@@ -1,73 +1,70 @@
 # Optimal Engine
 
-Signal-native context storage for AI agents. A single Elixir application that treats
-every piece of content as a classified **Signal** — routed, indexed, reasoned over,
-and recallable at bounded cost.
+**The second brain of a company.** An Elixir application that ingests every
+signal flowing through an organization — chat, email, docs, meetings, tickets,
+CRM, code, voice, video — decodes the intent behind each one, embeds it into a
+multi-modal aligned vector space, clusters it wide by theme, and delivers the
+right chunks at the right grain to any agent runtime that queries it, scoped
+to what the caller is allowed to see.
 
-- **SQLite + FTS5** for full-text search, with a tiered L0/L1/L2 loading model so
-  agents never blow past their context window.
-- **OWL 2 RL reasoning** in pure Elixir — no Java, no SPARQL endpoint — for
-  graph-backed retrieval that goes beyond keyword match.
-- **Episodic memory + SICA learning** — the engine remembers not just what was
-  said, but what worked, what broke, and what patterns repeat.
-- **Signal Theory classification** — every input resolved on `S=(Mode, Genre, Type,
-  Format, Structure)` so routing and retrieval honor the shape of the signal, not
-  just its tokens.
-
-Built by [Roberto Luna](https://github.com/robertohluna). Private.
+> **Positioning:** Classical RAG re-discovers the same facts on every query.
+> The Optimal Engine discovers once, curates forever, and delivers
+> permission-gated, receiver-matched context to any agent runtime in under
+> 200ms.
 
 ---
 
-## Why this exists
+## Status
 
-Context windows are finite. Signal gets lost in noise. Agents forget what they
-learned five turns ago. The Optimal Engine is a storage layer designed against
-exactly those failure modes: it ranks, compacts, and tiers context so the agent
-loads the minimum information needed for the maximum decision quality.
+Active development. Per-phase progress against [`PLAN.md`](PLAN.md):
 
-The theory driving it is **Signal Theory**: every output is a Signal, modeled as
-`S = (Mode, Genre, Type, Format, Structure)`. The engine's job is to maintain the
-highest Signal-to-Noise ratio achievable for a given retrieval. See
-[`docs/concepts/signal-theory.md`](docs/concepts/signal-theory.md).
+| Phase | Scope | Status |
+|---|---|---|
+| 0    | Extract engine into standalone repo, absorb 3 MIOSA subsystems | ✅ |
+| 0.5  | Restructure `lib/` to canonical layout (pipeline / retrieval / store / wiki / insight / graph / embed / tenancy / identity / audit / connectors) | ✅ |
+| 1    | Schema + tenancy + identity + ACLs + audit foundation (20 new tables, 16 versioned migrations, principal-scoped search) | ✅ |
+| 2    | Parser backends — 10 formats (md, yaml/json, csv, html, code, pdf, office, image-OCR, audio-whisper, video) | 🛠 in progress |
+| 3    | Decomposer — hierarchical chunking at 4 scales | ⏳ |
+| 4    | Per-chunk classify + intent extract (10-value enum) | ⏳ |
+| 5    | Multi-modal embedder — nomic-embed-text + nomic-embed-vision + whisper.cpp, all 768-dim aligned | ⏳ |
+| 6    | Clusterer — HDBSCAN + theme auto-naming | ⏳ |
+| 7    | Wiki Layer — LLM-maintained curated top layer with hot citations + executable directives | ⏳ |
+| 8    | Scale-aware Deliver + Composer + RAG | ⏳ |
+| 9    | 14 enterprise connectors (Slack / Gmail / Drive / Notion / Jira / Linear / GitHub / Zoom / …) | ⏳ |
+| 10   | Production hardening — perf targets, release, backup/restore | ⏳ |
+| 11   | Compliance — SOC 2, GDPR, HIPAA | ⏳ |
+| 12   | Desktop UI — Tauri + SvelteKit | ⏳ |
+| 13   | v0.1.0 tag | ⏳ |
+
+**Current suite:** 707 tests passing, 29 excluded (RocksDB NIF, optional backend).
 
 ---
 
-## Architecture
+## The three tiers
 
 ```
-                          ┌───────────────────────────────┐
-      user input ──────▶  │  Intake  →  Classifier  →  … │
-                          └──────┬────────────────────────┘
-                                 │
-                                 ▼
-                          ┌──────────────────────────────┐
-                          │         Router               │  signals routed to nodes
-                          └──────┬───────────────────────┘
-                                 │
-              ┌──────────────────┼────────────────────────┐
-              ▼                  ▼                        ▼
-       ┌───────────┐      ┌────────────┐          ┌──────────────┐
-       │  Store    │      │ Knowledge  │          │    Memory    │
-       │ SQLite +  │      │  triples + │          │  episodic +  │
-       │   FTS5    │      │   OWL 2 RL │          │  cortex +    │
-       │           │      │  reasoner  │          │  learning    │
-       └────┬──────┘      └─────┬──────┘          └──────┬───────┘
-            └────────────┬──────┴────────────────────────┘
-                         ▼
-                ┌──────────────────┐
-                │  SearchEngine    │  hybrid BM25 + graph boost + temporal
-                └─────────┬────────┘
-                          ▼
-                ┌────────────────────┐
-                │ ContextAssembler   │  L0 → L1 → L2 tiered loading
-                └────────┬───────────┘
-                         ▼
-                    agent prompt
+TIER 3 — THE WIKI              LLM-maintained. Read first. Audience-aware.
+Path: .wiki/                   Hot citations + executable directives.
+           ▲ CURATE ▼
+TIER 2 — DERIVATIVES           Machine-maintained. Rebuildable.
+Path: .optimal/index.db        SQLite + FTS5 + vectors + graph + clusters.
+           ▲ DERIVE ▼
+TIER 1 — RAW SOURCES           Immutable. Append-only. Hash-addressed.
+Path: nodes/**/signals/*        Signal files, PDFs, images, audio, video.
+      assets/                   The engine NEVER rewrites them.
 ```
 
-Full walkthrough: [`docs/architecture/FULL-SYSTEM-ARCHITECTURE.md`](docs/architecture/FULL-SYSTEM-ARCHITECTURE.md).
-Layer specs: [`docs/architecture/00-overview.md`](docs/architecture/00-overview.md)
-through `07-governance.md`.
+## The 9-stage ingestion pipeline
+
+```
+1. INTAKE → 2. PARSE → 3. DECOMPOSE → 4. CLASSIFY → 5. EMBED → 6. ROUTE
+                                                                    │
+9. CURATE ← 8. CLUSTER ← 7. STORE ←────────────────────────────────┘
+```
+
+Each stage has one responsibility and a typed contract with the next. See
+[`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) for
+per-stage detail.
 
 ---
 
@@ -80,9 +77,10 @@ git clone git@github.com:robertohluna/OptimalEngine.git
 cd OptimalEngine
 mix deps.get
 mix compile
+mix test                    # expect 707/707 passing
 ```
 
-First ingest:
+First ingest + search:
 
 ```bash
 mix optimal.ingest "Ed called about pricing, wants $2K per seat" --genre note
@@ -90,88 +88,177 @@ mix optimal.search "pricing"
 mix optimal.l0
 ```
 
+Check migration state:
+
+```bash
+mix optimal.migrate --status   # lists applied + pending migrations
+mix optimal.stats              # row counts across all tables
+```
+
+---
+
+## Why it wins
+
+The entire AI-context market built the same stack:
+
+```
+Storage → Retrieval → Dump to LLM
+```
+
+We build the layer nobody else has:
+
+```
+Classification → Routing → Composition → Tiered Assembly → Delivery → Feedback
+                          (with any storage engine underneath)
+```
+
+| Capability | Glean | Dust | NotebookLM | OpenViking | LLM Wiki | **Optimal Engine** |
+|---|---|---|---|---|---|---|
+| Enterprise connectors | ✅ | ✅ | ⚠️ | ❌ | ❌ | ✅ (Phase 9) |
+| Permission-aware RAG | ✅ | ✅ | ⚠️ | ❌ | ❌ | ✅ chunk-level + intersection propagation |
+| Signal classification `S=(M,G,T,F,W)` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Intent extraction per chunk | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ 10-value enum |
+| Multi-modal aligned embeddings | ⚠️ | ⚠️ | ✅ | ❌ | ❌ | ✅ nomic 768-dim |
+| Cross-modal retrieval (text→image) | ❌ | ❌ | ⚠️ | ❌ | ❌ | ✅ |
+| Audience-aware wiki variants | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Triggered incremental curation | ❌ | ❌ | ❌ | ✅ single-loop | ✅ single-loop | ✅ triple-loop SICA |
+| Agent-runtime integration (any lang) | API | API | Workspace | API | desktop | ✅ CLI + HTTP + MCP + Elixir |
+| Local-first / self-hosted | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+
 ---
 
 ## Mix tasks
 
-All commands are prefixed `mix optimal.*`. Full reference:
-[`docs/guides/mix-tasks.md`](docs/guides/mix-tasks.md).
+| Task | Purpose |
+|---|---|
+| `mix optimal.ingest <text\|--file path>` | Classify, route, persist, and index a signal |
+| `mix optimal.search <query>` | Hybrid BM25 + vector + graph + temporal. `--principal` enforces ACLs. |
+| `mix optimal.read <optimal://uri>` | Read a context at a given tier |
+| `mix optimal.assemble <topic>` | Build a tiered (L0/L1/L2) context bundle |
+| `mix optimal.rag <query>` | LLM-ready retrieved chunks (`--format text\|json\|claude\|openai`) |
+| `mix optimal.l0` | Print the always-loaded L0 context |
+| `mix optimal.ls <optimal://uri-prefix>` | List contexts under a URI |
+| `mix optimal.graph [triangles\|clusters\|hubs]` | Knowledge-graph analysis |
+| `mix optimal.reflect [--min N]` | Find missing edges from entity co-occurrence |
+| `mix optimal.reweave <topic>` | Find stale contexts on a topic |
+| `mix optimal.simulate <scenario>` | "What if" scenario through the graph |
+| `mix optimal.impact <entity-or-node>` | Impact analysis |
+| `mix optimal.remember <observation>` | Store an observation for the SICA learning loop |
+| `mix optimal.rethink <topic>` | Synthesize observations into actionable knowledge |
+| `mix optimal.knowledge [metrics]` | Knowledge-graph stats + SICA patterns |
+| `mix optimal.health [--quick]` | Diagnostic checks on the knowledge base |
+| `mix optimal.verify [--sample N]` | Cold-read test of L0 abstract fidelity |
+| `mix optimal.stats` | Row counts + Phase 1 table counts |
+| `mix optimal.migrate [--status]` | Apply pending migrations / show version map |
+| `mix optimal.api` | Start the HTTP API on port 4200 |
+| `mix optimal.graph_ui` | Launch the graph visualizer |
+| `mix optimal.spec.{init,drift,report}` | Spec-led-dev tooling |
 
-| Task                       | Purpose                                                       |
-|---------------------------|---------------------------------------------------------------|
-| `mix optimal.ingest`      | Classify, route, persist, and index a signal                  |
-| `mix optimal.search`      | Hybrid BM25 + temporal + graph-boosted search                 |
-| `mix optimal.read`        | Read a context by `optimal://` URI at a given tier            |
-| `mix optimal.assemble`    | Build a tiered (L0/L1/L2) context bundle for a topic          |
-| `mix optimal.l0`          | Print the always-loaded L0 context (~100 tokens per node)     |
-| `mix optimal.ls`          | List contexts under an `optimal://` URI                       |
-| `mix optimal.index`       | Full reindex of all markdown files under the root             |
-| `mix optimal.intake`      | Interactive multi-line intake from stdin                      |
-| `mix optimal.graph`       | Knowledge graph stats, triangles, clusters, hubs              |
-| `mix optimal.reflect`     | Find missing edges from entity co-occurrences                 |
-| `mix optimal.reweave`     | Find stale contexts on a topic + suggest updates              |
-| `mix optimal.simulate`    | Run a "what if" scenario through the graph                    |
-| `mix optimal.impact`      | Impact analysis for an entity or node                         |
-| `mix optimal.remember`    | Store observations; mine friction patterns                    |
-| `mix optimal.rethink`     | Synthesize observations into actionable knowledge             |
-| `mix optimal.knowledge`   | Knowledge graph + SICA learning operations                    |
-| `mix optimal.health`      | Diagnostics — orphans, drift, duplicates, fidelity            |
-| `mix optimal.verify`      | Cold-read test of L0 abstract fidelity                        |
-| `mix optimal.stats`       | Store statistics (counts, sizes, token budgets)               |
-| `mix optimal.api`         | Start the HTTP API on port 4200                               |
-| `mix optimal.graph_ui`    | Launch the graph visualizer against a running API             |
-| `mix optimal.spec.*`      | Spec coverage, drift detection, reporting                     |
-
----
-
-## Subsystems
-
-Four cohesive subsystems live inside a single `:optimal_engine` app, one
-supervision tree, one naming convention.
-
-- **Core engine** (`lib/optimal_engine/`) — Intake, Router, Indexer, SearchEngine,
-  ContextAssembler, Store (SQLite + FTS5 + ETS hot cache), L0Cache.
-- **Knowledge** (`lib/optimal_engine/knowledge/`) — RDF triple store with pluggable
-  backends (ETS, Mnesia, RocksDB), native SPARQL 1.1 execution, OWL 2 RL
-  materialization.
-- **Memory** (`lib/optimal_engine/memory/`) — episodic records, Cortex synthesis,
-  SICA-style learning loop, session persistence, context injection.
-- **Signal** (`lib/optimal_engine/signal/`) — CloudEvents v1.0.2 envelopes, Signal
-  Theory classification, failure-mode detection, ETS-backed pub/sub + journal.
+Full reference: [`docs/guides/mix-tasks.md`](docs/guides/mix-tasks.md).
 
 ---
 
-## Docs map
+## Agent runtime integration
+
+Any runtime that can shell out to a command can use the engine:
+
+```python
+# Python
+import subprocess, json
+ctx = json.loads(subprocess.check_output([
+    "mix", "optimal.rag", "current state of Ed's pricing negotiation",
+    "--format", "json", "--limit", "6"
+]))
+```
+
+```javascript
+// Claude Agent SDK / Node
+const ctx = await exec(`mix optimal.rag "${query}" --format claude`);
+const response = await anthropic.messages.create({
+  model: "claude-opus-4-7",
+  system: ctx,
+  messages: [{role: "user", content: userAsk}]
+});
+```
+
+```go
+// Go
+ctx := exec.Command("mix", "optimal.rag", query, "--format", "openai").Output()
+```
+
+Same data. Same guarantees. Same HTTP API behind it.
+
+---
+
+## Architecture
 
 ```
-docs/
-├── architecture/   ← the 7 layers + system overview + ADRs
-├── concepts/       ← Signal Theory, three-spaces, methodology, kernel primitives
-├── reference/      ← data model, search architecture, session lifecycle, hooks
-├── guides/         ← getting started, mix tasks, writing guide
-└── research/       ← exploratory work that informed the design
+lib/optimal_engine/
+├── optimal_engine.ex           # top-level facade (defdelegate everything)
+├── application.ex              # unified supervision tree
+├── cli.ex                      # escript entry
+│
+├── pipeline/                   # Stages 1–9 (ingest path)
+├── retrieval/                  # Serving path (the "read" side)
+├── store/                      # SQLite + FTS + vectors + migrations
+├── wiki/                       # Tier 3 — LLM-maintained (Phase 7)
+│
+├── knowledge/ memory/ signal/  # Absorbed subsystems (OWL, episodic, CloudEvents)
+│
+├── graph/                      # Graph analysis (not storage)
+├── insight/                    # Learning + synthesis (verify/health/rethink/…)
+├── embed/                      # Embedding providers (Ollama; Phase 5 adds whisper)
+│
+├── tenancy/                    # Multi-tenant primitives (Phase 1)
+├── identity/                   # Principal / Group / Role / ACL (Phase 1)
+├── audit/                      # Event + Logger (Phase 1)
+├── connectors/                 # Phase 9 — enterprise integrations
+│
+├── api/                        # HTTP surface
+└── spec/                       # Spec-led-dev tooling
 ```
 
-Start with [`docs/README.md`](docs/README.md) for the index.
+Stable root primitives: `context.ex` `session.ex` `session_compressor.ex`
+`signal.ex` `topology.ex` `uri.ex` `graph.ex` `knowledge.ex` `memory.ex`.
+
+---
+
+## Documentation map
+
+| Doc | Purpose |
+|---|---|
+| [`PLAN.md`](PLAN.md) | **Master plan** — every phase, every decision, every open question |
+| [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) | Canonical 9-stage pipeline + 3 tiers + data contracts |
+| [`docs/architecture/ENTERPRISE.md`](docs/architecture/ENTERPRISE.md) | Tenancy, ACLs, connectors, retention, audit, performance targets |
+| [`docs/architecture/WIKI-LAYER.md`](docs/architecture/WIKI-LAYER.md) | Tier 3 deep dive: directives, curator, integrity, schema governance |
+| [`docs/architecture/UI.md`](docs/architecture/UI.md) | Desktop app spec — Tauri + SvelteKit, 7 views |
+| [`docs/concepts/signal-theory.md`](docs/concepts/signal-theory.md) | `S=(M,G,T,F,W)` + 4 constraints + 6 principles + 11 failure modes |
+| [`docs/guides/getting-started.md`](docs/guides/getting-started.md) | Clone → compile → first ingest + search |
+| [`docs/guides/mix-tasks.md`](docs/guides/mix-tasks.md) | All 25 `mix optimal.*` commands |
+| [`docs/architecture/00-overview.md`](docs/architecture/00-overview.md) … `07-governance.md` | Original 7-layer system architecture |
 
 ---
 
 ## Development
 
 ```bash
-mix test                  # full suite (689 tests, ~3s)
-mix credo                 # lints
-mix dialyzer              # optional — slow the first run
+mix test                  # full suite (707 tests, ~10s)
 mix format                # after edits
+mix credo                 # lints
+mix dialyzer              # optional — slow first run
 ```
 
-Optional: the `:rocksdb` knowledge backend is gated behind a test tag and is
-skipped unless the NIF is installed. The default ETS backend covers every
-feature the default mix tasks exercise.
+Optional shell tools enhance text-extraction for binary formats (installed on
+demand; missing tools cause graceful degradation, never crashes):
+
+```bash
+brew install pdftotext tesseract ffmpeg
+# whisper.cpp via separate install or use Ollama's whisper support
+```
 
 ---
 
 ## Status
 
-Private. Active development. Single-operator project. Not yet a published Hex
-package; not yet accepting external contributions.
+Private. Active development. Not yet published. Not yet accepting external
+contributions. See [`PLAN.md`](PLAN.md) for the per-phase build sequence.
