@@ -204,6 +204,30 @@ Strict ordering. Each phase blocks the next via its acceptance criterion.
 
 **Modules touched / created:** ~18 new, 4 edited.
 
+### Phase 3.5 — Workspace (organizational topology) ✅
+
+**Why a .5 phase:** Roberto's framing clarified that the engine isn't just a
+pipeline — it's the second brain *of a company*. That means nodes, people-vs-
+agents, skills, and memberships are first-class data, not implicit strings.
+Phase 1 gave us tenants + principals + groups + roles. Phase 3.5 adds the
+missing organizational-topology primitives so Phase 4's classifier can key off
+"who owns this signal" and Phase 7's wiki curator can resolve audiences
+properly.
+
+**Scope:**
+- Migrations 017–022: `nodes`, `node_members`, `skills`, `principal_skills`, tenant-first indexes, backfill distinct `contexts.node` values into `nodes` rows.
+- `OptimalEngine.Workspace.Node` — CRUD, tree traversal (children, ancestors), list filtered by kind/status.
+- `OptimalEngine.Workspace.NodeMember` — add/remove (owner/internal/external/observer), members_of, nodes_of, time-bounded (started_at/ended_at).
+- `OptimalEngine.Workspace.Skill` — CRUD (technical/communication/strategic/domain/tool).
+- `OptimalEngine.Workspace.PrincipalSkill` — grant/revoke at level (novice/intermediate/expert/lead), min_level filter, principals_with_skill returns humans + agents together.
+- Top-level facade: `OptimalEngine.Workspace`.
+- `mix optimal.workspace [--tenant X] [--nodes-only|--skills-only]`.
+- Doc: `docs/architecture/WORKSPACE.md`.
+
+**Acceptance:** 20 new tests; nodes form a tenant-scoped tree with correct
+ancestor ordering; skill levels filter correctly; memberships are
+time-bounded; default-tenant backfill runs. **Complete: 786/786 passing.**
+
 ### Phase 2 — Parser backends (format coverage)
 
 **Scope:** implement `OptimalEngine.Pipeline.Parser` dispatch + 10 format backends in strict order:

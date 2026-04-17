@@ -23,7 +23,8 @@ Active development. Per-phase progress against [`PLAN.md`](PLAN.md):
 | 0    | Extract engine into standalone repo, absorb 3 MIOSA subsystems | ✅ |
 | 0.5  | Restructure `lib/` to canonical layout (pipeline / retrieval / store / wiki / insight / graph / embed / tenancy / identity / audit / connectors) | ✅ |
 | 1    | Schema + tenancy + identity + ACLs + audit foundation (20 new tables, 16 versioned migrations, principal-scoped search) | ✅ |
-| 2    | Parser backends — 10 formats (md, yaml/json, csv, html, code, pdf, office, image-OCR, audio-whisper, video) | 🛠 in progress |
+| 3.5  | Workspace — nodes + members + skills (6 new tables, node tree + skill levels + internal/external memberships) | ✅ |
+| 2    | Parser backends — 10 formats (md, yaml/json, csv, html, code, pdf, office, image-OCR, audio-whisper, video) | ✅ |
 | 3    | Decomposer — hierarchical chunking at 4 scales | ⏳ |
 | 4    | Per-chunk classify + intent extract (10-value enum) | ⏳ |
 | 5    | Multi-modal embedder — nomic-embed-text + nomic-embed-vision + whisper.cpp, all 768-dim aligned | ⏳ |
@@ -36,7 +37,7 @@ Active development. Per-phase progress against [`PLAN.md`](PLAN.md):
 | 12   | Desktop UI — Tauri + SvelteKit | ⏳ |
 | 13   | v0.1.0 tag | ⏳ |
 
-**Current suite:** 707 tests passing, 29 excluded (RocksDB NIF, optional backend).
+**Current suite:** 786 tests passing, 29 excluded (RocksDB NIF, optional backend).
 
 ---
 
@@ -77,7 +78,7 @@ git clone git@github.com:robertohluna/OptimalEngine.git
 cd OptimalEngine
 mix deps.get
 mix compile
-mix test                    # expect 707/707 passing
+mix test                    # expect 786/786 passing
 ```
 
 First ingest + search:

@@ -154,7 +154,9 @@ defmodule OptimalEngine.Pipeline.Decomposer do
               tenant_id,
               signal_id,
               modality,
-              class_level, boundary: nil)
+              class_level,
+              boundary: nil
+            )
           ]
         end
 

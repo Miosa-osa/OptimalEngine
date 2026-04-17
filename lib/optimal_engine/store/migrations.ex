@@ -61,7 +61,13 @@ defmodule OptimalEngine.Store.Migrations do
       migration_013_tenant_id_on_existing_tables(),
       migration_014_tenant_first_indexes(),
       migration_015_default_tenant_seed(),
-      migration_016_backfill_document_chunks()
+      migration_016_backfill_document_chunks(),
+      migration_017_workspace_nodes(),
+      migration_018_node_members(),
+      migration_019_skills(),
+      migration_020_principal_skills(),
+      migration_021_workspace_indexes(),
+      migration_022_backfill_nodes_from_contexts()
     ]
   end
 
@@ -530,6 +536,131 @@ defmodule OptimalEngine.Store.Migrations do
         """
         INSERT OR IGNORE INTO tenants (id, name, plan)
         VALUES ('default', 'Default Tenant', 'default')
+        """}
+     ]}
+  end
+
+  defp migration_017_workspace_nodes do
+    {17, "workspace: nodes (organizational units)",
+     [
+       {"nodes",
+        """
+        CREATE TABLE IF NOT EXISTS nodes (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          name TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          parent_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+          description TEXT,
+          style TEXT NOT NULL DEFAULT 'internal',
+          status TEXT NOT NULL DEFAULT 'active',
+          path TEXT NOT NULL DEFAULT '',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(tenant_id, slug)
+        )
+        """}
+     ]}
+  end
+
+  defp migration_018_node_members do
+    {18, "workspace: node_members (principal ↔ node with internal/external/owner/observer)",
+     [
+       {"node_members",
+        """
+        CREATE TABLE IF NOT EXISTS node_members (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id TEXT NOT NULL,
+          node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+          principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+          membership TEXT NOT NULL DEFAULT 'internal',
+          role TEXT,
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          ended_at TEXT,
+          UNIQUE(node_id, principal_id, membership)
+        )
+        """}
+     ]}
+  end
+
+  defp migration_019_skills do
+    {19, "workspace: skills (capability registry)",
+     [
+       {"skills",
+        """
+        CREATE TABLE IF NOT EXISTS skills (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          kind TEXT,
+          description TEXT,
+          UNIQUE(tenant_id, name)
+        )
+        """}
+     ]}
+  end
+
+  defp migration_020_principal_skills do
+    {20, "workspace: principal_skills (many-to-many capability grants)",
+     [
+       {"principal_skills",
+        """
+        CREATE TABLE IF NOT EXISTS principal_skills (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id TEXT NOT NULL,
+          principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+          skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+          level TEXT NOT NULL DEFAULT 'intermediate',
+          evidence TEXT,
+          acquired_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(principal_id, skill_id)
+        )
+        """}
+     ]}
+  end
+
+  defp migration_021_workspace_indexes do
+    {21, "workspace: tenant-first indexes",
+     [
+       {"idx_nodes_tenant_kind",
+        "CREATE INDEX IF NOT EXISTS idx_nodes_tenant_kind ON nodes(tenant_id, kind)"},
+       {"idx_nodes_tenant_parent",
+        "CREATE INDEX IF NOT EXISTS idx_nodes_tenant_parent ON nodes(tenant_id, parent_id)"},
+       {"idx_nodes_tenant_style",
+        "CREATE INDEX IF NOT EXISTS idx_nodes_tenant_style ON nodes(tenant_id, style)"},
+       {"idx_node_members_tenant_node",
+        "CREATE INDEX IF NOT EXISTS idx_node_members_tenant_node ON node_members(tenant_id, node_id)"},
+       {"idx_node_members_tenant_principal",
+        "CREATE INDEX IF NOT EXISTS idx_node_members_tenant_principal ON node_members(tenant_id, principal_id)"},
+       {"idx_skills_tenant_kind",
+        "CREATE INDEX IF NOT EXISTS idx_skills_tenant_kind ON skills(tenant_id, kind)"},
+       {"idx_principal_skills_tenant_principal",
+        "CREATE INDEX IF NOT EXISTS idx_principal_skills_tenant_principal ON principal_skills(tenant_id, principal_id)"},
+       {"idx_principal_skills_tenant_skill",
+        "CREATE INDEX IF NOT EXISTS idx_principal_skills_tenant_skill ON principal_skills(tenant_id, skill_id)"}
+     ]}
+  end
+
+  # Backfill: every distinct `contexts.node` value becomes a nodes row so
+  # existing routing / retrieval paths continue to resolve, with the node
+  # now first-class and upgradable (kind / style / memberships can evolve).
+  defp migration_022_backfill_nodes_from_contexts do
+    {22, "workspace: backfill nodes rows from distinct contexts.node values",
+     [
+       {"backfill_nodes",
+        """
+        INSERT OR IGNORE INTO nodes (id, tenant_id, slug, name, kind, style, status, path)
+        SELECT
+          COALESCE(c.tenant_id, 'default') || ':' || c.node AS id,
+          COALESCE(c.tenant_id, 'default')                  AS tenant_id,
+          c.node                                            AS slug,
+          c.node                                            AS name,
+          'domain'                                          AS kind,
+          'internal'                                        AS style,
+          'active'                                          AS status,
+          'nodes/' || c.node                                AS path
+        FROM (SELECT DISTINCT tenant_id, node FROM contexts WHERE node IS NOT NULL AND node <> '') c
         """}
      ]}
   end
