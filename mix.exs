@@ -71,6 +71,10 @@ defmodule OptimalEngine.MixProject do
       {:plug, "~> 1.15"},
       {:plug_cowboy, "~> 2.7"},
 
+      # Parser backends (Phase 2)
+      {:nimble_csv, "~> 1.2"},
+      {:floki, "~> 0.36"},
+
       # Observability
       {:telemetry, "~> 1.2"},
 
@@ -83,7 +87,13 @@ defmodule OptimalEngine.MixProject do
   defp aliases do
     [
       "optimal.index": ["run -e 'Mix.Tasks.Optimal.Index.run([])'"],
-      "optimal.search": ["run -e 'Mix.Tasks.Optimal.Search.run(System.argv())'"]
+      "optimal.search": ["run -e 'Mix.Tasks.Optimal.Search.run(System.argv())'"],
+      # Wipe the test SQLite store before every run so schema drift from
+      # an older migration set can't leak into the current test process.
+      test: [
+        "cmd rm -f /tmp/optimal_engine_test_0.db /tmp/optimal_engine_test_0.db-wal /tmp/optimal_engine_test_0.db-shm",
+        "test"
+      ]
     ]
   end
 
