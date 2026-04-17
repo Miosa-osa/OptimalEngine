@@ -49,19 +49,17 @@ defmodule OptimalEngine do
       OptimalEngine.resolve_uri("optimal://nodes/roberto/signal.md")
   """
 
-  alias OptimalEngine.{
-    Classifier,
-    Composer,
-    Context,
-    Indexer,
-    L0Cache,
-    SearchEngine,
-    Session,
-    Signal,
-    Store,
-    Topology,
-    URI
-  }
+  alias OptimalEngine.Context
+  alias OptimalEngine.Session
+  alias OptimalEngine.Signal
+  alias OptimalEngine.Store
+  alias OptimalEngine.Topology
+  alias OptimalEngine.URI
+  alias OptimalEngine.Pipeline.Classifier
+  alias OptimalEngine.Pipeline.Indexer
+  alias OptimalEngine.Retrieval.Composer
+  alias OptimalEngine.Retrieval.L0Cache
+  alias OptimalEngine.Retrieval.Search, as: SearchEngine
 
   # ---------------------------------------------------------------------------
   # Indexing
@@ -306,7 +304,7 @@ defmodule OptimalEngine do
   end
 
   defp route_signal(%Signal{} = signal) do
-    case OptimalEngine.Router.route(signal) do
+    case OptimalEngine.Pipeline.Router.route(signal) do
       {:ok, destinations} -> destinations
       {:error, _} -> [signal.node || "inbox"]
     end

@@ -31,7 +31,7 @@ defmodule Mix.Tasks.Optimal.Index do
 
     IO.puts("\n[optimal.index] Starting full reindex...")
 
-    case OptimalEngine.Indexer.full_index() do
+    case OptimalEngine.Pipeline.Indexer.full_index() do
       {:ok, :started} ->
         wait_for_completion(@timeout_ms)
 
@@ -54,7 +54,7 @@ defmodule Mix.Tasks.Optimal.Index do
       Mix.raise("Index timed out after #{@timeout_ms}ms")
     end
 
-    status = OptimalEngine.Indexer.status()
+    status = OptimalEngine.Pipeline.Indexer.status()
 
     case status.status do
       :idle when not is_nil(status.last_run) ->

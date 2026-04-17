@@ -31,7 +31,7 @@ defmodule Mix.Tasks.Optimal.Health do
 
     IO.puts(IO.ANSI.bright() <> "\nOptimalOS Health Diagnostics\n" <> IO.ANSI.reset())
 
-    {:ok, diagnostics} = OptimalEngine.HealthDiagnostics.run()
+    {:ok, diagnostics} = OptimalEngine.Insight.Health.run()
     Enum.each(diagnostics, &print_check/1)
     print_summary(diagnostics)
     maybe_exit_nonzero(diagnostics)
@@ -79,7 +79,7 @@ defmodule Mix.Tasks.Optimal.Health do
 
   defp print_summary(diagnostics) do
     %{ok: ok, warning: warning, critical: critical, total: total} =
-      OptimalEngine.HealthDiagnostics.summary(diagnostics)
+      OptimalEngine.Insight.Health.summary(diagnostics)
 
     IO.puts(IO.ANSI.bright() <> "Summary" <> IO.ANSI.reset())
     IO.puts("  Total checks : #{total}")

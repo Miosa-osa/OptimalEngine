@@ -20,12 +20,12 @@ defmodule OptimalEngine.Application do
     children = [
       # ── Core engine (SQLite-backed, must start first) ─────────────────────
       OptimalEngine.Store,
-      OptimalEngine.Router,
-      OptimalEngine.Indexer,
-      OptimalEngine.SearchEngine,
-      OptimalEngine.L0Cache,
-      OptimalEngine.Intake,
-      OptimalEngine.Simulator,
+      OptimalEngine.Pipeline.Router,
+      OptimalEngine.Pipeline.Indexer,
+      OptimalEngine.Retrieval.Search,
+      OptimalEngine.Retrieval.L0Cache,
+      OptimalEngine.Pipeline.Intake,
+      OptimalEngine.Insight.Simulate,
       {Registry, keys: :unique, name: OptimalEngine.SessionRegistry},
       {DynamicSupervisor, name: OptimalEngine.SessionSupervisor, strategy: :one_for_one},
 

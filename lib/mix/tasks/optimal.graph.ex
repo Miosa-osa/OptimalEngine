@@ -44,7 +44,7 @@ defmodule Mix.Tasks.Optimal.Graph do
 
     IO.puts("\nOpen Triangles (synthesis opportunities)\n")
 
-    case OptimalEngine.GraphAnalyzer.triangles(limit: limit) do
+    case OptimalEngine.Graph.Analyzer.triangles(limit: limit) do
       {:ok, []} ->
         IO.puts("  No open triangles found.")
 
@@ -58,7 +58,7 @@ defmodule Mix.Tasks.Optimal.Graph do
 
     IO.puts("\nConnected Components (isolated clusters)\n")
 
-    case OptimalEngine.GraphAnalyzer.clusters() do
+    case OptimalEngine.Graph.Analyzer.clusters() do
       {:ok, []} ->
         IO.puts("  No edges found in the graph.")
 
@@ -72,7 +72,7 @@ defmodule Mix.Tasks.Optimal.Graph do
 
     IO.puts("\nHub Nodes (degree > 2σ above mean)\n")
 
-    case OptimalEngine.GraphAnalyzer.hubs() do
+    case OptimalEngine.Graph.Analyzer.hubs() do
       {:ok, []} ->
         IO.puts("  No hubs found (graph may be too sparse).")
 

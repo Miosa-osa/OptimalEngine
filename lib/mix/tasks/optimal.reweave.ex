@@ -42,7 +42,7 @@ defmodule Mix.Tasks.Optimal.Reweave do
     IO.puts("  Topic: \"#{topic}\"")
     IO.puts("  #{@separator}")
 
-    case OptimalEngine.Reweaver.reweave(topic, opts) do
+    case OptimalEngine.Insight.Reweave.reweave(topic, opts) do
       {:ok, []} ->
         IO.puts("  All related contexts are up to date.")
         IO.puts("")

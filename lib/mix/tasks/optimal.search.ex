@@ -58,7 +58,7 @@ defmodule Mix.Tasks.Optimal.Search do
 
     IO.puts("")
 
-    case OptimalEngine.SearchEngine.search(query, search_opts) do
+    case OptimalEngine.Retrieval.Search.search(query, search_opts) do
       {:ok, []} ->
         IO.puts("No results found.")
 

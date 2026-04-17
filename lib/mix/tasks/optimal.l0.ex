@@ -18,11 +18,11 @@ defmodule Mix.Tasks.Optimal.L0 do
     {opts, _, _} = OptionParser.parse(args, switches: [refresh: :boolean])
 
     if Keyword.get(opts, :refresh, false) do
-      OptimalEngine.L0Cache.refresh()
+      OptimalEngine.Retrieval.L0Cache.refresh()
       Process.sleep(200)
     end
 
-    content = OptimalEngine.L0Cache.get()
+    content = OptimalEngine.Retrieval.L0Cache.get()
 
     if content == "" do
       IO.puts("[optimal.l0] Cache empty — run `mix optimal.index` first")

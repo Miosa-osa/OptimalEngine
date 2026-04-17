@@ -55,7 +55,7 @@ defmodule Mix.Tasks.Optimal.Remember do
   defp run_explicit(observation) do
     IO.puts("\nRememberLoop — Storing Observation\n")
 
-    case OptimalEngine.RememberLoop.remember(observation) do
+    case OptimalEngine.Insight.Remember.remember(observation) do
       {:ok, result} ->
         IO.puts("  Stored: [#{result.category}] #{result.content}")
         IO.puts("  Confidence: #{result.confidence}")
@@ -78,7 +78,7 @@ defmodule Mix.Tasks.Optimal.Remember do
   defp run_contextual do
     IO.puts("\nRememberLoop — Contextual Scan\n")
 
-    case OptimalEngine.RememberLoop.contextual_scan() do
+    case OptimalEngine.Insight.Remember.contextual_scan() do
       {:ok, []} ->
         IO.puts("  No friction signals found in recent contexts.")
 
@@ -94,7 +94,7 @@ defmodule Mix.Tasks.Optimal.Remember do
   defp run_mine do
     IO.puts("\nRememberLoop — Session Mining\n")
 
-    case OptimalEngine.RememberLoop.mine_sessions() do
+    case OptimalEngine.Insight.Remember.mine_sessions() do
       {:ok, []} ->
         IO.puts("  No patterns extracted from sessions.")
 
@@ -118,7 +118,7 @@ defmodule Mix.Tasks.Optimal.Remember do
 
     opts = if category, do: [category: category], else: []
 
-    case OptimalEngine.RememberLoop.list(opts) do
+    case OptimalEngine.Insight.Remember.list(opts) do
       {:ok, []} ->
         IO.puts("  No observations stored yet.")
 
@@ -135,7 +135,7 @@ defmodule Mix.Tasks.Optimal.Remember do
   defp run_escalations do
     IO.puts("\nRememberLoop — Escalation Candidates\n")
 
-    case OptimalEngine.RememberLoop.escalation_candidates() do
+    case OptimalEngine.Insight.Remember.escalation_candidates() do
       {:ok, []} ->
         IO.puts("  No categories have reached escalation threshold (3+ observations).")
 

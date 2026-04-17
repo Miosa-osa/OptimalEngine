@@ -46,7 +46,7 @@ defmodule Mix.Tasks.Optimal.Impact do
     IO.puts("  Target: #{target}")
     IO.puts("")
 
-    case OptimalEngine.Simulator.impact_analysis(target, sim_opts) do
+    case OptimalEngine.Insight.Simulate.impact_analysis(target, sim_opts) do
       {:ok, report} ->
         print_report(report)
 

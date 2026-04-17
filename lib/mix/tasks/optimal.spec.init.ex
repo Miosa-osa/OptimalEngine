@@ -132,7 +132,7 @@ defmodule Mix.Tasks.Optimal.Spec.Init do
     - id: ingest_text_end_to_end
       covers: [classify_signal, route_to_node, write_signal_files, index_after_write]
       given: [raw text input with entity mentions]
-      when: [OptimalEngine.Intake.process/2 is called]
+      when: [OptimalEngine.Pipeline.Intake.process/2 is called]
       then: [signal is classified, routed, written to disk, and indexed in SQLite]
 
     - id: genre_skeleton_applied
