@@ -332,6 +332,29 @@ defmodule OptimalEngine.Store do
     GenServer.call(__MODULE__, {:insert_embeddings, rows}, 60_000)
   end
 
+  @doc """
+  Upserts clusters (Phase 6). Idempotent on `cluster.id`.
+
+  Accepts `%OptimalEngine.Pipeline.Clusterer.Cluster{}` structs or maps
+  with the right keys. Centroid vectors are persisted as little-endian
+  float32 BLOBs (same encoding as chunk_embeddings.vector).
+  """
+  @spec insert_clusters([struct() | map()]) :: :ok | {:error, term()}
+  def insert_clusters(rows) when is_list(rows) do
+    GenServer.call(__MODULE__, {:insert_clusters, rows}, 60_000)
+  end
+
+  @doc """
+  Upserts cluster-membership rows into `cluster_members` (Phase 6).
+  Idempotent on `(cluster_id, chunk_id)`.
+
+  Each row: `%{cluster_id, chunk_id, tenant_id, weight}`.
+  """
+  @spec insert_cluster_members([map()]) :: :ok | {:error, term()}
+  def insert_cluster_members(rows) when is_list(rows) do
+    GenServer.call(__MODULE__, {:insert_cluster_members, rows}, 60_000)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer Callbacks
   # ---------------------------------------------------------------------------
@@ -386,6 +409,18 @@ defmodule OptimalEngine.Store do
   @impl true
   def handle_call({:insert_embeddings, rows}, _from, state) do
     result = insert_embeddings_in_transaction(state.db, rows)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:insert_clusters, rows}, _from, state) do
+    result = insert_clusters_in_transaction(state.db, rows)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:insert_cluster_members, rows}, _from, state) do
+    result = insert_cluster_members_in_transaction(state.db, rows)
     {:reply, result, state}
   end
 
@@ -1212,6 +1247,113 @@ defmodule OptimalEngine.Store do
 
   defp encode_vector(vector) when is_list(vector) do
     for f <- vector, into: <<>>, do: <<f::little-float-size(32)>>
+  end
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Clusters — Phase 6 Clusterer writes cluster rows + membership edges.
+  # ──────────────────────────────────────────────────────────────────────────
+
+  defp insert_clusters_in_transaction(_db, []), do: :ok
+
+  defp insert_clusters_in_transaction(db, rows) do
+    case Exqlite.Sqlite3.execute(db, "BEGIN") do
+      :ok ->
+        result =
+          Enum.reduce_while(rows, :ok, fn row, _acc ->
+            case do_insert_cluster(db, row) do
+              :ok -> {:cont, :ok}
+              {:error, _} = err -> {:halt, err}
+            end
+          end)
+
+        case result do
+          :ok ->
+            Exqlite.Sqlite3.execute(db, "COMMIT")
+            :ok
+
+          {:error, _} = err ->
+            Exqlite.Sqlite3.execute(db, "ROLLBACK")
+            err
+        end
+
+      err ->
+        err
+    end
+  end
+
+  defp do_insert_cluster(db, row) do
+    centroid = chunk_field(row, :centroid) || []
+    blob = encode_vector(centroid)
+
+    sql = """
+    INSERT INTO clusters
+      (id, tenant_id, theme, intent_dominant, member_count, centroid, updated_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, datetime('now')))
+    ON CONFLICT(id) DO UPDATE SET
+      theme           = excluded.theme,
+      intent_dominant = excluded.intent_dominant,
+      member_count    = excluded.member_count,
+      centroid        = excluded.centroid,
+      updated_at      = excluded.updated_at
+    """
+
+    params = [
+      chunk_field(row, :id),
+      chunk_field(row, :tenant_id) || "default",
+      chunk_field(row, :theme) || "Unnamed cluster",
+      atom_or_nil(chunk_field(row, :intent_dominant)),
+      chunk_field(row, :member_count) || 0,
+      {:blob, blob},
+      chunk_field(row, :updated_at)
+    ]
+
+    exec_stmt(db, sql, params)
+  end
+
+  defp insert_cluster_members_in_transaction(_db, []), do: :ok
+
+  defp insert_cluster_members_in_transaction(db, rows) do
+    case Exqlite.Sqlite3.execute(db, "BEGIN") do
+      :ok ->
+        result =
+          Enum.reduce_while(rows, :ok, fn row, _acc ->
+            case do_insert_cluster_member(db, row) do
+              :ok -> {:cont, :ok}
+              {:error, _} = err -> {:halt, err}
+            end
+          end)
+
+        case result do
+          :ok ->
+            Exqlite.Sqlite3.execute(db, "COMMIT")
+            :ok
+
+          {:error, _} = err ->
+            Exqlite.Sqlite3.execute(db, "ROLLBACK")
+            err
+        end
+
+      err ->
+        err
+    end
+  end
+
+  defp do_insert_cluster_member(db, row) do
+    sql = """
+    INSERT INTO cluster_members (tenant_id, cluster_id, chunk_id, weight)
+    VALUES (?1, ?2, ?3, ?4)
+    ON CONFLICT(cluster_id, chunk_id) DO UPDATE SET
+      weight = excluded.weight
+    """
+
+    params = [
+      chunk_field(row, :tenant_id) || "default",
+      chunk_field(row, :cluster_id),
+      chunk_field(row, :chunk_id),
+      chunk_field(row, :weight) || 1.0
+    ]
+
+    exec_stmt(db, sql, params)
   end
 
   defp exec_stmt(db, sql, params) do
