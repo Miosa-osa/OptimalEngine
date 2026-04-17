@@ -60,7 +60,7 @@ defmodule Mix.Tasks.Optimal.Reflect do
     IO.puts("  limit:             #{Keyword.get(opts, :limit, 20)}")
     IO.puts("")
 
-    case OptimalEngine.Reflector.reflect(opts) do
+    case OptimalEngine.Graph.Reflector.reflect(opts) do
       {:ok, []} ->
         IO.puts("  No missing edges found. Graph looks complete!")
         IO.puts("")
@@ -89,7 +89,7 @@ defmodule Mix.Tasks.Optimal.Reflect do
     IO.puts(@separator)
     IO.puts("")
 
-    case OptimalEngine.Reflector.shared_contexts(entity_a, entity_b) do
+    case OptimalEngine.Graph.Reflector.shared_contexts(entity_a, entity_b) do
       {:ok, []} ->
         IO.puts("  No shared contexts found.")
         IO.puts("")

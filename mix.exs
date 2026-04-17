@@ -14,7 +14,32 @@ defmodule OptimalEngine.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       dialyzer: [plt_add_apps: [:mix]],
       description: description(),
-      package: package()
+      package: package(),
+      escript: escript(),
+      releases: releases()
+    ]
+  end
+
+  # Single-file CLI for development and trusted environments that already have
+  # Erlang installed.  For cross-platform standalone distribution (no Erlang on
+  # the target machine) build the Burrito release below: `mix release optimal`.
+  defp escript do
+    [
+      main_module: OptimalEngine.CLI,
+      name: "optimal",
+      app: nil
+    ]
+  end
+
+  # `mix release optimal` produces a self-contained OTP release tarball in
+  # _build/prod/rel/optimal/.  Wrap with Burrito for single-binary distribution
+  # by adding the burrito config block here when we're ready.
+  defp releases do
+    [
+      optimal: [
+        include_executables_for: [:unix],
+        applications: [optimal_engine: :permanent]
+      ]
     ]
   end
 

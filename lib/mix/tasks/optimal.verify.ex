@@ -24,7 +24,7 @@ defmodule Mix.Tasks.Optimal.Verify do
 
     IO.puts("\nVerify Engine — L0 Fidelity Test\n")
 
-    case OptimalEngine.VerifyEngine.verify(opts) do
+    case OptimalEngine.Insight.Verify.verify(opts) do
       {:ok, %{scores: [], message: msg}} ->
         IO.puts("  #{msg}")
 

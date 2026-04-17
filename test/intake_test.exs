@@ -1,7 +1,10 @@
-defmodule OptimalEngine.IntakeTest do
+defmodule OptimalEngine.Pipeline.IntakeTest do
   use ExUnit.Case, async: false
 
-  alias OptimalEngine.{Intake, Intake.Skeleton, Intake.Writer, Signal}
+  alias OptimalEngine.Pipeline.Intake, as: Intake
+  alias OptimalEngine.Pipeline.Intake.Skeleton, as: Skeleton
+  alias OptimalEngine.Pipeline.Intake.Writer, as: Writer
+  alias OptimalEngine.Signal
 
   # ─────────────────────────────────────────────────────────────
   # Skeleton
@@ -404,7 +407,7 @@ defmodule OptimalEngine.IntakeTest do
       [relative_path] = result.files_written
       content = File.read!(Path.join(tmp_dir, relative_path))
 
-      {frontmatter, _body} = OptimalEngine.Classifier.parse_frontmatter(content)
+      {frontmatter, _body} = OptimalEngine.Pipeline.Classifier.parse_frontmatter(content)
       assert Map.has_key?(frontmatter, "node")
       assert Map.has_key?(frontmatter, "signal")
       assert get_in(frontmatter, ["signal", "genre"]) == "spec"
@@ -557,7 +560,7 @@ defmodule OptimalEngine.IntakeTest do
       {:ok, path} = Writer.write_signal(signal)
 
       content = File.read!(path)
-      ctx_type = OptimalEngine.Classifier.detect_type(content, path: path)
+      ctx_type = OptimalEngine.Pipeline.Classifier.detect_type(content, path: path)
       assert ctx_type == :signal
     end
 
@@ -566,7 +569,7 @@ defmodule OptimalEngine.IntakeTest do
       {:ok, path} = Writer.write_signal(signal)
 
       content = File.read!(path)
-      ctx = OptimalEngine.Classifier.classify_context(content, path: path)
+      ctx = OptimalEngine.Pipeline.Classifier.classify_context(content, path: path)
       assert ctx.signal.genre == "transcript"
     end
 
@@ -577,7 +580,7 @@ defmodule OptimalEngine.IntakeTest do
       {:ok, path} = Writer.write_signal(signal)
       content = File.read!(path)
 
-      {fm, _body} = OptimalEngine.Classifier.parse_frontmatter(content)
+      {fm, _body} = OptimalEngine.Pipeline.Classifier.parse_frontmatter(content)
       assert Map.get(fm, "node") == "ai-masters"
       assert get_in(fm, ["signal", "genre"]) == "plan"
       assert get_in(fm, ["signal", "mode"]) == "linguistic"

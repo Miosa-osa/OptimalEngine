@@ -1,7 +1,12 @@
 defmodule OptimalEngineTest do
   use ExUnit.Case, async: false
 
-  alias OptimalEngine.{Classifier, Composer, Context, Signal, Topology, URI}
+  alias OptimalEngine.Pipeline.Classifier, as: Classifier
+  alias OptimalEngine.Retrieval.Composer, as: Composer
+  alias OptimalEngine.Context
+  alias OptimalEngine.Signal
+  alias OptimalEngine.Topology
+  alias OptimalEngine.URI
 
   # ─────────────────────────────────────────────────────────────
   # Signal struct — round trip (backward compat)
@@ -674,7 +679,7 @@ defmodule OptimalEngineTest do
       }
 
       topology = %{half_lives: %{"spec" => 4320, "default" => 720}}
-      factor = OptimalEngine.SearchEngine.temporal_factor(ctx, DateTime.utc_now(), topology)
+      factor = OptimalEngine.Retrieval.Search.temporal_factor(ctx, DateTime.utc_now(), topology)
       assert_in_delta factor, 1.0, 0.01
     end
 
@@ -689,14 +694,14 @@ defmodule OptimalEngineTest do
       }
 
       topology = %{half_lives: %{"spec" => half_life_hours, "default" => 720}}
-      factor = OptimalEngine.SearchEngine.temporal_factor(ctx, DateTime.utc_now(), topology)
+      factor = OptimalEngine.Retrieval.Search.temporal_factor(ctx, DateTime.utc_now(), topology)
       assert factor < 0.5
     end
 
     test "returns 0.5 for nil modified_at" do
       ctx = %Context{modified_at: nil, created_at: nil, signal: nil}
       topology = %{half_lives: %{"default" => 720}}
-      factor = OptimalEngine.SearchEngine.temporal_factor(ctx, DateTime.utc_now(), topology)
+      factor = OptimalEngine.Retrieval.Search.temporal_factor(ctx, DateTime.utc_now(), topology)
       assert factor == 0.5
     end
 
@@ -704,7 +709,7 @@ defmodule OptimalEngineTest do
     test "works with a Signal struct" do
       signal = %Signal{modified_at: DateTime.utc_now(), genre: "spec", created_at: nil}
       topology = %{half_lives: %{"spec" => 4320, "default" => 720}}
-      factor = OptimalEngine.SearchEngine.temporal_factor(signal, DateTime.utc_now(), topology)
+      factor = OptimalEngine.Retrieval.Search.temporal_factor(signal, DateTime.utc_now(), topology)
       assert_in_delta factor, 1.0, 0.01
     end
   end

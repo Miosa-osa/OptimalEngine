@@ -35,14 +35,10 @@ defmodule Mix.Tasks.Optimal.Spec.Report do
       return_or_halt()
     end
 
-    # Coverage analysis
-    case Coverage.analyze(spec_dir, source_dir) do
-      {:ok, report} ->
-        print_coverage(report)
-
-      {:error, reason} ->
-        IO.puts("  Coverage analysis failed: #{inspect(reason)}")
-    end
+    # Coverage analysis (Coverage.analyze spec returns {:ok, report} only;
+    # parse failures propagate as raises from the underlying Parser.parse_all).
+    {:ok, report} = Coverage.analyze(spec_dir, source_dir)
+    print_coverage(report)
 
     # State summary (if exists)
     case State.read() do

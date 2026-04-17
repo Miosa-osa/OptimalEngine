@@ -38,7 +38,7 @@ defmodule Mix.Tasks.Optimal.Rethink do
       IO.puts(@separator)
       IO.puts("")
 
-      case OptimalEngine.RethinkEngine.rethink(topic, opts) do
+      case OptimalEngine.Insight.Rethink.rethink(topic, opts) do
         {:ok, %{status: :insufficient_evidence} = result} ->
           IO.puts("  Status:       Insufficient evidence")
           IO.puts("  Observations: #{result.observation_count}")
@@ -95,7 +95,7 @@ defmodule Mix.Tasks.Optimal.Rethink do
   # ---------------------------------------------------------------------------
 
   defp show_candidates do
-    case OptimalEngine.RememberLoop.escalation_candidates() do
+    case OptimalEngine.Insight.Remember.escalation_candidates() do
       {:ok, []} ->
         IO.puts("  No categories have reached escalation threshold yet.")
         IO.puts("  Use 'mix optimal.remember' to accumulate observations.")

@@ -33,7 +33,8 @@ defmodule OptimalEngine.Session do
   use GenServer
   require Logger
 
-  alias OptimalEngine.{MemoryExtractor, SessionCompressor}
+  alias OptimalEngine.Insight.MemoryExtractor, as: MemoryExtractor
+  alias OptimalEngine.SessionCompressor
 
   @idle_timeout_ms 60 * 60 * 1_000
   @max_messages 200
@@ -241,7 +242,7 @@ defmodule OptimalEngine.Session do
   defp generate_summary(%{messages: []}, _compressed), do: "(empty session)"
 
   defp generate_summary(%{messages: messages}, compressed) do
-    if OptimalEngine.Ollama.available?() do
+    if OptimalEngine.Embed.Ollama.available?() do
       llm_summary(compressed)
     else
       fallback_summary(messages)
@@ -256,7 +257,7 @@ defmodule OptimalEngine.Session do
 
     system = "Be concise. Output only the summary."
 
-    case OptimalEngine.Ollama.generate(prompt, system: system) do
+    case OptimalEngine.Embed.Ollama.generate(prompt, system: system) do
       {:ok, summary} ->
         summary |> String.trim() |> truncate(500)
 

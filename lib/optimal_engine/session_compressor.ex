@@ -9,7 +9,7 @@ defmodule OptimalEngine.SessionCompressor do
   All functions are best-effort and always return `{:ok, text}`.
   """
 
-  alias OptimalEngine.Ollama
+  alias OptimalEngine.Embed.Ollama
   require Logger
 
   @compression_threshold 10_000

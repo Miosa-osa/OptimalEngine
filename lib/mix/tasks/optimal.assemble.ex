@@ -32,12 +32,12 @@ defmodule Mix.Tasks.Optimal.Assemble do
 
     case tier do
       "l0" ->
-        {:ok, content} = OptimalEngine.ContextAssembler.l0()
+        {:ok, content} = OptimalEngine.Retrieval.ContextAssembler.l0()
         Mix.shell().info(content)
 
       _ ->
         opts = Keyword.take(parsed, [:limit])
-        {:ok, result} = OptimalEngine.ContextAssembler.assemble(query, opts)
+        {:ok, result} = OptimalEngine.Retrieval.ContextAssembler.assemble(query, opts)
 
         Mix.shell().info("""
         === L0 (#{estimate_tokens(result.l0)} tokens) ===

@@ -55,7 +55,7 @@ defmodule Mix.Tasks.Optimal.Intake do
     IO.puts("")
     IO.puts("[intake] Classifying...")
 
-    case OptimalEngine.Intake.process(text, intake_opts) do
+    case OptimalEngine.Pipeline.Intake.process(text, intake_opts) do
       {:ok, result} -> print_result(result)
       {:error, reason} -> IO.puts("[intake] Failed: #{inspect(reason)}")
     end

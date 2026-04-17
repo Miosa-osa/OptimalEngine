@@ -6,7 +6,7 @@ defmodule OptimalEngine.Bridge.Signal do
 
   ## Integration points
 
-  - `classify/1` — Augments OptimalEngine.Classifier with OptimalEngine.Signal.Classifier's
+  - `classify/1` — Augments OptimalEngine.Pipeline.Classifier with OptimalEngine.Signal.Classifier's
     inference (mode, genre, type, format, structure) for improved accuracy
   - `audit/1` — Runs OptimalEngine.Signal.FailureModes.detect/1 against a signal to produce
     a list of Signal Theory constraint violations (Shannon, Ashby, Beer, Wiener)

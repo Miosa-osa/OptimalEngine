@@ -19,7 +19,10 @@ defmodule OptimalEngine.API.Router do
 
   use Plug.Router
 
-  alias OptimalEngine.{GraphAnalyzer, HealthDiagnostics, Reflector, Store}
+  alias OptimalEngine.Graph.Analyzer, as: GraphAnalyzer
+  alias OptimalEngine.Insight.Health, as: HealthDiagnostics
+  alias OptimalEngine.Graph.Reflector, as: Reflector
+  alias OptimalEngine.Store
 
   plug(:cors)
   plug(:match)
