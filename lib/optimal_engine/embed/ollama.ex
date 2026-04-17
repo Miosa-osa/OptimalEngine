@@ -46,18 +46,75 @@ defmodule OptimalEngine.Embed.Ollama do
   - `:model` — override the default embed model
   """
   @spec embed(String.t(), keyword()) :: {:ok, [float()]} | {:error, atom()}
-  def embed(text, opts \\ []) do
+  def embed(text, opts \\ []), do: embed_text(text, opts)
+
+  @doc """
+  Embed text using the configured text-embedding model.
+  Default model: `nomic-embed-text` (configurable via `:optimal_engine, :ollama, :embed_model`).
+
+  Returns `{:ok, [float()]}` — a single 768-dim vector — or `{:error, reason}`.
+  """
+  @spec embed_text(String.t(), keyword()) :: {:ok, [float()]} | {:error, atom()}
+  def embed_text(text, opts \\ []) when is_binary(text) do
     cfg = config()
     model = Keyword.get(opts, :model, cfg[:embed_model])
 
     body = %{"model" => model, "input" => text}
 
     case post_json("/api/embed", body) do
-      {:ok, %{"embeddings" => [first | _]}} ->
+      {:ok, %{"embeddings" => [first | _]}} when is_list(first) ->
         {:ok, first}
 
       {:ok, response} ->
-        Logger.warning("Ollama embed: unexpected response shape: #{inspect(response)}")
+        Logger.warning("Ollama embed_text: unexpected response shape: #{inspect(response)}")
+        {:error, :unexpected_response}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Embed an image using the configured vision-embedding model.
+  Default model: `nomic-embed-vision` — aligned with `nomic-embed-text` in
+  the same 768-dim space so text queries can retrieve image chunks.
+
+  Accepts either a filesystem path or raw binary bytes. The image is sent
+  base64-encoded in the `images` field of Ollama's `/api/embed` endpoint.
+
+  Returns `{:ok, [float()]}` — a single 768-dim vector — or `{:error, reason}`.
+  """
+  @spec embed_image(String.t() | binary(), keyword()) :: {:ok, [float()]} | {:error, atom()}
+  def embed_image(path_or_bytes, opts \\ [])
+
+  def embed_image(path, opts) when is_binary(path) do
+    cond do
+      File.exists?(path) ->
+        case File.read(path) do
+          {:ok, bytes} -> embed_image_bytes(bytes, opts)
+          {:error, reason} -> {:error, reason}
+        end
+
+      true ->
+        embed_image_bytes(path, opts)
+    end
+  end
+
+  defp embed_image_bytes(bytes, opts) do
+    cfg = config()
+    model = Keyword.get(opts, :model, cfg[:embed_vision_model] || "nomic-embed-vision")
+    encoded = Base.encode64(bytes)
+
+    # Ollama multi-modal embed: image goes in `images` array. `input` carries
+    # an optional caption hint — empty string is fine for pure vision embed.
+    body = %{"model" => model, "input" => "", "images" => [encoded]}
+
+    case post_json("/api/embed", body) do
+      {:ok, %{"embeddings" => [first | _]}} when is_list(first) ->
+        {:ok, first}
+
+      {:ok, response} ->
+        Logger.warning("Ollama embed_image: unexpected response shape: #{inspect(response)}")
         {:error, :unexpected_response}
 
       {:error, reason} ->

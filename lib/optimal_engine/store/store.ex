@@ -319,6 +319,19 @@ defmodule OptimalEngine.Store do
     GenServer.call(__MODULE__, {:insert_intents, rows}, 60_000)
   end
 
+  @doc """
+  Upserts per-chunk embeddings into `chunk_embeddings` (Phase 5).
+  Accepts `%OptimalEngine.Pipeline.Embedder.Embedding{}` structs
+  (or equivalent maps). Idempotent on `chunk_id`.
+
+  Vectors are stored as little-endian 32-bit float BLOBs — 768 × 4 = 3072
+  bytes per row for nomic-class models.
+  """
+  @spec insert_embeddings([struct() | map()]) :: :ok | {:error, term()}
+  def insert_embeddings(rows) when is_list(rows) do
+    GenServer.call(__MODULE__, {:insert_embeddings, rows}, 60_000)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer Callbacks
   # ---------------------------------------------------------------------------
@@ -367,6 +380,12 @@ defmodule OptimalEngine.Store do
   @impl true
   def handle_call({:insert_intents, rows}, _from, state) do
     result = insert_intents_in_transaction(state.db, rows)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:insert_embeddings, rows}, _from, state) do
+    result = insert_embeddings_in_transaction(state.db, rows)
     {:reply, result, state}
   end
 
@@ -1127,6 +1146,73 @@ defmodule OptimalEngine.Store do
   defp atom_or_nil(nil), do: nil
   defp atom_or_nil(a) when is_atom(a), do: Atom.to_string(a)
   defp atom_or_nil(s) when is_binary(s), do: s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Chunk embeddings — Phase 5 Embedder writes per-chunk aligned vectors.
+  # Vectors encode as little-endian float32 BLOBs, 4 bytes per component.
+  # ──────────────────────────────────────────────────────────────────────────
+
+  defp insert_embeddings_in_transaction(_db, []), do: :ok
+
+  defp insert_embeddings_in_transaction(db, rows) do
+    case Exqlite.Sqlite3.execute(db, "BEGIN") do
+      :ok ->
+        result =
+          Enum.reduce_while(rows, :ok, fn row, _acc ->
+            case do_insert_embedding(db, row) do
+              :ok -> {:cont, :ok}
+              {:error, _} = err -> {:halt, err}
+            end
+          end)
+
+        case result do
+          :ok ->
+            Exqlite.Sqlite3.execute(db, "COMMIT")
+            :ok
+
+          {:error, _} = err ->
+            Exqlite.Sqlite3.execute(db, "ROLLBACK")
+            err
+        end
+
+      err ->
+        err
+    end
+  end
+
+  defp do_insert_embedding(db, row) do
+    vector = chunk_field(row, :vector) || []
+    blob = encode_vector(vector)
+
+    sql = """
+    INSERT INTO chunk_embeddings
+      (chunk_id, tenant_id, model, modality, dim, vector)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+    ON CONFLICT(chunk_id) DO UPDATE SET
+      tenant_id = excluded.tenant_id,
+      model     = excluded.model,
+      modality  = excluded.modality,
+      dim       = excluded.dim,
+      vector    = excluded.vector
+    """
+
+    params = [
+      chunk_field(row, :chunk_id),
+      chunk_field(row, :tenant_id) || "default",
+      chunk_field(row, :model),
+      atom_or_nil(chunk_field(row, :modality)) || "text",
+      chunk_field(row, :dim) || length(vector),
+      # Force BLOB binding — exqlite otherwise treats a raw binary as TEXT,
+      # and float32 bytes frequently contain 0x00 which SQLite TEXT truncates.
+      {:blob, blob}
+    ]
+
+    exec_stmt(db, sql, params)
+  end
+
+  defp encode_vector(vector) when is_list(vector) do
+    for f <- vector, into: <<>>, do: <<f::little-float-size(32)>>
+  end
 
   defp exec_stmt(db, sql, params) do
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
