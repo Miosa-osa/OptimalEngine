@@ -45,7 +45,10 @@ defmodule OptimalEngine.Store.Vectors do
     VALUES (?1, ?2, ?3)
     """
 
-    case Store.raw_query(sql, [context_id, blob, dims]) do
+    # `{:blob, _}` forces exqlite to bind as BLOB. Raw binary otherwise
+    # binds as TEXT and gets truncated at the first null byte — which is
+    # catastrophic for float32 data.
+    case Store.raw_query(sql, [context_id, {:blob, blob}, dims]) do
       {:ok, _} ->
         Logger.debug("[VectorStore] Stored embedding for #{context_id} (#{dims} dims)")
         :ok

@@ -67,7 +67,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_019_skills(),
       migration_020_principal_skills(),
       migration_021_workspace_indexes(),
-      migration_022_backfill_nodes_from_contexts()
+      migration_022_backfill_nodes_from_contexts(),
+      migration_023_chunk_embeddings()
     ]
   end
 
@@ -662,6 +663,32 @@ defmodule OptimalEngine.Store.Migrations do
           'nodes/' || c.node                                AS path
         FROM (SELECT DISTINCT tenant_id, node FROM contexts WHERE node IS NOT NULL AND node <> '') c
         """}
+     ]}
+  end
+
+  # Phase 5: chunk-level embeddings in the aligned 768-dim nomic space.
+  # Keyed on chunk_id so re-embedding overwrites in place. `modality` is the
+  # original chunk modality (text/image/audio/code/data/mixed) so a single
+  # query can filter to a subset of modalities if needed.
+  defp migration_023_chunk_embeddings do
+    {23, "chunk_embeddings — aligned 768-dim per-chunk vectors (Phase 5)",
+     [
+       {"chunk_embeddings",
+        """
+        CREATE TABLE IF NOT EXISTS chunk_embeddings (
+          chunk_id TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+          tenant_id TEXT NOT NULL,
+          model TEXT NOT NULL,
+          modality TEXT NOT NULL,
+          dim INTEGER NOT NULL DEFAULT 768,
+          vector BLOB NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_chunk_embeddings_tenant_modality",
+        "CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_tenant_modality ON chunk_embeddings(tenant_id, modality)"},
+       {"idx_chunk_embeddings_tenant_model",
+        "CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_tenant_model ON chunk_embeddings(tenant_id, model)"}
      ]}
   end
 
