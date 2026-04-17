@@ -453,7 +453,8 @@ defmodule OptimalEngine.Store do
          :ok <- Exqlite.Sqlite3.execute(db, @ddl_observations),
          :ok <- run_index_migrations(db),
          :ok <- normalize_node_names(db),
-         :ok <- run_probability_column_migrations(db) do
+         :ok <- run_probability_column_migrations(db),
+         :ok <- OptimalEngine.Store.Migrations.run(db) do
       {:ok, db}
     end
   end
