@@ -299,6 +299,26 @@ defmodule OptimalEngine.Store do
     GenServer.call(__MODULE__, {:insert_chunks, chunks}, 60_000)
   end
 
+  @doc """
+  Upserts per-chunk classifications (Phase 4).
+  Accepts `%OptimalEngine.Pipeline.Classifier.Classification{}` structs
+  or equivalent maps. Idempotent on `chunk_id`.
+  """
+  @spec insert_classifications([struct() | map()]) :: :ok | {:error, term()}
+  def insert_classifications(rows) when is_list(rows) do
+    GenServer.call(__MODULE__, {:insert_classifications, rows}, 60_000)
+  end
+
+  @doc """
+  Upserts per-chunk intents (Phase 4).
+  Accepts `%OptimalEngine.Pipeline.IntentExtractor.Intent{}` structs
+  or equivalent maps. Idempotent on `chunk_id`.
+  """
+  @spec insert_intents([struct() | map()]) :: :ok | {:error, term()}
+  def insert_intents(rows) when is_list(rows) do
+    GenServer.call(__MODULE__, {:insert_intents, rows}, 60_000)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer Callbacks
   # ---------------------------------------------------------------------------
@@ -335,6 +355,18 @@ defmodule OptimalEngine.Store do
   @impl true
   def handle_call({:insert_chunks, chunks}, _from, state) do
     result = insert_chunks_in_transaction(state.db, chunks)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:insert_classifications, rows}, _from, state) do
+    result = insert_classifications_in_transaction(state.db, rows)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:insert_intents, rows}, _from, state) do
+    result = insert_intents_in_transaction(state.db, rows)
     {:reply, result, state}
   end
 
@@ -975,6 +1007,138 @@ defmodule OptimalEngine.Store do
 
   defp chunk_field(chunk, key) when is_map(chunk),
     do: Map.get(chunk, key) || Map.get(chunk, to_string(key))
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Classifications — Phase 4 Classifier writes per-chunk classification rows.
+  # ──────────────────────────────────────────────────────────────────────────
+
+  defp insert_classifications_in_transaction(_db, []), do: :ok
+
+  defp insert_classifications_in_transaction(db, rows) do
+    case Exqlite.Sqlite3.execute(db, "BEGIN") do
+      :ok ->
+        result =
+          Enum.reduce_while(rows, :ok, fn row, _acc ->
+            case do_insert_classification(db, row) do
+              :ok -> {:cont, :ok}
+              {:error, _} = err -> {:halt, err}
+            end
+          end)
+
+        case result do
+          :ok ->
+            Exqlite.Sqlite3.execute(db, "COMMIT")
+            :ok
+
+          {:error, _} = err ->
+            Exqlite.Sqlite3.execute(db, "ROLLBACK")
+            err
+        end
+
+      err ->
+        err
+    end
+  end
+
+  defp do_insert_classification(db, row) do
+    sql = """
+    INSERT INTO classifications
+      (tenant_id, chunk_id, mode, genre, signal_type, format, structure,
+       sn_ratio, confidence)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+    ON CONFLICT(chunk_id) DO UPDATE SET
+      mode        = excluded.mode,
+      genre       = excluded.genre,
+      signal_type = excluded.signal_type,
+      format      = excluded.format,
+      structure   = excluded.structure,
+      sn_ratio    = excluded.sn_ratio,
+      confidence  = excluded.confidence
+    """
+
+    params = [
+      chunk_field(row, :tenant_id) || "default",
+      chunk_field(row, :chunk_id),
+      atom_or_nil(chunk_field(row, :mode)),
+      atom_or_nil(chunk_field(row, :genre)),
+      atom_or_nil(chunk_field(row, :signal_type)),
+      atom_or_nil(chunk_field(row, :format)),
+      atom_or_nil(chunk_field(row, :structure)),
+      chunk_field(row, :sn_ratio),
+      chunk_field(row, :confidence)
+    ]
+
+    exec_stmt(db, sql, params)
+  end
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Intents — Phase 4 IntentExtractor writes per-chunk intent rows.
+  # ──────────────────────────────────────────────────────────────────────────
+
+  defp insert_intents_in_transaction(_db, []), do: :ok
+
+  defp insert_intents_in_transaction(db, rows) do
+    case Exqlite.Sqlite3.execute(db, "BEGIN") do
+      :ok ->
+        result =
+          Enum.reduce_while(rows, :ok, fn row, _acc ->
+            case do_insert_intent(db, row) do
+              :ok -> {:cont, :ok}
+              {:error, _} = err -> {:halt, err}
+            end
+          end)
+
+        case result do
+          :ok ->
+            Exqlite.Sqlite3.execute(db, "COMMIT")
+            :ok
+
+          {:error, _} = err ->
+            Exqlite.Sqlite3.execute(db, "ROLLBACK")
+            err
+        end
+
+      err ->
+        err
+    end
+  end
+
+  defp do_insert_intent(db, row) do
+    sql = """
+    INSERT INTO intents (tenant_id, chunk_id, intent, confidence, evidence)
+    VALUES (?1, ?2, ?3, ?4, ?5)
+    ON CONFLICT(chunk_id) DO UPDATE SET
+      intent     = excluded.intent,
+      confidence = excluded.confidence,
+      evidence   = excluded.evidence
+    """
+
+    params = [
+      chunk_field(row, :tenant_id) || "default",
+      chunk_field(row, :chunk_id),
+      atom_or_nil(chunk_field(row, :intent)) || "record_fact",
+      chunk_field(row, :confidence),
+      chunk_field(row, :evidence)
+    ]
+
+    exec_stmt(db, sql, params)
+  end
+
+  defp atom_or_nil(nil), do: nil
+  defp atom_or_nil(a) when is_atom(a), do: Atom.to_string(a)
+  defp atom_or_nil(s) when is_binary(s), do: s
+
+  defp exec_stmt(db, sql, params) do
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
+         :ok <- Exqlite.Sqlite3.bind(stmt, params),
+         :done <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      other -> {:error, other}
+    end
+  end
 
   defp commit_or_rollback(db, contexts) do
     count =

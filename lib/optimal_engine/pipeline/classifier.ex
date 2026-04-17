@@ -30,6 +30,8 @@ defmodule OptimalEngine.Pipeline.Classifier do
   """
 
   alias OptimalEngine.{Context, Signal}
+  alias OptimalEngine.Pipeline.Classifier.Classification
+  alias OptimalEngine.Pipeline.Decomposer.{Chunk, ChunkTree}
 
   # Genre keywords used for auto-detection (ordered by specificity)
   @genre_patterns [
@@ -207,6 +209,111 @@ defmodule OptimalEngine.Pipeline.Classifier do
       routed_to: [],
       score: nil
     }
+  end
+
+  # ─── Per-chunk classification (Phase 4) ──────────────────────────────────
+
+  @doc """
+  Classify a single chunk from Phase 3's Decomposer.
+
+  Unlike `classify/2` which builds a full `%Signal{}` from a whole document,
+  this runs on chunk-scale text and produces a `%Classification{}` row
+  keyed by `chunk.id`. Frontmatter is not re-parsed (the parent doc's
+  frontmatter already set the modality / format); chunk-level classification
+  focuses on what varies across chunks: genre, signal_type, structure.
+
+  Options:
+    * `:mode_default`   — used when the chunk offers no mode signal (default: inherit from chunk.modality)
+    * `:format_default` — fallback format (default: inferred from chunk.modality)
+  """
+  @spec classify_chunk(Chunk.t(), keyword()) :: {:ok, Classification.t()}
+  def classify_chunk(%Chunk{} = chunk, opts \\ []) do
+    text = chunk.text || ""
+    frontmatter = %{}
+
+    mode = classify_chunk_mode(chunk, opts) || extract_mode(frontmatter, text)
+    genre = extract_genre(frontmatter, text)
+    signal_type = extract_type(frontmatter, text)
+    format = classify_chunk_format(chunk, opts) || extract_format(frontmatter)
+    structure = extract_structure(frontmatter)
+    sn_ratio = chunk_sn_ratio(text)
+    confidence = chunk_confidence(mode, genre, signal_type, format, structure)
+
+    {:ok,
+     Classification.new(
+       chunk_id: chunk.id,
+       tenant_id: chunk.tenant_id,
+       mode: mode,
+       genre: genre,
+       signal_type: signal_type,
+       format: format,
+       structure: structure,
+       sn_ratio: sn_ratio,
+       confidence: confidence
+     )}
+  end
+
+  @doc "Classify every chunk in a ChunkTree. Returns the list in tree order."
+  @spec classify_tree(ChunkTree.t(), keyword()) :: {:ok, [Classification.t()]}
+  def classify_tree(%ChunkTree{chunks: chunks}, opts \\ []) do
+    classifications = Enum.map(chunks, fn c -> elem(classify_chunk(c, opts), 1) end)
+    {:ok, classifications}
+  end
+
+  # Prefer the chunk's modality (set by the Parser) — it's the ground truth for
+  # mode. Fall back to heuristics on body text.
+  defp classify_chunk_mode(%Chunk{modality: :code}, _opts), do: :code
+  defp classify_chunk_mode(%Chunk{modality: :image}, _opts), do: :visual
+  defp classify_chunk_mode(%Chunk{modality: :audio}, _opts), do: :linguistic
+  defp classify_chunk_mode(%Chunk{modality: :video}, _opts), do: :mixed
+  defp classify_chunk_mode(%Chunk{modality: :data}, _opts), do: :data
+  defp classify_chunk_mode(%Chunk{modality: :mixed}, _opts), do: :mixed
+  defp classify_chunk_mode(_, opts), do: Keyword.get(opts, :mode_default)
+
+  defp classify_chunk_format(%Chunk{modality: :code}, _opts), do: :code
+  defp classify_chunk_format(%Chunk{modality: :data}, _opts), do: :json
+  defp classify_chunk_format(%Chunk{modality: :image}, _opts), do: :unknown
+  defp classify_chunk_format(%Chunk{modality: :audio}, _opts), do: :unknown
+  defp classify_chunk_format(%Chunk{modality: :video}, _opts), do: :unknown
+  defp classify_chunk_format(_, opts), do: Keyword.get(opts, :format_default)
+
+  # Cheap sn_ratio heuristic: higher when the chunk is dense + structured.
+  defp chunk_sn_ratio(text) do
+    len = byte_size(text)
+
+    cond do
+      len == 0 -> 0.0
+      len < 40 -> 0.3
+      true -> entropy_like_density(text)
+    end
+  end
+
+  defp entropy_like_density(text) do
+    # Rough measure: ratio of unique tokens to total tokens, mapped to 0.0..1.0.
+    tokens =
+      text
+      |> String.downcase()
+      |> String.split(~r/[^a-z0-9]+/, trim: true)
+
+    total = length(tokens)
+
+    if total == 0 do
+      0.0
+    else
+      unique = tokens |> Enum.uniq() |> length()
+      ratio = unique / total
+      # Squash to 0.4..0.9 so chunks don't all land at the extremes
+      Float.round(0.4 + ratio * 0.5, 3)
+    end
+  end
+
+  # Confidence rises with how many of the five dimensions were resolved.
+  defp chunk_confidence(mode, genre, signal_type, format, structure) do
+    resolved =
+      [mode, genre, signal_type, format, structure]
+      |> Enum.count(&(not is_nil(&1)))
+
+    Float.round(resolved / 5.0, 2)
   end
 
   @doc """

@@ -37,7 +37,7 @@ Active development. Per-phase progress against [`PLAN.md`](PLAN.md):
 | 12   | Desktop UI — Tauri + SvelteKit | ⏳ |
 | 13   | v0.1.0 tag | ⏳ |
 
-**Current suite:** 786 tests passing, 29 excluded (RocksDB NIF, optional backend).
+**Current suite:** 810 tests passing, 29 excluded (RocksDB NIF, optional backend).
 
 ---
 
@@ -78,7 +78,7 @@ git clone git@github.com:robertohluna/OptimalEngine.git
 cd OptimalEngine
 mix deps.get
 mix compile
-mix test                    # expect 786/786 passing
+mix test                    # expect 810/810 passing
 ```
 
 First ingest + search:

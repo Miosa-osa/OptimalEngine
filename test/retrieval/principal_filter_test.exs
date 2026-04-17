@@ -11,7 +11,8 @@ defmodule OptimalEngine.Retrieval.PrincipalFilterTest do
   describe "search/2 with :principal" do
     test "returns all hits when principal is omitted (backwards compat)" do
       # Any pre-existing content should be returned with no filter.
-      assert {:ok, hits} = SearchEngine.search("", limit: 5)
+      # Use a harmless query — empty strings can trigger Ollama edge paths.
+      assert {:ok, hits} = SearchEngine.search("test", limit: 5)
       assert is_list(hits)
     end
 
