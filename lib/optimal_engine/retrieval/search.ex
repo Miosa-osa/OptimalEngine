@@ -106,7 +106,7 @@ defmodule OptimalEngine.Retrieval.Search do
     start = System.monotonic_time(:millisecond)
 
     # Try hybrid search first, fall back to FTS-only
-    result =
+    raw_result =
       if Ollama.available?() and hybrid_enabled?() do
         case do_hybrid_search(query, opts, state.topology) do
           {:ok, _} = ok -> ok
@@ -116,6 +116,11 @@ defmodule OptimalEngine.Retrieval.Search do
         do_search(query, opts, state.topology)
       end
 
+    # Phase 1: principal-scoped ACL filter. No `:principal` → no filter
+    # (backwards-compatible with pre-Phase-1 callers). When `:principal`
+    # is set, drop any result the principal cannot read per ACLs.
+    result = filter_by_principal(raw_result, opts)
+
     elapsed = System.monotonic_time(:millisecond) - start
 
     :telemetry.execute(
@@ -124,7 +129,58 @@ defmodule OptimalEngine.Retrieval.Search do
       %{query: query}
     )
 
+    emit_audit(query, opts, result, elapsed)
+
     {:reply, result, state}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private: principal-scoped ACL filter
+  # ---------------------------------------------------------------------------
+
+  defp filter_by_principal({:ok, hits}, opts) when is_list(hits) do
+    case Keyword.get(opts, :principal) do
+      nil ->
+        {:ok, hits}
+
+      principal_id when is_binary(principal_id) ->
+        tenant_id = Keyword.get(opts, :tenant_id, OptimalEngine.Tenancy.Tenant.default_id())
+
+        filtered =
+          Enum.filter(hits, fn hit ->
+            uri = Map.get(hit, :uri) || Map.get(hit, :id)
+
+            uri == nil or
+              OptimalEngine.Identity.ACL.can?(principal_id, uri, :read, tenant_id: tenant_id)
+          end)
+
+        {:ok, filtered}
+    end
+  end
+
+  defp filter_by_principal(other, _opts), do: other
+
+  defp emit_audit(query, opts, result, elapsed) do
+    case Keyword.get(opts, :principal) do
+      nil ->
+        :ok
+
+      principal_id when is_binary(principal_id) ->
+        count =
+          case result do
+            {:ok, hits} -> length(hits)
+            _ -> 0
+          end
+
+        OptimalEngine.Audit.Logger.log("retrieval.executed",
+          tenant_id: Keyword.get(opts, :tenant_id, OptimalEngine.Tenancy.Tenant.default_id()),
+          principal: principal_id,
+          latency_ms: elapsed,
+          metadata: %{query: query, result_count: count}
+        )
+
+        :ok
+    end
   end
 
   # ---------------------------------------------------------------------------
