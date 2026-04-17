@@ -288,6 +288,17 @@ defmodule OptimalEngine.Store do
     GenServer.call(__MODULE__, {:raw_query, sql, params}, 15_000)
   end
 
+  @doc """
+  Inserts or replaces a list of chunks in one transaction.
+
+  Accepts anything that behaves like `OptimalEngine.Pipeline.Decomposer.Chunk`
+  (struct or map with the right keys). Idempotent on `chunk.id`.
+  """
+  @spec insert_chunks([struct() | map()]) :: :ok | {:error, term()}
+  def insert_chunks(chunks) when is_list(chunks) do
+    GenServer.call(__MODULE__, {:insert_chunks, chunks}, 60_000)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer Callbacks
   # ---------------------------------------------------------------------------
@@ -318,6 +329,12 @@ defmodule OptimalEngine.Store do
   @impl true
   def handle_call({:insert_contexts, contexts}, _from, state) do
     result = insert_in_transaction(state.db, contexts)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:insert_chunks, chunks}, _from, state) do
+    result = insert_chunks_in_transaction(state.db, chunks)
     {:reply, result, state}
   end
 
@@ -886,6 +903,78 @@ defmodule OptimalEngine.Store do
       err -> err
     end
   end
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Chunk inserts — Phase 1 `chunks` table; Phase 3 Decomposer writes here.
+  # ──────────────────────────────────────────────────────────────────────────
+
+  defp insert_chunks_in_transaction(_db, []), do: :ok
+
+  defp insert_chunks_in_transaction(db, chunks) do
+    case Exqlite.Sqlite3.execute(db, "BEGIN") do
+      :ok ->
+        result =
+          Enum.reduce_while(chunks, :ok, fn chunk, _acc ->
+            case do_insert_chunk(db, chunk) do
+              :ok -> {:cont, :ok}
+              {:error, _} = err -> {:halt, err}
+            end
+          end)
+
+        case result do
+          :ok ->
+            Exqlite.Sqlite3.execute(db, "COMMIT")
+            :ok
+
+          {:error, _} = err ->
+            Exqlite.Sqlite3.execute(db, "ROLLBACK")
+            err
+        end
+
+      err ->
+        err
+    end
+  end
+
+  defp do_insert_chunk(db, chunk) do
+    sql = """
+    INSERT OR REPLACE INTO chunks
+      (id, tenant_id, signal_id, parent_id, scale, offset_bytes, length_bytes,
+       text, modality, asset_ref, classification_level, created_at)
+    VALUES
+      (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, COALESCE(?12, datetime('now')))
+    """
+
+    params = [
+      chunk_field(chunk, :id),
+      chunk_field(chunk, :tenant_id) || "default",
+      chunk_field(chunk, :signal_id),
+      chunk_field(chunk, :parent_id),
+      chunk_field(chunk, :scale) |> to_string(),
+      chunk_field(chunk, :offset_bytes) || 0,
+      chunk_field(chunk, :length_bytes) || 0,
+      chunk_field(chunk, :text) || "",
+      chunk_field(chunk, :modality) |> to_string(),
+      chunk_field(chunk, :asset_ref),
+      chunk_field(chunk, :classification_level) || "internal",
+      chunk_field(chunk, :created_at)
+    ]
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
+         :ok <- Exqlite.Sqlite3.bind(stmt, params),
+         :done <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      other -> {:error, other}
+    end
+  end
+
+  defp chunk_field(%{__struct__: _} = chunk, key), do: Map.get(chunk, key)
+
+  defp chunk_field(chunk, key) when is_map(chunk),
+    do: Map.get(chunk, key) || Map.get(chunk, to_string(key))
 
   defp commit_or_rollback(db, contexts) do
     count =
