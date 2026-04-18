@@ -18,6 +18,7 @@
   <h1>Optimal Engine</h1>
   <nav>
     <a href="/">Ask</a>
+    <a href="/graph">Graph</a>
     <a href="/wiki">Wiki</a>
     <a href="/status">Status</a>
   </nav>

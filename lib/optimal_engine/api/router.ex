@@ -227,6 +227,42 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # ── Phase 12.5: endpoints the ported BusinessOS knowledge components call ─
+  #
+  # The Svelte components in desktop/src/lib/components/knowledge/ (copied from
+  # BusinessOS-5) hit these paths directly. We keep the shape stable so the
+  # component code stays unmodified between the two projects.
+
+  # GET /api/optimal/graph — shape expected by OptimalGraphView.svelte:
+  #   %{entities: [%{name, type, connections}], edges: [%{source, target, relation, weight}], stats: %{...}}
+  get "/api/optimal/graph" do
+    entities = optimal_entity_summary()
+    edges = optimal_relation_edges()
+    edge_types = Enum.frequencies_by(edges, & &1.relation)
+
+    json(conn, %{
+      entities: entities,
+      edges: edges,
+      stats: %{
+        entity_count: length(entities),
+        edge_count: length(edges),
+        edge_types: edge_types
+      }
+    })
+  end
+
+  # GET /api/optimal/nodes — shape expected by NodeDrillDown level-0 card grid:
+  #   %{nodes: [%{slug, name, type, signal_count}]}
+  get "/api/optimal/nodes" do
+    json(conn, %{nodes: optimal_node_summary()})
+  end
+
+  # GET /api/optimal/nodes/:slug/files — drill-down file tree. Component
+  # expects `{files: [...]}`; each entry `%{name, path, is_dir, size, children?}`.
+  get "/api/optimal/nodes/:slug/files" do
+    json(conn, %{files: optimal_node_files(slug)})
+  end
+
   match _ do
     send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
   end
@@ -465,6 +501,133 @@ defmodule OptimalEngine.API.Router do
          ) do
       {:ok, rows} -> rows
       _ -> []
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Helpers: data fetching for the ported knowledge components
+  # ---------------------------------------------------------------------------
+
+  # Entities for OptimalGraphView — one row per unique (name, type), with
+  # `connections` = how many distinct contexts reference that entity.
+  defp optimal_entity_summary do
+    case Store.raw_query(
+           """
+           SELECT name, type, COUNT(DISTINCT context_id) AS connections
+           FROM entities
+           WHERE name IS NOT NULL AND name <> ''
+           GROUP BY name, type
+           ORDER BY connections DESC
+           LIMIT 300
+           """,
+           []
+         ) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [name, type, connections] ->
+          %{name: name, type: type || "concept", connections: connections}
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  # Edges between entities by co-occurrence in the same context. Two entities
+  # sharing a context produce one `related_to` edge; weight is the number of
+  # shared contexts (capped at 5.0 to keep visuals stable).
+  defp optimal_relation_edges do
+    sql = """
+    SELECT e1.name AS source, e2.name AS target, COUNT(*) AS shared
+    FROM entities e1
+    JOIN entities e2
+      ON e1.context_id = e2.context_id
+     AND e1.name < e2.name
+    WHERE e1.name IS NOT NULL AND e2.name IS NOT NULL
+    GROUP BY e1.name, e2.name
+    HAVING shared >= 1
+    ORDER BY shared DESC
+    LIMIT 800
+    """
+
+    case Store.raw_query(sql, []) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [s, t, shared] ->
+          %{
+            source: s,
+            target: t,
+            relation: "related_to",
+            weight: min(shared * 1.0, 5.0)
+          }
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  # Node list for the drill-down level-0 card grid. Pulls from the workspace
+  # `nodes` table (Phase 3.5) joined against context counts, so operators see
+  # real signal volumes per node rather than just names.
+  defp optimal_node_summary do
+    sql = """
+    SELECT n.slug, n.name, COALESCE(n.kind, 'node') AS type,
+           COALESCE((SELECT COUNT(*) FROM contexts c WHERE c.node = n.slug), 0) AS signal_count
+    FROM nodes n
+    ORDER BY n.slug
+    """
+
+    case Store.raw_query(sql, []) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [slug, name, type, count] ->
+          %{slug: slug, name: name || slug, type: type, signal_count: count}
+        end)
+
+      _ ->
+        # Fallback for tenants that haven't populated the nodes table yet —
+        # derive distinct nodes straight from contexts.
+        case Store.raw_query(
+               "SELECT node, COUNT(*) FROM contexts WHERE node IS NOT NULL GROUP BY node",
+               []
+             ) do
+          {:ok, rows} ->
+            Enum.map(rows, fn [slug, count] ->
+              %{slug: slug, name: slug, type: "node", signal_count: count}
+            end)
+
+          _ ->
+            []
+        end
+    end
+  end
+
+  # File tree for NodeDrillDown — one entry per signal in a given node,
+  # flattened with `is_dir: false`. The component also accepts nested
+  # children but the engine stores a flat list per node, so we return that.
+  defp optimal_node_files(slug) do
+    case Store.raw_query(
+           """
+           SELECT id, title, uri, genre, modified_at, LENGTH(content) AS size
+           FROM contexts
+           WHERE node = ?1
+           ORDER BY modified_at DESC
+           LIMIT 200
+           """,
+           [slug]
+         ) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [id, title, uri, genre, modified_at, size] ->
+          %{
+            name: title || id,
+            path: uri || id,
+            is_dir: false,
+            size: size || 0,
+            genre: genre,
+            modified_at: modified_at
+          }
+        end)
+
+      _ ->
+        []
     end
   end
 
