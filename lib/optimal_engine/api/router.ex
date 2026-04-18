@@ -263,6 +263,69 @@ defmodule OptimalEngine.API.Router do
     json(conn, %{files: optimal_node_files(slug)})
   end
 
+  # ── Phase 14: workspace explorer endpoints ──────────────────────────────
+
+  # GET /api/workspace — full node forest with parent/child + signal counts.
+  # Returned as a flat list; the UI builds the tree client-side using parent_id.
+  get "/api/workspace" do
+    json(conn, %{nodes: workspace_nodes()})
+  end
+
+  # GET /api/signals/:id — full signal granularity: chunks (4 scales),
+  # entities (by type), classification, intent, clusters, wiki citations.
+  # This is the "see everything the engine knows about this one data point"
+  # endpoint that the workspace drill-down mounts.
+  get "/api/signals/:id" do
+    case signal_detail(id) do
+      nil -> send_resp(conn, 404, Jason.encode!(%{error: "signal not found"}))
+      detail -> json(conn, detail)
+    end
+  end
+
+  # GET /api/activity — reverse-chron events (audit log). Params:
+  #   limit=N  (default 100, max 1000)
+  #   kind=ingest|erasure|retention_action|…  (optional filter)
+  get "/api/activity" do
+    limit = conn |> query_param("limit", "100") |> parse_int(100) |> min(1000)
+    kind = query_param(conn, "kind", "")
+    json(conn, %{events: recent_events(limit, kind)})
+  end
+
+  # GET /api/architectures — every data architecture the engine recognises,
+  # built-ins first then any tenant-registered schemas.
+  get "/api/architectures" do
+    archs =
+      Enum.map(OptimalEngine.Architecture.list(), fn a ->
+        %{
+          id: a.id,
+          name: a.name,
+          version: a.version,
+          description: a.description,
+          modality_primary: a.modality_primary,
+          granularity: a.granularity,
+          field_count: length(a.fields)
+        }
+      end)
+
+    processors =
+      Enum.map(OptimalEngine.Architecture.processor_summary(), fn {id, modality, emits} ->
+        %{id: id, modality: modality, emits: emits}
+      end)
+
+    json(conn, %{architectures: archs, processors: processors})
+  end
+
+  # GET /api/architectures/:id — field-level detail for one architecture.
+  get "/api/architectures/:id" do
+    case OptimalEngine.Architecture.fetch(id) do
+      {:ok, arch} ->
+        json(conn, architecture_detail(arch))
+
+      {:error, _} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "architecture not found"}))
+    end
+  end
+
   match _ do
     send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
   end
@@ -629,6 +692,283 @@ defmodule OptimalEngine.API.Router do
       _ ->
         []
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Helpers: workspace / signal / activity / architecture (Phase 14)
+  # ---------------------------------------------------------------------------
+
+  # Flat node list with enough structure for a client-side tree build.
+  defp workspace_nodes do
+    sql = """
+    SELECT n.id, n.slug, n.name, n.kind, n.parent_id, n.style, n.status,
+           COALESCE((SELECT COUNT(*) FROM contexts c WHERE c.node = n.slug), 0) AS signal_count
+    FROM nodes n
+    ORDER BY COALESCE(n.parent_id, ''), n.slug
+    """
+
+    case Store.raw_query(sql, []) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [id, slug, name, kind, parent_id, style, status, count] ->
+          %{
+            id: id,
+            slug: slug,
+            name: name || slug,
+            kind: kind || "node",
+            parent_id: parent_id,
+            style: style || "internal",
+            status: status || "active",
+            signal_count: count
+          }
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  # Full granularity for one signal — enough for a drill-down to visualize
+  # every layer the engine tracks.
+  defp signal_detail(id) do
+    with {:ok, [row]} <- signal_row(id) do
+      [
+        ctx_id,
+        uri,
+        title,
+        genre,
+        mode,
+        type,
+        format,
+        structure,
+        node,
+        sn_ratio,
+        content,
+        l0,
+        l1,
+        modified_at,
+        architecture_id
+      ] = row
+
+      %{
+        id: ctx_id,
+        uri: uri,
+        title: title,
+        node: node,
+        genre: genre,
+        modified_at: modified_at,
+        architecture_id: architecture_id,
+        signal_dimensions: %{
+          mode: mode,
+          genre: genre,
+          type: type,
+          format: format,
+          structure: structure
+        },
+        sn_ratio: sn_ratio,
+        content: content,
+        l0_abstract: l0,
+        l1_overview: l1,
+        chunks: signal_chunks(ctx_id),
+        entities: signal_entities(ctx_id),
+        classification: signal_classification(ctx_id),
+        intent: signal_intent(ctx_id),
+        clusters: signal_clusters(ctx_id),
+        citations: signal_wiki_citations(ctx_id)
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp signal_row(id) do
+    Store.raw_query(
+      """
+      SELECT id, uri, title, genre, mode, signal_type, format, structure, node,
+             sn_ratio, content, l0_abstract, l1_overview, modified_at,
+             architecture_id
+      FROM contexts
+      WHERE id = ?1 LIMIT 1
+      """,
+      [id]
+    )
+  end
+
+  defp signal_chunks(signal_id) do
+    case Store.raw_query(
+           """
+           SELECT id, parent_id, scale, modality, length_bytes
+           FROM chunks WHERE signal_id = ?1
+           ORDER BY
+             CASE scale
+               WHEN 'document'  THEN 0
+               WHEN 'section'   THEN 1
+               WHEN 'paragraph' THEN 2
+               WHEN 'sentence'  THEN 3
+               ELSE 4
+             END,
+             id
+           """,
+           [signal_id]
+         ) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [cid, parent, scale, modality, len] ->
+          %{id: cid, parent_id: parent, scale: scale, modality: modality, length_bytes: len}
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp signal_entities(signal_id) do
+    case Store.raw_query(
+           "SELECT name, type FROM entities WHERE context_id = ?1 ORDER BY type, name",
+           [signal_id]
+         ) do
+      {:ok, rows} -> Enum.map(rows, fn [n, t] -> %{name: n, type: t} end)
+      _ -> []
+    end
+  end
+
+  defp signal_classification(signal_id) do
+    case Store.raw_query(
+           """
+           SELECT mode, genre, signal_type, format, structure, sn_ratio, confidence
+           FROM classifications WHERE chunk_id = ?1 LIMIT 1
+           """,
+           ["#{signal_id}:doc"]
+         ) do
+      {:ok, [[mode, genre, type, format, structure, sn, conf]]} ->
+        %{
+          mode: mode,
+          genre: genre,
+          type: type,
+          format: format,
+          structure: structure,
+          sn_ratio: sn,
+          confidence: conf
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  defp signal_intent(signal_id) do
+    case Store.raw_query(
+           "SELECT intent, confidence FROM intents WHERE chunk_id = ?1 LIMIT 1",
+           ["#{signal_id}:doc"]
+         ) do
+      {:ok, [[intent, confidence]]} -> %{intent: intent, confidence: confidence}
+      _ -> nil
+    end
+  end
+
+  defp signal_clusters(signal_id) do
+    sql = """
+    SELECT c.id, c.theme, c.intent_dominant, cm.weight
+    FROM cluster_members cm
+    JOIN clusters c ON c.id = cm.cluster_id
+    WHERE cm.chunk_id = ?1
+    """
+
+    case Store.raw_query(sql, ["#{signal_id}:doc"]) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [cid, theme, dom, w] ->
+          %{id: cid, theme: theme, intent_dominant: dom, weight: w}
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp signal_wiki_citations(signal_id) do
+    case Store.raw_query(
+           """
+           SELECT wiki_slug, wiki_audience, claim_hash, last_verified
+           FROM citations WHERE chunk_id = ?1
+           """,
+           ["#{signal_id}:doc"]
+         ) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [slug, audience, claim, verified] ->
+          %{wiki_slug: slug, audience: audience, claim_hash: claim, last_verified: verified}
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  # Activity feed — append-only events table. Most-recent first.
+  defp recent_events(limit, kind) do
+    {where, params} =
+      if kind == "" do
+        {"WHERE 1=1", [limit]}
+      else
+        {"WHERE kind = ?2", [limit, kind]}
+      end
+
+    sql = """
+    SELECT id, tenant_id, ts, principal, kind, target_uri, latency_ms, metadata
+    FROM events #{where}
+    ORDER BY ts DESC, id DESC
+    LIMIT ?1
+    """
+
+    case Store.raw_query(sql, params) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [id, tenant, ts, principal, kind, uri, latency, metadata] ->
+          %{
+            id: id,
+            tenant_id: tenant,
+            ts: ts,
+            principal: principal,
+            kind: kind,
+            target_uri: uri,
+            latency_ms: latency,
+            metadata: decode_json_meta(metadata)
+          }
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp decode_json_meta(nil), do: %{}
+  defp decode_json_meta(""), do: %{}
+
+  defp decode_json_meta(str) do
+    case Jason.decode(str) do
+      {:ok, m} when is_map(m) -> m
+      _ -> %{}
+    end
+  end
+
+  # Full architecture detail for the /api/architectures/:id endpoint.
+  defp architecture_detail(arch) do
+    %{
+      id: arch.id,
+      name: arch.name,
+      version: arch.version,
+      description: arch.description,
+      modality_primary: arch.modality_primary,
+      granularity: arch.granularity,
+      retention: arch.retention,
+      fields:
+        Enum.map(arch.fields, fn f ->
+          %{
+            name: f.name,
+            modality: f.modality,
+            dims: f.dims,
+            required: f.required,
+            processor: f.processor,
+            description: f.description
+          }
+        end)
+    }
   end
 
   # ---------------------------------------------------------------------------

@@ -69,7 +69,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_021_workspace_indexes(),
       migration_022_backfill_nodes_from_contexts(),
       migration_023_chunk_embeddings(),
-      migration_024_compliance_columns()
+      migration_024_compliance_columns(),
+      migration_025_data_architectures()
     ]
   end
 
@@ -671,6 +672,49 @@ defmodule OptimalEngine.Store.Migrations do
   # Keyed on chunk_id so re-embedding overwrites in place. `modality` is the
   # original chunk modality (text/image/audio/code/data/mixed) so a single
   # query can filter to a subset of modalities if needed.
+  defp migration_025_data_architectures do
+    {25, "data-architectures — model-agnostic data-point schemas (Phase 14)",
+     [
+       {"architectures",
+        """
+        CREATE TABLE IF NOT EXISTS architectures (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          name TEXT NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1,
+          description TEXT,
+          modality_primary TEXT NOT NULL DEFAULT 'text',
+          spec TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(tenant_id, name, version)
+        )
+        """},
+       {"idx_architectures_tenant",
+        "CREATE INDEX IF NOT EXISTS idx_architectures_tenant ON architectures(tenant_id, name)"},
+       {"contexts.architecture_id", "ALTER TABLE contexts ADD COLUMN architecture_id TEXT"},
+       {"idx_contexts_architecture",
+        "CREATE INDEX IF NOT EXISTS idx_contexts_architecture ON contexts(tenant_id, architecture_id)"},
+       {"processor_runs",
+        """
+        CREATE TABLE IF NOT EXISTS processor_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id TEXT NOT NULL,
+          context_id TEXT NOT NULL,
+          architecture_id TEXT NOT NULL,
+          processor TEXT NOT NULL,
+          field TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT,
+          output_ref TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}'
+        )
+        """},
+       {"idx_processor_runs_context",
+        "CREATE INDEX IF NOT EXISTS idx_processor_runs_context ON processor_runs(context_id, processor)"}
+     ]}
+  end
+
   defp migration_024_compliance_columns do
     {24, "compliance — contexts.created_by + archived_at for Phase 11",
      [
