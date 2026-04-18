@@ -46,9 +46,14 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
     fallback = Keyword.get(opts, :fallback_audience, "default")
     normalized = slugify(query)
 
-    with {:ok, pages} <- Wiki.list(tenant_id),
-         candidates <- filter_audience(pages, audience, fallback) do
-      match(candidates, query, normalized)
+    with {:ok, pages} <- Wiki.list(tenant_id) do
+      case match(Enum.filter(pages, &(&1.audience == audience)), query, normalized) do
+        :miss when audience != fallback ->
+          match(Enum.filter(pages, &(&1.audience == fallback)), query, normalized)
+
+        result ->
+          result
+      end
     else
       _ -> :miss
     end
@@ -67,30 +72,36 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
 
     case Wiki.list(tenant_id) do
       {:ok, pages} ->
-        pages
-        |> filter_audience(audience, fallback)
-        |> Enum.map(fn p -> {score(p, query, normalized), p} end)
-        |> Enum.filter(fn {score, _} -> score > 0 end)
-        |> Enum.sort_by(fn {score, _} -> score end, :desc)
-        |> Enum.take(limit)
-        |> Enum.map(fn {_, p} -> p end)
+        primary = score_and_rank(pages, audience, query, normalized)
+
+        cond do
+          primary != [] ->
+            Enum.take(primary, limit)
+
+          audience != fallback ->
+            pages
+            |> score_and_rank(fallback, query, normalized)
+            |> Enum.take(limit)
+
+          true ->
+            []
+        end
 
       _ ->
         []
     end
   end
 
-  # ─── private ─────────────────────────────────────────────────────────────
-
-  defp filter_audience(pages, audience, fallback) do
-    by_requested = Enum.filter(pages, &(&1.audience == audience))
-
-    if by_requested == [] and audience != fallback do
-      Enum.filter(pages, &(&1.audience == fallback))
-    else
-      by_requested
-    end
+  defp score_and_rank(pages, audience, query, normalized) do
+    pages
+    |> Enum.filter(&(&1.audience == audience))
+    |> Enum.map(fn p -> {score(p, query, normalized), p} end)
+    |> Enum.filter(fn {score, _} -> score > 0 end)
+    |> Enum.sort_by(fn {score, _} -> score end, :desc)
+    |> Enum.map(fn {_, p} -> p end)
   end
+
+  # ─── private ─────────────────────────────────────────────────────────────
 
   defp match([], _query, _normalized), do: :miss
 
