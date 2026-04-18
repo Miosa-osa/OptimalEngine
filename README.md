@@ -25,11 +25,11 @@ Active development. Per-phase progress against [`PLAN.md`](PLAN.md):
 | 1    | Schema + tenancy + identity + ACLs + audit foundation (20 new tables, 16 versioned migrations, principal-scoped search) | ✅ |
 | 3.5  | Workspace — nodes + members + skills (6 new tables, node tree + skill levels + internal/external memberships) | ✅ |
 | 2    | Parser backends — 10 formats (md, yaml/json, csv, html, code, pdf, office, image-OCR, audio-whisper, video) | ✅ |
-| 3    | Decomposer — hierarchical chunking at 4 scales | ⏳ |
-| 4    | Per-chunk classify + intent extract (10-value enum) | ⏳ |
-| 5    | Multi-modal embedder — nomic-embed-text + nomic-embed-vision + whisper.cpp, all 768-dim aligned | ⏳ |
-| 6    | Clusterer — HDBSCAN + theme auto-naming | ⏳ |
-| 7    | Wiki Layer — LLM-maintained curated top layer with hot citations + executable directives | ⏳ |
+| 3    | Decomposer — hierarchical chunking at 4 scales | ✅ |
+| 4    | Per-chunk classify + intent extract (10-value enum) | ✅ |
+| 5    | Multi-modal embedder — nomic-embed-text + nomic-embed-vision + whisper.cpp, all 768-dim aligned | ✅ |
+| 6    | Clusterer — incremental greedy theme grouping with weighted similarity | ✅ |
+| 7    | Wiki Layer — LLM-maintained curated top layer with hot citations + executable directives | ✅ |
 | 8    | Scale-aware Deliver + Composer + RAG | ⏳ |
 | 9    | 14 enterprise connectors (Slack / Gmail / Drive / Notion / Jira / Linear / GitHub / Zoom / …) | ⏳ |
 | 10   | Production hardening — perf targets, release, backup/restore | ⏳ |
@@ -37,7 +37,7 @@ Active development. Per-phase progress against [`PLAN.md`](PLAN.md):
 | 12   | Desktop UI — Tauri + SvelteKit | ⏳ |
 | 13   | v0.1.0 tag | ⏳ |
 
-**Current suite:** 810 tests passing, 29 excluded (RocksDB NIF, optional backend).
+**Current suite:** 891 tests passing, 29 excluded (RocksDB NIF, optional backend).
 
 ---
 
