@@ -68,7 +68,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_020_principal_skills(),
       migration_021_workspace_indexes(),
       migration_022_backfill_nodes_from_contexts(),
-      migration_023_chunk_embeddings()
+      migration_023_chunk_embeddings(),
+      migration_024_compliance_columns()
     ]
   end
 
@@ -670,6 +671,16 @@ defmodule OptimalEngine.Store.Migrations do
   # Keyed on chunk_id so re-embedding overwrites in place. `modality` is the
   # original chunk modality (text/image/audio/code/data/mixed) so a single
   # query can filter to a subset of modalities if needed.
+  defp migration_024_compliance_columns do
+    {24, "compliance — contexts.created_by + archived_at for Phase 11",
+     [
+       {"contexts.created_by", "ALTER TABLE contexts ADD COLUMN created_by TEXT"},
+       {"contexts.archived_at", "ALTER TABLE contexts ADD COLUMN archived_at TEXT"},
+       {"idx_contexts_tenant_created_by",
+        "CREATE INDEX IF NOT EXISTS idx_contexts_tenant_created_by ON contexts(tenant_id, created_by)"}
+     ]}
+  end
+
   defp migration_023_chunk_embeddings do
     {23, "chunk_embeddings — aligned 768-dim per-chunk vectors (Phase 5)",
      [
