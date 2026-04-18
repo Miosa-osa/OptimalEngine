@@ -52,47 +52,74 @@ defmodule Mix.Tasks.Optimal.Seed do
     seed_nodes(tenant)
     signals = seed_signals(tenant)
     seed_entities(signals)
+    seed_chunks(signals, tenant)
+    seed_classifications(signals)
+    seed_cluster(signals, tenant)
     seed_wiki_page(tenant)
+    seed_events(signals, tenant)
 
     stats = count_rows(tenant)
 
     IO.puts("""
 
     Demo seed complete.
-      tenant:    #{tenant}
-      nodes:     #{stats.nodes}
-      contexts:  #{stats.contexts}
-      entities:  #{stats.entities}
-      wiki:      #{stats.wiki}
+      tenant:          #{tenant}
+      nodes:           #{stats.nodes}
+      signals:         #{stats.contexts}
+      entities:        #{stats.entities}
+      chunks:          #{stats.chunks}
+      classifications: #{stats.classifications}
+      intents:         #{stats.intents}
+      clusters:        #{stats.clusters}
+      events:          #{stats.events}
+      wiki pages:      #{stats.wiki}
 
     Try:
       mix optimal.rag "ClinicIQ pricing"
       mix optimal.wiki list
-      (enable the HTTP API and open the desktop at /graph)
+      (enable the HTTP API and open the desktop at /graph, /workspace, /activity)
     """)
   end
 
   # ─── schema seeding ─────────────────────────────────────────────────────
 
+  # Nodes with a parent/child hierarchy so the workspace explorer shows
+  # real depth. `parent` is a slug; the function resolves it to the parent's
+  # id on insert.
   defp seed_nodes(tenant) do
     nodes = [
-      {"01-roberto", "Roberto Luna", "person"},
-      {"02-miosa", "MIOSA LLC", "org"},
-      {"03-lunivate", "Lunivate LLC", "org"},
-      {"04-ai-masters", "AI Masters Course", "operation"},
-      {"06-agency-accelerants", "Agency Accelerants", "org"},
-      {"08-content-creators", "Content Creators Network", "org"}
+      # Roots
+      {"01-roberto", "Roberto Luna", "person", nil, "internal"},
+      {"02-miosa", "MIOSA LLC", "org", nil, "internal"},
+      {"03-lunivate", "Lunivate LLC", "org", nil, "internal"},
+      {"04-ai-masters", "AI Masters Course", "operation", nil, "internal"},
+      {"06-agency-accelerants", "Agency Accelerants", "org", nil, "external"},
+      {"08-content-creators", "Content Creators Network", "org", nil, "external"},
+
+      # MIOSA sub-tree
+      {"02-miosa-platform", "MIOSA Platform", "project", "02-miosa", "internal"},
+      {"02-miosa-agency", "MIOSA Agency Services", "project", "02-miosa", "internal"},
+      {"02-miosa-pe", "MIOSA PE Deck", "project", "02-miosa", "internal"},
+
+      # AI Masters sub-tree
+      {"04-ai-masters-beginner", "Beginner Track", "project", "04-ai-masters", "internal"},
+      {"04-ai-masters-advanced", "Advanced Track", "project", "04-ai-masters", "internal"},
+
+      # Agency Accelerants sub-tree
+      {"06-agency-accelerants-cliniciq", "ClinicIQ Delivery", "project", "06-agency-accelerants",
+       "external"}
     ]
 
-    Enum.each(nodes, fn {slug, name, kind} ->
+    Enum.each(nodes, fn {slug, name, kind, parent_slug, style} ->
       id = "#{tenant}:node:#{slug}"
+      parent_id = if parent_slug, do: "#{tenant}:node:#{parent_slug}", else: nil
 
       Store.raw_query(
         """
-        INSERT OR IGNORE INTO nodes (id, tenant_id, slug, name, kind, path, metadata)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?3, ?6)
+        INSERT OR IGNORE INTO nodes (id, tenant_id, slug, name, kind, parent_id, path, style, metadata)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?3, ?7, ?8)
         """,
-        [id, tenant, slug, name, kind, Jason.encode!(%{tag: @demo_tag})]
+        [id, tenant, slug, name, kind, parent_id, style, Jason.encode!(%{tag: @demo_tag})]
       )
     end)
   end
@@ -142,6 +169,128 @@ defmodule Mix.Tasks.Optimal.Seed do
           [sig.id, name, type]
         )
       end)
+    end)
+  end
+
+  # Hierarchical decomposition at 4 scales — document → section → paragraph
+  # → sentence. Viewers can see how the engine breaks a signal down for
+  # embedding + retrieval at each granularity.
+  defp seed_chunks(signals, tenant) do
+    Enum.each(signals, fn sig ->
+      sentences =
+        sig.content
+        |> String.split(~r/\.\s+/, trim: true)
+        |> Enum.reject(&(&1 == ""))
+
+      doc_id = "#{sig.id}:doc"
+      sec_id = "#{sig.id}:sec:0"
+
+      # Scale 0: document
+      insert_chunk(doc_id, tenant, sig.id, nil, "document", sig.content)
+
+      # Scale 1: sections (one section for the demo; parent = document)
+      insert_chunk(sec_id, tenant, sig.id, doc_id, "section", sig.content)
+
+      # Scale 2: paragraphs under the section
+      Enum.with_index(sentences)
+      |> Enum.each(fn {s, i} ->
+        par_id = "#{sig.id}:par:#{i}"
+        insert_chunk(par_id, tenant, sig.id, sec_id, "paragraph", s <> ".")
+
+        # Scale 3: sentence under each paragraph
+        sen_id = "#{sig.id}:sen:#{i}"
+        insert_chunk(sen_id, tenant, sig.id, par_id, "sentence", s <> ".")
+      end)
+    end)
+  end
+
+  defp insert_chunk(chunk_id, tenant, signal_id, parent_id, scale, text) do
+    Store.raw_query(
+      """
+      INSERT OR IGNORE INTO chunks (id, tenant_id, signal_id, parent_id, scale, text, length_bytes)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+      """,
+      [chunk_id, tenant, signal_id, parent_id, scale, text, byte_size(text)]
+    )
+  end
+
+  # Per-chunk classification + intent rows (schema keys on chunk_id, not
+  # context_id). We stamp only the document-scale chunk so the viewer has
+  # a signal-level classification to display.
+  defp seed_classifications(signals) do
+    Enum.each(signals, fn sig ->
+      doc_id = "#{sig.id}:doc"
+      intent = intent_for_genre(sig.genre)
+      tenant = "default"
+
+      Store.raw_query(
+        """
+        INSERT OR IGNORE INTO classifications (tenant_id, chunk_id, mode, genre, signal_type, format, structure, sn_ratio, confidence)
+        VALUES (?1, ?2, 'linguistic', ?3, 'inform', 'markdown', 'prose', 0.75, 0.85)
+        """,
+        [tenant, doc_id, sig.genre]
+      )
+
+      Store.raw_query(
+        """
+        INSERT OR IGNORE INTO intents (tenant_id, chunk_id, intent, confidence)
+        VALUES (?1, ?2, ?3, 0.80)
+        """,
+        [tenant, doc_id, Atom.to_string(intent)]
+      )
+    end)
+  end
+
+  defp intent_for_genre("transcript"), do: :capture
+  defp intent_for_genre("decision_log"), do: :decide
+  defp intent_for_genre("plan"), do: :commit
+  defp intent_for_genre("spec"), do: :commit
+  defp intent_for_genre("note"), do: :inform
+  defp intent_for_genre(_), do: :inform
+
+  # A single theme cluster spanning the ClinicIQ-related signals so the
+  # workspace explorer shows cross-signal grouping at the wide-pass layer.
+  defp seed_cluster(signals, tenant) do
+    cliniciq_signals =
+      Enum.filter(signals, fn s -> String.contains?(s.content, "ClinicIQ") end)
+
+    if cliniciq_signals != [] do
+      cluster_id = "seed-cluster-cliniciq-#{System.unique_integer([:positive])}"
+
+      Store.raw_query(
+        """
+        INSERT OR IGNORE INTO clusters (id, tenant_id, theme, intent_dominant, member_count)
+        VALUES (?1, ?2, 'ClinicIQ delivery + pricing', 'inform', ?3)
+        """,
+        [cluster_id, tenant, length(cliniciq_signals)]
+      )
+
+      Enum.each(cliniciq_signals, fn s ->
+        Store.raw_query(
+          """
+          INSERT OR IGNORE INTO cluster_members (tenant_id, cluster_id, chunk_id, weight)
+          VALUES (?1, ?2, ?3, 0.85)
+          """,
+          [tenant, cluster_id, "#{s.id}:doc"]
+        )
+      end)
+    end
+  end
+
+  # Ingest events so the /activity log has real entries to display.
+  defp seed_events(signals, tenant) do
+    Enum.each(signals, fn sig ->
+      Store.raw_query(
+        """
+        INSERT INTO events (tenant_id, principal, kind, target_uri, metadata)
+        VALUES (?1, 'system:demo-seed', 'ingest', ?2, ?3)
+        """,
+        [
+          tenant,
+          "optimal://contexts/#{sig.id}",
+          Jason.encode!(%{genre: sig.genre, node: sig.node, tag: @demo_tag})
+        ]
+      )
     end)
   end
 
@@ -332,6 +481,38 @@ defmodule Mix.Tasks.Optimal.Seed do
   # ─── housekeeping ───────────────────────────────────────────────────────
 
   defp wipe_demo_rows(tenant) do
+    # Downstream tables (chunks, classifications, intents, cluster_members,
+    # entities, processor_runs) cascade off the seed context ids. We collect
+    # the demo context ids first, then delete from the dependent tables, then
+    # finally delete the contexts + nodes + wiki + events themselves.
+    {:ok, ids} =
+      Store.raw_query(
+        "SELECT id FROM contexts WHERE tenant_id = ?1 AND json_extract(metadata, '$.tag') = ?2",
+        [tenant, @demo_tag]
+      )
+
+    ids = Enum.map(ids || [], fn [id] -> id end)
+
+    for id <- ids do
+      Store.raw_query("DELETE FROM entities WHERE context_id = ?1", [id])
+      Store.raw_query("DELETE FROM chunks WHERE signal_id = ?1", [id])
+      Store.raw_query("DELETE FROM processor_runs WHERE context_id = ?1", [id])
+    end
+
+    # Classifications / intents / cluster_members key on chunk_id; once
+    # chunks are gone their cascade triggers handle it in schema-declared
+    # FKs, but SQLite may not be running with foreign_keys=ON, so be explicit.
+    Store.raw_query(
+      """
+      DELETE FROM classifications WHERE chunk_id LIKE 'seed-%:doc'
+      """,
+      []
+    )
+
+    Store.raw_query("DELETE FROM intents WHERE chunk_id LIKE 'seed-%:doc'", [])
+    Store.raw_query("DELETE FROM cluster_members WHERE chunk_id LIKE 'seed-%:doc'", [])
+    Store.raw_query("DELETE FROM clusters WHERE id LIKE 'seed-cluster-%'", [])
+
     Store.raw_query(
       "DELETE FROM contexts WHERE tenant_id = ?1 AND json_extract(metadata, '$.tag') = ?2",
       [tenant, @demo_tag]
@@ -346,6 +527,11 @@ defmodule Mix.Tasks.Optimal.Seed do
       "DELETE FROM wiki_pages WHERE tenant_id = ?1 AND json_extract(frontmatter, '$.tag') = ?2",
       [tenant, @demo_tag]
     )
+
+    Store.raw_query(
+      "DELETE FROM events WHERE tenant_id = ?1 AND json_extract(metadata, '$.tag') = ?2",
+      [tenant, @demo_tag]
+    )
   end
 
   defp count_rows(tenant) do
@@ -358,6 +544,11 @@ defmodule Mix.Tasks.Optimal.Seed do
         JOIN contexts c ON c.id = e.context_id
         WHERE c.tenant_id = ?1
         """),
+      chunks: count(tenant, "SELECT COUNT(*) FROM chunks WHERE tenant_id = ?1"),
+      classifications: count(tenant, "SELECT COUNT(*) FROM classifications WHERE tenant_id = ?1"),
+      intents: count(tenant, "SELECT COUNT(*) FROM intents WHERE tenant_id = ?1"),
+      clusters: count(tenant, "SELECT COUNT(*) FROM clusters WHERE tenant_id = ?1"),
+      events: count(tenant, "SELECT COUNT(*) FROM events WHERE tenant_id = ?1"),
       wiki: count(tenant, "SELECT COUNT(*) FROM wiki_pages WHERE tenant_id = ?1")
     }
   end

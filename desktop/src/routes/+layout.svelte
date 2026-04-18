@@ -18,8 +18,11 @@
   <h1>Optimal Engine</h1>
   <nav>
     <a href="/">Ask</a>
+    <a href="/workspace">Workspace</a>
     <a href="/graph">Graph</a>
     <a href="/wiki">Wiki</a>
+    <a href="/architectures">Architectures</a>
+    <a href="/activity">Activity</a>
     <a href="/status">Status</a>
   </nav>
   <span class="badge badge-{engineStatus}">{engineStatus}</span>
