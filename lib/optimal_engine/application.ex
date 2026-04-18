@@ -17,7 +17,24 @@ defmodule OptimalEngine.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
+    children =
+      base_children() ++ OptimalEngine.API.Endpoint.children()
+
+    opts = [strategy: :one_for_one, name: OptimalEngine.Supervisor]
+
+    case Supervisor.start_link(children, opts) do
+      {:ok, pid} ->
+        Logger.info("[OptimalEngine] Supervision tree started (#{inspect(pid)})")
+        {:ok, pid}
+
+      {:error, reason} = err ->
+        Logger.error("[OptimalEngine] Failed to start: #{inspect(reason)}")
+        err
+    end
+  end
+
+  defp base_children do
+    [
       # ── Observability (comes up first so every other child's metrics are captured) ─
       OptimalEngine.Telemetry,
 
@@ -48,18 +65,6 @@ defmodule OptimalEngine.Application do
       {OptimalEngine.Signal.PubSub, name: OptimalEngine.Signal.PubSub},
       {OptimalEngine.Signal.Journal, name: OptimalEngine.Signal.Journal}
     ]
-
-    opts = [strategy: :one_for_one, name: OptimalEngine.Supervisor]
-
-    case Supervisor.start_link(children, opts) do
-      {:ok, pid} ->
-        Logger.info("[OptimalEngine] Supervision tree started (#{inspect(pid)})")
-        {:ok, pid}
-
-      {:error, reason} = err ->
-        Logger.error("[OptimalEngine] Failed to start: #{inspect(reason)}")
-        err
-    end
   end
 
   @impl true

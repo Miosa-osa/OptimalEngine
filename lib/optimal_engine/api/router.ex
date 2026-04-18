@@ -20,12 +20,18 @@ defmodule OptimalEngine.API.Router do
   use Plug.Router
 
   alias OptimalEngine.Graph.Analyzer, as: GraphAnalyzer
+  alias OptimalEngine.Health
   alias OptimalEngine.Insight.Health, as: HealthDiagnostics
   alias OptimalEngine.Graph.Reflector, as: Reflector
+  alias OptimalEngine.Retrieval
+  alias OptimalEngine.Retrieval.Receiver
   alias OptimalEngine.Store
+  alias OptimalEngine.Telemetry
+  alias OptimalEngine.Wiki
 
   plug(:cors)
   plug(:match)
+  plug(Plug.Parsers, parsers: [:json], json_decoder: Jason, pass: ["application/json"])
   plug(:dispatch)
 
   # ---------------------------------------------------------------------------
@@ -119,6 +125,103 @@ defmodule OptimalEngine.API.Router do
     json(conn, %{health: format_health(checks)})
   end
 
+  # ── Phase 12: runtime + retrieval + wiki endpoints ──────────────────────
+
+  # Engine liveness + readiness (Phase 10 Health module).
+  get "/api/status" do
+    report = Health.ready(skip: [:embedder])
+
+    json(conn, %{
+      status: Health.status(),
+      ok?: report.ok?,
+      checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end),
+      degraded: report.degraded
+    })
+  end
+
+  # Runtime metrics snapshot (Phase 10 Telemetry module).
+  get "/api/metrics" do
+    snap =
+      try do
+        Telemetry.snapshot()
+      rescue
+        _ -> %{counters: %{}, histograms: %{}, uptime_ms: 0}
+      end
+
+    json(conn, snap)
+  end
+
+  # POST /api/rag — end-to-end retrieval for LLM consumption.
+  # Body: {"query": "…", "format": "markdown", "audience": "default", "bandwidth": "medium"}
+  post "/api/rag" do
+    body = conn.body_params || %{}
+
+    case Map.get(body, "query") do
+      q when is_binary(q) and q != "" ->
+        receiver =
+          Receiver.new(%{
+            format: parse_atom(body["format"], :markdown),
+            bandwidth: parse_atom(body["bandwidth"], :medium),
+            audience: body["audience"] || "default"
+          })
+
+        {:ok, result} = Retrieval.ask(q, receiver: receiver)
+        json(conn, result)
+
+      _ ->
+        send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
+    end
+  end
+
+  # Wiki listing — GET /api/wiki?tenant=default
+  get "/api/wiki" do
+    tenant = query_param(conn, "tenant", "default")
+
+    case Wiki.list(tenant) do
+      {:ok, pages} ->
+        json(conn, %{
+          pages:
+            Enum.map(pages, fn p ->
+              %{
+                slug: p.slug,
+                audience: p.audience,
+                version: p.version,
+                last_curated: p.last_curated,
+                curated_by: p.curated_by,
+                size_bytes: byte_size(p.body || "")
+              }
+            end)
+        })
+
+      _ ->
+        json(conn, %{pages: []})
+    end
+  end
+
+  # Wiki page render — GET /api/wiki/:slug?audience=default&format=markdown
+  get "/api/wiki/:slug" do
+    tenant = query_param(conn, "tenant", "default")
+    audience = query_param(conn, "audience", "default")
+    format = query_param(conn, "format", "markdown") |> parse_atom(:markdown)
+
+    case Wiki.latest(tenant, slug, audience) do
+      {:ok, page} ->
+        resolver = fn _d, _opts -> {:ok, "", %{}} end
+        {rendered, warnings} = Wiki.render(page, resolver, format: format)
+
+        json(conn, %{
+          slug: page.slug,
+          audience: page.audience,
+          version: page.version,
+          body: rendered,
+          warnings: warnings
+        })
+
+      _ ->
+        send_resp(conn, 404, Jason.encode!(%{error: "page not found"}))
+    end
+  end
+
   match _ do
     send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
   end
@@ -138,8 +241,19 @@ defmodule OptimalEngine.API.Router do
   defp cors(conn, _opts) do
     conn
     |> put_resp_header("access-control-allow-origin", "*")
-    |> put_resp_header("access-control-allow-methods", "GET, OPTIONS")
+    |> put_resp_header("access-control-allow-methods", "GET, POST, OPTIONS")
     |> put_resp_header("access-control-allow-headers", "content-type")
+  end
+
+  defp parse_atom(v, default) when is_atom(default) do
+    case v do
+      nil -> default
+      "" -> default
+      s when is_binary(s) -> String.to_existing_atom(s)
+      a when is_atom(a) -> a
+    end
+  rescue
+    _ -> default
   end
 
   defp query_param(conn, key, default) do
