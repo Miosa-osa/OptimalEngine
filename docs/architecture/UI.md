@@ -126,7 +126,7 @@ is always present at the bottom.
 |--------------------|-------------------------------------------|------------------------------------------------|
 | Desktop shell      | Tauri 2                                   | Small cross-platform binary; Rust core.        |
 | Frontend framework | SvelteKit                                 | Matches MIOSA/BusinessOS stack.                |
-| Styling            | Tailwind CSS v4 + Foundation tokens       | Roberto's existing design system.              |
+| Styling            | Tailwind CSS v4 + Foundation tokens       | Alice's existing design system.              |
 | Component primitives | bits-ui + melt-ui                       | Svelte-native, headless.                        |
 | Markdown editor    | Milkdown                                  | CRDT-ready, plugin-rich.                       |
 | Graph rendering    | Sigma.js + graphology                     | Battle-tested force-directed + community layouts. |

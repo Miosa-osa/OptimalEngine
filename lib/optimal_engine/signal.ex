@@ -3,7 +3,7 @@ defmodule OptimalEngine.Signal do
   Core data model. Every piece of context in OptimalOS is a Signal.
 
   Signals are classified on 5 dimensions: S=(Mode, Genre, Type, Format, Structure)
-  per Signal Theory (Roberto H. Luna, Feb 2026).
+  per Signal Theory (Alice H. Luna, Feb 2026).
 
   The struct is the canonical representation — it travels between processes,
   is persisted to SQLite, and is returned from searches.

@@ -26,14 +26,14 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   ## Usage
 
-      {:ok, result} = OptimalEngine.Pipeline.Intake.process("Ed called about redacted pricing")
+      {:ok, result} = OptimalEngine.Pipeline.Intake.process("Customer called about redacted pricing")
 
       {:ok, result} = OptimalEngine.Pipeline.Intake.process(
-        "Ed called...",
+        "Customer called...",
         genre: "transcript",
-        title: "Ed Pricing Call",
+        title: "Q4 Pricing Call",
         node: "redacted",
-        entities: ["redacted", "Roberto"]
+        entities: ["Alice", "Alice"]
       )
 
   ## Result shape

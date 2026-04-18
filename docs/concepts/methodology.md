@@ -2,9 +2,9 @@
 
 ## Core Philosophy
 
-Roberto's brain externalized as markdown files. Every numbered folder is a decision tree category. Every `context.md` is a persistent pattern library. Every signal file is episodic memory. Every playbook is a pre-computed response tree. The engine is optimal search across the whole library.
+Alice's brain externalized as markdown files. Every numbered folder is a decision tree category. Every `context.md` is a persistent pattern library. Every signal file is episodic memory. Every playbook is a pre-computed response tree. The engine is optimal search across the whole library.
 
-Jordan's framing: "My brain is nothing but markdown files." That is the architecture. The system grows with every new scenario captured. Retrieval gets faster as the library matures. Roberto builds Jordan's ROM externally.
+Oscar's framing: "My brain is nothing but markdown files." That is the architecture. The system grows with every new scenario captured. Retrieval gets faster as the library matures. Alice builds Oscar's ROM externally.
 
 Three axioms:
 
@@ -31,7 +31,7 @@ Viable systems maintain coherent structure at every scale. A response, a file, a
 Never broadcast without confirmation. Close every loop — verify the receiver decoded correctly. Applied in OptimalOS: `VerifyEngine` cold-reads L0 abstracts and confirms they predict content. `RethinkEngine` synthesizes evidence when confidence accumulates. The system never drifts silently.
 
 ### Signal Theory
-Source: Roberto H. Luna, "Signal Theory: The Architecture of Optimal Intent Encoding" (MIOSA Research, Feb 2026).
+Source: Alice H. Luna, "Signal Theory: The Architecture of Optimal Intent Encoding" (MIOSA Research, Feb 2026).
 
 Every Signal has 5 dimensions:
 
@@ -119,7 +119,7 @@ The original Ars Contexta pipeline had 6 stages. OptimalOS extends it to 10.
 
 ## Operating Rhythm
 
-The `rhythm/` folder is the daily operating layer. It defines HOW Roberto moves through the system each day.
+The `rhythm/` folder is the daily operating layer. It defines HOW Alice moves through the system each day.
 
 ### Daily Sequence
 
@@ -142,7 +142,7 @@ Mode → EXTRACT immediately. Run `mix optimal.ingest` while memory is fresh. De
 ### Weekly Cadence
 
 **Monday — Brain Dump**
-Roberto walks through each node stream-of-consciousness. Capture everything. Classify after. Build `week-plan.md` from extracted priorities. Flag top 3 non-negotiables. Identify outbound signals (who gets what, in what genre).
+Alice walks through each node stream-of-consciousness. Capture everything. Classify after. Build `week-plan.md` from extracted priorities. Flag top 3 non-negotiables. Identify outbound signals (who gets what, in what genre).
 
 **Friday — Review**
 - Single-loop: Did the 3 non-negotiables happen? (`week-plan.md`)

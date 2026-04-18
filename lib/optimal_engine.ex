@@ -40,7 +40,7 @@ defmodule OptimalEngine do
 
   ### Sessions
       {:ok, session_id} = OptimalEngine.start_session()
-      OptimalEngine.add_message(session_id, :user, "Ed called about pricing")
+      OptimalEngine.add_message(session_id, :user, "Customer called about pricing")
       {:ok, summary} = OptimalEngine.commit_session(session_id)
 
   ### URI Operations
@@ -113,7 +113,7 @@ defmodule OptimalEngine do
   Classifies, routes, and stores raw content as a Context.
 
   Supports explicit type override:
-      OptimalEngine.ingest("Ed called about pricing")           # auto-detected
+      OptimalEngine.ingest("Customer called about pricing")           # auto-detected
       OptimalEngine.ingest("api docs text", type: :resource)   # force resource
       OptimalEngine.ingest("I learned X", type: :memory)       # force memory
 

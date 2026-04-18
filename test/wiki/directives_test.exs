@@ -11,7 +11,7 @@ defmodule OptimalEngine.Wiki.DirectivesTest do
       Here is an expand {{expand: topic-slug}}.
       Here is a search {{search: "pricing"}}.
       Here is a table {{table: optimal://data.csv#col=val}}.
-      Here is a trace {{trace: redacted}}.
+      Here is a trace {{trace: Alice}}.
       Here is a recent {{recent: node=redacted limit=5}}.
       Here is a [[wikilink]].
       """

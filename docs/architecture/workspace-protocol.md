@@ -2,7 +2,7 @@
 
 > The standard interface between an AI agent and a specialized AI system.
 >
-> Roberto H. Luna — MIOSA Research, March 2026
+> Alice H. Luna — MIOSA Research, March 2026
 
 ## The Insight
 

@@ -15,7 +15,7 @@ defmodule OptimalEngine.Graph do
   ## Node conventions
 
   Node names are bare strings like "redacted", "redacted", etc. — they are
-  NOT context IDs. Entity names like "redacted" are also bare strings. Only
+  NOT context IDs. Entity names like "Alice" are also bare strings. Only
   context-to-context edges use real context IDs as both source and target.
 
   The edges table has no FK constraints (migrated from the original FK schema) so
@@ -297,35 +297,35 @@ defmodule OptimalEngine.Graph do
     # Static mapping: entity name → [nodes they work on]
     # Derived from CLAUDE.md routing table and OptimalOS topology
     [
-      {"redacted", "redacted"},
-      {"redacted", "redacted"},
-      {"Adam", "redacted"},
-      {"Pedro", "redacted"},
-      {"Abdul", "redacted"},
-      {"Nejd", "redacted"},
-      {"redacted", "redacted"},
-      {"Javaris", "redacted"},
-      {"Bennett", "agency-accelerants"},
-      {"Bennett", "content-creators"},
-      {"Bennett", "accelerants-community"},
-      {"Len", "agency-accelerants"},
-      {"Liam", "agency-accelerants"},
-      {"Ahmed", "os-architect"},
-      {"Ahmed", "content-creators"},
-      {"Tejas", "content-creators"},
-      {"Ikram", "content-creators"},
-      {"Jordan", "roberto"},
-      {"Roberto", "roberto"},
-      {"Roberto", "redacted"},
-      {"Roberto", "redacted"},
-      {"Roberto", "os-architect"},
-      {"Roberto", "agency-accelerants"},
-      {"Roberto", "accelerants-community"},
-      {"Roberto", "content-creators"},
-      {"Roberto", "redacted"},
-      {"Roberto", "team"},
-      {"Roberto", "redacted"},
-      {"Roberto", "os-accelerator"}
+      {"Alice", "redacted"},
+      {"Bob", "redacted"},
+      {"Quinn", "redacted"},
+      {"Erin", "redacted"},
+      {"Ruth", "redacted"},
+      {"Frank", "redacted"},
+      {"Carol", "redacted"},
+      {"Nina", "redacted"},
+      {"Dan", "agency-accelerants"},
+      {"Dan", "content-creators"},
+      {"Dan", "accelerants-community"},
+      {"Sam", "agency-accelerants"},
+      {"Tina", "agency-accelerants"},
+      {"Ivan", "os-architect"},
+      {"Ivan", "content-creators"},
+      {"Judy", "content-creators"},
+      {"Grace", "content-creators"},
+      {"Oscar", "roberto"},
+      {"Alice", "roberto"},
+      {"Alice", "redacted"},
+      {"Alice", "redacted"},
+      {"Alice", "os-architect"},
+      {"Alice", "agency-accelerants"},
+      {"Alice", "accelerants-community"},
+      {"Alice", "content-creators"},
+      {"Alice", "redacted"},
+      {"Alice", "team"},
+      {"Alice", "redacted"},
+      {"Alice", "os-accelerator"}
     ]
   end
 

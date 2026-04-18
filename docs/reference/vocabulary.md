@@ -63,5 +63,5 @@ transform vocabulary for the receiver.
 
 ## Application Rule
 Before encoding a signal for a specific receiver, check their domain and transform
-the vocabulary. Roberto and the engine use universal terms. Everyone else gets
+the vocabulary. Alice and the engine use universal terms. Everyone else gets
 domain-appropriate language.

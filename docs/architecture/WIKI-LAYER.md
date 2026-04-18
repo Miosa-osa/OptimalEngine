@@ -58,13 +58,13 @@ has three sections:
 
 ```markdown
 ---
-title: redacted — pricing conversations
+title: Alice — pricing conversations
 last_curated: 2026-04-17T14:30:00Z
 curated_by: ollama:qwen3:8b
 source_count: 7
 ---
 
-# redacted — pricing conversations
+# Alice — pricing conversations
 
 ## Summary
 
@@ -73,12 +73,12 @@ three times for a discount {{cite: optimal://nodes/redacted/signals/2026-03-18-e
 {{cite: optimal://nodes/redacted/signals/2026-03-22-ed-followup.md}}
 {{cite: optimal://nodes/redacted/signals/2026-04-03-ed-pricing-pushback.md}}.
 
-Roberto's position: $2K is the floor for redacted
+Alice's position: $2K is the floor for redacted
 {{cite: optimal://nodes/04-redacted/context.md}}.
 
 ## Open threads
 
-- Discount request pending Roberto's response {{expand: ed-counter-offer-options}}
+- Discount request pending Alice's response {{expand: ed-counter-offer-options}}
 - Waiting on partnership terms {{include: optimal://nodes/04-redacted/deliverables/external/ed-partnership/offer-stack.md}}
 
 ## Related
@@ -167,8 +167,8 @@ The maintenance loop enforces:
 ```
 
 Maintenance is **triggered, not scheduled**. A new signal into the `04-redacted`
-node with the entity "redacted" queues a curation job for exactly the wiki
-pages that mention redacted. No blanket rebuild.
+node with the entity "Alice" queues a curation job for exactly the wiki
+pages that mention Alice. No blanket rebuild.
 
 Hard rebuild (`mix optimal.wiki.rebuild`) exists for disaster recovery: it
 re-curates every page from Tier 1 + Tier 2. Idempotent, takes minutes, not

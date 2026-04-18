@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Optimal.Simulate do
   structured impact-analysis report.
 
   Usage:
-      mix optimal.simulate "What if redacted leaves redacted?"
+      mix optimal.simulate "What if Alice leaves redacted?"
       mix optimal.simulate "What if we cancel redacted?" --depth 4
       mix optimal.simulate "What if revenue drops 50%?"
 

@@ -8,7 +8,7 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
 
       ---
       node: redacted
-      title: Ed Pricing Call
+      title: Q4 Pricing Call
       signal:
         mode: linguistic
         genre: transcript
@@ -16,18 +16,18 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
         format: markdown
         sn_ratio: 0.7
       tiers:
-        l0: "TRANSCRIPT | redacted | Ed Pricing Call [S/N: 0.7]"
+        l0: "TRANSCRIPT | redacted | Q4 Pricing Call [S/N: 0.7]"
         l1: "First 300 chars of content..."
       entities:
-        - redacted
-        - Roberto
+        - Alice
+        - Alice
       routed_to:
         - 04-redacted
         - redacted
       created_at: "2026-03-18T14:30:00Z"
       ---
 
-      # Ed Pricing Call
+      # Q4 Pricing Call
 
       ## Participants
       ...

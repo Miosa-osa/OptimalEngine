@@ -33,7 +33,7 @@ feature added to the monolith.
 Three constraints govern the design:
 1. No external dependencies for core (stdlib only: `sqlite3`, `pathlib`, `json`, `hashlib`, `re`, `math`)
 2. Must run as CLI (`python3 optimal/`) AND be importable as a library (`from optimal import Engine`)
-3. Must stay simple enough that Roberto can read the directory structure and understand
+3. Must stay simple enough that Alice can read the directory structure and understand
    what each folder does without a guided tour
 
 ---
@@ -87,7 +87,7 @@ directly to the user's mental model of the tool.
 
 ### Option C: Microservices / FastAPI server from day one
 Each capability as a separate HTTP service.
-Rejected because: Massive over-engineering for Phase 0. Roberto runs this as a local CLI.
+Rejected because: Massive over-engineering for Phase 0. Alice runs this as a local CLI.
 Adding HTTP, serialization, and service discovery triples the complexity with zero benefit
 until Phase 1+ when the engine needs to serve multiple clients.
 

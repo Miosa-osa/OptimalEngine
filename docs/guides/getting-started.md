@@ -46,7 +46,7 @@ directory). Point it somewhere you control:
 ```bash
 export OPTIMAL_ENGINE_ROOT=$HOME/tmp/optimal-demo
 mkdir -p "$OPTIMAL_ENGINE_ROOT"
-mix optimal.ingest "Ed called about pricing, wants $2K per seat" --genre note
+mix optimal.ingest "Customer called about pricing, wants $2K per seat" --genre note
 ```
 
 What happens under the hood:

@@ -1,6 +1,6 @@
 # Signal Theory
 
-> Adapted from Roberto H. Luna, *Signal Theory: The Architecture of Optimal Intent
+> Adapted from Alice H. Luna, *Signal Theory: The Architecture of Optimal Intent
 > Encoding* (MIOSA Research, February 2026). This is the theoretical foundation
 > the Optimal Engine is built to instantiate.
 

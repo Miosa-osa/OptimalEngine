@@ -159,10 +159,10 @@ will accelerate in the wrong direction.
 Fidelity is the measure of intent preservation through the signal chain.
 
 ```
-Roberto forms intent
+Alice forms intent
       |
       v
-Roberto encodes signal  (email, doc, verbal instruction, task)
+Alice encodes signal  (email, doc, verbal instruction, task)
       |
       v
 Signal transmits        (receiver reads, hears, or receives it)
@@ -191,7 +191,7 @@ FIDELITY CHECK: Did the action match the original intent?
 
 | Failure Type | Diagnosis | Fix |
 |--------------|-----------|-----|
-| Encoding failure | Roberto stated the intent unclearly or incompletely | Improve signal encoding: use M/G/T/F/W classification on delegated tasks |
+| Encoding failure | Alice stated the intent unclearly or incompletely | Improve signal encoding: use M/G/T/F/W classification on delegated tasks |
 | Transmission failure | Signal never reached the receiver | Confirm receipt explicitly before assuming transmission |
 | Decoding failure | Receiver interpreted differently than intended | Add context to encoding; verify understanding before action starts |
 | Action failure | Receiver understood but executed differently | Escalate — this is a trust/ownership question, not a communication question |
@@ -255,7 +255,7 @@ Action: Triple-loop question — "Should we stop calling ourselves a platform co
 until platform revenue exceeds 50% of total?" This is not a failure. It is honest data.
 
 EXAMPLE 3 — S4 vs. S3 Time Balance
-System 4 requirement: 10% of Roberto's weekly time on environmental scanning.
+System 4 requirement: 10% of Alice's weekly time on environmental scanning.
 Actual allocation: 0% in last 3 weeks (all time consumed by S3 operational urgency).
 Drift type: Strategic attention drift.
 Action: Protect one 90-minute block per week as S4 time. Non-negotiable.
@@ -355,7 +355,7 @@ ESCALATION PATH:
     → stop execution, course correct immediately (S5 review)
 
   Cortex flags persistent pattern
-    → surfaced in Monday brain dump, Roberto reviews before week plan
+    → surfaced in Monday brain dump, Alice reviews before week plan
 ```
 
 ---
@@ -392,6 +392,6 @@ ESCALATION PATH:
 - Argyris, C. — *Double Loop Learning in Organizations* (Harvard Business Review, 1977)
 - Senge, P. — *The Fifth Discipline: The Art and Practice of the Learning Organization* (1990)
 - Beer, S. — *Brain of the Firm* (2nd ed., 1981) — algedonic channel and feedback integration
-- Luna, Roberto H. — *Signal Theory: The Architecture of Optimal Intent Encoding* (MIOSA Research, Feb 2026)
+- Luna, Alice H. — *Signal Theory: The Architecture of Optimal Intent Encoding* (MIOSA Research, Feb 2026)
 - ADR-001: Feedback Loop Architecture — `/Users/rhl/Desktop/OptimalOS/tasks/ADR-001-feedback-loop-architecture.md`
 - Working documents: `feedback-loops.md`, `weekly-review.md`, `monthly-review.md`, `alignment.md`

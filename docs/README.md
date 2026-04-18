@@ -25,7 +25,7 @@ This index is the entry point. Follow the path that matches what you need.
 - [Layer bridge](architecture/layer-bridge.md)
 - [Workspace protocol](architecture/workspace-protocol.md)
 - [System overview](architecture/system-overview.md)
-- [Jordan / Jarvis system](architecture/jordan-jarvis-system.md) — cognitive model that informed the design
+- [Oscar / Atlas system](architecture/jordan-jarvis-system.md) — cognitive model that informed the design
 - [arscontexta extraction](architecture/arscontexta-extraction.md)
 
 ## Concepts (why it's built this way)
