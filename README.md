@@ -30,14 +30,14 @@ Active development. Per-phase progress against [`PLAN.md`](PLAN.md):
 | 5    | Multi-modal embedder — nomic-embed-text + nomic-embed-vision + whisper.cpp, all 768-dim aligned | ✅ |
 | 6    | Clusterer — incremental greedy theme grouping with weighted similarity | ✅ |
 | 7    | Wiki Layer — LLM-maintained curated top layer with hot citations + executable directives | ✅ |
-| 8    | Scale-aware Deliver + Composer + RAG | ⏳ |
+| 8    | Scale-aware Deliver + Composer + RAG | ✅ |
 | 9    | 14 enterprise connectors (Slack / Gmail / Drive / Notion / Jira / Linear / GitHub / Zoom / …) | ⏳ |
 | 10   | Production hardening — perf targets, release, backup/restore | ⏳ |
 | 11   | Compliance — SOC 2, GDPR, HIPAA | ⏳ |
 | 12   | Desktop UI — Tauri + SvelteKit | ⏳ |
 | 13   | v0.1.0 tag | ⏳ |
 
-**Current suite:** 891 tests passing, 29 excluded (RocksDB NIF, optional backend).
+**Current suite:** 933 tests passing, 29 excluded (RocksDB NIF, optional backend).
 
 ---
 
