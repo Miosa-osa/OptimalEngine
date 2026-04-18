@@ -74,8 +74,16 @@ defmodule OptimalEngine.Compliance.LegalHold do
     end
   end
 
-  @doc "Count active holds covering anything authored by `principal_id`."
-  @spec count_holds_for_principal(String.t(), String.t()) :: {:ok, non_neg_integer()}
+  @doc """
+  Count active holds covering anything authored by `principal_id`.
+
+  **Critical path for erasure + retention.** On DB error we return
+  `{:error, :hold_check_failed}` rather than `{:ok, 0}` — a transient
+  failure must never be reported as "no holds" because callers use the
+  answer to gate destructive actions.
+  """
+  @spec count_holds_for_principal(String.t(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, :hold_check_failed}
   def count_holds_for_principal(principal_id, tenant_id) do
     sql = """
     SELECT COUNT(*)
@@ -89,23 +97,29 @@ defmodule OptimalEngine.Compliance.LegalHold do
 
     case Store.raw_query(sql, [tenant_id, principal_id]) do
       {:ok, [[n]]} when is_integer(n) -> {:ok, n}
-      _ -> {:ok, 0}
+      _ -> {:error, :hold_check_failed}
     end
   rescue
-    _ -> {:ok, 0}
+    _ -> {:error, :hold_check_failed}
   end
 
-  @doc "True when a specific signal is currently held."
-  @spec held?(String.t(), String.t()) :: boolean()
+  @doc """
+  `{:ok, true}` when the signal is currently held, `{:ok, false}` when
+  it isn't, `{:error, :hold_check_failed}` when the DB query can't run.
+  Retention + erasure must distinguish "not held" from "we don't know";
+  previously both collapsed to `false`, letting transient failures
+  allow deletion of held content.
+  """
+  @spec held?(String.t(), String.t()) :: {:ok, boolean()} | {:error, :hold_check_failed}
   def held?(signal_id, tenant_id \\ Tenant.default_id()) do
     case Store.raw_query(
            "SELECT COUNT(*) FROM legal_holds WHERE tenant_id = ?1 AND signal_id = ?2 AND released_at IS NULL",
            [tenant_id, signal_id]
          ) do
-      {:ok, [[n]]} when is_integer(n) and n > 0 -> true
-      _ -> false
+      {:ok, [[n]]} when is_integer(n) -> {:ok, n > 0}
+      _ -> {:error, :hold_check_failed}
     end
   rescue
-    _ -> false
+    _ -> {:error, :hold_check_failed}
   end
 end

@@ -115,15 +115,33 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
     end
   end
 
-  # Scoring: higher is better. Exact slug = 100. Prefix = 50. Contains = 25.
-  # Title substring = 10. Missing = 0.
+  # Minimum normalized-query length before a substring match is allowed to
+  # score. `"ai"` would otherwise hit `"ai-masters-pricing"`, `"ai-strategy"`,
+  # `"ai-workflow"`, …; any of them could short-circuit hybrid retrieval
+  # under the front-door contract. Four chars rules out single acronyms +
+  # stop-word sized queries while still catching real slug stems.
+  @min_substring_len 4
+
+  # Scoring: higher is better. Exact slug = 100. Prefix = 50. Contains = 10
+  # (only when both sides are long enough to be discriminative). Title
+  # substring = 10. Missing = 0. A prefix match on a different slug always
+  # beats a contains match on any slug.
   defp score(%Page{slug: slug} = page, query, normalized) do
     slug_score =
       cond do
-        slug == normalized -> 100
-        String.starts_with?(slug, normalized) or String.starts_with?(normalized, slug) -> 50
-        String.contains?(slug, normalized) or String.contains?(normalized, slug) -> 25
-        true -> 0
+        slug == normalized ->
+          100
+
+        String.starts_with?(slug, normalized) or String.starts_with?(normalized, slug) ->
+          50
+
+        byte_size(normalized) >= @min_substring_len and
+          byte_size(slug) >= @min_substring_len and
+            (String.contains?(slug, normalized) or String.contains?(normalized, slug)) ->
+          10
+
+        true ->
+          0
       end
 
     title_score =
@@ -137,7 +155,7 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
 
           cond do
             t_lower == q_lower -> 40
-            String.contains?(t_lower, q_lower) -> 10
+            byte_size(q_lower) >= @min_substring_len and String.contains?(t_lower, q_lower) -> 10
             true -> 0
           end
       end
@@ -153,7 +171,7 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
 
   defp reason_for(s) when s >= 100, do: :slug_exact
   defp reason_for(s) when s >= 50, do: :slug_prefix
-  defp reason_for(s) when s >= 25, do: :slug_contains
+  defp reason_for(s) when s >= 10, do: :slug_contains
   defp reason_for(_), do: :title_substring
 
   # Lowercase, collapse non-alphanumerics to hyphens, trim, dedupe.

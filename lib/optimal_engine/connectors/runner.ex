@@ -118,18 +118,49 @@ defmodule OptimalEngine.Connectors.Runner do
     sink = Keyword.get(opts, :signal_sink, &default_sink/1)
     :ok = sink.(signals)
 
-    advance_cursor(row.id, next_cursor)
-    complete_run_row(run_id, :success, length(signals), 0, row.cursor, next_cursor, nil)
+    # Persist the cursor advance + audit completion in one transaction so
+    # they succeed or fail together. Without this, a cursor could advance
+    # while the audit row stayed in `'running'` — a silently-lost run that
+    # no operator could diagnose.
+    case transaction(fn ->
+           advance_cursor(row.id, next_cursor)
+           complete_run_row(run_id, :success, length(signals), 0, row.cursor, next_cursor, nil)
+         end) do
+      :ok ->
+        %{
+          connector_id: row.id,
+          status: :success,
+          signals: length(signals),
+          errors: 0,
+          cursor_before: row.cursor,
+          cursor_after: next_cursor,
+          reason: nil
+        }
 
-    %{
-      connector_id: row.id,
-      status: :success,
-      signals: length(signals),
-      errors: 0,
-      cursor_before: row.cursor,
-      cursor_after: next_cursor,
-      reason: nil
-    }
+      :error ->
+        # The sync itself worked, but we couldn't persist the state
+        # change. Surface it so the operator sees a consistent failure
+        # rather than a success report.
+        complete_run_row(
+          run_id,
+          :error,
+          length(signals),
+          1,
+          row.cursor,
+          row.cursor,
+          "persist_failed"
+        )
+
+        %{
+          connector_id: row.id,
+          status: :error,
+          signals: length(signals),
+          errors: 1,
+          cursor_before: row.cursor,
+          cursor_after: row.cursor,
+          reason: :persist_failed
+        }
+    end
   end
 
   defp finalize({:error, :fatal}, row, run_id, _opts) do
@@ -195,8 +226,14 @@ defmodule OptimalEngine.Connectors.Runner do
   defp ensure_enabled(%{enabled: true}), do: :ok
   defp ensure_enabled(%{enabled: false}), do: {:error, :disabled}
 
-  defp lookup_adapter(kind_str) do
-    Registry.fetch(String.to_atom(kind_str))
+  # `String.to_existing_atom/1` (not `to_atom/1`): `kind_str` comes from the
+  # `connectors.kind` column — operator-writable data. `to_atom/1` would
+  # create a new atom on every junk value and eventually exhaust the atom
+  # table. Every legitimate adapter atom is already loaded via the Registry.
+  defp lookup_adapter(kind_str) when is_binary(kind_str) do
+    Registry.fetch(String.to_existing_atom(kind_str))
+  rescue
+    ArgumentError -> {:error, :unknown_kind}
   end
 
   defp init_adapter(mod, config) do
@@ -285,6 +322,22 @@ defmodule OptimalEngine.Connectors.Runner do
   # (CLI, schedulers) which doesn't care about ingest — callers that
   # want downstream processing pass `:signal_sink` explicitly.
   defp default_sink(_signals), do: :ok
+
+  # Wrap a sequence of raw_query writes in a SQLite BEGIN/COMMIT so a
+  # failure in any statement rolls back the lot. If the transaction
+  # itself errors we log + return :error rather than raising, so the
+  # caller can surface the issue through its normal result channel.
+  defp transaction(fun) when is_function(fun, 0) do
+    Store.raw_query("BEGIN IMMEDIATE", [])
+    fun.()
+    Store.raw_query("COMMIT", [])
+    :ok
+  rescue
+    e ->
+      Store.raw_query("ROLLBACK", [])
+      Logger.error("[Runner] transaction aborted: #{Exception.message(e)}")
+      :error
+  end
 
   @doc """
   Upsert a connector row. This is the only place config JSON is

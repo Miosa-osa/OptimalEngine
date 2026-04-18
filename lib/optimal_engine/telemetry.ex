@@ -178,19 +178,39 @@ defmodule OptimalEngine.Telemetry do
         name |> Atom.to_string() |> String.split(".") |> Enum.map(&String.to_atom/1)
       end)
 
-    :telemetry.attach_many(
-      "optimal-engine-telemetry",
-      events,
-      &__MODULE__.handle_event/4,
-      nil
-    )
-  rescue
-    _ -> :ok
+    case :telemetry.attach_many(
+           "optimal-engine-telemetry",
+           events,
+           &__MODULE__.handle_event/4,
+           nil
+         ) do
+      :ok ->
+        :ok
+
+      # Idempotent: a prior attach (e.g. hot-reload) already registered us.
+      {:error, :already_exists} ->
+        :ok
+
+      {:error, reason} ->
+        require Logger
+        Logger.warning("[Telemetry] attach_many failed: #{inspect(reason)}")
+        :ok
+    end
   end
 
   @doc false
+  # `String.to_existing_atom/1`: we only attach to declared events, but a
+  # future third-party library emitting under the `[:optimal_engine, …]`
+  # prefix could otherwise create new atoms on every call. Declared
+  # counter/histogram atoms are already loaded at init time.
   def handle_event(event, measurements, _metadata, _config) do
-    metric = event |> Enum.map_join(".", &Atom.to_string/1) |> String.to_atom()
-    send(__MODULE__, {:telemetry_event, metric, measurements})
+    metric_str = Enum.map_join(event, ".", &Atom.to_string/1)
+
+    try do
+      metric = String.to_existing_atom(metric_str)
+      send(__MODULE__, {:telemetry_event, metric, measurements})
+    rescue
+      ArgumentError -> :ok
+    end
   end
 end

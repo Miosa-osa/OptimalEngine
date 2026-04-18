@@ -50,7 +50,16 @@ defmodule OptimalEngine.Compliance.Erasure do
     force? = Keyword.get(opts, :force, false)
     actor = Keyword.get(opts, :actor, "system:erasure")
 
-    with {:ok, held} <- LegalHold.count_holds_for_principal(principal_id, tenant_id),
+    # `force: true` skips the hold check entirely — an operator overriding.
+    # Otherwise we require a definitive count; a `:hold_check_failed` from
+    # LegalHold propagates out so erase fails closed rather than proceeding
+    # under an unknown hold state.
+    held_result =
+      if force?,
+        do: {:ok, 0},
+        else: LegalHold.count_holds_for_principal(principal_id, tenant_id)
+
+    with {:ok, held} <- held_result,
          :ok <- gate_on_holds(held, force?) do
       deleted = do_cascade(principal_id, tenant_id)
       redacted = redact_audit(principal_id, tenant_id)
@@ -144,8 +153,18 @@ defmodule OptimalEngine.Compliance.Erasure do
 
   # Audit events aren't deleted — they're pseudonymized so the trail
   # stays intact but can't be linked back to the erased subject.
+  #
+  # SHA-256 (truncated to 16 hex chars) instead of `:erlang.phash2/1`:
+  # phash2 returns a 27-bit integer, which at even a modest erasure
+  # volume has meaningful birthday-collision probability — two
+  # different principals could share a pseudonym and their audit
+  # trails would conflate.
   defp redact_audit(principal_id, tenant_id) do
-    pseudonym = "erased:" <> (principal_id |> :erlang.phash2() |> Integer.to_string(16))
+    pseudonym =
+      "erased:" <>
+        (:crypto.hash(:sha256, principal_id)
+         |> Base.encode16(case: :lower)
+         |> String.slice(0, 16))
 
     case Store.raw_query(
            "UPDATE events SET principal = ?1 WHERE tenant_id = ?2 AND principal = ?3",

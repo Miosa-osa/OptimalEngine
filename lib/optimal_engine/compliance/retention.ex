@@ -29,6 +29,8 @@ defmodule OptimalEngine.Compliance.Retention do
   alias OptimalEngine.Compliance.{LegalHold, Redact}
   alias OptimalEngine.Store
 
+  require Logger
+
   @type policy :: %{
           id: integer(),
           scope_type: String.t(),
@@ -123,7 +125,12 @@ defmodule OptimalEngine.Compliance.Retention do
   defp process_targets(targets, policy, tenant_id, dry_run?, acc) do
     Enum.reduce(targets, acc, fn target, acc ->
       cond do
-        LegalHold.held?(target.id, tenant_id) ->
+        held_error?(target.id, tenant_id) ->
+          # Hold check itself failed — don't touch the row, treat it as
+          # an error so operators see the count spike and investigate.
+          %{acc | errors: acc.errors + 1}
+
+        held?(target.id, tenant_id) ->
           %{acc | skipped_held: acc.skipped_held + 1}
 
         dry_run? ->
@@ -131,7 +138,7 @@ defmodule OptimalEngine.Compliance.Retention do
           acc
 
         true ->
-          case apply_action(target, policy, tenant_id, false) do
+          case apply_action(target, policy, tenant_id) do
             :ok -> %{acc | actions_taken: acc.actions_taken + 1}
             _ -> %{acc | errors: acc.errors + 1}
           end
@@ -139,31 +146,55 @@ defmodule OptimalEngine.Compliance.Retention do
     end)
   end
 
-  defp apply_action(target, %{action: "delete"}, tenant_id, false) do
-    Store.raw_query("DELETE FROM contexts WHERE id = ?1 AND tenant_id = ?2", [target.id, tenant_id])
-    trace(target.id, "delete", tenant_id)
-    :ok
+  defp held_error?(target_id, tenant_id) do
+    match?({:error, _}, LegalHold.held?(target_id, tenant_id))
+  end
+
+  defp held?(target_id, tenant_id) do
+    case LegalHold.held?(target_id, tenant_id) do
+      {:ok, true} -> true
+      _ -> false
+    end
+  end
+
+  # Each apply_action clause returns :ok only when the DB write succeeded.
+  # Audit tracing is a best-effort side effect: if it fails it logs (via
+  # `trace/3`'s rescue) but does NOT turn a successful action into :error.
+  defp apply_action(target, %{action: "delete"}, tenant_id) do
+    case Store.raw_query("DELETE FROM contexts WHERE id = ?1 AND tenant_id = ?2", [
+           target.id,
+           tenant_id
+         ]) do
+      {:ok, _} ->
+        trace(target.id, "delete", tenant_id)
+        :ok
+
+      _ ->
+        :error
+    end
   rescue
     _ -> :error
   end
 
-  defp apply_action(target, %{action: "redact"}, tenant_id, false) do
+  defp apply_action(target, %{action: "redact"}, tenant_id) do
     redacted = Redact.redact!(target.content || "")
 
-    Store.raw_query(
-      "UPDATE contexts SET content = ?1 WHERE id = ?2 AND tenant_id = ?3",
-      [redacted, target.id, tenant_id]
-    )
+    case Store.raw_query(
+           "UPDATE contexts SET content = ?1 WHERE id = ?2 AND tenant_id = ?3",
+           [redacted, target.id, tenant_id]
+         ) do
+      {:ok, _} ->
+        trace(target.id, "redact", tenant_id)
+        :ok
 
-    trace(target.id, "redact", tenant_id)
-    :ok
+      _ ->
+        :error
+    end
   rescue
     _ -> :error
   end
 
-  defp apply_action(target, %{action: action}, tenant_id, false) when action in ["archive", nil] do
-    # `archived_at` may not be present on older schemas — swallow that
-    # specific failure so sweeps don't crash the whole run.
+  defp apply_action(target, %{action: action}, tenant_id) when action in ["archive", nil] do
     case Store.raw_query(
            "UPDATE contexts SET archived_at = datetime('now') WHERE id = ?1 AND tenant_id = ?2",
            [target.id, tenant_id]
@@ -173,16 +204,17 @@ defmodule OptimalEngine.Compliance.Retention do
         :ok
 
       _ ->
-        # Fall back to a synthetic flag in the metadata column if archived_at
-        # doesn't exist — keeps sweeps useful pre-migration.
-        :ok
+        :error
     end
   rescue
     _ -> :error
   end
 
-  defp apply_action(_target, _policy, _tenant_id, false), do: :ok
+  defp apply_action(_target, _policy, _tenant_id), do: :ok
 
+  # Audit trace: best-effort. A failure here is logged but never
+  # propagates — a trace insert failure must NOT make a successful
+  # retention action look failed.
   defp trace(target_id, action, tenant_id) do
     Store.raw_query(
       """
@@ -192,7 +224,7 @@ defmodule OptimalEngine.Compliance.Retention do
       [tenant_id, "context:#{target_id}", Jason.encode!(%{action: action})]
     )
   rescue
-    _ -> :ok
+    e -> Logger.warning("[Retention] trace failed for #{target_id}: #{Exception.message(e)}")
   end
 
   defp cutoff_iso(ttl_days) do
