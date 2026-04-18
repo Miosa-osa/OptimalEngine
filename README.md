@@ -35,7 +35,7 @@ Active development. Per-phase progress against [`PLAN.md`](PLAN.md):
 | 10   | Production hardening — perf targets, release, backup/restore | ✅ |
 | 11   | Compliance — SOC 2, GDPR, HIPAA | ✅ |
 | 12   | Desktop UI — Tauri + SvelteKit + HTTP API | ✅ |
-| 13   | v0.1.0 tag | ⏳ |
+| 13   | v0.1.0 tag | ✅ |
 
 **Current suite:** 1,075 tests passing, 29 excluded (RocksDB NIF, optional backend).
 
