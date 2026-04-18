@@ -18,6 +18,9 @@ defmodule OptimalEngine.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      # ── Observability (comes up first so every other child's metrics are captured) ─
+      OptimalEngine.Telemetry,
+
       # ── Core engine (SQLite-backed, must start first) ─────────────────────
       OptimalEngine.Store,
       OptimalEngine.Pipeline.Router,

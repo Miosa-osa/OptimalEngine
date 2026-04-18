@@ -32,12 +32,12 @@ Active development. Per-phase progress against [`PLAN.md`](PLAN.md):
 | 7    | Wiki Layer — LLM-maintained curated top layer with hot citations + executable directives | ✅ |
 | 8    | Scale-aware Deliver + Composer + RAG | ✅ |
 | 9    | 14 enterprise connectors (Slack / Gmail / Drive / Notion / Jira / Linear / GitHub / Zoom / …) | ✅ |
-| 10   | Production hardening — perf targets, release, backup/restore | ⏳ |
+| 10   | Production hardening — perf targets, release, backup/restore | ✅ |
 | 11   | Compliance — SOC 2, GDPR, HIPAA | ⏳ |
 | 12   | Desktop UI — Tauri + SvelteKit | ⏳ |
 | 13   | v0.1.0 tag | ⏳ |
 
-**Current suite:** 1,026 tests passing, 29 excluded (RocksDB NIF, optional backend).
+**Current suite:** 1,040 tests passing, 29 excluded (RocksDB NIF, optional backend).
 
 ---
 
