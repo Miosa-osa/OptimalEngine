@@ -12,7 +12,7 @@ defmodule OptimalEngine.Session do
       {:ok, session_id} = Session.start_session()
 
       # Add messages during the conversation
-      :ok = Session.add_message(session_id, :user, "Ed called about pricing")
+      :ok = Session.add_message(session_id, :user, "Customer called about pricing")
       :ok = Session.add_message(session_id, :assistant, "Logged to ai-masters/signal.md")
 
       # Commit — extracts memories, generates summary, archives

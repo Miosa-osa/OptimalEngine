@@ -14,7 +14,7 @@ argument details.
 **Ingest examples:**
 
 ```bash
-mix optimal.ingest "Ed called about pricing" --genre note
+mix optimal.ingest "Customer called about pricing" --genre note
 mix optimal.ingest --file notes.md --genre transcript --title "Team sync"
 ```
 
@@ -37,7 +37,7 @@ mix optimal.ingest --file notes.md --genre transcript --title "Team sync"
 
 ```bash
 mix optimal.search "pricing decision" --limit 5
-mix optimal.search "Ed Honour" --node ai-masters
+mix optimal.search "Alice" --node ai-masters
 mix optimal.read "optimal://nodes/ai-masters/signals/2026-04-17-ed-pricing.md" --tier l1
 mix optimal.assemble "AI Masters pricing"
 ```

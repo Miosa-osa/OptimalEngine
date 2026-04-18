@@ -27,7 +27,7 @@ Built on **Elixir/OTP** — fault-tolerant, concurrent, hot-reloadable. Each com
 ## The 30-Second Version
 
 ```
-INPUT: "Ed called about pricing, wants $2K/seat"
+INPUT: "Customer called about pricing, wants $2K/seat"
   │
   ▼
 ┌──────────────────────────────────────────────────────┐
@@ -461,7 +461,7 @@ L0 CACHE ───────── Inject synthesized awareness into always-lo
 ### Reweave Flow (NEW)
 
 ```
-Topic: "Ed Honour"
+Topic: "Alice"
     │
     ▼
 SEARCH ─────────── Find all contexts mentioning topic

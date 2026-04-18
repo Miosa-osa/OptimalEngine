@@ -118,8 +118,8 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
 
   describe "Skeleton.apply_skeleton/2" do
     test "places raw content under the first section" do
-      result = Skeleton.apply_skeleton("note", "Roberto said pricing is $99/mo")
-      assert String.starts_with?(result, "## Context\n\nRoberto said pricing is $99/mo")
+      result = Skeleton.apply_skeleton("note", "Alice said pricing is $99/mo")
+      assert String.starts_with?(result, "## Context\n\nAlice said pricing is $99/mo")
     end
 
     test "generates empty section headers for remaining sections" do
@@ -139,7 +139,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "transcript skeleton includes all 5 sections" do
-      result = Skeleton.apply_skeleton("transcript", "Ed Honour, Roberto")
+      result = Skeleton.apply_skeleton("transcript", "Alice, Alice")
       assert String.contains?(result, "## Participants")
       assert String.contains?(result, "## Key Points")
       assert String.contains?(result, "## Decisions Made")
@@ -175,7 +175,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "write_signal/1 creates file with YAML frontmatter", %{tmp_dir: tmp_dir} do
-      signal = build_signal("Ed Pricing Call", "ai-masters", "transcript")
+      signal = build_signal("Q4 Pricing Call", "ai-masters", "transcript")
 
       {:ok, path} = Writer.write_signal(signal)
 
@@ -188,16 +188,16 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
       assert String.starts_with?(content, "---\n")
       assert String.contains?(content, "node: ai-masters")
       assert String.contains?(content, "genre: transcript")
-      assert String.contains?(content, "title: Ed Pricing Call")
+      assert String.contains?(content, "title: Q4 Pricing Call")
     end
 
     test "write_signal/1 filename is date-slug formatted", %{} do
-      signal = build_signal("Ed Pricing Call 2026", "ai-masters", "transcript")
+      signal = build_signal("Q4 Pricing Call 2026", "ai-masters", "transcript")
 
       {:ok, path} = Writer.write_signal(signal)
 
       filename = Path.basename(path)
-      assert Regex.match?(~r/^\d{4}-\d{2}-\d{2}-ed-pricing-call-2026\.md$/, filename)
+      assert Regex.match?(~r/^\d{4}-\d{2}-\d{2}-q4-pricing-call-2026\.md$/, filename)
     end
 
     test "write_signal/1 creates signals/ directory if missing", %{tmp_dir: tmp_dir} do
@@ -224,13 +224,13 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
 
     test "write_signal/1 includes entities in frontmatter", %{} do
       signal = build_signal("Ed Call", "ai-masters", "transcript")
-      signal = %{signal | entities: ["Ed Honour", "Roberto"]}
+      signal = %{signal | entities: ["Alice", "Alice"]}
 
       {:ok, path} = Writer.write_signal(signal)
 
       content = File.read!(path)
-      assert String.contains?(content, "- Ed Honour")
-      assert String.contains?(content, "- Roberto")
+      assert String.contains?(content, "- Alice")
+      assert String.contains?(content, "- Alice")
     end
 
     test "write_signal/1 includes routed_to in frontmatter", %{} do
@@ -367,7 +367,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
 
     test "returns {:ok, result} with required fields", %{} do
       {:ok, result} =
-        Intake.process("Ed called about pricing. We decided on $99/mo.",
+        Intake.process("Customer called about pricing. We decided on $99/mo.",
           genre: "note",
           node: "ai-masters"
         )
@@ -382,7 +382,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
 
     test "writes primary signal file to disk", %{tmp_dir: tmp_dir} do
       {:ok, result} =
-        Intake.process("Roberto wants platform V2 by Q3.",
+        Intake.process("Alice wants platform V2 by Q3.",
           genre: "plan",
           node: "roberto",
           title: "V2 Plan"
@@ -415,7 +415,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
 
     test "genre override is respected", %{tmp_dir: tmp_dir} do
       {:ok, result} =
-        Intake.process("Ed Honour, Roberto. Pricing decided.",
+        Intake.process("Alice, Alice. Pricing decided.",
           genre: "transcript",
           node: "ai-masters",
           title: "Ed Call"
@@ -456,12 +456,12 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     test "entity override merges with auto-extracted", %{} do
       {:ok, result} =
         Intake.process(
-          "Ed Honour called. Pricing discussion.",
-          entities: ["Roberto"],
+          "Alice called. Pricing discussion.",
+          entities: ["Alice"],
           node: "ai-masters"
         )
 
-      assert "Roberto" in result.signal.entities
+      assert "Alice" in result.signal.entities
     end
 
     test "uri is a valid optimal:// URI", %{} do
@@ -489,8 +489,8 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     test "auto-detects transcript genre from Participants heading", %{} do
       content = """
       ## Participants
-      - Ed Honour
-      - Roberto
+      - Alice
+      - Alice
 
       ## Key Points
       Discussed pricing.
@@ -565,7 +565,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "written file classifies with correct genre", %{} do
-      signal = build_signal("Ed Pricing", "ai-masters", "transcript")
+      signal = build_signal("Q4 Pricing", "ai-masters", "transcript")
       {:ok, path} = Writer.write_signal(signal)
 
       content = File.read!(path)
@@ -575,7 +575,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
 
     test "written file has parseable YAML frontmatter", %{} do
       signal = build_signal("My Plan", "ai-masters", "plan")
-      signal = %{signal | entities: ["Ed Honour", "Roberto"], routed_to: ["04-ai-masters"]}
+      signal = %{signal | entities: ["Alice", "Alice"], routed_to: ["04-ai-masters"]}
 
       {:ok, path} = Writer.write_signal(signal)
       content = File.read!(path)

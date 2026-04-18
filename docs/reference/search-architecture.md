@@ -125,7 +125,7 @@ After the base scoring (BM25 + vector + decay + S/N), a graph boost is applied b
 3. Results whose entities share strong graph edges with the query entities receive a score multiplier
 4. Results with isolated entities (weak graph connections) receive no boost
 
-**Effect**: Well-connected, cross-referenced signals rank higher than isolated ones. A signal about "Ed Honour + AI Masters pricing" ranks higher in an Ed Honour query than a signal that only mentions Ed once in passing, because the graph knows Ed is a hub for the AI Masters node.
+**Effect**: Well-connected, cross-referenced signals rank higher than isolated ones. A signal about "Alice + AI Masters pricing" ranks higher in an Alice query than a signal that only mentions Ed once in passing, because the graph knows Ed is a hub for the AI Masters node.
 
 **Commands to inspect graph state**:
 ```bash
@@ -146,7 +146,7 @@ cd engine && mix optimal.search "pricing decision"
 cd engine && mix optimal.search "revenue" --type signal
 
 # Filter by node
-cd engine && mix optimal.search "Ed Honour" --node ai-masters
+cd engine && mix optimal.search "Alice" --node ai-masters
 
 # Filter by genre
 cd engine && mix optimal.search "revenue" --genre decision-log

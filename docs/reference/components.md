@@ -428,7 +428,7 @@ Simulator.simulate(scenario, opts)            # {:ok, report()} | {:error, reaso
   # e.g. "What if Ed leaves AI Masters?"
 
 Simulator.impact_analysis(entity_or_node, opts)   # {:ok, impact()} | {:error, reason}
-  # e.g. "Bennett", "agency-accelerants"
+  # e.g. "Dan", "agency-accelerants"
 ```
 
 **Mutation types:** `:entity_removal`, `:node_cancellation`, `:revenue_change`, `:dependency_break`, `:general`

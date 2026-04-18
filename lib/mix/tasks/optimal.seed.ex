@@ -75,7 +75,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       wiki pages:      #{stats.wiki}
 
     Try:
-      mix optimal.rag "ClinicIQ pricing"
+      mix optimal.rag "healthtech pricing"
       mix optimal.wiki list
       (enable the HTTP API and open the desktop at /graph, /workspace, /activity)
     """)
@@ -87,27 +87,29 @@ defmodule Mix.Tasks.Optimal.Seed do
   # real depth. `parent` is a slug; the function resolves it to the parent's
   # id on insert.
   defp seed_nodes(tenant) do
+    # A generic "Acme Corp" demo company so anyone firing the seeder gets
+    # a realistic parent/child node tree without the fixtures being tied
+    # to any real organization.
     nodes = [
       # Roots
-      {"01-roberto", "Roberto Luna", "person", nil, "internal"},
-      {"02-miosa", "MIOSA LLC", "org", nil, "internal"},
-      {"03-lunivate", "Lunivate LLC", "org", nil, "internal"},
-      {"04-ai-masters", "AI Masters Course", "operation", nil, "internal"},
-      {"06-agency-accelerants", "Agency Accelerants", "org", nil, "external"},
-      {"08-content-creators", "Content Creators Network", "org", nil, "external"},
+      {"01-founder", "Founder's Desk", "person", nil, "internal"},
+      {"02-platform", "Platform Division", "org", nil, "internal"},
+      {"03-services", "Services Division", "org", nil, "internal"},
+      {"04-academy", "Customer Academy", "operation", nil, "internal"},
+      {"06-partners", "Partner Network", "org", nil, "external"},
+      {"08-media", "Media & Content", "org", nil, "external"},
 
-      # MIOSA sub-tree
-      {"02-miosa-platform", "MIOSA Platform", "project", "02-miosa", "internal"},
-      {"02-miosa-agency", "MIOSA Agency Services", "project", "02-miosa", "internal"},
-      {"02-miosa-pe", "MIOSA PE Deck", "project", "02-miosa", "internal"},
+      # Platform sub-tree
+      {"02-platform-core", "Core Platform", "project", "02-platform", "internal"},
+      {"02-platform-services", "Managed Services", "project", "02-platform", "internal"},
+      {"02-platform-investors", "Investor Materials", "project", "02-platform", "internal"},
 
-      # AI Masters sub-tree
-      {"04-ai-masters-beginner", "Beginner Track", "project", "04-ai-masters", "internal"},
-      {"04-ai-masters-advanced", "Advanced Track", "project", "04-ai-masters", "internal"},
+      # Academy sub-tree
+      {"04-academy-beginner", "Beginner Track", "project", "04-academy", "internal"},
+      {"04-academy-advanced", "Advanced Track", "project", "04-academy", "internal"},
 
-      # Agency Accelerants sub-tree
-      {"06-agency-accelerants-cliniciq", "ClinicIQ Delivery", "project", "06-agency-accelerants",
-       "external"}
+      # Partners sub-tree
+      {"06-partners-healthtech", "Healthtech Delivery", "project", "06-partners", "external"}
     ]
 
     Enum.each(nodes, fn {slug, name, kind, parent_slug, style} ->
@@ -248,24 +250,24 @@ defmodule Mix.Tasks.Optimal.Seed do
   defp intent_for_genre("note"), do: :inform
   defp intent_for_genre(_), do: :inform
 
-  # A single theme cluster spanning the ClinicIQ-related signals so the
+  # A single theme cluster spanning the healthtech-related signals so the
   # workspace explorer shows cross-signal grouping at the wide-pass layer.
   defp seed_cluster(signals, tenant) do
-    cliniciq_signals =
-      Enum.filter(signals, fn s -> String.contains?(s.content, "ClinicIQ") end)
+    theme_signals =
+      Enum.filter(signals, fn s -> String.contains?(s.content, "healthtech") end)
 
-    if cliniciq_signals != [] do
-      cluster_id = "seed-cluster-cliniciq-#{System.unique_integer([:positive])}"
+    if theme_signals != [] do
+      cluster_id = "seed-cluster-healthtech-#{System.unique_integer([:positive])}"
 
       Store.raw_query(
         """
         INSERT OR IGNORE INTO clusters (id, tenant_id, theme, intent_dominant, member_count)
-        VALUES (?1, ?2, 'ClinicIQ delivery + pricing', 'inform', ?3)
+        VALUES (?1, ?2, 'Healthtech delivery + pricing', 'inform', ?3)
         """,
-        [cluster_id, tenant, length(cliniciq_signals)]
+        [cluster_id, tenant, length(theme_signals)]
       )
 
-      Enum.each(cliniciq_signals, fn s ->
+      Enum.each(theme_signals, fn s ->
         Store.raw_query(
           """
           INSERT OR IGNORE INTO cluster_members (tenant_id, cluster_id, chunk_id, weight)
@@ -295,23 +297,27 @@ defmodule Mix.Tasks.Optimal.Seed do
   end
 
   defp seed_wiki_page(tenant) do
-    slug = "cliniciq-pricing-decision"
+    slug = "healthtech-pricing-decision"
 
     page = %Page{
       tenant_id: tenant,
       slug: slug,
       audience: "default",
       version: 1,
-      frontmatter: %{"slug" => slug, "title" => "ClinicIQ Pricing Decision", "tag" => @demo_tag},
+      frontmatter: %{
+        "slug" => slug,
+        "title" => "Healthtech pricing decision",
+        "tag" => @demo_tag
+      },
       body: """
       ## Summary
 
-      ClinicIQ pricing set at $2K per seat for Q4 based on the Ed Honour
-      call {{cite: optimal://nodes/04-ai-masters/signals/ed-honour-call.md}}.
+      Healthtech partner pricing set at $2K per seat for Q4 based on the
+      customer call {{cite: optimal://nodes/04-academy/signals/customer-pricing-call.md}}.
 
       ## Related
 
-      Bennett closed the first ClinicIQ deal {{cite: optimal://nodes/06-agency-accelerants/signals/cliniciq-first-close.md}}.
+      Partner closed the first healthtech deal {{cite: optimal://nodes/06-partners/signals/first-healthtech-close.md}}.
       """,
       last_curated: DateTime.utc_now() |> DateTime.to_iso8601(),
       curated_by: "deterministic:demo-seed"
@@ -321,158 +327,162 @@ defmodule Mix.Tasks.Optimal.Seed do
   end
 
   # ─── fixtures ───────────────────────────────────────────────────────────
+  #
+  # Generic Acme-Corp demo dataset. Names are placeholders ("Alice",
+  # "Bob", …) chosen so the seeder can ship with the public repo without
+  # exposing any real person's correspondence. Swap them for your own
+  # fixtures when you wire the engine into a real workspace.
 
   defp signal_fixtures do
     [
       %{
-        slug: "ed-honour-call",
-        node: "04-ai-masters",
-        title: "Ed Honour — pricing call Q4",
+        slug: "customer-pricing-call",
+        node: "04-academy",
+        title: "Customer pricing call — Q4",
         genre: "transcript",
-        abstract: "Ed called about Q4 pricing; wants $2K per seat.",
+        abstract: "Customer wants $2K per seat pricing for the healthtech product.",
         content:
-          "Ed Honour called to discuss ClinicIQ pricing for Q4. He wants $2K per seat. Roberto agreed to run the numbers with Robert Potter before replying.",
+          "Customer lead called to discuss healthtech pricing for Q4. They want $2K per seat. Alice agreed to run the numbers with Bob before replying.",
         entities: [
-          {"Ed Honour", "person"},
-          {"Roberto Luna", "person"},
-          {"Robert Potter", "person"},
-          {"ClinicIQ", "product"},
-          {"AI Masters Course", "operation"}
+          {"Alice", "person"},
+          {"Bob", "person"},
+          {"Customer Lead", "person"},
+          {"Healthtech Product", "product"},
+          {"Customer Academy", "operation"}
         ]
       },
       %{
-        slug: "cliniciq-first-close",
-        node: "06-agency-accelerants",
-        title: "Bennett closed first ClinicIQ deal",
+        slug: "first-healthtech-close",
+        node: "06-partners",
+        title: "First healthtech deal closed",
         genre: "note",
-        abstract: "Bennett closed first ClinicIQ deal.",
+        abstract: "Partner closed first healthtech deal.",
         content:
-          "Bennett closed the first ClinicIQ deal with Atif's clinic network in Sacramento. Onboarding handoff to Len; Roberto CC'd for context.",
+          "Partner Dan closed the first healthtech deal with a Sacramento clinic network. Onboarding handoff to Eve; Alice CC'd for context.",
         entities: [
-          {"Bennett", "person"},
-          {"Atif", "person"},
-          {"ClinicIQ", "product"},
-          {"Agency Accelerants", "org"},
-          {"Len", "person"}
+          {"Dan", "person"},
+          {"Eve", "person"},
+          {"Alice", "person"},
+          {"Healthtech Product", "product"},
+          {"Partner Network", "org"}
         ]
       },
       %{
-        slug: "miosa-platform-spec",
-        node: "02-miosa",
-        title: "MIOSA platform — Firecracker VM isolation",
+        slug: "platform-microvm-spec",
+        node: "02-platform",
+        title: "Core platform — microVM isolation",
         genre: "spec",
-        abstract: "Firecracker-based VM per tenant on the MIOSA compute plane.",
+        abstract: "Per-tenant microVM isolation on the core platform.",
         content:
-          "Pedram and Pedro scoped Firecracker microVM isolation on the MIOSA compute plane. Each tenant gets an isolated VM; envd runs inside. Nejd owns the proxy layer.",
+          "Bob and Carol scoped per-tenant microVM isolation on the core compute plane. Each tenant gets an isolated VM; an in-VM daemon runs inside. Dan owns the proxy layer.",
         entities: [
-          {"Pedram", "person"},
-          {"Pedro", "person"},
-          {"Nejd", "person"},
-          {"MIOSA", "product"},
-          {"Firecracker", "concept"},
-          {"envd", "concept"}
+          {"Bob", "person"},
+          {"Carol", "person"},
+          {"Dan", "person"},
+          {"Core Platform", "product"},
+          {"microVM", "concept"},
+          {"in-VM daemon", "concept"}
         ]
       },
       %{
-        slug: "agency-miosa-package",
-        node: "02-miosa",
-        title: "Agency MIOSA — Robert Potter package",
+        slug: "services-sales-package",
+        node: "02-platform",
+        title: "Managed services — sales enablement package",
         genre: "plan",
-        abstract: "Send Robert the agency-MIOSA sales package by Thursday.",
+        abstract: "Send Bob the managed-services sales package by Thursday.",
         content:
-          "Assemble the Agency MIOSA package for Robert Potter — ad scripts, VSLs, the offer stack — and hand it off by Thursday. Bennett provides conversion data.",
+          "Assemble the managed-services sales package for the partner network — ad scripts, walk-through videos, the offer stack — and hand off by Thursday. Dan provides conversion data.",
         entities: [
-          {"Robert Potter", "person"},
-          {"Bennett", "person"},
-          {"MIOSA", "product"},
-          {"Agency Accelerants", "org"},
+          {"Bob", "person"},
+          {"Dan", "person"},
+          {"Managed Services", "product"},
+          {"Partner Network", "org"},
           {"Ad Scripts", "concept"}
         ]
       },
       %{
-        slug: "content-os-launch",
-        node: "08-content-creators",
-        title: "ContentOS launch — Tejas build handoff",
+        slug: "media-stack-handoff",
+        node: "08-media",
+        title: "Media stack build handoff",
         genre: "decision_log",
-        abstract: "ContentOS launch handed off to Tejas after Ikram spec review.",
+        abstract: "Media stack handed off after spec review.",
         content:
-          "Decided: Tejas takes the ContentOS build now that Ikram finished the Mosaic Effect spec review. Sukhpreet owns the launch podcast series.",
+          "Decided: Carol takes the media-stack build now that Bob finished the spec review. Eve owns the launch series.",
         entities: [
-          {"Tejas", "person"},
-          {"Ikram", "person"},
-          {"Sukhpreet", "person"},
-          {"ContentOS", "product"},
-          {"Mosaic Effect", "concept"}
+          {"Carol", "person"},
+          {"Bob", "person"},
+          {"Eve", "person"},
+          {"Media Stack", "product"}
         ]
       },
       %{
-        slug: "ai-masters-course-structure",
-        node: "04-ai-masters",
-        title: "AI Masters course structure — beginner + advanced",
+        slug: "academy-course-structure",
+        node: "04-academy",
+        title: "Academy course structure — beginner + advanced",
         genre: "plan",
-        abstract: "AI Masters split into beginner + advanced tracks with a $10K tier on top.",
+        abstract: "Academy splits into beginner + advanced tracks with a premium tier on top.",
         content:
-          "AI Masters structure confirmed: beginner track, advanced track, and a $10K tier on top. Ed Honour co-teaches beginner; Adam handles advanced. Robert Potter runs sales.",
+          "Academy structure confirmed: beginner track, advanced track, and a $10K premium tier on top. Alice co-teaches beginner; Bob handles advanced. Dan runs sales.",
         entities: [
-          {"Ed Honour", "person"},
-          {"Adam", "person"},
-          {"Robert Potter", "person"},
-          {"AI Masters Course", "operation"}
+          {"Alice", "person"},
+          {"Bob", "person"},
+          {"Dan", "person"},
+          {"Customer Academy", "operation"}
         ]
       },
       %{
-        slug: "lunivate-invoice-1234",
-        node: "03-lunivate",
-        title: "Lunivate — invoice 1234",
+        slug: "services-invoice-1234",
+        node: "03-services",
+        title: "Services division — invoice 1234",
         genre: "note",
-        abstract: "Lunivate invoice 1234 to ClinicIQ for October agency services.",
+        abstract: "Services invoice 1234 to the healthtech partner for October.",
         content:
-          "Lunivate LLC invoiced ClinicIQ $8,500 for October agency services (invoice 1234). 30-day terms.",
+          "Services Division invoiced the healthtech partner $8,500 for October agency services (invoice 1234). 30-day terms.",
         entities: [
-          {"Lunivate LLC", "org"},
-          {"ClinicIQ", "product"}
+          {"Services Division", "org"},
+          {"Healthtech Product", "product"}
         ]
       },
       %{
-        slug: "os-architect-youtube",
-        node: "02-miosa",
-        title: "OS Architect YouTube — Ahmed first pilot",
+        slug: "platform-youtube-pilot",
+        node: "02-platform",
+        title: "Platform YouTube channel — first pilot",
         genre: "plan",
-        abstract: "Ahmed kicks off OS Architect YouTube channel with pilot episode.",
+        abstract: "Frank kicks off the platform YouTube channel with pilot episode.",
         content:
-          "Ahmed is kicking off the OS Architect YouTube channel; pilot episode on compute-layer design. Roberto appears as guest.",
+          "Frank is kicking off the platform YouTube channel; pilot episode on compute-layer design. Alice appears as guest.",
         entities: [
-          {"Ahmed", "person"},
-          {"Roberto Luna", "person"},
-          {"OS Architect", "concept"}
+          {"Frank", "person"},
+          {"Alice", "person"},
+          {"Platform YouTube", "concept"}
         ]
       },
       %{
-        slug: "pedram-partnership",
-        node: "02-miosa",
-        title: "Pedram — 50/50 technical partnership",
+        slug: "technical-partnership",
+        node: "02-platform",
+        title: "Bob — 50/50 technical partnership",
         genre: "decision_log",
-        abstract: "Pedram confirmed as 50/50 technical partner on MIOSA.",
+        abstract: "Bob confirmed as 50/50 technical partner on the core platform.",
         content:
-          "Decision: Pedram is now 50/50 technical partner on MIOSA. Licensing, infrastructure, middleware all report to him.",
+          "Decision: Bob is now 50/50 technical partner on the core platform. Licensing, infrastructure, middleware all report to him.",
         entities: [
-          {"Pedram", "person"},
-          {"Roberto Luna", "person"},
-          {"MIOSA", "product"}
+          {"Bob", "person"},
+          {"Alice", "person"},
+          {"Core Platform", "product"}
         ]
       },
       %{
-        slug: "jordan-consortium-call",
-        node: "01-roberto",
-        title: "Jordan consortium call — political economy",
+        slug: "advisor-consortium-call",
+        node: "01-founder",
+        title: "Advisor consortium call — strategy framing",
         genre: "transcript",
-        abstract: "Jordan ran political economy pitch for consortium play.",
+        abstract: "Advisor walked through the consortium pitch framing.",
         content:
-          "Jordan walked through the consortium pitch — political economy framing. Tom joined on recruitment. Roberto to follow up with a brief.",
+          "Advisor Gina walked through the consortium pitch — strategy framing. Henry joined on recruitment. Alice to follow up with a brief.",
         entities: [
-          {"Jordan", "person"},
-          {"Tom", "person"},
-          {"Roberto Luna", "person"}
+          {"Gina", "person"},
+          {"Henry", "person"},
+          {"Alice", "person"}
         ]
       }
     ]

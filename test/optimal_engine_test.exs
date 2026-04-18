@@ -32,7 +32,7 @@ defmodule OptimalEngineTest do
         supersedes: nil,
         node: "roberto",
         sn_ratio: 0.85,
-        entities: ["Roberto", "Pedram"],
+        entities: ["Alice", "Carol"],
         l0_summary: "SPEC | roberto | Test Signal [S/N: 0.9]",
         l1_description: "A test signal description",
         content: "Test content",
@@ -44,7 +44,7 @@ defmodule OptimalEngineTest do
       assert row.id == "abc123"
       assert row.mode == "linguistic"
       assert row.genre == "spec"
-      assert row.entities == Jason.encode!(["Roberto", "Pedram"])
+      assert row.entities == Jason.encode!(["Alice", "Carol"])
 
       row_list = [
         row.id,
@@ -73,7 +73,7 @@ defmodule OptimalEngineTest do
       assert reconstructed.id == "abc123"
       assert reconstructed.mode == :linguistic
       assert reconstructed.genre == "spec"
-      assert reconstructed.entities == ["Roberto", "Pedram"]
+      assert reconstructed.entities == ["Alice", "Carol"]
     end
   end
 
@@ -163,7 +163,7 @@ defmodule OptimalEngineTest do
         supersedes: nil,
         node: "roberto",
         sn_ratio: 0.9,
-        entities: ["Roberto"],
+        entities: ["Alice"],
         l0_summary: "ADR | roberto | Architecture Decision [S/N: 0.9]",
         l1_description: "Decided to use SQLite",
         content: "We decided to use SQLite.",
@@ -403,7 +403,7 @@ defmodule OptimalEngineTest do
     end
 
     test "classifies a memory file" do
-      content = "Roberto prefers specs over briefs for technical decisions."
+      content = "Alice prefers specs over briefs for technical decisions."
 
       ctx =
         Classifier.classify_context(content,
@@ -507,10 +507,10 @@ defmodule OptimalEngineTest do
     end
 
     test "extracts known entities from content" do
-      content = "Roberto and Pedram met to discuss the platform."
-      signal = Classifier.classify(content, known_entities: ["Roberto", "Pedram", "Ed"])
-      assert "Roberto" in signal.entities
-      assert "Pedram" in signal.entities
+      content = "Alice and Carol met to discuss the platform."
+      signal = Classifier.classify(content, known_entities: ["Alice", "Carol", "Ed"])
+      assert "Alice" in signal.entities
+      assert "Carol" in signal.entities
       refute "Ed" in signal.entities
     end
 
@@ -556,7 +556,7 @@ defmodule OptimalEngineTest do
         endpoints: %{
           "robert-potter" => %{
             id: "robert-potter",
-            name: "Robert Potter",
+            name: "Bob",
             role: "Sales",
             genre_competence: ["brief", "pitch", "email"],
             channels: ["slack"],
@@ -564,7 +564,7 @@ defmodule OptimalEngineTest do
           },
           "pedro" => %{
             id: "pedro",
-            name: "Pedro Afonso",
+            name: "Erin Afonso",
             role: "Frontend Dev",
             genre_competence: ["spec", "readme", "changelog"],
             channels: ["slack", "github"],
@@ -649,7 +649,7 @@ defmodule OptimalEngineTest do
         endpoints: %{
           "pedro" => %{
             genre_competence: ["spec", "readme"],
-            name: "Pedro",
+            name: "Erin",
             role: "",
             channels: [],
             notes: nil

@@ -35,8 +35,8 @@ When OpenViking stores "we decided to use $99 pricing," it's a memory file in a 
 When we store the same thing, the system KNOWS:
 - It's a **decision** (type=decide, genre=decision-log)
 - It affects **AI Masters** and **money-revenue** nodes (auto-routed to both)
-- It involves **Ed, Roberto, Robert Potter** (entities extracted)
-- **Robert Potter** should get a **brief** about it, not the raw decision log (receiver modeling)
+- It involves **Ed, Alice, Bob** (entities extracted)
+- **Bob** should get a **brief** about it, not the raw decision log (receiver modeling)
 - The L0 headline is 10 words, L1 summary is 50 words, without reading the file
 - It **supersedes** the old pricing discussion (temporal chain)
 - The OWL reasoner can infer that anything affecting AI Masters pricing affects Ed's revenue targets
@@ -49,9 +49,9 @@ That's not "files with extra metadata." That's a fundamentally different paradig
 |---|-----------|--------------|----------------------|
 | 1 | **Signal Classification** — every context item classified on 5 dimensions S=(M,G,T,F,W) | System understands WHAT something IS, not just WHERE it lives. Filter by genre, type, mode. Retrieval is 10x smarter. | Nothing. Files are untyped. |
 | 2 | **Receiver Modeling** — output shaped FOR the specific human/agent receiving it | Same data produces a brief for a salesperson, a spec for an engineer, an L0 for a busy exec. Context isn't just retrieved — it's ENCODED for the receiver. | Nothing. All output is generic. |
-| 3 | **OWL Reasoning** — 16 forward-chaining rules that auto-derive facts | "Roberto manages MIOSA" + "Pedro works on MIOSA" → system INFERS "Roberto indirectly manages Pedro" without anyone writing that. Relationships compound automatically. | Nothing. No inference at all. |
+| 3 | **OWL Reasoning** — 16 forward-chaining rules that auto-derive facts | "Alice manages MIOSA" + "Erin works on MIOSA" → system INFERS "Alice indirectly manages Erin" without anyone writing that. Relationships compound automatically. | Nothing. No inference at all. |
 | 4 | **Genre Composition** — 143 genre skeletons with required/optional/auto sections | Agent doesn't just "write a response." It composes in the CORRECT genre with the CORRECT skeleton. A postmortem has a root cause section. A brief has a CTA. Structure is imposed, not hoped for. | Nothing. Raw text output. |
-| 5 | **Cross-Node Routing** — signals automatically flow to every relevant node | "Ed called about AI Masters pricing" → routes to `ai-masters/` AND `money-revenue/` AND updates Ed's entity profile. One signal, multiple destinations. Information doesn't get siloed. | Nothing. Single agent, single directory. |
+| 5 | **Cross-Node Routing** — signals automatically flow to every relevant node | "Customer called about AI Masters pricing" → routes to `ai-masters/` AND `money-revenue/` AND updates Ed's entity profile. One signal, multiple destinations. Information doesn't get siloed. | Nothing. Single agent, single directory. |
 
 ### What OpenViking Got RIGHT (That We Keep)
 
@@ -163,7 +163,7 @@ optimal://
 │   │   ├── compose-genre.md            #   ← HOW to compose in each genre skeleton
 │   │   ├── route-signal.md             #   ← HOW to determine which nodes get a signal
 │   │   ├── assemble-context.md         #   ← HOW to build tiered context for a query
-│   │   ├── weekly-review.md            #   ← HOW to run Roberto's Friday review
+│   │   ├── weekly-review.md            #   ← HOW to run Alice's Friday review
 │   │   └── brain-dump-intake.md        #   ← HOW to process Monday brain dumps
 │   └── memories/                       # Agent's learning pipeline
 │       ├── observations/               # SICA step 1: what the agent noticed
@@ -200,7 +200,7 @@ optimal://
 | Agent has skills — flat files describing capabilities | Agent has skills — each is a classified, versioned, executable workflow with SICA feedback loop | **Skills improve themselves.** Agent makes a mistake → logs correction → updates skill. OpenViking skills are static. |
 | Agent learns — end-of-session memory extraction | Agent learns — OBSERVE → REFLECT → PROPOSE → TEST → INTEGRATE (triple-loop) | **Three levels of learning.** Did it work? Was it the right thing? Are we asking the right questions? OpenViking only asks "did it work?" |
 | Session history — raw logs | Session history — auto-extracted signals routed to the right nodes + searchable summaries | **Past sessions are MINED for signals.** A decision from last Tuesday's call is already in the right operation folder. OpenViking leaves it buried in a log. |
-| No organizational awareness | Full topology — nodes, entities, operations, routing rules, endpoint bandwidth profiles | **The agent understands the ORGANIZATION.** It knows Robert Potter gets briefs, Nejd gets explicit constraints, financial data always goes to money-revenue. OpenViking knows nothing about organizational structure. |
+| No organizational awareness | Full topology — nodes, entities, operations, routing rules, endpoint bandwidth profiles | **The agent understands the ORGANIZATION.** It knows Bob gets briefs, Frank gets explicit constraints, financial data always goes to money-revenue. OpenViking knows nothing about organizational structure. |
 | `l0` / `l1` / `l2` tiers | `l0` / `l1` / `l2` / `l3` + token budgets + adaptive scaling + promotion/demotion | **Budget-controlled tiered loading.** We never blow the context window. Content auto-promotes (accessed often → higher tier) and auto-demotes (stale → lower tier). OpenViking loads tiers but has no budget system. |
 
 ### Why This Structure Works for Any Agent
@@ -244,7 +244,7 @@ supersedes: null           # or ID of previous version
 sn_ratio: 0.95
 tiers:
   l0: "AI Masters pricing set at $99/mo community, $8-9K/yr premium"
-  l1: "Ed and Roberto agreed on two-tier pricing for AI Masters course..."
+  l1: "Ed and Alice agreed on two-tier pricing for AI Masters course..."
   # l2 = the full file body
 ---
 
@@ -367,9 +367,9 @@ CREATE TABLE decisions (
 Uses the existing `miosa_knowledge` engine. Same data as `edges` table but queryable via SPARQL with OWL 2 RL reasoning (16 forward-chaining rules).
 
 What the graph gives us that SQLite can't:
-- **Inference**: "Roberto manages MIOSA" + "Pedro works on MIOSA" → auto-derives "Roberto indirectly manages Pedro"
+- **Inference**: "Alice manages MIOSA" + "Erin works on MIOSA" → auto-derives "Alice indirectly manages Erin"
 - **Transitive closure**: Decision chains, supersession chains
-- **2-hop traversal**: "Give me everything related to things Pedro works on"
+- **2-hop traversal**: "Give me everything related to things Erin works on"
 
 ---
 
@@ -390,13 +390,13 @@ Like OpenViking's L0/L1/L2 but with **token budgets** and **receiver bandwidth m
 
 ```markdown
 ## System Identity
-You are the Optimal System operating for Roberto H. Luna.
+You are the Optimal System operating for Alice H. Luna.
 Active operations: MIOSA Platform, AI Masters, Agency Accelerants, OS Accelerator, Mosaic Effect.
 
 ## Top Priorities (this week)
 1. AI Masters: Ed filming technical modules, Robert filming sales modules
-2. Revenue: Bennett pipeline, Ed $20K/mo target
-3. MIOSA: Pedro PR review, Pedram audit
+2. Revenue: Dan pipeline, Ed $20K/mo target
+3. MIOSA: Erin PR review, Carol audit
 
 ## Recent Decisions
 - 2026-03-17: AI Masters pricing — $99/mo community, $8-9K premium
@@ -404,7 +404,7 @@ Active operations: MIOSA Platform, AI Masters, Agency Accelerants, OS Accelerato
 - 2026-03-15: Course needs monthly refresh
 
 ## Key People (by recent mention)
-Roberto (CEO), Ed Honour (course partner), Robert Potter (sales), Bennett (AA/content), Pedro (frontend)
+Alice (CEO), Alice (course partner), Bob (sales), Dan (AA/content), Erin (frontend)
 ```
 
 This is ~400 tokens. Loaded EVERY session. Never skipped. Regenerated when:
@@ -416,7 +416,7 @@ This is ~400 tokens. Loaded EVERY session. Never skipped. Regenerated when:
 
 When a task is identified (e.g., "work on AI Masters pricing"), load:
 - Full `signal.md` for `operations/ai-masters/`
-- Entity profiles for mentioned people (Ed, Robert Potter)
+- Entity profiles for mentioned people (Ed, Bob)
 - Recent decisions tagged to this node
 - Relevant patterns from `knowledge/patterns/`
 
@@ -673,12 +673,12 @@ context.search(query, scope?, limit?) → ranked_results
 
 # Ingest + auto-classify + auto-route (the smart intake)
 context.ingest(content) → {signal_id, classification, routed_to[]}
-# Example: context.ingest("Ed called, $99 for community tier")
+# Example: context.ingest("Customer called, $99 for community tier")
 # → classifies as decision-log, routes to ai-masters + money-revenue
 
 # Get assembled context for a task (tiered, budget-aware)
 context.assemble(query, budget?) → {l0, l1, l2?, trace}
-# Example: context.assemble("prepare AI Masters pricing brief for Robert Potter", budget=10000)
+# Example: context.assemble("prepare AI Masters pricing brief for Bob", budget=10000)
 # → loads relevant context, shapes for Robert's bandwidth (brief only, no specs)
 
 # Get agent's learned skill for a task type

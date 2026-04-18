@@ -13,7 +13,7 @@ defmodule OptimalEngine.Wiki.PageTest do
       last_curated: 2026-04-17T10:00:00Z
       ---
 
-      # Ed Honour pricing
+      # Alice pricing
 
       Body text here.
       """

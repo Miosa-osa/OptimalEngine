@@ -41,9 +41,9 @@ They are complementary, not competing. We steal their internal organization patt
 ### Priority 1: Reweaving (`/reweave` backward pass)
 **What it does**: When new information arrives, revisits older notes that reference the same topics and updates them with new context. A "backward pass" through the knowledge graph.
 
-**Why we need it**: Our intake is forward-only — signals go in, get indexed, done. But when Roberto learns "Ed actually wants $3K not $2K", the old signal about $2K pricing still exists unchanged. Reweaving would propagate the update.
+**Why we need it**: Our intake is forward-only — signals go in, get indexed, done. But when Alice learns "Ed actually wants $3K not $2K", the old signal about $2K pricing still exists unchanged. Reweaving would propagate the update.
 
-**Implementation**: `mix optimal.reweave "Ed Honour pricing"` — finds all contexts mentioning the entity/topic, presents them for review, suggests updates. Uses knowledge graph edges to find related contexts.
+**Implementation**: `mix optimal.reweave "Alice pricing"` — finds all contexts mentioning the entity/topic, presents them for review, suggests updates. Uses knowledge graph edges to find related contexts.
 
 **Where it goes**: New Mix task + new `OptimalEngine.Reweaver` module. Uses `Store.raw_query` + graph traversal.
 
@@ -70,7 +70,7 @@ They are complementary, not competing. We steal their internal organization patt
 **Where it goes**: New `engine/lib/mix/tasks/optimal.health.ex`
 
 ### Priority 4: Graph Triangle Detection
-**What it does**: Finds three nodes A→B, B→C, A→C where a synthesis opportunity exists. If Roberto has signals about "Ed + pricing" and "pricing + AI Masters" and "AI Masters + Ed", there's a triangle — a natural synthesis point.
+**What it does**: Finds three nodes A→B, B→C, A→C where a synthesis opportunity exists. If Alice has signals about "Ed + pricing" and "pricing + AI Masters" and "AI Masters + Ed", there's a triangle — a natural synthesis point.
 
 **Why we need it**: Our knowledge graph has 1045 edges but we never analyze topology for patterns. Triangles reveal where contexts should be combined into higher-level insights.
 
@@ -81,10 +81,10 @@ They are complementary, not competing. We steal their internal organization patt
 ### Priority 5: Agent Self-Space
 **What it does**: AC has `self/identity.md` (who am I), `self/methodology.md` (how I work), `self/goals.md` (what I'm optimizing for). The agent has a persistent self-model it can reference and update.
 
-**Why we need it**: Our CLAUDE.md is static — it describes the system but not the agent's evolving understanding. When the agent learns "Roberto prefers single bundled PRs", that goes in Claude memory but not in a structured self-model.
+**Why we need it**: Our CLAUDE.md is static — it describes the system but not the agent's evolving understanding. When the agent learns "Alice prefers single bundled PRs", that goes in Claude memory but not in a structured self-model.
 
 **Implementation**: Add `self/` directory with:
-- `self/identity.md` — "I am OptimalOS, Roberto's cognitive engine..."
+- `self/identity.md` — "I am OptimalOS, Alice's cognitive engine..."
 - `self/methodology.md` — "I use Signal Theory S=(M,G,T,F,W)..."
 - `self/patterns.md` — Learned patterns from SICA
 
@@ -336,8 +336,8 @@ Resolution at cumulative confidence >= 1.5. One HIGH + one MEDIUM = 1.6 = resolv
 | Dimension | Ars Contexta | OptimalOS |
 |-----------|-------------|-----------|
 | Core metaphor | Knowledge graph (notes=nodes, links=edges) | Decision tree library (folders=categories, files=patterns) |
-| Design approach | Generated from conversation via derivation | Hand-crafted by architect (Roberto) |
-| Target user | Anyone (researchers, therapists, PMs) | One person (Roberto) across all life domains |
+| Design approach | Generated from conversation via derivation | Hand-crafted by architect (Alice) |
+| Target user | Anyone (researchers, therapists, PMs) | One person (Alice) across all life domains |
 | Theory | 249 cognitive science claims | Signal Theory (4 constraints, 6 principles, 11 failure modes) |
 | File philosophy | Atomic: one claim per file | Comprehensive: one context.md per domain node |
 | Navigation | Wiki-links + MOC hierarchy | Folder numbers + engine search + routing table |

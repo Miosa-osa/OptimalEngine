@@ -83,8 +83,8 @@ Persist checklist:
 **Duration**: 60-90 minutes
 
 **Procedure**:
-1. Roberto talks stream-of-consciousness, node by node (01 through 12)
-2. Capture everything — do not interrupt while Roberto is processing
+1. Alice talks stream-of-consciousness, node by node (01 through 12)
+2. Capture everything — do not interrupt while Alice is processing
 3. After capture: classify each statement → route to the right signal.md / context.md
 4. Identify the top 3 critical non-negotiables for the week
 5. Build `rhythm/weekly/week-of-YYYY-MM-DD.md` (current Monday) from extracted priorities
@@ -184,8 +184,8 @@ cd engine && mix optimal.search "context for incoming question"
 
 **Engine commands**:
 ```bash
-cd engine && mix optimal.ingest "Ed called about pricing. He wants $2K per seat. Decision pending." --genre note
-cd engine && mix optimal.ingest --file path/to/notes.md --genre transcript --title "Ed Honour Pricing Call"
+cd engine && mix optimal.ingest "Customer called about pricing. He wants $2K per seat. Decision pending." --genre note
+cd engine && mix optimal.ingest --file path/to/notes.md --genre transcript --title "Alice Pricing Call"
 ```
 
 **Rule**: Never let an EXTRACT session happen more than 30 minutes after the triggering call. Signal degrades.

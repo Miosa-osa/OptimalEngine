@@ -35,15 +35,15 @@ System is one of these.
 | **Domain** | A bounded operational area with coherent purpose and ownership | Platform, Agency, Education, Content, Research |
 | **Operation** | A time-bounded project or program with a goal, people, and outputs | ClinicIQ, AI Masters, OS Accelerator |
 | **Unit** | A team or group within an operation, with shared function | Engineering team, Sales team, Content team |
-| **Endpoint** | An individual human with a name, role, and bandwidth profile | Roberto, Ed, Bennett, Ahmed |
+| **Endpoint** | An individual human with a name, role, and bandwidth profile | Alice, Ed, Dan, Ivan |
 | **Agent** | An autonomous AI actor with a defined autonomy level (L1–L5) | OSA Agent, @architect, @debugger |
-| **Relay** | A node that re-encodes and forwards signals (manager, coordinator) | Jordan (political relay), Roberto (when acting as S3 coordinator) |
-| **Bridge** | A node that connects two domains without belonging to either | Pedram (infrastructure ↔ platform), Liam Motley (audience ↔ product) |
+| **Relay** | A node that re-encodes and forwards signals (manager, coordinator) | Oscar (political relay), Alice (when acting as S3 coordinator) |
+| **Bridge** | A node that connects two domains without belonging to either | Carol (infrastructure ↔ platform), Tina Motley (audience ↔ product) |
 
 ### Node Type Rules
 
 - A node can be classified as multiple types only if each type applies at a
-  different scope level. Roberto is an Endpoint (individual human) at the
+  different scope level. Alice is an Endpoint (individual human) at the
   network layer AND a Relay when acting as coordinator between operations.
 - Agents carry an autonomy level (L1–L5) as a required property.
   See [Layer 7: Governance](07-governance.md) for autonomy definitions.
@@ -99,7 +99,7 @@ connections:                  # Peer relationships (bidirectional)
 
 ---
 
-## 4. Roberto's Node Topology
+## 4. Alice's Node Topology
 
 The 12 OptimalOS folders map to the following node hierarchy.
 
@@ -126,7 +126,7 @@ Lunivate LLC
 └── node:domain-content         Domain — Content (Nodes 05, 07, 08)
 
 Cross-cutting (belongs to both entities functionally)
-├── node:endpoint-roberto       Endpoint — Roberto Luna (Node 01)
+├── node:endpoint-roberto       Endpoint — Alice (Node 01)
 ├── node:unit-team              Unit — Team (Node 10)
 └── node:domain-finance         Domain — Finance (Node 11)
 ```
@@ -135,7 +135,7 @@ Cross-cutting (belongs to both entities functionally)
 
 | Node | ID | Type | Entity | VSM Role | Status |
 |------|----|------|--------|----------|--------|
-| 01 – Roberto | node:endpoint-roberto | Endpoint + Relay | Both | S3/S4/S5 arbiter | active |
+| 01 – Alice | node:endpoint-roberto | Endpoint + Relay | Both | S3/S4/S5 arbiter | active |
 | 02 – MIOSA Platform | node:op-miosa | Operation | MIOSA LLC | S1 production | active |
 | 03 – Lunivate Agency | node:op-lunivate | Operation | Lunivate LLC | S1 production | active |
 | 04 – AI Masters | node:op-ai-masters | Operation | MIOSA LLC | S1 production | active |
@@ -152,18 +152,18 @@ Cross-cutting (belongs to both entities functionally)
 
 | Person | ID | Role | Member Of | Bandwidth (signals/wk) |
 |--------|----|------|-----------|----------------------|
-| Roberto Luna | node:endpoint-roberto | CEO / Architect / S5 | All operations | 60–80 (overloaded) |
-| Ed Honour | node:endpoint-ed | Educator / Developer | node:op-ai-masters | 20 |
-| Robert Potter | node:endpoint-robert-p | Sales / Agency | node:op-ai-masters | 15 |
-| Bennett | node:endpoint-bennett | Operations Lead | node:op-agency-acc | 20 |
-| Ahmed | node:endpoint-ahmed | Content Lead | node:op-os-architect | 20 |
-| Pedram | node:endpoint-pedram | Infrastructure Partner | node:op-miosa | 15 |
-| Jordan | node:endpoint-jordan | Consortium Relay | node:op-miosa, node:op-lunivate | 10 |
-| Len | node:endpoint-len | Sales | node:op-ai-masters, node:op-agency-acc | 20 |
-| Pedro | node:endpoint-pedro | Developer | node:unit-team | 30 |
-| Javaris | node:endpoint-javaris | Developer | node:unit-team | 30 |
-| Nejd | node:endpoint-nejd | Integrations | node:unit-team | 25 |
-| Tejas | node:endpoint-tejas | Content Ops | node:unit-team | 20 |
+| Alice | node:endpoint-roberto | CEO / Architect / S5 | All operations | 60–80 (overloaded) |
+| Alice | node:endpoint-ed | Educator / Developer | node:op-ai-masters | 20 |
+| Bob | node:endpoint-robert-p | Sales / Agency | node:op-ai-masters | 15 |
+| Dan | node:endpoint-bennett | Operations Lead | node:op-agency-acc | 20 |
+| Ivan | node:endpoint-ahmed | Content Lead | node:op-os-architect | 20 |
+| Carol | node:endpoint-pedram | Infrastructure Partner | node:op-miosa | 15 |
+| Oscar | node:endpoint-jordan | Consortium Relay | node:op-miosa, node:op-lunivate | 10 |
+| Sam | node:endpoint-len | Sales | node:op-ai-masters, node:op-agency-acc | 20 |
+| Erin | node:endpoint-pedro | Developer | node:unit-team | 30 |
+| Nina | node:endpoint-javaris | Developer | node:unit-team | 30 |
+| Frank | node:endpoint-nejd | Integrations | node:unit-team | 25 |
+| Judy | node:endpoint-tejas | Content Ops | node:unit-team | 20 |
 
 ### 4.5 Agent Nodes
 
@@ -245,8 +245,8 @@ output must preserve:
 - All commitment-critical content (dates, amounts, decisions)
 
 A relay that transforms a `commit` act into an `inform` act has introduced
-distortion. This is the most common relay failure in Roberto's current system:
-decisions made by Roberto are re-encoded by team relays as "suggestions," losing
+distortion. This is the most common relay failure in Alice's current system:
+decisions made by Alice are re-encoded by team relays as "suggestions," losing
 their binding commitment status.
 
 **Distortion detection:** Compare the output signal of the relay against the
@@ -262,9 +262,9 @@ directly to `node:endpoint-roberto` regardless of bandwidth state or queue depth
 ```
 Algedonic triggers (from VSM mapping):
 - Recurring revenue confirmed < $15K/month
-- Key team member (Pedro, Javaris, Nejd, Bennett) departs
+- Key team member (Erin, Nina, Frank, Dan) departs
 - NVIDIA Nemo Claw goes live
-- Pedram or Jordan relationship fractures
+- Carol or Oscar relationship fractures
 - ClinicIQ or Mosaic Effect signals termination risk
 
 Bypass route: any_node → node:endpoint-roberto [ALGEDONIC]
@@ -285,13 +285,13 @@ changes the act type, filters without authorization, or adds noise.
 |----------------|-------------|---------|
 | **Act corruption** | `commit` re-encoded as `inform` | Decision announced as "FYI" instead of binding |
 | **Content loss** | Signal shortened beyond L4 threshold | 5-item commitment summarized as 1-item, 4 lost |
-| **Noise injection** | Relay adds own interpretation as fact | Coordinator adds "Roberto thinks..." (fabricated) |
+| **Noise injection** | Relay adds own interpretation as fact | Coordinator adds "Alice thinks..." (fabricated) |
 | **Genre shift** | Spec re-encoded as casual note | Technical requirement turned into a Slack message |
 | **Bandwidth mismatch** | Full payload sent when summary was appropriate | Full ADR forwarded to a sales endpoint |
 
 ### 6.2 Fidelity Protocol for Relay Nodes
 
-Any node operating as a relay (Roberto coordinating between S1 units, Jordan
+Any node operating as a relay (Alice coordinating between S1 units, Oscar
 as consortium relay, etc.) must follow this protocol:
 
 ```
@@ -306,20 +306,20 @@ as consortium relay, etc.) must follow this protocol:
 5. FORWARD: Route to destination.
 ```
 
-### 6.3 Roberto as Relay (S3 Coordinator)
+### 6.3 Alice as Relay (S3 Coordinator)
 
-Roberto is the most critical relay in the network and the highest-distortion
+Alice is the most critical relay in the network and the highest-distortion
 risk because he is:
 - Overloaded (bandwidth at or above capacity most weeks)
 - The single path between most S1 units and their strategic context
-- Subject to the god-complex bottleneck pattern (Jordan's mandate)
+- Subject to the god-complex bottleneck pattern (Oscar's mandate)
 
 Distortion risk mitigation:
-- Roberto's relay function should decrease over time as S1 unit leads
+- Alice's relay function should decrease over time as S1 unit leads
   gain direct communication channels with each other.
-- The target state is: Roberto relays S5 policy (identity signals),
+- The target state is: Alice relays S5 policy (identity signals),
   NOT S1 operational signals.
-- Any operational signal that has been in Roberto's relay queue for
+- Any operational signal that has been in Alice's relay queue for
   more than 48 hours should be flagged for direct routing.
 
 ---
@@ -645,7 +645,7 @@ units:
 
 endpoints:
   - id: node:endpoint-roberto
-    name: "Roberto Luna"
+    name: "Alice"
     type: endpoint
     status: active
     roles: [relay, bridge]
@@ -676,7 +676,7 @@ endpoints:
         medium: in-person
 
   - id: node:endpoint-pedram
-    name: "Pedram"
+    name: "Carol"
     type: bridge
     status: active
     member_of: [node:op-miosa]
@@ -694,7 +694,7 @@ endpoints:
         medium: slack
 
   - id: node:endpoint-jordan
-    name: "Jordan"
+    name: "Oscar"
     type: relay
     status: active
     bridges: [node:op-miosa, consortium]
@@ -845,15 +845,15 @@ Every routing decision is logged in L5 (Data) as a `routing_event`:
 
 ## 10. Known Network Pathologies (March 2026)
 
-These are current distortion and capacity issues in Roberto's network,
+These are current distortion and capacity issues in Alice's network,
 recorded for L6 (Feedback) to track resolution.
 
 | Pathology | Type | Affected Nodes | Root Cause | Resolution |
 |-----------|------|----------------|------------|------------|
-| Roberto bottleneck | Bandwidth overload | node:endpoint-roberto | 70+ signals/week through a single relay node | Increase S1 unit lead autonomy; reduce relay dependency |
-| S1 lateral silence | Missing channel | node:op-miosa ↔ node:op-os-architect | No direct channel between Ahmed and Pedro; both route through Roberto | Create direct Slack channel; formalize handoff protocol |
-| Developer over-commitment | Capacity saturation | node:unit-team | Pedro, Javaris, Nejd allocated to multiple operations simultaneously without capacity booking | Weekly capacity table in Node 10 signal.md |
-| Act corruption on relay | Relay distortion | Multiple operations | Operational decisions re-encoded as suggestions when Roberto is not direct sender | All Roberto decisions marked COMMIT explicitly; not re-encodable as inform |
+| Alice bottleneck | Bandwidth overload | node:endpoint-roberto | 70+ signals/week through a single relay node | Increase S1 unit lead autonomy; reduce relay dependency |
+| S1 lateral silence | Missing channel | node:op-miosa ↔ node:op-os-architect | No direct channel between Ivan and Erin; both route through Alice | Create direct Slack channel; formalize handoff protocol |
+| Developer over-commitment | Capacity saturation | node:unit-team | Erin, Nina, Frank allocated to multiple operations simultaneously without capacity booking | Weekly capacity table in Node 10 signal.md |
+| Act corruption on relay | Relay distortion | Multiple operations | Operational decisions re-encoded as suggestions when Alice is not direct sender | All Alice decisions marked COMMIT explicitly; not re-encodable as inform |
 | Ghost node status | Missing routing data | node:op-new-stuff, node:op-os-accelerator | Nodes exist in topology but no active weekly signals; routing cannot verify capacity | Enforce explicit ACTIVE / PAUSED / KILLED on all nodes in weekly dump |
 
 ---
@@ -879,16 +879,16 @@ ENTITY LAYER
 │  └─────────────────────────┘                                        │
 │                                                                     │
 │  CROSS-CUTTING (Both Entities)                                      │
-│  ├── Endpoint: Roberto [01]  ← S3/S4/S5 arbiter, Relay            │
+│  ├── Endpoint: Alice [01]  ← S3/S4/S5 arbiter, Relay            │
 │  ├── Unit: Team       [10]  ← S2 coordination                     │
 │  └── Domain: Finance  [11]  ← S3 revenue control                  │
 └─────────────────────────────────────────────────────────────────────┘
 
 RELAY + BRIDGE LAYER (external connections)
 ┌──────────────────────────────────────────────────────────────────┐
-│  Pedram    → Bridge: infrastructure ↔ node:op-miosa             │
-│  Jordan    → Relay:  consortium ↔ node:endpoint-roberto         │
-│  Liam M.   → Bridge: 300K audience ↔ Education domain           │
+│  Carol    → Bridge: infrastructure ↔ node:op-miosa             │
+│  Oscar    → Relay:  consortium ↔ node:endpoint-roberto         │
+│  Tina M.   → Bridge: 300K audience ↔ Education domain           │
 │  Consortium AI → node:op-miosa (strategic + compute layer)      │
 └──────────────────────────────────────────────────────────────────┘
 

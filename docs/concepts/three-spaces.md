@@ -17,10 +17,10 @@ OptimalOS organizes all information into three distinct spaces: Self, Notes, and
 | `CLAUDE.md` | System instructions, routing table, genre skeletons, Signal Theory rules |
 | `.canopy/reference/kernel.yaml` | Universal primitives — the non-negotiable operating constraints |
 | `.canopy/reference/methodology.md` | Core philosophy and working approach |
-| `nodes/01-roberto/context.md` | Roberto's persistent identity: goals, working style, constraints |
+| `nodes/01-roberto/context.md` | Alice's persistent identity: goals, working style, constraints |
 | `rhythm/` | Operating cadence — the behavioral patterns that define how the system runs |
 
-**What belongs here**: Stable facts about identity and operating method. How Roberto thinks. What genre to send to whom. What the system is for. What never changes regardless of current projects.
+**What belongs here**: Stable facts about identity and operating method. How Alice thinks. What genre to send to whom. What the system is for. What never changes regardless of current projects.
 
 **What does NOT belong here**: Current project status, weekly priorities, or anything that will be different in 30 days.
 
@@ -30,7 +30,7 @@ OptimalOS organizes all information into three distinct spaces: Self, Notes, and
 
 ### 2. Notes (Knowledge)
 
-**What it is**: The stored cognitive patterns — decision trees, playbooks, domain knowledge, scenarios, historical signals, genre templates. Roberto's externalized library.
+**What it is**: The stored cognitive patterns — decision trees, playbooks, domain knowledge, scenarios, historical signals, genre templates. Alice's externalized library.
 
 **Where in OptimalOS**:
 
@@ -43,7 +43,7 @@ OptimalOS organizes all information into three distinct spaces: Self, Notes, and
 | `docs/architecture/` | System architecture specs and ADRs |
 | Engine SQLite database | Indexed, searchable, scored contexts — the retrieval layer over the notes |
 
-**What belongs here**: Everything Roberto has learned, decided, observed, or built that has value beyond the current session. Playbooks. Decision trees. People context. Domain knowledge.
+**What belongs here**: Everything Alice has learned, decided, observed, or built that has value beyond the current session. Playbooks. Decision trees. People context. Domain knowledge.
 
 **What does NOT belong here**: Today's tasks (that's Ops), or fundamental identity principles (that's Self).
 
@@ -97,7 +97,7 @@ Ars Contexta (AC) identified 6 failure modes that occur when the spaces are conf
 
 **What it is**: Operational state corrupts the Notes knowledge base. Yesterday's status gets treated as permanent fact.
 
-**How it happens in OptimalOS**: Writing current project status into `context.md` instead of `signal.md`. Example: "Roberto is currently focused on AI Masters launch" written into `nodes/01-roberto/context.md` — this becomes stale in two weeks but looks like permanent fact.
+**How it happens in OptimalOS**: Writing current project status into `context.md` instead of `signal.md`. Example: "Alice is currently focused on AI Masters launch" written into `nodes/01-roberto/context.md` — this becomes stale in two weeks but looks like permanent fact.
 
 **OptimalOS defense**: The context.md vs signal.md distinction is absolute. Permanent facts → context.md. Current state → signal.md. The engine's temporal decay scoring automatically deprioritizes signal.md entries as they age, but context.md entries do not decay — which is why polluting context.md with state is particularly damaging.
 
@@ -119,7 +119,7 @@ Ars Contexta (AC) identified 6 failure modes that occur when the spaces are conf
 
 **How it happens in OptimalOS**: `CLAUDE.md` becomes outdated — the People table doesn't reflect current team composition, the routing table misses new domains, the genre skeletons drift. The agent falls back on default behavior instead of OptimalOS-specific behavior.
 
-**OptimalOS defense**: The People table and routing table in `CLAUDE.md` are treated as living documents. When Roberto introduces a new person or domain, `CLAUDE.md` is updated. This is the only file that defines Self — it must be current.
+**OptimalOS defense**: The People table and routing table in `CLAUDE.md` are treated as living documents. When Alice introduces a new person or domain, `CLAUDE.md` is updated. This is the only file that defines Self — it must be current.
 
 ---
 
@@ -137,7 +137,7 @@ Ars Contexta (AC) identified 6 failure modes that occur when the spaces are conf
 
 **What it is**: The agent can't tell if information is permanent fact or current status — so it can't reliably update either.
 
-**How it happens in OptimalOS**: Ed Honour's email address (permanent fact) and Ed Honour's current negotiating position (current state) are both in the same file. When the negotiating position changes, should the file be updated? Yes. But the email address shouldn't be. If they're mixed, the distinction is lost.
+**How it happens in OptimalOS**: Alice's email address (permanent fact) and Alice's current negotiating position (current state) are both in the same file. When the negotiating position changes, should the file be updated? Yes. But the email address shouldn't be. If they're mixed, the distinction is lost.
 
 **OptimalOS defense**: Strict file separation. `context.md` = permanent facts. `signal.md` = weekly/temporal. Never mix them. The rule "Persistent facts → context.md. Weekly/temporal → signal.md. Don't mix them" in `CLAUDE.md` is the direct defense against Context Confusion.
 

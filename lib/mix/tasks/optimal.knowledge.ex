@@ -7,7 +7,7 @@ defmodule Mix.Tasks.Optimal.Knowledge do
       mix optimal.knowledge sync       # Sync SQLite edges into SPARQL store
       mix optimal.knowledge count      # Count triples
       mix optimal.knowledge materialize # Run OWL 2 RL reasoning
-      mix optimal.knowledge query "Ed Honour"  # Query triples for entity
+      mix optimal.knowledge query "Alice"  # Query triples for entity
       mix optimal.knowledge metrics    # Show SICA learning metrics
   """
 

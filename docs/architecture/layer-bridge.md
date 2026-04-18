@@ -58,7 +58,7 @@ L0  Data Storage ────── SQLite, ETS cache, vectors
 
 ## ROM vs RAM
 
-The system has two memory modes, matching Jordan's "pre-computed decision tree library" model:
+The system has two memory modes, matching Oscar's "pre-computed decision tree library" model:
 
 ### ROM (OM — Operational Memory)
 Slow-changing. The library. What you've already figured out.
@@ -103,6 +103,6 @@ it stays relevant in search results.
 | Writing architecture docs | 7-layer conceptual |
 | Debugging the engine | 10-layer engine |
 | Adding a new module | 10-layer engine (which layer does it belong to?) |
-| Discussing with Jordan | 7-layer conceptual (he thinks in Beer's VSM) |
-| Discussing with Pedram | 10-layer engine (he thinks in code) |
+| Discussing with Oscar | 7-layer conceptual (he thinks in Beer's VSM) |
+| Discussing with Carol | 10-layer engine (he thinks in code) |
 | Writing specs | Either — but reference the engine layer for `surface` paths |

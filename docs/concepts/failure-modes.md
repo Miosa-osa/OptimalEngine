@@ -54,8 +54,8 @@ Always resolve: "Who receives this?" before encoding. For financial signals, the
 **Symptoms**
 - Receiver stops reading mid-document
 - Action rate drops (people see a wall of text and do nothing)
-- Roberto gets 500 lines when 20 would suffice
-- Robert Potter receives a spec instead of a brief
+- Alice gets 500 lines when 20 would suffice
+- Bob receives a spec instead of a brief
 
 **Root Cause**
 Output density exceeds the receiver's decoding capacity. The sender over-encoded — added context the receiver didn't need, repeated themselves, or used the wrong tier of detail.
@@ -63,12 +63,12 @@ Output density exceeds the receiver's decoding capacity. The sender over-encoded
 **Fix**
 1. Cut to the bandwidth the receiver can process
 2. Apply the genre skeleton — each skeleton has a maximum footprint
-3. For salespeople (Robert, Len, Liam): brief only, 5 bullets max
+3. For salespeople (Robert, Sam, Tina): brief only, 5 bullets max
 4. Use tiered loading: send L0 summary, offer L1 on request
 
 **Engine Check**
 - No engine check for output bandwidth — this is a human judgment call
-- Before sending: ask "Would Robert Potter act on this in 60 seconds?"
+- Before sending: ask "Would Bob act on this in 60 seconds?"
 
 **Prevention**
 Check receiver's genre preference in the People table (`CLAUDE.md`) before encoding. Match output density to that receiver's documented capacity.
@@ -187,7 +187,7 @@ Never write without a genre. If unsure: note genre is the minimum viable structu
 - Receiver has no shared context to decode the signal
 - "Who is Ed?" — receiver doesn't know the entities referenced
 - New team member can't use existing signals
-- Signal makes sense to Roberto but nobody else
+- Signal makes sense to Alice but nobody else
 
 **Root Cause**
 The sender assumed shared context that doesn't exist. The signal references entities, decisions, or history that the receiver has no access to. No bridge was built between sender's knowledge and receiver's knowledge.
@@ -196,14 +196,14 @@ The sender assumed shared context that doesn't exist. The signal references enti
 1. Add preamble: define entities, reference the decision history
 2. For external receivers: include enough context to decode without access to internal files
 3. For briefs sent to salespeople: assume zero internal knowledge
-4. Cross-reference key signals: "See context.md node 04 for Ed Honour background"
+4. Cross-reference key signals: "See context.md node 04 for Alice background"
 
 **Engine Check**
 - `mix optimal.assemble "topic"` — surfaces the bridge context needed before a conversation
 - `mix optimal.reflect` — finds entities that are referenced but not linked to their source context
 
 **Prevention**
-Before sending to anyone outside the core system (Roberto + Pedram): ask "Can they decode this cold?" If no, add the bridge.
+Before sending to anyone outside the core system (Alice + Carol): ask "Can they decode this cold?" If no, add the bridge.
 
 ---
 
@@ -239,7 +239,7 @@ Maintain the context.md vs signal.md separation strictly. Persistent facts → c
 - Acting on information that is weeks or months old
 - Pricing, team membership, or project status in context.md hasn't been updated
 - Search surfaces stale signals as top results
-- Roberto makes a decision based on a fact that changed
+- Alice makes a decision based on a fact that changed
 
 **Root Cause**
 Signals were written but never updated as the world changed. The knowledge base is temporally incoherent — it represents a past state as if it were current. All signals have a half-life; failure to acknowledge this is Decay Failure.
@@ -339,7 +339,7 @@ Which failure modes are most common per domain. Use this to prioritize diagnosti
 
 **Technical domain** (engine, platform, specs): Herniation and Decay are the dominant risks. Code and docs drift apart. Specs go stale. The system coherence breaks silently.
 
-**Personal domain** (Roberto's goals, energy, health): Fidelity and Adversarial Noise are the risks. Roberto's intentions don't survive encoding into delegated tasks. External noise shapes decisions.
+**Personal domain** (Alice's goals, energy, health): Fidelity and Adversarial Noise are the risks. Alice's intentions don't survive encoding into delegated tasks. External noise shapes decisions.
 
 **Operational domain** (rhythm, runbooks, daily execution): Routing, Structure, Decay, and Feedback are dominant. Procedures without structure fail. Delegations without feedback loops drift. Stale runbooks cause incidents.
 

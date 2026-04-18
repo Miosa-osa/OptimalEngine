@@ -58,13 +58,13 @@ has three sections:
 
 ```markdown
 ---
-title: Ed Honour — pricing conversations
+title: Alice — pricing conversations
 last_curated: 2026-04-17T14:30:00Z
 curated_by: ollama:qwen3:8b
 source_count: 7
 ---
 
-# Ed Honour — pricing conversations
+# Alice — pricing conversations
 
 ## Summary
 
@@ -73,12 +73,12 @@ three times for a discount {{cite: optimal://nodes/ai-masters/signals/2026-03-18
 {{cite: optimal://nodes/ai-masters/signals/2026-03-22-ed-followup.md}}
 {{cite: optimal://nodes/ai-masters/signals/2026-04-03-ed-pricing-pushback.md}}.
 
-Roberto's position: $2K is the floor for AI Masters
+Alice's position: $2K is the floor for AI Masters
 {{cite: optimal://nodes/04-ai-masters/context.md}}.
 
 ## Open threads
 
-- Discount request pending Roberto's response {{expand: ed-counter-offer-options}}
+- Discount request pending Alice's response {{expand: ed-counter-offer-options}}
 - Waiting on partnership terms {{include: optimal://nodes/04-ai-masters/deliverables/external/ed-partnership/offer-stack.md}}
 
 ## Related
@@ -167,8 +167,8 @@ The maintenance loop enforces:
 ```
 
 Maintenance is **triggered, not scheduled**. A new signal into the `04-ai-masters`
-node with the entity "Ed Honour" queues a curation job for exactly the wiki
-pages that mention Ed Honour. No blanket rebuild.
+node with the entity "Alice" queues a curation job for exactly the wiki
+pages that mention Alice. No blanket rebuild.
 
 Hard rebuild (`mix optimal.wiki.rebuild`) exists for disaster recovery: it
 re-curates every page from Tier 1 + Tier 2. Idempotent, takes minutes, not

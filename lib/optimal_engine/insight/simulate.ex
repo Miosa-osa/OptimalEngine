@@ -15,7 +15,7 @@ defmodule OptimalEngine.Insight.Simulate do
       {:ok, report} = Simulator.simulate("What if Ed leaves AI Masters?")
       {:ok, report} = Simulator.simulate("What if we cancel Agency Accelerants?")
       {:ok, report} = Simulator.simulate("What if revenue drops 50%?")
-      {:ok, impact} = Simulator.impact_analysis("Bennett")
+      {:ok, impact} = Simulator.impact_analysis("Dan")
       {:ok, impact} = Simulator.impact_analysis("agency-accelerants")
   """
 
@@ -201,7 +201,7 @@ defmodule OptimalEngine.Insight.Simulate do
     Parse this "what if" scenario for an Elixir cognitive OS knowledge graph.
 
     Domain nodes: #{Enum.join(@domain_nodes, ", ")}
-    Known people: Roberto, Pedram, Ed Honour, Robert Potter, Adam, Pedro, Abdul, Nejd, Javaris, Jordan, Bennett, Len, Liam, Ahmed, Ikram, Tejas, Nick, Tom, Jared
+    Known people: Alice, Carol, Alice, Bob, Quinn, Erin, Ruth, Frank, Nina, Oscar, Dan, Sam, Tina, Ivan, Grace, Judy, Victor, Peggy, Uma
 
     Scenario: "#{scenario}"
 
@@ -244,7 +244,7 @@ defmodule OptimalEngine.Insight.Simulate do
 
   defp regex_parse_scenario(scenario, downcased) do
     cond do
-      # Entity removal patterns: "Ed leaves", "Ed Honour leaves", "without Ed"
+      # Entity removal patterns: "Ed leaves", "Alice leaves", "without Ed"
       Regex.match?(
         ~r/\bleav(e|es|ing)\b|\bdeparture\b|\bwithout\b|\bfire[sd]?\b|\bremove[sd]?\b/,
         downcased
@@ -341,7 +341,7 @@ defmodule OptimalEngine.Insight.Simulate do
   # ---------------------------------------------------------------------------
 
   defp gather_seed_contexts(%{type: :entity_removal, entity: entity}) when is_binary(entity) do
-    # Fuzzy match: the entity name may be partial (e.g. "Ed" → "Ed Honour")
+    # Fuzzy match: the entity name may be partial (e.g. "Ed" → "Alice")
     sql = """
     SELECT DISTINCT c.id FROM contexts c
     JOIN entities e ON c.id = e.context_id
@@ -855,7 +855,7 @@ defmodule OptimalEngine.Insight.Simulate do
     Critical dependencies: #{if dep_summary == "", do: "none", else: dep_summary}
 
     Return a JSON array of strings. Each recommendation should be concrete and actionable.
-    Example: ["Redistribute Ed Honour's AI Masters responsibilities to Robert Potter and Adam", ...]
+    Example: ["Redistribute Alice's AI Masters responsibilities to Bob and Quinn", ...]
     """
 
     case Ollama.generate(prompt, system: "Output valid JSON array only.") do

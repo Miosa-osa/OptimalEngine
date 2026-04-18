@@ -126,7 +126,7 @@ L2: SIGNAL — Classify the needed output:
     ▼
 L5: DATA — Pull relevant context:
     │        - AI Masters operation context
-    │        - Robert Potter's role and relationship
+    │        - Bob's role and relationship
     │        - Sales funnel status and targets
     │        - Past briefs (genre: brief) for pattern
     │        - Revenue targets from finance
@@ -144,7 +144,7 @@ L4: INTERFACE — Match output to Robert's decoding capacity.
     │            Robert = salesperson → brief genre, not spec genre.
     │
     ▼
-L1: NETWORK — Route: Roberto → Robert (channel: email + Slack)
+L1: NETWORK — Route: Alice → Robert (channel: email + Slack)
     │
     ▼
 L6: FEEDBACK — Did Robert act on it? Track response.

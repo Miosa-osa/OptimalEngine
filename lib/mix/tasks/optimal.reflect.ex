@@ -7,7 +7,7 @@ defmodule Mix.Tasks.Optimal.Reflect do
   Usage:
       mix optimal.reflect
       mix optimal.reflect --min 3 --limit 10
-      mix optimal.reflect --show-contexts "Roberto" "Ed Honour"
+      mix optimal.reflect --show-contexts "Alice" "Alice"
 
   Options:
     --min N              Minimum co-occurrences to qualify (default: 2)

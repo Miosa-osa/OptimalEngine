@@ -284,9 +284,9 @@ Every signal, regardless of genre, has four granularity levels. These enable pro
 **Examples for the same signal (sales brief, AI Masters):**
 
 ```
-L0: Roberto directed Robert to activate AI Masters enterprise sales for Q1.
+L0: Alice directed Robert to activate AI Masters enterprise sales for Q1.
 
-L1: Roberto Luna sent Robert Potter a sales brief on 2026-03-17 targeting AI
+L1: Alice sent Bob a sales brief on 2026-03-17 targeting AI
     Masters enterprise accounts. Objective: close 2 deals by end of Q1. CTA:
     schedule discovery calls this week. See L2 for full brief.
 
@@ -311,20 +311,20 @@ Every signal is decomposed into atomic Subject-Predicate-Object triples at intak
 **Format:** `(Subject, Predicate, Object)` where each element is a node or literal.
 
 **Example input:**
-> "Roberto decided to use OpenRouter for ClinicIQ on March 6"
+> "Alice decided to use OpenRouter for ClinicIQ on March 6"
 
 **Extracted triples:**
 ```
-(Roberto,      decided,          use_OpenRouter)
+(Alice,      decided,          use_OpenRouter)
 (ClinicIQ,     uses,             OpenRouter)
 (decision,     date,             2026-03-06)
-(decision,     decided_by,       Roberto)
+(decision,     decided_by,       Alice)
 (decision,     applies_to,       ClinicIQ)
 ```
 
 **Extraction rules:**
 1. One triple per atomic claim. Do not compress two claims into one triple.
-2. Entities are normalized to canonical IDs (e.g., `Roberto` → `node:roberto_luna`).
+2. Entities are normalized to canonical IDs (e.g., `Alice` → `node:roberto_luna`).
 3. Dates are ISO 8601 literals.
 4. Predicates use snake_case. Prefer existing predicates before creating new ones.
 5. If a claim is uncertain, add `(triple_id, confidence, 0.0–1.0)` meta-triple.

@@ -100,7 +100,7 @@ valid_until: null
 sn_ratio: 0.95
 tiers:
   l0: "AI Masters pricing set at $99/mo community, $8-9K/yr premium"
-  l1: "Ed and Roberto agreed on two-tier pricing..."
+  l1: "Ed and Alice agreed on two-tier pricing..."
 ---
 ```
 
@@ -227,13 +227,13 @@ Query: "What did Ed say about pricing?"
 - Routing rules: keyword patterns → destination node(s)
 - Cross-cutting rules: financial signals ALWAYS also route to `nodes/11-money-revenue`
 
-**Routing is signal-property-based, not session-based.** When "Bennett closed a deal for $1,500" enters the system, the router evaluates:
+**Routing is signal-property-based, not session-based.** When "Dan closed a deal for $1,500" enters the system, the router evaluates:
 1. Keywords match (`deal`, `$`) → fires financial routing rule → routes to `nodes/06-agency-accelerants` AND `nodes/11-money-revenue`
-2. Entity mention (`Bennett`) → routes to `nodes/10-team` for relationship update
+2. Entity mention (`Dan`) → routes to `nodes/10-team` for relationship update
 
 One signal, three destinations. Fully automatic.
 
-**No routing logic lives in code.** All rules live in `topology.yaml`. Roberto adds a new node or person, edits the YAML, and the router picks it up on next run.
+**No routing logic lives in code.** All rules live in `topology.yaml`. Alice adds a new node or person, edits the YAML, and the router picks it up on next run.
 
 ---
 
@@ -279,14 +279,14 @@ Raw text (voice, message, brain dump)
 
 **Same data. Different output.**
 
-When Roberto asks "create something for Robert about AI Masters pricing":
+When Alice asks "create something for Robert about AI Masters pricing":
 1. System identifies receiver: `robert-potter`
 2. Looks up genre competence: `[brief]` — Robert receives briefs only
 3. Pulls relevant context from `04-ai-masters/`
 4. Composes in brief skeleton: Objective → Key Messages → CTA → Supporting Materials
 5. Outputs a brief. Not a spec. Not a report. A brief.
 
-When Roberto asks "create a spec for Nejd for the dashboard feature":
+When Alice asks "create a spec for Frank for the dashboard feature":
 1. System identifies receiver: `nejd`
 2. Looks up notes: "explicit constraints required — over-engineers on open-ended"
 3. Pulls relevant context from `02-miosa/`
@@ -313,27 +313,27 @@ When Roberto asks "create a spec for Nejd for the dashboard feature":
 3. Session ends → decisions extracted → context.md updated → next L0 cache queued
 
 **The SICA learning loop** (Observe → Reflect → Propose → Test → Integrate):
-- Agent notices a pattern (e.g., Roberto always adds context when a brief is too short)
-- Reflects: "Robert Potter briefs should include a metrics section by default"
+- Agent notices a pattern (e.g., Alice always adds context when a brief is too short)
+- Reflects: "Bob briefs should include a metrics section by default"
 - Proposes an update to the `brief` skeleton
-- Roberto confirms or rejects
+- Alice confirms or rejects
 - On confirm: skeleton updated in templates
 
 ---
 
 ## Layer 9 — The Interface (Outermost)
 
-**What it is:** Claude Code TUI. Roberto talks. The system processes.
+**What it is:** Claude Code TUI. Alice talks. The system processes.
 
-**The conversation IS the interface.** There is no separate UI. No web app. No dashboard. The terminal window where Roberto talks to Claude Code is the operating system's control surface.
+**The conversation IS the interface.** There is no separate UI. No web app. No dashboard. The terminal window where Alice talks to Claude Code is the operating system's control surface.
 
 **CLAUDE.md is the engine config.** Claude reads it every session. It contains:
 - The routing table (which keywords go where)
 - The people table (who gets what genre)
 - The workflow definitions (how to process a brain dump, how to run a Friday review)
-- The rules (financial data always to node 11, Robert Potter always gets briefs)
+- The rules (financial data always to node 11, Bob always gets briefs)
 
-**Mix commands** give direct engine access when needed. Claude runs them; Roberto doesn't have to.
+**Mix commands** give direct engine access when needed. Claude runs them; Alice doesn't have to.
 
 ---
 
@@ -368,7 +368,7 @@ What makes OptimalOS different is not any single feature — it's the combinatio
 
 **Intake:**
 ```
-Roberto: "Ed called — we're pushing filming to next week"
+Alice: "Customer called — we're pushing filming to next week"
     │
     ▼ Classify
     mode=linguistic, genre=transcript, type=inform
@@ -388,7 +388,7 @@ Roberto: "Ed called — we're pushing filming to next week"
 
 **Retrieval:**
 ```
-Roberto: "What's the status on Ed's filming?"
+Alice: "What's the status on Ed's filming?"
     │
     ▼ Search
     BM25: "ed filming" → 3 results
@@ -397,7 +397,7 @@ Roberto: "What's the status on Ed's filming?"
     │
     ▼ Assemble
     L0: "Ed filming delayed — new date TBD" (20 tokens)
-    L1: "Ed Honour pushed filming session from March 20 to next week..." (50 tokens)
+    L1: "Alice pushed filming session from March 20 to next week..." (50 tokens)
     │
     ▼ Respond
     Within 80ms from query to answer

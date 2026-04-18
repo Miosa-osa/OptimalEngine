@@ -15,7 +15,7 @@ Before writing, resolve all 5 dimensions. Unresolved dimensions create noise.
 3. Call to Action — Single unambiguous ask + deadline.
 4. Supporting Materials — Links if needed.
 
-**Example receivers**: Robert Potter, Len, Liam, Jared, Bennett, Jordan, Tom
+**Example receivers**: Bob, Sam, Tina, Uma, Dan, Oscar, Peggy
 
 ### spec
 **Receiver**: Developers, technical partners
@@ -27,10 +27,10 @@ Before writing, resolve all 5 dimensions. Unresolved dimensions create noise.
 4. Architecture — How it fits.
 5. Acceptance Criteria — How we know it's done.
 
-**Example receivers**: Pedro, Abdul, Nejd, Javaris, Pedram, Tejas
+**Example receivers**: Erin, Ruth, Frank, Nina, Carol, Judy
 
 ### plan
-**Receiver**: Roberto (self)
+**Receiver**: Alice (self)
 **Goal**: Structured execution
 **Skeleton**:
 1. Objective — What this plan achieves.
@@ -90,14 +90,14 @@ Before writing, resolve all 5 dimensions. Unresolved dimensions create noise.
 
 | Receiver | Primary Genres | NEVER Send |
 |----------|---------------|------------|
-| Robert Potter | brief, pitch | spec, technical docs |
-| Nejd | spec + explicit constraints | open-ended requirements |
-| Pedro, Abdul | spec, readme, changelog | business strategy |
-| Ed Honour | brief, proposal, pitch | raw specs |
-| Bennett | brief, pitch, social-post | technical specs |
-| Len, Liam | brief, pitch | anything technical |
-| Pedram | spec, runbook | fluff, sales content |
-| Roberto | spec, plan, review, brief | — (anything) |
+| Bob | brief, pitch | spec, technical docs |
+| Frank | spec + explicit constraints | open-ended requirements |
+| Erin, Ruth | spec, readme, changelog | business strategy |
+| Alice | brief, proposal, pitch | raw specs |
+| Dan | brief, pitch, social-post | technical specs |
+| Sam, Tina | brief, pitch | anything technical |
+| Carol | spec, runbook | fluff, sales content |
+| Alice | spec, plan, review, brief | — (anything) |
 
 ## Quality Checklist (Before Sending)
 - [ ] Does every sentence carry actionable intent? Cut filler.

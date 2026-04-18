@@ -31,7 +31,7 @@ L7 GOVERNANCE — THE OUTERMOST LAYER
 
   ┌─────────────────────────────────────────────────────────────────────┐
   │  S5 — POLICY (Identity + Purpose)                                    │
-  │  Roberto's governing philosophy. What OptimalOS will and won't do.   │
+  │  Alice's governing philosophy. What OptimalOS will and won't do.   │
   │                                                                       │
   │  ┌───────────────────────────────────────────────────────────────┐   │
   │  │  S4 — INTELLIGENCE (Outside/Future)                           │   │
@@ -75,10 +75,10 @@ or becomes something different from what it was.
 |--------|----------|-------------|-------------------|
 | **S1** | Operations | Executes the primary activities that produce value | Each Operation node — ClinicIQ, AI Masters, MIOSA Platform, Lunivate Agency, OS Accelerator, Agency Accelerants, OS Architect, Content Creators |
 | **S2** | Coordination | Prevents oscillation between S1 units; resolves resource conflicts; maintains schedule coherence | `node:unit-team` (Team, Node 10) — shared developer allocation, calendar coordination, cross-operation handoffs |
-| **S3** | Control | Resource allocation authority; performance monitoring; standards enforcement; internal audit | Roberto (as operator) acting on Node 11 (Finance) data — audits actuals, reallocates resources, enforces standards |
+| **S3** | Control | Resource allocation authority; performance monitoring; standards enforcement; internal audit | Alice (as operator) acting on Node 11 (Finance) data — audits actuals, reallocates resources, enforces standards |
 | **S3\*** | Audit | Independent direct sampling of S1 behavior; bypasses S2 reporting chain | End-of-week review: shipped vs. planned; Node 11 actuals vs. projections |
 | **S4** | Intelligence | Environmental scanning; opportunity detection; threat identification; future modeling | `node:op-new-stuff` (Node 09) — research, competitive intelligence, strategic experiments |
-| **S5** | Policy | Identity, values, purpose — what the system *is* and what it will *not* become | Roberto (as identity-holder) — final arbiter of S3/S4 balance, source of the system's self-description |
+| **S5** | Policy | Identity, values, purpose — what the system *is* and what it will *not* become | Alice (as identity-holder) — final arbiter of S3/S4 balance, source of the system's self-description |
 
 ---
 
@@ -92,36 +92,36 @@ System 5. The outputs of S1 units are what the system actually delivers to the w
 
 | S1 Unit | Node | Accountable Person | Output | Revenue Logic |
 |---------|------|--------------------|--------|---------------|
-| MIOSA Platform | 02 | Pedro / Javaris / Nejd | Tech infrastructure, VM compute, agent wallets | Recurring compute fees + $50K app/module builds |
-| Lunivate Agency | 03 | Nejd / Tejas | Client deliverables (ClinicIQ, Mosaic Effect, Atlas Cards) | Project fees ($50K+), database reactivation |
-| AI Masters | 04 | Ed / Robert P. / Len | Courses, coaching, cohorts | Ed group $20K/mo, course sales |
-| Agency Accelerants | 06 | Bennett / Len | Acceleration program, community | $99/mo community (~$10.7K/mo), coaching |
-| OS Architect | 05 | Ahmed | YouTube content, lead generation | Lead gen → funnel → paid |
+| MIOSA Platform | 02 | Erin / Nina / Frank | Tech infrastructure, VM compute, agent wallets | Recurring compute fees + $50K app/module builds |
+| Lunivate Agency | 03 | Frank / Judy | Client deliverables (ClinicIQ, Mosaic Effect, Atlas Cards) | Project fees ($50K+), database reactivation |
+| AI Masters | 04 | Ed / Robert P. / Sam | Courses, coaching, cohorts | Ed group $20K/mo, course sales |
+| Agency Accelerants | 06 | Dan / Sam | Acceleration program, community | $99/mo community (~$10.7K/mo), coaching |
+| OS Architect | 05 | Ivan | YouTube content, lead generation | Lead gen → funnel → paid |
 | OS Accelerator | 12 | TBD | Education platform | Subscription + cohort |
-| Content Creators | 08 | Ahmed / Tejas | Distributed content | Feed all other S1s |
-| New Stuff | 09 | Roberto | Research, scanning | This IS S4 — not an S1 revenue unit |
+| Content Creators | 08 | Ivan / Judy | Distributed content | Feed all other S1s |
+| New Stuff | 09 | Alice | Research, scanning | This IS S4 — not an S1 revenue unit |
 
 **S1 structural requirement:** Each unit must have:
-1. One named accountable person — not Roberto as day-to-day operator
+1. One named accountable person — not Alice as day-to-day operator
 2. A `signal.md` file that is the unit's weekly state broadcast
 3. A `context.md` file that is the unit's persistent memory
-4. Operational autonomy: the accountable person makes day-to-day decisions without escalating to Roberto for routine decisions
+4. Operational autonomy: the accountable person makes day-to-day decisions without escalating to Alice for routine decisions
 
-**Critical S1 pathology:** Roberto's recognized god-complex routes S1 operational decisions back
+**Critical S1 pathology:** Alice's recognized god-complex routes S1 operational decisions back
 through him, collapsing the S1/S3 boundary. The result is a single point of failure at the
 system's most productive layer. The fix is not working harder — it is structural: each S1 unit
-lead must have explicit authority to operate without Roberto in the execution loop.
+lead must have explicit authority to operate without Alice in the execution loop.
 
 ---
 
 ### System 2 — Coordination (Preventing Oscillation)
 
 **Beer's definition:** The mechanism that prevents S1 units from interfering with each other.
-Without S2, S1 units compete for shared resources (Roberto's time, developer capacity, budget)
+Without S2, S1 units compete for shared resources (Alice's time, developer capacity, budget)
 and create oscillation — cyclical instability as units repeatedly disrupt each other.
 
 **The oscillation problem in OptimalOS:**
-Every S1 unit wants Roberto's attention simultaneously. Without S2, they interrupt him in
+Every S1 unit wants Alice's attention simultaneously. Without S2, they interrupt him in
 parallel, causing context-switching chaos, dropped commitments, and the chronic overload
 pattern that produces 48–72 hour coding sessions (S3 breakdown disguised as heroism).
 
@@ -130,18 +130,18 @@ pattern that produces 48–72 hour coding sessions (S3 breakdown disguised as he
 | S2 Mechanism | Artifact | Function |
 |---|---|---|
 | Weekly Dump | `weekly-dump.md` | Batch capture of all S1 unit state — one channel, one time per week. Converts parallel interrupt storms into a sequential batch |
-| Signal Documents | `*/signal.md` per node | Standardized state format — every unit speaks the same genre so Roberto reads 12 signals in 20 minutes, not 12 ad-hoc formats |
+| Signal Documents | `*/signal.md` per node | Standardized state format — every unit speaks the same genre so Alice reads 12 signals in 20 minutes, not 12 ad-hoc formats |
 | Signal Theory Encoding | M/G/T/F/W on all outputs | The communication standard. Prevents S1 units from sending noise-heavy requests that consume S3 bandwidth |
 | Weekly Template | `weekly-template.md` | Structural protocol for S2 synchronization — same schema every cycle, no format drift |
 | Node Ownership | Accountable person per node | Prevents resource conflicts — one person owns each S1, they coordinate laterally before escalating |
 
 **S2 non-negotiable:** The Monday brain dump is not optional. It IS the S2 mechanism.
-Skipping the dump breaks coordination and forces Roberto into reactive mode.
+Skipping the dump breaks coordination and forces Alice into reactive mode.
 
 **S2 gaps (March 2026):**
-- No lateral coordination protocol between S1 units (Ahmed's content feeds Bennett's funnel —
-  this handoff currently routes through Roberto)
-- No shared developer capacity booking (Pedro/Javaris/Nejd pulled by multiple S1 units without
+- No lateral coordination protocol between S1 units (Ivan's content feeds Dan's funnel —
+  this handoff currently routes through Alice)
+- No shared developer capacity booking (Erin/Nina/Frank pulled by multiple S1 units without
   a weekly allocation table)
 
 ---
@@ -159,8 +159,8 @@ management of S1 units — it is governance of the space *between* S1 units.
 | Resource allocation | `week-plan.md` — Time Blocks section | Explicit time budget assigned per node per day. If it is not in the time blocks, it is not allocated |
 | Revenue monitoring | `nodes/11-money-revenue/signal.md` | Weekly revenue state: what closed, what is close, what must close to hit $25K floor |
 | Priority triage | Top 3 Non-Negotiables in `week-plan.md` | Explicit S3 decision: these three items override all competing demands for the week |
-| Conflict resolution | Roberto's week plan choices | When two S1 units need Roberto simultaneously, the week plan resolves it pre-emptively, not reactively |
-| Developer allocation | Node 10 team signal | Pedro/Javaris/Nejd assigned per S1 unit for the week — weekly capacity table |
+| Conflict resolution | Alice's week plan choices | When two S1 units need Alice simultaneously, the week plan resolves it pre-emptively, not reactively |
+| Developer allocation | Node 10 team signal | Erin/Nina/Frank assigned per S1 unit for the week — weekly capacity table |
 
 **S3 financial thresholds:**
 
@@ -170,7 +170,7 @@ management of S1 units — it is governance of the space *between* S1 units.
 | Warning | $15K–$25K | S3 concentrates all top 3 on revenue |
 | Survival | $25K | Minimum viable. Continue current allocation |
 | Target | $100K | Strategic reinvestment unlocked |
-| Current (Mar 2026) | ~$30.7K | Ed $20K + Bennett community $10.7K |
+| Current (Mar 2026) | ~$30.7K | Ed $20K + Dan community $10.7K |
 
 ---
 
@@ -216,19 +216,19 @@ kill it.
 | S4 Function | Artifact | Operation |
 |---|---|---|
 | Competitive scanning | `nodes/09-new-stuff/context.md` | Active watch: Fiova (Saeed), NVIDIA NeMo Claw, Pulsio, Perplexity computer use |
-| Opportunity identification | Node 09 weekly signal | Ahmed clipper startup, Liam Motley 300K, Kong university play, Dom VC connector |
-| Strategic partnerships | Node 09 + Node 01 context | Jordan/Tom Consortium AI, Pedram platform partnership, Capital Factory |
-| Threat modeling | Node 09 — requires externalization | All active competitive threats should live in Node 09, not in Roberto's head |
+| Opportunity identification | Node 09 weekly signal | Ivan clipper startup, Tina Motley 300K, Kong university play, Dom VC connector |
+| Strategic partnerships | Node 09 + Node 01 context | Oscar/Peggy Consortium AI, Carol platform partnership, Capital Factory |
+| Threat modeling | Node 09 — requires externalization | All active competitive threats should live in Node 09, not in Alice's head |
 | Future scenario planning | `monthly-review.md` | 90-day forward question (not a goal — a question) |
 
-**S4 time protection rule:** Roberto must protect a minimum of 10% of his weekly time for
-S4 activity. Current state (March 2026): 0–2% of Roberto's week. Target: 10–15%.
+**S4 time protection rule:** Alice must protect a minimum of 10% of his weekly time for
+S4 activity. Current state (March 2026): 0–2% of Alice's week. Target: 10–15%.
 S5 must enforce this structurally — S3 will fill all available time without constraint.
 
 **S4 cadence:**
 - Weekly: 15-minute Node 09 update during Monday dump
 - Monthly: 1-hour competitive landscape review (currently a gap — not happening)
-- Quarterly: Strategic planning session with Jordan (Consortium-level S4)
+- Quarterly: Strategic planning session with Oscar (Consortium-level S4)
 
 ---
 
@@ -242,11 +242,11 @@ future) when they conflict. S5 is the final arbiter.
 
 > "Every output is a Signal. Maximize Signal-to-Noise Ratio. Zero exceptions."
 >
-> — *Signal Theory: The Architecture of Optimal Intent Encoding*, Roberto H. Luna (MIOSA Research, Feb 2026)
+> — *Signal Theory: The Architecture of Optimal Intent Encoding*, Alice H. Luna (MIOSA Research, Feb 2026)
 
 This is not a productivity principle. It is S5 policy. It defines what MIOSA builds
-(high-signal infrastructure), how Roberto communicates (Signal Theory M/G/T/F/W),
-what Roberto refuses (VC money, noise-addicted partners, bullshit-first startups),
+(high-signal infrastructure), how Alice communicates (Signal Theory M/G/T/F/W),
+what Alice refuses (VC money, noise-addicted partners, bullshit-first startups),
 and what the Consortium stands for.
 
 **S5 policy artifacts:**
@@ -255,7 +255,7 @@ and what the Consortium stands for.
 |---|---|---|
 | Governing philosophy | Signal Theory paper (63 pages, Feb 2026) | Complete theoretical framework governing all output and communication |
 | Values + non-negotiables | `nodes/01-roberto/context.md` | CPU-at-edge, no VC, self-funding, open source distribution, developer royalty framework |
-| Identity boundaries | Consortium model constraints | Who Roberto partners with, what he builds, what he will not sell |
+| Identity boundaries | Consortium model constraints | Who Alice partners with, what he builds, what he will not sell |
 | Legal structure | MIOSA LLC (TX) + Lunivate LLC (MI) | Entity separation encodes business logic at legal level |
 
 **Active S5 tensions requiring active management:**
@@ -264,7 +264,7 @@ and what the Consortium stands for.
 |---|---|---|
 | "Close deals NOW to survive" | "No bad-fit clients even under financial pressure" | S5 wins on quality; S3 must find volume from right-fit clients faster |
 | "Move before NVIDIA launches" | "Don't ship garbage — every output is a Signal" | S5 sets quality floor; S4 sets deadline; S3 plans the sprint |
-| "Roberto should do everything" | "Roberto must grow 4 years by tomorrow" (Jordan's mandate) | S5 wins — god-complex violates S5 identity. Napoleonic Complex = noise injection into S1 |
+| "Alice should do everything" | "Alice must grow 4 years by tomorrow" (Oscar's mandate) | S5 wins — god-complex violates S5 identity. Napoleonic Complex = noise injection into S1 |
 
 ---
 
@@ -279,33 +279,33 @@ systems. Each S1 operation within it also has its own five systems.
 ```
 AI MASTERS (node:op-ai-masters) — Internal VSM
 
-  S1: Ed Honour — delivers course content and coaching
-  S1: Robert Potter / Len — executes sales conversations and pipeline
+  S1: Alice — delivers course content and coaching
+  S1: Bob / Sam — executes sales conversations and pipeline
 
-  S2: Coordination between Ed (delivery) and Robert/Len (sales) —
+  S2: Coordination between Ed (delivery) and Robert/Sam (sales) —
       capacity matching: don't sell cohorts faster than Ed can deliver them
 
-  S3: Roberto (acting as AI Masters controller) — reviews enrollment metrics,
+  S3: Alice (acting as AI Masters controller) — reviews enrollment metrics,
       revenue-per-cohort, delivery quality; reallocates time and resources
 
-  S4: Roberto + Ed — what is the next cohort design? What is the competitor
+  S4: Alice + Ed — what is the next cohort design? What is the competitor
       landscape for AI training? What is NVIDIA doing with NeMo Claw?
 
-  S5: Roberto — what is AI Masters *for* in the portfolio? When does it
-      get a dedicated lead vs. remain under Roberto?
+  S5: Alice — what is AI Masters *for* in the portfolio? When does it
+      get a dedicated lead vs. remain under Alice?
 ```
 
 **Full recursive mapping across all operations:**
 
 | Operation | S1 (Who executes) | S2 (What coordinates) | S3 (Who controls) | S4 (Who scans) | S5 (What is it for) |
 |-----------|------------------|----------------------|------------------|---------------|-------------------|
-| MIOSA Platform | Pedro, Javaris, Nejd | Team capacity table | Roberto + Pedram | Roberto + Pedram | Build the platform to exit service dependency |
-| Lunivate Agency | Nejd, Tejas, contractors | Project scheduling | Roberto | Roberto | Fund platform build; maintain until platform revenue > 50% |
-| AI Masters | Ed, Robert P., Len | Ed ↔ sales capacity | Roberto | Roberto + Ed | Education revenue; platform adoption pathway |
-| Agency Accelerants | Bennett, Len | Community calendar | Roberto + Bennett | Roberto | Build audience for OS Accelerator conversion |
-| OS Architect | Ahmed | Content calendar | Roberto + Ahmed | Ahmed | Build Roberto's public platform and audience |
-| OS Accelerator | Roberto (lead) | None yet | Roberto | Roberto | Premium cohort: highest-leverage revenue per hour |
-| Content Creators | Ahmed, Tejas | Content calendar | Roberto | Ahmed | Expand distribution; feed all other S1s |
+| MIOSA Platform | Erin, Nina, Frank | Team capacity table | Alice + Carol | Alice + Carol | Build the platform to exit service dependency |
+| Lunivate Agency | Frank, Judy, contractors | Project scheduling | Alice | Alice | Fund platform build; maintain until platform revenue > 50% |
+| AI Masters | Ed, Robert P., Sam | Ed ↔ sales capacity | Alice | Alice + Ed | Education revenue; platform adoption pathway |
+| Agency Accelerants | Dan, Sam | Community calendar | Alice + Dan | Alice | Build audience for OS Accelerator conversion |
+| OS Architect | Ivan | Content calendar | Alice + Ivan | Ivan | Build Alice's public platform and audience |
+| OS Accelerator | Alice (lead) | None yet | Alice | Alice | Premium cohort: highest-leverage revenue per hour |
+| Content Creators | Ivan, Judy | Content calendar | Alice | Ivan | Expand distribution; feed all other S1s |
 
 **Recursion applies to agents as well.** Any OSA agent operating at L3 or above must have its
 own internal VSM architecture: S1 (task execution), S2 (tool coordination), S3 (self-monitoring),
@@ -341,7 +341,7 @@ EXAMPLE:
 node:agent-debugger
   autonomy:
     code_fix_isolated_bug: L4    # Can fix, test, verify, commit
-    architecture_change: L2      # Can propose; Roberto approves
+    architecture_change: L2      # Can propose; Alice approves
     financial_decision: L1       # Not in scope at any level
     security_critical_path: L3   # Can recommend; @security-auditor reviews
 ```
@@ -356,8 +356,8 @@ agent: node:agent-devops
 elevated_from: L3
 elevated_to: L4
 domain: production_deployment
-reason: "Critical hotfix; Roberto unavailable; pre-approved deployment window"
-expiry: "2026-03-17T18:00:00Z OR when Roberto reviews"
+reason: "Critical hotfix; Alice unavailable; pre-approved deployment window"
+expiry: "2026-03-17T18:00:00Z OR when Alice reviews"
 authorized_by: node:endpoint-roberto
 logged: true
 ```
@@ -378,19 +378,19 @@ Agents with 3+ escalations in a single quarter → review for protocol improveme
 
 | Agent | Domain | Default Level | Escalation Condition |
 |-------|--------|--------------|---------------------|
-| OSA Master Orchestrator | All domains | L3 | Any S5-policy question → Roberto |
+| OSA Master Orchestrator | All domains | L3 | Any S5-policy question → Alice |
 | `@architect` | System design, ADRs | L3 | Database schema, cross-team impact → escalate |
 | `@debugger` | Bug isolation and fix | L4 | Fix touches architecture → drop to L3 |
 | `@code-reviewer` | Code quality | L4 | Security-critical findings → co-review with `@security-auditor` |
-| `@security-auditor` | Security | L3 | Critical vulnerability (A01/A02) → algedonic bypass to Roberto |
+| `@security-auditor` | Security | L3 | Critical vulnerability (A01/A02) → algedonic bypass to Alice |
 | `@backend-elixir` | Elixir/Phoenix/OTP | L3 | Database schema → co-review with `@database-specialist` |
 | `@backend-go` | Go services | L3 | New service creation → `@architect` approval |
 | `@frontend-svelte` | Svelte frontend | L3 | Design system changes → `@osa-frontend-design` |
 | `@frontend-react` | React frontend | L3 | Design system changes → `@osa-frontend-design` |
-| `@devops-engineer` | Infrastructure | L3 | Production deployment → Roberto approval |
-| `@database-specialist` | Database queries | L2 | Schema change → L1 (Roberto approves all) |
+| `@devops-engineer` | Infrastructure | L3 | Production deployment → Alice approval |
+| `@database-specialist` | Database queries | L2 | Schema change → L1 (Alice approves all) |
 | `@test-automator` | Test suites | L4 | Test suite regression → L3 |
-| `@oracle` | AI/ML architecture | L3 | New model deployment → Roberto + S4 context |
+| `@oracle` | AI/ML architecture | L3 | New model deployment → Alice + S4 context |
 | `@performance-optimizer` | Performance analysis | L4 | >20% behavior change → L3 |
 
 ### Autonomy and VSM: The Structural Connection
@@ -447,12 +447,12 @@ inside. By the time it reaches S5 through normal channels, it is too late to act
 |----------|---------|-----------|------------------|
 | **Revenue** | Recurring monthly revenue drops below floor | MRR < $15,000 (confirmed, not projected) | Emergency S3/S4 session within 24h |
 | **Revenue** | Single client above concentration threshold signals termination | Client > 30% of MRR signals churn | Immediate S3 review; diversification decision |
-| **Team** | Key technical team member departs | Pedro, Javaris, or Nejd exits | Platform delivery plan reassessment within 48h |
-| **Team** | Senior contractor relationship fractures | Pedram or Bennett relationship breaks down | Operational continuity plan within 48h |
+| **Team** | Key technical team member departs | Erin, Nina, or Frank exits | Platform delivery plan reassessment within 48h |
+| **Team** | Senior contractor relationship fractures | Carol or Dan relationship breaks down | Operational continuity plan within 48h |
 | **Competitive** | Strategic competitor launches in primary space | NVIDIA NeMo Claw goes live; direct education competitor emerges | S4 emergency brief within 72h |
 | **Legal** | Legal or compliance threat materializes | Any legal demand, IP dispute, employment claim | Legal consultation within 24h — do not respond without counsel |
 | **Security** | Security breach or data exposure | Any unauthorized access to MIOSA platform or client data | Immediate isolation, incident response within 1h |
-| **Strategic Partnership** | Critical partnership fractures | Jordan/consortium relationship collapses | S5 strategic review within 24h |
+| **Strategic Partnership** | Critical partnership fractures | Oscar/consortium relationship collapses | S5 strategic review within 24h |
 | **Identity** | Mission-critical decision committed without S5 review | Agent or team commits system to a path that changes its identity | Immediate recall and S5 review |
 | **System** | Governance coverage falls below floor | Governance coverage metric < 50% for two consecutive weeks | System health review within 1 week |
 
@@ -489,7 +489,7 @@ S5-level attention before the system resumes S3 optimization.
 ```
 Condition:   Confirmed recurring revenue below $15K/month
 Signal:      ALGEDONIC: REVENUE CRITICAL
-S5 Response: Roberto suspends all S4 activity.
+S5 Response: Alice suspends all S4 activity.
              S3 concentrates entirely on survival revenue.
              Top 3 non-negotiables = all revenue-related until $25K floor restored.
 Current:     Near-threshold active (March 2026)
@@ -497,7 +497,7 @@ Current:     Near-threshold active (March 2026)
 
 **Trigger: Key Team Member Departure**
 ```
-Condition:   Nejd, Javaris, Pedro, or Bennett becomes unavailable
+Condition:   Frank, Nina, Erin, or Dan becomes unavailable
 Signal:      ALGEDONIC: TEAM CAPACITY CRITICAL
 S5 Response: Immediate team audit. Coverage gap identified within 48 hours.
              Pause lowest-priority S1 unit.
@@ -508,7 +508,7 @@ Precedent:   Past team departures created emergency revenue situations
 **Trigger: Strategic Competitor Launches**
 ```
 Condition:   NVIDIA NeMo Claw goes live, Pulsio hits $10M revenue,
-             or any competitor captures Roberto's primary market segment
+             or any competitor captures Alice's primary market segment
 Signal:      ALGEDONIC: COMPETITIVE THREAT ACTIVE
 S5 Response: S4 emergency session. Evaluate whether CPU-at-edge differentiation holds.
              If yes: accelerate launch immediately.
@@ -518,19 +518,19 @@ Current:     NVIDIA NeMo Claw = active pre-launch threat (March 2026)
 
 **Trigger: Strategic Partnership Fracture**
 ```
-Condition:   Pedram relationship breaks down, Jordan exits Consortium,
-             or Liam Motley (300K members) withdraws distribution
+Condition:   Carol relationship breaks down, Oscar exits Consortium,
+             or Tina Motley (300K members) withdraws distribution
 Signal:      ALGEDONIC: STRATEGIC DEPENDENCY CRITICAL
-S5 Response: Immediate intervention. Jordan is the appointed mediator
-             (proven: brokered Roberto-Pedram peace).
-             Invoke mediation protocol. Roberto does NOT attempt to resolve alone.
+S5 Response: Immediate intervention. Oscar is the appointed mediator
+             (proven: brokered Alice-Carol peace).
+             Invoke mediation protocol. Alice does NOT attempt to resolve alone.
 ```
 
 **Trigger: Client Churn Risk**
 ```
 Condition:   ClinicIQ/HBAI or Mosaic Effect client signals termination risk
 Signal:      ALGEDONIC: CLIENT CHURN RISK
-S5 Response: Roberto takes direct ownership of relationship recovery.
+S5 Response: Alice takes direct ownership of relationship recovery.
              Deliverable review + honest conversation within 24 hours.
 ```
 
@@ -547,7 +547,7 @@ Autopoiesis (Maturana and Varela, 1972) is the capacity of a system to produce a
 itself. The word means "self-creation." An autopoietic system is not maintained by external
 forces — it maintains itself through its own internal processes.
 
-For OptimalOS, this means the system does not depend solely on Roberto's manual attention to
+For OptimalOS, this means the system does not depend solely on Alice's manual attention to
 remain coherent. It monitors itself, identifies its own degradation signals, and initiates
 corrective action.
 
@@ -562,7 +562,7 @@ signals are observable at the structural level (independent of operational perfo
 | S3* drift accumulation | Same "slipped" item in End of Week Review for 3+ consecutive weeks | Chronic execution failure at that node |
 | Revenue gap widening | Node 11 "what's coming in" decreasing while "what's close" does not convert | Pipeline degradation |
 | Node silence | Any node's `signal.md` not updated for 2+ weeks without explicit PAUSED status | Active ghost node — draining S3 attention |
-| Roberto bottleneck index | Roberto appears in "who's involved" for more than 7 of 12 nodes in a single dump | S3 bottleneck pathology threshold reached |
+| Alice bottleneck index | Alice appears in "who's involved" for more than 7 of 12 nodes in a single dump | S3 bottleneck pathology threshold reached |
 
 **Bottleneck index:**
 ```
@@ -581,8 +581,8 @@ for manual intervention:
 | S2 skip (dump not done) | OSA agent prompts Monday dump at session start. No other work begins until current state is captured |
 | Node chronic slip (3+ consecutive weeks) | Generate Node Diagnosis prompt: "What is the actual constraint? Resourcing? Ownership? Market?" |
 | Revenue gap widening | Trigger S3 concentration protocol: all Top 3 non-negotiables become revenue-related until gap closes |
-| Node silence | Roberto prompted to explicitly mark node ACTIVE / PAUSED / KILLED. No implicit status. No ghost nodes. |
-| Roberto bottleneck above 7/12 | Generate delegation audit: for each node Roberto is in, who SHOULD own this, and what is blocking the handoff? |
+| Node silence | Alice prompted to explicitly mark node ACTIVE / PAUSED / KILLED. No implicit status. No ghost nodes. |
+| Alice bottleneck above 7/12 | Generate delegation audit: for each node Alice is in, who SHOULD own this, and what is blocking the handoff? |
 
 ### Property 3 — Self-Regeneration
 
@@ -637,7 +637,7 @@ ADAPTATION FLOW:
 L6 triple-loop produces:
   "The S4 function is consistently under-resourced. The current metric
    (node:op-new-stuff signal throughput) is not the right measure of strategic
-   attention. Recommend: track Roberto's S4 time directly."
+   attention. Recommend: track Alice's S4 time directly."
 
 L7 reviews:
   Is this a metric change (governance audit) or a structural change (VSM)?
@@ -678,7 +678,7 @@ delivery), which belong to S3.
 | Governance coverage | % of active operations with explicit S1–S5 mapping | 100% | < 80% | < 60% | Monthly |
 | Agent compliance | % of agent actions within their stated autonomy level | > 95% | < 90% | < 80% | Per-session |
 | Decision trace completeness | % of significant decisions with logged rationale | > 90% | < 75% | < 60% | Weekly |
-| S4 time allocation | Roberto's actual time on environmental scanning vs. target | > 10% of work week | 5–10% | < 5% | Weekly |
+| S4 time allocation | Alice's actual time on environmental scanning vs. target | > 10% of work week | 5–10% | < 5% | Weekly |
 | Algedonic response time | Time from trigger detection to S5 acknowledgment | < 24h for critical | 24–48h | > 48h | Per-event |
 | Layer spec freshness | % of layer specs current with actual architecture | 100% | < 90% | < 80% | Monthly |
 | Autonomy log completeness | % of autonomy level changes with logged reason | 100% | < 95% | < 85% | Per-change |
@@ -707,7 +707,7 @@ governance review asks "is the system still structurally viable?"
 ```markdown
 # Monthly Governance Review — [Month YYYY]
 Date: [date]
-Conducted by: Roberto Luna (S5)
+Conducted by: Alice (S5)
 
 ---
 
@@ -770,7 +770,7 @@ S3* audit findings (gap between reported and actual): [list]
 Cross-operation conflicts this month: [list]
 Resource contention resolved: [list]
 Coordination failures (operations that ran into each other without S2 handling it): [list]
-Lateral coordination gaps (handoffs that still route through Roberto): [list]
+Lateral coordination gaps (handoffs that still route through Alice): [list]
 
 S2 decision: [ ] Mechanisms adequate  [ ] Coordination improvement needed: [specifics]
 
@@ -877,15 +877,15 @@ Log: permanent record created regardless of outcome
 
 ### Near-Term (Month 1)
 
-4. **Lateral S2 coordination protocol** — Ahmed (OS Architect) feeds Agency Accelerants funnel.
+4. **Lateral S2 coordination protocol** — Ivan (OS Architect) feeds Agency Accelerants funnel.
    MIOSA feeds all S1 units. These horizontal flows need an explicit handoff protocol that
-   does not route through Roberto.
+   does not route through Alice.
 
-5. **Developer capacity table in Node 10 `signal.md`** — Pedro/Javaris/Nejd: weekly allocation
+5. **Developer capacity table in Node 10 `signal.md`** — Erin/Nina/Frank: weekly allocation
    showing who is committed where, how many hours, what is unbooked.
 
 6. **Monthly S4 session** — 1-hour competitive landscape review on the last Friday of each month.
-   Currently happening ad-hoc in Roberto's head. Requires externalization into Node 09.
+   Currently happening ad-hoc in Alice's head. Requires externalization into Node 09.
 
 ### Strategic (Quarter 1)
 
@@ -905,7 +905,7 @@ Log: permanent record created regardless of outcome
 
 10. **`miosa_context.Governance` — Phase 4: VSM Enforcement**
     - `MiosaContext.Governance.VSMValidator` — validates `topology.yaml` against VSM completeness
-    - `MiosaContext.Governance.S4Monitor` — tracks Roberto's S4 time allocation
+    - `MiosaContext.Governance.S4Monitor` — tracks Alice's S4 time allocation
     - Monthly governance review template auto-population with live metrics
 
 ---
@@ -914,16 +914,16 @@ Log: permanent record created regardless of outcome
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  S5 — POLICY (Roberto's Identity)                                        │
+│  S5 — POLICY (Alice's Identity)                                        │
 │  "Every output is a Signal. Maximize S/N. Zero exceptions."             │
 │  Signal Theory paper. No VC. CPU-at-edge. Self-funding.                │
-│  Consortium model. Developer royalty framework. Jordan's mandate.       │
+│  Consortium model. Developer royalty framework. Oscar's mandate.       │
 │  Artifact: 01-roberto/context.md + Signal Theory paper (Feb 2026)      │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │  S4 — INTELLIGENCE (Outside/Future)                              │   │
-│  │  Node 09: Fiova/NVIDIA/Pulsio watch. Liam 300K. Jordan/Tom.     │   │
-│  │  Capital Factory. Ahmed clipper startup. GovCon pipeline.       │   │
+│  │  Node 09: Fiova/NVIDIA/Pulsio watch. Tina 300K. Oscar/Peggy.     │   │
+│  │  Capital Factory. Ivan clipper startup. GovCon pipeline.       │   │
 │  │  Monthly: 1-hour competitive landscape session (gap to fill)    │   │
 │  │  Artifact: 09-new-stuff/context.md + signal.md                  │   │
 │  │                                                                  │   │
@@ -946,11 +946,11 @@ Log: permanent record created regardless of outcome
 │  │  │  │                                                        │  │ │   │
 │  │  │  │  ┌────────────────────────────────────────────────┐   │  │ │   │
 │  │  │  │  │  S1 — OPERATIONS (Production Units)             │   │  │ │   │
-│  │  │  │  │  02-MIOSA ←→ Pedro, Javaris, Nejd             │   │  │ │   │
-│  │  │  │  │  03-LUNIVATE ←→ Nejd, Tejas                   │   │  │ │   │
-│  │  │  │  │  04-AI MASTERS ←→ Ed, Robert P., Len           │   │  │ │   │
-│  │  │  │  │  06-AGENCY ACCELERANTS ←→ Bennett, Len         │   │  │ │   │
-│  │  │  │  │  05-OS ARCHITECT ←→ Ahmed                      │   │  │ │   │
+│  │  │  │  │  02-MIOSA ←→ Erin, Nina, Frank             │   │  │ │   │
+│  │  │  │  │  03-LUNIVATE ←→ Frank, Judy                   │   │  │ │   │
+│  │  │  │  │  04-AI MASTERS ←→ Ed, Robert P., Sam           │   │  │ │   │
+│  │  │  │  │  06-AGENCY ACCELERANTS ←→ Dan, Sam         │   │  │ │   │
+│  │  │  │  │  05-OS ARCHITECT ←→ Ivan                      │   │  │ │   │
 │  │  │  │  │  12-OS ACCELERATOR ←→ TBD                      │   │  │ │   │
 │  │  │  │  └────────────────────────────────────────────────┘   │  │ │   │
 │  │  │  └──────────────────────────────────────────────────────┘  │ │   │
@@ -974,7 +974,7 @@ Log: permanent record created regardless of outcome
 - Maturana, H. & Varela, F. — *Autopoiesis and Cognition* (1980) — self-producing systems
 - Ashby, W.R. — *An Introduction to Cybernetics* (1956) — requisite variety (governs L2, informed by L7)
 - Wiener, N. — *Cybernetics* (1948) — feedback and control (governs L6, informs L7)
-- Luna, Roberto H. — *Signal Theory: The Architecture of Optimal Intent Encoding* (MIOSA Research, Feb 2026)
+- Luna, Alice H. — *Signal Theory: The Architecture of Optimal Intent Encoding* (MIOSA Research, Feb 2026)
 - [00-overview.md](00-overview.md) — Full 7-layer architecture
 - [01-network.md](01-network.md) — Node types, VSM role assignments, topology
 - [06-feedback.md](06-feedback.md) — Three-loop feedback, escalation path to L7

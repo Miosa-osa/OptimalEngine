@@ -86,7 +86,7 @@ First ingest + search:
 
 ```bash
 mix optimal.seed            # loads a realistic 10-signal / 12-node demo dataset
-mix optimal.ingest "Ed called about pricing, wants $2K per seat" --genre note
+mix optimal.ingest "Customer called about pricing, wants $2K per seat" --genre note
 mix optimal.search "pricing"
 mix optimal.rag "ClinicIQ pricing" --trace
 mix optimal.l0
@@ -115,33 +115,45 @@ mix optimal.stats              # row counts across all tables
 
 ---
 
-## Why it wins
+## Positioning
 
-The entire AI-context market built the same stack:
+The typical AI-context stack looks like:
 
 ```
 Storage → Retrieval → Dump to LLM
 ```
 
-We build the layer nobody else has:
+The Optimal Engine puts a full pipeline under it:
 
 ```
 Classification → Routing → Composition → Tiered Assembly → Delivery → Feedback
                           (with any storage engine underneath)
 ```
 
-| Capability | Glean | Dust | NotebookLM | OpenViking | LLM Wiki | **Optimal Engine** |
-|---|---|---|---|---|---|---|
-| Enterprise connectors | ✅ | ✅ | ⚠️ | ❌ | ❌ | ✅ (Phase 9) |
-| Permission-aware RAG | ✅ | ✅ | ⚠️ | ❌ | ❌ | ✅ chunk-level + intersection propagation |
-| Signal classification `S=(M,G,T,F,W)` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Intent extraction per chunk | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ 10-value enum |
-| Multi-modal aligned embeddings | ⚠️ | ⚠️ | ✅ | ❌ | ❌ | ✅ nomic 768-dim |
-| Cross-modal retrieval (text→image) | ❌ | ❌ | ⚠️ | ❌ | ❌ | ✅ |
-| Audience-aware wiki variants | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Triggered incremental curation | ❌ | ❌ | ❌ | ✅ single-loop | ✅ single-loop | ✅ triple-loop SICA |
-| Agent-runtime integration (any lang) | API | API | Workspace | API | desktop | ✅ CLI + HTTP + MCP + Elixir |
-| Local-first / self-hosted | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+### Capability grid
+
+Reference points across the enterprise-RAG and memory-layer space — framed by what ships today, not who got there first.
+
+| Capability | Glean | Dust | NotebookLM | OpenViking | Notion AI | Mem0 / Letta / Zep | Pinecone / Weaviate / LlamaIndex | **Optimal Engine** |
+|---|---|---|---|---|---|---|---|---|
+| Enterprise connectors | ✅ | ✅ | ⚠️ | ❌ | ⚠️ | ❌ | ❌ | ✅ 14 adapters (Phase 9) |
+| Permission-aware RAG | ✅ | ✅ | ⚠️ | ❌ | ✅ | ❌ | ❌ | ✅ chunk-level + intersection propagation |
+| Signal classification `S=(M,G,T,F,W)` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Intent extraction per chunk | ❌ | ❌ | ❌ | ❌ | ❌ | ⚠️ | ❌ | ✅ 10-value enum |
+| Multi-modal aligned embeddings | ⚠️ | ⚠️ | ✅ | ❌ | ❌ | ❌ | ⚠️ | ✅ nomic 768-dim text + vision |
+| Cross-modal retrieval (text ↔ image) | ❌ | ❌ | ⚠️ | ❌ | ❌ | ❌ | ⚠️ | ✅ |
+| Audience-aware curation variants | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Hierarchical chunking (4 scales) | ⚠️ | ⚠️ | ⚠️ | ✅ | ❌ | ❌ | ⚠️ | ✅ doc / sec / para / sent |
+| Incremental LLM-curated wiki | ❌ | ❌ | ❌ | ✅ single-loop | ❌ | ❌ | ❌ | ✅ triple-loop SICA + citations |
+| Episodic → semantic memory consolidation | ❌ | ⚠️ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ Memory.Cortex |
+| OWL / neuro-symbolic reasoner | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Knowledge module |
+| Hybrid retrieval (BM25 + vector + graph) | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ✅ wiki-first → hybrid fallback |
+| Model-agnostic processor registry | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ DataArchitecture (Phase 14) |
+| GDPR Art. 17 erasure + legal hold | ⚠️ | ⚠️ | ❌ | ❌ | ⚠️ | ❌ | ❌ | ✅ Phase 11 |
+| Agent-runtime integration (any lang) | API | API | Workspace | API | API | SDK | SDK | ✅ CLI + HTTP + MCP + Elixir |
+| Local-first / self-hosted | ❌ | ❌ | ❌ | ✅ | ❌ | ⚠️ | ⚠️ | ✅ |
+
+Reads: ✅ ships, ⚠️ partial / paid tier / beta, ❌ not in the shipping product.
 
 ---
 

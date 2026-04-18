@@ -6,9 +6,9 @@ defmodule Mix.Tasks.Optimal.Intake do
 
   Usage:
       mix optimal.intake
-      mix optimal.intake --genre transcript --title "Ed Pricing Call"
+      mix optimal.intake --genre transcript --title "Q4 Pricing Call"
       mix optimal.intake --node ai-masters --title "Ed Call"
-      echo "Ed called about pricing" | mix optimal.intake --genre note
+      echo "Customer called about pricing" | mix optimal.intake --genre note
 
   Options:
     --genre   Override auto-detected genre (transcript, brief, spec, plan, note,
@@ -17,9 +17,9 @@ defmodule Mix.Tasks.Optimal.Intake do
     --node    Override primary node routing (ai-masters, roberto, money-revenue, etc.)
 
   Examples:
-      $ mix optimal.intake --genre transcript --title "Ed Pricing Call"
+      $ mix optimal.intake --genre transcript --title "Q4 Pricing Call"
       Enter content (Ctrl+D to finish):
-      > Ed called about AI Masters pricing...
+      > Customer called about AI Masters pricing...
       > He wants $2K per seat...
       > [Ctrl+D]
 

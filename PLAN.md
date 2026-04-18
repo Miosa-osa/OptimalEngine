@@ -206,7 +206,7 @@ Strict ordering. Each phase blocks the next via its acceptance criterion.
 
 ### Phase 3.5 — Workspace (organizational topology) ✅
 
-**Why a .5 phase:** Roberto's framing clarified that the engine isn't just a
+**Why a .5 phase:** Alice's framing clarified that the engine isn't just a
 pipeline — it's the second brain *of a company*. That means nodes, people-vs-
 agents, skills, and memberships are first-class data, not implicit strings.
 Phase 1 gave us tenants + principals + groups + roles. Phase 3.5 adds the
@@ -295,7 +295,7 @@ time-bounded; default-tenant backfill runs. **Complete: 786/786 passing.**
 - Audience-aware curation (one signal → N page variants, intersection-filtered).
 - `mix optimal.wiki <view|edit|rebuild|verify> <slug-or-all>`.
 
-**Acceptance:** ingesting a new signal about Ed Honour updates `.wiki/accounts/acme.md` autonomously with new citations verified. Per-audience variants produced (sales / engineering / exec) with zero cross-leak (integrity test).
+**Acceptance:** ingesting a new signal about Alice updates `.wiki/accounts/acme.md` autonomously with new citations verified. Per-audience variants produced (sales / engineering / exec) with zero cross-leak (integrity test).
 
 **Modules touched / created:** 8 new.
 
@@ -390,7 +390,7 @@ Each connector: idempotent, resumable, honors rate limits, reports cursor state 
 
 **Scope:** version `v0.1.0` tagged. Final docs pass. `git push -u origin main`.
 
-**Acceptance:** Roberto's explicit go.
+**Acceptance:** Alice's explicit go.
 
 ---
 
@@ -500,7 +500,7 @@ The restructure is **Phase 0.5** — happens before Phase 1. Confirm before each
 
 - **Tauri 2** (Rust desktop shell)
 - **SvelteKit** (matches MIOSA/BusinessOS)
-- **Tailwind CSS v4 + Foundation tokens** (Roberto's existing design system)
+- **Tailwind CSS v4 + Foundation tokens** (Alice's existing design system)
 - **bits-ui + melt-ui** (Svelte-native headless primitives)
 - **Milkdown** (markdown editor)
 - **Sigma.js + graphology** (graph rendering)
@@ -540,11 +540,11 @@ The restructure is **Phase 0.5** — happens before Phase 1. Confirm before each
 
 | # | Question | Blocking? |
 |---|---|---|
-| 1 | License: private, MIT, BUSL, AGPL — Roberto's call | Phase 13 |
+| 1 | License: private, MIT, BUSL, AGPL — Alice's call | Phase 13 |
 | 2 | Hosted offering strategy: do we offer SaaS, or strictly self-hosted with commercial support? | Phase 9 (impacts connector OAuth story) |
 | 3 | Pricing model for a hosted tier (per-seat, per-signal, per-tenant, storage-based) | Post Phase 13 |
 | 4 | Which agent runtime gets first-class integration beyond the CLI: Claude Agent SDK, LangChain, MCP server? | Phase 10 |
-| 5 | Do we compete directly with Glean/Dust in sales, or anchor on MIOSA + expand outward? | Strategic; Roberto to decide |
+| 5 | Do we compete directly with Glean/Dust in sales, or anchor on MIOSA + expand outward? | Strategic; Alice to decide |
 | 6 | Cloud-embedding backstop (Cohere / Voyage) for tenants without local Ollama capacity — in or out? | Phase 5 |
 | 7 | Obsidian vault compatibility — nice-to-have or distraction? | Phase 7 |
 | 8 | Authority model for multi-tenant deployments: Org-level superadmin vs per-principal-delegated? | Phase 1 |
@@ -607,7 +607,7 @@ Most-dangerous single competitor: **OpenViking (ByteDance)** — same filesystem
 | Directive | executable `{{verb: arg}}` in wiki pages |
 | Audience | a role set that defines who a wiki page is curated for |
 | Node | organizational folder (e.g., `04-ai-masters`) |
-| Entity | a named thing mentioned in signals (e.g., "Ed Honour") |
+| Entity | a named thing mentioned in signals (e.g., "Alice") |
 | Principal | an identity the engine knows about (human, agent, service account) |
 | Tenant | an isolated org with its own DB + wiki |
 | Tier 1 / 2 / 3 | Raw Sources / Derivatives / Wiki |

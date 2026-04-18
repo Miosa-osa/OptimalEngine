@@ -112,9 +112,9 @@ defmodule OptimalEngine.Insight.MemoryExtractor do
     Extract structured memories from this conversation. For each memory, classify into one of 6 categories:
 
     - fact: Concrete statements about the world ("Ed wants $2K per seat", "Budget is $50K")
-    - preference: How someone prefers things ("Roberto prefers specs for devs", "Use Slack not email")
+    - preference: How someone prefers things ("Alice prefers specs for devs", "Use Slack not email")
     - decision: Choices that were made ("Decided to use Firecracker", "Agreed on Q2 launch")
-    - relationship: How people/entities relate ("Ed is AI Masters partner", "Bennett reports to Roberto")
+    - relationship: How people/entities relate ("Ed is AI Masters partner", "Dan reports to Alice")
     - skill: Learned capabilities or processes ("Use mix optimal.search for context", "Deploy via GitHub Actions")
     - context: Situational/temporal info ("AI Masters launching Q2", "Team is 5 people currently")
 

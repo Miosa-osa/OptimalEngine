@@ -15,7 +15,7 @@ defmodule OptimalEngine.Graph do
   ## Node conventions
 
   Node names are bare strings like "ai-masters", "miosa-platform", etc. — they are
-  NOT context IDs. Entity names like "Ed Honour" are also bare strings. Only
+  NOT context IDs. Entity names like "Alice" are also bare strings. Only
   context-to-context edges use real context IDs as both source and target.
 
   The edges table has no FK constraints (migrated from the original FK schema) so
@@ -297,35 +297,35 @@ defmodule OptimalEngine.Graph do
     # Static mapping: entity name → [nodes they work on]
     # Derived from CLAUDE.md routing table and OptimalOS topology
     [
-      {"Ed Honour", "ai-masters"},
-      {"Robert Potter", "ai-masters"},
-      {"Adam", "ai-masters"},
-      {"Pedro", "miosa-platform"},
-      {"Abdul", "miosa-platform"},
-      {"Nejd", "miosa-platform"},
-      {"Pedram", "miosa-platform"},
-      {"Javaris", "miosa-platform"},
-      {"Bennett", "agency-accelerants"},
-      {"Bennett", "content-creators"},
-      {"Bennett", "accelerants-community"},
-      {"Len", "agency-accelerants"},
-      {"Liam", "agency-accelerants"},
-      {"Ahmed", "os-architect"},
-      {"Ahmed", "content-creators"},
-      {"Tejas", "content-creators"},
-      {"Ikram", "content-creators"},
-      {"Jordan", "roberto"},
-      {"Roberto", "roberto"},
-      {"Roberto", "miosa-platform"},
-      {"Roberto", "ai-masters"},
-      {"Roberto", "os-architect"},
-      {"Roberto", "agency-accelerants"},
-      {"Roberto", "accelerants-community"},
-      {"Roberto", "content-creators"},
-      {"Roberto", "money-revenue"},
-      {"Roberto", "team"},
-      {"Roberto", "lunivate"},
-      {"Roberto", "os-accelerator"}
+      {"Alice", "ai-masters"},
+      {"Bob", "ai-masters"},
+      {"Quinn", "ai-masters"},
+      {"Erin", "miosa-platform"},
+      {"Ruth", "miosa-platform"},
+      {"Frank", "miosa-platform"},
+      {"Carol", "miosa-platform"},
+      {"Nina", "miosa-platform"},
+      {"Dan", "agency-accelerants"},
+      {"Dan", "content-creators"},
+      {"Dan", "accelerants-community"},
+      {"Sam", "agency-accelerants"},
+      {"Tina", "agency-accelerants"},
+      {"Ivan", "os-architect"},
+      {"Ivan", "content-creators"},
+      {"Judy", "content-creators"},
+      {"Grace", "content-creators"},
+      {"Oscar", "roberto"},
+      {"Alice", "roberto"},
+      {"Alice", "miosa-platform"},
+      {"Alice", "ai-masters"},
+      {"Alice", "os-architect"},
+      {"Alice", "agency-accelerants"},
+      {"Alice", "accelerants-community"},
+      {"Alice", "content-creators"},
+      {"Alice", "money-revenue"},
+      {"Alice", "team"},
+      {"Alice", "lunivate"},
+      {"Alice", "os-accelerator"}
     ]
   end
 

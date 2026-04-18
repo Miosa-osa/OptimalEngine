@@ -7,10 +7,10 @@ defmodule Mix.Tasks.Optimal.Impact do
   a name directly and auto-detects whether it is an entity or a node.
 
   Usage:
-      mix optimal.impact "Bennett"
-      mix optimal.impact "Ed Honour"
+      mix optimal.impact "Dan"
+      mix optimal.impact "Alice"
       mix optimal.impact "agency-accelerants"
-      mix optimal.impact "Bennett" --depth 4
+      mix optimal.impact "Dan" --depth 4
 
   Options:
     --depth   BFS traversal depth (default: 3)

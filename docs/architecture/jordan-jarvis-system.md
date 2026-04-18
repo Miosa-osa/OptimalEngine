@@ -7,22 +7,22 @@ signal:
   structure: architecture-spec
   sn_ratio: 0.9
   audience: [human, agent]
-  intent: "Jordan-Jarvis System — cognitive replication architecture. North star for OptimalOS AI evolution."
+  intent: "Oscar-Atlas System — cognitive replication architecture. North star for OptimalOS AI evolution."
 node: miosa-platform
 cross_ref: [roberto]
 valid_from: "2026-03-18"
 ---
 
-# The Jordan-Jarvis System
+# The Oscar-Atlas System
 
-> A cognitive replication system that does what Jordan does in his head, but computationally.
+> A cognitive replication system that does what Oscar does in his head, but computationally.
 > This is the north star for where OptimalOS evolves.
 
 ---
 
 ## Core Concept
 
-An AI system that replicates **how Jordan thinks** — not just what he knows, but his actual cognitive process:
+An AI system that replicates **how Oscar thinks** — not just what he knows, but his actual cognitive process:
 
 - Multi-dimensional analysis (5 modes simultaneously)
 - Probability tree navigation (decompose → select → bundle → simulate)
@@ -30,13 +30,13 @@ An AI system that replicates **how Jordan thinks** — not just what he knows, b
 - Variant generation and simulation
 - Real-time decision support
 
-**The Goal:** Free Jordan's brain from brute-force data retrieval so he can focus on subjective analytical thinking — reading what people DON'T say, creative synthesis, and scenario planning.
+**The Goal:** Free Oscar's brain from brute-force data retrieval so he can focus on subjective analytical thinking — reading what people DON'T say, creative synthesis, and scenario planning.
 
 ---
 
 ## The 5-Dimensional Thinking Modes
 
-Jordan operates with all five modes running simultaneously. The AI must replicate this.
+Oscar operates with all five modes running simultaneously. The AI must replicate this.
 
 ### 1. SYSTEMATIC
 - Step-by-step logical progression
@@ -206,7 +206,7 @@ OPTIMAL PATH IDENTIFIED
 2. **World Models** — Reality simulation, causal understanding, predictive capability
 3. **Multi-Agent Systems** — Parallel processing, specialized sub-agents, coordinated analysis
 4. **Advanced Reasoning** — Beyond pattern matching: logical inference, novel problem solving
-5. **Custom Training** — Jordan's thinking patterns, domain expertise, historical decisions
+5. **Custom Training** — Oscar's thinking patterns, domain expertise, historical decisions
 6. **PDE Modeling** — Continuous system modeling, dynamic state evolution, complex interaction modeling
 
 ### "Some of this shit doesn't even exist yet"
@@ -261,14 +261,14 @@ OUTPUT (Optimal path + variants + reasoning)
 
 ## The Key Realization: OptimalOS IS This System (Phase 1)
 
-> "My brain is nothing but markdown files." — Jordan
-> "The only thing that matters is the markdown files and the library." — Pedram
+> "My brain is nothing but markdown files." — Oscar
+> "The only thing that matters is the markdown files and the library." — Carol
 
-OptimalOS is NOT a future aspiration toward the Jordan-Jarvis system. **It IS the Jordan-Jarvis system, Phase 1.** The markdown files ARE the externalized decision tree library. The Elixir engine IS the optimal search mechanism. The AI agent IS the cognitive processor.
+OptimalOS is NOT a future aspiration toward the Oscar-Atlas system. **It IS the Oscar-Atlas system, Phase 1.** The markdown files ARE the externalized decision tree library. The Elixir engine IS the optimal search mechanism. The AI agent IS the cognitive processor.
 
 ### The Mapping
 
-| Jordan's Brain | OptimalOS Equivalent |
+| Oscar's Brain | OptimalOS Equivalent |
 |---|---|
 | Pre-sorted decision tree library (ROM) | **The markdown files** — numbered folders, context.md, playbooks, signal files |
 | Categories of decision trees | **The 12 numbered folders** — each a domain of pre-computed patterns |
@@ -284,24 +284,24 @@ OptimalOS is NOT a future aspiration toward the Jordan-Jarvis system. **It IS th
 
 ### What This Means for Building
 
-Every time Roberto encounters a new scenario, the correct action is:
+Every time Alice encounters a new scenario, the correct action is:
 1. **Capture it** — engine ingest the signal
 2. **Extract the pattern** — what category? what decision tree?
 3. **Store the playbook** — if it's a new type, create a new playbook file
 4. **Route it** — file it in the right numbered folder
 5. **The library grows** — next time this scenario appears, the AI finds it instantly
 
-Over time, the library becomes comprehensive. Retrieval becomes instant. Roberto builds Jordan's ROM — externally, searchably, and with an AI that can process it computationally.
+Over time, the library becomes comprehensive. Retrieval becomes instant. Alice builds Oscar's ROM — externally, searchably, and with an AI that can process it computationally.
 
-### Jordan's Lane vs Roberto's Lane
+### Oscar's Lane vs Alice's Lane
 
-Jordan (March 18): Roberto should **stay in his lane** — hard sciences (logic, linguistics, engineering, systems). Jordan handles soft sciences (political economy, human reading, negotiation, coalition building). They're complementary, not competitive. Roberto trying to do both = dilution. The system should reflect this: Roberto builds the library and the engine. Jordan provides the playbooks and the constructs. The AI bridges them.
+Oscar (March 18): Alice should **stay in his lane** — hard sciences (logic, linguistics, engineering, systems). Oscar handles soft sciences (political economy, human reading, negotiation, coalition building). They're complementary, not competitive. Alice trying to do both = dilution. The system should reflect this: Alice builds the library and the engine. Oscar provides the playbooks and the constructs. The AI bridges them.
 
 ---
 
 ## How This Maps to OptimalOS Today
 
-| Jordan-Jarvis Component | Current OptimalOS Equivalent | Gap |
+| Oscar-Atlas Component | Current OptimalOS Equivalent | Gap |
 |---|---|---|
 | Decision tree library | **The entire markdown file library** | Need more playbooks for every domain |
 | 5-dimensional analysis | Signal Theory S=(M,G,T,F,W) | Maps to mode, but not full 5-dim yet |
@@ -315,26 +315,26 @@ Jordan (March 18): Roberto should **stay in his lane** — hard sciences (logic,
 
 ### Evolution Path
 
-**Phase 1 (NOW — THIS IS WHERE WE ARE):** OptimalOS as externalized cognitive ROM. Markdown files = decision tree library. Elixir engine = optimal search/retrieval. AI agent = signal processor. Rhythm layer = operating discipline. Every new scenario gets captured, classified, filed. The library grows daily. Roberto uses playbooks manually + engine for retrieval.
+**Phase 1 (NOW — THIS IS WHERE WE ARE):** OptimalOS as externalized cognitive ROM. Markdown files = decision tree library. Elixir engine = optimal search/retrieval. AI agent = signal processor. Rhythm layer = operating discipline. Every new scenario gets captured, classified, filed. The library grows daily. Alice uses playbooks manually + engine for retrieval.
 
-**Phase 2 (NEXT):** Engine adds person models (deeper than current people table), scenario templates (pre-computed decision trees per domain), multi-node synthesis, and proactive retrieval (engine surfaces relevant playbooks BEFORE Roberto asks).
+**Phase 2 (NEXT):** Engine adds person models (deeper than current people table), scenario templates (pre-computed decision trees per domain), multi-node synthesis, and proactive retrieval (engine surfaces relevant playbooks BEFORE Alice asks).
 
-**Phase 3 (FUTURE):** Full Jordan-Jarvis — MCTS for probability tree navigation, multi-agent parallel analysis, variant generation, simulation runs. The AI thinks in 5 dimensions and outputs optimal paths with reasoning. The library has grown large enough to cover most scenarios. The engine doesn't just search — it reasons across the library.
+**Phase 3 (FUTURE):** Full Oscar-Atlas — MCTS for probability tree navigation, multi-agent parallel analysis, variant generation, simulation runs. The AI thinks in 5 dimensions and outputs optimal paths with reasoning. The library has grown large enough to cover most scenarios. The engine doesn't just search — it reasons across the library.
 
 ---
 
-## Pedram's Concern & The Integration Path
+## Carol's Concern & The Integration Path
 
-Pedram's fear: "Trojan horse" — that MIOSA applications don't actually integrate with the middleware/infrastructure he built. The fix: demonstrate that middleware + applications work together. Show the integration. Don't just talk about it — prove it computationally.
+Carol's fear: "Trojan horse" — that MIOSA applications don't actually integrate with the middleware/infrastructure he built. The fix: demonstrate that middleware + applications work together. Show the integration. Don't just talk about it — prove it computationally.
 
 This maps to OptimalOS too: the markdown library (applications layer) must integrate with the engine (middleware layer). Neither works alone. The library without the engine is just files. The engine without the library has nothing to search.
 
 ---
 
-## Jordan's Summary
+## Oscar's Summary
 
 > "This is not a chatbot. This is not a standard AI assistant. This is a cognitive replication system."
 
-> "A mega, super fucking god Jarvis system that can basically do everything and anything."
+> "A mega, super fucking god Atlas system that can basically do everything and anything."
 
 > "I wanna spend my time on subjective analytical thinking, and I want my AI to pull up all the shit."

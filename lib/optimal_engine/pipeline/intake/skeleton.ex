@@ -182,7 +182,7 @@ defmodule OptimalEngine.Pipeline.Intake.Skeleton do
 
   ## Example
 
-      apply_skeleton("note", "Roberto said pricing is $99/mo")
+      apply_skeleton("note", "Alice said pricing is $99/mo")
       # => "## Context\\n\\nRoberto said pricing is $99/mo\\n\\n## Content\\n\\n## Route\\n\\n"
   """
   @spec apply_skeleton(String.t(), String.t()) :: String.t()

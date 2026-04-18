@@ -271,7 +271,7 @@ class EntityExtractor:
 
 **Why topology.yaml is the source:**
 Entity names live in `topology.yaml` under `endpoints:`. Loading them from there means
-Roberto can add a new person to the YAML and the entity extractor picks them up automatically.
+Alice can add a new person to the YAML and the entity extractor picks them up automatically.
 No code change required.
 
 ---
@@ -298,7 +298,7 @@ class Router:
 
 **This is the key organizational differentiator:**
 Mem0 has no routing concept. OpenViking routes by session. We route by *signal properties*
-against an organizational topology. "Ed called about pricing" → `ai-masters` AND `money-revenue`.
+against an organizational topology. "Customer called about pricing" → `ai-masters` AND `money-revenue`.
 The routing logic lives in `topology.yaml`, not in code.
 
 ---
@@ -492,7 +492,7 @@ class TopologyLoader:
 ```
 
 **This eliminates the hardcoded `NODE_MAP`, `INDEX_DIRS`, and entity name dicts from `optimal.py`.**
-Roberto edits `topology.yaml` → engine picks it up on next run. Zero code changes required.
+Alice edits `topology.yaml` → engine picks it up on next run. Zero code changes required.
 
 ---
 
@@ -645,7 +645,7 @@ No module in `cli/` imports from `store/`. All cross-cutting state flows through
 | Routing | Session-based | None | None | **topology.yaml rule engine** |
 | Temporal decay | None | None | None | **Genre-specific half-lives** |
 | Tier loading | None | None | None | **L0/L1/L2/L3 pre-computed** |
-| Config source | Code | Code | Code | **topology.yaml (Roberto edits YAML)** |
+| Config source | Code | Code | Code | **topology.yaml (Alice edits YAML)** |
 | Stdlib only (core) | No | No | No | **Yes** |
 | Phase 0 → Phase 1 | N/A | N/A | N/A | **Pluggable ports: add embedder to HybridSearchEngine** |
 

@@ -96,7 +96,7 @@ valid_until: null                 # null = still valid
 supersedes: doc_x9y8z7w6          # temporal chain link
 
 entities:
-  - "[[Roberto Luna]]"
+  - "[[Alice]]"
   - "[[OptimalOS]]"
   - "[[Context System]]"
 
@@ -276,10 +276,10 @@ The knowledge graph stores relationships as RDF triples and runs OWL 2 RL infere
 Every relationship is a triple: `(subject, predicate, object)`
 
 ```
-("Roberto Luna", "works_on", "OptimalOS")
+("Alice", "works_on", "OptimalOS")
 ("OptimalOS", "uses", "SignalGraph")
 ("SignalGraph", "implements", "DIKW hierarchy")
-("Roberto Luna", "decided", "ADR-001")
+("Alice", "decided", "ADR-001")
 ("ADR-001", "supersedes", "ADR-000")
 ```
 
@@ -288,9 +288,9 @@ Every relationship is a triple: `(subject, predicate, object)`
 The OWL 2 RL profile runs on the materialized triple store to derive implicit relationships:
 
 ```
-EXPLICIT:  Roberto works_on OptimalOS
+EXPLICIT:  Alice works_on OptimalOS
 EXPLICIT:  OptimalOS is_a Project
-INFERRED:  Roberto works_on Project   (class inference)
+INFERRED:  Alice works_on Project   (class inference)
 
 EXPLICIT:  ADR-001 supersedes ADR-000
 EXPLICIT:  supersedes is transitive
@@ -315,7 +315,7 @@ When an agent requests context, the knowledge graph returns only triples scoped 
 The `miosa_knowledge` app exposes a SPARQL endpoint for complex graph queries that SQLite's edge table cannot efficiently express:
 
 ```sparql
-# All entities Roberto is connected to within 2 hops
+# All entities Alice is connected to within 2 hops
 SELECT DISTINCT ?connected_entity WHERE {
   <entity:roberto_luna> ?rel1 ?hop1 .
   ?hop1 ?rel2 ?connected_entity .
@@ -347,17 +347,17 @@ Every mutation to the knowledge base follows a four-step protocol:
 
 ```
 BEFORE:
-  fact_001: Roberto → prefers → Elixir/Phoenix
+  fact_001: Alice → prefers → Elixir/Phoenix
             valid_from: 2025-06-01, valid_until: NULL
 
 MUTATION EVENT:
   New requirement: compute-engine needs syscall-heavy performance work.
 
 AFTER:
-  fact_001: Roberto → prefers → Elixir/Phoenix
+  fact_001: Alice → prefers → Elixir/Phoenix
             valid_from: 2025-06-01, valid_until: 2026-03-16T09:00:00Z
 
-  fact_002: Roberto → prefers → Elixir/Phoenix + Go
+  fact_002: Alice → prefers → Elixir/Phoenix + Go
             valid_from: 2026-03-16T09:00:00Z, valid_until: NULL
             supersedes: fact_001
             reason: "Added Go for compute-engine performance requirements"
@@ -377,7 +377,7 @@ AFTER:
 #### Time-Travel Queries
 
 ```sql
--- What did Roberto prefer in January 2026?
+-- What did Alice prefer in January 2026?
 SELECT * FROM facts
 WHERE subject_entity = 'roberto_luna'
   AND predicate = 'prefers'

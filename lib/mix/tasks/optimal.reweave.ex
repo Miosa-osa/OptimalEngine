@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Optimal.Reweave do
   and generates update suggestions.
 
   Usage:
-      mix optimal.reweave "Ed Honour"
+      mix optimal.reweave "Alice"
       mix optimal.reweave "pricing" --days 60 --limit 5
       mix optimal.reweave "AI Masters" --days 14 --limit 3
 

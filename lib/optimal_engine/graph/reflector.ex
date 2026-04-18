@@ -11,8 +11,8 @@ defmodule OptimalEngine.Graph.Reflector do
   ## Suggestion shape
 
       %{
-        source: "Roberto",
-        target: "Ed Honour",
+        source: "Alice",
+        target: "Alice",
         cooccurrences: 4,
         confidence: 0.8,
         suggested_relation: "works_with",
@@ -22,7 +22,7 @@ defmodule OptimalEngine.Graph.Reflector do
   ## Usage
 
       {:ok, suggestions} = OptimalEngine.Graph.Reflector.reflect(min_cooccurrences: 2, limit: 20)
-      {:ok, contexts}    = OptimalEngine.Graph.Reflector.shared_contexts("Roberto", "Ed Honour")
+      {:ok, contexts}    = OptimalEngine.Graph.Reflector.shared_contexts("Alice", "Alice")
   """
 
   require Logger

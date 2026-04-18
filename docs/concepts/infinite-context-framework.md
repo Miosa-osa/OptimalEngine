@@ -1,6 +1,6 @@
 # The Infinite Context Framework
 ## A Universal Architecture for Context-Aware AI Systems
-### By Roberto H. Luna | Signal Theory Research | March 2026
+### By Alice H. Luna | Signal Theory Research | March 2026
 
 ---
 
@@ -386,7 +386,7 @@ where k = 60, i = each search mode, d = each document
 Every artifact that enters the system gets auto-classified:
 
 ```
-INPUT: "Ed called about the $99 pricing for AI Masters"
+INPUT: "Customer called about the $99 pricing for AI Masters"
 
 CLASSIFICATION:
   Mode:      linguistic (text)
@@ -401,7 +401,7 @@ ROUTING:
 
 EXTRACTION:
   Decision:  "$99 pricing for AI Masters" → context.md Key Decisions
-  Person:    Ed Honour → 10-team update
+  Person:    Alice → 10-team update
   Financial: $99/mo × projected members → 11-money-revenue
   Action:    None extracted (informational)
 
@@ -425,7 +425,7 @@ signal_versions:
     value: "$99/mo community"
     timestamp: 2026-03-17T14:30:00Z
     source: "Ed call"
-    decision_by: Roberto
+    decision_by: Alice
 
   - id: sv_002
     node: ai-masters
@@ -433,7 +433,7 @@ signal_versions:
     value: "$90/mo community"
     timestamp: 2026-03-18T10:15:00Z
     source: "Team discussion"
-    decision_by: Roberto
+    decision_by: Alice
     reason: "Rounded down for psychological pricing"
 ```
 

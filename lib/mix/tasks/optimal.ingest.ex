@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Optimal.Ingest do
   classify → route → write signal files to disk → index in SQLite.
 
   Usage:
-      mix optimal.ingest "Ed called about AI Masters pricing"
+      mix optimal.ingest "Customer called about AI Masters pricing"
       mix optimal.ingest "$(cat path/to/file.md)"
       mix optimal.ingest --file path/to/file.md
       mix optimal.ingest --file docs/notes.md --genre transcript --title "Team Sync"

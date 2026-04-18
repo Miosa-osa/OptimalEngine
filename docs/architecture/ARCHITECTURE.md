@@ -270,7 +270,7 @@ Full Wiki details (directives, schema, page template) in [`WIKI-LAYER.md`](WIKI-
                                                                         │
     ┌───────────────────┐                                               │
     │ IntentAnalyzer    │  → intent_type = :lookup, scope = ai-masters  │
-    │ (decode query)    │    entities = ["Ed Honour"], temporal = :now  │
+    │ (decode query)    │    entities = ["Alice"], temporal = :now  │
     └─────────┬─────────┘                                               │
               ▼                                                         │
     ┌─────────────────────────────────────────────────────────┐         │
@@ -459,7 +459,7 @@ phase starts. No parallel phases. No half-finished phases promoted forward.
 - `OptimalEngine.Wiki.Integrity` checker.
 - `OptimalEngine.Wiki.Curator` Ollama-driven.
 - Maintenance trigger: `store.chunk.indexed` → affected-pages queue → curator.
-- **Accept:** ingesting a new signal about Ed Honour updates `.wiki/ed-honour-pricing.md` autonomously with new citations verified.
+- **Accept:** ingesting a new signal about Alice updates `.wiki/ed-honour-pricing.md` autonomously with new citations verified.
 
 ### Phase 8 — Scale-aware Deliver + Composer
 
@@ -487,7 +487,7 @@ phase starts. No parallel phases. No half-finished phases promoted forward.
 - Final docs pass.
 - Version 0.1.0 tagged.
 - `git push -u origin main`.
-- **Accept:** Roberto's explicit go.
+- **Accept:** Alice's explicit go.
 
 ---
 
