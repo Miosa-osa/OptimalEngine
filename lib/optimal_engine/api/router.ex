@@ -141,11 +141,16 @@ defmodule OptimalEngine.API.Router do
 
   # Runtime metrics snapshot (Phase 10 Telemetry module).
   get "/api/metrics" do
+    # `try/rescue` doesn't catch GenServer exits (they aren't exceptions).
+    # `try/catch :exit` does. Without this, a downed Telemetry GenServer
+    # would crash this request handler instead of returning the fallback.
     snap =
       try do
         Telemetry.snapshot()
       rescue
         _ -> %{counters: %{}, histograms: %{}, uptime_ms: 0}
+      catch
+        :exit, _ -> %{counters: %{}, histograms: %{}, uptime_ms: 0}
       end
 
     json(conn, snap)

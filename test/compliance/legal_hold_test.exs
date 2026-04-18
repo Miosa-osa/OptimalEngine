@@ -24,10 +24,10 @@ defmodule OptimalEngine.Compliance.LegalHoldTest do
 
     {:ok, hold_id} = LegalHold.place(sig_id, "user:legal", "litigation hold")
     assert is_integer(hold_id)
-    assert LegalHold.held?(sig_id)
+    assert {:ok, true} = LegalHold.held?(sig_id)
 
     :ok = LegalHold.release(hold_id)
-    refute LegalHold.held?(sig_id)
+    assert {:ok, false} = LegalHold.held?(sig_id)
   end
 
   test "active/1 lists open holds" do

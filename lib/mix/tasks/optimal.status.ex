@@ -110,6 +110,6 @@ defmodule Mix.Tasks.Optimal.Status do
   rescue
     _ -> %{uptime_ms: 0, counters: %{}, histograms: %{}}
   catch
-    _, _ -> %{uptime_ms: 0, counters: %{}, histograms: %{}}
+    :exit, _ -> %{uptime_ms: 0, counters: %{}, histograms: %{}}
   end
 end
