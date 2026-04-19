@@ -484,6 +484,207 @@ defmodule Mix.Tasks.Optimal.Seed do
           {"Henry", "person"},
           {"Alice", "person"}
         ]
+      },
+      %{
+        slug: "beginner-track-pilot",
+        node: "04-academy-beginner",
+        title: "Beginner track pilot — 12-week curriculum",
+        genre: "plan",
+        abstract: "Beginner track curriculum pilot ready; first cohort in two weeks.",
+        content:
+          "Beginner track curriculum locked: 12 weeks, 3 modules, weekly live session. Alice co-teaching with Ivan. Judy runs office hours. First cohort launches in two weeks; Dan will drive enrollment.",
+        entities: [
+          {"Alice", "person"},
+          {"Ivan", "person"},
+          {"Judy", "person"},
+          {"Dan", "person"},
+          {"Customer Academy", "operation"}
+        ]
+      },
+      %{
+        slug: "advanced-track-labs",
+        node: "04-academy-advanced",
+        title: "Advanced track — hands-on labs specification",
+        genre: "spec",
+        abstract: "Advanced track labs spec — 8 hands-on exercises covering the full pipeline.",
+        content:
+          "Advanced track labs: 8 exercises covering ingest → classify → embed → retrieve → curate. Bob authors the retrieval labs. Carol authors the embedding labs. Ivan covers the pipeline glue. Peer review by Alice before ship.",
+        entities: [
+          {"Bob", "person"},
+          {"Carol", "person"},
+          {"Ivan", "person"},
+          {"Alice", "person"},
+          {"Customer Academy", "operation"}
+        ]
+      },
+      %{
+        slug: "investor-deck-v2",
+        node: "02-platform-investors",
+        title: "Investor deck v2 — revenue model update",
+        genre: "plan",
+        abstract: "Investor deck v2 updates the revenue model and adds partner traction slide.",
+        content:
+          "Investor deck v2: added partner traction slide (healthtech, 3 signed), revised revenue model (SaaS + services), tightened the ask to $8M Series A. Grace reviewed; Alice to present to Karl next week.",
+        entities: [
+          {"Grace", "person"},
+          {"Alice", "person"},
+          {"Karl", "person"},
+          {"Investor Deck", "product"}
+        ]
+      },
+      %{
+        slug: "healthtech-partner-onboarding",
+        node: "06-partners-healthtech",
+        title: "Healthtech partner onboarding — runbook",
+        genre: "spec",
+        abstract: "Runbook for onboarding a new healthtech partner in under 10 days.",
+        content:
+          "Healthtech onboarding runbook: day 1 kickoff, day 2-4 data mapping, day 5 staging deploy, day 7 pilot users, day 10 go-live. Dan is the accountable owner. Eve runs the technical handoff. Heidi handles legal.",
+        entities: [
+          {"Dan", "person"},
+          {"Eve", "person"},
+          {"Heidi", "person"},
+          {"Healthtech Product", "product"},
+          {"Partner Network", "org"}
+        ]
+      },
+      %{
+        slug: "media-content-calendar",
+        node: "08-media",
+        title: "Q1 media content calendar",
+        genre: "plan",
+        abstract: "Q1 media calendar — 12 episodes, 3 content pillars, weekly cadence.",
+        content:
+          "Q1 media calendar confirmed: 12 episodes across 3 pillars (platform deep-dives, customer stories, industry analysis). Carol produces, Eve edits, Frank hosts. Target is 2x subscriber growth by end of Q1.",
+        entities: [
+          {"Carol", "person"},
+          {"Eve", "person"},
+          {"Frank", "person"},
+          {"Media Stack", "product"}
+        ]
+      },
+      %{
+        slug: "security-audit-followup",
+        node: "02-platform-core",
+        title: "Security audit — remediation plan",
+        genre: "decision_log",
+        abstract: "Security audit closed with 3 mediums + 1 high; remediation plan shipped.",
+        content:
+          "Security audit results: 3 medium findings (session handling, input validation, rate limiting), 1 high finding (ACL propagation bug). Carol fixes the high this week. Bob owns the mediums across the sprint. Nina verifies before close-out.",
+        entities: [
+          {"Carol", "person"},
+          {"Bob", "person"},
+          {"Nina", "person"},
+          {"Core Platform", "product"}
+        ]
+      },
+      %{
+        slug: "customer-success-q4-review",
+        node: "04-academy",
+        title: "Customer success Q4 review",
+        genre: "note",
+        abstract: "Q4 customer-success metrics — NPS 54, retention 91%, expansion 38%.",
+        content:
+          "Q4 customer success: NPS 54 (up from 47), retention 91% (flat), expansion revenue 38% (up from 29%). Judy drove the expansion number via quarterly health checks. Alice wants to double expansion next quarter.",
+        entities: [
+          {"Judy", "person"},
+          {"Alice", "person"},
+          {"Customer Academy", "operation"}
+        ]
+      },
+      %{
+        slug: "data-architecture-review",
+        node: "02-platform-core",
+        title: "Data-architecture review — new signal types",
+        genre: "spec",
+        abstract: "Review of adding time-series + geo signal types to the data-architecture registry.",
+        content:
+          "Data-architecture review: adding time-series (IoT telemetry) and geo (polygon / trajectory) as first-class modalities. Carol designs the processor bindings. Bob extends the SQL schema. Ivan writes the tests. Target: ship in 2 sprints.",
+        entities: [
+          {"Carol", "person"},
+          {"Bob", "person"},
+          {"Ivan", "person"},
+          {"DataArchitecture", "product"},
+          {"time-series", "concept"},
+          {"geo", "concept"}
+        ]
+      },
+      %{
+        slug: "partner-renewal-pipeline",
+        node: "06-partners",
+        title: "Partner renewal pipeline — Q1",
+        genre: "plan",
+        abstract: "6 partner renewals in Q1 pipeline — 4 likely, 2 at risk.",
+        content:
+          "Q1 partner renewals: 6 in flight — 4 likely (Acme Clinics, BetaHealth, CareLink, DentAI) and 2 at risk (EpicMed, FastScan). Dan runs point. Eve handles the technical uplift clauses. Heidi redlines contracts.",
+        entities: [
+          {"Dan", "person"},
+          {"Eve", "person"},
+          {"Heidi", "person"},
+          {"Partner Network", "org"},
+          {"Healthtech Product", "product"}
+        ]
+      },
+      %{
+        slug: "office-hours-learnings",
+        node: "04-academy-beginner",
+        title: "Office hours — week 4 learnings",
+        genre: "note",
+        abstract: "Week 4 office hours feedback — two concept gaps identified.",
+        content:
+          "Office hours week 4: two consistent concept gaps — students struggle with chunk-level ACLs and the S/N ratio. Judy recommends an extra lecture on each. Alice agrees; update coming next week.",
+        entities: [
+          {"Judy", "person"},
+          {"Alice", "person"},
+          {"Customer Academy", "operation"},
+          {"S/N ratio", "concept"}
+        ]
+      },
+      %{
+        slug: "vendor-selection-embeddings",
+        node: "02-platform-core",
+        title: "Embedding vendor selection — decision",
+        genre: "decision_log",
+        abstract:
+          "Decision: default to local nomic-embed-text + nomic-embed-vision, with optional cloud fallback.",
+        content:
+          "After the vendor review (local vs. cloud embedders, cost, latency, alignment), decided to default to local nomic-embed-text + nomic-embed-vision. Cloud fallback for enterprise tenants who opt in. Ivan implements the config switch. Carol verifies alignment across the two spaces.",
+        entities: [
+          {"Ivan", "person"},
+          {"Carol", "person"},
+          {"Core Platform", "product"},
+          {"embeddings", "concept"}
+        ]
+      },
+      %{
+        slug: "compliance-soc2-scoping",
+        node: "02-platform",
+        title: "SOC 2 scoping — Type II path",
+        genre: "plan",
+        abstract: "SOC 2 Type II scope defined; target audit window starts Q2.",
+        content:
+          "SOC 2 Type II scope: all tenant data processing + credential storage + audit log. Observation window starts Q2. Heidi owns policy drafts. Carol runs technical controls. Bob fixes the audit trail gaps.",
+        entities: [
+          {"Heidi", "person"},
+          {"Carol", "person"},
+          {"Bob", "person"},
+          {"SOC 2", "concept"}
+        ]
+      },
+      %{
+        slug: "founder-weekly-notes",
+        node: "01-founder",
+        title: "Founder weekly — focus notes",
+        genre: "note",
+        abstract: "Weekly focus: close Series A, ship 3D graph, hire head of growth.",
+        content:
+          "Weekly focus: close Series A (Karl lead), ship 3D graph viewer, hire head of growth. Unblock Carol on the data-architecture review; unblock Dan on the two at-risk renewals. Skip the vendor call — delegate to Ivan.",
+        entities: [
+          {"Karl", "person"},
+          {"Carol", "person"},
+          {"Dan", "person"},
+          {"Ivan", "person"}
+        ]
       }
     ]
   end

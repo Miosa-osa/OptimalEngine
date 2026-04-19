@@ -45,12 +45,14 @@ export interface RagEnvelope {
 export interface RagResult {
   source: "wiki" | "chunks" | "empty";
   envelope: RagEnvelope;
+  // Elixir emits keys verbatim including `?` — these match the wire shape.
   trace: {
-    wiki_hit: boolean;
+    "wiki_hit?": boolean;
     n_candidates: number;
     n_delivered: number;
-    truncated: boolean;
+    "truncated?": boolean;
     elapsed_ms: number;
+    intent?: unknown;
   };
 }
 

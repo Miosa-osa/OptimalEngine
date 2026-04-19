@@ -124,8 +124,10 @@ defmodule OptimalEngine.Health do
         {:error, :connector_key_missing}
 
       true ->
-        # No connectors registered yet → absence is benign.
-        {:warn, :connector_key_unset}
+        # No connectors registered yet + no key set — that's the default
+        # dev state, not a degraded one. Credential encryption only
+        # matters once a connector is wired up.
+        :ok
     end
   end
 

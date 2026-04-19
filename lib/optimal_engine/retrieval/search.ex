@@ -105,9 +105,14 @@ defmodule OptimalEngine.Retrieval.Search do
   def handle_call({:search, query, opts}, _from, state) do
     start = System.monotonic_time(:millisecond)
 
-    # Try hybrid search first, fall back to FTS-only
+    # `embed_healthy?` is stronger than `available?` — it verifies Ollama
+    # actually returns a non-empty vector, not just that /api/tags
+    # responds. When embeddings are flaky (missing model / partial
+    # load / cold start) we skip the whole hybrid path and serve
+    # FTS-only results so retrieval stays sub-second instead of
+    # queuing behind a slow embed.
     raw_result =
-      if Ollama.available?() and hybrid_enabled?() do
+      if hybrid_enabled?() and Ollama.embed_healthy?() do
         case do_hybrid_search(query, opts, state.topology) do
           {:ok, _} = ok -> ok
           {:error, _} -> do_search(query, opts, state.topology)
@@ -206,8 +211,19 @@ defmodule OptimalEngine.Retrieval.Search do
     min_score = Keyword.get(opts, :min_score, 0.0)
     alpha = hybrid_alpha()
 
-    # Step 1: Analyze intent
-    {:ok, intent} = IntentAnalyzer.analyze(query)
+    # Step 1: Intent analysis. LLM-based expansion costs 5-8 seconds on a
+    # local generate call, which is not acceptable on the hot retrieval
+    # path. Use the fast regex fallback by default; opt in with
+    # `expand_intent: true` for offline or background workloads.
+    intent =
+      if Keyword.get(opts, :expand_intent, false) do
+        case IntentAnalyzer.analyze(query) do
+          {:ok, i} -> i
+          _ -> %{expanded_query: query, key_entities: [], node_hints: []}
+        end
+      else
+        %{expanded_query: query, key_entities: [], node_hints: []}
+      end
 
     # Step 2: Run FTS5 search (existing pipeline) — get more results for merging
     fts_opts = Keyword.put(opts, :limit, limit * 3)
@@ -218,10 +234,13 @@ defmodule OptimalEngine.Retrieval.Search do
         _ -> []
       end
 
-    # Step 3: Run vector search
+    # Step 3: Run vector search. Ollama sometimes returns an empty
+    # embedding list for degenerate queries (empty strings, very short
+    # tokens, partial model load). Skip the vector hop in that case so
+    # we don't chase a zero-vector through VectorStore.
     vector_results =
       case Ollama.embed(query) do
-        {:ok, query_embedding} ->
+        {:ok, query_embedding} when is_list(query_embedding) and query_embedding != [] ->
           vector_opts = [
             limit: limit * 3,
             min_similarity: 0.1
