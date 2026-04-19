@@ -85,11 +85,21 @@ mix test                    # expect 1,075/1,075 passing
 First ingest + search:
 
 ```bash
-mix optimal.seed            # loads a realistic 10-signal / 12-node demo dataset
-mix optimal.ingest "Customer called about pricing, wants $2K per seat" --genre note
-mix optimal.search "pricing"
-mix optimal.rag "ClinicIQ pricing" --trace
-mix optimal.l0
+# Walk the sample-workspace/ directory — 6 nodes, 13 signals, 2
+# curated wiki pages — and run them through the full pipeline.
+mix optimal.ingest_workspace sample-workspace/
+
+mix optimal.search "platform"
+mix optimal.rag "healthtech pricing decision" --trace
+mix optimal.wiki list
+```
+
+See [`sample-workspace/README.md`](sample-workspace/README.md) for the
+on-disk convention (nodes / signals / wiki / architectures) with
+filled-in example files. Scaffold a fresh workspace from it with:
+
+```bash
+mix optimal.init ~/my-engine
 ```
 
 Browse the engine in a desktop window:
