@@ -38,6 +38,53 @@ defmodule OptimalEngine.Embed.Ollama do
   end
 
   @doc """
+  Stronger than `available?/0` — actually tries an embed probe and
+  verifies a non-empty vector comes back. Cached for 60 s per process
+  so callers in a tight retrieval loop don't re-probe every call.
+
+  `/api/tags` can be up while `/api/embed` returns empty for missing
+  models or partial loads; `available?/0` only catches the former.
+  This variant is what the search layer uses to decide whether to
+  spend time on a vector hop.
+  """
+  @spec embed_healthy?() :: boolean()
+  def embed_healthy? do
+    now = System.monotonic_time(:millisecond)
+    key = :oe_ollama_embed_health
+
+    case Process.get(key) do
+      {result, cached_at} when now - cached_at < @availability_ttl_ms ->
+        result
+
+      _ ->
+        # Bound the probe to ~1 s via a dedicated Task so a hung Ollama
+        # can't stall the caller for 5–30 s on first use. A healthy
+        # local embedder round-trips in tens of milliseconds; anything
+        # slower than 1 s is disqualified from the hot retrieval path.
+        task =
+          Task.async(fn ->
+            case embed_text("probe",
+                   model:
+                     Application.get_env(:optimal_engine, :ollama, [])[:embed_model] ||
+                       "nomic-embed-text"
+                 ) do
+              {:ok, v} when is_list(v) and v != [] -> true
+              _ -> false
+            end
+          end)
+
+        result =
+          case Task.yield(task, 1_000) || Task.shutdown(task, :brutal_kill) do
+            {:ok, r} when is_boolean(r) -> r
+            _ -> false
+          end
+
+        Process.put(key, {result, now})
+        result
+    end
+  end
+
+  @doc """
   Generates a text embedding vector for the given input.
 
   Returns `{:ok, [float()]}` — a 768-dimension vector from nomic-embed-text.
@@ -172,11 +219,15 @@ defmodule OptimalEngine.Embed.Ollama do
   defp maybe_add_system(body, system), do: Map.put(body, "system", system)
 
   defp config do
+    # 30s was too generous — it let a slow / degraded Ollama stall the
+    # Search GenServer long enough that subsequent searches queued
+    # behind a dead call. 5s fails fast and lets us degrade to FTS-only
+    # retrieval cleanly.
     Application.get_env(:optimal_engine, :ollama,
       host: "http://localhost:11434",
       embed_model: "nomic-embed-text",
       generate_model: "qwen3:8b",
-      timeout_ms: 30_000
+      timeout_ms: 5_000
     )
   end
 
