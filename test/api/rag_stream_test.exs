@@ -19,10 +19,18 @@ defmodule OptimalEngine.API.RagStreamTest do
   import Plug.Test
   import Plug.Conn
 
+  alias OptimalEngine.API.RateLimiter
   alias OptimalEngine.API.Router
   alias OptimalEngine.Wiki.{Page, Store}
 
   @opts Router.init([])
+
+  # Reset the rate-limiter bucket before each test so the full suite does
+  # not trigger 429s when many /api/rag/stream requests share one IP bucket.
+  setup do
+    RateLimiter.reset()
+    :ok
+  end
 
   # ── helpers ──────────────────────────────────────────────────────────────
 
