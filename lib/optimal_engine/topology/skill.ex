@@ -1,4 +1,4 @@
-defmodule OptimalEngine.Workspace.Skill do
+defmodule OptimalEngine.Topology.Skill do
   @moduledoc """
   A named, tenant-scoped capability: `"elixir"`, `"enterprise-sales"`,
   `"phoenix-arbiter-model"`, `"sql-optimization"`.

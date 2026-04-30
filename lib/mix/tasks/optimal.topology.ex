@@ -1,4 +1,4 @@
-defmodule Mix.Tasks.Optimal.Workspace do
+defmodule Mix.Tasks.Optimal.Topology do
   @shortdoc "Inspect the tenant's workspace (nodes + members + skills)"
 
   @moduledoc """
@@ -16,7 +16,7 @@ defmodule Mix.Tasks.Optimal.Workspace do
   use Mix.Task
 
   alias OptimalEngine.Tenancy.Tenant
-  alias OptimalEngine.Workspace
+  alias OptimalEngine.Topology
 
   @impl Mix.Task
   def run(args) do
@@ -46,7 +46,7 @@ defmodule Mix.Tasks.Optimal.Workspace do
   end
 
   defp print_nodes(tenant_id) do
-    case Workspace.list_nodes(tenant_id: tenant_id) do
+    case Topology.list_nodes(tenant_id: tenant_id) do
       {:ok, []} ->
         IO.puts("  No nodes.")
         IO.puts("")
@@ -75,7 +75,7 @@ defmodule Mix.Tasks.Optimal.Workspace do
   end
 
   defp print_skills(tenant_id) do
-    case Workspace.list_skills(tenant_id: tenant_id) do
+    case Topology.list_skills(tenant_id: tenant_id) do
       {:ok, []} ->
         IO.puts("  No skills registered.")
 

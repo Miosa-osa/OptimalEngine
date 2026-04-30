@@ -1,8 +1,8 @@
-defmodule OptimalEngine.Workspace.SkillTest do
+defmodule OptimalEngine.Topology.SkillTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Identity.Principal
-  alias OptimalEngine.Workspace.{PrincipalSkill, Skill}
+  alias OptimalEngine.Topology.{PrincipalSkill, Skill}
 
   describe "Skill.upsert/1" do
     test "creates a skill with defaults" do
