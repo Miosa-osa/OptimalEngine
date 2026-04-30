@@ -1,4 +1,4 @@
-defmodule OptimalEngine.Workspace.NodeMember do
+defmodule OptimalEngine.Topology.NodeMember do
   @moduledoc """
   Ties a principal to a node with an explicit membership kind.
 

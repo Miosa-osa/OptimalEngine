@@ -1,4 +1,4 @@
-defmodule OptimalEngine.Workspace.PrincipalSkill do
+defmodule OptimalEngine.Topology.PrincipalSkill do
   @moduledoc """
   Ties a principal (human OR agent) to a skill at a level, with optional
   evidence (a link, an id of a signal, free text).

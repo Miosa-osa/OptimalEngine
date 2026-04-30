@@ -1,8 +1,8 @@
-defmodule OptimalEngine.Workspace.NodeMemberTest do
+defmodule OptimalEngine.Topology.NodeMemberTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Identity.Principal
-  alias OptimalEngine.Workspace.{Node, NodeMember}
+  alias OptimalEngine.Topology.{Node, NodeMember}
 
   setup do
     suffix = System.unique_integer([:positive])

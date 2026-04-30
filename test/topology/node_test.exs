@@ -1,7 +1,7 @@
-defmodule OptimalEngine.Workspace.NodeTest do
+defmodule OptimalEngine.Topology.NodeTest do
   use ExUnit.Case, async: false
 
-  alias OptimalEngine.Workspace.Node
+  alias OptimalEngine.Topology.Node
 
   describe "upsert/1" do
     test "creates a node with defaults" do

@@ -1,4 +1,4 @@
-defmodule OptimalEngine.Workspace.Node do
+defmodule OptimalEngine.Topology.Node do
   @moduledoc """
   An organizational unit inside a tenant's workspace — a team, a project, an
   external entity, a domain, a named person, etc.
