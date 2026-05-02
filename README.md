@@ -363,6 +363,212 @@ Exposed tools: `ask`, `search`, `grep`, `profile`, `add_memory`, `forget_memory`
 
 ---
 
+## The second brain for your agent
+
+The Optimal Engine is designed to be the **memory backend for any agent harness** — whether that's OSA (Operating System Agent), BusinessOS, Claude Code, a custom LangChain/LangGraph pipeline, or a bare-bones script. The engine doesn't care what agent talks to it; it cares that every agent gets cited, permission-scoped, audience-shaped context.
+
+### How agent integration works
+
+```
+┌─────────────────────────────────────────────────┐
+│  YOUR AGENT HARNESS                             │
+│  (OSA · BusinessOS · Claude Code · LangChain)   │
+│                                                 │
+│  ┌───────────┐  ┌──────────┐  ┌──────────────┐ │
+│  │ CLI tools  │  │ MCP      │  │ SDK client   │ │
+│  │ mix optimal│  │ 9 tools  │  │ TS / Python  │ │
+│  └─────┬──────┘  └────┬─────┘  └──────┬───────┘ │
+│        │              │               │          │
+│        └──────────────┼───────────────┘          │
+│                       ▼                          │
+│               HTTP API (:4200)                   │
+└───────────────────────┬─────────────────────────┘
+                        ▼
+┌─────────────────────────────────────────────────┐
+│  OPTIMAL ENGINE                                 │
+│  9-stage pipeline → 3-tier memory → wiki        │
+│  workspaces · memories · surfacing              │
+└─────────────────────────────────────────────────┘
+```
+
+Three integration surfaces — use whichever fits your agent's runtime:
+
+| Surface | Best for | Example |
+|---|---|---|
+| **CLI** (`mix optimal.*`) | Shell agents, scripts, CI pipelines | `mix optimal.rag "pricing" --workspace engineering --format claude` |
+| **MCP** (stdio, 9 tools) | Claude Desktop, Cursor, Windsurf, Zed, any MCP-compatible agent | Add to `claude_desktop_config.json` and the agent gains memory |
+| **SDK** (TypeScript / Python) | Custom agents, LangChain, Vercel AI SDK, OpenAI Agents SDK | `client.ask(query)` / `client.memory.create(...)` |
+
+### Example: OSA agent with Optimal Engine as its brain
+
+OSA (Operating System Agent) uses Optimal Engine as its long-term memory and organizational context layer. The agent runtime dispatches sub-agents; each reads from and writes to the engine.
+
+```typescript
+// OSA agent harness — wiring the engine as the second brain
+import { OptimalEngine } from "@optimal-engine/client";
+import { optimalEngineTools } from "@optimal-engine/client/adapters/ai-sdk";
+
+const brain = new OptimalEngine({
+  baseUrl: "http://localhost:4200",
+  workspace: "engineering",
+});
+
+// 1. Load context at session start — the agent knows who it is
+const profile = await brain.profile({ audience: "engineering", bandwidth: "l1" });
+const systemPrompt = `
+You are an engineering assistant.
+
+## What you know (from the second brain)
+${profile.static}
+
+## Recent context
+${profile.dynamic}
+
+## Curated summary
+${profile.curated}
+`;
+
+// 2. During the conversation — recall on demand
+const decisions = await brain.recall.actions({ topic: "microvm isolation" });
+const owner = await brain.recall.who({ topic: "compute engine" });
+
+// 3. After the conversation — persist what was learned
+await brain.memory.create({
+  content: "Team decided to use Firecracker for tenant isolation",
+  isStatic: true,
+  citationUri: "optimal://nodes/02-platform/signals/2026-04-30-standup.md",
+});
+
+// 4. Tools auto-wired — agent can search/recall/remember on its own
+const tools = optimalEngineTools(brain);
+// Pass `tools` to your LLM call (Vercel AI SDK, OpenAI, Anthropic)
+```
+
+### Example: BusinessOS orchestrator with workspace-per-module
+
+BusinessOS runs multiple domain modules (CRM, HR, Finance, Ops). Each module gets its own workspace in the engine — isolated data, isolated wiki, isolated surfacing.
+
+```typescript
+const crm    = new OptimalEngine({ baseUrl: engine, workspace: "crm" });
+const hr     = new OptimalEngine({ baseUrl: engine, workspace: "hr" });
+const finance = new OptimalEngine({ baseUrl: engine, workspace: "finance" });
+
+// CRM agent asks its own brain
+const deals = await crm.ask("renewal pipeline status", { audience: "sales" });
+
+// HR agent asks its own brain — no CRM data leaks through
+const policies = await hr.ask("remote work policy", { audience: "exec" });
+
+// Cross-module: orchestrator can read from multiple workspaces
+const crmProfile = await crm.profile({ bandwidth: "l0" });
+const finProfile = await finance.profile({ bandwidth: "l0" });
+```
+
+### Example: Claude Code with the Claude Skill
+
+Drop the skill into your Claude Code setup and the engine becomes ambient context:
+
+```bash
+# Install the skill
+cp -r skills/optimal-engine/ ~/.claude/skills/optimal-engine/
+
+# Claude Code now:
+# - Loads engine context when relevant queries arise
+# - Has access to 6 reference docs (API, concepts, patterns)
+# - Can bootstrap workspaces via the included script
+```
+
+Or wire via MCP for tool-level integration:
+
+```json
+{
+  "mcpServers": {
+    "optimal-engine": {
+      "command": "npx",
+      "args": ["-y", "@optimal-engine/mcp"],
+      "env": {
+        "OPTIMAL_ENGINE_URL": "http://localhost:4200",
+        "OPTIMAL_WORKSPACE": "default"
+      }
+    }
+  }
+}
+```
+
+Now Claude Code can `ask`, `search`, `grep`, `add_memory`, `forget_memory`, `recall`, and `get_profile` against the engine — your second brain is always in context.
+
+### Example: Python agent with LangChain
+
+```python
+from optimal_engine import OptimalEngine
+from optimal_engine.adapters.langchain import build_tools
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_openai import ChatOpenAI
+
+brain = OptimalEngine(base_url="http://localhost:4200", workspace="research")
+
+# 8 tools: ask, search, grep, profile, add_memory, forget_memory, recall, wiki_get
+tools = build_tools(brain)
+
+llm = ChatOpenAI(model="gpt-4o")
+agent = create_openai_tools_agent(llm, tools, prompt)
+executor = AgentExecutor(agent=agent, tools=tools)
+
+result = executor.invoke({"input": "What decisions were made about pricing?"})
+```
+
+### Example: Batch migration from another system
+
+Moving from Notion / Confluence / a custom wiki? Bulk-import via the batch API:
+
+```bash
+# Export from your existing system to JSON, then:
+curl -X POST http://localhost:4200/api/batch/import/signals \
+  -H 'content-type: application/json' \
+  -d '{
+    "workspace": "migrated",
+    "signals": [
+      {"content": "Q3 pricing decision: $2K/seat", "title": "Pricing", "genre": "decision", "node": "sales"},
+      {"content": "Platform uses Firecracker for isolation", "title": "Infra", "genre": "spec", "node": "platform"},
+      ...
+    ]
+  }'
+# → {"imported": 142, "skipped": 3, "errors": 0}
+
+# Export a full workspace snapshot (for backup or migration to another engine instance):
+curl http://localhost:4200/v1/batch/export/workspace?workspace=engineering > snapshot.json
+```
+
+### Example: Proactive surfacing with webhooks
+
+Subscribe to topics and get POSTed when something relevant surfaces — no polling, no query:
+
+```bash
+# Create a webhook subscription
+curl -X POST http://localhost:4200/v1/subscriptions \
+  -H 'content-type: application/json' \
+  -d '{
+    "workspace": "engineering",
+    "scope": "topic",
+    "scope_value": "pricing",
+    "categories": ["recent_actions", "ownership"],
+    "webhook_url": "https://your-agent.example.com/hooks/brain",
+    "webhook_secret": "whsec_abc123"
+  }'
+
+# Your agent receives POSTs like:
+# POST /hooks/brain
+# X-Optimal-Signature: sha256=<hmac>
+# {
+#   "trigger": "wiki_updated",
+#   "envelope": {"slug": "pricing-decision", "kind": "wiki_page"},
+#   "category": "recent_actions",
+#   "score": 0.95
+# }
+```
+
+---
+
 ## Desktop UI
 
 `desktop/` — SvelteKit shell with Foundation tokens. Glass header, two-dropdown workspace switcher, 12 routes:
