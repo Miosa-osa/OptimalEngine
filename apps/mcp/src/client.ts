@@ -129,6 +129,40 @@ export interface RecallResponse {
   [key: string]: unknown;
 }
 
+export interface RenderContextResponse {
+  spec: {
+    name: string;
+    title: string;
+    audience: string;
+    genre: string;
+    bandwidth: string;
+    constraints: Record<string, string>;
+    html_hints: Record<string, unknown>;
+    modalities: string[];
+  };
+  context: {
+    body: string;
+    format: string;
+    sources: string[];
+    warnings: string[];
+  };
+  prompt_guidance: string;
+  trace: unknown;
+}
+
+export interface RenderSpecsResponse {
+  specs: Array<{
+    name: string;
+    title: string;
+    audience: string;
+    genre: string;
+    bandwidth: string;
+    constraints: Record<string, string>;
+    html_hints: Record<string, unknown>;
+    modalities: string[];
+  }>;
+}
+
 // ---------------------------------------------------------------------------
 // API calls — one function per engine endpoint
 // ---------------------------------------------------------------------------
@@ -209,5 +243,20 @@ export const engine = {
 
   workspaces(params?: { tenant?: string }): Promise<WorkspaceList> {
     return request<WorkspaceList>("/api/workspaces", { params });
+  },
+
+  renderContext(body: {
+    source: string;
+    spec: string;
+    workspace: string;
+  }): Promise<RenderContextResponse> {
+    return request<RenderContextResponse>("/api/render/context", {
+      method: "POST",
+      body,
+    });
+  },
+
+  renderSpecs(params: { workspace: string }): Promise<RenderSpecsResponse> {
+    return request<RenderSpecsResponse>("/api/render/specs", { params });
   },
 };

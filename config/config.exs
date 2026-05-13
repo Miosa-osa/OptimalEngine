@@ -21,8 +21,15 @@ config :optimal_engine, :auth,
 config :optimal_engine, :ollama,
   host: System.get_env("OLLAMA_HOST", "http://localhost:11434"),
   embed_model: "nomic-embed-text",
+  embed_vision_model: "nomic-embed-vision",
   generate_model: "qwen3:8b",
+  vlm_model: System.get_env("OPTIMAL_VLM_MODEL", "qwen2.5-vl"),
+  vlm_timeout_ms: 60_000,
   timeout_ms: 30_000
+
+config :optimal_engine, :video,
+  max_keyframes: 10,
+  scene_threshold: 0.3
 
 config :optimal_engine, :hybrid_search,
   alpha: 0.6,

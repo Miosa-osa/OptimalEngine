@@ -1,15 +1,14 @@
 defmodule OptimalEngine.Architecture.Processors.AudioEmbedder do
   @moduledoc """
-  Audio embedding — stub. Phase 5's embedder wired whisper.cpp for
-  transcription; a true audio embedder (CLAP / AudioCLIP) lands in
-  Phase 15 when we add the wav2vec / audio-modality model.
+  Audio embedding — transcribes via Whisper.cpp, then embeds the
+  transcript text via `nomic-embed-text` (768-d aligned space).
 
-  For now this processor transcribes the audio (if reachable) and
-  emits the transcript as a text-embedding-ready output so downstream
-  retrieval still has something to match against.
+  Falls back gracefully when whisper.cpp or Ollama is unreachable.
   """
 
   @behaviour OptimalEngine.Architecture.Processor
+
+  alias OptimalEngine.Embed.{Ollama, Whisper}
 
   @impl true
   def id, do: :audio_embedder
@@ -24,8 +23,30 @@ defmodule OptimalEngine.Architecture.Processors.AudioEmbedder do
   def init(_config), do: {:ok, %{}}
 
   @impl true
-  def process(_field, _value, _state) do
-    # Phase 15 wiring — return :not_implemented so `Apply` logs + continues.
-    {:error, :not_implemented}
+  def process(_field, value, _state) do
+    with {:ok, path} <- resolve(value),
+         {:ok, %{text: text}} when text != "" <- Whisper.transcribe(path),
+         {:ok, vector} <- Ollama.embed_text(text) do
+      {:ok,
+       %{
+         kind: :embedding,
+         value: vector,
+         metadata: %{
+           dim: length(vector),
+           model: "whisper+nomic-embed-text",
+           transcript: text
+         }
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+      {:ok, %{text: ""}} -> {:error, :empty_transcript}
+      other -> {:error, other}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
   end
+
+  defp resolve(path) when is_binary(path), do: {:ok, path}
+  defp resolve(%{path: p}) when is_binary(p), do: {:ok, p}
+  defp resolve(_), do: {:error, :unresolvable_audio_reference}
 end

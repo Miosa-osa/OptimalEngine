@@ -25,7 +25,8 @@ defmodule OptimalEngine.Architecture.ProcessorRegistry do
     Processors.AudioEmbedder,
     Processors.VideoEmbedder,
     Processors.CodeEmbedder,
-    Processors.TsFeatureExtractor
+    Processors.TsFeatureExtractor,
+    Processors.VlmCaptioner
   ]
 
   @doc "All registered processor modules."

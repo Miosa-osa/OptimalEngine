@@ -375,6 +375,58 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # ── Render pipeline ─────────────────────────────────────────────────────
+  #
+  # 1-source → N-renders: the engine assembles audience-matched context and
+  # prompt guidance; the calling agent generates the final HTML via its LLM.
+
+  # GET /api/render/specs — list all render specs for a workspace.
+  get "/api/render/specs" do
+    workspace = query_param(conn, "workspace", "default")
+    specs = OptimalEngine.Render.Registry.list(workspace)
+    json(conn, %{specs: Enum.map(specs, &OptimalEngine.Render.Spec.to_map/1)})
+  end
+
+  # POST /api/render/context — assemble context for a specific render spec.
+  # Body: {"source": "architecture", "spec": "exec", "workspace": "default"}
+  # Returns: {spec, context (RAG envelope), prompt_guidance}
+  post "/api/render/context" do
+    body = conn.body_params || %{}
+    source = body["source"]
+    spec_name = body["spec"]
+    workspace_id = body["workspace"] || "default"
+
+    with source when is_binary(source) and source != "" <- source,
+         spec_name when is_binary(spec_name) and spec_name != "" <- spec_name,
+         {:ok, spec} <- OptimalEngine.Render.Registry.get(workspace_id, spec_name) do
+      receiver =
+        Receiver.new(%{
+          format: :markdown,
+          bandwidth: spec.bandwidth,
+          audience: spec.audience,
+          genre: spec.genre
+        })
+
+      {:ok, rag_result} = Retrieval.ask(source, receiver: receiver, workspace_id: workspace_id)
+
+      json(conn, %{
+        spec: OptimalEngine.Render.Spec.to_map(spec),
+        context: rag_result.envelope,
+        prompt_guidance: OptimalEngine.Render.Spec.prompt_guidance(spec),
+        trace: rag_result.trace
+      })
+    else
+      nil ->
+        send_resp(conn, 400, Jason.encode!(%{error: "source and spec are required"}))
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "render spec not found"}))
+
+      _ ->
+        send_resp(conn, 400, Jason.encode!(%{error: "source and spec are required"}))
+    end
+  end
+
   # Wiki listing — GET /api/wiki?tenant=default&workspace=default
   get "/api/wiki" do
     tenant = query_param(conn, "tenant", "default")

@@ -364,3 +364,42 @@ export interface ArchitectureEntry {
   description?: string;
   [key: string]: unknown;
 }
+
+// ---------------------------------------------------------------------------
+// Render pipeline
+// ---------------------------------------------------------------------------
+
+export interface RenderSpec {
+  name: string;
+  title: string;
+  audience: string;
+  genre: string;
+  bandwidth: string;
+  constraints: Record<string, string>;
+  html_hints: Record<string, unknown>;
+  modalities: string[];
+}
+
+export interface RenderContextOptions {
+  workspace?: string;
+}
+
+export interface RenderContextResult {
+  spec: RenderSpec;
+  context: {
+    body: string;
+    format: string;
+    sources: string[];
+    warnings: string[];
+  };
+  prompt_guidance: string;
+  trace: Record<string, unknown>;
+}
+
+export interface ListRenderSpecsOptions {
+  workspace?: string;
+}
+
+export interface RenderSpecsResult {
+  specs: RenderSpec[];
+}

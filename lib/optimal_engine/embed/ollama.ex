@@ -200,6 +200,102 @@ defmodule OptimalEngine.Embed.Ollama do
     end
   end
 
+  @doc """
+  Analyze an image using a Vision-Language Model (VLM).
+
+  Sends the image to a multimodal model (default: `qwen2.5-vl`) via
+  Ollama's `/api/generate` endpoint with the `images` array. Returns
+  the model's text description of the image.
+
+  Accepts a filesystem path or raw binary bytes. Uses a longer timeout
+  than embedding calls since VLM inference is slower.
+
+  ## Options
+  - `:model` — override the VLM model (default from config `:vlm_model`)
+  - `:system` — system prompt
+  - `:timeout_ms` — override the VLM timeout (default from config `:vlm_timeout_ms`)
+  """
+  @spec vlm_analyze(String.t() | binary(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def vlm_analyze(path_or_bytes, prompt, opts \\ [])
+
+  def vlm_analyze(path, prompt, opts) when is_binary(path) and is_binary(prompt) do
+    cond do
+      File.exists?(path) ->
+        case File.read(path) do
+          {:ok, bytes} -> vlm_analyze_bytes(bytes, prompt, opts)
+          {:error, reason} -> {:error, reason}
+        end
+
+      true ->
+        vlm_analyze_bytes(path, prompt, opts)
+    end
+  end
+
+  @doc """
+  Returns `true` if the configured VLM model is available in Ollama.
+
+  Checks `/api/tags` for the model name. Cached for 60s per process.
+  """
+  @spec vlm_available?() :: boolean()
+  def vlm_available? do
+    now = System.monotonic_time(:millisecond)
+    key = :oe_ollama_vlm_available
+
+    case Process.get(key) do
+      {result, cached_at} when now - cached_at < @availability_ttl_ms ->
+        result
+
+      _ ->
+        result = check_vlm_availability()
+        Process.put(key, {result, now})
+        result
+    end
+  end
+
+  defp vlm_analyze_bytes(bytes, prompt, opts) do
+    cfg = config()
+    model = Keyword.get(opts, :model, cfg[:vlm_model] || "qwen2.5-vl")
+    timeout = Keyword.get(opts, :timeout_ms, cfg[:vlm_timeout_ms] || 60_000)
+    encoded = Base.encode64(bytes)
+
+    body =
+      %{"model" => model, "prompt" => prompt, "images" => [encoded], "stream" => false}
+      |> maybe_add_system(Keyword.get(opts, :system))
+
+    case post_json("/api/generate", body, timeout) do
+      {:ok, %{"response" => text}} ->
+        {:ok, text}
+
+      {:ok, response} ->
+        Logger.warning("Ollama vlm_analyze: unexpected response shape: #{inspect(response)}")
+        {:error, :unexpected_response}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp check_vlm_availability do
+    cfg = config()
+    vlm_model = cfg[:vlm_model] || "qwen2.5-vl"
+
+    case get_json("/api/tags") do
+      {:ok, %{"models" => models}} when is_list(models) ->
+        Enum.any?(models, fn m ->
+          name = m["name"] || m["model"] || ""
+          String.starts_with?(name, vlm_model)
+        end)
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
@@ -231,12 +327,12 @@ defmodule OptimalEngine.Embed.Ollama do
     )
   end
 
-  defp post_json(path, body) do
+  defp post_json(path, body, timeout_override \\ nil) do
     :inets.start()
 
     cfg = config()
     url = (cfg[:host] <> path) |> to_charlist()
-    timeout_ms = cfg[:timeout_ms] || 30_000
+    timeout_ms = timeout_override || cfg[:timeout_ms] || 30_000
 
     headers = [{~c"content-type", ~c"application/json"}]
     content_type = ~c"application/json"
