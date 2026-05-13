@@ -299,39 +299,92 @@ defmodule OptimalEngine.Pipeline.Indexer do
   defp build_binary_context(path) do
     case File.stat(path) do
       {:ok, stat} when stat.size > 0 and stat.size <= @max_file_bytes ->
-        ext = Path.extname(path)
-        filename = Path.basename(path)
-        title = filename |> String.replace(~r/[-_]/, " ") |> String.trim()
-        uri = URI.from_path(path)
-        node = node_from_path(path)
+        case OptimalEngine.Pipeline.run(path, skip_embed: true) do
+          {:ok, %{parsed: parsed}} when parsed.text != "" ->
+            build_parsed_binary_context(path, parsed, stat)
 
-        %Context{
-          id: context_id(path),
-          uri: uri,
-          type: :resource,
-          path: path,
-          title: title,
-          content: "",
-          l0_abstract: "RESOURCE | binary | #{title}",
-          l1_overview: "Binary file: #{filename} (#{ext}, #{stat.size} bytes)",
-          signal: nil,
-          node: node,
-          sn_ratio: 0.3,
-          entities: [],
-          created_at: posix_to_datetime(stat.ctime),
-          modified_at: posix_to_datetime(stat.mtime),
-          routed_to: [node],
-          metadata: %{
-            "extension" => ext,
-            "filename" => filename,
-            "size_bytes" => stat.size,
-            "format" => "binary"
-          }
-        }
+          _ ->
+            build_metadata_only_context(path, stat)
+        end
 
       _ ->
         nil
     end
+  end
+
+  defp build_parsed_binary_context(path, parsed, stat) do
+    ext = Path.extname(path)
+    filename = Path.basename(path)
+    title = filename |> String.replace(~r/[-_]/, " ") |> String.trim()
+    uri = URI.from_path(path)
+    node = node_from_path(path)
+
+    modality = to_string(parsed.modality)
+    content = parsed.text |> String.slice(0, 50_000)
+
+    l0 =
+      case parsed.metadata[:vlm_description] do
+        desc when is_binary(desc) -> String.slice(desc, 0, 200)
+        _ -> String.slice(content, 0, 200)
+      end
+
+    %Context{
+      id: context_id(path),
+      uri: uri,
+      type: :resource,
+      path: path,
+      title: title,
+      content: content,
+      l0_abstract: "#{String.upcase(modality)} | #{node} | #{title}",
+      l1_overview: l0,
+      signal: nil,
+      node: node,
+      sn_ratio: 0.5,
+      entities: [],
+      created_at: posix_to_datetime(stat.ctime),
+      modified_at: posix_to_datetime(stat.mtime),
+      routed_to: [node],
+      metadata: %{
+        "extension" => ext,
+        "filename" => filename,
+        "size_bytes" => stat.size,
+        "format" => modality,
+        "frame_count" => parsed.metadata[:frame_count],
+        "has_vlm" => parsed.metadata[:vlm_description] != nil
+      }
+    }
+  end
+
+  defp build_metadata_only_context(path, stat) do
+    ext = Path.extname(path)
+    filename = Path.basename(path)
+    title = filename |> String.replace(~r/[-_]/, " ") |> String.trim()
+    uri = URI.from_path(path)
+    node = node_from_path(path)
+
+    %Context{
+      id: context_id(path),
+      uri: uri,
+      type: :resource,
+      path: path,
+      title: title,
+      content: "",
+      l0_abstract: "RESOURCE | binary | #{title}",
+      l1_overview: "Binary file: #{filename} (#{ext}, #{stat.size} bytes)",
+      signal: nil,
+      node: node,
+      sn_ratio: 0.3,
+      entities: [],
+      created_at: posix_to_datetime(stat.ctime),
+      modified_at: posix_to_datetime(stat.mtime),
+      routed_to: [node],
+      metadata: %{
+        "extension" => ext,
+        "filename" => filename,
+        "size_bytes" => stat.size,
+        "format" => "binary"
+      }
+    }
   end
 
   defp route_signal(%Signal{} = signal) do

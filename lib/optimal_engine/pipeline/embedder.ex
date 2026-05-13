@@ -151,7 +151,25 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   defp dispatch(%Chunk{modality: :audio}, _opts), do: {:error, :no_embeddable_content}
 
-  # Video: defer to text fallback for now. Phase 10+ extracts frames.
+  # Video: prefer vision embedding on keyframe assets, fall back to text.
+  defp dispatch(%Chunk{modality: :video, asset_ref: ref} = chunk, opts) when is_binary(ref) do
+    asset_path = get_in(opts, [:asset_paths, ref])
+
+    cond do
+      is_binary(asset_path) and File.exists?(asset_path) and image_asset?(asset_path) ->
+        case Ollama.embed_image(asset_path, opts) do
+          {:ok, vector} -> {:ok, vector, "vision+" <> model_name(opts, :image), :video}
+          {:error, _} -> fallback_text(chunk, opts, :video)
+        end
+
+      chunk.text != "" ->
+        fallback_text(chunk, opts, :video)
+
+      true ->
+        {:error, :no_embeddable_content}
+    end
+  end
+
   defp dispatch(%Chunk{modality: :video} = chunk, opts) do
     fallback_text(chunk, opts, :video)
   end
@@ -170,6 +188,12 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   defp model_name(opts, :text), do: Keyword.get(opts, :text_model, @text_model)
   defp model_name(opts, :image), do: Keyword.get(opts, :vision_model, @vision_model)
+
+  @image_extensions ~w(.jpg .jpeg .png .gif .webp .bmp .tiff)
+  defp image_asset?(path) when is_binary(path) do
+    ext = path |> Path.extname() |> String.downcase()
+    ext in @image_extensions
+  end
 
   @doc "The canonical vector dimension for Phase 5 providers (768)."
   @spec dim() :: non_neg_integer()

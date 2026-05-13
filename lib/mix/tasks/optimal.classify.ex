@@ -21,6 +21,7 @@ defmodule Mix.Tasks.Optimal.Classify do
   use Mix.Task
 
   alias OptimalEngine.Pipeline.{Classifier, Decomposer, IntentExtractor, Parser}
+  alias OptimalEngine.Pipeline.Enricher.VlmEnricher
 
   @impl Mix.Task
   def run(args) do
@@ -38,7 +39,8 @@ defmodule Mix.Tasks.Optimal.Classify do
     format = Keyword.get(opts, :format, "summary")
 
     with {:ok, parsed} <- Parser.parse(path),
-         {:ok, tree} <- Decomposer.decompose(parsed),
+         {:ok, enriched} <- VlmEnricher.enrich(parsed),
+         {:ok, tree} <- Decomposer.decompose(enriched),
          {:ok, classifications} <- Classifier.classify_tree(tree),
          {:ok, intents} <- IntentExtractor.extract_tree(tree) do
       render(tree, classifications, intents, format)

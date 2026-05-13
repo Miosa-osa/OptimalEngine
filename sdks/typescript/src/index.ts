@@ -3,6 +3,7 @@ export { OptimalEngineError } from "./error.js";
 export { MemoryClient } from "./memory.js";
 export { WikiClient } from "./profile.js";
 export { RecallClient } from "./recall.js";
+export { RenderClient } from "./render.js";
 export { RetrievalClient } from "./retrieval.js";
 export type {
   SurfaceEvent,
