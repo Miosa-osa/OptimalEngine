@@ -78,9 +78,9 @@ defmodule OptimalEngine.Pipeline.Indexer do
   Indexes a single file immediately (synchronous).
   Useful for CLI tools like `mix optimal.ingest`.
   """
-  @spec index_file(String.t()) :: {:ok, Context.t()} | {:error, term()}
-  def index_file(path) when is_binary(path) do
-    GenServer.call(__MODULE__, {:index_file, path}, 10_000)
+  @spec index_file(String.t(), keyword()) :: {:ok, Context.t()} | {:error, term()}
+  def index_file(path, opts \\ []) when is_binary(path) do
+    GenServer.call(__MODULE__, {:index_file, path, opts}, 10_000)
   end
 
   @doc "Returns the current indexer status."
@@ -135,9 +135,9 @@ defmodule OptimalEngine.Pipeline.Indexer do
   end
 
   @impl true
-  def handle_call({:index_file, path}, _from, state) do
+  def handle_call({:index_file, path, opts}, _from, state) do
     known_entities = known_entity_names(state.topology)
-    result = index_single_file(path, known_entities)
+    result = index_single_file(path, known_entities, opts)
     {:reply, result, state}
   end
 
@@ -202,7 +202,7 @@ defmodule OptimalEngine.Pipeline.Indexer do
       |> Enum.flat_map(fn batch ->
         contexts =
           batch
-          |> Enum.map(&build_context(&1, known_entities))
+          |> Enum.map(&build_context(&1, known_entities, []))
           |> Enum.reject(&is_nil/1)
           |> Enum.map(&maybe_semantic_process/1)
 
@@ -220,8 +220,8 @@ defmodule OptimalEngine.Pipeline.Indexer do
     {:ok, length(results)}
   end
 
-  defp index_single_file(path, known_entities) do
-    with ctx when not is_nil(ctx) <- build_context(path, known_entities),
+  defp index_single_file(path, known_entities, opts) do
+    with ctx when not is_nil(ctx) <- build_context(path, known_entities, opts),
          :ok <- Store.insert_context(ctx) do
       {:ok, ctx}
     else
@@ -230,11 +230,11 @@ defmodule OptimalEngine.Pipeline.Indexer do
     end
   end
 
-  defp build_context(path, known_entities) do
+  defp build_context(path, known_entities, opts) do
     ext = Path.extname(path)
 
     if ext in @binary_extensions do
-      build_binary_context(path)
+      build_binary_context(path, opts)
     else
       build_text_context(path, known_entities)
     end
@@ -296,10 +296,12 @@ defmodule OptimalEngine.Pipeline.Indexer do
     end
   end
 
-  defp build_binary_context(path) do
+  defp build_binary_context(path, opts) do
     case File.stat(path) do
       {:ok, stat} when stat.size > 0 and stat.size <= @max_file_bytes ->
-        case OptimalEngine.Pipeline.run(path, skip_embed: true) do
+        pipeline_opts = Keyword.merge(opts, skip_embed: true)
+
+        case OptimalEngine.Pipeline.run(path, pipeline_opts) do
           {:ok, %{parsed: parsed}} when parsed.text != "" ->
             build_parsed_binary_context(path, parsed, stat)
 
