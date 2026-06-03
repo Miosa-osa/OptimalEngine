@@ -10,6 +10,7 @@ defmodule OptimalEngine.Topology.NodeRelationship do
 
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
+  alias OptimalEngine.Topology.Node
 
   @type relationship_type ::
           :parent_child
@@ -113,26 +114,25 @@ defmodule OptimalEngine.Topology.NodeRelationship do
       updated_at = datetime('now')
     """
 
-    case Store.raw_execute(sql, [
-           id,
-           tenant_id,
-           workspace_id,
-           source_node_id,
-           target_node_id,
-           relationship_type_string,
-           direction,
-           strength,
-           valid_time_start,
-           valid_time_end,
-           lifecycle_state,
-           Jason.encode!(metadata),
-           created_by
-         ]) do
-      :ok ->
-        get(id, tenant_id: tenant_id, workspace_id: workspace_id)
-
-      other ->
-        other
+    with :ok <- validate_node_scope(source_node_id, tenant_id, workspace_id, :source),
+         :ok <- validate_node_scope(target_node_id, tenant_id, workspace_id, :target),
+         :ok <-
+           Store.raw_execute(sql, [
+             id,
+             tenant_id,
+             workspace_id,
+             source_node_id,
+             target_node_id,
+             relationship_type_string,
+             direction,
+             strength,
+             valid_time_start,
+             valid_time_end,
+             lifecycle_state,
+             Jason.encode!(metadata),
+             created_by
+           ]) do
+      get(id, tenant_id: tenant_id, workspace_id: workspace_id)
     end
   end
 
@@ -200,6 +200,14 @@ defmodule OptimalEngine.Topology.NodeRelationship do
       |> binary_part(0, 24)
 
     "node_rel_#{hash}"
+  end
+
+  defp validate_node_scope(node_id, tenant_id, workspace_id, side) do
+    case Node.get(node_id, tenant_id: tenant_id, workspace_id: workspace_id) do
+      {:ok, _node} -> :ok
+      {:error, :not_found} -> {:error, {:node_not_found_in_workspace, side, node_id, workspace_id}}
+      other -> other
+    end
   end
 
   defp select_columns do

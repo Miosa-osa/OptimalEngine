@@ -130,6 +130,30 @@ defmodule OptimalEngine.Topology.NodeTest do
       assert {:ok, chain} = Node.ancestors(g.id)
       assert Enum.map(chain, & &1.id) == [parent.id, a.id, g.id]
     end
+
+    test "rejects parent from another workspace" do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, parent} =
+        Node.upsert(%{
+          workspace_id: "parent-workspace-#{suffix}",
+          slug: "parent",
+          name: "Parent",
+          kind: :unit
+        })
+
+      parent_id = parent.id
+      child_workspace_id = "child-workspace-#{suffix}"
+
+      assert {:error, {:parent_not_found_in_workspace, ^parent_id, ^child_workspace_id}} =
+               Node.upsert(%{
+                 workspace_id: child_workspace_id,
+                 slug: "child",
+                 name: "Child",
+                 kind: :project,
+                 parent_id: parent.id
+               })
+    end
   end
 
   describe "list/1 filters" do

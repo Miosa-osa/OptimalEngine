@@ -134,4 +134,49 @@ defmodule OptimalEngine.Topology.NodeMemberTest do
     assert node_membership_b.node_id == node_b.id
     assert node_membership_b.membership == :observer
   end
+
+  test "add resolves workspace from the node instead of defaulting incorrectly",
+       %{internal: p} do
+    suffix = System.unique_integer([:positive])
+    workspace_id = "membership-resolve-#{suffix}"
+
+    {:ok, node} =
+      Node.upsert(%{
+        workspace_id: workspace_id,
+        slug: "resolved-node",
+        name: "Resolved Node",
+        kind: :project
+      })
+
+    assert :ok = NodeMember.add(node.id, p.id, membership: :owner)
+
+    assert {:ok, [member]} = NodeMember.members_of(node.id, workspace_id: workspace_id)
+    assert member.workspace_id == workspace_id
+    assert member.membership == :owner
+
+    assert {:ok, []} = NodeMember.members_of(node.id, workspace_id: "default")
+  end
+
+  test "add rejects explicit workspace mismatch",
+       %{internal: p} do
+    suffix = System.unique_integer([:positive])
+
+    {:ok, node} =
+      Node.upsert(%{
+        workspace_id: "membership-home-#{suffix}",
+        slug: "home-node",
+        name: "Home Node",
+        kind: :project
+      })
+
+    wrong_workspace_id = "wrong-workspace-#{suffix}"
+
+    assert {:error, {:node_not_found_in_workspace, node_id, ^wrong_workspace_id}} =
+             NodeMember.add(node.id, p.id,
+               workspace_id: wrong_workspace_id,
+               membership: :owner
+             )
+
+    assert node_id == node.id
+  end
 end
