@@ -16,7 +16,8 @@ Raw asset
   -> governed Asset row
   -> parser / model adapter
   -> extracted text, structure, transcript, visual facts, embeddings
-  -> Claims / Facts / Memory Objects when reviewed
+  -> derived Source Package + pending Claim
+  -> Facts / Memory Objects only when reviewed
 ```
 
 The raw asset remains the evidence. Extracted text, OCR, transcripts, visual
@@ -162,6 +163,15 @@ created_by
 policy_version
 derivation_ledger_id
 ```
+
+Completed adapter outputs can already enter the truth lifecycle through:
+
+```text
+MemoryCore.claim_from_asset_adapter_run(run_id, opts)
+```
+
+That bridge preserves the adapter output as a derived Source Package and creates
+a pending Claim. It does not automatically promote the model output to a Fact.
 
 ## Deployment
 
