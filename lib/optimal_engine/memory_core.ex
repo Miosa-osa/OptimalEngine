@@ -13,6 +13,7 @@ defmodule OptimalEngine.MemoryCore do
     KnowledgeLifecycle,
     RetrievalCoordinator,
     SourcePackage,
+    ToolModelGovernance,
     WorkflowSkill
   }
 
@@ -42,4 +43,9 @@ defmodule OptimalEngine.MemoryCore do
   defdelegate generalize_workflow(trace, opts \\ []), to: WorkflowSkill
   defdelegate create_procedural_memory(workflow, opts \\ []), to: WorkflowSkill
   defdelegate package_skill(procedure, opts \\ []), to: WorkflowSkill
+
+  defdelegate register_model_call_operation(opts), to: ToolModelGovernance
+  defdelegate register_mcp_tool_definition(opts), to: ToolModelGovernance
+  defdelegate record_model_call(function_name, input_payload, opts \\ []), to: ToolModelGovernance
+  defdelegate record_tool_call(tool_name, input_payload, opts \\ []), to: ToolModelGovernance
 end

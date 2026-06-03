@@ -618,6 +618,221 @@ defmodule OptimalEngine.MemoryCore.Store do
     ])
   end
 
+  @spec insert_model_call_operation(map()) :: :ok | {:error, term()}
+  def insert_model_call_operation(operation) when is_map(operation) do
+    sql = """
+    INSERT OR REPLACE INTO model_call_operations (
+      id, tenant_id, workspace_id, function_name, model_task_type,
+      execution_mode, risk_class, model_id, model_version, prompt_template_id,
+      input_schema, output_contract, execution_policy, storage_target,
+      prompt_policy_id, cost_policy, expected_confidence_behavior,
+      required_privileges, allowed_partitions, lifecycle_state, rollout_state,
+      suspension_reason, retirement_status, valid_time_start, valid_time_end,
+      transaction_time_start, transaction_time_end, stale_after,
+      access_policy_id, security_labels, partition_ids, metadata, updated_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5,
+      ?6, ?7, ?8, ?9, ?10,
+      ?11, ?12, ?13, ?14,
+      ?15, ?16, ?17,
+      ?18, ?19, ?20, ?21,
+      ?22, ?23, ?24, ?25,
+      ?26, ?27, ?28,
+      ?29, ?30, ?31, ?32, datetime('now')
+    )
+    """
+
+    Store.raw_execute(sql, [
+      operation.id,
+      operation.tenant_id,
+      operation.workspace_id,
+      operation.function_name,
+      operation.model_task_type,
+      Map.get(operation, :execution_mode, "sync"),
+      Map.get(operation, :risk_class, "low"),
+      Map.get(operation, :model_id),
+      Map.get(operation, :model_version),
+      Map.get(operation, :prompt_template_id),
+      JSON.map(Map.get(operation, :input_schema, %{})),
+      JSON.map(Map.get(operation, :output_contract, %{})),
+      JSON.map(Map.get(operation, :execution_policy, %{})),
+      JSON.map(Map.get(operation, :storage_target, %{})),
+      Map.get(operation, :prompt_policy_id),
+      JSON.map(Map.get(operation, :cost_policy, %{})),
+      JSON.map(Map.get(operation, :expected_confidence_behavior, %{})),
+      JSON.list(Map.get(operation, :required_privileges, [])),
+      JSON.list(Map.get(operation, :allowed_partitions, [])),
+      Map.get(operation, :lifecycle_state, "draft"),
+      Map.get(operation, :rollout_state, "disabled"),
+      Map.get(operation, :suspension_reason),
+      Map.get(operation, :retirement_status, "active"),
+      Map.get(operation, :valid_time_start),
+      Map.get(operation, :valid_time_end),
+      Map.get(operation, :transaction_time_start, timestamp()),
+      Map.get(operation, :transaction_time_end),
+      Map.get(operation, :stale_after),
+      Map.get(operation, :access_policy_id),
+      JSON.list(Map.get(operation, :security_labels, [])),
+      JSON.list(Map.get(operation, :partition_ids, [])),
+      JSON.map(Map.get(operation, :metadata, %{}))
+    ])
+  end
+
+  @spec insert_mcp_tool_definition(map()) :: :ok | {:error, term()}
+  def insert_mcp_tool_definition(definition) when is_map(definition) do
+    sql = """
+    INSERT OR REPLACE INTO mcp_tool_definitions (
+      id, tenant_id, workspace_id, tool_name, protocol_adapter_id,
+      implementation_type, enabled_state, registration_source,
+      documentation_links, required_privileges, allowed_partitions,
+      input_schema, output_schema, execution_policy, routing_policy,
+      timeout_policy, cost_policy, audit_policy, lifecycle_state,
+      suspension_reason, retirement_status, valid_time_start, valid_time_end,
+      transaction_time_start, transaction_time_end, stale_after,
+      access_policy_id, security_labels, partition_ids, policy_version,
+      metadata, updated_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5,
+      ?6, ?7, ?8,
+      ?9, ?10, ?11,
+      ?12, ?13, ?14, ?15,
+      ?16, ?17, ?18, ?19,
+      ?20, ?21, ?22, ?23,
+      ?24, ?25, ?26,
+      ?27, ?28, ?29, ?30,
+      ?31, datetime('now')
+    )
+    """
+
+    Store.raw_execute(sql, [
+      definition.id,
+      definition.tenant_id,
+      definition.workspace_id,
+      definition.tool_name,
+      Map.get(definition, :protocol_adapter_id, "mcp"),
+      definition.implementation_type,
+      Map.get(definition, :enabled_state, "disabled"),
+      Map.get(definition, :registration_source),
+      JSON.list(Map.get(definition, :documentation_links, [])),
+      JSON.list(Map.get(definition, :required_privileges, [])),
+      JSON.list(Map.get(definition, :allowed_partitions, [])),
+      JSON.map(Map.get(definition, :input_schema, %{})),
+      JSON.map(Map.get(definition, :output_schema, %{})),
+      JSON.map(Map.get(definition, :execution_policy, %{})),
+      JSON.map(Map.get(definition, :routing_policy, %{})),
+      JSON.map(Map.get(definition, :timeout_policy, %{})),
+      JSON.map(Map.get(definition, :cost_policy, %{})),
+      JSON.map(Map.get(definition, :audit_policy, %{})),
+      Map.get(definition, :lifecycle_state, "draft"),
+      Map.get(definition, :suspension_reason),
+      Map.get(definition, :retirement_status, "active"),
+      Map.get(definition, :valid_time_start),
+      Map.get(definition, :valid_time_end),
+      Map.get(definition, :transaction_time_start, timestamp()),
+      Map.get(definition, :transaction_time_end),
+      Map.get(definition, :stale_after),
+      Map.get(definition, :access_policy_id),
+      JSON.list(Map.get(definition, :security_labels, [])),
+      JSON.list(Map.get(definition, :partition_ids, [])),
+      Map.get(definition, :policy_version),
+      JSON.map(Map.get(definition, :metadata, %{}))
+    ])
+  end
+
+  @spec get_model_call_operation(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def get_model_call_operation(workspace_id, function_name)
+      when is_binary(workspace_id) and is_binary(function_name) do
+    sql = """
+    SELECT id, tenant_id, workspace_id, function_name, model_task_type,
+           execution_mode, risk_class, model_id, model_version, prompt_template_id,
+           input_schema, output_contract, execution_policy, storage_target,
+           prompt_policy_id, cost_policy, expected_confidence_behavior,
+           required_privileges, allowed_partitions, lifecycle_state, rollout_state,
+           suspension_reason, retirement_status, access_policy_id, security_labels,
+           partition_ids, metadata
+    FROM model_call_operations
+    WHERE workspace_id = ?1 AND function_name = ?2
+    """
+
+    case Store.raw_query(sql, [workspace_id, function_name]) do
+      {:ok, [row]} -> {:ok, model_call_operation_from_row(row)}
+      {:ok, []} -> {:error, :not_found}
+      other -> other
+    end
+  end
+
+  @spec get_mcp_tool_definition(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def get_mcp_tool_definition(workspace_id, tool_name, protocol_adapter_id \\ "mcp")
+      when is_binary(workspace_id) and is_binary(tool_name) and is_binary(protocol_adapter_id) do
+    sql = """
+    SELECT id, tenant_id, workspace_id, tool_name, protocol_adapter_id,
+           implementation_type, enabled_state, registration_source,
+           documentation_links, required_privileges, allowed_partitions,
+           input_schema, output_schema, execution_policy, routing_policy,
+           timeout_policy, cost_policy, audit_policy, lifecycle_state,
+           suspension_reason, retirement_status, access_policy_id, security_labels,
+           partition_ids, policy_version, metadata
+    FROM mcp_tool_definitions
+    WHERE workspace_id = ?1 AND tool_name = ?2 AND protocol_adapter_id = ?3
+    """
+
+    case Store.raw_query(sql, [workspace_id, tool_name, protocol_adapter_id]) do
+      {:ok, [row]} -> {:ok, mcp_tool_definition_from_row(row)}
+      {:ok, []} -> {:error, :not_found}
+      other -> other
+    end
+  end
+
+  @spec insert_model_call_run(map()) :: :ok | {:error, term()}
+  def insert_model_call_run(run) when is_map(run) do
+    sql = """
+    INSERT INTO model_call_runs (
+      id, tenant_id, workspace_id, model_call_operation_id, function_name,
+      requesting_actor_id, active_memory_pool_id, decision_state, run_status,
+      rejection_reason, input_payload, output_payload, input_hash, output_hash,
+      required_privileges, granted_privileges, requested_partitions,
+      allowed_partitions, policy_decision, latency_ms, cost_units,
+      source_package_links, observation_links, audit_event_links,
+      access_policy_id, security_labels, partition_ids, metadata
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5,
+      ?6, ?7, ?8, ?9,
+      ?10, ?11, ?12, ?13, ?14,
+      ?15, ?16, ?17,
+      ?18, ?19, ?20, ?21,
+      ?22, ?23, ?24,
+      ?25, ?26, ?27, ?28
+    )
+    """
+
+    Store.raw_execute(sql, run_record_params(run, :model_call_operation_id, :function_name))
+  end
+
+  @spec insert_tool_call_run(map()) :: :ok | {:error, term()}
+  def insert_tool_call_run(run) when is_map(run) do
+    sql = """
+    INSERT INTO tool_call_runs (
+      id, tenant_id, workspace_id, mcp_tool_definition_id, tool_name,
+      requesting_actor_id, active_memory_pool_id, decision_state, run_status,
+      rejection_reason, input_payload, output_payload, input_hash, output_hash,
+      required_privileges, granted_privileges, requested_partitions,
+      allowed_partitions, policy_decision, latency_ms, cost_units,
+      source_package_links, observation_links, audit_event_links,
+      access_policy_id, security_labels, partition_ids, metadata
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5,
+      ?6, ?7, ?8, ?9,
+      ?10, ?11, ?12, ?13, ?14,
+      ?15, ?16, ?17,
+      ?18, ?19, ?20, ?21,
+      ?22, ?23, ?24,
+      ?25, ?26, ?27, ?28
+    )
+    """
+
+    Store.raw_execute(sql, run_record_params(run, :mcp_tool_definition_id, :tool_name))
+  end
+
   @spec insert_active_memory_pool(map()) :: :ok | {:error, term()}
   def insert_active_memory_pool(pool) when is_map(pool) do
     sql = """
@@ -730,6 +945,178 @@ defmodule OptimalEngine.MemoryCore.Store do
       Map.get(pool, :policy_version),
       JSON.map(Map.get(pool, :metadata, %{}))
     ]
+  end
+
+  defp run_record_params(run, definition_id_key, operation_name_key) do
+    [
+      run.id,
+      run.tenant_id,
+      run.workspace_id,
+      Map.get(run, definition_id_key),
+      Map.get(run, operation_name_key),
+      Map.get(run, :requesting_actor_id),
+      Map.get(run, :active_memory_pool_id),
+      run.decision_state,
+      Map.get(run, :run_status, "recorded"),
+      Map.get(run, :rejection_reason),
+      JSON.map(Map.get(run, :input_payload, %{})),
+      JSON.map(Map.get(run, :output_payload, %{})),
+      Map.get(run, :input_hash),
+      Map.get(run, :output_hash),
+      JSON.list(Map.get(run, :required_privileges, [])),
+      JSON.list(Map.get(run, :granted_privileges, [])),
+      JSON.list(Map.get(run, :requested_partitions, [])),
+      JSON.list(Map.get(run, :allowed_partitions, [])),
+      JSON.map(Map.get(run, :policy_decision, %{})),
+      Map.get(run, :latency_ms),
+      Map.get(run, :cost_units),
+      JSON.list(Map.get(run, :source_package_links, [])),
+      JSON.list(Map.get(run, :observation_links, [])),
+      JSON.list(Map.get(run, :audit_event_links, [])),
+      Map.get(run, :access_policy_id),
+      JSON.list(Map.get(run, :security_labels, [])),
+      JSON.list(Map.get(run, :partition_ids, [])),
+      JSON.map(Map.get(run, :metadata, %{}))
+    ]
+  end
+
+  defp model_call_operation_from_row([
+         id,
+         tenant_id,
+         workspace_id,
+         function_name,
+         model_task_type,
+         execution_mode,
+         risk_class,
+         model_id,
+         model_version,
+         prompt_template_id,
+         input_schema,
+         output_contract,
+         execution_policy,
+         storage_target,
+         prompt_policy_id,
+         cost_policy,
+         expected_confidence_behavior,
+         required_privileges,
+         allowed_partitions,
+         lifecycle_state,
+         rollout_state,
+         suspension_reason,
+         retirement_status,
+         access_policy_id,
+         security_labels,
+         partition_ids,
+         metadata
+       ]) do
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      function_name: function_name,
+      model_task_type: model_task_type,
+      execution_mode: execution_mode,
+      risk_class: risk_class,
+      model_id: model_id,
+      model_version: model_version,
+      prompt_template_id: prompt_template_id,
+      input_schema: decode_map(input_schema),
+      output_contract: decode_map(output_contract),
+      execution_policy: decode_map(execution_policy),
+      storage_target: decode_map(storage_target),
+      prompt_policy_id: prompt_policy_id,
+      cost_policy: decode_map(cost_policy),
+      expected_confidence_behavior: decode_map(expected_confidence_behavior),
+      required_privileges: decode_list(required_privileges),
+      allowed_partitions: decode_list(allowed_partitions),
+      lifecycle_state: lifecycle_state,
+      rollout_state: rollout_state,
+      suspension_reason: suspension_reason,
+      retirement_status: retirement_status,
+      access_policy_id: access_policy_id,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      metadata: decode_map(metadata)
+    }
+  end
+
+  defp mcp_tool_definition_from_row([
+         id,
+         tenant_id,
+         workspace_id,
+         tool_name,
+         protocol_adapter_id,
+         implementation_type,
+         enabled_state,
+         registration_source,
+         documentation_links,
+         required_privileges,
+         allowed_partitions,
+         input_schema,
+         output_schema,
+         execution_policy,
+         routing_policy,
+         timeout_policy,
+         cost_policy,
+         audit_policy,
+         lifecycle_state,
+         suspension_reason,
+         retirement_status,
+         access_policy_id,
+         security_labels,
+         partition_ids,
+         policy_version,
+         metadata
+       ]) do
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      tool_name: tool_name,
+      protocol_adapter_id: protocol_adapter_id,
+      implementation_type: implementation_type,
+      enabled_state: enabled_state,
+      registration_source: registration_source,
+      documentation_links: decode_list(documentation_links),
+      required_privileges: decode_list(required_privileges),
+      allowed_partitions: decode_list(allowed_partitions),
+      input_schema: decode_map(input_schema),
+      output_schema: decode_map(output_schema),
+      execution_policy: decode_map(execution_policy),
+      routing_policy: decode_map(routing_policy),
+      timeout_policy: decode_map(timeout_policy),
+      cost_policy: decode_map(cost_policy),
+      audit_policy: decode_map(audit_policy),
+      lifecycle_state: lifecycle_state,
+      suspension_reason: suspension_reason,
+      retirement_status: retirement_status,
+      access_policy_id: access_policy_id,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      policy_version: policy_version,
+      metadata: decode_map(metadata)
+    }
+  end
+
+  defp decode_map(nil), do: %{}
+  defp decode_map(""), do: %{}
+
+  defp decode_map(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, decoded} when is_map(decoded) -> decoded
+      _ -> %{}
+    end
+  end
+
+  defp decode_list(nil), do: []
+  defp decode_list(""), do: []
+
+  defp decode_list(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, decoded} when is_list(decoded) -> decoded
+      {:ok, decoded} -> [decoded]
+      _ -> []
+    end
   end
 
   defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
