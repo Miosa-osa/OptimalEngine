@@ -9,6 +9,7 @@ defmodule OptimalEngine.Signal.Dispatcher do
   - `:named` — sends to a named process
   - `:pubsub` — broadcasts via `OptimalEngine.Signal.PubSub` (built-in) or a custom module
   - `:logger` — logs the signal
+  - `:governed` — authorizes and records delivery through Memory Core tool governance
   - `:noop` — discards (useful for testing)
 
   ## Delivery Modes
@@ -19,6 +20,7 @@ defmodule OptimalEngine.Signal.Dispatcher do
   """
 
   alias OptimalEngine.Signal.Envelope, as: Signal
+  alias OptimalEngine.MemoryCore.ToolModelGovernance
 
   @type adapter :: :pid | :named | :pubsub | :logger | :noop | module()
   @type dispatch_result :: {:ok, [term()]} | {:error, term()}
@@ -76,11 +78,24 @@ defmodule OptimalEngine.Signal.Dispatcher do
     adapter = Keyword.get(opts, :adapter)
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
 
-    if adapter && adapter != :noop do
-      deliver_via_adapter(adapter, signal, adapter_opts)
-    end
+    adapter_result =
+      if adapter && adapter != :noop do
+        deliver_via_adapter(adapter, signal, adapter_opts)
+      else
+        :ok
+      end
 
-    errors = Enum.filter(results, &match?({:error, _}, &1))
+    errors =
+      results
+      |> Enum.filter(&match?({:error, _}, &1))
+      |> then(fn handler_errors ->
+        case adapter_result do
+          :ok -> handler_errors
+          {:ok, _} -> handler_errors
+          {:error, reason} -> handler_errors ++ [{:error, {:adapter, reason}}]
+          other -> handler_errors ++ [{:error, {:adapter, other}}]
+        end
+      end)
 
     case errors do
       [] -> {:ok, Enum.map(results, fn {:ok, val} -> val end)}
@@ -178,7 +193,67 @@ defmodule OptimalEngine.Signal.Dispatcher do
 
   defp deliver_via_adapter(:noop, _signal, _opts), do: :ok
 
+  defp deliver_via_adapter(:governed, signal, opts) do
+    tool_name = Keyword.fetch!(opts, :tool_name)
+    inner_adapter = Keyword.get(opts, :inner_adapter, :noop)
+    inner_opts = Keyword.get(opts, :inner_adapter_opts, [])
+    governance_opts = Keyword.get(opts, :governance_opts, [])
+    input_payload = Keyword.get(opts, :input_payload, signal_payload(signal))
+
+    ToolModelGovernance.execute_tool_call(
+      tool_name,
+      input_payload,
+      fn ->
+        case deliver_via_adapter(inner_adapter, signal, inner_opts) do
+          :ok ->
+            {:ok, %{delivered: true, adapter: adapter_name(inner_adapter)}}
+
+          {:ok, payload} when is_map(payload) ->
+            {:ok, payload}
+
+          {:ok, payload} ->
+            {:ok,
+             %{delivered: true, adapter: adapter_name(inner_adapter), result: inspect(payload)}}
+
+          {:error, reason} ->
+            {:error, reason}
+
+          other ->
+            {:ok, %{delivered: true, adapter: adapter_name(inner_adapter), result: inspect(other)}}
+        end
+      end,
+      governance_opts
+    )
+    |> case do
+      {:ok, _run} ->
+        :ok
+
+      {:error, {:rejected, run}} ->
+        {:error, {:governance_rejected, run.rejection_reason}}
+
+      {:error, {:output_rejected, run}} ->
+        {:error, {:governance_output_rejected, run.rejection_reason}}
+
+      {:error, {:execution_failed, reason, _run}} ->
+        {:error, {:governance_execution_failed, reason}}
+
+      other ->
+        other
+    end
+  end
+
   defp deliver_via_adapter(module, signal, opts) when is_atom(module) do
     module.deliver(signal, opts)
   end
+
+  defp signal_payload(%Signal{} = signal) do
+    %{
+      signal_type: signal.type,
+      signal_source: signal.source,
+      signal_data: signal.data
+    }
+  end
+
+  defp adapter_name(adapter) when is_atom(adapter), do: Atom.to_string(adapter)
+  defp adapter_name(adapter), do: inspect(adapter)
 end

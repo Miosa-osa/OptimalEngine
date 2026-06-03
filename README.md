@@ -26,7 +26,7 @@ Work improves the world:
 
 ## Current Build
 
-This branch moves the engine from a file/search-first system toward a governed
+The current build moves the engine from a file/search-first system toward a governed
 workspace runtime.
 
 Built and verified now:
@@ -40,17 +40,18 @@ Built and verified now:
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
 | Governed retrieval | Retrieval returns Context Packages, not loose chunks, and filters by partition/security scope before package assembly. |
 | Active Memory Pools | Task-scoped working memory can load Context Packages and publish observations as pending Claims. |
+| Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
 | Workspace export | Markdown/files are projections and editing surfaces, not the only source of truth. |
 | Reality check | `mix optimal.reality_check` covers store counts, topology, evidence/truth lifecycle, recall packages, retrieval, connectors, wiki, and compliance probes. |
 
 Current verification:
 
 ```text
-mix test test/memory_core/spine_test.exs test/workspace_export_test.exs test/topology/workspace_topology_test.exs test/topology/node_member_test.exs test/topology/node_test.exs test/topology/workspace_surface_spine_test.exs --seed 0
-38 tests, 0 failures
+mix test test/memory_core/spine_test.exs test/workspace_export_test.exs test/topology/workspace_topology_test.exs test/topology/node_member_test.exs test/topology/node_test.exs test/topology/workspace_surface_spine_test.exs test/signal/dispatcher_test.exs --seed 0
+55 tests, 0 failures
 
 mix optimal.reality_check
-80 probes, 80 ok, 0 warn, 0 fail
+104 probes, 104 ok, 0 warn, 0 fail
 ```
 
 The full legacy suite still contains older optional/backend warnings. The focused
@@ -114,7 +115,7 @@ Workflow / Skill Runtime
   owns traces, generalized workflows, procedures, skill packages, execution records
 
 Model / Tool Governance
-  owns model calls, tool definitions, schema validation, permissions, audit
+  owns model calls, tool definitions, governed execution, schema validation, permissions, audit
 
 Workspace Export
   owns markdown, HTML, app views, report packages, projection records
@@ -309,6 +310,7 @@ mix test test/memory_core/spine_test.exs \
   test/topology/node_member_test.exs \
   test/topology/node_test.exs \
   test/topology/workspace_surface_spine_test.exs \
+  test/signal/dispatcher_test.exs \
   --seed 0
 ```
 
@@ -357,7 +359,8 @@ The next build slices are:
 4. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
 5. Build workflow traces and Skill Packages from repeated Active Pool work.
-6. Add model/tool governance records for every agent action.
+6. Expand governed tool/model execution from the first dispatcher adapter into
+   connector-wide and model-provider-wide runtime paths.
 7. Add benchmark/evaluation records so large-scale recall tests are stored and
    inspectable.
 

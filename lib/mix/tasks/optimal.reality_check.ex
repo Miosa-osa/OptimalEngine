@@ -31,7 +31,10 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   alias OptimalEngine.MemoryCore.WorkflowSkill
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.Receiver
+  alias OptimalEngine.Signal.Dispatcher
+  alias OptimalEngine.Signal.Envelope, as: Signal
   alias OptimalEngine.Store
+  alias OptimalEngine.Wiki.Page
   alias OptimalEngine.WorkspaceExport
   alias OptimalEngine.WorkspaceTopology
   alias OptimalEngine.Wiki
@@ -837,6 +840,18 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                security_labels: ["internal"],
                partition_ids: ["reality-check"]
              ),
+           {:ok, dispatch_tool_definition} <-
+             ToolModelGovernance.register_mcp_tool_definition(
+               workspace_id: workspace_id,
+               tool_name: "signal.dispatch",
+               implementation_type: "signal_adapter",
+               required_privileges: ["signal:deliver"],
+               allowed_partitions: ["reality-check"],
+               input_schema: %{required: ["signal_type"]},
+               output_schema: %{required: ["delivered"]},
+               security_labels: ["internal"],
+               partition_ids: ["reality-check"]
+             ),
            {:ok, model_operation} <-
              ToolModelGovernance.register_model_call_operation(
                workspace_id: workspace_id,
@@ -907,17 +922,71 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                granted_privileges: ["model:summarize"],
                requested_partitions: ["reality-check"],
                output_payload: %{}
+             ),
+           {:error, {:rejected, blocked_execution_run}} <-
+             ToolModelGovernance.execute_tool_call(
+               "signal.dispatch",
+               %{signal_type: "reality.blocked"},
+               fn _payload ->
+                 send(self(), :governed_executor_should_not_run)
+                 {:ok, %{delivered: true}}
+               end,
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: [],
+               requested_partitions: ["reality-check"]
+             ),
+           {:ok, allowed_execution_run} <-
+             ToolModelGovernance.execute_tool_call(
+               "signal.dispatch",
+               %{signal_type: "reality.allowed"},
+               fn _payload -> {:ok, %{delivered: true}} end,
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: ["signal:deliver"],
+               requested_partitions: ["reality-check"]
+             ),
+           {:error, {:execution_failed, :boom, failed_execution_run}} <-
+             ToolModelGovernance.execute_tool_call(
+               "signal.dispatch",
+               %{signal_type: "reality.failed"},
+               fn _payload -> {:error, :boom} end,
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: ["signal:deliver"],
+               requested_partitions: ["reality-check"]
+             ),
+           signal = Signal.new!("reality.dispatch", source: "/reality-check"),
+           {:ok, []} <-
+             Dispatcher.dispatch(signal,
+               handlers: [],
+               adapter: :governed,
+               adapter_opts: [
+                 tool_name: "signal.dispatch",
+                 inner_adapter: :noop,
+                 input_payload: %{signal_type: signal.type},
+                 governance_opts: [
+                   workspace_id: workspace_id,
+                   actor_id: "agent:reality-check",
+                   granted_privileges: ["signal:deliver"],
+                   requested_partitions: ["reality-check"]
+                 ]
+               ]
              ) do
         {:ok,
          %{
            pool: pool,
            tool_definition: tool_definition,
+           dispatch_tool_definition: dispatch_tool_definition,
            model_operation: model_operation,
            rejected_tool_run: rejected_tool_run,
            invalid_tool_output_run: invalid_tool_output_run,
            allowed_tool_run: allowed_tool_run,
            allowed_model_run: allowed_model_run,
-           invalid_model_output_run: invalid_model_output_run
+           invalid_model_output_run: invalid_model_output_run,
+           blocked_execution_run: blocked_execution_run,
+           allowed_execution_run: allowed_execution_run,
+           failed_execution_run: failed_execution_run
          }}
       end
 
@@ -1035,6 +1104,53 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
               other -> {:error, inspect(other)}
             end
           end)
+          |> probe("governed execution blocks executor", fn ->
+            blocked? =
+              ctx.blocked_execution_run.decision_state == "rejected" and
+                String.contains?(ctx.blocked_execution_run.rejection_reason, "signal:deliver")
+
+            receive do
+              :governed_executor_should_not_run ->
+                {:error, "executor ran despite rejected governance decision"}
+            after
+              0 ->
+                if blocked?, do: {:ok, "blocked before execution"}, else: {:error, "not blocked"}
+            end
+          end)
+          |> probe("governed execution records completed run", fn ->
+            if ctx.allowed_execution_run.decision_state == "allowed" and
+                 ctx.allowed_execution_run.run_status == "completed" do
+              {:ok, "completed execution recorded"}
+            else
+              {:error, inspect(ctx.allowed_execution_run)}
+            end
+          end)
+          |> probe("governed execution records failures", fn ->
+            if ctx.failed_execution_run.decision_state == "allowed" and
+                 ctx.failed_execution_run.run_status == "failed" and
+                 String.contains?(ctx.failed_execution_run.rejection_reason, "execution_failed") do
+              {:ok, "failed execution recorded"}
+            else
+              {:error, inspect(ctx.failed_execution_run)}
+            end
+          end)
+          |> probe("dispatcher governed adapter records delivery", fn ->
+            case Store.raw_query(
+                   """
+                   SELECT COUNT(*)
+                   FROM tool_call_runs
+                   WHERE workspace_id = ?1
+                     AND mcp_tool_definition_id = ?2
+                     AND tool_name = 'signal.dispatch'
+                     AND decision_state = 'allowed'
+                     AND run_status = 'completed'
+                   """,
+                   [workspace_id, ctx.dispatch_tool_definition.id]
+                 ) do
+              {:ok, [[count]]} when count >= 2 -> {:ok, "#{count} completed dispatch run(s)"}
+              other -> {:error, inspect(other)}
+            end
+          end)
 
         {:error, reason} ->
           probe(state, "tool/model governance seed", fn -> {:error, inspect(reason)} end)
@@ -1110,6 +1226,8 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   end
 
   defp wiki_probes(state) do
+    ensure_reality_wiki_page()
+
     state
     |> probe("Wiki.list(default tenant)", fn ->
       case Wiki.list("default") do
@@ -1133,6 +1251,28 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
           {:warn, "no page"}
       end
     end)
+  end
+
+  defp ensure_reality_wiki_page do
+    case Wiki.latest("default", "healthtech-pricing-decision", "default") do
+      {:ok, _page} ->
+        :ok
+
+      {:error, :not_found} ->
+        Wiki.put(%Page{
+          tenant_id: "default",
+          workspace_id: "default",
+          slug: "healthtech-pricing-decision",
+          audience: "default",
+          version: 1,
+          frontmatter: %{"seeded_by" => "optimal.reality_check"},
+          body: "# Healthtech Pricing Decision\n\n## Summary\nSeed page for reality check.\n",
+          curated_by: "optimal.reality_check"
+        })
+
+      _other ->
+        :ok
+    end
   end
 
   defp retrieval_probes(state) do
