@@ -28,6 +28,7 @@ defmodule OptimalEngine.Memory do
   """
 
   alias OptimalEngine.Memory.Versioned
+  alias OptimalEngine.MemoryCore.{KnowledgeLifecycle, SourcePackage}
 
   require Logger
 
@@ -53,11 +54,71 @@ defmodule OptimalEngine.Memory do
     case Versioned.create(attrs) do
       {:ok, mem} = ok ->
         maybe_promote_to_wiki(mem)
+        record_versioned_memory_claim(mem, attrs)
         ok
 
       other ->
         other
     end
+  end
+
+  defp record_versioned_memory_claim(mem, attrs) do
+    source =
+      SourcePackage.from_text(mem.content,
+        tenant_id: mem.tenant_id,
+        workspace_id: mem.workspace_id,
+        source_type: "versioned_memory",
+        source_class: "text",
+        source_system: "optimal_engine.memory",
+        source_uri: "memory://#{mem.id}",
+        trust_label: "unreviewed",
+        access_policy_id: attr(attrs, :access_policy_id),
+        security_labels: attr(attrs, :security_labels, []),
+        partition_ids: attr(attrs, :partition_ids, []),
+        actor_id: attr(attrs, :actor_id) || attr(attrs, :created_by),
+        metadata: %{
+          versioned_memory_id: mem.id,
+          root_memory_id: mem.root_memory_id,
+          version: mem.version,
+          audience: mem.audience,
+          is_static: mem.is_static,
+          citation_uri: mem.citation_uri,
+          source_chunk_id: mem.source_chunk_id,
+          was_existing: mem.was_existing
+        }
+      )
+
+    case KnowledgeLifecycle.extract_claim(source,
+           claim_type: "memory_entry",
+           claim_text: mem.content,
+           source_span: %{kind: "full_memory_content"},
+           actor_id: attr(attrs, :actor_id) || attr(attrs, :created_by),
+           aggregate_confidence: 0.55,
+           aggregate_precision: 0.55,
+           metadata: %{
+             versioned_memory_id: mem.id,
+             root_memory_id: mem.root_memory_id,
+             version: mem.version,
+             audience: mem.audience,
+             source_api: "OptimalEngine.Memory.create"
+           }
+         ) do
+      {:ok, _claim} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Memory] versioned memory core bridge failed for #{mem.id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp attr(attrs, key, default \\ nil)
+
+  defp attr(attrs, key, default) when is_map(attrs) do
+    Map.get(attrs, key, Map.get(attrs, Atom.to_string(key), default))
   end
 
   @doc "Fetches a versioned memory by id."
