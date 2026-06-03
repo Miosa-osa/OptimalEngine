@@ -97,6 +97,98 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunnerTest do
              MemoryCore.list_asset_extractions(asset.id, workspace_id: "runner-workspace")
   end
 
+  test "projects transcript JSON into segment-level transcript rows", %{tmp_dir: tmp_dir} do
+    asset = store_test_asset!(tmp_dir, "segments.wav", "RIFF....WAVEsegments")
+
+    transcript_json =
+      Jason.encode!(%{
+        language: "en",
+        segments: [
+          %{id: 1, start: 0.0, end: 1.25, speaker: "speaker-a", text: "First segment"},
+          %{id: 2, start: 1.25, end: 2.0, speaker: "speaker-b", text: "Second segment"}
+        ]
+      })
+
+    assert {:ok, run} =
+             MemoryCore.run_asset_adapter(asset.id, :openai_whisper,
+               workspace_id: "runner-workspace",
+               actor_id: "user:runner",
+               command: "printf",
+               args: [transcript_json],
+               adapter_role: :audio_transcription,
+               confidence: 0.88,
+               precision: 0.77
+             )
+
+    assert run.status == "completed"
+
+    assert {:ok, extractions} =
+             MemoryCore.list_asset_extractions(asset.id, workspace_id: "runner-workspace")
+
+    assert Enum.count(extractions, &(&1.extraction_type == "transcript")) == 2
+    assert Enum.any?(extractions, &(&1.content_text == "First segment"))
+    assert Enum.any?(extractions, &(&1.content_text == "Second segment"))
+
+    assert {:ok, rows} =
+             Store.raw_query(
+               """
+               SELECT transcript_text, language, speaker, start_ms, end_ms
+               FROM asset_transcripts
+               WHERE workspace_id = ?1 AND asset_id = ?2
+               ORDER BY start_ms ASC
+               """,
+               ["runner-workspace", asset.id]
+             )
+
+    assert [
+             ["First segment", "en", "speaker-a", 0, 1250],
+             ["Second segment", "en", "speaker-b", 1250, 2000]
+           ] = rows
+  end
+
+  test "projects document JSON into page-level OCR spans", %{tmp_dir: tmp_dir} do
+    asset = store_test_asset!(tmp_dir, "pages.pdf", "%PDF-1.7\npage-json-test")
+
+    page_json =
+      Jason.encode!(%{
+        pages: [
+          %{page_number: 1, text: "Page one extracted text", bbox: %{x: 1, y: 2}},
+          %{page_number: 2, text: "Page two extracted text", bbox: %{x: 3, y: 4}}
+        ]
+      })
+
+    assert {:ok, run} =
+             MemoryCore.run_asset_adapter(asset.id, :docling,
+               workspace_id: "runner-workspace",
+               actor_id: "user:runner",
+               command: "printf",
+               args: [page_json],
+               adapter_role: :document_intelligence
+             )
+
+    assert run.status == "completed"
+
+    assert {:ok, extractions} =
+             MemoryCore.list_asset_extractions(asset.id, workspace_id: "runner-workspace")
+
+    assert Enum.count(extractions, &(&1.extraction_type == "ocr_span")) == 2
+
+    assert {:ok, rows} =
+             Store.raw_query(
+               """
+               SELECT page_number, span_text, bbox
+               FROM asset_ocr_spans
+               WHERE workspace_id = ?1 AND asset_id = ?2
+               ORDER BY page_number ASC
+               """,
+               ["runner-workspace", asset.id]
+             )
+
+    assert [[1, "Page one extracted text", bbox_1], [2, "Page two extracted text", bbox_2]] = rows
+    assert Jason.decode!(bbox_1) == %{"x" => 1, "y" => 2}
+    assert Jason.decode!(bbox_2) == %{"x" => 3, "y" => 4}
+  end
+
   test "records unavailable run when adapter command is not configured or missing", %{
     tmp_dir: tmp_dir
   } do

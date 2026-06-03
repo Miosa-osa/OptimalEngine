@@ -204,9 +204,11 @@ those tables by default:
 | `multimodal_embedding` | `asset_embedding_refs` when an embedding ref is available |
 
 Callers can pass `auto_extract: false` when a run should be recorded without an
-automatic projection. Rich adapter-specific parsers should still split real tool
-outputs into multiple page spans, transcript segments, frame observations, table
-records, or embedding refs as needed.
+automatic projection. `MultimodalExtractionParser` now handles the first parser
+slice: transcript JSON can become segment-level transcript rows, and document
+JSON can become page-level OCR span rows. Richer adapter-specific parsers should
+still split real tool outputs into tables, page elements, frame observations, and
+tool-specific schemas as needed.
 
 Retrieval can return these projection rows as source-linked Context Package
 objects. This lets an agent use a transcript, OCR span, visual observation, or
