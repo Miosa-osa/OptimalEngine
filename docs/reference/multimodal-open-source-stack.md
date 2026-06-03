@@ -193,6 +193,21 @@ transcripts, OCR spans, and visual observations can become pending Claims.
 Reference-only embedding rows remain governed retrieval/index projections and are
 not claimable text.
 
+`MemoryCore.run_asset_adapter/3` auto-projects supported completed runs into
+those tables by default:
+
+| Adapter role | Default projection |
+| --- | --- |
+| `document_intelligence` / `ocr` | `asset_ocr_spans` |
+| `audio_transcription` | `asset_transcripts` |
+| `visual_reasoning` | `asset_visual_observations` |
+| `multimodal_embedding` | `asset_embedding_refs` when an embedding ref is available |
+
+Callers can pass `auto_extract: false` when a run should be recorded without an
+automatic projection. Rich adapter-specific parsers should still split real tool
+outputs into multiple page spans, transcript segments, frame observations, table
+records, or embedding refs as needed.
+
 ## Deployment
 
 Docker is optional. Local development can run with SQLite and whichever binaries

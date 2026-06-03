@@ -58,6 +58,43 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunnerTest do
                """,
                ["runner-workspace", asset.id]
              )
+
+    assert {:ok, [extraction]} =
+             MemoryCore.list_asset_extractions(asset.id, workspace_id: "runner-workspace")
+
+    assert extraction.adapter_run_id == run.id
+    assert extraction.extraction_type == "ocr_span"
+    assert extraction.content_text == "Docling extracted text"
+    assert extraction.metadata["auto_projected"] == true
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               """
+               SELECT COUNT(*) FROM asset_ocr_spans
+               WHERE workspace_id = ?1
+                 AND asset_id = ?2
+                 AND adapter_run_id = ?3
+               """,
+               ["runner-workspace", asset.id, run.id]
+             )
+  end
+
+  test "can disable automatic extraction projection", %{tmp_dir: tmp_dir} do
+    asset = store_test_asset!(tmp_dir, "manual.pdf", "%PDF-1.7\nmanual-projection-test")
+
+    assert {:ok, run} =
+             MemoryCore.run_asset_adapter(asset.id, :docling,
+               workspace_id: "runner-workspace",
+               actor_id: "user:runner",
+               command: "printf",
+               args: ["Manual extraction only"],
+               auto_extract: false
+             )
+
+    assert run.status == "completed"
+
+    assert {:ok, []} =
+             MemoryCore.list_asset_extractions(asset.id, workspace_id: "runner-workspace")
   end
 
   test "records unavailable run when adapter command is not configured or missing", %{

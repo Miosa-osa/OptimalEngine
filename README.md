@@ -42,7 +42,7 @@ Built and verified now:
 | Multimodal adapter runs | Adapter attempts and outputs can be recorded as governed derived artifacts linked to assets, Source Packages, scopes, hashes, and derivation ledger entries. |
 | Multimodal adapter runner | Configured local adapter commands can execute against governed assets, with completed, failed, and unavailable runs recorded through Memory Core. |
 | Adapter-output Claims | Completed adapter outputs can be preserved as derived Source Packages and converted into pending Claims. Failed or unavailable adapter runs cannot become Claims. |
-| Asset extraction projections | Completed adapter runs can be normalized into `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection tables. Text-bearing extractions can become derived Source Packages and pending Claims. |
+| Asset extraction projections | Completed adapter runs can be normalized into `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection tables. The adapter runner now auto-projects supported completed runs, and text-bearing extractions can become derived Source Packages and pending Claims. |
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
@@ -66,7 +66,7 @@ mix test test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_
 10 tests, 0 failures
 
 mix test test/pipeline/multimodal_adapter_runner_test.exs test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs test/pipeline/indexer_asset_store_test.exs --seed 0
-20 tests, 0 failures
+21 tests, 0 failures
 
 mix optimal.reality_check
 115 probes, 115 ok, 0 warn, 0 fail
@@ -292,7 +292,7 @@ file
   -> Source Package + asset row + derivation ledger
   -> optional adapter run records for OCR/transcripts/visual outputs
   -> optional configured adapter command execution
-  -> asset_extractions + typed transcript/OCR/visual/embedding projection rows
+  -> automatic asset_extractions + typed transcript/OCR/visual/embedding projection rows for supported completed runs
   -> text-bearing extraction can become derived Source Package + pending Claim
   -> governed ParsedDoc
   -> Decomposer chunk with asset_ref
@@ -324,6 +324,12 @@ security scope, partitions, and derivation ledger link.
 `MemoryCore.run_asset_adapter/3` is the current runtime bridge: it loads a
 governed asset, resolves a registry adapter, executes a configured local command
 when present, and records completed, failed, or unavailable status.
+For supported completed runs, it also auto-projects output into the typed
+extraction tables unless `auto_extract: false` is passed. Document/OCR adapters
+default to OCR-span projections, audio transcription adapters default to
+transcript projections, visual reasoning adapters default to visual observation
+projections, and multimodal embedding adapters default to embedding-ref
+projections when a reference is available.
 `MemoryCore.claim_from_asset_adapter_run/2` is the review bridge: it turns a
 completed adapter output into a derived Source Package plus pending Claim without
 promoting that output to accepted truth.
