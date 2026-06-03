@@ -1004,6 +1004,21 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
               {:error, inspect(ctx.invalid_model_output_run)}
             end
           end)
+          |> probe("governed call run audit links attached", fn ->
+            runs = [
+              ctx.rejected_tool_run,
+              ctx.invalid_tool_output_run,
+              ctx.allowed_tool_run,
+              ctx.allowed_model_run,
+              ctx.invalid_model_output_run
+            ]
+
+            if Enum.all?(runs, &match?([%{type: "audit_event"}], &1.audit_event_links)) do
+              {:ok, "#{length(runs)} run audit link(s)"}
+            else
+              {:error, inspect(Enum.map(runs, & &1.audit_event_links))}
+            end
+          end)
           |> probe("governed call audit emitted", fn ->
             case Store.raw_query(
                    """
