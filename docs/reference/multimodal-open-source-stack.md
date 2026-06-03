@@ -244,6 +244,20 @@ The route stores the raw file as a Source Package plus workspace-scoped asset
 row, then optionally runs the adapter so extraction projection rows are created
 without bypassing Memory Core.
 
+Connector adapters can preserve downloaded attachments and files through:
+
+```text
+Connectors.preserve_payload_assets(:slack, "message-id", payload,
+  connector_id: "slack-main",
+  workspace_id: "default"
+)
+```
+
+The helper accepts attachment lists under `attachments` or `files`, supports
+local paths and base64 content, preserves connector origin metadata, and returns
+per-attachment errors so a single bad file does not erase the rest of the sync
+batch.
+
 Missing binaries should degrade gracefully. The engine should preserve the raw
 asset, write a warning or adapter-run failure, and continue the rest of the
 pipeline where possible.
