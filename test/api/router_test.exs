@@ -44,6 +44,44 @@ defmodule OptimalEngine.API.RouterTest do
     end
   end
 
+  describe "POST /api/workspaces" do
+    test "creates workspaces through topology lifecycle and seeds node types" do
+      suffix = System.unique_integer([:positive])
+      tmp_dir = Path.join(System.tmp_dir!(), "api_workspace_topology_#{suffix}")
+      original_root = Application.get_env(:optimal_engine, :root_path)
+      Application.put_env(:optimal_engine, :root_path, tmp_dir)
+
+      on_exit(fn ->
+        if original_root do
+          Application.put_env(:optimal_engine, :root_path, original_root)
+        else
+          Application.delete_env(:optimal_engine, :root_path)
+        end
+
+        File.rm_rf(tmp_dir)
+      end)
+
+      conn =
+        request(:post, "/api/workspaces", %{
+          "slug" => "api-topology-#{suffix}",
+          "name" => "API Topology #{suffix}",
+          "description" => "API workspace should use topology lifecycle"
+        })
+
+      assert conn.status == 201
+      assert {:ok, body} = Jason.decode(conn.resp_body)
+
+      assert {:ok, node_types} =
+               OptimalEngine.WorkspaceTopology.list_node_types(workspace_id: body["id"])
+
+      slugs = Enum.map(node_types, & &1.slug)
+      assert "project" in slugs
+      assert "person" in slugs
+      assert "operation" in slugs
+      assert "context" in slugs
+    end
+  end
+
   describe "POST /api/rag" do
     test "requires a query in the body" do
       conn = request(:post, "/api/rag", %{})
