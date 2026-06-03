@@ -112,66 +112,104 @@ defmodule OptimalEngine.Topology.Node do
         {:error, {:invalid_status, status}}
 
       true ->
-        sql = """
-        INSERT INTO nodes (id, tenant_id, workspace_id, slug, name, kind, node_type_id,
-                           parent_id, description, style, status, path, metadata,
-                           lifecycle_state)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-        ON CONFLICT(id) DO UPDATE SET
-          workspace_id     = excluded.workspace_id,
-          name             = excluded.name,
-          kind             = excluded.kind,
-          node_type_id     = excluded.node_type_id,
-          parent_id        = excluded.parent_id,
-          description      = excluded.description,
-          style            = excluded.style,
-          status           = excluded.status,
-          path             = excluded.path,
-          metadata         = excluded.metadata,
-          lifecycle_state  = excluded.lifecycle_state,
-          updated_at       = datetime('now')
-        """
-
-        params = [
-          id,
-          tenant_id,
-          workspace_id,
-          slug,
-          name,
-          kind_string,
-          node_type_id,
-          parent_id,
-          description,
-          Atom.to_string(style),
-          Atom.to_string(status),
-          path,
-          Jason.encode!(metadata),
-          lifecycle_state
-        ]
-
-        case Store.raw_query(sql, params) do
-          {:ok, _} ->
-            {:ok,
-             %__MODULE__{
-               id: id,
-               tenant_id: tenant_id,
-               workspace_id: workspace_id,
-               slug: slug,
-               name: name,
-               kind: kind,
-               node_type_id: node_type_id,
-               parent_id: parent_id,
-               description: description,
-               style: style,
-               status: status,
-               path: path,
-               metadata: metadata,
-               lifecycle_state: lifecycle_state
-             }}
-
-          other ->
-            other
+        with :ok <- validate_parent_scope(parent_id, tenant_id, workspace_id) do
+          upsert_scoped_node(%{
+            id: id,
+            tenant_id: tenant_id,
+            workspace_id: workspace_id,
+            slug: slug,
+            name: name,
+            kind_string: kind_string,
+            kind: kind,
+            node_type_id: node_type_id,
+            parent_id: parent_id,
+            description: description,
+            style: style,
+            status: status,
+            path: path,
+            metadata: metadata,
+            lifecycle_state: lifecycle_state
+          })
         end
+    end
+  end
+
+  defp upsert_scoped_node(%{
+         id: id,
+         tenant_id: tenant_id,
+         workspace_id: workspace_id,
+         slug: slug,
+         name: name,
+         kind_string: kind_string,
+         kind: kind,
+         node_type_id: node_type_id,
+         parent_id: parent_id,
+         description: description,
+         style: style,
+         status: status,
+         path: path,
+         metadata: metadata,
+         lifecycle_state: lifecycle_state
+       }) do
+    sql = """
+    INSERT INTO nodes (id, tenant_id, workspace_id, slug, name, kind, node_type_id,
+                       parent_id, description, style, status, path, metadata,
+                       lifecycle_state)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+    ON CONFLICT(id) DO UPDATE SET
+      workspace_id     = excluded.workspace_id,
+      name             = excluded.name,
+      kind             = excluded.kind,
+      node_type_id     = excluded.node_type_id,
+      parent_id        = excluded.parent_id,
+      description      = excluded.description,
+      style            = excluded.style,
+      status           = excluded.status,
+      path             = excluded.path,
+      metadata         = excluded.metadata,
+      lifecycle_state  = excluded.lifecycle_state,
+      updated_at       = datetime('now')
+    """
+
+    params = [
+      id,
+      tenant_id,
+      workspace_id,
+      slug,
+      name,
+      kind_string,
+      node_type_id,
+      parent_id,
+      description,
+      Atom.to_string(style),
+      Atom.to_string(status),
+      path,
+      Jason.encode!(metadata),
+      lifecycle_state
+    ]
+
+    case Store.raw_query(sql, params) do
+      {:ok, _} ->
+        {:ok,
+         %__MODULE__{
+           id: id,
+           tenant_id: tenant_id,
+           workspace_id: workspace_id,
+           slug: slug,
+           name: name,
+           kind: kind,
+           node_type_id: node_type_id,
+           parent_id: parent_id,
+           description: description,
+           style: style,
+           status: status,
+           path: path,
+           metadata: metadata,
+           lifecycle_state: lifecycle_state
+         }}
+
+      other ->
+        other
     end
   end
 
@@ -327,6 +365,16 @@ defmodule OptimalEngine.Topology.Node do
   end
 
   # ─── private ─────────────────────────────────────────────────────────────
+
+  defp validate_parent_scope(nil, _tenant_id, _workspace_id), do: :ok
+
+  defp validate_parent_scope(parent_id, tenant_id, workspace_id) do
+    case get(parent_id, tenant_id: tenant_id, workspace_id: workspace_id) do
+      {:ok, _parent} -> :ok
+      {:error, :not_found} -> {:error, {:parent_not_found_in_workspace, parent_id, workspace_id}}
+      other -> other
+    end
+  end
 
   defp select_columns,
     do:
