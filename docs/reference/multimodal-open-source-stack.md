@@ -174,6 +174,7 @@ The engine should ask the registry what is configured and available:
 ```text
 MultimodalToolRegistry.recommended_pipeline(:document)
 MultimodalToolRegistry.availability()
+MemoryCore.run_asset_adapter(asset_id, :docling, command: "docling")
 ```
 
 Missing binaries should degrade gracefully. The engine should preserve the raw
