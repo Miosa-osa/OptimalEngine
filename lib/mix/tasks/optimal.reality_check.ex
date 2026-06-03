@@ -22,9 +22,15 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   alias OptimalEngine.Compliance
   alias OptimalEngine.Connectors
   alias OptimalEngine.Health
+  alias OptimalEngine.Identity.Principal
+  alias OptimalEngine.MemoryCore.KnowledgeLifecycle
+  alias OptimalEngine.MemoryCore.RetrievalCoordinator
+  alias OptimalEngine.MemoryCore.SourcePackage
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.Receiver
   alias OptimalEngine.Store
+  alias OptimalEngine.WorkspaceExport
+  alias OptimalEngine.WorkspaceTopology
   alias OptimalEngine.Wiki
 
   @impl Mix.Task
@@ -39,6 +45,8 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
 
     IO.puts("\n┌─ Optimal Engine — Reality Check ─────────────────────────────┐\n")
 
+    cleanup_stale_topology_projection_probe_data()
+
     state = %{probes: [], started: System.monotonic_time(:millisecond)}
 
     state
@@ -48,17 +56,23 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     |> health_probes()
     |> section("3. Architecture registry (7 architectures · 6 processors)")
     |> architecture_probes()
-    |> section("4. Connector registry (14 adapters)")
+    |> section("4. Workspace topology + projection spine")
+    |> topology_projection_probes()
+    |> section("5. Evidence and truth lifecycle")
+    |> memory_core_lifecycle_probes()
+    |> section("6. Governed recall package")
+    |> governed_recall_probes()
+    |> section("7. Connector registry (14 adapters)")
     |> connector_probes()
-    |> section("5. Wiki tier-3 round-trip")
+    |> section("8. Wiki tier-3 round-trip")
     |> wiki_probes()
-    |> section("6. Retrieval — simple + complex + edge cases")
+    |> section("9. Retrieval — simple + complex + edge cases")
     |> retrieval_probes()
-    |> section("7. Compliance workflows (DSAR, erasure preview, holds)")
+    |> section("10. Compliance workflows (DSAR, erasure preview, holds)")
     |> compliance_probes()
-    |> maybe_section("8. Extra ingest load", ingest_count > 0)
+    |> maybe_section("11. Extra ingest load", ingest_count > 0)
     |> maybe_ingest(ingest_count)
-    |> maybe_section("9. Hard paths (slow retrieval, deep joins)", hard?)
+    |> maybe_section("12. Hard paths (slow retrieval, deep joins)", hard?)
     |> maybe_hard(hard?)
     |> summarize()
   end
@@ -158,6 +172,25 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     end)
   end
 
+  defp cleanup_stale_topology_projection_probe_data do
+    stale_workspace_sql = [
+      "DELETE FROM link_health_records WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM projection_revisions WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM export_records WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM derivation_ledger WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM source_packages WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM topology_change_requests WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM node_members WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM node_relationships WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM nodes WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM node_types WHERE workspace_id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM workspaces WHERE id LIKE 'default:reality-workspace-%'",
+      "DELETE FROM principals WHERE id = 'principal:reality-agent'"
+    ]
+
+    Enum.each(stale_workspace_sql, fn sql -> Store.raw_execute(sql, []) end)
+  end
+
   # ─── probes ─────────────────────────────────────────────────────────────
 
   defp store_counts(state) do
@@ -174,7 +207,25 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       "citations",
       "events",
       "nodes",
+      "node_types",
+      "node_relationships",
       "node_members",
+      "topology_change_requests",
+      "export_records",
+      "projection_revisions",
+      "link_health_records",
+      "source_packages",
+      "claims",
+      "facts",
+      "memory_objects",
+      "relationship_edges",
+      "derivation_ledger",
+      "context_packages",
+      "active_memory_pools",
+      "workflow_traces",
+      "generalized_workflows",
+      "procedural_memory_objects",
+      "skill_packages",
       "skills",
       "principals",
       "acls",
@@ -194,6 +245,415 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
         end
       end)
     end)
+  end
+
+  defp topology_projection_probes(state) do
+    suffix = System.unique_integer([:positive])
+    workspace_slug = "reality-workspace-#{suffix}"
+    tmp_root = Path.join(System.tmp_dir!(), workspace_slug)
+    previous_root = Application.get_env(:optimal_engine, :root_path)
+    Application.put_env(:optimal_engine, :root_path, tmp_root)
+
+    seed =
+      with {:ok, workspace} <-
+             WorkspaceTopology.create_workspace(%{
+               slug: workspace_slug,
+               name: "Reality Workspace #{suffix}",
+               description: "Throwaway workspace created by the reality check"
+             }),
+           {:ok, entity} <-
+             WorkspaceTopology.create_node(%{
+               workspace_id: workspace.id,
+               slug: "entity",
+               name: "Entity",
+               kind: :entity
+             }),
+           {:ok, department} <-
+             WorkspaceTopology.create_node(%{
+               workspace_id: workspace.id,
+               slug: "department",
+               name: "Department",
+               kind: :department,
+               parent_id: entity.id
+             }),
+           {:ok, project} <-
+             WorkspaceTopology.create_node(%{
+               workspace_id: workspace.id,
+               slug: "project",
+               name: "Project",
+               kind: :project,
+               parent_id: department.id
+             }),
+           {:ok, relationship} <-
+             WorkspaceTopology.link_nodes(project.id, entity.id, :depends_on,
+               workspace_id: workspace.id
+             ),
+           {:ok, agent} <-
+             Principal.upsert(%{
+               id: "principal:reality-agent",
+               kind: :agent,
+               display_name: "Reality Check Agent"
+             }),
+           :ok <-
+             WorkspaceTopology.add_node_member(project.id, agent.id,
+               workspace_id: workspace.id,
+               membership: :observer,
+               role: "agent"
+             ),
+           {:ok, export} <-
+             WorkspaceExport.record_export(%{
+               workspace_id: workspace.id,
+               source_object_type: "node",
+               source_object_id: project.id,
+               surface_type: "markdown",
+               destination_uri: "file://nodes/project/context.md",
+               generated_by: "reality_check"
+             }),
+           {:ok, projection} <-
+             WorkspaceExport.record_projection_revision(export.id, %{
+               workspace_id: workspace.id,
+               projection_uri: export.destination_uri,
+               content: "# Project\n\nReality check projection.",
+               source_object_links: [%{type: "node", id: project.id}]
+             }) do
+        {:ok,
+         %{
+           workspace: workspace,
+           entity: entity,
+           department: department,
+           project: project,
+           agent: agent,
+           relationship: relationship,
+           export: export,
+           projection: projection
+         }}
+      end
+
+    state =
+      case seed do
+        {:ok, ctx} ->
+          state
+          |> probe("workspace has standard node types", fn ->
+            {:ok, types} = WorkspaceTopology.list_node_types(workspace_id: ctx.workspace.id)
+            slugs = MapSet.new(Enum.map(types, & &1.slug))
+
+            if MapSet.subset?(MapSet.new(["entity", "project", "person", "operation"]), slugs),
+              do: {:ok, "#{MapSet.size(slugs)} node types"},
+              else: {:error, "missing standard node types: #{inspect(MapSet.to_list(slugs))}"}
+          end)
+          |> probe("workspace-scoped node tree", fn ->
+            {:ok, [root]} = WorkspaceTopology.node_tree(workspace_id: ctx.workspace.id)
+            [department] = root.children
+            [project] = department.children
+
+            if root.node.id == ctx.entity.id and project.node.id == ctx.project.id,
+              do: {:ok, "entity -> department -> project"},
+              else: {:error, "unexpected tree shape"}
+          end)
+          |> probe("typed node relationship", fn ->
+            {:ok, outgoing} =
+              WorkspaceTopology.relationships_for_node(ctx.project.id,
+                workspace_id: ctx.workspace.id,
+                direction: :outgoing
+              )
+
+            if Enum.any?(outgoing, &(&1.id == ctx.relationship.id)),
+              do: {:ok, "#{length(outgoing)} outgoing relationship(s)"},
+              else: {:error, "relationship not found"}
+          end)
+          |> probe("workspace-scoped node membership", fn ->
+            {:ok, members} =
+              WorkspaceTopology.node_members(ctx.project.id, workspace_id: ctx.workspace.id)
+
+            if Enum.any?(members, &(&1.principal_id == ctx.agent.id)),
+              do: {:ok, "#{length(members)} member(s)"},
+              else: {:error, "member not found"}
+          end)
+          |> probe("projection drift detection", fn ->
+            case WorkspaceExport.detect_drift(
+                   ctx.export.id,
+                   "# Project\n\nReality check projection."
+                 ) do
+              {:ok, :fresh} -> {:ok, "fresh"}
+              other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("projection invalidation", fn ->
+            case WorkspaceExport.invalidate_for_node(ctx.project.id,
+                   workspace_id: ctx.workspace.id,
+                   reason: "reality check node change"
+                 ) do
+              {:ok, %{export_record_ids: [_], projection_revision_count: 1}} ->
+                {:ok, "marked stale"}
+
+              other ->
+                {:error, inspect(other)}
+            end
+          end)
+          |> probe("projection edit re-enters source evidence", fn ->
+            case WorkspaceExport.capture_edit(ctx.export.id, %{
+                   content: "Reality check edit returned through the workspace surface.",
+                   actor_id: "human:reality-check"
+                 }) do
+              {:ok, capture} ->
+                {:ok, "source=#{capture.source_package.id}"}
+
+              other ->
+                {:error, inspect(other)}
+            end
+          end)
+
+        {:error, reason} ->
+          probe(state, "workspace topology seed", fn -> {:error, inspect(reason)} end)
+      end
+
+    cleanup_topology_projection_probe(seed)
+    restore_root_path(previous_root)
+    File.rm_rf(tmp_root)
+    state
+  end
+
+  defp cleanup_topology_projection_probe({:ok, %{workspace: %{id: workspace_id}, agent: agent}}) do
+    cleanup_sql = [
+      {"link_health_records", "DELETE FROM link_health_records WHERE workspace_id = ?1"},
+      {"projection_revisions", "DELETE FROM projection_revisions WHERE workspace_id = ?1"},
+      {"export_records", "DELETE FROM export_records WHERE workspace_id = ?1"},
+      {"derivation_ledger", "DELETE FROM derivation_ledger WHERE workspace_id = ?1"},
+      {"source_packages", "DELETE FROM source_packages WHERE workspace_id = ?1"},
+      {"topology_change_requests", "DELETE FROM topology_change_requests WHERE workspace_id = ?1"},
+      {"node_members", "DELETE FROM node_members WHERE workspace_id = ?1"},
+      {"node_relationships", "DELETE FROM node_relationships WHERE workspace_id = ?1"},
+      {"nodes", "DELETE FROM nodes WHERE workspace_id = ?1"},
+      {"node_types", "DELETE FROM node_types WHERE workspace_id = ?1"},
+      {"workspaces", "DELETE FROM workspaces WHERE id = ?1"}
+    ]
+
+    Enum.each(cleanup_sql, fn {_table, sql} -> Store.raw_execute(sql, [workspace_id]) end)
+    Store.raw_execute("DELETE FROM principals WHERE id = ?1", [agent.id])
+  end
+
+  defp cleanup_topology_projection_probe(_), do: :ok
+
+  defp restore_root_path(nil), do: Application.delete_env(:optimal_engine, :root_path)
+
+  defp restore_root_path(previous_root),
+    do: Application.put_env(:optimal_engine, :root_path, previous_root)
+
+  defp memory_core_lifecycle_probes(state) do
+    suffix = System.unique_integer([:positive])
+    workspace_id = "default:reality-memory-core-#{suffix}"
+
+    source =
+      SourcePackage.from_text("Reality check source: the project launch was approved.",
+        workspace_id: workspace_id,
+        source_type: "reality_check",
+        source_class: "text",
+        trust_label: "unreviewed",
+        security_labels: ["internal"],
+        partition_ids: ["reality-check"]
+      )
+
+    seed =
+      with {:ok, claim} <-
+             KnowledgeLifecycle.extract_claim(source,
+               claim_text: "The source states that the project launch was approved.",
+               subject_anchor: "project_launch",
+               action_class: "approved",
+               object_anchor: "reality_check_source",
+               aggregate_confidence: 0.72,
+               aggregate_precision: 0.68,
+               actor_id: "agent:reality-check"
+             ),
+           {:ok, fact} <-
+             KnowledgeLifecycle.promote_claim_to_fact(claim,
+               fact_text: "The project launch was approved.",
+               verifier_id: "human:reality-check",
+               aggregate_confidence: 0.91,
+               aggregate_precision: 0.86
+             ),
+           {:ok, memory} <-
+             KnowledgeLifecycle.build_memory_object(fact,
+               summary: "Reality check accepted memory: project launch approval is source-backed.",
+               memory_type: "decision",
+               salience: 0.8
+             ) do
+        {:ok, %{source: source, claim: claim, fact: fact, memory: memory}}
+      end
+
+    state =
+      case seed do
+        {:ok, ctx} ->
+          state
+          |> probe("source package preserved", fn ->
+            count_for("source_packages", workspace_id, ctx.source.id)
+          end)
+          |> probe("claim remains separate from truth", fn ->
+            count_for("claims", workspace_id, ctx.claim.id)
+          end)
+          |> probe("fact promotion writes accepted fact", fn ->
+            count_for("facts", workspace_id, ctx.fact.id)
+          end)
+          |> probe("memory object wraps accepted fact", fn ->
+            count_for("memory_objects", workspace_id, ctx.memory.id)
+          end)
+          |> probe("evidence edges and ledger entries", fn ->
+            with {:ok, [[edges]]} <-
+                   Store.raw_query(
+                     "SELECT COUNT(*) FROM relationship_edges WHERE workspace_id = ?1 AND relationship_type = 'supports'",
+                     [workspace_id]
+                   ),
+                 {:ok, [[ledger]]} <-
+                   Store.raw_query(
+                     "SELECT COUNT(*) FROM derivation_ledger WHERE workspace_id = ?1",
+                     [workspace_id]
+                   ) do
+              if edges >= 3 and ledger >= 3,
+                do: {:ok, "edges=#{edges} ledger=#{ledger}"},
+                else: {:error, "edges=#{edges} ledger=#{ledger}"}
+            else
+              other -> {:error, inspect(other)}
+            end
+          end)
+
+        {:error, reason} ->
+          probe(state, "memory lifecycle seed", fn -> {:error, inspect(reason)} end)
+      end
+
+    cleanup_memory_core_lifecycle_probe(workspace_id)
+    state
+  end
+
+  defp count_for(table, workspace_id, id) do
+    case Store.raw_query("SELECT COUNT(*) FROM #{table} WHERE workspace_id = ?1 AND id = ?2", [
+           workspace_id,
+           id
+         ]) do
+      {:ok, [[1]]} -> {:ok, "stored"}
+      {:ok, [[count]]} -> {:error, "expected 1 row, got #{count}"}
+      other -> {:error, inspect(other)}
+    end
+  end
+
+  defp cleanup_memory_core_lifecycle_probe(workspace_id) do
+    [
+      "DELETE FROM derivation_ledger WHERE workspace_id = ?1",
+      "DELETE FROM relationship_edges WHERE workspace_id = ?1",
+      "DELETE FROM memory_objects WHERE workspace_id = ?1",
+      "DELETE FROM facts WHERE workspace_id = ?1",
+      "DELETE FROM claims WHERE workspace_id = ?1",
+      "DELETE FROM source_packages WHERE workspace_id = ?1"
+    ]
+    |> Enum.each(&Store.raw_execute(&1, [workspace_id]))
+  end
+
+  defp governed_recall_probes(state) do
+    suffix = System.unique_integer([:positive])
+    workspace_id = "default:reality-recall-#{suffix}"
+
+    seed =
+      with {:ok, _ctx} <- seed_memory_for_recall(workspace_id, ["reality-check"]),
+           {:ok, package} <-
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               allowed_partitions: ["reality-check"],
+               allowed_security_labels: ["internal"]
+             ),
+           {:ok, filtered_package} <-
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               allowed_partitions: ["different-partition"],
+               allowed_security_labels: ["internal"]
+             ) do
+        {:ok, %{package: package, filtered_package: filtered_package}}
+      end
+
+    state =
+      case seed do
+        {:ok, ctx} ->
+          state
+          |> probe("context package assembled", fn ->
+            if length(ctx.package.fact_links) == 1 and length(ctx.package.memory_links) == 1,
+              do: {:ok, "facts=1 memories=1"},
+              else: {:error, inspect(ctx.package.filtered_object_summary)}
+          end)
+          |> probe("context package persisted", fn ->
+            case Store.raw_query(
+                   "SELECT COUNT(*) FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
+                   [workspace_id, ctx.package.id]
+                 ) do
+              {:ok, [[1]]} -> {:ok, "stored"}
+              other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("authorization filters before package assembly", fn ->
+            summary = ctx.filtered_package.filtered_object_summary
+
+            if summary.redacted_or_filtered_objects == 2 and ctx.filtered_package.fact_links == [] do
+              {:ok, "filtered=#{summary.redacted_or_filtered_objects}"}
+            else
+              {:error, inspect(summary)}
+            end
+          end)
+
+        {:error, reason} ->
+          probe(state, "governed recall seed", fn -> {:error, inspect(reason)} end)
+      end
+
+    cleanup_governed_recall_probe(workspace_id)
+    state
+  end
+
+  defp seed_memory_for_recall(workspace_id, partition_ids) do
+    source =
+      SourcePackage.from_text("Reality recall source: the project launch was approved.",
+        workspace_id: workspace_id,
+        source_type: "reality_check",
+        source_class: "text",
+        trust_label: "unreviewed",
+        security_labels: ["internal"],
+        partition_ids: partition_ids
+      )
+
+    with {:ok, claim} <-
+           KnowledgeLifecycle.extract_claim(source,
+             claim_text: "The source states that the project launch was approved.",
+             subject_anchor: "project_launch",
+             action_class: "approved",
+             object_anchor: "reality_recall_source",
+             aggregate_confidence: 0.72,
+             aggregate_precision: 0.68,
+             actor_id: "agent:reality-check"
+           ),
+         {:ok, fact} <-
+           KnowledgeLifecycle.promote_claim_to_fact(claim,
+             fact_text: "The project launch was approved.",
+             verifier_id: "human:reality-check",
+             aggregate_confidence: 0.91,
+             aggregate_precision: 0.86
+           ),
+         {:ok, memory} <-
+           KnowledgeLifecycle.build_memory_object(fact,
+             summary: "Reality check accepted memory: project launch approval is source-backed.",
+             memory_type: "decision",
+             salience: 0.8
+           ) do
+      {:ok, %{source: source, claim: claim, fact: fact, memory: memory}}
+    end
+  end
+
+  defp cleanup_governed_recall_probe(workspace_id) do
+    [
+      "DELETE FROM context_packages WHERE workspace_id = ?1",
+      "DELETE FROM derivation_ledger WHERE workspace_id = ?1",
+      "DELETE FROM relationship_edges WHERE workspace_id = ?1",
+      "DELETE FROM memory_objects WHERE workspace_id = ?1",
+      "DELETE FROM facts WHERE workspace_id = ?1",
+      "DELETE FROM claims WHERE workspace_id = ?1",
+      "DELETE FROM source_packages WHERE workspace_id = ?1"
+    ]
+    |> Enum.each(&Store.raw_execute(&1, [workspace_id]))
   end
 
   defp health_probes(state) do

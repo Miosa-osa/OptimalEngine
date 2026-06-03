@@ -182,13 +182,15 @@ defmodule OptimalEngine.Workspace do
 
     case Store.raw_query(sql, params) do
       {:ok, _} ->
+        root = Application.get_env(:optimal_engine, :root_path, File.cwd!())
+
         # Provision the on-disk directory tree (nodes/, .wiki/, assets/, ...).
         # Failure is non-fatal — the row exists; the user can re-trigger
         # provisioning via the API. Logged but doesn't roll back the row.
-        case Filesystem.provision(slug) do
+        case Filesystem.provision(slug, root: root) do
           {:ok, _path} ->
             # Write default config.yaml into .optimal/ after FS is ready.
-            case Config.put(slug, Config.defaults()) do
+            case Config.put(slug, Config.defaults(), root) do
               :ok ->
                 :ok
 
