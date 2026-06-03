@@ -30,6 +30,9 @@ defmodule OptimalEngine.Connectors do
   @doc "Run one sync cycle for the given connector."
   def run(connector_id, opts \\ []), do: Runner.run(connector_id, opts)
 
+  @doc "Run one sync cycle through Memory Core tool governance."
+  def run_governed(connector_id, opts \\ []), do: Runner.run_governed(connector_id, opts)
+
   @doc "`true` when the master key for credential encryption is configured."
   defdelegate credentials_ready?, to: Credential, as: :ready?
 end

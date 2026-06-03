@@ -41,17 +41,18 @@ Built and verified now:
 | Governed retrieval | Retrieval returns Context Packages, not loose chunks, and filters by partition/security scope before package assembly. |
 | Active Memory Pools | Task-scoped working memory can load Context Packages and publish observations as pending Claims. |
 | Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
+| Connector governance | Connector sync can run through the governed tool-call surface, blocking unauthorized runs before connector execution and recording both connector-run and tool-call audit rows when allowed. |
 | Workspace export | Markdown/files are projections and editing surfaces, not the only source of truth. |
 | Reality check | `mix optimal.reality_check` covers store counts, topology, evidence/truth lifecycle, recall packages, retrieval, connectors, wiki, and compliance probes. |
 
 Current verification:
 
 ```text
-mix test test/memory_core/spine_test.exs test/workspace_export_test.exs test/topology/workspace_topology_test.exs test/topology/node_member_test.exs test/topology/node_test.exs test/topology/workspace_surface_spine_test.exs test/signal/dispatcher_test.exs --seed 0
-55 tests, 0 failures
+mix test test/memory_core/spine_test.exs test/workspace_export_test.exs test/topology/workspace_topology_test.exs test/topology/node_member_test.exs test/topology/node_test.exs test/topology/workspace_surface_spine_test.exs test/signal/dispatcher_test.exs test/connectors/runner_test.exs --seed 0
+64 tests, 0 failures
 
 mix optimal.reality_check
-104 probes, 104 ok, 0 warn, 0 fail
+108 probes, 108 ok, 0 warn, 0 fail
 ```
 
 The full legacy suite still contains older optional/backend warnings. The focused
