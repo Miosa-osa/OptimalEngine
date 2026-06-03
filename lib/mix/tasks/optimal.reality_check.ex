@@ -859,6 +859,19 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                granted_privileges: [],
                requested_partitions: ["reality-check"]
              ),
+           {:ok, invalid_tool_output_run} <-
+             ToolModelGovernance.record_tool_call(
+               "calendar.read",
+               %{calendar_id: "primary"},
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               active_memory_pool_id: pool.id,
+               granted_privileges: ["calendar:read"],
+               requested_partitions: ["reality-check"],
+               output_payload: %{},
+               observation_text: "Calendar tool returned an invalid empty payload.",
+               claim_text: "Calendar returned an invalid empty payload."
+             ),
            {:ok, allowed_tool_run} <-
              ToolModelGovernance.record_tool_call(
                "calendar.read",
@@ -884,6 +897,16 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                granted_privileges: ["model:summarize"],
                requested_partitions: ["reality-check"],
                output_payload: %{summary: "Launch is ready for review."}
+             ),
+           {:ok, invalid_model_output_run} <-
+             ToolModelGovernance.record_model_call(
+               "summarize_context",
+               %{context: "Launch context"},
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: ["model:summarize"],
+               requested_partitions: ["reality-check"],
+               output_payload: %{}
              ) do
         {:ok,
          %{
@@ -891,8 +914,10 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
            tool_definition: tool_definition,
            model_operation: model_operation,
            rejected_tool_run: rejected_tool_run,
+           invalid_tool_output_run: invalid_tool_output_run,
            allowed_tool_run: allowed_tool_run,
-           allowed_model_run: allowed_model_run
+           allowed_model_run: allowed_model_run,
+           invalid_model_output_run: invalid_model_output_run
          }}
       end
 
@@ -922,11 +947,24 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                    WHERE workspace_id = ?1
                      AND mcp_tool_definition_id = ?2
                      AND decision_state = 'allowed'
+                     AND run_status = 'completed'
                    """,
                    [workspace_id, ctx.tool_definition.id]
                  ) do
               {:ok, [[1]]} -> {:ok, "stored"}
               other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("invalid tool output quarantined", fn ->
+            if ctx.invalid_tool_output_run.run_status == "output_rejected" and
+                 String.contains?(
+                   ctx.invalid_tool_output_run.rejection_reason,
+                   "missing_output:events"
+                 ) and
+                 ctx.invalid_tool_output_run.observation_links == [] do
+              {:ok, "missing output rejected without observation"}
+            else
+              {:error, inspect(ctx.invalid_tool_output_run)}
             end
           end)
           |> probe("tool output becomes pending claim", fn ->
@@ -946,11 +984,24 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                    WHERE workspace_id = ?1
                      AND model_call_operation_id = ?2
                      AND decision_state = 'allowed'
+                     AND run_status = 'completed'
                    """,
                    [workspace_id, ctx.model_operation.id]
                  ) do
               {:ok, [[1]]} -> {:ok, "stored"}
               other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("invalid model output quarantined", fn ->
+            if ctx.invalid_model_output_run.run_status == "output_rejected" and
+                 String.contains?(
+                   ctx.invalid_model_output_run.rejection_reason,
+                   "missing_output:summary"
+                 ) and
+                 ctx.invalid_model_output_run.observation_links == [] do
+              {:ok, "missing output rejected without observation"}
+            else
+              {:error, inspect(ctx.invalid_model_output_run)}
             end
           end)
           |> probe("governed call audit emitted", fn ->

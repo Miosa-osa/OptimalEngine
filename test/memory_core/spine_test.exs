@@ -604,6 +604,26 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert rejected_tool_run.decision_state == "rejected"
     assert rejected_tool_run.rejection_reason =~ "missing:calendar:read"
 
+    assert {:ok, invalid_tool_output_run} =
+             ToolModelGovernance.record_tool_call(
+               "calendar.read",
+               %{calendar_id: "primary"},
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               active_memory_pool_id: pool.id,
+               granted_privileges: ["calendar:read"],
+               requested_partitions: ["project-launch"],
+               output_payload: %{},
+               observation_text: "Calendar tool returned an invalid empty payload.",
+               claim_text: "Calendar returned an invalid empty payload."
+             )
+
+    assert invalid_tool_output_run.decision_state == "allowed"
+    assert invalid_tool_output_run.run_status == "output_rejected"
+    assert invalid_tool_output_run.rejection_reason =~ "missing_output:events"
+    assert invalid_tool_output_run.observation_links == []
+    assert invalid_tool_output_run.source_package_links == []
+
     assert {:ok, allowed_tool_run} =
              ToolModelGovernance.record_tool_call(
                "calendar.read",
@@ -646,6 +666,22 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert allowed_model_run.decision_state == "allowed"
     assert allowed_model_run.model_call_operation_id == model_operation.id
 
+    assert {:ok, invalid_model_output_run} =
+             ToolModelGovernance.record_model_call(
+               "summarize_context",
+               %{context: "Launch context"},
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               granted_privileges: ["model:summarize"],
+               requested_partitions: ["project-launch"],
+               output_payload: %{}
+             )
+
+    assert invalid_model_output_run.decision_state == "allowed"
+    assert invalid_model_output_run.run_status == "output_rejected"
+    assert invalid_model_output_run.rejection_reason =~ "missing_output:summary"
+    assert invalid_model_output_run.observation_links == []
+
     assert {:ok, [[1]]} =
              Store.raw_query(
                "SELECT COUNT(*) FROM mcp_tool_definitions WHERE workspace_id = ?1 AND id = ?2",
@@ -658,13 +694,13 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
                [workspace_id, model_operation.id]
              )
 
-    assert {:ok, [[2]]} =
+    assert {:ok, [[3]]} =
              Store.raw_query(
                "SELECT COUNT(*) FROM tool_call_runs WHERE workspace_id = ?1 AND mcp_tool_definition_id = ?2",
                [workspace_id, tool_definition.id]
              )
 
-    assert {:ok, [[1]]} =
+    assert {:ok, [[2]]} =
              Store.raw_query(
                "SELECT COUNT(*) FROM model_call_runs WHERE workspace_id = ?1 AND model_call_operation_id = ?2",
                [workspace_id, model_operation.id]
