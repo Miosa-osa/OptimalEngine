@@ -43,7 +43,6 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Pipeline.Router,
       OptimalEngine.Pipeline.Indexer,
       OptimalEngine.Retrieval.Search,
-      OptimalEngine.Retrieval.L0Cache,
       OptimalEngine.Pipeline.Intake,
       OptimalEngine.Insight.Simulate,
       {Registry, keys: :unique, name: OptimalEngine.SessionRegistry},
@@ -61,6 +60,7 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Memory.Cortex,
       OptimalEngine.Memory.Learning,
       OptimalEngine.Memory.Surfacer,
+      OptimalEngine.Retrieval.L0Cache,
 
       # ── Signal subsystem (pub/sub broker + journal for causality tracking) ─
       {OptimalEngine.Signal.PubSub, name: OptimalEngine.Signal.PubSub},

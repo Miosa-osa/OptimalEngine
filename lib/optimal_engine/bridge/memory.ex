@@ -29,7 +29,16 @@ defmodule OptimalEngine.Bridge.Memory do
   """
   @spec record_event(atom(), map(), String.t()) :: :ok
   def record_event(event_type, data, session_id \\ "optimal-engine") do
-    OptimalEngine.Memory.Episodic.record(event_type, data, session_id)
+    if event_type in [:pattern, :solution, :decision] do
+      OptimalEngine.Memory.Episodic.record_episode(event_type, %{
+        description:
+          Map.get(data, :description, Map.get(data, "description", to_string(event_type))),
+        context: Map.get(data, :context, Map.get(data, "context", session_id)),
+        outcome: Map.get(data, :outcome, Map.get(data, "outcome", "")),
+        tags: Map.get(data, :tags, Map.get(data, "tags", [session_id]))
+      })
+    end
+
     :ok
   rescue
     _ -> :ok
@@ -38,7 +47,10 @@ defmodule OptimalEngine.Bridge.Memory do
   @doc "Recalls recent events matching a query."
   @spec recall_events(String.t(), keyword()) :: [map()]
   def recall_events(query, opts \\ []) do
-    case OptimalEngine.Memory.Episodic.recall(query, opts) do
+    _opts = opts
+
+    case OptimalEngine.Memory.Episodic.recall_similar(query) do
+      {:ok, events} when is_list(events) -> events
       events when is_list(events) -> events
       _ -> []
     end
@@ -127,6 +139,8 @@ defmodule OptimalEngine.Bridge.Memory do
     end
   rescue
     _ -> ""
+  catch
+    :exit, _ -> ""
   end
 
   @doc "Forces Cortex to re-synthesize its bulletin."

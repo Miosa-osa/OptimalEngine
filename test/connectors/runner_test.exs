@@ -90,6 +90,92 @@ defmodule OptimalEngine.Connectors.RunnerTest do
     assert cursor == "cursor-42"
   end
 
+  test "governed run rejects missing privileges before connector execution", %{id: id} do
+    workspace_id = "default:connector-governance-#{System.unique_integer([:positive])}"
+
+    {:ok, ^id} =
+      Connectors.register(%{
+        id: id,
+        kind: :slack,
+        config: %{
+          "workspace_id" => "T01",
+          "channels" => ["C01"],
+          "credentials" => %{"bot_token" => "xoxb-test"}
+        }
+      })
+
+    assert {:error, {:rejected, rejected_run}} =
+             Runner.run_governed(id,
+               workspace_id: workspace_id,
+               actor_id: "agent:connector-test",
+               granted_privileges: [],
+               requested_partitions: ["ops"],
+               allowed_partitions: ["ops"]
+             )
+
+    assert rejected_run.tool_name == "connector.slack.sync"
+    assert rejected_run.decision_state == "rejected"
+    assert rejected_run.run_status == "rejected"
+    assert rejected_run.rejection_reason =~ "connector:slack:sync"
+    assert rejected_run.rejection_reason =~ "signal:ingest"
+
+    {:ok, [[connector_runs]]} =
+      Store.raw_query("SELECT COUNT(*) FROM connector_runs WHERE connector_id = ?1", [id])
+
+    assert connector_runs == 0
+  end
+
+  test "governed run allows connector execution and records both audit layers", %{id: id} do
+    workspace_id = "default:connector-governance-#{System.unique_integer([:positive])}"
+
+    {:ok, ^id} =
+      Connectors.register(%{
+        id: id,
+        kind: :slack,
+        config: %{
+          "workspace_id" => "T01",
+          "channels" => ["C01"],
+          "credentials" => %{"bot_token" => "xoxb-test"}
+        }
+      })
+
+    assert {:ok, result} =
+             Runner.run_governed(id,
+               workspace_id: workspace_id,
+               actor_id: "agent:connector-test",
+               granted_privileges: ["connector:slack:sync", "signal:ingest"],
+               requested_partitions: ["ops"],
+               allowed_partitions: ["ops"]
+             )
+
+    assert result.connector_id == id
+    assert result.governance_run.tool_name == "connector.slack.sync"
+    assert result.governance_run.decision_state == "allowed"
+    assert result.governance_run.run_status == "completed"
+    assert result.connector_result.status == "error"
+    assert result.connector_result.reason == "not_implemented"
+
+    {:ok, [[connector_runs]]} =
+      Store.raw_query("SELECT COUNT(*) FROM connector_runs WHERE connector_id = ?1", [id])
+
+    assert connector_runs == 1
+
+    {:ok, [[tool_runs]]} =
+      Store.raw_query(
+        """
+        SELECT COUNT(*)
+        FROM tool_call_runs
+        WHERE workspace_id = ?1
+          AND tool_name = 'connector.slack.sync'
+          AND decision_state = 'allowed'
+          AND run_status = 'completed'
+        """,
+        [workspace_id]
+      )
+
+    assert tool_runs == 1
+  end
+
   describe "Transform helpers" do
     test "signal_id/2 is deterministic" do
       a = Transform.signal_id(:slack, "abc")

@@ -1209,20 +1209,138 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   end
 
   defp connector_probes(state) do
-    state
-    |> probe("Connectors.list()", fn ->
-      {:ok, "#{length(Connectors.list())} adapters"}
-    end)
-    |> probe("Connectors.kinds() covers Slack + HubSpot", fn ->
-      kinds = Connectors.kinds()
+    suffix = System.unique_integer([:positive])
+    connector_id = "reality-slack-#{suffix}"
+    workspace_id = "default:reality-connector-#{suffix}"
 
-      if :slack in kinds and :hubspot in kinds,
-        do: {:ok, "#{length(kinds)} kinds"},
-        else: {:error, "missing core adapters"}
-    end)
-    |> probe("Connectors.credentials_ready? (no key required in dev)", fn ->
-      {:ok, to_string(Connectors.credentials_ready?())}
-    end)
+    {:ok, _} =
+      Connectors.register(%{
+        id: connector_id,
+        kind: :slack,
+        config: %{
+          "workspace_id" => "T01",
+          "channels" => ["C01"],
+          "credentials" => %{"bot_token" => "xoxb-reality"}
+        }
+      })
+
+    state =
+      state
+      |> probe("Connectors.list()", fn ->
+        {:ok, "#{length(Connectors.list())} adapters"}
+      end)
+      |> probe("Connectors.kinds() covers Slack + HubSpot", fn ->
+        kinds = Connectors.kinds()
+
+        if :slack in kinds and :hubspot in kinds,
+          do: {:ok, "#{length(kinds)} kinds"},
+          else: {:error, "missing core adapters"}
+      end)
+      |> probe("Connectors.credentials_ready? (no key required in dev)", fn ->
+        {:ok, to_string(Connectors.credentials_ready?())}
+      end)
+      |> probe("connector governance blocks runner without grants", fn ->
+        case Connectors.run_governed(connector_id,
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: [],
+               requested_partitions: ["reality-check"],
+               allowed_partitions: ["reality-check"]
+             ) do
+          {:error, {:rejected, run}} ->
+            with {:ok, [[connector_runs]]} <-
+                   Store.raw_query(
+                     "SELECT COUNT(*) FROM connector_runs WHERE connector_id = ?1",
+                     [connector_id]
+                   ) do
+              if connector_runs == 0 and run.run_status == "rejected" do
+                {:ok, "rejected before connector run"}
+              else
+                {:error, "connector_runs=#{connector_runs} run_status=#{run.run_status}"}
+              end
+            end
+
+          other ->
+            {:error, inspect(other)}
+        end
+      end)
+      |> probe("connector governance allows sync runner", fn ->
+        case Connectors.run_governed(connector_id,
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: ["connector:slack:sync", "signal:ingest"],
+               requested_partitions: ["reality-check"],
+               allowed_partitions: ["reality-check"]
+             ) do
+          {:ok, result} ->
+            run = result.governance_run
+
+            if run.decision_state == "allowed" and run.run_status == "completed" and
+                 result.connector_result.status == "error" do
+              {:ok, "governed #{run.tool_name}, connector status=#{result.connector_result.status}"}
+            else
+              {:error, inspect(result)}
+            end
+
+          other ->
+            {:error, inspect(other)}
+        end
+      end)
+      |> probe("connector governed run writes both audit layers", fn ->
+        with {:ok, [[connector_runs]]} <-
+               Store.raw_query(
+                 "SELECT COUNT(*) FROM connector_runs WHERE connector_id = ?1",
+                 [connector_id]
+               ),
+             {:ok, [[tool_runs]]} <-
+               Store.raw_query(
+                 """
+                 SELECT COUNT(*)
+                 FROM tool_call_runs
+                 WHERE workspace_id = ?1
+                   AND tool_name = 'connector.slack.sync'
+                   AND decision_state = 'allowed'
+                   AND run_status = 'completed'
+                 """,
+                 [workspace_id]
+               ) do
+          if connector_runs == 1 and tool_runs == 1 do
+            {:ok, "connector_runs=#{connector_runs}, tool_call_runs=#{tool_runs}"}
+          else
+            {:error, "connector_runs=#{connector_runs}, tool_call_runs=#{tool_runs}"}
+          end
+        end
+      end)
+      |> probe("connector governed audit event emitted", fn ->
+        case Store.raw_query(
+               """
+               SELECT COUNT(*)
+               FROM events
+               WHERE tenant_id = 'default'
+                 AND principal = 'agent:reality-check'
+                 AND kind = 'tool.call.governed'
+                 AND metadata LIKE ?1
+               """,
+               ["%#{workspace_id}%"]
+             ) do
+          {:ok, [[count]]} when count >= 2 -> {:ok, "#{count} audit event(s)"}
+          other -> {:error, inspect(other)}
+        end
+      end)
+
+    cleanup_connector_probe(connector_id, workspace_id)
+    state
+  end
+
+  defp cleanup_connector_probe(connector_id, workspace_id) do
+    [
+      {"DELETE FROM connector_runs WHERE connector_id = ?1", [connector_id]},
+      {"DELETE FROM connectors WHERE id = ?1", [connector_id]},
+      {"DELETE FROM tool_call_runs WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM mcp_tool_definitions WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM events WHERE metadata LIKE ?1", ["%#{workspace_id}%"]}
+    ]
+    |> Enum.each(fn {sql, params} -> Store.raw_execute(sql, params) end)
   end
 
   defp wiki_probes(state) do

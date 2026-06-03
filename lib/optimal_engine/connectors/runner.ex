@@ -21,6 +21,7 @@ defmodule OptimalEngine.Connectors.Runner do
   """
 
   alias OptimalEngine.Connectors.{Credential, Registry}
+  alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
 
@@ -43,6 +44,12 @@ defmodule OptimalEngine.Connectors.Runner do
           cursor_before: String.t() | nil,
           cursor_after: String.t() | nil,
           reason: term() | nil
+        }
+
+  @type governed_run_result :: %{
+          connector_id: String.t(),
+          governance_run: map(),
+          connector_result: map()
         }
 
   @default_max_retries 5
@@ -71,6 +78,153 @@ defmodule OptimalEngine.Connectors.Runner do
         |> finalize(row, run_id, opts)
 
       {:ok, result}
+    end
+  end
+
+  @doc """
+  Run one sync cycle through the Memory Core governed tool-call surface.
+
+  This keeps the existing connector bookkeeping intact while adding the
+  governance layer that agents, schedulers, and APIs should use before a
+  connector is allowed to touch external systems.
+  """
+  @spec run_governed(String.t(), keyword()) ::
+          {:ok, governed_run_result()} | {:error, term()}
+  def run_governed(connector_id, opts \\ []) when is_binary(connector_id) do
+    with {:ok, row} <- fetch_connector(connector_id),
+         {:ok, mod} <- lookup_adapter(row.kind),
+         {:ok, _definition} <- register_governed_connector_tool(row, mod, opts) do
+      tool_name = connector_tool_name(row)
+      input_payload = governed_connector_input(row)
+
+      executor = fn ->
+        case run(connector_id, connector_run_opts(opts)) do
+          {:ok, result} -> {:ok, governed_connector_output(row, result)}
+          {:error, reason} -> {:error, reason}
+        end
+      end
+
+      case ToolModelGovernance.execute_tool_call(
+             tool_name,
+             input_payload,
+             executor,
+             governed_connector_opts(row, opts)
+           ) do
+        {:ok, governance_run} ->
+          {:ok,
+           %{
+             connector_id: row.id,
+             governance_run: governance_run,
+             connector_result: governance_run.output_payload
+           }}
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
+  defp register_governed_connector_tool(row, mod, opts) do
+    ToolModelGovernance.register_mcp_tool_definition(
+      tenant_id: row.tenant_id,
+      workspace_id: governed_workspace_id(opts),
+      tool_name: connector_tool_name(row),
+      protocol_adapter_id: "mcp",
+      implementation_type: "external_connector",
+      registration_source: "connectors.runner",
+      required_privileges:
+        Keyword.get(opts, :required_privileges, [
+          "connector:#{row.kind}:sync",
+          "signal:ingest"
+        ]),
+      allowed_partitions: Keyword.get(opts, :allowed_partitions, []),
+      input_schema: %{required: ["connector_id", "kind", "operation"]},
+      output_schema: %{
+        required: [
+          "connector_id",
+          "kind",
+          "status",
+          "signals",
+          "errors",
+          "cursor_before",
+          "cursor_after"
+        ]
+      },
+      routing_policy: %{
+        connector_id: row.id,
+        kind: row.kind
+      },
+      timeout_policy: %{source: "connector_runner"},
+      audit_policy: %{record_connector_run: true},
+      metadata: %{
+        connector_id: row.id,
+        kind: row.kind,
+        display_name: safe_adapter_value(mod, :display_name),
+        auth_scheme: safe_adapter_value(mod, :auth_scheme)
+      }
+    )
+  end
+
+  defp governed_connector_opts(row, opts) do
+    [
+      tenant_id: row.tenant_id,
+      workspace_id: governed_workspace_id(opts),
+      protocol_adapter_id: "mcp",
+      actor_id: Keyword.get(opts, :actor_id, "system:connector-runner"),
+      active_memory_pool_id: Keyword.get(opts, :active_memory_pool_id),
+      granted_privileges: Keyword.get(opts, :granted_privileges, []),
+      requested_partitions: Keyword.get(opts, :requested_partitions, []),
+      security_labels: Keyword.get(opts, :security_labels, []),
+      partition_ids: Keyword.get(opts, :partition_ids, []),
+      metadata: %{
+        connector_id: row.id,
+        kind: row.kind,
+        operation: "sync"
+      }
+    ]
+  end
+
+  defp governed_connector_input(row) do
+    %{
+      connector_id: row.id,
+      kind: row.kind,
+      tenant_id: row.tenant_id,
+      cursor_before: row.cursor,
+      operation: "sync"
+    }
+  end
+
+  defp governed_connector_output(row, result) do
+    %{
+      connector_id: row.id,
+      kind: row.kind,
+      status: result.status |> to_string(),
+      signals: result.signals,
+      errors: result.errors,
+      cursor_before: result.cursor_before,
+      cursor_after: result.cursor_after,
+      reason: reason_to_string(result.reason)
+    }
+  end
+
+  defp connector_tool_name(row), do: "connector.#{row.kind}.sync"
+
+  defp connector_run_opts(opts) do
+    Keyword.take(opts, [:max_retries, :signal_sink])
+  end
+
+  defp governed_workspace_id(opts), do: Keyword.get(opts, :workspace_id, "default") |> to_string()
+
+  defp reason_to_string(nil), do: nil
+  defp reason_to_string(reason) when is_binary(reason), do: reason
+  defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_to_string(reason), do: inspect(reason)
+
+  defp safe_adapter_value(mod, callback) do
+    if function_exported?(mod, callback, 0) do
+      apply(mod, callback, []) |> to_string()
+    else
+      nil
     end
   end
 
