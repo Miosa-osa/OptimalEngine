@@ -158,6 +158,114 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
     end
   end
 
+  @spec record_asset_extraction(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def record_asset_extraction(run_id, opts \\ []) when is_binary(run_id) do
+    with {:ok, run} <- get_adapter_run(run_id, opts),
+         :ok <- completed_adapter_run?(run),
+         {:ok, extraction} <- build_asset_extraction(run, opts),
+         :ok <- insert_asset_extraction(extraction),
+         {:ok, projection} <- insert_typed_extraction_projection(extraction, opts),
+         :ok <- record_extraction_derivation(extraction, run, opts) do
+      {:ok, %{extraction: extraction, projection: projection}}
+    end
+  end
+
+  @spec list_asset_extractions(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_asset_extractions(asset_id, opts \\ []) when is_binary(asset_id) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+
+    sql = """
+    SELECT id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
+           extraction_type, modality, content_text, content_ref, content_hash,
+           confidence, precision, security_labels, partition_ids, metadata,
+           derivation_ledger_id, created_by, created_at
+    FROM asset_extractions
+    WHERE tenant_id = ?1 AND workspace_id = ?2 AND asset_id = ?3
+    ORDER BY created_at DESC
+    """
+
+    case Store.raw_query(sql, [tenant_id, workspace_id, asset_id]) do
+      {:ok, rows} -> {:ok, Enum.map(rows, &row_to_asset_extraction/1)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec get_asset_extraction(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found | term()}
+  def get_asset_extraction(extraction_id, opts \\ []) when is_binary(extraction_id) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+
+    sql = """
+    SELECT id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
+           extraction_type, modality, content_text, content_ref, content_hash,
+           confidence, precision, security_labels, partition_ids, metadata,
+           derivation_ledger_id, created_by, created_at
+    FROM asset_extractions
+    WHERE tenant_id = ?1 AND workspace_id = ?2 AND id = ?3
+    """
+
+    case Store.raw_query(sql, [tenant_id, workspace_id, extraction_id]) do
+      {:ok, [row]} -> {:ok, row_to_asset_extraction(row)}
+      {:ok, []} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec claim_from_asset_extraction(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def claim_from_asset_extraction(extraction_id, opts \\ []) when is_binary(extraction_id) do
+    with {:ok, extraction} <- get_asset_extraction(extraction_id, opts),
+         :ok <- claimable_extraction?(extraction) do
+      source_package =
+        SourcePackage.from_text(extraction.content_text,
+          tenant_id: extraction.tenant_id,
+          workspace_id: extraction.workspace_id,
+          source_type: "asset_extraction",
+          source_class: extraction.extraction_type,
+          source_system: "asset_extraction_projection",
+          source_uri: "optimal://assets/#{extraction.asset_id}/extractions/#{extraction.id}",
+          trust_label: Keyword.get(opts, :trust_label, "derived_unreviewed"),
+          security_labels: extraction.security_labels,
+          partition_ids: extraction.partition_ids,
+          actor_id: Keyword.get(opts, :actor_id) || extraction.created_by,
+          metadata:
+            Map.merge(extraction.metadata || %{}, %{
+              asset_id: extraction.asset_id,
+              adapter_run_id: extraction.adapter_run_id,
+              extraction_id: extraction.id,
+              extraction_type: extraction.extraction_type,
+              content_hash: extraction.content_hash,
+              derived_from: "asset_extraction"
+            })
+        )
+
+      with {:ok, claim} <-
+             KnowledgeLifecycle.extract_claim(source_package,
+               claim_text: Keyword.get(opts, :claim_text, extraction.content_text),
+               claim_type: Keyword.get(opts, :claim_type, extraction.extraction_type),
+               subject_anchor: Keyword.get(opts, :subject_anchor),
+               action_class: Keyword.get(opts, :action_class),
+               object_anchor: Keyword.get(opts, :object_anchor),
+               extraction_run_id: extraction.id,
+               evaluator_id: Keyword.get(opts, :evaluator_id),
+               aggregate_confidence:
+                 Keyword.get(opts, :aggregate_confidence, extraction.confidence || 0.5),
+               aggregate_precision:
+                 Keyword.get(opts, :aggregate_precision, extraction.precision || 0.5),
+               actor_id: Keyword.get(opts, :actor_id) || extraction.created_by,
+               metadata: %{
+                 adapter_run_id: extraction.adapter_run_id,
+                 asset_id: extraction.asset_id,
+                 extraction_id: extraction.id,
+                 extraction_type: extraction.extraction_type,
+                 content_hash: extraction.content_hash
+               }
+             ) do
+        {:ok, %{asset_extraction: extraction, source_package: source_package, pending_claim: claim}}
+      end
+    end
+  end
+
   @spec get(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found | term()}
   def get(asset_id, opts \\ []) when is_binary(asset_id) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
@@ -199,6 +307,404 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
   end
 
   defp claimable_adapter_run?(%{status: status}), do: {:error, {:adapter_run_not_completed, status}}
+
+  defp completed_adapter_run?(%{status: "completed"}), do: :ok
+  defp completed_adapter_run?(%{status: status}), do: {:error, {:adapter_run_not_completed, status}}
+
+  defp claimable_extraction?(%{content_text: content_text}) when is_binary(content_text) do
+    if String.trim(content_text) == "" do
+      {:error, :asset_extraction_empty}
+    else
+      :ok
+    end
+  end
+
+  defp build_asset_extraction(run, opts) do
+    now = timestamp()
+    extraction_type = normalize_extraction_type(Keyword.fetch!(opts, :extraction_type))
+    content_text = Keyword.get(opts, :content_text, run.output_text || "")
+    content_ref = Keyword.get(opts, :content_ref)
+
+    content_hash =
+      Keyword.get(opts, :content_hash) || derived_output_hash(content_text, content_ref)
+
+    extraction = %{
+      id: Keyword.get(opts, :id, ID.random_id("aext")),
+      tenant_id: run.tenant_id,
+      workspace_id: run.workspace_id,
+      asset_id: run.asset_id,
+      source_package_id: run.source_package_id,
+      adapter_run_id: run.id,
+      extraction_type: extraction_type,
+      modality: Keyword.get(opts, :modality, run.modality),
+      content_text: content_text,
+      content_ref: content_ref,
+      content_hash: content_hash,
+      confidence: Keyword.get(opts, :confidence, run.confidence),
+      precision: Keyword.get(opts, :precision, run.precision),
+      security_labels: Keyword.get(opts, :security_labels, run.security_labels),
+      partition_ids: Keyword.get(opts, :partition_ids, run.partition_ids),
+      metadata: Keyword.get(opts, :metadata, %{}),
+      derivation_ledger_id: nil,
+      created_by: Keyword.get(opts, :actor_id) || run.created_by,
+      created_at: now
+    }
+
+    with :ok <- supported_extraction_type?(extraction_type),
+         :ok <- validate_extraction_payload(extraction, opts) do
+      {:ok, extraction}
+    end
+  end
+
+  defp normalize_extraction_type(value) do
+    value
+    |> to_string()
+    |> String.downcase()
+    |> String.replace("-", "_")
+  end
+
+  defp supported_extraction_type?(type)
+       when type in ["transcript", "ocr_span", "visual_observation", "embedding_ref"],
+       do: :ok
+
+  defp supported_extraction_type?(type), do: {:error, {:unsupported_extraction_type, type}}
+
+  defp validate_extraction_payload(
+         %{extraction_type: "embedding_ref", content_ref: content_ref},
+         opts
+       ) do
+    embedding_ref = Keyword.get(opts, :embedding_ref) || content_ref
+
+    cond do
+      not is_binary(Keyword.get(opts, :embedding_model_id)) ->
+        {:error, :embedding_model_id_required}
+
+      not is_binary(embedding_ref) or String.trim(embedding_ref) == "" ->
+        {:error, :embedding_ref_required}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_extraction_payload(%{content_text: content_text}, _opts)
+       when is_binary(content_text) do
+    if String.trim(content_text) == "" do
+      {:error, :asset_extraction_text_required}
+    else
+      :ok
+    end
+  end
+
+  defp insert_asset_extraction(extraction) do
+    sql = """
+    INSERT INTO asset_extractions (
+      id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
+      extraction_type, modality, content_text, content_ref, content_hash,
+      confidence, precision, security_labels, partition_ids, metadata,
+      derivation_ledger_id, created_by, created_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6,
+      ?7, ?8, ?9, ?10, ?11,
+      ?12, ?13, ?14, ?15, ?16,
+      ?17, ?18, ?19
+    )
+    """
+
+    Store.raw_execute(sql, [
+      extraction.id,
+      extraction.tenant_id,
+      extraction.workspace_id,
+      extraction.asset_id,
+      extraction.source_package_id,
+      extraction.adapter_run_id,
+      extraction.extraction_type,
+      extraction.modality,
+      extraction.content_text,
+      extraction.content_ref,
+      extraction.content_hash,
+      extraction.confidence,
+      extraction.precision,
+      JSON.list(extraction.security_labels),
+      JSON.list(extraction.partition_ids),
+      JSON.map(extraction.metadata),
+      extraction.derivation_ledger_id,
+      extraction.created_by,
+      extraction.created_at
+    ])
+  end
+
+  defp insert_typed_extraction_projection(%{extraction_type: "transcript"} = extraction, opts) do
+    projection =
+      Map.merge(extraction, %{
+        language: Keyword.get(opts, :language),
+        speaker: Keyword.get(opts, :speaker),
+        start_ms: Keyword.get(opts, :start_ms),
+        end_ms: Keyword.get(opts, :end_ms)
+      })
+
+    sql = """
+    INSERT INTO asset_transcripts (
+      id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
+      extraction_id, language, speaker, transcript_text, start_ms, end_ms,
+      confidence, precision, security_labels, partition_ids, metadata,
+      derivation_ledger_id, created_by, created_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6,
+      ?7, ?8, ?9, ?10, ?11, ?12,
+      ?13, ?14, ?15, ?16, ?17,
+      ?18, ?19, ?20
+    )
+    """
+
+    with :ok <-
+           Store.raw_execute(sql, [
+             projection.id,
+             projection.tenant_id,
+             projection.workspace_id,
+             projection.asset_id,
+             projection.source_package_id,
+             projection.adapter_run_id,
+             projection.id,
+             projection.language,
+             projection.speaker,
+             projection.content_text,
+             projection.start_ms,
+             projection.end_ms,
+             projection.confidence,
+             projection.precision,
+             JSON.list(projection.security_labels),
+             JSON.list(projection.partition_ids),
+             JSON.map(projection.metadata),
+             projection.derivation_ledger_id,
+             projection.created_by,
+             projection.created_at
+           ]) do
+      {:ok, projection}
+    end
+  end
+
+  defp insert_typed_extraction_projection(%{extraction_type: "ocr_span"} = extraction, opts) do
+    projection =
+      Map.merge(extraction, %{
+        page_number: Keyword.get(opts, :page_number),
+        bbox: Keyword.get(opts, :bbox, %{})
+      })
+
+    sql = """
+    INSERT INTO asset_ocr_spans (
+      id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
+      extraction_id, page_number, span_text, bbox, confidence, precision,
+      security_labels, partition_ids, metadata, derivation_ledger_id,
+      created_by, created_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6,
+      ?7, ?8, ?9, ?10, ?11, ?12,
+      ?13, ?14, ?15, ?16,
+      ?17, ?18
+    )
+    """
+
+    with :ok <-
+           Store.raw_execute(sql, [
+             projection.id,
+             projection.tenant_id,
+             projection.workspace_id,
+             projection.asset_id,
+             projection.source_package_id,
+             projection.adapter_run_id,
+             projection.id,
+             projection.page_number,
+             projection.content_text,
+             JSON.map(projection.bbox),
+             projection.confidence,
+             projection.precision,
+             JSON.list(projection.security_labels),
+             JSON.list(projection.partition_ids),
+             JSON.map(projection.metadata),
+             projection.derivation_ledger_id,
+             projection.created_by,
+             projection.created_at
+           ]) do
+      {:ok, projection}
+    end
+  end
+
+  defp insert_typed_extraction_projection(
+         %{extraction_type: "visual_observation"} = extraction,
+         opts
+       ) do
+    projection =
+      Map.merge(extraction, %{
+        observation_type: Keyword.get(opts, :observation_type, "caption"),
+        region: Keyword.get(opts, :region, %{}),
+        frame_time_ms: Keyword.get(opts, :frame_time_ms)
+      })
+
+    sql = """
+    INSERT INTO asset_visual_observations (
+      id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
+      extraction_id, observation_type, observation_text, region, frame_time_ms,
+      confidence, precision, security_labels, partition_ids, metadata,
+      derivation_ledger_id, created_by, created_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6,
+      ?7, ?8, ?9, ?10, ?11,
+      ?12, ?13, ?14, ?15, ?16,
+      ?17, ?18, ?19
+    )
+    """
+
+    with :ok <-
+           Store.raw_execute(sql, [
+             projection.id,
+             projection.tenant_id,
+             projection.workspace_id,
+             projection.asset_id,
+             projection.source_package_id,
+             projection.adapter_run_id,
+             projection.id,
+             projection.observation_type,
+             projection.content_text,
+             JSON.map(projection.region),
+             projection.frame_time_ms,
+             projection.confidence,
+             projection.precision,
+             JSON.list(projection.security_labels),
+             JSON.list(projection.partition_ids),
+             JSON.map(projection.metadata),
+             projection.derivation_ledger_id,
+             projection.created_by,
+             projection.created_at
+           ]) do
+      {:ok, projection}
+    end
+  end
+
+  defp insert_typed_extraction_projection(%{extraction_type: "embedding_ref"} = extraction, opts) do
+    projection =
+      Map.merge(extraction, %{
+        embedding_model_id: Keyword.fetch!(opts, :embedding_model_id),
+        embedding_model_version: Keyword.get(opts, :embedding_model_version),
+        embedding_ref: Keyword.get(opts, :embedding_ref) || extraction.content_ref,
+        embedding_dim: Keyword.get(opts, :embedding_dim),
+        embedding_space: Keyword.get(opts, :embedding_space),
+        target_ref: Keyword.get(opts, :target_ref)
+      })
+
+    sql = """
+    INSERT INTO asset_embedding_refs (
+      id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
+      extraction_id, embedding_model_id, embedding_model_version, embedding_ref,
+      embedding_dim, embedding_space, target_ref, confidence, precision,
+      security_labels, partition_ids, metadata, derivation_ledger_id,
+      created_by, created_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6,
+      ?7, ?8, ?9, ?10,
+      ?11, ?12, ?13, ?14, ?15,
+      ?16, ?17, ?18, ?19,
+      ?20, ?21
+    )
+    """
+
+    with :ok <-
+           Store.raw_execute(sql, [
+             projection.id,
+             projection.tenant_id,
+             projection.workspace_id,
+             projection.asset_id,
+             projection.source_package_id,
+             projection.adapter_run_id,
+             projection.id,
+             projection.embedding_model_id,
+             projection.embedding_model_version,
+             projection.embedding_ref,
+             projection.embedding_dim,
+             projection.embedding_space,
+             projection.target_ref,
+             projection.confidence,
+             projection.precision,
+             JSON.list(projection.security_labels),
+             JSON.list(projection.partition_ids),
+             JSON.map(projection.metadata),
+             projection.derivation_ledger_id,
+             projection.created_by,
+             projection.created_at
+           ]) do
+      {:ok, projection}
+    end
+  end
+
+  defp insert_typed_extraction_projection(%{extraction_type: extraction_type}, _opts) do
+    {:error, {:unsupported_extraction_type, extraction_type}}
+  end
+
+  defp record_extraction_derivation(extraction, run, opts) do
+    asset_ref = DerivationLedgerEntry.object_ref("asset", extraction.asset_id)
+    run_ref = DerivationLedgerEntry.object_ref("asset_adapter_run", run.id)
+    extraction_ref = DerivationLedgerEntry.object_ref("asset_extraction", extraction.id)
+
+    source_refs =
+      if is_binary(extraction.source_package_id) do
+        [DerivationLedgerEntry.object_ref("source_package", extraction.source_package_id)]
+      else
+        []
+      end
+
+    ledger =
+      DerivationLedgerEntry.new(
+        "asset_extraction.#{extraction.extraction_type}",
+        "adapter_run_to_asset_extraction",
+        [run_ref],
+        [extraction_ref],
+        tenant_id: extraction.tenant_id,
+        workspace_id: extraction.workspace_id,
+        source_package_links: source_refs,
+        evidence_links: [asset_ref, run_ref | source_refs],
+        actor_id: Keyword.get(opts, :actor_id),
+        parser_id: "optimal_engine.memory_core.asset_store",
+        model_id: run.model_id,
+        model_version: run.model_version,
+        confidence_delta: extraction.confidence,
+        precision_delta: extraction.precision,
+        security_labels: extraction.security_labels,
+        partition_ids: extraction.partition_ids,
+        metadata: %{
+          asset_id: extraction.asset_id,
+          adapter_run_id: run.id,
+          extraction_id: extraction.id,
+          extraction_type: extraction.extraction_type,
+          content_hash: extraction.content_hash
+        }
+      )
+
+    case OptimalEngine.MemoryCore.Store.insert_derivation_entry(ledger) do
+      :ok -> attach_extraction_derivation(extraction, ledger.id)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp attach_extraction_derivation(extraction, ledger_id) do
+    type_table =
+      case extraction.extraction_type do
+        "transcript" -> "asset_transcripts"
+        "ocr_span" -> "asset_ocr_spans"
+        "visual_observation" -> "asset_visual_observations"
+        "embedding_ref" -> "asset_embedding_refs"
+      end
+
+    with :ok <-
+           Store.raw_execute(
+             "UPDATE asset_extractions SET derivation_ledger_id = ?1 WHERE id = ?2",
+             [ledger_id, extraction.id]
+           ) do
+      Store.raw_execute(
+        "UPDATE #{type_table} SET derivation_ledger_id = ?1 WHERE id = ?2",
+        [ledger_id, extraction.id]
+      )
+    end
+  end
 
   defp normalize_adapter_id(id) when is_atom(id), do: id
 
@@ -618,6 +1124,50 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
       confidence: confidence,
       precision: precision,
       error_reason: error_reason,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      metadata: decode_map(metadata),
+      derivation_ledger_id: derivation_ledger_id,
+      created_by: created_by,
+      created_at: created_at
+    }
+  end
+
+  defp row_to_asset_extraction([
+         id,
+         tenant_id,
+         workspace_id,
+         asset_id,
+         source_package_id,
+         adapter_run_id,
+         extraction_type,
+         modality,
+         content_text,
+         content_ref,
+         content_hash,
+         confidence,
+         precision,
+         security_labels,
+         partition_ids,
+         metadata,
+         derivation_ledger_id,
+         created_by,
+         created_at
+       ]) do
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      asset_id: asset_id,
+      source_package_id: source_package_id,
+      adapter_run_id: adapter_run_id,
+      extraction_type: extraction_type,
+      modality: modality,
+      content_text: content_text,
+      content_ref: content_ref,
+      content_hash: content_hash,
+      confidence: confidence,
+      precision: precision,
       security_labels: decode_list(security_labels),
       partition_ids: decode_list(partition_ids),
       metadata: decode_map(metadata),

@@ -18,6 +18,7 @@ Workspace/Topology
   -> Claim/Fact/Memory lifecycle
   -> Governed multimodal assets
   -> Adapter run records
+  -> Asset extraction projection records
   -> Context Packages
   -> Active Memory Pools
   -> Workflow/Skill records
@@ -90,16 +91,17 @@ workspace export of a Node.
 | Signal classification remains separate from truth. | Signal Pipeline | Signal modules classify and validate signals. Compatibility rows can still exist for search. | `test/signal/dispatcher_test.exs`, `test/pipeline/classify_store_test.exs`, parser/classifier tests. | The Signal-to-Claim bridge needs richer extraction policies and clearer routing hooks. |
 | Extracted assertions do not become truth automatically. | Memory Core | Claims are created first; promotion creates Facts through `ClaimReview` and `KnowledgeLifecycle`. | `test/memory_core/spine_test.exs`, `test/memory_core/claim_review_test.exs`, reality-check evidence lifecycle probes. | Review queue UI/API ergonomics and stronger policy-based promotion rules. |
 | Accepted knowledge becomes source-backed memory. | Memory Core | Facts can become Memory Objects with links to evidence, Claims, and derivation. | `MemoryCore.build_memory_object/2`, `test/memory_core/spine_test.exs`, reality-check memory probes. | Supersession, contradiction, stale-review, and richer memory object construction. |
-| Multimodal inputs are first-class evidence. | Memory Core / Pipeline | Parser-produced assets are preserved through `AssetStore`; chunks can carry `asset_ref`; indexer passes workspace scope. | `test/pipeline/pipeline_asset_store_test.exs`, `test/pipeline/indexer_asset_store_test.exs`, asset store tests. | Rich modality-specific extraction tables such as transcripts, OCR spans, visual observations, and embedding refs. |
+| Multimodal inputs are first-class evidence. | Memory Core / Pipeline | Parser-produced assets are preserved through `AssetStore`; chunks can carry `asset_ref`; indexer passes workspace scope. | `test/pipeline/pipeline_asset_store_test.exs`, `test/pipeline/indexer_asset_store_test.exs`, asset store tests. | Connector/API uploads still need to consistently force every file payload through this path. |
 | Open-source multimodal adapters are planned and governed. | Pipeline / Model Governance | `MultimodalToolRegistry` catalogs local-first adapter targets for documents, OCR, audio, video, visual reasoning, visual retrieval, and cross-modal embeddings. | `test/pipeline/multimodal_tool_registry_test.exs`, `docs/reference/multimodal-open-source-stack.md`. | Runtime availability checks, install profiles, and deployment packaging per adapter. |
 | Adapter execution is recorded instead of invisible. | Memory Core / Pipeline | `MultimodalAdapterRunner` executes configured local commands and records completed, failed, or unavailable runs in `asset_adapter_runs`. | `test/pipeline/multimodal_adapter_runner_test.exs`, migration 036, `MemoryCore.run_asset_adapter/3`. | Adapter-specific command builders and output parsers. |
-| Completed adapter output can become reviewable knowledge. | Memory Core | `MemoryCore.claim_from_asset_adapter_run/2` turns completed adapter output into a derived Source Package and pending Claim. Failed or unavailable adapter runs are rejected before Claim creation. | `test/memory_core/asset_store_test.exs`. | Rich adapter extraction projections and review policies that decide when Claims become Facts. |
+| Adapter outputs have typed projection storage. | Memory Core | `MemoryCore.record_asset_extraction/2` writes `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection rows linked to assets, adapter runs, scopes, hashes, and derivation ledger. | migration 037, `test/memory_core/asset_store_test.exs`, `mix optimal.reality_check` table probes. | Adapter-specific parsers still need to populate these projections from real tool output automatically. |
+| Completed adapter output can become reviewable knowledge. | Memory Core | `MemoryCore.claim_from_asset_adapter_run/2` and `MemoryCore.claim_from_asset_extraction/2` turn text-bearing completed outputs into derived Source Packages and pending Claims. Failed/unavailable adapter runs and reference-only extractions cannot become Claims. | `test/memory_core/asset_store_test.exs`. | Review policies that decide when adapter-derived Claims become Facts. |
 | Humans and agents receive Context Packages, not random chunks. | Retrieval / Context | `RetrievalCoordinator` returns and stores `context_packages` with facts, memories, evidence links, confidence/precision summaries, and an authorization envelope. | `test/memory_core/spine_test.exs`, reality-check retrieval/context probes. | Full planner across structured filters, FTS, vector search, graph traversal, temporal validity, workflows, and permissions. |
 | Agents work in task-scoped pools. | Active Collaboration | `ActiveMemoryPool` opens task pools, loads Context Packages, publishes observations as Source Packages and pending Claims, and closes pools. | Reality-check active pool probes and MemoryCore delegates. | Pool membership enforcement, refresh/invalidation workflows, and UI/API surfaces. |
 | Repeated work can become workflows and skills. | Workflow / Skill Runtime | First lifecycle records workflow traces, generalized workflows, procedural memory objects, and skill packages. | `MemoryCore.capture_workflow_trace/2`, `generalize_workflow/2`, `create_procedural_memory/2`, `package_skill/2`, reality-check workflow probes. | Real workflow mining, clustering, review gates, skill execution runtime, and exception/rollback handling. |
 | Tool and model calls are governed. | Model / Tool Governance | Tool/model definitions and calls can enforce privileges, partitions, required inputs/outputs, and audit links. Connector runs have a governed execution path. | `test/connectors/runner_test.exs`, reality-check governance probes. | Make governed connector execution the default path everywhere and add richer schema validation/output normalization. |
 | Markdown/files are projections, not the only truth. | Workspace Export | Workspace export records projections and can re-ingest edits as evidence. | `test/workspace_export_test.exs`, README storage model. | Full app/page rendering, HTML/report generation, and projection invalidation/rebuild policies. |
-| Benchmarks are inspectable, not just screenshots. | Evaluation / Audit | `mix optimal.reality_check` gives a deterministic backend probe suite. | `mix optimal.reality_check` currently reports 110 OK probes. | Large-scale benchmark tables, run configs, judge configs, dataset configs, retrieval metrics, and public/private result exports. |
+| Benchmarks are inspectable, not just screenshots. | Evaluation / Audit | `mix optimal.reality_check` gives a deterministic backend probe suite. | `mix optimal.reality_check` currently reports 115 OK probes. | Large-scale benchmark tables, run configs, judge configs, dataset configs, retrieval metrics, and public/private result exports. |
 | Public repo stays clean. | Governance | Public README/docs avoid private project material. Private HTML remains outside the public commit. | Current public worktree status and committed file scope. | Continue auditing generated docs before public pushes. |
 
 ## Current Data Flow
@@ -132,8 +134,9 @@ file
   -> Source Package + assets row + derivation ledger
   -> optional adapter run
   -> asset_adapter_runs
-  -> extracted text / transcript / OCR / visual output
-  -> derived Source Package
+  -> asset_extractions
+  -> typed transcript / OCR span / visual observation / embedding ref projection
+  -> text-bearing extraction becomes derived Source Package
   -> pending Claim
   -> reviewed Fact only after review or policy acceptance
 ```
@@ -145,14 +148,15 @@ same lifecycle order:
 
 ```text
 1. Keep preserving sources and assets correctly.
-2. Add adapter-specific extraction projection tables and parsers.
-3. Improve review policy for adapter-output Claims.
-4. Improve Fact review, stale review, and supersession.
-5. Expand retrieval planning and Context Package assembly.
-6. Strengthen Active Memory Pools and agent/tool governance.
-7. Add benchmark/evaluation storage.
-8. Build app/HTML/report surfaces from governed state.
-9. Add rebuild/recovery services for derived projections.
+2. Add adapter-specific parsers that populate the extraction projection tables.
+3. Feed extraction projections into retrieval and Context Package assembly.
+4. Improve review policy for adapter-output Claims.
+5. Improve Fact review, stale review, and supersession.
+6. Expand retrieval planning across FTS, vector, graph, temporal, and permissions.
+7. Strengthen Active Memory Pools and agent/tool governance.
+8. Add benchmark/evaluation storage.
+9. Build app/HTML/report surfaces from governed state.
+10. Add rebuild/recovery services for derived projections.
 ```
 
 This keeps complexity meaningful. The engine should be complex around evidence,

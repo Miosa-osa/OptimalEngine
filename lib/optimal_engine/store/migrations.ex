@@ -81,7 +81,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_033_workspace_topology_surface_spine(),
       migration_034_tool_model_governance_runs(),
       migration_035_asset_governance(),
-      migration_036_asset_adapter_runs()
+      migration_036_asset_adapter_runs(),
+      migration_037_asset_extraction_projections()
     ]
   end
 
@@ -2098,6 +2099,146 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_asset_adapter_runs_adapter ON asset_adapter_runs(workspace_id, adapter_id, status)"},
        {"idx_asset_adapter_runs_source_package",
         "CREATE INDEX IF NOT EXISTS idx_asset_adapter_runs_source_package ON asset_adapter_runs(source_package_id)"}
+     ]}
+  end
+
+  defp migration_037_asset_extraction_projections do
+    {37, "asset extraction projection records",
+     [
+       {"asset_extractions",
+        """
+        CREATE TABLE IF NOT EXISTS asset_extractions (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_type TEXT NOT NULL,
+          modality TEXT NOT NULL,
+          content_text TEXT NOT NULL DEFAULT '',
+          content_ref TEXT,
+          content_hash TEXT,
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"asset_transcripts",
+        """
+        CREATE TABLE IF NOT EXISTS asset_transcripts (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_id TEXT NOT NULL REFERENCES asset_extractions(id) ON DELETE CASCADE,
+          language TEXT,
+          speaker TEXT,
+          transcript_text TEXT NOT NULL,
+          start_ms INTEGER,
+          end_ms INTEGER,
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"asset_ocr_spans",
+        """
+        CREATE TABLE IF NOT EXISTS asset_ocr_spans (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_id TEXT NOT NULL REFERENCES asset_extractions(id) ON DELETE CASCADE,
+          page_number INTEGER,
+          span_text TEXT NOT NULL,
+          bbox TEXT NOT NULL DEFAULT '{}',
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"asset_visual_observations",
+        """
+        CREATE TABLE IF NOT EXISTS asset_visual_observations (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_id TEXT NOT NULL REFERENCES asset_extractions(id) ON DELETE CASCADE,
+          observation_type TEXT NOT NULL,
+          observation_text TEXT NOT NULL,
+          region TEXT NOT NULL DEFAULT '{}',
+          frame_time_ms INTEGER,
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"asset_embedding_refs",
+        """
+        CREATE TABLE IF NOT EXISTS asset_embedding_refs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_id TEXT NOT NULL REFERENCES asset_extractions(id) ON DELETE CASCADE,
+          embedding_model_id TEXT NOT NULL,
+          embedding_model_version TEXT,
+          embedding_ref TEXT NOT NULL,
+          embedding_dim INTEGER,
+          embedding_space TEXT,
+          target_ref TEXT,
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_asset_extractions_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_extractions_asset ON asset_extractions(workspace_id, asset_id, extraction_type)"},
+       {"idx_asset_extractions_adapter_run",
+        "CREATE INDEX IF NOT EXISTS idx_asset_extractions_adapter_run ON asset_extractions(adapter_run_id)"},
+       {"idx_asset_transcripts_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_transcripts_asset ON asset_transcripts(workspace_id, asset_id)"},
+       {"idx_asset_ocr_spans_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_ocr_spans_asset ON asset_ocr_spans(workspace_id, asset_id, page_number)"},
+       {"idx_asset_visual_observations_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_visual_observations_asset ON asset_visual_observations(workspace_id, asset_id)"},
+       {"idx_asset_embedding_refs_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_embedding_refs_asset ON asset_embedding_refs(workspace_id, asset_id, embedding_model_id)"}
      ]}
   end
 

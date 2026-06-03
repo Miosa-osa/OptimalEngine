@@ -115,6 +115,11 @@ The current public backend already supports:
 source_packages
 assets
 asset_adapter_runs
+asset_extractions
+asset_transcripts
+asset_ocr_spans
+asset_visual_observations
+asset_embedding_refs
 derivation_ledger
 parser-produced asset metadata
 workspace-scoped indexer ingestion
@@ -136,31 +141,33 @@ security_labels / partition_ids
 derivation_ledger_id
 ```
 
-Future adapter-specific projections can hang off that spine:
+`asset_extractions` is the generic adapter-output projection table. Typed
+projection tables hang off it for the modality-specific payloads the engine needs
+to recall and review:
 
 ```text
-asset_extractions
-asset_transcripts
-asset_ocr_spans
-asset_visual_observations
-asset_embedding_refs
+asset_transcripts          transcript text, speaker, language, start/end time
+asset_ocr_spans            OCR text, page number, bounding box
+asset_visual_observations  captions, states, regions, frame times
+asset_embedding_refs       embedding model metadata and external/internal vector refs
 ```
 
-Those rows should include:
+Those rows include or inherit:
 
 ```text
 workspace_id
 source_package_id
 asset_id
-adapter_id
-adapter_version
+adapter_run_id
+extraction_type
+modality
+content_text / content_ref
 model_id / model_version when applicable
-input_hash
-output_hash
+content_hash
 confidence
 precision
+security_labels / partition_ids
 created_by
-policy_version
 derivation_ledger_id
 ```
 
@@ -172,6 +179,19 @@ MemoryCore.claim_from_asset_adapter_run(run_id, opts)
 
 That bridge preserves the adapter output as a derived Source Package and creates
 a pending Claim. It does not automatically promote the model output to a Fact.
+
+Typed extractions can also enter the truth lifecycle through:
+
+```text
+MemoryCore.record_asset_extraction(run_id, opts)
+MemoryCore.claim_from_asset_extraction(extraction_id, opts)
+```
+
+`record_asset_extraction/2` requires a completed adapter run and writes the
+generic extraction row plus exactly one typed projection row. Text-bearing
+transcripts, OCR spans, and visual observations can become pending Claims.
+Reference-only embedding rows remain governed retrieval/index projections and are
+not claimable text.
 
 ## Deployment
 
