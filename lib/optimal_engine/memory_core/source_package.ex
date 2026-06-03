@@ -92,6 +92,40 @@ defmodule OptimalEngine.MemoryCore.SourcePackage do
     }
   end
 
+  @spec from_artifact(String.t(), String.t(), keyword()) :: t()
+  def from_artifact(storage_uri, content_hash, opts \\ [])
+      when is_binary(storage_uri) and is_binary(content_hash) do
+    now = timestamp()
+    tenant_id = string_opt(opts, :tenant_id, "default")
+    workspace_id = string_opt(opts, :workspace_id, "default")
+    raw_text = Keyword.get(opts, :raw_text, "")
+
+    %__MODULE__{
+      id: ID.content_id("sp", [tenant_id, ":", workspace_id, ":", content_hash]),
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      source_type: string_opt(opts, :source_type, "file"),
+      source_class: string_opt(opts, :source_class, "binary"),
+      source_system: string_or_nil(Keyword.get(opts, :source_system)),
+      source_uri: string_or_nil(Keyword.get(opts, :source_uri) || storage_uri),
+      source_time: serialize_time(Keyword.get(opts, :source_time)),
+      received_at: now,
+      content_hash: content_hash,
+      raw_text: raw_text,
+      verbatim_archive_uri: string_or_nil(Keyword.get(opts, :verbatim_archive_uri) || storage_uri),
+      trust_label: string_opt(opts, :trust_label, "unreviewed"),
+      retention_class: string_opt(opts, :retention_class, "standard"),
+      access_policy_id: string_or_nil(Keyword.get(opts, :access_policy_id)),
+      security_labels: list_opt(opts, :security_labels),
+      partition_ids: list_opt(opts, :partition_ids),
+      quarantine_state: string_opt(opts, :quarantine_state, "clear"),
+      metadata: Keyword.get(opts, :metadata, %{}),
+      created_by: string_or_nil(Keyword.get(opts, :created_by) || Keyword.get(opts, :actor_id)),
+      created_at: now,
+      updated_at: now
+    }
+  end
+
   defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
 
   defp serialize_time(nil), do: nil

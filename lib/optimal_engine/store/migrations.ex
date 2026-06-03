@@ -79,7 +79,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_031_memories_fts(),
       migration_032_memory_core_spine(),
       migration_033_workspace_topology_surface_spine(),
-      migration_034_tool_model_governance_runs()
+      migration_034_tool_model_governance_runs(),
+      migration_035_asset_governance()
     ]
   end
 
@@ -2028,6 +2029,31 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_tool_call_runs_tool ON tool_call_runs(workspace_id, mcp_tool_definition_id)"},
        {"idx_tool_call_runs_pool",
         "CREATE INDEX IF NOT EXISTS idx_tool_call_runs_pool ON tool_call_runs(active_memory_pool_id)"}
+     ]}
+  end
+
+  defp migration_035_asset_governance do
+    {35, "asset governance metadata",
+     [
+       {"assets.content_hash", "ALTER TABLE assets ADD COLUMN content_hash TEXT"},
+       {"assets.modality", "ALTER TABLE assets ADD COLUMN modality TEXT NOT NULL DEFAULT 'binary'"},
+       {"assets.source_package_id",
+        "ALTER TABLE assets ADD COLUMN source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL"},
+       {"assets.original_path", "ALTER TABLE assets ADD COLUMN original_path TEXT"},
+       {"assets.trust_label",
+        "ALTER TABLE assets ADD COLUMN trust_label TEXT NOT NULL DEFAULT 'unreviewed'"},
+       {"assets.retention_class",
+        "ALTER TABLE assets ADD COLUMN retention_class TEXT NOT NULL DEFAULT 'standard'"},
+       {"assets.access_policy_id", "ALTER TABLE assets ADD COLUMN access_policy_id TEXT"},
+       {"assets.security_labels",
+        "ALTER TABLE assets ADD COLUMN security_labels TEXT NOT NULL DEFAULT '[]'"},
+       {"assets.partition_ids",
+        "ALTER TABLE assets ADD COLUMN partition_ids TEXT NOT NULL DEFAULT '[]'"},
+       {"assets.metadata", "ALTER TABLE assets ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"},
+       {"idx_assets_workspace_hash",
+        "CREATE INDEX IF NOT EXISTS idx_assets_workspace_hash ON assets(workspace_id, content_hash)"},
+       {"idx_assets_source_package",
+        "CREATE INDEX IF NOT EXISTS idx_assets_source_package ON assets(source_package_id)"}
      ]}
   end
 
