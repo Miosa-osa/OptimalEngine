@@ -169,6 +169,94 @@ defmodule OptimalEngine.MemoryCore.Store do
     ])
   end
 
+  @spec get_claim(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
+  def get_claim(id, opts \\ []) when is_binary(id) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+
+    case Store.raw_query(
+           "SELECT " <>
+             claim_columns() <>
+             " FROM claims WHERE id = ?1 AND tenant_id = ?2" <>
+             workspace_clause(workspace_id, 3),
+           scoped_params([id, tenant_id], workspace_id)
+         ) do
+      {:ok, [row]} -> {:ok, row_to_claim(row)}
+      {:ok, []} -> {:error, :not_found}
+      other -> other
+    end
+  end
+
+  @spec list_claims(keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_claims(opts \\ []) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    review_status = Keyword.get(opts, :review_status)
+    lifecycle_state = Keyword.get(opts, :lifecycle_state)
+    limit = Keyword.get(opts, :limit, 50)
+
+    {clauses, params} =
+      {["tenant_id = ?1", "workspace_id = ?2"], [tenant_id, workspace_id]}
+
+    {clauses, params} =
+      case review_status do
+        nil -> {clauses, params}
+        value -> {clauses ++ ["review_status = ?#{length(params) + 1}"], params ++ [value]}
+      end
+
+    {clauses, params} =
+      case lifecycle_state do
+        nil -> {clauses, params}
+        value -> {clauses ++ ["lifecycle_state = ?#{length(params) + 1}"], params ++ [value]}
+      end
+
+    sql =
+      "SELECT " <>
+        claim_columns() <>
+        " FROM claims WHERE " <>
+        Enum.join(clauses, " AND ") <>
+        " ORDER BY transaction_time_start DESC LIMIT ?#{length(params) + 1}"
+
+    case Store.raw_query(sql, params ++ [limit]) do
+      {:ok, rows} -> {:ok, Enum.map(rows, &row_to_claim/1)}
+      other -> other
+    end
+  end
+
+  @spec update_claim_review(String.t(), keyword()) :: :ok | {:error, term()}
+  def update_claim_review(id, opts) when is_binary(id) and is_list(opts) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+    review_status = Keyword.fetch!(opts, :review_status)
+    lifecycle_state = Keyword.get(opts, :lifecycle_state)
+    evaluator_id = Keyword.get(opts, :evaluator_id) || Keyword.get(opts, :actor_id)
+
+    set_parts = ["review_status = ?1"]
+    params = [review_status]
+
+    {set_parts, params} =
+      case lifecycle_state do
+        nil -> {set_parts, params}
+        value -> {set_parts ++ ["lifecycle_state = ?#{length(params) + 1}"], params ++ [value]}
+      end
+
+    {set_parts, params} =
+      case evaluator_id do
+        nil -> {set_parts, params}
+        value -> {set_parts ++ ["evaluator_id = ?#{length(params) + 1}"], params ++ [value]}
+      end
+
+    where_position = length(params) + 1
+
+    sql =
+      "UPDATE claims SET " <>
+        Enum.join(set_parts, ", ") <>
+        " WHERE id = ?#{where_position} AND tenant_id = ?#{where_position + 1}" <>
+        workspace_clause(workspace_id, where_position + 2)
+
+    Store.raw_execute(sql, scoped_params(params ++ [id, tenant_id], workspace_id))
+  end
+
   @spec insert_fact(map()) :: :ok | {:error, term()}
   def insert_fact(fact) when is_map(fact) do
     sql = """
@@ -225,6 +313,74 @@ defmodule OptimalEngine.MemoryCore.Store do
       Map.get(fact, :stale_after),
       JSON.map(Map.get(fact, :metadata, %{}))
     ])
+  end
+
+  defp claim_columns do
+    "id, tenant_id, workspace_id, source_package_id, signal_id, claim_text, claim_type, subject_anchor, action_class, object_anchor, semantic_frame, source_span, extraction_run_id, evaluator_id, aggregate_confidence, aggregate_precision, raw_component_scores, calibration_dataset_version, access_policy_id, security_labels, partition_ids, lifecycle_state, review_status, valid_time_start, valid_time_end, transaction_time_start, transaction_time_end, stale_after, metadata"
+  end
+
+  defp row_to_claim([
+         id,
+         tenant_id,
+         workspace_id,
+         source_package_id,
+         signal_id,
+         claim_text,
+         claim_type,
+         subject_anchor,
+         action_class,
+         object_anchor,
+         semantic_frame,
+         source_span,
+         extraction_run_id,
+         evaluator_id,
+         aggregate_confidence,
+         aggregate_precision,
+         raw_component_scores,
+         calibration_dataset_version,
+         access_policy_id,
+         security_labels,
+         partition_ids,
+         lifecycle_state,
+         review_status,
+         valid_time_start,
+         valid_time_end,
+         transaction_time_start,
+         transaction_time_end,
+         stale_after,
+         metadata
+       ]) do
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      source_package_id: source_package_id,
+      signal_id: signal_id,
+      claim_text: claim_text,
+      claim_type: claim_type,
+      subject_anchor: subject_anchor,
+      action_class: action_class,
+      object_anchor: object_anchor,
+      semantic_frame: decode_map(semantic_frame),
+      source_span: decode_map(source_span),
+      extraction_run_id: extraction_run_id,
+      evaluator_id: evaluator_id,
+      aggregate_confidence: aggregate_confidence || 0.5,
+      aggregate_precision: aggregate_precision || 0.5,
+      raw_component_scores: decode_map(raw_component_scores),
+      calibration_dataset_version: calibration_dataset_version,
+      access_policy_id: access_policy_id,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      lifecycle_state: lifecycle_state,
+      review_status: review_status,
+      valid_time_start: valid_time_start,
+      valid_time_end: valid_time_end,
+      transaction_time_start: transaction_time_start,
+      transaction_time_end: transaction_time_end,
+      stale_after: stale_after,
+      metadata: decode_map(metadata)
+    }
   end
 
   @spec insert_memory_object(map()) :: :ok | {:error, term()}
@@ -1119,6 +1275,12 @@ defmodule OptimalEngine.MemoryCore.Store do
       _ -> []
     end
   end
+
+  defp workspace_clause(nil, _position), do: ""
+  defp workspace_clause(_workspace_id, position), do: " AND workspace_id = ?#{position}"
+
+  defp scoped_params(params, nil), do: params
+  defp scoped_params(params, workspace_id), do: params ++ [workspace_id]
 
   defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
 end
