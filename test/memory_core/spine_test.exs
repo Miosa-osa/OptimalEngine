@@ -6,6 +6,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
   alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.MemoryCore.SourcePackage
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
+  alias OptimalEngine.MemoryCore.WorkflowSkill
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.Store
 
@@ -373,6 +374,127 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert closed_pool.lifecycle_state == "closed"
     assert closed_pool.archive_state == "archived"
     assert is_binary(closed_pool.closed_at)
+  end
+
+  test "workflow and skill lifecycle turns observed work into a draft skill package" do
+    workspace_id = "memory-core-workflow-test-#{System.unique_integer([:positive])}"
+
+    {:ok, _fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+
+    {:ok, pool} =
+      ActiveMemoryPool.open(
+        workspace_id: workspace_id,
+        task_type: "launch_review",
+        subject_anchor: "project_launch",
+        member_links: [%{type: "human", id: "human:reviewer"}],
+        agent_links: [%{type: "agent", id: "agent:test"}],
+        security_labels: ["internal"],
+        partition_ids: ["project-launch"]
+      )
+
+    {:ok, package} =
+      RetrievalCoordinator.retrieve("launch",
+        workspace_id: workspace_id,
+        actor_id: "agent:test",
+        active_memory_pool_id: pool.id,
+        allowed_partitions: ["project-launch"],
+        allowed_security_labels: ["internal"]
+      )
+
+    {:ok, _loaded_pool} = ActiveMemoryPool.load_context_package(pool.id, package)
+
+    {:ok, observation} =
+      ActiveMemoryPool.publish_observation(
+        pool.id,
+        "Launch review used source-backed context, checked pending budget work, and recorded the follow-up.",
+        actor_id: "agent:test",
+        claim_text: "Launch review needs a budget follow-up.",
+        subject_anchor: "project_launch",
+        action_class: "reviewed",
+        object_anchor: "budget_follow_up"
+      )
+
+    assert {:ok, trace} =
+             WorkflowSkill.capture_trace_from_pool(pool.id,
+               workflow_family: "launch_review",
+               action_class: "reviewed",
+               outcome: "budget_follow_up_recorded",
+               step_links: [
+                 %{type: "step", id: "load_context"},
+                 %{type: "step", id: "record_observation"}
+               ],
+               actor_id: "agent:test"
+             )
+
+    assert trace.workflow_family == "launch_review"
+    assert %{type: "claim", id: observation.pending_claim.id} in trace.output_links
+
+    assert {:ok, workflow} =
+             WorkflowSkill.generalize_workflow(trace,
+               applicability_conditions: %{node_type: "project"},
+               validation_score: 0.35,
+               actor_id: "agent:test"
+             )
+
+    assert workflow.lifecycle_state == "candidate"
+    assert workflow.validation_status == "unvalidated"
+
+    assert {:ok, procedure} =
+             WorkflowSkill.create_procedural_memory(workflow,
+               capability_name: "launch_review_procedure",
+               required_privileges: ["memory:read", "claims:create"],
+               actor_id: "agent:test"
+             )
+
+    assert procedure.capability_name == "launch_review_procedure"
+    assert procedure.lifecycle_state == "candidate"
+
+    assert {:ok, skill} =
+             WorkflowSkill.package_skill(procedure,
+               skill_package_name: "launch_review_skill",
+               input_contract: %{requires: ["project_node_id"]},
+               output_contract: %{creates: ["pending_claims"]},
+               execution_policy: %{requires_review: true},
+               actor_id: "agent:test"
+             )
+
+    assert skill.skill_package_name == "launch_review_skill"
+    assert skill.review_status == "draft"
+    assert skill.enabled_state == "disabled"
+
+    for {table, id} <- [
+          {"workflow_traces", trace.id},
+          {"generalized_workflows", workflow.id},
+          {"procedural_memory_objects", procedure.id},
+          {"skill_packages", skill.id}
+        ] do
+      assert {:ok, [[1]]} =
+               Store.raw_query(
+                 "SELECT COUNT(*) FROM #{table} WHERE workspace_id = ?1 AND id = ?2",
+                 [
+                   workspace_id,
+                   id
+                 ]
+               )
+    end
+
+    assert {:ok, [[ledger_count]]} =
+             Store.raw_query(
+               """
+               SELECT COUNT(*)
+               FROM derivation_ledger
+               WHERE workspace_id = ?1
+                 AND activity_type IN (
+                   'memory_core.capture_workflow_trace',
+                   'memory_core.generalize_workflow',
+                   'memory_core.create_procedural_memory',
+                   'memory_core.package_skill'
+                 )
+               """,
+               [workspace_id]
+             )
+
+    assert ledger_count == 4
   end
 
   defp create_accepted_memory(workspace_id, opts) do

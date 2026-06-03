@@ -23,9 +23,11 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   alias OptimalEngine.Connectors
   alias OptimalEngine.Health
   alias OptimalEngine.Identity.Principal
+  alias OptimalEngine.MemoryCore.ActiveMemoryPool
   alias OptimalEngine.MemoryCore.KnowledgeLifecycle
   alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.MemoryCore.SourcePackage
+  alias OptimalEngine.MemoryCore.WorkflowSkill
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.Receiver
   alias OptimalEngine.Store
@@ -62,17 +64,19 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     |> memory_core_lifecycle_probes()
     |> section("6. Governed recall package")
     |> governed_recall_probes()
-    |> section("7. Connector registry (14 adapters)")
+    |> section("7. Workflow and Skill Package lifecycle")
+    |> workflow_skill_probes()
+    |> section("8. Connector registry (14 adapters)")
     |> connector_probes()
-    |> section("8. Wiki tier-3 round-trip")
+    |> section("9. Wiki tier-3 round-trip")
     |> wiki_probes()
-    |> section("9. Retrieval — simple + complex + edge cases")
+    |> section("10. Retrieval — simple + complex + edge cases")
     |> retrieval_probes()
-    |> section("10. Compliance workflows (DSAR, erasure preview, holds)")
+    |> section("11. Compliance workflows (DSAR, erasure preview, holds)")
     |> compliance_probes()
-    |> maybe_section("11. Extra ingest load", ingest_count > 0)
+    |> maybe_section("12. Extra ingest load", ingest_count > 0)
     |> maybe_ingest(ingest_count)
-    |> maybe_section("12. Hard paths (slow retrieval, deep joins)", hard?)
+    |> maybe_section("13. Hard paths (slow retrieval, deep joins)", hard?)
     |> maybe_hard(hard?)
     |> summarize()
   end
@@ -645,6 +649,150 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
 
   defp cleanup_governed_recall_probe(workspace_id) do
     [
+      "DELETE FROM context_packages WHERE workspace_id = ?1",
+      "DELETE FROM derivation_ledger WHERE workspace_id = ?1",
+      "DELETE FROM relationship_edges WHERE workspace_id = ?1",
+      "DELETE FROM memory_objects WHERE workspace_id = ?1",
+      "DELETE FROM facts WHERE workspace_id = ?1",
+      "DELETE FROM claims WHERE workspace_id = ?1",
+      "DELETE FROM source_packages WHERE workspace_id = ?1"
+    ]
+    |> Enum.each(&Store.raw_execute(&1, [workspace_id]))
+  end
+
+  defp workflow_skill_probes(state) do
+    suffix = System.unique_integer([:positive])
+    workspace_id = "default:reality-workflow-skill-#{suffix}"
+
+    seed =
+      with {:ok, _ctx} <- seed_memory_for_recall(workspace_id, ["reality-check"]),
+           {:ok, pool} <-
+             ActiveMemoryPool.open(
+               workspace_id: workspace_id,
+               task_type: "launch_review",
+               subject_anchor: "project_launch",
+               member_links: [%{type: "human", id: "human:reviewer"}],
+               agent_links: [%{type: "agent", id: "agent:reality-check"}],
+               security_labels: ["internal"],
+               partition_ids: ["reality-check"]
+             ),
+           {:ok, package} <-
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               active_memory_pool_id: pool.id,
+               allowed_partitions: ["reality-check"],
+               allowed_security_labels: ["internal"]
+             ),
+           {:ok, _loaded_pool} <- ActiveMemoryPool.load_context_package(pool.id, package),
+           {:ok, _observation} <-
+             ActiveMemoryPool.publish_observation(
+               pool.id,
+               "Reality workflow observed that launch review produced a budget follow-up.",
+               actor_id: "agent:reality-check",
+               claim_text: "Launch review produced a budget follow-up.",
+               subject_anchor: "project_launch",
+               action_class: "reviewed",
+               object_anchor: "budget_follow_up"
+             ),
+           {:ok, trace} <-
+             WorkflowSkill.capture_trace_from_pool(pool.id,
+               workflow_family: "launch_review",
+               action_class: "reviewed",
+               outcome: "budget_follow_up_recorded",
+               step_links: [
+                 %{type: "step", id: "load_context"},
+                 %{type: "step", id: "record_observation"}
+               ],
+               actor_id: "agent:reality-check"
+             ),
+           {:ok, workflow} <-
+             WorkflowSkill.generalize_workflow(trace,
+               applicability_conditions: %{node_type: "project"},
+               validation_score: 0.35,
+               actor_id: "agent:reality-check"
+             ),
+           {:ok, procedure} <-
+             WorkflowSkill.create_procedural_memory(workflow,
+               capability_name: "launch_review_procedure",
+               required_privileges: ["memory:read", "claims:create"],
+               actor_id: "agent:reality-check"
+             ),
+           {:ok, skill} <-
+             WorkflowSkill.package_skill(procedure,
+               skill_package_name: "launch_review_skill",
+               input_contract: %{requires: ["project_node_id"]},
+               output_contract: %{creates: ["pending_claims"]},
+               execution_policy: %{requires_review: true},
+               actor_id: "agent:reality-check"
+             ) do
+        {:ok, %{pool: pool, trace: trace, workflow: workflow, procedure: procedure, skill: skill}}
+      end
+
+    state =
+      case seed do
+        {:ok, ctx} ->
+          state
+          |> probe("active pool opened for workflow work", fn ->
+            count_for("active_memory_pools", workspace_id, ctx.pool.id)
+          end)
+          |> probe("workflow trace captured from pool", fn ->
+            count_for("workflow_traces", workspace_id, ctx.trace.id)
+          end)
+          |> probe("generalized workflow candidate stored", fn ->
+            count_for("generalized_workflows", workspace_id, ctx.workflow.id)
+          end)
+          |> probe("procedural memory object stored", fn ->
+            count_for("procedural_memory_objects", workspace_id, ctx.procedure.id)
+          end)
+          |> probe("skill package remains draft and disabled", fn ->
+            case Store.raw_query(
+                   """
+                   SELECT review_status, enabled_state
+                   FROM skill_packages
+                   WHERE workspace_id = ?1 AND id = ?2
+                   """,
+                   [workspace_id, ctx.skill.id]
+                 ) do
+              {:ok, [["draft", "disabled"]]} -> {:ok, "draft/disabled"}
+              other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("workflow-skill derivation ledger", fn ->
+            case Store.raw_query(
+                   """
+                   SELECT COUNT(*)
+                   FROM derivation_ledger
+                   WHERE workspace_id = ?1
+                     AND activity_type IN (
+                       'memory_core.capture_workflow_trace',
+                       'memory_core.generalize_workflow',
+                       'memory_core.create_procedural_memory',
+                       'memory_core.package_skill'
+                     )
+                   """,
+                   [workspace_id]
+                 ) do
+              {:ok, [[4]]} -> {:ok, "4 lifecycle entries"}
+              other -> {:error, inspect(other)}
+            end
+          end)
+
+        {:error, reason} ->
+          probe(state, "workflow-skill seed", fn -> {:error, inspect(reason)} end)
+      end
+
+    cleanup_workflow_skill_probe(workspace_id)
+    state
+  end
+
+  defp cleanup_workflow_skill_probe(workspace_id) do
+    [
+      "DELETE FROM skill_packages WHERE workspace_id = ?1",
+      "DELETE FROM procedural_memory_objects WHERE workspace_id = ?1",
+      "DELETE FROM generalized_workflows WHERE workspace_id = ?1",
+      "DELETE FROM workflow_traces WHERE workspace_id = ?1",
+      "DELETE FROM active_memory_pools WHERE workspace_id = ?1",
       "DELETE FROM context_packages WHERE workspace_id = ?1",
       "DELETE FROM derivation_ledger WHERE workspace_id = ?1",
       "DELETE FROM relationship_edges WHERE workspace_id = ?1",

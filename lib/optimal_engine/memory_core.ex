@@ -12,7 +12,8 @@ defmodule OptimalEngine.MemoryCore do
     ActiveMemoryPool,
     KnowledgeLifecycle,
     RetrievalCoordinator,
-    SourcePackage
+    SourcePackage,
+    WorkflowSkill
   }
 
   @spec source_package_from_text(String.t(), keyword()) :: SourcePackage.t()
@@ -33,4 +34,12 @@ defmodule OptimalEngine.MemoryCore do
     as: :publish_observation
 
   defdelegate close_active_pool(pool_id, opts \\ []), to: ActiveMemoryPool, as: :close
+
+  defdelegate capture_workflow_trace(pool_id, opts \\ []),
+    to: WorkflowSkill,
+    as: :capture_trace_from_pool
+
+  defdelegate generalize_workflow(trace, opts \\ []), to: WorkflowSkill
+  defdelegate create_procedural_memory(workflow, opts \\ []), to: WorkflowSkill
+  defdelegate package_skill(procedure, opts \\ []), to: WorkflowSkill
 end
