@@ -394,6 +394,230 @@ defmodule OptimalEngine.MemoryCore.Store do
     ])
   end
 
+  @spec insert_workflow_trace(map()) :: :ok | {:error, term()}
+  def insert_workflow_trace(trace) when is_map(trace) do
+    sql = """
+    INSERT OR IGNORE INTO workflow_traces (
+      id, tenant_id, workspace_id, case_id, workflow_family, subject_anchor,
+      action_class, outcome, episode_links, step_links, actor_links,
+      input_links, output_links, source_package_links, evidence_links,
+      aggregate_confidence, aggregate_precision, lifecycle_state,
+      validation_status, event_time_start, event_time_end, valid_time_start,
+      valid_time_end, transaction_time_start, transaction_time_end,
+      stale_after, access_policy_id, security_labels, partition_ids, metadata
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6,
+      ?7, ?8, ?9, ?10, ?11,
+      ?12, ?13, ?14, ?15,
+      ?16, ?17, ?18,
+      ?19, ?20, ?21, ?22,
+      ?23, ?24, ?25,
+      ?26, ?27, ?28, ?29, ?30
+    )
+    """
+
+    Store.raw_execute(sql, [
+      trace.id,
+      trace.tenant_id,
+      trace.workspace_id,
+      Map.get(trace, :case_id),
+      Map.get(trace, :workflow_family),
+      Map.get(trace, :subject_anchor),
+      Map.get(trace, :action_class),
+      Map.get(trace, :outcome),
+      JSON.list(Map.get(trace, :episode_links, [])),
+      JSON.list(Map.get(trace, :step_links, [])),
+      JSON.list(Map.get(trace, :actor_links, [])),
+      JSON.list(Map.get(trace, :input_links, [])),
+      JSON.list(Map.get(trace, :output_links, [])),
+      JSON.list(Map.get(trace, :source_package_links, [])),
+      JSON.list(Map.get(trace, :evidence_links, [])),
+      Map.get(trace, :aggregate_confidence, 0.5),
+      Map.get(trace, :aggregate_precision, 0.5),
+      Map.get(trace, :lifecycle_state, "extracted"),
+      Map.get(trace, :validation_status, "unvalidated"),
+      Map.get(trace, :event_time_start),
+      Map.get(trace, :event_time_end),
+      Map.get(trace, :valid_time_start),
+      Map.get(trace, :valid_time_end),
+      Map.get(trace, :transaction_time_start, timestamp()),
+      Map.get(trace, :transaction_time_end),
+      Map.get(trace, :stale_after),
+      Map.get(trace, :access_policy_id),
+      JSON.list(Map.get(trace, :security_labels, [])),
+      JSON.list(Map.get(trace, :partition_ids, [])),
+      JSON.map(Map.get(trace, :metadata, %{}))
+    ])
+  end
+
+  @spec insert_generalized_workflow(map()) :: :ok | {:error, term()}
+  def insert_generalized_workflow(workflow) when is_map(workflow) do
+    sql = """
+    INSERT OR IGNORE INTO generalized_workflows (
+      id, tenant_id, workspace_id, workflow_family, scope,
+      applicability_conditions, outcome_class, workflow_trace_links,
+      supporting_episode_links, contradicting_trace_links, step_pattern_links,
+      aggregate_confidence, aggregate_precision, validation_score,
+      lifecycle_state, validation_status, supersession_status,
+      valid_time_start, valid_time_end, transaction_time_start,
+      transaction_time_end, stale_after, access_policy_id, security_labels,
+      partition_ids, metadata
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5,
+      ?6, ?7, ?8,
+      ?9, ?10, ?11,
+      ?12, ?13, ?14,
+      ?15, ?16, ?17,
+      ?18, ?19, ?20,
+      ?21, ?22, ?23, ?24,
+      ?25, ?26
+    )
+    """
+
+    Store.raw_execute(sql, [
+      workflow.id,
+      workflow.tenant_id,
+      workflow.workspace_id,
+      workflow.workflow_family,
+      JSON.map(Map.get(workflow, :scope, %{})),
+      JSON.map(Map.get(workflow, :applicability_conditions, %{})),
+      Map.get(workflow, :outcome_class),
+      JSON.list(Map.get(workflow, :workflow_trace_links, [])),
+      JSON.list(Map.get(workflow, :supporting_episode_links, [])),
+      JSON.list(Map.get(workflow, :contradicting_trace_links, [])),
+      JSON.list(Map.get(workflow, :step_pattern_links, [])),
+      Map.get(workflow, :aggregate_confidence, 0.5),
+      Map.get(workflow, :aggregate_precision, 0.5),
+      Map.get(workflow, :validation_score, 0.0),
+      Map.get(workflow, :lifecycle_state, "candidate"),
+      Map.get(workflow, :validation_status, "unvalidated"),
+      Map.get(workflow, :supersession_status, "none"),
+      Map.get(workflow, :valid_time_start),
+      Map.get(workflow, :valid_time_end),
+      Map.get(workflow, :transaction_time_start, timestamp()),
+      Map.get(workflow, :transaction_time_end),
+      Map.get(workflow, :stale_after),
+      Map.get(workflow, :access_policy_id),
+      JSON.list(Map.get(workflow, :security_labels, [])),
+      JSON.list(Map.get(workflow, :partition_ids, [])),
+      JSON.map(Map.get(workflow, :metadata, %{}))
+    ])
+  end
+
+  @spec insert_procedural_memory_object(map()) :: :ok | {:error, term()}
+  def insert_procedural_memory_object(procedure) when is_map(procedure) do
+    sql = """
+    INSERT OR IGNORE INTO procedural_memory_objects (
+      id, tenant_id, workspace_id, capability_name, task_family,
+      applicability_conditions, risk_class, generalized_workflow_links,
+      step_links, validation_links, evidence_links, aggregate_confidence,
+      aggregate_precision, validation_confidence, required_privileges,
+      lifecycle_state, validation_status, retirement_status, valid_time_start,
+      valid_time_end, transaction_time_start, transaction_time_end,
+      stale_after, access_policy_id, security_labels, partition_ids, metadata
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5,
+      ?6, ?7, ?8,
+      ?9, ?10, ?11, ?12,
+      ?13, ?14, ?15,
+      ?16, ?17, ?18, ?19,
+      ?20, ?21, ?22,
+      ?23, ?24, ?25, ?26, ?27
+    )
+    """
+
+    Store.raw_execute(sql, [
+      procedure.id,
+      procedure.tenant_id,
+      procedure.workspace_id,
+      procedure.capability_name,
+      Map.get(procedure, :task_family),
+      JSON.map(Map.get(procedure, :applicability_conditions, %{})),
+      Map.get(procedure, :risk_class, "low"),
+      JSON.list(Map.get(procedure, :generalized_workflow_links, [])),
+      JSON.list(Map.get(procedure, :step_links, [])),
+      JSON.list(Map.get(procedure, :validation_links, [])),
+      JSON.list(Map.get(procedure, :evidence_links, [])),
+      Map.get(procedure, :aggregate_confidence, 0.5),
+      Map.get(procedure, :aggregate_precision, 0.5),
+      Map.get(procedure, :validation_confidence, 0.0),
+      JSON.list(Map.get(procedure, :required_privileges, [])),
+      Map.get(procedure, :lifecycle_state, "candidate"),
+      Map.get(procedure, :validation_status, "unvalidated"),
+      Map.get(procedure, :retirement_status, "active"),
+      Map.get(procedure, :valid_time_start),
+      Map.get(procedure, :valid_time_end),
+      Map.get(procedure, :transaction_time_start, timestamp()),
+      Map.get(procedure, :transaction_time_end),
+      Map.get(procedure, :stale_after),
+      Map.get(procedure, :access_policy_id),
+      JSON.list(Map.get(procedure, :security_labels, [])),
+      JSON.list(Map.get(procedure, :partition_ids, [])),
+      JSON.map(Map.get(procedure, :metadata, %{}))
+    ])
+  end
+
+  @spec insert_skill_package(map()) :: :ok | {:error, term()}
+  def insert_skill_package(skill_package) when is_map(skill_package) do
+    sql = """
+    INSERT OR IGNORE INTO skill_packages (
+      id, tenant_id, workspace_id, version, skill_package_name, task_family,
+      competency_links, risk_class, procedural_memory_links, workflow_links,
+      validation_links, evidence_links, input_contract, output_contract,
+      execution_policy, required_privileges, tool_requirements, model_policy_id,
+      aggregate_confidence, aggregate_precision, review_status, enabled_state,
+      suspension_reason, retirement_status, valid_time_start, valid_time_end,
+      transaction_time_start, transaction_time_end, stale_after,
+      access_policy_id, security_labels, partition_ids, metadata
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6,
+      ?7, ?8, ?9, ?10,
+      ?11, ?12, ?13, ?14,
+      ?15, ?16, ?17, ?18,
+      ?19, ?20, ?21, ?22,
+      ?23, ?24, ?25, ?26,
+      ?27, ?28, ?29,
+      ?30, ?31, ?32, ?33
+    )
+    """
+
+    Store.raw_execute(sql, [
+      skill_package.id,
+      skill_package.tenant_id,
+      skill_package.workspace_id,
+      Map.get(skill_package, :version, 1),
+      skill_package.skill_package_name,
+      Map.get(skill_package, :task_family),
+      JSON.list(Map.get(skill_package, :competency_links, [])),
+      Map.get(skill_package, :risk_class, "low"),
+      JSON.list(Map.get(skill_package, :procedural_memory_links, [])),
+      JSON.list(Map.get(skill_package, :workflow_links, [])),
+      JSON.list(Map.get(skill_package, :validation_links, [])),
+      JSON.list(Map.get(skill_package, :evidence_links, [])),
+      JSON.map(Map.get(skill_package, :input_contract, %{})),
+      JSON.map(Map.get(skill_package, :output_contract, %{})),
+      JSON.map(Map.get(skill_package, :execution_policy, %{})),
+      JSON.list(Map.get(skill_package, :required_privileges, [])),
+      JSON.list(Map.get(skill_package, :tool_requirements, [])),
+      Map.get(skill_package, :model_policy_id),
+      Map.get(skill_package, :aggregate_confidence, 0.5),
+      Map.get(skill_package, :aggregate_precision, 0.5),
+      Map.get(skill_package, :review_status, "draft"),
+      Map.get(skill_package, :enabled_state, "disabled"),
+      Map.get(skill_package, :suspension_reason),
+      Map.get(skill_package, :retirement_status, "active"),
+      Map.get(skill_package, :valid_time_start),
+      Map.get(skill_package, :valid_time_end),
+      Map.get(skill_package, :transaction_time_start, timestamp()),
+      Map.get(skill_package, :transaction_time_end),
+      Map.get(skill_package, :stale_after),
+      Map.get(skill_package, :access_policy_id),
+      JSON.list(Map.get(skill_package, :security_labels, [])),
+      JSON.list(Map.get(skill_package, :partition_ids, [])),
+      JSON.map(Map.get(skill_package, :metadata, %{}))
+    ])
+  end
+
   @spec insert_active_memory_pool(map()) :: :ok | {:error, term()}
   def insert_active_memory_pool(pool) when is_map(pool) do
     sql = """
