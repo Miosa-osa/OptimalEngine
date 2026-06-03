@@ -823,7 +823,7 @@ defmodule OptimalEngine.API.Router do
         tenant_id = Map.get(body, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
         description = Map.get(body, "description")
 
-        case OptimalEngine.Workspace.create(%{
+        case OptimalEngine.WorkspaceTopology.create_workspace(%{
                slug: slug,
                name: name,
                description: description,
