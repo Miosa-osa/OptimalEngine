@@ -47,6 +47,7 @@ This index is the entry point. Follow the path that matches what you need.
 - [Vocabulary](reference/vocabulary.md) — terminology reference
 - [Components](reference/components.md) — catalog of engine components
 - [Node template](reference/node-template.md) — the anatomy of a node
+- [Multimodal open-source stack](reference/multimodal-open-source-stack.md) — adapter targets for documents, OCR, audio, video, visual reasoning, visual retrieval, and embeddings
 
 ## Guides (how to use it)
 
