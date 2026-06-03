@@ -96,7 +96,7 @@ workspace export of a Node.
 | Adapter execution is recorded instead of invisible. | Memory Core / Pipeline | `MultimodalAdapterRunner` executes configured local commands and records completed, failed, or unavailable runs in `asset_adapter_runs`. Supported completed runs auto-project output into typed extraction tables unless disabled. | `test/pipeline/multimodal_adapter_runner_test.exs`, migration 036, `MemoryCore.run_asset_adapter/3`. | Adapter-specific command builders and richer per-tool output parsers. |
 | Adapter outputs have typed projection storage. | Memory Core | `MemoryCore.record_asset_extraction/2` writes `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection rows linked to assets, adapter runs, scopes, hashes, and derivation ledger. | migration 037, `test/memory_core/asset_store_test.exs`, `test/pipeline/multimodal_adapter_runner_test.exs`, `mix optimal.reality_check` table probes. | Rich per-adapter parsing for multi-page OCR, segment-level transcripts, frame-level observations, tables, and page elements. |
 | Completed adapter output can become reviewable knowledge. | Memory Core | `MemoryCore.claim_from_asset_adapter_run/2` and `MemoryCore.claim_from_asset_extraction/2` turn text-bearing completed outputs into derived Source Packages and pending Claims. Failed/unavailable adapter runs and reference-only extractions cannot become Claims. | `test/memory_core/asset_store_test.exs`. | Review policies that decide when adapter-derived Claims become Facts. |
-| Humans and agents receive Context Packages, not random chunks. | Retrieval / Context | `RetrievalCoordinator` returns and stores `context_packages` with facts, memories, evidence links, confidence/precision summaries, and an authorization envelope. | `test/memory_core/spine_test.exs`, reality-check retrieval/context probes. | Full planner across structured filters, FTS, vector search, graph traversal, temporal validity, workflows, and permissions. |
+| Humans and agents receive Context Packages, not random chunks. | Retrieval / Context | `RetrievalCoordinator` returns and stores `context_packages` with Facts, Memory Objects, asset extraction projections, evidence links, confidence/precision summaries, and an authorization envelope. | `test/memory_core/spine_test.exs`, reality-check retrieval/context probes. | Full planner across structured filters, FTS, vector search, graph traversal, temporal validity, workflows, and permissions. |
 | Agents work in task-scoped pools. | Active Collaboration | `ActiveMemoryPool` opens task pools, loads Context Packages, publishes observations as Source Packages and pending Claims, and closes pools. | Reality-check active pool probes and MemoryCore delegates. | Pool membership enforcement, refresh/invalidation workflows, and UI/API surfaces. |
 | Repeated work can become workflows and skills. | Workflow / Skill Runtime | First lifecycle records workflow traces, generalized workflows, procedural memory objects, and skill packages. | `MemoryCore.capture_workflow_trace/2`, `generalize_workflow/2`, `create_procedural_memory/2`, `package_skill/2`, reality-check workflow probes. | Real workflow mining, clustering, review gates, skill execution runtime, and exception/rollback handling. |
 | Tool and model calls are governed. | Model / Tool Governance | Tool/model definitions and calls can enforce privileges, partitions, required inputs/outputs, and audit links. Connector runs have a governed execution path. | `test/connectors/runner_test.exs`, reality-check governance probes. | Make governed connector execution the default path everywhere and add richer schema validation/output normalization. |
@@ -136,6 +136,7 @@ file
   -> asset_adapter_runs
   -> asset_extractions
   -> typed transcript / OCR span / visual observation / embedding ref projection
+  -> retrieval as source-linked Context Package evidence
   -> text-bearing extraction becomes derived Source Package
   -> pending Claim
   -> reviewed Fact only after review or policy acceptance
@@ -149,14 +150,13 @@ same lifecycle order:
 ```text
 1. Keep preserving sources and assets correctly.
 2. Add adapter-specific parsers that populate richer extraction projection rows.
-3. Feed extraction projections into retrieval and Context Package assembly.
-4. Improve review policy for adapter-output Claims.
-5. Improve Fact review, stale review, and supersession.
-6. Expand retrieval planning across FTS, vector, graph, temporal, and permissions.
-7. Strengthen Active Memory Pools and agent/tool governance.
-8. Add benchmark/evaluation storage.
-9. Build app/HTML/report surfaces from governed state.
-10. Add rebuild/recovery services for derived projections.
+3. Improve review policy for adapter-output Claims.
+4. Improve Fact review, stale review, and supersession.
+5. Expand retrieval planning across FTS, vector, graph, temporal, and permissions.
+6. Strengthen Active Memory Pools and agent/tool governance.
+7. Add benchmark/evaluation storage.
+8. Build app/HTML/report surfaces from governed state.
+9. Add rebuild/recovery services for derived projections.
 ```
 
 This keeps complexity meaningful. The engine should be complex around evidence,

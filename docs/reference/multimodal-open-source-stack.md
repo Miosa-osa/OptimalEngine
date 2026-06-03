@@ -208,6 +208,10 @@ automatic projection. Rich adapter-specific parsers should still split real tool
 outputs into multiple page spans, transcript segments, frame observations, table
 records, or embedding refs as needed.
 
+Retrieval can return these projection rows as source-linked Context Package
+objects. This lets an agent use a transcript, OCR span, visual observation, or
+embedding reference as governed context without treating it as an accepted Fact.
+
 ## Deployment
 
 Docker is optional. Local development can run with SQLite and whichever binaries
