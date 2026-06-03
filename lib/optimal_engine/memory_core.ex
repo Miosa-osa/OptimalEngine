@@ -38,6 +38,11 @@ defmodule OptimalEngine.MemoryCore do
     to: AssetStore,
     as: :claim_from_adapter_run
 
+  defdelegate record_asset_extraction(run_id, opts \\ []), to: AssetStore
+  defdelegate get_asset_extraction(extraction_id, opts \\ []), to: AssetStore
+  defdelegate list_asset_extractions(asset_id, opts \\ []), to: AssetStore
+  defdelegate claim_from_asset_extraction(extraction_id, opts \\ []), to: AssetStore
+
   defdelegate run_asset_adapter(asset_id, adapter_id, opts \\ []),
     to: MultimodalAdapterRunner,
     as: :run

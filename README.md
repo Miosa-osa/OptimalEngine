@@ -42,6 +42,7 @@ Built and verified now:
 | Multimodal adapter runs | Adapter attempts and outputs can be recorded as governed derived artifacts linked to assets, Source Packages, scopes, hashes, and derivation ledger entries. |
 | Multimodal adapter runner | Configured local adapter commands can execute against governed assets, with completed, failed, and unavailable runs recorded through Memory Core. |
 | Adapter-output Claims | Completed adapter outputs can be preserved as derived Source Packages and converted into pending Claims. Failed or unavailable adapter runs cannot become Claims. |
+| Asset extraction projections | Completed adapter runs can be normalized into `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection tables. Text-bearing extractions can become derived Source Packages and pending Claims. |
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
@@ -65,13 +66,10 @@ mix test test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_
 10 tests, 0 failures
 
 mix test test/pipeline/multimodal_adapter_runner_test.exs test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs test/pipeline/indexer_asset_store_test.exs --seed 0
-15 tests, 0 failures
-
-mix test test/memory_core/asset_store_test.exs test/pipeline/multimodal_adapter_runner_test.exs test/pipeline/multimodal_tool_registry_test.exs --seed 0
-12 tests, 0 failures
+20 tests, 0 failures
 
 mix optimal.reality_check
-110 probes, 110 ok, 0 warn, 0 fail
+115 probes, 115 ok, 0 warn, 0 fail
 ```
 
 The full legacy suite still contains older optional/backend warnings. The focused
@@ -294,7 +292,8 @@ file
   -> Source Package + asset row + derivation ledger
   -> optional adapter run records for OCR/transcripts/visual outputs
   -> optional configured adapter command execution
-  -> completed adapter output can become derived Source Package + pending Claim
+  -> asset_extractions + typed transcript/OCR/visual/embedding projection rows
+  -> text-bearing extraction can become derived Source Package + pending Claim
   -> governed ParsedDoc
   -> Decomposer chunk with asset_ref
   -> Embedder asset_paths lookup
@@ -328,6 +327,12 @@ when present, and records completed, failed, or unavailable status.
 `MemoryCore.claim_from_asset_adapter_run/2` is the review bridge: it turns a
 completed adapter output into a derived Source Package plus pending Claim without
 promoting that output to accepted truth.
+`MemoryCore.record_asset_extraction/2` is the typed projection bridge: it turns a
+completed adapter run into generic `asset_extractions` plus one typed projection
+table row for transcripts, OCR spans, visual observations, or embedding refs.
+`MemoryCore.claim_from_asset_extraction/2` then converts text-bearing extraction
+rows into derived Source Packages and pending Claims. Reference-only embedding
+rows remain searchable/retrievable projection records and are not claimable text.
 
 ## Human And Agent Usage
 
@@ -437,8 +442,9 @@ The next build slices are:
 1. Add adapter-specific command builders and output parsers around
    `MemoryCore.run_asset_adapter/3`, starting with Docling/Marker document
    intelligence and FFmpeg/Whisper media extraction.
-2. Add adapter-specific extraction projection tables for transcripts, OCR spans,
-   visual observations, page elements, and embedding references.
+2. Feed typed extraction projections into retrieval/context assembly so
+   transcripts, OCR spans, visual observations, and embedding refs can be recalled
+   through governed Context Packages.
 3. Make connector and API upload paths consistently use the governed multimodal
    pipeline.
 4. Add review queue UI/API ergonomics for Claims and Fact promotion.
