@@ -162,6 +162,7 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
       else
         run
       end
+      |> with_audit_link(kind)
 
     insert_result =
       case kind do
@@ -308,6 +309,7 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
       cost_units: Keyword.get(opts, :cost_units),
       source_package_links: [],
       observation_links: [],
+      audit_event_links: [],
       access_policy_id: operation.access_policy_id,
       security_labels: operation.security_labels,
       partition_ids: operation.partition_ids,
@@ -343,6 +345,7 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
       cost_units: Keyword.get(opts, :cost_units),
       source_package_links: [],
       observation_links: [],
+      audit_event_links: [],
       access_policy_id: definition.access_policy_id,
       security_labels: definition.security_labels,
       partition_ids: definition.partition_ids,
@@ -395,6 +398,18 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
   defp reject_reason(%{allowed?: true}), do: nil
   defp reject_reason(%{rejection_reason: reason}), do: reason
 
+  defp with_audit_link(run, kind) do
+    audit_event_id = ID.random_id("audit")
+
+    audit_link = %{
+      type: "audit_event",
+      id: audit_event_id,
+      kind: "#{kind}.call.governed"
+    }
+
+    Map.update(run, :audit_event_links, [audit_link], fn links -> links ++ [audit_link] end)
+  end
+
   defp log_audit(run, kind) do
     AuditLogger.log("#{kind}.call.governed",
       tenant_id: run.tenant_id,
@@ -404,7 +419,8 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
         workspace_id: run.workspace_id,
         decision_state: run.decision_state,
         run_status: run.run_status,
-        rejection_reason: run.rejection_reason
+        rejection_reason: run.rejection_reason,
+        audit_event_links: run.audit_event_links
       }
     )
   end

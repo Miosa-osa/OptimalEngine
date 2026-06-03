@@ -604,6 +604,9 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert rejected_tool_run.decision_state == "rejected"
     assert rejected_tool_run.rejection_reason =~ "missing:calendar:read"
 
+    assert [%{type: "audit_event", kind: "tool.call.governed"}] =
+             rejected_tool_run.audit_event_links
+
     assert {:ok, invalid_tool_output_run} =
              ToolModelGovernance.record_tool_call(
                "calendar.read",
@@ -623,6 +626,9 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert invalid_tool_output_run.rejection_reason =~ "missing_output:events"
     assert invalid_tool_output_run.observation_links == []
     assert invalid_tool_output_run.source_package_links == []
+
+    assert [%{type: "audit_event", kind: "tool.call.governed"}] =
+             invalid_tool_output_run.audit_event_links
 
     assert {:ok, allowed_tool_run} =
              ToolModelGovernance.record_tool_call(
@@ -644,6 +650,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert allowed_tool_run.decision_state == "allowed"
     assert allowed_tool_run.run_status == "completed"
     assert allowed_tool_run.mcp_tool_definition_id == tool_definition.id
+    assert [%{type: "audit_event", kind: "tool.call.governed"}] = allowed_tool_run.audit_event_links
     assert [%{type: "claim", id: pending_claim_id}] = allowed_tool_run.observation_links
 
     assert {:ok, [[1]]} =
@@ -666,6 +673,9 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert allowed_model_run.decision_state == "allowed"
     assert allowed_model_run.model_call_operation_id == model_operation.id
 
+    assert [%{type: "audit_event", kind: "model.call.governed"}] =
+             allowed_model_run.audit_event_links
+
     assert {:ok, invalid_model_output_run} =
              ToolModelGovernance.record_model_call(
                "summarize_context",
@@ -681,6 +691,9 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert invalid_model_output_run.run_status == "output_rejected"
     assert invalid_model_output_run.rejection_reason =~ "missing_output:summary"
     assert invalid_model_output_run.observation_links == []
+
+    assert [%{type: "audit_event", kind: "model.call.governed"}] =
+             invalid_model_output_run.audit_event_links
 
     assert {:ok, [[1]]} =
              Store.raw_query(
@@ -704,6 +717,18 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              Store.raw_query(
                "SELECT COUNT(*) FROM model_call_runs WHERE workspace_id = ?1 AND model_call_operation_id = ?2",
                [workspace_id, model_operation.id]
+             )
+
+    assert {:ok, [[5]]} =
+             Store.raw_query(
+               """
+               SELECT COUNT(*)
+               FROM events
+               WHERE tenant_id = 'default'
+                 AND metadata LIKE ?1
+                 AND metadata LIKE ?2
+               """,
+               ["%audit_event_links%", "%#{workspace_id}%"]
              )
   end
 
