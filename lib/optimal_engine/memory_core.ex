@@ -48,4 +48,7 @@ defmodule OptimalEngine.MemoryCore do
   defdelegate register_mcp_tool_definition(opts), to: ToolModelGovernance
   defdelegate record_model_call(function_name, input_payload, opts \\ []), to: ToolModelGovernance
   defdelegate record_tool_call(tool_name, input_payload, opts \\ []), to: ToolModelGovernance
+
+  defdelegate execute_tool_call(tool_name, input_payload, executor, opts \\ []),
+    to: ToolModelGovernance
 end

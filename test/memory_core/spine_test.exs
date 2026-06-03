@@ -732,6 +732,78 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              )
   end
 
+  test "tool governance execute helper blocks, runs, and records tool execution" do
+    workspace_id = "memory-core-tool-execute-test-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    assert {:ok, _tool_definition} =
+             ToolModelGovernance.register_mcp_tool_definition(
+               workspace_id: workspace_id,
+               tool_name: "workspace.notify",
+               implementation_type: "internal_adapter",
+               required_privileges: ["workspace:notify"],
+               allowed_partitions: ["workspace"],
+               input_schema: %{required: ["message"]},
+               output_schema: %{required: ["delivered"]}
+             )
+
+    assert {:error, {:rejected, rejected_run}} =
+             ToolModelGovernance.execute_tool_call(
+               "workspace.notify",
+               %{message: "Blocked"},
+               fn _payload ->
+                 send(test_pid, :should_not_execute)
+                 {:ok, %{delivered: true}}
+               end,
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               granted_privileges: [],
+               requested_partitions: ["workspace"]
+             )
+
+    assert rejected_run.decision_state == "rejected"
+    refute_receive :should_not_execute
+
+    assert {:ok, completed_run} =
+             ToolModelGovernance.execute_tool_call(
+               "workspace.notify",
+               %{message: "Allowed"},
+               fn payload ->
+                 send(test_pid, {:executed, payload.message})
+                 {:ok, %{delivered: true}}
+               end,
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               granted_privileges: ["workspace:notify"],
+               requested_partitions: ["workspace"]
+             )
+
+    assert completed_run.decision_state == "allowed"
+    assert completed_run.run_status == "completed"
+    assert_receive {:executed, "Allowed"}
+
+    assert {:error, {:execution_failed, :boom, failed_run}} =
+             ToolModelGovernance.execute_tool_call(
+               "workspace.notify",
+               %{message: "Fail"},
+               fn _payload -> {:error, :boom} end,
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               granted_privileges: ["workspace:notify"],
+               requested_partitions: ["workspace"]
+             )
+
+    assert failed_run.decision_state == "allowed"
+    assert failed_run.run_status == "failed"
+    assert failed_run.rejection_reason =~ "execution_failed"
+
+    assert {:ok, [[3]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM tool_call_runs WHERE workspace_id = ?1 AND tool_name = 'workspace.notify'",
+               [workspace_id]
+             )
+  end
+
   defp create_accepted_memory(workspace_id, opts) do
     partition_ids = Keyword.fetch!(opts, :partition_ids)
     fact_opts = Keyword.get(opts, :fact_opts, [])

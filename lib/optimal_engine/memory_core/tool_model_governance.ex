@@ -155,6 +155,33 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
     end
   end
 
+  @spec execute_tool_call(String.t(), map(), function(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def execute_tool_call(tool_name, input_payload, executor, opts \\ [])
+      when is_binary(tool_name) and is_map(input_payload) and is_function(executor) do
+    workspace_id = string_opt(opts, :workspace_id, "default")
+    protocol_adapter_id = string_opt(opts, :protocol_adapter_id, "mcp")
+
+    case Store.get_mcp_tool_definition(workspace_id, tool_name, protocol_adapter_id) do
+      {:ok, definition} ->
+        decision = decide(definition, input_payload, opts, :tool)
+
+        if decision.allowed? do
+          execute_allowed_tool(definition, input_payload, executor, opts)
+        else
+          run = build_tool_run(definition, input_payload, decision, opts)
+
+          case persist_run(run, decision, opts, :tool) do
+            {:ok, rejected_run} -> {:error, {:rejected, rejected_run}}
+            other -> other
+          end
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp persist_run(run, decision, opts, kind) do
     run =
       if decision.allowed? and run.run_status == "completed" do
@@ -174,6 +201,74 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
       log_audit(run, kind)
       {:ok, run}
     end
+  end
+
+  defp execute_allowed_tool(definition, input_payload, executor, opts) do
+    decision = decide(definition, input_payload, opts, :tool)
+    started_at = System.monotonic_time(:millisecond)
+
+    case invoke_executor(executor, input_payload) do
+      {:ok, output_payload} ->
+        exec_opts =
+          opts
+          |> Keyword.put(:output_payload, output_payload)
+          |> Keyword.put(:latency_ms, elapsed_ms(started_at, opts))
+
+        run = build_tool_run(definition, input_payload, decision, exec_opts)
+
+        case persist_run(run, decision, exec_opts, :tool) do
+          {:ok, %{run_status: "output_rejected"} = output_rejected_run} ->
+            {:error, {:output_rejected, output_rejected_run}}
+
+          other ->
+            other
+        end
+
+      {:error, reason} ->
+        failed_opts =
+          opts
+          |> Keyword.put(:output_payload, %{error: inspect(reason)})
+          |> Keyword.put(:latency_ms, elapsed_ms(started_at, opts))
+
+        run =
+          definition
+          |> build_tool_run(input_payload, decision, failed_opts)
+          |> Map.put(:run_status, "failed")
+          |> Map.put(:rejection_reason, "execution_failed:#{inspect(reason)}")
+
+        case persist_run(run, decision, failed_opts, :tool) do
+          {:ok, failed_run} -> {:error, {:execution_failed, reason, failed_run}}
+          other -> other
+        end
+    end
+  end
+
+  defp invoke_executor(executor, input_payload) do
+    result =
+      try do
+        case :erlang.fun_info(executor, :arity) do
+          {:arity, 0} -> executor.()
+          {:arity, 1} -> executor.(input_payload)
+          {:arity, _} -> {:error, :unsupported_executor_arity}
+        end
+      rescue
+        exception -> {:error, {exception.__struct__, Exception.message(exception)}}
+      catch
+        kind, reason -> {:error, {kind, reason}}
+      end
+
+    normalize_executor_result(result)
+  end
+
+  defp normalize_executor_result({:ok, payload}) when is_map(payload), do: {:ok, payload}
+  defp normalize_executor_result({:ok, payload}), do: {:ok, %{result: inspect(payload)}}
+  defp normalize_executor_result(:ok), do: {:ok, %{result: "ok"}}
+  defp normalize_executor_result(payload) when is_map(payload), do: {:ok, payload}
+  defp normalize_executor_result({:error, reason}), do: {:error, reason}
+  defp normalize_executor_result(other), do: {:ok, %{result: inspect(other)}}
+
+  defp elapsed_ms(started_at, opts) do
+    Keyword.get(opts, :latency_ms) || max(System.monotonic_time(:millisecond) - started_at, 0)
   end
 
   defp attach_observation(run, opts) do
