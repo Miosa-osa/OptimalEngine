@@ -27,6 +27,7 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Insight.Health, as: HealthDiagnostics
   alias OptimalEngine.Graph.Reflector, as: Reflector
   alias OptimalEngine.Profile
+  alias OptimalEngine.MemoryCore
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.Grep
   alias OptimalEngine.Retrieval.RagStream
@@ -1373,6 +1374,113 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # ── Memory Core claim governance ──────────────────────────────────────────
+
+  # GET /api/memory-core/claims — list pending claims for review.
+  # Params: workspace, tenant
+  get "/api/memory-core/claims" do
+    workspace_id = query_param(conn, "workspace", "default")
+    tenant_id = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    case MemoryCore.pending_claims(workspace_id: workspace_id, tenant_id: tenant_id) do
+      {:ok, claims} ->
+        json(conn, %{
+          tenant_id: tenant_id,
+          workspace_id: workspace_id,
+          count: length(claims),
+          claims: Enum.map(claims, &claim_to_map/1)
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/claims/:id — fetch one claim by id.
+  # Params: workspace, tenant
+  get "/api/memory-core/claims/:id" do
+    workspace_id = query_param(conn, "workspace", nil)
+    tenant_id = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    case MemoryCore.get_claim(id, workspace_id: workspace_id, tenant_id: tenant_id) do
+      {:ok, claim} -> json(conn, claim_to_map(claim))
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/claims/:id/reject — reject a pending claim.
+  # Body: {workspace?, tenant?, actor_id?}
+  post "/api/memory-core/claims/:id/reject" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
+    tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
+    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    case MemoryCore.reject_claim(id,
+           workspace_id: workspace_id,
+           tenant_id: tenant_id,
+           actor_id: actor_id
+         ) do
+      {:ok, claim} -> json(conn, %{claim: claim_to_map(claim)})
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/claims/:id/promote — accept a claim as a Fact and
+  # build a Memory Object.
+  # Body: {workspace?, tenant?, actor_id?, fact_text?, summary?, memory_type?,
+  #        verification_status?, aggregate_confidence?, aggregate_precision?,
+  #        valid_time_start?, valid_time_end?, stale_after?, fact_metadata?,
+  #        memory_metadata?}
+  post "/api/memory-core/claims/:id/promote" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
+    tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
+    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    opts =
+      [
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        actor_id: actor_id,
+        verifier_id: Map.get(body, "verifier_id"),
+        fact_text: Map.get(body, "fact_text"),
+        fact_type: Map.get(body, "fact_type"),
+        verification_status: Map.get(body, "verification_status"),
+        aggregate_confidence: Map.get(body, "aggregate_confidence"),
+        aggregate_precision: Map.get(body, "aggregate_precision"),
+        valid_time_start: Map.get(body, "valid_time_start"),
+        valid_time_end: Map.get(body, "valid_time_end"),
+        stale_after: Map.get(body, "stale_after"),
+        summary: Map.get(body, "summary"),
+        memory_type: Map.get(body, "memory_type"),
+        salience: Map.get(body, "salience"),
+        fact_metadata: coerce_metadata(Map.get(body, "fact_metadata")),
+        memory_metadata: coerce_metadata(Map.get(body, "memory_metadata"))
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case MemoryCore.promote_claim(id, opts) do
+      {:ok, result} ->
+        json(conn, %{
+          claim: claim_to_map(result.claim),
+          fact: result.fact,
+          memory_object: result.memory_object
+        })
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+
+      {:error, :claim_rejected} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim rejected"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
   # ── API key management (Phase 18) ──────────────────────────────────────────
   #
   # These endpoints manage API keys for the current tenant. When auth is on
@@ -1630,6 +1738,16 @@ defmodule OptimalEngine.API.Router do
       updated_at: mem.updated_at,
       was_existing: Map.get(mem, :was_existing, false)
     }
+  end
+
+  defp claim_to_map(claim) when is_map(claim) do
+    if Map.has_key?(claim, :__struct__) do
+      claim
+      |> Map.from_struct()
+      |> stringify_keys()
+    else
+      stringify_keys(claim)
+    end
   end
 
   # Shared handler for update/extend/derive — each takes (id, attrs) and returns {:ok, mem}.

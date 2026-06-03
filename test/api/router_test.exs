@@ -104,6 +104,88 @@ defmodule OptimalEngine.API.RouterTest do
     end
   end
 
+  describe "Memory Core claim governance API" do
+    test "lists pending claims and promotes one into fact and memory object" do
+      workspace_id = "api-claim-review-#{System.unique_integer([:positive])}"
+      content = "API claim promotion #{System.unique_integer([:positive])}"
+
+      create_conn =
+        request(:post, "/api/memory", %{
+          "workspace" => workspace_id,
+          "content" => content,
+          "metadata" => %{"source" => "api-test"}
+        })
+
+      assert create_conn.status == 201
+
+      list_conn = request(:get, "/api/memory-core/claims?workspace=#{workspace_id}")
+      assert list_conn.status == 200
+      assert {:ok, list_body} = Jason.decode(list_conn.resp_body)
+      assert list_body["count"] == 1
+
+      [claim] = list_body["claims"]
+      assert claim["claim_text"] == content
+      assert claim["review_status"] == "unreviewed"
+
+      get_conn = request(:get, "/api/memory-core/claims/#{claim["id"]}?workspace=#{workspace_id}")
+      assert get_conn.status == 200
+      assert {:ok, get_body} = Jason.decode(get_conn.resp_body)
+      assert get_body["id"] == claim["id"]
+
+      promote_conn =
+        request(:post, "/api/memory-core/claims/#{claim["id"]}/promote", %{
+          "workspace" => workspace_id,
+          "actor_id" => "user:api-reviewer",
+          "fact_text" => "Accepted #{content}",
+          "summary" => "Remember #{content}",
+          "memory_type" => "reviewed_api_note"
+        })
+
+      assert promote_conn.status == 200
+      assert {:ok, promote_body} = Jason.decode(promote_conn.resp_body)
+      assert promote_body["claim"]["review_status"] == "accepted"
+      assert promote_body["fact"]["fact_text"] == "Accepted #{content}"
+      assert promote_body["memory_object"]["summary"] == "Remember #{content}"
+
+      after_conn = request(:get, "/api/memory-core/claims?workspace=#{workspace_id}")
+      assert after_conn.status == 200
+      assert {:ok, after_body} = Jason.decode(after_conn.resp_body)
+      assert after_body["count"] == 0
+    end
+
+    test "rejects claims and prevents later promotion" do
+      workspace_id = "api-claim-reject-#{System.unique_integer([:positive])}"
+      content = "API claim rejection #{System.unique_integer([:positive])}"
+
+      assert request(:post, "/api/memory", %{
+               "workspace" => workspace_id,
+               "content" => content
+             }).status == 201
+
+      list_conn = request(:get, "/api/memory-core/claims?workspace=#{workspace_id}")
+      assert {:ok, %{"claims" => [claim]}} = Jason.decode(list_conn.resp_body)
+
+      reject_conn =
+        request(:post, "/api/memory-core/claims/#{claim["id"]}/reject", %{
+          "workspace" => workspace_id,
+          "actor_id" => "user:api-reviewer"
+        })
+
+      assert reject_conn.status == 200
+      assert {:ok, reject_body} = Jason.decode(reject_conn.resp_body)
+      assert reject_body["claim"]["review_status"] == "rejected"
+
+      promote_conn =
+        request(:post, "/api/memory-core/claims/#{claim["id"]}/promote", %{
+          "workspace" => workspace_id,
+          "actor_id" => "user:api-reviewer"
+        })
+
+      assert promote_conn.status == 409
+      assert {:ok, %{"error" => "claim rejected"}} = Jason.decode(promote_conn.resp_body)
+    end
+  end
+
   describe "GET /api/grep" do
     test "returns 400 when q is missing" do
       conn = request(:get, "/api/grep")

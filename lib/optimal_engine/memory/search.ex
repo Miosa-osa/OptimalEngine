@@ -81,7 +81,7 @@ defmodule OptimalEngine.Memory.Search do
         all_entries
         |> Enum.map(fn entry ->
           entry_keywords = Index.extract_keywords(entry[:content] || "")
-          overlap = length(keywords -- (keywords -- entry_keywords))
+          overlap = length(keywords -- keywords -- entry_keywords)
           s = score(entry, overlap, length(keywords))
           {s, entry}
         end)
