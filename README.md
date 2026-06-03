@@ -73,6 +73,10 @@ mix optimal.reality_check
 The full legacy suite still contains older optional/backend warnings. The focused
 slice above is the current verified build path.
 
+For the detailed build audit, see
+[`docs/reference/build-goal-alignment.md`](docs/reference/build-goal-alignment.md).
+It maps each intended layer to the code, tests, and remaining gaps.
+
 ## Product Shape
 
 Optimal Engine has two sides that share the same state.
