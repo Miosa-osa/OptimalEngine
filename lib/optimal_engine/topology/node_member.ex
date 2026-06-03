@@ -29,11 +29,13 @@ defmodule OptimalEngine.Topology.NodeMember do
     * `:membership` — default `:internal`
     * `:role`       — optional string ("lead", "designer", "CSM", …)
     * `:tenant_id`  — defaults to default tenant
+    * `:workspace_id` — defaults to `"default"`
   """
   @spec add(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def add(node_id, principal_id, opts \\ [])
       when is_binary(node_id) and is_binary(principal_id) do
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
     membership = Keyword.get(opts, :membership, :internal)
     role = Keyword.get(opts, :role)
 
@@ -41,11 +43,20 @@ defmodule OptimalEngine.Topology.NodeMember do
       {:error, {:invalid_membership, membership}}
     else
       sql = """
-      INSERT OR IGNORE INTO node_members (tenant_id, node_id, principal_id, membership, role)
-      VALUES (?1, ?2, ?3, ?4, ?5)
+      INSERT OR IGNORE INTO node_members (
+        tenant_id, workspace_id, node_id, principal_id, membership, role
+      )
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6)
       """
 
-      case Store.raw_query(sql, [tenant_id, node_id, principal_id, Atom.to_string(membership), role]) do
+      case Store.raw_query(sql, [
+             tenant_id,
+             workspace_id,
+             node_id,
+             principal_id,
+             Atom.to_string(membership),
+             role
+           ]) do
         {:ok, _} -> :ok
         other -> other
       end
@@ -57,25 +68,11 @@ defmodule OptimalEngine.Topology.NodeMember do
   def remove(node_id, principal_id, opts \\ [])
       when is_binary(node_id) and is_binary(principal_id) do
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
+    workspace_id = Keyword.get(opts, :workspace_id)
     membership = Keyword.get(opts, :membership)
 
     {sql, params} =
-      case membership do
-        nil ->
-          {"""
-           UPDATE node_members
-           SET ended_at = datetime('now')
-           WHERE node_id = ?1 AND principal_id = ?2 AND tenant_id = ?3 AND ended_at IS NULL
-           """, [node_id, principal_id, tenant_id]}
-
-        m when m in @allowed_memberships ->
-          {"""
-           UPDATE node_members
-           SET ended_at = datetime('now')
-           WHERE node_id = ?1 AND principal_id = ?2 AND tenant_id = ?3
-             AND membership = ?4 AND ended_at IS NULL
-           """, [node_id, principal_id, tenant_id, Atom.to_string(m)]}
-      end
+      remove_query(node_id, principal_id, tenant_id, workspace_id, membership)
 
     case Store.raw_query(sql, params) do
       {:ok, _} -> :ok
@@ -90,9 +87,20 @@ defmodule OptimalEngine.Topology.NodeMember do
   @spec members_of(String.t(), keyword()) :: {:ok, [map()]}
   def members_of(node_id, opts \\ []) when is_binary(node_id) do
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
+    workspace_id = Keyword.get(opts, :workspace_id)
     kind_filter = Keyword.get(opts, :membership)
 
-    {where, params} = {["node_id = ?1", "tenant_id = ?2", "ended_at IS NULL"], [node_id, tenant_id]}
+    {where, params} =
+      {["node_id = ?1", "tenant_id = ?2", "ended_at IS NULL"], [node_id, tenant_id]}
+
+    {where, params} =
+      case workspace_id do
+        nil ->
+          {where, params}
+
+        workspace_id ->
+          {where ++ ["workspace_id = ?#{length(params) + 1}"], params ++ [workspace_id]}
+      end
 
     {where, params} =
       case kind_filter do
@@ -104,7 +112,7 @@ defmodule OptimalEngine.Topology.NodeMember do
       end
 
     sql = """
-    SELECT principal_id, membership, role, started_at, ended_at
+    SELECT workspace_id, principal_id, membership, role, started_at, ended_at
     FROM node_members
     WHERE #{Enum.join(where, " AND ")}
     ORDER BY started_at
@@ -113,8 +121,9 @@ defmodule OptimalEngine.Topology.NodeMember do
     case Store.raw_query(sql, params) do
       {:ok, rows} ->
         {:ok,
-         Enum.map(rows, fn [pid, m, role, started_at, ended_at] ->
+         Enum.map(rows, fn [workspace_id, pid, m, role, started_at, ended_at] ->
            %{
+             workspace_id: workspace_id,
              principal_id: pid,
              membership: safe_atom(m, :internal),
              role: role,
@@ -135,10 +144,20 @@ defmodule OptimalEngine.Topology.NodeMember do
   @spec nodes_of(String.t(), keyword()) :: {:ok, [map()]}
   def nodes_of(principal_id, opts \\ []) when is_binary(principal_id) do
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
+    workspace_id = Keyword.get(opts, :workspace_id)
     kind_filter = Keyword.get(opts, :membership)
 
     {where, params} =
       {["principal_id = ?1", "tenant_id = ?2", "ended_at IS NULL"], [principal_id, tenant_id]}
+
+    {where, params} =
+      case workspace_id do
+        nil ->
+          {where, params}
+
+        workspace_id ->
+          {where ++ ["workspace_id = ?#{length(params) + 1}"], params ++ [workspace_id]}
+      end
 
     {where, params} =
       case kind_filter do
@@ -150,7 +169,7 @@ defmodule OptimalEngine.Topology.NodeMember do
       end
 
     sql = """
-    SELECT node_id, membership, role, started_at, ended_at
+    SELECT workspace_id, node_id, membership, role, started_at, ended_at
     FROM node_members
     WHERE #{Enum.join(where, " AND ")}
     ORDER BY started_at
@@ -159,8 +178,9 @@ defmodule OptimalEngine.Topology.NodeMember do
     case Store.raw_query(sql, params) do
       {:ok, rows} ->
         {:ok,
-         Enum.map(rows, fn [nid, m, role, started_at, ended_at] ->
+         Enum.map(rows, fn [workspace_id, nid, m, role, started_at, ended_at] ->
            %{
+             workspace_id: workspace_id,
              node_id: nid,
              membership: safe_atom(m, :internal),
              role: role,
@@ -172,6 +192,36 @@ defmodule OptimalEngine.Topology.NodeMember do
       other ->
         other
     end
+  end
+
+  defp remove_query(node_id, principal_id, tenant_id, workspace_id, membership) do
+    {where, params} =
+      {["node_id = ?1", "principal_id = ?2", "tenant_id = ?3", "ended_at IS NULL"],
+       [node_id, principal_id, tenant_id]}
+
+    {where, params} =
+      case workspace_id do
+        nil ->
+          {where, params}
+
+        workspace_id ->
+          {where ++ ["workspace_id = ?#{length(params) + 1}"], params ++ [workspace_id]}
+      end
+
+    {where, params} =
+      case membership do
+        nil ->
+          {where, params}
+
+        m when m in @allowed_memberships ->
+          {where ++ ["membership = ?#{length(params) + 1}"], params ++ [Atom.to_string(m)]}
+      end
+
+    {"""
+     UPDATE node_members
+     SET ended_at = datetime('now')
+     WHERE #{Enum.join(where, " AND ")}
+     """, params}
   end
 
   defp safe_atom(nil, fallback), do: fallback
