@@ -9,7 +9,15 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
   """
 
   alias OptimalEngine.{Store, Workspace}
-  alias OptimalEngine.MemoryCore.{DerivationLedgerEntry, ID, JSON, SourcePackage}
+
+  alias OptimalEngine.MemoryCore.{
+    DerivationLedgerEntry,
+    ID,
+    JSON,
+    KnowledgeLifecycle,
+    SourcePackage
+  }
+
   alias OptimalEngine.Pipeline.MultimodalToolRegistry
   alias OptimalEngine.Pipeline.Parser.Asset
   alias OptimalEngine.Workspace.Filesystem
@@ -74,6 +82,82 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
     end
   end
 
+  @spec get_adapter_run(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found | term()}
+  def get_adapter_run(run_id, opts \\ []) when is_binary(run_id) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+
+    sql = """
+    SELECT id, tenant_id, workspace_id, asset_id, source_package_id, adapter_id,
+           adapter_role, modality, status, started_at, completed_at, input_hash,
+           output_hash, output_text, output_ref, model_id, model_version,
+           confidence, precision, error_reason, security_labels, partition_ids,
+           metadata, derivation_ledger_id, created_by, created_at
+    FROM asset_adapter_runs
+    WHERE tenant_id = ?1 AND workspace_id = ?2 AND id = ?3
+    """
+
+    case Store.raw_query(sql, [tenant_id, workspace_id, run_id]) do
+      {:ok, [row]} -> {:ok, row_to_adapter_run(row)}
+      {:ok, []} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec claim_from_adapter_run(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def claim_from_adapter_run(run_id, opts \\ []) when is_binary(run_id) do
+    with {:ok, run} <- get_adapter_run(run_id, opts),
+         :ok <- claimable_adapter_run?(run) do
+      source_package =
+        SourcePackage.from_text(run.output_text,
+          tenant_id: run.tenant_id,
+          workspace_id: run.workspace_id,
+          source_type: "adapter_output",
+          source_class: run.modality || "text",
+          source_system: run.adapter_id,
+          source_uri: "optimal://assets/#{run.asset_id}/adapter-runs/#{run.id}",
+          trust_label: Keyword.get(opts, :trust_label, "derived_unreviewed"),
+          access_policy_id: Keyword.get(opts, :access_policy_id),
+          security_labels: run.security_labels,
+          partition_ids: run.partition_ids,
+          actor_id: Keyword.get(opts, :actor_id) || run.created_by,
+          metadata:
+            Map.merge(run.metadata || %{}, %{
+              asset_id: run.asset_id,
+              raw_source_package_id: run.source_package_id,
+              adapter_run_id: run.id,
+              adapter_id: run.adapter_id,
+              adapter_role: run.adapter_role,
+              output_hash: run.output_hash,
+              derived_from: "asset_adapter_run"
+            })
+        )
+
+      with {:ok, claim} <-
+             KnowledgeLifecycle.extract_claim(source_package,
+               claim_text: Keyword.get(opts, :claim_text, run.output_text),
+               claim_type: Keyword.get(opts, :claim_type, "adapter_output"),
+               subject_anchor: Keyword.get(opts, :subject_anchor),
+               action_class: Keyword.get(opts, :action_class),
+               object_anchor: Keyword.get(opts, :object_anchor),
+               extraction_run_id: run.id,
+               evaluator_id: Keyword.get(opts, :evaluator_id),
+               aggregate_confidence:
+                 Keyword.get(opts, :aggregate_confidence, run.confidence || 0.5),
+               aggregate_precision: Keyword.get(opts, :aggregate_precision, run.precision || 0.5),
+               actor_id: Keyword.get(opts, :actor_id) || run.created_by,
+               metadata: %{
+                 adapter_run_id: run.id,
+                 asset_id: run.asset_id,
+                 adapter_id: run.adapter_id,
+                 output_hash: run.output_hash
+               }
+             ) do
+        {:ok, %{adapter_run: run, source_package: source_package, pending_claim: claim}}
+      end
+    end
+  end
+
   @spec get(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found | term()}
   def get(asset_id, opts \\ []) when is_binary(asset_id) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
@@ -104,6 +188,17 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
       tool -> {:ok, tool}
     end
   end
+
+  defp claimable_adapter_run?(%{status: "completed", output_text: output_text})
+       when is_binary(output_text) do
+    if String.trim(output_text) == "" do
+      {:error, :adapter_output_empty}
+    else
+      :ok
+    end
+  end
+
+  defp claimable_adapter_run?(%{status: status}), do: {:error, {:adapter_run_not_completed, status}}
 
   defp normalize_adapter_id(id) when is_atom(id), do: id
 

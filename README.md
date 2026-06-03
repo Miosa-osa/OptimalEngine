@@ -41,6 +41,7 @@ Built and verified now:
 | Multimodal tool registry | Open-source adapter targets are cataloged for document intelligence, OCR, audio, video, visual reasoning, visual document retrieval, and cross-modal embeddings. |
 | Multimodal adapter runs | Adapter attempts and outputs can be recorded as governed derived artifacts linked to assets, Source Packages, scopes, hashes, and derivation ledger entries. |
 | Multimodal adapter runner | Configured local adapter commands can execute against governed assets, with completed, failed, and unavailable runs recorded through Memory Core. |
+| Adapter-output Claims | Completed adapter outputs can be preserved as derived Source Packages and converted into pending Claims. Failed or unavailable adapter runs cannot become Claims. |
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
@@ -64,7 +65,10 @@ mix test test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_
 10 tests, 0 failures
 
 mix test test/pipeline/multimodal_adapter_runner_test.exs test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs test/pipeline/indexer_asset_store_test.exs --seed 0
-13 tests, 0 failures
+15 tests, 0 failures
+
+mix test test/memory_core/asset_store_test.exs test/pipeline/multimodal_adapter_runner_test.exs test/pipeline/multimodal_tool_registry_test.exs --seed 0
+12 tests, 0 failures
 
 mix optimal.reality_check
 110 probes, 110 ok, 0 warn, 0 fail
@@ -290,6 +294,7 @@ file
   -> Source Package + asset row + derivation ledger
   -> optional adapter run records for OCR/transcripts/visual outputs
   -> optional configured adapter command execution
+  -> completed adapter output can become derived Source Package + pending Claim
   -> governed ParsedDoc
   -> Decomposer chunk with asset_ref
   -> Embedder asset_paths lookup
@@ -320,6 +325,9 @@ security scope, partitions, and derivation ledger link.
 `MemoryCore.run_asset_adapter/3` is the current runtime bridge: it loads a
 governed asset, resolves a registry adapter, executes a configured local command
 when present, and records completed, failed, or unavailable status.
+`MemoryCore.claim_from_asset_adapter_run/2` is the review bridge: it turns a
+completed adapter output into a derived Source Package plus pending Claim without
+promoting that output to accepted truth.
 
 ## Human And Agent Usage
 
@@ -429,17 +437,19 @@ The next build slices are:
 1. Add adapter-specific command builders and output parsers around
    `MemoryCore.run_asset_adapter/3`, starting with Docling/Marker document
    intelligence and FFmpeg/Whisper media extraction.
-2. Make connector and API upload paths consistently use the governed multimodal
+2. Add adapter-specific extraction projection tables for transcripts, OCR spans,
+   visual observations, page elements, and embedding references.
+3. Make connector and API upload paths consistently use the governed multimodal
    pipeline.
-3. Add review queue UI/API ergonomics for Claims and Fact promotion.
-4. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
+4. Add review queue UI/API ergonomics for Claims and Fact promotion.
+5. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
-5. Add review/supersession policies for stale, contradicted, and replaced
+6. Add review/supersession policies for stale, contradicted, and replaced
    Facts/Memory Objects.
-6. Make connector governance the default runtime path for connector sync.
-7. Add benchmark/evaluation records so large-scale recall tests are stored and
+7. Make connector governance the default runtime path for connector sync.
+8. Add benchmark/evaluation records so large-scale recall tests are stored and
    inspectable.
-8. Add recovery/rebuild services for summaries, indexes, workflows, and derived
+9. Add recovery/rebuild services for summaries, indexes, workflows, and derived
    projections.
 
 The system is meant to stay complex where complexity carries meaning: evidence,

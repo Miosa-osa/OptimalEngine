@@ -149,4 +149,88 @@ defmodule OptimalEngine.MemoryCore.AssetStoreTest do
                ["adapter-workspace", "%#{run.id}%"]
              )
   end
+
+  test "turns a completed adapter run into a pending claim", %{tmp_dir: tmp_dir} do
+    source_path = Path.join(tmp_dir, "claimable.pdf")
+    File.mkdir_p!(tmp_dir)
+    File.write!(source_path, "%PDF-1.7\nasset-adapter-claim-test")
+
+    assert {:ok, %{asset: asset}} =
+             MemoryCore.store_asset_file(source_path,
+               workspace_id: "adapter-claim-workspace",
+               actor_id: "user:adapter",
+               security_labels: ["internal"],
+               partition_ids: ["documents"]
+             )
+
+    assert {:ok, run} =
+             MemoryCore.record_asset_adapter_run(asset.id,
+               workspace_id: "adapter-claim-workspace",
+               actor_id: "user:adapter",
+               adapter_id: :docling,
+               adapter_role: :document_intelligence,
+               status: "completed",
+               output_text: "Adapter found an approved renewal date.",
+               model_id: "docling",
+               confidence: 0.72,
+               precision: 0.68
+             )
+
+    assert {:ok, %{source_package: source_package, pending_claim: claim}} =
+             MemoryCore.claim_from_asset_adapter_run(run.id,
+               workspace_id: "adapter-claim-workspace",
+               actor_id: "user:reviewer",
+               subject_anchor: "renewal",
+               action_class: "found_date"
+             )
+
+    assert source_package.source_type == "adapter_output"
+    assert source_package.source_system == "docling"
+    assert source_package.metadata.adapter_run_id == run.id
+
+    assert claim.claim_type == "adapter_output"
+    assert claim.claim_text == "Adapter found an approved renewal date."
+    assert claim.review_status == "unreviewed"
+    assert claim.lifecycle_state == "pending"
+    assert claim.source_package_id == source_package.id
+    assert claim.aggregate_confidence == 0.72
+    assert claim.aggregate_precision == 0.68
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               """
+               SELECT COUNT(*) FROM claims
+               WHERE workspace_id = ?1
+                 AND extraction_run_id = ?2
+                 AND review_status = 'unreviewed'
+               """,
+               ["adapter-claim-workspace", run.id]
+             )
+  end
+
+  test "does not create a claim from unavailable adapter output", %{tmp_dir: tmp_dir} do
+    source_path = Path.join(tmp_dir, "unavailable.pdf")
+    File.mkdir_p!(tmp_dir)
+    File.write!(source_path, "%PDF-1.7\nasset-adapter-unavailable-test")
+
+    assert {:ok, %{asset: asset}} =
+             MemoryCore.store_asset_file(source_path,
+               workspace_id: "adapter-claim-workspace",
+               actor_id: "user:adapter"
+             )
+
+    assert {:ok, run} =
+             MemoryCore.record_asset_adapter_run(asset.id,
+               workspace_id: "adapter-claim-workspace",
+               actor_id: "user:adapter",
+               adapter_id: :docling,
+               status: "unavailable",
+               error_reason: "command not found"
+             )
+
+    assert {:error, {:adapter_run_not_completed, "unavailable"}} =
+             MemoryCore.claim_from_asset_adapter_run(run.id,
+               workspace_id: "adapter-claim-workspace"
+             )
+  end
 end

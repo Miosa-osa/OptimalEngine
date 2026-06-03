@@ -33,7 +33,7 @@ full app UI
 full benchmark harness
 rich review queue UI/API
 adapter-specific output parsers
-automatic adapter-output-to-claim promotion
+automatic adapter-output-to-Fact promotion
 full structured + FTS + vector + graph + temporal retrieval planning
 workflow mining and runtime execution
 recovery/rebuild services
@@ -92,7 +92,8 @@ workspace export of a Node.
 | Accepted knowledge becomes source-backed memory. | Memory Core | Facts can become Memory Objects with links to evidence, Claims, and derivation. | `MemoryCore.build_memory_object/2`, `test/memory_core/spine_test.exs`, reality-check memory probes. | Supersession, contradiction, stale-review, and richer memory object construction. |
 | Multimodal inputs are first-class evidence. | Memory Core / Pipeline | Parser-produced assets are preserved through `AssetStore`; chunks can carry `asset_ref`; indexer passes workspace scope. | `test/pipeline/pipeline_asset_store_test.exs`, `test/pipeline/indexer_asset_store_test.exs`, asset store tests. | Rich modality-specific extraction tables such as transcripts, OCR spans, visual observations, and embedding refs. |
 | Open-source multimodal adapters are planned and governed. | Pipeline / Model Governance | `MultimodalToolRegistry` catalogs local-first adapter targets for documents, OCR, audio, video, visual reasoning, visual retrieval, and cross-modal embeddings. | `test/pipeline/multimodal_tool_registry_test.exs`, `docs/reference/multimodal-open-source-stack.md`. | Runtime availability checks, install profiles, and deployment packaging per adapter. |
-| Adapter execution is recorded instead of invisible. | Memory Core / Pipeline | `MultimodalAdapterRunner` executes configured local commands and records completed, failed, or unavailable runs in `asset_adapter_runs`. | `test/pipeline/multimodal_adapter_runner_test.exs`, migration 036, `MemoryCore.run_asset_adapter/3`. | Adapter-specific command builders, output parsers, and automatic derived Claim candidates. |
+| Adapter execution is recorded instead of invisible. | Memory Core / Pipeline | `MultimodalAdapterRunner` executes configured local commands and records completed, failed, or unavailable runs in `asset_adapter_runs`. | `test/pipeline/multimodal_adapter_runner_test.exs`, migration 036, `MemoryCore.run_asset_adapter/3`. | Adapter-specific command builders and output parsers. |
+| Completed adapter output can become reviewable knowledge. | Memory Core | `MemoryCore.claim_from_asset_adapter_run/2` turns completed adapter output into a derived Source Package and pending Claim. Failed or unavailable adapter runs are rejected before Claim creation. | `test/memory_core/asset_store_test.exs`. | Rich adapter extraction projections and review policies that decide when Claims become Facts. |
 | Humans and agents receive Context Packages, not random chunks. | Retrieval / Context | `RetrievalCoordinator` returns and stores `context_packages` with facts, memories, evidence links, confidence/precision summaries, and an authorization envelope. | `test/memory_core/spine_test.exs`, reality-check retrieval/context probes. | Full planner across structured filters, FTS, vector search, graph traversal, temporal validity, workflows, and permissions. |
 | Agents work in task-scoped pools. | Active Collaboration | `ActiveMemoryPool` opens task pools, loads Context Packages, publishes observations as Source Packages and pending Claims, and closes pools. | Reality-check active pool probes and MemoryCore delegates. | Pool membership enforcement, refresh/invalidation workflows, and UI/API surfaces. |
 | Repeated work can become workflows and skills. | Workflow / Skill Runtime | First lifecycle records workflow traces, generalized workflows, procedural memory objects, and skill packages. | `MemoryCore.capture_workflow_trace/2`, `generalize_workflow/2`, `create_procedural_memory/2`, `package_skill/2`, reality-check workflow probes. | Real workflow mining, clustering, review gates, skill execution runtime, and exception/rollback handling. |
@@ -132,7 +133,9 @@ file
   -> optional adapter run
   -> asset_adapter_runs
   -> extracted text / transcript / OCR / visual output
-  -> Claim candidate when reviewed or policy-accepted
+  -> derived Source Package
+  -> pending Claim
+  -> reviewed Fact only after review or policy acceptance
 ```
 
 ## What This Means For Build Order
@@ -142,8 +145,8 @@ same lifecycle order:
 
 ```text
 1. Keep preserving sources and assets correctly.
-2. Add adapter-specific extraction outputs.
-3. Turn reviewed adapter outputs into Claims.
+2. Add adapter-specific extraction projection tables and parsers.
+3. Improve review policy for adapter-output Claims.
 4. Improve Fact review, stale review, and supersession.
 5. Expand retrieval planning and Context Package assembly.
 6. Strengthen Active Memory Pools and agent/tool governance.
