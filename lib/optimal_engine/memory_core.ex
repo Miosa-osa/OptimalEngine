@@ -10,6 +10,7 @@ defmodule OptimalEngine.MemoryCore do
 
   alias OptimalEngine.MemoryCore.{
     ActiveMemoryPool,
+    AssetStore,
     ClaimReview,
     KnowledgeLifecycle,
     RetrievalCoordinator,
@@ -20,6 +21,8 @@ defmodule OptimalEngine.MemoryCore do
 
   @spec source_package_from_text(String.t(), keyword()) :: SourcePackage.t()
   defdelegate source_package_from_text(raw_text, opts \\ []), to: SourcePackage, as: :from_text
+  defdelegate store_asset_file(path, opts \\ []), to: AssetStore, as: :store_file
+  defdelegate get_asset(asset_id, opts \\ []), to: AssetStore, as: :get
 
   defdelegate extract_claim(source_package, opts \\ []), to: KnowledgeLifecycle
   defdelegate pending_claims(opts \\ []), to: ClaimReview, as: :pending
