@@ -10,6 +10,7 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
 
   alias OptimalEngine.{Store, Workspace}
   alias OptimalEngine.MemoryCore.{DerivationLedgerEntry, ID, JSON, SourcePackage}
+  alias OptimalEngine.Pipeline.MultimodalToolRegistry
   alias OptimalEngine.Pipeline.Parser.Asset
   alias OptimalEngine.Workspace.Filesystem
 
@@ -37,6 +38,42 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
 
   def store_asset(%Asset{} = _asset, _opts), do: {:error, :asset_path_required}
 
+  @spec record_adapter_run(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def record_adapter_run(asset_id, opts \\ []) when is_binary(asset_id) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+
+    with {:ok, asset} <- get(asset_id, tenant_id: tenant_id, workspace_id: workspace_id),
+         {:ok, tool} <- adapter_tool(opts),
+         {:ok, run} <- build_adapter_run(asset, tool, opts),
+         :ok <- insert_adapter_run(run),
+         :ok <- record_adapter_derivation(run, asset, tool, opts) do
+      {:ok, run}
+    end
+  end
+
+  @spec list_adapter_runs(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_adapter_runs(asset_id, opts \\ []) when is_binary(asset_id) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+
+    sql = """
+    SELECT id, tenant_id, workspace_id, asset_id, source_package_id, adapter_id,
+           adapter_role, modality, status, started_at, completed_at, input_hash,
+           output_hash, output_text, output_ref, model_id, model_version,
+           confidence, precision, error_reason, security_labels, partition_ids,
+           metadata, derivation_ledger_id, created_by, created_at
+    FROM asset_adapter_runs
+    WHERE tenant_id = ?1 AND workspace_id = ?2 AND asset_id = ?3
+    ORDER BY created_at DESC
+    """
+
+    case Store.raw_query(sql, [tenant_id, workspace_id, asset_id]) do
+      {:ok, rows} -> {:ok, Enum.map(rows, &row_to_adapter_run/1)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @spec get(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found | term()}
   def get(asset_id, opts \\ []) when is_binary(asset_id) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
@@ -56,6 +93,179 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
       {:ok, []} -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp adapter_tool(opts) do
+    adapter_id = Keyword.fetch!(opts, :adapter_id)
+    normalized = normalize_adapter_id(adapter_id)
+
+    case MultimodalToolRegistry.get(normalized) do
+      nil -> {:error, {:unknown_adapter, adapter_id}}
+      tool -> {:ok, tool}
+    end
+  end
+
+  defp normalize_adapter_id(id) when is_atom(id), do: id
+
+  defp normalize_adapter_id(id) when is_binary(id) do
+    id
+    |> String.downcase()
+    |> String.replace("-", "_")
+    |> String.to_existing_atom()
+  rescue
+    ArgumentError -> :unknown
+  end
+
+  defp build_adapter_run(asset, tool, opts) do
+    now = timestamp()
+    output_text = Keyword.get(opts, :output_text, "")
+    output_ref = Keyword.get(opts, :output_ref)
+    status = Keyword.get(opts, :status, "completed")
+    input_hash = Keyword.get(opts, :input_hash, asset.content_hash)
+    output_hash = Keyword.get(opts, :output_hash) || derived_output_hash(output_text, output_ref)
+
+    run = %{
+      id: Keyword.get(opts, :id, ID.random_id("aar")),
+      tenant_id: asset.tenant_id,
+      workspace_id: asset.workspace_id,
+      asset_id: asset.id,
+      source_package_id: asset.source_package_id,
+      adapter_id: Atom.to_string(tool.id),
+      adapter_role: adapter_role(tool, opts),
+      modality: Keyword.get(opts, :modality, asset.modality),
+      status: status,
+      started_at: Keyword.get(opts, :started_at, now),
+      completed_at: Keyword.get(opts, :completed_at, if(status == "running", do: nil, else: now)),
+      input_hash: input_hash,
+      output_hash: output_hash,
+      output_text: output_text,
+      output_ref: output_ref,
+      model_id: Keyword.get(opts, :model_id),
+      model_version: Keyword.get(opts, :model_version),
+      confidence: Keyword.get(opts, :confidence),
+      precision: Keyword.get(opts, :precision),
+      error_reason: Keyword.get(opts, :error_reason),
+      security_labels: Keyword.get(opts, :security_labels, asset.security_labels),
+      partition_ids: Keyword.get(opts, :partition_ids, asset.partition_ids),
+      metadata: Keyword.get(opts, :metadata, %{}),
+      derivation_ledger_id: nil,
+      created_by: Keyword.get(opts, :actor_id),
+      created_at: now
+    }
+
+    {:ok, run}
+  end
+
+  defp adapter_role(tool, opts) do
+    case Keyword.get(opts, :adapter_role) do
+      nil -> tool.roles |> List.first() |> to_string()
+      role -> to_string(role)
+    end
+  end
+
+  defp derived_output_hash("", nil), do: nil
+
+  defp derived_output_hash(output_text, output_ref) do
+    material = [output_text || "", ":", output_ref || ""]
+    "sha256:" <> ID.sha256(IO.iodata_to_binary(material))
+  end
+
+  defp insert_adapter_run(run) do
+    sql = """
+    INSERT INTO asset_adapter_runs (
+      id, tenant_id, workspace_id, asset_id, source_package_id, adapter_id,
+      adapter_role, modality, status, started_at, completed_at, input_hash,
+      output_hash, output_text, output_ref, model_id, model_version,
+      confidence, precision, error_reason, security_labels, partition_ids,
+      metadata, derivation_ledger_id, created_by, created_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6,
+      ?7, ?8, ?9, ?10, ?11, ?12,
+      ?13, ?14, ?15, ?16, ?17,
+      ?18, ?19, ?20, ?21, ?22,
+      ?23, ?24, ?25, ?26
+    )
+    """
+
+    Store.raw_execute(sql, [
+      run.id,
+      run.tenant_id,
+      run.workspace_id,
+      run.asset_id,
+      run.source_package_id,
+      run.adapter_id,
+      run.adapter_role,
+      run.modality,
+      run.status,
+      run.started_at,
+      run.completed_at,
+      run.input_hash,
+      run.output_hash,
+      run.output_text,
+      run.output_ref,
+      run.model_id,
+      run.model_version,
+      run.confidence,
+      run.precision,
+      run.error_reason,
+      JSON.list(run.security_labels),
+      JSON.list(run.partition_ids),
+      JSON.map(run.metadata),
+      run.derivation_ledger_id,
+      run.created_by,
+      run.created_at
+    ])
+  end
+
+  defp record_adapter_derivation(run, asset, tool, opts) do
+    asset_ref = DerivationLedgerEntry.object_ref("asset", asset.id)
+    run_ref = DerivationLedgerEntry.object_ref("asset_adapter_run", run.id)
+
+    source_refs =
+      if is_binary(asset.source_package_id) do
+        [DerivationLedgerEntry.object_ref("source_package", asset.source_package_id)]
+      else
+        []
+      end
+
+    ledger =
+      DerivationLedgerEntry.new(
+        "asset_adapter.#{Atom.to_string(tool.id)}",
+        "asset_to_derived_multimodal_output",
+        [asset_ref],
+        [run_ref],
+        tenant_id: asset.tenant_id,
+        workspace_id: asset.workspace_id,
+        source_package_links: source_refs,
+        evidence_links: [asset_ref | source_refs],
+        actor_id: Keyword.get(opts, :actor_id),
+        parser_id: "optimal_engine.pipeline.multimodal_tool_registry",
+        model_id: run.model_id,
+        model_version: run.model_version,
+        confidence_delta: run.confidence,
+        precision_delta: run.precision,
+        security_labels: run.security_labels,
+        partition_ids: run.partition_ids,
+        metadata: %{
+          adapter_run_id: run.id,
+          adapter_id: run.adapter_id,
+          adapter_role: run.adapter_role,
+          status: run.status,
+          output_hash: run.output_hash
+        }
+      )
+
+    case OptimalEngine.MemoryCore.Store.insert_derivation_entry(ledger) do
+      :ok -> attach_derivation_ledger(run.id, ledger.id)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp attach_derivation_ledger(run_id, ledger_id) do
+    Store.raw_execute(
+      "UPDATE asset_adapter_runs SET derivation_ledger_id = ?1 WHERE id = ?2",
+      [ledger_id, run_id]
+    )
   end
 
   defp copy_asset(%Asset{} = asset, opts) do
@@ -264,6 +474,64 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
     }
   end
 
+  defp row_to_adapter_run([
+         id,
+         tenant_id,
+         workspace_id,
+         asset_id,
+         source_package_id,
+         adapter_id,
+         adapter_role,
+         modality,
+         status,
+         started_at,
+         completed_at,
+         input_hash,
+         output_hash,
+         output_text,
+         output_ref,
+         model_id,
+         model_version,
+         confidence,
+         precision,
+         error_reason,
+         security_labels,
+         partition_ids,
+         metadata,
+         derivation_ledger_id,
+         created_by,
+         created_at
+       ]) do
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      asset_id: asset_id,
+      source_package_id: source_package_id,
+      adapter_id: adapter_id,
+      adapter_role: adapter_role,
+      modality: modality,
+      status: status,
+      started_at: started_at,
+      completed_at: completed_at,
+      input_hash: input_hash,
+      output_hash: output_hash,
+      output_text: output_text,
+      output_ref: output_ref,
+      model_id: model_id,
+      model_version: model_version,
+      confidence: confidence,
+      precision: precision,
+      error_reason: error_reason,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      metadata: decode_map(metadata),
+      derivation_ledger_id: derivation_ledger_id,
+      created_by: created_by,
+      created_at: created_at
+    }
+  end
+
   defp decode_list(nil), do: []
 
   defp decode_list(value) when is_binary(value) do
@@ -281,4 +549,6 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
       _ -> %{}
     end
   end
+
+  defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
 end

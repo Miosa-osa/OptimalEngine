@@ -225,6 +225,8 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       "projection_revisions",
       "link_health_records",
       "source_packages",
+      "assets",
+      "asset_adapter_runs",
       "claims",
       "facts",
       "memory_objects",

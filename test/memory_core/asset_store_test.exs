@@ -93,4 +93,60 @@ defmodule OptimalEngine.MemoryCore.AssetStoreTest do
     assert default_asset.workspace_id == "default"
     assert other_asset.workspace_id == "second-workspace"
   end
+
+  test "records multimodal adapter runs as derived asset artifacts", %{tmp_dir: tmp_dir} do
+    source_path = Path.join(tmp_dir, "document.pdf")
+    File.mkdir_p!(tmp_dir)
+    File.write!(source_path, "%PDF-1.7\nasset-adapter-run-test")
+
+    assert {:ok, %{asset: asset}} =
+             MemoryCore.store_asset_file(source_path,
+               workspace_id: "adapter-workspace",
+               actor_id: "user:adapter",
+               security_labels: ["internal"],
+               partition_ids: ["documents"]
+             )
+
+    assert {:ok, run} =
+             MemoryCore.record_asset_adapter_run(asset.id,
+               workspace_id: "adapter-workspace",
+               actor_id: "user:adapter",
+               adapter_id: :docling,
+               adapter_role: :document_intelligence,
+               status: "completed",
+               output_text: "Extracted document text",
+               model_id: "docling",
+               model_version: "local",
+               confidence: 0.82,
+               precision: 0.77,
+               metadata: %{pages: 1}
+             )
+
+    assert run.id =~ "aar_"
+    assert run.asset_id == asset.id
+    assert run.adapter_id == "docling"
+    assert run.adapter_role == "document_intelligence"
+    assert run.status == "completed"
+    assert run.output_hash =~ "sha256:"
+
+    assert {:ok, [stored_run]} =
+             MemoryCore.list_asset_adapter_runs(asset.id, workspace_id: "adapter-workspace")
+
+    assert stored_run.id == run.id
+    assert stored_run.derivation_ledger_id =~ "dl_"
+    assert stored_run.metadata["pages"] == 1
+    assert stored_run.security_labels == ["internal"]
+    assert stored_run.partition_ids == ["documents"]
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               """
+               SELECT COUNT(*) FROM derivation_ledger
+               WHERE workspace_id = ?1
+                 AND activity_type = 'asset_adapter.docling'
+                 AND output_object_links LIKE ?2
+               """,
+               ["adapter-workspace", "%#{run.id}%"]
+             )
+  end
 end

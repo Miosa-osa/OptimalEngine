@@ -113,12 +113,29 @@ The current public backend already supports:
 ```text
 source_packages
 assets
+asset_adapter_runs
 derivation_ledger
 parser-produced asset metadata
 workspace-scoped indexer ingestion
 ```
 
-The next adapters should add explicit derived-artifact rows for:
+`asset_adapter_runs` records:
+
+```text
+adapter_id
+adapter_role
+modality
+status
+input_hash
+output_hash
+output_text / output_ref
+model_id / model_version
+confidence / precision
+security_labels / partition_ids
+derivation_ledger_id
+```
+
+Future adapter-specific projections can hang off that spine:
 
 ```text
 asset_extractions
@@ -126,7 +143,6 @@ asset_transcripts
 asset_ocr_spans
 asset_visual_observations
 asset_embedding_refs
-asset_adapter_runs
 ```
 
 Those rows should include:
