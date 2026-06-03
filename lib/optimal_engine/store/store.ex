@@ -288,6 +288,12 @@ defmodule OptimalEngine.Store do
     GenServer.call(__MODULE__, {:raw_query, sql, params}, 15_000)
   end
 
+  @doc "Executes a raw non-SELECT statement with bound parameters."
+  @spec raw_execute(String.t(), [term()]) :: :ok | {:error, term()}
+  def raw_execute(sql, params \\ []) do
+    GenServer.call(__MODULE__, {:raw_execute, sql, params}, 15_000)
+  end
+
   @doc """
   Inserts or replaces a list of chunks in one transaction.
 
@@ -523,6 +529,12 @@ defmodule OptimalEngine.Store do
   end
 
   @impl true
+  def handle_call({:raw_execute, sql, params}, _from, state) do
+    result = exec_stmt(state.db, sql, params)
+    {:reply, result, state}
+  end
+
+  @impl true
   def terminate(_reason, %{db: db}) do
     Exqlite.Sqlite3.close(db)
   end
@@ -615,10 +627,10 @@ defmodule OptimalEngine.Store do
 
   defp normalize_node_names(db) do
     renames = [
-      {"01-roberto", "roberto"},
-      {"04-ai-masters", "ai-masters"},
+      {"01-inbox", "inbox"},
+      {"04-products", "products"},
       {"10-team", "team"},
-      {"11-money-revenue", "money-revenue"}
+      {"11-revenue", "revenue"}
     ]
 
     Enum.each(renames, fn {old, new} ->

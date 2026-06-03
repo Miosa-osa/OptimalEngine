@@ -26,13 +26,13 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   ## Usage
 
-      {:ok, result} = OptimalEngine.Pipeline.Intake.process("Customer called about AI Masters pricing")
+      {:ok, result} = OptimalEngine.Pipeline.Intake.process("Customer called about Product Suite pricing")
 
       {:ok, result} = OptimalEngine.Pipeline.Intake.process(
         "Customer called...",
         genre: "transcript",
         title: "Q4 Pricing Call",
-        node: "ai-masters",
+        node: "products",
         entities: ["Alice", "Alice"]
       )
 
@@ -41,10 +41,10 @@ defmodule OptimalEngine.Pipeline.Intake do
       %{
         signal: %Signal{},
         context: %Context{},
-        files_written: ["04-ai-masters/signals/2026-03-18-ed-pricing-call.md"],
-        routed_to: ["04-ai-masters", "11-money-revenue"],
-        cross_references: ["11-money-revenue/signals/2026-03-18-ed-pricing-call.md"],
-        uri: "optimal://nodes/ai-masters/signals/2026-03-18-ed-pricing-call.md",
+        files_written: ["04-products/signals/2026-03-18-pricing-call.md"],
+        routed_to: ["04-products", "11-revenue"],
+        cross_references: ["11-revenue/signals/2026-03-18-pricing-call.md"],
+        uri: "optimal://nodes/products/signals/2026-03-18-pricing-call.md",
         quality_violations: [{:bandwidth_overload, "..."}],
         quality_action: :accepted
       }
@@ -52,7 +52,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   ## Options
 
   - `:genre`    — Override auto-detected genre (e.g. "transcript")
-  - `:node`     — Override primary node routing (e.g. "ai-masters")
+  - `:node`     — Override primary node routing (e.g. "products")
   - `:title`    — Explicit title instead of auto-extracted one
   - `:entities` — Explicit entity list (merged with auto-extracted)
   - `:type`     — Force context type (:signal, :resource, :memory, :skill)
@@ -63,6 +63,8 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   alias OptimalEngine.Pipeline.Classifier, as: Classifier
   alias OptimalEngine.Context
+  alias OptimalEngine.MemoryCore.SourcePackage
+  alias OptimalEngine.MemoryCore.SourcePackageService
   alias OptimalEngine.Pipeline.Indexer, as: Indexer
   alias OptimalEngine.Pipeline.Intake.Writer, as: Writer
   alias OptimalEngine.Pipeline.Router, as: Router
@@ -130,8 +132,10 @@ defmodule OptimalEngine.Pipeline.Intake do
   # ---------------------------------------------------------------------------
 
   defp run_pipeline(raw_text, opts) do
+    source_package = SourcePackage.from_text(raw_text, opts)
+
     with {:ok, signal} <- classify_step(raw_text, opts),
-         signal = enhance_with_miosa(signal, raw_text),
+         signal = enhance_with_signal_bridge(signal, raw_text),
          {:ok, signal} <- quality_gate(signal),
          {:ok, signal, routed_to} <- route_step(signal, opts),
          {:ok, primary_path} <- write_step(signal, opts),
@@ -162,6 +166,8 @@ defmodule OptimalEngine.Pipeline.Intake do
         quality_action: quality_action
       }
 
+      record_memory_core_trace(source_package, signal, context, opts)
+
       # Async: non-critical steps (episodic record, SICA observe, telemetry)
       Task.start(fn -> async_post_intake(signal, result, violations) end)
 
@@ -173,6 +179,21 @@ defmodule OptimalEngine.Pipeline.Intake do
 
       {:ok, result}
     end
+  end
+
+  defp record_memory_core_trace(source_package, signal, context, opts) do
+    case SourcePackageService.record_ingested_signal(source_package, signal, context, opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[Intake] Memory Core provenance write failed: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning("[Intake] Memory Core provenance write failed: #{inspect(error)}")
+      :ok
   end
 
   # Quality gate — reject or quarantine signals based on S/N and failure modes
@@ -219,8 +240,8 @@ defmodule OptimalEngine.Pipeline.Intake do
     end
   end
 
-  # Augment signal classification with OptimalEngine.Signal.Core's classifier
-  defp enhance_with_miosa(signal, raw_text) do
+  # Augment signal classification with the bridge classifier when available.
+  defp enhance_with_signal_bridge(signal, raw_text) do
     BridgeSignal.enhance_classification(signal, raw_text)
   rescue
     _ -> signal
