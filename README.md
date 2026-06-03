@@ -40,6 +40,7 @@ Built and verified now:
 | Indexer asset governance | Binary indexing can pass workspace scope into the governed pipeline so indexed assets do not fall back to the default workspace. |
 | Multimodal tool registry | Open-source adapter targets are cataloged for document intelligence, OCR, audio, video, visual reasoning, visual document retrieval, and cross-modal embeddings. |
 | Multimodal adapter runs | Adapter attempts and outputs can be recorded as governed derived artifacts linked to assets, Source Packages, scopes, hashes, and derivation ledger entries. |
+| Multimodal adapter runner | Configured local adapter commands can execute against governed assets, with completed, failed, and unavailable runs recorded through Memory Core. |
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
@@ -61,6 +62,9 @@ mix test test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_stor
 
 mix test test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs test/pipeline/indexer_asset_store_test.exs --seed 0
 10 tests, 0 failures
+
+mix test test/pipeline/multimodal_adapter_runner_test.exs test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs test/pipeline/indexer_asset_store_test.exs --seed 0
+13 tests, 0 failures
 
 mix optimal.reality_check
 110 probes, 110 ok, 0 warn, 0 fail
@@ -281,6 +285,7 @@ file
   -> MemoryCore.AssetStore
   -> Source Package + asset row + derivation ledger
   -> optional adapter run records for OCR/transcripts/visual outputs
+  -> optional configured adapter command execution
   -> governed ParsedDoc
   -> Decomposer chunk with asset_ref
   -> Embedder asset_paths lookup
@@ -308,6 +313,9 @@ missing tools must degrade gracefully while raw evidence is still preserved.
 When an adapter does run, `asset_adapter_runs` records the adapter, role,
 modality, status, input hash, output hash, output text/reference, model metadata,
 security scope, partitions, and derivation ledger link.
+`MemoryCore.run_asset_adapter/3` is the current runtime bridge: it loads a
+governed asset, resolves a registry adapter, executes a configured local command
+when present, and records completed, failed, or unavailable status.
 
 ## Human And Agent Usage
 
@@ -369,6 +377,7 @@ Focused multimodal asset verification:
 
 ```bash
 mix test test/pipeline/multimodal_tool_registry_test.exs \
+  test/pipeline/multimodal_adapter_runner_test.exs \
   test/memory_core/asset_store_test.exs \
   test/pipeline/pipeline_asset_store_test.exs \
   test/pipeline/indexer_asset_store_test.exs \
@@ -413,8 +422,9 @@ raw SQL from feature modules into governed tables
 
 The next build slices are:
 
-1. Add concrete adapters around the multimodal registry, starting with document
-   intelligence and media demux/transcription.
+1. Add adapter-specific command builders and output parsers around
+   `MemoryCore.run_asset_adapter/3`, starting with Docling/Marker document
+   intelligence and FFmpeg/Whisper media extraction.
 2. Make connector and API upload paths consistently use the governed multimodal
    pipeline.
 3. Add review queue UI/API ergonomics for Claims and Fact promotion.

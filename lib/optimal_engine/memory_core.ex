@@ -19,6 +19,8 @@ defmodule OptimalEngine.MemoryCore do
     WorkflowSkill
   }
 
+  alias OptimalEngine.Pipeline.MultimodalAdapterRunner
+
   @spec source_package_from_text(String.t(), keyword()) :: SourcePackage.t()
   defdelegate source_package_from_text(raw_text, opts \\ []), to: SourcePackage, as: :from_text
   defdelegate store_asset_file(path, opts \\ []), to: AssetStore, as: :store_file
@@ -30,6 +32,14 @@ defmodule OptimalEngine.MemoryCore do
     as: :record_adapter_run
 
   defdelegate list_asset_adapter_runs(asset_id, opts \\ []), to: AssetStore, as: :list_adapter_runs
+
+  defdelegate run_asset_adapter(asset_id, adapter_id, opts \\ []),
+    to: MultimodalAdapterRunner,
+    as: :run
+
+  defdelegate run_recommended_asset_adapter(asset_id, modality, opts \\ []),
+    to: MultimodalAdapterRunner,
+    as: :run_recommended
 
   defdelegate extract_claim(source_package, opts \\ []), to: KnowledgeLifecycle
   defdelegate pending_claims(opts \\ []), to: ClaimReview, as: :pending
