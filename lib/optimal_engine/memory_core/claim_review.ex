@@ -26,7 +26,8 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     workspace_id = Keyword.get(opts, :workspace_id)
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
-    with {:ok, claim} <- Store.get_claim(claim_id, tenant_id: tenant_id, workspace_id: workspace_id),
+    with {:ok, claim} <-
+           Store.get_claim(claim_id, tenant_id: tenant_id, workspace_id: workspace_id),
          :ok <-
            Store.update_claim_review(claim_id,
              tenant_id: tenant_id,
@@ -48,7 +49,8 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     workspace_id = Keyword.get(opts, :workspace_id)
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
-    with {:ok, claim} <- Store.get_claim(claim_id, tenant_id: tenant_id, workspace_id: workspace_id),
+    with {:ok, claim} <-
+           Store.get_claim(claim_id, tenant_id: tenant_id, workspace_id: workspace_id),
          :ok <- ensure_promotable(claim),
          {:ok, fact} <- KnowledgeLifecycle.promote_claim_to_fact(claim, fact_opts(opts)),
          {:ok, memory} <- KnowledgeLifecycle.build_memory_object(fact, memory_opts(opts)),
