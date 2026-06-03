@@ -1797,7 +1797,6 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_nodes_ws_kind ON nodes(workspace_id, kind)"},
        {"idx_nodes_workspace_parent_v033",
         "CREATE INDEX IF NOT EXISTS idx_nodes_ws_parent ON nodes(workspace_id, parent_id)"},
-
        {"node_types",
         """
         CREATE TABLE IF NOT EXISTS node_types (

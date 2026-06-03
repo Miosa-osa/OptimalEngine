@@ -83,7 +83,11 @@ defmodule OptimalEngine.Topology.NodeRelationship do
     tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
     workspace_id = Map.get(attrs, :workspace_id, "default")
     relationship_type_string = Atom.to_string(relationship_type)
-    id = Map.get(attrs, :id) || deterministic_id(workspace_id, source_node_id, target_node_id, relationship_type_string)
+
+    id =
+      Map.get(attrs, :id) ||
+        deterministic_id(workspace_id, source_node_id, target_node_id, relationship_type_string)
+
     direction = Map.get(attrs, :direction, "directed")
     strength = Map.get(attrs, :strength, 1.0)
     valid_time_start = Map.get(attrs, :valid_time_start)
@@ -188,7 +192,10 @@ defmodule OptimalEngine.Topology.NodeRelationship do
 
   defp deterministic_id(workspace_id, source_node_id, target_node_id, relationship_type) do
     hash =
-      :crypto.hash(:sha256, "#{workspace_id}|#{source_node_id}|#{target_node_id}|#{relationship_type}")
+      :crypto.hash(
+        :sha256,
+        "#{workspace_id}|#{source_node_id}|#{target_node_id}|#{relationship_type}"
+      )
       |> Base.encode16(case: :lower)
       |> binary_part(0, 24)
 

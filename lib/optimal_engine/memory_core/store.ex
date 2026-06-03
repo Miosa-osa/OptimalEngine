@@ -761,7 +761,8 @@ defmodule OptimalEngine.MemoryCore.Store do
     end
   end
 
-  @spec get_mcp_tool_definition(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  @spec get_mcp_tool_definition(String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
   def get_mcp_tool_definition(workspace_id, tool_name, protocol_adapter_id \\ "mcp")
       when is_binary(workspace_id) and is_binary(tool_name) and is_binary(protocol_adapter_id) do
     sql = """
