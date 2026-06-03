@@ -10,6 +10,7 @@ defmodule OptimalEngine.MemoryCore do
 
   alias OptimalEngine.MemoryCore.{
     ActiveMemoryPool,
+    ClaimReview,
     KnowledgeLifecycle,
     RetrievalCoordinator,
     SourcePackage,
@@ -21,6 +22,10 @@ defmodule OptimalEngine.MemoryCore do
   defdelegate source_package_from_text(raw_text, opts \\ []), to: SourcePackage, as: :from_text
 
   defdelegate extract_claim(source_package, opts \\ []), to: KnowledgeLifecycle
+  defdelegate pending_claims(opts \\ []), to: ClaimReview, as: :pending
+  defdelegate get_claim(claim_id, opts \\ []), to: ClaimReview, as: :get
+  defdelegate reject_claim(claim_id, opts \\ []), to: ClaimReview, as: :reject
+  defdelegate promote_claim(claim_id, opts \\ []), to: ClaimReview, as: :promote
   defdelegate promote_claim_to_fact(claim, opts \\ []), to: KnowledgeLifecycle
   defdelegate build_memory_object(fact, opts \\ []), to: KnowledgeLifecycle
   defdelegate retrieve(query, opts \\ []), to: RetrievalCoordinator
