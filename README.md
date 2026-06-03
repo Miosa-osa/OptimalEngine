@@ -46,7 +46,7 @@ Built and verified now:
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
-| Governed retrieval | Retrieval returns Context Packages, not loose chunks, and filters by partition/security scope before package assembly. |
+| Governed retrieval | Retrieval returns Context Packages, not loose chunks, and filters Facts, Memory Objects, and asset extraction projections by partition/security scope before package assembly. |
 | Active Memory Pools | Task-scoped working memory can load Context Packages and publish observations as pending Claims. |
 | Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
 | Connector governance | Connector sync can run through the governed tool-call surface, blocking unauthorized runs before connector execution and recording both connector-run and tool-call audit rows when allowed. |
@@ -67,6 +67,9 @@ mix test test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_
 
 mix test test/pipeline/multimodal_adapter_runner_test.exs test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs test/pipeline/indexer_asset_store_test.exs --seed 0
 21 tests, 0 failures
+
+mix test test/memory_core/spine_test.exs test/pipeline/multimodal_adapter_runner_test.exs test/memory_core/asset_store_test.exs --seed 0
+28 tests, 0 failures
 
 mix optimal.reality_check
 115 probes, 115 ok, 0 warn, 0 fail
@@ -339,6 +342,9 @@ table row for transcripts, OCR spans, visual observations, or embedding refs.
 `MemoryCore.claim_from_asset_extraction/2` then converts text-bearing extraction
 rows into derived Source Packages and pending Claims. Reference-only embedding
 rows remain searchable/retrievable projection records and are not claimable text.
+Retrieval now includes governed asset extraction projections in Context Packages,
+so transcripts, OCR spans, visual observations, and embedding refs can be returned
+as source-linked context without being promoted to Facts.
 
 ## Human And Agent Usage
 
@@ -448,20 +454,17 @@ The next build slices are:
 1. Add adapter-specific command builders and output parsers around
    `MemoryCore.run_asset_adapter/3`, starting with Docling/Marker document
    intelligence and FFmpeg/Whisper media extraction.
-2. Feed typed extraction projections into retrieval/context assembly so
-   transcripts, OCR spans, visual observations, and embedding refs can be recalled
-   through governed Context Packages.
-3. Make connector and API upload paths consistently use the governed multimodal
+2. Make connector and API upload paths consistently use the governed multimodal
    pipeline.
-4. Add review queue UI/API ergonomics for Claims and Fact promotion.
-5. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
+3. Add review queue UI/API ergonomics for Claims and Fact promotion.
+4. Expand Retrieval Coordinator beyond simple fact/memory/extraction lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
-6. Add review/supersession policies for stale, contradicted, and replaced
+5. Add review/supersession policies for stale, contradicted, and replaced
    Facts/Memory Objects.
-7. Make connector governance the default runtime path for connector sync.
-8. Add benchmark/evaluation records so large-scale recall tests are stored and
+6. Make connector governance the default runtime path for connector sync.
+7. Add benchmark/evaluation records so large-scale recall tests are stored and
    inspectable.
-9. Add recovery/rebuild services for summaries, indexes, workflows, and derived
+8. Add recovery/rebuild services for summaries, indexes, workflows, and derived
    projections.
 
 The system is meant to stay complex where complexity carries meaning: evidence,

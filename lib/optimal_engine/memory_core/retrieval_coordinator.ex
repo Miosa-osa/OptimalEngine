@@ -3,8 +3,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   First governed recall slice for Memory Core.
 
   The coordinator returns a Context Package instead of loose search chunks. This
-  first implementation is intentionally narrow: it reads accepted Facts and
-  current Memory Objects in a workspace, applies basic partition/security
+  first implementation reads accepted Facts, current Memory Objects, and governed
+  asset extraction projections in a workspace, applies basic partition/security
   filtering, writes a `context_packages` row, and returns the structured package.
   """
 
@@ -29,7 +29,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     request_intent = string_opt(opts, :request_intent, classify_intent(query))
 
     with {:ok, facts} <- fetch_facts(workspace_id, query, limit * 2),
-         {:ok, memories} <- fetch_memory_objects(workspace_id, query, limit * 2) do
+         {:ok, memories} <- fetch_memory_objects(workspace_id, query, limit * 2),
+         {:ok, asset_extractions} <- fetch_asset_extractions(workspace_id, query, limit * 2) do
       authorized_facts =
         facts
         |> Enum.filter(&authorized?(&1, allowed_partitions, allowed_security_labels))
@@ -40,20 +41,31 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         |> Enum.filter(&authorized?(&1, allowed_partitions, allowed_security_labels))
         |> Enum.take(limit)
 
+      authorized_asset_extractions =
+        asset_extractions
+        |> Enum.filter(&authorized?(&1, allowed_partitions, allowed_security_labels))
+        |> Enum.take(limit)
+
       redacted =
         length(facts) - length(authorized_facts) +
-          (length(memories) - length(authorized_memories))
+          (length(memories) - length(authorized_memories)) +
+          (length(asset_extractions) - length(authorized_asset_extractions))
 
       fact_links = Enum.map(authorized_facts, &ref("fact", &1.id))
       memory_links = Enum.map(authorized_memories, &ref("memory_object", &1.id))
 
+      asset_extraction_links =
+        Enum.map(authorized_asset_extractions, &ref("asset_extraction", &1.id))
+
+      returned_objects = authorized_facts ++ authorized_memories ++ authorized_asset_extractions
+
       source_links =
-        collect_unique_links(authorized_facts ++ authorized_memories, :source_package_links)
+        collect_unique_links(returned_objects, :source_package_links)
 
       evidence_links =
-        collect_unique_links(authorized_facts ++ authorized_memories, :evidence_links)
+        collect_unique_links(returned_objects, :evidence_links)
 
-      returned_links = fact_links ++ memory_links
+      returned_links = fact_links ++ memory_links ++ asset_extraction_links
 
       context_package = %{
         id:
@@ -85,20 +97,24 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
           path: "memory_core_fact_memory_lookup",
           filters: %{
             workspace_id: workspace_id,
-            lifecycle: ["facts.accepted", "memory_objects.current"],
+            lifecycle: [
+              "facts.accepted",
+              "memory_objects.current",
+              "asset_extractions.projected"
+            ],
             time_mode: time_mode
           },
           limit: limit
         },
-        package_confidence_summary:
-          summarize_score(authorized_facts ++ authorized_memories, :confidence),
-        package_precision_summary:
-          summarize_score(authorized_facts ++ authorized_memories, :precision),
+        package_confidence_summary: summarize_score(returned_objects, :confidence),
+        package_precision_summary: summarize_score(returned_objects, :precision),
         filtered_object_summary: %{
           candidate_facts: length(facts),
           returned_facts: length(authorized_facts),
           candidate_memory_objects: length(memories),
           returned_memory_objects: length(authorized_memories),
+          candidate_asset_extractions: length(asset_extractions),
+          returned_asset_extractions: length(authorized_asset_extractions),
           redacted_or_filtered_objects: redacted
         },
         returned_object_links: returned_links,
@@ -113,11 +129,12 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         refresh_state: "fresh",
         refresh_time: now,
         transaction_time_start: now,
-        security_labels: merge_lists(authorized_facts ++ authorized_memories, :security_labels),
-        partition_ids: merge_lists(authorized_facts ++ authorized_memories, :partition_ids),
+        security_labels: merge_lists(returned_objects, :security_labels),
+        partition_ids: merge_lists(returned_objects, :partition_ids),
         metadata: %{
           query: query,
-          answer_surface: "context_package"
+          answer_surface: "context_package",
+          asset_extraction_links: asset_extraction_links
         }
       }
 
@@ -125,7 +142,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         {:ok,
          Map.merge(context_package, %{
            facts: authorized_facts,
-           memory_objects: authorized_memories
+           memory_objects: authorized_memories,
+           asset_extractions: authorized_asset_extractions
          })}
       end
     end
@@ -185,6 +203,29 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
     with {:ok, rows} <- BaseStore.raw_query(sql, [workspace_id, pattern, query, limit]) do
       {:ok, Enum.map(rows, &memory_from_row/1)}
+    end
+  end
+
+  defp fetch_asset_extractions(workspace_id, query, limit) do
+    pattern = "%#{query}%"
+
+    sql = """
+    SELECT id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
+           extraction_type, modality, content_text, content_ref, content_hash,
+           confidence, precision, security_labels, partition_ids, metadata,
+           derivation_ledger_id, created_by, created_at
+    FROM asset_extractions
+    WHERE workspace_id = ?1
+      AND (
+        content_text LIKE ?2 OR content_ref LIKE ?2 OR extraction_type LIKE ?2
+        OR modality LIKE ?2 OR ?3 = ''
+      )
+    ORDER BY confidence DESC, created_at DESC
+    LIMIT ?4
+    """
+
+    with {:ok, rows} <- BaseStore.raw_query(sql, [workspace_id, pattern, query, limit]) do
+      {:ok, Enum.map(rows, &asset_extraction_from_row/1)}
     end
   end
 
@@ -290,6 +331,70 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     }
   end
 
+  defp asset_extraction_from_row([
+         id,
+         tenant_id,
+         workspace_id,
+         asset_id,
+         source_package_id,
+         adapter_run_id,
+         extraction_type,
+         modality,
+         content_text,
+         content_ref,
+         content_hash,
+         confidence,
+         precision,
+         security_labels,
+         partition_ids,
+         metadata,
+         derivation_ledger_id,
+         created_by,
+         created_at
+       ]) do
+    source_links =
+      if is_binary(source_package_id) do
+        [ref("source_package", source_package_id)]
+      else
+        []
+      end
+
+    evidence_links =
+      [
+        ref("asset", asset_id),
+        ref("asset_adapter_run", adapter_run_id),
+        ref("asset_extraction", id)
+        | source_links
+      ]
+      |> Enum.reject(&(is_nil(&1.id) or &1.id == ""))
+
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      text: if(content_text == "", do: content_ref, else: content_text),
+      type: extraction_type,
+      asset_id: asset_id,
+      source_package_id: source_package_id,
+      adapter_run_id: adapter_run_id,
+      extraction_type: extraction_type,
+      modality: modality,
+      content_text: content_text,
+      content_ref: content_ref,
+      content_hash: content_hash,
+      source_package_links: source_links,
+      evidence_links: evidence_links,
+      confidence: confidence,
+      precision: precision,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      metadata: decode_map(metadata),
+      derivation_ledger_id: derivation_ledger_id,
+      created_by: created_by,
+      created_at: created_at
+    }
+  end
+
   defp authorized?(object, allowed_partitions, allowed_security_labels) do
     partition_allowed? =
       allowed_partitions == [] or
@@ -319,7 +424,11 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   defp summarize_score([], _field), do: %{count: 0, min: nil, max: nil, average: nil}
 
   defp summarize_score(objects, field) do
-    values = Enum.map(objects, &Map.get(&1, field, 0.0))
+    values =
+      objects
+      |> Enum.map(&(Map.get(&1, field) || 0.0))
+      |> Enum.map(&(&1 + 0.0))
+
     count = length(values)
 
     %{
@@ -346,6 +455,19 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
   defp decode_list(value) when is_list(value), do: value
   defp decode_list(value), do: [value]
+
+  defp decode_map(nil), do: %{}
+  defp decode_map(""), do: %{}
+
+  defp decode_map(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, map} when is_map(map) -> map
+      _ -> %{}
+    end
+  end
+
+  defp decode_map(value) when is_map(value), do: value
+  defp decode_map(_value), do: %{}
 
   defp link_type?(%{type: type}, expected), do: type == expected
   defp link_type?(%{"type" => type}, expected), do: type == expected

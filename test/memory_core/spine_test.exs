@@ -8,6 +8,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
   alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.MemoryCore.WorkflowSkill
+  alias OptimalEngine.MemoryCore
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.Store
 
@@ -308,6 +309,63 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
                "SELECT COUNT(*) FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
                [workspace_id, package.id]
              )
+  end
+
+  test "retrieval coordinator returns governed asset extraction projections", %{tmp_dir: tmp_dir} do
+    workspace_id = "memory-core-retrieval-extraction-test-#{System.unique_integer([:positive])}"
+    source_path = Path.join(tmp_dir, "retrieval-audio.wav")
+    File.write!(source_path, "RIFF....WAVEretrieval-extraction-test")
+
+    assert {:ok, %{asset: asset}} =
+             MemoryCore.store_asset_file(source_path,
+               workspace_id: workspace_id,
+               actor_id: "user:retrieval",
+               security_labels: ["internal"],
+               partition_ids: ["project-launch"]
+             )
+
+    assert {:ok, run} =
+             MemoryCore.run_asset_adapter(asset.id, :openai_whisper,
+               workspace_id: workspace_id,
+               actor_id: "user:retrieval",
+               command: "printf",
+               args: ["Launch transcript confirms approval"],
+               adapter_role: :audio_transcription,
+               confidence: 0.81,
+               precision: 0.76
+             )
+
+    assert run.status == "completed"
+
+    assert {:ok, package} =
+             RetrievalCoordinator.retrieve("Launch transcript",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"]
+             )
+
+    assert [%{type: "asset_extraction", id: extraction_id}] =
+             Enum.filter(package.returned_object_links, &(&1.type == "asset_extraction"))
+
+    assert package.filtered_object_summary.candidate_asset_extractions == 1
+    assert package.filtered_object_summary.returned_asset_extractions == 1
+    assert [%{id: ^extraction_id, extraction_type: "transcript"}] = package.asset_extractions
+    assert package.package_confidence_summary.count == 1
+    assert %{type: "asset", id: asset.id} in package.evidence_links
+
+    assert {:ok, restricted_package} =
+             RetrievalCoordinator.retrieve("Launch transcript",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["other-project"],
+               allowed_security_labels: ["internal"]
+             )
+
+    assert restricted_package.asset_extractions == []
+    assert restricted_package.filtered_object_summary.candidate_asset_extractions == 1
+    assert restricted_package.filtered_object_summary.returned_asset_extractions == 0
+    assert restricted_package.filtered_object_summary.redacted_or_filtered_objects == 1
   end
 
   test "retrieval coordinator excludes stale facts and memory objects before packaging" do
