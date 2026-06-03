@@ -138,12 +138,14 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     SELECT id, tenant_id, workspace_id, fact_text, fact_type, subject_anchor,
            action_class, object_anchor, accepted_claim_ids, supporting_evidence_links,
            aggregate_confidence, aggregate_precision, access_policy_id,
-           security_labels, partition_ids, lifecycle_state, valid_time_start,
+           security_labels, partition_ids, lifecycle_state, contradiction_status, valid_time_start,
            valid_time_end, stale_after
     FROM facts
     WHERE workspace_id = ?1
       AND lifecycle_state = 'accepted'
-      AND (valid_time_end IS NULL OR valid_time_end >= datetime('now'))
+      AND contradiction_status = 'none'
+      AND (valid_time_end IS NULL OR datetime(valid_time_end) >= datetime('now'))
+      AND (stale_after IS NULL OR datetime(stale_after) >= datetime('now'))
       AND (
         fact_text LIKE ?2 OR subject_anchor LIKE ?2 OR action_class LIKE ?2
         OR object_anchor LIKE ?2 OR ?3 = ''
@@ -165,12 +167,14 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
            action_class, fact_links, claim_links, source_package_links, evidence_links,
            aggregate_confidence, aggregate_precision, access_policy_id,
            security_labels, partition_ids, lifecycle_state, staleness_status,
-           valid_time_start, valid_time_end, stale_after
+           supersession_status, valid_time_start, valid_time_end, stale_after
     FROM memory_objects
     WHERE workspace_id = ?1
       AND lifecycle_state = 'current'
       AND staleness_status = 'current'
-      AND (valid_time_end IS NULL OR valid_time_end >= datetime('now'))
+      AND supersession_status = 'none'
+      AND (valid_time_end IS NULL OR datetime(valid_time_end) >= datetime('now'))
+      AND (stale_after IS NULL OR datetime(stale_after) >= datetime('now'))
       AND (
         summary LIKE ?2 OR subject_anchor LIKE ?2 OR action_class LIKE ?2
         OR ?3 = ''
@@ -201,6 +205,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
          security_labels,
          partition_ids,
          lifecycle_state,
+         contradiction_status,
          valid_time_start,
          valid_time_end,
          stale_after
@@ -228,6 +233,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       security_labels: decode_list(security_labels),
       partition_ids: decode_list(partition_ids),
       lifecycle_state: lifecycle_state,
+      contradiction_status: contradiction_status,
       valid_time_start: valid_time_start,
       valid_time_end: valid_time_end,
       stale_after: stale_after
@@ -253,6 +259,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
          partition_ids,
          lifecycle_state,
          staleness_status,
+         supersession_status,
          valid_time_start,
          valid_time_end,
          stale_after
@@ -276,6 +283,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       partition_ids: decode_list(partition_ids),
       lifecycle_state: lifecycle_state,
       staleness_status: staleness_status,
+      supersession_status: supersession_status,
       valid_time_start: valid_time_start,
       valid_time_end: valid_time_end,
       stale_after: stale_after

@@ -310,6 +310,55 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              )
   end
 
+  test "retrieval coordinator excludes stale facts and memory objects before packaging" do
+    workspace_id = "memory-core-retrieval-stale-test-#{System.unique_integer([:positive])}"
+    stale_after = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
+
+    {:ok, _fact, _memory} =
+      create_accepted_memory(workspace_id,
+        partition_ids: ["project-launch"],
+        fact_opts: [stale_after: stale_after],
+        memory_opts: [stale_after: stale_after]
+      )
+
+    assert {:ok, package} =
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"]
+             )
+
+    assert package.fact_links == []
+    assert package.memory_links == []
+    assert package.filtered_object_summary.candidate_facts == 0
+    assert package.filtered_object_summary.candidate_memory_objects == 0
+  end
+
+  test "retrieval coordinator excludes superseded memory objects" do
+    workspace_id = "memory-core-retrieval-superseded-test-#{System.unique_integer([:positive])}"
+
+    {:ok, fact, memory} =
+      create_accepted_memory(workspace_id,
+        partition_ids: ["project-launch"],
+        memory_opts: [supersession_status: "superseded"]
+      )
+
+    assert {:ok, package} =
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"]
+             )
+
+    assert package.fact_links == [%{type: "fact", id: fact.id}]
+    assert package.memory_links == []
+    assert memory.supersession_status == "superseded"
+    assert package.filtered_object_summary.candidate_facts == 1
+    assert package.filtered_object_summary.candidate_memory_objects == 0
+  end
+
   test "active memory pool loads context and publishes observations as pending claims" do
     workspace_id = "memory-core-pool-test-#{System.unique_integer([:positive])}"
 
@@ -624,6 +673,8 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
 
   defp create_accepted_memory(workspace_id, opts) do
     partition_ids = Keyword.fetch!(opts, :partition_ids)
+    fact_opts = Keyword.get(opts, :fact_opts, [])
+    memory_opts = Keyword.get(opts, :memory_opts, [])
 
     source =
       SourcePackage.from_text("The project launch was approved in the planning meeting.",
@@ -645,18 +696,24 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              actor_id: "agent:test"
            ),
          {:ok, fact} <-
-           KnowledgeLifecycle.promote_claim_to_fact(claim,
-             fact_text: "The project launch was approved in the planning meeting.",
-             verifier_id: "human:reviewer",
-             aggregate_confidence: 0.9,
-             aggregate_precision: 0.86
+           KnowledgeLifecycle.promote_claim_to_fact(
+             claim,
+             [
+               fact_text: "The project launch was approved in the planning meeting.",
+               verifier_id: "human:reviewer",
+               aggregate_confidence: 0.9,
+               aggregate_precision: 0.86
+             ] ++ fact_opts
            ),
          {:ok, memory} <-
-           KnowledgeLifecycle.build_memory_object(fact,
-             summary:
-               "The project launch approval is an accepted memory backed by the planning meeting source.",
-             memory_type: "decision",
-             salience: 0.8
+           KnowledgeLifecycle.build_memory_object(
+             fact,
+             [
+               summary:
+                 "The project launch approval is an accepted memory backed by the planning meeting source.",
+               memory_type: "decision",
+               salience: 0.8
+             ] ++ memory_opts
            ) do
       {:ok, fact, memory}
     end
