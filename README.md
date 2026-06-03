@@ -333,6 +333,10 @@ default to OCR-span projections, audio transcription adapters default to
 transcript projections, visual reasoning adapters default to visual observation
 projections, and multimodal embedding adapters default to embedding-ref
 projections when a reference is available.
+`MultimodalExtractionParser` sits between the completed adapter run and the
+Memory Core projection write. It can split structured adapter output into
+multiple governed rows, including segment-level transcript rows and page-level
+OCR span rows, while preserving the adapter run as the evidence source.
 `MemoryCore.claim_from_asset_adapter_run/2` is the review bridge: it turns a
 completed adapter output into a derived Source Package plus pending Claim without
 promoting that output to accepted truth.
@@ -451,9 +455,9 @@ raw SQL from feature modules into governed tables
 
 The next build slices are:
 
-1. Add adapter-specific command builders and output parsers around
-   `MemoryCore.run_asset_adapter/3`, starting with Docling/Marker document
-   intelligence and FFmpeg/Whisper media extraction.
+1. Expand adapter-specific command builders and output parsers around
+   `MemoryCore.run_asset_adapter/3`, starting with richer Docling/Marker page,
+   table, and element schemas plus FFmpeg/Whisper media extraction.
 2. Make connector and API upload paths consistently use the governed multimodal
    pipeline.
 3. Add review queue UI/API ergonomics for Claims and Fact promotion.
