@@ -35,6 +35,8 @@ Built and verified now:
 | --- | --- |
 | Workspace topology | Workspaces, Projects-as-Nodes, typed Nodes, Node Types, Node relationships, membership, and projection records. |
 | Source evidence | Raw text becomes Source Packages with hash, workspace scope, trust label, security labels, partitions, and metadata. |
+| Governed assets | Raw multimodal files can be preserved as Source Packages, workspace-scoped asset rows, and derivation ledger entries. |
+| Pipeline asset governance | `Pipeline.run/2` preserves parser-produced assets through Memory Core before enrichment, decomposition, and embedding. |
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
@@ -50,6 +52,9 @@ Current verification:
 ```text
 mix test test/memory_core/spine_test.exs test/workspace_export_test.exs test/topology/workspace_topology_test.exs test/topology/node_member_test.exs test/topology/node_test.exs test/topology/workspace_surface_spine_test.exs test/signal/dispatcher_test.exs test/connectors/runner_test.exs --seed 0
 64 tests, 0 failures
+
+mix test test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs --seed 0
+4 tests, 0 failures
 
 mix optimal.reality_check
 108 probes, 108 ok, 0 warn, 0 fail
@@ -220,6 +225,7 @@ Table ownership:
 | --- | --- |
 | `workspaces`, `nodes`, `node_types`, `node_relationships`, `node_members` | Workspace / Topology |
 | `contexts`, search projections, signal metadata | Signal/Search compatibility |
+| `assets`, chunk asset refs, parser asset paths | Memory Core / Pipeline projections |
 | `source_packages`, `claims`, `facts`, `memory_objects`, `relationship_edges`, `derivation_ledger` | Memory Core |
 | `context_packages`, retrieval audit | Retrieval / Context |
 | `active_memory_pools`, pool observations | Active Collaboration |
@@ -229,9 +235,11 @@ Table ownership:
 
 ## Multimodality
 
-The engine keeps a modality-aware data architecture. Text is the current most
-complete path, and the architecture supports additional input types through
-processors and projections.
+The engine keeps a modality-aware data architecture. Text is still the most
+complete truth-promotion path, but raw multimodal evidence now has a governed
+storage path. Parser-produced assets can be copied into workspace asset storage,
+linked to Source Packages, written into `assets`, and referenced by downstream
+chunks through stable content hashes.
 
 Canonical input families:
 
@@ -257,6 +265,18 @@ external source or local edit
   -> Source Package
   -> Signal classification
   -> Memory Core / Retrieval / Workflow as appropriate
+```
+
+For file-backed multimodal inputs, the current pipeline path is:
+
+```text
+file
+  -> Parser asset
+  -> MemoryCore.AssetStore
+  -> Source Package + asset row + derivation ledger
+  -> governed ParsedDoc
+  -> Decomposer chunk with asset_ref
+  -> Embedder asset_paths lookup
 ```
 
 ## Human And Agent Usage
@@ -353,17 +373,18 @@ raw SQL from feature modules into governed tables
 
 The next build slices are:
 
-1. Harden Workspace/Topology as the first gate for every project, node, member,
-   relationship, and projection edit.
-2. Expand Source Package support for richer multimodal source metadata.
-3. Add review queues for Claims and Fact promotion.
-4. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
+1. Make connector, indexer, and API upload paths consistently use the governed
+   multimodal pipeline.
+2. Add review queue UI/API ergonomics for Claims and Fact promotion.
+3. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
-5. Build workflow traces and Skill Packages from repeated Active Pool work.
-6. Expand governed tool/model execution from the first dispatcher adapter into
-   connector-wide and model-provider-wide runtime paths.
-7. Add benchmark/evaluation records so large-scale recall tests are stored and
+4. Add review/supersession policies for stale, contradicted, and replaced
+   Facts/Memory Objects.
+5. Make connector governance the default runtime path for connector sync.
+6. Add benchmark/evaluation records so large-scale recall tests are stored and
    inspectable.
+7. Add recovery/rebuild services for summaries, indexes, workflows, and derived
+   projections.
 
 The system is meant to stay complex where complexity carries meaning: evidence,
 ownership, validity, permissions, workflow, and audit. It should stay simple where
