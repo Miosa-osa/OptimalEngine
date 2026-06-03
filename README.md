@@ -39,6 +39,7 @@ Built and verified now:
 | Pipeline asset governance | `Pipeline.run/2` preserves parser-produced assets through Memory Core before enrichment, decomposition, and embedding. |
 | Indexer asset governance | Binary indexing can pass workspace scope into the governed pipeline so indexed assets do not fall back to the default workspace. |
 | Multimodal tool registry | Open-source adapter targets are cataloged for document intelligence, OCR, audio, video, visual reasoning, visual document retrieval, and cross-modal embeddings. |
+| Multimodal adapter runs | Adapter attempts and outputs can be recorded as governed derived artifacts linked to assets, Source Packages, scopes, hashes, and derivation ledger entries. |
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
@@ -59,10 +60,10 @@ mix test test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_stor
 5 tests, 0 failures
 
 mix test test/pipeline/multimodal_tool_registry_test.exs test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs test/pipeline/indexer_asset_store_test.exs --seed 0
-9 tests, 0 failures
+10 tests, 0 failures
 
 mix optimal.reality_check
-108 probes, 108 ok, 0 warn, 0 fail
+110 probes, 110 ok, 0 warn, 0 fail
 ```
 
 The full legacy suite still contains older optional/backend warnings. The focused
@@ -230,7 +231,7 @@ Table ownership:
 | --- | --- |
 | `workspaces`, `nodes`, `node_types`, `node_relationships`, `node_members` | Workspace / Topology |
 | `contexts`, search projections, signal metadata | Signal/Search compatibility |
-| `assets`, chunk asset refs, parser asset paths | Memory Core / Pipeline projections |
+| `assets`, `asset_adapter_runs`, chunk asset refs, parser asset paths | Memory Core / Pipeline projections |
 | `source_packages`, `claims`, `facts`, `memory_objects`, `relationship_edges`, `derivation_ledger` | Memory Core |
 | `context_packages`, retrieval audit | Retrieval / Context |
 | `active_memory_pools`, pool observations | Active Collaboration |
@@ -279,6 +280,7 @@ file
   -> Parser asset
   -> MemoryCore.AssetStore
   -> Source Package + asset row + derivation ledger
+  -> optional adapter run records for OCR/transcripts/visual outputs
   -> governed ParsedDoc
   -> Decomposer chunk with asset_ref
   -> Embedder asset_paths lookup
@@ -303,6 +305,9 @@ The current recommended stack is:
 The registry is a capability contract. It does not imply every heavyweight model
 is installed by default; deployments choose which local adapters to install, and
 missing tools must degrade gracefully while raw evidence is still preserved.
+When an adapter does run, `asset_adapter_runs` records the adapter, role,
+modality, status, input hash, output hash, output text/reference, model metadata,
+security scope, partitions, and derivation ledger link.
 
 ## Human And Agent Usage
 

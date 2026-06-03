@@ -80,7 +80,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_032_memory_core_spine(),
       migration_033_workspace_topology_surface_spine(),
       migration_034_tool_model_governance_runs(),
-      migration_035_asset_governance()
+      migration_035_asset_governance(),
+      migration_036_asset_adapter_runs()
     ]
   end
 
@@ -2054,6 +2055,49 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_assets_workspace_hash ON assets(workspace_id, content_hash)"},
        {"idx_assets_source_package",
         "CREATE INDEX IF NOT EXISTS idx_assets_source_package ON assets(source_package_id)"}
+     ]}
+  end
+
+  defp migration_036_asset_adapter_runs do
+    {36, "asset adapter run records",
+     [
+       {"asset_adapter_runs",
+        """
+        CREATE TABLE IF NOT EXISTS asset_adapter_runs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_id TEXT NOT NULL,
+          adapter_role TEXT NOT NULL,
+          modality TEXT NOT NULL,
+          status TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          completed_at TEXT,
+          input_hash TEXT,
+          output_hash TEXT,
+          output_text TEXT NOT NULL DEFAULT '',
+          output_ref TEXT,
+          model_id TEXT,
+          model_version TEXT,
+          confidence REAL,
+          precision REAL,
+          error_reason TEXT,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_asset_adapter_runs_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_adapter_runs_asset ON asset_adapter_runs(workspace_id, asset_id)"},
+       {"idx_asset_adapter_runs_adapter",
+        "CREATE INDEX IF NOT EXISTS idx_asset_adapter_runs_adapter ON asset_adapter_runs(workspace_id, adapter_id, status)"},
+       {"idx_asset_adapter_runs_source_package",
+        "CREATE INDEX IF NOT EXISTS idx_asset_adapter_runs_source_package ON asset_adapter_runs(source_package_id)"}
      ]}
   end
 

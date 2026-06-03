@@ -25,6 +25,12 @@ defmodule OptimalEngine.MemoryCore do
   defdelegate store_asset(asset, opts \\ []), to: AssetStore, as: :store_asset
   defdelegate get_asset(asset_id, opts \\ []), to: AssetStore, as: :get
 
+  defdelegate record_asset_adapter_run(asset_id, opts \\ []),
+    to: AssetStore,
+    as: :record_adapter_run
+
+  defdelegate list_asset_adapter_runs(asset_id, opts \\ []), to: AssetStore, as: :list_adapter_runs
+
   defdelegate extract_claim(source_package, opts \\ []), to: KnowledgeLifecycle
   defdelegate pending_claims(opts \\ []), to: ClaimReview, as: :pending
   defdelegate get_claim(claim_id, opts \\ []), to: ClaimReview, as: :get
