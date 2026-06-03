@@ -92,9 +92,8 @@ defmodule OptimalEngine.Pipeline.Embedder do
   # Image: prefer asset bytes (embed the picture); fall back to OCR text if
   # the chunk has text but no readable asset path.
   defp dispatch(%Chunk{modality: :image, asset_ref: ref} = chunk, opts) when is_binary(ref) do
-    # In Phase 5 the asset path convention is inherited from the Parser's
-    # asset.path. The chunk carries `asset_ref` = hash; the lookup lives in
-    # opts[:asset_paths][ref] for now, a future AssetStore will own this.
+    # The chunk carries `asset_ref` = content hash. Pipeline.run/2 can preserve
+    # parser assets through MemoryCore.AssetStore before building this lookup.
     asset_path = get_in(opts, [:asset_paths, ref])
 
     cond do

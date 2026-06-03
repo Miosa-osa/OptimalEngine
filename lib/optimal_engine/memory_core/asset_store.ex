@@ -16,7 +16,16 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
   @spec store_file(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def store_file(path, opts \\ []) when is_binary(path) do
     with {:ok, asset} <- Asset.from_path(path, opts),
-         {:ok, storage_path} <- copy_asset(asset, opts),
+         {:ok, result} <- store_asset(asset, opts) do
+      {:ok, result}
+    end
+  end
+
+  @spec store_asset(Asset.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def store_asset(asset, opts \\ [])
+
+  def store_asset(%Asset{path: path} = asset, opts) when is_binary(path) do
+    with {:ok, storage_path} <- copy_asset(asset, opts),
          {:ok, source_package} <- record_source_package(asset, storage_path, opts),
          asset_id = asset_id(asset, source_package),
          :ok <- upsert_asset(asset_id, asset, storage_path, source_package, opts),
@@ -25,6 +34,8 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
       {:ok, %{asset: stored_asset, source_package: source_package}}
     end
   end
+
+  def store_asset(%Asset{} = _asset, _opts), do: {:error, :asset_path_required}
 
   @spec get(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found | term()}
   def get(asset_id, opts \\ []) when is_binary(asset_id) do
