@@ -186,6 +186,71 @@ defmodule OptimalEngine.API.RouterTest do
     end
   end
 
+  describe "POST /api/assets" do
+    test "preserves uploaded bytes through Memory Core and optionally runs an adapter" do
+      suffix = System.unique_integer([:positive])
+      tmp_dir = Path.join(System.tmp_dir!(), "api_asset_upload_#{suffix}")
+      original_root = Application.get_env(:optimal_engine, :root_path)
+      Application.put_env(:optimal_engine, :root_path, tmp_dir)
+
+      on_exit(fn ->
+        if original_root do
+          Application.put_env(:optimal_engine, :root_path, original_root)
+        else
+          Application.delete_env(:optimal_engine, :root_path)
+        end
+
+        File.rm_rf(tmp_dir)
+      end)
+
+      workspace_id = "api-asset-upload-#{suffix}"
+
+      transcript_json =
+        Jason.encode!(%{segments: [%{start: 0.0, end: 1.0, text: "API upload segment"}]})
+
+      conn =
+        request(:post, "/api/assets", %{
+          "workspace" => workspace_id,
+          "filename" => "meeting.wav",
+          "content_base64" => Base.encode64("RIFF....WAVE api upload"),
+          "security_labels" => ["internal"],
+          "partition_ids" => ["project-api"],
+          "adapter_id" => "openai_whisper",
+          "adapter_role" => "audio_transcription",
+          "command" => "printf",
+          "args" => [transcript_json],
+          "confidence" => 0.83,
+          "precision" => 0.74
+        })
+
+      assert conn.status == 201
+      assert {:ok, body} = Jason.decode(conn.resp_body)
+
+      assert body["asset"]["workspace_id"] == workspace_id
+      assert body["asset"]["modality"] == "audio"
+      assert body["asset"]["source_package_id"] == body["source_package"]["id"]
+      assert body["source_package"]["source_type"] == "file"
+      assert body["adapter_run"]["status"] == "completed"
+      assert body["adapter_run"]["adapter_id"] == "openai_whisper"
+
+      assert [%{"extraction_type" => "transcript", "content_text" => "API upload segment"}] =
+               body["asset_extractions"]
+
+      assert {:ok, stored_asset} =
+               OptimalEngine.MemoryCore.get_asset(body["asset"]["id"], workspace_id: workspace_id)
+
+      assert File.exists?(stored_asset.storage_path)
+    end
+
+    test "rejects uploads without a file source" do
+      conn = request(:post, "/api/assets", %{"workspace" => "api-missing-upload"})
+      assert conn.status == 400
+
+      assert {:ok, %{"error" => "path or content_base64 is required"}} =
+               Jason.decode(conn.resp_body)
+    end
+  end
+
   describe "GET /api/grep" do
     test "returns 400 when q is missing" do
       conn = request(:get, "/api/grep")

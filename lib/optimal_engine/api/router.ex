@@ -1188,6 +1188,30 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # POST /api/assets — preserve a multimodal file through the governed asset path.
+  #
+  # JSON body supports either:
+  #   {"path": "/local/file.pdf", "workspace": "default"}
+  #   {"filename": "call.wav", "content_base64": "...", "workspace": "default"}
+  #
+  # Optional adapter execution:
+  #   {"adapter_id": "openai_whisper", "command": "printf", "args": ["..."]}
+  post "/api/assets" do
+    body = conn.body_params || %{}
+
+    case asset_upload_source_path(body) do
+      {:ok, source_path, cleanup} ->
+        try do
+          handle_asset_upload(conn, body, source_path)
+        after
+          cleanup.()
+        end
+
+      {:error, reason} ->
+        send_resp(conn, 400, Jason.encode!(%{error: asset_upload_error(reason)}))
+    end
+  end
+
   # GET /api/memory/:id/versions — version chain for a memory (BEFORE bare /:id).
   # Returns: {memory_id, root_id, versions: [...]} in chronological order.
   get "/api/memory/:id/versions" do
@@ -1750,6 +1774,178 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  defp asset_upload_source_path(body) do
+    path = Map.get(body, "path")
+    content_base64 = Map.get(body, "content_base64")
+
+    cond do
+      is_binary(path) and String.trim(path) != "" ->
+        if File.exists?(path) do
+          {:ok, path, fn -> :ok end}
+        else
+          {:error, :path_not_found}
+        end
+
+      is_binary(content_base64) and String.trim(content_base64) != "" ->
+        case Base.decode64(content_base64) do
+          {:ok, bytes} ->
+            with {:ok, path} <-
+                   write_upload_tempfile(bytes, Map.get(body, "filename", "upload.bin")) do
+              {:ok, path, fn -> File.rm(path) end}
+            end
+
+          :error ->
+            {:error, :invalid_base64}
+        end
+
+      true ->
+        {:error, :asset_source_required}
+    end
+  end
+
+  defp write_upload_tempfile(bytes, filename) when is_binary(bytes) do
+    safe_name =
+      filename
+      |> to_string()
+      |> Path.basename()
+      |> String.replace(~r/[^A-Za-z0-9._-]/, "_")
+      |> case do
+        "" -> "upload.bin"
+        value -> value
+      end
+
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "optimal-api-asset-#{System.unique_integer([:positive])}-#{safe_name}"
+      )
+
+    case File.write(path, bytes) do
+      :ok -> {:ok, path}
+      {:error, reason} -> {:error, {:write_failed, reason}}
+    end
+  end
+
+  defp handle_asset_upload(conn, body, source_path) do
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+    tenant_id = Map.get(body, "tenant", Map.get(body, "tenant_id", "default"))
+    actor_id = Map.get(body, "actor_id", "api:asset-upload")
+
+    store_opts =
+      [
+        tenant_id: tenant_id,
+        workspace_id: workspace_id,
+        actor_id: actor_id,
+        content_type: Map.get(body, "content_type"),
+        modality: parse_atom(Map.get(body, "modality"), nil),
+        trust_label: Map.get(body, "trust_label", "unreviewed"),
+        retention_class: Map.get(body, "retention_class", "standard"),
+        access_policy_id: Map.get(body, "access_policy_id"),
+        security_labels: string_list_param(body, "security_labels"),
+        partition_ids: string_list_param(body, "partition_ids"),
+        metadata:
+          Map.merge(coerce_metadata(Map.get(body, "metadata")), %{
+            "api_upload" => true,
+            "filename" => Map.get(body, "filename") || Path.basename(source_path)
+          })
+      ]
+      |> reject_nil_keyword()
+
+    with {:ok, %{asset: asset, source_package: source_package}} <-
+           MemoryCore.store_asset_file(source_path, store_opts),
+         {:ok, adapter_result} <- maybe_run_upload_adapter(asset, body, store_opts) do
+      response =
+        %{
+          asset: asset_to_map(asset),
+          source_package: source_package_to_map(source_package),
+          adapter_run: Map.get(adapter_result, :adapter_run),
+          asset_extractions: Map.get(adapter_result, :asset_extractions, [])
+        }
+        |> stringify_keys()
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(201, Jason.encode!(response))
+    else
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  defp maybe_run_upload_adapter(asset, body, store_opts) do
+    case Map.get(body, "adapter_id") do
+      adapter_id when is_binary(adapter_id) and adapter_id != "" ->
+        adapter_opts =
+          store_opts
+          |> Keyword.merge(
+            command: Map.get(body, "command"),
+            args: Map.get(body, "args", []),
+            adapter_role: Map.get(body, "adapter_role"),
+            auto_extract: parse_bool(Map.get(body, "auto_extract"), true),
+            confidence: Map.get(body, "confidence"),
+            precision: Map.get(body, "precision"),
+            model_id: Map.get(body, "model_id"),
+            model_version: Map.get(body, "model_version"),
+            content_text: Map.get(body, "content_text"),
+            content_ref: Map.get(body, "content_ref"),
+            embedding_ref: Map.get(body, "embedding_ref"),
+            embedding_model_id: Map.get(body, "embedding_model_id"),
+            embedding_model_version: Map.get(body, "embedding_model_version"),
+            embedding_dim: Map.get(body, "embedding_dim"),
+            embedding_space: Map.get(body, "embedding_space"),
+            target_ref: Map.get(body, "target_ref"),
+            extraction_type: Map.get(body, "extraction_type"),
+            extraction_metadata: coerce_metadata(Map.get(body, "extraction_metadata"))
+          )
+          |> reject_nil_keyword()
+
+        with {:ok, run} <- MemoryCore.run_asset_adapter(asset.id, adapter_id, adapter_opts),
+             {:ok, extractions} <-
+               MemoryCore.list_asset_extractions(asset.id,
+                 tenant_id: asset.tenant_id,
+                 workspace_id: asset.workspace_id
+               ) do
+          {:ok, %{adapter_run: run, asset_extractions: extractions}}
+        end
+
+      _ ->
+        {:ok, %{adapter_run: nil, asset_extractions: []}}
+    end
+  end
+
+  defp asset_to_map(asset), do: clean_map(asset)
+  defp source_package_to_map(source_package), do: clean_map(source_package)
+
+  defp clean_map(value) when is_map(value) do
+    value
+    |> maybe_from_struct()
+    |> Map.drop([:__struct__])
+  end
+
+  defp maybe_from_struct(%{__struct__: _} = value), do: Map.from_struct(value)
+  defp maybe_from_struct(value), do: value
+
+  defp string_list_param(body, key) do
+    case Map.get(body, key, []) do
+      value when is_list(value) -> Enum.map(value, &to_string/1)
+      value when is_binary(value) and value != "" -> [value]
+      _ -> []
+    end
+  end
+
+  defp reject_nil_keyword(keyword) do
+    Enum.reject(keyword, fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp asset_upload_error(:asset_source_required), do: "path or content_base64 is required"
+  defp asset_upload_error(:path_not_found), do: "path not found"
+  defp asset_upload_error(:invalid_base64), do: "content_base64 is invalid"
+
+  defp asset_upload_error({:write_failed, reason}),
+    do: "could not write upload temp file: #{reason}"
+
+  defp asset_upload_error(reason), do: inspect(reason)
+
   # Shared handler for update/extend/derive — each takes (id, attrs) and returns {:ok, mem}.
   defp memory_mutation_endpoint(conn, id, fun) do
     body = conn.body_params || %{}
@@ -1808,6 +2004,8 @@ defmodule OptimalEngine.API.Router do
 
   defp parse_bool("true", _default), do: true
   defp parse_bool("1", _default), do: true
+  defp parse_bool(true, _default), do: true
+  defp parse_bool(false, _default), do: false
   defp parse_bool(_, default), do: default
 
   # Resolve a workspace id (e.g. "default" or "default:engineering") to a
