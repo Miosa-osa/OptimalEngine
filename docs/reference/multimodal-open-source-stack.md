@@ -228,6 +228,22 @@ MultimodalToolRegistry.availability()
 MemoryCore.run_asset_adapter(asset_id, :docling, command: "docling")
 ```
 
+API clients can enter the same governed path through:
+
+```text
+POST /api/assets
+{
+  "workspace": "default",
+  "filename": "meeting.wav",
+  "content_base64": "...",
+  "adapter_id": "openai_whisper"
+}
+```
+
+The route stores the raw file as a Source Package plus workspace-scoped asset
+row, then optionally runs the adapter so extraction projection rows are created
+without bypassing Memory Core.
+
 Missing binaries should degrade gracefully. The engine should preserve the raw
 asset, write a warning or adapter-run failure, and continue the rest of the
 pipeline where possible.

@@ -38,6 +38,7 @@ Built and verified now:
 | Governed assets | Raw multimodal files can be preserved as Source Packages, workspace-scoped asset rows, and derivation ledger entries. |
 | Pipeline asset governance | `Pipeline.run/2` preserves parser-produced assets through Memory Core before enrichment, decomposition, and embedding. |
 | Indexer asset governance | Binary indexing can pass workspace scope into the governed pipeline so indexed assets do not fall back to the default workspace. |
+| API asset uploads | `POST /api/assets` preserves JSON-uploaded or local-path files through Memory Core and can optionally run a governed multimodal adapter. |
 | Multimodal tool registry | Open-source adapter targets are cataloged for document intelligence, OCR, audio, video, visual reasoning, visual document retrieval, and cross-modal embeddings. |
 | Multimodal adapter runs | Adapter attempts and outputs can be recorded as governed derived artifacts linked to assets, Source Packages, scopes, hashes, and derivation ledger entries. |
 | Multimodal adapter runner | Configured local adapter commands can execute against governed assets, with completed, failed, and unavailable runs recorded through Memory Core. |
@@ -70,6 +71,9 @@ mix test test/pipeline/multimodal_adapter_runner_test.exs test/pipeline/multimod
 
 mix test test/memory_core/spine_test.exs test/pipeline/multimodal_adapter_runner_test.exs test/memory_core/asset_store_test.exs --seed 0
 28 tests, 0 failures
+
+mix test test/api/router_test.exs --seed 0
+27 tests, 0 failures
 
 mix optimal.reality_check
 115 probes, 115 ok, 0 warn, 0 fail
@@ -337,6 +341,10 @@ projections when a reference is available.
 Memory Core projection write. It can split structured adapter output into
 multiple governed rows, including segment-level transcript rows and page-level
 OCR span rows, while preserving the adapter run as the evidence source.
+`POST /api/assets` is the first governed API upload surface. It accepts a local
+path or JSON `content_base64`, stores the raw file as a Source Package plus
+workspace-scoped asset row, and can optionally run an adapter so extraction
+projection rows are created in the same request.
 `MemoryCore.claim_from_asset_adapter_run/2` is the review bridge: it turns a
 completed adapter output into a derived Source Package plus pending Claim without
 promoting that output to accepted truth.
@@ -458,8 +466,8 @@ The next build slices are:
 1. Expand adapter-specific command builders and output parsers around
    `MemoryCore.run_asset_adapter/3`, starting with richer Docling/Marker page,
    table, and element schemas plus FFmpeg/Whisper media extraction.
-2. Make connector and API upload paths consistently use the governed multimodal
-   pipeline.
+2. Make connector attachment/file upload paths consistently use the governed
+   multimodal pipeline.
 3. Add review queue UI/API ergonomics for Claims and Fact promotion.
 4. Expand Retrieval Coordinator beyond simple fact/memory/extraction lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
