@@ -37,6 +37,7 @@ Built and verified now:
 | Source evidence | Raw text becomes Source Packages with hash, workspace scope, trust label, security labels, partitions, and metadata. |
 | Governed assets | Raw multimodal files can be preserved as Source Packages, workspace-scoped asset rows, and derivation ledger entries. |
 | Pipeline asset governance | `Pipeline.run/2` preserves parser-produced assets through Memory Core before enrichment, decomposition, and embedding. |
+| Indexer asset governance | Binary indexing can pass workspace scope into the governed pipeline so indexed assets do not fall back to the default workspace. |
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
@@ -53,8 +54,8 @@ Current verification:
 mix test test/memory_core/spine_test.exs test/workspace_export_test.exs test/topology/workspace_topology_test.exs test/topology/node_member_test.exs test/topology/node_test.exs test/topology/workspace_surface_spine_test.exs test/signal/dispatcher_test.exs test/connectors/runner_test.exs --seed 0
 64 tests, 0 failures
 
-mix test test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs --seed 0
-4 tests, 0 failures
+mix test test/memory_core/asset_store_test.exs test/pipeline/pipeline_asset_store_test.exs test/pipeline/indexer_asset_store_test.exs --seed 0
+5 tests, 0 failures
 
 mix optimal.reality_check
 108 probes, 108 ok, 0 warn, 0 fail
@@ -373,8 +374,8 @@ raw SQL from feature modules into governed tables
 
 The next build slices are:
 
-1. Make connector, indexer, and API upload paths consistently use the governed
-   multimodal pipeline.
+1. Make connector and API upload paths consistently use the governed multimodal
+   pipeline.
 2. Add review queue UI/API ergonomics for Claims and Fact promotion.
 3. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
