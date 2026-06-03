@@ -27,6 +27,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   alias OptimalEngine.MemoryCore.KnowledgeLifecycle
   alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.MemoryCore.SourcePackage
+  alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.MemoryCore.WorkflowSkill
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.Receiver
@@ -66,17 +67,19 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     |> governed_recall_probes()
     |> section("7. Workflow and Skill Package lifecycle")
     |> workflow_skill_probes()
-    |> section("8. Connector registry (14 adapters)")
+    |> section("8. Tool and model governance")
+    |> tool_model_governance_probes()
+    |> section("9. Connector registry (14 adapters)")
     |> connector_probes()
-    |> section("9. Wiki tier-3 round-trip")
+    |> section("10. Wiki tier-3 round-trip")
     |> wiki_probes()
-    |> section("10. Retrieval — simple + complex + edge cases")
+    |> section("11. Retrieval — simple + complex + edge cases")
     |> retrieval_probes()
-    |> section("11. Compliance workflows (DSAR, erasure preview, holds)")
+    |> section("12. Compliance workflows (DSAR, erasure preview, holds)")
     |> compliance_probes()
-    |> maybe_section("12. Extra ingest load", ingest_count > 0)
+    |> maybe_section("13. Extra ingest load", ingest_count > 0)
     |> maybe_ingest(ingest_count)
-    |> maybe_section("13. Hard paths (slow retrieval, deep joins)", hard?)
+    |> maybe_section("14. Hard paths (slow retrieval, deep joins)", hard?)
     |> maybe_hard(hard?)
     |> summarize()
   end
@@ -226,6 +229,10 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       "derivation_ledger",
       "context_packages",
       "active_memory_pools",
+      "model_call_operations",
+      "mcp_tool_definitions",
+      "model_call_runs",
+      "tool_call_runs",
       "workflow_traces",
       "generalized_workflows",
       "procedural_memory_objects",
@@ -798,6 +805,187 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       "DELETE FROM relationship_edges WHERE workspace_id = ?1",
       "DELETE FROM memory_objects WHERE workspace_id = ?1",
       "DELETE FROM facts WHERE workspace_id = ?1",
+      "DELETE FROM claims WHERE workspace_id = ?1",
+      "DELETE FROM source_packages WHERE workspace_id = ?1"
+    ]
+    |> Enum.each(&Store.raw_execute(&1, [workspace_id]))
+  end
+
+  defp tool_model_governance_probes(state) do
+    suffix = System.unique_integer([:positive])
+    workspace_id = "default:reality-tool-model-#{suffix}"
+
+    seed =
+      with {:ok, pool} <-
+             ActiveMemoryPool.open(
+               workspace_id: workspace_id,
+               task_type: "tool_model_review",
+               subject_anchor: "project_launch",
+               agent_links: [%{type: "agent", id: "agent:reality-check"}],
+               security_labels: ["internal"],
+               partition_ids: ["reality-check"]
+             ),
+           {:ok, tool_definition} <-
+             ToolModelGovernance.register_mcp_tool_definition(
+               workspace_id: workspace_id,
+               tool_name: "calendar.read",
+               implementation_type: "external_connector",
+               required_privileges: ["calendar:read"],
+               allowed_partitions: ["reality-check"],
+               input_schema: %{required: ["calendar_id"]},
+               output_schema: %{required: ["events"]},
+               security_labels: ["internal"],
+               partition_ids: ["reality-check"]
+             ),
+           {:ok, model_operation} <-
+             ToolModelGovernance.register_model_call_operation(
+               workspace_id: workspace_id,
+               function_name: "summarize_context",
+               model_task_type: "summarization",
+               model_id: "reality-model",
+               required_privileges: ["model:summarize"],
+               allowed_partitions: ["reality-check"],
+               input_schema: %{required: ["context"]},
+               output_contract: %{required: ["summary"]},
+               security_labels: ["internal"],
+               partition_ids: ["reality-check"]
+             ),
+           {:ok, rejected_tool_run} <-
+             ToolModelGovernance.record_tool_call(
+               "calendar.read",
+               %{calendar_id: "primary"},
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: [],
+               requested_partitions: ["reality-check"]
+             ),
+           {:ok, allowed_tool_run} <-
+             ToolModelGovernance.record_tool_call(
+               "calendar.read",
+               %{calendar_id: "primary"},
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               active_memory_pool_id: pool.id,
+               granted_privileges: ["calendar:read"],
+               requested_partitions: ["reality-check"],
+               output_payload: %{events: [%{title: "Launch review"}]},
+               observation_text: "Calendar tool returned a launch review event.",
+               claim_text: "Calendar contains a launch review event.",
+               subject_anchor: "project_launch",
+               action_class: "scheduled",
+               object_anchor: "launch_review_event"
+             ),
+           {:ok, allowed_model_run} <-
+             ToolModelGovernance.record_model_call(
+               "summarize_context",
+               %{context: "Launch context"},
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: ["model:summarize"],
+               requested_partitions: ["reality-check"],
+               output_payload: %{summary: "Launch is ready for review."}
+             ) do
+        {:ok,
+         %{
+           pool: pool,
+           tool_definition: tool_definition,
+           model_operation: model_operation,
+           rejected_tool_run: rejected_tool_run,
+           allowed_tool_run: allowed_tool_run,
+           allowed_model_run: allowed_model_run
+         }}
+      end
+
+    state =
+      case seed do
+        {:ok, ctx} ->
+          state
+          |> probe("tool definition registered", fn ->
+            count_for("mcp_tool_definitions", workspace_id, ctx.tool_definition.id)
+          end)
+          |> probe("model operation registered", fn ->
+            count_for("model_call_operations", workspace_id, ctx.model_operation.id)
+          end)
+          |> probe("tool call rejection recorded", fn ->
+            if ctx.rejected_tool_run.decision_state == "rejected" and
+                 String.contains?(ctx.rejected_tool_run.rejection_reason, "calendar:read") do
+              {:ok, "rejected with missing privilege"}
+            else
+              {:error, inspect(ctx.rejected_tool_run)}
+            end
+          end)
+          |> probe("allowed tool call recorded", fn ->
+            case Store.raw_query(
+                   """
+                   SELECT COUNT(*)
+                   FROM tool_call_runs
+                   WHERE workspace_id = ?1
+                     AND mcp_tool_definition_id = ?2
+                     AND decision_state = 'allowed'
+                   """,
+                   [workspace_id, ctx.tool_definition.id]
+                 ) do
+              {:ok, [[1]]} -> {:ok, "stored"}
+              other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("tool output becomes pending claim", fn ->
+            case ctx.allowed_tool_run.observation_links do
+              [%{type: "claim", id: claim_id}] ->
+                count_for("claims", workspace_id, claim_id)
+
+              other ->
+                {:error, inspect(other)}
+            end
+          end)
+          |> probe("allowed model call recorded", fn ->
+            case Store.raw_query(
+                   """
+                   SELECT COUNT(*)
+                   FROM model_call_runs
+                   WHERE workspace_id = ?1
+                     AND model_call_operation_id = ?2
+                     AND decision_state = 'allowed'
+                   """,
+                   [workspace_id, ctx.model_operation.id]
+                 ) do
+              {:ok, [[1]]} -> {:ok, "stored"}
+              other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("governed call audit emitted", fn ->
+            case Store.raw_query(
+                   """
+                   SELECT COUNT(*)
+                   FROM events
+                   WHERE tenant_id = 'default'
+                     AND principal = 'agent:reality-check'
+                     AND kind IN ('tool.call.governed', 'model.call.governed')
+                     AND metadata LIKE ?1
+                   """,
+                   ["%#{workspace_id}%"]
+                 ) do
+              {:ok, [[count]]} when count >= 2 -> {:ok, "#{count} audit event(s)"}
+              other -> {:error, inspect(other)}
+            end
+          end)
+
+        {:error, reason} ->
+          probe(state, "tool/model governance seed", fn -> {:error, inspect(reason)} end)
+      end
+
+    cleanup_tool_model_governance_probe(workspace_id)
+    state
+  end
+
+  defp cleanup_tool_model_governance_probe(workspace_id) do
+    [
+      "DELETE FROM model_call_runs WHERE workspace_id = ?1",
+      "DELETE FROM tool_call_runs WHERE workspace_id = ?1",
+      "DELETE FROM model_call_operations WHERE workspace_id = ?1",
+      "DELETE FROM mcp_tool_definitions WHERE workspace_id = ?1",
+      "DELETE FROM active_memory_pools WHERE workspace_id = ?1",
+      "DELETE FROM derivation_ledger WHERE workspace_id = ?1",
       "DELETE FROM claims WHERE workspace_id = ?1",
       "DELETE FROM source_packages WHERE workspace_id = ?1"
     ]

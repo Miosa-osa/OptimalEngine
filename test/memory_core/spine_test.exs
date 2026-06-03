@@ -6,6 +6,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
   alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.MemoryCore.SourcePackage
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
+  alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.MemoryCore.WorkflowSkill
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.Store
@@ -53,7 +54,9 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
       "active_memory_pools",
       "context_packages",
       "model_call_operations",
-      "mcp_tool_definitions"
+      "mcp_tool_definitions",
+      "model_call_runs",
+      "tool_call_runs"
     ]
 
     for table <- required_tables do
@@ -495,6 +498,128 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              )
 
     assert ledger_count == 4
+  end
+
+  test "tool and model governance records allowed and rejected calls" do
+    workspace_id = "memory-core-tool-model-test-#{System.unique_integer([:positive])}"
+
+    {:ok, _fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+
+    {:ok, pool} =
+      ActiveMemoryPool.open(
+        workspace_id: workspace_id,
+        task_type: "tool_model_review",
+        subject_anchor: "project_launch",
+        agent_links: [%{type: "agent", id: "agent:test"}],
+        security_labels: ["internal"],
+        partition_ids: ["project-launch"]
+      )
+
+    assert {:ok, tool_definition} =
+             ToolModelGovernance.register_mcp_tool_definition(
+               workspace_id: workspace_id,
+               tool_name: "calendar.read",
+               implementation_type: "external_connector",
+               required_privileges: ["calendar:read"],
+               allowed_partitions: ["project-launch"],
+               input_schema: %{required: ["calendar_id"]},
+               output_schema: %{required: ["events"]},
+               security_labels: ["internal"],
+               partition_ids: ["project-launch"]
+             )
+
+    assert {:ok, model_operation} =
+             ToolModelGovernance.register_model_call_operation(
+               workspace_id: workspace_id,
+               function_name: "summarize_context",
+               model_task_type: "summarization",
+               model_id: "test-model",
+               required_privileges: ["model:summarize"],
+               allowed_partitions: ["project-launch"],
+               input_schema: %{required: ["context"]},
+               output_contract: %{required: ["summary"]},
+               security_labels: ["internal"],
+               partition_ids: ["project-launch"]
+             )
+
+    assert {:ok, rejected_tool_run} =
+             ToolModelGovernance.record_tool_call(
+               "calendar.read",
+               %{calendar_id: "primary"},
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               granted_privileges: [],
+               requested_partitions: ["project-launch"]
+             )
+
+    assert rejected_tool_run.decision_state == "rejected"
+    assert rejected_tool_run.rejection_reason =~ "missing:calendar:read"
+
+    assert {:ok, allowed_tool_run} =
+             ToolModelGovernance.record_tool_call(
+               "calendar.read",
+               %{calendar_id: "primary"},
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               active_memory_pool_id: pool.id,
+               granted_privileges: ["calendar:read"],
+               requested_partitions: ["project-launch"],
+               output_payload: %{events: [%{title: "Launch review"}]},
+               observation_text: "Calendar tool returned a launch review event.",
+               claim_text: "Calendar contains a launch review event.",
+               subject_anchor: "project_launch",
+               action_class: "scheduled",
+               object_anchor: "launch_review_event"
+             )
+
+    assert allowed_tool_run.decision_state == "allowed"
+    assert allowed_tool_run.run_status == "completed"
+    assert allowed_tool_run.mcp_tool_definition_id == tool_definition.id
+    assert [%{type: "claim", id: pending_claim_id}] = allowed_tool_run.observation_links
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM claims WHERE workspace_id = ?1 AND id = ?2 AND review_status = 'unreviewed'",
+               [workspace_id, pending_claim_id]
+             )
+
+    assert {:ok, allowed_model_run} =
+             ToolModelGovernance.record_model_call(
+               "summarize_context",
+               %{context: "Launch context"},
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               granted_privileges: ["model:summarize"],
+               requested_partitions: ["project-launch"],
+               output_payload: %{summary: "Launch is ready for review."}
+             )
+
+    assert allowed_model_run.decision_state == "allowed"
+    assert allowed_model_run.model_call_operation_id == model_operation.id
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM mcp_tool_definitions WHERE workspace_id = ?1 AND id = ?2",
+               [workspace_id, tool_definition.id]
+             )
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM model_call_operations WHERE workspace_id = ?1 AND id = ?2",
+               [workspace_id, model_operation.id]
+             )
+
+    assert {:ok, [[2]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM tool_call_runs WHERE workspace_id = ?1 AND mcp_tool_definition_id = ?2",
+               [workspace_id, tool_definition.id]
+             )
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM model_call_runs WHERE workspace_id = ?1 AND model_call_operation_id = ?2",
+               [workspace_id, model_operation.id]
+             )
   end
 
   defp create_accepted_memory(workspace_id, opts) do

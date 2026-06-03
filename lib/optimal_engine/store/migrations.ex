@@ -78,7 +78,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_030_api_keys(),
       migration_031_memories_fts(),
       migration_032_memory_core_spine(),
-      migration_033_workspace_topology_surface_spine()
+      migration_033_workspace_topology_surface_spine(),
+      migration_034_tool_model_governance_runs()
     ]
   end
 
@@ -1943,6 +1944,91 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_projection_revisions_export ON projection_revisions(export_record_id, revision_number)"},
        {"idx_link_health_export",
         "CREATE INDEX IF NOT EXISTS idx_link_health_export ON link_health_records(export_record_id, checked_at)"}
+     ]}
+  end
+
+  defp migration_034_tool_model_governance_runs do
+    {34, "tool/model governance run records",
+     [
+       {"model_call_runs",
+        """
+        CREATE TABLE IF NOT EXISTS model_call_runs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          model_call_operation_id TEXT NOT NULL,
+          function_name TEXT NOT NULL,
+          requesting_actor_id TEXT,
+          active_memory_pool_id TEXT,
+          decision_state TEXT NOT NULL,
+          run_status TEXT NOT NULL DEFAULT 'recorded',
+          rejection_reason TEXT,
+          input_payload TEXT NOT NULL DEFAULT '{}',
+          output_payload TEXT NOT NULL DEFAULT '{}',
+          input_hash TEXT,
+          output_hash TEXT,
+          required_privileges TEXT NOT NULL DEFAULT '[]',
+          granted_privileges TEXT NOT NULL DEFAULT '[]',
+          requested_partitions TEXT NOT NULL DEFAULT '[]',
+          allowed_partitions TEXT NOT NULL DEFAULT '[]',
+          policy_decision TEXT NOT NULL DEFAULT '{}',
+          latency_ms INTEGER,
+          cost_units REAL,
+          source_package_links TEXT NOT NULL DEFAULT '[]',
+          observation_links TEXT NOT NULL DEFAULT '[]',
+          audit_event_links TEXT NOT NULL DEFAULT '[]',
+          access_policy_id TEXT,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"tool_call_runs",
+        """
+        CREATE TABLE IF NOT EXISTS tool_call_runs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          mcp_tool_definition_id TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          protocol_adapter_id TEXT NOT NULL DEFAULT 'mcp',
+          requesting_actor_id TEXT,
+          active_memory_pool_id TEXT,
+          decision_state TEXT NOT NULL,
+          run_status TEXT NOT NULL DEFAULT 'recorded',
+          rejection_reason TEXT,
+          input_payload TEXT NOT NULL DEFAULT '{}',
+          output_payload TEXT NOT NULL DEFAULT '{}',
+          input_hash TEXT,
+          output_hash TEXT,
+          required_privileges TEXT NOT NULL DEFAULT '[]',
+          granted_privileges TEXT NOT NULL DEFAULT '[]',
+          requested_partitions TEXT NOT NULL DEFAULT '[]',
+          allowed_partitions TEXT NOT NULL DEFAULT '[]',
+          policy_decision TEXT NOT NULL DEFAULT '{}',
+          latency_ms INTEGER,
+          cost_units REAL,
+          source_package_links TEXT NOT NULL DEFAULT '[]',
+          observation_links TEXT NOT NULL DEFAULT '[]',
+          audit_event_links TEXT NOT NULL DEFAULT '[]',
+          access_policy_id TEXT,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_model_call_runs_operation",
+        "CREATE INDEX IF NOT EXISTS idx_model_call_runs_operation ON model_call_runs(workspace_id, model_call_operation_id)"},
+       {"idx_model_call_runs_pool",
+        "CREATE INDEX IF NOT EXISTS idx_model_call_runs_pool ON model_call_runs(active_memory_pool_id)"},
+       {"idx_tool_call_runs_tool",
+        "CREATE INDEX IF NOT EXISTS idx_tool_call_runs_tool ON tool_call_runs(workspace_id, mcp_tool_definition_id)"},
+       {"idx_tool_call_runs_pool",
+        "CREATE INDEX IF NOT EXISTS idx_tool_call_runs_pool ON tool_call_runs(active_memory_pool_id)"}
      ]}
   end
 
