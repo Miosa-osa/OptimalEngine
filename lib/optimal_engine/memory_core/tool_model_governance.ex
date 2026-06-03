@@ -157,7 +157,7 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
 
   defp persist_run(run, decision, opts, kind) do
     run =
-      if decision.allowed? do
+      if decision.allowed? and run.run_status == "completed" do
         attach_observation(run, opts)
       else
         run
@@ -211,9 +211,25 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
 
   defp decide(definition, input_payload, opts, kind) do
     state_check = state_check(definition, kind)
-    privilege_check = subset_check(Map.get(definition, :required_privileges, []), list_opt(opts, :granted_privileges))
-    partition_check = subset_check(list_opt(opts, :requested_partitions), Map.get(definition, :allowed_partitions, []))
-    input_check = required_input_check(input_payload, Map.get(definition, :input_schema, %{}))
+
+    privilege_check =
+      subset_check(
+        Map.get(definition, :required_privileges, []),
+        list_opt(opts, :granted_privileges)
+      )
+
+    partition_check =
+      subset_check(
+        list_opt(opts, :requested_partitions),
+        Map.get(definition, :allowed_partitions, [])
+      )
+
+    input_check =
+      required_payload_check(
+        input_payload,
+        Map.get(definition, :input_schema, %{}),
+        "missing_input"
+      )
 
     checks = [
       state_check,
@@ -254,14 +270,14 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
     end
   end
 
-  defp required_input_check(payload, schema) do
+  defp required_payload_check(payload, schema, reason_prefix) do
     required = Map.get(schema, "required") || Map.get(schema, :required) || []
     payload_keys = Enum.map(Map.keys(payload), &to_string/1)
     missing = required |> Enum.map(&to_string/1) |> Enum.reject(&(&1 in payload_keys))
 
     case missing do
       [] -> {true, nil}
-      _ -> {false, "missing_input:#{Enum.join(missing, ",")}"}
+      _ -> {false, "#{reason_prefix}:#{Enum.join(missing, ",")}"}
     end
   end
 
@@ -277,7 +293,7 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
       requesting_actor_id: string_or_nil(Keyword.get(opts, :actor_id)),
       active_memory_pool_id: string_or_nil(Keyword.get(opts, :active_memory_pool_id)),
       decision_state: decision_state(decision),
-      run_status: run_status(decision, output_payload),
+      run_status: run_status(decision, output_payload, opts),
       rejection_reason: reject_reason(decision),
       input_payload: input_payload,
       output_payload: output_payload,
@@ -297,6 +313,7 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
       partition_ids: operation.partition_ids,
       metadata: Keyword.get(opts, :metadata, %{})
     }
+    |> apply_output_validation(operation.output_contract, opts, :output_contract)
   end
 
   defp build_tool_run(definition, input_payload, decision, opts) do
@@ -311,7 +328,7 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
       requesting_actor_id: string_or_nil(Keyword.get(opts, :actor_id)),
       active_memory_pool_id: string_or_nil(Keyword.get(opts, :active_memory_pool_id)),
       decision_state: decision_state(decision),
-      run_status: run_status(decision, output_payload),
+      run_status: run_status(decision, output_payload, opts),
       rejection_reason: reject_reason(decision),
       input_payload: input_payload,
       output_payload: output_payload,
@@ -331,14 +348,49 @@ defmodule OptimalEngine.MemoryCore.ToolModelGovernance do
       partition_ids: definition.partition_ids,
       metadata: Keyword.get(opts, :metadata, %{})
     }
+    |> apply_output_validation(definition.output_schema, opts, :output_schema)
   end
 
   defp decision_state(%{allowed?: true}), do: "allowed"
   defp decision_state(_decision), do: "rejected"
 
-  defp run_status(%{allowed?: false}, _output_payload), do: "rejected"
-  defp run_status(_decision, output_payload) when map_size(output_payload) == 0, do: "approved"
-  defp run_status(_decision, _output_payload), do: "completed"
+  defp run_status(%{allowed?: false}, _output_payload, _opts), do: "rejected"
+
+  defp run_status(_decision, _output_payload, opts),
+    do: if(output_payload_provided?(opts), do: "completed", else: "approved")
+
+  defp apply_output_validation(%{decision_state: "rejected"} = run, _schema, _opts, _check_key),
+    do: run
+
+  defp apply_output_validation(run, schema, opts, check_key) do
+    cond do
+      not output_payload_provided?(opts) ->
+        put_output_check(run, check_key, true)
+
+      true ->
+        case required_payload_check(run.output_payload, schema || %{}, "missing_output") do
+          {true, _} ->
+            put_output_check(run, check_key, true)
+
+          {false, reason} ->
+            run
+            |> Map.put(:run_status, "output_rejected")
+            |> Map.put(:rejection_reason, append_reason(run.rejection_reason, reason))
+            |> put_output_check(check_key, false)
+        end
+    end
+  end
+
+  defp put_output_check(run, check_key, value) do
+    checks = run.policy_decision |> Map.get(:checks, %{}) |> Map.put(check_key, value)
+    Map.put(run, :policy_decision, Map.put(run.policy_decision, :checks, checks))
+  end
+
+  defp append_reason(nil, reason), do: reason
+  defp append_reason("", reason), do: reason
+  defp append_reason(existing, reason), do: existing <> "; " <> reason
+
+  defp output_payload_provided?(opts), do: Keyword.has_key?(opts, :output_payload)
 
   defp reject_reason(%{allowed?: true}), do: nil
   defp reject_reason(%{rejection_reason: reason}), do: reason
