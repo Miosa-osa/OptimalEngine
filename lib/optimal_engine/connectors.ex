@@ -13,7 +13,7 @@ defmodule OptimalEngine.Connectors do
   Teams, Dropbox, OneDrive, Salesforce, HubSpot.
   """
 
-  alias OptimalEngine.Connectors.{Credential, Registry, Runner}
+  alias OptimalEngine.Connectors.{AssetIngest, Credential, Registry, Runner}
 
   @doc "Return `[{kind, display_name, auth_scheme}]` for every registered adapter."
   defdelegate list, to: Registry, as: :summary
@@ -32,6 +32,10 @@ defmodule OptimalEngine.Connectors do
 
   @doc "Run one sync cycle through Memory Core tool governance."
   def run_governed(connector_id, opts \\ []), do: Runner.run_governed(connector_id, opts)
+
+  @doc "Preserve connector file attachments through governed Memory Core assets."
+  defdelegate preserve_payload_assets(connector_kind, external_id, payload, opts \\ []),
+    to: AssetIngest
 
   @doc "`true` when the master key for credential encryption is configured."
   defdelegate credentials_ready?, to: Credential, as: :ready?
