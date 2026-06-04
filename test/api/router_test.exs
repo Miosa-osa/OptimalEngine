@@ -117,6 +117,45 @@ defmodule OptimalEngine.API.RouterTest do
   end
 
   describe "Memory Core claim governance API" do
+    test "gated memory intake adds salient memory and skips duplicates" do
+      workspace_id = "api-memory-remember-#{System.unique_integer([:positive])}"
+
+      first_conn =
+        request(:post, "/api/memory/remember", %{
+          "workspace" => workspace_id,
+          "content" => "Decision: Revenue lead owns renewal pricing for Q4 at $2000.",
+          "metadata" => %{"source" => "api-remember-test"}
+        })
+
+      assert first_conn.status == 200
+      assert {:ok, first_body} = Jason.decode(first_conn.resp_body)
+      assert first_body["action"] == "add"
+      assert first_body["memory"]["content"] =~ "Revenue lead"
+      assert first_body["gate"]["should_encode"] == true
+      assert first_body["dedup"]["action"] == "add"
+
+      list_conn = request(:get, "/api/memory-core/claims?workspace=#{workspace_id}")
+      assert {:ok, list_body} = Jason.decode(list_conn.resp_body)
+      assert list_body["count"] == 1
+
+      duplicate_conn =
+        request(:post, "/api/memory/remember", %{
+          "workspace" => workspace_id,
+          "content" => "Decision: Revenue lead owns renewal pricing for Q4 at $2000."
+        })
+
+      assert duplicate_conn.status == 200
+      assert {:ok, duplicate_body} = Jason.decode(duplicate_conn.resp_body)
+      assert duplicate_body["action"] == "skip"
+      assert duplicate_body["memory"]["id"] == first_body["memory"]["id"]
+      assert duplicate_body["memory"]["was_existing"] == true
+      assert duplicate_body["dedup"]["action"] == "skip"
+
+      after_conn = request(:get, "/api/memory-core/claims?workspace=#{workspace_id}")
+      assert {:ok, after_body} = Jason.decode(after_conn.resp_body)
+      assert after_body["count"] == 1
+    end
+
     test "lists pending claims and promotes one into fact and memory object" do
       workspace_id = "api-claim-review-#{System.unique_integer([:positive])}"
       content = "API claim promotion #{System.unique_integer([:positive])}"

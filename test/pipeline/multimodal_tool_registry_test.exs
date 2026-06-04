@@ -29,6 +29,13 @@ defmodule OptimalEngine.Pipeline.MultimodalToolRegistryTest do
     assert Enum.any?(image_tools, &(&1.id == :open_clip))
   end
 
+  test "resolves adapter ids from JSON-safe strings" do
+    assert %{id: :openai_whisper} = MultimodalToolRegistry.get("openai_whisper")
+    assert %{id: :openai_whisper} = MultimodalToolRegistry.get("openai-whisper")
+    assert %{id: :openai_whisper} = MultimodalToolRegistry.get("OpenAI Whisper")
+    assert is_nil(MultimodalToolRegistry.get("not-a-real-adapter"))
+  end
+
   test "returns recommended pipelines by modality" do
     assert MultimodalToolRegistry.recommended_tool_ids(:document) == [
              :docling,

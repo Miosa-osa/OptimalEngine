@@ -1188,6 +1188,53 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # POST /api/memory/remember — gated memory intake for agent/app writes.
+  # Body: {content, workspace?, audience?, metadata?, force?, gate_threshold?,
+  #        salience_floor?, skip_threshold?, update_threshold?}
+  # Returns: 200 + {action, memory?, gate, dedup?}.
+  post "/api/memory/remember" do
+    body = conn.body_params || %{}
+    content = Map.get(body, "content")
+
+    if not (is_binary(content) and content != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "content is required"}))
+    else
+      attrs =
+        %{
+          content: content,
+          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+        }
+        |> maybe_put(:tenant_id, Map.get(body, "tenant", Map.get(body, "tenant_id")))
+        |> maybe_put(:is_static, Map.get(body, "is_static"))
+        |> maybe_put(:audience, Map.get(body, "audience"))
+        |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
+        |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
+        |> maybe_put(:metadata, Map.get(body, "metadata"))
+        |> maybe_put(:actor_id, Map.get(body, "actor_id"))
+        |> maybe_put(:access_policy_id, Map.get(body, "access_policy_id"))
+        |> maybe_put(:security_labels, string_list_param(body, "security_labels"))
+        |> maybe_put(:partition_ids, string_list_param(body, "partition_ids"))
+
+      opts =
+        [
+          force: parse_bool(Map.get(body, "force"), false),
+          gate_threshold: parse_float(Map.get(body, "gate_threshold")),
+          salience_floor: parse_float(Map.get(body, "salience_floor")),
+          skip_threshold: parse_float(Map.get(body, "skip_threshold")),
+          update_threshold: parse_float(Map.get(body, "update_threshold"))
+        ]
+        |> reject_nil_keyword()
+
+      case OptimalEngine.Memory.remember(attrs, opts) do
+        {:ok, result} ->
+          json(conn, memory_intake_result_to_map(result))
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
   # POST /api/assets — preserve a multimodal file through the governed asset path.
   #
   # JSON body supports either:
@@ -1873,6 +1920,40 @@ defmodule OptimalEngine.API.Router do
     }
   end
 
+  defp memory_intake_result_to_map(result) do
+    %{
+      action: Atom.to_string(result.action),
+      memory: result.memory && memory_to_map(result.memory),
+      gate: memory_intake_gate_to_map(result.gate),
+      dedup: memory_intake_dedup_to_map(result.dedup)
+    }
+  end
+
+  defp memory_intake_gate_to_map(nil), do: nil
+
+  defp memory_intake_gate_to_map(gate) do
+    %{
+      should_encode: gate.should_encode,
+      score: gate.score,
+      novelty: gate.novelty,
+      salience: gate.salience,
+      prediction_error: gate.prediction_error,
+      reason: gate.reason,
+      similar_memory_id: gate.similar_memory_id
+    }
+  end
+
+  defp memory_intake_dedup_to_map(nil), do: nil
+
+  defp memory_intake_dedup_to_map(dedup) do
+    %{
+      action: Atom.to_string(dedup.action),
+      reason: dedup.reason,
+      similarity: dedup.similarity,
+      existing_memory_id: dedup.existing && dedup.existing.id
+    }
+  end
+
   defp claim_to_map(claim) when is_map(claim) do
     if Map.has_key?(claim, :__struct__) do
       claim
@@ -2143,6 +2224,20 @@ defmodule OptimalEngine.API.Router do
   defp parse_bool(true, _default), do: true
   defp parse_bool(false, _default), do: false
   defp parse_bool(_, default), do: default
+
+  defp parse_float(nil), do: nil
+  defp parse_float(""), do: nil
+  defp parse_float(value) when is_float(value), do: value
+  defp parse_float(value) when is_integer(value), do: value / 1
+
+  defp parse_float(value) when is_binary(value) do
+    case Float.parse(value) do
+      {float, ""} -> float
+      _ -> nil
+    end
+  end
+
+  defp parse_float(_value), do: nil
 
   # Resolve a workspace id (e.g. "default" or "default:engineering") to a
   # Workspace struct. Returns `{:error, :not_found}` for unknown ids.
