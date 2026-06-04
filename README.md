@@ -370,17 +370,20 @@ raw SQL from feature modules into governed tables
 
 The next build slices are:
 
-1. Expand Workspace/Topology with reusable templates for different operating
-   systems: company, personal, research, product, sales, support, and project
-   workspaces.
-2. Expand Source Package support for richer multimodal source metadata.
-3. Add review queues for Claims and Fact promotion.
-4. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
+1. Build the Markdown wiki service surface: page tree, backlinks, broken-link
+   checks, directive rendering, revisions, import/export, render/rebuild helpers,
+   and wiki HTTP/CLI operations.
+2. Harden source-first intake so every edit, file, API request, connector
+   payload, and tool result is preserved or quarantined before interpretation.
+3. Expand multimodality: raw artifact storage, modality metadata, parser assets,
+   adapter runs, extraction projections, and failed/unsupported artifact records.
+4. Add review queues for Claims and Fact promotion.
+5. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
-5. Build workflow traces and Skill Packages from repeated Active Pool work.
-6. Expand governed tool/model execution from the first dispatcher adapter into
+6. Build workflow traces and Skill Packages from repeated Active Pool work.
+7. Expand governed tool/model execution from the first dispatcher adapter into
    connector-wide and model-provider-wide runtime paths.
-7. Add benchmark/evaluation records so large-scale recall tests are stored and
+8. Add benchmark/evaluation records so large-scale recall tests are stored and
    inspectable.
 
 The system is meant to stay complex where complexity carries meaning: evidence,

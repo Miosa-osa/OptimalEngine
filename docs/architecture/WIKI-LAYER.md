@@ -1,8 +1,146 @@
-# The Wiki Layer
+# Workspace Wiki / Export Layer
+
+This document is being migrated from the older "LLM-maintained wiki" concept
+to the current Optimal Engine architecture.
+
+Current rule:
+
+```text
+The wiki/export surface is a human-operable projection.
+The governed runtime owns canonical topology, source evidence, memory, policy,
+workflow, tool state, and audit.
+```
+
+The wiki is still critical. It is where humans and agents can browse, edit,
+link, and understand the workspace. But it must not become a separate source of
+truth that bypasses Source Packages, Claims, Facts, Memory Objects, permissions,
+or export records.
 
 > A self-maintaining, citation-rich, incrementally-compacted top layer that
 > sits over immutable raw sources and makes context a first-class artifact of
 > the Optimal Engine — not a byproduct of retrieval.
+
+## Updated Thesis
+
+The wiki/export layer has two jobs:
+
+```text
+1. Make the workspace usable by humans.
+2. Prove that every page is a projection of governed engine state or a new
+   source/change request waiting to be processed.
+```
+
+It should provide the product mechanics users expect from a serious wiki:
+
+```text
+page tree
+Markdown files
+HTML pages
+backlinks
+broken-link status
+revision history
+safe editing / edit locks
+rename and move link repair
+import from existing Markdown folders
+export records
+projection freshness checks
+```
+
+It should not decide what is true. Truth promotion belongs to Memory Core:
+
+```text
+Source Package -> Claim -> Fact -> Memory Object
+```
+
+Human edits to wiki/markdown pages are handled as one of:
+
+```text
+new Source Package
+topology change request
+projection-only edit rejected or overwritten by next render
+```
+
+## Corrected Three-Tier Meaning
+
+The older three-tier model is still useful if interpreted correctly:
+
+```text
+Tier 1: Source Packages and preserved raw artifacts
+Tier 2: Rebuildable indexes, chunks, summaries, embeddings, graph projections
+Tier 3: Human-facing wiki/export projections
+```
+
+The hard invariant is now:
+
+```text
+The wiki/export layer can be edited, but edits re-enter the engine through a
+governed lifecycle. The wiki does not silently mutate canonical truth.
+```
+
+## Export Lifecycle
+
+Every generated page should have an export record:
+
+```text
+export_record_id
+workspace_id
+node_id
+output_path
+output_kind
+input_object_links
+input_object_versions
+source_hashes
+rendered_at
+rendered_by
+policy_version
+link_health_status
+projection_freshness_status
+rebuild_command
+audit_event_id
+```
+
+The lifecycle is:
+
+```text
+engine object version
+  -> render markdown / HTML / app view
+  -> record export
+  -> check page tree
+  -> check links and backlinks
+  -> detect broken links
+  -> detect projection drift
+  -> serve or expose page
+  -> capture human edit/import
+  -> Source Package or topology change request
+  -> review/promote
+  -> refresh projection
+```
+
+## Interface Health Gates
+
+The layer is not complete until these pass:
+
+```text
+Node tree renders from Workspace -> Nodes.
+Backlinks are computed from topology relationships and memory Relationship Edges.
+Broken links are detected.
+Renames and moves update links or create repair work.
+Concurrent edits do not silently overwrite newer state.
+Revision history exists for user-facing pages.
+Imports preserve folder structure and source lineage.
+Generated HTML/markdown can prove which object versions produced it.
+Stale projections are detected before agents rely on them.
+```
+
+Useful commands to build toward:
+
+```text
+mix optimal.export.check
+mix optimal.links.check
+mix optimal.import.markdown
+mix optimal.projection.diff
+mix optimal.workspace.serve
+```
 
 ## The thesis
 
@@ -41,7 +179,9 @@ answer.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Hard invariant: **the LLM owns Tier 3 and does not touch Tier 1**.
+Hard invariant: **the engine owns Tier 3 projection lifecycle. LLMs may propose
+or render pages, but they do not own canonical truth and they do not touch Tier
+1 directly.**
 
 ## Why three tiers (not two)
 
@@ -200,41 +340,65 @@ behavior predictable and auditable.
 | 5 Embed          | wiki pages are embedded so they can be retrieved by semantic search           |
 | 6 Cluster        | wiki pages tend to BE cluster summaries (or get co-clustered with their sources) |
 | 7 Store          | wiki pages are stored in `.wiki/` (Tier 1 wrt themselves, Tier 3 wrt sources) |
-| 8 Deliver        | **wiki is always-loaded as the "front door."** Assembly reads wiki first, retrieves raw sources only for sub-queries the wiki doesn't answer |
+| 8 Deliver        | Wiki/export pages are a preferred human-readable front door, but final agent context comes from governed Context Packages. Assembly can read wiki projections first, then verifies source, freshness, and permissions through retrieval. |
 | 9 Curate (new)   | the maintenance loop                                                          |
 
 ## Build status
 
 | Component                   | Status                                                  |
 |----------------------------|---------------------------------------------------------|
-| `.wiki/` directory          | ❌ does not exist                                        |
-| Wiki schema                 | ❌ not written                                           |
-| Wiki page template          | ❌ not defined                                           |
-| Directive parser            | ❌ not built (no `{{cite: ...}}` handler)                |
-| Citation integrity checker  | ❌ not built                                             |
-| Curation trigger (signal → affected pages)  | ❌ not built                             |
-| Curator (Ollama prompting)  | ❌ not built                                             |
-| Page history / diff storage | ❌ not built                                             |
-| `mix optimal.wiki.*` tasks  | ❌ not built                                             |
-| Deliver reads wiki first    | ❌ not wired (today ContextAssembler goes straight to chunks) |
+| `.wiki/` directory          | Built. `.wiki/SCHEMA.md` exists as the human-owned contract. |
+| Wiki schema                 | Built as a first schema; needs stronger validation against current Memory Core objects. |
+| Wiki page template          | Partial. Page shape exists conceptually; node/page render templates need first-class service support. |
+| Directive parser            | Built as `OptimalEngine.Wiki.Directives`; expand to richer render targets and stricter policy checks. |
+| Citation integrity checker  | Built as `OptimalEngine.Wiki.Integrity`; expand to Source Package, Fact, Memory Object, and projection freshness checks. |
+| Curation trigger (signal → affected pages)  | Partial. Scheduler/curator modules exist; affected-page routing and queue proof need hardening. |
+| Curator (Ollama prompting)  | Built as a first `OptimalEngine.Wiki.Curator`; needs governed model-call records and review policy. |
+| Page history / diff storage | Partial through wiki store/versioning and projection revisions; explicit diff/restore commands still needed. |
+| `mix optimal.wiki.*` tasks  | Built as `mix optimal.wiki list/view/verify/verify-all`; rebuild/import/link-check/export commands still needed. |
+| Deliver reads wiki first    | Partial. Wiki-first RAG exists, but Context Package assembly still needs a stricter wiki-projection-first path with source/freshness verification. |
 
-The L0 cache (existing) is a **distant cousin** of the Wiki — it's
-machine-generated, not LLM-curated; it's flat, not hierarchical; it has no
-citations. The Wiki replaces it as the top layer once built.
+The L0 cache is a distant cousin of the wiki/export layer. It is
+machine-generated, flat, and optimized for quick context. The wiki/export layer
+is structured, navigable, source-linked, and human-operable. It does not replace
+governed retrieval; it becomes one projection and input surface used by
+retrieval, humans, and agents.
 
-## Build order (delta from INTENT-MACHINE.md)
+## Correct Build Order
 
-Wiki layer is a SEPARATE track from the chunking/multimodal build, but it
-depends on a few primitives:
+The wiki/export track is the next user-visible layer after Workspace/Topology.
+It should be built before deeper source-first and multimodal hardening because
+it is how humans and agents inspect whether the engine is organizing the world
+correctly.
 
-1. **Schema writing** (prose, no code) — `.wiki/SCHEMA.md` + page template.
-2. **Directive parser** — `OptimalEngine.Wiki.Directives` — `{{cite}}`, `{{include}}`, `{{expand}}`, `{{search}}`. Renders to plain text, HTML, or Claude-format.
-3. **Citation integrity checker** — walks every wiki page, verifies every `{{cite}}` resolves, flags orphans.
-4. **Curator** — `OptimalEngine.Wiki.Curator` with an Ollama-driven prompt that takes `(existing_page, new_signals, schema) -> updated_page`.
-5. **Maintenance trigger** — on signal ingest, compute affected wiki pages, enqueue curation jobs.
-6. **Deliver integration** — `ContextAssembler` prepends relevant wiki pages to its output, then falls through to raw chunks only if the query isn't answered.
-7. **CLI + HTTP surface** — `mix optimal.wiki.view <slug>`, `mix optimal.wiki.rebuild`, `GET /api/wiki/:slug`, etc.
+The order is:
 
-This track CAN run in parallel with chunking/multimodal because it operates at
-the top of the stack — whatever the lower pipeline produces, the wiki curates
-a view of it.
+1. **Markdown wiki service** — page tree, page templates, directive rendering,
+   citation integrity, backlinks, broken links, revisions, import/export,
+   render/rebuild helpers, and `mix optimal.wiki`/HTTP surfaces.
+2. **Source-first intake** — every edit, file, connector payload, tool result,
+   and API request is preserved or quarantined as a Source Package before
+   classification, routing, summarization, or compatibility context writes.
+3. **Multimodality** — raw artifact store, modality metadata, parser assets,
+   extraction projections, adapter runs, text-bearing extraction to pending
+   Claims, and failed/unsupported artifact records.
+4. **Truth lifecycle** — Claim extraction, Fact promotion, Memory Object
+   building, contradiction handling, temporal validity, confidence, precision,
+   supersession, and review queues.
+5. **Governed recall** — wiki-projection-first retrieval, then structured
+   Source/Facts/Memories/asset extraction recall under permissions, freshness,
+   and redaction policy.
+6. **Active work loop** — Active Memory Pools, task observations, loaded
+   Context Packages, refresh, membership, and promotion candidates.
+7. **Workflow and Skill promotion** — Workflow Traces, Generalized Workflows,
+   Procedural Memory Objects, Skill Packages, validation, rollback, exception
+   paths, and disabled-by-default execution.
+8. **Tool/model governance** — registered model/tool definitions, schema
+   validation, permission checks, run records, output validation, and audit.
+9. **Evaluation, recovery, and benchmark surfaces** — reproducible benchmark
+   configs, result cards, large-scale recall tests, rebuild tests, recovery
+   tests, dashboards, and failure-class reporting.
+
+This wiki track can run alongside lower pipeline work, but it should stay first
+in the implementation queue because it gives the operator a visible, linkable,
+auditable surface for every later backend improvement.
