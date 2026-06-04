@@ -4,7 +4,7 @@ defmodule OptimalEngine.Connectors do
 
       Connectors.list()                   — every registered adapter
       Connectors.register(attrs)          — persist a new connector row
-      Connectors.run(connector_id, opts)  — execute one sync cycle
+      Connectors.run(connector_id, opts)  — execute one governed sync cycle
 
   See `OptimalEngine.Connectors.Behaviour` for the adapter contract.
 
@@ -27,7 +27,7 @@ defmodule OptimalEngine.Connectors do
   @doc "Persist a new connector row. See `Runner.upsert_row/1`."
   defdelegate register(attrs), to: Runner, as: :upsert_row
 
-  @doc "Run one sync cycle for the given connector."
+  @doc "Run one sync cycle for the given connector through governance by default."
   def run(connector_id, opts \\ []), do: Runner.run(connector_id, opts)
 
   @doc "Run one sync cycle through Memory Core tool governance."

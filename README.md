@@ -111,7 +111,7 @@ Built and verified now:
 | Governed retrieval | Retrieval returns Context Packages, not loose chunks, writes explicit retrieval-plan metadata, applies structured subject/action/object and asset filters, filters Facts, Memory Objects, and asset extraction projections by partition/security scope before package assembly, marks affected packages stale when returned Facts or Memory Objects are superseded, can refresh a stale package from its original request scope, can batch refresh stale packages, and exposes API, CLI/cron, and supervised scheduler triggers for app/agent/runtime workflows. |
 | Active Memory Pools | Task-scoped working memory can load Context Packages, refresh stale loaded Context Packages, and publish observations as pending Claims. |
 | Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
-| Connector governance | Connector sync can run through the governed tool-call surface, blocking unauthorized runs before connector execution and recording both connector-run and tool-call audit rows when allowed. |
+| Connector governance | Connector sync runs through the governed tool-call surface by default, blocking unauthorized runs before connector execution and recording both connector-run and tool-call audit rows when allowed. Raw sync requires an explicit `governed: false` bypass. |
 | Evaluation records | Benchmark/evaluation runs and per-case judge results can be stored, summarized, and linked to Context Packages for later result dashboards. |
 | Workspace export | Markdown/files are projections and editing surfaces, not the only source of truth. |
 | Reality check | `mix optimal.reality_check` covers store counts, topology, evidence/truth lifecycle, recall packages, retrieval, connectors, evaluation records, wiki, and compliance probes. |
@@ -141,7 +141,7 @@ mix test test/connectors/asset_ingest_test.exs --seed 0
 3 tests, 0 failures
 
 mix test test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs --seed 0
-13 tests, 0 failures
+14 tests, 0 failures
 
 mix test test/memory_core/claim_review_test.exs test/api/router_test.exs --seed 0
 34 tests, 0 failures
@@ -638,10 +638,9 @@ The next build slices are:
    full-text, vector, graph, temporal, workflow, and deeper permission-aware recall.
 5. Expand scheduled Context Package refresh with per-workspace policies, metrics,
    and backoff beyond the current supervised scheduler.
-6. Make connector governance the default runtime path for connector sync.
-7. Add benchmark runners, dataset importers, judge execution, and result exports
+6. Add benchmark runners, dataset importers, judge execution, and result exports
    on top of the existing evaluation run/case records.
-8. Add recovery/rebuild services for summaries, indexes, workflows, and derived
+7. Add recovery/rebuild services for summaries, indexes, workflows, and derived
    projections.
 
 The system is meant to stay complex where complexity carries meaning: evidence,
