@@ -108,7 +108,7 @@ Built and verified now:
 | Claim review queue | `MemoryCore.claim_review_queue/1` and `GET /api/memory-core/claim-review` return review/lifecycle counts plus filterable Claim rows for UI and agent review workflows. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
-| Governed retrieval | Retrieval returns Context Packages, not loose chunks, filters Facts, Memory Objects, and asset extraction projections by partition/security scope before package assembly, marks affected packages stale when returned Facts or Memory Objects are superseded, can refresh a stale package from its original request scope, can batch refresh stale packages, and exposes API plus CLI/cron triggers for app/agent/scheduler workflows. |
+| Governed retrieval | Retrieval returns Context Packages, not loose chunks, filters Facts, Memory Objects, and asset extraction projections by partition/security scope before package assembly, marks affected packages stale when returned Facts or Memory Objects are superseded, can refresh a stale package from its original request scope, can batch refresh stale packages, and exposes API, CLI/cron, and supervised scheduler triggers for app/agent/runtime workflows. |
 | Active Memory Pools | Task-scoped working memory can load Context Packages, refresh stale loaded Context Packages, and publish observations as pending Claims. |
 | Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
 | Connector governance | Connector sync can run through the governed tool-call surface, blocking unauthorized runs before connector execution and recording both connector-run and tool-call audit rows when allowed. |
@@ -148,6 +148,9 @@ mix test test/memory_core/claim_review_test.exs test/api/router_test.exs --seed 
 
 mix test test/evaluation_test.exs test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs test/api/router_test.exs test/memory_core/spine_test.exs test/pipeline/multimodal_adapter_runner_test.exs test/memory_core/asset_store_test.exs test/memory_core/claim_review_test.exs --seed 0
 82 tests, 0 failures
+
+mix test test/memory_core/context_refresh_scheduler_test.exs --seed 0
+3 tests, 0 failures
 
 mix test test/pipeline/multimodal_adapter_runner_test.exs --seed 0
 8 tests, 0 failures
@@ -630,8 +633,8 @@ The next build slices are:
    extraction output.
 4. Expand Retrieval Coordinator beyond simple fact/memory/extraction lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
-5. Wire Context Package batch refresh into scheduler workflows after
-   packages are marked stale, beyond the current CLI/cron task.
+5. Expand scheduled Context Package refresh with per-workspace policies, metrics,
+   and backoff beyond the current supervised scheduler.
 6. Make connector governance the default runtime path for connector sync.
 7. Add benchmark runners, dataset importers, judge execution, and result exports
    on top of the existing evaluation run/case records.

@@ -35,6 +35,13 @@ config :optimal_engine, :hybrid_search,
   alpha: 0.6,
   vector_enabled: true
 
+config :optimal_engine, :context_refresh_scheduler,
+  enabled: true,
+  boot_delay_ms: 5 * 60 * 1_000,
+  interval_ms: 60 * 60 * 1_000,
+  batch_limit: 50,
+  workspace_limit: 100
+
 config :logger, :console,
   format: "[$level] $message\n",
   metadata: [:module, :request_id]
