@@ -656,6 +656,14 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                allowed_partitions: ["different-partition"],
                allowed_security_labels: ["internal"]
              ),
+           {:ok, batch_package} <-
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               request_id: "reality-batch-refresh",
+               actor_id: "agent:reality-check",
+               allowed_partitions: ["reality-check"],
+               allowed_security_labels: ["internal"]
+             ),
            [%{id: fact_id}] = package.fact_links,
            :ok <-
              MemoryCoreStore.invalidate_context_packages_for_object("fact", fact_id,
@@ -663,11 +671,15 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                reason: "reality_refresh_probe"
              ),
            {:ok, refreshed_package} <-
-             RetrievalCoordinator.refresh_context_package(package.id, workspace_id: workspace_id) do
+             RetrievalCoordinator.refresh_context_package(package.id, workspace_id: workspace_id),
+           {:ok, batch_refresh} <-
+             RetrievalCoordinator.refresh_stale_context_packages(workspace_id: workspace_id) do
         {:ok,
          %{
            package: package,
            filtered_package: filtered_package,
+           batch_package: batch_package,
+           batch_refresh: batch_refresh,
            refreshed_package: refreshed_package
          }}
       end
@@ -706,6 +718,20 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
               {:ok, "fresh=#{ctx.refreshed_package.id}"}
             else
               {:error, inspect(ctx.refreshed_package)}
+            end
+          end)
+          |> probe("stale context package batch refreshed", fn ->
+            case ctx.batch_refresh do
+              %{
+                stale_context_package_ids: [package_id],
+                refreshed_context_packages: [%{refresh_state: "fresh"}],
+                errors: []
+              }
+              when package_id == ctx.batch_package.id ->
+                {:ok, "refreshed=1"}
+
+              other ->
+                {:error, inspect(other)}
             end
           end)
 
