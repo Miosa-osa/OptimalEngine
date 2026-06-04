@@ -61,13 +61,28 @@ defmodule OptimalEngine.Connectors.Runner do
   @doc """
   Run one sync cycle for the connector identified by `connector_id`.
 
+  Connector sync is governed by default. Agents, schedulers, APIs, and normal
+  callers go through the Memory Core tool-call gate before the adapter executes.
+  Use `governed: false` only for explicit legacy/internal raw sync paths.
+
   Options:
+    * `:governed` — pass `false` to bypass the governance gate explicitly
     * `:max_retries` — cap on transient-error retries (default 5)
     * `:signal_sink` — `(signals) -> :ok` callback that consumes the
       produced signals (default: hands them to the intake pipeline)
   """
-  @spec run(String.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
+  @spec run(String.t(), keyword()) ::
+          {:ok, run_result()} | {:ok, governed_run_result()} | {:error, term()}
   def run(connector_id, opts \\ []) when is_binary(connector_id) do
+    if Keyword.get(opts, :governed, true) do
+      run_governed(connector_id, opts)
+    else
+      run_raw(connector_id, opts)
+    end
+  end
+
+  @spec run_raw(String.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
+  defp run_raw(connector_id, opts) when is_binary(connector_id) do
     with {:ok, row} <- fetch_connector(connector_id),
          :ok <- ensure_enabled(row),
          {:ok, mod} <- lookup_adapter(row.kind, opts),
@@ -100,7 +115,7 @@ defmodule OptimalEngine.Connectors.Runner do
       input_payload = governed_connector_input(row)
 
       executor = fn ->
-        case run(connector_id, connector_run_opts(opts)) do
+        case run_raw(connector_id, connector_run_opts(opts)) do
           {:ok, result} -> {:ok, governed_connector_output(row, result)}
           {:error, reason} -> {:error, reason}
         end

@@ -23,7 +23,7 @@ defmodule OptimalEngine.Connectors.RunnerTest do
         }
       })
 
-    {:ok, result} = Runner.run(id)
+    {:ok, result} = Runner.run(id, governed: false)
 
     # Slack sync is still `:not_implemented` → runner reports :error
     assert result.status == :error
@@ -52,7 +52,7 @@ defmodule OptimalEngine.Connectors.RunnerTest do
         enabled: false
       })
 
-    assert {:error, :disabled} = Runner.run(id)
+    assert {:error, :disabled} = Runner.run(id, governed: false)
   end
 
   test "successful sync advances the cursor", %{id: id} do
@@ -127,6 +127,7 @@ defmodule OptimalEngine.Connectors.RunnerTest do
 
     assert {:ok, result} =
              Runner.run(id,
+               governed: false,
                adapter_resolver: fn "slack" ->
                  {:ok, OptimalEngine.Connectors.RunnerTest.SyncAssetAdapter}
                end,
@@ -198,7 +199,42 @@ defmodule OptimalEngine.Connectors.RunnerTest do
     assert connector_runs == 0
   end
 
-  test "governed run allows connector execution and records both audit layers", %{id: id} do
+  test "default run is governed and rejects missing privileges before connector execution", %{
+    id: id
+  } do
+    workspace_id = "default:connector-default-governance-#{System.unique_integer([:positive])}"
+
+    {:ok, ^id} =
+      Connectors.register(%{
+        id: id,
+        kind: :slack,
+        config: %{
+          "workspace_id" => "T01",
+          "channels" => ["C01"],
+          "credentials" => %{"bot_token" => "xoxb-test"}
+        }
+      })
+
+    assert {:error, {:rejected, rejected_run}} =
+             Runner.run(id,
+               workspace_id: workspace_id,
+               actor_id: "agent:connector-test",
+               granted_privileges: [],
+               requested_partitions: ["ops"],
+               allowed_partitions: ["ops"]
+             )
+
+    assert rejected_run.tool_name == "connector.slack.sync"
+    assert rejected_run.decision_state == "rejected"
+    assert rejected_run.run_status == "rejected"
+
+    {:ok, [[connector_runs]]} =
+      Store.raw_query("SELECT COUNT(*) FROM connector_runs WHERE connector_id = ?1", [id])
+
+    assert connector_runs == 0
+  end
+
+  test "default governed run allows connector execution and records both audit layers", %{id: id} do
     workspace_id = "default:connector-governance-#{System.unique_integer([:positive])}"
 
     {:ok, ^id} =
@@ -213,7 +249,7 @@ defmodule OptimalEngine.Connectors.RunnerTest do
       })
 
     assert {:ok, result} =
-             Runner.run_governed(id,
+             Runner.run(id,
                workspace_id: workspace_id,
                actor_id: "agent:connector-test",
                granted_privileges: ["connector:slack:sync", "signal:ingest"],

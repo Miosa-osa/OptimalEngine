@@ -1478,18 +1478,25 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                end,
                workspace_id: workspace_id,
                actor_id: "agent:reality-check",
+               granted_privileges: ["connector:slack:sync", "signal:ingest"],
+               requested_partitions: ["reality-check"],
+               allowed_partitions: ["reality-check"],
                security_labels: ["internal"],
                partition_ids: ["reality-check"]
              ) do
           {:ok, result} ->
+            connector_result = result.connector_result
+
             with {:ok, [[asset_count]]} <-
                    Store.raw_query(
                      "SELECT COUNT(*) FROM assets WHERE workspace_id = ?1 AND metadata LIKE ?2",
                      [workspace_id, "%reality-file-1%"]
                    ) do
-              if result.status == :success and result.assets == 1 and result.asset_errors == 0 and
-                   asset_count == 1 do
-                {:ok, "assets=#{result.assets}, asset_errors=#{result.asset_errors}"}
+              if result.governance_run.decision_state == "allowed" and
+                   connector_result.status == "success" and connector_result.assets == 1 and
+                   connector_result.asset_errors == 0 and asset_count == 1 do
+                {:ok,
+                 "assets=#{connector_result.assets}, asset_errors=#{connector_result.asset_errors}"}
               else
                 {:error, "result=#{inspect(result)} asset_count=#{asset_count}"}
               end
