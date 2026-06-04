@@ -58,7 +58,8 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunner do
   end
 
   defp execute_command(asset, tool, command, opts) do
-    args = Keyword.get(opts, :args) || default_args(tool, asset)
+    args =
+      Keyword.get(opts, :args) || MultimodalToolRegistry.default_args(tool.id, asset.storage_path)
 
     case System.cmd(command, args, stderr_to_stdout: true) do
       {output, 0} ->
@@ -84,15 +85,6 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunner do
         metadata: command_metadata(command, Keyword.get(opts, :args, []), opts)
       )
   end
-
-  defp default_args(%{id: :docling}, asset), do: [asset.storage_path]
-  defp default_args(%{id: :marker}, asset), do: [asset.storage_path]
-  defp default_args(%{id: :olmocr}, asset), do: [asset.storage_path]
-  defp default_args(%{id: :tesseract}, asset), do: [asset.storage_path, "stdout"]
-  defp default_args(%{id: :ffmpeg}, asset), do: ["-i", asset.storage_path, "-f", "null", "-"]
-  defp default_args(%{id: :whisper_cpp}, asset), do: ["-f", asset.storage_path]
-  defp default_args(%{id: :openai_whisper}, asset), do: [asset.storage_path]
-  defp default_args(_tool, asset), do: [asset.storage_path]
 
   defp record(asset, tool, opts, attrs) do
     metadata =
@@ -147,12 +139,15 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunner do
     end)
   end
 
-  defp adapter_role(tool, opts), do: Keyword.get(opts, :adapter_role) || List.first(tool.roles)
+  defp adapter_role(tool, opts) do
+    Keyword.get(opts, :adapter_role) || tool.profile.primary_role || List.first(tool.roles)
+  end
 
   defp command_metadata(command, args, opts) do
     %{
       "command" => command,
       "args" => args,
+      "adapter_profile" => stringify_keys(Keyword.get(opts, :adapter_profile, %{})),
       "configured_by" => Keyword.get(opts, :configured_by, "runtime")
     }
   end

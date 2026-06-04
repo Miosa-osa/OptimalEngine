@@ -55,6 +55,39 @@ defmodule OptimalEngine.Pipeline.MultimodalToolRegistryTest do
            ]
   end
 
+  test "exposes adapter profiles for runtime execution and review policy" do
+    assert %{
+             primary_role: :document_intelligence,
+             output_formats: output_formats,
+             claimable_output: true,
+             args_template: ["{asset_path}"],
+             install_profile: :python_cli
+           } = MultimodalToolRegistry.profile(:docling)
+
+    assert :json in output_formats
+    assert :markdown in output_formats
+    assert MultimodalToolRegistry.claimable_output?(:docling)
+    refute MultimodalToolRegistry.claimable_output?(:ffmpeg)
+    refute MultimodalToolRegistry.claimable_output?(:colpali)
+  end
+
+  test "builds default adapter args from registry profiles" do
+    assert MultimodalToolRegistry.default_args(:docling, "/tmp/source.pdf") == ["/tmp/source.pdf"]
+
+    assert MultimodalToolRegistry.default_args(:tesseract, "/tmp/page.png") == [
+             "/tmp/page.png",
+             "stdout"
+           ]
+
+    assert MultimodalToolRegistry.default_args(:ffmpeg, "/tmp/source.mp4") == [
+             "-i",
+             "/tmp/source.mp4",
+             "-f",
+             "null",
+             "-"
+           ]
+  end
+
   test "availability reports do not require tools to be installed" do
     availability = MultimodalToolRegistry.availability()
 
