@@ -12,6 +12,8 @@ defmodule OptimalEngine.WorkspaceTopology do
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Topology.{Node, NodeMember, NodeRelationship, NodeType}
   alias OptimalEngine.Workspace
+  alias OptimalEngine.Workspace.Filesystem, as: WorkspaceFilesystem
+  alias OptimalEngine.WorkspaceExport
 
   @standard_node_types [
     {"entity", "Entity", "Business, organization, institution, or operating entity."},
@@ -44,12 +46,70 @@ defmodule OptimalEngine.WorkspaceTopology do
           updated_at: String.t() | nil
         }
 
+  @type setup_result :: %{
+          workspace: Workspace.t(),
+          path: String.t(),
+          node_types: [NodeType.t()],
+          nodes: [Node.t()],
+          relationships: [NodeRelationship.t()],
+          exports: [map()],
+          projections: [map()],
+          rhythm_paths: [String.t()],
+          agent_sop_path: String.t() | nil
+        }
+
   @doc "Create a workspace and seed the standard Node Types it needs to operate."
   @spec create_workspace(map()) :: {:ok, Workspace.t()} | {:error, term()}
   def create_workspace(attrs) when is_map(attrs) do
     with {:ok, workspace} <- Workspace.create(attrs),
          :ok <- ensure_standard_node_types(workspace) do
       {:ok, workspace}
+    end
+  end
+
+  @doc """
+  Create or refresh a workspace operating topology.
+
+  This is the onboarding entry point for humans and agent CLIs. It creates the
+  workspace if needed, ensures standard Node Types, optionally creates starter
+  Nodes, writes the human-operable markdown/rhythm/agent files, and records
+  those files as governed projections.
+  """
+  @spec setup_workspace(map()) :: {:ok, setup_result()} | {:error, term()}
+  def setup_workspace(%{slug: slug, name: name} = attrs)
+      when is_binary(slug) and is_binary(name) do
+    tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
+    root = Map.get(attrs, :root, Application.get_env(:optimal_engine, :root_path, File.cwd!()))
+    create_starter_nodes? = Map.get(attrs, :starter_nodes, true)
+    write_files? = Map.get(attrs, :write_files, true)
+    write_rhythm? = Map.get(attrs, :write_rhythm, true)
+    write_agent_sop? = Map.get(attrs, :write_agent_sop, true)
+
+    with {:ok, workspace} <- get_or_create_workspace(attrs),
+         :ok <- ensure_standard_node_types(workspace),
+         {:ok, node_types} <- list_node_types(tenant_id: tenant_id, workspace_id: workspace.id),
+         {:ok, nodes} <- maybe_create_setup_nodes(workspace, attrs, create_starter_nodes?),
+         {:ok, relationships} <- create_setup_relationships(workspace, nodes, attrs),
+         {:ok, path} <- WorkspaceFilesystem.provision(workspace.slug, root: root),
+         {:ok, projection_result} <-
+           maybe_write_setup_files(workspace, path, nodes,
+             write_files: write_files?,
+             write_rhythm: write_rhythm?,
+             write_agent_sop: write_agent_sop?,
+             actor_id: Map.get(attrs, :actor_id) || Map.get(attrs, :created_by) || "optimal.setup"
+           ) do
+      {:ok,
+       %{
+         workspace: workspace,
+         path: path,
+         node_types: node_types,
+         nodes: nodes,
+         relationships: relationships,
+         exports: projection_result.exports,
+         projections: projection_result.projections,
+         rhythm_paths: projection_result.rhythm_paths,
+         agent_sop_path: projection_result.agent_sop_path
+       }}
     end
   end
 
@@ -132,6 +192,43 @@ defmodule OptimalEngine.WorkspaceTopology do
   @spec nodes_for_principal(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def nodes_for_principal(principal_id, opts \\ []) do
     NodeMember.nodes_of(principal_id, opts)
+  end
+
+  @doc "Return the standard starter Nodes used by `setup_workspace/1`."
+  @spec starter_nodes() :: [map()]
+  def starter_nodes do
+    [
+      %{
+        slug: "inbox",
+        name: "Inbox",
+        kind: :context,
+        description: "Default intake area for unsorted sources, notes, and pending routing."
+      },
+      %{
+        slug: "first-project",
+        name: "First Project",
+        kind: :project,
+        description: "Starter project Node. Rename or replace with the first active initiative."
+      },
+      %{
+        slug: "operating-rhythm",
+        name: "Operating Rhythm",
+        kind: :operation,
+        description: "Daily, weekly, and monthly cadence for keeping the workspace current."
+      },
+      %{
+        slug: "primary-user",
+        name: "Primary User",
+        kind: :person,
+        description: "The first human/operator represented in this workspace."
+      },
+      %{
+        slug: "knowledge-base",
+        name: "Knowledge Base",
+        kind: :learning,
+        description: "Research, references, frameworks, and reusable learning context."
+      }
+    ]
   end
 
   @doc """
@@ -302,6 +399,386 @@ defmodule OptimalEngine.WorkspaceTopology do
   end
 
   defp maybe_apply_change(_request, :approve, true), do: {:ok, nil}
+
+  defp get_or_create_workspace(%{slug: slug} = attrs) do
+    tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
+
+    case Workspace.get_by_slug(slug, tenant_id) do
+      {:ok, workspace} ->
+        {:ok, workspace}
+
+      {:error, :not_found} ->
+        create_workspace(attrs)
+
+      other ->
+        other
+    end
+  end
+
+  defp maybe_create_setup_nodes(workspace, attrs, create_starter_nodes?) do
+    custom_nodes =
+      attrs
+      |> Map.get(:nodes, [])
+      |> normalize_setup_node_specs()
+
+    starter_nodes =
+      if create_starter_nodes? do
+        starter_nodes()
+      else
+        []
+      end
+
+    node_specs =
+      (starter_nodes ++ custom_nodes)
+      |> unique_by_slug()
+
+    Enum.reduce_while(node_specs, {:ok, []}, fn spec, {:ok, acc} ->
+      node_attrs =
+        spec
+        |> Map.put(:tenant_id, workspace.tenant_id)
+        |> Map.put(:workspace_id, workspace.id)
+        |> Map.put_new(:path, "nodes/#{spec.slug}")
+
+      case create_node(node_attrs) do
+        {:ok, node} -> {:cont, {:ok, [node | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, nodes} -> {:ok, Enum.reverse(nodes)}
+      other -> other
+    end
+  end
+
+  defp normalize_setup_node_specs(specs) when is_list(specs) do
+    Enum.map(specs, fn spec ->
+      spec
+      |> normalize_keys()
+      |> Map.put_new(:kind, :project)
+      |> Map.update!(:kind, &parse_kind/1)
+      |> Map.put_new(:description, "Custom setup Node.")
+    end)
+  end
+
+  defp normalize_setup_node_specs(_), do: []
+
+  defp normalize_keys(map) when is_map(map) do
+    map
+    |> Enum.map(fn
+      {key, value} when is_binary(key) -> {normalize_key(key), value}
+      pair -> pair
+    end)
+    |> Map.new()
+  end
+
+  defp normalize_key("slug"), do: :slug
+  defp normalize_key("name"), do: :name
+  defp normalize_key("kind"), do: :kind
+  defp normalize_key("description"), do: :description
+  defp normalize_key("path"), do: :path
+  defp normalize_key("metadata"), do: :metadata
+  defp normalize_key("source"), do: :source
+  defp normalize_key("target"), do: :target
+  defp normalize_key("relationship_type"), do: :relationship_type
+  defp normalize_key(other), do: other
+
+  defp unique_by_slug(specs) do
+    specs
+    |> Enum.reverse()
+    |> Enum.uniq_by(& &1.slug)
+    |> Enum.reverse()
+  end
+
+  defp create_setup_relationships(_workspace, [], _attrs), do: {:ok, []}
+
+  defp create_setup_relationships(workspace, nodes, attrs) do
+    node_by_slug = Map.new(nodes, &{&1.slug, &1})
+
+    default_relationships = [
+      {"primary-user", "first-project", :participates_in, %{role: "operator"}},
+      {"operating-rhythm", "first-project", :supports, %{cadence: "daily_weekly"}},
+      {"knowledge-base", "first-project", :references, %{purpose: "research_context"}},
+      {"inbox", "first-project", :supports, %{purpose: "unrouted_inputs"}}
+    ]
+
+    relationship_specs =
+      default_relationships ++ Map.get(attrs, :relationships, [])
+
+    Enum.reduce_while(relationship_specs, {:ok, []}, fn spec, {:ok, acc} ->
+      with {:ok, source_slug, target_slug, relationship_type, metadata} <-
+             normalize_relationship_spec(spec),
+           {:ok, source} <- fetch_setup_node(node_by_slug, source_slug),
+           {:ok, target} <- fetch_setup_node(node_by_slug, target_slug),
+           {:ok, relationship} <-
+             link_nodes(source.id, target.id, relationship_type,
+               tenant_id: workspace.tenant_id,
+               workspace_id: workspace.id,
+               metadata: metadata,
+               created_by: Map.get(attrs, :actor_id) || "optimal.setup"
+             ) do
+        {:cont, {:ok, [relationship | acc]}}
+      else
+        {:error, :missing_setup_node} -> {:cont, {:ok, acc}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, relationships} -> {:ok, Enum.reverse(relationships)}
+      other -> other
+    end
+  end
+
+  defp normalize_relationship_spec({source, target, type, metadata}),
+    do: {:ok, source, target, type, metadata}
+
+  defp normalize_relationship_spec(%{} = spec) do
+    spec = normalize_keys(spec)
+
+    {:ok, Map.fetch!(spec, :source), Map.fetch!(spec, :target),
+     parse_relationship_type(Map.get(spec, :relationship_type, :references)),
+     Map.get(spec, :metadata, %{})}
+  end
+
+  defp fetch_setup_node(node_by_slug, slug) do
+    case Map.fetch(node_by_slug, slug) do
+      {:ok, node} -> {:ok, node}
+      :error -> {:error, :missing_setup_node}
+    end
+  end
+
+  defp maybe_write_setup_files(workspace, workspace_path, nodes, opts) do
+    if Keyword.get(opts, :write_files, true) == false do
+      {:ok, %{exports: [], projections: [], rhythm_paths: [], agent_sop_path: nil}}
+    else
+      actor_id = Keyword.fetch!(opts, :actor_id)
+
+      with {:ok, node_projection_result} <-
+             write_node_projection_files(workspace, workspace_path, nodes, actor_id),
+           {:ok, rhythm_paths} <-
+             maybe_write_rhythm_files(workspace_path, Keyword.get(opts, :write_rhythm, true)),
+           {:ok, agent_sop_path} <-
+             maybe_write_agent_sop(
+               workspace,
+               workspace_path,
+               Keyword.get(opts, :write_agent_sop, true)
+             ) do
+        {:ok,
+         %{
+           exports: node_projection_result.exports,
+           projections: node_projection_result.projections,
+           rhythm_paths: rhythm_paths,
+           agent_sop_path: agent_sop_path
+         }}
+      end
+    end
+  end
+
+  defp write_node_projection_files(workspace, workspace_path, nodes, actor_id) do
+    Enum.reduce_while(nodes, {:ok, %{exports: [], projections: []}}, fn node, {:ok, acc} ->
+      node_dir = Path.join([workspace_path, "nodes", node.slug])
+      context_path = Path.join(node_dir, "context.md")
+      signal_path = Path.join(node_dir, "signal.md")
+      signals_dir = Path.join(node_dir, "signals")
+
+      with :ok <- File.mkdir_p(signals_dir),
+           :ok <- write_if_missing(context_path, node_context_markdown(node)),
+           :ok <- write_if_missing(signal_path, node_signal_markdown(node)),
+           {:ok, context_projection} <-
+             record_node_projection(
+               workspace,
+               workspace_path,
+               node,
+               context_path,
+               "context",
+               actor_id
+             ),
+           {:ok, signal_projection} <-
+             record_node_projection(
+               workspace,
+               workspace_path,
+               node,
+               signal_path,
+               "signal",
+               actor_id
+             ) do
+        {:cont,
+         {:ok,
+          %{
+            exports: [context_projection.export, signal_projection.export | acc.exports],
+            projections: [
+              context_projection.projection,
+              signal_projection.projection | acc.projections
+            ]
+          }}}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, result} ->
+        {:ok,
+         %{
+           exports: Enum.reverse(result.exports),
+           projections: Enum.reverse(result.projections)
+         }}
+
+      other ->
+        other
+    end
+  end
+
+  defp record_node_projection(workspace, workspace_path, node, path, role, actor_id) do
+    destination_uri = "file://#{Path.relative_to(path, workspace_path)}"
+    content = File.read!(path)
+
+    with {:ok, export} <-
+           WorkspaceExport.record_export(%{
+             tenant_id: workspace.tenant_id,
+             workspace_id: workspace.id,
+             source_object_type: "node",
+             source_object_id: node.id,
+             surface_type: "markdown",
+             destination_uri: destination_uri,
+             generated_by: actor_id,
+             metadata: %{projection_role: role, node_slug: node.slug}
+           }),
+         {:ok, projection} <-
+           WorkspaceExport.record_projection_revision(export.id, %{
+             tenant_id: workspace.tenant_id,
+             workspace_id: workspace.id,
+             projection_uri: destination_uri,
+             content: content,
+             source_object_links: [%{type: "node", id: node.id}],
+             created_by: actor_id,
+             metadata: %{projection_role: role, node_slug: node.slug}
+           }) do
+      {:ok, %{export: export, projection: projection}}
+    end
+  end
+
+  defp maybe_write_rhythm_files(_workspace_path, false), do: {:ok, []}
+
+  defp maybe_write_rhythm_files(workspace_path, true) do
+    rhythm_dir = Path.join(workspace_path, "rhythm")
+    daily_dir = Path.join(rhythm_dir, "daily")
+    weekly_dir = Path.join(rhythm_dir, "weekly")
+
+    paths = [
+      Path.join(rhythm_dir, "README.md"),
+      Path.join(daily_dir, ".gitkeep"),
+      Path.join(weekly_dir, ".gitkeep")
+    ]
+
+    with :ok <- File.mkdir_p(daily_dir),
+         :ok <- File.mkdir_p(weekly_dir),
+         :ok <- write_if_missing(Enum.at(paths, 0), rhythm_readme()) do
+      File.touch!(Enum.at(paths, 1))
+      File.touch!(Enum.at(paths, 2))
+      {:ok, paths}
+    end
+  end
+
+  defp maybe_write_agent_sop(_workspace, _workspace_path, false), do: {:ok, nil}
+
+  defp maybe_write_agent_sop(workspace, workspace_path, true) do
+    path = Path.join(workspace_path, "AGENTS.md")
+
+    with :ok <- write_if_missing(path, agent_sop_markdown(workspace, workspace_path)) do
+      {:ok, path}
+    end
+  end
+
+  defp write_if_missing(path, content) do
+    if File.exists?(path) do
+      :ok
+    else
+      File.write(path, content)
+    end
+  end
+
+  defp node_context_markdown(node) do
+    """
+    # #{node.name}
+
+    ## Identity
+
+    - Node ID: `#{node.id}`
+    - Node type: `#{node.kind}`
+    - Purpose: #{node.description || "Define this Node's purpose."}
+    - Status: `#{node.status}`
+
+    ## Relationships
+
+    Add important parent, child, dependency, ownership, and collaboration links here.
+
+    ## Stable Context
+
+    Durable facts and reviewed memory for this Node should appear here as projections.
+    Human edits are re-ingested as source evidence before becoming durable truth.
+    """
+  end
+
+  defp node_signal_markdown(node) do
+    """
+    # #{node.name} Signal
+
+    ## Current Focus
+
+    - Define the current focus for this Node.
+
+    ## Blockers
+
+    - None recorded.
+
+    ## Open Decisions
+
+    - None recorded.
+    """
+  end
+
+  defp rhythm_readme do
+    """
+    # Operating Rhythm
+
+    Use this folder for daily and weekly operating state.
+
+    Rhythm is working state, not durable truth by itself:
+
+    ```text
+    daily note -> Source Package -> Signal -> Claim/Fact/Memory when reviewed
+    ```
+
+    Suggested cadence:
+
+    - daily: focus, blockers, decisions, follow-ups
+    - weekly: review active Nodes, stale context, open Claims, next priorities
+    - monthly: review topology, policies, workflows, and Skill Packages
+    """
+  end
+
+  defp agent_sop_markdown(workspace, workspace_path) do
+    """
+    # Agent SOP
+
+    Workspace: `#{workspace.id}`
+
+    Agents working in this workspace must:
+
+    1. Load workspace and Node scope before acting.
+    2. Retrieve governed context before answering project or memory questions.
+    3. Treat markdown as a projection or source input, not automatic truth.
+    4. Record observations as pending Claims before promotion.
+    5. Use registered tools and preserve audit/source links.
+
+    Useful commands:
+
+    ```bash
+    mix optimal.topology --workspace #{workspace.id}
+    mix optimal.rag "what changed this week?" --workspace #{workspace.id} --trace
+    mix optimal.ingest_workspace #{workspace_path}
+    ```
+    """
+  end
 
   defp row_to_change_request([
          id,
