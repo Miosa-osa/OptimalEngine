@@ -302,6 +302,12 @@ defmodule OptimalEngine.API.RouterTest do
                  "SELECT lifecycle_state FROM facts WHERE workspace_id = ?1 AND id = ?2",
                  [workspace_id, original_fact_id]
                )
+
+      assert {:ok, [["superseded", "superseded"]]} =
+               OptimalEngine.Store.raw_query(
+                 "SELECT lifecycle_state, supersession_status FROM memory_objects WHERE workspace_id = ?1 AND fact_links LIKE ?2",
+                 [workspace_id, "%#{original_fact_id}%"]
+               )
     end
   end
 

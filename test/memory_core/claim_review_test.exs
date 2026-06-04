@@ -199,6 +199,12 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
                [workspace_id, original.fact.id]
              )
 
+    assert {:ok, [["superseded", "stale", "superseded"]]} =
+             Store.raw_query(
+               "SELECT lifecycle_state, staleness_status, supersession_status FROM memory_objects WHERE workspace_id = ?1 AND id = ?2",
+               [workspace_id, original.memory_object.id]
+             )
+
     assert {:ok, [[1]]} =
              Store.raw_query(
                "SELECT COUNT(*) FROM facts WHERE workspace_id = ?1 AND lifecycle_state = 'accepted'",

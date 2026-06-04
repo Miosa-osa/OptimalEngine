@@ -575,6 +575,11 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                    Store.raw_query(
                      "SELECT COUNT(*) FROM relationship_edges WHERE workspace_id = ?1 AND relationship_type = 'supersedes' AND from_object_id = ?2 AND to_object_id = ?3",
                      [workspace_id, replacement.fact.id, ctx.fact.id]
+                   ),
+                 {:ok, [["superseded", "superseded"]]} <-
+                   Store.raw_query(
+                     "SELECT lifecycle_state, supersession_status FROM memory_objects WHERE workspace_id = ?1 AND id = ?2",
+                     [workspace_id, ctx.memory.id]
                    ) do
               {:ok, "superseded=#{ctx.fact.id}"}
             else
