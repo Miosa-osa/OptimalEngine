@@ -1400,6 +1400,54 @@ defmodule OptimalEngine.API.Router do
 
   # ── Memory Core claim governance ──────────────────────────────────────────
 
+  # POST /api/memory-core/context-packages/refresh-stale — batch refresh stale
+  # Context Packages for scheduler, app, or agent callers.
+  # Body: {workspace?, tenant?, actor_id?, batch_limit?, limit?,
+  #        continue_on_error?, allowed_partitions?, allowed_security_labels?}
+  post "/api/memory-core/context-packages/refresh-stale" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+
+    tenant_id =
+      Map.get(
+        body,
+        "tenant",
+        Map.get(body, "tenant_id", conn.assigns[:current_tenant] || "default")
+      )
+
+    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    opts =
+      [
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        actor_id: actor_id,
+        batch_limit: parse_optional_positive_int(Map.get(body, "batch_limit")),
+        limit: parse_optional_positive_int(Map.get(body, "limit")),
+        continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
+      ]
+      |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
+      |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case MemoryCore.refresh_stale_context_packages(opts) do
+      {:ok, result} ->
+        json(conn, %{
+          tenant_id: tenant_id,
+          workspace_id: workspace_id,
+          stale_context_package_ids: result.stale_context_package_ids,
+          refreshed_count: length(result.refreshed_context_packages),
+          error_count: length(result.errors),
+          refreshed_context_packages:
+            Enum.map(result.refreshed_context_packages, &stringify_keys/1),
+          errors: Enum.map(result.errors, &stringify_keys/1)
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
   # GET /api/memory-core/claim-review — review queue summary and claims.
   # Params: workspace, tenant, review_status?, lifecycle_state?, limit?
   get "/api/memory-core/claim-review" do
@@ -2010,6 +2058,14 @@ defmodule OptimalEngine.API.Router do
       value when is_list(value) -> Enum.map(value, &to_string/1)
       value when is_binary(value) and value != "" -> [value]
       _ -> []
+    end
+  end
+
+  defp maybe_put_string_list(keyword, body, body_key, opt_key) do
+    if Map.has_key?(body, body_key) do
+      Keyword.put(keyword, opt_key, string_list_param(body, body_key))
+    else
+      keyword
     end
   end
 

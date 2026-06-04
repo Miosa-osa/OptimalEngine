@@ -309,6 +309,62 @@ defmodule OptimalEngine.API.RouterTest do
                  [workspace_id, "%#{original_fact_id}%"]
                )
     end
+
+    test "refreshes stale context packages through API" do
+      workspace_id = "api-context-refresh-#{System.unique_integer([:positive])}"
+
+      assert {:ok, claim} =
+               extracted_policy_claim(workspace_id,
+                 claim_text: "The API launch plan is approved.",
+                 subject_anchor: "api_launch",
+                 action_class: "approved",
+                 object_anchor: "plan"
+               )
+
+      assert {:ok, accepted} =
+               OptimalEngine.MemoryCore.promote_claim(claim.id,
+                 workspace_id: workspace_id,
+                 actor_id: "user:api-reviewer",
+                 fact_text: "The API launch plan is approved.",
+                 summary: "API launch plan approval is source-backed."
+               )
+
+      assert {:ok, package} =
+               OptimalEngine.MemoryCore.retrieve("launch",
+                 workspace_id: workspace_id,
+                 actor_id: "agent:api",
+                 allowed_partitions: ["api-test"],
+                 allowed_security_labels: ["internal"]
+               )
+
+      assert :ok =
+               OptimalEngine.MemoryCore.Store.invalidate_context_packages_for_object(
+                 "fact",
+                 accepted.fact.id,
+                 workspace_id: workspace_id,
+                 reason: "api_refresh_test"
+               )
+
+      refresh_conn =
+        request(:post, "/api/memory-core/context-packages/refresh-stale", %{
+          "workspace" => workspace_id,
+          "actor_id" => "agent:api",
+          "batch_limit" => 10
+        })
+
+      assert refresh_conn.status == 200
+      assert {:ok, body} = Jason.decode(refresh_conn.resp_body)
+      assert body["stale_context_package_ids"] == [package.id]
+      assert body["refreshed_count"] == 1
+      assert body["error_count"] == 0
+      assert [%{"refresh_state" => "fresh"}] = body["refreshed_context_packages"]
+
+      assert {:ok, [["refreshed"]]} =
+               OptimalEngine.Store.raw_query(
+                 "SELECT refresh_state FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
+                 [workspace_id, package.id]
+               )
+    end
   end
 
   describe "POST /api/assets" do
