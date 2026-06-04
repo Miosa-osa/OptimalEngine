@@ -174,6 +174,9 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
 
     assert package.refresh_state == "fresh"
 
+    assert {:error, :context_package_not_stale} =
+             MemoryCore.refresh_context_package(package.id, workspace_id: workspace_id)
+
     assert {:ok, replacement_claim} =
              extracted_claim(workspace_id,
                claim_text: "The launch date is June 17.",
@@ -222,6 +225,20 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
              )
 
     assert invalidation_reason == "fact_superseded:#{original.fact.id}"
+
+    assert {:ok, refreshed_package} =
+             MemoryCore.refresh_context_package(package.id, workspace_id: workspace_id)
+
+    assert refreshed_package.id != package.id
+    assert refreshed_package.refresh_state == "fresh"
+    assert refreshed_package.fact_links == [%{type: "fact", id: replacement.fact.id}]
+
+    assert refreshed_package.memory_links == [
+             %{type: "memory_object", id: replacement.memory_object.id}
+           ]
+
+    assert refreshed_package.metadata.refreshed_from_context_package_id == package.id
+    assert refreshed_package.metadata.refreshed_from_invalidation_reason == invalidation_reason
 
     assert {:ok, [[1]]} =
              Store.raw_query(

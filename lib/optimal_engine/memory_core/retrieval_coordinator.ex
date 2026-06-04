@@ -131,11 +131,15 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         transaction_time_start: now,
         security_labels: merge_lists(returned_objects, :security_labels),
         partition_ids: merge_lists(returned_objects, :partition_ids),
-        metadata: %{
-          query: query,
-          answer_surface: "context_package",
-          asset_extraction_links: asset_extraction_links
-        }
+        metadata:
+          Map.merge(
+            %{
+              query: query,
+              answer_surface: "context_package",
+              asset_extraction_links: asset_extraction_links
+            },
+            Keyword.get(opts, :metadata, %{})
+          )
       }
 
       with :ok <- Store.insert_context_package(context_package) do
@@ -147,6 +151,194 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
          })}
       end
     end
+  end
+
+  @spec refresh_context_package(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def refresh_context_package(context_package_id, opts \\ []) when is_binary(context_package_id) do
+    tenant_id = string_opt(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+
+    with {:ok, stale_package} <- get_context_package(context_package_id, tenant_id, workspace_id),
+         :ok <- ensure_refreshable(stale_package, opts),
+         {:ok, query} <- original_query(stale_package) do
+      refresh_opts =
+        stale_package
+        |> refresh_opts_from_package(opts)
+        |> Keyword.put(
+          :metadata,
+          Map.merge(Keyword.get(opts, :metadata, %{}), %{
+            refreshed_from_context_package_id: stale_package.id,
+            refreshed_from_invalidation_reason: stale_package.invalidation_reason
+          })
+        )
+
+      retrieve(query, refresh_opts)
+    end
+  end
+
+  defp ensure_refreshable(%{refresh_state: "stale"}, _opts), do: :ok
+
+  defp ensure_refreshable(_package, opts) when is_list(opts) do
+    if Keyword.get(opts, :force, false), do: :ok, else: {:error, :context_package_not_stale}
+  end
+
+  defp get_context_package(context_package_id, tenant_id, nil) do
+    sql = context_package_select() <> " WHERE id = ?1 AND tenant_id = ?2 LIMIT 1"
+    context_package_query(sql, [context_package_id, tenant_id])
+  end
+
+  defp get_context_package(context_package_id, tenant_id, workspace_id) do
+    sql =
+      context_package_select() <>
+        " WHERE id = ?1 AND tenant_id = ?2 AND workspace_id = ?3 LIMIT 1"
+
+    context_package_query(sql, [context_package_id, tenant_id, workspace_id])
+  end
+
+  defp context_package_query(sql, params) do
+    case BaseStore.raw_query(sql, params) do
+      {:ok, [row]} -> {:ok, context_package_from_row(row)}
+      {:ok, []} -> {:error, :not_found}
+      other -> other
+    end
+  end
+
+  defp context_package_select do
+    """
+    SELECT id, tenant_id, workspace_id, request_id, request_intent,
+           requesting_actor_id, active_memory_pool_id, time_mode, detail_depth,
+           memory_links, fact_links, workflow_links, skill_package_links,
+           source_package_links, evidence_links, retrieval_plan,
+           package_confidence_summary, package_precision_summary,
+           filtered_object_summary, returned_object_links, redacted_object_links,
+           authorization_envelope, lifecycle_state, refresh_state,
+           invalidation_reason, valid_time_start, valid_time_end,
+           transaction_time_start, transaction_time_end, stale_after, refresh_time,
+           access_policy_id, security_labels, partition_ids, audit_event_links,
+           policy_version, metadata
+    FROM context_packages
+    """
+  end
+
+  defp context_package_from_row([
+         id,
+         tenant_id,
+         workspace_id,
+         request_id,
+         request_intent,
+         requesting_actor_id,
+         active_memory_pool_id,
+         time_mode,
+         detail_depth,
+         memory_links,
+         fact_links,
+         workflow_links,
+         skill_package_links,
+         source_package_links,
+         evidence_links,
+         retrieval_plan,
+         package_confidence_summary,
+         package_precision_summary,
+         filtered_object_summary,
+         returned_object_links,
+         redacted_object_links,
+         authorization_envelope,
+         lifecycle_state,
+         refresh_state,
+         invalidation_reason,
+         valid_time_start,
+         valid_time_end,
+         transaction_time_start,
+         transaction_time_end,
+         stale_after,
+         refresh_time,
+         access_policy_id,
+         security_labels,
+         partition_ids,
+         audit_event_links,
+         policy_version,
+         metadata
+       ]) do
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      request_id: request_id,
+      request_intent: request_intent,
+      requesting_actor_id: requesting_actor_id,
+      active_memory_pool_id: active_memory_pool_id,
+      time_mode: time_mode,
+      detail_depth: detail_depth,
+      memory_links: decode_list(memory_links),
+      fact_links: decode_list(fact_links),
+      workflow_links: decode_list(workflow_links),
+      skill_package_links: decode_list(skill_package_links),
+      source_package_links: decode_list(source_package_links),
+      evidence_links: decode_list(evidence_links),
+      retrieval_plan: decode_map(retrieval_plan),
+      package_confidence_summary: decode_map(package_confidence_summary),
+      package_precision_summary: decode_map(package_precision_summary),
+      filtered_object_summary: decode_map(filtered_object_summary),
+      returned_object_links: decode_list(returned_object_links),
+      redacted_object_links: decode_list(redacted_object_links),
+      authorization_envelope: decode_map(authorization_envelope),
+      lifecycle_state: lifecycle_state,
+      refresh_state: refresh_state,
+      invalidation_reason: invalidation_reason,
+      valid_time_start: valid_time_start,
+      valid_time_end: valid_time_end,
+      transaction_time_start: transaction_time_start,
+      transaction_time_end: transaction_time_end,
+      stale_after: stale_after,
+      refresh_time: refresh_time,
+      access_policy_id: access_policy_id,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      audit_event_links: decode_list(audit_event_links),
+      policy_version: policy_version,
+      metadata: decode_map(metadata)
+    }
+  end
+
+  defp original_query(package) do
+    query =
+      map_get(package.metadata, :query) ||
+        map_get(package.retrieval_plan, :query) ||
+        ""
+
+    case query do
+      "" -> {:error, :missing_original_query}
+      query when is_binary(query) -> {:ok, query}
+      query -> {:ok, to_string(query)}
+    end
+  end
+
+  defp refresh_opts_from_package(package, opts) do
+    auth = package.authorization_envelope
+
+    [
+      tenant_id: Keyword.get(opts, :tenant_id, package.tenant_id),
+      workspace_id: Keyword.get(opts, :workspace_id, package.workspace_id),
+      request_id: Keyword.get(opts, :request_id, package.request_id),
+      request_intent: Keyword.get(opts, :request_intent, package.request_intent),
+      actor_id:
+        Keyword.get(opts, :actor_id) ||
+          Keyword.get(opts, :requesting_actor_id) ||
+          package.requesting_actor_id,
+      active_memory_pool_id:
+        Keyword.get(opts, :active_memory_pool_id, package.active_memory_pool_id),
+      time_mode: Keyword.get(opts, :time_mode, package.time_mode),
+      detail_depth: Keyword.get(opts, :detail_depth, package.detail_depth),
+      allowed_partitions:
+        Keyword.get(opts, :allowed_partitions) ||
+          map_get(auth, :allowed_partitions) ||
+          package.partition_ids,
+      allowed_security_labels:
+        Keyword.get(opts, :allowed_security_labels) ||
+          map_get(auth, :allowed_security_labels) ||
+          package.security_labels,
+      limit: Keyword.get(opts, :limit) || map_get(package.retrieval_plan, :limit) || @default_limit
+    ]
   end
 
   defp fetch_facts(workspace_id, query, limit) do
@@ -468,6 +660,12 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
   defp decode_map(value) when is_map(value), do: value
   defp decode_map(_value), do: %{}
+
+  defp map_get(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp map_get(_map, _key), do: nil
 
   defp link_type?(%{type: type}, expected), do: type == expected
   defp link_type?(%{"type" => type}, expected), do: type == expected
