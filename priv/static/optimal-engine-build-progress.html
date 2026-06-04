@@ -390,27 +390,27 @@
       <section class="hero" id="current-decision">
         <div class="section-head">
           <div>
-            <h2>What We Are Building First</h2>
-            <p class="lead">The foundation build is not the full app and not the full autonomous agent runtime. It is the smallest complete backend loop that proves a human can define a workspace, use it through surfaces, preserve evidence, promote truth, retrieve governed context, work inside an active pool, and turn observed work into draft procedural knowledge.</p>
+            <h2>What We Build Next</h2>
+            <p class="lead">Gate 1 closed the workspace and Node topology loop. The next ordered build is the Markdown wiki service: the human-facing surface that renders Nodes, wiki pages, citations, backlinks, broken-link health, revisions, imports, exports, and rebuild proof before we harden deeper source-first and multimodal intake.</p>
           </div>
-          <span class="status partial">Gate 8 + memory API</span>
+          <span class="status next">Markdown wiki service</span>
         </div>
 
         <div class="grid-3">
-          <div class="card next">
-            <h3>Gate 1</h3>
-            <p><strong>Topology + Workspace Surface + Source Re-entry.</strong> This gives every later memory, retrieval, workflow, and agent action a stable place to attach.</p>
+          <div class="card done">
+            <h3>Closed Gate</h3>
+            <p><strong>Workspace + Node Topology.</strong> Humans and agents can create a workspace, starter Nodes, rhythm files, agent SOP, and projection records.</p>
             <div class="progress"><div class="bar done" style="width: 100%"></div></div>
           </div>
           <div class="card partial">
-            <h3>Current Reality</h3>
-            <p>Gates 1 through 7 have first working slices. Gate 8 now has governed raw asset storage plus Pipeline, Indexer, API, connector-ingestion integration, default governed connector sync, adapter profiles, string-safe adapter ID resolution, richer provider-schema extraction parsing, smart memory intake, Active Memory Pool API control, and an executable evaluation runner for multimodal/evidence-backed recall. File bytes are copied into the workspace asset store, Source Packages preserve the raw artifact, asset rows carry modality/security/retention metadata, derivation ledger entries link the preserved file to the source evidence, <span class="mono">Pipeline.run/2</span> preserves parser assets before enrichment, decomposition, and embedding, binary indexing forwards workspace scope into the governed pipeline, <span class="mono">POST /api/assets</span> lets API clients preserve base64 or local-path files through the same Memory Core path, <span class="mono">POST /api/memory/remember</span> exposes gated memory intake to app/agent callers, <span class="mono">POST /api/memory-core/active-pools</span> and related pool routes expose the task-scoped working-memory loop to apps/agents, and <span class="mono">Connectors.preserve_payload_assets/4</span> gives connector adapters a governed path for attachments/files with connector origin metadata and per-attachment errors. Connector sync can now return raw payloads with Signals, <span class="mono">Connectors.Runner</span> preserves any <span class="mono">attachments</span> or <span class="mono">files</span> in those payloads through Memory Core before completing the run, and normal connector runs now pass through Tool/Model Governance unless <span class="mono">governed: false</span> is explicitly requested. The engine also has a multimodal open-source tool registry with adapter profiles for primary role, output formats, claimability, install profile, and default runtime arguments; <span class="mono">asset_adapter_runs</span>; <span class="mono">MemoryCore.run_asset_adapter/3</span>; <span class="mono">MultimodalExtractionParser</span>; and <span class="mono">asset_extractions</span> with typed transcript, OCR span, visual observation, and embedding-ref projection tables. Completed supported adapter runs now auto-project into typed extraction tables unless <span class="mono">auto_extract: false</span> is passed, and structured adapter output can split into multiple rows such as segment-level transcripts, wrapped document payloads, document page/text/element/table OCR spans, cell-grid tables, metadata/provenance page and bbox fields, and frame-level visual observations/object detections. Governed recall can now return asset extraction projections inside Context Packages with the same partition/security filtering as Facts and Memory Objects. Completed adapter outputs can become derived Source Packages plus pending Claims through <span class="mono">MemoryCore.claim_from_asset_adapter_run/2</span>; text-bearing extraction projections can do the same through <span class="mono">MemoryCore.claim_from_asset_extraction/2</span>. Failed/unavailable runs and reference-only embeddings do not become Claims. API workspace creation uses the topology lifecycle, workspace hierarchy is scope-hardened, pending Claims now have service/API review queue summaries plus reject/promote routes into Facts and Memory Objects, <span class="mono">Memory.remember/2</span> now gates low-salience writes, skips semantic duplicates, updates superseded memories, and still routes accepted writes through the governed Source Package and pending Claim bridge, and <span class="mono">Evaluation.run_benchmark/2</span>, <span class="mono">Evaluation.load_dataset/2</span>, <span class="mono">Evaluation.run_dataset/2</span>, and <span class="mono">mix optimal.eval.run</span> can execute JSON/JSONL benchmark cases through Context Package retrieval and deterministic judging.</p>
-            <div class="progress"><div class="bar partial" style="width: 99%"></div></div>
+            <h3>Next Service</h3>
+            <p><strong>Markdown Wiki Service.</strong> Build render/rebuild helpers, page tree, backlinks, broken-link checks, directive rendering, revision history, import/export, and HTTP/CLI surfaces around existing wiki modules.</p>
+            <div class="progress"><div class="bar partial" style="width: 45%"></div></div>
           </div>
-          <div class="card done">
-            <h3>Decision Locked</h3>
-            <p>Projects are not peers of workspaces. A project is a Node type inside a workspace. Markdown and HTML are control surfaces and projections, not the source of truth.</p>
-            <div class="progress"><div class="bar done" style="width: 100%"></div></div>
+          <div class="card next">
+            <h3>Then</h3>
+            <p><strong>Source-first intake, then multimodality.</strong> Preserve or quarantine every input before interpretation, then handle raw artifacts and extraction projections across text, files, images, audio, video, tables, and payloads.</p>
+            <div class="progress"><div class="bar partial" style="width: 30%"></div></div>
           </div>
         </div>
 
@@ -680,38 +680,59 @@
             </tr>
             <tr>
               <td>5</td>
+              <td><strong>Markdown wiki service</strong><br>Page tree, backlinks, broken-link checks, directives, revisions, import/export, render/rebuild, CLI and HTTP operations.</td>
+              <td>Wiki / Workspace Export / Retrieval</td>
+              <td><span class="status partial">Core modules built</span></td>
+              <td><span class="mono">.wiki/SCHEMA.md</span>, wiki store, directives, integrity, curator, scheduler, and <span class="mono">mix optimal.wiki</span> exist. Next proof is a rendered Node/wiki page with backlinks, citation checks, projection revision, link health, and rebuild command.</td>
+            </tr>
+            <tr>
+              <td>6</td>
               <td><strong>Source-first intake hardening</strong><br>Commit evidence before interpretation, routing, or compatibility context writes.</td>
               <td>Memory Core + Signal Pipeline</td>
               <td><span class="status partial">Core path built</span></td>
               <td>Intake and workspace edits preserve Source Packages and ledger entries; failed/quarantined source handling still needs a stronger policy path.</td>
             </tr>
             <tr>
-              <td>6</td>
+              <td>7</td>
+              <td><strong>Multimodality and raw artifact governance</strong><br>Files, images, audio, video, tables, and API payloads need preserved assets, parser outputs, extraction projections, and adapter run records.</td>
+              <td>Memory Core + Pipeline + Multimodal Registry</td>
+              <td><span class="status partial">Spine built</span></td>
+              <td>Asset storage, adapter runs, extraction records, and extraction-to-Claim paths exist. Next proof is stronger provider-specific parsing, quarantine records, and recall from multimodal extractions.</td>
+            </tr>
+            <tr>
+              <td>8</td>
               <td><strong>Claim to Fact to Memory lifecycle</strong><br>Separate what a source said from what the engine accepts as true.</td>
               <td>Memory Core</td>
               <td><span class="status done">First slice built</span></td>
               <td>One source produces a Claim; promotion writes a Fact; a Memory Object links evidence, confidence, precision, support edges, and ledger entries. Promotion now blocks stale Claims, detects contradictory current Facts, and supports explicit Fact supersession with edge and ledger records.</td>
             </tr>
             <tr>
-              <td>7</td>
+              <td>9</td>
               <td><strong>Governed recall package</strong><br>Return authorized context packages instead of loose search chunks.</td>
               <td>Retrieval</td>
               <td><span class="status partial">First slice built</span></td>
               <td>A query returns source links, Facts, Memory Objects, confidence/precision summaries, filtered-object summary, authorization envelope metadata, and a persisted Context Package. Full retrieval planning and audit IDs remain next work.</td>
             </tr>
             <tr>
-              <td>8</td>
+              <td>10</td>
               <td><strong>Active Memory Pools</strong><br>Task-scoped working memory for humans, agents, context, observations, and pending Claims.</td>
               <td>Active Collaboration + Memory Core</td>
               <td><span class="status done">First slice built</span></td>
               <td>Active pools can open, load Context Packages, publish observations as Source Packages, create pending Claims, track promotion candidates, and close/archive.</td>
             </tr>
             <tr>
-              <td>9</td>
+              <td>11</td>
               <td><strong>Workflow and Skill Package lifecycle</strong><br>Observed work becomes evidence-linked procedural candidates, not arbitrary prompts.</td>
               <td>Workflow / Skill Runtime</td>
               <td><span class="status done">First slice built</span></td>
               <td>WorkflowSkill captures traces from active pools, generalizes workflows, creates procedural memory objects, packages draft disabled Skill Packages, and writes derivation ledger entries.</td>
+            </tr>
+            <tr>
+              <td>12</td>
+              <td><strong>Tool/model governance and evaluation</strong><br>Registered calls, schema validation, audit, benchmark configs, result cards, rebuild and recovery checks.</td>
+              <td>Tool/Model Governance + Evaluation</td>
+              <td><span class="status partial">First slices built</span></td>
+              <td>Tool/model run records and evaluation runners exist. Next proof is end-to-end dashboard/reporting with reproducible benchmark configuration and recovery/rebuild tests.</td>
             </tr>
           </tbody>
         </table>
