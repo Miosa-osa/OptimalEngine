@@ -21,6 +21,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   alias OptimalEngine.Architecture
   alias OptimalEngine.Compliance
   alias OptimalEngine.Connectors
+  alias OptimalEngine.Evaluation
   alias OptimalEngine.Health
   alias OptimalEngine.Identity.Principal
   alias OptimalEngine.MemoryCore.ActiveMemoryPool
@@ -75,15 +76,17 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     |> tool_model_governance_probes()
     |> section("9. Connector registry (14 adapters)")
     |> connector_probes()
-    |> section("10. Wiki tier-3 round-trip")
+    |> section("10. Evaluation records")
+    |> evaluation_probes()
+    |> section("11. Wiki tier-3 round-trip")
     |> wiki_probes()
-    |> section("11. Retrieval — simple + complex + edge cases")
+    |> section("12. Retrieval — simple + complex + edge cases")
     |> retrieval_probes()
-    |> section("12. Compliance workflows (DSAR, erasure preview, holds)")
+    |> section("13. Compliance workflows (DSAR, erasure preview, holds)")
     |> compliance_probes()
-    |> maybe_section("13. Extra ingest load", ingest_count > 0)
+    |> maybe_section("14. Extra ingest load", ingest_count > 0)
     |> maybe_ingest(ingest_count)
-    |> maybe_section("14. Hard paths (slow retrieval, deep joins)", hard?)
+    |> maybe_section("15. Hard paths (slow retrieval, deep joins)", hard?)
     |> maybe_hard(hard?)
     |> summarize()
   end
@@ -248,6 +251,8 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       "generalized_workflows",
       "procedural_memory_objects",
       "skill_packages",
+      "evaluation_runs",
+      "evaluation_cases",
       "skills",
       "principals",
       "acls",
@@ -1444,6 +1449,81 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     |> Enum.each(fn {sql, params} -> Store.raw_execute(sql, params) end)
 
     File.rm_rf(workspace_id)
+  end
+
+  defp evaluation_probes(state) do
+    workspace_id = "default:reality-eval-#{System.unique_integer([:positive])}"
+
+    seed =
+      with {:ok, run} <-
+             Evaluation.record_run(
+               workspace_id: workspace_id,
+               benchmark_name: "reality_recall_eval",
+               dataset_name: "reality-small",
+               dataset_size: 2,
+               question_count: 2,
+               answer_model: "rule-answer",
+               judge_model: "rule-judge",
+               judge_strategy: "deterministic",
+               retrieval_top_k: 10,
+               run_config: %{answer_temperature: 0},
+               retrieval_config: %{package_type: "context_package"},
+               judge_config: %{votes: 1}
+             ),
+           {:ok, _case_1} <-
+             Evaluation.record_case(run.id,
+               case_id: "case-1",
+               question: "What was approved?",
+               actual_answer: "The launch was approved.",
+               expected_answer: "The launch was approved.",
+               scores: %{accuracy: 1.0, grounding: 1.0},
+               status: "passed"
+             ),
+           {:ok, _case_2} <-
+             Evaluation.record_case(run.id,
+               case_id: "case-2",
+               question: "What was the unknown budget?",
+               actual_answer: "Unknown.",
+               scores: %{accuracy: 0.0, grounding: 0.5},
+               status: "failed"
+             ),
+           {:ok, summary} <- Evaluation.summarize(run.id) do
+        {:ok, %{run: run, summary: summary}}
+      end
+
+    state =
+      case seed do
+        {:ok, ctx} ->
+          state
+          |> probe("evaluation run persisted", fn ->
+            case Store.raw_query(
+                   "SELECT COUNT(*) FROM evaluation_runs WHERE workspace_id = ?1 AND id = ?2",
+                   [workspace_id, ctx.run.id]
+                 ) do
+              {:ok, [[1]]} -> {:ok, "stored"}
+              other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("evaluation cases summarized", fn ->
+            accuracy = get_in(ctx.summary, [:aggregate_scores, "accuracy", :average])
+
+            if ctx.summary.case_count == 2 and ctx.summary.passed_count == 1 and accuracy == 0.5 do
+              {:ok, "cases=2 accuracy=0.5"}
+            else
+              {:error, inspect(ctx.summary)}
+            end
+          end)
+
+        {:error, reason} ->
+          probe(state, "evaluation record seed", fn -> {:error, inspect(reason)} end)
+      end
+
+    cleanup_evaluation_probe(workspace_id)
+    state
+  end
+
+  defp cleanup_evaluation_probe(workspace_id) do
+    Store.raw_execute("DELETE FROM evaluation_runs WHERE workspace_id = ?1", [workspace_id])
   end
 
   defp wiki_probes(state) do
