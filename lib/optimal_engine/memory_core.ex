@@ -67,6 +67,10 @@ defmodule OptimalEngine.MemoryCore do
     to: ActiveMemoryPool,
     as: :load_context_package
 
+  defdelegate refresh_pool_context_packages(pool_id, opts \\ []),
+    to: ActiveMemoryPool,
+    as: :refresh_context_packages
+
   defdelegate publish_pool_observation(pool_id, observation_text, opts \\ []),
     to: ActiveMemoryPool,
     as: :publish_observation

@@ -420,7 +420,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
   test "active memory pool loads context and publishes observations as pending claims" do
     workspace_id = "memory-core-pool-test-#{System.unique_integer([:positive])}"
 
-    {:ok, _fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+    {:ok, fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
 
     assert {:ok, pool} =
              ActiveMemoryPool.open(
@@ -448,6 +448,23 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert {:ok, loaded_pool} = ActiveMemoryPool.load_context_package(pool.id, package)
     assert %{type: "context_package", id: package.id} in loaded_pool.context_package_links
     assert loaded_pool.refresh_state == "fresh"
+
+    assert {:ok, skipped_refresh} = MemoryCore.refresh_pool_context_packages(pool.id)
+    assert skipped_refresh.refreshed_context_packages == []
+    assert skipped_refresh.skipped_context_package_ids == [package.id]
+
+    assert :ok =
+             MemoryCoreStore.invalidate_context_packages_for_object("fact", fact.id,
+               workspace_id: workspace_id,
+               reason: "pool_refresh_test"
+             )
+
+    assert {:ok, refreshed} = MemoryCore.refresh_pool_context_packages(pool.id)
+    assert [refreshed_package] = refreshed.refreshed_context_packages
+    assert refreshed_package.id != package.id
+    assert refreshed_package.refresh_state == "fresh"
+
+    assert %{type: "context_package", id: refreshed_package.id} in refreshed.pool.context_package_links
 
     assert {:ok, observation} =
              ActiveMemoryPool.publish_observation(
