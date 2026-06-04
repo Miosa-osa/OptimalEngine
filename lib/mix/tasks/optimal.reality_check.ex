@@ -865,6 +865,25 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                output_contract: %{creates: ["pending_claims"]},
                execution_policy: %{requires_review: true},
                actor_id: "agent:reality-check"
+             ),
+           {:ok, approved_skill} <-
+             WorkflowSkill.package_skill(procedure,
+               skill_package_name: "launch_review_approved_skill",
+               review_status: "approved",
+               enabled_state: "enabled",
+               input_contract: %{requires: ["project_node_id"]},
+               output_contract: %{creates: ["pending_claims"]},
+               execution_policy: %{requires_review: true},
+               actor_id: "agent:reality-check"
+             ),
+           {:ok, workflow_skill_package} <-
+             RetrievalCoordinator.retrieve("launch_review",
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               allowed_partitions: ["reality-check"],
+               allowed_security_labels: ["internal"],
+               workflow_family: "launch_review",
+               task_family: "launch_review"
              ) do
         {:ok,
          %{
@@ -873,7 +892,9 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
            trace: trace,
            workflow: workflow,
            procedure: procedure,
-           skill: skill
+           skill: skill,
+           approved_skill: approved_skill,
+           workflow_skill_package: workflow_skill_package
          }}
       end
 
@@ -912,6 +933,23 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
               other -> {:error, inspect(other)}
             end
           end)
+          |> probe("retrieval packages workflow and approved skill", fn ->
+            package = ctx.workflow_skill_package
+
+            cond do
+              package.workflow_links != [%{type: "generalized_workflow", id: ctx.workflow.id}] ->
+                {:error, "missing workflow link"}
+
+              package.skill_package_links != [%{type: "skill_package", id: ctx.approved_skill.id}] ->
+                {:error, "missing approved skill link"}
+
+              package.filtered_object_summary.returned_skill_packages != 1 ->
+                {:error, "unexpected returned skill count"}
+
+              true ->
+                {:ok, "workflows=1 approved_skills=1"}
+            end
+          end)
           |> probe("workflow-skill derivation ledger", fn ->
             case Store.raw_query(
                    """
@@ -927,7 +965,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                    """,
                    [workspace_id]
                  ) do
-              {:ok, [[4]]} -> {:ok, "4 lifecycle entries"}
+              {:ok, [[5]]} -> {:ok, "5 lifecycle entries"}
               other -> {:error, inspect(other)}
             end
           end)
