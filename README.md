@@ -110,7 +110,7 @@ Built and verified now:
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
 | Governed retrieval | Retrieval returns Context Packages, not loose chunks, writes explicit retrieval-plan metadata, applies structured subject/action/object and asset filters, filters Facts, Memory Objects, and asset extraction projections by partition/security scope before package assembly, marks affected packages stale when returned Facts or Memory Objects are superseded, can refresh a stale package from its original request scope, can batch refresh stale packages, and exposes API, CLI/cron, and supervised scheduler triggers for app/agent/runtime workflows. |
 | Active Memory Pools | Task-scoped working memory can load Context Packages, refresh stale loaded Context Packages, and publish observations as pending Claims. |
-| Smart memory intake | `Memory.remember/2` can gate low-salience writes, skip semantic duplicates, update superseded memories, and attach intake metadata before the governed Source Package and pending Claim bridge runs. |
+| Smart memory intake | `Memory.remember/2` and `POST /api/memory/remember` can gate low-salience writes, skip semantic duplicates, update superseded memories, and attach intake metadata before the governed Source Package and pending Claim bridge runs. |
 | Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
 | Connector governance | Connector sync runs through the governed tool-call surface by default, blocking unauthorized runs before connector execution and recording both connector-run and tool-call audit rows when allowed. Raw sync requires an explicit `governed: false` bypass. |
 | Evaluation runner | Benchmark/evaluation runs can execute against governed retrieval, load JSON/JSONL datasets, assemble Context Packages per question, produce deterministic local answer surfaces, judge expected-answer matches, persist per-case scores, and update aggregate run scores. `mix optimal.eval.run` exposes the flow for CLI/cron use, and external answerer/judge callbacks can be plugged in later without changing the storage contract. |
@@ -136,7 +136,7 @@ mix test test/memory_core/spine_test.exs test/pipeline/multimodal_adapter_runner
 28 tests, 0 failures
 
 mix test test/api/router_test.exs --seed 0
-27 tests, 0 failures
+31 tests, 0 failures
 
 mix test test/connectors/asset_ingest_test.exs --seed 0
 3 tests, 0 failures

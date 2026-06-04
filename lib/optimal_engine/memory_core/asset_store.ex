@@ -709,12 +709,10 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
   defp normalize_adapter_id(id) when is_atom(id), do: id
 
   defp normalize_adapter_id(id) when is_binary(id) do
-    id
-    |> String.downcase()
-    |> String.replace("-", "_")
-    |> String.to_existing_atom()
-  rescue
-    ArgumentError -> :unknown
+    case MultimodalToolRegistry.get(id) do
+      %{id: tool_id} -> tool_id
+      nil -> :unknown
+    end
   end
 
   defp build_adapter_run(asset, tool, opts) do

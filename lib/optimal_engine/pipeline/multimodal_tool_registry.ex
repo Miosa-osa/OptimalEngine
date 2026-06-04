@@ -298,8 +298,13 @@ defmodule OptimalEngine.Pipeline.MultimodalToolRegistry do
   @spec tools() :: [tool()]
   def tools, do: @tools
 
-  @spec get(tool_id()) :: tool() | nil
+  @spec get(tool_id() | String.t()) :: tool() | nil
   def get(id) when is_atom(id), do: Enum.find(@tools, &(&1.id == id))
+
+  def get(id) when is_binary(id) do
+    normalized = normalize_id_string(id)
+    Enum.find(@tools, &(normalize_id_string(Atom.to_string(&1.id)) == normalized))
+  end
 
   @spec profile(tool_id()) :: adapter_profile() | nil
   def profile(id) when is_atom(id) do
@@ -366,5 +371,12 @@ defmodule OptimalEngine.Pipeline.MultimodalToolRegistry do
       _ ->
         false
     end
+  end
+
+  defp normalize_id_string(id) do
+    id
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, "_")
+    |> String.trim("_")
   end
 end

@@ -170,13 +170,10 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunner do
   end
 
   defp get_tool(adapter_id) when is_binary(adapter_id) do
-    adapter_id
-    |> String.downcase()
-    |> String.replace("-", "_")
-    |> String.to_existing_atom()
-    |> get_tool()
-  rescue
-    ArgumentError -> {:error, {:unknown_adapter, adapter_id}}
+    case MultimodalToolRegistry.get(adapter_id) do
+      nil -> {:error, {:unknown_adapter, adapter_id}}
+      tool -> {:ok, tool}
+    end
   end
 
   defp scope_opts(opts) do
