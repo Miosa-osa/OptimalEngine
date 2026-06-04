@@ -388,6 +388,27 @@ defmodule OptimalEngine.MemoryCore.Store do
     Store.raw_execute(sql, scoped_params([valid_time_end, now, id, tenant_id], workspace_id))
   end
 
+  @spec mark_memory_objects_for_fact_superseded(String.t(), keyword()) :: :ok | {:error, term()}
+  def mark_memory_objects_for_fact_superseded(fact_id, opts)
+      when is_binary(fact_id) and is_list(opts) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+    now = Keyword.get(opts, :transaction_time_end, timestamp())
+    valid_time_end = Keyword.get(opts, :valid_time_end, now)
+
+    sql =
+      "UPDATE memory_objects SET lifecycle_state = 'superseded', staleness_status = 'stale', " <>
+        "supersession_status = 'superseded', valid_time_end = COALESCE(valid_time_end, ?1), " <>
+        "transaction_time_end = COALESCE(transaction_time_end, ?2), updated_at = datetime('now') " <>
+        "WHERE tenant_id = ?3 AND fact_links LIKE ?4" <>
+        workspace_clause(workspace_id, 5)
+
+    Store.raw_execute(
+      sql,
+      scoped_params([valid_time_end, now, tenant_id, ~s(%"id":"#{fact_id}"%)], workspace_id)
+    )
+  end
+
   defp claim_columns do
     "id, tenant_id, workspace_id, source_package_id, signal_id, claim_text, claim_type, subject_anchor, action_class, object_anchor, semantic_frame, source_span, extraction_run_id, evaluator_id, aggregate_confidence, aggregate_precision, raw_component_scores, calibration_dataset_version, access_policy_id, security_labels, partition_ids, lifecycle_state, review_status, valid_time_start, valid_time_end, transaction_time_start, transaction_time_end, stale_after, metadata"
   end

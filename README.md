@@ -70,7 +70,7 @@ Built and verified now:
 | Structured multimodal extraction parsing | Nested transcript segments, document pages/elements/tables, and video frame observations/detections can be normalized into typed extraction projection rows. |
 | Adapter-output Claims | Completed adapter outputs can be preserved as derived Source Packages and converted into pending Claims. Failed or unavailable adapter runs cannot become Claims. |
 | Asset extraction projections | Completed adapter runs can be normalized into `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection tables. The adapter runner now auto-projects supported completed runs, and text-bearing extractions can become derived Source Packages and pending Claims. |
-| Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. Stale Claims are blocked by default, conflicting current Facts require explicit supersession, and supersession closes the old Fact with a typed edge and ledger entry. |
+| Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. Stale Claims are blocked by default, conflicting current Facts require explicit supersession, and supersession closes the old Fact and linked Memory Objects with a typed edge and ledger entry. |
 | Claim review queue | `MemoryCore.claim_review_queue/1` and `GET /api/memory-core/claim-review` return review/lifecycle counts plus filterable Claim rows for UI and agent review workflows. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
@@ -110,6 +110,9 @@ mix test test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs -
 
 mix test test/memory_core/claim_review_test.exs test/api/router_test.exs --seed 0
 34 tests, 0 failures
+
+mix test test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs test/api/router_test.exs test/memory_core/spine_test.exs test/pipeline/multimodal_adapter_runner_test.exs test/memory_core/asset_store_test.exs test/memory_core/claim_review_test.exs --seed 0
+79 tests, 0 failures
 
 mix test test/pipeline/multimodal_adapter_runner_test.exs --seed 0
 8 tests, 0 failures
@@ -455,9 +458,9 @@ without scraping raw tables.
 Promotion is policy-gated: stale Claims are rejected unless the reviewer
 explicitly allows stale promotion, Claims that contradict current accepted Facts
 return a conflict, and the reviewer must pass `supersedes_fact_id` when a new
-Fact replaces an older one. Supersession marks the older Fact as superseded,
-writes a `supersedes` Relationship Edge, and records the replacement in the
-Derivation Ledger.
+Fact replaces an older one. Supersession marks the older Fact and its linked
+Memory Objects as superseded, writes a `supersedes` Relationship Edge, and
+records the replacement in the Derivation Ledger.
 Retrieval now includes governed asset extraction projections in Context Packages,
 so transcripts, OCR spans, visual observations, and embedding refs can be returned
 as source-linked context without being promoted to Facts.
@@ -576,8 +579,8 @@ The next build slices are:
    extraction output.
 4. Expand Retrieval Coordinator beyond simple fact/memory/extraction lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
-5. Extend stale/supersession handling from Facts into Memory Objects and Context
-   Package invalidation.
+5. Invalidate or refresh Context Packages when their returned Facts or Memory
+   Objects become stale or superseded.
 6. Make connector governance the default runtime path for connector sync.
 7. Add benchmark/evaluation records so large-scale recall tests are stored and
    inspectable.

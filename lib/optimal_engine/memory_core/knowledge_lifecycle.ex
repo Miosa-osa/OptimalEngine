@@ -342,6 +342,12 @@ defmodule OptimalEngine.MemoryCore.KnowledgeLifecycle do
              workspace_id: old_fact.workspace_id,
              valid_time_end: Keyword.get(opts, :valid_time_end)
            ),
+         :ok <-
+           Store.mark_memory_objects_for_fact_superseded(old_fact.id,
+             tenant_id: old_fact.tenant_id,
+             workspace_id: old_fact.workspace_id,
+             valid_time_end: Keyword.get(opts, :valid_time_end)
+           ),
          :ok <- Store.insert_relationship_edge(edge),
          :ok <- Store.insert_derivation_entry(ledger) do
       :ok
