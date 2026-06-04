@@ -98,9 +98,9 @@ Built and verified now:
 | API asset uploads | `POST /api/assets` preserves JSON-uploaded or local-path files through Memory Core and can optionally run a governed multimodal adapter. |
 | Connector asset ingestion | `Connectors.preserve_payload_assets/4` preserves connector attachments/files through Memory Core with connector origin metadata and per-attachment errors. |
 | Connector sync asset preservation | Connector sync may return raw payloads with attachments/files; the runner preserves them through Memory Core before completing the run. |
-| Multimodal tool registry | Open-source adapter targets are cataloged for document intelligence, OCR, audio, video, visual reasoning, visual document retrieval, and cross-modal embeddings. |
+| Multimodal tool registry | Open-source adapter targets are cataloged for document intelligence, OCR, audio, video, visual reasoning, visual document retrieval, and cross-modal embeddings, with adapter profiles for primary role, output formats, claimability, install profile, and default runtime arguments. |
 | Multimodal adapter runs | Adapter attempts and outputs can be recorded as governed derived artifacts linked to assets, Source Packages, scopes, hashes, and derivation ledger entries. |
-| Multimodal adapter runner | Configured local adapter commands can execute against governed assets, with completed, failed, and unavailable runs recorded through Memory Core. |
+| Multimodal adapter runner | Configured local adapter commands can execute against governed assets, with completed, failed, and unavailable runs recorded through Memory Core. Runtime defaults now come from adapter profiles instead of hardcoded runner branches. |
 | Structured multimodal extraction parsing | Nested transcript segments, document pages/elements/tables, and video frame observations/detections can be normalized into typed extraction projection rows. |
 | Adapter-output Claims | Completed adapter outputs can be preserved as derived Source Packages and converted into pending Claims. Failed or unavailable adapter runs cannot become Claims. |
 | Asset extraction projections | Completed adapter runs can be normalized into `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection tables. The adapter runner now auto-projects supported completed runs, and text-bearing extractions can become derived Source Packages and pending Claims. |
@@ -630,9 +630,9 @@ raw SQL from feature modules into governed tables
 
 The next build slices are:
 
-1. Continue expanding adapter-specific command builders and output parsers around
+1. Continue expanding provider-specific command wrappers and output parsers around
    `MemoryCore.run_asset_adapter/3`, especially real Docling/Marker/Whisper/FFmpeg
-   output shapes and install profiles.
+   output shapes now that adapter profiles own default runtime behavior.
 2. Implement provider-specific sync/download adapters that return raw payloads
    with attachment/file data so `Connectors.Runner` can preserve them automatically.
 3. Add adapter-specific review policies for Claims created from multimodal
