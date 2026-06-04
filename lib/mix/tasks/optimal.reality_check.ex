@@ -1530,6 +1530,12 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   defp evaluation_probes(state) do
     workspace_id = "default:reality-eval-#{System.unique_integer([:positive])}"
 
+    dataset_path =
+      Path.join(
+        System.tmp_dir!(),
+        "optimal-reality-eval-#{System.unique_integer([:positive])}.jsonl"
+      )
+
     seed =
       with {:ok, run} <-
              Evaluation.record_run(
@@ -1594,12 +1600,88 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
           probe(state, "evaluation record seed", fn -> {:error, inspect(reason)} end)
       end
 
+    state =
+      state
+      |> probe("evaluation dataset runner", fn ->
+        with :ok <- seed_evaluation_dataset_memory(workspace_id),
+             :ok <-
+               File.write(dataset_path, [
+                 Jason.encode!(%{
+                   "question_id" => "dataset-case-1",
+                   "question" => "approved",
+                   "expected_answer" => "launch was approved"
+                 }),
+                 "\n"
+               ]),
+             {:ok, result} <-
+               Evaluation.run_dataset(dataset_path,
+                 workspace_id: workspace_id,
+                 benchmark_name: "reality_dataset_eval",
+                 retrieval_opts: [
+                   allowed_partitions: ["reality-check"],
+                   allowed_security_labels: ["internal"]
+                 ]
+               ) do
+          if result.summary.case_count == 1 and result.summary.passed_count == 1 do
+            {:ok, "jsonl cases=#{result.summary.case_count} passed=#{result.summary.passed_count}"}
+          else
+            {:error, inspect(result.summary)}
+          end
+        else
+          {:error, reason} -> {:error, inspect(reason)}
+          other -> {:error, inspect(other)}
+        end
+      end)
+
+    File.rm(dataset_path)
     cleanup_evaluation_probe(workspace_id)
     state
   end
 
+  defp seed_evaluation_dataset_memory(workspace_id) do
+    source =
+      OptimalEngine.MemoryCore.source_package_from_text(
+        "The launch was approved after final review.",
+        workspace_id: workspace_id,
+        source_type: "meeting_note",
+        security_labels: ["internal"],
+        partition_ids: ["reality-check"]
+      )
+
+    with {:ok, claim} <-
+           OptimalEngine.MemoryCore.extract_claim(source,
+             claim_text: "The launch was approved after final review.",
+             subject_anchor: "launch",
+             action_class: "approval",
+             aggregate_confidence: 0.95,
+             aggregate_precision: 0.9
+           ),
+         {:ok, fact} <-
+           OptimalEngine.MemoryCore.promote_claim_to_fact(claim,
+             fact_text: "The launch was approved.",
+             aggregate_confidence: 0.96,
+             aggregate_precision: 0.92
+           ),
+         {:ok, _memory} <-
+           OptimalEngine.MemoryCore.build_memory_object(fact,
+             summary: "The launch approval unblocked the release plan."
+           ) do
+      :ok
+    end
+  end
+
   defp cleanup_evaluation_probe(workspace_id) do
-    Store.raw_execute("DELETE FROM evaluation_runs WHERE workspace_id = ?1", [workspace_id])
+    [
+      {"DELETE FROM evaluation_runs WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM context_packages WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM relationship_edges WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM derivation_ledger WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM memory_objects WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM facts WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM claims WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM source_packages WHERE workspace_id = ?1", [workspace_id]}
+    ]
+    |> Enum.each(fn {sql, params} -> Store.raw_execute(sql, params) end)
   end
 
   defp wiki_probes(state) do
