@@ -87,8 +87,10 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     with {:ok, claim} <-
            Store.get_claim(claim_id, tenant_id: tenant_id, workspace_id: workspace_id),
          :ok <- ensure_promotable(claim),
-         {:ok, fact} <- KnowledgeLifecycle.promote_claim_to_fact(claim, fact_opts(opts)),
+         {:ok, policy} <- promotion_policy(claim, opts),
+         {:ok, fact} <- KnowledgeLifecycle.promote_claim_to_fact(claim, fact_opts(opts, policy)),
          {:ok, memory} <- KnowledgeLifecycle.build_memory_object(fact, memory_opts(opts)),
+         :ok <- apply_promotion_policy(policy, fact, opts),
          :ok <-
            Store.update_claim_review(claim.id,
              tenant_id: claim.tenant_id,
@@ -107,6 +109,120 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
   defp ensure_promotable(%{lifecycle_state: "rejected"}), do: {:error, :claim_rejected}
   defp ensure_promotable(_claim), do: :ok
 
+  defp promotion_policy(claim, opts) do
+    with :ok <- ensure_not_stale(claim, opts),
+         {:ok, current_facts} <- Store.list_current_facts_for_claim(claim),
+         {:ok, superseded_fact} <- resolve_superseded_fact(claim, current_facts, opts),
+         :ok <- ensure_no_unresolved_conflicts(claim, current_facts, superseded_fact, opts) do
+      {:ok,
+       %{
+         stale_checked: true,
+         superseded_fact: superseded_fact,
+         current_fact_count: length(current_facts)
+       }}
+    end
+  end
+
+  defp ensure_not_stale(%{stale_after: stale_after}, opts)
+       when is_binary(stale_after) and stale_after != "" do
+    if Keyword.get(opts, :allow_stale, false) do
+      :ok
+    else
+      case parse_datetime(stale_after) do
+        {:ok, stale_time} ->
+          case DateTime.compare(stale_time, DateTime.utc_now()) do
+            :lt -> {:error, {:claim_stale, stale_after}}
+            _ -> :ok
+          end
+
+        :error ->
+          :ok
+      end
+    end
+  end
+
+  defp ensure_not_stale(_claim, _opts), do: :ok
+
+  defp resolve_superseded_fact(claim, current_facts, opts) do
+    case Keyword.get(opts, :supersedes_fact_id) do
+      nil ->
+        {:ok, nil}
+
+      fact_id ->
+        current_match = Enum.find(current_facts, &(&1.id == fact_id))
+
+        cond do
+          current_match ->
+            {:ok, current_match}
+
+          true ->
+            with {:ok, fact} <-
+                   Store.get_fact(fact_id,
+                     tenant_id: claim.tenant_id,
+                     workspace_id: claim.workspace_id
+                   ),
+                 :ok <- ensure_current_fact(fact) do
+              {:ok, fact}
+            else
+              {:error, :not_found} -> {:error, {:superseded_fact_not_found, fact_id}}
+              {:error, reason} -> {:error, reason}
+            end
+        end
+    end
+  end
+
+  defp ensure_current_fact(%{lifecycle_state: "accepted", contradiction_status: "none"} = fact) do
+    ensure_fact_not_stale(fact)
+  end
+
+  defp ensure_current_fact(fact), do: {:error, {:superseded_fact_not_current, fact.id}}
+
+  defp ensure_fact_not_stale(%{stale_after: stale_after} = fact)
+       when is_binary(stale_after) and stale_after != "" do
+    case parse_datetime(stale_after) do
+      {:ok, stale_time} ->
+        case DateTime.compare(stale_time, DateTime.utc_now()) do
+          :lt -> {:error, {:superseded_fact_stale, fact.id}}
+          _ -> :ok
+        end
+
+      :error ->
+        :ok
+    end
+  end
+
+  defp ensure_fact_not_stale(_fact), do: :ok
+
+  defp ensure_no_unresolved_conflicts(claim, current_facts, superseded_fact, opts) do
+    fact_text = normalize_text(Keyword.get(opts, :fact_text) || claim.claim_text)
+    superseded_id = if superseded_fact, do: superseded_fact.id
+
+    conflicts =
+      current_facts
+      |> Enum.reject(&(&1.id == superseded_id))
+      |> Enum.reject(&(normalize_text(&1.fact_text) == fact_text))
+
+    if conflicts == [] do
+      :ok
+    else
+      {:error, {:contradicts_current_facts, Enum.map(conflicts, & &1.id)}}
+    end
+  end
+
+  defp apply_promotion_policy(%{superseded_fact: nil}, _fact, _opts), do: :ok
+
+  defp apply_promotion_policy(%{superseded_fact: old_fact}, fact, opts) do
+    KnowledgeLifecycle.record_fact_supersession(fact, old_fact,
+      actor_id: Keyword.get(opts, :actor_id),
+      evaluator_id: Keyword.get(opts, :verifier_id) || Keyword.get(opts, :actor_id),
+      valid_time_end:
+        Keyword.get(opts, :superseded_valid_time_end) ||
+          Map.get(fact, :valid_time_start) ||
+          Map.get(fact, :verification_time),
+      reason: Keyword.get(opts, :supersession_reason)
+    )
+  end
+
   defp count_by(claims, field) do
     claims
     |> Enum.map(&Map.get(&1, field))
@@ -114,7 +230,7 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     |> Enum.frequencies()
   end
 
-  defp fact_opts(opts) do
+  defp fact_opts(opts, policy) do
     [
       actor_id: Keyword.get(opts, :actor_id),
       verifier_id: Keyword.get(opts, :verifier_id) || Keyword.get(opts, :actor_id),
@@ -126,7 +242,7 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
       valid_time_start: Keyword.get(opts, :valid_time_start),
       valid_time_end: Keyword.get(opts, :valid_time_end),
       stale_after: Keyword.get(opts, :stale_after),
-      metadata: Keyword.get(opts, :fact_metadata, %{})
+      metadata: promotion_metadata(opts, policy)
     ]
     |> compact_nil()
   end
@@ -144,5 +260,39 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
 
   defp compact_nil(opts) do
     Enum.reject(opts, fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp promotion_metadata(opts, policy) do
+    superseded_fact = Map.get(policy, :superseded_fact)
+
+    Keyword.get(opts, :fact_metadata, %{})
+    |> Map.merge(%{
+      promotion_policy: %{
+        stale_checked: Map.get(policy, :stale_checked, false),
+        current_fact_count: Map.get(policy, :current_fact_count, 0),
+        supersedes_fact_id: if(superseded_fact, do: superseded_fact.id)
+      }
+    })
+  end
+
+  defp normalize_text(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_text(value), do: value |> to_string() |> normalize_text()
+
+  defp parse_datetime(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} ->
+        {:ok, datetime}
+
+      _ ->
+        case NaiveDateTime.from_iso8601(value) do
+          {:ok, naive} -> {:ok, DateTime.from_naive!(naive, "Etc/UTC")}
+          _ -> :error
+        end
+    end
   end
 end

@@ -1489,7 +1489,8 @@ defmodule OptimalEngine.API.Router do
   # Body: {workspace?, tenant?, actor_id?, fact_text?, summary?, memory_type?,
   #        verification_status?, aggregate_confidence?, aggregate_precision?,
   #        valid_time_start?, valid_time_end?, stale_after?, fact_metadata?,
-  #        memory_metadata?}
+  #        memory_metadata?, supersedes_fact_id?, allow_stale?,
+  #        supersession_reason?}
   post "/api/memory-core/claims/:id/promote" do
     body = conn.body_params || %{}
     workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
@@ -1510,6 +1511,10 @@ defmodule OptimalEngine.API.Router do
         valid_time_start: Map.get(body, "valid_time_start"),
         valid_time_end: Map.get(body, "valid_time_end"),
         stale_after: Map.get(body, "stale_after"),
+        supersedes_fact_id: Map.get(body, "supersedes_fact_id"),
+        superseded_valid_time_end: Map.get(body, "superseded_valid_time_end"),
+        supersession_reason: Map.get(body, "supersession_reason"),
+        allow_stale: truthy?(Map.get(body, "allow_stale")),
         summary: Map.get(body, "summary"),
         memory_type: Map.get(body, "memory_type"),
         salience: Map.get(body, "salience"),
@@ -1531,6 +1536,30 @@ defmodule OptimalEngine.API.Router do
 
       {:error, :claim_rejected} ->
         send_resp(conn, 409, Jason.encode!(%{error: "claim rejected"}))
+
+      {:error, {:claim_stale, stale_after}} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim stale", stale_after: stale_after}))
+
+      {:error, {:contradicts_current_facts, fact_ids}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "claim contradicts current facts", fact_ids: fact_ids})
+        )
+
+      {:error, {:superseded_fact_not_found, fact_id}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "superseded fact not found", fact_id: fact_id})
+        )
+
+      {:error, {:superseded_fact_not_current, fact_id}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "superseded fact is not current", fact_id: fact_id})
+        )
 
       {:error, reason} ->
         send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
@@ -1818,6 +1847,12 @@ defmodule OptimalEngine.API.Router do
 
   defp parse_optional_positive_int(value) when is_integer(value) and value > 0, do: value
   defp parse_optional_positive_int(_value), do: nil
+
+  defp truthy?(true), do: true
+  defp truthy?("true"), do: true
+  defp truthy?("1"), do: true
+  defp truthy?(1), do: true
+  defp truthy?(_value), do: nil
 
   defp asset_upload_source_path(body) do
     path = Map.get(body, "path")

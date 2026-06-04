@@ -24,6 +24,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   alias OptimalEngine.Health
   alias OptimalEngine.Identity.Principal
   alias OptimalEngine.MemoryCore.ActiveMemoryPool
+  alias OptimalEngine.MemoryCore.ClaimReview
   alias OptimalEngine.MemoryCore.KnowledgeLifecycle
   alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.MemoryCore.SourcePackage
@@ -531,6 +532,51 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
               if edges >= 3 and ledger >= 3,
                 do: {:ok, "edges=#{edges} ledger=#{ledger}"},
                 else: {:error, "edges=#{edges} ledger=#{ledger}"}
+            else
+              other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("fact supersession policy closes replaced fact", fn ->
+            replacement_source =
+              SourcePackage.from_text(
+                "Reality check source: the project launch approval was replaced.",
+                workspace_id: workspace_id,
+                source_type: "reality_check",
+                source_class: "text",
+                trust_label: "reviewed",
+                security_labels: ["internal"],
+                partition_ids: ["reality-check"]
+              )
+
+            with {:ok, replacement_claim} <-
+                   KnowledgeLifecycle.extract_claim(replacement_source,
+                     claim_text: "The source states that launch approval was replaced.",
+                     subject_anchor: "project_launch",
+                     action_class: "approved",
+                     object_anchor: "reality_check_source",
+                     aggregate_confidence: 0.74,
+                     aggregate_precision: 0.7,
+                     actor_id: "agent:reality-check"
+                   ),
+                 {:ok, replacement} <-
+                   ClaimReview.promote(replacement_claim.id,
+                     workspace_id: workspace_id,
+                     actor_id: "human:reality-check",
+                     fact_text: "The project launch approval was replaced.",
+                     supersedes_fact_id: ctx.fact.id,
+                     supersession_reason: "reality check replacement source"
+                   ),
+                 {:ok, [["superseded", "superseded"]]} <-
+                   Store.raw_query(
+                     "SELECT lifecycle_state, contradiction_status FROM facts WHERE workspace_id = ?1 AND id = ?2",
+                     [workspace_id, ctx.fact.id]
+                   ),
+                 {:ok, [[1]]} <-
+                   Store.raw_query(
+                     "SELECT COUNT(*) FROM relationship_edges WHERE workspace_id = ?1 AND relationship_type = 'supersedes' AND from_object_id = ?2 AND to_object_id = ?3",
+                     [workspace_id, replacement.fact.id, ctx.fact.id]
+                   ) do
+              {:ok, "superseded=#{ctx.fact.id}"}
             else
               other -> {:error, inspect(other)}
             end
