@@ -773,7 +773,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     workspace_id = "default:reality-workflow-skill-#{suffix}"
 
     seed =
-      with {:ok, _ctx} <- seed_memory_for_recall(workspace_id, ["reality-check"]),
+      with {:ok, memory_ctx} <- seed_memory_for_recall(workspace_id, ["reality-check"]),
            {:ok, pool} <-
              ActiveMemoryPool.open(
                workspace_id: workspace_id,
@@ -793,6 +793,12 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                allowed_security_labels: ["internal"]
              ),
            {:ok, _loaded_pool} <- ActiveMemoryPool.load_context_package(pool.id, package),
+           :ok <-
+             MemoryCoreStore.invalidate_context_packages_for_object("fact", memory_ctx.fact.id,
+               workspace_id: workspace_id,
+               reason: "pool_refresh_probe"
+             ),
+           {:ok, pool_refresh} <- ActiveMemoryPool.refresh_context_packages(pool.id),
            {:ok, _observation} <-
              ActiveMemoryPool.publish_observation(
                pool.id,
@@ -834,7 +840,15 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                execution_policy: %{requires_review: true},
                actor_id: "agent:reality-check"
              ) do
-        {:ok, %{pool: pool, trace: trace, workflow: workflow, procedure: procedure, skill: skill}}
+        {:ok,
+         %{
+           pool: pool,
+           pool_refresh: pool_refresh,
+           trace: trace,
+           workflow: workflow,
+           procedure: procedure,
+           skill: skill
+         }}
       end
 
     state =
@@ -843,6 +857,12 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
           state
           |> probe("active pool opened for workflow work", fn ->
             count_for("active_memory_pools", workspace_id, ctx.pool.id)
+          end)
+          |> probe("active pool refreshed stale context", fn ->
+            case ctx.pool_refresh.refreshed_context_packages do
+              [%{refresh_state: "fresh"}] -> {:ok, "refreshed=1"}
+              other -> {:error, inspect(other)}
+            end
           end)
           |> probe("workflow trace captured from pool", fn ->
             count_for("workflow_traces", workspace_id, ctx.trace.id)

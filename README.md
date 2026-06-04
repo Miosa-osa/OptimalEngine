@@ -109,7 +109,7 @@ Built and verified now:
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
 | Governed retrieval | Retrieval returns Context Packages, not loose chunks, filters Facts, Memory Objects, and asset extraction projections by partition/security scope before package assembly, marks affected packages stale when returned Facts or Memory Objects are superseded, and can refresh a stale package from its original request scope. |
-| Active Memory Pools | Task-scoped working memory can load Context Packages and publish observations as pending Claims. |
+| Active Memory Pools | Task-scoped working memory can load Context Packages, refresh stale loaded Context Packages, and publish observations as pending Claims. |
 | Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
 | Connector governance | Connector sync can run through the governed tool-call surface, blocking unauthorized runs before connector execution and recording both connector-run and tool-call audit rows when allowed. |
 | Evaluation records | Benchmark/evaluation runs and per-case judge results can be stored, summarized, and linked to Context Packages for later result dashboards. |
@@ -153,7 +153,7 @@ mix test test/pipeline/multimodal_adapter_runner_test.exs --seed 0
 8 tests, 0 failures
 
 mix optimal.reality_check
-122 probes, 122 ok, 0 warn, 0 fail
+123 probes, 123 ok, 0 warn, 0 fail
 ```
 
 The full legacy suite still contains older optional/backend warnings. The focused
@@ -213,7 +213,11 @@ flowchart TB
   Tools --> Store
 
   Memory --> Pools[Active Memory Pools]
+  Retrieval --> Packages[Context Packages]
+  Packages --> Pools
   Pools --> Workflow[Workflow / Skill Runtime]
+  Pools --> Refresh[Refresh stale loaded context]
+  Refresh --> Retrieval
   Workflow --> Store
   Store --> Export[Workspace Export / Reports / Dashboards]
 ```
@@ -527,6 +531,17 @@ workspace files
 Humans and agents should not have separate memory systems. They use different
 interfaces into the same governed workspace runtime.
 
+Task context refresh now follows the same governed recall path:
+
+```mermaid
+flowchart LR
+  Package[Loaded Context Package] --> Invalidate[Fact or Memory change marks it stale]
+  Invalidate --> Pool[Active Memory Pool refresh]
+  Pool --> Recall[Retrieval Coordinator replays original request scope]
+  Recall --> Fresh[Fresh Context Package]
+  Fresh --> Pool2[Pool links refreshed context]
+```
+
 ## Quick Start
 
 Requirements:
@@ -615,7 +630,7 @@ The next build slices are:
    extraction output.
 4. Expand Retrieval Coordinator beyond simple fact/memory/extraction lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
-5. Expand Context Package refresh into pool refresh, scheduled rebuild, and UI/API
+5. Expand Context Package refresh into scheduled rebuild and UI/API
    workflows after packages are marked stale.
 6. Make connector governance the default runtime path for connector sync.
 7. Add benchmark runners, dataset importers, judge execution, and result exports
