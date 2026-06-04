@@ -101,7 +101,7 @@ workspace export of a Node.
 | Repeated work can become workflows and skills. | Workflow / Skill Runtime | First lifecycle records workflow traces, generalized workflows, procedural memory objects, and skill packages. | `MemoryCore.capture_workflow_trace/2`, `generalize_workflow/2`, `create_procedural_memory/2`, `package_skill/2`, reality-check workflow probes. | Real workflow mining, clustering, review gates, skill execution runtime, and exception/rollback handling. |
 | Tool and model calls are governed. | Model / Tool Governance | Tool/model definitions and calls can enforce privileges, partitions, required inputs/outputs, and audit links. Connector runs use governed execution by default, while raw sync requires an explicit `governed: false` bypass. | `test/connectors/runner_test.exs`, reality-check governance probes. | Richer schema validation/output normalization and policy-specific grants. |
 | Markdown/files are projections, not the only truth. | Workspace Export | Workspace export records projections and can re-ingest edits as evidence. | `test/workspace_export_test.exs`, README storage model. | Full app/page rendering, HTML/report generation, and projection invalidation/rebuild policies. |
-| Benchmarks are inspectable, not just screenshots. | Evaluation / Audit | `evaluation_runs` and `evaluation_cases` store benchmark config, dataset metadata, judge config, retrieved object links, Context Package links, per-case scores, and aggregate summaries. | `OptimalEngine.Evaluation`, `test/evaluation_test.exs`, migration 038, and `mix optimal.reality_check` currently report 124 OK probes. | Real benchmark runners, dataset importers, judge execution, retrieval metrics, and public/private result exports. |
+| Benchmarks are inspectable, not just screenshots. | Evaluation / Audit | `Evaluation.run_benchmark/2` creates executable benchmark runs over governed retrieval, assembles Context Packages per question, records retrieved object links and Context Package IDs, applies deterministic expected-answer judging by default, accepts external answerer/judge callbacks, persists each case, and updates aggregate run scores. | `OptimalEngine.Evaluation`, `test/evaluation_test.exs`, migration 038, and `mix optimal.reality_check` currently report 124 OK probes. | Dataset importers, external judge/model execution adapters, retrieval metrics beyond deterministic scoring, and public/private result exports. |
 | Public repo stays clean. | Governance | Public README/docs avoid private project material. Private HTML remains outside the public commit. | Current public worktree status and committed file scope. | Continue auditing generated docs before public pushes. |
 
 ## Current Data Flow
@@ -158,8 +158,8 @@ same lifecycle order:
 5. Expand retrieval planning beyond current structured SQL-like filters into FTS,
    vector, graph, temporal, workflow, and deeper permissions.
 6. Strengthen Active Memory Pools and agent/tool governance.
-7. Add benchmark runners, dataset importers, judge execution, and result exports
-   on top of the existing evaluation run/case storage.
+7. Add dataset importers, external judge/model execution adapters, result exports,
+   and dashboards on top of the executable evaluation runner.
 8. Build app/HTML/report surfaces from governed state.
 9. Add rebuild/recovery services for derived projections.
 ```
