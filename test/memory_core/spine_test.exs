@@ -351,6 +351,42 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              )
   end
 
+  test "retrieval coordinator applies structured subject/action/object filters" do
+    workspace_id = "memory-core-structured-retrieval-test-#{System.unique_integer([:positive])}"
+
+    {:ok, fact, memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+
+    assert {:ok, matching_package} =
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"],
+               subject_anchor: "project_launch",
+               action_class: "approved",
+               object_anchor: "planning_meeting"
+             )
+
+    assert matching_package.retrieval_plan.path == "memory_core_structured_lookup"
+    assert matching_package.retrieval_plan.structured_filters.subject_anchor == "project_launch"
+    assert matching_package.fact_links == [%{type: "fact", id: fact.id}]
+    assert matching_package.memory_links == [%{type: "memory_object", id: memory.id}]
+
+    assert {:ok, mismatched_package} =
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"],
+               subject_anchor: "other_subject"
+             )
+
+    assert mismatched_package.fact_links == []
+    assert mismatched_package.memory_links == []
+    assert mismatched_package.filtered_object_summary.returned_facts == 0
+    assert mismatched_package.filtered_object_summary.returned_memory_objects == 0
+  end
+
   test "retrieval coordinator returns governed asset extraction projections", %{tmp_dir: tmp_dir} do
     workspace_id = "memory-core-retrieval-extraction-test-#{System.unique_integer([:positive])}"
     source_path = Path.join(tmp_dir, "retrieval-audio.wav")

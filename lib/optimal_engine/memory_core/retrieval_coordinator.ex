@@ -27,10 +27,12 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     allowed_security_labels = Keyword.get(opts, :allowed_security_labels, [])
     time_mode = string_opt(opts, :time_mode, "current_valid")
     request_intent = string_opt(opts, :request_intent, classify_intent(query))
+    retrieval_plan = build_retrieval_plan(query, opts)
 
-    with {:ok, facts} <- fetch_facts(workspace_id, query, limit * 2),
-         {:ok, memories} <- fetch_memory_objects(workspace_id, query, limit * 2),
-         {:ok, asset_extractions} <- fetch_asset_extractions(workspace_id, query, limit * 2) do
+    with {:ok, facts} <- fetch_facts(workspace_id, query, limit * 2, retrieval_plan),
+         {:ok, memories} <- fetch_memory_objects(workspace_id, query, limit * 2, retrieval_plan),
+         {:ok, asset_extractions} <-
+           fetch_asset_extractions(workspace_id, query, limit * 2, retrieval_plan) do
       authorized_facts =
         facts
         |> Enum.filter(&authorized?(&1, allowed_partitions, allowed_security_labels))
@@ -92,20 +94,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         skill_package_links: [],
         source_package_links: source_links,
         evidence_links: evidence_links,
-        retrieval_plan: %{
-          query: query,
-          path: "memory_core_fact_memory_lookup",
-          filters: %{
-            workspace_id: workspace_id,
-            lifecycle: [
-              "facts.accepted",
-              "memory_objects.current",
-              "asset_extractions.projected"
-            ],
-            time_mode: time_mode
-          },
-          limit: limit
-        },
+        retrieval_plan: Map.put(retrieval_plan, :limit, limit),
         package_confidence_summary: summarize_score(returned_objects, :confidence),
         package_precision_summary: summarize_score(returned_objects, :precision),
         filtered_object_summary: %{
@@ -413,8 +402,9 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     ]
   end
 
-  defp fetch_facts(workspace_id, query, limit) do
+  defp fetch_facts(workspace_id, query, limit, retrieval_plan) do
     pattern = "%#{query}%"
+    filters = Map.fetch!(retrieval_plan, :structured_filters)
 
     sql = """
     SELECT id, tenant_id, workspace_id, fact_text, fact_type, subject_anchor,
@@ -432,17 +422,31 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         fact_text LIKE ?2 OR subject_anchor LIKE ?2 OR action_class LIKE ?2
         OR object_anchor LIKE ?2 OR ?3 = ''
       )
+      AND (?4 IS NULL OR subject_anchor = ?4)
+      AND (?5 IS NULL OR action_class = ?5)
+      AND (?6 IS NULL OR object_anchor = ?6)
     ORDER BY aggregate_confidence DESC, updated_at DESC
-    LIMIT ?4
+    LIMIT ?7
     """
 
-    with {:ok, rows} <- BaseStore.raw_query(sql, [workspace_id, pattern, query, limit]) do
+    params = [
+      workspace_id,
+      pattern,
+      query,
+      Map.get(filters, :subject_anchor),
+      Map.get(filters, :action_class),
+      Map.get(filters, :object_anchor),
+      limit
+    ]
+
+    with {:ok, rows} <- BaseStore.raw_query(sql, params) do
       {:ok, Enum.map(rows, &fact_from_row/1)}
     end
   end
 
-  defp fetch_memory_objects(workspace_id, query, limit) do
+  defp fetch_memory_objects(workspace_id, query, limit, retrieval_plan) do
     pattern = "%#{query}%"
+    filters = Map.fetch!(retrieval_plan, :structured_filters)
 
     sql = """
     SELECT id, tenant_id, workspace_id, memory_type, summary, subject_anchor,
@@ -461,17 +465,29 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         summary LIKE ?2 OR subject_anchor LIKE ?2 OR action_class LIKE ?2
         OR ?3 = ''
       )
+      AND (?4 IS NULL OR subject_anchor = ?4)
+      AND (?5 IS NULL OR action_class = ?5)
     ORDER BY salience DESC, aggregate_confidence DESC, updated_at DESC
-    LIMIT ?4
+    LIMIT ?6
     """
 
-    with {:ok, rows} <- BaseStore.raw_query(sql, [workspace_id, pattern, query, limit]) do
+    params = [
+      workspace_id,
+      pattern,
+      query,
+      Map.get(filters, :subject_anchor),
+      Map.get(filters, :action_class),
+      limit
+    ]
+
+    with {:ok, rows} <- BaseStore.raw_query(sql, params) do
       {:ok, Enum.map(rows, &memory_from_row/1)}
     end
   end
 
-  defp fetch_asset_extractions(workspace_id, query, limit) do
+  defp fetch_asset_extractions(workspace_id, query, limit, retrieval_plan) do
     pattern = "%#{query}%"
+    filters = Map.fetch!(retrieval_plan, :asset_filters)
 
     sql = """
     SELECT id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
@@ -484,11 +500,22 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         content_text LIKE ?2 OR content_ref LIKE ?2 OR extraction_type LIKE ?2
         OR modality LIKE ?2 OR ?3 = ''
       )
+      AND (?4 IS NULL OR modality = ?4)
+      AND (?5 IS NULL OR extraction_type = ?5)
     ORDER BY confidence DESC, created_at DESC
-    LIMIT ?4
+    LIMIT ?6
     """
 
-    with {:ok, rows} <- BaseStore.raw_query(sql, [workspace_id, pattern, query, limit]) do
+    params = [
+      workspace_id,
+      pattern,
+      query,
+      Map.get(filters, :modality),
+      Map.get(filters, :extraction_type),
+      limit
+    ]
+
+    with {:ok, rows} <- BaseStore.raw_query(sql, params) do
       {:ok, Enum.map(rows, &asset_extraction_from_row/1)}
     end
   end
@@ -703,6 +730,60 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     }
   end
 
+  defp build_retrieval_plan(query, opts) do
+    structured_filters =
+      %{
+        subject_anchor: string_opt_or_nil(opts, :subject_anchor),
+        action_class: string_opt_or_nil(opts, :action_class),
+        object_anchor: string_opt_or_nil(opts, :object_anchor)
+      }
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+
+    asset_filters =
+      %{
+        modality: string_opt_or_nil(opts, :modality),
+        extraction_type: string_opt_or_nil(opts, :extraction_type)
+      }
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+
+    %{
+      query: query,
+      path: retrieval_path(structured_filters, asset_filters),
+      executed_paths: [
+        "facts.sql_like",
+        "memory_objects.sql_like",
+        "asset_extractions.sql_like",
+        "authorization.pre_assembly_filter"
+      ],
+      filters: %{
+        workspace_id: string_opt(opts, :workspace_id, "default"),
+        lifecycle: [
+          "facts.accepted",
+          "memory_objects.current",
+          "asset_extractions.projected"
+        ],
+        time_mode: string_opt(opts, :time_mode, "current_valid")
+      },
+      structured_filters: structured_filters,
+      asset_filters: asset_filters,
+      temporal_filter: %{
+        mode: string_opt(opts, :time_mode, "current_valid"),
+        valid_at: string_opt_or_nil(opts, :valid_at)
+      }
+    }
+  end
+
+  defp retrieval_path(structured_filters, asset_filters)
+
+  defp retrieval_path(filters, asset_filters)
+       when map_size(filters) > 0 or map_size(asset_filters) > 0 do
+    "memory_core_structured_lookup"
+  end
+
+  defp retrieval_path(_filters, _asset_filters), do: "memory_core_fact_memory_lookup"
+
   defp classify_intent(""), do: "recall"
   defp classify_intent(_query), do: "recall"
 
@@ -748,6 +829,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
 
   defp string_opt(opts, key, default), do: Keyword.get(opts, key, default) |> to_string()
+
+  defp string_opt_or_nil(opts, key), do: string_or_nil(Keyword.get(opts, key))
 
   defp string_or_nil(nil), do: nil
   defp string_or_nil(""), do: nil
