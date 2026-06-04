@@ -29,6 +29,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   alias OptimalEngine.MemoryCore.KnowledgeLifecycle
   alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.MemoryCore.SourcePackage
+  alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
   alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.MemoryCore.WorkflowSkill
   alias OptimalEngine.Retrieval
@@ -654,8 +655,21 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                actor_id: "agent:reality-check",
                allowed_partitions: ["different-partition"],
                allowed_security_labels: ["internal"]
-             ) do
-        {:ok, %{package: package, filtered_package: filtered_package}}
+             ),
+           [%{id: fact_id}] = package.fact_links,
+           :ok <-
+             MemoryCoreStore.invalidate_context_packages_for_object("fact", fact_id,
+               workspace_id: workspace_id,
+               reason: "reality_refresh_probe"
+             ),
+           {:ok, refreshed_package} <-
+             RetrievalCoordinator.refresh_context_package(package.id, workspace_id: workspace_id) do
+        {:ok,
+         %{
+           package: package,
+           filtered_package: filtered_package,
+           refreshed_package: refreshed_package
+         }}
       end
 
     state =
@@ -683,6 +697,15 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
               {:ok, "filtered=#{summary.redacted_or_filtered_objects}"}
             else
               {:error, inspect(summary)}
+            end
+          end)
+          |> probe("stale context package refreshed", fn ->
+            if ctx.refreshed_package.id != ctx.package.id and
+                 ctx.refreshed_package.refresh_state == "fresh" and
+                 ctx.refreshed_package.fact_links == ctx.package.fact_links do
+              {:ok, "fresh=#{ctx.refreshed_package.id}"}
+            else
+              {:error, inspect(ctx.refreshed_package)}
             end
           end)
 

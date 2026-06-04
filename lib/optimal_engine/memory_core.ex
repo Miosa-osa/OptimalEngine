@@ -60,6 +60,7 @@ defmodule OptimalEngine.MemoryCore do
   defdelegate promote_claim_to_fact(claim, opts \\ []), to: KnowledgeLifecycle
   defdelegate build_memory_object(fact, opts \\ []), to: KnowledgeLifecycle
   defdelegate retrieve(query, opts \\ []), to: RetrievalCoordinator
+  defdelegate refresh_context_package(context_package_id, opts \\ []), to: RetrievalCoordinator
   defdelegate open_active_pool(opts \\ []), to: ActiveMemoryPool, as: :open
 
   defdelegate load_context_package(pool_id, context_package, opts \\ []),
