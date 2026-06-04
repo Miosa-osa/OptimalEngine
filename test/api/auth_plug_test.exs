@@ -31,9 +31,19 @@ defmodule OptimalEngine.API.AuthPlugTest do
           conn(method, path, Jason.encode!(b))
           |> put_req_header("content-type", "application/json")
       end
+      |> put_peer_data(%{
+        address: unique_loopback_address(),
+        port: 0,
+        ssl_cert: nil
+      })
 
     conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
     Router.call(conn, @opts)
+  end
+
+  defp unique_loopback_address do
+    n = System.unique_integer([:positive])
+    {127, rem(div(n, 65_536), 256), rem(div(n, 256), 256), rem(n, 254) + 1}
   end
 
   # Temporarily force auth_required: true for the duration of a test.
