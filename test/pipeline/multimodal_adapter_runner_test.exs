@@ -189,6 +189,128 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunnerTest do
     assert Jason.decode!(bbox_2) == %{"x" => 3, "y" => 4}
   end
 
+  test "projects nested document elements and tables into OCR spans", %{tmp_dir: tmp_dir} do
+    asset = store_test_asset!(tmp_dir, "structured.pdf", "%PDF-1.7\nstructured-doc-test")
+
+    structured_json =
+      Jason.encode!(%{
+        pages: [
+          %{
+            page_number: 1,
+            text: "Page summary",
+            elements: [
+              %{id: "h1", type: "heading", text: "Executive Summary", bbox: %{x: 1, y: 2}},
+              %{id: "p1", type: "paragraph", text: "Revenue improved."}
+            ],
+            tables: [
+              %{
+                id: "t1",
+                rows: [
+                  ["Metric", "Value"],
+                  ["ARR", "$1M"]
+                ],
+                bbox: %{x: 10, y: 20}
+              }
+            ]
+          }
+        ]
+      })
+
+    assert {:ok, run} =
+             MemoryCore.run_asset_adapter(asset.id, :docling,
+               workspace_id: "runner-workspace",
+               actor_id: "user:runner",
+               command: "printf",
+               args: [structured_json],
+               adapter_role: :document_intelligence
+             )
+
+    assert run.status == "completed"
+
+    assert {:ok, rows} =
+             Store.raw_query(
+               """
+               SELECT page_number, span_text, metadata
+               FROM asset_ocr_spans
+               WHERE workspace_id = ?1 AND asset_id = ?2
+               ORDER BY span_text ASC
+               """,
+               ["runner-workspace", asset.id]
+             )
+
+    texts = Enum.map(rows, fn [_page, text, _metadata] -> text end)
+    assert "Executive Summary" in texts
+    assert "Page summary" in texts
+    assert "| Metric | Value |\n| --- | --- |\n| ARR | $1M |" in texts
+
+    table_row = Enum.find(rows, fn [_page, text, _metadata] -> String.contains?(text, "ARR") end)
+    assert [1, _table_text, table_metadata_json] = table_row
+    table_metadata = Jason.decode!(table_metadata_json)
+    assert table_metadata["element_type"] == "table"
+    assert table_metadata["table_id"] == "t1"
+    assert table_metadata["row_count"] == 2
+    assert table_metadata["column_count"] == 2
+  end
+
+  test "projects nested video frame observations and detections", %{tmp_dir: tmp_dir} do
+    asset = store_test_asset!(tmp_dir, "frames.mp4", "ftypmp4 frame-json-test")
+
+    frame_json =
+      Jason.encode!(%{
+        frames: [
+          %{
+            id: "frame-1",
+            time: 1.5,
+            caption: "Operator opens the dashboard.",
+            detections: [
+              %{id: "det-1", label: "dashboard", confidence: 0.91, bbox: %{x: 5, y: 6}}
+            ],
+            observations: [
+              %{id: "obs-1", type: "risk", text: "Warning banner visible."}
+            ]
+          }
+        ]
+      })
+
+    assert {:ok, run} =
+             MemoryCore.run_asset_adapter(asset.id, :ffmpeg,
+               workspace_id: "runner-workspace",
+               actor_id: "user:runner",
+               command: "printf",
+               args: [frame_json],
+               adapter_role: :visual_reasoning
+             )
+
+    assert run.status == "completed"
+
+    assert {:ok, rows} =
+             Store.raw_query(
+               """
+               SELECT observation_type, observation_text, frame_time_ms, region, metadata
+               FROM asset_visual_observations
+               WHERE workspace_id = ?1 AND asset_id = ?2
+               ORDER BY observation_text ASC
+               """,
+               ["runner-workspace", asset.id]
+             )
+
+    texts = Enum.map(rows, fn [_type, text, _time, _region, _metadata] -> text end)
+    assert "Operator opens the dashboard." in texts
+    assert "Warning banner visible." in texts
+    assert "dashboard" in texts
+
+    detection_row =
+      Enum.find(rows, fn [_type, text, _time, _region, _metadata] -> text == "dashboard" end)
+
+    assert ["object_detection", "dashboard", 1500, region_json, metadata_json] = detection_row
+    assert Jason.decode!(region_json) == %{"x" => 5, "y" => 6}
+
+    metadata = Jason.decode!(metadata_json)
+    assert metadata["observation_id"] == "det-1"
+    assert metadata["object_label"] == "dashboard"
+    assert metadata["object_confidence"] == 0.91
+  end
+
   test "records unavailable run when adapter command is not configured or missing", %{
     tmp_dir: tmp_dir
   } do

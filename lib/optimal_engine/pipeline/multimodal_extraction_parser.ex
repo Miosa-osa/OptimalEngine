@@ -126,9 +126,10 @@ defmodule OptimalEngine.Pipeline.MultimodalExtractionParser do
 
     spans =
       cond do
-        is_list(json["pages"]) -> json["pages"]
-        is_list(json["elements"]) -> json["elements"]
-        is_list(json["chunks"]) -> json["chunks"]
+        is_list(json["pages"]) -> document_spans_from_pages(json["pages"])
+        is_list(json["tables"]) -> document_spans_from_tables(json["tables"])
+        is_list(json["elements"]) -> document_spans_from_elements(json["elements"])
+        is_list(json["chunks"]) -> document_spans_from_elements(json["chunks"])
         is_list(json) -> json
         true -> parse_page_markers(text)
       end
@@ -152,7 +153,14 @@ defmodule OptimalEngine.Pipeline.MultimodalExtractionParser do
   end
 
   defp ocr_span(base, span, opts) when is_map(span) do
-    text = first_present([span["text"], span["content"], span["markdown"], span["span_text"]])
+    text =
+      first_present([
+        span["text"],
+        span["content"],
+        span["markdown"],
+        span["span_text"],
+        span["table_markdown"]
+      ])
 
     if present?(text) do
       base
@@ -166,7 +174,13 @@ defmodule OptimalEngine.Pipeline.MultimodalExtractionParser do
         :bbox,
         first_present([span["bbox"], span["bounding_box"], Keyword.get(opts, :bbox, %{})]) || %{}
       )
-      |> merge_metadata(%{element_type: span["type"], element_id: span["id"]})
+      |> merge_metadata(%{
+        element_type: span["type"],
+        element_id: span["id"],
+        table_id: span["table_id"],
+        row_count: span["row_count"],
+        column_count: span["column_count"]
+      })
     end
   end
 
@@ -178,7 +192,8 @@ defmodule OptimalEngine.Pipeline.MultimodalExtractionParser do
     observations =
       cond do
         is_list(json["observations"]) -> json["observations"]
-        is_list(json["frames"]) -> json["frames"]
+        is_list(json["frames"]) -> visual_observations_from_frames(json["frames"])
+        is_list(json["detections"]) -> visual_observations_from_detections(json["detections"])
         is_list(json) -> json
         true -> []
       end
@@ -203,7 +218,15 @@ defmodule OptimalEngine.Pipeline.MultimodalExtractionParser do
   end
 
   defp visual_observation(base, observation, opts) when is_map(observation) do
-    text = first_present([observation["text"], observation["caption"], observation["observation"]])
+    text =
+      first_present([
+        observation["text"],
+        observation["caption"],
+        observation["observation"],
+        observation["label"],
+        observation["class"],
+        observation["object"]
+      ])
 
     if present?(text) do
       base
@@ -221,9 +244,20 @@ defmodule OptimalEngine.Pipeline.MultimodalExtractionParser do
       |> Keyword.put(
         :frame_time_ms,
         ms(
-          first_present([observation["frame_time_ms"], observation["time_ms"], observation["time"]])
+          first_present([
+            observation["frame_time_ms"],
+            observation["time_ms"],
+            observation["time"],
+            observation["timestamp"],
+            observation["start"]
+          ])
         )
       )
+      |> merge_metadata(%{
+        observation_id: observation["id"],
+        object_label: observation["label"],
+        object_confidence: observation["object_confidence"] || observation["score"]
+      })
     end
   end
 
@@ -305,6 +339,171 @@ defmodule OptimalEngine.Pipeline.MultimodalExtractionParser do
     else
       []
     end
+  end
+
+  defp document_spans_from_pages(pages) do
+    Enum.flat_map(pages, fn
+      %{} = page ->
+        page_number = page["page_number"] || page["page"]
+
+        page_span =
+          page
+          |> Map.put_new("page_number", page_number)
+          |> Map.put_new("type", page["type"] || "page")
+
+        nested =
+          []
+          |> Kernel.++(page["elements"] || [])
+          |> Kernel.++(page["chunks"] || [])
+          |> Enum.map(fn element ->
+            element
+            |> Map.put_new("page_number", page_number)
+            |> Map.put_new("type", element["type"] || "element")
+          end)
+
+        tables =
+          page
+          |> Map.get("tables", [])
+          |> Enum.map(&table_span(&1, page_number))
+
+        [page_span | nested ++ tables]
+
+      other ->
+        [other]
+    end)
+  end
+
+  defp document_spans_from_elements(elements) do
+    Enum.map(elements, fn
+      %{} = element -> Map.put_new(element, "type", element["type"] || "element")
+      other -> other
+    end)
+  end
+
+  defp document_spans_from_tables(tables) do
+    Enum.map(tables, &table_span(&1, &1["page_number"] || &1["page"]))
+  end
+
+  defp table_span(%{} = table, page_number) do
+    rows = table["rows"] || table["data"] || []
+    table_text = first_present([table["markdown"], table["text"], table_markdown(rows)])
+
+    %{
+      "id" => table["id"],
+      "table_id" => table["table_id"] || table["id"],
+      "type" => "table",
+      "page_number" => table["page_number"] || table["page"] || page_number,
+      "bbox" => table["bbox"] || table["bounding_box"] || %{},
+      "table_markdown" => table_text,
+      "row_count" => length(rows),
+      "column_count" => table_column_count(rows)
+    }
+  end
+
+  defp table_span(other, page_number), do: %{"text" => inspect(other), "page_number" => page_number}
+
+  defp table_markdown(rows) when is_list(rows) and rows != [] do
+    normalized_rows = Enum.map(rows, &table_row/1)
+    max_cols = normalized_rows |> Enum.map(&length/1) |> Enum.max(fn -> 0 end)
+
+    if max_cols == 0 do
+      nil
+    else
+      padded_rows = Enum.map(normalized_rows, &pad_row(&1, max_cols))
+      [header | body] = padded_rows
+      separator = List.duplicate("---", max_cols)
+
+      ([header, separator] ++ body)
+      |> Enum.map(fn row -> "| " <> Enum.join(row, " | ") <> " |" end)
+      |> Enum.join("\n")
+    end
+  end
+
+  defp table_markdown(_rows), do: nil
+
+  defp table_row(row) when is_list(row), do: Enum.map(row, &cell_text/1)
+
+  defp table_row(row) when is_map(row) do
+    row
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.map(fn {_key, value} -> cell_text(value) end)
+  end
+
+  defp table_row(value), do: [cell_text(value)]
+
+  defp cell_text(value) when is_binary(value), do: String.replace(value, "|", "\\|")
+  defp cell_text(value), do: value |> to_string() |> String.replace("|", "\\|")
+
+  defp pad_row(row, size), do: row ++ List.duplicate("", max(size - length(row), 0))
+
+  defp table_column_count(rows) when is_list(rows) do
+    rows
+    |> Enum.map(&(&1 |> table_row() |> length()))
+    |> Enum.max(fn -> nil end)
+  end
+
+  defp table_column_count(_rows), do: nil
+
+  defp visual_observations_from_frames(frames) do
+    Enum.flat_map(frames, fn
+      %{} = frame ->
+        frame_time =
+          frame["frame_time_ms"] || frame["time_ms"] || frame["time"] || frame["timestamp"]
+
+        region = frame["region"] || frame["bbox"] || %{}
+
+        frame_observation =
+          if present?(frame["caption"] || frame["text"] || frame["observation"]) do
+            [
+              %{
+                "id" => frame["id"],
+                "text" => frame["caption"] || frame["text"] || frame["observation"],
+                "type" => frame["type"] || "frame_caption",
+                "frame_time_ms" => frame_time,
+                "region" => region
+              }
+            ]
+          else
+            []
+          end
+
+        nested_observations =
+          (frame["observations"] || [])
+          |> Enum.map(fn observation ->
+            observation
+            |> Map.put_new("frame_time_ms", frame_time)
+            |> Map.put_new("region", observation["region"] || observation["bbox"] || region)
+          end)
+
+        nested_detections =
+          (frame["detections"] || [])
+          |> visual_observations_from_detections()
+          |> Enum.map(fn detection ->
+            detection
+            |> Map.put_new("frame_time_ms", frame_time)
+            |> Map.put_new("region", detection["region"] || detection["bbox"] || region)
+          end)
+
+        frame_observation ++ nested_observations ++ nested_detections
+
+      other ->
+        [other]
+    end)
+  end
+
+  defp visual_observations_from_detections(detections) do
+    Enum.map(detections, fn
+      %{} = detection ->
+        label = detection["label"] || detection["class"] || detection["object"]
+
+        detection
+        |> Map.put_new("text", label)
+        |> Map.put_new("type", "object_detection")
+        |> Map.put_new("object_confidence", detection["confidence"])
+
+      other ->
+        other
+    end)
   end
 
   defp decode_json(text) when is_binary(text) do
