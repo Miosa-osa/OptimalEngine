@@ -101,15 +101,14 @@ defmodule OptimalEngine.MixProject do
   end
 
   defp description do
-    "Signal-native context storage engine for AI agents. SQLite + FTS5 + " <>
-      "tiered L0/L1/L2 loading + OWL 2 RL reasoning."
+    "Self-hosted second brain and operating engine for human and AI workspaces."
   end
 
   defp package do
     [
-      licenses: ["UNLICENSED"],
-      links: %{},
-      files: ~w(lib priv config mix.exs README.md)
+      licenses: ["MIT"],
+      links: %{"GitHub" => "https://github.com/robertohluna/OptimalEngine"},
+      files: ~w(lib priv config mix.exs README.md LICENSE)
     ]
   end
 end
