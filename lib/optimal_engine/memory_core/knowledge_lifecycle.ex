@@ -286,6 +286,68 @@ defmodule OptimalEngine.MemoryCore.KnowledgeLifecycle do
     end
   end
 
+  @doc """
+  Record that a newly accepted Fact supersedes an earlier current Fact.
+
+  Supersession does not delete the old Fact. It closes the old current validity
+  window, marks its lifecycle as superseded, and writes a typed Relationship Edge
+  plus Derivation Ledger entry so retrieval and audit can explain the replacement.
+  """
+  @spec record_fact_supersession(map(), map(), keyword()) :: :ok | {:error, term()}
+  def record_fact_supersession(new_fact, old_fact, opts \\ [])
+      when is_map(new_fact) and is_map(old_fact) do
+    new_ref = ref("fact", new_fact.id)
+    old_ref = ref("fact", old_fact.id)
+
+    edge =
+      relationship_edge(new_fact, "fact", new_fact.id, "fact", old_fact.id, "supersedes",
+        confidence: Map.get(new_fact, :aggregate_confidence, 0.5),
+        precision_score: Map.get(new_fact, :aggregate_precision, 0.5),
+        evidence_links: [new_ref, old_ref],
+        metadata: %{
+          supersession_reason: Keyword.get(opts, :reason, "reviewer accepted replacement fact")
+        }
+      )
+
+    ledger =
+      DerivationLedgerEntry.new(
+        "memory_core.supersede_fact",
+        "fact_supersession",
+        [old_ref, new_ref],
+        [new_ref],
+        tenant_id: new_fact.tenant_id,
+        workspace_id: new_fact.workspace_id,
+        evidence_links: [old_ref, new_ref],
+        actor_id: Keyword.get(opts, :actor_id),
+        evaluator_id: Keyword.get(opts, :evaluator_id) || Keyword.get(opts, :actor_id),
+        confidence_delta:
+          Map.get(new_fact, :aggregate_confidence, 0.5) -
+            Map.get(old_fact, :aggregate_confidence, 0.5),
+        precision_delta:
+          Map.get(new_fact, :aggregate_precision, 0.5) -
+            Map.get(old_fact, :aggregate_precision, 0.5),
+        access_policy_id: Map.get(new_fact, :access_policy_id),
+        security_labels: Map.get(new_fact, :security_labels, []),
+        partition_ids: Map.get(new_fact, :partition_ids, []),
+        metadata: %{
+          superseded_fact_id: old_fact.id,
+          replacement_fact_id: new_fact.id,
+          reason: Keyword.get(opts, :reason)
+        }
+      )
+
+    with :ok <-
+           Store.mark_fact_superseded(old_fact.id,
+             tenant_id: old_fact.tenant_id,
+             workspace_id: old_fact.workspace_id,
+             valid_time_end: Keyword.get(opts, :valid_time_end)
+           ),
+         :ok <- Store.insert_relationship_edge(edge),
+         :ok <- Store.insert_derivation_entry(ledger) do
+      :ok
+    end
+  end
+
   defp relationship_edge(scope, from_type, from_id, to_type, to_id, relationship_type, opts) do
     %{
       id:

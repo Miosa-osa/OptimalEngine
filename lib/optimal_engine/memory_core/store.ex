@@ -315,6 +315,79 @@ defmodule OptimalEngine.MemoryCore.Store do
     ])
   end
 
+  @spec get_fact(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found} | {:error, term()}
+  def get_fact(id, opts \\ []) when is_binary(id) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+
+    case Store.raw_query(
+           "SELECT " <>
+             fact_columns() <>
+             " FROM facts WHERE id = ?1 AND tenant_id = ?2" <>
+             workspace_clause(workspace_id, 3),
+           scoped_params([id, tenant_id], workspace_id)
+         ) do
+      {:ok, [row]} -> {:ok, row_to_fact(row)}
+      {:ok, []} -> {:error, :not_found}
+      other -> other
+    end
+  end
+
+  @spec list_current_facts_for_claim(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_current_facts_for_claim(claim, opts \\ []) when is_map(claim) do
+    tenant_id = Keyword.get(opts, :tenant_id, Map.get(claim, :tenant_id, "default"))
+    workspace_id = Keyword.get(opts, :workspace_id, Map.get(claim, :workspace_id, "default"))
+    subject_anchor = Map.get(claim, :subject_anchor)
+    action_class = Map.get(claim, :action_class)
+    object_anchor = Map.get(claim, :object_anchor)
+
+    if blank?(subject_anchor) and blank?(action_class) and blank?(object_anchor) do
+      {:ok, []}
+    else
+      {clauses, params} =
+        {[
+           "tenant_id = ?1",
+           "workspace_id = ?2",
+           "lifecycle_state = 'accepted'",
+           "contradiction_status = 'none'",
+           "(valid_time_end IS NULL OR datetime(valid_time_end) >= datetime('now'))",
+           "(stale_after IS NULL OR datetime(stale_after) >= datetime('now'))"
+         ], [tenant_id, workspace_id]}
+
+      {clauses, params} = maybe_where(clauses, params, "subject_anchor", subject_anchor)
+      {clauses, params} = maybe_where(clauses, params, "action_class", action_class)
+      {clauses, params} = maybe_where(clauses, params, "object_anchor", object_anchor)
+
+      sql =
+        "SELECT " <>
+          fact_columns() <>
+          " FROM facts WHERE " <>
+          Enum.join(clauses, " AND ") <>
+          " ORDER BY verification_time DESC, transaction_time_start DESC LIMIT 25"
+
+      case Store.raw_query(sql, params) do
+        {:ok, rows} -> {:ok, Enum.map(rows, &row_to_fact/1)}
+        other -> other
+      end
+    end
+  end
+
+  @spec mark_fact_superseded(String.t(), keyword()) :: :ok | {:error, term()}
+  def mark_fact_superseded(id, opts) when is_binary(id) and is_list(opts) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+    now = Keyword.get(opts, :transaction_time_end, timestamp())
+    valid_time_end = Keyword.get(opts, :valid_time_end, now)
+
+    sql =
+      "UPDATE facts SET lifecycle_state = 'superseded', contradiction_status = 'superseded', " <>
+        "valid_time_end = COALESCE(valid_time_end, ?1), transaction_time_end = COALESCE(transaction_time_end, ?2), updated_at = datetime('now') " <>
+        "WHERE id = ?3 AND tenant_id = ?4" <>
+        workspace_clause(workspace_id, 5)
+
+    Store.raw_execute(sql, scoped_params([valid_time_end, now, id, tenant_id], workspace_id))
+  end
+
   defp claim_columns do
     "id, tenant_id, workspace_id, source_package_id, signal_id, claim_text, claim_type, subject_anchor, action_class, object_anchor, semantic_frame, source_span, extraction_run_id, evaluator_id, aggregate_confidence, aggregate_precision, raw_component_scores, calibration_dataset_version, access_policy_id, security_labels, partition_ids, lifecycle_state, review_status, valid_time_start, valid_time_end, transaction_time_start, transaction_time_end, stale_after, metadata"
   end
@@ -378,6 +451,76 @@ defmodule OptimalEngine.MemoryCore.Store do
       valid_time_end: valid_time_end,
       transaction_time_start: transaction_time_start,
       transaction_time_end: transaction_time_end,
+      stale_after: stale_after,
+      metadata: decode_map(metadata)
+    }
+  end
+
+  defp fact_columns do
+    "id, tenant_id, workspace_id, fact_text, fact_type, subject_anchor, action_class, object_anchor, scope, accepted_claim_ids, supporting_evidence_links, contradicting_evidence_links, verifier_id, verification_status, aggregate_confidence, aggregate_precision, raw_component_scores, access_policy_id, security_labels, partition_ids, lifecycle_state, contradiction_status, event_time, valid_time_start, valid_time_end, transaction_time_start, transaction_time_end, verification_time, stale_after, metadata"
+  end
+
+  defp row_to_fact([
+         id,
+         tenant_id,
+         workspace_id,
+         fact_text,
+         fact_type,
+         subject_anchor,
+         action_class,
+         object_anchor,
+         scope,
+         accepted_claim_ids,
+         supporting_evidence_links,
+         contradicting_evidence_links,
+         verifier_id,
+         verification_status,
+         aggregate_confidence,
+         aggregate_precision,
+         raw_component_scores,
+         access_policy_id,
+         security_labels,
+         partition_ids,
+         lifecycle_state,
+         contradiction_status,
+         event_time,
+         valid_time_start,
+         valid_time_end,
+         transaction_time_start,
+         transaction_time_end,
+         verification_time,
+         stale_after,
+         metadata
+       ]) do
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      fact_text: fact_text,
+      fact_type: fact_type,
+      subject_anchor: subject_anchor,
+      action_class: action_class,
+      object_anchor: object_anchor,
+      scope: decode_map(scope),
+      accepted_claim_ids: decode_list(accepted_claim_ids),
+      supporting_evidence_links: decode_list(supporting_evidence_links),
+      contradicting_evidence_links: decode_list(contradicting_evidence_links),
+      verifier_id: verifier_id,
+      verification_status: verification_status,
+      aggregate_confidence: aggregate_confidence || 0.5,
+      aggregate_precision: aggregate_precision || 0.5,
+      raw_component_scores: decode_map(raw_component_scores),
+      access_policy_id: access_policy_id,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      lifecycle_state: lifecycle_state,
+      contradiction_status: contradiction_status,
+      event_time: event_time,
+      valid_time_start: valid_time_start,
+      valid_time_end: valid_time_end,
+      transaction_time_start: transaction_time_start,
+      transaction_time_end: transaction_time_end,
+      verification_time: verification_time,
       stale_after: stale_after,
       metadata: decode_map(metadata)
     }
@@ -1275,6 +1418,16 @@ defmodule OptimalEngine.MemoryCore.Store do
       _ -> []
     end
   end
+
+  defp maybe_where(clauses, params, _column, value) when value in [nil, ""], do: {clauses, params}
+
+  defp maybe_where(clauses, params, column, value) do
+    {clauses ++ ["#{column} = ?#{length(params) + 1}"], params ++ [value]}
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(""), do: true
+  defp blank?(_value), do: false
 
   defp workspace_clause(nil, _position), do: ""
   defp workspace_clause(_workspace_id, position), do: " AND workspace_id = ?#{position}"

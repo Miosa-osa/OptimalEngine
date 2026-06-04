@@ -32,8 +32,12 @@ flowchart LR
   Topology --> Source[Source Package]
   Source --> Signal[Signal Pipeline]
   Signal --> Claim[Claim Candidate]
-  Claim --> Review[Review / Policy]
-  Review --> Fact[Fact]
+  Claim --> Review[Review Queue]
+  Review --> Policy[Stale / Conflict / Supersession Policy]
+  Policy --> Fact[Accepted Fact]
+  Policy --> Reject[Rejected or Conflict Response]
+  Policy --> Supersede[Supersede Prior Fact]
+  Supersede --> Fact
   Fact --> Memory[Memory Object]
   Memory --> Retrieval[Retrieval Coordinator]
   Retrieval --> Context[Context Package]
@@ -66,7 +70,7 @@ Built and verified now:
 | Structured multimodal extraction parsing | Nested transcript segments, document pages/elements/tables, and video frame observations/detections can be normalized into typed extraction projection rows. |
 | Adapter-output Claims | Completed adapter outputs can be preserved as derived Source Packages and converted into pending Claims. Failed or unavailable adapter runs cannot become Claims. |
 | Asset extraction projections | Completed adapter runs can be normalized into `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection tables. The adapter runner now auto-projects supported completed runs, and text-bearing extractions can become derived Source Packages and pending Claims. |
-| Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
+| Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. Stale Claims are blocked by default, conflicting current Facts require explicit supersession, and supersession closes the old Fact with a typed edge and ledger entry. |
 | Claim review queue | `MemoryCore.claim_review_queue/1` and `GET /api/memory-core/claim-review` return review/lifecycle counts plus filterable Claim rows for UI and agent review workflows. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
@@ -105,13 +109,13 @@ mix test test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs -
 13 tests, 0 failures
 
 mix test test/memory_core/claim_review_test.exs test/api/router_test.exs --seed 0
-31 tests, 0 failures
+34 tests, 0 failures
 
 mix test test/pipeline/multimodal_adapter_runner_test.exs --seed 0
 8 tests, 0 failures
 
 mix optimal.reality_check
-116 probes, 116 ok, 0 warn, 0 fail
+117 probes, 117 ok, 0 warn, 0 fail
 ```
 
 The full legacy suite still contains older optional/backend warnings. The focused
@@ -298,7 +302,9 @@ flowchart LR
   Transcript --> Claim[Pending Claim]
   OCR --> Claim
   Visual --> Claim
-  Claim --> Fact[Reviewed Fact]
+  Claim --> Review[Review Policy]
+  Review --> Fact[Reviewed Fact]
+  Review --> Conflict[Stale / Conflict / Supersession Required]
 ```
 
 ## Storage Model
@@ -446,6 +452,12 @@ rows remain searchable/retrievable projection records and are not claimable text
 the review surface for apps and agents. They return filterable Claims plus review
 and lifecycle counts so a user can see pending, rejected, and accepted work
 without scraping raw tables.
+Promotion is policy-gated: stale Claims are rejected unless the reviewer
+explicitly allows stale promotion, Claims that contradict current accepted Facts
+return a conflict, and the reviewer must pass `supersedes_fact_id` when a new
+Fact replaces an older one. Supersession marks the older Fact as superseded,
+writes a `supersedes` Relationship Edge, and records the replacement in the
+Derivation Ledger.
 Retrieval now includes governed asset extraction projections in Context Packages,
 so transcripts, OCR spans, visual observations, and embedding refs can be returned
 as source-linked context without being promoted to Facts.
@@ -560,11 +572,12 @@ The next build slices are:
    output shapes and install profiles.
 2. Implement provider-specific sync/download adapters that return raw payloads
    with attachment/file data so `Connectors.Runner` can preserve them automatically.
-3. Add richer review policies for Claims, stale checks, contradictions, and Fact supersession.
+3. Add adapter-specific review policies for Claims created from multimodal
+   extraction output.
 4. Expand Retrieval Coordinator beyond simple fact/memory/extraction lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
-5. Add review/supersession policies for stale, contradicted, and replaced
-   Facts/Memory Objects.
+5. Extend stale/supersession handling from Facts into Memory Objects and Context
+   Package invalidation.
 6. Make connector governance the default runtime path for connector sync.
 7. Add benchmark/evaluation records so large-scale recall tests are stored and
    inspectable.

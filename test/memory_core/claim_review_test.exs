@@ -121,4 +121,112 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
     assert pending_only.count == 1
     assert hd(pending_only.claims).id == claim_a.id
   end
+
+  test "stale claims are blocked from promotion by default" do
+    workspace_id = ws()
+    stale_after = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
+
+    assert {:ok, claim} =
+             extracted_claim(workspace_id,
+               claim_text: "The deployment window was yesterday.",
+               subject_anchor: "deployment",
+               action_class: "scheduled_for",
+               object_anchor: "yesterday",
+               stale_after: stale_after
+             )
+
+    assert {:error, {:claim_stale, ^stale_after}} =
+             MemoryCore.promote_claim(claim.id,
+               workspace_id: workspace_id,
+               actor_id: "user:reviewer"
+             )
+
+    assert {:ok, [[0]]} =
+             Store.raw_query("SELECT COUNT(*) FROM facts WHERE workspace_id = ?1", [workspace_id])
+  end
+
+  test "conflicting current facts require explicit supersession" do
+    workspace_id = ws()
+
+    assert {:ok, original_claim} =
+             extracted_claim(workspace_id,
+               claim_text: "The launch date is June 10.",
+               subject_anchor: "project_launch",
+               action_class: "date",
+               object_anchor: "public_launch"
+             )
+
+    assert {:ok, original} =
+             MemoryCore.promote_claim(original_claim.id,
+               workspace_id: workspace_id,
+               actor_id: "user:reviewer",
+               fact_text: "The launch date is June 10.",
+               summary: "Launch date is June 10."
+             )
+
+    assert {:ok, replacement_claim} =
+             extracted_claim(workspace_id,
+               claim_text: "The launch date is June 17.",
+               subject_anchor: "project_launch",
+               action_class: "date",
+               object_anchor: "public_launch"
+             )
+
+    assert {:error, {:contradicts_current_facts, [blocked_fact_id]}} =
+             MemoryCore.promote_claim(replacement_claim.id,
+               workspace_id: workspace_id,
+               actor_id: "user:reviewer",
+               fact_text: "The launch date is June 17."
+             )
+
+    assert blocked_fact_id == original.fact.id
+
+    assert {:ok, replacement} =
+             MemoryCore.promote_claim(replacement_claim.id,
+               workspace_id: workspace_id,
+               actor_id: "user:reviewer",
+               fact_text: "The launch date is June 17.",
+               summary: "Launch date moved to June 17.",
+               supersedes_fact_id: original.fact.id,
+               supersession_reason: "updated source evidence"
+             )
+
+    assert replacement.fact.lifecycle_state == "accepted"
+
+    assert {:ok, [["superseded", "superseded"]]} =
+             Store.raw_query(
+               "SELECT lifecycle_state, contradiction_status FROM facts WHERE workspace_id = ?1 AND id = ?2",
+               [workspace_id, original.fact.id]
+             )
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM facts WHERE workspace_id = ?1 AND lifecycle_state = 'accepted'",
+               [workspace_id]
+             )
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM relationship_edges WHERE workspace_id = ?1 AND relationship_type = 'supersedes' AND from_object_id = ?2 AND to_object_id = ?3",
+               [workspace_id, replacement.fact.id, original.fact.id]
+             )
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM derivation_ledger WHERE workspace_id = ?1 AND activity_type = 'memory_core.supersede_fact'",
+               [workspace_id]
+             )
+  end
+
+  defp extracted_claim(workspace_id, opts) do
+    source =
+      MemoryCore.source_package_from_text(Keyword.fetch!(opts, :claim_text),
+        workspace_id: workspace_id,
+        source_type: "test_source",
+        security_labels: ["internal"],
+        partition_ids: ["test"]
+      )
+
+    MemoryCore.extract_claim(source, opts)
+  end
 end

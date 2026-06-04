@@ -22,6 +22,18 @@ defmodule OptimalEngine.API.RouterTest do
     Router.call(conn, @opts)
   end
 
+  defp extracted_policy_claim(workspace_id, opts) do
+    source =
+      OptimalEngine.MemoryCore.source_package_from_text(Keyword.fetch!(opts, :claim_text),
+        workspace_id: workspace_id,
+        source_type: "api_test_source",
+        security_labels: ["internal"],
+        partition_ids: ["api-test"]
+      )
+
+    OptimalEngine.MemoryCore.extract_claim(source, opts)
+  end
+
   describe "GET /api/status" do
     test "returns a JSON status payload" do
       conn = request(:get, "/api/status")
@@ -230,6 +242,66 @@ defmodule OptimalEngine.API.RouterTest do
       assert filtered_body["count"] == 1
       assert [filtered_claim] = filtered_body["claims"]
       assert filtered_claim["id"] == claim_a["id"]
+    end
+
+    test "promotion API reports conflicts and accepts explicit supersession" do
+      workspace_id = "api-claim-policy-#{System.unique_integer([:positive])}"
+
+      assert {:ok, original_claim} =
+               extracted_policy_claim(workspace_id,
+                 claim_text: "The customer onboarding date is June 10.",
+                 subject_anchor: "customer_onboarding",
+                 action_class: "date",
+                 object_anchor: "launch"
+               )
+
+      original_conn =
+        request(:post, "/api/memory-core/claims/#{original_claim.id}/promote", %{
+          "workspace" => workspace_id,
+          "actor_id" => "user:api-reviewer",
+          "fact_text" => "The customer onboarding date is June 10."
+        })
+
+      assert original_conn.status == 200
+      assert {:ok, %{"fact" => %{"id" => original_fact_id}}} = Jason.decode(original_conn.resp_body)
+
+      assert {:ok, replacement_claim} =
+               extracted_policy_claim(workspace_id,
+                 claim_text: "The customer onboarding date is June 17.",
+                 subject_anchor: "customer_onboarding",
+                 action_class: "date",
+                 object_anchor: "launch"
+               )
+
+      conflict_conn =
+        request(:post, "/api/memory-core/claims/#{replacement_claim.id}/promote", %{
+          "workspace" => workspace_id,
+          "actor_id" => "user:api-reviewer",
+          "fact_text" => "The customer onboarding date is June 17."
+        })
+
+      assert conflict_conn.status == 409
+
+      assert {:ok,
+              %{"error" => "claim contradicts current facts", "fact_ids" => [^original_fact_id]}} =
+               Jason.decode(conflict_conn.resp_body)
+
+      supersede_conn =
+        request(:post, "/api/memory-core/claims/#{replacement_claim.id}/promote", %{
+          "workspace" => workspace_id,
+          "actor_id" => "user:api-reviewer",
+          "fact_text" => "The customer onboarding date is June 17.",
+          "supersedes_fact_id" => original_fact_id,
+          "supersession_reason" => "new source evidence"
+        })
+
+      assert supersede_conn.status == 200
+
+      assert {:ok, [["superseded"]]} =
+               OptimalEngine.Store.raw_query(
+                 "SELECT lifecycle_state FROM facts WHERE workspace_id = ?1 AND id = ?2",
+                 [workspace_id, original_fact_id]
+               )
     end
   end
 
