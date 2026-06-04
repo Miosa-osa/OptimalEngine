@@ -108,7 +108,7 @@ Built and verified now:
 | Claim review queue | `MemoryCore.claim_review_queue/1` and `GET /api/memory-core/claim-review` return review/lifecycle counts plus filterable Claim rows for UI and agent review workflows. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
-| Governed retrieval | Retrieval returns Context Packages, not loose chunks, writes explicit retrieval-plan metadata, applies structured subject/action/object and asset filters, filters Facts, Memory Objects, and asset extraction projections by partition/security scope before package assembly, marks affected packages stale when returned Facts or Memory Objects are superseded, can refresh a stale package from its original request scope, can batch refresh stale packages, and exposes API, CLI/cron, and supervised scheduler triggers for app/agent/runtime workflows. |
+| Governed retrieval | Retrieval returns Context Packages, not loose chunks, writes explicit retrieval-plan metadata, applies structured subject/action/object, asset, workflow, and skill filters, filters Facts, Memory Objects, asset extraction projections, workflow candidates, and approved/enabled Skill Packages by partition/security scope before package assembly, marks affected packages stale when returned Facts or Memory Objects are superseded, can refresh a stale package from its original request scope, can batch refresh stale packages, and exposes API, CLI/cron, and supervised scheduler triggers for app/agent/runtime workflows. |
 | Active Memory Pools | Task-scoped working memory can load Context Packages, refresh stale loaded Context Packages, publish observations as pending Claims, and expose the open/retrieve/refresh/observe/close loop through API routes. |
 | Smart memory intake | `Memory.remember/2` and `POST /api/memory/remember` can gate low-salience writes, skip semantic duplicates, update superseded memories, and attach intake metadata before the governed Source Package and pending Claim bridge runs. |
 | Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
@@ -166,7 +166,7 @@ mix test test/pipeline/multimodal_adapter_runner_test.exs --seed 0
 8 tests, 0 failures
 
 mix optimal.reality_check
-125 probes, 125 ok, 0 warn, 0 fail
+126 probes, 126 ok, 0 warn, 0 fail
 ```
 
 The full legacy suite still contains older optional/backend warnings. The focused

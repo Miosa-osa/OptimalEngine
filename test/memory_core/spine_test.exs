@@ -700,6 +700,114 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert ledger_count == 4
   end
 
+  test "retrieval coordinator packages workflow candidates and approved enabled skills" do
+    workspace_id = "memory-core-workflow-retrieval-test-#{System.unique_integer([:positive])}"
+
+    {:ok, _fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+
+    {:ok, pool} =
+      ActiveMemoryPool.open(
+        workspace_id: workspace_id,
+        task_type: "launch_review",
+        subject_anchor: "project_launch",
+        member_links: [%{type: "human", id: "human:reviewer"}],
+        agent_links: [%{type: "agent", id: "agent:test"}],
+        security_labels: ["internal"],
+        partition_ids: ["project-launch"]
+      )
+
+    {:ok, trace} =
+      WorkflowSkill.capture_trace_from_pool(pool.id,
+        workflow_family: "launch_review",
+        action_class: "reviewed",
+        outcome: "budget_follow_up_recorded",
+        step_links: [
+          %{type: "step", id: "load_context"},
+          %{type: "step", id: "record_observation"}
+        ],
+        actor_id: "agent:test"
+      )
+
+    {:ok, workflow} =
+      WorkflowSkill.generalize_workflow(trace,
+        applicability_conditions: %{node_type: "project"},
+        validation_score: 0.45,
+        actor_id: "agent:test"
+      )
+
+    {:ok, procedure} =
+      WorkflowSkill.create_procedural_memory(workflow,
+        capability_name: "launch_review_procedure",
+        required_privileges: ["memory:read", "claims:create"],
+        actor_id: "agent:test"
+      )
+
+    {:ok, draft_skill} =
+      WorkflowSkill.package_skill(procedure,
+        skill_package_name: "launch_review_draft_skill",
+        actor_id: "agent:test"
+      )
+
+    assert draft_skill.review_status == "draft"
+    assert draft_skill.enabled_state == "disabled"
+
+    assert {:ok, draft_package} =
+             RetrievalCoordinator.retrieve("launch_review",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"],
+               workflow_family: "launch_review",
+               task_family: "launch_review"
+             )
+
+    assert draft_package.workflow_links == [%{type: "generalized_workflow", id: workflow.id}]
+    assert draft_package.skill_package_links == []
+    assert draft_package.filtered_object_summary.returned_workflows == 1
+    assert draft_package.filtered_object_summary.returned_skill_packages == 0
+    assert "workflow_skill.eligibility_filter" in draft_package.retrieval_plan.executed_paths
+
+    {:ok, approved_skill} =
+      WorkflowSkill.package_skill(procedure,
+        skill_package_name: "launch_review_approved_skill",
+        review_status: "approved",
+        enabled_state: "enabled",
+        input_contract: %{requires: ["project_node_id"]},
+        output_contract: %{creates: ["pending_claims"]},
+        execution_policy: %{requires_review: true},
+        actor_id: "agent:test"
+      )
+
+    assert {:ok, package} =
+             RetrievalCoordinator.retrieve("launch_review",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"],
+               workflow_family: "launch_review",
+               task_family: "launch_review"
+             )
+
+    assert package.workflow_links == [%{type: "generalized_workflow", id: workflow.id}]
+    assert package.skill_package_links == [%{type: "skill_package", id: approved_skill.id}]
+    assert package.filtered_object_summary.returned_workflows == 1
+    assert package.filtered_object_summary.returned_skill_packages == 1
+    assert [%{skill_package_name: "launch_review_approved_skill"}] = package.skill_packages
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               """
+               SELECT COUNT(*)
+               FROM context_packages
+               WHERE workspace_id = ?1
+                 AND id = ?2
+                 AND workflow_links != '[]'
+                 AND skill_package_links != '[]'
+               """,
+               [workspace_id, package.id]
+             )
+  end
+
   test "tool and model governance records allowed and rejected calls" do
     workspace_id = "memory-core-tool-model-test-#{System.unique_integer([:positive])}"
 

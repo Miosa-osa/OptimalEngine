@@ -3,9 +3,10 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   First governed recall slice for Memory Core.
 
   The coordinator returns a Context Package instead of loose search chunks. This
-  first implementation reads accepted Facts, current Memory Objects, and governed
-  asset extraction projections in a workspace, applies basic partition/security
-  filtering, writes a `context_packages` row, and returns the structured package.
+  first implementation reads accepted Facts, current Memory Objects, governed
+  asset extraction projections, workflow candidates, and approved Skill Packages
+  in a workspace. It applies partition/security filtering, writes a
+  `context_packages` row, and returns the structured package.
   """
 
   alias OptimalEngine.MemoryCore.{ID, Store}
@@ -32,7 +33,10 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     with {:ok, facts} <- fetch_facts(workspace_id, query, limit * 2, retrieval_plan),
          {:ok, memories} <- fetch_memory_objects(workspace_id, query, limit * 2, retrieval_plan),
          {:ok, asset_extractions} <-
-           fetch_asset_extractions(workspace_id, query, limit * 2, retrieval_plan) do
+           fetch_asset_extractions(workspace_id, query, limit * 2, retrieval_plan),
+         {:ok, workflows} <- fetch_workflows(workspace_id, query, limit * 2, retrieval_plan),
+         {:ok, skill_packages} <-
+           fetch_skill_packages(workspace_id, query, limit * 2, retrieval_plan, opts) do
       authorized_facts =
         facts
         |> Enum.filter(&authorized?(&1, allowed_partitions, allowed_security_labels))
@@ -48,10 +52,22 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         |> Enum.filter(&authorized?(&1, allowed_partitions, allowed_security_labels))
         |> Enum.take(limit)
 
+      authorized_workflows =
+        workflows
+        |> Enum.filter(&authorized?(&1, allowed_partitions, allowed_security_labels))
+        |> Enum.take(limit)
+
+      authorized_skill_packages =
+        skill_packages
+        |> Enum.filter(&authorized?(&1, allowed_partitions, allowed_security_labels))
+        |> Enum.take(limit)
+
       redacted =
         length(facts) - length(authorized_facts) +
           (length(memories) - length(authorized_memories)) +
-          (length(asset_extractions) - length(authorized_asset_extractions))
+          (length(asset_extractions) - length(authorized_asset_extractions)) +
+          (length(workflows) - length(authorized_workflows)) +
+          (length(skill_packages) - length(authorized_skill_packages))
 
       fact_links = Enum.map(authorized_facts, &ref("fact", &1.id))
       memory_links = Enum.map(authorized_memories, &ref("memory_object", &1.id))
@@ -59,7 +75,16 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       asset_extraction_links =
         Enum.map(authorized_asset_extractions, &ref("asset_extraction", &1.id))
 
-      returned_objects = authorized_facts ++ authorized_memories ++ authorized_asset_extractions
+      workflow_links =
+        Enum.map(authorized_workflows, &ref("generalized_workflow", &1.id))
+
+      skill_package_links =
+        Enum.map(authorized_skill_packages, &ref("skill_package", &1.id))
+
+      returned_objects =
+        authorized_facts ++
+          authorized_memories ++
+          authorized_asset_extractions ++ authorized_workflows ++ authorized_skill_packages
 
       source_links =
         collect_unique_links(returned_objects, :source_package_links)
@@ -67,7 +92,9 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       evidence_links =
         collect_unique_links(returned_objects, :evidence_links)
 
-      returned_links = fact_links ++ memory_links ++ asset_extraction_links
+      returned_links =
+        fact_links ++
+          memory_links ++ asset_extraction_links ++ workflow_links ++ skill_package_links
 
       context_package = %{
         id:
@@ -90,8 +117,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         detail_depth: Keyword.get(opts, :detail_depth, 1),
         memory_links: memory_links,
         fact_links: fact_links,
-        workflow_links: [],
-        skill_package_links: [],
+        workflow_links: workflow_links,
+        skill_package_links: skill_package_links,
         source_package_links: source_links,
         evidence_links: evidence_links,
         retrieval_plan: Map.put(retrieval_plan, :limit, limit),
@@ -104,6 +131,10 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
           returned_memory_objects: length(authorized_memories),
           candidate_asset_extractions: length(asset_extractions),
           returned_asset_extractions: length(authorized_asset_extractions),
+          candidate_workflows: length(workflows),
+          returned_workflows: length(authorized_workflows),
+          candidate_skill_packages: length(skill_packages),
+          returned_skill_packages: length(authorized_skill_packages),
           redacted_or_filtered_objects: redacted
         },
         returned_object_links: returned_links,
@@ -125,7 +156,9 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
             %{
               query: query,
               answer_surface: "context_package",
-              asset_extraction_links: asset_extraction_links
+              asset_extraction_links: asset_extraction_links,
+              workflow_links: workflow_links,
+              skill_package_links: skill_package_links
             },
             Keyword.get(opts, :metadata, %{})
           )
@@ -136,7 +169,9 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
          Map.merge(context_package, %{
            facts: authorized_facts,
            memory_objects: authorized_memories,
-           asset_extractions: authorized_asset_extractions
+           asset_extractions: authorized_asset_extractions,
+           workflows: authorized_workflows,
+           skill_packages: authorized_skill_packages
          })}
       end
     end
@@ -520,6 +555,101 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
+  defp fetch_workflows(workspace_id, query, limit, retrieval_plan) do
+    pattern = "%#{query}%"
+    filters = Map.fetch!(retrieval_plan, :workflow_filters)
+
+    sql = """
+    SELECT id, tenant_id, workspace_id, workflow_family, scope,
+           applicability_conditions, outcome_class, workflow_trace_links,
+           supporting_episode_links, contradicting_trace_links, step_pattern_links,
+           aggregate_confidence, aggregate_precision, validation_score,
+           lifecycle_state, validation_status, supersession_status,
+           valid_time_start, valid_time_end, stale_after, access_policy_id,
+           security_labels, partition_ids, metadata
+    FROM generalized_workflows
+    WHERE workspace_id = ?1
+      AND lifecycle_state IN ('candidate', 'current', 'approved')
+      AND validation_status != 'rejected'
+      AND supersession_status = 'none'
+      AND (valid_time_end IS NULL OR datetime(valid_time_end) >= datetime('now'))
+      AND (stale_after IS NULL OR datetime(stale_after) >= datetime('now'))
+      AND (
+        workflow_family LIKE ?2 OR outcome_class LIKE ?2 OR metadata LIKE ?2
+        OR ?3 = ''
+      )
+      AND (?4 IS NULL OR workflow_family = ?4)
+    ORDER BY validation_score DESC, aggregate_confidence DESC, updated_at DESC
+    LIMIT ?5
+    """
+
+    params = [
+      workspace_id,
+      pattern,
+      query,
+      Map.get(filters, :workflow_family),
+      limit
+    ]
+
+    with {:ok, rows} <- BaseStore.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &workflow_from_row/1)}
+    end
+  end
+
+  defp fetch_skill_packages(workspace_id, query, limit, retrieval_plan, opts) do
+    pattern = "%#{query}%"
+    filters = Map.fetch!(retrieval_plan, :skill_filters)
+    include_draft_skills? = Keyword.get(opts, :include_draft_skills, false)
+
+    eligibility_sql =
+      if include_draft_skills? do
+        "AND retirement_status = 'active'"
+      else
+        """
+        AND review_status = 'approved'
+        AND enabled_state = 'enabled'
+        AND retirement_status = 'active'
+        AND suspension_reason IS NULL
+        """
+      end
+
+    sql = """
+    SELECT id, tenant_id, workspace_id, version, skill_package_name, task_family,
+           competency_links, risk_class, procedural_memory_links, workflow_links,
+           validation_links, evidence_links, input_contract, output_contract,
+           execution_policy, required_privileges, tool_requirements, model_policy_id,
+           aggregate_confidence, aggregate_precision, review_status, enabled_state,
+           suspension_reason, retirement_status, valid_time_start, valid_time_end,
+           stale_after, access_policy_id, security_labels, partition_ids, metadata
+    FROM skill_packages
+    WHERE workspace_id = ?1
+      #{eligibility_sql}
+      AND (valid_time_end IS NULL OR datetime(valid_time_end) >= datetime('now'))
+      AND (stale_after IS NULL OR datetime(stale_after) >= datetime('now'))
+      AND (
+        skill_package_name LIKE ?2 OR task_family LIKE ?2 OR metadata LIKE ?2
+        OR ?3 = ''
+      )
+      AND (?4 IS NULL OR task_family = ?4)
+      AND (?5 IS NULL OR skill_package_name = ?5)
+    ORDER BY aggregate_confidence DESC, updated_at DESC
+    LIMIT ?6
+    """
+
+    params = [
+      workspace_id,
+      pattern,
+      query,
+      Map.get(filters, :task_family),
+      Map.get(filters, :skill_package_name),
+      limit
+    ]
+
+    with {:ok, rows} <- BaseStore.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &skill_package_from_row/1)}
+    end
+  end
+
   defp fact_from_row([
          id,
          tenant_id,
@@ -686,6 +816,146 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     }
   end
 
+  defp workflow_from_row([
+         id,
+         tenant_id,
+         workspace_id,
+         workflow_family,
+         scope,
+         applicability_conditions,
+         outcome_class,
+         workflow_trace_links,
+         supporting_episode_links,
+         contradicting_trace_links,
+         step_pattern_links,
+         aggregate_confidence,
+         aggregate_precision,
+         validation_score,
+         lifecycle_state,
+         validation_status,
+         supersession_status,
+         valid_time_start,
+         valid_time_end,
+         stale_after,
+         access_policy_id,
+         security_labels,
+         partition_ids,
+         metadata
+       ]) do
+    workflow_trace_links = decode_list(workflow_trace_links)
+    supporting_episode_links = decode_list(supporting_episode_links)
+    contradicting_trace_links = decode_list(contradicting_trace_links)
+    step_pattern_links = decode_list(step_pattern_links)
+
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      text: workflow_family,
+      type: "generalized_workflow",
+      workflow_family: workflow_family,
+      scope: decode_map(scope),
+      applicability_conditions: decode_map(applicability_conditions),
+      outcome_class: outcome_class,
+      workflow_trace_links: workflow_trace_links,
+      supporting_episode_links: supporting_episode_links,
+      contradicting_trace_links: contradicting_trace_links,
+      step_pattern_links: step_pattern_links,
+      source_package_links: [],
+      evidence_links: workflow_trace_links ++ supporting_episode_links ++ contradicting_trace_links,
+      confidence: aggregate_confidence,
+      precision: aggregate_precision,
+      validation_score: validation_score,
+      access_policy_id: access_policy_id,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      lifecycle_state: lifecycle_state,
+      validation_status: validation_status,
+      supersession_status: supersession_status,
+      valid_time_start: valid_time_start,
+      valid_time_end: valid_time_end,
+      stale_after: stale_after,
+      metadata: decode_map(metadata)
+    }
+  end
+
+  defp skill_package_from_row([
+         id,
+         tenant_id,
+         workspace_id,
+         version,
+         skill_package_name,
+         task_family,
+         competency_links,
+         risk_class,
+         procedural_memory_links,
+         workflow_links,
+         validation_links,
+         evidence_links,
+         input_contract,
+         output_contract,
+         execution_policy,
+         required_privileges,
+         tool_requirements,
+         model_policy_id,
+         aggregate_confidence,
+         aggregate_precision,
+         review_status,
+         enabled_state,
+         suspension_reason,
+         retirement_status,
+         valid_time_start,
+         valid_time_end,
+         stale_after,
+         access_policy_id,
+         security_labels,
+         partition_ids,
+         metadata
+       ]) do
+    procedural_memory_links = decode_list(procedural_memory_links)
+    workflow_links = decode_list(workflow_links)
+    validation_links = decode_list(validation_links)
+    evidence_links = decode_list(evidence_links)
+
+    %{
+      id: id,
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      text: skill_package_name,
+      type: "skill_package",
+      version: version,
+      skill_package_name: skill_package_name,
+      task_family: task_family,
+      competency_links: decode_list(competency_links),
+      risk_class: risk_class,
+      procedural_memory_links: procedural_memory_links,
+      workflow_links: workflow_links,
+      validation_links: validation_links,
+      source_package_links: [],
+      evidence_links:
+        evidence_links ++ workflow_links ++ procedural_memory_links ++ validation_links,
+      input_contract: decode_map(input_contract),
+      output_contract: decode_map(output_contract),
+      execution_policy: decode_map(execution_policy),
+      required_privileges: decode_list(required_privileges),
+      tool_requirements: decode_list(tool_requirements),
+      model_policy_id: model_policy_id,
+      confidence: aggregate_confidence,
+      precision: aggregate_precision,
+      access_policy_id: access_policy_id,
+      security_labels: decode_list(security_labels),
+      partition_ids: decode_list(partition_ids),
+      review_status: review_status,
+      enabled_state: enabled_state,
+      suspension_reason: suspension_reason,
+      retirement_status: retirement_status,
+      valid_time_start: valid_time_start,
+      valid_time_end: valid_time_end,
+      stale_after: stale_after,
+      metadata: decode_map(metadata)
+    }
+  end
+
   defp authorized?(object, allowed_partitions, allowed_security_labels) do
     partition_allowed? =
       allowed_partitions == [] or
@@ -748,13 +1018,31 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
       |> Map.new()
 
+    workflow_filters =
+      %{
+        workflow_family: string_opt_or_nil(opts, :workflow_family)
+      }
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+
+    skill_filters =
+      %{
+        task_family: string_opt_or_nil(opts, :task_family),
+        skill_package_name: string_opt_or_nil(opts, :skill_package_name)
+      }
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+
     %{
       query: query,
-      path: retrieval_path(structured_filters, asset_filters),
+      path: retrieval_path(structured_filters, asset_filters, workflow_filters, skill_filters),
       executed_paths: [
         "facts.sql_like",
         "memory_objects.sql_like",
         "asset_extractions.sql_like",
+        "generalized_workflows.sql_like",
+        "skill_packages.sql_like",
+        "workflow_skill.eligibility_filter",
         "authorization.pre_assembly_filter"
       ],
       filters: %{
@@ -762,12 +1050,16 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         lifecycle: [
           "facts.accepted",
           "memory_objects.current",
-          "asset_extractions.projected"
+          "asset_extractions.projected",
+          "generalized_workflows.candidate_or_current",
+          skill_package_lifecycle_filter(opts)
         ],
         time_mode: string_opt(opts, :time_mode, "current_valid")
       },
       structured_filters: structured_filters,
       asset_filters: asset_filters,
+      workflow_filters: workflow_filters,
+      skill_filters: skill_filters,
       temporal_filter: %{
         mode: string_opt(opts, :time_mode, "current_valid"),
         valid_at: string_opt_or_nil(opts, :valid_at)
@@ -775,14 +1067,25 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     }
   end
 
-  defp retrieval_path(structured_filters, asset_filters)
+  defp retrieval_path(structured_filters, asset_filters, workflow_filters, skill_filters)
 
-  defp retrieval_path(filters, asset_filters)
-       when map_size(filters) > 0 or map_size(asset_filters) > 0 do
+  defp retrieval_path(filters, asset_filters, workflow_filters, skill_filters)
+       when map_size(filters) > 0 or map_size(asset_filters) > 0 or
+              map_size(workflow_filters) > 0 or map_size(skill_filters) > 0 do
     "memory_core_structured_lookup"
   end
 
-  defp retrieval_path(_filters, _asset_filters), do: "memory_core_fact_memory_lookup"
+  defp retrieval_path(_filters, _asset_filters, _workflow_filters, _skill_filters) do
+    "memory_core_fact_memory_workflow_skill_lookup"
+  end
+
+  defp skill_package_lifecycle_filter(opts) do
+    if Keyword.get(opts, :include_draft_skills, false) do
+      "skill_packages.active_including_drafts"
+    else
+      "skill_packages.approved_enabled_active"
+    end
+  end
 
   defp classify_intent(""), do: "recall"
   defp classify_intent(_query), do: "recall"
