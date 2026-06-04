@@ -67,6 +67,7 @@ Built and verified now:
 | Adapter-output Claims | Completed adapter outputs can be preserved as derived Source Packages and converted into pending Claims. Failed or unavailable adapter runs cannot become Claims. |
 | Asset extraction projections | Completed adapter runs can be normalized into `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection tables. The adapter runner now auto-projects supported completed runs, and text-bearing extractions can become derived Source Packages and pending Claims. |
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
+| Claim review queue | `MemoryCore.claim_review_queue/1` and `GET /api/memory-core/claim-review` return review/lifecycle counts plus filterable Claim rows for UI and agent review workflows. |
 | Memory Objects | Accepted Facts can be wrapped into source-backed Memory Objects with evidence links and confidence/precision metadata. |
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
 | Governed retrieval | Retrieval returns Context Packages, not loose chunks, and filters Facts, Memory Objects, and asset extraction projections by partition/security scope before package assembly. |
@@ -102,6 +103,9 @@ mix test test/connectors/asset_ingest_test.exs --seed 0
 
 mix test test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs --seed 0
 13 tests, 0 failures
+
+mix test test/memory_core/claim_review_test.exs test/api/router_test.exs --seed 0
+31 tests, 0 failures
 
 mix test test/pipeline/multimodal_adapter_runner_test.exs --seed 0
 8 tests, 0 failures
@@ -437,6 +441,11 @@ table row for transcripts, OCR spans, visual observations, or embedding refs.
 `MemoryCore.claim_from_asset_extraction/2` then converts text-bearing extraction
 rows into derived Source Packages and pending Claims. Reference-only embedding
 rows remain searchable/retrievable projection records and are not claimable text.
+
+`MemoryCore.claim_review_queue/1` and `GET /api/memory-core/claim-review` provide
+the review surface for apps and agents. They return filterable Claims plus review
+and lifecycle counts so a user can see pending, rejected, and accepted work
+without scraping raw tables.
 Retrieval now includes governed asset extraction projections in Context Packages,
 so transcripts, OCR spans, visual observations, and embedding refs can be returned
 as source-linked context without being promoted to Facts.
@@ -551,7 +560,7 @@ The next build slices are:
    output shapes and install profiles.
 2. Implement provider-specific sync/download adapters that return raw payloads
    with attachment/file data so `Connectors.Runner` can preserve them automatically.
-3. Add review queue UI/API ergonomics for Claims and Fact promotion.
+3. Add richer review policies for Claims, stale checks, contradictions, and Fact supersession.
 4. Expand Retrieval Coordinator beyond simple fact/memory/extraction lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
 5. Add review/supersession policies for stale, contradicted, and replaced
