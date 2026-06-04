@@ -1,16 +1,17 @@
 defmodule Mix.Tasks.Optimal.Topology do
-  @shortdoc "Inspect the tenant's workspace (nodes + members + skills)"
+  @shortdoc "Inspect workspace topology (nodes + members + skills)"
 
   @moduledoc """
-  Prints a summary of the current tenant's workspace: nodes (by kind), top
+  Prints a summary of the current workspace topology: nodes (by kind), top
   members, skill registry, and recent skill grants.
 
   ## Usage
 
-      mix optimal.workspace
-      mix optimal.workspace --tenant acme-corp
-      mix optimal.workspace --nodes-only
-      mix optimal.workspace --skills-only
+      mix optimal.topology
+      mix optimal.topology --tenant acme-corp
+      mix optimal.topology --workspace default
+      mix optimal.topology --nodes-only
+      mix optimal.topology --skills-only
   """
 
   use Mix.Task
@@ -24,29 +25,41 @@ defmodule Mix.Tasks.Optimal.Topology do
 
     {opts, _, _} =
       OptionParser.parse(args,
-        strict: [tenant: :string, nodes_only: :boolean, skills_only: :boolean]
+        strict: [
+          tenant: :string,
+          workspace: :string,
+          nodes_only: :boolean,
+          skills_only: :boolean
+        ]
       )
 
     tenant_id = Keyword.get(opts, :tenant, Tenant.default_id())
+    workspace_id = Keyword.get(opts, :workspace)
     nodes_only = Keyword.get(opts, :nodes_only, false)
     skills_only = Keyword.get(opts, :skills_only, false)
 
     IO.puts("")
-    IO.puts("  Workspace — tenant: #{tenant_id}")
-    IO.puts("  " <> String.duplicate("─", 60))
+    IO.puts("  Workspace topology")
+    IO.puts("  tenant:    #{tenant_id}")
+    IO.puts("  workspace: #{workspace_id || "(all)"}")
+    IO.puts("  " <> String.duplicate("-", 60))
 
     if skills_only do
       print_skills(tenant_id)
     else
-      print_nodes(tenant_id)
+      print_nodes(tenant_id, workspace_id)
       unless nodes_only, do: print_skills(tenant_id)
     end
 
     IO.puts("")
   end
 
-  defp print_nodes(tenant_id) do
-    case Topology.list_nodes(tenant_id: tenant_id) do
+  defp print_nodes(tenant_id, workspace_id) do
+    opts =
+      [tenant_id: tenant_id]
+      |> maybe_put(:workspace_id, workspace_id)
+
+    case Topology.list_nodes(opts) do
       {:ok, []} ->
         IO.puts("  No nodes.")
         IO.puts("")
@@ -61,9 +74,9 @@ defmodule Mix.Tasks.Optimal.Topology do
           IO.puts("    #{kind} (#{length(ns)}):")
 
           Enum.each(ns, fn n ->
-            status_mark = if n.status == :active, do: "✓", else: "·"
-            parent = if n.parent_id, do: " ← #{n.parent_id}", else: ""
-            IO.puts("      #{status_mark} #{n.slug}  [#{n.style}]#{parent}")
+            status_mark = if n.status == :active, do: "*", else: "-"
+            parent = if n.parent_id, do: " <- #{n.parent_id}", else: ""
+            IO.puts("      #{status_mark} #{n.slug}  [#{n.workspace_id} / #{n.style}]#{parent}")
           end)
 
           IO.puts("")
@@ -73,6 +86,9 @@ defmodule Mix.Tasks.Optimal.Topology do
         IO.puts("  (nodes unavailable)")
     end
   end
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp print_skills(tenant_id) do
     case Topology.list_skills(tenant_id: tenant_id) do
@@ -85,7 +101,7 @@ defmodule Mix.Tasks.Optimal.Topology do
 
         Enum.each(skills, fn s ->
           kind_str = if s.kind, do: " [#{s.kind}]", else: ""
-          IO.puts("    · #{s.name}#{kind_str}")
+          IO.puts("    - #{s.name}#{kind_str}")
         end)
 
       _ ->

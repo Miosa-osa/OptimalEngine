@@ -22,7 +22,11 @@ defmodule OptimalEngine.CLI do
 
   @subcommands %{
     # Ingestion
+    "setup" => Mix.Tasks.Optimal.Setup,
+    "init" => Mix.Tasks.Optimal.Init,
+    "bootstrap" => Mix.Tasks.Optimal.Bootstrap,
     "ingest" => Mix.Tasks.Optimal.Ingest,
+    "ingest_workspace" => Mix.Tasks.Optimal.IngestWorkspace,
     "intake" => Mix.Tasks.Optimal.Intake,
     "index" => Mix.Tasks.Optimal.Index,
     # Retrieval
@@ -56,7 +60,8 @@ defmodule OptimalEngine.CLI do
   }
 
   @ordered_groups [
-    {"Ingestion", ["ingest", "intake", "index"]},
+    {"Setup", ["setup", "init", "bootstrap"]},
+    {"Ingestion", ["ingest", "ingest_workspace", "intake", "index"]},
     {"Retrieval", ["search", "read", "ls", "l0", "assemble", "rag"]},
     {"Graph analysis", ["graph", "reflect", "reweave", "simulate", "impact"]},
     {"Learning loop", ["remember", "rethink", "knowledge"]},
@@ -67,7 +72,11 @@ defmodule OptimalEngine.CLI do
 
   # Shortdocs are hardcoded here because escripts strip @shortdoc metadata.
   @shortdocs %{
+    "setup" => "Create a workspace with starter Nodes, rhythm, projections, and agent SOP",
+    "init" => "Scaffold a markdown workspace directory from the sample template",
+    "bootstrap" => "Compile, migrate, ingest sample workspace, and report status",
     "ingest" => "Classify, route, write signal files, and index content",
+    "ingest_workspace" => "Ingest a markdown workspace into the engine store",
     "intake" => "Interactive multi-line intake from stdin",
     "index" => "Full reindex of all markdown files",
     "search" => "Hybrid BM25 + temporal + graph-boosted search",
