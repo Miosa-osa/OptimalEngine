@@ -16,6 +16,7 @@ defmodule OptimalEngine.Evaluation do
   @type run :: map()
   @type evaluation_case :: map()
   @type benchmark_case :: map() | keyword()
+  @type dataset :: %{cases: [map()], metadata: map()}
 
   @spec run_benchmark([benchmark_case()], keyword() | map()) :: {:ok, map()} | {:error, term()}
   def run_benchmark(cases, opts \\ []) when is_list(cases) do
@@ -71,6 +72,26 @@ defmodule OptimalEngine.Evaluation do
          cases: recorded_cases,
          summary: Map.put(summary, :run_status, completed_run.status)
        }}
+    end
+  end
+
+  @spec run_dataset(Path.t(), keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def run_dataset(path, opts \\ []) when is_binary(path) do
+    opts = opts_to_keyword(opts)
+
+    with {:ok, dataset} <- load_dataset(path, opts) do
+      run_benchmark(dataset.cases, dataset_run_opts(dataset, opts))
+    end
+  end
+
+  @spec load_dataset(Path.t(), keyword() | map()) :: {:ok, dataset()} | {:error, term()}
+  def load_dataset(path, opts \\ []) when is_binary(path) do
+    opts = opts_to_keyword(opts)
+    format = Keyword.get(opts, :format) || infer_dataset_format(path)
+
+    with {:ok, content} <- File.read(path),
+         {:ok, raw_dataset} <- decode_dataset(content, format) do
+      normalize_dataset(raw_dataset, path)
     end
   end
 
@@ -390,6 +411,189 @@ defmodule OptimalEngine.Evaluation do
 
   defp decode_map(value) when is_map(value), do: value
   defp decode_map(_), do: %{}
+
+  defp infer_dataset_format(path) do
+    case path |> Path.extname() |> String.downcase() do
+      ".jsonl" -> :jsonl
+      ".ndjson" -> :jsonl
+      _ -> :json
+    end
+  end
+
+  defp decode_dataset(content, :json) do
+    case Jason.decode(content) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, reason} -> {:error, {:invalid_dataset_json, reason}}
+    end
+  end
+
+  defp decode_dataset(content, :jsonl) do
+    content
+    |> String.split(~r/\R/, trim: true)
+    |> Enum.with_index(1)
+    |> Enum.reject(fn {line, _line_number} ->
+      trimmed = String.trim(line)
+      trimmed == "" or String.starts_with?(trimmed, "#")
+    end)
+    |> Enum.reduce_while({:ok, []}, fn {line, line_number}, {:ok, acc} ->
+      case Jason.decode(line) do
+        {:ok, decoded} when is_map(decoded) ->
+          {:cont, {:ok, acc ++ [decoded]}}
+
+        {:ok, decoded} ->
+          {:halt, {:error, {:invalid_jsonl_case, line_number, decoded}}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:invalid_jsonl, line_number, reason}}}
+      end
+    end)
+  end
+
+  defp decode_dataset(_content, format), do: {:error, {:unsupported_dataset_format, format}}
+
+  defp normalize_dataset(raw_dataset, path) when is_list(raw_dataset) do
+    normalize_case_list(raw_dataset, %{}, path)
+  end
+
+  defp normalize_dataset(raw_dataset, path) when is_map(raw_dataset) do
+    cases =
+      map_get(raw_dataset, :cases) ||
+        map_get(raw_dataset, :questions) ||
+        map_get(raw_dataset, :examples) ||
+        map_get(raw_dataset, :items)
+
+    if is_list(cases) do
+      metadata =
+        raw_dataset
+        |> drop_keys(["cases", "questions", "examples", "items"])
+        |> Map.put_new("dataset_path", path)
+
+      normalize_case_list(cases, metadata, path)
+    else
+      normalize_case_list([raw_dataset], %{"dataset_path" => path}, path)
+    end
+  end
+
+  defp normalize_dataset(raw_dataset, _path),
+    do: {:error, {:invalid_dataset_shape, raw_dataset}}
+
+  defp normalize_case_list(cases, metadata, path) do
+    normalized =
+      cases
+      |> Enum.with_index(1)
+      |> Enum.map(fn {case_attrs, index} -> normalize_dataset_case(case_attrs, index) end)
+
+    metadata =
+      metadata
+      |> Map.put_new("dataset_path", path)
+      |> Map.put("dataset_size", length(normalized))
+      |> Map.put("question_count", length(normalized))
+
+    {:ok, %{cases: normalized, metadata: metadata}}
+  end
+
+  defp normalize_dataset_case(case_attrs, index) when is_map(case_attrs) do
+    question = first_present(case_attrs, [:question, :query, :input, :prompt])
+
+    expected_answer =
+      first_present(case_attrs, [
+        :expected_answer,
+        :answer,
+        :target,
+        :reference,
+        :gold,
+        :ground_truth
+      ])
+
+    %{
+      case_id:
+        string(
+          first_present(case_attrs, [:case_id, :id, :question_id, :qid]) ||
+            "case-#{index}"
+        ),
+      conversation_id:
+        string_or_nil(
+          first_present(case_attrs, [
+            :conversation_id,
+            :conversation,
+            :conv_id,
+            :session_id,
+            :dialogue_id
+          ])
+        ),
+      question: string(question),
+      expected_answer: string_or_nil(expected_answer),
+      retrieval_opts: map_get(case_attrs, :retrieval_opts) || %{},
+      metadata:
+        %{
+          source_case: case_attrs,
+          source_case_index: index
+        }
+        |> put_if_present(:dataset_split, first_present(case_attrs, [:split, :subset]))
+        |> put_if_present(
+          :question_type,
+          first_present(case_attrs, [:question_type, :type, :category])
+        )
+    }
+  end
+
+  defp normalize_dataset_case(case_attrs, index) do
+    %{
+      case_id: "case-#{index}",
+      question: string(case_attrs),
+      expected_answer: nil,
+      retrieval_opts: %{},
+      metadata: %{source_case: case_attrs, source_case_index: index}
+    }
+  end
+
+  defp dataset_run_opts(dataset, opts) do
+    metadata = dataset.metadata
+
+    defaults =
+      [
+        benchmark_name: map_get(metadata, :benchmark_name) || "memory_recall",
+        dataset_name:
+          map_get(metadata, :dataset_name) ||
+            dataset_name_from_path(map_get(metadata, :dataset_path)),
+        dataset_version: map_get(metadata, :dataset_version),
+        dataset_size: map_get(metadata, :dataset_size),
+        question_count: map_get(metadata, :question_count),
+        answer_model: map_get(metadata, :answer_model),
+        judge_model: map_get(metadata, :judge_model),
+        judge_strategy: map_get(metadata, :judge_strategy),
+        retrieval_top_k: map_get(metadata, :retrieval_top_k),
+        run_config:
+          Map.merge(map_get(metadata, :run_config) || %{}, %{
+            "dataset_path" => map_get(metadata, :dataset_path)
+          }),
+        retrieval_config: map_get(metadata, :retrieval_config) || %{},
+        judge_config: map_get(metadata, :judge_config) || %{},
+        metadata: Map.drop(metadata, ["run_config", "retrieval_config", "judge_config"])
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    Keyword.merge(defaults, opts)
+  end
+
+  defp dataset_name_from_path(nil), do: nil
+
+  defp dataset_name_from_path(path) do
+    path
+    |> Path.basename()
+    |> Path.rootname()
+  end
+
+  defp drop_keys(map, keys) do
+    Enum.reduce(keys, map, fn key, acc -> Map.delete(acc, key) end)
+  end
+
+  defp first_present(map, keys) do
+    Enum.find_value(keys, &map_get(map, &1))
+  end
+
+  defp put_if_present(map, _key, nil), do: map
+  defp put_if_present(map, key, value), do: Map.put(map, key, value)
 
   defp run_cases(run, cases, opts) do
     cases
