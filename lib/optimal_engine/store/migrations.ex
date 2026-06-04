@@ -82,7 +82,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_034_tool_model_governance_runs(),
       migration_035_asset_governance(),
       migration_036_asset_adapter_runs(),
-      migration_037_asset_extraction_projections()
+      migration_037_asset_extraction_projections(),
+      migration_038_evaluation_records()
     ]
   end
 
@@ -2239,6 +2240,68 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_asset_visual_observations_asset ON asset_visual_observations(workspace_id, asset_id)"},
        {"idx_asset_embedding_refs_asset",
         "CREATE INDEX IF NOT EXISTS idx_asset_embedding_refs_asset ON asset_embedding_refs(workspace_id, asset_id, embedding_model_id)"}
+     ]}
+  end
+
+  defp migration_038_evaluation_records do
+    {38, "evaluation and benchmark records",
+     [
+       {"evaluation_runs",
+        """
+        CREATE TABLE IF NOT EXISTS evaluation_runs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          benchmark_name TEXT NOT NULL,
+          dataset_name TEXT,
+          dataset_version TEXT,
+          dataset_size INTEGER,
+          question_count INTEGER,
+          answer_model TEXT,
+          judge_model TEXT,
+          judge_strategy TEXT,
+          retrieval_top_k INTEGER,
+          run_config TEXT NOT NULL DEFAULT '{}',
+          retrieval_config TEXT NOT NULL DEFAULT '{}',
+          judge_config TEXT NOT NULL DEFAULT '{}',
+          aggregate_scores TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'recorded',
+          started_at TEXT,
+          completed_at TEXT,
+          created_by TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"evaluation_cases",
+        """
+        CREATE TABLE IF NOT EXISTS evaluation_cases (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          evaluation_run_id TEXT NOT NULL REFERENCES evaluation_runs(id) ON DELETE CASCADE,
+          case_id TEXT NOT NULL,
+          conversation_id TEXT,
+          question TEXT NOT NULL,
+          expected_answer TEXT,
+          actual_answer TEXT,
+          context_package_id TEXT REFERENCES context_packages(id) ON DELETE SET NULL,
+          retrieved_object_links TEXT NOT NULL DEFAULT '[]',
+          scores TEXT NOT NULL DEFAULT '{}',
+          judge_output TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'recorded',
+          error_reason TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(evaluation_run_id, case_id)
+        )
+        """},
+       {"idx_evaluation_runs_workspace",
+        "CREATE INDEX IF NOT EXISTS idx_evaluation_runs_workspace ON evaluation_runs(workspace_id, benchmark_name, created_at)"},
+       {"idx_evaluation_cases_run",
+        "CREATE INDEX IF NOT EXISTS idx_evaluation_cases_run ON evaluation_cases(evaluation_run_id, status)"}
      ]}
   end
 

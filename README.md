@@ -47,6 +47,40 @@ flowchart LR
   Observation --> Claim
 ```
 
+Layer ownership:
+
+```mermaid
+flowchart TB
+  Surfaces[Markdown / CLI / App / Agent / Connector]
+  Gateway[Command Gateway]
+  Topology["Workspace Topology<br/>workspaces, Nodes, relationships"]
+  Memory["Memory Core<br/>sources, Claims, Facts, memories, ledger"]
+  Retrieval["Retrieval + Context<br/>packages, filters, audit"]
+  Active["Active Work<br/>pools, observations, pending Claims"]
+  Workflow["Workflow + Skill<br/>traces, procedures, Skill Packages"]
+  Governance["Tool / Model Governance<br/>registrations, calls, audit"]
+  Evaluation["Evaluation<br/>runs, cases, scores"]
+  Store["Shared SQLite/Postgres store<br/>separate table ownership"]
+  Exports[Markdown / API / UI projections]
+
+  Surfaces --> Gateway
+  Gateway --> Topology
+  Gateway --> Memory
+  Gateway --> Retrieval
+  Gateway --> Active
+  Gateway --> Workflow
+  Gateway --> Governance
+  Gateway --> Evaluation
+  Topology --> Store
+  Memory --> Store
+  Retrieval --> Store
+  Active --> Store
+  Workflow --> Store
+  Governance --> Store
+  Evaluation --> Store
+  Store --> Exports
+```
+
 ## Current Build
 
 The current build moves the engine from a file/search-first system toward a governed
@@ -78,8 +112,9 @@ Built and verified now:
 | Active Memory Pools | Task-scoped working memory can load Context Packages and publish observations as pending Claims. |
 | Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
 | Connector governance | Connector sync can run through the governed tool-call surface, blocking unauthorized runs before connector execution and recording both connector-run and tool-call audit rows when allowed. |
+| Evaluation records | Benchmark/evaluation runs and per-case judge results can be stored, summarized, and linked to Context Packages for later result dashboards. |
 | Workspace export | Markdown/files are projections and editing surfaces, not the only source of truth. |
-| Reality check | `mix optimal.reality_check` covers store counts, topology, evidence/truth lifecycle, recall packages, retrieval, connectors, wiki, and compliance probes. |
+| Reality check | `mix optimal.reality_check` covers store counts, topology, evidence/truth lifecycle, recall packages, retrieval, connectors, evaluation records, wiki, and compliance probes. |
 
 Current verification:
 
@@ -111,14 +146,14 @@ mix test test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs -
 mix test test/memory_core/claim_review_test.exs test/api/router_test.exs --seed 0
 34 tests, 0 failures
 
-mix test test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs test/api/router_test.exs test/memory_core/spine_test.exs test/pipeline/multimodal_adapter_runner_test.exs test/memory_core/asset_store_test.exs test/memory_core/claim_review_test.exs --seed 0
-79 tests, 0 failures
+mix test test/evaluation_test.exs test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs test/api/router_test.exs test/memory_core/spine_test.exs test/pipeline/multimodal_adapter_runner_test.exs test/memory_core/asset_store_test.exs test/memory_core/claim_review_test.exs --seed 0
+80 tests, 0 failures
 
 mix test test/pipeline/multimodal_adapter_runner_test.exs --seed 0
 8 tests, 0 failures
 
 mix optimal.reality_check
-117 probes, 117 ok, 0 warn, 0 fail
+121 probes, 121 ok, 0 warn, 0 fail
 ```
 
 The full legacy suite still contains older optional/backend warnings. The focused
@@ -582,8 +617,8 @@ The next build slices are:
    full-text, vector, graph, temporal, and permission-aware recall.
 5. Add Context Package rebuild/refresh services after packages are marked stale.
 6. Make connector governance the default runtime path for connector sync.
-7. Add benchmark/evaluation records so large-scale recall tests are stored and
-   inspectable.
+7. Add benchmark runners, dataset importers, judge execution, and result exports
+   on top of the existing evaluation run/case records.
 8. Add recovery/rebuild services for summaries, indexes, workflows, and derived
    projections.
 
