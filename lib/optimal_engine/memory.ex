@@ -27,7 +27,7 @@ defmodule OptimalEngine.Memory do
   path uses the explicit `forget_key/2` alias.
   """
 
-  alias OptimalEngine.Memory.Versioned
+  alias OptimalEngine.Memory.{EncodingGate, SemanticDedup, Versioned}
   alias OptimalEngine.MemoryCore.{KnowledgeLifecycle, SourcePackage}
 
   require Logger
@@ -120,6 +120,79 @@ defmodule OptimalEngine.Memory do
   defp attr(attrs, key, default) when is_map(attrs) do
     Map.get(attrs, key, Map.get(attrs, Atom.to_string(key), default))
   end
+
+  @doc """
+  Smart memory intake for agent-facing writes.
+
+  `create/1` is the low-level persistence primitive. `remember/2` is the
+  higher-level versioned-memory path: it evaluates whether a candidate is worth
+  storing, semantically compares it with live memories in the same
+  workspace/audience, then chooses `:add`, `:update`, or `:skip`.
+
+  Returns `{:ok, %{action:, memory:, gate:, dedup:}}`.
+
+  Options:
+    - `:force` — bypass the encoding gate but still deduplicate
+    - `:gate_threshold` — default `0.30`
+    - `:salience_floor` — default `0.10`
+  """
+  @spec remember(map(), keyword()) ::
+          {:ok,
+           %{
+             action: :add | :update | :skip,
+             memory: versioned() | nil,
+             gate: EncodingGate.t(),
+             dedup: SemanticDedup.t() | nil
+           }}
+          | {:error, term()}
+  @spec remember(String.t(), keyword()) :: :ok | {:error, term()}
+  def remember(input, opts \\ [])
+
+  def remember(%{content: content} = attrs, opts) when is_binary(content) and content != "" do
+    workspace_id = Map.get(attrs, :workspace_id, "default")
+    audience = Map.get(attrs, :audience, "default")
+
+    candidates = list(workspace_id: workspace_id, audience: audience, limit: 200)
+
+    gate =
+      EncodingGate.evaluate(content,
+        candidates: candidates,
+        threshold: Keyword.get(opts, :gate_threshold, 0.30),
+        salience_floor: Keyword.get(opts, :salience_floor, 0.10)
+      )
+
+    if gate.should_encode or Keyword.get(opts, :force, false) do
+      dedup = SemanticDedup.decide(content, candidates, opts)
+      attrs = put_memory_intake_metadata(attrs, gate, dedup)
+
+      case dedup.action do
+        :skip ->
+          {:ok, %{action: :skip, memory: mark_existing(dedup.existing), gate: gate, dedup: dedup}}
+
+        :update ->
+          case update(dedup.existing.id, attrs) do
+            {:ok, mem} -> {:ok, %{action: :update, memory: mem, gate: gate, dedup: dedup}}
+            other -> other
+          end
+
+        :add ->
+          case create(attrs) do
+            {:ok, mem} -> {:ok, %{action: :add, memory: mem, gate: gate, dedup: dedup}}
+            other -> other
+          end
+      end
+    else
+      {:ok, %{action: :skip, memory: nil, gate: gate, dedup: nil}}
+    end
+  end
+
+  def remember(insight, opts) when is_binary(insight) do
+    tags = Keyword.get(opts, :tags, [])
+    key = Keyword.get(opts, :key, "insight_#{:erlang.unique_integer([:positive])}")
+    store("memory", key, insight, tags: tags)
+  end
+
+  def remember(_attrs, _opts), do: {:error, :missing_required_fields}
 
   @doc "Fetches a versioned memory by id."
   @spec get(String.t()) :: {:ok, versioned()} | {:error, :not_found}
@@ -300,17 +373,6 @@ defmodule OptimalEngine.Memory do
   end
 
   @doc """
-  Stores an insight into the default "memory" collection.
-  Convenience wrapper over `store/4`.
-  """
-  @spec remember(String.t(), keyword()) :: :ok | {:error, term()}
-  def remember(insight, opts \\ []) when is_binary(insight) do
-    tags = Keyword.get(opts, :tags, [])
-    key = Keyword.get(opts, :key, "insight_#{:erlang.unique_integer([:positive])}")
-    store("memory", key, insight, tags: tags)
-  end
-
-  @doc """
   Export a collection to a JSON file at the given path.
   """
   @spec export(collection(), String.t()) :: :ok | {:error, term()}
@@ -362,6 +424,41 @@ defmodule OptimalEngine.Memory do
   end
 
   defp parse_dt(%DateTime{} = dt), do: dt
+
+  defp put_memory_intake_metadata(attrs, gate, dedup) do
+    metadata =
+      attrs
+      |> Map.get(:metadata, %{})
+      |> normalize_metadata()
+
+    intake = %{
+      "gate" => %{
+        "should_encode" => gate.should_encode,
+        "score" => gate.score,
+        "novelty" => gate.novelty,
+        "salience" => gate.salience,
+        "prediction_error" => gate.prediction_error,
+        "reason" => gate.reason,
+        "similar_memory_id" => gate.similar_memory_id
+      },
+      "dedup" => %{
+        "action" => Atom.to_string(dedup.action),
+        "reason" => dedup.reason,
+        "similarity" => dedup.similarity,
+        "existing_memory_id" => dedup.existing && dedup.existing.id
+      }
+    }
+
+    Map.put(attrs, :metadata, Map.put(metadata, "memory_intake", intake))
+  end
+
+  defp mark_existing(nil), do: nil
+  defp mark_existing(%Versioned{} = mem), do: %{mem | was_existing: true}
+  defp mark_existing(mem) when is_map(mem), do: Map.put(mem, :was_existing, true)
+
+  defp normalize_metadata(nil), do: %{}
+  defp normalize_metadata(metadata) when is_map(metadata), do: metadata
+  defp normalize_metadata(_metadata), do: %{}
 
   defp backend, do: OptimalEngine.Memory.Store.backend()
 
