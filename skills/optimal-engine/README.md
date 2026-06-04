@@ -46,17 +46,24 @@ skills/optimal-engine/
 # 1. Start the engine (needs config :api, enabled: true)
 iex -S mix
 
-# 2. Bootstrap a workspace
+# 2. Bootstrap an API workspace
 bash skills/optimal-engine/scripts/bootstrap.sh my-workspace
 
-# 3. Ingest your knowledge
-mix optimal.ingest_workspace ~/my-workspace/
+# 3. Optional: scaffold a markdown-operable workspace
+mix optimal.init ~/my-workspace-files
 
-# 4. Query
+# 4. Edit the generated files, then ingest your knowledge
+mix optimal.ingest_workspace ~/my-workspace-files
+
+# 5. Query the workspace
 curl -X POST http://localhost:4200/api/rag \
   -H 'Content-Type: application/json' \
   -d '{"query":"what do we know?","workspace":"my-workspace","format":"markdown"}'
 ```
+
+The skill should preserve all core architecture terms: company second brain,
+tiers, layers, stages, rhythm, Nodes, Signals, wiki/curation, retrieval, and
+agent operation. Do not flatten those into a generic RAG or task-runner model.
 
 ## Key References
 
