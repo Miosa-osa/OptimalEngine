@@ -336,7 +336,12 @@ defmodule OptimalEngine.MemoryCore.KnowledgeLifecycle do
         }
       )
 
-    with :ok <-
+    with {:ok, old_memory_ids} <-
+           Store.list_memory_object_ids_for_fact(old_fact.id,
+             tenant_id: old_fact.tenant_id,
+             workspace_id: old_fact.workspace_id
+           ),
+         :ok <-
            Store.mark_fact_superseded(old_fact.id,
              tenant_id: old_fact.tenant_id,
              workspace_id: old_fact.workspace_id,
@@ -348,10 +353,32 @@ defmodule OptimalEngine.MemoryCore.KnowledgeLifecycle do
              workspace_id: old_fact.workspace_id,
              valid_time_end: Keyword.get(opts, :valid_time_end)
            ),
+         :ok <-
+           Store.invalidate_context_packages_for_object("fact", old_fact.id,
+             tenant_id: old_fact.tenant_id,
+             workspace_id: old_fact.workspace_id,
+             reason: "fact_superseded:#{old_fact.id}"
+           ),
+         :ok <-
+           invalidate_context_packages_for_memories(old_memory_ids, old_fact, opts),
          :ok <- Store.insert_relationship_edge(edge),
          :ok <- Store.insert_derivation_entry(ledger) do
       :ok
     end
+  end
+
+  defp invalidate_context_packages_for_memories(memory_ids, old_fact, opts) do
+    Enum.reduce_while(memory_ids, :ok, fn memory_id, :ok ->
+      case Store.invalidate_context_packages_for_object("memory_object", memory_id,
+             tenant_id: old_fact.tenant_id,
+             workspace_id: old_fact.workspace_id,
+             transaction_time_end: Keyword.get(opts, :transaction_time_end),
+             reason: "memory_object_superseded:#{memory_id}"
+           ) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp relationship_edge(scope, from_type, from_id, to_type, to_id, relationship_type, opts) do

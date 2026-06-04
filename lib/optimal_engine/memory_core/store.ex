@@ -405,9 +405,51 @@ defmodule OptimalEngine.MemoryCore.Store do
 
     Store.raw_execute(
       sql,
-      scoped_params([valid_time_end, now, tenant_id, ~s(%"id":"#{fact_id}"%)], workspace_id)
+      scoped_params([valid_time_end, now, tenant_id, object_id_pattern(fact_id)], workspace_id)
     )
   end
+
+  @spec list_memory_object_ids_for_fact(String.t(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def list_memory_object_ids_for_fact(fact_id, opts)
+      when is_binary(fact_id) and is_list(opts) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+
+    sql =
+      "SELECT id FROM memory_objects WHERE tenant_id = ?1 AND fact_links LIKE ?2" <>
+        workspace_clause(workspace_id, 3)
+
+    with {:ok, rows} <-
+           Store.raw_query(
+             sql,
+             scoped_params([tenant_id, object_id_pattern(fact_id)], workspace_id)
+           ) do
+      {:ok, Enum.map(rows, fn [id] -> id end)}
+    end
+  end
+
+  @spec invalidate_context_packages_for_object(String.t(), String.t(), keyword()) ::
+          :ok | {:error, term()}
+  def invalidate_context_packages_for_object(object_type, object_id, opts)
+      when is_binary(object_type) and is_binary(object_id) and is_list(opts) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+    now = Keyword.get(opts, :transaction_time_end, timestamp())
+    reason = Keyword.get(opts, :reason, "#{object_type}:#{object_id}:invalidated")
+    pattern = object_id_pattern(object_id)
+
+    sql =
+      "UPDATE context_packages SET refresh_state = 'stale', invalidation_reason = ?1, " <>
+        "stale_after = COALESCE(stale_after, ?2), transaction_time_end = COALESCE(transaction_time_end, ?3) " <>
+        "WHERE tenant_id = ?4 AND refresh_state = 'fresh' " <>
+        "AND (returned_object_links LIKE ?5 OR fact_links LIKE ?5 OR memory_links LIKE ?5)" <>
+        workspace_clause(workspace_id, 6)
+
+    Store.raw_execute(sql, scoped_params([reason, now, now, tenant_id, pattern], workspace_id))
+  end
+
+  defp object_id_pattern(id), do: ~s(%"id":"#{id}"%)
 
   defp claim_columns do
     "id, tenant_id, workspace_id, source_package_id, signal_id, claim_text, claim_type, subject_anchor, action_class, object_anchor, semantic_frame, source_span, extraction_run_id, evaluator_id, aggregate_confidence, aggregate_precision, raw_component_scores, calibration_dataset_version, access_policy_id, security_labels, partition_ids, lifecycle_state, review_status, valid_time_start, valid_time_end, transaction_time_start, transaction_time_end, stale_after, metadata"
