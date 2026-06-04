@@ -20,7 +20,7 @@ defmodule OptimalEngine.Connectors.Runner do
   `OptimalEngine.Pipeline.Intake.ingest_signals/1`.
   """
 
-  alias OptimalEngine.Connectors.{Credential, Registry}
+  alias OptimalEngine.Connectors.{AssetIngest, Credential, Registry}
   alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
@@ -41,6 +41,8 @@ defmodule OptimalEngine.Connectors.Runner do
           status: :success | :error | :disabled,
           signals: non_neg_integer(),
           errors: non_neg_integer(),
+          assets: non_neg_integer(),
+          asset_errors: non_neg_integer(),
           cursor_before: String.t() | nil,
           cursor_after: String.t() | nil,
           reason: term() | nil
@@ -68,7 +70,7 @@ defmodule OptimalEngine.Connectors.Runner do
   def run(connector_id, opts \\ []) when is_binary(connector_id) do
     with {:ok, row} <- fetch_connector(connector_id),
          :ok <- ensure_enabled(row),
-         {:ok, mod} <- lookup_adapter(row.kind),
+         {:ok, mod} <- lookup_adapter(row.kind, opts),
          {:ok, state} <- init_adapter(mod, row.config) do
       run_id = start_run_row(row)
 
@@ -92,7 +94,7 @@ defmodule OptimalEngine.Connectors.Runner do
           {:ok, governed_run_result()} | {:error, term()}
   def run_governed(connector_id, opts \\ []) when is_binary(connector_id) do
     with {:ok, row} <- fetch_connector(connector_id),
-         {:ok, mod} <- lookup_adapter(row.kind),
+         {:ok, mod} <- lookup_adapter(row.kind, opts),
          {:ok, _definition} <- register_governed_connector_tool(row, mod, opts) do
       tool_name = connector_tool_name(row)
       input_payload = governed_connector_input(row)
@@ -146,6 +148,8 @@ defmodule OptimalEngine.Connectors.Runner do
           "status",
           "signals",
           "errors",
+          "assets",
+          "asset_errors",
           "cursor_before",
           "cursor_after"
         ]
@@ -201,6 +205,8 @@ defmodule OptimalEngine.Connectors.Runner do
       status: result.status |> to_string(),
       signals: result.signals,
       errors: result.errors,
+      assets: Map.get(result, :assets, 0),
+      asset_errors: Map.get(result, :asset_errors, 0),
       cursor_before: result.cursor_before,
       cursor_after: result.cursor_after,
       reason: reason_to_string(result.reason)
@@ -210,7 +216,18 @@ defmodule OptimalEngine.Connectors.Runner do
   defp connector_tool_name(row), do: "connector.#{row.kind}.sync"
 
   defp connector_run_opts(opts) do
-    Keyword.take(opts, [:max_retries, :signal_sink])
+    Keyword.take(opts, [
+      :max_retries,
+      :signal_sink,
+      :adapter_resolver,
+      :workspace_id,
+      :actor_id,
+      :security_labels,
+      :partition_ids,
+      :access_policy_id,
+      :retention_class,
+      :trust_label
+    ])
   end
 
   defp governed_workspace_id(opts), do: Keyword.get(opts, :workspace_id, "default") |> to_string()
@@ -238,7 +255,18 @@ defmodule OptimalEngine.Connectors.Runner do
   defp do_sync_attempt(row, mod, state, attempt, max_retries) do
     case mod.sync(state, row.cursor) do
       {:ok, signals, next_cursor} when is_list(signals) ->
-        {:ok, signals, next_cursor}
+        {:ok, %{signals: signals, cursor: next_cursor, payloads: []}}
+
+      {:ok, signals, next_cursor, payloads} when is_list(signals) and is_list(payloads) ->
+        {:ok, %{signals: signals, cursor: next_cursor, payloads: payloads}}
+
+      {:ok, %{signals: signals} = result} when is_list(signals) ->
+        {:ok,
+         %{
+           signals: signals,
+           cursor: Map.get(result, :cursor) || Map.get(result, "cursor"),
+           payloads: Map.get(result, :payloads) || Map.get(result, "payloads") || []
+         }}
 
       {:error, {:rate_limited, retry_after_ms}} when attempt < max_retries ->
         Logger.info("Connector #{row.id}: rate-limited, sleeping #{retry_after_ms}ms")
@@ -268,9 +296,16 @@ defmodule OptimalEngine.Connectors.Runner do
 
   # ─── finalize + persist state ────────────────────────────────────────────
 
-  defp finalize({:ok, signals, next_cursor}, row, run_id, opts) do
+  defp finalize(
+         {:ok, %{signals: signals, cursor: next_cursor, payloads: payloads}},
+         row,
+         run_id,
+         opts
+       ) do
     sink = Keyword.get(opts, :signal_sink, &default_sink/1)
     :ok = sink.(signals)
+    asset_summary = preserve_sync_payload_assets(row, payloads, opts)
+    asset_error_count = length(asset_summary.errors)
 
     # Persist the cursor advance + audit completion in one transaction so
     # they succeed or fail together. Without this, a cursor could advance
@@ -278,14 +313,25 @@ defmodule OptimalEngine.Connectors.Runner do
     # no operator could diagnose.
     case transaction(fn ->
            advance_cursor(row.id, next_cursor)
-           complete_run_row(run_id, :success, length(signals), 0, row.cursor, next_cursor, nil)
+
+           complete_run_row(
+             run_id,
+             :success,
+             length(signals),
+             asset_error_count,
+             row.cursor,
+             next_cursor,
+             asset_error_detail(asset_summary.errors)
+           )
          end) do
       :ok ->
         %{
           connector_id: row.id,
           status: :success,
           signals: length(signals),
-          errors: 0,
+          errors: asset_error_count,
+          assets: length(asset_summary.assets),
+          asset_errors: asset_error_count,
           cursor_before: row.cursor,
           cursor_after: next_cursor,
           reason: nil
@@ -299,7 +345,7 @@ defmodule OptimalEngine.Connectors.Runner do
           run_id,
           :error,
           length(signals),
-          1,
+          asset_error_count + 1,
           row.cursor,
           row.cursor,
           "persist_failed"
@@ -309,7 +355,9 @@ defmodule OptimalEngine.Connectors.Runner do
           connector_id: row.id,
           status: :error,
           signals: length(signals),
-          errors: 1,
+          errors: asset_error_count + 1,
+          assets: length(asset_summary.assets),
+          asset_errors: asset_error_count,
           cursor_before: row.cursor,
           cursor_after: row.cursor,
           reason: :persist_failed
@@ -326,6 +374,8 @@ defmodule OptimalEngine.Connectors.Runner do
       status: :disabled,
       signals: 0,
       errors: 1,
+      assets: 0,
+      asset_errors: 0,
       cursor_before: row.cursor,
       cursor_after: row.cursor,
       reason: :fatal
@@ -340,6 +390,8 @@ defmodule OptimalEngine.Connectors.Runner do
       status: :error,
       signals: 0,
       errors: 1,
+      assets: 0,
+      asset_errors: 0,
       cursor_before: row.cursor,
       cursor_after: row.cursor,
       reason: reason
@@ -384,6 +436,11 @@ defmodule OptimalEngine.Connectors.Runner do
   # `connectors.kind` column — operator-writable data. `to_atom/1` would
   # create a new atom on every junk value and eventually exhaust the atom
   # table. Every legitimate adapter atom is already loaded via the Registry.
+  defp lookup_adapter(kind_str, opts) when is_binary(kind_str) do
+    resolver = Keyword.get(opts, :adapter_resolver, &lookup_adapter/1)
+    resolver.(kind_str)
+  end
+
   defp lookup_adapter(kind_str) when is_binary(kind_str) do
     Registry.fetch(String.to_existing_atom(kind_str))
   rescue
@@ -476,6 +533,61 @@ defmodule OptimalEngine.Connectors.Runner do
   # (CLI, schedulers) which doesn't care about ingest — callers that
   # want downstream processing pass `:signal_sink` explicitly.
   defp default_sink(_signals), do: :ok
+
+  defp preserve_sync_payload_assets(row, payloads, opts) when is_list(payloads) do
+    payloads
+    |> Enum.filter(&is_map/1)
+    |> Enum.with_index()
+    |> Enum.reduce(%{assets: [], errors: []}, fn {payload, index}, acc ->
+      external_id = external_payload_id(payload, index)
+
+      {:ok, %{assets: assets, errors: errors}} =
+        AssetIngest.preserve_payload_assets(row.kind, external_id, payload,
+          tenant_id: row.tenant_id,
+          workspace_id: Keyword.get(opts, :workspace_id, "default"),
+          connector_id: row.id,
+          actor_id: Keyword.get(opts, :actor_id, "system:connector-runner"),
+          security_labels: Keyword.get(opts, :security_labels, []),
+          partition_ids: Keyword.get(opts, :partition_ids, []),
+          access_policy_id: Keyword.get(opts, :access_policy_id),
+          retention_class: Keyword.get(opts, :retention_class, "standard"),
+          trust_label: Keyword.get(opts, :trust_label, "connector_unreviewed"),
+          metadata: %{connector_run_source: "sync_payload", payload_index: index}
+        )
+
+      %{assets: acc.assets ++ assets, errors: acc.errors ++ errors}
+    end)
+  end
+
+  defp preserve_sync_payload_assets(_row, _payloads, _opts), do: %{assets: [], errors: []}
+
+  defp external_payload_id(payload, index) do
+    [
+      payload[:external_id],
+      payload["external_id"],
+      payload[:id],
+      payload["id"],
+      payload[:ts],
+      payload["ts"],
+      payload[:uuid],
+      payload["uuid"],
+      payload[:key],
+      payload["key"],
+      payload[:node_id],
+      payload["node_id"]
+    ]
+    |> Enum.find(&present_string?/1)
+    |> case do
+      nil -> "payload-#{index}"
+      value -> to_string(value)
+    end
+  end
+
+  defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present_string?(value), do: not is_nil(value)
+
+  defp asset_error_detail([]), do: nil
+  defp asset_error_detail(errors), do: Jason.encode!(%{asset_errors: errors})
 
   # Wrap a sequence of raw_query writes in a SQLite BEGIN/COMMIT so a
   # failure in any statement rolls back the lot. If the transaction

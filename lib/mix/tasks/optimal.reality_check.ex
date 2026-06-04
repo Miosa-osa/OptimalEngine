@@ -1334,6 +1334,34 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
           other -> {:error, inspect(other)}
         end
       end)
+      |> probe("connector sync payload preserves assets", fn ->
+        case Connectors.run(connector_id,
+               adapter_resolver: fn "slack" ->
+                 {:ok, Mix.Tasks.Optimal.RealityCheck.ConnectorAssetAdapter}
+               end,
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               security_labels: ["internal"],
+               partition_ids: ["reality-check"]
+             ) do
+          {:ok, result} ->
+            with {:ok, [[asset_count]]} <-
+                   Store.raw_query(
+                     "SELECT COUNT(*) FROM assets WHERE workspace_id = ?1 AND metadata LIKE ?2",
+                     [workspace_id, "%reality-file-1%"]
+                   ) do
+              if result.status == :success and result.assets == 1 and result.asset_errors == 0 and
+                   asset_count == 1 do
+                {:ok, "assets=#{result.assets}, asset_errors=#{result.asset_errors}"}
+              else
+                {:error, "result=#{inspect(result)} asset_count=#{asset_count}"}
+              end
+            end
+
+          other ->
+            {:error, inspect(other)}
+        end
+      end)
 
     cleanup_connector_probe(connector_id, workspace_id)
     state
@@ -1345,9 +1373,14 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       {"DELETE FROM connectors WHERE id = ?1", [connector_id]},
       {"DELETE FROM tool_call_runs WHERE workspace_id = ?1", [workspace_id]},
       {"DELETE FROM mcp_tool_definitions WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM assets WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM source_packages WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM derivation_ledger WHERE workspace_id = ?1", [workspace_id]},
       {"DELETE FROM events WHERE metadata LIKE ?1", ["%#{workspace_id}%"]}
     ]
     |> Enum.each(fn {sql, params} -> Store.raw_execute(sql, params) end)
+
+    File.rm_rf(workspace_id)
   end
 
   defp wiki_probes(state) do
@@ -1580,4 +1613,56 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       System.halt(1)
     end
   end
+end
+
+defmodule Mix.Tasks.Optimal.RealityCheck.ConnectorAssetAdapter do
+  @moduledoc false
+
+  @behaviour OptimalEngine.Connectors.Behaviour
+
+  alias OptimalEngine.Connectors.Transform
+
+  @impl true
+  def kind, do: :slack
+
+  @impl true
+  def display_name, do: "Reality Connector Asset Adapter"
+
+  @impl true
+  def auth_scheme, do: :token
+
+  @impl true
+  def required_config_keys, do: []
+
+  @impl true
+  def init(config), do: {:ok, config}
+
+  @impl true
+  def sync(_state, _cursor) do
+    signal =
+      Transform.new_signal(%{
+        id: Transform.signal_id(:slack, "reality-msg-1"),
+        title: "Reality connector file payload",
+        content: "Reality connector file payload",
+        path: "optimal://connectors/slack/reality-msg-1",
+        node: "09-new-stuff"
+      })
+
+    payload = %{
+      "id" => "reality-msg-1",
+      "attachments" => [
+        %{
+          "id" => "reality-file-1",
+          "filename" => "reality.txt",
+          "content_type" => "text/plain",
+          "content_base64" => Base.encode64("reality connector asset evidence")
+        }
+      ]
+    }
+
+    {:ok, %{signals: [signal], cursor: "reality-cursor-next", payloads: [payload]}}
+  end
+
+  @impl true
+  def transform(_payload), do: {:error, :not_used}
 end

@@ -90,6 +90,79 @@ defmodule OptimalEngine.Connectors.RunnerTest do
     assert cursor == "cursor-42"
   end
 
+  test "successful sync preserves raw payload attachments through Memory Core", %{id: id} do
+    workspace_id = "connector-sync-assets-#{System.unique_integer([:positive])}"
+    original_root = Application.get_env(:optimal_engine, :root_path)
+
+    tmp_dir =
+      Path.join(System.tmp_dir!(), "connector-sync-assets-#{System.unique_integer([:positive])}")
+
+    Application.put_env(:optimal_engine, :root_path, tmp_dir)
+
+    on_exit(fn ->
+      if original_root do
+        Application.put_env(:optimal_engine, :root_path, original_root)
+      else
+        Application.delete_env(:optimal_engine, :root_path)
+      end
+
+      File.rm_rf(tmp_dir)
+    end)
+
+    {:ok, ^id} =
+      Connectors.register(%{
+        id: id,
+        kind: :slack,
+        config: %{
+          "workspace_id" => "T01",
+          "channels" => ["C01"],
+          "credentials" => %{"bot_token" => "xoxb-test"}
+        }
+      })
+
+    sink = fn signals ->
+      send(self(), {:signals, signals})
+      :ok
+    end
+
+    assert {:ok, result} =
+             Runner.run(id,
+               adapter_resolver: fn "slack" ->
+                 {:ok, OptimalEngine.Connectors.RunnerTest.SyncAssetAdapter}
+               end,
+               signal_sink: sink,
+               workspace_id: workspace_id,
+               actor_id: "agent:connector-sync-test",
+               security_labels: ["internal"],
+               partition_ids: ["ops"]
+             )
+
+    assert result.status == :success
+    assert result.signals == 1
+    assert result.errors == 0
+    assert result.assets == 1
+    assert result.asset_errors == 0
+    assert result.cursor_after == "cursor-next"
+
+    assert_received {:signals, [_signal]}
+
+    {:ok, [[asset_count]]} =
+      Store.raw_query(
+        "SELECT COUNT(*) FROM assets WHERE workspace_id = ?1 AND metadata LIKE ?2",
+        [workspace_id, "%msg-1%"]
+      )
+
+    assert asset_count == 1
+
+    {:ok, [[run_errors]]} =
+      Store.raw_query(
+        "SELECT errors_encountered FROM connector_runs WHERE connector_id = ?1 ORDER BY id DESC LIMIT 1",
+        [id]
+      )
+
+    assert run_errors == 0
+  end
+
   test "governed run rejects missing privileges before connector execution", %{id: id} do
     workspace_id = "default:connector-governance-#{System.unique_integer([:positive])}"
 
@@ -197,4 +270,55 @@ defmodule OptimalEngine.Connectors.RunnerTest do
       assert Transform.parse_iso8601("garbage", fallback) == fallback
     end
   end
+end
+
+defmodule OptimalEngine.Connectors.RunnerTest.SyncAssetAdapter do
+  @behaviour OptimalEngine.Connectors.Behaviour
+
+  alias OptimalEngine.Connectors.Transform
+
+  @impl true
+  def kind, do: :slack
+
+  @impl true
+  def display_name, do: "Sync Asset Test"
+
+  @impl true
+  def auth_scheme, do: :token
+
+  @impl true
+  def required_config_keys, do: []
+
+  @impl true
+  def init(config), do: {:ok, config}
+
+  @impl true
+  def sync(_state, _cursor) do
+    signal =
+      Transform.new_signal(%{
+        id: Transform.signal_id(:slack, "msg-1"),
+        title: "Connector payload with file",
+        content: "Connector payload body",
+        path: "optimal://connectors/slack/msg-1",
+        node: "09-new-stuff"
+      })
+
+    payload = %{
+      "id" => "msg-1",
+      "text" => "Connector payload body",
+      "attachments" => [
+        %{
+          "id" => "file-1",
+          "filename" => "note.txt",
+          "content_type" => "text/plain",
+          "content_base64" => Base.encode64("connector attachment evidence")
+        }
+      ]
+    }
+
+    {:ok, %{signals: [signal], cursor: "cursor-next", payloads: [payload]}}
+  end
+
+  @impl true
+  def transform(_payload), do: {:error, :not_used}
 end
