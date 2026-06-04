@@ -1400,6 +1400,38 @@ defmodule OptimalEngine.API.Router do
 
   # ── Memory Core claim governance ──────────────────────────────────────────
 
+  # GET /api/memory-core/claim-review — review queue summary and claims.
+  # Params: workspace, tenant, review_status?, lifecycle_state?, limit?
+  get "/api/memory-core/claim-review" do
+    workspace_id = query_param(conn, "workspace", "default")
+    tenant_id = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    opts =
+      [
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        review_status: query_param(conn, "review_status", nil),
+        lifecycle_state: query_param(conn, "lifecycle_state", nil),
+        limit: parse_optional_positive_int(query_param(conn, "limit", nil))
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case MemoryCore.claim_review_queue(opts) do
+      {:ok, queue} ->
+        json(conn, %{
+          tenant_id: queue.tenant_id,
+          workspace_id: queue.workspace_id,
+          count: queue.count,
+          review_counts: queue.review_counts,
+          lifecycle_counts: queue.lifecycle_counts,
+          claims: Enum.map(queue.claims, &claim_to_map/1)
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
   # GET /api/memory-core/claims — list pending claims for review.
   # Params: workspace, tenant
   get "/api/memory-core/claims" do
@@ -1774,6 +1806,19 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  defp parse_optional_positive_int(nil), do: nil
+  defp parse_optional_positive_int(""), do: nil
+
+  defp parse_optional_positive_int(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} when int > 0 -> int
+      _ -> nil
+    end
+  end
+
+  defp parse_optional_positive_int(value) when is_integer(value) and value > 0, do: value
+  defp parse_optional_positive_int(_value), do: nil
+
   defp asset_upload_source_path(body) do
     path = Map.get(body, "path")
     content_base64 = Map.get(body, "content_base64")
@@ -2144,11 +2189,11 @@ defmodule OptimalEngine.API.Router do
       {:rag_stream_error, reason} ->
         send_sse(conn, "error", %{error: inspect(reason)})
 
-      # Task links emit a {:DOWN, ...} or normal exit message — ignore safely.
-      {_ref, _result} ->
+      {:plug_conn, :sent} ->
         rag_stream_loop(conn)
 
-      {:plug_conn, :sent} ->
+      # Task links emit a {:DOWN, ...} or normal exit message — ignore safely.
+      {_ref, _result} ->
         rag_stream_loop(conn)
 
       _other ->

@@ -184,6 +184,53 @@ defmodule OptimalEngine.API.RouterTest do
       assert promote_conn.status == 409
       assert {:ok, %{"error" => "claim rejected"}} = Jason.decode(promote_conn.resp_body)
     end
+
+    test "returns claim review queue summary with filters" do
+      workspace_id = "api-claim-queue-#{System.unique_integer([:positive])}"
+
+      assert request(:post, "/api/memory", %{
+               "workspace" => workspace_id,
+               "content" => "API queue pending #{System.unique_integer([:positive])}"
+             }).status == 201
+
+      assert request(:post, "/api/memory", %{
+               "workspace" => workspace_id,
+               "content" => "API queue rejected #{System.unique_integer([:positive])}"
+             }).status == 201
+
+      list_conn = request(:get, "/api/memory-core/claims?workspace=#{workspace_id}")
+      assert {:ok, %{"claims" => [claim_a, claim_b]}} = Jason.decode(list_conn.resp_body)
+
+      reject_conn =
+        request(:post, "/api/memory-core/claims/#{claim_b["id"]}/reject", %{
+          "workspace" => workspace_id,
+          "actor_id" => "user:api-reviewer"
+        })
+
+      assert reject_conn.status == 200
+
+      queue_conn = request(:get, "/api/memory-core/claim-review?workspace=#{workspace_id}")
+      assert queue_conn.status == 200
+      assert {:ok, queue_body} = Jason.decode(queue_conn.resp_body)
+
+      assert queue_body["count"] == 2
+      assert queue_body["review_counts"]["unreviewed"] == 1
+      assert queue_body["review_counts"]["rejected"] == 1
+      assert queue_body["lifecycle_counts"]["pending"] == 1
+      assert queue_body["lifecycle_counts"]["rejected"] == 1
+
+      filtered_conn =
+        request(
+          :get,
+          "/api/memory-core/claim-review?workspace=#{workspace_id}&review_status=unreviewed&lifecycle_state=pending"
+        )
+
+      assert filtered_conn.status == 200
+      assert {:ok, filtered_body} = Jason.decode(filtered_conn.resp_body)
+      assert filtered_body["count"] == 1
+      assert [filtered_claim] = filtered_body["claims"]
+      assert filtered_claim["id"] == claim_a["id"]
+    end
   end
 
   describe "POST /api/assets" do

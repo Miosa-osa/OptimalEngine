@@ -53,6 +53,7 @@ defmodule OptimalEngine.MemoryCore do
 
   defdelegate extract_claim(source_package, opts \\ []), to: KnowledgeLifecycle
   defdelegate pending_claims(opts \\ []), to: ClaimReview, as: :pending
+  defdelegate claim_review_queue(opts \\ []), to: ClaimReview, as: :queue
   defdelegate get_claim(claim_id, opts \\ []), to: ClaimReview, as: :get
   defdelegate reject_claim(claim_id, opts \\ []), to: ClaimReview, as: :reject
   defdelegate promote_claim(claim_id, opts \\ []), to: ClaimReview, as: :promote

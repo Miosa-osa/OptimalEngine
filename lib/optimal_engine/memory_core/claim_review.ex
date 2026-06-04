@@ -18,6 +18,41 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     |> Store.list_claims()
   end
 
+  @spec queue(keyword()) ::
+          {:ok,
+           %{
+             tenant_id: String.t(),
+             workspace_id: String.t(),
+             count: non_neg_integer(),
+             review_counts: map(),
+             lifecycle_counts: map(),
+             claims: [map()]
+           }}
+          | {:error, term()}
+  def queue(opts \\ []) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+
+    with {:ok, claims} <-
+           Store.list_claims(
+             tenant_id: tenant_id,
+             workspace_id: workspace_id,
+             review_status: Keyword.get(opts, :review_status),
+             lifecycle_state: Keyword.get(opts, :lifecycle_state),
+             limit: Keyword.get(opts, :limit, 100)
+           ) do
+      {:ok,
+       %{
+         tenant_id: tenant_id,
+         workspace_id: workspace_id,
+         count: length(claims),
+         review_counts: count_by(claims, :review_status),
+         lifecycle_counts: count_by(claims, :lifecycle_state),
+         claims: claims
+       }}
+    end
+  end
+
   @spec get(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
   def get(claim_id, opts \\ []), do: Store.get_claim(claim_id, opts)
 
@@ -71,6 +106,13 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
   defp ensure_promotable(%{review_status: "rejected"}), do: {:error, :claim_rejected}
   defp ensure_promotable(%{lifecycle_state: "rejected"}), do: {:error, :claim_rejected}
   defp ensure_promotable(_claim), do: :ok
+
+  defp count_by(claims, field) do
+    claims
+    |> Enum.map(&Map.get(&1, field))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.frequencies()
+  end
 
   defp fact_opts(opts) do
     [

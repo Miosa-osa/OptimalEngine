@@ -77,4 +77,48 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
     assert {:ok, [[0]]} =
              Store.raw_query("SELECT COUNT(*) FROM facts WHERE workspace_id = ?1", [workspace_id])
   end
+
+  test "review queue summarizes claims by review and lifecycle state" do
+    workspace_id = ws()
+
+    assert {:ok, _} =
+             Memory.create(%{
+               content: "Queue pending claim #{System.unique_integer([:positive])}",
+               workspace_id: workspace_id
+             })
+
+    assert {:ok, _} =
+             Memory.create(%{
+               content: "Queue rejected claim #{System.unique_integer([:positive])}",
+               workspace_id: workspace_id
+             })
+
+    assert {:ok, [claim_a, claim_b]} = MemoryCore.pending_claims(workspace_id: workspace_id)
+
+    assert {:ok, _rejected} =
+             MemoryCore.reject_claim(claim_b.id,
+               workspace_id: workspace_id,
+               actor_id: "user:reviewer"
+             )
+
+    assert {:ok, queue} = MemoryCore.claim_review_queue(workspace_id: workspace_id)
+
+    assert queue.workspace_id == workspace_id
+    assert queue.count == 2
+    assert queue.review_counts["unreviewed"] == 1
+    assert queue.review_counts["rejected"] == 1
+    assert queue.lifecycle_counts["pending"] == 1
+    assert queue.lifecycle_counts["rejected"] == 1
+    assert Enum.any?(queue.claims, &(&1.id == claim_a.id))
+
+    assert {:ok, pending_only} =
+             MemoryCore.claim_review_queue(
+               workspace_id: workspace_id,
+               review_status: "unreviewed",
+               lifecycle_state: "pending"
+             )
+
+    assert pending_only.count == 1
+    assert hd(pending_only.claims).id == claim_a.id
+  end
 end
