@@ -205,10 +205,10 @@ those tables by default:
 
 Callers can pass `auto_extract: false` when a run should be recorded without an
 automatic projection. `MultimodalExtractionParser` now handles the first parser
-slice: transcript JSON can become segment-level transcript rows, and document
-JSON can become page-level OCR span rows. Richer adapter-specific parsers should
-still split real tool outputs into tables, page elements, frame observations, and
-tool-specific schemas as needed.
+normalization pass: transcript JSON can become segment-level transcript rows;
+document JSON can become page, element, and table OCR rows; and frame JSON can
+become visual observations and object-detection rows. Richer adapter-specific
+parsers should still cover real tool/provider schemas as needed.
 
 Retrieval can return these projection rows as source-linked Context Package
 objects. This lets an agent use a transcript, OCR span, visual observation, or

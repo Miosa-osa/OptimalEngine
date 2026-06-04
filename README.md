@@ -24,6 +24,25 @@ Work improves the world:
   Observation -> Pending Claim -> Reviewed Fact -> Memory -> Workflow -> Skill
 ```
 
+System flow:
+
+```mermaid
+flowchart LR
+  Human[Human / Agent / App / Connector] --> Topology[Workspace + Node Scope]
+  Topology --> Source[Source Package]
+  Source --> Signal[Signal Pipeline]
+  Signal --> Claim[Claim Candidate]
+  Claim --> Review[Review / Policy]
+  Review --> Fact[Fact]
+  Fact --> Memory[Memory Object]
+  Memory --> Retrieval[Retrieval Coordinator]
+  Retrieval --> Context[Context Package]
+  Context --> Pool[Active Memory Pool]
+  Pool --> Action[Human / Agent Action]
+  Action --> Observation[Observation]
+  Observation --> Claim
+```
+
 ## Current Build
 
 The current build moves the engine from a file/search-first system toward a governed
@@ -43,6 +62,7 @@ Built and verified now:
 | Multimodal tool registry | Open-source adapter targets are cataloged for document intelligence, OCR, audio, video, visual reasoning, visual document retrieval, and cross-modal embeddings. |
 | Multimodal adapter runs | Adapter attempts and outputs can be recorded as governed derived artifacts linked to assets, Source Packages, scopes, hashes, and derivation ledger entries. |
 | Multimodal adapter runner | Configured local adapter commands can execute against governed assets, with completed, failed, and unavailable runs recorded through Memory Core. |
+| Structured multimodal extraction parsing | Nested transcript segments, document pages/elements/tables, and video frame observations/detections can be normalized into typed extraction projection rows. |
 | Adapter-output Claims | Completed adapter outputs can be preserved as derived Source Packages and converted into pending Claims. Failed or unavailable adapter runs cannot become Claims. |
 | Asset extraction projections | Completed adapter runs can be normalized into `asset_extractions` plus typed transcript, OCR span, visual observation, and embedding-ref projection tables. The adapter runner now auto-projects supported completed runs, and text-bearing extractions can become derived Source Packages and pending Claims. |
 | Claim/Fact separation | Extracted text becomes an unreviewed Claim first. A Claim becomes a Fact only through the truth-promotion lifecycle. |
@@ -78,6 +98,9 @@ mix test test/api/router_test.exs --seed 0
 
 mix test test/connectors/asset_ingest_test.exs --seed 0
 3 tests, 0 failures
+
+mix test test/pipeline/multimodal_adapter_runner_test.exs --seed 0
+8 tests, 0 failures
 
 mix optimal.reality_check
 115 probes, 115 ok, 0 warn, 0 fail
@@ -122,6 +145,28 @@ Markdown stays important because it is portable, inspectable, and easy for human
 and coding agents to edit. The database becomes the canonical runtime for identity,
 permissions, provenance, retrieval, audit, workflow state, and rebuildable
 projections.
+
+Runtime layer map:
+
+```mermaid
+flowchart TB
+  UI[Markdown / CLI / App / API / Agent] --> Gateway[Command + Query Gateway]
+  Gateway --> Topology[Workspace / Topology]
+  Gateway --> Intake[Source Intake + Signal Pipeline]
+  Gateway --> Retrieval[Retrieval / Context]
+  Gateway --> Tools[Tool + Model Governance]
+
+  Topology --> Store[(SQLite now / Postgres target)]
+  Intake --> Memory[Memory Core]
+  Memory --> Store
+  Retrieval --> Store
+  Tools --> Store
+
+  Memory --> Pools[Active Memory Pools]
+  Pools --> Workflow[Workflow / Skill Runtime]
+  Workflow --> Store
+  Store --> Export[Workspace Export / Reports / Dashboards]
+```
 
 ## Core Architecture
 
@@ -224,6 +269,29 @@ Raw input
 Not every source goes through every step. Some inputs stop at Signal. Some Claims
 never become Facts. Some Memory Objects never become workflows. That is expected.
 The important thing is that each promotion step has evidence, ownership, and audit.
+
+Multimodal evidence path:
+
+```mermaid
+flowchart LR
+  File[File / Attachment / Media] --> Preserve[MemoryCore AssetStore]
+  Preserve --> SP[Source Package]
+  Preserve --> Asset[Asset Row]
+  Asset --> Adapter[Adapter Run]
+  Adapter --> Parser[Extraction Parser]
+  Parser --> Transcript[Transcript Rows]
+  Parser --> OCR[OCR / Table / Element Rows]
+  Parser --> Visual[Visual Observation Rows]
+  Parser --> Embedding[Embedding Ref Rows]
+  Transcript --> Context[Context Package]
+  OCR --> Context
+  Visual --> Context
+  Embedding --> Context
+  Transcript --> Claim[Pending Claim]
+  OCR --> Claim
+  Visual --> Claim
+  Claim --> Fact[Reviewed Fact]
+```
 
 ## Storage Model
 
@@ -471,9 +539,9 @@ raw SQL from feature modules into governed tables
 
 The next build slices are:
 
-1. Expand adapter-specific command builders and output parsers around
-   `MemoryCore.run_asset_adapter/3`, starting with richer Docling/Marker page,
-   table, and element schemas plus FFmpeg/Whisper media extraction.
+1. Continue expanding adapter-specific command builders and output parsers around
+   `MemoryCore.run_asset_adapter/3`, especially real Docling/Marker/Whisper/FFmpeg
+   output shapes and install profiles.
 2. Wire real connector sync adapters to call `Connectors.preserve_payload_assets/4`
    for downloaded attachments and files.
 3. Add review queue UI/API ergonomics for Claims and Fact promotion.
