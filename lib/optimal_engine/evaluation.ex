@@ -3,15 +3,76 @@ defmodule OptimalEngine.Evaluation do
   Durable benchmark and evaluation records.
 
   This module stores benchmark runs and per-case results as governed engine data.
-  It does not run judges itself yet; it records the configuration, outputs, scores,
-  and context package links produced by an evaluation pipeline.
+  It can also execute a deterministic local evaluation pipeline: each case is
+  retrieved through a Context Package, answered from the returned objects, judged,
+  persisted, and summarized. External answerers or judges can be passed as
+  callbacks without changing the storage contract.
   """
 
   alias OptimalEngine.MemoryCore.{ID, JSON}
+  alias OptimalEngine.MemoryCore
   alias OptimalEngine.Store
 
   @type run :: map()
   @type evaluation_case :: map()
+  @type benchmark_case :: map() | keyword()
+
+  @spec run_benchmark([benchmark_case()], keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def run_benchmark(cases, opts \\ []) when is_list(cases) do
+    opts = opts_to_keyword(opts)
+    now = timestamp()
+    tenant_id = string(Keyword.get(opts, :tenant_id, "default"))
+    workspace_id = string(Keyword.get(opts, :workspace_id, "default"))
+    cases = Enum.map(cases, &case_to_map/1)
+
+    run_attrs =
+      opts
+      |> Keyword.take([
+        :id,
+        :benchmark_name,
+        :dataset_name,
+        :dataset_version,
+        :answer_model,
+        :judge_model,
+        :judge_strategy,
+        :retrieval_top_k,
+        :run_config,
+        :retrieval_config,
+        :judge_config,
+        :created_by,
+        :metadata
+      ])
+      |> Keyword.merge(
+        tenant_id: tenant_id,
+        workspace_id: workspace_id,
+        benchmark_name: Keyword.get(opts, :benchmark_name, "memory_recall"),
+        dataset_size: Keyword.get(opts, :dataset_size, length(cases)),
+        question_count: Keyword.get(opts, :question_count, length(cases)),
+        answer_model: Keyword.get(opts, :answer_model, "context-package-extractive"),
+        judge_model: Keyword.get(opts, :judge_model, "deterministic-rule"),
+        judge_strategy: Keyword.get(opts, :judge_strategy, "expected-answer-contains"),
+        retrieval_top_k: Keyword.get(opts, :retrieval_top_k, Keyword.get(opts, :limit, 10)),
+        status: "running",
+        started_at: now
+      )
+
+    with {:ok, run} <- record_run(run_attrs),
+         {:ok, recorded_cases} <- run_cases(run, cases, opts),
+         {:ok, summary} <- summarize(run.id),
+         {:ok, completed_run} <-
+           complete_run(run.id,
+             status: "completed",
+             completed_at: timestamp(),
+             aggregate_scores: summary.aggregate_scores
+           ) do
+      {:ok,
+       %{
+         run: completed_run,
+         cases: recorded_cases,
+         summary: Map.put(summary, :run_status, completed_run.status)
+       }}
+    end
+  end
 
   @spec record_run(keyword() | map()) :: {:ok, run()} | {:error, term()}
   def record_run(attrs) when is_list(attrs), do: attrs |> Map.new() |> record_run()
@@ -99,6 +160,35 @@ defmodule OptimalEngine.Evaluation do
 
     with :ok <- Store.raw_execute(sql, params) do
       {:ok, run}
+    end
+  end
+
+  @spec complete_run(String.t(), keyword() | map()) :: {:ok, run()} | {:error, term()}
+  def complete_run(run_id, attrs) when is_binary(run_id) and is_list(attrs),
+    do: complete_run(run_id, Map.new(attrs))
+
+  def complete_run(run_id, attrs) when is_binary(run_id) and is_map(attrs) do
+    with {:ok, _run} <- get_run(run_id) do
+      status = string(Map.get(attrs, :status) || Map.get(attrs, "status") || "completed")
+
+      completed_at =
+        string_or_nil(Map.get(attrs, :completed_at) || Map.get(attrs, "completed_at")) ||
+          timestamp()
+
+      aggregate_scores =
+        Map.get(attrs, :aggregate_scores) || Map.get(attrs, "aggregate_scores") || %{}
+
+      sql = """
+      UPDATE evaluation_runs
+      SET status = ?1,
+          completed_at = ?2,
+          aggregate_scores = ?3
+      WHERE id = ?4
+      """
+
+      with :ok <- Store.raw_execute(sql, [status, completed_at, JSON.map(aggregate_scores), run_id]) do
+        get_run(run_id)
+      end
     end
   end
 
@@ -300,6 +390,201 @@ defmodule OptimalEngine.Evaluation do
 
   defp decode_map(value) when is_map(value), do: value
   defp decode_map(_), do: %{}
+
+  defp run_cases(run, cases, opts) do
+    cases
+    |> Enum.with_index(1)
+    |> Enum.reduce_while({:ok, []}, fn {case_attrs, index}, {:ok, acc} ->
+      case run_case(run, case_attrs, index, opts) do
+        {:ok, evaluation_case} -> {:cont, {:ok, acc ++ [evaluation_case]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp run_case(run, case_attrs, index, opts) do
+    case_id = string(map_get(case_attrs, :case_id) || "case-#{index}")
+    question = string(map_get(case_attrs, :question))
+    retrieval_opts = retrieval_opts(run, case_attrs, opts)
+    retriever = Keyword.get(opts, :retriever, &MemoryCore.retrieve/2)
+
+    case retriever.(question, retrieval_opts) do
+      {:ok, context_package} ->
+        answerer = Keyword.get(opts, :answerer, &default_answer/2)
+        judge = Keyword.get(opts, :judge, &default_judge/3)
+        actual_answer = string(answerer.(case_attrs, context_package))
+        judge_result = normalize_judge_result(judge.(case_attrs, actual_answer, context_package))
+
+        record_case(run.id,
+          case_id: case_id,
+          conversation_id: string_or_nil(map_get(case_attrs, :conversation_id)),
+          question: question,
+          expected_answer: string_or_nil(map_get(case_attrs, :expected_answer)),
+          actual_answer: actual_answer,
+          context_package_id: context_package.id,
+          retrieved_object_links: Map.get(context_package, :returned_object_links, []),
+          scores: Map.get(judge_result, :scores, %{}),
+          judge_output: Map.get(judge_result, :judge_output, %{}),
+          status: Map.get(judge_result, :status, "recorded"),
+          error_reason: Map.get(judge_result, :error_reason),
+          metadata:
+            Map.merge(map_get(case_attrs, :metadata) || %{}, %{
+              retrieval_plan: Map.get(context_package, :retrieval_plan, %{}),
+              filtered_object_summary: Map.get(context_package, :filtered_object_summary, %{})
+            })
+        )
+
+      {:error, reason} ->
+        record_case(run.id,
+          case_id: case_id,
+          conversation_id: string_or_nil(map_get(case_attrs, :conversation_id)),
+          question: question,
+          expected_answer: string_or_nil(map_get(case_attrs, :expected_answer)),
+          actual_answer: nil,
+          scores: %{accuracy: 0.0, retrieval_success: 0.0},
+          judge_output: %{retrieval_error: inspect(reason)},
+          status: "failed",
+          error_reason: inspect(reason),
+          metadata: map_get(case_attrs, :metadata) || %{}
+        )
+    end
+  end
+
+  defp retrieval_opts(run, case_attrs, opts) do
+    base =
+      opts
+      |> Keyword.get(:retrieval_opts, [])
+      |> opts_to_keyword()
+
+    case_specific =
+      case_attrs
+      |> map_get(:retrieval_opts)
+      |> opts_to_keyword()
+
+    Keyword.merge(
+      [
+        tenant_id: run.tenant_id,
+        workspace_id: run.workspace_id,
+        actor_id: Keyword.get(opts, :actor_id) || Keyword.get(opts, :created_by),
+        limit: Keyword.get(opts, :retrieval_top_k, Keyword.get(opts, :limit, 10))
+      ],
+      Keyword.merge(base, case_specific)
+    )
+  end
+
+  defp default_answer(_case_attrs, context_package) do
+    context_package
+    |> answer_parts()
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n")
+  end
+
+  defp answer_parts(context_package) do
+    fact_parts = Enum.map(Map.get(context_package, :facts, []), &text_field(&1, :fact_text))
+
+    memory_parts =
+      Enum.map(Map.get(context_package, :memory_objects, []), &text_field(&1, :summary))
+
+    asset_parts =
+      Enum.map(Map.get(context_package, :asset_extractions, []), &text_field(&1, :content_text))
+
+    fact_parts ++ memory_parts ++ asset_parts
+  end
+
+  defp text_field(map, preferred_key) do
+    Map.get(map, preferred_key) || Map.get(map, :text) || Map.get(map, "text")
+  end
+
+  defp default_judge(case_attrs, actual_answer, context_package) do
+    expected_answer = string_or_nil(map_get(case_attrs, :expected_answer))
+    retrieved_count = length(Map.get(context_package, :returned_object_links, []))
+    retrieval_success = if retrieved_count > 0, do: 1.0, else: 0.0
+
+    cond do
+      expected_answer == nil ->
+        %{
+          status: "recorded",
+          scores: %{answered: answered_score(actual_answer), retrieval_success: retrieval_success},
+          judge_output: %{strategy: "no_expected_answer", retrieved_count: retrieved_count}
+        }
+
+      contains_normalized?(actual_answer, expected_answer) ->
+        %{
+          status: "passed",
+          scores: %{accuracy: 1.0, grounding: retrieval_success},
+          judge_output: %{
+            strategy: "expected-answer-contains",
+            expected_answer: expected_answer,
+            retrieved_count: retrieved_count
+          }
+        }
+
+      true ->
+        %{
+          status: "failed",
+          scores: %{accuracy: 0.0, grounding: retrieval_success},
+          judge_output: %{
+            strategy: "expected-answer-contains",
+            expected_answer: expected_answer,
+            retrieved_count: retrieved_count
+          },
+          error_reason: "expected_answer_not_found"
+        }
+    end
+  end
+
+  defp normalize_judge_result(result) when is_map(result) do
+    %{
+      status: string(Map.get(result, :status) || Map.get(result, "status") || "recorded"),
+      scores: Map.get(result, :scores) || Map.get(result, "scores") || %{},
+      judge_output: Map.get(result, :judge_output) || Map.get(result, "judge_output") || %{},
+      error_reason: string_or_nil(Map.get(result, :error_reason) || Map.get(result, "error_reason"))
+    }
+  end
+
+  defp normalize_judge_result(:passed), do: %{status: "passed", scores: %{accuracy: 1.0}}
+  defp normalize_judge_result(:failed), do: %{status: "failed", scores: %{accuracy: 0.0}}
+
+  defp normalize_judge_result(other) do
+    %{status: "recorded", judge_output: %{result: inspect(other)}}
+  end
+
+  defp answered_score(""), do: 0.0
+  defp answered_score(_), do: 1.0
+
+  defp contains_normalized?(actual, expected) do
+    actual |> normalize_text() |> String.contains?(normalize_text(expected))
+  end
+
+  defp normalize_text(value) do
+    value
+    |> string()
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, " ")
+    |> String.trim()
+  end
+
+  defp case_to_map(value) when is_list(value), do: Map.new(value)
+  defp case_to_map(value) when is_map(value), do: value
+
+  defp opts_to_keyword(nil), do: []
+  defp opts_to_keyword(value) when is_list(value), do: value
+
+  defp opts_to_keyword(value) when is_map(value) do
+    Enum.map(value, fn {key, option_value} -> {option_key(key), option_value} end)
+  end
+
+  defp opts_to_keyword(_), do: []
+
+  defp option_key(key) when is_atom(key), do: key
+  defp option_key(key) when is_binary(key), do: String.to_atom(key)
+  defp option_key(key), do: key
+
+  defp map_get(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, to_string(key))
+  end
+
+  defp map_get(_, _), do: nil
 
   defp int_or_nil(nil), do: nil
   defp int_or_nil(value) when is_integer(value), do: value
