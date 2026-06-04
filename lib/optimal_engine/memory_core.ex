@@ -63,6 +63,7 @@ defmodule OptimalEngine.MemoryCore do
   defdelegate refresh_context_package(context_package_id, opts \\ []), to: RetrievalCoordinator
   defdelegate refresh_stale_context_packages(opts \\ []), to: RetrievalCoordinator
   defdelegate open_active_pool(opts \\ []), to: ActiveMemoryPool, as: :open
+  defdelegate get_active_pool(pool_id), to: ActiveMemoryPool, as: :get
 
   defdelegate load_context_package(pool_id, context_package, opts \\ []),
     to: ActiveMemoryPool,

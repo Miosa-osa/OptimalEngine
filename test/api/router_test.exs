@@ -404,6 +404,102 @@ defmodule OptimalEngine.API.RouterTest do
                  [workspace_id, package.id]
                )
     end
+
+    test "active pool API opens task memory, loads context, records observations, and closes" do
+      workspace_id = "api-active-pool-#{System.unique_integer([:positive])}"
+
+      assert {:ok, claim} =
+               extracted_policy_claim(workspace_id,
+                 claim_text: "The active pool launch plan is approved.",
+                 subject_anchor: "active_pool_launch",
+                 action_class: "approved",
+                 object_anchor: "plan"
+               )
+
+      assert {:ok, _accepted} =
+               OptimalEngine.MemoryCore.promote_claim(claim.id,
+                 workspace_id: workspace_id,
+                 actor_id: "user:api-reviewer",
+                 fact_text: "The active pool launch plan is approved.",
+                 summary: "Active pool launch approval is source-backed."
+               )
+
+      open_conn =
+        request(:post, "/api/memory-core/active-pools", %{
+          "workspace" => workspace_id,
+          "task_type" => "launch_review",
+          "subject_anchor" => "active_pool_launch",
+          "member_links" => [%{"type" => "human", "id" => "human:reviewer"}],
+          "agent_links" => [%{"type" => "agent", "id" => "agent:api"}],
+          "security_labels" => ["internal"],
+          "partition_ids" => ["api-test"]
+        })
+
+      assert open_conn.status == 200
+      assert {:ok, %{"active_memory_pool" => pool}} = Jason.decode(open_conn.resp_body)
+      assert pool["lifecycle_state"] == "open"
+      assert pool["workspace_id"] == workspace_id
+
+      get_conn = request(:get, "/api/memory-core/active-pools/#{pool["id"]}")
+      assert get_conn.status == 200
+
+      retrieve_conn =
+        request(:post, "/api/memory-core/active-pools/#{pool["id"]}/retrieve", %{
+          "workspace" => workspace_id,
+          "query" => "launch",
+          "actor_id" => "agent:api",
+          "allowed_partitions" => ["api-test"],
+          "allowed_security_labels" => ["internal"]
+        })
+
+      assert retrieve_conn.status == 200
+      assert {:ok, retrieve_body} = Jason.decode(retrieve_conn.resp_body)
+      package = retrieve_body["context_package"]
+      loaded_pool = retrieve_body["active_memory_pool"]
+      assert package["filtered_object_summary"]["returned_facts"] == 1
+
+      assert %{"type" => "context_package", "id" => package["id"]} in loaded_pool[
+               "context_package_links"
+             ]
+
+      refresh_conn =
+        request(:post, "/api/memory-core/active-pools/#{pool["id"]}/refresh-context", %{
+          "allowed_partitions" => ["api-test"],
+          "allowed_security_labels" => ["internal"]
+        })
+
+      assert refresh_conn.status == 200
+      assert {:ok, refresh_body} = Jason.decode(refresh_conn.resp_body)
+      assert refresh_body["refreshed_count"] == 0
+      assert refresh_body["skipped_context_package_ids"] == [package["id"]]
+
+      observation_conn =
+        request(:post, "/api/memory-core/active-pools/#{pool["id"]}/observations", %{
+          "observation" => "Agent observed that launch approval still needs finance follow-up.",
+          "claim_text" => "Launch approval still needs finance follow-up.",
+          "actor_id" => "agent:api",
+          "subject_anchor" => "active_pool_launch",
+          "action_class" => "needs_follow_up",
+          "object_anchor" => "finance",
+          "aggregate_confidence" => 0.66,
+          "aggregate_precision" => 0.6
+        })
+
+      assert observation_conn.status == 200
+      assert {:ok, observation_body} = Jason.decode(observation_conn.resp_body)
+      assert observation_body["pending_claim"]["review_status"] == "unreviewed"
+      assert observation_body["active_memory_pool"]["refresh_state"] == "dirty"
+
+      close_conn =
+        request(:post, "/api/memory-core/active-pools/#{pool["id"]}/close", %{
+          "reason" => "api test complete"
+        })
+
+      assert close_conn.status == 200
+      assert {:ok, %{"active_memory_pool" => closed_pool}} = Jason.decode(close_conn.resp_body)
+      assert closed_pool["lifecycle_state"] == "closed"
+      assert closed_pool["archive_state"] == "archived"
+    end
   end
 
   describe "POST /api/assets" do

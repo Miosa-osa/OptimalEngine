@@ -1495,6 +1495,179 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # POST /api/memory-core/active-pools — open task-scoped working memory.
+  # Body: {workspace?, tenant?, task_type?, subject_anchor?, member_links?,
+  #        agent_links?, tool_links?, security_labels?, partition_ids?, metadata?}
+  post "/api/memory-core/active-pools" do
+    body = conn.body_params || %{}
+
+    opts =
+      [
+        workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+        tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
+        task_type: Map.get(body, "task_type"),
+        subject_anchor: Map.get(body, "subject_anchor"),
+        time_mode: Map.get(body, "time_mode", "current_valid"),
+        pool_scope: coerce_metadata(Map.get(body, "pool_scope")),
+        member_links: Map.get(body, "member_links", []),
+        agent_links: Map.get(body, "agent_links", []),
+        tool_links: Map.get(body, "tool_links", []),
+        membership_policy: coerce_metadata(Map.get(body, "membership_policy")),
+        delegation_chain_links: Map.get(body, "delegation_chain_links", []),
+        access_policy_id: Map.get(body, "access_policy_id"),
+        security_labels: string_list_param(body, "security_labels"),
+        partition_ids: string_list_param(body, "partition_ids"),
+        policy_version: Map.get(body, "policy_version"),
+        metadata: coerce_metadata(Map.get(body, "metadata"))
+      ]
+      |> reject_nil_keyword()
+
+    case MemoryCore.open_active_pool(opts) do
+      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/active-pools/:id — fetch one Active Memory Pool.
+  get "/api/memory-core/active-pools/:id" do
+    case MemoryCore.get_active_pool(id) do
+      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/retrieve — retrieve governed context
+  # for a pool and load the resulting Context Package into that pool.
+  post "/api/memory-core/active-pools/:id/retrieve" do
+    body = conn.body_params || %{}
+    query = Map.get(body, "query", "")
+
+    if not (is_binary(query) and String.trim(query) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
+    else
+      opts =
+        [
+          tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
+          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          active_memory_pool_id: id,
+          request_intent: Map.get(body, "request_intent", "recall"),
+          time_mode: Map.get(body, "time_mode", "current_valid"),
+          detail_depth: Map.get(body, "detail_depth", "summary"),
+          limit: parse_optional_positive_int(Map.get(body, "limit"))
+        ]
+        |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
+        |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+        |> reject_nil_keyword()
+
+      with {:ok, package} <- MemoryCore.retrieve(query, opts),
+           {:ok, pool} <- MemoryCore.load_context_package(id, package) do
+        json(conn, %{
+          active_memory_pool: active_pool_to_map(pool),
+          context_package: stringify_keys(package)
+        })
+      else
+        {:error, :not_found} ->
+          send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/refresh-context — refresh stale
+  # Context Packages already loaded into the pool.
+  post "/api/memory-core/active-pools/:id/refresh-context" do
+    body = conn.body_params || %{}
+
+    opts =
+      [
+        actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+        continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
+      ]
+      |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
+      |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+      |> reject_nil_keyword()
+
+    case MemoryCore.refresh_pool_context_packages(id, opts) do
+      {:ok, result} ->
+        json(conn, %{
+          active_memory_pool: active_pool_to_map(result.pool),
+          refreshed_count: length(result.refreshed_context_packages),
+          skipped_context_package_ids: result.skipped_context_package_ids,
+          errors: Enum.map(result.errors, &stringify_keys/1),
+          refreshed_context_packages: Enum.map(result.refreshed_context_packages, &stringify_keys/1)
+        })
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/observations — publish a pool-local
+  # observation as Source Package + pending Claim.
+  post "/api/memory-core/active-pools/:id/observations" do
+    body = conn.body_params || %{}
+    observation = Map.get(body, "observation", Map.get(body, "text", ""))
+
+    if not (is_binary(observation) and String.trim(observation) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "observation is required"}))
+    else
+      opts =
+        [
+          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          source_type: Map.get(body, "source_type", "pool_observation"),
+          observation_kind: Map.get(body, "observation_kind", "observation"),
+          claim_text: Map.get(body, "claim_text", observation),
+          subject_anchor: Map.get(body, "subject_anchor"),
+          action_class: Map.get(body, "action_class"),
+          object_anchor: Map.get(body, "object_anchor"),
+          aggregate_confidence: parse_float(Map.get(body, "aggregate_confidence")),
+          aggregate_precision: parse_float(Map.get(body, "aggregate_precision"))
+        ]
+        |> reject_nil_keyword()
+
+      case MemoryCore.publish_pool_observation(id, observation, opts) do
+        {:ok, result} ->
+          json(conn, %{
+            active_memory_pool: active_pool_to_map(result.pool),
+            source_package: source_package_to_map(result.source_package),
+            pending_claim: claim_to_map(result.pending_claim)
+          })
+
+        {:error, :not_found} ->
+          send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/close — close/archive a pool.
+  post "/api/memory-core/active-pools/:id/close" do
+    body = conn.body_params || %{}
+
+    opts =
+      [
+        reason: Map.get(body, "reason"),
+        lifecycle_state: Map.get(body, "lifecycle_state", "closed"),
+        archive_state: Map.get(body, "archive_state", "archived")
+      ]
+      |> reject_nil_keyword()
+
+    case MemoryCore.close_active_pool(id, opts) do
+      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
   # GET /api/memory-core/claim-review — review queue summary and claims.
   # Params: workspace, tenant, review_status?, lifecycle_state?, limit?
   get "/api/memory-core/claim-review" do
@@ -2124,6 +2297,7 @@ defmodule OptimalEngine.API.Router do
 
   defp asset_to_map(asset), do: clean_map(asset)
   defp source_package_to_map(source_package), do: clean_map(source_package)
+  defp active_pool_to_map(pool), do: pool |> clean_map() |> stringify_keys()
 
   defp clean_map(value) when is_map(value) do
     value
