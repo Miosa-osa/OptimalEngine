@@ -37,7 +37,7 @@ Work improves the world:
 | --- | --- | --- |
 | Company second brain | Active | The product framing is still a governed brain for a company, team, or operator. |
 | Markdown workspace | Active | Files and folders remain a human/agent control surface. They are projections, not the only truth. |
-| Workspace topology | Built | Workspaces, project-as-Node modeling, node types, node relationships, memberships, and projection records exist. |
+| Workspace topology | Built | Workspaces, project-as-Node modeling, node types, node relationships, memberships, setup command, rhythm/agent starter surface, and projection records exist. |
 | Signal pipeline | Built | Parse, decompose, classify, embed, route, store, cluster, and wiki tasks/modules exist, with text path strongest today. |
 | Memory Core | Built | Source Packages, Claims, Facts, Memory Objects, Relationship Edges, Derivation Ledger, Context Packages, and Active Pools exist in the schema and tests. |
 | Retrieval | Built, expanding | Wiki-first RAG, hybrid search, grep, tiered assembly, governed Context Packages, and receiver formatting exist. Full graph/vector/temporal coordinator expansion is ongoing. |
@@ -224,9 +224,10 @@ mix optimal.reality_check
 Scaffold a markdown-operable workspace:
 
 ```bash
-mix optimal.init ~/my-workspace
-mix optimal.ingest_workspace ~/my-workspace
-mix optimal.rag "what changed this week?" --trace
+mix optimal.setup my-workspace --name "My Workspace"
+mix optimal.topology --workspace default:my-workspace
+mix optimal.ingest_workspace ./my-workspace
+mix optimal.rag "what changed this week?" --workspace default:my-workspace --trace
 ```
 
 Useful commands:
@@ -236,7 +237,7 @@ mix optimal.reality_check
 mix optimal.search "project"
 mix optimal.rag "what changed this week?"
 mix optimal.wiki list
-mix optimal.topology
+mix optimal.topology --workspace default:my-workspace
 ```
 
 Start the API when enabled in config:
@@ -317,6 +318,7 @@ Current focused verification:
 
 ```bash
 mix test test/memory_core/spine_test.exs \
+  test/mix_tasks/optimal_setup_test.exs \
   test/workspace_export_test.exs \
   test/topology/workspace_topology_test.exs \
   test/topology/node_member_test.exs \
@@ -368,18 +370,17 @@ raw SQL from feature modules into governed tables
 
 The next build slices are:
 
-1. Harden Workspace/Topology as the first gate for every project, node, member,
-   relationship, and projection edit.
-2. Add a first-class workspace setup task that creates a workspace, starter
-   Nodes, rhythm structure, and agent SOP in one command.
-3. Expand Source Package support for richer multimodal source metadata.
-4. Add review queues for Claims and Fact promotion.
-5. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
+1. Expand Workspace/Topology with reusable templates for different operating
+   systems: company, personal, research, product, sales, support, and project
+   workspaces.
+2. Expand Source Package support for richer multimodal source metadata.
+3. Add review queues for Claims and Fact promotion.
+4. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.
-6. Build workflow traces and Skill Packages from repeated Active Pool work.
-7. Expand governed tool/model execution from the first dispatcher adapter into
+5. Build workflow traces and Skill Packages from repeated Active Pool work.
+6. Expand governed tool/model execution from the first dispatcher adapter into
    connector-wide and model-provider-wide runtime paths.
-8. Add benchmark/evaluation records so large-scale recall tests are stored and
+7. Add benchmark/evaluation records so large-scale recall tests are stored and
    inspectable.
 
 The system is meant to stay complex where complexity carries meaning: evidence,
