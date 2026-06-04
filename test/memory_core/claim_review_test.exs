@@ -2,6 +2,7 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.{Memory, MemoryCore, Store}
+  alias OptimalEngine.MemoryCore.RetrievalCoordinator
 
   defp ws, do: "claim-review-#{System.unique_integer([:positive])}"
 
@@ -164,6 +165,15 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
                summary: "Launch date is June 10."
              )
 
+    assert {:ok, package} =
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               allowed_partitions: [],
+               allowed_security_labels: []
+             )
+
+    assert package.refresh_state == "fresh"
+
     assert {:ok, replacement_claim} =
              extracted_claim(workspace_id,
                claim_text: "The launch date is June 17.",
@@ -204,6 +214,14 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
                "SELECT lifecycle_state, staleness_status, supersession_status FROM memory_objects WHERE workspace_id = ?1 AND id = ?2",
                [workspace_id, original.memory_object.id]
              )
+
+    assert {:ok, [["stale", invalidation_reason]]} =
+             Store.raw_query(
+               "SELECT refresh_state, invalidation_reason FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
+               [workspace_id, package.id]
+             )
+
+    assert invalidation_reason == "fact_superseded:#{original.fact.id}"
 
     assert {:ok, [[1]]} =
              Store.raw_query(

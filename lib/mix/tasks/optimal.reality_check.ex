@@ -558,6 +558,13 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                      aggregate_precision: 0.7,
                      actor_id: "agent:reality-check"
                    ),
+                 {:ok, pre_supersession_package} <-
+                   RetrievalCoordinator.retrieve("launch",
+                     workspace_id: workspace_id,
+                     actor_id: "agent:reality-check",
+                     allowed_partitions: ["reality-check"],
+                     allowed_security_labels: ["internal"]
+                   ),
                  {:ok, replacement} <-
                    ClaimReview.promote(replacement_claim.id,
                      workspace_id: workspace_id,
@@ -580,6 +587,11 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                    Store.raw_query(
                      "SELECT lifecycle_state, supersession_status FROM memory_objects WHERE workspace_id = ?1 AND id = ?2",
                      [workspace_id, ctx.memory.id]
+                   ),
+                 {:ok, [["stale"]]} <-
+                   Store.raw_query(
+                     "SELECT refresh_state FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
+                     [workspace_id, pre_supersession_package.id]
                    ) do
               {:ok, "superseded=#{ctx.fact.id}"}
             else
