@@ -240,6 +240,12 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
     assert refreshed_package.metadata.refreshed_from_context_package_id == package.id
     assert refreshed_package.metadata.refreshed_from_invalidation_reason == invalidation_reason
 
+    assert {:ok, [["refreshed"]]} =
+             Store.raw_query(
+               "SELECT refresh_state FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
+               [workspace_id, package.id]
+             )
+
     assert {:ok, [[1]]} =
              Store.raw_query(
                "SELECT COUNT(*) FROM facts WHERE workspace_id = ?1 AND lifecycle_state = 'accepted'",

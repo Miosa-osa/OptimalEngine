@@ -285,6 +285,46 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              )
   end
 
+  test "retrieval coordinator batch refreshes stale context packages" do
+    workspace_id = "memory-core-batch-refresh-test-#{System.unique_integer([:positive])}"
+
+    {:ok, fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+
+    assert {:ok, package} =
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"]
+             )
+
+    assert :ok =
+             MemoryCoreStore.invalidate_context_packages_for_object("fact", fact.id,
+               workspace_id: workspace_id,
+               reason: "batch_refresh_test"
+             )
+
+    assert {:ok, batch} = MemoryCore.refresh_stale_context_packages(workspace_id: workspace_id)
+    assert batch.stale_context_package_ids == [package.id]
+    assert batch.errors == []
+    assert [refreshed_package] = batch.refreshed_context_packages
+    assert refreshed_package.id != package.id
+    assert refreshed_package.refresh_state == "fresh"
+
+    assert {:ok, [["refreshed"]]} =
+             Store.raw_query(
+               "SELECT refresh_state FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
+               [workspace_id, package.id]
+             )
+
+    assert {:ok, empty_batch} =
+             MemoryCore.refresh_stale_context_packages(workspace_id: workspace_id)
+
+    assert empty_batch.stale_context_package_ids == []
+    assert empty_batch.refreshed_context_packages == []
+    assert empty_batch.errors == []
+  end
+
   test "retrieval coordinator filters unauthorized partitions before packaging" do
     workspace_id = "memory-core-retrieval-filter-test-#{System.unique_integer([:positive])}"
 

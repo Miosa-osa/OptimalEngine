@@ -449,6 +449,22 @@ defmodule OptimalEngine.MemoryCore.Store do
     Store.raw_execute(sql, scoped_params([reason, now, now, tenant_id, pattern], workspace_id))
   end
 
+  @spec mark_context_package_refreshed(String.t(), keyword()) :: :ok | {:error, term()}
+  def mark_context_package_refreshed(context_package_id, opts)
+      when is_binary(context_package_id) and is_list(opts) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+    now = Keyword.get(opts, :refresh_time, timestamp())
+
+    sql =
+      "UPDATE context_packages SET refresh_state = 'refreshed', refresh_time = ?1, " <>
+        "transaction_time_end = COALESCE(transaction_time_end, ?2) " <>
+        "WHERE id = ?3 AND tenant_id = ?4" <>
+        workspace_clause(workspace_id, 5)
+
+    Store.raw_execute(sql, scoped_params([now, now, context_package_id, tenant_id], workspace_id))
+  end
+
   defp object_id_pattern(id), do: ~s(%"id":"#{id}"%)
 
   defp claim_columns do

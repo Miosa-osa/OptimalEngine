@@ -172,7 +172,79 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
           })
         )
 
-      retrieve(query, refresh_opts)
+      with {:ok, refreshed_package} <- retrieve(query, refresh_opts),
+           :ok <-
+             Store.mark_context_package_refreshed(stale_package.id,
+               tenant_id: stale_package.tenant_id,
+               workspace_id: stale_package.workspace_id
+             ) do
+        {:ok, refreshed_package}
+      end
+    end
+  end
+
+  @spec refresh_stale_context_packages(keyword()) :: {:ok, map()} | {:error, term()}
+  def refresh_stale_context_packages(opts \\ []) when is_list(opts) do
+    with {:ok, stale_packages} <- list_stale_context_packages(opts) do
+      refresh_opts = Keyword.drop(opts, [:batch_limit, :continue_on_error])
+
+      stale_packages
+      |> Enum.reduce_while(
+        {:ok,
+         %{stale_context_package_ids: Enum.map(stale_packages, & &1.id), refreshed: [], errors: []}},
+        fn stale_package, {:ok, acc} ->
+          case refresh_context_package(stale_package.id, refresh_opts) do
+            {:ok, refreshed_package} ->
+              {:cont, {:ok, put_in(acc.refreshed, acc.refreshed ++ [refreshed_package])}}
+
+            {:error, reason} ->
+              if Keyword.get(opts, :continue_on_error, true) do
+                error = %{context_package_id: stale_package.id, reason: reason}
+                {:cont, {:ok, put_in(acc.errors, acc.errors ++ [error])}}
+              else
+                {:halt, {:error, {stale_package.id, reason}}}
+              end
+          end
+        end
+      )
+      |> case do
+        {:ok, result} ->
+          {:ok,
+           %{
+             stale_context_package_ids: result.stale_context_package_ids,
+             refreshed_context_packages: result.refreshed,
+             errors: result.errors
+           }}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  @spec list_stale_context_packages(keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_stale_context_packages(opts \\ []) when is_list(opts) do
+    tenant_id = string_opt(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
+    batch_limit = Keyword.get(opts, :batch_limit, 50)
+
+    {clauses, params} = {["tenant_id = ?1", "refresh_state = 'stale'"], [tenant_id]}
+
+    {clauses, params} =
+      case workspace_id do
+        nil -> {clauses, params}
+        value -> {clauses ++ ["workspace_id = ?#{length(params) + 1}"], params ++ [value]}
+      end
+
+    sql =
+      context_package_select() <>
+        " WHERE " <>
+        Enum.join(clauses, " AND ") <>
+        " ORDER BY transaction_time_end DESC, refresh_time DESC LIMIT ?#{length(params) + 1}"
+
+    case BaseStore.raw_query(sql, params ++ [batch_limit]) do
+      {:ok, rows} -> {:ok, Enum.map(rows, &context_package_from_row/1)}
+      other -> other
     end
   end
 
