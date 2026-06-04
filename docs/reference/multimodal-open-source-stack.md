@@ -258,6 +258,11 @@ local paths and base64 content, preserves connector origin metadata, and returns
 per-attachment errors so a single bad file does not erase the rest of the sync
 batch.
 
+Connector sync implementations may also return raw payloads alongside generated
+Signals. When those payloads include `attachments` or `files`,
+`Connectors.Runner` preserves them through the same Memory Core asset path before
+the connector run is marked complete.
+
 Missing binaries should degrade gracefully. The engine should preserve the raw
 asset, write a warning or adapter-run failure, and continue the rest of the
 pipeline where possible.

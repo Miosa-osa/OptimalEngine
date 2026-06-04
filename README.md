@@ -59,6 +59,7 @@ Built and verified now:
 | Indexer asset governance | Binary indexing can pass workspace scope into the governed pipeline so indexed assets do not fall back to the default workspace. |
 | API asset uploads | `POST /api/assets` preserves JSON-uploaded or local-path files through Memory Core and can optionally run a governed multimodal adapter. |
 | Connector asset ingestion | `Connectors.preserve_payload_assets/4` preserves connector attachments/files through Memory Core with connector origin metadata and per-attachment errors. |
+| Connector sync asset preservation | Connector sync may return raw payloads with attachments/files; the runner preserves them through Memory Core before completing the run. |
 | Multimodal tool registry | Open-source adapter targets are cataloged for document intelligence, OCR, audio, video, visual reasoning, visual document retrieval, and cross-modal embeddings. |
 | Multimodal adapter runs | Adapter attempts and outputs can be recorded as governed derived artifacts linked to assets, Source Packages, scopes, hashes, and derivation ledger entries. |
 | Multimodal adapter runner | Configured local adapter commands can execute against governed assets, with completed, failed, and unavailable runs recorded through Memory Core. |
@@ -99,11 +100,14 @@ mix test test/api/router_test.exs --seed 0
 mix test test/connectors/asset_ingest_test.exs --seed 0
 3 tests, 0 failures
 
+mix test test/connectors/runner_test.exs test/connectors/asset_ingest_test.exs --seed 0
+13 tests, 0 failures
+
 mix test test/pipeline/multimodal_adapter_runner_test.exs --seed 0
 8 tests, 0 failures
 
 mix optimal.reality_check
-115 probes, 115 ok, 0 warn, 0 fail
+116 probes, 116 ok, 0 warn, 0 fail
 ```
 
 The full legacy suite still contains older optional/backend warnings. The focused
@@ -420,7 +424,10 @@ projection rows are created in the same request.
 `Connectors.preserve_payload_assets/4` is the connector-side equivalent. It
 normalizes attachment/file payloads from connector raw data, supports local paths
 and base64 content, stores each file as a governed asset, and returns
-per-attachment errors instead of silently dropping failed preservation.
+per-attachment errors instead of silently dropping failed preservation. Connector
+sync adapters may also return raw payloads with their Signals; `Connectors.Runner`
+preserves any `attachments` or `files` in those payloads through this same Memory
+Core path before completing the connector run.
 `MemoryCore.claim_from_asset_adapter_run/2` is the review bridge: it turns a
 completed adapter output into a derived Source Package plus pending Claim without
 promoting that output to accepted truth.
@@ -542,8 +549,8 @@ The next build slices are:
 1. Continue expanding adapter-specific command builders and output parsers around
    `MemoryCore.run_asset_adapter/3`, especially real Docling/Marker/Whisper/FFmpeg
    output shapes and install profiles.
-2. Wire real connector sync adapters to call `Connectors.preserve_payload_assets/4`
-   for downloaded attachments and files.
+2. Implement provider-specific sync/download adapters that return raw payloads
+   with attachment/file data so `Connectors.Runner` can preserve them automatically.
 3. Add review queue UI/API ergonomics for Claims and Fact promotion.
 4. Expand Retrieval Coordinator beyond simple fact/memory/extraction lookup into structured,
    full-text, vector, graph, temporal, and permission-aware recall.

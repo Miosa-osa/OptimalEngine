@@ -49,6 +49,10 @@ defmodule OptimalEngine.Connectors.Behaviour do
   @type state :: term()
   @type cursor :: String.t() | nil
   @type raw_payload :: map()
+  @type sync_result ::
+          {:ok, [Signal.t()], cursor()}
+          | {:ok, [Signal.t()], cursor(), [raw_payload()]}
+          | {:ok, %{signals: [Signal.t()], cursor: cursor(), payloads: [raw_payload()]}}
   @type sync_error_reason ::
           :rate_limited
           | {:rate_limited, retry_after_ms :: non_neg_integer()}
@@ -62,8 +66,7 @@ defmodule OptimalEngine.Connectors.Behaviour do
   @callback auth_scheme() :: auth()
   @callback required_config_keys() :: [atom()]
   @callback init(config()) :: {:ok, state()} | {:error, term()}
-  @callback sync(state(), cursor()) ::
-              {:ok, [Signal.t()], cursor()} | {:error, sync_error_reason()}
+  @callback sync(state(), cursor()) :: sync_result() | {:error, sync_error_reason()}
   @callback transform(raw_payload()) :: {:ok, Signal.t()} | {:error, term()}
 
   @optional_callbacks [transform: 1]
