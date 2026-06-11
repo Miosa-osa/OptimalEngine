@@ -39,6 +39,7 @@ governed integration surface.
 | Manual import | User uploads/export files, CSVs, zip files, markdown folders, call transcripts. | Source Packages, assets, import run, pending Claims. |
 | Connector sync | A known provider has a sync adapter. | connector definition, sync run, Source Packages, assets, audit. |
 | MCP tool | Agent needs interactive access through an MCP server. | tool definition, grants, tool call runs, observations. |
+| CLI tool | A command-line tool maps directly to the job. | registered command/script surface, run record, captured output, Source Package or observation when useful. |
 | API integration | Organization has a REST/GraphQL/internal API. | connector/tool definition, schema, policy, call runs. |
 | Script or cron | Organization has local jobs or one-off scripts. | script tool definition, schedule, run record, Source Packages. |
 | Workspace edit | Human or agent edits markdown/files directly. | Source Package or topology change request, then projection refresh. |
@@ -46,6 +47,9 @@ governed integration surface.
 The same outside system can have more than one connection type. For example, a
 team may import old calendar exports manually, then later configure a calendar
 MCP or connector for live use.
+
+See [Tool surfaces and loops](tool-surfaces-and-loops.md) for the CLI vs MCP vs
+API decision rule.
 
 ## Setup Questions
 
@@ -60,6 +64,9 @@ Where are projects, tickets, and tasks tracked?
 Where are customers, partners, or relationships tracked?
 Where are code, product, or release records stored?
 Which tools should agents be allowed to call?
+Which command-line tools do you already use?
+Which MCP servers do you already use?
+Which scheduled loops or cron jobs should run?
 Which systems are read-only, and which can be written to?
 Which data is private, sensitive, or restricted?
 What packages do you commonly send to other people?
@@ -98,6 +105,37 @@ Old systems often have names that are too flat for Optimal Engine:
 | Project tool as the only system of record | Tickets track work but not why decisions were made. | Project Node plus tickets as Sources/Signals and decisions as Claims/Facts. |
 | Call summaries as truth | Summaries omit evidence and may be wrong. | Recording/transcript as Source Package; summary as derived output; Claims reviewed before Facts. |
 | Random "packages" at workspace root | Receiver and ownership are unclear. | Node-owned package templates with manifest and source links. |
+
+## CLI, MCP, API, Script, Or Connector
+
+Do not force every integration into one shape.
+
+```text
+CLI
+  -> best when a local command directly solves the job
+
+MCP/API/connector
+  -> best when auth, schemas, per-user access, audit, or SaaS state matter
+
+script/cron
+  -> best when the organization already has a repeatable local job
+```
+
+Examples:
+
+| Job | Likely surface |
+| --- | --- |
+| Search local markdown files. | CLI: `rg`, `grep`, `find`. |
+| Inspect a repo. | CLI: `git`, `ls`, `cat`, `rg`. |
+| Download/process a video or audio file. | CLI/script: media tools, transcription adapters, FFmpeg. |
+| Fetch a JavaScript-rendered page. | MCP/browser/fetch service. |
+| Send email or update calendar. | MCP/API/connector with user grants and audit. |
+| Sync chat, CRM, docs, or project systems. | Connector sync or provider API. |
+| Run daily/weekly refresh. | Cron/scheduler calling engine CLI/API. |
+
+Whatever surface is used, useful output should return to Optimal Engine as a
+Source Package, observation, pending Claim, package delivery record, or audit
+event.
 
 ## Package Inventory During Setup
 
@@ -159,6 +197,7 @@ resolve organization/workspace scope
   -> route uncertain items to inbox/review
   -> create pending Claims, not direct Facts
   -> update package templates only through owning Node or workspace scope
+  -> schedule repeat work only through an explicit scheduler/cron/tool record
 ```
 
 If an agent cannot determine receiver, channel, owning Node, or source objects

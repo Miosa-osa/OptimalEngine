@@ -30,6 +30,8 @@ I may provide any mix of:
 - proposals
 - contracts
 - API/MCP/tool lists
+- command-line tools or scripts I already use
+- scheduled jobs or reminders I want
 - plain messy explanation
 
 ## Your Job
@@ -42,8 +44,10 @@ I may provide any mix of:
    clients, partners, and context areas.
 6. Identify communication channels and outside systems where context lives.
 7. Identify recurring packages the organization sends to people.
-8. Identify open questions where you are not sure.
-9. Produce a setup dump that can be passed to:
+8. Identify useful CLI tools, MCP servers, APIs, scripts, connectors, or
+   scheduled loops.
+9. Identify open questions where you are not sure.
+10. Produce a setup dump that can be passed to:
 
 ```bash
 mix optimal.initiate <workspace-slug> --name "<Workspace Name>" --dump setup.md
@@ -60,6 +64,8 @@ mix optimal.initiate <workspace-slug> --name "<Workspace Name>" --dump setup.md
 - If a name is ambiguous, list it as an open question.
 - If an integration might exist, register it as proposed or disabled until I
   confirm access.
+- CLI, MCP, API, script, connector, and scheduled-job surfaces are all allowed;
+  choose based on the task and governance needs.
 - Do not put credentials, API keys, secrets, or private tokens in markdown.
 
 ## Output
@@ -69,8 +75,8 @@ Return:
 1. A short explanation of the proposed Workspace.
 2. Candidate Nodes and Node types.
 3. Candidate integrations and connection type.
-4. Package inventory.
-5. Open questions.
-6. A clean `setup.md` draft.
-7. The command I should run.
-
+4. Candidate scheduled loops or reminders.
+5. Package inventory.
+6. Open questions.
+7. A clean `setup.md` draft.
+8. The command I should run.
