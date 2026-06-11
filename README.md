@@ -24,6 +24,10 @@ Run work            -> Tools, models, workflows, Skill Packages
 Project the state   -> Markdown, wiki pages, dashboards, exports, APIs
 ```
 
+Most users should start by dumping messy context into the engine. The engine
+preserves that input, proposes structure, asks follow-up questions, and waits for
+review before turning suggestions into durable workspace truth.
+
 ## What You Can Build With It
 
 Optimal Engine is designed for operating systems around real work:
@@ -177,6 +181,45 @@ by the database.
 Markdown edit -> Source Package or topology change -> reviewed engine state
 Engine state  -> Markdown/wiki/API/dashboard projection
 ```
+
+## First-Run Initiation
+
+The first real workflow is not a perfect form. It is a data dump.
+
+```text
+User dumps messy context
+  -> engine preserves the dump as a Source Package
+  -> engine extracts an unreviewed setup Claim
+  -> engine proposes Nodes and integration surfaces
+  -> human or policy review accepts/rejects structure
+  -> approved Nodes become workspace topology
+  -> future sources route into the approved topology
+```
+
+Run it with a markdown or text file:
+
+```bash
+mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
+```
+
+The initiation command is conservative by design. It creates pending topology
+change requests instead of silently creating durable Nodes from guesses.
+
+It also inventories outside systems mentioned in the dump:
+
+```text
+MCP servers
+connector syncs
+custom APIs
+scripts and cron jobs
+model/tool calls
+local files and markdown folders
+third-party systems such as calendar, mail, calls, tickets, repos, CRM, docs
+```
+
+Those become disabled governed tool definitions until the user confirms
+credentials, scopes, allowed Nodes/partitions, read/write policy, and which
+actions require confirmation.
 
 ## Architecture
 
@@ -338,9 +381,13 @@ mix optimal.reality_check
 Create a markdown-operable workspace:
 
 ```bash
+mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 mix optimal.setup my-workspace --name "My Workspace"
 mix optimal.topology --workspace default:my-workspace
 ```
+
+Use `optimal.initiate` when starting from a messy dump. Use `optimal.setup` when
+you already know the workspace and starter Nodes you want.
 
 Render wiki/export projections:
 
@@ -374,6 +421,11 @@ A coding agent or assistant should use the engine in this order:
 
 Agents should not bypass Memory Core by writing final truth directly into
 markdown or raw tables.
+
+Agents should also not call arbitrary outside systems directly. Whether the
+surface is MCP, a connector, an API, or a script, it should be registered,
+permissioned, schema-checked, executed, logged, and converted back into Source
+Packages or observations when it produces useful evidence.
 
 ## Docker And Deployment
 
@@ -422,6 +474,8 @@ mix test test/wiki/service_test.exs \
   test/wiki/store_test.exs \
   test/workspace_export_test.exs \
   test/mix_tasks/optimal_setup_test.exs \
+  test/workspace_initiation_test.exs \
+  test/mix_tasks/optimal_initiate_test.exs \
   --seed 0
 ```
 
@@ -446,6 +500,9 @@ The runtime already includes:
 
 - Workspace topology with Workspaces, Nodes, Node Types, relationships,
   membership, setup CLI, and filesystem projections.
+- First-run workspace initiation from messy context dumps, with preserved source
+  evidence, pending setup Claims, proposed Nodes, open questions, and disabled
+  integration placeholders.
 - Source Package preservation for raw text and governed assets.
 - Signal classification and compatibility search rows.
 - Claim, Fact, Memory Object, Relationship Edge, and Derivation Ledger tables.
@@ -455,7 +512,8 @@ The runtime already includes:
 - Multimodal asset preservation, adapter run records, typed extraction
   projections, and derived pending Claims.
 - Tool/model governance run records and permission checks.
-- Connector governance for preserving attachment/file payloads.
+- Connector and integration governance for MCP, connector, API, and script
+  surfaces before agents can use outside systems.
 - Wiki/export rendering for Node pages and workspace tree pages.
 - Evaluation run/case records and JSON/JSONL dataset execution.
 - Reality check probes across the major runtime paths.
@@ -464,19 +522,21 @@ The runtime already includes:
 
 Next engineering slices:
 
-1. Finish the wiki/export surface: backlinks, import existing markdown,
+1. Expand initiation review flows: approve/reject proposed Nodes in bulk, attach
+   proposed integrations to Nodes, and generate setup questions for apps/agents.
+2. Finish the wiki/export surface: backlinks, import existing markdown,
    rebuild/diff commands, link repair, HTTP/API routes, and projection edit
    re-ingestion.
-2. Harden source-first intake so every edit, connector payload, tool result, and
+3. Harden source-first intake so every edit, connector payload, tool result, and
    API request enters through Source Package preservation or a clear quarantine.
-3. Expand multimodal provider wrappers for real Docling, Marker, Whisper,
+4. Expand multimodal provider wrappers for real Docling, Marker, Whisper,
    FFmpeg, OCR, visual reasoning, and cross-modal embedding outputs.
-4. Expand Retrieval into full FTS/vector/graph/temporal/workflow recall with
+5. Expand Retrieval into full FTS/vector/graph/temporal/workflow recall with
    authorization during candidate generation.
-5. Add review UI/API flows for pending Claims, contradictions, stale knowledge,
+6. Add review UI/API flows for pending Claims, contradictions, stale knowledge,
    and supersession decisions.
-6. Deepen workflow and Skill Package promotion from repeated Active Pool work.
-7. Add benchmark dashboards, recovery/rebuild jobs, and large-scale recall
+7. Deepen workflow and Skill Package promotion from repeated Active Pool work.
+8. Add benchmark dashboards, recovery/rebuild jobs, and large-scale recall
    evaluation.
 
 ## Development Rule
