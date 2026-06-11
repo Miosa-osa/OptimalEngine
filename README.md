@@ -526,6 +526,18 @@ mix compile
 mix optimal.reality_check
 ```
 
+Build the local `./optimal` command wrapper:
+
+```bash
+mix escript.build
+./optimal --help
+./optimal reality-check
+```
+
+That wrapper is for source checkouts. It delegates to `mix optimal.*` so native
+database dependencies load correctly. For production/API deployment, use the OTP
+release or container shape instead of treating the escript as the server binary.
+
 Create a markdown-operable workspace:
 
 ```bash
@@ -536,6 +548,15 @@ mix optimal.topology --workspace default:my-workspace
 
 Use `optimal.initiate` when starting from a messy dump. Use `optimal.setup` when
 you already know the workspace and starter Nodes you want.
+
+Local CLI commands are trusted local commands against the configured store. For
+apps, MCP servers, remote agents, or scripts that connect over HTTP/API, mint a
+scoped API key:
+
+```bash
+mix optimal.auth mint --name "Business OS" --workspace default:my-workspace
+mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+```
 
 Render wiki/export projections:
 

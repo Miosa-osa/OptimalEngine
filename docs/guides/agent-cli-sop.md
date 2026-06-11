@@ -167,6 +167,52 @@ preserve the dump
 This is how the engine handles noisy human language without corrupting the
 workspace.
 
+## Local CLI Auth Model
+
+The local CLI is a trusted local control surface.
+
+```text
+human/agent on the same machine
+  -> runs mix optimal.* or the local ./optimal wrapper
+  -> reads/writes the local configured store
+  -> records actor/service metadata where the command supports it
+```
+
+That path does not require an API key because it is equivalent to a developer
+or local agent running commands on the machine that owns the workspace.
+
+Use API keys when something connects over HTTP/API, MCP, a remote script, an
+external app, or a remote agent:
+
+```text
+external app / MCP server / remote agent / automation
+  -> gets scoped API key
+  -> sends Authorization: Bearer <key> or X-API-Key
+  -> API verifies tenant, principal, scopes, and workspace scope
+  -> backend applies lifecycle and audit rules
+```
+
+Create a key locally:
+
+```bash
+mix optimal.auth mint --name "Business OS" --workspace default:my-workspace
+mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+mix optimal.auth list
+mix optimal.auth revoke <key-id>
+```
+
+If the local `./optimal` wrapper was built in the checkout, the same commands
+can be run through it:
+
+```bash
+./optimal auth mint --name "Business OS" --workspace default:my-workspace
+./optimal auth env --name "Local Agent" --workspace default:my-workspace
+```
+
+Do not put raw API keys in markdown, Source Packages, package manifests, or
+Context Packages. Store them in shell environment, a local secret store, or the
+deployment secret manager.
+
 ## Retrieval Pattern
 
 Agents should request context from the engine, not scrape random files first.

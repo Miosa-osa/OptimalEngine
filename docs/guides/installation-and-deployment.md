@@ -46,6 +46,26 @@ mix compile
 mix optimal.reality_check
 ```
 
+Build the local `./optimal` command wrapper:
+
+```bash
+mix escript.build
+./optimal --help
+```
+
+The wrapper is for source checkouts. It delegates to the same backend commands
+as `mix optimal.*` so native dependencies such as SQLite load through the normal
+Mix build. For example:
+
+```bash
+./optimal reality-check
+./optimal setup my-workspace --name "My Workspace"
+./optimal topology --workspace default:my-workspace
+```
+
+Do not treat the escript as the production database/server binary. For a
+long-running API or team runtime, use the OTP release or container deployment.
+
 Create a known structure:
 
 ```bash
@@ -110,6 +130,39 @@ stale context refresh schedule
 projection rebuild procedure
 ```
 
+## Local Auth Vs Remote Auth
+
+Local CLI commands are trusted local commands. They run on the machine that owns
+the checkout/store and do not need an API key:
+
+```text
+mix optimal.setup ...
+mix optimal.initiate ...
+mix optimal.topology ...
+mix optimal.rag ...
+```
+
+Anything connecting over HTTP/API, MCP, app integration, remote script, or
+remote agent should use a scoped API key:
+
+```bash
+mix optimal.auth mint --name "Business OS" --tenant default --workspace default:my-workspace
+mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+mix optimal.auth list
+mix optimal.auth revoke <key-id>
+```
+
+API clients send the token as either:
+
+```text
+Authorization: Bearer <token>
+X-API-Key: <token>
+```
+
+For production, set API auth to required and store keys in a secret manager or
+environment variables. Do not store keys in markdown, Source Packages, Context
+Packages, or generated packages.
+
 ## Environment Variables
 
 The default runtime reads these paths:
@@ -120,6 +173,7 @@ OPTIMAL_ENGINE_DB            SQLite path for local runtime
 OPTIMAL_ENGINE_CACHE         cache path
 OPTIMAL_ENGINE_TOPOLOGY      local workspace config path
 OPTIMAL_ENGINE_TOPOLOGY_FULL root topology config path
+OPTIMAL_ENGINE_API_KEY       API key used by external clients/agents
 OLLAMA_HOST                  local model server URL
 OPTIMAL_VLM_MODEL            local visual model name for configured adapters
 ```
