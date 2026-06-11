@@ -182,6 +182,28 @@ Markdown edit -> Source Package or topology change -> reviewed engine state
 Engine state  -> Markdown/wiki/API/dashboard projection
 ```
 
+## Storage Vs Projection
+
+The engine deliberately separates where data is stored from how it is organized
+and displayed.
+
+```text
+Storage substrate   -> SQLite, Postgres, raw artifact storage, indexes, caches,
+                       optional graph/knowledge backends.
+Domain ownership    -> topology, intake, signal, memory, retrieval, active work,
+                       workflow, skill, governance, evaluation.
+Projection surface  -> markdown, wiki, HTML, app UI, API, MCP/tools, reports,
+                       agent context packages.
+```
+
+The database stores governed runtime state. Markdown, wiki pages, app views,
+HTML, reports, and agent prompts are projections or control surfaces. If a human
+edits a projection, that edit re-enters the engine as source evidence or a
+reviewed topology change instead of silently overwriting truth.
+
+See [`docs/architecture/STORAGE-AND-PROJECTION-MAP.md`](docs/architecture/STORAGE-AND-PROJECTION-MAP.md)
+for the full map.
+
 ## Repository Layout
 
 The top-level folders are product surfaces, not random piles of code:
