@@ -299,6 +299,10 @@ For repeatable goal loops with checklists, validation gates, stop conditions,
 and memory/audit outputs, read
 [`docs/guides/agentic-loops.md`](docs/guides/agentic-loops.md).
 
+For the concrete backend readiness status, store ownership, verification
+commands, and remaining hardening work, read
+[`docs/reference/backend-readiness.md`](docs/reference/backend-readiness.md).
+
 For the recommended documentation path, start at
 [`docs/README.md`](docs/README.md).
 
