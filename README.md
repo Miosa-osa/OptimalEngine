@@ -24,6 +24,19 @@ Run work            -> Tools, models, workflows, Skill Packages
 Project the state   -> Markdown, wiki pages, dashboards, exports, APIs
 ```
 
+Signal classification is the front door for noisy input:
+
+```text
+Signal = Mode + Genre + Type + Format + Structure
+```
+
+The engine keeps those dimensions separate so it can route, parse, review,
+package, and retrieve the input without pretending every file or message is the
+same kind of thing.
+
+See [`docs/concepts/signal-theory.md`](docs/concepts/signal-theory.md) for the
+breakdown and anti-noise rules.
+
 Most users should start by dumping messy context into the engine. The engine
 preserves that input, proposes structure, asks follow-up questions, and waits for
 review before turning suggestions into durable workspace truth.
@@ -220,6 +233,22 @@ organization/
 
 See [`docs/guides/workspace-filesystem.md`](docs/guides/workspace-filesystem.md)
 for the full convention.
+
+Packages are receiver/channel bundles, often zipped from multiple files. A
+package for one project, customer, product, person, or operation belongs under
+that Node:
+
+```text
+nodes/project-platform-launch/packages/partner-update/
+  package.yaml
+  dist/partner-update.zip
+```
+
+Workspace-level packages are only for bundles that intentionally span multiple
+Nodes and declare those Nodes in a manifest.
+
+See [`docs/guides/packages-and-exports.md`](docs/guides/packages-and-exports.md)
+for package placement rules.
 
 ## Storage Vs Projection
 

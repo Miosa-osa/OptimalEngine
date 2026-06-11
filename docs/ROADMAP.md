@@ -69,6 +69,9 @@ For organization/workspace/Node/task scope rules, see
 For canonical naming and aliases, see
 [`guides/naming-and-aliases.md`](guides/naming-and-aliases.md).
 
+For package placement and receiver/channel bundles, see
+[`guides/packages-and-exports.md`](guides/packages-and-exports.md).
+
 ## System Map
 
 ```mermaid

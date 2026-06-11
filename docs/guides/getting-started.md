@@ -57,7 +57,20 @@ This checks the runtime spine: store, topology, source evidence, memory,
 retrieval, pools, workflows, tools, connectors, evaluation, wiki, compliance,
 and retrieval edge cases.
 
-## 4. Choose A Workspace Setup Path
+## 4. Understand Signals Before Dumping Data
+
+Optimal Engine does not treat every input as generic text. It classifies input
+as a Signal:
+
+```text
+Signal = Mode + Genre + Type + Format + Structure
+```
+
+That breakdown tells the engine how to route, parse, review, package, and
+retrieve the input. Read [Signal theory](../concepts/signal-theory.md) before
+building serious workspaces.
+
+## 5. Choose A Workspace Setup Path
 
 Use initiation when the user starts with a messy dump:
 
@@ -80,7 +93,7 @@ mix optimal.setup my-workspace \
   --node operational:weekly-review:"Weekly Review"
 ```
 
-## 5. Understand What Was Created
+## 6. Understand What Was Created
 
 The hierarchy is:
 
@@ -108,7 +121,7 @@ Inspect topology:
 mix optimal.topology --workspace default:my-workspace
 ```
 
-## 6. Know Where Data Lives
+## 7. Know Where Data Lives
 
 Local default runtime state:
 
@@ -124,6 +137,10 @@ my-workspace/
   AGENTS.md
   rhythm/
   nodes/
+    first-project/
+      context.md
+      signal.md
+      packages/
 ```
 
 Important distinction:
@@ -138,7 +155,7 @@ markdown/wiki   = projection and editing surface
 See [Storage and projection map](../architecture/STORAGE-AND-PROJECTION-MAP.md)
 for the full storage map.
 
-## 7. Ingest Or Search
+## 8. Ingest Or Search
 
 Ingest a quick text Signal:
 
@@ -158,7 +175,7 @@ Ask:
 mix optimal.rag "what changed this week?"
 ```
 
-## 8. Render Human-Facing Projections
+## 9. Render Human-Facing Projections
 
 Render a workspace tree:
 
@@ -178,7 +195,7 @@ Check a page:
 mix optimal.wiki check node-first-project --workspace default:my-workspace
 ```
 
-## 9. Use With Agents
+## 10. Use With Agents
 
 For Codex, Claude Code, MCP clients, scripts, or app agents, use this sequence:
 
@@ -196,11 +213,12 @@ inspect topology
 Read [Agent and CLI SOP](agent-cli-sop.md) before wiring agents to tools,
 connectors, scripts, or APIs.
 
-## 10. What To Read Next
+## 11. What To Read Next
 
 - [Engine structure](../architecture/ENGINE-STRUCTURE.md)
 - [Storage and projection map](../architecture/STORAGE-AND-PROJECTION-MAP.md)
+- [Signal theory](../concepts/signal-theory.md)
+- [Packages and exports](packages-and-exports.md)
 - [Agent and CLI SOP](agent-cli-sop.md)
 - [Mix tasks](mix-tasks.md)
 - [Build goal alignment](../reference/build-goal-alignment.md)
-

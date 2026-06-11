@@ -216,6 +216,16 @@ engine state -> report/package
 engine state -> agent context
 ```
 
+Packages are receiver/channel bundles. If a package belongs to one Node, write
+it under:
+
+```text
+nodes/<node-slug>/packages/<package-slug>/
+```
+
+Only write a workspace-level package when it intentionally spans multiple Nodes
+and the package manifest lists those source Nodes.
+
 Edits flow back in:
 
 ```text
@@ -256,4 +266,3 @@ Do not use vector search as the final authority.
 Do not let app UI create a separate data model.
 Do not skip source evidence when storing memory.
 ```
-

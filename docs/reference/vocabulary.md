@@ -16,6 +16,7 @@ Use product terms consistently.
 | Active Memory Pool | Task-scoped working memory shared by humans and agents. |
 | Workflow Trace | Evidence-linked trace of repeated or meaningful work. |
 | Skill Package | Governed reusable procedure with policy, tools, checks, and audit. |
+| Delivery Package | Receiver/channel bundle assembled from multiple files or objects, often zipped for delivery. |
 | Projection | Rebuildable surface such as markdown, wiki, HTML, app view, API response, or agent prompt. |
 | Alias | Scoped user-facing name that resolves to a canonical engine object. |
 | Display Label | User or domain wording for a canonical type, such as calling a Project Node an initiative, campaign, deal, or case. |
@@ -32,6 +33,7 @@ Different users may prefer different surface words:
 | Memory Object | company memory | remembered context | durable context object |
 | Context Package | briefing packet | prep packet | authorized context bundle |
 | Skill Package | SOP/playbook | routine | executable procedure |
+| Delivery Package | client packet, handoff, board packet | trip packet, prep bundle | export bundle, zip artifact |
 
 The engine can render friendly language, but internal architecture should use
 the canonical terms above.
@@ -70,3 +72,4 @@ linking it to a stable canonical object.
 | Genre / Format | Genre is the expected kind of communication. Format is the container. |
 | Format / Structure | Format carries content. Structure is the internal skeleton. |
 | Active Memory Pool / Workspace | Pool is temporary task working state. Workspace is durable operating topology. |
+| Delivery Package / Skill Package | Delivery Package is sent to a receiver/channel. Skill Package is an approved reusable procedure. |
