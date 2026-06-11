@@ -65,6 +65,21 @@ Workspace
   -> Learning Node
 ```
 
+Users can call project-like things initiatives, campaigns, engagements, deals,
+cases, programs, or accounts. The engine preserves those labels as scoped
+aliases while keeping the canonical object clean:
+
+```text
+node_type: project
+display_label: Initiative
+display_name: Q3 Partner Launch
+aliases: ["launch project", "partner launch", "q3 initiative"]
+```
+
+This matters because names are part of routing. Loose names resolve inside the
+current organization/workspace scope. Ambiguous names produce a clarification
+question instead of a silent durable write.
+
 Layers are engine services that operate across the hierarchy:
 
 ```text
@@ -182,6 +197,30 @@ Markdown edit -> Source Package or topology change -> reviewed engine state
 Engine state  -> Markdown/wiki/API/dashboard projection
 ```
 
+The recommended filesystem projection is:
+
+```text
+organization/
+  organization.yaml
+  workspaces/
+    company-os/
+      workspace.yaml
+      AGENTS.md
+      rhythm/
+      nodes/
+        project-platform-launch/
+          node.yaml
+          context.md
+          signal.md
+          sources/
+          decisions/
+          workflows/
+          exports/
+```
+
+See [`docs/guides/workspace-filesystem.md`](docs/guides/workspace-filesystem.md)
+for the full convention.
+
 ## Storage Vs Projection
 
 The engine deliberately separates where data is stored from how it is organized
@@ -203,6 +242,12 @@ reviewed topology change instead of silently overwriting truth.
 
 See [`docs/architecture/STORAGE-AND-PROJECTION-MAP.md`](docs/architecture/STORAGE-AND-PROJECTION-MAP.md)
 for the full map.
+
+For scope switching rules across organization, workspace, Node, and task pool,
+read [`docs/guides/scope-switching.md`](docs/guides/scope-switching.md).
+
+For canonical naming, aliases, and how the engine handles user-specific labels,
+read [`docs/guides/naming-and-aliases.md`](docs/guides/naming-and-aliases.md).
 
 For the recommended documentation path, start at
 [`docs/README.md`](docs/README.md).

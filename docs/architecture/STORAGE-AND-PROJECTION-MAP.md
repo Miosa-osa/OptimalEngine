@@ -44,7 +44,7 @@ The storage substrate does not decide meaning. Domain layers do.
 
 | Domain layer | Owns durable lifecycle for | Writes |
 | --- | --- | --- |
-| Workspace / Topology | organizations, tenants, workspaces, nodes, node types, node relationships, memberships, routing rules | topology tables and topology change requests |
+| Workspace / Topology | organizations, tenants, workspaces, nodes, node types, node aliases, node relationships, memberships, routing rules | topology tables and topology change requests |
 | Source Intake | preserved input, source package creation, raw artifact capture | `source_packages`, raw artifact records |
 | Signal Pipeline | signal classification, multimodal parsing, compatibility search rows | signal metadata, contexts, chunks, classification records |
 | Memory Core | claims, facts, memory objects, evidence edges, derivation ledger, temporal state | memory core tables |
@@ -121,6 +121,7 @@ Tool call output bypasses governance.
 App UI invents a second data model.
 Cache/index rows are treated as canonical memory.
 Workspace folders become the only identity for Nodes.
+Loose names route durable writes without stable ID resolution.
 ```
 
 ## Production Shape
@@ -147,4 +148,3 @@ projection layer
 The important point is not which physical store is used first. The important
 point is that each table, file, cache, and projection has an owner, lifecycle,
 rebuild policy, and audit path.
-

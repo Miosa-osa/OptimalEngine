@@ -25,6 +25,15 @@ Workspace
   -> Learning Node
 ```
 
+For the recommended folder projection, see
+[`../guides/workspace-filesystem.md`](../guides/workspace-filesystem.md).
+
+For scope switching rules, see
+[`../guides/scope-switching.md`](../guides/scope-switching.md).
+
+For canonical naming and aliases, see
+[`../guides/naming-and-aliases.md`](../guides/naming-and-aliases.md).
+
 ## Core Objects
 
 | Object | Meaning | Owned by |
@@ -36,6 +45,7 @@ Workspace
 | Node Relationship | Typed relationship between nodes. | Workspace / Topology |
 | Node Member | Human, agent, service account, or team with access/role in a node. | Workspace / Topology |
 | Routing Rule | Rule or hint for placing new Signals into nodes and partitions. | Workspace / Topology |
+| Alias | Scoped user-facing name for a canonical object. | Workspace / Topology |
 
 ## Node Lifecycle
 
@@ -87,6 +97,7 @@ tenants / organizations
 workspaces
 nodes
 node_types
+node_aliases
 node_relationships
 node_members
 routing_rules
@@ -108,6 +119,43 @@ Export may render Node folders and pages.
 No layer should invent durable Nodes without the topology layer.
 ```
 
+## Scope Switching
+
+Scope moves from broad to narrow:
+
+```text
+Organization
+  -> Workspace
+      -> Node
+          -> Active Memory Pool
+```
+
+Switch organization when governance, ownership, credentials, tenant, or policy
+changes. Switch workspace when the operating area, node graph, rhythm, routing,
+or retrieval boundary changes. Switch Node when the focus changes inside a
+workspace. Open an Active Memory Pool when a bounded task starts.
+
+Each switch changes the authorization envelope, visible objects, routing rules,
+retrieval search space, tool grants, export paths, and audit scope.
+
+## Naming And Aliases
+
+Workspaces can use different language for the same canonical object type.
+
+```text
+node_type: project
+display_label: Campaign
+display_name: Product Announcement
+aliases:
+  - launch
+  - announcement push
+```
+
+Aliases are scoped to organization, workspace, or Node. Stable IDs do not
+change. Display names and aliases can change. If a loose name resolves to more
+than one active object in the current scope, the engine should ask for
+clarification before writing durable state.
+
 ## Human And Agent Setup
 
 Humans can create workspaces and nodes through CLI, API, app UI, or markdown
@@ -124,4 +172,3 @@ agent proposes node or relationship
 
 This keeps the system customizable without letting agents silently rewrite the
 workspace.
-
