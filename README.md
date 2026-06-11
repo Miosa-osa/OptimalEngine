@@ -42,6 +42,7 @@ Work improves the world:
 | Memory Core | Built | Source Packages, Claims, Facts, Memory Objects, Relationship Edges, Derivation Ledger, Context Packages, and Active Pools exist in the schema and tests. |
 | Retrieval | Built, expanding | Wiki-first RAG, hybrid search, grep, tiered assembly, governed Context Packages, and receiver formatting exist. Full graph/vector/temporal coordinator expansion is ongoing. |
 | Rhythm | Partly built | Rhythm is represented through Nodes, focus/review state, signals, active pools, and workspace projections. A dedicated rhythm service is still a build target. |
+| Wiki / export surface | First slice built | Node and workspace tree pages render into `wiki_pages`, `.wiki/*.md`, export records, projection revisions, and link-health records. Backlinks/import/HTTP/rebuild work remains. |
 | Workflow and skills | Built spine | Workflow Trace, Generalized Workflow, Procedural Memory Object, Skill Package, and derivation records exist. Runtime execution is still expanding. |
 | Tool/model governance | Built spine | Tool/model definitions, run records, permission checks, output validation, audit links, and dispatcher adapter coverage exist. |
 | Multimodality | Partly built | Text/code/document paths are strongest. Image/audio/video parsers and processors exist, but depend on external tools/models and need deeper test coverage. |
@@ -228,6 +229,8 @@ mix optimal.setup my-workspace --name "My Workspace"
 mix optimal.topology --workspace default:my-workspace
 mix optimal.ingest_workspace ./my-workspace
 mix optimal.rag "what changed this week?" --workspace default:my-workspace --trace
+mix optimal.wiki render-node first-project --workspace default:my-workspace
+mix optimal.wiki render-tree --workspace default:my-workspace
 ```
 
 Useful commands:
@@ -237,6 +240,8 @@ mix optimal.reality_check
 mix optimal.search "project"
 mix optimal.rag "what changed this week?"
 mix optimal.wiki list
+mix optimal.wiki render-node first-project --workspace default:my-workspace
+mix optimal.wiki check node-first-project --workspace default:my-workspace
 mix optimal.topology --workspace default:my-workspace
 ```
 
@@ -319,6 +324,8 @@ Current focused verification:
 ```bash
 mix test test/memory_core/spine_test.exs \
   test/mix_tasks/optimal_setup_test.exs \
+  test/wiki/service_test.exs \
+  test/wiki/store_test.exs \
   test/workspace_export_test.exs \
   test/topology/workspace_topology_test.exs \
   test/topology/node_member_test.exs \
@@ -372,7 +379,9 @@ The next build slices are:
 
 1. Build the Markdown wiki service surface: page tree, backlinks, broken-link
    checks, directive rendering, revisions, import/export, render/rebuild helpers,
-   and wiki HTTP/CLI operations.
+   and wiki HTTP/CLI operations. The first slice is built: Nodes and workspace
+   trees can render into stored wiki pages, markdown projections, export
+   records, projection revisions, and link-health records.
 2. Harden source-first intake so every edit, file, API request, connector
    payload, and tool result is preserved or quarantined before interpretation.
 3. Expand multimodality: raw artifact storage, modality metadata, parser assets,
