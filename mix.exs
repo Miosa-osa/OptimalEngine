@@ -107,7 +107,7 @@ defmodule OptimalEngine.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => "https://github.com/robertohluna/OptimalEngine"},
+      links: %{"GitHub" => "https://github.com/Miosa-osa/OptimalEngine"},
       files: ~w(lib priv config mix.exs README.md LICENSE)
     ]
   end
