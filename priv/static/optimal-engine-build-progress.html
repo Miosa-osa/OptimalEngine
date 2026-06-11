@@ -390,10 +390,10 @@
       <section class="hero" id="current-decision">
         <div class="section-head">
           <div>
-            <h2>What We Build Next</h2>
-            <p class="lead">Gate 1 closed the workspace and Node topology loop. The next ordered build is the Markdown wiki service: the human-facing surface that renders Nodes, wiki pages, citations, backlinks, broken-link health, revisions, imports, exports, and rebuild proof before we harden deeper source-first and multimodal intake.</p>
+            <h2>Current Build Gate</h2>
+            <p class="lead">Gate 1 closed the workspace and Node topology loop. Gate 2 is the Markdown wiki service: the human-facing surface that renders Nodes and workspace trees into stored wiki pages, markdown projections, export records, projection revisions, and link-health records before deeper source-first and multimodal intake hardening.</p>
           </div>
-          <span class="status next">Markdown wiki service</span>
+          <span class="status partial">Markdown wiki service</span>
         </div>
 
         <div class="grid-3">
@@ -403,9 +403,9 @@
             <div class="progress"><div class="bar done" style="width: 100%"></div></div>
           </div>
           <div class="card partial">
-            <h3>Next Service</h3>
-            <p><strong>Markdown Wiki Service.</strong> Build render/rebuild helpers, page tree, backlinks, broken-link checks, directive rendering, revision history, import/export, and HTTP/CLI surfaces around existing wiki modules.</p>
-            <div class="progress"><div class="bar partial" style="width: 45%"></div></div>
+            <h3>Active Gate</h3>
+            <p><strong>Markdown Wiki Service.</strong> Node pages and workspace tree pages now render through the service into wiki rows, markdown files, export records, projection revisions, and link-health records. Backlinks, import/export, rebuild, and HTTP surfaces remain.</p>
+            <div class="progress"><div class="bar partial" style="width: 60%"></div></div>
           </div>
           <div class="card next">
             <h3>Then</h3>
@@ -415,7 +415,7 @@
         </div>
 
         <div class="note" style="margin-top: 16px;">
-          Correct first loops now verified: <span class="mono">Workspace -> Node -> Projection -> Edit -> Source Package -> Signal</span>, <span class="mono">API Workspace -> Topology Lifecycle -> Standard Node Types</span>, <span class="mono">Workspace -> Scoped Parent/Relationship/Membership -> Rejected Cross-Workspace Write</span>, <span class="mono">Versioned Memory -> Source Package -> Pending Claim -> Evidence Edge -> Ledger</span>, <span class="mono">Memory.remember -> Encoding Gate -> Semantic Dedup -> Add/Update/Skip -> Governed Memory Bridge</span>, <span class="mono">API Memory Remember -> Encoding Gate -> Semantic Dedup -> Add/Skip -> Pending Claim Count Stable</span>, <span class="mono">Pending Claim -> Review API -> Review Decision -> Fact -> Memory Object</span>, <span class="mono">Source Package -> Claim -> Fact -> Memory Object -> Evidence Edges -> Ledger</span>, <span class="mono">Raw File -> Asset Store -> Source Package -> Asset Row -> Derivation Ledger</span>, <span class="mono">Parser Asset -> AssetStore -> Governed ParsedDoc -> Decomposer Chunk -> Embedder Asset Path</span>, <span class="mono">Indexed Binary -> Workspace Scope -> Governed Pipeline -> Workspace-Scoped Asset</span>, <span class="mono">API File Upload -> Source Package + Asset -> Optional Adapter Run -> Extraction Projections</span>, <span class="mono">JSON Adapter ID -> Registry Tool -> Adapter Runner/Asset Store</span>, <span class="mono">Connector Attachment -> Source Package + Asset -> Connector Metadata + Per-Attachment Errors</span>, <span class="mono">Modality -> Open-Source Adapter Registry -> Availability/Recommended Pipeline</span>, <span class="mono">Asset -> Adapter Run -> Output Hash -> Derivation Ledger</span>, <span class="mono">Completed Adapter Run -> Parser -> Multiple Asset Extractions -> Typed Projections -> Derivation Ledger</span>, <span class="mono">Text Extraction -> Derived Source Package -> Pending Claim</span>, <span class="mono">Query -> Fresh Context Package with Facts, Memories, and Asset Extractions -> Active Pool -> Observation -> Pending Claim</span>, <span class="mono">API Active Pool -> Retrieve Context -> Load Package -> Publish Observation -> Pending Claim -> Close Pool</span>, <span class="mono">Active Pool -> Workflow Trace -> Procedure -> Skill Package</span>, <span class="mono">Registered Tool/Model -> Governed Call -> Output Validation -> Run Record -> Audit Link -> Optional Observation</span>, <span class="mono">Signal Dispatch -> Governance Decision -> Adapter Execution or Rejection -> Tool Run Record</span>, <span class="mono">Connector Sync -> Governance Decision -> Connector Runner or Rejection -> Connector Run + Tool Run Audit</span>, <span class="mono">Benchmark Case -> Retrieval -> Context Package -> Answer Surface -> Judge -> Evaluation Case -> Aggregate Scores</span>, and <span class="mono">JSON/JSONL Dataset -> Evaluation Runner -> Persisted Run Summary</span>. Current backend foundation completion: about <strong>99%</strong>.
+          Correct first loops now verified include: <span class="mono">Workspace -> Node -> Projection -> Edit -> Source Package -> Signal</span>, <span class="mono">API Workspace -> Topology Lifecycle -> Standard Node Types</span>, <span class="mono">Workspace -> Scoped Parent/Relationship/Membership -> Rejected Cross-Workspace Write</span>, <span class="mono">Node -> Wiki Page -> .wiki Markdown -> Export Record -> Projection Revision -> Link Health</span>, <span class="mono">Workspace Tree -> Wiki Page -> Projection Revision</span>, <span class="mono">Versioned Memory -> Source Package -> Pending Claim -> Evidence Edge -> Ledger</span>, <span class="mono">Source Package -> Claim -> Fact -> Memory Object -> Evidence Edges -> Ledger</span>, <span class="mono">Raw File -> Asset Store -> Source Package -> Asset Row -> Derivation Ledger</span>, <span class="mono">Text Extraction -> Derived Source Package -> Pending Claim</span>, <span class="mono">Query -> Fresh Context Package -> Active Pool -> Observation -> Pending Claim</span>, <span class="mono">Active Pool -> Workflow Trace -> Procedure -> Skill Package</span>, <span class="mono">Registered Tool/Model -> Governed Call -> Output Validation -> Run Record -> Audit Link</span>, and <span class="mono">JSON/JSONL Dataset -> Evaluation Runner -> Persisted Run Summary</span>. This page tracks gate completion, not a fake whole-product percentage.
         </div>
       </section>
 
@@ -682,8 +682,8 @@
               <td>5</td>
               <td><strong>Markdown wiki service</strong><br>Page tree, backlinks, broken-link checks, directives, revisions, import/export, render/rebuild, CLI and HTTP operations.</td>
               <td>Wiki / Workspace Export / Retrieval</td>
-              <td><span class="status partial">Core modules built</span></td>
-              <td><span class="mono">.wiki/SCHEMA.md</span>, wiki store, directives, integrity, curator, scheduler, and <span class="mono">mix optimal.wiki</span> exist. Next proof is a rendered Node/wiki page with backlinks, citation checks, projection revision, link health, and rebuild command.</td>
+              <td><span class="status partial">First slice built</span></td>
+              <td><span class="mono">OptimalEngine.Wiki.Service</span> renders Node pages and workspace tree pages into <span class="mono">wiki_pages</span>, <span class="mono">.wiki/*.md</span>, export records, projection revisions, and link-health records. Remaining: backlinks, import/export, rebuild, HTTP, richer link repair.</td>
             </tr>
             <tr>
               <td>6</td>
