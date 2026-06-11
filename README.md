@@ -321,6 +321,25 @@ For repeatable goal loops with checklists, validation gates, stop conditions,
 and memory/audit outputs, read
 [`docs/guides/agentic-loops.md`](docs/guides/agentic-loops.md).
 
+The short version for users bringing their own agents:
+
+```text
+Define loop goal
+  -> choose workspace and owning Node
+  -> retrieve Context Package
+  -> run agent through allowed CLI/MCP/API/script/scheduler/A2A surfaces
+  -> validate each phase
+  -> record observations and pending Claims
+  -> promote repeated validated work into workflows or Skill Packages
+```
+
+Loop definitions should live near the Node they operate on, for example:
+
+```text
+nodes/operation-weekly-review/loops/weekly-review.loop.yaml
+nodes/product-customer-portal/loops/release-maintenance.loop.yaml
+```
+
 For the concrete backend readiness status, store ownership, verification
 commands, and remaining hardening work, read
 [`docs/reference/backend-readiness.md`](docs/reference/backend-readiness.md).
