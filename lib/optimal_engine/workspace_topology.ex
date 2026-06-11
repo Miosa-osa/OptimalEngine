@@ -578,9 +578,8 @@ defmodule OptimalEngine.WorkspaceTopology do
       node_dir = Path.join([workspace_path, "nodes", node.slug])
       context_path = Path.join(node_dir, "context.md")
       signal_path = Path.join(node_dir, "signal.md")
-      signals_dir = Path.join(node_dir, "signals")
 
-      with :ok <- File.mkdir_p(signals_dir),
+      with :ok <- create_node_projection_dirs(node_dir),
            :ok <- write_if_missing(context_path, node_context_markdown(node)),
            :ok <- write_if_missing(signal_path, node_signal_markdown(node)),
            {:ok, context_projection} <-
@@ -625,6 +624,23 @@ defmodule OptimalEngine.WorkspaceTopology do
       other ->
         other
     end
+  end
+
+  defp create_node_projection_dirs(node_dir) do
+    [
+      "signals",
+      "sources",
+      "decisions",
+      "workflows",
+      "packages",
+      "exports"
+    ]
+    |> Enum.reduce_while(:ok, fn child, :ok ->
+      case File.mkdir_p(Path.join(node_dir, child)) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp record_node_projection(workspace, workspace_path, node, path, role, actor_id) do
@@ -715,6 +731,19 @@ defmodule OptimalEngine.WorkspaceTopology do
 
     Durable facts and reviewed memory for this Node should appear here as projections.
     Human edits are re-ingested as source evidence before becoming durable truth.
+
+    ## Node Files
+
+    - `signals/` holds time-based updates and classified input for this Node.
+    - `sources/` holds local evidence or source references waiting for ingestion.
+    - `decisions/` holds decision projections backed by Claims and Facts.
+    - `workflows/` holds workflow and procedure projections.
+    - `packages/` holds receiver/channel bundles for this Node.
+    - `exports/` holds generated views and loose output artifacts for this Node.
+
+    Packages are deliverable bundles, often zipped, prepared for a person,
+    team, channel, or external system. Node-specific packages stay inside the
+    owning Node. Only cross-node packages should live at workspace scope.
     """
   end
 

@@ -43,6 +43,7 @@ optimal-workspace-root/
               sources/
               decisions/
               workflows/
+              packages/
               exports/
             person-operations-lead/
               node.yaml
@@ -78,7 +79,48 @@ The exact folder names can vary. The stable IDs inside `organization.yaml`,
 | `sources/` | Source links, imported files, source references, or local evidence awaiting ingestion. | Source Intake |
 | `decisions/` | Decision projections backed by Claims, Facts, and Memory Objects. | Memory Core / Export |
 | `workflows/` | Workflow and Skill Package projections for this Node. | Workflow / Skill Runtime |
-| `exports/` | Reports, packages, HTML, app-ready views, receiver-specific bundles. | Wiki / Export |
+| `packages/` | Receiver/channel bundles for this Node, often zipped or assembled from multiple files. | Wiki / Export |
+| `exports/` | Generated views, HTML, reports, app-ready files, and loose output artifacts for this Node. | Wiki / Export |
+
+## Packages
+
+A package is a deliverable bundle for a receiver or channel. It is not the same
+as a Skill Package.
+
+```text
+Package
+  -> files bundled for a person, team, customer, channel, API, or external system
+
+Skill Package
+  -> governed reusable procedure that tells a human or agent how to do work
+```
+
+Node-specific packages belong inside the owning Node:
+
+```text
+nodes/project-platform-launch/packages/partner-update/
+  package.yaml
+  README.md
+  launch-brief.md
+  pricing-summary.pdf
+  assets/
+  dist/
+    partner-update.zip
+```
+
+Cross-node packages may exist at workspace scope only when they intentionally
+span multiple Nodes and carry a manifest listing their source Nodes.
+
+```text
+workspace-packages/q3-board-review/
+  package.yaml
+  README.md
+  dist/
+    q3-board-review.zip
+```
+
+If the package is about one project, customer, person, product, or operation,
+put it under that Node. Do not put it at the workspace root.
 
 ## Projection Diagram
 
@@ -145,6 +187,7 @@ needs to be separate.
 | Add file to `sources/` | Source Package candidate. |
 | Add file to `decisions/` | Decision Claim candidate, not automatically a Fact. |
 | Add file to `workflows/` | Workflow/Skill candidate, not automatically approved procedure. |
+| Add file to `packages/` | Package source or manifest for a receiver/channel bundle. |
 
 The engine should preserve the edit, classify it, and then decide whether it is
 a source, topology change, observation, Claim, Fact promotion candidate, workflow
@@ -169,6 +212,7 @@ my-org/
           node.yaml
           context.md
           signal.md
+          packages/
         person-me/
           node.yaml
           context.md

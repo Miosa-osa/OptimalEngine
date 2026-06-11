@@ -29,23 +29,31 @@ Read these in order:
    Which substrate stores what, which layer owns meaning, and which surfaces
    display/control the state.
 
-5. [Workspace filesystem](guides/workspace-filesystem.md)  
+5. [Signal theory](concepts/signal-theory.md)  
+   How the engine breaks noisy input into Mode, Genre, Type, Format, and
+   Structure before routing, extracting, packaging, or retrieving it.
+
+6. [Workspace filesystem](guides/workspace-filesystem.md)  
    What the markdown/file projection looks like and how edits flow back into
    governed engine state.
 
-6. [Scope switching](guides/scope-switching.md)  
+7. [Scope switching](guides/scope-switching.md)  
    How organization, workspace, Node, and Active Memory Pool scope affect
    permissions, retrieval, routing, tools, and exports.
 
-7. [Naming and aliases](guides/naming-and-aliases.md)  
+8. [Naming and aliases](guides/naming-and-aliases.md)  
    How user language maps to canonical engine objects without creating routing
    noise.
 
-8. [Agent and CLI SOP](guides/agent-cli-sop.md)  
+9. [Packages and exports](guides/packages-and-exports.md)  
+   Where receiver/channel bundles live, how they differ from exports, and why
+   Node-owned packages stay under Nodes.
+
+10. [Agent and CLI SOP](guides/agent-cli-sop.md)  
    How a human, Codex, Claude Code, an MCP client, a script, or an app should
    operate the system without bypassing governance.
 
-9. [Build goal alignment](reference/build-goal-alignment.md)  
+11. [Build goal alignment](reference/build-goal-alignment.md)  
    What is built now, what is only a spine, what still needs work, and which
    tests/probes prove it.
 
@@ -242,6 +250,7 @@ engine asks for clarification before writing durable state.
 - [Workspace filesystem](guides/workspace-filesystem.md)
 - [Scope switching](guides/scope-switching.md)
 - [Naming and aliases](guides/naming-and-aliases.md)
+- [Packages and exports](guides/packages-and-exports.md)
 - [Agent and CLI SOP](guides/agent-cli-sop.md)
 - [Mix tasks](guides/mix-tasks.md)
 - [Writing guide](guides/writing-guide.md)
