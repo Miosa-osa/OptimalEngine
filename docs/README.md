@@ -17,19 +17,23 @@ Read these in order:
    Install, run the engine, create a workspace, initiate from a messy dump, and
    inspect the result.
 
-2. [Engine structure](architecture/ENGINE-STRUCTURE.md)  
+2. [Roadmap](ROADMAP.md)  
+   Backend-first build gates, layer guide, diagrams, and what each part is used
+   for.
+
+3. [Engine structure](architecture/ENGINE-STRUCTURE.md)  
    The clean system map: organization, workspace, nodes, layers, stores,
    projections, agents, and loops.
 
-3. [Storage and projection map](architecture/STORAGE-AND-PROJECTION-MAP.md)  
+4. [Storage and projection map](architecture/STORAGE-AND-PROJECTION-MAP.md)  
    Which substrate stores what, which layer owns meaning, and which surfaces
    display/control the state.
 
-4. [Agent and CLI SOP](guides/agent-cli-sop.md)  
+5. [Agent and CLI SOP](guides/agent-cli-sop.md)  
    How a human, Codex, Claude Code, an MCP client, a script, or an app should
    operate the system without bypassing governance.
 
-5. [Build goal alignment](reference/build-goal-alignment.md)  
+6. [Build goal alignment](reference/build-goal-alignment.md)  
    What is built now, what is only a spine, what still needs work, and which
    tests/probes prove it.
 
@@ -116,6 +120,7 @@ Human creates or initiates workspace
 
 ### Use And Operation
 
+- [Roadmap](ROADMAP.md)
 - [Getting started](guides/getting-started.md)
 - [Agent and CLI SOP](guides/agent-cli-sop.md)
 - [Mix tasks](guides/mix-tasks.md)
