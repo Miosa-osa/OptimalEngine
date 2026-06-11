@@ -110,6 +110,7 @@ Built and verified now:
 | Derivation Ledger | Source-to-Claim, Claim-to-Fact, and Fact-to-Memory steps write lineage entries. |
 | Governed retrieval | Retrieval returns Context Packages, not loose chunks, writes explicit retrieval-plan metadata, applies structured subject/action/object, asset, workflow, and skill filters, filters Facts, Memory Objects, asset extraction projections, workflow candidates, and approved/enabled Skill Packages by partition/security scope before package assembly, marks affected packages stale when returned Facts or Memory Objects are superseded, can refresh a stale package from its original request scope, can batch refresh stale packages, and exposes API, CLI/cron, and supervised scheduler triggers for app/agent/runtime workflows. |
 | Active Memory Pools | Task-scoped working memory can load Context Packages, refresh stale loaded Context Packages, publish observations as pending Claims, and expose the open/retrieve/refresh/observe/close loop through API routes. |
+| Wiki / export surface | Node and workspace tree pages can render into stored wiki pages, `.wiki/*.md` projections, export records, projection revisions, and link-health records. Backlinks/import/HTTP/rebuild work remains. |
 | Smart memory intake | `Memory.remember/2` and `POST /api/memory/remember` can gate low-salience writes, skip semantic duplicates, update superseded memories, and attach intake metadata before the governed Source Package and pending Claim bridge runs. |
 | Tool/model governance | Registered tools and model operations can enforce privileges, partitions, required inputs, required outputs, audit links, and the first governed execution path. |
 | Connector governance | Connector sync runs through the governed tool-call surface by default, blocking unauthorized runs before connector execution and recording both connector-run and tool-call audit rows when allowed. Raw sync requires an explicit `governed: false` bypass. |
@@ -572,6 +573,16 @@ mix compile
 mix optimal.reality_check
 ```
 
+Scaffold and inspect a markdown-operable workspace:
+
+```bash
+mix optimal.setup my-workspace --name "My Workspace"
+mix optimal.topology --workspace default:my-workspace
+mix optimal.wiki render-node first-project --workspace default:my-workspace
+mix optimal.wiki render-tree --workspace default:my-workspace
+mix optimal.wiki check node-first-project --workspace default:my-workspace
+```
+
 Focused verification for the current build:
 
 ```bash
@@ -581,6 +592,8 @@ mix test test/memory_core/spine_test.exs \
   test/topology/node_member_test.exs \
   test/topology/node_test.exs \
   test/topology/workspace_surface_spine_test.exs \
+  test/wiki/service_test.exs \
+  test/wiki/store_test.exs \
   test/signal/dispatcher_test.exs \
   --seed 0
 ```
@@ -602,6 +615,8 @@ Useful commands:
 mix optimal.reality_check
 mix optimal.search "project"
 mix optimal.rag "what changed this week?"
+mix optimal.wiki list
+mix optimal.wiki render-node first-project --workspace default:my-workspace
 ```
 
 ## Development Rule
