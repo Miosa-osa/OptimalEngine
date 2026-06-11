@@ -73,7 +73,11 @@ Read these in order:
    How goal-driven and scheduled loops use context, tools, validation gates,
    stop conditions, observations, workflow traces, and review.
 
-16. [Build goal alignment](reference/build-goal-alignment.md)
+16. [Backend readiness](reference/backend-readiness.md)
+   What is actually built in the backend, which stores own what, which checks
+   prove it, and what still needs hardening.
+
+17. [Build goal alignment](reference/build-goal-alignment.md)
    What is built now, what is only a spine, what still needs work, and which
    tests/probes prove it.
 
