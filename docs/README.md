@@ -127,21 +127,31 @@ Human creates or initiates workspace
 - [Storage and projection map](architecture/STORAGE-AND-PROJECTION-MAP.md)
 - [Workspace architecture](architecture/WORKSPACE.md)
 - [Wiki layer](architecture/WIKI-LAYER.md)
-- [Full system architecture](architecture/FULL-SYSTEM-ARCHITECTURE.md)
 
 ### Reference
 
 - [Build goal alignment](reference/build-goal-alignment.md)
+- [Data model](reference/data-model.md)
+- [Component map](reference/components.md)
 - [Multimodal open-source stack](reference/multimodal-open-source-stack.md)
 - [Search architecture](reference/search-architecture.md)
 - [Operations spec](reference/operations-spec.md)
+- [Agent hooks](reference/hooks.md)
+- [Session lifecycle](reference/session-lifecycle.md)
+- [Node template](reference/node-template.md)
 - [Vocabulary](reference/vocabulary.md)
 
-## Legacy And Deep-Dive Docs
+### Concepts
 
-Some older docs describe earlier architecture language and deeper research
-threads. Treat them as background unless a canonical doc links to them directly.
-The canonical docs above are the current product path.
+- [Signal theory](concepts/signal-theory.md)
+- [Failure modes](concepts/failure-modes.md)
+
+## Documentation Rule
+
+This docs tree is intentionally current-only. Historical strategy notes,
+private examples, and comparison research do not belong in the public product
+documentation path. If a document is not linked from this page, treat it as
+non-canonical until it is reviewed and added here.
 
 ## Verification
 
@@ -156,4 +166,3 @@ Current expected result:
 ```text
 126 probes, 126 ok, 0 warn, 0 fail
 ```
-
