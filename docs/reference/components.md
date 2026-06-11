@@ -12,6 +12,7 @@ This page maps the runtime components to the architecture layers.
 | Active Memory Pools | Task-scoped working memory, loaded context, observations. | Active pool services. |
 | Workflow / Skill Runtime | Workflow traces, generalized workflows, procedures, skill packages. | Memory Core workflow/skill records and future runtime services. |
 | Tool / Model Governance | Registered tools/models, permissions, calls, schemas, audit. | Tool/model definition and call-run tables. |
+| Agent Collaboration | Remote agent definitions, Agent Cards, delegation records, returned artifacts, observations. | Tool/model governance spine now; dedicated A2A registry is a future hardening target. |
 | Wiki / Export | Markdown/wiki/HTML/API/report projections. | Wiki service, workspace export, render/check Mix tasks. |
 | Evaluation / Recovery | Reality checks, benchmarks, rebuild checks. | Evaluation modules and `mix optimal.reality_check`. |
 
@@ -25,4 +26,3 @@ Agents call public interfaces.
 ```
 
 Avoid putting business meaning in low-level persistence adapters.
-

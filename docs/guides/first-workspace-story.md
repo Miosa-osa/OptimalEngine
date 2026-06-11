@@ -35,6 +35,7 @@ contracts
 SOPs
 client requirements documents
 agent chats
+other agents
 local scripts
 MCP tools
 command-line tools
@@ -176,6 +177,7 @@ them.
 | Code repos | implementation history, issues, releases |
 | CLI tools | local files, Git, Docker, media processing, scripts, simple command work |
 | Scripts/API/MCP | authenticated actions, structured tools, app writes, scheduled jobs |
+| A2A agents | specialist agents, reviewer agents, partner agents, supplier agents |
 
 Each channel becomes an integration surface. Each imported item becomes source
 evidence before it becomes memory.
@@ -191,6 +193,7 @@ API call
 connector sync
 local script
 scheduled job
+A2A remote agent
 ```
 
 The user should not have to know the implementation detail every time. The
@@ -200,6 +203,7 @@ engine should help the agent choose the right surface:
 simple local command -> CLI
 authenticated app action -> MCP/API/connector
 repeating operation -> scheduler/cron
+another agent needs to collaborate -> A2A
 knowledge-bearing output -> Source Package or observation
 ```
 
@@ -214,6 +218,18 @@ User asks to send a proposal
   -> agent confirms receiver/channel/review state
   -> email tool sends the package
   -> delivery receipt returns as Source Package evidence
+```
+
+Multi-agent example:
+
+```text
+Inventory agent detects low stock
+  -> Optimal Engine loads product, vendor, and policy context
+  -> inventory data is read through MCP/API/connector
+  -> internal order agent receives the task through A2A
+  -> supplier agent receives the order request through A2A when allowed
+  -> confirmation returns as source evidence
+  -> pending Claims, package records, and audit are created
 ```
 
 ## Self-Updating Loops

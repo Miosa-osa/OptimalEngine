@@ -11,11 +11,42 @@ connector syncs
 local scripts
 scheduled jobs
 model calls
+A2A remote agents
 ```
 
 The engine's job is to provide context, scope, policy, source preservation,
 memory, and audit. The agent or worker performs the outside action through the
 right surface.
+
+## Agent-To-Tool Vs Agent-To-Agent
+
+Separate these two problems:
+
+```text
+agent -> tool/data
+  -> CLI, MCP, API, connector, script, scheduler
+
+agent -> agent
+  -> A2A or another agent-to-agent protocol
+```
+
+MCP is for giving an agent access to tools, APIs, files, databases, and other
+resources. A2A is for agents discovering and coordinating with other agents.
+They are complementary.
+
+Optimal Engine can sit underneath both:
+
+```text
+Optimal Engine
+  -> stores workspace topology, source evidence, memory, context packages,
+     package manifests, tool grants, observations, and audit
+
+Local or remote agent
+  -> uses Optimal Engine context
+  -> calls tools through CLI/MCP/API/connectors/scripts
+  -> collaborates with other agents through A2A when needed
+  -> returns observations and evidence to Optimal Engine
+```
 
 ## CLI And MCP Are Both Tool Surfaces
 
@@ -51,15 +82,39 @@ crm.update_contact
 
 Both are valid. The wrong move is treating one as universally better.
 
+## A2A Is A Coordination Surface
+
+A2A is useful when one agent needs to delegate or coordinate with another agent
+that may be built by a different team, framework, vendor, or runtime.
+
+Typical A2A concepts:
+
+```text
+Agent Card
+  -> describes an agent's identity, endpoint, capabilities, skills, and auth
+
+task request
+  -> asks another agent to do work
+
+task response / artifact
+  -> returns result, file, structured data, or status
+
+streaming updates
+  -> long-running work can report progress over time
+```
+
+Use A2A when the remote thing is itself an agent with its own reasoning,
+capabilities, tools, memory, or workflow. Do not model a database, file system,
+or calendar as an agent just to use A2A. Those are tool/data surfaces.
+
 ## Decision Rule
 
-| Use CLI when | Use MCP/API/connector when |
+| Use this | When |
 | --- | --- |
-| The command maps directly to the job. | The raw command would require complex auth, IDs, pagination, or state. |
-| The model already knows the tool well. | The server can hide provider-specific complexity. |
-| Local files, repos, scripts, Git, Docker, text processing, or media tools are involved. | Per-user authorization, audit, structured inputs, or safe write actions matter. |
-| Pipes/composition make the task simple. | A browser/rendered page, app workspace, or authenticated SaaS system is involved. |
-| The output can be captured and preserved as evidence. | The tool needs schema validation and policy enforcement before execution. |
+| CLI | The command maps directly to the job and the model already knows the tool. |
+| MCP/API/connector | Auth, IDs, schemas, SaaS state, browser rendering, per-user access, or safe writes matter. |
+| Script/cron/scheduler | The operation is repeatable or timed. |
+| A2A | Another agent needs to receive, negotiate, delegate, coordinate, stream progress, or return artifacts. |
 
 Practical examples:
 
@@ -70,6 +125,7 @@ Render a JavaScript-heavy webpage -> MCP/browser/fetch service is usually better
 Send email as a user -> MCP/API/connector is usually better.
 Sync Slack/CRM/calendar -> connector or MCP is usually better.
 Run ffmpeg/yt-dlp/whisper locally -> CLI or script is usually better.
+Ask another specialist agent to review a design or place an order -> A2A is usually better.
 ```
 
 ## Governance Rule
@@ -80,7 +136,7 @@ The execution surface can vary. The governance path should not.
 request
   -> actor/workspace/node scope
   -> permission/grant check
-  -> execute through CLI, MCP, API, connector, script, or scheduler
+  -> execute through CLI, MCP, API, connector, script, scheduler, or A2A
   -> capture output
   -> preserve useful output as Source Package or observation
   -> create pending Claim when knowledge-bearing
@@ -102,7 +158,8 @@ Correct model:
 Optimal Engine
   -> provides context package, memory, package manifest, policy, and audit
 Agent/tool surface
-  -> sends email, calls API, runs CLI command, executes MCP tool, or schedules job
+  -> sends email, calls API, runs CLI command, executes MCP tool,
+     schedules job, or delegates to another agent through A2A
 Tool output
   -> returns to Optimal Engine as evidence, observation, or pending Claim
 ```
@@ -131,6 +188,7 @@ learning, research, and creator workflows.
 | Set a reminder to revisit something. | Calendar/task API, MCP, CLI, or scheduler. | Observation, schedule metadata, pending Claim if it records a commitment. |
 | Build a weekly learning review. | Scheduled job plus retrieval/context package. | Active Memory Pool, review report export, observations, workflow trace. |
 | Keep a company wiki current. | Wiki scheduler, connector sync, agent review. | Stale page detection, refreshed projections, source-linked updates. |
+| Coordinate internal and external agents. | A2A plus Optimal Engine Context Package. | Delegated task record, returned artifacts, observations, audit. |
 
 ## Scheduled Loops
 
@@ -183,6 +241,8 @@ During workspace setup, ask:
 Which CLIs do you already use?
 Which MCP servers do you already use?
 Which APIs/scripts should agents be allowed to call?
+Which other agents should this agent be allowed to contact?
+Do any agents expose A2A Agent Cards?
 Which tools are read-only?
 Which tools can write or send things?
 Which actions require confirmation?
@@ -194,3 +254,6 @@ If a tool produces useful knowledge, the output should come back as evidence or
 an observation. If it only helps perform a transient action, it can remain a tool
 run record.
 
+If another agent produces useful work through A2A, its returned artifact should
+be treated the same way: preserve it, link the task, and review knowledge-bearing
+claims before they become Facts.

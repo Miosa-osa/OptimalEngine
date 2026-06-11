@@ -86,6 +86,8 @@ If the user needs help creating that dump, use the starter prompts:
 templates/starter-prompts/workspace-initiation.md
 templates/starter-prompts/company-wiki-import.md
 templates/starter-prompts/package-inventory.md
+templates/starter-prompts/agentic-loop-design.md
+templates/starter-prompts/youtube-learning-import.md
 ```
 
 Use setup when the user already knows the initial structure:
@@ -235,6 +237,7 @@ connectors, scripts, or APIs.
 - [Signal theory](../concepts/signal-theory.md)
 - [Integrations and imports](integrations-and-imports.md)
 - [Tool surfaces and loops](tool-surfaces-and-loops.md)
+- [Agentic loops](agentic-loops.md)
 - [Packages and exports](packages-and-exports.md)
 - [Agent and CLI SOP](agent-cli-sop.md)
 - [Mix tasks](mix-tasks.md)
