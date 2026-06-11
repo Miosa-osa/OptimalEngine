@@ -55,7 +55,7 @@ Optimal Engine is designed for operating systems around real work:
 | Personal operating system | Workspaces for life, work, learning, people, money, projects, and daily rhythm. |
 | Agent workspace | Governed Context Packages, Active Memory Pools, tool permissions, observations, and audit. |
 | Research system | Source Packages, Claims, Facts, citations, relationships, retrieval, and evidence trails. |
-| Project/product OS | Nodes for products, projects, features, decisions, milestones, blockers, releases, and workflows. |
+| Product, operation, or initiative OS | Nodes for products, operations, initiatives, features, decisions, milestones, blockers, releases, and workflows. |
 | Operations/SOP system | Workflow traces, validated procedures, Skill Packages, tool calls, and exception handling. |
 | Customer/support memory | Customer nodes, issue history, prior fixes, current-valid Facts, and source-linked recall. |
 
@@ -70,21 +70,43 @@ Tenant / Organization
           -> attached sources, signals, memory, wiki pages, workflows, skills
 ```
 
-A Project is a Node type inside a Workspace. It is not a peer of Workspace.
+A Project is only one optional Node type inside a Workspace. It is not a peer
+of Workspace, and the engine does not require every workspace to have projects.
 
 ```text
 Workspace
-  -> Project Node
+  -> Entity / Company Node
+  -> Team / Department Node
   -> Person Node
   -> Product Node
   -> Operational Node
+  -> Project Node, when there is a bounded initiative
   -> Context Node
   -> Learning Node
 ```
 
+Companies often have projects they are focused on, but those projects live in
+the same Node graph as everything else. A company may also choose not to model
+projects at all and instead organize around operations, products, customers,
+departments, accounts, or rhythms.
+
+Use a Project Node when the thing has a bounded initiative shape: a scope,
+timeline, deliverables, blockers, milestones, and review cadence. Use another
+Node type when the thing is ongoing or structurally different:
+
+| User language | Usually model as |
+| --- | --- |
+| Platform Launch, SOC2 Push, Website Rebuild | Project Node |
+| Customer Success, Hiring Pipeline, Content Publishing | Operational Node |
+| Customer Portal, Internal Agent Runtime | Product Node |
+| Acme Client, Partner Account | Entity/Customer Node |
+| Weekly Review, Daily Focus | Operational/Rhythm Node |
+| Research Library, Market Notes | Learning/Context Node |
+
 Users can call project-like things initiatives, campaigns, engagements, deals,
 cases, programs, or accounts. The engine preserves those labels as scoped
-aliases while keeping the canonical object clean:
+aliases while keeping the canonical object clean when `project` is the right
+type:
 
 ```text
 node_type: project

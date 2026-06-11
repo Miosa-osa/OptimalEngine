@@ -13,17 +13,36 @@ Tenant / Organization
         -> sources, signals, claims, facts, memories, workflows, skills
 ```
 
-Projects are Nodes inside a Workspace. They are not peers of Workspace.
+Projects are optional Nodes inside a Workspace. They are not peers of
+Workspace, and a workspace does not need Project Nodes if the user's world is
+better organized around operations, products, people, customers, rhythm, or
+domains.
 
 ```text
 Workspace
-  -> Project Node
+  -> Entity / Company Node
+  -> Team / Department Node
   -> Person Node
   -> Product Node
   -> Operational Node
+  -> Project Node, when there is a bounded initiative
   -> Context Node
   -> Learning Node
 ```
+
+Use a Project Node for bounded work with scope, timeline, deliverables,
+milestones, blockers, and review cadence. Use another Node type for ongoing
+structure or context:
+
+| Real-world thing | Typical Node type |
+| --- | --- |
+| Company, client, vendor, partner | `entity` |
+| Department or team | `department` / `team` |
+| Launch, implementation, migration, campaign | `project` |
+| Recurring process or cadence | `operation` |
+| Product, platform, service, offer | `product` |
+| Person, agent, stakeholder | `person` |
+| Research, reference, wiki area | `learning` / `context` |
 
 For the recommended folder projection, see
 [`../guides/workspace-filesystem.md`](../guides/workspace-filesystem.md).

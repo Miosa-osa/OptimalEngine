@@ -26,9 +26,23 @@ Use these terms in engine internals and public docs:
 | Active Memory Pool | Task-scoped working memory. |
 | Skill Package | Governed reusable procedure. |
 
-## Projects Are Nodes
+## Projects Are Optional Nodes
 
-A project is a Node with `node_type = project`.
+A project is a Node with `node_type = project`, but not every workspace needs
+Project Nodes. Project is the right type when the thing has bounded work:
+scope, timeline, deliverables, milestones, blockers, and review cadence.
+
+If the thing is ongoing, structural, or reference-oriented, use another Node
+type:
+
+| User language | Usually model as |
+| --- | --- |
+| Launch, implementation, migration, campaign | Project Node |
+| Hiring, onboarding, publishing, finance review | Operational Node |
+| Product, platform, service, offer | Product Node |
+| Client, vendor, partner, account | Entity/Customer Node |
+| Person, agent, stakeholder | Person Node |
+| Research, knowledge base, market notes | Learning/Context Node |
 
 Different users may call project-like things:
 
