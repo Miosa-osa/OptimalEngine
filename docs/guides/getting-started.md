@@ -80,6 +80,14 @@ Use initiation when the user starts with a messy dump:
 mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 ```
 
+If the user needs help creating that dump, use the starter prompts:
+
+```text
+templates/starter-prompts/workspace-initiation.md
+templates/starter-prompts/company-wiki-import.md
+templates/starter-prompts/package-inventory.md
+```
+
 Use setup when the user already knows the initial structure:
 
 ```bash
@@ -223,6 +231,7 @@ connectors, scripts, or APIs.
 - [Engine structure](../architecture/ENGINE-STRUCTURE.md)
 - [Storage and projection map](../architecture/STORAGE-AND-PROJECTION-MAP.md)
 - [Installation and deployment](installation-and-deployment.md)
+- [First workspace story](first-workspace-story.md)
 - [Signal theory](../concepts/signal-theory.md)
 - [Integrations and imports](integrations-and-imports.md)
 - [Packages and exports](packages-and-exports.md)
