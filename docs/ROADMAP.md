@@ -60,6 +60,15 @@ flowchart LR
 | Wiki/export | Human-readable pages, reports, packages, and app-ready projections. | Decide what is true. |
 | Business OS / external UI | Product interface over engine state. | Reimplement memory, retrieval, or governance separately. |
 
+For the practical filesystem projection, see
+[`guides/workspace-filesystem.md`](guides/workspace-filesystem.md).
+
+For organization/workspace/Node/task scope rules, see
+[`guides/scope-switching.md`](guides/scope-switching.md).
+
+For canonical naming and aliases, see
+[`guides/naming-and-aliases.md`](guides/naming-and-aliases.md).
+
 ## System Map
 
 ```mermaid
@@ -247,6 +256,7 @@ Organizations can have workspaces.
 Workspaces can have Nodes.
 Nodes have types, relationships, members, status, and projections.
 Projects are Nodes inside Workspaces.
+Aliases preserve user vocabulary without changing canonical object types.
 ```
 
 Done when:
@@ -432,4 +442,3 @@ What test proves it?
 ```
 
 If those answers are unclear, the feature is not ready to be added.
-

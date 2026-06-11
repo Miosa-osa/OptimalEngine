@@ -29,11 +29,23 @@ Read these in order:
    Which substrate stores what, which layer owns meaning, and which surfaces
    display/control the state.
 
-5. [Agent and CLI SOP](guides/agent-cli-sop.md)  
+5. [Workspace filesystem](guides/workspace-filesystem.md)  
+   What the markdown/file projection looks like and how edits flow back into
+   governed engine state.
+
+6. [Scope switching](guides/scope-switching.md)  
+   How organization, workspace, Node, and Active Memory Pool scope affect
+   permissions, retrieval, routing, tools, and exports.
+
+7. [Naming and aliases](guides/naming-and-aliases.md)  
+   How user language maps to canonical engine objects without creating routing
+   noise.
+
+8. [Agent and CLI SOP](guides/agent-cli-sop.md)  
    How a human, Codex, Claude Code, an MCP client, a script, or an app should
    operate the system without bypassing governance.
 
-6. [Build goal alignment](reference/build-goal-alignment.md)  
+9. [Build goal alignment](reference/build-goal-alignment.md)  
    What is built now, what is only a spine, what still needs work, and which
    tests/probes prove it.
 
@@ -48,29 +60,53 @@ Tenant / Organization
 
 Projects are Nodes inside a Workspace. They are not peers of Workspace.
 
-```text
-Workspace
-  -> Project Node
-  -> Person Node
-  -> Product Node
-  -> Operational Node
-  -> Context Node
-  -> Learning Node
+```mermaid
+flowchart TB
+  Org[Tenant / Organization<br/>governance and policy boundary]
+  Workspace[Workspace<br/>bounded operating area]
+  Project[Project Node]
+  Person[Person Node]
+  Product[Product Node]
+  Ops[Operational Node]
+  Context[Context Node]
+  Learning[Learning Node]
+
+  Org --> Workspace
+  Workspace --> Project
+  Workspace --> Person
+  Workspace --> Product
+  Workspace --> Ops
+  Workspace --> Context
+  Workspace --> Learning
 ```
 
 The runtime is organized by lifecycle ownership:
 
-```text
-Workspace / Topology     owns the shape of the user's world.
-Source Intake            preserves evidence before interpretation.
-Signal Pipeline          classifies and parses inputs.
-Memory Core              owns Claims, Facts, Memories, edges, and lineage.
-Retrieval / Context      assembles governed context packages.
-Active Memory Pools      hold task-scoped working state.
-Workflow / Skill Runtime turns repeated work into reusable procedures.
-Tool / Model Governance  controls external actions and model/tool calls.
-Wiki / Export            projects state to markdown, HTML, reports, and apps.
-Evaluation / Recovery    proves behavior and rebuilds derived artifacts.
+```mermaid
+flowchart TB
+  Gateway[Command / Query Gateway]
+  Topology[Workspace / Topology<br/>shape of the user's world]
+  Intake[Source Intake<br/>preserve evidence]
+  Signal[Signal Pipeline<br/>classify and parse]
+  Memory[Memory Core<br/>Claims, Facts, Memories, lineage]
+  Retrieval[Retrieval / Context<br/>governed context packages]
+  Pools[Active Memory Pools<br/>task-scoped working state]
+  Workflow[Workflow / Skill Runtime<br/>repeatable procedures]
+  Governance[Tool / Model Governance<br/>external actions and calls]
+  Export[Wiki / Export<br/>markdown, HTML, reports, apps]
+  Eval[Evaluation / Recovery<br/>proof and rebuilds]
+
+  Gateway --> Topology
+  Gateway --> Intake
+  Intake --> Signal
+  Signal --> Memory
+  Memory --> Retrieval
+  Retrieval --> Pools
+  Pools --> Workflow
+  Gateway --> Governance
+  Memory --> Export
+  Retrieval --> Export
+  Gateway --> Eval
 ```
 
 ## Store Vs Layer Vs Surface
@@ -85,6 +121,21 @@ Use these terms precisely:
 
 The same information can appear in many surfaces, but one layer owns the
 canonical lifecycle.
+
+```mermaid
+flowchart LR
+  Store[(Storage substrate<br/>SQLite / Postgres / artifacts / indexes)]
+  Layer[Domain layer<br/>owns meaning and lifecycle]
+  Surface[Projection surface<br/>markdown / wiki / API / MCP / app]
+  Edit[Human or agent edit]
+  Review[Source package, topology change,<br/>observation, or pending Claim]
+
+  Store --> Layer
+  Layer --> Surface
+  Surface --> Edit
+  Edit --> Review
+  Review --> Layer
+```
 
 ## Current Default Stores
 
@@ -101,20 +152,86 @@ canonical lifecycle.
 
 ## User And Agent Flow
 
-```text
-Human creates or initiates workspace
-  -> engine creates workspace topology
-  -> user/agent adds messy sources
-  -> engine preserves evidence
-  -> signal layer classifies input
-  -> memory layer extracts Claims
-  -> review/policy promotes Facts
-  -> retrieval builds Context Packages
-  -> human/agent works inside Active Memory Pool
-  -> observations re-enter as pending Claims
-  -> repeated work becomes Workflows and Skill Packages
-  -> export layer renders markdown/wiki/app/API views
+```mermaid
+flowchart LR
+  Human[Human / Agent] --> Setup[Create or initiate workspace]
+  Setup --> Topology[Workspace topology]
+  Topology --> Source[Messy sources]
+  Source --> Preserve[Preserve evidence]
+  Preserve --> Classify[Classify Signal]
+  Classify --> Claim[Extract Claims]
+  Claim --> Fact[Review / promote Facts]
+  Fact --> Context[Build Context Package]
+  Context --> Pool[Work in Active Memory Pool]
+  Pool --> Observation[Record observations]
+  Observation --> Claim
+  Pool --> Workflow[Repeated work]
+  Workflow --> Skill[Workflow / Skill Package]
+  Fact --> Export[Render markdown / wiki / API views]
 ```
+
+Humans and AI agents use the same backend state. They use different surfaces:
+markdown, CLI, API, MCP/tools, wiki/export, or an external app.
+
+## Filesystem Projection
+
+The recommended markdown projection looks like this:
+
+```text
+organization/
+  organization.yaml
+  workspaces/
+    company-os/
+      workspace.yaml
+      AGENTS.md
+      rhythm/
+      nodes/
+        project-platform-launch/
+          node.yaml
+          context.md
+          signal.md
+          sources/
+          decisions/
+          workflows/
+          exports/
+```
+
+This is how people can see and operate the system directly. The database still
+owns canonical identity, permissions, lineage, memory, retrieval, workflow, and
+audit state.
+
+## Scope Switching
+
+```mermaid
+flowchart TB
+  Org[Organization<br/>governance, credentials, audit]
+  Workspace[Workspace<br/>operating area, rhythm, routing]
+  Node[Node<br/>focused context and relationships]
+  Pool[Active Memory Pool<br/>temporary task state]
+
+  Org --> Workspace
+  Workspace --> Node
+  Node --> Pool
+```
+
+Switch organization when ownership or policy changes. Switch workspace when the
+operating context changes. Switch Node when the focus changes inside a
+workspace. Open an Active Memory Pool when a bounded human/agent task starts.
+
+## Naming Discipline
+
+Different organizations can call the same shape different things. The engine
+preserves user language as aliases while keeping canonical object types stable:
+
+```text
+node_type: project
+display_label: Initiative
+display_name: Q3 Partner Launch
+aliases: ["launch project", "partner launch", "q3 initiative"]
+```
+
+If a loose name maps to more than one active object in the current scope, the
+engine asks for clarification before writing durable state.
 
 ## Canonical Docs
 
@@ -122,6 +239,9 @@ Human creates or initiates workspace
 
 - [Roadmap](ROADMAP.md)
 - [Getting started](guides/getting-started.md)
+- [Workspace filesystem](guides/workspace-filesystem.md)
+- [Scope switching](guides/scope-switching.md)
+- [Naming and aliases](guides/naming-and-aliases.md)
 - [Agent and CLI SOP](guides/agent-cli-sop.md)
 - [Mix tasks](guides/mix-tasks.md)
 - [Writing guide](guides/writing-guide.md)

@@ -52,6 +52,7 @@ Definitions:
 | Node | A governed unit of context, purpose, relationships, state, and activity. |
 | Node Type | The kind of Node: project, person, product, operational, context, learning, entity, team, department, etc. |
 | Node Relationship | Typed relationship between Nodes: parent/child, depends_on, blocks, owns, supports, participates_in, references. |
+| Alias | Scoped user-facing name that resolves to a stable canonical object. |
 
 Projects are Nodes inside a Workspace:
 
@@ -67,6 +68,18 @@ Workspace
 
 A folder may represent a Node, but a folder is only a projection. The Node is
 the governed topology object.
+
+Users can call the same canonical type different things. A Project Node may be
+called an initiative, campaign, engagement, deal, case, program, or account in
+one workspace. The engine should preserve those words as aliases/display labels
+while routing durable writes through stable IDs.
+
+For the concrete filesystem projection, scope switching rules, and naming
+discipline, see:
+
+- [`../guides/workspace-filesystem.md`](../guides/workspace-filesystem.md)
+- [`../guides/scope-switching.md`](../guides/scope-switching.md)
+- [`../guides/naming-and-aliases.md`](../guides/naming-and-aliases.md)
 
 ## Layer Stack
 
@@ -266,4 +279,3 @@ A well-structured Optimal Engine workspace has:
 - workflow traces and draft Skill Packages;
 - markdown/wiki/app/API projections generated from engine state;
 - verification through `mix optimal.reality_check`.
-
