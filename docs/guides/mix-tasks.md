@@ -105,6 +105,7 @@ mix optimal.wiki check node-first-project --workspace default:my-workspace
 | Task | Purpose |
 | --- | --- |
 | `mix optimal.connector` | Connector registry/sync operations. |
+| `mix optimal.auth` | Mint, list, revoke, and delete API keys for apps, MCP servers, remote agents, and scripts. |
 | `mix optimal.api` | Start the HTTP API. |
 | `mix optimal.graph_ui` | Launch the graph visualizer against a running API. |
 | `mix optimal.compliance` | Compliance workflows. |
@@ -113,6 +114,15 @@ mix optimal.wiki check node-first-project --workspace default:my-workspace
 
 Tool, MCP, API, connector, script, and model outputs should flow through
 governance before becoming evidence, observations, Claims, or Facts.
+
+Local CLI use is trusted local access to the configured store. Use API keys for
+HTTP/API clients, MCP servers, remote agents, external apps, and automation:
+
+```bash
+mix optimal.auth mint --name "Business OS" --workspace default:my-workspace
+mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+mix optimal.auth list
+```
 
 ## Evaluation, Health, And Verification
 
@@ -170,4 +180,3 @@ Default local data shape:
 .optimal/cache/
 workspace folders and markdown projections
 ```
-

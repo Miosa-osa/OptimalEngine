@@ -2,9 +2,9 @@ defmodule OptimalEngine.CLI do
   @moduledoc """
   Command-line entry point for the Optimal Engine.
 
-  Exposes every `mix optimal.*` task as a subcommand of a single `optimal`
-  binary, so any agent runtime (Python, Node, Go, shell scripts, Claude Agent
-  SDK, etc.) can shell out without needing Elixir on its path.
+  Exposes the supported `mix optimal.*` task surface as subcommands of a single
+  `optimal` binary, so humans, shell scripts, and agent runtimes can use one
+  command name.
 
   ## Usage
 
@@ -14,28 +14,43 @@ defmodule OptimalEngine.CLI do
 
   ## Subcommands
 
-  The CLI proxies to the same `Mix.Tasks.Optimal.*` modules used by `mix`, so
-  every task listed in `mix help | grep optimal` is available here too.
+  The CLI proxies to the same `mix optimal.*` task surface used by developers.
+  This keeps the local `optimal` binary as a thin command router while native
+  dependencies such as SQLite load through the normal Mix build.
   """
 
   @version Mix.Project.config()[:version] || "0.1.0"
 
   @subcommands %{
-    # Ingestion
+    # Setup
     "setup" => Mix.Tasks.Optimal.Setup,
+    "initiate" => Mix.Tasks.Optimal.Initiate,
     "init" => Mix.Tasks.Optimal.Init,
     "bootstrap" => Mix.Tasks.Optimal.Bootstrap,
+    "migrate" => Mix.Tasks.Optimal.Migrate,
+    # Intake and signal pipeline
     "ingest" => Mix.Tasks.Optimal.Ingest,
-    "ingest_workspace" => Mix.Tasks.Optimal.IngestWorkspace,
+    "ingest-workspace" => Mix.Tasks.Optimal.IngestWorkspace,
     "intake" => Mix.Tasks.Optimal.Intake,
     "index" => Mix.Tasks.Optimal.Index,
+    "classify" => Mix.Tasks.Optimal.Classify,
+    "parse" => Mix.Tasks.Optimal.Parse,
+    "decompose" => Mix.Tasks.Optimal.Decompose,
+    "embed" => Mix.Tasks.Optimal.Embed,
+    "cluster" => Mix.Tasks.Optimal.Cluster,
+    "architectures" => Mix.Tasks.Optimal.Architectures,
     # Retrieval
     "search" => Mix.Tasks.Optimal.Search,
+    "grep" => Mix.Tasks.Optimal.Grep,
     "read" => Mix.Tasks.Optimal.Read,
     "ls" => Mix.Tasks.Optimal.Ls,
     "l0" => Mix.Tasks.Optimal.L0,
     "assemble" => Mix.Tasks.Optimal.Assemble,
     "rag" => Mix.Tasks.Optimal.Rag,
+    "context.refresh-stale" => Mix.Tasks.Optimal.Context.RefreshStale,
+    # Topology and projections
+    "topology" => Mix.Tasks.Optimal.Topology,
+    "wiki" => Mix.Tasks.Optimal.Wiki,
     # Graph analysis
     "graph" => Mix.Tasks.Optimal.Graph,
     "reflect" => Mix.Tasks.Optimal.Reflect,
@@ -46,10 +61,18 @@ defmodule OptimalEngine.CLI do
     "remember" => Mix.Tasks.Optimal.Remember,
     "rethink" => Mix.Tasks.Optimal.Rethink,
     "knowledge" => Mix.Tasks.Optimal.Knowledge,
+    # Connectors, governance, and operations
+    "connector" => Mix.Tasks.Optimal.Connector,
+    "auth" => Mix.Tasks.Optimal.Auth,
+    "compliance" => Mix.Tasks.Optimal.Compliance,
+    "backup" => Mix.Tasks.Optimal.Backup,
     # Health & verification
     "health" => Mix.Tasks.Optimal.Health,
     "verify" => Mix.Tasks.Optimal.Verify,
     "stats" => Mix.Tasks.Optimal.Stats,
+    "status" => Mix.Tasks.Optimal.Status,
+    "reality-check" => Mix.Tasks.Optimal.RealityCheck,
+    "eval.run" => Mix.Tasks.Optimal.Eval.Run,
     # HTTP API & visualizer
     "api" => Mix.Tasks.Optimal.Api,
     "graph-ui" => Mix.Tasks.Optimal.GraphUi,
@@ -59,13 +82,40 @@ defmodule OptimalEngine.CLI do
     "spec.report" => Mix.Tasks.Optimal.Spec.Report
   }
 
+  @aliases %{
+    "ingest_workspace" => "ingest-workspace",
+    "context.refresh_stale" => "context.refresh-stale",
+    "context-refresh-stale" => "context.refresh-stale",
+    "context" => "context.refresh-stale",
+    "reality_check" => "reality-check",
+    "reality" => "reality-check",
+    "eval" => "eval.run",
+    "graph_ui" => "graph-ui"
+  }
+
   @ordered_groups [
-    {"Setup", ["setup", "init", "bootstrap"]},
-    {"Ingestion", ["ingest", "ingest_workspace", "intake", "index"]},
-    {"Retrieval", ["search", "read", "ls", "l0", "assemble", "rag"]},
+    {"Setup", ["setup", "initiate", "init", "bootstrap", "migrate"]},
+    {"Intake and signals",
+     [
+       "ingest",
+       "ingest-workspace",
+       "intake",
+       "index",
+       "classify",
+       "parse",
+       "decompose",
+       "embed",
+       "cluster",
+       "architectures"
+     ]},
+    {"Retrieval and context",
+     ["search", "grep", "read", "ls", "l0", "assemble", "rag", "context.refresh-stale"]},
+    {"Topology and projections", ["topology", "wiki"]},
     {"Graph analysis", ["graph", "reflect", "reweave", "simulate", "impact"]},
     {"Learning loop", ["remember", "rethink", "knowledge"]},
-    {"Health & verification", ["health", "verify", "stats"]},
+    {"Connectors, governance, and operations", ["connector", "auth", "compliance", "backup"]},
+    {"Health, verification, and evaluation",
+     ["health", "verify", "stats", "status", "reality-check", "eval.run"]},
     {"HTTP API & visualizer", ["api", "graph-ui"]},
     {"Spec tooling", ["spec.drift", "spec.init", "spec.report"]}
   ]
@@ -73,18 +123,30 @@ defmodule OptimalEngine.CLI do
   # Shortdocs are hardcoded here because escripts strip @shortdoc metadata.
   @shortdocs %{
     "setup" => "Create a workspace with starter Nodes, rhythm, projections, and agent SOP",
+    "initiate" => "Start a workspace from messy context and leave proposals pending review",
     "init" => "Scaffold a markdown workspace directory from the sample template",
     "bootstrap" => "Compile, migrate, ingest sample workspace, and report status",
+    "migrate" => "Apply or inspect store migrations",
     "ingest" => "Classify, route, write signal files, and index content",
-    "ingest_workspace" => "Ingest a markdown workspace into the engine store",
+    "ingest-workspace" => "Ingest a markdown workspace into the engine store",
     "intake" => "Interactive multi-line intake from stdin",
     "index" => "Full reindex of all markdown files",
+    "classify" => "Classify content without writing final truth",
+    "parse" => "Parse supported files or content",
+    "decompose" => "Decompose parsed documents into chunks",
+    "embed" => "Generate/store embeddings where configured",
+    "cluster" => "Cluster indexed chunks and signals",
+    "architectures" => "List registered multimodal architectures and processors",
     "search" => "Hybrid BM25 + temporal + graph-boosted search",
+    "grep" => "Literal/content grep over indexed chunks",
     "read" => "Read a context by optimal:// URI at a given tier",
     "ls" => "List contexts under an optimal:// URI",
     "l0" => "Print the always-loaded L0 context (~100 tokens per node)",
     "assemble" => "Build a tiered (L0/L1/L2) context bundle for a topic",
     "rag" => "Return LLM-ready retrieved chunks for a query",
+    "context.refresh-stale" => "Refresh stale stored Context Packages",
+    "topology" => "Inspect workspaces, Nodes, Node Types, memberships, and skills",
+    "wiki" => "List, render, view, and verify wiki/export projections",
     "graph" => "Knowledge graph stats, triangles, clusters, hubs",
     "reflect" => "Find missing edges from entity co-occurrences",
     "reweave" => "Find stale contexts on a topic and suggest updates",
@@ -93,9 +155,17 @@ defmodule OptimalEngine.CLI do
     "remember" => "Store observations; mine friction patterns",
     "rethink" => "Synthesize observations into actionable knowledge",
     "knowledge" => "Knowledge graph + SICA learning operations",
+    "connector" => "Connector registry and sync operations",
+    "auth" => "Mint, list, revoke, and delete API keys for apps and remote agents",
+    "compliance" => "DSAR, erasure, legal hold, and retention workflows",
+    "backup" => "Backup runtime state",
     "health" => "Diagnostic checks on the knowledge base",
     "verify" => "Cold-read test of L0 abstract fidelity",
     "stats" => "Store statistics (counts, sizes, token budgets)",
+    "status" => "Runtime status",
+    "reality-check" =>
+      "Broad backend spine check across store, topology, memory, retrieval, and governance",
+    "eval.run" => "Run evaluation datasets",
     "api" => "Start the HTTP API on port 4200",
     "graph-ui" => "Launch the graph visualizer against a running API",
     "spec.drift" => "Detect code changes without spec updates",
@@ -106,9 +176,9 @@ defmodule OptimalEngine.CLI do
   @doc """
   Main entry point for the escript.
 
-  Takes the raw argv from the OS, parses the subcommand, ensures the
-  application and its dependencies are started, then delegates to the matching
-  `Mix.Tasks.Optimal.*` task module.
+  Takes the raw argv from the OS, parses the subcommand, and delegates to the
+  matching `mix optimal.*` task. The escript is intentionally a local wrapper,
+  not the production release format.
   """
   @spec main([String.t()]) :: any()
   def main(argv) do
@@ -119,18 +189,61 @@ defmodule OptimalEngine.CLI do
       ["help"] -> print_help_and_exit(0)
       ["--version"] -> print_version_and_exit()
       ["-v"] -> print_version_and_exit()
-      [sub | rest] -> dispatch(sub, rest)
+      [sub | rest] -> dispatch(normalize_subcommand(sub), rest)
     end
+  end
+
+  @doc false
+  @spec subcommands() :: %{String.t() => module()}
+  def subcommands, do: @subcommands
+
+  @doc false
+  @spec command_names() :: [String.t()]
+  def command_names, do: @subcommands |> Map.keys() |> Enum.sort()
+
+  @doc false
+  @spec resolve_subcommand(String.t()) :: {:ok, String.t(), module()} | :error
+  def resolve_subcommand(sub) when is_binary(sub) do
+    canonical = normalize_subcommand(sub)
+
+    case Map.fetch(@subcommands, canonical) do
+      {:ok, module} -> {:ok, canonical, module}
+      :error -> :error
+    end
+  end
+
+  @doc false
+  @spec help_text() :: String.t()
+  def help_text do
+    [
+      "Optimal Engine CLI — backend runtime for human and AI workspaces.",
+      "",
+      "  usage: optimal <subcommand> [args...]",
+      "         optimal --help",
+      "         optimal --version",
+      "",
+      "Common first-run flow:",
+      "",
+      "  optimal reality-check",
+      "  optimal setup my-workspace --name \"My Workspace\"",
+      "  optimal topology --workspace default:my-workspace",
+      "  optimal initiate my-workspace --name \"My Workspace\" --dump setup.md",
+      "",
+      "Subcommands by group:",
+      grouped_help_text(),
+      "",
+      "Run 'optimal <subcommand> --help' for per-command detail where supported."
+    ]
+    |> List.flatten()
+    |> Enum.join("\n")
   end
 
   # ── Dispatch ─────────────────────────────────────────────────────────────
 
   defp dispatch(sub, rest) do
-    case Map.fetch(@subcommands, sub) do
-      {:ok, module} ->
-        ensure_started()
-        module.run(rest)
-        :ok
+    case resolve_subcommand(sub) do
+      {:ok, canonical, _module} ->
+        run_mix_task(canonical, rest)
 
       :error ->
         IO.puts(:stderr, "optimal: unknown subcommand '#{sub}'")
@@ -140,11 +253,34 @@ defmodule OptimalEngine.CLI do
     end
   end
 
-  # ── Boot ─────────────────────────────────────────────────────────────────
+  # ── Mix Delegation ───────────────────────────────────────────────────────
 
-  defp ensure_started do
-    # escript packages don't auto-start applications the way `mix` does
-    Application.ensure_all_started(:optimal_engine)
+  defp run_mix_task(canonical, rest) do
+    task = mix_task_name(canonical)
+
+    case System.find_executable("mix") do
+      nil ->
+        IO.puts(:stderr, "optimal: cannot find 'mix' on PATH")
+        IO.puts(:stderr, "Install Elixir/Mix or run the OTP release/API deployment instead.")
+        System.halt(69)
+
+      _mix ->
+        {_output, status} =
+          System.cmd("mix", [task | rest],
+            into: IO.stream(:stdio, :line),
+            stderr_to_stdout: true
+          )
+
+        System.halt(status)
+    end
+  end
+
+  defp mix_task_name(canonical) do
+    mix_name =
+      canonical
+      |> String.replace("-", "_")
+
+    "optimal.#{mix_name}"
   end
 
   # ── Help ─────────────────────────────────────────────────────────────────
@@ -160,33 +296,21 @@ defmodule OptimalEngine.CLI do
   end
 
   defp print_help(io) do
-    lines = [
-      "Optimal Engine CLI — signal-native context storage for AI agents.",
-      "",
-      "  usage: optimal <subcommand> [args...]",
-      "         optimal --help",
-      "         optimal --version",
-      "",
-      "Subcommands by group:"
-    ]
+    IO.puts(io, help_text())
+  end
 
-    Enum.each(lines, &IO.puts(io, &1))
-
-    Enum.each(@ordered_groups, fn {group, names} ->
-      IO.puts(io, "")
-      IO.puts(io, "  #{group}:")
-
-      Enum.each(names, fn name ->
-        short = Map.get(@shortdocs, name, "")
-        IO.puts(io, "    #{String.pad_trailing(name, 14)} #{short}")
-      end)
+  defp grouped_help_text do
+    Enum.flat_map(@ordered_groups, fn {group, names} ->
+      ["", "  #{group}:"] ++
+        Enum.map(names, fn name ->
+          short = Map.get(@shortdocs, name, "")
+          "    #{String.pad_trailing(name, 22)} #{short}"
+        end)
     end)
+  end
 
-    IO.puts(io, "")
-
-    IO.puts(
-      io,
-      "Run 'optimal <subcommand> --help' for per-command detail where supported."
-    )
+  defp normalize_subcommand(sub) do
+    trimmed = String.trim(sub)
+    Map.get(@aliases, trimmed, trimmed)
   end
 end

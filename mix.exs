@@ -20,9 +20,9 @@ defmodule OptimalEngine.MixProject do
     ]
   end
 
-  # Single-file CLI for development and trusted environments that already have
-  # Erlang installed.  For cross-platform standalone distribution (no Erlang on
-  # the target machine) build the Burrito release below: `mix release optimal`.
+  # Local source-checkout CLI wrapper. It routes `./optimal <cmd>` to
+  # `mix optimal.<cmd>` so native dependencies load from the normal Mix build.
+  # It is not the production packaging format.
   defp escript do
     [
       main_module: OptimalEngine.CLI,
@@ -31,9 +31,8 @@ defmodule OptimalEngine.MixProject do
     ]
   end
 
-  # `mix release optimal` produces a self-contained OTP release tarball in
-  # _build/prod/rel/optimal/.  Wrap with Burrito for single-binary distribution
-  # by adding the burrito config block here when we're ready.
+  # `MIX_ENV=prod mix release optimal` produces a supervised OTP runtime in
+  # _build/prod/rel/optimal/. Use that shape for API/server deployment.
   defp releases do
     [
       optimal: [
