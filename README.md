@@ -41,6 +41,10 @@ Most users should start by dumping messy context into the engine. The engine
 preserves that input, proposes structure, asks follow-up questions, and waits for
 review before turning suggestions into durable workspace truth.
 
+For the full first-workspace story and copy-paste starter prompts, read
+[`docs/guides/first-workspace-story.md`](docs/guides/first-workspace-story.md)
+and [`templates/starter-prompts/`](templates/starter-prompts/).
+
 ## What You Can Build With It
 
 Optimal Engine is designed for operating systems around real work:
