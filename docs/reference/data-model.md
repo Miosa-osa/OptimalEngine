@@ -13,6 +13,12 @@ Tenant / Organization
         -> Sources, Signals, Claims, Facts, Memories, Workflows, Skills
 ```
 
+`Tenant` and `Organization` are the outer governance boundary. A single person
+can run one organization for themselves. A company can run many Workspaces under
+one organization. Projects, deals, engagements, campaigns, cases, accounts, and
+initiatives are usually Node types or Node labels inside a Workspace, not peers
+of Workspace.
+
 ## Core Lifecycle Objects
 
 | Object | Meaning | Owner |
@@ -125,3 +131,17 @@ Indexes/caches/projections are rebuildable.
 Markdown/wiki/app/API views are surfaces, not separate truth.
 ```
 
+## Enterprise Rule
+
+Multi-user use does not change the model. It makes scope mandatory:
+
+```text
+every durable write has tenant_id
+every workspace object has workspace_id
+every Node-scoped object has a stable node_id or explicit scope
+every external action has actor_id and audit_event_links
+every generated object has derivation_ledger_links
+```
+
+If a feature cannot answer which tenant, workspace, Node, actor, policy, and
+source evidence own it, it is not ready for shared organizational use.

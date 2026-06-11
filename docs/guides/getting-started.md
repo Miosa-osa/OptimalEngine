@@ -28,6 +28,8 @@ Optional:
 - Ollama for local embeddings and generation
 - Docker for packaged service deployment
 - RocksDB runtime if you want the optional RocksDB graph/knowledge backend
+- Optional multimodal tools such as document parsers, OCR, transcription,
+  video, vision, or embedding adapters
 
 RocksDB is not required for the default local engine. SQLite is the local
 canonical runtime store today.
@@ -155,6 +157,9 @@ markdown/wiki   = projection and editing surface
 See [Storage and projection map](../architecture/STORAGE-AND-PROJECTION-MAP.md)
 for the full storage map.
 
+For local, Docker, team, enterprise, and multimodal setup options, read
+[Installation and deployment](installation-and-deployment.md).
+
 ## 8. Ingest Or Search
 
 Ingest a quick text Signal:
@@ -217,7 +222,9 @@ connectors, scripts, or APIs.
 
 - [Engine structure](../architecture/ENGINE-STRUCTURE.md)
 - [Storage and projection map](../architecture/STORAGE-AND-PROJECTION-MAP.md)
+- [Installation and deployment](installation-and-deployment.md)
 - [Signal theory](../concepts/signal-theory.md)
+- [Integrations and imports](integrations-and-imports.md)
 - [Packages and exports](packages-and-exports.md)
 - [Agent and CLI SOP](agent-cli-sop.md)
 - [Mix tasks](mix-tasks.md)

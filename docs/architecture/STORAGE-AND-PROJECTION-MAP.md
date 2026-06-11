@@ -38,6 +38,70 @@ separate truth systems. They are projections or control surfaces over the engine
 | Markdown workspace | Human-operable projection and editing surface. | No by default. | Yes from engine state. | Edits re-enter as Source Packages or topology change requests. |
 | HTML/wiki/dashboard/API | Display and control projections. | No. | Yes. | Should be regenerated from engine state. |
 
+## Store Decision Matrix
+
+Use this table when adding a new feature, connector, agent action, parser, or
+projection. The question is not "where can I put this fastest?" The question is
+"which layer owns this lifecycle?"
+
+| Data | Goes in | Owner | Why |
+| --- | --- | --- | --- |
+| Organization, tenant, workspace, Node, Node type, membership, relationship, alias, routing rule | SQLite locally, Postgres target for production | Workspace / Topology | This is durable structure. It decides scope, permissions, routing, and projections. |
+| Raw text dump, message, note, event, API payload, connector payload, tool result | `source_packages` plus raw artifact storage when file-backed | Source Intake / Memory Core | Preserve evidence before interpretation. |
+| File, attachment, image, audio, video, PDF, archive | raw artifact storage plus `assets` row | Memory Core | The file is evidence; parser/model output is derived. |
+| Signal classification | signal metadata and compatibility context/search rows | Signal Pipeline | Classification routes and parses input; it is not accepted truth. |
+| Claim candidate | `claims` | Memory Core | A Claim records what a source appears to say before acceptance. |
+| Reviewed truth | `facts` | Memory Core | Facts require evidence, validity, confidence, precision, and review/policy state. |
+| Institutional meaning | `memory_objects` | Memory Core | Memory explains why Facts/Claims matter in context. |
+| Evidence, semantic, temporal, procedural links | `relationship_edges` | Memory Core / Topology depending on edge type | Graph links need ownership and permissions, not loose references. |
+| Parser/model/tool lineage | `derivation_ledger`, model/tool run records | Memory Core / Governance / Audit | Every generated artifact needs provenance and replay/rebuild information. |
+| Transcript/OCR/visual observation/embedding reference | `asset_extractions` and typed projection tables | Memory Core / Pipeline | These are governed derived artifacts linked to the raw asset. |
+| Vector, FTS, chunk, rerank, summary acceleration | index/cache/projection tables | Retrieval / Pipeline | Rebuild from canonical sources and derived extraction rows. |
+| Query result for a human or agent | `context_packages` | Retrieval / Context | Context is an authorized package, not random chunks. |
+| Task-local working state | `active_memory_pools`, observations, loaded context links | Active Memory Pools | Humans and agents need scoped RAM without corrupting durable truth. |
+| Repeated execution evidence | `workflow_traces`, execution records | Workflow / Skill Runtime | Workflows should be learned from evidence-linked work. |
+| Reusable procedure | `procedural_memory_objects`, `skill_packages` | Workflow / Skill Runtime | A Skill Package is validated operational knowledge, not a prompt file. |
+| MCP/API/script/connector/model definitions and calls | governance tables and audit events | Tool / Model Governance | External action must be registered, permissioned, schema-checked, and logged. |
+| Markdown node page, HTML page, wiki page, dashboard card, report, API response | projection/export records and generated files | Wiki / Export | These are views over engine state unless re-ingested as evidence. |
+| Delivery bundle/zip for a receiver/channel | Node-local `packages/` or workspace-level package when cross-node | Wiki / Export plus owning Node | Packages are receiver/channel bundles with source links and review state. |
+| Secrets/API keys | secret manager or deployment environment, referenced by connector/tool config | Governance / Deployment | Secrets do not belong in markdown, Source Packages, context, or package manifests. |
+
+## Multi-User And Enterprise Scope
+
+The hierarchy stays the same for a single person and for an organization:
+
+```text
+Tenant / Organization
+  -> Workspace
+    -> Node graph
+      -> Sources, Signals, Claims, Facts, Memories, Workflows, Skills
+```
+
+In a team or enterprise deployment, every durable row should carry or inherit:
+
+```text
+tenant_id
+workspace_id
+node_id / scope where applicable
+security_labels
+partition_ids
+created_by / actor_id
+policy_version
+audit_event_links
+```
+
+The purpose is not bureaucracy. It prevents the three common failures:
+
+```text
+one user's context leaking into another workspace
+agent/tool calls acting outside their granted scope
+project/package/workflow names resolving to the wrong Node
+```
+
+SQLite can exercise this model locally. Production multi-user use should move
+the canonical runtime tables to Postgres or an equivalent managed relational
+store while preserving the same ownership rules.
+
 ## Domain Ownership
 
 The storage substrate does not decide meaning. Domain layers do.
