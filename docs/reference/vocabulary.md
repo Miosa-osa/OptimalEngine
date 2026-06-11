@@ -1,67 +1,35 @@
-# Vocabulary Transforms
+# Vocabulary
 
-## Universal → Domain Mapping
+Use product terms consistently.
 
-OptimalOS uses universal terms internally. When communicating to specific domains,
-transform vocabulary for the receiver.
+| Term | Meaning |
+| --- | --- |
+| Tenant / Organization | Governance boundary for one person, team, or company. |
+| Workspace | Bounded operating area inside an organization. |
+| Node | Governed unit of context, purpose, relationships, state, and activity. |
+| Source Package | Preserved raw input with metadata, hash, scope, and policy. |
+| Signal | Classified interpretation of source material. |
+| Claim | Unaccepted assertion extracted from a source or observation. |
+| Fact | Reviewed/policy-accepted assertion. |
+| Memory Object | Source-backed meaning around Facts, Claims, sources, and relationships. |
+| Context Package | Authorized bundle of context for a query or task. |
+| Active Memory Pool | Task-scoped working memory shared by humans and agents. |
+| Workflow Trace | Evidence-linked trace of repeated or meaningful work. |
+| Skill Package | Governed reusable procedure with policy, tools, checks, and audit. |
+| Projection | Rebuildable surface such as markdown, wiki, HTML, app view, API response, or agent prompt. |
 
-### Universal → Business
-| Universal | Business |
-|-----------|----------|
-| Signal | Communication / Update |
-| S/N Ratio | Quality / Relevance |
-| Genre | Format / Template |
-| Node | Department / Division |
-| Context | Background / History |
-| Decay | Relevance / Freshness |
-| Intake | Capture / Record |
-| Edge | Relationship / Connection |
-| Entity | Contact / Organization |
-| Tier | Detail Level / Summary Level |
+## Domain Translation
 
-### Universal → Technical
-| Universal | Technical |
-|-----------|-----------|
-| Signal | Event / Payload |
-| S/N Ratio | Quality Score |
-| Genre | Schema / Template |
-| Node | Namespace / Module |
-| Context | State / Configuration |
-| Decay | TTL / Expiration |
-| Intake | Ingestion / Pipeline |
-| Edge | Foreign Key / Association |
-| Entity | Record / Resource |
-| Tier | Cache Level / Resolution |
+Different users may prefer different surface words:
 
-### Universal → Sales
-| Universal | Sales |
-|-----------|-------|
-| Signal | Lead / Update / Intel |
-| S/N Ratio | Lead Quality |
-| Genre | Pitch / Deck / One-pager |
-| Node | Account / Territory |
-| Context | Account History |
-| Decay | Pipeline Stage / Freshness |
-| Intake | CRM Entry |
-| Edge | Referral / Introduction |
-| Entity | Contact / Company |
-| Tier | Summary / Deep Dive |
+| Engine term | Business-facing wording | Personal-facing wording | Technical wording |
+| --- | --- | --- | --- |
+| Node | team, project, account, function | life area, project, person | namespace, module, scope |
+| Signal | update, note, event | thought, note, observation | event, payload |
+| Memory Object | company memory | remembered context | durable context object |
+| Context Package | briefing packet | prep packet | authorized context bundle |
+| Skill Package | SOP/playbook | routine | executable procedure |
 
-### Universal → Personal
-| Universal | Personal |
-|-----------|----------|
-| Signal | Thought / Observation |
-| S/N Ratio | Importance |
-| Genre | Journal / Note / Reflection |
-| Node | Life Area |
-| Context | Memory / Experience |
-| Decay | Relevance |
-| Intake | Journaling / Capture |
-| Edge | Connection / Pattern |
-| Entity | Person / Place / Thing |
-| Tier | Quick Note / Detailed Reflection |
+The engine can render friendly language, but internal architecture should use
+the canonical terms above.
 
-## Application Rule
-Before encoding a signal for a specific receiver, check their domain and transform
-the vocabulary. Alice and the engine use universal terms. Everyone else gets
-domain-appropriate language.

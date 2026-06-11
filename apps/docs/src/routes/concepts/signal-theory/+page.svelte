@@ -7,8 +7,8 @@
 
 <h1>Signal Theory</h1>
 <p>
-	The theoretical foundation the Optimal Engine is built to instantiate. Adapted from
-	<em>Signal Theory: The Architecture of Optimal Intent Encoding</em> (MIOSA Research, February 2026).
+	The classification model Optimal Engine uses to separate useful operating context from
+	noise before memory, retrieval, workflow, or agent execution touches it.
 </p>
 
 <h2>Root Objective</h2>
