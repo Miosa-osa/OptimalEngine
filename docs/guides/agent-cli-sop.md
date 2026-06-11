@@ -1,7 +1,7 @@
 # Agent And CLI SOP
 
-This guide defines how humans, coding agents, MCP clients, scripts, and apps
-should use Optimal Engine.
+This guide defines how humans, coding agents, MCP clients, A2A agents, scripts,
+and apps should use Optimal Engine.
 
 The rule is simple:
 
@@ -120,6 +120,7 @@ cron jobs
 local files
 third-party apps
 model calls
+A2A agents
 ```
 
 The agent should ask:
@@ -132,6 +133,7 @@ Which workspace/nodes may it affect?
 What credentials or scopes are required?
 What actions require confirmation?
 Should output become evidence, observation, or just a transient result?
+Are any remote agents available through A2A Agent Cards?
 ```
 
 Then the integration should be registered as disabled/draft until confirmed.
@@ -219,6 +221,26 @@ tool request
 This applies whether the tool is MCP, HTTP API, local script, CLI command, or
 scheduled job.
 
+## A2A Pattern
+
+A2A is for agent-to-agent collaboration. Use it when another agent is the right
+worker, reviewer, negotiator, or external collaborator.
+
+```text
+agent task
+  -> retrieve Context Package
+  -> identify remote agent and Agent Card
+  -> check workspace, actor, and delegation policy
+  -> send A2A task request
+  -> receive response, progress updates, or artifacts
+  -> preserve useful artifacts and observations
+  -> create pending Claims when knowledge-bearing
+  -> audit delegation and returned work
+```
+
+Do not use A2A for ordinary files, databases, calendars, repos, or APIs. Those
+are tool/data surfaces and should use CLI, MCP, connectors, APIs, or scripts.
+
 ## CLI Vs MCP Decision
 
 Use CLI when the command directly maps to the job and the output can be captured
@@ -244,6 +266,15 @@ browser-rendered pages
 calendar/email/CRM actions
 audit-sensitive operations
 provider-specific pagination or IDs
+```
+
+Use A2A when the other side is another agent:
+
+```text
+delegate a specialist review
+coordinate with a partner/supplier agent
+request an external agent's artifact
+stream progress from a long-running agent task
 ```
 
 If an agent starts reverse-engineering a complex app response through raw CLI
@@ -288,7 +319,8 @@ wiki refresh
 
 Current engine surfaces include `mix optimal.context.refresh_stale`,
 `OptimalEngine.MemoryCore.ContextRefreshScheduler`, `OptimalEngine.Wiki.Scheduler`,
-and connector governed runs.
+connector governed runs, and tool/model governance records that can represent
+delegated agent work.
 
 ## Projection Pattern
 

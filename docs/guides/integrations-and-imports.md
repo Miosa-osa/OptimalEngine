@@ -24,7 +24,7 @@ During setup, ask the user where their work already happens.
 | Code and product | GitHub, GitLab, local repos | issues, PRs, commits, releases, docs | Product/Project Nodes, implementation history, decisions |
 | Finance and ops | accounting exports, invoices, banking CSVs, metrics sheets | CSVs, reports, invoices, dashboards | money/metrics Nodes, Facts after review, reports |
 | Knowledge systems | Notion, Confluence, Obsidian, wikis, old folders | pages, databases, backlinks, exports | workspace import Sources, candidate Nodes, wiki projections |
-| Custom systems | MCP servers, APIs, scripts, cron jobs, internal tools | schemas, endpoints, payloads, logs | governed connector/tool definitions and Source Packages |
+| Custom systems | MCP servers, APIs, scripts, cron jobs, internal tools, A2A agents | schemas, endpoints, payloads, logs, Agent Cards | governed connector/tool/agent definitions and Source Packages |
 
 These examples are not requirements. They are prompts to help a person find the
 places where their context already lives.
@@ -42,6 +42,7 @@ governed integration surface.
 | CLI tool | A command-line tool maps directly to the job. | registered command/script surface, run record, captured output, Source Package or observation when useful. |
 | API integration | Organization has a REST/GraphQL/internal API. | connector/tool definition, schema, policy, call runs. |
 | Script or cron | Organization has local jobs or one-off scripts. | script tool definition, schedule, run record, Source Packages. |
+| A2A agent | Agent needs to delegate or coordinate with another agent. | remote Agent Card, grants, delegated task run, returned artifacts, observations. |
 | Workspace edit | Human or agent edits markdown/files directly. | Source Package or topology change request, then projection refresh. |
 
 The same outside system can have more than one connection type. For example, a
@@ -49,7 +50,7 @@ team may import old calendar exports manually, then later configure a calendar
 MCP or connector for live use.
 
 See [Tool surfaces and loops](tool-surfaces-and-loops.md) for the CLI vs MCP vs
-API decision rule.
+API vs A2A decision rule.
 
 ## Setup Questions
 
@@ -66,6 +67,7 @@ Where are code, product, or release records stored?
 Which tools should agents be allowed to call?
 Which command-line tools do you already use?
 Which MCP servers do you already use?
+Which other agents or A2A Agent Cards should this workspace know about?
 Which scheduled loops or cron jobs should run?
 Which systems are read-only, and which can be written to?
 Which data is private, sensitive, or restricted?
@@ -106,7 +108,7 @@ Old systems often have names that are too flat for Optimal Engine:
 | Call summaries as truth | Summaries omit evidence and may be wrong. | Recording/transcript as Source Package; summary as derived output; Claims reviewed before Facts. |
 | Random "packages" at workspace root | Receiver and ownership are unclear. | Node-owned package templates with manifest and source links. |
 
-## CLI, MCP, API, Script, Or Connector
+## CLI, MCP, API, Script, Connector, Or A2A
 
 Do not force every integration into one shape.
 
@@ -119,6 +121,10 @@ MCP/API/connector
 
 script/cron
   -> best when the organization already has a repeatable local job
+
+A2A
+  -> best when the other side is another agent that can receive tasks,
+     negotiate work, stream progress, or return artifacts
 ```
 
 Examples:
@@ -132,6 +138,7 @@ Examples:
 | Send email or update calendar. | MCP/API/connector with user grants and audit. |
 | Sync chat, CRM, docs, or project systems. | Connector sync or provider API. |
 | Run daily/weekly refresh. | Cron/scheduler calling engine CLI/API. |
+| Delegate review or work to another agent. | A2A with Agent Card discovery and task/audit records. |
 
 Whatever surface is used, useful output should return to Optimal Engine as a
 Source Package, observation, pending Claim, package delivery record, or audit
@@ -191,7 +198,7 @@ Agents should follow this order:
 ```text
 resolve organization/workspace scope
   -> identify the outside system or import source
-  -> check connector/tool grant
+  -> check connector/tool/agent grant
   -> preserve raw payloads and files
   -> classify Signals
   -> route uncertain items to inbox/review

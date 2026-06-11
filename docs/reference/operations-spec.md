@@ -50,6 +50,22 @@ task
   -> create pending Claim when useful
 ```
 
+## Agent Collaboration Operation
+
+Use agent-to-agent collaboration when another agent is the right actor.
+
+```text
+task
+  -> load Context Package
+  -> resolve remote agent definition and Agent Card
+  -> check delegation policy and partition grants
+  -> send A2A task request
+  -> receive progress, response, or artifact
+  -> preserve useful output as Source Package or observation
+  -> create pending Claims when knowledge-bearing
+  -> record delegation audit
+```
+
 ## Workflow Promotion
 
 ```text
@@ -68,6 +84,6 @@ repeated episodes
 | Topology review | Agent-proposed Nodes/relationships become durable topology. |
 | Claim review | Extracted assertions become Facts. |
 | Tool grant review | Agents call external tools with write capability. |
+| Agent delegation review | Agents delegate work to another agent or accept returned artifacts. |
 | Workflow review | Repeated traces become reusable procedures. |
 | Skill enablement review | Skill Packages become executable guidance. |
-

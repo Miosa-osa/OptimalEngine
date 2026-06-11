@@ -66,10 +66,14 @@ Read these in order:
    operate the system without bypassing governance.
 
 14. [Tool surfaces and loops](guides/tool-surfaces-and-loops.md)  
-   When to use CLI, MCP, APIs, connectors, scripts, and scheduled jobs, and how
-   self-updating loops feed back into memory.
+   When to use CLI, MCP, A2A, APIs, connectors, scripts, and scheduled jobs,
+   and how self-updating loops feed back into memory.
 
-15. [Build goal alignment](reference/build-goal-alignment.md)  
+15. [Agentic loops](guides/agentic-loops.md)
+   How goal-driven and scheduled loops use context, tools, validation gates,
+   stop conditions, observations, workflow traces, and review.
+
+16. [Build goal alignment](reference/build-goal-alignment.md)
    What is built now, what is only a spine, what still needs work, and which
    tests/probes prove it.
 

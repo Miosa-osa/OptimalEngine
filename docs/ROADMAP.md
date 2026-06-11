@@ -5,7 +5,8 @@ agent-operated workspace.
 
 It does not need to be the main frontend. Frontends such as Business OS,
 dashboards, mobile apps, internal tools, or agent CLIs should connect to it
-through CLI, API, MCP/tools, SDKs, markdown projections, and wiki/export output.
+through CLI, API, MCP/tools, A2A agent delegation, SDKs, markdown projections,
+and wiki/export output.
 
 ## What This System Is
 
@@ -36,6 +37,7 @@ flowchart LR
   Agent[Agent] --> MCP[MCP / tools]
   Agent --> API[API]
   Agent --> CLI
+  Agent --> A2A[A2A remote agents]
 
   Connector[Connector / script / cron] --> API
   Connector --> Intake[Source Intake]
@@ -44,6 +46,7 @@ flowchart LR
   Markdown --> Engine
   BusinessOS --> API
   MCP --> Engine
+  A2A --> Engine
   API --> Engine
   Intake --> Engine
 
@@ -56,6 +59,7 @@ flowchart LR
 | CLI | Local setup, initiation, inspection, retrieval, verification, and scripted operation. | Become a separate truth system. |
 | API | Business OS, dashboards, services, SDKs, and automation clients. | Invent a different data model. |
 | MCP/tools | Agent-safe access to memory, retrieval, workspace, and tool actions. | Let agents bypass permissions or review. |
+| A2A agents | Delegating or coordinating work with other agents. | Replace tool/data integrations such as files, databases, calendars, or repos. |
 | Markdown workspace | Human/agent-operable projection and editing surface. | Silently overwrite canonical truth. |
 | Wiki/export | Human-readable pages, reports, packages, and app-ready projections. | Decide what is true. |
 | Business OS / external UI | Product interface over engine state. | Reimplement memory, retrieval, or governance separately. |
@@ -231,7 +235,7 @@ audit and evaluation records
 It does not replace markdown or apps. It makes them consistent, searchable,
 auditable, permission-aware, and rebuildable.
 
-## Why Connectors, MCPs, APIs, Scripts, And Cron Exist
+## Why Connectors, MCPs, APIs, A2A, Scripts, And Cron Exist
 
 Different users already work across different systems. Optimal Engine should not
 force everything through one interface.
@@ -239,6 +243,7 @@ force everything through one interface.
 | Integration type | Use it when | Engine rule |
 | --- | --- | --- |
 | MCP | An agent needs a standard tool protocol. | Register tool, validate input/output, audit calls. |
+| A2A | Another agent needs to receive, negotiate, coordinate, stream progress, or return artifacts. | Register remote agent, check delegation policy, preserve returned work. |
 | Connector | A third-party system needs sync/import. | Preserve raw payloads, scope credentials, create Sources/observations. |
 | API | Business OS or another app needs programmatic control. | Use engine objects and lifecycle rules. |
 | Script | A local workflow needs deterministic automation. | Treat output as Source Package or observation. |
@@ -343,7 +348,7 @@ Stale packages refresh safely.
 Goal:
 
 ```text
-Agents can work through CLI/API/MCP/tools without bypassing governance.
+Agents can work through CLI/API/MCP/tools/A2A without bypassing governance.
 ```
 
 Done when:
@@ -352,6 +357,8 @@ Done when:
 Tool definitions, model operations, permissions, schemas, confirmations, call
 runs, observations, and audit are complete.
 Codex, Claude Code, MCP clients, scripts, and Business OS agents use the same backend.
+Remote agents can be delegated to only through reviewed agent definitions,
+Agent Cards, grants, returned-artifact preservation, and audit.
 ```
 
 ### Gate 7: Workflow And Skill Lifecycle
@@ -426,8 +433,9 @@ multimodal asset/extraction tables
 reality checks and focused tests
 ```
 
-The product is not complete until the gates above are closed through CLI/API/MCP
-and Business OS integration. The next work should stay backend-first.
+The product is not complete until the gates above are closed through CLI/API/MCP,
+A2A where agent delegation is needed, and Business OS integration. The next
+work should stay backend-first.
 
 ## How To Decide Where New Work Belongs
 
@@ -440,7 +448,7 @@ Does it preserve evidence?
 Does it create Claims or Facts?
 Can it be rebuilt?
 Who can retrieve it?
-Which interface should expose it first: CLI, API, MCP, markdown, or export?
+Which interface should expose it first: CLI, API, MCP, A2A, markdown, or export?
 What test proves it?
 ```
 

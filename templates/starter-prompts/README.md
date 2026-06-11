@@ -26,4 +26,5 @@ silently rewrite the user's workspace.
 | `workspace-initiation.md` | The user wants to start from a messy explanation, pasted notes, or a folder of files. |
 | `company-wiki-import.md` | The user already has a company wiki, Notion/Confluence export, Obsidian vault, markdown folder, or document dump. |
 | `package-inventory.md` | The user wants to define recurring things they send out, such as proposals, contracts, SOPs, reports, and client requirement documents. |
-
+| `agentic-loop-design.md` | The user wants a repeatable loop with phases, validation gates, stop conditions, and memory/audit outputs. |
+| `youtube-learning-import.md` | The user wants to save a video, transcript, lecture, podcast, or media source into a learning/research workspace. |

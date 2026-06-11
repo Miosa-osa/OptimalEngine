@@ -188,6 +188,7 @@ surfaces over the same backend state.
 | CLI | setup, initiate, inspect, search, render, verify | deterministic local control surface |
 | API | dashboards, apps, services | programmatic access |
 | MCP/tools | agent-safe commands | governed tool calls |
+| A2A agents | rarely direct; configured as collaborators | delegated agent work and returned artifacts |
 | Wiki/export | browse and share readable state | load curated/cited pages |
 | Context Packages | rarely inspected directly | primary task context for agents |
 | Active Memory Pools | task collaboration view | task-local working memory |
@@ -224,7 +225,7 @@ workspace slug/name
 External systems do not become trusted memory automatically.
 
 ```text
-MCP / connector / API / script / cron / tool call
+MCP / connector / API / script / cron / tool call / A2A delegation
   -> registered tool or connector definition
   -> credentials/scopes/partition policy
   -> governed execution
@@ -240,6 +241,7 @@ The integration surface can be general or specific:
 | MCP server | General tool protocol | calendar, docs, repo, task manager access |
 | Connector | Product-specific sync adapter | mail, tickets, CRM, source control |
 | API adapter | Specific integration | a custom internal service |
+| A2A agent | Agent collaboration | specialist review, partner/supplier agent, delegated long-running task |
 | Script/cron | Specific local automation | daily import, report generation, backup |
 | Model call | Governed model operation | classification, extraction, summarization, judging |
 

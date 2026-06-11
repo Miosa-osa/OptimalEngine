@@ -116,6 +116,7 @@ The storage substrate does not decide meaning. Domain layers do.
 | Active Memory Pools | task-scoped working state for humans and agents | pools, observations, loaded context links |
 | Workflow / Skill Runtime | traces, generalized workflows, procedures, skill packages, execution records | workflow and skill tables |
 | Tool / Model Governance | registered tools, MCP/API/script/model calls, schemas, grants, call audit | tool/model definitions and call runs |
+| Agent Collaboration | remote agent definitions, Agent Cards, delegated task runs, returned artifacts | A2A registry/projection records and audit, backed by the governance spine first |
 | Wiki / Export | markdown/wiki/html/report/package projections | export records, wiki pages, projection revisions |
 | Evaluation / Recovery | benchmark runs, cases, rebuild checks, health probes | evaluation and recovery records |
 
@@ -128,6 +129,7 @@ The storage substrate does not decide meaning. Domain layers do.
 | CLI | setup, initiation, topology inspection, retrieval, rendering, verification | all domain layer interfaces |
 | API | app/dashboard/service access | same engine state as CLI |
 | MCP/tools | governed agent access to retrieval, memory, workspace, and tools | tool governance, context packages, active pools |
+| A2A agents | delegation to other agents and returned artifact capture | agent collaboration records, context packages, active pools, audit |
 | Desktop/app UI | workspace switcher, node pages, memory views, runs, dashboards | API projections over engine state |
 | Browser/Raycast extensions | quick capture, search, ask, add memory | API, source intake, retrieval |
 | SDKs | typed integration layer for apps and agents | API contracts |

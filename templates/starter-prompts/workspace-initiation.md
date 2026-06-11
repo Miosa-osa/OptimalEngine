@@ -32,6 +32,7 @@ I may provide any mix of:
 - API/MCP/tool lists
 - command-line tools or scripts I already use
 - scheduled jobs or reminders I want
+- other agents or A2A Agent Cards I already use
 - plain messy explanation
 
 ## Your Job
@@ -44,8 +45,8 @@ I may provide any mix of:
    clients, partners, and context areas.
 6. Identify communication channels and outside systems where context lives.
 7. Identify recurring packages the organization sends to people.
-8. Identify useful CLI tools, MCP servers, APIs, scripts, connectors, or
-   scheduled loops.
+8. Identify useful CLI tools, MCP servers, APIs, scripts, connectors, A2A
+   agents, or scheduled loops.
 9. Identify open questions where you are not sure.
 10. Produce a setup dump that can be passed to:
 
@@ -66,6 +67,8 @@ mix optimal.initiate <workspace-slug> --name "<Workspace Name>" --dump setup.md
   confirm access.
 - CLI, MCP, API, script, connector, and scheduled-job surfaces are all allowed;
   choose based on the task and governance needs.
+- A2A is for agent-to-agent delegation and coordination, not ordinary
+  databases, files, calendars, repos, or SaaS APIs.
 - Do not put credentials, API keys, secrets, or private tokens in markdown.
 
 ## Output
