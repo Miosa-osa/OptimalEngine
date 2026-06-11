@@ -204,6 +204,9 @@ reviewed topology change instead of silently overwriting truth.
 See [`docs/architecture/STORAGE-AND-PROJECTION-MAP.md`](docs/architecture/STORAGE-AND-PROJECTION-MAP.md)
 for the full map.
 
+For the recommended documentation path, start at
+[`docs/README.md`](docs/README.md).
+
 ## Repository Layout
 
 The top-level folders are product surfaces, not random piles of code:
