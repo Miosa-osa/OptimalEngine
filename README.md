@@ -275,8 +275,17 @@ for the full map.
 For scope switching rules across organization, workspace, Node, and task pool,
 read [`docs/guides/scope-switching.md`](docs/guides/scope-switching.md).
 
+For installation profiles, local vs enterprise storage, Docker, multimodality,
+and adapter setup, read
+[`docs/guides/installation-and-deployment.md`](docs/guides/installation-and-deployment.md).
+
 For canonical naming, aliases, and how the engine handles user-specific labels,
 read [`docs/guides/naming-and-aliases.md`](docs/guides/naming-and-aliases.md).
+
+For common communication channels, imports from old systems, connector types,
+and recurring package types such as proposals, contracts, SOPs, and client
+requirements, read
+[`docs/guides/integrations-and-imports.md`](docs/guides/integrations-and-imports.md).
 
 For the recommended documentation path, start at
 [`docs/README.md`](docs/README.md).

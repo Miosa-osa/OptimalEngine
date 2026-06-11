@@ -1,4 +1,4 @@
-# Multimodal Open-Source Stack
+# Multimodal Adapter Stack
 
 Optimal Engine is local-first and self-hostable. Multimodal support should
 therefore be built around open-source tools that can run locally, while still
@@ -41,6 +41,29 @@ The code-level registry lives at:
 ```text
 lib/optimal_engine/pipeline/multimodal_tool_registry.ex
 ```
+
+## Hosted Adapter Options
+
+Hosted services can be useful for teams that want managed quality, throughput,
+or a single cross-modal embedding space. They must still use the same adapter
+and derivation path as local tools.
+
+Current hosted options to evaluate:
+
+| Capability | Option | Notes |
+| --- | --- | --- |
+| Unified multimodal embeddings | Google Gemini API / Vertex AI `gemini-embedding-2` | Google's current docs describe it as a multimodal embedding model that maps text, images, video, audio, and documents into one embedding space. |
+| Vertex AI compatibility | Google `multimodalembedding@001` | Supports multimodal embeddings for image, text, and video use cases; useful where existing Vertex AI workflows use that model. |
+| Document/image/video retrieval embeddings | Voyage multimodal embeddings | Hosted multimodal embeddings for interleaved text and visual data such as screenshots, PDFs, slides, tables, figures, and video. |
+| Text/image/PDF multimodal embeddings | Jina embeddings | Hosted multimodal embedding models for text, images, and visually rich documents. |
+
+Hosted adapters should record provider, model, version, request hash, output
+hash or reference, cost, latency, security labels, and derivation ledger links.
+Credentials belong in deployment secrets or provider-specific secret stores, not
+in markdown, package manifests, Source Packages, or Context Packages.
+
+These providers are optional. The engine's contract is the adapter record shape,
+not any single provider.
 
 ## Recommended Pipelines
 
@@ -279,3 +302,10 @@ pipeline where possible.
 - ColPali / ColQwen: <https://github.com/illuin-tech/colpali>
 - OpenCLIP: <https://github.com/mlfoundations/open_clip>
 - ImageBind: <https://github.com/facebookresearch/ImageBind>
+
+## Hosted References
+
+- Google Gemini API embeddings: <https://ai.google.dev/gemini-api/docs/embeddings>
+- Google Vertex AI / Gemini Enterprise multimodal embeddings: <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/embeddings/get-multimodal-embeddings>
+- Voyage multimodal embeddings: <https://docs.voyageai.com/docs/multimodal-embeddings>
+- Jina embeddings: <https://jina.ai/embeddings/>

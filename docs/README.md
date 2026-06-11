@@ -29,31 +29,39 @@ Read these in order:
    Which substrate stores what, which layer owns meaning, and which surfaces
    display/control the state.
 
-5. [Signal theory](concepts/signal-theory.md)  
+5. [Installation and deployment](guides/installation-and-deployment.md)  
+   Local CLI setup, Docker, production/organization setup, store roles,
+   multimodality profiles, and enterprise readiness.
+
+6. [Signal theory](concepts/signal-theory.md)  
    How the engine breaks noisy input into Mode, Genre, Type, Format, and
    Structure before routing, extracting, packaging, or retrieving it.
 
-6. [Workspace filesystem](guides/workspace-filesystem.md)  
+7. [Workspace filesystem](guides/workspace-filesystem.md)  
    What the markdown/file projection looks like and how edits flow back into
    governed engine state.
 
-7. [Scope switching](guides/scope-switching.md)  
+8. [Scope switching](guides/scope-switching.md)  
    How organization, workspace, Node, and Active Memory Pool scope affect
    permissions, retrieval, routing, tools, and exports.
 
-8. [Naming and aliases](guides/naming-and-aliases.md)  
+9. [Naming and aliases](guides/naming-and-aliases.md)  
    How user language maps to canonical engine objects without creating routing
    noise.
 
-9. [Packages and exports](guides/packages-and-exports.md)  
+10. [Packages and exports](guides/packages-and-exports.md)  
    Where receiver/channel bundles live, how they differ from exports, and why
    Node-owned packages stay under Nodes.
 
-10. [Agent and CLI SOP](guides/agent-cli-sop.md)  
+11. [Integrations and imports](guides/integrations-and-imports.md)  
+   How to inventory existing systems, connect common communication channels,
+   import old context, and define recurring package types.
+
+12. [Agent and CLI SOP](guides/agent-cli-sop.md)  
    How a human, Codex, Claude Code, an MCP client, a script, or an app should
    operate the system without bypassing governance.
 
-11. [Build goal alignment](reference/build-goal-alignment.md)  
+13. [Build goal alignment](reference/build-goal-alignment.md)  
    What is built now, what is only a spine, what still needs work, and which
    tests/probes prove it.
 
@@ -157,6 +165,10 @@ flowchart LR
 | ETS/RocksDB/Mnesia/Riak-style backends | Optional graph/knowledge backends; not the main workspace database today. |
 | Markdown/files | Human-operable projection and editing surface. |
 | HTML/wiki/API/app views | Projection and control surfaces. |
+
+For install profiles, Docker guidance, hosted/local multimodal adapter options,
+and enterprise readiness checks, read
+[Installation and deployment](guides/installation-and-deployment.md).
 
 ## User And Agent Flow
 

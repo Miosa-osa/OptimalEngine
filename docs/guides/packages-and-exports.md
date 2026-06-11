@@ -21,6 +21,43 @@ Who generated it?
 Who reviewed it?
 ```
 
+Packages are named in the user's language. A proposal can stay a proposal. A
+contract can stay a contract. Internally, the engine treats each one as a
+receiver/channel bundle with source links, review state, and delivery formats.
+
+## Common Package Types
+
+| Package type | Common receiver | Common stage or situation | Typical contents |
+| --- | --- | --- | --- |
+| Proposal | prospect, client, partner | sales, partnership, project approval | offer, scope, pricing, proof, timeline, next step |
+| Contract | client, vendor, partner | agreement, renewal, procurement | terms, signatures, exhibits, attachments |
+| SOP document | team, client, operator | onboarding, operations, training | steps, checks, tools, roles, exceptions |
+| Client requirements document | client, delivery team | discovery, implementation | goals, constraints, requirements, acceptance criteria |
+| Handoff packet | team, client, partner | delivery transition | context, files, decisions, open risks, contacts |
+| Report | executive, board, client, internal team | review cadence | metrics, narrative, findings, asks, source links |
+| Onboarding packet | new hire, client, partner | onboarding | profile, access, docs, SOPs, first tasks |
+| Evidence packet | reviewer, auditor, legal, compliance | review, dispute, audit | source links, facts, claims, chronology, attachments |
+
+These are examples, not a fixed taxonomy. Organizations can define their own
+package types and aliases.
+
+## Package Lifecycle
+
+```text
+package template
+  -> package instance
+  -> source selection
+  -> draft
+  -> review
+  -> delivery artifact
+  -> delivery/audit record
+  -> optional re-ingest as source evidence
+```
+
+The package itself is not automatically truth. It is a generated or assembled
+communication bundle. If a sent proposal, contract, or SOP becomes evidence, it
+should re-enter as a Source Package with delivery metadata.
+
 ## Placement Rule
 
 Put a package where its ownership lives.
@@ -68,6 +105,16 @@ source_object_links:
     id: fact_current_pricing
 review_status: draft
 generated_by: agent_or_human_id
+```
+
+`package_type` should use the organization's term when useful:
+
+```yaml
+package_type: proposal
+display_name: Platform Launch Proposal
+receiver_type: prospect
+stage: sales_evaluation
+delivery_formats: [pdf, docx, zip]
 ```
 
 ## Workspace Package Shape
