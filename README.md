@@ -182,6 +182,27 @@ Markdown edit -> Source Package or topology change -> reviewed engine state
 Engine state  -> Markdown/wiki/API/dashboard projection
 ```
 
+## Repository Layout
+
+The top-level folders are product surfaces, not random piles of code:
+
+| Path | Purpose |
+| --- | --- |
+| `lib/` | Elixir/OTP runtime: topology, intake, memory, retrieval, API, wiki/export, governance, evaluation. |
+| `test/` | Runtime, API, topology, wiki, memory, connector, and evaluation tests. |
+| `apps/` | App surfaces such as docs and MCP server packages. |
+| `desktop/` | Desktop/app shell surface. |
+| `extensions/` | Browser and Raycast integration surfaces. |
+| `sdks/` | TypeScript, Python, and UI/client SDKs. |
+| `site/` | Public site surface. |
+| `skills/` | Agent skill package for using the engine from coding assistants. |
+| `sample-workspace/` | Example workspace convention for new users. |
+| `deploy/` | Docker/production deployment assets. |
+| `docs/` | Reference docs for concepts, architecture, data model, operations, and build alignment. |
+
+Generated dependency folders, local databases, build outputs, and generated
+binaries are intentionally ignored. They should be rebuilt locally, not tracked.
+
 ## First-Run Initiation
 
 The first real workflow is not a perfect form. It is a data dump.
@@ -236,7 +257,7 @@ flowchart TB
   Workflow[Workflow and Skill Runtime]
   Governance[Tool and Model Governance]
   Eval[Evaluation and Recovery]
-  Store[(SQLite now / Postgres target)]
+  Store[(SQLite now / Postgres target / optional knowledge backends)]
   Export[Wiki / Markdown / HTML / API projections]
 
   Surfaces --> Gateway
@@ -447,11 +468,16 @@ The target production database is Postgres. The architecture is built so the
 physical store can change while layer ownership stays the same.
 
 ```text
-SQLite now
-Postgres target
-Indexes/caches as rebuildable projections
-Markdown/files as export surfaces
+SQLite now: local canonical runtime store
+Postgres target: production canonical runtime store
+FTS/vector/index/cache rows: rebuildable projections
+ETS/RocksDB/Mnesia/Riak knowledge backends: optional graph/triple-store engines
+Markdown/files/wiki/HTML/API: export and control surfaces
 ```
+
+RocksDB is not the main workspace database today. It is an optional persistent
+knowledge backend for graph/triple-store workloads when the runtime has the
+required native RocksDB library available.
 
 ## Verification
 
@@ -482,7 +508,7 @@ mix test test/wiki/service_test.exs \
 Current result:
 
 ```text
-16 tests, 0 failures
+19 tests, 0 failures
 ```
 
 Focused multimodal/memory path:
