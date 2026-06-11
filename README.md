@@ -207,6 +207,9 @@ for the full map.
 For the recommended documentation path, start at
 [`docs/README.md`](docs/README.md).
 
+For the backend-first build plan, layer guide, and diagrams showing what each
+part is used for, read [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 ## Repository Layout
 
 The top-level folders are product surfaces, not random piles of code:
@@ -571,24 +574,24 @@ The runtime already includes:
 
 ## Roadmap
 
-Next engineering slices:
+The backend-first roadmap is organized as build gates:
 
-1. Expand initiation review flows: approve/reject proposed Nodes in bulk, attach
-   proposed integrations to Nodes, and generate setup questions for apps/agents.
-2. Finish the wiki/export surface: backlinks, import existing markdown,
-   rebuild/diff commands, link repair, HTTP/API routes, and projection edit
-   re-ingestion.
-3. Harden source-first intake so every edit, connector payload, tool result, and
-   API request enters through Source Package preservation or a clear quarantine.
-4. Expand multimodal provider wrappers for real Docling, Marker, Whisper,
-   FFmpeg, OCR, visual reasoning, and cross-modal embedding outputs.
-5. Expand Retrieval into full FTS/vector/graph/temporal/workflow recall with
-   authorization during candidate generation.
-6. Add review UI/API flows for pending Claims, contradictions, stale knowledge,
-   and supersession decisions.
-7. Deepen workflow and Skill Package promotion from repeated Active Pool work.
-8. Add benchmark dashboards, recovery/rebuild jobs, and large-scale recall
-   evaluation.
+```text
+Workspace Topology
+  -> Source-First Intake
+  -> Signal and Multimodal Processing
+  -> Claim, Fact, and Memory Review
+  -> Retrieval and Context Packages
+  -> Agent Runtime and Tool Governance
+  -> Workflow and Skill Lifecycle
+  -> Projection and Business OS Integration
+  -> Evaluation, Recovery, and Production Hardening
+```
+
+Read the full roadmap, diagrams, layer guide, and "what each part is used for"
+here:
+
+[`docs/ROADMAP.md`](docs/ROADMAP.md)
 
 ## Development Rule
 
