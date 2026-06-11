@@ -123,7 +123,7 @@ defmodule OptimalEngine.CLI do
   # Shortdocs are hardcoded here because escripts strip @shortdoc metadata.
   @shortdocs %{
     "setup" => "Create a workspace with starter Nodes, rhythm, projections, and agent SOP",
-    "initiate" => "Start a workspace from messy context and leave proposals pending review",
+    "initiate" => "Start a workspace from messy context and apply conservative Node proposals",
     "init" => "Scaffold a markdown workspace directory from the sample template",
     "bootstrap" => "Compile, migrate, ingest sample workspace, and report status",
     "migrate" => "Apply or inspect store migrations",

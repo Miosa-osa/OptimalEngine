@@ -6,9 +6,9 @@ defmodule Mix.Tasks.Optimal.Initiate do
   reviewable structure proposals.
 
   The dump is preserved as a Source Package, converted into an unreviewed setup
-  Claim, and scanned for candidate Nodes. Candidate Nodes are written as pending
-  topology-change requests. They are not accepted as durable topology until
-  reviewed.
+  Claim, and scanned for candidate Nodes. By default, conservative Node
+  proposals are applied immediately so the workspace is usable. Use
+  `--review-only` to leave proposals pending instead.
 
   ## Usage
 
@@ -26,6 +26,7 @@ defmodule Mix.Tasks.Optimal.Initiate do
     * `--no-files` - skip markdown projection files
     * `--no-rhythm` - skip rhythm folders
     * `--no-agent-sop` - skip AGENTS.md projection
+    * `--review-only` - preserve proposals without applying them
   """
 
   use Mix.Task
@@ -48,7 +49,8 @@ defmodule Mix.Tasks.Optimal.Initiate do
           no_starter_nodes: :boolean,
           no_files: :boolean,
           no_rhythm: :boolean,
-          no_agent_sop: :boolean
+          no_agent_sop: :boolean,
+          review_only: :boolean
         ]
       )
 
@@ -70,6 +72,7 @@ defmodule Mix.Tasks.Optimal.Initiate do
         write_files: not Keyword.get(opts, :no_files, false),
         write_rhythm: not Keyword.get(opts, :no_rhythm, false),
         write_agent_sop: not Keyword.get(opts, :no_agent_sop, false),
+        review_only: Keyword.get(opts, :review_only, false),
         actor_id: "mix optimal.initiate"
       }
       |> maybe_put(:dump_path, Keyword.get(opts, :dump))
@@ -96,6 +99,8 @@ defmodule Mix.Tasks.Optimal.Initiate do
 
     Starter Nodes:  #{length(result.setup.nodes)}
     Proposals:      #{length(result.topology_change_requests)}
+    Applied:        #{length(result.applied_topology_changes)}
+    Accepted Nodes: #{length(result.accepted_nodes)}
     Integrations:   #{length(result.proposed_integrations)}
 
     Proposed Nodes:
@@ -103,6 +108,9 @@ defmodule Mix.Tasks.Optimal.Initiate do
 
     Integration Surfaces:
     #{format_integrations(result.proposed_integrations, result.registered_tool_definitions)}
+
+    Accepted Nodes:
+    #{format_nodes(result.accepted_nodes)}
 
     Open Questions:
     #{format_list(result.open_questions)}
@@ -143,6 +151,15 @@ defmodule Mix.Tasks.Optimal.Initiate do
 
       "  - #{integration.surface_type}:#{integration.slug}  #{integration.name}  [#{tool}, disabled]"
     end)
+    |> Enum.join("\n")
+  end
+
+  defp format_nodes([]),
+    do: "  (none applied; run without --review-only to apply conservative candidates)"
+
+  defp format_nodes(nodes) do
+    nodes
+    |> Enum.map(fn node -> "  - #{node.kind}:#{node.slug}  #{node.name}" end)
     |> Enum.join("\n")
   end
 

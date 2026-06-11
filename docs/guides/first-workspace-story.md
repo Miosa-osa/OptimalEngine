@@ -95,6 +95,11 @@ structure.
 mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 ```
 
+By default, conservative Node candidates from explicit headings, labels, and
+lists are applied immediately so the user gets a usable workspace. The dump
+itself remains source evidence and the setup Claim remains unreviewed. Add
+`--review-only` when every topology change must wait for human or policy review.
+
 The dump can describe:
 
 ```text

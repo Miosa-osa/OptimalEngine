@@ -12,24 +12,29 @@ defmodule Mix.Tasks.Optimal.Topology do
       mix optimal.topology --workspace default
       mix optimal.topology --nodes-only
       mix optimal.topology --skills-only
+      mix optimal.topology approve <request-id> --workspace default:my-workspace --apply
+      mix optimal.topology reject <request-id> --workspace default:my-workspace
   """
 
   use Mix.Task
 
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Topology
+  alias OptimalEngine.WorkspaceTopology
 
   @impl Mix.Task
   def run(args) do
     Mix.Task.run("app.start")
 
-    {opts, _, _} =
+    {opts, rest, _} =
       OptionParser.parse(args,
         strict: [
           tenant: :string,
           workspace: :string,
           nodes_only: :boolean,
-          skills_only: :boolean
+          skills_only: :boolean,
+          apply: :boolean,
+          actor: :string
         ]
       )
 
@@ -38,6 +43,22 @@ defmodule Mix.Tasks.Optimal.Topology do
     nodes_only = Keyword.get(opts, :nodes_only, false)
     skills_only = Keyword.get(opts, :skills_only, false)
 
+    case rest do
+      ["approve", request_id | _] ->
+        review_request(request_id, :approve, tenant_id, workspace_id, opts)
+
+      ["reject", request_id | _] ->
+        review_request(request_id, :reject, tenant_id, workspace_id, opts)
+
+      [] ->
+        print_summary(tenant_id, workspace_id, nodes_only, skills_only)
+
+      _ ->
+        Mix.raise("Usage: mix optimal.topology [approve|reject <request-id>] [--workspace ID]")
+    end
+  end
+
+  defp print_summary(tenant_id, workspace_id, nodes_only, skills_only) do
     IO.puts("")
     IO.puts("  Workspace topology")
     IO.puts("  tenant:    #{tenant_id}")
@@ -53,6 +74,35 @@ defmodule Mix.Tasks.Optimal.Topology do
 
     IO.puts("")
   end
+
+  defp review_request(request_id, decision, tenant_id, workspace_id, opts) do
+    apply? = Keyword.get(opts, :apply, false)
+    actor_id = Keyword.get(opts, :actor, "mix optimal.topology")
+
+    case WorkspaceTopology.review_change_request(request_id, decision,
+           tenant_id: tenant_id,
+           workspace_id: workspace_id,
+           actor_id: actor_id,
+           apply: apply?
+         ) do
+      {:ok, %{request: request, applied: applied}} ->
+        IO.puts("")
+        IO.puts("  Topology change #{request.review_status}")
+        IO.puts("  " <> String.duplicate("-", 60))
+        IO.puts("  Request:   #{request.id}")
+        IO.puts("  Workspace: #{request.workspace_id}")
+        IO.puts("  Type:      #{request.request_type}")
+        IO.puts("  Applied:   #{format_applied(applied)}")
+        IO.puts("")
+
+      {:error, reason} ->
+        Mix.raise("optimal.topology #{decision} failed: #{inspect(reason)}")
+    end
+  end
+
+  defp format_applied(nil), do: "no"
+  defp format_applied(%{id: id}), do: id
+  defp format_applied(other), do: inspect(other)
 
   defp print_nodes(tenant_id, workspace_id) do
     opts =

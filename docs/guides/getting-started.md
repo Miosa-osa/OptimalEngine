@@ -80,6 +80,13 @@ Use initiation when the user starts with a messy dump:
 mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 ```
 
+This creates the workspace, preserves the dump as evidence, applies
+conservative Node candidates, writes markdown projections, and leaves detected
+integration/tool surfaces disabled until the user scopes credentials and
+permissions. For stricter environments, add `--review-only` and approve
+individual topology requests later with `mix optimal.topology approve <id>
+--workspace <workspace-id> --apply`.
+
 If the user needs help creating that dump, use the starter prompts:
 
 ```text
