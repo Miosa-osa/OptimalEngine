@@ -26,15 +26,18 @@ I may provide:
 
 1. Identify the loop goal.
 2. Identify the owning Workspace and Node.
-3. Identify required context sources.
-4. Identify allowed tool surfaces: CLI, MCP, API, connector, script, scheduler,
+3. If the owning Node is unclear, ask whether to create a new Node or attach
+   the loop to an existing Node.
+4. Identify required context sources.
+5. Identify allowed tool surfaces: CLI, MCP, API, connector, script, scheduler,
    model call, or A2A agent.
-5. Create a checklist with phases.
-6. Define validation gates for every phase.
-7. Define stop conditions.
-8. Define what outputs should become Source Packages, observations, pending
+6. Create a checklist with phases.
+7. Define validation gates for every phase.
+8. Define stop conditions.
+9. Define what outputs should become Source Packages, observations, pending
    Claims, packages, exports, workflow traces, or audit records.
-9. Identify when human review is required.
+10. Identify when human review is required.
+11. Recommend where the loop manifest should live in the workspace projection.
 
 ## Required Output
 
@@ -48,6 +51,8 @@ Return:
 6. Stop conditions.
 7. Memory/audit outputs.
 8. Command or scheduler recommendation.
+9. Workspace path recommendation, such as
+   `nodes/<node-slug>/loops/<loop-name>.loop.yaml`.
 
 ## Rules
 
@@ -58,4 +63,5 @@ Return:
 - Do not use A2A unless the other side is another agent.
 - Ask before write actions, external sends, purchases, deployments, or
   cross-organization delegation unless policy explicitly allows it.
-
+- Do not hide the loop only in chat history. Store the loop contract as a
+  workspace projection or governed workflow/skill record.

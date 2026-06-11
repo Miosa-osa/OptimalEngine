@@ -82,6 +82,135 @@ stop_conditions:
 This can later become a Workflow Trace, Procedural Memory Object, or Skill
 Package after it has been proven useful.
 
+## Create A Loop With Your Own Agent
+
+Users should be able to create loops with whichever agent surface they already
+use: a coding agent CLI, a desktop assistant, an MCP-capable chat app, a custom
+script, a scheduler, or an internal agent service.
+
+The engine should not force one agent product. It should give the agent a clean
+loop contract:
+
+```text
+1. Select organization and workspace.
+2. Select the owning Node, or ask the user to create/choose one.
+3. Define the loop goal.
+4. Define the allowed tool surfaces.
+5. Retrieve a governed Context Package.
+6. Open or attach an Active Memory Pool.
+7. Work through phases and validation gates.
+8. Record outputs as observations, Source Packages, pending Claims, packages,
+   exports, workflow traces, or audit records.
+9. Stop when validation passes, policy blocks, retries are exhausted, or human
+   review is required.
+```
+
+The practical command pattern is:
+
+```bash
+mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
+mix optimal.rag "what context should this loop use?" --workspace default:my-workspace --trace
+```
+
+Then give the agent the loop prompt:
+
+```text
+Use templates/starter-prompts/agentic-loop-design.md.
+Create a governed loop for [goal].
+Owning workspace: [workspace id].
+Owning Node: [node id or unknown].
+Allowed surfaces: [CLI/MCP/API/script/scheduler/A2A].
+Do not mark complete until validation gates pass.
+Record observations and pending Claims instead of writing truth directly.
+```
+
+If the agent is running outside Optimal Engine, the same rule still holds: it
+uses Optimal Engine for scope, context, memory, and audit. The agent can use
+outside tools, but the work products should come back through the governed
+lifecycle.
+
+```text
+Agent CLI / app / service
+  -> asks Optimal Engine for workspace + Node scope
+  -> receives Context Package
+  -> uses allowed CLI/MCP/API/script/A2A surfaces
+  -> returns artifacts and observations
+  -> engine records Source Packages, pending Claims, workflow traces, audit
+```
+
+### Loop Placement In The Workspace
+
+Loop definitions are projections of governed workflow/skill state. Put local
+loop files near the Node they operate on:
+
+```text
+workspaces/company-os/
+  nodes/operation-weekly-review/
+    loops/
+      weekly-review.loop.yaml
+  nodes/product-customer-portal/
+    loops/
+      release-maintenance.loop.yaml
+  nodes/learning-ai-research/
+    loops/
+      youtube-learning.loop.yaml
+```
+
+A workspace-wide loop belongs under the workspace only when it intentionally
+spans multiple Nodes and names those Nodes in its manifest.
+
+```text
+workspaces/company-os/
+  loops/
+    company-weekly-review.loop.yaml
+```
+
+Do not hide loop definitions in an agent prompt history. The prompt can launch
+the loop, but the loop contract should be stored as a file projection or a
+governed workflow/skill record so other agents and humans can inspect it.
+
+### Minimal Loop Manifest
+
+```yaml
+loop_id: loop_weekly_review
+display_name: Weekly Review
+owner_workspace_id: default:company-os
+owner_node_id: node_operation_weekly_review
+trigger:
+  type: manual_or_schedule
+  schedule: weekly
+goal: Review open decisions, blockers, stale context, and follow-ups.
+allowed_surfaces:
+  - engine_cli
+  - calendar_connector
+  - task_api
+context:
+  required_nodes:
+    - node_operation_weekly_review
+  context_package_query: "weekly review open decisions blockers follow ups"
+phases:
+  - name: collect_context
+    validation: context_package_created
+  - name: summarize_state
+    validation: source_links_present
+  - name: propose_updates
+    validation: pending_claims_created
+  - name: publish_review
+    validation: export_manifest_complete
+stop_conditions:
+  - validation_passed
+  - human_review_required
+  - failed_three_times
+outputs:
+  - observation
+  - pending_claim
+  - workflow_trace
+  - markdown_export
+review_policy:
+  external_sends_require_confirmation: true
+  facts_require_review: true
+```
+
 ## Common Loop Types
 
 | Loop | Purpose | Validation |
