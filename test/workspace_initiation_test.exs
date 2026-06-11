@@ -26,7 +26,7 @@ defmodule OptimalEngine.WorkspaceInitiationTest do
     %{suffix: suffix, tmp_dir: tmp_dir}
   end
 
-  test "initiates a workspace from a messy dump without accepting guesses as truth", %{
+  test "initiates a workspace from a messy dump and applies conservative topology", %{
     suffix: suffix,
     tmp_dir: tmp_dir
   } do
@@ -87,10 +87,20 @@ defmodule OptimalEngine.WorkspaceInitiationTest do
     assert {"product", "customer-portal"} in proposed
 
     assert length(result.topology_change_requests) >= 5
-    assert Enum.all?(result.topology_change_requests, &(&1.review_status == "pending"))
+    assert length(result.applied_topology_changes) == length(result.topology_change_requests)
+    assert length(result.accepted_nodes) >= 5
 
-    assert {:error, :not_found} = Node.get_by_slug("example-company", workspace_id: workspace_id)
+    assert Enum.all?(
+             result.applied_topology_changes,
+             &(&1.request.review_status == "approved")
+           )
+
+    assert {:ok, _entity} = Node.get_by_slug("example-company", workspace_id: workspace_id)
+    assert {:ok, _project} = Node.get_by_slug("launch-plan", workspace_id: workspace_id)
+    assert {:ok, _person} = Node.get_by_slug("founder", workspace_id: workspace_id)
     assert {:ok, _starter} = Node.get_by_slug("inbox", workspace_id: workspace_id)
+
+    assert File.exists?(Path.join([tmp_dir, slug, "nodes", "launch-plan", "context.md"]))
 
     integration_slugs = MapSet.new(result.proposed_integrations, & &1.slug)
     assert "google_workspace" in integration_slugs
@@ -112,6 +122,41 @@ defmodule OptimalEngine.WorkspaceInitiationTest do
     assert Enum.any?(result.open_questions, &String.contains?(&1, "Which proposed Nodes"))
     assert Enum.any?(result.open_questions, &String.contains?(&1, "credentials"))
     assert Enum.any?(result.next_actions, &String.contains?(&1, "Confirm integration scopes"))
+    assert Enum.any?(result.next_actions, &String.contains?(&1, "Inspect accepted Nodes"))
+  end
+
+  test "review-only initiation leaves topology proposals pending", %{
+    suffix: suffix,
+    tmp_dir: tmp_dir
+  } do
+    slug = "review-only-workspace-#{suffix}"
+
+    dump = """
+    Projects:
+    - Launch Plan
+
+    People:
+    - Operator
+    """
+
+    assert {:ok, result} =
+             WorkspaceInitiation.initiate(%{
+               slug: slug,
+               name: "Review Only Workspace #{suffix}",
+               root: tmp_dir,
+               dump_text: dump,
+               review_only: true,
+               actor_id: "agent:test-initiation"
+             })
+
+    workspace_id = result.setup.workspace.id
+
+    assert result.applied_topology_changes == []
+    assert result.accepted_nodes == []
+    assert Enum.all?(result.topology_change_requests, &(&1.review_status == "pending"))
+    assert {:error, :not_found} = Node.get_by_slug("launch-plan", workspace_id: workspace_id)
+    assert {:ok, _starter} = Node.get_by_slug("inbox", workspace_id: workspace_id)
+    assert Enum.any?(result.next_actions, &String.contains?(&1, "Review proposals"))
   end
 
   test "candidate inference stays conservative for vague text" do

@@ -203,10 +203,10 @@ Use `optimal.initiate` when the user starts with messy context:
 messy dump
   -> Source Package
   -> setup Claim
-  -> proposed Nodes
-  -> proposed integrations
-  -> pending topology change requests
-  -> human/policy review
+  -> conservative Node candidates
+  -> applied workspace Nodes by default
+  -> proposed integrations remain disabled
+  -> optional review-only topology requests
 ```
 
 Use `optimal.setup` when the user already knows the structure:

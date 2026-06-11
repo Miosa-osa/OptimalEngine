@@ -28,7 +28,7 @@ defmodule Mix.Tasks.Optimal.InitiateTest do
     %{suffix: suffix, tmp_dir: tmp_dir}
   end
 
-  test "CLI initiates a workspace from a dump file and prints reviewable proposals", %{
+  test "CLI initiates a workspace from a dump file and applies conservative proposals", %{
     suffix: suffix,
     tmp_dir: tmp_dir
   } do
@@ -65,9 +65,12 @@ defmodule Mix.Tasks.Optimal.InitiateTest do
     assert output =~ "Optimal workspace initiated"
     assert output =~ "Source Package:"
     assert output =~ "Setup Claim:"
+    assert output =~ "Applied:"
+    assert output =~ "Accepted Nodes:"
     assert output =~ "project:founder-dashboard"
     assert output =~ "mcp_or_api:google_workspace"
     assert output =~ "fathom"
+    assert output =~ "Inspect accepted Nodes"
     assert output =~ "Confirm integration scopes"
 
     assert {:ok, workspace} = Workspace.get_by_slug(slug, "default")
@@ -80,12 +83,12 @@ defmodule Mix.Tasks.Optimal.InitiateTest do
 
     assert source_count == 1
 
-    assert {:ok, [[proposal_count]]} =
+    assert {:ok, [[approved_count]]} =
              Store.raw_query(
-               "SELECT COUNT(*) FROM topology_change_requests WHERE workspace_id = ?1 AND review_status = 'pending'",
+               "SELECT COUNT(*) FROM topology_change_requests WHERE workspace_id = ?1 AND review_status = 'approved'",
                [workspace.id]
              )
 
-    assert proposal_count >= 2
+    assert approved_count >= 2
   end
 end

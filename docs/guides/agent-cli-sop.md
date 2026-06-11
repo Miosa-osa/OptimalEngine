@@ -24,10 +24,10 @@ This does not blindly create truth. It:
 ```text
 preserves the dump as a Source Package
   -> creates an unreviewed setup Claim
-  -> proposes Nodes
+  -> applies conservative Node candidates by default
   -> proposes integration surfaces
-  -> writes pending topology change requests
-  -> waits for review
+  -> keeps integration/tool surfaces disabled until scoped
+  -> writes pending topology change requests only with --review-only
 ```
 
 When the person already knows the workspace structure, use:

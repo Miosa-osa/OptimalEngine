@@ -338,9 +338,9 @@ The first real workflow is not a perfect form. It is a data dump.
 User dumps messy context
   -> engine preserves the dump as a Source Package
   -> engine extracts an unreviewed setup Claim
-  -> engine proposes Nodes and integration surfaces
-  -> human or policy review accepts/rejects structure
-  -> approved Nodes become workspace topology
+  -> engine detects conservative Nodes and integration surfaces
+  -> detected Nodes become workspace topology by default
+  -> integration/tool surfaces stay disabled until scoped
   -> future sources route into the approved topology
 ```
 
@@ -350,8 +350,10 @@ Run it with a markdown or text file:
 mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 ```
 
-The initiation command is conservative by design. It creates pending topology
-change requests instead of silently creating durable Nodes from guesses.
+The initiation command is conservative by design. It only applies explicit,
+high-confidence structure from headings, labels, and lists. It does not promote
+the setup dump into Facts. Use `--review-only` when a workspace needs every
+topology change to stay pending until a human or policy reviewer approves it.
 
 It also inventories outside systems mentioned in the dump:
 

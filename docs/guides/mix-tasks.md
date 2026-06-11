@@ -9,7 +9,7 @@ full arguments.
 
 | Task | Purpose |
 | --- | --- |
-| `mix optimal.initiate` | Start a workspace from a messy natural-language setup dump. Preserves the dump, creates a setup Claim, proposes Nodes/integrations, and leaves topology changes pending review. |
+| `mix optimal.initiate` | Start a workspace from a messy natural-language setup dump. Preserves the dump, creates a setup Claim, applies conservative Node candidates, and leaves integrations disabled until scoped. Use `--review-only` to keep topology proposals pending. |
 | `mix optimal.setup` | Create or refresh a workspace with starter Node Types, Nodes, rhythm files, projections, and agent SOP. |
 | `mix optimal.topology` | Inspect workspace topology: Nodes, Node Types, members, and skills. |
 | `mix optimal.init` | Older/simple initialization helper. Prefer `optimal.initiate` or `optimal.setup` for new workspaces. |
@@ -19,8 +19,10 @@ Examples:
 
 ```bash
 mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
+mix optimal.initiate regulated-workspace --name "Regulated Workspace" --dump setup.md --review-only
 mix optimal.setup my-workspace --node project:launch:"Launch"
 mix optimal.topology --workspace default:my-workspace
+mix optimal.topology approve <request-id> --workspace default:regulated-workspace --apply
 ```
 
 ## Source Intake And Signal Pipeline

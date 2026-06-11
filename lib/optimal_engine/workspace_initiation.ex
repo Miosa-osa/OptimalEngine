@@ -4,9 +4,12 @@ defmodule OptimalEngine.WorkspaceInitiation do
 
   Initiation is the bridge between a messy human data dump and a governed
   workspace structure. It preserves the dump as source evidence, extracts an
-  unreviewed setup Claim, and creates pending topology-change requests for
-  candidate Nodes. It does not silently turn agent guesses into durable
-  topology or accepted truth.
+  unreviewed setup Claim, and conservatively proposes candidate Nodes.
+
+  By default, conservative Node proposals are applied so a first-time user gets
+  a usable workspace immediately. The setup Claim remains unreviewed and no
+  Claims become Facts. Pass `review_only: true` to leave every candidate as a
+  pending topology-change request.
   """
 
   alias OptimalEngine.MemoryCore
@@ -34,6 +37,8 @@ defmodule OptimalEngine.WorkspaceInitiation do
           proposed_integrations: [map()],
           registered_tool_definitions: [map()],
           topology_change_requests: [WorkspaceTopology.topology_change_request()],
+          applied_topology_changes: [map()],
+          accepted_nodes: [map()],
           open_questions: [String.t()],
           next_actions: [String.t()]
         }
@@ -47,8 +52,8 @@ defmodule OptimalEngine.WorkspaceInitiation do
     * `:name`
     * `:dump_text` or `:dump_path`
 
-  The returned topology requests are pending. A human or policy reviewer can
-  approve them with `WorkspaceTopology.review_change_request/3`.
+  Unless `review_only: true` is set, conservative Node candidates are reviewed
+  and applied during initiation. The original setup Claim remains unreviewed.
   """
   @spec initiate(map()) :: {:ok, result()} | {:error, term()}
   def initiate(%{slug: slug, name: name} = attrs) when is_binary(slug) and is_binary(name) do
@@ -62,6 +67,8 @@ defmodule OptimalEngine.WorkspaceInitiation do
          proposed_nodes <- infer_node_candidates(dump_text),
          {:ok, topology_requests} <-
            create_topology_requests(setup.workspace.id, proposed_nodes, attrs, actor_id, tenant_id),
+         {:ok, applied_topology_changes, accepted_setup} <-
+           maybe_apply_topology_requests(setup, topology_requests, proposed_nodes, attrs, actor_id),
          proposed_integrations <- infer_integration_candidates(dump_text),
          {:ok, tool_definitions} <-
            register_integration_placeholders(
@@ -79,8 +86,11 @@ defmodule OptimalEngine.WorkspaceInitiation do
          proposed_integrations: proposed_integrations,
          registered_tool_definitions: tool_definitions,
          topology_change_requests: topology_requests,
+         applied_topology_changes: applied_topology_changes,
+         accepted_nodes: accepted_setup.nodes,
          open_questions: open_questions(proposed_nodes, proposed_integrations, dump_text),
-         next_actions: next_actions(setup.workspace.id, topology_requests)
+         next_actions:
+           next_actions(setup.workspace.id, topology_requests, applied_topology_changes, attrs)
        }}
     end
   end
@@ -305,6 +315,80 @@ defmodule OptimalEngine.WorkspaceInitiation do
     |> case do
       {:ok, definitions} -> {:ok, Enum.reverse(definitions)}
       other -> other
+    end
+  end
+
+  defp maybe_apply_topology_requests(setup, requests, candidates, attrs, actor_id) do
+    if Map.get(attrs, :review_only, false) do
+      {:ok, [], %{setup | nodes: []}}
+    else
+      workspace = setup.workspace
+
+      with {:ok, applied} <-
+             apply_topology_requests(requests,
+               tenant_id: workspace.tenant_id,
+               workspace_id: workspace.id,
+               actor_id: actor_id
+             ),
+           {:ok, accepted_setup} <-
+             write_accepted_node_projections(setup, candidates, attrs, actor_id) do
+        {:ok, applied, accepted_setup}
+      end
+    end
+  end
+
+  defp apply_topology_requests(requests, opts) do
+    Enum.reduce_while(requests, {:ok, []}, fn request, {:ok, acc} ->
+      case WorkspaceTopology.review_change_request(request.id, :approve,
+             tenant_id: Keyword.fetch!(opts, :tenant_id),
+             workspace_id: Keyword.fetch!(opts, :workspace_id),
+             actor_id: Keyword.fetch!(opts, :actor_id),
+             apply: true
+           ) do
+        {:ok, reviewed} -> {:cont, {:ok, [reviewed | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, applied} -> {:ok, Enum.reverse(applied)}
+      other -> other
+    end
+  end
+
+  defp write_accepted_node_projections(setup, candidates, attrs, actor_id) do
+    candidate_nodes =
+      Enum.map(candidates, fn candidate ->
+        %{
+          kind: candidate.kind,
+          slug: candidate.slug,
+          name: candidate.name,
+          description: "Created during workspace initiation: #{candidate.reason}",
+          metadata:
+            Map.merge(candidate.metadata, %{
+              "source_line" => candidate.source_line,
+              "confidence" => candidate.confidence,
+              "initiation_candidate" => true,
+              "accepted_during_initiation" => true
+            })
+        }
+      end)
+
+    if candidate_nodes == [] do
+      {:ok, %{setup | nodes: []}}
+    else
+      WorkspaceTopology.setup_workspace(%{
+        slug: setup.workspace.slug,
+        name: setup.workspace.name,
+        description: setup.workspace.description,
+        tenant_id: setup.workspace.tenant_id,
+        root: Map.get(attrs, :root, Application.get_env(:optimal_engine, :root_path, File.cwd!())),
+        starter_nodes: false,
+        write_files: Map.get(attrs, :write_files, true),
+        write_rhythm: false,
+        write_agent_sop: false,
+        actor_id: actor_id,
+        nodes: candidate_nodes
+      })
     end
   end
 
@@ -537,13 +621,18 @@ defmodule OptimalEngine.WorkspaceInitiation do
     if MapSet.member?(present_kinds, kind), do: nil, else: question
   end
 
-  defp next_actions(workspace_id, requests) do
+  defp next_actions(workspace_id, requests, applied_topology_changes, attrs) do
     review_command =
-      case requests do
-        [request | _] ->
-          "Review proposals, then approve one with: mix optimal.topology approve #{request.id} --workspace #{workspace_id} --apply"
+      cond do
+        applied_topology_changes != [] ->
+          "Inspect accepted Nodes with: mix optimal.topology --workspace #{workspace_id}"
 
-        [] ->
+        Map.get(attrs, :review_only, false) and requests != [] ->
+          first_request = hd(requests)
+
+          "Review proposals, then approve one with: mix optimal.topology approve #{first_request.id} --workspace #{workspace_id} --apply"
+
+        true ->
           "Add explicit Nodes with: mix optimal.setup #{workspace_id} --node project:example:Example"
       end
 

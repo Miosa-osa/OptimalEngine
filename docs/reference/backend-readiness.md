@@ -191,6 +191,10 @@ For messy setup:
 mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 ```
 
+That path now applies conservative Node candidates by default and writes the
+workspace projections immediately. Use `--review-only` when topology proposals
+must remain pending until approval.
+
 ## Next Backend Hardening Order
 
 The next backend work should close gaps in this order:
