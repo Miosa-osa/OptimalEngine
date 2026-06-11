@@ -78,6 +78,21 @@ mix optimal.wiki render-tree --workspace default:my-workspace
 mix optimal.reality_check
 ```
 
+There are two kinds of CLI use:
+
+```text
+engine CLI
+  -> mix optimal.* commands that read/write Optimal Engine state
+
+external CLI
+  -> normal terminal tools such as ls, cat, rg, grep, curl, git, docker,
+     ffmpeg, or provider-specific CLIs
+```
+
+External CLI output is not automatically memory. If it contains useful evidence,
+preserve it as a Source Package or observation, then create pending Claims where
+appropriate.
+
 ## What The Agent May Write
 
 | Write target | Allowed? | Correct path |
@@ -97,6 +112,7 @@ Users may have many integration types:
 
 ```text
 MCP servers
+CLI tools
 connector syncs
 custom APIs
 scripts
@@ -202,6 +218,77 @@ tool request
 
 This applies whether the tool is MCP, HTTP API, local script, CLI command, or
 scheduled job.
+
+## CLI Vs MCP Decision
+
+Use CLI when the command directly maps to the job and the output can be captured
+cleanly:
+
+```text
+local file inspection
+text search
+Git status/history
+Docker inspection
+curl against a simple endpoint
+media processing
+local scripts
+```
+
+Use MCP/API/connectors when the abstraction or governance is worth it:
+
+```text
+authenticated SaaS systems
+per-user access control
+schema-validated writes
+browser-rendered pages
+calendar/email/CRM actions
+audit-sensitive operations
+provider-specific pagination or IDs
+```
+
+If an agent starts reverse-engineering a complex app response through raw CLI
+commands when a rendered/browser/API tool exists, it probably chose the wrong
+surface. If it loads a huge tool schema just to run a simple file search, it
+probably chose the wrong surface.
+
+## Scheduled Loop Pattern
+
+Scheduled loops are allowed, but they must be explicit.
+
+```text
+schedule
+  -> actor/service account
+  -> workspace/node scope
+  -> tool/connector/API/CLI command
+  -> run policy
+  -> captured output
+  -> Source Package, observation, pending Claim, export, or audit record
+```
+
+Examples:
+
+```text
+daily review
+  -> assemble Context Package
+  -> render focus export
+  -> record observations
+
+connector sync
+  -> preserve new payloads/assets
+  -> classify Signals
+  -> create pending Claims
+
+context refresh
+  -> refresh stale Context Packages
+  -> mark old packages refreshed
+
+wiki refresh
+  -> rebuild stale projected pages from governed state
+```
+
+Current engine surfaces include `mix optimal.context.refresh_stale`,
+`OptimalEngine.MemoryCore.ContextRefreshScheduler`, `OptimalEngine.Wiki.Scheduler`,
+and connector governed runs.
 
 ## Projection Pattern
 

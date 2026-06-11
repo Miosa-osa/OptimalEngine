@@ -65,7 +65,11 @@ Read these in order:
    How a human, Codex, Claude Code, an MCP client, a script, or an app should
    operate the system without bypassing governance.
 
-14. [Build goal alignment](reference/build-goal-alignment.md)  
+14. [Tool surfaces and loops](guides/tool-surfaces-and-loops.md)  
+   When to use CLI, MCP, APIs, connectors, scripts, and scheduled jobs, and how
+   self-updating loops feed back into memory.
+
+15. [Build goal alignment](reference/build-goal-alignment.md)  
    What is built now, what is only a spine, what still needs work, and which
    tests/probes prove it.
 

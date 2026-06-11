@@ -234,6 +234,7 @@ connectors, scripts, or APIs.
 - [First workspace story](first-workspace-story.md)
 - [Signal theory](../concepts/signal-theory.md)
 - [Integrations and imports](integrations-and-imports.md)
+- [Tool surfaces and loops](tool-surfaces-and-loops.md)
 - [Packages and exports](packages-and-exports.md)
 - [Agent and CLI SOP](agent-cli-sop.md)
 - [Mix tasks](mix-tasks.md)

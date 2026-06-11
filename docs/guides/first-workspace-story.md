@@ -37,6 +37,7 @@ client requirements documents
 agent chats
 local scripts
 MCP tools
+command-line tools
 custom APIs
 ```
 
@@ -173,10 +174,76 @@ them.
 | CRM | relationships, deals, stages, requirements |
 | Project tools | tasks, blockers, milestones, status |
 | Code repos | implementation history, issues, releases |
-| Scripts/API/MCP | actions agents can take |
+| CLI tools | local files, Git, Docker, media processing, scripts, simple command work |
+| Scripts/API/MCP | authenticated actions, structured tools, app writes, scheduled jobs |
 
 Each channel becomes an integration surface. Each imported item becomes source
 evidence before it becomes memory.
+
+## Agent Tool Surfaces
+
+Agents can act through several surfaces:
+
+```text
+CLI command
+MCP tool
+API call
+connector sync
+local script
+scheduled job
+```
+
+The user should not have to know the implementation detail every time. The
+engine should help the agent choose the right surface:
+
+```text
+simple local command -> CLI
+authenticated app action -> MCP/API/connector
+repeating operation -> scheduler/cron
+knowledge-bearing output -> Source Package or observation
+```
+
+Optimal Engine provides context, memory, package manifests, permissions, and
+audit. The agent/tool surface performs the outside action.
+
+Example:
+
+```text
+User asks to send a proposal
+  -> Optimal Engine retrieves client/project/package context
+  -> agent confirms receiver/channel/review state
+  -> email tool sends the package
+  -> delivery receipt returns as Source Package evidence
+```
+
+## Self-Updating Loops
+
+The system learns by closing loops, not by hallucinating durable truth.
+
+```text
+scheduled sync or agent action
+  -> new source evidence
+  -> Signal classification
+  -> pending Claims
+  -> review/policy
+  -> Facts and Memory Objects
+  -> refreshed Context Packages and projections
+```
+
+Examples:
+
+```text
+save watched videos to a Learning Node
+turn transcripts into study notes
+research books and label them by topic
+set reminders from commitments
+refresh project context before weekly review
+sync new customer notes from CRM
+rebuild stale wiki pages
+```
+
+The user can use the same architecture for business, learning, research,
+personal operations, and agent work.
 
 ## Package Examples
 
@@ -225,4 +292,3 @@ can read the user's files.
 The prompts are intentionally conservative. They tell the agent to preserve
 evidence, propose structure, and ask before turning guesses into durable system
 state.
-

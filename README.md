@@ -291,6 +291,10 @@ and recurring package types such as proposals, contracts, SOPs, and client
 requirements, read
 [`docs/guides/integrations-and-imports.md`](docs/guides/integrations-and-imports.md).
 
+For when to use CLI tools, MCP servers, APIs, connector syncs, scripts, and
+scheduled jobs, read
+[`docs/guides/tool-surfaces-and-loops.md`](docs/guides/tool-surfaces-and-loops.md).
+
 For the recommended documentation path, start at
 [`docs/README.md`](docs/README.md).
 
