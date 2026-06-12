@@ -139,8 +139,6 @@ defmodule OptimalEngine.Spec.Verifier do
 
   # -- Private: Strength Comparison --------------------------------------------
 
-  defp meets_minimum?(:none, _min), do: false
-
   defp meets_minimum?(achieved, minimum) do
     Map.get(@strength_order, achieved, -1) >= Map.get(@strength_order, minimum, 0)
   end

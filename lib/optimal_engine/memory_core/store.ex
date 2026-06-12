@@ -4,12 +4,21 @@ defmodule OptimalEngine.MemoryCore.Store do
 
   The base `OptimalEngine.Store` still owns the SQLite connection. This module
   keeps Memory Core writes typed. Lifecycle operations belong in domain modules
-  such as `SourcePackageService`, `KnowledgeLifecycle`, and
+  such as `SourcePackageService`, `ClaimExtractor`, `FactPromoter`, and
   `RetrievalCoordinator`.
   """
 
   alias OptimalEngine.Store
-  alias OptimalEngine.MemoryCore.{DerivationLedgerEntry, JSON, SourcePackage}
+
+  alias OptimalEngine.MemoryCore.{
+    Claim,
+    DerivationLedgerEntry,
+    Fact,
+    JSON,
+    MemoryObject,
+    RelationshipEdge,
+    SourcePackage
+  }
 
   @spec insert_source_package(SourcePackage.t()) :: :ok | {:error, term()}
   def insert_source_package(%SourcePackage{} = source_package) do
@@ -112,7 +121,7 @@ defmodule OptimalEngine.MemoryCore.Store do
     ])
   end
 
-  @spec insert_claim(map()) :: :ok | {:error, term()}
+  @spec insert_claim(Claim.t() | map()) :: :ok | {:error, term()}
   def insert_claim(claim) when is_map(claim) do
     sql = """
     INSERT OR IGNORE INTO claims (
@@ -143,7 +152,7 @@ defmodule OptimalEngine.MemoryCore.Store do
       claim.source_package_id,
       Map.get(claim, :signal_id),
       claim.claim_text,
-      Map.get(claim, :claim_type, "assertion"),
+      Map.get(claim, :claim_type) || "assertion",
       Map.get(claim, :subject_anchor),
       Map.get(claim, :action_class),
       Map.get(claim, :object_anchor),
@@ -151,25 +160,25 @@ defmodule OptimalEngine.MemoryCore.Store do
       JSON.map(Map.get(claim, :source_span, %{})),
       Map.get(claim, :extraction_run_id),
       Map.get(claim, :evaluator_id),
-      Map.get(claim, :aggregate_confidence, 0.5),
-      Map.get(claim, :aggregate_precision, 0.5),
+      Map.get(claim, :aggregate_confidence) || 0.5,
+      Map.get(claim, :aggregate_precision) || 0.5,
       JSON.map(Map.get(claim, :raw_component_scores, %{})),
       Map.get(claim, :calibration_dataset_version),
       Map.get(claim, :access_policy_id),
       JSON.list(Map.get(claim, :security_labels, [])),
       JSON.list(Map.get(claim, :partition_ids, [])),
-      Map.get(claim, :lifecycle_state, "pending"),
-      Map.get(claim, :review_status, "unreviewed"),
+      Map.get(claim, :lifecycle_state) || "pending",
+      Map.get(claim, :review_status) || "unreviewed",
       Map.get(claim, :valid_time_start),
       Map.get(claim, :valid_time_end),
-      Map.get(claim, :transaction_time_start, timestamp()),
+      Map.get(claim, :transaction_time_start) || timestamp(),
       Map.get(claim, :transaction_time_end),
       Map.get(claim, :stale_after),
       JSON.map(Map.get(claim, :metadata, %{}))
     ])
   end
 
-  @spec insert_fact(map()) :: :ok | {:error, term()}
+  @spec insert_fact(Fact.t() | map()) :: :ok | {:error, term()}
   def insert_fact(fact) when is_map(fact) do
     sql = """
     INSERT OR IGNORE INTO facts (
@@ -198,7 +207,7 @@ defmodule OptimalEngine.MemoryCore.Store do
       fact.tenant_id,
       fact.workspace_id,
       fact.fact_text,
-      Map.get(fact, :fact_type, "assertion"),
+      Map.get(fact, :fact_type) || "assertion",
       Map.get(fact, :subject_anchor),
       Map.get(fact, :action_class),
       Map.get(fact, :object_anchor),
@@ -207,19 +216,19 @@ defmodule OptimalEngine.MemoryCore.Store do
       JSON.list(Map.get(fact, :supporting_evidence_links, [])),
       JSON.list(Map.get(fact, :contradicting_evidence_links, [])),
       Map.get(fact, :verifier_id),
-      Map.get(fact, :verification_status, "unverified"),
-      Map.get(fact, :aggregate_confidence, 0.5),
-      Map.get(fact, :aggregate_precision, 0.5),
+      Map.get(fact, :verification_status) || "unverified",
+      Map.get(fact, :aggregate_confidence) || 0.5,
+      Map.get(fact, :aggregate_precision) || 0.5,
       JSON.map(Map.get(fact, :raw_component_scores, %{})),
       Map.get(fact, :access_policy_id),
       JSON.list(Map.get(fact, :security_labels, [])),
       JSON.list(Map.get(fact, :partition_ids, [])),
-      Map.get(fact, :lifecycle_state, "candidate"),
-      Map.get(fact, :contradiction_status, "none"),
+      Map.get(fact, :lifecycle_state) || "candidate",
+      Map.get(fact, :contradiction_status) || "none",
       Map.get(fact, :event_time),
       Map.get(fact, :valid_time_start),
       Map.get(fact, :valid_time_end),
-      Map.get(fact, :transaction_time_start, timestamp()),
+      Map.get(fact, :transaction_time_start) || timestamp(),
       Map.get(fact, :transaction_time_end),
       Map.get(fact, :verification_time),
       Map.get(fact, :stale_after),
@@ -227,7 +236,7 @@ defmodule OptimalEngine.MemoryCore.Store do
     ])
   end
 
-  @spec insert_memory_object(map()) :: :ok | {:error, term()}
+  @spec insert_memory_object(MemoryObject.t() | map()) :: :ok | {:error, term()}
   def insert_memory_object(memory_object) when is_map(memory_object) do
     sql = """
     INSERT OR IGNORE INTO memory_objects (
@@ -253,35 +262,35 @@ defmodule OptimalEngine.MemoryCore.Store do
       memory_object.id,
       memory_object.tenant_id,
       memory_object.workspace_id,
-      Map.get(memory_object, :memory_type, "general"),
+      Map.get(memory_object, :memory_type) || "general",
       memory_object.summary,
       Map.get(memory_object, :subject_anchor),
       Map.get(memory_object, :action_class),
       JSON.map(Map.get(memory_object, :semantic_frame, %{})),
-      Map.get(memory_object, :salience, 0.5),
+      Map.get(memory_object, :salience) || 0.5,
       JSON.list(Map.get(memory_object, :fact_links, [])),
       JSON.list(Map.get(memory_object, :claim_links, [])),
       JSON.list(Map.get(memory_object, :source_package_links, [])),
       JSON.list(Map.get(memory_object, :evidence_links, [])),
-      Map.get(memory_object, :aggregate_confidence, 0.5),
-      Map.get(memory_object, :aggregate_precision, 0.5),
+      Map.get(memory_object, :aggregate_confidence) || 0.5,
+      Map.get(memory_object, :aggregate_precision) || 0.5,
       Map.get(memory_object, :access_policy_id),
       JSON.list(Map.get(memory_object, :security_labels, [])),
       JSON.list(Map.get(memory_object, :partition_ids, [])),
-      Map.get(memory_object, :lifecycle_state, "candidate"),
-      Map.get(memory_object, :staleness_status, "current"),
-      Map.get(memory_object, :supersession_status, "none"),
+      Map.get(memory_object, :lifecycle_state) || "candidate",
+      Map.get(memory_object, :staleness_status) || "current",
+      Map.get(memory_object, :supersession_status) || "none",
       Map.get(memory_object, :event_time),
       Map.get(memory_object, :valid_time_start),
       Map.get(memory_object, :valid_time_end),
-      Map.get(memory_object, :transaction_time_start, timestamp()),
+      Map.get(memory_object, :transaction_time_start) || timestamp(),
       Map.get(memory_object, :transaction_time_end),
       Map.get(memory_object, :stale_after),
       JSON.map(Map.get(memory_object, :metadata, %{}))
     ])
   end
 
-  @spec insert_relationship_edge(map()) :: :ok | {:error, term()}
+  @spec insert_relationship_edge(RelationshipEdge.t() | map()) :: :ok | {:error, term()}
   def insert_relationship_edge(edge) when is_map(edge) do
     sql = """
     INSERT OR IGNORE INTO relationship_edges (
@@ -308,19 +317,403 @@ defmodule OptimalEngine.MemoryCore.Store do
       edge.to_object_type,
       edge.to_object_id,
       edge.relationship_type,
-      Map.get(edge, :confidence, 0.5),
-      Map.get(edge, :precision_score, 0.5),
+      Map.get(edge, :confidence) || 0.5,
+      Map.get(edge, :precision_score) || 0.5,
       JSON.list(Map.get(edge, :evidence_links, [])),
       Map.get(edge, :access_policy_id),
       JSON.list(Map.get(edge, :security_labels, [])),
       JSON.list(Map.get(edge, :partition_ids, [])),
-      Map.get(edge, :lifecycle_state, "current"),
+      Map.get(edge, :lifecycle_state) || "current",
       Map.get(edge, :valid_time_start),
       Map.get(edge, :valid_time_end),
-      Map.get(edge, :transaction_time_start, timestamp()),
+      Map.get(edge, :transaction_time_start) || timestamp(),
       Map.get(edge, :transaction_time_end),
       JSON.map(Map.get(edge, :metadata, %{}))
     ])
+  end
+
+  @claim_columns ~w(
+    id tenant_id workspace_id source_package_id signal_id claim_text claim_type
+    subject_anchor action_class object_anchor semantic_frame source_span
+    extraction_run_id evaluator_id aggregate_confidence aggregate_precision
+    raw_component_scores calibration_dataset_version access_policy_id
+    security_labels partition_ids lifecycle_state review_status valid_time_start
+    valid_time_end transaction_time_start transaction_time_end stale_after
+    metadata created_at updated_at
+  )a
+
+  @fact_columns ~w(
+    id tenant_id workspace_id fact_text fact_type subject_anchor action_class
+    object_anchor scope accepted_claim_ids supporting_evidence_links
+    contradicting_evidence_links verifier_id verification_status
+    aggregate_confidence aggregate_precision raw_component_scores
+    access_policy_id security_labels partition_ids lifecycle_state
+    contradiction_status event_time valid_time_start valid_time_end
+    transaction_time_start transaction_time_end verification_time stale_after
+    metadata created_at updated_at
+  )a
+
+  @memory_object_columns ~w(
+    id tenant_id workspace_id memory_type summary subject_anchor action_class
+    semantic_frame salience fact_links claim_links source_package_links
+    evidence_links aggregate_confidence aggregate_precision access_policy_id
+    security_labels partition_ids lifecycle_state staleness_status
+    supersession_status event_time valid_time_start valid_time_end
+    transaction_time_start transaction_time_end stale_after metadata created_at
+    updated_at
+  )a
+
+  @relationship_edge_columns ~w(
+    id tenant_id workspace_id from_object_type from_object_id to_object_type
+    to_object_id relationship_type confidence precision_score evidence_links
+    access_policy_id security_labels partition_ids lifecycle_state
+    valid_time_start valid_time_end transaction_time_start transaction_time_end
+    metadata created_at
+  )a
+
+  @spec get_claim(String.t(), String.t(), keyword()) :: {:ok, Claim.t()} | {:error, term()}
+  def get_claim(workspace_id, claim_id, opts \\ [])
+      when is_binary(workspace_id) and is_binary(claim_id) do
+    {tenant_clause, params} = tenant_scope(opts, [workspace_id, claim_id])
+
+    sql = """
+    SELECT #{Enum.join(@claim_columns, ", ")}
+    FROM claims
+    WHERE workspace_id = ?1 AND id = ?2#{tenant_clause}
+    """
+
+    case Store.raw_query(sql, params) do
+      {:ok, [row]} -> {:ok, claim_from_row(row)}
+      {:ok, []} -> {:error, :not_found}
+      other -> other
+    end
+  end
+
+  @spec list_claims(String.t(), keyword()) :: {:ok, [Claim.t()]} | {:error, term()}
+  def list_claims(workspace_id, opts \\ []) when is_binary(workspace_id) do
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"tenant_id =", Keyword.get(opts, :tenant_id)},
+          {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)},
+          {"review_status =", Keyword.get(opts, :review_status)},
+          {"source_package_id =", Keyword.get(opts, :source_package_id)}
+        ],
+        [workspace_id]
+      )
+
+    sql = """
+    SELECT #{Enum.join(@claim_columns, ", ")}
+    FROM claims
+    WHERE workspace_id = ?1 #{clauses}
+    ORDER BY created_at, id
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &claim_from_row/1)}
+    end
+  end
+
+  @doc """
+  Conditionally transitions a Claim out of review.
+
+  The UPDATE only matches rows still in `lifecycle_state = 'pending'`, so a
+  Claim can be reviewed exactly once; when zero rows are affected the Claim
+  was already promoted or rejected (or never persisted) and
+  `{:error, :claim_already_reviewed}` is returned instead of silently
+  succeeding.
+
+  Pass the opaque handle from `OptimalEngine.Store.transaction/2` as `txn` to
+  run the update inside an enclosing transaction; without it the update runs
+  in its own transaction (needed to read the affected-row count atomically).
+  """
+  @spec update_claim_review(String.t(), String.t(), String.t(), String.t(), term() | nil) ::
+          :ok | {:error, :claim_already_reviewed} | {:error, term()}
+  def update_claim_review(workspace_id, claim_id, lifecycle_state, review_status, txn \\ nil)
+
+  def update_claim_review(workspace_id, claim_id, lifecycle_state, review_status, nil)
+      when is_binary(workspace_id) and is_binary(claim_id) and is_binary(lifecycle_state) and
+             is_binary(review_status) do
+    result =
+      Store.transaction(fn txn ->
+        case update_claim_review(workspace_id, claim_id, lifecycle_state, review_status, txn) do
+          :ok -> {:ok, :updated}
+          {:error, _} = error -> error
+        end
+      end)
+
+    case result do
+      {:ok, :updated} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  def update_claim_review(workspace_id, claim_id, lifecycle_state, review_status, txn)
+      when is_binary(workspace_id) and is_binary(claim_id) and is_binary(lifecycle_state) and
+             is_binary(review_status) do
+    sql = """
+    UPDATE claims
+    SET lifecycle_state = ?3, review_status = ?4, updated_at = datetime('now')
+    WHERE workspace_id = ?1 AND id = ?2 AND lifecycle_state = 'pending'
+    """
+
+    case Store.txn_execute(txn, sql, [workspace_id, claim_id, lifecycle_state, review_status]) do
+      {:ok, 0} -> {:error, :claim_already_reviewed}
+      {:ok, _changes} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  @spec get_fact(String.t(), String.t(), keyword()) :: {:ok, Fact.t()} | {:error, term()}
+  def get_fact(workspace_id, fact_id, opts \\ [])
+      when is_binary(workspace_id) and is_binary(fact_id) do
+    {tenant_clause, params} = tenant_scope(opts, [workspace_id, fact_id])
+
+    sql = """
+    SELECT #{Enum.join(@fact_columns, ", ")}
+    FROM facts
+    WHERE workspace_id = ?1 AND id = ?2#{tenant_clause}
+    """
+
+    case Store.raw_query(sql, params) do
+      {:ok, [row]} -> {:ok, fact_from_row(row)}
+      {:ok, []} -> {:error, :not_found}
+      other -> other
+    end
+  end
+
+  @spec list_facts(String.t(), keyword()) :: {:ok, [Fact.t()]} | {:error, term()}
+  def list_facts(workspace_id, opts \\ []) when is_binary(workspace_id) do
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"tenant_id =", Keyword.get(opts, :tenant_id)},
+          {"subject_anchor =", Keyword.get(opts, :subject_anchor)},
+          {"action_class =", Keyword.get(opts, :action_class)},
+          {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)}
+        ],
+        [workspace_id]
+      )
+
+    open_clause =
+      if Keyword.get(opts, :open_transaction_only, false),
+        do: "AND transaction_time_end IS NULL",
+        else: ""
+
+    sql = """
+    SELECT #{Enum.join(@fact_columns, ", ")}
+    FROM facts
+    WHERE workspace_id = ?1 #{clauses} #{open_clause}
+    ORDER BY created_at, id
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &fact_from_row/1)}
+    end
+  end
+
+  @spec update_fact_supersession(String.t(), String.t(), map()) :: :ok | {:error, term()}
+  def update_fact_supersession(workspace_id, fact_id, attrs)
+      when is_binary(workspace_id) and is_binary(fact_id) and is_map(attrs) do
+    sql = """
+    UPDATE facts
+    SET lifecycle_state = ?3,
+        valid_time_end = ?4,
+        transaction_time_end = ?5,
+        metadata = ?6,
+        updated_at = datetime('now')
+    WHERE workspace_id = ?1 AND id = ?2
+    """
+
+    Store.raw_execute(sql, [
+      workspace_id,
+      fact_id,
+      Map.get(attrs, :lifecycle_state, "superseded"),
+      Map.get(attrs, :valid_time_end),
+      Map.get(attrs, :transaction_time_end),
+      JSON.map(Map.get(attrs, :metadata, %{}))
+    ])
+  end
+
+  @spec get_memory_object(String.t(), String.t(), keyword()) ::
+          {:ok, MemoryObject.t()} | {:error, term()}
+  def get_memory_object(workspace_id, memory_object_id, opts \\ [])
+      when is_binary(workspace_id) and is_binary(memory_object_id) do
+    {tenant_clause, params} = tenant_scope(opts, [workspace_id, memory_object_id])
+
+    sql = """
+    SELECT #{Enum.join(@memory_object_columns, ", ")}
+    FROM memory_objects
+    WHERE workspace_id = ?1 AND id = ?2#{tenant_clause}
+    """
+
+    case Store.raw_query(sql, params) do
+      {:ok, [row]} -> {:ok, memory_object_from_row(row)}
+      {:ok, []} -> {:error, :not_found}
+      other -> other
+    end
+  end
+
+  @spec list_memory_objects(String.t(), keyword()) :: {:ok, [MemoryObject.t()]} | {:error, term()}
+  def list_memory_objects(workspace_id, opts \\ []) when is_binary(workspace_id) do
+    fact_link_id = Keyword.get(opts, :fact_link_id)
+
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"tenant_id =", Keyword.get(opts, :tenant_id)},
+          {"supersession_status =", Keyword.get(opts, :supersession_status)},
+          {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)},
+          {"fact_links LIKE", fact_link_id && "%#{fact_link_id}%"}
+        ],
+        [workspace_id]
+      )
+
+    sql = """
+    SELECT #{Enum.join(@memory_object_columns, ", ")}
+    FROM memory_objects
+    WHERE workspace_id = ?1 #{clauses}
+    ORDER BY created_at, id
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      memory_objects =
+        rows
+        |> Enum.map(&memory_object_from_row/1)
+        |> filter_by_fact_link(fact_link_id)
+
+      {:ok, memory_objects}
+    end
+  end
+
+  @spec update_memory_object_supersession(String.t(), String.t(), map()) ::
+          :ok | {:error, term()}
+  def update_memory_object_supersession(workspace_id, memory_object_id, attrs)
+      when is_binary(workspace_id) and is_binary(memory_object_id) and is_map(attrs) do
+    sql = """
+    UPDATE memory_objects
+    SET supersession_status = ?3,
+        transaction_time_end = ?4,
+        updated_at = datetime('now')
+    WHERE workspace_id = ?1 AND id = ?2
+    """
+
+    Store.raw_execute(sql, [
+      workspace_id,
+      memory_object_id,
+      Map.get(attrs, :supersession_status, "superseded"),
+      Map.get(attrs, :transaction_time_end)
+    ])
+  end
+
+  @spec list_relationship_edges(String.t(), keyword()) ::
+          {:ok, [RelationshipEdge.t()]} | {:error, term()}
+  def list_relationship_edges(workspace_id, opts \\ []) when is_binary(workspace_id) do
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"tenant_id =", Keyword.get(opts, :tenant_id)},
+          {"relationship_type =", Keyword.get(opts, :relationship_type)},
+          {"from_object_id =", Keyword.get(opts, :from_object_id)},
+          {"to_object_id =", Keyword.get(opts, :to_object_id)}
+        ],
+        [workspace_id]
+      )
+
+    sql = """
+    SELECT #{Enum.join(@relationship_edge_columns, ", ")}
+    FROM relationship_edges
+    WHERE workspace_id = ?1 #{clauses}
+    ORDER BY created_at, id
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &relationship_edge_from_row/1)}
+    end
+  end
+
+  defp filter_clauses(filters, base_params) do
+    filters
+    |> Enum.reject(fn {_clause, value} -> is_nil(value) end)
+    |> Enum.reduce({"", base_params}, fn {clause, value}, {clauses, params} ->
+      {clauses <> " AND #{clause} ?#{length(params) + 1}", params ++ [value]}
+    end)
+  end
+
+  # Tenant predicate for reader scoping. When the caller resolves a tenant
+  # (e.g. through a ScopeEnvelope) the row must belong to it, so readers
+  # never return another tenant's rows that share a workspace id.
+  defp tenant_scope(opts, params) do
+    case Keyword.get(opts, :tenant_id) do
+      nil -> {"", params}
+      tenant_id -> {" AND tenant_id = ?#{length(params) + 1}", params ++ [to_string(tenant_id)]}
+    end
+  end
+
+  defp filter_by_fact_link(memory_objects, nil), do: memory_objects
+
+  defp filter_by_fact_link(memory_objects, fact_link_id) do
+    Enum.filter(memory_objects, fn memory_object ->
+      Enum.any?(memory_object.fact_links, fn link -> link_id(link) == fact_link_id end)
+    end)
+  end
+
+  defp link_id(%{"id" => id}), do: id
+  defp link_id(%{id: id}), do: id
+  defp link_id(_), do: nil
+
+  defp claim_from_row(row) do
+    @claim_columns
+    |> Enum.zip(row)
+    |> Map.new()
+    |> Map.update!(:semantic_frame, &decode_map/1)
+    |> Map.update!(:source_span, &decode_map/1)
+    |> Map.update!(:raw_component_scores, &decode_map/1)
+    |> Map.update!(:security_labels, &decode_list/1)
+    |> Map.update!(:partition_ids, &decode_list/1)
+    |> Map.update!(:metadata, &decode_map/1)
+    |> Claim.new()
+  end
+
+  defp fact_from_row(row) do
+    @fact_columns
+    |> Enum.zip(row)
+    |> Map.new()
+    |> Map.update!(:scope, &decode_map/1)
+    |> Map.update!(:accepted_claim_ids, &decode_list/1)
+    |> Map.update!(:supporting_evidence_links, &decode_list/1)
+    |> Map.update!(:contradicting_evidence_links, &decode_list/1)
+    |> Map.update!(:raw_component_scores, &decode_map/1)
+    |> Map.update!(:security_labels, &decode_list/1)
+    |> Map.update!(:partition_ids, &decode_list/1)
+    |> Map.update!(:metadata, &decode_map/1)
+    |> Fact.new()
+  end
+
+  defp memory_object_from_row(row) do
+    @memory_object_columns
+    |> Enum.zip(row)
+    |> Map.new()
+    |> Map.update!(:semantic_frame, &decode_map/1)
+    |> Map.update!(:fact_links, &decode_list/1)
+    |> Map.update!(:claim_links, &decode_list/1)
+    |> Map.update!(:source_package_links, &decode_list/1)
+    |> Map.update!(:evidence_links, &decode_list/1)
+    |> Map.update!(:security_labels, &decode_list/1)
+    |> Map.update!(:partition_ids, &decode_list/1)
+    |> Map.update!(:metadata, &decode_map/1)
+    |> MemoryObject.new()
+  end
+
+  defp relationship_edge_from_row(row) do
+    @relationship_edge_columns
+    |> Enum.zip(row)
+    |> Map.new()
+    |> Map.update!(:evidence_links, &decode_list/1)
+    |> Map.update!(:security_labels, &decode_list/1)
+    |> Map.update!(:partition_ids, &decode_list/1)
+    |> Map.update!(:metadata, &decode_map/1)
+    |> RelationshipEdge.new()
   end
 
   @spec insert_context_package(map()) :: :ok | {:error, term()}
@@ -761,7 +1154,8 @@ defmodule OptimalEngine.MemoryCore.Store do
     end
   end
 
-  @spec get_mcp_tool_definition(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  @spec get_mcp_tool_definition(String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
   def get_mcp_tool_definition(workspace_id, tool_name, protocol_adapter_id \\ "mcp")
       when is_binary(workspace_id) and is_binary(tool_name) and is_binary(protocol_adapter_id) do
     sql = """

@@ -5,14 +5,14 @@ defmodule OptimalEngine.Compliance.PIITest do
 
   describe "scan/1" do
     test "detects email addresses" do
-      text = "Ping me at alice@example.com or bob.jr+work@acme.co.uk"
+      text = "Ping me at alice@example.com or bob.jr+work@sample.co.uk"
       matches = PII.scan(text)
       kinds = Enum.map(matches, & &1.kind)
       assert :email in kinds
 
       emails = matches |> Enum.filter(&(&1.kind == :email)) |> Enum.map(& &1.value)
       assert "alice@example.com" in emails
-      assert "bob.jr+work@acme.co.uk" in emails
+      assert "bob.jr+work@sample.co.uk" in emails
     end
 
     test "detects US SSNs" do

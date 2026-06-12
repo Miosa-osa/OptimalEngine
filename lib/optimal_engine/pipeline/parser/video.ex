@@ -16,8 +16,7 @@ defmodule OptimalEngine.Pipeline.Parser.Video do
 
   @behaviour OptimalEngine.Pipeline.Parser.Backend
 
-  alias OptimalEngine.Pipeline.Parser.{Asset, Audio, Image, ParsedDoc}
-  alias OptimalEngine.Pipeline.Parser.ParsedDoc.StructuralElement
+  alias OptimalEngine.Pipeline.Parser.{Asset, Audio, Image, ParsedDoc, StructuralElement}
 
   @impl true
   def parse(path, opts) when is_binary(path) do
@@ -82,7 +81,7 @@ defmodule OptimalEngine.Pipeline.Parser.Video do
       structure =
         Enum.map(frame_results, fn %{index: idx, timestamp_s: ts} ->
           StructuralElement.new(
-            kind: :frame,
+            :frame,
             offset: 0,
             metadata: %{frame_index: idx, timestamp_s: ts}
           )
@@ -124,11 +123,17 @@ defmodule OptimalEngine.Pipeline.Parser.Video do
       System.cmd(
         "ffmpeg",
         [
-          "-y", "-i", path,
-          "-vf", "select='gt(scene,#{threshold})',showinfo",
-          "-vsync", "vfr",
-          "-q:v", "3",
-          "-frames:v", to_string(max_frames),
+          "-y",
+          "-i",
+          path,
+          "-vf",
+          "select='gt(scene,#{threshold})',showinfo",
+          "-vsync",
+          "vfr",
+          "-q:v",
+          "3",
+          "-frames:v",
+          to_string(max_frames),
           Path.join(frames_dir, "frame_%04d.jpg")
         ],
         stderr_to_stdout: true
@@ -187,10 +192,15 @@ defmodule OptimalEngine.Pipeline.Parser.Video do
       System.cmd(
         "ffmpeg",
         [
-          "-y", "-i", path,
-          "-vf", "fps=1/#{interval}",
-          "-frames:v", to_string(capped),
-          "-q:v", "3",
+          "-y",
+          "-i",
+          path,
+          "-vf",
+          "fps=1/#{interval}",
+          "-frames:v",
+          to_string(capped),
+          "-q:v",
+          "3",
           Path.join(frames_dir, "frame_%04d.jpg")
         ],
         stderr_to_stdout: true
@@ -218,7 +228,8 @@ defmodule OptimalEngine.Pipeline.Parser.Video do
         %{index: idx, timestamp_s: ts, text: text, assets: assets}
       end)
 
-    {results, if(frame_files == [], do: ["no frames extracted — video may be audio-only"], else: [])}
+    {results,
+     if(frame_files == [], do: ["no frames extracted — video may be audio-only"], else: [])}
   end
 
   defp parse_showinfo_timestamps(output, expected_count) do

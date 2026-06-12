@@ -135,6 +135,7 @@ defmodule OptimalEngine.Topology.NodeTest do
   describe "list/1 filters" do
     test "filter by kind" do
       suffix = System.unique_integer([:positive])
+
       {:ok, _} =
         Node.upsert(%{
           slug: "list-u-#{suffix}",

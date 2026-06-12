@@ -10,6 +10,10 @@ defmodule OptimalEngine.Insight.Remember do
   Observations accumulate in the `observations` table. When 3+ observations
   share a category, they're flagged for escalation to RethinkEngine.
 
+  All reads AND writes are workspace-scoped (`:workspace_id` option, default
+  `"default"`) — observations carry the workspace they were captured in, and
+  escalation counts never aggregate across workspaces.
+
   Stateless module — no GenServer.
   """
 
@@ -39,20 +43,22 @@ defmodule OptimalEngine.Insight.Remember do
     category = Keyword.get(opts, :category) || classify_observation(observation)
     confidence = Keyword.get(opts, :confidence, 0.6)
     source = Keyword.get(opts, :source, "explicit")
+    ws = Keyword.get(opts, :workspace_id, "default")
 
     sql = """
-    INSERT INTO observations (category, content, confidence, source)
-    VALUES (?1, ?2, ?3, ?4)
+    INSERT INTO observations (category, content, confidence, source, workspace_id)
+    VALUES (?1, ?2, ?3, ?4, ?5)
     """
 
-    case Store.raw_query(sql, [category, observation, confidence, source]) do
+    case Store.raw_query(sql, [category, observation, confidence, source, ws]) do
       {:ok, _} ->
         result = %{
           category: category,
           content: observation,
           confidence: confidence,
           source: source,
-          escalation: check_escalation(category)
+          workspace_id: ws,
+          escalation: check_escalation(category, ws)
         }
 
         Logger.info(
@@ -79,15 +85,16 @@ defmodule OptimalEngine.Insight.Remember do
   @spec contextual_scan(keyword()) :: {:ok, [map()]}
   def contextual_scan(opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
+    ws = Keyword.get(opts, :workspace_id, "default")
 
     sql = """
     SELECT id, title, content FROM contexts
-    WHERE type = 'signal' AND content != ''
+    WHERE type = 'signal' AND content != '' AND workspace_id = ?2
     ORDER BY created_at DESC
     LIMIT ?1
     """
 
-    case Store.raw_query(sql, [limit]) do
+    case Store.raw_query(sql, [limit, ws]) do
       {:ok, rows} ->
         observations =
           rows
@@ -100,7 +107,8 @@ defmodule OptimalEngine.Insight.Remember do
             case remember(obs.content,
                    category: obs.category,
                    confidence: obs.confidence,
-                   source: "contextual"
+                   source: "contextual",
+                   workspace_id: ws
                  ) do
               {:ok, result} -> result
               _ -> nil
@@ -125,24 +133,25 @@ defmodule OptimalEngine.Insight.Remember do
   @spec mine_sessions(keyword()) :: {:ok, [map()]}
   def mine_sessions(opts \\ []) do
     limit = Keyword.get(opts, :limit, 20)
+    ws = Keyword.get(opts, :workspace_id, "default")
 
     sessions_sql = """
     SELECT id, content FROM sessions
-    WHERE content IS NOT NULL AND content != '' AND summary != ''
+    WHERE content IS NOT NULL AND content != '' AND summary != '' AND workspace_id = ?2
     ORDER BY started_at DESC
     LIMIT ?1
     """
 
     rows =
-      case Store.raw_query(sessions_sql, [limit]) do
+      case Store.raw_query(sessions_sql, [limit, ws]) do
         {:ok, r} when r != [] ->
           r
 
         _ ->
           contexts_sql =
-            "SELECT id, content FROM contexts WHERE content != '' ORDER BY created_at DESC LIMIT ?1"
+            "SELECT id, content FROM contexts WHERE content != '' AND workspace_id = ?2 ORDER BY created_at DESC LIMIT ?1"
 
-          case Store.raw_query(contexts_sql, [limit]) do
+          case Store.raw_query(contexts_sql, [limit, ws]) do
             {:ok, r} -> r
             _ -> []
           end
@@ -174,7 +183,8 @@ defmodule OptimalEngine.Insight.Remember do
         case remember(obs.content,
                category: obs.category,
                confidence: obs.confidence,
-               source: obs.source
+               source: obs.source,
+               workspace_id: ws
              ) do
           {:ok, result} -> result
           _ -> nil
@@ -196,17 +206,18 @@ defmodule OptimalEngine.Insight.Remember do
   def list(opts \\ []) do
     category = Keyword.get(opts, :category)
     limit = Keyword.get(opts, :limit, 50)
+    ws = Keyword.get(opts, :workspace_id, "default")
 
     {sql, params} =
       if category do
         {
-          "SELECT id, category, content, confidence, source, created_at FROM observations WHERE category = ?1 ORDER BY created_at DESC LIMIT ?2",
-          [category, limit]
+          "SELECT id, category, content, confidence, source, created_at FROM observations WHERE category = ?1 AND workspace_id = ?3 ORDER BY created_at DESC LIMIT ?2",
+          [category, limit, ws]
         }
       else
         {
-          "SELECT id, category, content, confidence, source, created_at FROM observations ORDER BY created_at DESC LIMIT ?1",
-          [limit]
+          "SELECT id, category, content, confidence, source, created_at FROM observations WHERE workspace_id = ?2 ORDER BY created_at DESC LIMIT ?1",
+          [limit, ws]
         }
       end
 
@@ -233,18 +244,24 @@ defmodule OptimalEngine.Insight.Remember do
 
   @doc """
   Returns categories with 3+ observations (escalation candidates for RethinkEngine).
+
+  Options:
+  - `:workspace_id` — workspace to scope to (default: "default")
   """
-  @spec escalation_candidates() :: {:ok, [map()]}
-  def escalation_candidates do
+  @spec escalation_candidates(keyword()) :: {:ok, [map()]}
+  def escalation_candidates(opts \\ []) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+
     sql = """
     SELECT category, COUNT(*) as cnt, SUM(confidence) as total_confidence
     FROM observations
+    WHERE workspace_id = ?1
     GROUP BY category
     HAVING COUNT(*) >= 3
     ORDER BY total_confidence DESC
     """
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, rows} ->
         candidates =
           Enum.map(rows, fn [cat, cnt, conf] ->
@@ -347,10 +364,11 @@ defmodule OptimalEngine.Insight.Remember do
     end
   end
 
-  defp check_escalation(category) do
-    sql = "SELECT COUNT(*), SUM(confidence) FROM observations WHERE category = ?1"
+  defp check_escalation(category, ws) do
+    sql =
+      "SELECT COUNT(*), SUM(confidence) FROM observations WHERE category = ?1 AND workspace_id = ?2"
 
-    case Store.raw_query(sql, [category]) do
+    case Store.raw_query(sql, [category, ws]) do
       {:ok, [[count, total_conf]]} when count >= 3 ->
         %{
           escalated: true,

@@ -29,6 +29,7 @@ defmodule OptimalEngine.Connectors.Runner do
   @type connector_row :: %{
           id: String.t(),
           tenant_id: String.t(),
+          workspace_id: String.t(),
           kind: String.t(),
           config: map(),
           cursor: String.t() | nil,
@@ -37,6 +38,7 @@ defmodule OptimalEngine.Connectors.Runner do
 
   @type run_result :: %{
           connector_id: String.t(),
+          workspace_id: String.t(),
           status: :success | :error | :disabled,
           signals: non_neg_integer(),
           errors: non_neg_integer(),
@@ -54,14 +56,19 @@ defmodule OptimalEngine.Connectors.Runner do
 
   Options:
     * `:max_retries` — cap on transient-error retries (default 5)
-    * `:signal_sink` — `(signals) -> :ok` callback that consumes the
-      produced signals (default: hands them to the intake pipeline)
+    * `:signal_sink` — callback that consumes the produced signals
+      (default: no-op). Arity 1 receives `signals`; arity 2 receives
+      `signals` plus a scope map `%{workspace_id, tenant_id, connector_id}`
+      so the sink can land connector-ingested signals in the connector's
+      workspace (e.g. `Pipeline.Intake.process(text, workspace_id: ...)`).
+    * `:adapter` — adapter module override (test seam — production lookup
+      goes through the compile-time `Registry`)
   """
   @spec run(String.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(connector_id, opts \\ []) when is_binary(connector_id) do
     with {:ok, row} <- fetch_connector(connector_id),
          :ok <- ensure_enabled(row),
-         {:ok, mod} <- lookup_adapter(row.kind),
+         {:ok, mod} <- lookup_adapter(row.kind, opts),
          {:ok, state} <- init_adapter(mod, row.config) do
       run_id = start_run_row(row)
 
@@ -116,7 +123,7 @@ defmodule OptimalEngine.Connectors.Runner do
 
   defp finalize({:ok, signals, next_cursor}, row, run_id, opts) do
     sink = Keyword.get(opts, :signal_sink, &default_sink/1)
-    :ok = sink.(signals)
+    :ok = invoke_sink(sink, signals, row)
 
     # Persist the cursor advance + audit completion in one transaction so
     # they succeed or fail together. Without this, a cursor could advance
@@ -129,6 +136,7 @@ defmodule OptimalEngine.Connectors.Runner do
       :ok ->
         %{
           connector_id: row.id,
+          workspace_id: row.workspace_id,
           status: :success,
           signals: length(signals),
           errors: 0,
@@ -153,6 +161,7 @@ defmodule OptimalEngine.Connectors.Runner do
 
         %{
           connector_id: row.id,
+          workspace_id: row.workspace_id,
           status: :error,
           signals: length(signals),
           errors: 1,
@@ -169,6 +178,7 @@ defmodule OptimalEngine.Connectors.Runner do
 
     %{
       connector_id: row.id,
+      workspace_id: row.workspace_id,
       status: :disabled,
       signals: 0,
       errors: 1,
@@ -183,6 +193,7 @@ defmodule OptimalEngine.Connectors.Runner do
 
     %{
       connector_id: row.id,
+      workspace_id: row.workspace_id,
       status: :error,
       signals: 0,
       errors: 1,
@@ -197,18 +208,19 @@ defmodule OptimalEngine.Connectors.Runner do
   defp fetch_connector(id) do
     case Store.raw_query(
            """
-           SELECT id, tenant_id, kind, config, cursor, enabled
+           SELECT id, tenant_id, workspace_id, kind, config, cursor, enabled
            FROM connectors WHERE id = ?1 LIMIT 1
            """,
            [id]
          ) do
-      {:ok, [[id, tenant_id, kind, config_json, cursor, enabled]]} ->
+      {:ok, [[id, tenant_id, workspace_id, kind, config_json, cursor, enabled]]} ->
         config = decode_config(config_json)
 
         {:ok,
          %{
            id: id,
            tenant_id: tenant_id,
+           workspace_id: workspace_id || "default",
            kind: kind,
            config: config,
            cursor: cursor,
@@ -230,8 +242,11 @@ defmodule OptimalEngine.Connectors.Runner do
   # `connectors.kind` column — operator-writable data. `to_atom/1` would
   # create a new atom on every junk value and eventually exhaust the atom
   # table. Every legitimate adapter atom is already loaded via the Registry.
-  defp lookup_adapter(kind_str) when is_binary(kind_str) do
-    Registry.fetch(String.to_existing_atom(kind_str))
+  defp lookup_adapter(kind_str, opts) when is_binary(kind_str) do
+    case Keyword.get(opts, :adapter) do
+      mod when is_atom(mod) and not is_nil(mod) -> {:ok, mod}
+      _ -> Registry.fetch(String.to_existing_atom(kind_str))
+    end
   rescue
     ArgumentError -> {:error, :unknown_kind}
   end
@@ -269,10 +284,10 @@ defmodule OptimalEngine.Connectors.Runner do
     {:ok, _} =
       Store.raw_query(
         """
-        INSERT INTO connector_runs (tenant_id, connector_id, cursor_before, status)
-        VALUES (?1, ?2, ?3, 'running')
+        INSERT INTO connector_runs (tenant_id, workspace_id, connector_id, cursor_before, status)
+        VALUES (?1, ?2, ?3, ?4, 'running')
         """,
-        [row.tenant_id, row.id, row.cursor]
+        [row.tenant_id, row.workspace_id, row.id, row.cursor]
       )
 
     # SQLite returns the last insert id via a small follow-up query
@@ -323,6 +338,21 @@ defmodule OptimalEngine.Connectors.Runner do
   # want downstream processing pass `:signal_sink` explicitly.
   defp default_sink(_signals), do: :ok
 
+  # Sinks come in two arities: legacy arity-1 `(signals)`, and arity-2
+  # `(signals, scope)` where scope carries the connector's workspace so
+  # downstream ingest attributes the signals to the right workspace.
+  defp invoke_sink(sink, signals, row) when is_function(sink, 2) do
+    sink.(signals, %{
+      workspace_id: row.workspace_id,
+      tenant_id: row.tenant_id,
+      connector_id: row.id
+    })
+  end
+
+  defp invoke_sink(sink, signals, _row) when is_function(sink, 1) do
+    sink.(signals)
+  end
+
   # Wrap a sequence of raw_query writes in a SQLite BEGIN/COMMIT so a
   # failure in any statement rolls back the lot. If the transaction
   # itself errors we log + return :error rather than raising, so the
@@ -342,19 +372,24 @@ defmodule OptimalEngine.Connectors.Runner do
   @doc """
   Upsert a connector row. This is the only place config JSON is
   written so we can enforce shape + encrypt credentials centrally.
+
+  `attrs` may include `:workspace_id` (default `"default"`) — every signal
+  the connector ingests is attributed to that workspace.
   """
   @spec upsert_row(map()) :: {:ok, String.t()} | {:error, term()}
   def upsert_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
     tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
+    workspace_id = Map.get(attrs, :workspace_id, "default")
     enabled = if Map.get(attrs, :enabled, true), do: 1, else: 0
 
     sanitized = maybe_encrypt_credentials(config)
 
     sql = """
-    INSERT INTO connectors (id, tenant_id, kind, config, cursor, enabled)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+    INSERT INTO connectors (id, tenant_id, workspace_id, kind, config, cursor, enabled)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
     ON CONFLICT(id) DO UPDATE SET
+      workspace_id = excluded.workspace_id,
       config  = excluded.config,
       enabled = excluded.enabled
     """
@@ -362,6 +397,7 @@ defmodule OptimalEngine.Connectors.Runner do
     case Store.raw_query(sql, [
            id,
            tenant_id,
+           workspace_id,
            Atom.to_string(kind),
            Jason.encode!(sanitized),
            Map.get(attrs, :cursor),

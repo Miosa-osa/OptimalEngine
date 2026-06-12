@@ -25,6 +25,41 @@ defmodule OptimalEngine.Store do
 
   All public functions return `{:ok, result}` or `{:error, reason}` — no bare
   raises outside of init (where crashing is acceptable per OTP let-it-crash).
+  The one deliberate exception: `transaction/2` re-raises exceptions raised by
+  the *caller's own fun* (after rolling back), so bugs inside a transaction fun
+  surface in the calling process instead of being swallowed as error tuples.
+
+  ## Transactions
+
+  `transaction/1` runs a caller-supplied fun inside one SQLite transaction
+  (`BEGIN IMMEDIATE` .. `COMMIT`/`ROLLBACK`) executed within a SINGLE GenServer
+  call, so a whole read-check-write sequence is atomic and serialized against
+  every other Store operation. This is the primitive that FactPromoter atomic
+  promotion and ActiveMemoryPool atomic pool mutations build on.
+
+  ### Contract
+
+      Store.transaction(fn txn ->
+        {:ok, rows} = Store.txn_query(txn, "SELECT ...", [param])
+        {:ok, _changes} = Store.txn_execute(txn, "UPDATE ...", [param])
+        {:ok, result}
+      end)
+      #=> {:ok, result} | {:error, reason}
+
+  - The fun receives an opaque transaction handle and must run every statement
+    through `txn_query/3` / `txn_execute/3`. Calling any other
+    `OptimalEngine.Store` function inside the fun deadlocks (the fun runs in
+    the Store GenServer process).
+  - Fun returns `{:ok, result}` → `COMMIT`, `transaction/2` returns
+    `{:ok, result}`. If the commit itself fails, the transaction is rolled
+    back and `{:error, {:commit_failed, reason}}` is returned.
+  - Fun returns `{:error, reason}` → `ROLLBACK`, `transaction/2` returns
+    `{:error, reason}` unchanged.
+  - Fun raises/throws/exits → `ROLLBACK`, then the exception is re-raised in
+    the calling process with its original stacktrace (the Store GenServer
+    itself stays alive).
+  - Any other return value → `ROLLBACK` (fail closed),
+    `{:error, {:invalid_transaction_return, other}}`.
   """
 
   use GenServer
@@ -295,6 +330,55 @@ defmodule OptimalEngine.Store do
   end
 
   @doc """
+  Runs `fun` inside a single SQLite transaction (`BEGIN IMMEDIATE` ..
+  `COMMIT`/`ROLLBACK`) executed within ONE Store GenServer call, so the whole
+  read-check-write sequence is atomic and serialized against every other
+  Store operation.
+
+  `fun` receives an opaque transaction handle and must run every statement
+  through `txn_query/3` / `txn_execute/3` (calling other `OptimalEngine.Store`
+  functions inside the fun would deadlock the GenServer). Return
+  `{:ok, result}` to commit or `{:error, reason}` to roll back. If the fun
+  raises (or throws/exits), the transaction is rolled back and the exception
+  is re-raised here in the calling process with its original stacktrace.
+
+  See the module documentation ("Transactions") for the full contract.
+  """
+  @spec transaction((term() -> {:ok, term()} | {:error, term()}), timeout()) ::
+          {:ok, term()} | {:error, term()}
+  def transaction(fun, timeout \\ 30_000) when is_function(fun, 1) do
+    case GenServer.call(__MODULE__, {:transaction, fun}, timeout) do
+      {:__txn_raise__, kind, reason, stacktrace} -> :erlang.raise(kind, reason, stacktrace)
+      result -> result
+    end
+  end
+
+  @doc "Executes a SELECT inside a `transaction/2` fun. Returns `{:ok, rows}`."
+  @spec txn_query(term(), String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
+  def txn_query({:txn, db}, sql, params \\ []) do
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
+         :ok <- Exqlite.Sqlite3.bind(stmt, params) do
+      rows = collect_rows_raw(db, stmt, [])
+      Exqlite.Sqlite3.release(db, stmt)
+      {:ok, rows}
+    end
+  end
+
+  @doc """
+  Executes a non-SELECT statement inside a `transaction/2` fun. Returns
+  `{:ok, changes}` with the number of rows affected, so callers can detect
+  conditional updates that matched zero rows.
+  """
+  @spec txn_execute(term(), String.t(), [term()]) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def txn_execute({:txn, db} = txn, sql, params \\ []) do
+    with :ok <- exec_stmt(db, sql, params),
+         {:ok, [[changes]]} <- txn_query(txn, "SELECT changes()") do
+      {:ok, changes}
+    end
+  end
+
+  @doc """
   Inserts or replaces a list of chunks in one transaction.
 
   Accepts anything that behaves like `OptimalEngine.Pipeline.Decomposer.Chunk`
@@ -535,6 +619,11 @@ defmodule OptimalEngine.Store do
   end
 
   @impl true
+  def handle_call({:transaction, fun}, _from, state) do
+    {:reply, run_transaction(state.db, fun), state}
+  end
+
+  @impl true
   def terminate(_reason, %{db: db}) do
     Exqlite.Sqlite3.close(db)
   end
@@ -567,7 +656,6 @@ defmodule OptimalEngine.Store do
          :ok <- Exqlite.Sqlite3.execute(db, @ddl_vectors),
          :ok <- Exqlite.Sqlite3.execute(db, @ddl_observations),
          :ok <- run_index_migrations(db),
-         :ok <- normalize_node_names(db),
          :ok <- run_probability_column_migrations(db),
          :ok <- OptimalEngine.Store.Migrations.run(db) do
       {:ok, db}
@@ -625,28 +713,11 @@ defmodule OptimalEngine.Store do
     :ok
   end
 
-  defp normalize_node_names(db) do
-    renames = [
-      {"01-inbox", "inbox"},
-      {"04-products", "products"},
-      {"10-team", "team"},
-      {"11-revenue", "revenue"}
-    ]
-
-    Enum.each(renames, fn {old, new} ->
-      sql = "UPDATE contexts SET node = '#{new}' WHERE node = '#{old}'"
-
-      case Exqlite.Sqlite3.execute(db, sql) do
-        :ok ->
-          :ok
-
-        {:error, reason} ->
-          Logger.warning("[Store] Node rename #{old} → #{new} failed: #{inspect(reason)}")
-      end
-    end)
-
-    :ok
-  end
+  # NOTE: the legacy node renames ("01-inbox" → "inbox", "04-products" →
+  # "product-customer-portal") used to run here on every init, rewriting node
+  # names across ALL workspaces. They now live in Migrations as a one-time,
+  # workspace-scoped backfill (migration 035) — see
+  # `OptimalEngine.Store.Migrations.migration_035_connector_workspace_and_legacy_node_renames/0`.
 
   # If an old `signals` TABLE exists (not view), migrate its data to `contexts`
   # then drop it so our VIEW can be created.
@@ -999,6 +1070,47 @@ defmodule OptimalEngine.Store do
     case Exqlite.Sqlite3.execute(db, "BEGIN") do
       :ok -> commit_or_rollback(db, contexts)
       err -> err
+    end
+  end
+
+  # Runs a caller fun inside BEGIN IMMEDIATE .. COMMIT/ROLLBACK on the owned
+  # connection. Executes in the GenServer process, so the fun must only use
+  # txn_query/3 and txn_execute/3 for database access. Exceptions raised by
+  # the fun roll the transaction back and are returned as a `:__txn_raise__`
+  # sentinel that `transaction/2` re-raises in the calling process — the
+  # Store GenServer must survive caller bugs.
+  defp run_transaction(db, fun) do
+    case Exqlite.Sqlite3.execute(db, "BEGIN IMMEDIATE") do
+      :ok ->
+        try do
+          case fun.({:txn, db}) do
+            {:ok, result} ->
+              case Exqlite.Sqlite3.execute(db, "COMMIT") do
+                :ok ->
+                  {:ok, result}
+
+                {:error, reason} ->
+                  Exqlite.Sqlite3.execute(db, "ROLLBACK")
+                  {:error, {:commit_failed, reason}}
+              end
+
+            {:error, _} = err ->
+              Exqlite.Sqlite3.execute(db, "ROLLBACK")
+              err
+
+            other ->
+              Exqlite.Sqlite3.execute(db, "ROLLBACK")
+              {:error, {:invalid_transaction_return, other}}
+          end
+        catch
+          kind, reason ->
+            stacktrace = __STACKTRACE__
+            Exqlite.Sqlite3.execute(db, "ROLLBACK")
+            {:__txn_raise__, kind, reason, stacktrace}
+        end
+
+      {:error, reason} ->
+        {:error, {:begin_failed, reason}}
     end
   end
 
@@ -1476,10 +1588,12 @@ defmodule OptimalEngine.Store do
     result
   end
 
-  defp insert_entities(db, %Context{id: id, entities: entities}) when is_list(entities) do
+  defp insert_entities(db, %Context{id: id, entities: entities} = ctx) when is_list(entities) do
+    workspace_id = ctx.workspace_id || "default"
+
     Enum.each(entities, fn entity ->
       sql =
-        "INSERT OR IGNORE INTO entities (context_id, name, type) VALUES ('#{escape(id)}', '#{escape(entity)}', 'person')"
+        "INSERT OR IGNORE INTO entities (context_id, name, type, workspace_id) VALUES ('#{escape(id)}', '#{escape(entity)}', 'person', '#{escape(workspace_id)}')"
 
       Exqlite.Sqlite3.execute(db, sql)
     end)

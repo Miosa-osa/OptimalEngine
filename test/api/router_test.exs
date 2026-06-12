@@ -93,7 +93,9 @@ defmodule OptimalEngine.API.RouterTest do
         request(:post, "/api/rag", %{
           "query" => "nonexistent-rag-api-probe-#{System.unique_integer([:positive])}",
           "format" => "markdown",
-          "audience" => "default"
+          "audience" => "default",
+          "skip_intent" => true,
+          "skip_wiki" => true
         })
 
       assert conn.status == 200
@@ -101,6 +103,34 @@ defmodule OptimalEngine.API.RouterTest do
       assert Map.has_key?(body, "source")
       assert Map.has_key?(body, "envelope")
       assert Map.has_key?(body, "trace")
+    end
+
+    test "forwards benchmark controls to the memory fallback path" do
+      workspace_id = "api-rag-memory-fallback-#{System.unique_integer([:positive])}"
+
+      {:ok, _memory} =
+        OptimalEngine.Memory.create(%{
+          workspace_id: workspace_id,
+          audience: "default",
+          content:
+            "Conversation bench: Project Atlas handled customer portal pricing. Decision: standardize on annual price protection. Owner: Revenue Lead."
+        })
+
+      conn =
+        request(:post, "/api/rag", %{
+          "query" => "What decision did Project Atlas make for customer portal pricing?",
+          "workspace" => workspace_id,
+          "format" => "markdown",
+          "skip_intent" => true,
+          "skip_wiki" => true,
+          "memory_limit" => 2
+        })
+
+      assert conn.status == 200
+      {:ok, body} = Jason.decode(conn.resp_body)
+      assert body["source"] == "memory"
+      assert body["trace"]["n_candidates"] >= 1
+      assert body["envelope"]["body"] =~ "standardize on annual price protection"
     end
   end
 

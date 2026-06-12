@@ -88,7 +88,7 @@ defmodule Mix.Tasks.Optimal.Spec.Init do
     id: intake-pipeline
     kind: module
     status: active
-    node: os-architect
+    node: entity-company
     surface:
       - engine/lib/optimal_engine/intake.ex
       - engine/lib/optimal_engine/intake/writer.ex
@@ -98,7 +98,7 @@ defmodule Mix.Tasks.Optimal.Spec.Init do
 
     ```spec-requirements
     - id: classify_signal
-      statement: Intake shall classify raw text into S=(M,G,T,F,W) dimensions via Classifier
+      statement: Intake shall classify raw text into Mode + Genre + Type + Format + Structure dimensions via Classifier
       priority: must
       stability: stable
 

@@ -3,13 +3,20 @@ defmodule OptimalEngine.Pipeline.Intake do
   Intake pipeline — classifies raw text, routes it to nodes, writes signal
   files to disk, and updates the SQLite index.
 
-  This is the core user-facing ingestion flow:
+  This is the Evidence Intake gate:
 
-  1. Classify: run S=(M,G,T,F,W) classification via `Classifier`
-  2. Route: determine primary node + cross-reference nodes via `Router`
-  3. Write: emit structured markdown files to `{node}/signals/` directories
-  4. Cross-ref: write cross-references to secondary destinations
-  5. Index: store the Context in SQLite via `Store`
+  1. Scope: resolve the best-known `ScopeEnvelope` (actor, tenant, workspace,
+     operation class, node hints, permissions) from caller options
+  2. Source-first: persist the `SourcePackage` BEFORE any interpretation, so
+     reject/quarantine paths can never lose the source evidence
+  3. Classify: run Mode + Genre + Type + Format + Structure classification via `Classifier`
+  4. Route: determine primary node + cross-reference nodes via `Router`
+  5. Write: emit structured markdown files to the Node's `signals/` directory
+     (folders resolve through workspace topology, with a legacy alias fallback)
+  6. Cross-ref: write cross-references to secondary destinations
+  7. Index: store the compatibility Context row in SQLite via `Store`
+  8. Lineage: record a Derivation Ledger entry linking
+     `source_package -> signal + context` with actor and policy
 
   Non-critical steps run async (fire-and-forget):
   - Episodic recording
@@ -18,9 +25,16 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   ## Quality Actions
 
-  FailureModes violations now trigger actions:
-  - S/N < 0.3 → reject with `{:error, :signal_too_noisy}`
-  - S/N < 0.6 AND routing_failure → quarantine to inbox with `:low_quality` tag
+  FailureModes violations trigger actions. In every case the Source Package
+  is already durable and its `quarantine_state` plus a Derivation Ledger
+  entry record what happened:
+
+  - S/N < 0.3 → reject with `{:error, :signal_too_noisy}`; the Source Package
+    is kept with `quarantine_state = "rejected"` and a `source_rejected`
+    ledger entry
+  - S/N < 0.6 AND (routing_failure OR inbox fallback) → result is
+    `:quarantined`; the Source Package is marked
+    `quarantine_state = "quarantined"` with a `source_quarantined` ledger entry
   - :bandwidth_overload → truncate L1 to 250 chars
   - :structure_failure → auto-apply genre skeleton (already happens)
 
@@ -31,7 +45,7 @@ defmodule OptimalEngine.Pipeline.Intake do
       {:ok, result} = OptimalEngine.Pipeline.Intake.process(
         "Customer called...",
         genre: "transcript",
-        title: "Q4 Pricing Call",
+        title: "Requirements Review Call",
         node: "products",
         entities: ["Alice", "Alice"]
       )
@@ -41,9 +55,10 @@ defmodule OptimalEngine.Pipeline.Intake do
       %{
         signal: %Signal{},
         context: %Context{},
-        files_written: ["04-products/signals/2026-03-18-pricing-call.md"],
-        routed_to: ["04-products", "11-revenue"],
-        cross_references: ["11-revenue/signals/2026-03-18-pricing-call.md"],
+        source_package: %SourcePackage{},
+        files_written: ["product-customer-portal/signals/2026-03-18-pricing-call.md"],
+        routed_to: ["product-customer-portal", "operation-revenue"],
+        cross_references: ["operation-revenue/signals/2026-03-18-pricing-call.md"],
         uri: "optimal://nodes/products/signals/2026-03-18-pricing-call.md",
         quality_violations: [{:bandwidth_overload, "..."}],
         quality_action: :accepted
@@ -56,6 +71,13 @@ defmodule OptimalEngine.Pipeline.Intake do
   - `:title`    — Explicit title instead of auto-extracted one
   - `:entities` — Explicit entity list (merged with auto-extracted)
   - `:type`     — Force context type (:signal, :resource, :memory, :skill)
+
+  Scope Envelope options (see `OptimalEngine.MemoryCore.ScopeEnvelope`):
+
+  - `:actor` / `:actor_id` / `:created_by` — acting principal
+  - `:tenant_id` / `:workspace_id` — evidence scope (default: "default")
+  - `:operation_class` — operation being performed (default: "intake.process")
+  - `:permissions` — permissions presented by the caller
   """
 
   use GenServer
@@ -63,8 +85,11 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   alias OptimalEngine.Pipeline.Classifier, as: Classifier
   alias OptimalEngine.Context
+  alias OptimalEngine.MemoryCore.DerivationLedgerEntry
+  alias OptimalEngine.MemoryCore.ScopeEnvelope
   alias OptimalEngine.MemoryCore.SourcePackage
   alias OptimalEngine.MemoryCore.SourcePackageService
+  alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
   alias OptimalEngine.Pipeline.Indexer, as: Indexer
   alias OptimalEngine.Pipeline.Intake.Writer, as: Writer
   alias OptimalEngine.Pipeline.Router, as: Router
@@ -77,10 +102,14 @@ defmodule OptimalEngine.Pipeline.Intake do
   alias OptimalEngine.Bridge.Memory, as: BridgeMemory
   alias OptimalEngine.Bridge.Signal, as: BridgeSignal
 
+  # Policy applied by the quality gate; recorded on reject/quarantine ledger entries.
+  @quality_gate_policy "intake_quality_gate_v1"
+
   # Result type for process/2
   @type result :: %{
           signal: Signal.t(),
           context: Context.t(),
+          source_package: SourcePackage.t(),
           files_written: [String.t()],
           routed_to: [String.t()],
           cross_references: [String.t()],
@@ -132,15 +161,21 @@ defmodule OptimalEngine.Pipeline.Intake do
   # ---------------------------------------------------------------------------
 
   defp run_pipeline(raw_text, opts) do
-    source_package = SourcePackage.from_text(raw_text, opts)
+    scope = ScopeEnvelope.resolve(opts)
 
-    with {:ok, signal} <- classify_step(raw_text, opts),
+    source_package =
+      SourcePackage.from_text(raw_text, ScopeEnvelope.source_package_opts(scope, opts))
+
+    # Source-first: the Source Package is committed BEFORE any interpretation,
+    # so reject/quarantine/failure paths can never lose the source evidence.
+    with :ok <- persist_source_package(source_package),
+         {:ok, signal} <- classify_step(raw_text, opts),
          signal = enhance_with_signal_bridge(signal, raw_text),
-         {:ok, signal} <- quality_gate(signal),
+         {:ok, signal} <- quality_gate(signal, source_package, scope),
          {:ok, signal, routed_to} <- route_step(signal, opts),
-         {:ok, primary_path} <- write_step(signal, opts),
-         {:ok, cross_paths} <- cross_ref_step(signal, routed_to),
-         {:ok, context} <- index_step(signal, primary_path, opts) do
+         {:ok, primary_path} <- write_step(signal, scope),
+         {:ok, cross_paths} <- cross_ref_step(signal, routed_to, scope),
+         {:ok, context} <- index_step(signal, primary_path, scope) do
       uri = URI.from_path(primary_path)
       primary_relative = relative(primary_path)
       cross_relatives = Enum.map(cross_paths, &relative/1)
@@ -151,6 +186,7 @@ defmodule OptimalEngine.Pipeline.Intake do
       # Quality audit — determine violations and action
       violations = BridgeSignal.audit(signal)
       quality_action = determine_quality_action(signal, violations)
+      record_quality_action(source_package, quality_action, signal, violations, scope)
 
       # Apply bandwidth fix if needed (truncate L1 for overloaded signals)
       signal = apply_bandwidth_fix(signal, violations)
@@ -158,6 +194,7 @@ defmodule OptimalEngine.Pipeline.Intake do
       result = %{
         signal: signal,
         context: context,
+        source_package: source_package,
         files_written: [primary_relative],
         routed_to: routed_to,
         cross_references: cross_relatives,
@@ -166,7 +203,12 @@ defmodule OptimalEngine.Pipeline.Intake do
         quality_action: quality_action
       }
 
-      record_memory_core_trace(source_package, signal, context, opts)
+      record_memory_core_trace(
+        source_package,
+        signal,
+        context,
+        ScopeEnvelope.ledger_opts(scope, opts)
+      )
 
       # Async: non-critical steps (episodic record, SICA observe, telemetry)
       Task.start(fn -> async_post_intake(signal, result, violations) end)
@@ -179,6 +221,24 @@ defmodule OptimalEngine.Pipeline.Intake do
 
       {:ok, result}
     end
+  end
+
+  # Source-first commit. Refuses to derive anything when the evidence cannot
+  # be persisted — derived objects without source lineage are forbidden.
+  defp persist_source_package(%SourcePackage{} = source_package) do
+    case MemoryCoreStore.insert_source_package(source_package) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("[Intake] Source Package persist failed — refusing intake: #{inspect(reason)}")
+
+        {:error, {:source_package_not_persisted, reason}}
+    end
+  rescue
+    error ->
+      Logger.error("[Intake] Source Package persist failed — refusing intake: #{inspect(error)}")
+      {:error, {:source_package_not_persisted, error}}
   end
 
   defp record_memory_core_trace(source_package, signal, context, opts) do
@@ -196,21 +256,27 @@ defmodule OptimalEngine.Pipeline.Intake do
       :ok
   end
 
-  # Quality gate — reject or quarantine signals based on S/N and failure modes
-  defp quality_gate(%Signal{} = signal) do
+  # Quality gate — reject signals based on S/N. The Source Package is already
+  # durable; rejection only marks it and records the attempt in the ledger.
+  defp quality_gate(%Signal{} = signal, %SourcePackage{} = source_package, scope) do
     sn = signal.sn_ratio || 0.6
 
-    cond do
-      sn < 0.3 ->
-        Logger.warning("[Intake] Rejecting signal — S/N #{sn} too low (< 0.3)")
-        {:error, :signal_too_noisy}
+    if sn < 0.3 do
+      Logger.warning("[Intake] Rejecting signal — S/N #{sn} too low (< 0.3)")
 
-      true ->
-        {:ok, signal}
+      quarantine_source_package(source_package, "rejected", scope, %{
+        reason: "signal_too_noisy",
+        sn_ratio: sn
+      })
+
+      {:error, :signal_too_noisy}
+    else
+      {:ok, signal}
     end
   end
 
-  # Determine quality action based on violations and S/N
+  # Determine quality action based on violations and S/N. A low-signal input
+  # that could not be routed to a real Node (inbox fallback) is quarantined.
   defp determine_quality_action(%Signal{} = signal, violations) do
     sn = signal.sn_ratio || 0.6
     violation_modes = Enum.map(violations, &elem(&1, 0))
@@ -219,9 +285,90 @@ defmodule OptimalEngine.Pipeline.Intake do
       sn < 0.6 and :routing_failure in violation_modes ->
         :quarantined
 
+      sn < 0.6 and inbox_fallback?(signal) ->
+        :quarantined
+
       true ->
         :accepted
     end
+  end
+
+  defp inbox_fallback?(%Signal{} = signal) do
+    signal.node in [nil, "inbox"] and (signal.routed_to || []) -- ["inbox"] == []
+  end
+
+  defp record_quality_action(_source_package, :accepted, _signal, _violations, _scope), do: :ok
+
+  defp record_quality_action(source_package, :quarantined, signal, violations, scope) do
+    quarantine_source_package(source_package, "quarantined", scope, %{
+      reason: "low_signal_inbox_fallback",
+      sn_ratio: signal.sn_ratio || 0.6,
+      violations: Enum.map(violations, &elem(&1, 0))
+    })
+  end
+
+  # Marks the already-persisted Source Package and records the intake attempt
+  # in the Derivation Ledger so the reject/quarantine decision has lineage
+  # (source, processor, actor, policy). Never fails the pipeline.
+  defp quarantine_source_package(
+         %SourcePackage{} = source_package,
+         state,
+         %ScopeEnvelope{} = scope,
+         metadata
+       ) do
+    with :ok <- set_quarantine_state(source_package, state),
+         :ok <- record_quarantine_ledger(source_package, state, scope, metadata) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "[Intake] Failed to record #{state} state for #{source_package.id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "[Intake] Failed to record #{state} state for #{source_package.id}: #{inspect(error)}"
+      )
+
+      :ok
+  end
+
+  defp set_quarantine_state(%SourcePackage{id: id}, state) do
+    Store.raw_execute(
+      "UPDATE source_packages SET quarantine_state = ?1, updated_at = ?2 WHERE id = ?3",
+      [state, DateTime.to_iso8601(DateTime.utc_now()), id]
+    )
+  end
+
+  defp record_quarantine_ledger(%SourcePackage{} = source_package, state, scope, metadata) do
+    source_ref = DerivationLedgerEntry.object_ref("source_package", source_package.id)
+
+    entry =
+      DerivationLedgerEntry.new(
+        "intake.quality_gate",
+        "source_" <> state,
+        [source_ref],
+        [source_ref],
+        tenant_id: source_package.tenant_id,
+        workspace_id: source_package.workspace_id,
+        source_package_links: [source_ref],
+        evidence_links: [source_ref],
+        actor_id: scope.actor,
+        parser_id: "optimal_engine.pipeline.intake",
+        policy_version: @quality_gate_policy,
+        security_labels: source_package.security_labels,
+        partition_ids: source_package.partition_ids,
+        metadata:
+          Map.merge(metadata, %{
+            operation_class: scope.operation_class,
+            quarantine_state: state
+          })
+      )
+
+    MemoryCoreStore.insert_derivation_entry(entry)
   end
 
   # Apply bandwidth overload fix to signal
@@ -307,7 +454,7 @@ defmodule OptimalEngine.Pipeline.Intake do
 
     # Intake always produces a signal unless the caller explicitly forces another type.
     # Without this, content with an empty path is classified as :resource and loses
-    # all S=(M,G,T,F,W) dimensions.
+    # all Mode + Genre + Type + Format + Structure dimensions.
     forced_type = Keyword.get(opts, :type, :signal)
     classify_opts = [path: "", known_entities: all_known, type: forced_type]
 
@@ -368,29 +515,30 @@ defmodule OptimalEngine.Pipeline.Intake do
     {:ok, signal, routed_to}
   end
 
-  # Step 3: Write primary file
-  defp write_step(%Signal{} = signal, _opts) do
-    Writer.write_signal(signal)
+  # Step 3: Write primary file (Node folders resolve through workspace topology)
+  defp write_step(%Signal{} = signal, %ScopeEnvelope{} = scope) do
+    Writer.write_signal(signal, ScopeEnvelope.folder_scope(scope))
   end
 
   # Step 4: Write cross-references
-  defp cross_ref_step(%Signal{} = signal, routed_to) do
-    primary_folder = Writer.node_to_folder(signal.node)
+  defp cross_ref_step(%Signal{} = signal, routed_to, %ScopeEnvelope{} = scope) do
+    folder_scope = ScopeEnvelope.folder_scope(scope)
+    primary_folder = Writer.node_to_folder(signal.node, folder_scope)
 
     cross_nodes =
       routed_to
       |> Enum.reject(fn dest ->
-        Writer.node_to_folder(dest) == primary_folder
+        Writer.node_to_folder(dest, folder_scope) == primary_folder
       end)
 
-    Writer.write_cross_references(signal, cross_nodes)
+    Writer.write_cross_references(signal, cross_nodes, folder_scope)
   end
 
   # Step 5: Index — write the primary file to SQLite via Indexer
-  defp index_step(%Signal{} = signal, primary_path, opts) do
+  defp index_step(%Signal{} = signal, primary_path, %ScopeEnvelope{} = scope) do
     # Build a complete context for storage
     uri = URI.from_path(primary_path)
-    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    workspace_id = scope.workspace_id
 
     context = %Context{
       id: signal.id,
@@ -414,7 +562,7 @@ defmodule OptimalEngine.Pipeline.Intake do
 
     case Store.insert_context(context) do
       :ok ->
-        index_cross_refs(signal)
+        index_cross_refs(signal, scope)
         {:ok, context}
 
       {:error, _} = err ->
@@ -422,21 +570,28 @@ defmodule OptimalEngine.Pipeline.Intake do
     end
   end
 
-  defp index_cross_refs(%Signal{} = signal) do
-    primary_folder = Writer.node_to_folder(signal.node)
+  defp index_cross_refs(%Signal{} = signal, %ScopeEnvelope{} = scope) do
+    folder_scope = ScopeEnvelope.folder_scope(scope)
+    primary_folder = Writer.node_to_folder(signal.node, folder_scope)
 
     Enum.each(signal.routed_to || [], fn dest ->
-      if Writer.node_to_folder(dest) != primary_folder do
-        cross_path = cross_file_path(signal, dest)
-        if File.exists?(cross_path), do: Indexer.index_file(cross_path)
+      if Writer.node_to_folder(dest, folder_scope) != primary_folder do
+        cross_path = cross_file_path(signal, dest, folder_scope)
+
+        # Cross-ref Context rows must carry the intake's workspace scope.
+        # Indexing without it stamps the struct default ("default"),
+        # leaking workspace content into default-workspace surfaces.
+        if File.exists?(cross_path) do
+          Indexer.index_file(cross_path, workspace_id: scope.workspace_id)
+        end
       end
     end)
   end
 
-  defp cross_file_path(%Signal{} = signal, dest_node) do
+  defp cross_file_path(%Signal{} = signal, dest_node, folder_scope) do
     root = Application.get_env(:optimal_engine, :root_path, "")
-    dest_folder = Writer.node_to_folder(dest_node)
-    filename = Writer.relative_path(%{signal | node: dest_node}) |> Path.basename()
+    dest_folder = Writer.node_to_folder(dest_node, folder_scope)
+    filename = Writer.relative_path(%{signal | node: dest_node}, folder_scope) |> Path.basename()
     Path.join([root, dest_folder, "signals", filename])
   end
 

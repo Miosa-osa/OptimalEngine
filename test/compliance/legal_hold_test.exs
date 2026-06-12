@@ -11,7 +11,7 @@ defmodule OptimalEngine.Compliance.LegalHoldTest do
       Store.raw_query(
         """
         INSERT INTO contexts (id, tenant_id, uri, title, content, genre, node)
-        VALUES (?1, 'default', ?2, 't', 'body', 'note', 'redacted')
+        VALUES (?1, 'default', ?2, 't', 'body', 'note', 'person-operator')
         """,
         [id, "optimal://holds/#{id}"]
       )

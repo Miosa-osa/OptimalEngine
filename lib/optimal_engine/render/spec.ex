@@ -94,8 +94,11 @@ defmodule OptimalEngine.Render.Spec do
 
     modality_note =
       case s.modalities do
-        [:text] -> ""
-        mods -> "\n\nContent modalities available: #{Enum.join(Enum.map(mods, &to_string/1), ", ")}. Include appropriate elements (img, video, audio) when source assets are provided."
+        [:text] ->
+          ""
+
+        mods ->
+          "\n\nContent modalities available: #{Enum.join(Enum.map(mods, &to_string/1), ", ")}. Include appropriate elements (img, video, audio) when source assets are provided."
       end
 
     """
@@ -118,6 +121,7 @@ defmodule OptimalEngine.Render.Spec do
   defp parse_bandwidth(_), do: :large
 
   defp parse_modalities(nil), do: [:text]
+
   defp parse_modalities(list) when is_list(list) do
     list
     |> Enum.map(fn
@@ -130,5 +134,6 @@ defmodule OptimalEngine.Render.Spec do
       mods -> mods
     end
   end
+
   defp parse_modalities(_), do: [:text]
 end

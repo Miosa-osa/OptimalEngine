@@ -8,7 +8,7 @@ defmodule Mix.Tasks.Optimal.Topology do
   ## Usage
 
       mix optimal.topology
-      mix optimal.topology --tenant acme-corp
+      mix optimal.topology --tenant sample-corp
       mix optimal.topology --workspace default
       mix optimal.topology --nodes-only
       mix optimal.topology --skills-only

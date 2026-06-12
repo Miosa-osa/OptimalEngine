@@ -120,7 +120,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   # Audio: if a transcript is already on the chunk (Phase 2 whisper path),
   # embed that. Otherwise attempt whisper transcription of the asset.
-  defp dispatch(%Chunk{modality: :audio, text: transcript} = chunk, opts)
+  defp dispatch(%Chunk{modality: :audio, text: transcript}, opts)
        when is_binary(transcript) and transcript != "" do
     # Existing transcript → text embed.
     with {:ok, vector} <- Ollama.embed_text(transcript, opts) do

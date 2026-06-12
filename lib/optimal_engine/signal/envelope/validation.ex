@@ -59,7 +59,7 @@ defmodule OptimalEngine.Signal.Envelope.Validation do
   end
 
   @doc """
-  Ashby constraint check: does the signal have sufficient variety (all S=(M,G,T,F,W) resolved)?
+  Ashby constraint check: does the signal have sufficient variety (all Mode + Genre + Type + Format + Structure resolved)?
 
   A fully classified signal has all five Signal Theory dimensions set.
   """

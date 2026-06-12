@@ -4,6 +4,9 @@
 /deps/
 /doc/
 /.fetch
+**/node_modules/
+__pycache__/
+*.pyc
 erl_crash.dump
 *.ez
 *.beam

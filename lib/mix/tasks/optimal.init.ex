@@ -16,11 +16,11 @@ defmodule Mix.Tasks.Optimal.Init do
       <target-dir>/
       ├── README.md                (how-to-use, same as the sample)
       ├── nodes/
-      │   ├── redacted/context.md + signal.md
-      │   ├── redacted/context.md + signal.md
+      │   ├── entity-company/context.md + signal.md
+      │   ├── product-customer-portal/context.md + signal.md
       │   └── …
       ├── .wiki/SCHEMA.md
-      ├── architectures/clinical_visit.yaml
+      ├── architectures/customer_requirement.yaml
       └── assets/README.md
 
   Existing files in `<target-dir>` are left untouched — the task will

@@ -3,7 +3,7 @@ defmodule OptimalEngine.Connectors.Adapters.Jira do
   Jira connector — issues, comments, sprints, releases.
 
   ## Required config keys
-    * `:site_url` (e.g. `https://acme.atlassian.net`), `:projects` (list of keys)
+    * `:site_url` (e.g. `https://sample.atlassian.net`), `:projects` (list of keys)
 
   ## Credentials
     * `:email`, `:api_token`

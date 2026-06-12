@@ -25,6 +25,20 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
   """
 
   @behaviour OptimalEngine.Knowledge.Backend
+  @compile {:no_warn_undefined,
+            [
+              {:rocksdb, :batch, 0},
+              {:rocksdb, :batch_delete, 3},
+              {:rocksdb, :batch_put, 4},
+              {:rocksdb, :close, 1},
+              {:rocksdb, :get, 4},
+              {:rocksdb, :iterator, 3},
+              {:rocksdb, :iterator_close, 1},
+              {:rocksdb, :iterator_move, 2},
+              {:rocksdb, :open_with_cf, 3},
+              {:rocksdb, :release_batch, 1},
+              {:rocksdb, :write_batch, 3}
+            ]}
 
   alias OptimalEngine.Knowledge.Dictionary
 

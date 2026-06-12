@@ -10,7 +10,9 @@ defmodule OptimalEngine.MemoryCore do
 
   alias OptimalEngine.MemoryCore.{
     ActiveMemoryPool,
-    KnowledgeLifecycle,
+    ClaimExtractor,
+    FactPromoter,
+    MemoryObject,
     RetrievalCoordinator,
     SourcePackage,
     ToolModelGovernance,
@@ -20,9 +22,12 @@ defmodule OptimalEngine.MemoryCore do
   @spec source_package_from_text(String.t(), keyword()) :: SourcePackage.t()
   defdelegate source_package_from_text(raw_text, opts \\ []), to: SourcePackage, as: :from_text
 
-  defdelegate extract_claim(source_package, opts \\ []), to: KnowledgeLifecycle
-  defdelegate promote_claim_to_fact(claim, opts \\ []), to: KnowledgeLifecycle
-  defdelegate build_memory_object(fact, opts \\ []), to: KnowledgeLifecycle
+  defdelegate extract_claim(source_package, opts \\ []),
+    to: ClaimExtractor,
+    as: :extract_from_source
+
+  defdelegate promote_claim_to_fact(claim, opts \\ []), to: FactPromoter, as: :promote
+  defdelegate build_memory_object(fact, opts \\ []), to: MemoryObject, as: :build_from_fact
   defdelegate retrieve(query, opts \\ []), to: RetrievalCoordinator
   defdelegate open_active_pool(opts \\ []), to: ActiveMemoryPool, as: :open
 
@@ -48,4 +53,7 @@ defmodule OptimalEngine.MemoryCore do
   defdelegate register_mcp_tool_definition(opts), to: ToolModelGovernance
   defdelegate record_model_call(function_name, input_payload, opts \\ []), to: ToolModelGovernance
   defdelegate record_tool_call(tool_name, input_payload, opts \\ []), to: ToolModelGovernance
+
+  defdelegate execute_tool_call(tool_name, input_payload, executor, opts \\ []),
+    to: ToolModelGovernance
 end

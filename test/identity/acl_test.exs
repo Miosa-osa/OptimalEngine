@@ -7,8 +7,8 @@ defmodule OptimalEngine.Identity.ACLTest do
     # Use unique ids per test to avoid interference between runs.
     suffix = System.unique_integer([:positive])
 
-    principal = "user:ada-#{suffix}@acme.test"
-    stranger = "user:bob-#{suffix}@acme.test"
+    principal = "user:ada-#{suffix}@sample.test"
+    stranger = "user:bob-#{suffix}@sample.test"
     group = "group:sales-#{suffix}"
     resource = "optimal://nodes/test/#{suffix}.md"
 

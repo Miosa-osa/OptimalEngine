@@ -10,17 +10,22 @@ defmodule OptimalEngine.API.GraphPayload do
   alias OptimalEngine.Graph.Reflector
   alias OptimalEngine.Store
 
-  @doc "Full graph payload: renderable contexts, visual edges, entity summary, node summary."
-  def full_graph do
-    edges = fetch_visual_edges()
-    entities = fetch_entity_summary()
-    contexts = fetch_all_contexts()
+  @doc """
+  Full graph payload: renderable contexts, visual edges, entity summary, node summary.
+
+  Scope is workspace-bound to avoid cross-workspace leakage.
+  """
+  def full_graph(workspace_id \\ "default") do
+    edges = fetch_visual_edges(workspace_id)
+    entities = fetch_entity_summary(workspace_id)
+    contexts = fetch_all_contexts(workspace_id)
 
     %{
+      workspace_id: workspace_id,
       contexts: contexts,
       edges: edges,
       entities: format_entities(entities),
-      nodes: fetch_node_summary(),
+      nodes: fetch_node_summary(workspace_id),
       stats: %{
         context_count: length(contexts),
         edge_count: length(edges),
@@ -29,43 +34,56 @@ defmodule OptimalEngine.API.GraphPayload do
     }
   end
 
-  def hubs do
-    {:ok, hubs} = GraphAnalyzer.hubs()
+  def hubs(workspace_id \\ "default") do
+    {:ok, hubs} = GraphAnalyzer.hubs(workspace_id: workspace_id)
     %{hubs: format_hubs(hubs)}
   end
 
-  def triangles(limit) do
-    {:ok, triangles} = GraphAnalyzer.triangles(limit: limit)
+  def triangles(limit \\ 20, workspace_id \\ "default", opts \\ []) when is_list(opts) do
+    {:ok, triangles} =
+      GraphAnalyzer.triangles(Keyword.merge([limit: limit, workspace_id: workspace_id], opts))
+
     %{triangles: format_triangles(triangles)}
   end
 
-  def clusters do
-    {:ok, clusters} = GraphAnalyzer.clusters()
+  def clusters(workspace_id \\ "default") do
+    {:ok, clusters} = GraphAnalyzer.clusters(workspace_id: workspace_id)
     %{clusters: format_clusters(clusters)}
   end
 
-  def reflection_gaps(min_cooccurrences) do
-    {:ok, gaps} = Reflector.reflect(min_cooccurrences: min_cooccurrences)
+  def reflection_gaps(min_cooccurrences \\ 2, workspace_id \\ "default", opts \\ [])
+      when is_list(opts) do
+    skip_llm = Keyword.get(opts, :skip_llm, true)
+
+    {:ok, gaps} =
+      Reflector.reflect(
+        min_cooccurrences: min_cooccurrences,
+        workspace_id: workspace_id,
+        skip_llm: skip_llm
+      )
+
     %{gaps: format_gaps(gaps)}
   end
 
-  def node(node_id) do
+  def node(node_id, workspace_id \\ "default") do
     %{
       node: node_id,
-      contexts: fetch_node_contexts(node_id),
-      edges: fetch_node_edges(node_id) |> format_edges()
+      workspace_id: workspace_id,
+      contexts: fetch_node_contexts(node_id, workspace_id),
+      edges: fetch_node_edges(node_id, workspace_id) |> format_edges()
     }
   end
 
   # Every context in the DB; each becomes a renderable node in the graph.
-  defp fetch_all_contexts do
+  defp fetch_all_contexts(workspace_id) do
     case Store.raw_query(
            """
            SELECT id, title, node, type, genre, sn_ratio, modified_at, l0_abstract, uri
            FROM contexts
+           WHERE workspace_id = ?1
            ORDER BY node, modified_at DESC
            """,
-           []
+           [workspace_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, node, type, genre, sn, mod, abstract, uri] ->
@@ -87,20 +105,23 @@ defmodule OptimalEngine.API.GraphPayload do
     end
   end
 
-  defp fetch_visual_edges do
-    (fetch_shared_entity_edges() ++ fetch_cross_ref_edges())
+  defp fetch_visual_edges(workspace_id) do
+    (fetch_shared_entity_edges(workspace_id) ++ fetch_cross_ref_edges(workspace_id))
     |> deduplicate_edges()
   end
 
-  defp fetch_shared_entity_edges do
+  defp fetch_shared_entity_edges(workspace_id) do
     sql = """
     SELECT e1.context_id AS source, e2.context_id AS target, e1.name AS entity
     FROM entities e1
     JOIN entities e2 ON e1.name = e2.name AND e1.context_id < e2.context_id
+    JOIN contexts c1 ON c1.id = e1.context_id
+    JOIN contexts c2 ON c2.id = e2.context_id
+    WHERE c1.workspace_id = ?1 AND c2.workspace_id = ?1
     LIMIT 2000
     """
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [workspace_id]) do
       {:ok, rows} ->
         rows
         |> Enum.group_by(fn [source, target, _entity] -> {source, target} end)
@@ -124,17 +145,19 @@ defmodule OptimalEngine.API.GraphPayload do
     end
   end
 
-  defp fetch_cross_ref_edges do
+  defp fetch_cross_ref_edges(workspace_id) do
     sql = """
     SELECT e.source_id AS source, c.id AS target
     FROM edges e
     JOIN contexts c ON c.node = e.target_id
     WHERE e.relation = 'cross_ref'
-      AND EXISTS (SELECT 1 FROM contexts WHERE id = e.source_id)
+      AND e.workspace_id = ?1
+      AND c.workspace_id = ?1
+      AND EXISTS (SELECT 1 FROM contexts WHERE id = e.source_id AND workspace_id = ?1)
     LIMIT 500
     """
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [workspace_id]) do
       {:ok, rows} ->
         Enum.map(rows, fn [source, target] ->
           %{source: source, target: target, relation: "cross_ref", weight: 1.0}
@@ -152,31 +175,34 @@ defmodule OptimalEngine.API.GraphPayload do
     end)
   end
 
-  defp fetch_entity_summary do
+  defp fetch_entity_summary(workspace_id) do
     case Store.raw_query(
            """
-           SELECT name, type, COUNT(*) as count
-           FROM entities
-           GROUP BY name, type
+           SELECT e.name, e.type, COUNT(*) as count
+           FROM entities e
+           JOIN contexts c ON c.id = e.context_id
+           WHERE c.workspace_id = ?1
+           GROUP BY e.name, e.type
            ORDER BY count DESC
            LIMIT 200
            """,
-           []
+           [workspace_id]
          ) do
       {:ok, rows} -> rows
       _ -> []
     end
   end
 
-  defp fetch_node_summary do
+  defp fetch_node_summary(workspace_id) do
     case Store.raw_query(
            """
            SELECT node, COUNT(*) as count, MAX(modified_at) as last_modified
            FROM contexts
+           WHERE workspace_id = ?1
            GROUP BY node
            ORDER BY node
            """,
-           []
+           [workspace_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [node, count, last_mod] ->
@@ -188,16 +214,16 @@ defmodule OptimalEngine.API.GraphPayload do
     end
   end
 
-  defp fetch_node_contexts(node_id) do
+  defp fetch_node_contexts(node_id, workspace_id) do
     case Store.raw_query(
            """
            SELECT id, title, type, genre, sn_ratio, modified_at
            FROM contexts
-           WHERE node = ?1
+           WHERE node = ?1 AND workspace_id = ?2
            ORDER BY modified_at DESC
            LIMIT 50
            """,
-           [node_id]
+           [node_id, workspace_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, type, genre, sn, mod] ->
@@ -209,16 +235,17 @@ defmodule OptimalEngine.API.GraphPayload do
     end
   end
 
-  defp fetch_node_edges(node_id) do
+  defp fetch_node_edges(node_id, workspace_id) do
     case Store.raw_query(
            """
            SELECT DISTINCT e.source_id, e.target_id, e.relation, e.weight
            FROM edges e
            JOIN contexts c ON (c.id = e.source_id OR c.id = e.target_id)
            WHERE c.node = ?1
+           AND e.workspace_id = ?2
            LIMIT 200
            """,
-           [node_id]
+           [node_id, workspace_id]
          ) do
       {:ok, rows} -> rows
       _ -> []
@@ -263,8 +290,14 @@ defmodule OptimalEngine.API.GraphPayload do
 
   defp format_triangles(triangles) when is_list(triangles) do
     Enum.map(triangles, fn
+      %{id: id, nodes: nodes, score: score} when is_list(nodes) ->
+        %{id: id, nodes: nodes, score: Float.round(score, 2)}
+
       %{a: a, b: b, c: c, suggestion: suggestion} ->
-        %{a: a, b: b, missing_link: c, suggestion: suggestion}
+        %{id: Enum.join([a, b, c], ":"), nodes: [a, b, c], score: 0.0, suggestion: suggestion}
+
+      %{a: a, b: b, c: c} ->
+        %{id: Enum.join([a, b, c], ":"), nodes: [a, b, c], score: 0.0, suggestion: nil}
 
       other ->
         %{raw: inspect(other)}
@@ -274,11 +307,10 @@ defmodule OptimalEngine.API.GraphPayload do
   defp format_triangles(_), do: []
 
   defp format_clusters(clusters) when is_list(clusters) do
-    clusters
-    |> Enum.with_index()
-    |> Enum.map(fn {members, idx} ->
-      member_list = MapSet.to_list(members)
-      %{id: idx, size: length(member_list), members: member_list}
+    Enum.map(clusters, fn
+      %MapSet{} = members -> MapSet.to_list(members)
+      members when is_list(members) -> Enum.map(members, &to_string/1)
+      other -> [inspect(other)]
     end)
   end
 
@@ -286,15 +318,14 @@ defmodule OptimalEngine.API.GraphPayload do
 
   defp format_gaps(gaps) when is_list(gaps) do
     Enum.map(gaps, fn
-      %{source: s, target: t, cooccurrences: c, confidence: conf} = gap ->
-        %{
-          source: s,
-          target: t,
-          cooccurrences: c,
-          confidence: Float.round(conf, 2),
-          suggested_relation: Map.get(gap, :suggested_relation, "related"),
-          reason: Map.get(gap, :reason, nil)
-        }
+      %{entity_a: a, entity_b: b, confidence: c, relation: relation} ->
+        %{entity_a: a, entity_b: b, confidence: Float.round(c, 2), relation: relation}
+
+      %{source: a, target: b, confidence: c, suggested_relation: relation} ->
+        %{entity_a: a, entity_b: b, confidence: Float.round(c, 2), relation: relation}
+
+      %{source: a, target: b, confidence: c} ->
+        %{entity_a: a, entity_b: b, confidence: Float.round(c, 2), relation: nil}
 
       other ->
         %{raw: inspect(other)}
