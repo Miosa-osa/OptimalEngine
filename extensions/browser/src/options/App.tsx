@@ -216,7 +216,7 @@ export default function OptionsApp() {
           <p className="text-xs text-text-muted">
             Sent as{" "}
             <code className="rounded bg-bg-elevated px-1 text-accent">
-              X-API-Key
+              Authorization: Bearer
             </code>{" "}
             on every request. Leave blank for local engines.
           </p>

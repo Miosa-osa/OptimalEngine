@@ -6,7 +6,7 @@ import { engine, EngineError } from "../client.js";
 export function registerWorkspaces(server: McpServer): void {
   server.tool(
     "workspaces",
-    "List available knowledge workspaces in the engine. Each workspace is its own isolated brain with its own wiki and signals.",
+    "List available workspaces in the engine. Each workspace is a governed operating area with its own topology, memory, retrieval scope, projections, and policy boundary.",
     {
       tenant: z
         .string()

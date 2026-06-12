@@ -17,7 +17,7 @@ async function buildHeaders(): Promise<Record<string, string>> {
     Accept: "application/json",
   };
   if (settings.apiKey) {
-    headers["X-API-Key"] = settings.apiKey;
+    headers["Authorization"] = `Bearer ${settings.apiKey}`;
   }
   return headers;
 }
@@ -80,7 +80,7 @@ export async function listWorkspaces(
 }
 
 /**
- * Search memories in a workspace.
+ * Search governed memory/context projections in a workspace.
  */
 export async function searchMemories(
   query: string,
@@ -96,7 +96,7 @@ export async function searchMemories(
 }
 
 /**
- * Clip content to the engine as a new memory.
+ * Clip content to the engine through the governed memory intake path.
  */
 export async function clipMemory(
   payload: ClipPayload,
@@ -105,7 +105,7 @@ export async function clipMemory(
 }
 
 /**
- * Fetch recent memories for a workspace.
+ * Fetch recent memory projections for a workspace.
  */
 export async function listMemories(
   workspace: string,
@@ -116,7 +116,7 @@ export async function listMemories(
 }
 
 /**
- * Get workspace profile summary (active wiki page, memory count, etc.).
+ * Get workspace profile summary and projection state.
  */
 export async function getProfile(
   workspace: string,

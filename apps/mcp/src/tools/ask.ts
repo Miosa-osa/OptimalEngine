@@ -7,14 +7,14 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 export function registerAsk(server: McpServer): void {
   server.tool(
     "ask",
-    "Ask the second brain a question. Returns a curated, cited envelope from the active workspace's wiki first; falls through to hybrid retrieval (BM25 + vector + intent + cluster) on miss. Use this when the user asks anything about org context, history, or knowledge.",
+    "Ask Optimal Engine a workspace-scoped question. Returns governed retrieval/context output with evidence, memory, and projection metadata when available. Use this when an agent needs authorized context before answering or acting.",
     {
       query: z.string().min(1).describe("The question to ask the engine."),
       workspace: z
         .string()
         .optional()
         .describe(
-          `Knowledge workspace to query. Defaults to "${config.defaultWorkspace}".`,
+          `Workspace to query. Defaults to "${config.defaultWorkspace}".`,
         ),
       audience: z
         .string()

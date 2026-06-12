@@ -7,13 +7,13 @@ import { config } from "../config.js";
 export function registerAddMemory(server: McpServer): void {
   server.tool(
     "add_memory",
-    "Add a fact, decision, or observation as a first-class memory. Required: content. Optional: is_static (true for permanent facts), audience, citation_uri (URI of source), source_chunk_id. Every memory is integrity-gated — must tie back to a source. Use when the user mentions information that should persist beyond this conversation.",
+    "Submit durable information to Optimal Engine through the governed memory intake path. The engine preserves source context and should create reviewable/persistent memory according to policy. Use for facts, decisions, observations, or source-backed notes that should survive the session.",
     {
       content: z
         .string()
         .min(1)
         .describe(
-          "The memory content to store. Be precise and self-contained.",
+          "The content to submit. Be precise and include enough source context for later review.",
         ),
       workspace: z
         .string()
@@ -25,7 +25,7 @@ export function registerAddMemory(server: McpServer): void {
         .boolean()
         .optional()
         .describe(
-          "Mark true for permanent ground-truth facts (e.g. company founding date, core product definition).",
+          "Mark true only for stable facts that should be treated as durable context.",
         ),
       audience: z
         .string()

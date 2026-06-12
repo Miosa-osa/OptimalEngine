@@ -1,7 +1,7 @@
 {
   "name": "@optimal-engine/mcp",
-  "version": "0.1.0",
-  "description": "First-party MCP server for Optimal Engine — exposes memory, retrieval, and wiki tools to Claude Desktop, Cursor, Windsurf, and Zed.",
+  "version": "0.3.0",
+  "description": "First-party MCP server for Optimal Engine — exposes workspace, memory, retrieval, wiki/export, and context tools to agent clients.",
   "main": "dist/index.js",
   "bin": {
     "optimal-engine-mcp": "dist/index.js"
@@ -29,5 +29,5 @@
     "dist/**/*",
     "README.md"
   ],
-  "license": "UNLICENSED"
+  "license": "MIT"
 }
