@@ -74,8 +74,8 @@ defmodule OptimalEngine.API.WorkspaceAuthorizationTest do
     suffix = System.unique_integer([:positive])
 
     # A foreign tenant with one registered workspace.
-    foreign_tenant = "acme-#{suffix}"
-    {:ok, _} = Tenant.create(%{id: foreign_tenant, name: "Acme #{suffix}"})
+    foreign_tenant = "exampleorg-#{suffix}"
+    {:ok, _} = Tenant.create(%{id: foreign_tenant, name: "ExampleOrg #{suffix}"})
     foreign_ws = insert_workspace("#{foreign_tenant}:secrets", foreign_tenant, "secrets")
 
     # Two registered workspaces under the default tenant.
@@ -229,7 +229,7 @@ defmodule OptimalEngine.API.WorkspaceAuthorizationTest do
         {:ok, %{key: token}} =
           ApiKey.mint(%{
             tenant_id: ctx.foreign_tenant,
-            name: "acme wildcard #{ctx.suffix}",
+            name: "exampleorg wildcard #{ctx.suffix}",
             workspace_scope: ["*"]
           })
 

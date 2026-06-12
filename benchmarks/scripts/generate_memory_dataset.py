@@ -22,7 +22,7 @@ PROJECTS = [
 ]
 
 DOMAINS = [
-    "healthtech pricing", "identity migration", "partner onboarding", "billing retry",
+    "customer portal pricing", "identity migration", "partner onboarding", "billing retry",
     "clinical export", "data retention", "support escalation", "microVM rollout",
     "renewal pipeline", "analytics warehouse", "security review", "workflow capture",
 ]
