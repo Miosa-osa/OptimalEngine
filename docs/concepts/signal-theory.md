@@ -113,7 +113,7 @@ per unit of meaning.
 
 | Theory element              | Engine artifact                                                     |
 |----------------------------|---------------------------------------------------------------------|
-| Signal `S=(M,G,T,F,W)`     | `OptimalEngine.Signal.Envelope` struct — CloudEvents + classification |
+| Signal `Mode + Genre + Type + Format + Structure`     | `OptimalEngine.Signal.Envelope` struct — CloudEvents + classification |
 | Classification             | `OptimalEngine.Signal.Classifier` — auto-infers dimensions           |
 | Genre routing              | `OptimalEngine.Router` — trie-based pattern matching                 |
 | Failure-mode detection     | `OptimalEngine.Signal.Classifier.FailureModes`                       |
@@ -128,5 +128,5 @@ per unit of meaning.
 3. [`failure-modes.md`](failure-modes.md) — deep dive on the 11 failure modes.
 4. [`infinite-context-framework.md`](infinite-context-framework.md) — tiered
    loading as bandwidth matching at scale.
-5. [`../architecture/system-overview.md`](../architecture/system-overview.md) —
+5. [`../README.md`](../README.md) —
    how the theory maps onto the running system.

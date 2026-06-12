@@ -1,7 +1,8 @@
 ---
-# OptimalEngine — local development stack
+# OptimalEngine — local backend stack
 # Usage: docker compose up --build
-# All services are rebuilt from source on every `up --build`.
+# Starts the engine API and persistent data volume by default.
+# Optional app/site/docs surfaces are available with --profile surfaces.
 # For production overlays see docker-compose.prod.yml.
 
 name: optimal-engine
@@ -41,8 +42,9 @@ services:
       start_period: 20s
       retries: 3
 
-  # ─── Desktop UI ─────────────────────────────────────────────────────────
+  # ─── Optional Desktop UI ────────────────────────────────────────────────
   desktop:
+    profiles: ["surfaces"]
     build:
       context: ../desktop
       dockerfile: ../deploy/Dockerfile.desktop
@@ -63,8 +65,9 @@ services:
       start_period: 10s
       retries: 3
 
-  # ─── Marketing Site ──────────────────────────────────────────────────────
+  # ─── Optional Marketing Site ─────────────────────────────────────────────
   site:
+    profiles: ["surfaces"]
     build:
       context: ../site
       dockerfile: ../deploy/Dockerfile.site
@@ -78,11 +81,9 @@ services:
       start_period: 10s
       retries: 3
 
-  # ─── Docs Site ───────────────────────────────────────────────────────────
-  # NOTE: apps/docs/ is under active development by a separate agent.
-  # This service will fail to build until apps/docs/ exists with a valid
-  # SvelteKit project (package.json + npm run build → build/).
+  # ─── Optional Docs Site ──────────────────────────────────────────────────
   docs:
+    profiles: ["surfaces"]
     build:
       context: ../apps/docs
       dockerfile: ../../deploy/Dockerfile.docs

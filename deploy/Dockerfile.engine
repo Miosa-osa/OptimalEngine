@@ -55,6 +55,7 @@ RUN apt-get update -qq && \
         libssl3 \
         libstdc++6 \
         ncurses-bin \
+        wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user — UID 1000 to match common Docker conventions

@@ -1,59 +1,59 @@
-# Optimal Engine — Documentation
+# Optimal Engine Docs
 
-This index is the entry point. Follow the path that matches what you need.
+This documentation explains the backend runtime, not a standalone frontend.
+External apps, CLIs, MCP servers, scripts, and agents can all use the same
+engine state.
 
-## If you are new here
+## Start Here
 
-1. [Getting started](guides/getting-started.md) — clone, compile, first ingest + search.
-2. [Signal Theory](concepts/signal-theory.md) — the theoretical foundation. 10-minute read.
-3. [System overview](architecture/system-overview.md) — how the pieces fit together.
+1. [Getting Started](../GETTING_STARTED.md) — install, verify, create a
+   workspace, and run the CLI.
+2. [Roadmap](../PLAN.md) — build gates and what is complete versus still
+   hardening.
+3. [Sample Workspace](../sample-workspace/README.md) — current filesystem
+   projection shape.
+4. [Deployment](../deploy/README.md) — optional Docker/backend service setup.
 
-## Architecture (how it's built)
+## Core Architecture
 
-- [00 — Overview](architecture/00-overview.md)
-- [01 — Network layer](architecture/01-network.md)
-- [02 — Signal layer](architecture/02-signal.md)
-- [03 — Composition layer](architecture/03-composition.md)
-- [04 — Interface layer](architecture/04-interface.md)
-- [05 — Data layer](architecture/05-data.md)
-- [06 — Feedback layer](architecture/06-feedback.md)
-- [07 — Governance layer](architecture/07-governance.md)
-- [FULL-SYSTEM-ARCHITECTURE](architecture/FULL-SYSTEM-ARCHITECTURE.md) — end-to-end walkthrough
-- [Optimal Engine package spec](architecture/optimal-engine-package-spec.md)
-- [ADR-002: Optimal Context Engine architecture](architecture/ADR-002-optimal-context-engine-architecture.md)
-- [Context system](architecture/context-system.md)
-- [Layer bridge](architecture/layer-bridge.md)
-- [Workspace protocol](architecture/workspace-protocol.md)
-- [System overview](architecture/system-overview.md)
-- [Oscar / Atlas system](architecture/jordan-jarvis-system.md) — cognitive model that informed the design
-- [arscontexta extraction](architecture/arscontexta-extraction.md)
+| Doc | Purpose |
+| --- | --- |
+| [Architecture](architecture/ARCHITECTURE.md) | Runtime overview and subsystem map. |
+| [Full System Architecture](architecture/FULL-SYSTEM-ARCHITECTURE.md) | End-to-end architecture notes. |
+| [Data Architecture](architecture/DATA_ARCHITECTURE.md) | Storage roles and data lifecycle. |
+| [Data Anatomy and Multimodality](architecture/DATA-ANATOMY-AND-MULTIMODALITY.md) | How text, files, images, audio, video, and structured records enter the system. |
+| [Layer Ownership and Data Flow](architecture/LAYER-OWNERSHIP-AND-DATA-FLOW.md) | Which layer owns which lifecycle and tables. |
+| [Node Ontology](architecture/NODE-ONTOLOGY.md) | What a Node is, how projects fit, and how topology works. |
+| [Memory Core Codebase Fit](architecture/MEMORY-CORE-CODEBASE-FIT.md) | How new governed memory code fits around legacy Store/Context modules. |
 
-## Concepts (why it's built this way)
+## Concepts
 
-- [Signal Theory](concepts/signal-theory.md) — `S=(Mode, Genre, Type, Format, Structure)` with four constraints
-- [Methodology](concepts/methodology.md) — the working loops (boot, operate, build, review)
-- [Three spaces](concepts/three-spaces.md) — input / signal / persistence separation
-- [Failure modes](concepts/failure-modes.md) — the 11 Shannon / Ashby / Beer / Wiener violations the engine guards against
-- [Infinite context framework](concepts/infinite-context-framework.md) — tiered loading, compaction, recall
-- [Kernel primitives](concepts/kernel.yaml) — the invariant vocabulary
+| Doc | Purpose |
+| --- | --- |
+| [Signal Theory](concepts/signal-theory.md) | Mode, Genre, Type, Format, and Structure classification. |
+| [Methodology](concepts/methodology.md) | How humans and agents operate the system over time. |
+| [Failure Modes](concepts/failure-modes.md) | What the engine should prevent. |
+| [Kernel Vocabulary](concepts/kernel.yaml) | Stable vocabulary primitives. |
 
-## Reference (what each piece does)
+## Guides
 
-- [Data model](reference/data-model.md) — schemas, relationships, URI conventions
-- [Search architecture](reference/search-architecture.md) — hybrid BM25 + temporal + graph boost
-- [Session lifecycle](reference/session-lifecycle.md) — boot → operate → shutdown
-- [Hooks](reference/hooks.md) — extension points
-- [Operations spec](reference/operations-spec.md) — the full operational contract
-- [Vocabulary](reference/vocabulary.md) — terminology reference
-- [Components](reference/components.md) — catalog of engine components
-- [Node template](reference/node-template.md) — the anatomy of a node
+| Doc | Purpose |
+| --- | --- |
+| [Mix Tasks](guides/mix-tasks.md) | CLI and Mix task reference. |
+| [Writing Guide](guides/writing-guide.md) | How to write engine-friendly markdown and Signals. |
 
-## Guides (how to use it)
+## Backend Layers
 
-- [Getting started](guides/getting-started.md)
-- [Mix tasks](guides/mix-tasks.md) — the 25 `mix optimal.*` commands, annotated
-- [Writing guide](guides/writing-guide.md) — conventions for Signal-correct output
+```text
+Workspace / Topology
+  -> Signal Pipeline
+  -> Memory Core
+  -> Retrieval / Context
+  -> Active Memory Pools
+  -> Workflow / Skill Runtime
+  -> Tool / Model Governance
+  -> Workspace Export / Wiki
+  -> Audit / Governance
+```
 
-## Research
-
-- [Signal composition layer](research/signal-composition-layer.md) — exploratory work on the composition primitives
+The physical store can be one database. Ownership is still separated by layer.

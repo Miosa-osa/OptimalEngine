@@ -151,6 +151,23 @@ Consequences:
 
 ## How a data point flows through the engine
 
+Current architecture correction:
+
+```text
+Command or raw input
+  -> Scope Envelope
+  -> Source Package
+  -> Data Point
+  -> Data Architecture
+  -> Field validation
+  -> Processor outputs
+  -> Signal
+  -> Claim / Fact / Memory lifecycle
+```
+
+The older flow below describes the processor dispatch mechanism. It does not
+replace Source Packages, Memory Core promotion, or the layer ownership rules.
+
 ```
   INGEST                    DISPATCH                  PERSIST
   ──────                    ────────                  ───────
@@ -189,7 +206,7 @@ with what confidence?" for compliance + debugging.
    `multimodal_media` transcripts simultaneously, weighted by the
    receiver's intent.
 4. **Architecture inheritance** — a tenant declares
-   `clinical_visit` extending `structured_record` by adding
+   `customer_requirement` extending `structured_record` by adding
    vitals + imaging fields. Schema-on-read composes the parent.
 5. **Native vector store for non-768-d spaces** — `chunk_embeddings`
    is aligned at 768 today; sparse + higher-dim + per-modality

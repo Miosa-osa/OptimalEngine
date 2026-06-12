@@ -31,7 +31,7 @@ skills/optimal-engine/
 ├── README.md                   This file
 ├── references/
 │   ├── api-reference.md        Every endpoint with params + examples
-│   ├── concepts.md             3 tiers, 9 stages, intents, S=(M,G,T,F,W)
+│   ├── concepts.md             3 tiers, 9 stages, intents, Mode + Genre + Type + Format + Structure
 │   ├── workspace-pattern.md    Multi-workspace design + config schema
 │   ├── memory-pattern.md       Versioning, relations, forgetting
 │   ├── retrieval-pattern.md    Decision tree: which endpoint to use

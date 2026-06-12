@@ -32,8 +32,6 @@ services:
     depends_on:
       engine:
         condition: service_healthy
-      desktop:
-        condition: service_healthy
     restart: always
     deploy:
       resources:
@@ -72,8 +70,9 @@ services:
           cpus: "0.5"
           memory: 256M
 
-  # ─── Desktop — production overrides ──────────────────────────────────
+  # ─── Optional Desktop — production overrides ─────────────────────────
   desktop:
+    profiles: ["surfaces"]
     env_file: ./.env.prod
     ports: []
     restart: always
@@ -86,8 +85,9 @@ services:
           cpus: "0.25"
           memory: 64M
 
-  # ─── Site — production overrides ─────────────────────────────────────
+  # ─── Optional Site — production overrides ────────────────────────────
   site:
+    profiles: ["surfaces"]
     env_file: ./.env.prod
     ports: []
     restart: always
@@ -100,8 +100,9 @@ services:
           cpus: "0.25"
           memory: 64M
 
-  # ─── Docs — production overrides ─────────────────────────────────────
+  # ─── Optional Docs — production overrides ────────────────────────────
   docs:
+    profiles: ["surfaces"]
     env_file: ./.env.prod
     ports: []
     restart: always

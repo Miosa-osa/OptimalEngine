@@ -37,9 +37,9 @@ mix optimal.ingest --file notes.md --genre transcript --title "Team sync"
 
 ```bash
 mix optimal.search "pricing decision" --limit 5
-mix optimal.search "Alice" --node redacted
-mix optimal.read "optimal://nodes/redacted/signals/2026-04-17-ed-pricing.md" --tier l1
-mix optimal.assemble "redacted pricing"
+mix optimal.search "Alice" --node project-platform-launch
+mix optimal.read "optimal://nodes/project-platform-launch/signals/2026-04-17-ed-pricing.md" --tier l1
+mix optimal.assemble "Platform Launch pricing"
 ```
 
 ## Graph analysis
