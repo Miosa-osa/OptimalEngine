@@ -186,6 +186,7 @@ defmodule OptimalEngine.Connectors.Runner do
     # no operator could diagnose.
     case transaction(fn ->
            advance_cursor(row.id, next_cursor)
+
            complete_run_row(
              run_id,
              :success,
