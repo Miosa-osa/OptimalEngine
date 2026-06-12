@@ -1,144 +1,76 @@
-# Node Template — Standard Anatomy
+# Node Template
 
-> Every node in OptimalOS follows this structure. The context.md and signal.md
-> together form the complete node. context.md = persistent facts that change slowly.
-> signal.md = weekly state that changes fast.
+A Node is a governed topology object. A markdown folder or page is an export of
+that Node.
 
----
+## Node Fields
 
-## context.md Template
+```yaml
+node_id: node-project-launch
+workspace_id: default:workspace
+name: Project Launch
+node_type: project
+purpose: Coordinate launch work and preserve decisions.
+owner_id: person-owner
+status: active
+health: yellow
+review_cadence: weekly
+parent_node_id:
+metadata: {}
+```
+
+## Markdown Projection
+
+`context.md` should represent slow-changing node context:
 
 ```markdown
----
-signal:
-  mode: linguistic
-  genre: spec
-  type: inform
-  format: markdown
-  structure: persistent-context
-  sn_ratio: 0.9
-  audience: [human, agent]
-  intent: "[Node name] — persistent context"
-node: [node-id]
-cross_ref: [related-nodes]
-valid_from: "[date]"
----
-
-# [Node Name]
-
-> [One-line purpose statement — why this node exists]
+# Project Launch
 
 ## Identity
 
 | Field | Value |
-|-------|-------|
-| Type | [entity/operation/person/product/project/operational/learning/context] |
-| Owner | [who is responsible] |
-| Status | [draft/active/paused/blocked/completed/archived] |
-| Health | [🟢 green / 🟡 yellow / 🔴 red] |
-| Parent | [parent node] |
-| Review | [weekly/biweekly/monthly] |
+| --- | --- |
+| Type | project |
+| Owner | Product lead |
+| Status | active |
+| Health | yellow |
+| Review | weekly |
+
+## Purpose
+
+Coordinate launch work and preserve source-backed decisions.
 
 ## Relationships
 
-| Node | Relationship | How |
-|------|-------------|-----|
-| [node] | parent | [description] |
-| [node] | depends-on | [what we need from them] |
-| [node] | feeds | [what we send to them] |
-| [node] | collaborates | [how we work together] |
+| Node | Relationship | Meaning |
+| --- | --- | --- |
+| Product | parent | Launch belongs to the product. |
+| Sales | depends_on | Launch needs sales enablement. |
 
-### People Involved
+## Decisions
 
-| Person | Role Here | Genre | Channel |
-|--------|----------|-------|---------|
-| [name] | [their role in this node] | [what to send them] | [how to reach them] |
-
-## Context
-
-[Persistent facts about this node. What is true. What has been decided.
-This is the body — update when ground truth changes.]
-
-### Key Decisions
-
-| Date | Decision | Rationale | Impact |
-|------|----------|-----------|--------|
-| [date] | [what was decided] | [why] | [what changed] |
-
-### Open Questions
-
-- [ ] [Question that needs answering]
-- [ ] [Question that needs answering]
-
-## Assets
-
-[Links to key files, documents, repos, tools that belong to this node]
-
-| Asset | Location | What |
-|-------|----------|------|
-| [name] | [path or URL] | [description] |
+| Date | Decision | Evidence |
+| --- | --- | --- |
+| 2026-06-11 | Example decision | Source Package link |
 ```
 
----
-
-## signal.md Template
+`signal.md` should represent current operating state:
 
 ```markdown
----
-signal:
-  mode: linguistic
-  genre: note
-  type: inform
-  format: markdown
-  structure: weekly-status
-  sn_ratio: 0.9
-  audience: [human, agent]
-  intent: "[Node name] weekly status"
-node: [node-id]
-valid_from: "[date]"
----
+# Project Launch Signal
 
-# [Node Name] — Signal (Week of [date])
+## Focus
 
-## State
-
-| Metric | Value | Target | Trend |
-|--------|-------|--------|-------|
-| Health | [🟢/🟡/🔴] | 🟢 | [↑/→/↓] |
-| Progress | [X/10] | [target] | [↑/→/↓] |
-| [domain-specific metric] | [value] | [target] | [trend] |
-
-## Focus This Week
-
-1. **[Non-negotiable 1]** — [what and why]
-2. **[Non-negotiable 2]** — [what and why]
-3. **[Non-negotiable 3]** — [what and why]
+1. Confirm release checklist.
+2. Resolve launch blocker.
+3. Refresh customer-facing docs.
 
 ## Blockers
 
-| What | Who Owns It | Status | Since |
-|------|-------------|--------|-------|
-| [blocker] | [person] | [status] | [date] |
-
-## Progress Log
-
-- [x] [What got done]
-- [x] [What got done]
-- [ ] [What didn't get done — why]
-
-## Signals Out (Need to Send)
-
-| To | What | Genre | Status |
-|----|------|-------|--------|
-| [person] | [what to send] | [brief/spec/etc] | [sent/pending/draft] |
-
-## Fidelity Tracking
-
-| Signal Sent | To | Expected Back | Status |
-|-------------|-----|--------------|--------|
-| [what] | [who] | [what we expect] | [status] |
-
-## Next Week Preview
-
-- [ ] [What's coming]
+| Blocker | Owner | Since |
+| --- | --- | --- |
+| Example blocker | Product lead | 2026-06-11 |
 ```
+
+Edits to these files should re-enter as source evidence or topology changes.
+

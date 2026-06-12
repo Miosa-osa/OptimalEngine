@@ -49,6 +49,9 @@ defmodule OptimalEngine.MemoryCore.RetrievalPackage do
           retrieval_plan: map(),
           facts: [map()],
           memory_objects: [map()],
+          asset_extractions: [map()],
+          workflows: [map()],
+          skill_packages: [map()],
           source_package_links: [map()],
           evidence_links: [map()],
           redacted_object_links: [redacted_ref()],
@@ -70,6 +73,9 @@ defmodule OptimalEngine.MemoryCore.RetrievalPackage do
             retrieval_plan: %{},
             facts: [],
             memory_objects: [],
+            asset_extractions: [],
+            workflows: [],
+            skill_packages: [],
             source_package_links: [],
             evidence_links: [],
             redacted_object_links: [],
@@ -85,8 +91,17 @@ defmodule OptimalEngine.MemoryCore.RetrievalPackage do
 
   @doc "Object refs for every Fact and Memory Object the package returns."
   @spec returned_object_links(t()) :: [object_ref()]
-  def returned_object_links(%__MODULE__{facts: facts, memory_objects: memory_objects}) do
+  def returned_object_links(%__MODULE__{
+        facts: facts,
+        memory_objects: memory_objects,
+        asset_extractions: asset_extractions,
+        workflows: workflows,
+        skill_packages: skill_packages
+      }) do
     Enum.map(facts, &%{type: "fact", id: &1.id}) ++
-      Enum.map(memory_objects, &%{type: "memory_object", id: &1.id})
+      Enum.map(memory_objects, &%{type: "memory_object", id: &1.id}) ++
+      Enum.map(asset_extractions, &%{type: "asset_extraction", id: &1.id}) ++
+      Enum.map(workflows, &%{type: "generalized_workflow", id: &1.id}) ++
+      Enum.map(skill_packages, &%{type: "skill_package", id: &1.id})
   end
 end

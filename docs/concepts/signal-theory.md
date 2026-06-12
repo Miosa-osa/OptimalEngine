@@ -1,132 +1,172 @@
 # Signal Theory
 
-> Adapted from Alice H. Luna, *Signal Theory: The Architecture of Optimal Intent
-> Encoding* (MIOSA Research, February 2026). This is the theoretical foundation
-> the Optimal Engine is built to instantiate.
+Signal Theory is the engine's classification model for turning noisy input into
+structured operating context.
 
-## Root objective
+The engine receives messy human language, files, events, API payloads, tool
+outputs, media, and agent observations. It must not treat all of that as generic
+text. It first asks what kind of signal arrived.
 
-**Maximize S/N** — the ratio of actionable intent to noise in every output. S/N is
-not one metric among many; it is the measure of communication quality.
+## Core Shape
 
-## The Signal
-
-Every output is a **Signal**, modeled as:
-
-```
+```text
 S = (M, G, T, F, W)
+
+M = Mode
+G = Genre
+T = Type
+F = Format
+W = Structure
 ```
 
-| Dim | Name        | Question it answers                              | Examples                                          |
-|-----|-------------|--------------------------------------------------|---------------------------------------------------|
-| M   | **Mode**    | How is it perceived?                             | linguistic, visual, code, data, mixed             |
-| G   | **Genre**   | What conventionalized form?                      | spec, brief, plan, transcript, report, ADR, note  |
-| T   | **Type**    | What does it DO?                                 | direct, inform, commit, decide, express           |
-| F   | **Format**  | What container?                                  | markdown, code, JSON, CLI output, diff            |
-| W   | **Structure** | Internal skeleton                              | genre-specific template                            |
+| Dimension | Question | Examples |
+| --- | --- | --- |
+| Mode | What medium carries the signal? | text, image, audio, video, code, table, event, multimodal |
+| Genre | What kind of work communication is it? | note, decision, transcript, spec, runbook, brief, report, incident, proposal |
+| Type | What action does it perform? | inform, direct, decide, ask, commit, warn, delegate, evidence |
+| Format | What container is it encoded in? | markdown, JSON, PDF, image, audio, video, email, API payload, calendar event |
+| Structure | What internal skeleton does it follow? | freeform note, checklist, meeting log, ADR, table, contract, issue, postmortem |
 
-Before producing any non-trivial output, resolve all five dimensions. Unresolved
-dimensions create noise.
+These dimensions stay separate. A markdown file can be a decision, meeting note,
+spec, SOP, report, or package manifest. A PDF can contain a contract, deck,
+invoice, research paper, or scanned image. A calendar event can be an event
+source, a meeting signal, or evidence for a later Fact.
 
-## Four governing constraints
+## Why It Exists
 
-Any Signal that violates one of these fails regardless of its content.
+Signal classification answers:
 
-1. **Shannon — the ceiling.** Every channel has finite capacity. Don't exceed the
-   receiver's bandwidth. A 500-line explanation when 20 lines suffice is a
-   Shannon violation.
-2. **Ashby — the repertoire.** Have enough Signal variety (genres, modes,
-   structures) to handle every situation. Prose when a table is needed is an
-   Ashby violation.
-3. **Beer — the architecture.** Maintain viable structure at every scale. A
-   response, a file, a system — each must be coherently structured. Orphaned
-   logic is a Beer violation.
-4. **Wiener — the feedback loop.** Never broadcast without confirmation. Close
-   the loop: verify the receiver decoded correctly. Ask when ambiguous. Check
-   that the action happened.
-
-## Six encoding principles
-
-Apply on every non-trivial output:
-
-1. **Mode-message alignment** — sequential logic goes to text/code; relational
-   logic goes to diagrams/tables. Don't use the wrong logic for the message.
-2. **Genre-receiver alignment** — match genre to receiver. Developers decode
-   specs. Executives decode briefs. Wrong genre = failed Signal.
-3. **Structure imposition** — raw information is noise. Always impose structure.
-   Headers, sections, genre-specific skeletons.
-4. **Redundancy proportional to noise** — high-stakes contexts get more
-   structure and explicit intent. Simple contexts get minimal framing.
-5. **Entropy preservation** — maximum meaning per unit of output. No filler, no
-   hedging, no padding. An SOP that buries the action in paragraphs has lost
-   entropy to noise.
-6. **Bandwidth matching** — match output density to receiver capacity. Three
-   bullet points when that's what's needed. Full spec when that's what's needed.
-
-## Eleven failure modes
-
-```
-SHANNON VIOLATIONS
-  Routing failure       wrong recipient. Re-route.
-  Bandwidth overload    too much output. Reduce, prioritize, batch.
-  Fidelity failure      meaning lost. Re-encode with clearer structure.
-
-ASHBY VIOLATIONS
-  Genre mismatch        wrong form. Re-encode in correct genre.
-  Variety failure       no genre exists. Create one.
-  Structure failure     no internal skeleton. Impose genre structure.
-
-BEER VIOLATIONS
-  Bridge failure        no shared context. Add preamble/conventions.
-  Herniation failure    incoherence across layers. Re-encode with proper traversal.
-  Decay failure         outdated Signal. Audit, version, or sunset.
-
-WIENER VIOLATIONS
-  Feedback failure      no confirmation loop. Close it.
-
-CROSS-CUTTING
-  Adversarial noise     deliberate degradation. Make visible, escalate.
+```text
+What is this?
+Where should it route?
+Which Node owns the context?
+Which parser or adapter should process it?
+What Claims can be extracted from it?
+How much review is needed?
+Which package, report, wiki page, or app view should display it?
 ```
 
-The engine's `mix optimal.health` and `OptimalEngine.Signal.FailureModes`
-modules detect these at the data layer.
+Without Signal classification, the engine creates noise:
 
-## Path of least resistance
+```text
+wrong Node
+wrong package
+wrong workflow
+wrong receiver
+wrong level of detail
+unsupported "facts"
+```
 
-Optimal encoding converges on minimum decoding effort at the receiver. The best
-Signal:
+## Signal Is Not Truth
 
-- Uses the **mode** the receiver perceives most naturally
-- Takes the **genre** the receiver has competence to decode
-- Performs the **type** (speech act) that matches intended outcome
-- Arrives in the **format** appropriate to the channel
-- Has a **structure** that makes the internal skeleton immediately decodable
-- Carries enough **redundancy** to survive noise
-- Minimizes **decoding effort** at the receiver
-- Produces **action** with highest probability
+Signals are interpretations, not accepted truth.
 
-What the receiver experiences as clarity, elegance, or "just right" — that is
-the path of least resistance. Maximum meaning per unit of signal, minimum noise
-per unit of meaning.
+```text
+Source Package preserves what arrived.
+Signal classifies what kind of thing it is.
+Claim records what the source appears to say.
+Fact records what review/policy accepts as true.
+Memory Object records why accepted truth matters.
+```
 
-## How the engine instantiates this
+This separation is the main safety rule. The engine can classify messy input
+without believing it.
 
-| Theory element              | Engine artifact                                                     |
-|----------------------------|---------------------------------------------------------------------|
-| Signal `Mode + Genre + Type + Format + Structure`     | `OptimalEngine.Signal.Envelope` struct — CloudEvents + classification |
-| Classification             | `OptimalEngine.Signal.Classifier` — auto-infers dimensions           |
-| Genre routing              | `OptimalEngine.Router` — trie-based pattern matching                 |
-| Failure-mode detection     | `OptimalEngine.Signal.Classifier.FailureModes`                       |
-| Bandwidth matching (tiers) | L0 (~100 tok) / L1 (~2K tok) / full — `ContextAssembler`             |
-| Entropy preservation       | Redundancy budget enforced in `Indexer`; duplicates surfaced by `optimal.health` |
-| Feedback loop              | `OptimalEngine.Memory.Learning` (SICA) — corrections feed back in    |
+## Signal Breakdown Example
 
-## Recommended reading order
+User writes:
 
-1. This document.
-2. [`three-spaces.md`](three-spaces.md) — input, signal, persistence separation.
-3. [`failure-modes.md`](failure-modes.md) — deep dive on the 11 failure modes.
-4. [`infinite-context-framework.md`](infinite-context-framework.md) — tiered
-   loading as bandwidth matching at scale.
-5. [`../README.md`](../README.md) —
-   how the theory maps onto the running system.
+```text
+Send the updated launch packet to the partner team after today's pricing call.
+```
+
+Possible classification:
+
+```text
+Mode: text
+Genre: operational instruction
+Type: direct
+Format: chat message
+Structure: task request
+Primary Node: Project Node / Partner Launch
+Receiver: partner team
+Package implication: update or create a Node-local package
+Truth implication: create pending Claims only if new factual assertions appear
+```
+
+The engine should not randomly create a workspace-level package. The request is
+about a launch Node and a receiver. The package belongs under that Node unless
+the package intentionally spans multiple Nodes.
+
+## Signal-To-Node Routing
+
+Routing should use this order:
+
+```text
+explicit workspace/node ID
+  -> current session scope
+  -> scoped aliases
+  -> signal genre/type hints
+  -> entity relationships
+  -> fuzzy candidates with confirmation
+  -> inbox quarantine
+```
+
+If the engine is not sure, it should ask or route to the workspace inbox. It
+should not make durable topology or package placement guesses.
+
+## Signal-To-Package Routing
+
+A package is a deliverable bundle for a receiver or channel. It may contain
+markdown, PDFs, HTML, images, JSON, attachments, or zipped artifacts.
+
+```text
+Node-specific package
+  -> nodes/<node-slug>/packages/<package-slug>/
+
+Cross-node package
+  -> workspace-level package only when the manifest explicitly lists source Nodes
+```
+
+The package manifest should say:
+
+```text
+receiver
+channel
+purpose
+source_node_ids
+source_object_links
+included_files
+generated_by
+review_status
+```
+
+If the package exists because of one Node, keep it inside that Node.
+
+## Anti-Noise Rules
+
+| Rule | Reason |
+| --- | --- |
+| Keep Mode, Genre, Type, Format, and Structure separate. | One label cannot route or process every input correctly. |
+| Do not treat Signal as Fact. | Classification is not verification. |
+| Do not create workspaces from project names. | Projects are normally Nodes. |
+| Do not put Node packages at workspace root. | Packages need ownership, receiver, source links, and review path. |
+| Ask when aliases are ambiguous. | Clarification prevents corrupt context. |
+| Use inbox quarantine for uncertain routing. | It is better to review than to pollute a Node. |
+
+## What Good Looks Like
+
+Good Signal handling produces:
+
+```text
+preserved source
+clear classification
+correct workspace and Node scope
+candidate Claims
+review path
+receiver-aware package/export placement
+source-linked retrieval later
+```
+
+Bad Signal handling produces unsupported summaries, misplaced files, wrong
+packages, duplicate Nodes, and agent work that cannot be audited.

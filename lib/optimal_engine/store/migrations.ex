@@ -80,7 +80,12 @@ defmodule OptimalEngine.Store.Migrations do
       migration_032_memory_core_spine(),
       migration_033_workspace_topology_surface_spine(),
       migration_034_tool_model_governance_runs(),
-      migration_035_connector_workspace_and_legacy_node_renames()
+      migration_035_asset_governance(),
+      migration_036_asset_adapter_runs(),
+      migration_037_asset_extraction_projections(),
+      migration_038_evaluation_records(),
+      migration_039_connector_workspace_and_legacy_node_renames(),
+      migration_040_asset_governance_backfill()
     ]
   end
 
@@ -2032,21 +2037,287 @@ defmodule OptimalEngine.Store.Migrations do
      ]}
   end
 
-  # Workspace isolation fixes (T3):
+  defp migration_035_asset_governance do
+    {35, "asset governance metadata",
+     [
+       {"assets.content_hash", "ALTER TABLE assets ADD COLUMN content_hash TEXT"},
+       {"assets.modality", "ALTER TABLE assets ADD COLUMN modality TEXT NOT NULL DEFAULT 'binary'"},
+       {"assets.source_package_id",
+        "ALTER TABLE assets ADD COLUMN source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL"},
+       {"assets.original_path", "ALTER TABLE assets ADD COLUMN original_path TEXT"},
+       {"assets.trust_label",
+        "ALTER TABLE assets ADD COLUMN trust_label TEXT NOT NULL DEFAULT 'unreviewed'"},
+       {"assets.retention_class",
+        "ALTER TABLE assets ADD COLUMN retention_class TEXT NOT NULL DEFAULT 'standard'"},
+       {"assets.access_policy_id", "ALTER TABLE assets ADD COLUMN access_policy_id TEXT"},
+       {"assets.security_labels",
+        "ALTER TABLE assets ADD COLUMN security_labels TEXT NOT NULL DEFAULT '[]'"},
+       {"assets.partition_ids",
+        "ALTER TABLE assets ADD COLUMN partition_ids TEXT NOT NULL DEFAULT '[]'"},
+       {"assets.metadata", "ALTER TABLE assets ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"},
+       {"idx_assets_workspace_hash",
+        "CREATE INDEX IF NOT EXISTS idx_assets_workspace_hash ON assets(workspace_id, content_hash)"},
+       {"idx_assets_source_package",
+        "CREATE INDEX IF NOT EXISTS idx_assets_source_package ON assets(source_package_id)"}
+     ]}
+  end
+
+  defp migration_036_asset_adapter_runs do
+    {36, "asset adapter run records",
+     [
+       {"asset_adapter_runs",
+        """
+        CREATE TABLE IF NOT EXISTS asset_adapter_runs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_id TEXT NOT NULL,
+          adapter_role TEXT NOT NULL,
+          modality TEXT NOT NULL,
+          status TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          completed_at TEXT,
+          input_hash TEXT,
+          output_hash TEXT,
+          output_text TEXT NOT NULL DEFAULT '',
+          output_ref TEXT,
+          model_id TEXT,
+          model_version TEXT,
+          confidence REAL,
+          precision REAL,
+          error_reason TEXT,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_asset_adapter_runs_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_adapter_runs_asset ON asset_adapter_runs(workspace_id, asset_id)"},
+       {"idx_asset_adapter_runs_adapter",
+        "CREATE INDEX IF NOT EXISTS idx_asset_adapter_runs_adapter ON asset_adapter_runs(workspace_id, adapter_id, status)"},
+       {"idx_asset_adapter_runs_source_package",
+        "CREATE INDEX IF NOT EXISTS idx_asset_adapter_runs_source_package ON asset_adapter_runs(source_package_id)"}
+     ]}
+  end
+
+  defp migration_037_asset_extraction_projections do
+    {37, "asset extraction projection records",
+     [
+       {"asset_extractions",
+        """
+        CREATE TABLE IF NOT EXISTS asset_extractions (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_type TEXT NOT NULL,
+          modality TEXT NOT NULL,
+          content_text TEXT NOT NULL DEFAULT '',
+          content_ref TEXT,
+          content_hash TEXT,
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"asset_transcripts",
+        """
+        CREATE TABLE IF NOT EXISTS asset_transcripts (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_id TEXT NOT NULL REFERENCES asset_extractions(id) ON DELETE CASCADE,
+          language TEXT,
+          speaker TEXT,
+          transcript_text TEXT NOT NULL,
+          start_ms INTEGER,
+          end_ms INTEGER,
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"asset_ocr_spans",
+        """
+        CREATE TABLE IF NOT EXISTS asset_ocr_spans (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_id TEXT NOT NULL REFERENCES asset_extractions(id) ON DELETE CASCADE,
+          page_number INTEGER,
+          span_text TEXT NOT NULL,
+          bbox TEXT NOT NULL DEFAULT '{}',
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"asset_visual_observations",
+        """
+        CREATE TABLE IF NOT EXISTS asset_visual_observations (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_id TEXT NOT NULL REFERENCES asset_extractions(id) ON DELETE CASCADE,
+          observation_type TEXT NOT NULL,
+          observation_text TEXT NOT NULL,
+          region TEXT NOT NULL DEFAULT '{}',
+          frame_time_ms INTEGER,
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"asset_embedding_refs",
+        """
+        CREATE TABLE IF NOT EXISTS asset_embedding_refs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL,
+          adapter_run_id TEXT NOT NULL REFERENCES asset_adapter_runs(id) ON DELETE CASCADE,
+          extraction_id TEXT NOT NULL REFERENCES asset_extractions(id) ON DELETE CASCADE,
+          embedding_model_id TEXT NOT NULL,
+          embedding_model_version TEXT,
+          embedding_ref TEXT NOT NULL,
+          embedding_dim INTEGER,
+          embedding_space TEXT,
+          target_ref TEXT,
+          confidence REAL,
+          precision REAL,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          derivation_ledger_id TEXT REFERENCES derivation_ledger(id) ON DELETE SET NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_asset_extractions_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_extractions_asset ON asset_extractions(workspace_id, asset_id, extraction_type)"},
+       {"idx_asset_extractions_adapter_run",
+        "CREATE INDEX IF NOT EXISTS idx_asset_extractions_adapter_run ON asset_extractions(adapter_run_id)"},
+       {"idx_asset_transcripts_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_transcripts_asset ON asset_transcripts(workspace_id, asset_id)"},
+       {"idx_asset_ocr_spans_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_ocr_spans_asset ON asset_ocr_spans(workspace_id, asset_id, page_number)"},
+       {"idx_asset_visual_observations_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_visual_observations_asset ON asset_visual_observations(workspace_id, asset_id)"},
+       {"idx_asset_embedding_refs_asset",
+        "CREATE INDEX IF NOT EXISTS idx_asset_embedding_refs_asset ON asset_embedding_refs(workspace_id, asset_id, embedding_model_id)"}
+     ]}
+  end
+
+  defp migration_038_evaluation_records do
+    {38, "evaluation and benchmark records",
+     [
+       {"evaluation_runs",
+        """
+        CREATE TABLE IF NOT EXISTS evaluation_runs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          benchmark_name TEXT NOT NULL,
+          dataset_name TEXT,
+          dataset_version TEXT,
+          dataset_size INTEGER,
+          question_count INTEGER,
+          answer_model TEXT,
+          judge_model TEXT,
+          judge_strategy TEXT,
+          retrieval_top_k INTEGER,
+          run_config TEXT NOT NULL DEFAULT '{}',
+          retrieval_config TEXT NOT NULL DEFAULT '{}',
+          judge_config TEXT NOT NULL DEFAULT '{}',
+          aggregate_scores TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'recorded',
+          started_at TEXT,
+          completed_at TEXT,
+          created_by TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"evaluation_cases",
+        """
+        CREATE TABLE IF NOT EXISTS evaluation_cases (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          evaluation_run_id TEXT NOT NULL REFERENCES evaluation_runs(id) ON DELETE CASCADE,
+          case_id TEXT NOT NULL,
+          conversation_id TEXT,
+          question TEXT NOT NULL,
+          expected_answer TEXT,
+          actual_answer TEXT,
+          context_package_id TEXT REFERENCES context_packages(id) ON DELETE SET NULL,
+          retrieved_object_links TEXT NOT NULL DEFAULT '[]',
+          scores TEXT NOT NULL DEFAULT '{}',
+          judge_output TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'recorded',
+          error_reason TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(evaluation_run_id, case_id)
+        )
+        """},
+       {"idx_evaluation_runs_workspace",
+        "CREATE INDEX IF NOT EXISTS idx_evaluation_runs_workspace ON evaluation_runs(workspace_id, benchmark_name, created_at)"},
+       {"idx_evaluation_cases_run",
+        "CREATE INDEX IF NOT EXISTS idx_evaluation_cases_run ON evaluation_cases(evaluation_run_id, status)"}
+     ]}
+  end
+
+  # Workspace isolation fixes:
   #
   # 1. `connectors` / `connector_runs` predate migration 026 and never got a
-  #    workspace_id column, contradicting the Workspace contract ("each
-  #    workspace has its own connectors"). Add it so connector-ingested
-  #    signals can be attributed to the connector's workspace.
+  #    workspace_id column, contradicting the workspace contract. Add it so
+  #    connector-ingested signals can be attributed to the connector's workspace.
   #
-  # 2. The legacy node renames (`01-inbox` → `inbox`, `04-products` →
-  #    `product-customer-portal`) used to run as an unconditional UPDATE on
-  #    every Store init (`Store.normalize_node_names/1`), silently rewriting
-  #    node names across ALL workspaces. They are now a one-time migration,
-  #    scoped to the pre-workspace `default` workspace where that legacy
-  #    data lives, applied exactly once and recorded in schema_migrations.
-  defp migration_035_connector_workspace_and_legacy_node_renames do
-    {35, "connectors.workspace_id + one-time legacy node renames (workspace isolation)",
+  # 2. Legacy node renames used to run as an unconditional update on every Store
+  #    init, silently rewriting node names across all workspaces. They are now a
+  #    one-time migration scoped to the pre-workspace `default` workspace.
+  defp migration_039_connector_workspace_and_legacy_node_renames do
+    {39, "connectors.workspace_id + one-time legacy node renames (workspace isolation)",
      [
        {"connectors.workspace_id",
         "ALTER TABLE connectors ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default'"},
@@ -2056,10 +2327,34 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_connectors_ws ON connectors(workspace_id)"},
        {"idx_connector_runs_ws",
         "CREATE INDEX IF NOT EXISTS idx_connector_runs_ws ON connector_runs(workspace_id, connector_id)"},
-       {"legacy rename 01-inbox → inbox (default workspace only)",
+       {"legacy rename 01-inbox to inbox (default workspace only)",
         "UPDATE contexts SET node = 'inbox' WHERE node = '01-inbox' AND workspace_id = 'default'"},
-       {"legacy rename 04-products → product-customer-portal (default workspace only)",
+       {"legacy rename 04-products to product-customer-portal (default workspace only)",
         "UPDATE contexts SET node = 'product-customer-portal' WHERE node = '04-products' AND workspace_id = 'default'"}
+     ]}
+  end
+
+  defp migration_040_asset_governance_backfill do
+    {40, "asset governance metadata backfill",
+     [
+       {"assets.content_hash", "ALTER TABLE assets ADD COLUMN content_hash TEXT"},
+       {"assets.modality", "ALTER TABLE assets ADD COLUMN modality TEXT NOT NULL DEFAULT 'binary'"},
+       {"assets.source_package_id",
+        "ALTER TABLE assets ADD COLUMN source_package_id TEXT REFERENCES source_packages(id) ON DELETE SET NULL"},
+       {"assets.original_path", "ALTER TABLE assets ADD COLUMN original_path TEXT"},
+       {"assets.trust_label",
+        "ALTER TABLE assets ADD COLUMN trust_label TEXT NOT NULL DEFAULT 'unreviewed'"},
+       {"assets.retention_class",
+        "ALTER TABLE assets ADD COLUMN retention_class TEXT NOT NULL DEFAULT 'standard'"},
+       {"assets.access_policy_id", "ALTER TABLE assets ADD COLUMN access_policy_id TEXT"},
+       {"assets.security_labels",
+        "ALTER TABLE assets ADD COLUMN security_labels TEXT NOT NULL DEFAULT '[]'"},
+       {"assets.partition_ids", "ALTER TABLE assets ADD COLUMN partition_ids TEXT NOT NULL DEFAULT '[]'"},
+       {"assets.metadata", "ALTER TABLE assets ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"},
+       {"idx_assets_workspace_hash",
+        "CREATE INDEX IF NOT EXISTS idx_assets_workspace_hash ON assets(workspace_id, content_hash)"},
+       {"idx_assets_source_package",
+        "CREATE INDEX IF NOT EXISTS idx_assets_source_package ON assets(source_package_id)"}
      ]}
   end
 

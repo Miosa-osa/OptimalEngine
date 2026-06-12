@@ -1,209 +1,556 @@
 # Optimal Engine
 
-[![Elixir](https://img.shields.io/badge/Elixir-1.17-4B275F)](https://elixir-lang.org/)
-[![Runtime](https://img.shields.io/badge/runtime-self--hosted-blue)](#storage-and-deployment)
-[![Database](https://img.shields.io/badge/database-SQLite%20now%20%7C%20Postgres%20target-0f766e)](#storage-and-deployment)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/Miosa-osa/OptimalEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/Miosa-osa/OptimalEngine/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Elixir](https://img.shields.io/badge/Elixir-1.17+-4B275F.svg)](mix.exs)
 
-Optimal Engine is a self-hosted second brain for a company, team, or operator.
+Optimal Engine is a self-hosted second brain and operating engine for human and
+AI workspaces.
 
-It is the runtime behind a markdown-operable workspace: typed Nodes, operating
-rhythm, source-backed memory, retrieval, workflows, skills, tool/model
-governance, and interfaces for humans and AI agents.
+It gives a person, team, or company a governed place to organize work, preserve
+source evidence, build institutional memory, retrieve trusted context, operate
+with agents, and project the same state into markdown, APIs, dashboards, CLI
+tools, and workflows.
 
-The engine is not only a note app, a RAG app, or an agent task runner. It is the
-system that lets a human or organization define its world, preserve evidence,
-classify Signals, promote reviewed truth, assemble context, run agents/tools,
-and project the same state into markdown, APIs, dashboards, HTML, reports, and
-agent runtimes.
+It is not only a notes app, a vector database, or an agent task runner. It is the
+runtime underneath a workspace:
 
 ```text
-Human defines the world:
-  Workspace -> Nodes -> Relationships -> Policies
-
-Data enters the world:
-  Source Package -> Signal -> Route -> Claim -> Fact -> Memory Object
-
-Humans and agents use the world:
-  Query or task -> Context Package -> Active Memory Pool -> Action
-
-Work improves the world:
-  Observation -> Pending Claim -> Reviewed Fact -> Memory -> Workflow -> Skill
+Define the world    -> Organization, Workspaces, Nodes, relationships, policies
+Capture evidence    -> Sources, files, messages, events, tool results
+Build memory        -> Signals, Claims, Facts, Memory Objects
+Use context         -> Retrieval, Context Packages, Active Memory Pools
+Run work            -> Tools, models, workflows, Skill Packages
+Project the state   -> Markdown, wiki pages, dashboards, exports, APIs
 ```
 
-## Status Cards
+Signal classification is the front door for noisy input:
 
-| Card | Status | What it means |
-| --- | --- | --- |
-| Company second brain | Active | The product framing is still a governed brain for a company, team, or operator. |
-| Markdown workspace | Active | Files and folders remain a human/agent control surface. They are projections, not the only truth. |
-| Workspace topology | Built | Workspaces, project-as-Node modeling, node types, node relationships, memberships, setup command, rhythm/agent starter surface, and projection records exist. |
-| Signal pipeline | Built | Parse, decompose, classify, embed, route, store, cluster, and wiki tasks/modules exist, with text path strongest today. |
-| Memory Core | Built | Source Packages, Claims, Facts, Memory Objects, Relationship Edges, Derivation Ledger, Context Packages, and Active Pools exist in the schema and tests. |
-| Retrieval | Built, expanding | Wiki-first RAG, hybrid search, grep, tiered assembly, governed Context Packages, and receiver formatting exist. Full graph/vector/temporal coordinator expansion is ongoing. |
-| Rhythm | Partly built | Rhythm is represented through Nodes, focus/review state, signals, active pools, and workspace projections. A dedicated rhythm service is still a build target. |
-| Wiki / export surface | First slice built | Node and workspace tree pages render into `wiki_pages`, `.wiki/*.md`, export records, projection revisions, and link-health records. Backlinks/import/HTTP/rebuild work remains. |
-| Workflow and skills | Built spine | Workflow Trace, Generalized Workflow, Procedural Memory Object, Skill Package, and derivation records exist. Runtime execution is still expanding. |
-| Tool/model governance | Built spine | Tool/model definitions, run records, permission checks, output validation, audit links, and dispatcher adapter coverage exist. |
-| Multimodality | Partly built | Text/code/document paths are strongest. Image/audio/video parsers and processors exist, but depend on external tools/models and need deeper test coverage. |
-| Benchmarks | Built spine | Benchmark/evaluation records and scripts exist, but large-scale public benchmark numbers should be treated as active evaluation work. |
+```text
+Signal = Mode + Genre + Type + Format + Structure
+```
 
-## Core Concepts
+The engine keeps those dimensions separate so it can route, parse, review,
+package, and retrieve the input without pretending every file or message is the
+same kind of thing.
 
-These concepts are all still part of Optimal Engine. The newer Memory Core work
-does not remove them; it gives them stricter storage and lifecycle boundaries.
+See [`docs/concepts/signal-theory.md`](docs/concepts/signal-theory.md) for the
+breakdown and anti-noise rules.
 
-| Concept | Meaning |
+Most users should start by dumping messy context into the engine. The engine
+preserves that input, proposes structure, asks follow-up questions, and waits for
+review before turning suggestions into durable workspace truth.
+
+For the full first-workspace story and copy-paste starter prompts, read
+[`docs/guides/first-workspace-story.md`](docs/guides/first-workspace-story.md)
+and [`templates/starter-prompts/`](templates/starter-prompts/).
+
+## What You Can Build With It
+
+Optimal Engine is designed for operating systems around real work:
+
+| Use case | What the engine gives you |
 | --- | --- |
-| Tiers | Where knowledge lives: raw sources, rebuildable derivatives, curated/wiki/interface memory. |
-| Layers | Who owns lifecycle decisions: Topology, Signal, Memory Core, Retrieval, Active Pools, Workflow/Skill, Tool/Model Governance, Export, Audit. |
-| Stages | How ingestion processes data: intake, parse, decompose, classify, embed, route, store, cluster, curate. |
-| Rhythm | How humans operate the workspace over time: daily focus, weekly review, blockers, decisions, handoffs, follow-ups. |
-| Gates | Checkpoints that prevent raw evidence, interpretation, accepted truth, and agent action from being mixed together. |
-| Nodes | Governed topology objects. A folder can be an export of a Node, but a Node is not just a folder. |
-| Wiki / curated memory | The human and agent front door, backed by citations and governed state. |
+| Company second brain | Source-backed memory for decisions, projects, people, customers, procedures, and institutional context. |
+| Personal operating system | Workspaces for life, work, learning, people, money, projects, and daily rhythm. |
+| Agent workspace | Governed Context Packages, Active Memory Pools, tool permissions, observations, and audit. |
+| Research system | Source Packages, Claims, Facts, citations, relationships, retrieval, and evidence trails. |
+| Product, operation, or initiative OS | Nodes for products, operations, initiatives, features, decisions, milestones, blockers, releases, and workflows. |
+| Operations/SOP system | Workflow traces, validated procedures, Skill Packages, tool calls, and exception handling. |
+| Customer/support memory | Customer nodes, issue history, prior fixes, current-valid Facts, and source-linked recall. |
 
-## Tiers
+## Core Model
 
-```text
-Tier 1: Raw Sources
-  Append-only source material, signal files, imported artifacts, tool outputs.
-
-Tier 2: Rebuildable Derivatives
-  Parsed text, chunks, embeddings, classifications, indexes, graph edges,
-  clusters, summaries, compatibility context rows.
-
-Tier 3: Curated / Wiki / Interface Memory
-  Audience-aware wiki pages, node context projections, dashboards, HTML,
-  reports, and agent-ready context surfaces.
-```
-
-The Memory Core lifecycle now makes truth handling stricter inside those tiers:
+The hierarchy is intentionally simple:
 
 ```text
-Source Package -> Claim -> Fact -> Memory Object
+Tenant / Organization
+  -> Workspaces
+      -> Nodes
+          -> attached sources, signals, memory, wiki pages, workflows, skills
 ```
 
-A wiki page, context package, or generated report should cite accepted objects
-and source evidence. It should not become unsupported truth by itself.
+A Project is only one optional Node type inside a Workspace. It is not a peer
+of Workspace, and the engine does not require every workspace to have projects.
 
-## Layers
+```text
+Workspace
+  -> Entity / Company Node
+  -> Team / Department Node
+  -> Person Node
+  -> Product Node
+  -> Operational Node
+  -> Project Node, when there is a bounded initiative
+  -> Context Node
+  -> Learning Node
+```
 
-Optimal Engine is organized by lifecycle ownership, not just where bytes are
-stored.
+Companies often have projects they are focused on, but those projects live in
+the same Node graph as everything else. A company may also choose not to model
+projects at all and instead organize around operations, products, customers,
+departments, accounts, or rhythms.
 
-| Layer | Owns |
+Use a Project Node when the thing has a bounded initiative shape: a scope,
+timeline, deliverables, blockers, milestones, and review cadence. Use another
+Node type when the thing is ongoing or structurally different:
+
+| User language | Usually model as |
 | --- | --- |
-| Workspace / Topology | Workspaces, Nodes, Node Types, relationships, membership, policies, projection scope. |
-| Signal Pipeline | Classification, quality, routing hints, compatibility context rows. |
-| Memory Core | Source Packages, Claims, Facts, Memory Objects, Relationship Edges, Derivation Ledger. |
-| Retrieval / Context | Recall planning, Context Packages, authorization envelope, retrieval audit. |
-| Active Collaboration | Active Memory Pools, task observations, pending Claims, refresh state. |
-| Workflow / Skill Runtime | Workflow Traces, Generalized Workflows, procedures, Skill Packages, execution records. |
-| Model / Tool Governance | Model operations, tool definitions, schema validation, permission checks, run records, audit. |
-| Workspace Export / Wiki Surface | Markdown, HTML, app views, reports, packages, projection records. |
-| Audit / Governance | Policy decisions, lineage, validation, access records, rebuild proof. |
+| Platform Launch, SOC2 Push, Website Rebuild | Project Node |
+| Customer Success, Hiring Pipeline, Content Publishing | Operational Node |
+| Customer Portal, Internal Agent Runtime | Product Node |
+| Example Customer, Partner Account | Entity/Customer Node |
+| Weekly Review, Daily Focus | Operational/Rhythm Node |
+| Research Library, Market Notes | Learning/Context Node |
 
-One physical database can hold many layer-owned tables. The rule is that each
-table has an owning layer, and other layers write through that owner instead of
-directly inventing lifecycle state.
-
-## Stages
-
-The full ingestion contract is:
+Users can call project-like things initiatives, campaigns, engagements, deals,
+cases, programs, or accounts. The engine preserves those labels as scoped
+aliases while keeping the canonical object clean when `project` is the right
+type:
 
 ```text
-1. Intake
-2. Parse
-3. Decompose
-4. Classify
-5. Embed
-6. Route
-7. Store
-8. Cluster
-9. Curate
+node_type: project
+display_label: Initiative
+display_name: Q3 Partner Launch
+aliases: ["launch project", "partner launch", "q3 initiative"]
 ```
 
-Not every input currently exercises every stage. Some inputs stop early. Some
-modalities are less complete than text. The invariant is that no input should
-be promoted into accepted memory without scope, evidence, classification,
-review/policy, and audit.
+This matters because names are part of routing. Loose names resolve inside the
+current organization/workspace scope. Ambiguous names produce a clarification
+question instead of a silent durable write.
 
-## Gates
-
-| Gate | Question |
-| --- | --- |
-| Scope Gate | Who is acting, which workspace/node is in scope, and which policy applies? |
-| Evidence Gate | Has the raw source been preserved or quarantined before interpretation? |
-| Signal Gate | What kind of Signal is this: mode, genre, type, format, structure? |
-| Routing Gate | Where does the Signal belong in the workspace topology? |
-| Claim Gate | What does the source assert, and with what confidence/precision? |
-| Fact Gate | What is accepted as true, valid when, and supported by which evidence? |
-| Retrieval Gate | What is this actor allowed to receive now? |
-| Action Gate | What is an agent, model, or tool allowed to do? |
-| Promotion Gate | Which observations become durable Claims, Facts, Memories, Workflows, or Skills? |
-| Projection Gate | Which markdown, HTML, app, or report view can be generated or edited? |
-
-## Node Model
-
-A Node is a governed topology object inside a Workspace.
-
-Common Node types:
+Layers are engine services that operate across the hierarchy:
 
 ```text
-entity
-department
-team
-project
-operational
-learning
-person
-product
-partnership
-context
-```
-
-Projects are Nodes inside a Workspace. They are not a peer of the Workspace.
-
-```text
-Tenant
-  -> Workspace
-    -> Nodes
-      -> Project Node
-      -> Person Node
-      -> Product Node
-      -> Operational Node
-      -> Context Node
-```
-
-The folder is an export or editing surface. The Node identity, lifecycle,
-relationships, permissions, and routing behavior belong to the engine.
-
-## Human And Agent Usage
-
-Humans can use the engine through:
-
-```text
-markdown
-CLI
-web/app UI
-reports
-workspace exports
-```
-
-Agents can use the engine through:
-
-```text
-API
-MCP/tool surface
-Context Packages
+Workspace / Topology
+Source Intake
+Signal Pipeline
+Memory Core
+Retrieval / Context
 Active Memory Pools
-Skill Packages
-workspace files
+Workflow / Skill Runtime
+Tool / Model Governance
+Wiki / Export Surface
+Evaluation / Audit / Recovery
 ```
 
-Humans and agents should not have separate memory systems. They use different
-interfaces into the same governed workspace runtime.
+## Operating Flow
+
+```mermaid
+flowchart LR
+  Human[Human / Agent / App / Connector] --> Scope[Workspace + Node Scope]
+  Scope --> Source[Source Package]
+  Source --> Signal[Signal]
+  Signal --> Route[Route to Node]
+  Route --> Claim[Claim]
+  Claim --> Review[Review / Policy]
+  Review --> Fact[Fact]
+  Fact --> Memory[Memory Object]
+  Memory --> Recall[Retrieval]
+  Recall --> Context[Context Package]
+  Context --> Pool[Active Memory Pool]
+  Pool --> Action[Human or Agent Action]
+  Action --> Observation[Observation]
+  Observation --> Claim
+```
+
+The same pattern works whether the input is a markdown edit, uploaded file,
+calendar event, API payload, connector sync, tool result, or agent observation.
+
+## Tiers, Layers, Stages, Rhythm
+
+These concepts are still part of the engine.
+
+### Tiers
+
+```text
+Tier 1: preserved sources and raw artifacts
+Tier 2: rebuildable indexes, summaries, chunks, embeddings, projections
+Tier 3: human-facing wiki/export pages and app views
+```
+
+Tier 3 is useful for humans and agents, but canonical truth lives in governed
+engine objects with provenance and policy.
+
+### Layers
+
+```text
+Topology owns the shape of the workspace.
+Intake owns source preservation.
+Signal owns classification.
+Memory Core owns claims, facts, memories, edges, and ledger.
+Retrieval owns context assembly.
+Active Pools own task-local working state.
+Workflow/Skill owns repeatable procedures.
+Tool/Model Governance owns calls, permissions, validation, and audit.
+Export owns markdown, HTML, reports, and app projections.
+```
+
+### Stages
+
+```text
+Setup workspace
+  -> Create Nodes
+  -> Ingest sources
+  -> Classify Signals
+  -> Extract Claims
+  -> Promote Facts
+  -> Build Memories
+  -> Retrieve Context
+  -> Work in Active Pools
+  -> Capture Observations
+  -> Promote Workflows and Skills
+```
+
+### Rhythm
+
+Rhythm is the human operating cadence: daily focus, weekly review, node status,
+open decisions, blockers, and follow-up loops. The engine treats rhythm as part
+of the workspace, not as random notes.
+
+```text
+Daily work -> observations, updates, pending claims
+Weekly review -> node state, priorities, decisions, stale context
+Monthly review -> workspace health, workflow promotion, memory cleanup
+```
+
+## Product Surfaces
+
+Optimal Engine is the backend runtime. Different surfaces can control or display
+the same state.
+
+| Surface | Role |
+| --- | --- |
+| Markdown workspace | Direct human/agent editing and portable workspace projection. |
+| CLI | Fast local setup, inspection, retrieval, rendering, and verification. |
+| API | App, dashboard, service, and automation integration. |
+| MCP/tools | Agent-safe access to memory, retrieval, wiki, and workspace actions. |
+| Wiki/export | Human-readable pages, reports, packages, and app views. |
+| Database | Canonical runtime state, provenance, permissions, audit, and rebuildable projections. |
+
+Markdown is not removed. Markdown becomes an inspectable control surface backed
+by the database.
+
+```text
+Markdown edit -> Source Package or topology change -> reviewed engine state
+Engine state  -> Markdown/wiki/API/dashboard projection
+```
+
+The recommended filesystem projection is:
+
+```text
+organization/
+  organization.yaml
+  workspaces/
+    company-os/
+      workspace.yaml
+      AGENTS.md
+      rhythm/
+      nodes/
+        project-platform-launch/
+          node.yaml
+          context.md
+          signal.md
+          sources/
+          decisions/
+          workflows/
+          exports/
+```
+
+See [`docs/guides/workspace-filesystem.md`](docs/guides/workspace-filesystem.md)
+for the full convention.
+
+Packages are receiver/channel bundles, often zipped from multiple files. A
+package for one project, customer, product, person, or operation belongs under
+that Node:
+
+```text
+nodes/project-platform-launch/packages/partner-update/
+  package.yaml
+  dist/partner-update.zip
+```
+
+Workspace-level packages are only for bundles that intentionally span multiple
+Nodes and declare those Nodes in a manifest.
+
+See [`docs/guides/packages-and-exports.md`](docs/guides/packages-and-exports.md)
+for package placement rules.
+
+## Storage Vs Projection
+
+The engine deliberately separates where data is stored from how it is organized
+and displayed.
+
+```text
+Storage substrate   -> SQLite, Postgres, raw artifact storage, indexes, caches,
+                       optional graph/knowledge backends.
+Domain ownership    -> topology, intake, signal, memory, retrieval, active work,
+                       workflow, skill, governance, evaluation.
+Projection surface  -> markdown, wiki, HTML, app UI, API, MCP/tools, reports,
+                       agent context packages.
+```
+
+The database stores governed runtime state. Markdown, wiki pages, app views,
+HTML, reports, and agent prompts are projections or control surfaces. If a human
+edits a projection, that edit re-enters the engine as source evidence or a
+reviewed topology change instead of silently overwriting truth.
+
+See [`docs/architecture/STORAGE-AND-PROJECTION-MAP.md`](docs/architecture/STORAGE-AND-PROJECTION-MAP.md)
+for the full map.
+
+For scope switching rules across organization, workspace, Node, and task pool,
+read [`docs/guides/scope-switching.md`](docs/guides/scope-switching.md).
+
+For installation profiles, local vs enterprise storage, Docker, multimodality,
+and adapter setup, read
+[`docs/guides/installation-and-deployment.md`](docs/guides/installation-and-deployment.md).
+
+For canonical naming, aliases, and how the engine handles user-specific labels,
+read [`docs/guides/naming-and-aliases.md`](docs/guides/naming-and-aliases.md).
+
+For common communication channels, imports from old systems, connector types,
+and recurring package types such as proposals, contracts, SOPs, and client
+requirements, read
+[`docs/guides/integrations-and-imports.md`](docs/guides/integrations-and-imports.md).
+
+For when to use CLI tools, MCP servers, A2A agents, APIs, connector syncs,
+scripts, and scheduled jobs, read
+[`docs/guides/tool-surfaces-and-loops.md`](docs/guides/tool-surfaces-and-loops.md).
+
+For repeatable goal loops with checklists, validation gates, stop conditions,
+and memory/audit outputs, read
+[`docs/guides/agentic-loops.md`](docs/guides/agentic-loops.md).
+
+The short version for users bringing their own agents:
+
+```text
+Define loop goal
+  -> choose workspace and owning Node
+  -> retrieve Context Package
+  -> run agent through allowed CLI/MCP/API/script/scheduler/A2A surfaces
+  -> validate each phase
+  -> record observations and pending Claims
+  -> promote repeated validated work into workflows or Skill Packages
+```
+
+Loop definitions should live near the Node they operate on, for example:
+
+```text
+nodes/operation-weekly-review/loops/weekly-review.loop.yaml
+nodes/product-customer-portal/loops/release-maintenance.loop.yaml
+```
+
+For the concrete backend readiness status, store ownership, verification
+commands, and remaining hardening work, read
+[`docs/reference/backend-readiness.md`](docs/reference/backend-readiness.md).
+
+For the recommended documentation path, start at
+[`docs/README.md`](docs/README.md).
+
+For the backend-first build plan, layer guide, and diagrams showing what each
+part is used for, read [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+## Repository Layout
+
+The top-level folders are product surfaces, not random piles of code:
+
+| Path | Purpose |
+| --- | --- |
+| `lib/` | Elixir/OTP runtime: topology, intake, memory, retrieval, API, wiki/export, governance, evaluation. |
+| `test/` | Runtime, API, topology, wiki, memory, connector, and evaluation tests. |
+| `apps/` | App surfaces such as docs and MCP server packages. |
+| `desktop/` | Desktop/app shell surface. |
+| `extensions/` | Browser and Raycast integration surfaces. |
+| `sdks/` | TypeScript, Python, and UI/client SDKs. |
+| `site/` | Public site surface. |
+| `skills/` | Agent skill package for using the engine from coding assistants. |
+| `sample-workspace/` | Example workspace convention for new users. |
+| `deploy/` | Docker/production deployment assets. |
+| `docs/` | Reference docs for concepts, architecture, data model, operations, and build alignment. |
+
+Generated dependency folders, local databases, build outputs, and generated
+binaries are intentionally ignored. They should be rebuilt locally, not tracked.
+
+## First-Run Initiation
+
+The first real workflow is not a perfect form. It is a data dump.
+
+```text
+User dumps messy context
+  -> engine preserves the dump as a Source Package
+  -> engine extracts an unreviewed setup Claim
+  -> engine detects conservative Nodes and integration surfaces
+  -> detected Nodes become workspace topology by default
+  -> integration/tool surfaces stay disabled until scoped
+  -> future sources route into the approved topology
+```
+
+Run it with a markdown or text file:
+
+```bash
+mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
+```
+
+The initiation command is conservative by design. It only applies explicit,
+high-confidence structure from headings, labels, and lists. It does not promote
+the setup dump into Facts. Use `--review-only` when a workspace needs every
+topology change to stay pending until a human or policy reviewer approves it.
+
+It also inventories outside systems mentioned in the dump:
+
+```text
+MCP servers
+connector syncs
+custom APIs
+scripts and cron jobs
+model/tool calls
+local files and markdown folders
+third-party systems such as calendar, mail, calls, tickets, repos, CRM, docs
+```
+
+Those become disabled governed tool definitions until the user confirms
+credentials, scopes, allowed Nodes/partitions, read/write policy, and which
+actions require confirmation.
+
+## Architecture
+
+```mermaid
+flowchart TB
+  Surfaces[Markdown / CLI / App / API / Agent / Connector]
+  Gateway[Command and Query Gateway]
+  Topology[Workspace Topology]
+  Intake[Source Intake]
+  Signal[Signal Pipeline]
+  Memory[Memory Core]
+  Retrieval[Retrieval and Context Packages]
+  Pools[Active Memory Pools]
+  Workflow[Workflow and Skill Runtime]
+  Governance[Tool and Model Governance]
+  Eval[Evaluation and Recovery]
+  Store[(SQLite now / Postgres target / optional knowledge backends)]
+  Export[Wiki / Markdown / HTML / API projections]
+
+  Surfaces --> Gateway
+  Gateway --> Topology
+  Gateway --> Intake
+  Intake --> Signal
+  Signal --> Memory
+  Memory --> Retrieval
+  Retrieval --> Pools
+  Pools --> Workflow
+  Gateway --> Governance
+  Gateway --> Eval
+
+  Topology --> Store
+  Memory --> Store
+  Retrieval --> Store
+  Pools --> Store
+  Workflow --> Store
+  Governance --> Store
+  Eval --> Store
+  Store --> Export
+  Export --> Surfaces
+```
+
+The physical database can be shared. Ownership is not shared. Each table group
+has an owning layer and a lifecycle.
+
+| Table group | Owner |
+| --- | --- |
+| `workspaces`, `nodes`, `node_types`, `node_relationships`, `node_members` | Workspace / Topology |
+| `source_packages`, `claims`, `facts`, `memory_objects`, `relationship_edges`, `derivation_ledger` | Memory Core |
+| `assets`, `asset_adapter_runs`, `asset_extractions`, transcript/OCR/visual projection rows | Memory Core / Pipeline |
+| `contexts`, FTS/search projections, signal metadata | Signal/Search compatibility |
+| `context_packages`, retrieval plans, retrieval audit | Retrieval / Context |
+| `active_memory_pools`, observations, loaded context links | Active Work |
+| `workflow_traces`, `generalized_workflows`, `procedural_memory_objects`, `skill_packages` | Workflow / Skill Runtime |
+| `model_call_operations`, `mcp_tool_definitions`, call runs | Tool / Model Governance |
+| `wiki_pages`, `export_records`, `projection_revisions`, `link_health_records` | Wiki / Export |
+| `evaluation_runs`, `evaluation_cases` | Evaluation |
+
+## Memory Lifecycle
+
+Optimal Engine separates what was said from what is accepted as true.
+
+```text
+Source Package
+  -> Signal
+  -> Claim
+  -> Fact
+  -> Memory Object
+  -> Context Package
+  -> Active Memory Pool
+  -> Observation
+  -> Pending Claim
+```
+
+This prevents an agent, parser, connector, or markdown edit from silently
+becoming truth.
+
+Facts and Memory Objects can carry:
+
+```text
+source links
+evidence links
+confidence
+precision
+valid time
+transaction time
+security labels
+partition scope
+review state
+supersession state
+derivation ledger links
+```
+
+## Multimodal Evidence
+
+Text is not the only source. Files and media enter the same governed lifecycle.
+
+```mermaid
+flowchart LR
+  File[File / Attachment / Media] --> Preserve[Preserve Raw Source]
+  Preserve --> Asset[Asset Row]
+  Asset --> Adapter[Adapter Run]
+  Adapter --> Extract[Typed Extraction]
+  Extract --> Transcript[Transcript]
+  Extract --> OCR[OCR / Tables]
+  Extract --> Visual[Visual Observations]
+  Extract --> Embed[Embedding Refs]
+  Transcript --> Claim[Pending Claim]
+  OCR --> Claim
+  Visual --> Claim
+  Claim --> Review[Review Policy]
+  Review --> Fact[Accepted Fact]
+```
+
+Supported input families include:
+
+```text
+text
+documents
+code
+images
+audio
+video
+calendar/events
+messages/conversations
+tickets/tasks
+database/API payloads
+tool results
+workspace projection edits
+```
+
+The current open-source adapter registry is in:
+
+```text
+lib/optimal_engine/pipeline/multimodal_tool_registry.ex
+docs/reference/multimodal-open-source-stack.md
+```
+
+Deployments choose which heavier local tools to install. Missing adapters should
+degrade gracefully: raw evidence is still preserved, and unavailable runs are
+recorded instead of being hidden.
 
 ## Quick Start
 
@@ -212,9 +559,9 @@ Requirements:
 - Elixir `~> 1.17`
 - Erlang/OTP 26+
 - Node 20+ for app/site surfaces
-- a local C toolchain for optional native dependencies
+- A local C toolchain for optional native dependencies
 
-Install and verify:
+Run the engine locally:
 
 ```bash
 mix deps.get
@@ -222,143 +569,205 @@ mix compile
 mix optimal.reality_check
 ```
 
-Scaffold a markdown-operable workspace:
+Build the local `./optimal` command wrapper:
 
 ```bash
+mix escript.build
+./optimal --help
+./optimal reality-check
+```
+
+That wrapper is for source checkouts. It delegates to `mix optimal.*` so native
+database dependencies load correctly. For production/API deployment, use the OTP
+release or container shape instead of treating the escript as the server binary.
+
+Create a markdown-operable workspace:
+
+```bash
+mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 mix optimal.setup my-workspace --name "My Workspace"
 mix optimal.topology --workspace default:my-workspace
-mix optimal.ingest_workspace ./my-workspace
-mix optimal.rag "what changed this week?" --workspace default:my-workspace --trace
+```
+
+Use `optimal.initiate` when starting from a messy dump. Use `optimal.setup` when
+you already know the workspace and starter Nodes you want.
+
+Local CLI commands are trusted local commands against the configured store. For
+apps, MCP servers, remote agents, or scripts that connect over HTTP/API, mint a
+scoped API key:
+
+```bash
+mix optimal.auth mint --name "Business OS" --workspace default:my-workspace
+mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+```
+
+Render wiki/export projections:
+
+```bash
 mix optimal.wiki render-node first-project --workspace default:my-workspace
 mix optimal.wiki render-tree --workspace default:my-workspace
+mix optimal.wiki check node-first-project --workspace default:my-workspace
 ```
 
-Useful commands:
+Ask the engine:
 
 ```bash
-mix optimal.reality_check
 mix optimal.search "project"
 mix optimal.rag "what changed this week?"
-mix optimal.wiki list
-mix optimal.wiki render-node first-project --workspace default:my-workspace
-mix optimal.wiki check node-first-project --workspace default:my-workspace
-mix optimal.topology --workspace default:my-workspace
 ```
 
-Start the API when enabled in config:
+## Agent SOP
 
-```bash
-mix optimal.api
+A coding agent or assistant should use the engine in this order:
+
+```text
+1. Inspect workspace topology.
+2. Retrieve a governed Context Package.
+3. Work inside the current task scope.
+4. Use registered tools or APIs.
+5. Record observations.
+6. Promote useful observations to pending Claims.
+7. Let review/policy promote Claims into Facts.
+8. Export markdown/wiki/app views from engine state.
 ```
 
-## Storage And Deployment
+Agents should not bypass Memory Core by writing final truth directly into
+markdown or raw tables.
 
-Local development uses SQLite:
+Agents should also not call arbitrary outside systems directly. Whether the
+surface is MCP, a connector, an API, or a script, it should be registered,
+permissioned, schema-checked, executed, logged, and converted back into Source
+Packages or observations when it produces useful evidence.
+
+## Docker And Deployment
+
+Docker is optional.
+
+Use local Elixir/SQLite for development and personal use:
 
 ```text
 .optimal/index.db
 ```
 
-Docker is optional. You do not need Docker to run the local engine. Use Docker
-when you want a packaged service stack or deployment-style environment.
+Use Docker or a managed runtime when you want a packaged service stack:
 
-Target production storage can move to Postgres while keeping the same ownership
-model:
-
-```text
-SQLite now
-Postgres target
-Indexes and caches attached as rebuildable projections
-Markdown/files exported from governed state
+```bash
+docker compose -f deploy/docker-compose.yml up
 ```
 
-Table ownership:
-
-| Table group | Owner |
-| --- | --- |
-| `workspaces`, `nodes`, `node_types`, `node_relationships`, `node_members` | Workspace / Topology |
-| `contexts`, `chunks`, `classifications`, `intents`, search projections | Signal/Search compatibility |
-| `source_packages`, `claims`, `facts`, `memory_objects`, `relationship_edges`, `derivation_ledger` | Memory Core |
-| `context_packages`, retrieval audit | Retrieval / Context |
-| `active_memory_pools`, pool observations | Active Collaboration |
-| `workflow_traces`, `generalized_workflows`, `procedural_memory_objects`, `skill_packages` | Workflow / Skill Runtime |
-| `model_call_operations`, `mcp_tool_definitions`, call runs | Model / Tool Governance |
-| `wiki_pages`, `citations`, `export_records`, projection revisions, generated files | Wiki / Workspace Export |
-
-## Multimodality
-
-Canonical input families:
+The target production database is Postgres. The architecture is built so the
+physical store can change while layer ownership stays the same.
 
 ```text
-text
-document
-code
-image
-audio
-video
-calendar/event
-message/conversation
-ticket/task
-database/API payload
-tool result
-workspace projection edit
+SQLite now: local canonical runtime store
+Postgres target: production canonical runtime store
+FTS/vector/index/cache rows: rebuildable projections
+ETS/RocksDB/Mnesia/Riak knowledge backends: optional graph/triple-store engines
+Markdown/files/wiki/HTML/API: export and control surfaces
 ```
 
-Every input family should enter through the same evidence lifecycle:
-
-```text
-external source or local edit
-  -> Source Package
-  -> Signal classification
-  -> Memory Core / Retrieval / Workflow as appropriate
-```
-
-Text is the most complete path today. Image, audio, and video support exists in
-the parser/processor architecture and should be treated as active build surface
-until deeper end-to-end tests are added.
+RocksDB is not the main workspace database today. It is an optional persistent
+knowledge backend for graph/triple-store workloads when the runtime has the
+required native RocksDB library available.
 
 ## Verification
 
-Current focused verification:
+Core reality check:
 
 ```bash
-mix test test/memory_core/spine_test.exs \
-  test/mix_tasks/optimal_setup_test.exs \
-  test/wiki/service_test.exs \
-  test/wiki/store_test.exs \
-  test/workspace_export_test.exs \
-  test/topology/workspace_topology_test.exs \
-  test/topology/node_member_test.exs \
-  test/topology/node_test.exs \
-  test/topology/workspace_surface_spine_test.exs \
-  test/signal/dispatcher_test.exs \
-  --seed 0
-
 mix optimal.reality_check
 ```
 
-Latest local reality check:
+Current verified result:
 
 ```text
-104 probes, 104 ok, 0 warn, 0 fail
+126 probes, 126 ok, 0 warn, 0 fail
 ```
 
-Existing compile warnings remain around optional/legacy integrations, especially
-RocksDB and transitional bridge modules. They are not ignored; they are separate
-cleanup work from the README/license production pass.
+Focused topology/wiki path:
 
-## Development Rules
+```bash
+mix test test/wiki/service_test.exs \
+  test/wiki/store_test.exs \
+  test/workspace_export_test.exs \
+  test/mix_tasks/optimal_setup_test.exs \
+  test/workspace_initiation_test.exs \
+  test/mix_tasks/optimal_initiate_test.exs \
+  --seed 0
+```
+
+Current result:
+
+```text
+19 tests, 0 failures
+```
+
+Focused multimodal/memory path:
+
+```bash
+mix test test/memory_core/spine_test.exs \
+  test/pipeline/multimodal_adapter_runner_test.exs \
+  test/memory_core/asset_store_test.exs \
+  --seed 0
+```
+
+## What Is Built
+
+The runtime already includes:
+
+- Workspace topology with Workspaces, Nodes, Node Types, relationships,
+  membership, setup CLI, and filesystem projections.
+- First-run workspace initiation from messy context dumps, with preserved source
+  evidence, pending setup Claims, proposed Nodes, open questions, and disabled
+  integration placeholders.
+- Source Package preservation for raw text and governed assets.
+- Signal classification and compatibility search rows.
+- Claim, Fact, Memory Object, Relationship Edge, and Derivation Ledger tables.
+- Fact promotion, stale/conflict handling, supersession, and context invalidation.
+- Context Packages with permission-aware package assembly.
+- Active Memory Pools with load, refresh, observe, and close flows.
+- Multimodal asset preservation, adapter run records, typed extraction
+  projections, and derived pending Claims.
+- Tool/model governance run records and permission checks.
+- Connector and integration governance for MCP, connector, API, and script
+  surfaces before agents can use outside systems.
+- Wiki/export rendering for Node pages and workspace tree pages.
+- Evaluation run/case records and JSON/JSONL dataset execution.
+- Reality check probes across the major runtime paths.
+
+## Roadmap
+
+The backend-first roadmap is organized as build gates:
+
+```text
+Workspace Topology
+  -> Source-First Intake
+  -> Signal and Multimodal Processing
+  -> Claim, Fact, and Memory Review
+  -> Retrieval and Context Packages
+  -> Agent Runtime and Tool Governance
+  -> Workflow and Skill Lifecycle
+  -> Projection and Business OS Integration
+  -> Evaluation, Recovery, and Production Hardening
+```
+
+Read the full roadmap, diagrams, layer guide, and "what each part is used for"
+here:
+
+[`docs/ROADMAP.md`](docs/ROADMAP.md)
+
+## Development Rule
 
 Do not make `Store` the owner of business meaning.
 
 Good:
 
 ```text
+WorkspaceTopology.create_node(...)
 MemoryCore.extract_claim(...)
 MemoryCore.promote_claim_to_fact(...)
 MemoryCore.retrieve(...)
 MemoryCore.open_active_pool(...)
-WorkspaceTopology.create_node(...)
 WorkspaceExport.project(...)
 ```
 
@@ -373,32 +782,6 @@ raw SQL from feature modules into governed tables
 
 `Store` can execute database writes. Domain layers own lifecycle decisions.
 
-## What Comes Next
-
-The next build slices are:
-
-1. Build the Markdown wiki service surface: page tree, backlinks, broken-link
-   checks, directive rendering, revisions, import/export, render/rebuild helpers,
-   and wiki HTTP/CLI operations. The first slice is built: Nodes and workspace
-   trees can render into stored wiki pages, markdown projections, export
-   records, projection revisions, and link-health records.
-2. Harden source-first intake so every edit, file, API request, connector
-   payload, and tool result is preserved or quarantined before interpretation.
-3. Expand multimodality: raw artifact storage, modality metadata, parser assets,
-   adapter runs, extraction projections, and failed/unsupported artifact records.
-4. Add review queues for Claims and Fact promotion.
-5. Expand Retrieval Coordinator beyond simple fact/memory lookup into structured,
-   full-text, vector, graph, temporal, and permission-aware recall.
-6. Build workflow traces and Skill Packages from repeated Active Pool work.
-7. Expand governed tool/model execution from the first dispatcher adapter into
-   connector-wide and model-provider-wide runtime paths.
-8. Add benchmark/evaluation records so large-scale recall tests are stored and
-   inspectable.
-
-The system is meant to stay complex where complexity carries meaning: evidence,
-ownership, validity, permissions, workflow, and audit. It should stay simple
-where complexity only creates extra steps.
-
 ## License
 
-Optimal Engine is released under the MIT License. See [LICENSE](LICENSE).
+Optimal Engine is released under the [MIT License](LICENSE).

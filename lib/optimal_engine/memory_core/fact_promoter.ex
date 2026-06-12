@@ -407,6 +407,7 @@ defmodule OptimalEngine.MemoryCore.FactPromoter do
     sql = """
     UPDATE facts
     SET lifecycle_state = 'superseded',
+        contradiction_status = 'superseded',
         valid_time_end = ?3,
         transaction_time_end = ?4,
         metadata = ?5,
@@ -438,6 +439,8 @@ defmodule OptimalEngine.MemoryCore.FactPromoter do
     update_sql = """
     UPDATE memory_objects
     SET supersession_status = 'superseded',
+        lifecycle_state = 'superseded',
+        staleness_status = 'stale',
         transaction_time_end = ?3,
         updated_at = datetime('now')
     WHERE workspace_id = ?1 AND id = ?2 AND supersession_status = 'none'

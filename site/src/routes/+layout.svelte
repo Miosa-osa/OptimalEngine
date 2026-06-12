@@ -47,8 +47,8 @@
     <div class="site-footer__col">
       <div class="eyebrow">Develop</div>
       <a href="https://github.com/Miosa-osa/OptimalEngine" target="_blank" rel="noopener">GitHub</a>
-      <a href="https://github.com/Miosa-osa/OptimalEngine/blob/main/docs/architecture/ARCHITECTURE.md" target="_blank" rel="noopener">Architecture</a>
-      <a href="https://github.com/Miosa-osa/OptimalEngine/blob/main/GETTING_STARTED.md" target="_blank" rel="noopener">Getting started</a>
+      <a href="https://github.com/Miosa-osa/OptimalEngine/blob/main/docs/architecture/ENGINE-STRUCTURE.md" target="_blank" rel="noopener">Architecture</a>
+      <a href="https://github.com/Miosa-osa/OptimalEngine/blob/main/docs/guides/getting-started.md" target="_blank" rel="noopener">Getting started</a>
     </div>
     <div class="site-footer__col">
       <div class="eyebrow">License</div>

@@ -224,7 +224,8 @@ defmodule OptimalEngine.Memory.Injector do
   defp error_match_score(_entry, _context), do: 0.0
 
   defp session_match_score(%Taxonomy{category: :context, scope: :session}, %{session_id: sid})
-       when is_binary(sid) and sid != "", do: 1.0
+       when is_binary(sid) and sid != "",
+       do: 1.0
 
   defp session_match_score(%Taxonomy{category: :context, scope: :session}, _context), do: 0.0
 

@@ -29,6 +29,7 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Graph.Reflector, as: Reflector
   alias OptimalEngine.MemoryCore.ContextPackage
   alias OptimalEngine.Profile
+  alias OptimalEngine.MemoryCore
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.Grep
   alias OptimalEngine.Retrieval.RagStream
@@ -1260,6 +1261,78 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # POST /api/memory/remember — gated memory intake for agent/app writes.
+  # Body: {content, workspace?, audience?, metadata?, force?, gate_threshold?,
+  #        salience_floor?, skip_threshold?, update_threshold?}
+  # Returns: 200 + {action, memory?, gate, dedup?}.
+  post "/api/memory/remember" do
+    body = conn.body_params || %{}
+    content = Map.get(body, "content")
+
+    if not (is_binary(content) and content != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "content is required"}))
+    else
+      attrs =
+        %{
+          content: content,
+          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+        }
+        |> maybe_put(:tenant_id, Map.get(body, "tenant", Map.get(body, "tenant_id")))
+        |> maybe_put(:is_static, Map.get(body, "is_static"))
+        |> maybe_put(:audience, Map.get(body, "audience"))
+        |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
+        |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
+        |> maybe_put(:metadata, Map.get(body, "metadata"))
+        |> maybe_put(:actor_id, Map.get(body, "actor_id"))
+        |> maybe_put(:access_policy_id, Map.get(body, "access_policy_id"))
+        |> maybe_put(:security_labels, string_list_param(body, "security_labels"))
+        |> maybe_put(:partition_ids, string_list_param(body, "partition_ids"))
+
+      opts =
+        [
+          force: parse_bool(Map.get(body, "force"), false),
+          gate_threshold: parse_float(Map.get(body, "gate_threshold")),
+          salience_floor: parse_float(Map.get(body, "salience_floor")),
+          skip_threshold: parse_float(Map.get(body, "skip_threshold")),
+          update_threshold: parse_float(Map.get(body, "update_threshold")),
+          versioned_projection: true
+        ]
+        |> reject_nil_keyword()
+
+      case OptimalEngine.Memory.remember(attrs, opts) do
+        {:ok, result} ->
+          json(conn, memory_intake_result_to_map(result))
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
+  # POST /api/assets — preserve a multimodal file through the governed asset path.
+  #
+  # JSON body supports either:
+  #   {"path": "/local/file.pdf", "workspace": "default"}
+  #   {"filename": "call.wav", "content_base64": "...", "workspace": "default"}
+  #
+  # Optional adapter execution:
+  #   {"adapter_id": "openai_whisper", "command": "printf", "args": ["..."]}
+  post "/api/assets" do
+    body = conn.body_params || %{}
+
+    case asset_upload_source_path(body) do
+      {:ok, source_path, cleanup} ->
+        try do
+          handle_asset_upload(conn, body, source_path)
+        after
+          cleanup.()
+        end
+
+      {:error, reason} ->
+        send_resp(conn, 400, Jason.encode!(%{error: asset_upload_error(reason)}))
+    end
+  end
+
   # GET /api/memory/:id/versions — version chain for a memory (BEFORE bare /:id).
   # Returns: {memory_id, root_id, versions: [...]} in chronological order.
   get "/api/memory/:id/versions" do
@@ -1443,6 +1516,396 @@ defmodule OptimalEngine.API.Router do
         {:error, reason} ->
           send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
       end
+    end
+  end
+
+  # ── Memory Core claim governance ──────────────────────────────────────────
+
+  # POST /api/memory-core/context-packages/refresh-stale — batch refresh stale
+  # Context Packages for scheduler, app, or agent callers.
+  # Body: {workspace?, tenant?, actor_id?, batch_limit?, limit?,
+  #        continue_on_error?, allowed_partitions?, allowed_security_labels?}
+  post "/api/memory-core/context-packages/refresh-stale" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+
+    tenant_id =
+      Map.get(
+        body,
+        "tenant",
+        Map.get(body, "tenant_id", conn.assigns[:current_tenant] || "default")
+      )
+
+    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    opts =
+      [
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        actor_id: actor_id,
+        batch_limit: parse_optional_positive_int(Map.get(body, "batch_limit")),
+        limit: parse_optional_positive_int(Map.get(body, "limit")),
+        continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
+      ]
+      |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
+      |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case MemoryCore.refresh_stale_context_packages(opts) do
+      {:ok, result} ->
+        json(conn, %{
+          tenant_id: tenant_id,
+          workspace_id: workspace_id,
+          stale_context_package_ids: result.stale_context_package_ids,
+          refreshed_count: length(result.refreshed_context_packages),
+          error_count: length(result.errors),
+          refreshed_context_packages:
+            Enum.map(result.refreshed_context_packages, &context_package_to_map/1),
+          errors: Enum.map(result.errors, &stringify_keys/1)
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/active-pools — open task-scoped working memory.
+  # Body: {workspace?, tenant?, task_type?, subject_anchor?, member_links?,
+  #        agent_links?, tool_links?, security_labels?, partition_ids?, metadata?}
+  post "/api/memory-core/active-pools" do
+    body = conn.body_params || %{}
+
+    opts =
+      [
+        workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+        tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
+        task_type: Map.get(body, "task_type"),
+        subject_anchor: Map.get(body, "subject_anchor"),
+        time_mode: Map.get(body, "time_mode", "current_valid"),
+        pool_scope: coerce_metadata(Map.get(body, "pool_scope")),
+        member_links: Map.get(body, "member_links", []),
+        agent_links: Map.get(body, "agent_links", []),
+        tool_links: Map.get(body, "tool_links", []),
+        membership_policy: coerce_metadata(Map.get(body, "membership_policy")),
+        delegation_chain_links: Map.get(body, "delegation_chain_links", []),
+        access_policy_id: Map.get(body, "access_policy_id"),
+        security_labels: string_list_param(body, "security_labels"),
+        partition_ids: string_list_param(body, "partition_ids"),
+        policy_version: Map.get(body, "policy_version"),
+        metadata: coerce_metadata(Map.get(body, "metadata"))
+      ]
+      |> reject_nil_keyword()
+
+    case MemoryCore.open_active_pool(opts) do
+      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/active-pools/:id — fetch one Active Memory Pool.
+  get "/api/memory-core/active-pools/:id" do
+    case MemoryCore.get_active_pool(id) do
+      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/retrieve — retrieve governed context
+  # for a pool and load the resulting Context Package into that pool.
+  post "/api/memory-core/active-pools/:id/retrieve" do
+    body = conn.body_params || %{}
+    query = Map.get(body, "query", "")
+
+    if not (is_binary(query) and String.trim(query) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
+    else
+      opts =
+        [
+          tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
+          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          active_memory_pool_id: id,
+          request_intent: Map.get(body, "request_intent", "recall"),
+          time_mode: Map.get(body, "time_mode", "current_valid"),
+          detail_depth: Map.get(body, "detail_depth", "summary"),
+          limit: parse_optional_positive_int(Map.get(body, "limit"))
+        ]
+        |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
+        |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+        |> reject_nil_keyword()
+
+      with {:ok, package} <- MemoryCore.retrieve(query, opts),
+           {:ok, pool} <- MemoryCore.load_context_package(id, package) do
+        json(conn, %{
+          active_memory_pool: active_pool_to_map(pool),
+          context_package: context_package_to_map(package)
+        })
+      else
+        {:error, :not_found} ->
+          send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/refresh-context — refresh stale
+  # Context Packages already loaded into the pool.
+  post "/api/memory-core/active-pools/:id/refresh-context" do
+    body = conn.body_params || %{}
+
+    opts =
+      [
+        actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+        continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
+      ]
+      |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
+      |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+      |> reject_nil_keyword()
+
+    case MemoryCore.refresh_pool_context_packages(id, opts) do
+      {:ok, result} ->
+        json(conn, %{
+          active_memory_pool: active_pool_to_map(result.pool),
+          refreshed_count: length(result.refreshed_context_packages),
+          skipped_context_package_ids: result.skipped_context_package_ids,
+          errors: Enum.map(result.errors, &stringify_keys/1),
+          refreshed_context_packages:
+            Enum.map(result.refreshed_context_packages, &context_package_to_map/1)
+        })
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/observations — publish a pool-local
+  # observation as Source Package + pending Claim.
+  post "/api/memory-core/active-pools/:id/observations" do
+    body = conn.body_params || %{}
+    observation = Map.get(body, "observation", Map.get(body, "text", ""))
+
+    if not (is_binary(observation) and String.trim(observation) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "observation is required"}))
+    else
+      opts =
+        [
+          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          source_type: Map.get(body, "source_type", "pool_observation"),
+          observation_kind: Map.get(body, "observation_kind", "observation"),
+          claim_text: Map.get(body, "claim_text", observation),
+          subject_anchor: Map.get(body, "subject_anchor"),
+          action_class: Map.get(body, "action_class"),
+          object_anchor: Map.get(body, "object_anchor"),
+          aggregate_confidence: parse_float(Map.get(body, "aggregate_confidence")),
+          aggregate_precision: parse_float(Map.get(body, "aggregate_precision"))
+        ]
+        |> reject_nil_keyword()
+
+      case MemoryCore.publish_pool_observation(id, observation, opts) do
+        {:ok, result} ->
+          json(conn, %{
+            active_memory_pool: active_pool_to_map(result.pool),
+            source_package: source_package_to_map(result.source_package),
+            pending_claim: claim_to_map(result.pending_claim)
+          })
+
+        {:error, :not_found} ->
+          send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/close — close/archive a pool.
+  post "/api/memory-core/active-pools/:id/close" do
+    body = conn.body_params || %{}
+
+    opts =
+      [
+        reason: Map.get(body, "reason"),
+        lifecycle_state: Map.get(body, "lifecycle_state", "closed"),
+        archive_state: Map.get(body, "archive_state", "archived")
+      ]
+      |> reject_nil_keyword()
+
+    case MemoryCore.close_active_pool(id, opts) do
+      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/claim-review — review queue summary and claims.
+  # Params: workspace, tenant, review_status?, lifecycle_state?, limit?
+  get "/api/memory-core/claim-review" do
+    workspace_id = query_param(conn, "workspace", "default")
+    tenant_id = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    opts =
+      [
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        review_status: query_param(conn, "review_status", nil),
+        lifecycle_state: query_param(conn, "lifecycle_state", nil),
+        limit: parse_optional_positive_int(query_param(conn, "limit", nil))
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case MemoryCore.claim_review_queue(opts) do
+      {:ok, queue} ->
+        json(conn, %{
+          tenant_id: queue.tenant_id,
+          workspace_id: queue.workspace_id,
+          count: queue.count,
+          review_counts: queue.review_counts,
+          lifecycle_counts: queue.lifecycle_counts,
+          claims: Enum.map(queue.claims, &claim_to_map/1)
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/claims — list pending claims for review.
+  # Params: workspace, tenant
+  get "/api/memory-core/claims" do
+    workspace_id = query_param(conn, "workspace", "default")
+    tenant_id = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    case MemoryCore.pending_claims(workspace_id: workspace_id, tenant_id: tenant_id) do
+      {:ok, claims} ->
+        json(conn, %{
+          tenant_id: tenant_id,
+          workspace_id: workspace_id,
+          count: length(claims),
+          claims: Enum.map(claims, &claim_to_map/1)
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/claims/:id — fetch one claim by id.
+  # Params: workspace, tenant
+  get "/api/memory-core/claims/:id" do
+    workspace_id = query_param(conn, "workspace", nil)
+    tenant_id = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    case MemoryCore.get_claim(id, workspace_id: workspace_id, tenant_id: tenant_id) do
+      {:ok, claim} -> json(conn, claim_to_map(claim))
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/claims/:id/reject — reject a pending claim.
+  # Body: {workspace?, tenant?, actor_id?}
+  post "/api/memory-core/claims/:id/reject" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
+    tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
+    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    case MemoryCore.reject_claim(id,
+           workspace_id: workspace_id,
+           tenant_id: tenant_id,
+           actor_id: actor_id
+         ) do
+      {:ok, claim} -> json(conn, %{claim: claim_to_map(claim)})
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/claims/:id/promote — accept a claim as a Fact and
+  # build a Memory Object.
+  # Body: {workspace?, tenant?, actor_id?, fact_text?, summary?, memory_type?,
+  #        verification_status?, aggregate_confidence?, aggregate_precision?,
+  #        valid_time_start?, valid_time_end?, stale_after?, fact_metadata?,
+  #        memory_metadata?, supersedes_fact_id?, allow_stale?,
+  #        supersession_reason?}
+  post "/api/memory-core/claims/:id/promote" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
+    tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
+    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    opts =
+      [
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        actor_id: actor_id,
+        verifier_id: Map.get(body, "verifier_id"),
+        fact_text: Map.get(body, "fact_text"),
+        fact_type: Map.get(body, "fact_type"),
+        verification_status: Map.get(body, "verification_status"),
+        aggregate_confidence: Map.get(body, "aggregate_confidence"),
+        aggregate_precision: Map.get(body, "aggregate_precision"),
+        valid_time_start: Map.get(body, "valid_time_start"),
+        valid_time_end: Map.get(body, "valid_time_end"),
+        stale_after: Map.get(body, "stale_after"),
+        supersedes_fact_id: Map.get(body, "supersedes_fact_id"),
+        superseded_valid_time_end: Map.get(body, "superseded_valid_time_end"),
+        supersession_reason: Map.get(body, "supersession_reason"),
+        allow_stale: truthy?(Map.get(body, "allow_stale")),
+        summary: Map.get(body, "summary"),
+        memory_type: Map.get(body, "memory_type"),
+        salience: Map.get(body, "salience"),
+        fact_metadata: coerce_metadata(Map.get(body, "fact_metadata")),
+        memory_metadata: coerce_metadata(Map.get(body, "memory_metadata"))
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case MemoryCore.promote_claim(id, opts) do
+      {:ok, result} ->
+        json(conn, %{
+          claim: claim_to_map(result.claim),
+          fact: stringify_keys(result.fact),
+          memory_object: stringify_keys(result.memory_object)
+        })
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+
+      {:error, :claim_rejected} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim rejected"}))
+
+      {:error, {:claim_stale, stale_after}} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim stale", stale_after: stale_after}))
+
+      {:error, {:contradicts_current_facts, fact_ids}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "claim contradicts current facts", fact_ids: fact_ids})
+        )
+
+      {:error, {:superseded_fact_not_found, fact_id}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "superseded fact not found", fact_id: fact_id})
+        )
+
+      {:error, {:superseded_fact_not_current, fact_id}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "superseded fact is not current", fact_id: fact_id})
+        )
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
@@ -1700,6 +2163,250 @@ defmodule OptimalEngine.API.Router do
     }
   end
 
+  defp memory_intake_result_to_map(result) do
+    %{
+      action: Atom.to_string(result.action),
+      memory: result.memory && memory_to_map(result.memory),
+      gate: memory_intake_gate_to_map(result.gate),
+      dedup: memory_intake_dedup_to_map(Map.get(result, :dedup))
+    }
+  end
+
+  defp memory_intake_gate_to_map(nil), do: nil
+
+  defp memory_intake_gate_to_map(gate) do
+    %{
+      should_encode: gate.should_encode,
+      score: gate.score,
+      novelty: gate.novelty,
+      salience: gate.salience,
+      prediction_error: gate.prediction_error,
+      reason: gate.reason,
+      similar_memory_id: gate.similar_memory_id
+    }
+  end
+
+  defp memory_intake_dedup_to_map(nil), do: nil
+
+  defp memory_intake_dedup_to_map(dedup) do
+    %{
+      action: Atom.to_string(dedup.action),
+      reason: dedup.reason,
+      similarity: dedup.similarity,
+      existing_memory_id: dedup.existing && dedup.existing.id
+    }
+  end
+
+  defp claim_to_map(claim) when is_map(claim) do
+    if Map.has_key?(claim, :__struct__) do
+      claim
+      |> Map.from_struct()
+      |> stringify_keys()
+    else
+      stringify_keys(claim)
+    end
+  end
+
+  defp parse_optional_positive_int(nil), do: nil
+  defp parse_optional_positive_int(""), do: nil
+
+  defp parse_optional_positive_int(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} when int > 0 -> int
+      _ -> nil
+    end
+  end
+
+  defp parse_optional_positive_int(value) when is_integer(value) and value > 0, do: value
+  defp parse_optional_positive_int(_value), do: nil
+
+  defp truthy?(true), do: true
+  defp truthy?("true"), do: true
+  defp truthy?("1"), do: true
+  defp truthy?(1), do: true
+  defp truthy?(_value), do: nil
+
+  defp asset_upload_source_path(body) do
+    path = Map.get(body, "path")
+    content_base64 = Map.get(body, "content_base64")
+
+    cond do
+      is_binary(path) and String.trim(path) != "" ->
+        if File.exists?(path) do
+          {:ok, path, fn -> :ok end}
+        else
+          {:error, :path_not_found}
+        end
+
+      is_binary(content_base64) and String.trim(content_base64) != "" ->
+        case Base.decode64(content_base64) do
+          {:ok, bytes} ->
+            with {:ok, path} <-
+                   write_upload_tempfile(bytes, Map.get(body, "filename", "upload.bin")) do
+              {:ok, path, fn -> File.rm(path) end}
+            end
+
+          :error ->
+            {:error, :invalid_base64}
+        end
+
+      true ->
+        {:error, :asset_source_required}
+    end
+  end
+
+  defp write_upload_tempfile(bytes, filename) when is_binary(bytes) do
+    safe_name =
+      filename
+      |> to_string()
+      |> Path.basename()
+      |> String.replace(~r/[^A-Za-z0-9._-]/, "_")
+      |> case do
+        "" -> "upload.bin"
+        value -> value
+      end
+
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "optimal-api-asset-#{System.unique_integer([:positive])}-#{safe_name}"
+      )
+
+    case File.write(path, bytes) do
+      :ok -> {:ok, path}
+      {:error, reason} -> {:error, {:write_failed, reason}}
+    end
+  end
+
+  defp handle_asset_upload(conn, body, source_path) do
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+    tenant_id = Map.get(body, "tenant", Map.get(body, "tenant_id", "default"))
+    actor_id = Map.get(body, "actor_id", "api:asset-upload")
+
+    store_opts =
+      [
+        tenant_id: tenant_id,
+        workspace_id: workspace_id,
+        actor_id: actor_id,
+        content_type: Map.get(body, "content_type"),
+        modality: parse_atom(Map.get(body, "modality"), nil),
+        trust_label: Map.get(body, "trust_label", "unreviewed"),
+        retention_class: Map.get(body, "retention_class", "standard"),
+        access_policy_id: Map.get(body, "access_policy_id"),
+        security_labels: string_list_param(body, "security_labels"),
+        partition_ids: string_list_param(body, "partition_ids"),
+        metadata:
+          Map.merge(coerce_metadata(Map.get(body, "metadata")), %{
+            "api_upload" => true,
+            "filename" => Map.get(body, "filename") || Path.basename(source_path)
+          })
+      ]
+      |> reject_nil_keyword()
+
+    with {:ok, %{asset: asset, source_package: source_package}} <-
+           MemoryCore.store_asset_file(source_path, store_opts),
+         {:ok, adapter_result} <- maybe_run_upload_adapter(asset, body, store_opts) do
+      response =
+        %{
+          asset: asset_to_map(asset),
+          source_package: source_package_to_map(source_package),
+          adapter_run: Map.get(adapter_result, :adapter_run),
+          asset_extractions: Map.get(adapter_result, :asset_extractions, [])
+        }
+        |> stringify_keys()
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(201, Jason.encode!(response))
+    else
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  defp maybe_run_upload_adapter(asset, body, store_opts) do
+    case Map.get(body, "adapter_id") do
+      adapter_id when is_binary(adapter_id) and adapter_id != "" ->
+        adapter_opts =
+          store_opts
+          |> Keyword.merge(
+            command: Map.get(body, "command"),
+            args: Map.get(body, "args", []),
+            adapter_role: Map.get(body, "adapter_role"),
+            auto_extract: parse_bool(Map.get(body, "auto_extract"), true),
+            confidence: Map.get(body, "confidence"),
+            precision: Map.get(body, "precision"),
+            model_id: Map.get(body, "model_id"),
+            model_version: Map.get(body, "model_version"),
+            content_text: Map.get(body, "content_text"),
+            content_ref: Map.get(body, "content_ref"),
+            embedding_ref: Map.get(body, "embedding_ref"),
+            embedding_model_id: Map.get(body, "embedding_model_id"),
+            embedding_model_version: Map.get(body, "embedding_model_version"),
+            embedding_dim: Map.get(body, "embedding_dim"),
+            embedding_space: Map.get(body, "embedding_space"),
+            target_ref: Map.get(body, "target_ref"),
+            extraction_type: Map.get(body, "extraction_type"),
+            extraction_metadata: coerce_metadata(Map.get(body, "extraction_metadata"))
+          )
+          |> reject_nil_keyword()
+
+        with {:ok, run} <- MemoryCore.run_asset_adapter(asset.id, adapter_id, adapter_opts),
+             {:ok, extractions} <-
+               MemoryCore.list_asset_extractions(asset.id,
+                 tenant_id: asset.tenant_id,
+                 workspace_id: asset.workspace_id
+               ) do
+          {:ok, %{adapter_run: run, asset_extractions: extractions}}
+        end
+
+      _ ->
+        {:ok, %{adapter_run: nil, asset_extractions: []}}
+    end
+  end
+
+  defp asset_to_map(asset), do: clean_map(asset)
+  defp source_package_to_map(source_package), do: clean_map(source_package)
+  defp active_pool_to_map(pool), do: pool |> clean_map() |> stringify_keys()
+
+  defp clean_map(value) when is_map(value) do
+    value
+    |> maybe_from_struct()
+    |> Map.drop([:__struct__])
+  end
+
+  defp maybe_from_struct(%{__struct__: _} = value), do: Map.from_struct(value)
+  defp maybe_from_struct(value), do: value
+
+  defp string_list_param(body, key) do
+    case Map.get(body, key, []) do
+      value when is_list(value) -> Enum.map(value, &to_string/1)
+      value when is_binary(value) and value != "" -> [value]
+      _ -> []
+    end
+  end
+
+  defp maybe_put_string_list(keyword, body, body_key, opt_key) do
+    if Map.has_key?(body, body_key) do
+      Keyword.put(keyword, opt_key, string_list_param(body, body_key))
+    else
+      keyword
+    end
+  end
+
+  defp reject_nil_keyword(keyword) do
+    Enum.reject(keyword, fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp asset_upload_error(:asset_source_required), do: "path or content_base64 is required"
+  defp asset_upload_error(:path_not_found), do: "path not found"
+  defp asset_upload_error(:invalid_base64), do: "content_base64 is invalid"
+
+  defp asset_upload_error({:write_failed, reason}),
+    do: "could not write upload temp file: #{reason}"
+
+  defp asset_upload_error(reason), do: inspect(reason)
+
   # Shared handler for update/extend/derive — each takes (id, attrs) and returns {:ok, mem}.
   defp memory_mutation_endpoint(conn, id, fun) do
     body = conn.body_params || %{}
@@ -1823,6 +2530,20 @@ defmodule OptimalEngine.API.Router do
   defp parse_bool("0", _default), do: false
   defp parse_bool(_, default), do: default
 
+  defp parse_float(nil), do: nil
+  defp parse_float(""), do: nil
+  defp parse_float(value) when is_float(value), do: value
+  defp parse_float(value) when is_integer(value), do: value / 1
+
+  defp parse_float(value) when is_binary(value) do
+    case Float.parse(value) do
+      {float, ""} -> float
+      _ -> nil
+    end
+  end
+
+  defp parse_float(_value), do: nil
+
   # Resolve a workspace id (e.g. "default" or "default:engineering") to a
   # Workspace struct. Returns `{:error, :not_found}` for unknown ids.
   defp resolve_workspace(id) do
@@ -1831,6 +2552,25 @@ defmodule OptimalEngine.API.Router do
 
   # Recursively convert atom keys to strings for JSON serialisation.
   # Config maps use atom keys internally; JSON must emit strings.
+  defp context_package_to_map(%ContextPackage{} = package) do
+    package
+    |> ContextPackage.to_map()
+    |> stringify_keys()
+  end
+
+  defp context_package_to_map(package), do: stringify_keys(package)
+
+  defp stringify_keys(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp stringify_keys(%NaiveDateTime{} = value), do: NaiveDateTime.to_iso8601(value)
+  defp stringify_keys(%Date{} = value), do: Date.to_iso8601(value)
+  defp stringify_keys(%Time{} = value), do: Time.to_iso8601(value)
+
+  defp stringify_keys(%_struct{} = value) do
+    value
+    |> Map.from_struct()
+    |> stringify_keys()
+  end
+
   defp stringify_keys(map) when is_map(map) do
     Map.new(map, fn
       {k, v} when is_atom(k) -> {Atom.to_string(k), stringify_keys(v)}
@@ -1957,6 +2697,9 @@ defmodule OptimalEngine.API.Router do
 
       {:rag_stream_error, reason} ->
         send_sse(conn, "error", %{error: inspect(reason)})
+
+      {:plug_conn, :sent} ->
+        rag_stream_loop(conn)
 
       # Task links emit a {:DOWN, ...} or normal exit message — ignore safely.
       {_ref, _result} ->
