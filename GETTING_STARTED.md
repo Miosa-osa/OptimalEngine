@@ -136,7 +136,9 @@ docker compose --profile surfaces up --build
 
 - [README.md](README.md): product and architecture overview.
 - [docs/README.md](docs/README.md): docs map.
-- [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md):
+- [docs/architecture/ENGINE-STRUCTURE.md](docs/architecture/ENGINE-STRUCTURE.md):
   runtime architecture.
+- [docs/architecture/STORAGE-AND-PROJECTION-MAP.md](docs/architecture/STORAGE-AND-PROJECTION-MAP.md):
+  where state lives and what is only a projection.
 - [sample-workspace/README.md](sample-workspace/README.md): workspace
   projection example.
