@@ -183,9 +183,13 @@ Have enough Signal variety (genres, modes, structures) to handle every situation
 
 ### 3. Beer — The Architecture (Recursive Viability)
 
-Maintain viable structure at every scale. A response, a file, a system — each must be coherently structured. Orphaned logic is a Beer violation. The engine addresses this with the 3-tier architecture: every claim either lives in a chunk (Tier 2) or in a wiki page that cites a chunk (Tier 3). No orphaned facts.
+Maintain viable structure at every scale. A response, a file, a system — each
+must be coherently structured. Orphaned logic is a Beer violation. The engine
+addresses this with governed topology, source-backed Memory Core lineage, and
+projection discipline: every accepted Fact must trace to a Source Package, and
+markdown/wiki/API/app views remain projections over that governed state.
 
-**Engine artifact:** `OptimalEngine.Wiki.Integrity` — citation + contradiction checker
+**Engine artifact:** `OptimalEngine.MemoryCore` and `OptimalEngine.Wiki.Integrity` — lineage, citation, contradiction, and projection integrity checks
 
 ---
 

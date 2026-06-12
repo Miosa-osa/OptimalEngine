@@ -1,7 +1,7 @@
 defmodule OptimalEngine.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.3.0"
 
   def project do
     [
@@ -59,18 +59,18 @@ defmodule OptimalEngine.MixProject do
       {:jason, "~> 1.4"},
       {:yaml_elixir, "~> 2.11"},
 
-      # Knowledge subsystem (RDF triples, OWL 2 RL reasoning)
+      # Optional knowledge graph substrate
       {:rdf, "~> 2.0"},
 
-      # Signal subsystem (CloudEvents envelopes)
+      # Signal and option validation
       {:nimble_options, "~> 1.1"},
       {:uuid, "~> 1.1"},
 
-      # HTTP API (Plug.Router for the graph visualizer endpoint)
+      # HTTP API
       {:plug, "~> 1.15"},
       {:plug_cowboy, "~> 2.7"},
 
-      # Parser backends (Phase 2)
+      # Parser backends
       {:nimble_csv, "~> 1.2"},
       {:floki, "~> 0.36"},
 
