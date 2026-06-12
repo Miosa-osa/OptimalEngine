@@ -55,8 +55,8 @@ the organizational envelope.
 
 ```yaml
 # company.yaml
-name: string                    # Display name ("Lunivate Agency")
-slug: string                    # URL-safe identifier ("lunivate")
+name: string                    # Display name ("Example Company")
+slug: string                    # URL-safe identifier ("example-company")
 description: string             # One sentence
 mission: string                 # North star statement
 

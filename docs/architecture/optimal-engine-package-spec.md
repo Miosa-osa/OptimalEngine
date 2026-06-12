@@ -6,7 +6,7 @@ signal:
   format: markdown
   structure: spec_template
   sn_ratio: 1.0
-  audience: [roberto, javaris]
+  audience: [operator, javaris]
   intent: "Complete package architecture specification for tools/optimal/ — the Optimal Context Engine"
 ---
 
@@ -37,9 +37,9 @@ tools/
     │   ├── frontmatter.py  ← YAML frontmatter parser (zero deps, already exists)
     │   └── tiers.py        ← L0/L1/L2 tier extraction and auto-generation
     │
-    ├── classify/           ← Signal Theory: auto-classifies S=(M,G,T,F,W)
+    ├── classify/           ← Signal Theory: auto-classifies Mode + Genre + Type + Format + Structure
     │   ├── __init__.py
-    │   ├── classifier.py   ← Auto-classification pipeline (7-step, per 02-signal.md)
+    │   ├── classifier.py   ← Auto-classification pipeline using Signal Theory dimensions
     │   ├── entities.py     ← Entity extraction (people, orgs, financial patterns)
     │   └── router.py       ← Routing rule engine (reads from topology.yaml)
     │
@@ -113,7 +113,7 @@ class Signal:
     id: str                          # "sig_" + md5(rel_path)[:12]
     path: str                        # relative to OptimalOS root
 
-    # Signal Theory dimensions S=(M,G,T,F,W)
+    # Signal Theory dimensions Mode + Genre + Type + Format + Structure
     mode: Mode = Mode.LINGUISTIC
     genre: str = "note"              # validated against genre catalogue
     signal_type: SignalType = SignalType.INFORM
@@ -215,7 +215,7 @@ calls an LLM to produce better summaries. The interface stays the same.
 
 ### `classify/classifier.py` — The 7-Step Pipeline
 
-Implements the auto-classification pipeline from `docs/architecture/02-signal.md` exactly.
+Implements the auto-classification pipeline from `docs/concepts/signal-theory.md`.
 This is where Signal Theory becomes executable.
 
 ```
@@ -245,8 +245,8 @@ class SignalClassifier:
     def _detect_failures(self, signal: Signal) -> list[str]: ...
 ```
 
-**Why this matters vs competitors:**
-Mem0 and OpenViking store embeddings of raw text. They have no concept of *what a document is*.
+**Why this matters vs reference systems:**
+memory-layer systems and tiered context systems store embeddings of raw text. They have no concept of *what a document is*.
 Our classifier knows that a file named `2026-03-15-standup.md` with `## Status` headers is a
 `standup` with `inform` type and `weekly_signal` structure — before reading a single word of content.
 That structural knowledge changes what gets indexed, how it decays, and how results are ranked.
@@ -289,7 +289,7 @@ class Router:
     def route(self, signal: Signal) -> list[str]:
         """
         Returns list of destination node IDs.
-        Multiple rules can fire (financial data → money-revenue AND roberto).
+        Multiple rules can fire (financial data → operation-revenue AND operator).
         Critical priority rules fire immediately (algedonic bypass).
         """
 
@@ -297,8 +297,8 @@ class Router:
 ```
 
 **This is the key organizational differentiator:**
-Mem0 has no routing concept. OpenViking routes by session. We route by *signal properties*
-against an organizational topology. "Customer called about pricing" → `ai-masters` AND `money-revenue`.
+memory-layer systems has no routing concept. tiered context systems routes by session. We route by *signal properties*
+against an organizational topology. "Customer called about pricing" → `project-platform-launch` AND `operation-revenue`.
 The routing logic lives in `topology.yaml`, not in code.
 
 ---
@@ -440,7 +440,7 @@ class L0CacheGenerator:
 
 ### `compose/renderer.py` — Receiver-Shaped Output
 
-This module has **no equivalent in Mem0, OpenViking, or LangChain.** It is the
+This module has **no equivalent in memory-layer systems, tiered context systems, or LangChain.** It is the
 receiver modeling capability.
 
 ```python
@@ -456,7 +456,7 @@ class SignalRenderer:
         - If receiver has low technical bandwidth → strip technical sections
         Returns rendered markdown string.
 
-        Example: render_for(spec_signal, "robert-potter") → brief (not spec)
+        Example: render_for(spec_signal, "sales-lead") -> brief (not spec)
         """
 
     def render_tier(self, signal: Signal, tier: str) -> str:
@@ -636,9 +636,9 @@ No module in `cli/` imports from `store/`. All cross-cutting state flows through
 
 ## 4. How We Compare to Competitors
 
-| Capability | OpenViking | Mem0 | LangChain | **Optimal Engine** |
+| Capability | tiered context systems | memory-layer systems | LangChain | **Optimal Engine** |
 |------------|-----------|------|-----------|-------------------|
-| Context model | Virtual filesystem | Memory records | Documents/chains | **Signals: S=(M,G,T,F,W)** |
+| Context model | Virtual filesystem | Memory records | Documents/chains | **Signals: Mode + Genre + Type + Format + Structure** |
 | Classification | File type only | LLM-based extraction | None | **7-step pipeline, Ashby-compliant** |
 | Genre awareness | None | None | None | **143 genres, skeletal validation** |
 | Receiver modeling | None | None | None | **genre_competence per receiver** |
@@ -649,10 +649,10 @@ No module in `cli/` imports from `store/`. All cross-cutting state flows through
 | Stdlib only (core) | No | No | No | **Yes** |
 | Phase 0 → Phase 1 | N/A | N/A | N/A | **Pluggable ports: add embedder to HybridSearchEngine** |
 
-**The fundamental difference:** competitors treat context as a retrieval problem (how do I find
+**The fundamental difference:** reference systems treat context as a retrieval problem (how do I find
 the right chunk of text?). We treat context as a communication problem (how do I send the right
 Signal to the right receiver in the right genre at the right time?). The architecture reflects
-that: `receiver.py`, `router.py`, and `classifier.py` have no equivalent in any competitor.
+that: `receiver.py`, `router.py`, and `classifier.py` have no equivalent in any reference system.
 
 ---
 

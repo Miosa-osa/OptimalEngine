@@ -52,10 +52,10 @@ Before producing any non-trivial output, resolve all 5. Unresolved dimensions pr
 Every piece of information entering the system follows this 7-stage lifecycle:
 
 ### 1. CLASSIFY
-Resolve S=(M,G,T,F,W) for the incoming signal. The intake pipeline applies this automatically via `mix optimal.ingest`. Manual classification uses the routing table in CLAUDE.md. S/N below 0.3 → reject. S/N 0.3–0.6 → accept with flagging. S/N above 0.6 → accept normally.
+Resolve Mode + Genre + Type + Format + Structure for the incoming signal. The intake pipeline applies this automatically via `mix optimal.ingest`. Manual classification uses the routing table in CLAUDE.md. S/N below 0.3 → reject. S/N 0.3–0.6 → accept with flagging. S/N above 0.6 → accept normally.
 
 ### 2. ROUTE
-Match the classified signal to one or more nodes using the routing table. Financial data always routes to `nodes/11-money-revenue` in addition to the primary node. Decisions always route to the relevant `context.md` under "Key Decisions." Ambiguous signals route to `nodes/09-new-stuff` rather than misrouting.
+Match the classified signal to one or more nodes using the routing table. Financial data always routes to `nodes/operation-revenue` in addition to the primary node. Decisions always route to the relevant `context.md` under "Key Decisions." Ambiguous signals route to `nodes/inbox` rather than misrouting.
 
 ### 3. STORE
 Persistent facts → `context.md`. Temporal/episodic signals → dated signal files under `signals/`. Weekly status → `signal.md`. Never mix persistent facts with temporal signals in the same file.
@@ -93,7 +93,7 @@ The original Ars Contexta pipeline had 6 stages. OptimalOS extends it to 10.
 
 ### Core 6 (inherited, improved)
 
-**1. Record** — Signal intake via `mix optimal.ingest`. Auto-classifies S=(M,G,T,F,W), routes to primary + cross-reference nodes, writes signal files to disk, indexes in SQLite with FTS5, records in episodic memory, feeds SICA learning patterns.
+**1. Record** — Signal intake via `mix optimal.ingest`. Auto-classifies Mode + Genre + Type + Format + Structure, routes to primary + cross-reference nodes, writes signal files to disk, indexes in SQLite with FTS5, records in episodic memory, feeds SICA learning patterns.
 
 **2. Reduce** — L0/L1/L2 tiered abstractions generated at ingest time. `SearchEngine` uses BM25 + vector scoring to rank results. L0 abstracts (~100 tokens) enable high-throughput scanning without loading full content.
 
@@ -126,7 +126,7 @@ The `rhythm/` folder is the daily operating layer. It defines HOW Alice moves th
 | Block | Time | Mode | Purpose |
 |-------|------|------|---------|
 | BOOT | ~3pm | OPERATE | Wake → run `rhythm/boot.md` → generate `rhythm/today.md` from `week-plan.md` |
-| OPERATE | 3–5pm | OPERATE | Clear queue: Slack, email, delegate, triage. Pre-call prep from `nodes/01-roberto/miosa-positioning-playbook.md` |
+| OPERATE | 3–5pm | OPERATE | Clear queue: Slack, email, delegate, triage. Pre-call prep from `nodes/person-operator/miosa-positioning-playbook.md` |
 | BUILD 1 | 5–8pm | BUILD | Deep work block 1. Single focus. No Slack. Load context: `mix optimal.assemble "{topic}"` |
 | BREAK | 8–9pm | — | Eat. Move. |
 | BUILD 2 | 9pm–1am | BUILD | Deep work block 2. Peak hours. Protect this window. |
@@ -198,7 +198,7 @@ OptimalOS and Ars Contexta share a common ancestor in personal knowledge managem
 | Dimension | Ars Contexta | OptimalOS |
 |-----------|-------------|-----------|
 | Foundation | General PKM | Signal Theory (Shannon + Ashby + Beer + Wiener) |
-| Signal model | Content-centric | S=(M,G,T,F,W) 5-dimensional encoding |
+| Signal model | Content-centric | Mode + Genre + Type + Format + Structure 5-dimensional encoding |
 | Genre system | Informal | 27-genre formal taxonomy with skeletons |
 | Retrieval | Vector similarity | Hybrid BM25 + vector + RRF with tiered loading |
 | Quality gate | None | S/N threshold 0.3; L0 fidelity verification |
@@ -219,10 +219,10 @@ We adopted from AC: the reweave backward pass concept, write-validate pattern, a
 cd engine && mix optimal.ingest "text or --file path --genre transcript"
 
 # Search before answering questions
-cd engine && mix optimal.search "query" --limit 5 --node ai-masters
+cd engine && mix optimal.search "query" --limit 5 --node project-platform-launch
 
 # Assemble tiered context for a topic
-cd engine && mix optimal.assemble "AI Masters pricing"
+cd engine && mix optimal.assemble "Platform Launch pricing"
 
 # Health check
 cd engine && mix optimal.health

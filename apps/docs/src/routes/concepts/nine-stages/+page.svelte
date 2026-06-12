@@ -5,7 +5,7 @@
 		{ name: 'Intake', desc: 'Receive any input, hash for deduplication, record provenance' },
 		{ name: 'Parse', desc: 'Convert any format to text + structural metadata. 10 backends.' },
 		{ name: 'Decompose', desc: 'Large → small hierarchical chunks at 4 fixed scales' },
-		{ name: 'Classify', desc: 'S=(M,G,T,F,W) + intent enum per chunk at every scale' },
+		{ name: 'Classify', desc: 'Mode + Genre + Type + Format + Structure + intent enum per chunk at every scale' },
 		{ name: 'Embed', desc: 'Multi-modal aligned 768-dim vectors (text, image, audio, code)' },
 		{ name: 'Route', desc: 'Assign each chunk to primary node + cross-reference nodes' },
 		{ name: 'Store', desc: 'Atomic SQLite commit. Emit store.chunk.indexed event.' },
@@ -107,7 +107,7 @@ mix optimal.ingest_workspace ~/company-brain/sales`} lang="bash" />
 <h2>Stage 4 — Classify</h2>
 
 <p>
-	For every chunk at every scale: determines S=(M,G,T,F,W) signal dimensions and extracts intent.
+	For every chunk at every scale: determines Mode + Genre + Type + Format + Structure signal dimensions and extracts intent.
 	Heuristics-first; Ollama augments confidence when available.
 </p>
 
@@ -192,7 +192,7 @@ mix optimal.ingest_workspace ~/company-brain/sales`} lang="bash" />
 <h2>See Also</h2>
 <ul>
 	<li><a href="/concepts/three-tiers">Three Tiers</a> — what the pipeline writes to</li>
-	<li><a href="/concepts/signal-theory">Signal Theory</a> — S=(M,G,T,F,W) classification</li>
+	<li><a href="/concepts/signal-theory">Signal Theory</a> — Mode + Genre + Type + Format + Structure classification</li>
 	<li><a href="/api/retrieval">Retrieval API</a> — how agents read from the result</li>
 </ul>
 

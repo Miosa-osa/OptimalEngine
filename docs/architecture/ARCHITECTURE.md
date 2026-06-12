@@ -1,7 +1,42 @@
 # Optimal Engine — Architecture
 
-> **One canonical architecture. One source of truth. One flow of data.**
-> If this doc and the code disagree, the code is wrong.
+> **Current architecture note:** this file contains the older signal-pipeline
+> architecture and is no longer the only canonical architecture reference.
+> For the current layer ownership and build sequence, read
+> [`LAYER-OWNERSHIP-AND-DATA-FLOW.md`](LAYER-OWNERSHIP-AND-DATA-FLOW.md),
+> [`OPTIMIZED-BUILD-PHASES.md`](OPTIMIZED-BUILD-PHASES.md),
+> [`REALITY-AUDIT.md`](REALITY-AUDIT.md), and
+> [`WIKI-LAYER.md`](WIKI-LAYER.md).
+>
+> Current correction: markdown/wiki/HTML pages are human-operable projections
+> and editing surfaces. The governed runtime owns canonical topology, source
+> evidence, Claims, Facts, Memory Objects, permissions, workflows, tool/model
+> records, and audit.
+>
+> Current canonical flow:
+>
+> ```text
+> Command or raw input
+>   -> Scope Envelope
+>   -> Source Package
+>   -> Signal
+>   -> Route / Node assignment
+>   -> compatibility Context row
+>   -> Claim
+>   -> Fact
+>   -> Memory Object
+>   -> Retrieval Package / Context Package
+>   -> Active Memory Pool / Workflow / Skill / Export
+> ```
+>
+> The nine-stage signal pipeline below remains useful as a processing mechanism,
+> but it is not the full lifecycle contract. Source evidence and scope handling
+> now come before interpretation, and `Store` remains an adapter rather than the
+> owner of truth.
+
+> **One engine. Governed runtime truth. Multiple operating surfaces.**
+> If this legacy overview and the current layer/build docs disagree, the current
+> layer/build docs win.
 >
 > **Scale:** enterprise second brain — not a personal tool. See
 > [`ENTERPRISE.md`](ENTERPRISE.md) for tenancy, ACLs, connectors, retention,
@@ -19,10 +54,11 @@ its intent at every scale, clusters it wide by theme, and delivers the right
 chunks at the right grain to any agent or human who queries it — scoped to
 what that caller is allowed to see.
 
-On top of raw storage sits an **LLM-maintained Wiki** — the front door every
-agent reads first. Wiki pages carry **hot citations** back to source material
-and **executable directives** that pull more context on demand. Agents don't
-re-discover facts on every query; the wiki already knows them.
+On top of raw storage and derived indexes sits a **human-operable wiki/export
+surface**. Wiki pages carry source links, page links, backlinks, revision
+history, and projection records. Agents may read those pages, but final working
+context should be assembled as governed Context Packages with permissions,
+freshness, source links, and audit.
 
 Three promises:
 
@@ -42,10 +78,10 @@ Three promises:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  TIER 3 — THE WIKI              LLM-maintained. Read first.          │
+│  TIER 3 — WIKI / EXPORT         Human-operable projection surface.   │
 │  Path: .wiki/                    Hot citations + executable          │
-│                                  directives. The agent's front door. │
-│                                  Curated by Ollama on every ingest.  │
+│                                  directives. Page tree, backlinks,   │
+│                                  revisions, import/export records.   │
 └──────────────────────────────────────────────────────────────────────┘
                           ▲ CURATE ▼
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -67,12 +103,12 @@ Three promises:
 |-----------------------------------------------------------------------------------------------|
 | Tier 1 is append-only. Every write is a new file at a new path. Nothing gets edited in place. |
 | Tier 2 is fully derivable from Tier 1. `mix optimal.rebuild` reconstructs it from scratch.    |
-| Tier 3 is LLM-owned. Humans write the schema; the curator writes the pages. Versioned.        |
+| Tier 3 is projection-owned. Humans and agents can edit/import, but edits re-enter through Source Packages or topology change requests. Versioned. |
 | Citations only point downward: T3 → (T2 or T1), T2 → T1. Never upward.                        |
 
 ---
 
-## 3. The 9-Stage Pipeline
+## 3. Legacy 9-Stage Processing Pipeline
 
 Every signal flows through the same nine stages in strict order. Each stage has
 one responsibility and a typed contract with the next.
@@ -81,7 +117,7 @@ one responsibility and a typed contract with the next.
   1. INTAKE    2. PARSE      3. DECOMPOSE   4. CLASSIFY    5. EMBED
      │            │              │              │              │
      ▼            ▼              ▼              ▼              ▼
-  receive     format→text   large → small   S=(M,G,T,F,W)  multi-modal
+  receive     format→text   large → small   Mode + Genre + Type + Format + Structure  multi-modal
   any input   any format    hierarchical    + intent       aligned vectors
   + hash      + metadata    chunks          per scale      per scale
   + provenance
@@ -226,7 +262,7 @@ whole product.
 |-------------------|------------------------------------------------------|-----------|
 | `signals`         | Tier-1 metadata: source path, hash, received_at, size| extends `contexts` |
 | `chunks`          | Tier-2 hierarchical decomposition, one row per chunk | **NEW**   |
-| `classifications` | Per-chunk `S=(M,G,T,F,W)` + intent + confidence      | **NEW**   |
+| `classifications` | Per-chunk `Mode + Genre + Type + Format + Structure` + intent + confidence      | **NEW**   |
 | `embeddings`      | Per-chunk 768-dim vectors, modality-tagged           | extends `vectors` |
 | `entities`        | Extracted entities per chunk                         | extends   |
 | `edges`           | Typed relations in the knowledge graph               | exists    |
@@ -269,7 +305,7 @@ Full Wiki details (directives, schema, page template) in [`WIKI-LAYER.md`](WIKI-
     "what's the current state of pricing with Ed?"                      │
                                                                         │
     ┌───────────────────┐                                               │
-    │ IntentAnalyzer    │  → intent_type = :lookup, scope = ai-masters  │
+    │ IntentAnalyzer    │  → intent_type = :lookup, scope = project-platform-launch  │
     │ (decode query)    │    entities = ["Alice"], temporal = :now  │
     └─────────┬─────────┘                                               │
               ▼                                                         │
@@ -328,7 +364,7 @@ lib/optimal_engine/
 │   ├── audio.ex           whisper.cpp + asset
 │   └── video.ex           ffmpeg → image.ex + audio.ex
 ├── decomposer.ex          [Stage 3]
-├── classifier.ex          [Stage 4] — S=(M,G,T,F,W)
+├── classifier.ex          [Stage 4] — Mode + Genre + Type + Format + Structure
 ├── intent_extractor.ex    [Stage 4] — intent enum
 ├── embedder.ex            [Stage 5]
 ├── ollama.ex              Ollama HTTP client
@@ -589,12 +625,14 @@ event — no silent degradation.
 
 Everything above enforces three invariants that make the engine *optimal*:
 
-1. **Single source of truth per scale.** A fact is either a chunk or a wiki
-   claim citing chunks. Never both copied.
+1. **Source-backed truth lifecycle.** A fact is accepted through the Memory
+   Core lifecycle. Chunks, summaries, wiki pages, and HTML pages are sources or
+   projections, not accepted truth by themselves.
 2. **Aligned vector space.** Text, image, audio all embed to the same 768-dim
    space. One retriever, not three.
-3. **Citations only point down.** Tier 3 cites Tier 1/2. Tier 2 cites Tier 1.
-   Tier 1 cites nothing. Acyclic. Auditable.
+3. **Projections cite governed objects.** Wiki/HTML/markdown projections cite
+   Source Packages, Claims, Facts, Memory Objects, and export records. They do
+   not silently rewrite those objects.
 
 Keep these three invariants and the engine stays coherent as it grows.
 Violate any one and the rot starts.

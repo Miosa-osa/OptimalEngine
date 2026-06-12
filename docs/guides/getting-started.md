@@ -19,7 +19,7 @@ Optional:
 ## 2. Clone and compile
 
 ```bash
-git clone git@github.com:robertohluna/OptimalEngine.git
+git clone https://github.com/Miosa-osa/OptimalEngine.git
 cd OptimalEngine
 mix deps.get
 mix compile
@@ -52,7 +52,7 @@ mix optimal.ingest "Customer called about pricing, wants $2K per seat" --genre n
 What happens under the hood:
 1. The signal is classified on `S=(Mode, Genre, Type, Format, Structure)`.
 2. The router picks a destination node based on rules in `config.yaml` (falls
-   back to `09-new-stuff` when routing is ambiguous).
+   back to `inbox` when routing is ambiguous).
 3. A signal file is written under `nodes/<routed-node>/signals/YYYY-MM-DD-slug.md`.
 4. The file is indexed into SQLite (`FTS5` full-text + BM25) and, if Ollama is
    up, into the vector store.
@@ -69,7 +69,7 @@ Returns L0 abstracts (~100 tokens each) by default — the tier designed for
 "search, then decide what to load fully." To open one:
 
 ```bash
-mix optimal.read "optimal://nodes/ai-masters/signals/2026-04-17-ed-pricing.md" --tier l1
+mix optimal.read "optimal://nodes/project-platform-launch/signals/2026-04-17-ed-pricing.md" --tier l1
 ```
 
 Tiers:
@@ -110,6 +110,6 @@ Full command reference: [mix-tasks.md](mix-tasks.md).
 
 When you want to understand what's actually happening under the calls:
 
-- [System overview](../architecture/system-overview.md) — the 30,000-foot view
+- [Docs index](../README.md) — the current architecture map
 - [FULL-SYSTEM-ARCHITECTURE](../architecture/FULL-SYSTEM-ARCHITECTURE.md) — the walkthrough
 - [Signal Theory](../concepts/signal-theory.md) — the framework that governs classification

@@ -79,7 +79,7 @@
   const capabilities = [
     { dim: 'Enterprise connectors',                value: '14 in v1' },
     { dim: 'Permission-aware retrieval',           value: 'chunk-level + intersection propagation' },
-    { dim: 'Signal classification S=(M,G,T,F,W)',  value: 'every chunk classified at ingest' },
+    { dim: 'Signal classification Mode + Genre + Type + Format + Structure',  value: 'every chunk classified at ingest' },
     { dim: 'Per-chunk intent extraction',          value: '10-value enum, deterministic' },
     { dim: 'Tiered disclosure',                    value: 'L0 / L1 / full + bandwidth-matched' },
     { dim: 'Hierarchical chunking',                value: '4 scales: document / section / paragraph / chunk' },
@@ -266,23 +266,23 @@
 
     <div class="disk">
       <pre class="disk__tree" aria-label="On-disk layout">
-<span class="disk__c">acme-corp/</span>                              <span class="disk__t">Organization (= tenant)</span>
+<span class="disk__c">sample-corp/</span>                              <span class="disk__t">Organization (= tenant)</span>
 ├── <span class="disk__d">engineering-brain/</span>                  <span class="disk__t">Workspace · its own knowledge base</span>
 │   ├── <span class="disk__d">nodes/</span>                       <span class="disk__t">Tier 1 — raw, append-only, human-edited</span>
-│   │   ├── 02-platform/                <span class="disk__t">a node — recursive folder tree</span>
+│   │   ├── product-customer-portal/                <span class="disk__t">a node — recursive folder tree</span>
 │   │   │   ├── <span class="disk__f">context.md</span>         <span class="disk__t">persistent ground truth</span>
 │   │   │   ├── <span class="disk__f">signal.md</span>          <span class="disk__t">rolling weekly status</span>
 │   │   │   └── <span class="disk__d">signals/</span>           <span class="disk__t">append-only event log</span>
 │   │   │       ├── <span class="disk__f">2026-04-10-microvm-spec.md</span>
 │   │   │       └── <span class="disk__f">2026-04-15-data-arch-review.md</span>
-│   │   └── 04-academy/
+│   │   └── operation-weekly-review/
 │   │       └── signals/
 │   │           └── <span class="disk__f">2026-04-11-customer-pricing-call.md</span>
 │   ├── <span class="disk__d">.wiki/</span>                       <span class="disk__t">Tier 3 — LLM-curated, more markdown</span>
 │   │   ├── <span class="disk__f">SCHEMA.md</span>               <span class="disk__t">governance rules the curator honors</span>
 │   │   └── <span class="disk__f">core-platform-architecture.md</span>
 │   ├── <span class="disk__d">architectures/</span>               <span class="disk__t">user-defined data-point schemas</span>
-│   │   └── <span class="disk__f">clinical_visit.yaml</span>
+│   │   └── <span class="disk__f">customer_requirement.yaml</span>
 │   └── <span class="disk__d">assets/</span>                      <span class="disk__t">hash-addressed binaries</span>
 │       └── &lt;hash&gt;.&lt;ext&gt;
 │
@@ -298,14 +298,14 @@
 
       <div class="disk__file">
         <header class="disk__file-head">
-          <code>acme-corp/engineering-brain/nodes/02-platform/signals/2026-04-10-microvm-spec.md</code>
+          <code>sample-corp/engineering-brain/nodes/product-customer-portal/signals/2026-04-10-microvm-spec.md</code>
           <span class="disk__chip">Tier 1 · raw signal</span>
         </header>
 <pre class="disk__sample"><span class="disk__y">---</span>
 <span class="disk__k">title</span>: <span class="disk__v">Core platform — microVM isolation spec</span>
 <span class="disk__k">genre</span>: <span class="disk__v">spec</span>
 <span class="disk__k">mode</span>: <span class="disk__v">linguistic</span>
-<span class="disk__k">node</span>: <span class="disk__v">02-platform</span>
+<span class="disk__k">node</span>: <span class="disk__v">product-customer-portal</span>
 <span class="disk__k">authored_at</span>: <span class="disk__v">2026-04-10T10:00:00Z</span>
 <span class="disk__k">sn_ratio</span>: <span class="disk__v">0.85</span>
 <span class="disk__k">entities</span>:

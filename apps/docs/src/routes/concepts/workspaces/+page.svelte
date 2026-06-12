@@ -63,7 +63,7 @@
 
 <CodeBlock code={`workspace/
 ├── nodes/
-│   └── <slug>/               e.g. 01-founder, 02-platform, 03-sales
+│   └── <slug>/               e.g. entity-company, product-customer-portal, 03-sales
 │       ├── context.md        Persistent facts — edit in place as ground truth changes
 │       ├── signal.md         Rolling weekly status — overwritten each cycle
 │       └── signals/          Append-only dated signals
@@ -87,7 +87,7 @@ node: 03-sales
 sn_ratio: 0.75
 entities:
   - { name: "Alice", type: person }
-  - { name: "Healthtech Product", type: product }
+  - { name: "Customer Portal Product", type: product }
 authored_at: 2026-04-28T14:00:00Z
 ---
 
@@ -170,7 +170,7 @@ curl -X PATCH http://localhost:4200/api/workspaces/engineering/config \\
 mix optimal.ingest_workspace ~/company-brain/engineering
 
 # Ingest a single signal
-mix optimal.ingest --file ~/company-brain/engineering/nodes/02-platform/signals/2026-04-28-api-design.md`} lang="bash" />
+mix optimal.ingest --file ~/company-brain/engineering/nodes/product-customer-portal/signals/2026-04-28-api-design.md`} lang="bash" />
 
 <h2>See Also</h2>
 <ul>

@@ -48,7 +48,7 @@
     <g class="rf-node">
       <rect x="20" y="100" width="140" height="60" rx="10" fill="#0d1015" stroke="#1c2230"/>
       <text x="90" y="125" text-anchor="middle" fill="#9aa0a8" font-size="9" font-weight="600" letter-spacing="1.5">QUERY</text>
-      <text x="90" y="145" text-anchor="middle" fill="#f1f1f3" font-size="12" font-style="italic">"healthtech pricing"</text>
+      <text x="90" y="145" text-anchor="middle" fill="#f1f1f3" font-size="12" font-style="italic">"customer portal pricing"</text>
     </g>
 
     <!-- Arrow query → wiki -->

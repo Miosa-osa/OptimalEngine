@@ -8,7 +8,7 @@ description: |
   when building applications that need: persistent organizational memory, multi-
   workspace knowledge isolation, audience-aware curation, hot-cited retrieval, or
   proactive surfacing. Architectural commitments: 3-tier memory (raw / derivatives
-  / wiki), 9-stage pipeline, S=(M,G,T,F,W) signal classification, 14-category
+  / wiki), 9-stage pipeline, Mode + Genre + Type + Format + Structure signal classification, 14-category
   proactive surfacing, 5-relation memory graph (updates / extends / derives /
   contradicts / cites). Self-hosted, MIT, runs on a laptop.
 triggers:
@@ -34,7 +34,7 @@ The Optimal Engine is the **second brain of a company** — an intent machine th
 
 **Three promises:**
 
-1. **Signal integrity.** Nothing is stored without classification (`S=(M,G,T,F,W)`), intent, and citation lineage. The engine knows *why* each fact exists.
+1. **Signal integrity.** Nothing is stored without classification (`Mode + Genre + Type + Format + Structure`), intent, and citation lineage. The engine knows *why* each fact exists.
 2. **Scale alignment.** Every piece of content exists simultaneously as document / section / paragraph / chunk. Retrieval returns the coarsest scale that answers the query.
 3. **Modality alignment.** Text, image, and audio embed into the same 768-dim vector space (nomic-embed-text + nomic-embed-vision + whisper.cpp). A text query can retrieve an image.
 
@@ -251,7 +251,7 @@ curl -s "$ENGINE/api/recall/who?topic=pricing&workspace=sales" | jq '.answer'
 | **Memory** | First-class versioned entry with typed relations | Not a chunk — a claim with provenance |
 | **Wiki (Tier 3)** | LLM-maintained curated front door | Most agent queries answered here — zero retriever hits |
 | **Hot citations** | Every wiki claim → source chunk | Fail-closed integrity gate — no unverified assertions |
-| **Signal `S=(M,G,T,F,W)`** | 5-dimension classification per chunk | Routes intent correctly, enables audience filtering |
+| **Signal `Mode + Genre + Type + Format + Structure`** | 5-dimension classification per chunk | Routes intent correctly, enables audience filtering |
 | **Audience** | Tag on retrieval (`sales`, `legal`, `exec`, `engineering`) | Same wiki, different variants — no manual branching |
 | **Bandwidth** | `l0` (~100 tok) / `l1` (~2K tok) / `full` | Match context density to LLM token budget |
 | **9-stage pipeline** | Intake → Parse → Decompose → Classify → Embed → Route → Store → Cluster → Curate | Every signal gets full treatment, no shortcuts |
@@ -265,7 +265,7 @@ curl -s "$ENGINE/api/recall/who?topic=pricing&workspace=sales" | jq '.answer'
 | Doc | Contents |
 |---|---|
 | [`references/api-reference.md`](references/api-reference.md) | Every endpoint — method, path, params, response, use-when |
-| [`references/concepts.md`](references/concepts.md) | 3 tiers, 9 stages, 4 chunk scales, 10-intent enum, S=(M,G,T,F,W), 3 constraints |
+| [`references/concepts.md`](references/concepts.md) | 3 tiers, 9 stages, 4 chunk scales, 10-intent enum, Mode + Genre + Type + Format + Structure, 3 constraints |
 | [`references/workspace-pattern.md`](references/workspace-pattern.md) | Multi-workspace design, config schema, isolation guarantees |
 | [`references/memory-pattern.md`](references/memory-pattern.md) | When to add a memory, 5 relation types, versioning, forgetting |
 | [`references/retrieval-pattern.md`](references/retrieval-pattern.md) | Decision tree: ask vs search vs grep vs recall vs profile |

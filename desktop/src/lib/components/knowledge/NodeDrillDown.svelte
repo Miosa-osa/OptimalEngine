@@ -36,7 +36,7 @@
 
 	// ─── State ────────────────────────────────────────────────────────────────
 
-	// path[0] = node slug (e.g. '02-miosa'), path[1+] = sub-folder names
+	// path[0] = node slug (e.g. 'product-customer-portal'), path[1+] = sub-folder names
 	let path = $state<string[]>([]);
 	let currentItems = $state<FileEntry[]>([]);
 	let loading = $state(false);
@@ -50,7 +50,7 @@
 	// The node slug is always path[0] when we're inside a node
 	let activeSlug = $derived(path[0] ?? null);
 
-	// Breadcrumb labels: ['All Pages', 'MIOSA LLC', 'platform', 'projects']
+	// Breadcrumb labels: ['All Pages', 'Example Company', 'product', 'projects']
 	let breadcrumbs = $derived<string[]>([
 		'All Pages',
 		...path.map((seg, i) => {
@@ -87,7 +87,7 @@
 
 	/**
 	 * Walk the cached tree along path[1..] to find children at the current depth.
-	 * path = ['02-miosa', 'platform', 'projects'] → find 'platform' at root, then
+	 * path = ['product-customer-portal', 'platform', 'projects'] → find 'platform' at root, then
 	 * 'projects' inside it, and return its children.
 	 */
 	function walkToCurrentDir(tree: FileEntry[], segments: string[]): FileEntry[] {

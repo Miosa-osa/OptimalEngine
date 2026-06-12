@@ -127,7 +127,7 @@
 
   async function test(sub: Subscription) {
     // Push a synthetic envelope with a real workspace slug so the category heuristic finds something
-    await testSurface(sub.id, 'healthtech-pricing-decision');
+    await testSurface(sub.id, 'customer-portal-pricing-decision');
   }
 
   function toggleCategory(cat: MemoryCategory) {
@@ -201,7 +201,7 @@
             <input
               type="text"
               bind:value={newScopeValue}
-              placeholder={newScope === 'topic' ? 'pricing' : newScope === 'node' ? '02-platform' : 'sales'}
+              placeholder={newScope === 'topic' ? 'pricing' : newScope === 'node' ? 'product-customer-portal' : 'sales'}
               autofocus
             />
           </label>

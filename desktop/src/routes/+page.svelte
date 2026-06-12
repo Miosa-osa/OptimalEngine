@@ -9,7 +9,7 @@
   let error = $state<string | null>(null);
 
   const seeds: { label: string; query: string }[] = [
-    { label: 'Pricing decision',     query: 'healthtech pricing decision' },
+    { label: 'Pricing decision',     query: 'customer portal pricing decision' },
     { label: 'Platform architecture', query: 'core platform architecture' },
     { label: 'Renewal pipeline',     query: 'renewal pipeline status' },
     { label: 'MicroVM spec',         query: 'microvm provisioning spec' }
@@ -60,7 +60,7 @@
       <input
         type="text"
         bind:value={query}
-        placeholder="e.g. healthtech pricing"
+        placeholder="e.g. customer portal pricing"
         disabled={loading}
         class="ask-form__input"
       />

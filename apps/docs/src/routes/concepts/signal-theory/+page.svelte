@@ -232,7 +232,7 @@
 	</thead>
 	<tbody>
 		<tr>
-			<td>Signal S=(M,G,T,F,W)</td>
+			<td>Signal Mode + Genre + Type + Format + Structure</td>
 			<td><code>OptimalEngine.Signal.Envelope</code> — CloudEvents + classification</td>
 		</tr>
 		<tr>
@@ -264,7 +264,7 @@
 
 <h2>See Also</h2>
 <ul>
-	<li><a href="/concepts/nine-stages">Nine Stages</a> — Stage 4 (Classify) instantiates S=(M,G,T,F,W)</li>
+	<li><a href="/concepts/nine-stages">Nine Stages</a> — Stage 4 (Classify) instantiates Mode + Genre + Type + Format + Structure</li>
 	<li><a href="/api/retrieval">Retrieval API</a> — bandwidth parameter maps to Shannon tier</li>
 	<li><a href="/api/surfacing">Surfacing API</a> — contradiction category maps to Beer failure mode detection</li>
 </ul>

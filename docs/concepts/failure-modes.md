@@ -38,14 +38,14 @@ Sender did not resolve the receiver dimension before encoding. The routing table
 1. Identify the correct receiver using the routing table in `CLAUDE.md`
 2. Re-route the signal to the correct node folder
 3. If the signal touches multiple nodes, write to all of them
-4. For cross-domain signals (e.g., financial + personal), always write to 11-money-revenue as the secondary route
+4. For cross-domain signals (e.g., financial + personal), always write to operation-revenue as the secondary route
 
 **Engine Check**
 - `mix optimal.health` — detects orphaned signals not linked to any node
 - `mix optimal.reflect` — surfaces co-occurring entities that should be linked
 
 **Prevention**
-Always resolve: "Who receives this?" before encoding. For financial signals, the answer is always "primary node + 11-money-revenue."
+Always resolve: "Who receives this?" before encoding. For financial signals, the answer is always "primary node + operation-revenue."
 
 ---
 
@@ -139,14 +139,14 @@ Before encoding: "What genre does this receiver decode most naturally?" Consult 
 The genre repertoire doesn't have enough variety to cover this situation. This is a system-level gap — the Ashby variety requirement is not met.
 
 **Fix**
-1. Route to `nodes/09-new-stuff` — don't force a misfit genre
+1. Route to `nodes/inbox` — don't force a misfit genre
 2. Document the new situation type: "We need a genre for X"
 3. Create the genre skeleton in `docs/taxonomy/genres.md`
 4. Add it to the routing table if it recurs
 
 **Engine Check**
-- `mix optimal.health` — surfaces signals routed to 09-new-stuff at high rate (indicates variety gap)
-- High volume in 09-new-stuff = Ashby variety failure at system level
+- `mix optimal.health` — surfaces signals routed to inbox at high rate (indicates variety gap)
+- High volume in inbox = Ashby variety failure at system level
 
 **Prevention**
 Review `docs/taxonomy/genres.md` quarterly. When the same situation recurs 3+ times without a genre, create one.
@@ -305,7 +305,7 @@ Deliberate degradation of signal quality by a participant in the network. Unlike
 1. Make the noise pattern visible — surface it explicitly rather than acting on the degraded signal
 2. Cross-reference with independent sources (other people, other nodes, documented history)
 3. Escalate: adversarial noise is a people problem, not a system problem
-4. Document the pattern in `nodes/01-roberto/context.md` under "Key Decisions"
+4. Document the pattern in `nodes/person-operator/context.md` under "Key Decisions"
 
 **Engine Check**
 - No automated engine check for adversarial noise — requires human pattern recognition
@@ -348,6 +348,6 @@ Which failure modes are most common per domain. Use this to prioritize diagnosti
 ## See Also
 
 - `reference/search-architecture.md` — Engine checks for decay and herniation
-- `reference/session-lifecycle.md` — Feedback loops in daily rhythm
+- `../architecture/LAYER-OWNERSHIP-AND-DATA-FLOW.md` — Feedback loops in daily rhythm and active work
 - `CLAUDE.md` — Routing table and genre skeletons
 - `docs/taxonomy/genres.md` — Full genre catalogue

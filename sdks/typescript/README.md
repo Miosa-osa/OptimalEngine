@@ -156,7 +156,7 @@ import { openai } from "@ai-sdk/openai";
 
 const engine = new OptimalEngine({
   baseUrl: "http://localhost:4200",
-  workspace: "acme",
+  workspace: "sample",
 });
 
 const { text } = await generateText({
@@ -188,7 +188,7 @@ Available tools:
 import { OptimalEngine } from "@optimal-engine/client";
 import { optimalEngineAgentTools } from "@optimal-engine/client/adapters/openai-agents";
 
-const engine = new OptimalEngine({ workspace: "acme" });
+const engine = new OptimalEngine({ workspace: "sample" });
 const tools = optimalEngineAgentTools(engine);
 
 // Pass `tools` to your Agent constructor

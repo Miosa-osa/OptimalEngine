@@ -14,7 +14,7 @@ They are complementary, not competing. We steal their internal organization patt
 
 | Feature | Ars Contexta | OptimalOS | Winner | Notes |
 |---------|-------------|-----------|--------|-------|
-| **Classification** | None (manual tagging) | S=(M,G,T,F,W) auto-classify | **OptimalOS** | Signal Theory is far superior |
+| **Classification** | None (manual tagging) | Mode + Genre + Type + Format + Structure auto-classify | **OptimalOS** | Signal Theory is far superior |
 | **Routing** | Manual folder placement | 12-node auto-routing + cross-ref | **OptimalOS** | AC has 3 spaces, we have 12 nodes |
 | **Search** | FTS5 + optional `qmd` semantic | FTS5 + vector + RRF hybrid | **OptimalOS** | Our hybrid search is leagues ahead |
 | **Knowledge Graph** | Wiki-links between notes | OWL-materialized graph + edges | **OptimalOS** | We have entities, edges, probabilities |
@@ -70,7 +70,7 @@ They are complementary, not competing. We steal their internal organization patt
 **Where it goes**: New `engine/lib/mix/tasks/optimal.health.ex`
 
 ### Priority 4: Graph Triangle Detection
-**What it does**: Finds three nodes A→B, B→C, A→C where a synthesis opportunity exists. If Alice has signals about "Ed + pricing" and "pricing + AI Masters" and "AI Masters + Ed", there's a triangle — a natural synthesis point.
+**What it does**: Finds three nodes A→B, B→C, A→C where a synthesis opportunity exists. If Alice has signals about "Ed + pricing" and "pricing + Platform Launch" and "Platform Launch + Ed", there's a triangle — a natural synthesis point.
 
 **Why we need it**: Our knowledge graph has 1045 edges but we never analyze topology for patterns. Triangles reveal where contexts should be combined into higher-level insights.
 
@@ -85,7 +85,7 @@ They are complementary, not competing. We steal their internal organization patt
 
 **Implementation**: Add `self/` directory with:
 - `self/identity.md` — "I am OptimalOS, Alice's cognitive engine..."
-- `self/methodology.md` — "I use Signal Theory S=(M,G,T,F,W)..."
+- `self/methodology.md` — "I use Signal Theory Mode + Genre + Type + Format + Structure..."
 - `self/patterns.md` — Learned patterns from SICA
 
 **Where it goes**: New `self/` directory at OptimalOS root. Referenced in CLAUDE.md.
@@ -107,13 +107,13 @@ They are complementary, not competing. We steal their internal organization patt
 AC has no classification at all. Users manually decide where notes go. We auto-classify across 5 dimensions and 27 genres. This is our biggest structural advantage.
 
 ### Simulation Engine
-AC can't answer "What if Ed leaves?" — it's a note-taking system. We have MCTS (32-iteration action planning), Monte Carlo (1000-simulation probability distributions), and BFS graph traversal (3-depth impact analysis). No competitor has this.
+AC can't answer "What if Ed leaves?" — it's a note-taking system. We have MCTS (32-iteration action planning), Monte Carlo (1000-simulation probability distributions), and BFS graph traversal (3-depth impact analysis). No reference system has this.
 
 ### Hybrid Search with RRF
 AC uses basic FTS5 or optional `qmd` semantic search. We fuse FTS5 + vector similarity + temporal decay + S/N boost + graph boost via Reciprocal Rank Fusion. Our search is dramatically better.
 
 ### 12-Node Routing with Cross-References
-AC has 3 spaces (self/notes/ops). We have 12 semantic nodes with auto-routing, cross-referencing, and a routing table that maps keywords to destinations. A signal about "Ed pricing" automatically goes to ai-masters AND money-revenue.
+AC has 3 spaces (self/notes/ops). We have 12 semantic nodes with auto-routing, cross-referencing, and a routing table that maps keywords to destinations. A signal about "Ed pricing" automatically goes to project-platform-launch AND operation-revenue.
 
 ### Quality Gates
 AC validates file structure. We validate signal quality — S/N ratio < 0.3 gets rejected, routing failures get quarantined, bandwidth overload triggers L1 truncation. This is Signal Theory in action.

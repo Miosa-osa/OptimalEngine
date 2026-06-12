@@ -16,7 +16,7 @@ L6  Feedback ───── Self-correction loops (Wiener)
 L5  Data ───────── Storage, retrieval, knowledge graph (All)
 L4  Interface ──── Tiered disclosure, bandwidth matching (Shannon)
 L3  Composition ── Genre skeletons, structure imposition (Ashby)
-L2  Signal ─────── S=(M,G,T,F,W) classification (Ashby)
+L2  Signal ─────── Mode + Genre + Type + Format + Structure classification (Ashby)
 L1  Network ────── Topology, routing, nodes (Shannon)
 ```
 
@@ -37,7 +37,7 @@ L5  Intelligence ────── MCTS, simulation, semantic processing
 L4  Knowledge Graph ─── Entities, edges, triangles, clusters
 L3  Search ──────────── FTS5, vector, RRF fusion, temporal decay
 L2  Routing ─────────── Topology rules, cross-references
-L1  Classification ──── S=(M,G,T,F,W), entity extraction
+L1  Classification ──── Mode + Genre + Type + Format + Structure, entity extraction
 L0  Data Storage ────── SQLite, ETS cache, vectors
 ```
 
@@ -48,7 +48,7 @@ L0  Data Storage ────── SQLite, ETS cache, vectors
 | Conceptual | Engine | What It Does |
 |-----------|--------|-------------|
 | L1 Network | L2 Routing | Topology, node definitions, signal routing |
-| L2 Signal | L1 Classification | S=(M,G,T,F,W) classification |
+| L2 Signal | L1 Classification | Mode + Genre + Type + Format + Structure classification |
 | L3 Composition | L7 Agent Interface | Genre skeletons, receiver-adaptive encoding |
 | L4 Interface | L3 Search + L6 Processing | Tiered disclosure, context assembly |
 | L5 Data | L0 Data + L4 Knowledge Graph | SQLite, FTS5, graph, vectors |

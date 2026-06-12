@@ -10,7 +10,35 @@ signal:
 # OptimalOS — Full System Architecture
 
 > The synthesized optimal cognitive operating system.
-> 42+ modules. 20+ CLI commands. 10-layer architecture. Zero competitors cover the full stack.
+> 42+ modules. 20+ CLI commands. 10-layer architecture. Zero reference systems cover the full stack.
+>
+> Current correction: this older overview describes the file-backed prototype.
+> In the current Optimal Engine architecture, markdown remains a direct human
+> operating surface, but canonical lifecycle state belongs to the governed
+> runtime: Workspace/Nodes, Source Packages, Claims, Facts, Memory Objects,
+> Context Packages, Active Memory Pools, Workflows, Skills, permissions, and
+> audit. Files and HTML are projections unless a human edit is re-ingested as a
+> Source Package or topology change request.
+>
+> Current canonical flow:
+>
+> ```text
+> Command or raw input
+>   -> Scope Envelope
+>   -> Source Package
+>   -> Signal
+>   -> Route / Node assignment
+>   -> compatibility Context row
+>   -> Claim
+>   -> Fact
+>   -> Memory Object
+>   -> Retrieval Package / Context Package
+>   -> Active Memory Pool / Workflow / Skill / Export
+> ```
+>
+> The older layer list below describes the file-backed prototype and processing
+> mechanisms. The current build gates are authoritative when this document and
+> the layer ownership docs disagree.
 
 ---
 
@@ -35,7 +63,7 @@ INPUT: "Customer called about pricing, wants $2K/seat"
 │                                                       │
 │  1. CLASSIFY  →  S=(linguistic, transcript, decide,   │
 │                    markdown, meeting-notes)            │
-│  2. ROUTE     →  ai-masters + money-revenue + team    │
+│  2. ROUTE     →  project-platform-launch + operation-revenue + team    │
 │  3. STORE     →  Markdown files + SQLite + FTS5       │
 │  4. GRAPH     →  Ed→mentioned_in→pricing-call         │
 │  5. LEARN     →  SICA records pattern, Cortex synth.  │
@@ -68,12 +96,21 @@ INPUT: "Customer called about pricing, wants $2K/seat"
 
 **Tables:** `contexts`, `contexts_fts` (FTS5), `entities`, `edges`, `decisions`, `sessions`, `vectors`, `observations`
 
-**Storage hierarchy:**
+**Legacy storage hierarchy:**
 ```
-Markdown files  →  Source of truth (human-readable, git-trackable)
-SQLite + FTS5   →  Search index (regenerated from files via mix optimal.index)
+Markdown files  →  Prototype human-readable operating surface
+SQLite + FTS5   →  Prototype search/index store
 ETS             →  Hot cache (sub-millisecond, lost on restart)
 Vectors         →  Embedding store (768-dim nomic-embed-text)
+```
+
+Current storage hierarchy:
+
+```
+Governed runtime DB   →  Canonical topology, evidence, memory, policy, audit
+Markdown / HTML       →  Human-operable projection and edit/import surface
+Search / vectors      →  Rebuildable projection and acceleration layer
+ETS / caches          →  Runtime acceleration only
 ```
 
 ---
@@ -84,7 +121,7 @@ Vectors         →  Embedding store (768-dim nomic-embed-text)
 
 | Module | Type | Responsibility |
 |--------|------|---------------|
-| `Classifier` | Stateless | S=(M,G,T,F,W) detection from content + YAML frontmatter. 16 genre patterns, 5 mode patterns. Entity extraction. L0/L1 generation. |
+| `Classifier` | Stateless | Mode + Genre + Type + Format + Structure detection from content + YAML frontmatter. 16 genre patterns, 5 mode patterns. Entity extraction. L0/L1 generation. |
 | `Bridge.Signal` | Stateless | Classification augmentation via MiosaSignal. Quality audit via 11 failure mode detectors (Shannon/Ashby/Beer/Wiener violations). S/N ratio scoring. |
 
 **Classification pipeline:**
@@ -110,11 +147,11 @@ Raw text → Parse YAML frontmatter → Detect Mode → Detect Genre → Detect 
 
 **Routing rules:**
 ```
-Keyword match     →  Primary node (e.g., "AI Masters" → ai-masters)
-Financial data    →  Always cross-ref to money-revenue
+Keyword match     →  Primary node (e.g., "Platform Launch" → project-platform-launch)
+Financial data    →  Always cross-ref to operation-revenue
 Entity mentions   →  Cross-ref to team registry
 Domain keywords   →  Route to domain node
-Ambiguous         →  Route to inbox (09-new-stuff)
+Ambiguous         →  Route to inbox (inbox)
 ```
 
 ---
@@ -209,7 +246,7 @@ Reflection: Entity co-occurrence without edges → missing relationships
 | `Composer` | Stateless | Renders signals for specific receivers. Applies genre skeletons. Adapts formality, detail level, vocabulary per person. |
 | `CortexFeed` | Stateless | Feeds knowledge graph data to Cortex for synthesis bulletins. |
 | `Context` | Struct | Universal context struct. 4 types (resource, memory, skill, signal). Score field for search ranking. |
-| `Signal` | Struct | Signal struct with full S=(M,G,T,F,W) dimensions. |
+| `Signal` | Struct | Signal struct with full Mode + Genre + Type + Format + Structure dimensions. |
 
 **Genre skeletons (10 built-in):**
 ```
@@ -377,7 +414,7 @@ CLASSIFIER ───────────────────────
     ▼
 ROUTER ──────────────────────────────────────────────────────
   │ Keyword match → primary node
-  │ Financial data → money-revenue (always)
+  │ Financial data → operation-revenue (always)
   │ Entity mentions → team registry
   │ Multi-destination → cross-ref edges
     │
@@ -536,7 +573,7 @@ REPORT ────────── Structured synthesis with evidence + propo
 
 | Capability | OptimalOS | Ars Contexta | Obsidian | Notion | Mem.ai | Roam | Logseq | Reflect |
 |-----------|-----------|-------------|----------|--------|--------|------|--------|---------|
-| Auto-classification (5 dim) | **S=(M,G,T,F,W)** | Partial (3 dim) | Manual tags | Manual | AI tags | Manual | Manual | AI tags |
+| Auto-classification (5 dim) | **Mode + Genre + Type + Format + Structure** | Partial (3 dim) | Manual tags | Manual | AI tags | Manual | Manual | AI tags |
 | Auto-routing (multi-dest) | **13 rules** | None | Manual | Manual | Auto-folder | Manual | Manual | None |
 | Hybrid search (BM25+vector+RRF) | **Yes** | BM25 only | Plugin | Basic | Vector only | Basic | Basic | AI search |
 | Knowledge graph | **SQLite+SPARQL+OWL** | None | Plugin | None | None | Backlinks | Graph | None |
@@ -560,7 +597,7 @@ REPORT ────────── Structured synthesis with evidence + propo
 | Competitor | What They Do Well | What We Stole | What We Do Better |
 |-----------|-------------------|---------------|-------------------|
 | **Ars Contexta** | 6R pipeline (read, reflect, remember, rethink, reweave, verify). Elegant conceptual framework. | Reweave (backward pass), Health diagnostics, Reflect (co-occurrence), Remember (friction capture), Rethink (evidence synthesis), Verify (fidelity test), Triangle detection. | Full engine implementation vs VSCode plugin. Auto-classification. Simulation. Hybrid search. Routing. Quality gates. |
-| **OpenViking/Sagacity** | Resource/memory/skill typology. Tiered loading. Clean URI scheme. | Tiered loading (L0/L1/L2). Vector search. Memory extraction. Session compression. URI system. Context type system. | Signal Theory classification. Simulation. Genre system. Knowledge graph. Learning loop. |
+| **tiered context systems/Sagacity** | Resource/memory/skill typology. Tiered loading. Clean URI scheme. | Tiered loading (L0/L1/L2). Vector search. Memory extraction. Session compression. URI system. Context type system. | Signal Theory classification. Simulation. Genre system. Knowledge graph. Learning loop. |
 | **Obsidian** | Plugin ecosystem. UI. Community. Backlinks. | Graph-first thinking (we build a real graph, not just backlinks). | Automation. Search quality. No manual tagging. Classification. Simulation. |
 | **Mem.ai** | AI-first memory. Auto-organization. | Memory extraction patterns. Auto-categorization concept. | 5-dimension classification vs flat tags. Simulation. Quality gates. Full OS vs note app. |
 | **Roam Research** | Bidirectional linking. Block-level outliner. | Graph-first philosophy. | Engine intelligence. Hybrid search. Classification. Not just links — typed, weighted, reasoned graph. |

@@ -69,7 +69,7 @@ mix optimal.bootstrap`} lang="bash" />
 
 <h2>Use the CLI</h2>
 
-<CodeBlock code={`mix optimal.rag "healthtech pricing decision" --trace
+<CodeBlock code={`mix optimal.rag "customer portal pricing decision" --trace
 mix optimal.search "platform"
 mix optimal.wiki list
 mix optimal.graph hubs
@@ -89,7 +89,7 @@ mix optimal.architectures`} lang="bash" />
 
 <CodeBlock code={`curl -X POST http://localhost:4200/api/rag \\
   -H 'Content-Type: application/json' \\
-  -d '{"query":"healthtech pricing decision","workspace":"default","format":"markdown"}'`} lang="bash" />
+  -d '{"query":"customer portal pricing decision","workspace":"default","format":"markdown"}'`} lang="bash" />
 
 <h2>Launch the desktop UI</h2>
 
@@ -126,7 +126,7 @@ mix optimal.ingest_workspace ~/my-engine`} lang="bash" />
 <CodeBlock code={`mix optimal.reality_check --hard`} lang="bash" />
 
 <p>
-	Runs 50+ probes across every storage table, pipeline stage, retrieval path, and compliance
+	Runs reality-check probes across every storage table, pipeline stage, retrieval path, and compliance
 	workflow. Prints OK / WARN / FAIL + elapsed ms. Target: all green, under 1 second total.
 </p>
 
@@ -156,7 +156,7 @@ mix optimal.ingest_workspace ~/my-engine`} lang="bash" />
 <ul>
 	<li><a href="/concepts/three-tiers">Three Tiers</a> — the storage model</li>
 	<li><a href="/concepts/nine-stages">Nine Stages</a> — the ingestion pipeline</li>
-	<li><a href="/concepts/signal-theory">Signal Theory</a> — S=(M,G,T,F,W)</li>
+	<li><a href="/concepts/signal-theory">Signal Theory</a> — Mode + Genre + Type + Format + Structure</li>
 	<li><a href="/api">API Reference</a> — every endpoint</li>
 	<li><a href="/sdks/typescript">TypeScript SDK</a> — drop-in integration</li>
 </ul>

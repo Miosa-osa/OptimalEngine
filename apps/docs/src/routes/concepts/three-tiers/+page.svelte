@@ -129,7 +129,7 @@
 	<tbody>
 		<tr><td><code>signals</code></td><td>Tier-1 metadata: source path, hash, received_at, size</td></tr>
 		<tr><td><code>chunks</code></td><td>Hierarchical decomposition, one row per chunk at every scale</td></tr>
-		<tr><td><code>classifications</code></td><td>Per-chunk S=(M,G,T,F,W) + intent + confidence</td></tr>
+		<tr><td><code>classifications</code></td><td>Per-chunk Mode + Genre + Type + Format + Structure + intent + confidence</td></tr>
 		<tr><td><code>embeddings</code></td><td>Per-chunk 768-dim vectors, modality-tagged</td></tr>
 		<tr><td><code>entities</code></td><td>Extracted entities per chunk</td></tr>
 		<tr><td><code>edges</code></td><td>Typed relations in the knowledge graph</td></tr>

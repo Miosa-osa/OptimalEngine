@@ -78,10 +78,10 @@ es.onmessage = (event) => {
   // {
   //   "category": "contradictions",
   //   "workspace": "sales",
-  //   "page_slug": "healthtech-pricing",
+  //   "page_slug": "customer portal-pricing",
   //   "detected_at": "2026-04-28T15:00:00Z",
   //   "score": 0.82,
-  //   "entities": ["Alice", "Q4 Pricing"]
+  //   "entities": ["Alice", "Requirements Review"]
   // }
 };`} lang="bash" />
 </div>
@@ -118,7 +118,7 @@ es.onmessage = (event) => {
 	<p>Trigger a synthetic push to all listeners of a subscription. Useful for testing your SSE handler.</p>
 	<CodeBlock code={`curl -X POST http://localhost:4200/api/surface/test \\
   -H 'Content-Type: application/json' \\
-  -d '{"subscription":"sub:abc123","slug":"healthtech-pricing"}'`} lang="bash" />
+  -d '{"subscription":"sub:abc123","slug":"customer portal-pricing"}'`} lang="bash" />
 </div>
 
 <h2>The 14 Categories</h2>

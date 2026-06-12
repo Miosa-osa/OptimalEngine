@@ -459,7 +459,7 @@ curl -s -N "$ENGINE/api/surface/stream?subscription=$SUB_ID"
 curl -s "$ENGINE/api/wiki?workspace=$WS" | jq '.pages[] | .slug'
 
 # Wiki page render
-curl -s "$ENGINE/api/wiki/healthtech-pricing-decision?workspace=$WS&audience=sales" \
+curl -s "$ENGINE/api/wiki/customer portal-pricing-decision?workspace=$WS&audience=sales" \
   | jq '.body'
 
 # Graph hubs
@@ -501,7 +501,7 @@ alias OptimalEngine
 
 # Wiki
 {:ok, pages} = OptimalEngine.Wiki.list("default", "sales")
-{:ok, page} = OptimalEngine.Wiki.latest("default", "healthtech-pricing-decision", "sales", "sales")
+{:ok, page} = OptimalEngine.Wiki.latest("default", "customer portal-pricing-decision", "sales", "sales")
 ```
 
 All four surfaces (CLI, HTTP, Elixir API, Mix tasks) route through the same internal modules. There is no separate code path per surface.

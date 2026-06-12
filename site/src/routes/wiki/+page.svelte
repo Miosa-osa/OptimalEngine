@@ -4,9 +4,9 @@
   // executable directives look like — using a real-shaped example.
 
   const sample = {
-    slug: 'healthtech-pricing-decision',
+    slug: 'customer portal-pricing-decision',
     audience: 'sales',
-    body: `# Healthtech partner pricing — Q4
+    body: `# Customer Portal partner pricing — Q4
 
 **Decision:** $2,000 per seat per year, 3-year term with annual price protection. [^1] [^2]
 
@@ -20,10 +20,10 @@ three-year lock-in. [^3]
 > /audience: sales
 > /executable: regenerate-on Slack:#deals events, JIRA priority bumps`,
     citations: [
-      { id: 1, source: 'optimal://nodes/04-academy/signals/2026-04-11-customer-pricing-call.md' },
-      { id: 2, source: 'optimal://nodes/02-platform/signals/2026-04-10-microvm-spec.md' },
-      { id: 3, source: 'optimal://nodes/06-partners/signals/2026-04-10-first-healthtech-close.md' },
-      { id: 4, source: 'optimal://nodes/06-partners/signals/2026-04-15-renewal-pipeline.md' }
+      { id: 1, source: 'optimal://nodes/operation-weekly-review/signals/2026-04-11-customer-pricing-call.md' },
+      { id: 2, source: 'optimal://nodes/product-customer-portal/signals/2026-04-10-microvm-spec.md' },
+      { id: 3, source: 'optimal://nodes/project-platform-launch/signals/2026-04-10-first-customer portal-close.md' },
+      { id: 4, source: 'optimal://nodes/project-platform-launch/signals/2026-04-15-renewal-pipeline.md' }
     ]
   };
 </script>
