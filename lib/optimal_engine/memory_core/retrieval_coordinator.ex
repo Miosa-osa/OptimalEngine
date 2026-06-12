@@ -319,7 +319,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     with {:ok, stale_package} <- get_context_package(context_package_id, tenant_id, workspace_id),
          :ok <- ensure_refreshable(stale_package, opts),
          {:ok, query} <- original_query(stale_package),
-         {:ok, refreshed_package} <- retrieve(query, refresh_opts_from_package(stale_package, opts)),
+         {:ok, refreshed_package} <-
+           retrieve(query, refresh_opts_from_package(stale_package, opts)),
          :ok <-
            Store.mark_context_package_refreshed(stale_package.id,
              tenant_id: stale_package.tenant_id,
