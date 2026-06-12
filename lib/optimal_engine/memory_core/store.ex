@@ -372,7 +372,21 @@ defmodule OptimalEngine.MemoryCore.Store do
   )a
 
   @spec get_claim(String.t(), String.t(), keyword()) :: {:ok, Claim.t()} | {:error, term()}
-  def get_claim(workspace_id, claim_id, opts \\ [])
+  def get_claim(claim_id, opts) when is_binary(claim_id) and is_list(opts) do
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    get_claim(workspace_id, claim_id, opts)
+  end
+
+  def get_claim(workspace_id, claim_id) when is_binary(workspace_id) and is_binary(claim_id) do
+    get_claim(workspace_id, claim_id, [])
+  end
+
+  def get_claim(claim_id, opts, _extra_opts) when is_binary(claim_id) and is_list(opts) do
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    get_claim(workspace_id, claim_id, opts)
+  end
+
+  def get_claim(workspace_id, claim_id, opts)
       when is_binary(workspace_id) and is_binary(claim_id) do
     {tenant_clause, params} = tenant_scope(opts, [workspace_id, claim_id])
 
@@ -390,7 +404,12 @@ defmodule OptimalEngine.MemoryCore.Store do
   end
 
   @spec list_claims(String.t(), keyword()) :: {:ok, [Claim.t()]} | {:error, term()}
-  def list_claims(workspace_id, opts \\ []) when is_binary(workspace_id) do
+  def list_claims(opts) when is_list(opts) do
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    list_claims(workspace_id, opts)
+  end
+
+  def list_claims(workspace_id, opts) when is_binary(workspace_id) and is_list(opts) do
     {clauses, params} =
       filter_clauses(
         [
@@ -464,6 +483,16 @@ defmodule OptimalEngine.MemoryCore.Store do
     end
   end
 
+  @spec update_claim_review(String.t(), keyword()) ::
+          :ok | {:error, :claim_already_reviewed} | {:error, term()}
+  def update_claim_review(claim_id, opts) when is_binary(claim_id) and is_list(opts) do
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    lifecycle_state = Keyword.get(opts, :lifecycle_state, "reviewed") |> to_string()
+    review_status = Keyword.get(opts, :review_status, lifecycle_state) |> to_string()
+
+    update_claim_review(workspace_id, claim_id, lifecycle_state, review_status)
+  end
+
   @spec get_fact(String.t(), String.t(), keyword()) :: {:ok, Fact.t()} | {:error, term()}
   def get_fact(workspace_id, fact_id, opts \\ [])
       when is_binary(workspace_id) and is_binary(fact_id) do
@@ -504,6 +533,34 @@ defmodule OptimalEngine.MemoryCore.Store do
     SELECT #{Enum.join(@fact_columns, ", ")}
     FROM facts
     WHERE workspace_id = ?1 #{clauses} #{open_clause}
+    ORDER BY created_at, id
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &fact_from_row/1)}
+    end
+  end
+
+  @spec list_current_facts_for_claim(map(), keyword()) :: {:ok, [Fact.t()]} | {:error, term()}
+  def list_current_facts_for_claim(claim, opts \\ []) when is_map(claim) do
+    workspace_id = Map.get(claim, :workspace_id) || Map.get(claim, "workspace_id") || "default"
+    subject_anchor = Map.get(claim, :subject_anchor) || Map.get(claim, "subject_anchor")
+    action_class = Map.get(claim, :action_class) || Map.get(claim, "action_class")
+    object_anchor = Map.get(claim, :object_anchor) || Map.get(claim, "object_anchor")
+
+    {tenant_clause, params} =
+      tenant_scope(opts, [workspace_id, subject_anchor, action_class, object_anchor])
+
+    sql = """
+    SELECT #{Enum.join(@fact_columns, ", ")}
+    FROM facts
+    WHERE workspace_id = ?1
+      AND (?2 IS NULL OR subject_anchor = ?2)
+      AND (?3 IS NULL OR action_class = ?3)
+      AND (?4 IS NULL OR object_anchor = ?4)
+      AND lifecycle_state = 'accepted'
+      AND contradiction_status = 'none'
+      AND transaction_time_end IS NULL#{tenant_clause}
     ORDER BY created_at, id
     """
 
@@ -785,6 +842,82 @@ defmodule OptimalEngine.MemoryCore.Store do
       Map.get(context_package, :policy_version),
       JSON.map(Map.get(context_package, :metadata, %{}))
     ])
+  end
+
+  @spec invalidate_context_packages_for_object(String.t(), String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def invalidate_context_packages_for_object(object_type, object_id, opts \\ [])
+      when is_binary(object_type) and is_binary(object_id) and is_list(opts) do
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    link = "#{object_type}:#{object_id}"
+    id_fragment = object_id
+
+    sql = """
+    UPDATE context_packages
+    SET refresh_state = 'stale',
+        invalidation_reason = ?4,
+        updated_at = datetime('now')
+    WHERE workspace_id = ?1
+      AND refresh_state != 'stale'
+      AND (
+        returned_object_links LIKE '%' || ?2 || '%'
+        OR returned_object_links LIKE '%' || ?3 || '%'
+        OR fact_links LIKE '%' || ?2 || '%'
+        OR fact_links LIKE '%' || ?3 || '%'
+        OR memory_links LIKE '%' || ?2 || '%'
+        OR memory_links LIKE '%' || ?3 || '%'
+        OR workflow_links LIKE '%' || ?2 || '%'
+        OR workflow_links LIKE '%' || ?3 || '%'
+        OR skill_package_links LIKE '%' || ?2 || '%'
+        OR skill_package_links LIKE '%' || ?3 || '%'
+      )
+    """
+
+    reason = Keyword.get(opts, :reason, "source_object_changed")
+
+    with result when result in [:ok] or (is_tuple(result) and elem(result, 0) == :ok) <-
+           Store.raw_execute(sql, [workspace_id, link, id_fragment, reason]),
+         fallback when fallback in [:ok] or (is_tuple(fallback) and elem(fallback, 0) == :ok) <-
+           invalidate_context_packages_for_workspace(workspace_id, reason: reason) do
+      result
+    else
+      {:error, _} = error -> error
+    end
+  end
+
+  defp invalidate_context_packages_for_workspace(workspace_id, opts) do
+    sql = """
+    UPDATE context_packages
+    SET refresh_state = 'stale',
+        invalidation_reason = ?2,
+        updated_at = datetime('now')
+    WHERE workspace_id = ?1
+      AND refresh_state != 'stale'
+    """
+
+    Store.raw_execute(sql, [workspace_id, Keyword.get(opts, :reason, "source_object_changed")])
+  end
+
+  @spec mark_context_package_refreshed(String.t(), keyword()) ::
+          :ok | {:error, term()}
+  def mark_context_package_refreshed(context_package_id, opts \\ [])
+      when is_binary(context_package_id) and is_list(opts) do
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+
+    sql = """
+    UPDATE context_packages
+    SET refresh_state = 'refreshed',
+        lifecycle_state = 'superseded',
+        refresh_time = datetime('now'),
+        transaction_time_end = datetime('now')
+    WHERE workspace_id = ?1 AND id = ?2
+    """
+
+    case Store.raw_execute(sql, [workspace_id, context_package_id]) do
+      {:ok, _count} -> :ok
+      :ok -> :ok
+      {:error, _} = error -> error
+    end
   end
 
   @spec insert_workflow_trace(map()) :: :ok | {:error, term()}

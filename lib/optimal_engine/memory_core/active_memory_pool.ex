@@ -25,6 +25,7 @@ defmodule OptimalEngine.MemoryCore.ActiveMemoryPool do
     FactPromoter,
     ID,
     JSON,
+    RetrievalCoordinator,
     SourcePackage
   }
 
@@ -169,6 +170,69 @@ defmodule OptimalEngine.MemoryCore.ActiveMemoryPool do
            |> Map.put(:refresh_state, "fresh")}
         end
       end)
+    end
+  end
+
+  @spec refresh_context_packages(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def refresh_context_packages(pool_id, opts \\ []) when is_binary(pool_id) and is_list(opts) do
+    with {:ok, pool} <- get(pool_id) do
+      base_opts = [
+        tenant_id: pool.tenant_id,
+        workspace_id: pool.workspace_id,
+        active_memory_pool_id: pool.id
+      ]
+
+      refresh_opts = Keyword.merge(base_opts, opts)
+
+      pool.context_package_links
+      |> Enum.reduce_while({:ok, %{refreshed: [], skipped: [], errors: []}}, fn link, {:ok, acc} ->
+        case refresh_pool_context_link(pool.id, link, refresh_opts) do
+          {:ok, :skipped, package_id} ->
+            {:cont, {:ok, put_in(acc.skipped, acc.skipped ++ [package_id])}}
+
+          {:ok, refreshed_package} ->
+            {:cont, {:ok, put_in(acc.refreshed, acc.refreshed ++ [refreshed_package])}}
+
+          {:error, reason} ->
+            if Keyword.get(opts, :continue_on_error, true) do
+              {:cont, {:ok, put_in(acc.errors, acc.errors ++ [%{link: link, reason: reason}])}}
+            else
+              {:halt, {:error, {link, reason}}}
+            end
+        end
+      end)
+      |> case do
+        {:ok, result} ->
+          with {:ok, refreshed_pool} <- get(pool_id) do
+            {:ok,
+             %{
+               pool: refreshed_pool,
+               refreshed_context_packages: result.refreshed,
+               skipped_context_package_ids: result.skipped,
+               errors: result.errors
+             }}
+          end
+
+        other ->
+          other
+      end
+    end
+  end
+
+  defp refresh_pool_context_link(pool_id, link, refresh_opts) do
+    package_id = link_id(link)
+
+    case RetrievalCoordinator.refresh_context_package(package_id, refresh_opts) do
+      {:ok, refreshed_package} ->
+        with {:ok, _pool} <- load_context_package(pool_id, refreshed_package) do
+          {:ok, refreshed_package}
+        end
+
+      {:error, :context_package_not_stale} ->
+        {:ok, :skipped, package_id}
+
+      other ->
+        other
     end
   end
 
@@ -532,14 +596,22 @@ defmodule OptimalEngine.MemoryCore.ActiveMemoryPool do
 
   defp decode_list(value) when is_binary(value) do
     case Jason.decode(value) do
-      {:ok, list} when is_list(list) -> list
-      {:ok, other} -> [other]
+      {:ok, list} when is_list(list) -> Enum.map(list, &normalize_link/1)
+      {:ok, other} -> [normalize_link(other)]
       _ -> []
     end
   end
 
-  defp decode_list(value) when is_list(value), do: value
-  defp decode_list(value), do: [value]
+  defp decode_list(value) when is_list(value), do: Enum.map(value, &normalize_link/1)
+  defp decode_list(value), do: [normalize_link(value)]
+
+  defp normalize_link(%{"type" => type, "id" => id}), do: %{type: type, id: id}
+  defp normalize_link(%{type: _type, id: _id} = link), do: link
+  defp normalize_link(value), do: value
+
+  defp link_id(%{id: id}), do: id
+  defp link_id(%{"id" => id}), do: id
+  defp link_id(id) when is_binary(id), do: id
 
   defp ref(type, id), do: %{type: type, id: id}
 

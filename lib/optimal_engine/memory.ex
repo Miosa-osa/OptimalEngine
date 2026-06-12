@@ -27,7 +27,7 @@ defmodule OptimalEngine.Memory do
   path uses the explicit `forget_key/2` alias.
   """
 
-  alias OptimalEngine.Memory.{EncodingGate, Versioned}
+  alias OptimalEngine.Memory.{EncodingGate, SemanticDedup, Versioned}
 
   alias OptimalEngine.MemoryCore.{
     Claim,
@@ -61,6 +61,7 @@ defmodule OptimalEngine.Memory do
   def create(attrs) do
     case Versioned.create(attrs) do
       {:ok, mem} = ok ->
+        maybe_create_pending_claim(attrs, mem)
         maybe_promote_to_wiki(mem)
         ok
 
@@ -68,6 +69,42 @@ defmodule OptimalEngine.Memory do
         other
     end
   end
+
+  defp maybe_create_pending_claim(%{content: content} = attrs, mem)
+       when is_binary(content) and content != "" do
+    gate = %EncodingGate{
+      should_encode: true,
+      score: 1.0,
+      novelty: 1.0,
+      salience: 1.0,
+      prediction_error: 0.0,
+      reason: "memory_create_bridge"
+    }
+
+    source_package =
+      memory_source_package(content, attrs, [], gate, true,
+        source_type: "versioned_memory",
+        source_uri: "memory://#{mem.id}",
+        metadata: %{"versioned_memory_id" => mem.id}
+      )
+
+    claim_opts = [
+      actor_id: "system:memory-create-bridge",
+      extracted_by: "system:memory-create-bridge",
+      claim_text: content,
+      metadata: governed_memory_metadata(attrs, gate, true, %{"versioned_memory_id" => mem.id})
+    ]
+
+    case ClaimExtractor.extract_from_source(source_package, claim_opts) do
+      {:ok, _claim} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Memory.create pending claim bridge failed: #{inspect(reason)}")
+    end
+  end
+
+  defp maybe_create_pending_claim(_attrs, _mem), do: :ok
 
   @doc """
   Governed memory intake for agent-facing writes.
@@ -102,6 +139,7 @@ defmodule OptimalEngine.Memory do
     audience = Map.get(attrs, :audience, "default")
 
     candidates = list(workspace_id: workspace_id, audience: audience, limit: 200)
+    dedup = SemanticDedup.decide(content, candidates, opts)
 
     gate =
       EncodingGate.evaluate(content,
@@ -122,13 +160,16 @@ defmodule OptimalEngine.Memory do
 
       case ClaimExtractor.extract_from_source(source_package, claim_opts) do
         {:ok, claim} ->
+          {action, memory} = maybe_versioned_projection(attrs, source_package, claim, dedup, opts)
+
           {:ok,
            %{
-             action: :pending_claim,
-             memory: nil,
+             action: action,
+             memory: memory,
              source_package: source_package,
              pending_claim: claim,
-             gate: gate
+             gate: gate,
+             dedup: dedup
            }}
 
         other ->
@@ -143,7 +184,8 @@ defmodule OptimalEngine.Memory do
            memory: nil,
            source_package: source_package,
            pending_claim: nil,
-           gate: gate
+           gate: gate,
+           dedup: dedup
          }}
       end
     end
@@ -156,6 +198,41 @@ defmodule OptimalEngine.Memory do
   end
 
   def remember(_attrs, _opts), do: {:error, :missing_required_fields}
+
+  defp maybe_versioned_projection(attrs, source_package, claim, dedup, opts) do
+    if Keyword.get(opts, :versioned_projection, false) do
+      do_versioned_projection(attrs, source_package, claim, dedup)
+    else
+      {:pending_claim, nil}
+    end
+  end
+
+  defp do_versioned_projection(_attrs, _source_package, _claim, %{action: :skip, existing: existing})
+       when not is_nil(existing) do
+    {:skip, Map.put(existing, :was_existing, true)}
+  end
+
+  defp do_versioned_projection(attrs, source_package, claim, _dedup) do
+    metadata =
+      attrs
+      |> Map.get(:metadata, %{})
+      |> normalize_metadata()
+      |> Map.merge(%{
+        "memory_core_source_package_id" => source_package.id,
+        "memory_core_pending_claim_id" => claim.id,
+        "projection_kind" => "versioned_memory_staging"
+      })
+
+    projection_attrs =
+      attrs
+      |> Map.put(:metadata, metadata)
+
+    case Versioned.create(projection_attrs) do
+      {:ok, memory} -> {:add, memory}
+      {:error, {:duplicate, memory}} -> {:skip, Map.put(memory, :was_existing, true)}
+      {:error, _reason} -> {:pending_claim, nil}
+    end
+  end
 
   @doc "Fetches a versioned memory by id."
   @spec get(String.t()) :: {:ok, versioned()} | {:error, :not_found}
@@ -388,16 +465,19 @@ defmodule OptimalEngine.Memory do
 
   defp parse_dt(%DateTime{} = dt), do: dt
 
-  defp memory_source_package(content, attrs, opts, gate, encode?) do
+  defp memory_source_package(content, attrs, opts, gate, encode?, overrides \\ []) do
+    override_metadata = Keyword.get(overrides, :metadata, %{})
+
     SourcePackage.from_text(content,
       tenant_id: Map.get(attrs, :tenant_id, "default"),
       workspace_id: Map.get(attrs, :workspace_id, "default"),
-      source_type: "memory_remember",
+      source_type: Keyword.get(overrides, :source_type, "memory_remember"),
       source_class: "text",
       source_system: "optimal_engine.memory",
+      source_uri: Keyword.get(overrides, :source_uri),
       trust_label: "unreviewed",
       quarantine_state: if(encode?, do: "clear", else: "rejected"),
-      metadata: governed_memory_metadata(attrs, gate, encode?),
+      metadata: governed_memory_metadata(attrs, gate, encode?, override_metadata),
       created_by:
         Map.get(attrs, :created_by) || Map.get(attrs, :actor_id) || Keyword.get(opts, :actor_id),
       access_policy_id: Map.get(attrs, :access_policy_id),
@@ -406,12 +486,13 @@ defmodule OptimalEngine.Memory do
     )
   end
 
-  defp governed_memory_metadata(attrs, gate, encode?) do
+  defp governed_memory_metadata(attrs, gate, encode?, extra \\ %{}) do
     path = if encode?, do: "memory_core_pending_claim", else: "rejected_source_package"
 
     attrs
     |> Map.get(:metadata, %{})
     |> normalize_metadata()
+    |> Map.merge(normalize_metadata(extra))
     |> Map.put("memory_intake", %{
       "path" => path,
       "gate" => gate_summary(gate)

@@ -92,10 +92,20 @@ defmodule OptimalEngine.Retrieval.Grep do
       |> maybe_put(:node, extract_node_filter(path_prefix))
 
     raw_result =
-      if literal? do
-        SearchEngine.search(query, Keyword.put(search_opts, :expand_intent, false))
-      else
-        SearchEngine.search(query, search_opts)
+      try do
+        if literal? do
+          SearchEngine.search(query, Keyword.put(search_opts, :expand_intent, false))
+        else
+          SearchEngine.search(query, search_opts)
+        end
+      catch
+        :exit, {:timeout, _} ->
+          Logger.warning("Grep search timed out for query=#{inspect(query)}")
+          {:ok, []}
+
+        :exit, reason ->
+          Logger.warning("Grep search exited for query=#{inspect(query)} reason=#{inspect(reason)}")
+          {:error, reason}
       end
 
     case raw_result do

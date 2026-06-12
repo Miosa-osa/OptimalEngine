@@ -6,7 +6,7 @@ Claude Code skill for building with [Optimal Engine](../../README.md) — the se
 
 When activated, this skill gives Claude Code full working knowledge of:
 - Every HTTP API endpoint (method, params, response shape)
-- The 3-tier memory architecture and 9-stage ingestion pipeline
+- The workspace topology, source-first intake, memory lifecycle, and projection model
 - When to use `ask` vs `search` vs `grep` vs `recall` vs `profile`
 - Memory primitive: versioning, relations, forgetting
 - Workspace isolation and config schema
@@ -68,6 +68,7 @@ agent operation. Do not flatten those into a generic RAG or task-runner model.
 ## Key References
 
 - Engine README: [`../../README.md`](../../README.md)
-- Architecture: [`../../docs/architecture/ARCHITECTURE.md`](../../docs/architecture/ARCHITECTURE.md)
+- Architecture: [`../../docs/architecture/ENGINE-STRUCTURE.md`](../../docs/architecture/ENGINE-STRUCTURE.md)
+- Storage/projections: [`../../docs/architecture/STORAGE-AND-PROJECTION-MAP.md`](../../docs/architecture/STORAGE-AND-PROJECTION-MAP.md)
 - Signal Theory: [`../../docs/concepts/signal-theory.md`](../../docs/concepts/signal-theory.md)
 - Mix tasks: [`../../docs/guides/mix-tasks.md`](../../docs/guides/mix-tasks.md)

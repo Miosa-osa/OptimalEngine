@@ -17,3 +17,14 @@ config :optimal_engine,
   cache_path: "/tmp/optimal_engine_test_cache",
   topology_path: "/Users/rhl/Desktop/OptimalOS/.system/config.yaml",
   topology_full_path: "/Users/rhl/Desktop/OptimalOS/topology.yaml"
+
+config :optimal_engine, :api_rate_limit,
+  default_capacity: 10_000,
+  default_per_minute: 10_000
+
+config :optimal_engine, :context_refresh_scheduler,
+  enabled: false,
+  boot_delay_ms: 1_000,
+  interval_ms: 60_000,
+  batch_limit: 50,
+  workspace_limit: 100

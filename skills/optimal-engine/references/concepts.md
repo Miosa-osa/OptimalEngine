@@ -132,7 +132,7 @@ On each `store.chunk.indexed` event: computes affected wiki pages → enqueues c
 
 ## Signal Classification: S = (M, G, T, F, W)
 
-Every chunk at every scale is classified across five dimensions. This is the theoretical foundation from "Signal Theory: The Architecture of Optimal Intent Encoding" (MIOSA Research, 2026).
+Every chunk at every scale is classified across five dimensions. This is the engine's public Signal Theory model for separating useful operating context from noise.
 
 | Dim | Name | Question | Examples |
 |---|---|---|---|

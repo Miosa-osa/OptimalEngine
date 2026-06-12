@@ -10,6 +10,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
   alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.MemoryCore.WorkflowSkill
+  alias OptimalEngine.MemoryCore
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.Store
 
@@ -286,6 +287,46 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              )
   end
 
+  test "retrieval coordinator batch refreshes stale context packages" do
+    workspace_id = "memory-core-batch-refresh-test-#{System.unique_integer([:positive])}"
+
+    {:ok, fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+
+    assert {:ok, package} =
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"]
+             )
+
+    assert :ok =
+             MemoryCoreStore.invalidate_context_packages_for_object("fact", fact.id,
+               workspace_id: workspace_id,
+               reason: "batch_refresh_test"
+             )
+
+    assert {:ok, batch} = MemoryCore.refresh_stale_context_packages(workspace_id: workspace_id)
+    assert batch.stale_context_package_ids == [package.id]
+    assert batch.errors == []
+    assert [refreshed_package] = batch.refreshed_context_packages
+    assert refreshed_package.id != package.id
+    assert refreshed_package.refresh_state == "fresh"
+
+    assert {:ok, [["refreshed"]]} =
+             Store.raw_query(
+               "SELECT refresh_state FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
+               [workspace_id, package.id]
+             )
+
+    assert {:ok, empty_batch} =
+             MemoryCore.refresh_stale_context_packages(workspace_id: workspace_id)
+
+    assert empty_batch.stale_context_package_ids == []
+    assert empty_batch.refreshed_context_packages == []
+    assert empty_batch.errors == []
+  end
+
   test "retrieval coordinator filters unauthorized partitions before packaging" do
     workspace_id = "memory-core-retrieval-filter-test-#{System.unique_integer([:positive])}"
 
@@ -310,6 +351,99 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
                "SELECT COUNT(*) FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
                [workspace_id, package.id]
              )
+  end
+
+  test "retrieval coordinator applies structured subject/action/object filters" do
+    workspace_id = "memory-core-structured-retrieval-test-#{System.unique_integer([:positive])}"
+
+    {:ok, fact, memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+
+    assert {:ok, matching_package} =
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"],
+               subject_anchor: "project_launch",
+               action_class: "approved",
+               object_anchor: "planning_meeting"
+             )
+
+    assert matching_package.retrieval_plan.path == "memory_core_structured_lookup"
+    assert matching_package.retrieval_plan.structured_filters.subject_anchor == "project_launch"
+    assert matching_package.fact_links == [%{type: "fact", id: fact.id}]
+    assert matching_package.memory_links == [%{type: "memory_object", id: memory.id}]
+
+    assert {:ok, mismatched_package} =
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"],
+               subject_anchor: "other_subject"
+             )
+
+    assert mismatched_package.fact_links == []
+    assert mismatched_package.memory_links == []
+    assert mismatched_package.filtered_object_summary.returned_facts == 0
+    assert mismatched_package.filtered_object_summary.returned_memory_objects == 0
+  end
+
+  test "retrieval coordinator returns governed asset extraction projections", %{tmp_dir: tmp_dir} do
+    workspace_id = "memory-core-retrieval-extraction-test-#{System.unique_integer([:positive])}"
+    source_path = Path.join(tmp_dir, "retrieval-audio.wav")
+    File.write!(source_path, "RIFF....WAVEretrieval-extraction-test")
+
+    assert {:ok, %{asset: asset}} =
+             MemoryCore.store_asset_file(source_path,
+               workspace_id: workspace_id,
+               actor_id: "user:retrieval",
+               security_labels: ["internal"],
+               partition_ids: ["project-launch"]
+             )
+
+    assert {:ok, run} =
+             MemoryCore.run_asset_adapter(asset.id, :openai_whisper,
+               workspace_id: workspace_id,
+               actor_id: "user:retrieval",
+               command: "printf",
+               args: ["Launch transcript confirms approval"],
+               adapter_role: :audio_transcription,
+               confidence: 0.81,
+               precision: 0.76
+             )
+
+    assert run.status == "completed"
+
+    assert {:ok, package} =
+             RetrievalCoordinator.retrieve("Launch transcript",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"]
+             )
+
+    assert [%{type: "asset_extraction", id: extraction_id}] =
+             Enum.filter(package.returned_object_links, &(&1.type == "asset_extraction"))
+
+    assert package.filtered_object_summary.candidate_asset_extractions == 1
+    assert package.filtered_object_summary.returned_asset_extractions == 1
+    assert [%{id: ^extraction_id, extraction_type: "transcript"}] = package.asset_extractions
+    assert package.package_confidence_summary.count == 1
+    assert %{type: "asset", id: asset.id} in package.evidence_links
+
+    assert {:ok, restricted_package} =
+             RetrievalCoordinator.retrieve("Launch transcript",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["other-project"],
+               allowed_security_labels: ["internal"]
+             )
+
+    assert restricted_package.asset_extractions == []
+    assert restricted_package.filtered_object_summary.candidate_asset_extractions == 1
+    assert restricted_package.filtered_object_summary.returned_asset_extractions == 0
+    assert restricted_package.filtered_object_summary.redacted_or_filtered_objects == 1
   end
 
   test "retrieval coordinator excludes stale facts and memory objects before packaging" do
@@ -364,7 +498,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
   test "active memory pool loads context and publishes observations as pending claims" do
     workspace_id = "memory-core-pool-test-#{System.unique_integer([:positive])}"
 
-    {:ok, _fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+    {:ok, fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
 
     assert {:ok, pool} =
              ActiveMemoryPool.open(
@@ -392,6 +526,23 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert {:ok, loaded_pool} = ActiveMemoryPool.load_context_package(pool.id, package)
     assert %{type: "context_package", id: package.id} in loaded_pool.context_package_links
     assert loaded_pool.refresh_state == "fresh"
+
+    assert {:ok, skipped_refresh} = MemoryCore.refresh_pool_context_packages(pool.id)
+    assert skipped_refresh.refreshed_context_packages == []
+    assert skipped_refresh.skipped_context_package_ids == [package.id]
+
+    assert :ok =
+             MemoryCoreStore.invalidate_context_packages_for_object("fact", fact.id,
+               workspace_id: workspace_id,
+               reason: "pool_refresh_test"
+             )
+
+    assert {:ok, refreshed} = MemoryCore.refresh_pool_context_packages(pool.id)
+    assert [refreshed_package] = refreshed.refreshed_context_packages
+    assert refreshed_package.id != package.id
+    assert refreshed_package.refresh_state == "fresh"
+
+    assert %{type: "context_package", id: refreshed_package.id} in refreshed.pool.context_package_links
 
     assert {:ok, observation} =
              ActiveMemoryPool.publish_observation(
@@ -549,6 +700,114 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              )
 
     assert ledger_count == 4
+  end
+
+  test "retrieval coordinator packages workflow candidates and approved enabled skills" do
+    workspace_id = "memory-core-workflow-retrieval-test-#{System.unique_integer([:positive])}"
+
+    {:ok, _fact, _memory} = create_accepted_memory(workspace_id, partition_ids: ["project-launch"])
+
+    {:ok, pool} =
+      ActiveMemoryPool.open(
+        workspace_id: workspace_id,
+        task_type: "launch_review",
+        subject_anchor: "project_launch",
+        member_links: [%{type: "human", id: "human:reviewer"}],
+        agent_links: [%{type: "agent", id: "agent:test"}],
+        security_labels: ["internal"],
+        partition_ids: ["project-launch"]
+      )
+
+    {:ok, trace} =
+      WorkflowSkill.capture_trace_from_pool(pool.id,
+        workflow_family: "launch_review",
+        action_class: "reviewed",
+        outcome: "budget_follow_up_recorded",
+        step_links: [
+          %{type: "step", id: "load_context"},
+          %{type: "step", id: "record_observation"}
+        ],
+        actor_id: "agent:test"
+      )
+
+    {:ok, workflow} =
+      WorkflowSkill.generalize_workflow(trace,
+        applicability_conditions: %{node_type: "project"},
+        validation_score: 0.45,
+        actor_id: "agent:test"
+      )
+
+    {:ok, procedure} =
+      WorkflowSkill.create_procedural_memory(workflow,
+        capability_name: "launch_review_procedure",
+        required_privileges: ["memory:read", "claims:create"],
+        actor_id: "agent:test"
+      )
+
+    {:ok, draft_skill} =
+      WorkflowSkill.package_skill(procedure,
+        skill_package_name: "launch_review_draft_skill",
+        actor_id: "agent:test"
+      )
+
+    assert draft_skill.review_status == "draft"
+    assert draft_skill.enabled_state == "disabled"
+
+    assert {:ok, draft_package} =
+             RetrievalCoordinator.retrieve("launch_review",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"],
+               workflow_family: "launch_review",
+               task_family: "launch_review"
+             )
+
+    assert draft_package.workflow_links == [%{type: "generalized_workflow", id: workflow.id}]
+    assert draft_package.skill_package_links == []
+    assert draft_package.filtered_object_summary.returned_workflows == 1
+    assert draft_package.filtered_object_summary.returned_skill_packages == 0
+    assert "workflow_skill.eligibility_filter" in draft_package.retrieval_plan.executed_paths
+
+    {:ok, approved_skill} =
+      WorkflowSkill.package_skill(procedure,
+        skill_package_name: "launch_review_approved_skill",
+        review_status: "approved",
+        enabled_state: "enabled",
+        input_contract: %{requires: ["project_node_id"]},
+        output_contract: %{creates: ["pending_claims"]},
+        execution_policy: %{requires_review: true},
+        actor_id: "agent:test"
+      )
+
+    assert {:ok, package} =
+             RetrievalCoordinator.retrieve("launch_review",
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               allowed_partitions: ["project-launch"],
+               allowed_security_labels: ["internal"],
+               workflow_family: "launch_review",
+               task_family: "launch_review"
+             )
+
+    assert package.workflow_links == [%{type: "generalized_workflow", id: workflow.id}]
+    assert package.skill_package_links == [%{type: "skill_package", id: approved_skill.id}]
+    assert package.filtered_object_summary.returned_workflows == 1
+    assert package.filtered_object_summary.returned_skill_packages == 1
+    assert [%{skill_package_name: "launch_review_approved_skill"}] = package.skill_packages
+
+    assert {:ok, [[1]]} =
+             Store.raw_query(
+               """
+               SELECT COUNT(*)
+               FROM context_packages
+               WHERE workspace_id = ?1
+                 AND id = ?2
+                 AND workflow_links != '[]'
+                 AND skill_package_links != '[]'
+               """,
+               [workspace_id, package.id]
+             )
   end
 
   test "tool and model governance records allowed and rejected calls" do

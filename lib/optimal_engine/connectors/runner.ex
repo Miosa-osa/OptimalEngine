@@ -20,7 +20,8 @@ defmodule OptimalEngine.Connectors.Runner do
   `OptimalEngine.Pipeline.Intake.ingest_signals/1`.
   """
 
-  alias OptimalEngine.Connectors.{Credential, Registry}
+  alias OptimalEngine.Connectors.{AssetIngest, Credential, Registry}
+  alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
 
@@ -47,6 +48,12 @@ defmodule OptimalEngine.Connectors.Runner do
           reason: term() | nil
         }
 
+  @type governed_run_result :: %{
+          connector_id: String.t(),
+          governance_run: map(),
+          connector_result: map()
+        }
+
   @default_max_retries 5
   @base_backoff_ms 100
   @max_backoff_ms 30_000
@@ -66,6 +73,14 @@ defmodule OptimalEngine.Connectors.Runner do
   """
   @spec run(String.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(connector_id, opts \\ []) when is_binary(connector_id) do
+    if governed_run?(opts) do
+      run_governed(connector_id, Keyword.put(opts, :governed, true))
+    else
+      run_raw(connector_id, opts)
+    end
+  end
+
+  defp run_raw(connector_id, opts) do
     with {:ok, row} <- fetch_connector(connector_id),
          :ok <- ensure_enabled(row),
          {:ok, mod} <- lookup_adapter(row.kind, opts),
@@ -81,6 +96,42 @@ defmodule OptimalEngine.Connectors.Runner do
     end
   end
 
+  @doc """
+  Run one sync cycle through the Memory Core governed tool-call surface.
+  """
+  @spec run_governed(String.t(), keyword()) ::
+          {:ok, governed_run_result()} | {:error, term()}
+  def run_governed(connector_id, opts \\ []) when is_binary(connector_id) do
+    with {:ok, row} <- fetch_connector(connector_id),
+         {:ok, mod} <- lookup_adapter(row.kind, opts),
+         {:ok, _definition} <- register_governed_connector_tool(row, mod, opts) do
+      executor = fn payload ->
+        case run_raw(connector_id, connector_run_opts(opts)) do
+          {:ok, result} -> {:ok, governed_connector_output(row, result, payload)}
+          {:error, reason} -> {:error, reason}
+        end
+      end
+
+      case ToolModelGovernance.execute_tool_call(
+             connector_tool_name(row),
+             governed_connector_input(row),
+             executor,
+             governed_connector_opts(row, opts)
+           ) do
+        {:ok, governance_run} ->
+          {:ok,
+           %{
+             connector_id: row.id,
+             governance_run: governance_run,
+             connector_result: governance_run.output_payload
+           }}
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
   # ─── sync loop with retry ───────────────────────────────────────────────
 
   defp do_sync_with_retries(row, mod, state, opts) do
@@ -91,7 +142,10 @@ defmodule OptimalEngine.Connectors.Runner do
   defp do_sync_attempt(row, mod, state, attempt, max_retries) do
     case mod.sync(state, row.cursor) do
       {:ok, signals, next_cursor} when is_list(signals) ->
-        {:ok, signals, next_cursor}
+        {:ok, signals, next_cursor, []}
+
+      {:ok, %{signals: signals, cursor: next_cursor} = result} when is_list(signals) ->
+        {:ok, signals, next_cursor, Map.get(result, :payloads, [])}
 
       {:error, {:rate_limited, retry_after_ms}} when attempt < max_retries ->
         Logger.info("Connector #{row.id}: rate-limited, sleeping #{retry_after_ms}ms")
@@ -121,9 +175,10 @@ defmodule OptimalEngine.Connectors.Runner do
 
   # ─── finalize + persist state ────────────────────────────────────────────
 
-  defp finalize({:ok, signals, next_cursor}, row, run_id, opts) do
+  defp finalize({:ok, signals, next_cursor, payloads}, row, run_id, opts) do
     sink = Keyword.get(opts, :signal_sink, &default_sink/1)
     :ok = invoke_sink(sink, signals, row)
+    %{assets: assets, errors: asset_errors} = preserve_payload_assets(row, payloads, opts)
 
     # Persist the cursor advance + audit completion in one transaction so
     # they succeed or fail together. Without this, a cursor could advance
@@ -131,7 +186,15 @@ defmodule OptimalEngine.Connectors.Runner do
     # no operator could diagnose.
     case transaction(fn ->
            advance_cursor(row.id, next_cursor)
-           complete_run_row(run_id, :success, length(signals), 0, row.cursor, next_cursor, nil)
+           complete_run_row(
+             run_id,
+             :success,
+             length(signals),
+             length(asset_errors),
+             row.cursor,
+             next_cursor,
+             asset_error_detail(asset_errors)
+           )
          end) do
       :ok ->
         %{
@@ -139,7 +202,9 @@ defmodule OptimalEngine.Connectors.Runner do
           workspace_id: row.workspace_id,
           status: :success,
           signals: length(signals),
-          errors: 0,
+          errors: length(asset_errors),
+          assets: length(assets),
+          asset_errors: length(asset_errors),
           cursor_before: row.cursor,
           cursor_after: next_cursor,
           reason: nil
@@ -165,6 +230,8 @@ defmodule OptimalEngine.Connectors.Runner do
           status: :error,
           signals: length(signals),
           errors: 1,
+          assets: length(assets),
+          asset_errors: length(asset_errors),
           cursor_before: row.cursor,
           cursor_after: row.cursor,
           reason: :persist_failed
@@ -182,6 +249,8 @@ defmodule OptimalEngine.Connectors.Runner do
       status: :disabled,
       signals: 0,
       errors: 1,
+      assets: 0,
+      asset_errors: 0,
       cursor_before: row.cursor,
       cursor_after: row.cursor,
       reason: :fatal
@@ -197,6 +266,8 @@ defmodule OptimalEngine.Connectors.Runner do
       status: :error,
       signals: 0,
       errors: 1,
+      assets: 0,
+      asset_errors: 0,
       cursor_before: row.cursor,
       cursor_after: row.cursor,
       reason: reason
@@ -243,9 +314,15 @@ defmodule OptimalEngine.Connectors.Runner do
   # create a new atom on every junk value and eventually exhaust the atom
   # table. Every legitimate adapter atom is already loaded via the Registry.
   defp lookup_adapter(kind_str, opts) when is_binary(kind_str) do
-    case Keyword.get(opts, :adapter) do
-      mod when is_atom(mod) and not is_nil(mod) -> {:ok, mod}
-      _ -> Registry.fetch(String.to_existing_atom(kind_str))
+    cond do
+      mod = Keyword.get(opts, :adapter) ->
+        {:ok, mod}
+
+      resolver = Keyword.get(opts, :adapter_resolver) ->
+        resolver.(kind_str)
+
+      true ->
+        Registry.fetch(String.to_existing_atom(kind_str))
     end
   rescue
     ArgumentError -> {:error, :unknown_kind}
@@ -259,6 +336,151 @@ defmodule OptimalEngine.Connectors.Runner do
       {:error, _} = err -> err
       other -> {:error, {:bad_init_return, other}}
     end
+  end
+
+  defp register_governed_connector_tool(row, mod, opts) do
+    ToolModelGovernance.register_mcp_tool_definition(
+      tenant_id: row.tenant_id,
+      workspace_id: governed_workspace_id(row, opts),
+      tool_name: connector_tool_name(row),
+      protocol_adapter_id: "mcp",
+      implementation_type: "external_connector",
+      registration_source: "connectors.runner",
+      required_privileges:
+        Keyword.get(opts, :required_privileges, [
+          "connector:#{row.kind}:sync",
+          "signal:ingest"
+        ]),
+      allowed_partitions: Keyword.get(opts, :allowed_partitions, []),
+      input_schema: %{required: ["connector_id", "kind", "operation"]},
+      output_schema: %{required: ["connector_id", "kind", "status", "signals", "errors"]},
+      routing_policy: %{connector_id: row.id, kind: row.kind},
+      timeout_policy: %{source: "connector_runner"},
+      audit_policy: %{record_connector_run: true},
+      metadata: %{
+        connector_id: row.id,
+        kind: row.kind,
+        display_name: safe_adapter_value(mod, :display_name),
+        auth_scheme: safe_adapter_value(mod, :auth_scheme)
+      }
+    )
+  end
+
+  defp governed_connector_opts(row, opts) do
+    [
+      tenant_id: row.tenant_id,
+      workspace_id: governed_workspace_id(row, opts),
+      protocol_adapter_id: "mcp",
+      actor_id: Keyword.get(opts, :actor_id, "system:connector-runner"),
+      active_memory_pool_id: Keyword.get(opts, :active_memory_pool_id),
+      granted_privileges: Keyword.get(opts, :granted_privileges, []),
+      requested_partitions: Keyword.get(opts, :requested_partitions, []),
+      security_labels: Keyword.get(opts, :security_labels, []),
+      partition_ids: Keyword.get(opts, :partition_ids, []),
+      metadata: %{connector_id: row.id, kind: row.kind, operation: "sync"}
+    ]
+  end
+
+  defp governed_connector_input(row) do
+    %{
+      connector_id: row.id,
+      kind: row.kind,
+      tenant_id: row.tenant_id,
+      cursor_before: row.cursor,
+      operation: "sync"
+    }
+  end
+
+  defp governed_connector_output(row, result, _payload) do
+    %{
+      connector_id: row.id,
+      kind: row.kind,
+      status: result.status |> to_string(),
+      signals: result.signals,
+      errors: result.errors,
+      assets: Map.get(result, :assets, 0),
+      asset_errors: Map.get(result, :asset_errors, 0),
+      cursor_before: result.cursor_before,
+      cursor_after: result.cursor_after,
+      reason: reason_to_string(result.reason)
+    }
+  end
+
+  defp connector_tool_name(row), do: "connector.#{row.kind}.sync"
+
+  defp governed_run?(opts) do
+    Keyword.get(opts, :governed, false) == true or
+      Keyword.has_key?(opts, :granted_privileges) or
+      Keyword.has_key?(opts, :requested_partitions) or
+      Keyword.has_key?(opts, :allowed_partitions)
+  end
+
+  defp connector_run_opts(opts) do
+    Keyword.take(opts, [
+      :max_retries,
+      :signal_sink,
+      :adapter,
+      :adapter_resolver,
+      :workspace_id,
+      :actor_id,
+      :security_labels,
+      :partition_ids,
+      :access_policy_id,
+      :retention_class,
+      :trust_label
+    ])
+  end
+
+  defp preserve_payload_assets(_row, [], _opts), do: %{assets: [], errors: []}
+
+  defp preserve_payload_assets(row, payloads, opts) when is_list(payloads) do
+    Enum.reduce(payloads, %{assets: [], errors: []}, fn payload, acc ->
+      external_id = payload_external_id(payload)
+
+      case AssetIngest.preserve_payload_assets(row.kind, external_id, payload,
+             tenant_id: row.tenant_id,
+             workspace_id: Keyword.get(opts, :workspace_id, row.workspace_id),
+             connector_id: row.id,
+             actor_id: Keyword.get(opts, :actor_id, "system:connector-runner"),
+             security_labels: Keyword.get(opts, :security_labels, []),
+             partition_ids: Keyword.get(opts, :partition_ids, []),
+             access_policy_id: Keyword.get(opts, :access_policy_id),
+             retention_class: Keyword.get(opts, :retention_class),
+             trust_label: Keyword.get(opts, :trust_label, "connector_unreviewed"),
+             metadata: %{connector_run_payload_id: external_id}
+           ) do
+        {:ok, %{assets: assets, errors: errors}} ->
+          %{assets: acc.assets ++ assets, errors: acc.errors ++ errors}
+      end
+    end)
+  end
+
+  defp preserve_payload_assets(_row, _payloads, _opts), do: %{assets: [], errors: []}
+
+  defp payload_external_id(payload) when is_map(payload) do
+    Map.get(payload, :id) ||
+      Map.get(payload, "id") ||
+      Map.get(payload, :external_id) ||
+      Map.get(payload, "external_id") ||
+      "payload-#{:erlang.unique_integer([:positive])}"
+  end
+
+  defp asset_error_detail([]), do: nil
+  defp asset_error_detail(errors), do: Jason.encode!(%{asset_errors: errors})
+
+  defp governed_workspace_id(row, opts) do
+    Keyword.get(opts, :workspace_id, row.workspace_id || "default") |> to_string()
+  end
+
+  defp reason_to_string(nil), do: nil
+  defp reason_to_string(reason) when is_binary(reason), do: reason
+  defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_to_string(reason), do: inspect(reason)
+
+  defp safe_adapter_value(mod, callback) do
+    if function_exported?(mod, callback, 0), do: apply(mod, callback, []), else: nil
+  rescue
+    _ -> nil
   end
 
   defp maybe_decrypt_credentials(%{"credentials_ciphertext" => envelope} = config) do

@@ -32,7 +32,15 @@ defmodule OptimalEngine.MemoryCore.KnowledgeLifecycle do
   Do not add new lifecycle logic here.
   """
 
-  alias OptimalEngine.MemoryCore.{ClaimExtractor, FactPromoter, MemoryObject}
+  alias OptimalEngine.MemoryCore.{
+    ClaimExtractor,
+    DerivationLedgerEntry,
+    FactPromoter,
+    MemoryObject,
+    RelationshipEdge,
+    ScoringPolicy,
+    Store
+  }
 
   @deprecated "Use OptimalEngine.MemoryCore.ClaimExtractor.extract_from_source/2 (returns {:ok, %Claim{}})"
   defdelegate extract_claim(source_package, opts \\ []),
@@ -44,4 +52,58 @@ defmodule OptimalEngine.MemoryCore.KnowledgeLifecycle do
 
   @deprecated "Use OptimalEngine.MemoryCore.MemoryObject.build_from_fact/2 (requires a persisted accepted Fact; returns {:ok, %MemoryObject{}})"
   defdelegate build_memory_object(fact, opts \\ []), to: MemoryObject, as: :build_from_fact
+
+  def record_fact_supersession(new_fact, old_fact, opts \\ [])
+      when is_map(new_fact) and is_map(old_fact) and is_list(opts) do
+    workspace_id = Map.get(old_fact, :workspace_id) || "default"
+    old_fact_id = Map.fetch!(old_fact, :id)
+    new_fact_id = Map.fetch!(new_fact, :id)
+    now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+    metadata =
+      old_fact
+      |> Map.get(:metadata, %{})
+      |> Map.put("superseded_by", new_fact_id)
+      |> Map.put("supersession_reason", Keyword.get(opts, :reason))
+
+    edge =
+      RelationshipEdge.between(
+        new_fact,
+        {"fact", new_fact_id},
+        {"fact", old_fact_id},
+        "supersedes",
+        confidence: Map.get(new_fact, :aggregate_confidence, 0.5),
+        precision_score: Map.get(new_fact, :aggregate_precision, 0.5),
+        evidence_links: ["fact:#{new_fact_id}", "fact:#{old_fact_id}"]
+      )
+
+    ledger =
+      DerivationLedgerEntry.new(
+        "memory_core.supersede_fact",
+        "fact_supersession",
+        ["fact:#{new_fact_id}"],
+        ["fact:#{old_fact_id}"],
+        tenant_id: Map.get(new_fact, :tenant_id, Map.get(old_fact, :tenant_id, "default")),
+        workspace_id: workspace_id,
+        evidence_links: ["fact:#{new_fact_id}", "fact:#{old_fact_id}"],
+        actor_id: Keyword.get(opts, :actor_id),
+        evaluator_id: Keyword.get(opts, :evaluator_id),
+        scoring_policy_version: ScoringPolicy.version(),
+        metadata: %{reason: Keyword.get(opts, :reason), recorded_at: now}
+      )
+
+    with :ok <-
+           Store.update_fact_supersession(workspace_id, old_fact_id, %{
+             lifecycle_state: "superseded",
+             contradiction_status: "superseded",
+             superseded_by: new_fact_id,
+             valid_time_end: Keyword.get(opts, :valid_time_end),
+             transaction_time_end: now,
+             metadata: metadata
+           }),
+         :ok <- Store.insert_relationship_edge(edge),
+         :ok <- Store.insert_derivation_entry(ledger) do
+      :ok
+    end
+  end
 end

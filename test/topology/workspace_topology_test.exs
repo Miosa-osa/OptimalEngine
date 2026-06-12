@@ -199,6 +199,35 @@ defmodule OptimalEngine.WorkspaceTopologyTest do
     assert Enum.map(incoming, & &1.id) == [relationship.id]
   end
 
+  test "rejects node relationships that cross workspace scope" do
+    suffix = System.unique_integer([:positive])
+    workspace_a = "topology-rel-a-#{suffix}"
+    workspace_b = "topology-rel-b-#{suffix}"
+
+    {:ok, source} =
+      WorkspaceTopology.create_node(%{
+        workspace_id: workspace_a,
+        slug: "source",
+        name: "Source",
+        kind: :project
+      })
+
+    {:ok, target} =
+      WorkspaceTopology.create_node(%{
+        workspace_id: workspace_b,
+        slug: "target",
+        name: "Target",
+        kind: :project
+      })
+
+    target_id = target.id
+
+    assert {:error, {:node_not_found_in_workspace, :target, ^target_id, ^workspace_a}} =
+             WorkspaceTopology.link_nodes(source.id, target.id, :depends_on,
+               workspace_id: workspace_a
+             )
+  end
+
   test "reviews and applies create_node topology changes" do
     suffix = System.unique_integer([:positive])
     workspace_id = "topology-review-create-#{suffix}"

@@ -21,14 +21,17 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   alias OptimalEngine.Architecture
   alias OptimalEngine.Compliance
   alias OptimalEngine.Connectors
+  alias OptimalEngine.Evaluation
   alias OptimalEngine.Health
   alias OptimalEngine.Identity.Principal
   alias OptimalEngine.MemoryCore.ActiveMemoryPool
+  alias OptimalEngine.MemoryCore.ClaimReview
   alias OptimalEngine.MemoryCore.ClaimExtractor
   alias OptimalEngine.MemoryCore.FactPromoter
   alias OptimalEngine.MemoryCore.MemoryObject
   alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.MemoryCore.SourcePackage
+  alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
   alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.MemoryCore.WorkflowSkill
   alias OptimalEngine.Retrieval
@@ -76,15 +79,17 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     |> tool_model_governance_probes()
     |> section("9. Connector registry (14 adapters)")
     |> connector_probes()
-    |> section("10. Wiki tier-3 round-trip")
+    |> section("10. Evaluation records")
+    |> evaluation_probes()
+    |> section("11. Wiki tier-3 round-trip")
     |> wiki_probes()
-    |> section("11. Retrieval — simple + complex + edge cases")
+    |> section("12. Retrieval — simple + complex + edge cases")
     |> retrieval_probes()
-    |> section("12. Compliance workflows (DSAR, erasure preview, holds)")
+    |> section("13. Compliance workflows (DSAR, erasure preview, holds)")
     |> compliance_probes()
-    |> maybe_section("13. Extra ingest load", ingest_count > 0)
+    |> maybe_section("14. Extra ingest load", ingest_count > 0)
     |> maybe_ingest(ingest_count)
-    |> maybe_section("14. Hard paths (slow retrieval, deep joins)", hard?)
+    |> maybe_section("15. Hard paths (slow retrieval, deep joins)", hard?)
     |> maybe_hard(hard?)
     |> summarize()
   end
@@ -227,6 +232,13 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       "projection_revisions",
       "link_health_records",
       "source_packages",
+      "assets",
+      "asset_adapter_runs",
+      "asset_extractions",
+      "asset_transcripts",
+      "asset_ocr_spans",
+      "asset_visual_observations",
+      "asset_embedding_refs",
       "claims",
       "facts",
       "memory_objects",
@@ -242,6 +254,8 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       "generalized_workflows",
       "procedural_memory_objects",
       "skill_packages",
+      "evaluation_runs",
+      "evaluation_cases",
       "skills",
       "principals",
       "acls",
@@ -530,6 +544,68 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
               other -> {:error, inspect(other)}
             end
           end)
+          |> probe("fact supersession policy closes replaced fact", fn ->
+            replacement_source =
+              SourcePackage.from_text(
+                "Reality check source: the project launch approval was replaced.",
+                workspace_id: workspace_id,
+                source_type: "reality_check",
+                source_class: "text",
+                trust_label: "reviewed",
+                security_labels: ["internal"],
+                partition_ids: ["reality-check"]
+              )
+
+            with {:ok, replacement_claim} <-
+                   ClaimExtractor.extract_from_source(replacement_source,
+                     claim_text: "The source states that launch approval was replaced.",
+                     subject_anchor: "project_launch",
+                     action_class: "approved",
+                     object_anchor: "reality_check_source",
+                     aggregate_confidence: 0.74,
+                     aggregate_precision: 0.7,
+                     actor_id: "agent:reality-check"
+                   ),
+                 {:ok, pre_supersession_package} <-
+                   RetrievalCoordinator.retrieve("launch",
+                     workspace_id: workspace_id,
+                     actor_id: "agent:reality-check",
+                     allowed_partitions: ["reality-check"],
+                     allowed_security_labels: ["internal"]
+                   ),
+                 {:ok, replacement} <-
+                   ClaimReview.promote(replacement_claim.id,
+                     workspace_id: workspace_id,
+                     actor_id: "human:reality-check",
+                     fact_text: "The project launch approval was replaced.",
+                     supersedes_fact_id: ctx.fact.id,
+                     supersession_reason: "reality check replacement source"
+                   ),
+                 {:ok, [["superseded", "superseded"]]} <-
+                   Store.raw_query(
+                     "SELECT lifecycle_state, contradiction_status FROM facts WHERE workspace_id = ?1 AND id = ?2",
+                     [workspace_id, ctx.fact.id]
+                   ),
+                 {:ok, [[1]]} <-
+                   Store.raw_query(
+                     "SELECT COUNT(*) FROM relationship_edges WHERE workspace_id = ?1 AND relationship_type = 'supersedes' AND from_object_id = ?2 AND to_object_id = ?3",
+                     [workspace_id, replacement.fact.id, ctx.fact.id]
+                   ),
+                 {:ok, [["superseded", "superseded"]]} <-
+                   Store.raw_query(
+                     "SELECT lifecycle_state, supersession_status FROM memory_objects WHERE workspace_id = ?1 AND id = ?2",
+                     [workspace_id, ctx.memory.id]
+                   ),
+                 {:ok, [["stale"]]} <-
+                   Store.raw_query(
+                     "SELECT refresh_state FROM context_packages WHERE workspace_id = ?1 AND id = ?2",
+                     [workspace_id, pre_supersession_package.id]
+                   ) do
+              {:ok, "superseded=#{ctx.fact.id}"}
+            else
+              other -> {:error, inspect(other)}
+            end
+          end)
 
         {:error, reason} ->
           probe(state, "memory lifecycle seed", fn -> {:error, inspect(reason)} end)
@@ -581,8 +657,33 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                actor_id: "agent:reality-check",
                allowed_partitions: ["different-partition"],
                allowed_security_labels: ["internal"]
-             ) do
-        {:ok, %{package: package, filtered_package: filtered_package}}
+             ),
+           {:ok, batch_package} <-
+             RetrievalCoordinator.retrieve("launch",
+               workspace_id: workspace_id,
+               request_id: "reality-batch-refresh",
+               actor_id: "agent:reality-check",
+               allowed_partitions: ["reality-check"],
+               allowed_security_labels: ["internal"]
+             ),
+           [%{id: fact_id}] = package.fact_links,
+           :ok <-
+             MemoryCoreStore.invalidate_context_packages_for_object("fact", fact_id,
+               workspace_id: workspace_id,
+               reason: "reality_refresh_probe"
+             ),
+           {:ok, refreshed_package} <-
+             RetrievalCoordinator.refresh_context_package(package.id, workspace_id: workspace_id),
+           {:ok, batch_refresh} <-
+             RetrievalCoordinator.refresh_stale_context_packages(workspace_id: workspace_id) do
+        {:ok,
+         %{
+           package: package,
+           filtered_package: filtered_package,
+           batch_package: batch_package,
+           batch_refresh: batch_refresh,
+           refreshed_package: refreshed_package
+         }}
       end
 
     state =
@@ -610,6 +711,36 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
               {:ok, "filtered=#{summary.redacted_or_filtered_objects}"}
             else
               {:error, inspect(summary)}
+            end
+          end)
+          |> probe("stale context package refreshed", fn ->
+            if ctx.refreshed_package.id != ctx.package.id and
+                 ctx.refreshed_package.refresh_state == "fresh" and
+                 ctx.refreshed_package.fact_links == ctx.package.fact_links do
+              {:ok, "fresh=#{ctx.refreshed_package.id}"}
+            else
+              {:error, inspect(ctx.refreshed_package)}
+            end
+          end)
+          |> probe("stale context package batch refreshed", fn ->
+            case ctx.batch_refresh do
+              %{
+                stale_context_package_ids: stale_ids,
+                refreshed_context_packages: refreshed_packages,
+                errors: []
+              }
+              when is_list(stale_ids) and is_list(refreshed_packages) ->
+                refreshed_package =
+                  Enum.find(refreshed_packages, &(Map.get(&1, :refresh_state) == "fresh"))
+
+                if stale_ids != [] and not is_nil(refreshed_package) do
+                  {:ok, "refreshed=#{length(refreshed_packages)}"}
+                else
+                  {:error, inspect(ctx.batch_refresh)}
+                end
+
+              other ->
+                {:error, inspect(other)}
             end
           end)
 
@@ -677,7 +808,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     workspace_id = "default:reality-workflow-skill-#{suffix}"
 
     seed =
-      with {:ok, _ctx} <- seed_memory_for_recall(workspace_id, ["reality-check"]),
+      with {:ok, memory_ctx} <- seed_memory_for_recall(workspace_id, ["reality-check"]),
            {:ok, pool} <-
              ActiveMemoryPool.open(
                workspace_id: workspace_id,
@@ -697,6 +828,12 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                allowed_security_labels: ["internal"]
              ),
            {:ok, _loaded_pool} <- ActiveMemoryPool.load_context_package(pool.id, package),
+           :ok <-
+             MemoryCoreStore.invalidate_context_packages_for_object("fact", memory_ctx.fact.id,
+               workspace_id: workspace_id,
+               reason: "pool_refresh_probe"
+             ),
+           {:ok, pool_refresh} <- ActiveMemoryPool.refresh_context_packages(pool.id),
            {:ok, _observation} <-
              ActiveMemoryPool.publish_observation(
                pool.id,
@@ -737,8 +874,37 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                output_contract: %{creates: ["pending_claims"]},
                execution_policy: %{requires_review: true},
                actor_id: "agent:reality-check"
+             ),
+           {:ok, approved_skill} <-
+             WorkflowSkill.package_skill(procedure,
+               skill_package_name: "launch_review_approved_skill",
+               review_status: "approved",
+               enabled_state: "enabled",
+               input_contract: %{requires: ["project_node_id"]},
+               output_contract: %{creates: ["pending_claims"]},
+               execution_policy: %{requires_review: true},
+               actor_id: "agent:reality-check"
+             ),
+           {:ok, workflow_skill_package} <-
+             RetrievalCoordinator.retrieve("launch_review",
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               allowed_partitions: ["reality-check"],
+               allowed_security_labels: ["internal"],
+               workflow_family: "launch_review",
+               task_family: "launch_review"
              ) do
-        {:ok, %{pool: pool, trace: trace, workflow: workflow, procedure: procedure, skill: skill}}
+        {:ok,
+         %{
+           pool: pool,
+           pool_refresh: pool_refresh,
+           trace: trace,
+           workflow: workflow,
+           procedure: procedure,
+           skill: skill,
+           approved_skill: approved_skill,
+           workflow_skill_package: workflow_skill_package
+         }}
       end
 
     state =
@@ -747,6 +913,12 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
           state
           |> probe("active pool opened for workflow work", fn ->
             count_for("active_memory_pools", workspace_id, ctx.pool.id)
+          end)
+          |> probe("active pool refreshed stale context", fn ->
+            case ctx.pool_refresh.refreshed_context_packages do
+              [%{refresh_state: "fresh"}] -> {:ok, "refreshed=1"}
+              other -> {:error, inspect(other)}
+            end
           end)
           |> probe("workflow trace captured from pool", fn ->
             count_for("workflow_traces", workspace_id, ctx.trace.id)
@@ -770,6 +942,23 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
               other -> {:error, inspect(other)}
             end
           end)
+          |> probe("retrieval packages workflow and approved skill", fn ->
+            package = ctx.workflow_skill_package
+
+            cond do
+              package.workflow_links != [%{type: "generalized_workflow", id: ctx.workflow.id}] ->
+                {:error, "missing workflow link"}
+
+              package.skill_package_links != [%{type: "skill_package", id: ctx.approved_skill.id}] ->
+                {:error, "missing approved skill link"}
+
+              package.filtered_object_summary.returned_skill_packages != 1 ->
+                {:error, "unexpected returned skill count"}
+
+              true ->
+                {:ok, "workflows=1 approved_skills=1"}
+            end
+          end)
           |> probe("workflow-skill derivation ledger", fn ->
             case Store.raw_query(
                    """
@@ -785,7 +974,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
                    """,
                    [workspace_id]
                  ) do
-              {:ok, [[4]]} -> {:ok, "4 lifecycle entries"}
+              {:ok, [[5]]} -> {:ok, "5 lifecycle entries"}
               other -> {:error, inspect(other)}
             end
           end)
@@ -1211,20 +1400,335 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
   end
 
   defp connector_probes(state) do
-    state
-    |> probe("Connectors.list()", fn ->
-      {:ok, "#{length(Connectors.list())} adapters"}
-    end)
-    |> probe("Connectors.kinds() covers Slack + HubSpot", fn ->
-      kinds = Connectors.kinds()
+    suffix = System.unique_integer([:positive])
+    connector_id = "reality-slack-#{suffix}"
+    workspace_id = "default:reality-connector-#{suffix}"
 
-      if :slack in kinds and :hubspot in kinds,
-        do: {:ok, "#{length(kinds)} kinds"},
-        else: {:error, "missing core adapters"}
-    end)
-    |> probe("Connectors.credentials_ready? (no key required in dev)", fn ->
-      {:ok, to_string(Connectors.credentials_ready?())}
-    end)
+    {:ok, _} =
+      Connectors.register(%{
+        id: connector_id,
+        kind: :slack,
+        config: %{
+          "workspace_id" => "T01",
+          "channels" => ["C01"],
+          "credentials" => %{"bot_token" => "xoxb-reality"}
+        }
+      })
+
+    state =
+      state
+      |> probe("Connectors.list()", fn ->
+        {:ok, "#{length(Connectors.list())} adapters"}
+      end)
+      |> probe("Connectors.kinds() covers Slack + HubSpot", fn ->
+        kinds = Connectors.kinds()
+
+        if :slack in kinds and :hubspot in kinds,
+          do: {:ok, "#{length(kinds)} kinds"},
+          else: {:error, "missing core adapters"}
+      end)
+      |> probe("Connectors.credentials_ready? (no key required in dev)", fn ->
+        {:ok, to_string(Connectors.credentials_ready?())}
+      end)
+      |> probe("connector governance blocks runner without grants", fn ->
+        case Connectors.run_governed(connector_id,
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: [],
+               requested_partitions: ["reality-check"],
+               allowed_partitions: ["reality-check"]
+             ) do
+          {:error, {:rejected, run}} ->
+            with {:ok, [[connector_runs]]} <-
+                   Store.raw_query(
+                     "SELECT COUNT(*) FROM connector_runs WHERE connector_id = ?1",
+                     [connector_id]
+                   ) do
+              if connector_runs == 0 and run.run_status == "rejected" do
+                {:ok, "rejected before connector run"}
+              else
+                {:error, "connector_runs=#{connector_runs} run_status=#{run.run_status}"}
+              end
+            end
+
+          other ->
+            {:error, inspect(other)}
+        end
+      end)
+      |> probe("connector governance allows sync runner", fn ->
+        case Connectors.run_governed(connector_id,
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: ["connector:slack:sync", "signal:ingest"],
+               requested_partitions: ["reality-check"],
+               allowed_partitions: ["reality-check"]
+             ) do
+          {:ok, result} ->
+            run = result.governance_run
+
+            if run.decision_state == "allowed" and run.run_status == "completed" and
+                 result.connector_result.status == "error" do
+              {:ok, "governed #{run.tool_name}, connector status=#{result.connector_result.status}"}
+            else
+              {:error, inspect(result)}
+            end
+
+          other ->
+            {:error, inspect(other)}
+        end
+      end)
+      |> probe("connector governed run writes both audit layers", fn ->
+        with {:ok, [[connector_runs]]} <-
+               Store.raw_query(
+                 "SELECT COUNT(*) FROM connector_runs WHERE connector_id = ?1",
+                 [connector_id]
+               ),
+             {:ok, [[tool_runs]]} <-
+               Store.raw_query(
+                 """
+                 SELECT COUNT(*)
+                 FROM tool_call_runs
+                 WHERE workspace_id = ?1
+                   AND tool_name = 'connector.slack.sync'
+                   AND decision_state = 'allowed'
+                   AND run_status = 'completed'
+                 """,
+                 [workspace_id]
+               ) do
+          if connector_runs == 1 and tool_runs == 1 do
+            {:ok, "connector_runs=#{connector_runs}, tool_call_runs=#{tool_runs}"}
+          else
+            {:error, "connector_runs=#{connector_runs}, tool_call_runs=#{tool_runs}"}
+          end
+        end
+      end)
+      |> probe("connector governed audit event emitted", fn ->
+        case Store.raw_query(
+               """
+               SELECT COUNT(*)
+               FROM events
+               WHERE tenant_id = 'default'
+                 AND principal = 'agent:reality-check'
+                 AND kind = 'tool.call.governed'
+                 AND metadata LIKE ?1
+               """,
+               ["%#{workspace_id}%"]
+             ) do
+          {:ok, [[count]]} when count >= 2 -> {:ok, "#{count} audit event(s)"}
+          other -> {:error, inspect(other)}
+        end
+      end)
+      |> probe("connector sync payload preserves assets", fn ->
+        case Connectors.run(connector_id,
+               adapter_resolver: fn "slack" ->
+                 {:ok, Mix.Tasks.Optimal.RealityCheck.ConnectorAssetAdapter}
+               end,
+               workspace_id: workspace_id,
+               actor_id: "agent:reality-check",
+               granted_privileges: ["connector:slack:sync", "signal:ingest"],
+               requested_partitions: ["reality-check"],
+               allowed_partitions: ["reality-check"],
+               security_labels: ["internal"],
+               partition_ids: ["reality-check"]
+             ) do
+          {:ok, result} ->
+            connector_result = result.connector_result
+
+            with {:ok, [[asset_count]]} <-
+                   Store.raw_query(
+                     "SELECT COUNT(*) FROM assets WHERE workspace_id = ?1 AND metadata LIKE ?2",
+                     [workspace_id, "%reality-file-1%"]
+                   ) do
+              if result.governance_run.decision_state == "allowed" and
+                   connector_result.status == "success" and connector_result.assets == 1 and
+                   connector_result.asset_errors == 0 and asset_count == 1 do
+                {:ok,
+                 "assets=#{connector_result.assets}, asset_errors=#{connector_result.asset_errors}"}
+              else
+                {:error, "result=#{inspect(result)} asset_count=#{asset_count}"}
+              end
+            end
+
+          other ->
+            {:error, inspect(other)}
+        end
+      end)
+
+    cleanup_connector_probe(connector_id, workspace_id)
+    state
+  end
+
+  defp cleanup_connector_probe(connector_id, workspace_id) do
+    [
+      {"DELETE FROM connector_runs WHERE connector_id = ?1", [connector_id]},
+      {"DELETE FROM connectors WHERE id = ?1", [connector_id]},
+      {"DELETE FROM tool_call_runs WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM mcp_tool_definitions WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM assets WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM source_packages WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM derivation_ledger WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM events WHERE metadata LIKE ?1", ["%#{workspace_id}%"]}
+    ]
+    |> Enum.each(fn {sql, params} -> Store.raw_execute(sql, params) end)
+
+    File.rm_rf(workspace_id)
+  end
+
+  defp evaluation_probes(state) do
+    workspace_id = "default:reality-eval-#{System.unique_integer([:positive])}"
+
+    dataset_path =
+      Path.join(
+        System.tmp_dir!(),
+        "optimal-reality-eval-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    seed =
+      with {:ok, run} <-
+             Evaluation.record_run(
+               workspace_id: workspace_id,
+               benchmark_name: "reality_recall_eval",
+               dataset_name: "reality-small",
+               dataset_size: 2,
+               question_count: 2,
+               answer_model: "rule-answer",
+               judge_model: "rule-judge",
+               judge_strategy: "deterministic",
+               retrieval_top_k: 10,
+               run_config: %{answer_temperature: 0},
+               retrieval_config: %{package_type: "context_package"},
+               judge_config: %{votes: 1}
+             ),
+           {:ok, _case_1} <-
+             Evaluation.record_case(run.id,
+               case_id: "case-1",
+               question: "What was approved?",
+               actual_answer: "The launch was approved.",
+               expected_answer: "The launch was approved.",
+               scores: %{accuracy: 1.0, grounding: 1.0},
+               status: "passed"
+             ),
+           {:ok, _case_2} <-
+             Evaluation.record_case(run.id,
+               case_id: "case-2",
+               question: "What was the unknown budget?",
+               actual_answer: "Unknown.",
+               scores: %{accuracy: 0.0, grounding: 0.5},
+               status: "failed"
+             ),
+           {:ok, summary} <- Evaluation.summarize(run.id) do
+        {:ok, %{run: run, summary: summary}}
+      end
+
+    state =
+      case seed do
+        {:ok, ctx} ->
+          state
+          |> probe("evaluation run persisted", fn ->
+            case Store.raw_query(
+                   "SELECT COUNT(*) FROM evaluation_runs WHERE workspace_id = ?1 AND id = ?2",
+                   [workspace_id, ctx.run.id]
+                 ) do
+              {:ok, [[1]]} -> {:ok, "stored"}
+              other -> {:error, inspect(other)}
+            end
+          end)
+          |> probe("evaluation cases summarized", fn ->
+            accuracy = get_in(ctx.summary, [:aggregate_scores, "accuracy", :average])
+
+            if ctx.summary.case_count == 2 and ctx.summary.passed_count == 1 and accuracy == 0.5 do
+              {:ok, "cases=2 accuracy=0.5"}
+            else
+              {:error, inspect(ctx.summary)}
+            end
+          end)
+
+        {:error, reason} ->
+          probe(state, "evaluation record seed", fn -> {:error, inspect(reason)} end)
+      end
+
+    state =
+      state
+      |> probe("evaluation dataset runner", fn ->
+        with :ok <- seed_evaluation_dataset_memory(workspace_id),
+             :ok <-
+               File.write(dataset_path, [
+                 Jason.encode!(%{
+                   "question_id" => "dataset-case-1",
+                   "question" => "approved",
+                   "expected_answer" => "launch was approved"
+                 }),
+                 "\n"
+               ]),
+             {:ok, result} <-
+               Evaluation.run_dataset(dataset_path,
+                 workspace_id: workspace_id,
+                 benchmark_name: "reality_dataset_eval",
+                 retrieval_opts: [
+                   allowed_partitions: ["reality-check"],
+                   allowed_security_labels: ["internal"]
+                 ]
+               ) do
+          if result.summary.case_count == 1 and result.summary.passed_count == 1 do
+            {:ok, "jsonl cases=#{result.summary.case_count} passed=#{result.summary.passed_count}"}
+          else
+            {:error, inspect(result.summary)}
+          end
+        else
+          {:error, reason} -> {:error, inspect(reason)}
+          other -> {:error, inspect(other)}
+        end
+      end)
+
+    File.rm(dataset_path)
+    cleanup_evaluation_probe(workspace_id)
+    state
+  end
+
+  defp seed_evaluation_dataset_memory(workspace_id) do
+    source =
+      OptimalEngine.MemoryCore.source_package_from_text(
+        "The launch was approved after final review.",
+        workspace_id: workspace_id,
+        source_type: "meeting_note",
+        security_labels: ["internal"],
+        partition_ids: ["reality-check"]
+      )
+
+    with {:ok, claim} <-
+           OptimalEngine.MemoryCore.extract_claim(source,
+             claim_text: "The launch was approved after final review.",
+             subject_anchor: "launch",
+             action_class: "approval",
+             aggregate_confidence: 0.95,
+             aggregate_precision: 0.9
+           ),
+         {:ok, fact} <-
+           OptimalEngine.MemoryCore.promote_claim_to_fact(claim,
+             fact_text: "The launch was approved.",
+             aggregate_confidence: 0.96,
+             aggregate_precision: 0.92
+           ),
+         {:ok, _memory} <-
+           OptimalEngine.MemoryCore.build_memory_object(fact,
+             summary: "The launch approval unblocked the release plan."
+           ) do
+      :ok
+    end
+  end
+
+  defp cleanup_evaluation_probe(workspace_id) do
+    [
+      {"DELETE FROM evaluation_runs WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM context_packages WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM relationship_edges WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM derivation_ledger WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM memory_objects WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM facts WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM claims WHERE workspace_id = ?1", [workspace_id]},
+      {"DELETE FROM source_packages WHERE workspace_id = ?1", [workspace_id]}
+    ]
+    |> Enum.each(fn {sql, params} -> Store.raw_execute(sql, params) end)
   end
 
   defp wiki_probes(state) do
@@ -1457,4 +1961,56 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       System.halt(1)
     end
   end
+end
+
+defmodule Mix.Tasks.Optimal.RealityCheck.ConnectorAssetAdapter do
+  @moduledoc false
+
+  @behaviour OptimalEngine.Connectors.Behaviour
+
+  alias OptimalEngine.Connectors.Transform
+
+  @impl true
+  def kind, do: :slack
+
+  @impl true
+  def display_name, do: "Reality Connector Asset Adapter"
+
+  @impl true
+  def auth_scheme, do: :token
+
+  @impl true
+  def required_config_keys, do: []
+
+  @impl true
+  def init(config), do: {:ok, config}
+
+  @impl true
+  def sync(_state, _cursor) do
+    signal =
+      Transform.new_signal(%{
+        id: Transform.signal_id(:slack, "reality-msg-1"),
+        title: "Reality connector file payload",
+        content: "Reality connector file payload",
+        path: "optimal://connectors/slack/reality-msg-1",
+        node: "inbox"
+      })
+
+    payload = %{
+      "id" => "reality-msg-1",
+      "attachments" => [
+        %{
+          "id" => "reality-file-1",
+          "filename" => "reality.txt",
+          "content_type" => "text/plain",
+          "content_base64" => Base.encode64("reality connector asset evidence")
+        }
+      ]
+    }
+
+    {:ok, %{signals: [signal], cursor: "reality-cursor-next", payloads: [payload]}}
+  end
+
+  @impl true
+  def transform(_payload), do: {:error, :not_used}
 end

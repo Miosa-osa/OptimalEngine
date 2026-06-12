@@ -16,6 +16,7 @@ defmodule OptimalEngine.Topology.NodeMember do
 
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
+  alias OptimalEngine.Topology.Node
 
   @type membership :: :owner | :internal | :external | :observer
 
@@ -35,30 +36,32 @@ defmodule OptimalEngine.Topology.NodeMember do
   def add(node_id, principal_id, opts \\ [])
       when is_binary(node_id) and is_binary(principal_id) do
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
-    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id)
     membership = Keyword.get(opts, :membership, :internal)
     role = Keyword.get(opts, :role)
 
     if membership not in @allowed_memberships do
       {:error, {:invalid_membership, membership}}
     else
-      sql = """
-      INSERT OR IGNORE INTO node_members (
-        tenant_id, workspace_id, node_id, principal_id, membership, role
-      )
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-      """
+      with {:ok, resolved_workspace_id} <- resolve_node_workspace(node_id, tenant_id, workspace_id) do
+        sql = """
+        INSERT OR IGNORE INTO node_members (
+          tenant_id, workspace_id, node_id, principal_id, membership, role
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        """
 
-      case Store.raw_query(sql, [
-             tenant_id,
-             workspace_id,
-             node_id,
-             principal_id,
-             Atom.to_string(membership),
-             role
-           ]) do
-        {:ok, _} -> :ok
-        other -> other
+        case Store.raw_query(sql, [
+               tenant_id,
+               resolved_workspace_id,
+               node_id,
+               principal_id,
+               Atom.to_string(membership),
+               role
+             ]) do
+          {:ok, _} -> :ok
+          other -> other
+        end
       end
     end
   end
@@ -222,6 +225,22 @@ defmodule OptimalEngine.Topology.NodeMember do
      SET ended_at = datetime('now')
      WHERE #{Enum.join(where, " AND ")}
      """, params}
+  end
+
+  defp resolve_node_workspace(node_id, tenant_id, nil) do
+    case Node.get(node_id, tenant_id: tenant_id) do
+      {:ok, node} -> {:ok, node.workspace_id}
+      {:error, :not_found} -> {:error, {:node_not_found, node_id}}
+      other -> other
+    end
+  end
+
+  defp resolve_node_workspace(node_id, tenant_id, workspace_id) do
+    case Node.get(node_id, tenant_id: tenant_id, workspace_id: workspace_id) do
+      {:ok, node} -> {:ok, node.workspace_id}
+      {:error, :not_found} -> {:error, {:node_not_found_in_workspace, node_id, workspace_id}}
+      other -> other
+    end
   end
 
   defp safe_atom(nil, fallback), do: fallback

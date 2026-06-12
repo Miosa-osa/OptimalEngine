@@ -66,6 +66,9 @@ defmodule OptimalEngine.MemoryCore.ContextPackage do
           metadata: map(),
           facts: [map()],
           memory_objects: [map()],
+          asset_extractions: [map()],
+          workflows: [map()],
+          skill_packages: [map()],
           sections: sections() | map()
         }
 
@@ -108,6 +111,9 @@ defmodule OptimalEngine.MemoryCore.ContextPackage do
             metadata: %{},
             facts: [],
             memory_objects: [],
+            asset_extractions: [],
+            workflows: [],
+            skill_packages: [],
             sections: %{}
 
   @doc "Build a Context Package from an attribute map (atom keys)."
