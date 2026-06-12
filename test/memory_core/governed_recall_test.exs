@@ -439,19 +439,19 @@ defmodule OptimalEngine.MemoryCore.GovernedRecallTest do
     end
 
     test "ScopeEnvelope derives a tenant-scoped default workspace id" do
-      scope = ScopeEnvelope.resolve(tenant_id: "acme")
-      assert scope.workspace_id == "acme:default"
+      scope = ScopeEnvelope.resolve(tenant_id: "exampleorg")
+      assert scope.workspace_id == "exampleorg:default"
       assert :workspace_id in scope.unresolved
 
       # The default tenant keeps the bare "default" workspace.
       assert ScopeEnvelope.resolve([]).workspace_id == "default"
 
       # An explicit workspace always wins over the derived default.
-      assert ScopeEnvelope.resolve(tenant_id: "acme", workspace_id: "ws-9").workspace_id ==
+      assert ScopeEnvelope.resolve(tenant_id: "exampleorg", workspace_id: "ws-9").workspace_id ==
                "ws-9"
 
       assert ScopeEnvelope.default_workspace_id("default") == "default"
-      assert ScopeEnvelope.default_workspace_id("acme") == "acme:default"
+      assert ScopeEnvelope.default_workspace_id("exampleorg") == "exampleorg:default"
     end
 
     test "Store readers apply the tenant predicate when a tenant is given" do

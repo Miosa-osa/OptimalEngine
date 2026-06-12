@@ -9,7 +9,7 @@ defmodule Mix.Tasks.Optimal.Impact do
   Usage:
       mix optimal.impact "Dan"
       mix optimal.impact "Alice"
-      mix optimal.impact "agency-accelerants"
+      mix optimal.impact "services-group"
       mix optimal.impact "Dan" --depth 4
 
   Options:
