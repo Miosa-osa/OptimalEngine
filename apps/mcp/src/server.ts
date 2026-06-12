@@ -13,6 +13,7 @@ import { registerForgetMemory } from "./tools/forget_memory.js";
 import { registerRecall } from "./tools/recall.js";
 import { registerWikiGet } from "./tools/wiki_get.js";
 import { registerWorkspaces } from "./tools/workspaces.js";
+import { registerRenderContext } from "./tools/render_context.js";
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -29,6 +30,7 @@ export function createServer(): McpServer {
   registerRecall(server);
   registerWikiGet(server);
   registerWorkspaces(server);
+  registerRenderContext(server);
 
   return server;
 }

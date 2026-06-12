@@ -119,7 +119,7 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
   end
 
   # Minimum normalized-query length before a substring match is allowed to
-  # score. `"ai"` would otherwise hit `"ai-masters-pricing"`, `"ai-strategy"`,
+  # score. `"ai"` would otherwise hit `"project-platform-launch-pricing"`, `"ai-strategy"`,
   # `"ai-workflow"`, …; any of them could short-circuit hybrid retrieval
   # under the front-door contract. Four chars rules out single acronyms +
   # stop-word sized queries while still catching real slug stems.

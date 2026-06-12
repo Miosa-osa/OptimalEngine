@@ -3,6 +3,8 @@ defmodule OptimalEngine.Signal.DispatcherTest do
 
   alias OptimalEngine.Signal.Envelope, as: Signal
   alias OptimalEngine.Signal.{Dispatcher, Router}
+  alias OptimalEngine.MemoryCore.ToolModelGovernance
+  alias OptimalEngine.Store
 
   setup do
     name = :"dispatcher_router_#{System.unique_integer([:positive])}"
@@ -118,6 +120,93 @@ defmodule OptimalEngine.Signal.DispatcherTest do
         Dispatcher.dispatch(signal, handlers: [], adapter: :noop)
 
       refute_receive {:signal, _}
+    end
+
+    test "governed adapter blocks unauthorized delivery and records the attempt" do
+      workspace_id = "dispatcher-governed-reject-#{System.unique_integer([:positive])}"
+
+      {:ok, _definition} =
+        ToolModelGovernance.register_mcp_tool_definition(
+          workspace_id: workspace_id,
+          tool_name: "signal.dispatch",
+          implementation_type: "signal_adapter",
+          required_privileges: ["signal:deliver"],
+          allowed_partitions: ["ops"],
+          input_schema: %{required: ["signal_type"]},
+          output_schema: %{required: ["delivered"]}
+        )
+
+      signal = Signal.new!("optimal.test.governed", source: "/t")
+
+      assert {:error, [{:error, {:adapter, {:governance_rejected, reason}}}]} =
+               Dispatcher.dispatch(signal,
+                 handlers: [],
+                 adapter: :governed,
+                 adapter_opts: [
+                   tool_name: "signal.dispatch",
+                   inner_adapter: :pid,
+                   inner_adapter_opts: [pid: self()],
+                   input_payload: %{signal_type: signal.type},
+                   governance_opts: [
+                     workspace_id: workspace_id,
+                     actor_id: "agent:test",
+                     granted_privileges: [],
+                     requested_partitions: ["ops"]
+                   ]
+                 ]
+               )
+
+      assert reason =~ "missing:signal:deliver"
+      refute_receive {:signal, ^signal}
+
+      assert {:ok, [[1]]} =
+               Store.raw_query(
+                 "SELECT COUNT(*) FROM tool_call_runs WHERE workspace_id = ?1 AND decision_state = 'rejected'",
+                 [workspace_id]
+               )
+    end
+
+    test "governed adapter delivers authorized signals and records the completed run" do
+      workspace_id = "dispatcher-governed-allow-#{System.unique_integer([:positive])}"
+
+      {:ok, _definition} =
+        ToolModelGovernance.register_mcp_tool_definition(
+          workspace_id: workspace_id,
+          tool_name: "signal.dispatch",
+          implementation_type: "signal_adapter",
+          required_privileges: ["signal:deliver"],
+          allowed_partitions: ["ops"],
+          input_schema: %{required: ["signal_type"]},
+          output_schema: %{required: ["delivered"]}
+        )
+
+      signal = Signal.new!("optimal.test.governed", source: "/t")
+
+      assert {:ok, []} =
+               Dispatcher.dispatch(signal,
+                 handlers: [],
+                 adapter: :governed,
+                 adapter_opts: [
+                   tool_name: "signal.dispatch",
+                   inner_adapter: :pid,
+                   inner_adapter_opts: [pid: self()],
+                   input_payload: %{signal_type: signal.type},
+                   governance_opts: [
+                     workspace_id: workspace_id,
+                     actor_id: "agent:test",
+                     granted_privileges: ["signal:deliver"],
+                     requested_partitions: ["ops"]
+                   ]
+                 ]
+               )
+
+      assert_receive {:signal, ^signal}
+
+      assert {:ok, [[1]]} =
+               Store.raw_query(
+                 "SELECT COUNT(*) FROM tool_call_runs WHERE workspace_id = ?1 AND decision_state = 'allowed' AND run_status = 'completed'",
+                 [workspace_id]
+               )
     end
   end
 

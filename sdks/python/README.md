@@ -87,7 +87,7 @@ client.workspaces.archive("research")
 
 ```python
 pages = client.wiki.list()
-page  = client.wiki.get("healthtech-pricing-decision", audience="sales")
+page  = client.wiki.get("customer portal-pricing-decision", audience="sales")
 client.wiki.contradictions()
 ```
 

@@ -1,6 +1,6 @@
 defmodule OptimalEngine.Retrieval.ContextAssembler do
   @moduledoc """
-  Tiered context assembly following OpenViking's hierarchy.
+  Tiered context assembly following tiered context systems's hierarchy.
 
   ## Tiers (the correct model)
 
@@ -20,7 +20,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   ## Usage
 
       # Full tiered assembly for a query
-      {:ok, context} = ContextAssembler.assemble("AI Masters pricing")
+      {:ok, context} = ContextAssembler.assemble("Platform Launch pricing")
 
       # Just the inventory
       {:ok, l0} = ContextAssembler.l0()
@@ -58,6 +58,12 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   L0 = inventory (what exists)
   L1 = relevant file summaries (what matches)
   L2 = full content (what you need to read)
+
+  Return shape (cleanup rule 7): `{:ok, map}` of token-budgeted markdown tiers
+  built from **raw search hits** over compatibility `contexts` rows. This is a
+  precursor surface — not the governed
+  `OptimalEngine.MemoryCore.ContextPackage`; for that, use
+  `OptimalEngine.MemoryCore.RetrievalCoordinator.retrieve/2`.
   """
   @spec assemble(String.t(), keyword()) :: {:ok, assembled()}
   def assemble(query, opts \\ []) do

@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Optimal.Assemble do
 
   ## Usage
 
-      mix optimal.assemble "AI Masters pricing"
+      mix optimal.assemble "Platform Launch pricing"
       mix optimal.assemble "Alice" --tier l0
       mix optimal.assemble "revenue" --limit 20
   """

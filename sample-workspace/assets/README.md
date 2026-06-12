@@ -1,16 +1,17 @@
 # Assets
 
-Binary attachments referenced by signals — images, PDFs, audio,
-video. The engine doesn't index binary content at this layer; it
-references the file by path and leaves extraction to parsers.
+Place source artifacts here when they are too large or binary-oriented for a
+single markdown signal.
 
-## Convention
+Examples:
 
-- `media/` — audio/video episodes for the `08-media` node
-- `screenshots/` — image attachments referenced from any node
-- `pdfs/` — PDF documents (parser extracts text during ingest)
+```text
+audio/
+video/
+images/
+documents/
+exports/
+```
 
-## Privacy
-
-Assets inherit the ACLs of the signals that cite them. If a signal is
-gated to `audience: legal`, its attached PDF is too.
+The asset itself should be preserved as source evidence. Extracted text,
+summaries, embeddings, labels, and generated views are rebuildable derivatives.

@@ -7,7 +7,7 @@ defmodule Mix.Tasks.Optimal.Verify do
   Usage:
       mix optimal.verify
       mix optimal.verify --sample 20
-      mix optimal.verify --sample 10 --node ai-masters
+      mix optimal.verify --sample 10 --node project-platform-launch
   """
 
   use Mix.Task

@@ -4,7 +4,7 @@ defmodule OptimalEngine.Retrieval.L0Cache do
 
   L0 answers: "What exists? What's available?" — NOT "What's happening now?"
 
-  Following OpenViking's tiered loading model:
+  Following tiered context systems's tiered loading model:
   - **L0** = Directory/inventory — nodes, skills, resources, memory counts
   - **L1** = Per-file summaries/abstracts — one-liner each
   - **L2** = Full content — loaded on demand

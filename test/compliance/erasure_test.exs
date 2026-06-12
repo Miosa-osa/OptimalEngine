@@ -22,7 +22,7 @@ defmodule OptimalEngine.Compliance.ErasureTest do
       Store.raw_query(
         """
         INSERT INTO contexts (id, tenant_id, uri, title, content, created_by, genre, node)
-        VALUES (?1, 'default', ?2, 't', 'body', ?3, 'note', '01-roberto')
+        VALUES (?1, 'default', ?2, 't', 'body', ?3, 'note', 'person-operator')
         """,
         [ctx_id, "optimal://erase/#{ctx_id}", principal_id]
       )

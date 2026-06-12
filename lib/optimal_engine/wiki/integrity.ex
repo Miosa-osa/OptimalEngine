@@ -311,7 +311,7 @@ defmodule OptimalEngine.Wiki.Integrity do
     end
   end
 
-  defp check_required_sections(body, []), do: []
+  defp check_required_sections(_body, []), do: []
 
   defp check_required_sections(body, required) when is_list(required) do
     headings = Regex.scan(~r/^##\s+(.+?)\s*$/m, body, capture: :all_but_first)
@@ -507,7 +507,7 @@ defmodule OptimalEngine.Wiki.Integrity do
   # Defaults to "flag_for_review" when config is absent.
   # `root` is the engine root path passed to `Config.get_section/4`; in tests
   # a temp directory can be supplied so YAML can be written and read back.
-  defp contradiction_policy(workspace_slug, root \\ nil) do
+  defp contradiction_policy(workspace_slug, root) do
     effective_root = root || File.cwd!()
 
     section =

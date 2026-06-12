@@ -105,7 +105,7 @@ defmodule OptimalEngine.Routing do
   end
 
   @doc """
-  Returns all node folder names (e.g. \"01-roberto\", \"02-miosa\").
+  Returns all node folder names (e.g. \"person-operator\", \"product-customer-portal\").
   """
   @spec node_folders(t()) :: [String.t()]
   def node_folders(topology) do

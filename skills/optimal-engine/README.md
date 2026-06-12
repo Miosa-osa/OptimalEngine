@@ -6,7 +6,7 @@ Claude Code skill for building with [Optimal Engine](../../README.md) — the se
 
 When activated, this skill gives Claude Code full working knowledge of:
 - Every HTTP API endpoint (method, params, response shape)
-- The 3-tier memory architecture and 9-stage ingestion pipeline
+- The workspace topology, source-first intake, memory lifecycle, and projection model
 - When to use `ask` vs `search` vs `grep` vs `recall` vs `profile`
 - Memory primitive: versioning, relations, forgetting
 - Workspace isolation and config schema
@@ -31,7 +31,7 @@ skills/optimal-engine/
 ├── README.md                   This file
 ├── references/
 │   ├── api-reference.md        Every endpoint with params + examples
-│   ├── concepts.md             3 tiers, 9 stages, intents, S=(M,G,T,F,W)
+│   ├── concepts.md             3 tiers, 9 stages, intents, Mode + Genre + Type + Format + Structure
 │   ├── workspace-pattern.md    Multi-workspace design + config schema
 │   ├── memory-pattern.md       Versioning, relations, forgetting
 │   ├── retrieval-pattern.md    Decision tree: which endpoint to use
@@ -46,21 +46,29 @@ skills/optimal-engine/
 # 1. Start the engine (needs config :api, enabled: true)
 iex -S mix
 
-# 2. Bootstrap a workspace
+# 2. Bootstrap an API workspace
 bash skills/optimal-engine/scripts/bootstrap.sh my-workspace
 
-# 3. Ingest your knowledge
-mix optimal.ingest_workspace ~/my-workspace/
+# 3. Optional: scaffold a markdown-operable workspace
+mix optimal.init ~/my-workspace-files
 
-# 4. Query
+# 4. Edit the generated files, then ingest your knowledge
+mix optimal.ingest_workspace ~/my-workspace-files
+
+# 5. Query the workspace
 curl -X POST http://localhost:4200/api/rag \
   -H 'Content-Type: application/json' \
   -d '{"query":"what do we know?","workspace":"my-workspace","format":"markdown"}'
 ```
 
+The skill should preserve all core architecture terms: company second brain,
+tiers, layers, stages, rhythm, Nodes, Signals, wiki/curation, retrieval, and
+agent operation. Do not flatten those into a generic RAG or task-runner model.
+
 ## Key References
 
 - Engine README: [`../../README.md`](../../README.md)
-- Architecture: [`../../docs/architecture/ARCHITECTURE.md`](../../docs/architecture/ARCHITECTURE.md)
+- Architecture: [`../../docs/architecture/ENGINE-STRUCTURE.md`](../../docs/architecture/ENGINE-STRUCTURE.md)
+- Storage/projections: [`../../docs/architecture/STORAGE-AND-PROJECTION-MAP.md`](../../docs/architecture/STORAGE-AND-PROJECTION-MAP.md)
 - Signal Theory: [`../../docs/concepts/signal-theory.md`](../../docs/concepts/signal-theory.md)
 - Mix tasks: [`../../docs/guides/mix-tasks.md`](../../docs/guides/mix-tasks.md)

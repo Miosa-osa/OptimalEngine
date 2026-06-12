@@ -12,7 +12,7 @@ defmodule OptimalEngine.Identity.Principal do
 
   ## Identity string conventions
 
-  - `"user:ada@acme.com"`
+  - `"user:ada@sample.com"`
   - `"agent:ada-bot"`
   - `"service:slack-connector"`
 

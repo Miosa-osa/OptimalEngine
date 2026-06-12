@@ -2,6 +2,7 @@ import { HttpClient } from "./http.js";
 import { MemoryClient } from "./memory.js";
 import { WikiClient } from "./profile.js";
 import { RecallClient } from "./recall.js";
+import { RenderClient } from "./render.js";
 import { RetrievalClient } from "./retrieval.js";
 import { SubscriptionClient, SurfaceClient } from "./surface.js";
 import type {
@@ -41,6 +42,9 @@ export class OptimalEngine {
   /** Recall queries (actions / who / when / where / owns). */
   readonly recall: RecallClient;
 
+  /** Multi-audience render pipeline (1 source → N HTML renders). */
+  readonly render: RenderClient;
+
   private readonly retrieval: RetrievalClient;
   private readonly defaultWorkspace: string | undefined;
 
@@ -59,6 +63,7 @@ export class OptimalEngine {
     );
     this.surface = new SurfaceClient(this.http, this.defaultWorkspace);
     this.recall = new RecallClient(this.http, this.defaultWorkspace);
+    this.render = new RenderClient(this.http, this.defaultWorkspace);
   }
 
   // ---------------------------------------------------------------------------

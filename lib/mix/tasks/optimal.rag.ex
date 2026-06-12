@@ -15,7 +15,7 @@ defmodule Mix.Tasks.Optimal.Rag do
       mix optimal.rag "Q4 pricing decision"
       mix optimal.rag "pricing" --audience sales --format claude
       mix optimal.rag "pricing" --bandwidth small
-      mix optimal.rag "pricing" --principal user:ada@acme.com
+      mix optimal.rag "pricing" --principal user:ada@sample.com
       mix optimal.rag "pricing" --skip-wiki --trace
 
   ## Options

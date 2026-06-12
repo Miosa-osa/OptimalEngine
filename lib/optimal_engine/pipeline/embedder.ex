@@ -92,9 +92,8 @@ defmodule OptimalEngine.Pipeline.Embedder do
   # Image: prefer asset bytes (embed the picture); fall back to OCR text if
   # the chunk has text but no readable asset path.
   defp dispatch(%Chunk{modality: :image, asset_ref: ref} = chunk, opts) when is_binary(ref) do
-    # In Phase 5 the asset path convention is inherited from the Parser's
-    # asset.path. The chunk carries `asset_ref` = hash; the lookup lives in
-    # opts[:asset_paths][ref] for now, a future AssetStore will own this.
+    # The chunk carries `asset_ref` = content hash. Pipeline.run/2 can preserve
+    # parser assets through MemoryCore.AssetStore before building this lookup.
     asset_path = get_in(opts, [:asset_paths, ref])
 
     cond do
@@ -120,7 +119,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   # Audio: if a transcript is already on the chunk (Phase 2 whisper path),
   # embed that. Otherwise attempt whisper transcription of the asset.
-  defp dispatch(%Chunk{modality: :audio, text: transcript} = chunk, opts)
+  defp dispatch(%Chunk{modality: :audio, text: transcript}, opts)
        when is_binary(transcript) and transcript != "" do
     # Existing transcript → text embed.
     with {:ok, vector} <- Ollama.embed_text(transcript, opts) do
@@ -151,7 +150,25 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   defp dispatch(%Chunk{modality: :audio}, _opts), do: {:error, :no_embeddable_content}
 
-  # Video: defer to text fallback for now. Phase 10+ extracts frames.
+  # Video: prefer vision embedding on keyframe assets, fall back to text.
+  defp dispatch(%Chunk{modality: :video, asset_ref: ref} = chunk, opts) when is_binary(ref) do
+    asset_path = get_in(opts, [:asset_paths, ref])
+
+    cond do
+      is_binary(asset_path) and File.exists?(asset_path) and image_asset?(asset_path) ->
+        case Ollama.embed_image(asset_path, opts) do
+          {:ok, vector} -> {:ok, vector, "vision+" <> model_name(opts, :image), :video}
+          {:error, _} -> fallback_text(chunk, opts, :video)
+        end
+
+      chunk.text != "" ->
+        fallback_text(chunk, opts, :video)
+
+      true ->
+        {:error, :no_embeddable_content}
+    end
+  end
+
   defp dispatch(%Chunk{modality: :video} = chunk, opts) do
     fallback_text(chunk, opts, :video)
   end
@@ -170,6 +187,12 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   defp model_name(opts, :text), do: Keyword.get(opts, :text_model, @text_model)
   defp model_name(opts, :image), do: Keyword.get(opts, :vision_model, @vision_model)
+
+  @image_extensions ~w(.jpg .jpeg .png .gif .webp .bmp .tiff)
+  defp image_asset?(path) when is_binary(path) do
+    ext = path |> Path.extname() |> String.downcase()
+    ext in @image_extensions
+  end
 
   @doc "The canonical vector dimension for Phase 5 providers (768)."
   @spec dim() :: non_neg_integer()

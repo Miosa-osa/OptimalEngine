@@ -30,8 +30,9 @@ defmodule OptimalEngine.Insight.Rethink do
 
   ## Options
 
-  - `:force`      — bypass the confidence threshold (default: false)
-  - `:auto_apply` — apply proposed updates automatically (default: false)
+  - `:force`        — bypass the confidence threshold (default: false)
+  - `:auto_apply`   — apply proposed updates automatically (default: false)
+  - `:workspace_id` — workspace whose observations are synthesized (default: "default")
 
   ## Return value
 
@@ -44,8 +45,9 @@ defmodule OptimalEngine.Insight.Rethink do
   @spec rethink(String.t(), keyword()) :: {:ok, map()}
   def rethink(topic, opts \\ []) do
     auto_apply = Keyword.get(opts, :auto_apply, false)
+    ws = Keyword.get(opts, :workspace_id, "default")
 
-    observations = gather_observations(topic)
+    observations = gather_observations(topic, ws)
 
     total_confidence =
       observations
@@ -64,7 +66,7 @@ defmodule OptimalEngine.Insight.Rethink do
            "Need #{Float.round(@confidence_threshold - total_confidence, 2)} more confidence to trigger rethink. Use --force to override."
        }}
     else
-      related_contexts = search_related(topic)
+      related_contexts = search_related(topic, ws)
       synthesis = generate_synthesis(topic, observations, related_contexts)
 
       report = %{
@@ -100,15 +102,15 @@ defmodule OptimalEngine.Insight.Rethink do
   # Private: Gather evidence
   # ---------------------------------------------------------------------------
 
-  defp gather_observations(topic) do
+  defp gather_observations(topic, ws) do
     sql = """
     SELECT id, category, content, confidence, source, created_at
     FROM observations
-    WHERE category = ?1 OR content LIKE ?2
+    WHERE (category = ?1 OR content LIKE ?2) AND workspace_id = ?3
     ORDER BY confidence DESC
     """
 
-    case Store.raw_query(sql, [topic, "%#{topic}%"]) do
+    case Store.raw_query(sql, [topic, "%#{topic}%", ws]) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, cat, content, conf, source, created] ->
           %{
@@ -126,8 +128,12 @@ defmodule OptimalEngine.Insight.Rethink do
     end
   end
 
-  defp search_related(topic) do
-    case GenServer.call(OptimalEngine.Retrieval.Search, {:search, topic, [limit: 10]}, 15_000) do
+  defp search_related(topic, ws) do
+    case GenServer.call(
+           OptimalEngine.Retrieval.Search,
+           {:search, topic, [limit: 10, workspace_id: ws]},
+           15_000
+         ) do
       {:ok, results} -> results
       _ -> []
     end

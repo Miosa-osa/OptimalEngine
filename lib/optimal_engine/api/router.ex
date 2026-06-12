@@ -1,6 +1,7 @@
 defmodule OptimalEngine.API.Router do
   @moduledoc """
-  Plug-based HTTP JSON API for OptimalOS knowledge graph data.
+  Plug-based HTTP JSON API for Optimal Engine graph, workspace, retrieval, and
+  governed memory data.
 
   Endpoints:
     GET /api/graph           — Full graph (all edges + entity summary + node summary)
@@ -26,7 +27,9 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Health
   alias OptimalEngine.Insight.Health, as: HealthDiagnostics
   alias OptimalEngine.Graph.Reflector, as: Reflector
+  alias OptimalEngine.MemoryCore.ContextPackage
   alias OptimalEngine.Profile
+  alias OptimalEngine.MemoryCore
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.Grep
   alias OptimalEngine.Retrieval.RagStream
@@ -46,6 +49,12 @@ defmodule OptimalEngine.API.Router do
   )
 
   plug(OptimalEngine.API.AuthPlug)
+
+  # Workspace authorization — must run after AuthPlug (needs :current_tenant /
+  # :current_api_key) and before :dispatch. Resolves the requested workspace
+  # (path/body/query), sets conn.assigns[:workspace_id], and fails closed:
+  # 403 on API-key workspace_scope mismatch, 404 on another tenant's workspace.
+  plug(OptimalEngine.API.WorkspaceAuthPlug)
   plug(:dispatch)
 
   # ---------------------------------------------------------------------------
@@ -60,14 +69,18 @@ defmodule OptimalEngine.API.Router do
   # Routes
   # ---------------------------------------------------------------------------
 
-  # Full graph payload — every context as a renderable node + visual edges + entities
+  # Full graph payload — every context as a renderable node + visual edges + entities.
+  # Workspace-scoped: ?workspace=<id> (default "default") — never leaks other
+  # workspaces' contexts, edges, or entities.
   get "/api/graph" do
-    edges = fetch_visual_edges()
-    entities = fetch_entity_summary()
-    nodes = fetch_node_summary()
-    contexts = fetch_all_contexts()
+    workspace = query_param(conn, "workspace", "default")
+    edges = fetch_visual_edges(workspace)
+    entities = fetch_entity_summary(workspace)
+    nodes = fetch_node_summary(workspace)
+    contexts = fetch_all_contexts(workspace)
 
     json(conn, %{
+      workspace_id: workspace,
       contexts: contexts,
       edges: edges,
       entities: format_entities(entities),
@@ -81,33 +94,55 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/graph/hubs" do
-    {:ok, hubs} = GraphAnalyzer.hubs()
+    workspace = query_param(conn, "workspace", "default")
+    {:ok, hubs} = GraphAnalyzer.hubs(workspace_id: workspace)
     json(conn, %{hubs: format_hubs(hubs)})
   end
 
   get "/api/graph/triangles" do
+    workspace = query_param(conn, "workspace", "default")
     limit = conn |> query_param("limit", "20") |> parse_int(20)
-    {:ok, triangles} = GraphAnalyzer.triangles(limit: limit)
+    # LLM classification is intentionally opt-in; default is low-latency
+    # candidate-only triangles. Use `?classify=true` to enable enrichment.
+    skip_llm = not (conn |> query_param("classify", "false") |> parse_bool(false))
+
+    {:ok, triangles} =
+      GraphAnalyzer.triangles(limit: limit, workspace_id: workspace, skip_llm: skip_llm)
+
     json(conn, %{triangles: format_triangles(triangles)})
   end
 
   get "/api/graph/clusters" do
-    {:ok, clusters} = GraphAnalyzer.clusters()
+    workspace = query_param(conn, "workspace", "default")
+    {:ok, clusters} = GraphAnalyzer.clusters(workspace_id: workspace)
     json(conn, %{clusters: format_clusters(clusters)})
   end
 
   get "/api/graph/reflect" do
+    workspace = query_param(conn, "workspace", "default")
     min = conn |> query_param("min", "2") |> parse_int(2)
-    {:ok, gaps} = Reflector.reflect(min_cooccurrences: min)
+    # LLM classification is intentionally opt-in; default is workspace-safe,
+    # low-latency candidate gaps only. Use `?classify=true` to enable.
+    skip_llm = not (conn |> query_param("classify", "false") |> parse_bool(false))
+
+    {:ok, gaps} =
+      Reflector.reflect(
+        min_cooccurrences: min,
+        workspace_id: workspace,
+        skip_llm: skip_llm
+      )
+
     json(conn, %{gaps: format_gaps(gaps)})
   end
 
   get "/api/node/:node_id" do
-    contexts = fetch_node_contexts(node_id)
-    edges = fetch_node_edges(node_id)
+    workspace = query_param(conn, "workspace", "default")
+    contexts = fetch_node_contexts(node_id, workspace)
+    edges = fetch_node_edges(node_id, workspace)
 
     json(conn, %{
       node: node_id,
+      workspace_id: workspace,
       contexts: contexts,
       edges: format_edges(edges)
     })
@@ -258,18 +293,9 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  get "/api/contexts/map" do
-    case Store.raw_query("SELECT id, node FROM contexts WHERE node IS NOT NULL", []) do
-      {:ok, rows} ->
-        mapping = Enum.map(rows, fn [id, node] -> %{id: id, node: node} end)
-        json(conn, %{contexts: mapping})
-      {:error, _} ->
-        json(conn, %{contexts: []})
-    end
-  end
-
   get "/api/health" do
-    {:ok, checks} = HealthDiagnostics.run()
+    workspace = query_param(conn, "workspace", "default")
+    {:ok, checks} = HealthDiagnostics.run(workspace_id: workspace)
     json(conn, %{health: format_health(checks)})
   end
 
@@ -317,45 +343,19 @@ defmodule OptimalEngine.API.Router do
     json(conn, snap)
   end
 
-  # POST /api/reindex — trigger a full re-walk of OPTIMAL_ENGINE_ROOT/nodes,
-  # or index a single file when {"path": "…"} is supplied.
-  #
-  # BusinessOS hits this after writing user-content markdown files (Pages,
-  # Tasks, Projects, etc.) so the engine picks them up without a process
-  # restart. Returns 202 + {"status":"already_running"} when the indexer is
-  # mid-run — that's not an error, just "another reindex is already in
-  # flight; the new files will land on the next pass."
-  post "/api/reindex" do
-    body = conn.body_params || %{}
-
-    result =
-      case Map.get(body, "path") do
-        path when is_binary(path) and path != "" ->
-          OptimalEngine.Pipeline.Indexer.index_file(path)
-
-        _ ->
-          OptimalEngine.Pipeline.Indexer.full_index()
-      end
-
-    case result do
-      {:ok, payload} when is_map(payload) ->
-        json(conn, Map.merge(%{status: "ok"}, payload))
-
-      {:ok, _} ->
-        json(conn, %{status: "ok"})
-
-      {:error, :already_running} ->
-        conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(202, Jason.encode!(%{status: "already_running"}))
-
-      {:error, reason} ->
-        send_resp(conn, 500, Jason.encode!(%{status: "error", reason: inspect(reason)}))
-    end
-  end
-
   # POST /api/rag — end-to-end retrieval for LLM consumption.
   # Body: {"query": "…", "format": "markdown", "audience": "default", "bandwidth": "medium", "workspace": "default"}
+  # Optional benchmark/debug controls: skip_intent, skip_wiki, hybrid_limit, memory_limit.
+  #
+  # Governed recall (additive opt-in): pass "context_package": true to answer
+  # through the Memory Core Retrieval Coordinator. The response then carries
+  # "source": "context_package" and a "context_package" object (the persisted
+  # ContextPackage) alongside the usual envelope.
+  #
+  # The authorization envelope (actor + allowed_partitions +
+  # allowed_security_labels) is derived SERVER-SIDE from the authenticated
+  # principal — body-supplied "actor"/"partitions"/"security_labels" are
+  # ignored. See rag_context_package_opts/3.
   post "/api/rag" do
     body = conn.body_params || %{}
 
@@ -370,8 +370,24 @@ defmodule OptimalEngine.API.Router do
 
         workspace_id = body["workspace"] || "default"
 
-        {:ok, result} = Retrieval.ask(q, receiver: receiver, workspace_id: workspace_id)
-        json(conn, result)
+        rag_opts =
+          [
+            receiver: receiver,
+            workspace_id: workspace_id,
+            skip_intent: parse_bool(body["skip_intent"], false),
+            skip_wiki: parse_bool(body["skip_wiki"], false)
+          ]
+          |> api_maybe_put(:hybrid_limit, parse_int(body["hybrid_limit"], nil))
+          |> api_maybe_put(:memory_limit, parse_int(body["memory_limit"], nil))
+          |> rag_context_package_opts(body, conn)
+
+        case Retrieval.ask(q, rag_opts) do
+          {:ok, result} ->
+            json(conn, render_rag_result(result))
+
+          {:error, reason} ->
+            send_resp(conn, 502, Jason.encode!(%{error: inspect(reason)}))
+        end
 
       _ ->
         send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
@@ -419,6 +435,58 @@ defmodule OptimalEngine.API.Router do
       {:ok, _task} = RagStream.start_link(query, receiver, self(), rag_opts)
 
       rag_stream_loop(conn)
+    end
+  end
+
+  # ── Render pipeline ─────────────────────────────────────────────────────
+  #
+  # 1-source → N-renders: the engine assembles audience-matched context and
+  # prompt guidance; the calling agent generates the final HTML via its LLM.
+
+  # GET /api/render/specs — list all render specs for a workspace.
+  get "/api/render/specs" do
+    workspace = query_param(conn, "workspace", "default")
+    specs = OptimalEngine.Render.Registry.list(workspace)
+    json(conn, %{specs: Enum.map(specs, &OptimalEngine.Render.Spec.to_map/1)})
+  end
+
+  # POST /api/render/context — assemble context for a specific render spec.
+  # Body: {"source": "architecture", "spec": "exec", "workspace": "default"}
+  # Returns: {spec, context (RAG envelope), prompt_guidance}
+  post "/api/render/context" do
+    body = conn.body_params || %{}
+    source = body["source"]
+    spec_name = body["spec"]
+    workspace_id = body["workspace"] || "default"
+
+    with source when is_binary(source) and source != "" <- source,
+         spec_name when is_binary(spec_name) and spec_name != "" <- spec_name,
+         {:ok, spec} <- OptimalEngine.Render.Registry.get(workspace_id, spec_name) do
+      receiver =
+        Receiver.new(%{
+          format: :markdown,
+          bandwidth: spec.bandwidth,
+          audience: spec.audience,
+          genre: spec.genre
+        })
+
+      {:ok, rag_result} = Retrieval.ask(source, receiver: receiver, workspace_id: workspace_id)
+
+      json(conn, %{
+        spec: OptimalEngine.Render.Spec.to_map(spec),
+        context: rag_result.envelope,
+        prompt_guidance: OptimalEngine.Render.Spec.prompt_guidance(spec),
+        trace: rag_result.trace
+      })
+    else
+      nil ->
+        send_resp(conn, 400, Jason.encode!(%{error: "source and spec are required"}))
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "render spec not found"}))
+
+      _ ->
+        send_resp(conn, 400, Jason.encode!(%{error: "source and spec are required"}))
     end
   end
 
@@ -637,9 +705,11 @@ defmodule OptimalEngine.API.Router do
 
   # GET /api/optimal/graph — shape expected by OptimalGraphView.svelte:
   #   %{entities: [%{name, type, connections}], edges: [%{source, target, relation, weight}], stats: %{...}}
+  # Workspace-scoped via ?workspace=<id> (default "default").
   get "/api/optimal/graph" do
-    entities = optimal_entity_summary()
-    edges = optimal_relation_edges()
+    workspace = query_param(conn, "workspace", "default")
+    entities = optimal_entity_summary(workspace)
+    edges = optimal_relation_edges(workspace)
     edge_types = Enum.frequencies_by(edges, & &1.relation)
 
     json(conn, %{
@@ -656,13 +726,15 @@ defmodule OptimalEngine.API.Router do
   # GET /api/optimal/nodes — shape expected by NodeDrillDown level-0 card grid:
   #   %{nodes: [%{slug, name, type, signal_count}]}
   get "/api/optimal/nodes" do
-    json(conn, %{nodes: optimal_node_summary()})
+    workspace = query_param(conn, "workspace", "default")
+    json(conn, %{nodes: optimal_node_summary(workspace)})
   end
 
   # GET /api/optimal/nodes/:slug/files — drill-down file tree. Component
   # expects `{files: [...]}`; each entry `%{name, path, is_dir, size, children?}`.
   get "/api/optimal/nodes/:slug/files" do
-    json(conn, %{files: optimal_node_files(slug)})
+    workspace = query_param(conn, "workspace", "default")
+    json(conn, %{files: optimal_node_files(slug, workspace)})
   end
 
   # ── Phase 14: workspace explorer endpoints ──────────────────────────────
@@ -679,8 +751,13 @@ defmodule OptimalEngine.API.Router do
   # entities (by type), classification, intent, clusters, wiki citations.
   # This is the "see everything the engine knows about this one data point"
   # endpoint that the workspace drill-down mounts.
+  #
+  # Workspace-scoped via ?workspace=<id> (default "default"): a signal id
+  # belonging to another workspace returns 404, never its content (IDOR fix).
   get "/api/signals/:id" do
-    case signal_detail(id) do
+    workspace = query_param(conn, "workspace", "default")
+
+    case signal_detail(id, workspace) do
       nil -> send_resp(conn, 404, Jason.encode!(%{error: "signal not found"}))
       detail -> json(conn, detail)
     end
@@ -690,13 +767,15 @@ defmodule OptimalEngine.API.Router do
   #   limit=N   (default 50, max 200 via pagination; legacy max 1000 honoured when no offset given)
   #   offset=N  (default 0)
   #   kind=ingest|erasure|retention_action|…  (optional filter)
+  #   workspace=<id>  (default "default" — only that workspace's events are returned)
   get "/api/activity" do
     {offset, limit} = Pagination.parse(conn, 100)
     kind = query_param(conn, "kind", "")
-    total = count_events(kind)
-    events = recent_events(limit, offset, kind)
+    workspace = query_param(conn, "workspace", "default")
+    total = count_events(kind, workspace)
+    events = recent_events(limit, offset, kind, workspace)
     pagination = Pagination.wrap(events, total, offset, limit)
-    json(conn, %{events: events, pagination: pagination.pagination})
+    json(conn, %{workspace_id: workspace, events: events, pagination: pagination.pagination})
   end
 
   # GET /api/architectures — every data architecture the engine recognises,
@@ -818,7 +897,7 @@ defmodule OptimalEngine.API.Router do
         tenant_id = Map.get(body, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
         description = Map.get(body, "description")
 
-        case OptimalEngine.Workspace.create(%{
+        case OptimalEngine.WorkspaceTopology.create_workspace(%{
                slug: slug,
                name: name,
                description: description,
@@ -1112,7 +1191,7 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # POST /api/surface/test  body: {"subscription":"sub:...","slug":"healthtech-pricing-decision"}
+  # POST /api/surface/test  body: {"subscription":"sub:...","slug":"customer-portal-pricing-decision"}
   # Convenience: trigger a synthetic push to all listeners of a subscription.
   post "/api/surface/test" do
     body = conn.body_params || %{}
@@ -1179,6 +1258,78 @@ defmodule OptimalEngine.API.Router do
         {:error, reason} ->
           send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
       end
+    end
+  end
+
+  # POST /api/memory/remember — gated memory intake for agent/app writes.
+  # Body: {content, workspace?, audience?, metadata?, force?, gate_threshold?,
+  #        salience_floor?, skip_threshold?, update_threshold?}
+  # Returns: 200 + {action, memory?, gate, dedup?}.
+  post "/api/memory/remember" do
+    body = conn.body_params || %{}
+    content = Map.get(body, "content")
+
+    if not (is_binary(content) and content != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "content is required"}))
+    else
+      attrs =
+        %{
+          content: content,
+          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+        }
+        |> maybe_put(:tenant_id, Map.get(body, "tenant", Map.get(body, "tenant_id")))
+        |> maybe_put(:is_static, Map.get(body, "is_static"))
+        |> maybe_put(:audience, Map.get(body, "audience"))
+        |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
+        |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
+        |> maybe_put(:metadata, Map.get(body, "metadata"))
+        |> maybe_put(:actor_id, Map.get(body, "actor_id"))
+        |> maybe_put(:access_policy_id, Map.get(body, "access_policy_id"))
+        |> maybe_put(:security_labels, string_list_param(body, "security_labels"))
+        |> maybe_put(:partition_ids, string_list_param(body, "partition_ids"))
+
+      opts =
+        [
+          force: parse_bool(Map.get(body, "force"), false),
+          gate_threshold: parse_float(Map.get(body, "gate_threshold")),
+          salience_floor: parse_float(Map.get(body, "salience_floor")),
+          skip_threshold: parse_float(Map.get(body, "skip_threshold")),
+          update_threshold: parse_float(Map.get(body, "update_threshold")),
+          versioned_projection: true
+        ]
+        |> reject_nil_keyword()
+
+      case OptimalEngine.Memory.remember(attrs, opts) do
+        {:ok, result} ->
+          json(conn, memory_intake_result_to_map(result))
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
+  # POST /api/assets — preserve a multimodal file through the governed asset path.
+  #
+  # JSON body supports either:
+  #   {"path": "/local/file.pdf", "workspace": "default"}
+  #   {"filename": "call.wav", "content_base64": "...", "workspace": "default"}
+  #
+  # Optional adapter execution:
+  #   {"adapter_id": "openai_whisper", "command": "printf", "args": ["..."]}
+  post "/api/assets" do
+    body = conn.body_params || %{}
+
+    case asset_upload_source_path(body) do
+      {:ok, source_path, cleanup} ->
+        try do
+          handle_asset_upload(conn, body, source_path)
+        after
+          cleanup.()
+        end
+
+      {:error, reason} ->
+        send_resp(conn, 400, Jason.encode!(%{error: asset_upload_error(reason)}))
     end
   end
 
@@ -1368,6 +1519,396 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # ── Memory Core claim governance ──────────────────────────────────────────
+
+  # POST /api/memory-core/context-packages/refresh-stale — batch refresh stale
+  # Context Packages for scheduler, app, or agent callers.
+  # Body: {workspace?, tenant?, actor_id?, batch_limit?, limit?,
+  #        continue_on_error?, allowed_partitions?, allowed_security_labels?}
+  post "/api/memory-core/context-packages/refresh-stale" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+
+    tenant_id =
+      Map.get(
+        body,
+        "tenant",
+        Map.get(body, "tenant_id", conn.assigns[:current_tenant] || "default")
+      )
+
+    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    opts =
+      [
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        actor_id: actor_id,
+        batch_limit: parse_optional_positive_int(Map.get(body, "batch_limit")),
+        limit: parse_optional_positive_int(Map.get(body, "limit")),
+        continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
+      ]
+      |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
+      |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case MemoryCore.refresh_stale_context_packages(opts) do
+      {:ok, result} ->
+        json(conn, %{
+          tenant_id: tenant_id,
+          workspace_id: workspace_id,
+          stale_context_package_ids: result.stale_context_package_ids,
+          refreshed_count: length(result.refreshed_context_packages),
+          error_count: length(result.errors),
+          refreshed_context_packages:
+            Enum.map(result.refreshed_context_packages, &context_package_to_map/1),
+          errors: Enum.map(result.errors, &stringify_keys/1)
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/active-pools — open task-scoped working memory.
+  # Body: {workspace?, tenant?, task_type?, subject_anchor?, member_links?,
+  #        agent_links?, tool_links?, security_labels?, partition_ids?, metadata?}
+  post "/api/memory-core/active-pools" do
+    body = conn.body_params || %{}
+
+    opts =
+      [
+        workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+        tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
+        task_type: Map.get(body, "task_type"),
+        subject_anchor: Map.get(body, "subject_anchor"),
+        time_mode: Map.get(body, "time_mode", "current_valid"),
+        pool_scope: coerce_metadata(Map.get(body, "pool_scope")),
+        member_links: Map.get(body, "member_links", []),
+        agent_links: Map.get(body, "agent_links", []),
+        tool_links: Map.get(body, "tool_links", []),
+        membership_policy: coerce_metadata(Map.get(body, "membership_policy")),
+        delegation_chain_links: Map.get(body, "delegation_chain_links", []),
+        access_policy_id: Map.get(body, "access_policy_id"),
+        security_labels: string_list_param(body, "security_labels"),
+        partition_ids: string_list_param(body, "partition_ids"),
+        policy_version: Map.get(body, "policy_version"),
+        metadata: coerce_metadata(Map.get(body, "metadata"))
+      ]
+      |> reject_nil_keyword()
+
+    case MemoryCore.open_active_pool(opts) do
+      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/active-pools/:id — fetch one Active Memory Pool.
+  get "/api/memory-core/active-pools/:id" do
+    case MemoryCore.get_active_pool(id) do
+      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/retrieve — retrieve governed context
+  # for a pool and load the resulting Context Package into that pool.
+  post "/api/memory-core/active-pools/:id/retrieve" do
+    body = conn.body_params || %{}
+    query = Map.get(body, "query", "")
+
+    if not (is_binary(query) and String.trim(query) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
+    else
+      opts =
+        [
+          tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
+          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          active_memory_pool_id: id,
+          request_intent: Map.get(body, "request_intent", "recall"),
+          time_mode: Map.get(body, "time_mode", "current_valid"),
+          detail_depth: Map.get(body, "detail_depth", "summary"),
+          limit: parse_optional_positive_int(Map.get(body, "limit"))
+        ]
+        |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
+        |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+        |> reject_nil_keyword()
+
+      with {:ok, package} <- MemoryCore.retrieve(query, opts),
+           {:ok, pool} <- MemoryCore.load_context_package(id, package) do
+        json(conn, %{
+          active_memory_pool: active_pool_to_map(pool),
+          context_package: context_package_to_map(package)
+        })
+      else
+        {:error, :not_found} ->
+          send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/refresh-context — refresh stale
+  # Context Packages already loaded into the pool.
+  post "/api/memory-core/active-pools/:id/refresh-context" do
+    body = conn.body_params || %{}
+
+    opts =
+      [
+        actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+        continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
+      ]
+      |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
+      |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+      |> reject_nil_keyword()
+
+    case MemoryCore.refresh_pool_context_packages(id, opts) do
+      {:ok, result} ->
+        json(conn, %{
+          active_memory_pool: active_pool_to_map(result.pool),
+          refreshed_count: length(result.refreshed_context_packages),
+          skipped_context_package_ids: result.skipped_context_package_ids,
+          errors: Enum.map(result.errors, &stringify_keys/1),
+          refreshed_context_packages:
+            Enum.map(result.refreshed_context_packages, &context_package_to_map/1)
+        })
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/observations — publish a pool-local
+  # observation as Source Package + pending Claim.
+  post "/api/memory-core/active-pools/:id/observations" do
+    body = conn.body_params || %{}
+    observation = Map.get(body, "observation", Map.get(body, "text", ""))
+
+    if not (is_binary(observation) and String.trim(observation) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "observation is required"}))
+    else
+      opts =
+        [
+          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          source_type: Map.get(body, "source_type", "pool_observation"),
+          observation_kind: Map.get(body, "observation_kind", "observation"),
+          claim_text: Map.get(body, "claim_text", observation),
+          subject_anchor: Map.get(body, "subject_anchor"),
+          action_class: Map.get(body, "action_class"),
+          object_anchor: Map.get(body, "object_anchor"),
+          aggregate_confidence: parse_float(Map.get(body, "aggregate_confidence")),
+          aggregate_precision: parse_float(Map.get(body, "aggregate_precision"))
+        ]
+        |> reject_nil_keyword()
+
+      case MemoryCore.publish_pool_observation(id, observation, opts) do
+        {:ok, result} ->
+          json(conn, %{
+            active_memory_pool: active_pool_to_map(result.pool),
+            source_package: source_package_to_map(result.source_package),
+            pending_claim: claim_to_map(result.pending_claim)
+          })
+
+        {:error, :not_found} ->
+          send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
+  # POST /api/memory-core/active-pools/:id/close — close/archive a pool.
+  post "/api/memory-core/active-pools/:id/close" do
+    body = conn.body_params || %{}
+
+    opts =
+      [
+        reason: Map.get(body, "reason"),
+        lifecycle_state: Map.get(body, "lifecycle_state", "closed"),
+        archive_state: Map.get(body, "archive_state", "archived")
+      ]
+      |> reject_nil_keyword()
+
+    case MemoryCore.close_active_pool(id, opts) do
+      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/claim-review — review queue summary and claims.
+  # Params: workspace, tenant, review_status?, lifecycle_state?, limit?
+  get "/api/memory-core/claim-review" do
+    workspace_id = query_param(conn, "workspace", "default")
+    tenant_id = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    opts =
+      [
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        review_status: query_param(conn, "review_status", nil),
+        lifecycle_state: query_param(conn, "lifecycle_state", nil),
+        limit: parse_optional_positive_int(query_param(conn, "limit", nil))
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case MemoryCore.claim_review_queue(opts) do
+      {:ok, queue} ->
+        json(conn, %{
+          tenant_id: queue.tenant_id,
+          workspace_id: queue.workspace_id,
+          count: queue.count,
+          review_counts: queue.review_counts,
+          lifecycle_counts: queue.lifecycle_counts,
+          claims: Enum.map(queue.claims, &claim_to_map/1)
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/claims — list pending claims for review.
+  # Params: workspace, tenant
+  get "/api/memory-core/claims" do
+    workspace_id = query_param(conn, "workspace", "default")
+    tenant_id = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    case MemoryCore.pending_claims(workspace_id: workspace_id, tenant_id: tenant_id) do
+      {:ok, claims} ->
+        json(conn, %{
+          tenant_id: tenant_id,
+          workspace_id: workspace_id,
+          count: length(claims),
+          claims: Enum.map(claims, &claim_to_map/1)
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/claims/:id — fetch one claim by id.
+  # Params: workspace, tenant
+  get "/api/memory-core/claims/:id" do
+    workspace_id = query_param(conn, "workspace", nil)
+    tenant_id = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    case MemoryCore.get_claim(id, workspace_id: workspace_id, tenant_id: tenant_id) do
+      {:ok, claim} -> json(conn, claim_to_map(claim))
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/claims/:id/reject — reject a pending claim.
+  # Body: {workspace?, tenant?, actor_id?}
+  post "/api/memory-core/claims/:id/reject" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
+    tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
+    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    case MemoryCore.reject_claim(id,
+           workspace_id: workspace_id,
+           tenant_id: tenant_id,
+           actor_id: actor_id
+         ) do
+      {:ok, claim} -> json(conn, %{claim: claim_to_map(claim)})
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/claims/:id/promote — accept a claim as a Fact and
+  # build a Memory Object.
+  # Body: {workspace?, tenant?, actor_id?, fact_text?, summary?, memory_type?,
+  #        verification_status?, aggregate_confidence?, aggregate_precision?,
+  #        valid_time_start?, valid_time_end?, stale_after?, fact_metadata?,
+  #        memory_metadata?, supersedes_fact_id?, allow_stale?,
+  #        supersession_reason?}
+  post "/api/memory-core/claims/:id/promote" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
+    tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
+    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    opts =
+      [
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        actor_id: actor_id,
+        verifier_id: Map.get(body, "verifier_id"),
+        fact_text: Map.get(body, "fact_text"),
+        fact_type: Map.get(body, "fact_type"),
+        verification_status: Map.get(body, "verification_status"),
+        aggregate_confidence: Map.get(body, "aggregate_confidence"),
+        aggregate_precision: Map.get(body, "aggregate_precision"),
+        valid_time_start: Map.get(body, "valid_time_start"),
+        valid_time_end: Map.get(body, "valid_time_end"),
+        stale_after: Map.get(body, "stale_after"),
+        supersedes_fact_id: Map.get(body, "supersedes_fact_id"),
+        superseded_valid_time_end: Map.get(body, "superseded_valid_time_end"),
+        supersession_reason: Map.get(body, "supersession_reason"),
+        allow_stale: truthy?(Map.get(body, "allow_stale")),
+        summary: Map.get(body, "summary"),
+        memory_type: Map.get(body, "memory_type"),
+        salience: Map.get(body, "salience"),
+        fact_metadata: coerce_metadata(Map.get(body, "fact_metadata")),
+        memory_metadata: coerce_metadata(Map.get(body, "memory_metadata"))
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case MemoryCore.promote_claim(id, opts) do
+      {:ok, result} ->
+        json(conn, %{
+          claim: claim_to_map(result.claim),
+          fact: stringify_keys(result.fact),
+          memory_object: stringify_keys(result.memory_object)
+        })
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+
+      {:error, :claim_rejected} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim rejected"}))
+
+      {:error, {:claim_stale, stale_after}} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim stale", stale_after: stale_after}))
+
+      {:error, {:contradicts_current_facts, fact_ids}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "claim contradicts current facts", fact_ids: fact_ids})
+        )
+
+      {:error, {:superseded_fact_not_found, fact_id}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "superseded fact not found", fact_id: fact_id})
+        )
+
+      {:error, {:superseded_fact_not_current, fact_id}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "superseded fact is not current", fact_id: fact_id})
+        )
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
   # ── API key management (Phase 18) ──────────────────────────────────────────
   #
   # These endpoints manage API keys for the current tenant. When auth is on
@@ -1464,7 +2005,6 @@ defmodule OptimalEngine.API.Router do
     else
       case OptimalEngine.Batch.import_signals(items, workspace_id: workspace_id) do
         {:ok, summary} -> json(conn, summary)
-        {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
       end
     end
   end
@@ -1482,7 +2022,6 @@ defmodule OptimalEngine.API.Router do
     else
       case OptimalEngine.Batch.import_memories(items, workspace_id: workspace_id) do
         {:ok, summary} -> json(conn, summary)
-        {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
       end
     end
   end
@@ -1494,7 +2033,6 @@ defmodule OptimalEngine.API.Router do
 
     case OptimalEngine.Batch.export_signals(workspace_id: workspace_id) do
       {:ok, signals} -> json(conn, %{workspace_id: workspace_id, signals: signals})
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
@@ -1505,7 +2043,6 @@ defmodule OptimalEngine.API.Router do
 
     case OptimalEngine.Batch.export_memories(workspace_id: workspace_id) do
       {:ok, memories} -> json(conn, %{workspace_id: workspace_id, memories: memories})
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
@@ -1517,7 +2054,6 @@ defmodule OptimalEngine.API.Router do
 
     case OptimalEngine.Batch.export_workspace(workspace_id, tenant_id: tenant_id) do
       {:ok, snapshot} -> json(conn, snapshot)
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
@@ -1627,6 +2163,250 @@ defmodule OptimalEngine.API.Router do
     }
   end
 
+  defp memory_intake_result_to_map(result) do
+    %{
+      action: Atom.to_string(result.action),
+      memory: result.memory && memory_to_map(result.memory),
+      gate: memory_intake_gate_to_map(result.gate),
+      dedup: memory_intake_dedup_to_map(Map.get(result, :dedup))
+    }
+  end
+
+  defp memory_intake_gate_to_map(nil), do: nil
+
+  defp memory_intake_gate_to_map(gate) do
+    %{
+      should_encode: gate.should_encode,
+      score: gate.score,
+      novelty: gate.novelty,
+      salience: gate.salience,
+      prediction_error: gate.prediction_error,
+      reason: gate.reason,
+      similar_memory_id: gate.similar_memory_id
+    }
+  end
+
+  defp memory_intake_dedup_to_map(nil), do: nil
+
+  defp memory_intake_dedup_to_map(dedup) do
+    %{
+      action: Atom.to_string(dedup.action),
+      reason: dedup.reason,
+      similarity: dedup.similarity,
+      existing_memory_id: dedup.existing && dedup.existing.id
+    }
+  end
+
+  defp claim_to_map(claim) when is_map(claim) do
+    if Map.has_key?(claim, :__struct__) do
+      claim
+      |> Map.from_struct()
+      |> stringify_keys()
+    else
+      stringify_keys(claim)
+    end
+  end
+
+  defp parse_optional_positive_int(nil), do: nil
+  defp parse_optional_positive_int(""), do: nil
+
+  defp parse_optional_positive_int(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} when int > 0 -> int
+      _ -> nil
+    end
+  end
+
+  defp parse_optional_positive_int(value) when is_integer(value) and value > 0, do: value
+  defp parse_optional_positive_int(_value), do: nil
+
+  defp truthy?(true), do: true
+  defp truthy?("true"), do: true
+  defp truthy?("1"), do: true
+  defp truthy?(1), do: true
+  defp truthy?(_value), do: nil
+
+  defp asset_upload_source_path(body) do
+    path = Map.get(body, "path")
+    content_base64 = Map.get(body, "content_base64")
+
+    cond do
+      is_binary(path) and String.trim(path) != "" ->
+        if File.exists?(path) do
+          {:ok, path, fn -> :ok end}
+        else
+          {:error, :path_not_found}
+        end
+
+      is_binary(content_base64) and String.trim(content_base64) != "" ->
+        case Base.decode64(content_base64) do
+          {:ok, bytes} ->
+            with {:ok, path} <-
+                   write_upload_tempfile(bytes, Map.get(body, "filename", "upload.bin")) do
+              {:ok, path, fn -> File.rm(path) end}
+            end
+
+          :error ->
+            {:error, :invalid_base64}
+        end
+
+      true ->
+        {:error, :asset_source_required}
+    end
+  end
+
+  defp write_upload_tempfile(bytes, filename) when is_binary(bytes) do
+    safe_name =
+      filename
+      |> to_string()
+      |> Path.basename()
+      |> String.replace(~r/[^A-Za-z0-9._-]/, "_")
+      |> case do
+        "" -> "upload.bin"
+        value -> value
+      end
+
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "optimal-api-asset-#{System.unique_integer([:positive])}-#{safe_name}"
+      )
+
+    case File.write(path, bytes) do
+      :ok -> {:ok, path}
+      {:error, reason} -> {:error, {:write_failed, reason}}
+    end
+  end
+
+  defp handle_asset_upload(conn, body, source_path) do
+    workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+    tenant_id = Map.get(body, "tenant", Map.get(body, "tenant_id", "default"))
+    actor_id = Map.get(body, "actor_id", "api:asset-upload")
+
+    store_opts =
+      [
+        tenant_id: tenant_id,
+        workspace_id: workspace_id,
+        actor_id: actor_id,
+        content_type: Map.get(body, "content_type"),
+        modality: parse_atom(Map.get(body, "modality"), nil),
+        trust_label: Map.get(body, "trust_label", "unreviewed"),
+        retention_class: Map.get(body, "retention_class", "standard"),
+        access_policy_id: Map.get(body, "access_policy_id"),
+        security_labels: string_list_param(body, "security_labels"),
+        partition_ids: string_list_param(body, "partition_ids"),
+        metadata:
+          Map.merge(coerce_metadata(Map.get(body, "metadata")), %{
+            "api_upload" => true,
+            "filename" => Map.get(body, "filename") || Path.basename(source_path)
+          })
+      ]
+      |> reject_nil_keyword()
+
+    with {:ok, %{asset: asset, source_package: source_package}} <-
+           MemoryCore.store_asset_file(source_path, store_opts),
+         {:ok, adapter_result} <- maybe_run_upload_adapter(asset, body, store_opts) do
+      response =
+        %{
+          asset: asset_to_map(asset),
+          source_package: source_package_to_map(source_package),
+          adapter_run: Map.get(adapter_result, :adapter_run),
+          asset_extractions: Map.get(adapter_result, :asset_extractions, [])
+        }
+        |> stringify_keys()
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(201, Jason.encode!(response))
+    else
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  defp maybe_run_upload_adapter(asset, body, store_opts) do
+    case Map.get(body, "adapter_id") do
+      adapter_id when is_binary(adapter_id) and adapter_id != "" ->
+        adapter_opts =
+          store_opts
+          |> Keyword.merge(
+            command: Map.get(body, "command"),
+            args: Map.get(body, "args", []),
+            adapter_role: Map.get(body, "adapter_role"),
+            auto_extract: parse_bool(Map.get(body, "auto_extract"), true),
+            confidence: Map.get(body, "confidence"),
+            precision: Map.get(body, "precision"),
+            model_id: Map.get(body, "model_id"),
+            model_version: Map.get(body, "model_version"),
+            content_text: Map.get(body, "content_text"),
+            content_ref: Map.get(body, "content_ref"),
+            embedding_ref: Map.get(body, "embedding_ref"),
+            embedding_model_id: Map.get(body, "embedding_model_id"),
+            embedding_model_version: Map.get(body, "embedding_model_version"),
+            embedding_dim: Map.get(body, "embedding_dim"),
+            embedding_space: Map.get(body, "embedding_space"),
+            target_ref: Map.get(body, "target_ref"),
+            extraction_type: Map.get(body, "extraction_type"),
+            extraction_metadata: coerce_metadata(Map.get(body, "extraction_metadata"))
+          )
+          |> reject_nil_keyword()
+
+        with {:ok, run} <- MemoryCore.run_asset_adapter(asset.id, adapter_id, adapter_opts),
+             {:ok, extractions} <-
+               MemoryCore.list_asset_extractions(asset.id,
+                 tenant_id: asset.tenant_id,
+                 workspace_id: asset.workspace_id
+               ) do
+          {:ok, %{adapter_run: run, asset_extractions: extractions}}
+        end
+
+      _ ->
+        {:ok, %{adapter_run: nil, asset_extractions: []}}
+    end
+  end
+
+  defp asset_to_map(asset), do: clean_map(asset)
+  defp source_package_to_map(source_package), do: clean_map(source_package)
+  defp active_pool_to_map(pool), do: pool |> clean_map() |> stringify_keys()
+
+  defp clean_map(value) when is_map(value) do
+    value
+    |> maybe_from_struct()
+    |> Map.drop([:__struct__])
+  end
+
+  defp maybe_from_struct(%{__struct__: _} = value), do: Map.from_struct(value)
+  defp maybe_from_struct(value), do: value
+
+  defp string_list_param(body, key) do
+    case Map.get(body, key, []) do
+      value when is_list(value) -> Enum.map(value, &to_string/1)
+      value when is_binary(value) and value != "" -> [value]
+      _ -> []
+    end
+  end
+
+  defp maybe_put_string_list(keyword, body, body_key, opt_key) do
+    if Map.has_key?(body, body_key) do
+      Keyword.put(keyword, opt_key, string_list_param(body, body_key))
+    else
+      keyword
+    end
+  end
+
+  defp reject_nil_keyword(keyword) do
+    Enum.reject(keyword, fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp asset_upload_error(:asset_source_required), do: "path or content_base64 is required"
+  defp asset_upload_error(:path_not_found), do: "path not found"
+  defp asset_upload_error(:invalid_base64), do: "content_base64 is invalid"
+
+  defp asset_upload_error({:write_failed, reason}),
+    do: "could not write upload temp file: #{reason}"
+
+  defp asset_upload_error(reason), do: inspect(reason)
+
   # Shared handler for update/extend/derive — each takes (id, attrs) and returns {:ok, mem}.
   defp memory_mutation_endpoint(conn, id, fun) do
     body = conn.body_params || %{}
@@ -1683,9 +2463,86 @@ defmodule OptimalEngine.API.Router do
   defp api_maybe_put(kw, _key, nil), do: kw
   defp api_maybe_put(kw, key, val), do: Keyword.put(kw, key, val)
 
+  # Governed-recall opt-in for POST /api/rag: forwards context_package opts
+  # to Retrieval.ask/2. No-op unless "context_package": true.
+  #
+  # SECURITY: the authorization envelope (actor + allowed_partitions +
+  # allowed_security_labels) is derived SERVER-SIDE from the authenticated
+  # principal — body-supplied "actor"/"partitions"/"security_labels" are
+  # ignored, so a caller can never widen recall by asserting an envelope.
+  # Without an API key (anonymous dev mode) no grants are forwarded and the
+  # Retrieval Coordinator's fail-closed empty-envelope behavior applies: only
+  # unlabeled, unpartitioned objects are admitted.
+  defp rag_context_package_opts(rag_opts, body, conn) do
+    if parse_bool(body["context_package"], false) do
+      rag_opts
+      |> Keyword.put(:context_package, true)
+      |> api_maybe_put(:actor_id, authenticated_actor(conn))
+      |> api_maybe_put(:allowed_partitions, principal_grants(conn, "allowed_partitions"))
+      |> api_maybe_put(
+        :allowed_security_labels,
+        principal_grants(conn, "allowed_security_labels")
+      )
+    else
+      rag_opts
+    end
+  end
+
+  # The actor recorded in the governed scope envelope is the authenticated
+  # principal set by AuthPlug — never a body-asserted name.
+  defp authenticated_actor(conn) do
+    case conn.assigns[:current_principal] do
+      principal when is_binary(principal) and principal != "" -> principal
+      _ -> nil
+    end
+  end
+
+  # Server-side ACL grants for governed recall, read from the verified API
+  # key's metadata ("allowed_partitions" / "allowed_security_labels" string
+  # lists, set at mint time). Returns nil (opt omitted) when the caller has no
+  # key or the key carries no such grant — the coordinator then fails closed.
+  defp principal_grants(conn, grant) do
+    case conn.assigns[:current_api_key] do
+      %ApiKey{metadata: %{} = metadata} ->
+        case Map.get(metadata, grant) do
+          grants when is_list(grants) -> Enum.map(grants, &to_string/1)
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # ContextPackage structs are projected to plain maps before JSON encoding;
+  # legacy RAG results pass through unchanged.
+  defp render_rag_result(%{context_package: %ContextPackage{} = package} = result) do
+    Map.put(result, :context_package, ContextPackage.to_map(package))
+  end
+
+  defp render_rag_result(result), do: result
+
+  defp parse_bool(true, _default), do: true
+  defp parse_bool(false, _default), do: false
   defp parse_bool("true", _default), do: true
   defp parse_bool("1", _default), do: true
+  defp parse_bool("false", _default), do: false
+  defp parse_bool("0", _default), do: false
   defp parse_bool(_, default), do: default
+
+  defp parse_float(nil), do: nil
+  defp parse_float(""), do: nil
+  defp parse_float(value) when is_float(value), do: value
+  defp parse_float(value) when is_integer(value), do: value / 1
+
+  defp parse_float(value) when is_binary(value) do
+    case Float.parse(value) do
+      {float, ""} -> float
+      _ -> nil
+    end
+  end
+
+  defp parse_float(_value), do: nil
 
   # Resolve a workspace id (e.g. "default" or "default:engineering") to a
   # Workspace struct. Returns `{:error, :not_found}` for unknown ids.
@@ -1695,6 +2552,25 @@ defmodule OptimalEngine.API.Router do
 
   # Recursively convert atom keys to strings for JSON serialisation.
   # Config maps use atom keys internally; JSON must emit strings.
+  defp context_package_to_map(%ContextPackage{} = package) do
+    package
+    |> ContextPackage.to_map()
+    |> stringify_keys()
+  end
+
+  defp context_package_to_map(package), do: stringify_keys(package)
+
+  defp stringify_keys(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp stringify_keys(%NaiveDateTime{} = value), do: NaiveDateTime.to_iso8601(value)
+  defp stringify_keys(%Date{} = value), do: Date.to_iso8601(value)
+  defp stringify_keys(%Time{} = value), do: Time.to_iso8601(value)
+
+  defp stringify_keys(%_struct{} = value) do
+    value
+    |> Map.from_struct()
+    |> stringify_keys()
+  end
+
   defp stringify_keys(map) when is_map(map) do
     Map.new(map, fn
       {k, v} when is_atom(k) -> {Atom.to_string(k), stringify_keys(v)}
@@ -1707,7 +2583,6 @@ defmodule OptimalEngine.API.Router do
 
   defp append_if(list, true, item), do: list ++ [item]
   defp append_if(list, false, _item), do: list
-  defp append_if(list, "", _item), do: list
 
   defp body_audience(conn), do: query_param(conn, "audience", "default")
 
@@ -1823,11 +2698,11 @@ defmodule OptimalEngine.API.Router do
       {:rag_stream_error, reason} ->
         send_sse(conn, "error", %{error: inspect(reason)})
 
-      # Task links emit a {:DOWN, ...} or normal exit message — ignore safely.
-      {_ref, _result} ->
+      {:plug_conn, :sent} ->
         rag_stream_loop(conn)
 
-      {:plug_conn, :sent} ->
+      # Task links emit a {:DOWN, ...} or normal exit message — ignore safely.
+      {_ref, _result} ->
         rag_stream_loop(conn)
 
       _other ->
@@ -1859,8 +2734,11 @@ defmodule OptimalEngine.API.Router do
     Map.get(conn.query_params, key, default)
   end
 
+  defp parse_int(nil, default), do: default
+  defp parse_int(n, _default) when is_integer(n) and n > 0, do: n
+
   defp parse_int(str, default) do
-    case Integer.parse(str) do
+    case Integer.parse(to_string(str)) do
       {n, _} when n > 0 -> n
       _ -> default
     end
@@ -1870,15 +2748,17 @@ defmodule OptimalEngine.API.Router do
   # Helpers: data fetching (raw SQL via Store.raw_query/2)
   # ---------------------------------------------------------------------------
 
-  # Every context in the DB — each becomes a renderable node in the graph
-  defp fetch_all_contexts do
+  # Every context in the requested workspace — each becomes a renderable node
+  # in the graph. Always workspace-filtered: no cross-workspace leakage.
+  defp fetch_all_contexts(workspace_id) do
     case Store.raw_query(
            """
            SELECT id, title, node, type, genre, sn_ratio, modified_at, l0_abstract, uri
            FROM contexts
+           WHERE workspace_id = ?1
            ORDER BY node, modified_at DESC
            """,
-           []
+           [workspace_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, node, type, genre, sn, mod, abstract, uri] ->
@@ -1910,23 +2790,28 @@ defmodule OptimalEngine.API.Router do
   #
   # All edges are deduplicated: only the (min_id, max_id) pair is kept so
   # A→B and B→A are not both emitted.
-  defp fetch_visual_edges do
-    entity_edges = fetch_shared_entity_edges()
-    cross_ref_edges = fetch_cross_ref_edges()
+  defp fetch_visual_edges(workspace_id) do
+    entity_edges = fetch_shared_entity_edges(workspace_id)
+    cross_ref_edges = fetch_cross_ref_edges(workspace_id)
 
     (entity_edges ++ cross_ref_edges)
     |> deduplicate_edges()
   end
 
-  defp fetch_shared_entity_edges do
+  # Both endpoints are resolved through the contexts table (the source of
+  # truth for workspace membership) so legacy entity rows backfilled to
+  # 'default' can never bridge two workspaces.
+  defp fetch_shared_entity_edges(workspace_id) do
     sql = """
     SELECT e1.context_id AS source, e2.context_id AS target, e1.name AS entity
     FROM entities e1
     JOIN entities e2 ON e1.name = e2.name AND e1.context_id < e2.context_id
+    JOIN contexts c1 ON c1.id = e1.context_id AND c1.workspace_id = ?1
+    JOIN contexts c2 ON c2.id = e2.context_id AND c2.workspace_id = ?1
     LIMIT 2000
     """
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [workspace_id]) do
       {:ok, rows} ->
         # Group by (source, target) pair and count shared entities
         rows
@@ -1952,19 +2837,20 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp fetch_cross_ref_edges do
+  defp fetch_cross_ref_edges(workspace_id) do
     # cross_ref edges: source_id is a context_id, target_id is a node name.
-    # Resolve target node name → all context IDs in that node.
+    # Resolve target node name → all context IDs in that node, requiring both
+    # endpoints to live in the requested workspace.
     sql = """
     SELECT e.source_id AS source, c.id AS target
     FROM edges e
-    JOIN contexts c ON c.node = e.target_id
+    JOIN contexts c ON c.node = e.target_id AND c.workspace_id = ?1
     WHERE e.relation = 'cross_ref'
-      AND EXISTS (SELECT 1 FROM contexts WHERE id = e.source_id)
+      AND EXISTS (SELECT 1 FROM contexts WHERE id = e.source_id AND workspace_id = ?1)
     LIMIT 500
     """
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [workspace_id]) do
       {:ok, rows} ->
         rows
         |> Enum.map(fn [source, target] ->
@@ -1986,31 +2872,33 @@ defmodule OptimalEngine.API.Router do
     end)
   end
 
-  defp fetch_entity_summary do
+  defp fetch_entity_summary(workspace_id) do
     case Store.raw_query(
            """
-           SELECT name, type, COUNT(*) as count
-           FROM entities
-           GROUP BY name, type
+           SELECT e.name, e.type, COUNT(*) as count
+           FROM entities e
+           JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?1
+           GROUP BY e.name, e.type
            ORDER BY count DESC
            LIMIT 200
            """,
-           []
+           [workspace_id]
          ) do
       {:ok, rows} -> rows
       _ -> []
     end
   end
 
-  defp fetch_node_summary do
+  defp fetch_node_summary(workspace_id) do
     case Store.raw_query(
            """
            SELECT node, COUNT(*) as count, MAX(modified_at) as last_modified
            FROM contexts
+           WHERE workspace_id = ?1
            GROUP BY node
            ORDER BY node
            """,
-           []
+           [workspace_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [node, count, last_mod] ->
@@ -2022,16 +2910,19 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp fetch_node_contexts(node_id) do
+  # Node slugs are reused across workspaces — both queries must filter by
+  # workspace_id in addition to the slug (REALITY-AUDIT: natural key is
+  # workspace_id + slug).
+  defp fetch_node_contexts(node_id, workspace_id) do
     case Store.raw_query(
            """
            SELECT id, title, type, genre, sn_ratio, modified_at
            FROM contexts
-           WHERE node = ?1
+           WHERE node = ?1 AND workspace_id = ?2
            ORDER BY modified_at DESC
            LIMIT 50
            """,
-           [node_id]
+           [node_id, workspace_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, type, genre, sn, mod] ->
@@ -2043,7 +2934,7 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp fetch_node_edges(node_id) do
+  defp fetch_node_edges(node_id, workspace_id) do
     # Return edges where at least one endpoint lives in this node.
     # We join via the contexts table to resolve node membership.
     case Store.raw_query(
@@ -2051,10 +2942,10 @@ defmodule OptimalEngine.API.Router do
            SELECT DISTINCT e.source_id, e.target_id, e.relation, e.weight
            FROM edges e
            JOIN contexts c ON (c.id = e.source_id OR c.id = e.target_id)
-           WHERE c.node = ?1
+           WHERE c.node = ?1 AND c.workspace_id = ?2
            LIMIT 200
            """,
-           [node_id]
+           [node_id, workspace_id]
          ) do
       {:ok, rows} -> rows
       _ -> []
@@ -2067,17 +2958,19 @@ defmodule OptimalEngine.API.Router do
 
   # Entities for OptimalGraphView — one row per unique (name, type), with
   # `connections` = how many distinct contexts reference that entity.
-  defp optimal_entity_summary do
+  # Workspace membership resolved via the contexts table.
+  defp optimal_entity_summary(workspace_id) do
     case Store.raw_query(
            """
-           SELECT name, type, COUNT(DISTINCT context_id) AS connections
-           FROM entities
-           WHERE name IS NOT NULL AND name <> ''
-           GROUP BY name, type
+           SELECT e.name, e.type, COUNT(DISTINCT e.context_id) AS connections
+           FROM entities e
+           JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?1
+           WHERE e.name IS NOT NULL AND e.name <> ''
+           GROUP BY e.name, e.type
            ORDER BY connections DESC
            LIMIT 300
            """,
-           []
+           [workspace_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [name, type, connections] ->
@@ -2092,13 +2985,14 @@ defmodule OptimalEngine.API.Router do
   # Edges between entities by co-occurrence in the same context. Two entities
   # sharing a context produce one `related_to` edge; weight is the number of
   # shared contexts (capped at 5.0 to keep visuals stable).
-  defp optimal_relation_edges do
+  defp optimal_relation_edges(workspace_id) do
     sql = """
     SELECT e1.name AS source, e2.name AS target, COUNT(*) AS shared
     FROM entities e1
     JOIN entities e2
       ON e1.context_id = e2.context_id
      AND e1.name < e2.name
+    JOIN contexts c ON c.id = e1.context_id AND c.workspace_id = ?1
     WHERE e1.name IS NOT NULL AND e2.name IS NOT NULL
     GROUP BY e1.name, e2.name
     HAVING shared >= 1
@@ -2106,7 +3000,7 @@ defmodule OptimalEngine.API.Router do
     LIMIT 800
     """
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [workspace_id]) do
       {:ok, rows} ->
         Enum.map(rows, fn [s, t, shared] ->
           %{
@@ -2125,57 +3019,52 @@ defmodule OptimalEngine.API.Router do
   # Node list for the drill-down level-0 card grid. Pulls from the workspace
   # `nodes` table (Phase 3.5) joined against context counts, so operators see
   # real signal volumes per node rather than just names.
-  defp optimal_node_summary do
+  defp optimal_node_summary(workspace_id) do
     sql = """
     SELECT n.slug, n.name, COALESCE(n.kind, 'node') AS type,
-           COALESCE((SELECT COUNT(*) FROM contexts c WHERE c.node = n.slug), 0) AS signal_count
+           COALESCE((SELECT COUNT(*) FROM contexts c WHERE c.node = n.slug AND c.workspace_id = ?1), 0) AS signal_count
     FROM nodes n
+    WHERE n.workspace_id = ?1
     ORDER BY n.slug
     """
 
-    rows_from_nodes =
-      case Store.raw_query(sql, []) do
-        {:ok, rows} -> rows
-        _ -> []
-      end
+    case Store.raw_query(sql, [workspace_id]) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [slug, name, type, count] ->
+          %{slug: slug, name: name || slug, type: type, signal_count: count}
+        end)
 
-    if rows_from_nodes == [] do
-      # Fallback for tenants that haven't populated the nodes table yet —
-      # or where the nodes table is empty after a fresh index. Derive
-      # distinct nodes straight from contexts so the graph view still
-      # shows what was indexed.
-      case Store.raw_query(
-             "SELECT node, COUNT(*) FROM contexts WHERE node IS NOT NULL GROUP BY node ORDER BY node",
-             []
-           ) do
-        {:ok, rows} ->
-          Enum.map(rows, fn [slug, count] ->
-            %{slug: slug, name: slug, type: "node", signal_count: count}
-          end)
+      _ ->
+        # Fallback for tenants that haven't populated the nodes table yet —
+        # derive distinct nodes straight from contexts.
+        case Store.raw_query(
+               "SELECT node, COUNT(*) FROM contexts WHERE node IS NOT NULL AND workspace_id = ?1 GROUP BY node",
+               [workspace_id]
+             ) do
+          {:ok, rows} ->
+            Enum.map(rows, fn [slug, count] ->
+              %{slug: slug, name: slug, type: "node", signal_count: count}
+            end)
 
-        _ ->
-          []
-      end
-    else
-      Enum.map(rows_from_nodes, fn [slug, name, type, count] ->
-        %{slug: slug, name: name || slug, type: type, signal_count: count}
-      end)
+          _ ->
+            []
+        end
     end
   end
 
   # File tree for NodeDrillDown — one entry per signal in a given node,
   # flattened with `is_dir: false`. The component also accepts nested
   # children but the engine stores a flat list per node, so we return that.
-  defp optimal_node_files(slug) do
+  defp optimal_node_files(slug, workspace_id) do
     case Store.raw_query(
            """
            SELECT id, title, uri, genre, modified_at, LENGTH(content) AS size
            FROM contexts
-           WHERE node = ?1
+           WHERE node = ?1 AND workspace_id = ?2
            ORDER BY modified_at DESC
            LIMIT 200
            """,
-           [slug]
+           [slug, workspace_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, uri, genre, modified_at, size] ->
@@ -2230,9 +3119,11 @@ defmodule OptimalEngine.API.Router do
   end
 
   # Full granularity for one signal — enough for a drill-down to visualize
-  # every layer the engine tracks.
-  defp signal_detail(id) do
-    with {:ok, [row]} <- signal_row(id) do
+  # every layer the engine tracks. The parent row is fetched with a
+  # workspace_id guard so an id from another workspace yields nil (→ 404);
+  # the child fetchers below are only reachable once that guard passed.
+  defp signal_detail(id, workspace_id) do
+    with {:ok, [row]} <- signal_row(id, workspace_id) do
       [
         ctx_id,
         uri,
@@ -2282,16 +3173,16 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp signal_row(id) do
+  defp signal_row(id, workspace_id) do
     Store.raw_query(
       """
       SELECT id, uri, title, genre, mode, signal_type, format, structure, node,
              sn_ratio, content, l0_abstract, l1_overview, modified_at,
              architecture_id
       FROM contexts
-      WHERE id = ?1 LIMIT 1
+      WHERE id = ?1 AND workspace_id = ?2 LIMIT 1
       """,
-      [id]
+      [id, workspace_id]
     )
   end
 
@@ -2404,13 +3295,14 @@ defmodule OptimalEngine.API.Router do
   end
 
   # Activity feed — append-only events table. Most-recent first.
-  # 3-arg form used by the paginated endpoint (limit, offset, kind).
-  defp recent_events(limit, offset, kind) do
+  # Always workspace-filtered (uses idx_events_ws_ts) so callers never see
+  # other workspaces' audit entries.
+  defp recent_events(limit, offset, kind, workspace_id) do
     {where, params} =
       if kind == "" do
-        {"WHERE 1=1", [limit, offset]}
+        {"WHERE workspace_id = ?3", [limit, offset, workspace_id]}
       else
-        {"WHERE kind = ?3", [limit, offset, kind]}
+        {"WHERE workspace_id = ?3 AND kind = ?4", [limit, offset, workspace_id, kind]}
       end
 
     sql = """
@@ -2440,12 +3332,12 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp count_events(kind) do
+  defp count_events(kind, workspace_id) do
     {where, params} =
       if kind == "" do
-        {"WHERE 1=1", []}
+        {"WHERE workspace_id = ?1", [workspace_id]}
       else
-        {"WHERE kind = ?1", [kind]}
+        {"WHERE workspace_id = ?1 AND kind = ?2", [workspace_id, kind]}
       end
 
     sql = "SELECT COUNT(*) FROM events #{where}"

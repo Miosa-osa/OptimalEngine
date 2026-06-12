@@ -6,22 +6,22 @@ defmodule Mix.Tasks.Optimal.Intake do
 
   Usage:
       mix optimal.intake
-      mix optimal.intake --genre transcript --title "Q4 Pricing Call"
-      mix optimal.intake --node ai-masters --title "Ed Call"
+      mix optimal.intake --genre transcript --title "Requirements Review Call"
+      mix optimal.intake --node project-platform-launch --title "Ed Call"
       echo "Customer called about pricing" | mix optimal.intake --genre note
-      mix optimal.intake --workspace acme-q1 --genre note
+      mix optimal.intake --workspace sample-q1 --genre note
 
   Options:
     --genre      Override auto-detected genre (transcript, brief, spec, plan, note,
                  decision-log, standup, review, report, pitch)
     --title      Explicit title
-    --node       Override primary node routing (ai-masters, roberto, money-revenue, etc.)
+    --node       Override primary node routing (project-platform-launch, operator, operation-revenue, etc.)
     --workspace  Target workspace ID (default: "default")
 
   Examples:
-      $ mix optimal.intake --genre transcript --title "Q4 Pricing Call"
+      $ mix optimal.intake --genre transcript --title "Requirements Review Call"
       Enter content (Ctrl+D to finish):
-      > Customer called about AI Masters pricing...
+      > Customer called about Platform Launch pricing...
       > He wants $2K per seat...
       > [Ctrl+D]
 

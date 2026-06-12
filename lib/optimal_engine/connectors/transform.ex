@@ -51,7 +51,7 @@ defmodule OptimalEngine.Connectors.Transform do
       valid_from: Map.get(attrs, :valid_from),
       valid_until: Map.get(attrs, :valid_until),
       supersedes: Map.get(attrs, :supersedes),
-      node: Map.get(attrs, :node, "09-new-stuff"),
+      node: Map.get(attrs, :node, "inbox"),
       sn_ratio: Map.get(attrs, :sn_ratio, 0.5),
       entities: Map.get(attrs, :entities, []),
       l0_summary: Map.get(attrs, :l0_summary, ""),

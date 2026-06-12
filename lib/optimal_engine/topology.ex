@@ -18,7 +18,7 @@ defmodule OptimalEngine.Topology do
   See `docs/architecture/WORKSPACE.md` for the model.
   """
 
-  alias OptimalEngine.Topology.{Node, NodeMember, PrincipalSkill, Skill}
+  alias OptimalEngine.Topology.{Node, NodeMember, NodeRelationship, NodeType, PrincipalSkill, Skill}
 
   # ── Nodes ────────────────────────────────────────────────────────────────
 
@@ -28,6 +28,20 @@ defmodule OptimalEngine.Topology do
   defdelegate list_nodes(opts), to: Node, as: :list
   defdelegate children(node_id, opts), to: Node
   defdelegate ancestors(node_id, opts), to: Node
+  defdelegate node_tree(opts), to: Node, as: :tree
+
+  # ── Node Types ───────────────────────────────────────────────────────────
+
+  defdelegate create_node_type(attrs), to: NodeType, as: :upsert
+  defdelegate get_node_type(id, opts), to: NodeType, as: :get
+  defdelegate get_node_type_by_slug(slug, opts), to: NodeType, as: :get_by_slug
+  defdelegate list_node_types(opts), to: NodeType, as: :list
+
+  # ── Node Relationships ──────────────────────────────────────────────────
+
+  defdelegate create_node_relationship(attrs), to: NodeRelationship, as: :upsert
+  defdelegate get_node_relationship(id, opts), to: NodeRelationship, as: :get
+  defdelegate relationships_for_node(node_id, opts), to: NodeRelationship, as: :for_node
 
   # ── Memberships ──────────────────────────────────────────────────────────
 

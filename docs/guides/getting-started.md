@@ -1,115 +1,251 @@
 # Getting Started
 
-This walks you from a fresh clone to your first ingest-and-search round trip in
-about two minutes.
+This guide takes a new user from clone to a working Optimal Engine workspace.
+
+The first workflow is intentionally simple:
+
+```text
+install
+  -> run reality check
+  -> initiate or set up workspace
+  -> inspect topology
+  -> ingest/search/render
+  -> use the workspace from CLI, agent, app, or markdown
+```
 
 ## 1. Prerequisites
 
-- **Erlang/OTP 26+** and **Elixir ~> 1.17**. Install via `asdf` or `homebrew`.
-- **C toolchain** — required for the `:exqlite` SQLite NIF. macOS: Xcode
-  Command Line Tools (`xcode-select --install`). Linux: `build-essential`.
-- **Git**.
+Required:
+
+- Erlang/OTP 26+
+- Elixir `~> 1.17`
+- Git
+- C toolchain for the SQLite NIF
 
 Optional:
-- **Ollama** — for embeddings (`nomic-embed-text`) and local generation. Without
-  Ollama the engine runs fine; hybrid vector search just degrades to BM25.
-- **RocksDB** — alternative knowledge backend. Not needed for the default ETS
-  path. Tests that require it are skipped unless the NIF is loadable.
 
-## 2. Clone and compile
+- Node 20+ for app/site/extension surfaces
+- Ollama for local embeddings and generation
+- Docker for packaged service deployment
+- RocksDB runtime if you want the optional RocksDB graph/knowledge backend
+- Optional multimodal tools such as document parsers, OCR, transcription,
+  video, vision, or embedding adapters
+
+RocksDB is not required for the default local engine. SQLite is the local
+canonical runtime store today.
+
+## 2. Clone And Compile
 
 ```bash
-git clone git@github.com:robertohluna/OptimalEngine.git
+git clone https://github.com/Miosa-osa/OptimalEngine.git
 cd OptimalEngine
 mix deps.get
 mix compile
 ```
 
-The first compile pulls ~30 hex packages and builds the SQLite NIF. Expect
-60–120 seconds on a fresh machine.
-
-## 3. Run the test suite
+## 3. Run The Reality Check
 
 ```bash
-mix test
+mix optimal.reality_check
 ```
 
-Expect `689 tests, 0 failures (29 excluded)`. The 29 excluded tests require the
-RocksDB backend.
+Expected current result:
 
-## 4. First ingest
+```text
+126 probes, 126 ok, 0 warn, 0 fail
+```
 
-The engine stores signals and contexts under a root directory controlled by
-`config/config.exs` (defaults to `.optimal/` under the current working
-directory). Point it somewhere you control:
+This checks the runtime spine: store, topology, source evidence, memory,
+retrieval, pools, workflows, tools, connectors, evaluation, wiki, compliance,
+and retrieval edge cases.
+
+## 4. Understand Signals Before Dumping Data
+
+Optimal Engine does not treat every input as generic text. It classifies input
+as a Signal:
+
+```text
+Signal = Mode + Genre + Type + Format + Structure
+```
+
+That breakdown tells the engine how to route, parse, review, package, and
+retrieve the input. Read [Signal theory](../concepts/signal-theory.md) before
+building serious workspaces.
+
+## 5. Choose A Workspace Setup Path
+
+Use initiation when the user starts with a messy dump:
 
 ```bash
-export OPTIMAL_ENGINE_ROOT=$HOME/tmp/optimal-demo
-mkdir -p "$OPTIMAL_ENGINE_ROOT"
-mix optimal.ingest "Customer called about pricing, wants $2K per seat" --genre note
+mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 ```
 
-What happens under the hood:
-1. The signal is classified on `S=(Mode, Genre, Type, Format, Structure)`.
-2. The router picks a destination node based on rules in `config.yaml` (falls
-   back to `09-new-stuff` when routing is ambiguous).
-3. A signal file is written under `nodes/<routed-node>/signals/YYYY-MM-DD-slug.md`.
-4. The file is indexed into SQLite (`FTS5` full-text + BM25) and, if Ollama is
-   up, into the vector store.
-5. Cross-references are recorded (financial data and decisions get automatic
-   secondary routes).
+This creates the workspace, preserves the dump as evidence, applies
+conservative Node candidates, writes markdown projections, and leaves detected
+integration/tool surfaces disabled until the user scopes credentials and
+permissions. For stricter environments, add `--review-only` and approve
+individual topology requests later with `mix optimal.topology approve <id>
+--workspace <workspace-id> --apply`.
 
-## 5. First search
+If the user needs help creating that dump, use the starter prompts:
+
+```text
+templates/starter-prompts/workspace-initiation.md
+templates/starter-prompts/company-wiki-import.md
+templates/starter-prompts/package-inventory.md
+templates/starter-prompts/agentic-loop-design.md
+templates/starter-prompts/youtube-learning-import.md
+```
+
+Use setup when the user already knows the initial structure:
+
+```bash
+mix optimal.setup my-workspace --name "My Workspace"
+```
+
+Add explicit Nodes:
+
+```bash
+mix optimal.setup my-workspace \
+  --node project:launch-plan:"Launch Plan" \
+  --node person:founder:"Founder" \
+  --node operational:weekly-review:"Weekly Review"
+```
+
+## 6. Understand What Was Created
+
+The hierarchy is:
+
+```text
+Tenant / Organization
+  -> Workspace
+    -> Node graph
+```
+
+Projects are Nodes inside a Workspace:
+
+```text
+Workspace
+  -> Project Node
+  -> Person Node
+  -> Product Node
+  -> Operational Node
+  -> Context Node
+  -> Learning Node
+```
+
+Inspect topology:
+
+```bash
+mix optimal.topology --workspace default:my-workspace
+```
+
+## 7. Know Where Data Lives
+
+Local default runtime state:
+
+```text
+.optimal/index.db
+.optimal/cache/
+```
+
+Workspace projection files:
+
+```text
+my-workspace/
+  AGENTS.md
+  rhythm/
+  nodes/
+    first-project/
+      context.md
+      signal.md
+      packages/
+```
+
+Important distinction:
+
+```text
+SQLite/Postgres = canonical runtime state
+raw artifacts   = preserved source evidence
+indexes/caches  = rebuildable acceleration
+markdown/wiki   = projection and editing surface
+```
+
+See [Storage and projection map](../architecture/STORAGE-AND-PROJECTION-MAP.md)
+for the full storage map.
+
+For local, Docker, team, enterprise, and multimodal setup options, read
+[Installation and deployment](installation-and-deployment.md).
+
+## 8. Ingest Or Search
+
+Ingest a quick text Signal:
+
+```bash
+mix optimal.ingest "Customer asked about pricing and wants a follow-up" --genre note
+```
+
+Search:
 
 ```bash
 mix optimal.search "pricing"
 ```
 
-Returns L0 abstracts (~100 tokens each) by default — the tier designed for
-"search, then decide what to load fully." To open one:
+Ask:
 
 ```bash
-mix optimal.read "optimal://nodes/ai-masters/signals/2026-04-17-ed-pricing.md" --tier l1
+mix optimal.rag "what changed this week?"
 ```
 
-Tiers:
-- `l0` — ~100 tokens. Abstract. Cheap to load many.
-- `l1` — ~2K tokens. Summary with key facts. The default working tier.
-- `full` — complete content. Use only when `l1` is insufficient.
+## 9. Render Human-Facing Projections
 
-## 6. L0 — the always-loaded context
+Render a workspace tree:
 
 ```bash
-mix optimal.l0
+mix optimal.wiki render-tree --workspace default:my-workspace
 ```
 
-Prints every node's abstract. This is what agents load at session start — the
-whole knowledge base in roughly 2K tokens.
-
-## 7. Assemble tiered context for a topic
+Render a Node page:
 
 ```bash
-mix optimal.assemble "pricing decisions"
+mix optimal.wiki render-node first-project --workspace default:my-workspace
 ```
 
-Returns an L0 + L1 + L2 bundle with token counts so you can fit a context
-window deterministically.
+Check a page:
 
-## 8. Keep going
+```bash
+mix optimal.wiki check node-first-project --workspace default:my-workspace
+```
 
-- `mix optimal.graph` — knowledge graph statistics and analysis
-- `mix optimal.reflect` — find missing edges between entities that co-occur
-- `mix optimal.reweave "ed honour"` — find stale contexts about a topic
-- `mix optimal.health` — 10 diagnostic checks on the knowledge base
-- `mix optimal.remember "always check duplicates before insert"` — store a
-  learned observation for future sessions
+## 10. Use With Agents
 
-Full command reference: [mix-tasks.md](mix-tasks.md).
+For Codex, Claude Code, MCP clients, scripts, or app agents, use this sequence:
 
-## 9. Architecture deep-dive
+```text
+inspect topology
+  -> retrieve governed context
+  -> work inside task scope
+  -> use registered tools
+  -> record observations
+  -> create pending Claims
+  -> let review/policy promote Facts
+  -> render projections from engine state
+```
 
-When you want to understand what's actually happening under the calls:
+Read [Agent and CLI SOP](agent-cli-sop.md) before wiring agents to tools,
+connectors, scripts, or APIs.
 
-- [System overview](../architecture/system-overview.md) — the 30,000-foot view
-- [FULL-SYSTEM-ARCHITECTURE](../architecture/FULL-SYSTEM-ARCHITECTURE.md) — the walkthrough
-- [Signal Theory](../concepts/signal-theory.md) — the framework that governs classification
+## 11. What To Read Next
+
+- [Engine structure](../architecture/ENGINE-STRUCTURE.md)
+- [Storage and projection map](../architecture/STORAGE-AND-PROJECTION-MAP.md)
+- [Installation and deployment](installation-and-deployment.md)
+- [First workspace story](first-workspace-story.md)
+- [Signal theory](../concepts/signal-theory.md)
+- [Integrations and imports](integrations-and-imports.md)
+- [Tool surfaces and loops](tool-surfaces-and-loops.md)
+- [Agentic loops](agentic-loops.md)
+- [Packages and exports](packages-and-exports.md)
+- [Agent and CLI SOP](agent-cli-sop.md)
+- [Mix tasks](mix-tasks.md)
+- [Build goal alignment](../reference/build-goal-alignment.md)

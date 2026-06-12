@@ -14,7 +14,7 @@ defmodule OptimalEngine.Pipeline.Parser.Pdf do
   alias OptimalEngine.Pipeline.Parser.{Asset, ParsedDoc, StructuralElement}
 
   @impl true
-  def parse(path, opts) when is_binary(path) do
+  def parse(path, _opts) when is_binary(path) do
     asset =
       case Asset.from_path(path, modality: :binary, content_type: "application/pdf") do
         {:ok, a} -> a

@@ -162,7 +162,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
       Application.put_env(:optimal_engine, :root_path, tmp_dir)
 
       # Create node folder structure
-      for folder <- ~w[04-ai-masters 11-money-revenue 09-new-stuff 01-roberto] do
+      for folder <- ~w[project-platform-launch operation-revenue inbox person-operator] do
         File.mkdir_p!(Path.join([tmp_dir, folder, "signals"]))
       end
 
@@ -175,44 +175,49 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "write_signal/1 creates file with YAML frontmatter", %{tmp_dir: tmp_dir} do
-      signal = build_signal("Q4 Pricing Call", "ai-masters", "transcript")
+      signal = build_signal("Requirements Review Call", "project-platform-launch", "transcript")
 
       {:ok, path} = Writer.write_signal(signal)
 
       assert File.exists?(path)
       assert String.starts_with?(path, tmp_dir)
-      assert String.contains?(path, "04-ai-masters/signals/")
+      assert String.contains?(path, "project-platform-launch/signals/")
       assert String.ends_with?(path, ".md")
 
       content = File.read!(path)
       assert String.starts_with?(content, "---\n")
-      assert String.contains?(content, "node: ai-masters")
+      assert String.contains?(content, "node: project-platform-launch")
       assert String.contains?(content, "genre: transcript")
-      assert String.contains?(content, "title: Q4 Pricing Call")
+      assert String.contains?(content, "title: Requirements Review Call")
     end
 
     test "write_signal/1 filename is date-slug formatted", %{} do
-      signal = build_signal("Q4 Pricing Call 2026", "ai-masters", "transcript")
+      signal =
+        build_signal("Requirements Review Call 2026", "project-platform-launch", "transcript")
 
       {:ok, path} = Writer.write_signal(signal)
 
       filename = Path.basename(path)
-      assert Regex.match?(~r/^\d{4}-\d{2}-\d{2}-q4-pricing-call-2026\.md$/, filename)
+
+      assert Regex.match?(
+               ~r/^\d{4}-\d{2}-\d{2}-requirements-review-call-2026\.md$/,
+               filename
+             )
     end
 
     test "write_signal/1 creates signals/ directory if missing", %{tmp_dir: tmp_dir} do
-      # Remove the signals dir for roberto
-      signals_dir = Path.join([tmp_dir, "01-roberto", "signals"])
+      # Remove the signals dir for operator
+      signals_dir = Path.join([tmp_dir, "person-operator", "signals"])
       File.rm_rf!(signals_dir)
 
-      signal = build_signal("My Note", "roberto", "note")
+      signal = build_signal("My Note", "operator", "note")
       {:ok, path} = Writer.write_signal(signal)
 
       assert File.exists?(path)
     end
 
     test "write_signal/1 body contains genre skeleton sections", %{} do
-      signal = build_signal("Weekly Standup", "roberto", "standup")
+      signal = build_signal("Weekly Standup", "operator", "standup")
 
       {:ok, path} = Writer.write_signal(signal)
 
@@ -223,7 +228,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "write_signal/1 includes entities in frontmatter", %{} do
-      signal = build_signal("Ed Call", "ai-masters", "transcript")
+      signal = build_signal("Ed Call", "project-platform-launch", "transcript")
       signal = %{signal | entities: ["Alice", "Alice"]}
 
       {:ok, path} = Writer.write_signal(signal)
@@ -234,18 +239,18 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "write_signal/1 includes routed_to in frontmatter", %{} do
-      signal = build_signal("Plan", "roberto", "plan")
-      signal = %{signal | routed_to: ["01-roberto", "11-money-revenue"]}
+      signal = build_signal("Plan", "operator", "plan")
+      signal = %{signal | routed_to: ["person-operator", "operation-revenue"]}
 
       {:ok, path} = Writer.write_signal(signal)
 
       content = File.read!(path)
-      assert String.contains?(content, "- 01-roberto")
-      assert String.contains?(content, "- 11-money-revenue")
+      assert String.contains?(content, "- person-operator")
+      assert String.contains?(content, "- operation-revenue")
     end
 
     test "write_signal/1 includes tiers l0 and l1 in frontmatter", %{} do
-      signal = build_signal("Platform Spec", "roberto", "spec")
+      signal = build_signal("Platform Spec", "operator", "spec")
 
       {:ok, path} = Writer.write_signal(signal)
 
@@ -256,35 +261,39 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "write_cross_references/2 writes to additional nodes", %{tmp_dir: tmp_dir} do
-      signal = build_signal("Revenue Note", "ai-masters", "note")
-      signal = %{signal | routed_to: ["04-ai-masters", "11-money-revenue"]}
+      signal = build_signal("Revenue Note", "project-platform-launch", "note")
+      signal = %{signal | routed_to: ["project-platform-launch", "operation-revenue"]}
 
-      {:ok, paths} = Writer.write_cross_references(signal, ["11-money-revenue"])
+      {:ok, paths} = Writer.write_cross_references(signal, ["operation-revenue"])
 
       assert length(paths) == 1
       [cross_path] = paths
-      assert String.contains?(cross_path, "11-money-revenue/signals/")
+      assert String.contains?(cross_path, "operation-revenue/signals/")
       assert File.exists?(cross_path)
 
       # Verify cross-ref frontmatter
       content = File.read!(cross_path)
-      assert String.contains?(content, "cross_ref_from: ai-masters")
+      assert String.contains?(content, "cross_ref_from: project-platform-launch")
 
       _ = tmp_dir
     end
 
     test "write_cross_references/2 skips nodes that map to the same folder as primary", %{} do
       signal = build_signal("Note", "inbox", "note")
-      # "09-new-stuff" and "inbox" both map to 09-new-stuff
+      # "inbox" and "inbox" both map to inbox
       {:ok, paths} = Writer.write_cross_references(signal, ["inbox"])
       assert paths == []
     end
 
     test "update_context/2 appends to existing context.md", %{tmp_dir: tmp_dir} do
-      context_path = Path.join([tmp_dir, "04-ai-masters", "context.md"])
-      File.write!(context_path, "# AI Masters\n\nExisting content.\n")
+      context_path = Path.join([tmp_dir, "project-platform-launch", "context.md"])
+      File.write!(context_path, "# Platform Launch\n\nExisting content.\n")
 
-      :ok = Writer.update_context("ai-masters", ["Pricing is $2K/seat", "Course launches Q2"])
+      :ok =
+        Writer.update_context("project-platform-launch", [
+          "Pricing is $2K/seat",
+          "Course launches Q2"
+        ])
 
       content = File.read!(context_path)
       assert String.contains?(content, "Pricing is $2K/seat")
@@ -293,10 +302,10 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "update_context/2 creates context.md if missing", %{tmp_dir: tmp_dir} do
-      context_path = Path.join([tmp_dir, "04-ai-masters", "context.md"])
+      context_path = Path.join([tmp_dir, "project-platform-launch", "context.md"])
       File.rm(context_path)
 
-      :ok = Writer.update_context("ai-masters", ["Fact one"])
+      :ok = Writer.update_context("project-platform-launch", ["Fact one"])
 
       assert File.exists?(context_path)
       content = File.read!(context_path)
@@ -304,34 +313,34 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "node_to_folder/1 maps all 12 nodes correctly" do
-      assert Writer.node_to_folder("roberto") == "01-roberto"
-      assert Writer.node_to_folder("miosa-platform") == "02-miosa"
-      assert Writer.node_to_folder("lunivate") == "03-lunivate"
-      assert Writer.node_to_folder("ai-masters") == "04-ai-masters"
-      assert Writer.node_to_folder("os-architect") == "05-os-architect"
-      assert Writer.node_to_folder("agency-accelerants") == "06-agency-accelerants"
-      assert Writer.node_to_folder("accelerants-community") == "07-accelerants-community"
-      assert Writer.node_to_folder("content-creators") == "08-content-creators"
-      assert Writer.node_to_folder("inbox") == "09-new-stuff"
-      assert Writer.node_to_folder("team") == "10-team"
-      assert Writer.node_to_folder("money-revenue") == "11-money-revenue"
-      assert Writer.node_to_folder("os-accelerator") == "12-os-accelerator"
+      assert Writer.node_to_folder("operator") == "person-operator"
+      assert Writer.node_to_folder("product-customer-portal") == "product-customer-portal"
+      assert Writer.node_to_folder("entity-company") == "entity-company"
+      assert Writer.node_to_folder("project-platform-launch") == "project-platform-launch"
+      assert Writer.node_to_folder("entity-company") == "entity-company"
+      assert Writer.node_to_folder("operation-delivery") == "operation-delivery"
+      assert Writer.node_to_folder("team") == "team"
+      assert Writer.node_to_folder("learning-research-library") == "learning-research-library"
+      assert Writer.node_to_folder("inbox") == "inbox"
+      assert Writer.node_to_folder("team") == "team"
+      assert Writer.node_to_folder("operation-revenue") == "operation-revenue"
+      assert Writer.node_to_folder("operation-delivery") == "operation-delivery"
     end
 
     test "node_to_folder/1 accepts folder names passthrough" do
-      assert Writer.node_to_folder("04-ai-masters") == "04-ai-masters"
-      assert Writer.node_to_folder("11-money-revenue") == "11-money-revenue"
+      assert Writer.node_to_folder("project-platform-launch") == "project-platform-launch"
+      assert Writer.node_to_folder("operation-revenue") == "operation-revenue"
     end
 
     test "node_to_folder/1 defaults to inbox for unknown node" do
-      assert Writer.node_to_folder("unknown-node") == "09-new-stuff"
-      assert Writer.node_to_folder(nil) == "09-new-stuff"
+      assert Writer.node_to_folder("unknown-node") == "inbox"
+      assert Writer.node_to_folder(nil) == "inbox"
     end
 
     test "relative_path/1 returns node_folder/signals/filename" do
-      signal = build_signal("Ed Call", "ai-masters", "transcript")
+      signal = build_signal("Ed Call", "project-platform-launch", "transcript")
       rel = Writer.relative_path(signal)
-      assert String.starts_with?(rel, "04-ai-masters/signals/")
+      assert String.starts_with?(rel, "project-platform-launch/signals/")
       assert String.ends_with?(rel, ".md")
     end
   end
@@ -350,9 +359,9 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
 
       # Create all 12 node folder structures
       for folder <- ~w[
-        01-roberto 02-miosa 03-lunivate 04-ai-masters 05-os-architect
-        06-agency-accelerants 07-accelerants-community 08-content-creators
-        09-new-stuff 10-team 11-money-revenue 12-os-accelerator
+        person-operator product-customer-portal entity-company project-platform-launch entity-company
+        operation-delivery team learning-research-library
+        inbox team operation-revenue operation-delivery
       ] do
         File.mkdir_p!(Path.join([tmp_dir, folder, "signals"]))
       end
@@ -369,7 +378,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
       {:ok, result} =
         Intake.process("Customer called about pricing. We decided on $99/mo.",
           genre: "note",
-          node: "ai-masters"
+          node: "project-platform-launch"
         )
 
       assert is_struct(result.signal, Signal)
@@ -384,7 +393,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
       {:ok, result} =
         Intake.process("Alice wants platform V2 by Q3.",
           genre: "plan",
-          node: "roberto",
+          node: "operator",
           title: "V2 Plan"
         )
 
@@ -393,14 +402,14 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
 
       abs_path = Path.join(tmp_dir, relative_path)
       assert File.exists?(abs_path)
-      assert String.contains?(relative_path, "01-roberto/signals/")
+      assert String.contains?(relative_path, "person-operator/signals/")
     end
 
     test "written file has valid YAML frontmatter", %{tmp_dir: tmp_dir} do
       {:ok, result} =
         Intake.process("Spec for new feature.",
           genre: "spec",
-          node: "roberto",
+          node: "operator",
           title: "Feature Spec"
         )
 
@@ -417,7 +426,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
       {:ok, result} =
         Intake.process("Alice, Alice. Pricing decided.",
           genre: "transcript",
-          node: "ai-masters",
+          node: "project-platform-launch",
           title: "Ed Call"
         )
 
@@ -431,24 +440,24 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
 
     test "title override is respected", %{} do
       {:ok, result} =
-        Intake.process("some content", title: "My Custom Title", node: "roberto")
+        Intake.process("some content", title: "My Custom Title", node: "operator")
 
       assert result.signal.title == "My Custom Title"
     end
 
     test "node override sets primary node on the signal", %{} do
       {:ok, result} =
-        Intake.process("agency work update", node: "agency-accelerants")
+        Intake.process("agency work update", node: "operation-delivery")
 
-      assert result.signal.node == "agency-accelerants"
+      assert result.signal.node == "operation-delivery"
     end
 
     test "node override writes file to correct folder", %{tmp_dir: tmp_dir} do
       {:ok, result} =
-        Intake.process("agency work update", node: "agency-accelerants")
+        Intake.process("agency work update", node: "operation-delivery")
 
       [primary] = result.files_written
-      assert String.starts_with?(primary, "06-agency-accelerants/signals/")
+      assert String.starts_with?(primary, "operation-delivery/signals/")
 
       assert File.exists?(Path.join(tmp_dir, primary))
     end
@@ -458,19 +467,19 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
         Intake.process(
           "Alice called. Pricing discussion.",
           entities: ["Alice"],
-          node: "ai-masters"
+          node: "project-platform-launch"
         )
 
       assert "Alice" in result.signal.entities
     end
 
     test "uri is a valid optimal:// URI", %{} do
-      {:ok, result} = Intake.process("test content", node: "roberto")
+      {:ok, result} = Intake.process("test content", node: "operator")
       assert String.starts_with?(result.uri, "optimal://nodes/")
     end
 
     test "signal is indexed in SQLite store", %{} do
-      {:ok, result} = Intake.process("indexed content", node: "roberto", title: "Index Test")
+      {:ok, result} = Intake.process("indexed content", node: "operator", title: "Index Test")
 
       {:ok, ctx} = OptimalEngine.Store.get_context(result.signal.id)
       assert ctx.title == "Index Test"
@@ -480,7 +489,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
       {:ok, result} =
         Intake.process(
           "We decided to use Elixir. Decision: use Phoenix for the API layer.",
-          node: "roberto"
+          node: "operator"
         )
 
       assert result.signal.type == :decide
@@ -499,30 +508,77 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
       - Follow up next week
       """
 
-      {:ok, result} = Intake.process(content, node: "ai-masters")
+      {:ok, result} = Intake.process(content, node: "project-platform-launch")
       assert result.signal.genre == "transcript"
     end
 
     test "cross-references are written for financial content", %{tmp_dir: tmp_dir} do
-      # invoice genre triggers money-revenue cross-cutting rule
+      # invoice genre triggers operation-revenue cross-cutting rule
       {:ok, result} =
         Intake.process(
           "Invoice #1234. Amount: $5,000. Payment due: 2026-04-01.",
           genre: "invoice",
-          node: "lunivate",
+          node: "entity-company",
           title: "Invoice 1234"
         )
 
-      # Should have written cross-ref to 11-money-revenue
+      # Should have written cross-ref to operation-revenue
       all_paths = result.files_written ++ result.cross_references
-      has_money = Enum.any?(all_paths, &String.contains?(&1, "11-money-revenue"))
-      assert has_money, "Expected cross-ref to money-revenue, got: #{inspect(all_paths)}"
+      has_money = Enum.any?(all_paths, &String.contains?(&1, "operation-revenue"))
+      assert has_money, "Expected cross-ref to operation-revenue, got: #{inspect(all_paths)}"
 
       _ = tmp_dir
     end
 
+    test "cross-reference contexts carry the intake workspace, not \"default\"", %{
+      tmp_dir: tmp_dir
+    } do
+      workspace_id = "ws-cross-#{System.unique_integer([:positive])}"
+
+      {:ok, result} =
+        Intake.process(
+          "Invoice #4321. Amount: $7,500. Payment due: 2026-05-01.",
+          genre: "invoice",
+          node: "entity-company",
+          title: "Invoice 4321",
+          workspace_id: workspace_id
+        )
+
+      cross_refs = result.cross_references
+      assert cross_refs != [], "Expected at least one cross-reference to be written"
+
+      assert Enum.any?(cross_refs, &String.contains?(&1, "operation-revenue")),
+             "Expected cross-ref to operation-revenue, got: #{inspect(cross_refs)}"
+
+      # Every cross-ref Context row must be stamped with the intake workspace —
+      # regression guard against leaking workspace content into "default".
+      for rel <- cross_refs do
+        abs_path = Path.join(tmp_dir, rel)
+
+        assert {:ok, [[stored_workspace]]} =
+                 OptimalEngine.Store.raw_query(
+                   "SELECT workspace_id FROM contexts WHERE path = ?1",
+                   [abs_path]
+                 )
+
+        assert stored_workspace == workspace_id,
+               "Cross-ref context #{rel} carries workspace #{inspect(stored_workspace)}, " <>
+                 "expected #{inspect(workspace_id)}"
+      end
+
+      # Primary context carries the workspace as well
+      assert result.context.workspace_id == workspace_id
+
+      # Nothing from this intake landed in the default workspace
+      assert {:ok, [[0]]} =
+               OptimalEngine.Store.raw_query(
+                 "SELECT COUNT(*) FROM contexts WHERE workspace_id = 'default' AND path LIKE ?1",
+                 [tmp_dir <> "%"]
+               )
+    end
+
     test "handles empty entities gracefully", %{} do
-      {:ok, result} = Intake.process("No people mentioned here.", node: "roberto")
+      {:ok, result} = Intake.process("No people mentioned here.", node: "operator")
       assert is_list(result.signal.entities)
     end
 
@@ -543,7 +599,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
       original_root = Application.get_env(:optimal_engine, :root_path)
       Application.put_env(:optimal_engine, :root_path, tmp_dir)
 
-      for folder <- ~w[04-ai-masters] do
+      for folder <- ~w[project-platform-launch] do
         File.mkdir_p!(Path.join([tmp_dir, folder, "signals"]))
       end
 
@@ -556,7 +612,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "written file is detected as :signal type", %{} do
-      signal = build_signal("Platform Spec", "ai-masters", "spec")
+      signal = build_signal("Platform Spec", "project-platform-launch", "spec")
       {:ok, path} = Writer.write_signal(signal)
 
       content = File.read!(path)
@@ -565,7 +621,7 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "written file classifies with correct genre", %{} do
-      signal = build_signal("Q4 Pricing", "ai-masters", "transcript")
+      signal = build_signal("Requirements Review", "project-platform-launch", "transcript")
       {:ok, path} = Writer.write_signal(signal)
 
       content = File.read!(path)
@@ -574,14 +630,14 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
     end
 
     test "written file has parseable YAML frontmatter", %{} do
-      signal = build_signal("My Plan", "ai-masters", "plan")
-      signal = %{signal | entities: ["Alice", "Alice"], routed_to: ["04-ai-masters"]}
+      signal = build_signal("My Plan", "project-platform-launch", "plan")
+      signal = %{signal | entities: ["Alice", "Alice"], routed_to: ["project-platform-launch"]}
 
       {:ok, path} = Writer.write_signal(signal)
       content = File.read!(path)
 
       {fm, _body} = OptimalEngine.Pipeline.Classifier.parse_frontmatter(content)
-      assert Map.get(fm, "node") == "ai-masters"
+      assert Map.get(fm, "node") == "project-platform-launch"
       assert get_in(fm, ["signal", "genre"]) == "plan"
       assert get_in(fm, ["signal", "mode"]) == "linguistic"
     end

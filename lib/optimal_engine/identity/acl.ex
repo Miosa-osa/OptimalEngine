@@ -11,7 +11,7 @@ defmodule OptimalEngine.Identity.ACL do
 
   ## Resource URI conventions
 
-  - `"optimal://nodes/04-ai-masters/signals/2026-04-17-ed-call.md"`
+  - `"optimal://nodes/project-platform-launch/signals/2026-04-17-ed-call.md"`
   - `"chunk:{chunk_id}"` — per-chunk ACL
   - `"wiki:{slug}:{audience}"` — per-wiki-page ACL
   - `"tenant:{tenant_id}"` — tenant-wide grant

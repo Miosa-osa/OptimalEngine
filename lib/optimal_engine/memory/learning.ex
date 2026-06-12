@@ -1,6 +1,6 @@
 defmodule OptimalEngine.Memory.Learning do
   @moduledoc """
-  Self-learning engine based on SICA, VIGIL, and Mem0 patterns.
+  Self-learning engine based on SICA, VIGIL, and memory-layer systems patterns.
 
   Continuous improvement loop:
     OBSERVE  → Capture every tool interaction, error, user correction

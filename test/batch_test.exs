@@ -11,9 +11,9 @@ defmodule OptimalEngine.BatchTest do
   # Node-folder setup required by Intake.process/2.
   defp setup_node_folders(tmp_dir) do
     for folder <- ~w[
-      01-roberto 02-miosa 03-lunivate 04-ai-masters 05-os-architect
-      06-agency-accelerants 07-accelerants-community 08-content-creators
-      09-new-stuff 10-team 11-money-revenue 12-os-accelerator
+      person-operator product-customer-portal entity-company project-platform-launch entity-company
+      operation-delivery team learning-research-library
+      inbox team operation-revenue operation-delivery
     ] do
       File.mkdir_p!(Path.join([tmp_dir, folder, "signals"]))
     end
@@ -44,11 +44,11 @@ defmodule OptimalEngine.BatchTest do
       workspace_id = ws()
 
       items = [
-        %{"content" => "First signal about Q4 planning", "genre" => "note", "node" => "roberto"},
+        %{"content" => "First signal about Q4 planning", "genre" => "note", "node" => "operator"},
         %{
           "content" => "Second signal about product roadmap",
           "genre" => "note",
-          "node" => "roberto"
+          "node" => "operator"
         },
         %{"content" => "Third signal about team velocity", "genre" => "note", "node" => "team"}
       ]
@@ -63,9 +63,9 @@ defmodule OptimalEngine.BatchTest do
       workspace_id = ws()
 
       items = [
-        %{"content" => "Valid signal content here", "node" => "roberto"},
+        %{"content" => "Valid signal content here", "node" => "operator"},
         %{"title" => "No content key at all"},
-        %{"content" => "Another valid signal", "node" => "roberto"}
+        %{"content" => "Another valid signal", "node" => "operator"}
       ]
 
       assert {:ok, summary} = Batch.import_signals(items, workspace_id: workspace_id)
@@ -78,9 +78,9 @@ defmodule OptimalEngine.BatchTest do
       workspace_id = ws()
 
       items = [
-        %{"content" => "Good signal alpha", "node" => "roberto"},
+        %{"content" => "Good signal alpha", "node" => "operator"},
         %{"content" => ""},
-        %{"content" => "Good signal beta", "node" => "roberto"}
+        %{"content" => "Good signal beta", "node" => "operator"}
       ]
 
       assert {:ok, summary} = Batch.import_signals(items, workspace_id: workspace_id)
@@ -98,7 +98,7 @@ defmodule OptimalEngine.BatchTest do
       workspace_id = ws()
 
       items = [
-        %{content: "Atom-keyed signal content", genre: "note", node: "roberto"}
+        %{content: "Atom-keyed signal content", genre: "note", node: "operator"}
       ]
 
       assert {:ok, summary} = Batch.import_signals(items, workspace_id: workspace_id)
@@ -187,10 +187,10 @@ defmodule OptimalEngine.BatchTest do
 
       # Ingest two signals into this workspace
       {:ok, _} =
-        Intake.process("Signal export test content A", workspace_id: workspace_id, node: "roberto")
+        Intake.process("Signal export test content A", workspace_id: workspace_id, node: "operator")
 
       {:ok, _} =
-        Intake.process("Signal export test content B", workspace_id: workspace_id, node: "roberto")
+        Intake.process("Signal export test content B", workspace_id: workspace_id, node: "operator")
 
       assert {:ok, signals} = Batch.export_signals(workspace_id: workspace_id)
       assert length(signals) >= 2
@@ -207,7 +207,7 @@ defmodule OptimalEngine.BatchTest do
       ws_a = ws()
       ws_b = ws()
 
-      {:ok, _} = Intake.process("Workspace A signal", workspace_id: ws_a, node: "roberto")
+      {:ok, _} = Intake.process("Workspace A signal", workspace_id: ws_a, node: "operator")
 
       assert {:ok, signals_b} = Batch.export_signals(workspace_id: ws_b)
       refute Enum.any?(signals_b, &(&1.workspace_id == ws_a))
@@ -286,7 +286,7 @@ defmodule OptimalEngine.BatchTest do
 
       # Seed some data
       {:ok, _} =
-        Intake.process("Workspace snapshot signal", workspace_id: workspace_id, node: "roberto")
+        Intake.process("Workspace snapshot signal", workspace_id: workspace_id, node: "operator")
 
       {:ok, _} = Memory.create(%{content: "Workspace snapshot memory", workspace_id: workspace_id})
 
@@ -313,7 +313,7 @@ defmodule OptimalEngine.BatchTest do
     test "signals and memories in snapshot match standalone export counts" do
       workspace_id = ws()
 
-      {:ok, _} = Intake.process("Count check signal", workspace_id: workspace_id, node: "roberto")
+      {:ok, _} = Intake.process("Count check signal", workspace_id: workspace_id, node: "operator")
       {:ok, _} = Memory.create(%{content: "Count check memory", workspace_id: workspace_id})
 
       {:ok, signals} = Batch.export_signals(workspace_id: workspace_id)

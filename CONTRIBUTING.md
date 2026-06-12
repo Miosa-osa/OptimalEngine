@@ -27,7 +27,9 @@ mix deps.get
 mix test
 ```
 
-The test alias wipes the test SQLite store before each run so schema drift between migration versions cannot leak. All 1,297 tests should pass on a clean checkout.
+The test alias wipes the test SQLite store before each run so schema drift
+between migration versions cannot leak. The current local suite is over 1,600
+tests; use CI as the source of truth for the exact count on your branch.
 
 **Start the engine locally**
 
@@ -65,7 +67,8 @@ Strict mode is on everywhere. No `any`. Explicit return types on public function
 1. **Fork** the repository and create a branch from `main`.
 2. **Name your branch** using the scope prefix convention (see Commit Messages below).
 3. **Write or update tests** — new behaviour needs coverage, bug fixes need a regression test.
-4. **Run the full suite** locally before pushing: `mix test && mix credo --strict && mix format --check-formatted`.
+4. **Run the safety checks** locally before pushing:
+   `mix format --check-formatted && mix compile && mix test && mix optimal.reality_check`.
 5. **Open a PR** against `main`. Keep the diff reviewable — aim for under 400 lines changed per PR. Split larger changes into a stack.
 6. **Describe what changed and why** in the PR body. Link any related issues.
 7. At least one maintainer approval is required before merge.
@@ -85,7 +88,9 @@ chore(ci): skip non-Elixir paths in test matrix
 refactor(topology): rename Workspace module to Topology
 ```
 
-Scopes in use: `workspace`, `memory`, `wiki`, `fts`, `rag`, `recall`, `surface`, `api`, `auth`, `sdk`, `mcp`, `desktop`, `site`, `docs`, `ci`, `deploy`, `topology`, `routing`.
+Scopes in use: `topology`, `intake`, `signal`, `memory-core`, `retrieval`,
+`pool`, `workflow`, `skill`, `governance`, `connector`, `asset`, `wiki`,
+`export`, `api`, `auth`, `cli`, `sdk`, `mcp`, `docs`, `ci`, `deploy`.
 
 ---
 
@@ -101,31 +106,58 @@ Scopes in use: `workspace`, `memory`, `wiki`, `fts`, `rag`, `recall`, `surface`,
 
 ## Architecture Overview
 
-The engine is organized as a pipeline with three storage tiers:
+Optimal Engine is organized by lifecycle ownership, not by where bytes happen
+to live.
 
-```
-INGEST → PARSE → DECOMPOSE → CLASSIFY → EMBED
-                                         │
-CURATE ← CLUSTER ← STORE ← ROUTE ←──────┘
-
-Tier 1  lib/optimal_engine/ingest/      immutable .md files on disk
-Tier 2  lib/optimal_engine/store/       SQLite + FTS5 (rebuildable from Tier 1)
-Tier 3  lib/optimal_engine/wiki/        LLM-curated wiki pages
+```text
+Tenant / Organization
+  -> Workspaces
+      -> Nodes
+          -> Sources, Signals, Claims, Facts, Memories, Workflows, Skills
 ```
 
-Full architecture documentation lives in `docs/architecture/`. Read `docs/architecture/overview.md` before making changes to the pipeline or storage layers.
+The runtime layers are:
+
+```text
+Workspace / Topology
+Source Intake
+Signal Pipeline
+Memory Core
+Retrieval / Context
+Active Memory Pools
+Workflow / Skill Runtime
+Tool / Model Governance
+Wiki / Export Surface
+Evaluation / Audit / Recovery
+```
+
+The storage rule is:
+
+```text
+database rows own governed runtime state
+raw artifacts own source evidence
+indexes/caches speed up retrieval
+markdown/wiki/API/app views project state
+```
+
+Full architecture documentation lives in `docs/architecture/`. Read
+`docs/architecture/ENGINE-STRUCTURE.md`,
+`docs/architecture/STORAGE-AND-PROJECTION-MAP.md`, and
+`docs/reference/backend-readiness.md` before making changes to lifecycle,
+storage, retrieval, or projection behavior.
 
 Key modules:
 
 | Module | Responsibility |
 |--------|---------------|
-| `OptimalEngine.Pipeline` | 9-stage ingest orchestrator |
-| `OptimalEngine.Workspace` | Multi-workspace isolation and scoping |
-| `OptimalEngine.Topology` | Node and skill graph |
-| `OptimalEngine.Routing` | YAML-driven signal routing |
-| `OptimalEngine.Memory` | Versioned memory primitive with typed relations |
-| `OptimalEngine.Surfacer` | Proactive surfacing GenServer |
-| `OptimalEngine.Wiki` | Curation, contradiction detection, claim extraction |
+| `OptimalEngine.WorkspaceTopology` | Workspaces, Nodes, Node Types, relationships, membership, and topology review. |
+| `OptimalEngine.WorkspaceInitiation` | Messy setup dump to workspace topology candidates and projections. |
+| `OptimalEngine.Pipeline` | Intake/classification/indexing compatibility pipeline. |
+| `OptimalEngine.Signal` | Signal classification and dispatch surfaces. |
+| `OptimalEngine.MemoryCore` | Source Packages, Claims, Facts, Memory Objects, Relationship Edges, context, pools, workflows, and skills. |
+| `OptimalEngine.MemoryCore.RetrievalCoordinator` | Governed Context Package assembly and refresh. |
+| `OptimalEngine.Connectors` | Connector registry, governed execution, and payload preservation. |
+| `OptimalEngine.Wiki` | Wiki/export projection service over governed engine state. |
 | `OptimalEngine.API.Router` | Plug.Router HTTP entry point |
 
 ---

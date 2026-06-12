@@ -5,10 +5,10 @@ defmodule OptimalEngine.Audit.EventTest do
 
   describe "Event.new/2" do
     test "builds an Event with the kind and sensible defaults" do
-      event = Event.new("retrieval.executed", principal: "user:ada@acme.test")
+      event = Event.new("retrieval.executed", principal: "user:ada@sample.test")
 
       assert event.kind == "retrieval.executed"
-      assert event.principal == "user:ada@acme.test"
+      assert event.principal == "user:ada@sample.test"
       assert event.tenant_id == "default"
       assert is_binary(event.ts)
     end

@@ -225,19 +225,19 @@ describe("OptimalEngine", () => {
 
   describe("workspaces.create", () => {
     it("should POST to /api/workspaces", async () => {
-      const ws = { id: "ws1", slug: "acme", name: "Acme" };
+      const ws = { id: "ws1", slug: "sample", name: "Example" };
       mockFetch(200, ws);
       const client = new OptimalEngine();
 
       const result = await client.workspaces.create({
-        slug: "acme",
-        name: "Acme",
+        slug: "sample",
+        name: "Example",
       });
 
       const { url, init } = lastFetchCall();
       expect(url).toContain("/api/workspaces");
       expect(init.method).toBe("POST");
-      expect(result.slug).toBe("acme");
+      expect(result.slug).toBe("sample");
     });
   });
 

@@ -1,149 +1,89 @@
-# Sample Workspace — "Acme Corp"
+# Sample Workspace
 
-A complete example of how an organization lays out its knowledge on disk
-for the Optimal Engine to ingest.
+This sample shows the public, current workspace shape for Optimal Engine.
 
-This directory is **opt-in reference data** — nothing here is required for
-the engine to run. Use it to:
+The files are not the whole database. They are the human-readable projection
+and editing surface for a governed backend.
 
-- See the three-tier convention (raw sources → derivatives → wiki) with
-  real files you can open and edit.
-- Bootstrap your own workspace via `mix optimal.init <target-dir>`.
-- Run the engine end-to-end against it: `mix optimal.ingest_workspace
-  sample-workspace/`.
-
----
-
-## Directory anatomy
-
+```text
+Organization / Tenant
+  -> Workspace
+    -> Nodes
+      -> entity-company
+      -> operation-weekly-review
+      -> product-customer-portal
+      -> project-platform-launch
+      -> learning-research-library
 ```
+
+Projects are Nodes. A project is not a peer of a workspace. A workspace can
+contain many project Nodes, product Nodes, person Nodes, operation Nodes,
+learning Nodes, context Nodes, and other custom Node types.
+
+## Directory Shape
+
+```text
 sample-workspace/
-├── nodes/                      # Organizational units (Tier 1 source)
-│   ├── 01-founder/
-│   │   ├── context.md          # Persistent facts (edit in place)
-│   │   ├── signal.md           # Weekly / rolling status
-│   │   └── signals/            # Dated signal files (append-only)
-│   │       └── YYYY-MM-DD-slug.md
-│   ├── 02-platform/
-│   └── …
-│
-├── .wiki/                      # Tier 3 — LLM-maintained curation
-│   ├── SCHEMA.md               # Governance rules the curator honors
-│   └── <slug>.md               # Curated pages with citations back to Tier 1
-│
-├── architectures/              # User-defined data-point schemas
-│   └── clinical_visit.yaml     # Example custom Architecture
-│
-└── assets/                     # Binary attachments (images, PDFs, audio)
+  workspace.yaml
+  README.md
+  .wiki/
+    SCHEMA.md
+    weekly-review.md
+  assets/
+    README.md
+  architectures/
+    customer_requirement.yaml
+  nodes/
+    entity-company/
+    operation-weekly-review/
+    product-customer-portal/
+    project-platform-launch/
+    learning-research-library/
 ```
 
-### Tier 1 — raw sources (this directory)
+Every Node folder follows the same projection shape:
 
-The file is the source of truth. The engine ingests, classifies, and
-indexes but **never rewrites** these files.
-
-- `context.md` — persistent facts about the node. Updated manually
-  when ground truth changes.
-- `signal.md` — the rolling weekly status for that node. Overwritten
-  each cycle.
-- `signals/YYYY-MM-DD-slug.md` — append-only. One file per event:
-  transcripts, decisions, plans, notes. Convention:
-  `YYYY-MM-DD-lowercase-slug.md`.
-
-### Tier 2 — derivatives
-
-Lives in `.optimal/index.db` (SQLite). Rebuildable from Tier 1 at any
-time with `mix optimal.reindex`. Holds the FTS5 index, per-chunk
-classifications + intents, extracted entities, edges, chunks at 4
-scales, embeddings, cluster assignments, audit events.
-
-### Tier 3 — the wiki
-
-Lives in `.wiki/`. LLM-maintained. Each file is a curated page with
-YAML frontmatter and `{{cite: …}}` directives pointing back to Tier 1
-chunks. The curator:
-
-1. Reads the governance rules in `SCHEMA.md`.
-2. Appends new signals under a `## New signals` section with citations.
-3. Rewrites existing sections when the underlying facts change.
-
----
-
-## Signal file convention
-
-Every signal file has YAML frontmatter + body:
-
-```markdown
----
-title: Customer pricing call — Q4
-genre: transcript
-mode: linguistic
-node: 04-academy
-sn_ratio: 0.75
-entities:
-  - { name: "Alice",   type: person }
-  - { name: "Bob",     type: person }
-  - { name: "Healthtech Product", type: product }
----
-
-## Summary
-
-One-sentence abstract. The engine pulls this for L0 (~100 tokens).
-
-## Key points
-
-- Bullets here. The engine pulls this block for L1 (~2K tokens).
-- Each bullet should be an atomic claim.
-
-## Detail
-
-Full content (L2 / `content` column). Prose is fine; the decomposer
-splits into paragraphs + sentences automatically.
+```text
+node.yaml       stable identity, type, owner, lifecycle, policy
+context.md     durable context projection
+signal.md      current operating state projection
+signals/       source-backed event stream
+packages/      outbound bundles sent to a person, team, client, partner, or channel
+loops/         scheduled or repeatable agent/human loops
 ```
 
-Fields the engine reads from frontmatter:
+## Database Role
 
-| Field       | Required | Used for                                          |
-|-------------|----------|---------------------------------------------------|
-| `title`     | yes      | Display + search ranking                          |
-| `genre`     | yes      | Classification + retrieval filter                 |
-| `mode`      | no       | `linguistic` / `visual` / `code` / `data` / `mixed` |
-| `node`      | inferred | Routed from directory; override if needed         |
-| `sn_ratio`  | no       | Signal/noise boost; defaults to 0.5               |
-| `entities`  | no       | Extracted entities (the engine can derive them)   |
-| `authored_at` | no     | ISO-8601 timestamp; defaults to file mtime        |
+The database owns governed runtime state:
 
----
+```text
+workspaces
+nodes
+node_types
+node_relationships
+source_packages
+claims
+facts
+memory_objects
+relationship_edges
+derivation_ledger
+context_packages
+active_memory_pools
+workflow_traces
+skill_packages
+tool/model runs
+audit events
+```
 
-## Running the engine against this workspace
+Markdown is still important because humans and agents can inspect, edit, and
+version it. When markdown changes, the engine should ingest it as source,
+classify it as a Signal, route it, and decide what projections need rebuilding.
+
+## Try It
 
 ```bash
-# One-shot setup — point the engine at this tree
-mix optimal.ingest_workspace sample-workspace/
-
-# Interactive usage
-mix optimal.search "healthtech pricing"
-mix optimal.rag "what's the decision on Q4 pricing?" --trace
-mix optimal.wiki view healthtech-pricing-decision
-mix optimal.graph hubs
+mix optimal.ingest_workspace sample-workspace
+mix optimal.search "launch blockers"
+mix optimal.rag "what context should I know before the weekly review?"
+mix optimal.wiki render-tree --workspace sample
 ```
-
-Or from a web UI:
-
-```bash
-# config/dev.exs
-config :optimal_engine, :api, enabled: true, port: 4200
-
-iex -S mix     # boots the engine + HTTP API
-```
-
-Then `cd desktop && npm run dev` and open http://localhost:1420.
-
----
-
-## Starting fresh
-
-Use `mix optimal.init <my-workspace>` to scaffold a new workspace
-that mirrors this layout. Six empty nodes, a SCHEMA.md, and a tiny
-starter signal so you can verify the pipeline works before you
-ingest real data.

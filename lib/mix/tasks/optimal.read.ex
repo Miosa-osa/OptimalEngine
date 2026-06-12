@@ -4,10 +4,10 @@ defmodule Mix.Tasks.Optimal.Read do
   Reads a context by its `optimal://` URI and prints its metadata + content.
 
   Usage:
-      mix optimal.read "optimal://nodes/ai-masters/context.md"
-      mix optimal.read "optimal://nodes/roberto/signal.md" --tier l0
-      mix optimal.read "optimal://nodes/roberto/signal.md" --tier l1
-      mix optimal.read "optimal://nodes/roberto/signal.md" --tier full
+      mix optimal.read "optimal://nodes/project-platform-launch/context.md"
+      mix optimal.read "optimal://nodes/operator/signal.md" --tier l0
+      mix optimal.read "optimal://nodes/operator/signal.md" --tier l1
+      mix optimal.read "optimal://nodes/operator/signal.md" --tier full
 
   Options:
     --tier   Content tier to display: l0, l1, full (default: l1)

@@ -49,10 +49,10 @@
 	</table>
 	<p>Returns: <code>{'{ slug, audience, version, workspace_id, body, warnings }'}</code></p>
 	<CodeBlock code={`# Serve the sales variant of a pricing page
-curl 'http://localhost:4200/api/wiki/healthtech-pricing?workspace=sales&audience=sales'
+curl 'http://localhost:4200/api/wiki/customer portal-pricing?workspace=sales&audience=sales'
 
 # Serve the exec variant
-curl 'http://localhost:4200/api/wiki/healthtech-pricing?workspace=sales&audience=exec'`} lang="bash" />
+curl 'http://localhost:4200/api/wiki/customer portal-pricing?workspace=sales&audience=exec'`} lang="bash" />
 </div>
 
 <div class="endpoint-group">
@@ -82,7 +82,7 @@ curl 'http://localhost:4200/api/wiki/healthtech-pricing?workspace=sales&audience
 </p>
 
 <CodeBlock code={`---
-title: Q4 Pricing Strategy
+title: Requirements Review Strategy
 audience: sales
 version: 3
 last_curated: 2026-04-28T15:00:00Z
@@ -142,10 +142,10 @@ The base price is $2,000/seat/year. {{cite:chunk:sha256:def456}}
 mix optimal.wiki list
 
 # View a page
-mix optimal.wiki view healthtech-pricing
+mix optimal.wiki view customer portal-pricing
 
 # Force re-curate
-mix optimal.wiki rebuild healthtech-pricing
+mix optimal.wiki rebuild customer portal-pricing
 
 # Verify all pages
 mix optimal.wiki verify all`} lang="bash" />

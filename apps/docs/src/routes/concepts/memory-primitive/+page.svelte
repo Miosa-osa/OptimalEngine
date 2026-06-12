@@ -198,7 +198,7 @@ curl -X POST http://localhost:4200/api/memory \\
   -d '{
     "content": "Pricing decision confirmed — see wiki",
     "workspace": "sales",
-    "citation_uri": "optimal://wiki/healthtech-pricing-decision"
+    "citation_uri": "optimal://wiki/customer portal-pricing-decision"
   }'`} lang="bash" />
 
 <h2>See Also</h2>

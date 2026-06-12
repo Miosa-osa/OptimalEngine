@@ -47,7 +47,7 @@
 					<path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
 				</svg>
 			</div>
-			<h3>Signal integrity — S=(M,G,T,F,W)</h3>
+			<h3>Signal integrity — Mode + Genre + Type + Format + Structure</h3>
 			<p>
 				Every chunk is classified across five dimensions: Mode, Genre, Type, Format, Structure.
 				Intent is extracted at every scale. Nothing is stored without provenance.

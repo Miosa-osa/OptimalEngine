@@ -109,7 +109,7 @@ defmodule OptimalEngine.Pipeline.Classifier do
 
   This is the main entry point. It:
   1. Detects the context type
-  2. For :signal types, runs the full S=(M,G,T,F,W) signal classification
+  2. For :signal types, runs the full Mode + Genre + Type + Format + Structure signal classification
   3. For all types, generates L0/L1/L2 summaries
   4. Returns a fully populated Context (caller must set: id, uri, created_at, modified_at)
   """
@@ -157,7 +157,7 @@ defmodule OptimalEngine.Pipeline.Classifier do
   end
 
   @doc """
-  Classifies raw markdown content into signal dimensions (S=(M,G,T,F,W)).
+  Classifies raw markdown content into signal dimensions (Mode + Genre + Type + Format + Structure).
 
   Returns a partial Signal struct with all classification fields populated.
   The caller must set: id, path, content, created_at, modified_at.
@@ -371,9 +371,9 @@ defmodule OptimalEngine.Pipeline.Classifier do
     is_org_markdown =
       ext == ".md" and
         Enum.any?(
-          ~w[01-roberto 02-miosa 03-lunivate 04-ai-masters 05-os-architect
-             06-agency-accelerants 07-accelerants-community 08-content-creators
-             09-new-stuff 10-team 11-money-revenue 12-os-accelerator],
+          ~w[entity-company person-operator product-customer-portal
+             project-platform-launch operation-weekly-review operation-revenue
+             operation-delivery learning-research-library inbox team],
           &String.contains?(path, &1)
         )
 
@@ -479,19 +479,17 @@ defmodule OptimalEngine.Pipeline.Classifier do
     folder_to_node(top)
   end
 
-  # Derive the node from the path — e.g. ".../01-roberto/..." → "roberto"
-  defp folder_to_node("01-roberto"), do: "roberto"
-  defp folder_to_node("02-miosa"), do: "miosa-platform"
-  defp folder_to_node("03-lunivate"), do: "lunivate"
-  defp folder_to_node("04-ai-masters"), do: "ai-masters"
-  defp folder_to_node("05-os-architect"), do: "os-architect"
-  defp folder_to_node("06-agency-accelerants"), do: "agency-accelerants"
-  defp folder_to_node("07-accelerants-community"), do: "accelerants-community"
-  defp folder_to_node("08-content-creators"), do: "content-creators"
-  defp folder_to_node("09-new-stuff"), do: "inbox"
-  defp folder_to_node("10-team"), do: "team"
-  defp folder_to_node("11-money-revenue"), do: "money-revenue"
-  defp folder_to_node("12-os-accelerator"), do: "os-accelerator"
+  # Derive the node from the path.
+  defp folder_to_node("entity-company"), do: "entity-company"
+  defp folder_to_node("person-operator"), do: "person-operator"
+  defp folder_to_node("product-customer-portal"), do: "product-customer-portal"
+  defp folder_to_node("project-platform-launch"), do: "project-platform-launch"
+  defp folder_to_node("operation-weekly-review"), do: "operation-weekly-review"
+  defp folder_to_node("operation-revenue"), do: "operation-revenue"
+  defp folder_to_node("operation-delivery"), do: "operation-delivery"
+  defp folder_to_node("learning-research-library"), do: "learning-research-library"
+  defp folder_to_node("team"), do: "team"
+  defp folder_to_node("inbox"), do: "inbox"
   defp folder_to_node("docs"), do: "resources"
   defp folder_to_node(_), do: "inbox"
 

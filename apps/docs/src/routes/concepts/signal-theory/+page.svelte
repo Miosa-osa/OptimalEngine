@@ -7,8 +7,8 @@
 
 <h1>Signal Theory</h1>
 <p>
-	The theoretical foundation the Optimal Engine is built to instantiate. Adapted from
-	<em>Signal Theory: The Architecture of Optimal Intent Encoding</em> (MIOSA Research, February 2026).
+	The classification model Optimal Engine uses to separate useful operating context from
+	noise before memory, retrieval, workflow, or agent execution touches it.
 </p>
 
 <h2>Root Objective</h2>
@@ -232,7 +232,7 @@
 	</thead>
 	<tbody>
 		<tr>
-			<td>Signal S=(M,G,T,F,W)</td>
+			<td>Signal Mode + Genre + Type + Format + Structure</td>
 			<td><code>OptimalEngine.Signal.Envelope</code> — CloudEvents + classification</td>
 		</tr>
 		<tr>
@@ -264,7 +264,7 @@
 
 <h2>See Also</h2>
 <ul>
-	<li><a href="/concepts/nine-stages">Nine Stages</a> — Stage 4 (Classify) instantiates S=(M,G,T,F,W)</li>
+	<li><a href="/concepts/nine-stages">Nine Stages</a> — Stage 4 (Classify) instantiates Mode + Genre + Type + Format + Structure</li>
 	<li><a href="/api/retrieval">Retrieval API</a> — bandwidth parameter maps to Shannon tier</li>
 	<li><a href="/api/surfacing">Surfacing API</a> — contradiction category maps to Beer failure mode detection</li>
 </ul>

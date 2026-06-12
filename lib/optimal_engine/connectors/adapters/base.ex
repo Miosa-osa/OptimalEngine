@@ -67,7 +67,10 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
         flatten_credentials(config)
       end
 
-      defoverridable hydrate_state: 1
+      # Adapters with either-or credential schemes (e.g. GitHub pat vs. App,
+      # HubSpot token vs. OAuth) declare `credential_keys: []` and override
+      # `init/1` to enforce their own credential gate.
+      defoverridable init: 1, hydrate_state: 1
 
       # ── shared helpers ───────────────────────────────────────────────────
 

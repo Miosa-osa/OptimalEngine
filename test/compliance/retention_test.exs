@@ -36,7 +36,7 @@ defmodule OptimalEngine.Compliance.RetentionTest do
     Store.raw_query(
       """
       INSERT INTO contexts (id, tenant_id, uri, title, content, genre, node, created_at)
-      VALUES (?1, ?2, ?3, 't', 'body', 'note', '01-roberto', '2020-01-01T00:00:00Z')
+      VALUES (?1, ?2, ?3, 't', 'body', 'note', 'person-operator', '2020-01-01T00:00:00Z')
       """,
       [ctx_id, tenant, "optimal://rsweep/#{ctx_id}"]
     )

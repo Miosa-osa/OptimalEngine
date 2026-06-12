@@ -162,7 +162,7 @@ All five return the same envelope as `/api/rag` plus a `recall_query` field show
 curl 'http://localhost:4200/api/profile?workspace=sales&audience=exec&bandwidth=l1'
 
 # Restrict to one node
-curl 'http://localhost:4200/api/profile?workspace=engineering&node=02-platform&bandwidth=full'
+curl 'http://localhost:4200/api/profile?workspace=engineering&node=product-customer-portal&bandwidth=full'
 ```
 
 **Response structure:**
@@ -173,8 +173,8 @@ curl 'http://localhost:4200/api/profile?workspace=engineering&node=02-platform&b
   "tenant_id": "default",
   "audience": "exec",
   "static": "Base price is $2K/seat...",
-  "dynamic": "Alice and Bob co-lead pricing. Open: Q4 deal with Acme...",
-  "curated": "## Q4 Pricing Strategy\n\nThe team has committed to...\n\n{{cite:...}}",
+  "dynamic": "Alice and Bob co-lead pricing. Open: Q4 deal with Example...",
+  "curated": "## Requirements Review Strategy\n\nThe team has committed to...\n\n{{cite:...}}",
   "activity": [
     { "kind": "ingest", "signal": "2026-04-28-pricing-call", "at": "2026-04-28T14:00:00Z" }
   ],

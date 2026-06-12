@@ -22,9 +22,9 @@ defmodule OptimalEngine.Wiki.ContradictionsTest do
   describe "check_contradictions/2" do
     test "same entity with two different price values → contradiction flagged" do
       body = """
-      **Acme Widget** costs $2K in the enterprise tier. {{cite: optimal://a#c1}}
+      **Example Widget** costs $2K in the enterprise tier. {{cite: optimal://a#c1}}
 
-      According to the updated sheet, **Acme Widget** is priced at $2.4K. {{cite: optimal://b#c2}}
+      According to the updated sheet, **Example Widget** is priced at $2.4K. {{cite: optimal://b#c2}}
       """
 
       result = Integrity.check_contradictions(page(body))
@@ -32,7 +32,7 @@ defmodule OptimalEngine.Wiki.ContradictionsTest do
       assert length(result) == 1
       [clash] = result
       assert clash.type == :entity_attr_clash
-      assert clash.entity == "acme widget"
+      assert clash.entity == "example widget"
       assert clash.attr == :numeric
       assert length(clash.claims) == 2
 
@@ -43,9 +43,9 @@ defmodule OptimalEngine.Wiki.ContradictionsTest do
 
     test "same entity with consistent values → no contradiction" do
       body = """
-      **Acme Widget** costs $2K. {{cite: optimal://a#c1}}
+      **Example Widget** costs $2K. {{cite: optimal://a#c1}}
 
-      The **Acme Widget** enterprise tier is $2K per seat. {{cite: optimal://b#c2}}
+      The **Example Widget** enterprise tier is $2K per seat. {{cite: optimal://b#c2}}
       """
 
       result = Integrity.check_contradictions(page(body))

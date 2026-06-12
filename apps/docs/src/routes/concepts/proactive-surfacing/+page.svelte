@@ -71,7 +71,7 @@ curl -X POST http://localhost:4200/api/subscriptions \\
 curl -N 'http://localhost:4200/api/surface/stream?subscription=sub:abc123'
 
 # Each event is a newline-delimited JSON envelope:
-# data: {"category":"contradictions","workspace":"sales","page_slug":"healthtech-pricing","detected_at":"2026-04-28T15:00:00Z","score":0.82}`} lang="bash" />
+# data: {"category":"contradictions","workspace":"sales","page_slug":"customer portal-pricing","detected_at":"2026-04-28T15:00:00Z","score":0.82}`} lang="bash" />
 
 <p>In TypeScript:</p>
 
@@ -117,7 +117,7 @@ curl -X DELETE http://localhost:4200/api/subscriptions/sub:abc123`} lang="bash" 
 <CodeBlock code={`# Trigger a synthetic push to test your listener
 curl -X POST http://localhost:4200/api/surface/test \\
   -H 'Content-Type: application/json' \\
-  -d '{"subscription":"sub:abc123","slug":"healthtech-pricing"}'`} lang="bash" />
+  -d '{"subscription":"sub:abc123","slug":"customer portal-pricing"}'`} lang="bash" />
 
 <h2>Workspace Config</h2>
 

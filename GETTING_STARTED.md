@@ -1,121 +1,144 @@
 # Getting Started
 
-Zero-to-running in about 5 minutes.
+This is the shortest path to a working local Optimal Engine.
 
-## 1. Prerequisites
+Optimal Engine is backend-first. You do not need Docker or a frontend to start.
+The CLI, Mix tasks, HTTP API, and agent tools can all operate against the same
+workspace.
 
-| What         | Version             | Check                         |
-|--------------|---------------------|-------------------------------|
-| Elixir       | `~> 1.17`           | `elixir --version`            |
-| Erlang / OTP | `26+`               | `erl -version`                |
-| C toolchain  | (for the SQLite NIF)| `cc --version`                |
-| Node         | `20+` (desktop UI)  | `node --version`              |
-| Rust stable  | (Tauri bundle only) | `rustc --version`             |
+## 1. Install
 
-On macOS:
+Requirements:
 
-```bash
-brew install elixir node rust
-```
+| Tool | Use |
+| --- | --- |
+| Elixir `~> 1.17` | Engine runtime and CLI tasks. |
+| Erlang/OTP 26+ | BEAM runtime. |
+| C toolchain | SQLite NIF build. |
+| Node 20+ | Optional app/site/docs surfaces only. |
+| `pdftotext`, `tesseract`, `ffmpeg` | Optional multimodal extraction helpers. |
 
-On Debian / Ubuntu:
-
-```bash
-sudo apt install elixir build-essential nodejs
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-Optional — enrichens parser coverage (graceful no-op when absent):
+macOS:
 
 ```bash
-brew install pdftotext tesseract ffmpeg
-```
-
-## 2. Clone + bootstrap
-
-```bash
-git clone https://github.com/Miosa-osa/OptimalEngine.git
-cd OptimalEngine
-make install       # deps + compile
-make bootstrap     # migrate + ingest sample-workspace/
-```
-
-Or, without make:
-
-```bash
+brew install elixir node ffmpeg tesseract
 mix deps.get
 mix compile
-mix optimal.bootstrap
 ```
 
-`bootstrap` is idempotent — run it again to re-seed after pulling.
-
-## 3. Use the CLI
+## 2. Verify The Engine
 
 ```bash
-mix optimal.rag "healthtech pricing decision" --trace
-mix optimal.search "platform"
-mix optimal.wiki list
-mix optimal.graph hubs
-mix optimal.architectures
+mix optimal.reality_check
 ```
 
-## 4. Launch the desktop UI
+This checks the runtime spine: database migrations, topology tables, memory
+objects, retrieval paths, wiki/export pieces, tool/model records, and API
+surfaces.
 
-Enable the HTTP API once in `config/dev.exs`:
+## 3. Create A Workspace
 
-```elixir
-config :optimal_engine, :api, enabled: true, port: 4200
-```
-
-Then in two terminals:
+Create the workspace topology first. This gives the engine a tenant/workspace
+scope, starter Nodes, rhythm files, agent SOP, and projection records.
 
 ```bash
-# terminal A — engine + API
-iex -S mix
-
-# terminal B — desktop
-cd desktop
-npm install
-npm run dev           # browser preview at http://localhost:1420
-# or
-npm run tauri:dev     # native window
+mix optimal.setup my-workspace --name "My Workspace"
 ```
 
-The desktop has seven routes: **Ask**, **Workspace**, **Graph**, **Wiki**, **Architectures**, **Activity**, **Status**. Light and dark themes are selectable in the header.
+The setup flow creates:
 
-## 5. Make it yours
+```text
+Organization / tenant
+  -> workspace
+  -> starter Nodes
+  -> node types
+  -> relationships
+  -> markdown projection files
+  -> rhythm folders
+  -> agent operating instructions
+```
 
-The `sample-workspace/` directory is your on-disk reference. Copy its shape to a fresh location and start replacing fixtures with real signals:
+If you want to start from a copied filesystem template instead, use:
 
 ```bash
-mix optimal.init ~/my-engine
-# edit files under ~/my-engine/nodes/*/signals/*.md
-mix optimal.ingest_workspace ~/my-engine
+mix optimal.init ./my-workspace
 ```
 
-Every signal file carries YAML frontmatter + a markdown body. Frontmatter field reference lives in [`sample-workspace/README.md`](sample-workspace/README.md).
+Then paste messy notes, imports, transcripts, markdown, or tool outputs into the
+workspace and ingest them. Intake preserves raw source first, then classifies,
+routes, extracts claims, and builds searchable memory.
 
-## 6. Sanity-check at any time
+## 4. Use The Sample Workspace
 
 ```bash
-mix optimal.reality_check --hard
+mix optimal.ingest_workspace sample-workspace
+mix optimal.search "launch blockers"
+mix optimal.rag "what should I know before the weekly review?"
+mix optimal.wiki render-tree --workspace sample
 ```
 
-Runs 50+ probes across every storage table, every pipeline stage, every retrieval path, every compliance workflow. Prints OK/WARN/FAIL + elapsed ms. Target: all green, total wall-clock under 1 second.
+## 5. Use The Local Wrapper
 
-## Troubleshooting
+The `./optimal` wrapper is the clean surface for agents and humans:
 
-**`mix deps.get` fails with compilation errors on `exqlite`** — install the C toolchain for your platform (Xcode Command-Line Tools on macOS, `build-essential` on Debian).
+```bash
+./optimal status
+./optimal init my-workspace
+./optimal search "customer portal requirements"
+./optimal rag "prep me for the platform launch review"
+```
 
-**`mix optimal.rag` takes several seconds** — you have Ollama running but without `nomic-embed-text` pulled. Either `ollama pull nomic-embed-text`, or ignore — the engine detects the gap and falls through to BM25-only.
+An agent can use regular CLI tools (`ls`, `rg`, `cat`, `git`, `curl`) and the
+Optimal Engine CLI. MCP/tool servers are useful when authentication,
+schema-validation, remote resources, or audit justify the extra structure.
 
-**Desktop boots but `Status` reads "down"** — the engine isn't running on `127.0.0.1:4200`. Check `iex -S mix` is up and `config/dev.exs` has the API block enabled.
+## 6. Storage Model
 
-**`npm run dev` fails with `pixi.js` / `three` resolution errors** — the `node_modules` cache is stale. Delete and reinstall: `rm -rf node_modules && npm install`.
+One local SQLite database is enough to start:
 
-## What next
+```text
+.optimal/index.db
+```
 
-- Read [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) for the 9-stage pipeline.
-- Read [`docs/architecture/DATA_ARCHITECTURE.md`](docs/architecture/DATA_ARCHITECTURE.md) for the universal data-point layer.
-- Read [`docs/concepts/signal-theory.md`](docs/concepts/signal-theory.md) for `S=(M,G,T,F,W)`.
+The database owns governed runtime state. Markdown files are projections and
+editing surfaces.
+
+```text
+Database:
+  workspaces, nodes, source packages, claims, facts, memories,
+  context packages, active pools, workflows, skills, tools, audit
+
+Markdown:
+  node pages, current state, signals, packages, loops, wiki projections
+
+Indexes/caches:
+  FTS, embeddings, summaries, parser output, rebuildable acceleration
+```
+
+## 7. Optional Docker
+
+Docker is for a packaged backend service:
+
+```bash
+cd deploy
+cp env.example .env
+docker compose up --build
+```
+
+The default compose stack starts only the backend engine. Optional surfaces are
+behind the `surfaces` profile:
+
+```bash
+docker compose --profile surfaces up --build
+```
+
+## 8. What To Read Next
+
+- [README.md](README.md): product and architecture overview.
+- [docs/README.md](docs/README.md): docs map.
+- [docs/architecture/ENGINE-STRUCTURE.md](docs/architecture/ENGINE-STRUCTURE.md):
+  runtime architecture.
+- [docs/architecture/STORAGE-AND-PROJECTION-MAP.md](docs/architecture/STORAGE-AND-PROJECTION-MAP.md):
+  where state lives and what is only a projection.
+- [sample-workspace/README.md](sample-workspace/README.md): workspace
+  projection example.
