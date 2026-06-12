@@ -77,10 +77,16 @@ defmodule OptimalEngine.Pipeline.Indexer do
   @doc """
   Indexes a single file immediately (synchronous).
   Useful for CLI tools like `mix optimal.ingest`.
+
+  Options:
+    * `:workspace_id` — stamps the built Context with this workspace scope
+      instead of the struct default (`"default"`). Callers that index files
+      on behalf of a workspace (e.g. `Pipeline.Intake` cross-references)
+      MUST pass this so rows never leak into the default workspace.
   """
-  @spec index_file(String.t()) :: {:ok, Context.t()} | {:error, term()}
-  def index_file(path) when is_binary(path) do
-    GenServer.call(__MODULE__, {:index_file, path}, 10_000)
+  @spec index_file(String.t(), keyword()) :: {:ok, Context.t()} | {:error, term()}
+  def index_file(path, opts \\ []) when is_binary(path) and is_list(opts) do
+    GenServer.call(__MODULE__, {:index_file, path, opts}, 10_000)
   end
 
   @doc "Returns the current indexer status."
@@ -135,9 +141,9 @@ defmodule OptimalEngine.Pipeline.Indexer do
   end
 
   @impl true
-  def handle_call({:index_file, path}, _from, state) do
+  def handle_call({:index_file, path, opts}, _from, state) do
     known_entities = known_entity_names(state.topology)
-    result = index_single_file(path, known_entities)
+    result = index_single_file(path, known_entities, opts)
     {:reply, result, state}
   end
 
@@ -220,13 +226,27 @@ defmodule OptimalEngine.Pipeline.Indexer do
     {:ok, length(results)}
   end
 
-  defp index_single_file(path, known_entities) do
+  defp index_single_file(path, known_entities, opts) do
     with ctx when not is_nil(ctx) <- build_context(path, known_entities),
+         ctx = stamp_scope(ctx, opts),
          :ok <- Store.insert_context(ctx) do
       {:ok, ctx}
     else
       nil -> {:error, :could_not_build_context}
       {:error, _} = err -> err
+    end
+  end
+
+  # Stamps caller-provided workspace scope on the Context. Without this the
+  # struct default ("default") wins and workspace content leaks into the
+  # default workspace.
+  defp stamp_scope(%Context{} = ctx, opts) do
+    case Keyword.get(opts, :workspace_id) do
+      workspace_id when is_binary(workspace_id) and workspace_id != "" ->
+        %{ctx | workspace_id: workspace_id}
+
+      _ ->
+        ctx
     end
   end
 
@@ -471,18 +491,16 @@ defmodule OptimalEngine.Pipeline.Indexer do
     folder_to_node(relative)
   end
 
-  defp folder_to_node("01-roberto"), do: "roberto"
-  defp folder_to_node("02-miosa"), do: "miosa-platform"
-  defp folder_to_node("03-lunivate"), do: "lunivate"
-  defp folder_to_node("04-ai-masters"), do: "ai-masters"
-  defp folder_to_node("05-os-architect"), do: "os-architect"
-  defp folder_to_node("06-agency-accelerants"), do: "agency-accelerants"
-  defp folder_to_node("07-accelerants-community"), do: "accelerants-community"
-  defp folder_to_node("08-content-creators"), do: "content-creators"
-  defp folder_to_node("09-new-stuff"), do: "inbox"
-  defp folder_to_node("10-team"), do: "team"
-  defp folder_to_node("11-money-revenue"), do: "money-revenue"
-  defp folder_to_node("12-os-accelerator"), do: "os-accelerator"
+  defp folder_to_node("entity-company"), do: "entity-company"
+  defp folder_to_node("person-operator"), do: "person-operator"
+  defp folder_to_node("product-customer-portal"), do: "product-customer-portal"
+  defp folder_to_node("project-platform-launch"), do: "project-platform-launch"
+  defp folder_to_node("operation-weekly-review"), do: "operation-weekly-review"
+  defp folder_to_node("operation-revenue"), do: "operation-revenue"
+  defp folder_to_node("operation-delivery"), do: "operation-delivery"
+  defp folder_to_node("learning-research-library"), do: "learning-research-library"
+  defp folder_to_node("team"), do: "team"
+  defp folder_to_node("inbox"), do: "inbox"
   defp folder_to_node("docs"), do: "resources"
   defp folder_to_node("_memories"), do: "inbox"
   defp folder_to_node("_skills"), do: "inbox"

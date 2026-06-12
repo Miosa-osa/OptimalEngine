@@ -19,7 +19,7 @@ defmodule Mix.Tasks.Optimal.Grep do
 
       query         The search term (required)
       path_prefix   Optional: restrict to a node slug or slug prefix
-                    e.g. "04-academy" or "04-academy/" or "04-academy/pricing"
+                    e.g. "operation-weekly-review" or "operation-weekly-review/" or "operation-weekly-review/pricing"
 
   ## Options
 
@@ -44,7 +44,7 @@ defmodule Mix.Tasks.Optimal.Grep do
       mix optimal.grep "pricing"
 
       # Restrict to the academy node, section scale only
-      mix optimal.grep "pricing" 04-academy/ --scale section
+      mix optimal.grep "pricing" operation-weekly-review/ --scale section
 
       # All commit_action chunks mentioning "launch"
       mix optimal.grep "launch" --intent commit_action
@@ -64,7 +64,7 @@ defmodule Mix.Tasks.Optimal.Grep do
 
       [
         {
-          "slug": "04-academy",
+          "slug": "operation-weekly-review",
           "scale": "section",
           "intent": "record_fact",
           "sn_ratio": 0.82,

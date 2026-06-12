@@ -106,7 +106,10 @@ defmodule OptimalEngine.Pipeline.Enricher.VlmEnricher do
 
             metadata =
               doc.metadata
-              |> Map.put(:frame_descriptions, Enum.map(descs, fn {i, t, d} -> %{index: i, timestamp_s: t, description: d} end))
+              |> Map.put(
+                :frame_descriptions,
+                Enum.map(descs, fn {i, t, d} -> %{index: i, timestamp_s: t, description: d} end)
+              )
 
             {:ok, %{doc | text: enriched_text, metadata: metadata}}
         end

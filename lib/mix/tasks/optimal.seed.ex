@@ -2,23 +2,21 @@ defmodule Mix.Tasks.Optimal.Seed do
   @shortdoc "Load a small demo dataset so the graph + RAG + wiki have something to show"
 
   @moduledoc """
-  Seeds the engine with a realistic mini-company dataset — people, orgs,
-  products, concepts, operations, and the signals that connect them.
+  Seeds the engine with a realistic public demo workspace dataset: one
+  organization, product, project, operations, research, package, and signal flow.
 
   Use this after a fresh `mix compile` to have something to look at when
-  you fire up the desktop UI (the `/graph` route goes dark on an empty
-  engine).
+  you run graph, RAG, wiki, or API commands against an empty engine.
 
   ## Usage
 
       mix optimal.seed                    — default ~20 signals
       mix optimal.seed --reset            — wipe demo rows first, re-seed
-      mix optimal.seed --tenant acme      — target a specific tenant
+      mix optimal.seed --tenant sample      — target a specific tenant
 
   ## What gets created
 
-    * 6 organizational nodes (roberto, miosa, lunivate, ai-masters, agency,
-      content-creators)
+    * a workspace-like node tree using current semantic node IDs
     * ~20 signals spanning decisions, calls, plans, transcripts
     * ~30 extracted entities with type stamps (person, org, product,
       concept, operation) so the `/api/optimal/graph` co-occurrence
@@ -53,7 +51,7 @@ defmodule Mix.Tasks.Optimal.Seed do
     signals = seed_signals(tenant)
     seed_entities(signals)
     seed_chunks(signals, tenant)
-    seed_classifications(signals)
+    seed_classifications(signals, tenant)
     seed_cluster(signals, tenant)
     seed_wiki_page(tenant)
     seed_events(signals, tenant)
@@ -75,7 +73,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       wiki pages:      #{stats.wiki}
 
     Try:
-      mix optimal.rag "healthtech pricing"
+      mix optimal.rag "customer portal pricing"
       mix optimal.wiki list
       (enable the HTTP API and open the desktop at /graph, /workspace, /activity)
     """)
@@ -87,29 +85,29 @@ defmodule Mix.Tasks.Optimal.Seed do
   # real depth. `parent` is a slug; the function resolves it to the parent's
   # id on insert.
   defp seed_nodes(tenant) do
-    # A generic "Acme Corp" demo company so anyone firing the seeder gets
-    # a realistic parent/child node tree without the fixtures being tied
-    # to any real organization.
     nodes = [
-      # Roots
-      {"01-founder", "Founder's Desk", "person", nil, "internal"},
-      {"02-platform", "Platform Division", "org", nil, "internal"},
-      {"03-services", "Services Division", "org", nil, "internal"},
-      {"04-academy", "Customer Academy", "operation", nil, "internal"},
-      {"06-partners", "Partner Network", "org", nil, "external"},
-      {"08-media", "Media & Content", "org", nil, "external"},
-
-      # Platform sub-tree
-      {"02-platform-core", "Core Platform", "project", "02-platform", "internal"},
-      {"02-platform-services", "Managed Services", "project", "02-platform", "internal"},
-      {"02-platform-investors", "Investor Materials", "project", "02-platform", "internal"},
-
-      # Academy sub-tree
-      {"04-academy-beginner", "Beginner Track", "project", "04-academy", "internal"},
-      {"04-academy-advanced", "Advanced Track", "project", "04-academy", "internal"},
-
-      # Partners sub-tree
-      {"06-partners-healthtech", "Healthtech Delivery", "project", "06-partners", "external"}
+      {"entity-company", "Example Company", "entity", nil, "internal"},
+      {"team", "Team", "team", "entity-company", "internal"},
+      {"product-customer-portal", "Customer Portal", "product", "entity-company", "internal"},
+      {"product-customer-portal-core", "Customer Portal Core", "project", "product-customer-portal",
+       "internal"},
+      {"product-customer-portal-services", "Customer Portal Services", "operation",
+       "product-customer-portal", "internal"},
+      {"product-customer-portal-investors", "Investor Materials", "context",
+       "product-customer-portal", "internal"},
+      {"project-platform-launch", "Platform Launch", "project", "product-customer-portal",
+       "internal"},
+      {"project-platform-launch-customer-portal", "Customer Portal Delivery", "project",
+       "project-platform-launch", "external"},
+      {"operation-delivery", "Delivery Operations", "operation", "entity-company", "internal"},
+      {"operation-revenue", "Revenue Operations", "operation", "entity-company", "internal"},
+      {"operation-weekly-review", "Weekly Review", "operation", "entity-company", "internal"},
+      {"operation-weekly-review-beginner", "Beginner Review Track", "project",
+       "operation-weekly-review", "internal"},
+      {"operation-weekly-review-advanced", "Advanced Review Track", "project",
+       "operation-weekly-review", "internal"},
+      {"learning-research-library", "Research Library", "learning", "entity-company", "internal"},
+      {"inbox", "Inbox", "context", nil, "internal"}
     ]
 
     Enum.each(nodes, fn {slug, name, kind, parent_slug, style} ->
@@ -219,11 +217,10 @@ defmodule Mix.Tasks.Optimal.Seed do
   # Per-chunk classification + intent rows (schema keys on chunk_id, not
   # context_id). We stamp only the document-scale chunk so the viewer has
   # a signal-level classification to display.
-  defp seed_classifications(signals) do
+  defp seed_classifications(signals, tenant) do
     Enum.each(signals, fn sig ->
       doc_id = "#{sig.id}:doc"
       intent = intent_for_genre(sig.genre)
-      tenant = "default"
 
       Store.raw_query(
         """
@@ -250,19 +247,19 @@ defmodule Mix.Tasks.Optimal.Seed do
   defp intent_for_genre("note"), do: :inform
   defp intent_for_genre(_), do: :inform
 
-  # A single theme cluster spanning the healthtech-related signals so the
+  # A single theme cluster spanning the customer portal-related signals so the
   # workspace explorer shows cross-signal grouping at the wide-pass layer.
   defp seed_cluster(signals, tenant) do
     theme_signals =
-      Enum.filter(signals, fn s -> String.contains?(s.content, "healthtech") end)
+      Enum.filter(signals, fn s -> String.contains?(s.content, "customer portal") end)
 
     if theme_signals != [] do
-      cluster_id = "seed-cluster-healthtech-#{System.unique_integer([:positive])}"
+      cluster_id = "seed-cluster-customer-portal-#{System.unique_integer([:positive])}"
 
       Store.raw_query(
         """
         INSERT OR IGNORE INTO clusters (id, tenant_id, theme, intent_dominant, member_count)
-        VALUES (?1, ?2, 'Healthtech delivery + pricing', 'inform', ?3)
+        VALUES (?1, ?2, 'Customer Portal delivery + pricing', 'inform', ?3)
         """,
         [cluster_id, tenant, length(theme_signals)]
       )
@@ -297,7 +294,7 @@ defmodule Mix.Tasks.Optimal.Seed do
   end
 
   defp seed_wiki_page(tenant) do
-    slug = "healthtech-pricing-decision"
+    slug = "customer-portal-pricing-decision"
 
     page = %Page{
       tenant_id: tenant,
@@ -306,18 +303,18 @@ defmodule Mix.Tasks.Optimal.Seed do
       version: 1,
       frontmatter: %{
         "slug" => slug,
-        "title" => "Healthtech pricing decision",
+        "title" => "Customer Portal pricing decision",
         "tag" => @demo_tag
       },
       body: """
       ## Summary
 
-      Healthtech partner pricing set at $2K per seat for Q4 based on the
-      customer call {{cite: optimal://nodes/04-academy/signals/customer-pricing-call.md}}.
+      Customer Portal partner pricing set at $2K per seat for Q4 based on the
+      customer call {{cite: optimal://nodes/operation-weekly-review/signals/customer-pricing-call.md}}.
 
       ## Related
 
-      Partner closed the first healthtech deal {{cite: optimal://nodes/06-partners/signals/first-healthtech-close.md}}.
+      Partner closed the first customer portal deal {{cite: optimal://nodes/project-platform-launch/signals/first-customer-portal-close.md}}.
       """,
       last_curated: DateTime.utc_now() |> DateTime.to_iso8601(),
       curated_by: "deterministic:demo-seed"
@@ -328,7 +325,7 @@ defmodule Mix.Tasks.Optimal.Seed do
 
   # ─── fixtures ───────────────────────────────────────────────────────────
   #
-  # Generic Acme-Corp demo dataset. Names are placeholders ("Alice",
+  # Generic Example-Corp demo dataset. Names are placeholders ("Alice",
   # "Bob", …) chosen so the seeder can ship with the public repo without
   # exposing any real person's correspondence. Swap them for your own
   # fixtures when you wire the engine into a real workspace.
@@ -337,39 +334,39 @@ defmodule Mix.Tasks.Optimal.Seed do
     [
       %{
         slug: "customer-pricing-call",
-        node: "04-academy",
+        node: "operation-weekly-review",
         title: "Customer pricing call — Q4",
         genre: "transcript",
-        abstract: "Customer wants $2K per seat pricing for the healthtech product.",
+        abstract: "Customer wants $2K per seat pricing for the customer portal product.",
         content:
-          "Customer lead called to discuss healthtech pricing for Q4. They want $2K per seat. Alice agreed to run the numbers with Bob before replying.",
+          "Customer lead called to discuss customer portal pricing for Q4. They want $2K per seat. Alice agreed to run the numbers with Bob before replying.",
         entities: [
           {"Alice", "person"},
           {"Bob", "person"},
           {"Customer Lead", "person"},
-          {"Healthtech Product", "product"},
+          {"Customer Portal Product", "product"},
           {"Customer Academy", "operation"}
         ]
       },
       %{
-        slug: "first-healthtech-close",
-        node: "06-partners",
-        title: "First healthtech deal closed",
+        slug: "first-customer-portal-close",
+        node: "project-platform-launch",
+        title: "First customer portal deal closed",
         genre: "note",
-        abstract: "Partner closed first healthtech deal.",
+        abstract: "Partner closed first customer portal deal.",
         content:
-          "Partner Dan closed the first healthtech deal with a Sacramento clinic network. Onboarding handoff to Eve; Alice CC'd for context.",
+          "Partner Dan closed the first customer portal deal with a Sacramento clinic network. Onboarding handoff to Eve; Alice CC'd for context.",
         entities: [
           {"Dan", "person"},
           {"Eve", "person"},
           {"Alice", "person"},
-          {"Healthtech Product", "product"},
+          {"Customer Portal Product", "product"},
           {"Partner Network", "org"}
         ]
       },
       %{
         slug: "platform-microvm-spec",
-        node: "02-platform",
+        node: "product-customer-portal",
         title: "Core platform — microVM isolation",
         genre: "spec",
         abstract: "Per-tenant microVM isolation on the core platform.",
@@ -386,7 +383,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "services-sales-package",
-        node: "02-platform",
+        node: "product-customer-portal",
         title: "Managed services — sales enablement package",
         genre: "plan",
         abstract: "Send Bob the managed-services sales package by Thursday.",
@@ -402,7 +399,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "media-stack-handoff",
-        node: "08-media",
+        node: "learning-research-library",
         title: "Media stack build handoff",
         genre: "decision_log",
         abstract: "Media stack handed off after spec review.",
@@ -417,7 +414,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "academy-course-structure",
-        node: "04-academy",
+        node: "operation-weekly-review",
         title: "Academy course structure — beginner + advanced",
         genre: "plan",
         abstract: "Academy splits into beginner + advanced tracks with a premium tier on top.",
@@ -432,20 +429,20 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "services-invoice-1234",
-        node: "03-services",
+        node: "operation-delivery",
         title: "Services division — invoice 1234",
         genre: "note",
-        abstract: "Services invoice 1234 to the healthtech partner for October.",
+        abstract: "Services invoice 1234 to the customer portal partner for October.",
         content:
-          "Services Division invoiced the healthtech partner $8,500 for October agency services (invoice 1234). 30-day terms.",
+          "Services Division invoiced the customer portal partner $8,500 for October agency services (invoice 1234). 30-day terms.",
         entities: [
           {"Services Division", "org"},
-          {"Healthtech Product", "product"}
+          {"Customer Portal Product", "product"}
         ]
       },
       %{
         slug: "platform-youtube-pilot",
-        node: "02-platform",
+        node: "product-customer-portal",
         title: "Platform YouTube channel — first pilot",
         genre: "plan",
         abstract: "Frank kicks off the platform YouTube channel with pilot episode.",
@@ -459,7 +456,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "technical-partnership",
-        node: "02-platform",
+        node: "product-customer-portal",
         title: "Bob — 50/50 technical partnership",
         genre: "decision_log",
         abstract: "Bob confirmed as 50/50 technical partner on the core platform.",
@@ -473,7 +470,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "advisor-consortium-call",
-        node: "01-founder",
+        node: "entity-company",
         title: "Advisor consortium call — strategy framing",
         genre: "transcript",
         abstract: "Advisor walked through the consortium pitch framing.",
@@ -487,7 +484,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "beginner-track-pilot",
-        node: "04-academy-beginner",
+        node: "operation-weekly-review-beginner",
         title: "Beginner track pilot — 12-week curriculum",
         genre: "plan",
         abstract: "Beginner track curriculum pilot ready; first cohort in two weeks.",
@@ -503,7 +500,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "advanced-track-labs",
-        node: "04-academy-advanced",
+        node: "operation-weekly-review-advanced",
         title: "Advanced track — hands-on labs specification",
         genre: "spec",
         abstract: "Advanced track labs spec — 8 hands-on exercises covering the full pipeline.",
@@ -519,12 +516,12 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "investor-deck-v2",
-        node: "02-platform-investors",
+        node: "product-customer-portal-investors",
         title: "Investor deck v2 — revenue model update",
         genre: "plan",
         abstract: "Investor deck v2 updates the revenue model and adds partner traction slide.",
         content:
-          "Investor deck v2: added partner traction slide (healthtech, 3 signed), revised revenue model (SaaS + services), tightened the ask to $8M Series A. Grace reviewed; Alice to present to Karl next week.",
+          "Investor deck v2: added partner traction slide (customer portal, 3 signed), revised revenue model (SaaS + services), tightened the ask to $8M Series A. Grace reviewed; Alice to present to Karl next week.",
         entities: [
           {"Grace", "person"},
           {"Alice", "person"},
@@ -533,24 +530,24 @@ defmodule Mix.Tasks.Optimal.Seed do
         ]
       },
       %{
-        slug: "healthtech-partner-onboarding",
-        node: "06-partners-healthtech",
-        title: "Healthtech partner onboarding — runbook",
+        slug: "customer-portal-partner-onboarding",
+        node: "project-platform-launch-customer-portal",
+        title: "Customer Portal partner onboarding — runbook",
         genre: "spec",
-        abstract: "Runbook for onboarding a new healthtech partner in under 10 days.",
+        abstract: "Runbook for onboarding a new customer portal partner in under 10 days.",
         content:
-          "Healthtech onboarding runbook: day 1 kickoff, day 2-4 data mapping, day 5 staging deploy, day 7 pilot users, day 10 go-live. Dan is the accountable owner. Eve runs the technical handoff. Heidi handles legal.",
+          "Customer Portal onboarding runbook: day 1 kickoff, day 2-4 data mapping, day 5 staging deploy, day 7 pilot users, day 10 go-live. Dan is the accountable owner. Eve runs the technical handoff. Heidi handles legal.",
         entities: [
           {"Dan", "person"},
           {"Eve", "person"},
           {"Heidi", "person"},
-          {"Healthtech Product", "product"},
+          {"Customer Portal Product", "product"},
           {"Partner Network", "org"}
         ]
       },
       %{
         slug: "media-content-calendar",
-        node: "08-media",
+        node: "learning-research-library",
         title: "Q1 media content calendar",
         genre: "plan",
         abstract: "Q1 media calendar — 12 episodes, 3 content pillars, weekly cadence.",
@@ -565,7 +562,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "security-audit-followup",
-        node: "02-platform-core",
+        node: "product-customer-portal-core",
         title: "Security audit — remediation plan",
         genre: "decision_log",
         abstract: "Security audit closed with 3 mediums + 1 high; remediation plan shipped.",
@@ -580,7 +577,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "customer-success-q4-review",
-        node: "04-academy",
+        node: "operation-weekly-review",
         title: "Customer success Q4 review",
         genre: "note",
         abstract: "Q4 customer-success metrics — NPS 54, retention 91%, expansion 38%.",
@@ -594,7 +591,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "data-architecture-review",
-        node: "02-platform-core",
+        node: "product-customer-portal-core",
         title: "Data-architecture review — new signal types",
         genre: "spec",
         abstract:
@@ -612,23 +609,23 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "partner-renewal-pipeline",
-        node: "06-partners",
+        node: "project-platform-launch",
         title: "Partner renewal pipeline — Q1",
         genre: "plan",
         abstract: "6 partner renewals in Q1 pipeline — 4 likely, 2 at risk.",
         content:
-          "Q1 partner renewals: 6 in flight — 4 likely (Acme Clinics, BetaHealth, CareLink, DentAI) and 2 at risk (EpicMed, FastScan). Dan runs point. Eve handles the technical uplift clauses. Heidi redlines contracts.",
+          "Q1 partner renewals: 6 in flight — 4 likely (Example Clinics, BetaHealth, CareLink, DentAI) and 2 at risk (EpicMed, FastScan). Dan runs point. Eve handles the technical uplift clauses. Heidi redlines contracts.",
         entities: [
           {"Dan", "person"},
           {"Eve", "person"},
           {"Heidi", "person"},
           {"Partner Network", "org"},
-          {"Healthtech Product", "product"}
+          {"Customer Portal Product", "product"}
         ]
       },
       %{
         slug: "office-hours-learnings",
-        node: "04-academy-beginner",
+        node: "operation-weekly-review-beginner",
         title: "Office hours — week 4 learnings",
         genre: "note",
         abstract: "Week 4 office hours feedback — two concept gaps identified.",
@@ -643,7 +640,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "vendor-selection-embeddings",
-        node: "02-platform-core",
+        node: "product-customer-portal-core",
         title: "Embedding vendor selection — decision",
         genre: "decision_log",
         abstract:
@@ -659,7 +656,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "compliance-soc2-scoping",
-        node: "02-platform",
+        node: "product-customer-portal",
         title: "SOC 2 scoping — Type II path",
         genre: "plan",
         abstract: "SOC 2 Type II scope defined; target audit window starts Q2.",
@@ -674,7 +671,7 @@ defmodule Mix.Tasks.Optimal.Seed do
       },
       %{
         slug: "founder-weekly-notes",
-        node: "01-founder",
+        node: "entity-company",
         title: "Founder weekly — focus notes",
         genre: "note",
         abstract: "Weekly focus: close Series A, ship 3D graph, hire head of growth.",

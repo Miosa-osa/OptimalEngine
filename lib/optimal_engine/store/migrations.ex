@@ -79,7 +79,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_031_memories_fts(),
       migration_032_memory_core_spine(),
       migration_033_workspace_topology_surface_spine(),
-      migration_034_tool_model_governance_runs()
+      migration_034_tool_model_governance_runs(),
+      migration_035_connector_workspace_and_legacy_node_renames()
     ]
   end
 
@@ -1797,7 +1798,6 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_nodes_ws_kind ON nodes(workspace_id, kind)"},
        {"idx_nodes_workspace_parent_v033",
         "CREATE INDEX IF NOT EXISTS idx_nodes_ws_parent ON nodes(workspace_id, parent_id)"},
-
        {"node_types",
         """
         CREATE TABLE IF NOT EXISTS node_types (
@@ -2029,6 +2029,37 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_tool_call_runs_tool ON tool_call_runs(workspace_id, mcp_tool_definition_id)"},
        {"idx_tool_call_runs_pool",
         "CREATE INDEX IF NOT EXISTS idx_tool_call_runs_pool ON tool_call_runs(active_memory_pool_id)"}
+     ]}
+  end
+
+  # Workspace isolation fixes (T3):
+  #
+  # 1. `connectors` / `connector_runs` predate migration 026 and never got a
+  #    workspace_id column, contradicting the Workspace contract ("each
+  #    workspace has its own connectors"). Add it so connector-ingested
+  #    signals can be attributed to the connector's workspace.
+  #
+  # 2. The legacy node renames (`01-inbox` → `inbox`, `04-products` →
+  #    `product-customer-portal`) used to run as an unconditional UPDATE on
+  #    every Store init (`Store.normalize_node_names/1`), silently rewriting
+  #    node names across ALL workspaces. They are now a one-time migration,
+  #    scoped to the pre-workspace `default` workspace where that legacy
+  #    data lives, applied exactly once and recorded in schema_migrations.
+  defp migration_035_connector_workspace_and_legacy_node_renames do
+    {35, "connectors.workspace_id + one-time legacy node renames (workspace isolation)",
+     [
+       {"connectors.workspace_id",
+        "ALTER TABLE connectors ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default'"},
+       {"connector_runs.workspace_id",
+        "ALTER TABLE connector_runs ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default'"},
+       {"idx_connectors_ws",
+        "CREATE INDEX IF NOT EXISTS idx_connectors_ws ON connectors(workspace_id)"},
+       {"idx_connector_runs_ws",
+        "CREATE INDEX IF NOT EXISTS idx_connector_runs_ws ON connector_runs(workspace_id, connector_id)"},
+       {"legacy rename 01-inbox → inbox (default workspace only)",
+        "UPDATE contexts SET node = 'inbox' WHERE node = '01-inbox' AND workspace_id = 'default'"},
+       {"legacy rename 04-products → product-customer-portal (default workspace only)",
+        "UPDATE contexts SET node = 'product-customer-portal' WHERE node = '04-products' AND workspace_id = 'default'"}
      ]}
   end
 

@@ -7,7 +7,7 @@ defmodule Mix.Tasks.Optimal.Reweave do
   Usage:
       mix optimal.reweave "Alice"
       mix optimal.reweave "pricing" --days 60 --limit 5
-      mix optimal.reweave "AI Masters" --days 14 --limit 3
+      mix optimal.reweave "Platform Launch" --days 14 --limit 3
 
   Options:
     --days    Days before a context is considered fully stale (default: 30)

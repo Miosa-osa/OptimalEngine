@@ -69,7 +69,7 @@ defmodule OptimalEngine.Store.Vectors do
   - `:limit`          — maximum results to return (default 10)
   - `:min_similarity` — minimum cosine similarity threshold (default 0.0)
   - `:type_filter`    — filter by context type (string, e.g. `"signal"`)
-  - `:node_filter`    — filter by node (string, e.g. `"ai-masters"`)
+  - `:node_filter`    — filter by node (string, e.g. `"project-platform-launch"`)
 
   Returns `{:ok, [{context_id, similarity_score}]}` sorted descending by score.
   """

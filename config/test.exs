@@ -5,6 +5,12 @@ config :optimal_engine, :auth,
   auth_required: false,
   bcrypt_cost: 4
 
+# Integration tests exercise many API endpoints in one run. Keep rate limits high
+# so the suite validates behavior rather than hitting infra guardrails.
+config :optimal_engine,
+  api_rate_limit_capacity: 10_000,
+  api_rate_limit_per_minute: 10_000
+
 config :optimal_engine,
   root_path: "/Users/rhl/Desktop/OptimalOS",
   db_path: "/tmp/optimal_engine_test_#{System.get_env("MIX_TEST_PARTITION", "0")}.db",

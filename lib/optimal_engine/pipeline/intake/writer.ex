@@ -7,8 +7,8 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   Every written file is a valid markdown signal that the indexer can parse:
 
       ---
-      node: ai-masters
-      title: Q4 Pricing Call
+      node: project-platform-launch
+      title: Requirements Review
       signal:
         mode: linguistic
         genre: transcript
@@ -16,26 +16,31 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
         format: markdown
         sn_ratio: 0.7
       tiers:
-        l0: "TRANSCRIPT | ai-masters | Q4 Pricing Call [S/N: 0.7]"
+        l0: "TRANSCRIPT | project-platform-launch | Requirements Review [S/N: 0.7]"
         l1: "First 300 chars of content..."
       entities:
         - Alice
         - Alice
       routed_to:
-        - 04-ai-masters
-        - 11-money-revenue
+        - project-platform-launch
+        - operation-revenue
       created_at: "2026-03-18T14:30:00Z"
       ---
 
-      # Q4 Pricing Call
+      # Requirements Review
 
       ## Participants
       ...
 
   ## File naming
 
-  Files are written to `{root}/{node_folder}/signals/{date}-{slug}.md`
+  Files are written to `{root}/{workspace_dir}/{node_folder}/signals/{date}-{slug}.md`
   where slug is the title lowercased with spaces replaced by hyphens.
+
+  `workspace_dir` follows `OptimalEngine.Workspace.Filesystem.path/2`: the
+  default workspace lives at the root itself (no prefix — single-workspace
+  behavior is preserved), every other workspace gets its own directory so
+  two workspaces can never read or overwrite each other's signal files.
 
   Cross-references get the same content written to additional node folders
   with a `cross_ref_from:` note in the frontmatter.
@@ -45,17 +50,23 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
 
   alias OptimalEngine.Pipeline.Intake.Skeleton
   alias OptimalEngine.Signal
+  alias OptimalEngine.Topology.Node, as: TopologyNode
   alias OptimalEngine.URI
+  alias OptimalEngine.Workspace
+  alias OptimalEngine.Workspace.Filesystem, as: WorkspaceFilesystem
 
   @doc """
   Writes a classified signal to the primary node's signals/ directory.
+
+  Pass `:tenant_id`/`:workspace_id` in `opts` to resolve the Node folder
+  through workspace topology (see `node_to_folder/2`).
 
   Returns `{:ok, absolute_path}` or `{:error, reason}`.
   """
   @spec write_signal(Signal.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def write_signal(%Signal{} = signal, opts \\ []) do
     root = root_path()
-    node_folder = node_to_folder(signal.node)
+    node_folder = node_to_folder(signal.node, opts)
     signals_dir = Path.join([root, node_folder, "signals"])
 
     filename = build_filename(signal)
@@ -78,19 +89,19 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
 
   Returns `{:ok, [path]}` — all successfully written paths.
   """
-  @spec write_cross_references(Signal.t(), [String.t()]) :: {:ok, [String.t()]}
-  def write_cross_references(%Signal{} = signal, additional_nodes)
+  @spec write_cross_references(Signal.t(), [String.t()], keyword()) :: {:ok, [String.t()]}
+  def write_cross_references(%Signal{} = signal, additional_nodes, opts \\ [])
       when is_list(additional_nodes) do
-    primary_folder = node_to_folder(signal.node)
+    primary_folder = node_to_folder(signal.node, opts)
 
     paths =
       additional_nodes
       |> Enum.reject(fn node ->
         # Skip if it resolves to the same folder as the primary
-        node_to_folder(node) == primary_folder
+        node_to_folder(node, opts) == primary_folder
       end)
       |> Enum.flat_map(fn node ->
-        cross_opts = [cross_ref_from: signal.node]
+        cross_opts = Keyword.put(opts, :cross_ref_from, signal.node)
 
         case write_signal_to_node(signal, node, cross_opts) do
           {:ok, path} ->
@@ -111,10 +122,10 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   Appends the facts under a dated section if context.md exists, or
   creates a minimal context.md if the file is absent.
   """
-  @spec update_context(String.t(), [String.t()]) :: :ok | {:error, term()}
-  def update_context(node, facts) when is_binary(node) and is_list(facts) do
+  @spec update_context(String.t(), [String.t()], keyword()) :: :ok | {:error, term()}
+  def update_context(node, facts, opts \\ []) when is_binary(node) and is_list(facts) do
     root = root_path()
-    node_folder = node_to_folder(node)
+    node_folder = node_to_folder(node, opts)
     context_path = Path.join([root, node_folder, "context.md"])
     date_str = Date.utc_today() |> Date.to_iso8601()
 
@@ -128,7 +139,10 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
 
       {:error, :enoent} ->
         initial = "# #{humanize_node(node)}\n#{section}"
-        File.write(context_path, initial)
+
+        with :ok <- File.mkdir_p(Path.dirname(context_path)) do
+          File.write(context_path, initial)
+        end
 
       {:error, _} = err ->
         err
@@ -139,9 +153,9 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   Returns the relative path from OptimalOS root that would be written for a signal.
   Useful for display in CLI output without computing absolute paths.
   """
-  @spec relative_path(Signal.t()) :: String.t()
-  def relative_path(%Signal{} = signal) do
-    node_folder = node_to_folder(signal.node)
+  @spec relative_path(Signal.t(), keyword()) :: String.t()
+  def relative_path(%Signal{} = signal, opts \\ []) do
+    node_folder = node_to_folder(signal.node, opts)
     filename = build_filename(signal)
     Path.join([node_folder, "signals", filename])
   end
@@ -149,9 +163,9 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   @doc """
   Returns the optimal:// URI that corresponds to a written signal path.
   """
-  @spec signal_uri(Signal.t()) :: String.t()
-  def signal_uri(%Signal{} = signal) do
-    node_folder = node_to_folder(signal.node)
+  @spec signal_uri(Signal.t(), keyword()) :: String.t()
+  def signal_uri(%Signal{} = signal, opts \\ []) do
+    node_folder = node_to_folder(signal.node, opts)
     filename = build_filename(signal)
     fs_path = Path.join([root_path(), node_folder, "signals", filename])
     URI.from_path(fs_path)
@@ -163,7 +177,7 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
 
   defp write_signal_to_node(%Signal{} = signal, node, opts) do
     root = root_path()
-    node_folder = node_to_folder(node)
+    node_folder = node_to_folder(node, opts)
     signals_dir = Path.join([root, node_folder, "signals"])
     filename = build_filename(signal)
     path = Path.join(signals_dir, filename)
@@ -280,40 +294,160 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   end
 
   # ---------------------------------------------------------------------------
-  # Node/folder mapping (kept in sync with Router and Indexer)
+  # Node/folder resolution
+  #
+  # Workspace topology (`OptimalEngine.Topology.Node`) is the source of truth
+  # for Node folders: when a tenant/workspace scope is given and the slug has a
+  # topology row, the file lands in that Node's own folder (its `path`). The
+  # legacy alias map below is ONLY the final fallback for pre-topology slugs;
+  # unknown slugs without a topology row still land in inbox so evidence is
+  # never dropped.
   # ---------------------------------------------------------------------------
 
-  @node_folder_map %{
-    "roberto" => "01-roberto",
-    "miosa-platform" => "02-miosa",
-    "lunivate" => "03-lunivate",
-    "ai-masters" => "04-ai-masters",
-    "os-architect" => "05-os-architect",
-    "agency-accelerants" => "06-agency-accelerants",
-    "accelerants-community" => "07-accelerants-community",
-    "content-creators" => "08-content-creators",
-    "inbox" => "09-new-stuff",
-    "team" => "10-team",
-    "money-revenue" => "11-money-revenue",
-    "os-accelerator" => "12-os-accelerator",
-    # Folder name passthrough — router returns folder names in some cases
-    "01-roberto" => "01-roberto",
-    "02-miosa" => "02-miosa",
-    "03-lunivate" => "03-lunivate",
-    "04-ai-masters" => "04-ai-masters",
-    "05-os-architect" => "05-os-architect",
-    "06-agency-accelerants" => "06-agency-accelerants",
-    "07-accelerants-community" => "07-accelerants-community",
-    "08-content-creators" => "08-content-creators",
-    "09-new-stuff" => "09-new-stuff",
-    "10-team" => "10-team",
-    "11-money-revenue" => "11-money-revenue",
-    "12-os-accelerator" => "12-os-accelerator"
+  # Kept in sync with `Workspace.default_id/0` / `Workspace.Filesystem` —
+  # the default workspace lives at the engine root itself.
+  @default_workspace_id "default"
+
+  @legacy_node_folder_map %{
+    "operator" => "person-operator",
+    "entity-company" => "entity-company",
+    "person-operator" => "person-operator",
+    "product-customer-portal" => "product-customer-portal",
+    "project-platform-launch" => "project-platform-launch",
+    "operation-weekly-review" => "operation-weekly-review",
+    "operation-revenue" => "operation-revenue",
+    "operation-delivery" => "operation-delivery",
+    "learning-research-library" => "learning-research-library",
+    "team" => "team",
+    "inbox" => "inbox"
   }
 
-  @spec node_to_folder(String.t() | nil) :: String.t()
-  def node_to_folder(nil), do: "09-new-stuff"
-  def node_to_folder(node), do: Map.get(@node_folder_map, node, "09-new-stuff")
+  @doc """
+  Resolves a node slug to its folder relative to the engine root.
+
+  Resolution order:
+
+  1. Workspace topology Node lookup (requires `:workspace_id` in `opts`,
+     optionally `:tenant_id`) — a topology Node routes to its own `path`
+  2. Legacy alias map (e.g. `"operator"` → `"person-operator"`)
+  3. `"inbox"` — the routing fallback; evidence is preserved, never dropped
+
+  Every resolved folder (including the legacy-alias and inbox fallbacks) is
+  prefixed with the workspace directory for non-default workspaces, so
+  on-disk signal storage is segregated per workspace. The default workspace
+  keeps the unprefixed single-workspace layout.
+  """
+  @spec node_to_folder(String.t() | nil, keyword()) :: String.t()
+  def node_to_folder(node, opts \\ [])
+  def node_to_folder(nil, opts), do: scoped_folder("inbox", opts)
+
+  def node_to_folder(node, opts) when is_binary(node) do
+    folder =
+      case topology_folder(node, opts) do
+        {:ok, folder} -> folder
+        :miss -> Map.get(@legacy_node_folder_map, node, "inbox")
+      end
+
+    scoped_folder(folder, opts)
+  end
+
+  defp topology_folder(_slug, []), do: :miss
+
+  defp topology_folder(slug, opts) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
+    if is_binary(workspace_id) and workspace_id != "" do
+      lookup_opts =
+        case Keyword.get(opts, :tenant_id) do
+          nil -> [workspace_id: workspace_id]
+          tenant_id -> [tenant_id: tenant_id, workspace_id: workspace_id]
+        end
+
+      case TopologyNode.get_by_slug(slug, lookup_opts) do
+        {:ok, %TopologyNode{} = node} -> {:ok, node_folder(node)}
+        _ -> :miss
+      end
+    else
+      :miss
+    end
+  rescue
+    _ -> :miss
+  catch
+    :exit, _ -> :miss
+  end
+
+  defp node_folder(%TopologyNode{path: path}) when is_binary(path) and path != "", do: path
+  defp node_folder(%TopologyNode{slug: slug}), do: "nodes/#{slug}"
+
+  # Prefixes a node folder with the workspace directory so non-default
+  # workspaces never share (or clobber) each other's on-disk signal tree.
+  # Mirrors `Workspace.Filesystem.path/2`: the default workspace lives at
+  # the root itself, every other workspace under `<root>/<workspace_dir>/`.
+  defp scoped_folder(folder, opts) do
+    case workspace_dir(opts) do
+      nil ->
+        folder
+
+      dir ->
+        # A topology Node path may already carry the workspace prefix —
+        # never double-prefix.
+        if folder == dir or String.starts_with?(folder, dir <> "/") do
+          folder
+        else
+          Path.join(dir, folder)
+        end
+    end
+  end
+
+  defp workspace_dir(opts) when is_list(opts) do
+    case Keyword.get(opts, :workspace_id) do
+      nil -> nil
+      "" -> nil
+      @default_workspace_id -> nil
+      workspace_id when is_binary(workspace_id) -> workspace_prefix(workspace_slug(workspace_id))
+      _ -> nil
+    end
+  end
+
+  # Registered workspaces route through the slug directory provisioned by
+  # `Workspace.Filesystem.provision/2`. Unregistered workspace ids (fail
+  # closed: still segregated, never the shared root) get a deterministic
+  # sanitized directory.
+  defp workspace_slug(workspace_id) do
+    case Workspace.get(workspace_id) do
+      {:ok, %Workspace{slug: slug}} when is_binary(slug) and slug != "" -> slug
+      _ -> sanitize_workspace_dir(workspace_id)
+    end
+  rescue
+    _ -> sanitize_workspace_dir(workspace_id)
+  catch
+    :exit, _ -> sanitize_workspace_dir(workspace_id)
+  end
+
+  defp workspace_prefix(slug) do
+    root = root_path()
+
+    case WorkspaceFilesystem.path(root, slug) do
+      ^root -> nil
+      workspace_path -> Path.relative_to(workspace_path, root)
+    end
+  end
+
+  defp sanitize_workspace_dir(workspace_id) do
+    sanitized =
+      workspace_id
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9_-]+/, "-")
+      |> String.replace(~r/-{2,}/, "-")
+      |> String.trim("-")
+
+    if sanitized == "" do
+      "ws-" <>
+        Base.encode16(binary_part(:crypto.hash(:sha256, workspace_id), 0, 6), case: :lower)
+    else
+      sanitized
+    end
+  end
 
   defp humanize_node(node) do
     node

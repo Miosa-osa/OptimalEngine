@@ -30,13 +30,13 @@ defmodule OptimalEngineTest do
         valid_from: now,
         valid_until: nil,
         supersedes: nil,
-        node: "roberto",
+        node: "operator",
         sn_ratio: 0.85,
         entities: ["Alice", "Carol"],
-        l0_summary: "SPEC | roberto | Test Signal [S/N: 0.9]",
+        l0_summary: "SPEC | operator | Test Signal [S/N: 0.9]",
         l1_description: "A test signal description",
         content: "Test content",
-        routed_to: ["01-roberto"],
+        routed_to: ["person-operator"],
         score: nil
       }
 
@@ -150,7 +150,7 @@ defmodule OptimalEngineTest do
 
       signal = %Signal{
         id: "sig001",
-        path: "/test/01-roberto/signal.md",
+        path: "/test/person-operator/signal.md",
         title: "Architecture Decision",
         mode: :linguistic,
         genre: "adr",
@@ -162,20 +162,20 @@ defmodule OptimalEngineTest do
         valid_from: nil,
         valid_until: nil,
         supersedes: nil,
-        node: "roberto",
+        node: "operator",
         sn_ratio: 0.9,
         entities: ["Alice"],
-        l0_summary: "ADR | roberto | Architecture Decision [S/N: 0.9]",
+        l0_summary: "ADR | operator | Architecture Decision [S/N: 0.9]",
         l1_description: "Decided to use SQLite",
         content: "We decided to use SQLite.",
-        routed_to: ["01-roberto"],
+        routed_to: ["person-operator"],
         score: nil
       }
 
       ctx = Context.from_signal(signal)
       assert ctx.type == :signal
       assert ctx.signal == signal
-      assert String.contains?(ctx.uri, "roberto")
+      assert String.contains?(ctx.uri, "operator")
 
       row = Context.to_row(ctx)
       assert row.type == "signal"
@@ -195,7 +195,7 @@ defmodule OptimalEngineTest do
         structure: "",
         created_at: DateTime.utc_now(),
         modified_at: DateTime.utc_now(),
-        node: "roberto",
+        node: "operator",
         sn_ratio: 0.5,
         entities: [],
         l0_summary: "",
@@ -239,9 +239,9 @@ defmodule OptimalEngineTest do
 
   describe "URI.parse/1" do
     test "parses nodes URI" do
-      {:ok, parsed} = URI.parse("optimal://nodes/ai-masters/context.md")
+      {:ok, parsed} = URI.parse("optimal://nodes/project-platform-launch/context.md")
       assert parsed.namespace == :nodes
-      assert parsed.segments == ["ai-masters", "context.md"]
+      assert parsed.segments == ["project-platform-launch", "context.md"]
     end
 
     test "parses resources URI" do
@@ -271,7 +271,7 @@ defmodule OptimalEngineTest do
     end
 
     test "returns :signal for nodes namespace" do
-      assert URI.context_type("optimal://nodes/roberto/signal.md") == :signal
+      assert URI.context_type("optimal://nodes/operator/signal.md") == :signal
     end
 
     test "returns :memory for user/memories namespace" do
@@ -285,7 +285,8 @@ defmodule OptimalEngineTest do
 
   describe "URI.node_id/1" do
     test "returns node id for nodes URI" do
-      assert URI.node_id("optimal://nodes/ai-masters/context.md") == "ai-masters"
+      assert URI.node_id("optimal://nodes/project-platform-launch/context.md") ==
+               "project-platform-launch"
     end
 
     test "returns inbox for inbox URI" do
@@ -300,8 +301,8 @@ defmodule OptimalEngineTest do
   describe "URI.from_path/1" do
     test "builds node URI from org folder path" do
       Application.put_env(:optimal_engine, :root_path, "/test/root")
-      uri = URI.from_path("/test/root/04-ai-masters/context.md")
-      assert uri == "optimal://nodes/ai-masters/context.md"
+      uri = URI.from_path("/test/root/project-platform-launch/context.md")
+      assert uri == "optimal://nodes/project-platform-launch/context.md"
     end
 
     test "builds resources URI from docs folder path" do
@@ -325,19 +326,19 @@ defmodule OptimalEngineTest do
     test "detects signal from YAML frontmatter with node key" do
       content = """
       ---
-      node: roberto
+      node: operator
       signal:
         genre: spec
       ---
       # A Signal
       """
 
-      assert Classifier.detect_type(content, path: "/01-roberto/signal.md") == :signal
+      assert Classifier.detect_type(content, path: "/person-operator/signal.md") == :signal
     end
 
     test "detects signal for org folder markdown" do
       content = "# Some note\n\nJust some content."
-      assert Classifier.detect_type(content, path: "/01-roberto/note.md") == :signal
+      assert Classifier.detect_type(content, path: "/person-operator/note.md") == :signal
     end
 
     test "detects memory from path" do
@@ -363,7 +364,7 @@ defmodule OptimalEngineTest do
     test "classifies a signal markdown with full dimensions" do
       content = """
       ---
-      node: roberto
+      node: operator
       signal:
         genre: spec
         mode: linguistic
@@ -377,7 +378,7 @@ defmodule OptimalEngineTest do
 
       ctx =
         Classifier.classify_context(content,
-          path: "/01-roberto/spec.md",
+          path: "/person-operator/spec.md",
           known_entities: []
         )
 
@@ -385,7 +386,7 @@ defmodule OptimalEngineTest do
       assert ctx.signal != nil
       assert ctx.signal.genre == "spec"
       assert ctx.title == "Platform Spec"
-      assert ctx.node == "roberto"
+      assert ctx.node == "operator"
       assert String.length(ctx.l0_abstract) > 0
     end
 
@@ -437,7 +438,7 @@ defmodule OptimalEngineTest do
         type: inform
         format: markdown
         sn_ratio: 0.9
-      node: roberto
+      node: operator
       ---
       # My Document
 
@@ -446,7 +447,7 @@ defmodule OptimalEngineTest do
 
       {fm, body} = Classifier.parse_frontmatter(content)
       assert get_in(fm, ["signal", "genre"]) == "spec"
-      assert Map.get(fm, "node") == "roberto"
+      assert Map.get(fm, "node") == "operator"
       assert String.contains?(body, "Body content here")
     end
 
@@ -467,7 +468,7 @@ defmodule OptimalEngineTest do
         genre: decision-log
         type: decide
         sn_ratio: 0.9
-      node: roberto
+      node: operator
       ---
       # Architecture Decision
       We decided to use SQLite.
@@ -476,7 +477,7 @@ defmodule OptimalEngineTest do
       signal = Classifier.classify(content)
       assert signal.genre == "decision-log"
       assert signal.type == :decide
-      assert signal.node == "roberto"
+      assert signal.node == "operator"
     end
 
     test "auto-detects genre from content patterns" do
@@ -555,8 +556,8 @@ defmodule OptimalEngineTest do
     setup do
       topology = %{
         endpoints: %{
-          "robert-potter" => %{
-            id: "robert-potter",
+          "sales-lead" => %{
+            id: "sales-lead",
             name: "Bob",
             role: "Sales",
             genre_competence: ["brief", "pitch", "email"],
@@ -589,11 +590,11 @@ defmodule OptimalEngineTest do
         valid_from: nil,
         valid_until: nil,
         supersedes: nil,
-        node: "roberto",
+        node: "operator",
         sn_ratio: 0.85,
         entities: [],
-        l0_summary: "SPEC | roberto | Platform Architecture Spec [S/N: 0.9]",
-        l1_description: "The platform architecture for MIOSA.",
+        l0_summary: "SPEC | operator | Platform Architecture Spec [S/N: 0.9]",
+        l1_description: "The platform architecture for the example company.",
         content: """
         ## Requirements
         1. Must support multi-tenancy
@@ -609,8 +610,8 @@ defmodule OptimalEngineTest do
       %{topology: topology, signal: signal}
     end
 
-    test "renders brief for robert-potter", %{topology: topology, signal: signal} do
-      {:ok, rendered} = Composer.render_for(signal, "robert-potter", topology)
+    test "renders brief for sales-lead", %{topology: topology, signal: signal} do
+      {:ok, rendered} = Composer.render_for(signal, "sales-lead", topology)
       assert String.contains?(rendered, "# Brief:")
       assert String.contains?(rendered, "Platform Architecture Spec")
     end

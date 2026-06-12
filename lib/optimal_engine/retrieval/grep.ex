@@ -18,7 +18,7 @@ defmodule OptimalEngine.Retrieval.Grep do
   ## Match shape
 
       %{
-        slug:     "04-academy/pricing",  # context slug / node
+        slug:     "operation-weekly-review/pricing",  # context slug / node
         scale:    :section,              # document | section | paragraph | chunk
         intent:   :record_fact,          # one of the 10 canonical intent values
         sn_ratio: 0.82,
@@ -306,8 +306,8 @@ defmodule OptimalEngine.Retrieval.Grep do
   end
 
   # Derive a node filter from a path prefix. The prefix may include a trailing
-  # slash (e.g. "04-academy/") — strip it before passing as a node slug.
-  # If the prefix contains a slash in the middle (e.g. "04-academy/pricing")
+  # slash (e.g. "operation-weekly-review/") — strip it before passing as a node slug.
+  # If the prefix contains a slash in the middle (e.g. "operation-weekly-review/pricing")
   # we take the first segment as the node and apply path_prefix post-filter.
   defp extract_node_filter(nil), do: nil
 

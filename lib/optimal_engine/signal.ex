@@ -17,7 +17,7 @@ defmodule OptimalEngine.Signal do
           id: String.t(),
           path: String.t(),
           title: String.t(),
-          # S=(M,G,T,F,W)
+          # Mode + Genre + Type + Format + Structure
           mode: mode(),
           genre: String.t(),
           type: signal_type(),

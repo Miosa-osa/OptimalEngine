@@ -1,6 +1,6 @@
 defmodule OptimalEngine.Signal.Classifier do
   @moduledoc """
-  Signal Theory classifier — analyzes signal content to suggest S=(M,G,T,F,W) dimensions,
+  Signal Theory classifier — analyzes signal content to suggest Mode + Genre + Type + Format + Structure dimensions,
   estimate signal-to-noise ratio, verify the four governing constraints, and detect failure modes.
 
   This module is the intelligence layer that makes Signal Theory actionable. It provides:

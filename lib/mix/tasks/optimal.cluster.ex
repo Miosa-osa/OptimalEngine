@@ -9,7 +9,7 @@ defmodule Mix.Tasks.Optimal.Cluster do
   ## Usage
 
       mix optimal.cluster                          list clusters in the default tenant
-      mix optimal.cluster --tenant acme-corp       list clusters in a specific tenant
+      mix optimal.cluster --tenant sample-corp       list clusters in a specific tenant
       mix optimal.cluster rebuild                  full rebuild (clears + re-assigns)
       mix optimal.cluster rebuild --threshold 0.7  custom similarity threshold
   """

@@ -8,7 +8,7 @@ defmodule OptimalEngine.Pipeline.Router do
   Priority levels: `:critical` > `:high` > `:normal` > `:low`
 
   Cross-cutting rules from `config.yaml` are also applied:
-  - Financial genres always copy to `money-revenue`
+  - Financial genres always copy to `operation-revenue`
   - Any signal mentioning a known person copies to `team`
   """
 
@@ -135,7 +135,7 @@ defmodule OptimalEngine.Pipeline.Router do
 
   defp maybe_add_financial(acc, signal) do
     if signal.genre in @financial_genres do
-      ["11-money-revenue" | acc]
+      ["operation-revenue" | acc]
     else
       acc
     end
@@ -143,39 +143,31 @@ defmodule OptimalEngine.Pipeline.Router do
 
   defp maybe_add_team(acc, signal) do
     if length(signal.entities || []) > 0 do
-      ["10-team" | acc]
+      ["team" | acc]
     else
       acc
     end
   end
 
-  # Normalize: strip entity-path prefixes, map folder names to node IDs
+  # Legacy destination aliases. Routing carries Node slugs through unchanged —
+  # folder resolution is topology-aware and owned by `Intake.Writer` — so this
+  # is NOT a list of known nodes, only renames for pre-topology rule targets.
+  @legacy_destination_aliases %{
+    "governance/l7-bypass" => "person-operator",
+    "optimal-system" => "entity-company"
+  }
+
+  # Normalize: strip entity-path prefixes, apply legacy aliases, pass all other
+  # Node slugs through untouched (unknown slugs are a Writer/topology concern).
   defp normalize_destinations(destinations) do
     destinations
     |> Enum.map(fn dest ->
-      dest
-      |> String.split("/")
-      |> List.last()
-      |> map_to_folder_id()
+      last = dest |> String.split("/") |> List.last()
+      Map.get(@legacy_destination_aliases, last, last)
     end)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
   end
-
-  # Maps destination strings to canonical folder/node names
-  defp map_to_folder_id("roberto"), do: "01-roberto"
-  defp map_to_folder_id("inbox"), do: "09-new-stuff"
-  defp map_to_folder_id("money-revenue"), do: "11-money-revenue"
-  defp map_to_folder_id("team"), do: "10-team"
-  defp map_to_folder_id("governance/l7-bypass"), do: "01-roberto"
-  defp map_to_folder_id("ai-masters"), do: "04-ai-masters"
-  defp map_to_folder_id("os-accelerator"), do: "12-os-accelerator"
-  defp map_to_folder_id("agency-accelerants"), do: "06-agency-accelerants"
-  defp map_to_folder_id("content/mosaic-effect"), do: "08-content-creators"
-  defp map_to_folder_id("miosa-core"), do: "02-miosa"
-  defp map_to_folder_id("compute-engine"), do: "02-miosa"
-  defp map_to_folder_id("optimal-system"), do: "05-os-architect"
-  defp map_to_folder_id(other), do: other
 
   defp load_state do
     topology =

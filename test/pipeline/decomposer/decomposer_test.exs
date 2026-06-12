@@ -232,9 +232,9 @@ defmodule OptimalEngine.Pipeline.DecomposerTest do
   describe "tenant_id propagation" do
     test "all chunks carry the tenant_id from opts" do
       doc = ParsedDoc.new(text: "anything")
-      {:ok, tree} = Decomposer.decompose(doc, tenant_id: "acme-corp")
+      {:ok, tree} = Decomposer.decompose(doc, tenant_id: "sample-corp")
 
-      assert Enum.all?(tree.chunks, &(&1.tenant_id == "acme-corp"))
+      assert Enum.all?(tree.chunks, &(&1.tenant_id == "sample-corp"))
     end
 
     test "defaults to `default` tenant" do

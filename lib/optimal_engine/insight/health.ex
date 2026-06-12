@@ -8,6 +8,12 @@ defmodule OptimalEngine.Insight.Health do
   This module has no process state — no GenServer, no supervision tree entry.
   All failures are caught; every check always returns a result map.
 
+  All checks are workspace-scoped (`:workspace_id` option, default
+  `"default"`): details may include concrete context ids and titles, so a
+  check must never aggregate across workspaces. Entity and vector membership
+  is resolved through the contexts table — the source of truth for
+  workspace_id — rather than the (legacy-backfilled) columns on those tables.
+
   Severities:
   - `:ok`       — check passed, no action needed
   - `:warning`  — issue found, should be addressed
@@ -29,22 +35,27 @@ defmodule OptimalEngine.Insight.Health do
   @doc """
   Runs all 10 diagnostic checks and returns their results.
 
+  Options:
+  - `:workspace_id` — workspace to diagnose (default: "default")
+
   Always returns `{:ok, [map()]}`. Individual check failures are caught and
   reported as `:warning` severity rather than propagated.
   """
-  @spec run() :: {:ok, [map()]}
-  def run do
+  @spec run(keyword()) :: {:ok, [map()]}
+  def run(opts \\ []) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+
     checks = [
-      check_orphaned_contexts(),
-      check_stale_signals(),
-      check_missing_cross_refs(),
-      check_fts_drift(),
-      check_entity_merge_candidates(),
-      check_node_imbalance(),
-      check_duplicate_detection(),
-      check_broken_references(),
-      check_embedding_coverage(),
-      check_quality_distribution()
+      check_orphaned_contexts(ws),
+      check_stale_signals(ws),
+      check_missing_cross_refs(ws),
+      check_fts_drift(ws),
+      check_entity_merge_candidates(ws),
+      check_node_imbalance(ws),
+      check_duplicate_detection(ws),
+      check_broken_references(ws),
+      check_embedding_coverage(ws),
+      check_quality_distribution(ws)
     ]
 
     {:ok, checks}
@@ -71,15 +82,15 @@ defmodule OptimalEngine.Insight.Health do
   # Check 1 — Orphaned contexts (no edges)
   # ---------------------------------------------------------------------------
 
-  @spec check_orphaned_contexts() :: map()
-  def check_orphaned_contexts do
+  @spec check_orphaned_contexts(String.t()) :: map()
+  def check_orphaned_contexts(ws \\ "default") do
     sql = """
     SELECT c.id, c.title FROM contexts c
     LEFT JOIN edges e ON e.source_id = c.id OR e.target_id = c.id
-    WHERE e.id IS NULL
+    WHERE e.id IS NULL AND c.workspace_id = ?1
     """
 
-    case Store.raw_query(sql) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, rows} ->
         items = Enum.map(rows, fn [id, title] -> %{id: id, title: title} end)
         count = length(items)
@@ -105,15 +116,16 @@ defmodule OptimalEngine.Insight.Health do
   # Check 2 — Stale signals (not modified in >30 days)
   # ---------------------------------------------------------------------------
 
-  @spec check_stale_signals() :: map()
-  def check_stale_signals do
+  @spec check_stale_signals(String.t()) :: map()
+  def check_stale_signals(ws \\ "default") do
     sql = """
     SELECT id, title, modified_at FROM contexts
     WHERE modified_at < datetime('now', '-#{@stale_days} days')
     AND modified_at IS NOT NULL
+    AND workspace_id = ?1
     """
 
-    case Store.raw_query(sql) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, rows} ->
         items =
           Enum.map(rows, fn [id, title, modified_at] ->
@@ -148,19 +160,21 @@ defmodule OptimalEngine.Insight.Health do
   # Check 3 — Missing cross-references
   # ---------------------------------------------------------------------------
 
-  @spec check_missing_cross_refs() :: map()
-  def check_missing_cross_refs do
+  @spec check_missing_cross_refs(String.t()) :: map()
+  def check_missing_cross_refs(ws \\ "default") do
     ctx_sql = """
     SELECT c.id, c.title, c.routed_to, c.node FROM contexts c
     WHERE c.routed_to != '[]' AND c.routed_to != '' AND c.routed_to IS NOT NULL
+    AND c.workspace_id = ?1
     """
 
     edge_sql = """
-    SELECT source_id, target_id FROM edges WHERE relation = 'cross_ref'
+    SELECT source_id, target_id FROM edges
+    WHERE relation = 'cross_ref' AND workspace_id = ?1
     """
 
-    with {:ok, ctx_rows} <- Store.raw_query(ctx_sql),
-         {:ok, edge_rows} <- Store.raw_query(edge_sql) do
+    with {:ok, ctx_rows} <- Store.raw_query(ctx_sql, [ws]),
+         {:ok, edge_rows} <- Store.raw_query(edge_sql, [ws]) do
       existing_pairs =
         MapSet.new(edge_rows, fn [src, tgt] -> {src, tgt} end)
 
@@ -201,14 +215,16 @@ defmodule OptimalEngine.Insight.Health do
   # Check 4 — FTS/index drift (count mismatch)
   # ---------------------------------------------------------------------------
 
-  @spec check_fts_drift() :: map()
-  def check_fts_drift do
+  @spec check_fts_drift(String.t()) :: map()
+  def check_fts_drift(ws \\ "default") do
     sql = """
-    SELECT (SELECT COUNT(*) FROM contexts) as ctx_count,
-           (SELECT COUNT(*) FROM contexts_fts) as fts_count
+    SELECT (SELECT COUNT(*) FROM contexts WHERE workspace_id = ?1) as ctx_count,
+           (SELECT COUNT(*) FROM contexts_fts f
+              JOIN contexts c ON c.id = f.id
+             WHERE c.workspace_id = ?1) as fts_count
     """
 
-    case Store.raw_query(sql) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, [[ctx_count, fts_count]]} ->
         drift = abs(ctx_count - fts_count)
 
@@ -241,16 +257,17 @@ defmodule OptimalEngine.Insight.Health do
   # Check 5 — Entity merge candidates (duplicate names, case-insensitive)
   # ---------------------------------------------------------------------------
 
-  @spec check_entity_merge_candidates() :: map()
-  def check_entity_merge_candidates do
+  @spec check_entity_merge_candidates(String.t()) :: map()
+  def check_entity_merge_candidates(ws \\ "default") do
     sql = """
-    SELECT LOWER(name) as lname, COUNT(*) as cnt, GROUP_CONCAT(DISTINCT name) as variants
-    FROM entities
-    GROUP BY LOWER(name)
+    SELECT LOWER(e.name) as lname, COUNT(*) as cnt, GROUP_CONCAT(DISTINCT e.name) as variants
+    FROM entities e
+    JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?1
+    GROUP BY LOWER(e.name)
     HAVING COUNT(*) > 1
     """
 
-    case Store.raw_query(sql) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, rows} ->
         items =
           Enum.map(rows, fn [lname, cnt, variants] ->
@@ -283,13 +300,13 @@ defmodule OptimalEngine.Insight.Health do
   # Check 6 — Node imbalance (any node > 3x mean context count)
   # ---------------------------------------------------------------------------
 
-  @spec check_node_imbalance() :: map()
-  def check_node_imbalance do
+  @spec check_node_imbalance(String.t()) :: map()
+  def check_node_imbalance(ws \\ "default") do
     sql = """
-    SELECT node, COUNT(*) as cnt FROM contexts GROUP BY node
+    SELECT node, COUNT(*) as cnt FROM contexts WHERE workspace_id = ?1 GROUP BY node
     """
 
-    case Store.raw_query(sql) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, []} ->
         ok_result(:node_imbalance, "No contexts in store — nothing to compare")
 
@@ -333,15 +350,16 @@ defmodule OptimalEngine.Insight.Health do
   # Check 7 — Duplicate detection (identical titles within same node)
   # ---------------------------------------------------------------------------
 
-  @spec check_duplicate_detection() :: map()
-  def check_duplicate_detection do
+  @spec check_duplicate_detection(String.t()) :: map()
+  def check_duplicate_detection(ws \\ "default") do
     sql = """
     SELECT node, title, COUNT(*) as cnt FROM contexts
+    WHERE workspace_id = ?1
     GROUP BY node, title
     HAVING COUNT(*) > 1
     """
 
-    case Store.raw_query(sql) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, rows} ->
         items =
           Enum.map(rows, fn [node, title, cnt] ->
@@ -370,15 +388,16 @@ defmodule OptimalEngine.Insight.Health do
   # Check 8 — Broken references (supersedes pointing to nonexistent IDs)
   # ---------------------------------------------------------------------------
 
-  @spec check_broken_references() :: map()
-  def check_broken_references do
+  @spec check_broken_references(String.t()) :: map()
+  def check_broken_references(ws \\ "default") do
     sql = """
     SELECT c.id, c.title, c.supersedes FROM contexts c
     WHERE c.supersedes IS NOT NULL AND c.supersedes != ''
-    AND c.supersedes NOT IN (SELECT id FROM contexts)
+    AND c.workspace_id = ?1
+    AND c.supersedes NOT IN (SELECT id FROM contexts WHERE workspace_id = ?1)
     """
 
-    case Store.raw_query(sql) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, rows} ->
         items =
           Enum.map(rows, fn [id, title, supersedes] ->
@@ -407,14 +426,16 @@ defmodule OptimalEngine.Insight.Health do
   # Check 9 — Embedding coverage (ratio of vectors to total contexts)
   # ---------------------------------------------------------------------------
 
-  @spec check_embedding_coverage() :: map()
-  def check_embedding_coverage do
+  @spec check_embedding_coverage(String.t()) :: map()
+  def check_embedding_coverage(ws \\ "default") do
     sql = """
-    SELECT (SELECT COUNT(*) FROM vectors) as vec_count,
-           (SELECT COUNT(*) FROM contexts) as ctx_count
+    SELECT (SELECT COUNT(*) FROM vectors v
+              JOIN contexts c ON c.id = v.context_id
+             WHERE c.workspace_id = ?1) as vec_count,
+           (SELECT COUNT(*) FROM contexts WHERE workspace_id = ?1) as ctx_count
     """
 
-    case Store.raw_query(sql) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, [[vec_count, ctx_count]]} when ctx_count > 0 ->
         coverage = Float.round(vec_count / ctx_count * 100, 1)
 
@@ -451,13 +472,15 @@ defmodule OptimalEngine.Insight.Health do
   # Check 10 — Quality distribution (flag if >20% have sn_ratio < 0.4)
   # ---------------------------------------------------------------------------
 
-  @spec check_quality_distribution() :: map()
-  def check_quality_distribution do
-    low_sql = "SELECT COUNT(*) as low_quality FROM contexts WHERE sn_ratio < #{@low_sn_threshold}"
-    total_sql = "SELECT COUNT(*) FROM contexts"
+  @spec check_quality_distribution(String.t()) :: map()
+  def check_quality_distribution(ws \\ "default") do
+    low_sql =
+      "SELECT COUNT(*) as low_quality FROM contexts WHERE sn_ratio < #{@low_sn_threshold} AND workspace_id = ?1"
 
-    with {:ok, [[low_count]]} <- Store.raw_query(low_sql),
-         {:ok, [[total_count]]} <- Store.raw_query(total_sql) do
+    total_sql = "SELECT COUNT(*) FROM contexts WHERE workspace_id = ?1"
+
+    with {:ok, [[low_count]]} <- Store.raw_query(low_sql, [ws]),
+         {:ok, [[total_count]]} <- Store.raw_query(total_sql, [ws]) do
       if total_count == 0 do
         ok_result(:quality_distribution, "No contexts in store — quality check skipped")
       else

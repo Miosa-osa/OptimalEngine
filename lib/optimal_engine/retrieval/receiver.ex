@@ -9,7 +9,7 @@ defmodule OptimalEngine.Retrieval.Receiver do
 
   ## Fields
 
-  - `:id`             — principal id (`"user:ada@acme.com"` / `"agent:bot"` / nil)
+  - `:id`             — principal id (`"user:ada@sample.com"` / `"agent:bot"` / nil)
   - `:kind`           — `:user | :agent | :service | :unknown`
   - `:audience`       — wiki audience tag (`"default" | "sales" | "legal" | …`)
   - `:tenant_id`      — tenant scope

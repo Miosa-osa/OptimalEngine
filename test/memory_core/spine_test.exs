@@ -2,7 +2,9 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.MemoryCore.ActiveMemoryPool
-  alias OptimalEngine.MemoryCore.KnowledgeLifecycle
+  alias OptimalEngine.MemoryCore.ClaimExtractor
+  alias OptimalEngine.MemoryCore.FactPromoter
+  alias OptimalEngine.MemoryCore.MemoryObject
   alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.MemoryCore.SourcePackage
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
@@ -22,9 +24,9 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     Application.put_env(:optimal_engine, :write_cross_ref_files, false)
 
     for folder <- ~w[
-          01-founder 02-platform 03-services 04-academy 05-operations
-          06-partners 07-community 08-media
-          09-inbox 10-team 11-finance 12-program
+          entity-company product-customer-portal operation-delivery operation-weekly-review 05-operations
+          project-platform-launch 07-community learning-research-library
+          09-inbox team 11-finance 12-program
         ] do
       File.mkdir_p!(Path.join([tmp_dir, folder, "signals"]))
     end
@@ -178,7 +180,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
       )
 
     assert {:ok, claim} =
-             KnowledgeLifecycle.extract_claim(source,
+             ClaimExtractor.extract_from_source(source,
                claim_text: "The source states that the project launch was approved.",
                subject_anchor: "project_launch",
                action_class: "approved",
@@ -193,7 +195,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert claim.source_package_id == source.id
 
     assert {:ok, fact} =
-             KnowledgeLifecycle.promote_claim_to_fact(claim,
+             FactPromoter.promote(claim,
                fact_text: "The project launch was approved in the planning meeting.",
                verifier_id: "human:reviewer",
                valid_time_start: "2026-06-02T00:00:00Z",
@@ -206,7 +208,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     assert fact.accepted_claim_ids == [claim.id]
 
     assert {:ok, memory} =
-             KnowledgeLifecycle.build_memory_object(fact,
+             MemoryObject.build_from_fact(fact,
                summary:
                  "The project launch approval is an accepted memory backed by the planning meeting source.",
                memory_type: "decision",
@@ -719,16 +721,118 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
                [workspace_id, model_operation.id]
              )
 
+    # Every governed run must join to its audit event by the REAL persisted
+    # event id (Agent Work Loop gate: "Audit records the run") — no synthetic
+    # ids, no fuzzy metadata-echo lookups.
+    governed_runs = [
+      {rejected_tool_run, "tool.call.governed"},
+      {invalid_tool_output_run, "tool.call.governed"},
+      {allowed_tool_run, "tool.call.governed"},
+      {allowed_model_run, "model.call.governed"},
+      {invalid_model_output_run, "model.call.governed"}
+    ]
+
+    for {run, kind} <- governed_runs do
+      assert [%{type: "audit_event", id: audit_event_id, kind: ^kind}] = run.audit_event_links
+      assert is_integer(audit_event_id)
+
+      assert {:ok, [[1]]} =
+               Store.raw_query(
+                 """
+                 SELECT COUNT(*)
+                 FROM events
+                 WHERE id = ?1
+                   AND tenant_id = 'default'
+                   AND workspace_id = ?2
+                   AND kind = ?3
+                   AND metadata LIKE ?4
+                 """,
+                 [audit_event_id, workspace_id, kind, "%#{run.id}%"]
+               )
+    end
+
     assert {:ok, [[5]]} =
              Store.raw_query(
                """
                SELECT COUNT(*)
                FROM events
                WHERE tenant_id = 'default'
-                 AND metadata LIKE ?1
-                 AND metadata LIKE ?2
+                 AND workspace_id = ?1
+                 AND kind IN ('tool.call.governed', 'model.call.governed')
                """,
-               ["%audit_event_links%", "%#{workspace_id}%"]
+               [workspace_id]
+             )
+  end
+
+  test "tool governance execute helper blocks, runs, and records tool execution" do
+    workspace_id = "memory-core-tool-execute-test-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    assert {:ok, _tool_definition} =
+             ToolModelGovernance.register_mcp_tool_definition(
+               workspace_id: workspace_id,
+               tool_name: "workspace.notify",
+               implementation_type: "internal_adapter",
+               required_privileges: ["workspace:notify"],
+               allowed_partitions: ["workspace"],
+               input_schema: %{required: ["message"]},
+               output_schema: %{required: ["delivered"]}
+             )
+
+    assert {:error, {:rejected, rejected_run}} =
+             ToolModelGovernance.execute_tool_call(
+               "workspace.notify",
+               %{message: "Blocked"},
+               fn _payload ->
+                 send(test_pid, :should_not_execute)
+                 {:ok, %{delivered: true}}
+               end,
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               granted_privileges: [],
+               requested_partitions: ["workspace"]
+             )
+
+    assert rejected_run.decision_state == "rejected"
+    refute_receive :should_not_execute
+
+    assert {:ok, completed_run} =
+             ToolModelGovernance.execute_tool_call(
+               "workspace.notify",
+               %{message: "Allowed"},
+               fn payload ->
+                 send(test_pid, {:executed, payload.message})
+                 {:ok, %{delivered: true}}
+               end,
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               granted_privileges: ["workspace:notify"],
+               requested_partitions: ["workspace"]
+             )
+
+    assert completed_run.decision_state == "allowed"
+    assert completed_run.run_status == "completed"
+    assert_receive {:executed, "Allowed"}
+
+    assert {:error, {:execution_failed, :boom, failed_run}} =
+             ToolModelGovernance.execute_tool_call(
+               "workspace.notify",
+               %{message: "Fail"},
+               fn _payload -> {:error, :boom} end,
+               workspace_id: workspace_id,
+               actor_id: "agent:test",
+               granted_privileges: ["workspace:notify"],
+               requested_partitions: ["workspace"]
+             )
+
+    assert failed_run.decision_state == "allowed"
+    assert failed_run.run_status == "failed"
+    assert failed_run.rejection_reason =~ "execution_failed"
+
+    assert {:ok, [[3]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM tool_call_runs WHERE workspace_id = ?1 AND tool_name = 'workspace.notify'",
+               [workspace_id]
              )
   end
 
@@ -747,7 +851,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
       )
 
     with {:ok, claim} <-
-           KnowledgeLifecycle.extract_claim(source,
+           ClaimExtractor.extract_from_source(source,
              claim_text: "The source states that the project launch was approved.",
              subject_anchor: "project_launch",
              action_class: "approved",
@@ -757,7 +861,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              actor_id: "agent:test"
            ),
          {:ok, fact} <-
-           KnowledgeLifecycle.promote_claim_to_fact(
+           FactPromoter.promote(
              claim,
              [
                fact_text: "The project launch was approved in the planning meeting.",
@@ -767,7 +871,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
              ] ++ fact_opts
            ),
          {:ok, memory} <-
-           KnowledgeLifecycle.build_memory_object(
+           MemoryObject.build_from_fact(
              fact,
              [
                summary:

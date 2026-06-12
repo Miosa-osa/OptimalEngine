@@ -20,6 +20,13 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB.Iterator do
   state unchanged.
   """
 
+  @compile {:no_warn_undefined,
+            [
+              {:rocksdb, :iterator, 3},
+              {:rocksdb, :iterator_close, 1},
+              {:rocksdb, :iterator_move, 2}
+            ]}
+
   defstruct [:db, :cf_handle, :iter, :prefix, :current, :exhausted, :dict_pid]
 
   @type t :: %__MODULE__{

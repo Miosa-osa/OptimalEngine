@@ -5,7 +5,7 @@ defmodule OptimalEngine.Signal.Envelope do
   Every event in the MIOSA ecosystem is a Signal. A Signal carries:
 
   - **CloudEvents v1.0.2** required and optional attributes for interoperability
-  - **Signal Theory S=(M,G,T,F,W)** dimensions for quality classification
+  - **Signal Theory Mode + Genre + Type + Format + Structure** dimensions for quality classification
   - **MIOSA extensions** for agent context, causality chains, and correlation
 
   ## CloudEvents v1.0.2 Compliance

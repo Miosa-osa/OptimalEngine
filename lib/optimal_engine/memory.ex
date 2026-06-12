@@ -27,7 +27,16 @@ defmodule OptimalEngine.Memory do
   path uses the explicit `forget_key/2` alias.
   """
 
-  alias OptimalEngine.Memory.Versioned
+  alias OptimalEngine.Memory.{EncodingGate, Versioned}
+
+  alias OptimalEngine.MemoryCore.{
+    Claim,
+    ClaimExtractor,
+    DerivationLedgerEntry,
+    ScoringPolicy,
+    SourcePackage,
+    Store
+  }
 
   require Logger
 
@@ -59,6 +68,94 @@ defmodule OptimalEngine.Memory do
         other
     end
   end
+
+  @doc """
+  Governed memory intake for agent-facing writes.
+
+  `create/1` is the low-level legacy versioned-memory primitive. `remember/2`
+  is the higher-level governed path: it preserves the input as a Source Package
+  first, then either records a rejected intake decision or creates a pending
+  Claim. It never promotes text directly into durable truth.
+
+  Returns `{:ok, %{action:, memory:, source_package:, pending_claim:, gate:}}`.
+
+  Options:
+    - `:force` — bypass the encoding gate and still create a pending Claim
+    - `:gate_threshold` — default `0.30`
+    - `:salience_floor` — default `0.10`
+  """
+  @spec remember(map(), keyword()) ::
+          {:ok,
+           %{
+             action: :pending_claim | :rejected,
+             memory: versioned() | nil,
+             gate: EncodingGate.t(),
+             source_package: SourcePackage.t(),
+             pending_claim: Claim.t() | nil
+           }}
+          | {:error, term()}
+  @spec remember(String.t(), keyword()) :: :ok | {:error, term()}
+  def remember(input, opts \\ [])
+
+  def remember(%{content: content} = attrs, opts) when is_binary(content) and content != "" do
+    workspace_id = Map.get(attrs, :workspace_id, "default")
+    audience = Map.get(attrs, :audience, "default")
+
+    candidates = list(workspace_id: workspace_id, audience: audience, limit: 200)
+
+    gate =
+      EncodingGate.evaluate(content,
+        candidates: candidates,
+        threshold: Keyword.get(opts, :gate_threshold, 0.30),
+        salience_floor: Keyword.get(opts, :salience_floor, 0.10)
+      )
+
+    encode? = gate.should_encode or Keyword.get(opts, :force, false)
+    source_package = memory_source_package(content, attrs, opts, gate, encode?)
+
+    if encode? do
+      claim_opts =
+        opts
+        |> Keyword.put_new(:actor_id, Map.get(attrs, :actor_id) || Map.get(attrs, :created_by))
+        |> Keyword.put_new(:claim_text, content)
+        |> Keyword.put_new(:metadata, governed_memory_metadata(attrs, gate, encode?))
+
+      case ClaimExtractor.extract_from_source(source_package, claim_opts) do
+        {:ok, claim} ->
+          {:ok,
+           %{
+             action: :pending_claim,
+             memory: nil,
+             source_package: source_package,
+             pending_claim: claim,
+             gate: gate
+           }}
+
+        other ->
+          other
+      end
+    else
+      with :ok <- Store.insert_source_package(source_package),
+           :ok <- record_remember_rejection(source_package, gate, opts) do
+        {:ok,
+         %{
+           action: :rejected,
+           memory: nil,
+           source_package: source_package,
+           pending_claim: nil,
+           gate: gate
+         }}
+      end
+    end
+  end
+
+  def remember(insight, opts) when is_binary(insight) do
+    tags = Keyword.get(opts, :tags, [])
+    key = Keyword.get(opts, :key, "insight_#{:erlang.unique_integer([:positive])}")
+    store("memory", key, insight, tags: tags)
+  end
+
+  def remember(_attrs, _opts), do: {:error, :missing_required_fields}
 
   @doc "Fetches a versioned memory by id."
   @spec get(String.t()) :: {:ok, versioned()} | {:error, :not_found}
@@ -239,17 +336,6 @@ defmodule OptimalEngine.Memory do
   end
 
   @doc """
-  Stores an insight into the default "memory" collection.
-  Convenience wrapper over `store/4`.
-  """
-  @spec remember(String.t(), keyword()) :: :ok | {:error, term()}
-  def remember(insight, opts \\ []) when is_binary(insight) do
-    tags = Keyword.get(opts, :tags, [])
-    key = Keyword.get(opts, :key, "insight_#{:erlang.unique_integer([:positive])}")
-    store("memory", key, insight, tags: tags)
-  end
-
-  @doc """
   Export a collection to a JSON file at the given path.
   """
   @spec export(collection(), String.t()) :: :ok | {:error, term()}
@@ -301,6 +387,81 @@ defmodule OptimalEngine.Memory do
   end
 
   defp parse_dt(%DateTime{} = dt), do: dt
+
+  defp memory_source_package(content, attrs, opts, gate, encode?) do
+    SourcePackage.from_text(content,
+      tenant_id: Map.get(attrs, :tenant_id, "default"),
+      workspace_id: Map.get(attrs, :workspace_id, "default"),
+      source_type: "memory_remember",
+      source_class: "text",
+      source_system: "optimal_engine.memory",
+      trust_label: "unreviewed",
+      quarantine_state: if(encode?, do: "clear", else: "rejected"),
+      metadata: governed_memory_metadata(attrs, gate, encode?),
+      created_by:
+        Map.get(attrs, :created_by) || Map.get(attrs, :actor_id) || Keyword.get(opts, :actor_id),
+      access_policy_id: Map.get(attrs, :access_policy_id),
+      security_labels: Map.get(attrs, :security_labels, []),
+      partition_ids: Map.get(attrs, :partition_ids, [])
+    )
+  end
+
+  defp governed_memory_metadata(attrs, gate, encode?) do
+    path = if encode?, do: "memory_core_pending_claim", else: "rejected_source_package"
+
+    attrs
+    |> Map.get(:metadata, %{})
+    |> normalize_metadata()
+    |> Map.put("memory_intake", %{
+      "path" => path,
+      "gate" => gate_summary(gate)
+    })
+  end
+
+  defp record_remember_rejection(%SourcePackage{} = source_package, gate, opts) do
+    source_ref = DerivationLedgerEntry.object_ref("source_package", source_package.id)
+
+    ledger =
+      DerivationLedgerEntry.new(
+        "memory.remember",
+        "source_rejected",
+        [source_ref],
+        [source_ref],
+        tenant_id: source_package.tenant_id,
+        workspace_id: source_package.workspace_id,
+        source_package_links: [source_ref],
+        evidence_links: [source_ref],
+        actor_id: Keyword.get(opts, :actor_id) || source_package.created_by,
+        parser_id: "optimal_engine.memory.remember",
+        scoring_policy_version: ScoringPolicy.version(),
+        access_policy_id: source_package.access_policy_id,
+        security_labels: source_package.security_labels,
+        partition_ids: source_package.partition_ids,
+        metadata: %{
+          quarantine_state: "rejected",
+          reason: "encoding_gate_rejected",
+          gate: gate_summary(gate)
+        }
+      )
+
+    Store.insert_derivation_entry(ledger)
+  end
+
+  defp gate_summary(gate) do
+    %{
+      "should_encode" => gate.should_encode,
+      "score" => gate.score,
+      "novelty" => gate.novelty,
+      "salience" => gate.salience,
+      "prediction_error" => gate.prediction_error,
+      "reason" => gate.reason,
+      "similar_memory_id" => gate.similar_memory_id
+    }
+  end
+
+  defp normalize_metadata(nil), do: %{}
+  defp normalize_metadata(metadata) when is_map(metadata), do: metadata
+  defp normalize_metadata(_metadata), do: %{}
 
   defp backend, do: OptimalEngine.Memory.Store.backend()
 

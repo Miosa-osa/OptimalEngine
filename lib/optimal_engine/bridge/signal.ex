@@ -15,6 +15,7 @@ defmodule OptimalEngine.Bridge.Signal do
   """
 
   alias OptimalEngine.Signal, as: OptSignal
+  alias OptimalEngine.Signal.Envelope
 
   @doc """
   Augments an OptimalEngine.Signal with OptimalEngine.Signal.Core classification.
@@ -24,17 +25,10 @@ defmodule OptimalEngine.Bridge.Signal do
   """
   @spec enhance_classification(OptSignal.t(), String.t()) :: OptSignal.t()
   def enhance_classification(%OptSignal{} = signal, raw_text) do
-    # Build a proper OptimalEngine.Signal.Event struct for classification
-    event_type = String.to_atom("optimal.#{signal.genre || "note"}.#{signal.type || "inform"}")
-
-    miosa_event =
-      OptimalEngine.Signal.Event.new(
-        event_type,
-        signal.node || "optimal-engine",
-        %{"text" => raw_text}
-      )
-
-    classification = OptimalEngine.Signal.Classifier.classify(miosa_event)
+    classification =
+      signal
+      |> to_envelope(raw_text)
+      |> OptimalEngine.Signal.Classifier.classify()
 
     # Only fill dimensions that are nil or default
     signal
@@ -50,8 +44,9 @@ defmodule OptimalEngine.Bridge.Signal do
   """
   @spec audit(OptSignal.t()) :: [{atom(), String.t()}]
   def audit(%OptSignal{} = signal) do
-    event = to_miosa_event(signal)
-    OptimalEngine.Signal.FailureModes.detect(event)
+    signal
+    |> to_envelope()
+    |> OptimalEngine.Signal.Classifier.failure_modes()
   rescue
     _ -> []
   end
@@ -61,9 +56,7 @@ defmodule OptimalEngine.Bridge.Signal do
   """
   @spec measure_sn(OptSignal.t()) :: float()
   def measure_sn(%OptSignal{} = signal) do
-    miosa_signal = to_miosa_signal(signal)
-
-    case OptimalEngine.Signal.measure_sn_ratio(miosa_signal) do
+    case signal |> to_envelope() |> OptimalEngine.Signal.Classifier.sn_ratio() do
       ratio when is_float(ratio) -> ratio
       _ -> signal.sn_ratio || 0.5
     end
@@ -76,9 +69,7 @@ defmodule OptimalEngine.Bridge.Signal do
   """
   @spec to_cloud_event(OptSignal.t()) :: map()
   def to_cloud_event(%OptSignal{} = signal) do
-    miosa_signal = to_miosa_signal(signal)
-
-    case OptimalEngine.Signal.to_cloud_event(miosa_signal) do
+    case signal |> to_envelope() |> Envelope.to_cloud_event() do
       %{} = event -> event
       _ -> %{}
     end
@@ -86,36 +77,24 @@ defmodule OptimalEngine.Bridge.Signal do
     _ -> %{}
   end
 
-  # Convert to OptimalEngine.Signal.Event struct (for Classifier + FailureModes)
-  defp to_miosa_event(%OptSignal{} = signal) do
-    event_type = String.to_atom("optimal.#{signal.genre || "note"}.#{signal.type || "inform"}")
+  defp to_envelope(signal, raw_text \\ nil)
 
-    OptimalEngine.Signal.Event.new(
-      event_type,
-      signal.node || "optimal-engine",
-      %{"text" => signal.content || ""},
-      signal_mode: normalize_mode(signal.mode),
-      signal_genre: normalize_genre(signal.genre),
-      signal_type: normalize_type(signal.type),
-      signal_format: normalize_format(signal.format),
-      signal_sn: signal.sn_ratio
-    )
-  end
-
-  # Convert OptimalEngine.Signal to OptimalEngine.Signal.Core struct (CloudEvents envelope)
-  defp to_miosa_signal(%OptSignal{} = signal) do
-    OptimalEngine.Signal.new(%{
-      type: signal_type_string(signal),
+  defp to_envelope(%OptSignal{} = signal, raw_text) do
+    Envelope.new!(
+      signal_type_string(signal),
       source: signal.node || "optimal-engine",
-      data: signal.content || "",
+      data: %{"text" => raw_text || signal.content || ""},
       signal_mode: normalize_mode(signal.mode),
       signal_genre: normalize_genre(signal.genre),
       signal_type: normalize_type(signal.type),
       signal_format: normalize_format(signal.format),
       signal_structure:
-        if(is_binary(signal.structure), do: String.to_atom(signal.structure), else: nil),
+        if(is_binary(signal.structure) and signal.structure != "",
+          do: String.to_atom(signal.structure),
+          else: nil
+        ),
       signal_sn_ratio: signal.sn_ratio
-    })
+    )
   end
 
   defp normalize_genre(nil), do: nil

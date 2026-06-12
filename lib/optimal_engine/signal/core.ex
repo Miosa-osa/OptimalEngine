@@ -3,7 +3,7 @@ defmodule OptimalEngine.Signal.Core do
   CloudEvents v1.0.2 + Signal Theory foundation for the MIOSA ecosystem.
 
   Every event in MIOSA is a **Signal** — a standardized envelope (CloudEvents)
-  annotated with quality dimensions from Signal Theory: S=(M,G,T,F,W).
+  annotated with quality dimensions from Signal Theory: Mode + Genre + Type + Format + Structure.
 
   ## Quick Start
 

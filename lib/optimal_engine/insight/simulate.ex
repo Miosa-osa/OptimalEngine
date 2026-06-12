@@ -12,11 +12,11 @@ defmodule OptimalEngine.Insight.Simulate do
 
   ## Usage
 
-      {:ok, report} = Simulator.simulate("What if Ed leaves AI Masters?")
-      {:ok, report} = Simulator.simulate("What if we cancel Agency Accelerants?")
+      {:ok, report} = Simulator.simulate("What if Alice leaves Platform Launch?")
+      {:ok, report} = Simulator.simulate("What if we pause Platform Launch?")
       {:ok, report} = Simulator.simulate("What if revenue drops 50%?")
-      {:ok, impact} = Simulator.impact_analysis("Dan")
-      {:ok, impact} = Simulator.impact_analysis("agency-accelerants")
+      {:ok, impact} = Simulator.impact_analysis("Alice")
+      {:ok, impact} = Simulator.impact_analysis("operation-delivery")
   """
 
   use GenServer
@@ -39,9 +39,9 @@ defmodule OptimalEngine.Insight.Simulate do
 
   # Known domain nodes in the system
   @domain_nodes ~w[
-    roberto miosa-platform lunivate ai-masters os-architect
-    agency-accelerants accelerants-community content-creators
-    new-stuff team money-revenue os-accelerator
+    operator product-customer-portal entity-company project-platform-launch entity-company
+    operation-delivery team learning-research-library
+    inbox team operation-revenue operation-delivery
   ]
 
   # ---------------------------------------------------------------------------
@@ -107,7 +107,8 @@ defmodule OptimalEngine.Insight.Simulate do
   graph, and returns a structured impact report.
 
   ## Options
-    - `:max_depth` — BFS traversal depth (default: #{@default_max_depth})
+    - `:max_depth`    — BFS traversal depth (default: #{@default_max_depth})
+    - `:workspace_id` — workspace to simulate against (default: "default")
   """
   @spec simulate(String.t(), keyword()) :: {:ok, report()} | {:error, term()}
   def simulate(scenario, opts \\ []) when is_binary(scenario) do
@@ -132,20 +133,23 @@ defmodule OptimalEngine.Insight.Simulate do
   @impl true
   def init(_opts) do
     Logger.info("[Simulator] Ready")
+    # node_totals is cached per workspace: %{workspace_id => %{node => count}}
     {:ok, %{node_totals: %{}}}
   end
 
   @impl true
   def handle_call({:simulate, scenario, opts}, _from, state) do
     max_depth = Keyword.get(opts, :max_depth, @default_max_depth)
+    ws = Keyword.get(opts, :workspace_id, "default")
 
     result =
       with {:ok, mutation} <- parse_scenario(scenario),
-           {:ok, seed_ids} <- gather_seed_contexts(mutation),
-           {:ok, traversal} <- traverse_graph(seed_ids, max_depth),
-           {:ok, node_totals} <- get_or_fetch_node_totals(state.node_totals),
+           {:ok, seed_ids} <- gather_seed_contexts(mutation, ws),
+           {:ok, traversal} <- traverse_graph(seed_ids, max_depth, ws),
+           {:ok, node_totals} <- get_or_fetch_node_totals(state.node_totals, ws),
            {:ok, scored_nodes} <- score_nodes(traversal, node_totals),
-           {:ok, critical_deps} <- find_critical_dependencies(mutation, traversal, node_totals),
+           {:ok, critical_deps} <-
+             find_critical_dependencies(mutation, traversal, node_totals, ws),
            {:ok, risk} <- assess_risk(scored_nodes, critical_deps, traversal),
            {:ok, recs} <- generate_recommendations(mutation, scored_nodes, critical_deps) do
         report = %{
@@ -166,9 +170,9 @@ defmodule OptimalEngine.Insight.Simulate do
     new_state =
       case result do
         {:ok, _} ->
-          # Refresh node totals cache on each successful run
-          case fetch_node_totals() do
-            {:ok, totals} -> %{state | node_totals: totals}
+          # Refresh this workspace's node totals cache on each successful run
+          case fetch_node_totals(ws) do
+            {:ok, totals} -> %{state | node_totals: Map.put(state.node_totals, ws, totals)}
             _ -> state
           end
 
@@ -252,7 +256,7 @@ defmodule OptimalEngine.Insight.Simulate do
         entity = extract_entity_from_scenario(scenario)
         %{type: :entity_removal, entity: entity, node: nil, raw_scenario: scenario}
 
-      # Node cancellation patterns: "cancel AA", "shut down agency-accelerants", "drop ai-masters"
+      # Node cancellation patterns: "cancel AA", "shut down operation-delivery", "drop project-platform-launch"
       Regex.match?(
         ~r/\bcancel\b|\bshut down\b|\bdrop\b|\bend\b|\bkill\b|\bclose\b|\bdissolve\b/,
         downcased
@@ -262,7 +266,7 @@ defmodule OptimalEngine.Insight.Simulate do
 
       # Revenue change patterns
       Regex.match?(~r/\brevenue\b|\bmoney\b|\bdrop[s]?\b|\blose\b|\bcut\b|\bincome\b/, downcased) ->
-        %{type: :revenue_change, entity: nil, node: "money-revenue", raw_scenario: scenario}
+        %{type: :revenue_change, entity: nil, node: "operation-revenue", raw_scenario: scenario}
 
       # Dependency break: "what if X stops working on Y"
       Regex.match?(~r/\bstops?\b|\bno longer\b|\bpull[s]? out\b|\bbreaks?\b/, downcased) ->
@@ -309,26 +313,19 @@ defmodule OptimalEngine.Insight.Simulate do
 
   defp extract_node_from_scenario(downcased) do
     node_aliases = %{
-      "agency accelerants" => "agency-accelerants",
-      "agency-accelerants" => "agency-accelerants",
-      "aa" => "agency-accelerants",
-      "ai masters" => "ai-masters",
-      "ai-masters" => "ai-masters",
-      "miosa" => "miosa-platform",
-      "miosa-platform" => "miosa-platform",
-      "os architect" => "os-architect",
-      "os-architect" => "os-architect",
-      "content creators" => "content-creators",
-      "content-creators" => "content-creators",
-      "accelerants community" => "accelerants-community",
-      "accelerants-community" => "accelerants-community",
-      "money revenue" => "money-revenue",
-      "money-revenue" => "money-revenue",
-      "os accelerator" => "os-accelerator",
-      "os-accelerator" => "os-accelerator",
-      "lunivate" => "lunivate",
-      "roberto" => "roberto",
-      "team" => "team"
+      "operation-delivery" => "operation-delivery",
+      "project-platform-launch" => "project-platform-launch",
+      "platform launch" => "project-platform-launch",
+      "product-customer-portal" => "product-customer-portal",
+      "customer portal" => "product-customer-portal",
+      "entity-company" => "entity-company",
+      "example company" => "entity-company",
+      "learning-research-library" => "learning-research-library",
+      "research library" => "learning-research-library",
+      "team" => "team",
+      "revenue operations" => "operation-revenue",
+      "operation-revenue" => "operation-revenue",
+      "operator" => "operator"
     }
 
     Enum.find_value(node_aliases, fn {alias, node_id} ->
@@ -340,17 +337,19 @@ defmodule OptimalEngine.Insight.Simulate do
   # Private: Seed Context Gathering
   # ---------------------------------------------------------------------------
 
-  defp gather_seed_contexts(%{type: :entity_removal, entity: entity}) when is_binary(entity) do
-    # Fuzzy match: the entity name may be partial (e.g. "Ed" → "Alice")
+  defp gather_seed_contexts(%{type: :entity_removal, entity: entity}, ws)
+       when is_binary(entity) do
+    # Fuzzy match: the entity name may be partial (e.g. "Ed" → "Alice").
+    # Workspace membership resolved via contexts (source of truth).
     sql = """
     SELECT DISTINCT c.id FROM contexts c
     JOIN entities e ON c.id = e.context_id
-    WHERE e.name LIKE ?1
+    WHERE e.name LIKE ?1 AND c.workspace_id = ?2
     """
 
     like_pattern = "%" <> String.trim(entity) <> "%"
 
-    case Store.raw_query(sql, [like_pattern]) do
+    case Store.raw_query(sql, [like_pattern, ws]) do
       {:ok, rows} ->
         ids = Enum.map(rows, fn [id] -> id end)
         Logger.debug("[Simulator] Seed contexts for entity '#{entity}': #{length(ids)}")
@@ -361,10 +360,10 @@ defmodule OptimalEngine.Insight.Simulate do
     end
   end
 
-  defp gather_seed_contexts(%{type: :node_cancellation, node: node}) when is_binary(node) do
-    sql = "SELECT id FROM contexts WHERE node = ?1"
+  defp gather_seed_contexts(%{type: :node_cancellation, node: node}, ws) when is_binary(node) do
+    sql = "SELECT id FROM contexts WHERE node = ?1 AND workspace_id = ?2"
 
-    case Store.raw_query(sql, [node]) do
+    case Store.raw_query(sql, [node, ws]) do
       {:ok, rows} ->
         ids = Enum.map(rows, fn [id] -> id end)
         Logger.debug("[Simulator] Seed contexts for node '#{node}': #{length(ids)}")
@@ -375,20 +374,20 @@ defmodule OptimalEngine.Insight.Simulate do
     end
   end
 
-  defp gather_seed_contexts(%{type: :revenue_change}) do
-    sql = "SELECT id FROM contexts WHERE node = 'money-revenue'"
+  defp gather_seed_contexts(%{type: :revenue_change}, ws) do
+    sql = "SELECT id FROM contexts WHERE node = 'operation-revenue' AND workspace_id = ?1"
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, rows} -> {:ok, Enum.map(rows, fn [id] -> id end)}
       err -> err
     end
   end
 
-  defp gather_seed_contexts(%{type: :dependency_break, entity: entity, node: node}) do
+  defp gather_seed_contexts(%{type: :dependency_break, entity: entity, node: node}, ws) do
     # Combine entity + node seeds
     entity_ids =
       if is_binary(entity) do
-        case gather_seed_contexts(%{type: :entity_removal, entity: entity}) do
+        case gather_seed_contexts(%{type: :entity_removal, entity: entity}, ws) do
           {:ok, ids} -> ids
           _ -> []
         end
@@ -398,7 +397,7 @@ defmodule OptimalEngine.Insight.Simulate do
 
     node_ids =
       if is_binary(node) do
-        case gather_seed_contexts(%{type: :node_cancellation, node: node}) do
+        case gather_seed_contexts(%{type: :node_cancellation, node: node}, ws) do
           {:ok, ids} -> ids
           _ -> []
         end
@@ -409,10 +408,10 @@ defmodule OptimalEngine.Insight.Simulate do
     {:ok, Enum.uniq(entity_ids ++ node_ids)}
   end
 
-  defp gather_seed_contexts(%{type: :general, entity: entity, node: node}) do
+  defp gather_seed_contexts(%{type: :general, entity: entity, node: node}, ws) do
     entity_ids =
       if is_binary(entity) do
-        case gather_seed_contexts(%{type: :entity_removal, entity: entity}) do
+        case gather_seed_contexts(%{type: :entity_removal, entity: entity}, ws) do
           {:ok, ids} -> ids
           _ -> []
         end
@@ -422,7 +421,7 @@ defmodule OptimalEngine.Insight.Simulate do
 
     node_ids =
       if is_binary(node) do
-        case gather_seed_contexts(%{type: :node_cancellation, node: node}) do
+        case gather_seed_contexts(%{type: :node_cancellation, node: node}, ws) do
           {:ok, ids} -> ids
           _ -> []
         end
@@ -434,7 +433,7 @@ defmodule OptimalEngine.Insight.Simulate do
 
     if all_ids == [] do
       # No specific seeds found — return all contexts as seeds (general exploration)
-      case Store.raw_query("SELECT id FROM contexts LIMIT 50", []) do
+      case Store.raw_query("SELECT id FROM contexts WHERE workspace_id = ?1 LIMIT 50", [ws]) do
         {:ok, rows} -> {:ok, Enum.map(rows, fn [id] -> id end)}
         err -> err
       end
@@ -448,7 +447,7 @@ defmodule OptimalEngine.Insight.Simulate do
   # ---------------------------------------------------------------------------
 
   # traversal entry: %{context_id, depth, relation, weight}
-  defp traverse_graph(seed_ids, max_depth) do
+  defp traverse_graph(seed_ids, max_depth, ws) do
     # seed_ids are direct (depth 1)
     initial =
       Enum.map(seed_ids, fn id ->
@@ -456,14 +455,14 @@ defmodule OptimalEngine.Insight.Simulate do
       end)
 
     visited = MapSet.new(seed_ids)
-    traversal = bfs(initial, visited, max_depth, initial)
+    traversal = bfs(initial, visited, max_depth, initial, ws)
     {:ok, traversal}
   end
 
   # Returns the accumulated list of traversal entries (plain list, not {:ok, ...})
-  defp bfs([], _visited, _max_depth, acc), do: acc
+  defp bfs([], _visited, _max_depth, acc, _ws), do: acc
 
-  defp bfs(frontier, visited, max_depth, acc) do
+  defp bfs(frontier, visited, max_depth, acc, ws) do
     # Only expand nodes that haven't hit max depth
     expandable = Enum.filter(frontier, fn e -> e.depth < max_depth end)
 
@@ -472,7 +471,7 @@ defmodule OptimalEngine.Insight.Simulate do
     else
       {next_frontier, next_visited, new_entries} =
         Enum.reduce(expandable, {[], visited, []}, fn entry, {frontier_acc, vis_acc, new_acc} ->
-          case fetch_neighbors(entry.context_id) do
+          case fetch_neighbors(entry.context_id, ws) do
             {:ok, neighbors} ->
               unvisited =
                 Enum.reject(neighbors, fn n -> MapSet.member?(vis_acc, n.neighbor_id) end)
@@ -497,18 +496,18 @@ defmodule OptimalEngine.Insight.Simulate do
           end
         end)
 
-      bfs(next_frontier, next_visited, max_depth, acc ++ new_entries)
+      bfs(next_frontier, next_visited, max_depth, acc ++ new_entries, ws)
     end
   end
 
-  defp fetch_neighbors(context_id) do
+  defp fetch_neighbors(context_id, ws) do
     sql = """
     SELECT source_id, target_id, relation, weight
     FROM edges
-    WHERE source_id = ?1 OR target_id = ?1
+    WHERE (source_id = ?1 OR target_id = ?1) AND workspace_id = ?2
     """
 
-    case Store.raw_query(sql, [context_id]) do
+    case Store.raw_query(sql, [context_id, ws]) do
       {:ok, rows} ->
         neighbors =
           rows
@@ -541,16 +540,17 @@ defmodule OptimalEngine.Insight.Simulate do
   # Private: Node Scoring
   # ---------------------------------------------------------------------------
 
-  defp get_or_fetch_node_totals(cached) when map_size(cached) > 0, do: {:ok, cached}
-
-  defp get_or_fetch_node_totals(_) do
-    fetch_node_totals()
+  defp get_or_fetch_node_totals(cache, ws) do
+    case Map.get(cache, ws) do
+      totals when is_map(totals) and map_size(totals) > 0 -> {:ok, totals}
+      _ -> fetch_node_totals(ws)
+    end
   end
 
-  defp fetch_node_totals do
-    sql = "SELECT node, COUNT(*) FROM contexts GROUP BY node"
+  defp fetch_node_totals(ws) do
+    sql = "SELECT node, COUNT(*) FROM contexts WHERE workspace_id = ?1 GROUP BY node"
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, rows} ->
         totals = Map.new(rows, fn [node, count] -> {node, count} end)
         {:ok, totals}
@@ -641,20 +641,20 @@ defmodule OptimalEngine.Insight.Simulate do
   # Private: Critical Dependencies
   # ---------------------------------------------------------------------------
 
-  defp find_critical_dependencies(%{entity: entity}, traversal, node_totals)
+  defp find_critical_dependencies(%{entity: entity}, traversal, node_totals, ws)
        when is_binary(entity) do
     # A critical dependency exists when the entity appears in >50% of a node's contexts
     sql = """
     SELECT c.node, COUNT(*) as cnt
     FROM contexts c
     JOIN entities e ON c.id = e.context_id
-    WHERE e.name LIKE ?1
+    WHERE e.name LIKE ?1 AND c.workspace_id = ?2
     GROUP BY c.node
     """
 
     like_pattern = "%" <> String.trim(entity) <> "%"
 
-    case Store.raw_query(sql, [like_pattern]) do
+    case Store.raw_query(sql, [like_pattern, ws]) do
       {:ok, rows} ->
         deps =
           rows
@@ -683,17 +683,17 @@ defmodule OptimalEngine.Insight.Simulate do
     end
   end
 
-  defp find_critical_dependencies(%{node: node}, _traversal, node_totals)
+  defp find_critical_dependencies(%{node: node}, _traversal, node_totals, ws)
        when is_binary(node) do
     # For a node, critical deps are cross_ref edges pointing to other nodes
     sql = """
     SELECT DISTINCT c.node as src_node, e.target_id as target
     FROM edges e
     JOIN contexts c ON c.id = e.source_id
-    WHERE c.node = ?1 AND e.relation = 'cross_ref'
+    WHERE c.node = ?1 AND e.relation = 'cross_ref' AND c.workspace_id = ?2
     """
 
-    case Store.raw_query(sql, [node]) do
+    case Store.raw_query(sql, [node, ws]) do
       {:ok, rows} ->
         deps =
           Enum.map(rows, fn [src_node, target] ->
@@ -714,7 +714,7 @@ defmodule OptimalEngine.Insight.Simulate do
     end
   end
 
-  defp find_critical_dependencies(_mutation, _traversal, _node_totals), do: {:ok, []}
+  defp find_critical_dependencies(_mutation, _traversal, _node_totals, _ws), do: {:ok, []}
 
   defp find_bridge_dependencies(entity, traversal) do
     # Contexts that appear in 2+ different nodes via this entity's traversal
@@ -767,7 +767,7 @@ defmodule OptimalEngine.Insight.Simulate do
     total_affected = count_unique_context_ids(traversal)
     critical_count = length(critical_deps)
     nodes_affected = length(scored_nodes)
-    revenue_affected = Enum.any?(scored_nodes, fn n -> n.node == "money-revenue" end)
+    revenue_affected = Enum.any?(scored_nodes, fn n -> n.node == "operation-revenue" end)
     high_impact_nodes = Enum.count(scored_nodes, fn n -> n.impact_score > 0.5 end)
 
     severity =
@@ -807,7 +807,7 @@ defmodule OptimalEngine.Insight.Simulate do
       parts
     end
     |> then(fn p ->
-      if revenue, do: p ++ ["money-revenue node is in the blast radius"], else: p
+      if revenue, do: p ++ ["operation-revenue node is in the blast radius"], else: p
     end)
     |> then(fn p ->
       severity_label =
@@ -855,7 +855,7 @@ defmodule OptimalEngine.Insight.Simulate do
     Critical dependencies: #{if dep_summary == "", do: "none", else: dep_summary}
 
     Return a JSON array of strings. Each recommendation should be concrete and actionable.
-    Example: ["Redistribute Alice's AI Masters responsibilities to Bob and Quinn", ...]
+    Example: ["Redistribute Alice's Platform Launch responsibilities to Bob and Quinn", ...]
     """
 
     case Ollama.generate(prompt, system: "Output valid JSON array only.") do
@@ -917,7 +917,7 @@ defmodule OptimalEngine.Insight.Simulate do
     top_nodes = scored_nodes |> Enum.take(3) |> Enum.map(& &1.node)
 
     base = [
-      "Immediately update money-revenue context with revised projections",
+      "Immediately update operation-revenue context with revised projections",
       "Audit all active revenue pipelines and re-prioritize based on new reality"
     ]
 

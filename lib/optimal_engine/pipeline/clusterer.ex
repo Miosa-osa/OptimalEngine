@@ -127,13 +127,6 @@ defmodule OptimalEngine.Pipeline.Clusterer do
 
     case find_nearest(clusters, feature, threshold) do
       {:ok, %Cluster{} = cluster, _sim} ->
-        updated_centroid =
-          Similarity.mean_vector([
-            scale_list(cluster.centroid, cluster.member_count),
-            feature.embedding
-          ])
-          |> Enum.map(&(&1 * (cluster.member_count + 1) / (cluster.member_count + 1)))
-
         # Proper running-mean update:
         updated_centroid =
           cluster.centroid
@@ -190,10 +183,6 @@ defmodule OptimalEngine.Pipeline.Clusterer do
       [{c, sim} | _] when sim >= threshold -> {:ok, c, sim}
       _ -> :none
     end
-  end
-
-  defp scale_list(list, n) do
-    Enum.map(list, &(&1 * n))
   end
 
   defp replace_cluster(clusters, id, new_cluster) do

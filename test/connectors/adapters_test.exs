@@ -40,12 +40,12 @@ defmodule OptimalEngine.Connectors.AdaptersTest do
       }
     },
     notion: %{
-      "workspace_name" => "acme",
+      "workspace_name" => "sample",
       "database_ids" => [],
       "credentials" => %{"integration_token" => "secret_x"}
     },
     jira: %{
-      "site_url" => "https://acme.atlassian.net",
+      "site_url" => "https://sample.atlassian.net",
       "projects" => ["PROJ"],
       "credentials" => %{"email" => "x@y.com", "api_token" => "t"}
     },
@@ -54,7 +54,7 @@ defmodule OptimalEngine.Connectors.AdaptersTest do
       "credentials" => %{"api_key" => "lin_api_x"}
     },
     github: %{
-      "org_or_user" => "acme",
+      "org_or_user" => "sample",
       "repos" => ["engine"],
       "credentials" => %{"pat" => "ghp_x"}
     },
@@ -63,7 +63,7 @@ defmodule OptimalEngine.Connectors.AdaptersTest do
       "credentials" => %{"client_id" => "c", "client_secret" => "s"}
     },
     confluence: %{
-      "site_url" => "https://acme.atlassian.net",
+      "site_url" => "https://sample.atlassian.net",
       "spaces" => ["DOCS"],
       "credentials" => %{"email" => "x@y.com", "api_token" => "t"}
     },
@@ -86,7 +86,7 @@ defmodule OptimalEngine.Connectors.AdaptersTest do
       "credentials" => %{"client_id" => "c", "client_secret" => "s"}
     },
     salesforce: %{
-      "instance_url" => "https://acme.my.salesforce.com",
+      "instance_url" => "https://sample.my.salesforce.com",
       "objects" => ["Account"],
       "credentials" => %{
         "client_id" => "c",
@@ -137,6 +137,57 @@ defmodule OptimalEngine.Connectors.AdaptersTest do
         {:ok, mod} = Registry.fetch(@kind)
         assert mod.kind() == @kind
       end
+    end
+  end
+
+  # GitHub and HubSpot declare `credential_keys: []` and gate credentials in
+  # their own `init/1` (either-or auth schemes), so the generic loop above
+  # cannot exercise the rejection path. Pin it explicitly here.
+  describe "adapters with alternate credential schemes" do
+    test "github init/1 rejects config without a pat or GitHub App credentials" do
+      {:ok, mod} = Registry.fetch(:github)
+
+      assert {:error, :missing_credentials} =
+               mod.init(%{"org_or_user" => "sample", "repos" => ["engine"]})
+    end
+
+    test "github init/1 accepts GitHub App credentials in place of a pat" do
+      {:ok, mod} = Registry.fetch(:github)
+
+      config = %{
+        "org_or_user" => "sample",
+        "repos" => ["engine"],
+        "credentials" => %{
+          "app_id" => "1",
+          "installation_id" => "2",
+          "private_key_pem" => "fake-rsa-private-key"
+        }
+      }
+
+      assert {:ok, _state} = mod.init(config)
+    end
+
+    test "hubspot init/1 rejects config without an access token or OAuth credentials" do
+      {:ok, mod} = Registry.fetch(:hubspot)
+
+      assert {:error, :missing_credentials} =
+               mod.init(%{"portal_id" => "12345", "objects" => ["contacts"]})
+    end
+
+    test "hubspot init/1 accepts OAuth credentials in place of an access token" do
+      {:ok, mod} = Registry.fetch(:hubspot)
+
+      config = %{
+        "portal_id" => "12345",
+        "objects" => ["contacts"],
+        "credentials" => %{
+          "client_id" => "c",
+          "client_secret" => "s",
+          "refresh_token" => "r"
+        }
+      }
+
+      assert {:ok, _state} = mod.init(config)
     end
   end
 
@@ -212,7 +263,7 @@ defmodule OptimalEngine.Connectors.AdaptersTest do
   defp minimal_payload(:salesforce),
     do: %{
       "Id" => "sf1",
-      "Name" => "Acme",
+      "Name" => "Example",
       "LastModifiedDate" => "2026-01-01T00:00:00.000+0000",
       "attributes" => %{"type" => "Account"}
     }
@@ -220,6 +271,6 @@ defmodule OptimalEngine.Connectors.AdaptersTest do
   defp minimal_payload(:hubspot),
     do: %{
       "id" => 1,
-      "properties" => %{"company" => "Acme", "hs_lastmodifieddate" => "2026-01-01T00:00:00Z"}
+      "properties" => %{"company" => "Example", "hs_lastmodifieddate" => "2026-01-01T00:00:00Z"}
     }
 end

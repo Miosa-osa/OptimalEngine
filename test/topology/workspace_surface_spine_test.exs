@@ -23,14 +23,12 @@ defmodule OptimalEngine.Topology.WorkspaceSurfaceSpineTest do
 
   test "default workspace gets standard node types" do
     {:ok, rows} =
-      Store.raw_query(
-        """
-        SELECT slug
-        FROM node_types
-        WHERE workspace_id = 'default'
-        ORDER BY slug
-        """
-      )
+      Store.raw_query("""
+      SELECT slug
+      FROM node_types
+      WHERE workspace_id = 'default'
+      ORDER BY slug
+      """)
 
     slugs = Enum.map(rows, fn [slug] -> slug end)
 

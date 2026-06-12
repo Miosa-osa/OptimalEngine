@@ -23,9 +23,9 @@ defmodule OptimalEngine do
 
   ### Search
       OptimalEngine.search("query")
-      OptimalEngine.search("query", type: :signal, node: "roberto", limit: 5)
+      OptimalEngine.search("query", type: :signal, node: "operator", limit: 5)
       OptimalEngine.search("query", type: :resource)
-      OptimalEngine.search("query", uri: "optimal://nodes/ai-masters/")
+      OptimalEngine.search("query", uri: "optimal://nodes/project-platform-launch/")
 
   ### Context Tiers
       OptimalEngine.l0()                            # always-loaded ~2K token context
@@ -36,7 +36,7 @@ defmodule OptimalEngine do
       OptimalEngine.ingest(text, type: :memory, path: "optimal://user/memories/note.md")
 
   ### Composition (signal only)
-      OptimalEngine.render_for(context_or_signal, "robert-potter")
+      OptimalEngine.render_for(context_or_signal, "sales-lead")
 
   ### Sessions
       {:ok, session_id} = OptimalEngine.start_session()
@@ -44,9 +44,9 @@ defmodule OptimalEngine do
       {:ok, summary} = OptimalEngine.commit_session(session_id)
 
   ### URI Operations
-      OptimalEngine.ls("optimal://nodes/ai-masters/")
+      OptimalEngine.ls("optimal://nodes/project-platform-launch/")
       OptimalEngine.uri_for(path)
-      OptimalEngine.resolve_uri("optimal://nodes/roberto/signal.md")
+      OptimalEngine.resolve_uri("optimal://nodes/operator/signal.md")
   """
 
   alias OptimalEngine.Context
@@ -238,7 +238,7 @@ defmodule OptimalEngine do
   Lists contexts under a URI prefix. Returns `{:ok, [%Context{}]}`.
 
   ## Example
-      OptimalEngine.ls("optimal://nodes/ai-masters/")
+      OptimalEngine.ls("optimal://nodes/project-platform-launch/")
   """
   @spec ls(String.t(), keyword()) :: {:ok, [Context.t()]} | {:error, term()}
   def ls(uri_prefix, opts \\ []) do

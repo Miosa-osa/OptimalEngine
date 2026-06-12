@@ -5,19 +5,19 @@ defmodule Mix.Tasks.Optimal.Ingest do
   classify → route → write signal files to disk → index in SQLite.
 
   Usage:
-      mix optimal.ingest "Customer called about AI Masters pricing"
+      mix optimal.ingest "Customer called about Platform Launch pricing"
       mix optimal.ingest "$(cat path/to/file.md)"
       mix optimal.ingest --file path/to/file.md
       mix optimal.ingest --file docs/notes.md --genre transcript --title "Team Sync"
-      mix optimal.ingest --file notes.md --node ai-masters
-      mix optimal.ingest --file notes.md --workspace acme-q1
+      mix optimal.ingest --file notes.md --node project-platform-launch
+      mix optimal.ingest --file notes.md --workspace sample-q1
 
   Options:
     --file       Read input from file instead of argument
     --genre      Override auto-detected genre (transcript, brief, spec, plan, note,
                  decision-log, standup, review, report, pitch)
     --title      Explicit title
-    --node       Override primary node routing (ai-masters, roberto, money-revenue, etc.)
+    --node       Override primary node routing (project-platform-launch, operator, operation-revenue, etc.)
     --type       Force context type: signal, resource, memory, skill (default: auto-detect)
     --workspace  Target workspace ID (default: "default")
   """

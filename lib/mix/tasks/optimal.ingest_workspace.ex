@@ -29,8 +29,8 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
   ## Usage
 
       mix optimal.ingest_workspace sample-workspace/
-      mix optimal.ingest_workspace ~/Desktop/my-engine --tenant acme
-      mix optimal.ingest_workspace sample-workspace/ --workspace acme-q1
+      mix optimal.ingest_workspace ~/Desktop/my-engine --tenant sample
+      mix optimal.ingest_workspace sample-workspace/ --workspace sample-q1
       mix optimal.ingest_workspace sample-workspace/ --reset
   """
 
@@ -95,7 +95,7 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
       skipped:     #{stats.skipped}
 
     Try:
-      mix optimal.rag "healthtech pricing" --trace
+      mix optimal.rag "customer portal pricing" --trace
       mix optimal.search "platform"
       mix optimal.wiki list
     """)
@@ -161,7 +161,7 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
             fm["node"] ||
               case Path.split(rel) do
                 ["nodes", slug | _] -> slug
-                _ -> "09-new-stuff"
+                _ -> "inbox"
               end
 
           path_hash =

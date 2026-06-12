@@ -31,35 +31,35 @@ defmodule OptimalEngine.Retrieval.IntentAnalyzer do
         }
 
   @node_keywords %{
-    "roberto" => "roberto",
-    "personal" => "roberto",
-    "miosa" => "miosa",
-    "platform" => "miosa",
-    "skyscraper" => "miosa",
-    "lunivate" => "lunivate",
-    "agency" => "lunivate",
-    "ai masters" => "ai-masters",
-    "course" => "ai-masters",
-    "ed" => "ai-masters",
-    "os architect" => "os-architect",
-    "youtube" => "os-architect",
-    "ahmed" => "os-architect",
-    "agency accelerants" => "agency-accelerants",
-    "aa" => "agency-accelerants",
-    "bennett" => "agency-accelerants",
-    "cliniciq" => "agency-accelerants",
-    "community" => "accelerants-community",
-    "school group" => "accelerants-community",
-    "content" => "content-creators",
-    "mosaic" => "content-creators",
-    "podcast" => "content-creators",
-    "revenue" => "money-revenue",
-    "money" => "money-revenue",
-    "pricing" => "money-revenue",
-    "deal" => "money-revenue",
+    "operator" => "operator",
+    "personal" => "operator",
+    "platform" => "product-customer-portal",
+    "portal" => "product-customer-portal",
+    "skyscraper" => "product-customer-portal",
+    "entity-company" => "entity-company",
+    "agency" => "entity-company",
+    "ai masters" => "project-platform-launch",
+    "course" => "project-platform-launch",
+    "ed" => "project-platform-launch",
+    "os architect" => "entity-company",
+    "youtube" => "entity-company",
+    "ahmed" => "entity-company",
+    "agency accelerants" => "operation-delivery",
+    "aa" => "operation-delivery",
+    "bennett" => "operation-delivery",
+    "cliniciq" => "operation-delivery",
+    "community" => "team",
+    "school group" => "team",
+    "content" => "learning-research-library",
+    "mosaic" => "learning-research-library",
+    "podcast" => "learning-research-library",
+    "revenue" => "operation-revenue",
+    "money" => "operation-revenue",
+    "pricing" => "operation-revenue",
+    "deal" => "operation-revenue",
     "team" => "team",
     "hiring" => "team",
-    "accelerator" => "os-accelerator"
+    "accelerator" => "operation-delivery"
   }
 
   @stopwords ~w[the a an is are was were what when where who how why did do does can could should would will about for with from this that these those it its and or but not]
@@ -111,8 +111,8 @@ defmodule OptimalEngine.Retrieval.IntentAnalyzer do
 
   defp build_prompt(query) do
     """
-    Analyze this search query for a cognitive operating system. The system has 12 domain nodes:
-    roberto, miosa, lunivate, ai-masters, os-architect, agency-accelerants, accelerants-community, content-creators, new-stuff, team, money-revenue, os-accelerator
+    Analyze this search query for an operating engine. The system has these domain nodes:
+    operator, product-customer-portal, entity-company, project-platform-launch, operation-delivery, team, learning-research-library, inbox, operation-revenue
 
     Query: "#{query}"
 

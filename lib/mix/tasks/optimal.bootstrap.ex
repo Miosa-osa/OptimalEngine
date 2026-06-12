@@ -115,7 +115,7 @@ defmodule Mix.Tasks.Optimal.Bootstrap do
     IO.puts("  " <> String.duplicate("─", 60))
 
     IO.puts("""
-        mix optimal.rag "healthtech pricing decision" --trace
+        mix optimal.rag "customer portal pricing decision" --trace
         mix optimal.search "platform"
         mix optimal.wiki list
         mix optimal.graph hubs

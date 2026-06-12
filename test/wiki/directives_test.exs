@@ -12,7 +12,7 @@ defmodule OptimalEngine.Wiki.DirectivesTest do
       Here is a search {{search: "pricing"}}.
       Here is a table {{table: optimal://data.csv#col=val}}.
       Here is a trace {{trace: Alice}}.
-      Here is a recent {{recent: node=ai-masters limit=5}}.
+      Here is a recent {{recent: node=project-platform-launch limit=5}}.
       Here is a [[wikilink]].
       """
 
@@ -39,10 +39,10 @@ defmodule OptimalEngine.Wiki.DirectivesTest do
     end
 
     test "parses key=value options on recent" do
-      body = "{{recent: node=ai-masters limit=5}}"
+      body = "{{recent: node=project-platform-launch limit=5}}"
       {:ok, [d]} = Directives.parse(body)
       assert d.verb == :recent
-      assert d.options["node"] == "ai-masters"
+      assert d.options["node"] == "project-platform-launch"
       assert d.options["limit"] == "5"
     end
 

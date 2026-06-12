@@ -5,16 +5,16 @@ defmodule Mix.Tasks.Optimal.Search do
 
   Usage:
       mix optimal.search "query"
-      mix optimal.search "query" --node roberto --limit 5
+      mix optimal.search "query" --node operator --limit 5
       mix optimal.search "query" --type signal --genre spec
       mix optimal.search "query" --type resource
-      mix optimal.search "query" --uri "optimal://nodes/ai-masters/"
+      mix optimal.search "query" --uri "optimal://nodes/project-platform-launch/"
 
   Options:
-    --node    Filter by node ID (e.g. roberto, miosa-platform)
+    --node    Filter by node ID (e.g. operator, product-customer-portal)
     --type    Filter by context type: signal, resource, memory, skill (default: all)
     --genre   Filter by genre (signals only, e.g. spec, brief, decision-log)
-    --uri     Scope to a URI prefix (e.g. optimal://nodes/ai-masters/)
+    --uri     Scope to a URI prefix (e.g. optimal://nodes/project-platform-launch/)
     --limit   Max results (default 10)
   """
 

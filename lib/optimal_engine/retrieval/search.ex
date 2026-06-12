@@ -16,9 +16,9 @@ defmodule OptimalEngine.Retrieval.Search do
   ## Options
 
   - `:type`   — filter by context type atom (`:signal`, `:resource`, `:memory`, `:skill`)
-  - `:node`   — filter by node ID (e.g. `"roberto"`)
+  - `:node`   — filter by node ID (e.g. `"operator"`)
   - `:genre`  — filter by genre (signals only)
-  - `:uri`    — scope to a URI prefix (e.g. `"optimal://nodes/ai-masters/"`)
+  - `:uri`    — scope to a URI prefix (e.g. `"optimal://nodes/project-platform-launch/"`)
   - `:limit`  — max results (default 10)
   - `:offset` — pagination offset (default 0)
   - `:min_score` — drop results below this score (default 0.0)
@@ -57,22 +57,26 @@ defmodule OptimalEngine.Retrieval.Search do
   @doc """
   Executes a hybrid search query across all context types.
 
+  Return shape (cleanup rule 7): **raw search hits** over compatibility
+  `contexts` rows — not a `RetrievalPackage` or `ContextPackage`. Governed
+  recall lives in `OptimalEngine.MemoryCore.RetrievalCoordinator`.
+
   Returns `{:ok, [%Context{}]}` with `:score` set on each result,
   or `{:error, reason}`.
 
   ## Examples
 
       # Search everything
-      SearchEngine.search("AI Masters pricing")
+      SearchEngine.search("Platform Launch pricing")
 
       # Only signals
-      SearchEngine.search("AI Masters", type: :signal)
+      SearchEngine.search("Platform Launch", type: :signal)
 
       # Resources only
       SearchEngine.search("API docs", type: :resource)
 
       # Scoped to a URI prefix
-      SearchEngine.search("context", uri: "optimal://nodes/ai-masters/")
+      SearchEngine.search("context", uri: "optimal://nodes/project-platform-launch/")
   """
   @spec search(String.t(), keyword()) :: {:ok, [Context.t()]} | {:error, term()}
   def search(query, opts \\ []) when is_binary(query) do

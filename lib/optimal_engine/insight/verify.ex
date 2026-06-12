@@ -28,8 +28,9 @@ defmodule OptimalEngine.Insight.Verify do
   Samples contexts and scores their L0 abstract fidelity.
 
   ## Options
-  - `:sample` — number of contexts to sample (default: #{@default_sample_size})
-  - `:node`   — restrict sampling to a specific node (default: all nodes)
+  - `:sample`       — number of contexts to sample (default: #{@default_sample_size})
+  - `:node`         — restrict sampling to a specific node (default: all nodes)
+  - `:workspace_id` — workspace to sample from (default: "default")
 
   ## Returns
   `{:ok, map()}` where the map contains:
@@ -42,8 +43,9 @@ defmodule OptimalEngine.Insight.Verify do
   def verify(opts \\ []) do
     sample_size = Keyword.get(opts, :sample, @default_sample_size)
     node_filter = Keyword.get(opts, :node)
+    ws = Keyword.get(opts, :workspace_id, "default")
 
-    contexts = sample_contexts(sample_size, node_filter)
+    contexts = sample_contexts(sample_size, node_filter, ws)
 
     if contexts == [] do
       {:ok, %{scores: [], aggregate: 0.0, sample_size: 0, message: "No contexts to verify"}}
@@ -84,31 +86,31 @@ defmodule OptimalEngine.Insight.Verify do
   # Private: Sampling
   # ---------------------------------------------------------------------------
 
-  defp sample_contexts(n, nil) do
+  defp sample_contexts(n, nil, ws) do
     sql = """
     SELECT id, title, l0_abstract, content, node
     FROM contexts
-    WHERE l0_abstract != '' AND content != ''
+    WHERE l0_abstract != '' AND content != '' AND workspace_id = ?2
     ORDER BY RANDOM()
     LIMIT ?1
     """
 
-    case Store.raw_query(sql, [n]) do
+    case Store.raw_query(sql, [n, ws]) do
       {:ok, rows} -> Enum.map(rows, &row_to_ctx/1)
       _ -> []
     end
   end
 
-  defp sample_contexts(n, node) do
+  defp sample_contexts(n, node, ws) do
     sql = """
     SELECT id, title, l0_abstract, content, node
     FROM contexts
-    WHERE l0_abstract != '' AND content != '' AND node = ?2
+    WHERE l0_abstract != '' AND content != '' AND node = ?2 AND workspace_id = ?3
     ORDER BY RANDOM()
     LIMIT ?1
     """
 
-    case Store.raw_query(sql, [n, node]) do
+    case Store.raw_query(sql, [n, node, ws]) do
       {:ok, rows} -> Enum.map(rows, &row_to_ctx/1)
       _ -> []
     end

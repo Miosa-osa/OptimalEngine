@@ -14,9 +14,9 @@ defmodule OptimalEngine.URI do
   | `user/memories/`       | `_memories/user/`                | :memory      |
   | `agent/memories/`      | `_memories/agent/`               | :memory      |
   | `agent/skills/`        | `_skills/`                       | :skill       |
-  | `nodes/{id}/`          | `{folder}/` (one of 12 nodes)    | :signal      |
+  | `nodes/{id}/`          | `nodes/{id}/` workspace projection | :signal      |
   | `sessions/{id}/`       | `.system/sessions/{id}/`         | :memory      |
-  | `inbox/`               | `09-new-stuff/`                  | :signal      |
+  | `inbox/`               | `inbox/`                         | :signal      |
 
   ## Operations
 
@@ -35,20 +35,19 @@ defmodule OptimalEngine.URI do
           raw: String.t()
         }
 
-  # Node folder → node ID mapping
+  # Node folder -> node ID mapping. Current public examples use semantic node
+  # IDs instead of old numbered folders.
   @node_folders %{
-    "01-roberto" => "roberto",
-    "02-miosa" => "miosa-platform",
-    "03-lunivate" => "lunivate",
-    "04-ai-masters" => "ai-masters",
-    "05-os-architect" => "os-architect",
-    "06-agency-accelerants" => "agency-accelerants",
-    "07-accelerants-community" => "accelerants-community",
-    "08-content-creators" => "content-creators",
-    "09-new-stuff" => "inbox",
-    "10-team" => "team",
-    "11-money-revenue" => "money-revenue",
-    "12-os-accelerator" => "os-accelerator",
+    "entity-company" => "entity-company",
+    "person-operator" => "person-operator",
+    "product-customer-portal" => "product-customer-portal",
+    "project-platform-launch" => "project-platform-launch",
+    "operation-weekly-review" => "operation-weekly-review",
+    "operation-revenue" => "operation-revenue",
+    "operation-delivery" => "operation-delivery",
+    "learning-research-library" => "learning-research-library",
+    "inbox" => "inbox",
+    "team" => "team",
     "docs" => "resources"
   }
 
@@ -62,8 +61,8 @@ defmodule OptimalEngine.URI do
 
   ## Examples
 
-      iex> OptimalEngine.URI.parse("optimal://nodes/ai-masters/context.md")
-      {:ok, %{namespace: :nodes, segments: ["ai-masters", "context.md"], raw: "optimal://nodes/ai-masters/context.md"}}
+      iex> OptimalEngine.URI.parse("optimal://nodes/project-platform-launch/context.md")
+      {:ok, %{namespace: :nodes, segments: ["project-platform-launch", "context.md"], raw: "optimal://nodes/project-platform-launch/context.md"}}
 
       iex> OptimalEngine.URI.parse("optimal://resources/api-docs.md")
       {:ok, %{namespace: :resources, segments: ["api-docs.md"], raw: "optimal://resources/api-docs.md"}}
@@ -201,8 +200,8 @@ defmodule OptimalEngine.URI do
 
   ## Examples
 
-      iex> OptimalEngine.URI.node_folder("ai-masters")
-      "04-ai-masters"
+      iex> OptimalEngine.URI.node_folder("project-platform-launch")
+      "project-platform-launch"
   """
   @spec node_folder(String.t()) :: String.t() | nil
   def node_folder(node_id) when is_binary(node_id) do
@@ -298,7 +297,7 @@ defmodule OptimalEngine.URI do
   end
 
   defp namespace_to_path(:inbox, segments, root) do
-    Path.join([root, "09-new-stuff"] ++ segments)
+    Path.join([root, "inbox"] ++ segments)
   end
 
   defp namespace_to_path(_, _segments, _root), do: nil

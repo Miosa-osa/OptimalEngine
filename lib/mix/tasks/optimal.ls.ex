@@ -5,9 +5,9 @@ defmodule Mix.Tasks.Optimal.Ls do
 
   Usage:
       mix optimal.ls "optimal://nodes/"
-      mix optimal.ls "optimal://nodes/ai-masters/"
+      mix optimal.ls "optimal://nodes/project-platform-launch/"
       mix optimal.ls "optimal://resources/"
-      mix optimal.ls "optimal://nodes/roberto/" --limit 20
+      mix optimal.ls "optimal://nodes/operator/" --limit 20
 
   Options:
     --limit   Max results to display (default 50)

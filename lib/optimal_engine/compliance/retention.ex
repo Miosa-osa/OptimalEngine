@@ -5,7 +5,7 @@ defmodule OptimalEngine.Compliance.Retention do
   Operators register rules in `retention_policies` (migration 010):
 
       scope_type  TEXT NOT NULL      -- :node, :genre, :tenant, :global
-      scope_value TEXT               -- e.g. "ai-masters" or "transcript"
+      scope_value TEXT               -- e.g. "project-platform-launch" or "transcript"
       ttl_days    INTEGER            -- null = no TTL
       action      TEXT DEFAULT 'archive'   -- :archive | :delete | :redact
 

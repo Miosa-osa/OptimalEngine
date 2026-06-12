@@ -35,7 +35,7 @@ defmodule OptimalEngine.Pipeline.Clusterer.SimilarityTest do
 
   describe "entity_overlap/2" do
     test "identical sets → 1.0" do
-      ents = ["Alice", "Alice", "AI Masters"]
+      ents = ["Alice", "Alice", "Platform Launch"]
       assert Similarity.entity_overlap(ents, ents) == 1.0
     end
 
@@ -73,8 +73,8 @@ defmodule OptimalEngine.Pipeline.Clusterer.SimilarityTest do
 
   describe "node_affinity/2" do
     test "same node_id → 1.0" do
-      a = %{node_id: "04-ai-masters", node_ancestors: []}
-      b = %{node_id: "04-ai-masters", node_ancestors: []}
+      a = %{node_id: "project-platform-launch", node_ancestors: []}
+      b = %{node_id: "project-platform-launch", node_ancestors: []}
       assert Similarity.node_affinity(a, b) == 1.0
     end
 
@@ -105,7 +105,7 @@ defmodule OptimalEngine.Pipeline.Clusterer.SimilarityTest do
         embedding: v,
         entities: ["Ed", "Alice"],
         intent: :propose_decision,
-        node_id: "ai-masters",
+        node_id: "project-platform-launch",
         node_ancestors: []
       }
 
