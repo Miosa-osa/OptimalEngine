@@ -3,12 +3,12 @@ defmodule OptimalEngine.Context do
   Universal context unit for OptimalEngine.
 
   Every piece of ingested content — regardless of origin — is a Context. The three
-  base types mirror OpenViking's model:
+  base types mirror tiered context systems's model:
 
   - `:resource`  — Static knowledge: docs, PDFs, specs, manuals, API references
   - `:memory`    — Dynamic learned facts from conversations or agent observations
   - `:skill`     — Callable tool/function definitions
-  - `:signal`    — OptimalOS extension: classified content with full S=(M,G,T,F,W) dimensions
+  - `:signal`    — OptimalOS extension: classified content with full Mode + Genre + Type + Format + Structure dimensions
 
   Only `:signal` contexts carry a populated `signal` field. All other types leave
   it `nil`. This lets the engine ingest anything while preserving the full Signal

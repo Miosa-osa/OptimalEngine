@@ -9,6 +9,9 @@ defmodule OptimalEngine.Graph.Analyzer do
 
   All functions return `{:ok, result}` and never raise. LLM enhancement via
   Ollama is applied when available; the module degrades gracefully without it.
+
+  All analyses are workspace-scoped: pass `:workspace_id` (default "default").
+  No cross-workspace leakage by default — see `OptimalEngine.Workspace`.
   """
 
   require Logger
@@ -31,6 +34,8 @@ defmodule OptimalEngine.Graph.Analyzer do
   @spec triangles(keyword()) :: {:ok, [map()]}
   def triangles(opts \\ []) do
     limit = Keyword.get(opts, :limit, 20)
+    ws = Keyword.get(opts, :workspace_id, "default")
+    skip_llm = Keyword.get(opts, :skip_llm, false)
 
     sql = """
     SELECT DISTINCT e1.source_id, e1.target_id, e2.target_id
@@ -38,17 +43,20 @@ defmodule OptimalEngine.Graph.Analyzer do
     JOIN edges e2
       ON e1.source_id = e2.source_id
      AND e1.target_id != e2.target_id
-    WHERE NOT EXISTS (
-      SELECT 1 FROM edges e3
-      WHERE e3.source_id = e1.target_id
-        AND e3.target_id = e2.target_id
-    )
+     AND e2.workspace_id = ?2
+    WHERE e1.workspace_id = ?2
+      AND NOT EXISTS (
+        SELECT 1 FROM edges e3
+        WHERE e3.source_id = e1.target_id
+          AND e3.target_id = e2.target_id
+          AND e3.workspace_id = ?2
+      )
     LIMIT ?1
     """
 
-    case Store.raw_query(sql, [limit]) do
+    case Store.raw_query(sql, [limit, ws]) do
       {:ok, rows} ->
-        results = Enum.map(rows, fn [a, b, c] -> build_triangle(a, b, c) end)
+        results = Enum.map(rows, fn [a, b, c] -> build_triangle(a, b, c, skip_llm) end)
         {:ok, results}
 
       {:error, reason} ->
@@ -70,11 +78,12 @@ defmodule OptimalEngine.Graph.Analyzer do
 
   Returns `{:ok, [MapSet.t()]}`.
   """
-  @spec clusters() :: {:ok, [MapSet.t()]}
-  def clusters do
-    sql = "SELECT DISTINCT source_id, target_id FROM edges"
+  @spec clusters(keyword()) :: {:ok, [MapSet.t()]}
+  def clusters(opts \\ []) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+    sql = "SELECT DISTINCT source_id, target_id FROM edges WHERE workspace_id = ?1"
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, rows} ->
         adjacency = build_adjacency(rows)
         components = find_components(adjacency)
@@ -100,17 +109,19 @@ defmodule OptimalEngine.Graph.Analyzer do
 
   Returns `{:ok, [%{id: String.t(), degree: non_neg_integer(), sigma: float()}]}`.
   """
-  @spec hubs() :: {:ok, [map()]}
-  def hubs do
+  @spec hubs(keyword()) :: {:ok, [map()]}
+  def hubs(opts \\ []) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+
     sql = """
     SELECT id, COUNT(*) as degree FROM (
-      SELECT source_id as id FROM edges
+      SELECT source_id as id FROM edges WHERE workspace_id = ?1
       UNION ALL
-      SELECT target_id as id FROM edges
+      SELECT target_id as id FROM edges WHERE workspace_id = ?1
     ) GROUP BY id
     """
 
-    case Store.raw_query(sql, []) do
+    case Store.raw_query(sql, [ws]) do
       {:ok, []} ->
         {:ok, []}
 
@@ -146,10 +157,10 @@ defmodule OptimalEngine.Graph.Analyzer do
   # Triangle helpers
   # ---------------------------------------------------------------------------
 
-  defp build_triangle(a, b, c) do
+  defp build_triangle(a, b, c, skip_llm) do
     base = %{a: a, b: b, c: c, suggestion: nil}
 
-    if Ollama.available?() do
+    if !skip_llm and Ollama.available?() do
       Map.put(base, :suggestion, llm_suggestion(a, b, c))
     else
       base
@@ -190,13 +201,10 @@ defmodule OptimalEngine.Graph.Analyzer do
     do_bfs(adjacency, all_nodes, [])
   end
 
-  defp do_bfs(_adjacency, unvisited, components) when map_size(%{}) == 0 do
-    case MapSet.size(unvisited) do
-      0 -> components
-      _ -> do_bfs(%{}, unvisited, components)
-    end
-  end
-
+  # NOTE: a previous first clause guarded on `map_size(%{}) == 0` — a
+  # constant-true guard that swallowed every call and recursed on itself,
+  # looping forever for any non-empty graph. Removed; the empty-set check
+  # below is the real termination condition.
   defp do_bfs(adjacency, unvisited, components) do
     if MapSet.size(unvisited) == 0 do
       components

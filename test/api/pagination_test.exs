@@ -36,7 +36,19 @@ defmodule OptimalEngine.API.PaginationTest do
           |> put_req_header("content-type", "application/json")
       end
 
+    conn =
+      put_peer_data(conn, %{
+        address: unique_loopback_address(),
+        port: 0,
+        ssl_cert: nil
+      })
+
     Router.call(conn, @opts)
+  end
+
+  defp unique_loopback_address do
+    n = System.unique_integer([:positive])
+    {127, rem(div(n, 65_536), 256), rem(div(n, 256), 256), rem(n, 254) + 1}
   end
 
   defp decode(conn), do: Jason.decode!(conn.resp_body)

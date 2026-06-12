@@ -29,7 +29,21 @@ defmodule OptimalEngine.Bridge.Memory do
   """
   @spec record_event(atom(), map(), String.t()) :: :ok
   def record_event(event_type, data, session_id \\ "optimal-engine") do
-    OptimalEngine.Memory.Episodic.record(event_type, data, session_id)
+    key =
+      "event_#{DateTime.utc_now() |> DateTime.to_unix(:microsecond)}_#{System.unique_integer([:positive])}"
+
+    OptimalEngine.Memory.store(
+      "events",
+      key,
+      %{
+        type: event_type,
+        data: data,
+        session_id: session_id,
+        created_at: DateTime.utc_now()
+      },
+      tags: [to_string(event_type), session_id]
+    )
+
     :ok
   rescue
     _ -> :ok
@@ -38,9 +52,19 @@ defmodule OptimalEngine.Bridge.Memory do
   @doc "Recalls recent events matching a query."
   @spec recall_events(String.t(), keyword()) :: [map()]
   def recall_events(query, opts \\ []) do
-    case OptimalEngine.Memory.Episodic.recall(query, opts) do
-      events when is_list(events) -> events
-      _ -> []
+    limit = Keyword.get(opts, :limit, 20)
+
+    case OptimalEngine.Memory.search("events", query) do
+      {:ok, entries} ->
+        entries
+        |> Enum.map(& &1.value)
+        |> Enum.take(limit)
+
+      events when is_list(events) ->
+        Enum.take(events, limit)
+
+      _ ->
+        []
     end
   rescue
     _ -> []

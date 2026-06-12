@@ -83,7 +83,7 @@ defmodule OptimalEngine.API.Pagination do
     end
   end
 
-  defp parse_int(other, default) when is_integer(other), do: other
+  defp parse_int(other, _default) when is_integer(other), do: other
   defp parse_int(_, default), do: default
 
   defp clamp_limit(n) when n < 1, do: 1

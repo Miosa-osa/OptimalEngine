@@ -41,7 +41,7 @@ Every signal flows through all nine stages in strict order. Each stage has one r
 1. INTAKE    2. PARSE      3. DECOMPOSE   4. CLASSIFY    5. EMBED
    │            │              │              │              │
    ▼            ▼              ▼              ▼              ▼
-receive      format→text   large → small   S=(M,G,T,F,W)  multi-modal
+receive      format→text   large → small   Mode + Genre + Type + Format + Structure  multi-modal
 any input    any format    hierarchical    + intent       aligned vectors
 + hash       + metadata    chunks          per scale      per scale
 + provenance
@@ -95,7 +95,7 @@ Rules: never split across structural boundaries; never split a sentence mid-word
 
 ### Stage 4 — Classify
 
-For every chunk at every scale: determines `S=(M,G,T,F,W)` dimensions AND intent. Heuristics-first, Ollama-augmented when available.
+For every chunk at every scale: determines `Mode + Genre + Type + Format + Structure` dimensions AND intent. Heuristics-first, Ollama-augmented when available.
 
 ### Stage 5 — Embed
 
@@ -132,7 +132,7 @@ On each `store.chunk.indexed` event: computes affected wiki pages → enqueues c
 
 ## Signal Classification: S = (M, G, T, F, W)
 
-Every chunk at every scale is classified across five dimensions. This is the theoretical foundation from "Signal Theory: The Architecture of Optimal Intent Encoding" (MIOSA Research, 2026).
+Every chunk at every scale is classified across five dimensions. This is the engine's public Signal Theory model for separating useful operating context from noise.
 
 | Dim | Name | Question | Examples |
 |---|---|---|---|
@@ -177,7 +177,7 @@ Every channel has finite capacity. Don't exceed the receiver's bandwidth. A 500-
 
 ### 2. Ashby — The Repertoire
 
-Have enough Signal variety (genres, modes, structures) to handle every situation. Prose when a table is needed is an Ashby violation. The engine addresses this with the 5-dimension `S=(M,G,T,F,W)` classification and the Composer's format variants (`text` / `json` / `claude` / `openai`).
+Have enough Signal variety (genres, modes, structures) to handle every situation. Prose when a table is needed is an Ashby violation. The engine addresses this with the 5-dimension `Mode + Genre + Type + Format + Structure` classification and the Composer's format variants (`text` / `json` / `claude` / `openai`).
 
 **Engine artifact:** `OptimalEngine.Classifier`, `OptimalEngine.Composer`
 

@@ -25,6 +25,7 @@ defmodule Mix.Tasks.Optimal.Decompose do
 
   alias OptimalEngine.Pipeline.Decomposer
   alias OptimalEngine.Pipeline.Decomposer.ChunkTree
+  alias OptimalEngine.Pipeline.Enricher.VlmEnricher
   alias OptimalEngine.Pipeline.Parser
 
   @impl Mix.Task
@@ -52,7 +53,8 @@ defmodule Mix.Tasks.Optimal.Decompose do
       ]
 
     with {:ok, parsed} <- Parser.parse(path),
-         {:ok, tree} <- Decomposer.decompose(parsed, decompose_opts) do
+         {:ok, enriched} <- VlmEnricher.enrich(parsed),
+         {:ok, tree} <- Decomposer.decompose(enriched, decompose_opts) do
       render(tree, format)
     else
       {:error, reason} ->

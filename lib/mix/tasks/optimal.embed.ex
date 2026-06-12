@@ -20,6 +20,7 @@ defmodule Mix.Tasks.Optimal.Embed do
   use Mix.Task
 
   alias OptimalEngine.Pipeline.{Decomposer, Embedder, Parser}
+  alias OptimalEngine.Pipeline.Enricher.VlmEnricher
 
   @impl Mix.Task
   def run(args) do
@@ -37,7 +38,8 @@ defmodule Mix.Tasks.Optimal.Embed do
     format = Keyword.get(opts, :format, "summary")
 
     with {:ok, parsed} <- Parser.parse(path),
-         {:ok, tree} <- Decomposer.decompose(parsed),
+         {:ok, enriched} <- VlmEnricher.enrich(parsed),
+         {:ok, tree} <- Decomposer.decompose(enriched),
          {:ok, embeddings, %{errors: errors}} <- Embedder.embed_tree(tree) do
       render(tree, embeddings, errors, format)
     else

@@ -20,9 +20,9 @@ defmodule OptimalEngine.MixProject do
     ]
   end
 
-  # Single-file CLI for development and trusted environments that already have
-  # Erlang installed.  For cross-platform standalone distribution (no Erlang on
-  # the target machine) build the Burrito release below: `mix release optimal`.
+  # Local source-checkout CLI wrapper. It routes `./optimal <cmd>` to
+  # `mix optimal.<cmd>` so native dependencies load from the normal Mix build.
+  # It is not the production packaging format.
   defp escript do
     [
       main_module: OptimalEngine.CLI,
@@ -31,9 +31,8 @@ defmodule OptimalEngine.MixProject do
     ]
   end
 
-  # `mix release optimal` produces a self-contained OTP release tarball in
-  # _build/prod/rel/optimal/.  Wrap with Burrito for single-binary distribution
-  # by adding the burrito config block here when we're ready.
+  # `MIX_ENV=prod mix release optimal` produces a supervised OTP runtime in
+  # _build/prod/rel/optimal/. Use that shape for API/server deployment.
   defp releases do
     [
       optimal: [
@@ -101,15 +100,14 @@ defmodule OptimalEngine.MixProject do
   end
 
   defp description do
-    "Signal-native context storage engine for AI agents. SQLite + FTS5 + " <>
-      "tiered L0/L1/L2 loading + OWL 2 RL reasoning."
+    "Self-hosted second brain and operating engine for human and AI workspaces."
   end
 
   defp package do
     [
-      licenses: ["UNLICENSED"],
-      links: %{},
-      files: ~w(lib priv config mix.exs README.md)
+      licenses: ["MIT"],
+      links: %{"GitHub" => "https://github.com/Miosa-osa/OptimalEngine"},
+      files: ~w(lib priv config mix.exs README.md LICENSE)
     ]
   end
 end

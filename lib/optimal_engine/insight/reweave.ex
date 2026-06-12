@@ -35,17 +35,19 @@ defmodule OptimalEngine.Insight.Reweave do
   ## Options
   - `:max_results`    — max contexts to return (default 10)
   - `:staleness_days` — days before a context is considered fully stale (default 30)
+  - `:workspace_id`   — workspace to scope to (default "default")
   """
   @spec reweave(String.t(), keyword()) :: {:ok, [map()]}
   def reweave(topic, opts \\ []) do
     max_results = Keyword.get(opts, :max_results, @default_max_results)
     staleness_days = Keyword.get(opts, :staleness_days, @default_staleness_days)
+    ws = Keyword.get(opts, :workspace_id, "default")
 
     # Step 1: Search for related contexts
-    search_results = do_search(topic, max_results * 3)
+    search_results = do_search(topic, max_results * 3, ws)
 
     # Step 2: Find graph-connected contexts via entity matching
-    entity_contexts = find_entity_contexts(topic)
+    entity_contexts = find_entity_contexts(topic, ws)
 
     # Step 3: Merge and deduplicate
     all_context_ids =
@@ -55,7 +57,7 @@ defmodule OptimalEngine.Insight.Reweave do
     # Step 4: Load context metadata, score staleness, filter and rank
     contexts_with_staleness =
       all_context_ids
-      |> Enum.map(&load_context_meta/1)
+      |> Enum.map(&load_context_meta(&1, ws))
       |> Enum.reject(&is_nil/1)
       |> Enum.map(fn ctx ->
         days_old = compute_days_old(ctx)
@@ -105,8 +107,12 @@ defmodule OptimalEngine.Insight.Reweave do
   # Private: Search
   # ---------------------------------------------------------------------------
 
-  defp do_search(query, limit) do
-    case GenServer.call(OptimalEngine.Retrieval.Search, {:search, query, [limit: limit]}, 15_000) do
+  defp do_search(query, limit, ws) do
+    case GenServer.call(
+           OptimalEngine.Retrieval.Search,
+           {:search, query, [limit: limit, workspace_id: ws]},
+           15_000
+         ) do
       {:ok, results} -> results
       _ -> []
     end
@@ -118,15 +124,20 @@ defmodule OptimalEngine.Insight.Reweave do
   # Private: Graph traversal
   # ---------------------------------------------------------------------------
 
-  defp find_entity_contexts(topic) do
-    sql = "SELECT DISTINCT name FROM entities WHERE name LIKE ?1"
+  defp find_entity_contexts(topic, ws) do
+    # Entity → workspace membership resolved via contexts (source of truth).
+    sql = """
+    SELECT DISTINCT e.name FROM entities e
+    JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?2
+    WHERE e.name LIKE ?1
+    """
 
-    case Store.raw_query(sql, ["%#{topic}%"]) do
+    case Store.raw_query(sql, ["%#{topic}%", ws]) do
       {:ok, rows} ->
         rows
         |> List.flatten()
         |> Enum.flat_map(fn name ->
-          case Graph.edges_for(name, direction: :out, relation: "mentioned_in") do
+          case Graph.edges_for(name, direction: :out, relation: "mentioned_in", workspace_id: ws) do
             {:ok, edges} -> Enum.map(edges, & &1.target_id)
             _ -> []
           end
@@ -141,10 +152,11 @@ defmodule OptimalEngine.Insight.Reweave do
   # Private: Metadata loading
   # ---------------------------------------------------------------------------
 
-  defp load_context_meta(id) do
-    sql = "SELECT id, title, node, modified_at, l0_abstract FROM contexts WHERE id = ?1"
+  defp load_context_meta(id, ws) do
+    sql =
+      "SELECT id, title, node, modified_at, l0_abstract FROM contexts WHERE id = ?1 AND workspace_id = ?2"
 
-    case Store.raw_query(sql, [id]) do
+    case Store.raw_query(sql, [id, ws]) do
       {:ok, [[id, title, node, modified_at, l0]]} ->
         %{id: id, title: title, node: node, modified_at: modified_at, l0: l0}
 

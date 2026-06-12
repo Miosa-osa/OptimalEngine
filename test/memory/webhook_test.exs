@@ -205,13 +205,13 @@ defmodule OptimalEngine.Memory.WebhookTest do
 
       opts = %{
         "webhook_url" => url,
-        "webhook_headers" => %{"x-tenant-id" => "acme", "x-custom" => "value"}
+        "webhook_headers" => %{"x-tenant-id" => "sample", "x-custom" => "value"}
       }
 
       assert {:ok, 200} = Webhook.deliver(%{event: "test"}, opts)
 
       assert_receive {:webhook_received, ^ref, captured}, 3_000
-      assert captured.headers["x-tenant-id"] == "acme"
+      assert captured.headers["x-tenant-id"] == "sample"
       assert captured.headers["x-custom"] == "value"
     end
   end

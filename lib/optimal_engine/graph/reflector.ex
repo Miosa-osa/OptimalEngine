@@ -42,6 +42,7 @@ defmodule OptimalEngine.Graph.Reflector do
 
   - `:min_cooccurrences` — minimum shared contexts to qualify (default: 2)
   - `:limit` — max suggestions to return (default: 20)
+  - `:workspace_id` — workspace to scope to (default: "default")
 
   Returns `{:ok, [map()]}`. Never raises — logs and returns `{:ok, []}` on failure.
   """
@@ -49,24 +50,30 @@ defmodule OptimalEngine.Graph.Reflector do
   def reflect(opts \\ []) do
     min_cooccurrences = Keyword.get(opts, :min_cooccurrences, 2)
     limit = Keyword.get(opts, :limit, 20)
+    ws = Keyword.get(opts, :workspace_id, "default")
+    skip_llm = Keyword.get(opts, :skip_llm, false)
 
+    # Scope co-occurrence through the contexts table (source of truth for
+    # workspace membership) rather than entities.workspace_id — legacy entity
+    # rows were backfilled to 'default' regardless of their context.
     sql = """
     SELECT e1.name as entity_a, e2.name as entity_b, COUNT(DISTINCT e1.context_id) as cooccurrences
     FROM entities e1
     JOIN entities e2 ON e1.context_id = e2.context_id AND e1.name < e2.name
+    JOIN contexts c ON c.id = e1.context_id AND c.workspace_id = ?3
     GROUP BY e1.name, e2.name
     HAVING COUNT(DISTINCT e1.context_id) >= ?1
     ORDER BY cooccurrences DESC
     LIMIT ?2
     """
 
-    with {:ok, rows} <- Store.raw_query(sql, [min_cooccurrences, limit * 3]) do
+    with {:ok, rows} <- Store.raw_query(sql, [min_cooccurrences, limit * 3, ws]) do
       suggestions =
         rows
         |> Enum.map(fn [a, b, count] -> {a, b, count} end)
-        |> Enum.reject(fn {a, b, _} -> edge_exists?(a, b) end)
+        |> Enum.reject(fn {a, b, _} -> edge_exists?(a, b, ws) end)
         |> Enum.take(limit)
-        |> Enum.map(&build_suggestion/1)
+        |> Enum.map(&build_suggestion(&1, skip_llm))
 
       {:ok, suggestions}
     end
@@ -80,17 +87,23 @@ defmodule OptimalEngine.Graph.Reflector do
   Returns the contexts where both `entity_a` and `entity_b` appear together.
 
   Useful for understanding why the Reflector flagged a pair.
+
+  Options:
+  - `:workspace_id` — workspace to scope to (default: "default")
   """
-  @spec shared_contexts(String.t(), String.t()) :: {:ok, [map()]} | {:error, term()}
-  def shared_contexts(entity_a, entity_b) do
+  @spec shared_contexts(String.t(), String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def shared_contexts(entity_a, entity_b, opts \\ []) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+
     sql = """
     SELECT DISTINCT c.id, c.title, c.node
     FROM contexts c
     JOIN entities e1 ON e1.context_id = c.id AND e1.name = ?1
     JOIN entities e2 ON e2.context_id = c.id AND e2.name = ?2
+    WHERE c.workspace_id = ?3
     """
 
-    case Store.raw_query(sql, [entity_a, entity_b]) do
+    case Store.raw_query(sql, [entity_a, entity_b, ws]) do
       {:ok, rows} ->
         contexts = Enum.map(rows, fn [id, title, node] -> %{id: id, title: title, node: node} end)
         {:ok, contexts}
@@ -104,7 +117,7 @@ defmodule OptimalEngine.Graph.Reflector do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  defp build_suggestion({a, b, count}) do
+  defp build_suggestion({a, b, count}, skip_llm) do
     base = %{
       source: a,
       target: b,
@@ -113,20 +126,29 @@ defmodule OptimalEngine.Graph.Reflector do
       reason: "Co-occur in #{count} contexts without direct edge"
     }
 
-    if Ollama.available?() do
+    if should_classify?(skip_llm) do
       classify_relationship(base)
     else
       Map.put(base, :suggested_relation, "related")
     end
   end
 
-  defp edge_exists?(a, b) do
+  defp should_classify?(skip_llm) do
+    if skip_llm do
+      false
+    else
+      Ollama.available?() and Ollama.embed_healthy?()
+    end
+  end
+
+  defp edge_exists?(a, b, ws) do
     sql = """
     SELECT COUNT(*) FROM edges
-    WHERE (source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1)
+    WHERE ((source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1))
+      AND workspace_id = ?3
     """
 
-    case Store.raw_query(sql, [a, b]) do
+    case Store.raw_query(sql, [a, b, ws]) do
       {:ok, [[count]]} -> count > 0
       _ -> false
     end

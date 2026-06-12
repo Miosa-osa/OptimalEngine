@@ -27,7 +27,16 @@ defmodule OptimalEngine.Memory do
   path uses the explicit `forget_key/2` alias.
   """
 
-  alias OptimalEngine.Memory.Versioned
+  alias OptimalEngine.Memory.{EncodingGate, SemanticDedup, Versioned}
+
+  alias OptimalEngine.MemoryCore.{
+    Claim,
+    ClaimExtractor,
+    DerivationLedgerEntry,
+    ScoringPolicy,
+    SourcePackage,
+    Store
+  }
 
   require Logger
 
@@ -52,11 +61,176 @@ defmodule OptimalEngine.Memory do
   def create(attrs) do
     case Versioned.create(attrs) do
       {:ok, mem} = ok ->
+        maybe_create_pending_claim(attrs, mem)
         maybe_promote_to_wiki(mem)
         ok
 
       other ->
         other
+    end
+  end
+
+  defp maybe_create_pending_claim(%{content: content} = attrs, mem)
+       when is_binary(content) and content != "" do
+    gate = %EncodingGate{
+      should_encode: true,
+      score: 1.0,
+      novelty: 1.0,
+      salience: 1.0,
+      prediction_error: 0.0,
+      reason: "memory_create_bridge"
+    }
+
+    source_package =
+      memory_source_package(content, attrs, [], gate, true,
+        source_type: "versioned_memory",
+        source_uri: "memory://#{mem.id}",
+        metadata: %{"versioned_memory_id" => mem.id}
+      )
+
+    claim_opts = [
+      actor_id: "system:memory-create-bridge",
+      extracted_by: "system:memory-create-bridge",
+      claim_text: content,
+      metadata: governed_memory_metadata(attrs, gate, true, %{"versioned_memory_id" => mem.id})
+    ]
+
+    case ClaimExtractor.extract_from_source(source_package, claim_opts) do
+      {:ok, _claim} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Memory.create pending claim bridge failed: #{inspect(reason)}")
+    end
+  end
+
+  defp maybe_create_pending_claim(_attrs, _mem), do: :ok
+
+  @doc """
+  Governed memory intake for agent-facing writes.
+
+  `create/1` is the low-level legacy versioned-memory primitive. `remember/2`
+  is the higher-level governed path: it preserves the input as a Source Package
+  first, then either records a rejected intake decision or creates a pending
+  Claim. It never promotes text directly into durable truth.
+
+  Returns `{:ok, %{action:, memory:, source_package:, pending_claim:, gate:}}`.
+
+  Options:
+    - `:force` — bypass the encoding gate and still create a pending Claim
+    - `:gate_threshold` — default `0.30`
+    - `:salience_floor` — default `0.10`
+  """
+  @spec remember(map(), keyword()) ::
+          {:ok,
+           %{
+             action: :pending_claim | :rejected,
+             memory: versioned() | nil,
+             gate: EncodingGate.t(),
+             source_package: SourcePackage.t(),
+             pending_claim: Claim.t() | nil
+           }}
+          | {:error, term()}
+  @spec remember(String.t(), keyword()) :: :ok | {:error, term()}
+  def remember(input, opts \\ [])
+
+  def remember(%{content: content} = attrs, opts) when is_binary(content) and content != "" do
+    workspace_id = Map.get(attrs, :workspace_id, "default")
+    audience = Map.get(attrs, :audience, "default")
+
+    candidates = list(workspace_id: workspace_id, audience: audience, limit: 200)
+    dedup = SemanticDedup.decide(content, candidates, opts)
+
+    gate =
+      EncodingGate.evaluate(content,
+        candidates: candidates,
+        threshold: Keyword.get(opts, :gate_threshold, 0.30),
+        salience_floor: Keyword.get(opts, :salience_floor, 0.10)
+      )
+
+    encode? = gate.should_encode or Keyword.get(opts, :force, false)
+    source_package = memory_source_package(content, attrs, opts, gate, encode?)
+
+    if encode? do
+      claim_opts =
+        opts
+        |> Keyword.put_new(:actor_id, Map.get(attrs, :actor_id) || Map.get(attrs, :created_by))
+        |> Keyword.put_new(:claim_text, content)
+        |> Keyword.put_new(:metadata, governed_memory_metadata(attrs, gate, encode?))
+
+      case ClaimExtractor.extract_from_source(source_package, claim_opts) do
+        {:ok, claim} ->
+          {action, memory} = maybe_versioned_projection(attrs, source_package, claim, dedup, opts)
+
+          {:ok,
+           %{
+             action: action,
+             memory: memory,
+             source_package: source_package,
+             pending_claim: claim,
+             gate: gate,
+             dedup: dedup
+           }}
+
+        other ->
+          other
+      end
+    else
+      with :ok <- Store.insert_source_package(source_package),
+           :ok <- record_remember_rejection(source_package, gate, opts) do
+        {:ok,
+         %{
+           action: :rejected,
+           memory: nil,
+           source_package: source_package,
+           pending_claim: nil,
+           gate: gate,
+           dedup: dedup
+         }}
+      end
+    end
+  end
+
+  def remember(insight, opts) when is_binary(insight) do
+    tags = Keyword.get(opts, :tags, [])
+    key = Keyword.get(opts, :key, "insight_#{:erlang.unique_integer([:positive])}")
+    store("memory", key, insight, tags: tags)
+  end
+
+  def remember(_attrs, _opts), do: {:error, :missing_required_fields}
+
+  defp maybe_versioned_projection(attrs, source_package, claim, dedup, opts) do
+    if Keyword.get(opts, :versioned_projection, false) do
+      do_versioned_projection(attrs, source_package, claim, dedup)
+    else
+      {:pending_claim, nil}
+    end
+  end
+
+  defp do_versioned_projection(_attrs, _source_package, _claim, %{action: :skip, existing: existing})
+       when not is_nil(existing) do
+    {:skip, Map.put(existing, :was_existing, true)}
+  end
+
+  defp do_versioned_projection(attrs, source_package, claim, _dedup) do
+    metadata =
+      attrs
+      |> Map.get(:metadata, %{})
+      |> normalize_metadata()
+      |> Map.merge(%{
+        "memory_core_source_package_id" => source_package.id,
+        "memory_core_pending_claim_id" => claim.id,
+        "projection_kind" => "versioned_memory_staging"
+      })
+
+    projection_attrs =
+      attrs
+      |> Map.put(:metadata, metadata)
+
+    case Versioned.create(projection_attrs) do
+      {:ok, memory} -> {:add, memory}
+      {:error, {:duplicate, memory}} -> {:skip, Map.put(memory, :was_existing, true)}
+      {:error, _reason} -> {:pending_claim, nil}
     end
   end
 
@@ -239,17 +413,6 @@ defmodule OptimalEngine.Memory do
   end
 
   @doc """
-  Stores an insight into the default "memory" collection.
-  Convenience wrapper over `store/4`.
-  """
-  @spec remember(String.t(), keyword()) :: :ok | {:error, term()}
-  def remember(insight, opts \\ []) when is_binary(insight) do
-    tags = Keyword.get(opts, :tags, [])
-    key = Keyword.get(opts, :key, "insight_#{:erlang.unique_integer([:positive])}")
-    store("memory", key, insight, tags: tags)
-  end
-
-  @doc """
   Export a collection to a JSON file at the given path.
   """
   @spec export(collection(), String.t()) :: :ok | {:error, term()}
@@ -301,6 +464,85 @@ defmodule OptimalEngine.Memory do
   end
 
   defp parse_dt(%DateTime{} = dt), do: dt
+
+  defp memory_source_package(content, attrs, opts, gate, encode?, overrides \\ []) do
+    override_metadata = Keyword.get(overrides, :metadata, %{})
+
+    SourcePackage.from_text(content,
+      tenant_id: Map.get(attrs, :tenant_id, "default"),
+      workspace_id: Map.get(attrs, :workspace_id, "default"),
+      source_type: Keyword.get(overrides, :source_type, "memory_remember"),
+      source_class: "text",
+      source_system: "optimal_engine.memory",
+      source_uri: Keyword.get(overrides, :source_uri),
+      trust_label: "unreviewed",
+      quarantine_state: if(encode?, do: "clear", else: "rejected"),
+      metadata: governed_memory_metadata(attrs, gate, encode?, override_metadata),
+      created_by:
+        Map.get(attrs, :created_by) || Map.get(attrs, :actor_id) || Keyword.get(opts, :actor_id),
+      access_policy_id: Map.get(attrs, :access_policy_id),
+      security_labels: Map.get(attrs, :security_labels, []),
+      partition_ids: Map.get(attrs, :partition_ids, [])
+    )
+  end
+
+  defp governed_memory_metadata(attrs, gate, encode?, extra \\ %{}) do
+    path = if encode?, do: "memory_core_pending_claim", else: "rejected_source_package"
+
+    attrs
+    |> Map.get(:metadata, %{})
+    |> normalize_metadata()
+    |> Map.merge(normalize_metadata(extra))
+    |> Map.put("memory_intake", %{
+      "path" => path,
+      "gate" => gate_summary(gate)
+    })
+  end
+
+  defp record_remember_rejection(%SourcePackage{} = source_package, gate, opts) do
+    source_ref = DerivationLedgerEntry.object_ref("source_package", source_package.id)
+
+    ledger =
+      DerivationLedgerEntry.new(
+        "memory.remember",
+        "source_rejected",
+        [source_ref],
+        [source_ref],
+        tenant_id: source_package.tenant_id,
+        workspace_id: source_package.workspace_id,
+        source_package_links: [source_ref],
+        evidence_links: [source_ref],
+        actor_id: Keyword.get(opts, :actor_id) || source_package.created_by,
+        parser_id: "optimal_engine.memory.remember",
+        scoring_policy_version: ScoringPolicy.version(),
+        access_policy_id: source_package.access_policy_id,
+        security_labels: source_package.security_labels,
+        partition_ids: source_package.partition_ids,
+        metadata: %{
+          quarantine_state: "rejected",
+          reason: "encoding_gate_rejected",
+          gate: gate_summary(gate)
+        }
+      )
+
+    Store.insert_derivation_entry(ledger)
+  end
+
+  defp gate_summary(gate) do
+    %{
+      "should_encode" => gate.should_encode,
+      "score" => gate.score,
+      "novelty" => gate.novelty,
+      "salience" => gate.salience,
+      "prediction_error" => gate.prediction_error,
+      "reason" => gate.reason,
+      "similar_memory_id" => gate.similar_memory_id
+    }
+  end
+
+  defp normalize_metadata(nil), do: %{}
+  defp normalize_metadata(metadata) when is_map(metadata), do: metadata
+  defp normalize_metadata(_metadata), do: %{}
 
   defp backend, do: OptimalEngine.Memory.Store.backend()
 

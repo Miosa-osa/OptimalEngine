@@ -55,9 +55,21 @@ defmodule OptimalEngine.API.RateLimitPlug do
 
   @impl Plug
   def init(opts) do
+    app_defaults = Application.get_env(:optimal_engine, :api_rate_limit, [])
+
     %{
-      default_capacity: Keyword.get(opts, :default_capacity, @default_capacity),
-      default_per_minute: Keyword.get(opts, :default_per_minute, @default_per_minute),
+      default_capacity:
+        Keyword.get(
+          opts,
+          :default_capacity,
+          Keyword.get(app_defaults, :default_capacity, @default_capacity)
+        ),
+      default_per_minute:
+        Keyword.get(
+          opts,
+          :default_per_minute,
+          Keyword.get(app_defaults, :default_per_minute, @default_per_minute)
+        ),
       exempt_paths: Keyword.get(opts, :exempt_paths, @default_exempt)
     }
   end
