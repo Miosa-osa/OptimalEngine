@@ -429,7 +429,7 @@ Subgraph for one node: contexts + edges.
 
 ---
 
-## Architectures (Phase 14)
+## Architectures
 
 ### GET /api/architectures
 
