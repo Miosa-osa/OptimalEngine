@@ -1,16 +1,19 @@
 ---
 name: optimal-engine
 description: |
-  Optimal Engine is the second brain of a company — open-source memory infrastructure
-  that ingests every signal flowing through an org (chat, email, docs, meetings,
-  tickets, CRM, code, voice, video), curates it into an LLM-maintained wiki, and
-  delivers permission-scoped context to any agent in under 200ms. Use this skill
-  when building applications that need: persistent organizational memory, multi-
-  workspace knowledge isolation, audience-aware curation, hot-cited retrieval, or
-  proactive surfacing. Architectural commitments: 3-tier memory (raw / derivatives
-  / wiki), 9-stage pipeline, Mode + Genre + Type + Format + Structure signal classification, 14-category
-  proactive surfacing, 5-relation memory graph (updates / extends / derives /
-  contradicts / cites). Self-hosted, MIT, runs on a laptop.
+  Optimal Engine is a self-hosted second brain and operating engine for human and
+  AI workspaces. It preserves messy sources, organizes them into workspaces and
+  Nodes, classifies Signals, turns extracted assertions into reviewable Claims,
+  promotes accepted Claims into source-backed Facts and Memory Objects, assembles
+  governed Context Packages, and projects the same state into markdown, wiki/API
+  views, CLIs, MCP tools, and app surfaces. Use this skill when building or using
+  persistent organizational memory, workspace topology, source-backed retrieval,
+  agent work loops, multimodal intake, packages/exports, or governed tool/model
+  execution. Architectural commitments: source-first evidence, workspace/Node
+  scope, Signal = Mode + Genre + Type + Format + Structure, Claim -> Fact gate,
+  Memory Core lineage, Context Packages, Active Memory Pools, Skill Packages,
+  and projection surfaces over canonical runtime state. Self-hosted, MIT, runs
+  locally first.
 triggers:
   - persistent memory
   - organizational memory
@@ -23,29 +26,41 @@ triggers:
   - retrieval augmented generation
   - workspace knowledge
   - signal classification
-  - proactive surfacing
+  - source-backed memory
+  - workspace topology
+  - context packages
+  - active memory pool
 ---
 
 # Optimal Engine Skill
 
 ## What Optimal Engine Is
 
-The Optimal Engine is the **second brain of a company** — an intent machine that ingests every signal flowing through an organization, decodes the intent behind each one, curates it into a permission-aware wiki, and delivers the right context to any agent runtime in under 200ms.
+Optimal Engine is a **second brain and operating engine** for a person, team, or
+company. It is the backend runtime underneath markdown workspaces, agent
+sessions, retrieval, workflows, packages, integrations, and app surfaces.
 
-**Three promises:**
+It is not just a wiki, vector database, desktop UI, or agent task runner. It is
+the system that decides where information belongs, what can become truth, what
+context an agent is allowed to see, and which projection should be rendered for a
+human or application.
 
-1. **Signal integrity.** Nothing is stored without classification (`Mode + Genre + Type + Format + Structure`), intent, and citation lineage. The engine knows *why* each fact exists.
-2. **Scale alignment.** Every piece of content exists simultaneously as document / section / paragraph / chunk. Retrieval returns the coarsest scale that answers the query.
-3. **Modality alignment.** Text, image, and audio embed into the same 768-dim vector space (nomic-embed-text + nomic-embed-vision + whisper.cpp). A text query can retrieve an image.
+**Core promises:**
 
-**Four invariants — violate any one and the system rots:**
+1. **Source integrity.** Preserve raw evidence before interpretation.
+2. **Topology discipline.** Work happens inside tenant, workspace, Node, and pool scope.
+3. **Signal clarity.** Classify noisy input as `Mode + Genre + Type + Format + Structure`.
+4. **Truth gate.** Observations and extracted assertions become Claims first; accepted truth becomes Facts through review or policy.
+5. **Governed context.** Humans and agents receive Context Packages, not random chunks.
+6. **Projection discipline.** Markdown/wiki/API/app views are projections over governed runtime state.
 
-- Tier 1 is append-only. Nothing gets edited in place.
-- Tier 2 is fully rebuildable from Tier 1. `mix optimal.rebuild` reconstructs it.
-- Tier 3 is LLM-owned. Humans write the schema; the curator writes the pages.
-- Citations only point downward: T3 → T2/T1, T2 → T1. Never upward.
+**Hard invariants:**
 
-**Competitive position:** Classical RAG re-discovers the same facts on every query. Optimal Engine discovers once, curates forever, and delivers permission-gated, receiver-matched context. **Wiki-first, not chunk-and-pray. Curated memory beats infinite memory.**
+- No durable Fact without source lineage.
+- No cross-workspace recall without an authorization envelope.
+- No agent observation becomes truth silently.
+- No connector/tool/model output bypasses Source Package, Claim, audit, or governance when it affects memory.
+- No package/export is written outside the owning workspace/Node projection unless it is a receiver-level export job.
 
 ---
 
@@ -60,80 +75,77 @@ Activate when the user says or implies:
 - "I need memory that survives conversation resets"
 - "My agent needs to know who owns X / what Y decided"
 - "I want to search all our documents semantically"
-- "I need proactive surfacing — notify me when X changes"
 - "I want RAG with citations I can trust"
 - "Multi-tenant / workspace-isolated knowledge"
+- "Help me organize a messy company or personal workspace"
+- "My agent needs authorized context before doing work"
+- "Turn repeated work into workflows or skills"
+- "Connect tools, CLIs, MCP servers, or scripts without bypassing governance"
 
 ---
 
-## Three Core Capabilities
+## Core Capabilities
 
-### 1. Memory API
+### 1. Workspace / Topology
 
-First-class memory entries: versioned, cited, relation-tracked. Not a key-value store — every memory carries provenance.
+Create an organization/workspace, define Nodes, attach aliases, set
+relationships, and keep projects as one Node type inside a workspace.
 
 ```bash
-# Create
-POST /api/memory  {"content": "Alice owns the pricing negotiation", "workspace": "sales"}
-
-# Version it
-POST /api/memory/:id/update  {"content": "Alice + Bob now co-own pricing"}
-
-# Branch it
-POST /api/memory/:id/extend  {"content": "Bob is the fallback if Alice is OOO"}
-
-# Forget it (soft delete with reason)
-POST /api/memory/:id/forget  {"reason": "resolved", "forget_after": "2026-12-31"}
-
-# Navigate the graph
-GET /api/memory/:id/versions   # full version chain
-GET /api/memory/:id/relations  # inbound + outbound typed edges
+mix optimal.setup company-os --name "Company OS"
+mix optimal.initiate company-os --name "Company OS" --dump setup.md
+mix optimal.topology --workspace default:company-os
 ```
 
-Five relation types: `updates` / `extends` / `derives` / `contradicts` / `cites`.
+### 2. Source-First Memory Core
 
-### 2. Workspace + Profile
-
-Workspaces are isolated brains — per-tenant, per-team, per-project. Profile delivers a 4-tier context snapshot in one call.
+Preserve source evidence, extract Claims, review/promote Facts, build Memory
+Objects, and keep derivation lineage.
 
 ```bash
-# Create a workspace
-POST /api/workspaces  {"slug": "sales", "name": "Sales Brain"}
+# Ingest a workspace projection or source dump
+mix optimal.ingest_workspace sample-workspace
 
-# 4-tier profile snapshot (static + dynamic + curated + activity)
-GET /api/profile?workspace=sales&audience=executive&bandwidth=l1
+# Ask through governed retrieval
+mix optimal.rag "what changed before the weekly review?"
 ```
 
-Profile tiers:
-- **static** — facts that rarely change (team composition, product definitions)
-- **dynamic** — rolling context (this week's signals, open decisions)
-- **curated** — the wiki front-door (LLM-maintained, audience-aware)
-- **activity** — recent events (what happened in the last N days)
+Truth lifecycle:
 
-### 3. Retrieval
+```text
+Source Package -> Signal -> Claim -> Fact -> Memory Object
+```
 
-Wiki-first → hybrid fallback → typed recall. Never starts with the chunk index.
+### 3. Retrieval / Context Packages
+
+Retrieve scoped context with evidence links and authorization metadata.
 
 ```bash
-# Wiki-first open question (recommended for agents)
-POST /api/rag  {"query": "what's the pricing decision?", "workspace": "sales", "format": "claude"}
-
-# Keyword + semantic hybrid
+# Keyword + semantic search
 GET /api/search?q=pricing+negotiation&workspace=sales
 
-# Chunk-level grep with signal trace (intent, scale, sn_ratio)
+# Contextual answer
+POST /api/rag  {"query": "what's the pricing decision?", "workspace": "sales", "format": "markdown"}
+
+# Grep-style inspection
 GET /api/grep?q=pricing&workspace=sales&intent=record_fact&scale=paragraph
-
-# Typed cued recall — one endpoint per memory-failure pattern
-GET /api/recall/actions?actor=Alice&topic=pricing&since=2026-01-01
-GET /api/recall/who?topic=pricing&role=owner
-GET /api/recall/when?event=Q4+pricing+decision
-GET /api/recall/where?thing=pricing+deck
-GET /api/recall/owns?actor=Alice
-
-# Contextual snapshot
-GET /api/profile?workspace=sales&audience=sales&bandwidth=l1
 ```
+
+### 4. Agent Work Loops
+
+Agents should load a Context Package, work inside an Active Memory Pool, call
+governed tools, record observations, and promote only reviewed knowledge.
+
+```text
+Task -> Context Package -> Active Memory Pool -> Tool/model calls
+     -> Observations -> pending Claims -> reviewed Facts
+```
+
+### 5. Projections And Packages
+
+Markdown/wiki/API/app views are projections. Packages are receiver/channel
+bundles, usually owned by a Node, such as proposals, contracts, SOP bundles,
+requirements packets, reports, or handoff bundles.
 
 ---
 
@@ -247,16 +259,19 @@ curl -s "$ENGINE/api/recall/who?topic=pricing&workspace=sales" | jq '.answer'
 
 | Concept | What it is | Why it matters |
 |---|---|---|
-| **Workspace** | Isolated brain (per-tenant, per-team) | Sales, Engineering, M&A never bleed into each other |
-| **Memory** | First-class versioned entry with typed relations | Not a chunk — a claim with provenance |
-| **Wiki (Tier 3)** | LLM-maintained curated front door | Most agent queries answered here — zero retriever hits |
-| **Hot citations** | Every wiki claim → source chunk | Fail-closed integrity gate — no unverified assertions |
-| **Signal `Mode + Genre + Type + Format + Structure`** | 5-dimension classification per chunk | Routes intent correctly, enables audience filtering |
-| **Audience** | Tag on retrieval (`sales`, `legal`, `exec`, `engineering`) | Same wiki, different variants — no manual branching |
-| **Bandwidth** | `l0` (~100 tok) / `l1` (~2K tok) / `full` | Match context density to LLM token budget |
-| **9-stage pipeline** | Intake → Parse → Decompose → Classify → Embed → Route → Store → Cluster → Curate | Every signal gets full treatment, no shortcuts |
-| **Proactive surfacing** | 14-category taxonomy pushed via SSE | Engine notifies agents when relevant facts change |
-| **HDBSCAN clusters** | Incremental theme grouping | Context assembler expands a hit to its whole cluster |
+| **Organization / Tenant** | Governance, identity, credential, and policy boundary | Prevents cross-company bleed |
+| **Workspace** | Bounded operating area inside an organization | A company OS, personal OS, team OS, client workspace, or research workspace |
+| **Node** | Governed unit of context, purpose, relationships, state, decisions, and lifecycle | A project, person, product, operation, company, learning area, or custom type |
+| **Project Node** | Optional bounded initiative Node | Projects live inside workspaces; they are not peers of workspaces |
+| **Source Package** | Preserved raw evidence | The engine can always prove where a Claim came from |
+| **Signal** | `Mode + Genre + Type + Format + Structure` classification | Routes noisy input without flattening everything into notes |
+| **Claim** | Reviewable assertion extracted from evidence or observation | Prevents generated output from becoming truth automatically |
+| **Fact** | Accepted, source-backed truth | Used by retrieval, memory, packages, and projections |
+| **Memory Object** | Durable institutional memory built from Facts and evidence | Makes accepted knowledge reusable |
+| **Context Package** | Authorized task/query context envelope | Agents get scoped context, not random files |
+| **Active Memory Pool** | Task-scoped working state for humans and agents | Captures observations and keeps loops auditable |
+| **Skill Package** | Reviewed repeatable procedure | Turns repeated work into reusable agent/human workflows |
+| **Package / Export** | Receiver/channel bundle or rendered projection | Keeps proposals, SOP bundles, reports, and handoffs organized |
 
 ---
 
@@ -265,7 +280,7 @@ curl -s "$ENGINE/api/recall/who?topic=pricing&workspace=sales" | jq '.answer'
 | Doc | Contents |
 |---|---|
 | [`references/api-reference.md`](references/api-reference.md) | Every endpoint — method, path, params, response, use-when |
-| [`references/concepts.md`](references/concepts.md) | 3 tiers, 9 stages, 4 chunk scales, 10-intent enum, Mode + Genre + Type + Format + Structure, 3 constraints |
+| [`references/concepts.md`](references/concepts.md) | Legacy concept reference; prefer the current docs tree for architecture-critical work |
 | [`references/workspace-pattern.md`](references/workspace-pattern.md) | Multi-workspace design, config schema, isolation guarantees |
 | [`references/memory-pattern.md`](references/memory-pattern.md) | When to add a memory, 5 relation types, versioning, forgetting |
 | [`references/retrieval-pattern.md`](references/retrieval-pattern.md) | Decision tree: ask vs search vs grep vs recall vs profile |
