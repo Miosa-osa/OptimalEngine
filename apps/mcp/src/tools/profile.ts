@@ -7,7 +7,7 @@ import { config } from "../config.js";
 export function registerProfile(server: McpServer): void {
   server.tool(
     "profile",
-    "Get a 4-tier workspace profile in one call: static (permanent ground truth), dynamic (rolling status), curated (wiki summary), activity (recent + top entities). Audience-aware. Use at session start to load context.",
+    "Get a workspace profile for session start: topology, stable context, current state, recent activity, and projection summaries when available. Use before an agent starts work in a workspace.",
     {
       workspace: z
         .string()

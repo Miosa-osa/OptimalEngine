@@ -1,9 +1,9 @@
 {
   "name": "optimal-engine",
   "title": "Optimal Engine",
-  "description": "Search and add to your second brain from Raycast",
+  "description": "Search, ask, and submit context to Optimal Engine from Raycast",
   "icon": "icon.png",
-  "author": "miosa",
+  "author": "robertolhuna",
   "license": "MIT",
   "categories": [
     "Productivity",
@@ -25,7 +25,7 @@
     {
       "name": "ask-engine",
       "title": "Ask Engine",
-      "description": "Ask the second brain a question",
+      "description": "Ask Optimal Engine a workspace-scoped question",
       "mode": "view"
     }
   ],
@@ -41,6 +41,7 @@
     {
       "name": "workspace",
       "title": "Default Workspace",
+      "description": "Workspace slug or ID used when a command does not specify one.",
       "type": "textfield",
       "default": "default",
       "required": true
@@ -64,9 +65,11 @@
     "typescript": "^5"
   },
   "scripts": {
-    "build": "ray build",
+    "build": "tsc --noEmit",
+    "build:raycast": "ray build",
     "dev": "ray develop",
-    "lint": "ray lint",
+    "lint": "tsc --noEmit",
+    "lint:publish": "ray lint",
     "publish": "npx @raycast/api@latest publish"
   }
 }

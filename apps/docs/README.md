@@ -1,6 +1,13 @@
-# Optimal Engine — Docs
+# Optimal Engine Docs Site
 
-SvelteKit static docs site for [Optimal Engine](https://github.com/Miosa-osa/OptimalEngine).
+SvelteKit static documentation surface for
+[Optimal Engine](https://github.com/Miosa-osa/OptimalEngine).
+
+This app is a projection surface. It should explain the backend runtime:
+workspace topology, source-first intake, Signal classification, Memory Core,
+Context Packages, Active Memory Pools, workflow/Skill Packages, tool/model
+governance, integrations, and wiki/export projections. It is not the canonical
+store.
 
 ## Run locally
 
@@ -16,7 +23,8 @@ npm run dev        # dev server at http://localhost:1422
 npm run build      # produces build/
 ```
 
-The output is a fully static site — every route is pre-rendered at build time. Serve with any static host (Netlify, Vercel, Cloudflare Pages, nginx, S3).
+The output is a fully static site. Every route is pre-rendered at build time.
+Serve with any static host.
 
 ## Type check
 
@@ -41,41 +49,19 @@ wrangler pages publish build
 ```
 src/
 ├── routes/
-│   ├── +layout.svelte           Glass header + sidebar shell
-│   ├── +page.svelte             Landing page
-│   ├── quickstart/
-│   ├── concepts/
-│   │   ├── three-tiers/
-│   │   ├── nine-stages/
-│   │   ├── signal-theory/
-│   │   ├── workspaces/
-│   │   ├── memory-primitive/
-│   │   └── proactive-surfacing/
-│   ├── api/
-│   │   ├── retrieval/
-│   │   ├── memory/
-│   │   ├── recall/
-│   │   ├── workspaces/
-│   │   ├── wiki/
-│   │   └── surfacing/
-│   ├── sdks/
-│   │   ├── typescript/
-│   │   ├── python/
-│   │   └── mcp/
-│   ├── extensions/
-│   │   ├── browser/
-│   │   └── raycast/
-│   └── self-host/
+│   ├── +layout.svelte           Header shell
+│   └── +page.svelte             Current docs landing page
 └── lib/
     ├── components/
-    │   ├── Sidebar.svelte
     │   ├── CodeBlock.svelte
-    │   ├── ApiSpec.svelte
     │   └── EngineThemeToggle.svelte
-    └── data/
-        ├── nav.ts               Sidebar navigation tree
-        └── endpoints.ts         API endpoints as typed data
 ```
+
+## Content Rule
+
+The canonical markdown docs live under `docs/`. Keep product/architecture truth
+there first, then mirror or render it here. Do not introduce separate
+architecture claims in this app that disagree with `docs/README.md`.
 
 ## Tech
 

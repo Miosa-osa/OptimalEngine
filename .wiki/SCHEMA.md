@@ -4,12 +4,17 @@ version: 1
 type: governance
 ---
 
-# Wiki Schema
+# Wiki Projection Schema
 
-Authoritative rules for the Tier-3 wiki — enforced by
+Authoritative rules for the wiki/export projection surface — enforced by
 `OptimalEngine.Wiki.Integrity.against_schema/2` when serialized as the
-map below, and read by `OptimalEngine.Wiki.Curator` when constructing
-the curator's system prompt.
+map below, and read by projection/rendering services when constructing
+human-facing pages.
+
+The wiki is not canonical truth. It is a projection over governed engine state:
+workspace topology, Source Packages, Claims, Facts, Memory Objects, Context
+Packages, workflow records, and audit state. Canonical truth remains in Memory
+Core and its lineage records.
 
 A page that violates the "error" rules cannot be committed. A page that
 violates the "warning" rules still commits but surfaces in
@@ -33,15 +38,15 @@ Every page MUST carry this frontmatter:
 - `version` — monotonic integer, bumped by the curator on every write.
 - `last_curated` — ISO-8601 timestamp of the most recent curator run.
 
-## Citation rules (errors)
+## Citation and lineage rules (errors)
 
 - Every factual claim in `## Summary` and `## Decisions` (if present) MUST
   carry at least one `{{cite: optimal://…}}` directive.
-- Every `{{cite: uri}}` MUST resolve to a real chunk in the Store. Broken
-  citations block the commit.
-- Citations never point upward across tiers: a Tier-3 citation resolves to
-  Tier-2 chunks or Tier-1 raw signal files, never to other wiki pages.
-  Cross-page links use `[[slug]]`, not `{{cite}}`.
+- Every `{{cite: uri}}` MUST resolve to governed evidence: a Source Package,
+  Fact, Memory Object, asset extraction, or derivation record. Broken citations
+  block the commit.
+- Citations point from projection back to evidence or accepted memory. Cross-page
+  links use `[[slug]]`, not `{{cite}}`.
 
 ## Size ceilings (warnings)
 
@@ -74,5 +79,5 @@ The integrity checker consumes this schema as a map with the fields:
 }
 ```
 
-Add rules here; don't hardcode them in the checker. Schema evolution is
-a governance action, not a code change.
+Add rules here; do not hardcode them in the checker. Schema evolution is a
+governance action, not a hidden code change.

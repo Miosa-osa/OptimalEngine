@@ -165,7 +165,7 @@ export default function AskEngine(): React.ReactElement {
   return (
     <List
       isLoading={isLoading}
-      searchBarPlaceholder="Ask your second brain anything…"
+      searchBarPlaceholder="Ask Optimal Engine anything…"
       searchText={query}
       onSearchTextChange={setQuery}
       actions={
@@ -182,7 +182,7 @@ export default function AskEngine(): React.ReactElement {
         <List.EmptyView
           icon={Icon.SpeechBubble}
           title="Ask the engine"
-          description="Type a question and press Enter — the engine will answer using your workspace memories"
+          description="Type a question and press Enter — the engine will answer using workspace context"
         />
       ) : (
         <List.Section title="Recent Questions">
