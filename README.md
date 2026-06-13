@@ -313,6 +313,10 @@ and recurring package types such as proposals, contracts, SOPs, and client
 requirements, read
 [`docs/guides/integrations-and-imports.md`](docs/guides/integrations-and-imports.md).
 
+For building custom apps, dashboards, client portals, static pages, public
+links, package delivery flows, or deployment surfaces on top of the engine, read
+[`docs/guides/interfaces-and-publishing.md`](docs/guides/interfaces-and-publishing.md).
+
 For when to use CLI tools, MCP servers, A2A agents, APIs, connector syncs,
 scripts, and scheduled jobs, read
 [`docs/guides/tool-surfaces-and-loops.md`](docs/guides/tool-surfaces-and-loops.md).

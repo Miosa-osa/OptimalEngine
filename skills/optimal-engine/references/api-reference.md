@@ -10,7 +10,9 @@ All responses are JSON (`Content-Type: application/json`). CORS is open (`*`) by
 
 ### POST /api/rag
 
-Wiki-first retrieval envelope. The primary endpoint for agent consumption. Tries the wiki (Tier 3) first; falls back to hybrid retrieval (BM25 + vector + graph) only on miss.
+Governed retrieval envelope for agent consumption. The endpoint assembles
+workspace-scoped context from Memory Core state, search/index projections, and
+wiki/export projections where useful.
 
 **Body**
 
@@ -157,7 +159,7 @@ Open-task and current-commitment lookup for an actor.
 
 ---
 
-## Wiki (Tier 3)
+## Wiki / Export Projection
 
 ### GET /api/wiki
 

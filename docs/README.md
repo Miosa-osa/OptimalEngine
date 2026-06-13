@@ -69,15 +69,20 @@ Read these in order:
    When to use CLI, MCP, A2A, APIs, connectors, scripts, and scheduled jobs,
    and how self-updating loops feed back into memory.
 
-15. [Agentic loops](guides/agentic-loops.md)
+15. [Interfaces and publishing](guides/interfaces-and-publishing.md)
+   How custom apps, dashboards, MCP clients, public links, static sites,
+   package delivery flows, and deployment tools should sit on top of the
+   backend without becoming a second source of truth.
+
+16. [Agentic loops](guides/agentic-loops.md)
    How goal-driven and scheduled loops use context, tools, validation gates,
    stop conditions, observations, workflow traces, and review.
 
-16. [Backend readiness](reference/backend-readiness.md)
+17. [Backend readiness](reference/backend-readiness.md)
    What is actually built in the backend, which stores own what, which checks
    prove it, and what still needs hardening.
 
-17. [Build goal alignment](reference/build-goal-alignment.md)
+18. [Build goal alignment](reference/build-goal-alignment.md)
    What is built now, what is only a spine, what still needs work, and which
    tests/probes prove it.
 

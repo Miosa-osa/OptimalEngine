@@ -23,8 +23,9 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
        into the `entities` table.
     5. Writes an `ingest` event to the audit log.
 
-  Wiki pages under `.wiki/` are written via `Wiki.put/1` so Tier 3 is
-  populated with the curated markdown as-is.
+  Wiki pages under `.wiki/` are written via `Wiki.put/1` as projection pages.
+  They are useful for browsing, but they are not canonical truth unless their
+  contents re-enter the engine as source-backed Claims/Facts.
 
   ## Usage
 

@@ -1,11 +1,12 @@
 defmodule Mix.Tasks.Optimal.Rag do
-  @shortdoc "Ask the engine a question (wiki-first, hybrid-fallback, LLM-ready)"
+  @shortdoc "Ask the engine a question with governed retrieval context"
 
   @moduledoc """
   End-to-end retrieval for LLM consumption.
 
-  Flow: Intent → WikiFirst (Tier 3) → hybrid search fallback → BandwidthPlanner
-  → Deliver (receiver-shaped envelope).
+  Flow: query → receiver/scope → governed retrieval/context assembly → delivery
+  envelope. Existing wiki/export projections may be used as one retrieval input,
+  but canonical truth remains source-backed Memory Core state.
 
   Where `mix optimal.search` returns metadata for humans, `mix optimal.rag`
   returns a payload ready to be fed to a language model.
