@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Optimal.Graph do
   @shortdoc "Show knowledge graph stats and analysis"
   @moduledoc """
-  Displays statistics and analysis from the OptimalOS knowledge graph.
+  Displays statistics and analysis from the Optimal Engine graph projection.
 
   Usage:
       mix optimal.graph                # Show graph stats and sample edges

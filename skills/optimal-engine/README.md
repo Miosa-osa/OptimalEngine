@@ -1,6 +1,8 @@
 # Optimal Engine Skill
 
-Claude Code skill for building with [Optimal Engine](../../README.md) — the second brain of a company.
+Claude Code skill for building with [Optimal Engine](../../README.md) — a
+backend operating engine for source-backed workspace memory, agent context, and
+projection surfaces.
 
 ## What This Skill Does
 
@@ -31,7 +33,7 @@ skills/optimal-engine/
 ├── README.md                   This file
 ├── references/
 │   ├── api-reference.md        Every endpoint with params + examples
-│   ├── concepts.md             3 tiers, 9 stages, intents, Mode + Genre + Type + Format + Structure
+│   ├── concepts.md             tiers, layers, stages, intents, Mode + Genre + Type + Format + Structure
 │   ├── workspace-pattern.md    Multi-workspace design + config schema
 │   ├── memory-pattern.md       Versioning, relations, forgetting
 │   ├── retrieval-pattern.md    Decision tree: which endpoint to use

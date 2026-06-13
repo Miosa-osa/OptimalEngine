@@ -404,7 +404,7 @@ The MCP server exposes these tools:
 ENGINE=http://localhost:4200
 WS=sales
 
-# Ask the wiki (wiki-first, markdown output)
+# Ask with governed context (markdown output)
 curl -s -X POST $ENGINE/api/rag \
   -H 'Content-Type: application/json' \
   -d "{\"query\":\"current pricing strategy\",\"workspace\":\"$WS\",\"format\":\"markdown\"}" \

@@ -57,7 +57,7 @@ This is the current implementation status by layer.
 | Topology / Nodes | `nodes` table exists, `workspace_id` exists in the migration, and `OptimalEngine.Topology.Node` supports tenant-scoped node CRUD and hierarchy. | Node ownership is not yet enforced through `workspace_id`; there is no first-class `node_types`, `node_relationships`, or topology change lifecycle. |
 | Signal Pipeline | `Pipeline.Intake` classifies raw input into Signals, routes it, writes workspace files, and inserts compatibility Context rows. | Intake is not yet source-first. Source evidence is recorded after the old pipeline succeeds, not before interpretation. |
 | Memory Core | `source_packages` and `derivation_ledger` writes exist through `MemoryCore.SourcePackageService` and `MemoryCore.Store`. Migration 032 creates the full schema spine. | Claims, Facts, Memory Objects, Details, Relationships, Pools, Context Packages, Workflows, Skills, model calls, and tool definitions are mostly schema-only. |
-| Retrieval | Search, wiki-first retrieval, RAG/context assembly, and principal post-filter tests exist. | This is not yet governed recall. There is no full Retrieval Package / Context Package contract with pre-expansion authorization, freshness, filtered-object accounting, and source-linked package storage. |
+| Retrieval | Search, RAG/context assembly, wiki/export projection lookup, and principal post-filter tests exist. | This audit predates the full governed-recall buildout; verify current Retrieval Package / Context Package behavior against `docs/reference/backend-readiness.md` and `docs/reference/build-goal-alignment.md`. |
 | Wiki / Export | `Wiki.Store` persists versioned pages and citations. `Wiki.Integrity` checks citations, directives, claim density, size, and contradictions. | The newer Workspace Export lifecycle is not built: export records, projection revisions, backlinks, broken-link records, projection drift, import lineage, and edit collision handling are not first-class yet. |
 | Active Collaboration | `active_memory_pools` table exists. | There is no pool lifecycle service for opening pools, loading context, publishing observations, proposing Claims, or closing pools. |
 | Workflow / Skill | Workflow and Skill tables exist in the schema spine. | There is no evidence-linked workflow extraction, generalized workflow validation, or governed Skill Package runtime yet. |
@@ -272,7 +272,7 @@ query
 
 Current code reality:
 
-- Retrieval has useful search, RAG, wiki-first, intent, and context assembly
+- Retrieval has useful search, RAG, wiki/export projection lookup, intent, and context assembly
   modules.
 - These are not yet the same as governed retrieval packages.
 - Permission-aware candidate generation and graph expansion are not the central
