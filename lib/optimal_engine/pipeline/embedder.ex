@@ -79,6 +79,69 @@ defmodule OptimalEngine.Pipeline.Embedder do
     {:ok, Enum.reverse(embeddings), %{errors: Enum.reverse(errors)}}
   end
 
+  @doc """
+  Embed every chunk in a tree and persist the vectors to `chunk_embeddings`.
+
+  This is the connecting tissue between the in-memory Phase 5 embedder and the
+  store: `embed_tree/2` produces `%Embedding{}` structs but never persists them;
+  this function maps each embedding back onto its originating chunk (to inherit
+  `workspace_id`/`tenant_id` — keeping the embedding row in the **current**
+  chunk-keyed scope scheme, joinable to contexts via `chunks.signal_id`) and
+  writes the batch via `OptimalEngine.Store.insert_embeddings/1`.
+
+  Returns `{:ok, %{embedded: n, errors: [...]}}` or `{:error, reason}` if the
+  store write fails. Embeddings whose providers were unreachable are reported in
+  `:errors` and simply not persisted (graceful degradation).
+
+  Gated by `config :optimal_engine, :embed, on_ingest: true` — see
+  `embed_on_ingest?/0`. Callers in the ingest path should check that flag.
+  """
+  @spec embed_and_store(ChunkTree.t(), keyword()) ::
+          {:ok, %{embedded: non_neg_integer(), errors: [{String.t(), term()}]}}
+          | {:error, term()}
+  def embed_and_store(%ChunkTree{chunks: chunks} = tree, opts \\ []) do
+    {:ok, embeddings, %{errors: errors}} = embed_tree(tree, opts)
+
+    chunk_by_id = Map.new(chunks, fn c -> {c.id, c} end)
+    rows = Enum.map(embeddings, &embedding_row(&1, chunk_by_id))
+
+    case OptimalEngine.Store.insert_embeddings(rows) do
+      :ok -> {:ok, %{embedded: length(rows), errors: errors}}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc """
+  Build a persistable embedding row from an `%Embedding{}`, inheriting
+  `workspace_id`/`tenant_id` from the originating chunk when available.
+  """
+  @spec embedding_row(Embedding.t(), %{String.t() => Chunk.t()}) :: map()
+  def embedding_row(%Embedding{} = emb, chunk_by_id) do
+    chunk = Map.get(chunk_by_id, emb.chunk_id)
+
+    %{
+      chunk_id: emb.chunk_id,
+      tenant_id: emb.tenant_id,
+      model: emb.model,
+      modality: emb.modality,
+      dim: emb.dim,
+      vector: emb.vector,
+      workspace_id: chunk && Map.get(chunk, :workspace_id) || "default"
+    }
+  end
+
+  @doc """
+  Whether embedding should run automatically on the ingest path.
+
+  Config: `config :optimal_engine, :embed, on_ingest: true` (default `true`).
+  """
+  @spec embed_on_ingest?() :: boolean()
+  def embed_on_ingest? do
+    :optimal_engine
+    |> Application.get_env(:embed, [])
+    |> Keyword.get(:on_ingest, true)
+  end
+
   # ─── dispatch ────────────────────────────────────────────────────────────
 
   # Text-ish modalities: plain text embedding
