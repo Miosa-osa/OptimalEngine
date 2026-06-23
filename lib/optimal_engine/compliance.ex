@@ -55,4 +55,7 @@ defmodule OptimalEngine.Compliance do
 
   @doc "Apply retention policies. See `Compliance.Retention.sweep/1`."
   def retention_sweep(opts \\ []), do: Retention.sweep(opts)
+
+  @doc "Register a retention policy. See `Compliance.Retention.add_policy/1`."
+  def add_retention_policy(attrs), do: Retention.add_policy(attrs)
 end
