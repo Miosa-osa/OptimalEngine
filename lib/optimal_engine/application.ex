@@ -73,7 +73,10 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Wiki.Scheduler,
 
       # ── Memory Core maintenance (periodic stale Context Package refresh) ──
-      OptimalEngine.MemoryCore.ContextRefreshScheduler
+      OptimalEngine.MemoryCore.ContextRefreshScheduler,
+
+      # ── Memory Core promotion loop (autonomous Claim → Fact → Memory) ────
+      OptimalEngine.MemoryCore.PromotionScheduler
     ]
   end
 
