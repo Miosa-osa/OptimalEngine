@@ -31,6 +31,13 @@ config :optimal_engine, :ollama,
 # accepted Signal (closing the Source -> Signal -> Claim break). Default ON.
 config :optimal_engine, :memory, auto_extract_claims: true
 
+# Tool/Model governance: when true, the engine's OWN model/tool calls
+# (Ollama embeddings, LLM generation) are routed through the governance
+# control plane and recorded as model_call_run / tool_call_run rows with
+# provenance + latency + status. Fail-open: logging never blocks the call.
+# Default ON.
+config :optimal_engine, :governance, log_model_calls: true
+
 config :optimal_engine, :video,
   max_keyframes: 10,
   scene_threshold: 0.3
