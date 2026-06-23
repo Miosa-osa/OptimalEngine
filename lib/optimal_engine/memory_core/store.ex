@@ -15,6 +15,7 @@ defmodule OptimalEngine.MemoryCore.Store do
     DerivationLedgerEntry,
     Fact,
     JSON,
+    MemoryDetailObject,
     MemoryObject,
     RelationshipEdge,
     SourcePackage
@@ -288,6 +289,79 @@ defmodule OptimalEngine.MemoryCore.Store do
       Map.get(memory_object, :stale_after),
       JSON.map(Map.get(memory_object, :metadata, %{}))
     ])
+  end
+
+  @spec insert_memory_detail_object(MemoryDetailObject.t() | map()) :: :ok | {:error, term()}
+  def insert_memory_detail_object(%MemoryDetailObject{} = detail) do
+    sql = """
+    INSERT OR IGNORE INTO memory_detail_objects (
+      id, tenant_id, workspace_id, parent_object_type, parent_object_id,
+      detail_type, detail_order, detail_depth, action_class, detail_text,
+      command_or_parameter_value, source_package_links, evidence_links,
+      aggregate_confidence, aggregate_precision, access_policy_id,
+      security_labels, partition_ids, lifecycle_state, reuse_status,
+      valid_time_start, valid_time_end, transaction_time_start,
+      transaction_time_end, stale_after, metadata
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5,
+      ?6, ?7, ?8, ?9, ?10,
+      ?11, ?12, ?13,
+      ?14, ?15, ?16,
+      ?17, ?18, ?19, ?20,
+      ?21, ?22, ?23,
+      ?24, ?25, ?26
+    )
+    """
+
+    Store.raw_execute(sql, [
+      detail.id,
+      detail.tenant_id,
+      detail.workspace_id,
+      detail.parent_object_type,
+      detail.parent_object_id,
+      detail.detail_type || "step",
+      detail.detail_order || 0,
+      detail.detail_depth || 0,
+      detail.action_class,
+      detail.detail_text,
+      detail.command_or_parameter_value,
+      JSON.list(detail.source_package_links || []),
+      JSON.list(detail.evidence_links || []),
+      detail.aggregate_confidence || 0.5,
+      detail.aggregate_precision || 0.5,
+      detail.access_policy_id,
+      JSON.list(detail.security_labels || []),
+      JSON.list(detail.partition_ids || []),
+      detail.lifecycle_state || "candidate",
+      detail.reuse_status || "local",
+      detail.valid_time_start,
+      detail.valid_time_end,
+      detail.transaction_time_start || timestamp(),
+      detail.transaction_time_end,
+      detail.stale_after,
+      JSON.map(detail.metadata || %{})
+    ])
+  end
+
+  def insert_memory_detail_object(attrs) when is_map(attrs) do
+    with {:ok, detail} <- MemoryDetailObject.new(attrs) do
+      insert_memory_detail_object(detail)
+    end
+  end
+
+  @doc "Returns all detail objects attached to a parent object, ordered by detail_order."
+  @spec get_memory_detail_objects(String.t(), String.t(), String.t()) ::
+          {:ok, [list()]} | {:error, term()}
+  def get_memory_detail_objects(workspace_id, parent_object_type, parent_object_id) do
+    sql = """
+    SELECT id, parent_object_type, parent_object_id, detail_type, detail_order,
+           detail_text, command_or_parameter_value, lifecycle_state
+    FROM memory_detail_objects
+    WHERE workspace_id = ?1 AND parent_object_type = ?2 AND parent_object_id = ?3
+    ORDER BY detail_order ASC
+    """
+
+    Store.raw_query(sql, [workspace_id, parent_object_type, parent_object_id])
   end
 
   @spec insert_relationship_edge(RelationshipEdge.t() | map()) :: :ok | {:error, term()}
