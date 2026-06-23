@@ -11,6 +11,7 @@ defmodule OptimalEngine.MemoryCore.WorkflowSkillPromotionTest do
 
   alias OptimalEngine.MemoryCore.Store
   alias OptimalEngine.MemoryCore.WorkflowSkill
+  alias OptimalEngine.Topology.Skill
 
   test "two similar traces promote into a skill package linked to the traces" do
     workspace_id = unique_workspace()
@@ -72,6 +73,44 @@ defmodule OptimalEngine.MemoryCore.WorkflowSkillPromotionTest do
     assert Enum.any?(pkgs, &(&1.id == pkg.id))
     assert {:ok, [_ | _]} = Store.list_generalized_workflows(workspace_id)
     assert {:ok, [_ | _]} = Store.list_procedural_memory_objects(workspace_id)
+  end
+
+  test "promotion registers the terminal capability in the skills registry" do
+    workspace_id = unique_workspace()
+    # Unique family => unique skill name => provable 0 -> 1 in the skills registry.
+    family = "register_capability_flow_#{System.unique_integer([:positive])}"
+    steps = [%{action: "a"}, %{action: "b"}]
+
+    # 0: capability does not exist yet.
+    assert {:ok, before} = Skill.list()
+    refute Enum.any?(before, &(&1.name == family))
+
+    {:ok, _t1} =
+      WorkflowSkill.record_trace(steps,
+        workflow_family: family,
+        workspace_id: workspace_id,
+        auto_promote: false
+      )
+
+    {:ok, _t2} =
+      WorkflowSkill.record_trace(steps,
+        workflow_family: family,
+        workspace_id: workspace_id,
+        auto_promote: false
+      )
+
+    assert {:ok, %{skill_package: pkg}} =
+             WorkflowSkill.promote_repeated(family, workspace_id: workspace_id)
+
+    # >=1: the real promotion flow registered a named, tenant-scoped capability.
+    assert {:ok, after_skills} = Skill.list()
+    registered = Enum.filter(after_skills, &(&1.name == family))
+    assert length(registered) == 1
+
+    [skill] = registered
+    assert skill.kind == :domain
+    assert skill.tenant_id == pkg.tenant_id
+    assert skill.description =~ pkg.id
   end
 
   test "a single trace stays below threshold" do
