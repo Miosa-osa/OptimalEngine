@@ -27,6 +27,10 @@ config :optimal_engine, :ollama,
   vlm_timeout_ms: 60_000,
   timeout_ms: 30_000
 
+# Memory Core: when true, CLI/API intake extracts a pending Claim from each
+# accepted Signal (closing the Source -> Signal -> Claim break). Default ON.
+config :optimal_engine, :memory, auto_extract_claims: true
+
 config :optimal_engine, :video,
   max_keyframes: 10,
   scene_threshold: 0.3
