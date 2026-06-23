@@ -214,6 +214,80 @@ Weekly review -> node state, priorities, decisions, stale context
 Monthly review -> workspace health, workflow promotion, memory cleanup
 ```
 
+## Retrieval Pipeline: Ordered Chain, Signal Branching, MCTS, Token Tiers
+
+This is the brain part. Everything is classified in Signal Theory dimensions, and
+those dimensions decide where the engine looks and how data is chained. The engine
+does not treat every input the same; it branches.
+
+### Signal-dimensional branching (the front door)
+
+Every input and every query is a Signal `S = (Mode, Genre, Type, Format, Structure)`.
+The dimensions choose the path:
+
+```text
+Mode      linguistic / visual / code / data / mixed   -> which parser + which index (FTS, vector, OCR, code-aware)
+Genre     brief / spec / transcript / decision-log /  -> which skeleton (191 templates), which node kind,
+          note / ... (143+ genres)                       which retention/decay rate
+Type      direct / inform / commit / decide / express -> commit|decide -> Claim candidate (push toward Fact);
+                                                          express|note -> low retention, stays at Signal
+Format    markdown / pdf / audio / video / json       -> which extraction (parse, transcribe, OCR, visual)
+Structure the genre skeleton                          -> how it is sectioned and summarized into L0/L1/L2 tiers
+```
+
+A `decision-log` transcript routes to the node's `decisions/`, becomes a Claim, and
+is promoted toward a Fact. A casual `note` decays in days and never leaves the Signal
+layer. Same engine, different branch, chosen by the signal's dimensions.
+
+### The retrieval chain (strict order, cheapest first)
+
+A query is itself a Signal: it is classified, then resolved through an ordered chain.
+
+```text
+1. CLASSIFY query   -> S=(M,G,T,F,W) + workspace/node scope + token budget
+2. CANDIDATE GEN    -> run the stores in parallel, each returns a ranked list:
+                       a. FTS5 / BM25        (lexical)
+                       b. Vector / semantic   (embeddings)
+                       c. Knowledge graph     (1..n-hop edge traversal)
+                       d. Temporal / recency  (decay-weighted)
+3. FUSE             -> Reciprocal Rank Fusion (RRF) across the lists -> one ranked candidate set
+4. DECAY / POLICY   -> temporal decay + S/N filter + governance/authorization gate
+5. SELECT (MCTS)    -> budget-aware Monte Carlo Tree Search: choose the subset that
+                       maximizes coverage/relevance WITHIN the token budget
+                       (UCT selection, greedy rollout, reward = coverage, backprop).
+                       Falls back to greedy when retrieval.mcts_enabled is off.
+6. TIER ASSEMBLE    -> fill the budget by disclosure tier, cheapest first (below)
+7. PACKAGE          -> an authorized Context Package (provenance + scope), not raw chunks
+8. DELIVER          -> human terminal / agent context / app / Active Memory Pool
+```
+
+### Token tiers (disclosure ladder, cheapest first)
+
+Retrieval starts at L0 and drills down only as budget and need require. This is the
+token optimization: maximum meaning per token, never load L3 when L1 answers.
+
+```text
+L0  headline   ~10 words    ~2K budget    always-loaded inventory, dashboards
+L1  summary    ~50 words     ~10K         warm context, search snippets
+L2  detail     ~500 words    ~50K         agent working memory
+L3  complete   verbatim      unbounded    audit, deep research
+```
+
+The bandwidth planner downgrades an item to a lower tier to fit the budget rather
+than dropping it.
+
+### The places it can look (one brain, many stores)
+
+```text
+sources (raw evidence) -> signals -> claims -> facts -> memory_objects
+relationship_edges (graph) | FTS index | vector index | context_packages | active_memory_pools
+```
+
+Each store is a layer with a single owner. Retrieval fuses across them, MCTS chooses
+under budget, tiers compress. That ordering is the chaining: classify, branch by
+dimension, generate candidates across every store, fuse, score, select with MCTS,
+assemble by tier, deliver.
+
 ## Product Surfaces
 
 Optimal Engine is the backend runtime. Different surfaces can control or display
@@ -289,6 +363,26 @@ Domain ownership    -> topology, intake, signal, memory, retrieval, active work,
 Projection surface  -> markdown, wiki, HTML, app UI, API, MCP/tools, reports,
                        agent context packages.
 ```
+
+### Thin to wide (narrow canonical core, wide derived fan)
+
+A few THIN canonical truths fan out into many WIDE derived stores and projections.
+You write narrow and read wide:
+
+```text
+THIN canonical core (governed truth, few rows, NOT rebuildable)
+  workspaces -> nodes -> facts -> memory_objects -> decisions
+        |
+        v   derive / index / project
+WIDE derived fan (many stores, rebuildable from core + sources)
+  signals | claims | contexts | chunks | chunk_embeddings | vectors |
+  relationship_edges | FTS index | context_packages | active_memory_pools |
+  wiki_pages | exports | dashboards | API responses
+```
+
+Retrieval runs the same shape in time: a THIN query fans WIDE across every store
+(parallel candidate generation), then narrows back THIN via RRF + MCTS into a
+tiered Context Package. The motion is always thin -> wide -> thin.
 
 The database stores governed runtime state. Markdown, wiki pages, app views,
 HTML, reports, and agent prompts are projections or control surfaces. If a human
