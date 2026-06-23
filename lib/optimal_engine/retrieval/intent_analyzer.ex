@@ -19,6 +19,7 @@ defmodule OptimalEngine.Retrieval.IntentAnalyzer do
   """
 
   alias OptimalEngine.Embed.Ollama
+  alias OptimalEngine.MemoryCore.GovernedModel
   require Logger
 
   @typedoc "Analyzed intent for a search query."
@@ -95,7 +96,19 @@ defmodule OptimalEngine.Retrieval.IntentAnalyzer do
   defp llm_analyze(query) do
     prompt = build_prompt(query)
 
-    case Ollama.generate(prompt, system: @llm_system_prompt) do
+    generate_model =
+      Application.get_env(:optimal_engine, :ollama, [])[:generate_model] || "qwen3:8b"
+
+    governed_generate =
+      GovernedModel.call_model(
+        "intent_analyzer.generate",
+        %{"chars" => String.length(prompt)},
+        fn -> Ollama.generate(prompt, system: @llm_system_prompt) end,
+        model_id: generate_model,
+        model_task_type: "generation"
+      )
+
+    case governed_generate do
       {:ok, raw_text} ->
         parse_llm_response(raw_text, query)
 

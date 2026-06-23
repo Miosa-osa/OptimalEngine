@@ -32,6 +32,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
   """
 
   alias OptimalEngine.Embed.{Ollama, Whisper}
+  alias OptimalEngine.MemoryCore.GovernedModel
   alias OptimalEngine.Pipeline.Decomposer.{Chunk, ChunkTree}
   alias OptimalEngine.Pipeline.Embedder.Embedding
 
@@ -147,7 +148,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
   # Text-ish modalities: plain text embedding
   defp dispatch(%Chunk{modality: m, text: text}, opts)
        when m in [:text, :code, :data, :mixed] and is_binary(text) and text != "" do
-    with {:ok, vector} <- Ollama.embed_text(text, opts) do
+    with {:ok, vector} <- governed_embed_text(text, opts) do
       {:ok, vector, model_name(opts, :text), m}
     end
   end
@@ -161,7 +162,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
     cond do
       is_binary(asset_path) and File.exists?(asset_path) ->
-        case Ollama.embed_image(asset_path, opts) do
+        case governed_embed_image(asset_path, opts) do
           {:ok, vector} -> {:ok, vector, model_name(opts, :image), :image}
           {:error, _} = err -> err
         end
@@ -185,7 +186,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
   defp dispatch(%Chunk{modality: :audio, text: transcript}, opts)
        when is_binary(transcript) and transcript != "" do
     # Existing transcript → text embed.
-    with {:ok, vector} <- Ollama.embed_text(transcript, opts) do
+    with {:ok, vector} <- governed_embed_text(transcript, opts) do
       {:ok, vector, "whisper+" <> model_name(opts, :text), :audio}
     end
   end
@@ -198,7 +199,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
       is_binary(asset_path) and File.exists?(asset_path) ->
         case Whisper.transcribe(asset_path, opts) do
           {:ok, %{text: text}} when text != "" ->
-            with {:ok, vector} <- Ollama.embed_text(text, opts) do
+            with {:ok, vector} <- governed_embed_text(text, opts) do
               {:ok, vector, "whisper+" <> model_name(opts, :text), :audio}
             end
 
@@ -219,7 +220,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
     cond do
       is_binary(asset_path) and File.exists?(asset_path) and image_asset?(asset_path) ->
-        case Ollama.embed_image(asset_path, opts) do
+        case governed_embed_image(asset_path, opts) do
           {:ok, vector} -> {:ok, vector, "vision+" <> model_name(opts, :image), :video}
           {:error, _} -> fallback_text(chunk, opts, :video)
         end
@@ -241,7 +242,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   defp fallback_text(%Chunk{text: text}, opts, effective_modality)
        when is_binary(text) and text != "" do
-    with {:ok, vector} <- Ollama.embed_text(text, opts) do
+    with {:ok, vector} <- governed_embed_text(text, opts) do
       {:ok, vector, model_name(opts, :text), effective_modality}
     end
   end
@@ -250,6 +251,37 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   defp model_name(opts, :text), do: Keyword.get(opts, :text_model, @text_model)
   defp model_name(opts, :image), do: Keyword.get(opts, :vision_model, @vision_model)
+
+  # ─── governance-wrapped provider calls ─────────────────────────────────────
+  # Every external model call from this stage is routed through GovernedModel so
+  # it lands a model_call_run with provenance (model id) + latency + status.
+  # Fail-open: governance never alters or blocks the embedding result.
+
+  defp governed_embed_text(text, opts) do
+    model = model_name(opts, :text)
+
+    GovernedModel.call_model(
+      "embedder.embed_text",
+      %{"chars" => String.length(text)},
+      fn -> Ollama.embed_text(text, opts) end,
+      model_id: model,
+      model_task_type: "embedding",
+      workspace_id: Keyword.get(opts, :workspace_id, "default")
+    )
+  end
+
+  defp governed_embed_image(asset_path, opts) do
+    model = model_name(opts, :image)
+
+    GovernedModel.call_model(
+      "embedder.embed_image",
+      %{"asset_path" => asset_path},
+      fn -> Ollama.embed_image(asset_path, opts) end,
+      model_id: model,
+      model_task_type: "embedding",
+      workspace_id: Keyword.get(opts, :workspace_id, "default")
+    )
+  end
 
   @image_extensions ~w(.jpg .jpeg .png .gif .webp .bmp .tiff)
   defp image_asset?(path) when is_binary(path) do
