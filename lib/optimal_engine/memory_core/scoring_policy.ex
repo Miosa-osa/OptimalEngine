@@ -45,6 +45,33 @@ defmodule OptimalEngine.MemoryCore.ScoringPolicy do
   def auto_promote_threshold, do: @auto_promote_threshold
 
   @doc """
+  Per-workspace auto-promotion confidence threshold.
+
+  The policy-version floor (`auto_promote_threshold/0`) still governs the
+  Claim→Fact review decision; this helper lets the autonomous promotion
+  scheduler require a workspace-specific minimum confidence before it offers a
+  Claim for `policy: :auto` promotion. Resolution order:
+
+    1. `config :optimal_engine, :memory, auto_promote_thresholds: %{workspace_id => float}`
+    2. `config :optimal_engine, :memory, auto_promote_threshold: float`
+    3. the policy-version floor (`auto_promote_threshold/0`)
+
+  The returned value is never below the policy floor.
+  """
+  @spec auto_promote_threshold(String.t() | nil) :: float()
+  def auto_promote_threshold(workspace_id) do
+    memory_config = Application.get_env(:optimal_engine, :memory, [])
+    per_workspace = Keyword.get(memory_config, :auto_promote_thresholds, %{})
+
+    configured =
+      Map.get(per_workspace, to_string(workspace_id)) ||
+        Keyword.get(memory_config, :auto_promote_threshold) ||
+        @auto_promote_threshold
+
+    max(clamp(configured), @auto_promote_threshold)
+  end
+
+  @doc """
   Score a Claim extracted from a Source Package.
 
   Caller-supplied `:aggregate_confidence`/`:aggregate_precision` win (the
