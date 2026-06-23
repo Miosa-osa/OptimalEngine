@@ -85,6 +85,8 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   alias OptimalEngine.Pipeline.Classifier, as: Classifier
   alias OptimalEngine.Context
+  alias OptimalEngine.MemoryCore.Claim
+  alias OptimalEngine.MemoryCore.ClaimExtractor
   alias OptimalEngine.MemoryCore.DerivationLedgerEntry
   alias OptimalEngine.MemoryCore.ScopeEnvelope
   alias OptimalEngine.MemoryCore.SourcePackage
@@ -115,7 +117,8 @@ defmodule OptimalEngine.Pipeline.Intake do
           cross_references: [String.t()],
           uri: String.t(),
           quality_violations: [{atom(), String.t()}],
-          quality_action: :accepted | :quarantined | :rejected
+          quality_action: :accepted | :quarantined | :rejected,
+          pending_claim: Claim.t() | nil
         }
 
   # ---------------------------------------------------------------------------
@@ -175,7 +178,9 @@ defmodule OptimalEngine.Pipeline.Intake do
          {:ok, signal, routed_to} <- route_step(signal, opts),
          {:ok, primary_path} <- write_step(signal, scope),
          {:ok, cross_paths} <- cross_ref_step(signal, routed_to, scope),
-         {:ok, context} <- index_step(signal, primary_path, scope) do
+         {:ok, context} <- index_step(signal, primary_path, scope),
+         {:ok, pending_claim} <-
+           extract_claims_step(source_package, signal, scope, opts) do
       uri = URI.from_path(primary_path)
       primary_relative = relative(primary_path)
       cross_relatives = Enum.map(cross_paths, &relative/1)
@@ -200,7 +205,8 @@ defmodule OptimalEngine.Pipeline.Intake do
         cross_references: cross_relatives,
         uri: uri,
         quality_violations: violations,
-        quality_action: quality_action
+        quality_action: quality_action,
+        pending_claim: pending_claim
       }
 
       record_memory_core_trace(
@@ -593,6 +599,124 @@ defmodule OptimalEngine.Pipeline.Intake do
     dest_folder = Writer.node_to_folder(dest_node, folder_scope)
     filename = Writer.relative_path(%{signal | node: dest_node}, folder_scope) |> Path.basename()
     Path.join([root, dest_folder, "signals", filename])
+  end
+
+  # Step 6: Extract a pending Claim from the Source Package.
+  #
+  # Closes the EXTRACTION break: intake now produces a Claim, not just a
+  # Signal. Gated behind `memory.auto_extract_claims` (default ON) and an
+  # optional per-call `:extract_claims` override. The Source Package is already
+  # durable and the Signal/Context already indexed, so claim extraction is
+  # additive — it must NEVER fail the pipeline. On disable or error it returns
+  # `{:ok, nil}` and leaves existing intake behavior untouched.
+  defp extract_claims_step(
+         %SourcePackage{} = source_package,
+         %Signal{} = signal,
+         %ScopeEnvelope{} = scope,
+         opts
+       ) do
+    if auto_extract_claims?(opts) do
+      do_extract_claim(source_package, signal, scope, opts)
+    else
+      {:ok, nil}
+    end
+  rescue
+    error ->
+      Logger.warning("[Intake] Claim extraction failed (skipping): #{inspect(error)}")
+      {:ok, nil}
+  end
+
+  defp do_extract_claim(source_package, signal, scope, _opts) do
+    extract_opts = [
+      signal_id: signal.id,
+      workspace_id: scope.workspace_id,
+      tenant_id: scope.tenant_id,
+      actor_id: scope.actor,
+      claim_text: signal.content || source_package.raw_text,
+      metadata: %{
+        node: signal.node,
+        genre: signal.genre,
+        title: signal.title,
+        intake_signal_id: signal.id
+      }
+    ]
+
+    case ClaimExtractor.extract_from_source(source_package, extract_opts) do
+      {:ok, %Claim{} = claim} ->
+        record_signal_to_claim_ledger(signal, claim, source_package, scope)
+        {:ok, claim}
+
+      {:error, reason} ->
+        Logger.warning("[Intake] Claim extraction failed (skipping): #{inspect(reason)}")
+        {:ok, nil}
+    end
+  end
+
+  # Whether claim extraction runs. Per-call `:extract_claims` overrides the
+  # `memory.auto_extract_claims` config flag (default ON).
+  defp auto_extract_claims?(opts) do
+    case Keyword.get(opts, :extract_claims) do
+      nil ->
+        :optimal_engine
+        |> Application.get_env(:memory, [])
+        |> Keyword.get(:auto_extract_claims, true)
+
+      override ->
+        override == true
+    end
+  end
+
+  # Emit a `signal_to_claim` derivation ledger entry mirroring the
+  # `source_to_signal_context` entry — linking the Signal (input) to the
+  # extracted Claim (output) so the Signal -> Claim hop has explicit lineage.
+  # Never fails the pipeline.
+  defp record_signal_to_claim_ledger(
+         %Signal{} = signal,
+         %Claim{} = claim,
+         %SourcePackage{} = source_package,
+         %ScopeEnvelope{} = scope
+       ) do
+    signal_ref = DerivationLedgerEntry.object_ref("signal", signal.id)
+    claim_ref = DerivationLedgerEntry.object_ref("claim", claim.id)
+    source_ref = DerivationLedgerEntry.object_ref("source_package", source_package.id)
+
+    entry =
+      DerivationLedgerEntry.new(
+        "intake.extract_claim",
+        "signal_to_claim",
+        [signal_ref],
+        [claim_ref],
+        tenant_id: source_package.tenant_id,
+        workspace_id: source_package.workspace_id,
+        source_package_links: [source_ref],
+        evidence_links: [source_ref],
+        actor_id: scope.actor,
+        evaluator_id: claim.evaluator_id,
+        parser_id: "optimal_engine.pipeline.intake",
+        confidence_delta: claim.aggregate_confidence,
+        precision_delta: claim.aggregate_precision,
+        security_labels: source_package.security_labels,
+        partition_ids: source_package.partition_ids,
+        metadata: %{
+          node: signal.node,
+          genre: signal.genre,
+          title: signal.title,
+          claim_type: claim.claim_type
+        }
+      )
+
+    case MemoryCoreStore.insert_derivation_entry(entry) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[Intake] signal_to_claim ledger write failed: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning("[Intake] signal_to_claim ledger write failed: #{inspect(error)}")
+      :ok
   end
 
   # ---------------------------------------------------------------------------
