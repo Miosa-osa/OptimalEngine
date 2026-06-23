@@ -30,6 +30,7 @@ defmodule OptimalEngine.Pipeline.Classifier do
   """
 
   alias OptimalEngine.{Context, Signal}
+  alias OptimalEngine.Signal.GenreRegistry
   alias OptimalEngine.Pipeline.Classifier.Classification
   alias OptimalEngine.Pipeline.Decomposer.{Chunk, ChunkTree}
 
@@ -527,13 +528,28 @@ defmodule OptimalEngine.Pipeline.Classifier do
       get_in(fm, ["signal", "genre"]) ||
         Map.get(fm, "genre")
 
-    if raw && is_binary(raw), do: raw, else: detect_genre(body)
+    cond do
+      raw && is_binary(raw) && GenreRegistry.valid?(raw) -> raw
+      raw && is_binary(raw) -> raw
+      true -> detect_genre(body)
+    end
   end
 
+  # Two-stage detection against the SINGLE canonical genre registry:
+  # 1. high-precision regex cues (@genre_patterns) for the most common genres
+  # 2. fall back to keyword scoring across all 142 registry genres
+  # 3. graceful default of "note" when nothing matches
   defp detect_genre(body) do
-    Enum.find_value(@genre_patterns, "note", fn {genre, pattern} ->
-      if Regex.match?(pattern, body), do: genre
-    end)
+    precise =
+      Enum.find_value(@genre_patterns, nil, fn {genre, pattern} ->
+        if Regex.match?(pattern, body), do: genre
+      end)
+
+    case precise do
+      nil -> GenreRegistry.detect(body)
+      "note" -> GenreRegistry.detect(body)
+      genre -> genre
+    end
   end
 
   defp extract_type(fm, body) do
