@@ -85,6 +85,7 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   alias OptimalEngine.Pipeline.Classifier, as: Classifier
   alias OptimalEngine.Context
+  alias OptimalEngine.Graph
   alias OptimalEngine.MemoryCore.Claim
   alias OptimalEngine.MemoryCore.ClaimExtractor
   alias OptimalEngine.MemoryCore.DerivationLedgerEntry
@@ -181,6 +182,13 @@ defmodule OptimalEngine.Pipeline.Intake do
          {:ok, context} <- index_step(signal, primary_path, scope),
          {:ok, pending_claim} <-
            extract_claims_step(source_package, signal, scope, opts) do
+      # Additive graph population: link the extracted claim to the signal's
+      # entities (claim --about--> entity). The context's own edges
+      # (mentioned_in, co_occurs, lives_in) are already written by
+      # Store.insert_context -> Graph.create_edges_for_context_db during the
+      # index step. This step must never fail the pipeline.
+      populate_graph_step(pending_claim, signal, scope)
+
       uri = URI.from_path(primary_path)
       primary_relative = relative(primary_path)
       cross_relatives = Enum.map(cross_paths, &relative/1)
@@ -718,6 +726,31 @@ defmodule OptimalEngine.Pipeline.Intake do
       Logger.warning("[Intake] signal_to_claim ledger write failed: #{inspect(error)}")
       :ok
   end
+
+  # Step 7: Populate the knowledge graph with claim->about->entity edges.
+  #
+  # The signal/context edges (mentioned_in, co_occurs, lives_in, cross_ref) are
+  # already created synchronously inside Store.insert_context. This step only
+  # adds the claim->entity links, which require the Claim id produced by the
+  # claim-extraction step. Purely additive — never fails the pipeline.
+  defp populate_graph_step(nil, _signal, _scope), do: :ok
+
+  defp populate_graph_step(%Claim{id: claim_id}, %Signal{} = signal, %ScopeEnvelope{} = scope)
+       when is_binary(claim_id) do
+    entities = signal.entities || []
+
+    if entities != [] do
+      Graph.create_claim_edges(claim_id, entities, workspace_id: scope.workspace_id)
+    end
+
+    :ok
+  rescue
+    error ->
+      Logger.warning("[Intake] Graph population failed (skipping): #{inspect(error)}")
+      :ok
+  end
+
+  defp populate_graph_step(_claim, _signal, _scope), do: :ok
 
   # ---------------------------------------------------------------------------
   # Private: Helpers
