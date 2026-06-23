@@ -53,6 +53,18 @@ config :optimal_engine, :context_refresh_scheduler,
   batch_limit: 50,
   workspace_limit: 100
 
+# Connector pull loop — the periodic intake FEED. Runs each enabled
+# connector once per interval and drives emitted signals through intake.
+config :optimal_engine, :pull_scheduler,
+  enabled: true,
+  boot_delay_ms: 2 * 60 * 1_000,
+  interval_ms: 24 * 60 * 60 * 1_000,
+  tenant_id: "default"
+
+# Connectors enabled for the pull loop. Each entry is a bare kind atom
+# (default config) or a map %{kind:, workspace_id:, config:}.
+config :optimal_engine, :connectors, enabled: [:sources_folder]
+
 config :logger, :console,
   format: "[$level] $message\n",
   metadata: [:module, :request_id]

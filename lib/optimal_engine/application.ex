@@ -76,7 +76,10 @@ defmodule OptimalEngine.Application do
       OptimalEngine.MemoryCore.ContextRefreshScheduler,
 
       # ── Memory Core promotion loop (autonomous Claim → Fact → Memory) ────
-      OptimalEngine.MemoryCore.PromotionScheduler
+      OptimalEngine.MemoryCore.PromotionScheduler,
+
+      # ── Connector pull loop (periodic intake FEED from enabled connectors) ─
+      OptimalEngine.Connectors.PullScheduler
     ]
   end
 
