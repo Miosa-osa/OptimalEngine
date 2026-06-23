@@ -573,8 +573,29 @@ defmodule OptimalEngine.MemoryCore.WorkflowSkill do
                  enabled_state: skill_package.enabled_state
                }
              )
-           ) do
+           ),
+         {:ok, _skill} <- register_capability(skill_package, opts) do
       {:ok, skill_package}
+    end
+  end
+
+  # Terminal registration: a packaged skill registers a named capability in the
+  # tenant-scoped Topology.Skill registry, so the procedural-knowledge pipeline
+  # (trace -> generalized workflow -> procedure -> skill package) ends in a
+  # discoverable capability. The skill row is idempotent (upsert keyed on
+  # {tenant_id, name}); enabling/execution stays governed by the skill package's
+  # own review/enabled state. Disable with `register_capability: false`.
+  defp register_capability(skill_package, opts) do
+    if Keyword.get(opts, :register_capability, true) do
+      OptimalEngine.Topology.Skill.upsert(%{
+        tenant_id: skill_package.tenant_id,
+        name: skill_package.skill_package_name,
+        kind: :domain,
+        description:
+          "Procedural capability promoted from workflow traces (skill_package #{skill_package.id})"
+      })
+    else
+      {:ok, :skipped}
     end
   end
 
