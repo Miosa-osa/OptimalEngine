@@ -141,10 +141,17 @@ defmodule OptimalEngine.Graph.Reflector do
     end
   end
 
+  # A gap means there is no SEMANTIC relationship between the two entities yet.
+  # The mechanical `co_occurs` relation (auto-written at intake to record that
+  # two entities shared a context) is NOT a semantic edge, so it is excluded
+  # here. This keeps the Reflector suggesting real relationships (works_with,
+  # reports_to, ...) even though every co-occurring pair now carries a
+  # co_occurs edge used by graph candidate generation.
   defp edge_exists?(a, b, ws) do
     sql = """
     SELECT COUNT(*) FROM edges
     WHERE ((source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1))
+      AND relation != 'co_occurs'
       AND workspace_id = ?3
     """
 

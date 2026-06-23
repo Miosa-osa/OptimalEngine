@@ -65,6 +65,12 @@ defmodule OptimalEngine.Graph do
         insert_edge_via_store(entity, id, "mentioned_in", 1.0, now, ws)
       end)
 
+      # entity ↔ entity (co_occurs) — every unordered pair sharing this context
+      Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
+        insert_edge_via_store(a, b, "co_occurs", 0.5, now, ws)
+        insert_edge_via_store(b, a, "co_occurs", 0.5, now, ws)
+      end)
+
       # context → node (lives_in)
       if is_binary(node) and node != "" do
         insert_edge_via_store(id, node, "lives_in", 1.0, now, ws)
@@ -107,6 +113,11 @@ defmodule OptimalEngine.Graph do
 
       Enum.each(entities, fn entity ->
         insert_edge_direct(db, entity, id, "mentioned_in", 1.0, now, ws)
+      end)
+
+      Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
+        insert_edge_direct(db, a, b, "co_occurs", 0.5, now, ws)
+        insert_edge_direct(db, b, a, "co_occurs", 0.5, now, ws)
       end)
 
       if is_binary(node) and node != "" do
@@ -343,6 +354,128 @@ defmodule OptimalEngine.Graph do
       {:ok, rows} -> {:ok, Enum.map(rows, &row_to_edge/1)}
       err -> err
     end
+  end
+
+  @doc """
+  Creates `claim --about--> entity` edges for an extracted claim.
+
+  Idempotent (INSERT OR IGNORE). Used by the intake pipeline after claim
+  extraction to link a Claim to the entities its source signal mentions.
+  Additive: failures are logged and swallowed, never raised.
+
+  Options:
+  - `:workspace_id` — workspace to attribute the edges to (default: "default")
+  """
+  @spec create_claim_edges(String.t(), [String.t()], keyword()) :: :ok
+  def create_claim_edges(claim_id, entities, opts \\ [])
+      when is_binary(claim_id) and is_list(entities) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+    now = DateTime.to_iso8601(DateTime.utc_now())
+
+    entities
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+    |> Enum.each(fn entity ->
+      insert_edge_via_store(claim_id, entity, "about", 1.0, now, ws)
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Returns candidate context IDs reachable from a set of query entities by
+  traversing the graph up to `hops` hops.
+
+  This is a graph candidate generator for retrieval fusion. Starting from the
+  query entities, it follows `mentioned_in` edges (entity → context) to gather
+  contexts, and `co_occurs` edges (entity → entity) to expand the entity
+  frontier for additional hops.
+
+  Returns `{:ok, [context_id]}` ranked by how many query-reachable entities
+  mention each context (descending), so densely-connected contexts surface first.
+
+  Options:
+  - `:workspace_id` — workspace to scope to (default: "default")
+  - `:limit`        — max context IDs to return (default: 20)
+  """
+  @spec graph_candidates([String.t()], pos_integer(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def graph_candidates(query_entities, hops \\ 1, opts \\ [])
+      when is_list(query_entities) and is_integer(hops) and hops >= 1 do
+    ws = Keyword.get(opts, :workspace_id, "default")
+    limit = Keyword.get(opts, :limit, 20)
+
+    seed =
+      query_entities
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> MapSet.new()
+
+    {entities, context_scores} = expand_frontier(seed, hops, ws)
+    _ = entities
+
+    ranked =
+      context_scores
+      |> Enum.sort_by(fn {_id, score} -> score end, :desc)
+      |> Enum.map(fn {id, _score} -> id end)
+      |> Enum.take(limit)
+
+    {:ok, ranked}
+  rescue
+    error -> {:error, error}
+  end
+
+  # Breadth-first expansion: accumulate mentioned_in contexts (scored by mention
+  # count) and grow the entity frontier via co_occurs for each remaining hop.
+  defp expand_frontier(seed_entities, hops, ws) do
+    Enum.reduce(1..hops, {seed_entities, MapSet.new(), %{}}, fn _hop,
+                                                                {frontier, visited, scores} ->
+      to_visit = MapSet.difference(frontier, visited)
+
+      {next_frontier, new_scores} =
+        Enum.reduce(to_visit, {MapSet.new(), scores}, fn entity, {nf, sc} ->
+          ctx_ids = entity_contexts(entity, ws)
+          sc = Enum.reduce(ctx_ids, sc, fn cid, acc -> Map.update(acc, cid, 1, &(&1 + 1)) end)
+          neighbors = co_occurring_entities(entity, ws)
+          {MapSet.union(nf, MapSet.new(neighbors)), sc}
+        end)
+
+      {next_frontier, MapSet.union(visited, to_visit), new_scores}
+    end)
+    |> then(fn {_frontier, _visited, scores} -> {MapSet.new(), scores} end)
+  end
+
+  defp entity_contexts(entity, ws) do
+    sql =
+      "SELECT target_id FROM edges WHERE source_id = ?1 AND relation = 'mentioned_in' AND workspace_id = ?2"
+
+    case Store.raw_query(sql, [entity, ws]) do
+      {:ok, rows} -> Enum.map(rows, fn [id] -> id end)
+      _ -> []
+    end
+  end
+
+  defp co_occurring_entities(entity, ws) do
+    sql =
+      "SELECT target_id FROM edges WHERE source_id = ?1 AND relation = 'co_occurs' AND workspace_id = ?2"
+
+    case Store.raw_query(sql, [entity, ws]) do
+      {:ok, rows} -> Enum.map(rows, fn [id] -> id end)
+      _ -> []
+    end
+  end
+
+  # Unordered distinct pairs of entities (for co_occurs edges). Filters blanks
+  # and self-pairs; returns each pair once as {a, b}.
+  defp co_occurrence_pairs(entities) do
+    clean =
+      entities
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.uniq()
+
+    for {a, i} <- Enum.with_index(clean),
+        {b, j} <- Enum.with_index(clean),
+        i < j,
+        do: {a, b}
   end
 
   # ---------------------------------------------------------------------------
