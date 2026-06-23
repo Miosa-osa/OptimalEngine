@@ -389,6 +389,65 @@ defmodule OptimalEngine.Pipeline.IntakeTest do
       assert is_binary(result.uri)
     end
 
+    test "extracts a pending claim and ledgers signal_to_claim", %{} do
+      workspace_id = "test-intake-claims-#{:erlang.unique_integer([:positive])}"
+
+      {:ok, result} =
+        Intake.process("Decision: Finance lead owns pricing renewal for Q4 at $2000.",
+          genre: "decision-log",
+          node: "project-platform-launch",
+          workspace_id: workspace_id
+        )
+
+      # A pending claim is produced from the signal/source.
+      assert result.pending_claim != nil
+      claim = result.pending_claim
+      assert claim.status == "pending" or claim.lifecycle_state == "pending"
+      assert claim.signal_id == result.signal.id
+      assert claim.workspace_id == workspace_id
+
+      # The claim row exists in the store, scoped to the workspace.
+      assert {:ok, [[1]]} =
+               OptimalEngine.Store.raw_query(
+                 "SELECT COUNT(*) FROM claims WHERE workspace_id = ?1 AND id = ?2",
+                 [workspace_id, claim.id]
+               )
+
+      # The signal -> claim hop is ledgered (the new lineage entry).
+      assert {:ok, [[count]]} =
+               OptimalEngine.Store.raw_query(
+                 """
+                 SELECT COUNT(*) FROM derivation_ledger
+                 WHERE workspace_id = ?1
+                   AND activity_type = 'intake.extract_claim'
+                   AND derivation_stage = 'signal_to_claim'
+                 """,
+                 [workspace_id]
+               )
+
+      assert count >= 1
+    end
+
+    test "honors extract_claims: false to skip claim extraction", %{} do
+      workspace_id = "test-intake-noclaims-#{:erlang.unique_integer([:positive])}"
+
+      {:ok, result} =
+        Intake.process("Decision: Finance lead owns pricing renewal for Q4 at $2000.",
+          genre: "decision-log",
+          node: "project-platform-launch",
+          workspace_id: workspace_id,
+          extract_claims: false
+        )
+
+      assert result.pending_claim == nil
+
+      assert {:ok, [[0]]} =
+               OptimalEngine.Store.raw_query(
+                 "SELECT COUNT(*) FROM claims WHERE workspace_id = ?1",
+                 [workspace_id]
+               )
+    end
+
     test "writes primary signal file to disk", %{tmp_dir: tmp_dir} do
       {:ok, result} =
         Intake.process("Alice wants platform V2 by Q3.",
