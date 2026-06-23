@@ -115,8 +115,13 @@ defmodule OptimalEngine.Retrieval.Search do
     # load / cold start) we skip the whole hybrid path and serve
     # FTS-only results so retrieval stays sub-second instead of
     # queuing behind a slow embed.
+    # Per-call override: callers (e.g. the RRF fusion in ContextAssembler)
+    # can force a pure FTS list with `vector_enabled: false` so they get a
+    # genuinely independent lexical ranking to fuse against.
+    vector_allowed = Keyword.get(opts, :vector_enabled, true)
+
     raw_result =
-      if hybrid_enabled?() and Ollama.embed_healthy?() do
+      if vector_allowed and hybrid_enabled?() and Ollama.embed_healthy?() do
         case do_hybrid_search(query, opts, state.topology) do
           {:ok, _} = ok -> ok
           {:error, _} -> do_search(query, opts, state.topology)
