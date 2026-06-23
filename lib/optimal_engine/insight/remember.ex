@@ -77,6 +77,64 @@ defmodule OptimalEngine.Insight.Remember do
   end
 
   @doc """
+  Record a durable decision in the workspace `decisions` ledger.
+
+  Decisions are first-class, queryable records of "what was decided and why" —
+  distinct from free-form `observations`. They feed the L0 system-state cache
+  ("recent decisions") and give the knowledge base an auditable choice history.
+
+  Required: `decision` (the choice made). A human-readable `:title` is derived
+  from the decision text when not supplied. Optional `:rationale`,
+  `:decided_by`, `:context_id` (FK into `contexts`), and `:workspace_id`
+  (default `"default"`).
+
+  Returns `{:ok, map}` describing the stored decision.
+
+  ## Examples
+
+      Remember.record_decision("Price AI Masters at $2K per seat",
+        rationale: "Matches Ed's call; keeps margin above 60%",
+        decided_by: "roberto",
+        workspace_id: "ai-masters")
+  """
+  @spec record_decision(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def record_decision(decision, opts \\ []) when is_binary(decision) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+    title = Keyword.get(opts, :title) || String.slice(decision, 0, 80)
+    rationale = Keyword.get(opts, :rationale)
+    decided_by = Keyword.get(opts, :decided_by)
+    context_id = Keyword.get(opts, :context_id)
+
+    sql = """
+    INSERT INTO decisions
+      (context_id, title, decision, rationale, decided_by, workspace_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+    """
+
+    case Store.raw_query(sql, [context_id, title, decision, rationale, decided_by, ws]) do
+      {:ok, _} ->
+        Logger.info("[RememberLoop] Recorded decision: #{String.slice(title, 0, 50)}")
+
+        {:ok,
+         %{
+           title: title,
+           decision: decision,
+           rationale: rationale,
+           decided_by: decided_by,
+           context_id: context_id,
+           workspace_id: ws
+         }}
+
+      err ->
+        {:error, err}
+    end
+  rescue
+    err ->
+      Logger.warning("[RememberLoop] record_decision/2 failed: #{inspect(err)}")
+      {:error, inspect(err)}
+  end
+
+  @doc """
   Mode 2: Contextual scan — find correction/friction signals in recent sessions.
 
   Looks for patterns like "no, not that", "actually", "wrong", "should have"
