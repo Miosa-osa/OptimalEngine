@@ -35,6 +35,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   alias OptimalEngine.Retrieval.Search, as: SearchEngine
   alias OptimalEngine.Store
   alias OptimalEngine.Bridge.Knowledge
+  alias OptimalEngine.Retrieval.MCTS
 
   @default_budgets %{l0: 3_000, l1: 10_000, l2: 50_000}
   @rrf_k 60
@@ -108,23 +109,78 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   end
 
   @doc """
-  Performs Reciprocal Rank Fusion across BM25 and graph-boosted results.
+  Performs real Reciprocal Rank Fusion across **independent** candidate
+  lists:
+
+    * FTS5 / BM25 lexical recall (`Search` with vectors disabled)
+    * vector / semantic recall (`Search.search` hybrid path, when embeddings
+      are healthy — degrades gracefully to FTS otherwise)
+    * graph 1-hop boosted ranking (when the knowledge graph is available)
+    * temporal-decay ranking (freshness-first ordering of the union)
+
+  Each list contributes `1/(k + rank)` per document; the fused score is the
+  sum across lists. Documents that appear in multiple independent lists rise
+  to the top — the canonical RRF property. Lists that are empty (e.g. no
+  embeddings) simply contribute nothing, so fusion degrades to FTS-only
+  cleanly.
   """
   @spec fused_search(String.t(), keyword()) :: {:ok, [map()]}
   def fused_search(query, opts \\ []) do
     limit = Keyword.get(opts, :limit, 20)
+    recall = limit * 3
 
-    bm25_results =
-      case SearchEngine.search(query, limit: limit) do
+    # FTS-only list: force vectors off so this list is a genuinely
+    # independent lexical ranking, not the already-fused hybrid output.
+    fts_results =
+      case SearchEngine.search(query, limit: recall, vector_enabled: false) do
         {:ok, results} -> results
         _ -> []
       end
 
-    graph_results = Knowledge.graph_boost(bm25_results, query)
+    # Semantic list: the hybrid path. When embeddings are absent this
+    # returns the FTS ranking, which is fine — RRF tolerates correlated
+    # lists, and the dedicated FTS list above keeps lexical signal intact.
+    vector_results =
+      case SearchEngine.search(query, limit: recall) do
+        {:ok, results} -> results
+        _ -> []
+      end
 
-    fused = reciprocal_rank_fusion([bm25_results, graph_results])
+    # Graph 1-hop list: reorder the union by graph adjacency to the query.
+    graph_results = safe_graph_boost(fts_results ++ vector_results, query)
+
+    # Temporal list: freshness-first ordering of everything seen.
+    temporal_results = temporal_ranked(fts_results ++ vector_results ++ graph_results)
+
+    fused =
+      reciprocal_rank_fusion([
+        fts_results,
+        vector_results,
+        graph_results,
+        temporal_results
+      ])
 
     {:ok, Enum.take(fused, limit)}
+  end
+
+  # Order the union by recency (modified_at, then created_at). Dedupe by id
+  # so a document gets a single temporal rank.
+  defp temporal_ranked(results) do
+    results
+    |> Enum.uniq_by(&Map.get(&1, :id))
+    |> Enum.sort_by(&temporal_key/1, {:desc, DateTime})
+  end
+
+  defp temporal_key(result) do
+    Map.get(result, :modified_at) || Map.get(result, :created_at) || ~U[1970-01-01 00:00:00Z]
+  end
+
+  defp safe_graph_boost(results, query) do
+    Knowledge.graph_boost(results, query)
+  rescue
+    _ -> results
+  catch
+    :exit, _ -> results
   end
 
   # ---------------------------------------------------------------------------
@@ -184,11 +240,17 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
     {header <> content, scores}
   end
 
-  # L2 — Full content for top results
+  # L2 — Full content for top results.
+  #
+  # Selection is budget-aware via MCTS (config `retrieval.mcts_enabled`,
+  # default on): instead of blindly taking the top-5, MCTS maximizes concept
+  # coverage within the L2 token budget so near-duplicate top hits don't
+  # crowd out distinct, lower-ranked context. Falls back to greedy when the
+  # flag is off.
   defp build_l2(_query, search_scores, budget, _opts) do
     top_ids =
       search_scores
-      |> Enum.take(5)
+      |> select_l2_candidates(budget)
       |> Enum.map(& &1.id)
       |> Enum.reject(&is_nil/1)
 
@@ -224,9 +286,64 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
     content <> decision_content
   end
 
+  # Build budget-aware L2 candidates and select with MCTS (or greedy fallback).
+  # Candidates carry a token estimate (full content length when cheaply
+  # available, else l0_abstract proxy) and concepts (from title + abstract)
+  # so MCTS can reason about coverage vs. budget.
+  defp select_l2_candidates(search_scores, budget) do
+    candidates =
+      search_scores
+      |> Enum.reject(&is_nil(&1[:id]))
+      |> Enum.map(fn s ->
+        {tokens, concepts_text} =
+          case Store.get_context(s.id) do
+            {:ok, ctx} ->
+              content = Map.get(ctx, :content) || ""
+              text = "#{Map.get(ctx, :title, "")} #{Map.get(ctx, :l0_abstract, "")}"
+              {max(div(String.length(content), 4), 1), text}
+
+            _ ->
+              {1, to_string(s[:title] || "")}
+          end
+
+        %{
+          id: s.id,
+          score: (s[:score] || 0.0) * 1.0,
+          tokens: tokens,
+          concepts: concept_tokens(concepts_text)
+        }
+      end)
+
+    result =
+      if MCTS.enabled?() do
+        MCTS.select(candidates, budget)
+      else
+        MCTS.greedy(candidates, budget)
+      end
+
+    result.selected
+  end
+
+  defp concept_tokens(text) do
+    text
+    |> String.downcase()
+    |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
+    |> Enum.reject(&(String.length(&1) < 3))
+    |> MapSet.new()
+  end
+
   # ---------------------------------------------------------------------------
-  # Private: Reciprocal Rank Fusion
+  # Reciprocal Rank Fusion
   # ---------------------------------------------------------------------------
+
+  @doc """
+  Fuse independent ranked lists via Reciprocal Rank Fusion. Each list
+  contributes `1/(k + rank)` per document; documents appearing across
+  multiple lists accumulate score and rise to the top. Public for testing
+  the fusion property directly.
+  """
+  @spec fuse([[map()]]) :: [map()]
+  def fuse(result_lists), do: reciprocal_rank_fusion(result_lists)
 
   defp reciprocal_rank_fusion(result_lists) do
     score_map =
@@ -235,8 +352,10 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
         results
         |> Enum.with_index(1)
         |> Enum.reduce(acc, fn {result, rank}, inner_acc ->
-          id = Map.get(result, :id, make_ref())
-          rrf_score = 1.0 / (@rrf_k + rank)
+          # Stable key so the *same* document fuses across independent lists.
+          # Falls back to uri/title before a ref so id-less rows still merge.
+          id = Map.get(result, :id) || Map.get(result, :uri) || Map.get(result, :title)
+          rrf_score = 1.0 / (rrf_k() + rank)
 
           Map.update(inner_acc, id, {rrf_score, result}, fn {existing_score, existing_result} ->
             {existing_score + rrf_score, existing_result}
@@ -246,7 +365,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
 
     score_map
     |> Enum.map(fn {_id, {fused_score, result}} ->
-      %{result | score: Float.round(fused_score, 6)}
+      Map.put(result, :score, Float.round(fused_score, 6))
     end)
     |> Enum.sort_by(& &1.score, :desc)
   end
@@ -293,6 +412,11 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
     scores
     |> Enum.map(fn s -> s[:uri] || s[:title] || "unknown" end)
     |> Enum.uniq()
+  end
+
+  defp rrf_k do
+    Application.get_env(:optimal_engine, :retrieval, [])
+    |> Keyword.get(:rrf_k, @rrf_k)
   end
 
   defp estimate_tokens(text) when is_binary(text), do: div(String.length(text), 4)

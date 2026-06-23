@@ -39,6 +39,13 @@ config :optimal_engine, :hybrid_search,
   alpha: 0.6,
   vector_enabled: true
 
+config :optimal_engine, :retrieval,
+  mcts_enabled: true,
+  mcts_iterations: 200,
+  mcts_exploration: 1.41,
+  rrf_k: 60,
+  temporal_weight: 0.15
+
 config :optimal_engine, :context_refresh_scheduler,
   enabled: true,
   boot_delay_ms: 5 * 60 * 1_000,
