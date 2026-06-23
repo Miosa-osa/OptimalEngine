@@ -59,4 +59,46 @@ defmodule OptimalEngine.Wiki do
   def curate(%Page{} = page, citations, opts \\ []) do
     Curator.curate(page, citations, opts)
   end
+
+  @doc """
+  Curate a page AND persist the result end-to-end.
+
+  This closes the curation loop that `curate/3` alone leaves open: it runs the
+  curator, persists the new page version via `Store.put/1`, and writes one
+  `citations` row per cited chunk (the hot back-link from a wiki page to its
+  Tier-2 chunks). Without this step the `{{cite:}}` markers in the page body
+  have no queryable provenance rows backing them.
+
+  Returns `{:ok, %{page: Page.t(), citations_persisted: non_neg_integer(),
+  outcome: Curator.outcome()}}` or `{:error, reason}`.
+  """
+  @spec curate_and_persist(Page.t(), [Curator.citation()], keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def curate_and_persist(%Page{} = page, citations, opts \\ []) when is_list(citations) do
+    outcome = Curator.curate(page, citations, opts)
+
+    if outcome.ok? do
+      curated = outcome.page
+      audience = Map.get(outcome.metadata, :audience, curated.audience)
+
+      with :ok <- Store.put(curated),
+           :ok <- Store.clear_citations(curated.tenant_id, curated.slug, audience),
+           :ok <-
+             Store.put_citations(
+               curated.tenant_id,
+               curated.slug,
+               audience,
+               citations
+             ) do
+        {:ok,
+         %{
+           page: curated,
+           citations_persisted: length(citations),
+           outcome: outcome
+         }}
+      end
+    else
+      {:error, {:curation_failed, outcome.metadata}}
+    end
+  end
 end
