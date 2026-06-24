@@ -34,6 +34,94 @@ defmodule OptimalEngine.Graph do
 
   alias OptimalEngine.Store
 
+  # Name of the default Knowledge.Store that mirrors the SQLite edges table.
+  @default_triple_store "default"
+
+  @doc """
+  Asserts a semantic edge — writes to both the SQLite `edges` table and the
+  default in-memory triple store (`Knowledge.Store`).
+
+  This is the primary public API for adding domain predicates (e.g.
+  `"mentions"`, `"co_occurs_with"`, `"authored_by"`) from ingest pipelines
+  or external callers.
+
+  Returns `:ok` on success. Edge insert failures are logged and swallowed;
+  triple-store failures are logged and swallowed so they never block the caller.
+
+  Options:
+  - `:workspace_id` — workspace to attribute the edge to (default: `"default"`)
+  - `:weight`       — edge weight (default: `1.0`)
+  """
+  @spec assert_edge(String.t(), String.t(), String.t(), keyword()) :: :ok
+  def assert_edge(source, target, predicate, opts \\ [])
+      when is_binary(source) and is_binary(target) and is_binary(predicate) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+    weight = Keyword.get(opts, :weight, 1.0)
+    now = DateTime.to_iso8601(DateTime.utc_now())
+
+    insert_edge_via_store(source, target, predicate, weight, now, ws)
+    maybe_feed_triple_store(source, predicate, target, ws)
+
+    :ok
+  end
+
+  @doc """
+  Hydrates a `Knowledge.Store` from all rows in the SQLite `edges` table.
+
+  Called on application start (and optionally per-workspace) so the in-memory
+  triple store reflects durable edge data after a restart. Each edge row is
+  asserted as a quad `{workspace_id, source_id, relation, target_id}`.
+
+  `store` must be a running `Knowledge.Store` GenServer (pid or via-name).
+
+  Options:
+  - `:workspace_id` — only hydrate edges from this workspace (default: all)
+  - `:limit`        — max rows to load (default: 100_000)
+
+  Returns `{:ok, count}` or `{:error, reason}`.
+  """
+  @spec hydrate_triple_store(GenServer.server(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def hydrate_triple_store(store, opts \\ []) do
+    ws = Keyword.get(opts, :workspace_id)
+    limit = Keyword.get(opts, :limit, 100_000)
+
+    {sql, params} =
+      case ws do
+        nil ->
+          {"SELECT source_id, relation, target_id, workspace_id FROM edges LIMIT ?1", [limit]}
+
+        ws ->
+          {"SELECT source_id, relation, target_id, workspace_id FROM edges WHERE workspace_id = ?1 LIMIT ?2",
+           [ws, limit]}
+      end
+
+    case Store.raw_query(sql, params) do
+      {:ok, rows} ->
+        triples =
+          Enum.map(rows, fn [source, predicate, target, graph] ->
+            {graph, source, predicate, target}
+          end)
+
+        count = length(triples)
+
+        Enum.each(triples, fn {g, s, p, o} ->
+          OptimalEngine.Knowledge.Store.assert(store, g, s, p, o)
+        end)
+
+        Logger.info("[Graph] Hydrated #{count} triples into Knowledge.Store from SQLite edges")
+        {:ok, count}
+
+      {:error, reason} ->
+        Logger.warning("[Graph] hydrate_triple_store query failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  rescue
+    error ->
+      Logger.warning("[Graph] hydrate_triple_store exception: #{inspect(error)}")
+      {:error, error}
+  end
+
   @doc """
   Creates all edges for a newly indexed or ingested context.
 
@@ -63,17 +151,21 @@ defmodule OptimalEngine.Graph do
       # entity → context (mentioned_in)
       Enum.each(entities, fn entity ->
         insert_edge_via_store(entity, id, "mentioned_in", 1.0, now, ws)
+        maybe_feed_triple_store(entity, "mentioned_in", id, ws)
       end)
 
       # entity ↔ entity (co_occurs) — every unordered pair sharing this context
       Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
         insert_edge_via_store(a, b, "co_occurs", 0.5, now, ws)
         insert_edge_via_store(b, a, "co_occurs", 0.5, now, ws)
+        maybe_feed_triple_store(a, "co_occurs", b, ws)
+        maybe_feed_triple_store(b, "co_occurs", a, ws)
       end)
 
       # context → node (lives_in)
       if is_binary(node) and node != "" do
         insert_edge_via_store(id, node, "lives_in", 1.0, now, ws)
+        maybe_feed_triple_store(id, "lives_in", node, ws)
       end
 
       # context → context (cross_ref) — extra destinations beyond the primary node
@@ -81,11 +173,13 @@ defmodule OptimalEngine.Graph do
 
       Enum.each(cross_refs, fn dest ->
         insert_edge_via_store(id, dest, "cross_ref", 0.8, now, ws)
+        maybe_feed_triple_store(id, "cross_ref", dest, ws)
       end)
 
       # context → context (supersedes)
       if is_binary(supersedes) and supersedes != "" do
         insert_edge_via_store(id, supersedes, "supersedes", 1.0, now, ws)
+        maybe_feed_triple_store(id, "supersedes", supersedes, ws)
       end
     end
 
@@ -663,4 +757,26 @@ defmodule OptimalEngine.Graph do
   defp struct_or_map_get(%_{} = struct, key), do: Map.get(struct, key)
   defp struct_or_map_get(map, key) when is_map(map), do: Map.get(map, key)
   defp struct_or_map_get(_, _), do: nil
+
+  # ---------------------------------------------------------------------------
+  # Private: triple-store feed
+  # ---------------------------------------------------------------------------
+
+  # Feeds a single edge into the default Knowledge.Store as a quad
+  # {workspace_id, source, predicate, object}. Silently swallows any error
+  # (the triple store is a secondary index — SQLite edges are the source of
+  # truth). Uses GenServer call only when the store is registered and alive.
+  defp maybe_feed_triple_store(source, predicate, target, workspace) do
+    store_name = {:via, Registry, {OptimalEngine.Knowledge.Registry, @default_triple_store}}
+
+    case Registry.lookup(OptimalEngine.Knowledge.Registry, @default_triple_store) do
+      [{_pid, _value}] ->
+        OptimalEngine.Knowledge.Store.assert(store_name, workspace, source, predicate, target)
+
+      [] ->
+        :noop
+    end
+  rescue
+    _ -> :noop
+  end
 end

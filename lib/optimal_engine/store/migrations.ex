@@ -85,7 +85,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_037_asset_extraction_projections(),
       migration_038_evaluation_records(),
       migration_039_connector_workspace_and_legacy_node_renames(),
-      migration_040_asset_governance_backfill()
+      migration_040_asset_governance_backfill(),
+      migration_041_episodes()
     ]
   end
 
@@ -2356,6 +2357,40 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_assets_workspace_hash ON assets(workspace_id, content_hash)"},
        {"idx_assets_source_package",
         "CREATE INDEX IF NOT EXISTS idx_assets_source_package ON assets(source_package_id)"}
+     ]}
+  end
+
+  # Phase 21 — Episodes: first-class episodic memory objects.
+  # An episode records a discrete workspace event (transcript ingested, meeting
+  # held, agent loop completed). The intake pipeline creates one row per
+  # transcript/meeting source; other subsystems can also insert episodes
+  # directly. `provenance` links back to source objects (source_package_id,
+  # signal_id, etc.) as a JSON map so the lineage chain is explicit.
+  defp migration_041_episodes do
+    {41, "episodes — episodic memory primitive for transcript/meeting intake",
+     [
+       {"episodes",
+        """
+        CREATE TABLE IF NOT EXISTS episodes (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          node_id TEXT,
+          kind TEXT NOT NULL DEFAULT 'event',
+          occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+          summary TEXT NOT NULL,
+          provenance TEXT NOT NULL DEFAULT '{}',
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          lifecycle_state TEXT NOT NULL DEFAULT 'recorded',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_episodes_workspace_kind",
+        "CREATE INDEX IF NOT EXISTS idx_episodes_workspace_kind ON episodes(workspace_id, kind, occurred_at)"},
+       {"idx_episodes_workspace_node",
+        "CREATE INDEX IF NOT EXISTS idx_episodes_workspace_node ON episodes(workspace_id, node_id, occurred_at)"}
      ]}
   end
 

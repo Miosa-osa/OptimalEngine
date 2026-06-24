@@ -82,6 +82,8 @@ defmodule OptimalEngine.MemoryCore.SourcePackageService do
         evidence_links: [source_ref],
         actor_id: Keyword.get(opts, :actor_id),
         parser_id: "optimal_engine.pipeline.intake",
+        model_id: string_or_nil(Keyword.get(opts, :model_id)),
+        model_version: string_or_nil(Keyword.get(opts, :model_version)),
         security_labels: source_package.security_labels,
         partition_ids: source_package.partition_ids,
         metadata: ledger_metadata(signal, context)
@@ -115,6 +117,10 @@ defmodule OptimalEngine.MemoryCore.SourcePackageService do
 
   defp maybe_ref(refs, type, id),
     do: refs ++ [DerivationLedgerEntry.object_ref(type, to_string(id))]
+
+  defp string_or_nil(nil), do: nil
+  defp string_or_nil(""), do: nil
+  defp string_or_nil(value), do: to_string(value)
 
   defp workspace_edit_metadata(opts) do
     %{

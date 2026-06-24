@@ -13,6 +13,7 @@ defmodule OptimalEngine.MemoryCore.Store do
   alias OptimalEngine.MemoryCore.{
     Claim,
     DerivationLedgerEntry,
+    Episode,
     Fact,
     JSON,
     MemoryDetailObject,
@@ -347,6 +348,67 @@ defmodule OptimalEngine.MemoryCore.Store do
     with {:ok, detail} <- MemoryDetailObject.new(attrs) do
       insert_memory_detail_object(detail)
     end
+  end
+
+  @spec insert_episode(Episode.t() | map()) :: :ok | {:error, term()}
+  def insert_episode(%Episode{} = episode) do
+    sql = """
+    INSERT OR IGNORE INTO episodes (
+      id, tenant_id, workspace_id, node_id, kind, occurred_at, summary,
+      provenance, security_labels, partition_ids, lifecycle_state, metadata,
+      created_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+      ?8, ?9, ?10, ?11, ?12,
+      ?13
+    )
+    """
+
+    Store.raw_execute(sql, [
+      episode.id,
+      episode.tenant_id,
+      episode.workspace_id,
+      episode.node_id,
+      episode.kind,
+      episode.occurred_at,
+      episode.summary,
+      JSON.map(episode.provenance || %{}),
+      JSON.list(episode.security_labels || []),
+      JSON.list(episode.partition_ids || []),
+      episode.lifecycle_state || "recorded",
+      JSON.map(episode.metadata || %{}),
+      episode.created_at
+    ])
+  end
+
+  def insert_episode(attrs) when is_map(attrs) do
+    with {:ok, episode} <- Episode.new(attrs) do
+      insert_episode(episode)
+    end
+  end
+
+  @doc "Returns all episodes for a workspace, optionally filtered by kind."
+  @spec list_episodes(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_episodes(workspace_id, opts \\ []) when is_binary(workspace_id) do
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"kind =", Keyword.get(opts, :kind)},
+          {"node_id =", Keyword.get(opts, :node_id)},
+          {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)}
+        ],
+        [workspace_id]
+      )
+
+    sql = """
+    SELECT id, tenant_id, workspace_id, node_id, kind, occurred_at, summary,
+           provenance, lifecycle_state, created_at
+    FROM episodes
+    WHERE workspace_id = ?1 #{clauses}
+    ORDER BY occurred_at DESC, created_at DESC
+    """
+
+    Store.raw_query(sql, params)
   end
 
   @doc "Returns all detail objects attached to a parent object, ordered by detail_order."

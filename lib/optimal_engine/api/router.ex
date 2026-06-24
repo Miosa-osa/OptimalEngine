@@ -2087,6 +2087,113 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # POST /api/assemble — tiered context assembly with MCTS budget-aware selection.
+  #
+  # Builds L0-L3 tiered context for a query via ContextAssembler.assemble/2,
+  # which drives the MCTS selection loop for L2 candidate ranking. Returns the
+  # assembled tiers plus MCTS selection metadata (selected candidate ids, scores,
+  # token budget used) so callers can inspect how the budget was spent.
+  #
+  # Body: {"query": "...", "workspace"?: "default", "tier_budgets"?: {l0, l1, l2}}
+  # Returns: {l0, l1, l2, l3, total_tokens, sources, mcts_metadata, workspace_id}
+  post "/api/ingest" do
+    body = conn.body_params || %{}
+    text = Map.get(body, "text", "")
+
+    if not (is_binary(text) and String.trim(text) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "text is required"}))
+    else
+      intake_opts =
+        []
+        |> then(fn acc -> if(v = body["genre"], do: Keyword.put(acc, :genre, v), else: acc) end)
+        |> then(fn acc -> if(v = body["title"], do: Keyword.put(acc, :title, v), else: acc) end)
+        |> then(fn acc -> if(v = body["node"], do: Keyword.put(acc, :node, v), else: acc) end)
+        |> then(fn acc -> if(v = body["workspace"], do: Keyword.put(acc, :workspace_id, v), else: acc) end)
+        |> then(fn acc -> if(body["extract_claims"] == true, do: Keyword.put(acc, :extract_claims, true), else: acc) end)
+
+      case OptimalEngine.Pipeline.Intake.process(text, intake_opts) do
+        {:ok, result} ->
+          sig = result.signal
+
+          send_resp(
+            conn,
+            200,
+            Jason.encode!(%{
+              ok: true,
+              signal_id: Map.get(result, :context_id) || Map.get(sig, :id),
+              genre: sig.genre,
+              type: sig.type,
+              entities: sig.entities,
+              source_package_id: result[:source_package] && result.source_package.id
+            })
+          )
+
+        {:error, reason} ->
+          send_resp(conn, 422, Jason.encode!(%{ok: false, error: inspect(reason)}))
+      end
+    end
+  end
+
+  post "/api/assemble" do
+    body = conn.body_params || %{}
+    query = Map.get(body, "query", "")
+
+    if not (is_binary(query) and String.trim(query) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
+    else
+      workspace_id = Map.get(body, "workspace", "default")
+
+      tier_budgets =
+        case Map.get(body, "tier_budgets") do
+          %{"l0" => l0, "l1" => l1, "l2" => l2} ->
+            [tier_budgets: %{l0: parse_int(l0, 3_000), l1: parse_int(l1, 10_000), l2: parse_int(l2, 50_000)}]
+
+          _ ->
+            []
+        end
+
+      assemble_opts =
+        tier_budgets ++
+          [
+            workspace_id: workspace_id
+          ]
+
+      case OptimalEngine.Retrieval.ContextAssembler.assemble(query, assemble_opts) do
+        {:ok, assembled} ->
+          mcts_meta =
+            assembled.search_scores
+            |> Enum.map(fn s ->
+              %{
+                id: s[:id],
+                title: s[:title],
+                score: s[:score],
+                uri: s[:uri],
+                node: s[:node]
+              }
+            end)
+
+          json(conn, %{
+            query: query,
+            workspace_id: workspace_id,
+            l0: assembled.l0,
+            l1: assembled.l1,
+            l2: assembled.l2,
+            l3: "",
+            total_tokens: assembled.total_tokens,
+            sources: assembled.sources,
+            mcts_metadata: %{
+              candidate_count: length(assembled.search_scores),
+              selected_sources: mcts_meta,
+              mcts_enabled: OptimalEngine.Retrieval.MCTS.enabled?()
+            }
+          })
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
   match _ do
     send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
   end
