@@ -118,6 +118,16 @@ defmodule OptimalEngine.MemoryCore.FactPromoter do
     with :ok <- require_source_lineage(claim),
          {:ok, review} <- ScoringPolicy.review_decision(claim, opts) do
       do_promote(claim, review, opts)
+    else
+      {:error, {:contradicts_current_facts, fact_ids}} = error ->
+        # Record `contradicts` edges from the claim to each blocking fact so the
+        # contradiction is visible in the relationship graph even when promotion
+        # is blocked. Additive only — never changes the promotion outcome.
+        emit_contradicts_edges(claim, fact_ids, opts)
+        error
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -698,6 +708,30 @@ defmodule OptimalEngine.MemoryCore.FactPromoter do
   defp present?(nil), do: false
   defp present?(""), do: false
   defp present?(_), do: true
+
+  # Emit `contradicts` relationship edges from the claim to each blocking fact.
+  # Runs outside any transaction; each INSERT OR IGNORE is safe to call alone.
+  defp emit_contradicts_edges(%Claim{} = claim, fact_ids, opts) do
+    claim_ref = ref("claim", claim.id)
+
+    Enum.each(fact_ids, fn fact_id ->
+      edge =
+        RelationshipEdge.between(
+          claim,
+          {"claim", claim.id},
+          {"fact", to_string(fact_id)},
+          "contradicts",
+          confidence: claim.aggregate_confidence || 0.5,
+          precision_score: claim.aggregate_precision || 0.5,
+          evidence_links: [claim_ref],
+          metadata: %{promotion_blocked: true, actor_id: Keyword.get(opts, :actor_id)}
+        )
+
+      Store.insert_relationship_edge(edge)
+    end)
+  rescue
+    _ -> :ok
+  end
 
   defp decode_map(nil), do: %{}
   defp decode_map(""), do: %{}

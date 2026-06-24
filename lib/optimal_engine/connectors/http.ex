@@ -69,6 +69,13 @@ defmodule OptimalEngine.Connectors.HTTP do
   end
 
   defp fire(url, opts) do
+    case Application.get_env(:optimal_engine, :http_mock) do
+      nil -> fire_httpc(url, opts)
+      mock_fn when is_function(mock_fn, 2) -> mock_fn.(url, opts)
+    end
+  end
+
+  defp fire_httpc(url, opts) do
     method = Keyword.get(opts, :method, :get)
     headers = build_headers(opts)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
@@ -103,7 +110,10 @@ defmodule OptimalEngine.Connectors.HTTP do
     Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
   end
 
-  defp normalize({:ok, {{_vsn, status, _reason}, resp_headers, raw_body}}, opts) do
+  # :httpc returns {:ok, {{vsn, status, reason}, headers, body}}.
+  # fire/2 returns that tuple directly; request/2 unwraps the {:ok, raw} via
+  # a with-clause, so normalize receives the inner raw value: {{vsn...}, headers, body}.
+  defp normalize({{_vsn, status, _reason}, resp_headers, raw_body}, opts) do
     headers = Enum.map(resp_headers, fn {k, v} -> {to_string(k), to_string(v)} end)
     body = maybe_decode(raw_body, headers, opts)
     %{status: status, headers: headers, body: body}

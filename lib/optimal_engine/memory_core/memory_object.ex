@@ -244,12 +244,42 @@ defmodule OptimalEngine.MemoryCore.MemoryObject do
         evidence_links: [fact_ref]
       )
 
+    # Emit a `part_of` edge when the caller declares that this Memory Object
+    # is a component of a composite/parent Memory Object. Purely additive.
+    part_of_edges =
+      opts
+      |> Keyword.get(:part_of_memory_ids, [])
+      |> List.wrap()
+      |> Enum.map(fn parent_id ->
+        RelationshipEdge.between(
+          fact,
+          {"memory_object", memory.id},
+          {"memory_object", to_string(parent_id)},
+          "part_of",
+          confidence: memory.aggregate_confidence,
+          precision_score: memory.aggregate_precision,
+          evidence_links: [fact_ref]
+        )
+      end)
+
     with :ok <- Store.insert_memory_object(memory),
          :ok <- Store.insert_relationship_edge(supports_edge),
          :ok <- Store.insert_relationship_edge(derived_from_edge),
+         :ok <- insert_edges(part_of_edges),
          :ok <- Store.insert_derivation_entry(ledger) do
       {:ok, memory}
     end
+  end
+
+  defp insert_edges([]), do: :ok
+
+  defp insert_edges(edges) do
+    Enum.reduce_while(edges, :ok, fn edge, :ok ->
+      case Store.insert_relationship_edge(edge) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
   end
 
   defp load_accepted_fact(%Fact{id: id, workspace_id: workspace_id})

@@ -49,9 +49,12 @@ defmodule OptimalEngine.Application do
       {DynamicSupervisor, name: OptimalEngine.SessionSupervisor, strategy: :one_for_one},
 
       # ── Knowledge subsystem (graph store + OWL 2 RL reasoner) ────────────
-      # Concrete stores are opened on-demand via OptimalEngine.Knowledge.open/2,
-      # so only the registry is permanent.
+      # The registry is permanent. The default store is started as a permanent
+      # named GenServer so Graph.assert_edge can find it via Registry lookup.
+      # Hydration (SQLite edges -> ETS triples) runs asynchronously after boot
+      # so it never delays the supervision tree startup.
       {Registry, keys: :unique, name: OptimalEngine.Knowledge.Registry},
+      OptimalEngine.Knowledge.DefaultStore,
 
       # ── Memory subsystem (episodic, cortex, learning, session store) ─────
       {Registry, keys: :unique, name: OptimalEngine.Memory.SessionRegistry},
