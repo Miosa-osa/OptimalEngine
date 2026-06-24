@@ -294,9 +294,26 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/health" do
-    workspace = query_param(conn, "workspace", "default")
-    {:ok, checks} = HealthDiagnostics.run(workspace_id: workspace)
-    json(conn, %{health: format_health(checks)})
+    # Lightweight by default: liveness + readiness (store/migrations/creds),
+    # skipping the slow embedder probe so this endpoint never blocks on Ollama.
+    # Pass ?full=true for the heavy 10-check knowledge-base diagnostics.
+    case query_param(conn, "full", "false") do
+      "true" ->
+        workspace = query_param(conn, "workspace", "default")
+        {:ok, checks} = HealthDiagnostics.run(workspace_id: workspace)
+        json(conn, %{health: format_health(checks)})
+
+      _ ->
+        report = Health.ready(skip: [:embedder])
+
+        json(conn, %{
+          status: Health.status(),
+          live: Health.live?(),
+          ok?: report.ok?,
+          degraded: report.degraded,
+          checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)
+        })
+    end
   end
 
   # ── Phase 12: runtime + retrieval + wiki endpoints ──────────────────────
