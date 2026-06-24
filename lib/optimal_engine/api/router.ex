@@ -2096,6 +2096,44 @@ defmodule OptimalEngine.API.Router do
   #
   # Body: {"query": "...", "workspace"?: "default", "tier_budgets"?: {l0, l1, l2}}
   # Returns: {l0, l1, l2, l3, total_tokens, sources, mcts_metadata, workspace_id}
+  post "/api/nodes" do
+    body = conn.body_params || %{}
+    name = Map.get(body, "name", "")
+    kind = Map.get(body, "kind", "")
+
+    cond do
+      not (is_binary(name) and String.trim(name) != "") ->
+        send_resp(conn, 400, Jason.encode!(%{error: "name is required"}))
+
+      not (is_binary(kind) and kind != "") ->
+        send_resp(conn, 400, Jason.encode!(%{error: "kind is required"}))
+
+      true ->
+        slug =
+          Map.get(body, "slug") ||
+            name
+            |> String.downcase()
+            |> String.replace(~r/[^a-z0-9]+/, "-")
+            |> String.trim("-")
+
+        attrs = %{
+          slug: slug,
+          name: name,
+          kind: String.to_atom(kind),
+          workspace_id: Map.get(body, "workspace", "default"),
+          description: Map.get(body, "description")
+        }
+
+        case OptimalEngine.Topology.Node.upsert(attrs) do
+          {:ok, node} ->
+            send_resp(conn, 200, Jason.encode!(%{ok: true, id: node.id, slug: node.slug, kind: kind}))
+
+          {:error, reason} ->
+            send_resp(conn, 422, Jason.encode!(%{ok: false, error: inspect(reason)}))
+        end
+    end
+  end
+
   post "/api/ingest" do
     body = conn.body_params || %{}
     text = Map.get(body, "text", "")

@@ -492,7 +492,11 @@ defmodule OptimalEngine.Pipeline.Intake do
   # Step 1: Classify
   defp classify_step(raw_text, opts) do
     topology = load_topology()
-    known_entities = topology_entities(topology)
+
+    # Known entities come from (1) the legacy topology.yaml endpoints and
+    # (2) the canonical Topology.Node table (the source of truth). The DB nodes
+    # are the gazetteer that drives entity extraction + semantic graph edges.
+    known_entities = Enum.uniq(topology_entities(topology) ++ db_entity_names())
 
     # Merge explicit entities into known entities for extraction
     extra_entities = Keyword.get(opts, :entities, [])
@@ -1088,6 +1092,29 @@ defmodule OptimalEngine.Pipeline.Intake do
       {:ok, t} -> t
       {:error, _} -> %{endpoints: %{}, root_path: nil}
     end
+  end
+
+  # Entity names from the canonical Topology.Node table. Includes each node's
+  # full name plus its first token (so "Pedro Afonso" also matches "Pedro").
+  # Resilient: any failure yields [] so intake never breaks on a topology read.
+  defp db_entity_names do
+    nodes =
+      case OptimalEngine.Topology.Node.list() do
+        {:ok, list} -> list
+        list when is_list(list) -> list
+        _ -> []
+      end
+
+    nodes
+    |> Enum.flat_map(fn node ->
+      name = Map.get(node, :name) || ""
+      first = name |> String.split(" ") |> List.first("")
+      [name, first]
+    end)
+    |> Enum.reject(&(String.length(&1) < 3))
+    |> Enum.uniq()
+  rescue
+    _ -> []
   end
 
   defp topology_entities(topology) do
