@@ -57,6 +57,7 @@ erl_crash.dump
 /nodes/
 /inbox/
 /default-*/
+/team/
 
 # Test artifacts
 /.optimal/index*.db*
