@@ -2269,7 +2269,15 @@ defmodule OptimalEngine.API.Router do
     conn
     |> put_resp_header("access-control-allow-origin", "*")
     |> put_resp_header("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS")
-    |> put_resp_header("access-control-allow-headers", "content-type")
+    # Allow the auth + workspace headers BusinessOS (and any app) sends so a
+    # browser/desktop client can connect this engine as its second brain.
+    # Without `authorization` here the browser blocks every authenticated
+    # cross-origin request to the engine.
+    |> put_resp_header(
+      "access-control-allow-headers",
+      "content-type, authorization, x-api-key, api-key, x-workspace-id"
+    )
+    |> put_resp_header("access-control-max-age", "86400")
     |> put_resp_header("x-api-version", "v1")
   end
 
