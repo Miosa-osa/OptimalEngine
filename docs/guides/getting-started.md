@@ -21,6 +21,7 @@ Required:
 - Elixir `~> 1.17`
 - Git
 - C toolchain for the SQLite NIF
+- Snappy for the RocksDB knowledge graph backend
 
 Optional:
 
@@ -39,6 +40,7 @@ canonical runtime store today.
 ```bash
 git clone https://github.com/Miosa-osa/OptimalEngine.git
 cd OptimalEngine
+brew install snappy
 make install
 ```
 

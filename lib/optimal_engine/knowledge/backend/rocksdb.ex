@@ -35,7 +35,7 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
               {:rocksdb, :iterator, 3},
               {:rocksdb, :iterator_close, 1},
               {:rocksdb, :iterator_move, 2},
-              {:rocksdb, :open_with_cf, 3},
+              {:rocksdb, :open, 3},
               {:rocksdb, :release_batch, 1},
               {:rocksdb, :write_batch, 3}
             ]}
@@ -203,7 +203,7 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
 
     # CF names must be charlists per the rocksdb Erlang NIF type spec: cf_descriptor() :: {string(), cf_options()}
     cf_descriptors = Enum.map(@cf_names, fn name -> {to_charlist(name), []} end)
-    :rocksdb.open_with_cf(to_charlist(path), db_opts, cf_descriptors)
+    :rocksdb.open(to_charlist(path), db_opts, cf_descriptors)
   end
 
   # ---------------------------------------------------------------------------
