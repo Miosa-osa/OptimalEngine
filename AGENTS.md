@@ -81,6 +81,26 @@ Use these terms precisely:
 One physical store can hold many layer-owned records.
 Do not confuse physical storage with domain ownership.
 
+## Layer Flow
+
+Use this flow when explaining or debugging the engine:
+
+```text
+Raw inputs
+  -> ingestion
+  -> SQLite canonical store
+  -> RocksDB graph runtime plus retrieval projections
+  -> search, graph, and RAG
+  -> API, CLI, wiki, and app surfaces
+```
+
+SQLite is the durable local truth.
+RocksDB is the default persistent local knowledge graph backend when installed.
+Chunks, vectors, FTS rows, and caches are retrieval material or rebuildable projections.
+RAG is an answer path across retrieved context, not a database and not the source of truth.
+BusinessOS is an app surface.
+It must call Optimal Engine with explicit tenant, organization, and workspace scope.
+
 ## Workspace And Tenant Isolation
 
 Every read and write must respect tenant, organization, workspace, Node, and policy scope.
