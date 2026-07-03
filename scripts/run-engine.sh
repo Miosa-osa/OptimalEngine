@@ -5,6 +5,7 @@ set -euo pipefail
 export PATH="/opt/homebrew/opt/erlang/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export OPTIMAL_API_ENABLED=true
 export MIX_ENV=dev
+export OPTIMAL_KNOWLEDGE_BACKEND="${OPTIMAL_KNOWLEDGE_BACKEND:-rocksdb}"
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 mkdir -p .optimal
