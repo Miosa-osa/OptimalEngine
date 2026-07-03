@@ -132,6 +132,7 @@ Read these when changing setup, stores, agents, or deployment:
 ```text
 docs/guides/getting-started.md
 docs/guides/installation-and-deployment.md
+docs/guides/store-and-layer-reality.md
 docs/guides/agent-cli-sop.md
 docs/architecture/STORAGE-AND-PROJECTION-MAP.md
 docs/reference/backend-readiness.md
