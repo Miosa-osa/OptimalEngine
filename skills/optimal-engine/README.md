@@ -45,8 +45,10 @@ skills/optimal-engine/
 ## Quick Start
 
 ```bash
-# 1. Start the engine (needs config :api, enabled: true)
-iex -S mix
+# 1. Start the engine
+make install
+make bootstrap
+make dev
 
 # 2. Bootstrap an API workspace
 bash skills/optimal-engine/scripts/bootstrap.sh my-workspace
@@ -62,6 +64,9 @@ curl -X POST http://localhost:4200/api/rag \
   -H 'Content-Type: application/json' \
   -d '{"query":"what do we know?","workspace":"my-workspace","format":"markdown"}'
 ```
+
+`make dev` starts the HTTP engine on `http://localhost:4200` and creates a local connector key in `.optimal/connector_key` if one is not already set.
+The `.optimal/` directory is local runtime state and is ignored by git.
 
 The skill should preserve all core architecture terms: company second brain,
 tiers, layers, stages, rhythm, Nodes, Signals, wiki/curation, retrieval, and
