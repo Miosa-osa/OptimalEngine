@@ -21,6 +21,7 @@ Required:
 - Elixir `~> 1.17`
 - Git
 - C toolchain for the SQLite NIF
+- Snappy for the RocksDB knowledge graph backend
 
 Optional:
 
@@ -39,11 +40,28 @@ canonical runtime store today.
 ```bash
 git clone https://github.com/Miosa-osa/OptimalEngine.git
 cd OptimalEngine
-mix deps.get
-mix compile
+brew install snappy
+make install
 ```
 
-## 3. Run The Reality Check
+## 3. Start The Local Engine
+
+```bash
+make bootstrap
+make dev
+```
+
+`make dev` starts the HTTP engine on `http://localhost:4200`.
+It creates `.optimal/connector_key` if `CONNECTOR_KEY` is not already set.
+That key and the whole `.optimal/` runtime directory are local-only and ignored by git.
+
+Verify the server:
+
+```bash
+curl http://localhost:4200/api/health
+```
+
+## 4. Run The Reality Check
 
 ```bash
 mix optimal.reality_check
@@ -59,7 +77,7 @@ This checks the runtime spine: store, topology, source evidence, memory,
 retrieval, pools, workflows, tools, connectors, evaluation, wiki, compliance,
 and retrieval edge cases.
 
-## 4. Understand Signals Before Dumping Data
+## 5. Understand Signals Before Dumping Data
 
 Optimal Engine does not treat every input as generic text. It classifies input
 as a Signal:
@@ -72,7 +90,7 @@ That breakdown tells the engine how to route, parse, review, package, and
 retrieve the input. Read [Signal theory](../concepts/signal-theory.md) before
 building serious workspaces.
 
-## 5. Choose A Workspace Setup Path
+## 6. Choose A Workspace Setup Path
 
 Use initiation when the user starts with a messy dump:
 
@@ -113,7 +131,7 @@ mix optimal.setup my-workspace \
   --node operational:weekly-review:"Weekly Review"
 ```
 
-## 6. Understand What Was Created
+## 7. Understand What Was Created
 
 The hierarchy is:
 
@@ -141,14 +159,18 @@ Inspect topology:
 mix optimal.topology --workspace default:my-workspace
 ```
 
-## 7. Know Where Data Lives
+## 8. Know Where Data Lives
 
 Local default runtime state:
 
 ```text
 .optimal/index.db
 .optimal/cache/
+.optimal/connector_key
 ```
+
+These files are created locally and ignored by git.
+They are not part of the repository and should not be copied into public setup docs, commits, Source Packages, Context Packages, or markdown workspaces.
 
 Workspace projection files:
 
@@ -178,7 +200,7 @@ for the full storage map.
 For local, Docker, team, enterprise, and multimodal setup options, read
 [Installation and deployment](installation-and-deployment.md).
 
-## 8. Ingest Or Search
+## 9. Ingest Or Search
 
 Ingest a quick text Signal:
 
@@ -198,7 +220,7 @@ Ask:
 mix optimal.rag "what changed this week?"
 ```
 
-## 9. Render Human-Facing Projections
+## 10. Render Human-Facing Projections
 
 Render a workspace tree:
 
