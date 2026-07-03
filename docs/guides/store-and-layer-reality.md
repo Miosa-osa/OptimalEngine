@@ -39,6 +39,65 @@ RocksDB is the preferred local knowledge graph backend when the native NIF is in
 ETS remains the in-memory fallback.
 ```
 
+## Runtime Flow
+
+This is the real flow from input to answer.
+
+```text
+Raw inputs
+  -> meetings, docs, notes, files, transcripts, connector payloads, app data
+
+Ingestion
+  -> normalizes the source, preserves evidence, creates source records
+
+SQLite canonical store
+  -> stores the durable truth for contexts, chunks, entities, edges, vectors, claims, facts, memory objects, packages, and audit
+
+Runtime graph store
+  -> hydrates graph edges from SQLite into RocksDB for the full local setup
+  -> uses ETS only as the fallback when RocksDB is unavailable or intentionally disabled
+
+Retrieval layer
+  -> uses search, chunks, vectors, graph relationships, ranking, and Context Packages
+
+RAG path
+  -> assembles an answer from retrieved governed context
+  -> does not create truth by itself
+
+App and API surfaces
+  -> BusinessOS, CLI, wiki, markdown, and API clients read and write through engine rules
+```
+
+The practical mental model is:
+
+```text
+SQLite = durable truth
+RocksDB = fast persistent graph runtime
+Chunks and vectors = retrieval material
+Search and graph = ways to find relevant context
+RAG = answer assembly from retrieved context
+BusinessOS = app surface that calls the engine with workspace scope
+```
+
+BusinessOS should not own this engine data.
+BusinessOS should send the correct tenant, organization, and workspace scope to Optimal Engine.
+Optimal Engine then decides what that workspace can read and returns scoped graph, search, or RAG results.
+
+For example:
+
+```text
+BusinessOS workspace
+  -> Optimal Engine API
+  -> tenant, organization, and workspace scope check
+  -> search, graph, or RAG query
+  -> SQLite plus RocksDB plus retrieval projections
+  -> scoped response back to BusinessOS
+```
+
+If Workspace A can read Workspace B private data, that is a bug.
+If an app screen shows stale data but the engine API is correct, that is an app or mapping bug.
+If the engine API returns the wrong workspace data, that is an engine isolation bug.
+
 ## What Each Store Does
 
 | Store | Is it required locally? | What it does | How to verify |
