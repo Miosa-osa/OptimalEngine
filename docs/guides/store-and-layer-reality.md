@@ -35,7 +35,8 @@ SQLite owns local truth today.
 Indexes and caches make retrieval faster.
 The graph store makes relationships usable.
 RAG is a query path across those stores.
-RocksDB is optional, not required for a normal local engine.
+RocksDB is the preferred local knowledge graph backend when the native NIF is installed.
+ETS remains the in-memory fallback.
 ```
 
 ## What Each Store Does
@@ -48,8 +49,9 @@ RocksDB is optional, not required for a normal local engine.
 | Vector rows | Optional but expected for semantic retrieval | Embedding-backed retrieval projection. | Reality check retrieval probes pass. Health stays degraded only if configured embedder is broken. |
 | Chunk rows | Yes for document-scale retrieval | Breaks large sources into retrievable pieces. | Reality check store counts include `chunks`; ingesting files should increase chunk rows. |
 | Cache directories | Optional | Rebuildable acceleration for parsing, embeddings, and runtime work. | Can be deleted and rebuilt without losing truth. |
-| In-memory graph store | Yes for relationship use | Hydrates relationship edges from SQLite into the running graph view. | Startup logs show `Hydrated N triples into Knowledge.Store`. |
-| RocksDB or similar graph backend | No | Optional specialized persistent graph/triple-store backend. | Only verify when intentionally configured. It is not the main local DB. |
+| RocksDB graph store | Yes for the full local setup | Persistent knowledge graph backend hydrated from SQLite edges. | `lsof` shows `.optimal/knowledge-rocksdb` files open and startup logs show `Knowledge backend: RocksDB`. |
+| ETS graph store | Fallback | In-memory graph backend when RocksDB is unavailable or disabled. | Startup logs show `Knowledge backend: ETS`. |
+| Mnesia graph store | Optional | Distributed BEAM graph backend for specialized deployments. | Backend tests pass and startup logs show `Knowledge backend: Mnesia` when configured. |
 | Postgres | No for local dev | Production target for canonical runtime rows. | Verify in production profile, not normal local boot. |
 
 ## What Each Layer Owns
@@ -74,6 +76,7 @@ Organize it by ownership.
 Start the engine:
 
 ```bash
+brew install snappy
 make install
 make bootstrap
 make dev
@@ -132,6 +135,22 @@ retrieval and RAG
 compliance workflows
 ```
 
+To prove the live local graph is running on RocksDB:
+
+```bash
+pid=$(launchctl list | awk '/com.optimalos.engine/{print $1}')
+lsof -p "$pid" | rg 'knowledge-rocksdb|liberocksdb|index.db'
+```
+
+Expected:
+
+```text
+.optimal/index.db
+.optimal/knowledge-rocksdb/LOG
+.optimal/knowledge-rocksdb/MANIFEST-...
+deps/rocksdb/priv/liberocksdb.so
+```
+
 ## How To Prove Retrieval Works
 
 Use search for direct text recall:
@@ -184,7 +203,8 @@ Say this instead:
 ```text
 The local engine runs SQLite as the canonical store.
 It builds retrieval indexes and hydrates graph views from that store.
-Optional graph backends such as RocksDB can be enabled for specialized workloads, but they are not required for the normal local setup.
+The full local setup uses RocksDB as the persistent knowledge graph backend.
+ETS is the fallback backend when RocksDB is unavailable or intentionally disabled.
 The reality check tells you which layers are working in this checkout.
 ```
 
@@ -195,7 +215,7 @@ They are surfaces or rebuildable projections unless a specific layer says otherw
 
 | Confusion | Correct explanation |
 | --- | --- |
-| "RocksDB is the database." | No. SQLite is the local canonical store today. RocksDB is optional specialized graph storage. |
+| "RocksDB is the database." | No. SQLite is the local canonical store today. RocksDB is the persistent knowledge graph backend in the full local setup. |
 | "RAG is the brain." | No. RAG is one retrieval path across governed stores and context packages. |
 | "Markdown is the source of truth." | No. Markdown is a projection and editing surface. Important edits re-enter as source evidence or pending changes. |
 | "The app owns the data." | No. Apps are surfaces. The engine owns lifecycle and policy. |

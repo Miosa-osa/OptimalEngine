@@ -21,6 +21,11 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
   alias OptimalEngine.Knowledge.Store, as: KnowledgeStore
 
   @store_id "default"
+  @backend_modules %{
+    "ets" => OptimalEngine.Knowledge.Backend.ETS,
+    "mnesia" => OptimalEngine.Knowledge.Backend.Mnesia,
+    "rocksdb" => OptimalEngine.Knowledge.Backend.RocksDB
+  }
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -28,8 +33,10 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
 
   @impl true
   def init(_opts) do
+    {backend, backend_opts} = configured_backend()
+
     # Start the underlying Knowledge.Store registered under the default store_id.
-    case KnowledgeStore.start_link(store_id: @store_id) do
+    case KnowledgeStore.start_link(store_id: @store_id, backend: backend, backend_opts: backend_opts) do
       {:ok, store_pid} ->
         # Hydrate asynchronously so supervision tree startup is not blocked.
         Task.start(fn -> hydrate(store_pid) end)
@@ -50,6 +57,40 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
+
+  defp configured_backend do
+    config = Application.get_env(:optimal_engine, :knowledge, [])
+
+    requested =
+      config
+      |> Keyword.get(:backend, "ets")
+      |> to_string()
+      |> String.downcase()
+
+    backend = Map.get(@backend_modules, requested, OptimalEngine.Knowledge.Backend.ETS)
+
+    cond do
+      requested == "rocksdb" and not Code.ensure_loaded?(:rocksdb) ->
+        Logger.warning(
+          "[DefaultStore] OPTIMAL_KNOWLEDGE_BACKEND=rocksdb requested but :rocksdb is unavailable; falling back to ETS"
+        )
+
+        {OptimalEngine.Knowledge.Backend.ETS, []}
+
+      requested == "rocksdb" ->
+        path = Keyword.get(config, :rocksdb_path, Path.join(File.cwd!(), ".optimal/knowledge-rocksdb"))
+        Logger.info("[DefaultStore] Knowledge backend: RocksDB at #{path}")
+        {backend, path: path}
+
+      requested == "mnesia" ->
+        Logger.info("[DefaultStore] Knowledge backend: Mnesia")
+        {backend, copies: :ram_copies}
+
+      true ->
+        Logger.info("[DefaultStore] Knowledge backend: ETS")
+        {backend, []}
+    end
+  end
 
   defp hydrate(store_pid) do
     store_name = {:via, Registry, {OptimalEngine.Knowledge.Registry, @store_id}}

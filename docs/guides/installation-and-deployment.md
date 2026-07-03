@@ -34,6 +34,7 @@ Erlang/OTP 26+
 Elixir ~> 1.17
 Git
 C toolchain for the SQLite NIF
+Snappy for the RocksDB knowledge graph backend
 ```
 
 Run:
@@ -41,6 +42,7 @@ Run:
 ```bash
 git clone https://github.com/Miosa-osa/OptimalEngine.git
 cd OptimalEngine
+brew install snappy
 make install
 make bootstrap
 make dev
