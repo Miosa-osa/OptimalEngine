@@ -662,8 +662,19 @@ Requirements:
 Run the engine locally:
 
 ```bash
-mix deps.get
-mix compile
+make install
+make bootstrap
+make dev
+```
+
+`make dev` starts the HTTP engine on `http://localhost:4200`.
+It creates a local connector key in `.optimal/connector_key` when one is not already set.
+The `.optimal/` directory is local runtime state and is ignored by git, so your database, workspace runtime files, cache, WAL files, and keys do not go into the repo.
+
+In another terminal, verify the running engine:
+
+```bash
+curl http://localhost:4200/api/health
 mix optimal.reality_check
 ```
 
@@ -746,6 +757,10 @@ Use local Elixir/SQLite for development and personal use:
 ```text
 .optimal/index.db
 ```
+
+That file is the local canonical runtime store.
+It is not committed to git.
+Clone users get the engine code and setup scripts, then create their own local store when they run the engine.
 
 Use Docker or a managed runtime when you want a packaged service stack:
 

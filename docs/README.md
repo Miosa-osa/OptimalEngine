@@ -13,6 +13,11 @@ projections.
 
 Read these in order:
 
+0. [Agent boot](../AGENTS.md)
+   The repo-level boot contract for agents: canonical repo, local startup,
+   runtime data boundary, store model, isolation rules, and verification before
+   push.
+
 1. [Getting started](guides/getting-started.md)  
    Install, run the engine, create a workspace, initiate from a messy dump, and
    inspect the result.
