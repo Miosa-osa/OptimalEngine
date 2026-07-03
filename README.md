@@ -658,10 +658,12 @@ Requirements:
 - Erlang/OTP 26+
 - Node 20+ for app/site surfaces
 - A local C toolchain for optional native dependencies
+- Snappy for the RocksDB knowledge graph backend
 
 Run the engine locally:
 
 ```bash
+brew install snappy
 make install
 make bootstrap
 make dev

@@ -61,6 +61,7 @@ defmodule OptimalEngine.MixProject do
 
       # Optional knowledge graph substrate
       {:rdf, "~> 2.0"},
+      {:rocksdb, "~> 3.1"},
 
       # Signal and option validation
       {:nimble_options, "~> 1.1"},

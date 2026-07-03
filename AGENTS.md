@@ -19,6 +19,7 @@ Check `git status`, branch, remotes, and the running process before making chang
 Use the standard local path:
 
 ```bash
+brew install snappy
 make install
 make bootstrap
 make dev
@@ -27,6 +28,8 @@ make dev
 `make dev` starts the HTTP engine at `http://localhost:4200`.
 It runs `scripts/run-engine.sh`.
 The launcher creates `.optimal/connector_key` if `CONNECTOR_KEY` is not already set.
+It starts the knowledge graph with RocksDB by default when the `rocksdb` NIF is available.
+Override with `OPTIMAL_KNOWLEDGE_BACKEND=ets` or `OPTIMAL_KNOWLEDGE_BACKEND=mnesia` when intentionally testing another backend.
 
 Verify:
 
@@ -48,6 +51,7 @@ Local runtime state lives under:
 .optimal/index.db-shm
 .optimal/cache/
 .optimal/connector_key
+.optimal/knowledge-rocksdb/
 .optimal/workspaces/
 ```
 
@@ -69,7 +73,9 @@ Use these terms precisely:
 | Postgres | Production canonical runtime target. |
 | Raw artifact storage | Preserved files, uploads, attachments, and media evidence. |
 | FTS, vector, chunk, cache rows | Rebuildable retrieval and acceleration projections. |
-| ETS, RocksDB, Mnesia, Riak style backends | Optional graph or knowledge backends, not the main product DB today. |
+| RocksDB | Default local persistent knowledge graph backend when installed. |
+| ETS | In-memory fallback knowledge graph backend. |
+| Mnesia | Optional distributed knowledge graph backend. |
 | Markdown, wiki, HTML, API, app views | Projection and control surfaces. |
 
 One physical store can hold many layer-owned records.

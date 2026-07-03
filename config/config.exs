@@ -46,6 +46,14 @@ config :optimal_engine, :hybrid_search,
   alpha: 0.6,
   vector_enabled: true
 
+config :optimal_engine, :knowledge,
+  backend: System.get_env("OPTIMAL_KNOWLEDGE_BACKEND", "ets"),
+  rocksdb_path:
+    System.get_env(
+      "OPTIMAL_KNOWLEDGE_ROCKSDB_PATH",
+      Path.join(File.cwd!(), ".optimal/knowledge-rocksdb")
+    )
+
 config :optimal_engine, :retrieval,
   mcts_enabled: true,
   mcts_iterations: 200,
