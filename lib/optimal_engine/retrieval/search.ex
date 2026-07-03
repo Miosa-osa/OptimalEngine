@@ -252,7 +252,8 @@ defmodule OptimalEngine.Retrieval.Search do
         {:ok, query_embedding} when is_list(query_embedding) and query_embedding != [] ->
           vector_opts = [
             limit: limit * 3,
-            min_similarity: 0.1
+            min_similarity: 0.1,
+            workspace_id: Keyword.get(opts, :workspace_id, "default")
           ]
 
           # Add type/node filters if present in opts
@@ -314,7 +315,7 @@ defmodule OptimalEngine.Retrieval.Search do
         case Map.get(fts_lookup, id) do
           nil ->
             # This result came from vector search only — need to load the context
-            case load_context(id) do
+            case load_context(id, Keyword.get(opts, :workspace_id, "default")) do
               {:ok, ctx} -> %{ctx | score: Float.round(score, 4)}
               _ -> nil
             end
@@ -335,7 +336,7 @@ defmodule OptimalEngine.Retrieval.Search do
       do_search(query, opts, topology)
   end
 
-  defp load_context(id) do
+  defp load_context(id, workspace_id) do
     sql = """
     SELECT id, uri, type, path, title,
       l0_abstract, l1_overview, content,
@@ -343,10 +344,10 @@ defmodule OptimalEngine.Retrieval.Search do
       node, sn_ratio, entities,
       created_at, modified_at, valid_from, valid_until, supersedes,
       routed_to, metadata, workspace_id
-    FROM contexts WHERE id = ?1
+    FROM contexts WHERE id = ?1 AND workspace_id = ?2
     """
 
-    case Store.raw_query(sql, [id]) do
+    case Store.raw_query(sql, [id, workspace_id]) do
       {:ok, [row]} -> {:ok, Context.from_row(row)}
       _ -> {:error, :not_found}
     end
