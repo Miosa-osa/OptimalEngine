@@ -30,7 +30,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && tsc --emitDeclarationOnly --declaration --declarationMap false --outDir dist",
     "dev": "tsdown --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
