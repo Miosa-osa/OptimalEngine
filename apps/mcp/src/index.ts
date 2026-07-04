@@ -4,10 +4,10 @@
  *
  * Reads engine URL from OPTIMAL_ENGINE_URL (default http://localhost:4200),
  * default workspace from OPTIMAL_WORKSPACE (default "default"), and an
- * optional API key from OPTIMAL_API_KEY (sent as X-API-Key header).
+ * optional API key from OPTIMAL_API_KEY (sent as a Bearer token).
  *
- * Connects via stdio so Claude Desktop / Cursor / Windsurf / Zed can spawn
- * this binary directly. Tool surface is registered in server.ts.
+ * Connects via stdio so MCP-capable agent clients can spawn this binary
+ * directly. Tool surface is registered in server.ts.
  */
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -17,7 +17,7 @@ async function main() {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  // Graceful shutdown on SIGINT / SIGTERM (Claude Desktop kills child on disconnect)
+  // Graceful shutdown on SIGINT / SIGTERM when an MCP host disconnects.
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {
       void transport.close();

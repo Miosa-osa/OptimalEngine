@@ -27,6 +27,17 @@ config :optimal_engine, :ollama,
   vlm_timeout_ms: 60_000,
   timeout_ms: 30_000
 
+# Memory Core: when true, CLI/API intake extracts a pending Claim from each
+# accepted Signal (closing the Source -> Signal -> Claim break). Default ON.
+config :optimal_engine, :memory, auto_extract_claims: true
+
+# Tool/Model governance: when true, the engine's OWN model/tool calls
+# (Ollama embeddings, LLM generation) are routed through the governance
+# control plane and recorded as model_call_run / tool_call_run rows with
+# provenance + latency + status. Fail-open: logging never blocks the call.
+# Default ON.
+config :optimal_engine, :governance, log_model_calls: true
+
 config :optimal_engine, :video,
   max_keyframes: 10,
   scene_threshold: 0.3
@@ -35,12 +46,39 @@ config :optimal_engine, :hybrid_search,
   alpha: 0.6,
   vector_enabled: true
 
+config :optimal_engine, :knowledge,
+  backend: System.get_env("OPTIMAL_KNOWLEDGE_BACKEND", "ets"),
+  rocksdb_path:
+    System.get_env(
+      "OPTIMAL_KNOWLEDGE_ROCKSDB_PATH",
+      Path.join(File.cwd!(), ".optimal/knowledge-rocksdb")
+    )
+
+config :optimal_engine, :retrieval,
+  mcts_enabled: true,
+  mcts_iterations: 200,
+  mcts_exploration: 1.41,
+  rrf_k: 60,
+  temporal_weight: 0.15
+
 config :optimal_engine, :context_refresh_scheduler,
   enabled: true,
   boot_delay_ms: 5 * 60 * 1_000,
   interval_ms: 60 * 60 * 1_000,
   batch_limit: 50,
   workspace_limit: 100
+
+# Connector pull loop — the periodic intake FEED. Runs each enabled
+# connector once per interval and drives emitted signals through intake.
+config :optimal_engine, :pull_scheduler,
+  enabled: true,
+  boot_delay_ms: 2 * 60 * 1_000,
+  interval_ms: 24 * 60 * 60 * 1_000,
+  tenant_id: "default"
+
+# Connectors enabled for the pull loop. Each entry is a bare kind atom
+# (default config) or a map %{kind:, workspace_id:, config:}.
+config :optimal_engine, :connectors, enabled: [:sources_folder]
 
 config :logger, :console,
   format: "[$level] $message\n",

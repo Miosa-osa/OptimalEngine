@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.Optimal.Health do
-  @shortdoc "Run health diagnostics on the OptimalOS knowledge base"
+  @shortdoc "Run health diagnostics on the Optimal Engine store"
   @moduledoc """
   Runs 10 diagnostic checks on the knowledge base and reports issues.
 
@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Optimal.Health do
   def run(_args) do
     Mix.Task.run("app.start")
 
-    IO.puts(IO.ANSI.bright() <> "\nOptimalOS Health Diagnostics\n" <> IO.ANSI.reset())
+    IO.puts(IO.ANSI.bright() <> "\nOptimal Engine Health Diagnostics\n" <> IO.ANSI.reset())
 
     {:ok, diagnostics} = OptimalEngine.Insight.Health.run()
     Enum.each(diagnostics, &print_check/1)

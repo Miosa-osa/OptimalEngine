@@ -25,7 +25,8 @@ defmodule OptimalEngine.Connectors.Transform do
   @spec signal_id(atom(), String.t()) :: String.t()
   def signal_id(kind, external_id) when is_atom(kind) and is_binary(external_id) do
     raw = "#{kind}:#{external_id}"
-    :crypto.hash(:sha256, raw) |> Base.encode16(case: :lower) |> String.slice(0, 16)
+    hash = :crypto.hash(:sha256, raw) |> Base.encode16(case: :lower) |> String.slice(0, 16)
+    "#{kind}:#{hash}"
   end
 
   @doc """

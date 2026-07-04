@@ -294,9 +294,26 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/health" do
-    workspace = query_param(conn, "workspace", "default")
-    {:ok, checks} = HealthDiagnostics.run(workspace_id: workspace)
-    json(conn, %{health: format_health(checks)})
+    # Lightweight by default: liveness + readiness (store/migrations/creds),
+    # skipping the slow embedder probe so this endpoint never blocks on Ollama.
+    # Pass ?full=true for the heavy 10-check knowledge-base diagnostics.
+    case query_param(conn, "full", "false") do
+      "true" ->
+        workspace = query_param(conn, "workspace", "default")
+        {:ok, checks} = HealthDiagnostics.run(workspace_id: workspace)
+        json(conn, %{health: format_health(checks)})
+
+      _ ->
+        report = Health.ready(skip: [:embedder])
+
+        json(conn, %{
+          status: Health.status(),
+          live: Health.live?(),
+          ok?: report.ok?,
+          degraded: report.degraded,
+          checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)
+        })
+    end
   end
 
   # ── Phase 12: runtime + retrieval + wiki endpoints ──────────────────────
@@ -2087,6 +2104,151 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # POST /api/assemble — tiered context assembly with MCTS budget-aware selection.
+  #
+  # Builds L0-L3 tiered context for a query via ContextAssembler.assemble/2,
+  # which drives the MCTS selection loop for L2 candidate ranking. Returns the
+  # assembled tiers plus MCTS selection metadata (selected candidate ids, scores,
+  # token budget used) so callers can inspect how the budget was spent.
+  #
+  # Body: {"query": "...", "workspace"?: "default", "tier_budgets"?: {l0, l1, l2}}
+  # Returns: {l0, l1, l2, l3, total_tokens, sources, mcts_metadata, workspace_id}
+  post "/api/nodes" do
+    body = conn.body_params || %{}
+    name = Map.get(body, "name", "")
+    kind = Map.get(body, "kind", "")
+
+    cond do
+      not (is_binary(name) and String.trim(name) != "") ->
+        send_resp(conn, 400, Jason.encode!(%{error: "name is required"}))
+
+      not (is_binary(kind) and kind != "") ->
+        send_resp(conn, 400, Jason.encode!(%{error: "kind is required"}))
+
+      true ->
+        slug =
+          Map.get(body, "slug") ||
+            name
+            |> String.downcase()
+            |> String.replace(~r/[^a-z0-9]+/, "-")
+            |> String.trim("-")
+
+        attrs = %{
+          slug: slug,
+          name: name,
+          kind: String.to_atom(kind),
+          workspace_id: Map.get(body, "workspace", "default"),
+          description: Map.get(body, "description")
+        }
+
+        case OptimalEngine.Topology.Node.upsert(attrs) do
+          {:ok, node} ->
+            send_resp(conn, 200, Jason.encode!(%{ok: true, id: node.id, slug: node.slug, kind: kind}))
+
+          {:error, reason} ->
+            send_resp(conn, 422, Jason.encode!(%{ok: false, error: inspect(reason)}))
+        end
+    end
+  end
+
+  post "/api/ingest" do
+    body = conn.body_params || %{}
+    text = Map.get(body, "text", "")
+
+    if not (is_binary(text) and String.trim(text) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "text is required"}))
+    else
+      intake_opts =
+        []
+        |> then(fn acc -> if(v = body["genre"], do: Keyword.put(acc, :genre, v), else: acc) end)
+        |> then(fn acc -> if(v = body["title"], do: Keyword.put(acc, :title, v), else: acc) end)
+        |> then(fn acc -> if(v = body["node"], do: Keyword.put(acc, :node, v), else: acc) end)
+        |> then(fn acc -> if(v = body["workspace"], do: Keyword.put(acc, :workspace_id, v), else: acc) end)
+        |> then(fn acc -> if(body["extract_claims"] == true, do: Keyword.put(acc, :extract_claims, true), else: acc) end)
+
+      case OptimalEngine.Pipeline.Intake.process(text, intake_opts) do
+        {:ok, result} ->
+          sig = result.signal
+
+          send_resp(
+            conn,
+            200,
+            Jason.encode!(%{
+              ok: true,
+              signal_id: Map.get(result, :context_id) || Map.get(sig, :id),
+              genre: sig.genre,
+              type: sig.type,
+              entities: sig.entities,
+              source_package_id: result[:source_package] && result.source_package.id
+            })
+          )
+
+        {:error, reason} ->
+          send_resp(conn, 422, Jason.encode!(%{ok: false, error: inspect(reason)}))
+      end
+    end
+  end
+
+  post "/api/assemble" do
+    body = conn.body_params || %{}
+    query = Map.get(body, "query", "")
+
+    if not (is_binary(query) and String.trim(query) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
+    else
+      workspace_id = Map.get(body, "workspace", "default")
+
+      tier_budgets =
+        case Map.get(body, "tier_budgets") do
+          %{"l0" => l0, "l1" => l1, "l2" => l2} ->
+            [tier_budgets: %{l0: parse_int(l0, 3_000), l1: parse_int(l1, 10_000), l2: parse_int(l2, 50_000)}]
+
+          _ ->
+            []
+        end
+
+      assemble_opts =
+        tier_budgets ++
+          [
+            workspace_id: workspace_id
+          ]
+
+      case OptimalEngine.Retrieval.ContextAssembler.assemble(query, assemble_opts) do
+        {:ok, assembled} ->
+          mcts_meta =
+            assembled.search_scores
+            |> Enum.map(fn s ->
+              %{
+                id: s[:id],
+                title: s[:title],
+                score: s[:score],
+                uri: s[:uri],
+                node: s[:node]
+              }
+            end)
+
+          json(conn, %{
+            query: query,
+            workspace_id: workspace_id,
+            l0: assembled.l0,
+            l1: assembled.l1,
+            l2: assembled.l2,
+            l3: "",
+            total_tokens: assembled.total_tokens,
+            sources: assembled.sources,
+            mcts_metadata: %{
+              candidate_count: length(assembled.search_scores),
+              selected_sources: mcts_meta,
+              mcts_enabled: OptimalEngine.Retrieval.MCTS.enabled?()
+            }
+          })
+
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
   match _ do
     send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
   end
@@ -2107,7 +2269,15 @@ defmodule OptimalEngine.API.Router do
     conn
     |> put_resp_header("access-control-allow-origin", "*")
     |> put_resp_header("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS")
-    |> put_resp_header("access-control-allow-headers", "content-type")
+    # Allow the auth + workspace headers BusinessOS (and any app) sends so a
+    # browser/desktop client can connect this engine as its second brain.
+    # Without `authorization` here the browser blocks every authenticated
+    # cross-origin request to the engine.
+    |> put_resp_header(
+      "access-control-allow-headers",
+      "content-type, authorization, x-api-key, api-key, x-workspace-id"
+    )
+    |> put_resp_header("access-control-max-age", "86400")
     |> put_resp_header("x-api-version", "v1")
   end
 

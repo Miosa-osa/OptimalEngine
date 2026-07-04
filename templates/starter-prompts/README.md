@@ -28,3 +28,4 @@ silently rewrite the user's workspace.
 | `package-inventory.md` | The user wants to define recurring things they send out, such as proposals, contracts, SOPs, reports, and client requirement documents. |
 | `agentic-loop-design.md` | The user wants a repeatable loop with phases, validation gates, stop conditions, and memory/audit outputs. |
 | `youtube-learning-import.md` | The user wants to save a video, transcript, lecture, podcast, or media source into a learning/research workspace. |
+| `interface-and-publishing-plan.md` | The user wants an app, dashboard, client portal, static page, public link, package delivery flow, or deployment surface on top of the engine. |

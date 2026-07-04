@@ -1467,7 +1467,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
             run = result.governance_run
 
             if run.decision_state == "allowed" and run.run_status == "completed" and
-                 result.connector_result.status == "error" do
+                 result.connector_result.status in ["success", "error"] do
               {:ok, "governed #{run.tool_name}, connector status=#{result.connector_result.status}"}
             else
               {:error, inspect(result)}

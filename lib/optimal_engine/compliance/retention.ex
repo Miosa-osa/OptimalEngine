@@ -72,6 +72,42 @@ defmodule OptimalEngine.Compliance.Retention do
     {:ok, result}
   end
 
+  @doc """
+  Register a retention policy. The governed entry point for operators to
+  populate `retention_policies`. Returns `{:ok, policy_id}`.
+
+  Required: `:scope_type`. Optional: `:scope_value`, `:ttl_days`,
+  `:action` (default `"archive"`), `:tenant_id` (default `"default"`).
+  """
+  @spec add_policy(map() | keyword()) :: {:ok, integer()} | {:error, term()}
+  def add_policy(attrs) when is_list(attrs), do: attrs |> Map.new() |> add_policy()
+
+  def add_policy(attrs) when is_map(attrs) do
+    tenant_id = to_string(Map.get(attrs, :tenant_id) || Map.get(attrs, "tenant_id") || "default")
+    scope_type = Map.get(attrs, :scope_type) || Map.get(attrs, "scope_type")
+    scope_value = Map.get(attrs, :scope_value) || Map.get(attrs, "scope_value")
+    ttl_days = Map.get(attrs, :ttl_days) || Map.get(attrs, "ttl_days")
+    action = to_string(Map.get(attrs, :action) || Map.get(attrs, "action") || "archive")
+
+    cond do
+      is_nil(scope_type) ->
+        {:error, :scope_type_required}
+
+      true ->
+        with {:ok, _} <-
+               Store.raw_query(
+                 """
+                 INSERT INTO retention_policies (tenant_id, scope_type, scope_value, ttl_days, action)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 """,
+                 [tenant_id, to_string(scope_type), scope_value, ttl_days, action]
+               ),
+             {:ok, [[id]]} <- Store.raw_query("SELECT last_insert_rowid()", []) do
+          {:ok, id}
+        end
+    end
+  end
+
   # ─── private ─────────────────────────────────────────────────────────────
 
   defp list_policies(tenant_id) do

@@ -1,13 +1,17 @@
 # Optimal Engine — Web Clipper
 
 Chrome extension (Manifest V3) that lets you clip web pages, selections, and
-URLs directly into your Optimal Engine workspace.
+URLs into an Optimal Engine workspace.
+
+This is an optional surface. The extension does not own truth; it sends clipped
+content to the backend, where the engine preserves source context and routes it
+through the governed memory/intake flow.
 
 ## Features
 
 - **Clip page** — saves the first 1000 characters of the active tab's body text
 - **Clip selection** — saves highlighted text (shown when text is selected)
-- **Search memories** — live search across any workspace from the popup
+- **Search workspace context** — live search across any workspace from the popup
 - **Context menu** — right-click a selection to "Save to Optimal Engine", or
   right-click a link to "Clip URL to Optimal Engine"
 - **Workspace switcher** — change target workspace from the popup dropdown
@@ -17,7 +21,7 @@ URLs directly into your Optimal Engine workspace.
 ## Requirements
 
 - Chrome 114+ (Manifest V3 service workers)
-- A running [Optimal Engine](https://github.com/OptimalEngine/optimal) instance
+- A running [Optimal Engine](https://github.com/Miosa-osa/OptimalEngine) instance
 - Node.js 20+
 
 ## Development
@@ -48,7 +52,7 @@ extension in `chrome://extensions` and click **Details → Extension options**):
 |---|---|---|
 | Engine URL | `http://localhost:4200` | Base URL of your Optimal Engine instance |
 | Default workspace | _(blank)_ | Workspace ID that clips are saved to |
-| API key | _(blank)_ | Sent as `X-API-Key` header — leave blank for local engines |
+| API key | _(blank)_ | Sent as `Authorization: Bearer ...` — leave blank for local engines |
 | Auto-tag clips | off | Adds domain + date tags automatically |
 
 ## Project layout
@@ -86,10 +90,10 @@ extensions/browser/
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/memory` | Save a clip |
-| `GET` | `/api/memory?workspace=&limit=` | List recent clips |
-| `GET` | `/api/search?q=&workspace=&limit=` | Search memories |
-| `GET` | `/api/profile?workspace=&bandwidth=l1` | Workspace profile |
+| `POST` | `/api/memory` | Submit a clip through governed memory intake |
+| `GET` | `/api/memory?workspace=&limit=` | List recent memory projections |
+| `GET` | `/api/search?q=&workspace=&limit=` | Search workspace context |
+| `GET` | `/api/profile?workspace=&bandwidth=l1` | Workspace profile/projection summary |
 | `GET` | `/api/workspaces?tenant=` | List workspaces |
 
 ## Building for production

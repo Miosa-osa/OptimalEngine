@@ -118,8 +118,8 @@ export default function SearchMemory(): React.ReactElement {
       ) : !query.trim() ? (
         <List.EmptyView
           icon={Icon.MagnifyingGlass}
-          title="Search your second brain"
-          description="Type to search across your workspace memories"
+          title="Search Optimal Engine"
+          description="Type to search across your workspace context"
         />
       ) : results.length === 0 && !isLoading ? (
         <List.EmptyView

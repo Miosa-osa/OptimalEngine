@@ -1,7 +1,7 @@
 {
   "name": "optimal-engine-web-clipper",
-  "version": "0.1.0",
-  "description": "Clip pages and selections to your Optimal Engine second brain",
+  "version": "0.3.0",
+  "description": "Clip web pages and selections into an Optimal Engine workspace",
   "private": true,
   "type": "module",
   "scripts": {

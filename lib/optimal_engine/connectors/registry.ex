@@ -26,7 +26,8 @@ defmodule OptimalEngine.Connectors.Registry do
     Adapters.Dropbox,
     Adapters.OneDrive,
     Adapters.Salesforce,
-    Adapters.HubSpot
+    Adapters.HubSpot,
+    Adapters.SourcesFolder
   ]
 
   @doc "All registered adapter modules."

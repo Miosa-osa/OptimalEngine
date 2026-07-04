@@ -13,8 +13,10 @@ defmodule OptimalEngine.MemoryCore.Store do
   alias OptimalEngine.MemoryCore.{
     Claim,
     DerivationLedgerEntry,
+    Episode,
     Fact,
     JSON,
+    MemoryDetailObject,
     MemoryObject,
     RelationshipEdge,
     SourcePackage
@@ -290,6 +292,140 @@ defmodule OptimalEngine.MemoryCore.Store do
     ])
   end
 
+  @spec insert_memory_detail_object(MemoryDetailObject.t() | map()) :: :ok | {:error, term()}
+  def insert_memory_detail_object(%MemoryDetailObject{} = detail) do
+    sql = """
+    INSERT OR IGNORE INTO memory_detail_objects (
+      id, tenant_id, workspace_id, parent_object_type, parent_object_id,
+      detail_type, detail_order, detail_depth, action_class, detail_text,
+      command_or_parameter_value, source_package_links, evidence_links,
+      aggregate_confidence, aggregate_precision, access_policy_id,
+      security_labels, partition_ids, lifecycle_state, reuse_status,
+      valid_time_start, valid_time_end, transaction_time_start,
+      transaction_time_end, stale_after, metadata
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5,
+      ?6, ?7, ?8, ?9, ?10,
+      ?11, ?12, ?13,
+      ?14, ?15, ?16,
+      ?17, ?18, ?19, ?20,
+      ?21, ?22, ?23,
+      ?24, ?25, ?26
+    )
+    """
+
+    Store.raw_execute(sql, [
+      detail.id,
+      detail.tenant_id,
+      detail.workspace_id,
+      detail.parent_object_type,
+      detail.parent_object_id,
+      detail.detail_type || "step",
+      detail.detail_order || 0,
+      detail.detail_depth || 0,
+      detail.action_class,
+      detail.detail_text,
+      detail.command_or_parameter_value,
+      JSON.list(detail.source_package_links || []),
+      JSON.list(detail.evidence_links || []),
+      detail.aggregate_confidence || 0.5,
+      detail.aggregate_precision || 0.5,
+      detail.access_policy_id,
+      JSON.list(detail.security_labels || []),
+      JSON.list(detail.partition_ids || []),
+      detail.lifecycle_state || "candidate",
+      detail.reuse_status || "local",
+      detail.valid_time_start,
+      detail.valid_time_end,
+      detail.transaction_time_start || timestamp(),
+      detail.transaction_time_end,
+      detail.stale_after,
+      JSON.map(detail.metadata || %{})
+    ])
+  end
+
+  def insert_memory_detail_object(attrs) when is_map(attrs) do
+    with {:ok, detail} <- MemoryDetailObject.new(attrs) do
+      insert_memory_detail_object(detail)
+    end
+  end
+
+  @spec insert_episode(Episode.t() | map()) :: :ok | {:error, term()}
+  def insert_episode(%Episode{} = episode) do
+    sql = """
+    INSERT OR IGNORE INTO episodes (
+      id, tenant_id, workspace_id, node_id, kind, occurred_at, summary,
+      provenance, security_labels, partition_ids, lifecycle_state, metadata,
+      created_at
+    ) VALUES (
+      ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+      ?8, ?9, ?10, ?11, ?12,
+      ?13
+    )
+    """
+
+    Store.raw_execute(sql, [
+      episode.id,
+      episode.tenant_id,
+      episode.workspace_id,
+      episode.node_id,
+      episode.kind,
+      episode.occurred_at,
+      episode.summary,
+      JSON.map(episode.provenance || %{}),
+      JSON.list(episode.security_labels || []),
+      JSON.list(episode.partition_ids || []),
+      episode.lifecycle_state || "recorded",
+      JSON.map(episode.metadata || %{}),
+      episode.created_at
+    ])
+  end
+
+  def insert_episode(attrs) when is_map(attrs) do
+    with {:ok, episode} <- Episode.new(attrs) do
+      insert_episode(episode)
+    end
+  end
+
+  @doc "Returns all episodes for a workspace, optionally filtered by kind."
+  @spec list_episodes(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_episodes(workspace_id, opts \\ []) when is_binary(workspace_id) do
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"kind =", Keyword.get(opts, :kind)},
+          {"node_id =", Keyword.get(opts, :node_id)},
+          {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)}
+        ],
+        [workspace_id]
+      )
+
+    sql = """
+    SELECT id, tenant_id, workspace_id, node_id, kind, occurred_at, summary,
+           provenance, lifecycle_state, created_at
+    FROM episodes
+    WHERE workspace_id = ?1 #{clauses}
+    ORDER BY occurred_at DESC, created_at DESC
+    """
+
+    Store.raw_query(sql, params)
+  end
+
+  @doc "Returns all detail objects attached to a parent object, ordered by detail_order."
+  @spec get_memory_detail_objects(String.t(), String.t(), String.t()) ::
+          {:ok, [list()]} | {:error, term()}
+  def get_memory_detail_objects(workspace_id, parent_object_type, parent_object_id) do
+    sql = """
+    SELECT id, parent_object_type, parent_object_id, detail_type, detail_order,
+           detail_text, command_or_parameter_value, lifecycle_state
+    FROM memory_detail_objects
+    WHERE workspace_id = ?1 AND parent_object_type = ?2 AND parent_object_id = ?3
+    ORDER BY detail_order ASC
+    """
+
+    Store.raw_query(sql, [workspace_id, parent_object_type, parent_object_id])
+  end
+
   @spec insert_relationship_edge(RelationshipEdge.t() | map()) :: :ok | {:error, term()}
   def insert_relationship_edge(edge) when is_map(edge) do
     sql = """
@@ -370,6 +506,217 @@ defmodule OptimalEngine.MemoryCore.Store do
     valid_time_start valid_time_end transaction_time_start transaction_time_end
     metadata created_at
   )a
+
+  @workflow_trace_columns ~w(
+    id tenant_id workspace_id case_id workflow_family subject_anchor action_class
+    outcome episode_links step_links actor_links input_links output_links
+    source_package_links evidence_links aggregate_confidence aggregate_precision
+    lifecycle_state validation_status event_time_start event_time_end
+    valid_time_start valid_time_end transaction_time_start transaction_time_end
+    stale_after access_policy_id security_labels partition_ids metadata
+    created_at updated_at
+  )a
+
+  @generalized_workflow_columns ~w(
+    id tenant_id workspace_id workflow_family scope applicability_conditions
+    outcome_class workflow_trace_links supporting_episode_links
+    contradicting_trace_links step_pattern_links aggregate_confidence
+    aggregate_precision validation_score lifecycle_state validation_status
+    supersession_status valid_time_start valid_time_end transaction_time_start
+    transaction_time_end stale_after access_policy_id security_labels
+    partition_ids metadata created_at updated_at
+  )a
+
+  @procedural_memory_object_columns ~w(
+    id tenant_id workspace_id capability_name task_family applicability_conditions
+    risk_class generalized_workflow_links step_links validation_links
+    evidence_links aggregate_confidence aggregate_precision validation_confidence
+    required_privileges lifecycle_state validation_status retirement_status
+    valid_time_start valid_time_end transaction_time_start transaction_time_end
+    stale_after access_policy_id security_labels partition_ids metadata
+    created_at updated_at
+  )a
+
+  @skill_package_columns ~w(
+    id tenant_id workspace_id version skill_package_name task_family
+    competency_links risk_class procedural_memory_links workflow_links
+    validation_links evidence_links input_contract output_contract
+    execution_policy required_privileges tool_requirements model_policy_id
+    aggregate_confidence aggregate_precision review_status enabled_state
+    suspension_reason retirement_status valid_time_start valid_time_end
+    transaction_time_start transaction_time_end stale_after access_policy_id
+    security_labels partition_ids metadata created_at updated_at
+  )a
+
+  @doc "Lists Workflow Traces for a workspace, optionally filtered by family/state."
+  @spec list_workflow_traces(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_workflow_traces(workspace_id \\ "default", opts \\ []) when is_binary(workspace_id) do
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"tenant_id =", Keyword.get(opts, :tenant_id)},
+          {"workflow_family =", Keyword.get(opts, :workflow_family)},
+          {"subject_anchor =", Keyword.get(opts, :subject_anchor)},
+          {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)}
+        ],
+        [workspace_id]
+      )
+
+    sql = """
+    SELECT #{Enum.join(@workflow_trace_columns, ", ")}
+    FROM workflow_traces
+    WHERE workspace_id = ?1 #{clauses}
+    ORDER BY created_at, id
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &workflow_trace_from_row/1)}
+    end
+  end
+
+  @doc "Lists Generalized Workflows for a workspace."
+  @spec list_generalized_workflows(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_generalized_workflows(workspace_id \\ "default", opts \\ [])
+      when is_binary(workspace_id) do
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"tenant_id =", Keyword.get(opts, :tenant_id)},
+          {"workflow_family =", Keyword.get(opts, :workflow_family)},
+          {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)}
+        ],
+        [workspace_id]
+      )
+
+    sql = """
+    SELECT #{Enum.join(@generalized_workflow_columns, ", ")}
+    FROM generalized_workflows
+    WHERE workspace_id = ?1 #{clauses}
+    ORDER BY created_at, id
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &generalized_workflow_from_row/1)}
+    end
+  end
+
+  @doc "Lists Procedural Memory Objects for a workspace."
+  @spec list_procedural_memory_objects(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def list_procedural_memory_objects(workspace_id \\ "default", opts \\ [])
+      when is_binary(workspace_id) do
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"tenant_id =", Keyword.get(opts, :tenant_id)},
+          {"capability_name =", Keyword.get(opts, :capability_name)},
+          {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)}
+        ],
+        [workspace_id]
+      )
+
+    sql = """
+    SELECT #{Enum.join(@procedural_memory_object_columns, ", ")}
+    FROM procedural_memory_objects
+    WHERE workspace_id = ?1 #{clauses}
+    ORDER BY created_at, id
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &procedural_memory_object_from_row/1)}
+    end
+  end
+
+  @doc "Lists Skill Packages for a workspace."
+  @spec list_skill_packages(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_skill_packages(workspace_id \\ "default", opts \\ []) when is_binary(workspace_id) do
+    {clauses, params} =
+      filter_clauses(
+        [
+          {"tenant_id =", Keyword.get(opts, :tenant_id)},
+          {"skill_package_name =", Keyword.get(opts, :skill_package_name)},
+          {"enabled_state =", Keyword.get(opts, :enabled_state)},
+          {"review_status =", Keyword.get(opts, :review_status)}
+        ],
+        [workspace_id]
+      )
+
+    sql = """
+    SELECT #{Enum.join(@skill_package_columns, ", ")}
+    FROM skill_packages
+    WHERE workspace_id = ?1 #{clauses}
+    ORDER BY created_at, id
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      {:ok, Enum.map(rows, &skill_package_from_row/1)}
+    end
+  end
+
+  defp workflow_trace_from_row(row) do
+    @workflow_trace_columns
+    |> Enum.zip(row)
+    |> Map.new()
+    |> Map.update!(:episode_links, &decode_list/1)
+    |> Map.update!(:step_links, &decode_list/1)
+    |> Map.update!(:actor_links, &decode_list/1)
+    |> Map.update!(:input_links, &decode_list/1)
+    |> Map.update!(:output_links, &decode_list/1)
+    |> Map.update!(:source_package_links, &decode_list/1)
+    |> Map.update!(:evidence_links, &decode_list/1)
+    |> Map.update!(:security_labels, &decode_list/1)
+    |> Map.update!(:partition_ids, &decode_list/1)
+    |> Map.update!(:metadata, &decode_map/1)
+  end
+
+  defp generalized_workflow_from_row(row) do
+    @generalized_workflow_columns
+    |> Enum.zip(row)
+    |> Map.new()
+    |> Map.update!(:scope, &decode_map/1)
+    |> Map.update!(:applicability_conditions, &decode_map/1)
+    |> Map.update!(:workflow_trace_links, &decode_list/1)
+    |> Map.update!(:supporting_episode_links, &decode_list/1)
+    |> Map.update!(:contradicting_trace_links, &decode_list/1)
+    |> Map.update!(:step_pattern_links, &decode_list/1)
+    |> Map.update!(:security_labels, &decode_list/1)
+    |> Map.update!(:partition_ids, &decode_list/1)
+    |> Map.update!(:metadata, &decode_map/1)
+  end
+
+  defp procedural_memory_object_from_row(row) do
+    @procedural_memory_object_columns
+    |> Enum.zip(row)
+    |> Map.new()
+    |> Map.update!(:applicability_conditions, &decode_map/1)
+    |> Map.update!(:generalized_workflow_links, &decode_list/1)
+    |> Map.update!(:step_links, &decode_list/1)
+    |> Map.update!(:validation_links, &decode_list/1)
+    |> Map.update!(:evidence_links, &decode_list/1)
+    |> Map.update!(:required_privileges, &decode_list/1)
+    |> Map.update!(:security_labels, &decode_list/1)
+    |> Map.update!(:partition_ids, &decode_list/1)
+    |> Map.update!(:metadata, &decode_map/1)
+  end
+
+  defp skill_package_from_row(row) do
+    @skill_package_columns
+    |> Enum.zip(row)
+    |> Map.new()
+    |> Map.update!(:competency_links, &decode_list/1)
+    |> Map.update!(:procedural_memory_links, &decode_list/1)
+    |> Map.update!(:workflow_links, &decode_list/1)
+    |> Map.update!(:validation_links, &decode_list/1)
+    |> Map.update!(:evidence_links, &decode_list/1)
+    |> Map.update!(:input_contract, &decode_map/1)
+    |> Map.update!(:output_contract, &decode_map/1)
+    |> Map.update!(:execution_policy, &decode_map/1)
+    |> Map.update!(:required_privileges, &decode_list/1)
+    |> Map.update!(:tool_requirements, &decode_list/1)
+    |> Map.update!(:security_labels, &decode_list/1)
+    |> Map.update!(:partition_ids, &decode_list/1)
+    |> Map.update!(:metadata, &decode_map/1)
+  end
 
   @spec get_claim(String.t(), String.t(), keyword()) :: {:ok, Claim.t()} | {:error, term()}
   def get_claim(claim_id, opts) when is_binary(claim_id) and is_list(opts) do

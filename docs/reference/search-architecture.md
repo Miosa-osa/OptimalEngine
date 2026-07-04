@@ -72,3 +72,4 @@ audit_event_id
 ```
 
 This makes the agent's context inspectable, refreshable, and auditable.
+

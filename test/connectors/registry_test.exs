@@ -5,15 +5,15 @@ defmodule OptimalEngine.Connectors.RegistryTest do
 
   test "all/0 lists every adapter module" do
     mods = Registry.all()
-    assert length(mods) == 14
+    assert length(mods) == 15
     # Every module responds to kind/0
     assert Enum.all?(mods, fn m -> is_atom(m.kind()) end)
   end
 
   test "kinds/0 returns 14 unique adapter atoms" do
     kinds = Registry.kinds()
-    assert length(kinds) == 14
-    assert length(Enum.uniq(kinds)) == 14
+    assert length(kinds) == 15
+    assert length(Enum.uniq(kinds)) == 15
     assert :slack in kinds
     assert :gmail in kinds
     assert :github in kinds
@@ -31,7 +31,7 @@ defmodule OptimalEngine.Connectors.RegistryTest do
 
   test "summary/0 emits (kind, name, auth) triples" do
     summary = Registry.summary()
-    assert length(summary) == 14
+    assert length(summary) == 15
     assert Enum.all?(summary, fn {k, n, a} -> is_atom(k) and is_binary(n) and is_atom(a) end)
 
     {:slack, name, auth} =

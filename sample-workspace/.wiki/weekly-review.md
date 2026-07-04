@@ -21,3 +21,4 @@ loop.
 
 - `optimal://nodes/operation-weekly-review/signals/2026-06-08-weekly-review.md`
 - `optimal://nodes/project-platform-launch/signals/2026-06-06-package-draft.md`
+

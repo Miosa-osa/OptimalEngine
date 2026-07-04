@@ -68,6 +68,7 @@ defmodule OptimalEngine.Store.Vectors do
   Options:
   - `:limit`          — maximum results to return (default 10)
   - `:min_similarity` — minimum cosine similarity threshold (default 0.0)
+  - `:workspace_id`   — workspace scope (default `"default"`)
   - `:type_filter`    — filter by context type (string, e.g. `"signal"`)
   - `:node_filter`    — filter by node (string, e.g. `"project-platform-launch"`)
 
@@ -77,10 +78,11 @@ defmodule OptimalEngine.Store.Vectors do
   def search(query_embedding, opts \\ []) when is_list(query_embedding) do
     limit = Keyword.get(opts, :limit, 10)
     min_sim = Keyword.get(opts, :min_similarity, 0.0)
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
     type_filter = Keyword.get(opts, :type_filter)
     node_filter = Keyword.get(opts, :node_filter)
 
-    {sql, params} = build_search_query(type_filter, node_filter)
+    {sql, params} = build_search_query(workspace_id, type_filter, node_filter)
 
     case Store.raw_query(sql, params) do
       {:ok, rows} ->
@@ -161,42 +163,49 @@ defmodule OptimalEngine.Store.Vectors do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  defp build_search_query(nil, nil) do
-    {"SELECT context_id, embedding FROM vectors", []}
-  end
-
-  defp build_search_query(type_filter, nil) when is_binary(type_filter) do
+  defp build_search_query(workspace_id, nil, nil) do
     sql = """
     SELECT v.context_id, v.embedding
     FROM vectors v
     JOIN contexts c ON c.id = v.context_id
-    WHERE c.type = ?1
+    WHERE c.workspace_id = ?1
     """
 
-    {sql, [type_filter]}
+    {sql, [workspace_id]}
   end
 
-  defp build_search_query(nil, node_filter) when is_binary(node_filter) do
+  defp build_search_query(workspace_id, type_filter, nil) when is_binary(type_filter) do
     sql = """
     SELECT v.context_id, v.embedding
     FROM vectors v
     JOIN contexts c ON c.id = v.context_id
-    WHERE c.node = ?1
+    WHERE c.workspace_id = ?1 AND c.type = ?2
     """
 
-    {sql, [node_filter]}
+    {sql, [workspace_id, type_filter]}
   end
 
-  defp build_search_query(type_filter, node_filter)
+  defp build_search_query(workspace_id, nil, node_filter) when is_binary(node_filter) do
+    sql = """
+    SELECT v.context_id, v.embedding
+    FROM vectors v
+    JOIN contexts c ON c.id = v.context_id
+    WHERE c.workspace_id = ?1 AND c.node = ?2
+    """
+
+    {sql, [workspace_id, node_filter]}
+  end
+
+  defp build_search_query(workspace_id, type_filter, node_filter)
        when is_binary(type_filter) and is_binary(node_filter) do
     sql = """
     SELECT v.context_id, v.embedding
     FROM vectors v
     JOIN contexts c ON c.id = v.context_id
-    WHERE c.type = ?1 AND c.node = ?2
+    WHERE c.workspace_id = ?1 AND c.type = ?2 AND c.node = ?3
     """
 
-    {sql, [type_filter, node_filter]}
+    {sql, [workspace_id, type_filter, node_filter]}
   end
 
   @spec encode_embedding([float()]) :: binary()

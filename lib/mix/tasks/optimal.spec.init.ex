@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Optimal.Spec.Init do
   @shortdoc "Scaffold the .spec/ directory with templates and a starter spec"
   @moduledoc """
-  Creates the `.spec/` directory structure at the OptimalOS root with:
+  Creates the `.spec/` directory structure at the Optimal Engine root with:
   - `.spec/specs/` — where spec files live
   - `.spec/templates/` — reusable spec templates
   - A starter spec for the intake pipeline

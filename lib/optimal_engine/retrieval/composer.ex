@@ -20,6 +20,7 @@ defmodule OptimalEngine.Retrieval.Composer do
   """
 
   alias OptimalEngine.{Signal, Routing}
+  alias OptimalEngine.Signal.GenreRegistry
 
   @doc """
   Renders a Signal for a specific receiver.
@@ -143,16 +144,56 @@ defmodule OptimalEngine.Retrieval.Composer do
     |> String.trim()
   end
 
-  defp reformat(signal, _genre) do
-    # Default: pass-through with metadata header
+  defp reformat(signal, genre) do
+    # Any of the 142 registry genres renders its canonical section skeleton.
+    # Unknown genres fall through to a metadata-headed pass-through.
+    case GenreRegistry.skeleton(genre) do
+      [] -> reformat_passthrough(signal, genre)
+      sections -> reformat_from_skeleton(signal, genre, sections)
+    end
+  end
+
+  defp reformat_from_skeleton(signal, genre, sections) do
+    category = GenreRegistry.category(genre) || "general"
+
+    section_blocks =
+      sections
+      |> Enum.map_join("\n\n", fn %{name: name, required: required} ->
+        marker = if required, do: "[required]", else: "[optional]"
+        "## #{name}\n_#{marker}_"
+      end)
+
+    """
+    # #{title_case(genre)}: #{signal.title}
+
+    > Category: #{category} | Node: #{signal.node} | S/N: #{signal.sn_ratio}
+
+    #{section_blocks}
+
+    ---
+    _Source content:_
+
+    #{signal.l1_description || signal.content}
+    """
+    |> String.trim()
+  end
+
+  defp reformat_passthrough(signal, genre) do
     """
     # #{signal.title}
 
-    > Genre: #{signal.genre} | Node: #{signal.node} | S/N: #{signal.sn_ratio}
+    > Genre: #{genre} | Node: #{signal.node} | S/N: #{signal.sn_ratio}
 
     #{signal.content}
     """
     |> String.trim()
+  end
+
+  defp title_case(genre) do
+    genre
+    |> to_string()
+    |> String.split("-", trim: true)
+    |> Enum.map_join(" ", &String.capitalize/1)
   end
 
   # --- Content extraction helpers ---

@@ -1350,14 +1350,15 @@ defmodule OptimalEngine.Store do
 
     sql = """
     INSERT INTO chunk_embeddings
-      (chunk_id, tenant_id, model, modality, dim, vector)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+      (chunk_id, tenant_id, model, modality, dim, vector, workspace_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
     ON CONFLICT(chunk_id) DO UPDATE SET
-      tenant_id = excluded.tenant_id,
-      model     = excluded.model,
-      modality  = excluded.modality,
-      dim       = excluded.dim,
-      vector    = excluded.vector
+      tenant_id    = excluded.tenant_id,
+      model        = excluded.model,
+      modality     = excluded.modality,
+      dim          = excluded.dim,
+      vector       = excluded.vector,
+      workspace_id = excluded.workspace_id
     """
 
     params = [
@@ -1368,7 +1369,8 @@ defmodule OptimalEngine.Store do
       chunk_field(row, :dim) || length(vector),
       # Force BLOB binding — exqlite otherwise treats a raw binary as TEXT,
       # and float32 bytes frequently contain 0x00 which SQLite TEXT truncates.
-      {:blob, blob}
+      {:blob, blob},
+      chunk_field(row, :workspace_id) || "default"
     ]
 
     exec_stmt(db, sql, params)

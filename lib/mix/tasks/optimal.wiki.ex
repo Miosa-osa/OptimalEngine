@@ -1,8 +1,8 @@
 defmodule Mix.Tasks.Optimal.Wiki do
-  @shortdoc "Operate on Tier-3 wiki pages"
+  @shortdoc "Operate on wiki/export projection pages"
 
   @moduledoc """
-  Wiki Tier-3 operations.
+  Wiki/export projection operations.
 
   ## Usage
 

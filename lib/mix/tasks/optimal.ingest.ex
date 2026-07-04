@@ -20,6 +20,12 @@ defmodule Mix.Tasks.Optimal.Ingest do
     --node       Override primary node routing (project-platform-launch, operator, operation-revenue, etc.)
     --type       Force context type: signal, resource, memory, skill (default: auto-detect)
     --workspace  Target workspace ID (default: "default")
+    --extract-claims     Force pending-Claim extraction on (overrides config)
+    --no-extract-claims  Disable pending-Claim extraction for this run
+
+  By default intake extracts a pending Claim from each accepted Signal
+  (config `memory.auto_extract_claims`, default ON), closing the
+  Source -> Signal -> Claim break.
   """
 
   use Mix.Task
@@ -36,7 +42,8 @@ defmodule Mix.Tasks.Optimal.Ingest do
           title: :string,
           node: :string,
           type: :string,
-          workspace: :string
+          workspace: :string,
+          extract_claims: :boolean
         ],
         aliases: [f: :file, g: :genre, t: :title, n: :node, w: :workspace]
       )
@@ -74,6 +81,7 @@ defmodule Mix.Tasks.Optimal.Ingest do
     |> maybe_put(:title, Keyword.get(opts, :title))
     |> maybe_put(:node, Keyword.get(opts, :node))
     |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+    |> maybe_put(:extract_claims, Keyword.get(opts, :extract_claims))
     |> maybe_put_type(Keyword.get(opts, :type))
   end
 
@@ -109,7 +117,15 @@ defmodule Mix.Tasks.Optimal.Ingest do
     IO.puts("[intake] Updating index...")
     IO.puts("  + #{1 + length(result.cross_references)} context(s) indexed")
     IO.puts("")
+    print_claim(Map.get(result, :pending_claim))
     IO.puts("[intake] Done. URI: #{result.uri}")
+    IO.puts("")
+  end
+
+  defp print_claim(nil), do: :ok
+
+  defp print_claim(claim) do
+    IO.puts("[intake] Extracted pending claim: #{claim.id} (#{claim.claim_type})")
     IO.puts("")
   end
 
