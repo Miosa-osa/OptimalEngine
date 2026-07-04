@@ -118,10 +118,24 @@ defmodule OptimalEngine.Connectors.AdaptersTest do
         assert {:error, _} = mod.init(creds)
       end
 
-      test "sync/2 returns :not_implemented (Phase 10 gap)" do
+      test "sync/2 attempts real HTTP -- no adapter returns :not_implemented" do
         {:ok, mod} = Registry.fetch(@kind)
         {:ok, state} = mod.init(@config)
-        assert {:error, :not_implemented} = mod.sync(state, nil)
+        result = mod.sync(state, nil)
+        # All adapters now have real sync/2 implementations. Without valid
+        # credentials each returns either {:ok, %{signals, cursor}} (when its
+        # reduce loop silently skips per-item auth errors) or {:error, reason}
+        # where reason is a real HTTP/auth failure -- never :not_implemented.
+        case result do
+          {:error, :not_implemented} ->
+            flunk("expected real code path, got {:error, :not_implemented}")
+
+          {:error, _reason} ->
+            :ok
+
+          {:ok, %{signals: _, cursor: _}} ->
+            :ok
+        end
       end
 
       test "transform/1 builds a %Signal{} from a minimal payload" do

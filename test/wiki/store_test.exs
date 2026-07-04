@@ -1,6 +1,7 @@
 defmodule OptimalEngine.Wiki.StoreTest do
   use ExUnit.Case, async: false
 
+  alias OptimalEngine.Wiki
   alias OptimalEngine.Wiki.{Page, Store}
 
   test "put/1 + latest/3 round-trip" do
@@ -82,5 +83,73 @@ defmodule OptimalEngine.Wiki.StoreTest do
       )
 
     assert count_after == 0
+  end
+
+  test "curate_and_persist/3 drives the citations store 0 -> populated via the real curation flow" do
+    suffix = System.unique_integer([:positive])
+    slug = "curate-persist-#{suffix}"
+    tenant = "default"
+    chunk_id = "curate-chunk-#{suffix}"
+
+    # Real Tier-2 chunk the citation will back-link to (FK target).
+    OptimalEngine.Store.raw_query(
+      "INSERT OR IGNORE INTO chunks (id, tenant_id, signal_id, scale, text) VALUES (?1, ?2, 's', 'document', 't')",
+      [chunk_id, tenant]
+    )
+
+    # Store starts empty for this page.
+    {:ok, [[before]]} =
+      OptimalEngine.Store.raw_query(
+        "SELECT COUNT(*) FROM citations WHERE wiki_slug = ?1",
+        [slug]
+      )
+
+    assert before == 0
+
+    page = %Page{
+      tenant_id: tenant,
+      slug: slug,
+      audience: "default",
+      version: 1,
+      frontmatter: %{"slug" => slug},
+      body: "## Summary\n\nExisting content.\n",
+      last_curated: DateTime.utc_now() |> DateTime.to_iso8601(),
+      curated_by: "seed"
+    }
+
+    :ok = Store.put(page)
+
+    citations = [
+      %{
+        chunk_id: chunk_id,
+        text: "Greice signed the Phase 2 retainer for $12k.",
+        uri: "optimal://chunks/#{chunk_id}"
+      }
+    ]
+
+    # Real public flow: curate (deterministic, no Ollama) + persist page + citations.
+    assert {:ok, result} = Wiki.curate_and_persist(page, citations, deterministic: true)
+    assert result.citations_persisted == 1
+    assert result.page.version == 2
+    assert result.page.body =~ "{{cite: optimal://chunks/#{chunk_id}}}"
+
+    # The citations store went 0 -> 1 with correct shape + provenance.
+    {:ok, rows} =
+      OptimalEngine.Store.raw_query(
+        "SELECT wiki_slug, wiki_audience, chunk_id, claim_hash FROM citations WHERE wiki_slug = ?1",
+        [slug]
+      )
+
+    assert [[^slug, "default", ^chunk_id, claim_hash]] = rows
+    assert is_binary(claim_hash) and claim_hash != ""
+
+    # Provenance: citation chunk_id resolves to a real chunk row.
+    {:ok, [[chunk_count]]} =
+      OptimalEngine.Store.raw_query(
+        "SELECT COUNT(*) FROM chunks WHERE id = ?1",
+        [chunk_id]
+      )
+
+    assert chunk_count == 1
   end
 end

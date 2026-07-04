@@ -1,14 +1,20 @@
 # Optimal Engine — Raycast Extension
 
-Search, add, and query your [Optimal Engine](https://github.com/miosa/OptimalEngine) second brain directly from Raycast.
+Search, ask, and submit context to
+[Optimal Engine](https://github.com/Miosa-osa/OptimalEngine) directly from
+Raycast.
+
+This is an optional agent/user surface over the backend runtime. Raycast does
+not own workspace truth; it calls the engine API for search, retrieval, and
+governed memory intake.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| **Search Memory** | Instant fuzzy search across your active workspace |
-| **Add Memory** | Quick-add a fact, decision, or observation |
-| **Ask Engine** | Natural-language Q&A answered from your workspace memories |
+| **Search Memory** | Search governed memory/context projections in your active workspace |
+| **Add Memory** | Submit a fact, decision, observation, or note through memory intake |
+| **Ask Engine** | Ask a workspace-scoped question using governed retrieval/context |
 
 ## Setup
 
@@ -40,7 +46,8 @@ Open Raycast → Extension Preferences → Optimal Engine and set:
 
 ### Search Memory
 
-Type any term. Results stream in with a 200 ms debounce. The detail panel on the right shows the full content, audience, relevance score, and metadata.
+Type any term. Results stream in with a 200 ms debounce. The detail panel on the
+right shows the content projection, audience, relevance score, and metadata.
 
 Actions available on each result:
 - **Copy Content** — copy the full memory text to clipboard
@@ -50,7 +57,7 @@ Actions available on each result:
 ### Add Memory
 
 Fill in the form:
-- **Content** (required) — the fact, decision, or observation
+- **Content** (required) — the fact, decision, observation, or source-backed note
 - **Audience** — `general | technical | executive | internal`
 - **Static** — pin the memory so it is never evicted by the engine
 - **Source URL** — optional provenance link
@@ -59,7 +66,9 @@ On success a toast displays the new memory ID and the form closes automatically.
 
 ### Ask Engine
 
-Type a natural-language question and press **Enter**. The engine answers using RAG over your workspace memories. The detail view renders the answer as Markdown with sources listed below.
+Type a natural-language question and press **Enter**. The engine answers using
+workspace-scoped retrieval/context. The detail view renders the answer as
+Markdown with sources listed below when the API returns them.
 
 Actions available on each answer:
 - **Copy Answer** — copy the full response body
@@ -73,8 +82,18 @@ Actions available on each answer:
 # Type-check only (no Raycast CLI required)
 npx tsc --noEmit
 
-# Full build (requires Raycast app installed)
+# Local source verification
+npm run lint
+
+# Strict store/publisher lint; requires package.json author to be a real
+# Raycast publisher account.
+npm run lint:publish
+
+# TypeScript build check
 npm run build
+
+# Raycast bundle build; requires Raycast app and a valid publisher account
+npm run build:raycast
 
 # Live-reload dev mode
 npm run dev

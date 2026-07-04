@@ -3,10 +3,15 @@
 Docker is optional. The normal local path is still:
 
 ```bash
-mix deps.get
-mix optimal.setup --workspace my-workspace
-./optimal status
+make install
+make bootstrap
+make dev
+curl http://localhost:4200/api/health
 ```
+
+Local runtime state is created under `.optimal/`.
+That directory contains the SQLite store, caches, WAL files, and local connector key.
+It is ignored by git and should not be committed or copied into public docs.
 
 Use this directory when you want a packaged backend service with a persistent
 data volume and HTTP API.

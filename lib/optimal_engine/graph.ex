@@ -34,6 +34,94 @@ defmodule OptimalEngine.Graph do
 
   alias OptimalEngine.Store
 
+  # Name of the default Knowledge.Store that mirrors the SQLite edges table.
+  @default_triple_store "default"
+
+  @doc """
+  Asserts a semantic edge — writes to both the SQLite `edges` table and the
+  default in-memory triple store (`Knowledge.Store`).
+
+  This is the primary public API for adding domain predicates (e.g.
+  `"mentions"`, `"co_occurs_with"`, `"authored_by"`) from ingest pipelines
+  or external callers.
+
+  Returns `:ok` on success. Edge insert failures are logged and swallowed;
+  triple-store failures are logged and swallowed so they never block the caller.
+
+  Options:
+  - `:workspace_id` — workspace to attribute the edge to (default: `"default"`)
+  - `:weight`       — edge weight (default: `1.0`)
+  """
+  @spec assert_edge(String.t(), String.t(), String.t(), keyword()) :: :ok
+  def assert_edge(source, target, predicate, opts \\ [])
+      when is_binary(source) and is_binary(target) and is_binary(predicate) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+    weight = Keyword.get(opts, :weight, 1.0)
+    now = DateTime.to_iso8601(DateTime.utc_now())
+
+    insert_edge_via_store(source, target, predicate, weight, now, ws)
+    maybe_feed_triple_store(source, predicate, target, ws)
+
+    :ok
+  end
+
+  @doc """
+  Hydrates a `Knowledge.Store` from all rows in the SQLite `edges` table.
+
+  Called on application start (and optionally per-workspace) so the in-memory
+  triple store reflects durable edge data after a restart. Each edge row is
+  asserted as a quad `{workspace_id, source_id, relation, target_id}`.
+
+  `store` must be a running `Knowledge.Store` GenServer (pid or via-name).
+
+  Options:
+  - `:workspace_id` — only hydrate edges from this workspace (default: all)
+  - `:limit`        — max rows to load (default: 100_000)
+
+  Returns `{:ok, count}` or `{:error, reason}`.
+  """
+  @spec hydrate_triple_store(GenServer.server(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def hydrate_triple_store(store, opts \\ []) do
+    ws = Keyword.get(opts, :workspace_id)
+    limit = Keyword.get(opts, :limit, 100_000)
+
+    {sql, params} =
+      case ws do
+        nil ->
+          {"SELECT source_id, relation, target_id, workspace_id FROM edges LIMIT ?1", [limit]}
+
+        ws ->
+          {"SELECT source_id, relation, target_id, workspace_id FROM edges WHERE workspace_id = ?1 LIMIT ?2",
+           [ws, limit]}
+      end
+
+    case Store.raw_query(sql, params) do
+      {:ok, rows} ->
+        triples =
+          Enum.map(rows, fn [source, predicate, target, graph] ->
+            {graph, source, predicate, target}
+          end)
+
+        count = length(triples)
+
+        Enum.each(triples, fn {g, s, p, o} ->
+          OptimalEngine.Knowledge.Store.assert(store, g, s, p, o)
+        end)
+
+        Logger.info("[Graph] Hydrated #{count} triples into Knowledge.Store from SQLite edges")
+        {:ok, count}
+
+      {:error, reason} ->
+        Logger.warning("[Graph] hydrate_triple_store query failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  rescue
+    error ->
+      Logger.warning("[Graph] hydrate_triple_store exception: #{inspect(error)}")
+      {:error, error}
+  end
+
   @doc """
   Creates all edges for a newly indexed or ingested context.
 
@@ -63,11 +151,21 @@ defmodule OptimalEngine.Graph do
       # entity → context (mentioned_in)
       Enum.each(entities, fn entity ->
         insert_edge_via_store(entity, id, "mentioned_in", 1.0, now, ws)
+        maybe_feed_triple_store(entity, "mentioned_in", id, ws)
+      end)
+
+      # entity ↔ entity (co_occurs) — every unordered pair sharing this context
+      Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
+        insert_edge_via_store(a, b, "co_occurs", 0.5, now, ws)
+        insert_edge_via_store(b, a, "co_occurs", 0.5, now, ws)
+        maybe_feed_triple_store(a, "co_occurs", b, ws)
+        maybe_feed_triple_store(b, "co_occurs", a, ws)
       end)
 
       # context → node (lives_in)
       if is_binary(node) and node != "" do
         insert_edge_via_store(id, node, "lives_in", 1.0, now, ws)
+        maybe_feed_triple_store(id, "lives_in", node, ws)
       end
 
       # context → context (cross_ref) — extra destinations beyond the primary node
@@ -75,11 +173,13 @@ defmodule OptimalEngine.Graph do
 
       Enum.each(cross_refs, fn dest ->
         insert_edge_via_store(id, dest, "cross_ref", 0.8, now, ws)
+        maybe_feed_triple_store(id, "cross_ref", dest, ws)
       end)
 
       # context → context (supersedes)
       if is_binary(supersedes) and supersedes != "" do
         insert_edge_via_store(id, supersedes, "supersedes", 1.0, now, ws)
+        maybe_feed_triple_store(id, "supersedes", supersedes, ws)
       end
     end
 
@@ -107,6 +207,11 @@ defmodule OptimalEngine.Graph do
 
       Enum.each(entities, fn entity ->
         insert_edge_direct(db, entity, id, "mentioned_in", 1.0, now, ws)
+      end)
+
+      Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
+        insert_edge_direct(db, a, b, "co_occurs", 0.5, now, ws)
+        insert_edge_direct(db, b, a, "co_occurs", 0.5, now, ws)
       end)
 
       if is_binary(node) and node != "" do
@@ -345,6 +450,128 @@ defmodule OptimalEngine.Graph do
     end
   end
 
+  @doc """
+  Creates `claim --about--> entity` edges for an extracted claim.
+
+  Idempotent (INSERT OR IGNORE). Used by the intake pipeline after claim
+  extraction to link a Claim to the entities its source signal mentions.
+  Additive: failures are logged and swallowed, never raised.
+
+  Options:
+  - `:workspace_id` — workspace to attribute the edges to (default: "default")
+  """
+  @spec create_claim_edges(String.t(), [String.t()], keyword()) :: :ok
+  def create_claim_edges(claim_id, entities, opts \\ [])
+      when is_binary(claim_id) and is_list(entities) do
+    ws = Keyword.get(opts, :workspace_id, "default")
+    now = DateTime.to_iso8601(DateTime.utc_now())
+
+    entities
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+    |> Enum.each(fn entity ->
+      insert_edge_via_store(claim_id, entity, "about", 1.0, now, ws)
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Returns candidate context IDs reachable from a set of query entities by
+  traversing the graph up to `hops` hops.
+
+  This is a graph candidate generator for retrieval fusion. Starting from the
+  query entities, it follows `mentioned_in` edges (entity → context) to gather
+  contexts, and `co_occurs` edges (entity → entity) to expand the entity
+  frontier for additional hops.
+
+  Returns `{:ok, [context_id]}` ranked by how many query-reachable entities
+  mention each context (descending), so densely-connected contexts surface first.
+
+  Options:
+  - `:workspace_id` — workspace to scope to (default: "default")
+  - `:limit`        — max context IDs to return (default: 20)
+  """
+  @spec graph_candidates([String.t()], pos_integer(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def graph_candidates(query_entities, hops \\ 1, opts \\ [])
+      when is_list(query_entities) and is_integer(hops) and hops >= 1 do
+    ws = Keyword.get(opts, :workspace_id, "default")
+    limit = Keyword.get(opts, :limit, 20)
+
+    seed =
+      query_entities
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> MapSet.new()
+
+    {entities, context_scores} = expand_frontier(seed, hops, ws)
+    _ = entities
+
+    ranked =
+      context_scores
+      |> Enum.sort_by(fn {_id, score} -> score end, :desc)
+      |> Enum.map(fn {id, _score} -> id end)
+      |> Enum.take(limit)
+
+    {:ok, ranked}
+  rescue
+    error -> {:error, error}
+  end
+
+  # Breadth-first expansion: accumulate mentioned_in contexts (scored by mention
+  # count) and grow the entity frontier via co_occurs for each remaining hop.
+  defp expand_frontier(seed_entities, hops, ws) do
+    Enum.reduce(1..hops, {seed_entities, MapSet.new(), %{}}, fn _hop,
+                                                                {frontier, visited, scores} ->
+      to_visit = MapSet.difference(frontier, visited)
+
+      {next_frontier, new_scores} =
+        Enum.reduce(to_visit, {MapSet.new(), scores}, fn entity, {nf, sc} ->
+          ctx_ids = entity_contexts(entity, ws)
+          sc = Enum.reduce(ctx_ids, sc, fn cid, acc -> Map.update(acc, cid, 1, &(&1 + 1)) end)
+          neighbors = co_occurring_entities(entity, ws)
+          {MapSet.union(nf, MapSet.new(neighbors)), sc}
+        end)
+
+      {next_frontier, MapSet.union(visited, to_visit), new_scores}
+    end)
+    |> then(fn {_frontier, _visited, scores} -> {MapSet.new(), scores} end)
+  end
+
+  defp entity_contexts(entity, ws) do
+    sql =
+      "SELECT target_id FROM edges WHERE source_id = ?1 AND relation = 'mentioned_in' AND workspace_id = ?2"
+
+    case Store.raw_query(sql, [entity, ws]) do
+      {:ok, rows} -> Enum.map(rows, fn [id] -> id end)
+      _ -> []
+    end
+  end
+
+  defp co_occurring_entities(entity, ws) do
+    sql =
+      "SELECT target_id FROM edges WHERE source_id = ?1 AND relation = 'co_occurs' AND workspace_id = ?2"
+
+    case Store.raw_query(sql, [entity, ws]) do
+      {:ok, rows} -> Enum.map(rows, fn [id] -> id end)
+      _ -> []
+    end
+  end
+
+  # Unordered distinct pairs of entities (for co_occurs edges). Filters blanks
+  # and self-pairs; returns each pair once as {a, b}.
+  defp co_occurrence_pairs(entities) do
+    clean =
+      entities
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.uniq()
+
+    for {a, i} <- Enum.with_index(clean),
+        {b, j} <- Enum.with_index(clean),
+        i < j,
+        do: {a, b}
+  end
+
   # ---------------------------------------------------------------------------
   # Private: topology works_on edges
   # ---------------------------------------------------------------------------
@@ -530,4 +757,26 @@ defmodule OptimalEngine.Graph do
   defp struct_or_map_get(%_{} = struct, key), do: Map.get(struct, key)
   defp struct_or_map_get(map, key) when is_map(map), do: Map.get(map, key)
   defp struct_or_map_get(_, _), do: nil
+
+  # ---------------------------------------------------------------------------
+  # Private: triple-store feed
+  # ---------------------------------------------------------------------------
+
+  # Feeds a single edge into the default Knowledge.Store as a quad
+  # {workspace_id, source, predicate, object}. Silently swallows any error
+  # (the triple store is a secondary index — SQLite edges are the source of
+  # truth). Uses GenServer call only when the store is registered and alive.
+  defp maybe_feed_triple_store(source, predicate, target, workspace) do
+    store_name = {:via, Registry, {OptimalEngine.Knowledge.Registry, @default_triple_store}}
+
+    case Registry.lookup(OptimalEngine.Knowledge.Registry, @default_triple_store) do
+      [{_pid, _value}] ->
+        OptimalEngine.Knowledge.Store.assert(store_name, workspace, source, predicate, target)
+
+      [] ->
+        :noop
+    end
+  rescue
+    _ -> :noop
+  end
 end

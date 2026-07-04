@@ -102,11 +102,25 @@ defmodule OptimalEngine.Embed.Ollama do
   Returns `{:ok, [float()]}` — a single 768-dim vector — or `{:error, reason}`.
   """
   @spec embed_text(String.t(), keyword()) :: {:ok, [float()]} | {:error, atom()}
+  # Embedding models have a bounded context window; nomic-embed-text rejects
+  # oversized input with HTTP 400 ("input length exceeds the context length").
+  # Cap input so large chunks embed (truncated) instead of being skipped.
+  # nomic-embed-text's effective window is ~2048 tokens; ~4 chars/token, kept
+  # conservative so even token-dense text stays under the limit.
+  @max_embed_chars 6_000
+
   def embed_text(text, opts \\ []) when is_binary(text) do
     cfg = config()
     model = Keyword.get(opts, :model, cfg[:embed_model])
 
-    body = %{"model" => model, "input" => text}
+    capped =
+      if String.length(text) > @max_embed_chars do
+        String.slice(text, 0, @max_embed_chars)
+      else
+        text
+      end
+
+    body = %{"model" => model, "input" => capped}
 
     case post_json("/api/embed", body) do
       {:ok, %{"embeddings" => [first | _]}} when is_list(first) ->

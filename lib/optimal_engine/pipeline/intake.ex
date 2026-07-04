@@ -84,14 +84,21 @@ defmodule OptimalEngine.Pipeline.Intake do
   require Logger
 
   alias OptimalEngine.Pipeline.Classifier, as: Classifier
+  alias OptimalEngine.Pipeline.Decomposer, as: Decomposer
+  alias OptimalEngine.Pipeline.Parser.ParsedDoc
   alias OptimalEngine.Context
+  alias OptimalEngine.Graph
+  alias OptimalEngine.MemoryCore.Claim
+  alias OptimalEngine.MemoryCore.ClaimExtractor
   alias OptimalEngine.MemoryCore.DerivationLedgerEntry
+  alias OptimalEngine.MemoryCore.Episode
   alias OptimalEngine.MemoryCore.ScopeEnvelope
   alias OptimalEngine.MemoryCore.SourcePackage
   alias OptimalEngine.MemoryCore.SourcePackageService
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
   alias OptimalEngine.Pipeline.Indexer, as: Indexer
   alias OptimalEngine.Pipeline.Intake.Writer, as: Writer
+  alias OptimalEngine.Pipeline.Intake.Skeleton, as: Skeleton
   alias OptimalEngine.Pipeline.Router, as: Router
   alias OptimalEngine.Pipeline.SemanticProcessor, as: SemanticProcessor
   alias OptimalEngine.Signal
@@ -115,7 +122,8 @@ defmodule OptimalEngine.Pipeline.Intake do
           cross_references: [String.t()],
           uri: String.t(),
           quality_violations: [{atom(), String.t()}],
-          quality_action: :accepted | :quarantined | :rejected
+          quality_action: :accepted | :quarantined | :rejected,
+          pending_claim: Claim.t() | nil
         }
 
   # ---------------------------------------------------------------------------
@@ -175,7 +183,44 @@ defmodule OptimalEngine.Pipeline.Intake do
          {:ok, signal, routed_to} <- route_step(signal, opts),
          {:ok, primary_path} <- write_step(signal, scope),
          {:ok, cross_paths} <- cross_ref_step(signal, routed_to, scope),
-         {:ok, context} <- index_step(signal, primary_path, scope) do
+         {:ok, context} <- index_step(signal, primary_path, scope),
+         {:ok, pending_claim} <-
+           extract_claims_step(source_package, signal, scope, opts) do
+      # Persist detail objects for each extracted entity as a step record
+      # attached to the source package (parent_object_type = "source_package").
+      # Never fails the pipeline.
+      persist_detail_objects(signal, source_package, scope)
+
+      # Persist skeleton-section detail objects for structured genres
+      # (transcript, decision-log). Each section name from the genre skeleton
+      # becomes a step MDO attached to the source package, giving the episodic
+      # layer a structured breakdown of what this document contains.
+      # Never fails the pipeline.
+      persist_skeleton_detail_objects(signal, source_package, scope)
+
+      # Create an Episode row for transcript/meeting sources so the episodic
+      # memory layer has a first-class record of this ingestion event.
+      persist_episode_if_applicable(signal, source_package, pending_claim, scope)
+
+      # Decompose content into chunks and embed them (async, non-blocking).
+      # Chunks carry signal_id = context.id to satisfy the join key. If Ollama
+      # is unavailable the chunks are still persisted and embeddings are skipped
+      # gracefully — backfill via `mix optimal.embed_backfill` later.
+      Task.start(fn -> decompose_and_embed(context, scope) end)
+
+      # Additive graph population: link the extracted claim to the signal's
+      # entities (claim --about--> entity). The context's own edges
+      # (mentioned_in, co_occurs, lives_in) are already written by
+      # Store.insert_context -> Graph.create_edges_for_context_db during the
+      # index step. This step must never fail the pipeline.
+      populate_graph_step(pending_claim, signal, scope)
+
+      # Emit semantic edges with varied predicates (mentions, co_occurs_with)
+      # distinct from the structural mentioned_in/co_occurs/lives_in edges
+      # written by Store.insert_context. These populate the graph with domain
+      # predicates queryable via Graph.assert_edge. Never fails the pipeline.
+      emit_semantic_edges(signal, context, scope)
+
       uri = URI.from_path(primary_path)
       primary_relative = relative(primary_path)
       cross_relatives = Enum.map(cross_paths, &relative/1)
@@ -200,7 +245,8 @@ defmodule OptimalEngine.Pipeline.Intake do
         cross_references: cross_relatives,
         uri: uri,
         quality_violations: violations,
-        quality_action: quality_action
+        quality_action: quality_action,
+        pending_claim: pending_claim
       }
 
       record_memory_core_trace(
@@ -446,7 +492,11 @@ defmodule OptimalEngine.Pipeline.Intake do
   # Step 1: Classify
   defp classify_step(raw_text, opts) do
     topology = load_topology()
-    known_entities = topology_entities(topology)
+
+    # Known entities come from (1) the legacy topology.yaml endpoints and
+    # (2) the canonical Topology.Node table (the source of truth). The DB nodes
+    # are the gazetteer that drives entity extraction + semantic graph edges.
+    known_entities = Enum.uniq(topology_entities(topology) ++ db_entity_names())
 
     # Merge explicit entities into known entities for extraction
     extra_entities = Keyword.get(opts, :entities, [])
@@ -595,6 +645,239 @@ defmodule OptimalEngine.Pipeline.Intake do
     Path.join([root, dest_folder, "signals", filename])
   end
 
+  # Step 6: Extract a pending Claim from the Source Package.
+  #
+  # Closes the EXTRACTION break: intake now produces a Claim, not just a
+  # Signal. Gated behind `memory.auto_extract_claims` (default ON) and an
+  # optional per-call `:extract_claims` override. The Source Package is already
+  # durable and the Signal/Context already indexed, so claim extraction is
+  # additive — it must NEVER fail the pipeline. On disable or error it returns
+  # `{:ok, nil}` and leaves existing intake behavior untouched.
+  defp extract_claims_step(
+         %SourcePackage{} = source_package,
+         %Signal{} = signal,
+         %ScopeEnvelope{} = scope,
+         opts
+       ) do
+    if auto_extract_claims?(opts) do
+      do_extract_claim(source_package, signal, scope, opts)
+    else
+      {:ok, nil}
+    end
+  rescue
+    error ->
+      Logger.warning("[Intake] Claim extraction failed (skipping): #{inspect(error)}")
+      {:ok, nil}
+  end
+
+  defp do_extract_claim(source_package, signal, scope, _opts) do
+    extract_opts = [
+      signal_id: signal.id,
+      workspace_id: scope.workspace_id,
+      tenant_id: scope.tenant_id,
+      actor_id: scope.actor,
+      claim_text: signal.content || source_package.raw_text,
+      metadata: %{
+        node: signal.node,
+        genre: signal.genre,
+        title: signal.title,
+        intake_signal_id: signal.id
+      }
+    ]
+
+    case ClaimExtractor.extract_from_source(source_package, extract_opts) do
+      {:ok, %Claim{} = claim} ->
+        record_signal_to_claim_ledger(signal, claim, source_package, scope)
+        {:ok, claim}
+
+      {:error, reason} ->
+        Logger.warning("[Intake] Claim extraction failed (skipping): #{inspect(reason)}")
+        {:ok, nil}
+    end
+  end
+
+  # Whether claim extraction runs. Per-call `:extract_claims` overrides the
+  # `memory.auto_extract_claims` config flag (default ON).
+  defp auto_extract_claims?(opts) do
+    case Keyword.get(opts, :extract_claims) do
+      nil ->
+        :optimal_engine
+        |> Application.get_env(:memory, [])
+        |> Keyword.get(:auto_extract_claims, true)
+
+      override ->
+        override == true
+    end
+  end
+
+  # Emit a `signal_to_claim` derivation ledger entry mirroring the
+  # `source_to_signal_context` entry — linking the Signal (input) to the
+  # extracted Claim (output) so the Signal -> Claim hop has explicit lineage.
+  # Never fails the pipeline.
+  defp record_signal_to_claim_ledger(
+         %Signal{} = signal,
+         %Claim{} = claim,
+         %SourcePackage{} = source_package,
+         %ScopeEnvelope{} = scope
+       ) do
+    signal_ref = DerivationLedgerEntry.object_ref("signal", signal.id)
+    claim_ref = DerivationLedgerEntry.object_ref("claim", claim.id)
+    source_ref = DerivationLedgerEntry.object_ref("source_package", source_package.id)
+
+    entry =
+      DerivationLedgerEntry.new(
+        "intake.extract_claim",
+        "signal_to_claim",
+        [signal_ref],
+        [claim_ref],
+        tenant_id: source_package.tenant_id,
+        workspace_id: source_package.workspace_id,
+        source_package_links: [source_ref],
+        evidence_links: [source_ref],
+        actor_id: scope.actor,
+        evaluator_id: claim.evaluator_id,
+        parser_id: "optimal_engine.pipeline.intake",
+        confidence_delta: claim.aggregate_confidence,
+        precision_delta: claim.aggregate_precision,
+        security_labels: source_package.security_labels,
+        partition_ids: source_package.partition_ids,
+        metadata: %{
+          node: signal.node,
+          genre: signal.genre,
+          title: signal.title,
+          claim_type: claim.claim_type
+        }
+      )
+
+    case MemoryCoreStore.insert_derivation_entry(entry) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[Intake] signal_to_claim ledger write failed: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning("[Intake] signal_to_claim ledger write failed: #{inspect(error)}")
+      :ok
+  end
+
+  # Step 7: Populate the knowledge graph with claim->about->entity edges.
+  #
+  # The signal/context edges (mentioned_in, co_occurs, lives_in, cross_ref) are
+  # already created synchronously inside Store.insert_context. This step only
+  # adds the claim->entity links, which require the Claim id produced by the
+  # claim-extraction step. Purely additive — never fails the pipeline.
+  defp populate_graph_step(nil, _signal, _scope), do: :ok
+
+  defp populate_graph_step(%Claim{id: claim_id}, %Signal{} = signal, %ScopeEnvelope{} = scope)
+       when is_binary(claim_id) do
+    entities = signal.entities || []
+
+    if entities != [] do
+      Graph.create_claim_edges(claim_id, entities, workspace_id: scope.workspace_id)
+    end
+
+    :ok
+  rescue
+    error ->
+      Logger.warning("[Intake] Graph population failed (skipping): #{inspect(error)}")
+      :ok
+  end
+
+  defp populate_graph_step(_claim, _signal, _scope), do: :ok
+
+  # ---------------------------------------------------------------------------
+  # Private: Detail objects + episode persistence
+  # ---------------------------------------------------------------------------
+
+  # Persist one MemoryDetailObject per extracted entity as a "step" record
+  # attached to the source package. This converts previously dead code into a
+  # live call: every intake with entities now writes detail rows.
+  defp persist_detail_objects(%Signal{} = signal, %SourcePackage{} = source_package, %ScopeEnvelope{} = scope) do
+    entities = signal.entities || []
+
+    entities
+    |> Enum.with_index()
+    |> Enum.each(fn {entity, idx} ->
+      attrs = %{
+        tenant_id: scope.tenant_id,
+        workspace_id: scope.workspace_id,
+        parent_object_type: "source_package",
+        parent_object_id: source_package.id,
+        detail_type: "step",
+        detail_order: idx,
+        detail_text: "entity: #{entity}",
+        action_class: "entity_extraction",
+        source_package_links: [source_package.id],
+        metadata: %{node: signal.node, genre: signal.genre}
+      }
+
+      case MemoryCoreStore.insert_memory_detail_object(attrs) do
+        :ok -> :ok
+        {:error, reason} ->
+          Logger.warning("[Intake] MemoryDetailObject persist failed (skipping): #{inspect(reason)}")
+          :ok
+      end
+    end)
+  rescue
+    error ->
+      Logger.warning("[Intake] persist_detail_objects failed (skipping): #{inspect(error)}")
+      :ok
+  end
+
+  # The genres that should produce an Episode record.
+  @episode_genres ~w[transcript meeting]
+
+  # Create an Episode row when the ingested source is a transcript or meeting.
+  # Wires insert_episode into the live pipeline so episodes table grows on real
+  # intake calls (not just test-fixture inserts).
+  defp persist_episode_if_applicable(%Signal{} = signal, %SourcePackage{} = source_package, pending_claim, %ScopeEnvelope{} = scope) do
+    genre = signal.genre || ""
+
+    if genre in @episode_genres do
+      claim_id = if pending_claim, do: pending_claim.id, else: nil
+
+      attrs = %{
+        tenant_id: scope.tenant_id,
+        workspace_id: scope.workspace_id,
+        node_id: signal.node,
+        kind: genre,
+        occurred_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+        summary: signal.title || signal.l0_summary || String.slice(signal.content || "", 0, 120),
+        provenance: %{
+          source_package_id: source_package.id,
+          signal_id: signal.id,
+          claim_id: claim_id
+        },
+        security_labels: source_package.security_labels || [],
+        partition_ids: source_package.partition_ids || [],
+        metadata: %{node: signal.node, genre: genre, sn_ratio: signal.sn_ratio}
+      }
+
+      case Episode.new(attrs) do
+        {:ok, episode} ->
+          case MemoryCoreStore.insert_episode(episode) do
+            :ok -> :ok
+            {:error, reason} ->
+              Logger.warning("[Intake] Episode persist failed (skipping): #{inspect(reason)}")
+              :ok
+          end
+
+        {:error, reason} ->
+          Logger.warning("[Intake] Episode build failed (skipping): #{inspect(reason)}")
+          :ok
+      end
+    else
+      :ok
+    end
+  rescue
+    error ->
+      Logger.warning("[Intake] persist_episode_if_applicable failed (skipping): #{inspect(error)}")
+      :ok
+  end
+
   # ---------------------------------------------------------------------------
   # Private: Helpers
   # ---------------------------------------------------------------------------
@@ -655,11 +938,183 @@ defmodule OptimalEngine.Pipeline.Intake do
     |> String.slice(0, 32)
   end
 
+  # ---------------------------------------------------------------------------
+  # Private: Decompose + embed
+  # ---------------------------------------------------------------------------
+
+  # Builds a ParsedDoc from the context content and runs decompose_and_store.
+  # The crucial invariant: parsed_doc.signal_id must equal context.id so that
+  # chunks.signal_id references the context row (avoids the prior ID-drift bug).
+  # Failures are logged and swallowed — chunks/embeddings are not pipeline-critical.
+  defp decompose_and_embed(%Context{} = context, %ScopeEnvelope{} = scope) do
+    doc =
+      ParsedDoc.new(
+        signal_id: context.id,
+        text: context.content || context.l1_overview || "",
+        modality: :text
+      )
+
+    opts = [
+      tenant_id: scope.tenant_id,
+      workspace_id: scope.workspace_id
+    ]
+
+    case Decomposer.decompose_and_store(doc, opts) do
+      {:ok, tree} ->
+        Logger.debug(
+          "[Intake] Decomposed context #{context.id} into #{length(tree.chunks)} chunks"
+        )
+
+      {:error, reason} ->
+        Logger.warning("[Intake] decompose_and_store failed for #{context.id}: #{inspect(reason)}")
+    end
+  rescue
+    error ->
+      Logger.warning("[Intake] decompose_and_embed failed (skipping): #{inspect(error)}")
+      :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private: Semantic edges
+  # ---------------------------------------------------------------------------
+
+  # Emits "mentions" (context -> entity) and "co_occurs_with" (entity -> entity)
+  # edges via Graph.assert_edge. These use different predicates than the
+  # structural "mentioned_in" / "co_occurs" edges written by insert_context, so
+  # they complement rather than duplicate the existing graph.
+  # Never fails the pipeline.
+  defp emit_semantic_edges(%Signal{} = signal, %Context{} = context, %ScopeEnvelope{} = scope) do
+    entities =
+      (signal.entities || [])
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.uniq()
+
+    ws_opts = [workspace_id: scope.workspace_id]
+
+    # context --mentions--> entity
+    Enum.each(entities, fn entity ->
+      Graph.assert_edge(context.id, entity, "mentions", ws_opts)
+    end)
+
+    # entity --co_occurs_with--> entity (unordered pairs)
+    entities
+    |> co_occurrence_pairs()
+    |> Enum.each(fn {a, b} ->
+      Graph.assert_edge(a, b, "co_occurs_with", ws_opts)
+      Graph.assert_edge(b, a, "co_occurs_with", ws_opts)
+    end)
+
+    :ok
+  rescue
+    error ->
+      Logger.warning("[Intake] emit_semantic_edges failed (skipping): #{inspect(error)}")
+      :ok
+  end
+
+  defp emit_semantic_edges(_signal, _context, _scope), do: :ok
+
+  defp co_occurrence_pairs([]), do: []
+  defp co_occurrence_pairs([_]), do: []
+
+  defp co_occurrence_pairs(entities) do
+    for {a, i} <- Enum.with_index(entities),
+        {b, j} <- Enum.with_index(entities),
+        i < j,
+        do: {a, b}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private: Skeleton detail objects
+  # ---------------------------------------------------------------------------
+
+  # Genres whose skeleton sections map naturally to step-level MDOs.
+  @skeleton_detail_genres ~w[transcript decision-log]
+
+  # Creates one MemoryDetailObject per skeleton section for structured genres.
+  # Uses the source_package as parent so the MDO hierarchy is:
+  # source_package -> step (section name).
+  # Only runs when the genre has a meaningful skeleton AND the content is
+  # non-empty. Purely additive — never fails the pipeline.
+  defp persist_skeleton_detail_objects(
+         %Signal{} = signal,
+         %SourcePackage{} = source_package,
+         %ScopeEnvelope{} = scope
+       ) do
+    genre = signal.genre || ""
+
+    if genre in @skeleton_detail_genres do
+      sections = Skeleton.sections_for(genre)
+
+      sections
+      |> Enum.with_index()
+      |> Enum.each(fn {section, idx} ->
+        attrs = %{
+          tenant_id: scope.tenant_id,
+          workspace_id: scope.workspace_id,
+          parent_object_type: "source_package",
+          parent_object_id: source_package.id,
+          detail_type: "step",
+          detail_order: idx,
+          detail_text: "section: #{section.name}",
+          action_class: "skeleton_section",
+          source_package_links: [source_package.id],
+          metadata: %{
+            genre: genre,
+            section_name: section.name,
+            required: section.required,
+            auto: section.auto
+          }
+        }
+
+        case MemoryCoreStore.insert_memory_detail_object(attrs) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "[Intake] MemoryDetailObject (skeleton) persist failed (skipping): #{inspect(reason)}"
+            )
+
+            :ok
+        end
+      end)
+    end
+
+    :ok
+  rescue
+    error ->
+      Logger.warning("[Intake] persist_skeleton_detail_objects failed (skipping): #{inspect(error)}")
+      :ok
+  end
+
   defp load_topology do
     case Routing.load() do
       {:ok, t} -> t
       {:error, _} -> %{endpoints: %{}, root_path: nil}
     end
+  end
+
+  # Entity names from the canonical Topology.Node table. Includes each node's
+  # full name plus its first token (so "Pedro Afonso" also matches "Pedro").
+  # Resilient: any failure yields [] so intake never breaks on a topology read.
+  defp db_entity_names do
+    nodes =
+      case OptimalEngine.Topology.Node.list() do
+        {:ok, list} -> list
+        list when is_list(list) -> list
+        _ -> []
+      end
+
+    nodes
+    |> Enum.flat_map(fn node ->
+      name = Map.get(node, :name) || ""
+      first = name |> String.split(" ") |> List.first("")
+      [name, first]
+    end)
+    |> Enum.reject(&(String.length(&1) < 3))
+    |> Enum.uniq()
+  rescue
+    _ -> []
   end
 
   defp topology_entities(topology) do

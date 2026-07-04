@@ -1,13 +1,16 @@
 defmodule OptimalEngine.Connectors.Adapters.GitHub do
   @moduledoc """
-  GitHub connector — issues, PRs, discussions, commits, wiki.
+  GitHub connector -- issues, PRs, discussions, commits, wiki.
 
   ## Required config keys
     * `:org_or_user`, `:repos` (list of `"name"` or `"*"` for all)
 
   ## Credentials
-    * `:pat` — personal access token **or**
+    * `:pat` -- personal access token **or**
     * `:app_id` + `:installation_id` + `:private_key_pem` (GitHub App)
+
+  ## Cursor shape
+  ISO-8601 timestamp (`since` param). Initial sync: `nil` (fetches last 30 days).
   """
 
   use OptimalEngine.Connectors.Adapters.Base,
@@ -16,6 +19,11 @@ defmodule OptimalEngine.Connectors.Adapters.GitHub do
     auth_scheme: :token,
     required_keys: [:org_or_user, :repos],
     credential_keys: []
+
+  alias OptimalEngine.Connectors.HTTP
+
+  @base_url "https://api.github.com"
+  @page_size 100
 
   @impl true
   def init(config) do
@@ -28,7 +36,40 @@ defmodule OptimalEngine.Connectors.Adapters.GitHub do
   end
 
   @impl true
-  def sync(_state, _cursor), do: {:error, :not_implemented}
+  def sync(state, cursor) do
+    org = pick(state, :org_or_user)
+    repos = pick(state, :repos, [])
+    since = cursor || default_since()
+    token = pick(state, :pat)
+    headers = auth_headers(token)
+
+    repo_list =
+      case repos do
+        ["*"] -> fetch_repos(org, headers)
+        list when is_list(list) -> list
+        _ -> []
+      end
+
+    {signals, last_ts} =
+      Enum.reduce(repo_list, {[], since}, fn repo, {acc_signals, acc_ts} ->
+        case fetch_issues(org, repo, since, headers) do
+          {:ok, items} ->
+            new_signals = Enum.flat_map(items, fn item ->
+              case transform(item) do
+                {:ok, s} -> [s]
+                _ -> []
+              end
+            end)
+            new_ts = latest_ts(items, acc_ts)
+            {acc_signals ++ new_signals, new_ts}
+
+          {:error, _} ->
+            {acc_signals, acc_ts}
+        end
+      end)
+
+    {:ok, %{signals: signals, cursor: last_ts}}
+  end
 
   @impl true
   def transform(raw) when is_map(raw) do
@@ -47,6 +88,8 @@ defmodule OptimalEngine.Connectors.Adapters.GitHub do
      })}
   end
 
+  # ---- private ----------------------------------------------------------------
+
   defp require_github_auth(config) do
     pat = Map.get(config, "pat") || Map.get(config, :pat)
 
@@ -61,5 +104,49 @@ defmodule OptimalEngine.Connectors.Adapters.GitHub do
       app? -> :ok
       true -> {:error, :missing_credentials}
     end
+  end
+
+  defp auth_headers(nil), do: []
+  defp auth_headers(token), do: [{"authorization", "token #{token}"}]
+
+  defp fetch_repos(org, headers) do
+    url = "#{@base_url}/orgs/#{org}/repos?per_page=#{@page_size}"
+
+    case HTTP.get_json(url, headers: headers) do
+      {:ok, %{status: 200, body: repos}} when is_list(repos) ->
+        Enum.map(repos, & &1["name"])
+
+      _ ->
+        []
+    end
+  end
+
+  defp fetch_issues(org, repo, since, headers) do
+    url =
+      "#{@base_url}/repos/#{org}/#{repo}/issues" <>
+        "?state=all&sort=updated&direction=desc&since=#{since}&per_page=#{@page_size}"
+
+    case HTTP.get_json(url, headers: headers) do
+      {:ok, %{status: 200, body: items}} when is_list(items) -> {:ok, items}
+      {:ok, %{status: 401}} -> {:error, :auth_expired}
+      {:ok, %{status: 429}} -> {:error, :rate_limited}
+      {:ok, %{status: status}} -> {:error, {:http, status}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp default_since do
+    DateTime.utc_now()
+    |> DateTime.add(-30 * 86_400, :second)
+    |> DateTime.to_iso8601()
+  end
+
+  defp latest_ts([], current), do: current
+
+  defp latest_ts(items, current) do
+    items
+    |> Enum.map(& &1["updated_at"])
+    |> Enum.reject(&is_nil/1)
+    |> Enum.max(fn -> current end)
   end
 end

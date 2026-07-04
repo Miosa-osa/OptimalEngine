@@ -25,19 +25,17 @@ Does the user want a full contextual snapshot to seed an agent system prompt?
 
 ---
 
-## /api/rag — Ask (wiki-first open question)
+## /api/rag — Ask With Governed Context
 
 **When:** any natural-language question where you want the best possible answer from organizational memory.
 
 **How it works:**
-1. `IntentAnalyzer` decodes the query (intent type, entities, temporal scope)
-2. `Wiki.find` looks for a matching curated page (Tier 3)
-3. If wiki answers it: return wiki body + inline citations — no retriever hits
-4. If wiki doesn't answer: `SearchEngine.search` (BM25 + vector + graph_boost + intent_match + cluster_expand + temporal_decay)
-5. `ContextAssembler` fits chunks to token budget, prefers coarsest scale
-6. `Composer` formats for target model
-
-**Wiki-hit rate:** most questions about facts the engine has seen before are answered from the wiki without touching the retriever. This is the key difference vs classical RAG.
+1. Resolve actor, tenant, workspace, and receiver scope.
+2. Decode the query intent, entities, and temporal scope.
+3. Assemble governed context from Memory Core state, search/index projections,
+   and wiki/export projections where useful.
+4. Apply authorization and filtering before delivery.
+5. Format the resulting Context Package for the receiver/model.
 
 ```bash
 # Markdown output (good for humans + generic LLMs)

@@ -1,8 +1,9 @@
 defmodule Mix.Tasks.Optimal.Index do
-  @shortdoc "Full reindex of all OptimalOS markdown files"
+  @shortdoc "Full reindex of Optimal Engine workspace projection files"
   @moduledoc """
-  Crawls the OptimalOS directory, classifies all supported file types,
-  and persists contexts to the SQLite store at `.system/index.db`.
+  Crawls the configured Optimal Engine workspace projection directory,
+  classifies supported file types, and persists searchable context to the
+  configured store.
 
   Supported types:
   - Markdown (.md)         → :signal (org folders) or :resource (docs/)

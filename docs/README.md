@@ -13,6 +13,11 @@ projections.
 
 Read these in order:
 
+0. [Agent boot](../AGENTS.md)
+   The repo-level boot contract for agents: canonical repo, local startup,
+   runtime data boundary, store model, isolation rules, and verification before
+   push.
+
 1. [Getting started](guides/getting-started.md)
    Install, run the engine, create a workspace, initiate from a messy dump, and
    inspect the result.
@@ -33,51 +38,60 @@ Read these in order:
    Which substrate stores what, which layer owns meaning, and which surfaces
    display/control the state.
 
-6. [Installation and deployment](guides/installation-and-deployment.md)
+6. [Store and layer reality](guides/store-and-layer-reality.md)
+   Plain-language explanation of what actually runs, which stores are required,
+   which are optional, how RAG and graph views fit, and how to verify each layer.
+
+7. [Installation and deployment](guides/installation-and-deployment.md)
    Local CLI setup, Docker, production/organization setup, store roles,
    multimodality profiles, and enterprise readiness.
 
-7. [Signal theory](concepts/signal-theory.md)
+8. [Signal theory](concepts/signal-theory.md)
    How the engine breaks noisy input into Mode, Genre, Type, Format, and
    Structure before routing, extracting, packaging, or retrieving it.
 
-8. [Workspace filesystem](guides/workspace-filesystem.md)
+9. [Workspace filesystem](guides/workspace-filesystem.md)
    What the markdown/file projection looks like and how edits flow back into
    governed engine state.
 
-9. [Scope switching](guides/scope-switching.md)
+10. [Scope switching](guides/scope-switching.md)
    How organization, workspace, Node, and Active Memory Pool scope affect
    permissions, retrieval, routing, tools, and exports.
 
-10. [Naming and aliases](guides/naming-and-aliases.md)
+11. [Naming and aliases](guides/naming-and-aliases.md)
    How user language maps to canonical engine objects without creating routing
    noise.
 
-11. [Packages and exports](guides/packages-and-exports.md)
+12. [Packages and exports](guides/packages-and-exports.md)
    Where receiver/channel bundles live, how they differ from exports, and why
    Node-owned packages stay under Nodes.
 
-12. [Integrations and imports](guides/integrations-and-imports.md)
+13. [Integrations and imports](guides/integrations-and-imports.md)
    How to inventory existing systems, connect common communication channels,
    import old context, and define recurring package types.
 
-13. [Agent and CLI SOP](guides/agent-cli-sop.md)
+14. [Agent and CLI SOP](guides/agent-cli-sop.md)
    How a human, Codex, Claude Code, an MCP client, a script, or an app should
    operate the system without bypassing governance.
 
-14. [Tool surfaces and loops](guides/tool-surfaces-and-loops.md)
+15. [Tool surfaces and loops](guides/tool-surfaces-and-loops.md)
    When to use CLI, MCP, A2A, APIs, connectors, scripts, and scheduled jobs,
    and how self-updating loops feed back into memory.
 
-15. [Agentic loops](guides/agentic-loops.md)
+16. [Interfaces and publishing](guides/interfaces-and-publishing.md)
+   How custom apps, dashboards, MCP clients, public links, static sites,
+   package delivery flows, and deployment tools should sit on top of the
+   backend without becoming a second source of truth.
+
+17. [Agentic loops](guides/agentic-loops.md)
    How goal-driven and scheduled loops use context, tools, validation gates,
    stop conditions, observations, workflow traces, and review.
 
-16. [Backend readiness](reference/backend-readiness.md)
+18. [Backend readiness](reference/backend-readiness.md)
    What is actually built in the backend, which stores own what, which checks
    prove it, and what still needs hardening.
 
-17. [Build goal alignment](reference/build-goal-alignment.md)
+19. [Build goal alignment](reference/build-goal-alignment.md)
    What is built now, what is only a spine, what still needs work, and which
    tests/probes prove it.
 

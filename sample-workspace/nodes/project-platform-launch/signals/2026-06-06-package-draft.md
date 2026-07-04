@@ -8,3 +8,4 @@ source_type: draft
 
 A partner update package was drafted for the launch. It should include current
 scope, accepted requirements, open blockers, and the next review date.
+

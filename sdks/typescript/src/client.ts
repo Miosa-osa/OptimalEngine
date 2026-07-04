@@ -102,6 +102,104 @@ export class OptimalEngine {
   }
 
   // ---------------------------------------------------------------------------
+  // Lifecycle — drive the engine, not just read it.
+  // ingest -> source -> signal -> claim -> fact -> memory (+ chunks, embeddings,
+  // episodes, semantic edges). assemble -> MCTS tiered context. createNode ->
+  // topology gazetteer used for entity extraction.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Ingest raw content into a workspace's knowledge. Runs the full intake
+   * lifecycle: classify, route, decompose, embed, extract claims, episodes,
+   * and semantic graph edges.
+   */
+  ingest(
+    text: string,
+    opts: {
+      workspace?: string;
+      genre?: string;
+      title?: string;
+      node?: string;
+      extractClaims?: boolean;
+    } = {},
+  ): Promise<{
+    ok: boolean;
+    signal_id: string;
+    genre: string;
+    type: string;
+    entities: string[];
+    source_package_id?: string;
+  }> {
+    const workspace = opts.workspace ?? this.defaultWorkspace;
+    return this.http.post("/api/ingest", {
+      text,
+      ...(workspace !== undefined ? { workspace } : {}),
+      ...(opts.genre !== undefined ? { genre: opts.genre } : {}),
+      ...(opts.title !== undefined ? { title: opts.title } : {}),
+      ...(opts.node !== undefined ? { node: opts.node } : {}),
+      ...(opts.extractClaims !== undefined
+        ? { extract_claims: opts.extractClaims }
+        : {}),
+    });
+  }
+
+  /**
+   * Assemble budget-aware, L0-L3 tiered context for a query via MCTS selection.
+   * This is what an agent/app should call to get a Context Package instead of
+   * loose search hits.
+   */
+  assemble(
+    query: string,
+    opts: {
+      workspace?: string;
+      tierBudgets?: { l0: number; l1: number; l2: number };
+    } = {},
+  ): Promise<{
+    l0: unknown;
+    l1: string;
+    l2: string;
+    l3?: string;
+    total_tokens: number;
+    sources: unknown[];
+    mcts_metadata?: {
+      candidate_count: number;
+      selected_sources: unknown[];
+      mcts_enabled: boolean;
+    };
+  }> {
+    const workspace = opts.workspace ?? this.defaultWorkspace;
+    return this.http.post("/api/assemble", {
+      query,
+      ...(workspace !== undefined ? { workspace } : {}),
+      ...(opts.tierBudgets !== undefined
+        ? { tier_budgets: opts.tierBudgets }
+        : {}),
+    });
+  }
+
+  /**
+   * Upsert a topology node (person, entity, project, ...). Node names feed the
+   * gazetteer that drives entity extraction and semantic graph edges, so seed
+   * a workspace's people/orgs here.
+   */
+  createNode(
+    name: string,
+    kind: string,
+    opts: { workspace?: string; slug?: string; description?: string } = {},
+  ): Promise<{ ok: boolean; id: string; slug: string; kind: string }> {
+    const workspace = opts.workspace ?? this.defaultWorkspace;
+    return this.http.post("/api/nodes", {
+      name,
+      kind,
+      ...(workspace !== undefined ? { workspace } : {}),
+      ...(opts.slug !== undefined ? { slug: opts.slug } : {}),
+      ...(opts.description !== undefined
+        ? { description: opts.description }
+        : {}),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // System
   // ---------------------------------------------------------------------------
 

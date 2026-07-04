@@ -115,8 +115,13 @@ defmodule OptimalEngine.Retrieval.Search do
     # load / cold start) we skip the whole hybrid path and serve
     # FTS-only results so retrieval stays sub-second instead of
     # queuing behind a slow embed.
+    # Per-call override: callers (e.g. the RRF fusion in ContextAssembler)
+    # can force a pure FTS list with `vector_enabled: false` so they get a
+    # genuinely independent lexical ranking to fuse against.
+    vector_allowed = Keyword.get(opts, :vector_enabled, true)
+
     raw_result =
-      if hybrid_enabled?() and Ollama.embed_healthy?() do
+      if vector_allowed and hybrid_enabled?() and Ollama.embed_healthy?() do
         case do_hybrid_search(query, opts, state.topology) do
           {:ok, _} = ok -> ok
           {:error, _} -> do_search(query, opts, state.topology)
@@ -247,7 +252,8 @@ defmodule OptimalEngine.Retrieval.Search do
         {:ok, query_embedding} when is_list(query_embedding) and query_embedding != [] ->
           vector_opts = [
             limit: limit * 3,
-            min_similarity: 0.1
+            min_similarity: 0.1,
+            workspace_id: Keyword.get(opts, :workspace_id, "default")
           ]
 
           # Add type/node filters if present in opts
@@ -309,7 +315,7 @@ defmodule OptimalEngine.Retrieval.Search do
         case Map.get(fts_lookup, id) do
           nil ->
             # This result came from vector search only — need to load the context
-            case load_context(id) do
+            case load_context(id, Keyword.get(opts, :workspace_id, "default")) do
               {:ok, ctx} -> %{ctx | score: Float.round(score, 4)}
               _ -> nil
             end
@@ -330,7 +336,7 @@ defmodule OptimalEngine.Retrieval.Search do
       do_search(query, opts, topology)
   end
 
-  defp load_context(id) do
+  defp load_context(id, workspace_id) do
     sql = """
     SELECT id, uri, type, path, title,
       l0_abstract, l1_overview, content,
@@ -338,10 +344,10 @@ defmodule OptimalEngine.Retrieval.Search do
       node, sn_ratio, entities,
       created_at, modified_at, valid_from, valid_until, supersedes,
       routed_to, metadata, workspace_id
-    FROM contexts WHERE id = ?1
+    FROM contexts WHERE id = ?1 AND workspace_id = ?2
     """
 
-    case Store.raw_query(sql, [id]) do
+    case Store.raw_query(sql, [id, workspace_id]) do
       {:ok, [row]} -> {:ok, Context.from_row(row)}
       _ -> {:error, :not_found}
     end

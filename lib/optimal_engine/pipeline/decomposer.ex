@@ -98,7 +98,36 @@ defmodule OptimalEngine.Pipeline.Decomposer do
   def decompose_and_store(%ParsedDoc{} = doc, opts \\ []) do
     with {:ok, tree} <- decompose(doc, opts),
          :ok <- OptimalEngine.Store.insert_chunks(tree.chunks) do
+      maybe_embed_chunks(tree, opts)
       {:ok, tree}
+    end
+  end
+
+  # Phase 5 connection: after chunks land in the store, embed them and persist
+  # to `chunk_embeddings` so semantic search has vectors. Gated by config flag
+  # (`config :optimal_engine, :embed, on_ingest: true`) and the per-call
+  # `:skip_embed` opt. Failures (e.g. Ollama down) are non-fatal — chunks are
+  # still stored; backfill via `mix optimal.embed_backfill` later.
+  defp maybe_embed_chunks(tree, opts) do
+    cond do
+      Keyword.get(opts, :skip_embed, false) ->
+        :ok
+
+      not OptimalEngine.Pipeline.Embedder.embed_on_ingest?() ->
+        :ok
+
+      true ->
+        case OptimalEngine.Pipeline.Embedder.embed_and_store(tree, opts) do
+          {:ok, %{embedded: n, errors: errs}} ->
+            require Logger
+            Logger.debug("[Decomposer] embedded #{n} chunks, #{length(errs)} skipped")
+            :ok
+
+          {:error, reason} ->
+            require Logger
+            Logger.warning("[Decomposer] embed_and_store failed: #{inspect(reason)}")
+            :ok
+        end
     end
   end
 

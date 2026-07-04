@@ -32,7 +32,7 @@ fail() { echo -e "${RED}[FAIL] $*${RESET}" >&2; exit 1; }
 info "Checking engine at $ENGINE ..."
 STATUS=$(curl -sf "$ENGINE/api/status" 2>/dev/null || echo "{}")
 if [ "$STATUS" = "{}" ]; then
-  fail "Engine not reachable at $ENGINE. Start it with: iex -S mix (ensure api enabled in config)"
+  fail "Engine not reachable at $ENGINE. Start it with: make dev"
 fi
 ok "Engine is up"
 

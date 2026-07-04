@@ -34,6 +34,7 @@ Erlang/OTP 26+
 Elixir ~> 1.17
 Git
 C toolchain for the SQLite NIF
+Snappy for the RocksDB knowledge graph backend
 ```
 
 Run:
@@ -41,8 +42,20 @@ Run:
 ```bash
 git clone https://github.com/Miosa-osa/OptimalEngine.git
 cd OptimalEngine
-mix deps.get
-mix compile
+brew install snappy
+make install
+make bootstrap
+make dev
+```
+
+`make dev` runs `scripts/run-engine.sh`.
+The launcher starts the HTTP API, uses the repo checkout as the runtime root, and creates `.optimal/connector_key` when `CONNECTOR_KEY` is not already set.
+The generated key and `.optimal/` runtime files are local machine state, not repository content.
+
+Verify:
+
+```bash
+curl http://localhost:4200/api/health
 mix optimal.reality_check
 ```
 
@@ -83,8 +96,12 @@ The default local paths are:
 ```text
 .optimal/index.db        SQLite runtime store
 .optimal/cache/          rebuildable local cache
+.optimal/connector_key   local API/connector secret
 workspace files          markdown/wiki/package/export projection
 ```
+
+`.optimal/` is ignored by git.
+Do not commit local databases, WAL files, cache, connector keys, workspace runtime state, or imported private data.
 
 ## Docker
 

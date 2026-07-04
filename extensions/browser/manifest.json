@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Optimal Engine — Web Clipper",
-  "version": "0.1.0",
-  "description": "Clip pages and selections to your second brain",
+  "version": "0.3.0",
+  "description": "Clip pages and selections into an Optimal Engine workspace",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",

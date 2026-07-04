@@ -18,7 +18,7 @@ const ACTION_DESCRIPTIONS: Record<RecallAction, string> = {
 export function registerRecall(server: McpServer): void {
   server.tool(
     "recall",
-    "Typed cued-recall over the workspace. Action: 'actions' (past commitments by topic), 'who' (ownership lookup), 'when' (schedule lookup), 'where' (location/file lookup), 'owns' (open commitments by actor). Each is shaped for one of the 5 enterprise memory failure patterns from Engramme's research.",
+    "Typed cued recall over a workspace. Use for ownership, commitments, timing, location/file lookup, and open actor responsibilities when a full synthesis answer is not needed.",
     {
       action: z
         .enum(RECALL_ACTIONS)

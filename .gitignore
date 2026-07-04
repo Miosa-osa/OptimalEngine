@@ -50,11 +50,14 @@ erl_crash.dump
 /optimal.exe
 /burrito_out/
 
-# Per-workspace runtime data dirs created by Workspace.create
+# Per-workspace runtime data dirs created by Workspace.create / intake
 /engineering/
 /sales/
 /research/
 /nodes/
+/inbox/
+/default-*/
+/team/
 
 # Test artifacts
 /.optimal/index*.db*

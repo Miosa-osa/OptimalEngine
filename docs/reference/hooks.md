@@ -37,3 +37,4 @@ SessionStart
 
 This gives Codex, Claude Code, MCP clients, scripts, and app agents the same
 operating contract.
+

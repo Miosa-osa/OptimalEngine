@@ -1,12 +1,15 @@
 defmodule OptimalEngine.Connectors.Adapters.Linear do
   @moduledoc """
-  Linear connector — issues, comments, cycles, projects.
+  Linear connector - issues, comments, cycles, projects.
 
   ## Required config keys
     * `:team_ids` (list of Linear team UUIDs)
 
   ## Credentials
-    * `:api_key` — `lin_api_…`
+    * `:api_key` - `lin_api_...`
+
+  ## Cursor shape
+  Opaque pagination cursor from Linear's GraphQL `pageInfo.endCursor`. Initial sync: `nil`.
   """
 
   use OptimalEngine.Connectors.Adapters.Base,
@@ -16,8 +19,76 @@ defmodule OptimalEngine.Connectors.Adapters.Linear do
     required_keys: [:team_ids],
     credential_keys: [:api_key]
 
+  alias OptimalEngine.Connectors.HTTP
+
+  @graphql_url "https://api.linear.app/graphql"
+  @page_size 50
+
   @impl true
-  def sync(_state, _cursor), do: {:error, :not_implemented}
+  def sync(state, cursor) do
+    api_key = pick(state, :api_key)
+    team_ids = pick(state, :team_ids, [])
+    headers = [{"authorization", api_key}, {"content-type", "application/json"}]
+
+    team_filter = Enum.map_join(team_ids, ", ", &"\"#{&1}\"")
+
+    query = """
+    query($after: String) {
+      issues(
+        filter: { team: { id: { in: [#{team_filter}] } } }
+        first: #{@page_size}
+        after: $after
+        orderBy: updatedAt
+      ) {
+        nodes {
+          id
+          title
+          description
+          updatedAt
+          assignee { name }
+          creator { name }
+          state { name }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+    """
+
+    body = %{"query" => query, "variables" => %{"after" => cursor}}
+
+    case HTTP.post_json(@graphql_url, body, headers: headers) do
+      {:ok, %{status: 200, body: %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => page_info}}}}} ->
+        signals =
+          Enum.flat_map(nodes, fn node ->
+            case transform(node) do
+              {:ok, s} -> [s]
+              _ -> []
+            end
+          end)
+
+        next_cursor =
+          if page_info["hasNextPage"],
+            do: page_info["endCursor"],
+            else: nil
+
+        {:ok, %{signals: signals, cursor: next_cursor}}
+
+      {:ok, %{status: 401}} ->
+        {:error, :auth_expired}
+
+      {:ok, %{status: 429}} ->
+        {:error, :rate_limited}
+
+      {:ok, %{status: 200, body: %{"errors" => [%{"extensions" => %{"type" => "AUTHENTICATION"}} | _]}}} ->
+        {:error, :auth_expired}
+
+      {:ok, %{status: status}} ->
+        {:error, {:http, status}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   @impl true
   def transform(raw) when is_map(raw) do

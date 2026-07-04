@@ -32,6 +32,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
   """
 
   alias OptimalEngine.Embed.{Ollama, Whisper}
+  alias OptimalEngine.MemoryCore.GovernedModel
   alias OptimalEngine.Pipeline.Decomposer.{Chunk, ChunkTree}
   alias OptimalEngine.Pipeline.Embedder.Embedding
 
@@ -79,12 +80,75 @@ defmodule OptimalEngine.Pipeline.Embedder do
     {:ok, Enum.reverse(embeddings), %{errors: Enum.reverse(errors)}}
   end
 
+  @doc """
+  Embed every chunk in a tree and persist the vectors to `chunk_embeddings`.
+
+  This is the connecting tissue between the in-memory Phase 5 embedder and the
+  store: `embed_tree/2` produces `%Embedding{}` structs but never persists them;
+  this function maps each embedding back onto its originating chunk (to inherit
+  `workspace_id`/`tenant_id` — keeping the embedding row in the **current**
+  chunk-keyed scope scheme, joinable to contexts via `chunks.signal_id`) and
+  writes the batch via `OptimalEngine.Store.insert_embeddings/1`.
+
+  Returns `{:ok, %{embedded: n, errors: [...]}}` or `{:error, reason}` if the
+  store write fails. Embeddings whose providers were unreachable are reported in
+  `:errors` and simply not persisted (graceful degradation).
+
+  Gated by `config :optimal_engine, :embed, on_ingest: true` — see
+  `embed_on_ingest?/0`. Callers in the ingest path should check that flag.
+  """
+  @spec embed_and_store(ChunkTree.t(), keyword()) ::
+          {:ok, %{embedded: non_neg_integer(), errors: [{String.t(), term()}]}}
+          | {:error, term()}
+  def embed_and_store(%ChunkTree{chunks: chunks} = tree, opts \\ []) do
+    {:ok, embeddings, %{errors: errors}} = embed_tree(tree, opts)
+
+    chunk_by_id = Map.new(chunks, fn c -> {c.id, c} end)
+    rows = Enum.map(embeddings, &embedding_row(&1, chunk_by_id))
+
+    case OptimalEngine.Store.insert_embeddings(rows) do
+      :ok -> {:ok, %{embedded: length(rows), errors: errors}}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc """
+  Build a persistable embedding row from an `%Embedding{}`, inheriting
+  `workspace_id`/`tenant_id` from the originating chunk when available.
+  """
+  @spec embedding_row(Embedding.t(), %{String.t() => Chunk.t()}) :: map()
+  def embedding_row(%Embedding{} = emb, chunk_by_id) do
+    chunk = Map.get(chunk_by_id, emb.chunk_id)
+
+    %{
+      chunk_id: emb.chunk_id,
+      tenant_id: emb.tenant_id,
+      model: emb.model,
+      modality: emb.modality,
+      dim: emb.dim,
+      vector: emb.vector,
+      workspace_id: chunk && Map.get(chunk, :workspace_id) || "default"
+    }
+  end
+
+  @doc """
+  Whether embedding should run automatically on the ingest path.
+
+  Config: `config :optimal_engine, :embed, on_ingest: true` (default `true`).
+  """
+  @spec embed_on_ingest?() :: boolean()
+  def embed_on_ingest? do
+    :optimal_engine
+    |> Application.get_env(:embed, [])
+    |> Keyword.get(:on_ingest, true)
+  end
+
   # ─── dispatch ────────────────────────────────────────────────────────────
 
   # Text-ish modalities: plain text embedding
   defp dispatch(%Chunk{modality: m, text: text}, opts)
        when m in [:text, :code, :data, :mixed] and is_binary(text) and text != "" do
-    with {:ok, vector} <- Ollama.embed_text(text, opts) do
+    with {:ok, vector} <- governed_embed_text(text, opts) do
       {:ok, vector, model_name(opts, :text), m}
     end
   end
@@ -98,7 +162,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
     cond do
       is_binary(asset_path) and File.exists?(asset_path) ->
-        case Ollama.embed_image(asset_path, opts) do
+        case governed_embed_image(asset_path, opts) do
           {:ok, vector} -> {:ok, vector, model_name(opts, :image), :image}
           {:error, _} = err -> err
         end
@@ -122,7 +186,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
   defp dispatch(%Chunk{modality: :audio, text: transcript}, opts)
        when is_binary(transcript) and transcript != "" do
     # Existing transcript → text embed.
-    with {:ok, vector} <- Ollama.embed_text(transcript, opts) do
+    with {:ok, vector} <- governed_embed_text(transcript, opts) do
       {:ok, vector, "whisper+" <> model_name(opts, :text), :audio}
     end
   end
@@ -135,7 +199,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
       is_binary(asset_path) and File.exists?(asset_path) ->
         case Whisper.transcribe(asset_path, opts) do
           {:ok, %{text: text}} when text != "" ->
-            with {:ok, vector} <- Ollama.embed_text(text, opts) do
+            with {:ok, vector} <- governed_embed_text(text, opts) do
               {:ok, vector, "whisper+" <> model_name(opts, :text), :audio}
             end
 
@@ -156,7 +220,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
     cond do
       is_binary(asset_path) and File.exists?(asset_path) and image_asset?(asset_path) ->
-        case Ollama.embed_image(asset_path, opts) do
+        case governed_embed_image(asset_path, opts) do
           {:ok, vector} -> {:ok, vector, "vision+" <> model_name(opts, :image), :video}
           {:error, _} -> fallback_text(chunk, opts, :video)
         end
@@ -178,7 +242,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   defp fallback_text(%Chunk{text: text}, opts, effective_modality)
        when is_binary(text) and text != "" do
-    with {:ok, vector} <- Ollama.embed_text(text, opts) do
+    with {:ok, vector} <- governed_embed_text(text, opts) do
       {:ok, vector, model_name(opts, :text), effective_modality}
     end
   end
@@ -187,6 +251,37 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   defp model_name(opts, :text), do: Keyword.get(opts, :text_model, @text_model)
   defp model_name(opts, :image), do: Keyword.get(opts, :vision_model, @vision_model)
+
+  # ─── governance-wrapped provider calls ─────────────────────────────────────
+  # Every external model call from this stage is routed through GovernedModel so
+  # it lands a model_call_run with provenance (model id) + latency + status.
+  # Fail-open: governance never alters or blocks the embedding result.
+
+  defp governed_embed_text(text, opts) do
+    model = model_name(opts, :text)
+
+    GovernedModel.call_model(
+      "embedder.embed_text",
+      %{"chars" => String.length(text)},
+      fn -> Ollama.embed_text(text, opts) end,
+      model_id: model,
+      model_task_type: "embedding",
+      workspace_id: Keyword.get(opts, :workspace_id, "default")
+    )
+  end
+
+  defp governed_embed_image(asset_path, opts) do
+    model = model_name(opts, :image)
+
+    GovernedModel.call_model(
+      "embedder.embed_image",
+      %{"asset_path" => asset_path},
+      fn -> Ollama.embed_image(asset_path, opts) end,
+      model_id: model,
+      model_task_type: "embedding",
+      workspace_id: Keyword.get(opts, :workspace_id, "default")
+    )
+  end
 
   @image_extensions ~w(.jpg .jpeg .png .gif .webp .bmp .tiff)
   defp image_asset?(path) when is_binary(path) do

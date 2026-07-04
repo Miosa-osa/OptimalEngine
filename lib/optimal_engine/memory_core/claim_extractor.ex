@@ -96,6 +96,8 @@ defmodule OptimalEngine.MemoryCore.ClaimExtractor do
         actor_id: Keyword.get(opts, :actor_id),
         evaluator_id: claim.evaluator_id,
         parser_id: string_opt(opts, :parser_id, "optimal_engine.memory_core.claim_extractor"),
+        model_id: string_or_nil(Keyword.get(opts, :model_id)),
+        model_version: string_or_nil(Keyword.get(opts, :model_version)),
         confidence_delta: claim.aggregate_confidence,
         precision_delta: claim.aggregate_precision,
         scoring_policy_version: ScoringPolicy.version(),
@@ -116,12 +118,94 @@ defmodule OptimalEngine.MemoryCore.ClaimExtractor do
         evidence_links: [source_ref]
       )
 
+    # Emit `depends_on` edges when the caller declares prerequisite claim IDs.
+    depends_on_edges =
+      opts
+      |> Keyword.get(:depends_on_ids, [])
+      |> List.wrap()
+      |> Enum.map(fn prereq_id ->
+        RelationshipEdge.between(
+          source_package,
+          {"claim", claim.id},
+          {"claim", to_string(prereq_id)},
+          "depends_on",
+          confidence: claim.aggregate_confidence,
+          precision_score: claim.aggregate_precision,
+          evidence_links: [claim_ref]
+        )
+      end)
+
+    # Detect conflicting accepted facts to emit `contradicts` edges.
+    # A conflict exists when an accepted fact shares subject_anchor +
+    # action_class with this claim but carries different object_anchor text.
+    # This is purely additive and never blocks the extraction pipeline.
+    contradicts_edges = build_contradicts_edges(claim, source_package)
+
     with :ok <- Store.insert_source_package(source_package),
          :ok <- Store.insert_claim(claim),
          :ok <- Store.insert_relationship_edge(edge),
+         :ok <- insert_edges(depends_on_edges),
+         :ok <- insert_edges(contradicts_edges),
          :ok <- Store.insert_derivation_entry(ledger) do
       {:ok, claim}
     end
+  end
+
+  # Query accepted facts for the same subject_anchor + action_class; emit a
+  # `contradicts` edge for each fact whose object_anchor differs from ours.
+  # Falls back to `{:ok, []}` on any error so the main pipeline is never blocked.
+  defp build_contradicts_edges(%Claim{} = claim, %SourcePackage{} = source_package) do
+    if present?(claim.subject_anchor) and present?(claim.action_class) do
+      # Query WITHOUT object_anchor so we find facts with the SAME subject+action
+      # but a DIFFERENT object — those are the conflicting ones.
+      probe = %{
+        workspace_id: claim.workspace_id,
+        subject_anchor: claim.subject_anchor,
+        action_class: claim.action_class,
+        object_anchor: nil
+      }
+
+      case Store.list_current_facts_for_claim(probe) do
+        {:ok, facts} ->
+          claim_ref = ref("claim", claim.id)
+
+          facts
+          |> Enum.filter(fn fact ->
+            present?(fact.object_anchor) and
+              present?(claim.object_anchor) and
+              fact.object_anchor != claim.object_anchor
+          end)
+          |> Enum.map(fn fact ->
+            RelationshipEdge.between(
+              source_package,
+              {"claim", claim.id},
+              {"fact", fact.id},
+              "contradicts",
+              confidence: claim.aggregate_confidence,
+              precision_score: claim.aggregate_precision,
+              evidence_links: [claim_ref]
+            )
+          end)
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp insert_edges([]), do: :ok
+
+  defp insert_edges(edges) do
+    Enum.reduce_while(edges, :ok, fn edge, :ok ->
+      case Store.insert_relationship_edge(edge) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
   end
 
   defp ref(type, id), do: DerivationLedgerEntry.object_ref(type, id)
@@ -138,4 +222,8 @@ defmodule OptimalEngine.MemoryCore.ClaimExtractor do
   defp string_or_nil(nil), do: nil
   defp string_or_nil(""), do: nil
   defp string_or_nil(value), do: to_string(value)
+
+  defp present?(nil), do: false
+  defp present?(""), do: false
+  defp present?(_), do: true
 end

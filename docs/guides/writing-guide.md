@@ -49,3 +49,4 @@ Stale after...
 ```
 
 That keeps human-readable writing aligned with the governed memory lifecycle.
+

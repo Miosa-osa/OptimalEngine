@@ -11,6 +11,7 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
   import Plug.Test
 
   alias OptimalEngine.API.Router
+  alias OptimalEngine.API.RateLimiter
   alias OptimalEngine.Context
   alias OptimalEngine.Store
 
@@ -53,6 +54,8 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
   end
 
   setup do
+    RateLimiter.reset()
+
     suffix = System.unique_integer([:positive])
     ws_a = "iso-ws-a-#{suffix}"
     ws_b = "iso-ws-b-#{suffix}"
@@ -141,7 +144,9 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
     end
 
     test "default workspace (no param) does not leak either workspace", ctx do
-      body = request(:get, "/api/graph") |> json_body()
+      conn = request(:get, "/api/graph")
+      assert conn.status == 200
+      body = json_body(conn)
 
       context_ids = Enum.map(body["contexts"], & &1["id"])
       refute ctx.a1.id in context_ids
@@ -226,9 +231,9 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
     end
 
     test "/api/optimal/nodes/:slug/files only lists the requested workspace's signals", ctx do
-      body =
-        request(:get, "/api/optimal/nodes/#{ctx.node}/files?workspace=#{ctx.ws_b}")
-        |> json_body()
+      conn = request(:get, "/api/optimal/nodes/#{ctx.node}/files?workspace=#{ctx.ws_b}")
+      assert conn.status == 200
+      body = json_body(conn)
 
       names = Enum.map(body["files"], & &1["name"])
       assert "B1 secret" in names

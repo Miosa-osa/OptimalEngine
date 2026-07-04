@@ -1,6 +1,6 @@
 {
   "name": "@miosa/optimal-engine",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Svelte components + hooks for embedding Optimal Engine in BusinessOS modules",
   "type": "module",
   "svelte": "./dist/index.js",

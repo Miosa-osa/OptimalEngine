@@ -46,3 +46,4 @@ useful assertion -> pending Claim
 accepted assertion -> Fact
 contextual meaning -> Memory Object
 ```
+
