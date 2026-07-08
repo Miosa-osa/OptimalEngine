@@ -680,24 +680,24 @@ curl http://localhost:4200/api/health
 mix optimal.reality_check
 ```
 
-Build the local `./optimal` command wrapper:
+Use the checked-in `bin/optimal` command wrapper:
 
 ```bash
-mix escript.build
-./optimal --help
-./optimal reality-check
+bin/optimal --help
+bin/optimal doctor
+bin/optimal reality-check
 ```
 
-That wrapper is for source checkouts. It delegates to `mix optimal.*` so native
-database dependencies load correctly. For production/API deployment, use the OTP
-release or container shape instead of treating the escript as the server binary.
+That wrapper is for source checkouts.
+It delegates to `mix optimal.*` so native database dependencies load correctly.
+For production/API deployment, use the OTP release or container shape instead of treating the checkout wrapper as the server binary.
 
 Create a markdown-operable workspace:
 
 ```bash
-mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
-mix optimal.setup my-workspace --name "My Workspace"
-mix optimal.topology --workspace default:my-workspace
+bin/optimal initiate my-workspace --name "My Workspace" --dump setup.md
+bin/optimal setup my-workspace --name "My Workspace"
+bin/optimal topology --workspace default:my-workspace
 ```
 
 Use `optimal.initiate` when starting from a messy dump. Use `optimal.setup` when
@@ -708,8 +708,8 @@ apps, MCP servers, remote agents, or scripts that connect over HTTP/API, mint a
 scoped API key:
 
 ```bash
-mix optimal.auth mint --name "Business OS" --workspace default:my-workspace
-mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+bin/optimal auth mint --name "Business OS" --workspace default:my-workspace
+bin/optimal auth env --name "Local Agent" --workspace default:my-workspace
 ```
 
 Render wiki/export projections:

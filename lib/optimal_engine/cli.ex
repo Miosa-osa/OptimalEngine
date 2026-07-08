@@ -84,6 +84,7 @@ defmodule OptimalEngine.CLI do
 
   @aliases %{
     "ingest_workspace" => "ingest-workspace",
+    "find" => "search",
     "context.refresh_stale" => "context.refresh-stale",
     "context-refresh-stale" => "context.refresh-stale",
     "context" => "context.refresh-stale",

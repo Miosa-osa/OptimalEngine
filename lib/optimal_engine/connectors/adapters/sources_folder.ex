@@ -6,8 +6,7 @@ defmodule OptimalEngine.Connectors.Adapters.SourcesFolder do
 
   Unlike the SaaS connectors (Slack, Gmail, …) this adapter reads no
   external API: its "external system" is a folder tree on disk. It is the
-  bridge that makes the OptimalOS raw-evidence backlog
-  (`OptimalOS/sources/` — meetings/ + highlight/) flow into the engine.
+  bridge that makes a local raw-evidence backlog flow into the engine.
 
   ## Required config keys
 
@@ -16,8 +15,8 @@ defmodule OptimalEngine.Connectors.Adapters.SourcesFolder do
 
   ## Config
 
-    * `:root` — directory to walk (default
-      `/Users/rhl/code/OptimalOS/sources`).
+    * `:root` — directory to walk.
+      Defaults to `OPTIMAL_ENGINE_SOURCES_ROOT`, then `./sources`.
     * `:glob` — file extension to match (default `".md"`).
     * `:default_genre` — genre stamped on files that match no genre rule
       (default `"note"`).
@@ -49,7 +48,7 @@ defmodule OptimalEngine.Connectors.Adapters.SourcesFolder do
     required_keys: [],
     credential_keys: []
 
-  @default_root "/Users/rhl/code/OptimalOS/sources"
+  @default_root System.get_env("OPTIMAL_ENGINE_SOURCES_ROOT", Path.expand("sources", File.cwd!()))
   @default_glob ".md"
   @default_genre "note"
   @default_genre_map [

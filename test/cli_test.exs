@@ -31,6 +31,9 @@ defmodule OptimalEngine.CLITest do
 
     assert {:ok, "ingest-workspace", Mix.Tasks.Optimal.IngestWorkspace} =
              CLI.resolve_subcommand("ingest_workspace")
+
+    assert {:ok, "search", Mix.Tasks.Optimal.Search} =
+             CLI.resolve_subcommand("find")
   end
 
   test "help text includes local setup and auth guidance" do
