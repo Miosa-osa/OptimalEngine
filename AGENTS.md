@@ -2,6 +2,8 @@
 
 This file is the boot contract for agents working in this repo.
 Read it before changing code, running the engine, or touching runtime data.
+Read `OPINIONS.md` before making setup, store, memory, API, CLI, or architecture decisions.
+Read `~/OPINIONS.md` when the task touches Roberto's broader technical or product viewpoints.
 
 ## Canonical Repo
 
@@ -117,6 +119,19 @@ git status --short --branch
 curl http://localhost:4200/api/health
 ```
 
+If this engine is being used from Roberto's private OptimalOS checkout, prefer the parent wrapper for operating tasks:
+
+```bash
+/Users/rhl/code/OptimalOS/.system/oe boot
+/Users/rhl/code/OptimalOS/.system/oe health
+/Users/rhl/code/OptimalOS/.system/oe find "query" <workspace>
+/Users/rhl/code/OptimalOS/.system/oe aware "important correction" <workspace>
+/Users/rhl/code/OptimalOS/.system/oe close "what changed and how verified" <workspace>
+```
+
+Use direct `mix optimal.*` commands only when developing or debugging the engine itself.
+Use the wrapper for agent memory, Roberto context, workspace retrieval, and BusinessOS integration checks.
+
 Then inspect the relevant workspace:
 
 ```bash
@@ -130,6 +145,17 @@ Agents should not directly write final Facts or rewrite topology without review 
 
 Use registered tools, connector grants, partition policy, and audit paths for external actions.
 Do not build a side memory system outside Optimal Engine.
+
+## Agent Docs In Parent Products
+
+BusinessOS, OptimalOS, and other apps that embed or connect to this engine must include agent instructions that explain:
+
+- BusinessOS owns app state, UI state, users, sessions, workspace records, and operational records.
+- Optimal Engine owns knowledge, memory, source packages, claims, facts, retrieval, graph, RAG, and context packages.
+- Every read and write must include explicit tenant, organization, and workspace scope.
+- Downloaded users use their own local bundled engine and must not read Roberto's private engine data.
+- Roberto's private agents use `/Users/rhl/code/OptimalOS/.system/oe` for Roberto/MIOSA/BusinessOS context.
+- Agents should run boot/search/capture/aware/close loops instead of treating memory as optional.
 
 ## Verification Before Push
 
