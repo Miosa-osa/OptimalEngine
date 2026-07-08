@@ -2,7 +2,7 @@
 # Stage 1 — builder
 # Compile deps and produce an OTP release via `mix release optimal`
 # ─────────────────────────────────────────────────────────────────────────────
-FROM hexpm/elixir:1.17.3-erlang-26.2.5-debian-bookworm-slim AS builder
+FROM hexpm/elixir:1.17.3-erlang-26.2.5-debian-bookworm-20260610-slim AS builder
 
 # Build-time tools: native extensions need gcc/make; libsqlite3-dev for exqlite
 RUN apt-get update -qq && \
