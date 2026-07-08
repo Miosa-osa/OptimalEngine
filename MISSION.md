@@ -8,4 +8,3 @@ It must support local-first developer use, production deployment, strict workspa
 
 The engine should make memory practical.
 Agents should be able to boot, search, ingest, classify, capture corrections, save decisions, and close the loop without inventing side channels.
-
