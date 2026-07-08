@@ -108,7 +108,8 @@ defmodule OptimalEngine.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => "https://github.com/Miosa-osa/OptimalEngine"},
-      files: ~w(lib priv config mix.exs README.md LICENSE)
+      files:
+        ~w(bin lib priv config docs mix.exs README.md LICENSE AGENTS.md MISSION.md RESOURCES.md NOTES.md OPINIONS.md)
     ]
   end
 end

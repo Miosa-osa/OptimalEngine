@@ -58,8 +58,7 @@ state. The workspace state should come from the engine.
 
 ## Local CLI Setup
 
-For local work, the `mix optimal.*` tasks and `./optimal` wrapper are the
-fastest control surface:
+For local work, the `mix optimal.*` tasks and `bin/optimal` wrapper are the fastest control surface:
 
 ```bash
 mix deps.get
@@ -70,13 +69,12 @@ mix optimal.topology --workspace default:my-workspace
 mix optimal.wiki render-tree --workspace default:my-workspace
 ```
 
-Build the wrapper when an agent or script should use one command name:
+Use the wrapper when an agent or script should use one command name:
 
 ```bash
-mix escript.build
-./optimal reality-check
-./optimal setup my-workspace --name "My Workspace"
-./optimal wiki render-tree --workspace default:my-workspace
+bin/optimal reality-check
+bin/optimal setup my-workspace --name "My Workspace"
+bin/optimal wiki render-tree --workspace default:my-workspace
 ```
 
 Local CLI commands are trusted local access to the configured store. They are

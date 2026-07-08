@@ -12,11 +12,13 @@ config :optimal_engine,
   api_rate_limit_per_minute: 10_000
 
 config :optimal_engine,
-  root_path: "/Users/rhl/Desktop/OptimalOS",
+  root_path: Path.expand("../tmp/optimal_engine_test_root", System.tmp_dir!()),
   db_path: "/tmp/optimal_engine_test_#{System.get_env("MIX_TEST_PARTITION", "0")}.db",
   cache_path: "/tmp/optimal_engine_test_cache",
-  topology_path: "/Users/rhl/Desktop/OptimalOS/.system/config.yaml",
-  topology_full_path: "/Users/rhl/Desktop/OptimalOS/topology.yaml"
+  topology_path:
+    Path.expand("../tmp/optimal_engine_test_root/.optimal/config.yaml", System.tmp_dir!()),
+  topology_full_path:
+    Path.expand("../tmp/optimal_engine_test_root/topology.yaml", System.tmp_dir!())
 
 config :optimal_engine, :api_rate_limit,
   default_capacity: 10_000,

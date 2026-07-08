@@ -27,22 +27,6 @@ config :optimal_engine, :ollama,
   vlm_timeout_ms: 60_000,
   timeout_ms: 30_000
 
-# Cloud LLM provider for text generation. When ANTHROPIC_API_KEY or
-# OPENAI_API_KEY is present in the environment (the desktop EngineManager
-# exports these from the user's saved Model connection), text generation routes
-# to that cloud API instead of Ollama; Ollama stays the default when no key is
-# set. Provider + API keys are read from the environment at call time (see
-# OptimalEngine.LLM) so a release picks up EngineManager-exported vars at
-# runtime. Values below are compile-time defaults for model names / endpoints;
-# env vars (OPTIMAL_LLM_PROVIDER, OPTIMAL_ANTHROPIC_MODEL, OPTIMAL_OPENAI_MODEL,
-# ANTHROPIC_BASE_URL, OPENAI_BASE_URL) override them at runtime.
-config :optimal_engine, :llm,
-  provider: System.get_env("OPTIMAL_LLM_PROVIDER"),
-  anthropic_model: "claude-opus-4-8",
-  openai_model: "gpt-4o",
-  max_tokens: 4_096,
-  timeout_ms: 60_000
-
 # Memory Core: when true, CLI/API intake extracts a pending Claim from each
 # accepted Signal (closing the Source -> Signal -> Claim break). Default ON.
 config :optimal_engine, :memory, auto_extract_claims: true
