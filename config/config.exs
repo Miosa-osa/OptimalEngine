@@ -3,13 +3,12 @@ import Config
 # Default paths point at the current directory; override in dev.exs / prod.exs
 # or via OPTIMAL_ENGINE_ROOT env var at runtime.
 config :optimal_engine,
-  root_path: System.get_env("OPTIMAL_ENGINE_ROOT", File.cwd!()),
-  db_path: System.get_env("OPTIMAL_ENGINE_DB", Path.join(File.cwd!(), ".optimal/index.db")),
-  cache_path: System.get_env("OPTIMAL_ENGINE_CACHE", Path.join(File.cwd!(), ".optimal/cache")),
+  root_path: System.get_env("OPTIMAL_ENGINE_ROOT", "."),
+  db_path: System.get_env("OPTIMAL_ENGINE_DB", ".optimal/index.db"),
+  cache_path: System.get_env("OPTIMAL_ENGINE_CACHE", ".optimal/cache"),
   topology_path:
-    System.get_env("OPTIMAL_ENGINE_TOPOLOGY", Path.join(File.cwd!(), ".optimal/config.yaml")),
-  topology_full_path:
-    System.get_env("OPTIMAL_ENGINE_TOPOLOGY_FULL", Path.join(File.cwd!(), "topology.yaml"))
+    System.get_env("OPTIMAL_ENGINE_TOPOLOGY", ".optimal/config.yaml"),
+  topology_full_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY_FULL", "topology.yaml")
 
 # API key authentication.
 # Set auth_required: true in production (or via OPTIMAL_AUTH_REQUIRED env var in runtime.exs).
@@ -51,7 +50,7 @@ config :optimal_engine, :knowledge,
   rocksdb_path:
     System.get_env(
       "OPTIMAL_KNOWLEDGE_ROCKSDB_PATH",
-      Path.join(File.cwd!(), ".optimal/knowledge-rocksdb")
+      ".optimal/knowledge-rocksdb"
     )
 
 config :optimal_engine, :retrieval,
