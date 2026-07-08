@@ -173,7 +173,7 @@ The local CLI is a trusted local control surface.
 
 ```text
 human/agent on the same machine
-  -> runs mix optimal.* or the local ./optimal wrapper
+  -> runs mix optimal.* or the local bin/optimal wrapper
   -> reads/writes the local configured store
   -> records actor/service metadata where the command supports it
 ```
@@ -201,12 +201,11 @@ mix optimal.auth list
 mix optimal.auth revoke <key-id>
 ```
 
-If the local `./optimal` wrapper was built in the checkout, the same commands
-can be run through it:
+The same commands can be run through the checked-in wrapper:
 
 ```bash
-./optimal auth mint --name "Business OS" --workspace default:my-workspace
-./optimal auth env --name "Local Agent" --workspace default:my-workspace
+bin/optimal auth mint --name "Business OS" --workspace default:my-workspace
+bin/optimal auth env --name "Local Agent" --workspace default:my-workspace
 ```
 
 Do not put raw API keys in markdown, Source Packages, package manifests, or

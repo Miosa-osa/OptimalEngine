@@ -14,23 +14,22 @@ Start here:
 Core local commands:
 
 ```bash
-make install
-make bootstrap
-make dev
-curl http://localhost:4200/api/health
-mix optimal.reality_check
+bin/optimal install
+bin/optimal bootstrap
+bin/optimal dev
+bin/optimal doctor
+bin/optimal reality-check
 ```
 
-When operating from Roberto's private OptimalOS checkout, prefer:
+Agent loop commands:
 
 ```bash
-/Users/rhl/code/OptimalOS/.system/oe boot
-/Users/rhl/code/OptimalOS/.system/oe find "query" <workspace>
-/Users/rhl/code/OptimalOS/.system/oe capture "raw signal" <workspace> note
-/Users/rhl/code/OptimalOS/.system/oe aware "important correction" <workspace>
-/Users/rhl/code/OptimalOS/.system/oe close "what changed and how verified" <workspace>
+bin/optimal boot
+bin/optimal find "query" --workspace default:my-workspace
+bin/optimal capture "raw signal" --workspace default:my-workspace
+bin/optimal aware "important correction" --workspace default:my-workspace
+bin/optimal close "what changed and how verified"
 ```
 
 Runtime data lives in `.optimal/`.
 Do not commit `.optimal/index.db`, cache files, connector keys, RocksDB stores, workspace imports, or private user data.
-

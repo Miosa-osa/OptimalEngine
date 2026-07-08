@@ -17,8 +17,8 @@ They are not the same thing as raw evidence or final truth.
 ## Agent Interface
 
 For engine development, direct `mix optimal.*` commands are acceptable.
-For Roberto's private OptimalOS operating loop, use `/Users/rhl/code/OptimalOS/.system/oe`.
-The wrapper is the agent-facing interface because it handles the live server, root paths, workspace scope, and memory commands.
+For normal local agent work, use `bin/optimal`.
+The wrapper is the agent-facing interface because it handles live-server reads, root paths, workspace scope, and memory commands better than raw task calls.
 The engine should keep making that wrapper easier to use, not force agents into low-level internals.
 
 ## Isolation
@@ -33,4 +33,3 @@ Fresh clone setup matters.
 Docs should explain required stores and startup commands without buzzwords.
 A user should know what SQLite, RocksDB, ETS, Mnesia, FTS, graph, and RAG actually do in the stack.
 If setup requires a local dependency, document it and provide a fallback.
-

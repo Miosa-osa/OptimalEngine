@@ -23,7 +23,8 @@ help:
 	@echo "  make docs-check   - public audit + whitespace check"
 	@echo "  make clean        - wipe _build/ and the dev SQLite"
 	@echo ""
-	@echo "  Quick start:  make install && make bootstrap && make dev"
+	@echo "  CLI:          bin/optimal doctor"
+	@echo "  Quick start:  bin/optimal install && bin/optimal bootstrap && bin/optimal dev"
 
 install:
 	mix deps.get

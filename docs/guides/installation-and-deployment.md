@@ -59,11 +59,11 @@ curl http://localhost:4200/api/health
 mix optimal.reality_check
 ```
 
-Build the local `./optimal` command wrapper:
+Use the checked-in local CLI wrapper:
 
 ```bash
-mix escript.build
-./optimal --help
+bin/optimal --help
+bin/optimal doctor
 ```
 
 The wrapper is for source checkouts. It delegates to the same backend commands
@@ -71,13 +71,13 @@ as `mix optimal.*` so native dependencies such as SQLite load through the normal
 Mix build. For example:
 
 ```bash
-./optimal reality-check
-./optimal setup my-workspace --name "My Workspace"
-./optimal topology --workspace default:my-workspace
+bin/optimal reality-check
+bin/optimal setup my-workspace --name "My Workspace"
+bin/optimal topology --workspace default:my-workspace
 ```
 
-Do not treat the escript as the production database/server binary. For a
-long-running API or team runtime, use the OTP release or container deployment.
+Do not treat the checkout wrapper as the production database/server binary.
+For a long-running API or team runtime, use the OTP release or container deployment.
 
 Create a known structure:
 
