@@ -6,7 +6,12 @@
 [templates_dir, out_file] =
   case System.argv() do
     [d, o] -> [d, o]
-    _ -> ["/Users/rhl/code/OptimalOS/docs/taxonomy/genres", "priv/genres.exs"]
+    _ ->
+      templates =
+        System.get_env("OPTIMAL_GENRE_TEMPLATES_DIR") ||
+          Path.expand("../../docs/taxonomy/genres", __DIR__)
+
+      [templates, "priv/genres.exs"]
   end
 
 slug = fn name ->
