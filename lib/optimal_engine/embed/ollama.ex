@@ -24,15 +24,6 @@ defmodule OptimalEngine.Embed.Ollama do
   """
   @spec available?() :: boolean()
   def available? do
-    # A configured cloud LLM (Anthropic/OpenAI) satisfies generation
-    # availability even when the local Ollama daemon is not running. Callers
-    # gate text generation on this; embedding paths use `embed_healthy?/0`,
-    # which independently probes the local embedder, so cloud config never
-    # masks a missing Ollama embed model.
-    OptimalEngine.LLM.cloud_configured?() or ollama_available?()
-  end
-
-  defp ollama_available? do
     now = System.monotonic_time(:millisecond)
 
     case Process.get(@availability_cache_key) do
@@ -203,17 +194,6 @@ defmodule OptimalEngine.Embed.Ollama do
   """
   @spec generate(String.t(), keyword()) :: {:ok, String.t()} | {:error, atom()}
   def generate(prompt, opts \\ []) do
-    # When a cloud Model (Anthropic/OpenAI key) is configured, route text
-    # generation to that provider instead of Ollama. Ollama stays the default
-    # when no cloud key is set. See OptimalEngine.LLM.
-    if OptimalEngine.LLM.cloud_configured?() do
-      OptimalEngine.LLM.generate(prompt, opts)
-    else
-      ollama_generate(prompt, opts)
-    end
-  end
-
-  defp ollama_generate(prompt, opts) do
     cfg = config()
     model = Keyword.get(opts, :model, cfg[:generate_model])
 

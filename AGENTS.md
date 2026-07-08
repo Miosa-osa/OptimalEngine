@@ -2,6 +2,8 @@
 
 This file is the boot contract for agents working in this repo.
 Read it before changing code, running the engine, or touching runtime data.
+Read `OPINIONS.md` before making setup, store, memory, API, CLI, or architecture decisions.
+Read any user-level opinions file only when working inside a private checkout that provides one.
 
 ## Canonical Repo
 
@@ -114,15 +116,28 @@ Start every session with:
 
 ```bash
 git status --short --branch
-curl http://localhost:4200/api/health
+bin/optimal doctor
 ```
+
+Use the repo-native wrapper for engine work:
+
+```bash
+bin/optimal boot
+bin/optimal find "query" --workspace default:my-workspace
+bin/optimal capture "important raw signal" --workspace default:my-workspace
+bin/optimal aware "important correction" --workspace default:my-workspace
+bin/optimal close "what changed and how verified"
+```
+
+Use direct `mix optimal.*` commands when developing or debugging the underlying engine task itself.
+Use `bin/optimal` for normal local agent memory, workspace retrieval, setup, health, and BusinessOS integration checks.
 
 Then inspect the relevant workspace:
 
 ```bash
-mix optimal.topology --workspace default:my-workspace
-mix optimal.search "current state"
-mix optimal.rag "what context should I know?"
+bin/optimal topology --workspace default:my-workspace
+bin/optimal find "current state" --workspace default:my-workspace
+bin/optimal rag "what context should I know?" --workspace default:my-workspace
 ```
 
 Agents may preserve evidence, create pending Claims, assemble Context Packages, and render projections.
@@ -130,6 +145,17 @@ Agents should not directly write final Facts or rewrite topology without review 
 
 Use registered tools, connector grants, partition policy, and audit paths for external actions.
 Do not build a side memory system outside Optimal Engine.
+
+## Agent Docs In Parent Products
+
+BusinessOS, OptimalOS, and other apps that embed or connect to this engine must include agent instructions that explain:
+
+- BusinessOS owns app state, UI state, users, sessions, workspace records, and operational records.
+- Optimal Engine owns knowledge, memory, source packages, claims, facts, retrieval, graph, RAG, and context packages.
+- Every read and write must include explicit tenant, organization, and workspace scope.
+- Downloaded users use their own local bundled engine and must not read another user's private engine data.
+- Private agents may use an outside wrapper for private context, but that wrapper is not part of this public engine repo.
+- Agents should run `bin/optimal boot/find/capture/aware/close` loops instead of treating memory as optional.
 
 ## Verification Before Push
 

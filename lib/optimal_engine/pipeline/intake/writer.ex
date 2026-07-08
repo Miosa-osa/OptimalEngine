@@ -457,6 +457,6 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   end
 
   defp root_path do
-    Application.get_env(:optimal_engine, :root_path, "/Users/rhl/Desktop/OptimalOS")
+    Application.get_env(:optimal_engine, :root_path, File.cwd!())
   end
 end

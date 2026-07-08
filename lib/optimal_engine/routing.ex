@@ -53,7 +53,7 @@ defmodule OptimalEngine.Routing do
   def load do
     config_path = Application.get_env(:optimal_engine, :topology_path)
     full_path = Application.get_env(:optimal_engine, :topology_full_path)
-    root = Application.get_env(:optimal_engine, :root_path, "/Users/rhl/Desktop/OptimalOS")
+    root = Application.get_env(:optimal_engine, :root_path, File.cwd!())
     db = Application.get_env(:optimal_engine, :db_path)
     cache = Application.get_env(:optimal_engine, :cache_path)
 
