@@ -17,6 +17,8 @@ defmodule OptimalEngine.CLITest do
           "eval.run",
           "wiki",
           "connector",
+          "claims",
+          "facts",
           "doctor",
           "boot",
           "find",
