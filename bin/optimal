@@ -344,7 +344,8 @@ case "$command" in
     if [[ "${1:-}" == --* || $# -eq 0 ]]; then
       run_mix_task remember "$@"
     elif api_up; then
-      content="$(join_args "$@")"
+      content="$1"
+      shift
       workspace="$(option_value --workspace -w default "$@")"
       body="$(json_payload content "$content" workspace "$workspace" force true)"
       api_post "/api/memory/remember" "$body"
@@ -355,27 +356,37 @@ case "$command" in
 
   note)
     need_arg "note text" "${1:-}"
-    "$ROOT_DIR/bin/optimal" remember "Note: $(join_args "$@")"
+    note_text="$1"
+    shift
+    "$ROOT_DIR/bin/optimal" remember "Note: $note_text" "$@"
     ;;
 
   lesson)
     need_arg "lesson text" "${1:-}"
-    "$ROOT_DIR/bin/optimal" remember "Lesson: $(join_args "$@")"
+    lesson_text="$1"
+    shift
+    "$ROOT_DIR/bin/optimal" remember "Lesson: $lesson_text" "$@"
     ;;
 
   decision)
     need_arg "decision text" "${1:-}"
-    "$ROOT_DIR/bin/optimal" remember "Decision: $(join_args "$@")"
+    decision_text="$1"
+    shift
+    "$ROOT_DIR/bin/optimal" remember "Decision: $decision_text" "$@"
     ;;
 
   task)
     need_arg "task text" "${1:-}"
-    "$ROOT_DIR/bin/optimal" remember "Task: $(join_args "$@")"
+    task_text="$1"
+    shift
+    "$ROOT_DIR/bin/optimal" remember "Task: $task_text" "$@"
     ;;
 
   close)
     need_arg "close summary" "${1:-}"
-    "$ROOT_DIR/bin/optimal" remember "Close-loop: $(join_args "$@")"
+    close_text="$1"
+    shift
+    "$ROOT_DIR/bin/optimal" remember "Close-loop: $close_text" "$@"
     ;;
 
   *)

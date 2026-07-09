@@ -17,6 +17,7 @@ defmodule Mix.Tasks.Optimal.Rag do
       mix optimal.rag "pricing" --audience sales --format claude
       mix optimal.rag "pricing" --bandwidth small
       mix optimal.rag "pricing" --principal user:ada@sample.com
+      mix optimal.rag "pricing" --workspace default:my-workspace
       mix optimal.rag "pricing" --skip-wiki --trace
 
   ## Options
@@ -25,6 +26,7 @@ defmodule Mix.Tasks.Optimal.Rag do
     --bandwidth   small | medium | large                     (default: medium)
     --audience    wiki audience tag                          (default: default)
     --tenant      tenant id                                  (default: default)
+    --workspace   workspace id                               (default: derived from tenant)
     --principal   hydrate receiver from a principal id
     --skip-wiki   force hybrid fallback (debugging)
     --trace       print the trace block alongside the envelope
@@ -56,6 +58,7 @@ defmodule Mix.Tasks.Optimal.Rag do
           bandwidth: :string,
           audience: :string,
           tenant: :string,
+          workspace: :string,
           principal: :string,
           skip_wiki: :boolean,
           trace: :boolean,
@@ -73,22 +76,17 @@ defmodule Mix.Tasks.Optimal.Rag do
 
     receiver = build_receiver(parsed)
 
-    {:ok, result} =
-      Retrieval.ask(query,
-        receiver: receiver,
-        skip_wiki: Keyword.get(parsed, :skip_wiki, false),
-        hybrid_limit: Keyword.get(parsed, :hybrid_limit, 20)
-      )
+    {:ok, result} = Retrieval.ask(query, retrieval_opts(parsed, receiver))
 
     IO.puts(result.envelope.body)
 
     if result.envelope.sources != [] do
-      IO.puts("\n— sources —")
+      IO.puts("\n- sources -")
       Enum.each(result.envelope.sources, fn u -> IO.puts("  • #{u}") end)
     end
 
     if Keyword.get(parsed, :trace, false) do
-      IO.puts("\n— trace —")
+      IO.puts("\n- trace -")
       IO.puts("  source:       #{result.source}")
       IO.puts("  wiki_hit?:    #{result.trace.wiki_hit?}")
       IO.puts("  candidates:   #{result.trace.n_candidates}")
@@ -120,6 +118,18 @@ defmodule Mix.Tasks.Optimal.Rag do
         end
     end
   end
+
+  defp retrieval_opts(parsed, receiver) do
+    [
+      receiver: receiver,
+      skip_wiki: Keyword.get(parsed, :skip_wiki, false),
+      hybrid_limit: Keyword.get(parsed, :hybrid_limit, 20)
+    ]
+    |> maybe_put(:workspace_id, Keyword.get(parsed, :workspace))
+  end
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
   # `text` is accepted as an alias for `plain` so old shell scripts keep working.
   defp parse_format("text"), do: :plain

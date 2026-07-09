@@ -9,13 +9,15 @@ defmodule Mix.Tasks.Optimal.Search do
       mix optimal.search "query" --type signal --genre spec
       mix optimal.search "query" --type resource
       mix optimal.search "query" --uri "optimal://nodes/project-platform-launch/"
+      mix optimal.search "query" --workspace default:my-workspace
 
   Options:
-    --node    Filter by node ID (e.g. operator, product-customer-portal)
-    --type    Filter by context type: signal, resource, memory, skill (default: all)
-    --genre   Filter by genre (signals only, e.g. spec, brief, decision-log)
-    --uri     Scope to a URI prefix (e.g. optimal://nodes/project-platform-launch/)
-    --limit   Max results (default 10)
+    --workspace  Filter by workspace ID (default: default)
+    --node       Filter by node ID (e.g. operator, product-customer-portal)
+    --type       Filter by context type: signal, resource, memory, skill (default: all)
+    --genre      Filter by genre (signals only, e.g. spec, brief, decision-log)
+    --uri        Scope to a URI prefix (e.g. optimal://nodes/project-platform-launch/)
+    --limit      Max results (default 10)
   """
 
   use Mix.Task
@@ -26,8 +28,15 @@ defmodule Mix.Tasks.Optimal.Search do
 
     {opts, positional, _} =
       OptionParser.parse(args,
-        switches: [node: :string, type: :string, genre: :string, uri: :string, limit: :integer],
-        aliases: [n: :node, t: :type, g: :genre, l: :limit]
+        switches: [
+          workspace: :string,
+          node: :string,
+          type: :string,
+          genre: :string,
+          uri: :string,
+          limit: :integer
+        ],
+        aliases: [w: :workspace, n: :node, t: :type, g: :genre, l: :limit]
       )
 
     query =
@@ -40,6 +49,7 @@ defmodule Mix.Tasks.Optimal.Search do
       opts
       |> Keyword.take([:node, :genre, :uri, :limit])
       |> Keyword.put_new(:limit, 10)
+      |> maybe_put_workspace(Keyword.get(opts, :workspace))
       |> add_type_filter(Keyword.get(opts, :type))
 
     IO.puts("\n[optimal.search] Query: \"#{query}\"")
@@ -54,6 +64,10 @@ defmodule Mix.Tasks.Optimal.Search do
 
     if uri = Keyword.get(search_opts, :uri) do
       IO.puts("  URI scope:   #{uri}")
+    end
+
+    if workspace = Keyword.get(search_opts, :workspace_id) do
+      IO.puts("  Workspace:   #{workspace}")
     end
 
     IO.puts("")
@@ -83,6 +97,9 @@ defmodule Mix.Tasks.Optimal.Search do
         opts
     end
   end
+
+  defp maybe_put_workspace(opts, nil), do: opts
+  defp maybe_put_workspace(opts, workspace_id), do: Keyword.put(opts, :workspace_id, workspace_id)
 
   defp print_result(ctx) do
     date = format_date(ctx.modified_at)

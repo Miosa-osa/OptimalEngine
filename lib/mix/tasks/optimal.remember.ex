@@ -1,10 +1,16 @@
 defmodule Mix.Tasks.Optimal.Remember do
-  @shortdoc "Store observations and mine friction patterns"
+  @shortdoc "Store governed memory signals and mine friction patterns"
   @moduledoc """
-  Three-mode friction capture for the knowledge base.
+  Governed memory capture for the knowledge base.
+
+  The default explicit-memory path writes through `OptimalEngine.Memory.remember/2`.
+  That preserves source evidence, creates pending Claims, and keeps durable truth behind review.
+
+  The contextual, mine, list, and escalations modes remain available for the older friction-insight loop.
 
   Usage:
       mix optimal.remember "always check duplicates before inserting"
+      mix optimal.remember "decision made" --workspace default:my-workspace --force
       mix optimal.remember --contextual
       mix optimal.remember --mine
       mix optimal.remember --list
@@ -18,29 +24,51 @@ defmodule Mix.Tasks.Optimal.Remember do
   def run(args) do
     Mix.Task.run("app.start")
 
+    {opts, positional, _} =
+      OptionParser.parse(args,
+        strict: [
+          workspace: :string,
+          tenant: :string,
+          audience: :string,
+          actor: :string,
+          force: :boolean,
+          gate_threshold: :float,
+          salience_floor: :float,
+          category: :string,
+          contextual: :boolean,
+          mine: :boolean,
+          list: :boolean,
+          escalations: :boolean,
+          legacy: :boolean
+        ],
+        aliases: [w: :workspace, a: :audience]
+      )
+
     cond do
-      "--contextual" in args ->
+      Keyword.get(opts, :contextual, false) ->
         run_contextual()
 
-      "--mine" in args ->
+      Keyword.get(opts, :mine, false) ->
         run_mine()
 
-      "--list" in args ->
-        run_list(args)
+      Keyword.get(opts, :list, false) ->
+        run_list(opts)
 
-      "--escalations" in args ->
+      Keyword.get(opts, :escalations, false) ->
         run_escalations()
 
-      args != [] ->
-        observation =
-          args
-          |> Enum.reject(&String.starts_with?(&1, "--"))
-          |> Enum.join(" ")
+      positional != [] ->
+        observation = Enum.join(positional, " ")
 
-        run_explicit(observation)
+        if Keyword.get(opts, :legacy, false) do
+          run_legacy_explicit(observation)
+        else
+          run_explicit(observation, opts)
+        end
 
       true ->
         IO.puts("Usage: mix optimal.remember \"observation\"")
+        IO.puts("       mix optimal.remember \"observation\" --workspace default:my-workspace --force")
         IO.puts("       mix optimal.remember --contextual")
         IO.puts("       mix optimal.remember --mine")
         IO.puts("       mix optimal.remember --list [--category CAT]")
@@ -52,8 +80,49 @@ defmodule Mix.Tasks.Optimal.Remember do
   # Mode runners
   # ---------------------------------------------------------------------------
 
-  defp run_explicit(observation) do
-    IO.puts("\nRememberLoop — Storing Observation\n")
+  defp run_explicit(observation, opts) do
+    IO.puts("\nOptimal Memory - Governed Intake\n")
+
+    attrs =
+      %{
+        content: observation,
+        workspace_id: Keyword.get(opts, :workspace, "default")
+      }
+      |> maybe_put(:tenant_id, Keyword.get(opts, :tenant))
+      |> maybe_put(:audience, Keyword.get(opts, :audience))
+      |> maybe_put(:actor_id, Keyword.get(opts, :actor))
+
+    remember_opts =
+      [
+        force: Keyword.get(opts, :force, false),
+        gate_threshold: Keyword.get(opts, :gate_threshold),
+        salience_floor: Keyword.get(opts, :salience_floor),
+        versioned_projection: true
+      ]
+      |> reject_nil_keyword()
+
+    case OptimalEngine.Memory.remember(attrs, remember_opts) do
+      {:ok, result} ->
+        IO.puts("  Action:    #{result.action}")
+        IO.puts("  Workspace: #{attrs.workspace_id}")
+        IO.puts("  Source:    #{result.source_package.id}")
+        IO.puts("  Gate:      #{format_gate(result.gate)}")
+
+        if result.pending_claim do
+          IO.puts("  Claim:     #{result.pending_claim.id}")
+        end
+
+        if result.memory do
+          IO.puts("  Memory:    #{result.memory.id}")
+        end
+
+      {:error, reason} ->
+        IO.puts("  Failed: #{inspect(reason)}")
+    end
+  end
+
+  defp run_legacy_explicit(observation) do
+    IO.puts("\nRememberLoop - Storing Observation\n")
 
     case OptimalEngine.Insight.Remember.remember(observation) do
       {:ok, result} ->
@@ -76,7 +145,7 @@ defmodule Mix.Tasks.Optimal.Remember do
   end
 
   defp run_contextual do
-    IO.puts("\nRememberLoop — Contextual Scan\n")
+    IO.puts("\nRememberLoop - Contextual Scan\n")
 
     case OptimalEngine.Insight.Remember.contextual_scan() do
       {:ok, []} ->
@@ -92,7 +161,7 @@ defmodule Mix.Tasks.Optimal.Remember do
   end
 
   defp run_mine do
-    IO.puts("\nRememberLoop — Session Mining\n")
+    IO.puts("\nRememberLoop - Session Mining\n")
 
     case OptimalEngine.Insight.Remember.mine_sessions() do
       {:ok, []} ->
@@ -107,14 +176,10 @@ defmodule Mix.Tasks.Optimal.Remember do
     end
   end
 
-  defp run_list(args) do
-    IO.puts("\nRememberLoop — Observations\n")
+  defp run_list(opts) do
+    IO.puts("\nRememberLoop - Observations\n")
 
-    category =
-      case Enum.find_index(args, &(&1 == "--category")) do
-        nil -> nil
-        idx -> Enum.at(args, idx + 1)
-      end
+    category = Keyword.get(opts, :category)
 
     opts = if category, do: [category: category], else: []
 
@@ -133,7 +198,7 @@ defmodule Mix.Tasks.Optimal.Remember do
   end
 
   defp run_escalations do
-    IO.puts("\nRememberLoop — Escalation Candidates\n")
+    IO.puts("\nRememberLoop - Escalation Candidates\n")
 
     case OptimalEngine.Insight.Remember.escalation_candidates() do
       {:ok, []} ->
@@ -144,9 +209,20 @@ defmodule Mix.Tasks.Optimal.Remember do
           status = if c.ready_for_rethink, do: "READY FOR RETHINK", else: "accumulating"
 
           IO.puts(
-            "  [#{c.category}] #{c.count} observations, confidence: #{Float.round(c.total_confidence * 1.0, 2)} — #{status}"
+            "  [#{c.category}] #{c.count} observations, confidence: #{Float.round(c.total_confidence * 1.0, 2)} - #{status}"
           )
         end)
     end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp reject_nil_keyword(opts) do
+    Enum.reject(opts, fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp format_gate(gate) do
+    "#{gate.reason} score=#{Float.round(gate.score, 3)} encode?=#{gate.should_encode}"
   end
 end
