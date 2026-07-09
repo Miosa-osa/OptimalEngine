@@ -62,6 +62,9 @@ defmodule OptimalEngine.CLI do
     "remember" => Mix.Tasks.Optimal.Remember,
     "rethink" => Mix.Tasks.Optimal.Rethink,
     "knowledge" => Mix.Tasks.Optimal.Knowledge,
+    # Truth lifecycle
+    "claims" => Mix.Tasks.Optimal.Claims,
+    "facts" => Mix.Tasks.Optimal.Facts,
     # Connectors, governance, and operations
     "connector" => Mix.Tasks.Optimal.Connector,
     "auth" => Mix.Tasks.Optimal.Auth,
@@ -116,6 +119,7 @@ defmodule OptimalEngine.CLI do
     {"Topology and projections", ["topology", "wiki"]},
     {"Graph analysis", ["graph", "reflect", "reweave", "simulate", "impact"]},
     {"Learning loop", ["remember", "rethink", "knowledge"]},
+    {"Truth lifecycle", ["claims", "facts"]},
     {"Connectors, governance, and operations", ["connector", "auth", "compliance", "backup"]},
     {"Health, verification, and evaluation",
      ["health", "verify", "stats", "status", "reality-check", "eval.run"]},
@@ -160,6 +164,8 @@ defmodule OptimalEngine.CLI do
     "remember" => "Store observations; mine friction patterns",
     "rethink" => "Synthesize observations into actionable knowledge",
     "knowledge" => "Knowledge graph + SICA learning operations",
+    "claims" => "List, inspect, promote, and reject Memory Core Claims",
+    "facts" => "List and inspect accepted Memory Core Facts",
     "connector" => "Connector registry and sync operations",
     "auth" => "Mint, list, revoke, and delete API keys for apps and remote agents",
     "compliance" => "DSAR, erasure, legal hold, and retention workflows",
