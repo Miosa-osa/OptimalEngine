@@ -9,3 +9,5 @@
 - 2026-07-08: Every integration must preserve tenant, organization, workspace, Node, and policy scope.
 - 2026-07-08: Public defaults must be repo-relative or environment-driven.
 - 2026-07-08: Private machine paths, connector keys, runtime stores, and user data do not belong in public commits.
+- 2026-07-09: `CLAUDE.md`, `BOOT.md`, `OPTIONS.md`, and `SYSTEM.md` are public entry docs for agents and users.
+- 2026-07-09: Claude users should get the same `bin/optimal boot/find/capture/aware/close` memory loop from repo docs without relying on a private checkout.
