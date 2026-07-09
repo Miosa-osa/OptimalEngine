@@ -11,3 +11,5 @@
 - 2026-07-08: Private machine paths, connector keys, runtime stores, and user data do not belong in public commits.
 - 2026-07-09: `CLAUDE.md`, `BOOT.md`, `OPTIONS.md`, and `SYSTEM.md` are public entry docs for agents and users.
 - 2026-07-09: Claude users should get the same `bin/optimal boot/find/capture/aware/close` memory loop from repo docs without relying on a private checkout.
+- 2026-07-09: Explicit `optimal.remember` CLI writes must use governed Memory Core intake, not only the older insight observation loop.
+- 2026-07-09: CLI retrieval commands must pass workspace scope through to the retrieval layer so local source-checkout behavior matches API behavior.
