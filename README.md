@@ -685,12 +685,22 @@ Use the checked-in `bin/optimal` command wrapper:
 ```bash
 bin/optimal --help
 bin/optimal doctor
+bin/optimal boot
 bin/optimal reality-check
 ```
 
 That wrapper is for source checkouts.
 It delegates to `mix optimal.*` so native database dependencies load correctly.
 For production/API deployment, use the OTP release or container shape instead of treating the checkout wrapper as the server binary.
+
+There are three CLI surfaces:
+
+- `bin/optimal` is the source-checkout command for humans, local agents, scripts, and fresh clones.
+- `lib/optimal_engine/cli.ex` is the packaged CLI router for a compiled `optimal` command.
+- `mix optimal.*` tasks are the native development surface where the implementation lives.
+
+The preferred public command surface is `bin/optimal`.
+It keeps a stable command name while still routing through the same engine tasks, stores, and policies as the native Mix layer.
 
 Create a markdown-operable workspace:
 
@@ -723,9 +733,79 @@ mix optimal.wiki check node-first-project --workspace default:my-workspace
 Ask the engine:
 
 ```bash
-mix optimal.search "project"
-mix optimal.rag "what changed this week?"
+bin/optimal find "project" --workspace default:my-workspace
+bin/optimal rag "what changed this week?" --workspace default:my-workspace
 ```
+
+Run the agent memory loop:
+
+```bash
+bin/optimal boot
+bin/optimal find "pricing decision" --workspace default:my-workspace
+bin/optimal capture "Raw meeting note or source text" --workspace default:my-workspace
+bin/optimal aware "Important correction or decision" --workspace default:my-workspace
+bin/optimal note "Small thing to remember" --workspace default:my-workspace
+bin/optimal lesson "Reusable lesson for future work" --workspace default:my-workspace
+bin/optimal decision "Decision made and why" --workspace default:my-workspace
+bin/optimal task "Follow-up action item" --workspace default:my-workspace
+bin/optimal close "What changed, what was verified, and what remains" --workspace default:my-workspace
+```
+
+Review the truth layer:
+
+```bash
+bin/optimal claims --workspace default:my-workspace
+bin/optimal claims get <claim-id> --workspace default:my-workspace
+bin/optimal claims promote <claim-id> --workspace default:my-workspace --actor user:reviewer
+bin/optimal claims reject <claim-id> --workspace default:my-workspace --actor user:reviewer
+bin/optimal facts --workspace default:my-workspace
+bin/optimal facts get <fact-id> --workspace default:my-workspace
+```
+
+Claims are pending truth.
+Facts are accepted truth.
+Agents can capture evidence and propose Claims, but review or policy should decide which Claims become Facts.
+
+### Custom Commands
+
+Teams can add custom commands for their own data, organization, workspaces, Nodes, and context flows.
+The recommended pattern is to add a focused `Mix.Tasks.Optimal.<Name>` module, expose it through `OptimalEngine.CLI`, and add a small `bin/optimal` wrapper only when the command needs source-checkout ergonomics.
+
+Custom commands should take explicit scope.
+Use workspace ids such as `default:my-workspace`, Node ids, source ids, claim ids, or fact ids rather than implicit global state.
+
+Good custom commands usually do one of these jobs:
+
+- Find context from a workspace, Node, source package, claim, fact, or memory pool.
+- Capture a new signal and preserve the raw source.
+- Assemble a governed Context Package for an agent or workflow.
+- Promote, reject, supersede, or inspect truth lifecycle records.
+- Render a projection such as markdown, wiki, HTML, API output, or a BusinessOS view.
+- Run a registered connector, script, model, or tool through the governance layer.
+
+Custom commands should not write final truth directly into markdown, app tables, or ad hoc files.
+They should route through Source Packages, Claims, Facts, Memory Objects, Relationship Edges, and the Derivation Ledger so the engine can explain where knowledge came from.
+
+### How Apps And Agents Use The Engine
+
+Optimal Engine is used as the memory and context service behind an app, agent, or workflow.
+The app keeps its own product state, and the engine keeps source-linked knowledge, retrieval, Claims, Facts, Memory Objects, graph relationships, and Context Packages.
+
+There are four normal integration paths:
+
+- Local humans and local coding agents use `bin/optimal`.
+- Packaged runtimes can expose the compiled `optimal` command through `lib/optimal_engine/cli.ex`.
+- Apps and remote agents call the HTTP API with a scoped key minted by `bin/optimal auth mint`.
+- BusinessOS configures an engine endpoint and workspace mapping, then reads and writes knowledge through that configured engine instead of storing long-term memory in BusinessOS tables.
+
+Every integration should pass tenant, organization, workspace, and Node scope when that scope matters.
+That is how multiple businesses, teams, and workspaces can share one engine runtime without mixing data.
+
+For example, BusinessOS should store desktop windows, installed apps, module settings, and user preferences in BusinessOS.
+When a user or agent creates a lasting insight, source note, decision, task, lesson, or context package, BusinessOS should mirror that signal into the configured Optimal Engine workspace.
+
+The correct claim is not "Optimal Engine magically remembers everything."
+The correct claim is "Optimal Engine provides the scoped memory, context, truth, and retrieval layer, and products must explicitly write useful signals into it."
 
 ## Agent SOP
 
@@ -749,6 +829,18 @@ Agents should also not call arbitrary outside systems directly. Whether the
 surface is MCP, a connector, an API, or a script, it should be registered,
 permissioned, schema-checked, executed, logged, and converted back into Source
 Packages or observations when it produces useful evidence.
+
+Agent-facing docs are included in the repo:
+
+- `AGENTS.md` is the full agent contract.
+- `CLAUDE.md` is the Claude Code boot contract.
+- `BOOT.md` is the day-start and session-start protocol.
+- `SYSTEM.md` explains the engine layers and operating model.
+- `OPTIONS.md` records choices, tradeoffs, and configurable operating modes.
+- `RESOURCES.md` points agents to the right commands, files, and docs.
+
+These files are public operating instructions.
+They must describe how to use the engine without embedding private stores, user memories, workspace dumps, connector keys, or credentials.
 
 ## Docker And Deployment
 
@@ -838,6 +930,7 @@ The runtime already includes:
 - Source Package preservation for raw text and governed assets.
 - Signal classification and compatibility search rows.
 - Claim, Fact, Memory Object, Relationship Edge, and Derivation Ledger tables.
+- Claim review and Fact inspection from the CLI.
 - Fact promotion, stale/conflict handling, supersession, and context invalidation.
 - Context Packages with permission-aware package assembly.
 - Active Memory Pools with load, refresh, observe, and close flows.
@@ -848,6 +941,8 @@ The runtime already includes:
   surfaces before agents can use outside systems.
 - Wiki/export rendering for Node pages and workspace tree pages.
 - Evaluation run/case records and JSON/JSONL dataset execution.
+- Public agent boot docs for `AGENTS.md`, `CLAUDE.md`, `BOOT.md`, `SYSTEM.md`, `OPTIONS.md`, `RESOURCES.md`, and `NOTES.md`.
+- BusinessOS integration boundaries so app state stays in BusinessOS while knowledge, context, RAG, Claims, Facts, and memory stay in the configured Optimal Engine.
 - Reality check probes across the major runtime paths.
 
 ## Roadmap
