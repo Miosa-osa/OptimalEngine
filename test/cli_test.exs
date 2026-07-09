@@ -16,7 +16,17 @@ defmodule OptimalEngine.CLITest do
           "context.refresh-stale",
           "eval.run",
           "wiki",
-          "connector"
+          "connector",
+          "doctor",
+          "boot",
+          "find",
+          "capture",
+          "aware",
+          "note",
+          "lesson",
+          "decision",
+          "task",
+          "close"
         ] do
       assert command in names
     end
@@ -34,11 +44,20 @@ defmodule OptimalEngine.CLITest do
 
     assert {:ok, "search", Mix.Tasks.Optimal.Search} =
              CLI.resolve_subcommand("find")
+
+    assert {:ok, "capture", Mix.Tasks.Optimal.Ingest} =
+             CLI.resolve_subcommand("signal")
   end
 
   test "help text includes local setup and auth guidance" do
     help = CLI.help_text()
 
+    assert help =~ "optimal doctor"
+    assert help =~ "optimal boot"
+    assert help =~ "optimal find"
+    assert help =~ "optimal capture"
+    assert help =~ "optimal aware"
+    assert help =~ "optimal close"
     assert help =~ "optimal setup my-workspace"
     assert help =~ "optimal initiate my-workspace"
     assert help =~ "auth"

@@ -30,6 +30,7 @@ defmodule OptimalEngine.CLI do
     "migrate" => Mix.Tasks.Optimal.Migrate,
     # Intake and signal pipeline
     "ingest" => Mix.Tasks.Optimal.Ingest,
+    "capture" => Mix.Tasks.Optimal.Ingest,
     "ingest-workspace" => Mix.Tasks.Optimal.IngestWorkspace,
     "intake" => Mix.Tasks.Optimal.Intake,
     "index" => Mix.Tasks.Optimal.Index,
@@ -85,6 +86,7 @@ defmodule OptimalEngine.CLI do
   @aliases %{
     "ingest_workspace" => "ingest-workspace",
     "find" => "search",
+    "signal" => "capture",
     "context.refresh_stale" => "context.refresh-stale",
     "context-refresh-stale" => "context.refresh-stale",
     "context" => "context.refresh-stale",
@@ -117,6 +119,8 @@ defmodule OptimalEngine.CLI do
     {"Connectors, governance, and operations", ["connector", "auth", "compliance", "backup"]},
     {"Health, verification, and evaluation",
      ["health", "verify", "stats", "status", "reality-check", "eval.run"]},
+    {"Agent convenience loop",
+     ["doctor", "boot", "find", "capture", "aware", "note", "lesson", "decision", "task", "close"]},
     {"HTTP API & visualizer", ["api", "graph-ui"]},
     {"Spec tooling", ["spec.drift", "spec.init", "spec.report"]}
   ]
@@ -167,6 +171,16 @@ defmodule OptimalEngine.CLI do
     "reality-check" =>
       "Broad backend spine check across store, topology, memory, retrieval, and governance",
     "eval.run" => "Run evaluation datasets",
+    "doctor" => "Print local runtime diagnostics and quick status",
+    "boot" => "Run doctor, then print always-loaded L0 context",
+    "find" => "Alias for search",
+    "capture" => "Capture raw text through intake with claim extraction",
+    "aware" => "Capture a signal, search related context, and remember a summary",
+    "note" => "Remember a lightweight note",
+    "lesson" => "Remember a reusable lesson",
+    "decision" => "Remember a decision",
+    "task" => "Remember an action item",
+    "close" => "Remember a close-loop summary",
     "api" => "Start the HTTP API on port 4200",
     "graph-ui" => "Launch the graph visualizer against a running API",
     "spec.drift" => "Detect code changes without spec updates",
@@ -200,7 +214,12 @@ defmodule OptimalEngine.CLI do
 
   @doc false
   @spec command_names() :: [String.t()]
-  def command_names, do: @subcommands |> Map.keys() |> Enum.sort()
+  def command_names do
+    @ordered_groups
+    |> Enum.flat_map(fn {_group, names} -> names end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
 
   @doc false
   @spec resolve_subcommand(String.t()) :: {:ok, String.t(), module()} | :error
@@ -225,10 +244,16 @@ defmodule OptimalEngine.CLI do
       "",
       "Common first-run flow:",
       "",
+      "  optimal doctor",
+      "  optimal boot",
       "  optimal reality-check",
       "  optimal setup my-workspace --name \"My Workspace\"",
       "  optimal topology --workspace default:my-workspace",
       "  optimal initiate my-workspace --name \"My Workspace\" --dump setup.md",
+      "  optimal find \"query\" --workspace default:my-workspace",
+      "  optimal capture \"raw signal\" --workspace default:my-workspace",
+      "  optimal aware \"important correction\" --workspace default:my-workspace",
+      "  optimal close \"what changed and how verified\"",
       "",
       "Subcommands by group:",
       grouped_help_text(),
@@ -242,6 +267,42 @@ defmodule OptimalEngine.CLI do
   # ── Dispatch ─────────────────────────────────────────────────────────────
 
   defp dispatch(sub, rest) do
+    case sub do
+      "doctor" ->
+        run_sequence([{"status", ["--quick"]}], 0)
+
+      "boot" ->
+        run_sequence([{"status", ["--quick"]}, {"l0", rest}], 0)
+
+      "capture" ->
+        run_mix_task("ingest", ensure_text_arg!("signal text", rest))
+
+      "aware" ->
+        args = ensure_text_arg!("signal text", rest)
+        text = Enum.join(args, " ")
+        run_sequence([{"ingest", args}, {"search", [text]}, {"remember", ["Signal: " <> text]}], 0)
+
+      "note" ->
+        remember_with_prefix("Note: ", rest)
+
+      "lesson" ->
+        remember_with_prefix("Lesson: ", rest)
+
+      "decision" ->
+        remember_with_prefix("Decision: ", rest)
+
+      "task" ->
+        remember_with_prefix("Task: ", rest)
+
+      "close" ->
+        remember_with_prefix("Close-loop: ", rest)
+
+      _ ->
+        dispatch_mix_task(sub, rest)
+    end
+  end
+
+  defp dispatch_mix_task(sub, rest) do
     case resolve_subcommand(sub) do
       {:ok, canonical, _module} ->
         run_mix_task(canonical, rest)
@@ -275,6 +336,47 @@ defmodule OptimalEngine.CLI do
         System.halt(status)
     end
   end
+
+  defp run_sequence([], status), do: System.halt(status)
+
+  defp run_sequence([{canonical, rest} | remaining], _status) do
+    case run_mix_task_inline(canonical, rest) do
+      0 -> run_sequence(remaining, 0)
+      status -> System.halt(status)
+    end
+  end
+
+  defp run_mix_task_inline(canonical, rest) do
+    task = mix_task_name(canonical)
+
+    case System.find_executable("mix") do
+      nil ->
+        IO.puts(:stderr, "optimal: cannot find 'mix' on PATH")
+        IO.puts(:stderr, "Install Elixir/Mix or run the OTP release/API deployment instead.")
+        69
+
+      _mix ->
+        {_output, status} =
+          System.cmd("mix", [task | rest],
+            into: IO.stream(:stdio, :line),
+            stderr_to_stdout: true
+          )
+
+        status
+    end
+  end
+
+  defp remember_with_prefix(prefix, rest) do
+    args = ensure_text_arg!("memory text", rest)
+    run_mix_task("remember", [prefix <> Enum.join(args, " ")])
+  end
+
+  defp ensure_text_arg!(label, []) do
+    IO.puts(:stderr, "optimal: missing #{label}")
+    System.halt(64)
+  end
+
+  defp ensure_text_arg!(_label, args), do: args
 
   defp mix_task_name(canonical) do
     mix_name =
