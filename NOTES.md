@@ -13,3 +13,4 @@
 - 2026-07-09: Claude users should get the same `bin/optimal boot/find/capture/aware/close` memory loop from repo docs without relying on a private checkout.
 - 2026-07-09: Explicit `optimal.remember` CLI writes must use governed Memory Core intake, not only the older insight observation loop.
 - 2026-07-09: CLI retrieval commands must pass workspace scope through to the retrieval layer so local source-checkout behavior matches API behavior.
+- 2026-07-09: Blank embedding input is rejected before Ollama, absent optional routing YAML loads empty defaults without warning, and exhaustive connector/context assembly call sites no longer retain impossible error branches.

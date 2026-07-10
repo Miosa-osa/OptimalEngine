@@ -104,9 +104,15 @@ defmodule OptimalEngine.Pipeline.EmbedderTest do
   end
 
   describe "Ollama surface" do
+    test "empty input is rejected without calling Ollama" do
+      assert {:error, :empty_input} = Ollama.embed_text("   \n")
+    end
+
     test "embed_text/2 + embed/2 are equivalent (backward compat)" do
       # Without hitting the network: just verify the function arities exist
       # and agree.
+      Code.ensure_loaded!(Ollama)
+
       assert function_exported?(Ollama, :embed_text, 2)
       assert function_exported?(Ollama, :embed, 2)
       assert function_exported?(Ollama, :embed_image, 2)

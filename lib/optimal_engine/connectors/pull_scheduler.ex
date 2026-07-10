@@ -278,17 +278,13 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   end
 
   defp run_and_store(opts, state) do
-    case run_once(Keyword.put_new(opts, :tenant_id, state.tenant_id)) do
-      {:ok, summary} = reply ->
-        Logger.info(
-          "[Connectors.PullScheduler] ingested=#{summary.ingested_count} errors=#{summary.error_count}"
-        )
+    {:ok, summary} = reply = run_once(Keyword.put_new(opts, :tenant_id, state.tenant_id))
 
-        {reply, %{state | last_run_at: DateTime.utc_now(), last_result: summary}}
+    Logger.info(
+      "[Connectors.PullScheduler] ingested=#{summary.ingested_count} errors=#{summary.error_count}"
+    )
 
-      {:error, _reason} = err ->
-        {err, state}
-    end
+    {reply, %{state | last_run_at: DateTime.utc_now(), last_result: summary}}
   end
 
   defp cancel_timer(%{timer_ref: nil} = state), do: state
