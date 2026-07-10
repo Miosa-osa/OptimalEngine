@@ -34,11 +34,11 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
     charlist_headers =
       Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
 
-    {:ok, {{'HTTP/1.1', 200, 'OK'}, charlist_headers, json}}
+    {:ok, {{~c"HTTP/1.1", 200, ~c"OK"}, charlist_headers, json}}
   end
 
   defp httpc_status(status) do
-    {:ok, {{'HTTP/1.1', status, 'Error'}, [], ""}}
+    {:ok, {{~c"HTTP/1.1", status, ~c"Error"}, [], ""}}
   end
 
   defp base_state(extra \\ %{}) do
