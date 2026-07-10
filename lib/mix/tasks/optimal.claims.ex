@@ -163,7 +163,11 @@ defmodule Mix.Tasks.Optimal.Claims do
 
   defp print_claim_row(claim) do
     IO.puts("  #{claim.id}")
-    IO.puts("    #{claim.review_status}/#{claim.lifecycle_state}  #{format_score(claim.aggregate_confidence)} confidence")
+
+    IO.puts(
+      "    #{claim.review_status}/#{claim.lifecycle_state}  #{format_score(claim.aggregate_confidence)} confidence"
+    )
+
     IO.puts("    #{claim.claim_text || "(no text)"}")
     IO.puts("    #{format_triple(claim.subject_anchor, claim.action_class, claim.object_anchor)}")
     IO.puts("")
@@ -184,7 +188,11 @@ defmodule Mix.Tasks.Optimal.Claims do
       IO.puts("  precision:  #{format_score(claim.aggregate_precision)}")
       IO.puts("  source:     #{claim.source_package_id || "(none)"}")
       IO.puts("  text:       #{claim.claim_text || "(no text)"}")
-      IO.puts("  triple:     #{format_triple(claim.subject_anchor, claim.action_class, claim.object_anchor)}")
+
+      IO.puts(
+        "  triple:     #{format_triple(claim.subject_anchor, claim.action_class, claim.object_anchor)}"
+      )
+
       IO.puts("")
     end
   end

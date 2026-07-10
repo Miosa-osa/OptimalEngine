@@ -112,7 +112,11 @@ defmodule Mix.Tasks.Optimal.Facts do
 
   defp print_fact_row(fact) do
     IO.puts("  #{fact.id}")
-    IO.puts("    #{fact.lifecycle_state}/#{fact.verification_status}  #{format_score(fact.aggregate_confidence)} confidence")
+
+    IO.puts(
+      "    #{fact.lifecycle_state}/#{fact.verification_status}  #{format_score(fact.aggregate_confidence)} confidence"
+    )
+
     IO.puts("    #{fact.fact_text || "(no text)"}")
     IO.puts("    #{format_triple(fact.subject_anchor, fact.action_class, fact.object_anchor)}")
     IO.puts("")
@@ -134,7 +138,11 @@ defmodule Mix.Tasks.Optimal.Facts do
       IO.puts("  verifier:     #{fact.verifier_id || "(none)"}")
       IO.puts("  claims:       #{Enum.join(fact.accepted_claim_ids || [], ", ")}")
       IO.puts("  text:         #{fact.fact_text || "(no text)"}")
-      IO.puts("  triple:       #{format_triple(fact.subject_anchor, fact.action_class, fact.object_anchor)}")
+
+      IO.puts(
+        "  triple:       #{format_triple(fact.subject_anchor, fact.action_class, fact.object_anchor)}"
+      )
+
       IO.puts("")
     end
   end

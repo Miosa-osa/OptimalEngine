@@ -24,6 +24,7 @@ defmodule OptimalEngine.Connectors.Adapters.SourcesFolderTest do
   describe "sync/2" do
     test "discovers all markdown files and routes genres by subfolder", %{root: root} do
       {:ok, state} = SourcesFolder.init(%{"root" => root})
+
       {:ok, %{signals: signals, cursor: cursor, payloads: payloads}} =
         SourcesFolder.sync(state, nil)
 

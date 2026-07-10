@@ -64,7 +64,9 @@ defmodule OptimalEngine.Signal.GenreRegistryTest do
     end
 
     test "classifies a clearly brief input as brief" do
-      content = "# Outreach\n\n## Objective\nClose deal.\n\n## Key Messages\n- a\n\n## Call to Action\nReply by Friday."
+      content =
+        "# Outreach\n\n## Objective\nClose deal.\n\n## Key Messages\n- a\n\n## Call to Action\nReply by Friday."
+
       sig = Classifier.classify(content)
       assert sig.genre == "brief"
     end

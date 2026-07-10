@@ -6,8 +6,7 @@ config :optimal_engine,
   root_path: System.get_env("OPTIMAL_ENGINE_ROOT", "."),
   db_path: System.get_env("OPTIMAL_ENGINE_DB", ".optimal/index.db"),
   cache_path: System.get_env("OPTIMAL_ENGINE_CACHE", ".optimal/cache"),
-  topology_path:
-    System.get_env("OPTIMAL_ENGINE_TOPOLOGY", ".optimal/config.yaml"),
+  topology_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY", ".optimal/config.yaml"),
   topology_full_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY_FULL", "topology.yaml")
 
 # API key authentication.

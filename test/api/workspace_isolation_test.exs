@@ -259,7 +259,7 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
 
   describe "GET /api/health" do
     test "diagnostics never include another workspace's context ids or titles", ctx do
-      conn = request(:get, "/api/health?workspace=#{ctx.ws_a}")
+      conn = request(:get, "/api/health?full=true&workspace=#{ctx.ws_a}")
       assert conn.status == 200
       refute conn.resp_body =~ "B1 secret"
       refute conn.resp_body =~ ctx.b1.id
@@ -270,7 +270,7 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
     end
 
     test "scoped diagnostics still see their own workspace's orphans", ctx do
-      conn = request(:get, "/api/health?workspace=#{ctx.ws_b}")
+      conn = request(:get, "/api/health?full=true&workspace=#{ctx.ws_b}")
       assert conn.status == 200
       assert conn.resp_body =~ ctx.b3.id
     end

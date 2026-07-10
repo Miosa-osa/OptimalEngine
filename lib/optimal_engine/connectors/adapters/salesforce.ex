@@ -117,13 +117,21 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
 
   defp fetch_sobject(instance_url, sobject, since, headers) do
     fields = sobject_fields(sobject)
-    soql = "SELECT #{fields} FROM #{sobject} WHERE LastModifiedDate > #{since} ORDER BY LastModifiedDate DESC LIMIT #{@page_size}"
+
+    soql =
+      "SELECT #{fields} FROM #{sobject} WHERE LastModifiedDate > #{since} ORDER BY LastModifiedDate DESC LIMIT #{@page_size}"
+
     encoded = URI.encode_query(%{"q" => soql})
     url = "#{instance_url}/services/data/v59.0/query?#{encoded}"
 
     case HTTP.get_json(url, headers: headers) do
       {:ok, %{status: 200, body: %{"records" => records}}} ->
-        new_ts = records |> Enum.map(& &1["LastModifiedDate"]) |> Enum.reject(&is_nil/1) |> Enum.max(fn -> since end)
+        new_ts =
+          records
+          |> Enum.map(& &1["LastModifiedDate"])
+          |> Enum.reject(&is_nil/1)
+          |> Enum.max(fn -> since end)
+
         {:ok, records, new_ts}
 
       {:ok, %{status: 401}} ->

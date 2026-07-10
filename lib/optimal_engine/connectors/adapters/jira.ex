@@ -85,7 +85,14 @@ defmodule OptimalEngine.Connectors.Adapters.Jira do
   # ---- private ----------------------------------------------------------------
 
   defp fetch_issues(site_url, jql, start_at, headers) do
-    encoded = URI.encode_query(%{"jql" => jql, "startAt" => start_at, "maxResults" => @page_size, "fields" => "summary,description,updated,assignee,reporter"})
+    encoded =
+      URI.encode_query(%{
+        "jql" => jql,
+        "startAt" => start_at,
+        "maxResults" => @page_size,
+        "fields" => "summary,description,updated,assignee,reporter"
+      })
+
     url = "#{site_url}/rest/api/3/search?#{encoded}"
 
     case HTTP.get_json(url, headers: headers) do

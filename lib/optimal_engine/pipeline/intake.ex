@@ -795,7 +795,11 @@ defmodule OptimalEngine.Pipeline.Intake do
   # Persist one MemoryDetailObject per extracted entity as a "step" record
   # attached to the source package. This converts previously dead code into a
   # live call: every intake with entities now writes detail rows.
-  defp persist_detail_objects(%Signal{} = signal, %SourcePackage{} = source_package, %ScopeEnvelope{} = scope) do
+  defp persist_detail_objects(
+         %Signal{} = signal,
+         %SourcePackage{} = source_package,
+         %ScopeEnvelope{} = scope
+       ) do
     entities = signal.entities || []
 
     entities
@@ -815,9 +819,14 @@ defmodule OptimalEngine.Pipeline.Intake do
       }
 
       case MemoryCoreStore.insert_memory_detail_object(attrs) do
-        :ok -> :ok
+        :ok ->
+          :ok
+
         {:error, reason} ->
-          Logger.warning("[Intake] MemoryDetailObject persist failed (skipping): #{inspect(reason)}")
+          Logger.warning(
+            "[Intake] MemoryDetailObject persist failed (skipping): #{inspect(reason)}"
+          )
+
           :ok
       end
     end)
@@ -833,7 +842,12 @@ defmodule OptimalEngine.Pipeline.Intake do
   # Create an Episode row when the ingested source is a transcript or meeting.
   # Wires insert_episode into the live pipeline so episodes table grows on real
   # intake calls (not just test-fixture inserts).
-  defp persist_episode_if_applicable(%Signal{} = signal, %SourcePackage{} = source_package, pending_claim, %ScopeEnvelope{} = scope) do
+  defp persist_episode_if_applicable(
+         %Signal{} = signal,
+         %SourcePackage{} = source_package,
+         pending_claim,
+         %ScopeEnvelope{} = scope
+       ) do
     genre = signal.genre || ""
 
     if genre in @episode_genres do
@@ -859,7 +873,9 @@ defmodule OptimalEngine.Pipeline.Intake do
       case Episode.new(attrs) do
         {:ok, episode} ->
           case MemoryCoreStore.insert_episode(episode) do
-            :ok -> :ok
+            :ok ->
+              :ok
+
             {:error, reason} ->
               Logger.warning("[Intake] Episode persist failed (skipping): #{inspect(reason)}")
               :ok
@@ -961,9 +977,7 @@ defmodule OptimalEngine.Pipeline.Intake do
 
     case Decomposer.decompose_and_store(doc, opts) do
       {:ok, tree} ->
-        Logger.debug(
-          "[Intake] Decomposed context #{context.id} into #{length(tree.chunks)} chunks"
-        )
+        Logger.debug("[Intake] Decomposed context #{context.id} into #{length(tree.chunks)} chunks")
 
       {:error, reason} ->
         Logger.warning("[Intake] decompose_and_store failed for #{context.id}: #{inspect(reason)}")
@@ -1083,7 +1097,10 @@ defmodule OptimalEngine.Pipeline.Intake do
     :ok
   rescue
     error ->
-      Logger.warning("[Intake] persist_skeleton_detail_objects failed (skipping): #{inspect(error)}")
+      Logger.warning(
+        "[Intake] persist_skeleton_detail_objects failed (skipping): #{inspect(error)}"
+      )
+
       :ok
   end
 

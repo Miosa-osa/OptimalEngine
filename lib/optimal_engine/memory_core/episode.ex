@@ -74,7 +74,17 @@ defmodule OptimalEngine.MemoryCore.Episode do
     %__MODULE__{
       id:
         Map.get(attrs, :id) ||
-          ID.content_id("epi", [tenant_id, ":", workspace_id, ":", kind, ":", occurred_at, ":", summary]),
+          ID.content_id("epi", [
+            tenant_id,
+            ":",
+            workspace_id,
+            ":",
+            kind,
+            ":",
+            occurred_at,
+            ":",
+            summary
+          ]),
       tenant_id: tenant_id,
       workspace_id: workspace_id,
       node_id: string_or_nil(Map.get(attrs, :node_id)),

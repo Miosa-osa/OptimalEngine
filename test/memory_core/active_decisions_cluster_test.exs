@@ -69,7 +69,10 @@ defmodule OptimalEngine.MemoryCore.ActiveDecisionsClusterTest do
         )
 
       assert lifecycle == "open"
-      assert Jason.decode!(pkg_links) == [%{"type" => "context_package", "id" => "ctx-#{workspace_id}"}]
+
+      assert Jason.decode!(pkg_links) == [
+               %{"type" => "context_package", "id" => "ctx-#{workspace_id}"}
+             ]
 
       assert [%{"type" => "claim", "id" => _}] = Jason.decode!(candidate_links)
     end

@@ -40,4 +40,21 @@ defmodule OptimalEngine.RuntimeConfigTest do
 
     assert engine[:ollama][:host] == @runtime_env["OLLAMA_HOST"]
   end
+
+  test "runtime preserves environment-specific config when overrides are absent" do
+    Enum.each(@runtime_env, fn {name, _value} -> System.delete_env(name) end)
+
+    expected = %{
+      root_path: Application.fetch_env!(:optimal_engine, :root_path),
+      db_path: Application.fetch_env!(:optimal_engine, :db_path),
+      cache_path: Application.fetch_env!(:optimal_engine, :cache_path),
+      topology_path: Application.fetch_env!(:optimal_engine, :topology_path),
+      topology_full_path: Application.fetch_env!(:optimal_engine, :topology_full_path)
+    }
+
+    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    engine = Keyword.fetch!(config, :optimal_engine)
+
+    Enum.each(expected, fn {key, value} -> assert engine[key] == value end)
+  end
 end

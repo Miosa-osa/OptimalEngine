@@ -30,7 +30,10 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
   defp httpc_ok(body_map, extra_headers \\ []) do
     json = Jason.encode!(body_map)
     headers = [{"content-type", "application/json"}] ++ extra_headers
-    charlist_headers = Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+
+    charlist_headers =
+      Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+
     {:ok, {{'HTTP/1.1', 200, 'OK'}, charlist_headers, json}}
   end
 
@@ -75,7 +78,11 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           HubSpot.sync(hubspot_state(), nil)
           assert_received {:request, url, opts}
           headers = Keyword.get(opts, :headers, [])
-          assert Enum.any?(headers, fn {k, v} -> k == "authorization" and String.starts_with?(v, "Bearer ") end)
+
+          assert Enum.any?(headers, fn {k, v} ->
+                   k == "authorization" and String.starts_with?(v, "Bearer ")
+                 end)
+
           assert String.contains?(url, "api.hubapi.com")
         end
       )
@@ -119,7 +126,15 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
       with_mock(
         fn _url, _opts ->
           httpc_ok(%{
-            "results" => [%{"id" => "1", "properties" => %{"dealname" => "Deal A", "hs_lastmodifieddate" => "2024-01-01T00:00:00Z"}}],
+            "results" => [
+              %{
+                "id" => "1",
+                "properties" => %{
+                  "dealname" => "Deal A",
+                  "hs_lastmodifieddate" => "2024-01-01T00:00:00Z"
+                }
+              }
+            ],
             "paging" => %{"next" => %{"after" => "page2cursor"}}
           })
         end,
@@ -241,7 +256,9 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
 
           messages = collect_messages(:request)
 
-          query_req = Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "query") end)
+          query_req =
+            Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "query") end)
+
           assert query_req != nil
           {:request, _url, opts} = query_req
           headers = Keyword.get(opts, :headers, [])
@@ -292,11 +309,15 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           Salesforce.sync(sf_state(), cursor_ts)
 
           messages = collect_messages(:request)
-          query_req = Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "query") end)
+
+          query_req =
+            Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "query") end)
+
           assert query_req != nil
           {:request, url, _} = query_req
+
           assert String.contains?(url, URI.encode_www_form(cursor_ts) |> String.replace("+", "%20")) or
-                 String.contains?(URI.decode(url), cursor_ts)
+                   String.contains?(URI.decode(url), cursor_ts)
         end
       )
     end
@@ -366,7 +387,11 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           Jira.sync(jira_state(), nil)
           assert_received {:request, url, opts}
           headers = Keyword.get(opts, :headers, [])
-          assert Enum.any?(headers, fn {k, v} -> k == "authorization" and String.starts_with?(v, "Basic ") end)
+
+          assert Enum.any?(headers, fn {k, v} ->
+                   k == "authorization" and String.starts_with?(v, "Basic ")
+                 end)
+
           assert String.contains?(url, "atlassian.net")
         end
       )
@@ -412,8 +437,26 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
         fn _url, _opts ->
           httpc_ok(%{
             "issues" => [
-              %{"key" => "PROJ-1", "fields" => %{"summary" => "Fix bug", "description" => "", "updated" => "2024-05-10T12:00:00.000Z", "assignee" => nil, "reporter" => nil}},
-              %{"key" => "PROJ-2", "fields" => %{"summary" => "Add feat", "description" => "", "updated" => "2024-05-12T08:00:00.000Z", "assignee" => nil, "reporter" => nil}}
+              %{
+                "key" => "PROJ-1",
+                "fields" => %{
+                  "summary" => "Fix bug",
+                  "description" => "",
+                  "updated" => "2024-05-10T12:00:00.000Z",
+                  "assignee" => nil,
+                  "reporter" => nil
+                }
+              },
+              %{
+                "key" => "PROJ-2",
+                "fields" => %{
+                  "summary" => "Add feat",
+                  "description" => "",
+                  "updated" => "2024-05-12T08:00:00.000Z",
+                  "assignee" => nil,
+                  "reporter" => nil
+                }
+              }
             ]
           })
         end,
@@ -490,7 +533,15 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
       with_mock(
         fn url, opts ->
           send(me, {:request, url, opts})
-          httpc_ok(%{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}})
+
+          httpc_ok(%{
+            "data" => %{
+              "issues" => %{
+                "nodes" => [],
+                "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+              }
+            }
+          })
         end,
         fn ->
           Linear.sync(linear_state(), nil)
@@ -508,7 +559,15 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
       with_mock(
         fn url, opts ->
           send(me, {:request, url, opts})
-          httpc_ok(%{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}})
+
+          httpc_ok(%{
+            "data" => %{
+              "issues" => %{
+                "nodes" => [],
+                "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+              }
+            }
+          })
         end,
         fn ->
           Linear.sync(linear_state(), "gql_cursor_xyz")
@@ -523,10 +582,24 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
     test "sync/2 returns next cursor when hasNextPage is true" do
       with_mock(
         fn _url, _opts ->
-          httpc_ok(%{"data" => %{"issues" => %{
-            "nodes" => [%{"id" => "issue-1", "title" => "T1", "description" => "", "updatedAt" => "2024-01-01T00:00:00Z", "assignee" => nil, "creator" => nil, "state" => nil}],
-            "pageInfo" => %{"hasNextPage" => true, "endCursor" => "next_page_cursor"}
-          }}})
+          httpc_ok(%{
+            "data" => %{
+              "issues" => %{
+                "nodes" => [
+                  %{
+                    "id" => "issue-1",
+                    "title" => "T1",
+                    "description" => "",
+                    "updatedAt" => "2024-01-01T00:00:00Z",
+                    "assignee" => nil,
+                    "creator" => nil,
+                    "state" => nil
+                  }
+                ],
+                "pageInfo" => %{"hasNextPage" => true, "endCursor" => "next_page_cursor"}
+              }
+            }
+          })
         end,
         fn ->
           {:ok, %{cursor: cursor}} = Linear.sync(linear_state(), nil)
@@ -538,10 +611,14 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
     test "sync/2 returns nil cursor when no next page" do
       with_mock(
         fn _url, _opts ->
-          httpc_ok(%{"data" => %{"issues" => %{
-            "nodes" => [],
-            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
-          }}})
+          httpc_ok(%{
+            "data" => %{
+              "issues" => %{
+                "nodes" => [],
+                "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+              }
+            }
+          })
         end,
         fn ->
           {:ok, %{cursor: cursor}} = Linear.sync(linear_state(), nil)
@@ -637,7 +714,11 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           Confluence.sync(confluence_state(), nil)
           assert_received {:request, url, opts}
           headers = Keyword.get(opts, :headers, [])
-          assert Enum.any?(headers, fn {k, v} -> k == "authorization" and String.starts_with?(v, "Basic ") end)
+
+          assert Enum.any?(headers, fn {k, v} ->
+                   k == "authorization" and String.starts_with?(v, "Basic ")
+                 end)
+
           assert String.contains?(url, "atlassian.net")
         end
       )
@@ -689,8 +770,18 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
         fn _url, _opts ->
           httpc_ok(%{
             "results" => [
-              %{"id" => "p1", "title" => "Page 1", "body" => %{"storage" => %{"value" => ""}}, "version" => %{"when" => "2024-05-01T10:00:00Z"}},
-              %{"id" => "p2", "title" => "Page 2", "body" => %{"storage" => %{"value" => ""}}, "version" => %{"when" => "2024-05-03T08:00:00Z"}}
+              %{
+                "id" => "p1",
+                "title" => "Page 1",
+                "body" => %{"storage" => %{"value" => ""}},
+                "version" => %{"when" => "2024-05-01T10:00:00Z"}
+              },
+              %{
+                "id" => "p2",
+                "title" => "Page 2",
+                "body" => %{"storage" => %{"value" => ""}},
+                "version" => %{"when" => "2024-05-03T08:00:00Z"}
+              }
             ]
           })
         end,
@@ -721,13 +812,17 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
       raw = %{
         "id" => "page-999",
         "title" => "Notes",
-        "body" => %{"storage" => %{"value" => "<h1>Header</h1><p>Paragraph <strong>text</strong>.</p>"}},
+        "body" => %{
+          "storage" => %{"value" => "<h1>Header</h1><p>Paragraph <strong>text</strong>.</p>"}
+        },
         "version" => %{"when" => nil}
       }
 
       {:ok, signal} = Confluence.transform(raw)
       refute String.contains?(signal.content, "<h1>")
-      assert String.contains?(signal.content, "Header") or String.contains?(signal.content, "Paragraph")
+
+      assert String.contains?(signal.content, "Header") or
+               String.contains?(signal.content, "Paragraph")
     end
   end
 
@@ -802,11 +897,19 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           Teams.sync(teams_state(), nil)
 
           messages = collect_messages(:request)
-          graph_req = Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "graph.microsoft.com") end)
+
+          graph_req =
+            Enum.find(messages, fn {:request, url, _} ->
+              String.contains?(url, "graph.microsoft.com")
+            end)
+
           assert graph_req != nil
           {:request, _url, opts} = graph_req
           headers = Keyword.get(opts, :headers, [])
-          assert Enum.any?(headers, fn {k, v} -> k == "authorization" and v == "Bearer ms_bearer_tok" end)
+
+          assert Enum.any?(headers, fn {k, v} ->
+                   k == "authorization" and v == "Bearer ms_bearer_tok"
+                 end)
         end
       )
     end
@@ -828,11 +931,17 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           send(me, {:request, url, opts})
 
           cond do
-            String.contains?(url, "oauth2") -> httpc_ok(%{"access_token" => "ms_tok"})
+            String.contains?(url, "oauth2") ->
+              httpc_ok(%{"access_token" => "ms_tok"})
+
             String.contains?(url, "/channels") and not String.contains?(url, "messages") ->
               httpc_ok(%{"value" => [%{"id" => "ch-1"}]})
-            String.contains?(url, "messages") -> httpc_ok(%{"value" => []})
-            true -> httpc_ok(%{"value" => []})
+
+            String.contains?(url, "messages") ->
+              httpc_ok(%{"value" => []})
+
+            true ->
+              httpc_ok(%{"value" => []})
           end
         end,
         fn ->
@@ -840,7 +949,10 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           Teams.sync(teams_state(), cursor_ts)
 
           messages = collect_messages(:request)
-          msg_req = Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "messages") end)
+
+          msg_req =
+            Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "messages") end)
+
           assert msg_req != nil
           {:request, url, _} = msg_req
           assert String.contains?(url, "2024-06-01")
@@ -913,12 +1025,18 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           Zoom.sync(zoom_state(), nil)
 
           messages = collect_messages(:request)
-          token_req = Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "oauth/token") end)
+
+          token_req =
+            Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "oauth/token") end)
+
           assert token_req != nil
           {:request, url, opts} = token_req
           assert String.contains?(url, "zoom_acct")
           headers = Keyword.get(opts, :headers, [])
-          assert Enum.any?(headers, fn {k, v} -> k == "authorization" and String.starts_with?(v, "Basic ") end)
+
+          assert Enum.any?(headers, fn {k, v} ->
+                   k == "authorization" and String.starts_with?(v, "Basic ")
+                 end)
         end
       )
     end
@@ -940,11 +1058,17 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           Zoom.sync(zoom_state(), nil)
 
           messages = collect_messages(:request)
-          rec_req = Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "recordings") end)
+
+          rec_req =
+            Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "recordings") end)
+
           assert rec_req != nil
           {:request, _url, opts} = rec_req
           headers = Keyword.get(opts, :headers, [])
-          assert Enum.any?(headers, fn {k, v} -> k == "authorization" and v == "Bearer zoom_bearer" end)
+
+          assert Enum.any?(headers, fn {k, v} ->
+                   k == "authorization" and v == "Bearer zoom_bearer"
+                 end)
         end
       )
     end
@@ -966,7 +1090,10 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
           Zoom.sync(zoom_state(), "2024-03-01")
 
           messages = collect_messages(:request)
-          rec_req = Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "recordings") end)
+
+          rec_req =
+            Enum.find(messages, fn {:request, url, _} -> String.contains?(url, "recordings") end)
+
           assert rec_req != nil
           {:request, url, _} = rec_req
           assert String.contains?(url, "from=2024-03-01")

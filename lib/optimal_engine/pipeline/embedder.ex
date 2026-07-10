@@ -127,7 +127,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
       modality: emb.modality,
       dim: emb.dim,
       vector: emb.vector,
-      workspace_id: chunk && Map.get(chunk, :workspace_id) || "default"
+      workspace_id: (chunk && Map.get(chunk, :workspace_id)) || "default"
     }
   end
 

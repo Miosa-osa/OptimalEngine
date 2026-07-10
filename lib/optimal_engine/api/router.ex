@@ -2143,7 +2143,11 @@ defmodule OptimalEngine.API.Router do
 
         case OptimalEngine.Topology.Node.upsert(attrs) do
           {:ok, node} ->
-            send_resp(conn, 200, Jason.encode!(%{ok: true, id: node.id, slug: node.slug, kind: kind}))
+            send_resp(
+              conn,
+              200,
+              Jason.encode!(%{ok: true, id: node.id, slug: node.slug, kind: kind})
+            )
 
           {:error, reason} ->
             send_resp(conn, 422, Jason.encode!(%{ok: false, error: inspect(reason)}))
@@ -2163,8 +2167,12 @@ defmodule OptimalEngine.API.Router do
         |> then(fn acc -> if(v = body["genre"], do: Keyword.put(acc, :genre, v), else: acc) end)
         |> then(fn acc -> if(v = body["title"], do: Keyword.put(acc, :title, v), else: acc) end)
         |> then(fn acc -> if(v = body["node"], do: Keyword.put(acc, :node, v), else: acc) end)
-        |> then(fn acc -> if(v = body["workspace"], do: Keyword.put(acc, :workspace_id, v), else: acc) end)
-        |> then(fn acc -> if(body["extract_claims"] == true, do: Keyword.put(acc, :extract_claims, true), else: acc) end)
+        |> then(fn acc ->
+          if(v = body["workspace"], do: Keyword.put(acc, :workspace_id, v), else: acc)
+        end)
+        |> then(fn acc ->
+          if(body["extract_claims"] == true, do: Keyword.put(acc, :extract_claims, true), else: acc)
+        end)
 
       case OptimalEngine.Pipeline.Intake.process(text, intake_opts) do
         {:ok, result} ->
@@ -2201,7 +2209,13 @@ defmodule OptimalEngine.API.Router do
       tier_budgets =
         case Map.get(body, "tier_budgets") do
           %{"l0" => l0, "l1" => l1, "l2" => l2} ->
-            [tier_budgets: %{l0: parse_int(l0, 3_000), l1: parse_int(l1, 10_000), l2: parse_int(l2, 50_000)}]
+            [
+              tier_budgets: %{
+                l0: parse_int(l0, 3_000),
+                l1: parse_int(l1, 10_000),
+                l2: parse_int(l2, 50_000)
+              }
+            ]
 
           _ ->
             []

@@ -142,6 +142,7 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
   end
 
   defp parse_cursor(nil), do: {"", nil}
+
   defp parse_cursor(cursor) when is_binary(cursor) do
     case String.split(cursor, ":", parts: 2) do
       [ch_id, oldest] -> {ch_id, if(oldest == "", do: nil, else: oldest)}
