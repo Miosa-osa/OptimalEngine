@@ -2213,39 +2213,36 @@ defmodule OptimalEngine.API.Router do
             workspace_id: workspace_id
           ]
 
-      case OptimalEngine.Retrieval.ContextAssembler.assemble(query, assemble_opts) do
-        {:ok, assembled} ->
-          mcts_meta =
-            assembled.search_scores
-            |> Enum.map(fn s ->
-              %{
-                id: s[:id],
-                title: s[:title],
-                score: s[:score],
-                uri: s[:uri],
-                node: s[:node]
-              }
-            end)
+      {:ok, assembled} =
+        OptimalEngine.Retrieval.ContextAssembler.assemble(query, assemble_opts)
 
-          json(conn, %{
-            query: query,
-            workspace_id: workspace_id,
-            l0: assembled.l0,
-            l1: assembled.l1,
-            l2: assembled.l2,
-            l3: "",
-            total_tokens: assembled.total_tokens,
-            sources: assembled.sources,
-            mcts_metadata: %{
-              candidate_count: length(assembled.search_scores),
-              selected_sources: mcts_meta,
-              mcts_enabled: OptimalEngine.Retrieval.MCTS.enabled?()
-            }
-          })
+      mcts_meta =
+        assembled.search_scores
+        |> Enum.map(fn s ->
+          %{
+            id: s[:id],
+            title: s[:title],
+            score: s[:score],
+            uri: s[:uri],
+            node: s[:node]
+          }
+        end)
 
-        {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-      end
+      json(conn, %{
+        query: query,
+        workspace_id: workspace_id,
+        l0: assembled.l0,
+        l1: assembled.l1,
+        l2: assembled.l2,
+        l3: "",
+        total_tokens: assembled.total_tokens,
+        sources: assembled.sources,
+        mcts_metadata: %{
+          candidate_count: length(assembled.search_scores),
+          selected_sources: mcts_meta,
+          mcts_enabled: OptimalEngine.Retrieval.MCTS.enabled?()
+        }
+      })
     end
   end
 

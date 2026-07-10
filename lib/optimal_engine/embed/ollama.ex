@@ -110,6 +110,14 @@ defmodule OptimalEngine.Embed.Ollama do
   @max_embed_chars 6_000
 
   def embed_text(text, opts \\ []) when is_binary(text) do
+    if String.trim(text) == "" do
+      {:error, :empty_input}
+    else
+      do_embed_text(text, opts)
+    end
+  end
+
+  defp do_embed_text(text, opts) do
     cfg = config()
     model = Keyword.get(opts, :model, cfg[:embed_model])
 

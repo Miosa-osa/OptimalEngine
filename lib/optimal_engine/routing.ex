@@ -122,6 +122,9 @@ defmodule OptimalEngine.Routing do
           {:error, _} = err -> err
         end
 
+      {:error, :enoent} ->
+        {:ok, %{}}
+
       {:error, reason} ->
         Logger.warning("Could not read YAML at #{path}: #{inspect(reason)}")
         {:ok, %{}}
