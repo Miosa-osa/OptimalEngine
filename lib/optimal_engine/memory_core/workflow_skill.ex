@@ -65,8 +65,7 @@ defmodule OptimalEngine.MemoryCore.WorkflowSkill do
         step_links = step_links_from_steps(steps)
 
         trace = %{
-          id:
-            ID.random_id("wft"),
+          id: ID.random_id("wft"),
           tenant_id: tenant_id,
           workspace_id: workspace_id,
           case_id: string_opt(opts, :case_id, ID.random_id("case")),
@@ -174,7 +173,12 @@ defmodule OptimalEngine.MemoryCore.WorkflowSkill do
              threshold: promotion_threshold(opts)
            ) do
         {:ok, %{skill_package: pkg, procedure: proc, workflow: wf}} ->
-          {:ok, Map.merge(trace, %{promoted_skill_package: pkg, promoted_procedure: proc, promoted_workflow: wf})}
+          {:ok,
+           Map.merge(trace, %{
+             promoted_skill_package: pkg,
+             promoted_procedure: proc,
+             promoted_workflow: wf
+           })}
 
         {:ok, :below_threshold} ->
           {:ok, trace}

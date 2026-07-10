@@ -60,7 +60,10 @@ defmodule Mix.Tasks.Optimal.EmbedBackfill do
 
     shell = Mix.shell()
     shell.info("Chunks missing embeddings: #{pending}")
-    shell.info("Backfilling: #{target} (batch=#{batch_size}#{if dry_run, do: ", dry-run", else: ""})")
+
+    shell.info(
+      "Backfilling: #{target} (batch=#{batch_size}#{if dry_run, do: ", dry-run", else: ""})"
+    )
 
     if target == 0 do
       shell.info("Nothing to do — embedding coverage already complete.")

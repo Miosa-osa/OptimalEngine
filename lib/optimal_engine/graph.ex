@@ -521,8 +521,7 @@ defmodule OptimalEngine.Graph do
   # Breadth-first expansion: accumulate mentioned_in contexts (scored by mention
   # count) and grow the entity frontier via co_occurs for each remaining hop.
   defp expand_frontier(seed_entities, hops, ws) do
-    Enum.reduce(1..hops, {seed_entities, MapSet.new(), %{}}, fn _hop,
-                                                                {frontier, visited, scores} ->
+    Enum.reduce(1..hops, {seed_entities, MapSet.new(), %{}}, fn _hop, {frontier, visited, scores} ->
       to_visit = MapSet.difference(frontier, visited)
 
       {next_frontier, new_scores} =

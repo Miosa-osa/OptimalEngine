@@ -299,20 +299,24 @@ defmodule OptimalEngineTest do
   end
 
   describe "URI.from_path/1" do
-    test "builds node URI from org folder path" do
+    setup do
+      original_root = Application.get_env(:optimal_engine, :root_path)
       Application.put_env(:optimal_engine, :root_path, "/test/root")
+
+      on_exit(fn -> Application.put_env(:optimal_engine, :root_path, original_root) end)
+    end
+
+    test "builds node URI from org folder path" do
       uri = URI.from_path("/test/root/project-platform-launch/context.md")
       assert uri == "optimal://nodes/project-platform-launch/context.md"
     end
 
     test "builds resources URI from docs folder path" do
-      Application.put_env(:optimal_engine, :root_path, "/test/root")
       uri = URI.from_path("/test/root/docs/api.md")
       assert uri == "optimal://resources/api.md"
     end
 
     test "builds inbox URI for unknown folder" do
-      Application.put_env(:optimal_engine, :root_path, "/test/root")
       uri = URI.from_path("/test/root/unknown-folder/file.md")
       assert String.starts_with?(uri, "optimal://")
     end

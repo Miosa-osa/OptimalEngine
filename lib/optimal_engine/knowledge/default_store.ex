@@ -36,7 +36,11 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
     {backend, backend_opts} = configured_backend()
 
     # Start the underlying Knowledge.Store registered under the default store_id.
-    case KnowledgeStore.start_link(store_id: @store_id, backend: backend, backend_opts: backend_opts) do
+    case KnowledgeStore.start_link(
+           store_id: @store_id,
+           backend: backend,
+           backend_opts: backend_opts
+         ) do
       {:ok, store_pid} ->
         # Hydrate asynchronously so supervision tree startup is not blocked.
         Task.start(fn -> hydrate(store_pid) end)
@@ -78,7 +82,9 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
         {OptimalEngine.Knowledge.Backend.ETS, []}
 
       requested == "rocksdb" ->
-        path = Keyword.get(config, :rocksdb_path, Path.join(File.cwd!(), ".optimal/knowledge-rocksdb"))
+        path =
+          Keyword.get(config, :rocksdb_path, Path.join(File.cwd!(), ".optimal/knowledge-rocksdb"))
+
         Logger.info("[DefaultStore] Knowledge backend: RocksDB at #{path}")
         {backend, path: path}
 

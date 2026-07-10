@@ -98,7 +98,10 @@ defmodule OptimalEngine.Retrieval.MCTS do
 
   def select(candidates, budget, opts) when is_list(candidates) and budget >= 0 do
     cfg = Application.get_env(:optimal_engine, :retrieval, [])
-    iterations = Keyword.get(opts, :iterations, Keyword.get(cfg, :mcts_iterations, @default_iterations))
+
+    iterations =
+      Keyword.get(opts, :iterations, Keyword.get(cfg, :mcts_iterations, @default_iterations))
+
     c = Keyword.get(opts, :exploration, Keyword.get(cfg, :mcts_exploration, @default_exploration))
     lambda = Keyword.get(opts, :coverage_lambda, @coverage_lambda)
 
@@ -231,7 +234,9 @@ defmodule OptimalEngine.Retrieval.MCTS do
         remaining_untried = List.delete(node.untried, id)
         child = new_node(child_selected, child_used, remaining_untried)
 
-        {terminal_ids, reward} = rollout(child_selected, child_used, remaining_untried, by_id, budget, lambda)
+        {terminal_ids, reward} =
+          rollout(child_selected, child_used, remaining_untried, by_id, budget, lambda)
+
         child = backprop_local(child, reward)
 
         node =
@@ -334,6 +339,7 @@ defmodule OptimalEngine.Retrieval.MCTS do
   defp normalize(candidates) do
     Enum.map(candidates, fn cand ->
       tokens = candidate_tokens(cand)
+
       %{
         id: Map.get(cand, :id) || Map.get(cand, :uri) || make_ref(),
         score: (Map.get(cand, :score) || 0.0) * 1.0,
@@ -346,7 +352,9 @@ defmodule OptimalEngine.Retrieval.MCTS do
   defp candidate_tokens(%{tokens: t}) when is_integer(t) and t >= 0, do: t
 
   defp candidate_tokens(cand) do
-    content = Map.get(cand, :content) || Map.get(cand, :l1_overview) || Map.get(cand, :l0_abstract) || ""
+    content =
+      Map.get(cand, :content) || Map.get(cand, :l1_overview) || Map.get(cand, :l0_abstract) || ""
+
     max(div(String.length(content), @chars_per_token), 1)
   end
 

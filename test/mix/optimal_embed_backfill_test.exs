@@ -68,7 +68,8 @@ defmodule Mix.Tasks.Optimal.EmbedBackfillTest do
   end
 
   defp embedded_count(chunk_ids) do
-    placeholders = chunk_ids |> Enum.with_index(1) |> Enum.map(fn {_, i} -> "?#{i}" end) |> Enum.join(",")
+    placeholders =
+      chunk_ids |> Enum.with_index(1) |> Enum.map(fn {_, i} -> "?#{i}" end) |> Enum.join(",")
 
     {:ok, [[n]]} =
       Store.raw_query(

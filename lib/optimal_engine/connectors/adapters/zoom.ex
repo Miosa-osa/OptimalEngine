@@ -79,7 +79,9 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
     client_secret = pick(state, :client_secret)
 
     credentials = Base.encode64("#{client_id}:#{client_secret}")
-    token_url = "https://zoom.us/oauth/token?grant_type=account_credentials&account_id=#{account_id}"
+
+    token_url =
+      "https://zoom.us/oauth/token?grant_type=account_credentials&account_id=#{account_id}"
 
     case HTTP.request(token_url,
            method: :post,

@@ -57,7 +57,11 @@ defmodule OptimalEngine.Connectors.Adapters.Linear do
     body = %{"query" => query, "variables" => %{"after" => cursor}}
 
     case HTTP.post_json(@graphql_url, body, headers: headers) do
-      {:ok, %{status: 200, body: %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => page_info}}}}} ->
+      {:ok,
+       %{
+         status: 200,
+         body: %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => page_info}}}
+       }} ->
         signals =
           Enum.flat_map(nodes, fn node ->
             case transform(node) do
@@ -79,7 +83,8 @@ defmodule OptimalEngine.Connectors.Adapters.Linear do
       {:ok, %{status: 429}} ->
         {:error, :rate_limited}
 
-      {:ok, %{status: 200, body: %{"errors" => [%{"extensions" => %{"type" => "AUTHENTICATION"}} | _]}}} ->
+      {:ok,
+       %{status: 200, body: %{"errors" => [%{"extensions" => %{"type" => "AUTHENTICATION"}} | _]}}} ->
         {:error, :auth_expired}
 
       {:ok, %{status: status}} ->

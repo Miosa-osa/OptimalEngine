@@ -15,3 +15,4 @@
 - 2026-07-09: CLI retrieval commands must pass workspace scope through to the retrieval layer so local source-checkout behavior matches API behavior.
 - 2026-07-09: Blank embedding input is rejected before Ollama, absent optional routing YAML loads empty defaults without warning, and exhaustive connector/context assembly call sites no longer retain impossible error branches.
 - 2026-07-09: Release runtime configuration must re-read database, cache, workspace, topology, RocksDB, and Ollama environment values because config.exs is evaluated when the release is built, not when a downloaded app starts it.
+- 2026-07-09: Runtime environment overrides must preserve values already selected by environment-specific config when an override is absent, especially isolated test storage.

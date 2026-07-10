@@ -62,6 +62,9 @@ jobs:
           otp-version: ${{ matrix.otp }}
           elixir-version: ${{ matrix.elixir }}
 
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev
+
       - name: Cache deps and _build
         uses: actions/cache@v4
         with:

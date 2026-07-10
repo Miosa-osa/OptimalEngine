@@ -54,12 +54,14 @@ defmodule OptimalEngine.Connectors.Adapters.GitHub do
       Enum.reduce(repo_list, {[], since}, fn repo, {acc_signals, acc_ts} ->
         case fetch_issues(org, repo, since, headers) do
           {:ok, items} ->
-            new_signals = Enum.flat_map(items, fn item ->
-              case transform(item) do
-                {:ok, s} -> [s]
-                _ -> []
-              end
-            end)
+            new_signals =
+              Enum.flat_map(items, fn item ->
+                case transform(item) do
+                  {:ok, s} -> [s]
+                  _ -> []
+                end
+              end)
+
             new_ts = latest_ts(items, acc_ts)
             {acc_signals ++ new_signals, new_ts}
 

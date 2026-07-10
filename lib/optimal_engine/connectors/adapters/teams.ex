@@ -133,9 +133,10 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
                 |> Enum.reject(&is_nil/1)
                 |> Enum.max(fn -> nil end)
 
-              new_last = if message_ts && (is_nil(last_ts) || message_ts > last_ts),
-                           do: message_ts,
-                           else: last_ts
+              new_last =
+                if message_ts && (is_nil(last_ts) || message_ts > last_ts),
+                  do: message_ts,
+                  else: last_ts
 
               {msgs ++ messages, new_last}
 

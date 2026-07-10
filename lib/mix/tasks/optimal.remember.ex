@@ -68,7 +68,11 @@ defmodule Mix.Tasks.Optimal.Remember do
 
       true ->
         IO.puts("Usage: mix optimal.remember \"observation\"")
-        IO.puts("       mix optimal.remember \"observation\" --workspace default:my-workspace --force")
+
+        IO.puts(
+          "       mix optimal.remember \"observation\" --workspace default:my-workspace --force"
+        )
+
         IO.puts("       mix optimal.remember --contextual")
         IO.puts("       mix optimal.remember --mine")
         IO.puts("       mix optimal.remember --list [--category CAT]")

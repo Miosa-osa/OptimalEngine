@@ -40,7 +40,10 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
   defp httpc_ok(body_map, extra_headers \\ []) do
     json = Jason.encode!(body_map)
     headers = [{"content-type", "application/json"}] ++ extra_headers
-    charlist_headers = Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+
+    charlist_headers =
+      Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+
     {:ok, {{'HTTP/1.1', 200, 'OK'}, charlist_headers, json}}
   end
 
@@ -99,7 +102,10 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
 
         assert String.contains?(url, "repos/acme/engine/issues")
         headers = Keyword.get(opts, :headers, [])
-        assert Enum.any?(headers, fn {k, v} -> k == "authorization" and String.contains?(v, "ghp_test") end)
+
+        assert Enum.any?(headers, fn {k, v} ->
+                 k == "authorization" and String.contains?(v, "ghp_test")
+               end)
       end)
 
       :ets.delete(calls)
@@ -169,7 +175,8 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
         :ets.insert(calls, {url, opts})
 
         cond do
-          String.contains?(url, "/orgs/") and String.ends_with?(url |> URI.parse() |> Map.get(:path, ""), "/repos") ->
+          String.contains?(url, "/orgs/") and
+              String.ends_with?(url |> URI.parse() |> Map.get(:path, ""), "/repos") ->
             httpc_ok([%{"name" => "repo-a"}])
 
           String.contains?(url, "/repos/") and String.contains?(url, "/issues") ->
@@ -257,13 +264,17 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
       with_mock(mock, fn ->
         OptimalEngine.Connectors.Adapters.Gmail.sync(@gmail_state, nil)
 
-        msg_call = :ets.tab2list(calls)
-        |> Enum.find(fn {u, _} -> String.contains?(u, "/messages?") end)
+        msg_call =
+          :ets.tab2list(calls)
+          |> Enum.find(fn {u, _} -> String.contains?(u, "/messages?") end)
 
         if msg_call do
           {_url, opts} = msg_call
           headers = Keyword.get(opts, :headers, [])
-          assert Enum.any?(headers, fn {k, v} -> k == "authorization" and String.contains?(v, "bearer_tok") end)
+
+          assert Enum.any?(headers, fn {k, v} ->
+                   k == "authorization" and String.contains?(v, "bearer_tok")
+                 end)
         end
       end)
 
@@ -280,16 +291,17 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
     end
 
     test "sync/2 incremental uses historyId as cursor" do
-      mock = gmail_token_mock(fn url, _opts ->
-        if String.contains?(url, "/history") do
-          httpc_ok(%{
-            "history" => [],
-            "historyId" => "99999"
-          })
-        else
-          httpc_ok(%{"messages" => []})
-        end
-      end)
+      mock =
+        gmail_token_mock(fn url, _opts ->
+          if String.contains?(url, "/history") do
+            httpc_ok(%{
+              "history" => [],
+              "historyId" => "99999"
+            })
+          else
+            httpc_ok(%{"messages" => []})
+          end
+        end)
 
       with_mock(mock, fn ->
         assert {:ok, %{signals: [], cursor: "99999"}} =
@@ -347,13 +359,17 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
       with_mock(mock, fn ->
         OptimalEngine.Connectors.Adapters.Slack.sync(@slack_state, nil)
 
-        history_call = :ets.tab2list(calls)
-        |> Enum.find(fn {u, _} -> String.contains?(u, "conversations.history") end)
+        history_call =
+          :ets.tab2list(calls)
+          |> Enum.find(fn {u, _} -> String.contains?(u, "conversations.history") end)
 
         if history_call do
           {_url, opts} = history_call
           headers = Keyword.get(opts, :headers, [])
-          assert Enum.any?(headers, fn {k, v} -> k == "authorization" and String.contains?(v, "xoxb-test") end)
+
+          assert Enum.any?(headers, fn {k, v} ->
+                   k == "authorization" and String.contains?(v, "xoxb-test")
+                 end)
         end
       end)
 
@@ -383,8 +399,9 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
         assert {:ok, %{signals: _}} =
                  OptimalEngine.Connectors.Adapters.Slack.sync(state, nil)
 
-        list_calls = :ets.tab2list(calls)
-        |> Enum.filter(fn {u, _} -> String.contains?(u, "conversations.list") end)
+        list_calls =
+          :ets.tab2list(calls)
+          |> Enum.filter(fn {u, _} -> String.contains?(u, "conversations.list") end)
 
         assert length(list_calls) >= 1
       end)
@@ -481,14 +498,18 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
       with_mock(mock, fn ->
         OptimalEngine.Connectors.Adapters.Notion.sync(@notion_state, nil)
 
-        db_call = :ets.tab2list(calls)
-        |> Enum.find(fn {u, _} -> String.contains?(u, "/databases/") end)
+        db_call =
+          :ets.tab2list(calls)
+          |> Enum.find(fn {u, _} -> String.contains?(u, "/databases/") end)
 
         if db_call do
           {_url, opts} = db_call
           headers = Keyword.get(opts, :headers, [])
           assert Enum.any?(headers, fn {k, _v} -> k == "notion-version" end)
-          assert Enum.any?(headers, fn {k, v} -> k == "authorization" and String.contains?(v, "secret_test") end)
+
+          assert Enum.any?(headers, fn {k, v} ->
+                   k == "authorization" and String.contains?(v, "secret_test")
+                 end)
         end
       end)
 
@@ -507,9 +528,10 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
       with_mock(mock, fn ->
         OptimalEngine.Connectors.Adapters.Notion.sync(state, nil)
 
-        db_calls = :ets.tab2list(calls)
-        |> Enum.filter(fn {u, _} -> String.contains?(u, "/databases/") end)
-        |> Enum.map(fn {u, _} -> u end)
+        db_calls =
+          :ets.tab2list(calls)
+          |> Enum.filter(fn {u, _} -> String.contains?(u, "/databases/") end)
+          |> Enum.map(fn {u, _} -> u end)
 
         assert Enum.any?(db_calls, &String.contains?(&1, "db-a"))
         assert Enum.any?(db_calls, &String.contains?(&1, "db-b"))
@@ -628,22 +650,30 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
     test "sync/2 initial sync fetches startPageToken then files" do
       calls = :ets.new(:drive_init, [:bag, :public])
 
-      mock = drive_token_mock(fn url, opts ->
-        :ets.insert(calls, {url, opts})
+      mock =
+        drive_token_mock(fn url, opts ->
+          :ets.insert(calls, {url, opts})
 
-        cond do
-          String.contains?(url, "startPageToken") ->
-            httpc_ok(%{"startPageToken" => "start_tok_1"})
+          cond do
+            String.contains?(url, "startPageToken") ->
+              httpc_ok(%{"startPageToken" => "start_tok_1"})
 
-          String.contains?(url, "/files") ->
-            httpc_ok(%{"files" => [
-              %{"id" => "f1", "name" => "doc.pdf", "mimeType" => "application/pdf", "modifiedTime" => "2026-01-01T00:00:00Z"}
-            ]})
+            String.contains?(url, "/files") ->
+              httpc_ok(%{
+                "files" => [
+                  %{
+                    "id" => "f1",
+                    "name" => "doc.pdf",
+                    "mimeType" => "application/pdf",
+                    "modifiedTime" => "2026-01-01T00:00:00Z"
+                  }
+                ]
+              })
 
-          true ->
-            httpc_ok(%{})
-        end
-      end)
+            true ->
+              httpc_ok(%{})
+          end
+        end)
 
       with_mock(mock, fn ->
         assert {:ok, %{signals: signals, cursor: "start_tok_1"}} =
@@ -660,25 +690,27 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
     test "sync/2 incremental uses changes API with page token" do
       calls = :ets.new(:drive_incr, [:bag, :public])
 
-      mock = drive_token_mock(fn url, opts ->
-        :ets.insert(calls, {url, opts})
+      mock =
+        drive_token_mock(fn url, opts ->
+          :ets.insert(calls, {url, opts})
 
-        if String.contains?(url, "/changes") do
-          httpc_ok(%{
-            "changes" => [],
-            "newStartPageToken" => "next_tok"
-          })
-        else
-          httpc_ok(%{})
-        end
-      end)
+          if String.contains?(url, "/changes") do
+            httpc_ok(%{
+              "changes" => [],
+              "newStartPageToken" => "next_tok"
+            })
+          else
+            httpc_ok(%{})
+          end
+        end)
 
       with_mock(mock, fn ->
         assert {:ok, %{signals: [], cursor: "next_tok"}} =
                  OptimalEngine.Connectors.Adapters.Drive.sync(@drive_state, "current_tok")
 
-        changes_call = :ets.tab2list(calls)
-        |> Enum.find(fn {u, _} -> String.contains?(u, "/changes") end)
+        changes_call =
+          :ets.tab2list(calls)
+          |> Enum.find(fn {u, _} -> String.contains?(u, "/changes") end)
 
         assert changes_call != nil
         {url, _} = changes_call
@@ -762,17 +794,19 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
     test "sync/2 full sync calls list_folder" do
       calls = :ets.new(:dbx_full, [:bag, :public])
 
-      mock = dropbox_token_mock(fn url, opts ->
-        :ets.insert(calls, {url, opts})
-        httpc_ok(%{"entries" => [], "has_more" => false, "cursor" => "dbx_cursor_1"})
-      end)
+      mock =
+        dropbox_token_mock(fn url, opts ->
+          :ets.insert(calls, {url, opts})
+          httpc_ok(%{"entries" => [], "has_more" => false, "cursor" => "dbx_cursor_1"})
+        end)
 
       with_mock(mock, fn ->
         assert {:ok, %{cursor: "dbx_cursor_1"}} =
                  OptimalEngine.Connectors.Adapters.Dropbox.sync(@dropbox_state, nil)
 
-        folder_calls = :ets.tab2list(calls)
-        |> Enum.filter(fn {u, _} -> String.contains?(u, "list_folder") end)
+        folder_calls =
+          :ets.tab2list(calls)
+          |> Enum.filter(fn {u, _} -> String.contains?(u, "list_folder") end)
 
         assert length(folder_calls) >= 1
 
@@ -787,17 +821,19 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
     test "sync/2 incremental calls list_folder/continue with cursor" do
       calls = :ets.new(:dbx_incr, [:bag, :public])
 
-      mock = dropbox_token_mock(fn url, opts ->
-        :ets.insert(calls, {url, opts})
-        httpc_ok(%{"entries" => [], "has_more" => false, "cursor" => "dbx_cursor_2"})
-      end)
+      mock =
+        dropbox_token_mock(fn url, opts ->
+          :ets.insert(calls, {url, opts})
+          httpc_ok(%{"entries" => [], "has_more" => false, "cursor" => "dbx_cursor_2"})
+        end)
 
       with_mock(mock, fn ->
         assert {:ok, %{cursor: "dbx_cursor_2"}} =
                  OptimalEngine.Connectors.Adapters.Dropbox.sync(@dropbox_state, "prev_cursor")
 
-        continue_calls = :ets.tab2list(calls)
-        |> Enum.filter(fn {u, _} -> String.contains?(u, "list_folder/continue") end)
+        continue_calls =
+          :ets.tab2list(calls)
+          |> Enum.filter(fn {u, _} -> String.contains?(u, "list_folder/continue") end)
 
         assert length(continue_calls) == 1
       end)
@@ -806,16 +842,23 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
     end
 
     test "sync/2 only returns file entries (filters out folders)" do
-      mock = dropbox_token_mock(fn _url, _opts ->
-        httpc_ok(%{
-          "entries" => [
-            %{".tag" => "file", "id" => "id:f1", "name" => "notes.txt", "path_display" => "/notes.txt", "server_modified" => "2026-01-01T00:00:00Z"},
-            %{".tag" => "folder", "id" => "id:d1", "name" => "docs", "path_display" => "/docs"}
-          ],
-          "has_more" => false,
-          "cursor" => "c3"
-        })
-      end)
+      mock =
+        dropbox_token_mock(fn _url, _opts ->
+          httpc_ok(%{
+            "entries" => [
+              %{
+                ".tag" => "file",
+                "id" => "id:f1",
+                "name" => "notes.txt",
+                "path_display" => "/notes.txt",
+                "server_modified" => "2026-01-01T00:00:00Z"
+              },
+              %{".tag" => "folder", "id" => "id:d1", "name" => "docs", "path_display" => "/docs"}
+            ],
+            "has_more" => false,
+            "cursor" => "c3"
+          })
+        end)
 
       with_mock(mock, fn ->
         assert {:ok, %{signals: signals}} =
@@ -890,17 +933,19 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
     test "sync/2 initial sync uses drive delta endpoint" do
       calls = :ets.new(:od_full, [:bag, :public])
 
-      mock = onedrive_token_mock(fn url, opts ->
-        :ets.insert(calls, {url, opts})
-        httpc_ok(%{"value" => [], "@odata.deltaLink" => "https://graph.microsoft.com/delta2"})
-      end)
+      mock =
+        onedrive_token_mock(fn url, opts ->
+          :ets.insert(calls, {url, opts})
+          httpc_ok(%{"value" => [], "@odata.deltaLink" => "https://graph.microsoft.com/delta2"})
+        end)
 
       with_mock(mock, fn ->
         assert {:ok, %{cursor: "https://graph.microsoft.com/delta2"}} =
                  OptimalEngine.Connectors.Adapters.OneDrive.sync(@od_state, nil)
 
-        delta_calls = :ets.tab2list(calls)
-        |> Enum.filter(fn {u, _} -> String.contains?(u, "/delta") end)
+        delta_calls =
+          :ets.tab2list(calls)
+          |> Enum.filter(fn {u, _} -> String.contains?(u, "/delta") end)
 
         assert length(delta_calls) >= 1
         [{url, _} | _] = delta_calls
@@ -914,17 +959,19 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
       calls = :ets.new(:od_incr, [:bag, :public])
       delta_link = "https://graph.microsoft.com/v1.0/drives/drive-456/root/delta?token=abc"
 
-      mock = onedrive_token_mock(fn url, opts ->
-        :ets.insert(calls, {url, opts})
-        httpc_ok(%{"value" => [], "@odata.deltaLink" => "https://graph.microsoft.com/delta3"})
-      end)
+      mock =
+        onedrive_token_mock(fn url, opts ->
+          :ets.insert(calls, {url, opts})
+          httpc_ok(%{"value" => [], "@odata.deltaLink" => "https://graph.microsoft.com/delta3"})
+        end)
 
       with_mock(mock, fn ->
         assert {:ok, %{cursor: "https://graph.microsoft.com/delta3"}} =
                  OptimalEngine.Connectors.Adapters.OneDrive.sync(@od_state, delta_link)
 
-        delta_calls = :ets.tab2list(calls)
-        |> Enum.filter(fn {u, _} -> String.contains?(u, delta_link) end)
+        delta_calls =
+          :ets.tab2list(calls)
+          |> Enum.filter(fn {u, _} -> String.contains?(u, delta_link) end)
 
         assert length(delta_calls) >= 1
       end)
@@ -933,15 +980,21 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
     end
 
     test "sync/2 filters out deleted items" do
-      item_normal = %{"id" => "i1", "name" => "doc.docx", "lastModifiedDateTime" => "2026-01-01T00:00:00Z"}
+      item_normal = %{
+        "id" => "i1",
+        "name" => "doc.docx",
+        "lastModifiedDateTime" => "2026-01-01T00:00:00Z"
+      }
+
       item_deleted = %{"id" => "i2", "name" => "gone.docx", "deleted" => %{"state" => "deleted"}}
 
-      mock = onedrive_token_mock(fn _url, _opts ->
-        httpc_ok(%{
-          "value" => [item_normal, item_deleted],
-          "@odata.deltaLink" => "https://graph.microsoft.com/delta4"
-        })
-      end)
+      mock =
+        onedrive_token_mock(fn _url, _opts ->
+          httpc_ok(%{
+            "value" => [item_normal, item_deleted],
+            "@odata.deltaLink" => "https://graph.microsoft.com/delta4"
+          })
+        end)
 
       with_mock(mock, fn ->
         assert {:ok, %{signals: signals}} =

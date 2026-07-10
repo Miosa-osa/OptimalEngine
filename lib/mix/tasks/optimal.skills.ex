@@ -57,24 +57,28 @@ defmodule Mix.Tasks.Optimal.Skills do
     cond do
       Keyword.get(opts, :traces) ->
         {:ok, rows} = Store.list_workflow_traces(workspace)
+
         print("Workflow Traces", rows, fn t ->
           "#{t.id}  family=#{t.workflow_family}  subject=#{t.subject_anchor || "-"}  state=#{t.lifecycle_state}"
         end)
 
       Keyword.get(opts, :workflows) ->
         {:ok, rows} = Store.list_generalized_workflows(workspace)
+
         print("Generalized Workflows", rows, fn w ->
           "#{w.id}  family=#{w.workflow_family}  traces=#{length(w.workflow_trace_links)}  state=#{w.lifecycle_state}"
         end)
 
       Keyword.get(opts, :procedures) ->
         {:ok, rows} = Store.list_procedural_memory_objects(workspace)
+
         print("Procedural Memory Objects", rows, fn p ->
           "#{p.id}  capability=#{p.capability_name}  risk=#{p.risk_class}  state=#{p.lifecycle_state}"
         end)
 
       true ->
         {:ok, rows} = Store.list_skill_packages(workspace)
+
         print("Skill Packages", rows, fn s ->
           "#{s.id}  name=#{s.skill_package_name}  v#{s.version}  review=#{s.review_status}  enabled=#{s.enabled_state}"
         end)

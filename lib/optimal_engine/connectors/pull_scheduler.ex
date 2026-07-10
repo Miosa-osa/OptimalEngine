@@ -204,8 +204,11 @@ defmodule OptimalEngine.Connectors.PullScheduler do
         |> maybe_put(:title, signal.title)
 
       case Intake.process(content, intake_opts) do
-        {:ok, _result} -> :ok
-        {:error, reason} -> Logger.warning("[Connectors.PullScheduler] intake failed: #{inspect(reason)}")
+        {:ok, _result} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("[Connectors.PullScheduler] intake failed: #{inspect(reason)}")
       end
     end
   end
