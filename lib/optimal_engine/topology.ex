@@ -2,7 +2,7 @@ defmodule OptimalEngine.Topology do
   @moduledoc """
   Top-level facade for the organizational topology layer.
 
-  A tenant's workspace is the first-class model of the company it represents:
+  An organization's workspace is the first-class model of the operation it represents:
   nodes (organizational units), people (principal.kind=:user), agents
   (principal.kind=:agent), skills (capabilities), memberships (who's in
   what node), and tool integrations (the translation layer between the
@@ -18,7 +18,14 @@ defmodule OptimalEngine.Topology do
   See `docs/architecture/WORKSPACE.md` for the model.
   """
 
+  alias OptimalEngine.Organization
   alias OptimalEngine.Topology.{Node, NodeMember, NodeRelationship, NodeType, PrincipalSkill, Skill}
+
+  # ── Organizations ────────────────────────────────────────────────────────
+
+  defdelegate create_organization(attrs), to: Organization, as: :create
+  defdelegate get_organization(id), to: Organization, as: :get
+  defdelegate list_organizations(opts), to: Organization, as: :list
 
   # ── Nodes ────────────────────────────────────────────────────────────────
 

@@ -1,12 +1,11 @@
 defmodule OptimalEngine.Workspace do
   @moduledoc """
-  A **workspace** is a knowledge base inside an organization (tenant).
+  A **workspace** is a knowledge base owned by an organization inside a tenant.
 
   An organization can hold many workspaces — e.g. "Engineering Brain",
   "Sales Brain", "M&A Brain", "Personal". Each workspace has its own
   curated wiki, its own connectors, its own audiences, and its own
-  set of nodes (the tenant's organizational topology can be re-used
-  across workspaces or scoped per-workspace via `node.workspace_id`).
+  set of typed hierarchical nodes scoped by `node.workspace_id`.
 
   Multiplicity rules:
 
@@ -25,6 +24,7 @@ defmodule OptimalEngine.Workspace do
   """
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Organization
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Workspace.Config
   alias OptimalEngine.Workspace.Filesystem
@@ -39,6 +39,7 @@ defmodule OptimalEngine.Workspace do
   @type t :: %__MODULE__{
           id: String.t(),
           tenant_id: String.t(),
+          organization_id: String.t(),
           slug: String.t(),
           name: String.t(),
           description: String.t() | nil,
@@ -50,6 +51,7 @@ defmodule OptimalEngine.Workspace do
 
   defstruct id: nil,
             tenant_id: Tenant.default_id(),
+            organization_id: Organization.default_id(),
             slug: nil,
             name: nil,
             description: nil,
@@ -70,7 +72,7 @@ defmodule OptimalEngine.Workspace do
   @spec get(String.t()) :: {:ok, t()} | {:error, :not_found}
   def get(id) when is_binary(id) do
     case Store.raw_query(
-           "SELECT id, tenant_id, slug, name, description, status, created_at, archived_at, metadata FROM workspaces WHERE id = ?1",
+           select_sql() <> " WHERE id = ?1",
            [id]
          ) do
       {:ok, [row]} -> {:ok, row_to_struct(row)}
@@ -83,7 +85,7 @@ defmodule OptimalEngine.Workspace do
   @spec get_by_slug(String.t(), String.t()) :: {:ok, t()} | {:error, :not_found}
   def get_by_slug(slug, tenant_id) when is_binary(slug) and is_binary(tenant_id) do
     case Store.raw_query(
-           "SELECT id, tenant_id, slug, name, description, status, created_at, archived_at, metadata FROM workspaces WHERE tenant_id = ?1 AND slug = ?2",
+           select_sql() <> " WHERE tenant_id = ?1 AND slug = ?2",
            [tenant_id, slug]
          ) do
       {:ok, [row]} -> {:ok, row_to_struct(row)}
@@ -102,23 +104,18 @@ defmodule OptimalEngine.Workspace do
   @spec list(keyword()) :: {:ok, [t()]} | {:error, term()}
   def list(opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
+    organization_id = Keyword.get(opts, :organization_id)
     status = Keyword.get(opts, :status, :active)
     limit = Keyword.get(opts, :limit, 50)
     offset = Keyword.get(opts, :offset, 0)
 
-    {sql, params} =
-      case status do
-        :all ->
-          {"SELECT id, tenant_id, slug, name, description, status, created_at, archived_at, metadata FROM workspaces WHERE tenant_id = ?1 ORDER BY name LIMIT ?2 OFFSET ?3",
-           [tenant_id, limit, offset]}
+    {where, params} = list_scope(tenant_id, organization_id, status)
 
-        s when s in @allowed_statuses ->
-          {"SELECT id, tenant_id, slug, name, description, status, created_at, archived_at, metadata FROM workspaces WHERE tenant_id = ?1 AND status = ?2 ORDER BY name LIMIT ?3 OFFSET ?4",
-           [tenant_id, Atom.to_string(s), limit, offset]}
+    sql =
+      select_sql() <>
+        where <> " ORDER BY name LIMIT ?#{length(params) + 1} OFFSET ?#{length(params) + 2}"
 
-        other ->
-          throw({:invalid_status, other})
-      end
+    params = params ++ [limit, offset]
 
     case Store.raw_query(sql, params) do
       {:ok, rows} -> {:ok, Enum.map(rows, &row_to_struct/1)}
@@ -134,20 +131,11 @@ defmodule OptimalEngine.Workspace do
   @spec count(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def count(opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
+    organization_id = Keyword.get(opts, :organization_id)
     status = Keyword.get(opts, :status, :active)
 
-    {sql, params} =
-      case status do
-        :all ->
-          {"SELECT COUNT(*) FROM workspaces WHERE tenant_id = ?1", [tenant_id]}
-
-        s when s in @allowed_statuses ->
-          {"SELECT COUNT(*) FROM workspaces WHERE tenant_id = ?1 AND status = ?2",
-           [tenant_id, Atom.to_string(s)]}
-
-        other ->
-          throw({:invalid_status, other})
-      end
+    {where, params} = list_scope(tenant_id, organization_id, status)
+    sql = "SELECT COUNT(*) FROM workspaces" <> where
 
     case Store.raw_query(sql, params) do
       {:ok, [[n]]} -> {:ok, n}
@@ -169,57 +157,56 @@ defmodule OptimalEngine.Workspace do
   @spec create(map()) :: {:ok, t()} | {:error, term()}
   def create(%{slug: slug, name: name} = attrs) when is_binary(slug) and is_binary(name) do
     tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
+    organization_id = Map.get(attrs, :organization_id, Organization.default_id())
     description = Map.get(attrs, :description)
     metadata = Map.get(attrs, :metadata, %{})
     id = Map.get(attrs, :id) || derive_id(tenant_id, slug)
 
     sql = """
-    INSERT INTO workspaces (id, tenant_id, slug, name, description, status, metadata)
-    VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6)
+    INSERT INTO workspaces (id, tenant_id, organization_id, slug, name, description, status, metadata)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7)
     """
 
-    params = [id, tenant_id, slug, name, description, Jason.encode!(metadata)]
+    params = [id, tenant_id, organization_id, slug, name, description, Jason.encode!(metadata)]
 
-    case Store.raw_query(sql, params) do
-      {:ok, _} ->
-        root = Application.get_env(:optimal_engine, :root_path, File.cwd!())
+    with {:ok, organization} <- Organization.get(organization_id),
+         true <- organization.tenant_id == tenant_id || {:error, :organization_tenant_mismatch},
+         {:ok, _} <- Store.raw_query(sql, params) do
+      root = Application.get_env(:optimal_engine, :root_path, File.cwd!())
 
-        # Provision the on-disk directory tree (nodes/, .wiki/, assets/, ...).
-        # Failure is non-fatal — the row exists; the user can re-trigger
-        # provisioning via the API. Logged but doesn't roll back the row.
-        case Filesystem.provision(slug, root: root) do
-          {:ok, _path} ->
-            # Write default config.yaml into .optimal/ after FS is ready.
-            case Config.put(slug, Config.defaults(), root) do
-              :ok ->
-                :ok
+      case Filesystem.provision(slug, root: root) do
+        {:ok, _path} ->
+          case Config.put(slug, Config.defaults(), root) do
+            :ok ->
+              :ok
 
-              {:error, reason} ->
-                require Logger
+            {:error, reason} ->
+              require Logger
 
-                Logger.warning(
-                  "[Workspace.create] config write failed for #{slug}: #{inspect(reason)}"
-                )
-            end
+              Logger.warning(
+                "[Workspace.create] config write failed for #{slug}: #{inspect(reason)}"
+              )
+          end
 
-          {:error, reason} ->
-            require Logger
-            Logger.warning("[Workspace.create] FS provision failed for #{slug}: #{inspect(reason)}")
-        end
+        {:error, reason} ->
+          require Logger
+          Logger.warning("[Workspace.create] FS provision failed for #{slug}: #{inspect(reason)}")
+      end
 
-        {:ok,
-         %__MODULE__{
-           id: id,
-           tenant_id: tenant_id,
-           slug: slug,
-           name: name,
-           description: description,
-           status: :active,
-           metadata: metadata
-         }}
-
-      other ->
-        other
+      {:ok,
+       %__MODULE__{
+         id: id,
+         tenant_id: tenant_id,
+         organization_id: organization_id,
+         slug: slug,
+         name: name,
+         description: description,
+         status: :active,
+         metadata: metadata
+       }}
+    else
+      false -> {:error, :organization_tenant_mismatch}
+      other -> other
     end
   end
 
@@ -246,6 +233,25 @@ defmodule OptimalEngine.Workspace do
         other ->
           other
       end
+    end
+  end
+
+  @doc "Moves a workspace to another organization in the same tenant."
+  @spec assign_organization(String.t(), String.t()) :: {:ok, t()} | {:error, term()}
+  def assign_organization(id, organization_id) when is_binary(id) and is_binary(organization_id) do
+    with {:ok, workspace} <- get(id),
+         {:ok, organization} <- Organization.get(organization_id),
+         true <-
+           organization.tenant_id == workspace.tenant_id || {:error, :organization_tenant_mismatch},
+         {:ok, _} <-
+           Store.raw_query("UPDATE workspaces SET organization_id = ?1 WHERE id = ?2", [
+             organization_id,
+             id
+           ]) do
+      get(id)
+    else
+      false -> {:error, :organization_tenant_mismatch}
+      other -> other
     end
   end
 
@@ -333,7 +339,7 @@ defmodule OptimalEngine.Workspace do
   @spec workspaces_of(String.t()) :: {:ok, [{t(), atom()}]} | {:error, term()}
   def workspaces_of(principal_id) when is_binary(principal_id) do
     sql = """
-    SELECT w.id, w.tenant_id, w.slug, w.name, w.description, w.status,
+    SELECT w.id, w.tenant_id, w.organization_id, w.slug, w.name, w.description, w.status,
            w.created_at, w.archived_at, w.metadata, m.role
     FROM workspaces w
     INNER JOIN workspace_members m ON m.workspace_id = w.id
@@ -345,7 +351,7 @@ defmodule OptimalEngine.Workspace do
       {:ok, rows} ->
         {:ok,
          Enum.map(rows, fn row ->
-           {ws_row, [role]} = Enum.split(row, 9)
+           {ws_row, [role]} = Enum.split(row, 10)
            {row_to_struct(ws_row), String.to_atom(role)}
          end)}
 
@@ -365,9 +371,35 @@ defmodule OptimalEngine.Workspace do
       else: "#{tenant_id}:#{slug}"
   end
 
+  defp select_sql do
+    "SELECT id, tenant_id, organization_id, slug, name, description, status, created_at, archived_at, metadata FROM workspaces"
+  end
+
+  defp list_scope(tenant_id, organization_id, status) do
+    {clauses, params} =
+      if organization_id,
+        do: {["tenant_id = ?1", "organization_id = ?2"], [tenant_id, organization_id]},
+        else: {["tenant_id = ?1"], [tenant_id]}
+
+    case status do
+      :all ->
+        {" WHERE " <> Enum.join(clauses, " AND "), params}
+
+      s when s in @allowed_statuses ->
+        position = length(params) + 1
+
+        {" WHERE " <> Enum.join(clauses ++ ["status = ?#{position}"], " AND "),
+         params ++ [Atom.to_string(s)]}
+
+      other ->
+        throw({:invalid_status, other})
+    end
+  end
+
   defp row_to_struct([
          id,
          tenant_id,
+         organization_id,
          slug,
          name,
          description,
@@ -379,6 +411,7 @@ defmodule OptimalEngine.Workspace do
     %__MODULE__{
       id: id,
       tenant_id: tenant_id,
+      organization_id: organization_id,
       slug: slug,
       name: name,
       description: description,
