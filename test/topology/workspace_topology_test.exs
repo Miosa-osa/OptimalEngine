@@ -47,6 +47,7 @@ defmodule OptimalEngine.WorkspaceTopologyTest do
     assert "role" in slugs
     assert "process" in slugs
     assert "task" in slugs
+    assert "customer" in slugs
 
     assert {:ok, type} = WorkspaceTopology.get_node_type("project", workspace_id: workspace.id)
     assert type.workspace_id == workspace.id

@@ -27,6 +27,7 @@ defmodule OptimalEngine.WorkspaceTopology do
     {"operation", "Operation", "Ongoing process or business function."},
     {"learning", "Learning", "Knowledge acquisition or capability development."},
     {"person", "Person", "Individual human, agent, partner, customer, or stakeholder."},
+    {"customer", "Customer", "Client account or customer organization receiving ongoing value."},
     {"product", "Product", "Product, platform, system, or offer."},
     {"partnership", "Partnership",
      "Collaboration, joint venture, or external working relationship."},
