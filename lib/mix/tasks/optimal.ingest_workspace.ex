@@ -81,7 +81,7 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
       stats
       |> ingest_nodes(root, tenant, workspace_id)
       |> ingest_signals(root, tenant, workspace_id)
-      |> ingest_wiki(root, tenant)
+      |> ingest_wiki(root, tenant, workspace_id)
 
     IO.puts("""
 
@@ -118,22 +118,23 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
 
       {name, kind, style, parent_slug} =
         case read_frontmatter(ctx_path) do
-          {:ok, fm, _body} ->
-            {fm["name"] || fm["title"] || slug, fm["kind"] || "node", fm["style"] || "internal",
-             fm["parent"]}
+          {:ok, fm, body} ->
+            {fm["name"] || fm["title"] || markdown_heading(body) || slug,
+             fm["kind"] || markdown_identity(body, "Node type") || "context",
+             fm["style"] || "internal", fm["parent"] || markdown_identity(body, "Parent")}
 
           _ ->
             {slug, "node", "internal", nil}
         end
 
-      id = "#{tenant}:node:#{slug}"
-      parent_id = if parent_slug, do: "#{tenant}:node:#{parent_slug}", else: nil
+      id = "#{tenant}:#{workspace_id}:#{slug}"
+      parent_id = if parent_slug, do: "#{tenant}:#{workspace_id}:#{parent_slug}", else: nil
 
       Store.raw_query(
         """
         INSERT INTO nodes (id, tenant_id, slug, name, kind, parent_id, path, style, workspace_id, metadata)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?3, ?7, ?8, '{"tag":"workspace-ingest"}')
-        ON CONFLICT(tenant_id, slug) DO UPDATE SET
+        ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           kind = excluded.kind,
           parent_id = excluded.parent_id,
@@ -212,7 +213,8 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
                ) do
             {:ok, _} ->
               # Entities from frontmatter
-              entity_count = ingest_entities(sig_id, fm["entities"] || [])
+              entity_count =
+                ingest_entities(sig_id, fm["entities"] || [], workspace_id)
 
               # Audit event
               Store.raw_query(
@@ -239,14 +241,14 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
     end)
   end
 
-  defp ingest_entities(signal_id, entities) when is_list(entities) do
+  defp ingest_entities(signal_id, entities, workspace_id) when is_list(entities) do
     Enum.reduce(entities, 0, fn e, acc ->
       {name, type} = extract_entity(e)
 
       if is_binary(name) and name != "" do
         Store.raw_query(
-          "INSERT OR IGNORE INTO entities (context_id, name, type) VALUES (?1, ?2, ?3)",
-          [signal_id, name, type || "concept"]
+          "INSERT OR IGNORE INTO entities (context_id, name, type, workspace_id) VALUES (?1, ?2, ?3, ?4)",
+          [signal_id, name, type || "concept", workspace_id]
         )
 
         acc + 1
@@ -256,7 +258,7 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
     end)
   end
 
-  defp ingest_entities(_, _), do: 0
+  defp ingest_entities(_, _, _), do: 0
 
   defp extract_entity(%{"name" => n, "type" => t}), do: {n, t}
   defp extract_entity(%{"name" => n}), do: {n, "concept"}
@@ -265,7 +267,7 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
 
   # ─── wiki ───────────────────────────────────────────────────────────────
 
-  defp ingest_wiki(stats, root, tenant) do
+  defp ingest_wiki(stats, root, tenant, workspace_id) do
     wiki_files = Path.wildcard(Path.join([root, ".wiki", "*.md"]))
 
     Enum.reduce(wiki_files, stats, fn path, acc ->
@@ -278,6 +280,7 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
           {:ok, fm, body} ->
             page = %Page{
               tenant_id: tenant,
+              workspace_id: workspace_id,
               slug: fm["slug"] || base,
               audience: fm["audience"] || "default",
               version: to_int(fm["version"]) || 1,
@@ -339,6 +342,22 @@ defmodule Mix.Tasks.Optimal.IngestWorkspace do
     overview = String.slice(body, 0, 2000)
 
     {summary, overview}
+  end
+
+  defp markdown_heading(body) do
+    case Regex.run(~r/^#\s+(.+)$/m, body) do
+      [_, heading] -> String.trim(heading)
+      _ -> nil
+    end
+  end
+
+  defp markdown_identity(body, label) do
+    pattern = ~r/^-\s+#{Regex.escape(label)}:\s+`?([^`\n]+)`?\s*$/mi
+
+    case Regex.run(pattern, body) do
+      [_, value] -> String.trim(value)
+      _ -> nil
+    end
   end
 
   defp to_float(nil), do: nil

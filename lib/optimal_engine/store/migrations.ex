@@ -89,7 +89,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_041_episodes(),
       migration_042_organizations(),
       migration_043_repair_workspace_organization_ownership(),
-      migration_044_reconcile_organization_schema()
+      migration_044_reconcile_organization_schema(),
+      migration_045_customer_node_type()
     ]
   end
 
@@ -2491,6 +2492,22 @@ defmodule OptimalEngine.Store.Migrations do
         "UPDATE workspaces SET organization_id = 'default' WHERE organization_id IS NULL"},
        {"idx_workspaces_organization_status.reconcile",
         "CREATE INDEX IF NOT EXISTS idx_workspaces_organization_status ON workspaces(organization_id, status)"}
+     ]}
+  end
+
+  defp migration_045_customer_node_type do
+    {45, "customer node type",
+     [
+       {"seed_customer_node_type",
+        """
+        INSERT OR IGNORE INTO node_types (
+          id, tenant_id, workspace_id, slug, name, category, description
+        )
+        SELECT
+          w.id || ':customer', w.tenant_id, w.id, 'customer', 'Customer', 'standard',
+          'Client account or customer organization receiving ongoing value.'
+        FROM workspaces w
+        """}
      ]}
   end
 
