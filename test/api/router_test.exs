@@ -94,6 +94,26 @@ defmodule OptimalEngine.API.RouterTest do
     end
   end
 
+  describe "organizations" do
+    test "creates organizations and scopes workspaces to them" do
+      suffix = System.unique_integer([:positive])
+
+      create_conn =
+        request(:post, "/api/organizations", %{
+          "slug" => "api-org-#{suffix}",
+          "name" => "API Organization #{suffix}"
+        })
+
+      assert create_conn.status == 201
+      assert {:ok, organization} = Jason.decode(create_conn.resp_body)
+
+      list_conn = request(:get, "/api/organizations")
+      assert list_conn.status == 200
+      assert {:ok, body} = Jason.decode(list_conn.resp_body)
+      assert Enum.any?(body["organizations"], &(&1["id"] == organization["id"]))
+    end
+  end
+
   describe "POST /api/rag" do
     test "requires a query in the body" do
       conn = request(:post, "/api/rag", %{})

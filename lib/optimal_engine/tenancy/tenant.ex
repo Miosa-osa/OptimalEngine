@@ -1,6 +1,8 @@
 defmodule OptimalEngine.Tenancy.Tenant do
   @moduledoc """
-  A tenant is an isolated organization with its own data, wiki, and ACLs.
+  A tenant is the hard security and account boundary for isolated data and ACLs.
+  One tenant can contain many organizations, and each organization can own many
+  workspaces.
   For v0.1, single-tenant deployments use the `"default"` tenant seeded
   automatically by migration 015.
 

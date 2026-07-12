@@ -86,7 +86,10 @@ defmodule OptimalEngine.Store.Migrations do
       migration_038_evaluation_records(),
       migration_039_connector_workspace_and_legacy_node_renames(),
       migration_040_asset_governance_backfill(),
-      migration_041_episodes()
+      migration_041_episodes(),
+      migration_042_organizations(),
+      migration_043_repair_workspace_organization_ownership(),
+      migration_044_reconcile_organization_schema()
     ]
   end
 
@@ -2394,6 +2397,103 @@ defmodule OptimalEngine.Store.Migrations do
      ]}
   end
 
+  # Organizations are operating entities inside a tenant. The tenant remains
+  # the hard security boundary; organizations provide the ownership boundary
+  # above workspaces without preventing governed cross-organization views.
+  defp migration_042_organizations do
+    {42, "organizations + workspace ownership",
+     [
+       {"organizations",
+        """
+        CREATE TABLE IF NOT EXISTS organizations (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          slug TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          archived_at TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          UNIQUE(tenant_id, slug)
+        )
+        """},
+       {"idx_organizations_tenant_status",
+        "CREATE INDEX IF NOT EXISTS idx_organizations_tenant_status ON organizations(tenant_id, status)"},
+       {"seed_default_organization",
+        """
+        INSERT OR IGNORE INTO organizations (
+          id, tenant_id, slug, name, description, status
+        ) VALUES (
+          'default', 'default', 'default', 'Default organization',
+          'Compatibility owner for workspaces created before organizations were first-class.',
+          'active'
+        )
+        """},
+       {"workspaces.organization_id",
+        "ALTER TABLE workspaces ADD COLUMN organization_id TEXT REFERENCES organizations(id)"},
+       {"backfill_workspaces_organization_id",
+        "UPDATE workspaces SET organization_id = 'default' WHERE organization_id IS NULL"},
+       {"idx_workspaces_organization_status",
+        "CREATE INDEX IF NOT EXISTS idx_workspaces_organization_status ON workspaces(organization_id, status)"}
+     ]}
+  end
+
+  # Repair installations where an early migration 042 attempt was recorded
+  # after SQLite rejected its original non-null REFERENCES column statement.
+  defp migration_043_repair_workspace_organization_ownership do
+    {43, "repair workspace organization ownership",
+     [
+       {"workspaces.organization_id.repair",
+        "ALTER TABLE workspaces ADD COLUMN organization_id TEXT REFERENCES organizations(id)"},
+       {"backfill_workspaces_organization_id.repair",
+        "UPDATE workspaces SET organization_id = 'default' WHERE organization_id IS NULL"},
+       {"idx_workspaces_organization_status.repair",
+        "CREATE INDEX IF NOT EXISTS idx_workspaces_organization_status ON workspaces(organization_id, status)"}
+     ]}
+  end
+
+  # Reconcile live stores where migration 42 was recorded despite only some
+  # statements being applied. Creation and backfill are intentionally ordered.
+  defp migration_044_reconcile_organization_schema do
+    {44, "reconcile organization schema",
+     [
+       {"organizations.reconcile",
+        """
+        CREATE TABLE IF NOT EXISTS organizations (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          slug TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          archived_at TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          UNIQUE(tenant_id, slug)
+        )
+        """},
+       {"idx_organizations_tenant_status.reconcile",
+        "CREATE INDEX IF NOT EXISTS idx_organizations_tenant_status ON organizations(tenant_id, status)"},
+       {"seed_default_organization.reconcile",
+        """
+        INSERT OR IGNORE INTO organizations (
+          id, tenant_id, slug, name, description, status
+        ) VALUES (
+          'default', 'default', 'default', 'Default organization',
+          'Compatibility owner for workspaces created before organizations were first-class.',
+          'active'
+        )
+        """},
+       {"workspaces.organization_id.reconcile",
+        "ALTER TABLE workspaces ADD COLUMN organization_id TEXT REFERENCES organizations(id)"},
+       {"backfill_workspaces_organization_id.reconcile",
+        "UPDATE workspaces SET organization_id = 'default' WHERE organization_id IS NULL"},
+       {"idx_workspaces_organization_status.reconcile",
+        "CREATE INDEX IF NOT EXISTS idx_workspaces_organization_status ON workspaces(organization_id, status)"}
+     ]}
+  end
+
   # ---------------------------------------------------------------------------
   # Private — helpers
   # ---------------------------------------------------------------------------
@@ -2426,9 +2526,8 @@ defmodule OptimalEngine.Store.Migrations do
     :ok
   end
 
-  # Executes a statement; tolerates duplicate-column / duplicate-index errors
-  # so re-runs never fail. Any unexpected error is logged but not raised
-  # (migrations continue) so a single broken statement doesn't brick the store.
+  # Executes a statement and tolerates only idempotency errors. Unexpected
+  # failures must stop the migration so its version is never recorded as done.
   defp safe_execute(db, label, sql) do
     case Exqlite.Sqlite3.execute(db, sql) do
       :ok ->
@@ -2443,13 +2542,11 @@ defmodule OptimalEngine.Store.Migrations do
             :ok
 
           true ->
-            Logger.warning("[Migrations] #{label} failed: #{msg}")
-            :ok
+            raise "migration statement #{label} failed: #{msg}"
         end
 
       {:error, reason} ->
-        Logger.warning("[Migrations] #{label} failed: #{inspect(reason)}")
-        :ok
+        raise "migration statement #{label} failed: #{inspect(reason)}"
     end
   end
 

@@ -832,25 +832,47 @@ defmodule OptimalEngine.API.Router do
 
   # ── Organizations + Workspaces (Phase 1.5) ─────────────────────────────
 
-  # GET /api/organizations — every organization (tenant) the caller can see.
-  # v0.1 single-tenant: returns the singleton default org.
+  # GET /api/organizations — organizations inside the caller's tenant.
   get "/api/organizations" do
-    case OptimalEngine.Tenancy.Tenant.get(OptimalEngine.Tenancy.Tenant.default_id()) do
-      {:ok, t} ->
+    tenant_id = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
+    status = if query_param(conn, "status", "active") == "all", do: :all, else: :active
+
+    case OptimalEngine.Organization.list(tenant_id: tenant_id, status: status) do
+      {:ok, organizations} ->
         json(conn, %{
-          organizations: [
-            %{
-              id: t.id,
-              name: t.name,
-              plan: t.plan,
-              region: t.region,
-              created_at: t.created_at
-            }
-          ]
+          tenant_id: tenant_id,
+          organizations: Enum.map(organizations, &organization_to_map/1)
         })
 
-      _ ->
-        json(conn, %{organizations: []})
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/organizations — create an organization inside a tenant.
+  post "/api/organizations" do
+    body = conn.body_params || %{}
+
+    attrs = %{
+      slug: Map.get(body, "slug"),
+      name: Map.get(body, "name"),
+      tenant_id: Map.get(body, "tenant", OptimalEngine.Tenancy.Tenant.default_id()),
+      description: Map.get(body, "description"),
+      status: parse_organization_status(Map.get(body, "status", "active")),
+      metadata: Map.get(body, "metadata", %{})
+    }
+
+    case OptimalEngine.Organization.create(attrs) do
+      {:ok, organization} ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(201, Jason.encode!(organization_to_map(organization)))
+
+      {:error, :missing_required_fields} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "slug and name required"}))
+
+      {:error, reason} ->
+        send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
@@ -858,6 +880,7 @@ defmodule OptimalEngine.API.Router do
   # Status filter via ?status=active|archived|all (default: active).
   get "/api/workspaces" do
     tenant_id = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
+    organization_id = query_param(conn, "organization", nil)
     {offset, limit} = Pagination.parse(conn)
 
     status =
@@ -870,13 +893,18 @@ defmodule OptimalEngine.API.Router do
       end
 
     total =
-      case OptimalEngine.Workspace.count(tenant_id: tenant_id, status: status) do
+      case OptimalEngine.Workspace.count(
+             tenant_id: tenant_id,
+             organization_id: organization_id,
+             status: status
+           ) do
         {:ok, n} -> n
         _ -> 0
       end
 
     case OptimalEngine.Workspace.list(
            tenant_id: tenant_id,
+           organization_id: organization_id,
            status: status,
            limit: limit,
            offset: offset
@@ -912,13 +940,15 @@ defmodule OptimalEngine.API.Router do
 
       true ->
         tenant_id = Map.get(body, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
+        organization_id = Map.get(body, "organization", OptimalEngine.Organization.default_id())
         description = Map.get(body, "description")
 
         case OptimalEngine.WorkspaceTopology.create_workspace(%{
                slug: slug,
                name: name,
                description: description,
-               tenant_id: tenant_id
+               tenant_id: tenant_id,
+               organization_id: organization_id
              }) do
           {:ok, ws} ->
             conn
@@ -949,7 +979,18 @@ defmodule OptimalEngine.API.Router do
       |> maybe_put(:name, Map.get(body, "name"))
       |> maybe_put(:description, Map.get(body, "description"))
 
-    case OptimalEngine.Workspace.update(id, attrs) do
+    result =
+      with {:ok, workspace} <- OptimalEngine.Workspace.update(id, attrs) do
+        case Map.get(body, "organization") do
+          organization_id when is_binary(organization_id) ->
+            OptimalEngine.Workspace.assign_organization(workspace.id, organization_id)
+
+          _ ->
+            {:ok, workspace}
+        end
+      end
+
+    case result do
       {:ok, ws} -> json(conn, workspace_to_map(ws))
       {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "workspace not found"}))
       {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
@@ -2296,6 +2337,7 @@ defmodule OptimalEngine.API.Router do
     %{
       id: ws.id,
       tenant_id: ws.tenant_id,
+      organization_id: ws.organization_id,
       slug: ws.slug,
       name: ws.name,
       description: ws.description,
@@ -2305,6 +2347,24 @@ defmodule OptimalEngine.API.Router do
       metadata: ws.metadata
     }
   end
+
+  defp organization_to_map(organization) do
+    %{
+      id: organization.id,
+      tenant_id: organization.tenant_id,
+      slug: organization.slug,
+      name: organization.name,
+      description: organization.description,
+      status: Atom.to_string(organization.status),
+      created_at: organization.created_at,
+      archived_at: organization.archived_at,
+      metadata: organization.metadata
+    }
+  end
+
+  defp parse_organization_status("dormant"), do: :dormant
+  defp parse_organization_status("archived"), do: :archived
+  defp parse_organization_status(_), do: :active
 
   defp profile_to_map(%Profile{} = p) do
     %{

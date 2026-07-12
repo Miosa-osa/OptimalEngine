@@ -17,9 +17,13 @@ defmodule OptimalEngine.WorkspaceTopology do
 
   @standard_node_types [
     {"entity", "Entity", "Business, organization, institution, or operating entity."},
+    {"division", "Division", "Major operating branch inside an organization or workspace."},
     {"department", "Department", "Functional area inside an entity."},
     {"team", "Team", "Group of people or agents working together."},
+    {"role", "Role", "Named responsibility or position held by a person or agent."},
     {"project", "Project", "Bounded initiative with a target outcome."},
+    {"process", "Process", "Repeatable sequence of work with defined inputs and outputs."},
+    {"task", "Task", "Assignable unit of work with a completion state."},
     {"operation", "Operation", "Ongoing process or business function."},
     {"learning", "Learning", "Knowledge acquisition or capability development."},
     {"person", "Person", "Individual human, agent, partner, customer, or stakeholder."},
