@@ -6,7 +6,14 @@ export PATH="/opt/homebrew/opt/erlang/bin:/opt/homebrew/bin:/usr/local/bin:/usr/
 export OPTIMAL_API_ENABLED=true
 export MIX_ENV=dev
 export OPTIMAL_KNOWLEDGE_BACKEND="${OPTIMAL_KNOWLEDGE_BACKEND:-rocksdb}"
-cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OPTIMALOS_DIR="$(cd "$ENGINE_DIR/.." && pwd)"
+
+export OPTIMAL_ENGINE_ROOT="${OPTIMAL_ENGINE_ROOT:-$OPTIMALOS_DIR/workspaces}"
+export OPTIMAL_ENGINE_DB="${OPTIMAL_ENGINE_DB:-$ENGINE_DIR/.optimal/index.db}"
+export OPTIMAL_ENGINE_CACHE="${OPTIMAL_ENGINE_CACHE:-$ENGINE_DIR/.optimal/cache}"
+
+cd "$ENGINE_DIR"
 
 mkdir -p .optimal
 
