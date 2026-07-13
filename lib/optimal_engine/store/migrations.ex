@@ -92,7 +92,10 @@ defmodule OptimalEngine.Store.Migrations do
       migration_044_reconcile_organization_schema(),
       migration_045_customer_node_type(),
       migration_046_operational_stores(),
-      migration_047_model_adaptation_store()
+      migration_047_model_adaptation_store(),
+      migration_048_repair_chunk_workspace_scope(),
+      migration_049_rebuild_contexts_fts_triggers(),
+      migration_050_retire_test_storage_fixtures()
     ]
   end
 
@@ -2699,6 +2702,98 @@ defmodule OptimalEngine.Store.Migrations do
         """},
        {"idx_model_adapters_scope",
         "CREATE INDEX IF NOT EXISTS idx_model_adapters_scope ON model_adapters(organization_id, workspace_id, status, base_model)"}
+     ]}
+  end
+
+  defp migration_048_repair_chunk_workspace_scope do
+    {48, "repair chunk and embedding workspace scope from parent contexts",
+     [
+       {"repair_chunks_workspace_scope",
+        """
+        UPDATE chunks
+        SET workspace_id = (
+          SELECT contexts.workspace_id
+          FROM contexts
+          WHERE contexts.id = chunks.signal_id
+        )
+        WHERE workspace_id = 'default'
+          AND EXISTS (
+            SELECT 1 FROM contexts
+            WHERE contexts.id = chunks.signal_id
+              AND contexts.workspace_id != 'default'
+          )
+        """},
+       {"repair_chunk_embeddings_workspace_scope",
+        """
+        UPDATE chunk_embeddings
+        SET workspace_id = (
+          SELECT chunks.workspace_id
+          FROM chunks
+          WHERE chunks.id = chunk_embeddings.chunk_id
+        )
+        WHERE workspace_id = 'default'
+          AND EXISTS (
+            SELECT 1 FROM chunks
+            WHERE chunks.id = chunk_embeddings.chunk_id
+              AND chunks.workspace_id != 'default'
+          )
+        """}
+     ]}
+  end
+
+  defp migration_049_rebuild_contexts_fts_triggers do
+    {49, "rebuild contexts FTS and use content-table-safe triggers",
+     [
+       {"drop_contexts_fts_insert_trigger", "DROP TRIGGER IF EXISTS contexts_fts_insert"},
+       {"drop_contexts_fts_update_trigger", "DROP TRIGGER IF EXISTS contexts_fts_update"},
+       {"drop_contexts_fts_delete_trigger", "DROP TRIGGER IF EXISTS contexts_fts_delete"},
+       {"clear_contexts_fts", "DELETE FROM contexts_fts"},
+       {"rebuild_contexts_fts",
+        """
+        INSERT INTO contexts_fts(rowid, id, title, content, node, type, genre)
+        SELECT rowid, id, title, content, node, type, COALESCE(genre, '')
+        FROM contexts
+        """},
+       {"contexts_fts_insert_trigger_v2",
+        """
+        CREATE TRIGGER contexts_fts_insert AFTER INSERT ON contexts BEGIN
+          INSERT INTO contexts_fts(rowid, id, title, content, node, type, genre)
+          VALUES (new.rowid, new.id, new.title, new.content, new.node, new.type, COALESCE(new.genre, ''));
+        END
+        """},
+       {"contexts_fts_update_trigger_v2",
+        """
+        CREATE TRIGGER contexts_fts_update AFTER UPDATE ON contexts BEGIN
+          DELETE FROM contexts_fts WHERE rowid = old.rowid;
+          INSERT INTO contexts_fts(rowid, id, title, content, node, type, genre)
+          VALUES (new.rowid, new.id, new.title, new.content, new.node, new.type, COALESCE(new.genre, ''));
+        END
+        """},
+       {"contexts_fts_delete_trigger_v2",
+        """
+        CREATE TRIGGER contexts_fts_delete AFTER DELETE ON contexts BEGIN
+          DELETE FROM contexts_fts WHERE rowid = old.rowid;
+        END
+        """}
+     ]}
+  end
+
+  defp migration_050_retire_test_storage_fixtures do
+    {50, "retire leaked test workspaces and stale temporary assets",
+     [
+       {"archive_example_secret_workspaces",
+        """
+        UPDATE workspaces
+        SET status = 'archived'
+        WHERE id GLOB 'exampleorg-*:secrets'
+          AND name = 'WS secrets'
+        """},
+       {"delete_stale_test_assets",
+        """
+        DELETE FROM assets
+        WHERE storage_path LIKE '/var/folders/%/T/%'
+           OR storage_path GLOB '*/exercise-mm-*/assets/*'
+        """}
      ]}
   end
 

@@ -366,6 +366,11 @@ defmodule OptimalEngine.API.Router do
     json(conn, %{stores: stores, count: length(stores)})
   end
 
+  get "/api/stores/audit" do
+    audit = OptimalEngine.StorageAudit.run()
+    conn |> put_status(if(audit.ok, do: 200, else: 503)) |> json(audit)
+  end
+
   get "/api/stores/:id/records" do
     conn = Plug.Conn.fetch_query_params(conn)
     workspace_id = conn.query_params["workspace_id"]

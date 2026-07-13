@@ -97,6 +97,16 @@ defmodule OptimalEngine.API.RouterTest do
 
       assert request(:get, "/api/stores/secrets/records?workspace_id=x").status == 403
     end
+
+    test "exposes the deep storage audit" do
+      conn = request(:get, "/api/stores/audit")
+      assert conn.status in [200, 503]
+      assert {:ok, body} = Jason.decode(conn.resp_body)
+      assert is_boolean(body["ok"])
+      assert is_list(body["checks"])
+      assert Enum.any?(body["checks"], &(&1["name"] == "sqlite_integrity"))
+      assert Enum.any?(body["checks"], &(&1["name"] == "vector_integrity"))
+    end
   end
 
   describe "POST /api/workspaces" do

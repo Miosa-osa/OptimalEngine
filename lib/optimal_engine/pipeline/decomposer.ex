@@ -60,6 +60,7 @@ defmodule OptimalEngine.Pipeline.Decomposer do
   @spec decompose(ParsedDoc.t(), keyword()) :: {:ok, ChunkTree.t()}
   def decompose(%ParsedDoc{} = doc, opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, @default_tenant)
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
     signal_id = doc.signal_id || derive_signal_id(doc.text)
     window = Keyword.get(opts, :window_bytes, @default_window_bytes)
     overlap = Keyword.get(opts, :overlap_bytes, @default_overlap_bytes)
@@ -84,7 +85,9 @@ defmodule OptimalEngine.Pipeline.Decomposer do
         overlap
       )
 
-    all = [document] ++ sections ++ paragraphs ++ chunks
+    all =
+      ([document] ++ sections ++ paragraphs ++ chunks)
+      |> Enum.map(&%{&1 | workspace_id: workspace_id})
 
     {:ok, %ChunkTree{root_chunk_id: document.id, chunks: all}}
   end

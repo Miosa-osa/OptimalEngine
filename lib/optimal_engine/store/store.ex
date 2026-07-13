@@ -153,8 +153,7 @@ defmodule OptimalEngine.Store do
 
   @ddl_fts_update_trigger """
   CREATE TRIGGER IF NOT EXISTS contexts_fts_update AFTER UPDATE ON contexts BEGIN
-    INSERT INTO contexts_fts(contexts_fts, rowid, id, title, content, node, type, genre)
-    VALUES('delete', old.rowid, old.id, old.title, old.content, old.node, old.type, COALESCE(old.genre, ''));
+    DELETE FROM contexts_fts WHERE rowid = old.rowid;
     INSERT INTO contexts_fts(rowid, id, title, content, node, type, genre)
     VALUES (new.rowid, new.id, new.title, new.content, new.node, new.type, COALESCE(new.genre, ''));
   END
@@ -162,8 +161,7 @@ defmodule OptimalEngine.Store do
 
   @ddl_fts_delete_trigger """
   CREATE TRIGGER IF NOT EXISTS contexts_fts_delete AFTER DELETE ON contexts BEGIN
-    INSERT INTO contexts_fts(contexts_fts, rowid, id, title, content, node, type, genre)
-    VALUES('delete', old.rowid, old.id, old.title, old.content, old.node, old.type, COALESCE(old.genre, ''));
+    DELETE FROM contexts_fts WHERE rowid = old.rowid;
   END
   """
 
@@ -638,6 +636,7 @@ defmodule OptimalEngine.Store do
     with {:ok, db} <- Exqlite.Sqlite3.open(db_path),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA journal_mode=WAL"),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA foreign_keys=ON"),
+         :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA recursive_triggers=ON"),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA synchronous=NORMAL"),
          :ok <- Exqlite.Sqlite3.execute(db, @ddl_contexts),
          :ok <- migrate_from_signals_table(db),
