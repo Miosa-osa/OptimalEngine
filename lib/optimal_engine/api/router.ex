@@ -2358,7 +2358,7 @@ defmodule OptimalEngine.API.Router do
 
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(200, body)
+    |> send_resp(conn.status || 200, body)
   end
 
   defp cors(conn, _opts) do

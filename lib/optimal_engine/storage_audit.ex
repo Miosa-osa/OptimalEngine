@@ -169,8 +169,13 @@ defmodule OptimalEngine.StorageAudit do
 
   defp rlm_runtime do
     case RLM.health() do
-      {:ok, status} -> {:ok, status}
-      {:error, reason} -> {:error, reason}
+      {:ok, status} ->
+        {:ok, status}
+
+      {:error, reason} ->
+        if System.get_env("OPTIMAL_RLM_REQUIRED") == "true",
+          do: {:error, reason},
+          else: {:ok, %{available: false, optional: true, reason: inspect(reason)}}
     end
   end
 

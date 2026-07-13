@@ -100,8 +100,8 @@ defmodule OptimalEngine.API.RouterTest do
 
     test "exposes the deep storage audit" do
       conn = request(:get, "/api/stores/audit")
-      assert conn.status in [200, 503]
       assert {:ok, body} = Jason.decode(conn.resp_body)
+      assert conn.status == if(body["ok"], do: 200, else: 503)
       assert is_boolean(body["ok"])
       assert is_list(body["checks"])
       assert Enum.any?(body["checks"], &(&1["name"] == "sqlite_integrity"))

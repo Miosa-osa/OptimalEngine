@@ -21,7 +21,7 @@ defmodule OptimalEngine.StorageCatalog do
       id: "full_text",
       purpose: "Exact text and phrase retrieval",
       technology: "SQLite FTS5",
-      tables: ~w(contexts_fts memories_fts source_packages_fts)
+      tables: ~w(contexts_fts memories_fts)
     },
     %{
       id: "vector",
