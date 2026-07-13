@@ -90,7 +90,9 @@ defmodule OptimalEngine.Store.Migrations do
       migration_042_organizations(),
       migration_043_repair_workspace_organization_ownership(),
       migration_044_reconcile_organization_schema(),
-      migration_045_customer_node_type()
+      migration_045_customer_node_type(),
+      migration_046_operational_stores(),
+      migration_047_model_adaptation_store()
     ]
   end
 
@@ -2508,6 +2510,195 @@ defmodule OptimalEngine.Store.Migrations do
           'Client account or customer organization receiving ongoing value.'
         FROM workspaces w
         """}
+     ]}
+  end
+
+  defp migration_046_operational_stores do
+    {46, "durable jobs, metric history, and backup catalog",
+     [
+       {"jobs",
+        """
+        CREATE TABLE IF NOT EXISTS jobs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'available',
+          priority INTEGER NOT NULL DEFAULT 0,
+          run_at TEXT NOT NULL DEFAULT (datetime('now')),
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 5,
+          lease_owner TEXT,
+          lease_expires_at TEXT,
+          idempotency_key TEXT,
+          last_error TEXT,
+          inserted_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT,
+          UNIQUE(tenant_id, workspace_id, idempotency_key)
+        )
+        """},
+       {"idx_jobs_claim",
+        "CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, run_at, priority DESC)"},
+       {"idx_jobs_workspace_status",
+        "CREATE INDEX IF NOT EXISTS idx_jobs_workspace_status ON jobs(workspace_id, status, run_at)"},
+       {"dead_letter_jobs",
+        """
+        CREATE TABLE IF NOT EXISTS dead_letter_jobs (
+          id TEXT PRIMARY KEY,
+          original_job_id TEXT NOT NULL,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload TEXT NOT NULL DEFAULT '{}',
+          attempts INTEGER NOT NULL,
+          final_error TEXT NOT NULL,
+          failed_at TEXT NOT NULL DEFAULT (datetime('now')),
+          replayed_at TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}'
+        )
+        """},
+       {"idx_dead_letter_workspace",
+        "CREATE INDEX IF NOT EXISTS idx_dead_letter_workspace ON dead_letter_jobs(workspace_id, failed_at)"},
+       {"metric_samples",
+        """
+        CREATE TABLE IF NOT EXISTS metric_samples (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL,
+          metric_name TEXT NOT NULL,
+          metric_kind TEXT NOT NULL,
+          value REAL NOT NULL,
+          labels TEXT NOT NULL DEFAULT '{}',
+          recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_metric_samples_name_time",
+        "CREATE INDEX IF NOT EXISTS idx_metric_samples_name_time ON metric_samples(metric_name, recorded_at)"},
+       {"idx_metric_samples_workspace_time",
+        "CREATE INDEX IF NOT EXISTS idx_metric_samples_workspace_time ON metric_samples(workspace_id, recorded_at)"},
+       {"backup_records",
+        """
+        CREATE TABLE IF NOT EXISTS backup_records (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          storage_provider TEXT NOT NULL DEFAULT 'local',
+          storage_uri TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'created',
+          encrypted INTEGER NOT NULL DEFAULT 0,
+          offsite INTEGER NOT NULL DEFAULT 0,
+          size_bytes INTEGER,
+          checksum_sha256 TEXT,
+          integrity_status TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          verified_at TEXT,
+          expires_at TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}'
+        )
+        """},
+       {"idx_backup_records_status_time",
+        "CREATE INDEX IF NOT EXISTS idx_backup_records_status_time ON backup_records(status, created_at)"}
+     ]}
+  end
+
+  defp migration_047_model_adaptation_store do
+    {47, "decomposition and workspace-scoped model adaptation records",
+     [
+       {"decomposition_runs",
+        """
+        CREATE TABLE IF NOT EXISTS decomposition_runs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          organization_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          source_package_id TEXT NOT NULL,
+          strategy TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued',
+          fallback_strategy TEXT,
+          attempt INTEGER NOT NULL DEFAULT 1,
+          checkpoint_uri TEXT,
+          input_bytes INTEGER,
+          output_units INTEGER,
+          model_calls INTEGER NOT NULL DEFAULT 0,
+          iterations INTEGER NOT NULL DEFAULT 0,
+          metrics TEXT NOT NULL DEFAULT '{}',
+          error TEXT,
+          started_at TEXT,
+          completed_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_decomposition_runs_scope",
+        "CREATE INDEX IF NOT EXISTS idx_decomposition_runs_scope ON decomposition_runs(organization_id, workspace_id, source_package_id, status)"},
+       {"training_examples",
+        """
+        CREATE TABLE IF NOT EXISTS training_examples (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          organization_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          source_package_id TEXT,
+          input TEXT NOT NULL,
+          expected_output TEXT NOT NULL,
+          purpose TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'candidate',
+          consent_basis TEXT,
+          content_hash TEXT NOT NULL,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          approved_at TEXT,
+          UNIQUE(workspace_id, content_hash)
+        )
+        """},
+       {"idx_training_examples_scope",
+        "CREATE INDEX IF NOT EXISTS idx_training_examples_scope ON training_examples(organization_id, workspace_id, status, purpose)"},
+       {"training_runs",
+        """
+        CREATE TABLE IF NOT EXISTS training_runs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          organization_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          base_model TEXT NOT NULL,
+          trainer TEXT NOT NULL,
+          method TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued',
+          dataset_query TEXT NOT NULL DEFAULT '{}',
+          hyperparameters TEXT NOT NULL DEFAULT '{}',
+          hardware TEXT NOT NULL DEFAULT '{}',
+          metrics TEXT NOT NULL DEFAULT '{}',
+          error TEXT,
+          started_at TEXT,
+          completed_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_training_runs_scope",
+        "CREATE INDEX IF NOT EXISTS idx_training_runs_scope ON training_runs(organization_id, workspace_id, status, created_at)"},
+       {"model_adapters",
+        """
+        CREATE TABLE IF NOT EXISTS model_adapters (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          organization_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          training_run_id TEXT NOT NULL REFERENCES training_runs(id),
+          base_model TEXT NOT NULL,
+          adapter_type TEXT NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1,
+          artifact_uri TEXT NOT NULL,
+          checksum_sha256 TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'candidate',
+          evaluation TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          activated_at TEXT,
+          retired_at TEXT,
+          UNIQUE(workspace_id, id, version)
+        )
+        """},
+       {"idx_model_adapters_scope",
+        "CREATE INDEX IF NOT EXISTS idx_model_adapters_scope ON model_adapters(organization_id, workspace_id, status, base_model)"}
      ]}
   end
 
