@@ -360,6 +360,19 @@ defmodule OptimalEngine.API.Router do
     json(conn, snap)
   end
 
+  # Agent-facing inventory of every logical data store and index.
+  get "/api/stores" do
+    stores = OptimalEngine.StorageCatalog.list()
+    json(conn, %{stores: stores, count: length(stores)})
+  end
+
+  get "/api/stores/:id" do
+    case OptimalEngine.StorageCatalog.get(id) do
+      {:ok, store} -> json(conn, store)
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "store not found"}))
+    end
+  end
+
   # POST /api/rag — end-to-end retrieval for LLM consumption.
   # Body: {"query": "…", "format": "markdown", "audience": "default", "bandwidth": "medium", "workspace": "default"}
   # Optional benchmark/debug controls: skip_intent, skip_wiki, hybrid_limit, memory_limit.

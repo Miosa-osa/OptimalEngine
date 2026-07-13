@@ -56,6 +56,37 @@ defmodule OptimalEngine.API.RouterTest do
     end
   end
 
+  describe "storage catalog" do
+    test "lists every agent-readable logical store" do
+      conn = request(:get, "/api/stores")
+      assert conn.status == 200
+      assert {:ok, body} = Jason.decode(conn.resp_body)
+
+      ids = Enum.map(body["stores"], & &1["id"])
+
+      assert body["count"] == 11
+      assert "relational" in ids
+      assert "full_text" in ids
+      assert "vector" in ids
+      assert "graph" in ids
+      assert "jobs" in ids
+      assert "metrics" in ids
+      assert "backups" in ids
+      assert "models" in ids
+      assert "secrets" in ids
+    end
+
+    test "returns one store without exposing record content" do
+      conn = request(:get, "/api/stores/vector")
+      assert conn.status == 200
+      assert {:ok, body} = Jason.decode(conn.resp_body)
+      assert body["id"] == "vector"
+      assert body["status"] == "available"
+      assert is_integer(body["row_count"])
+      refute Map.has_key?(body, "records")
+    end
+  end
+
   describe "POST /api/workspaces" do
     test "creates workspaces through topology lifecycle and seeds node types" do
       suffix = System.unique_integer([:positive])
