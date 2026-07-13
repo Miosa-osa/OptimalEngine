@@ -3,6 +3,8 @@
 This file is the Claude Code entrypoint for the public Optimal Engine repo.
 Read `AGENTS.md` first when you need the full contract.
 This file keeps the shortest possible rules in front of Claude users and coding agents.
+The canonical upstream is `https://github.com/Miosa-osa/OptimalEngine.git` on `main`.
+Never push Engine changes to `robertohluna/OptimalEngine`.
 
 ## What This Repo Is
 
@@ -113,6 +115,7 @@ For setup, backend, store, CLI, or runtime changes:
 bash -n scripts/run-engine.sh
 mix compile
 mix optimal.reality_check
+curl http://localhost:4200/api/stores/audit
 ```
 
 If port `4200` is already in use, identify the process before touching it.

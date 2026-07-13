@@ -10,9 +10,11 @@ Read any user-level opinions file only when working inside a private checkout th
 Use this repo as the engine source of truth:
 
 ```text
-OptimalEngine
+https://github.com/Miosa-osa/OptimalEngine.git
 ```
 
+The canonical branch is `main`.
+Never push Engine changes to `robertohluna/OptimalEngine`.
 Do not assume an embedded copy inside another app is newer.
 Check `git status`, branch, remotes, and the running process before making changes.
 
@@ -37,6 +39,7 @@ Verify:
 
 ```bash
 curl http://localhost:4200/api/health
+curl http://localhost:4200/api/stores/audit
 mix optimal.reality_check
 ```
 
@@ -165,6 +168,7 @@ For setup or backend changes, run:
 bash -n scripts/run-engine.sh
 mix compile
 mix optimal.reality_check
+curl http://localhost:4200/api/stores/audit
 ```
 
 If the live engine already owns port `4200`, either verify against the live engine or run checks in a clean environment.
