@@ -56,5 +56,26 @@ defmodule OptimalEngine.Pipeline.Decomposer.StoreIntegrationTest do
     assert count == length(tree1.chunks)
   end
 
+  test "persists workspace scope on chunks" do
+    unique = System.unique_integer([:positive])
+    signal_id = "sha256:workspace-#{unique}"
+    workspace_id = "workspace-#{unique}"
+    doc = ParsedDoc.new(text: "Workspace-scoped content", signal_id: signal_id)
+
+    assert {:ok, tree} =
+             Decomposer.decompose_and_store(doc,
+               workspace_id: workspace_id,
+               skip_embed: true
+             )
+
+    assert Enum.all?(tree.chunks, &(&1.workspace_id == workspace_id))
+
+    assert {:ok, [[^workspace_id]]} =
+             Store.raw_query(
+               "SELECT DISTINCT workspace_id FROM chunks WHERE signal_id = ?1",
+               [signal_id]
+             )
+  end
+
   defp signal_id_from_id(id), do: id |> String.split(":doc-") |> hd()
 end

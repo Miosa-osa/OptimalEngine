@@ -22,6 +22,7 @@ defmodule OptimalEngine.Pipeline.Decomposer.Chunk do
   @type t :: %__MODULE__{
           id: String.t(),
           tenant_id: String.t(),
+          workspace_id: String.t(),
           signal_id: String.t(),
           parent_id: String.t() | nil,
           scale: scale(),
@@ -35,6 +36,7 @@ defmodule OptimalEngine.Pipeline.Decomposer.Chunk do
 
   defstruct id: nil,
             tenant_id: "default",
+            workspace_id: "default",
             signal_id: nil,
             parent_id: nil,
             scale: :chunk,
