@@ -13,8 +13,19 @@ defmodule OptimalEngine.BackupTest do
     assert info.size_bytes > 0
     assert info.rows_backed_up >= 0
     assert info.duration_ms >= 0
+    assert String.starts_with?(info.id, "backup_")
+    assert String.length(info.checksum_sha256) == 64
+    assert info.integrity_status == "verified"
 
     assert File.exists?(target)
+
+    assert {:ok, [["completed", "verified", checksum]]} =
+             OptimalEngine.Store.raw_query(
+               "SELECT status, integrity_status, checksum_sha256 FROM backup_records WHERE id = ?1",
+               [info.id]
+             )
+
+    assert checksum == info.checksum_sha256
   end
 
   test "create/1 refuses to overwrite an existing target", %{tmp_dir: tmp} do

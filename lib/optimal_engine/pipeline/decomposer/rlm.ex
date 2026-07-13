@@ -36,6 +36,23 @@ defmodule OptimalEngine.Pipeline.Decomposer.RLM do
     end
   end
 
+  @spec health(keyword()) :: {:ok, map()} | {:error, term()}
+  def health(opts \\ []) do
+    {executable, prefix_args} = command(opts)
+
+    case System.cmd(executable, prefix_args ++ [script(opts), "--check"], stderr_to_stdout: true) do
+      {output, 0} ->
+        case Jason.decode(output) do
+          {:ok, %{"available" => true} = status} -> {:ok, status}
+          {:ok, status} -> {:error, {:rlm_unavailable, status}}
+          {:error, reason} -> {:error, {:invalid_rlm_health, reason}}
+        end
+
+      {output, status} ->
+        {:error, {:rlm_health_exit, status, String.trim(output)}}
+    end
+  end
+
   defp invoke(payload, opts) do
     {executable, prefix_args} = command(opts)
     args = prefix_args ++ [script(opts)]
