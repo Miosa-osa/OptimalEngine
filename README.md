@@ -288,6 +288,12 @@ under budget, tiers compress. That ordering is the chaining: classify, branch by
 dimension, generate candidates across every store, fuse, score, select with MCTS,
 assemble by tier, deliver.
 
+The agent-facing storage catalog exposes 12 logical stores through
+`GET /api/stores`: relational, full-text, vector, graph, assets, cache, jobs,
+metrics, backups, decomposition, models, and secrets. These are logical
+capabilities, not a requirement to deploy 12 separate database servers. The
+default local runtime uses SQLite, FTS5, RocksDB, ETS, and filesystem artifacts.
+
 ## Product Surfaces
 
 Optimal Engine is the backend runtime. Different surfaces can control or display
@@ -391,6 +397,32 @@ reviewed topology change instead of silently overwriting truth.
 
 See [`docs/architecture/STORAGE-AND-PROJECTION-MAP.md`](docs/architecture/STORAGE-AND-PROJECTION-MAP.md)
 for the full map.
+
+### Retrieval and long-document decomposition
+
+Hybrid retrieval combines FTS candidates, workspace-scoped context vectors,
+and per-chunk semantic reranking. Chunk embeddings remain rebuildable
+projections and never become accepted facts.
+
+The deterministic four-level decomposer remains the default ingestion path.
+An optional local DSPy RLM sidecar can recursively inspect unusually large or
+structurally difficult sources through Deno/Pyodide. RLM output enters the same
+governed Source Package, Signal, Claim, Fact, and Memory lifecycle and falls
+back safely when the local model runtime is unavailable.
+
+### Storage verification
+
+Use the catalog for inventory and the deep audit for proof:
+
+```bash
+curl http://localhost:4200/api/stores
+curl http://localhost:4200/api/stores/audit
+```
+
+The deep audit verifies SQLite integrity, foreign keys, migration parity, FTS
+parity, workspace isolation, vector shape and references, leaked fixtures,
+asset paths, a verified backup, DSPy/Deno health, and ETS cache availability.
+It returns HTTP 503 when any invariant fails.
 
 For scope switching rules across organization, workspace, Node, and task pool,
 read [`docs/guides/scope-switching.md`](docs/guides/scope-switching.md).

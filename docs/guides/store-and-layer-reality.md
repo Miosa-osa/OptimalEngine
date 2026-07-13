@@ -113,6 +113,30 @@ If the engine API returns the wrong workspace data, that is an engine isolation 
 | Mnesia graph store | Optional | Distributed BEAM graph backend for specialized deployments. | Backend tests pass and startup logs show `Knowledge backend: Mnesia` when configured. |
 | Postgres | No for local dev | Production target for canonical runtime rows. | Verify in production profile, not normal local boot. |
 
+## Agent-Facing Logical Stores
+
+`GET /api/stores` reports the current logical storage capabilities without
+exposing raw secrets or arbitrary SQL access.
+
+| Logical store | Local backing | Contents |
+| --- | --- | --- |
+| relational | SQLite | topology, sources, claims, facts, memories, episodes, and audit |
+| full-text | SQLite FTS5 | exact text and phrase retrieval |
+| vector | SQLite float32 BLOBs | context and chunk embeddings |
+| graph | RocksDB plus SQLite lineage | relationship traversal and multi-hop reasoning |
+| assets | filesystem plus SQLite metadata | uploaded files and multimodal extraction records |
+| cache | ETS and filesystem cache | rebuildable hot context |
+| jobs | SQLite | leases, retries, and dead letters |
+| metrics | Telemetry, Prometheus, and SQLite history | operational measurements |
+| backups | files plus SQLite catalog | checksum, integrity, retention, and offsite status |
+| decomposition | SQLite plus optional DSPy RLM | deterministic, recursive, and fallback runs |
+| models | SQLite metadata plus artifact storage | training examples, runs, and adapters |
+| secrets | bcrypt and encrypted envelopes | API authentication and connector credentials |
+
+Operational and model records can be inspected through bounded, sanitized,
+workspace-scoped endpoints under `/api/stores/:id/records`. Secret record
+inspection is intentionally rejected.
+
 ## What Each Layer Owns
 
 Do not organize the system by database name.
@@ -167,6 +191,23 @@ Run the full backend probe:
 ```bash
 mix optimal.reality_check
 ```
+
+For storage-specific proof in an OptimalOS checkout, run:
+
+```bash
+.system/oe storage_check
+```
+
+The equivalent direct Engine endpoint is:
+
+```bash
+curl http://localhost:4200/api/stores/audit
+```
+
+Do not report storage as healthy from table existence alone. The audit must
+show zero failures, FTS row parity, zero foreign-key violations, zero
+legacy-default rows, valid vector dimensions, existing asset paths, and an
+existing integrity-verified backup.
 
 Expected summary:
 
