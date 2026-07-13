@@ -69,8 +69,19 @@ defmodule OptimalEngine.Pipeline.Decomposer.RLM do
 
   defp command(opts) do
     case Keyword.get(opts, :command) || System.get_env("OPTIMAL_RLM_COMMAND") do
-      nil -> {"python3", []}
+      nil -> {default_python(), []}
       command -> {"sh", ["-c", command <> " \"$@\"", "optimal-rlm"]}
+    end
+  end
+
+  defp default_python do
+    configured = System.get_env("OPTIMAL_RLM_PYTHON")
+    local = Path.expand("../../../../.optimal/rlm-venv/bin/python", __DIR__)
+
+    cond do
+      is_binary(configured) and configured != "" -> configured
+      File.regular?(local) -> local
+      true -> "python3"
     end
   end
 
