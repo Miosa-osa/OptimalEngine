@@ -59,7 +59,14 @@ Verify the server:
 
 ```bash
 curl http://localhost:4200/api/health
+curl http://localhost:4200/api/stores
+curl http://localhost:4200/api/stores/audit
 ```
+
+`/api/health` proves the process and canonical store are reachable.
+`/api/stores` inventories the 12 logical stores.
+`/api/stores/audit` performs the deeper integrity, isolation, index, vector,
+asset, backup, RLM, and cache checks and returns HTTP 503 on failure.
 
 ## 4. Run The Reality Check
 
