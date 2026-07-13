@@ -106,6 +106,55 @@ defmodule OptimalEngine.Store.Vectors do
   end
 
   @doc """
+  Reranks candidate contexts using their persisted chunk embeddings.
+
+  This keeps exact local search bounded to candidates selected by FTS while
+  making the richer per-chunk embedding index participate in retrieval.
+  Scores use the best matching chunk for each source context.
+  """
+  @spec rerank_contexts([float()], [String.t()], keyword()) ::
+          {:ok, [{String.t(), float()}]} | {:error, term()}
+  def rerank_contexts(query_embedding, context_ids, opts \\ [])
+
+  def rerank_contexts(_query_embedding, [], _opts), do: {:ok, []}
+
+  def rerank_contexts(query_embedding, context_ids, opts)
+      when is_list(query_embedding) and is_list(context_ids) do
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    limit = Keyword.get(opts, :limit, length(context_ids))
+    placeholders = Enum.map_join(1..length(context_ids), ", ", &"?#{&1 + 2}")
+
+    sql = """
+    SELECT c.signal_id, ce.vector
+    FROM chunk_embeddings ce
+    JOIN chunks c ON c.id = ce.chunk_id
+    WHERE ce.workspace_id = ?1
+      AND ce.dim = ?2
+      AND c.signal_id IN (#{placeholders})
+    """
+
+    params = [workspace_id, length(query_embedding) | context_ids]
+
+    case Store.raw_query(sql, params) do
+      {:ok, rows} ->
+        results =
+          rows
+          |> Enum.reduce(%{}, fn [context_id, blob], scores ->
+            similarity = cosine_similarity(query_embedding, decode_embedding(blob))
+            Map.update(scores, context_id, similarity, &max(&1, similarity))
+          end)
+          |> Enum.sort_by(fn {_context_id, similarity} -> similarity end, :desc)
+          |> Enum.take(limit)
+
+        {:ok, results}
+
+      {:error, reason} = error ->
+        Logger.warning("[VectorStore] Chunk rerank failed: #{inspect(reason)}")
+        error
+    end
+  end
+
+  @doc """
   Deletes the embedding for a given context_id.
 
   Returns `:ok` (idempotent — no error if the row does not exist).

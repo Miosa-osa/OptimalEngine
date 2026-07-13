@@ -366,6 +366,29 @@ defmodule OptimalEngine.API.Router do
     json(conn, %{stores: stores, count: length(stores)})
   end
 
+  get "/api/stores/:id/records" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    workspace_id = conn.query_params["workspace_id"]
+    limit = parse_int(conn.query_params["limit"], 25)
+
+    case OptimalEngine.StorageCatalog.records(id, workspace_id, limit) do
+      {:ok, records} ->
+        json(conn, %{store: id, records: records, count: length(records)})
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "store not found"}))
+
+      {:error, :not_inspectable} ->
+        send_resp(conn, 403, Jason.encode!(%{error: "store does not expose records"}))
+
+      {:error, :workspace_required} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "workspace_id is required"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: "store inspection failed: #{inspect(reason)}"}))
+    end
+  end
+
   get "/api/stores/:id" do
     case OptimalEngine.StorageCatalog.get(id) do
       {:ok, store} -> json(conn, store)
@@ -2141,10 +2164,13 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.Backup.create(target_path) do
       {:ok, info} ->
         json(conn, %{
+          id: info.id,
           path: info.target,
           size_bytes: info.size_bytes,
           rows_backed_up: info.rows_backed_up,
-          duration_ms: info.duration_ms
+          duration_ms: info.duration_ms,
+          checksum_sha256: info.checksum_sha256,
+          integrity_status: info.integrity_status
         })
 
       {:error, {:target_exists, path}} ->

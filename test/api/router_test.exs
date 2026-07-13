@@ -64,7 +64,7 @@ defmodule OptimalEngine.API.RouterTest do
 
       ids = Enum.map(body["stores"], & &1["id"])
 
-      assert body["count"] == 11
+      assert body["count"] == 12
       assert "relational" in ids
       assert "full_text" in ids
       assert "vector" in ids
@@ -72,6 +72,7 @@ defmodule OptimalEngine.API.RouterTest do
       assert "jobs" in ids
       assert "metrics" in ids
       assert "backups" in ids
+      assert "decomposition" in ids
       assert "models" in ids
       assert "secrets" in ids
     end
@@ -84,6 +85,17 @@ defmodule OptimalEngine.API.RouterTest do
       assert body["status"] == "available"
       assert is_integer(body["row_count"])
       refute Map.has_key?(body, "records")
+    end
+
+    test "requires workspace scope and refuses secret records" do
+      assert request(:get, "/api/stores/jobs/records").status == 400
+
+      conn = request(:get, "/api/stores/jobs/records?workspace_id=default:knowledge-intake")
+      assert conn.status == 200
+      assert {:ok, %{"records" => records}} = Jason.decode(conn.resp_body)
+      assert is_list(records)
+
+      assert request(:get, "/api/stores/secrets/records?workspace_id=x").status == 403
     end
   end
 

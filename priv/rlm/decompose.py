@@ -3,6 +3,7 @@
 
 import json
 import os
+import shutil
 import sys
 
 
@@ -16,6 +17,18 @@ try:
 except ImportError:
     fail("dspy is not installed; install the optional Optimal RLM environment")
 
+if "--check" in sys.argv:
+    print(
+        json.dumps(
+            {
+                "available": shutil.which("deno") is not None,
+                "dspy_version": getattr(dspy, "__version__", "unknown"),
+                "deno": shutil.which("deno"),
+            }
+        )
+    )
+    raise SystemExit(0)
+
 
 class DecomposeSource(dspy.Signature):
     """Split a source into atomic units while preserving factual content.
@@ -27,8 +40,8 @@ class DecomposeSource(dspy.Signature):
     title: str = dspy.InputField()
     content: str = dspy.InputField()
     related_titles: str = dspy.InputField()
-    atoms_json: str = dspy.OutputField(
-        desc="JSON array of {title, body, tags, links, evidence} objects"
+    atoms: list[dict] = dspy.OutputField(
+        desc="Atomic units with title, body, tags, links, and verbatim evidence fields"
     )
 
 
@@ -41,7 +54,7 @@ lm = dspy.LM(model_id)
 dspy.configure(lm=lm)
 
 kwargs = {
-    "max_iterations": int(request.get("max_iterations", 15)),
+    "max_iters": int(request.get("max_iterations", 15)),
     "max_llm_calls": int(request.get("max_llm_calls", 30)),
     "max_output_chars": int(request.get("max_output_chars", 15000)),
     "verbose": False,
@@ -58,10 +71,7 @@ result = decomposer(
     related_titles=", ".join(request.get("related_titles", [])),
 )
 
-try:
-    atoms = json.loads(result.atoms_json)
-except (AttributeError, json.JSONDecodeError) as exc:
-    fail(f"RLM returned invalid atoms JSON: {exc}")
+atoms = result.atoms
 
 if not isinstance(atoms, list) or not atoms:
     fail("RLM returned no atoms")

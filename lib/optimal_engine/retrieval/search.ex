@@ -247,7 +247,7 @@ defmodule OptimalEngine.Retrieval.Search do
     # embedding list for degenerate queries (empty strings, very short
     # tokens, partial model load). Skip the vector hop in that case so
     # we don't chase a zero-vector through VectorStore.
-    vector_results =
+    {vector_results, chunk_results} =
       case Ollama.embed(query) do
         {:ok, query_embedding} when is_list(query_embedding) and query_embedding != [] ->
           vector_opts = [
@@ -267,13 +267,27 @@ defmodule OptimalEngine.Retrieval.Search do
               do: Keyword.put(vector_opts, :node_filter, n),
               else: vector_opts
 
-          case VectorStore.search(query_embedding, vector_opts) do
-            {:ok, pairs} -> pairs
-            _ -> []
-          end
+          context_pairs =
+            case VectorStore.search(query_embedding, vector_opts) do
+              {:ok, pairs} -> pairs
+              _ -> []
+            end
+
+          candidate_ids = Enum.map(fts_results, & &1.id)
+
+          chunk_pairs =
+            case VectorStore.rerank_contexts(query_embedding, candidate_ids,
+                   limit: limit * 3,
+                   workspace_id: Keyword.get(opts, :workspace_id, "default")
+                 ) do
+              {:ok, pairs} -> pairs
+              _ -> []
+            end
+
+          {context_pairs, chunk_pairs}
 
         _ ->
-          []
+          {[], []}
       end
 
     # Step 4: Merge results
@@ -282,7 +296,11 @@ defmodule OptimalEngine.Retrieval.Search do
     fts_map = Map.new(fts_results, fn ctx -> {ctx.id, ctx.score / max(max_fts, 0.001)} end)
 
     # Build a map of context_id -> vector_similarity
-    vector_map = Map.new(vector_results)
+    vector_map =
+      (vector_results ++ chunk_results)
+      |> Enum.reduce(%{}, fn {id, score}, scores ->
+        Map.update(scores, id, score, &max(&1, score))
+      end)
 
     # Union of all context IDs
     all_ids = MapSet.union(MapSet.new(Map.keys(fts_map)), MapSet.new(Map.keys(vector_map)))
