@@ -49,12 +49,26 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
   """
   @spec process(Context.t()) :: {:ok, Context.t()}
   def process(%Context{} = context) do
-    if Ollama.available?() do
-      run_semantic_pipeline(context)
-    else
-      Logger.debug("[SemanticProcessor] Ollama unavailable, skipping semantic processing")
-      {:ok, context}
+    cond do
+      not enabled?() ->
+        Logger.debug("[SemanticProcessor] disabled, skipping semantic processing")
+        {:ok, context}
+
+      Ollama.available?() ->
+        run_semantic_pipeline(context)
+
+      true ->
+        Logger.debug("[SemanticProcessor] Ollama unavailable, skipping semantic processing")
+        {:ok, context}
     end
+  end
+
+  @doc "Whether asynchronous LLM enrichment is enabled for intake."
+  @spec enabled?() :: boolean()
+  def enabled? do
+    :optimal_engine
+    |> Application.get_env(:semantic_processing, [])
+    |> Keyword.get(:enabled, true)
   end
 
   @doc """

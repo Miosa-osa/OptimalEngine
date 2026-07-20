@@ -95,7 +95,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_047_model_adaptation_store(),
       migration_048_repair_chunk_workspace_scope(),
       migration_049_rebuild_contexts_fts_triggers(),
-      migration_050_retire_test_storage_fixtures()
+      migration_050_retire_test_storage_fixtures(),
+      migration_051_workspace_storage_policies()
     ]
   end
 
@@ -2793,6 +2794,92 @@ defmodule OptimalEngine.Store.Migrations do
         DELETE FROM assets
         WHERE storage_path LIKE '/var/folders/%/T/%'
            OR storage_path GLOB '*/exercise-mm-*/assets/*'
+        """}
+     ]}
+  end
+
+  defp migration_051_workspace_storage_policies do
+    {51, "workspace storage policies and governed replication ledger",
+     [
+       {"storage_provider_configs",
+        """
+        CREATE TABLE IF NOT EXISTS storage_provider_configs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          organization_id TEXT,
+          workspace_id TEXT,
+          provider_id TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+          lifecycle_state TEXT NOT NULL DEFAULT 'configured',
+          config_refs TEXT NOT NULL DEFAULT '{}',
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(tenant_id, workspace_id, provider_id),
+          FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+        )
+        """},
+       {"idx_storage_provider_configs_scope",
+        "CREATE INDEX IF NOT EXISTS idx_storage_provider_configs_scope ON storage_provider_configs(tenant_id, organization_id, workspace_id, enabled)"},
+       {"workspace_storage_policies",
+        """
+        CREATE TABLE IF NOT EXISTS workspace_storage_policies (
+          workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          organization_id TEXT,
+          use_cases TEXT NOT NULL DEFAULT '[]',
+          provider_overrides TEXT NOT NULL DEFAULT '{}',
+          policy_version INTEGER NOT NULL DEFAULT 1,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_workspace_storage_policies_scope",
+        "CREATE INDEX IF NOT EXISTS idx_workspace_storage_policies_scope ON workspace_storage_policies(tenant_id, organization_id, workspace_id)"},
+       {"backfill_workspace_storage_policies",
+        """
+        INSERT OR IGNORE INTO workspace_storage_policies (
+          workspace_id, tenant_id, organization_id, use_cases, created_by
+        )
+        SELECT id, tenant_id, organization_id, '[\"desktop_local\"]', 'migration.051'
+        FROM workspaces
+        WHERE status = 'active'
+        """},
+       {"sync_mutations",
+        """
+        CREATE TABLE IF NOT EXISTS sync_mutations (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          organization_id TEXT,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          device_id TEXT NOT NULL,
+          actor_id TEXT,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          operation TEXT NOT NULL CHECK(operation IN ('create', 'update', 'delete')),
+          payload TEXT,
+          payload_hash TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          occurred_at TEXT NOT NULL,
+          recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_sync_mutations_workspace_sequence",
+        "CREATE INDEX IF NOT EXISTS idx_sync_mutations_workspace_sequence ON sync_mutations(tenant_id, workspace_id, sequence)"},
+       {"idx_sync_mutations_entity",
+        "CREATE INDEX IF NOT EXISTS idx_sync_mutations_entity ON sync_mutations(workspace_id, entity_type, entity_id, sequence)"},
+       {"sync_cursors",
+        """
+        CREATE TABLE IF NOT EXISTS sync_cursors (
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          replica_id TEXT NOT NULL,
+          last_sequence INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(tenant_id, workspace_id, replica_id)
+        )
         """}
      ]}
   end

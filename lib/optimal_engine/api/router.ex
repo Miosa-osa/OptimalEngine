@@ -371,6 +371,126 @@ defmodule OptimalEngine.API.Router do
     conn |> put_status(if(audit.ok, do: 200, else: 503)) |> json(audit)
   end
 
+  # Physical provider inventory. Logical stores above describe ownership;
+  # providers describe replaceable deployment technology.
+  get "/api/storage/providers" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    probe? = conn.query_params["probe"] in ["1", "true", "yes"]
+    providers = OptimalEngine.Storage.Providers.list(probe: probe?)
+    json(conn, %{providers: providers, count: length(providers)})
+  end
+
+  get "/api/storage/use-cases" do
+    use_cases = OptimalEngine.Storage.Planner.use_cases()
+    json(conn, %{use_cases: use_cases, count: length(use_cases)})
+  end
+
+  post "/api/storage/plan" do
+    body = conn.body_params || %{}
+
+    use_cases =
+      case Map.get(body, "use_cases", []) do
+        value when is_list(value) -> value
+        value when is_binary(value) -> String.split(value, ",", trim: true)
+        _ -> []
+      end
+
+    case OptimalEngine.Storage.Planner.plan(use_cases,
+           probe: Map.get(body, "probe", false) == true
+         ) do
+      {:ok, plan} ->
+        json(conn, plan)
+
+      {:error, {:unknown_use_cases, unknown}} ->
+        send_resp(conn, 422, Jason.encode!(%{error: "unknown use cases", unknown: unknown}))
+    end
+  end
+
+  get "/api/storage/providers/:id" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    probe? = conn.query_params["probe"] in ["1", "true", "yes"]
+
+    case OptimalEngine.Storage.Providers.get(id, probe: probe?) do
+      {:ok, provider} -> json(conn, provider)
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "provider not found"}))
+    end
+  end
+
+  get "/api/storage/workspaces/:workspace_id/policy" do
+    case OptimalEngine.Storage.PolicyStore.get_policy(workspace_id) do
+      {:ok, policy} ->
+        json(conn, policy)
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "storage policy not found"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  put "/api/storage/workspaces/:workspace_id/policy" do
+    body = conn.body_params || %{}
+
+    use_cases =
+      case Map.get(body, "use_cases", []) do
+        value when is_list(value) -> value
+        value when is_binary(value) -> String.split(value, ",", trim: true)
+        _ -> []
+      end
+
+    case OptimalEngine.Storage.PolicyStore.put_policy(workspace_id, use_cases,
+           provider_overrides: Map.get(body, "provider_overrides", %{}),
+           actor_id: conn.assigns[:current_principal_id]
+         ) do
+      {:ok, policy} -> json(conn, policy)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  get "/api/storage/workspaces/:workspace_id/mutations" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    after_sequence = parse_int(conn.query_params["after"], 0)
+    limit = parse_int(conn.query_params["limit"], 100)
+
+    case OptimalEngine.Storage.PolicyStore.mutations_after(workspace_id, after_sequence, limit) do
+      {:ok, mutations} -> json(conn, %{mutations: mutations, count: length(mutations)})
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  post "/api/storage/workspaces/:workspace_id/mutations" do
+    body = conn.body_params || %{}
+
+    attrs = %{
+      workspace_id: workspace_id,
+      device_id: Map.get(body, "device_id"),
+      actor_id: conn.assigns[:current_principal_id],
+      entity_type: Map.get(body, "entity_type"),
+      entity_id: Map.get(body, "entity_id"),
+      operation: Map.get(body, "operation"),
+      payload: Map.get(body, "payload"),
+      idempotency_key: Map.get(body, "idempotency_key"),
+      occurred_at: Map.get(body, "occurred_at")
+    }
+
+    attrs = attrs |> Enum.reject(fn {_key, value} -> is_nil(value) end) |> Map.new()
+
+    case OptimalEngine.Storage.PolicyStore.append_mutation(attrs) do
+      {:ok, mutation} -> conn |> put_status(201) |> json(mutation)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  post "/api/storage/workspaces/:workspace_id/cursors/:replica_id" do
+    sequence = Map.get(conn.body_params || %{}, "last_sequence", 0)
+
+    case OptimalEngine.Storage.PolicyStore.advance_cursor(workspace_id, replica_id, sequence) do
+      :ok -> json(conn, %{ok: true, workspace_id: workspace_id, replica_id: replica_id})
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
   get "/api/stores/:id/records" do
     conn = Plug.Conn.fetch_query_params(conn)
     workspace_id = conn.query_params["workspace_id"]

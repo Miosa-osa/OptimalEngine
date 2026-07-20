@@ -35,6 +35,13 @@ separate truth systems. They are projections or control surfaces over the engine
 | ETS | In-memory graph/knowledge backend. | No for durable truth. | Yes. | Fast local process state. |
 | RocksDB | Optional persistent graph/triple-store backend. | Optional for graph workload, not main workspace DB. | Depends on configured use. | Requires native RocksDB runtime support. |
 | Mnesia/Riak backends | Optional distributed graph/knowledge backend experiments. | Optional. | Depends on configured use. | Not the primary product storage path today. |
+| S3-compatible object storage | Shared artifacts, media, backups, and multi-device evidence. | Yes for artifacts assigned to it. | No unless replicated elsewhere. | Garage provides an open-source self-hosted option. |
+| NATS JetStream | Replayable event, job, connector, and replication transport. | No. | Yes from the governed mutation and job ledgers. | Transport never replaces canonical state. |
+| Valkey | Distributed cache, rate limits, locks, and coordination. | No. | Yes. | Ephemeral acceleration only. |
+| Qdrant | High-scale semantic retrieval projection. | No. | Yes. | Vector results remain candidates, not truth. |
+| DuckDB and Parquet | Large analytical and historical projections. | No for transactional state. | Yes. | Analytics remain isolated from operational writes. |
+| OpenBao | Secret, key, PKI, and credential lifecycle. | Yes for managed secrets. | Recovery follows secret-manager policy. | Workspace policies contain references, not secret values. |
+| Fractal Computing | Enterprise synchronized digital-twin substrate. | Governed by the enterprise integration boundary. | Depends on the enterprise contract. | Cloud-only partner capability with controlled, auditable promotion to systems of record. |
 | Markdown workspace | Human-operable projection and editing surface. | No by default. | Yes from engine state. | Edits re-enter as Source Packages or topology change requests. |
 | HTML/wiki/dashboard/API | Display and control projections. | No. | Yes. | Should be regenerated from engine state. |
 
@@ -98,9 +105,11 @@ agent/tool calls acting outside their granted scope
 project/package/workflow names resolving to the wrong Node
 ```
 
-SQLite can exercise this model locally. Production multi-user use should move
-the canonical runtime tables to Postgres or an equivalent managed relational
-store while preserving the same ownership rules.
+SQLite can exercise this model locally.
+
+Multi-user deployments can activate PostgreSQL or an equivalent managed relational store when concurrent writes, availability, or scale require it, while preserving the same ownership rules.
+
+The workspace policy and replication ledger make that transition explicit instead of silently changing the source of truth.
 
 ## Domain Ownership
 

@@ -83,6 +83,10 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
   # /api/workspaces/:id, /api/workspaces/:id/config, /api/workspaces/:id/archive…
   defp path_workspace(%{path_info: ["api", "workspaces", id | _]}), do: URI.decode(id)
+
+  defp path_workspace(%{path_info: ["api", "storage", "workspaces", id | _]}),
+    do: URI.decode(id)
+
   defp path_workspace(_conn), do: nil
 
   defp body_workspace(%{body_params: %Plug.Conn.Unfetched{}}), do: nil
