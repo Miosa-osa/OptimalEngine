@@ -157,7 +157,7 @@ Workspace policy stores provider identifiers, use cases, lifecycle choices, and 
 
 ## Workspace Policy And Replication
 
-Migration 51 creates a storage policy for every existing active workspace and seeds it with `desktop_local`.
+Migration 52 creates a storage policy for every existing active workspace and seeds it with `desktop_local`.
 
 Every future workspace receives the same policy during topology creation.
 

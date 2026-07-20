@@ -96,7 +96,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_048_repair_chunk_workspace_scope(),
       migration_049_rebuild_contexts_fts_triggers(),
       migration_050_retire_test_storage_fixtures(),
-      migration_051_workspace_storage_policies()
+      migration_051_workspace_storage_policies(),
+      migration_052_backfill_workspace_storage_policies()
     ]
   end
 
@@ -2837,15 +2838,6 @@ defmodule OptimalEngine.Store.Migrations do
         """},
        {"idx_workspace_storage_policies_scope",
         "CREATE INDEX IF NOT EXISTS idx_workspace_storage_policies_scope ON workspace_storage_policies(tenant_id, organization_id, workspace_id)"},
-       {"backfill_workspace_storage_policies",
-        """
-        INSERT OR IGNORE INTO workspace_storage_policies (
-          workspace_id, tenant_id, organization_id, use_cases, created_by
-        )
-        SELECT id, tenant_id, organization_id, '[\"desktop_local\"]', 'migration.051'
-        FROM workspaces
-        WHERE status = 'active'
-        """},
        {"sync_mutations",
         """
         CREATE TABLE IF NOT EXISTS sync_mutations (
@@ -2880,6 +2872,21 @@ defmodule OptimalEngine.Store.Migrations do
           updated_at TEXT NOT NULL DEFAULT (datetime('now')),
           PRIMARY KEY(tenant_id, workspace_id, replica_id)
         )
+        """}
+     ]}
+  end
+
+  defp migration_052_backfill_workspace_storage_policies do
+    {52, "backfill local-first policies for existing workspaces",
+     [
+       {"backfill_workspace_storage_policies",
+        """
+        INSERT OR IGNORE INTO workspace_storage_policies (
+          workspace_id, tenant_id, organization_id, use_cases, created_by
+        )
+        SELECT id, tenant_id, organization_id, '[\"desktop_local\"]', 'migration.052'
+        FROM workspaces
+        WHERE status = 'active'
         """}
      ]}
   end
