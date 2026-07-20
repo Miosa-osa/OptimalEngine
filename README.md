@@ -398,6 +398,9 @@ reviewed topology change instead of silently overwriting truth.
 See [`docs/architecture/STORAGE-AND-PROJECTION-MAP.md`](docs/architecture/STORAGE-AND-PROJECTION-MAP.md)
 for the full map.
 
+See [`docs/architecture/STORAGE-CAPABILITIES-AND-WORKSPACE-FLOW.md`](docs/architecture/STORAGE-CAPABILITIES-AND-WORKSPACE-FLOW.md)
+for the local-first capability ladder, workspace policy, optional provider activation, module flow, and Fractal enterprise boundary.
+
 ### Retrieval and long-document decomposition
 
 Hybrid retrieval combines FTS candidates, workspace-scoped context vectors,
@@ -417,6 +420,8 @@ Use the catalog for inventory and the deep audit for proof:
 ```bash
 curl http://localhost:4200/api/stores
 curl http://localhost:4200/api/stores/audit
+curl http://localhost:4200/api/storage/providers?probe=true
+curl http://localhost:4200/api/storage/use-cases
 ```
 
 The deep audit verifies SQLite integrity, foreign keys, migration parity, FTS

@@ -15,7 +15,7 @@ defmodule OptimalEngine.StorageCatalog do
       purpose: "Canonical topology, identity, evidence, truth, and governance",
       technology: "SQLite",
       tables:
-        ~w(organizations workspaces nodes source_packages contexts claims facts memory_objects episodes events)
+        ~w(organizations workspaces nodes source_packages contexts claims facts memory_objects episodes events workspace_storage_policies storage_provider_configs)
     },
     %{
       id: "full_text",
@@ -53,6 +53,12 @@ defmodule OptimalEngine.StorageCatalog do
       purpose: "Durable background work, leases, retries, and dead letters",
       technology: "SQLite",
       tables: ~w(jobs dead_letter_jobs)
+    },
+    %{
+      id: "replication",
+      purpose: "Workspace-scoped mutation replay, idempotency, and replica progress",
+      technology: "SQLite append-only ledger with optional NATS JetStream transport",
+      tables: ~w(sync_mutations sync_cursors)
     },
     %{
       id: "metrics",
@@ -103,6 +109,10 @@ defmodule OptimalEngine.StorageCatalog do
     "decomposition" => {
       "SELECT id, workspace_id, source_package_id, strategy, status, fallback_strategy, attempt, input_bytes, output_units, model_calls, iterations, error, created_at, completed_at FROM decomposition_runs WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2",
       ~w(id workspace_id source_package_id strategy status fallback_strategy attempt input_bytes output_units model_calls iterations error created_at completed_at)
+    },
+    "replication" => {
+      "SELECT sequence, id, workspace_id, device_id, actor_id, entity_type, entity_id, operation, payload_hash, idempotency_key, occurred_at, recorded_at FROM sync_mutations WHERE workspace_id = ?1 ORDER BY sequence DESC LIMIT ?2",
+      ~w(sequence id workspace_id device_id actor_id entity_type entity_id operation payload_hash idempotency_key occurred_at recorded_at)
     },
     "models" => {
       "SELECT id, workspace_id, base_model, trainer, method, status, hardware, metrics, error, created_at, completed_at FROM training_runs WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2",

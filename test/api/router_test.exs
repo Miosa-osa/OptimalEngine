@@ -64,7 +64,7 @@ defmodule OptimalEngine.API.RouterTest do
 
       ids = Enum.map(body["stores"], & &1["id"])
 
-      assert body["count"] == 12
+      assert body["count"] == 13
       assert "relational" in ids
       assert "full_text" in ids
       assert "vector" in ids
@@ -106,6 +106,74 @@ defmodule OptimalEngine.API.RouterTest do
       assert is_list(body["checks"])
       assert Enum.any?(body["checks"], &(&1["name"] == "sqlite_integrity"))
       assert Enum.any?(body["checks"], &(&1["name"] == "vector_integrity"))
+    end
+  end
+
+  describe "physical storage providers" do
+    test "lists providers without exposing connection values" do
+      System.put_env("OPTIMAL_POSTGRES_URL", "postgres://private-user:private-pass@localhost/db")
+      on_exit(fn -> System.delete_env("OPTIMAL_POSTGRES_URL") end)
+
+      conn = request(:get, "/api/storage/providers")
+      assert conn.status == 200
+      assert {:ok, body} = Jason.decode(conn.resp_body)
+      assert body["count"] >= 13
+      assert Enum.any?(body["providers"], &(&1["id"] == "postgres"))
+      refute conn.resp_body =~ "private-user"
+      refute conn.resp_body =~ "private-pass"
+    end
+
+    test "returns use cases and builds a deduplicated plan" do
+      cases = request(:get, "/api/storage/use-cases")
+      assert cases.status == 200
+      assert {:ok, %{"use_cases" => use_cases}} = Jason.decode(cases.resp_body)
+      assert Enum.any?(use_cases, &(&1["id"] == "multi_device"))
+
+      conn = request(:post, "/api/storage/plan", %{"use_cases" => ["cloud_team", "media_archive"]})
+      assert conn.status == 200
+      assert {:ok, body} = Jason.decode(conn.resp_body)
+      ids = Enum.map(body["providers"], & &1["id"])
+      assert "postgres" in ids
+      assert "s3" in ids
+      assert length(ids) == length(Enum.uniq(ids))
+    end
+
+    test "rejects unknown use cases" do
+      conn = request(:post, "/api/storage/plan", %{"use_cases" => ["unknown"]})
+      assert conn.status == 422
+    end
+
+    test "new workspaces receive local-first policy and scoped mutation ledger" do
+      suffix = System.unique_integer([:positive])
+
+      created =
+        request(:post, "/api/workspaces", %{
+          "slug" => "storage-api-#{suffix}",
+          "name" => "Storage API #{suffix}"
+        })
+
+      assert created.status == 201
+      assert {:ok, %{"id" => workspace_id}} = Jason.decode(created.resp_body)
+
+      policy = request(:get, "/api/storage/workspaces/#{workspace_id}/policy")
+      assert policy.status == 200
+      assert {:ok, %{"use_cases" => ["desktop_local"]}} = Jason.decode(policy.resp_body)
+
+      mutation =
+        request(:post, "/api/storage/workspaces/#{workspace_id}/mutations", %{
+          "device_id" => "api-device",
+          "entity_type" => "claim",
+          "entity_id" => "claim-1",
+          "operation" => "create",
+          "payload" => %{"text" => "Scoped"},
+          "idempotency_key" => "api-mutation-#{suffix}"
+        })
+
+      assert mutation.status == 201
+
+      listed = request(:get, "/api/storage/workspaces/#{workspace_id}/mutations?after=0")
+      assert listed.status == 200
+      assert {:ok, %{"count" => 1}} = Jason.decode(listed.resp_body)
     end
   end
 

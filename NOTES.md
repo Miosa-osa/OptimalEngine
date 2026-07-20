@@ -16,3 +16,6 @@
 - 2026-07-09: Blank embedding input is rejected before Ollama, absent optional routing YAML loads empty defaults without warning, and exhaustive connector/context assembly call sites no longer retain impossible error branches.
 - 2026-07-09: Release runtime configuration must re-read database, cache, workspace, topology, RocksDB, and Ollama environment values because config.exs is evaluated when the release is built, not when a downloaded app starts it.
 - 2026-07-09: Runtime environment overrides must preserve values already selected by environment-specific config when an override is absent, especially isolated test storage.
+- 2026-07-20: Every workspace starts with an explicit `desktop_local` storage policy, and optional providers require configuration plus a successful health probe before they are reported as available.
+- 2026-07-20: BusinessOS modules use scoped APIs and logical store contracts instead of physical databases, so local, self-hosted, cloud, and Fractal enterprise providers can change without creating a second product data model.
+- 2026-07-20: Fractal Computing is an enterprise partner substrate for governed AI against a synchronized digital twin and is never a default local dependency or an unreviewed write path.

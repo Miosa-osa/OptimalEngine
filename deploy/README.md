@@ -55,6 +55,27 @@ The engine container uses `/data` as its runtime root:
 The database is the governed runtime state. Markdown workspaces are projections
 and editing surfaces. Indexes and caches are rebuildable acceleration layers.
 
+## Optional Storage Profile
+
+The default deployment remains local-first and requires no external database.
+
+Use the optional overlay when a team workload needs shared relational state, object storage, replayable events, distributed cache, high-scale vectors, or centralized secrets.
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.storage.yml \
+  --profile storage up -d
+```
+
+The overlay provisions PostgreSQL, Garage, NATS JetStream, Valkey, Qdrant, and OpenBao with development defaults.
+
+Replace every development credential and configure production security before exposing these services.
+
+Fractal Computing is configured separately as an enterprise partner substrate and is not started by Compose.
+
+Read [`../docs/architecture/STORAGE-CAPABILITIES-AND-WORKSPACE-FLOW.md`](../docs/architecture/STORAGE-CAPABILITIES-AND-WORKSPACE-FLOW.md) before activating or migrating a provider.
+
 ## Environment
 
 Copy `env.example` to `.env` for local Docker or `.env.prod` for the production

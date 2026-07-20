@@ -9,6 +9,7 @@ defmodule OptimalEngine.WorkspaceTopology do
   """
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Storage.PolicyStore
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Topology.{Node, NodeMember, NodeRelationship, NodeType}
   alias OptimalEngine.Workspace
@@ -67,7 +68,8 @@ defmodule OptimalEngine.WorkspaceTopology do
   @spec create_workspace(map()) :: {:ok, Workspace.t()} | {:error, term()}
   def create_workspace(attrs) when is_map(attrs) do
     with {:ok, workspace} <- Workspace.create(attrs),
-         :ok <- ensure_standard_node_types(workspace) do
+         :ok <- ensure_standard_node_types(workspace),
+         {:ok, _policy} <- ensure_storage_policy(workspace, attrs) do
       {:ok, workspace}
     end
   end
@@ -91,6 +93,7 @@ defmodule OptimalEngine.WorkspaceTopology do
     write_agent_sop? = Map.get(attrs, :write_agent_sop, true)
 
     with {:ok, workspace} <- get_or_create_workspace(attrs),
+         {:ok, _policy} <- ensure_storage_policy(workspace, attrs),
          :ok <- ensure_standard_node_types(workspace),
          {:ok, node_types} <- list_node_types(tenant_id: tenant_id, workspace_id: workspace.id),
          {:ok, nodes} <- maybe_create_setup_nodes(workspace, attrs, create_starter_nodes?),
@@ -121,6 +124,23 @@ defmodule OptimalEngine.WorkspaceTopology do
   @doc "Fetch a workspace by id."
   @spec get_workspace(String.t()) :: {:ok, Workspace.t()} | {:error, :not_found}
   def get_workspace(id), do: Workspace.get(id)
+
+  defp ensure_storage_policy(workspace, attrs) do
+    case PolicyStore.get_policy(workspace.id) do
+      {:ok, policy} ->
+        {:ok, policy}
+
+      {:error, :not_found} ->
+        use_cases = Map.get(attrs, :storage_use_cases, ["desktop_local"])
+
+        PolicyStore.put_policy(workspace.id, use_cases,
+          actor_id: Map.get(attrs, :actor_id) || Map.get(attrs, :created_by) || "workspace.create"
+        )
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   @doc "Ensure a workspace has the standard Node Types."
   @spec ensure_standard_node_types(Workspace.t() | map()) :: :ok | {:error, term()}
