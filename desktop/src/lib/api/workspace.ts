@@ -137,8 +137,15 @@ export async function listWorkspace(
   return nodes;
 }
 
-export async function getSignal(id: string): Promise<SignalDetail> {
-  return j<SignalDetail>(`/api/signals/${encodeURIComponent(id)}`);
+export async function getSignal(
+  id: string,
+  workspace?: string | null,
+): Promise<SignalDetail> {
+  // /api/signals/:id is workspace-scoped: an id from another workspace 404s.
+  const qs = workspace
+    ? "?" + new URLSearchParams({ workspace }).toString()
+    : "";
+  return j<SignalDetail>(`/api/signals/${encodeURIComponent(id)}${qs}`);
 }
 
 export async function getActivity(
@@ -193,6 +200,7 @@ export async function getNodeFiles(
   workspace?: string | null,
 ): Promise<
   {
+    id: string;
     name: string;
     path: string;
     is_dir: boolean;

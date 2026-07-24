@@ -11,7 +11,7 @@
   import { activeWorkspaceId } from '$lib/stores/workspace';
 
   type TreeNode = WorkspaceNode & { children: TreeNode[] };
-  type FileEntry = { name: string; path: string; genre: string | null; modified_at: string | null };
+  type FileEntry = { id: string; name: string; path: string; genre: string | null; modified_at: string | null };
 
   let tree = $state<TreeNode[]>([]);
   let expanded = $state<Set<string>>(new Set());
@@ -62,12 +62,10 @@
     }
   }
 
-  async function selectSignalByPath(path: string) {
+  async function selectSignal(id: string) {
     loading = true;
     try {
-      // path is the context URI or id — extract id from optimal://contexts/<id> or use as-is
-      const id = path.startsWith('optimal://') ? path.split('/').pop()! : path;
-      selectedSignal = await getSignal(id);
+      selectedSignal = await getSignal(id, $activeWorkspaceId);
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -167,8 +165,8 @@
         <li>
           <button
             class="ws__signal"
-            class:ws__signal--active={selectedSignal?.id === f.path.split('/').pop()}
-            onclick={() => selectSignalByPath(f.path)}
+            class:ws__signal--active={selectedSignal?.id === f.id}
+            onclick={() => selectSignal(f.id)}
           >
             <span class="ws__signal-name">{f.name}</span>
             {#if f.genre}

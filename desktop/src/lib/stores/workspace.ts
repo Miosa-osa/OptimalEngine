@@ -69,12 +69,21 @@ export async function bootstrap(): Promise<void> {
     const [{ organizations: orgs }, _] = [await listOrganizations(), null];
     organizations.set(orgs);
 
+    // Real organizations, i.e. everything except the "default" compatibility
+    // org, which only owns pre-organization workspaces and is empty here.
+    const realOrgs = orgs.filter((o) => o.id !== "default");
     let orgId = get(activeOrgId);
-    if (!orgId || !orgs.find((o) => o.id === orgId)) {
-      // Prefer a real organization over the "default" compatibility org,
-      // which only owns pre-organization workspaces and is empty here.
-      const preferred = orgs.find((o) => o.id !== "default") ?? orgs[0];
-      orgId = preferred?.id ?? null;
+    // Re-select the org when nothing is persisted, the persisted org no longer
+    // exists, OR the persisted org is the empty "default" compat org while a
+    // real org is available. That last case matters: before organizations were
+    // first-class the app auto-parked returning users on "default", so their
+    // saved selection is a valid-but-empty org that would blank every module.
+    if (
+      !orgId ||
+      !orgs.find((o) => o.id === orgId) ||
+      (orgId === "default" && realOrgs.length > 0)
+    ) {
+      orgId = (realOrgs[0] ?? orgs[0])?.id ?? null;
       activeOrgId.set(orgId);
     }
 
