@@ -54,7 +54,7 @@
     selectedSignal = null;
     loading = true;
     try {
-      nodeFiles = await getNodeFiles(n.slug);
+      nodeFiles = await getNodeFiles(n.slug, $activeWorkspaceId);
     } catch (e) {
       error = (e as Error).message;
     } finally {

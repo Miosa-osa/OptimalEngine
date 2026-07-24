@@ -38,7 +38,8 @@ function writeLS(key: string, value: string | null) {
 export const organizations = writable<Organization[]>([]);
 export const workspaces = writable<Workspace[]>([]);
 
-// id of the active org (= tenant_id), nullable until first load resolves.
+// id of the active org (an organization id, NOT the tenant id), nullable
+// until first load resolves.
 export const activeOrgId = writable<string | null>(readLS(ORG_KEY));
 
 // id of the active workspace, nullable until first load.
@@ -70,12 +71,15 @@ export async function bootstrap(): Promise<void> {
 
     let orgId = get(activeOrgId);
     if (!orgId || !orgs.find((o) => o.id === orgId)) {
-      orgId = orgs[0]?.id ?? null;
+      // Prefer a real organization over the "default" compatibility org,
+      // which only owns pre-organization workspaces and is empty here.
+      const preferred = orgs.find((o) => o.id !== "default") ?? orgs[0];
+      orgId = preferred?.id ?? null;
       activeOrgId.set(orgId);
     }
 
     if (orgId) {
-      const { workspaces: ws } = await listWorkspaces(orgId);
+      const { workspaces: ws } = await listWorkspaces({ organization: orgId });
       workspaces.set(ws);
 
       let wsId = get(activeWorkspaceId);
@@ -98,7 +102,7 @@ export async function bootstrap(): Promise<void> {
 export async function refreshWorkspaces(): Promise<void> {
   const orgId = get(activeOrgId);
   if (!orgId) return;
-  const { workspaces: ws } = await listWorkspaces(orgId);
+  const { workspaces: ws } = await listWorkspaces({ organization: orgId });
   workspaces.set(ws);
 }
 

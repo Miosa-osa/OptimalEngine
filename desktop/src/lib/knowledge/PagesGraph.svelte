@@ -7,6 +7,8 @@
   import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } from 'd3-force-3d';
   import { loadGraph, type GNode, type GEdge } from './graph';
   import { theme } from '$lib/theme';
+  import { get } from 'svelte/store';
+  import { activeWorkspaceId } from '$lib/stores/workspace';
 
   interface Props {
     onSelect?: (node: GNode) => void;
@@ -127,7 +129,7 @@
     if (!container) return;
     try {
       initThree();
-      const data = await loadGraph();
+      const data = await loadGraph(get(activeWorkspaceId));
       stats = { nodes: data.nodes.length, edges: data.edges.length };
       buildScene(data.nodes, data.edges);
       loading = false;

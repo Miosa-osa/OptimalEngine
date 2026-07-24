@@ -188,7 +188,10 @@ export function toTree(
 }
 
 /** Signals for one node — uses /api/optimal/nodes/:slug/files. */
-export async function getNodeFiles(slug: string): Promise<
+export async function getNodeFiles(
+  slug: string,
+  workspace?: string | null,
+): Promise<
   {
     name: string;
     path: string;
@@ -198,8 +201,13 @@ export async function getNodeFiles(slug: string): Promise<
     modified_at: string | null;
   }[]
 > {
+  // Node slugs are not globally unique (many workspaces have a
+  // "knowledge-base" / "inbox" node), so the workspace scope is required.
+  const qs = workspace
+    ? "?" + new URLSearchParams({ workspace }).toString()
+    : "";
   const { files } = await j<{ files: any[] }>(
-    `/api/optimal/nodes/${encodeURIComponent(slug)}/files`,
+    `/api/optimal/nodes/${encodeURIComponent(slug)}/files${qs}`,
   );
   return files;
 }
