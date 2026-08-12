@@ -260,7 +260,7 @@ defmodule OptimalEngine.API.Router do
   get "/api/context-health" do
     workspace = query_param(conn, "workspace", "default")
     result = OptimalEngine.ContextHealth.run(workspace_id: workspace)
-    conn |> put_status(if(result.ok, do: 200, else: 503)) |> json(result)
+    json(conn, result)
   end
 
   get "/api/maintenance/corpus-organization" do
