@@ -26,13 +26,15 @@ has older context-engine names carrying too much meaning:
 
 - `OptimalEngine.Context` is a compatibility storage/search row.
 - `OptimalEngine.Store` owns too many database responsibilities.
-- `OptimalEngine.Retrieval.*` returns ranked contexts, not governed retrieval
-  packages yet.
+- `OptimalEngine.Retrieval.*` retains compatibility search and tiered assembly.
+- `OptimalEngine.MemoryCore.RetrievalCoordinator` is the canonical governed
+  retrieval Interface and returns Context Packages.
 - `OptimalEngine.Memory.*`, `OptimalEngine.Bridge.*`, and
   `OptimalEngine.MemoryCore.*` still use overlapping memory language until the
   older modules are intentionally folded into the new subsystem.
-- The governed object tables exist, but only Source Package and Derivation
-  Ledger writes are currently implemented.
+- The governed Source, Claim, Fact, Memory Object, Episode, Relationship,
+  Retrieval Package, Context Package, Active Memory Pool, reconstruction,
+  workflow, skill, evaluation, and audit slices are implemented.
 
 This is fixable. The next work needs strict ownership so Memory Core does not
 become another parallel bucket of generic logic.
@@ -113,6 +115,11 @@ Keep these names contained:
 | `OptimalEngine.Store` | SQLite connection, migrations, compatibility context CRUD, FTS, vectors, cache. | Infrastructure, not business lifecycle. |
 | `OptimalEngine.Retrieval.Search` | Hybrid search over compatibility Context rows. | Useful mechanism, not the governed retrieval coordinator. |
 | `OptimalEngine.Retrieval.ContextAssembler` | Builds tiered context from search results. | Precursor, not the governed Context Package assembler. |
+| `OptimalEngine.MemoryCore.Reconstruction` | Expands authorized Association Paths and records Reconstruction Runs. | Internal strategy behind Retrieval Coordinator. |
+| `OptimalEngine.MemoryCore.AssociativeProjection` | Rebuilds and queries Cue-Tag-Content paths. | Correct Retrieval projection owner. |
+| `OptimalEngine.MemoryCore.ReconstructionLearning` | Applies path-conditioned outcome credit and review-only consolidation. | Correct learning lifecycle owner. |
+| `OptimalEngine.ReconstructionEvaluation` | Adapts reconstruction to governed Evaluation runs. | Correct evaluation Adapter. |
+| `OptimalEngine.Optimality` | Classifies readiness from explicit evidence gates. | Correct Evaluation / Recovery owner. |
 | `OptimalEngine.Memory.*` | Legacy/session/agent memory behavior. | Keep until intentionally folded into Memory Core concepts. |
 | `OptimalEngine.Bridge.*` | Adapters between Signal/Memory/Knowledge subsystems. | Transitional; avoid expanding unless adapting old code. |
 

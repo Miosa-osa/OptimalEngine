@@ -81,6 +81,9 @@ defmodule OptimalEngine.Application do
       # ── Memory Core promotion loop (autonomous Claim → Fact → Memory) ────
       OptimalEngine.MemoryCore.PromotionScheduler,
 
+      # ── Reconstructive memory maintenance (projection + reviewed proposals) ──
+      OptimalEngine.MemoryCore.ReconstructionScheduler,
+
       # ── Connector pull loop (periodic intake FEED from enabled connectors) ─
       OptimalEngine.Connectors.PullScheduler
     ]

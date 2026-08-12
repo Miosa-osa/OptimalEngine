@@ -365,6 +365,10 @@ New code should depend on layer interfaces, not table names.
 | Persist Memory Core row | `MemoryCore.Store` | `OptimalEngine.Store.raw_execute` from business modules |
 | Promote assertion to truth | `MemoryCore.FactPromoter` | setting `facts` rows directly |
 | Retrieve governed context | `MemoryCore.RetrievalCoordinator` or `Retrieval` facade | raw vector search as final answer |
+| Reconstruct context | `MemoryCore.RetrievalCoordinator` with `strategy: :reconstructive` | direct compatibility search or loose evidence maps |
+| Rebuild associations | `MemoryCore.AssociativeProjection` | hand-authored association truth |
+| Record reconstruction learning | `MemoryCore.ReconstructionLearning` | global document popularity updates |
+| Classify readiness | `OptimalEngine.Optimality` | unconditional “optimal” branding |
 | Create task context | `MemoryCore.ActiveMemoryPool` | free-floating session memory |
 | Run a reusable procedure | `SkillPackageService` | arbitrary prompt/tool call |
 | Export files/pages | `WorkspaceExport` or `WikiSurface` | treating node files as source of truth |

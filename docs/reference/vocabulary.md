@@ -13,6 +13,12 @@ Use product terms consistently.
 | Fact | Reviewed/policy-accepted assertion. |
 | Memory Object | Source-backed meaning around Facts, Claims, sources, and relationships. |
 | Context Package | Authorized bundle of context for a query or task. |
+| Memory Reconstruction | Bounded assembly of task context through authorized Association Paths. |
+| Reconstruction Run | Audited reconstruction execution linked to one Context Package. |
+| Association Path | Ordered cue-to-object links used during reconstruction. |
+| Associative Projection | Rebuildable Cue-Tag-Content projection derived from governed objects. |
+| Consolidation Proposal | Review-required proposal derived from recurring successful Association Paths. |
+| Optimality Assessment | Versioned classification against explicit architecture or whole-system gates. |
 | Active Memory Pool | Task-scoped working memory shared by humans and agents. |
 | Workflow Trace | Evidence-linked trace of repeated or meaningful work. |
 | Skill Package | Governed reusable procedure with policy, tools, checks, and audit. |
@@ -72,4 +78,6 @@ linking it to a stable canonical object.
 | Genre / Format | Genre is the expected kind of communication. Format is the container. |
 | Format / Structure | Format carries content. Structure is the internal skeleton. |
 | Active Memory Pool / Workspace | Pool is temporary task working state. Workspace is durable operating topology. |
+| Associative Projection / Memory Object | Associative Projection is rebuildable retrieval acceleration. Memory Object is durable governed meaning. |
+| Reconstruction Run / Context Package | Reconstruction Run is execution and audit state. Context Package is the authorized answer surface. |
 | Delivery Package / Skill Package | Delivery Package is sent to a receiver/channel. Skill Package is an approved reusable procedure. |

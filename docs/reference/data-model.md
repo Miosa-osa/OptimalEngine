@@ -32,6 +32,10 @@ of Workspace.
 | Relationship Edge | Typed link among objects or nodes. | Memory Core / Topology |
 | Derivation Ledger Entry | Lineage record for generated or transformed objects. | Memory Core / Audit |
 | Context Package | Authorized context assembled for a query/task. | Retrieval / Context |
+| Associative Projection | Rebuildable Cue-Tag-Content paths over governed objects. | Retrieval / Context |
+| Reconstruction Run | Audited bounded traversal linked to a Context Package. | Retrieval / Evaluation |
+| Consolidation Proposal | Review-required recurring path proposal. | Memory Core / Review |
+| Optimality Assessment | Evidence-based readiness classification. | Evaluation / Recovery |
 | Active Memory Pool | Task-scoped working state for humans and agents. | Active Collaboration |
 | Workflow Trace | Evidence-linked record of work that happened. | Workflow |
 | Skill Package | Governed reusable procedure with policy, tools, checks, and audit. | Workflow / Skill Runtime |
@@ -74,6 +78,12 @@ contexts
 chunks
 FTS/search projections
 context_packages
+memory_associations
+memory_reconstruction_runs
+memory_reconstruction_steps
+memory_association_paths
+memory_path_priors
+memory_consolidation_proposals
 retrieval_audit
 active_memory_pools
 pool_observations
@@ -94,6 +104,7 @@ policies
 audit_events
 evaluation_runs
 evaluation_cases
+optimality_assessments
 export_records
 projection_revisions
 ```
