@@ -151,7 +151,7 @@ defmodule OptimalEngine.Retrieval.L0Cache do
           |> Enum.map(fn {node, type_rows} ->
             counts =
               Enum.map_join(type_rows, ", ", fn [_node, type, cnt] ->
-                "#{cnt} #{type}s"
+                "#{cnt} #{pluralize_type(type, cnt)}"
               end)
 
             total = Enum.reduce(type_rows, 0, fn [_, _, c], acc -> acc + c end)
@@ -164,6 +164,10 @@ defmodule OptimalEngine.Retrieval.L0Cache do
         nil
     end
   end
+
+  defp pluralize_type(type, 1), do: type
+  defp pluralize_type("memory", _count), do: "memories"
+  defp pluralize_type(type, _count), do: "#{type}s"
 
   # Section 2: Available skills/commands
   defp build_available_skills do
