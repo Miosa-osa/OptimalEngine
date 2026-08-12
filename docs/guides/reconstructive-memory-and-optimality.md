@@ -70,3 +70,15 @@ The `--verified` flag is intentionally explicit.
 It should only be used after the referenced release checks have actually passed.
 
 An assessment is a time-stamped evidence record, not a permanent claim about future system state.
+
+## Governed data remediation
+
+Use `oe data_review <workspace>` to inspect clustered actionable claims, memory candidates, routing proposals, unresolved entity mentions, and orphan workspace scopes in one read-only dashboard.
+
+Use `oe claim_batch` and `oe route_batch` only with explicit reviewed identifiers.
+The commands do not infer approval, and invalid decisions fail instead of defaulting to rejection.
+
+Use `oe data_recheck <workspace>` after reviewed changes settle.
+It rebuilds the associative projection and returns the updated dashboard without promoting additional claims.
+
+The Data Quality Scheduler records a daily read-only snapshot for every active workspace and records score regressions.

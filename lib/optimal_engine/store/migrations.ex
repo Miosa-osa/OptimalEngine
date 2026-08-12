@@ -104,8 +104,31 @@ defmodule OptimalEngine.Store.Migrations do
       migration_056_classify_memory_candidate_claims(),
       migration_057_canonical_entity_spine(),
       migration_058_reconstructive_memory(),
-      migration_059_governed_reconstruction()
+      migration_059_governed_reconstruction(),
+      migration_060_data_quality_observability()
     ]
+  end
+
+  defp migration_060_data_quality_observability do
+    {60, "data quality drift snapshots",
+     [
+       {"data_quality_snapshots",
+        """
+        CREATE TABLE IF NOT EXISTS data_quality_snapshots (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL,
+          health_score INTEGER NOT NULL,
+          health_status TEXT NOT NULL,
+          dashboard TEXT NOT NULL,
+          detected_regressions TEXT NOT NULL DEFAULT '[]',
+          evaluator_version TEXT NOT NULL DEFAULT 'data-steward-v1',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_data_quality_snapshots_scope",
+        "CREATE INDEX IF NOT EXISTS idx_data_quality_snapshots_scope ON data_quality_snapshots(tenant_id, workspace_id, created_at DESC)"}
+     ]}
   end
 
   defp migration_058_reconstructive_memory do

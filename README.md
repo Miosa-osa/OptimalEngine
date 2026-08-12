@@ -1068,3 +1068,7 @@ raw SQL from feature modules into governed tables
 ## License
 
 Optimal Engine is released under the [MIT License](LICENSE).
+
+`OptimalEngine.DataSteward` provides the governed remediation Interface for clustered claim, routing, entity, and workspace-integrity review.
+Bulk decisions require explicit identifiers and preserve source evidence.
+`OptimalEngine.DataQualityScheduler` records daily read-only health snapshots for drift detection.
