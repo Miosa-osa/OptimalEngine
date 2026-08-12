@@ -9,6 +9,7 @@ defmodule OptimalEngine.Pipeline.Decomposer.RLM do
   """
 
   @default_timeout 120_000
+  @default_health_timeout 15_000
 
   @spec available?(keyword()) :: boolean()
   def available?(opts \\ []) do
@@ -39,17 +40,27 @@ defmodule OptimalEngine.Pipeline.Decomposer.RLM do
   @spec health(keyword()) :: {:ok, map()} | {:error, term()}
   def health(opts \\ []) do
     {executable, prefix_args} = command(opts)
+    timeout = Keyword.get(opts, :timeout, @default_health_timeout)
+    runner = Keyword.get(opts, :runner, &System.cmd/3)
 
-    case System.cmd(executable, prefix_args ++ [script(opts), "--check"], stderr_to_stdout: true) do
-      {output, 0} ->
+    task =
+      Task.async(fn ->
+        runner.(executable, prefix_args ++ [script(opts), "--check"], stderr_to_stdout: true)
+      end)
+
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {output, 0}} ->
         case Jason.decode(output) do
           {:ok, %{"available" => true} = status} -> {:ok, status}
           {:ok, status} -> {:error, {:rlm_unavailable, status}}
           {:error, reason} -> {:error, {:invalid_rlm_health, reason}}
         end
 
-      {output, status} ->
+      {:ok, {output, status}} ->
         {:error, {:rlm_health_exit, status, String.trim(output)}}
+
+      nil ->
+        {:error, :rlm_health_timeout}
     end
   end
 

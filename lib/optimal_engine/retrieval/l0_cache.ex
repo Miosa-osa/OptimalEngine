@@ -126,6 +126,12 @@ defmodule OptimalEngine.Retrieval.L0Cache do
     sql = """
     SELECT node, type, COUNT(*) as cnt
     FROM contexts
+    WHERE archived_at IS NULL
+      AND node != 'test'
+      AND node NOT LIKE 'node-a-%'
+      AND node NOT LIKE 'node-b-%'
+      AND title NOT LIKE 'Backfill %'
+      AND title NOT LIKE 'bf task %'
     GROUP BY node, type
     ORDER BY node, type
     """
@@ -184,6 +190,12 @@ defmodule OptimalEngine.Retrieval.L0Cache do
     SELECT title, node, path, l0_abstract
     FROM contexts
     WHERE type = 'resource'
+      AND archived_at IS NULL
+      AND node != 'test'
+      AND node NOT LIKE 'node-a-%'
+      AND node NOT LIKE 'node-b-%'
+      AND title NOT LIKE 'Backfill %'
+      AND title NOT LIKE 'bf task %'
     ORDER BY node, title
     LIMIT 30
     """
@@ -217,10 +229,10 @@ defmodule OptimalEngine.Retrieval.L0Cache do
   # Section 4: Memory summary — how many memories by category
   defp build_memory_summary do
     sql = """
-    SELECT genre, COUNT(*) as cnt
-    FROM contexts
-    WHERE type = 'memory'
-    GROUP BY genre
+    SELECT COALESCE(json_extract(metadata, '$.kind'), 'memory') AS kind, COUNT(*) as cnt
+    FROM memories
+    WHERE is_latest = 1 AND is_forgotten = 0
+    GROUP BY kind
     ORDER BY cnt DESC
     """
 

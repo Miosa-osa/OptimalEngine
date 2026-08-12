@@ -131,8 +131,10 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
 
     # FTS-only list: force vectors off so this list is a genuinely
     # independent lexical ranking, not the already-fused hybrid output.
+    scoped_opts = opts |> Keyword.put(:limit, recall)
+
     fts_results =
-      case SearchEngine.search(query, limit: recall, vector_enabled: false) do
+      case SearchEngine.search(query, Keyword.put(scoped_opts, :vector_enabled, false)) do
         {:ok, results} -> results
         _ -> []
       end
@@ -141,7 +143,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
     # returns the FTS ranking, which is fine — RRF tolerates correlated
     # lists, and the dedicated FTS list above keeps lexical signal intact.
     vector_results =
-      case SearchEngine.search(query, limit: recall) do
+      case SearchEngine.search(query, scoped_opts) do
         {:ok, results} -> results
         _ -> []
       end
@@ -159,8 +161,48 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
         graph_results,
         temporal_results
       ])
+      |> focus_exact_query(query)
 
     {:ok, Enum.take(fused, limit)}
+  end
+
+  # When an exact phrase is present, broad semantic recall should not spend
+  # most of the context budget on documents unrelated to that phrase. Keep
+  # the exact hit and corroborating results that share at least two useful
+  # query terms. Queries without an exact hit retain normal hybrid recall.
+  defp focus_exact_query(results, query) do
+    normalized_query = normalize_search_text(query)
+    query_terms = concept_tokens(query)
+
+    if normalized_query != "" and
+         Enum.any?(results, &strong_query_match?(&1, normalized_query, query_terms)) do
+      Enum.filter(results, fn result ->
+        text = normalize_search_text(result_search_text(result))
+        exact? = text =~ normalized_query
+        overlap = MapSet.intersection(query_terms, concept_tokens(text)) |> MapSet.size()
+        exact? or overlap >= 2
+      end)
+    else
+      results
+    end
+  end
+
+  defp strong_query_match?(result, normalized_query, query_terms) do
+    text = normalize_search_text(result_search_text(result))
+    overlap = MapSet.intersection(query_terms, concept_tokens(text)) |> MapSet.size()
+    text =~ normalized_query or overlap >= max(2, ceil(MapSet.size(query_terms) * 0.8))
+  end
+
+  defp result_search_text(result) do
+    "#{Map.get(result, :title, "")} #{Map.get(result, :l0_abstract, "")}"
+  end
+
+  defp normalize_search_text(text) do
+    text
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/[^\p{L}\p{N}]+/u, " ")
+    |> String.trim()
   end
 
   # Order the union by recency (modified_at, then created_at). Dedupe by id
@@ -197,7 +239,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   defp build_l1(query, budget, opts) do
     limit = Keyword.get(opts, :limit, 20)
 
-    {:ok, results} = fused_search(query, limit: limit)
+    {:ok, results} = fused_search(query, Keyword.put(opts, :limit, limit))
 
     # Build L1 as a list of file summaries — one entry per matching file
     {content, _} =
@@ -256,7 +298,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
 
     {content, _} =
       Enum.reduce(top_ids, {"", 0}, fn id, {acc, tokens} ->
-        case Store.get_context(id) do
+        case load_context_or_memory(id) do
           {:ok, ctx} ->
             full_text = Map.get(ctx, :content, "") || ""
             title = Map.get(ctx, :title, "")
@@ -296,7 +338,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
       |> Enum.reject(&is_nil(&1[:id]))
       |> Enum.map(fn s ->
         {tokens, concepts_text} =
-          case Store.get_context(s.id) do
+          case load_context_or_memory(s.id) do
             {:ok, ctx} ->
               content = Map.get(ctx, :content) || ""
               text = "#{Map.get(ctx, :title, "")} #{Map.get(ctx, :l0_abstract, "")}"
@@ -330,6 +372,45 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
     |> String.split(~r/[^\p{L}\p{N}]+/u, trim: true)
     |> Enum.reject(&(String.length(&1) < 3))
     |> MapSet.new()
+  end
+
+  defp load_context_or_memory(id) do
+    case Store.get_context(id) do
+      {:ok, context} ->
+        {:ok, context}
+
+      _ ->
+        case Store.raw_query(
+               "SELECT content, workspace_id, metadata, created_at, updated_at FROM memories WHERE id = ?1 AND is_latest = 1 AND is_forgotten = 0",
+               [id]
+             ) do
+          {:ok, [[content, workspace_id, metadata, created_at, updated_at]]} ->
+            {:ok,
+             %{
+               id: id,
+               title: memory_title(metadata, content),
+               node: "memory-core",
+               uri: "optimal://memory/#{workspace_id}/#{id}",
+               content: content,
+               l0_abstract: content,
+               created_at: created_at,
+               modified_at: updated_at
+             }}
+
+          _ ->
+            {:error, :not_found}
+        end
+    end
+  end
+
+  defp memory_title(metadata_json, content) do
+    kind =
+      case Jason.decode(metadata_json || "{}") do
+        {:ok, metadata} -> Map.get(metadata, "kind", "memory")
+        _ -> "memory"
+      end
+
+    "#{kind}: #{String.slice(content, 0, 72)}"
   end
 
   # ---------------------------------------------------------------------------

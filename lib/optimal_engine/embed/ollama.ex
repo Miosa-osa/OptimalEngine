@@ -344,7 +344,7 @@ defmodule OptimalEngine.Embed.Ollama do
     Application.get_env(:optimal_engine, :ollama,
       host: "http://localhost:11434",
       embed_model: "nomic-embed-text",
-      generate_model: "qwen3:8b",
+      generate_model: "qwen3:1.7b",
       timeout_ms: 5_000
     )
   end

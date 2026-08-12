@@ -130,6 +130,10 @@ defmodule OptimalEngine.Retrieval.Search do
         do_search(query, opts, state.topology)
       end
 
+    # Durable memories are stored in their own versioned table and FTS index.
+    # Merge them here so every public search surface sees what `oe memory` sees.
+    raw_result = merge_durable_memories(raw_result, query, opts)
+
     # Phase 1: principal-scoped ACL filter. No `:principal` → no filter
     # (backwards-compatible with pre-Phase-1 callers). When `:principal`
     # is set, drop any result the principal cannot read per ACLs.
@@ -173,6 +177,105 @@ defmodule OptimalEngine.Retrieval.Search do
   end
 
   defp filter_by_principal(other, _opts), do: other
+
+  defp merge_durable_memories({:ok, context_hits}, query, opts) do
+    type_filter = Keyword.get(opts, :type)
+
+    if type_filter not in [nil, :memory] do
+      {:ok, context_hits}
+    else
+      limit = Keyword.get(opts, :limit, @default_limit)
+      memory_hits = durable_memory_hits(query, opts, limit * 3)
+
+      merged =
+        (context_hits ++ memory_hits)
+        |> Enum.uniq_by(& &1.id)
+        |> Enum.sort_by(&(&1.score || 0.0), :desc)
+        |> Enum.take(limit)
+
+      {:ok, merged}
+    end
+  end
+
+  defp merge_durable_memories(other, _query, _opts), do: other
+
+  defp durable_memory_hits(query, opts, limit) do
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    fts_query = sanitize_fts_query(query)
+
+    sql = """
+    SELECT m.id, m.content, m.metadata, m.created_at, m.updated_at,
+           -bm25(memories_fts) AS lexical_score
+    FROM memories_fts
+    JOIN memories m ON m.rowid = memories_fts.rowid
+    WHERE memories_fts MATCH ?1
+      AND m.workspace_id = ?2
+      AND m.is_latest = 1
+      AND m.is_forgotten = 0
+    ORDER BY lexical_score DESC, m.updated_at DESC
+    LIMIT ?3
+    """
+
+    case Store.raw_query(sql, [fts_query, workspace_id, limit]) do
+      {:ok, rows} -> Enum.map(rows, &memory_context(&1, workspace_id, query))
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp memory_context(
+         [id, content, metadata_json, created_at, updated_at, lexical],
+         workspace_id,
+         query
+       ) do
+    metadata = decode_json(metadata_json, %{})
+    kind = Map.get(metadata, "kind", "memory")
+
+    exact_bonus =
+      if String.contains?(String.downcase(content), String.downcase(query)), do: 10.0, else: 0.0
+
+    %Context{
+      id: id,
+      uri: "optimal://memory/#{workspace_id}/#{id}",
+      type: :memory,
+      title: memory_title(kind, content),
+      content: content,
+      l0_abstract: content,
+      l1_overview: content,
+      node: "memory-core",
+      created_at: parse_datetime(created_at),
+      modified_at: parse_datetime(updated_at),
+      workspace_id: workspace_id,
+      metadata: metadata,
+      score: Float.round((lexical || 0.0) + exact_bonus + 1.0, 4)
+    }
+  end
+
+  defp memory_title(kind, content) do
+    preview = content |> String.replace(~r/\s+/u, " ") |> String.slice(0, 72)
+    "#{kind}: #{preview}"
+  end
+
+  defp decode_json(value, fallback) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, decoded} -> decoded
+      _ -> fallback
+    end
+  end
+
+  defp decode_json(_, fallback), do: fallback
+
+  defp parse_datetime(nil), do: nil
+
+  defp parse_datetime(value) when is_binary(value) do
+    normalized = if String.ends_with?(value, "Z"), do: value, else: value <> "Z"
+
+    case DateTime.from_iso8601(normalized) do
+      {:ok, datetime, _} -> datetime
+      _ -> nil
+    end
+  end
 
   defp emit_audit(query, opts, result, elapsed) do
     case Keyword.get(opts, :principal) do
@@ -362,7 +465,7 @@ defmodule OptimalEngine.Retrieval.Search do
       node, sn_ratio, entities,
       created_at, modified_at, valid_from, valid_until, supersedes,
       routed_to, metadata, workspace_id
-    FROM contexts WHERE id = ?1 AND workspace_id = ?2
+    FROM contexts WHERE id = ?1 AND workspace_id = ?2 AND archived_at IS NULL
     """
 
     case Store.raw_query(sql, [id, workspace_id]) do
@@ -482,6 +585,7 @@ defmodule OptimalEngine.Retrieval.Search do
     FROM contexts_fts
     JOIN contexts c ON c.id = contexts_fts.id
     WHERE contexts_fts MATCH ?1
+      AND c.archived_at IS NULL
     """
 
     # workspace_id is always filtered; remaining filters are optional.

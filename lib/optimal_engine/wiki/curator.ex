@@ -27,7 +27,7 @@ defmodule OptimalEngine.Wiki.Curator do
 
   require Logger
 
-  @default_model "qwen3:8b"
+  @default_model "qwen3:1.7b"
 
   @type citation :: %{chunk_id: String.t(), text: String.t(), uri: String.t()}
 
@@ -44,7 +44,7 @@ defmodule OptimalEngine.Wiki.Curator do
   Options:
     * `:audience`       — target audience slug (default: page.audience)
     * `:schema`         — schema rules map (from `.wiki/SCHEMA.md`)
-    * `:model`          — override LLM model (default: `qwen3:8b`)
+    * `:model`          - override LLM model (default: `qwen3:1.7b`)
     * `:deterministic`  — when true, skip Ollama entirely and just
                           append new citations verbatim. Used by tests
                           and by environments without Ollama.

@@ -87,7 +87,7 @@ config :optimal_engine,
          generate_model:
            System.get_env(
              "OPTIMAL_GENERATE_MODEL",
-             Keyword.get(ollama_config, :generate_model, "qwen3:8b")
+             Keyword.get(ollama_config, :generate_model, "qwen3:1.7b")
            ),
          vlm_model:
            System.get_env(
