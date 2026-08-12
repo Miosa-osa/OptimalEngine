@@ -2671,6 +2671,16 @@ defmodule OptimalEngine.API.Router do
       {:ok, assembled} =
         OptimalEngine.Retrieval.ContextAssembler.assemble(query, assemble_opts)
 
+      reconstruction =
+        case OptimalEngine.MemoryReconstructor.reconstruct(query,
+               workspace_id: workspace_id,
+               step_budget: parse_int(body["reconstruction_steps"], 4),
+               token_budget: parse_int(body["reconstruction_tokens"], 8_000)
+             ) do
+          {:ok, result} -> result
+          {:error, reason} -> %{status: "unavailable", error: inspect(reason)}
+        end
+
       mcts_meta =
         assembled.search_scores
         |> Enum.map(fn s ->
@@ -2692,12 +2702,97 @@ defmodule OptimalEngine.API.Router do
         l3: "",
         total_tokens: assembled.total_tokens,
         sources: assembled.sources,
+        reconstruction: reconstruction,
         mcts_metadata: %{
           candidate_count: length(assembled.search_scores),
           selected_sources: mcts_meta,
           mcts_enabled: OptimalEngine.Retrieval.MCTS.enabled?()
         }
       })
+    end
+  end
+
+  post "/api/reconstruct" do
+    body = conn.body_params || %{}
+    query = Map.get(body, "query", "")
+
+    if not (is_binary(query) and String.trim(query) != "") do
+      send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
+    else
+      opts = [
+        workspace_id: Map.get(body, "workspace", "default"),
+        step_budget: parse_int(body["step_budget"], 4),
+        token_budget: parse_int(body["token_budget"], 8_000),
+        limit: parse_int(body["limit"], 8)
+      ]
+
+      case OptimalEngine.MemoryReconstructor.reconstruct(query, opts) do
+        {:ok, result} -> json(conn, result)
+        {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end
+  end
+
+  post "/api/reconstruct/:id/outcome" do
+    body = conn.body_params || %{}
+    outcome = Map.get(body, "outcome", "")
+
+    opts =
+      [
+        notes: body["notes"],
+        actor_id: Map.get(body, "actor_id", "user:roberto")
+      ]
+      |> then(fn acc ->
+        if is_number(body["score"]), do: Keyword.put(acc, :score, body["score"]), else: acc
+      end)
+
+    case OptimalEngine.MemoryReconstructor.feedback(id, outcome, opts) do
+      {:ok, result} -> json(conn, result)
+      {:error, :run_not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "run not found"}))
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  post "/api/memory/consolidate" do
+    body = conn.body_params || %{}
+
+    case OptimalEngine.MemoryReconstructor.consolidate(
+           workspace_id: Map.get(body, "workspace", "default"),
+           minimum_observations: parse_int(body["minimum_observations"], 2)
+         ) do
+      {:ok, proposals} -> json(conn, %{proposals: proposals, count: length(proposals)})
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  get "/api/memory/reconstruction/quality" do
+    workspace = conn.params["workspace"] || "default"
+
+    case OptimalEngine.MemoryReconstructor.quality(workspace_id: workspace) do
+      {:ok, result} -> json(conn, result)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  post "/api/memory/reconstruction/benchmark" do
+    body = conn.body_params || %{}
+
+    questions =
+      Map.get(body, "questions", [
+        "What is the current Commas commitment and how did it evolve?",
+        "What changed in the TerraWatt commercial plan?",
+        "Which Optimal Engine problems were found, fixed, and verified?"
+      ])
+
+    if is_list(questions) and Enum.all?(questions, &is_binary/1) do
+      {:ok, result} =
+        OptimalEngine.MemoryReconstructor.benchmark(questions,
+          workspace_id: Map.get(body, "workspace", "miosa")
+        )
+
+      json(conn, result)
+    else
+      send_resp(conn, 400, Jason.encode!(%{error: "questions must be a list of strings"}))
     end
   end
 
