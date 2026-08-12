@@ -97,7 +97,7 @@ defmodule OptimalEngine.Retrieval.IntentAnalyzer do
     prompt = build_prompt(query)
 
     generate_model =
-      Application.get_env(:optimal_engine, :ollama, [])[:generate_model] || "qwen3:8b"
+      Application.get_env(:optimal_engine, :ollama, [])[:generate_model] || "qwen3:1.7b"
 
     governed_generate =
       GovernedModel.call_model(

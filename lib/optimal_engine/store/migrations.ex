@@ -97,7 +97,10 @@ defmodule OptimalEngine.Store.Migrations do
       migration_049_rebuild_contexts_fts_triggers(),
       migration_050_retire_test_storage_fixtures(),
       migration_051_workspace_storage_policies(),
-      migration_052_backfill_workspace_storage_policies()
+      migration_052_backfill_workspace_storage_policies(),
+      migration_053_repair_source_package_fts_triggers(),
+      migration_054_repair_memory_fts_triggers(),
+      migration_055_remove_optional_source_package_fts_triggers()
     ]
   end
 
@@ -2888,6 +2891,61 @@ defmodule OptimalEngine.Store.Migrations do
         FROM workspaces
         WHERE status = 'active'
         """}
+     ]}
+  end
+
+  defp migration_053_repair_source_package_fts_triggers do
+    {53, "repair source package FTS update and delete triggers",
+     [
+       {"drop_source_packages_fts_update_trigger",
+        "DROP TRIGGER IF EXISTS source_packages_fts_update"},
+       {"drop_source_packages_fts_delete_trigger",
+        "DROP TRIGGER IF EXISTS source_packages_fts_delete"},
+       {"source_packages_fts_update_trigger_v2",
+        """
+        CREATE TRIGGER source_packages_fts_update AFTER UPDATE ON source_packages BEGIN
+          DELETE FROM source_packages_fts WHERE rowid = old.rowid;
+          INSERT INTO source_packages_fts(rowid, id, raw_text, source_type, source_system, source_uri, metadata)
+          VALUES (new.rowid, new.id, new.raw_text, new.source_type, new.source_system, new.source_uri, new.metadata);
+        END
+        """},
+       {"source_packages_fts_delete_trigger_v2",
+        """
+        CREATE TRIGGER source_packages_fts_delete AFTER DELETE ON source_packages BEGIN
+          DELETE FROM source_packages_fts WHERE rowid = old.rowid;
+        END
+        """}
+     ]}
+  end
+
+  defp migration_054_repair_memory_fts_triggers do
+    {54, "repair memory FTS update and delete triggers",
+     [
+       {"drop_memories_fts_update_trigger", "DROP TRIGGER IF EXISTS memories_fts_update"},
+       {"drop_memories_fts_delete_trigger", "DROP TRIGGER IF EXISTS memories_fts_delete"},
+       {"memories_fts_update_trigger_v2",
+        """
+        CREATE TRIGGER memories_fts_update AFTER UPDATE ON memories BEGIN
+          DELETE FROM memories_fts WHERE rowid = old.rowid;
+          INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+        END
+        """},
+       {"memories_fts_delete_trigger_v2",
+        """
+        CREATE TRIGGER memories_fts_delete AFTER DELETE ON memories BEGIN
+          DELETE FROM memories_fts WHERE rowid = old.rowid;
+        END
+        """}
+     ]}
+  end
+
+  defp migration_055_remove_optional_source_package_fts_triggers do
+    {55, "remove triggers for the optional source package FTS projection",
+     [
+       {"drop_optional_source_packages_fts_update_trigger",
+        "DROP TRIGGER IF EXISTS source_packages_fts_update"},
+       {"drop_optional_source_packages_fts_delete_trigger",
+        "DROP TRIGGER IF EXISTS source_packages_fts_delete"}
      ]}
   end
 

@@ -39,7 +39,7 @@ defmodule Mix.Tasks.Optimal.Rag do
       $ claude-cli "Given this: $ctx — what should our counter-offer be?"
 
       # Pipe to a local LLM
-      $ mix optimal.rag "bug report" --format plain | ollama run qwen3:8b
+      $ mix optimal.rag "bug report" --format plain | ollama run qwen3:1.7b
   """
 
   use Mix.Task

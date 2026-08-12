@@ -562,11 +562,14 @@ defmodule OptimalEngine.Store do
   @impl true
   def handle_call(:stats, _from, state) do
     queries = [
-      {"total_contexts", "SELECT COUNT(*) FROM contexts"},
-      {"total_signals", "SELECT COUNT(*) FROM contexts WHERE type = 'signal'"},
-      {"total_resources", "SELECT COUNT(*) FROM contexts WHERE type = 'resource'"},
-      {"total_memories", "SELECT COUNT(*) FROM contexts WHERE type = 'memory'"},
-      {"total_skills", "SELECT COUNT(*) FROM contexts WHERE type = 'skill'"},
+      {"total_contexts", "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL"},
+      {"total_signals",
+       "SELECT COUNT(*) FROM contexts WHERE type = 'signal' AND archived_at IS NULL"},
+      {"total_resources",
+       "SELECT COUNT(*) FROM contexts WHERE type = 'resource' AND archived_at IS NULL"},
+      {"total_memories", "SELECT COUNT(*) FROM memories WHERE is_latest = 1 AND is_forgotten = 0"},
+      {"total_skills",
+       "SELECT COUNT(*) FROM contexts WHERE type = 'skill' AND archived_at IS NULL"},
       {"total_entities", "SELECT COUNT(*) FROM entities"},
       {"total_edges", "SELECT COUNT(*) FROM edges"},
       {"total_decisions", "SELECT COUNT(*) FROM decisions"}

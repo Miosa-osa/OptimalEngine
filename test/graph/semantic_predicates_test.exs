@@ -165,6 +165,31 @@ defmodule OptimalEngine.Graph.SemanticPredicatesTest do
     KStore.stop(store)
   end
 
+  test "hydrate_triple_store honors its limit across small batches" do
+    ws = unique_ws()
+    suffix = System.unique_integer([:positive])
+
+    for index <- 1..3 do
+      :ok =
+        Graph.assert_edge("PagedSource#{suffix}-#{index}", "PagedTarget#{suffix}-#{index}", "paged",
+          workspace_id: ws
+        )
+    end
+
+    store_id = "hydrate-paged-test-#{suffix}"
+    {:ok, store} = KStore.start_link(store_id: store_id)
+
+    assert {:ok, 2} =
+             Graph.hydrate_triple_store(store,
+               workspace_id: ws,
+               limit: 2,
+               batch_size: 1
+             )
+
+    assert {:ok, 2} = KStore.count(store)
+    KStore.stop(store)
+  end
+
   test "Graph.assert_edge writes to SQLite and feeds the triple store" do
     ws = unique_ws()
     suffix = System.unique_integer([:positive])

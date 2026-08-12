@@ -37,7 +37,11 @@ defmodule OptimalEngine.API.Endpoint do
         {Plug.Cowboy,
          scheme: :http,
          plug: OptimalEngine.API.Router,
-         options: [port: port, ip: parse_ip(interface)]}
+         options: [
+           port: port,
+           ip: parse_ip(interface),
+           protocol_options: [idle_timeout: 180_000]
+         ]}
       ]
     else
       []

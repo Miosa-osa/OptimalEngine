@@ -1,7 +1,7 @@
 defmodule OptimalEngine.StorageAudit do
   @moduledoc "Deep, read-only health audit for every engine storage layer."
 
-  alias OptimalEngine.{StorageCatalog, Store}
+  alias OptimalEngine.{Backup, StorageCatalog, Store}
   alias OptimalEngine.Pipeline.Decomposer.RLM
 
   @scoped_tables ~w(contexts chunks chunk_embeddings memories claims facts memory_objects source_packages)
@@ -28,19 +28,36 @@ defmodule OptimalEngine.StorageAudit do
   end
 
   defp check(name, fun) do
-    case fun.() do
-      {:ok, detail} -> %{name: name, ok: true, detail: detail}
-      {:error, detail} -> %{name: name, ok: false, detail: inspect(detail)}
+    started_at = System.monotonic_time()
+
+    try do
+      case fun.() do
+        {:ok, detail} ->
+          %{name: name, ok: true, detail: detail, duration_ms: elapsed_ms(started_at)}
+
+        {:error, detail} ->
+          %{name: name, ok: false, detail: inspect(detail), duration_ms: elapsed_ms(started_at)}
+      end
+    rescue
+      error ->
+        %{
+          name: name,
+          ok: false,
+          detail: Exception.message(error),
+          duration_ms: elapsed_ms(started_at)
+        }
+    catch
+      :exit, reason ->
+        %{name: name, ok: false, detail: inspect(reason), duration_ms: elapsed_ms(started_at)}
     end
-  rescue
-    error -> %{name: name, ok: false, detail: Exception.message(error)}
-  catch
-    :exit, reason -> %{name: name, ok: false, detail: inspect(reason)}
   end
 
   defp sqlite_integrity do
-    case Store.raw_query("PRAGMA integrity_check", []) do
-      {:ok, [["ok"]]} -> {:ok, "ok"}
+    db_path = Application.fetch_env!(:optimal_engine, :db_path)
+
+    case Backup.verify(db_path) do
+      {:ok, :ok} -> {:ok, "ok"}
+      {:ok, issues} -> {:error, issues}
       other -> {:error, other}
     end
   end
@@ -122,12 +139,27 @@ defmodule OptimalEngine.StorageAudit do
   end
 
   defp active_test_fixtures do
-    case scalar(
-           "SELECT COUNT(*) FROM workspaces WHERE status = 'active' AND id GLOB 'exampleorg-*:secrets'"
-         ) do
-      {:ok, 0} -> {:ok, "none active"}
-      {:ok, count} -> {:error, %{active_fixture_workspaces: count}}
-      other -> other
+    sql = """
+    SELECT
+      (SELECT COUNT(*) FROM workspaces WHERE status = 'active' AND id GLOB 'exampleorg-*:secrets'),
+      (SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND (
+        path LIKE '/var/folders/%/optimal_%test_%'
+        OR path LIKE '/tmp/optimal_%test_%'
+        OR node = 'test'
+        OR node LIKE 'node-a-%'
+        OR node LIKE 'node-b-%'
+      ))
+    """
+
+    case Store.raw_query(sql, []) do
+      {:ok, [[0, 0]]} ->
+        {:ok, "none active"}
+
+      {:ok, [[workspaces, contexts]]} ->
+        {:error, %{active_fixture_workspaces: workspaces, active_fixture_contexts: contexts}}
+
+      other ->
+        other
     end
   end
 
@@ -191,5 +223,9 @@ defmodule OptimalEngine.StorageAudit do
       {:ok, [[value]]} -> {:ok, value}
       other -> {:error, other}
     end
+  end
+
+  defp elapsed_ms(started_at) do
+    System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)
   end
 end

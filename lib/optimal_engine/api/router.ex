@@ -257,6 +257,57 @@ defmodule OptimalEngine.API.Router do
     json(conn, %{l0: OptimalEngine.l0()})
   end
 
+  get "/api/context-health" do
+    workspace = query_param(conn, "workspace", "default")
+    result = OptimalEngine.ContextHealth.run(workspace_id: workspace)
+    conn |> put_status(if(result.ok, do: 200, else: 503)) |> json(result)
+  end
+
+  get "/api/maintenance/corpus-organization" do
+    case OptimalEngine.CorpusOrganizer.preview() do
+      {:ok, preview} -> json(conn, preview)
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  post "/api/maintenance/corpus-organization" do
+    body = conn.body_params || %{}
+
+    if body["queue_remaining"] == true do
+      case OptimalEngine.CorpusOrganizer.queue_remaining() do
+        {:ok, result} -> json(conn, result)
+        {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+      end
+    else
+      if body["deduplicate_exact"] == true do
+        case OptimalEngine.CorpusOrganizer.deduplicate_exact() do
+          {:ok, result} -> json(conn, result)
+          {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+        end
+      else
+        if body["apply"] == true do
+          case OptimalEngine.CorpusOrganizer.apply_high_confidence() do
+            {:ok, result} -> json(conn, result)
+            {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+          end
+        else
+          conn
+          |> put_status(400)
+          |> json(%{
+            error: "apply=true, queue_remaining=true, or deduplicate_exact=true is required"
+          })
+        end
+      end
+    end
+  end
+
+  get "/api/stats" do
+    case OptimalEngine.stats() do
+      {:ok, stats} -> json(conn, stats)
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
   # GET /api/profile — 4-tier workspace snapshot.
   # Params:
   #   workspace=<id>        workspace id or slug (default: "default")
@@ -2002,11 +2053,28 @@ defmodule OptimalEngine.API.Router do
 
     case MemoryCore.pending_claims(workspace_id: workspace_id, tenant_id: tenant_id) do
       {:ok, claims} ->
+        kind = query_param(conn, "kind", "all")
+        limit = query_param(conn, "limit", "100") |> parse_int(100)
+        actionable = Enum.reject(claims, &memory_candidate_claim?/1)
+        memory_candidates = Enum.filter(claims, &memory_candidate_claim?/1)
+
+        selected =
+          case kind do
+            "actionable" -> actionable
+            "memory_candidate" -> memory_candidates
+            _ -> claims
+          end
+
         json(conn, %{
           tenant_id: tenant_id,
           workspace_id: workspace_id,
-          count: length(claims),
-          claims: Enum.map(claims, &claim_to_map/1)
+          count: length(selected),
+          returned: min(length(selected), limit),
+          category_counts: %{
+            actionable: length(actionable),
+            memory_candidates: length(memory_candidates)
+          },
+          claims: selected |> Enum.take(limit) |> Enum.map(&claim_to_map/1)
         })
 
       {:error, reason} ->
@@ -2610,6 +2678,12 @@ defmodule OptimalEngine.API.Router do
     else
       stringify_keys(claim)
     end
+  end
+
+  defp memory_candidate_claim?(claim) do
+    metadata = Map.get(claim, :metadata) || Map.get(claim, "metadata") || %{}
+    intake = Map.get(metadata, "memory_intake") || Map.get(metadata, :memory_intake) || %{}
+    (Map.get(intake, "path") || Map.get(intake, :path)) == "memory_core_pending_claim"
   end
 
   defp parse_optional_positive_int(nil), do: nil

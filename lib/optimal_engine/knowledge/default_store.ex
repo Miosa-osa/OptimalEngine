@@ -21,6 +21,7 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
   alias OptimalEngine.Knowledge.Store, as: KnowledgeStore
 
   @store_id "default"
+  @hydration_delay_ms 10_000
   @backend_modules %{
     "ets" => OptimalEngine.Knowledge.Backend.ETS,
     "mnesia" => OptimalEngine.Knowledge.Backend.Mnesia,
@@ -43,11 +44,11 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
          ) do
       {:ok, store_pid} ->
         # Hydrate asynchronously so supervision tree startup is not blocked.
-        Task.start(fn -> hydrate(store_pid) end)
+        start_hydration(store_pid)
         {:ok, %{store_pid: store_pid}}
 
       {:error, {:already_started, store_pid}} ->
-        Task.start(fn -> hydrate(store_pid) end)
+        start_hydration(store_pid)
         {:ok, %{store_pid: store_pid}}
 
       {:error, reason} ->
@@ -61,6 +62,13 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
+
+  defp start_hydration(store_pid) do
+    Task.start(fn ->
+      Process.sleep(@hydration_delay_ms)
+      hydrate(store_pid)
+    end)
+  end
 
   defp configured_backend do
     config = Application.get_env(:optimal_engine, :knowledge, [])

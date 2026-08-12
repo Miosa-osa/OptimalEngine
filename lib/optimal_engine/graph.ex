@@ -77,6 +77,7 @@ defmodule OptimalEngine.Graph do
   Options:
   - `:workspace_id` — only hydrate edges from this workspace (default: all)
   - `:limit`        — max rows to load (default: 100_000)
+  - `:batch_size`   — rows fetched per Store call (default: 1_000)
 
   Returns `{:ok, count}` or `{:error, reason}`.
   """
@@ -85,41 +86,65 @@ defmodule OptimalEngine.Graph do
   def hydrate_triple_store(store, opts \\ []) do
     ws = Keyword.get(opts, :workspace_id)
     limit = Keyword.get(opts, :limit, 100_000)
+    batch_size = Keyword.get(opts, :batch_size, 1_000) |> min(limit) |> max(1)
 
-    {sql, params} =
-      case ws do
-        nil ->
-          {"SELECT source_id, relation, target_id, workspace_id FROM edges LIMIT ?1", [limit]}
-
-        ws ->
-          {"SELECT source_id, relation, target_id, workspace_id FROM edges WHERE workspace_id = ?1 LIMIT ?2",
-           [ws, limit]}
-      end
-
-    case Store.raw_query(sql, params) do
-      {:ok, rows} ->
-        triples =
-          Enum.map(rows, fn [source, predicate, target, graph] ->
-            {graph, source, predicate, target}
-          end)
-
-        count = length(triples)
-
-        Enum.each(triples, fn {g, s, p, o} ->
-          OptimalEngine.Knowledge.Store.assert(store, g, s, p, o)
-        end)
-
+    case hydrate_triple_store_pages(store, ws, limit, batch_size, 0, 0) do
+      {:ok, count} = result ->
         Logger.info("[Graph] Hydrated #{count} triples into Knowledge.Store from SQLite edges")
-        {:ok, count}
+        result
 
-      {:error, reason} ->
+      {:error, reason} = error ->
         Logger.warning("[Graph] hydrate_triple_store query failed: #{inspect(reason)}")
-        {:error, reason}
+        error
     end
   rescue
     error ->
       Logger.warning("[Graph] hydrate_triple_store exception: #{inspect(error)}")
       {:error, error}
+  end
+
+  defp hydrate_triple_store_pages(_store, _ws, limit, _batch_size, _last_id, count)
+       when count >= limit,
+       do: {:ok, count}
+
+  defp hydrate_triple_store_pages(store, ws, limit, batch_size, last_id, count) do
+    page_size = min(batch_size, limit - count)
+
+    {sql, params} =
+      case ws do
+        nil ->
+          {"SELECT id, source_id, relation, target_id, workspace_id FROM edges WHERE id > ?1 ORDER BY id LIMIT ?2",
+           [last_id, page_size]}
+
+        workspace_id ->
+          {"SELECT id, source_id, relation, target_id, workspace_id FROM edges WHERE workspace_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
+           [workspace_id, last_id, page_size]}
+      end
+
+    case Store.raw_query(sql, params) do
+      {:ok, []} ->
+        {:ok, count}
+
+      {:ok, rows} ->
+        Enum.each(rows, fn [_id, source, predicate, target, graph] ->
+          OptimalEngine.Knowledge.Store.assert(store, graph, source, predicate, target)
+        end)
+
+        [last_row | _] = Enum.reverse(rows)
+        [next_id | _] = last_row
+
+        hydrate_triple_store_pages(
+          store,
+          ws,
+          limit,
+          batch_size,
+          next_id,
+          count + length(rows)
+        )
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @doc """
