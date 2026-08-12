@@ -93,8 +93,8 @@ defmodule OptimalEngine.ContextHealth do
       Store.raw_query(
         """
         SELECT
-          SUM(CASE WHEN COALESCE(json_extract(metadata, '$.memory_intake.path'), '') != 'memory_core_pending_claim' THEN 1 ELSE 0 END),
-          SUM(CASE WHEN json_extract(metadata, '$.memory_intake.path') = 'memory_core_pending_claim' THEN 1 ELSE 0 END)
+          SUM(CASE WHEN claim_type != 'memory_candidate' THEN 1 ELSE 0 END),
+          SUM(CASE WHEN claim_type = 'memory_candidate' THEN 1 ELSE 0 END)
         FROM claims
         WHERE workspace_id = ?1 AND lifecycle_state = 'pending'
         """,

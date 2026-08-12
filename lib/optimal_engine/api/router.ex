@@ -254,13 +254,60 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/l0" do
-    json(conn, %{l0: OptimalEngine.l0()})
+    workspace = query_param(conn, "workspace", nil)
+
+    l0 =
+      if workspace do
+        OptimalEngine.Retrieval.L0Cache.for_workspace(workspace)
+      else
+        OptimalEngine.l0()
+      end
+
+    json(conn, %{workspace_id: workspace, l0: l0})
   end
 
   get "/api/context-health" do
     workspace = query_param(conn, "workspace", "default")
     result = OptimalEngine.ContextHealth.run(workspace_id: workspace)
     json(conn, result)
+  end
+
+  get "/api/operating-projection" do
+    workspace = query_param(conn, "workspace", "default:miosa")
+
+    case OptimalEngine.OperatingProjection.workspace(workspace) do
+      {:ok, projection} -> json(conn, projection)
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  get "/api/rhythm/draft" do
+    workspace = query_param(conn, "workspace", "default:miosa")
+
+    case OptimalEngine.OperatingProjection.daily_draft(workspace) do
+      {:ok, draft} -> json(conn, %{workspace_id: workspace, draft: draft})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  get "/api/review/routing" do
+    state = query_param(conn, "state", "review")
+    limit = query_param(conn, "limit", "25") |> parse_int(25)
+
+    case OptimalEngine.ReviewQueue.routing(state: state, limit: limit) do
+      {:ok, items} -> json(conn, %{state: state, count: length(items), items: items})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  post "/api/review/routing/:id" do
+    body = conn.body_params || %{}
+    decision = if body["decision"] == "accept", do: :accept, else: :reject
+
+    case OptimalEngine.ReviewQueue.decide_route(id, decision, body["workspace"]) do
+      {:ok, result} -> json(conn, %{result: result})
+      {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+    end
   end
 
   get "/api/maintenance/corpus-organization" do
