@@ -91,6 +91,7 @@ defmodule OptimalEngine.Memory do
     claim_opts = [
       actor_id: "system:memory-create-bridge",
       extracted_by: "system:memory-create-bridge",
+      claim_type: "memory_candidate",
       claim_text: content,
       metadata: governed_memory_metadata(attrs, gate, true, %{"versioned_memory_id" => mem.id})
     ]
@@ -154,6 +155,7 @@ defmodule OptimalEngine.Memory do
     if encode? do
       claim_opts =
         opts
+        |> Keyword.put_new(:claim_type, "memory_candidate")
         |> Keyword.put_new(:actor_id, Map.get(attrs, :actor_id) || Map.get(attrs, :created_by))
         |> Keyword.put_new(:claim_text, content)
         |> Keyword.put_new(:metadata, governed_memory_metadata(attrs, gate, encode?))

@@ -41,6 +41,32 @@ defmodule OptimalEngine.Retrieval.L0Cache do
     GenServer.call(__MODULE__, :get)
   end
 
+  def for_workspace(workspace_id) do
+    {:ok, projection} = OptimalEngine.OperatingProjection.workspace(workspace_id, limit: 100)
+
+    commitments =
+      projection.commitments
+      |> Enum.take(8)
+      |> Enum.map_join("\n", &"- [#{&1.status}] #{&1.summary}")
+
+    """
+    # L0 - #{workspace_id}
+
+    ## Workspace Inventory
+
+    - Contexts: #{projection.inventory.contexts}
+    - Durable memories: #{projection.inventory.memories}
+    - Recent durable memories sampled: #{projection.inventory.recent_memories_sampled}
+    - Actionable claims: #{projection.review_queue.actionable_claims}
+    - Latest evidence: #{projection.freshness.latest_at || "none"}
+
+    ## Current Operating Items
+
+    #{if(commitments == "", do: "_No current durable items._", else: commitments)}
+    """
+    |> String.trim()
+  end
+
   @doc "Forces a cache refresh."
   @spec refresh() :: :ok
   def refresh do

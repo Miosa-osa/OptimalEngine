@@ -100,7 +100,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_052_backfill_workspace_storage_policies(),
       migration_053_repair_source_package_fts_triggers(),
       migration_054_repair_memory_fts_triggers(),
-      migration_055_remove_optional_source_package_fts_triggers()
+      migration_055_remove_optional_source_package_fts_triggers(),
+      migration_056_classify_memory_candidate_claims()
     ]
   end
 
@@ -2946,6 +2947,19 @@ defmodule OptimalEngine.Store.Migrations do
         "DROP TRIGGER IF EXISTS source_packages_fts_update"},
        {"drop_optional_source_packages_fts_delete_trigger",
         "DROP TRIGGER IF EXISTS source_packages_fts_delete"}
+     ]}
+  end
+
+  defp migration_056_classify_memory_candidate_claims do
+    {56, "classify governed memory intake claims separately from evidence claims",
+     [
+       {"classify_memory_candidate_claims",
+        """
+        UPDATE claims
+        SET claim_type = 'memory_candidate'
+        WHERE json_extract(metadata, '$.memory_intake.path') = 'memory_core_pending_claim'
+          AND claim_type != 'memory_candidate'
+        """}
      ]}
   end
 
