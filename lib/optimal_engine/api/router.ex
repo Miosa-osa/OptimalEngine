@@ -2820,6 +2820,14 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  get "/api/hierarchy/audit" do
+    tenant = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    case OptimalEngine.HierarchyAudit.run(tenant) do
+      {:ok, result} -> json(conn, result)
+    end
+  end
+
   post "/api/data-steward/claims/decide" do
     body = conn.body_params || %{}
     decision = parse_review_decision(body["decision"])
@@ -2870,6 +2878,41 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.DataSteward.repair_orphan_scope(
            body["source_workspace_id"],
            body["target_workspace_id"],
+           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+         ) do
+      {:ok, result} -> json(conn, result)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  post "/api/data-steward/workspaces/rename" do
+    body = conn.body_params || %{}
+
+    case OptimalEngine.DataSteward.rename_workspace(
+           body["source_workspace_id"],
+           body["target_workspace_id"],
+           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+         ) do
+      {:ok, result} -> json(conn, result)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  post "/api/data-steward/nodes/repair-types" do
+    body = conn.body_params || %{}
+
+    case OptimalEngine.DataSteward.repair_node_types(
+           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+         ) do
+      {:ok, result} -> json(conn, %{updated_nodes: result})
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  post "/api/data-steward/hierarchy/repair-deterministic" do
+    body = conn.body_params || %{}
+
+    case OptimalEngine.DataSteward.repair_deterministic_hierarchy(
            actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
          ) do
       {:ok, result} -> json(conn, result)

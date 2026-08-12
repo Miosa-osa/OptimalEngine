@@ -150,6 +150,9 @@ Multi-user use does not change the model. It makes scope mandatory:
 every durable write has tenant_id
 every workspace object has workspace_id
 every Node-scoped object has a stable node_id or explicit scope
+
+Active Workspace identifiers are canonicalized as `<tenant_id>:<slug>`.
+The `hierarchy` audit verifies Organization ownership, canonical Workspace identifiers, Node parent integrity, Node Type scope, and Node Relationship scope.
 every external action has actor_id and audit_event_links
 every generated object has derivation_ledger_links
 ```

@@ -15,6 +15,7 @@ Optimal Engine turns preserved evidence into governed memory and authorized cont
 | Optimality Assessment | Versioned evidence record that classifies architecture or whole-system readiness against explicit gates. |
 | Data Steward | Governed remediation interface that clusters review queues, exposes integrity gaps, and applies only explicit human decisions. |
 | Quality Snapshot | Periodic, non-mutating record of data health used to detect regressions over time. |
+| Hierarchy Audit | Verification of Tenant ownership, Organization ownership, Workspace identity, and Node parent, type, and relationship scope. |
 
 ## Invariants
 
@@ -27,3 +28,6 @@ Optimal Engine turns preserved evidence into governed memory and authorized cont
 - The `optimal` classification is earned from current evidence and is not permanent branding.
 - Bulk review never implies bulk acceptance.
 - Every mutation names explicit item identifiers, actor, scope, and decision.
+- Active Workspace IDs use `<tenant_id>:<slug>`.
+- Every active Workspace belongs to an active Organization in the same Tenant.
+- Node parents, Node Types, and Node Relationships remain inside one Workspace.
