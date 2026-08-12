@@ -102,8 +102,100 @@ defmodule OptimalEngine.Store.Migrations do
       migration_054_repair_memory_fts_triggers(),
       migration_055_remove_optional_source_package_fts_triggers(),
       migration_056_classify_memory_candidate_claims(),
-      migration_057_canonical_entity_spine()
+      migration_057_canonical_entity_spine(),
+      migration_058_reconstructive_memory()
     ]
+  end
+
+  defp migration_058_reconstructive_memory do
+    {58, "reconstructive memory traces, feedback, and consolidation",
+     [
+       {"memory_reconstruction_runs",
+        """
+        CREATE TABLE IF NOT EXISTS memory_reconstruction_runs (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          query TEXT NOT NULL,
+          cues TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'running',
+          stop_reason TEXT,
+          step_budget INTEGER NOT NULL,
+          token_budget INTEGER NOT NULL,
+          evidence TEXT NOT NULL DEFAULT '[]',
+          citations TEXT NOT NULL DEFAULT '[]',
+          answer_context TEXT NOT NULL DEFAULT '',
+          confidence REAL NOT NULL DEFAULT 0.0,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT
+        )
+        """},
+       {"memory_reconstruction_steps",
+        """
+        CREATE TABLE IF NOT EXISTS memory_reconstruction_steps (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES memory_reconstruction_runs(id) ON DELETE CASCADE,
+          step_number INTEGER NOT NULL,
+          action TEXT NOT NULL,
+          cue TEXT,
+          candidates TEXT NOT NULL DEFAULT '[]',
+          selected_evidence TEXT NOT NULL DEFAULT '[]',
+          accumulated_score REAL NOT NULL DEFAULT 0.0,
+          token_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(run_id, step_number)
+        )
+        """},
+       {"memory_reconstruction_outcomes",
+        """
+        CREATE TABLE IF NOT EXISTS memory_reconstruction_outcomes (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES memory_reconstruction_runs(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL,
+          outcome TEXT NOT NULL,
+          score REAL NOT NULL,
+          notes TEXT,
+          actor_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          CHECK (outcome IN ('success', 'partial', 'failure'))
+        )
+        """},
+       {"memory_path_feedback",
+        """
+        CREATE TABLE IF NOT EXISTS memory_path_feedback (
+          workspace_id TEXT NOT NULL,
+          object_type TEXT NOT NULL,
+          object_id TEXT NOT NULL,
+          success_weight REAL NOT NULL DEFAULT 0.0,
+          failure_weight REAL NOT NULL DEFAULT 0.0,
+          observations INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(workspace_id, object_type, object_id)
+        )
+        """},
+       {"memory_consolidation_proposals",
+        """
+        CREATE TABLE IF NOT EXISTS memory_consolidation_proposals (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          proposal_type TEXT NOT NULL,
+          member_links TEXT NOT NULL DEFAULT '[]',
+          rationale TEXT NOT NULL,
+          confidence REAL NOT NULL DEFAULT 0.0,
+          status TEXT NOT NULL DEFAULT 'proposed',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          reviewed_at TEXT,
+          CHECK (status IN ('proposed', 'accepted', 'rejected'))
+        )
+        """},
+       {"memory_reconstruction_runs_workspace_idx",
+        "CREATE INDEX IF NOT EXISTS memory_reconstruction_runs_workspace_idx ON memory_reconstruction_runs(workspace_id, created_at)"},
+       {"memory_reconstruction_steps_run_idx",
+        "CREATE INDEX IF NOT EXISTS memory_reconstruction_steps_run_idx ON memory_reconstruction_steps(run_id, step_number)"},
+       {"memory_consolidation_workspace_idx",
+        "CREATE INDEX IF NOT EXISTS memory_consolidation_workspace_idx ON memory_consolidation_proposals(workspace_id, status, created_at)"}
+     ]}
   end
 
   # ---------------------------------------------------------------------------
