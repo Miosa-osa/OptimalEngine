@@ -44,19 +44,24 @@ defmodule OptimalEngine.ReviewQueue do
     end
   end
 
-  def decide_route(id, :accept, target_workspace_id) do
+  def decide_route(id, decision, target_workspace_id, opts \\ [])
+
+  def decide_route(id, :accept, target_workspace_id, _opts) do
     CorpusOrganizer.move_context(id, target_workspace_id)
   end
 
-  def decide_route(id, :reject, _target_workspace_id) do
+  def decide_route(id, :reject, _target_workspace_id, opts) do
+    actor_id = Keyword.get(opts, :actor_id, "unknown")
+
     Store.raw_query(
       """
       UPDATE contexts SET metadata = json_set(
         COALESCE(metadata, '{}'), '$.routing_review.state', 'rejected',
         '$.routing_review.reviewed_at', datetime('now')
+        ,'$.routing_review.reviewed_by', ?2
       ) WHERE id = ?1 AND workspace_id = 'default:knowledge-intake' AND archived_at IS NULL
       """,
-      [id]
+      [id, actor_id]
     )
   end
 

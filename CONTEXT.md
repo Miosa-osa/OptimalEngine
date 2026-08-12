@@ -13,6 +13,8 @@ Optimal Engine turns preserved evidence into governed memory and authorized cont
 | Associative Projection | Rebuildable Cue-Tag-Content index derived from governed objects and never treated as canonical truth. |
 | Consolidation Proposal | Review-required suggestion created from recurring successful Association Paths. |
 | Optimality Assessment | Versioned evidence record that classifies architecture or whole-system readiness against explicit gates. |
+| Data Steward | Governed remediation interface that clusters review queues, exposes integrity gaps, and applies only explicit human decisions. |
+| Quality Snapshot | Periodic, non-mutating record of data health used to detect regressions over time. |
 
 ## Invariants
 
@@ -23,3 +25,5 @@ Optimal Engine turns preserved evidence into governed memory and authorized cont
 - Reconstruction outcomes train intent-specific paths, not global document popularity.
 - Consolidation cannot create a Fact without the existing Claim review lifecycle.
 - The `optimal` classification is earned from current evidence and is not permanent branding.
+- Bulk review never implies bulk acceptance.
+- Every mutation names explicit item identifiers, actor, scope, and decision.

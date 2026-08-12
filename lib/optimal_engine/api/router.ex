@@ -2810,6 +2810,73 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  get "/api/data-steward/dashboard" do
+    workspace = query_param(conn, "workspace", "default:miosa")
+    tenant = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
+
+    case OptimalEngine.DataSteward.dashboard(workspace, tenant_id: tenant) do
+      {:ok, result} -> json(conn, result)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  post "/api/data-steward/claims/decide" do
+    body = conn.body_params || %{}
+    decision = parse_review_decision(body["decision"])
+
+    if decision in [:accept, :reject] and is_list(body["ids"]) and body["ids"] != [] do
+      case OptimalEngine.DataSteward.decide_claims(body["ids"], decision,
+             workspace_id: body["workspace"] || "default:miosa",
+             tenant_id: body["tenant_id"] || "default",
+             actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           ) do
+        {:ok, result} -> json(conn, result)
+      end
+    else
+      send_resp(conn, 400, Jason.encode!(%{error: "decision and non-empty ids are required"}))
+    end
+  end
+
+  post "/api/data-steward/routes/decide" do
+    body = conn.body_params || %{}
+    decision = parse_review_decision(body["decision"])
+
+    if decision in [:accept, :reject] and is_list(body["items"]) and body["items"] != [] do
+      case OptimalEngine.DataSteward.decide_routes(body["items"], decision,
+             actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           ) do
+        {:ok, result} -> json(conn, result)
+      end
+    else
+      send_resp(conn, 400, Jason.encode!(%{error: "decision and non-empty items are required"}))
+    end
+  end
+
+  post "/api/data-steward/recheck" do
+    body = conn.body_params || %{}
+
+    case OptimalEngine.DataSteward.recheck(body["workspace"] || "default:miosa",
+           tenant_id: body["tenant_id"] || "default",
+           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+         ) do
+      {:ok, result} -> json(conn, result)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  post "/api/data-steward/workspaces/repair" do
+    body = conn.body_params || %{}
+
+    case OptimalEngine.DataSteward.repair_orphan_scope(
+           body["source_workspace_id"],
+           body["target_workspace_id"],
+           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+         ) do
+      {:ok, result} -> json(conn, result)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
   match _ do
     send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
   end
@@ -2817,6 +2884,10 @@ defmodule OptimalEngine.API.Router do
   # ---------------------------------------------------------------------------
   # Helpers: response
   # ---------------------------------------------------------------------------
+
+  defp parse_review_decision("accept"), do: :accept
+  defp parse_review_decision("reject"), do: :reject
+  defp parse_review_decision(_), do: :invalid
 
   defp governed_retrieval_opts(body, workspace_id, strategy) do
     [

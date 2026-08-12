@@ -84,6 +84,9 @@ defmodule OptimalEngine.Application do
       # ── Reconstructive memory maintenance (projection + reviewed proposals) ──
       OptimalEngine.MemoryCore.ReconstructionScheduler,
 
+      # ── Read-only data-quality drift snapshots ───────────────────────────
+      OptimalEngine.DataQualityScheduler,
+
       # ── Connector pull loop (periodic intake FEED from enabled connectors) ─
       OptimalEngine.Connectors.PullScheduler
     ]
