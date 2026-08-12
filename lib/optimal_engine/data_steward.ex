@@ -6,7 +6,14 @@ defmodule OptimalEngine.DataSteward do
   Mutations require explicit item identifiers and never infer acceptance.
   """
 
-  alias OptimalEngine.{ContextHealth, EntityQuality, MemoryCore, ReviewQueue, Store}
+  alias OptimalEngine.{
+    ContextHealth,
+    EntityQuality,
+    HierarchyAudit,
+    MemoryCore,
+    ReviewQueue,
+    Store
+  }
 
   @default_limit 100
 
@@ -17,7 +24,8 @@ defmodule OptimalEngine.DataSteward do
          {:ok, orphan_scopes} <- orphan_scopes(),
          {:ok, claims} <- claim_clusters(workspace_id, tenant_id, @default_limit),
          {:ok, routes} <- route_clusters(@default_limit),
-         {:ok, entities} <- entity_clusters(workspace_id, @default_limit) do
+         {:ok, entities} <- entity_clusters(workspace_id, @default_limit),
+         {:ok, hierarchy} <- HierarchyAudit.run(tenant_id) do
       {:ok,
        %{
          workspace_id: workspace_id,
@@ -28,6 +36,7 @@ defmodule OptimalEngine.DataSteward do
          claim_clusters: claims,
          route_clusters: routes,
          entity_clusters: entities,
+         hierarchy: hierarchy,
          invariants: [
            "source evidence is preserved",
            "acceptance requires explicit identifiers",
@@ -122,7 +131,12 @@ defmodule OptimalEngine.DataSteward do
        end)
        |> Enum.group_by(&{&1.proposed_kind, &1.normalized_text})
        |> Enum.map(fn {{kind, normalized}, items} ->
-         %{proposed_kind: kind, normalized_text: normalized, count: length(items), mentions: items}
+         %{
+           proposed_kind: kind,
+           normalized_text: normalized,
+           count: length(items),
+           mentions: items
+         }
        end)
        |> Enum.sort_by(&{-&1.count, &1.normalized_text})}
     end
@@ -182,7 +196,9 @@ defmodule OptimalEngine.DataSteward do
              []
            ) do
       {:ok,
-       Enum.map(rows, fn [workspace_id, count] -> %{workspace_id: workspace_id, records: count} end)}
+       Enum.map(rows, fn [workspace_id, count] ->
+         %{workspace_id: workspace_id, records: count}
+       end)}
     end
   end
 
@@ -225,6 +241,138 @@ defmodule OptimalEngine.DataSteward do
       {:ok, []} -> {:error, :target_workspace_not_registered}
       error -> error
     end
+  end
+
+  def rename_workspace(source_workspace_id, target_workspace_id, opts) do
+    actor_id = Keyword.fetch!(opts, :actor_id)
+
+    with {:ok, [[tenant, slug, name, description, status, organization_id, metadata]]} <-
+           Store.raw_query(
+             "SELECT tenant_id,slug,name,description,status,organization_id,metadata FROM workspaces WHERE id=?1",
+             [source_workspace_id]
+           ),
+         {:ok, []} <-
+           Store.raw_query("SELECT id FROM workspaces WHERE id=?1", [target_workspace_id]),
+         true <- target_workspace_id == tenant <> ":" <> slug,
+         {:ok, tables} <- workspace_tables() do
+      Store.transaction(fn txn ->
+        temporary_slug =
+          "__renaming__" <> slug <> "__" <> Integer.to_string(System.unique_integer([:positive]))
+
+        with {:ok, _} <-
+               Store.txn_execute(txn, "UPDATE workspaces SET slug=?1 WHERE id=?2", [
+                 temporary_slug,
+                 source_workspace_id
+               ]),
+             {:ok, _} <-
+               Store.txn_execute(
+                 txn,
+                 "INSERT INTO workspaces(id,tenant_id,slug,name,description,status,organization_id,metadata) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                 [
+                   target_workspace_id,
+                   tenant,
+                   slug,
+                   name,
+                   description,
+                   status,
+                   organization_id,
+                   metadata
+                 ]
+               ),
+             {:ok, results} <-
+               rename_tables(txn, tables, source_workspace_id, target_workspace_id),
+             {:ok, _} <-
+               Store.txn_execute(txn, "DELETE FROM workspaces WHERE id=?1", [source_workspace_id]) do
+          {:ok,
+           %{
+             source_workspace_id: source_workspace_id,
+             target_workspace_id: target_workspace_id,
+             actor_id: actor_id,
+             tables: results
+           }}
+        end
+      end)
+    else
+      false -> {:error, :target_must_match_tenant_and_slug}
+      {:ok, [_ | _]} -> {:error, :target_workspace_exists}
+      {:ok, []} -> {:error, :source_workspace_not_found}
+      error -> error
+    end
+  end
+
+  def repair_node_types(opts) do
+    actor_id = Keyword.fetch!(opts, :actor_id)
+
+    with {:ok, _workspaces} <-
+           Store.raw_query("SELECT id,tenant_id FROM workspaces WHERE status='active'", []) do
+      Store.raw_query(
+        """
+        UPDATE nodes
+        SET node_type_id = (
+              SELECT t.id FROM node_types t
+              WHERE t.workspace_id=nodes.workspace_id
+                AND t.slug=CASE nodes.kind WHEN 'org' THEN 'entity' WHEN 'unit' THEN 'department' ELSE nodes.kind END
+                AND t.lifecycle_state='active' LIMIT 1
+            ),
+            updated_at = datetime('now'),
+            metadata = json_set(COALESCE(metadata,'{}'), '$.hierarchy_repaired_by', ?1)
+        WHERE lifecycle_state='active'
+          AND workspace_id IN (SELECT id FROM workspaces WHERE status='active')
+          AND EXISTS (
+            SELECT 1 FROM node_types t
+            WHERE t.workspace_id=nodes.workspace_id
+              AND t.slug=CASE nodes.kind WHEN 'org' THEN 'entity' WHEN 'unit' THEN 'department' ELSE nodes.kind END
+              AND t.lifecycle_state='active'
+          )
+          AND (node_type_id IS NULL OR NOT EXISTS (
+            SELECT 1 FROM node_types current
+            WHERE current.id=nodes.node_type_id AND current.workspace_id=nodes.workspace_id
+              AND current.lifecycle_state='active'
+          ))
+        """,
+        [actor_id]
+      )
+    end
+  end
+
+  def repair_deterministic_hierarchy(opts) do
+    actor_id = Keyword.fetch!(opts, :actor_id)
+
+    Store.transaction(fn txn ->
+      with {:ok, owner_count} <-
+             Store.txn_execute(
+               txn,
+               "UPDATE workspaces SET organization_id='miosa', metadata=json_set(COALESCE(metadata,'{}'),'$.hierarchy_repaired_by',?1) WHERE status='active' AND organization_id='default' AND (name LIKE '%BusinessOS%' OR description LIKE '%BusinessOS%')",
+               [actor_id]
+             ),
+           {:ok, node_count} <-
+             Store.txn_execute(
+               txn,
+               """
+               UPDATE nodes
+               SET kind=CASE
+                     WHEN slug='18-clients' THEN 'customer'
+                     WHEN slug='17-team' THEN 'team'
+                     WHEN slug='11-tasks' THEN 'operation'
+                     WHEN slug='12-projects' THEN 'project'
+                   END,
+                   node_type_id=workspace_id || ':' || CASE
+                     WHEN slug='18-clients' THEN 'customer'
+                     WHEN slug='17-team' THEN 'team'
+                     WHEN slug='11-tasks' THEN 'operation'
+                     WHEN slug='12-projects' THEN 'project'
+                   END,
+                   updated_at=datetime('now'),
+                   metadata=json_set(COALESCE(metadata,'{}'),'$.hierarchy_repaired_by',?1)
+               WHERE workspace_id='default:businessos' AND kind='workspace'
+                 AND slug IN ('18-clients','17-team','11-tasks','12-projects')
+               """,
+               [actor_id]
+             ) do
+        {:ok,
+         %{workspace_owners_updated: owner_count, nodes_retyped: node_count, actor_id: actor_id}}
+      end
+    end)
   end
 
   def recheck(workspace_id, opts \\ []) do
@@ -311,4 +459,20 @@ defmodule OptimalEngine.DataSteward do
   end
 
   defp safe_identifier?(value), do: is_binary(value) and Regex.match?(~r/^[a-zA-Z0-9_]+$/, value)
+
+  defp rename_tables(txn, tables, source, target) do
+    Enum.reduce_while(tables, {:ok, []}, fn table, {:ok, results} ->
+      case Store.txn_execute(
+             txn,
+             "UPDATE \"#{table}\" SET workspace_id=?1 WHERE workspace_id=?2",
+             [
+               target,
+               source
+             ]
+           ) do
+        {:ok, count} -> {:cont, {:ok, [%{table: table, updated: count} | results]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
 end
