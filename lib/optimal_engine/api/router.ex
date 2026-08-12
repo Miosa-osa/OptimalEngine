@@ -310,6 +310,127 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  post "/api/entities" do
+    body = conn.body_params || %{}
+
+    case OptimalEngine.EntityRegistry.register(body) do
+      {:ok, entity} -> conn |> put_status(201) |> json(entity)
+      {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  get "/api/entities/quality" do
+    workspace = query_param(conn, "workspace", "default:miosa")
+
+    case OptimalEngine.EntityQuality.run(workspace) do
+      {:ok, quality} -> json(conn, quality)
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  get "/api/entities/review" do
+    workspace = query_param(conn, "workspace", "default:miosa")
+    limit = query_param(conn, "limit", "50") |> parse_int(50)
+
+    case OptimalEngine.EntityResolution.queue(workspace, limit: limit) do
+      {:ok, items} -> json(conn, %{workspace_id: workspace, count: length(items), items: items})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  get "/api/entities/:id/history" do
+    workspace = query_param(conn, "workspace", "default:miosa")
+
+    case OptimalEngine.EntityRegistry.history(id, workspace) do
+      {:ok, history} -> json(conn, %{entity_id: id, workspace_id: workspace, history: history})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  get "/api/entities/:id/projection" do
+    workspace = query_param(conn, "workspace", "default:miosa")
+    opts = if as_of = query_param(conn, "as_of", nil), do: [as_of: as_of], else: []
+
+    case OptimalEngine.EntityProjection.build(id, workspace, opts) do
+      {:ok, projection} -> json(conn, projection)
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "not_found"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  get "/api/entities/:id" do
+    workspace = query_param(conn, "workspace", "default:miosa")
+    opts = if as_of = query_param(conn, "as_of", nil), do: [as_of: as_of], else: []
+
+    case OptimalEngine.EntityRegistry.get(id, workspace, opts) do
+      {:ok, entity} -> json(conn, entity)
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "not_found"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  post "/api/entities/:id/merge" do
+    body = conn.body_params || %{}
+
+    opts = [
+      workspace_id: body["workspace"],
+      actor_id: body["actor_id"] || "user:roberto",
+      reason: body["reason"] || "reviewed identity merge"
+    ]
+
+    case OptimalEngine.EntityRegistry.merge(id, body["winner_entity_id"], opts) do
+      {:ok, result} -> json(conn, result)
+      {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  post "/api/entity-mentions" do
+    body = conn.body_params || %{}
+
+    case OptimalEngine.EntityResolution.resolve(body) do
+      {:ok, result} -> conn |> put_status(201) |> json(result)
+      {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  post "/api/entity-mentions/:id/decision" do
+    body = conn.body_params || %{}
+
+    decision =
+      case body["decision"] do
+        "link" -> :link
+        "new_entity" -> :new_entity
+        "reject" -> :reject
+        _ -> :invalid
+      end
+
+    if decision == :invalid do
+      conn |> put_status(422) |> json(%{error: "decision must be link, new_entity, or reject"})
+    else
+      opts = [
+        workspace_id: body["workspace"],
+        actor_id: body["actor_id"] || "user:roberto",
+        entity_id: body["entity_id"],
+        confidence: body["confidence"] || 1.0,
+        reason: body["reason"]
+      ]
+
+      case OptimalEngine.EntityResolution.decide(id, decision, opts) do
+        {:ok, result} -> json(conn, result)
+        {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+      end
+    end
+  end
+
+  post "/api/entity-relationships" do
+    body = conn.body_params || %{}
+
+    case OptimalEngine.RelationshipRegistry.relate(body) do
+      {:ok, relationship} -> conn |> put_status(201) |> json(relationship)
+      {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+    end
+  end
+
   get "/api/maintenance/corpus-organization" do
     case OptimalEngine.CorpusOrganizer.preview() do
       {:ok, preview} -> json(conn, preview)

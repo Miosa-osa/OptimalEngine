@@ -101,7 +101,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_053_repair_source_package_fts_triggers(),
       migration_054_repair_memory_fts_triggers(),
       migration_055_remove_optional_source_package_fts_triggers(),
-      migration_056_classify_memory_candidate_claims()
+      migration_056_classify_memory_candidate_claims(),
+      migration_057_canonical_entity_spine()
     ]
   end
 
@@ -2959,6 +2960,184 @@ defmodule OptimalEngine.Store.Migrations do
         SET claim_type = 'memory_candidate'
         WHERE json_extract(metadata, '$.memory_intake.path') = 'memory_core_pending_claim'
           AND claim_type != 'memory_candidate'
+        """}
+     ]}
+  end
+
+  defp migration_057_canonical_entity_spine do
+    {57, "canonical entity identity and resolution spine",
+     [
+       {"canonical_entities",
+        """
+        CREATE TABLE IF NOT EXISTS canonical_entities (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL,
+          entity_kind TEXT NOT NULL,
+          canonical_name TEXT NOT NULL,
+          normalized_name TEXT NOT NULL,
+          lifecycle_state TEXT NOT NULL DEFAULT 'active',
+          valid_time_start TEXT,
+          valid_time_end TEXT,
+          transaction_time_start TEXT NOT NULL DEFAULT (datetime('now')),
+          transaction_time_end TEXT,
+          successor_entity_id TEXT,
+          access_policy_id TEXT,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          CHECK (lifecycle_state IN ('active', 'merged', 'split', 'retired'))
+        )
+        """},
+       {"entity_aliases",
+        """
+        CREATE TABLE IF NOT EXISTS entity_aliases (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          entity_id TEXT NOT NULL REFERENCES canonical_entities(id),
+          alias TEXT NOT NULL,
+          normalized_alias TEXT NOT NULL,
+          alias_type TEXT NOT NULL DEFAULT 'name',
+          language TEXT,
+          source_package_id TEXT,
+          confidence REAL NOT NULL DEFAULT 1.0,
+          lifecycle_state TEXT NOT NULL DEFAULT 'active',
+          valid_time_start TEXT,
+          valid_time_end TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(workspace_id, entity_id, normalized_alias, alias_type)
+        )
+        """},
+       {"entity_identifiers",
+        """
+        CREATE TABLE IF NOT EXISTS entity_identifiers (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          entity_id TEXT NOT NULL REFERENCES canonical_entities(id),
+          namespace TEXT NOT NULL,
+          identifier_value TEXT NOT NULL,
+          normalized_value TEXT NOT NULL,
+          verification_status TEXT NOT NULL DEFAULT 'unverified',
+          verified_at TEXT,
+          source_package_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(workspace_id, namespace, normalized_value)
+        )
+        """},
+       {"entity_mentions",
+        """
+        CREATE TABLE IF NOT EXISTS entity_mentions (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          source_package_id TEXT,
+          context_id TEXT,
+          surface_text TEXT NOT NULL,
+          normalized_text TEXT NOT NULL,
+          proposed_kind TEXT,
+          source_span TEXT NOT NULL DEFAULT '{}',
+          extraction_run_id TEXT,
+          resolution_state TEXT NOT NULL DEFAULT 'unresolved',
+          resolved_entity_id TEXT REFERENCES canonical_entities(id),
+          confidence REAL NOT NULL DEFAULT 0.5,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          CHECK (resolution_state IN ('unresolved', 'linked', 'new_entity', 'ambiguous', 'rejected'))
+        )
+        """},
+       {"resolution_decisions",
+        """
+        CREATE TABLE IF NOT EXISTS resolution_decisions (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          mention_id TEXT NOT NULL REFERENCES entity_mentions(id),
+          candidate_entity_ids TEXT NOT NULL DEFAULT '[]',
+          candidate_scores TEXT NOT NULL DEFAULT '{}',
+          decision TEXT NOT NULL,
+          selected_entity_id TEXT REFERENCES canonical_entities(id),
+          actor_id TEXT NOT NULL,
+          policy_version TEXT NOT NULL DEFAULT 'entity-resolution-v1',
+          reason TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"entity_lineage",
+        """
+        CREATE TABLE IF NOT EXISTS entity_lineage (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          predecessor_entity_id TEXT NOT NULL REFERENCES canonical_entities(id),
+          successor_entity_id TEXT NOT NULL REFERENCES canonical_entities(id),
+          operation TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          transaction_time TEXT NOT NULL DEFAULT (datetime('now')),
+          metadata TEXT NOT NULL DEFAULT '{}',
+          CHECK (operation IN ('merge', 'split', 'replace'))
+        )
+        """},
+       {"relation_types",
+        """
+        CREATE TABLE IF NOT EXISTS relation_types (
+          name TEXT PRIMARY KEY,
+          inverse_name TEXT,
+          subject_kinds TEXT NOT NULL DEFAULT '[]',
+          object_kinds TEXT NOT NULL DEFAULT '[]',
+          symmetry TEXT NOT NULL DEFAULT 'asymmetric',
+          temporal_semantics TEXT NOT NULL DEFAULT 'interval',
+          lifecycle_state TEXT NOT NULL DEFAULT 'active',
+          schema_version INTEGER NOT NULL DEFAULT 1,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"claims_subject_entity_id", "ALTER TABLE claims ADD COLUMN subject_entity_id TEXT"},
+       {"claims_object_entity_id", "ALTER TABLE claims ADD COLUMN object_entity_id TEXT"},
+       {"facts_subject_entity_id", "ALTER TABLE facts ADD COLUMN subject_entity_id TEXT"},
+       {"facts_object_entity_id", "ALTER TABLE facts ADD COLUMN object_entity_id TEXT"},
+       {"canonical_entities_lookup_idx",
+        "CREATE INDEX IF NOT EXISTS canonical_entities_lookup_idx ON canonical_entities(workspace_id, entity_kind, normalized_name, lifecycle_state)"},
+       {"entity_aliases_lookup_idx",
+        "CREATE INDEX IF NOT EXISTS entity_aliases_lookup_idx ON entity_aliases(workspace_id, normalized_alias, lifecycle_state)"},
+       {"entity_mentions_queue_idx",
+        "CREATE INDEX IF NOT EXISTS entity_mentions_queue_idx ON entity_mentions(workspace_id, resolution_state, created_at)"},
+       {"resolution_decisions_mention_idx",
+        "CREATE INDEX IF NOT EXISTS resolution_decisions_mention_idx ON resolution_decisions(workspace_id, mention_id, created_at)"},
+       {"claims_entity_idx",
+        "CREATE INDEX IF NOT EXISTS claims_entity_idx ON claims(workspace_id, subject_entity_id, object_entity_id, lifecycle_state)"},
+       {"facts_entity_idx",
+        "CREATE INDEX IF NOT EXISTS facts_entity_idx ON facts(workspace_id, subject_entity_id, object_entity_id, lifecycle_state)"},
+       {"seed_relation_types",
+        """
+        INSERT OR IGNORE INTO relation_types
+          (name, inverse_name, subject_kinds, object_kinds, symmetry, temporal_semantics)
+        VALUES
+          ('member_of', 'has_member', '["person"]', '["organization","team"]', 'asymmetric', 'interval'),
+          ('owns', 'owned_by', '["person","organization"]', '["organization","product","project"]', 'asymmetric', 'interval'),
+          ('works_on', 'has_contributor', '["person","organization"]', '["project","product"]', 'asymmetric', 'interval'),
+          ('related_to', 'related_to', '[]', '[]', 'symmetric', 'interval'),
+          ('supersedes', 'superseded_by', '[]', '[]', 'asymmetric', 'transaction')
+        """},
+       {"backfill_legacy_entity_mentions",
+        """
+        INSERT OR IGNORE INTO entity_mentions
+          (id, workspace_id, context_id, surface_text, normalized_text, proposed_kind,
+           resolution_state, confidence, metadata)
+        SELECT
+          'mention_legacy_' || e.id,
+          c.workspace_id,
+          e.context_id,
+          e.name,
+          lower(trim(e.name)),
+          e.type,
+          'unresolved',
+          0.5,
+          json_object('backfill', 'legacy_entities', 'legacy_entity_id', e.id)
+        FROM entities e
+        JOIN contexts c ON c.id = e.context_id
+        WHERE c.archived_at IS NULL AND trim(e.name) != ''
         """}
      ]}
   end

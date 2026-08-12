@@ -15,7 +15,7 @@ defmodule OptimalEngine.StorageCatalog do
       purpose: "Canonical topology, identity, evidence, truth, and governance",
       technology: "SQLite",
       tables:
-        ~w(organizations workspaces nodes source_packages contexts claims facts memory_objects episodes events workspace_storage_policies storage_provider_configs)
+        ~w(organizations workspaces nodes canonical_entities entity_aliases entity_identifiers entity_mentions resolution_decisions entity_lineage relation_types source_packages contexts claims facts memory_objects episodes events workspace_storage_policies storage_provider_configs)
     },
     %{
       id: "full_text",
