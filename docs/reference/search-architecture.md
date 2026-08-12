@@ -73,3 +73,32 @@ audit_event_id
 
 This makes the agent's context inspectable, refreshable, and auditable.
 
+## Retrieval Strategies
+
+`MemoryCore.RetrievalCoordinator` owns one deep Interface with three strategies:
+
+```text
+tiered          -> authorized governed objects packaged directly
+reconstructive  -> authorized governed objects plus bounded Association Paths
+hybrid          -> tiered packaging with reconstructive evidence in one budget
+```
+
+All strategies accept the same Scope Envelope and return one Context Package.
+
+Reconstructive expansion reads the rebuildable `memory_associations` projection.
+
+Every association retains canonical endpoint IDs, provenance, security labels, partitions, valid time, transaction time, confidence, and precision.
+
+Unauthorized rows are excluded during candidate expansion.
+
+The projection can improve recall but cannot decide truth.
+
+## Reconstruction Learning
+
+Each Reconstruction Run stores ordered steps and exact Association Paths.
+
+Human outcomes credit paths within a workspace and intent.
+
+They do not globally boost every returned object.
+
+Recurring successful paths may create Consolidation Proposals, but those proposals remain review-required and cannot create Facts directly.

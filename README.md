@@ -154,6 +154,42 @@ flowchart LR
   Observation --> Claim
 ```
 
+## Governed Memory Reconstruction
+
+Optimal Engine can reconstruct context instead of relying on a single search result.
+
+Reconstruction is a governed strategy inside the existing Retrieval Coordinator:
+
+```text
+query + Scope Envelope
+  -> authorized Facts, Memory Objects, Episodes, and Relationship Edges
+  -> rebuildable Cue-Tag-Content associations
+  -> bounded Association Paths
+  -> one cited Context Package
+  -> atomic Reconstruction Run and trace
+  -> optional path-specific outcome feedback
+```
+
+The Associative Projection is disposable acceleration.
+
+Facts, Memory Objects, source evidence, and governed relationships remain canonical.
+
+Use the agent wrapper in OptimalOS:
+
+```bash
+.system/oe reconstruct "What changed in the customer commitment?" miosa
+.system/oe memory_feedback <run-id> success "supported the decision" miosa
+.system/oe memory_project miosa
+.system/oe memory_benchmark miosa
+.system/oe optimality architecture miosa --verified
+```
+
+The `optimal` classification is evidence-based.
+
+Architecture classification requires storage integrity, migration parity, governed evaluation thresholds, authorization regressions, a zero-failure full suite, and current documentation.
+
+Whole-system classification additionally requires healthy live operating data.
+
 The same pattern works whether the input is a markdown edit, uploaded file,
 calendar event, API payload, connector sync, tool result, or agent observation.
 

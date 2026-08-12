@@ -103,7 +103,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_055_remove_optional_source_package_fts_triggers(),
       migration_056_classify_memory_candidate_claims(),
       migration_057_canonical_entity_spine(),
-      migration_058_reconstructive_memory()
+      migration_058_reconstructive_memory(),
+      migration_059_governed_reconstruction()
     ]
   end
 
@@ -195,6 +196,110 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS memory_reconstruction_steps_run_idx ON memory_reconstruction_steps(run_id, step_number)"},
        {"memory_consolidation_workspace_idx",
         "CREATE INDEX IF NOT EXISTS memory_consolidation_workspace_idx ON memory_consolidation_proposals(workspace_id, status, created_at)"}
+     ]}
+  end
+
+  defp migration_059_governed_reconstruction do
+    {59, "governed associative reconstruction and optimality assessments",
+     [
+       {"memory_associations",
+        """
+        CREATE TABLE IF NOT EXISTS memory_associations (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL,
+          cue TEXT NOT NULL,
+          normalized_cue TEXT NOT NULL,
+          tag TEXT NOT NULL,
+          from_object_type TEXT NOT NULL,
+          from_object_id TEXT NOT NULL,
+          to_object_type TEXT NOT NULL,
+          to_object_id TEXT NOT NULL,
+          relationship_type TEXT NOT NULL,
+          content TEXT NOT NULL DEFAULT '',
+          source_package_links TEXT NOT NULL DEFAULT '[]',
+          evidence_links TEXT NOT NULL DEFAULT '[]',
+          confidence REAL NOT NULL DEFAULT 0.5,
+          precision_score REAL NOT NULL DEFAULT 0.5,
+          access_policy_id TEXT,
+          security_labels TEXT NOT NULL DEFAULT '[]',
+          partition_ids TEXT NOT NULL DEFAULT '[]',
+          valid_time_start TEXT,
+          valid_time_end TEXT,
+          transaction_time_start TEXT NOT NULL DEFAULT (datetime('now')),
+          transaction_time_end TEXT,
+          projection_version TEXT NOT NULL DEFAULT 'associative-v1',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(workspace_id, normalized_cue, from_object_type, from_object_id,
+                 to_object_type, to_object_id, relationship_type)
+        )
+        """},
+       {"memory_association_paths",
+        """
+        CREATE TABLE IF NOT EXISTS memory_association_paths (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES memory_reconstruction_runs(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL,
+          intent TEXT NOT NULL,
+          cue TEXT NOT NULL,
+          association_ids TEXT NOT NULL DEFAULT '[]',
+          evidence_links TEXT NOT NULL DEFAULT '[]',
+          path_score REAL NOT NULL DEFAULT 0.0,
+          outcome_credit REAL NOT NULL DEFAULT 0.0,
+          policy_version TEXT NOT NULL DEFAULT 'reconstruction-learning-v1',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"memory_path_priors",
+        """
+        CREATE TABLE IF NOT EXISTS memory_path_priors (
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL,
+          intent TEXT NOT NULL,
+          path_fingerprint TEXT NOT NULL,
+          positive_credit REAL NOT NULL DEFAULT 0.0,
+          negative_credit REAL NOT NULL DEFAULT 0.0,
+          observations INTEGER NOT NULL DEFAULT 0,
+          policy_version TEXT NOT NULL DEFAULT 'reconstruction-learning-v1',
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(tenant_id, workspace_id, intent, path_fingerprint, policy_version)
+        )
+        """},
+       {"optimality_assessments",
+        """
+        CREATE TABLE IF NOT EXISTS optimality_assessments (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL,
+          classification TEXT NOT NULL,
+          score REAL NOT NULL,
+          gates TEXT NOT NULL DEFAULT '{}',
+          evidence TEXT NOT NULL DEFAULT '[]',
+          thresholds TEXT NOT NULL DEFAULT '{}',
+          evaluator_version TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          CHECK (classification IN ('optimal', 'qualified', 'degraded', 'unclassified'))
+        )
+        """},
+       {"reconstruction_runs_tenant",
+        "ALTER TABLE memory_reconstruction_runs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"},
+       {"reconstruction_runs_actor",
+        "ALTER TABLE memory_reconstruction_runs ADD COLUMN actor_id TEXT"},
+       {"reconstruction_runs_context_package",
+        "ALTER TABLE memory_reconstruction_runs ADD COLUMN context_package_id TEXT"},
+       {"reconstruction_runs_strategy",
+        "ALTER TABLE memory_reconstruction_runs ADD COLUMN strategy TEXT NOT NULL DEFAULT 'reconstructive'"},
+       {"reconstruction_runs_time_mode",
+        "ALTER TABLE memory_reconstruction_runs ADD COLUMN time_mode TEXT NOT NULL DEFAULT 'current_valid'"},
+       {"memory_associations_lookup_idx",
+        "CREATE INDEX IF NOT EXISTS memory_associations_lookup_idx ON memory_associations(tenant_id, workspace_id, normalized_cue, valid_time_end)"},
+       {"memory_associations_from_idx",
+        "CREATE INDEX IF NOT EXISTS memory_associations_from_idx ON memory_associations(workspace_id, from_object_type, from_object_id)"},
+       {"memory_association_paths_run_idx",
+        "CREATE INDEX IF NOT EXISTS memory_association_paths_run_idx ON memory_association_paths(run_id, created_at)"},
+       {"optimality_assessments_workspace_idx",
+        "CREATE INDEX IF NOT EXISTS optimality_assessments_workspace_idx ON optimality_assessments(workspace_id, created_at)"}
      ]}
   end
 

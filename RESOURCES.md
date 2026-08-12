@@ -12,6 +12,9 @@ Start here:
 - `docs/guides/store-and-layer-reality.md` - stores and layer ownership.
 - `docs/guides/agent-cli-sop.md` - agent CLI operating procedure.
 - `docs/architecture/STORAGE-AND-PROJECTION-MAP.md` - canonical storage/projection map.
+- `CONTEXT.md` - canonical reconstructive-memory and optimality vocabulary.
+- `docs/adr/0001-governed-reconstructive-memory.md` - accepted reconstruction ownership and truth decision.
+- `docs/guides/reconstructive-memory-and-optimality.md` - operating, security, evaluation, and classification guide.
 - `docs/reference/backend-readiness.md` - backend readiness checks.
 - `skills/optimal-engine/README.md` - engine skill docs.
 

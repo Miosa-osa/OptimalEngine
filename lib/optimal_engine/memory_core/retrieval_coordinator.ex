@@ -24,6 +24,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     ContextPackage,
     DerivationLedgerEntry,
     ID,
+    Reconstruction,
     RetrievalPackage,
     ScopeEnvelope,
     Store
@@ -63,8 +64,36 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   def retrieve(query, %ScopeEnvelope{} = scope), do: retrieve(query, scope: scope)
 
   def retrieve(query, opts) when is_binary(query) and is_list(opts) do
+    strategy = strategy(opts)
+
     with {:ok, retrieval_package} <- retrieve_package(query, opts) do
-      build_context_package(retrieval_package, opts)
+      retrieve_with_strategy(retrieval_package, strategy, opts)
+    end
+  end
+
+  defp retrieve_with_strategy(package, strategy, opts)
+       when strategy in [:reconstructive, :hybrid] do
+    with {:ok, reconstructed, trace} <- Reconstruction.enrich(package, opts),
+         {:ok, context_package} <- build_context_package(reconstructed, opts),
+         {:ok, run_id} <- Reconstruction.record(reconstructed, context_package, trace, opts) do
+      {:ok,
+       %{
+         context_package
+         | metadata:
+             context_package.metadata
+             |> Map.put(:reconstruction_run_id, run_id)
+             |> Map.put(:retrieval_strategy, Atom.to_string(strategy))
+       }}
+    end
+  end
+
+  defp retrieve_with_strategy(package, _strategy, opts), do: build_context_package(package, opts)
+
+  defp strategy(opts) do
+    case Keyword.get(opts, :strategy, :tiered) do
+      value when value in [:reconstructive, "reconstructive"] -> :reconstructive
+      value when value in [:hybrid, "hybrid"] -> :hybrid
+      _ -> :tiered
     end
   end
 
@@ -1326,7 +1355,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
   defp assemble_sections(retrieval_package, token_budget) do
     summary = summary_section(retrieval_package)
-    remaining = max(token_budget - estimate_tokens(summary), 0)
+    reconstruction = reconstruction_section(retrieval_package)
+    remaining = max(token_budget - estimate_tokens(summary) - estimate_tokens(reconstruction), 0)
     fact_budget = div(remaining * 6, 10)
 
     {facts_section, fact_tokens, facts_truncated?} =
@@ -1344,10 +1374,19 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       summary: summary,
       facts: facts_section,
       memory: memory_section,
+      reconstruction: reconstruction,
       token_budget: token_budget,
-      total_tokens: estimate_tokens(summary) + fact_tokens + memory_tokens,
+      total_tokens:
+        estimate_tokens(summary) + estimate_tokens(reconstruction) + fact_tokens + memory_tokens,
       truncated?: facts_truncated? or memory_truncated?
     }
+  end
+
+  defp reconstruction_section(retrieval_package) do
+    case get_in(retrieval_package.retrieval_plan, [:reconstruction, :context]) do
+      value when is_binary(value) and value != "" -> "## Reconstructed Evidence\n" <> value
+      _ -> ""
+    end
   end
 
   defp summary_section(retrieval_package) do

@@ -65,6 +65,9 @@ projection. The question is not "where can I put this fastest?" The question is
 | Transcript/OCR/visual observation/embedding reference | `asset_extractions` and typed projection tables | Memory Core / Pipeline | These are governed derived artifacts linked to the raw asset. |
 | Vector, FTS, chunk, rerank, summary acceleration | index/cache/projection tables | Retrieval / Pipeline | Rebuild from canonical sources and derived extraction rows. |
 | Query result for a human or agent | `context_packages` | Retrieval / Context | Context is an authorized package, not random chunks. |
+| Cue-Tag-Content association index | `memory_associations` | Retrieval / Context | Rebuildable from governed objects and never canonical truth. |
+| Reconstruction execution and path learning | reconstruction run, step, path, outcome, and prior tables | Retrieval / Evaluation | Audit and routing evidence linked to one Context Package. |
+| Readiness classification | `optimality_assessments` | Evaluation / Recovery | Versioned evidence against explicit thresholds. |
 | Task-local working state | `active_memory_pools`, observations, loaded context links | Active Memory Pools | Humans and agents need scoped RAM without corrupting durable truth. |
 | Repeated execution evidence | `workflow_traces`, execution records | Workflow / Skill Runtime | Workflows should be learned from evidence-linked work. |
 | Reusable procedure | `procedural_memory_objects`, `skill_packages` | Workflow / Skill Runtime | A Skill Package is validated operational knowledge, not a prompt file. |
@@ -121,7 +124,7 @@ The storage substrate does not decide meaning. Domain layers do.
 | Source Intake | preserved input, source package creation, raw artifact capture | `source_packages`, raw artifact records |
 | Signal Pipeline | signal classification, multimodal parsing, compatibility search rows | signal metadata, contexts, chunks, classification records |
 | Memory Core | claims, facts, memory objects, evidence edges, derivation ledger, temporal state | memory core tables |
-| Retrieval / Context | query plans, authorization envelope, context package assembly, stale package refresh | context packages, retrieval audit, projection links |
+| Retrieval / Context | query plans, authorization envelope, tiered or reconstructive strategy, associative projection, context package assembly, stale package refresh | context packages, reconstruction traces, association paths, retrieval audit, projection links |
 | Active Memory Pools | task-scoped working state for humans and agents | pools, observations, loaded context links |
 | Workflow / Skill Runtime | traces, generalized workflows, procedures, skill packages, execution records | workflow and skill tables |
 | Tool / Model Governance | registered tools, MCP/API/script/model calls, schemas, grants, call audit | tool/model definitions and call runs |
@@ -192,6 +195,8 @@ agent tool result
 Markdown file directly becomes truth without source/provenance.
 Agent writes Facts directly instead of Claims/observations.
 Vector search becomes the final authority.
+Associative projection rows become durable truth.
+Reconstruction bypasses Scope Envelope or returns loose evidence instead of a Context Package.
 Tool call output bypasses governance.
 App UI invents a second data model.
 Cache/index rows are treated as canonical memory.

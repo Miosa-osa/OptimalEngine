@@ -15,6 +15,7 @@ defmodule OptimalEngine.MemoryCore.Store do
     DerivationLedgerEntry,
     Episode,
     Fact,
+    ID,
     JSON,
     MemoryDetailObject,
     MemoryObject,
@@ -1970,6 +1971,233 @@ defmodule OptimalEngine.MemoryCore.Store do
       policy_version: policy_version,
       metadata: decode_map(metadata)
     }
+  end
+
+  @doc "Atomically persists a terminal Reconstruction Run, its ordered trace, and association paths."
+  @spec record_reconstruction(map(), [map()], [map()]) :: :ok | {:error, term()}
+  def record_reconstruction(run, steps, paths) do
+    Store.transaction(fn txn ->
+      run_sql = """
+      INSERT INTO memory_reconstruction_runs (
+        id, tenant_id, workspace_id, actor_id, query, cues, status, stop_reason,
+        step_budget, token_budget, evidence, citations, answer_context,
+        confidence, metadata, completed_at, context_package_id, strategy, time_mode
+      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+      """
+
+      run_params = [
+        run.id,
+        run.tenant_id,
+        run.workspace_id,
+        run.actor_id,
+        run.query,
+        JSON.list(run.cues),
+        run.status,
+        run.stop_reason,
+        run.step_budget,
+        run.token_budget,
+        JSON.list(run.evidence),
+        JSON.list(run.citations),
+        run.answer_context,
+        run.confidence,
+        JSON.map(run.metadata),
+        run.completed_at,
+        run.context_package_id,
+        run.strategy,
+        run.time_mode
+      ]
+
+      with {:ok, _} <- Store.txn_execute(txn, run_sql, run_params),
+           :ok <- insert_reconstruction_steps(txn, run.id, steps),
+           :ok <- insert_association_paths(txn, run, paths) do
+        {:ok, :ok}
+      end
+    end)
+    |> case do
+      {:ok, :ok} -> :ok
+      error -> error
+    end
+  end
+
+  @doc "Gets a Reconstruction Run only inside its tenant and workspace scope."
+  @spec get_reconstruction_run(String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def get_reconstruction_run(id, tenant_id, workspace_id) do
+    sql = """
+    SELECT id, tenant_id, workspace_id, actor_id, query, status, stop_reason,
+           evidence, citations, confidence, context_package_id, strategy,
+           time_mode, metadata, created_at, completed_at
+    FROM memory_reconstruction_runs
+    WHERE id = ?1 AND tenant_id = ?2 AND workspace_id = ?3
+    """
+
+    case Store.raw_query(sql, [id, tenant_id, workspace_id]) do
+      {:ok,
+       [
+         [
+           run_id,
+           tenant,
+           workspace,
+           actor,
+           query,
+           status,
+           reason,
+           evidence,
+           citations,
+           confidence,
+           package_id,
+           strategy,
+           time_mode,
+           metadata,
+           created,
+           completed
+         ]
+       ]} ->
+        {:ok,
+         %{
+           id: run_id,
+           tenant_id: tenant,
+           workspace_id: workspace,
+           actor_id: actor,
+           query: query,
+           status: status,
+           stop_reason: reason,
+           evidence: decode_list(evidence),
+           citations: decode_list(citations),
+           confidence: confidence,
+           context_package_id: package_id,
+           strategy: strategy,
+           time_mode: time_mode,
+           metadata: decode_map(metadata),
+           created_at: created,
+           completed_at: completed
+         }}
+
+      {:ok, []} ->
+        {:error, :run_not_found}
+
+      error ->
+        error
+    end
+  end
+
+  @doc "Records scoped outcome credit against the exact paths used by a Reconstruction Run."
+  @spec record_reconstruction_outcome(
+          map(),
+          String.t(),
+          float(),
+          String.t() | nil,
+          String.t() | nil
+        ) :: :ok | {:error, term()}
+  def record_reconstruction_outcome(run, outcome, score, notes, actor_id) do
+    Store.transaction(fn txn ->
+      outcome_id = ID.random_id("reconout")
+
+      with {:ok, _} <-
+             Store.txn_execute(
+               txn,
+               "INSERT INTO memory_reconstruction_outcomes (id, run_id, workspace_id, outcome, score, notes, actor_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+               [outcome_id, run.id, run.workspace_id, outcome, score, notes, actor_id]
+             ),
+           {:ok, paths} <-
+             Store.txn_query(
+               txn,
+               "SELECT id, intent, association_ids FROM memory_association_paths WHERE run_id = ?1",
+               [run.id]
+             ),
+           :ok <- credit_paths(txn, run, paths, outcome, score) do
+        {:ok, :ok}
+      end
+    end)
+    |> case do
+      {:ok, :ok} -> :ok
+      error -> error
+    end
+  end
+
+  defp insert_reconstruction_steps(txn, run_id, steps) do
+    Enum.reduce_while(steps, :ok, fn step, :ok ->
+      id = ID.content_id("reconstruction_step", [run_id, ":", to_string(step.step_number)])
+
+      params = [
+        id,
+        run_id,
+        step.step_number,
+        step.action,
+        step.cue,
+        JSON.list(step.candidates),
+        JSON.list(step.selected_evidence),
+        step.accumulated_score,
+        step.token_count
+      ]
+
+      case Store.txn_execute(
+             txn,
+             "INSERT INTO memory_reconstruction_steps (id, run_id, step_number, action, cue, candidates, selected_evidence, accumulated_score, token_count) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+             params
+           ) do
+        {:ok, _} -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp insert_association_paths(txn, run, paths) do
+    Enum.reduce_while(paths, :ok, fn path, :ok ->
+      id =
+        ID.content_id("association_path", [
+          run.id,
+          ":",
+          path.cue,
+          ":",
+          JSON.list(path.association_ids)
+        ])
+
+      params = [
+        id,
+        run.id,
+        run.workspace_id,
+        path.intent,
+        path.cue,
+        JSON.list(path.association_ids),
+        JSON.list(path.evidence_links),
+        path.path_score
+      ]
+
+      case Store.txn_execute(
+             txn,
+             "INSERT INTO memory_association_paths (id, run_id, workspace_id, intent, cue, association_ids, evidence_links, path_score) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+             params
+           ) do
+        {:ok, _} -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp credit_paths(txn, run, paths, outcome, score) do
+    {positive, negative} = if outcome == "failure", do: {0.0, max(score, 1.0)}, else: {score, 0.0}
+
+    Enum.reduce_while(paths, :ok, fn [path_id, intent, association_ids], :ok ->
+      fingerprint = :crypto.hash(:sha256, association_ids) |> Base.encode16(case: :lower)
+
+      with {:ok, _} <-
+             Store.txn_execute(
+               txn,
+               "UPDATE memory_association_paths SET outcome_credit = ?1 WHERE id = ?2",
+               [positive - negative, path_id]
+             ),
+           {:ok, _} <-
+             Store.txn_execute(
+               txn,
+               "INSERT INTO memory_path_priors (tenant_id, workspace_id, intent, path_fingerprint, positive_credit, negative_credit, observations) VALUES (?1,?2,?3,?4,?5,?6,1) ON CONFLICT(tenant_id, workspace_id, intent, path_fingerprint, policy_version) DO UPDATE SET positive_credit = positive_credit + excluded.positive_credit, negative_credit = negative_credit + excluded.negative_credit, observations = observations + 1, updated_at = datetime('now')",
+               [run.tenant_id, run.workspace_id, intent, fingerprint, positive, negative]
+             ) do
+        {:cont, :ok}
+      else
+        error -> {:halt, error}
+      end
+    end)
   end
 
   defp decode_map(nil), do: %{}

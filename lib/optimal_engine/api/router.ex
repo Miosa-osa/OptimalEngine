@@ -2647,68 +2647,33 @@ defmodule OptimalEngine.API.Router do
     else
       workspace_id = Map.get(body, "workspace", "default")
 
-      tier_budgets =
-        case Map.get(body, "tier_budgets") do
-          %{"l0" => l0, "l1" => l1, "l2" => l2} ->
-            [
-              tier_budgets: %{
-                l0: parse_int(l0, 3_000),
-                l1: parse_int(l1, 10_000),
-                l2: parse_int(l2, 50_000)
-              }
-            ]
+      opts = governed_retrieval_opts(body, workspace_id, :hybrid)
 
-          _ ->
-            []
-        end
+      case OptimalEngine.MemoryCore.retrieve(query, opts) do
+        {:ok, package} ->
+          sections = package.sections
 
-      assemble_opts =
-        tier_budgets ++
-          [
-            workspace_id: workspace_id
-          ]
+          json(conn, %{
+            query: query,
+            workspace_id: workspace_id,
+            l0: Map.get(sections, :summary, ""),
+            l1: Map.get(sections, :facts, ""),
+            l2: Map.get(sections, :memory, "") <> Map.get(sections, :reconstruction, ""),
+            l3: "",
+            total_tokens: Map.get(sections, :total_tokens, 0),
+            sources: package.source_package_links,
+            context_package: OptimalEngine.MemoryCore.ContextPackage.to_map(package),
+            reconstruction: Map.get(package.retrieval_plan, :reconstruction, %{}),
+            mcts_metadata: %{
+              candidate_count: length(package.returned_object_links),
+              selected_sources: package.returned_object_links,
+              mcts_enabled: false
+            }
+          })
 
-      {:ok, assembled} =
-        OptimalEngine.Retrieval.ContextAssembler.assemble(query, assemble_opts)
-
-      reconstruction =
-        case OptimalEngine.MemoryReconstructor.reconstruct(query,
-               workspace_id: workspace_id,
-               step_budget: parse_int(body["reconstruction_steps"], 4),
-               token_budget: parse_int(body["reconstruction_tokens"], 8_000)
-             ) do
-          {:ok, result} -> result
-          {:error, reason} -> %{status: "unavailable", error: inspect(reason)}
-        end
-
-      mcts_meta =
-        assembled.search_scores
-        |> Enum.map(fn s ->
-          %{
-            id: s[:id],
-            title: s[:title],
-            score: s[:score],
-            uri: s[:uri],
-            node: s[:node]
-          }
-        end)
-
-      json(conn, %{
-        query: query,
-        workspace_id: workspace_id,
-        l0: assembled.l0,
-        l1: assembled.l1,
-        l2: assembled.l2,
-        l3: "",
-        total_tokens: assembled.total_tokens,
-        sources: assembled.sources,
-        reconstruction: reconstruction,
-        mcts_metadata: %{
-          candidate_count: length(assembled.search_scores),
-          selected_sources: mcts_meta,
-          mcts_enabled: OptimalEngine.Retrieval.MCTS.enabled?()
-        }
-      })
+        {:error, reason} ->
+          send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+      end
     end
   end
 
@@ -2719,15 +2684,11 @@ defmodule OptimalEngine.API.Router do
     if not (is_binary(query) and String.trim(query) != "") do
       send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
     else
-      opts = [
-        workspace_id: Map.get(body, "workspace", "default"),
-        step_budget: parse_int(body["step_budget"], 4),
-        token_budget: parse_int(body["token_budget"], 8_000),
-        limit: parse_int(body["limit"], 8)
-      ]
+      workspace = Map.get(body, "workspace", "default")
+      opts = governed_retrieval_opts(body, workspace, :reconstructive)
 
-      case OptimalEngine.MemoryReconstructor.reconstruct(query, opts) do
-        {:ok, result} -> json(conn, result)
+      case OptimalEngine.MemoryCore.retrieve(query, opts) do
+        {:ok, result} -> json(conn, OptimalEngine.MemoryCore.ContextPackage.to_map(result))
         {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
       end
     end
@@ -2737,16 +2698,21 @@ defmodule OptimalEngine.API.Router do
     body = conn.body_params || %{}
     outcome = Map.get(body, "outcome", "")
 
+    scope =
+      OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
+        tenant_id: Map.get(body, "tenant_id", "default"),
+        workspace_id: Map.get(body, "workspace", "default"),
+        actor_id: Map.get(body, "actor_id", "user:roberto"),
+        permissions: Map.get(body, "permissions", [])
+      })
+
     opts =
-      [
-        notes: body["notes"],
-        actor_id: Map.get(body, "actor_id", "user:roberto")
-      ]
+      [notes: body["notes"]]
       |> then(fn acc ->
         if is_number(body["score"]), do: Keyword.put(acc, :score, body["score"]), else: acc
       end)
 
-    case OptimalEngine.MemoryReconstructor.feedback(id, outcome, opts) do
+    case OptimalEngine.MemoryCore.ReconstructionLearning.record_outcome(id, outcome, scope, opts) do
       {:ok, result} -> json(conn, result)
       {:error, :run_not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "run not found"}))
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2756,8 +2722,14 @@ defmodule OptimalEngine.API.Router do
   post "/api/memory/consolidate" do
     body = conn.body_params || %{}
 
-    case OptimalEngine.MemoryReconstructor.consolidate(
-           workspace_id: Map.get(body, "workspace", "default"),
+    scope =
+      OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
+        tenant_id: Map.get(body, "tenant_id", "default"),
+        workspace_id: Map.get(body, "workspace", "default"),
+        actor_id: Map.get(body, "actor_id", "user:roberto")
+      })
+
+    case OptimalEngine.MemoryCore.ReconstructionLearning.propose_consolidation(scope,
            minimum_observations: parse_int(body["minimum_observations"], 2)
          ) do
       {:ok, proposals} -> json(conn, %{proposals: proposals, count: length(proposals)})
@@ -2765,13 +2737,25 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  get "/api/memory/reconstruction/quality" do
-    workspace = conn.params["workspace"] || "default"
+  post "/api/memory/associations/rebuild" do
+    body = conn.body_params || %{}
 
-    case OptimalEngine.MemoryReconstructor.quality(workspace_id: workspace) do
+    scope =
+      OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
+        tenant_id: Map.get(body, "tenant_id", "default"),
+        workspace_id: Map.get(body, "workspace", "default"),
+        actor_id: Map.get(body, "actor_id", "user:roberto")
+      })
+
+    case OptimalEngine.MemoryCore.AssociativeProjection.rebuild(scope) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
+  end
+
+  get "/api/memory/reconstruction/quality" do
+    workspace = conn.params["workspace"] || "default"
+    json(conn, reconstruction_quality(workspace))
   end
 
   post "/api/memory/reconstruction/benchmark" do
@@ -2785,14 +2769,44 @@ defmodule OptimalEngine.API.Router do
       ])
 
     if is_list(questions) and Enum.all?(questions, &is_binary/1) do
+      cases =
+        Enum.with_index(questions, 1)
+        |> Enum.map(fn {question, index} -> %{case_id: "live-#{index}", question: question} end)
+
       {:ok, result} =
-        OptimalEngine.MemoryReconstructor.benchmark(questions,
-          workspace_id: Map.get(body, "workspace", "miosa")
+        OptimalEngine.ReconstructionEvaluation.run(cases,
+          workspace_id: Map.get(body, "workspace", "default:miosa"),
+          tenant_id: Map.get(body, "tenant_id", "default"),
+          actor_id: Map.get(body, "actor_id", "user:roberto")
         )
 
       json(conn, result)
     else
       send_resp(conn, 400, Jason.encode!(%{error: "questions must be a list of strings"}))
+    end
+  end
+
+  post "/api/optimality/classify" do
+    body = conn.body_params || %{}
+
+    supplied_verification = Map.get(body, "verification", %{})
+
+    verification = %{
+      authorization_tests: supplied_verification["authorization_tests"],
+      context_health_score: supplied_verification["context_health_score"],
+      documentation_current: supplied_verification["documentation_current"],
+      full_test_failures: supplied_verification["full_test_failures"]
+    }
+
+    case OptimalEngine.Optimality.classify(
+           tenant_id: Map.get(body, "tenant_id", "default"),
+           workspace_id: Map.get(body, "workspace", "default:miosa"),
+           assessment_scope: Map.get(body, "assessment_scope", "system"),
+           verification: verification,
+           evidence: Map.get(body, "evidence", [])
+         ) do
+      {:ok, result} -> json(conn, result)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
@@ -2803,6 +2817,37 @@ defmodule OptimalEngine.API.Router do
   # ---------------------------------------------------------------------------
   # Helpers: response
   # ---------------------------------------------------------------------------
+
+  defp governed_retrieval_opts(body, workspace_id, strategy) do
+    [
+      tenant_id: Map.get(body, "tenant_id", "default"),
+      workspace_id: workspace_id,
+      actor_id: Map.get(body, "actor_id", "user:roberto"),
+      permissions: Map.get(body, "permissions", []),
+      allowed_partitions: Map.get(body, "allowed_partitions", []),
+      allowed_security_labels: Map.get(body, "allowed_security_labels", []),
+      time_mode: Map.get(body, "time_mode", "current_valid"),
+      strategy: strategy,
+      limit: parse_int(body["limit"], 10),
+      token_budget: parse_int(body["token_budget"] || body["reconstruction_tokens"], 8_000),
+      reconstruction_steps: parse_int(body["step_budget"] || body["reconstruction_steps"], 4),
+      reconstruction_tokens: parse_int(body["token_budget"] || body["reconstruction_tokens"], 8_000)
+    ]
+  end
+
+  defp reconstruction_quality(workspace) do
+    scope =
+      OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
+        tenant_id: "default",
+        workspace_id: workspace,
+        actor_id: "system:quality"
+      })
+
+    case OptimalEngine.MemoryCore.ReconstructionLearning.measure(scope) do
+      {:ok, result} -> result
+      {:error, reason} -> %{workspace_id: workspace, error: inspect(reason)}
+    end
+  end
 
   defp json(conn, data) do
     body = Jason.encode!(data)
