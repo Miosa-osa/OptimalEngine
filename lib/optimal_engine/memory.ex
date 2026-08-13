@@ -61,7 +61,7 @@ defmodule OptimalEngine.Memory do
   def create(attrs) do
     case Versioned.create(attrs) do
       {:ok, mem} = ok ->
-        maybe_create_pending_claim(attrs, mem)
+        maybe_create_pending_claim(attrs, mem, "create")
         maybe_promote_to_wiki(mem)
         ok
 
@@ -70,7 +70,7 @@ defmodule OptimalEngine.Memory do
     end
   end
 
-  defp maybe_create_pending_claim(%{content: content} = attrs, mem)
+  defp maybe_create_pending_claim(%{content: content} = attrs, mem, operation)
        when is_binary(content) and content != "" do
     gate = %EncodingGate{
       should_encode: true,
@@ -78,19 +78,20 @@ defmodule OptimalEngine.Memory do
       novelty: 1.0,
       salience: 1.0,
       prediction_error: 0.0,
-      reason: "memory_create_bridge"
+      reason: "memory_#{operation}_bridge"
     }
 
     source_package =
       memory_source_package(content, attrs, [], gate, true,
-        source_type: "versioned_memory",
+        source_type:
+          if(operation == "create", do: "versioned_memory", else: "versioned_memory_update"),
         source_uri: "memory://#{mem.id}",
         metadata: %{"versioned_memory_id" => mem.id}
       )
 
     claim_opts = [
-      actor_id: "system:memory-create-bridge",
-      extracted_by: "system:memory-create-bridge",
+      actor_id: "system:memory-#{operation}-bridge",
+      extracted_by: "system:memory-#{operation}-bridge",
       claim_type: "memory_candidate",
       claim_text: content,
       metadata: governed_memory_metadata(attrs, gate, true, %{"versioned_memory_id" => mem.id})
@@ -101,11 +102,11 @@ defmodule OptimalEngine.Memory do
         :ok
 
       {:error, reason} ->
-        Logger.warning("Memory.create pending claim bridge failed: #{inspect(reason)}")
+        Logger.warning("Memory.#{operation} pending claim bridge failed: #{inspect(reason)}")
     end
   end
 
-  defp maybe_create_pending_claim(_attrs, _mem), do: :ok
+  defp maybe_create_pending_claim(_attrs, _mem, _operation), do: :ok
 
   @doc """
   Governed memory intake for agent-facing writes.
@@ -272,7 +273,23 @@ defmodule OptimalEngine.Memory do
   is_latest=false, adds `:updates` relation).
   """
   @spec update(String.t(), map()) :: {:ok, versioned()} | {:error, term()}
-  defdelegate update(id, attrs), to: Versioned
+  def update(id, attrs) do
+    case Versioned.update(id, attrs) do
+      {:ok, mem} = ok ->
+        claim_attrs =
+          attrs
+          |> Map.put(:content, mem.content)
+          |> Map.put_new(:workspace_id, mem.workspace_id)
+          |> Map.put_new(:tenant_id, mem.tenant_id)
+          |> Map.put_new(:audience, mem.audience)
+
+        maybe_create_pending_claim(claim_attrs, mem, "update")
+        ok
+
+      other ->
+        other
+    end
+  end
 
   @doc """
   Creates a child memory with `:extends` relation. Source keeps is_latest.

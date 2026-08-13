@@ -79,7 +79,12 @@ def behavioral_exact_vote(row: dict[str, Any]) -> dict[str, str]:
     if row.get("expected_abstention"):
         abstained = no_result or any(
             marker in normalize(answer)
-            for marker in ("do not know", "insufficient evidence", "no results")
+            for marker in (
+                "do not know",
+                "insufficient evidence",
+                "no reviewed evidence",
+                "no results",
+            )
         )
         reason = (
             "Abstention matched expectation."

@@ -1,0 +1,90 @@
+{
+  "benchmark_version": "system-benchmark-v1",
+  "endpoints": [
+    {
+      "concurrency": 10,
+      "elapsed_seconds": 0.4013188339304179,
+      "endpoint": "rag-governed-tiered",
+      "error_rate": 0.64,
+      "errors": [
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests"
+      ],
+      "failures": 320,
+      "gates": {
+        "error_rate": false,
+        "p95_ms": true,
+        "p99_ms": true
+      },
+      "latency_ms": {
+        "max": 28.254874981939793,
+        "mean": 7.828144826227799,
+        "min": 0.34899997990578413,
+        "p50": 2.750334097072482,
+        "p95": 19.153375062160194,
+        "p99": 25.310707977041602
+      },
+      "passed": false,
+      "requests": 500,
+      "response_megabytes": 0.721531,
+      "successes": 180,
+      "throughput_rps": 1245.8921877728067,
+      "warmup_requests": 25
+    },
+    {
+      "concurrency": 10,
+      "elapsed_seconds": 0.28553350002039224,
+      "endpoint": "rag-governed-reconstructive",
+      "error_rate": 0.984,
+      "errors": [
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests",
+        "HTTPError: HTTP Error 429: Too Many Requests"
+      ],
+      "failures": 492,
+      "gates": {
+        "error_rate": false,
+        "p95_ms": true,
+        "p99_ms": true
+      },
+      "latency_ms": {
+        "max": 224.72562501206994,
+        "mean": 4.4571260896045715,
+        "min": 0.4130000015720725,
+        "p50": 1.6790840309113264,
+        "p95": 3.687708987854421,
+        "p99": 143.76808400265872
+      },
+      "passed": false,
+      "requests": 500,
+      "response_megabytes": 0.034927,
+      "successes": 8,
+      "throughput_rps": 1751.108013470542,
+      "warmup_requests": 25
+    }
+  ],
+  "engine_url": "http://127.0.0.1:4200",
+  "environment": {
+    "cpu_count": 28,
+    "platform": "macOS-26.5-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "passed": false,
+  "profile": "interactive",
+  "workspace": "default:miosa"
+}

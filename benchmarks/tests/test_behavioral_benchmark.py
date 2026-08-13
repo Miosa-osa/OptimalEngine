@@ -61,6 +61,14 @@ class BehavioralBenchmarkTest(unittest.TestCase):
 
         self.assertEqual("correct", vote["label"])
 
+    def test_updates_are_emitted_as_one_version_chain(self):
+        rows, _question = generator.build_case(
+            0, "knowledge_update", 100, random.Random(1)
+        )
+
+        self.assertEqual(["create", "update"], [row["operation"] for row in rows])
+        self.assertEqual(rows[0]["conversation_id"], rows[1]["conversation_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

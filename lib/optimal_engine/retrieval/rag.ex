@@ -104,6 +104,8 @@ defmodule OptimalEngine.Retrieval.RAG do
       across tenants
     * `:context_package` — when `true`, answer with a governed Context Package
       from the Memory Core Retrieval Coordinator (see above)
+    * `:strategy` — `:tiered`, `:reconstructive`, or `:hybrid` for governed
+      Context Package retrieval; ignored by the compatibility path
     * `:actor_id`, `:allowed_partitions`, `:allowed_security_labels` —
       authorization scope forwarded to the coordinator on the
       `context_package: true` path (actor defaults to `receiver.id`)
@@ -225,6 +227,9 @@ defmodule OptimalEngine.Retrieval.RAG do
         limit: Keyword.get(opts, :hybrid_limit, @default_hybrid_limit),
         token_budget: Keyword.get(opts, :token_budget, receiver.token_budget)
       ]
+      |> maybe_put(:strategy, Keyword.get(opts, :strategy))
+      |> maybe_put(:reconstruction_steps, Keyword.get(opts, :reconstruction_steps))
+      |> maybe_put(:reconstruction_tokens, Keyword.get(opts, :reconstruction_tokens))
 
     case RetrievalCoordinator.retrieve(query, coordinator_opts) do
       {:ok, package} ->

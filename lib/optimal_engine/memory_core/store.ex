@@ -896,6 +896,26 @@ defmodule OptimalEngine.MemoryCore.Store do
     action_class = Map.get(claim, :action_class) || Map.get(claim, "action_class")
     object_anchor = Map.get(claim, :object_anchor) || Map.get(claim, "object_anchor")
 
+    if Enum.all?([subject_anchor, action_class, object_anchor], &is_nil/1) do
+      {:ok, []}
+    else
+      do_list_current_facts_for_claim(
+        workspace_id,
+        subject_anchor,
+        action_class,
+        object_anchor,
+        opts
+      )
+    end
+  end
+
+  defp do_list_current_facts_for_claim(
+         workspace_id,
+         subject_anchor,
+         action_class,
+         object_anchor,
+         opts
+       ) do
     {tenant_clause, params} =
       tenant_scope(opts, [workspace_id, subject_anchor, action_class, object_anchor])
 

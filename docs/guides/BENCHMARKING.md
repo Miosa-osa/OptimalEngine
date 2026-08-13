@@ -71,9 +71,23 @@ The repository already contains deterministic 500-question and 700-question synt
 They test decision, owner, reason, numeric, and open-question recall.
 
 `generate_behavioral_memory_dataset.py` adds original, deterministic GoodAI-shaped behavioral cases without redistributing GoodAI data.
-Its smoke baseline on 2026-08-13 improved from 28.6% to 57.1% after natural-language FTS normalization.
-Delayed recall, prospective memory, trigger-response, and spatial reasoning passed.
-Knowledge updates, conflicting evidence, and abstention remain failing release gates until lifecycle-aware retrieval and evidence thresholds are implemented.
+Version 2 creates real updates instead of storing contradictory rows as unrelated memories.
+The governed seeder promotes review-required Claims and explicitly supersedes the prior accepted Fact.
+
+The 2026-08-13 progression exposed and then fixed several real defects:
+
+1. Raw Memory search improved from 28.6% to 57.1% after natural-language FTS normalization.
+2. Correct lifecycle seeding raised raw Memory search to 100% on the seven-case smoke set.
+3. Governed tiered retrieval scored 14.3%, showing that fast lexical retrieval alone was not enough for this workload.
+4. Governed reconstructive retrieval scored 100% on the same smoke set at a 43 ms P95.
+5. The first 21-case multi-span run scored 57.1% because oversized evidence was dropped.
+6. Evidence clipping raised it to 85.7%, but reconstruction could still consume the whole Context Package budget.
+7. Reserving budget for canonical Facts raised it to 90.5%, but graph hydration reversed relevance order.
+8. Preserving traversal rank and prioritizing distinctive cues produced 100% across 50, 500, and 5,000 filler-token spans at a 31 ms P95.
+
+This progression matters more than the final perfect number.
+It proves the benchmark can locate architectural failures and verify their fixes.
+The dataset remains small and deterministic, so it is a regression gate rather than a universal claim of optimality.
 
 Add four versioned dataset adapters next:
 
@@ -110,6 +124,30 @@ python3 benchmarks/scripts/system_benchmark.py \
   --out benchmarks/results/system-smoke.json
 ```
 
+The system harness reports attempted requests per second and successful requests per second separately.
+Latency percentiles include successful requests only, so fast 429 rejections cannot make an overloaded endpoint look healthy.
+Use `--request-rate` for paced sustained load and omit it for saturation testing.
+
+Measure cold-first-request behavior separately:
+
+```bash
+python3 benchmarks/scripts/system_benchmark.py \
+  --profile smoke \
+  --warmup 0 \
+  --workspace default:miosa \
+  --out benchmarks/results/system-cold-smoke.json
+```
+
+Run authorization and governance regressions in an isolated test database:
+
+```bash
+python3 benchmarks/scripts/security_benchmark.py \
+  --out benchmarks/results/security-regression.json
+```
+
+The security benchmark fails closed if the test process crashes or its ExUnit summary cannot be parsed.
+It covers tenant, workspace, label, partition, crowd-out, temporal, supersession, and reconstructive-expansion boundaries.
+
 Use `interactive` for release qualification and `soak` for dedicated stability runs.
 Do not run the soak profile casually against a shared live Engine.
 
@@ -127,6 +165,11 @@ The initial release gates are deliberately strict on safety and provisional on l
 - Search P95: at most 300 ms at concurrency 10
 - RAG P95: at most 1,800 ms at concurrency 10
 - Assemble and reconstruct P95: at most 2,200 ms at concurrency 10
+
+The release report must show both governed retrieval strategies.
+Tiered retrieval is the low-latency path.
+Reconstructive retrieval is the deeper association path.
+A speed win cannot compensate for a behavioral-quality failure, and a quality win cannot compensate for leakage.
 
 Thresholds must be revised from measured baselines and recorded hardware.
 They must never be relaxed merely to turn a failing run green.

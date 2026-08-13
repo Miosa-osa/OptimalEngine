@@ -155,7 +155,7 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
 
           true ->
             with {:ok, fact} <-
-                   Store.get_fact(fact_id,
+                   Store.get_fact(claim.workspace_id, fact_id,
                      tenant_id: claim.tenant_id,
                      workspace_id: claim.workspace_id
                    ),
@@ -257,6 +257,11 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
       valid_time_start: Keyword.get(opts, :valid_time_start),
       valid_time_end: Keyword.get(opts, :valid_time_end),
       stale_after: Keyword.get(opts, :stale_after),
+      supersedes:
+        case Map.get(policy, :superseded_fact) do
+          nil -> nil
+          fact -> [fact.id]
+        end,
       metadata: promotion_metadata(opts, policy)
     ]
     |> compact_nil()

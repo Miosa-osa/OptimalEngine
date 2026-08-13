@@ -166,6 +166,21 @@ defmodule OptimalEngine.Retrieval.RAGTest do
       assert result.trace.n_delivered >= 1
       refute result.trace.wiki_hit?
     end
+
+    test "context_package forwards the requested retrieval strategy" do
+      workspace_id = "rag-reconstructive-#{System.unique_integer([:positive])}"
+
+      {:ok, result} =
+        RAG.ask("launch",
+          workspace_id: workspace_id,
+          context_package: true,
+          strategy: :reconstructive,
+          actor_id: "agent:rag-test"
+        )
+
+      assert result.context_package.metadata.retrieval_strategy == "reconstructive"
+      assert is_binary(result.context_package.metadata.reconstruction_run_id)
+    end
   end
 
   describe "ask/2 — tenant-derived workspace scope" do

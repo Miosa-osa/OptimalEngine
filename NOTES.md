@@ -20,3 +20,7 @@
 - 2026-07-20: BusinessOS modules use scoped APIs and logical store contracts instead of physical databases, so local, self-hosted, cloud, and Fractal enterprise providers can change without creating a second product data model.
 - 2026-07-20: Fractal Computing is an enterprise partner substrate for governed AI against a synchronized digital twin and is never a default local dependency or an unreviewed write path.
 - 2026-08-13: Natural-language memory queries must normalize stop words and use ranked discriminating-term matches because raw FTS5 whitespace semantics require every token and silently miss otherwise valid memories.
+- 2026-08-13: Unanchored Claims cannot participate in global conflict matching because missing subject, action, and object anchors otherwise make every accepted Fact appear contradictory.
+- 2026-08-13: Updating a versioned Memory must create a new review-required Claim, and promotion must explicitly supersede the prior accepted Fact.
+- 2026-08-13: Reconstructive recall must preserve traversal rank, prioritize distinctive cues, and reserve Context Package budget for canonical Facts so graph expansion cannot crowd correct evidence out.
+- 2026-08-13: Behavioral benchmark seeding must honor API rate limits and support recorded-run resume because governed promotion creates several writes per case.

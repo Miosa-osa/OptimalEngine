@@ -31,7 +31,7 @@ against a gold answer.
 Start the engine first:
 
 ```bash
-iex -S mix
+../.system/oe start
 ```
 
 Then run the sample questions without a model judge:
@@ -114,6 +114,21 @@ python3 benchmarks/scripts/system_benchmark.py \
   --workspace default:miosa \
   --out benchmarks/results/system-smoke.json
 ```
+
+Set `--warmup 0` to include cold-first-request cost.
+Use the profile warmup for steady-state measurements.
+Set `--request-rate 5` for a paced sustained workload.
+Omit it for an intentional saturation burst.
+Latency percentiles use successful requests only, while 429 responses remain visible in the error rate, status counts, and rate-limited request count.
+
+Run the isolated security and governance benchmark against the test database:
+
+```bash
+python3 benchmarks/scripts/security_benchmark.py \
+  --out benchmarks/results/security-regression.json
+```
+
+This never writes benchmark fixtures into the live Engine database.
 
 Profiles live in `benchmarks/configs/system_profiles.json`.
 Use `interactive` for release qualification and reserve `soak` for an isolated or explicitly scheduled run.
@@ -261,11 +276,16 @@ python3 benchmarks/scripts/generate_behavioral_memory_dataset.py \
 python3 benchmarks/scripts/seed_memory_corpus.py \
   --corpus /tmp/optimal-behavioral/corpus.jsonl \
   --out /tmp/optimal-behavioral/seeded.jsonl \
-  --benchmark optimal-behavioral-memory-v1
+  --benchmark optimal-behavioral-memory-v2 \
+  --promote-governed \
+  --sleep-ms 700
 
 python3 benchmarks/scripts/optimal_eval.py \
   --questions /tmp/optimal-behavioral/questions.jsonl \
-  --engine-mode memory-search \
+  --engine-mode rag \
+  --rag-context-package \
+  --rag-skip-wiki \
+  --retrieval-strategy reconstructive \
   --out /tmp/optimal-behavioral/unjudged.jsonl
 
 python3 benchmarks/scripts/judge_results.py \
@@ -275,3 +295,11 @@ python3 benchmarks/scripts/judge_results.py \
 ```
 
 The deterministic judge requires current evidence, rejects forbidden stale evidence, and scores unsupported-answer abstention without using a judge model.
+The seeder creates real Memory version chains, creates review-required Claims, promotes them into governed Facts and Memory Objects, and explicitly supersedes the prior Fact on updates.
+It honors HTTP rate-limit retry instructions.
+Use `--resume` after an interrupted recorded run.
+
+The 2026-08-13 governed baseline found a useful tradeoff.
+Tiered retrieval answered only 14.3% of the seven behavioral smoke cases, while reconstructive retrieval answered 100% at a 43 ms P95.
+The 21-case scale run across 50, 500, and 5,000 filler-token spans reached 100% at a 31 ms P95 after fixing cue ranking, graph hydration order, and Context Package budget allocation.
+These are deterministic local fixtures, not evidence that every real workload is solved.
