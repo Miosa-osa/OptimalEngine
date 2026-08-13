@@ -104,6 +104,23 @@ The complete 1,540-question LoCoMo ablation improved evidence recall from 84.081
 It recovered 25 net evidence addresses, improved categories 1 through 3, and reduced P95 from 511.8 ms to 480.2 ms.
 Category 4 evidence recall declined from 94.525% to 93.855%, so the task profile is not yet the global default.
 
+Contextual retrieval-document ablations use `document_profile: retrieval-document-v1` with an isolated `nomic-context-v1` projection.
+The serializer converts speaker, recipient, timestamp, session, and content into a stable searchable document while excluding benchmark labels, gold fields, and evidence addresses.
+Its representation hash changes when searchable metadata changes, and canonical Memory content remains unchanged.
+The complete 1,540-question LoCoMo run reached 84.928% evidence recall and 94.141% question recall with retrieval P50 367.7 ms, P95 555.2 ms, and P99 626.0 ms.
+That is better than the raw semantic baseline but slightly below the `nomic-search-v1` task profile, so it remains an explicit clean-data ablation rather than the default.
+Its category-3 inference evidence recall reached 64.423% and question recall reached 89.130%, compared with 58.173% and 83.696% for `nomic-search-v1`.
+This measured complementarity motivates intent-aware projection selection, but the aggregate regression prevents automatic promotion.
+Pass a comma-separated `memory_embedding_model` value to fuse multiple compatible projections with deterministic reciprocal-rank fusion while computing the query embedding only once.
+This is intended for measured complementary representations such as `nomic-search-v1,nomic-context-v1`.
+The first 200-case ensemble gate matched the contextual projection's 90.110% evidence recall and 95.455% question recall rather than exceeding it, so the ensemble is also opt-in.
+
+```bash
+curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
+  -H 'content-type: application/json' \
+  -d '{"tenant":"default","workspace":"WORKSPACE_ID","model":"nomic-context-v1","provider_model":"nomic-embed-text","document_profile":"retrieval-document-v1","document_prefix":"search_document: "}'
+```
+
 ```bash
 curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
   -H 'content-type: application/json' \

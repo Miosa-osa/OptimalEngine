@@ -26,3 +26,5 @@
 - 2026-08-13: Behavioral benchmark seeding must honor API rate limits and support recorded-run resume because governed promotion creates several writes per case.
 - 2026-08-13: Release benchmark reports must distinguish executed regressions, public data contracts, paced smoke measurements, and production qualification so a green harness cannot overstate coverage.
 - 2026-08-13: Every benchmark history row carries the Engine commit and dataset SHA-256 hashes, and pass-to-fail changes are first-class regressions.
+- 2026-08-13: Semantic embedding hashes must cover the exact searchable representation, including contextual metadata and task prefixes, rather than canonical Memory content alone.
+- 2026-08-13: Benchmark evidence addresses and gold labels are evaluation metadata, not retrieval features, and contextual retrieval projections must exclude them.

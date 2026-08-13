@@ -8,6 +8,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
 
   alias OptimalEngine.Embed.Ollama
   alias OptimalEngine.Memory.Versioned
+  alias OptimalEngine.Memory.Versioned.RetrievalDocument
   alias OptimalEngine.Store
 
   @fallback_model "nomic-embed-text"
@@ -29,14 +30,20 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
     projection_model = Keyword.get(opts, :model, model())
 
     provider_model = Keyword.get(opts, :provider_model, projection_model)
-    document_prefix = Keyword.get(opts, :document_prefix, "")
 
     embedder =
       Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: provider_model) end)
 
-    with {:ok, vector} when is_list(vector) and vector != [] <-
-           embedder.(document_prefix <> memory.content) do
-      put(memory, vector, Keyword.put(opts, :model, projection_model))
+    with {:ok, document} <- retrieval_document(memory, opts),
+         {:ok, vector} when is_list(vector) and vector != [] <-
+           embedder.(document) do
+      put(
+        memory,
+        vector,
+        opts
+        |> Keyword.put(:model, projection_model)
+        |> Keyword.put(:projection_content, document)
+      )
     else
       {:error, _} = error -> error
       _ -> {:error, :invalid_embedding}
@@ -61,7 +68,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
            model,
            length(embedding),
            {:blob, blob},
-           content_hash(memory.content)
+           content_hash(Keyword.get(opts, :projection_content, memory.content))
          ]) do
       {:ok, _} -> :ok
       {:error, _} = error -> error
@@ -108,6 +115,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
 
     provider_model = Keyword.get(opts, :provider_model, projection_model)
     document_prefix = Keyword.get(opts, :document_prefix, "")
+    document_profile = Keyword.get(opts, :document_profile)
 
     embedder =
       Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: provider_model) end)
@@ -124,50 +132,66 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
     LIMIT ?3
     """
 
-    case Store.raw_query(sql, [tenant_id, workspace_id, limit]) do
-      {:ok, rows} ->
-        memories =
-          Enum.flat_map(rows, fn [id] ->
-            case Versioned.get(id) do
-              {:ok, memory} -> [memory]
-              _ -> []
-            end
-          end)
+    with :ok <- validate_document_profile(document_profile),
+         {:ok, rows} <- Store.raw_query(sql, [tenant_id, workspace_id, limit]) do
+      memories =
+        Enum.flat_map(rows, fn [id] ->
+          case Versioned.get(id) do
+            {:ok, memory} -> [memory]
+            _ -> []
+          end
+        end)
 
-        summary =
-          memories
-          |> Task.async_stream(
-            fn memory ->
-              index(memory,
-                embedder: embedder,
-                tenant_id: tenant_id,
-                model: projection_model,
-                provider_model: provider_model,
-                document_prefix: document_prefix
-              )
-            end,
-            max_concurrency: concurrency,
-            ordered: false,
-            timeout: 120_000
-          )
-          |> Enum.reduce(%{indexed: 0, failed: 0}, fn
-            {:ok, :ok}, counts -> Map.update!(counts, :indexed, &(&1 + 1))
-            _, counts -> Map.update!(counts, :failed, &(&1 + 1))
-          end)
+      summary =
+        memories
+        |> Task.async_stream(
+          fn memory ->
+            index(memory,
+              embedder: embedder,
+              tenant_id: tenant_id,
+              model: projection_model,
+              provider_model: provider_model,
+              document_prefix: document_prefix,
+              document_profile: document_profile
+            )
+          end,
+          max_concurrency: concurrency,
+          ordered: false,
+          timeout: 120_000
+        )
+        |> Enum.reduce(%{indexed: 0, failed: 0}, fn
+          {:ok, :ok}, counts -> Map.update!(counts, :indexed, &(&1 + 1))
+          _, counts -> Map.update!(counts, :failed, &(&1 + 1))
+        end)
 
-        {:ok,
-         Map.merge(summary, %{
-           workspace_id: workspace_id,
-           total: length(memories),
-           model: projection_model
-         })}
-
-      {:error, _} = error ->
-        error
+      {:ok,
+       Map.merge(summary, %{
+         workspace_id: workspace_id,
+         total: length(memories),
+         model: projection_model
+       })}
+    else
+      {:error, _} = error -> error
     end
   end
 
   defp content_hash(content), do: :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+
+  defp retrieval_document(memory, opts) do
+    case Keyword.get(opts, :document_profile) do
+      nil -> {:ok, prefixed(memory.content, opts)}
+      :contextual -> {:ok, prefixed(RetrievalDocument.serialize(memory), opts)}
+      "retrieval-document-v1" -> {:ok, prefixed(RetrievalDocument.serialize(memory), opts)}
+      profile -> {:error, {:unsupported_document_profile, profile}}
+    end
+  end
+
+  defp validate_document_profile(nil), do: :ok
+  defp validate_document_profile(:contextual), do: :ok
+  defp validate_document_profile("retrieval-document-v1"), do: :ok
+  defp validate_document_profile(profile), do: {:error, {:unsupported_document_profile, profile}}
+  defp prefixed(content, opts), do: Keyword.get(opts, :document_prefix, "") <> content
+
   defp encode(values), do: for(value <- values, into: <<>>, do: <<value::float-little-32>>)
   defp decode(blob), do: for(<<value::float-little-32 <- blob>>, do: value)
 

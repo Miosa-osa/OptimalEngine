@@ -3,6 +3,7 @@ defmodule OptimalEngine.Memory.Versioned.EmbeddingsTest do
 
   alias OptimalEngine.Memory.Versioned
   alias OptimalEngine.Memory.Versioned.Embeddings
+  alias OptimalEngine.Memory.Versioned.RetrievalDocument
   alias OptimalEngine.Store
 
   setup do
@@ -114,6 +115,56 @@ defmodule OptimalEngine.Memory.Versioned.EmbeddingsTest do
     assert persisted.content == "canonical content"
   end
 
+  test "contextual profiles embed and hash the searchable representation" do
+    {:ok, memory} =
+      Versioned.create(%{
+        content: "[D9:7] [2024-01-12] John to Tim: Barcelona is a must-visit",
+        workspace_id: "contextual-profile-ws",
+        metadata: %{"session" => "January trip", "evidence_tag" => "D9:7"}
+      })
+
+    parent = self()
+
+    assert :ok =
+             Embeddings.index(memory,
+               model: "nomic-context-v1",
+               document_profile: RetrievalDocument.profile(),
+               document_prefix: "search_document: ",
+               embedder: fn content ->
+                 send(parent, {:embedded, content})
+                 {:ok, [1.0, 0.0]}
+               end
+             )
+
+    expected = "search_document: " <> RetrievalDocument.serialize(memory)
+    assert_received {:embedded, ^expected}
+    refute expected =~ "D9:7"
+
+    assert {:ok, [[hash]]} =
+             Store.raw_query(
+               "SELECT content_hash FROM memory_embeddings WHERE memory_id = ?1 AND model = ?2",
+               [memory.id, "nomic-context-v1"]
+             )
+
+    assert hash == :crypto.hash(:sha256, expected) |> Base.encode16(case: :lower)
+    assert {:ok, persisted} = Versioned.get(memory.id)
+    assert persisted.content == memory.content
+  end
+
+  test "unknown document profiles fail closed" do
+    {:ok, memory} =
+      Versioned.create(%{content: "do not index", workspace_id: "unknown-profile-ws"})
+
+    assert {:error, {:unsupported_document_profile, "made-up-v9"}} =
+             Embeddings.index(memory,
+               document_profile: "made-up-v9",
+               embedder: fn _content -> flunk("embedder must not run") end
+             )
+
+    assert {:error, {:unsupported_document_profile, "made-up-v9"}} =
+             Embeddings.rebuild("unknown-profile-ws", document_profile: "made-up-v9")
+  end
+
   test "public search retrieves a semantic durable-memory paraphrase" do
     {:ok, target} =
       Versioned.create(%{
@@ -156,6 +207,30 @@ defmodule OptimalEngine.Memory.Versioned.EmbeddingsTest do
              )
 
     assert result.id == target.id
+  end
+
+  test "semantic-only search fuses complementary named projections" do
+    {:ok, first} =
+      Versioned.create(%{content: "first projection winner", workspace_id: "ensemble-search"})
+
+    {:ok, second} =
+      Versioned.create(%{content: "second projection winner", workspace_id: "ensemble-search"})
+
+    :ok = Embeddings.put(first, [1.0, 0.0], model: "projection-a")
+    :ok = Embeddings.put(second, [1.0, 0.0], model: "projection-b")
+
+    assert {:ok, results} =
+             OptimalEngine.search("no lexical overlap",
+               workspace_id: "ensemble-search",
+               tenant_id: "default",
+               vector_enabled: false,
+               query_embedding: [1.0, 0.0],
+               memory_search_mode: :semantic,
+               memory_embedding_model: "projection-a,projection-b",
+               limit: 2
+             )
+
+    assert Enum.map(results, & &1.id) == Enum.sort([first.id, second.id])
   end
 
   test "lexical and semantic search both enforce tenant scope" do
