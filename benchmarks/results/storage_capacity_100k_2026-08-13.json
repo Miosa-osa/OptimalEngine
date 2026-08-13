@@ -1,0 +1,11 @@
+{
+  "records": 100000,
+  "insert_ms": 3920.509,
+  "benchmark_version": "storage-capacity-v1",
+  "inserts_per_second": 25506.9,
+  "lookup_p50_ms": 0.023,
+  "lookup_p95_ms": 0.061,
+  "lookup_p99_ms": 0.084,
+  "database_growth_bytes": 8986624,
+  "passed": true
+}

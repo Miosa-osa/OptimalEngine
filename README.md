@@ -4,6 +4,37 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-4B275F.svg)](mix.exs)
 
+## Current Benchmark Scorecard
+
+The benchmark program is executable and its numbers are checked into the repository.
+
+| Measured gate | Current result |
+| --- | ---: |
+| Twelve-family release suite | 12/12 passing |
+| Governed behavioral recall | 21/21 correct |
+| Behavioral memory span | 50 to 5,000 filler tokens |
+| Behavioral P95 latency | 31 ms |
+| Authorization and governance regressions | 33/33 passing |
+| Paced governed tiered retrieval | 12.3 ms P95, 0 errors |
+| Paced governed reconstructive retrieval | 66.0 ms P95, 0 errors |
+| Isolated storage capacity | 100,000 records, 0.061 ms lookup P95 |
+| Storage insert throughput | 25,507 records/second |
+| Full Engine test suite | 1,968 tests, 0 failures |
+
+Read the [current twelve-family release report](benchmarks/results/RELEASE-CURRENT.md), browse the [benchmark source and datasets](benchmarks/), or read [what every number means](docs/guides/BENCHMARKING.md).
+
+Run all twelve benchmark families:
+
+```bash
+python3 benchmarks/scripts/release_benchmark.py
+```
+
+From the parent OptimalOS checkout, run `.system/oe benchmark_release`.
+
+A green score proves the listed gates on the recorded environment.
+It does not claim that unmeasured workloads are universally optimal.
+The public Gold Set is a sanitized schema fixture; production qualification also requires a private, human-reviewed OptimalOS Gold Set.
+
 Optimal Engine is a self-hosted second brain and operating engine for human and
 AI workspaces.
 

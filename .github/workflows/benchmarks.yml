@@ -1,0 +1,33 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "benchmarks/**"
+      - "lib/optimal_engine/memory_core/**"
+      - "lib/optimal_engine/retrieval/**"
+      - ".github/workflows/benchmarks.yml"
+
+jobs:
+  release-benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          elixir-version: "1.17"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors
+      - run: python3 benchmarks/scripts/release_benchmark.py --no-history
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: optimal-engine-benchmark-scorecard
+          path: |
+            benchmarks/results/release-current.json
+            benchmarks/results/RELEASE-CURRENT.md

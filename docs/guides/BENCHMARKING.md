@@ -7,6 +7,40 @@ Optimal Engine is evaluated as a governed memory system, not only as a text sear
 No single aggregate score may hide a security, correctness, or reliability failure.
 Every release report keeps quality, safety, latency, throughput, resource use, and operational integrity as separate gates.
 
+## Twelve-family release benchmark
+
+Run every implemented family with one command:
+
+```bash
+python3 benchmarks/scripts/release_benchmark.py
+```
+
+The command writes a machine-readable JSON report, a plain-English Markdown scorecard, and an append-only history row containing the commit and dataset hashes.
+
+| Family | Primary proof |
+| --- | --- |
+| Governed Gold Set | Versioned reviewed-case contract plus persisted Evaluation execution |
+| Entity and identity | Alias, mention, merge, and Workspace isolation regressions |
+| Episodic memory | Episode and ordered-detail persistence and transcript intake |
+| Graph reasoning | Scoped predicates, traversal, and reconstructive paths |
+| Citation quality | Citation integrity, delivery, grounding, and evidence checks |
+| End-to-end ingestion | Source through governed truth lifecycle and scoped projections |
+| Crash and recovery | Transaction rollback, backups, and FTS rebuild integrity |
+| Capacity and soak | Isolated 10,000-record storage run plus paced endpoint artifact |
+| Overload and limits | Rate-limit capacity, client override, and rejection semantics |
+| Adversarial mutation | Deterministic noisy cases plus stale, unauthorized, and injection regressions |
+| Workflow, skill, and asset | Promotion eligibility, extraction, and governed storage |
+| Benchmark history | Append-only results and pass-to-fail regression detection |
+
+Qualification is explicit.
+`executed_regression` means the behavior ran against an isolated test database.
+`public_contract` means the public fixture proves the schema and execution machinery but still needs a private reviewed dataset.
+`paced_smoke` means the measured workload is useful for regression detection but is not a large production capacity certification.
+
+The 2026-08-13 isolated storage baseline inserted 100,000 indexed records at 25,507 records per second.
+Random scoped lookup P95 was 0.061 ms and the temporary table increased the SQLite file by 8,986,624 bytes before cleanup.
+This measures the local storage substrate, not full governed ingestion throughput.
+
 ## External benchmark families
 
 | Benchmark | What we adopt | Optimal Engine application |
