@@ -45,6 +45,11 @@ class ReleaseBenchmarkTest(unittest.TestCase):
         }
         self.assertIn("does not make unmeasured workloads optimal", MODULE.markdown(report))
 
+    def test_release_config_never_points_mix_at_the_live_database(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('environment.pop(key, None)', source)
+        self.assertIn('environment["MIX_ENV"] = "test"', source)
+
 
 if __name__ == "__main__":
     unittest.main()
