@@ -7,6 +7,8 @@ Optimal Engine turns preserved evidence into governed memory and authorized cont
 | Term | Meaning |
 | --- | --- |
 | Governed Recall | Retrieval through a Scope Envelope that applies authorization, time, evidence, and lifecycle policy before candidate ranking. |
+| Evidence Plan | Deterministic decomposition of a request into bounded entity, clause, temporal, comparison, and inference obligations that must be retrieved under one Scope Envelope. |
+| Evidence Set | Authorized, identity-deduplicated objects selected for complementary obligation coverage instead of redundant document popularity. |
 | Memory Reconstruction | Bounded, task-scoped assembly of context by following authorized Association Paths from cues to governed objects. |
 | Reconstruction Run | Audited execution record containing the query, scope, budgets, stop reason, Context Package, ordered steps, and Association Paths. |
 | Association Path | Ordered links from a cue through rebuildable associations to governed Facts, Memory Objects, Episodes, Relationship Edges, and source evidence. |
@@ -22,6 +24,8 @@ Optimal Engine turns preserved evidence into governed memory and authorized cont
 
 - Reconstruction always returns a Context Package.
 - Authorization is applied during every candidate expansion.
+- Evidence probes are authorized before limits and fusion, so restricted candidates cannot crowd out authorized evidence.
+- Reconstructive recall stops for sufficient evidence only when every required Evidence Plan role is covered within confidence and budget gates.
 - Missing authorization fails closed for labeled or partitioned data.
 - Associative projections can be deleted and rebuilt without losing truth.
 - Reconstruction outcomes train intent-specific paths, not global document popularity.

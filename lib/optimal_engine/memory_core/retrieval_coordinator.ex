@@ -23,6 +23,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   alias OptimalEngine.MemoryCore.{
     ContextPackage,
     DerivationLedgerEntry,
+    EvidencePlan,
     ID,
     Reconstruction,
     RetrievalPackage,
@@ -115,7 +116,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     scope = resolve_scope(opts)
     limit = Keyword.get(opts, :limit, @default_limit)
     time_mode = string_opt(opts, :time_mode, "current_valid")
-    request_intent = string_opt(opts, :request_intent, classify_intent(query))
+    request_intent = string_opt(opts, :request_intent, "recall")
 
     authorization = %{
       allowed_partitions: string_list_opt(opts, :allowed_partitions),
@@ -481,6 +482,10 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         Keyword.get(opts, :active_memory_pool_id, package.active_memory_pool_id),
       time_mode: Keyword.get(opts, :time_mode, package.time_mode),
       detail_depth: Keyword.get(opts, :detail_depth, package.detail_depth),
+      strategy:
+        Keyword.get(opts, :strategy) ||
+          map_get(package.retrieval_plan, :strategy) ||
+          :tiered,
       allowed_partitions:
         Keyword.get(opts, :allowed_partitions) ||
           map_get(auth, :allowed_partitions) ||
@@ -528,6 +533,39 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   # ---------------------------------------------------------------------------
 
   defp fetch_candidates(kind, %ScopeEnvelope{} = scope, query, limit, authorization, retrieval_plan) do
+    probes = Map.get(retrieval_plan, :evidence_probes, [query])
+
+    probe_results =
+      Enum.map(probes, fn probe ->
+        fetch_candidate_probe(kind, scope, probe, limit, authorization, retrieval_plan)
+      end)
+
+    if Enum.all?(probe_results, &match?({:ok, _, _}, &1)) do
+      rankings = Enum.map(probe_results, fn {:ok, objects, _} -> objects end)
+      accountings = Enum.map(probe_results, fn {:ok, _, accounting} -> accounting end)
+      objects = complementary_fuse(rankings, limit)
+      redacted_links = accountings |> Enum.flat_map(& &1.redacted_links) |> Enum.uniq()
+
+      {:ok, objects,
+       %{
+         candidates: accountings |> Enum.map(& &1.candidates) |> Enum.max(fn -> 0 end),
+         returned: length(objects),
+         policy_excluded: length(redacted_links),
+         redacted_links: redacted_links
+       }}
+    else
+      Enum.find(probe_results, &match?({:error, _}, &1)) || {:error, :candidate_probe_failed}
+    end
+  end
+
+  defp fetch_candidate_probe(
+         kind,
+         %ScopeEnvelope{} = scope,
+         query,
+         limit,
+         authorization,
+         retrieval_plan
+       ) do
     parts = sql_parts(kind)
     pattern = "%#{query}%"
     filters = Map.get(retrieval_plan, :structured_filters, %{})
@@ -578,6 +616,35 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
+  defp complementary_fuse(rankings, limit) do
+    max_length = rankings |> Enum.map(&length/1) |> Enum.max(fn -> 0 end)
+
+    if max_length == 0 do
+      []
+    else
+      0..(max_length - 1)
+      |> Enum.reduce_while({[], MapSet.new()}, fn index, {selected, seen} ->
+        {next, next_seen} =
+          Enum.reduce(rankings, {selected, seen}, fn ranking, {items, ids} ->
+            case Enum.at(ranking, index) do
+              nil ->
+                {items, ids}
+
+              object ->
+                if MapSet.member?(ids, object.id),
+                  do: {items, ids},
+                  else: {items ++ [object], MapSet.put(ids, object.id)}
+            end
+          end)
+
+        if length(next) >= limit,
+          do: {:halt, {Enum.take(next, limit), next_seen}},
+          else: {:cont, {next, next_seen}}
+      end)
+      |> elem(0)
+    end
+  end
+
   # The authorization envelope always yields both predicates (fail-closed),
   # so the excluded-object accounting runs on every retrieval.
   defp fetch_excluded(parts, where, auth_clauses, base_params, auth_params, authorization) do
@@ -610,16 +677,31 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
          retrieval_plan,
          opts
        ) do
-    with {:ok, candidates} <-
-           fetch_projection_rows(kind, scope, query, limit * 2, retrieval_plan, opts) do
-      {authorized, redacted} =
-        Enum.split_with(candidates, &authorized_projection?(&1, authorization))
-
-      returned = Enum.take(authorized, limit)
+    with {:ok, returned} <-
+           fetch_projection_rows(
+             kind,
+             scope,
+             query,
+             limit,
+             authorization,
+             retrieval_plan,
+             opts
+           ),
+         {:ok, visible_window} <-
+           fetch_projection_rows(
+             kind,
+             scope,
+             query,
+             limit * 2,
+             %{authorization | allow_all?: true},
+             retrieval_plan,
+             opts
+           ) do
+      redacted = Enum.reject(visible_window, &authorized_projection?(&1, authorization))
 
       {:ok, returned,
        %{
-         candidates: length(candidates),
+         candidates: length(Enum.uniq_by(returned ++ redacted, & &1.id)),
          returned: length(returned),
          policy_excluded: length(redacted),
          redacted_links:
@@ -630,9 +712,20 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
-  defp fetch_projection_rows(:asset_extractions, scope, query, limit, retrieval_plan, _opts) do
+  defp fetch_projection_rows(
+         :asset_extractions,
+         scope,
+         query,
+         limit,
+         authorization,
+         retrieval_plan,
+         _opts
+       ) do
     pattern = "%#{query}%"
     filters = Map.get(retrieval_plan, :asset_filters, %{})
+
+    {auth_clauses, auth_params} = authorization_clauses("asset_extractions", authorization, 6)
+    limit_placeholder = "?#{7 + length(auth_params)}"
 
     sql = """
     SELECT id, tenant_id, workspace_id, asset_id, source_package_id, adapter_run_id,
@@ -648,28 +741,40 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       )
       AND (?5 IS NULL OR modality = ?5)
       AND (?6 IS NULL OR extraction_type = ?6)
+    #{and_all(auth_clauses)}
     ORDER BY confidence DESC, created_at DESC
-    LIMIT ?7
+    LIMIT #{limit_placeholder}
     """
 
-    params = [
-      scope.tenant_id,
-      scope.workspace_id,
-      pattern,
-      query,
-      Map.get(filters, :modality),
-      Map.get(filters, :extraction_type),
-      limit
-    ]
+    params =
+      [
+        scope.tenant_id,
+        scope.workspace_id,
+        pattern,
+        query,
+        Map.get(filters, :modality),
+        Map.get(filters, :extraction_type)
+      ] ++ auth_params ++ [limit]
 
     with {:ok, rows} <- BaseStore.raw_query(sql, params) do
       {:ok, Enum.map(rows, &asset_extraction_from_row/1)}
     end
   end
 
-  defp fetch_projection_rows(:workflows, scope, query, limit, retrieval_plan, _opts) do
+  defp fetch_projection_rows(
+         :workflows,
+         scope,
+         query,
+         limit,
+         authorization,
+         retrieval_plan,
+         _opts
+       ) do
     pattern = "%#{query}%"
     filters = Map.get(retrieval_plan, :workflow_filters, %{})
+
+    {auth_clauses, auth_params} = authorization_clauses("generalized_workflows", authorization, 5)
+    limit_placeholder = "?#{6 + length(auth_params)}"
 
     sql = """
     SELECT id, tenant_id, workspace_id, workflow_family, scope,
@@ -692,25 +797,34 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         OR ?4 = ''
       )
       AND (?5 IS NULL OR workflow_family = ?5)
+    #{and_all(auth_clauses)}
     ORDER BY validation_score DESC, aggregate_confidence DESC, updated_at DESC
-    LIMIT ?6
+    LIMIT #{limit_placeholder}
     """
 
-    params = [
-      scope.tenant_id,
-      scope.workspace_id,
-      pattern,
-      query,
-      Map.get(filters, :workflow_family),
-      limit
-    ]
+    params =
+      [
+        scope.tenant_id,
+        scope.workspace_id,
+        pattern,
+        query,
+        Map.get(filters, :workflow_family)
+      ] ++ auth_params ++ [limit]
 
     with {:ok, rows} <- BaseStore.raw_query(sql, params) do
       {:ok, Enum.map(rows, &workflow_from_row/1)}
     end
   end
 
-  defp fetch_projection_rows(:skill_packages, scope, query, limit, retrieval_plan, opts) do
+  defp fetch_projection_rows(
+         :skill_packages,
+         scope,
+         query,
+         limit,
+         authorization,
+         retrieval_plan,
+         opts
+       ) do
     pattern = "%#{query}%"
     filters = Map.get(retrieval_plan, :skill_filters, %{})
 
@@ -725,6 +839,9 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         AND suspension_reason IS NULL
         """
       end
+
+    {auth_clauses, auth_params} = authorization_clauses("skill_packages", authorization, 6)
+    limit_placeholder = "?#{7 + length(auth_params)}"
 
     sql = """
     SELECT id, tenant_id, workspace_id, version, skill_package_name, task_family,
@@ -746,19 +863,20 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       )
       AND (?5 IS NULL OR task_family = ?5)
       AND (?6 IS NULL OR skill_package_name = ?6)
+    #{and_all(auth_clauses)}
     ORDER BY aggregate_confidence DESC, updated_at DESC
-    LIMIT ?7
+    LIMIT #{limit_placeholder}
     """
 
-    params = [
-      scope.tenant_id,
-      scope.workspace_id,
-      pattern,
-      query,
-      Map.get(filters, :task_family),
-      Map.get(filters, :skill_package_name),
-      limit
-    ]
+    params =
+      [
+        scope.tenant_id,
+        scope.workspace_id,
+        pattern,
+        query,
+        Map.get(filters, :task_family),
+        Map.get(filters, :skill_package_name)
+      ] ++ auth_params ++ [limit]
 
     with {:ok, rows} <- BaseStore.raw_query(sql, params) do
       {:ok, Enum.map(rows, &skill_package_from_row/1)}
@@ -1516,6 +1634,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   end
 
   defp build_retrieval_plan(query, %ScopeEnvelope{} = scope, authorization, opts) do
+    evidence_plan = EvidencePlan.build(query)
+
     structured_filters =
       %{
         subject_anchor: string_opt_or_nil(opts, :subject_anchor),
@@ -1545,7 +1665,11 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     %{
       query: query,
       path: retrieval_path(structured_filters, asset_filters, workflow_filters, skill_filters),
-      intent: string_opt(opts, :request_intent, classify_intent(query)),
+      intent: string_opt(opts, :request_intent, evidence_plan.intent),
+      evidence_plan: evidence_plan,
+      evidence_obligations: evidence_plan.obligations,
+      evidence_probes: evidence_plan.probes,
+      required_evidence_roles: evidence_plan.required_roles,
       executed_paths: [
         "facts.sql_like",
         "memory_objects.sql_like",
@@ -1681,9 +1805,6 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       average: Enum.sum(values) / count
     }
   end
-
-  defp classify_intent(""), do: "recall"
-  defp classify_intent(_query), do: "recall"
 
   defp decode_list(nil), do: []
   defp decode_list(""), do: []

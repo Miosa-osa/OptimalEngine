@@ -193,8 +193,8 @@ class TrueMemoryCompatTest(unittest.TestCase):
             "How do Alice and Bob use creative hobbies while handling stress?"
         )
         self.assertEqual(variants[0], "How do Alice and Bob use creative hobbies while handling stress?")
-        self.assertTrue(any(variant.startswith("Alice ") for variant in variants))
-        self.assertTrue(any(variant.startswith("Bob ") for variant in variants))
+        self.assertIn("Alice", variants)
+        self.assertIn("Bob", variants)
         self.assertIn("Bob use creative hobbies", variants)
 
     def test_round_robin_fusion_prevents_one_query_from_crowding_out_others(self):
@@ -212,6 +212,21 @@ class TrueMemoryCompatTest(unittest.TestCase):
         fused = RUNNER.coverage_fuse(original, [[{"id": "companion"}]], 10)
         self.assertEqual([item["id"] for item in fused[:8]], [f"primary-{index}" for index in range(8)])
         self.assertEqual(fused[8]["id"], "companion")
+
+    def test_evidence_set_retrieval_runs_semantic_probes_and_fuses_coverage(self):
+        def semantic(_url, _workspace, probe, _top_k, _model):
+            return ([{"id": probe, "content": probe}], 0.01)
+
+        with patch.object(RUNNER, "retrieve_semantic", side_effect=semantic):
+            memories, latency = RUNNER.retrieve_evidence_set(
+                "http://engine", "workspace-1", "How do Alice and Bob relax?", 10, "nomic"
+            )
+
+        identities = [memory["id"] for memory in memories]
+        self.assertEqual(identities[0], "How do Alice and Bob relax?")
+        self.assertIn("Alice", identities)
+        self.assertEqual(len(identities), len(set(identities)))
+        self.assertGreaterEqual(latency, 0)
 
     def test_semantic_retrieval_uses_scoped_hybrid_search(self):
         with patch.object(RUNNER, "get_json", return_value={"results": [{"id": "semantic"}]}) as request:

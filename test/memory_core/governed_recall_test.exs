@@ -86,6 +86,67 @@ defmodule OptimalEngine.MemoryCore.GovernedRecallTest do
   end
 
   describe "retrieve_package/2 — authorization during candidate expansion" do
+    test "evidence probes retrieve complementary authorized facts" do
+      workspace_id = unique_workspace("governed-evidence-plan")
+
+      alice =
+        insert_fact!(workspace_id, %{
+          fact_text: "Alice relaxes by painting landscapes.",
+          aggregate_confidence: 0.9
+        })
+
+      bob =
+        insert_fact!(workspace_id, %{
+          fact_text: "Bob relaxes by playing guitar.",
+          aggregate_confidence: 0.8
+        })
+
+      assert {:ok, package} =
+               RetrievalCoordinator.retrieve_package(
+                 "How does Alice relax, and how does Bob relax?",
+                 workspace_id: workspace_id,
+                 actor_id: "agent:test",
+                 allowed_partitions: ["public"],
+                 allowed_security_labels: ["internal"],
+                 limit: 4
+               )
+
+      assert MapSet.new(Enum.map(package.facts, & &1.id)) == MapSet.new([alice.id, bob.id])
+      assert package.retrieval_plan.intent == "multi_hop"
+      assert length(package.retrieval_plan.evidence_probes) > 1
+      assert Enum.any?(package.retrieval_plan.required_evidence_roles, &(&1 == "clause_1"))
+    end
+
+    test "secondary probes cannot admit unauthorized facts" do
+      workspace_id = unique_workspace("governed-evidence-auth")
+
+      _restricted =
+        insert_fact!(workspace_id, %{
+          fact_text: "Bob relaxes with a restricted launch plan.",
+          partition_ids: ["restricted"],
+          aggregate_confidence: 0.99
+        })
+
+      public =
+        insert_fact!(workspace_id, %{
+          fact_text: "Alice relaxes with the public launch plan.",
+          aggregate_confidence: 0.4
+        })
+
+      assert {:ok, package} =
+               RetrievalCoordinator.retrieve_package(
+                 "How does Alice relax, and how does Bob relax?",
+                 workspace_id: workspace_id,
+                 actor_id: "agent:test",
+                 allowed_partitions: ["public"],
+                 allowed_security_labels: ["internal"],
+                 limit: 4
+               )
+
+      assert Enum.map(package.facts, & &1.id) == [public.id]
+      assert package.filtered_summary.redacted_or_filtered_objects == 1
+    end
+
     test "workspace scope is applied inside the candidate queries, not as a post-filter" do
       workspace_a = unique_workspace("governed-recall-ws-a")
       workspace_b = unique_workspace("governed-recall-ws-b")

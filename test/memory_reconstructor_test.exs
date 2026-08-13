@@ -65,6 +65,9 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     assert package.returned_object_links != []
     assert package.retrieval_plan.strategy == "reconstructive"
     assert package.retrieval_plan.reconstruction.paths != []
+    assert package.retrieval_plan.reconstruction.required_evidence_roles == ["primary"]
+    assert package.retrieval_plan.reconstruction.missing_evidence_roles == []
+    assert package.retrieval_plan.reconstruction.stop_reason == "coverage_satisfied"
     assert package.sections.reconstruction =~ "Commas"
 
     assert {:ok, [["completed", package_id, steps, paths]]} =
@@ -76,6 +79,27 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     assert package_id == package.id
     assert steps > 0
     assert paths > 0
+  end
+
+  test "refresh preserves reconstructive strategy and evidence requirements", %{
+    workspace: workspace,
+    actor: actor
+  } do
+    assert {:ok, original} = reconstruct(workspace, actor)
+
+    assert {:ok, refreshed} =
+             MemoryCore.refresh_context_package(original.id,
+               tenant_id: "default",
+               workspace_id: workspace,
+               actor_id: actor,
+               force: true
+             )
+
+    assert refreshed.metadata.retrieval_strategy == "reconstructive"
+    assert refreshed.retrieval_plan.strategy == "reconstructive"
+
+    assert refreshed.retrieval_plan.reconstruction.required_evidence_roles ==
+             original.retrieval_plan.reconstruction.required_evidence_roles
   end
 
   test "authorization is fail-closed during association expansion", %{
