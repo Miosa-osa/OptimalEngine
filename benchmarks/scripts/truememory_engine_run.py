@@ -122,12 +122,18 @@ def retrieve(engine_url: str, workspace: str, question: str, top_k: int) -> tupl
 
 
 def retrieve_semantic(
-    engine_url: str, workspace: str, question: str, top_k: int, embedding_model: str | None = None
+    engine_url: str,
+    workspace: str,
+    question: str,
+    top_k: int,
+    embedding_model: str | None = None,
+    search_mode: str = "hybrid",
 ) -> tuple[list[dict], float]:
     started = time.perf_counter()
     params = {
         "tenant": "default", "workspace": workspace, "type": "memory",
         "q": question, "limit": top_k,
+        "memory_search_mode": search_mode,
     }
     if embedding_model:
         params["memory_embedding_model"] = embedding_model
@@ -394,7 +400,7 @@ def main() -> int:
     parser.add_argument("--engine-url", default="http://127.0.0.1:4200")
     parser.add_argument("--workspace-prefix", default="benchmark:truememory")
     parser.add_argument(
-        "--retrieval", choices=("engine_memory", "engine_semantic", "engine_coverage", "engine_evidence", "bm25", "oracle"),
+        "--retrieval", choices=("engine_memory", "engine_semantic", "engine_semantic_only", "engine_coverage", "engine_evidence", "bm25", "oracle"),
         default="engine_memory",
     )
     parser.add_argument("--top-k", type=int, help="Ablation override; official matched runs must use manifest top-k")
@@ -455,7 +461,7 @@ def main() -> int:
     remaining_questions = args.question_limit
     for conversation_index, conversation in enumerate(conversations):
         slug = f"{args.workspace_prefix}-{args.benchmark}-r{args.run_id}-c{conversation_index}".replace(":", "-")
-        engine_strategy = args.retrieval in {"engine_memory", "engine_semantic", "engine_coverage", "engine_evidence"}
+        engine_strategy = args.retrieval in {"engine_memory", "engine_semantic", "engine_semantic_only", "engine_coverage", "engine_evidence"}
         workspace = ensure_workspace(args.engine_url, slug) if engine_strategy else None
         if engine_strategy and not args.skip_seed:
             seed_started = time.perf_counter()
@@ -476,6 +482,15 @@ def main() -> int:
             elif args.retrieval == "engine_semantic":
                 memories, latency = retrieve_semantic(
                     args.engine_url, workspace, question["question"], top_k, args.embedding_model
+                )
+            elif args.retrieval == "engine_semantic_only":
+                memories, latency = retrieve_semantic(
+                    args.engine_url,
+                    workspace,
+                    question["question"],
+                    top_k,
+                    args.embedding_model,
+                    "semantic",
                 )
             elif args.retrieval == "engine_coverage":
                 memories, latency = retrieve_coverage(

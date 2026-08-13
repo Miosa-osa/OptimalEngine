@@ -244,6 +244,7 @@ class TrueMemoryCompatTest(unittest.TestCase):
                 "type": "memory",
                 "q": "a paraphrased question",
                 "limit": 20,
+                "memory_search_mode": "hybrid",
             },
         )
 

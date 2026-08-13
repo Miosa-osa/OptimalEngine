@@ -233,7 +233,12 @@ defmodule OptimalEngine.Retrieval.Search do
       end
 
     semantic_hits = semantic_memory_hits(query, opts, limit)
-    reciprocal_rank_fuse(lexical_hits, semantic_hits, limit)
+
+    case Keyword.get(opts, :memory_search_mode, :hybrid) do
+      value when value in [:lexical, "lexical"] -> Enum.take(lexical_hits, limit)
+      value when value in [:semantic, "semantic"] -> Enum.take(semantic_hits, limit)
+      _ -> reciprocal_rank_fuse(lexical_hits, semantic_hits, limit)
+    end
   rescue
     _ -> []
   end
