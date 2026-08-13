@@ -100,8 +100,9 @@ curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
 ```
 
 Run retrieval with `--embedding-model nomic-search-v1 --embedding-provider-model nomic-embed-text --query-prefix 'search_query: '`.
-The first fixed 200-question LoCoMo ablation improved evidence recall from 88.278% to 89.744% and question recall from 94.949% to 96.970%.
-Treat this as preliminary until the complete dataset finishes.
+The complete 1,540-question LoCoMo ablation improved evidence recall from 84.081% to 85.140% and question recall from 93.750% to 94.271%.
+It recovered 25 net evidence addresses, improved categories 1 through 3, and reduced P95 from 511.8 ms to 480.2 ms.
+Category 4 evidence recall declined from 94.525% to 93.855%, so the task profile is not yet the global default.
 
 ```bash
 curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
