@@ -17,6 +17,14 @@ Each suite records its qualification level and any remaining limitation so a har
 
 This directory contains dependency-free benchmark harnesses for measuring Optimal Engine quality, speed, safety, and reliability.
 
+## TrueMemory-compatible external evaluation
+
+The TrueMemory program is separate from the twelve internal release families.
+It covers official LoCoMo, LongMemEval strict and oracle, BEAM-1M, and BEAM-10M protocols.
+
+Start with [the TrueMemory reproduction guide](truememory/README.md).
+The current checked-in status is [COMPATIBILITY-CURRENT.md](results/truememory/COMPATIBILITY-CURRENT.md).
+
 ## What the numbers mean
 
 - Accuracy asks: did the system return the right answer?

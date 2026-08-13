@@ -1,0 +1,69 @@
+{
+  "version": "truememory-compat-v1",
+  "upstream": {
+    "repository": "https://github.com/buildingjoshbetter/TrueMemory.git",
+    "commit": "e7f1fd79e4188637f9b168337c5a219af890a613",
+    "license": "AGPL-3.0"
+  },
+  "provider": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "answer_model": "openai/gpt-4.1-mini",
+    "judge_model": "openai/gpt-4o-mini",
+    "answer_temperature": 0,
+    "judge_temperature": 0,
+    "judge_runs": 3
+  },
+  "benchmarks": {
+    "locomo": {
+      "questions": 1540,
+      "runs": 3,
+      "top_k": 100,
+      "answer_max_tokens": 200,
+      "judge_max_tokens": 10,
+      "excluded_categories": [5],
+      "upstream_dataset": "benchmarks/locomo/data/locomo10.json",
+      "source_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+      "upstream_script": "benchmarks/locomo/scripts/bench_truememory_pro.py"
+    },
+    "longmemeval_strict": {
+      "questions": 500,
+      "runs": 3,
+      "top_k": 100,
+      "answer_max_tokens": 200,
+      "judge_max_tokens": 10,
+      "upstream_dataset": "benchmarks/longmemeval/data/longmemeval_s.json",
+      "source_sha256": "d6f21ea8919a9c6c17e3953d0875b661151904ab6f90f0dc7181cebb7a83a442",
+      "upstream_script": "benchmarks/longmemeval/bench_truememory_pro_s.py"
+    },
+    "longmemeval_oracle": {
+      "questions": 500,
+      "runs": 3,
+      "top_k": 100,
+      "answer_max_tokens": 200,
+      "judge_max_tokens": 10,
+      "upstream_dataset": "benchmarks/longmemeval/data/longmemeval_oracle.json",
+      "source_sha256": "821a2019ea0e0297f2f893267896523d3c21c0d9d9912189d448367a43b620c",
+      "upstream_script": "benchmarks/longmemeval/bench_truememory_pro.py"
+    },
+    "beam_1m": {
+      "questions": 700,
+      "runs": 3,
+      "top_k": 100,
+      "answer_max_tokens": 500,
+      "judge_max_tokens": 50,
+      "huggingface_dataset": "Mohammadta/BEAM",
+      "split": "1M",
+      "upstream_script": "benchmarks/beam/bench_truememory_pro_beam1m.py"
+    },
+    "beam_10m": {
+      "questions": 200,
+      "runs": 3,
+      "top_k": 100,
+      "answer_max_tokens": 500,
+      "judge_max_tokens": 50,
+      "huggingface_dataset": "Mohammadta/BEAM-10M",
+      "split": "10M",
+      "upstream_script": "benchmarks/beam/bench_truememory_pro_beam10m.py"
+    }
+  }
+}

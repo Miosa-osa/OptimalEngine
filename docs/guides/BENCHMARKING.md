@@ -43,6 +43,10 @@ This measures the local storage substrate, not full governed ingestion throughpu
 
 ## External benchmark families
 
+The implemented TrueMemory-compatible program is documented in [`benchmarks/truememory/README.md`](../../benchmarks/truememory/README.md).
+It pins the upstream repository, validates model and judge settings from the upstream Python AST, checks official dataset hashes, and keeps external scores separate from internal release gates.
+The exact upstream prompts are loaded from a pinned checkout at runtime so AGPL-licensed prompt text is not copied into this MIT repository.
+
 | Benchmark | What we adopt | Optimal Engine application |
 | --- | --- | --- |
 | BEIR | nDCG@10, Recall@k, heterogeneous retrieval tasks, lexical baseline | Retrieval Package ranking and zero-shot robustness |
