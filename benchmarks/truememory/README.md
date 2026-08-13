@@ -30,8 +30,20 @@ python3 benchmarks/scripts/truememory_compat.py prepare \
   --out /tmp/optimal-truememory/longmemeval_strict.jsonl
 ```
 
-The BEAM adapter accepts a JSON export of the Hugging Face rows with `conversation_id`, `chat`, and `probing_questions` fields.
-Use benchmark names `beam_1m` and `beam_10m` when preparing those exports.
+The BEAM adapter accepts the official Hugging Face Parquet files or a JSON export with `conversation_id`, `chat`, and `probing_questions` fields.
+Parquet input requires optional `pyarrow`.
+Pass the BEAM-1M file directly and pass a directory containing both BEAM-10M shards.
+The manifest verifies the official file and bundle hashes.
+
+```bash
+PYTHONPATH=/path/to/pyarrow python3 benchmarks/scripts/truememory_compat.py prepare \
+  --benchmark beam_1m --source /data/1M-00000-of-00001.parquet \
+  --out /tmp/optimal-truememory/beam_1m.jsonl
+
+PYTHONPATH=/path/to/pyarrow python3 benchmarks/scripts/truememory_compat.py prepare \
+  --benchmark beam_10m --source /data/beam-10m-shards \
+  --out /tmp/optimal-truememory/beam_10m.jsonl
+```
 
 Run the strict-versus-oracle corpus diagnostic:
 

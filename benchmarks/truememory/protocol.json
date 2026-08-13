@@ -53,6 +53,7 @@
       "judge_max_tokens": 50,
       "huggingface_dataset": "Mohammadta/BEAM",
       "split": "1M",
+      "source_sha256": "41b5acbbb55a586b1305514ef9d9fb03365d9b3331b598a1c2dd7603d93ef533",
       "upstream_script": "benchmarks/beam/bench_truememory_pro_beam1m.py"
     },
     "beam_10m": {
@@ -63,6 +64,11 @@
       "judge_max_tokens": 50,
       "huggingface_dataset": "Mohammadta/BEAM-10M",
       "split": "10M",
+      "source_sha256": "735dc0583a5be573555b90069af7c3fb77616557b383dd92657c3f812d0a9463",
+      "source_files_sha256": [
+        "31d96fd47ec56221d202e68792f26c00e49467dd4b36ee105c36ebd19ef78ad5",
+        "a4f13fe25af51d57405ae41008689c31d1421377f3efde56a024b441deb2ee65"
+      ],
       "upstream_script": "benchmarks/beam/bench_truememory_pro_beam10m.py"
     }
   }

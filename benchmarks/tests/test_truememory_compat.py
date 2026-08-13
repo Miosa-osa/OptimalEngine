@@ -88,6 +88,19 @@ class TrueMemoryCompatTest(unittest.TestCase):
         self.assertEqual(prepared[0]["questions"][0]["gold"], "blue")
         self.assertEqual(prepared[0]["messages"][0]["session"], "session_0")
 
+    def test_beam_10m_adapter_flattens_plan_batches(self):
+        fixture = [{
+            "conversation_id": "beam-10m",
+            "chat": [{"plan-1": [{"turns": [[{"role": "user", "content": "remember"}]]}]}],
+            "probing_questions": "{'recall': [{'question': 'What?', 'answer': 'remember'}]}",
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "beam.json"
+            path.write_text(json.dumps(fixture))
+            prepared = COMPAT.load_beam(path)
+        self.assertEqual(len(prepared[0]["messages"]), 1)
+        self.assertEqual(prepared[0]["messages"][0]["content"], "remember")
+
     def test_aggregate_reports_three_run_variance(self):
         protocol = COMPAT.load_protocol()
         protocol["benchmarks"]["locomo"]["questions"] = 1
