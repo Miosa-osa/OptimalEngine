@@ -18,6 +18,7 @@ defmodule OptimalEngine.API.PaginationTest do
 
   alias OptimalEngine.API.Pagination
   alias OptimalEngine.API.Router
+  alias OptimalEngine.Memory.Versioned
 
   @opts Router.init([])
 
@@ -343,6 +344,27 @@ defmodule OptimalEngine.API.PaginationTest do
       conn = request(:get, "/api/search?q=test&limit=9999")
       body = decode(conn)
       assert body["pagination"]["limit"] == 200
+    end
+
+    test "durable memory results retain evidence content and scope" do
+      suffix = System.unique_integer([:positive])
+      workspace = "search-contract-#{suffix}"
+      phrase = "searchcontract#{suffix}"
+
+      assert {:ok, memory} =
+               Versioned.create(%{
+                 content: "#{phrase} evidence body",
+                 workspace_id: workspace,
+                 tenant_id: "default"
+               })
+
+      conn = request(:get, "/api/search?q=#{phrase}&workspace=#{workspace}&tenant=default")
+      body = decode(conn)
+
+      assert [result | _] = body["results"]
+      assert result["id"] == memory.id
+      assert result["content"] == "#{phrase} evidence body"
+      assert result["workspace_id"] == workspace
     end
   end
 
