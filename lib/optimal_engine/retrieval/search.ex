@@ -246,17 +246,28 @@ defmodule OptimalEngine.Retrieval.Search do
   defp semantic_memory_hits(query, opts, limit) do
     case query_embedding(query, opts) do
       {:ok, embedding} when is_list(embedding) and embedding != [] ->
-        with {:ok, results} <-
-               MemoryEmbeddings.search(embedding,
-                 tenant_id: Keyword.get(opts, :tenant_id, "default"),
-                 workspace_id: Keyword.get(opts, :workspace_id, "default"),
-                 model: Keyword.get(opts, :memory_embedding_model, MemoryEmbeddings.model()),
-                 limit: limit,
-                 min_similarity: 0.1
-               ) do
-          Enum.map(results, fn {memory, score} -> semantic_memory_context(memory, score) end)
-        else
-          _ -> []
+        rankings =
+          opts
+          |> memory_embedding_models()
+          |> Enum.map(fn model ->
+            case MemoryEmbeddings.search(embedding,
+                   tenant_id: Keyword.get(opts, :tenant_id, "default"),
+                   workspace_id: Keyword.get(opts, :workspace_id, "default"),
+                   model: model,
+                   limit: limit,
+                   min_similarity: 0.1
+                 ) do
+              {:ok, results} ->
+                Enum.map(results, fn {memory, score} -> semantic_memory_context(memory, score) end)
+
+              _ ->
+                []
+            end
+          end)
+
+        case rankings do
+          [ranking] -> ranking
+          many -> reciprocal_rank_fuse_many(many, limit)
         end
 
       _ ->
@@ -282,10 +293,14 @@ defmodule OptimalEngine.Retrieval.Search do
   end
 
   defp reciprocal_rank_fuse(lexical, semantic, limit) do
-    contexts = Map.new(lexical ++ semantic, &{&1.id, &1})
+    reciprocal_rank_fuse_many([lexical, semantic], limit)
+  end
+
+  defp reciprocal_rank_fuse_many(rankings, limit) do
+    contexts = rankings |> List.flatten() |> Map.new(&{&1.id, &1})
 
     scores =
-      [lexical, semantic]
+      rankings
       |> Enum.reduce(%{}, fn ranking, acc ->
         ranking
         |> Enum.with_index(1)
@@ -295,9 +310,22 @@ defmodule OptimalEngine.Retrieval.Search do
       end)
 
     scores
-    |> Enum.sort_by(fn {_id, score} -> score end, :desc)
+    |> Enum.sort_by(fn {id, score} -> {-score, id} end)
     |> Enum.take(limit)
     |> Enum.map(fn {id, score} -> %{Map.fetch!(contexts, id) | score: Float.round(score, 6)} end)
+  end
+
+  defp memory_embedding_models(opts) do
+    opts
+    |> Keyword.get(:memory_embedding_model, MemoryEmbeddings.model())
+    |> to_string()
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> case do
+      [] -> [MemoryEmbeddings.model()]
+      models -> Enum.uniq(models)
+    end
   end
 
   defp semantic_memory_context(memory, score) do

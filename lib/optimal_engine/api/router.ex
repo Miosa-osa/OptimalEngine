@@ -1747,7 +1747,8 @@ defmodule OptimalEngine.API.Router do
                "provider_model",
                Map.get(body, "model", OptimalEngine.Memory.Versioned.Embeddings.model())
              ),
-           document_prefix: Map.get(body, "document_prefix", "")
+           document_prefix: Map.get(body, "document_prefix", ""),
+           document_profile: Map.get(body, "document_profile")
          ) do
       {:ok, summary} -> json(conn, summary)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
