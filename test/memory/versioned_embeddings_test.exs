@@ -114,6 +114,28 @@ defmodule OptimalEngine.Memory.Versioned.EmbeddingsTest do
     assert result.type == :memory
   end
 
+  test "semantic-only memory search does not require lexical overlap" do
+    {:ok, target} =
+      Versioned.create(%{
+        content: "The quarterly planning ritual happens beside the cedar desk",
+        workspace_id: "semantic-only-search"
+      })
+
+    :ok = Embeddings.put(target, [1.0, 0.0])
+
+    assert {:ok, [result]} =
+             OptimalEngine.search("unrelated lexical vocabulary",
+               workspace_id: "semantic-only-search",
+               tenant_id: "default",
+               vector_enabled: false,
+               query_embedding: [1.0, 0.0],
+               memory_search_mode: :semantic,
+               limit: 1
+             )
+
+    assert result.id == target.id
+  end
+
   test "lexical and semantic search both enforce tenant scope" do
     {:ok, allowed} =
       Versioned.create(%{

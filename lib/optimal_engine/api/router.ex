@@ -154,6 +154,7 @@ defmodule OptimalEngine.API.Router do
     tenant = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
     type = if query_param(conn, "type", "") == "memory", do: :memory, else: nil
     memory_embedding_model = query_param(conn, "memory_embedding_model", nil)
+    memory_search_mode = query_param(conn, "memory_search_mode", "hybrid")
     {offset, limit} = Pagination.parse(conn, 10)
 
     {results, total} =
@@ -168,6 +169,7 @@ defmodule OptimalEngine.API.Router do
                workspace_id: workspace,
                tenant_id: tenant,
                type: type,
+               memory_search_mode: memory_search_mode,
                memory_embedding_model:
                  memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()
              ) do

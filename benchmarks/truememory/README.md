@@ -79,9 +79,11 @@ python3 benchmarks/scripts/truememory_diagnostics.py \
   --out benchmarks/results/truememory/locomo_bm25_diagnostics.json
 ```
 
-The matched runner accepts `--retrieval engine_memory`, `--retrieval engine_semantic`, `--retrieval engine_coverage`, `--retrieval engine_evidence`, `--retrieval bm25`, or `--retrieval oracle`.
+The matched runner accepts `--retrieval engine_memory`, `--retrieval engine_semantic`, `--retrieval engine_semantic_only`, `--retrieval engine_coverage`, `--retrieval engine_evidence`, `--retrieval bm25`, or `--retrieval oracle`.
 The default `engine_memory` strategy is the durable-memory FTS endpoint and serves as the lexical Engine baseline.
 The `engine_semantic` strategy uses the Engine's hybrid search endpoint, where lexical and semantic durable-memory rankings are fused.
+The `engine_semantic_only` strategy bypasses lexical fusion while preserving the same scoped semantic candidate set.
+On the complete 1,540-question LoCoMo retrieval run it preserved 84.081% evidence recall and 93.750% question recall while improving P95 from 596.8 ms to 511.8 ms and P99 from 1,353.4 ms to 612.0 ms.
 The `engine_coverage` strategy is an experimental deterministic query-expansion ablation and is not the default.
 The `engine_evidence` strategy applies those bounded probes to semantic retrieval and reserves part of top-k for complementary results.
 It is an ablation only and must beat the plain semantic baseline on the same complete dataset before it can become a production default.
