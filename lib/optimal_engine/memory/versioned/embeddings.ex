@@ -20,17 +20,22 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
 
   @spec embed_query(String.t(), keyword()) :: {:ok, [float()]} | {:error, term()}
   def embed_query(query, opts \\ []) do
-    Ollama.embed(query, model: Keyword.get(opts, :model, model()))
+    prefix = Keyword.get(opts, :query_prefix, "")
+    Ollama.embed(prefix <> query, model: Keyword.get(opts, :model, model()))
   end
 
   @spec index(Versioned.t(), keyword()) :: :ok | {:error, term()}
   def index(memory, opts \\ []) do
     projection_model = Keyword.get(opts, :model, model())
 
-    embedder =
-      Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: projection_model) end)
+    provider_model = Keyword.get(opts, :provider_model, projection_model)
+    document_prefix = Keyword.get(opts, :document_prefix, "")
 
-    with {:ok, vector} when is_list(vector) and vector != [] <- embedder.(memory.content) do
+    embedder =
+      Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: provider_model) end)
+
+    with {:ok, vector} when is_list(vector) and vector != [] <-
+           embedder.(document_prefix <> memory.content) do
       put(memory, vector, Keyword.put(opts, :model, projection_model))
     else
       {:error, _} = error -> error
@@ -101,8 +106,11 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
   def rebuild(workspace_id, opts \\ []) do
     projection_model = Keyword.get(opts, :model, model())
 
+    provider_model = Keyword.get(opts, :provider_model, projection_model)
+    document_prefix = Keyword.get(opts, :document_prefix, "")
+
     embedder =
-      Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: projection_model) end)
+      Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: provider_model) end)
 
     tenant_id = Keyword.get(opts, :tenant_id, "default")
     limit = Keyword.get(opts, :limit, 100_000)
@@ -133,7 +141,9 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
               index(memory,
                 embedder: embedder,
                 tenant_id: tenant_id,
-                model: projection_model
+                model: projection_model,
+                provider_model: provider_model,
+                document_prefix: document_prefix
               )
             end,
             max_concurrency: concurrency,

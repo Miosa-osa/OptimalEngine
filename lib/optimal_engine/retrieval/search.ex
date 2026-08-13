@@ -273,7 +273,10 @@ defmodule OptimalEngine.Retrieval.Search do
 
       _ ->
         MemoryEmbeddings.embed_query(query,
-          model: Keyword.get(opts, :memory_embedding_model, MemoryEmbeddings.model())
+          model:
+            Keyword.get(opts, :memory_embedding_provider_model) ||
+              Keyword.get(opts, :memory_embedding_model, MemoryEmbeddings.model()),
+          query_prefix: Keyword.get(opts, :memory_query_prefix, "")
         )
     end
   end

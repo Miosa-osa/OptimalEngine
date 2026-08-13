@@ -92,6 +92,28 @@ defmodule OptimalEngine.Memory.Versioned.EmbeddingsTest do
     assert_in_delta score, 1.0, 1.0e-9
   end
 
+  test "rebuildable task profiles prefix documents without changing canonical content" do
+    {:ok, memory} =
+      Versioned.create(%{content: "canonical content", workspace_id: "task-prefix-ws"})
+
+    parent = self()
+
+    assert :ok =
+             Embeddings.index(memory,
+               model: "nomic-search-v1",
+               provider_model: "nomic-embed-text",
+               document_prefix: "search_document: ",
+               embedder: fn content ->
+                 send(parent, {:embedded, content})
+                 {:ok, [1.0, 0.0]}
+               end
+             )
+
+    assert_received {:embedded, "search_document: canonical content"}
+    assert {:ok, persisted} = Versioned.get(memory.id)
+    assert persisted.content == "canonical content"
+  end
+
   test "public search retrieves a semantic durable-memory paraphrase" do
     {:ok, target} =
       Versioned.create(%{

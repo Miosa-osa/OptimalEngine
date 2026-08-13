@@ -154,6 +154,8 @@ defmodule OptimalEngine.API.Router do
     tenant = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
     type = if query_param(conn, "type", "") == "memory", do: :memory, else: nil
     memory_embedding_model = query_param(conn, "memory_embedding_model", nil)
+    memory_embedding_provider_model = query_param(conn, "memory_embedding_provider_model", nil)
+    memory_query_prefix = query_param(conn, "memory_query_prefix", "")
     memory_search_mode = query_param(conn, "memory_search_mode", "hybrid")
     {offset, limit} = Pagination.parse(conn, 10)
 
@@ -170,6 +172,9 @@ defmodule OptimalEngine.API.Router do
                tenant_id: tenant,
                type: type,
                memory_search_mode: memory_search_mode,
+               memory_embedding_provider_model:
+                 memory_embedding_provider_model || memory_embedding_model,
+               memory_query_prefix: memory_query_prefix,
                memory_embedding_model:
                  memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()
              ) do
@@ -1735,7 +1740,14 @@ defmodule OptimalEngine.API.Router do
            tenant_id: tenant_id,
            limit: parse_int(body["limit"], 100_000),
            concurrency: parse_int(body["concurrency"], 4),
-           model: Map.get(body, "model", OptimalEngine.Memory.Versioned.Embeddings.model())
+           model: Map.get(body, "model", OptimalEngine.Memory.Versioned.Embeddings.model()),
+           provider_model:
+             Map.get(
+               body,
+               "provider_model",
+               Map.get(body, "model", OptimalEngine.Memory.Versioned.Embeddings.model())
+             ),
+           document_prefix: Map.get(body, "document_prefix", "")
          ) do
       {:ok, summary} -> json(conn, summary)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
