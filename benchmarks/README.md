@@ -1,5 +1,20 @@
 # Optimal Engine Benchmarks
 
+## Run the complete release scorecard
+
+```bash
+python3 benchmarks/scripts/release_benchmark.py
+```
+
+This runs twelve named benchmark families and writes:
+
+- `benchmarks/results/release-current.json` for automation
+- `benchmarks/results/RELEASE-CURRENT.md` for people
+- `benchmarks/results/release-history.jsonl` for comparisons over time
+
+The twelve families cover the governed Gold Set contract, entity identity, episodic memory, graph reasoning, citation quality, ingestion, recovery, capacity, overload, adversarial mutation, workflow-skill-asset governance, and benchmark history.
+Each suite records its qualification level and any remaining limitation so a harness check cannot masquerade as production proof.
+
 This directory contains dependency-free benchmark harnesses for measuring Optimal Engine quality, speed, safety, and reliability.
 
 ## What the numbers mean

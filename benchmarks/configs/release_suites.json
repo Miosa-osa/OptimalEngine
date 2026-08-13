@@ -1,0 +1,95 @@
+{
+  "version": "release-suites-v1",
+  "suites": [
+    {
+      "id": "gold_set",
+      "name": "Governed Gold Set",
+      "meaning": "Reviewed-case schemas require current evidence, forbidden evidence, authorization, time, and abstention expectations, then run through persisted evaluation.",
+      "commands": [
+        ["python3", "benchmarks/scripts/gold_set_benchmark.py", "--dataset", "benchmarks/datasets/gold_set_sample.jsonl"],
+        ["mix", "test", "--no-color", "test/evaluation_test.exs", "test/reconstruction_evaluation_test.exs"]
+      ],
+      "qualification": "public_contract",
+      "limitation": "Production qualification requires a private human-reviewed OptimalOS dataset."
+    },
+    {
+      "id": "entity_identity",
+      "name": "Entity and identity",
+      "meaning": "Aliases, mentions, merges, and similarly named entities resolve without crossing scope.",
+      "command": ["mix", "test", "--no-color", "test/entity_spine_test.exs", "test/api/workspace_isolation_test.exs"]
+    },
+    {
+      "id": "episodic_memory",
+      "name": "Episodic memory",
+      "meaning": "Meetings, transcripts, speakers, event order, and episode details survive intake and recall.",
+      "command": ["mix", "test", "--no-color", "test/memory/episodic_test.exs", "test/memory_core/episodes_and_detail_objects_test.exs"]
+    },
+    {
+      "id": "graph_reasoning",
+      "name": "Graph and multi-hop reasoning",
+      "meaning": "Relationship traversal remains scoped, bounded, and connected to canonical evidence.",
+      "command": ["mix", "test", "--no-color", "test/graph/semantic_predicates_test.exs", "test/graph/workspace_scoping_test.exs", "test/memory_reconstructor_test.exs"]
+    },
+    {
+      "id": "citation_quality",
+      "name": "Citation and evidence quality",
+      "meaning": "Answers preserve valid source links and expose broken or unsupported citations.",
+      "command": ["mix", "test", "--no-color", "test/wiki/integrity_test.exs", "test/retrieval/deliver_test.exs", "test/reconstruction_evaluation_test.exs"]
+    },
+    {
+      "id": "ingestion_lifecycle",
+      "name": "End-to-end ingestion",
+      "meaning": "Sources become governed claims, facts, memories, episodes, and searchable projections without scope loss.",
+      "command": ["mix", "test", "--no-color", "test/intake_test.exs", "test/pipeline/intake_scope_test.exs", "test/memory_core/truth_lifecycle_test.exs"]
+    },
+    {
+      "id": "crash_recovery",
+      "name": "Crash and recovery",
+      "meaning": "Transactions, backups, retries, and rebuilds do not leave partial or corrupted canonical state.",
+      "command": ["mix", "test", "--no-color", "test/store/transaction_test.exs", "test/ops/backup_test.exs", "test/store/fts_integrity_test.exs"]
+    },
+    {
+      "id": "capacity_soak",
+      "name": "Capacity and soak",
+      "meaning": "Latency, throughput, and reliability remain measurable as request volume and concurrency increase.",
+      "commands": [
+        ["mix", "run", "benchmarks/scripts/storage_capacity_benchmark.exs"],
+        ["python3", "benchmarks/scripts/artifact_gate.py", "--artifact", "benchmarks/results/system_governed_sustained_2026-08-13.json"],
+        ["python3", "-m", "unittest", "benchmarks.tests.test_system_benchmark"]
+      ],
+      "env": {"MIX_ENV": "test", "BENCHMARK_RECORDS": "10000"},
+      "qualification": "paced_smoke",
+      "limitation": "A dedicated large-corpus soak run remains required for production capacity certification."
+    },
+    {
+      "id": "overload_limits",
+      "name": "Overload and rate limits",
+      "meaning": "The Engine rejects excess traffic explicitly, isolates clients, and reports accepted latency honestly.",
+      "command": ["mix", "test", "--no-color", "test/api/rate_limit_test.exs"]
+    },
+    {
+      "id": "adversarial_mutation",
+      "name": "Adversarial mutation",
+      "meaning": "Noisy variants are generated, while stale distractors and hostile authorization text execute against governed retrieval.",
+      "commands": [
+        ["python3", "benchmarks/scripts/mutation_benchmark.py", "--dataset", "benchmarks/datasets/gold_set_sample.jsonl"],
+        ["mix", "test", "--no-color", "test/benchmarks/adversarial_retrieval_test.exs"],
+        ["mix", "test", "--no-color", "test/memory_core/governed_recall_test.exs", "test/api/workspace_authorization_test.exs"]
+      ],
+      "qualification": "deterministic_regression",
+      "limitation": "The public suite uses deterministic mutations rather than an adaptive external attacker."
+    },
+    {
+      "id": "workflow_skill_asset",
+      "name": "Workflow, skill, and asset governance",
+      "meaning": "Only eligible workflows, approved skills, and authorized extracted assets enter context.",
+      "command": ["mix", "test", "--no-color", "test/memory_core/workflow_skill_promotion_test.exs", "test/memory_core/asset_store_test.exs", "test/connectors/asset_ingest_test.exs"]
+    },
+    {
+      "id": "benchmark_history",
+      "name": "Continuous benchmark history",
+      "meaning": "Every release can be compared with a prior baseline and regressions remain visible.",
+      "command": ["python3", "-m", "unittest", "benchmarks.tests.test_benchmark_history"]
+    }
+  ]
+}

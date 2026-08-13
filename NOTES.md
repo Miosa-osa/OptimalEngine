@@ -24,3 +24,5 @@
 - 2026-08-13: Updating a versioned Memory must create a new review-required Claim, and promotion must explicitly supersede the prior accepted Fact.
 - 2026-08-13: Reconstructive recall must preserve traversal rank, prioritize distinctive cues, and reserve Context Package budget for canonical Facts so graph expansion cannot crowd correct evidence out.
 - 2026-08-13: Behavioral benchmark seeding must honor API rate limits and support recorded-run resume because governed promotion creates several writes per case.
+- 2026-08-13: Release benchmark reports must distinguish executed regressions, public data contracts, paced smoke measurements, and production qualification so a green harness cannot overstate coverage.
+- 2026-08-13: Every benchmark history row carries the Engine commit and dataset SHA-256 hashes, and pass-to-fail changes are first-class regressions.
