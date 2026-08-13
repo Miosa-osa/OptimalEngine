@@ -1,0 +1,27 @@
+{
+  "generated_at": "2026-08-13",
+  "protocol": "truememory-compat-v1",
+  "upstream_commit": "e7f1fd79e4188637f9b168337c5a219af890a613",
+  "protocol_verification": "PASS",
+  "dataset_adapters": {
+    "locomo": {"state": "PASS", "questions": 1540, "messages": 5882},
+    "longmemeval_strict": {"state": "PASS", "questions": 500, "messages": 246750},
+    "longmemeval_oracle": {"state": "PASS", "questions": 500, "messages": 10960},
+    "beam_1m": {"state": "PASS_UNIT_ONLY", "questions": 700},
+    "beam_10m": {"state": "PASS_UNIT_ONLY", "questions": 200}
+  },
+  "live_smoke": {
+    "state": "PASS",
+    "questions": 1,
+    "evidence_recall_percent": 100.0,
+    "retrieval_p95_ms": 6.1
+  },
+  "matched_scores": {
+    "locomo": "NOT RUN",
+    "longmemeval_strict": "NOT RUN",
+    "longmemeval_oracle": "NOT RUN",
+    "beam_1m": "NOT RUN",
+    "beam_10m": "NOT RUN"
+  },
+  "blocker": "OPENROUTER_API_KEY is not configured"
+}

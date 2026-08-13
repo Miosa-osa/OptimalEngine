@@ -35,6 +35,19 @@ A green score proves the listed gates on the recorded environment.
 It does not claim that unmeasured workloads are universally optimal.
 The public Gold Set is a sanitized schema fixture; production qualification also requires a private, human-reviewed OptimalOS Gold Set.
 
+### TrueMemory compatibility
+
+The twelve-family release suite above is an internal Optimal Engine qualification suite.
+It is not a TrueMemory score and must never be presented as one.
+
+The repository now includes a separate, pinned TrueMemory-compatible harness for LoCoMo, LongMemEval strict, LongMemEval oracle, BEAM-1M, and BEAM-10M.
+It verifies the upstream commit and protocol constants, adapts the official datasets, uses top-100 retrieval, loads the exact upstream answer and judge prompts at runtime, uses the same models and token limits, takes three judge votes, reports Wilson intervals and run variance, and refuses paid execution without an explicit flag and credential.
+
+Current external answer-quality scores remain **NOT RUN** because `OPENROUTER_API_KEY` is not configured.
+The live retrieval smoke test passed 1/1 with 100% evidence recall at 6.1 ms, but one question is only an integration check and is not a quality claim.
+
+Read the [current TrueMemory compatibility report](benchmarks/results/truememory/COMPATIBILITY-CURRENT.md) and the [reproduction instructions](benchmarks/truememory/README.md).
+
 Optimal Engine is a self-hosted second brain and operating engine for human and
 AI workspaces.
 

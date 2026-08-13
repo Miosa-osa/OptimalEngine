@@ -1,0 +1,33 @@
+{
+  "system": "optimal_engine",
+  "benchmark": "locomo",
+  "protocol": "truememory-compat-v1",
+  "run": 91,
+  "mode": "retrieval_only",
+  "source_sha256": "00c11cc5ed489a54ebaf54fe37ad681ac3e16e203f8f854ceb7f2dfe858aa22c",
+  "total_questions": 1,
+  "total_correct": 1,
+  "retrieval_question_recall": 100.0,
+  "evidence_recall": 100.0,
+  "evidence_found": 1,
+  "evidence_total": 1,
+  "wilson_95": [
+    20.65,
+    100.0
+  ],
+  "retrieval_latency_p50_s": 0.0061,
+  "retrieval_latency_p95_s": 0.0061,
+  "details": [
+    {
+      "id": "conv-26:0",
+      "category": 2,
+      "question": "When did Caroline go to the LGBTQ support group?",
+      "gold": "7 May 2023",
+      "num_retrieved": 10,
+      "evidence_found": 1,
+      "evidence_total": 1,
+      "retrieval_latency_s": 0.0061
+    }
+  ],
+  "answer_evaluation_state": "NOT RUN - requires OPENROUTER_API_KEY"
+}
