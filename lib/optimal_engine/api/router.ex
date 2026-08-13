@@ -1726,7 +1726,8 @@ defmodule OptimalEngine.API.Router do
 
     case OptimalEngine.Memory.Versioned.Embeddings.rebuild(workspace_id,
            tenant_id: tenant_id,
-           limit: parse_int(body["limit"], 100_000)
+           limit: parse_int(body["limit"], 100_000),
+           concurrency: parse_int(body["concurrency"], 4)
          ) do
       {:ok, summary} -> json(conn, summary)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
