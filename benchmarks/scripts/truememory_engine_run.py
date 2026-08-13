@@ -133,6 +133,7 @@ def retrieve_semantic(
     search_mode: str = "hybrid",
     embedding_provider_model: str | None = None,
     query_prefix: str = "",
+    inference_embedding_model: str | None = None,
 ) -> tuple[list[dict], float]:
     started = time.perf_counter()
     params = {
@@ -146,6 +147,8 @@ def retrieve_semantic(
         params["memory_embedding_provider_model"] = embedding_provider_model
     if query_prefix:
         params["memory_query_prefix"] = query_prefix
+    if inference_embedding_model:
+        params["memory_inference_embedding_model"] = inference_embedding_model
     response = get_json(
         f"{engine_url.rstrip('/')}/api/search",
         params,
@@ -431,6 +434,7 @@ def main() -> int:
     parser.add_argument("--embedding-model", help="Memory projection model used by engine_semantic")
     parser.add_argument("--embedding-provider-model", help="Provider model behind a named projection")
     parser.add_argument("--query-prefix", default="", help="Task prefix applied before query embedding")
+    parser.add_argument("--inference-embedding-model", help="Named projection selected for deterministic inference intent")
     args = parser.parse_args()
     protocol = load_protocol()
     config = protocol["benchmarks"][args.benchmark]
@@ -499,6 +503,7 @@ def main() -> int:
                     args.embedding_model,
                     embedding_provider_model=args.embedding_provider_model,
                     query_prefix=args.query_prefix,
+                    inference_embedding_model=args.inference_embedding_model,
                 )
             elif args.retrieval == "engine_semantic_only":
                 memories, latency = retrieve_semantic(
@@ -510,6 +515,7 @@ def main() -> int:
                     "semantic",
                     args.embedding_provider_model,
                     args.query_prefix,
+                    args.inference_embedding_model,
                 )
             elif args.retrieval == "engine_coverage":
                 memories, latency = retrieve_coverage(
@@ -581,6 +587,12 @@ def main() -> int:
         details, args.benchmark, args.run_id, source, args.paid, ingest_seconds, prices,
         args.retrieval,
     )
+    result["retrieval_configuration"] = {
+        "embedding_model": args.embedding_model,
+        "embedding_provider_model": args.embedding_provider_model,
+        "inference_embedding_model": args.inference_embedding_model,
+        "query_prefix": args.query_prefix,
+    }
     if seeded_messages:
         result["ingest_messages_per_second"] = round(seeded_messages / ingest_seconds, 3)
     output.parent.mkdir(parents=True, exist_ok=True)

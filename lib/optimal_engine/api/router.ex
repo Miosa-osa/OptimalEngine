@@ -155,6 +155,7 @@ defmodule OptimalEngine.API.Router do
     type = if query_param(conn, "type", "") == "memory", do: :memory, else: nil
     memory_embedding_model = query_param(conn, "memory_embedding_model", nil)
     memory_embedding_provider_model = query_param(conn, "memory_embedding_provider_model", nil)
+    memory_inference_embedding_model = query_param(conn, "memory_inference_embedding_model", nil)
     memory_query_prefix = query_param(conn, "memory_query_prefix", "")
     memory_search_mode = query_param(conn, "memory_search_mode", "hybrid")
     {offset, limit} = Pagination.parse(conn, 10)
@@ -174,6 +175,7 @@ defmodule OptimalEngine.API.Router do
                memory_search_mode: memory_search_mode,
                memory_embedding_provider_model:
                  memory_embedding_provider_model || memory_embedding_model,
+               memory_inference_embedding_model: memory_inference_embedding_model,
                memory_query_prefix: memory_query_prefix,
                memory_embedding_model:
                  memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()

@@ -31,3 +31,4 @@
 - 2026-08-13: Named Memory embedding projections require `(memory_id, model)` identity; keying only by Memory silently replaces earlier projections and makes ensemble results invalid.
 - 2026-08-13: LoCoMo multimodal preparation preserves source captions but excludes generated image queries, URLs, evidence addresses, answers, and gold labels from Retrieval Documents.
 - 2026-08-13: Compatible semantic projections use max-similarity fusion because rank-agreement fusion suppresses unique modality evidence by rewarding redundant hits.
+- 2026-08-13: Semantic profile routing is deterministic from the Evidence Plan intent; inference uses contextual Retrieval Documents while other intents retain text-plus-multimodal fusion.

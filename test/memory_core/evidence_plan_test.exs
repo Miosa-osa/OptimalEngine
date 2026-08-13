@@ -35,4 +35,10 @@ defmodule OptimalEngine.MemoryCore.EvidencePlanTest do
              required: true
            }
   end
+
+  test "classifies counterfactual and advisory language as inference" do
+    assert EvidencePlan.classify("What career might Maria pursue in the future?") == "inference"
+    assert EvidencePlan.classify("Would Tim enjoy these books?") == "inference"
+    assert EvidencePlan.classify("What advice could Evan give?") == "inference"
+  end
 end
