@@ -128,6 +128,8 @@ def retrieve_semantic(
     top_k: int,
     embedding_model: str | None = None,
     search_mode: str = "hybrid",
+    embedding_provider_model: str | None = None,
+    query_prefix: str = "",
 ) -> tuple[list[dict], float]:
     started = time.perf_counter()
     params = {
@@ -137,6 +139,10 @@ def retrieve_semantic(
     }
     if embedding_model:
         params["memory_embedding_model"] = embedding_model
+    if embedding_provider_model:
+        params["memory_embedding_provider_model"] = embedding_provider_model
+    if query_prefix:
+        params["memory_query_prefix"] = query_prefix
     response = get_json(
         f"{engine_url.rstrip('/')}/api/search",
         params,
@@ -420,6 +426,8 @@ def main() -> int:
     parser.add_argument("--judge-output-cost", type=float, default=0.0, help="USD per million tokens")
     parser.add_argument("--workers", type=int, default=8, help="Concurrent paid answer/judge jobs")
     parser.add_argument("--embedding-model", help="Memory projection model used by engine_semantic")
+    parser.add_argument("--embedding-provider-model", help="Provider model behind a named projection")
+    parser.add_argument("--query-prefix", default="", help="Task prefix applied before query embedding")
     args = parser.parse_args()
     protocol = load_protocol()
     config = protocol["benchmarks"][args.benchmark]
@@ -481,7 +489,13 @@ def main() -> int:
                 memories, latency = retrieve(args.engine_url, workspace, question["question"], top_k)
             elif args.retrieval == "engine_semantic":
                 memories, latency = retrieve_semantic(
-                    args.engine_url, workspace, question["question"], top_k, args.embedding_model
+                    args.engine_url,
+                    workspace,
+                    question["question"],
+                    top_k,
+                    args.embedding_model,
+                    embedding_provider_model=args.embedding_provider_model,
+                    query_prefix=args.query_prefix,
                 )
             elif args.retrieval == "engine_semantic_only":
                 memories, latency = retrieve_semantic(
@@ -491,6 +505,8 @@ def main() -> int:
                     top_k,
                     args.embedding_model,
                     "semantic",
+                    args.embedding_provider_model,
+                    args.query_prefix,
                 )
             elif args.retrieval == "engine_coverage":
                 memories, latency = retrieve_coverage(

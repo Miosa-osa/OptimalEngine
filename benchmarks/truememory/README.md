@@ -91,6 +91,18 @@ It is an ablation only and must beat the plain semantic baseline on the same com
 
 Existing durable memories need their rebuildable semantic projection populated before measuring `engine_semantic`.
 
+Nomic task-profile ablations use a separately named projection so they cannot overwrite the baseline:
+
+```bash
+curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
+  -H 'content-type: application/json' \
+  -d '{"tenant":"default","workspace":"WORKSPACE_ID","model":"nomic-search-v1","provider_model":"nomic-embed-text","document_prefix":"search_document: "}'
+```
+
+Run retrieval with `--embedding-model nomic-search-v1 --embedding-provider-model nomic-embed-text --query-prefix 'search_query: '`.
+The first fixed 200-question LoCoMo ablation improved evidence recall from 88.278% to 89.744% and question recall from 94.949% to 96.970%.
+Treat this as preliminary until the complete dataset finishes.
+
 ```bash
 curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
   -H 'content-type: application/json' \
