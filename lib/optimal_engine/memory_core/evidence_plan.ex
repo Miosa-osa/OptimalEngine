@@ -14,7 +14,8 @@ defmodule OptimalEngine.MemoryCore.EvidencePlan do
   ]
   @temporal ~w[when date dates day days week weeks month months year years before after during
                 first last latest earlier later recently yesterday today tomorrow]
-  @inference ~w[likely infer inferred suggest suggests indicate indicates reason why probably]
+  @inference ~w[likely infer inferred suggest suggests indicate indicates reason why probably
+                might could would advice considering potential potentially]
   @comparison ~w[both compare compared difference differences similar similarities together
                  respectively each all list names activities events]
   @planner_version "evidence-plan-v1"

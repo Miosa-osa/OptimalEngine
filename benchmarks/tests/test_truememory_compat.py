@@ -291,6 +291,16 @@ class TrueMemoryCompatTest(unittest.TestCase):
         self.assertEqual(payload["metadata"]["turn_index"], 4)
         self.assertEqual(payload["metadata"]["modality_text"], "a sunset over a lake")
 
+    def test_semantic_retrieval_sends_inference_profile_override(self):
+        with patch.object(RUNNER, "get_json", return_value={"results": []}) as request:
+            RUNNER.retrieve_semantic(
+                "http://engine", "workspace-1", "What might Alice do?", 100,
+                "task,multimodal", "semantic", "provider", "search_query: ", "contextual",
+            )
+        params = request.call_args.args[1]
+        self.assertEqual(params["memory_embedding_model"], "task,multimodal")
+        self.assertEqual(params["memory_inference_embedding_model"], "contextual")
+
 
 if __name__ == "__main__":
     unittest.main()

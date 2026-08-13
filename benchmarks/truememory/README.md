@@ -133,6 +133,13 @@ The next quality step is deterministic intent routing to the contextual projecti
 
 The multimodal prepared dataset has a distinct source hash and must not be aggregated with the text-only protocol.
 
+Deterministic Profile Router experiments select `nomic-context-v1` only when the production Evidence Plan classifies the query as inference.
+All other requests retain `nomic-search-v1,nomic-multimodal-v1` max-similarity fusion.
+No benchmark category, answer, gold label, or retrieval result participates in routing.
+The complete 1,540-question routed run reached 85.944% evidence recall and 94.661% question recall, with P50 443.3 ms, P95 702.9 ms, and P99 879.1 ms.
+Category-3 inference improved from 57.212% to 60.577% evidence recall and from 82.609% to 84.783% question recall versus unconditional fusion.
+The matched answer-and-judge score remains unrun for this pipeline and must not be inferred from retrieval coverage.
+
 ```bash
 curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
   -H 'content-type: application/json' \

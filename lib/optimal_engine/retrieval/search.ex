@@ -42,6 +42,7 @@ defmodule OptimalEngine.Retrieval.Search do
   alias OptimalEngine.Bridge.Knowledge, as: BridgeKnowledge
   alias OptimalEngine.Bridge.Memory, as: BridgeMemory
   alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
+  alias OptimalEngine.Retrieval.ProfileRouter
 
   @default_limit 10
   @default_half_life 720
@@ -244,10 +245,17 @@ defmodule OptimalEngine.Retrieval.Search do
   end
 
   defp semantic_memory_hits(query, opts, limit) do
+    profile =
+      ProfileRouter.select(
+        query,
+        Keyword.get(opts, :memory_embedding_model, MemoryEmbeddings.model()),
+        Keyword.get(opts, :memory_inference_embedding_model)
+      )
+
     case query_embedding(query, opts) do
       {:ok, embedding} when is_list(embedding) and embedding != [] ->
         rankings =
-          opts
+          profile.models
           |> memory_embedding_models()
           |> Enum.map(fn model ->
             case MemoryEmbeddings.search(embedding,
@@ -328,9 +336,8 @@ defmodule OptimalEngine.Retrieval.Search do
     |> Enum.take(limit)
   end
 
-  defp memory_embedding_models(opts) do
-    opts
-    |> Keyword.get(:memory_embedding_model, MemoryEmbeddings.model())
+  defp memory_embedding_models(models) do
+    models
     |> to_string()
     |> String.split(",", trim: true)
     |> Enum.map(&String.trim/1)
