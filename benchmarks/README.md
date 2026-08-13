@@ -3,6 +3,9 @@
 This directory contains lightweight benchmark harnesses for measuring Optimal
 Engine retrieval quality against question-answer datasets.
 
+The full scorecard and release gates are documented in
+`docs/guides/BENCHMARKING.md`.
+
 The first harness is model-provider agnostic: it calls the local Optimal Engine
 API for answers, then optionally asks a separate judge model to grade the answer
 against a gold answer.
@@ -84,6 +87,20 @@ Each result line includes:
 - final label: `correct`, `partial`, `incorrect`, or `unjudged`
 
 Never put provider API keys in question files or result files.
+
+## System Performance
+
+Measure endpoint tail latency, throughput, reliability, and declared SLOs:
+
+```bash
+python3 benchmarks/scripts/system_benchmark.py \
+  --profile smoke \
+  --workspace default:miosa \
+  --out benchmarks/results/system-smoke.json
+```
+
+Profiles live in `benchmarks/configs/system_profiles.json`.
+Use `interactive` for release qualification and reserve `soak` for an isolated or explicitly scheduled run.
 
 ## Benchmark Card
 

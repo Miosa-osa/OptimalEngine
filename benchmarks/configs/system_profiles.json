@@ -1,0 +1,54 @@
+{
+  "profiles": [
+    {
+      "name": "smoke",
+      "description": "Fast local regression check for every read path.",
+      "requests": 30,
+      "concurrency": 3,
+      "warmup": 3,
+      "queries": [
+        "Optimal Engine hierarchy repair",
+        "current Commas commitment",
+        "TerraWatt commercial plan"
+      ],
+      "targets": {
+        "search": {"p95_ms": 250, "error_rate": 0.0},
+        "rag": {"p95_ms": 1500, "error_rate": 0.0},
+        "assemble": {"p95_ms": 2000, "error_rate": 0.0},
+        "reconstruct": {"p95_ms": 2000, "error_rate": 0.0}
+      }
+    },
+    {
+      "name": "interactive",
+      "description": "Steady interactive workload for release qualification.",
+      "requests": 500,
+      "concurrency": 10,
+      "warmup": 25,
+      "queries": [
+        "current commitments",
+        "recent decisions",
+        "project owners",
+        "what changed and why",
+        "open questions"
+      ],
+      "targets": {
+        "search": {"p95_ms": 300, "p99_ms": 600, "error_rate": 0.001},
+        "rag": {"p95_ms": 1800, "p99_ms": 3000, "error_rate": 0.001},
+        "assemble": {"p95_ms": 2200, "p99_ms": 4000, "error_rate": 0.001},
+        "reconstruct": {"p95_ms": 2200, "p99_ms": 4000, "error_rate": 0.001}
+      }
+    },
+    {
+      "name": "soak",
+      "description": "Long-running stability and tail-latency workload.",
+      "requests": 10000,
+      "concurrency": 25,
+      "warmup": 100,
+      "queries": ["current commitments", "recent decisions", "project owners"],
+      "targets": {
+        "search": {"p95_ms": 400, "p99_ms": 900, "error_rate": 0.001},
+        "rag": {"p95_ms": 2500, "p99_ms": 5000, "error_rate": 0.001}
+      }
+    }
+  ]
+}

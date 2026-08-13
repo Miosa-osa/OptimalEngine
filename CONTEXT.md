@@ -16,6 +16,7 @@ Optimal Engine turns preserved evidence into governed memory and authorized cont
 | Data Steward | Governed remediation interface that clusters review queues, exposes integrity gaps, and applies only explicit human decisions. |
 | Quality Snapshot | Periodic, non-mutating record of data health used to detect regressions over time. |
 | Hierarchy Audit | Verification of Tenant ownership, Organization ownership, Workspace identity, and Node parent, type, and relationship scope. |
+| Benchmark Scorecard | Versioned evaluation result that keeps quality, safety, latency, throughput, resource use, and integrity as separate gates. |
 
 ## Invariants
 
@@ -31,3 +32,4 @@ Optimal Engine turns preserved evidence into governed memory and authorized cont
 - Active Workspace IDs use `<tenant_id>:<slug>`.
 - Every active Workspace belongs to an active Organization in the same Tenant.
 - Node parents, Node Types, and Node Relationships remain inside one Workspace.
+- A passing average cannot override a failed security, correctness, or tail-latency gate.

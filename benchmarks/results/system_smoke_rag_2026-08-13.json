@@ -1,0 +1,40 @@
+{
+  "benchmark_version": "system-benchmark-v1",
+  "endpoints": [
+    {
+      "concurrency": 3,
+      "elapsed_seconds": 97.58810708299279,
+      "endpoint": "rag",
+      "error_rate": 0.0,
+      "errors": [],
+      "failures": 0,
+      "gates": {
+        "error_rate": true,
+        "p95_ms": false,
+        "p99_ms": true
+      },
+      "latency_ms": {
+        "max": 16377.439207979478,
+        "mean": 9672.862906971326,
+        "min": 4498.507124953903,
+        "p50": 9261.859250022098,
+        "p95": 13121.125624980778,
+        "p99": 16377.439207979478
+      },
+      "passed": false,
+      "requests": 30,
+      "response_megabytes": 0.373021,
+      "successes": 30,
+      "throughput_rps": 0.30741450876270004
+    }
+  ],
+  "engine_url": "http://127.0.0.1:4200",
+  "environment": {
+    "cpu_count": 28,
+    "platform": "macOS-26.5-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "passed": false,
+  "profile": "smoke",
+  "workspace": "default:miosa"
+}
