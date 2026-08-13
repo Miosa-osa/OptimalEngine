@@ -1,11 +1,13 @@
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).parents[2]
+sys.path.insert(0, str(ROOT / "benchmarks/scripts"))
 
 
 def load_script(name):
@@ -18,6 +20,8 @@ def load_script(name):
 
 
 COMPAT = load_script("truememory_compat.py")
+DIAGNOSTICS = load_script("truememory_diagnostics.py")
+RUNNER = load_script("truememory_engine_run.py")
 
 
 class TrueMemoryCompatTest(unittest.TestCase):
@@ -51,6 +55,12 @@ class TrueMemoryCompatTest(unittest.TestCase):
         self.assertEqual(len(prepared[0]["questions"]), 1)
         self.assertEqual(prepared[0]["messages"][0]["evidence_tag"], "D1:1")
         self.assertIn("May 09, 2024", prepared[0]["messages"][0]["content"])
+
+    def test_locomo_evidence_normalizes_composites_and_typos(self):
+        self.assertEqual(
+            COMPAT.normalize_locomo_evidence(["D8:6; D9:17", "D:11:26", "D30:05", "D"]),
+            ["D8:6", "D9:17", "D11:26", "D30:5"],
+        )
 
     def test_wilson_interval_contains_observed_accuracy(self):
         lower, upper = COMPAT.wilson(93, 100)
@@ -88,6 +98,7 @@ class TrueMemoryCompatTest(unittest.TestCase):
                 path.write_text(json.dumps({
                     "benchmark": "locomo", "protocol": protocol["version"], "run": index,
                     "mode": "matched_answer_judge", "answer_evaluation_state": "COMPLETE",
+                    "retrieval_strategy": "engine_memory",
                     "source_sha256": "same", "total_questions": 1,
                     "total_correct": 1 if correct > 91 else 0,
                     "details": [{"id": "q1", "correct": correct > 91}],
@@ -104,6 +115,64 @@ class TrueMemoryCompatTest(unittest.TestCase):
             path.write_text(json.dumps({"benchmark": "locomo", "run": 1}))
             with self.assertRaises(ValueError):
                 COMPAT.aggregate([path])
+
+    def test_category_breakdown_reports_accuracy_and_interval(self):
+        result = COMPAT.category_breakdown([
+            {"category": "temporal", "correct": True},
+            {"category": "temporal", "correct": False},
+        ])
+        self.assertEqual(result["temporal"]["accuracy"], 50.0)
+        self.assertEqual(result["temporal"]["total"], 2)
+
+    def test_bm25_ablation_and_oracle_address_integrity(self):
+        prepared = [{
+            "conversation_id": "c1",
+            "messages": [
+                {"content": "favorite color blue", "evidence_tag": "D1:1"},
+                {"content": "unrelated weather", "evidence_tag": "D1:2"},
+            ],
+            "questions": [{"id": "q1", "question": "favorite color", "evidence": ["D1:1"]}],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "prepared.jsonl"
+            path.write_text("\n".join(json.dumps(row) for row in prepared))
+            result = DIAGNOSTICS.evaluate(path, [1, 2])
+        self.assertEqual(result["oracle"]["address_integrity"], "PASS")
+        self.assertEqual(result["ablations"][0]["evidence_recall"], 100.0)
+
+    def test_strict_oracle_diagnostic_matches_question_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            strict = Path(directory) / "strict.jsonl"
+            oracle = Path(directory) / "oracle.jsonl"
+            strict.write_text(json.dumps({"conversation_id": "q1", "messages": [{}, {}, {}]}) + "\n")
+            oracle.write_text(json.dumps({"conversation_id": "q1", "messages": [{}]}) + "\n")
+            result = DIAGNOSTICS.compare_strict_oracle(strict, oracle)
+        self.assertEqual(result["matched_question_ids"], 1)
+        self.assertEqual(result["message_reduction_percent"], 66.667)
+
+    def test_oracle_retrieval_returns_only_gold_evidence(self):
+        conversation = {"messages": [
+            {"content": "gold", "evidence_tag": "D1:1"},
+            {"content": "noise", "evidence_tag": "D1:2"},
+        ]}
+        memories, _latency = RUNNER.local_retrieve(
+            "oracle", conversation, {"evidence": ["D1:1"]}, 100
+        )
+        self.assertEqual(len(memories), 1)
+        self.assertIn("gold", memories[0]["content"])
+
+    def test_paid_summary_marks_unknown_cost_without_prices(self):
+        detail = {
+            "id": "q1", "category": "recall", "correct": True,
+            "evidence_found": 1, "evidence_total": 1, "retrieval_latency_s": 0.01,
+            "answer_usage": {"prompt_tokens": 10, "completion_tokens": 2}, "judge_usage": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "prepared.jsonl"
+            source.write_text("{}\n")
+            result = RUNNER.summarize([detail], "locomo", 1, source, True)
+        self.assertIsNone(result["estimated_cost_usd"])
+        self.assertEqual(result["by_category"]["recall"]["accuracy"], 100.0)
 
 
 if __name__ == "__main__":

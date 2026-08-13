@@ -13,7 +13,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from truememory_compat import load_protocol, percentile, protocol_prompts, sha256, verify_protocol, wilson
+from truememory_compat import category_breakdown, load_protocol, percentile, protocol_prompts, sha256, verify_protocol, wilson
+from truememory_diagnostics import bm25_rank
 
 
 def request_json(method: str, url: str, payload: dict[str, Any] | None = None, retries: int = 8) -> dict[str, Any]:
@@ -50,7 +51,8 @@ def get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_prepared(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    with path.open(encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
 
 
 def ensure_workspace(engine_url: str, slug: str) -> str:
@@ -124,6 +126,21 @@ def evidence_recall(expected: list[str], memories: list[dict[str, Any]]) -> tupl
     text = "\n".join(memory.get("content", "") for memory in memories)
     found = sum(1 for evidence in expected if f"[{evidence}]" in text)
     return found, len(expected)
+
+
+def local_retrieve(
+    strategy: str, conversation: dict[str, Any], question: dict[str, Any], top_k: int
+) -> tuple[list[dict[str, Any]], float]:
+    started = time.perf_counter()
+    if strategy == "bm25":
+        selected = bm25_rank(conversation["messages"], question["question"], top_k)
+    elif strategy == "oracle":
+        evidence = set(question.get("evidence", []))
+        selected = [message for message in conversation["messages"] if message.get("evidence_tag") in evidence]
+    else:
+        raise ValueError(f"unsupported local strategy: {strategy}")
+    memories = [{"content": f"[{item.get('evidence_tag', '')}] {item['content']}"} for item in selected]
+    return memories, time.perf_counter() - started
 
 
 def openrouter_chat(api_key: str, model: str, messages: list[dict[str, str]], max_tokens: int) -> tuple[str, dict]:
@@ -204,7 +221,11 @@ def evaluate_answer(
     }
 
 
-def summarize(details: list[dict[str, Any]], benchmark: str, run_id: int, source: Path, paid: bool) -> dict[str, Any]:
+def summarize(
+    details: list[dict[str, Any]], benchmark: str, run_id: int, source: Path, paid: bool,
+    ingest_seconds: float = 0.0, prices: dict[str, float] | None = None,
+    retrieval_strategy: str = "engine_memory",
+) -> dict[str, Any]:
     recall_found = sum(item["evidence_found"] for item in details)
     recall_total = sum(item["evidence_total"] for item in details)
     hit_questions = sum(item["evidence_found"] > 0 for item in details if item["evidence_total"] > 0)
@@ -217,6 +238,7 @@ def summarize(details: list[dict[str, Any]], benchmark: str, run_id: int, source
         "protocol": "truememory-compat-v1",
         "run": run_id,
         "mode": "matched_answer_judge" if paid else "retrieval_only",
+        "retrieval_strategy": retrieval_strategy,
         "source_sha256": sha256(source),
         "total_questions": len(details),
         "total_correct": answer_correct if paid else hit_questions,
@@ -228,6 +250,8 @@ def summarize(details: list[dict[str, Any]], benchmark: str, run_id: int, source
         "retrieval_latency_p50_s": round(percentile(latencies, 0.50), 4),
         "retrieval_latency_p95_s": round(percentile(latencies, 0.95), 4),
         "retrieval_latency_p99_s": round(percentile(latencies, 0.99), 4),
+        "ingest_time_s": round(ingest_seconds, 4),
+        "ingest_messages_per_second": None,
         "details": details,
         "answer_evaluation_state": "COMPLETE" if paid else "NOT RUN - requires --paid and OPENROUTER_API_KEY",
     }
@@ -241,6 +265,20 @@ def summarize(details: list[dict[str, Any]], benchmark: str, run_id: int, source
             "completion_tokens": sum(int(usage.get("completion_tokens", 0)) for usage in usages),
             "total_tokens": sum(int(usage.get("total_tokens", 0)) for usage in usages),
         }
+        prices = prices or {}
+        result["pricing_usd_per_million_tokens"] = prices
+        result["estimated_cost_usd"] = round(
+            sum(
+                int(item.get("answer_usage", {}).get("prompt_tokens", 0)) * prices.get("answer_input", 0)
+                + int(item.get("answer_usage", {}).get("completion_tokens", 0)) * prices.get("answer_output", 0)
+                + sum(int(use.get("prompt_tokens", 0)) for use in item.get("judge_usage", [])) * prices.get("judge_input", 0)
+                + sum(int(use.get("completion_tokens", 0)) for use in item.get("judge_usage", [])) * prices.get("judge_output", 0)
+                for item in details
+            ) / 1_000_000,
+            6,
+        ) if any(prices.values()) else None
+        result["cost_state"] = "COMPLETE" if any(prices.values()) else "NOT CALCULATED - provide explicit current prices"
+        result["by_category"] = category_breakdown(details)
     return result
 
 
@@ -250,6 +288,8 @@ def main() -> int:
     parser.add_argument("--prepared", required=True)
     parser.add_argument("--engine-url", default="http://127.0.0.1:4200")
     parser.add_argument("--workspace-prefix", default="benchmark:truememory")
+    parser.add_argument("--retrieval", choices=("engine_memory", "bm25", "oracle"), default="engine_memory")
+    parser.add_argument("--top-k", type=int, help="Ablation override; official matched runs must use manifest top-k")
     parser.add_argument("--run-id", type=int, default=1)
     parser.add_argument("--conversation-limit", type=int)
     parser.add_argument("--question-limit", type=int)
@@ -259,9 +299,17 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--paid", action="store_true", help="Run exact upstream answer and three-vote judge protocol")
     parser.add_argument("--upstream", help="Pinned TrueMemory checkout used to load exact prompt literals")
+    parser.add_argument("--resume", action="store_true", help="Resume completed question IDs from --out")
+    parser.add_argument("--answer-input-cost", type=float, default=0.0, help="USD per million tokens")
+    parser.add_argument("--answer-output-cost", type=float, default=0.0, help="USD per million tokens")
+    parser.add_argument("--judge-input-cost", type=float, default=0.0, help="USD per million tokens")
+    parser.add_argument("--judge-output-cost", type=float, default=0.0, help="USD per million tokens")
     args = parser.parse_args()
     protocol = load_protocol()
     config = protocol["benchmarks"][args.benchmark]
+    top_k = args.top_k or config["top_k"]
+    if args.paid and top_k != config["top_k"]:
+        parser.error("official paid runs must use the manifest top-k")
     api_key = os.environ.get("OPENROUTER_API_KEY")
     prompts = None
     if args.paid:
@@ -281,21 +329,33 @@ def main() -> int:
     conversations = load_prepared(source)
     if args.conversation_limit:
         conversations = conversations[: args.conversation_limit]
+    output = Path(args.out)
     details = []
+    if args.resume and output.exists():
+        details = json.loads(output.read_text(encoding="utf-8")).get("details", [])
+    completed_ids = {detail["id"] for detail in details}
+    ingest_started = time.perf_counter()
+    seeded_messages = 0
     remaining_questions = args.question_limit
     for conversation_index, conversation in enumerate(conversations):
         slug = f"{args.workspace_prefix}-{args.benchmark}-r{args.run_id}-c{conversation_index}".replace(":", "-")
-        workspace = ensure_workspace(args.engine_url, slug)
-        if not args.skip_seed:
+        workspace = ensure_workspace(args.engine_url, slug) if args.retrieval == "engine_memory" else None
+        if args.retrieval == "engine_memory" and not args.skip_seed:
             seeded = seed_conversation(
                 args.engine_url, workspace, conversation, args.sleep_ms, args.message_limit
             )
+            seeded_messages += seeded
             print(f"seeded {seeded} messages into {workspace}")
         questions = conversation["questions"]
         if remaining_questions is not None:
             questions = questions[:remaining_questions]
         for question in questions:
-            memories, latency = retrieve(args.engine_url, workspace, question["question"], config["top_k"])
+            if question["id"] in completed_ids:
+                continue
+            if args.retrieval == "engine_memory":
+                memories, latency = retrieve(args.engine_url, workspace, question["question"], top_k)
+            else:
+                memories, latency = local_retrieve(args.retrieval, conversation, question, top_k)
             found, total = evidence_recall(question.get("evidence", []), memories)
             detail = {
                     "id": question["id"],
@@ -310,13 +370,28 @@ def main() -> int:
             if args.paid:
                 detail.update(evaluate_answer(question, memories, prompts, config, protocol["provider"], api_key))
             details.append(detail)
+            checkpoint = summarize(
+                details, args.benchmark, args.run_id, source, args.paid,
+                retrieval_strategy=args.retrieval,
+            )
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(checkpoint, indent=2) + "\n", encoding="utf-8")
             print(f"[{len(details)}] {question['id']} evidence={found}/{total} latency={latency:.3f}s")
         if remaining_questions is not None:
             remaining_questions -= len(questions)
             if remaining_questions <= 0:
                 break
-    result = summarize(details, args.benchmark, args.run_id, source, args.paid)
-    output = Path(args.out)
+    ingest_seconds = time.perf_counter() - ingest_started
+    prices = {
+        "answer_input": args.answer_input_cost, "answer_output": args.answer_output_cost,
+        "judge_input": args.judge_input_cost, "judge_output": args.judge_output_cost,
+    }
+    result = summarize(
+        details, args.benchmark, args.run_id, source, args.paid, ingest_seconds, prices,
+        args.retrieval,
+    )
+    if seeded_messages:
+        result["ingest_messages_per_second"] = round(seeded_messages / ingest_seconds, 3)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items() if key != "details"}, indent=2))

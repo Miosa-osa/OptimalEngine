@@ -161,6 +161,15 @@ def resolve_relative_time(text: str, date_string: str) -> str:
     return text
 
 
+def normalize_locomo_evidence(values: list[str]) -> list[str]:
+    """Normalize known delimiter and formatting inconsistencies in LoCoMo annotations."""
+    normalized = []
+    for value in values:
+        for match in re.finditer(r"D:?([0-9]+):([0-9]+)", value):
+            normalized.append(f"D{int(match.group(1))}:{int(match.group(2))}")
+    return list(dict.fromkeys(normalized))
+
+
 def load_locomo(path: Path) -> list[dict[str, Any]]:
     conversations = json.loads(path.read_text(encoding="utf-8"))
     prepared = []
@@ -198,7 +207,8 @@ def load_locomo(path: Path) -> list[dict[str, Any]]:
                 "question": item["question"],
                 "gold": item["answer"],
                 "category": item["category"],
-                "evidence": item.get("evidence", []),
+                "evidence": normalize_locomo_evidence(item.get("evidence", [])),
+                "evidence_raw": item.get("evidence", []),
             }
             for index, item in enumerate(conversation["qa"])
             if item["category"] != 5
@@ -346,6 +356,19 @@ def percentile(values: list[float], quantile: float) -> float:
     return ordered[max(math.ceil(len(ordered) * quantile) - 1, 0)]
 
 
+def category_breakdown(details: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    result = {}
+    for detail in details:
+        category = str(detail.get("category", "unknown"))
+        bucket = result.setdefault(category, {"correct": 0, "total": 0})
+        bucket["total"] += 1
+        bucket["correct"] += int(bool(detail.get("correct")))
+    for bucket in result.values():
+        bucket["accuracy"] = round(bucket["correct"] / bucket["total"] * 100, 3)
+        bucket["wilson_95"] = wilson(bucket["correct"], bucket["total"])
+    return dict(sorted(result.items()))
+
+
 def validate_runs(runs: list[dict[str, Any]], protocol: dict[str, Any]) -> None:
     if not runs:
         raise ValueError("no runs supplied")
@@ -358,6 +381,7 @@ def validate_runs(runs: list[dict[str, Any]], protocol: dict[str, Any]) -> None:
     if len(runs) != config["runs"] or actual_runs != expected_runs:
         raise ValueError(f"requires distinct complete runs {sorted(expected_runs)}")
     source_hashes = {run.get("source_sha256") for run in runs}
+    strategies = {run.get("retrieval_strategy") for run in runs}
     for run in runs:
         if run.get("benchmark") != benchmark or run.get("protocol") != protocol["version"]:
             raise ValueError("mixed benchmark or protocol")
@@ -370,6 +394,8 @@ def validate_runs(runs: list[dict[str, Any]], protocol: dict[str, Any]) -> None:
             raise ValueError("run contains missing or duplicate question IDs")
     if len(source_hashes) != 1:
         raise ValueError("runs use different prepared datasets")
+    if len(strategies) != 1:
+        raise ValueError("runs use different retrieval strategies")
 
 
 def aggregate(paths: list[Path], protocol: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -400,6 +426,15 @@ def aggregate(paths: list[Path], protocol: dict[str, Any] | None = None) -> dict
         "total_questions_per_run": first_total,
         "mean_correct": mean_correct,
         "wilson_95": wilson(mean_correct, first_total),
+        "by_category": category_breakdown(details),
+        "model_usage": {
+            key: sum(int(run.get("model_usage", {}).get(key, 0)) for run in runs)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        },
+        "estimated_cost_usd": (
+            round(sum(float(run["estimated_cost_usd"]) for run in runs), 6)
+            if all(run.get("estimated_cost_usd") is not None for run in runs) else None
+        ),
         "latency_p50_s": round(percentile(latencies, 0.50), 3),
         "latency_p95_s": round(percentile(latencies, 0.95), 3),
         "latency_p99_s": round(percentile(latencies, 0.99), 3),

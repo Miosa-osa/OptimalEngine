@@ -1,0 +1,15 @@
+{
+  "version": "longmemeval-strict-oracle-diagnostic-v1",
+  "strict_sha256": "89ab9f52e157e3e178ee50e9995d581ed68c45e9e64d6459a7f9892a7bb24347",
+  "oracle_sha256": "38e23859b14f40be8df4fa1050622ad93712aba03effb2a28e3c9bdbcde532e6",
+  "strict_cases": 500,
+  "oracle_cases": 500,
+  "matched_question_ids": 500,
+  "missing_from_oracle": [],
+  "missing_from_strict": [],
+  "strict_messages": 246750,
+  "oracle_messages": 10960,
+  "message_reduction_percent": 95.558,
+  "per_case_reduction_p50": 95.445,
+  "per_case_reduction_p95": 98.464
+}

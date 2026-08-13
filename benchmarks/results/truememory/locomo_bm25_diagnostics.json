@@ -1,0 +1,121 @@
+{
+  "version": "truememory-diagnostics-v1",
+  "prepared_sha256": "0bd74ca476262c2241133520660a7471922e33ffac3a01eeb52755893131c733",
+  "oracle": {
+    "questions": 1536,
+    "evidence_addresses": 2362,
+    "missing_addresses": 2,
+    "missing": [
+      {
+        "conversation_id": "conv-42",
+        "question_id": "conv-42:58",
+        "address": "D10:19"
+      },
+      {
+        "conversation_id": "conv-47",
+        "question_id": "conv-47:38",
+        "address": "D4:36"
+      }
+    ],
+    "resolvable_addresses": 2360,
+    "address_integrity": "UPSTREAM_ANNOTATION_GAPS"
+  },
+  "ablations": [
+    {
+      "strategy": "bm25",
+      "top_k": 1,
+      "questions": 1536,
+      "question_recall": 24.349,
+      "evidence_recall": 15.834,
+      "evidence_found": 374,
+      "evidence_total": 2362,
+      "wilson_95": [
+        22.27,
+        26.56
+      ],
+      "latency_p50_ms": 5.599,
+      "latency_p95_ms": 7.175,
+      "latency_p99_ms": 7.871
+    },
+    {
+      "strategy": "bm25",
+      "top_k": 5,
+      "questions": 1536,
+      "question_recall": 45.117,
+      "evidence_recall": 30.567,
+      "evidence_found": 722,
+      "evidence_total": 2362,
+      "wilson_95": [
+        42.64,
+        47.61
+      ],
+      "latency_p50_ms": 5.607,
+      "latency_p95_ms": 7.175,
+      "latency_p99_ms": 7.771
+    },
+    {
+      "strategy": "bm25",
+      "top_k": 10,
+      "questions": 1536,
+      "question_recall": 53.841,
+      "evidence_recall": 37.511,
+      "evidence_found": 886,
+      "evidence_total": 2362,
+      "wilson_95": [
+        51.34,
+        56.32
+      ],
+      "latency_p50_ms": 5.634,
+      "latency_p95_ms": 7.142,
+      "latency_p99_ms": 7.843
+    },
+    {
+      "strategy": "bm25",
+      "top_k": 25,
+      "questions": 1536,
+      "question_recall": 64.453,
+      "evidence_recall": 46.613,
+      "evidence_found": 1101,
+      "evidence_total": 2362,
+      "wilson_95": [
+        62.03,
+        66.81
+      ],
+      "latency_p50_ms": 5.59,
+      "latency_p95_ms": 7.244,
+      "latency_p99_ms": 7.926
+    },
+    {
+      "strategy": "bm25",
+      "top_k": 50,
+      "questions": 1536,
+      "question_recall": 71.029,
+      "evidence_recall": 53.429,
+      "evidence_found": 1262,
+      "evidence_total": 2362,
+      "wilson_95": [
+        68.71,
+        73.24
+      ],
+      "latency_p50_ms": 5.626,
+      "latency_p95_ms": 7.217,
+      "latency_p99_ms": 7.85
+    },
+    {
+      "strategy": "bm25",
+      "top_k": 100,
+      "questions": 1536,
+      "question_recall": 77.409,
+      "evidence_recall": 61.346,
+      "evidence_found": 1449,
+      "evidence_total": 2362,
+      "wilson_95": [
+        75.25,
+        79.43
+      ],
+      "latency_p50_ms": 5.605,
+      "latency_p95_ms": 7.144,
+      "latency_p99_ms": 7.985
+    }
+  ]
+}

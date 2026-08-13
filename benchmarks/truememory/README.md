@@ -33,6 +33,15 @@ python3 benchmarks/scripts/truememory_compat.py prepare \
 The BEAM adapter accepts a JSON export of the Hugging Face rows with `conversation_id`, `chat`, and `probing_questions` fields.
 Use benchmark names `beam_1m` and `beam_10m` when preparing those exports.
 
+Run the strict-versus-oracle corpus diagnostic:
+
+```bash
+python3 benchmarks/scripts/truememory_diagnostics.py \
+  --prepared /tmp/optimal-truememory/longmemeval_strict.jsonl \
+  --oracle-prepared /tmp/optimal-truememory/longmemeval_oracle.jsonl \
+  --out benchmarks/results/truememory/longmemeval_strict_oracle_diagnostics.json
+```
+
 ## Run retrieval-only integration checks
 
 The runner creates an isolated workspace per conversation and uses the canonical workspace ID returned by the Engine.
@@ -49,6 +58,19 @@ python3 benchmarks/scripts/truememory_engine_run.py \
 `--message-limit` and `--question-limit` exist only for smoke testing.
 Do not compare a limited run with a published benchmark score.
 
+Run the dependency-free BM25 top-k ablation and validate LoCoMo oracle evidence addresses:
+
+```bash
+python3 benchmarks/scripts/truememory_diagnostics.py \
+  --prepared /tmp/optimal-truememory/locomo.jsonl \
+  --top-k 1 5 10 25 50 100 \
+  --out benchmarks/results/truememory/locomo_bm25_diagnostics.json
+```
+
+The matched runner also accepts `--retrieval engine_memory`, `--retrieval bm25`, or `--retrieval oracle`.
+The default is the Optimal Engine Memory endpoint.
+`--top-k` supports diagnostic ablations, but paid official runs reject a value that differs from the pinned protocol.
+
 ## Run the matched answer and judge protocol
 
 Paid evaluation is opt-in and fails closed when its credential or pinned upstream checkout is missing.
@@ -64,6 +86,11 @@ for run in 1 2 3; do
     --prepared /tmp/optimal-truememory/locomo.jsonl \
     --upstream /tmp/truememory \
     --paid \
+    --resume \
+    --answer-input-cost CURRENT_USD_PER_MILLION \
+    --answer-output-cost CURRENT_USD_PER_MILLION \
+    --judge-input-cost CURRENT_USD_PER_MILLION \
+    --judge-output-cost CURRENT_USD_PER_MILLION \
     --run-id "$run" \
     --out "benchmarks/results/truememory/optimal_engine_locomo_run${run}.json"
 done
@@ -80,6 +107,13 @@ python3 benchmarks/scripts/truememory_compat.py aggregate \
 - P50 and P95 show typical and slow retrieval latency.
 - The Wilson interval shows uncertainty around measured accuracy.
 - Standard deviation shows variation across the required three complete runs.
+- Token totals come from provider response usage.
+- Estimated cost is calculated only when explicit current per-million-token prices are supplied.
+- Ingestion throughput and retrieval P50, P95, and P99 remain separate from model latency.
 - `NOT RUN` means no result exists and is never converted into a zero or a pass.
+
+Every completed question is checkpointed to the output file.
+Use `--resume` to skip those question IDs after an interruption.
+Aggregation rejects partial runs, duplicate question IDs, mixed datasets, mixed strategies, mixed protocols, and anything other than distinct complete runs 1, 2, and 3.
 
 The Engine is eligible to claim TrueMemory-compatible results only after all official cases complete for three runs with the pinned protocol.
