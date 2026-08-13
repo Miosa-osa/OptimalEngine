@@ -10,14 +10,28 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
   alias OptimalEngine.Memory.Versioned
   alias OptimalEngine.Store
 
-  @model "nomic-embed-text"
+  @fallback_model "nomic-embed-text"
+
+  @spec model() :: String.t()
+  def model do
+    Application.get_env(:optimal_engine, :memory_embeddings, [])
+    |> Keyword.get(:model, @fallback_model)
+  end
+
+  @spec embed_query(String.t(), keyword()) :: {:ok, [float()]} | {:error, term()}
+  def embed_query(query, opts \\ []) do
+    Ollama.embed(query, model: Keyword.get(opts, :model, model()))
+  end
 
   @spec index(Versioned.t(), keyword()) :: :ok | {:error, term()}
   def index(memory, opts \\ []) do
-    embedder = Keyword.get(opts, :embedder, &Ollama.embed/1)
+    projection_model = Keyword.get(opts, :model, model())
+
+    embedder =
+      Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: projection_model) end)
 
     with {:ok, vector} when is_list(vector) and vector != [] <- embedder.(memory.content) do
-      put(memory, vector, opts)
+      put(memory, vector, Keyword.put(opts, :model, projection_model))
     else
       {:error, _} = error -> error
       _ -> {:error, :invalid_embedding}
@@ -26,7 +40,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
 
   @spec put(Versioned.t(), [float()], keyword()) :: :ok | {:error, term()}
   def put(memory, embedding, opts \\ []) when is_list(embedding) do
-    model = Keyword.get(opts, :model, @model)
+    model = Keyword.get(opts, :model, model())
     blob = encode(embedding)
 
     sql = """
@@ -53,7 +67,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
   def search(query_embedding, opts) when is_list(query_embedding) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
     workspace_id = Keyword.fetch!(opts, :workspace_id)
-    model = Keyword.get(opts, :model, @model)
+    model = Keyword.get(opts, :model, model())
     limit = Keyword.get(opts, :limit, 10)
     min_similarity = Keyword.get(opts, :min_similarity, 0.1)
 
@@ -85,7 +99,11 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
 
   @spec rebuild(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def rebuild(workspace_id, opts \\ []) do
-    embedder = Keyword.get(opts, :embedder, &Ollama.embed/1)
+    projection_model = Keyword.get(opts, :model, model())
+
+    embedder =
+      Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: projection_model) end)
+
     tenant_id = Keyword.get(opts, :tenant_id, "default")
     limit = Keyword.get(opts, :limit, 100_000)
     concurrency = opts |> Keyword.get(:concurrency, 4) |> max(1) |> min(32)
@@ -111,7 +129,13 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
         summary =
           memories
           |> Task.async_stream(
-            fn memory -> index(memory, embedder: embedder, tenant_id: tenant_id) end,
+            fn memory ->
+              index(memory,
+                embedder: embedder,
+                tenant_id: tenant_id,
+                model: projection_model
+              )
+            end,
             max_concurrency: concurrency,
             ordered: false,
             timeout: 120_000
@@ -121,7 +145,12 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
             _, counts -> Map.update!(counts, :failed, &(&1 + 1))
           end)
 
-        {:ok, Map.merge(summary, %{workspace_id: workspace_id, total: length(memories)})}
+        {:ok,
+         Map.merge(summary, %{
+           workspace_id: workspace_id,
+           total: length(memories),
+           model: projection_model
+         })}
 
       {:error, _} = error ->
         error

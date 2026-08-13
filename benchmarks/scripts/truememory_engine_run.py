@@ -121,11 +121,19 @@ def retrieve(engine_url: str, workspace: str, question: str, top_k: int) -> tupl
     return response.get("memories") or [], time.perf_counter() - started
 
 
-def retrieve_semantic(engine_url: str, workspace: str, question: str, top_k: int) -> tuple[list[dict], float]:
+def retrieve_semantic(
+    engine_url: str, workspace: str, question: str, top_k: int, embedding_model: str | None = None
+) -> tuple[list[dict], float]:
     started = time.perf_counter()
+    params = {
+        "tenant": "default", "workspace": workspace, "type": "memory",
+        "q": question, "limit": top_k,
+    }
+    if embedding_model:
+        params["memory_embedding_model"] = embedding_model
     response = get_json(
         f"{engine_url.rstrip('/')}/api/search",
-        {"tenant": "default", "workspace": workspace, "type": "memory", "q": question, "limit": top_k},
+        params,
     )
     return response.get("results") or [], time.perf_counter() - started
 
@@ -383,6 +391,7 @@ def main() -> int:
     parser.add_argument("--judge-input-cost", type=float, default=0.0, help="USD per million tokens")
     parser.add_argument("--judge-output-cost", type=float, default=0.0, help="USD per million tokens")
     parser.add_argument("--workers", type=int, default=8, help="Concurrent paid answer/judge jobs")
+    parser.add_argument("--embedding-model", help="Memory projection model used by engine_semantic")
     args = parser.parse_args()
     protocol = load_protocol()
     config = protocol["benchmarks"][args.benchmark]
@@ -444,7 +453,7 @@ def main() -> int:
                 memories, latency = retrieve(args.engine_url, workspace, question["question"], top_k)
             elif args.retrieval == "engine_semantic":
                 memories, latency = retrieve_semantic(
-                    args.engine_url, workspace, question["question"], top_k
+                    args.engine_url, workspace, question["question"], top_k, args.embedding_model
                 )
             elif args.retrieval == "engine_coverage":
                 memories, latency = retrieve_coverage(

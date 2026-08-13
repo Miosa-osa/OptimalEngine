@@ -245,6 +245,7 @@ defmodule OptimalEngine.Retrieval.Search do
                MemoryEmbeddings.search(embedding,
                  tenant_id: Keyword.get(opts, :tenant_id, "default"),
                  workspace_id: Keyword.get(opts, :workspace_id, "default"),
+                 model: Keyword.get(opts, :memory_embedding_model, MemoryEmbeddings.model()),
                  limit: limit,
                  min_similarity: 0.1
                ) do
@@ -262,8 +263,13 @@ defmodule OptimalEngine.Retrieval.Search do
 
   defp query_embedding(query, opts) do
     case Keyword.get(opts, :query_embedding) do
-      embedding when is_list(embedding) and embedding != [] -> {:ok, embedding}
-      _ -> if Ollama.embed_healthy?(), do: Ollama.embed(query), else: {:error, :unavailable}
+      embedding when is_list(embedding) and embedding != [] ->
+        {:ok, embedding}
+
+      _ ->
+        MemoryEmbeddings.embed_query(query,
+          model: Keyword.get(opts, :memory_embedding_model, MemoryEmbeddings.model())
+        )
     end
   end
 
