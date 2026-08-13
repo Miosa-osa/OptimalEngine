@@ -16,6 +16,17 @@
     "evidence_recall_percent": 100.0,
     "retrieval_p95_ms": 6.1
   },
+  "diagnostics": {
+    "locomo_bm25_top100_question_recall_percent": 77.409,
+    "locomo_bm25_top100_evidence_recall_percent": 61.346,
+    "locomo_bm25_top100_p95_ms": 7.192,
+    "locomo_gold_addresses": 2362,
+    "locomo_unresolvable_upstream_addresses": 2,
+    "longmemeval_matched_question_ids": 500,
+    "longmemeval_strict_messages": 246750,
+    "longmemeval_oracle_messages": 10960,
+    "longmemeval_oracle_message_reduction_percent": 95.558
+  },
   "matched_scores": {
     "locomo": "NOT RUN",
     "longmemeval_strict": "NOT RUN",

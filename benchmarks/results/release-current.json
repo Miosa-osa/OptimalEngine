@@ -1,6 +1,6 @@
 {
   "benchmark_version": "release-suites-v1",
-  "commit": "83eb9afc97bb2f9c6d3c5cde5463c9be2fcc12d9",
+  "commit": "d33db4c2a4162fd1175c9175e589a4e57de89217",
   "dataset_hashes": {
     "benchmarks/datasets/gold_set_sample.jsonl": "32b4330f39ec893dcaf89b2d11c5bf4a3567f01197a83ed122f8c3babbbdf618"
   },
@@ -8,7 +8,7 @@
     "platform": "macOS-26.5-arm64-arm-64bit-Mach-O",
     "python": "3.14.6"
   },
-  "generated_at": "2026-08-13T16:17:31.314661+00:00",
+  "generated_at": "2026-08-13T16:42:51.552888+00:00",
   "passed": true,
   "passed_suites": 12,
   "suites": [
@@ -28,7 +28,7 @@
           "test/reconstruction_evaluation_test.exs"
         ]
       ],
-      "elapsed_seconds": 1.552,
+      "elapsed_seconds": 1.606,
       "id": "gold_set",
       "limitation": "Production qualification requires a private human-reviewed OptimalOS dataset.",
       "meaning": "Reviewed-case schemas require current evidence, forbidden evidence, authorization, time, and abstention expectations, then run through persisted evaluation.",
@@ -53,7 +53,7 @@
           "test/api/workspace_isolation_test.exs"
         ]
       ],
-      "elapsed_seconds": 1.408,
+      "elapsed_seconds": 1.531,
       "id": "entity_identity",
       "limitation": null,
       "meaning": "Aliases, mentions, merges, and similarly named entities resolve without crossing scope.",
@@ -76,7 +76,7 @@
           "test/memory_core/episodes_and_detail_objects_test.exs"
         ]
       ],
-      "elapsed_seconds": 1.305,
+      "elapsed_seconds": 1.258,
       "id": "episodic_memory",
       "limitation": null,
       "meaning": "Meetings, transcripts, speakers, event order, and episode details survive intake and recall.",
@@ -100,7 +100,7 @@
           "test/memory_reconstructor_test.exs"
         ]
       ],
-      "elapsed_seconds": 1.354,
+      "elapsed_seconds": 1.332,
       "id": "graph_reasoning",
       "limitation": null,
       "meaning": "Relationship traversal remains scoped, bounded, and connected to canonical evidence.",
@@ -124,7 +124,7 @@
           "test/reconstruction_evaluation_test.exs"
         ]
       ],
-      "elapsed_seconds": 1.256,
+      "elapsed_seconds": 1.163,
       "id": "citation_quality",
       "limitation": null,
       "meaning": "Answers preserve valid source links and expose broken or unsupported citations.",
@@ -148,7 +148,7 @@
           "test/memory_core/truth_lifecycle_test.exs"
         ]
       ],
-      "elapsed_seconds": 2.072,
+      "elapsed_seconds": 1.949,
       "id": "ingestion_lifecycle",
       "limitation": null,
       "meaning": "Sources become governed claims, facts, memories, episodes, and searchable projections without scope loss.",
@@ -172,7 +172,7 @@
           "test/store/fts_integrity_test.exs"
         ]
       ],
-      "elapsed_seconds": 1.291,
+      "elapsed_seconds": 1.242,
       "id": "crash_recovery",
       "limitation": null,
       "meaning": "Transactions, backups, retries, and rebuilds do not leave partial or corrupted canonical state.",
@@ -205,18 +205,18 @@
           "benchmarks.tests.test_system_benchmark"
         ]
       ],
-      "elapsed_seconds": 1.447,
+      "elapsed_seconds": 1.361,
       "id": "capacity_soak",
       "limitation": "A dedicated large-corpus soak run remains required for production capacity certification.",
       "meaning": "Latency, throughput, and reliability remain measurable as request volume and concurrency increase.",
       "metrics": {
         "database_growth_bytes": 876544,
         "endpoints": 2,
-        "insert_ms": 380.288,
-        "inserts_per_second": 26295.9,
-        "lookup_p50_ms": 0.022,
-        "lookup_p95_ms": 0.064,
-        "lookup_p99_ms": 0.095,
+        "insert_ms": 421.51,
+        "inserts_per_second": 23724.2,
+        "lookup_p50_ms": 0.025,
+        "lookup_p95_ms": 0.207,
+        "lookup_p99_ms": 0.336,
         "records": 10000
       },
       "name": "Capacity and soak",
@@ -233,7 +233,7 @@
           "test/api/rate_limit_test.exs"
         ]
       ],
-      "elapsed_seconds": 2.048,
+      "elapsed_seconds": 2.192,
       "id": "overload_limits",
       "limitation": null,
       "meaning": "The Engine rejects excess traffic explicitly, isolates clients, and reports accepted latency honestly.",
@@ -268,7 +268,7 @@
           "test/api/workspace_authorization_test.exs"
         ]
       ],
-      "elapsed_seconds": 2.955,
+      "elapsed_seconds": 2.886,
       "id": "adversarial_mutation",
       "limitation": "The public suite uses deterministic mutations rather than an adaptive external attacker.",
       "meaning": "Noisy variants are generated, while stale distractors and hostile authorization text execute against governed retrieval.",
@@ -293,7 +293,7 @@
           "test/connectors/asset_ingest_test.exs"
         ]
       ],
-      "elapsed_seconds": 1.464,
+      "elapsed_seconds": 1.401,
       "id": "workflow_skill_asset",
       "limitation": null,
       "meaning": "Only eligible workflows, approved skills, and authorized extracted assets enter context.",
@@ -315,7 +315,7 @@
           "benchmarks.tests.test_benchmark_history"
         ]
       ],
-      "elapsed_seconds": 0.053,
+      "elapsed_seconds": 0.051,
       "id": "benchmark_history",
       "limitation": null,
       "meaning": "Every release can be compared with a prior baseline and regressions remain visible.",
