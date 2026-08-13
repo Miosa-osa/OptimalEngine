@@ -29,6 +29,15 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def source_sha256(path: Path) -> str:
+    if path.is_file():
+        return sha256(path)
+    digest = hashlib.sha256()
+    for child in sorted(path.glob("*.parquet")):
+        digest.update(bytes.fromhex(sha256(child)))
+    return digest.hexdigest()
+
+
 def load_protocol(path: Path = DEFAULT_PROTOCOL) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -284,12 +293,40 @@ def parse_beam_questions(value: str) -> list[dict[str, Any]]:
 
 
 def load_beam(path: Path) -> list[dict[str, Any]]:
-    rows = json.loads(path.read_text(encoding="utf-8"))
+    if path.suffix == ".parquet" or path.is_dir():
+        try:
+            import pyarrow.parquet as parquet
+        except ImportError as error:
+            raise RuntimeError("BEAM parquet input requires optional pyarrow") from error
+        files = sorted(path.glob("*.parquet")) if path.is_dir() else [path]
+        rows = []
+        for file in files:
+            rows.extend(parquet.read_table(file).to_pylist())
+    else:
+        rows = json.loads(path.read_text(encoding="utf-8"))
     prepared = []
     for row_index, row in enumerate(rows):
         messages = []
         for session_index, session in enumerate(row["chat"]):
-            for turn in session:
+            turns = []
+            if isinstance(session, list):
+                turns = [turn for turn in session if isinstance(turn, dict)]
+            elif isinstance(session, dict):
+                keys = sorted(
+                    session,
+                    key=lambda key: int(key.split("-")[1])
+                    if "-" in key and key.split("-")[1].isdigit() else 0,
+                )
+                for key in keys:
+                    plan = session[key]
+                    if not isinstance(plan, list):
+                        continue
+                    for batch in plan:
+                        if not isinstance(batch, dict):
+                            continue
+                        for turn_group in batch.get("turns", []):
+                            turns.extend(turn for turn in turn_group if isinstance(turn, dict))
+            for turn in turns:
                 role = turn.get("role", "user")
                 messages.append(
                     {
@@ -320,7 +357,8 @@ def prepare_dataset(name: str, source: Path, destination: Path) -> dict[str, Any
     else:
         raise ValueError(f"unsupported benchmark: {name}")
     expected_hash = load_protocol()["benchmarks"][name].get("source_sha256")
-    if expected_hash and sha256(source) != expected_hash:
+    actual_source_hash = source_sha256(source)
+    if expected_hash and actual_source_hash != expected_hash:
         raise RuntimeError(f"dataset hash mismatch for {name}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("w", encoding="utf-8") as output:
@@ -329,7 +367,7 @@ def prepare_dataset(name: str, source: Path, destination: Path) -> dict[str, Any
     result = {
         "benchmark": name,
         "source": str(source),
-        "source_sha256": sha256(source),
+        "source_sha256": actual_source_hash,
         "output": str(destination),
         "output_sha256": sha256(destination),
         "conversations": len(conversations),

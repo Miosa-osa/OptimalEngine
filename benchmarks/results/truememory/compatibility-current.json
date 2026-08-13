@@ -7,8 +7,8 @@
     "locomo": {"state": "PASS", "questions": 1540, "messages": 5882},
     "longmemeval_strict": {"state": "PASS", "questions": 500, "messages": 246750},
     "longmemeval_oracle": {"state": "PASS", "questions": 500, "messages": 10960},
-    "beam_1m": {"state": "PASS_UNIT_ONLY", "questions": 700},
-    "beam_10m": {"state": "PASS_UNIT_ONLY", "questions": 200}
+    "beam_1m": {"state": "PASS", "conversations": 35, "messages": 74630, "questions": 700},
+    "beam_10m": {"state": "PASS", "conversations": 10, "messages": 208696, "questions": 200}
   },
   "live_smoke": {
     "state": "PASS",

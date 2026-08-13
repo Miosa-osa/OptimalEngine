@@ -8,7 +8,8 @@ Generated and verified on 2026-08-13.
 | LoCoMo adapter | PASS | Official source hash verified; 10 conversations, 5,882 messages, 1,540 scored questions; category 5 excluded. |
 | LongMemEval strict adapter | PASS | Official source hash verified; 500 cases and 246,750 messages. |
 | LongMemEval oracle adapter | PASS | Official source hash verified; 500 cases and 10,960 messages. |
-| BEAM adapters | PARTIAL | Unit-verified conversion for chat sessions and probing-question categories; official large datasets not downloaded or verified. |
+| BEAM-1M adapter | PASS | Official Parquet hash verified; 35 conversations, 74,630 messages, and 700 questions. |
+| BEAM-10M adapter | PASS | Both official Parquet hashes and the bundle hash verified; 10 conversations, 208,696 messages, and 200 questions. |
 | Live Engine integration | PASS | One LoCoMo question retrieved its one gold evidence address; retrieval latency was 6.1 ms. |
 | LoCoMo BM25 baseline | MEASURED | At top-100: 77.409% question recall and 61.346% evidence recall across 1,536 evidence-scored questions; P95 7.192 ms. |
 | LoCoMo oracle-address audit | UPSTREAM GAPS | 2 of 2,362 normalized gold addresses do not exist in the corresponding official conversations; both are retained as explicit diagnostics. |
