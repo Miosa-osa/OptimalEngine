@@ -88,6 +88,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
     embedder = Keyword.get(opts, :embedder, &Ollama.embed/1)
     tenant_id = Keyword.get(opts, :tenant_id, "default")
     limit = Keyword.get(opts, :limit, 100_000)
+    concurrency = opts |> Keyword.get(:concurrency, 4) |> max(1) |> min(32)
 
     sql = """
     SELECT id FROM memories
@@ -108,11 +109,16 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
           end)
 
         summary =
-          Enum.reduce(memories, %{indexed: 0, failed: 0}, fn memory, counts ->
-            case index(memory, embedder: embedder, tenant_id: tenant_id) do
-              :ok -> Map.update!(counts, :indexed, &(&1 + 1))
-              _ -> Map.update!(counts, :failed, &(&1 + 1))
-            end
+          memories
+          |> Task.async_stream(
+            fn memory -> index(memory, embedder: embedder, tenant_id: tenant_id) end,
+            max_concurrency: concurrency,
+            ordered: false,
+            timeout: 120_000
+          )
+          |> Enum.reduce(%{indexed: 0, failed: 0}, fn
+            {:ok, :ok}, counts -> Map.update!(counts, :indexed, &(&1 + 1))
+            _, counts -> Map.update!(counts, :failed, &(&1 + 1))
           end)
 
         {:ok, Map.merge(summary, %{workspace_id: workspace_id, total: length(memories)})}
