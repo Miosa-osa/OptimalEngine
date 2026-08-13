@@ -140,6 +140,15 @@ The complete 1,540-question routed run reached 85.944% evidence recall and 94.66
 Category-3 inference improved from 57.212% to 60.577% evidence recall and from 82.609% to 84.783% question recall versus unconditional fusion.
 The matched answer-and-judge score remains unrun for this pipeline and must not be inferred from retrieval coverage.
 
+The Candidate Portfolio replaces exclusive routing with a 70% primary result budget and a 30% complementary evidence budget.
+Its adapters are tenant and workspace scoped before selection, and it combines adapter ranks rather than comparing raw cosine scores from different representations.
+The complete 1,540-question run reached 87.130% evidence recall and 96.094% question recall, compared with 85.944% and 94.661% for routed retrieval.
+It recovered 28 additional evidence addresses and 22 additional covered questions, with P50 452.9 ms, P95 665.5 ms, and P99 818.4 ms.
+Categories 1, 3, and 4 improved on both recall measures.
+Category 2 temporal evidence recall declined from 92.800% to 92.000% even though question recall rose from 94.393% to 94.704%, so portfolio mode remains explicit until the temporal evidence-set ranker removes that regression.
+
+Run the production portfolio with `--retrieval engine_portfolio` and the same task, multimodal, and contextual projection arguments shown above.
+
 ```bash
 curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
   -H 'content-type: application/json' \

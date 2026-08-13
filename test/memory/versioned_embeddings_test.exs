@@ -263,6 +263,36 @@ defmodule OptimalEngine.Memory.Versioned.EmbeddingsTest do
     assert Enum.map(results, & &1.id) == Enum.sort([first.id, second.id])
   end
 
+  test "candidate portfolio preserves lexical and projection-specific evidence" do
+    {:ok, lexical} =
+      Versioned.create(%{
+        content: "cedar phrase found only by lexical search",
+        workspace_id: "portfolio-search"
+      })
+
+    {:ok, first} =
+      Versioned.create(%{content: "first semantic evidence", workspace_id: "portfolio-search"})
+
+    {:ok, second} =
+      Versioned.create(%{content: "second semantic evidence", workspace_id: "portfolio-search"})
+
+    :ok = Embeddings.put(first, [1.0, 0.0], model: "projection-a")
+    :ok = Embeddings.put(second, [1.0, 0.0], model: "projection-b")
+
+    assert {:ok, results} =
+             OptimalEngine.search("cedar",
+               workspace_id: "portfolio-search",
+               tenant_id: "default",
+               vector_enabled: false,
+               query_embedding: [1.0, 0.0],
+               memory_search_mode: :portfolio,
+               memory_embedding_model: "projection-a,projection-b",
+               limit: 3
+             )
+
+    assert MapSet.new(Enum.map(results, & &1.id)) == MapSet.new([lexical.id, first.id, second.id])
+  end
+
   test "lexical and semantic search both enforce tenant scope" do
     {:ok, allowed} =
       Versioned.create(%{

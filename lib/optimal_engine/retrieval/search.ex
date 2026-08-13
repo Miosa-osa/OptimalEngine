@@ -43,9 +43,14 @@ defmodule OptimalEngine.Retrieval.Search do
   alias OptimalEngine.Bridge.Memory, as: BridgeMemory
   alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
   alias OptimalEngine.Retrieval.ProfileRouter
+  alias OptimalEngine.Retrieval.CandidatePortfolio
 
   @default_limit 10
   @default_half_life 720
+  @memory_fts_stopwords MapSet.new(~w[
+    a an and are as at be by do does for from how i in is it of on or that
+    the this to was what when where which who why with
+  ])
 
   # ---------------------------------------------------------------------------
   # Client API
@@ -193,13 +198,18 @@ defmodule OptimalEngine.Retrieval.Search do
       {:ok, context_hits}
     else
       limit = Keyword.get(opts, :limit, @default_limit)
-      memory_hits = durable_memory_hits(query, opts, limit * 3)
+      memory_limit = if type_filter == :memory, do: limit, else: limit * 3
+      memory_hits = durable_memory_hits(query, opts, memory_limit)
 
       merged =
-        (context_hits ++ memory_hits)
-        |> Enum.uniq_by(& &1.id)
-        |> Enum.sort_by(&(&1.score || 0.0), :desc)
-        |> Enum.take(limit)
+        if type_filter == :memory do
+          Enum.take(memory_hits, limit)
+        else
+          (context_hits ++ memory_hits)
+          |> Enum.uniq_by(& &1.id)
+          |> Enum.sort_by(&(&1.score || 0.0), :desc)
+          |> Enum.take(limit)
+        end
 
       {:ok, merged}
     end
@@ -232,19 +242,41 @@ defmodule OptimalEngine.Retrieval.Search do
         {:ok, rows} -> Enum.map(rows, &memory_context(&1, workspace_id, query))
         _ -> []
       end
-
-    semantic_hits = semantic_memory_hits(query, opts, limit)
+      |> filter_memory_candidates(opts)
 
     case Keyword.get(opts, :memory_search_mode, :hybrid) do
-      value when value in [:lexical, "lexical"] -> Enum.take(lexical_hits, limit)
-      value when value in [:semantic, "semantic"] -> Enum.take(semantic_hits, limit)
-      _ -> reciprocal_rank_fuse(lexical_hits, semantic_hits, limit)
+      value when value in [:lexical, "lexical"] ->
+        Enum.take(lexical_hits, limit)
+
+      value when value in [:semantic, "semantic"] ->
+        Enum.take(semantic_memory_hits(query, opts, limit), limit)
+
+      value when value in [:portfolio, "portfolio"] ->
+        semantic_rankings = semantic_memory_rankings(query, opts, limit, :all)
+        primary_ranking = portfolio_primary_ranking(query, opts, semantic_rankings, limit)
+        weights = portfolio_weights(query, length(semantic_rankings))
+
+        CandidatePortfolio.select([primary_ranking, lexical_hits | semantic_rankings], limit,
+          weights: weights
+        )
+
+      _ ->
+        reciprocal_rank_fuse(lexical_hits, semantic_memory_hits(query, opts, limit), limit)
     end
   rescue
     _ -> []
   end
 
   defp semantic_memory_hits(query, opts, limit) do
+    rankings = semantic_memory_rankings(query, opts, limit, :routed)
+
+    case rankings do
+      [ranking] -> ranking
+      many -> max_similarity_fuse(many, limit)
+    end
+  end
+
+  defp semantic_memory_rankings(query, opts, limit, selection) do
     profile =
       ProfileRouter.select(
         query,
@@ -254,9 +286,23 @@ defmodule OptimalEngine.Retrieval.Search do
 
     case query_embedding(query, opts) do
       {:ok, embedding} when is_list(embedding) and embedding != [] ->
+        models =
+          case selection do
+            :all ->
+              [
+                Keyword.get(opts, :memory_embedding_model, MemoryEmbeddings.model()),
+                Keyword.get(opts, :memory_inference_embedding_model)
+              ]
+
+            :routed ->
+              [profile.models]
+          end
+
         rankings =
-          profile.models
-          |> memory_embedding_models()
+          models
+          |> Enum.reject(&is_nil/1)
+          |> Enum.flat_map(&memory_embedding_models/1)
+          |> Enum.uniq()
           |> Enum.map(fn model ->
             case MemoryEmbeddings.search(embedding,
                    tenant_id: Keyword.get(opts, :tenant_id, "default"),
@@ -273,16 +319,27 @@ defmodule OptimalEngine.Retrieval.Search do
             end
           end)
 
-        case rankings do
-          [ranking] -> ranking
-          many -> max_similarity_fuse(many, limit)
-        end
+        Enum.map(rankings, &filter_memory_candidates(&1, opts))
 
       _ ->
         []
     end
   rescue
     _ -> []
+  end
+
+  defp filter_memory_candidates(candidates, opts) do
+    case Keyword.get(opts, :principal) do
+      nil ->
+        candidates
+
+      principal_id ->
+        tenant_id = Keyword.get(opts, :tenant_id, OptimalEngine.Tenancy.Tenant.default_id())
+
+        Enum.filter(candidates, fn candidate ->
+          OptimalEngine.Identity.ACL.can?(principal_id, candidate.uri, :read, tenant_id: tenant_id)
+        end)
+    end
   end
 
   defp query_embedding(query, opts) do
@@ -345,6 +402,35 @@ defmodule OptimalEngine.Retrieval.Search do
     |> case do
       [] -> [MemoryEmbeddings.model()]
       models -> Enum.uniq(models)
+    end
+  end
+
+  defp portfolio_weights(query, 3) do
+    case OptimalEngine.MemoryCore.EvidencePlan.classify(query) do
+      "inference" -> [70, 10, 5, 5, 10]
+      _ -> [70, 15, 5, 5, 5]
+    end
+  end
+
+  defp portfolio_weights(_query, semantic_count) do
+    [70 | List.duplicate(30 / max(semantic_count + 1, 1), semantic_count + 1)]
+  end
+
+  defp portfolio_primary_ranking(query, opts, rankings, limit) do
+    default_model_count =
+      opts
+      |> Keyword.get(:memory_embedding_model, MemoryEmbeddings.model())
+      |> memory_embedding_models()
+      |> length()
+
+    case OptimalEngine.MemoryCore.EvidencePlan.classify(query) do
+      "inference" ->
+        rankings |> Enum.drop(default_model_count) |> List.first() || List.first(rankings) || []
+
+      _ ->
+        rankings
+        |> Enum.take(default_model_count)
+        |> max_similarity_fuse(limit)
     end
   end
 
@@ -804,12 +890,16 @@ defmodule OptimalEngine.Retrieval.Search do
   end
 
   defp sanitize_fts_query(query) do
-    query
-    |> String.replace(~r/[\"*^()]/u, " ")
-    |> String.trim()
-    |> case do
-      "" -> "*"
-      q -> q
+    terms =
+      ~r/[\p{L}\p{N}_-]+/u
+      |> Regex.scan(String.downcase(query))
+      |> List.flatten()
+      |> Enum.reject(&MapSet.member?(@memory_fts_stopwords, &1))
+      |> Enum.uniq()
+
+    case terms do
+      [] -> "*"
+      _ -> Enum.map_join(terms, " OR ", &"\"#{&1}\"")
     end
   end
 
