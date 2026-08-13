@@ -145,13 +145,9 @@ def query_variants(question: str) -> list[str]:
     variants.extend(part for part in clauses if len(part.split()) >= 3)
     entities = __import__("re").findall(r"\b[A-Z][a-z]{2,}\b", question)
     ignored = {"What", "When", "Where", "Which", "Who", "Why", "How", "Does", "Did"}
-    content_words = [
-        word for word in __import__("re").findall(r"[A-Za-z0-9]+", question)
-        if len(word) > 3 and word not in ignored
-    ]
     for entity in entities:
         if entity not in ignored:
-            variants.append(" ".join([entity] + [word for word in content_words if word != entity][:6]))
+            variants.append(entity)
     return list(dict.fromkeys(variant for variant in variants if variant))
 
 
@@ -198,6 +194,32 @@ def retrieve_coverage(engine_url: str, workspace: str, question: str, top_k: int
                 top_k if index == 0 else min(20, top_k),
             )
             for index, variant in enumerate(variants)
+        ]
+        result_sets = [future.result()[0] for future in futures]
+    return coverage_fuse(result_sets[0], result_sets[1:], top_k), time.perf_counter() - started
+
+
+def retrieve_evidence_set(
+    engine_url: str,
+    workspace: str,
+    question: str,
+    top_k: int,
+    embedding_model: str | None = None,
+) -> tuple[list[dict], float]:
+    """Retrieve semantic evidence independently per deterministic plan probe."""
+    started = time.perf_counter()
+    variants = query_variants(question)
+    with ThreadPoolExecutor(max_workers=min(len(variants), 6)) as executor:
+        futures = [
+            executor.submit(
+                retrieve_semantic,
+                engine_url,
+                workspace,
+                variant,
+                top_k,
+                embedding_model,
+            )
+            for variant in variants
         ]
         result_sets = [future.result()[0] for future in futures]
     return coverage_fuse(result_sets[0], result_sets[1:], top_k), time.perf_counter() - started
@@ -372,7 +394,7 @@ def main() -> int:
     parser.add_argument("--engine-url", default="http://127.0.0.1:4200")
     parser.add_argument("--workspace-prefix", default="benchmark:truememory")
     parser.add_argument(
-        "--retrieval", choices=("engine_memory", "engine_semantic", "engine_coverage", "bm25", "oracle"),
+        "--retrieval", choices=("engine_memory", "engine_semantic", "engine_coverage", "engine_evidence", "bm25", "oracle"),
         default="engine_memory",
     )
     parser.add_argument("--top-k", type=int, help="Ablation override; official matched runs must use manifest top-k")
@@ -433,7 +455,7 @@ def main() -> int:
     remaining_questions = args.question_limit
     for conversation_index, conversation in enumerate(conversations):
         slug = f"{args.workspace_prefix}-{args.benchmark}-r{args.run_id}-c{conversation_index}".replace(":", "-")
-        engine_strategy = args.retrieval in {"engine_memory", "engine_semantic", "engine_coverage"}
+        engine_strategy = args.retrieval in {"engine_memory", "engine_semantic", "engine_coverage", "engine_evidence"}
         workspace = ensure_workspace(args.engine_url, slug) if engine_strategy else None
         if engine_strategy and not args.skip_seed:
             seed_started = time.perf_counter()
@@ -458,6 +480,14 @@ def main() -> int:
             elif args.retrieval == "engine_coverage":
                 memories, latency = retrieve_coverage(
                     args.engine_url, workspace, question["question"], top_k
+                )
+            elif args.retrieval == "engine_evidence":
+                memories, latency = retrieve_evidence_set(
+                    args.engine_url,
+                    workspace,
+                    question["question"],
+                    top_k,
+                    args.embedding_model,
                 )
             else:
                 memories, latency = local_retrieve(args.retrieval, conversation, question, top_k)

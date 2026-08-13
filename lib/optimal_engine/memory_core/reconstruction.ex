@@ -27,11 +27,16 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
     token_budget =
       positive(Keyword.get(opts, :reconstruction_tokens, @default_tokens), @default_tokens)
 
-    cues = cues(package.query)
+    obligations = evidence_obligations(package)
+    role_cues = role_cues(obligations)
+    cues = obligations |> Enum.flat_map(&obligation_cues/1) |> Enum.uniq()
+    required_roles = required_roles(obligations)
 
     with {:ok, associations} <- expand_or_rebuild(cues, scope, package, opts) do
+      associations = annotate_roles(associations, role_cues)
+
       {selected, steps, paths, stop_reason} =
-        traverse(associations, cues, step_budget, token_budget)
+        traverse(associations, cues, required_roles, step_budget, token_budget)
 
       citations = citations(selected)
       context = render(selected, token_budget)
@@ -41,6 +46,9 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
       reconstruction = %{
         policy_version: @policy_version,
         cues: cues,
+        required_evidence_roles: required_roles,
+        covered_evidence_roles: covered_roles(selected),
+        missing_evidence_roles: missing_roles(selected, required_roles),
         paths: paths,
         citations: citations,
         context: context,
@@ -136,7 +144,7 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
     end
   end
 
-  defp traverse(associations, cues, step_budget, token_budget) do
+  defp traverse(associations, cues, required_roles, step_budget, token_budget) do
     grouped = Enum.group_by(associations, & &1.cue)
 
     Enum.reduce_while(1..step_budget, {[], [], [], cues, 0}, fn step,
@@ -148,6 +156,8 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
       step_tokens = chosen |> Enum.map(& &1.content) |> Enum.join(" ") |> estimate_tokens()
       accumulated = unique_by_id(selected ++ chosen)
       score = confidence(accumulated)
+      covered_before = covered_roles(selected)
+      covered_after = covered_roles(accumulated)
 
       trace = %{
         step_number: step,
@@ -157,12 +167,16 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
           Enum.map(candidates, &Map.take(&1, [:id, :relationship_type, :confidence, :precision])),
         selected_evidence: Enum.map(chosen, &evidence_ref/1),
         accumulated_score: score,
-        token_count: step_tokens
+        token_count: step_tokens,
+        covered_roles_before: covered_before,
+        covered_roles_after: covered_after,
+        missing_required_roles: missing_roles(accumulated, required_roles)
       }
 
       path = %{
         intent: intent(cues),
         cue: cue,
+        evidence_roles: Enum.flat_map(chosen, & &1.evidence_roles) |> Enum.uniq(),
         association_ids: Enum.map(chosen, & &1.id),
         evidence_links: Enum.map(chosen, &evidence_ref/1),
         path_score: confidence(chosen)
@@ -172,10 +186,17 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
       next = {accumulated, steps ++ [trace], paths ++ [path], next_frontier, tokens + step_tokens}
 
       cond do
-        tokens + step_tokens >= token_budget -> {:halt, append_reason(next, "token_budget")}
-        sufficient?(accumulated, cues) -> {:halt, append_reason(next, "sufficient_evidence")}
-        step == step_budget -> {:halt, append_reason(next, "step_budget")}
-        true -> {:cont, next}
+        tokens + step_tokens >= token_budget ->
+          {:halt, append_reason(next, "token_budget")}
+
+        sufficient?(accumulated, required_roles) ->
+          {:halt, append_reason(next, "coverage_satisfied")}
+
+        step == step_budget ->
+          {:halt, append_reason(next, "step_budget")}
+
+        true ->
+          {:cont, next}
       end
     end)
     |> normalize_traversal()
@@ -300,8 +321,55 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
     |> Enum.take(16)
   end
 
-  defp sufficient?(selected, cues),
-    do: length(selected) >= 3 and confidence(selected) >= 0.65 and length(cues) > 0
+  defp sufficient?(selected, required_roles) do
+    required_roles != [] and missing_roles(selected, required_roles) == [] and
+      confidence(selected) >= 0.65
+  end
+
+  defp evidence_obligations(package) do
+    case Map.get(package.retrieval_plan, :evidence_obligations) do
+      obligations when is_list(obligations) and obligations != [] -> obligations
+      _ -> [%{role: "primary", probe: package.query, required: true}]
+    end
+  end
+
+  defp role_cues(obligations) do
+    Enum.reduce(obligations, %{}, fn obligation, acc ->
+      role = Map.get(obligation, :role) || Map.get(obligation, "role")
+      probe = Map.get(obligation, :probe) || Map.get(obligation, "probe") || ""
+
+      Enum.reduce(cues(probe), acc, fn cue, role_acc ->
+        Map.update(role_acc, cue, [role], &Enum.uniq([role | &1]))
+      end)
+    end)
+  end
+
+  defp obligation_cues(obligation) do
+    obligation
+    |> then(&(Map.get(&1, :probe) || Map.get(&1, "probe") || ""))
+    |> cues()
+  end
+
+  defp required_roles(obligations) do
+    obligations
+    |> Enum.filter(&(Map.get(&1, :required) || Map.get(&1, "required")))
+    |> Enum.map(&(Map.get(&1, :role) || Map.get(&1, "role")))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp annotate_roles(associations, role_cues) do
+    Enum.map(associations, fn association ->
+      Map.put(association, :evidence_roles, Map.get(role_cues, association.cue, []))
+    end)
+  end
+
+  defp covered_roles(selected) do
+    selected |> Enum.flat_map(& &1.evidence_roles) |> Enum.uniq()
+  end
+
+  defp missing_roles(selected, required_roles),
+    do: required_roles -- covered_roles(selected)
 
   defp confidence([]), do: 0.0
 

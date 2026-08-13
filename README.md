@@ -209,9 +209,11 @@ Reconstruction is a governed strategy inside the existing Retrieval Coordinator:
 
 ```text
 query + Scope Envelope
-  -> authorized Facts, Memory Objects, Episodes, and Relationship Edges
+  -> deterministic Evidence Plan with required roles and bounded probes
+  -> independently authorized Facts, Memory Objects, Episodes, and Relationship Edges
+  -> complementary Evidence Set fusion without restricted-candidate crowd-out
   -> rebuildable Cue-Tag-Content associations
-  -> bounded Association Paths
+  -> bounded Association Paths until role coverage, token budget, or step budget
   -> one cited Context Package
   -> atomic Reconstruction Run and trace
   -> optional path-specific outcome feedback
@@ -220,6 +222,10 @@ query + Scope Envelope
 The Associative Projection is disposable acceleration.
 
 Facts, Memory Objects, source evidence, and governed relationships remain canonical.
+
+Every Context Package persists the Evidence Plan, required roles, and reconstruction coverage.
+
+Refreshing a reconstructive package preserves its strategy and deterministically replans from the original query under the current planner version.
 
 Use the agent wrapper in OptimalOS:
 
