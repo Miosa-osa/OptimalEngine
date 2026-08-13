@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).parents[2]
@@ -186,6 +187,49 @@ class TrueMemoryCompatTest(unittest.TestCase):
             result = RUNNER.summarize([detail], "locomo", 1, source, True)
         self.assertIsNone(result["estimated_cost_usd"])
         self.assertEqual(result["by_category"]["recall"]["accuracy"], 100.0)
+
+    def test_coverage_query_variants_include_entities_and_clauses(self):
+        variants = RUNNER.query_variants(
+            "How do Alice and Bob use creative hobbies while handling stress?"
+        )
+        self.assertEqual(variants[0], "How do Alice and Bob use creative hobbies while handling stress?")
+        self.assertTrue(any(variant.startswith("Alice ") for variant in variants))
+        self.assertTrue(any(variant.startswith("Bob ") for variant in variants))
+        self.assertIn("Bob use creative hobbies", variants)
+
+    def test_round_robin_fusion_prevents_one_query_from_crowding_out_others(self):
+        fused = RUNNER.round_robin_fuse(
+            [
+                [{"id": "alice-1"}, {"id": "alice-2"}, {"id": "alice-3"}],
+                [{"id": "bob-1"}, {"id": "bob-2"}],
+            ],
+            4,
+        )
+        self.assertEqual([item["id"] for item in fused], ["alice-1", "bob-1", "alice-2", "bob-2"])
+
+    def test_coverage_fusion_preserves_primary_ranking_before_expansion(self):
+        original = [{"id": f"primary-{index}"} for index in range(10)]
+        fused = RUNNER.coverage_fuse(original, [[{"id": "companion"}]], 10)
+        self.assertEqual([item["id"] for item in fused[:8]], [f"primary-{index}" for index in range(8)])
+        self.assertEqual(fused[8]["id"], "companion")
+
+    def test_semantic_retrieval_uses_scoped_hybrid_search(self):
+        with patch.object(RUNNER, "get_json", return_value={"results": [{"id": "semantic"}]}) as request:
+            memories, latency = RUNNER.retrieve_semantic(
+                "http://engine", "workspace-1", "a paraphrased question", 20
+            )
+
+        self.assertEqual(memories, [{"id": "semantic"}])
+        self.assertGreaterEqual(latency, 0)
+        request.assert_called_once_with(
+            "http://engine/api/search",
+            {
+                "tenant": "default",
+                "workspace": "workspace-1",
+                "q": "a paraphrased question",
+                "limit": 20,
+            },
+        )
 
 
 if __name__ == "__main__":

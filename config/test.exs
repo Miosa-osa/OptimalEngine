@@ -34,5 +34,6 @@ config :optimal_engine, :context_refresh_scheduler,
 # Unit and integration tests must not depend on a developer's local Ollama.
 # Dedicated model integration tests call the adapters explicitly.
 config :optimal_engine, :hybrid_search, vector_enabled: false
+config :optimal_engine, :memory_embeddings, auto_index: false
 config :optimal_engine, :embed, on_ingest: false
 config :optimal_engine, :semantic_processing, enabled: false

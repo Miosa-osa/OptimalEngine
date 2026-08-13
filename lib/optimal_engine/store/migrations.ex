@@ -105,8 +105,37 @@ defmodule OptimalEngine.Store.Migrations do
       migration_057_canonical_entity_spine(),
       migration_058_reconstructive_memory(),
       migration_059_governed_reconstruction(),
-      migration_060_data_quality_observability()
+      migration_060_data_quality_observability(),
+      migration_061_memory_embeddings()
     ]
+  end
+
+  defp migration_061_memory_embeddings do
+    {61, "workspace-scoped semantic embeddings for durable memories",
+     [
+       {"memory_embeddings",
+        """
+        CREATE TABLE IF NOT EXISTS memory_embeddings (
+          memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          model TEXT NOT NULL,
+          dimensions INTEGER NOT NULL,
+          embedding BLOB NOT NULL,
+          content_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """},
+       {"idx_memory_embeddings_scope",
+        "CREATE INDEX IF NOT EXISTS idx_memory_embeddings_scope ON memory_embeddings(tenant_id, workspace_id, model)"},
+       {"drop_workspace_only_memory_dedup", "DROP INDEX IF EXISTS idx_memories_dedup_key"},
+       {"idx_memories_dedup_key_tenant_scoped",
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_dedup_key
+        ON memories (tenant_id, workspace_id, audience, content_hash)
+        WHERE is_forgotten = 0 AND is_latest = 1
+        """}
+     ]}
   end
 
   defp migration_060_data_quality_observability do

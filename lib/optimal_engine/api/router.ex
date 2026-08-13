@@ -151,6 +151,7 @@ defmodule OptimalEngine.API.Router do
   get "/api/search" do
     q = query_param(conn, "q", "")
     workspace = query_param(conn, "workspace", "default")
+    tenant = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
     {offset, limit} = Pagination.parse(conn, 10)
 
     {results, total} =
@@ -160,7 +161,11 @@ defmodule OptimalEngine.API.Router do
         # Fetch up to max_limit to get the real total, then slice.
         fetch_limit = min(limit + offset + 200, 200)
 
-        case OptimalEngine.search(q, limit: fetch_limit, workspace_id: workspace) do
+        case OptimalEngine.search(q,
+               limit: fetch_limit,
+               workspace_id: workspace,
+               tenant_id: tenant
+             ) do
           {:ok, contexts} ->
             all = format_search_results(contexts)
             total = length(all)
@@ -1689,7 +1694,11 @@ defmodule OptimalEngine.API.Router do
       workspace_id = Map.get(body, "workspace", "default")
 
       attrs =
-        %{content: content, workspace_id: workspace_id}
+        %{
+          content: content,
+          workspace_id: workspace_id,
+          tenant_id: Map.get(body, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
+        }
         |> maybe_put(:is_static, Map.get(body, "is_static"))
         |> maybe_put(:audience, Map.get(body, "audience"))
         |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
@@ -1705,6 +1714,22 @@ defmodule OptimalEngine.API.Router do
         {:error, reason} ->
           send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
       end
+    end
+  end
+
+  # POST /api/memory/embeddings/rebuild — rebuild the disposable semantic
+  # projection for current durable memories in one workspace.
+  post "/api/memory/embeddings/rebuild" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", OptimalEngine.Workspace.default_id())
+    tenant_id = Map.get(body, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
+
+    case OptimalEngine.Memory.Versioned.Embeddings.rebuild(workspace_id,
+           tenant_id: tenant_id,
+           limit: parse_int(body["limit"], 100_000)
+         ) do
+      {:ok, summary} -> json(conn, summary)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 

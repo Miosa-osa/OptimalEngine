@@ -79,9 +79,22 @@ python3 benchmarks/scripts/truememory_diagnostics.py \
   --out benchmarks/results/truememory/locomo_bm25_diagnostics.json
 ```
 
-The matched runner also accepts `--retrieval engine_memory`, `--retrieval bm25`, or `--retrieval oracle`.
-The default is the Optimal Engine Memory endpoint.
+The matched runner accepts `--retrieval engine_memory`, `--retrieval engine_semantic`, `--retrieval engine_coverage`, `--retrieval bm25`, or `--retrieval oracle`.
+The default `engine_memory` strategy is the durable-memory FTS endpoint and serves as the lexical Engine baseline.
+The `engine_semantic` strategy uses the Engine's hybrid search endpoint, where lexical and semantic durable-memory rankings are fused.
+The `engine_coverage` strategy is an experimental deterministic query-expansion ablation and is not the default.
 `--top-k` supports diagnostic ablations, but paid official runs reject a value that differs from the pinned protocol.
+
+Existing durable memories need their rebuildable semantic projection populated before measuring `engine_semantic`.
+
+```bash
+curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
+  -H 'content-type: application/json' \
+  -d '{"tenant":"default","workspace":"WORKSPACE_ID"}'
+```
+
+New and updated durable memories are indexed automatically when semantic indexing is enabled.
+The projection is tenant and workspace scoped and can be rebuilt without changing canonical memory content.
 
 ## Run the matched answer and judge protocol
 

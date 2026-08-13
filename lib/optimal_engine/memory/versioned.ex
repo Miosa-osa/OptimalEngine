@@ -136,7 +136,7 @@ defmodule OptimalEngine.Memory.Versioned do
         do_insert(attrs, workspace_id, tenant_id, audience, content, content_hash)
 
       policy when policy in ["return_existing", "bump_version"] ->
-        case VStore.find_by_content_hash(workspace_id, audience, content_hash) do
+        case VStore.find_by_content_hash(tenant_id, workspace_id, audience, content_hash) do
           {:ok, existing_row} ->
             existing = row_to_struct(existing_row)
 

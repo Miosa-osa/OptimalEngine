@@ -63,27 +63,29 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   end
 
   @doc """
-  Looks up an existing live memory by workspace_id, audience, and content_hash.
+  Looks up an existing live memory by tenant, workspace, audience, and content hash.
 
   "Live" means `is_forgotten = 0` AND `is_latest = 1`. Returns `{:ok, row}`
   when found, `{:error, :not_found}` when absent.
   """
-  @spec find_by_content_hash(String.t(), String.t(), String.t()) ::
+  @spec find_by_content_hash(String.t(), String.t(), String.t(), String.t()) ::
           {:ok, list()} | {:error, :not_found}
-  def find_by_content_hash(workspace_id, audience, content_hash)
-      when is_binary(workspace_id) and is_binary(audience) and is_binary(content_hash) do
+  def find_by_content_hash(tenant_id, workspace_id, audience, content_hash)
+      when is_binary(tenant_id) and is_binary(workspace_id) and is_binary(audience) and
+             is_binary(content_hash) do
     sql = """
     SELECT #{@dedup_select_cols}
     FROM memories
-    WHERE workspace_id = ?1
-      AND audience = ?2
-      AND content_hash = ?3
+    WHERE tenant_id = ?1
+      AND workspace_id = ?2
+      AND audience = ?3
+      AND content_hash = ?4
       AND is_forgotten = 0
       AND is_latest = 1
     LIMIT 1
     """
 
-    case Store.raw_query(sql, [workspace_id, audience, content_hash]) do
+    case Store.raw_query(sql, [tenant_id, workspace_id, audience, content_hash]) do
       {:ok, [row]} -> {:ok, row}
       {:ok, []} -> {:error, :not_found}
       other -> other
