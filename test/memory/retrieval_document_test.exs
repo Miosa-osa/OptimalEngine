@@ -62,4 +62,21 @@ defmodule OptimalEngine.Memory.Versioned.RetrievalDocumentTest do
 
     assert RetrievalDocument.serialize(atoms) == RetrievalDocument.serialize(strings)
   end
+
+  test "multimodal profile includes governed extraction text but not benchmark labels" do
+    memory = %Versioned{
+      content: "Take a look at this.",
+      metadata: %{
+        modality_text: "a painting of a sunset over a lake",
+        query: "painting sunrise",
+        evidence_tag: "D1:12"
+      }
+    }
+
+    document = RetrievalDocument.serialize(memory, RetrievalDocument.multimodal_profile())
+
+    assert document =~ "modality_text: a painting of a sunset over a lake"
+    refute document =~ "painting sunrise"
+    refute document =~ "D1:12"
+  end
 end

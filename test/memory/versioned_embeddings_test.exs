@@ -93,6 +93,36 @@ defmodule OptimalEngine.Memory.Versioned.EmbeddingsTest do
     assert_in_delta score, 1.0, 1.0e-9
   end
 
+  test "one memory retains multiple named projection embeddings" do
+    {:ok, memory} =
+      Versioned.create(%{content: "multiple projections", workspace_id: "multi-profile-ws"})
+
+    :ok = Embeddings.put(memory, [1.0, 0.0], model: "profile-a")
+    :ok = Embeddings.put(memory, [0.0, 1.0], model: "profile-b")
+
+    assert {:ok, [[2]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM memory_embeddings WHERE memory_id = ?1",
+               [memory.id]
+             )
+
+    assert {:ok, [{profile_a_memory, 1.0}]} =
+             Embeddings.search([1.0, 0.0],
+               workspace_id: "multi-profile-ws",
+               model: "profile-a"
+             )
+
+    assert profile_a_memory.id == memory.id
+
+    assert {:ok, [{profile_b_memory, 1.0}]} =
+             Embeddings.search([0.0, 1.0],
+               workspace_id: "multi-profile-ws",
+               model: "profile-b"
+             )
+
+    assert profile_b_memory.id == memory.id
+  end
+
   test "rebuildable task profiles prefix documents without changing canonical content" do
     {:ok, memory} =
       Versioned.create(%{content: "canonical content", workspace_id: "task-prefix-ws"})

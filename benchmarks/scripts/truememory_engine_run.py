@@ -103,7 +103,10 @@ def seed_conversation(
                     "evidence_tag": evidence_tag,
                     "timestamp": message.get("timestamp"),
                     "speaker": message.get("speaker"),
+                    "recipient": message.get("recipient"),
                     "session": message.get("session"),
+                    "turn_index": message.get("turn_index", index),
+                    "modality_text": message.get("modality_text", ""),
                 },
             },
         )

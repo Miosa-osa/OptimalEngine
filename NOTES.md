@@ -28,3 +28,6 @@
 - 2026-08-13: Every benchmark history row carries the Engine commit and dataset SHA-256 hashes, and pass-to-fail changes are first-class regressions.
 - 2026-08-13: Semantic embedding hashes must cover the exact searchable representation, including contextual metadata and task prefixes, rather than canonical Memory content alone.
 - 2026-08-13: Benchmark evidence addresses and gold labels are evaluation metadata, not retrieval features, and contextual retrieval projections must exclude them.
+- 2026-08-13: Named Memory embedding projections require `(memory_id, model)` identity; keying only by Memory silently replaces earlier projections and makes ensemble results invalid.
+- 2026-08-13: LoCoMo multimodal preparation preserves source captions but excludes generated image queries, URLs, evidence addresses, answers, and gold labels from Retrieval Documents.
+- 2026-08-13: Compatible semantic projections use max-similarity fusion because rank-agreement fusion suppresses unique modality evidence by rewarding redundant hits.
