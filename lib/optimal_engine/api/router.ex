@@ -4417,8 +4417,12 @@ defmodule OptimalEngine.API.Router do
         node: Map.get(ctx, :node),
         genre: Map.get(ctx, :genre),
         uri: Map.get(ctx, :uri),
+        content: Map.get(ctx, :content),
         l0_abstract: Map.get(ctx, :l0_abstract),
-        sn_ratio: Map.get(ctx, :sn_ratio)
+        sn_ratio: Map.get(ctx, :sn_ratio),
+        score: Map.get(ctx, :score),
+        workspace_id: Map.get(ctx, :workspace_id),
+        metadata: Map.get(ctx, :metadata)
       }
     end)
   end
