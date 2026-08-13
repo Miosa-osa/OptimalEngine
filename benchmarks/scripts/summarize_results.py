@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 from collections import Counter
 from pathlib import Path
@@ -43,11 +44,19 @@ def latency_summary(rows: list[dict[str, Any]]) -> dict[str, int | str]:
     ]
 
     if not values:
-        return {"avg": "n/a", "median": "n/a", "min": "n/a", "max": "n/a"}
+        return {"avg": "n/a", "median": "n/a", "p95": "n/a", "p99": "n/a", "min": "n/a", "max": "n/a"}
+
+    ordered = sorted(values)
+
+    def percentile(quantile: float) -> int:
+        index = max(0, math.ceil(quantile * len(ordered)) - 1)
+        return int(round(ordered[index]))
 
     return {
         "avg": int(round(statistics.mean(values))),
         "median": int(round(statistics.median(values))),
+        "p95": percentile(0.95),
+        "p99": percentile(0.99),
         "min": int(min(values)),
         "max": int(max(values)),
     }
@@ -99,6 +108,8 @@ def render_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> str
         f"| Avg delivered | {numeric_trace_summary(rows, 'n_delivered')} |",
         f"| Avg latency | {latencies['avg']} ms |",
         f"| Median latency | {latencies['median']} ms |",
+        f"| P95 latency | {latencies['p95']} ms |",
+        f"| P99 latency | {latencies['p99']} ms |",
         f"| Min latency | {latencies['min']} ms |",
         f"| Max latency | {latencies['max']} ms |",
         "",

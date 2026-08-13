@@ -40,3 +40,5 @@ bin/optimal close "what changed and how verified"
 
 Runtime data lives in `.optimal/`.
 Do not commit `.optimal/index.db`, cache files, connector keys, RocksDB stores, workspace imports, or private user data.
+- Benchmark standard and external benchmark mapping: `docs/guides/BENCHMARKING.md`.
+- Reproducible quality and performance harnesses: `benchmarks/`.

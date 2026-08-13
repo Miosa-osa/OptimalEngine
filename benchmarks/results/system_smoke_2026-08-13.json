@@ -1,0 +1,92 @@
+{
+  "benchmark_version": "system-benchmark-v1",
+  "endpoints": [
+    {
+      "concurrency": 3,
+      "elapsed_seconds": 14.118483082973398,
+      "endpoint": "search",
+      "error_rate": 0.0,
+      "errors": [],
+      "failures": 0,
+      "gates": {
+        "error_rate": true,
+        "p95_ms": false,
+        "p99_ms": true
+      },
+      "latency_ms": {
+        "max": 1726.0057909879833,
+        "mean": 1372.7578776694525,
+        "min": 592.0196669176221,
+        "p50": 1369.2159169586375,
+        "p95": 1701.8432500772178,
+        "p99": 1726.0057909879833
+      },
+      "passed": false,
+      "requests": 30,
+      "response_megabytes": 0.10899,
+      "successes": 30,
+      "throughput_rps": 2.1248741683998182
+    },
+    {
+      "concurrency": 3,
+      "elapsed_seconds": 1.1510577920125797,
+      "endpoint": "assemble",
+      "error_rate": 0.0,
+      "errors": [],
+      "failures": 0,
+      "gates": {
+        "error_rate": true,
+        "p95_ms": true,
+        "p99_ms": true
+      },
+      "latency_ms": {
+        "max": 410.85824999026954,
+        "mean": 112.66086546626563,
+        "min": 56.83462496381253,
+        "p50": 80.8285839157179,
+        "p95": 410.17466702032834,
+        "p99": 410.85824999026954
+      },
+      "passed": true,
+      "requests": 30,
+      "response_megabytes": 0.13774,
+      "successes": 30,
+      "throughput_rps": 26.062983290826924
+    },
+    {
+      "concurrency": 3,
+      "elapsed_seconds": 0.9633783750468865,
+      "endpoint": "reconstruct",
+      "error_rate": 0.0,
+      "errors": [],
+      "failures": 0,
+      "gates": {
+        "error_rate": true,
+        "p95_ms": true,
+        "p99_ms": true
+      },
+      "latency_ms": {
+        "max": 143.9094579545781,
+        "mean": 95.17177080657954,
+        "min": 61.23300001490861,
+        "p50": 83.0171670531854,
+        "p95": 143.12995795626193,
+        "p99": 143.9094579545781
+      },
+      "passed": true,
+      "requests": 30,
+      "response_megabytes": 0.11606,
+      "successes": 30,
+      "throughput_rps": 31.14041250774384
+    }
+  ],
+  "engine_url": "http://127.0.0.1:4200",
+  "environment": {
+    "cpu_count": 28,
+    "platform": "macOS-26.5-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "passed": false,
+  "profile": "smoke",
+  "workspace": "default:miosa"
+}

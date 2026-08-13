@@ -1,0 +1,16 @@
+{
+  "version": "quality-gates-v1",
+  "gates": {
+    "governed_gold_pass_rate": {"minimum": 0.90},
+    "citation_precision": {"minimum": 0.95},
+    "temporal_accuracy": {"minimum": 0.95},
+    "supersession_accuracy": {"minimum": 0.95},
+    "abstention_f1": {"minimum": 0.90},
+    "tenant_leakage_rate": {"maximum": 0.0},
+    "workspace_leakage_rate": {"maximum": 0.0},
+    "security_label_leakage_rate": {"maximum": 0.0},
+    "partition_leakage_rate": {"maximum": 0.0},
+    "expired_evidence_leakage_rate": {"maximum": 0.0},
+    "full_test_failures": {"maximum": 0}
+  }
+}
