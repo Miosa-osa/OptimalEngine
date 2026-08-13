@@ -49,6 +49,9 @@ The live retrieval smoke test passed 1/1 with 100% evidence recall at 6.1 ms, bu
 The complete semantic-only LoCoMo retrieval ablation preserved the semantic baseline's 84.081% evidence recall and 93.750% question recall across 1,540 questions.
 It reduced retrieval P95 from 596.8 ms to 511.8 ms and P99 from 1,353.4 ms to 612.0 ms.
 Hybrid retrieval remains the compatibility default until matched answer scoring validates the faster strategy.
+
+The separately versioned `nomic-search-v1` task profile improved complete LoCoMo evidence recall from 84.081% to 85.140% and question recall from 93.750% to 94.271%.
+It also reduced P95 to 480.2 ms, but remains an ablation because category 4 evidence recall declined by 0.670 points.
 The full LoCoMo BM25 diagnostic measured 77.409% question-level evidence recall and 61.346% evidence recall at top-100 with a 7.192 ms P95.
 The LongMemEval corpus diagnostic matched all 500 strict/oracle question IDs and measured a 95.558% oracle context reduction.
 Both official BEAM datasets are now adapter-verified: BEAM-1M contains 700 questions and BEAM-10M contains 200 questions.
