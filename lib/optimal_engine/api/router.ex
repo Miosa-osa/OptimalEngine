@@ -3416,7 +3416,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   # ContextPackage structs are projected to plain maps before JSON encoding;
-  # legacy RAG results pass through unchanged.
+  # Compatibility RAG results pass through unchanged.
   defp render_rag_result(%{context_package: %ContextPackage{} = package} = result) do
     Map.put(result, :context_package, ContextPackage.to_map(package))
   end

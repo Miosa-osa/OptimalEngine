@@ -83,7 +83,7 @@ defmodule OptimalEngine.Retrieval.RAG do
   @doc """
   Ask the engine a question on behalf of `receiver`.
 
-  Return shape (cleanup rule 7): by default this is the legacy compatibility
+  Return shape (cleanup rule 7): by default this is the compatibility
   path — the envelope is rendered from a curated wiki page or from **raw
   search hits** over compatibility `contexts` rows, not from governed memory.
   With `context_package: true` the question routes through

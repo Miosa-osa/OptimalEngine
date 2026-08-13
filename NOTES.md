@@ -19,3 +19,4 @@
 - 2026-07-20: Every workspace starts with an explicit `desktop_local` storage policy, and optional providers require configuration plus a successful health probe before they are reported as available.
 - 2026-07-20: BusinessOS modules use scoped APIs and logical store contracts instead of physical databases, so local, self-hosted, cloud, and Fractal enterprise providers can change without creating a second product data model.
 - 2026-07-20: Fractal Computing is an enterprise partner substrate for governed AI against a synchronized digital twin and is never a default local dependency or an unreviewed write path.
+- 2026-08-13: Natural-language memory queries must normalize stop words and use ranked discriminating-term matches because raw FTS5 whitespace semantics require every token and silently miss otherwise valid memories.

@@ -22,6 +22,11 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   # Columns used in the dedup lookup — must match @select_cols order exactly.
   @dedup_select_cols @select_cols
 
+  @fts_stopwords MapSet.new(~w[
+    a an and are as at be by do does for from how i in is it of on or that
+    the this to was what when where which who why with
+  ])
+
   # ---------------------------------------------------------------------------
   # Write operations
   # ---------------------------------------------------------------------------
@@ -273,12 +278,17 @@ defmodule OptimalEngine.Memory.Versioned.Store do
     if trimmed == "" do
       nil
     else
-      # Escape double-quotes (used for phrase queries) by doubling them,
-      # then strip FTS5 operator chars that could cause parse errors.
-      trimmed
-      |> String.replace("\"", "\"\"")
-      |> String.replace(~r/[*^()]/u, " ")
-      |> String.trim()
+      terms =
+        ~r/[\p{L}\p{N}_-]+/u
+        |> Regex.scan(String.downcase(trimmed))
+        |> List.flatten()
+        |> Enum.reject(&MapSet.member?(@fts_stopwords, &1))
+        |> Enum.uniq()
+
+      case terms do
+        [] -> nil
+        _ -> Enum.map_join(terms, " OR ", &"\"#{&1}\"")
+      end
     end
   end
 

@@ -70,6 +70,31 @@ def synthetic_exact_vote(row: dict[str, Any]) -> dict[str, str]:
     return {"label": "incorrect", "reason": "Answer is missing the category-specific gold fact."}
 
 
+def behavioral_exact_vote(row: dict[str, Any]) -> dict[str, str]:
+    answer = str(row.get("answer") or "")
+    required = [str(value) for value in row.get("required_terms") or []]
+    forbidden = [str(value) for value in row.get("forbidden_terms") or []]
+    no_result = not answer or answer.startswith("_No results")
+
+    if row.get("expected_abstention"):
+        abstained = no_result or any(
+            marker in normalize(answer)
+            for marker in ("do not know", "insufficient evidence", "no results")
+        )
+        reason = (
+            "Abstention matched expectation."
+            if abstained
+            else "System invented an unsupported answer."
+        )
+        return {"label": "correct" if abstained else "incorrect", "reason": reason}
+
+    missing = [term for term in required if not contains_phrase(answer, term)]
+    leaked = [term for term in forbidden if contains_phrase(answer, term)]
+    if not missing and not leaked:
+        return {"label": "correct", "reason": "Required evidence is present and forbidden stale evidence is absent."}
+    return {"label": "incorrect", "reason": f"Missing={missing}; forbidden_hits={leaked}."}
+
+
 def majority_label(votes: list[dict[str, str]]) -> str:
     counts = {"correct": 0, "partial": 0, "incorrect": 0}
     for vote in votes:
@@ -81,7 +106,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", required=True, help="Existing result JSONL")
     parser.add_argument("--out", required=True, help="Judged result JSONL")
-    parser.add_argument("--judge", choices=["synthetic-exact"], default="synthetic-exact")
+    parser.add_argument("--judge", choices=["synthetic-exact", "behavioral-exact"], default="synthetic-exact")
     parser.add_argument("--judge-votes", type=int, default=1)
     args = parser.parse_args()
 
@@ -100,7 +125,8 @@ def main() -> int:
             if not line.strip():
                 continue
             row = json.loads(line)
-            votes = [synthetic_exact_vote(row) for _ in range(args.judge_votes)]
+            vote_fn = behavioral_exact_vote if args.judge == "behavioral-exact" else synthetic_exact_vote
+            votes = [vote_fn(row) for _ in range(args.judge_votes)]
             label = majority_label(votes)
             row["votes"] = votes
             row["label"] = label

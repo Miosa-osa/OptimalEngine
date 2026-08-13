@@ -340,6 +340,15 @@ def run(args: argparse.Namespace) -> int:
                 "engine_source": raw_response.get("source"),
                 "error": error,
             }
+            for field in (
+                "required_terms",
+                "forbidden_terms",
+                "expected_abstention",
+                "memory_span_tokens",
+                "expected_object_links",
+            ):
+                if field in row:
+                    result[field] = row[field]
 
             output.write(json.dumps(result, ensure_ascii=False) + "\n")
             output.flush()
