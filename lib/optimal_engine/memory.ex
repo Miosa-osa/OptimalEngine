@@ -580,7 +580,7 @@ defmodule OptimalEngine.Memory do
     mem_cfg = Config.get_section(mem.workspace_id, :memory, %{auto_promote_to_wiki: false})
 
     if Map.get(mem_cfg, :auto_promote_to_wiki, false) do
-      Task.start(fn ->
+      Task.Supervisor.start_child(OptimalEngine.Memory.EmbeddingTaskSupervisor, fn ->
         opts = [
           workspace_id: mem.workspace_id,
           tenant_id: mem.tenant_id,
