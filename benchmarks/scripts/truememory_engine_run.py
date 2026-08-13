@@ -125,7 +125,7 @@ def retrieve_semantic(engine_url: str, workspace: str, question: str, top_k: int
     started = time.perf_counter()
     response = get_json(
         f"{engine_url.rstrip('/')}/api/search",
-        {"tenant": "default", "workspace": workspace, "q": question, "limit": top_k},
+        {"tenant": "default", "workspace": workspace, "type": "memory", "q": question, "limit": top_k},
     )
     return response.get("results") or [], time.perf_counter() - started
 

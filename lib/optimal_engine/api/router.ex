@@ -152,6 +152,7 @@ defmodule OptimalEngine.API.Router do
     q = query_param(conn, "q", "")
     workspace = query_param(conn, "workspace", "default")
     tenant = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
+    type = if query_param(conn, "type", "") == "memory", do: :memory, else: nil
     {offset, limit} = Pagination.parse(conn, 10)
 
     {results, total} =
@@ -164,7 +165,8 @@ defmodule OptimalEngine.API.Router do
         case OptimalEngine.search(q,
                limit: fetch_limit,
                workspace_id: workspace,
-               tenant_id: tenant
+               tenant_id: tenant,
+               type: type
              ) do
           {:ok, contexts} ->
             all = format_search_results(contexts)
