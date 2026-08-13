@@ -16,6 +16,7 @@ Every release report keeps quality, safety, latency, throughput, resource use, a
 | RAGBench/TRACe | Context relevance, answer faithfulness, completeness, and citation quality | Context Package and answer evaluation |
 | LongMemEval | Information extraction, multi-session reasoning, temporal reasoning, updates, and abstention | Governed long-term Memory Objects and reconstruction |
 | LoCoMo | Long-range conversational QA, event summarization, temporal and causal understanding | Episode and conversation memory |
+| GoodAI LTM Benchmark | Delayed recall, prospective memory, trigger-response, updates, conflicts, and increasing memory span | Behavioral Memory Objects and reconstructive recall |
 | ANN-Benchmarks | Recall-versus-queries-per-second tradeoff | Vector Adapter and filtered retrieval |
 
 External datasets remain in their original formats and licenses.
@@ -68,6 +69,11 @@ Dataset adapters should convert them into versioned Optimal Engine cases rather 
 
 The repository already contains deterministic 500-question and 700-question synthetic institutional-memory datasets.
 They test decision, owner, reason, numeric, and open-question recall.
+
+`generate_behavioral_memory_dataset.py` adds original, deterministic GoodAI-shaped behavioral cases without redistributing GoodAI data.
+Its smoke baseline on 2026-08-13 improved from 28.6% to 57.1% after natural-language FTS normalization.
+Delayed recall, prospective memory, trigger-response, and spatial reasoning passed.
+Knowledge updates, conflicting evidence, and abstention remain failing release gates until lifecycle-aware retrieval and evidence thresholds are implemented.
 
 Add four versioned dataset adapters next:
 
@@ -133,3 +139,5 @@ They must never be relaxed merely to turn a failing run green.
 - LongMemEval: https://arxiv.org/abs/2410.10813
 - LoCoMo: https://arxiv.org/abs/2402.17753
 - ANN-Benchmarks: https://arxiv.org/abs/1807.05614
+- GoodAI LTM Benchmark: https://github.com/GoodAI/goodai-ltm-benchmark
+- GoodAI dynamic conversational benchmark paper: https://openreview.net/forum?id=twFlD3C9Rt

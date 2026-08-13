@@ -1,7 +1,23 @@
 # Optimal Engine Benchmarks
 
-This directory contains lightweight benchmark harnesses for measuring Optimal
-Engine retrieval quality against question-answer datasets.
+This directory contains dependency-free benchmark harnesses for measuring Optimal Engine quality, speed, safety, and reliability.
+
+## What the numbers mean
+
+- Accuracy asks: did the system return the right answer?
+- Recall asks: did the right evidence appear anywhere in the returned results?
+- Precision asks: how much returned material was actually useful?
+- Abstention asks: did the system say it lacked evidence instead of inventing an answer?
+- P50 is a typical request.
+- P95 is a slow request that about 1 in 20 users experiences.
+- P99 is a bad-tail request that about 1 in 100 users experiences.
+- Throughput is how many requests finish per second at a declared concurrency.
+- Error rate is the share of requests that fail or time out.
+- Leakage rate is the share of answers that expose data outside the authorized tenant, workspace, label, or partition.
+
+A fast wrong answer fails.
+A correct answer that leaks private data also fails.
+Optimal Engine is only classified as optimal when every required gate passes on a current, reproducible run.
 
 The full scorecard and release gates are documented in
 `docs/guides/BENCHMARKING.md`.
@@ -227,3 +243,35 @@ python3 benchmarks/scripts/generate_memory_dataset.py \
   --questions-per-conversation 20 \
   --filler-tokens 1000000
 ```
+
+## Behavioral Memory Benchmark
+
+The behavioral suite uses original deterministic fixtures modeled on the task taxonomy from GoodAI's LTM Benchmark.
+It does not copy GoodAI datasets.
+It tests delayed recall, updated facts, conflicting evidence, future reminders, trigger-response rules, spatial reasoning, and abstention at multiple memory spans.
+
+Generate a small local run:
+
+```bash
+python3 benchmarks/scripts/generate_behavioral_memory_dataset.py \
+  --out /tmp/optimal-behavioral \
+  --cases-per-task 2 \
+  --spans 100,1000
+
+python3 benchmarks/scripts/seed_memory_corpus.py \
+  --corpus /tmp/optimal-behavioral/corpus.jsonl \
+  --out /tmp/optimal-behavioral/seeded.jsonl \
+  --benchmark optimal-behavioral-memory-v1
+
+python3 benchmarks/scripts/optimal_eval.py \
+  --questions /tmp/optimal-behavioral/questions.jsonl \
+  --engine-mode memory-search \
+  --out /tmp/optimal-behavioral/unjudged.jsonl
+
+python3 benchmarks/scripts/judge_results.py \
+  --results /tmp/optimal-behavioral/unjudged.jsonl \
+  --judge behavioral-exact \
+  --out /tmp/optimal-behavioral/judged.jsonl
+```
+
+The deterministic judge requires current evidence, rejects forbidden stale evidence, and scores unsupported-answer abstention without using a judge model.

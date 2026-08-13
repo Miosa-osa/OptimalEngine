@@ -96,6 +96,26 @@ defmodule OptimalEngine.Memory.SearchTest do
       assert length(results) == 1
       assert hd(results).content =~ "pricing"
     end
+
+    test "natural-language questions match on their discriminating terms" do
+      ws = ws()
+
+      expected =
+        create!(%{
+          content: "The verified launch code for Project Northstar-0007 is NOVA-0007.",
+          workspace_id: ws
+        })
+
+      create!(%{content: "The onboarding checklist is ready.", workspace_id: ws})
+
+      {:ok, results} =
+        Memory.list(
+          workspace_id: ws,
+          q: "What is the verified launch code for Project Northstar-0007?"
+        )
+
+      assert expected.id in Enum.map(results, & &1.id)
+    end
   end
 
   # ---------------------------------------------------------------------------
