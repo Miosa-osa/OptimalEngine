@@ -165,7 +165,12 @@ defmodule OptimalEngine.API.Router do
         {[], 0}
       else
         # Fetch up to max_limit to get the real total, then slice.
-        fetch_limit = min(limit + offset + 200, 200)
+        fetch_limit =
+          if type == :memory do
+            min(limit + offset, 200)
+          else
+            min(limit + offset + 200, 200)
+          end
 
         case OptimalEngine.search(q,
                limit: fetch_limit,

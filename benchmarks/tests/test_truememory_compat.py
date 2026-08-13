@@ -301,6 +301,18 @@ class TrueMemoryCompatTest(unittest.TestCase):
         self.assertEqual(params["memory_embedding_model"], "task,multimodal")
         self.assertEqual(params["memory_inference_embedding_model"], "contextual")
 
+    def test_portfolio_retrieval_requests_the_production_candidate_portfolio(self):
+        with patch.object(RUNNER, "get_json", return_value={"results": []}) as request:
+            RUNNER.retrieve_semantic(
+                "http://engine", "workspace-1", "Where did Alice go?", 100,
+                "task,multimodal", "portfolio", "provider", "search_query: ", "contextual",
+            )
+
+        params = request.call_args.args[1]
+        self.assertEqual(params["memory_search_mode"], "portfolio")
+        self.assertEqual(params["tenant"], "default")
+        self.assertEqual(params["workspace"], "workspace-1")
+
 
 if __name__ == "__main__":
     unittest.main()

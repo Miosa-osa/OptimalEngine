@@ -412,7 +412,7 @@ def main() -> int:
     parser.add_argument("--engine-url", default="http://127.0.0.1:4200")
     parser.add_argument("--workspace-prefix", default="benchmark:truememory")
     parser.add_argument(
-        "--retrieval", choices=("engine_memory", "engine_semantic", "engine_semantic_only", "engine_coverage", "engine_evidence", "bm25", "oracle"),
+        "--retrieval", choices=("engine_memory", "engine_semantic", "engine_semantic_only", "engine_portfolio", "engine_coverage", "engine_evidence", "bm25", "oracle"),
         default="engine_memory",
     )
     parser.add_argument("--top-k", type=int, help="Ablation override; official matched runs must use manifest top-k")
@@ -476,7 +476,7 @@ def main() -> int:
     remaining_questions = args.question_limit
     for conversation_index, conversation in enumerate(conversations):
         slug = f"{args.workspace_prefix}-{args.benchmark}-r{args.run_id}-c{conversation_index}".replace(":", "-")
-        engine_strategy = args.retrieval in {"engine_memory", "engine_semantic", "engine_semantic_only", "engine_coverage", "engine_evidence"}
+        engine_strategy = args.retrieval in {"engine_memory", "engine_semantic", "engine_semantic_only", "engine_portfolio", "engine_coverage", "engine_evidence"}
         workspace = ensure_workspace(args.engine_url, slug) if engine_strategy else None
         if engine_strategy and not args.skip_seed:
             seed_started = time.perf_counter()
@@ -513,6 +513,18 @@ def main() -> int:
                     top_k,
                     args.embedding_model,
                     "semantic",
+                    args.embedding_provider_model,
+                    args.query_prefix,
+                    args.inference_embedding_model,
+                )
+            elif args.retrieval == "engine_portfolio":
+                memories, latency = retrieve_semantic(
+                    args.engine_url,
+                    workspace,
+                    question["question"],
+                    top_k,
+                    args.embedding_model,
+                    "portfolio",
                     args.embedding_provider_model,
                     args.query_prefix,
                     args.inference_embedding_model,
@@ -593,6 +605,12 @@ def main() -> int:
         "inference_embedding_model": args.inference_embedding_model,
         "query_prefix": args.query_prefix,
     }
+    if args.retrieval == "engine_portfolio":
+        result["retrieval_configuration"].update({
+            "candidate_portfolio_version": "candidate-portfolio-v1",
+            "primary_budget_percent": 70,
+            "selection": "bounded adapter representation plus reciprocal-rank fill",
+        })
     if seeded_messages:
         result["ingest_messages_per_second"] = round(seeded_messages / ingest_seconds, 3)
     output.parent.mkdir(parents=True, exist_ok=True)
