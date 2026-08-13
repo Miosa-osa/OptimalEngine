@@ -41,6 +41,7 @@ defmodule OptimalEngine.Retrieval.Search do
   alias OptimalEngine.Store.Vectors, as: VectorStore
   alias OptimalEngine.Bridge.Knowledge, as: BridgeKnowledge
   alias OptimalEngine.Bridge.Memory, as: BridgeMemory
+  alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
 
   @default_limit 10
   @default_half_life 720
@@ -210,18 +211,93 @@ defmodule OptimalEngine.Retrieval.Search do
     JOIN memories m ON m.rowid = memories_fts.rowid
     WHERE memories_fts MATCH ?1
       AND m.workspace_id = ?2
+      AND m.tenant_id = ?3
       AND m.is_latest = 1
       AND m.is_forgotten = 0
     ORDER BY lexical_score DESC, m.updated_at DESC
-    LIMIT ?3
+    LIMIT ?4
     """
 
-    case Store.raw_query(sql, [fts_query, workspace_id, limit]) do
-      {:ok, rows} -> Enum.map(rows, &memory_context(&1, workspace_id, query))
-      _ -> []
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+
+    lexical_hits =
+      case Store.raw_query(sql, [fts_query, workspace_id, tenant_id, limit]) do
+        {:ok, rows} -> Enum.map(rows, &memory_context(&1, workspace_id, query))
+        _ -> []
+      end
+
+    semantic_hits = semantic_memory_hits(query, opts, limit)
+    reciprocal_rank_fuse(lexical_hits, semantic_hits, limit)
+  rescue
+    _ -> []
+  end
+
+  defp semantic_memory_hits(query, opts, limit) do
+    case query_embedding(query, opts) do
+      {:ok, embedding} when is_list(embedding) and embedding != [] ->
+        with {:ok, results} <-
+               MemoryEmbeddings.search(embedding,
+                 tenant_id: Keyword.get(opts, :tenant_id, "default"),
+                 workspace_id: Keyword.get(opts, :workspace_id, "default"),
+                 limit: limit,
+                 min_similarity: 0.1
+               ) do
+          Enum.map(results, fn {memory, score} -> semantic_memory_context(memory, score) end)
+        else
+          _ -> []
+        end
+
+      _ ->
+        []
     end
   rescue
     _ -> []
+  end
+
+  defp query_embedding(query, opts) do
+    case Keyword.get(opts, :query_embedding) do
+      embedding when is_list(embedding) and embedding != [] -> {:ok, embedding}
+      _ -> if Ollama.embed_healthy?(), do: Ollama.embed(query), else: {:error, :unavailable}
+    end
+  end
+
+  defp reciprocal_rank_fuse(lexical, semantic, limit) do
+    contexts = Map.new(lexical ++ semantic, &{&1.id, &1})
+
+    scores =
+      [lexical, semantic]
+      |> Enum.reduce(%{}, fn ranking, acc ->
+        ranking
+        |> Enum.with_index(1)
+        |> Enum.reduce(acc, fn {context, rank}, rank_scores ->
+          Map.update(rank_scores, context.id, 1.0 / (60 + rank), &(&1 + 1.0 / (60 + rank)))
+        end)
+      end)
+
+    scores
+    |> Enum.sort_by(fn {_id, score} -> score end, :desc)
+    |> Enum.take(limit)
+    |> Enum.map(fn {id, score} -> %{Map.fetch!(contexts, id) | score: Float.round(score, 6)} end)
+  end
+
+  defp semantic_memory_context(memory, score) do
+    kind = Map.get(memory.metadata || %{}, "kind", "memory")
+
+    %Context{
+      id: memory.id,
+      uri: "optimal://memory/#{memory.workspace_id}/#{memory.id}",
+      type: :memory,
+      title: memory_title(kind, memory.content),
+      content: memory.content,
+      l0_abstract: memory.content,
+      l1_overview: memory.content,
+      node: "memory-core",
+      created_at: memory.created_at,
+      modified_at: memory.updated_at,
+      workspace_id: memory.workspace_id,
+      metadata: memory.metadata || %{},
+      score: Float.round(score, 4)
+    }
   end
 
   defp memory_context(

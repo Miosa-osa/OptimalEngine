@@ -28,6 +28,7 @@ defmodule OptimalEngine.Memory do
   """
 
   alias OptimalEngine.Memory.{EncodingGate, SemanticDedup, Versioned}
+  alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
 
   alias OptimalEngine.MemoryCore.{
     Claim,
@@ -63,6 +64,7 @@ defmodule OptimalEngine.Memory do
       {:ok, mem} = ok ->
         maybe_create_pending_claim(attrs, mem, "create")
         maybe_promote_to_wiki(mem)
+        maybe_index_embedding(mem)
         ok
 
       other ->
@@ -284,6 +286,7 @@ defmodule OptimalEngine.Memory do
           |> Map.put_new(:audience, mem.audience)
 
         maybe_create_pending_claim(claim_attrs, mem, "update")
+        maybe_index_embedding(mem)
         ok
 
       other ->
@@ -606,4 +609,21 @@ defmodule OptimalEngine.Memory do
   end
 
   defp maybe_promote_to_wiki(_mem), do: :ok
+
+  defp maybe_index_embedding(mem) do
+    if Application.get_env(:optimal_engine, :memory_embeddings, [])
+       |> Keyword.get(:auto_index, true) do
+      Task.start(fn ->
+        case MemoryEmbeddings.index(mem) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("[Memory] semantic indexing failed: #{inspect(reason)}")
+        end
+      end)
+    else
+      :ok
+    end
+  end
 end

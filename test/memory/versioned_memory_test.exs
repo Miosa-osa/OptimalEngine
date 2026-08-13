@@ -60,6 +60,18 @@ defmodule OptimalEngine.Memory.VersionedTest do
       assert mem.workspace_id == "default"
       assert mem.tenant_id == "default"
     end
+
+    test "deduplication is tenant scoped" do
+      workspace_id = ws()
+      attrs = %{content: "same content", workspace_id: workspace_id}
+
+      assert {:ok, first} = Memory.create(Map.put(attrs, :tenant_id, "tenant-a"))
+      assert {:ok, second} = Memory.create(Map.put(attrs, :tenant_id, "tenant-b"))
+
+      refute first.id == second.id
+      assert first.tenant_id == "tenant-a"
+      assert second.tenant_id == "tenant-b"
+    end
   end
 
   # ---------------------------------------------------------------------------

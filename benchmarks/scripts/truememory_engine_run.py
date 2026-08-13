@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +119,80 @@ def retrieve(engine_url: str, workspace: str, question: str, top_k: int) -> tupl
         {"workspace": workspace, "q": question, "limit": top_k},
     )
     return response.get("memories") or [], time.perf_counter() - started
+
+
+def retrieve_semantic(engine_url: str, workspace: str, question: str, top_k: int) -> tuple[list[dict], float]:
+    started = time.perf_counter()
+    response = get_json(
+        f"{engine_url.rstrip('/')}/api/search",
+        {"tenant": "default", "workspace": workspace, "q": question, "limit": top_k},
+    )
+    return response.get("results") or [], time.perf_counter() - started
+
+
+def query_variants(question: str) -> list[str]:
+    """Build deterministic entity and clause probes for coverage-oriented retrieval."""
+    variants = [question]
+    clauses = [part.strip(" ,?.") for part in __import__("re").split(r"\b(?:and|while|but)\b", question, flags=__import__("re").I)]
+    variants.extend(part for part in clauses if len(part.split()) >= 3)
+    entities = __import__("re").findall(r"\b[A-Z][a-z]{2,}\b", question)
+    ignored = {"What", "When", "Where", "Which", "Who", "Why", "How", "Does", "Did"}
+    content_words = [
+        word for word in __import__("re").findall(r"[A-Za-z0-9]+", question)
+        if len(word) > 3 and word not in ignored
+    ]
+    for entity in entities:
+        if entity not in ignored:
+            variants.append(" ".join([entity] + [word for word in content_words if word != entity][:6]))
+    return list(dict.fromkeys(variant for variant in variants if variant))
+
+
+def round_robin_fuse(result_sets: list[list[dict[str, Any]]], limit: int) -> list[dict[str, Any]]:
+    fused, seen = [], set()
+    for index in range(max((len(results) for results in result_sets), default=0)):
+        for results in result_sets:
+            if index >= len(results):
+                continue
+            item = results[index]
+            identity = item.get("id") or item.get("content")
+            if identity in seen:
+                continue
+            seen.add(identity)
+            fused.append(item)
+            if len(fused) == limit:
+                return fused
+    return fused
+
+
+def coverage_fuse(original: list[dict[str, Any]], expansions: list[list[dict[str, Any]]], limit: int) -> list[dict[str, Any]]:
+    quota = max(1, round(limit * 0.8))
+    primary = original[:quota]
+    candidates = primary + round_robin_fuse(expansions, limit - quota) + original[quota:]
+    fused, seen = [], set()
+    for item in candidates:
+        identity = item.get("id") or item.get("content")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        fused.append(item)
+        if len(fused) == limit:
+            break
+    return fused
+
+
+def retrieve_coverage(engine_url: str, workspace: str, question: str, top_k: int) -> tuple[list[dict], float]:
+    started = time.perf_counter()
+    variants = query_variants(question)
+    with ThreadPoolExecutor(max_workers=min(len(variants), 6)) as executor:
+        futures = [
+            executor.submit(
+                retrieve, engine_url, workspace, variant,
+                top_k if index == 0 else min(20, top_k),
+            )
+            for index, variant in enumerate(variants)
+        ]
+        result_sets = [future.result()[0] for future in futures]
+    return coverage_fuse(result_sets[0], result_sets[1:], top_k), time.perf_counter() - started
 
 
 def evidence_recall(expected: list[str], memories: list[dict[str, Any]]) -> tuple[int, int]:
@@ -288,7 +363,10 @@ def main() -> int:
     parser.add_argument("--prepared", required=True)
     parser.add_argument("--engine-url", default="http://127.0.0.1:4200")
     parser.add_argument("--workspace-prefix", default="benchmark:truememory")
-    parser.add_argument("--retrieval", choices=("engine_memory", "bm25", "oracle"), default="engine_memory")
+    parser.add_argument(
+        "--retrieval", choices=("engine_memory", "engine_semantic", "engine_coverage", "bm25", "oracle"),
+        default="engine_memory",
+    )
     parser.add_argument("--top-k", type=int, help="Ablation override; official matched runs must use manifest top-k")
     parser.add_argument("--run-id", type=int, default=1)
     parser.add_argument("--conversation-limit", type=int)
@@ -304,6 +382,7 @@ def main() -> int:
     parser.add_argument("--answer-output-cost", type=float, default=0.0, help="USD per million tokens")
     parser.add_argument("--judge-input-cost", type=float, default=0.0, help="USD per million tokens")
     parser.add_argument("--judge-output-cost", type=float, default=0.0, help="USD per million tokens")
+    parser.add_argument("--workers", type=int, default=8, help="Concurrent paid answer/judge jobs")
     args = parser.parse_args()
     protocol = load_protocol()
     config = protocol["benchmarks"][args.benchmark]
@@ -333,17 +412,26 @@ def main() -> int:
     details = []
     if args.resume and output.exists():
         details = json.loads(output.read_text(encoding="utf-8")).get("details", [])
-    completed_ids = {detail["id"] for detail in details}
-    ingest_started = time.perf_counter()
+        if args.paid:
+            details = [detail for detail in details if "correct" in detail]
+    completed_ids = {
+        detail["id"] for detail in details
+        if not args.paid or "correct" in detail
+    }
+    pending_paid = []
+    ingest_seconds = 0.0
     seeded_messages = 0
     remaining_questions = args.question_limit
     for conversation_index, conversation in enumerate(conversations):
         slug = f"{args.workspace_prefix}-{args.benchmark}-r{args.run_id}-c{conversation_index}".replace(":", "-")
-        workspace = ensure_workspace(args.engine_url, slug) if args.retrieval == "engine_memory" else None
-        if args.retrieval == "engine_memory" and not args.skip_seed:
+        engine_strategy = args.retrieval in {"engine_memory", "engine_semantic", "engine_coverage"}
+        workspace = ensure_workspace(args.engine_url, slug) if engine_strategy else None
+        if engine_strategy and not args.skip_seed:
+            seed_started = time.perf_counter()
             seeded = seed_conversation(
                 args.engine_url, workspace, conversation, args.sleep_ms, args.message_limit
             )
+            ingest_seconds += time.perf_counter() - seed_started
             seeded_messages += seeded
             print(f"seeded {seeded} messages into {workspace}")
         questions = conversation["questions"]
@@ -354,6 +442,14 @@ def main() -> int:
                 continue
             if args.retrieval == "engine_memory":
                 memories, latency = retrieve(args.engine_url, workspace, question["question"], top_k)
+            elif args.retrieval == "engine_semantic":
+                memories, latency = retrieve_semantic(
+                    args.engine_url, workspace, question["question"], top_k
+                )
+            elif args.retrieval == "engine_coverage":
+                memories, latency = retrieve_coverage(
+                    args.engine_url, workspace, question["question"], top_k
+                )
             else:
                 memories, latency = local_retrieve(args.retrieval, conversation, question, top_k)
             found, total = evidence_recall(question.get("evidence", []), memories)
@@ -368,20 +464,42 @@ def main() -> int:
                     "retrieval_latency_s": round(latency, 4),
                 }
             if args.paid:
-                detail.update(evaluate_answer(question, memories, prompts, config, protocol["provider"], api_key))
+                pending_paid.append((detail, question, memories))
             details.append(detail)
-            checkpoint = summarize(
-                details, args.benchmark, args.run_id, source, args.paid,
+            retrieval_checkpoint = summarize(
+                details, args.benchmark, args.run_id, source, False,
                 retrieval_strategy=args.retrieval,
             )
             output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(json.dumps(checkpoint, indent=2) + "\n", encoding="utf-8")
+            output.write_text(json.dumps(retrieval_checkpoint, indent=2) + "\n", encoding="utf-8")
+            if not args.paid:
+                pass
             print(f"[{len(details)}] {question['id']} evidence={found}/{total} latency={latency:.3f}s")
         if remaining_questions is not None:
             remaining_questions -= len(questions)
             if remaining_questions <= 0:
                 break
-    ingest_seconds = time.perf_counter() - ingest_started
+    if args.paid and pending_paid:
+        def run_paid(item):
+            detail, question, memories = item
+            evaluation = evaluate_answer(
+                question, memories, prompts, config, protocol["provider"], api_key
+            )
+            return detail, evaluation
+
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = [executor.submit(run_paid, item) for item in pending_paid]
+            for completed, future in enumerate(as_completed(futures), start=1):
+                detail, evaluation = future.result()
+                detail.update(evaluation)
+                completed_details = [item for item in details if "correct" in item]
+                checkpoint = summarize(
+                    completed_details, args.benchmark, args.run_id, source, True,
+                    retrieval_strategy=args.retrieval,
+                )
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(json.dumps(checkpoint, indent=2) + "\n", encoding="utf-8")
+                print(f"paid [{completed}/{len(futures)}] {detail['id']} correct={detail['correct']}")
     prices = {
         "answer_input": args.answer_input_cost, "answer_output": args.answer_output_cost,
         "judge_input": args.judge_input_cost, "judge_output": args.judge_output_cost,
