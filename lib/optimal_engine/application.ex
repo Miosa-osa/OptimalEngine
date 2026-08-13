@@ -60,6 +60,7 @@ defmodule OptimalEngine.Application do
       {Registry, keys: :unique, name: OptimalEngine.Memory.SessionRegistry},
       OptimalEngine.Memory.Store.ETS,
       {DynamicSupervisor, name: OptimalEngine.Memory.SessionSupervisor, strategy: :one_for_one},
+      {Task.Supervisor, name: OptimalEngine.Memory.EmbeddingTaskSupervisor},
       OptimalEngine.Memory.Cortex,
       OptimalEngine.Memory.Learning,
       OptimalEngine.Memory.Surfacer,
