@@ -153,6 +153,7 @@ defmodule OptimalEngine.API.Router do
     workspace = query_param(conn, "workspace", "default")
     tenant = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
     type = if query_param(conn, "type", "") == "memory", do: :memory, else: nil
+    memory_embedding_model = query_param(conn, "memory_embedding_model", nil)
     {offset, limit} = Pagination.parse(conn, 10)
 
     {results, total} =
@@ -166,7 +167,9 @@ defmodule OptimalEngine.API.Router do
                limit: fetch_limit,
                workspace_id: workspace,
                tenant_id: tenant,
-               type: type
+               type: type,
+               memory_embedding_model:
+                 memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()
              ) do
           {:ok, contexts} ->
             all = format_search_results(contexts)
@@ -1729,7 +1732,8 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.Memory.Versioned.Embeddings.rebuild(workspace_id,
            tenant_id: tenant_id,
            limit: parse_int(body["limit"], 100_000),
-           concurrency: parse_int(body["concurrency"], 4)
+           concurrency: parse_int(body["concurrency"], 4),
+           model: Map.get(body, "model", OptimalEngine.Memory.Versioned.Embeddings.model())
          ) do
       {:ok, summary} -> json(conn, summary)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
