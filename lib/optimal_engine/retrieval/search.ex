@@ -121,14 +121,20 @@ defmodule OptimalEngine.Retrieval.Search do
     # genuinely independent lexical ranking to fuse against.
     vector_allowed = Keyword.get(opts, :vector_enabled, true)
 
+    memory_only = Keyword.get(opts, :type) == :memory
+
     raw_result =
-      if vector_allowed and hybrid_enabled?() and Ollama.embed_healthy?() do
-        case do_hybrid_search(query, opts, state.topology) do
-          {:ok, _} = ok -> ok
-          {:error, _} -> do_search(query, opts, state.topology)
-        end
+      if memory_only do
+        {:ok, []}
       else
-        do_search(query, opts, state.topology)
+        if vector_allowed and hybrid_enabled?() and Ollama.embed_healthy?() do
+          case do_hybrid_search(query, opts, state.topology) do
+            {:ok, _} = ok -> ok
+            {:error, _} -> do_search(query, opts, state.topology)
+          end
+        else
+          do_search(query, opts, state.topology)
+        end
       end
 
     # Durable memories are stored in their own versioned table and FTS index.

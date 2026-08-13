@@ -226,6 +226,7 @@ class TrueMemoryCompatTest(unittest.TestCase):
             {
                 "tenant": "default",
                 "workspace": "workspace-1",
+                "type": "memory",
                 "q": "a paraphrased question",
                 "limit": 20,
             },
