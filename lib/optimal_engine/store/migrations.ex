@@ -106,8 +106,41 @@ defmodule OptimalEngine.Store.Migrations do
       migration_058_reconstructive_memory(),
       migration_059_governed_reconstruction(),
       migration_060_data_quality_observability(),
-      migration_061_memory_embeddings()
+      migration_061_memory_embeddings(),
+      migration_062_multi_profile_memory_embeddings()
     ]
+  end
+
+  defp migration_062_multi_profile_memory_embeddings do
+    {62, "multi-profile semantic embeddings for durable memories",
+     [
+       {"memory_embeddings_multi_profile",
+        """
+        CREATE TABLE IF NOT EXISTS memory_embeddings_multi_profile (
+          memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          model TEXT NOT NULL,
+          dimensions INTEGER NOT NULL,
+          embedding BLOB NOT NULL,
+          content_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (memory_id, model)
+        )
+        """},
+       {"copy_memory_embeddings_to_multi_profile",
+        """
+        INSERT OR REPLACE INTO memory_embeddings_multi_profile
+          (memory_id, tenant_id, workspace_id, model, dimensions, embedding, content_hash, created_at)
+        SELECT memory_id, tenant_id, workspace_id, model, dimensions, embedding, content_hash, created_at
+        FROM memory_embeddings
+        """},
+       {"drop_single_profile_memory_embeddings", "DROP TABLE memory_embeddings"},
+       {"rename_multi_profile_memory_embeddings",
+        "ALTER TABLE memory_embeddings_multi_profile RENAME TO memory_embeddings"},
+       {"idx_memory_embeddings_scope_multi_profile",
+        "CREATE INDEX IF NOT EXISTS idx_memory_embeddings_scope ON memory_embeddings(tenant_id, workspace_id, model)"}
+     ]}
   end
 
   defp migration_061_memory_embeddings do

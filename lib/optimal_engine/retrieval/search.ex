@@ -267,7 +267,7 @@ defmodule OptimalEngine.Retrieval.Search do
 
         case rankings do
           [ranking] -> ranking
-          many -> reciprocal_rank_fuse_many(many, limit)
+          many -> max_similarity_fuse(many, limit)
         end
 
       _ ->
@@ -313,6 +313,19 @@ defmodule OptimalEngine.Retrieval.Search do
     |> Enum.sort_by(fn {id, score} -> {-score, id} end)
     |> Enum.take(limit)
     |> Enum.map(fn {id, score} -> %{Map.fetch!(contexts, id) | score: Float.round(score, 6)} end)
+  end
+
+  defp max_similarity_fuse(rankings, limit) do
+    rankings
+    |> List.flatten()
+    |> Enum.reduce(%{}, fn context, acc ->
+      Map.update(acc, context.id, context, fn existing ->
+        if context.score > existing.score, do: context, else: existing
+      end)
+    end)
+    |> Map.values()
+    |> Enum.sort_by(fn context -> {-context.score, context.id} end)
+    |> Enum.take(limit)
   end
 
   defp memory_embedding_models(opts) do

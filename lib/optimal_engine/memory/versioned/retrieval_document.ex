@@ -10,30 +10,42 @@ defmodule OptimalEngine.Memory.Versioned.RetrievalDocument do
   alias OptimalEngine.Memory.Versioned
 
   @profile "retrieval-document-v1"
+  @multimodal_profile "retrieval-document-multimodal-v1"
   @excluded_metadata ~w[benchmark category evidence evidence_tag gold answer expected_answer]
   @header ~r/^\[[^\]]+\]\s+\[([^\]]*)\]\s+(.+?)\s+to\s+(.+?):\s*(.*)$/su
 
   @spec profile() :: String.t()
   def profile, do: @profile
 
+  @spec multimodal_profile() :: String.t()
+  def multimodal_profile, do: @multimodal_profile
+
   @spec serialize(Versioned.t()) :: String.t()
-  def serialize(%Versioned{} = memory) do
+  def serialize(%Versioned{} = memory), do: serialize(memory, @profile)
+
+  @spec serialize(Versioned.t(), String.t()) :: String.t()
+  def serialize(%Versioned{} = memory, profile)
+      when profile in [@profile, @multimodal_profile] do
     metadata = stringify_keys(memory.metadata || %{})
     parsed = parse_header(memory.content)
 
     fields = [
-      {"profile", @profile},
+      {"profile", profile},
       {"speaker", metadata["speaker"] || parsed.speaker},
       {"recipient", metadata["recipient"] || parsed.recipient},
       {"date", metadata["timestamp"] || parsed.timestamp},
       {"session", metadata["session"]},
-      {"content", parsed.content}
+      {"content", parsed.content},
+      {"modality_text", multimodal_text(metadata, profile)}
     ]
 
     fields
     |> Enum.reject(fn {_name, value} -> blank?(value) end)
     |> Enum.map_join("\n", fn {name, value} -> "#{name}: #{normalize(value)}" end)
   end
+
+  defp multimodal_text(metadata, @multimodal_profile), do: metadata["modality_text"]
+  defp multimodal_text(_metadata, _profile), do: nil
 
   @spec hash(Versioned.t()) :: String.t()
   def hash(%Versioned{} = memory), do: serialize(memory) |> sha256()

@@ -179,16 +179,31 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
 
   defp retrieval_document(memory, opts) do
     case Keyword.get(opts, :document_profile) do
-      nil -> {:ok, prefixed(memory.content, opts)}
-      :contextual -> {:ok, prefixed(RetrievalDocument.serialize(memory), opts)}
-      "retrieval-document-v1" -> {:ok, prefixed(RetrievalDocument.serialize(memory), opts)}
-      profile -> {:error, {:unsupported_document_profile, profile}}
+      nil ->
+        {:ok, prefixed(memory.content, opts)}
+
+      :contextual ->
+        {:ok, prefixed(RetrievalDocument.serialize(memory), opts)}
+
+      "retrieval-document-v1" ->
+        {:ok, prefixed(RetrievalDocument.serialize(memory), opts)}
+
+      "retrieval-document-multimodal-v1" ->
+        {:ok,
+         prefixed(
+           RetrievalDocument.serialize(memory, RetrievalDocument.multimodal_profile()),
+           opts
+         )}
+
+      profile ->
+        {:error, {:unsupported_document_profile, profile}}
     end
   end
 
   defp validate_document_profile(nil), do: :ok
   defp validate_document_profile(:contextual), do: :ok
   defp validate_document_profile("retrieval-document-v1"), do: :ok
+  defp validate_document_profile("retrieval-document-multimodal-v1"), do: :ok
   defp validate_document_profile(profile), do: {:error, {:unsupported_document_profile, profile}}
   defp prefixed(content, opts), do: Keyword.get(opts, :document_prefix, "") <> content
 

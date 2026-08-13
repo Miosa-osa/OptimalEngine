@@ -63,6 +63,29 @@ class TrueMemoryCompatTest(unittest.TestCase):
             ["D8:6", "D9:17", "D11:26", "D30:5"],
         )
 
+    def test_locomo_adapter_preserves_caption_but_excludes_generated_query(self):
+        fixture = [{
+            "sample_id": "sample",
+            "conversation": {
+                "speaker_a": "A", "speaker_b": "B",
+                "session_1_date_time": "1:00 PM on 10 May, 2024",
+                "session_1": [{
+                    "speaker": "A", "text": "Take a look at this.",
+                    "blip_caption": "a painting of a sunset over a lake",
+                    "query": "painting sunrise", "img_url": ["https://example.invalid/image.jpg"],
+                }],
+            },
+            "qa": [{"question": "What?", "answer": "sunset", "evidence": ["D1:1"], "category": 1}],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "locomo.json"
+            path.write_text(json.dumps(fixture))
+            message = COMPAT.load_locomo(path)[0]["messages"][0]
+        self.assertEqual(message["modality_text"], "a painting of a sunset over a lake")
+        self.assertEqual(message["turn_index"], 0)
+        self.assertNotIn("query", message)
+        self.assertNotIn("img_url", message)
+
     def test_wilson_interval_contains_observed_accuracy(self):
         lower, upper = COMPAT.wilson(93, 100)
         self.assertLess(lower, 93)
@@ -247,6 +270,26 @@ class TrueMemoryCompatTest(unittest.TestCase):
                 "memory_search_mode": "hybrid",
             },
         )
+
+    def test_seed_preserves_multimodal_and_turn_metadata(self):
+        conversation = {
+            "conversation_id": "conv-1",
+            "messages": [{
+                "content": "Take a look at this.",
+                "speaker": "A", "recipient": "B", "timestamp": "2024-01-01",
+                "session": "session_1", "turn_index": 4,
+                "modality_text": "a sunset over a lake", "evidence_tag": "D1:5",
+            }],
+        }
+        with patch.object(RUNNER, "post_json", return_value={}) as request:
+            count = RUNNER.seed_conversation(
+                "http://engine", "default:workspace", conversation, 0
+            )
+        self.assertEqual(count, 1)
+        payload = request.call_args.args[1]
+        self.assertEqual(payload["metadata"]["recipient"], "B")
+        self.assertEqual(payload["metadata"]["turn_index"], 4)
+        self.assertEqual(payload["metadata"]["modality_text"], "a sunset over a lake")
 
 
 if __name__ == "__main__":

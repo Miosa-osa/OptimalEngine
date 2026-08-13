@@ -207,6 +207,8 @@ def load_locomo(path: Path) -> list[dict[str, Any]]:
                         "recipient": speakers[1] if speaker == speakers[0] else speakers[0],
                         "timestamp": timestamp,
                         "session": session,
+                        "turn_index": index,
+                        "modality_text": turn.get("blip_caption", ""),
                         "evidence_tag": f"D{int(session.split('_')[-1])}:{index + 1}",
                     }
                 )
@@ -236,7 +238,7 @@ def load_longmemeval(path: Path) -> list[dict[str, Any]]:
         dates = row.get("haystack_dates", [])
         for session_index, session in enumerate(row.get("haystack_sessions", [])):
             timestamp = dates[session_index] if session_index < len(dates) else ""
-            for turn in session:
+            for turn_index, turn in enumerate(session):
                 role = turn.get("role", "user")
                 messages.append(
                     {
@@ -245,6 +247,7 @@ def load_longmemeval(path: Path) -> list[dict[str, Any]]:
                         "recipient": "assistant" if role == "user" else "user",
                         "timestamp": timestamp,
                         "session": f"session_{session_index}",
+                        "turn_index": turn_index,
                     }
                 )
         prepared.append(

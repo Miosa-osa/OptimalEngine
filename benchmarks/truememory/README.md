@@ -115,6 +115,24 @@ Pass a comma-separated `memory_embedding_model` value to fuse multiple compatibl
 This is intended for measured complementary representations such as `nomic-search-v1,nomic-context-v1`.
 The first 200-case ensemble gate matched the contextual projection's 90.110% evidence recall and 95.455% question recall rather than exceeding it, so the ensemble is also opt-in.
 
+## Multimodal evidence
+
+LoCoMo source turns can include image captions whose text turn only says something like "take a look at this."
+The multimodal adapter preserves source-provided `blip_caption` text as `modality_text`, plus session and turn ordinals.
+It excludes the dataset's generated image query, image URL, evidence address, answer, and gold labels from the searchable representation.
+
+Migration 62 changes semantic projection identity from `memory_id` to `(memory_id, model)`.
+Before this migration, rebuilding a second named projection silently replaced the first projection for that Memory.
+Multiple named projections now coexist and are fused by maximum cosine similarity when they use the same embedding provider and query task profile.
+
+The complete 1,540-question text-plus-multimodal LoCoMo run reached 85.648% evidence recall and 94.531% question recall.
+This improves the prior `nomic-search-v1` result of 85.140% and 94.271%, recovering 12 net evidence addresses and 4 net questions.
+Retrieval latency increased from P50 373.0 ms and P95 480.2 ms to P50 473.6 ms and P95 680.6 ms.
+Categories 1, 2, and 4 improved, while category 3 inference regressed from 58.173% to 57.212% evidence recall.
+The next quality step is deterministic intent routing to the contextual projection for inference and text-plus-multimodal fusion for other intents.
+
+The multimodal prepared dataset has a distinct source hash and must not be aggregated with the text-only protocol.
+
 ```bash
 curl -X POST http://127.0.0.1:4200/api/memory/embeddings/rebuild \
   -H 'content-type: application/json' \
