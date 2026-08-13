@@ -48,13 +48,25 @@ def parse_metrics(output: str) -> dict:
 def run_suite(suite: dict, root: Path) -> dict:
     started = time.perf_counter()
     commands = suite.get("commands") or [suite["command"]]
-    environment = os.environ.copy()
-    environment.update(suite.get("env") or {})
+    def command_environment(command: list[str]) -> dict[str, str]:
+        environment = os.environ.copy()
+        environment.update(suite.get("env") or {})
+        if command and command[0] == "mix":
+            environment["MIX_ENV"] = "test"
+            for key in (
+                "OPTIMAL_ENGINE_DB",
+                "OPTIMAL_ENGINE_ROOT",
+                "OPTIMAL_ENGINE_CACHE",
+                "OPTIMAL_API_ENABLED",
+            ):
+                environment.pop(key, None)
+        return environment
+
     completed_runs = [
         subprocess.run(
             command,
             cwd=root,
-            env=environment,
+            env=command_environment(command),
             capture_output=True,
             text=True,
             check=False,
@@ -80,7 +92,7 @@ def run_suite(suite: dict, root: Path) -> dict:
         "commands": commands,
         "qualification": suite.get("qualification", "executed_regression"),
         "limitation": suite.get("limitation"),
-        "output_tail": output[-1200:] if all(run.returncode == 0 for run in completed_runs) else "",
+        "output_tail": output[-1200:] if not all(run.returncode == 0 for run in completed_runs) else "",
     }
 
 
