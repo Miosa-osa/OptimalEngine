@@ -1355,7 +1355,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
   defp assemble_sections(retrieval_package, token_budget) do
     summary = summary_section(retrieval_package)
-    reconstruction = reconstruction_section(retrieval_package)
+    reconstruction = reconstruction_section(retrieval_package, div(token_budget * 3, 10))
     remaining = max(token_budget - estimate_tokens(summary) - estimate_tokens(reconstruction), 0)
     fact_budget = div(remaining * 6, 10)
 
@@ -1382,10 +1382,13 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     }
   end
 
-  defp reconstruction_section(retrieval_package) do
+  defp reconstruction_section(retrieval_package, budget) do
     case get_in(retrieval_package.retrieval_plan, [:reconstruction, :context]) do
-      value when is_binary(value) and value != "" -> "## Reconstructed Evidence\n" <> value
-      _ -> ""
+      value when is_binary(value) and value != "" ->
+        clip_entry("## Reconstructed Evidence\n" <> value, budget)
+
+      _ ->
+        ""
     end
   end
 
@@ -1408,20 +1411,43 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
   defp object_section(header, objects, budget, entry_fun) do
     opening = header <> "\n"
+    opening_tokens = estimate_tokens(opening)
 
-    {body, tokens, kept} =
-      Enum.reduce(objects, {"", estimate_tokens(opening), 0}, fn object, {acc, acc_tokens, kept} ->
+    {body, tokens, kept, clipped?} =
+      Enum.reduce(objects, {"", opening_tokens, 0, false}, fn object,
+                                                              {acc, acc_tokens, kept, clipped?} ->
         entry = entry_fun.(object)
         entry_tokens = estimate_tokens(entry)
+        remaining = max(budget - acc_tokens, 0)
 
         if acc_tokens + entry_tokens <= budget do
-          {acc <> entry, acc_tokens + entry_tokens, kept + 1}
+          {acc <> entry, acc_tokens + entry_tokens, kept + 1, clipped?}
         else
-          {acc, acc_tokens, kept}
+          clipped = clip_entry(entry, remaining)
+          clipped_tokens = estimate_tokens(clipped)
+
+          if clipped == "" do
+            {acc, acc_tokens, kept, clipped?}
+          else
+            {acc <> clipped, acc_tokens + clipped_tokens, kept + 1, true}
+          end
         end
       end)
 
-    {opening <> body, tokens, kept < length(objects)}
+    {opening <> body, tokens, clipped? or kept < length(objects)}
+  end
+
+  defp clip_entry(_entry, available_tokens) when available_tokens < 8, do: ""
+
+  defp clip_entry(entry, available_tokens) do
+    max_chars = available_tokens * 4
+
+    if String.length(entry) <= max_chars do
+      entry
+    else
+      suffix = "... [truncated]\n"
+      String.slice(entry, 0, max(max_chars - String.length(suffix), 0)) <> suffix
+    end
   end
 
   defp fact_entry(fact) do

@@ -116,6 +116,9 @@ def ask_engine(args: argparse.Namespace, query: str, workspace: str) -> tuple[st
             payload["skip_intent"] = True
         if args.rag_skip_wiki:
             payload["skip_wiki"] = True
+        if args.rag_context_package:
+            payload["context_package"] = True
+            payload["strategy"] = args.retrieval_strategy
         if args.hybrid_limit is not None:
             payload["hybrid_limit"] = args.hybrid_limit
         if args.memory_limit is not None:
@@ -374,6 +377,12 @@ def main() -> int:
     parser.add_argument("--retrieval-limit", type=int, default=5)
     parser.add_argument("--rag-skip-intent", action="store_true")
     parser.add_argument("--rag-skip-wiki", action="store_true")
+    parser.add_argument("--rag-context-package", action="store_true")
+    parser.add_argument(
+        "--retrieval-strategy",
+        choices=["tiered", "reconstructive", "hybrid"],
+        default="tiered",
+    )
     parser.add_argument("--hybrid-limit", type=int)
     parser.add_argument("--memory-limit", type=int)
     parser.add_argument("--http-retries", type=int, default=3)

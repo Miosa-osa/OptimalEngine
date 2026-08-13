@@ -79,6 +79,69 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
              Store.raw_query("SELECT COUNT(*) FROM facts WHERE workspace_id = ?1", [workspace_id])
   end
 
+  test "independent unanchored memory candidates do not conflict globally" do
+    workspace_id = ws()
+
+    assert {:ok, _} =
+             Memory.create(%{
+               content: "Project Atlas launch code is NOVA.",
+               workspace_id: workspace_id
+             })
+
+    assert {:ok, _} =
+             Memory.create(%{content: "Project Beacon owner is Priya.", workspace_id: workspace_id})
+
+    assert {:ok, [first, second]} = MemoryCore.pending_claims(workspace_id: workspace_id)
+
+    assert {:ok, _} =
+             MemoryCore.promote_claim(first.id,
+               workspace_id: workspace_id,
+               actor_id: "user:reviewer"
+             )
+
+    assert {:ok, _} =
+             MemoryCore.promote_claim(second.id,
+               workspace_id: workspace_id,
+               actor_id: "user:reviewer"
+             )
+  end
+
+  test "an unanchored memory update can explicitly supersede its prior fact" do
+    workspace_id = ws()
+
+    assert {:ok, original_memory} =
+             Memory.create(%{content: "Project owner was Alice.", workspace_id: workspace_id})
+
+    assert {:ok, [original_claim]} = MemoryCore.pending_claims(workspace_id: workspace_id)
+
+    assert {:ok, original} =
+             MemoryCore.promote_claim(original_claim.id,
+               workspace_id: workspace_id,
+               actor_id: "user:reviewer"
+             )
+
+    assert {:ok, _updated_memory} =
+             Memory.update(original_memory.id, %{content: "Project owner is Priya."})
+
+    assert {:ok, [replacement_claim]} = MemoryCore.pending_claims(workspace_id: workspace_id)
+
+    assert {:ok, replacement} =
+             MemoryCore.promote_claim(replacement_claim.id,
+               workspace_id: workspace_id,
+               actor_id: "user:reviewer",
+               supersedes_fact_id: original.fact.id,
+               supersession_reason: "owner changed"
+             )
+
+    assert replacement.fact.lifecycle_state == "accepted"
+
+    assert {:ok, [["superseded"]]} =
+             Store.raw_query(
+               "SELECT lifecycle_state FROM facts WHERE workspace_id = ?1 AND id = ?2",
+               [workspace_id, original.fact.id]
+             )
+  end
+
   test "review queue summarizes claims by review and lifecycle state" do
     workspace_id = ws()
 

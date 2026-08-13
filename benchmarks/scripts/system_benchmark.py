@@ -11,6 +11,7 @@ import os
 import platform
 import statistics
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -39,8 +40,26 @@ def request_for(base_url: str, endpoint: str, query: str, workspace: str) -> url
         params = urllib.parse.urlencode({"q": query, "workspace": workspace, "limit": 10})
         return urllib.request.Request(f"{base}/api/search?{params}", method="GET")
 
-    paths = {"rag": "/api/rag", "assemble": "/api/assemble", "reconstruct": "/api/reconstruct"}
-    payload = json.dumps({"query": query, "topic": query, "workspace": workspace}).encode("utf-8")
+    paths = {
+        "rag": "/api/rag",
+        "rag-fast": "/api/rag",
+        "rag-governed-tiered": "/api/rag",
+        "rag-governed-reconstructive": "/api/rag",
+        "assemble": "/api/assemble",
+        "reconstruct": "/api/reconstruct",
+    }
+    payload_data: dict[str, Any] = {
+        "query": query,
+        "topic": query,
+        "workspace": workspace,
+    }
+    if endpoint == "rag-fast":
+        payload_data.update({"skip_intent": True, "skip_wiki": True})
+    elif endpoint == "rag-governed-tiered":
+        payload_data.update({"context_package": True, "strategy": "tiered"})
+    elif endpoint == "rag-governed-reconstructive":
+        payload_data.update({"context_package": True, "strategy": "reconstructive"})
+    payload = json.dumps(payload_data).encode("utf-8")
     return urllib.request.Request(
         base + paths[endpoint],
         data=payload,
@@ -62,6 +81,15 @@ def execute(base_url: str, endpoint: str, query: str, workspace: str, timeout: f
             "latency_ms": (time.perf_counter() - started) * 1000,
             "bytes": len(body),
         }
+    except urllib.error.HTTPError as error:
+        body = error.read()
+        return {
+            "ok": False,
+            "status": error.code,
+            "latency_ms": (time.perf_counter() - started) * 1000,
+            "bytes": len(body),
+            "error": f"HTTPError: HTTP {error.code}",
+        }
     except Exception as error:
         return {
             "ok": False,
@@ -73,23 +101,36 @@ def execute(base_url: str, endpoint: str, query: str, workspace: str, timeout: f
 
 
 def summarize(rows: list[dict[str, Any]], elapsed: float, target: dict[str, Any]) -> dict[str, Any]:
-    latencies = [float(row["latency_ms"]) for row in rows]
+    successful_latencies = [float(row["latency_ms"]) for row in rows if row["ok"]]
+    all_latencies = [float(row["latency_ms"]) for row in rows]
     failures = sum(1 for row in rows if not row["ok"])
     error_rate = failures / len(rows) if rows else 1.0
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("status") or "transport_error")
+        status_counts[key] = status_counts.get(key, 0) + 1
     metrics = {
         "requests": len(rows),
         "successes": len(rows) - failures,
         "failures": failures,
         "error_rate": error_rate,
-        "throughput_rps": len(rows) / elapsed if elapsed else 0.0,
+        "attempted_rps": len(rows) / elapsed if elapsed else 0.0,
+        "successful_rps": (len(rows) - failures) / elapsed if elapsed else 0.0,
+        "rate_limited_requests": status_counts.get("429", 0),
+        "status_counts": status_counts,
         "response_megabytes": sum(row["bytes"] for row in rows) / 1_000_000,
         "latency_ms": {
-            "min": min(latencies, default=0.0),
-            "mean": statistics.mean(latencies) if latencies else 0.0,
-            "p50": percentile(latencies, 0.50),
-            "p95": percentile(latencies, 0.95),
-            "p99": percentile(latencies, 0.99),
-            "max": max(latencies, default=0.0),
+            "population": "successful requests only",
+            "min": min(successful_latencies, default=0.0),
+            "mean": statistics.mean(successful_latencies) if successful_latencies else 0.0,
+            "p50": percentile(successful_latencies, 0.50),
+            "p95": percentile(successful_latencies, 0.95),
+            "p99": percentile(successful_latencies, 0.99),
+            "max": max(successful_latencies, default=0.0),
+        },
+        "attempt_latency_ms": {
+            "p95": percentile(all_latencies, 0.95),
+            "max": max(all_latencies, default=0.0),
         },
     }
     gates = {
@@ -105,7 +146,7 @@ def summarize(rows: list[dict[str, Any]], elapsed: float, target: dict[str, Any]
 def run_endpoint(args: argparse.Namespace, profile: dict[str, Any], endpoint: str) -> dict[str, Any]:
     requests = args.requests or int(profile["requests"])
     concurrency = args.concurrency or int(profile["concurrency"])
-    warmup = int(profile.get("warmup", 0))
+    warmup = args.warmup if args.warmup is not None else int(profile.get("warmup", 0))
     queries = profile["queries"]
 
     for index in range(warmup):
@@ -113,22 +154,29 @@ def run_endpoint(args: argparse.Namespace, profile: dict[str, Any], endpoint: st
 
     started = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [
-            pool.submit(
+        futures = []
+        next_submission = time.perf_counter()
+        for index in range(requests):
+            if args.request_rate:
+                delay = next_submission - time.perf_counter()
+                if delay > 0:
+                    time.sleep(delay)
+                next_submission += 1.0 / args.request_rate
+            futures.append(pool.submit(
                 execute,
                 args.engine_url,
                 endpoint,
                 queries[index % len(queries)],
                 args.workspace,
                 args.timeout,
-            )
-            for index in range(requests)
-        ]
+            ))
         rows = [future.result() for future in futures]
     elapsed = time.perf_counter() - started
     metrics = summarize(rows, elapsed, profile.get("targets", {}).get(endpoint, {}))
     metrics["endpoint"] = endpoint
     metrics["concurrency"] = concurrency
+    metrics["warmup_requests"] = warmup
+    metrics["requested_rate_rps"] = args.request_rate
     metrics["elapsed_seconds"] = elapsed
     metrics["errors"] = [row.get("error") for row in rows if row.get("error")][:10]
     return metrics
@@ -143,13 +191,32 @@ def main() -> int:
     parser.add_argument("--endpoints", default="search,rag,assemble,reconstruct")
     parser.add_argument("--requests", type=int)
     parser.add_argument("--concurrency", type=int)
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        help="override profile warmup; use 0 to measure cold-first-request behavior",
+    )
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--request-rate",
+        type=float,
+        help="pace submissions per endpoint; omit for an intentional saturation burst",
+    )
     parser.add_argument("--out")
     args = parser.parse_args()
 
     profile = load_profile(Path(args.profiles), args.profile)
     endpoints = [value.strip() for value in args.endpoints.split(",") if value.strip()]
-    invalid = sorted(set(endpoints) - {"search", "rag", "assemble", "reconstruct"})
+    valid = {
+        "search",
+        "rag",
+        "rag-fast",
+        "rag-governed-tiered",
+        "rag-governed-reconstructive",
+        "assemble",
+        "reconstruct",
+    }
+    invalid = sorted(set(endpoints) - valid)
     if invalid:
         parser.error(f"unsupported endpoints: {', '.join(invalid)}")
 

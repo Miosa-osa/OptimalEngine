@@ -98,4 +98,29 @@ defmodule OptimalEngine.MemoryCoreBridgeTest do
                workspace_id
              ])
   end
+
+  test "versioned memory updates remain behind the governed review boundary" do
+    workspace_id = ws()
+
+    assert {:ok, original} =
+             Memory.create(%{content: "Project owner was Alice.", workspace_id: workspace_id})
+
+    assert {:ok, updated} = Memory.update(original.id, %{content: "Project owner is Priya."})
+
+    assert {:ok, [[claim_id, source_uri, claim_text]]} =
+             Store.raw_query(
+               """
+               SELECT c.id, sp.source_uri, c.claim_text
+               FROM claims c
+               JOIN source_packages sp ON sp.id = c.source_package_id
+               WHERE c.workspace_id = ?1
+                 AND json_extract(c.metadata, '$.versioned_memory_id') = ?2
+               """,
+               [workspace_id, updated.id]
+             )
+
+    assert is_binary(claim_id)
+    assert source_uri == "memory://#{updated.id}"
+    assert claim_text == updated.content
+  end
 end

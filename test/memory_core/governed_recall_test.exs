@@ -44,8 +44,11 @@ defmodule OptimalEngine.MemoryCore.GovernedRecallTest do
     partition_ids = Keyword.get(opts, :partition_ids, ["project-launch"])
     security_labels = Keyword.get(opts, :security_labels, ["internal"])
 
+    fact_text =
+      Keyword.get(opts, :fact_text, "The project launch was approved in the planning meeting.")
+
     source =
-      SourcePackage.from_text("The project launch was approved in the planning meeting.",
+      SourcePackage.from_text(fact_text,
         workspace_id: workspace_id,
         source_type: "meeting_note",
         trust_label: "unreviewed",
@@ -66,7 +69,7 @@ defmodule OptimalEngine.MemoryCore.GovernedRecallTest do
 
     {:ok, fact} =
       FactPromoter.promote(claim,
-        fact_text: "The project launch was approved in the planning meeting.",
+        fact_text: fact_text,
         verifier_id: "human:reviewer",
         aggregate_confidence: 0.9,
         aggregate_precision: 0.86
@@ -267,6 +270,31 @@ defmodule OptimalEngine.MemoryCore.GovernedRecallTest do
                  """,
                  [workspace_id, "%#{package.id}%", "%#{seeded.source.id}%"]
                )
+    end
+
+    test "clips an oversized evidence item instead of dropping the whole section" do
+      workspace_id = unique_workspace("governed-recall-large-item")
+      marker = "CRITICAL-MARKER"
+
+      seeded =
+        seed_accepted_memory(workspace_id,
+          fact_text: marker <> " " <> String.duplicate("evidence ", 2_000)
+        )
+
+      assert {:ok, %ContextPackage{} = package} =
+               RetrievalCoordinator.retrieve(marker,
+                 workspace_id: workspace_id,
+                 actor_id: "agent:test",
+                 allowed_partitions: ["project-launch"],
+                 allowed_security_labels: ["internal"],
+                 token_budget: 300
+               )
+
+      assert package.sections.facts =~ marker
+      assert package.sections.facts =~ "[truncated]"
+      assert package.sections.total_tokens <= package.sections.token_budget
+      assert package.sections.truncated?
+      assert package.fact_links == [%{type: "fact", id: seeded.fact.id}]
     end
 
     test "build_context_package/2 projects a RetrievalPackage into a ContextPackage" do

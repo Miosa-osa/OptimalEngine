@@ -776,6 +776,15 @@ defmodule OptimalEngine.API.Router do
           ]
           |> api_maybe_put(:hybrid_limit, parse_int(body["hybrid_limit"], nil))
           |> api_maybe_put(:memory_limit, parse_int(body["memory_limit"], nil))
+          |> api_maybe_put(:strategy, retrieval_strategy(body["strategy"]))
+          |> api_maybe_put(
+            :reconstruction_steps,
+            parse_int(body["reconstruction_steps"], nil)
+          )
+          |> api_maybe_put(
+            :reconstruction_tokens,
+            parse_int(body["reconstruction_tokens"], nil)
+          )
           |> rag_context_package_opts(body, conn)
 
         case Retrieval.ask(q, rag_opts) do
@@ -3422,6 +3431,9 @@ defmodule OptimalEngine.API.Router do
   end
 
   defp render_rag_result(result), do: result
+
+  defp retrieval_strategy(value) when value in ["tiered", "reconstructive", "hybrid"], do: value
+  defp retrieval_strategy(_value), do: nil
 
   defp parse_bool(true, _default), do: true
   defp parse_bool(false, _default), do: false

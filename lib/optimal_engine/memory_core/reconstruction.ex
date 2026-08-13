@@ -12,6 +12,10 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
   @policy_version "governed-reconstruction-v2"
   @default_steps 4
   @default_tokens 8_000
+  @cue_stopwords ~w[
+    a an and are as at be by did do does for from had has have how i in is it its
+    of on or that the this to was were what when where which who why with you your
+  ]
 
   @doc "Adds bounded association paths to an authorized Retrieval Package."
   @spec enrich(RetrievalPackage.t(), keyword()) ::
@@ -197,25 +201,31 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
   end
 
   defp hydrate_selected(selected, package) do
-    selected
-    |> Enum.map(& &1.to)
-    |> Enum.uniq()
-    |> Enum.reduce({[], []}, fn
-      %{type: "fact", id: id}, {facts, memories} ->
-        case Store.get_fact(package.workspace_id, id, tenant_id: package.tenant_id) do
-          {:ok, fact} -> {[fact_candidate(fact) | facts], memories}
-          _ -> {facts, memories}
-        end
+    {facts, memories} =
+      selected
+      |> Enum.map(& &1.to)
+      |> Enum.uniq()
+      |> Enum.reduce({[], []}, fn
+        %{type: "fact", id: id}, {facts, memories} ->
+          case Store.get_fact(package.workspace_id, id, tenant_id: package.tenant_id) do
+            {:ok, fact} -> {[fact_candidate(fact) | facts], memories}
+            _ -> {facts, memories}
+          end
 
-      %{type: "memory_object", id: id}, {facts, memories} ->
-        case Store.get_memory_object(package.workspace_id, id, tenant_id: package.tenant_id) do
-          {:ok, memory} -> {facts, [memory_candidate(memory) | memories]}
-          _ -> {facts, memories}
-        end
+        %{type: "memory_object", id: id}, {facts, memories} ->
+          case Store.get_memory_object(package.workspace_id, id, tenant_id: package.tenant_id) do
+            {:ok, memory} -> {facts, [memory_candidate(memory) | memories]}
+            _ -> {facts, memories}
+          end
 
-      _, acc ->
-        acc
-    end)
+        _, acc ->
+          acc
+      end)
+
+    # The accumulator prepends for linear construction, so restore traversal
+    # rank before section assembly. Token clipping must retain the strongest
+    # authorized evidence first, not the last graph neighbor visited.
+    {Enum.reverse(facts), Enum.reverse(memories)}
   end
 
   defp fact_candidate(fact) do
@@ -282,8 +292,11 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
     |> String.downcase()
     |> String.replace(~r/[^\p{L}\p{N}-]+/u, " ")
     |> String.split()
-    |> Enum.reject(&(String.length(&1) < 3))
+    |> Enum.reject(&(String.length(&1) < 3 or &1 in @cue_stopwords))
     |> Enum.uniq()
+    |> Enum.with_index()
+    |> Enum.sort_by(fn {cue, index} -> {-String.length(cue), index} end)
+    |> Enum.map(&elem(&1, 0))
     |> Enum.take(16)
   end
 

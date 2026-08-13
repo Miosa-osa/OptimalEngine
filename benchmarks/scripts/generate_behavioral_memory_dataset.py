@@ -33,9 +33,15 @@ def filler(rng: random.Random, tokens: int) -> str:
     return " ".join(rng.choice(vocabulary) for _ in range(tokens))
 
 
-def build_case(index: int, task: str, span: int, rng: random.Random) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def build_case(
+    index: int,
+    task: str,
+    span: int,
+    rng: random.Random,
+    workspace_prefix: str = "bench-behavior-v2",
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     case_id = f"behavior-{span}-{index:04d}-{task}"
-    workspace = f"bench-behavior-{span}"
+    workspace = f"{workspace_prefix}-{span}"
     project = f"Northstar-{task}-{index:04d}"
     code = f"NOVA-{index:04d}"
     noise = filler(rng, span)
@@ -49,12 +55,24 @@ def build_case(index: int, task: str, span: int, rng: random.Random) -> tuple[li
         question = f"What is the verified launch code for Project {project}?"
         required = [code]
     elif task == "knowledge_update":
-        corpus.append({"content": f"Project {project} owner was Alice. This record is superseded.", "sequence": 1})
+        corpus.append(
+            {
+                "content": f"Project {project} owner was Alice.",
+                "sequence": 1,
+                "operation": "create",
+            }
+        )
         content = f"Project {project} owner changed to Priya. Priya is current. {noise}"
         question = f"Who is the current owner of Project {project}?"
         required, forbidden = ["Priya"], ["Alice"]
     elif task == "conflict_resolution":
-        corpus.append({"content": "An unreviewed rumor says the budget is $900.", "sequence": 1})
+        corpus.append(
+            {
+                "content": f"An unreviewed report says Project {project} budget is $900.",
+                "sequence": 1,
+                "operation": "create",
+            }
+        )
         content = f"Reviewed financial decision: Project {project} budget is $2400. {noise}"
         question = f"What is the reviewed Project {project} budget?"
         required, forbidden = ["$2400"], ["$900"]
@@ -71,7 +89,7 @@ def build_case(index: int, task: str, span: int, rng: random.Random) -> tuple[li
         question = "Which cabinet contains the red key?"
         required = ["west cabinet"]
     else:
-        content = f"Project {project} records describe launch timing and ownership only. {noise}"
+        content = f"No reviewed evidence records a favorite restaurant for Project {project}. {noise}"
         question = f"What is Project {project}'s favorite restaurant?"
         expected_abstention = True
 
@@ -85,6 +103,7 @@ def build_case(index: int, task: str, span: int, rng: random.Random) -> tuple[li
             "domain": task,
             "content": row["content"],
             "sequence": row["sequence"],
+            "operation": row.get("operation", "update" if len(corpus) > 1 else "create"),
         }
         for row in corpus
     ]
@@ -108,6 +127,7 @@ def main() -> int:
     parser.add_argument("--cases-per-task", type=int, default=10)
     parser.add_argument("--spans", default="100,1000,10000")
     parser.add_argument("--seed", type=int, default=20260813)
+    parser.add_argument("--workspace-prefix", default="bench-behavior-v2")
     args = parser.parse_args()
     rng = random.Random(args.seed)
     corpus: list[dict[str, Any]] = []
@@ -116,7 +136,13 @@ def main() -> int:
     for span in [int(value) for value in args.spans.split(",")]:
         for task in TASKS:
             for offset in range(args.cases_per_task):
-                rows, question = build_case(offset, task, span, rng)
+                rows, question = build_case(
+                    offset,
+                    task,
+                    span,
+                    rng,
+                    workspace_prefix=args.workspace_prefix,
+                )
                 corpus.extend(rows)
                 questions.append(question)
 
@@ -124,7 +150,7 @@ def main() -> int:
     write_jsonl(out / "corpus.jsonl", corpus)
     write_jsonl(out / "questions.jsonl", questions)
     manifest = {
-        "benchmark": "optimal-behavioral-memory-v1",
+        "benchmark": "optimal-behavioral-memory-v2",
         "inspiration": "GoodAI LTM Benchmark task taxonomy",
         "license": "Original deterministic Optimal Engine fixtures",
         "seed": args.seed,
