@@ -758,28 +758,82 @@ defmodule OptimalEngine.MemoryCore.Store do
   end
 
   def list_claims(workspace_id, opts) when is_binary(workspace_id) and is_list(opts) do
-    {clauses, params} =
-      filter_clauses(
-        [
-          {"tenant_id =", Keyword.get(opts, :tenant_id)},
-          {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)},
-          {"review_status =", Keyword.get(opts, :review_status)},
-          {"source_package_id =", Keyword.get(opts, :source_package_id)}
-        ],
-        [workspace_id]
-      )
+    {clauses, params} = claim_filter_clauses(workspace_id, opts)
+    {limit_clause, params} = limit_clause(Keyword.get(opts, :limit), params)
 
     sql = """
     SELECT #{Enum.join(@claim_columns, ", ")}
     FROM claims
     WHERE workspace_id = ?1 #{clauses}
-    ORDER BY created_at, id
+    ORDER BY created_at, id#{limit_clause}
     """
 
     with {:ok, rows} <- Store.raw_query(sql, params) do
       {:ok, Enum.map(rows, &claim_from_row/1)}
     end
   end
+
+  @doc """
+  Counts claims matching the same filters as `list_claims/2`, without hydrating
+  rows. Returns the total plus per-status breakdowns, so a caller that pages
+  with `:limit` can still report honest totals.
+  """
+  @spec count_claims(keyword()) ::
+          {:ok,
+           %{
+             total: non_neg_integer(),
+             review_counts: %{optional(String.t()) => non_neg_integer()},
+             lifecycle_counts: %{optional(String.t()) => non_neg_integer()}
+           }}
+          | {:error, term()}
+  def count_claims(opts \\ []) when is_list(opts) do
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    {clauses, params} = claim_filter_clauses(workspace_id, opts)
+
+    sql = """
+    SELECT review_status, lifecycle_state, COUNT(*)
+    FROM claims
+    WHERE workspace_id = ?1 #{clauses}
+    GROUP BY review_status, lifecycle_state
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      {:ok,
+       %{
+         total: rows |> Enum.map(fn [_, _, n] -> n end) |> Enum.sum(),
+         review_counts: sum_grouped(rows, fn [review, _, n] -> {review, n} end),
+         lifecycle_counts: sum_grouped(rows, fn [_, lifecycle, n] -> {lifecycle, n} end)
+       }}
+    end
+  end
+
+  defp claim_filter_clauses(workspace_id, opts) do
+    filter_clauses(
+      [
+        {"tenant_id =", Keyword.get(opts, :tenant_id)},
+        {"lifecycle_state =", Keyword.get(opts, :lifecycle_state)},
+        {"review_status =", Keyword.get(opts, :review_status)},
+        {"source_package_id =", Keyword.get(opts, :source_package_id)}
+      ],
+      [workspace_id]
+    )
+  end
+
+  defp sum_grouped(rows, mapper) do
+    Enum.reduce(rows, %{}, fn row, acc ->
+      {key, n} = mapper.(row)
+      Map.update(acc, to_string(key), n, &(&1 + n))
+    end)
+  end
+
+  # A missing or non-positive :limit keeps the query unbounded — existing
+  # callers that never paged keep their behaviour; a positive limit becomes a
+  # bound SQL parameter instead of being silently dropped.
+  defp limit_clause(limit, params) when is_integer(limit) and limit > 0 do
+    {"\nLIMIT ?#{length(params) + 1}", params ++ [limit]}
+  end
+
+  defp limit_clause(_absent_or_invalid, params), do: {"", params}
 
   @doc """
   Conditionally transitions a Claim out of review.
