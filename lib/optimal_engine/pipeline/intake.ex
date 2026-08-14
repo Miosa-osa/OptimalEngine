@@ -671,11 +671,19 @@ defmodule OptimalEngine.Pipeline.Intake do
   end
 
   defp do_extract_claim(source_package, signal, scope, _opts) do
+    # The claim must record who fed it in: a known actor becomes the
+    # evaluator (and can then not approve their own claim), an anonymous
+    # intake is attributed to the pipeline itself. scope.actor alone was nil
+    # on anonymous calls, which left evaluator_id empty and the self-review
+    # gate inert on every intake-produced claim.
+    intake_actor = scope.actor || "system:intake-pipeline"
+
     extract_opts = [
       signal_id: signal.id,
       workspace_id: scope.workspace_id,
       tenant_id: scope.tenant_id,
-      actor_id: scope.actor,
+      actor_id: intake_actor,
+      extracted_by: intake_actor,
       claim_text: signal.content || source_package.raw_text,
       metadata: %{
         node: signal.node,
