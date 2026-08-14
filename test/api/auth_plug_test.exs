@@ -273,4 +273,31 @@ defmodule OptimalEngine.API.AuthPlugTest do
       assert conn.status == 204
     end
   end
+
+  describe "exempt_paths (auth_required: true)" do
+    # The container HEALTHCHECK probes /api/health with a bare wget — no key.
+    # Without the exemption, enabling auth marks a correctly-secured container
+    # unhealthy and compose restart-loops it.
+    test "GET /api/health without a token returns 200" do
+      with_auth_required(fn ->
+        conn = call(:get, "/api/health")
+        assert conn.status == 200
+      end)
+    end
+
+    test "the exemption does not leak to other routes" do
+      with_auth_required(fn ->
+        conn = call(:get, "/api/stats")
+        assert conn.status == 401
+        assert {:ok, %{"error" => "missing_api_key"}} = Jason.decode(conn.resp_body)
+      end)
+    end
+
+    test "a garbage token on an exempt path is still rejected" do
+      with_auth_required(fn ->
+        conn = call(:get, "/api/health", [{"x-api-key", "oe_garbage_nope"}])
+        assert conn.status == 401
+      end)
+    end
+  end
 end
