@@ -4,63 +4,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-4B275F.svg)](mix.exs)
 
-## Current Benchmark Scorecard
+## Verified Performance Snapshot
 
-The benchmark program is executable and its numbers are checked into the repository.
+The current Candidate Portfolio retrieves at least one gold evidence item for **96.094%** of 1,540 LoCoMo questions and retrieves **87.130%** of all gold evidence addresses at top 100.
 
-| Measured gate | Current result |
-| --- | ---: |
-| Twelve-family release suite | 12/12 passing |
-| Governed behavioral recall | 21/21 correct |
-| Behavioral memory span | 50 to 5,000 filler tokens |
-| Behavioral P95 latency | 31 ms |
-| Authorization and governance regressions | 33/33 passing |
-| Paced governed tiered retrieval | 12.3 ms P95, 0 errors |
-| Paced governed reconstructive retrieval | 66.0 ms P95, 0 errors |
-| Isolated storage capacity | 100,000 records, 0.061 ms lookup P95 |
-| Storage insert throughput | 25,507 records/second |
-| Full Engine test suite | 1,968 tests, 0 failures |
-
-Read the [current twelve-family release report](benchmarks/results/RELEASE-CURRENT.md), browse the [benchmark source and datasets](benchmarks/), or read [what every number means](docs/guides/BENCHMARKING.md).
-
-Run all twelve benchmark families:
-
-```bash
-python3 benchmarks/scripts/release_benchmark.py
-```
-
-From the parent OptimalOS checkout, run `.system/oe benchmark_release`.
-
-A green score proves the listed gates on the recorded environment.
-It does not claim that unmeasured workloads are universally optimal.
-The public Gold Set is a sanitized schema fixture; production qualification also requires a private, human-reviewed OptimalOS Gold Set.
-
-### TrueMemory compatibility
-
-The twelve-family release suite above is an internal Optimal Engine qualification suite.
-It is not a TrueMemory score and must never be presented as one.
-
-The repository now includes a separate, pinned TrueMemory-compatible harness for LoCoMo, LongMemEval strict, LongMemEval oracle, BEAM-1M, and BEAM-10M.
-It verifies the upstream commit and protocol constants, adapts the official datasets, uses top-100 retrieval, loads the exact upstream answer and judge prompts at runtime, uses the same models and token limits, takes three judge votes, reports Wilson intervals and run variance, and refuses paid execution without an explicit flag and credential.
-
-Current external answer-quality scores remain **NOT RUN** because `OPENROUTER_API_KEY` is not configured.
-The live retrieval smoke test passed 1/1 with 100% evidence recall at 6.1 ms, but one question is only an integration check and is not a quality claim.
-
-The complete semantic-only LoCoMo retrieval ablation preserved the semantic baseline's 84.081% evidence recall and 93.750% question recall across 1,540 questions.
-It reduced retrieval P95 from 596.8 ms to 511.8 ms and P99 from 1,353.4 ms to 612.0 ms.
-Hybrid retrieval remains the compatibility default until matched answer scoring validates the faster strategy.
-
-The separately versioned `nomic-search-v1` task profile improved complete LoCoMo evidence recall from 84.081% to 85.140% and question recall from 93.750% to 94.271%.
-It also reduced P95 to 480.2 ms, but remains an ablation because category 4 evidence recall declined by 0.670 points.
-The full LoCoMo BM25 diagnostic measured 77.409% question-level evidence recall and 61.346% evidence recall at top-100 with a 7.192 ms P95.
-The governed Candidate Portfolio improves the complete LoCoMo retrieval run to 96.094% question evidence recall and 87.130% evidence-address recall.
-That is 22 more covered questions and 28 more gold evidence addresses than exclusive intent routing, while P95 improves from 702.9 ms to 665.5 ms.
-It keeps 70% of the proven routed ranking, then uses bounded lexical and semantic adapter budgets plus reciprocal-rank selection to recover complementary evidence without comparing incompatible raw cosine scores.
-Temporal evidence-address recall remains 0.8 points below the routed control, so this is a measured opt-in strategy rather than the default.
-The LongMemEval corpus diagnostic matched all 500 strict/oracle question IDs and measured a 95.558% oracle context reduction.
-Both official BEAM datasets are now adapter-verified: BEAM-1M contains 700 questions and BEAM-10M contains 200 questions.
-
-Read the [current TrueMemory compatibility report](benchmarks/results/truememory/COMPATIBILITY-CURRENT.md) and the [reproduction instructions](benchmarks/truememory/README.md).
+The complete benchmark dashboard, category scores, latency, scale tests, metric definitions, limitations, reproduction commands, and result artifacts are in [Benchmarks](#benchmarks).
 
 Optimal Engine is a self-hosted second brain and operating engine for human and
 AI workspaces.
@@ -1129,10 +1077,156 @@ raw SQL from feature modules into governed tables
 
 `Store` can execute database writes. Domain layers own lifecycle decisions.
 
-## License
-
-Optimal Engine is released under the [MIT License](LICENSE).
-
 `OptimalEngine.DataSteward` provides the governed remediation Interface for clustered claim, routing, entity, and workspace-integrity review.
 Bulk decisions require explicit identifiers and preserve source evidence.
 `OptimalEngine.DataQualityScheduler` records daily read-only health snapshots for drift detection.
+
+## Benchmarks
+
+Every number below is tied to a checked-in result or executable test suite.
+Retrieval-only scores are not presented as answer accuracy, smoke tests are not presented as quality claims, and unrun evaluations remain visibly unrun.
+
+### External memory quality
+
+The strongest completed external retrieval run is the governed Candidate Portfolio on all 1,540 LoCoMo questions at top 100.
+
+| Quality metric | Candidate Portfolio | Previous routed system | Change |
+| --- | ---: | ---: | ---: |
+| Questions with at least one gold evidence item | **96.094%** (1,476/1,540) | 94.661% (1,454/1,540) | **+22 questions** |
+| All gold evidence addresses retrieved | **87.130%** (2,058/2,362) | 85.944% (2,030/2,362) | **+28 addresses** |
+| Retrieval P50 | **452.9 ms** | 443.3 ms | +9.6 ms |
+| Retrieval P95 | **665.5 ms** | 702.9 ms | **-37.4 ms** |
+| Retrieval P99 | **818.4 ms** | 879.1 ms | **-60.7 ms** |
+
+The result artifact is [`optimal_engine_locomo_candidate_portfolio_retrieval_run3.json`](benchmarks/results/truememory/optimal_engine_locomo_candidate_portfolio_retrieval_run3.json).
+
+### LoCoMo progress
+
+This table shows the complete retrieval program rather than only the best number.
+
+| Retrieval system | Questions covered | Evidence recall | P50 | P95 | Evaluation state |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Lexical Engine baseline | 83.984% | 70.703% | 473.2 ms | 572.0 ms | Matched answer judging completed |
+| Raw semantic | 93.750% | 84.081% | 406.5 ms | 596.8 ms | Retrieval only |
+| Semantic-only execution | 93.750% | 84.081% | 370.0 ms | 511.8 ms | Retrieval only |
+| Task-profile semantic | 94.271% | 85.140% | 373.0 ms | 480.2 ms | Retrieval only |
+| Contextual projection | 94.141% | 84.928% | 367.7 ms | 555.2 ms | Retrieval only |
+| Multimodal fusion | 94.531% | 85.648% | 473.6 ms | 680.6 ms | Retrieval only |
+| Exclusive intent routing | 94.661% | 85.944% | 443.3 ms | 702.9 ms | Retrieval only |
+| **Governed Candidate Portfolio** | **96.094%** | **87.130%** | 452.9 ms | 665.5 ms | Retrieval only |
+
+The matched lexical run scored **87.857% answer accuracy** across 1,540 questions.
+Candidate Portfolio answer accuracy remains **NOT RUN**, so its retrieval improvement must not be described as a TrueMemory answer-score improvement yet.
+
+### LoCoMo category quality
+
+| Category | What it tests | Candidate Portfolio evidence recall | Candidate Portfolio question recall | Routed evidence recall | Routed question recall |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Single-hop facts | **81.674%** | **97.872%** | 80.543% | 97.518% |
+| 2 | Temporal reasoning | 92.000% | **94.704%** | **92.800%** | 94.393% |
+| 3 | Commonsense and inference | **62.981%** | **85.870%** | 60.577% | 84.783% |
+| 4 | Multi-hop and set completion | **96.089%** | **97.146%** | 94.302% | 94.887% |
+
+Temporal evidence completeness is the known regression.
+Candidate Portfolio remains opt-in until that 0.8-point loss is removed, even though temporal question coverage improved.
+
+### Supported external benchmark protocols
+
+| Benchmark | Prepared dataset | Cases | Current state |
+| --- | ---: | ---: | --- |
+| LoCoMo | 10 conversations, 5,882 messages | 1,540 questions | Full retrieval measured; one matched answer run completed |
+| LongMemEval strict | 246,750 messages | 500 questions | Adapter verified; matched score not run |
+| LongMemEval oracle | 10,960 messages | 500 questions | Adapter verified; matched score not run |
+| BEAM-1M | 35 conversations, 74,630 messages | 700 questions | Adapter verified; matched score not run |
+| BEAM-10M | 10 conversations, 208,696 messages | 200 questions | Adapter verified; matched score not run |
+
+LongMemEval oracle reduces the strict corpus by **95.558%** while preserving the same 500 question IDs.
+The harness pins the upstream TrueMemory commit and protocol constants, uses top-100 retrieval, exact answer and judge prompts, three judge votes, Wilson intervals, and run variance.
+
+### Internal release qualification
+
+The internal release suite covers twelve independent families and currently passes **12/12**.
+These are engineering gates, not external memory leaderboard scores.
+
+| Release family | Current result |
+| --- | ---: |
+| Governed Gold Set | 6 cases passing |
+| Entity and identity | 18 tests passing |
+| Episodic memory | 18 tests passing |
+| Graph and multi-hop reasoning | 17 tests passing |
+| Citation and evidence quality | 19 tests passing |
+| End-to-end ingestion | 94 tests passing |
+| Crash and recovery | 14 tests passing |
+| Capacity and soak | 10,000 paced operations passing |
+| Overload and rate limits | 17 tests passing |
+| Adversarial mutation | 31 tests passing |
+| Workflow, skill, and asset governance | 18 tests passing |
+| Continuous benchmark history | Passing |
+
+Read the complete [release qualification report](benchmarks/results/RELEASE-CURRENT.md).
+
+### Speed, scale, and storage
+
+These measurements test different paths and must not be compared as if they were the same workload.
+
+| Measured workload | Result |
+| --- | ---: |
+| Governed behavioral recall | 21/21 correct |
+| Behavioral memory span | 50 to 5,000 filler tokens |
+| Behavioral recall P95 | 31 ms |
+| Paced governed tiered retrieval | 12.3 ms P95, 0 errors |
+| Paced governed reconstructive retrieval | 66.0 ms P95, 0 errors |
+| Isolated storage lookup at 100,000 records | 0.061 ms P95 |
+| Isolated storage insert throughput | 25,507 records/second |
+
+### What the metrics mean
+
+| Metric | Plain-English meaning |
+| --- | --- |
+| Question recall | Percentage of questions whose top-100 results contain at least one gold evidence item. |
+| Evidence recall | Percentage of every annotated gold evidence address retrieved across all questions. |
+| Answer accuracy | Percentage of generated answers accepted by the benchmark judge protocol. |
+| P50 latency | Median request time. Half of requests are faster and half are slower. |
+| P95 latency | Tail latency. Ninety-five percent of requests finish within this time. |
+| P99 latency | Extreme tail latency. Ninety-nine percent of requests finish within this time. |
+| Top 100 | The retriever may return at most 100 candidates for each question. |
+| Retrieval only | Evidence was scored, but no answer model or answer judge was run. |
+| Matched answer judging | The pinned answer model and three-vote judge protocol were executed. |
+
+### Reproduce the benchmarks
+
+Run all twelve internal release families:
+
+```bash
+python3 benchmarks/scripts/release_benchmark.py
+```
+
+From OptimalOS:
+
+```bash
+.system/oe benchmark_release
+```
+
+Run Candidate Portfolio retrieval after preparing the pinned LoCoMo dataset and projections:
+
+```bash
+python3 benchmarks/scripts/truememory_engine_run.py \
+  --benchmark locomo \
+  --prepared /tmp/optimal-truememory/locomo.jsonl \
+  --retrieval engine_portfolio \
+  --run-id 1 \
+  --embedding-model nomic-search-v1,nomic-multimodal-v1 \
+  --embedding-provider-model nomic-embed-text \
+  --query-prefix 'search_query: ' \
+  --inference-embedding-model nomic-context-v1 \
+  --out /tmp/optimal-engine-locomo-portfolio-run1.json
+```
+
+Read [the metric guide](docs/guides/BENCHMARKING.md), [TrueMemory reproduction instructions](benchmarks/truememory/README.md), [current compatibility status](benchmarks/results/truememory/COMPATIBILITY-CURRENT.md), and [all checked-in results](benchmarks/results/).
+
+The public Gold Set is sanitized.
+Production qualification still requires a private, human-reviewed OptimalOS Gold Set, dedicated large-corpus soak testing, and three complete matched external answer runs.
+
+## License
+
+Optimal Engine is released under the [MIT License](LICENSE).
