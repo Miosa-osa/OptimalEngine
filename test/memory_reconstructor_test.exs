@@ -207,6 +207,49 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     assert second.associations == first.associations
   end
 
+  test "reconstructs governed durable memories without promoting them to facts", %{
+    workspace: workspace,
+    actor: actor
+  } do
+    memory_id = "mem_durable_#{System.unique_integer([:positive])}"
+
+    assert :ok =
+             Store.raw_execute(
+               "INSERT INTO memories (id, tenant_id, workspace_id, content, root_memory_id, audience, metadata) VALUES (?1, 'default', ?2, ?3, ?1, 'default', ?4)",
+               [
+                 memory_id,
+                 workspace,
+                 "The retrieval portfolio release improved evidence recall without changing canonical facts",
+                 Jason.encode!(%{
+                   "memory_core_source_package_id" => "sp_durable_test",
+                   "projection_kind" => "versioned_memory_staging"
+                 })
+               ]
+             )
+
+    assert {:ok, package} =
+             MemoryCore.retrieve("retrieval portfolio evidence recall",
+               tenant_id: "default",
+               workspace_id: workspace,
+               actor_id: actor,
+               strategy: :reconstructive
+             )
+
+    assert package.sections.reconstruction =~ "improved evidence recall"
+    assert package.retrieval_plan.reconstruction.paths != []
+
+    assert Enum.any?(package.evidence_links, fn link ->
+             (Map.get(link, :id) || Map.get(link, "id")) == memory_id
+           end)
+
+    assert {:ok, [[fact_count]]} =
+             Store.raw_query("SELECT COUNT(*) FROM facts WHERE id = ?1", [memory_id])
+
+    assert fact_count == 0
+
+    Store.raw_execute("DELETE FROM memories WHERE id = ?1", [memory_id])
+  end
+
   defp reconstruct(workspace, actor) do
     MemoryCore.retrieve("Commas commitment customer feedback",
       tenant_id: "default",

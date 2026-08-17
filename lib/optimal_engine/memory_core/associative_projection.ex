@@ -10,7 +10,7 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
   alias OptimalEngine.MemoryCore.{ID, JSON, ScopeEnvelope}
   alias OptimalEngine.Store
 
-  @version "associative-v1"
+  @version "associative-v2"
   @stopwords ~w[a an and are as at be by for from how in is it of on or that the this to was what when where which who why with]
 
   @doc "Returns the rebuildable association schema version."
@@ -29,15 +29,18 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
              ),
            {:ok, facts} <- query_objects(txn, :facts, scope),
            {:ok, memories} <- query_objects(txn, :memory_objects, scope),
+           {:ok, durable_memories} <- query_objects(txn, :durable_memories, scope),
            {:ok, episodes} <- query_objects(txn, :episodes, scope),
            {:ok, edges} <- query_edges(txn, scope),
-           :ok <- insert_all(txn, facts ++ memories ++ episodes ++ edges) do
+           :ok <- insert_all(txn, facts ++ memories ++ durable_memories ++ episodes ++ edges) do
         {:ok,
          %{
            tenant_id: scope.tenant_id,
            workspace_id: scope.workspace_id,
            projection_version: @version,
-           associations: length(facts) + length(memories) + length(episodes) + length(edges)
+           associations:
+             length(facts) + length(memories) + length(durable_memories) + length(episodes) +
+               length(edges)
          }}
       end
     end)
@@ -135,6 +138,26 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
     object_rows(txn, sql, scope)
   end
 
+  # Versioned durable memories predate the governed Fact -> Memory Object
+  # lifecycle and remain the primary corpus written by `oe aware` and
+  # `oe close`. They are admissible as attributed retrieval evidence, never as
+  # Facts. Keeping this as a rebuildable association projection makes the
+  # compatibility boundary explicit without silently promoting staged claims.
+  defp query_objects(txn, :durable_memories, scope) do
+    sql = """
+    SELECT id, content, audience, citation_uri, source_chunk_id, metadata,
+           created_at, updated_at
+    FROM memories
+    WHERE tenant_id = ?1 AND workspace_id = ?2
+      AND is_latest = 1 AND is_forgotten = 0
+      AND audience = 'default'
+    """
+
+    with {:ok, rows} <- Store.txn_query(txn, sql, [scope.tenant_id, scope.workspace_id]) do
+      {:ok, Enum.flat_map(rows, &durable_memory_associations(scope, &1))}
+    end
+  end
+
   defp query_objects(txn, :episodes, scope) do
     sql = """
     SELECT id, 'episode', kind, summary, provenance, 0.7, 0.7, NULL,
@@ -145,6 +168,68 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
 
     object_rows(txn, sql, scope)
   end
+
+  defp durable_memory_associations(
+         scope,
+         [
+           id,
+           content,
+           audience,
+           citation_uri,
+           source_chunk_id,
+           metadata_json,
+           created_at,
+           updated_at
+         ]
+       ) do
+    metadata = decode_map(metadata_json)
+
+    evidence_links =
+      [
+        %{type: "durable_memory", id: id},
+        optional_link("source_package", metadata["memory_core_source_package_id"]),
+        optional_link("chunk", source_chunk_id),
+        optional_link("source", citation_uri)
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    labels = Jason.encode!(Map.get(metadata, "security_labels", []))
+    partitions = Jason.encode!(Map.get(metadata, "partition_ids", []))
+
+    content
+    |> terms()
+    |> Enum.map(fn cue ->
+      association(
+        scope,
+        cue,
+        audience,
+        "durable_memory",
+        id,
+        "durable_memory",
+        id,
+        "recalls",
+        content,
+        evidence: Jason.encode!(evidence_links),
+        labels: labels,
+        partitions: partitions,
+        tx_start: created_at || updated_at,
+        confidence: Map.get(metadata, "confidence", 0.65),
+        precision: Map.get(metadata, "precision", 0.65)
+      )
+    end)
+  end
+
+  defp optional_link(_type, value) when value in [nil, ""], do: nil
+  defp optional_link(type, value), do: %{type: type, id: value}
+
+  defp decode_map(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, decoded} when is_map(decoded) -> decoded
+      _ -> %{}
+    end
+  end
+
+  defp decode_map(_), do: %{}
 
   defp object_rows(txn, sql, scope) do
     with {:ok, rows} <- Store.txn_query(txn, sql, [scope.tenant_id, scope.workspace_id]) do
