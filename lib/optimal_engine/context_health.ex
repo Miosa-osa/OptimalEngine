@@ -10,7 +10,7 @@ defmodule OptimalEngine.ContextHealth do
       check("memory_projection", fn -> memory_projection(workspace_id) end),
       check("routing_concentration", &routing_concentration/0),
       check("pending_claims", fn -> pending_claims(workspace_id) end),
-      check("workspace_integrity", &workspace_integrity/0),
+      check("workspace_integrity", fn -> workspace_integrity(workspace_id) end),
       check("fixture_visibility", &fixture_visibility/0),
       check("freshness", fn -> freshness(workspace_id) end)
     ]
@@ -113,20 +113,20 @@ defmodule OptimalEngine.ContextHealth do
      }}
   end
 
-  defp workspace_integrity do
+  defp workspace_integrity(workspace_id) do
     {:ok, [[count]]} =
       Store.raw_query(
         """
         SELECT COUNT(*)
         FROM (
-          SELECT DISTINCT workspace_id FROM contexts WHERE archived_at IS NULL
-          UNION SELECT DISTINCT workspace_id FROM memories WHERE is_latest = 1 AND is_forgotten = 0
-          UNION SELECT DISTINCT workspace_id FROM claims
+          SELECT DISTINCT workspace_id FROM contexts WHERE archived_at IS NULL AND workspace_id = ?1
+          UNION SELECT DISTINCT workspace_id FROM memories WHERE is_latest = 1 AND is_forgotten = 0 AND workspace_id = ?1
+          UNION SELECT DISTINCT workspace_id FROM claims WHERE workspace_id = ?1
         ) owned
         LEFT JOIN workspaces registered ON registered.id = owned.workspace_id
         WHERE registered.id IS NULL
         """,
-        []
+        [workspace_id]
       )
 
     {count == 0, if(count == 0, do: 100, else: 0), %{orphan_workspace_scopes: count}}

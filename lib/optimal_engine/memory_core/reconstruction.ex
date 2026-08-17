@@ -110,6 +110,8 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
       confidence: reconstruction.confidence,
       metadata: %{
         policy_version: @policy_version,
+        engine_version: OptimalEngine.Version.application_version(),
+        associative_projection_version: AssociativeProjection.version(),
         authorization_envelope: context_package.authorization_envelope,
         request_id: Keyword.get(opts, :request_id)
       },
