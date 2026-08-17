@@ -22,6 +22,10 @@ defmodule OptimalEngine.MemoryCore.EvidencePlan do
 
   @type obligation :: %{role: String.t(), probe: String.t(), required: boolean()}
 
+  @doc "Returns the planner schema version persisted in retrieval traces."
+  @spec version() :: String.t()
+  def version, do: @planner_version
+
   @spec build(String.t()) :: map()
   def build(query) when is_binary(query) do
     normalized = normalize(query)

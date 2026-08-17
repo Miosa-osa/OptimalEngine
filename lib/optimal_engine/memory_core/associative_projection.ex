@@ -13,6 +13,10 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
   @version "associative-v1"
   @stopwords ~w[a an and are as at be by for from how in is it of on or that the this to was what when where which who why with]
 
+  @doc "Returns the rebuildable association schema version."
+  @spec version() :: String.t()
+  def version, do: @version
+
   @doc "Rebuilds all associations for one tenant and workspace from canonical rows."
   @spec rebuild(ScopeEnvelope.t()) :: {:ok, map()} | {:error, term()}
   def rebuild(%ScopeEnvelope{} = scope) do
