@@ -1224,6 +1224,8 @@ python3 benchmarks/scripts/truememory_engine_run.py \
 
 Read [the metric guide](docs/guides/BENCHMARKING.md), [TrueMemory reproduction instructions](benchmarks/truememory/README.md), [current compatibility status](benchmarks/results/truememory/COMPATIBILITY-CURRENT.md), and [all checked-in results](benchmarks/results/).
 
+Read [Versioning And Releases](docs/guides/versioning-and-releases.md) for the application, Git, migration, component, benchmark, and deployment version contract.
+
 The public Gold Set is sanitized.
 Production qualification still requires a private, human-reviewed OptimalOS Gold Set, dedicated large-corpus soak testing, and three complete matched external answer runs.
 

@@ -42,6 +42,29 @@ defmodule OptimalEngine.API.RouterTest do
       assert Map.has_key?(body, "status")
       assert Map.has_key?(body, "ok?")
       assert Map.has_key?(body, "checks")
+      assert body["release"]["version"] == "0.3.0"
+    end
+  end
+
+  describe "GET /api/version" do
+    test "returns build, schema, and component provenance" do
+      conn = request(:get, "/api/version")
+      assert conn.status == 200
+      assert {:ok, body} = Jason.decode(conn.resp_body)
+      assert body["application"] == "optimal_engine"
+      assert body["version"] == "0.3.0"
+      assert body["expected_migration"] == 62
+      assert body["components"]["candidate_portfolio"] == "candidate-portfolio-v1"
+    end
+  end
+
+  describe "GET /api/health" do
+    test "includes the exact running release identity" do
+      conn = request(:get, "/api/health")
+      assert conn.status == 200
+      assert {:ok, body} = Jason.decode(conn.resp_body)
+      assert body["release"]["version"] == "0.3.0"
+      assert body["release"]["expected_migration"] == 62
     end
   end
 

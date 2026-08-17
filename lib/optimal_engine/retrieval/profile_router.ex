@@ -7,6 +7,11 @@ defmodule OptimalEngine.Retrieval.ProfileRouter do
   """
 
   alias OptimalEngine.MemoryCore.EvidencePlan
+  @version "profile-router-v1"
+
+  @doc "Returns the deterministic routing policy version."
+  @spec version() :: String.t()
+  def version, do: @version
 
   @spec select(String.t(), String.t(), String.t() | nil) :: map()
   def select(query, default_models, inference_models \\ nil) do
@@ -19,7 +24,7 @@ defmodule OptimalEngine.Retrieval.ProfileRouter do
         {default_models, "default_profile"}
       end
 
-    %{intent: intent, models: models, reason: reason, router_version: "profile-router-v1"}
+    %{intent: intent, models: models, reason: reason, router_version: @version}
   end
 
   defp present?(value) when is_binary(value), do: String.trim(value) != ""

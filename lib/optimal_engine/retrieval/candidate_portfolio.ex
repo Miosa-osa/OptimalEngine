@@ -9,7 +9,12 @@ defmodule OptimalEngine.Retrieval.CandidatePortfolio do
   before its candidates enter the portfolio.
   """
 
+  @version "candidate-portfolio-v1"
   @rrf_constant 60
+
+  @doc "Returns the candidate selection policy version."
+  @spec version() :: String.t()
+  def version, do: @version
 
   @spec select([[map()]], pos_integer(), keyword()) :: [map()]
   def select(rankings, limit, opts \\ [])
