@@ -38,7 +38,8 @@ function writeLS(key: string, value: string | null) {
 export const organizations = writable<Organization[]>([]);
 export const workspaces = writable<Workspace[]>([]);
 
-// id of the active org (= tenant_id), nullable until first load resolves.
+// id of the active org (an organization id, NOT the tenant id), nullable
+// until first load resolves.
 export const activeOrgId = writable<string | null>(readLS(ORG_KEY));
 
 // id of the active workspace, nullable until first load.
@@ -68,14 +69,26 @@ export async function bootstrap(): Promise<void> {
     const [{ organizations: orgs }, _] = [await listOrganizations(), null];
     organizations.set(orgs);
 
+    // Real organizations, i.e. everything except the "default" compatibility
+    // org, which only owns pre-organization workspaces and is empty here.
+    const realOrgs = orgs.filter((o) => o.id !== "default");
     let orgId = get(activeOrgId);
-    if (!orgId || !orgs.find((o) => o.id === orgId)) {
-      orgId = orgs[0]?.id ?? null;
+    // Re-select the org when nothing is persisted, the persisted org no longer
+    // exists, OR the persisted org is the empty "default" compat org while a
+    // real org is available. That last case matters: before organizations were
+    // first-class the app auto-parked returning users on "default", so their
+    // saved selection is a valid-but-empty org that would blank every module.
+    if (
+      !orgId ||
+      !orgs.find((o) => o.id === orgId) ||
+      (orgId === "default" && realOrgs.length > 0)
+    ) {
+      orgId = (realOrgs[0] ?? orgs[0])?.id ?? null;
       activeOrgId.set(orgId);
     }
 
     if (orgId) {
-      const { workspaces: ws } = await listWorkspaces(orgId);
+      const { workspaces: ws } = await listWorkspaces({ organization: orgId });
       workspaces.set(ws);
 
       let wsId = get(activeWorkspaceId);
@@ -98,7 +111,7 @@ export async function bootstrap(): Promise<void> {
 export async function refreshWorkspaces(): Promise<void> {
   const orgId = get(activeOrgId);
   if (!orgId) return;
-  const { workspaces: ws } = await listWorkspaces(orgId);
+  const { workspaces: ws } = await listWorkspaces({ organization: orgId });
   workspaces.set(ws);
 }
 

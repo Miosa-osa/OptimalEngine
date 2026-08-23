@@ -4042,6 +4042,7 @@ defmodule OptimalEngine.API.Router do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, uri, genre, modified_at, size] ->
           %{
+            id: id,
             name: title || id,
             path: uri || id,
             is_dir: false,
