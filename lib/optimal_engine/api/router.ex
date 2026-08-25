@@ -2446,30 +2446,43 @@ defmodule OptimalEngine.API.Router do
     name = Map.get(body, "name")
     tenant_id = conn.assigns[:current_tenant] || "default"
 
-    if not (is_binary(name) and name != "") do
-      send_resp(conn, 400, Jason.encode!(%{error: "name is required"}))
-    else
-      attrs =
-        %{tenant_id: tenant_id, name: name}
-        |> maybe_put(:scopes, Map.get(body, "scopes"))
-        |> maybe_put(:workspace_scope, Map.get(body, "workspace_scope"))
-        |> maybe_put(:expires_at, Map.get(body, "expires_at"))
-        |> maybe_put(:principal_id, Map.get(body, "principal_id"))
+    cond do
+      not admin_scope?(conn) ->
+        send_resp(conn, 403, Jason.encode!(%{error: "admin_scope_required"}))
 
-      case ApiKey.mint(attrs) do
-        {:ok, %{id: id, key: key, secret: _secret}} ->
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(201, Jason.encode!(%{id: id, key: key, prefix: String.slice(key, 0, 8)}))
+      not (is_binary(name) and name != "") ->
+        send_resp(conn, 400, Jason.encode!(%{error: "name is required"}))
 
-        {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-      end
+      true ->
+        attrs =
+          %{tenant_id: tenant_id, name: name}
+          |> maybe_put(:scopes, Map.get(body, "scopes"))
+          |> maybe_put(:workspace_scope, Map.get(body, "workspace_scope"))
+          |> maybe_put(:expires_at, Map.get(body, "expires_at"))
+          |> maybe_put(:principal_id, Map.get(body, "principal_id"))
+
+        case ApiKey.mint(attrs) do
+          {:ok, %{id: id, key: key, secret: _secret}} ->
+            conn
+            |> put_resp_content_type("application/json")
+            |> send_resp(201, Jason.encode!(%{id: id, key: key, prefix: String.slice(key, 0, 8)}))
+
+          {:error, reason} ->
+            send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        end
     end
   end
 
   # GET /api/auth/keys — list non-revoked keys for current tenant (no secrets).
   get "/api/auth/keys" do
+    if not admin_scope?(conn) do
+      send_resp(conn, 403, Jason.encode!(%{error: "admin_scope_required"}))
+    else
+      list_api_keys(conn)
+    end
+  end
+
+  defp list_api_keys(conn) do
     tenant_id = conn.assigns[:current_tenant] || "default"
     {offset, limit} = Pagination.parse(conn)
 
@@ -2497,17 +2510,29 @@ defmodule OptimalEngine.API.Router do
 
   # POST /api/auth/keys/:id/revoke — soft revoke a key.
   post "/api/auth/keys/:id/revoke" do
-    case ApiKey.revoke(id) do
-      :ok -> send_resp(conn, 204, "")
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    cond do
+      not admin_scope?(conn) ->
+        send_resp(conn, 403, Jason.encode!(%{error: "admin_scope_required"}))
+
+      true ->
+        case ApiKey.revoke(id) do
+          :ok -> send_resp(conn, 204, "")
+          {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        end
     end
   end
 
   # DELETE /api/auth/keys/:id — hard delete a key.
   delete "/api/auth/keys/:id" do
-    case ApiKey.delete(id) do
-      :ok -> send_resp(conn, 204, "")
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    cond do
+      not admin_scope?(conn) ->
+        send_resp(conn, 403, Jason.encode!(%{error: "admin_scope_required"}))
+
+      true ->
+        case ApiKey.delete(id) do
+          :ok -> send_resp(conn, 204, "")
+          {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        end
     end
   end
 
@@ -3464,6 +3489,18 @@ defmodule OptimalEngine.API.Router do
     case conn.assigns[:current_principal] do
       principal when is_binary(principal) and principal != "" -> principal
       _ -> nil
+    end
+  end
+
+  # Key management is the one place a caller can grow its own privileges, so
+  # it demands the admin scope — the guarantee the section comment above the
+  # routes always made but nothing enforced: any workspace-scoped key could
+  # mint itself a "*" key. Anonymous mode (auth off) stays open, same as every
+  # other route in dev.
+  defp admin_scope?(conn) do
+    case conn.assigns[:current_api_key] do
+      nil -> true
+      key -> "admin" in key.scopes or "*" in key.scopes
     end
   end
 
