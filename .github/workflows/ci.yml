@@ -7,6 +7,13 @@ on:
     tags: ["v*"]
     paths-ignore:
       - "**.md"
+  # Fork PRs (e.g. Oliver-CG's fix series) previously ran NO CI at all -
+  # seven open PRs sat unvalidated while main itself was red on the
+  # rocksdb NIF build. Every PR now runs the same pipeline.
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
       - "site/**"
       - "apps/docs/**"
       - "skills/**"
