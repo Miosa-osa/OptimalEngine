@@ -358,7 +358,7 @@ defmodule OptimalEngine.Store do
          :ok <- Exqlite.Sqlite3.bind(stmt, params) do
       rows = collect_rows_raw(db, stmt, [])
       Exqlite.Sqlite3.release(db, stmt)
-      {:ok, rows}
+      rows
     end
   end
 
@@ -607,7 +607,7 @@ defmodule OptimalEngine.Store do
            :ok <- Exqlite.Sqlite3.bind(stmt, params) do
         rows = collect_rows_raw(state.db, stmt, [])
         Exqlite.Sqlite3.release(state.db, stmt)
-        {:ok, rows}
+        rows
       end
 
     {:reply, result, state}
@@ -1617,11 +1617,15 @@ defmodule OptimalEngine.Store do
     end
   end
 
+  # A step error (constraint violation, malformed data, I/O failure) MUST
+  # surface: swallowing it here made every failed write through raw_query
+  # report {:ok, []} — measured with an api_keys INSERT hitting the principals
+  # foreign key: mint returned success and stored nothing.
   defp collect_rows_raw(db, stmt, acc) do
     case Exqlite.Sqlite3.step(db, stmt) do
       {:row, row} -> collect_rows_raw(db, stmt, [row | acc])
-      :done -> Enum.reverse(acc)
-      {:error, _} -> Enum.reverse(acc)
+      :done -> {:ok, Enum.reverse(acc)}
+      {:error, reason} -> {:error, reason}
     end
   end
 
