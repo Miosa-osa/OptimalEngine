@@ -200,6 +200,63 @@ defmodule OptimalEngine.Pipeline.IntakeScopeTest do
              ) == 1
     end
 
+    test "intake claims carry the feeding actor as evaluator, so self-review is refused" do
+      workspace_id = unique_workspace()
+
+      raw_text =
+        "team sync notes for evaluator threading #{System.unique_integer([:positive])}"
+
+      assert {:ok, result} =
+               Intake.process(raw_text,
+                 node: "team",
+                 workspace_id: workspace_id,
+                 actor: "user:ingest",
+                 title: "Evaluator Threading Note"
+               )
+
+      assert result.quality_action == :accepted
+
+      assert {:ok, [claim]} =
+               OptimalEngine.MemoryCore.pending_claims(workspace_id: workspace_id)
+
+      assert claim.evaluator_id == "user:ingest"
+
+      # The actor who fed the claim in cannot approve it...
+      assert {:error, :self_review_not_allowed} =
+               OptimalEngine.MemoryCore.promote_claim(claim.id,
+                 workspace_id: workspace_id,
+                 actor_id: "user:ingest"
+               )
+
+      # ...an independent reviewer can.
+      assert {:ok, _result} =
+               OptimalEngine.MemoryCore.promote_claim(claim.id,
+                 workspace_id: workspace_id,
+                 actor_id: "user:onafhankelijk"
+               )
+    end
+
+    test "anonymous intake attributes the claim to the pipeline, never to nobody" do
+      workspace_id = unique_workspace()
+
+      raw_text =
+        "team sync notes for anonymous attribution #{System.unique_integer([:positive])}"
+
+      assert {:ok, result} =
+               Intake.process(raw_text,
+                 node: "team",
+                 workspace_id: workspace_id,
+                 title: "Anonymous Attribution Note"
+               )
+
+      assert result.quality_action == :accepted
+
+      assert {:ok, [claim]} =
+               OptimalEngine.MemoryCore.pending_claims(workspace_id: workspace_id)
+
+      assert claim.evaluator_id == "system:intake-pipeline"
+    end
+
     test "low-signal inbox fallback is quarantined but evidence and files survive", %{
       tmp_dir: tmp_dir
     } do

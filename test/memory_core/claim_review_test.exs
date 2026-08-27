@@ -328,6 +328,29 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
              )
   end
 
+  test "an anonymously extracted claim is attributed to the extractor and refuses self-review" do
+    workspace_id = ws()
+
+    assert {:ok, claim} =
+             extracted_claim(workspace_id,
+               claim_text: "Anonymous extraction still carries an evaluator."
+             )
+
+    assert claim.evaluator_id == "system:claim-extractor"
+
+    assert {:error, :self_review_not_allowed} =
+             MemoryCore.promote_claim(claim.id,
+               workspace_id: workspace_id,
+               actor_id: "system:claim-extractor"
+             )
+
+    assert {:ok, _result} =
+             MemoryCore.promote_claim(claim.id,
+               workspace_id: workspace_id,
+               actor_id: "user:onafhankelijk"
+             )
+  end
+
   defp extracted_claim(workspace_id, opts) do
     source =
       MemoryCore.source_package_from_text(Keyword.fetch!(opts, :claim_text),

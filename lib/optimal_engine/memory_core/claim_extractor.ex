@@ -58,10 +58,15 @@ defmodule OptimalEngine.MemoryCore.ClaimExtractor do
         semantic_frame: Keyword.get(opts, :semantic_frame, %{}),
         source_span: Keyword.get(opts, :source_span, %{}),
         extraction_run_id: string_or_nil(Keyword.get(opts, :extraction_run_id)),
+        # Never nil: ScoringPolicy's self-review refusal compares the verifier
+        # against this field and treats nil as "no evaluator", which made the
+        # separation-of-duties rule unable to fire on any claim this extractor
+        # produced. An anonymous extraction is attributed to the extractor
+        # itself, so promoting under that same identity is refused.
         evaluator_id:
           string_or_nil(
             Keyword.get(opts, :evaluator_id) || Keyword.get(opts, :extracted_by) ||
-              Keyword.get(opts, :actor_id)
+              Keyword.get(opts, :actor_id) || "system:claim-extractor"
           ),
         aggregate_confidence: scores.confidence,
         aggregate_precision: scores.precision,
