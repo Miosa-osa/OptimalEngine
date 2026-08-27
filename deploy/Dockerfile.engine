@@ -10,9 +10,15 @@ RUN apt-get update -qq && \
         build-essential \
         git \
         libsqlite3-dev \
+        libsnappy-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# The rebar3 pre-hook of :rocksdb shells out to git inside /app; the build
+# context copies only mix.exs/lib/config/priv, so .git never arrives and the
+# hook dies with "fatal: not a git repository". An empty repo satisfies it.
+RUN git init -q . && git config user.email build@container && git config user.name build
 
 ENV MIX_ENV=prod \
     HEX_HTTP_CONCURRENCY=8 \
