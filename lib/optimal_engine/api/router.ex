@@ -2272,6 +2272,7 @@ defmodule OptimalEngine.API.Router do
           tenant_id: queue.tenant_id,
           workspace_id: queue.workspace_id,
           count: queue.count,
+          returned: queue.returned,
           review_counts: queue.review_counts,
           lifecycle_counts: queue.lifecycle_counts,
           claims: Enum.map(queue.claims, &claim_to_map/1)
