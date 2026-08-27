@@ -104,3 +104,14 @@ if System.get_env("OPTIMAL_API_ENABLED") == "true" do
     port: String.to_integer(System.get_env("OPTIMAL_API_PORT", "4200")),
     interface: System.get_env("OPTIMAL_API_INTERFACE", "127.0.0.1")
 end
+
+# API key authentication. config.exs hardcodes `auth_required: false` and a
+# release evaluates config.exs at compile time, so the production value must be
+# re-read from the environment here — the wiring config/prod.exs recommends.
+# Deploy templates (docker-compose.yml) pass OPTIMAL_AUTH_REQUIRED through;
+# without this block that variable is connected to nothing and every containered
+# deploy serves an open API. Only set when the variable is present, so
+# compile-time config still wins on machines that never pass it.
+if auth_env = System.get_env("OPTIMAL_AUTH_REQUIRED") do
+  config :optimal_engine, :auth, auth_required: auth_env == "true"
+end
