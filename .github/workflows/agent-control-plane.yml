@@ -23,3 +23,5 @@ jobs:
         run: python3 scripts/agent_control_plane.py
       - name: Adversarial authority regressions
         run: python3 -m unittest discover -s scripts/tests -p 'test_agent_control_plane.py'
+      - name: Authenticated wrapper routing regressions
+        run: python3 -m unittest discover -s scripts/tests -p 'test_optimal_wrapper.py'

@@ -1,13 +1,15 @@
 # Optimal Engine Documentation
 
-This is the canonical documentation path for understanding and using Optimal
-Engine.
+This index helps navigate Optimal Engine documentation.
+[agent-authority.json](../agent-authority.json) classifies current contracts, references, and historical evidence; links in this index do not grant authority.
 
 Optimal Engine is a self-hosted second brain and operating engine for human and
 AI workspaces. It is not only a database, not only a markdown workspace, and not
 only an agent runner. It is the runtime that connects those surfaces through
 governed topology, source evidence, memory, retrieval, workflows, tools, and
 projections.
+
+Read [control-plane evidence and limits](guides/agent-control-plane.md) and [API grants and migration](guides/interfaces-and-publishing.md#api-grants-and-identity) when evaluating governance or integrating a client.
 
 ## Start Here
 
@@ -328,21 +330,18 @@ engine asks for clarification before writing durable state.
 
 ## Documentation Rule
 
-This docs tree is intentionally current-only. Historical strategy notes,
-private examples, and comparison research do not belong in the public product
-documentation path. If a document is not linked from this page, treat it as
-non-canonical until it is reviewed and added here.
+The registry explicitly includes historical reviews alongside current contracts and explanatory references.
+Historical evidence may inform a review but cannot override current normative state.
+The structural validator checks declared authority; it does not decide whether every sentence in a reference is semantically current.
+Reviewers must compare architectural claims with code, tests, and build-specific evidence.
 
 ## Verification
 
-The broad runtime check is:
-
 ```bash
-mix optimal.reality_check
+python3 scripts/agent_control_plane.py
+python3 -m unittest discover -s scripts/tests -p 'test_agent_control_plane.py'
 ```
 
-Current expected result:
-
-```text
-126 probes, 126 ok, 0 warn, 0 fail
-```
+For live Engine diagnostics use `/api/health` and `/api/stores/audit`.
+For fixture-writing backend probes use the [isolated verification recipe](guides/installation-and-deployment.md#isolated-fixture-verification).
+Consult [release identity](guides/versioning-and-releases.md) before attributing a result to a build.

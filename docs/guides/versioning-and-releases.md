@@ -7,16 +7,29 @@ Optimal Engine uses one traceable release identity across source, runtime, stora
 Every build reports:
 
 ```text
+repository identity and contract schema version
 application version
 Git commit SHA
 build timestamp
 API version
 expected database migration
+required capability identifiers
 retrieval and projection component versions
 ```
 
 Read it from `GET /api/version`.
 The lightweight `GET /api/health` and `GET /api/status` responses include the same identity.
+
+The current tracked contract is application `0.3.1`, API `v1`, contract schema `1`, expected migration `62`.
+[engine-contract.json](../../engine-contract.json) supplies repository, schema, and capability metadata to [Version.info/0](../../lib/optimal_engine/version.ex) at compilation.
+[test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
+Git SHA and timestamp are build-time metadata; changing branches does not prove an already running process changed.
+A missing build SHA may be reported as `unknown` and is not an acceptable exact-commit identity for an integration requiring a pin.
+
+Canopy's workspace bridge validates a local checkout before running allowlisted Mix tasks.
+It checks the source root, canonical origin, clean status, pinned commit, and manifest compatibility.
+That preflight does not contact or attest a separately running Engine HTTP service.
+An HTTP consumer must separately compare the service response with its approved build/contract and authenticate the endpoint; this repository does not currently supply a universal remote attestation gate.
 
 ## Version policy
 
@@ -36,7 +49,7 @@ Change a component version whenever persisted meaning or deterministic behavior 
 ## Creating a release
 
 1. Choose the next Semantic Version.
-2. Update `@version` in `mix.exs`.
+2. Update `@version` in `mix.exs` and the matching version in `engine-contract.json`; update contract migration/capability fields when their meanings change.
 3. Run formatting, tests, release benchmarks, and `mix run --no-start scripts/check_release_version.exs`.
 4. Commit the complete release identity.
 5. Create the annotated tag `v<version>` on that exact commit.

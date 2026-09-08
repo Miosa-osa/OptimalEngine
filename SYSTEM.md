@@ -59,8 +59,20 @@ policy
 principal
 ```
 
-If scope is missing or ambiguous, fail closed or ask for clarification.
-Never leak one workspace into another.
+Applications must supply the intended scope and resolve ambiguity before writing.
+Authenticated HTTP tenant identity is derived from the key, and conflicting tenant parameters are rejected.
+Workspace authorization and operation grants are separate checks; some legacy endpoints still default to the `default` workspace.
+This is a design obligation with compatibility defaults, not a claim that every missing scope field is rejected.
+Never intentionally share one workspace's records with another.
+
+## Enforced HTTP Trust Boundary
+
+`PermissionPlug` enforces operation grants after authentication and workspace checks.
+Ordinary writes cannot grant themselves Claim review, topology mutation, or API-key administration.
+Claim reviewers are bound to authenticated credentials; persisted evidence and lifecycle checks remain in Memory Core.
+See [API grants and migration](docs/guides/interfaces-and-publishing.md#api-grants-and-identity) for exact scope names and endpoint groups.
+Trusted anonymous local mode and wildcard keys remain privileged; direct Elixir and database access are outside HTTP authorization.
+See [control-plane evidence](docs/guides/agent-control-plane.md) for tests and limits rather than treating this system map as exploit proof.
 
 ## BusinessOS Boundary
 

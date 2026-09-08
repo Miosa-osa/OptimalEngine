@@ -56,7 +56,7 @@ Verify:
 
 ```bash
 curl http://localhost:4200/api/health
-mix optimal.reality_check
+curl http://localhost:4200/api/stores/audit
 ```
 
 Use the checked-in local CLI wrapper:
@@ -66,12 +66,17 @@ bin/optimal --help
 bin/optimal doctor
 ```
 
-The wrapper is for source checkouts. It delegates to the same backend commands
-as `mix optimal.*` so native dependencies such as SQLite load through the normal
-Mix build. For example:
+The wrapper is for source checkouts.
+API-backed commands send `OPTIMAL_ENGINE_API_KEY` to both the health probe and the requested operation.
+Any HTTP response indicating failure stops the command, including missing or expired credentials, without falling back to a different local store.
+If `OPTIMAL_ENGINE_API_URL` is explicitly set or `OPTIMAL_ENGINE_API_KEY` is nonempty, an unavailable API also stops execution.
+Only an unconfigured default-local probe receiving no HTTP response may fall back to local Mix tasks using the configured local database.
+Native-only commands also use local Mix directly; the wrapper does not sandbox local operating-system access.
+Use an API client directly when a remote integration must never execute a local fallback.
+For example:
 
 ```bash
-bin/optimal reality-check
+bin/optimal health
 bin/optimal setup my-workspace --name "My Workspace"
 bin/optimal topology --workspace default:my-workspace
 ```
@@ -147,6 +152,33 @@ stale context refresh schedule
 projection rebuild procedure
 ```
 
+## Isolated Fixture Verification
+
+`mix optimal.reality_check` writes diagnostic fixtures and may alter topology, memory, and retrieval records.
+It is a development regression probe, not a read-only live-store audit.
+Run it only in a disposable environment, separately from any live Engine:
+
+```bash
+engine_check_root="$(mktemp -d)"
+MIX_ENV=test \
+OPTIMAL_AUTH_REQUIRED=false \
+OPTIMAL_API_ENABLED=false \
+OPTIMAL_ENGINE_ROOT="$engine_check_root/workspaces" \
+OPTIMAL_ENGINE_DB="$engine_check_root/index.db" \
+OPTIMAL_ENGINE_CACHE="$engine_check_root/cache" \
+OPTIMAL_ENGINE_TOPOLOGY="$engine_check_root/config.yaml" \
+OPTIMAL_ENGINE_TOPOLOGY_FULL="$engine_check_root/topology.yaml" \
+OPTIMAL_KNOWLEDGE_BACKEND=ets \
+mix optimal.reality_check
+```
+
+This uses test configuration, a separate SQLite file and filesystem root, and the in-memory graph backend.
+It does not start a second HTTP listener on port 4200.
+Inspect the command's actual probe results; a historical probe count is not a current acceptance criterion.
+A clean empty-fixture run does not establish production-data health, RocksDB qualification, or authorization for every endpoint.
+Use the running service's `/api/health` and `/api/stores/audit` for live diagnostics.
+Health and audit responses do not prove a completed authenticated application session or cross-repository compatibility.
+
 ## Local Auth Vs Remote Auth
 
 Local CLI commands are trusted local commands. They run on the machine that owns
@@ -163,8 +195,8 @@ Anything connecting over HTTP/API, MCP, app integration, remote script, or
 remote agent should use a scoped API key:
 
 ```bash
-mix optimal.auth mint --name "Business OS" --tenant default --workspace default:my-workspace
-mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+mix optimal.auth mint --name "Business OS" --scope read --scope write --tenant default --workspace default:my-workspace
+mix optimal.auth env --name "Local Agent" --scope read --scope write --workspace default:my-workspace
 mix optimal.auth list
 mix optimal.auth revoke <key-id>
 ```
@@ -176,9 +208,19 @@ Authorization: Bearer <token>
 X-API-Key: <token>
 ```
 
-For production, set API auth to required and store keys in a secret manager or
-environment variables. Do not store keys in markdown, Source Packages, Context
-Packages, or generated packages.
+Set `OPTIMAL_AUTH_REQUIRED=true` in the service environment before exposing the API to untrusted clients.
+Alternatively set `config :optimal_engine, :auth, auth_required: true` in its loaded Elixir configuration.
+The environment override accepts only literal `true` or `false`; invalid values stop configuration, and an absent override preserves the configured setting.
+Selecting `MIX_ENV=prod` alone does not enable authentication.
+Verify that a protected request without credentials returns 401 and that the intended scoped credential succeeds.
+Unauthenticated local mode is privileged development access, and direct CLI or database access is outside HTTP authorization.
+
+The `read` and `write` grants do not authorize Claim review, topology changes, or key administration.
+Add `claims:review`, `topology:write`, or `admin` only for the operations the client needs.
+Omitting operation scopes currently grants `*` privileges.
+Authenticated tenant parameters cannot override the key's tenant, and Claim reviewers are derived from its principal or key ID.
+See [API grants and migration](interfaces-and-publishing.md#api-grants-and-identity) for exact grants, identity checks, replacement-key creation, and revocation.
+Keep credentials in a secret manager or environment variables, not markdown, Source Packages, Context Packages, or generated packages.
 
 ## Environment Variables
 
@@ -191,6 +233,7 @@ OPTIMAL_ENGINE_CACHE         cache path
 OPTIMAL_ENGINE_TOPOLOGY      local workspace config path
 OPTIMAL_ENGINE_TOPOLOGY_FULL root topology config path
 OPTIMAL_ENGINE_API_KEY       API key used by external clients/agents
+OPTIMAL_AUTH_REQUIRED        true/false override for HTTP authentication
 OLLAMA_HOST                  local model server URL
 OPTIMAL_VLM_MODEL            local visual model name for configured adapters
 ```

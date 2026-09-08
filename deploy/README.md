@@ -86,11 +86,16 @@ Important variables:
 | Variable | Meaning |
 | --- | --- |
 | `OPTIMAL_API_PORT` | Host/API port, default `4200`. |
-| `OPTIMAL_AUTH_REQUIRED` | Require API auth. Set `true` outside local development. |
+| `OPTIMAL_AUTH_REQUIRED` | Literal `true` requires HTTP credentials; `false` selects trusted local mode; invalid values fail configuration. |
 | `OPTIMAL_ENGINE_ROOT` | Runtime root inside the container, default `/data`. |
 | `OPTIMAL_ENGINE_DB` | SQLite database path, default `/data/.optimal/index.db`. |
 | `OPTIMAL_ENGINE_CACHE` | Cache/index path, default `/data/.optimal/cache`. |
 | `OPTIMAL_OLLAMA_URL` | Optional local model endpoint for embeddings/generation. |
+
+Keys need explicit operation grants and workspace scope.
+Use [API grants and migration](../docs/guides/interfaces-and-publishing.md#api-grants-and-identity) for review/topology/admin permissions and authenticated tenant/reviewer binding.
+Verify missing credentials receive 401 after deployment; a health response alone does not prove authentication works.
+`MIX_ENV=prod` alone does not select authenticated mode.
 
 ## Backend Production
 

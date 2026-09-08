@@ -33,6 +33,14 @@ Reality checks write diagnostic fixtures.
 Do not run them on live user data; use a separate disposable environment when testing fixtures.
 For an Engine embedded in OptimalOS, use the parent's `.system/oe boot` and `.system/oe storage_check` instead of starting another server.
 
+## Identify The Process And Its Trust Mode
+
+Run `python3 scripts/agent_control_plane.py` to validate the declared boot authority.
+Compare `GET /api/version` with the intended Engine commit and [contract](engine-contract.json) before attributing health results to a build.
+This comparison is separate from Canopy's checkout preflight; neither a clean working tree nor a health response proves a completed authenticated application session.
+For shared HTTP access, set `OPTIMAL_AUTH_REQUIRED=true` and follow [API grants and migration](docs/guides/interfaces-and-publishing.md#api-grants-and-identity).
+Use the [isolated fixture recipe](docs/guides/installation-and-deployment.md#isolated-fixture-verification) for reality checks.
+
 ## First Workspace
 
 Create a workspace when you know the shape:

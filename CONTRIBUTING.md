@@ -68,7 +68,9 @@ Strict mode is on everywhere. No `any`. Explicit return types on public function
 2. **Name your branch** using the scope prefix convention (see Commit Messages below).
 3. **Write or update tests** — new behaviour needs coverage, bug fixes need a regression test.
 4. **Run the safety checks** locally before pushing:
-   `mix format --check-formatted && mix compile && mix test && mix optimal.reality_check`.
+   `mix format --check-formatted && mix compile && mix test`.
+   Run `python3 scripts/agent_control_plane.py` and its adversarial tests for control-plane changes.
+   Fixture-writing reality checks require the [isolated environment recipe](docs/guides/installation-and-deployment.md#isolated-fixture-verification), never a live user store.
 5. **Open a PR** against `main`. Keep the diff reviewable — aim for under 400 lines changed per PR. Split larger changes into a stack.
 6. **Describe what changed and why** in the PR body. Link any related issues.
 7. At least one maintainer approval is required before merge.

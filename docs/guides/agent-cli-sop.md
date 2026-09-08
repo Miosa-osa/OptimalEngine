@@ -72,10 +72,10 @@ Minimum CLI pattern:
 
 ```bash
 mix optimal.topology --workspace default:my-workspace
-mix optimal.search "current project state"
-mix optimal.rag "what changed this week?"
+bin/optimal find "current project state" --workspace default:my-workspace
+bin/optimal rag "what changed this week?" --workspace default:my-workspace
 mix optimal.wiki render-tree --workspace default:my-workspace
-mix optimal.reality_check
+bin/optimal health
 ```
 
 There are two kinds of CLI use:
@@ -192,11 +192,15 @@ external app / MCP server / remote agent / automation
   -> backend applies lifecycle and audit rules
 ```
 
+Create a key locally with explicit ordinary grants.
+Review, topology, and administration need separate grants; see [API grants and migration](interfaces-and-publishing.md#api-grants-and-identity).
+Authenticated tenant and reviewer identities come from the credential, not arbitrary request bodies.
+
 Create a key locally:
 
 ```bash
-mix optimal.auth mint --name "Business OS" --workspace default:my-workspace
-mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+mix optimal.auth mint --name "Business OS" --scope read --scope write --workspace default:my-workspace
+mix optimal.auth env --name "Local Agent" --scope read --scope write --workspace default:my-workspace
 mix optimal.auth list
 mix optimal.auth revoke <key-id>
 ```
@@ -204,9 +208,13 @@ mix optimal.auth revoke <key-id>
 The same commands can be run through the checked-in wrapper:
 
 ```bash
-bin/optimal auth mint --name "Business OS" --workspace default:my-workspace
-bin/optimal auth env --name "Local Agent" --workspace default:my-workspace
+bin/optimal auth mint --name "Business OS" --scope read --scope write --workspace default:my-workspace
+bin/optimal auth env --name "Local Agent" --scope read --scope write --workspace default:my-workspace
 ```
+
+For API-backed wrapper commands, `OPTIMAL_ENGINE_API_KEY` authenticates both the availability probe and the operation.
+Reachable HTTP errors stop execution; only an unconfigured default-local probe with no HTTP response can select trusted local Mix fallback.
+Native commands remain local, so this wrapper is not a remote-only client or an isolation boundary.
 
 Do not put raw API keys in markdown, Source Packages, package manifests, or
 Context Packages. Store them in shell environment, a local secret store, or the
@@ -400,11 +408,13 @@ agent output -> observation or pending Claim
 
 ## Verification Pattern
 
+Use the [isolated fixture recipe](installation-and-deployment.md#isolated-fixture-verification) for `mix optimal.reality_check`; it is not a live-store health command.
+
 Before presenting work as complete:
 
 ```bash
 mix compile
-mix optimal.reality_check
+bin/optimal health
 ```
 
 For workspace/wiki/setup changes:

@@ -79,3 +79,11 @@ agent operation. Do not flatten those into a generic RAG or task-runner model.
 - Storage/projections: [`../../docs/architecture/STORAGE-AND-PROJECTION-MAP.md`](../../docs/architecture/STORAGE-AND-PROJECTION-MAP.md)
 - Signal Theory: [`../../docs/concepts/signal-theory.md`](../../docs/concepts/signal-theory.md)
 - Mix tasks: [`../../docs/guides/mix-tasks.md`](../../docs/guides/mix-tasks.md)
+
+## Authority, Verification, And HTTP Credentials
+
+Use [AGENTS.md](../../AGENTS.md) and the [authority registry](../../agent-authority.json) before applying setup guidance.
+Use live `/api/health` and `/api/stores/audit` for diagnostics; [fixture-writing reality checks](../../docs/guides/installation-and-deployment.md#isolated-fixture-verification) require disposable stores.
+Use [API grants and migration](../../docs/guides/interfaces-and-publishing.md#api-grants-and-identity) for explicit scopes and authenticated tenant/reviewer identity.
+Set `OPTIMAL_AUTH_REQUIRED=true` for shared HTTP access; default local mode, CLI, and SQL remain trusted operator access.
+Compare [running build identity](../../docs/guides/versioning-and-releases.md) separately from checkout compatibility.
