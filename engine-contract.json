@@ -1,0 +1,12 @@
+{
+  "contract_version": 1,
+  "repository": "Miosa-osa/OptimalEngine",
+  "version": "0.3.1",
+  "api_version": "v1",
+  "expected_migration": 62,
+  "capabilities": [
+    "workspace_mix_tasks",
+    "governed_claim_review",
+    "scoped_memory_retrieval"
+  ]
+}

@@ -63,7 +63,7 @@ For local work, the `mix optimal.*` tasks and `bin/optimal` wrapper are the fast
 ```bash
 mix deps.get
 mix compile
-mix optimal.reality_check
+mix optimal.health
 mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 mix optimal.topology --workspace default:my-workspace
 mix optimal.wiki render-tree --workspace default:my-workspace
@@ -72,14 +72,15 @@ mix optimal.wiki render-tree --workspace default:my-workspace
 Use the wrapper when an agent or script should use one command name:
 
 ```bash
-bin/optimal reality-check
+bin/optimal health
 bin/optimal setup my-workspace --name "My Workspace"
 bin/optimal wiki render-tree --workspace default:my-workspace
 ```
 
-Local CLI commands are trusted local access to the configured store. They are
-best for humans, coding agents, local scripts, and local cron jobs running on
-the same machine.
+Local CLI commands are trusted local access to the configured store.
+They are best for humans, coding agents, local scripts, and local cron jobs running on the same machine.
+HTTP grants do not isolate CLI, direct Elixir, or SQL access.
+Fixture-writing reality checks require an isolated disposable store.
 
 ## Remote App/API Setup
 
@@ -89,8 +90,8 @@ agent, or deploy tool needs to connect.
 Mint a scoped key:
 
 ```bash
-mix optimal.auth mint --name "Workspace Dashboard" --workspace default:my-workspace
-mix optimal.auth env --name "Workspace Dashboard" --workspace default:my-workspace
+mix optimal.auth mint --name "Workspace Dashboard" --scope read --workspace default:my-workspace
+mix optimal.auth env --name "Workspace Dashboard" --scope read --workspace default:my-workspace
 ```
 
 Start the API:
@@ -134,6 +135,64 @@ PATCH /api/workspaces/:id/config
 Writes must preserve lifecycle rules. An app should submit new evidence,
 observations, or review actions. It should not create direct Facts unless it is
 calling the explicit review/promotion path.
+
+### API grants and identity
+
+An API key has operation `scopes`, a tenant, and a separate `workspace_scope` allowlist.
+All applicable checks must pass.
+Explicitly set operation scopes when minting keys: omitting them currently creates a privileged `*` key.
+
+| Operation scope | Permitted operations |
+| --- | --- |
+| `read` | Read endpoints and retrieval POSTs such as `/api/rag`, `/api/assemble`, `/api/reconstruct`, and `/api/render/context`. |
+| `write` | Ordinary intake, memory writes, batch imports, and projection updates. |
+| `claims:review` | Claim promotion/rejection and `/api/data-steward/claims/decide`. |
+| `topology:write` | Organization, workspace/config, Node, entity/relationship, routing-review, and storage-policy mutations. |
+| `admin` | API-key administration, backups, and corpus maintenance. |
+| `*` | All operation grants; tenant and workspace checks still apply. |
+
+Grants are additive: `write` does not imply `read`, review, topology, or administration.
+`POST /api/memory/:id/promote` updates a wiki projection and requires `write`; it does not accept a Claim as a canonical Fact.
+
+For authenticated calls, omitted `tenant` or `tenant_id` resolves to the key's tenant.
+A different tenant in either body or query is rejected with `403 tenant_scope_denied`.
+Continue supplying the intended workspace explicitly.
+
+At the Claim review boundary, the server uses the key's registered principal as the reviewer, or `api_key:<key-id>` when no principal is attached.
+Clients should omit `actor_id` and `verifier_id` on review requests.
+Supplying either field with a different identity returns `403 reviewer_identity_mismatch`.
+Promotion still requires persisted evidence and the governed Claim review path.
+
+### Migrating existing API clients
+
+A client with `read` and `write` that previously reviewed Claims or changed topology must receive the corresponding explicit grants.
+Missing operation authority returns `403 permission_scope_denied`.
+Existing `*` keys retain their privileged operation access; replace them with narrower keys where appropriate.
+
+A trusted local operator can bootstrap an administrator:
+
+```bash
+mix optimal.auth mint --name "API administrator" --scope admin --workspace '*'
+```
+
+An administrator can issue a replacement reviewer key through the API:
+
+```bash
+curl http://localhost:4200/api/auth/keys \
+  -H "Authorization: Bearer $OPTIMAL_ENGINE_ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"name":"Workspace reviewer","scopes":["read","write","claims:review"],"workspace_scope":["default:my-workspace"]}'
+```
+
+Add `topology:write` only when that client must change topology or workspace policy.
+Optionally provide `principal_id` for an existing registered reviewer or service principal.
+Store the returned token in the client's secret configuration, verify its intended operations, then revoke the old key with `POST /api/auth/keys/:id/revoke` using the administrator credential.
+A regular `read`/`write` client cannot mint its own broader grants.
+
+For shared or remote deployments, configure `config :optimal_engine, :auth, auth_required: true`.
+With `auth_required: false`, unauthenticated calls are trusted local development access and have no API-key operation grant to enforce.
+Even in that local mode, Claim review requires an explicit nonempty `actor_id` or `verifier_id`; an implicit anonymous identity is not approval.
+These HTTP controls do not sandbox an agent that has local process or database access.
 
 ## MCP Setup
 

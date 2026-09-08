@@ -25,8 +25,10 @@ bin/optimal install
 bin/optimal bootstrap
 bin/optimal dev
 bin/optimal doctor
-bin/optimal reality-check
 ```
+
+`bin/optimal reality-check` writes diagnostic fixtures and belongs in an isolated disposable test environment, not routine live-data verification.
+OptimalOS operators should use the parent `.system/oe` wrapper.
 
 Agent loop commands:
 

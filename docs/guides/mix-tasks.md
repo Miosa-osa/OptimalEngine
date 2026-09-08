@@ -121,10 +121,14 @@ Local CLI use is trusted local access to the configured store. Use API keys for
 HTTP/API clients, MCP servers, remote agents, external apps, and automation:
 
 ```bash
-mix optimal.auth mint --name "Business OS" --workspace default:my-workspace
-mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+mix optimal.auth mint --name "Business OS" --scope read --scope write --workspace default:my-workspace
+mix optimal.auth env --name "Local Agent" --scope read --scope write --workspace default:my-workspace
 mix optimal.auth list
 ```
+
+Repeat `--scope` to grant `claims:review`, `topology:write`, or `admin` only when needed.
+Omitting `--scope` currently grants privileged `*` access.
+See [API grants and client migration](interfaces-and-publishing.md#api-grants-and-identity) for tenant binding, reviewer identity, and administrator-issued replacement keys.
 
 ## Evaluation, Health, And Verification
 

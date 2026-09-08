@@ -5,28 +5,8 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths-ignore:
-      - "**.md"
-      - "site/**"
-      - "apps/docs/**"
-      - "skills/**"
-      - "deploy/**"
-      - "extensions/**"
-      - "sdks/**"
-      - "desktop/**"
-      - ".gitignore"
-      - "LICENSE"
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**.md"
-      - "site/**"
-      - "apps/docs/**"
-      - "skills/**"
-      - "deploy/**"
-      - "extensions/**"
-      - "sdks/**"
-      - "desktop/**"
 
 # Cancel any in-progress CI run for the same branch when a new push lands.
 # Saves Actions minutes on rapid-fire commits.
@@ -67,6 +47,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev
 
       - name: Cache deps and _build
+        id: build-cache
         uses: actions/cache@v4
         with:
           path: |
@@ -79,14 +60,23 @@ jobs:
       - name: Install deps
         run: mix deps.get
 
+      - name: Check formatting
+        run: mix format --check-formatted
+
       - name: Compile
         run: mix compile
 
+      - name: Preserve compiled dependencies
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+
       - name: Verify release version
         run: mix run --no-start scripts/check_release_version.exs
-
-      - name: Check formatting
-        run: mix format --check-formatted
 
       - name: Run tests
         run: mix test

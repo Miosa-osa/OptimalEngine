@@ -118,14 +118,16 @@ defmodule OptimalEngine.Bridge.Knowledge do
   def sync_and_materialize do
     Logger.info("[Bridge.Knowledge] Starting on-demand OWL materialization...")
 
-    with {:ok, store} <- open_knowledge_store(),
-         {:ok, synced} <- sync_edges_to_store(store),
-         result <- run_materialization(store) do
-      Logger.info(
-        "[Bridge.Knowledge] OWL materialization complete: synced #{synced} edges, result: #{inspect(result)}"
-      )
-
-      result
+    with {:ok, store} <- open_knowledge_store() do
+      try do
+        with {:ok, synced} <- sync_edges_to_store(store) do
+          result = run_materialization(store)
+          Logger.info("[Bridge.Knowledge] Materialized #{synced} edges: #{inspect(result)}")
+          result
+        end
+      after
+        OptimalEngine.Knowledge.close(store)
+      end
     end
   rescue
     e ->
@@ -202,7 +204,10 @@ defmodule OptimalEngine.Bridge.Knowledge do
   # ---------------------------------------------------------------------------
 
   defp open_knowledge_store do
-    OptimalEngine.Knowledge.open(@store_name, backend: OptimalEngine.Knowledge.Backend.ETS)
+    OptimalEngine.Knowledge.open(@store_name,
+      name: nil,
+      backend: OptimalEngine.Knowledge.Backend.ETS
+    )
   end
 
   defp sync_edges_to_store(store) do
@@ -210,7 +215,7 @@ defmodule OptimalEngine.Bridge.Knowledge do
       {:ok, rows} ->
         triples =
           Enum.map(rows, fn [source, relation, target] ->
-            [source, relation, target]
+            {source, relation, target}
           end)
 
         OptimalEngine.Knowledge.assert_many(store, triples)
@@ -223,6 +228,6 @@ defmodule OptimalEngine.Bridge.Knowledge do
   end
 
   defp run_materialization(store) do
-    OptimalEngine.Knowledge.Reasoner.materialize(store, store)
+    OptimalEngine.Knowledge.Store.materialize(store)
   end
 end
