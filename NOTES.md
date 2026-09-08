@@ -36,3 +36,11 @@
 - 2026-09-08: Agent authority now has an explicit registry and adversarial structural validator.
 Historical architecture reports remain evidence and cannot own current concepts.
 Cross-repo execution compatibility and governed API authorization require runtime tests, not documentation assertions alone.
+
+- 2026-09-08: Current setup docs now separate read-only live health/storage audit from fixture-writing reality checks, with a single disposable verification recipe.
+- 2026-09-08: The authority index classifies historical evidence explicitly; directory membership and index links do not independently grant normative authority.
+- 2026-09-08: Canopy checkout preflight validates the source/task contract and does not attest a separately running Engine HTTP process or sandbox trusted local execution.
+- 2026-09-08: Reproduced and fixed the advertised OPTIMAL_AUTH_REQUIRED flag being ignored at runtime; literal true/false now override the configured auth setting, absence preserves it, and invalid values fail configuration.
+- 2026-09-08: Report fixtures A-G have distinct structural, runtime, and administrative evidence; natural-language contradictions, historical retrieval poisoning, and universal independent red-team closure are not established by the structural validator.
+- 2026-09-08: The wrapper health probe now forwards bearer credentials and refuses local-store fallback after a reachable HTTP failure; black-box tests cover authentication failures, denied writes, and intentional unconfigured default-local no-response fallback without using a real database.
+- 2026-09-08: CODEOWNERS now covers Markdown at every directory depth, including deployment guidance, so newly registered nested documents retain independent owner-review coverage.

@@ -6,7 +6,7 @@ The first workflow is intentionally simple:
 
 ```text
 install
-  -> run reality check
+  -> inspect live health and storage audit
   -> initiate or set up workspace
   -> inspect topology
   -> ingest/search/render
@@ -28,12 +28,11 @@ Optional:
 - Node 20+ for app/site/extension surfaces
 - Ollama for local embeddings and generation
 - Docker for packaged service deployment
-- RocksDB runtime if you want the optional RocksDB graph/knowledge backend
 - Optional multimodal tools such as document parsers, OCR, transcription,
   video, vision, or embedding adapters
 
-RocksDB is not required for the default local engine. SQLite is the local
-canonical runtime store today.
+SQLite is the local canonical runtime store.
+The standard launcher selects RocksDB when its native dependency is available; ETS is the fallback or an explicit testing choice.
 
 ## 2. Clone And Compile
 
@@ -68,21 +67,12 @@ curl http://localhost:4200/api/stores/audit
 `/api/stores/audit` performs the deeper integrity, isolation, index, vector,
 asset, backup, RLM, and cache checks and returns HTTP 503 on failure.
 
-## 4. Run The Reality Check
+## 4. Separate Development Probes From Live Health
 
-```bash
-mix optimal.reality_check
-```
-
-Expected current result:
-
-```text
-126 probes, 126 ok, 0 warn, 0 fail
-```
-
-This checks the runtime spine: store, topology, source evidence, memory,
-retrieval, pools, workflows, tools, connectors, evaluation, wiki, compliance,
-and retrieval edge cases.
+The live checks above are the normal boot verification.
+`mix optimal.reality_check` writes fixtures and must not run against the store you just started for real work.
+Use the [isolated fixture verification recipe](installation-and-deployment.md#isolated-fixture-verification) when testing the backend spine.
+Use [API grants and migration](interfaces-and-publishing.md#api-grants-and-identity) before connecting an external client; local anonymous mode is trusted development access.
 
 ## 5. Understand Signals Before Dumping Data
 

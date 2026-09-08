@@ -96,6 +96,20 @@ config :optimal_engine,
            )
        )
 
+# Authentication is an explicit deployment choice. Preserve configured defaults
+# when absent; reject typos instead of silently exposing an anonymous service.
+auth_config = Application.get_env(:optimal_engine, :auth, [])
+
+auth_required =
+  case System.get_env("OPTIMAL_AUTH_REQUIRED") do
+    nil -> Keyword.get(auth_config, :auth_required, false)
+    "true" -> true
+    "false" -> false
+    _ -> raise ArgumentError, "OPTIMAL_AUTH_REQUIRED must be true or false"
+  end
+
+config :optimal_engine, :auth, Keyword.put(auth_config, :auth_required, auth_required)
+
 # Local HTTP API - enabled on demand (the bundled engine turns it on; other
 # contexts leave it off). Port is env-driven so it can dodge a busy :4200.
 if System.get_env("OPTIMAL_API_ENABLED") == "true" do

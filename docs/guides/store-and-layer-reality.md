@@ -186,11 +186,8 @@ Expected shape:
 }
 ```
 
-Run the full backend probe:
-
-```bash
-mix optimal.reality_check
-```
+Run fixture-writing backend probes only through the [isolated verification recipe](installation-and-deployment.md#isolated-fixture-verification).
+Do not run a reality check against this live store.
 
 For storage-specific proof in an OptimalOS checkout, run:
 
@@ -305,7 +302,7 @@ The local engine runs SQLite as the canonical store.
 It builds retrieval indexes and hydrates graph views from that store.
 The full local setup uses RocksDB as the persistent knowledge graph backend.
 ETS is the fallback backend when RocksDB is unavailable or intentionally disabled.
-The reality check tells you which layers are working in this checkout.
+A disposable reality check exercises implemented fixture paths; a live storage audit checks the configured user store.
 ```
 
 Do not call indexes, cache, markdown, or app screens the source of truth.
@@ -329,7 +326,7 @@ Before telling a user the engine is healthy, check:
 ```bash
 git status --short --branch
 curl http://localhost:4200/api/health
-mix optimal.reality_check
+curl http://localhost:4200/api/stores/audit
 git ls-files | rg '(^|/)\\.optimal|index\\.db|connector_key' || true
 ```
 

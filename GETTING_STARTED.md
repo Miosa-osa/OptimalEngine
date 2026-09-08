@@ -21,7 +21,7 @@ Requirements:
 macOS:
 
 ```bash
-brew install elixir node ffmpeg tesseract
+brew install elixir node ffmpeg tesseract snappy
 mix deps.get
 mix compile
 ```
@@ -29,12 +29,13 @@ mix compile
 ## 2. Verify The Engine
 
 ```bash
-mix optimal.reality_check
+bin/optimal doctor
+bin/optimal health
 ```
 
-This checks the runtime spine: database migrations, topology tables, memory
-objects, retrieval paths, wiki/export pieces, tool/model records, and API
-surfaces.
+For a running service, also inspect `GET /api/stores/audit`.
+Do not start a second process against a live user store merely to run a diagnostic.
+The fixture-writing reality check belongs in a [disposable environment](docs/guides/installation-and-deployment.md#isolated-fixture-verification).
 
 ## 3. Create A Workspace
 
@@ -79,18 +80,21 @@ mix optimal.wiki render-tree --workspace sample
 
 ## 5. Use The Local Wrapper
 
-The `./optimal` wrapper is the clean surface for agents and humans:
+The checked-in `bin/optimal` wrapper is the source-checkout surface for agents and humans:
 
 ```bash
-./optimal status
-./optimal init my-workspace
-./optimal search "customer portal requirements"
-./optimal rag "prep me for the platform launch review"
+bin/optimal status
+bin/optimal setup my-workspace --name "My Workspace"
+bin/optimal find "customer portal requirements" --workspace default:my-workspace
+bin/optimal rag "prep me for the platform launch review" --workspace default:my-workspace
 ```
 
 An agent can use regular CLI tools (`ls`, `rg`, `cat`, `git`, `curl`) and the
 Optimal Engine CLI. MCP/tool servers are useful when authentication,
 schema-validation, remote resources, or audit justify the extra structure.
+
+Read [API grants and migration](docs/guides/interfaces-and-publishing.md#api-grants-and-identity) before using HTTP credentials.
+Local CLI access is trusted operator access; API-key scopes do not sandbox local processes.
 
 ## 6. Storage Model
 
