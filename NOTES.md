@@ -46,3 +46,6 @@ Cross-repo execution compatibility and governed API authorization require runtim
 - 2026-09-08: CODEOWNERS now covers Markdown at every directory depth, including deployment guidance, so newly registered nested documents retain independent owner-review coverage.
 - 2026-09-08: Candidate-owned permissive validators and all-success tests reproduced a false green; the trusted harness now runs prior validator/test expectations and preserves exact hashed positive/negative evidence with additive supersession.
 - 2026-09-08: Initial ledger installation remains explicitly pending independent bootstrap review; existing base validator/tests still execute, while subsequent installed-baseline runs reject missing or rewritten evidence.
+
+- 2026-09-08: Real fresh-agent missing-authority reviews correctly stopped with validator exit 1, but the initial evaluator rejected Codex's terminal `status=failed` event.
+The exact event and causal lesson are retained under scripts/fixtures/fresh-agent, and a regression now verifies expected nonzero tool execution without changing the required permission or authority decisions.
