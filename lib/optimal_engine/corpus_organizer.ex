@@ -288,7 +288,9 @@ defmodule OptimalEngine.CorpusOrganizer do
   end
 
   defp confidence(score, second_score)
-       when score >= @minimum_score and score - second_score >= @minimum_margin, do: :high
+       when score >= @minimum_score and score - second_score >= @minimum_margin do
+    :high
+  end
 
   defp confidence(score, _second_score) when score > 0, do: :review
   defp confidence(_, _), do: :unresolved
