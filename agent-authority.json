@@ -108,7 +108,7 @@
       "status": "active",
       "owner": "platform",
       "scope": "optimal-engine",
-      "version": 2,
+      "version": 3,
       "effective": "2026-09-08",
       "owns": []
     },
@@ -434,7 +434,7 @@
       "status": "active",
       "owner": "platform",
       "scope": "optimal-engine",
-      "version": 2,
+      "version": 3,
       "effective": "2026-09-08",
       "owns": [
         "document-authority"

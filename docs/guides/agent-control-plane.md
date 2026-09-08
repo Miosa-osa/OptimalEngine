@@ -141,3 +141,59 @@ No local default was silently changed, and no live user service was restarted du
 
 For the current API contract and migration steps use [API grants and migration](interfaces-and-publishing.md#api-grants-and-identity).
 For verification against real user data use health/storage audit; fixture-writing probes require the [isolated environment recipe](installation-and-deployment.md#isolated-fixture-verification).
+
+## Trusted baseline and retained failure evidence
+
+The [trusted evaluator](../../scripts/trusted_control_plane.py) takes separate `--trusted-root` and `--candidate-root` checkouts plus a required `--report` artifact path.
+The trusted checkout comes from the pull request's exact base SHA, supplied as `--trusted-sha`.
+The CLI requires exact Git roots, clean tracked checkouts, and tracked validator/test/ledger files; dirty or untracked evidence cannot be presented as an immutable HEAD result.
+Its existing validator evaluates the candidate registry before any candidate validator executes, and its unchanged regression tests execute the candidate validator in a temporary directory.
+Trusted and candidate enforcement hashes and ledger contents are checked again after child execution to detect changes during evaluation.
+Candidate-authored tests cannot replace those baseline expectations.
+Missing validator files, empty or nonexecuting trusted tests, missing baseline evidence, fixture failures, and evidence rewrites fail the gate.
+The JSON report records both revisions, trusted and candidate source hashes, actual subprocess outcomes, and evidence status.
+
+The [failure ledger](../../evidence/control-plane/ledger.json) retains exact synthetic positive and negative inputs, SHA-256 hashes, observed failure, causal lesson, red-team record, and retention reason.
+Its six fixtures cover valid authority, missing boot contract, competing concept ownership, historical ownership of current state, a missing required execution path, and an empty permission baseline.
+Each red-team record explicitly stores the strongest argument for and against the claim, assumptions to break, constraints, verdict, and revisit condition.
+A failed replay of an existing baseline fixture is classified as `known-failure-recurrence` and `process-defect`, with its fixture ID and retained causal lesson.
+A newly introduced failing fixture is classified as `discovery`.
+This classification identifies exact retained fixture recurrence, not arbitrary defects with an inferred common cause.
+A permissive checker and replacement all-success test file previously both returned success, while the new harness rejects the candidate using retained negative expectations.
+The ordinary authority checker also accepted deletion of the evidence ledger; the trusted evidence comparison now rejects that loss.
+The exact synthetic replacements and reproduction record remain in the negative fixture directory.
+[Harness regressions](../../scripts/tests/test_trusted_control_plane.py) cover those cases and demonstrate that rehashing rewritten evidence does not evade comparison with the trusted record.
+Add a new record with `supersedes` pointing to an older ID when evidence needs a follow-up interpretation.
+Retain the old record and its exact files; supersession does not authorize deletion or rewriting of prior evidence.
+
+The first installation requires an explicit `--bootstrap-ledger` because older main has the trusted validator and regression suite but no ledger or harness yet.
+That mode still runs the previous validator and tests, validates the new fixture ledger, and reports `pending-independent-bootstrap` instead of claiming prior immutable evidence.
+It is rejected if a trusted ledger already exists.
+Subsequent pull requests run the installed base harness with strict retained-evidence checks.
+
+Trusted comparison runs inside the already-required `agent-control-plane-integrity` job, so its failure fails that merge check.
+The workflow uses ordinary `pull_request` with a separate base checkout and `persist-credentials: false`; it does not use privileged `pull_request_target` execution.
+The initial harness and the candidate-owned workflow remain subject to independent code-owner review.
+The [CI launcher](../../scripts/run_trusted_control_plane.sh) builds the [evaluation image](../../.github/control-plane/Dockerfile) before running candidate Python.
+The evaluator container has no network, runs as a nonroot user with capabilities dropped and privilege escalation disabled, mounts both checkouts read-only, and limits writable storage to temporary files and a dedicated report directory.
+It receives no host credentials or Docker socket, and the trusted report is uploaded before candidate code runs on the host.
+The installed baseline selects the launcher and image definition; their first installation remains independently reviewed bootstrap policy.
+Direct local invocation of the Python harness does not provide that container isolation.
+Neither execution mode establishes a fully tamperproof external oracle, and the candidate-owned workflow still requires independent owner review.
+Runner isolation, workflow review, and protected branch settings remain necessary trust boundaries.
+The gate verifies retained scenarios and does not claim that every semantic contradiction or adversarial agent behavior is covered.
+
+## Fresh-agent behavioral retest
+
+The [fresh-agent runner](../../scripts/fresh_agent_review.py) exercises four separate read-only agent cases: clean authority, historical poisoning, documentation permission poisoning, and a missing current contract.
+Use a separately reviewed runner and a clean committed candidate checkout:
+
+```bash
+python3 /trusted/path/scripts/fresh_agent_review.py --repository engine --candidate-root /clean/committed/repo --output-dir /private/new-dir
+```
+
+The output retains the candidate commit, tool transcript, schema, prompt, answer hashes, and evaluation result for each case.
+Evaluation requires exact evidence quotes and a completed validator trace; a plausible answer alone does not pass.
+CI runs the deterministic [runner regressions](../../scripts/tests/test_fresh_agent_review.py); actual model execution is explicit and does not expose credentials to pull-request CI.
+The runner and judging code themselves require independent review.
+These four behavioral cases do not establish authenticated runtime boot, arbitrary tool safety, or universal injection resistance.
