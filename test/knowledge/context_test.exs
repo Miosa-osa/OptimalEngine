@@ -6,11 +6,7 @@ defmodule OptimalEngine.Knowledge.ContextTest do
   setup do
     store_id = "ctx_test_#{:erlang.unique_integer([:positive])}"
 
-    {:ok, pid} =
-      Store.start_link(
-        store_id: store_id,
-        name: :"ctx_store_#{store_id}"
-      )
+    pid = start_supervised!({Store, store_id: store_id, name: :"ctx_store_#{store_id}"})
 
     # Seed knowledge graph
     :ok = Store.assert(pid, "agent:1", "role", "researcher")
@@ -18,10 +14,6 @@ defmodule OptimalEngine.Knowledge.ContextTest do
     :ok = Store.assert(pid, "agent:1", "knows", "user:bob")
     :ok = Store.assert(pid, "agent:1", "status", "active")
     :ok = Store.assert(pid, "user:alice", "role", "admin")
-
-    on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid)
-    end)
 
     %{store: pid}
   end

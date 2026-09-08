@@ -39,7 +39,7 @@ Postgres is the production durable target.
 RocksDB is the default local persistent graph backend when installed.
 ETS and Mnesia are alternate graph backends.
 Vectors, chunks, FTS rows, and caches are projections.
-The engine exposes 12 logical stores through `GET /api/stores`.
+The live logical-store catalog is available through `GET /api/stores`.
 Use `GET /api/stores/audit` to verify SQLite integrity, foreign keys, migrations, FTS parity, workspace isolation, vector validity, asset cataloging, verified backups, RLM readiness, and cache readiness.
 The audit endpoint returns HTTP `503` when any required check fails.
 

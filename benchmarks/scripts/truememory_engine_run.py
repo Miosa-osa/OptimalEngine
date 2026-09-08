@@ -412,7 +412,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", required=True)
     parser.add_argument("--prepared", required=True)
-    parser.add_argument("--engine-url", default="http://127.0.0.1:4200")
+    parser.add_argument("--engine-url", required=True, help="Dedicated disposable benchmark Engine URL")
     parser.add_argument("--workspace-prefix", default="benchmark:truememory")
     parser.add_argument(
         "--retrieval", choices=("engine_memory", "engine_semantic", "engine_semantic_only", "engine_portfolio", "engine_coverage", "engine_evidence", "bm25", "oracle"),
@@ -439,6 +439,9 @@ def main() -> int:
     parser.add_argument("--query-prefix", default="", help="Task prefix applied before query embedding")
     parser.add_argument("--inference-embedding-model", help="Named projection selected for deterministic inference intent")
     args = parser.parse_args()
+    endpoint = urllib.parse.urlparse(args.engine_url)
+    if endpoint.hostname in ("localhost", "127.0.0.1", "::1") and endpoint.port == 4200:
+        parser.error("Port 4200 is the personal Engine; use a dedicated disposable benchmark instance")
     protocol = load_protocol()
     config = protocol["benchmarks"][args.benchmark]
     top_k = args.top_k or config["top_k"]

@@ -32,3 +32,7 @@
 - 2026-08-13: LoCoMo multimodal preparation preserves source captions but excludes generated image queries, URLs, evidence addresses, answers, and gold labels from Retrieval Documents.
 - 2026-08-13: Compatible semantic projections use max-similarity fusion because rank-agreement fusion suppresses unique modality evidence by rewarding redundant hits.
 - 2026-08-13: Semantic profile routing is deterministic from the Evidence Plan intent; inference uses contextual Retrieval Documents while other intents retain text-plus-multimodal fusion.
+
+- 2026-09-08: Agent authority now has an explicit registry and adversarial structural validator.
+Historical architecture reports remain evidence and cannot own current concepts.
+Cross-repo execution compatibility and governed API authorization require runtime tests, not documentation assertions alone.

@@ -1,0 +1,15 @@
+# Control-plane changes require explicit owner review under branch protection.
+/*.md @robertohluna @MichaelFractal @PAMF2
+/skills/ @robertohluna @MichaelFractal @PAMF2
+/AGENTS.md @robertohluna @MichaelFractal @PAMF2
+/CLAUDE.md @robertohluna @MichaelFractal @PAMF2
+/BOOT.md @robertohluna @MichaelFractal @PAMF2
+/SYSTEM.md @robertohluna @MichaelFractal @PAMF2
+/CONTEXT.md @robertohluna @MichaelFractal @PAMF2
+/OPINIONS.md @robertohluna @MichaelFractal @PAMF2
+/agent-authority.json @robertohluna @MichaelFractal @PAMF2
+/engine-contract.json @robertohluna @MichaelFractal @PAMF2
+/docs/ @robertohluna @MichaelFractal @PAMF2
+/wiring/ @robertohluna @MichaelFractal @PAMF2
+/scripts/ @robertohluna @MichaelFractal @PAMF2
+/.github/ @robertohluna @MichaelFractal @PAMF2

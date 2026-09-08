@@ -5,28 +5,8 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths-ignore:
-      - "**.md"
-      - "site/**"
-      - "apps/docs/**"
-      - "skills/**"
-      - "deploy/**"
-      - "extensions/**"
-      - "sdks/**"
-      - "desktop/**"
-      - ".gitignore"
-      - "LICENSE"
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**.md"
-      - "site/**"
-      - "apps/docs/**"
-      - "skills/**"
-      - "deploy/**"
-      - "extensions/**"
-      - "sdks/**"
-      - "desktop/**"
 
 # Cancel any in-progress CI run for the same branch when a new push lands.
 # Saves Actions minutes on rapid-fire commits.
