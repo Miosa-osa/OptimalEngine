@@ -40,8 +40,11 @@ Verify:
 ```bash
 curl http://localhost:4200/api/health
 curl http://localhost:4200/api/stores/audit
-mix optimal.reality_check
 ```
+
+Reality checks write diagnostic fixtures and are not a read-only health check.
+Run them only against an isolated disposable store, never a live user store.
+When embedded in OptimalOS, use the parent `.system/oe` interface and its `storage_check` instead.
 
 If another engine is already using port `4200`, do not kill it unless the user asked you to.
 Check which process owns the port and which checkout it is running from.
@@ -160,6 +163,14 @@ BusinessOS, OptimalOS, and other apps that embed or connect to this engine must 
 - Private agents may use an outside wrapper for private context, but that wrapper is not part of this public engine repo.
 - Agents should run `bin/optimal boot/find/capture/aware/close` loops instead of treating memory as optional.
 
+## Authority validation
+
+`agent-authority.json` declares current authority and historical/reference status.
+Run `python3 scripts/agent_control_plane.py` before relying on repository architecture.
+Read `docs/guides/agent-control-plane.md` for the validation and permission-review contract.
+A failed authority check blocks dependent execution until repaired.
+Reference and historical material cannot override the active contract that owns a concept.
+
 ## Verification Before Push
 
 For setup or backend changes, run:
@@ -167,9 +178,10 @@ For setup or backend changes, run:
 ```bash
 bash -n scripts/run-engine.sh
 mix compile
-mix optimal.reality_check
 curl http://localhost:4200/api/stores/audit
 ```
+
+Run fixture-writing reality checks separately in an isolated disposable environment when required for development verification.
 
 If the live engine already owns port `4200`, either verify against the live engine or run checks in a clean environment.
 Do not stop a live user session without permission.

@@ -55,6 +55,7 @@ defmodule OptimalEngine.API.Router do
   # (path/body/query), sets conn.assigns[:workspace_id], and fails closed:
   # 403 on API-key workspace_scope mismatch, 404 on another tenant's workspace.
   plug(OptimalEngine.API.WorkspaceAuthPlug)
+  plug(OptimalEngine.API.PermissionPlug)
   plug(:dispatch)
 
   # ---------------------------------------------------------------------------

@@ -27,8 +27,11 @@ Verify it:
 ```bash
 curl http://localhost:4200/api/health
 bin/optimal doctor
-bin/optimal reality-check
 ```
+
+Reality checks write diagnostic fixtures.
+Do not run them on live user data; use a separate disposable environment when testing fixtures.
+For an Engine embedded in OptimalOS, use the parent's `.system/oe boot` and `.system/oe storage_check` instead of starting another server.
 
 ## First Workspace
 

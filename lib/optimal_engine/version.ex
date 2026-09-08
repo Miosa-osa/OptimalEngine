@@ -12,6 +12,8 @@ defmodule OptimalEngine.Version do
   alias OptimalEngine.Store.Migrations
 
   @source_root Path.expand("../..", __DIR__)
+  @external_resource Path.join(@source_root, "engine-contract.json")
+  @contract @external_resource |> File.read!() |> Jason.decode!()
   @git_sha System.get_env("OPTIMAL_ENGINE_GIT_SHA") ||
              (case System.cmd("git", ["rev-parse", "HEAD"],
                      cd: @source_root,
@@ -27,6 +29,9 @@ defmodule OptimalEngine.Version do
   def info do
     %{
       application: "optimal_engine",
+      repository: @contract["repository"],
+      contract_version: @contract["contract_version"],
+      capabilities: @contract["capabilities"],
       version: application_version(),
       git_sha: @git_sha,
       build_timestamp: @build_timestamp,

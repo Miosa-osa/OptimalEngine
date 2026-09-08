@@ -6,15 +6,7 @@ defmodule OptimalEngine.Knowledge.StoreTest do
   setup do
     store_id = "test_store_#{:erlang.unique_integer([:positive])}"
 
-    {:ok, pid} =
-      Store.start_link(
-        store_id: store_id,
-        name: :"store_#{store_id}"
-      )
-
-    on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid)
-    end)
+    pid = start_supervised!({Store, store_id: store_id, name: :"store_#{store_id}"})
 
     %{store: pid}
   end
