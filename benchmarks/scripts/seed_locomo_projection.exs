@@ -4,6 +4,13 @@ alias OptimalEngine.Memory.Versioned
 alias OptimalEngine.Workspace
 
 [prepared_path, run_id] = System.argv()
+live_db = Path.expand("../../.optimal/index.db", __DIR__)
+configured_db = Application.fetch_env!(:optimal_engine, :db_path) |> Path.expand()
+
+if configured_db == live_db do
+  raise "Benchmark seeding cannot use the personal Engine database; configure a disposable database"
+end
+
 Application.put_env(:optimal_engine, :root_path, System.tmp_dir!())
 
 prepared_path

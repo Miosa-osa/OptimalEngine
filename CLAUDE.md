@@ -100,6 +100,14 @@ Optimal Engine owns knowledge, memory, source packages, claims, facts, retrieval
 Every BusinessOS call into Optimal Engine must include explicit tenant, organization, and workspace scope.
 Downloaded users run their own local engine and must not read Roberto's private engine data.
 
+## Authority validation
+
+`agent-authority.json` declares current authority and historical/reference status.
+Run `python3 scripts/agent_control_plane.py` before relying on repository architecture.
+Read `docs/guides/agent-control-plane.md` for the validation and permission-review contract.
+A failed authority check blocks dependent execution until repaired.
+Reference and historical material cannot override the active contract that owns a concept.
+
 ## Verification
 
 For docs-only changes:
@@ -114,9 +122,11 @@ For setup, backend, store, CLI, or runtime changes:
 ```bash
 bash -n scripts/run-engine.sh
 mix compile
-mix optimal.reality_check
 curl http://localhost:4200/api/stores/audit
 ```
+
+Reality checks write fixtures and must run only against an isolated disposable store.
+Use the parent wrapper when embedded in OptimalOS and use its read-only storage audit.
 
 If port `4200` is already in use, identify the process before touching it.
 Do not kill a live user session without explicit permission.

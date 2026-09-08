@@ -8,6 +8,11 @@ defmodule OptimalEngine.API.RateLimitTest do
   alias OptimalEngine.API.RateLimitPlug
   alias OptimalEngine.API.Router
 
+  setup do
+    on_exit(fn -> RateLimiter.reset() end)
+    :ok
+  end
+
   # ── RateLimiter (GenServer / ETS) unit tests ────────────────────────────────
 
   describe "RateLimiter.check/3" do
@@ -195,8 +200,6 @@ defmodule OptimalEngine.API.RateLimitTest do
     end
 
     test "per-key metadata rate_limit_per_minute override is respected" do
-      opts = [default_capacity: 200, default_per_minute: 100]
-
       # Metadata sets a tight 2/min limit
       api_key = %{
         id: "meta_key_#{System.unique_integer([:positive])}",

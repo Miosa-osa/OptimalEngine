@@ -1,0 +1,769 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "id": "engine-boot",
+      "path": "AGENTS.md",
+      "kind": "normative",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": [
+        "agent-operation"
+      ],
+      "requires": [
+        "engine-system",
+        "engine-vocabulary",
+        "control-plane",
+        "storage-map",
+        "reconstruction"
+      ]
+    },
+    {
+      "id": "boot",
+      "path": "BOOT.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "changelog",
+      "path": "CHANGELOG.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "claude",
+      "path": "CLAUDE.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": [],
+      "check_references": true
+    },
+    {
+      "id": "engine-vocabulary",
+      "path": "CONTEXT.md",
+      "kind": "contract",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": [
+        "vocabulary"
+      ]
+    },
+    {
+      "id": "contributing",
+      "path": "CONTRIBUTING.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "getting_started",
+      "path": "GETTING_STARTED.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "mission",
+      "path": "MISSION.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "notes",
+      "path": "NOTES.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "opinions",
+      "path": "OPINIONS.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "options",
+      "path": "OPTIONS.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "plan",
+      "path": "PLAN.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "readme",
+      "path": "README.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "resources",
+      "path": "RESOURCES.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "engine-system",
+      "path": "SYSTEM.md",
+      "kind": "contract",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": [
+        "layer-ownership",
+        "knowledge-flow"
+      ]
+    },
+    {
+      "id": "ubiquitous_language",
+      "path": "UBIQUITOUS_LANGUAGE.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-readme",
+      "path": "docs/README.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-roadmap",
+      "path": "docs/ROADMAP.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "reconstruction",
+      "path": "docs/adr/0001-governed-reconstructive-memory.md",
+      "kind": "contract",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": [
+        "reconstructive-memory"
+      ]
+    },
+    {
+      "id": "docs-architecture-architecture-coverage-matrix",
+      "path": "docs/architecture/ARCHITECTURE-COVERAGE-MATRIX.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-current-workspace-usage-map",
+      "path": "docs/architecture/CURRENT-WORKSPACE-USAGE-MAP.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-data-anatomy-and-multimodality",
+      "path": "docs/architecture/DATA-ANATOMY-AND-MULTIMODALITY.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-devils-advocate-review",
+      "path": "docs/architecture/DEVILS-ADVOCATE-REVIEW.md",
+      "kind": "historical",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-engine-structure",
+      "path": "docs/architecture/ENGINE-STRUCTURE.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-layer-ownership-and-data-flow",
+      "path": "docs/architecture/LAYER-OWNERSHIP-AND-DATA-FLOW.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-memory-core-codebase-fit",
+      "path": "docs/architecture/MEMORY-CORE-CODEBASE-FIT.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-node-ontology",
+      "path": "docs/architecture/NODE-ONTOLOGY.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-optimized-build-phases",
+      "path": "docs/architecture/OPTIMIZED-BUILD-PHASES.md",
+      "kind": "historical",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-reality-audit",
+      "path": "docs/architecture/REALITY-AUDIT.md",
+      "kind": "historical",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "storage-map",
+      "path": "docs/architecture/STORAGE-AND-PROJECTION-MAP.md",
+      "kind": "contract",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": [
+        "storage-projection"
+      ]
+    },
+    {
+      "id": "docs-architecture-storage-capabilities-and-workspace-flow",
+      "path": "docs/architecture/STORAGE-CAPABILITIES-AND-WORKSPACE-FLOW.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-wiki-layer",
+      "path": "docs/architecture/WIKI-LAYER.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-architecture-workspace",
+      "path": "docs/architecture/WORKSPACE.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-concepts-failure-modes",
+      "path": "docs/concepts/failure-modes.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-concepts-signal-theory",
+      "path": "docs/concepts/signal-theory.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-benchmarking",
+      "path": "docs/guides/BENCHMARKING.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-agent-cli-sop",
+      "path": "docs/guides/agent-cli-sop.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "control-plane",
+      "path": "docs/guides/agent-control-plane.md",
+      "kind": "contract",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": [
+        "document-authority"
+      ]
+    },
+    {
+      "id": "docs-guides-agentic-loops",
+      "path": "docs/guides/agentic-loops.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-first-workspace-story",
+      "path": "docs/guides/first-workspace-story.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-getting-started",
+      "path": "docs/guides/getting-started.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-installation-and-deployment",
+      "path": "docs/guides/installation-and-deployment.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-integrations-and-imports",
+      "path": "docs/guides/integrations-and-imports.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-interfaces-and-publishing",
+      "path": "docs/guides/interfaces-and-publishing.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-mix-tasks",
+      "path": "docs/guides/mix-tasks.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-naming-and-aliases",
+      "path": "docs/guides/naming-and-aliases.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-packages-and-exports",
+      "path": "docs/guides/packages-and-exports.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-reconstructive-memory-and-optimality",
+      "path": "docs/guides/reconstructive-memory-and-optimality.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-scope-switching",
+      "path": "docs/guides/scope-switching.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-store-and-layer-reality",
+      "path": "docs/guides/store-and-layer-reality.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-tool-surfaces-and-loops",
+      "path": "docs/guides/tool-surfaces-and-loops.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-versioning-and-releases",
+      "path": "docs/guides/versioning-and-releases.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-workspace-filesystem",
+      "path": "docs/guides/workspace-filesystem.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-writing-guide",
+      "path": "docs/guides/writing-guide.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-backend-readiness",
+      "path": "docs/reference/backend-readiness.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-build-goal-alignment",
+      "path": "docs/reference/build-goal-alignment.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-components",
+      "path": "docs/reference/components.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-data-model",
+      "path": "docs/reference/data-model.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-hooks",
+      "path": "docs/reference/hooks.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-multimodal-open-source-stack",
+      "path": "docs/reference/multimodal-open-source-stack.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-node-template",
+      "path": "docs/reference/node-template.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-operations-spec",
+      "path": "docs/reference/operations-spec.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-search-architecture",
+      "path": "docs/reference/search-architecture.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-session-lifecycle",
+      "path": "docs/reference/session-lifecycle.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-reference-vocabulary",
+      "path": "docs/reference/vocabulary.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "skills-optimal-engine-readme",
+      "path": "skills/optimal-engine/README.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": []
+    }
+  ],
+  "inventory": [
+    "*.md",
+    "docs/**/*.md"
+  ],
+  "required_paths": [
+    "bin/optimal",
+    "scripts/run-engine.sh",
+    "lib/optimal_engine/version.ex",
+    "lib/optimal_engine/memory_core/fact_promoter.ex"
+  ],
+  "permissions": {
+    "fact_creation": "Engine evidence and authorized Claim review required",
+    "topology_modification": "explicit authorized actor and scope required",
+    "workspace_access": "explicit workspace boundary required",
+    "tool_execution": "registered allowlist and runtime authorization required",
+    "documentation": "cannot expand runtime permissions"
+  }
+}
