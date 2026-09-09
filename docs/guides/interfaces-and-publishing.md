@@ -77,6 +77,10 @@ bin/optimal setup my-workspace --name "My Workspace"
 bin/optimal wiki render-tree --workspace default:my-workspace
 ```
 
+For API-backed wrapper commands, `OPTIMAL_ENGINE_API_KEY` authenticates both the availability probe and the operation.
+Reachable HTTP errors stop execution; only an unconfigured default-local probe with no HTTP response can select trusted local Mix fallback.
+Native commands remain local, so this wrapper is not a remote-only client or an isolation boundary.
+
 Local CLI commands are trusted local access to the configured store.
 They are best for humans, coding agents, local scripts, and local cron jobs running on the same machine.
 HTTP grants do not isolate CLI, direct Elixir, or SQL access.
@@ -189,7 +193,9 @@ Optionally provide `principal_id` for an existing registered reviewer or service
 Store the returned token in the client's secret configuration, verify its intended operations, then revoke the old key with `POST /api/auth/keys/:id/revoke` using the administrator credential.
 A regular `read`/`write` client cannot mint its own broader grants.
 
-For shared or remote deployments, configure `config :optimal_engine, :auth, auth_required: true`.
+For shared or remote deployments, set `OPTIMAL_AUTH_REQUIRED=true` or configure `config :optimal_engine, :auth, auth_required: true`.
+The environment override accepts only literal `true` or `false`; invalid values fail configuration and an absent override preserves the configured setting.
+Selecting production Mix mode alone does not enable authentication.
 With `auth_required: false`, unauthenticated calls are trusted local development access and have no API-key operation grant to enforce.
 Even in that local mode, Claim review requires an explicit nonempty `actor_id` or `verifier_id`; an implicit anonymous identity is not approval.
 These HTTP controls do not sandbox an agent that has local process or database access.

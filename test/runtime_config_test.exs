@@ -2,6 +2,7 @@ defmodule OptimalEngine.RuntimeConfigTest do
   use ExUnit.Case, async: false
 
   @runtime_env %{
+    "OPTIMAL_AUTH_REQUIRED" => "true",
     "OPTIMAL_ENGINE_ROOT" => "/tmp/optimal-runtime/workspaces",
     "OPTIMAL_ENGINE_DB" => "/tmp/optimal-runtime/index.db",
     "OPTIMAL_ENGINE_CACHE" => "/tmp/optimal-runtime/cache",
@@ -13,6 +14,8 @@ defmodule OptimalEngine.RuntimeConfigTest do
   }
 
   setup do
+    original_auth = Application.get_env(:optimal_engine, :auth, [])
+    on_exit(fn -> Application.put_env(:optimal_engine, :auth, original_auth) end)
     original = Map.new(@runtime_env, fn {name, _value} -> {name, System.get_env(name)} end)
     Enum.each(@runtime_env, fn {name, value} -> System.put_env(name, value) end)
 
@@ -56,5 +59,41 @@ defmodule OptimalEngine.RuntimeConfigTest do
     engine = Keyword.fetch!(config, :optimal_engine)
 
     Enum.each(expected, fn {key, value} -> assert engine[key] == value end)
+  end
+
+  test "environment enables HTTP authentication without losing existing auth settings" do
+    Application.put_env(:optimal_engine, :auth, auth_required: false, bcrypt_cost: 4)
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    auth = get_in(config, [:optimal_engine, :auth])
+    assert auth[:auth_required] == true
+    assert auth[:bcrypt_cost] == 4
+    Application.put_env(:optimal_engine, :auth, auth)
+
+    response =
+      Plug.Test.conn(:get, "/api/workspaces")
+      |> OptimalEngine.API.Router.call(OptimalEngine.API.Router.init([]))
+
+    assert response.status == 401
+    assert Jason.decode!(response.resp_body)["error"] == "missing_api_key"
+  end
+
+  test "explicit false selects trusted local mode and absence preserves configured auth" do
+    Application.put_env(:optimal_engine, :auth, auth_required: true, bcrypt_cost: 4)
+    System.put_env("OPTIMAL_AUTH_REQUIRED", "false")
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    assert get_in(config, [:optimal_engine, :auth, :auth_required]) == false
+    System.delete_env("OPTIMAL_AUTH_REQUIRED")
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    assert get_in(config, [:optimal_engine, :auth, :auth_required]) == true
+  end
+
+  test "invalid authentication flags fail configuration rather than disabling protection" do
+    for value <- ["", "TRUE", "1", "false ", "yes"] do
+      System.put_env("OPTIMAL_AUTH_REQUIRED", value)
+
+      assert_raise ArgumentError, ~r/OPTIMAL_AUTH_REQUIRED must be true or false/, fn ->
+        Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+      end
+    end
   end
 end

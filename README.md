@@ -4,6 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-4B275F.svg)](mix.exs)
 
+Current source contract: application `0.3.1`, API `v1`, contract schema `1`, expected migration `62`.
+See [engine-contract.json](engine-contract.json), [release identity](docs/guides/versioning-and-releases.md), and [document authority](docs/guides/agent-control-plane.md).
+A clean pinned checkout does not prove the identity of a separately running HTTP service.
+
 ## Verified Performance Snapshot
 
 The current Candidate Portfolio retrieves at least one gold evidence item for **96.094%** of 1,540 LoCoMo questions and retrieves **87.130%** of all gold evidence addresses at top 100.
@@ -762,7 +766,7 @@ In another terminal, verify the running engine:
 
 ```bash
 curl http://localhost:4200/api/health
-mix optimal.reality_check
+curl http://localhost:4200/api/stores/audit
 ```
 
 Use the checked-in `bin/optimal` command wrapper:
@@ -771,11 +775,13 @@ Use the checked-in `bin/optimal` command wrapper:
 bin/optimal --help
 bin/optimal doctor
 bin/optimal boot
-bin/optimal reality-check
+bin/optimal health
 ```
 
 That wrapper is for source checkouts.
-It delegates to `mix optimal.*` so native database dependencies load correctly.
+API-backed commands probe the configured endpoint with `OPTIMAL_ENGINE_API_KEY` and use HTTP when available.
+A reachable HTTP failure stops the command; only an unconfigured default-local probe with no HTTP response permits local Mix fallback.
+Native commands and that fallback use trusted local `mix optimal.*` access, so configure the local store deliberately.
 For production/API deployment, use the OTP release or container shape instead of treating the checkout wrapper as the server binary.
 
 There are three CLI surfaces:
@@ -803,9 +809,13 @@ apps, MCP servers, remote agents, or scripts that connect over HTTP/API, mint a
 scoped API key:
 
 ```bash
-bin/optimal auth mint --name "Business OS" --workspace default:my-workspace
-bin/optimal auth env --name "Local Agent" --workspace default:my-workspace
+bin/optimal auth mint --name "Business OS" --scope read --scope write --workspace default:my-workspace
+bin/optimal auth env --name "Local Agent" --scope read --scope write --workspace default:my-workspace
 ```
+
+Ordinary grants do not authorize Claim review, topology changes, or key administration.
+Use the [API grants and migration guide](docs/guides/interfaces-and-publishing.md#api-grants-and-identity) for those operations and authenticated tenant/reviewer binding.
+Local anonymous mode and direct CLI access remain trusted operator surfaces.
 
 Render wiki/export projections:
 
@@ -964,17 +974,16 @@ required native RocksDB library available.
 
 ## Verification
 
-Core reality check:
+Validate document authority before relying on instructions:
 
 ```bash
-mix optimal.reality_check
+python3 scripts/agent_control_plane.py
+python3 -m unittest discover -s scripts/tests -p 'test_agent_control_plane.py'
 ```
 
-Current verified result:
-
-```text
-126 probes, 126 ok, 0 warn, 0 fail
-```
+For live data use `/api/health` and `/api/stores/audit`.
+`mix optimal.reality_check` writes fixtures; use only the [isolated fixture recipe](docs/guides/installation-and-deployment.md#isolated-fixture-verification).
+The [control-plane evidence and limits](docs/guides/agent-control-plane.md) distinguishes structural CI, runtime regressions, and independent review.
 
 Focused topology/wiki path:
 
@@ -988,11 +997,7 @@ mix test test/wiki/service_test.exs \
   --seed 0
 ```
 
-Current result:
-
-```text
-19 tests, 0 failures
-```
+Use the result from your current checkout; this focused selection does not replace the full suite.
 
 Focused multimodal/memory path:
 

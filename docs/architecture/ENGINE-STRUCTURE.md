@@ -280,4 +280,6 @@ A well-structured Optimal Engine workspace has:
 - registered tools/connectors;
 - workflow traces and draft Skill Packages;
 - markdown/wiki/app/API projections generated from engine state;
-- verification through `mix optimal.reality_check`.
+- live health/storage audits and separately isolated fixture verification.
+
+Use the [disposable fixture recipe](../guides/installation-and-deployment.md#isolated-fixture-verification) for `mix optimal.reality_check`; it writes records and is not a routine live-store check.

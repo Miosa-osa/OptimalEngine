@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "id": "boot",
+      "path": "AGENTS.md",
+      "kind": "normative",
+      "status": "active",
+      "owner": "platform",
+      "scope": "fixture",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": [
+        "boot"
+      ],
+      "requires": [
+        "contract"
+      ]
+    },
+    {
+      "id": "contract",
+      "path": "contract.md",
+      "kind": "contract",
+      "status": "active",
+      "owner": "platform",
+      "scope": "fixture",
+      "version": 1,
+      "effective": "2026-09-08",
+      "owns": [
+        "architecture"
+      ]
+    }
+  ],
+  "required_paths": [],
+  "inventory": [
+    "*.md"
+  ],
+  "permissions": {
+    "fact_creation": ""
+  }
+}

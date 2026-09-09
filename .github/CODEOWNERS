@@ -1,5 +1,5 @@
 # Control-plane changes require explicit owner review under branch protection.
-/*.md @robertohluna @MichaelFractal @PAMF2
+*.md @robertohluna @MichaelFractal @PAMF2
 /skills/ @robertohluna @MichaelFractal @PAMF2
 /AGENTS.md @robertohluna @MichaelFractal @PAMF2
 /CLAUDE.md @robertohluna @MichaelFractal @PAMF2
@@ -13,3 +13,4 @@
 /wiring/ @robertohluna @MichaelFractal @PAMF2
 /scripts/ @robertohluna @MichaelFractal @PAMF2
 /.github/ @robertohluna @MichaelFractal @PAMF2
+/evidence/control-plane/ @robertohluna @MichaelFractal @PAMF2

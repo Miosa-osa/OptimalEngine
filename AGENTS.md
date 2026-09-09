@@ -18,6 +18,21 @@ Never push Engine changes to `robertohluna/OptimalEngine`.
 Do not assume an embedded copy inside another app is newer.
 Check `git status`, branch, remotes, and the running process before making changes.
 
+## Authority, Runtime Identity, And Credentials
+
+Run `python3 scripts/agent_control_plane.py` before relying on current repository instructions.
+The registry classifies authority and historical evidence; it does not prove every prose claim or grant runtime access.
+Use [control-plane evidence and limits](docs/guides/agent-control-plane.md) when responding to a governance review.
+Use [release identity](docs/guides/versioning-and-releases.md) to compare the actual HTTP process with the intended build.
+A checked checkout or a passing health response alone does not attest a separate server or a completed authenticated session.
+
+HTTP clients need explicit operation grants and workspace scope.
+`read`/`write` do not imply `claims:review`, `topology:write`, or `admin`; an omitted scope list currently grants `*`.
+Authenticated tenant and Claim-review identities are bound to the key.
+See [API grants and migration](docs/guides/interfaces-and-publishing.md#api-grants-and-identity).
+Use `OPTIMAL_AUTH_REQUIRED=true` for shared deployments and verify missing credentials are rejected.
+Absent configuration retains trusted local development mode; CLI and direct database access remain privileged operator access.
+
 ## Local Boot
 
 Use the standard local path:

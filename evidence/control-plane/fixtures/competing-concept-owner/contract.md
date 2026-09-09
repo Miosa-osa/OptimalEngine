@@ -1,0 +1,1 @@
+Current synthetic architecture contract.
