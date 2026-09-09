@@ -4,6 +4,9 @@ This page answers the practical question: what is actually built in the backend,
 where does data live, and what still has to be finished before calling the
 system production-ready.
 
+Use [release identity](../guides/versioning-and-releases.md) to tie an implementation claim to a build.
+[API grants and migration](../guides/interfaces-and-publishing.md#api-grants-and-identity) defines the current HTTP credential boundary; local CLI and database access remain trusted.
+
 ## Current Verdict
 
 Optimal Engine currently has a working backend spine.
@@ -60,7 +63,7 @@ The backend uses multiple storage roles. They should not be confused.
 | Raw artifact storage | Current local file-backed evidence path; target object storage for production. | Files, uploads, attachments, media, source payloads. |
 | FTS/vector/chunk indexes | Rebuildable acceleration layer. | Search candidates, embeddings, chunks, summaries, rerank state. |
 | ETS | In-memory graph/knowledge runtime. | Fast process-local graph state. |
-| RocksDB | Optional graph/triple-store backend, not the main product database. | Persistent graph workload experiments when native support is installed. |
+| RocksDB | Default persistent graph backend selected by the standard launcher when its NIF is available. | Graph workload projections, not the canonical SQLite product store. |
 | Markdown/wiki/HTML/API | Projection surfaces. | Human-readable or app-readable views, not canonical truth. |
 
 The rule is:
@@ -108,12 +111,15 @@ If those answers are unclear, the feature is not ready.
 
 ## Verification Commands
 
+Run these development checks with test data; inspect the running service separately for live health.
+Fixture-writing reality checks require the [isolated recipe](../guides/installation-and-deployment.md#isolated-fixture-verification).
+
 Run these before calling a backend change safe:
 
 ```bash
 mix compile
 mix test
-mix optimal.reality_check
+bin/optimal health
 scripts/public-audit.sh
 ```
 
@@ -121,7 +127,7 @@ For a faster backend spine check during development:
 
 ```bash
 mix compile
-mix optimal.reality_check
+bin/optimal health
 ```
 
 For public pushes, also run:
@@ -155,8 +161,9 @@ retrieval/RAG edge cases
 compliance probes
 ```
 
-This is the backend safety harness. It does not replace focused tests, but it
-proves the main spine is still connected.
+These are fixture paths in a disposable backend harness.
+They do not prove every API/importer/migration preserves policy or that a deployed store is healthy.
+Use [control-plane evidence and limits](../guides/agent-control-plane.md) for the named authorization regressions and remaining red-team work.
 
 ## Setup Order For Users
 
@@ -165,7 +172,7 @@ The backend setup order should be:
 ```text
 install dependencies
   -> compile
-  -> run reality check
+  -> inspect health and storage audit
   -> create or initiate workspace
   -> inspect topology
   -> add/import sources
@@ -180,7 +187,7 @@ CLI shape:
 ```bash
 mix deps.get
 mix compile
-mix optimal.reality_check
+bin/optimal health
 mix optimal.setup my-workspace --name "My Workspace"
 mix optimal.topology --workspace default:my-workspace
 ```

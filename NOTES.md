@@ -36,3 +36,16 @@
 - 2026-09-08: Agent authority now has an explicit registry and adversarial structural validator.
 Historical architecture reports remain evidence and cannot own current concepts.
 Cross-repo execution compatibility and governed API authorization require runtime tests, not documentation assertions alone.
+
+- 2026-09-08: Current setup docs now separate read-only live health/storage audit from fixture-writing reality checks, with a single disposable verification recipe.
+- 2026-09-08: The authority index classifies historical evidence explicitly; directory membership and index links do not independently grant normative authority.
+- 2026-09-08: Canopy checkout preflight validates the source/task contract and does not attest a separately running Engine HTTP process or sandbox trusted local execution.
+- 2026-09-08: Reproduced and fixed the advertised OPTIMAL_AUTH_REQUIRED flag being ignored at runtime; literal true/false now override the configured auth setting, absence preserves it, and invalid values fail configuration.
+- 2026-09-08: Report fixtures A-G have distinct structural, runtime, and administrative evidence; natural-language contradictions, historical retrieval poisoning, and universal independent red-team closure are not established by the structural validator.
+- 2026-09-08: The wrapper health probe now forwards bearer credentials and refuses local-store fallback after a reachable HTTP failure; black-box tests cover authentication failures, denied writes, and intentional unconfigured default-local no-response fallback without using a real database.
+- 2026-09-08: CODEOWNERS now covers Markdown at every directory depth, including deployment guidance, so newly registered nested documents retain independent owner-review coverage.
+- 2026-09-08: Candidate-owned permissive validators and all-success tests reproduced a false green; the trusted harness now runs prior validator/test expectations and preserves exact hashed positive/negative evidence with additive supersession.
+- 2026-09-08: Initial ledger installation remains explicitly pending independent bootstrap review; existing base validator/tests still execute, while subsequent installed-baseline runs reject missing or rewritten evidence.
+
+- 2026-09-08: Real fresh-agent missing-authority reviews correctly stopped with validator exit 1, but the initial evaluator rejected Codex's terminal `status=failed` event.
+The exact event and causal lesson are retained under scripts/fixtures/fresh-agent, and a regression now verifies expected nonzero tool execution without changing the required permission or authority decisions.
