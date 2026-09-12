@@ -114,7 +114,13 @@ defmodule OptimalEngine.Memory.DedupTest do
   # ---------------------------------------------------------------------------
 
   describe "dedup — always_insert policy" do
-    test "same content with always_insert → both rows created" do
+    # HISTORY (fork, 14-08-2026): these two tests used to assert "both rows
+    # created". That behaviour never existed: the memories table carries
+    # UNIQUE(tenant_id, workspace_id, audience, content_hash), the second
+    # INSERT always failed, and the store swallowed the constraint error into
+    # {:ok, []} — so create returned a struct for a row that was never
+    # written. With the store honest, the policy's real limit surfaces.
+    test "same content with always_insert surfaces the uniqueness constraint" do
       workspace_id = ws()
 
       {:ok, first} =
@@ -124,37 +130,36 @@ defmodule OptimalEngine.Memory.DedupTest do
           dedup: "always_insert"
         })
 
-      {:ok, second} =
-        Memory.create(%{
-          content: "duplicate me",
-          workspace_id: workspace_id,
-          dedup: "always_insert"
-        })
-
-      # Two distinct rows
-      refute first.id == second.id
       assert first.was_existing == false
-      assert second.was_existing == false
+
+      assert {:error, reason} =
+               Memory.create(%{
+                 content: "duplicate me",
+                 workspace_id: workspace_id,
+                 dedup: "always_insert"
+               })
+
+      assert reason =~ "UNIQUE constraint"
     end
 
-    test "always_insert accepts atom policy" do
+    test "always_insert accepts atom policy and hits the same constraint" do
       workspace_id = ws()
 
-      {:ok, first} =
+      {:ok, _first} =
         Memory.create(%{
           content: "atom policy",
           workspace_id: workspace_id,
           dedup: :always_insert
         })
 
-      {:ok, second} =
-        Memory.create(%{
-          content: "atom policy",
-          workspace_id: workspace_id,
-          dedup: :always_insert
-        })
+      assert {:error, reason} =
+               Memory.create(%{
+                 content: "atom policy",
+                 workspace_id: workspace_id,
+                 dedup: :always_insert
+               })
 
-      refute first.id == second.id
+      assert reason =~ "UNIQUE constraint"
     end
   end
 
