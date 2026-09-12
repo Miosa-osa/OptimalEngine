@@ -273,4 +273,38 @@ defmodule OptimalEngine.API.AuthPlugTest do
       assert conn.status == 204
     end
   end
+
+  describe "admin scope on key management (auth_required: true)" do
+    # Key management is the one place a caller can grow its own privileges;
+    # without this gate any workspace-scoped key could mint itself a "*" key.
+    test "a non-admin key cannot mint keys" do
+      with_auth_required(fn ->
+        {:ok, %{key: token}} =
+          ApiKey.mint(%{tenant_id: @tenant_id, name: "beperkte sleutel", scopes: ["read"]})
+
+        conn = call(:post, "/api/auth/keys", [{"x-api-key", token}], %{name: "escalatie"})
+        assert conn.status == 403
+        assert {:ok, %{"error" => "admin_scope_required"}} = Jason.decode(conn.resp_body)
+      end)
+    end
+
+    test "a wildcard key can mint keys" do
+      with_auth_required(fn ->
+        {:ok, %{key: token}} = ApiKey.mint(%{tenant_id: @tenant_id, name: "admin sleutel"})
+        conn = call(:post, "/api/auth/keys", [{"x-api-key", token}], %{name: "nieuw"})
+        assert conn.status == 201
+      end)
+    end
+
+    test "a non-admin key cannot list, revoke or delete keys" do
+      with_auth_required(fn ->
+        {:ok, %{key: token}} =
+          ApiKey.mint(%{tenant_id: @tenant_id, name: "beperkt 2", scopes: ["read"]})
+
+        assert call(:get, "/api/auth/keys", [{"x-api-key", token}]).status == 403
+        assert call(:post, "/api/auth/keys/some-id/revoke", [{"x-api-key", token}]).status == 403
+        assert call(:delete, "/api/auth/keys/some-id", [{"x-api-key", token}]).status == 403
+      end)
+    end
+  end
 end
