@@ -48,7 +48,9 @@ defmodule OptimalEngine.API.Router do
     exempt_paths: ["/api/status", "/api/health", "/api/metrics/prometheus"]
   )
 
-  plug(OptimalEngine.API.AuthPlug)
+  # /api/health stays keyless so the container HEALTHCHECK (bare wget) keeps
+  # working when auth_required is on; everything else needs a key.
+  plug(OptimalEngine.API.AuthPlug, exempt_paths: ["/api/health"])
 
   # Workspace authorization — must run after AuthPlug (needs :current_tenant /
   # :current_api_key) and before :dispatch. Resolves the requested workspace

@@ -40,8 +40,14 @@ defmodule OptimalEngine.API.AuthPlug do
   def init(opts), do: opts
 
   @impl true
-  def call(conn, _opts) do
-    auth_required = auth_required?()
+  def call(conn, opts) do
+    # `exempt_paths` (default: none) lists routes that stay reachable without a
+    # token when auth_required is on — e.g. /api/health, which the container
+    # HEALTHCHECK probes with a bare wget; gating it marks a correctly-secured
+    # container unhealthy. A token that IS supplied is still verified, even on
+    # an exempt path.
+    exempt = conn.request_path in Keyword.get(opts, :exempt_paths, [])
+    auth_required = auth_required?() and not exempt
 
     case extract_token(conn) do
       nil ->
