@@ -238,9 +238,13 @@ defmodule OptimalEngine.Retrieval.Search do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
     lexical_hits =
-      case Store.raw_query(sql, [fts_query, workspace_id, tenant_id, limit]) do
-        {:ok, rows} -> Enum.map(rows, &memory_context(&1, workspace_id, query))
-        _ -> []
+      case fts_query do
+        :none -> []
+        _ ->
+          case Store.raw_query(sql, [fts_query, workspace_id, tenant_id, limit]) do
+            {:ok, rows} -> Enum.map(rows, &memory_context(&1, workspace_id, query))
+            _ -> []
+          end
       end
       |> filter_memory_candidates(opts)
 
@@ -745,20 +749,27 @@ defmodule OptimalEngine.Retrieval.Search do
     # Resolve URI prefix to node filter if given
     {node_filter, type_filter} = apply_uri_filter(uri_prefix, node_filter, type_filter)
 
-    fts_query = sanitize_fts_query(query)
+    fts_result =
+      case sanitize_fts_query(query) do
+        :none ->
+          {:ok, []}
 
-    {sql, params} =
-      build_fts_sql(
-        fts_query,
-        type_filter,
-        node_filter,
-        genre_filter,
-        workspace_id,
-        limit * 3,
-        offset
-      )
+        fts_query ->
+          {sql, params} =
+            build_fts_sql(
+              fts_query,
+              type_filter,
+              node_filter,
+              genre_filter,
+              workspace_id,
+              limit * 3,
+              offset
+            )
 
-    with {:ok, rows} <- Store.raw_query(sql, params) do
+          Store.raw_query(sql, params)
+      end
+
+    with {:ok, rows} <- fts_result do
       now = DateTime.utc_now()
 
       results =
@@ -898,7 +909,11 @@ defmodule OptimalEngine.Retrieval.Search do
       |> Enum.uniq()
 
     case terms do
-      [] -> "*"
+      # Only stopwords/punctuation left: there is nothing FTS5 can match. A
+      # bare "*" is NOT a match-all — FTS5 rejects it as "unknown special
+      # query", an error the store used to swallow into zero rows. Callers
+      # treat :none as an empty lexical result instead of running a query.
+      [] -> :none
       _ -> Enum.map_join(terms, " OR ", &"\"#{&1}\"")
     end
   end
