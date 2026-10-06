@@ -1,7 +1,7 @@
 # Optimal Engine
 
 [![CI](https://github.com/Miosa-osa/OptimalEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/Miosa-osa/OptimalEngine/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-4B275F.svg)](mix.exs)
 
 Current source contract: application `0.3.1`, API `v1`, contract schema `1`, expected migration `62`.
@@ -1236,4 +1236,4 @@ Production qualification still requires a private, human-reviewed OptimalOS Gold
 
 ## License
 
-Optimal Engine is released under the [MIT License](LICENSE).
+Optimal Engine is released under the [Apache License 2.0](LICENSE).
