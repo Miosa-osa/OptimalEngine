@@ -121,27 +121,32 @@ Local CLI use is trusted local access to the configured store. Use API keys for
 HTTP/API clients, MCP servers, remote agents, external apps, and automation:
 
 ```bash
-mix optimal.auth mint --name "Business OS" --workspace default:my-workspace
-mix optimal.auth env --name "Local Agent" --workspace default:my-workspace
+mix optimal.auth mint --name "Business OS" --scope read --scope write --workspace default:my-workspace
+mix optimal.auth env --name "Local Agent" --scope read --scope write --workspace default:my-workspace
 mix optimal.auth list
 ```
+
+Repeat `--scope` to grant `claims:review`, `topology:write`, or `admin` only when needed.
+Omitting `--scope` currently grants privileged `*` access.
+See [API grants and client migration](interfaces-and-publishing.md#api-grants-and-identity) for tenant binding, reviewer identity, and administrator-issued replacement keys.
 
 ## Evaluation, Health, And Verification
 
 | Task | Purpose |
 | --- | --- |
-| `mix optimal.reality_check` | Broad runtime probe across store, topology, memory, retrieval, pools, workflows, governance, connectors, evaluation, wiki, and compliance. |
+| `mix optimal.reality_check` | Fixture-writing regression probe, disposable stores only. Broad coverage across store, topology, memory, retrieval, pools, workflows, governance, connectors, evaluation, wiki, and compliance. |
 | `mix optimal.eval.run` | Run evaluation datasets. |
 | `mix optimal.health` | Diagnostic checks. |
 | `mix optimal.verify` | Cold-read fidelity checks. |
 | `mix optimal.stats` | Store statistics. |
 | `mix optimal.status` | Runtime status. |
 
-Recommended verification:
+Use the [isolated fixture recipe](installation-and-deployment.md#isolated-fixture-verification) for reality checks.
+Recommended live diagnostics and development compilation:
 
 ```bash
 mix compile
-mix optimal.reality_check
+bin/optimal health
 ```
 
 Focused workspace/wiki/initiation path:

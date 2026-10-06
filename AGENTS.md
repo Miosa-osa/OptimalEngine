@@ -18,6 +18,21 @@ Never push Engine changes to `robertohluna/OptimalEngine`.
 Do not assume an embedded copy inside another app is newer.
 Check `git status`, branch, remotes, and the running process before making changes.
 
+## Authority, Runtime Identity, And Credentials
+
+Run `python3 scripts/agent_control_plane.py` before relying on current repository instructions.
+The registry classifies authority and historical evidence; it does not prove every prose claim or grant runtime access.
+Use [control-plane evidence and limits](docs/guides/agent-control-plane.md) when responding to a governance review.
+Use [release identity](docs/guides/versioning-and-releases.md) to compare the actual HTTP process with the intended build.
+A checked checkout or a passing health response alone does not attest a separate server or a completed authenticated session.
+
+HTTP clients need explicit operation grants and workspace scope.
+`read`/`write` do not imply `claims:review`, `topology:write`, or `admin`; an omitted scope list currently grants `*`.
+Authenticated tenant and Claim-review identities are bound to the key.
+See [API grants and migration](docs/guides/interfaces-and-publishing.md#api-grants-and-identity).
+Use `OPTIMAL_AUTH_REQUIRED=true` for shared deployments and verify missing credentials are rejected.
+Absent configuration retains trusted local development mode; CLI and direct database access remain privileged operator access.
+
 ## Local Boot
 
 Use the standard local path:
@@ -40,8 +55,11 @@ Verify:
 ```bash
 curl http://localhost:4200/api/health
 curl http://localhost:4200/api/stores/audit
-mix optimal.reality_check
 ```
+
+Reality checks write diagnostic fixtures and are not a read-only health check.
+Run them only against an isolated disposable store, never a live user store.
+When embedded in OptimalOS, use the parent `.system/oe` interface and its `storage_check` instead.
 
 If another engine is already using port `4200`, do not kill it unless the user asked you to.
 Check which process owns the port and which checkout it is running from.
@@ -160,6 +178,14 @@ BusinessOS, OptimalOS, and other apps that embed or connect to this engine must 
 - Private agents may use an outside wrapper for private context, but that wrapper is not part of this public engine repo.
 - Agents should run `bin/optimal boot/find/capture/aware/close` loops instead of treating memory as optional.
 
+## Authority validation
+
+`agent-authority.json` declares current authority and historical/reference status.
+Run `python3 scripts/agent_control_plane.py` before relying on repository architecture.
+Read `docs/guides/agent-control-plane.md` for the validation and permission-review contract.
+A failed authority check blocks dependent execution until repaired.
+Reference and historical material cannot override the active contract that owns a concept.
+
 ## Verification Before Push
 
 For setup or backend changes, run:
@@ -167,9 +193,10 @@ For setup or backend changes, run:
 ```bash
 bash -n scripts/run-engine.sh
 mix compile
-mix optimal.reality_check
 curl http://localhost:4200/api/stores/audit
 ```
+
+Run fixture-writing reality checks separately in an isolated disposable environment when required for development verification.
 
 If the live engine already owns port `4200`, either verify against the live engine or run checks in a clean environment.
 Do not stop a live user session without permission.

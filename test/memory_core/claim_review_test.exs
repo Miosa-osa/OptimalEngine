@@ -328,6 +328,48 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
              )
   end
 
+  test "an anonymously extracted claim is attributed to the extractor and refuses self-review" do
+    workspace_id = ws()
+
+    assert {:ok, claim} =
+             extracted_claim(workspace_id,
+               claim_text: "Anonymous extraction still carries an evaluator."
+             )
+
+    assert claim.evaluator_id == "system:claim-extractor"
+
+    assert {:error, :self_review_not_allowed} =
+             MemoryCore.promote_claim(claim.id,
+               workspace_id: workspace_id,
+               actor_id: "system:claim-extractor"
+             )
+
+    assert {:ok, _result} =
+             MemoryCore.promote_claim(claim.id,
+               workspace_id: workspace_id,
+               actor_id: "user:onafhankelijk"
+             )
+  end
+
+  test "queue honours :limit as a SQL bound while totals stay honest" do
+    workspace_id = ws()
+
+    for i <- 1..7 do
+      assert {:ok, _claim} =
+               extracted_claim(workspace_id, claim_text: "Queue limit case #{i}")
+    end
+
+    assert {:ok, queue} = MemoryCore.claim_review_queue(workspace_id: workspace_id, limit: 3)
+
+    # The page is bounded by the requested limit...
+    assert length(queue.claims) == 3
+    assert queue.returned == 3
+    # ...while count and the breakdowns keep describing ALL matching claims.
+    assert queue.count == 7
+    assert queue.review_counts["unreviewed"] == 7
+    assert queue.lifecycle_counts["pending"] == 7
+  end
+
   defp extracted_claim(workspace_id, opts) do
     source =
       MemoryCore.source_package_from_text(Keyword.fetch!(opts, :claim_text),

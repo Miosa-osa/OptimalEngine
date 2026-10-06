@@ -39,6 +39,8 @@ defmodule OptimalEngine.Knowledge.Store do
 
   def count(store), do: GenServer.call(store, :count)
 
+  def materialize(store), do: GenServer.call(store, :materialize, :infinity)
+
   # --- Server Callbacks ---
 
   @impl true
@@ -64,6 +66,19 @@ defmodule OptimalEngine.Knowledge.Store do
   end
 
   @impl true
+  def handle_call(:materialize, _from, state) do
+    {:ok, before_count} = state.backend.count(state.backend_state)
+
+    case OptimalEngine.Knowledge.Reasoner.materialize(state.backend, state.backend_state) do
+      {:ok, backend_state, _rounds} ->
+        {:ok, after_count} = state.backend.count(backend_state)
+        {:reply, {:ok, after_count - before_count}, %{state | backend_state: backend_state}}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
   def handle_call({:assert, s, p, o}, _from, state) do
     case state.backend.assert(state.backend_state, s, p, o) do
       {:ok, new_backend_state} ->
