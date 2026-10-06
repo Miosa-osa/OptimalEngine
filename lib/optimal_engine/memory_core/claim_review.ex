@@ -24,6 +24,7 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
              tenant_id: String.t(),
              workspace_id: String.t(),
              count: non_neg_integer(),
+             returned: non_neg_integer(),
              review_counts: map(),
              lifecycle_counts: map(),
              claims: [map()]
@@ -33,21 +34,27 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
     workspace_id = Keyword.get(opts, :workspace_id, "default")
 
-    with {:ok, claims} <-
-           Store.list_claims(
-             tenant_id: tenant_id,
-             workspace_id: workspace_id,
-             review_status: Keyword.get(opts, :review_status),
-             lifecycle_state: Keyword.get(opts, :lifecycle_state),
-             limit: Keyword.get(opts, :limit, 100)
-           ) do
+    filters = [
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      review_status: Keyword.get(opts, :review_status),
+      lifecycle_state: Keyword.get(opts, :lifecycle_state)
+    ]
+
+    # `count`/`*_counts` come from a grouped count over ALL matching rows;
+    # `claims` is the page the caller asked for. Before the store honoured
+    # `:limit` these were the same list — now the totals stay honest while the
+    # page stays bounded.
+    with {:ok, claims} <- Store.list_claims(filters ++ [limit: Keyword.get(opts, :limit, 100)]),
+         {:ok, counts} <- Store.count_claims(filters) do
       {:ok,
        %{
          tenant_id: tenant_id,
          workspace_id: workspace_id,
-         count: length(claims),
-         review_counts: count_by(claims, :review_status),
-         lifecycle_counts: count_by(claims, :lifecycle_state),
+         count: counts.total,
+         returned: length(claims),
+         review_counts: counts.review_counts,
+         lifecycle_counts: counts.lifecycle_counts,
          claims: claims
        }}
     end
@@ -236,13 +243,6 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
           {:error, _} = error -> error
         end
     end
-  end
-
-  defp count_by(claims, field) do
-    claims
-    |> Enum.map(&Map.get(&1, field))
-    |> Enum.reject(&is_nil/1)
-    |> Enum.frequencies()
   end
 
   defp fact_opts(opts, policy) do
