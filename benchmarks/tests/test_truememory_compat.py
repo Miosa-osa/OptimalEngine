@@ -211,6 +211,25 @@ class TrueMemoryCompatTest(unittest.TestCase):
         self.assertIsNone(result["estimated_cost_usd"])
         self.assertEqual(result["by_category"]["recall"]["accuracy"], 100.0)
 
+    def test_summary_persists_engine_release_provenance(self):
+        detail = {
+            "id": "q1", "category": "recall",
+            "evidence_found": 1, "evidence_total": 1, "retrieval_latency_s": 0.01,
+        }
+        release = {
+            "version": "0.3.0", "git_sha": "a" * 40,
+            "expected_migration": 62,
+            "components": {"candidate_portfolio": "candidate-portfolio-v1"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "prepared.jsonl"
+            source.write_text("{}\n")
+            result = RUNNER.summarize(
+                [detail], "locomo", 1, source, False, engine_release=release
+            )
+
+        self.assertEqual(result["engine_release"], release)
+
     def test_coverage_query_variants_include_entities_and_clauses(self):
         variants = RUNNER.query_variants(
             "How do Alice and Bob use creative hobbies while handling stress?"

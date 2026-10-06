@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "id": "known-good",
+      "fixture_root": "evidence/control-plane/fixtures/known-good",
+      "expected_exit": 0,
+      "causal_lesson": "A passing summary cannot replace checking required authority files and retained negative expectations.",
+      "red_team_record": {
+        "strongest_for": "Exact synthetic fixture replay distinguishes retained positive and negative authority expectations.",
+        "strongest_against": "Synthetic fixture coverage is not real runtime proof or universal semantic protection.",
+        "assumptions_to_break": "Replace candidate validator and tests with success-only programs, or delete and rehash retained evidence.",
+        "constraints": "Standard-library checks, no private data, no live service or database writes; prior checkout and runner remain trusted.",
+        "verdict": "Retain this exact fixture and causal lesson; use independent review for baseline changes.",
+        "revisit_condition": "A changed validator, workflow, authority policy, or new reproducible bypass requires replay and additive evidence."
+      },
+      "observed_failure": "An all-failure checker would reject valid authority, so positive control is retained.",
+      "retained_reason": "Preserve exact input and expected outcome across checker and documentation revisions.",
+      "sha256": {
+        "evidence/control-plane/fixtures/known-good/agent-authority.json": "c3a30d289f3a8164765ba7e5814fad315932f67fe00f80c222195645136b2ff3",
+        "evidence/control-plane/fixtures/known-good/contract.md": "bd51dfdfaf64aea90dc3c41b424cb9b6afb527c4bd0e7e1ec7da35c5e838c879",
+        "evidence/control-plane/fixtures/known-good/AGENTS.md": "4d91b70d434cdef521e1af4b282d1b74773c4c2b2657cde8eda4841154fd743c"
+      }
+    },
+    {
+      "id": "missing-boot-contract",
+      "fixture_root": "evidence/control-plane/fixtures/missing-boot-contract",
+      "expected_exit": 1,
+      "causal_lesson": "A passing summary cannot replace checking required authority files and retained negative expectations.",
+      "red_team_record": {
+        "strongest_for": "Exact synthetic fixture replay distinguishes retained positive and negative authority expectations.",
+        "strongest_against": "Synthetic fixture coverage is not real runtime proof or universal semantic protection.",
+        "assumptions_to_break": "Replace candidate validator and tests with success-only programs, or delete and rehash retained evidence.",
+        "constraints": "Standard-library checks, no private data, no live service or database writes; prior checkout and runner remain trusted.",
+        "verdict": "Retain this exact fixture and causal lesson; use independent review for baseline changes.",
+        "revisit_condition": "A changed validator, workflow, authority policy, or new reproducible bypass requires replay and additive evidence."
+      },
+      "observed_failure": "A permissive replacement checker returned success despite an absent required contract.",
+      "retained_reason": "Preserve exact input and expected outcome across checker and documentation revisions.",
+      "sha256": {
+        "evidence/control-plane/fixtures/missing-boot-contract/permissive-checker.py": "16316191fbc1c6994f55438955278b59d1f0b34dc271eafc63d4bf344528a832",
+        "evidence/control-plane/fixtures/missing-boot-contract/agent-authority.json": "c3a30d289f3a8164765ba7e5814fad315932f67fe00f80c222195645136b2ff3",
+        "evidence/control-plane/fixtures/missing-boot-contract/reproduction.json": "ac21431f44608fec1a0f7d456b9e1d148ea0bc838d635a01216797f05a6d30b1",
+        "evidence/control-plane/fixtures/missing-boot-contract/AGENTS.md": "4d91b70d434cdef521e1af4b282d1b74773c4c2b2657cde8eda4841154fd743c",
+        "evidence/control-plane/fixtures/missing-boot-contract/all-success-tests.py": "bb791ce241c65765a1d8c6435642a5edfd46e8ee29874ee986377426a6bd12f9"
+      }
+    },
+    {
+      "id": "competing-concept-owner",
+      "fixture_root": "evidence/control-plane/fixtures/competing-concept-owner",
+      "expected_exit": 1,
+      "causal_lesson": "Duplicate declared owners must be rejected before an agent chooses an authority.",
+      "red_team_record": {
+        "strongest_for": "Exact synthetic fixture replay distinguishes retained positive and negative authority expectations.",
+        "strongest_against": "Synthetic fixture coverage is not real runtime proof or universal semantic protection.",
+        "assumptions_to_break": "Two current documents declare ownership of the same scoped architecture concept.",
+        "constraints": "Standard-library checks, no private data, no live service or database writes; prior checkout and runner remain trusted.",
+        "verdict": "Retain this exact fixture and causal lesson; use independent review for baseline changes.",
+        "revisit_condition": "A changed validator, workflow, authority policy, or new reproducible bypass requires replay and additive evidence."
+      },
+      "observed_failure": "Two current documents declare ownership of the same scoped architecture concept.",
+      "retained_reason": "Preserve exact input and expected outcome across checker and documentation revisions.",
+      "sha256": {
+        "evidence/control-plane/fixtures/competing-concept-owner/agent-authority.json": "01df7586448f2dbd044322acf25804c33d192a7e85dfd6543a083d565295a407",
+        "evidence/control-plane/fixtures/competing-concept-owner/contract.md": "bd51dfdfaf64aea90dc3c41b424cb9b6afb527c4bd0e7e1ec7da35c5e838c879",
+        "evidence/control-plane/fixtures/competing-concept-owner/AGENTS.md": "4d91b70d434cdef521e1af4b282d1b74773c4c2b2657cde8eda4841154fd743c"
+      }
+    },
+    {
+      "id": "historical-current-owner",
+      "fixture_root": "evidence/control-plane/fixtures/historical-current-owner",
+      "expected_exit": 1,
+      "causal_lesson": "Historical evidence must remain retrievable without acquiring current normative authority.",
+      "red_team_record": {
+        "strongest_for": "Exact synthetic fixture replay distinguishes retained positive and negative authority expectations.",
+        "strongest_against": "Synthetic fixture coverage is not real runtime proof or universal semantic protection.",
+        "assumptions_to_break": "A historical record claims ownership of current architecture.",
+        "constraints": "Standard-library checks, no private data, no live service or database writes; prior checkout and runner remain trusted.",
+        "verdict": "Retain this exact fixture and causal lesson; use independent review for baseline changes.",
+        "revisit_condition": "A changed validator, workflow, authority policy, or new reproducible bypass requires replay and additive evidence."
+      },
+      "observed_failure": "A historical record claims ownership of current architecture.",
+      "retained_reason": "Preserve exact input and expected outcome across checker and documentation revisions.",
+      "sha256": {
+        "evidence/control-plane/fixtures/historical-current-owner/agent-authority.json": "d04cf4268cc9a33e1c4bbf58d86cade33a6f4db7b522f426082baa1992b6548c",
+        "evidence/control-plane/fixtures/historical-current-owner/contract.md": "bd51dfdfaf64aea90dc3c41b424cb9b6afb527c4bd0e7e1ec7da35c5e838c879",
+        "evidence/control-plane/fixtures/historical-current-owner/AGENTS.md": "4d91b70d434cdef521e1af4b282d1b74773c4c2b2657cde8eda4841154fd743c"
+      }
+    },
+    {
+      "id": "missing-required-execution-path",
+      "fixture_root": "evidence/control-plane/fixtures/missing-required-execution-path",
+      "expected_exit": 1,
+      "causal_lesson": "A declared required execution surface must exist; existence alone is not proof of command behavior.",
+      "red_team_record": {
+        "strongest_for": "Exact synthetic fixture replay distinguishes retained positive and negative authority expectations.",
+        "strongest_against": "Synthetic fixture coverage is not real runtime proof or universal semantic protection.",
+        "assumptions_to_break": "The manifest requires an execution path that does not exist.",
+        "constraints": "Standard-library checks, no private data, no live service or database writes; prior checkout and runner remain trusted.",
+        "verdict": "Retain this exact fixture and causal lesson; use independent review for baseline changes.",
+        "revisit_condition": "A changed validator, workflow, authority policy, or new reproducible bypass requires replay and additive evidence."
+      },
+      "observed_failure": "The manifest requires an execution path that does not exist.",
+      "retained_reason": "Preserve exact input and expected outcome across checker and documentation revisions.",
+      "sha256": {
+        "evidence/control-plane/fixtures/missing-required-execution-path/agent-authority.json": "74554df894d87e80843de6080eb5d0efcd014e5aae45c24cacf1cc67097d044f",
+        "evidence/control-plane/fixtures/missing-required-execution-path/contract.md": "bd51dfdfaf64aea90dc3c41b424cb9b6afb527c4bd0e7e1ec7da35c5e838c879",
+        "evidence/control-plane/fixtures/missing-required-execution-path/AGENTS.md": "4d91b70d434cdef521e1af4b282d1b74773c4c2b2657cde8eda4841154fd743c"
+      }
+    },
+    {
+      "id": "empty-permission-baseline",
+      "fixture_root": "evidence/control-plane/fixtures/empty-permission-baseline",
+      "expected_exit": 1,
+      "causal_lesson": "An empty permission baseline is invalid; nonempty policy prose still requires semantic owner review.",
+      "red_team_record": {
+        "strongest_for": "Exact synthetic fixture replay distinguishes retained positive and negative authority expectations.",
+        "strongest_against": "Synthetic fixture coverage is not real runtime proof or universal semantic protection.",
+        "assumptions_to_break": "A named permission baseline is replaced with an empty string.",
+        "constraints": "Standard-library checks, no private data, no live service or database writes; prior checkout and runner remain trusted.",
+        "verdict": "Retain this exact fixture and causal lesson; use independent review for baseline changes.",
+        "revisit_condition": "A changed validator, workflow, authority policy, or new reproducible bypass requires replay and additive evidence."
+      },
+      "observed_failure": "A named permission baseline is replaced with an empty string.",
+      "retained_reason": "Preserve exact input and expected outcome across checker and documentation revisions.",
+      "sha256": {
+        "evidence/control-plane/fixtures/empty-permission-baseline/agent-authority.json": "9f9492553a0445e45147185b3561c7306d9b5df120b56e7f1639ef8056d8d67e",
+        "evidence/control-plane/fixtures/empty-permission-baseline/contract.md": "bd51dfdfaf64aea90dc3c41b424cb9b6afb527c4bd0e7e1ec7da35c5e838c879",
+        "evidence/control-plane/fixtures/empty-permission-baseline/AGENTS.md": "4d91b70d434cdef521e1af4b282d1b74773c4c2b2657cde8eda4841154fd743c"
+      }
+    }
+  ]
+}

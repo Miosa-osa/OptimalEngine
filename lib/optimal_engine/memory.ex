@@ -156,10 +156,15 @@ defmodule OptimalEngine.Memory do
     source_package = memory_source_package(content, attrs, opts, gate, encode?)
 
     if encode? do
+      remember_actor =
+        Map.get(attrs, :actor_id) || Map.get(attrs, :created_by) ||
+          "system:memory-remember-bridge"
+
       claim_opts =
         opts
         |> Keyword.put_new(:claim_type, "memory_candidate")
-        |> Keyword.put_new(:actor_id, Map.get(attrs, :actor_id) || Map.get(attrs, :created_by))
+        |> Keyword.put_new(:actor_id, remember_actor)
+        |> Keyword.put_new(:extracted_by, remember_actor)
         |> Keyword.put_new(:claim_text, content)
         |> Keyword.put_new(:metadata, governed_memory_metadata(attrs, gate, encode?))
 

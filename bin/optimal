@@ -121,7 +121,35 @@ option_value() {
 }
 
 api_up() {
-  curl -sf -m 1 "$API_URL/api/health" >/dev/null 2>&1
+  local status
+  local args=(-s -m 1 -o /dev/null -w '%{http_code}')
+  if [[ -n "${OPTIMAL_ENGINE_API_KEY:-}" ]]; then
+    args+=(-H "Authorization: Bearer ${OPTIMAL_ENGINE_API_KEY}")
+  fi
+
+  if status="$(curl "${args[@]}" "$API_URL/api/health")"; then
+    case "$status" in
+      2??) return 0 ;;
+      *)
+        printf 'optimal: API health returned HTTP %s; refusing local-store fallback\n' "$status" >&2
+        exit 77
+        ;;
+    esac
+  else
+    case "$status" in
+      ""|000)
+        if [[ -n "${OPTIMAL_ENGINE_API_URL+x}" || -n "${OPTIMAL_ENGINE_API_KEY:-}" ]]; then
+          printf 'optimal: configured API unavailable; refusing local-store fallback\n' >&2
+          exit 69
+        fi
+        return 1
+        ;;
+      *)
+        printf 'optimal: API response was incomplete; refusing local-store fallback\n' >&2
+        exit 69
+        ;;
+    esac
+  fi
 }
 
 curl_auth_args() {
@@ -133,9 +161,9 @@ curl_auth_args() {
 api_get() {
   local path="$1"
   if [[ -n "${OPTIMAL_ENGINE_API_KEY:-}" ]]; then
-    curl -sS -H "Authorization: Bearer ${OPTIMAL_ENGINE_API_KEY}" "$API_URL$path"
+    curl -fsS -H "Authorization: Bearer ${OPTIMAL_ENGINE_API_KEY}" "$API_URL$path" || return $?
   else
-    curl -sS "$API_URL$path"
+    curl -fsS "$API_URL$path" || return $?
   fi
   printf '\n'
 }
@@ -144,14 +172,14 @@ api_post() {
   local path="$1"
   local body="$2"
   if [[ -n "${OPTIMAL_ENGINE_API_KEY:-}" ]]; then
-    curl -sS -X POST "$API_URL$path" \
+    curl -fsS -X POST "$API_URL$path" \
       -H "Authorization: Bearer ${OPTIMAL_ENGINE_API_KEY}" \
       -H 'Content-Type: application/json' \
-      -d "$body"
+      -d "$body" || return $?
   else
-    curl -sS -X POST "$API_URL$path" \
+    curl -fsS -X POST "$API_URL$path" \
       -H 'Content-Type: application/json' \
-      -d "$body"
+      -d "$body" || return $?
   fi
   printf '\n'
 }

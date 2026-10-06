@@ -348,6 +348,7 @@ def summarize(
     details: list[dict[str, Any]], benchmark: str, run_id: int, source: Path, paid: bool,
     ingest_seconds: float = 0.0, prices: dict[str, float] | None = None,
     retrieval_strategy: str = "engine_memory",
+    engine_release: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     recall_found = sum(item["evidence_found"] for item in details)
     recall_total = sum(item["evidence_total"] for item in details)
@@ -378,6 +379,8 @@ def summarize(
         "details": details,
         "answer_evaluation_state": "COMPLETE" if paid else "NOT RUN - requires --paid and OPENROUTER_API_KEY",
     }
+    if engine_release:
+        result["engine_release"] = engine_release
     if paid:
         result["answer_accuracy"] = round(answer_correct / len(details) * 100, 3) if details else None
         result["wilson_95"] = wilson(answer_correct, len(details))
@@ -409,7 +412,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", required=True)
     parser.add_argument("--prepared", required=True)
-    parser.add_argument("--engine-url", default="http://127.0.0.1:4200")
+    parser.add_argument("--engine-url", required=True, help="Dedicated disposable benchmark Engine URL")
     parser.add_argument("--workspace-prefix", default="benchmark:truememory")
     parser.add_argument(
         "--retrieval", choices=("engine_memory", "engine_semantic", "engine_semantic_only", "engine_portfolio", "engine_coverage", "engine_evidence", "bm25", "oracle"),
@@ -436,6 +439,9 @@ def main() -> int:
     parser.add_argument("--query-prefix", default="", help="Task prefix applied before query embedding")
     parser.add_argument("--inference-embedding-model", help="Named projection selected for deterministic inference intent")
     args = parser.parse_args()
+    endpoint = urllib.parse.urlparse(args.engine_url)
+    if endpoint.hostname in ("localhost", "127.0.0.1", "::1") and endpoint.port == 4200:
+        parser.error("Port 4200 is the personal Engine; use a dedicated disposable benchmark instance")
     protocol = load_protocol()
     config = protocol["benchmarks"][args.benchmark]
     top_k = args.top_k or config["top_k"]
@@ -474,9 +480,10 @@ def main() -> int:
     ingest_seconds = 0.0
     seeded_messages = 0
     remaining_questions = args.question_limit
+    engine_strategy = args.retrieval in {"engine_memory", "engine_semantic", "engine_semantic_only", "engine_portfolio", "engine_coverage", "engine_evidence"}
+    engine_release = get_json(f"{args.engine_url.rstrip('/')}/api/version", {}) if engine_strategy else None
     for conversation_index, conversation in enumerate(conversations):
         slug = f"{args.workspace_prefix}-{args.benchmark}-r{args.run_id}-c{conversation_index}".replace(":", "-")
-        engine_strategy = args.retrieval in {"engine_memory", "engine_semantic", "engine_semantic_only", "engine_portfolio", "engine_coverage", "engine_evidence"}
         workspace = ensure_workspace(args.engine_url, slug) if engine_strategy else None
         if engine_strategy and not args.skip_seed:
             seed_started = time.perf_counter()
@@ -560,6 +567,7 @@ def main() -> int:
             retrieval_checkpoint = summarize(
                 details, args.benchmark, args.run_id, source, False,
                 retrieval_strategy=args.retrieval,
+                engine_release=engine_release,
             )
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(json.dumps(retrieval_checkpoint, indent=2) + "\n", encoding="utf-8")
@@ -587,6 +595,7 @@ def main() -> int:
                 checkpoint = summarize(
                     completed_details, args.benchmark, args.run_id, source, True,
                     retrieval_strategy=args.retrieval,
+                    engine_release=engine_release,
                 )
                 output.parent.mkdir(parents=True, exist_ok=True)
                 output.write_text(json.dumps(checkpoint, indent=2) + "\n", encoding="utf-8")
@@ -597,7 +606,7 @@ def main() -> int:
     }
     result = summarize(
         details, args.benchmark, args.run_id, source, args.paid, ingest_seconds, prices,
-        args.retrieval,
+        args.retrieval, engine_release,
     )
     result["retrieval_configuration"] = {
         "embedding_model": args.embedding_model,

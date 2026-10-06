@@ -1,0 +1,16 @@
+# Control-plane changes require explicit owner review under branch protection.
+*.md @robertohluna
+/skills/ @robertohluna
+/AGENTS.md @robertohluna
+/CLAUDE.md @robertohluna
+/BOOT.md @robertohluna
+/SYSTEM.md @robertohluna
+/CONTEXT.md @robertohluna
+/OPINIONS.md @robertohluna
+/agent-authority.json @robertohluna
+/engine-contract.json @robertohluna
+/docs/ @robertohluna
+/wiring/ @robertohluna
+/scripts/ @robertohluna
+/.github/ @robertohluna
+/evidence/control-plane/ @robertohluna
