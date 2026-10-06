@@ -147,6 +147,7 @@ export interface Organization {
 export interface Workspace {
   id: string;
   tenant_id: string;
+  organization_id: string | null;
   slug: string;
   name: string;
   description: string | null;
@@ -163,10 +164,20 @@ export async function listOrganizations(): Promise<{
 }
 
 export async function listWorkspaces(
-  tenant = "default",
-  status: "active" | "archived" | "all" = "active",
+  opts: {
+    organization?: string | null;
+    tenant?: string;
+    status?: "active" | "archived" | "all";
+  } = {},
 ): Promise<{ tenant_id: string; workspaces: Workspace[] }> {
-  const params = new URLSearchParams({ tenant, status });
+  const params = new URLSearchParams({
+    tenant: opts.tenant ?? "default",
+    status: opts.status ?? "active",
+  });
+  // An organization id is NOT a tenant id: every workspace shares tenant
+  // "default" but belongs to a specific organization. Filter by organization
+  // so switching orgs shows that org's workspaces instead of an empty match.
+  if (opts.organization) params.set("organization", opts.organization);
   return request(`/api/workspaces?${params}`);
 }
 

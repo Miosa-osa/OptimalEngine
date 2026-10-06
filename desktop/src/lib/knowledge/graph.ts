@@ -67,12 +67,19 @@ export interface NodeFilesResponse {
 }
 
 /** Pull everything the graph needs in parallel and fold it into one shape. */
-export async function loadGraph(): Promise<GraphData> {
+export async function loadGraph(workspace?: string | null): Promise<GraphData> {
+  // Every /api/workspace and /api/optimal/* read is scoped to a workspace.
+  // Without it the engine falls back to the empty "default" workspace and the
+  // graph renders nothing, so thread the active workspace through every call.
+  const wsParam = workspace
+    ? "?" + new URLSearchParams({ workspace }).toString()
+    : "";
+
   const [workspaceRes, optimalRes] = await Promise.all([
-    fetch("/api/workspace").then((r) => r.json()) as Promise<{
+    fetch(`/api/workspace${wsParam}`).then((r) => r.json()) as Promise<{
       nodes: WorkspaceNode[];
     }>,
-    fetch("/api/optimal/graph").then((r) =>
+    fetch(`/api/optimal/graph${wsParam}`).then((r) =>
       r.json(),
     ) as Promise<OptimalGraphResponse>,
   ]);
@@ -85,7 +92,7 @@ export async function loadGraph(): Promise<GraphData> {
   const signalLists = await Promise.all(
     workspaceNodes.map(async (n) => {
       const res = (await fetch(
-        `/api/optimal/nodes/${encodeURIComponent(n.slug)}/files`,
+        `/api/optimal/nodes/${encodeURIComponent(n.slug)}/files${wsParam}`,
       ).then((r) => r.json())) as NodeFilesResponse;
       return { node: n, files: res.files };
     }),

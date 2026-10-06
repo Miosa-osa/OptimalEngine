@@ -1,6 +1,7 @@
 <script lang="ts">
   import PagesGraph from '$lib/knowledge/PagesGraph.svelte';
   import type { GNode } from '$lib/knowledge/graph';
+  import { activeWorkspaceId } from '$lib/stores/workspace';
 
   let selected = $state<GNode | null>(null);
 
@@ -10,7 +11,9 @@
 </script>
 
 <div class="graph-page">
-  <PagesGraph {onSelect} />
+  {#key $activeWorkspaceId}
+    <PagesGraph {onSelect} />
+  {/key}
 </div>
 
 <style>
