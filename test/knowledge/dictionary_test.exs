@@ -9,8 +9,7 @@ defmodule OptimalEngine.Knowledge.DictionaryTest do
 
   setup do
     name = :"dict_#{:erlang.unique_integer([:positive])}"
-    {:ok, pid} = Dictionary.start_link(name: name)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    pid = start_supervised!({Dictionary, name: name})
     %{dict: name, pid: pid}
   end
 

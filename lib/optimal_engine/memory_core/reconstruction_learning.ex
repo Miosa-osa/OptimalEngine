@@ -68,6 +68,24 @@ defmodule OptimalEngine.MemoryCore.ReconstructionLearning do
   @doc "Measures reconstruction use, grounding, outcomes, and path learning for a workspace."
   @spec measure(ScopeEnvelope.t()) :: {:ok, map()} | {:error, term()}
   def measure(%ScopeEnvelope{} = scope) do
+    engine_version = OptimalEngine.Version.application_version()
+
+    with {:ok, current} <- measure_cohort(scope, engine_version),
+         {:ok, lifetime} <- measure_cohort(scope, nil) do
+      {:ok,
+       current
+       |> Map.put(:engine_version, engine_version)
+       |> Map.put(:cohort, "current_engine_version")
+       |> Map.put(:lifetime, lifetime)}
+    end
+  end
+
+  defp measure_cohort(scope, engine_version) do
+    cohort_filter =
+      if engine_version,
+        do: "AND json_extract(r.metadata, '$.engine_version') = ?3",
+        else: ""
+
     sql = """
     SELECT COUNT(DISTINCT r.id), COALESCE(AVG(r.confidence), 0),
            COALESCE(AVG(json_array_length(r.citations)), 0), COUNT(DISTINCT p.id),
@@ -77,9 +95,15 @@ defmodule OptimalEngine.MemoryCore.ReconstructionLearning do
     LEFT JOIN memory_association_paths p ON p.run_id = r.id
     LEFT JOIN memory_reconstruction_outcomes o ON o.run_id = r.id
     WHERE r.tenant_id = ?1 AND r.workspace_id = ?2
+    #{cohort_filter}
     """
 
-    case BaseStore.raw_query(sql, [scope.tenant_id, scope.workspace_id]) do
+    params =
+      if engine_version,
+        do: [scope.tenant_id, scope.workspace_id, engine_version],
+        else: [scope.tenant_id, scope.workspace_id]
+
+    case BaseStore.raw_query(sql, params) do
       {:ok, [[runs, confidence, citations, paths, outcomes, outcome_score]]} ->
         {:ok,
          %{

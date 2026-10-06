@@ -55,6 +55,7 @@ defmodule OptimalEngine.API.Router do
   # (path/body/query), sets conn.assigns[:workspace_id], and fails closed:
   # 403 on API-key workspace_scope mismatch, 404 on another tenant's workspace.
   plug(OptimalEngine.API.WorkspaceAuthPlug)
+  plug(OptimalEngine.API.PermissionPlug)
   plug(:dispatch)
 
   # ---------------------------------------------------------------------------
@@ -544,7 +545,7 @@ defmodule OptimalEngine.API.Router do
       "true" ->
         workspace = query_param(conn, "workspace", "default")
         {:ok, checks} = HealthDiagnostics.run(workspace_id: workspace)
-        json(conn, %{health: format_health(checks)})
+        json(conn, %{health: format_health(checks), release: OptimalEngine.Version.info()})
 
       _ ->
         report = Health.ready(skip: [:embedder])
@@ -553,10 +554,15 @@ defmodule OptimalEngine.API.Router do
           status: Health.status(),
           live: Health.live?(),
           ok?: report.ok?,
+          release: OptimalEngine.Version.info(),
           degraded: report.degraded,
           checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)
         })
     end
+  end
+
+  get "/api/version" do
+    json(conn, OptimalEngine.Version.info())
   end
 
   # ── Phase 12: runtime + retrieval + wiki endpoints ──────────────────────
@@ -570,7 +576,8 @@ defmodule OptimalEngine.API.Router do
       ok?: report.ok?,
       checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end),
       degraded: report.degraded,
-      api_version: "v1"
+      api_version: "v1",
+      release: OptimalEngine.Version.info()
     })
   end
 
