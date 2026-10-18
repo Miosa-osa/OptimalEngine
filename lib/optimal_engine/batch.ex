@@ -301,7 +301,7 @@ defmodule OptimalEngine.Batch do
 
   defp export_workspace_config(workspace_id) do
     with {:ok, ws} <- Workspace.get(workspace_id),
-         {:ok, cfg} <- OptimalEngine.Workspace.Config.get(ws.slug) do
+         {:ok, cfg} <- OptimalEngine.Workspace.Config.get(ws.id) do
       cfg
     else
       _ -> %{}

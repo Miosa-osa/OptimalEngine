@@ -77,7 +77,7 @@ defmodule OptimalEngine.Profile do
 
     # Resolve workspace to its slug (needed for Filesystem.path/2).
     with {:ok, workspace} <- resolve_workspace(workspace_id, tenant_id) do
-      ws_path = Filesystem.path(root, workspace.slug)
+      ws_path = Filesystem.path(root, workspace.id)
 
       static = build_static(ws_path, node_filter)
       dynamic = build_dynamic(ws_path, node_filter)

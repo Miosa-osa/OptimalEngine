@@ -25,15 +25,30 @@ defmodule OptimalEngine.Workspace.Filesystem do
   @default_slug "default"
 
   @doc """
-  Returns the absolute on-disk path for a workspace, given the engine root.
-  Default workspace returns the root itself; others return `<root>/<slug>`.
+  Returns the absolute on-disk path for a workspace, given the engine root
+  and either the workspace id or (for the default tenant) its slug.
+
+  * `"default"` (the default tenant's default workspace) is the root itself.
+  * `"default:<slug>"` and a bare `"<slug>"` are `<root>/<slug>`.
+  * `"<tenant>:<slug>"` for any other tenant is `<root>/tenants/<tenant>/<slug>`,
+    so two tenants' workspaces with the same slug never share a directory.
   """
   @spec path(String.t(), String.t()) :: String.t()
-  def path(root, slug) when is_binary(root) and is_binary(slug) do
-    if slug == @default_slug do
-      root
-    else
-      Path.join(root, slug)
+  def path(root, key) when is_binary(root) and is_binary(key) do
+    case String.split(key, ":", parts: 2) do
+      [@default_slug] -> root
+      ["default", @default_slug] -> root
+      ["default", slug] -> Path.join(root, safe(slug))
+      [tenant, slug] -> Path.join([root, "tenants", safe(tenant), safe(slug)])
+      [slug] -> Path.join(root, safe(slug))
+    end
+  end
+
+  # Directory names never climb out of the root.
+  defp safe(segment) do
+    case segment |> Path.basename() |> String.trim() do
+      value when value in ["", ".", ".."] -> "_"
+      value -> value
     end
   end
 

@@ -53,8 +53,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # workspace-scoped and authorized even when no workspace is named
   # (implicit "default"), so a new route is scoped unless it is listed here.
   # Global routes are still checked when they explicitly name a workspace.
-  @global_roots ~w(architectures auth authority backup maintenance metrics
-                   organizations principals routing status storage stores topology version)
+  @global_roots ~w(architectures auth authority backup bundles federation maintenance
+                   metrics organizations principals resolve routing scope status storage
+                   stores topology version)
 
   @impl true
   def init(opts), do: opts
@@ -169,9 +170,16 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # key's workspace_scope. Scope mismatches inside the caller's own tenant
   # are 403.
   defp authorize(workspace_id, tenant_id, api_key) do
-    with :ok <- check_tenant_ownership(workspace_id, tenant_id) do
+    with :ok <- check_engine_scope(workspace_id),
+         :ok <- check_tenant_ownership(workspace_id, tenant_id) do
       check_key_scope(workspace_id, api_key)
     end
+  end
+
+  # A workspace-scoped Engine serves exactly one workspace; any other is
+  # indistinguishable from one that does not exist.
+  defp check_engine_scope(workspace_id) do
+    if OptimalEngine.Scope.serves?(workspace_id), do: :ok, else: {:error, :foreign_tenant}
   end
 
   defp check_tenant_ownership(workspace_id, tenant_id) do

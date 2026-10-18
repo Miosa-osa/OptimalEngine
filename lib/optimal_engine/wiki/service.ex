@@ -132,7 +132,7 @@ defmodule OptimalEngine.Wiki.Service do
 
   defp provision_workspace(workspace, opts) do
     root = Keyword.get(opts, :root, Application.get_env(:optimal_engine, :root_path, File.cwd!()))
-    WorkspaceFilesystem.provision(workspace.slug, root: root)
+    WorkspaceFilesystem.provision(workspace.id, root: root)
   end
 
   defp build_node_page(node, workspace, relationships, audience, actor_id) do
