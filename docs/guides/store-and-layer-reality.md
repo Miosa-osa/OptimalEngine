@@ -111,7 +111,7 @@ If the engine API returns the wrong workspace data, that is an engine isolation 
 | RocksDB graph store | Yes for the full local setup | Persistent knowledge graph backend hydrated from SQLite edges. | `lsof` shows `.optimal/knowledge-rocksdb` files open and startup logs show `Knowledge backend: RocksDB`. |
 | ETS graph store | Fallback | In-memory graph backend when RocksDB is unavailable or disabled. | Startup logs show `Knowledge backend: ETS`. |
 | Mnesia graph store | Optional | Distributed BEAM graph backend for specialized deployments. | Backend tests pass and startup logs show `Knowledge backend: Mnesia` when configured. |
-| Postgres | No for local dev | Production target for canonical runtime rows. | Verify in production profile, not normal local boot. |
+| Postgres | No for local dev | Production target for canonical runtime rows. No adapter is implemented yet. | `GET /api/storage/providers` reports `adapter_implemented: false` and `adapter_missing` until an adapter ships. |
 
 ## Agent-Facing Logical Stores
 

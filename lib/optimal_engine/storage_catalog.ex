@@ -57,7 +57,7 @@ defmodule OptimalEngine.StorageCatalog do
     %{
       id: "replication",
       purpose: "Workspace-scoped mutation replay, idempotency, and replica progress",
-      technology: "SQLite append-only ledger with optional NATS JetStream transport",
+      technology: "SQLite append-only ledger (no network transport adapter is implemented)",
       tables: ~w(sync_mutations sync_cursors)
     },
     %{
