@@ -170,6 +170,9 @@ class _Collection:
     def list_files(self, id: str) -> _Request:
         return _Request("GET", self._path(f"/records/{_seg(id)}/files"))
 
+    def rebuild_embeddings(self) -> _Request:
+        return _Request("POST", self._path("/embeddings/rebuild"), body={})
+
     def file(self, id: str, file_id: str) -> _Request:
         return _Request("GET", self._path(f"/records/{_seg(id)}/files/{_seg(file_id)}"))
 
@@ -352,6 +355,11 @@ class Collection:
 
     def upload_file(self, id: str, filename: str, content: bytes, *, content_type: str | None = None) -> dict[str, Any]:
         result: dict[str, Any] = self._data._run(self._c.upload_file(id, filename, content, content_type))
+        return result
+
+    def rebuild_embeddings(self) -> dict[str, Any]:
+        """Re-embeds every record's semantic fields now (synchronous)."""
+        result: dict[str, Any] = self._data._run(self._c.rebuild_embeddings())
         return result
 
     def list_files(self, id: str) -> list[dict[str, Any]]:

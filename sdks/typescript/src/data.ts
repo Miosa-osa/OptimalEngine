@@ -463,6 +463,17 @@ export class CollectionClient<T = Data> {
     }
   }
 
+  /** Re-embeds every record's semantic fields now (synchronous). */
+  rebuildEmbeddings(): Promise<{
+    indexed: number;
+    unchanged: number;
+    skipped: number;
+    failed: number;
+    model: string;
+  }> {
+    return this.client.send("POST", this.path("/embeddings/rebuild"), {});
+  }
+
   uploadFile(
     id: string,
     file: { filename: string; content: Uint8Array | string; contentType?: string; metadata?: Record<string, unknown> },
