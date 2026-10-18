@@ -30,7 +30,8 @@ defmodule OptimalEngine.Authority.Evidence do
             policy.published policy.loosened local_deny.added local_deny.lifted
             approval.requested approval.approved approval.denied
             could_not_enforce external.receipt issuer.registered revocations.received
-            settings.changed key.rotated key.minted key.revoked integrity.finding)
+            settings.changed key.rotated key.minted key.revoked integrity.finding
+            agent_action.step)
 
   @doc "The evidence kinds the Engine records."
   @spec kinds() :: [String.t()]
@@ -139,6 +140,44 @@ defmodule OptimalEngine.Authority.Evidence do
       )
 
     Enum.map(rows, &to_entry/1)
+  end
+
+  @doc """
+  Entries matching a SQL condition over the evidence columns (`kind`, `jti`,
+  `subject`, `workspace_id`, `detail`), oldest first. Parameters start at
+  `?2`; `?1` is the tenant. For internal callers only: the condition is code,
+  values are always bound.
+  """
+  @spec where(String.t(), String.t(), [term()]) :: [map()]
+  def where(tenant_id, condition, params) do
+    {:ok, rows} =
+      Store.raw_query(
+        select_sql() <>
+          " WHERE tenant_id = ?1 AND (" <> condition <> ") ORDER BY tenant_seq ASC LIMIT 1000",
+        [tenant_id | params]
+      )
+
+    Enum.map(rows, &to_entry/1)
+  end
+
+  @doc """
+  Verifies one entry on its own: its hash over the canonical fields and its
+  signature against the tenant's evidence keys. Chain position is checked
+  by `verify/1`.
+  """
+  @spec verify_one(String.t(), map()) :: :ok | {:error, atom()}
+  def verify_one(tenant_id, entry) do
+    if CanonicalJSON.hash(chained_fields(entry)) != entry["hash"] do
+      {:error, :hash_mismatch}
+    else
+      case Keys.verification_key(tenant_id, entry["kid"], "evidence") do
+        {:ok, public_key} ->
+          if signature_valid?(public_key, entry), do: :ok, else: {:error, :bad_signature}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
   end
 
   @doc """

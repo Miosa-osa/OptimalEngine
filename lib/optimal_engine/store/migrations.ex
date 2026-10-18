@@ -111,8 +111,98 @@ defmodule OptimalEngine.Store.Migrations do
       migration_063_authority(),
       migration_064_operating_layer(),
       migration_065_scope_and_portability(),
-      migration_067_replication()
+      migration_067_replication(),
+      migration_068_viability()
     ]
+  end
+
+  defp migration_068_viability do
+    {68, "viability: signal events, viability reports, audit samples, agent action steps",
+     [
+       {"signal_events",
+        """
+        CREATE TABLE IF NOT EXISTS signal_events (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('acted', 'rerouted', 're_encoded', 'feedback_confirmed', 'genre_checked', 'produced', 'outward')),
+          context_id TEXT,
+          ref TEXT,
+          value REAL,
+          genre TEXT,
+          mode TEXT,
+          topic TEXT,
+          actor TEXT,
+          occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          metadata TEXT NOT NULL DEFAULT '{}'
+        )
+        """},
+       {"idx_signal_events_scope",
+        "CREATE INDEX IF NOT EXISTS idx_signal_events_scope ON signal_events(workspace_id, kind, occurred_at)"},
+       {"idx_signal_events_context",
+        "CREATE INDEX IF NOT EXISTS idx_signal_events_context ON signal_events(context_id, kind)"},
+       {"viability_reports",
+        """
+        CREATE TABLE IF NOT EXISTS viability_reports (
+          tenant_id TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          period TEXT NOT NULL,
+          report TEXT NOT NULL,
+          backfilled INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          PRIMARY KEY (tenant_id, scope, period)
+        )
+        """},
+       {"audit_samples",
+        """
+        CREATE TABLE IF NOT EXISTS audit_samples (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          period TEXT NOT NULL,
+          context_id TEXT NOT NULL,
+          basis TEXT NOT NULL,
+          formal REAL NOT NULL,
+          semantic REAL NOT NULL,
+          information REAL NOT NULL,
+          score REAL NOT NULL,
+          findings TEXT NOT NULL DEFAULT '[]',
+          state TEXT NOT NULL DEFAULT 'passed' CHECK (state IN ('passed', 'flagged', 'confirmed', 'dismissed')),
+          reviewed_by TEXT,
+          reviewed_at TEXT,
+          note TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          UNIQUE (tenant_id, workspace_id, period, context_id)
+        )
+        """},
+       {"idx_audit_samples_state",
+        "CREATE INDEX IF NOT EXISTS idx_audit_samples_state ON audit_samples(tenant_id, workspace_id, state)"},
+       {"authority_action_steps",
+        """
+        CREATE TABLE IF NOT EXISTS authority_action_steps (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          correlation_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          stage TEXT NOT NULL CHECK (stage IN ('request', 'approval', 'denial', 'action', 'result', 'reply')),
+          agent TEXT,
+          action TEXT,
+          resource TEXT,
+          summary TEXT,
+          detail TEXT NOT NULL DEFAULT '{}',
+          causation_id TEXT,
+          context_id TEXT,
+          evidence_id TEXT,
+          evidence_hash TEXT,
+          recorded_by TEXT,
+          occurred_at TEXT NOT NULL,
+          UNIQUE (tenant_id, correlation_id, seq)
+        )
+        """},
+       {"idx_authority_action_steps_workspace",
+        "CREATE INDEX IF NOT EXISTS idx_authority_action_steps_workspace ON authority_action_steps(tenant_id, workspace_id, occurred_at)"}
+     ]}
   end
 
   # 66 is the app data layer.
