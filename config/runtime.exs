@@ -140,6 +140,26 @@ if backup_dir = System.get_env("OPTIMAL_BACKUP_DIR") do
   config :optimal_engine, :backup_dir, backup_dir
 end
 
+# Engine scope: "org" (default, every workspace a walled section) or
+# "workspace" (serves only OPTIMAL_ENGINE_WORKSPACE).
+case System.get_env("OPTIMAL_ENGINE_SCOPE") do
+  nil ->
+    :ok
+
+  "org" ->
+    config :optimal_engine, :engine_scope, %{mode: "org"}
+
+  "workspace" ->
+    workspace =
+      System.get_env("OPTIMAL_ENGINE_WORKSPACE") ||
+        raise ArgumentError, "OPTIMAL_ENGINE_SCOPE=workspace needs OPTIMAL_ENGINE_WORKSPACE"
+
+    config :optimal_engine, :engine_scope, %{mode: "workspace", workspace_id: workspace}
+
+  _ ->
+    raise ArgumentError, "OPTIMAL_ENGINE_SCOPE must be org or workspace"
+end
+
 # Optimal Authority. OPTIMAL_AUTHORITY_KEY (64 hex characters) wraps the
 # signing keys and is read directly by OptimalEngine.Authority.Keys.
 authority_mode = System.get_env("OPTIMAL_AUTHORITY_MODE")

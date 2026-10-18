@@ -415,7 +415,7 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   # sanitized directory.
   defp workspace_slug(workspace_id) do
     case Workspace.get(workspace_id) do
-      {:ok, %Workspace{slug: slug}} when is_binary(slug) and slug != "" -> slug
+      {:ok, %Workspace{id: id}} when is_binary(id) and id != "" -> id
       _ -> sanitize_workspace_dir(workspace_id)
     end
   rescue

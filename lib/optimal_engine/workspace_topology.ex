@@ -98,7 +98,7 @@ defmodule OptimalEngine.WorkspaceTopology do
          {:ok, node_types} <- list_node_types(tenant_id: tenant_id, workspace_id: workspace.id),
          {:ok, nodes} <- maybe_create_setup_nodes(workspace, attrs, create_starter_nodes?),
          {:ok, relationships} <- create_setup_relationships(workspace, nodes, attrs),
-         {:ok, path} <- WorkspaceFilesystem.provision(workspace.slug, root: root),
+         {:ok, path} <- WorkspaceFilesystem.provision(workspace.id, root: root),
          {:ok, projection_result} <-
            maybe_write_setup_files(workspace, path, nodes,
              write_files: write_files?,

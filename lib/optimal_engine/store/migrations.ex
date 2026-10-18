@@ -109,8 +109,42 @@ defmodule OptimalEngine.Store.Migrations do
       migration_061_memory_embeddings(),
       migration_062_multi_profile_memory_embeddings(),
       migration_063_authority(),
-      migration_064_operating_layer()
+      migration_064_operating_layer(),
+      migration_065_scope_and_portability()
     ]
+  end
+
+  defp migration_065_scope_and_portability do
+    {65, "scope and portability: workspace move redirects, federation peers",
+     [
+       {"uri_redirects",
+        """
+        CREATE TABLE IF NOT EXISTS uri_redirects (
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          bundle_sha256 TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('pending', 'moved')),
+          target_url TEXT,
+          target_workspace_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          moved_at TEXT,
+          PRIMARY KEY (tenant_id, workspace_id)
+        )
+        """},
+       {"federation_peers",
+        """
+        CREATE TABLE IF NOT EXISTS federation_peers (
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          url TEXT NOT NULL,
+          credential TEXT NOT NULL,
+          share_up TEXT NOT NULL DEFAULT 'none' CHECK (share_up IN ('none', 'read')),
+          added_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          PRIMARY KEY (tenant_id, workspace_id)
+        )
+        """}
+     ]}
   end
 
   defp migration_064_operating_layer do

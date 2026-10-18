@@ -1026,9 +1026,10 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
     OptimalEngine.MemoryCore.Store.insert_derivation_entry(ledger)
   end
 
+  # The workspace's directory key (Workspace.Filesystem.path/2 accepts ids).
   defp workspace_slug(workspace_id) do
     case Workspace.get(workspace_id) do
-      {:ok, workspace} -> workspace.slug
+      {:ok, workspace} -> workspace.id
       _ -> workspace_id
     end
   end

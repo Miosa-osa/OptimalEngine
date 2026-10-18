@@ -43,7 +43,12 @@ defmodule OptimalEngine.API.Router do
   plug(OptimalEngine.API.VersionPlug)
   plug(:cors)
   plug(:match)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: Jason, pass: ["application/json"])
+
+  plug(Plug.Parsers,
+    parsers: [:json],
+    json_decoder: Jason,
+    pass: ["application/json", "application/gzip"]
+  )
 
   plug(OptimalEngine.API.RateLimitPlug,
     exempt_paths: ["/api/status", "/api/health", "/api/metrics/prometheus"]
@@ -1440,7 +1445,7 @@ defmodule OptimalEngine.API.Router do
   # Resolved to slug via Workspace.get/1 before reading the filesystem.
   get "/api/workspaces/:id/config" do
     with {:ok, ws} <- resolve_workspace(id),
-         {:ok, cfg} <- OptimalEngine.Workspace.Config.get(ws.slug) do
+         {:ok, cfg} <- OptimalEngine.Workspace.Config.get(ws.id) do
       json(conn, %{workspace_id: id, config: stringify_keys(cfg)})
     else
       {:error, :not_found} ->
@@ -1458,8 +1463,8 @@ defmodule OptimalEngine.API.Router do
     body = conn.body_params || %{}
 
     with {:ok, ws} <- resolve_workspace(id),
-         :ok <- OptimalEngine.Workspace.Config.put(ws.slug, body),
-         {:ok, cfg} <- OptimalEngine.Workspace.Config.get(ws.slug) do
+         :ok <- OptimalEngine.Workspace.Config.put(ws.id, body),
+         {:ok, cfg} <- OptimalEngine.Workspace.Config.get(ws.id) do
       json(conn, %{workspace_id: id, config: stringify_keys(cfg)})
     else
       {:error, :not_found} ->
@@ -3171,6 +3176,21 @@ defmodule OptimalEngine.API.Router do
   post("/api/routing/classify", do: OperatingAPI.classify(conn))
   post("/api/routing/feedback", do: OperatingAPI.feedback(conn))
   post("/api/routing/seed", do: OperatingAPI.seed_rules(conn))
+
+  # ── Scope, federation, workspace bundles (OptimalEngine.API.ScopeAPI) ────
+  alias OptimalEngine.API.ScopeAPI
+
+  get("/api/scope", do: ScopeAPI.scope(conn))
+  put("/api/workspaces/:id/share", do: ScopeAPI.set_share(conn, id))
+  get("/api/federation/search", do: ScopeAPI.federated_search(conn))
+  get("/api/federation/peers", do: ScopeAPI.list_peers(conn))
+  post("/api/federation/peers", do: ScopeAPI.add_peer(conn))
+  delete("/api/federation/peers/:workspace_id", do: ScopeAPI.remove_peer(conn, workspace_id))
+  post("/api/workspaces/:id/bundle", do: ScopeAPI.export_bundle(conn, id))
+  post("/api/workspaces/:id/finalize-move", do: ScopeAPI.finalize_move(conn, id))
+  get("/api/bundles/:name", do: ScopeAPI.download_bundle(conn, name))
+  post("/api/bundles/import", do: ScopeAPI.import_bundle(conn))
+  get("/api/resolve", do: ScopeAPI.resolve(conn))
 
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
 

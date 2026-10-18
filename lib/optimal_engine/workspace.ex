@@ -174,9 +174,9 @@ defmodule OptimalEngine.Workspace do
          {:ok, _} <- Store.raw_query(sql, params) do
       root = Application.get_env(:optimal_engine, :root_path, File.cwd!())
 
-      case Filesystem.provision(slug, root: root) do
+      case Filesystem.provision(id, root: root) do
         {:ok, _path} ->
-          case Config.put(slug, Config.defaults(), root) do
+          case Config.put(id, Config.defaults(), root) do
             :ok ->
               :ok
 
