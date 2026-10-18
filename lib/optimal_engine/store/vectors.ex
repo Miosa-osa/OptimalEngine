@@ -33,10 +33,17 @@ defmodule OptimalEngine.Store.Vectors do
   Uses INSERT OR REPLACE, so calling `store/2` again for the same `context_id`
   overwrites the previous embedding.
 
-  Returns `:ok` or `{:error, reason}`.
+  Returns `:ok` or `{:error, reason}`; an empty or non-numeric embedding is
+  rejected with `{:error, :invalid_embedding}`.
   """
   @spec store(String.t(), [float()]) :: :ok | {:error, term()}
   def store(context_id, embedding) when is_binary(context_id) and is_list(embedding) do
+    if valid_embedding?(embedding),
+      do: do_store(context_id, embedding),
+      else: {:error, :invalid_embedding}
+  end
+
+  defp do_store(context_id, embedding) do
     blob = encode_embedding(embedding)
     dims = length(embedding)
 
@@ -73,6 +80,8 @@ defmodule OptimalEngine.Store.Vectors do
   - `:node_filter`    — filter by node (string, e.g. `"project-platform-launch"`)
 
   Returns `{:ok, [{context_id, similarity_score}]}` sorted descending by score.
+  Stored vectors whose dimension differs from the query are never scored:
+  cosine similarity across different embedding spaces is meaningless.
   """
   @spec search([float()], keyword()) :: {:ok, [{String.t(), float()}]} | {:error, term()}
   def search(query_embedding, opts \\ []) when is_list(query_embedding) do
@@ -83,11 +92,13 @@ defmodule OptimalEngine.Store.Vectors do
     node_filter = Keyword.get(opts, :node_filter)
 
     {sql, params} = build_search_query(workspace_id, type_filter, node_filter)
+    query_bytes = length(query_embedding) * 4
 
     case Store.raw_query(sql, params) do
       {:ok, rows} ->
         results =
           rows
+          |> Enum.filter(fn [_cid, blob] -> byte_size(blob) == query_bytes end)
           |> Enum.map(fn [cid, blob] ->
             stored = decode_embedding(blob)
             sim = cosine_similarity(query_embedding, stored)
@@ -256,6 +267,9 @@ defmodule OptimalEngine.Store.Vectors do
 
     {sql, [workspace_id, type_filter, node_filter]}
   end
+
+  defp valid_embedding?([]), do: false
+  defp valid_embedding?(embedding), do: Enum.all?(embedding, &is_number/1)
 
   @spec encode_embedding([float()]) :: binary()
   defp encode_embedding(floats) do
