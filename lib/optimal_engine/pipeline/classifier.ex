@@ -30,38 +30,11 @@ defmodule OptimalEngine.Pipeline.Classifier do
   """
 
   alias OptimalEngine.{Context, Signal}
+  alias OptimalEngine.Signal.GenreDetector
   alias OptimalEngine.Signal.GenreRegistry
+  alias OptimalEngine.Signal.ModeDetector
   alias OptimalEngine.Pipeline.Classifier.Classification
   alias OptimalEngine.Pipeline.Decomposer.{Chunk, ChunkTree}
-
-  # Genre keywords used for auto-detection (ordered by specificity)
-  @genre_patterns [
-    {"invoice", ~r/invoice|billing|payment due/i},
-    {"profit-loss", ~r/P&L|profit.loss|revenue vs|net income/i},
-    {"budget", ~r/\bbudget\b|quarterly spend|annual spend/i},
-    {"decision-log", ~r/decision:|decided:|we decided|key decisions/i},
-    {"adr", ~r/Architecture Decision Record|ADR\s+\d+|## Status\n.*## Context/ims},
-    {"spec", ~r/## Requirements|## Acceptance Criteria|## Constraints/i},
-    {"runbook", ~r/## Steps|## Procedure|runbook|step-by-step/i},
-    {"postmortem", ~r/postmortem|incident report|root cause analysis/i},
-    {"standup", ~r/yesterday|today|blockers|standup|weekly signal/i},
-    {"transcript", ~r/## Participants|## Action Items|## Key Points/i},
-    {"plan", ~r/## Non-Negotiables|## Time Blocks|week plan|execution plan/i},
-    {"brief", ~r/## Key Messages|## Call to Action|## Objective/i},
-    {"proposal", ~r/## Proposed|## Investment|## Timeline|## Deliverables/i},
-    {"pitch", ~r/pitch|value proposition|problem.solution/i},
-    {"changelog", ~r/CHANGELOG|## Added|## Changed|## Fixed|## Removed/i},
-    {"readme", ~r/## Installation|## Usage|## Getting Started|## Contributing/i},
-    {"note", ~r/.*/}
-  ]
-
-  @mode_patterns [
-    {:code, ~r/```[a-z]+\n|defmodule|def |class |function |import |require /},
-    {:data, ~r/^\s*[\[\{]/m},
-    {:visual, ~r/!\[.*\]\(.*\)|<img |<svg /},
-    {:mixed, ~r/```/},
-    {:linguistic, ~r/.*/}
-  ]
 
   @type_patterns [
     {:decide, ~r/decided:|we decided|decision:|approved:|rejected:/i},
@@ -183,14 +156,20 @@ defmodule OptimalEngine.Pipeline.Classifier do
 
   This function is kept as the primary signal classification entry point for
   backward compatibility.
+
+  Options:
+
+    * `:known_entities` - names to extract as entities
+    * `:genre` - a genre already known to the caller; it replaces detection
+      and informs Mode when the content alone is too weak to decide
   """
   @spec classify(String.t(), keyword()) :: Signal.t()
   def classify(content, opts \\ []) when is_binary(content) do
     {frontmatter, body} = parse_frontmatter(content)
     known_entities = Keyword.get(opts, :known_entities, [])
 
-    mode = extract_mode(frontmatter, body)
-    genre = extract_genre(frontmatter, body)
+    genre = genre_hint(opts) || extract_genre(frontmatter, body)
+    mode = extract_mode(frontmatter, body, genre)
     type = extract_type(frontmatter, body)
     format = extract_format(frontmatter)
     structure = extract_structure(frontmatter)
@@ -250,8 +229,8 @@ defmodule OptimalEngine.Pipeline.Classifier do
     text = chunk.text || ""
     frontmatter = %{}
 
-    mode = classify_chunk_mode(chunk, opts) || extract_mode(frontmatter, text)
     genre = extract_genre(frontmatter, text)
+    mode = classify_chunk_mode(chunk, opts) || extract_mode(frontmatter, text, genre)
     signal_type = extract_type(frontmatter, text)
     format = classify_chunk_format(chunk, opts) || extract_format(frontmatter)
     structure = extract_structure(frontmatter)
@@ -516,29 +495,18 @@ defmodule OptimalEngine.Pipeline.Classifier do
   # Private: Signal extraction helpers
   # ---------------------------------------------------------------------------
 
-  defp extract_mode(fm, body) do
-    raw =
-      get_in(fm, ["signal", "mode"]) ||
-        Map.get(fm, "mode")
-
-    if raw do
-      parse_mode(raw)
-    else
-      detect_mode(body)
-    end
+  # A valid declared mode wins; otherwise the body decides, and the genre's
+  # registry mode settles text too weak to decide on its own.
+  defp extract_mode(fm, body, genre) do
+    declared = get_in(fm, ["signal", "mode"]) || Map.get(fm, "mode")
+    ModeDetector.resolve(body, declared: declared, genre: genre)
   end
 
-  defp parse_mode("linguistic"), do: :linguistic
-  defp parse_mode("visual"), do: :visual
-  defp parse_mode("code"), do: :code
-  defp parse_mode("data"), do: :data
-  defp parse_mode("mixed"), do: :mixed
-  defp parse_mode(_), do: :linguistic
-
-  defp detect_mode(body) do
-    Enum.find_value(@mode_patterns, :linguistic, fn {mode, pattern} ->
-      if Regex.match?(pattern, body), do: mode
-    end)
+  defp genre_hint(opts) do
+    case Keyword.get(opts, :genre) do
+      genre when is_binary(genre) and genre != "" -> genre
+      _ -> nil
+    end
   end
 
   defp extract_genre(fm, body) do
@@ -553,22 +521,8 @@ defmodule OptimalEngine.Pipeline.Classifier do
     end
   end
 
-  # Two-stage detection against the SINGLE canonical genre registry:
-  # 1. high-precision regex cues (@genre_patterns) for the most common genres
-  # 2. fall back to keyword scoring across all 142 registry genres
-  # 3. graceful default of "note" when nothing matches
-  defp detect_genre(body) do
-    precise =
-      Enum.find_value(@genre_patterns, nil, fn {genre, pattern} ->
-        if Regex.match?(pattern, body), do: genre
-      end)
-
-    case precise do
-      nil -> GenreRegistry.detect(body)
-      "note" -> GenreRegistry.detect(body)
-      genre -> genre
-    end
-  end
+  # Form, heading and keyword cues, then the registry; see GenreDetector.
+  defp detect_genre(body), do: GenreDetector.detect(body)
 
   defp extract_type(fm, body) do
     raw =

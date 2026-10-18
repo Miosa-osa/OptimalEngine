@@ -8,7 +8,7 @@ defmodule OptimalEngine.Signal.Envelope.Validation do
 
   alias OptimalEngine.Signal.Envelope, as: Signal
 
-  @valid_modes ~w(linguistic visual code mixed)a
+  @valid_modes ~w(linguistic visual code data mixed)a
   @valid_genres ~w(spec report pr adr brief chat error progress alert)a
   @valid_types ~w(direct inform commit decide express)a
   @valid_formats ~w(markdown code json cli diff table)a

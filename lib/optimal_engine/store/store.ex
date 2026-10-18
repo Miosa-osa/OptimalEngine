@@ -315,6 +315,16 @@ defmodule OptimalEngine.Store do
   @spec delete_signal(String.t()) :: :ok | {:error, term()}
   def delete_signal(id), do: delete_context(id)
 
+  @doc """
+  Drops contexts from the read cache so the next `get_context/1` reads
+  SQLite. Use after updating `contexts` rows with `raw_execute/2` or a
+  `transaction/2`.
+  """
+  @spec evict_cached([String.t()]) :: :ok
+  def evict_cached(ids) when is_list(ids) do
+    Enum.each(ids, &:ets.delete(@ets_table, &1))
+  end
+
   @doc "Executes a raw SELECT query. Returns list of rows."
   @spec raw_query(String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
   def raw_query(sql, params \\ []) do
