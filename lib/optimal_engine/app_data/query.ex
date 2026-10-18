@@ -37,6 +37,8 @@ defmodule OptimalEngine.AppData.Query do
   @max_sort 4
   @max_in 1_000
   @ops ~w(eq ne gt gte lt lte in nin contains is_null)
+  @max_depth 8
+  @max_conditions 200
 
   @doc "Fetches one record, optionally with `fields` and `include`."
   @spec get(Scope.t(), String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
@@ -365,13 +367,19 @@ defmodule OptimalEngine.AppData.Query do
   @spec compile_where(Scope.t(), map(), map(), term()) :: {:ok, {String.t(), list()}}
   def compile_where(scope, c, refs, where) do
     counter = :counters.new(1, [])
-    {:ok, compile(where, %{scope: scope, c: c, refs: refs, alias: "t", counter: counter})}
+    ctx = %{scope: scope, c: c, refs: refs, alias: "t", counter: counter, depth: 0}
+    {:ok, compile(where, ctx)}
   end
 
   defp compile(nil, _ctx), do: {"1", []}
   defp compile(where, _ctx) when where == %{}, do: {"1", []}
 
+  defp compile(_where, %{depth: depth}) when depth > @max_depth,
+    do: throw({:bad_query, "where nests deeper than #{@max_depth} levels"})
+
   defp compile(%{} = where, ctx) when not is_struct(where) do
+    ctx = %{ctx | depth: ctx.depth + 1}
+
     where
     |> Enum.sort_by(fn {key, _} -> key end)
     |> Enum.map(fn
@@ -388,6 +396,11 @@ defmodule OptimalEngine.AppData.Query do
         throw({:bad_query, "#{key} needs a list (not: an object)"})
 
       {field, condition} ->
+        :counters.add(ctx.counter, 1, 1)
+
+        if :counters.get(ctx.counter, 1) > @max_conditions,
+          do: throw({:bad_query, "where has more than #{@max_conditions} conditions"})
+
         field_condition(field, condition, ctx)
     end)
     |> combine("AND")

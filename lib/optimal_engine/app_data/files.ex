@@ -10,7 +10,8 @@ defmodule OptimalEngine.AppData.Files do
   itself stays in the asset store as preserved evidence.
 
   Uploads arrive as base64 inside the JSON request body (the API accepts
-  JSON only), so one upload is bounded by the request size limit.
+  JSON only), so one upload is bounded by the 8 MB JSON request limit:
+  5,900,000 decoded bytes encode to just under it.
   Downloads stream from the asset's stored path and honor single byte
   ranges.
   """
@@ -19,7 +20,7 @@ defmodule OptimalEngine.AppData.Files do
   alias OptimalEngine.MemoryCore.AssetStore
   alias OptimalEngine.Store
 
-  @max_bytes 6_000_000
+  @max_bytes 5_900_000
   @max_files_per_record 100
 
   @doc "Largest decoded upload accepted, in bytes."
