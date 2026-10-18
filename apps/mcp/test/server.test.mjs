@@ -73,6 +73,7 @@ test("lists the operating, context, record, and authority tools", async () => {
   for (const name of [
     "boot", "brief", "loops_list", "loops_add", "loops_close", "protocol", "search",
     "assemble", "read", "capture", "record", "close", "authority_decide", "authority_effective",
+    "check_draft", "viability", "action_step", "action_chain",
   ]) {
     assert.ok(names.includes(name), `missing tool ${name}`);
   }
@@ -104,6 +105,10 @@ test("maps each tool to its route", async () => {
     ["close", { summary: "Shipped and verified" }, "POST", "/api/memory/remember"],
     ["authority_decide", { action: "read", resource: "optimal://default:sales/**" }, "POST", "/api/authority/decide"],
     ["authority_effective", {}, "GET", "/api/authority/effective"],
+    ["check_draft", { draft: "Can you confirm?", channel: "whatsapp" }, "POST", "/api/signals/check"],
+    ["viability", {}, "GET", "/api/viability"],
+    ["action_step", { stage: "request", action: "send_email" }, "POST", "/api/agent-actions"],
+    ["action_chain", { id: "act_1" }, "GET", "/api/agent-actions/act_1"],
   ];
   for (const [name, args, method, path] of cases) {
     const result = await call(name, args);

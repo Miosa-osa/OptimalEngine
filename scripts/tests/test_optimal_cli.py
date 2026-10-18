@@ -150,7 +150,7 @@ class VersionAndAliasTests(CliTestCase):
                         'assemble', 'read', 'capture', 'aware', 'note', 'lesson', 'decision', 'task',
                         'close', 'memory', 'claims', 'review', 'routing', 'authority', 'status',
                         'version', 'start', 'stop', 'restart', 'log', 'index', 'graph',
-                        'reality-check', 'backup', 'init', 'size', 'viability', 'chain']:
+                        'reality-check', 'backup', 'init', 'size', 'viability', 'chain', 'check']:
             self.assertIn(command, text)
 
 
@@ -271,6 +271,10 @@ class RouteMappingTests(CliTestCase):
         self.check(['viability', 'history', ws, '--days', '14'], 'GET', '/api/viability/history',
                    {'workspace': ws, 'days': '14'})
         self.check(['chain', 'act_1f2e', ws], 'GET', '/api/agent-actions/act_1f2e', {'workspace': ws})
+        self.check(['check', 'Can you confirm by Friday?', ws, '--channel', 'whatsapp', '--type', 'direct'],
+                   'POST', '/api/signals/check',
+                   body={'workspace': ws, 'draft': 'Can you confirm by Friday?',
+                         'receiver': {'channel': 'whatsapp'}, 'type': 'direct'})
 
     def test_stdin_text(self):
         self.check(['capture', '-', 'default:sales'], 'POST', '/api/ingest',

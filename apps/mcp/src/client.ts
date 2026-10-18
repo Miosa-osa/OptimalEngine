@@ -424,4 +424,36 @@ export const engine = {
   }): Promise<JsonObject> {
     return request<JsonObject>("/api/authority/effective", { params });
   },
+
+  // -- signal quality, viability, agent action chains -------------------------
+
+  checkDraft(body: {
+    workspace: string;
+    draft: string;
+    receiver: { channel?: string; bandwidth?: string };
+    genre?: string;
+    type?: string;
+  }): Promise<JsonObject> {
+    return request<JsonObject>("/api/signals/check", { method: "POST", body });
+  },
+
+  viability(params: { workspace?: string; workspaces?: string }): Promise<JsonObject> {
+    return request<JsonObject>("/api/viability", { params });
+  },
+
+  recordActionStep(body: {
+    workspace: string;
+    stage: string;
+    correlation_id?: string;
+    action?: string;
+    resource?: string;
+    summary?: string;
+    detail?: JsonObject;
+  }): Promise<JsonObject> {
+    return request<JsonObject>("/api/agent-actions", { method: "POST", body });
+  },
+
+  actionChain(id: string, params: { workspace: string }): Promise<JsonObject> {
+    return request<JsonObject>(`/api/agent-actions/${encodeURIComponent(id)}`, { params });
+  },
 };

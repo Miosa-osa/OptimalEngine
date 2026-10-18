@@ -3220,6 +3220,7 @@ defmodule OptimalEngine.API.Router do
   get("/api/viability/audit", do: ViabilityAPI.audit_list(conn))
   post("/api/viability/audit/run", do: ViabilityAPI.audit_run(conn))
   post("/api/viability/audit/:id/review", do: ViabilityAPI.audit_review(conn, id))
+  post("/api/signals/check", do: ViabilityAPI.pre_send(conn))
   get("/api/signal-events", do: ViabilityAPI.events_list(conn))
   post("/api/signal-events", do: ViabilityAPI.events_create(conn))
   get("/api/agent-actions", do: ViabilityAPI.actions_list(conn))

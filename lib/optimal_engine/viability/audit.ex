@@ -18,7 +18,7 @@ defmodule OptimalEngine.Viability.Audit do
   confirmed or dismissed.
   """
 
-  alias OptimalEngine.Signal.{GenreRegistry, ModeDetector}
+  alias OptimalEngine.Signal.{GenreDetector, GenreRegistry, ModeDetector}
   alias OptimalEngine.Store
 
   @weights %{formal: 0.40, semantic: 0.35, information: 0.25}
@@ -302,7 +302,7 @@ defmodule OptimalEngine.Viability.Audit do
   end
 
   defp semantic(signal, content) do
-    detected = GenreRegistry.detect(content)
+    detected = GenreDetector.detect(content)
     recorded = signal.genre || GenreRegistry.default_genre()
 
     agreement =
