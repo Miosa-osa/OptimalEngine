@@ -430,6 +430,51 @@ defmodule OptimalEngine.API.SecurityFoundationsTest do
     end
   end
 
+  describe "principals" do
+    test "admins register principals; ids owned by another tenant are refused", ctx do
+      {admin, _id} = mint!(%{name: "admin", scopes: ["admin"], workspace_scope: ["*"]})
+      {reader, _id} = mint!(%{name: "reader", scopes: ["read"], workspace_scope: ["*"]})
+
+      {foreign_admin, _id} =
+        mint!(%{tenant_id: ctx.foreign_tenant, name: "foreign admin", scopes: ["admin"]})
+
+      with_auth_required(fn ->
+        body = %{
+          "id" => "agent:registered-#{ctx.suffix}",
+          "kind" => "agent",
+          "display_name" => "Registered"
+        }
+
+        assert request(:post, "/api/principals", reader, body).status == 403
+
+        conn = request(:post, "/api/principals", admin, body)
+        assert conn.status == 201
+        assert json_body(conn)["kind"] == "agent"
+
+        assert request(:get, "/api/principals?kind=agent", admin)
+               |> json_body()
+               |> Map.get("principals")
+               |> Enum.any?(&(&1["id"] == body["id"]))
+
+        conn =
+          request(
+            :post,
+            "/api/principals",
+            foreign_admin,
+            Map.put(body, "display_name", "Hijacked")
+          )
+
+        assert conn.status == 409
+
+        assert request(:get, "/api/principals/#{URI.encode_www_form(body["id"])}", foreign_admin).status ==
+                 404
+      end)
+
+      assert {:ok, %{display_name: "Registered"}} =
+               Principal.get("agent:registered-#{ctx.suffix}", "default")
+    end
+  end
+
   describe "sync idempotency" do
     defp mutation(workspace, key, entity_id) do
       OptimalEngine.Storage.PolicyStore.append_mutation(%{

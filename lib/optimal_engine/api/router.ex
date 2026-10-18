@@ -57,6 +57,7 @@ defmodule OptimalEngine.API.Router do
   # 403 on API-key workspace_scope mismatch, 404 on another tenant's workspace.
   plug(OptimalEngine.API.WorkspaceAuthPlug)
   plug(OptimalEngine.API.PermissionPlug)
+  plug(OptimalEngine.API.AuthorityPlug)
   plug(:dispatch)
 
   # ---------------------------------------------------------------------------
@@ -2464,6 +2465,18 @@ defmodule OptimalEngine.API.Router do
     with {:ok, attrs} <-
            OptimalEngine.Auth.KeyIssuance.attrs(conn.assigns[:current_api_key], tenant_id, body),
          {:ok, %{id: id, key: key, secret: _secret}} <- ApiKey.mint(attrs) do
+      OptimalEngine.Authority.record_key_minted(
+        tenant_id,
+        %{
+          id: id,
+          principal_id: attrs[:principal_id],
+          scopes: attrs[:scopes] || ["*"],
+          workspace_scope: attrs[:workspace_scope] || ["*"],
+          metadata: attrs[:metadata] || %{}
+        },
+        Actor.of(conn)
+      )
+
       conn
       |> put_resp_content_type("application/json")
       |> send_resp(201, Jason.encode!(%{id: id, key: key, prefix: String.slice(key, 0, 8)}))
@@ -2482,6 +2495,69 @@ defmodule OptimalEngine.API.Router do
 
       {:error, reason} ->
         send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # ── Principals (people, agents, services) ──────────────────────────────────
+  #
+  # The identities API keys act as and authority decides about. Admin only.
+  # POST /api/principals  {id, kind: user|agent|service, display_name, external_id?, metadata?}
+  # GET  /api/principals?kind=agent
+  # GET  /api/principals/:id
+  post "/api/principals" do
+    body = conn.body_params || %{}
+    tenant_id = conn.assigns[:current_tenant] || "default"
+    kind = Map.get(%{"user" => :user, "agent" => :agent, "service" => :service}, body["kind"])
+
+    attrs = %{
+      id: body["id"],
+      tenant_id: tenant_id,
+      kind: kind,
+      display_name: body["display_name"] || body["id"],
+      external_id: body["external_id"],
+      metadata: if(is_map(body["metadata"]), do: body["metadata"], else: %{})
+    }
+
+    cond do
+      not (is_binary(attrs.id) and String.trim(attrs.id) != "") ->
+        send_resp(conn, 400, Jason.encode!(%{error: "id is required"}))
+
+      is_nil(kind) ->
+        send_resp(conn, 400, Jason.encode!(%{error: "kind must be user, agent, or service"}))
+
+      true ->
+        case OptimalEngine.Identity.Principal.upsert(attrs) do
+          {:ok, principal} ->
+            conn |> put_status(201) |> json(principal_to_map(principal))
+
+          {:error, :principal_id_taken} ->
+            send_resp(conn, 409, Jason.encode!(%{error: "principal_id_taken"}))
+
+          {:error, reason} ->
+            send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+        end
+    end
+  end
+
+  get "/api/principals" do
+    tenant_id = conn.assigns[:current_tenant] || "default"
+
+    kind =
+      Map.get(
+        %{"user" => :user, "agent" => :agent, "service" => :service},
+        query_param(conn, "kind", nil)
+      )
+
+    principals = OptimalEngine.Identity.Principal.list(tenant_id, kind: kind)
+    json(conn, %{principals: Enum.map(principals, &principal_to_map/1)})
+  end
+
+  get "/api/principals/:id" do
+    tenant_id = conn.assigns[:current_tenant] || "default"
+
+    case OptimalEngine.Identity.Principal.get(URI.decode(id), tenant_id) do
+      {:ok, principal} -> json(conn, principal_to_map(principal))
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "principal not found"}))
     end
   end
 
@@ -3068,6 +3144,8 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
+
   match _ do
     send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
   end
@@ -3496,6 +3574,17 @@ defmodule OptimalEngine.API.Router do
           send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
       end
     end
+  end
+
+  defp principal_to_map(principal) do
+    %{
+      id: principal.id,
+      tenant_id: principal.tenant_id,
+      kind: principal.kind,
+      display_name: principal.display_name,
+      external_id: principal.external_id,
+      metadata: principal.metadata
+    }
   end
 
   defp api_key_to_map(key) do

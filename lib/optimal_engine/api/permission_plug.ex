@@ -86,7 +86,11 @@ defmodule OptimalEngine.API.PermissionPlug do
     mutation = conn.method not in ["GET", "HEAD", "OPTIONS"]
 
     cond do
-      String.starts_with?(path, "/api/auth/keys") or path == "/api/backup" or
+      match?(["api", "authority" | _], conn.path_info) ->
+        authority_scope(conn.method, tl(tl(conn.path_info)))
+
+      String.starts_with?(path, "/api/auth/keys") or String.starts_with?(path, "/api/principals") or
+        path == "/api/backup" or
           (mutation and String.starts_with?(path, "/api/maintenance/")) ->
         "admin"
 
@@ -108,6 +112,25 @@ defmodule OptimalEngine.API.PermissionPlug do
         "read"
     end
   end
+
+  # Authority routes (OptimalEngine.API.AuthorityRouter): verification
+  # material and a subject's own requests need ordinary scopes; reading the
+  # authority state, issuing, approving, enforcing and administering each
+  # need their own grant.
+  defp authority_scope("GET", [route | _]) when route in ~w(keys revocations effective settings),
+    do: "read"
+
+  defp authority_scope("GET", ["policies", "default"]), do: "read"
+  defp authority_scope("GET", _route), do: "authority:read"
+  defp authority_scope("POST", ["decide"]), do: "read"
+  defp authority_scope("POST", ["requests"]), do: "write"
+  defp authority_scope("POST", ["requests", _id, _decision]), do: "authority:approve"
+  defp authority_scope("POST", ["grants" | _]), do: "authority:issue"
+
+  defp authority_scope("POST", [route]) when route in ~w(admit checkpoint release evidence),
+    do: "authority:enforce"
+
+  defp authority_scope(_method, _route), do: "authority:admin"
 
   defp topology_path?(["api", "storage", "workspaces", _, "policy"]), do: true
   defp topology_path?(["api", root | _]), do: root in @topology_roots

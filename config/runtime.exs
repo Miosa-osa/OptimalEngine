@@ -140,6 +140,29 @@ if backup_dir = System.get_env("OPTIMAL_BACKUP_DIR") do
   config :optimal_engine, :backup_dir, backup_dir
 end
 
+# Optimal Authority. OPTIMAL_AUTHORITY_KEY (64 hex characters) wraps the
+# signing keys and is read directly by OptimalEngine.Authority.Keys.
+authority_mode = System.get_env("OPTIMAL_AUTHORITY_MODE")
+
+if authority_mode do
+  unless authority_mode in ~w(off observe enforce),
+    do: raise(ArgumentError, "OPTIMAL_AUTHORITY_MODE must be off, observe, or enforce")
+
+  config :optimal_engine, :authority_mode, authority_mode
+end
+
+if issuer = System.get_env("OPTIMAL_AUTHORITY_ISSUER") do
+  config :optimal_engine, :authority_issuer, issuer
+end
+
+if audience = System.get_env("OPTIMAL_AUTHORITY_AUDIENCE") do
+  config :optimal_engine, :authority_audience, audience
+end
+
+if max_ttl = System.get_env("OPTIMAL_AUTHORITY_MAX_TTL_SECONDS") do
+  config :optimal_engine, :authority_max_ttl_seconds, String.to_integer(max_ttl)
+end
+
 # Local HTTP API - enabled on demand (the bundled engine turns it on; other
 # contexts leave it off). Port is env-driven so it can dodge a busy :4200.
 if System.get_env("OPTIMAL_API_ENABLED") == "true" do
