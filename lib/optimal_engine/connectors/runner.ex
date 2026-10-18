@@ -83,14 +83,21 @@ defmodule OptimalEngine.Connectors.Runner do
   defp run_raw(connector_id, opts) do
     with {:ok, row} <- fetch_connector(connector_id),
          :ok <- ensure_enabled(row),
-         {:ok, mod} <- lookup_adapter(row.kind, opts),
-         {:ok, state} <- init_adapter(mod, row) do
+         {:ok, mod} <- lookup_adapter(row.kind, opts) do
+      # The run row is opened before the adapter is initialised so that a
+      # failure to initialise — a broker that refused, config the adapter
+      # rejects, a credential the Engine cannot decrypt — still leaves one
+      # audit row naming the reason, as this module promises.
       run_id = start_run_row(row)
 
       result =
-        row
-        |> do_sync_with_retries(mod, state, opts)
-        |> finalize(row, run_id, opts)
+        case init_adapter(mod, row) do
+          {:ok, state} ->
+            row |> do_sync_with_retries(mod, state, opts) |> finalize(row, run_id, opts)
+
+          {:error, reason} ->
+            finalize({:error, reason}, row, run_id, opts)
+        end
 
       {:ok, result}
     end

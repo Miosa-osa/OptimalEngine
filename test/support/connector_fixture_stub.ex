@@ -33,12 +33,16 @@ defmodule OptimalEngine.Test.ConnectorFixtureStub do
   next. `"unreachable": true` makes the route answer with a network error
   instead of a response.
 
+  A route's `headers` is an object of extra response headers, such as
+  `{"retry-after": "3"}`.
+
   The route may also be overridden per call through `install/2`:
 
       install(:gmail, status: 401)
 
   which answers every request with that status and no body. Use it for the
-  error paths a recording does not carry.
+  error paths a recording does not carry. `headers:` takes the same name and
+  value pairs as a route, for a `429` that names its `Retry-After`.
   """
 
   @fixtures_root "test/fixtures/connectors"
@@ -127,7 +131,11 @@ defmodule OptimalEngine.Test.ConnectorFixtureStub do
   end
 
   defp respond(_kind, _routes, _counters, _call, override) when override != [] do
-    httpc_ok(Keyword.get(override, :body, %{}), Keyword.get(override, :status, 200))
+    httpc_ok(
+      Keyword.get(override, :body, %{}),
+      Keyword.get(override, :status, 200),
+      response_headers(Keyword.get(override, :headers))
+    )
   end
 
   defp respond(kind, routes, counters, call, _override) do
@@ -139,7 +147,11 @@ defmodule OptimalEngine.Test.ConnectorFixtureStub do
         if route["unreachable"] == true do
           {:error, :econnrefused}
         else
-          httpc_ok(route["body"] || %{}, route["status"] || 200, route["headers"] || [])
+          httpc_ok(
+            route["body"] || %{},
+            route["status"] || 200,
+            response_headers(route["headers"])
+          )
         end
     end
   end
@@ -213,7 +225,18 @@ defmodule OptimalEngine.Test.ConnectorFixtureStub do
 
   defp match_contains(route), do: (route["match"] || %{})["contains"] || ""
 
-  defp httpc_ok(body, status, extra_headers \\ []) do
+  # A recording is JSON, so extra headers arrive as an object or a list of
+  # name and value pairs; the HTTP layer wants `{name, value}` tuples.
+  defp response_headers(nil), do: []
+
+  defp response_headers(headers) when is_map(headers) or is_list(headers) do
+    Enum.map(headers, fn
+      {name, value} -> {to_string(name), to_string(value)}
+      [name, value] -> {to_string(name), to_string(value)}
+    end)
+  end
+
+  defp httpc_ok(body, status, extra_headers) do
     headers =
       [{"content-type", "application/json"}, {"date", "Mon, 01 Jan 2026 00:00:00 GMT"}] ++
         extra_headers

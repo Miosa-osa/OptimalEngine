@@ -312,23 +312,29 @@ defmodule OptimalEngine.Connectors.Routing do
     end
   end
 
+  # Adapters differ on whether an entity is a bare address or a display name
+  # and address, so the address is pulled out of whichever shape arrives.
+  # `RuleStore` reads the sender the same way.
   defp sender(%Signal{entities: entities}) when is_list(entities) do
-    Enum.find(entities, &is_email?/1)
+    Enum.find_value(entities, &address/1)
   end
 
   defp sender(_signal), do: nil
 
-  defp is_email?(value) when is_binary(value) do
-    Regex.match?(~r/^#{@email.source}$/u, String.trim(value))
-  end
-
-  defp is_email?(_value), do: false
-
   defp counterparty(%Signal{entities: entities}) when is_list(entities) do
-    Enum.find(entities, &is_email?/1)
+    Enum.find_value(entities, &address/1)
   end
 
   defp counterparty(_signal), do: nil
+
+  defp address(value) when is_binary(value) do
+    case Regex.run(@email, value) do
+      [address | _] -> String.trim(address)
+      _ -> nil
+    end
+  end
+
+  defp address(_value), do: nil
 
   defp reference_date(%Signal{modified_at: %DateTime{} = at}), do: DateTime.to_date(at)
   defp reference_date(_signal), do: Date.utc_today()

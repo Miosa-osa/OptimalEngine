@@ -1,0 +1,143 @@
+{
+  "kind": "fathom",
+  "note": "Recorded shapes of the Fathom meetings API: a two-page meeting list (the first page carries a cursor, the last carries null), with transcript, summary and action items on the first meeting. Invented data only.",
+  "routes": [
+    {
+      "name": "meetings_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/meetings?limit=100"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "limit": 100,
+        "next_cursor": "example-next-cursor",
+        "items": [
+          {
+            "title": "Discovery call with Example Co",
+            "meeting_title": "Discovery call",
+            "recording_id": 100000001,
+            "created_at": "2026-10-14T15:46:00Z",
+            "recording_start_time": "2026-10-14T15:00:00Z",
+            "recording_end_time": "2026-10-14T15:45:00Z",
+            "url": "https://fathom.video/calls/100000001",
+            "calendar_invitees": [
+              {
+                "name": "Jane Example",
+                "email": "jane@example.com",
+                "email_domain": "example.com",
+                "is_external": true
+              },
+              {
+                "name": "Sam Sample",
+                "email": "sam@sample.example",
+                "email_domain": "sample.example",
+                "is_external": false
+              }
+            ],
+            "transcript": [
+              {
+                "speaker": {
+                  "display_name": "Jane Example",
+                  "matched_calendar_invitee_email": "jane@example.com"
+                },
+                "text": "We need the proposal by Friday.",
+                "timestamp": "00:00:12"
+              },
+              {
+                "speaker": {
+                  "display_name": "Sam Sample"
+                },
+                "text": "I will send it tomorrow.",
+                "timestamp": "00:01:03"
+              }
+            ],
+            "default_summary": {
+              "template_name": "Default",
+              "markdown_formatted": "## Summary\n\nDiscovery call with Example Co."
+            },
+            "action_items": [
+              {
+                "description": "Send the proposal",
+                "completed": false,
+                "recording_timestamp": "00:01:03"
+              }
+            ]
+          },
+          {
+            "title": "Weekly sync",
+            "meeting_title": "Weekly sync",
+            "recording_id": 100000002,
+            "created_at": "2026-10-15T09:31:00Z",
+            "recording_start_time": "2026-10-15T09:00:00Z",
+            "recording_end_time": "2026-10-15T09:30:00Z",
+            "url": "https://fathom.video/calls/100000002",
+            "calendar_invitees": [
+              {
+                "name": "Jane Example",
+                "email": "jane@example.com",
+                "email_domain": "example.com",
+                "is_external": true
+              },
+              {
+                "name": "Operations",
+                "email": "ops@example.com",
+                "email_domain": "example.com",
+                "is_external": true
+              }
+            ],
+            "transcript": [
+              {
+                "speaker": {
+                  "display_name": "Sam Sample"
+                },
+                "text": "The rollout is on track.",
+                "timestamp": "00:00:08"
+              }
+            ],
+            "default_summary": {
+              "template_name": "Default",
+              "markdown_formatted": "## Summary\n\nWeekly sync on the rollout plan."
+            },
+            "action_items": [
+              {
+                "description": "Share the rollout plan",
+                "completed": true,
+                "recording_timestamp": "00:00:40"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "meetings_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "cursor=example-next-cursor"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "limit": 100,
+        "next_cursor": null,
+        "items": [
+          {
+            "title": "Quick call with Example Co",
+            "meeting_title": null,
+            "recording_id": 100000003,
+            "created_at": "2026-10-16T13:21:00Z",
+            "recording_start_time": "2026-10-16T13:00:00Z",
+            "recording_end_time": "2026-10-16T13:20:00Z",
+            "url": "https://fathom.video/calls/100000003",
+            "calendar_invitees": [],
+            "transcript": null,
+            "default_summary": null,
+            "action_items": []
+          }
+        ]
+      }
+    }
+  ]
+}
