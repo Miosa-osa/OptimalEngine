@@ -553,6 +553,19 @@
       ]
     },
     {
+      "id": "docs-guides-app-data-api",
+      "path": "docs/guides/app-data-api.md",
+      "kind": "contract",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-18",
+      "owns": [
+        "app-data"
+      ]
+    },
+    {
       "id": "docs-guides-packages-and-exports",
       "path": "docs/guides/packages-and-exports.md",
       "kind": "reference",
