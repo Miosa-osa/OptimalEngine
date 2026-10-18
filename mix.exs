@@ -58,6 +58,7 @@ defmodule OptimalEngine.MixProject do
       {:exqlite, "~> 0.27"},
       {:jason, "~> 1.4"},
       {:yaml_elixir, "~> 2.11"},
+      {:tz, "~> 0.28"},
 
       # Optional knowledge graph substrate
       {:rdf, "~> 2.0"},

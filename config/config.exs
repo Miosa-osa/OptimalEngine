@@ -82,4 +82,7 @@ config :logger, :console,
   format: "[$level] $message\n",
   metadata: [:module, :request_id]
 
+# IANA time zones for workspace rhythm and boot (tz ships the database).
+config :elixir, :time_zone_database, Tz.TimeZoneDatabase
+
 import_config "#{config_env()}.exs"

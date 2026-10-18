@@ -108,8 +108,107 @@ defmodule OptimalEngine.Store.Migrations do
       migration_060_data_quality_observability(),
       migration_061_memory_embeddings(),
       migration_062_multi_profile_memory_embeddings(),
-      migration_063_authority()
+      migration_063_authority(),
+      migration_064_operating_layer()
     ]
+  end
+
+  defp migration_064_operating_layer do
+    {64, "operating layer: open loops, rhythm, protocol documents, routing rules",
+     [
+       {"open_loops",
+        """
+        CREATE TABLE IF NOT EXISTS open_loops (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('commitment', 'owed_reply', 'follow_up', 'payment_due', 'payment_owed', 'decision_needed')),
+          title TEXT NOT NULL,
+          owner TEXT,
+          counterparty TEXT,
+          due_at TEXT,
+          state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'closed', 'dropped')),
+          confidence REAL NOT NULL DEFAULT 1.0,
+          detected INTEGER NOT NULL DEFAULT 0,
+          fingerprint TEXT NOT NULL,
+          source_uri TEXT,
+          source_context_id TEXT,
+          thread_ref TEXT,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          closed_at TEXT,
+          closed_by TEXT,
+          close_reason TEXT,
+          close_source_uri TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          UNIQUE (tenant_id, workspace_id, fingerprint)
+        )
+        """},
+       {"idx_open_loops_state",
+        "CREATE INDEX IF NOT EXISTS idx_open_loops_state ON open_loops(tenant_id, workspace_id, state, due_at)"},
+       {"rhythm_templates",
+        """
+        CREATE TABLE IF NOT EXISTS rhythm_templates (
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          cadence TEXT NOT NULL CHECK (cadence IN ('daily', 'weekly', 'monthly')),
+          content TEXT NOT NULL,
+          timezone TEXT NOT NULL DEFAULT 'Etc/UTC',
+          updated_by TEXT,
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          PRIMARY KEY (tenant_id, workspace_id, cadence)
+        )
+        """},
+       {"rhythm_notes",
+        """
+        CREATE TABLE IF NOT EXISTS rhythm_notes (
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          cadence TEXT NOT NULL CHECK (cadence IN ('daily', 'weekly', 'monthly')),
+          period TEXT NOT NULL,
+          content TEXT NOT NULL,
+          generated INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          updated_by TEXT,
+          PRIMARY KEY (tenant_id, workspace_id, cadence, period)
+        )
+        """},
+       {"operating_documents",
+        """
+        CREATE TABLE IF NOT EXISTS operating_documents (
+          tenant_id TEXT NOT NULL,
+          scope_type TEXT NOT NULL CHECK (scope_type IN ('tenant', 'workspace')),
+          scope_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          content TEXT NOT NULL,
+          hash TEXT NOT NULL,
+          updated_by TEXT,
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          PRIMARY KEY (tenant_id, scope_type, scope_id, kind)
+        )
+        """},
+       {"routing_rules",
+        """
+        CREATE TABLE IF NOT EXISTS routing_rules (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          field TEXT NOT NULL CHECK (field IN ('sender', 'domain', 'label', 'channel', 'keyword')),
+          pattern TEXT NOT NULL,
+          weight INTEGER NOT NULL DEFAULT 5,
+          source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('seed', 'manual', 'learned')),
+          accepted INTEGER NOT NULL DEFAULT 0,
+          rejected INTEGER NOT NULL DEFAULT 0,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          UNIQUE (tenant_id, workspace_id, field, pattern)
+        )
+        """},
+       {"idx_routing_rules_tenant",
+        "CREATE INDEX IF NOT EXISTS idx_routing_rules_tenant ON routing_rules(tenant_id, field)"}
+     ]}
   end
 
   defp migration_063_authority do

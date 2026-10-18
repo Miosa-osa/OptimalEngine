@@ -3144,6 +3144,34 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # ── Operating layer (OptimalEngine.API.OperatingAPI) ──────────────────────
+  alias OptimalEngine.API.OperatingAPI
+
+  get("/api/boot", do: OperatingAPI.boot(conn))
+  get("/api/brief", do: OperatingAPI.brief(conn))
+  get("/api/loops", do: OperatingAPI.list_loops(conn))
+  post("/api/loops", do: OperatingAPI.create_loop(conn))
+  post("/api/loops/extract", do: OperatingAPI.extract_loops(conn))
+
+  post("/api/loops/:id/:action" when action in ["close", "drop", "reopen"],
+    do: OperatingAPI.transition_loop(conn, id, action)
+  )
+
+  get("/api/rhythm/current", do: OperatingAPI.rhythm_current(conn))
+  get("/api/rhythm/notes", do: OperatingAPI.rhythm_notes(conn))
+  put("/api/rhythm/notes/:cadence/:period", do: OperatingAPI.put_rhythm_note(conn, cadence, period))
+  put("/api/rhythm/templates/:cadence", do: OperatingAPI.put_rhythm_template(conn, cadence))
+  get("/api/protocol", do: OperatingAPI.protocol(conn))
+  put("/api/protocol", do: OperatingAPI.put_protocol(conn))
+  get("/api/topology/export", do: OperatingAPI.export_topology(conn))
+  post("/api/topology/import", do: OperatingAPI.import_topology(conn))
+  get("/api/routing/rules", do: OperatingAPI.list_rules(conn))
+  post("/api/routing/rules", do: OperatingAPI.add_rule(conn))
+  delete("/api/routing/rules/:id", do: OperatingAPI.delete_rule(conn, id))
+  post("/api/routing/classify", do: OperatingAPI.classify(conn))
+  post("/api/routing/feedback", do: OperatingAPI.feedback(conn))
+  post("/api/routing/seed", do: OperatingAPI.seed_rules(conn))
+
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
 
   match _ do

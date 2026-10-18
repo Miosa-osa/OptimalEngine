@@ -54,7 +54,7 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # (implicit "default"), so a new route is scoped unless it is listed here.
   # Global routes are still checked when they explicitly name a workspace.
   @global_roots ~w(architectures auth authority backup maintenance metrics
-                   organizations principals status storage stores version)
+                   organizations principals routing status storage stores topology version)
 
   @impl true
   def init(opts), do: opts
@@ -70,6 +70,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
       Enum.any?(requested, &(not is_binary(&1))) ->
         halt_json(conn, 400, "invalid workspace")
+
+      requested == [] and org_scope_request?(conn) ->
+        assign(conn, :org_scope, true)
 
       requested == [] and not key_allows_implicit_default?(conn.assigns[:current_api_key]) ->
         halt_json(conn, 400, "workspace_required")
@@ -106,7 +109,25 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
   defp body_workspaces(_conn), do: []
 
-  defp query_workspaces(conn), do: Enum.map(@workspace_fields, &Map.get(conn.query_params, &1))
+  # "workspaces" names several at once, comma-separated. "workspaces=*" asks
+  # for every workspace the caller may see and is honored only by routes
+  # that filter by the caller's scope themselves (@org_scope_paths).
+  defp query_workspaces(conn) do
+    named = Enum.map(@workspace_fields, &Map.get(conn.query_params, &1))
+
+    case Map.get(conn.query_params, "workspaces") do
+      "*" -> named
+      list when is_binary(list) -> named ++ String.split(list, ",", trim: true)
+      _ -> named
+    end
+  end
+
+  @org_scope_paths [["api", "brief"], ["api", "loops"]]
+
+  defp org_scope_request?(conn) do
+    conn.method == "GET" and conn.path_info in @org_scope_paths and
+      Map.get(conn.query_params, "workspaces") == "*"
+  end
 
   # GET/POST /api/workspaces (list/create) are tenant-parameterized, not
   # workspace-parameterized — only the /:id subroutes name a workspace, and
