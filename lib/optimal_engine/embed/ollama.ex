@@ -10,6 +10,8 @@ defmodule OptimalEngine.Embed.Ollama do
 
   require Logger
 
+  alias OptimalEngine.Store.FileCache
+
   @availability_ttl_ms 60_000
   @availability_cache_key :ollama_availability_cache
 
@@ -63,7 +65,9 @@ defmodule OptimalEngine.Embed.Ollama do
         # slower than 1 s is disqualified from the hot retrieval path.
         task =
           Task.async(fn ->
+            # A health probe must reach the embedder, never the cache.
             case embed_text("probe",
+                   cache: false,
                    model:
                      Application.get_env(:optimal_engine, :ollama, [])[:embed_model] ||
                        "nomic-embed-text"
@@ -91,6 +95,7 @@ defmodule OptimalEngine.Embed.Ollama do
 
   ## Options
   - `:model` — override the default embed model
+  - `:cache` — `false` bypasses the filesystem embedding cache (default `true`)
   """
   @spec embed(String.t(), keyword()) :: {:ok, [float()]} | {:error, atom()}
   def embed(text, opts \\ []), do: embed_text(text, opts)
@@ -128,6 +133,18 @@ defmodule OptimalEngine.Embed.Ollama do
         text
       end
 
+    # Embeddings are deterministic per model and input, so identical text is
+    # served from the rebuildable filesystem cache across restarts.
+    if Keyword.get(opts, :cache, true) do
+      FileCache.fetch("embeddings", "#{model}\0#{capped}", fn ->
+        request_text_embedding(model, capped)
+      end)
+    else
+      request_text_embedding(model, capped)
+    end
+  end
+
+  defp request_text_embedding(model, capped) do
     body = %{"model" => model, "input" => capped}
 
     case post_json("/api/embed", body) do

@@ -140,7 +140,7 @@ defmodule OptimalEngine.Health do
 
   defp safe_ollama_ping do
     try do
-      case Ollama.embed("health", model: "nomic-embed-text") do
+      case Ollama.embed("health", model: "nomic-embed-text", cache: false) do
         {:ok, _} -> :ok
         {:error, reason} -> {:error, reason}
       end
