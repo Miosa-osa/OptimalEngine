@@ -25,6 +25,7 @@ config :optimal_engine, :api_rate_limit,
   default_per_minute: 10_000
 
 config :optimal_engine, :metric_history, enabled: false
+config :optimal_engine, :session, llm_summary: false
 
 config :optimal_engine, :context_refresh_scheduler,
   enabled: false,
