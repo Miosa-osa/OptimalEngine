@@ -26,6 +26,9 @@ The current tracked contract is application `0.3.1`, API `v1`, contract schema `
 [test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
 Git SHA and timestamp are build-time metadata; changing branches does not prove an already running process changed.
 A missing build SHA may be reported as `unknown` and is not an acceptable exact-commit identity for an integration requiring a pin.
+The commit and build time are compiled into the release, so a build that reuses an earlier compilation of that module reports the values from that earlier compile rather than the ones it was given.
+Touch `lib/optimal_engine/version.ex` before a release build whose metadata changed; [deploy/Dockerfile.engine](../../deploy/Dockerfile.engine) does this so a cached build cannot bake a stale commit into a new image.
+Deleting the compiled module instead is not sufficient: Mix does not treat a missing output as stale, and the release then starts without that module while `/api/version` and `/api/health` fail.
 
 Canopy's workspace bridge validates a local checkout before running allowlisted Mix tasks.
 It checks the source root, canonical origin, clean status, pinned commit, and manifest compatibility.
