@@ -88,6 +88,9 @@ defmodule OptimalEngine.Application do
       # ── Read-only data-quality drift snapshots ───────────────────────────
       OptimalEngine.DataQualityScheduler,
 
+      # ── Durable metric history (Telemetry snapshots into metric_samples) ─
+      OptimalEngine.Telemetry.HistorySampler,
+
       # ── Connector pull loop (periodic intake FEED from enabled connectors) ─
       OptimalEngine.Connectors.PullScheduler
     ]
