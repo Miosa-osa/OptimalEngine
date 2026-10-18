@@ -566,7 +566,7 @@ call() {
 print_error_body() {
   [ -n "$R_BODY" ] || return 0
   _pe=$(printf '%s' "$R_BODY" | tr -d ' \n')
-  [ "$_pe" = "{\"error\":\"$_ce\"}" ] && return 0
+  [ "$_pe" = "$(printf '{"error":"%s"}' "$_ce" | tr -d ' \n')" ] && return 0
   printf '%s\n' "$(redact "$R_BODY")" >&2
 }
 

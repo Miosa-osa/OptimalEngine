@@ -420,6 +420,17 @@ class AuthAndSecrecyTests(CliTestCase):
         self.assertIn('workspace_scope_denied', result.stderr)
         self.assertIn('default:other', result.stderr)
 
+    def test_error_body_is_shown_only_when_it_adds_detail(self):
+        self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
+        self.fake.routes[('GET', '/api/search')] = (404, {'error': 'workspace not found'})
+        result = self.run_cli('search', 'x', 'example:other')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr.strip(), 'optimal: HTTP 404 from GET /api/search: workspace not found')
+        self.fake.routes[('POST', '/api/authority/requests')] = (403, {'error': 'denied', 'decision': {'effect': 'deny'}})
+        result = self.run_cli('authority', 'request', '--action', 'export', '--resource', 'optimal://x')
+        self.assertIn('"effect": "deny"', result.stderr)
+        self.assertIn('HTTP 403: denied', result.stderr)
+
     def test_workspace_required(self):
         self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
         self.fake.routes[('GET', '/api/memory')] = (400, {'error': 'workspace_required'})

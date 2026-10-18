@@ -49,13 +49,14 @@ Change a component version whenever persisted meaning or deterministic behavior 
 ## Creating a release
 
 1. Choose the next Semantic Version.
-2. Update `@version` in `mix.exs` and the matching version in `engine-contract.json`; update contract migration/capability fields when their meanings change.
+2. Update `@version` in `mix.exs` and the matching version in `engine-contract.json` and `OPTIMAL_CLI_VERSION` in `apps/cli/optimal`; update contract migration/capability fields when their meanings change.
 3. Run formatting, tests, release benchmarks, and `mix run --no-start scripts/check_release_version.exs`.
 4. Commit the complete release identity.
 5. Create the annotated tag `v<version>` on that exact commit.
 6. Push the commit and tag.
 7. Build with `OPTIMAL_ENGINE_GIT_SHA` and `OPTIMAL_ENGINE_BUILD_TIMESTAMP` set by CI.
 8. Verify the deployed `/api/version` response against the tag and expected migration.
+9. Build the client CLI archives with `apps/cli/build.sh` and publish them with `SHA256SUMS`; see [Client CLI and MCP server](cli.md).
 
 CI rejects a release tag that does not exactly match the application version.
 
