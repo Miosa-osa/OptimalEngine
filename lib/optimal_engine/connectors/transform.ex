@@ -80,11 +80,11 @@ defmodule OptimalEngine.Connectors.Transform do
   @doc """
   Parse an epoch timestamp into a `DateTime`. Accepts milliseconds or seconds,
   as a number or a decimal string, which is the shape several APIs use (Gmail's
-  `internalDate`, Stripe's `created`). Values above 10^11 are read as
-  milliseconds and anything smaller as seconds: no millisecond timestamp in use
-  today is that small, and no second timestamp that large has happened yet.
-  Returns the fallback (defaulting to now) when the input is missing or not a
-  number.
+  `internalDate`, Stripe's `created`). A string that is not all digits is read
+  as ISO-8601. Values above 10^11 are read as milliseconds and anything
+  smaller as seconds: no millisecond timestamp in use today is that small, and
+  no second timestamp that large has happened yet. Returns the fallback
+  (defaulting to now) when the input is missing or not a number.
   """
   @spec parse_epoch(term(), DateTime.t() | nil) :: DateTime.t()
   def parse_epoch(value, fallback \\ nil)
@@ -93,9 +93,14 @@ defmodule OptimalEngine.Connectors.Transform do
   def parse_epoch(value, fallback) when is_number(value), do: epoch_to_datetime(value, fallback)
 
   def parse_epoch(value, fallback) when is_binary(value) do
-    case Integer.parse(value) do
-      {n, _rest} -> epoch_to_datetime(n, fallback)
-      :error -> parse_iso8601(value, fallback)
+    # Only a string of digits (with an optional fraction) is an epoch. An
+    # ISO-8601 string also starts with digits, and reading its leading year as
+    # seconds would date the signal in 1970.
+    if Regex.match?(~r/\A\d+(\.\d+)?\z/, value) do
+      {n, _rest} = Integer.parse(value)
+      epoch_to_datetime(n, fallback)
+    else
+      parse_iso8601(value, fallback)
     end
   end
 

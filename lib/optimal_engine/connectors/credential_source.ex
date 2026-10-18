@@ -207,9 +207,22 @@ defmodule OptimalEngine.Connectors.CredentialSource do
 
   defp stringify(map), do: Map.new(map, fn {key, val} -> {to_string(key), val} end)
 
+  # A connector config arrives with string keys from the `connectors` table and
+  # with atom keys from a caller building one by hand, so both are read. The
+  # atom form is looked up without creating atoms.
   defp value(map, key) when is_map(map) do
-    Map.get(map, key) || Map.get(map, to_string(key))
+    Map.get(map, key) || Map.get(map, to_string(key)) || Map.get(map, atom_key(key))
   end
+
+  defp atom_key(key) when is_atom(key), do: key
+
+  defp atom_key(key) when is_binary(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp atom_key(_key), do: nil
 
   defp blank?(nil), do: true
   defp blank?(""), do: true

@@ -1,0 +1,283 @@
+{
+  "kind": "jot_form",
+  "note": "Recorded shapes of the JotForm API: a two-page form list and per-form submission lists, one of them two pages and one empty. The recording models an account whose page size is capped at 2, which keeps the two-page walks small; the adapter pages by the limit the response reports. Invented data only.",
+  "routes": [
+    {
+      "name": "forms_page_1",
+      "match": {
+        "method": "GET",
+        "absolute": "https://api.jotform.com/user/forms?apiKey=example-api-key&limit=100"
+      },
+      "status": 200,
+      "body": {
+        "responseCode": 200,
+        "message": "success",
+        "content": [
+          {
+            "id": "form_0001",
+            "title": "Contact Example Co",
+            "created_at": "2026-10-01 08:00:00",
+            "status": "ENABLED"
+          },
+          {
+            "id": "form_0002",
+            "title": "Event signup",
+            "created_at": "2026-10-02 08:00:00",
+            "status": "ENABLED"
+          }
+        ],
+        "resultSet": {
+          "offset": 0,
+          "limit": 2,
+          "count": 2
+        },
+        "limit-left": 998
+      }
+    },
+    {
+      "name": "forms_page_2",
+      "match": {
+        "method": "GET",
+        "absolute": "https://api.jotform.com/user/forms?apiKey=example-api-key&limit=100&offset=2"
+      },
+      "status": 200,
+      "body": {
+        "responseCode": 200,
+        "message": "success",
+        "content": [
+          {
+            "id": "form_0003",
+            "title": "Feedback survey",
+            "created_at": "2026-10-03 08:00:00",
+            "status": "ENABLED"
+          }
+        ],
+        "resultSet": {
+          "offset": 2,
+          "limit": 2,
+          "count": 1
+        },
+        "limit-left": 998
+      }
+    },
+    {
+      "name": "form_0001_submissions_page_1",
+      "match": {
+        "method": "GET",
+        "absolute": "https://api.jotform.com/form/form_0001/submissions?apiKey=example-api-key&limit=100&offset=0"
+      },
+      "status": 200,
+      "body": {
+        "responseCode": 200,
+        "message": "success",
+        "content": [
+          {
+            "id": "sub_0000001",
+            "form_id": "form_0001",
+            "created_at": "2026-10-26 09:00:00",
+            "updated_at": null,
+            "status": "ACTIVE",
+            "answers": {
+              "1": {
+                "name": "fullname",
+                "text": "Full Name",
+                "type": "control_fullname",
+                "order": "1",
+                "answer": {
+                  "first": "Jane",
+                  "last": "Example"
+                },
+                "prettyFormat": "Jane Example"
+              },
+              "2": {
+                "name": "email",
+                "text": "Email",
+                "type": "control_email",
+                "order": "2",
+                "answer": "jane@example.com"
+              },
+              "3": {
+                "name": "message",
+                "text": "How can we help?",
+                "type": "control_textarea",
+                "order": "3",
+                "answer": "Please send a quote for Example Co."
+              },
+              "4": {
+                "name": "submit",
+                "text": "Submit",
+                "type": "control_button",
+                "order": "4"
+              }
+            }
+          },
+          {
+            "id": "sub_0000002",
+            "form_id": "form_0001",
+            "created_at": "2026-10-26 09:30:00",
+            "updated_at": "2026-10-27 10:15:00",
+            "status": "ACTIVE",
+            "answers": {
+              "1": {
+                "name": "fullname",
+                "text": "Full Name",
+                "type": "control_textbox",
+                "order": "1",
+                "answer": "Sam Sample"
+              },
+              "2": {
+                "name": "email",
+                "text": "Email",
+                "type": "control_email",
+                "order": "2",
+                "answer": "sam@example.com"
+              },
+              "9": {
+                "name": "interests",
+                "text": "Interests",
+                "type": "control_checkbox",
+                "order": "9",
+                "answer": [
+                  "Pricing",
+                  "Support"
+                ]
+              },
+              "10": {
+                "name": "referral",
+                "text": "<b>Referral</b> source",
+                "type": "control_textbox",
+                "order": "10",
+                "answer": "Newsletter"
+              }
+            }
+          }
+        ],
+        "resultSet": {
+          "offset": 0,
+          "limit": 2,
+          "count": 2
+        },
+        "limit-left": 998
+      }
+    },
+    {
+      "name": "form_0001_submissions_page_2",
+      "match": {
+        "method": "GET",
+        "absolute": "https://api.jotform.com/form/form_0001/submissions?apiKey=example-api-key&limit=100&offset=2"
+      },
+      "status": 200,
+      "body": {
+        "responseCode": 200,
+        "message": "success",
+        "content": [
+          {
+            "id": "sub_0000003",
+            "form_id": "form_0001",
+            "created_at": "2026-10-28 11:45:00",
+            "updated_at": null,
+            "status": "ACTIVE",
+            "answers": {
+              "1": {
+                "name": "fullname",
+                "text": "Full Name",
+                "type": "control_textbox",
+                "order": "1",
+                "answer": "Alex Sample"
+              },
+              "2": {
+                "name": "email",
+                "text": "Email",
+                "type": "control_email",
+                "order": "2",
+                "answer": "alex@example.com"
+              },
+              "3": {
+                "name": "message",
+                "text": "How can we help?",
+                "type": "control_textarea",
+                "order": "3",
+                "answer": ""
+              }
+            }
+          }
+        ],
+        "resultSet": {
+          "offset": 2,
+          "limit": 2,
+          "count": 1
+        },
+        "limit-left": 998
+      }
+    },
+    {
+      "name": "form_0002_submissions_page_1",
+      "match": {
+        "method": "GET",
+        "absolute": "https://api.jotform.com/form/form_0002/submissions?apiKey=example-api-key&limit=100&offset=0"
+      },
+      "status": 200,
+      "body": {
+        "responseCode": 200,
+        "message": "success",
+        "content": [
+          {
+            "id": "sub_0000004",
+            "form_id": "form_0002",
+            "created_at": "2026-10-26 10:00:00",
+            "updated_at": null,
+            "status": "ACTIVE",
+            "answers": {
+              "1": {
+                "name": "fullname",
+                "text": "Full Name",
+                "type": "control_textbox",
+                "order": "1",
+                "answer": "Jane Example"
+              },
+              "2": {
+                "name": "email",
+                "text": "Email",
+                "type": "control_email",
+                "order": "2",
+                "answer": "jane@example.com"
+              },
+              "3": {
+                "name": "guests",
+                "text": "Number of guests",
+                "type": "control_textbox",
+                "order": "3",
+                "answer": "2"
+              }
+            }
+          }
+        ],
+        "resultSet": {
+          "offset": 0,
+          "limit": 2,
+          "count": 1
+        },
+        "limit-left": 998
+      }
+    },
+    {
+      "name": "form_0003_submissions_page_1",
+      "match": {
+        "method": "GET",
+        "absolute": "https://api.jotform.com/form/form_0003/submissions?apiKey=example-api-key&limit=100&offset=0"
+      },
+      "status": 200,
+      "body": {
+        "responseCode": 200,
+        "message": "success",
+        "content": [],
+        "resultSet": {
+          "offset": 0,
+          "limit": 2,
+          "count": 0
+        },
+        "limit-left": 998
+      }
+    }
+  ]
+}

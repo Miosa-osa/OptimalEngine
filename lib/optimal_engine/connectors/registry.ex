@@ -27,6 +27,11 @@ defmodule OptimalEngine.Connectors.Registry do
     Adapters.OneDrive,
     Adapters.Salesforce,
     Adapters.HubSpot,
+    Adapters.GoHighLevel,
+    Adapters.Stripe,
+    Adapters.Beehiiv,
+    Adapters.JotForm,
+    Adapters.Fathom,
     Adapters.SourcesFolder
   ]
 

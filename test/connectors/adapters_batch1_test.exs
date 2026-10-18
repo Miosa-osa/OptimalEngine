@@ -228,13 +228,17 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
           String.contains?(url, "/messages?") ->
             httpc_ok(%{"messages" => [], "nextPageToken" => nil})
 
+          # A full sync parks the cursor on the mailbox's current historyId.
+          String.contains?(url, "/profile") ->
+            httpc_ok(%{"historyId" => "900001"})
+
           true ->
             httpc_ok(%{})
         end
       end
 
       with_mock(base_mock, fn ->
-        assert {:ok, %{signals: _, cursor: _}} =
+        assert {:ok, %{signals: _, cursor: "900001"}} =
                  OptimalEngine.Connectors.Adapters.Gmail.sync(@gmail_state, nil)
 
         assert :ets.lookup(token_called, :called) == [{:called, true}]
