@@ -89,7 +89,10 @@ defmodule OptimalEngine.Application do
       OptimalEngine.DataQualityScheduler,
 
       # ── Connector pull loop (periodic intake FEED from enabled connectors) ─
-      OptimalEngine.Connectors.PullScheduler
+      OptimalEngine.Connectors.PullScheduler,
+
+      # ── Replication: change capture triggers, sealing, peer sync ─────────
+      OptimalEngine.Sync.Scheduler
     ]
   end
 

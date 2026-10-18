@@ -1,0 +1,161 @@
+defmodule OptimalEngine.API.SyncAPI do
+  @moduledoc """
+  Handlers for replication routes, called from `OptimalEngine.API.Router`.
+
+  | Route | Scope |
+  | --- | --- |
+  | `GET /api/sync/changes?workspace=&since=` | sync |
+  | `POST /api/sync/changes` (apply a batch from a peer) | sync |
+  | `POST /api/sync/enable`, `POST /api/sync/peers`, `POST /api/sync/run`, `POST /api/sync/conflicts/:id/resolve` | admin |
+  | `GET /api/sync/status?workspace=`, `GET /api/sync/conflicts?workspace=` | read |
+  """
+
+  import Plug.Conn
+
+  alias OptimalEngine.API.Actor
+  alias OptimalEngine.Sync
+
+  def changes(conn) do
+    conn = fetch_query_params(conn)
+    q = conn.query_params
+    workspace_id = q["workspace"] || q["workspace_id"]
+
+    cond do
+      is_nil(workspace_id) ->
+        error(conn, 400, "workspace is required")
+
+      not Sync.enabled?(workspace_id) ->
+        error(conn, 409, "sync_not_enabled")
+
+      true ->
+        requester = conn |> get_req_header("x-optimal-replica") |> List.first()
+        since = int(q["since"], 0)
+
+        json(
+          conn,
+          200,
+          Sync.changes(tenant(conn), workspace_id,
+            since: since,
+            limit: int(q["limit"], 500),
+            requester: requester
+          )
+        )
+    end
+  end
+
+  def apply(conn) do
+    body = body(conn)
+    workspace_id = body["workspace"] || body["workspace_id"]
+
+    with true <- is_binary(workspace_id) || {:error, :workspace_required},
+         true <- Sync.enabled?(workspace_id) || {:error, :sync_not_enabled},
+         :ok <- Sync.compatible(body["engine"] || %{}),
+         mutations when is_list(mutations) <- body["mutations"] || {:error, :mutations_required},
+         {:ok, result} <- Sync.apply_changes(tenant(conn), workspace_id, mutations) do
+      json(conn, 200, Map.put(result, :engine, Sync.engine_info()))
+    else
+      {:error, {:version_mismatch, message}} ->
+        json(conn, 409, %{error: "version_mismatch", message: message})
+
+      {:error, :sync_not_enabled} ->
+        error(conn, 409, "sync_not_enabled")
+
+      {:error, reason} ->
+        error(conn, 422, reason)
+    end
+  end
+
+  def enable(conn) do
+    body = body(conn)
+    workspace_id = body["workspace"] || body["workspace_id"]
+
+    if is_binary(workspace_id) do
+      {:ok, result} = Sync.enable(tenant(conn), workspace_id, Actor.of(conn, body))
+      json(conn, 200, result)
+    else
+      error(conn, 400, "workspace is required")
+    end
+  end
+
+  def add_peer(conn) do
+    body = body(conn)
+    attrs = Map.put_new(body, "workspace_id", body["workspace"])
+
+    case Sync.add_peer(tenant(conn), attrs, Actor.of(conn, body)) do
+      {:ok, peer} -> json(conn, 201, peer)
+      {:error, reason} -> error(conn, 422, reason)
+    end
+  end
+
+  def run(conn), do: json(conn, 200, %{results: Enum.map(Sync.run_all(), &plain/1)})
+
+  def status(conn) do
+    conn = fetch_query_params(conn)
+
+    case conn.query_params["workspace"] do
+      nil -> error(conn, 400, "workspace is required")
+      workspace_id -> json(conn, 200, Sync.status(tenant(conn), workspace_id))
+    end
+  end
+
+  def conflicts(conn) do
+    conn = fetch_query_params(conn)
+
+    case conn.query_params["workspace"] do
+      nil ->
+        error(conn, 400, "workspace is required")
+
+      workspace_id ->
+        json(conn, 200, %{
+          conflicts:
+            Sync.conflicts(tenant(conn), workspace_id, conn.query_params["state"] || "open")
+        })
+    end
+  end
+
+  def resolve(conn, id) do
+    case Sync.resolve_conflict(tenant(conn), id, Actor.of(conn)) do
+      :ok -> json(conn, 200, %{resolved: id})
+      {:error, :not_found} -> error(conn, 404, "conflict not found")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+
+  # Peer results carry {:ok, _} and {:error, _} tuples; JSON gets plain maps.
+  defp plain({:ok, value}), do: %{ok: plain(value)}
+  defp plain({:error, reason}), do: %{error: inspect(reason)}
+  defp plain(%{} = map) when not is_struct(map), do: Map.new(map, fn {k, v} -> {k, plain(v)} end)
+  defp plain(list) when is_list(list), do: Enum.map(list, &plain/1)
+  defp plain(value) when is_tuple(value), do: inspect(value)
+  defp plain(value), do: value
+
+  defp tenant(conn), do: conn.assigns[:current_tenant] || "default"
+
+  defp body(conn) do
+    case conn.body_params do
+      %{} = params when not is_struct(params) -> params
+      _ -> %{}
+    end
+  end
+
+  defp int(nil, default), do: default
+
+  defp int(value, default) do
+    case Integer.parse(to_string(value)) do
+      {n, ""} -> n
+      _ -> default
+    end
+  end
+
+  defp error(conn, status, reason) when is_atom(reason),
+    do: error(conn, status, Atom.to_string(reason))
+
+  defp error(conn, status, reason), do: json(conn, status, %{error: reason})
+
+  defp json(conn, status, data) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(status, Jason.encode!(data))
+  end
+end

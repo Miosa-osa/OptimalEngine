@@ -132,6 +132,8 @@ defmodule OptimalEngine.API.AuthorityPlug do
   defp action(_method, ["storage", "workspaces", _id, segment | _])
        when segment in ["mutations", "cursors"], do: "sync"
 
+  defp action(_method, ["sync" | _]), do: "sync"
+
   defp action("GET", ["batch", "export" | _]), do: "export"
 
   defp action(method, [root | _]) when root in @search_roots and method in ["GET", "POST"],

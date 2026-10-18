@@ -575,6 +575,17 @@
       "owns": []
     },
     {
+      "id": "docs-guides-replication",
+      "path": "docs/guides/replication.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-18",
+      "owns": []
+    },
+    {
       "id": "docs-guides-scope-switching",
       "path": "docs/guides/scope-switching.md",
       "kind": "reference",
