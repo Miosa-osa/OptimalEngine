@@ -12,6 +12,12 @@ defmodule OptimalEngine.Conformance.StoreProof do
   onto one conformance check. The HTTP client is untouched: the proof answers
   for the code in this checkout, and the other checks answer for the Engine the
   caller pointed the suite at.
+
+  The proof always runs with `MIX_ENV=test`, whatever environment the suite was
+  started in, and with `OPTIMAL_API_ENABLED=false`. The test environment does not
+  enable the HTTP API, while the development environment does, on port 4200: a
+  proof started from a development run would otherwise try to bind the port a
+  live Engine may already serve, or serve an empty store on it if it does not.
   """
 
   alias OptimalEngine.Conformance
@@ -114,7 +120,9 @@ defmodule OptimalEngine.Conformance.StoreProof do
          %{
            script: shown(script),
            exit_status: exit_status,
+           mix_env: "test",
            error: reason,
+           output_head: head(out),
            output_tail: tail(out)
          }}
     end
@@ -154,7 +162,7 @@ defmodule OptimalEngine.Conformance.StoreProof do
 
   defp environment(root, report_path) do
     [
-      {"MIX_ENV", mix_env()},
+      {"MIX_ENV", "test"},
       {"OPTIMAL_API_ENABLED", "false"},
       {"OPTIMAL_ENGINE_ROOT", Path.join(root, "root")},
       {"OPTIMAL_ENGINE_DB", Path.join(root, "engine.db")},
@@ -168,15 +176,11 @@ defmodule OptimalEngine.Conformance.StoreProof do
     ]
   end
 
-  # The proof runs in the environment the suite was started in, so a checkout
-  # that already compiled for tests does not compile again for the proof.
-  defp mix_env do
-    if Code.ensure_loaded?(Mix) and function_exported?(Mix, :env, 0),
-      do: to_string(Mix.env()),
-      else: "dev"
-  end
-
   defp shown(script), do: Path.relative_to_cwd(script)
+
+  # The first lines carry the failure, the last lines carry the shutdown.
+  defp head(out) when is_binary(out), do: out |> String.split("\n") |> Enum.take(6)
+  defp head(out), do: inspect(out)
 
   defp tail(out) when is_binary(out), do: out |> String.split("\n") |> Enum.take(-8)
   defp tail(out), do: inspect(out)
