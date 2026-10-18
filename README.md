@@ -4,7 +4,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-4B275F.svg)](mix.exs)
 
-Current source contract: application `0.3.1`, API `v1`, contract schema `1`, expected migration `64`.
+Current source contract: application `0.3.1`, API `v1`, contract schema `1`, expected migration `65`.
 See [engine-contract.json](engine-contract.json), [release identity](docs/guides/versioning-and-releases.md), and [document authority](docs/guides/agent-control-plane.md).
 A clean pinned checkout does not prove the identity of a separately running HTTP service.
 

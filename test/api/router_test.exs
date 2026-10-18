@@ -53,7 +53,7 @@ defmodule OptimalEngine.API.RouterTest do
       assert {:ok, body} = Jason.decode(conn.resp_body)
       assert body["application"] == "optimal_engine"
       assert body["version"] == "0.3.1"
-      assert body["expected_migration"] == 64
+      assert body["expected_migration"] == 65
       assert body["components"]["candidate_portfolio"] == "candidate-portfolio-v1"
     end
   end
@@ -64,7 +64,7 @@ defmodule OptimalEngine.API.RouterTest do
       assert conn.status == 200
       assert {:ok, body} = Jason.decode(conn.resp_body)
       assert body["release"]["version"] == "0.3.1"
-      assert body["release"]["expected_migration"] == 64
+      assert body["release"]["expected_migration"] == 65
     end
   end
 
