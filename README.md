@@ -764,6 +764,9 @@ recorded instead of being hidden.
 
 ## Quick Start
 
+The shortest path from nothing to a workspace you can search, with no other product installed, is [the Engine-only quickstart](docs/guides/quickstart.md).
+This section is the same ground in more detail.
+
 Requirements:
 
 - Elixir `~> 1.17`
@@ -964,6 +967,7 @@ They must describe how to use the engine without embedding private stores, user 
 ## Docker And Deployment
 
 Docker is optional.
+[deploy/Dockerfile.engine](deploy/Dockerfile.engine) builds a release image with `/data` as its only writable volume, env-only secrets, and a health check against the authenticated `/api/health` route; [the Engine-only quickstart](docs/guides/quickstart.md) walks through building, minting the first key, and running it.
 
 Use local Elixir/SQLite for development and personal use:
 
