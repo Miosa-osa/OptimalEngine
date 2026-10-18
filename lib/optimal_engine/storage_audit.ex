@@ -2,7 +2,7 @@ defmodule OptimalEngine.StorageAudit do
   @moduledoc "Deep, read-only health audit for every engine storage layer."
 
   alias OptimalEngine.{Backup, StorageCatalog, Store}
-  alias OptimalEngine.Storage.Assets
+  alias OptimalEngine.Storage.{Assets, S3}
   alias OptimalEngine.Pipeline.Decomposer.RLM
 
   @scoped_tables ~w(contexts chunks chunk_embeddings memories claims facts memory_objects source_packages)
@@ -179,25 +179,66 @@ defmodule OptimalEngine.StorageAudit do
     end
   end
 
+  # The newest verified backup must exist somewhere. A local copy is the common
+  # case; a backup whose local copy was removed after it was shipped offsite is
+  # still a backup, so the object is confirmed before it is called missing.
   defp verified_backup do
     sql = """
-    SELECT storage_uri, checksum_sha256
+    SELECT storage_uri, checksum_sha256, offsite, metadata
     FROM backup_records
     WHERE status = 'completed' AND integrity_status = 'verified'
-    ORDER BY verified_at DESC LIMIT 1
+    ORDER BY verified_at DESC, rowid DESC LIMIT 1
     """
 
     case Store.raw_query(sql, []) do
-      {:ok, [[path, checksum]]} when is_binary(checksum) ->
-        if File.regular?(path) and String.length(checksum) == 64,
-          do: {:ok, %{path: path, checksum: checksum}},
-          else: {:error, :verified_backup_missing}
+      {:ok, [[path, checksum, offsite, metadata]]} when is_binary(checksum) ->
+        cond do
+          String.length(checksum) != 64 ->
+            {:error, :verified_backup_missing}
+
+          File.regular?(path) ->
+            {:ok, %{path: path, checksum: checksum, copies: ["local"]}}
+
+          offsite == 1 ->
+            offsite_backup(metadata, checksum)
+
+          true ->
+            {:error, :verified_backup_missing}
+        end
 
       {:ok, []} ->
         {:error, :no_verified_backup}
 
       other ->
         {:error, other}
+    end
+  end
+
+  # An offsite-only backup is confirmed by asking the object store for it, so a
+  # bucket that is unreachable or missing the object is reported, not assumed.
+  defp offsite_backup(metadata, checksum) do
+    with {:ok, decoded} <- decode_metadata(metadata),
+         uri when is_binary(uri) <- decoded["offsite_uri"],
+         {:ok, _bucket, key} <- S3.parse_uri(uri),
+         {:ok, object} <- S3.head_object(key, max_retries: 0) do
+      {:ok,
+       %{
+         path: nil,
+         offsite_uri: uri,
+         checksum: checksum,
+         size_bytes: object.size_bytes,
+         copies: ["offsite"]
+       }}
+    else
+      nil -> {:error, :verified_backup_missing}
+      _ -> {:error, :verified_backup_unreachable}
+    end
+  end
+
+  defp decode_metadata(metadata) do
+    case Jason.decode(metadata || "{}") do
+      {:ok, decoded} when is_map(decoded) -> {:ok, decoded}
+      _ -> {:error, :invalid_backup_metadata}
     end
   end
 

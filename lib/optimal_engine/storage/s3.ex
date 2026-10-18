@@ -539,9 +539,26 @@ defmodule OptimalEngine.Storage.S3 do
   # a test. Attempt 0 waits 100 ms, attempt 1 waits 200 ms, and so on.
   defp backoff(attempt), do: Process.sleep(100 * Integer.pow(2, attempt))
 
+  defp ensure_http_started do
+    case Application.ensure_all_started(:inets) do
+      {:ok, _} -> :ok
+      {:error, _reason} -> :ok
+    end
+
+    case Application.ensure_all_started(:ssl) do
+      {:ok, _} -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
+
   defp retryable_status?(status), do: status == 429 or status == 408 or status >= 500
 
   defp perform(config, request, opts) do
+    # A Mix task that loads configuration without starting the application still
+    # has to be able to reach the bucket, so the HTTP client stack is started here
+    # rather than assumed.
+    ensure_http_started()
+
     now = DateTime.utc_now()
     payload_hash = sha256(request.body)
     headers = signed_headers(config, request, payload_hash, now)
