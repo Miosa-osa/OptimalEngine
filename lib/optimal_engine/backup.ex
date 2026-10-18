@@ -48,7 +48,7 @@ defmodule OptimalEngine.Backup do
 
   Options:
 
-    * `:offsite` — when true, copy the verified backup to the S3 object store
+    * `:offsite` - when true, copy the verified backup to the S3 object store
       after it is cataloged. The local backup is complete either way; a failed
       ship is reported in `:offsite` with `status: "failed"` rather than
       discarding it or pretending the copy exists.
@@ -248,10 +248,10 @@ defmodule OptimalEngine.Backup do
 
   Options:
 
-    * `:target` — destination database path (required; restoring over the live
+    * `:target` - destination database path (required; restoring over the live
       database requires the engine to be stopped, as `restore/2` enforces)
-    * `:data_dir` — destination directory, restored to `<data_dir>/index.db`
-    * `:keep_download` — keep the downloaded copy and return its path
+    * `:data_dir` - destination directory, restored to `<data_dir>/index.db`
+    * `:keep_download` - keep the downloaded copy and return its path
   """
   @spec restore_offsite(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
