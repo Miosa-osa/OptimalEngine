@@ -71,6 +71,86 @@ defmodule OptimalEngine.Connectors.CredentialTest do
     end
   end
 
+  describe "persisted connector rows" do
+    alias OptimalEngine.Connectors.Runner
+    alias OptimalEngine.Store
+
+    defp stored_config(id) do
+      {:ok, [[json]]} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [id])
+      json
+    end
+
+    test "string-keyed credentials are stored only as an envelope" do
+      System.put_env("CONNECTOR_KEY", @valid_key)
+      id = "credential-string-#{System.unique_integer([:positive])}"
+
+      assert {:ok, ^id} =
+               Runner.upsert_row(%{
+                 id: id,
+                 kind: :slack,
+                 config: %{"channels" => ["C01"], "credentials" => %{"bot_token" => "xoxb-str"}}
+               })
+
+      json = stored_config(id)
+      refute json =~ "xoxb-str"
+      assert {:ok, %{"credentials_ciphertext" => envelope} = config} = Jason.decode(json)
+      refute Map.has_key?(config, "credentials")
+      assert {:ok, %{"bot_token" => "xoxb-str"}} = Credential.decrypt(envelope)
+    end
+
+    test "atom-keyed credentials are stored only as an envelope" do
+      System.put_env("CONNECTOR_KEY", @valid_key)
+      id = "credential-atom-#{System.unique_integer([:positive])}"
+
+      assert {:ok, ^id} =
+               Runner.upsert_row(%{
+                 id: id,
+                 kind: :slack,
+                 config: %{channels: ["C01"], credentials: %{bot_token: "xoxb-atom"}}
+               })
+
+      json = stored_config(id)
+      refute json =~ "xoxb-atom"
+      assert {:ok, %{"credentials_ciphertext" => envelope} = config} = Jason.decode(json)
+      refute Map.has_key?(config, "credentials")
+      assert config["channels"] == ["C01"]
+      assert {:ok, %{"bot_token" => "xoxb-atom"}} = Credential.decrypt(envelope)
+    end
+
+    test "credentials are refused, never stored in plaintext, without a master key" do
+      System.delete_env("CONNECTOR_KEY")
+      id = "credential-nokey-#{System.unique_integer([:positive])}"
+
+      for config <- [
+            %{"credentials" => %{"bot_token" => "xoxb-plain"}},
+            %{credentials: %{bot_token: "xoxb-plain"}}
+          ] do
+        assert {:error, :connector_key_missing} =
+                 Runner.upsert_row(%{id: id, kind: :slack, config: config})
+      end
+
+      assert {:ok, []} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [id])
+    end
+
+    test "non-map credentials are rejected instead of persisted" do
+      System.put_env("CONNECTOR_KEY", @valid_key)
+      id = "credential-invalid-#{System.unique_integer([:positive])}"
+
+      assert {:error, :invalid_credentials} =
+               Runner.upsert_row(%{id: id, kind: :slack, config: %{"credentials" => "xoxb-raw"}})
+
+      assert {:ok, []} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [id])
+    end
+
+    test "configs without credentials do not need a master key" do
+      System.delete_env("CONNECTOR_KEY")
+      id = "credential-none-#{System.unique_integer([:positive])}"
+
+      assert {:ok, ^id} =
+               Runner.upsert_row(%{id: id, kind: :slack, config: %{"channels" => ["C01"]}})
+    end
+  end
+
   describe "ready?/0" do
     test "true when key set, false otherwise" do
       System.put_env("CONNECTOR_KEY", @valid_key)
