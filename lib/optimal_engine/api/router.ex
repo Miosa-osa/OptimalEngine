@@ -3204,6 +3204,22 @@ defmodule OptimalEngine.API.Router do
   get("/api/sync/conflicts", do: SyncAPI.conflicts(conn))
   post("/api/sync/conflicts/:id/resolve", do: SyncAPI.resolve(conn, id))
 
+  # ── Viability, Signal events, agent action chains (ViabilityAPI) ─────────
+  alias OptimalEngine.API.ViabilityAPI
+
+  get("/api/viability", do: ViabilityAPI.report(conn))
+  get("/api/viability/history", do: ViabilityAPI.history(conn))
+  get("/api/viability/metrics", do: ViabilityAPI.metrics(conn))
+  post("/api/viability/snapshot", do: ViabilityAPI.snapshot(conn))
+  get("/api/viability/audit", do: ViabilityAPI.audit_list(conn))
+  post("/api/viability/audit/run", do: ViabilityAPI.audit_run(conn))
+  post("/api/viability/audit/:id/review", do: ViabilityAPI.audit_review(conn, id))
+  get("/api/signal-events", do: ViabilityAPI.events_list(conn))
+  post("/api/signal-events", do: ViabilityAPI.events_create(conn))
+  get("/api/agent-actions", do: ViabilityAPI.actions_list(conn))
+  post("/api/agent-actions", do: ViabilityAPI.actions_record(conn))
+  get("/api/agent-actions/:id", do: ViabilityAPI.actions_trace(conn, id))
+
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
 
   match _ do

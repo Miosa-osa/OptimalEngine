@@ -2,6 +2,7 @@ defmodule OptimalEngine.ReviewQueue do
   @moduledoc "Evidence-preserving review interface for claim and routing decisions."
 
   alias OptimalEngine.{CorpusOrganizer, MemoryCore, Store}
+  alias OptimalEngine.Viability.Audit
 
   def claims(workspace_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 25)
@@ -77,6 +78,22 @@ defmodule OptimalEngine.ReviewQueue do
       ) WHERE id = ?1 AND workspace_id = 'default:knowledge-intake' AND archived_at IS NULL
       """,
       [id, actor_id]
+    )
+  end
+
+  @doc "Flagged System 3* audit samples in `workspace_ids`."
+  def audits(tenant_id, workspace_ids, opts \\ []) do
+    {:ok, Audit.list(tenant_id, workspace_ids, Keyword.put(opts, :state, "flagged"))}
+  end
+
+  @doc "Confirms or dismisses a flagged audit sample."
+  def decide_audit(tenant_id, id, decision, opts \\ []) when decision in [:confirm, :dismiss] do
+    Audit.review(
+      tenant_id,
+      id,
+      Atom.to_string(decision),
+      Keyword.get(opts, :actor_id, "unknown"),
+      opts[:note]
     )
   end
 

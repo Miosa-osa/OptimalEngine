@@ -20,6 +20,7 @@ defmodule OptimalEngine.Routing.RuleStore do
   """
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Viability.SignalEvents
 
   @fields ~w(sender domain label channel keyword)
   @minimum_score 8
@@ -193,7 +194,29 @@ defmodule OptimalEngine.Routing.RuleStore do
         )
       end)
 
+    if decision == :reject and updated > 0, do: note_reroute(tenant_id, rule_ids)
+
     {:ok, updated}
+  end
+
+  # A rejected routing decision is a bounce for the workspaces whose rules fired.
+  defp note_reroute(tenant_id, rule_ids) do
+    placeholders = rule_ids |> Enum.with_index(2) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
+
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT DISTINCT workspace_id FROM routing_rules WHERE tenant_id = ?1 AND id IN (#{placeholders})",
+        [tenant_id | rule_ids]
+      )
+
+    for [workspace_id] <- rows do
+      SignalEvents.note(tenant_id, %{
+        "workspace_id" => workspace_id,
+        "kind" => "rerouted",
+        "ref" => Enum.join(rule_ids, ","),
+        "metadata" => %{"source" => "routing_feedback"}
+      })
+    end
   end
 
   @doc "Loads the routing file's keyword rules as seed rules."

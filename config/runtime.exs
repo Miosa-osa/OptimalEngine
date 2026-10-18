@@ -165,6 +165,11 @@ if interval = System.get_env("OPTIMAL_SYNC_INTERVAL_MS") do
   config :optimal_engine, :sync_interval_ms, String.to_integer(interval)
 end
 
+# Viability: how often snapshots and the weekly audit are brought up to date.
+if interval = System.get_env("OPTIMAL_VIABILITY_INTERVAL_MS") do
+  config :optimal_engine, :viability_interval_ms, String.to_integer(interval)
+end
+
 # Optimal Authority. OPTIMAL_AUTHORITY_KEY (64 hex characters) wraps the
 # signing keys and is read directly by OptimalEngine.Authority.Keys.
 authority_mode = System.get_env("OPTIMAL_AUTHORITY_MODE")

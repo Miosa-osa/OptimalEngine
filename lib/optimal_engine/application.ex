@@ -92,7 +92,10 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Connectors.PullScheduler,
 
       # ── Replication: change capture triggers, sealing, peer sync ─────────
-      OptimalEngine.Sync.Scheduler
+      OptimalEngine.Sync.Scheduler,
+
+      # ── Viability: daily snapshots and the weekly System 3* audit ────────
+      OptimalEngine.Viability.Scheduler
     ]
   end
 

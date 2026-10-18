@@ -123,7 +123,14 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
     end
   end
 
-  @org_scope_paths [["api", "brief"], ["api", "loops"]]
+  @org_scope_paths [
+    ["api", "brief"],
+    ["api", "loops"],
+    ["api", "viability"],
+    ["api", "viability", "history"],
+    ["api", "viability", "metrics"],
+    ["api", "viability", "audit"]
+  ]
 
   defp org_scope_request?(conn) do
     conn.method == "GET" and conn.path_info in @org_scope_paths and

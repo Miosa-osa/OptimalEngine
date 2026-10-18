@@ -153,9 +153,27 @@ defmodule OptimalEngine.Pipeline.Classifier do
       created_at: nil,
       modified_at: nil,
       routed_to: (signal && signal.routed_to) || [],
-      metadata: build_file_metadata(path)
+      metadata: Map.merge(build_file_metadata(path), frontmatter_metadata(content))
     }
   end
+
+  # Frontmatter fields kept on the context: a cross-reference copy names the
+  # node it was copied from, and a writer may mark a Signal as sent
+  # (`direction: outbound`) or outward (`outward: market`).
+  @frontmatter_metadata ~w(cross_ref_from direction outward)
+
+  @doc false
+  def frontmatter_metadata(content) when is_binary(content) do
+    {frontmatter, _body} = parse_frontmatter(content)
+
+    frontmatter
+    |> Map.take(@frontmatter_metadata)
+    |> Enum.filter(fn {_key, value} -> is_binary(value) or is_atom(value) end)
+    |> Enum.reject(fn {_key, value} -> is_nil(value) or is_boolean(value) end)
+    |> Map.new(fn {key, value} -> {key, to_string(value)} end)
+  end
+
+  def frontmatter_metadata(_content), do: %{}
 
   @doc """
   Classifies raw markdown content into signal dimensions (Mode + Genre + Type + Format + Structure).

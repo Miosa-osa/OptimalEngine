@@ -24,6 +24,9 @@ config :optimal_engine, :api_rate_limit,
   default_capacity: 10_000,
   default_per_minute: 10_000
 
+# Viability passes run on demand in tests.
+config :optimal_engine, :viability_interval_ms, 0
+
 config :optimal_engine, :context_refresh_scheduler,
   enabled: false,
   boot_delay_ms: 1_000,

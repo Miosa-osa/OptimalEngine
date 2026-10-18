@@ -93,6 +93,14 @@ defmodule OptimalEngine.API.PermissionPlug do
       match?(["api", "sync" | _], conn.path_info) ->
         sync_scope(conn.method, tl(tl(conn.path_info)))
 
+      mutation and path in ["/api/viability/snapshot", "/api/viability/audit/run"] ->
+        "admin"
+
+      mutation and path == "/api/agent-actions" and
+          (is_map(conn.body_params) and not is_struct(conn.body_params) and
+             conn.body_params["stage"] in ["approval", "denial"]) ->
+        "authority:enforce"
+
       String.starts_with?(path, "/api/auth/keys") or String.starts_with?(path, "/api/principals") or
         path == "/api/backup" or String.starts_with?(path, "/api/topology") or
         String.starts_with?(path, "/api/bundles") or

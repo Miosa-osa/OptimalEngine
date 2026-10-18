@@ -55,7 +55,9 @@ defmodule OptimalEngine.Operating.Brief do
 
     items =
       (loop_items ++
-         approval_items(tenant_id, workspace_ids) ++ review_items(tenant_id, workspace_ids))
+         approval_items(tenant_id, workspace_ids) ++
+         review_items(tenant_id, workspace_ids) ++
+         audit_items(tenant_id, workspace_ids))
       |> Enum.sort_by(&{rank(&1.category), &1[:due_at] || "9999"})
       |> Enum.take(Keyword.get(opts, :limit, 25))
 
@@ -157,6 +159,39 @@ defmodule OptimalEngine.Operating.Brief do
     end
   end
 
-  @order ~w(overdue due_soon owed_reply money decision_needed approval stalled review)
+  # Flagged System 3* audit samples, one item per workspace.
+  defp audit_items(tenant_id, workspace_ids) do
+    {filter, params} =
+      case workspace_ids do
+        nil ->
+          {"", [tenant_id]}
+
+        ids ->
+          placeholders = ids |> Enum.with_index(2) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
+          {" AND workspace_id IN (#{placeholders})", [tenant_id | ids]}
+      end
+
+    case Store.raw_query(
+           "SELECT workspace_id, COUNT(*) FROM audit_samples WHERE tenant_id = ?1 AND state = 'flagged'#{filter} GROUP BY workspace_id",
+           params
+         ) do
+      {:ok, rows} ->
+        for [workspace_id, count] <- rows, count > 0 do
+          %{
+            category: "audit",
+            title: "#{count} audit samples flagged in #{workspace_id}",
+            workspace_id: workspace_id,
+            sources: ["optimal://#{workspace_id}/viability/audit"],
+            next_action:
+              "Confirm or dismiss them (GET /api/viability/audit?workspace=#{workspace_id}&state=flagged)."
+          }
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  @order ~w(overdue due_soon owed_reply money decision_needed approval stalled review audit)
   defp rank(category), do: Enum.find_index(@order, &(&1 == category)) || 99
 end
