@@ -217,7 +217,7 @@ value_opt() {
       tier | kind | owner | counterparty | due | due-before | reason | source-uri | state | cadence | \
       timezone | type | intent | scale | modality | path | action | resource | data-class | subject | \
       ttl | sender | domain | label | channel | text | since | name | workspaces | date | query | \
-      audience | justification | for | slug | days) return 0 ;;
+      audience | justification | for | slug | days | bandwidth) return 0 ;;
   esac
   return 1
 }
@@ -851,6 +851,8 @@ Setup and health
   viability [ws] [--workspaces *]  VSM systems, proxy metrics, variety ratio, alerts
   viability history [ws] [--days 30]
   chain <correlation|request|grant id> [ws]   an agent action's linked evidence
+  check "draft"|- [ws] [--channel sms|whatsapp|chat|slack|email|brief|document] [--bandwidth] [--genre] [--type]
+                                   pre-send check against the receiver, with a shorter version
 
 Engine
   status | health | version | doctor | url | workspaces | organizations
@@ -1150,6 +1152,14 @@ case $CMD in
         get /api/viability "" workspace "$WS"
       fi
     fi
+    ;;
+  check)
+    too_many $# 2 check
+    _draft=$(need_text "${1:-}" "draft") || exit
+    use_ws "${2:-}"
+    post /api/signals/check "$(jobj workspace "$WS" draft "$_draft" \
+      @receiver "$(jobj channel "${O_channel:-}" bandwidth "${O_bandwidth:-}")" \
+      genre "${O_genre:-}" type "${O_type:-}")"
     ;;
   chain)
     too_many $# 2 chain

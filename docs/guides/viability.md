@@ -89,6 +89,25 @@ Backfilled days carry metrics only, since how the systems stood then was not rec
 `POST /api/viability/snapshot {workspace | workspaces: "*", days}` (admin) catches up now.
 `OPTIMAL_VIABILITY_INTERVAL_MS` sets the pass interval (default one hour, 0 disables).
 
+## Pre-send check
+
+Agents check a draft against its receiver before sending it:
+
+```
+POST /api/signals/check {"workspace": "<id>", "draft": "...", "receiver": {"channel": "whatsapp"}, "genre": "email", "type": "direct"}
+```
+
+| Flag | Constraint | When | Suggestion |
+| --- | --- | --- | --- |
+| `bandwidth_overload` | Shannon | longer than the receiver takes (sms 60 words; whatsapp, chat, slack 150; email 400; brief 300; document 5,000; or bandwidth low 150, medium 400, high 2,000) | a shorter version keeping the opening sentences and the first explicit ask |
+| `genre_mismatch` | Ashby | the draft reads as a genre the channel does not expect, or not as the genre declared for it | the expected genre and its required parts |
+| `missing_type` | Wiener | declared as a request but asks for nothing | state the ask and its date first |
+| `routing_failure` | Shannon | no receiver named | name the channel or bandwidth |
+
+The check suggests; sending stays with the approval policy.
+Each check with a workspace records a `genre_checked` Signal event, which the genre recognition rate reads.
+The CLI is `optimal check "draft" --channel whatsapp`; the MCP tool is `check_draft`.
+
 ## Agent action chains
 
 Every agent action that goes through an approval is recorded as linked steps: `request`, `approval` or `denial`, `action`, `result`, `reply`.

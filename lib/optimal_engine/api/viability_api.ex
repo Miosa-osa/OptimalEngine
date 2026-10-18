@@ -13,6 +13,7 @@ defmodule OptimalEngine.API.ViabilityAPI do
   | `POST /api/viability/audit/run {workspace, size}` | admin |
   | `POST /api/viability/audit/:id/review {workspace, decision, note}` | write |
   | `GET /api/signal-events?workspace=&kind=`, `POST /api/signal-events` | read, write |
+  | `POST /api/signals/check {draft, receiver, genre, type, workspace}` (pre-send check) | write |
   | `GET /api/agent-actions?workspace=`, `GET /api/agent-actions/:id?workspace=` | read |
   | `POST /api/agent-actions` (stages approval and denial need `authority:enforce`) | write |
 
@@ -24,6 +25,7 @@ defmodule OptimalEngine.API.ViabilityAPI do
 
   alias OptimalEngine.API.{Actor, OperatingAPI}
   alias OptimalEngine.Authority.ActionChain
+  alias OptimalEngine.Signal.PreSend
   alias OptimalEngine.Store
   alias OptimalEngine.Viability
   alias OptimalEngine.Viability.{Audit, Metrics, SignalEvents}
@@ -149,6 +151,30 @@ defmodule OptimalEngine.API.ViabilityAPI do
           limit: int(conn.query_params["limit"], 100)
         )
     })
+  end
+
+  # -- pre-send check ------------------------------------------------------------
+
+  def pre_send(conn) do
+    body = body(conn)
+
+    case body["draft"] do
+      draft when is_binary(draft) and draft != "" ->
+        json(
+          conn,
+          200,
+          PreSend.check(draft, body["receiver"] || %{},
+            genre: body["genre"],
+            type: body["type"],
+            tenant_id: tenant(conn),
+            workspace_id: body["workspace"],
+            actor: Actor.of(conn, body)
+          )
+        )
+
+      _ ->
+        error(conn, 400, "draft is required")
+    end
   end
 
   # -- agent action chains -------------------------------------------------------
