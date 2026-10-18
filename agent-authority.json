@@ -608,6 +608,28 @@
       "owns": []
     },
     {
+      "id": "docs-guides-sizing-and-presets",
+      "path": "docs/guides/sizing-and-presets.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-18",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-recipes",
+      "path": "docs/guides/recipes.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-18",
+      "owns": []
+    },
+    {
       "id": "docs-guides-viability",
       "path": "docs/guides/viability.md",
       "kind": "reference",

@@ -616,7 +616,7 @@ defmodule OptimalEngine.API.Router do
         :exit, _ -> %{counters: %{}, histograms: %{}, uptime_ms: 0}
       end
 
-    json(conn, snap)
+    json(conn, Map.put(snap, :sizing, OptimalEngine.Sizing.usage()))
   end
 
   # Agent-facing inventory of every logical data store and index.
@@ -629,6 +629,12 @@ defmodule OptimalEngine.API.Router do
     audit = OptimalEngine.StorageAudit.run()
     conn |> put_status(if(audit.ok, do: 200, else: 503)) |> json(audit)
   end
+
+  # Size profile, usage against its limits, and use-case presets (SetupAPI).
+  get("/api/storage", do: OptimalEngine.API.SetupAPI.usage(conn))
+  get("/api/storage/profiles", do: OptimalEngine.API.SetupAPI.profiles(conn))
+  get("/api/init/presets", do: OptimalEngine.API.SetupAPI.presets(conn))
+  post("/api/init", do: OptimalEngine.API.SetupAPI.init(conn))
 
   # Physical provider inventory. Logical stores above describe ownership;
   # providers describe replaceable deployment technology.

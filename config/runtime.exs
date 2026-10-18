@@ -165,6 +165,15 @@ if interval = System.get_env("OPTIMAL_SYNC_INTERVAL_MS") do
   config :optimal_engine, :sync_interval_ms, String.to_integer(interval)
 end
 
+# Size profile: agent, workspace, business, platform, or scale (OptimalEngine.Sizing).
+if profile = System.get_env("OPTIMAL_SIZE_PROFILE") do
+  unless profile in ~w(agent workspace business platform scale) do
+    raise "OPTIMAL_SIZE_PROFILE must be agent, workspace, business, platform, or scale"
+  end
+
+  config :optimal_engine, :size_profile, profile
+end
+
 # Viability: how often snapshots and the weekly audit are brought up to date.
 if interval = System.get_env("OPTIMAL_VIABILITY_INTERVAL_MS") do
   config :optimal_engine, :viability_interval_ms, String.to_integer(interval)

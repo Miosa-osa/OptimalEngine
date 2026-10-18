@@ -150,7 +150,7 @@ class VersionAndAliasTests(CliTestCase):
                         'assemble', 'read', 'capture', 'aware', 'note', 'lesson', 'decision', 'task',
                         'close', 'memory', 'claims', 'review', 'routing', 'authority', 'status',
                         'version', 'start', 'stop', 'restart', 'log', 'index', 'graph',
-                        'reality-check', 'backup']:
+                        'reality-check', 'backup', 'init', 'size', 'viability', 'chain']:
             self.assertIn(command, text)
 
 
@@ -260,6 +260,17 @@ class RouteMappingTests(CliTestCase):
         self.check(['backup', '--name', 'nightly.db'], 'POST', '/api/backup', body={'name': 'nightly.db'})
         self.check(['api', 'GET', '/api/stats'], 'GET', '/api/stats')
         self.check(['api', 'post', '/api/memory', '{"content":"x"}'], 'POST', '/api/memory', body={'content': 'x'})
+
+    def test_setup_and_health_commands(self):
+        ws = 'default:sales'
+        self.check(['init', '--for', 'business', '--slug', 'brain', '--name', 'Brain'], 'POST', '/api/init',
+                   body={'for': 'business', 'slug': 'brain', 'name': 'Brain'})
+        self.check(['size'], 'GET', '/api/storage')
+        self.check(['viability', ws], 'GET', '/api/viability', {'workspace': ws})
+        self.check(['viability', '--workspaces', '*'], 'GET', '/api/viability', {'workspaces': '*'})
+        self.check(['viability', 'history', ws, '--days', '14'], 'GET', '/api/viability/history',
+                   {'workspace': ws, 'days': '14'})
+        self.check(['chain', 'act_1f2e', ws], 'GET', '/api/agent-actions/act_1f2e', {'workspace': ws})
 
     def test_stdin_text(self):
         self.check(['capture', '-', 'default:sales'], 'POST', '/api/ingest',
@@ -381,7 +392,8 @@ class ConfigTests(CliTestCase):
     def test_usage_errors(self):
         self.engine()
         for args in [['search'], ['bogus'], ['search', 'x', '--nope'], ['-n', 'ten', 'search', 'x'],
-                     ['loops', 'close', '../x'], ['authority', 'decide']]:
+                     ['loops', 'close', '../x'], ['authority', 'decide'], ['init'], ['chain'],
+                     ['chain', '../x'], ['viability', 'history', '--days', 'ten']]:
             with self.subTest(args=args):
                 self.assertEqual(self.run_cli(*args).returncode, 64)
 

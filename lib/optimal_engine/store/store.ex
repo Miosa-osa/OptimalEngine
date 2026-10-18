@@ -68,7 +68,6 @@ defmodule OptimalEngine.Store do
   alias OptimalEngine.{Context, Graph, Signal}
 
   @ets_table :optimal_engine_store_cache
-  @ets_max 500
 
   # ---------------------------------------------------------------------------
   # Schema DDL
@@ -651,6 +650,7 @@ defmodule OptimalEngine.Store do
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA foreign_keys=ON"),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA recursive_triggers=ON"),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA synchronous=NORMAL"),
+         :ok <- apply_size_profile(db),
          :ok <- Exqlite.Sqlite3.execute(db, @ddl_contexts),
          :ok <- migrate_from_signals_table(db),
          :ok <- run_contexts_column_migrations(db),
@@ -1677,8 +1677,18 @@ defmodule OptimalEngine.Store do
     end
   end
 
+  # The size profile sets the page cache and memory map (OptimalEngine.Sizing).
+  defp apply_size_profile(db) do
+    cache_kib = OptimalEngine.Sizing.tuning(:sqlite_cache_mib) * 1_024
+    mmap_bytes = OptimalEngine.Sizing.tuning(:sqlite_mmap_mib) * 1_048_576
+
+    with :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA cache_size=-#{cache_kib}") do
+      Exqlite.Sqlite3.execute(db, "PRAGMA mmap_size=#{mmap_bytes}")
+    end
+  end
+
   defp cache_put(id, ctx) do
-    if :ets.info(@ets_table, :size) >= @ets_max do
+    if :ets.info(@ets_table, :size) >= OptimalEngine.Sizing.tuning(:context_cache_entries) do
       case :ets.first(@ets_table) do
         :"$end_of_table" -> :ok
         old_key -> :ets.delete(@ets_table, old_key)

@@ -508,6 +508,29 @@ For repeatable goal loops with checklists, validation gates, stop conditions,
 and memory/audit outputs, read
 [`docs/guides/agentic-loops.md`](docs/guides/agentic-loops.md).
 
+For who or what may read, write, share, export, erase, sync, or act (policy
+packs, signed grants, enforcement, and the evidence chain), read
+[`docs/guides/optimal-authority.md`](docs/guides/optimal-authority.md).
+
+For boot, the decision brief, open loops, rhythm, the operating protocol,
+portable topology, and routing rules, read
+[`docs/guides/operating-layer.md`](docs/guides/operating-layer.md).
+
+For org and workspace Engines, share-up, federated search, and moving a
+workspace between Engines, read
+[`docs/guides/scope-and-portability.md`](docs/guides/scope-and-portability.md);
+for keeping local and cloud Engines in step, read
+[`docs/guides/replication.md`](docs/guides/replication.md).
+
+For the five VSM systems, the Signal Theory proxy metrics, the variety ratio,
+trajectory alerts, the weekly audit, and agent action chains, read
+[`docs/guides/viability.md`](docs/guides/viability.md).
+
+For size profiles, usage against their limits, and one-step presets
+(`optimal init --for agent|workspace|business|app|tenant-per-customer`), read
+[`docs/guides/sizing-and-presets.md`](docs/guides/sizing-and-presets.md) and the
+[recipes](docs/guides/recipes.md).
+
 The short version for users bringing their own agents:
 
 ```text

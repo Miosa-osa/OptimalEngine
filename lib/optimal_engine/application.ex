@@ -17,6 +17,8 @@ defmodule OptimalEngine.Application do
 
   @impl true
   def start(_type, _args) do
+    OptimalEngine.Sizing.boot_started()
+
     children =
       base_children() ++ OptimalEngine.API.Endpoint.children()
 
@@ -24,6 +26,7 @@ defmodule OptimalEngine.Application do
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
+        OptimalEngine.Sizing.boot_finished()
         Logger.info("[OptimalEngine] Supervision tree started (#{inspect(pid)})")
         {:ok, pid}
 

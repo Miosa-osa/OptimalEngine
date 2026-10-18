@@ -217,7 +217,7 @@ value_opt() {
       tier | kind | owner | counterparty | due | due-before | reason | source-uri | state | cadence | \
       timezone | type | intent | scale | modality | path | action | resource | data-class | subject | \
       ttl | sender | domain | label | channel | text | since | name | workspaces | date | query | \
-      audience | justification) return 0 ;;
+      audience | justification | for | slug | days) return 0 ;;
   esac
   return 1
 }
@@ -845,6 +845,13 @@ Route and authority
   authority decide --action <a> --resource <optimal://...> [--data-class] [--subject] [ws]
   authority request --action <a> --resource <optimal://...> [--data-class] [--ttl] [--justification] [ws]
 
+Setup and health
+  init --for agent|workspace|business|app|tenant-per-customer [--slug] [--name]   (admin scope)
+  size                             size profile, usage against its limits, resize advice
+  viability [ws] [--workspaces *]  VSM systems, proxy metrics, variety ratio, alerts
+  viability history [ws] [--days 30]
+  chain <correlation|request|grant id> [ws]   an agent action's linked evidence
+
 Engine
   status | health | version | doctor | url | workspaces | organizations
   api <METHOD> /api/<path> [json|-]  any other route, with the same auth
@@ -1113,6 +1120,43 @@ case $CMD in
         ;;
       *) usage_die "authority needs effective, decide or request" ;;
     esac
+    ;;
+  init)
+    too_many $# 0 init
+    [ -n "${O_for:-}" ] || usage_die "init needs --for agent|workspace|business|app|tenant-per-customer"
+    post /api/init "$(jobj for "$O_for" slug "${O_slug:-}" name "${O_name:-}")"
+    ;;
+  size | usage)
+    too_many $# 0 "$CMD"
+    get /api/storage ""
+    ;;
+  viability)
+    if [ "${1:-}" = history ]; then
+      shift
+      too_many $# 1 "viability history"
+      use_ws "${1:-}"
+      case ${O_days:-} in *[!0-9]*) usage_die "--days takes a whole number" ;; esac
+      if [ -n "${O_workspaces:-}" ]; then
+        get /api/viability/history "" workspaces "$O_workspaces" days "${O_days:-}"
+      else
+        get /api/viability/history "" workspace "$WS" days "${O_days:-}"
+      fi
+    else
+      too_many $# 1 viability
+      use_ws "${1:-}"
+      if [ -n "${O_workspaces:-}" ]; then
+        get /api/viability "" workspaces "$O_workspaces"
+      else
+        get /api/viability "" workspace "$WS"
+      fi
+    fi
+    ;;
+  chain)
+    too_many $# 2 chain
+    [ -n "${1:-}" ] || usage_die "missing correlation, request, or grant id"
+    case $1 in *[!A-Za-z0-9._:-]*) usage_die "invalid id" ;; esac
+    use_ws "${2:-}"
+    get "/api/agent-actions/$1" "" workspace "$WS"
     ;;
   workspaces)
     too_many $# 0 workspaces

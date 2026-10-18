@@ -420,7 +420,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           Map.put(
             attrs,
             :organization_id,
-            opts[:organization_id] || default_organization(tenant_id)
+            opts[:organization_id] || OptimalEngine.Organization.default_for(tenant_id)
           )
 
         case Workspace.create(attrs) do
@@ -434,26 +434,6 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   # The tenant's default organization, created on first use.
-  defp default_organization(tenant_id) do
-    id = if tenant_id == "default", do: "default", else: "#{tenant_id}:default"
-
-    case OptimalEngine.Organization.get(id) do
-      {:ok, _} ->
-        id
-
-      {:error, :not_found} ->
-        {:ok, _} =
-          OptimalEngine.Organization.create(%{
-            id: id,
-            tenant_id: tenant_id,
-            slug: "default",
-            name: tenant_id
-          })
-
-        id
-    end
-  end
-
   # Every column a bundle carries must exist in the target Engine.
   defp compatible(manifest, _staging) do
     missing =
