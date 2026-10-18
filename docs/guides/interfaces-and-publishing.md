@@ -213,10 +213,12 @@ npm run build
 The MCP server is a tool surface over the HTTP API. It needs:
 
 ```text
-engine URL
-scoped API key
-default workspace
+engine URL          OPTIMAL_ENGINE_URL
+scoped API key      OPTIMAL_ENGINE_API_KEY
+default workspace   OPTIMAL_WORKSPACE
 ```
+
+It reads the same settings and profile as the `optimal` client; see [Client CLI and MCP server](cli.md).
 
 MCP is best when the agent needs authenticated, schema-described access to
 workspace, memory, retrieval, wiki/export, and context tools. CLI is still

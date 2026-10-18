@@ -14,6 +14,10 @@ import { registerRecall } from "./tools/recall.js";
 import { registerWikiGet } from "./tools/wiki_get.js";
 import { registerWorkspaces } from "./tools/workspaces.js";
 import { registerRenderContext } from "./tools/render_context.js";
+import { registerOperating } from "./tools/operating.js";
+import { registerContext } from "./tools/context.js";
+import { registerRecord } from "./tools/record.js";
+import { registerAuthority } from "./tools/authority.js";
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -31,6 +35,10 @@ export function createServer(): McpServer {
   registerWikiGet(server);
   registerWorkspaces(server);
   registerRenderContext(server);
+  registerOperating(server);
+  registerContext(server);
+  registerRecord(server);
+  registerAuthority(server);
 
   return server;
 }

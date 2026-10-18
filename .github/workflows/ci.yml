@@ -82,3 +82,23 @@ jobs:
         run: mix test
         env:
           MIX_ENV: test
+
+  mcp:
+    name: mcp server (build and test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and test
+        run: npm test
