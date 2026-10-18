@@ -7,7 +7,7 @@ defmodule OptimalEngine.Viability.Audit do
   | Layer | Weight | Scored from |
   | --- | --- | --- |
   | formal | 0.40 | a title, a body of at least 20 words, recorded dimensions, and the genre's required sections when the text has headings |
-  | semantic | 0.35 | agreement between the recorded genre and the genre the text reads as, between the recorded mode and the mode the text shows (code, data, or linguistic; read independently of the classifier), and the classifier's S/N estimate |
+  | semantic | 0.35 | agreement between the recorded genre and the genre the text reads as, between the recorded mode and the mode the current detector reads with strong evidence, and the classifier's S/N estimate |
   | information | 0.25 | novelty against the 30 Signals before it in the workspace (1 minus the highest word-trigram overlap), scaled down under 20 words |
 
   Signals sent are those with `metadata.direction = "outbound"` or a
@@ -18,11 +18,10 @@ defmodule OptimalEngine.Viability.Audit do
   confirmed or dismissed.
   """
 
-  alias OptimalEngine.Signal.GenreRegistry
+  alias OptimalEngine.Signal.{GenreRegistry, ModeDetector}
   alias OptimalEngine.Store
 
   @weights %{formal: 0.40, semantic: 0.35, information: 0.25}
-  @code_line ~r/^\s*(def |defp |defmodule |function |class |import |from \S+ import |const |let |var |public |private |#include|SELECT |INSERT |CREATE TABLE|<\/?[a-z]+[ >])|[;{}]\s*$/
   @default_size 10
   @flag_below 0.5
   @layer_floor 0.4
@@ -346,43 +345,21 @@ defmodule OptimalEngine.Viability.Audit do
     {value, findings}
   end
 
-  # The audit reads the mode from the text itself, independently of the
-  # classifier, for the modes text can show: code, data, or linguistic.
-  # Visual, audio, and mixed Signals are not judged.
+  # The audit re-reads the mode from the text with the current detector and
+  # judges it only on strong evidence, so Signals stored by an older or wrong
+  # classification are caught. Visual, audio, and mixed records are not judged.
   defp mode_fit(recorded, content) when recorded in ["linguistic", "code", "data"] do
-    plausible = plausible_mode(content)
-    {if(plausible == recorded, do: 1.0, else: 0.0), plausible}
+    case ModeDetector.detect(content) do
+      {mode, :strong} ->
+        plausible = Atom.to_string(mode)
+        {if(plausible == recorded, do: 1.0, else: 0.0), plausible}
+
+      _weak ->
+        nil
+    end
   end
 
   defp mode_fit(_recorded, _content), do: nil
-
-  @doc false
-  def plausible_mode(content) do
-    lines = content |> String.split("\n") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
-    count = max(length(lines), 1)
-    code_lines = Enum.count(lines, &Regex.match?(@code_line, &1))
-
-    tabular =
-      Enum.count(lines, fn line ->
-        length(String.split(line, [",", "\t", "|"])) >= 4 or
-          Regex.match?(~r/^[\[{].*[\]}],?$/, line)
-      end)
-
-    chars = String.replace(content, ~r/\s/u, "")
-    digits = chars |> String.replace(~r/[^0-9]/, "") |> String.length()
-
-    cond do
-      String.contains?(content, "```") or (code_lines >= 3 and code_lines / count >= 0.3) ->
-        "code"
-
-      (count >= 3 and tabular / count >= 0.5) or
-          (String.length(chars) > 20 and digits / String.length(chars) > 0.4) ->
-        "data"
-
-      true ->
-        "linguistic"
-    end
-  end
 
   defp information(content, words, priors) do
     grams = trigrams(content)
