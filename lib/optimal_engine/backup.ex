@@ -127,14 +127,18 @@ defmodule OptimalEngine.Backup do
     end
   end
 
+  # Only the checksum check runs after a successful upload, so that is the only
+  # path where an object may be sitting in the bucket and has to be removed.
   defp ship_object(key, row) do
-    with {:ok, object} <- S3.put_file(key, row.target, []),
-         :ok <- match_object_checksum(object, row) do
-      {:ok}
-    else
-      {:error, reason} ->
-        discard_object(key, reason)
-        {:error, reason}
+    with {:ok, object} <- S3.put_file(key, row.target, []) do
+      case match_object_checksum(object, row) do
+        :ok ->
+          {:ok}
+
+        {:error, reason} ->
+          discard_object(key, reason)
+          {:error, reason}
+      end
     end
   end
 
