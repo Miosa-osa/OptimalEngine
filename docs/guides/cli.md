@@ -125,6 +125,8 @@ Text arguments may be `-` to read standard input.
 | `viability [ws] [--workspaces *]`, `viability history [ws] [--days]` | `GET /api/viability`, `GET /api/viability/history` |
 | `chain <correlation, request, or grant id> [ws]` | `GET /api/agent-actions/:id` |
 | `check "draft"\|- [ws] [--channel --bandwidth --genre --type]` | `POST /api/signals/check` (pre-send check) |
+| `analyses [ws] [--kind]`, `analyses run <kind> [ws]` | `GET /api/analyses`, `POST /api/analyses/run` (admin scope) |
+| `jobs [ws] [--state]` | `GET /api/jobs` |
 | `status`, `health`, `workspaces`, `organizations` | `GET /api/status`, `/api/health`, `/api/workspaces`, `/api/organizations` |
 | `version` | client version and `GET /api/version` |
 | `doctor` | configuration sources, curl version, and health |

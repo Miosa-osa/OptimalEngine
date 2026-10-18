@@ -182,7 +182,8 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   # The sink the Runner invokes with the connector's emitted signals + a
   # scope map carrying the workspace. Each signal's body is re-driven
   # through the full intake pipeline, attributed to the connector workspace.
-  defp intake_sink do
+  @doc false
+  def intake_sink do
     fn signals, scope ->
       Enum.each(signals, fn signal ->
         ingest_signal(signal, scope)

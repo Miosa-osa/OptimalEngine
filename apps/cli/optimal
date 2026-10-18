@@ -853,6 +853,10 @@ Setup and health
   chain <correlation|request|grant id> [ws]   an agent action's linked evidence
   check "draft"|- [ws] [--channel sms|whatsapp|chat|slack|email|brief|document] [--bandwidth] [--genre] [--type]
                                    pre-send check against the receiver, with a shorter version
+  analyses [ws] [--kind]           reports of the scheduled analyses
+  analyses run <kind> [ws]         run one now (admin scope): promises, workspace_population,
+                                   meeting_archive, file_audit, storage_usage, retention_sweep
+  jobs [ws] [--state available|running|completed|dead]
 
 Engine
   status | health | version | doctor | url | workspaces | organizations
@@ -1160,6 +1164,25 @@ case $CMD in
     post /api/signals/check "$(jobj workspace "$WS" draft "$_draft" \
       @receiver "$(jobj channel "${O_channel:-}" bandwidth "${O_bandwidth:-}")" \
       genre "${O_genre:-}" type "${O_type:-}")"
+    ;;
+  analyses)
+    if [ "${1:-}" = run ]; then
+      shift
+      too_many $# 2 "analyses run"
+      [ -n "${1:-}" ] || usage_die "analyses run needs a kind"
+      case $1 in *[!a-z_]*) usage_die "invalid analysis kind" ;; esac
+      use_ws "${2:-}"
+      post /api/analyses/run "$(jobj workspace "$WS" kind "$1")"
+    else
+      too_many $# 1 analyses
+      use_ws "${1:-}"
+      get /api/analyses "" workspace "$WS" kind "${O_kind:-}" limit "${O_limit:-}"
+    fi
+    ;;
+  jobs)
+    too_many $# 1 jobs
+    use_ws "${1:-}"
+    get /api/jobs "" workspace "$WS" status "${O_state:-}" limit "${O_limit:-}"
     ;;
   chain)
     too_many $# 2 chain

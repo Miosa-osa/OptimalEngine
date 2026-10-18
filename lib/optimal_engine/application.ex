@@ -101,7 +101,10 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Sync.Scheduler,
 
       # ── Viability: daily snapshots and the weekly System 3* audit ────────
-      OptimalEngine.Viability.Scheduler
+      OptimalEngine.Viability.Scheduler,
+
+      # ── Analyses as scheduled jobs (promises, audits, usage, retention) ──
+      OptimalEngine.Analyses.Worker
     ]
   end
 

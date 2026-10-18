@@ -150,7 +150,7 @@ class VersionAndAliasTests(CliTestCase):
                         'assemble', 'read', 'capture', 'aware', 'note', 'lesson', 'decision', 'task',
                         'close', 'memory', 'claims', 'review', 'routing', 'authority', 'status',
                         'version', 'start', 'stop', 'restart', 'log', 'index', 'graph',
-                        'reality-check', 'backup', 'init', 'size', 'viability', 'chain', 'check']:
+                        'reality-check', 'backup', 'init', 'size', 'viability', 'chain', 'check', 'analyses', 'jobs']:
             self.assertIn(command, text)
 
 
@@ -266,6 +266,10 @@ class RouteMappingTests(CliTestCase):
         self.check(['init', '--for', 'business', '--slug', 'brain', '--name', 'Brain'], 'POST', '/api/init',
                    body={'for': 'business', 'slug': 'brain', 'name': 'Brain'})
         self.check(['size'], 'GET', '/api/storage')
+        self.check(['analyses', ws, '--kind', 'promises'], 'GET', '/api/analyses', {'workspace': ws, 'kind': 'promises'})
+        self.check(['analyses', 'run', 'storage_usage', ws], 'POST', '/api/analyses/run',
+                   body={'workspace': ws, 'kind': 'storage_usage'})
+        self.check(['jobs', ws, '--state', 'dead'], 'GET', '/api/jobs', {'workspace': ws, 'status': 'dead'})
         self.check(['viability', ws], 'GET', '/api/viability', {'workspace': ws})
         self.check(['viability', '--workspaces', '*'], 'GET', '/api/viability', {'workspaces': '*'})
         self.check(['viability', 'history', ws, '--days', '14'], 'GET', '/api/viability/history',
@@ -397,7 +401,8 @@ class ConfigTests(CliTestCase):
         self.engine()
         for args in [['search'], ['bogus'], ['search', 'x', '--nope'], ['-n', 'ten', 'search', 'x'],
                      ['loops', 'close', '../x'], ['authority', 'decide'], ['init'], ['chain'],
-                     ['chain', '../x'], ['viability', 'history', '--days', 'ten']]:
+                     ['chain', '../x'], ['viability', 'history', '--days', 'ten'], ['analyses', 'run'],
+                     ['analyses', 'run', '../x']]:
             with self.subTest(args=args):
                 self.assertEqual(self.run_cli(*args).returncode, 64)
 
