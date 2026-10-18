@@ -15,6 +15,7 @@ defmodule OptimalEngine.Connectors.WorkspaceScopingTest do
   alias OptimalEngine.Connectors
   alias OptimalEngine.Connectors.Runner
   alias OptimalEngine.Store
+  alias OptimalEngine.Test.ConnectorFixtureStub
 
   defmodule StubAdapter do
     @moduledoc "Behaviour-compliant adapter that returns one synthetic signal."
@@ -111,9 +112,15 @@ defmodule OptimalEngine.Connectors.WorkspaceScopingTest do
         }
       })
 
-    # Slack's real sync is :not_implemented — the run errors, but the run row
-    # must still be attributed to the connector's workspace.
+    # The real Slack sync runs against a stubbed API that rejects the token, so the
+    # run errors with :auth_expired. The run row must still be attributed to the
+    # connector's workspace.
+    stub = ConnectorFixtureStub.install(:slack, body: %{"ok" => false, "error" => "invalid_auth"})
+    on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
+
     {:ok, result} = Runner.run(id)
+    assert result.status == :error
+    assert result.reason == :auth_expired
     assert result.workspace_id == ws
 
     {:ok, [[run_ws]]} =
