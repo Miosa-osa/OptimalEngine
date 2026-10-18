@@ -1,4 +1,31 @@
 export { OptimalEngine } from "./client.js";
+export { CollectionClient, DataClient, DataError, defineCollection } from "./data.js";
+export type {
+  AlterOperation,
+  Change,
+  ChangesPage,
+  Collection,
+  CollectionDefinition,
+  Data,
+  DataFile,
+  DataKey,
+  DataKeyOptions,
+  DataRecord,
+  FieldCondition,
+  FieldDefinition,
+  FieldOperators,
+  FieldType,
+  FieldValue,
+  IndexDefinition,
+  Migration,
+  Operation,
+  QueryResult,
+  QuerySpec,
+  RecordOf,
+  SortKey,
+  TransactionResult,
+  Where,
+} from "./data.js";
 export { OptimalEngineError } from "./error.js";
 export { MemoryClient } from "./memory.js";
 export { WikiClient } from "./profile.js";

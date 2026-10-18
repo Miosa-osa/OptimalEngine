@@ -23,6 +23,15 @@ from __future__ import annotations
 
 from ._async_client import AsyncOptimalEngine
 from ._client import OptimalEngine
+from .data import (
+    AsyncCollection,
+    AsyncDataResource,
+    Collection,
+    DataRecord,
+    DataResource,
+    FileRange,
+    QueryResult,
+)
 from .exceptions import (
     APIConnectionError,
     APIStatusError,
@@ -75,6 +84,14 @@ __all__ = [
     # Clients
     "AsyncOptimalEngine",
     "OptimalEngine",
+    # App data
+    "AsyncCollection",
+    "AsyncDataResource",
+    "Collection",
+    "DataRecord",
+    "DataResource",
+    "FileRange",
+    "QueryResult",
     # Exceptions
     "APIConnectionError",
     "APIStatusError",
