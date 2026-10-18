@@ -17,6 +17,20 @@ defmodule OptimalEngine.Pipeline.Decomposer.RLMTest do
              RLM.decompose("A long source", script: script, runner: runner)
   end
 
+  test "the default runner delivers the payload to the sidecar on stdin" do
+    script =
+      temporary_script("""
+      payload=$(cat)
+      case "$payload" in
+        *"A long source"*) echo '{"strategy":"rlm","atoms":[{"title":"stdin"}]}' ;;
+        *) echo "payload missing" >&2; exit 7 ;;
+      esac
+      """)
+
+    assert {:ok, %{"atoms" => [%{"title" => "stdin"}]}} =
+             RLM.decompose("A long source", command: "sh", script: script)
+  end
+
   test "rejects empty sidecar output" do
     script = temporary_script()
     runner = fn _, _, _ -> {Jason.encode!(%{"atoms" => []}), 0} end
@@ -45,9 +59,9 @@ defmodule OptimalEngine.Pipeline.Decomposer.RLMTest do
              RLM.health(script: script, runner: runner, timeout: 5)
   end
 
-  defp temporary_script do
+  defp temporary_script(body \\ "# test") do
     path = Path.join(System.tmp_dir!(), "optimal-rlm-#{System.unique_integer([:positive])}.py")
-    File.write!(path, "# test")
+    File.write!(path, body)
     on_exit(fn -> File.rm(path) end)
     path
   end
