@@ -1,7 +1,7 @@
 {
   "name": "@optimal-engine/mcp",
   "version": "0.3.0",
-  "description": "First-party MCP server for Optimal Engine — exposes workspace, memory, retrieval, wiki/export, and context tools to agent clients.",
+  "description": "First-party MCP server for Optimal Engine: boot, brief, loops, protocol, search, assemble, read, capture, record, close, authority, memory, retrieval, and wiki tools for agent clients.",
   "main": "dist/index.js",
   "bin": {
     "optimal-engine-mcp": "dist/index.js"
@@ -11,7 +11,9 @@
     "build": "tsc --noEmit && tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
