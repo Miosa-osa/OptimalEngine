@@ -234,6 +234,67 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDBTest do
     end
   end
 
+  describe "persistence across reopen" do
+    setup do
+      store_id = "reopen_#{:erlang.unique_integer([:positive])}"
+      path = Path.join(System.tmp_dir!(), "optimal_knowledge_rocksdb_reopen/#{store_id}")
+      on_exit(fn -> File.rm_rf!(path) end)
+      %{store_id: store_id, path: path}
+    end
+
+    test "quads written before a restart decode to the same terms", %{
+      store_id: store_id,
+      path: path
+    } do
+      {:ok, first} = RocksDB.init(store_id, path: path)
+      {:ok, first} = RocksDB.assert(first, "ws-a", "alice", "knows", "bob")
+      {:ok, first} = RocksDB.assert(first, "ws-a", "bob", "knows", "carol")
+      :ok = RocksDB.terminate(first)
+
+      {:ok, reopened} = RocksDB.init(store_id, path: path)
+
+      assert {:ok, 2} = RocksDB.count(reopened)
+
+      assert {:ok, all} = RocksDB.query(reopened, [])
+      assert Enum.sort(all) == [{"alice", "knows", "bob"}, {"bob", "knows", "carol"}]
+
+      assert {:ok, [{"alice", "knows", "bob"}]} = RocksDB.query(reopened, subject: "alice")
+
+      assert {:ok, [{"bob", "knows", "carol"}]} =
+               RocksDB.query(reopened, graph: "ws-a", subject: "bob")
+
+      # New terms after a restart must not reuse IDs of persisted terms.
+      {:ok, reopened} = RocksDB.assert(reopened, "ws-a", "dave", "likes", "erin")
+      assert {:ok, [{"dave", "likes", "erin"}]} = RocksDB.query(reopened, subject: "dave")
+      assert {:ok, [{"alice", "knows", "bob"}]} = RocksDB.query(reopened, subject: "alice")
+      :ok = RocksDB.terminate(reopened)
+    end
+
+    test "a projection written without a persisted dictionary is discarded, not misread", %{
+      store_id: store_id,
+      path: path
+    } do
+      {:ok, first} = RocksDB.init(store_id, path: path)
+      {:ok, first} = RocksDB.assert(first, "alice", "knows", "bob")
+      :ok = RocksDB.terminate(first)
+      drop_terms_column_family(path)
+
+      {:ok, reopened} = RocksDB.init(store_id, path: path)
+      assert {:ok, 0} = RocksDB.count(reopened)
+      assert {:ok, []} = RocksDB.query(reopened, [])
+      :ok = RocksDB.terminate(reopened)
+    end
+  end
+
+  # Simulates a store written before the term dictionary was persisted.
+  defp drop_terms_column_family(path) do
+    {:ok, names} = :rocksdb.list_column_families(to_charlist(path), [])
+    {:ok, db, handles} = :rocksdb.open(to_charlist(path), [], Enum.map(names, &{&1, []}))
+    {_name, terms} = names |> Enum.zip(handles) |> Enum.find(fn {name, _} -> name == ~c"terms" end)
+    :ok = :rocksdb.drop_column_family(db, terms)
+    :ok = :rocksdb.close(db)
+  end
+
   describe "count/1" do
     test "returns 0 for empty store", %{state: state} do
       {:ok, count} = RocksDB.count(state)
