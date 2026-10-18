@@ -37,3 +37,4 @@ config :optimal_engine, :hybrid_search, vector_enabled: false
 config :optimal_engine, :memory_embeddings, auto_index: false
 config :optimal_engine, :embed, on_ingest: false
 config :optimal_engine, :semantic_processing, enabled: false
+config :optimal_engine, :app_data, semantic_indexing: :off

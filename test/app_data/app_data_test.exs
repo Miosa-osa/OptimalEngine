@@ -315,11 +315,12 @@ defmodule OptimalEngine.AppDataTest do
                  "fields" => [
                    %{"name" => "id", "type" => "string"},
                    %{"name" => "x\"; DROP TABLE contexts; --", "type" => "string"},
-                   %{"name" => "y", "type" => "money"}
+                   %{"name" => "y", "type" => "money"},
+                   %{"name" => "or", "type" => "string"}
                  ]
                })
 
-      assert length(errors) == 3
+      assert length(errors) == 4
     end
 
     test "defaults, required, enum, unique and type checks" do

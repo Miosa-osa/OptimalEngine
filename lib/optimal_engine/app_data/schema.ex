@@ -26,7 +26,8 @@ defmodule OptimalEngine.AppData.Schema do
   @on_delete ~w(restrict set_null cascade)
   @identifier ~r/^[a-z][a-z0-9_]{0,62}$/
   @record_id ~r/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
-  @reserved ~w(id version created_at updated_at created_by updated_by)
+  # System fields, and the filter combinators a field name would shadow.
+  @reserved ~w(id version created_at updated_at created_by updated_by and or not)
 
   @max_fields 200
   @max_indexes 32
