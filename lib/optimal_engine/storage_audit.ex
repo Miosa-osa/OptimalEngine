@@ -2,6 +2,7 @@ defmodule OptimalEngine.StorageAudit do
   @moduledoc "Deep, read-only health audit for every engine storage layer."
 
   alias OptimalEngine.{Backup, StorageCatalog, Store}
+  alias OptimalEngine.Storage.Assets
   alias OptimalEngine.Pipeline.Decomposer.RLM
 
   @scoped_tables ~w(contexts chunks chunk_embeddings memories claims facts memory_objects source_packages)
@@ -163,14 +164,15 @@ defmodule OptimalEngine.StorageAudit do
     end
   end
 
+  # Assets are files on the local filesystem by default and objects in a bucket
+  # when the workspace storage policy or the engine selects S3. Both are checked,
+  # and an object that cannot be confirmed is a failure, not a pass.
   defp asset_files do
     case Store.raw_query("SELECT storage_path FROM assets", []) do
       {:ok, rows} ->
-        missing = rows |> Enum.map(&hd/1) |> Enum.reject(&File.regular?/1)
-
-        if missing == [],
-          do: {:ok, %{cataloged: length(rows)}},
-          else: {:error, %{missing: length(missing)}}
+        rows
+        |> Enum.map(&hd/1)
+        |> Assets.inventory()
 
       other ->
         {:error, other}
