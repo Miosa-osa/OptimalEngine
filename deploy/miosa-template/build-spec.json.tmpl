@@ -1,0 +1,23 @@
+{
+  "name": "optimal-engine",
+  "description": "Optimal Engine: a workspace's Memory (search, graph, claims). Auth required; the first key arrives as OPTIMAL_BOOTSTRAP_KEY.",
+  "build_spec": {
+    "from": { "image": "__ENGINE_IMAGE__" },
+    "size": "medium",
+    "env": {
+      "OPTIMAL_API_ENABLED": "true",
+      "OPTIMAL_API_PORT": "4200",
+      "OPTIMAL_API_INTERFACE": "0.0.0.0",
+      "OPTIMAL_AUTH_REQUIRED": "true",
+      "OPTIMAL_ENGINE_ROOT": "/data",
+      "OPTIMAL_ENGINE_DB": "/data/.optimal/index.db",
+      "OPTIMAL_ENGINE_CACHE": "/data/.optimal/cache"
+    },
+    "workdir": "/app",
+    "user": "root",
+    "startCmd": "mkdir -p /data/.optimal && exec /app/bin/optimal start",
+    "readyCmd": "wget -qO- http://127.0.0.1:4200/api/health",
+    "previewPort": 4200,
+    "artifactPaths": ["/data"]
+  }
+}
