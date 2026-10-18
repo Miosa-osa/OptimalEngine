@@ -16,7 +16,7 @@ defmodule OptimalEngine.ReconstructionEvaluationTest do
                  source_id,
                  workspace,
                  "hash-#{suffix}",
-                 "Commas commitment changed after customer feedback"
+                 "Northwind commitment changed after customer feedback"
                ]
              )
 
@@ -26,7 +26,7 @@ defmodule OptimalEngine.ReconstructionEvaluationTest do
                [
                  fact_id,
                  workspace,
-                 "Commas commitment changed after customer feedback",
+                 "Northwind commitment changed after customer feedback",
                  Jason.encode!([%{type: "source_package", id: source_id}])
                ]
              )
@@ -53,10 +53,10 @@ defmodule OptimalEngine.ReconstructionEvaluationTest do
   } do
     cases = [
       %{
-        case_id: "commas-evolution",
-        question: "What changed in the Commas commitment after customer feedback?",
-        required_terms: ["Commas", "customer feedback"],
-        forbidden_terms: ["ClinicIQ secret"],
+        case_id: "northwind-evolution",
+        question: "What changed in the Northwind commitment after customer feedback?",
+        required_terms: ["Northwind", "customer feedback"],
+        forbidden_terms: ["Fabrikam secret"],
         expected_object_links: [%{type: "fact", id: fact_id}],
         max_tokens: 2_000
       }
@@ -83,8 +83,8 @@ defmodule OptimalEngine.ReconstructionEvaluationTest do
                [
                  %{
                    case_id: "gold",
-                   question: "Commas customer feedback",
-                   required_terms: ["Commas"],
+                   question: "Northwind customer feedback",
+                   required_terms: ["Northwind"],
                    expected_object_links: [%{type: "fact", id: fact_id}]
                  }
                ],

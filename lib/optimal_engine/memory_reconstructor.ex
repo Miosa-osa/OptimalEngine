@@ -50,7 +50,7 @@ defmodule OptimalEngine.MemoryReconstructor do
     ScopeEnvelope.resolve(%{
       tenant_id: Keyword.get(opts, :tenant_id, "default"),
       workspace_id: Keyword.get(opts, :workspace_id, "default"),
-      actor_id: Keyword.get(opts, :actor_id, "user:roberto"),
+      actor_id: Keyword.get(opts, :actor_id, OptimalEngine.API.Actor.local_operator()),
       permissions: Keyword.get(opts, :permissions, [])
     })
   end

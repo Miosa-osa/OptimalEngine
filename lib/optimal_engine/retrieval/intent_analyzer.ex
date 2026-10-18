@@ -31,28 +31,23 @@ defmodule OptimalEngine.Retrieval.IntentAnalyzer do
           node_hints: [String.t()]
         }
 
+  # Generic query vocabulary for the sample node layout. Names of a
+  # deployment's own clients, projects, or people belong in the
+  # `intent_node_keywords` section of its routing rules file
+  # (OptimalEngine.RoutingRules) or `config :optimal_engine,
+  # :intent_node_keywords`, which are merged over these.
   @node_keywords %{
     "operator" => "operator",
     "personal" => "operator",
     "platform" => "product-customer-portal",
     "portal" => "product-customer-portal",
-    "skyscraper" => "product-customer-portal",
     "entity-company" => "entity-company",
     "agency" => "entity-company",
-    "ai masters" => "project-platform-launch",
     "course" => "project-platform-launch",
-    "ed" => "project-platform-launch",
-    "os architect" => "entity-company",
     "youtube" => "entity-company",
-    "ahmed" => "entity-company",
-    "agency accelerants" => "operation-delivery",
-    "aa" => "operation-delivery",
-    "bennett" => "operation-delivery",
-    "cliniciq" => "operation-delivery",
     "community" => "team",
     "school group" => "team",
     "content" => "learning-research-library",
-    "mosaic" => "learning-research-library",
     "podcast" => "learning-research-library",
     "revenue" => "operation-revenue",
     "money" => "operation-revenue",
@@ -256,10 +251,29 @@ defmodule OptimalEngine.Retrieval.IntentAnalyzer do
     end
   end
 
-  defp detect_node_hints(downcased) do
-    @node_keywords
-    |> Enum.filter(fn {keyword, _node} -> String.contains?(downcased, keyword) end)
+  # Keywords match whole words only, so a short keyword never fires inside
+  # an unrelated word.
+  @doc false
+  def detect_node_hints(downcased) do
+    node_keywords()
+    |> Enum.filter(fn {keyword, _node} ->
+      Regex.match?(~r/(?<![[:alnum:]])#{Regex.escape(keyword)}(?![[:alnum:]])/u, downcased)
+    end)
     |> Enum.map(fn {_keyword, node} -> node end)
     |> Enum.uniq()
+  end
+
+  @doc false
+  def node_keywords do
+    configured =
+      case Application.get_env(:optimal_engine, :intent_node_keywords) do
+        %{} = keywords -> keywords
+        _ -> OptimalEngine.RoutingRules.section("intent_node_keywords")
+      end
+
+    for {keyword, node} <- configured,
+        is_binary(node),
+        into: @node_keywords,
+        do: {keyword |> to_string() |> String.downcase(), node}
   end
 end

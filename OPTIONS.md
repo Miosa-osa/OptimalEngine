@@ -86,7 +86,7 @@ BusinessOS
 ```
 
 Downloaded users should get their own local bundled engine and local store.
-They should not connect to Roberto's private engine unless explicitly configured as Roberto's machine.
+They should not connect to the owner's private engine unless explicitly configured as the owner's machine.
 
 ## Setup Profiles
 

@@ -55,16 +55,48 @@ check_secret_shapes() {
   fi
 }
 
+# Private names (people, clients, companies, internal workspaces) are never
+# listed in this public script. They live in a private terms file outside the
+# repo: one extended regex per line, "#" comments allowed, matched without
+# case. Attribution files (copyright and code owners) are exempt.
 check_private_terms() {
+  local terms_file="${OPTIMAL_PRIVATE_TERMS:-$HOME/.config/optimal-engine/private-terms.txt}"
+
+  if [[ ! -f "$terms_file" ]]; then
+    say "Private terms check skipped: no terms file at $terms_file (set OPTIMAL_PRIVATE_TERMS)."
+    return
+  fi
+
+  # \< and \> mark word edges. PCRE (\b) is fast and used when git supports
+  # it; otherwise they become portable POSIX classes for git grep -E.
+  local terms grep_mode pattern
+  terms="$(grep -vE '^[[:space:]]*(#|$)' "$terms_file" || true)"
+
+  if git grep -qP 'x' -- scripts/public-audit.sh 2>/dev/null; then
+    grep_mode=-P
+    pattern="$(printf '%s\n' "$terms" | sed -e 's/\\</\\b/g' -e 's/\\>/\\b/g' | paste -sd '|' -)"
+  else
+    grep_mode=-E
+    pattern="$(
+      printf '%s\n' "$terms" |
+        sed -e 's/\\</(^|[^[:alnum:]_])/g' -e 's/\\>/($|[^[:alnum:]_])/g' |
+        paste -sd '|' -
+    )"
+  fi
+
+  if [[ -z "$pattern" ]]; then
+    return
+  fi
+
   local matches
   matches="$(
-    git grep -nE \
-      '(Roberto H\. Luna|robertohluna|\<roberto\>|NFOrce|AMEX|Lunivate|AI Masters|AI MASTERS|Ed Honour|Robert Potter|robert-potter|Brooklyn|Talha|Acme|acme|Healthtech|healthtech|MIOSA Platform|MIOSA LLC|ClinicIQ|Mosaic Effect|01-roberto|01-founder|02-platform|03-services|04-academy|04-ai-masters|04-AI MASTERS|06-partners|08-media|09-new-stuff|11-money-revenue|miosa-platform|ai-masters|money-revenue|Agency Accelerants|OS Architect|OS Accelerator|Content Creators|new-stuff|Malu|gbrain|leafwiki|OpenViking|ByteDance|Mem0|Letta|Zep|Dust|Glean|Pinecone|Weaviate|Qdrant)' \
-      -- . ':(exclude)scripts/public-audit.sh' ':(exclude)deps/**' ':(exclude)_build/**' ':(exclude)**/node_modules/**' || true
+    git grep -ni "$grep_mode" "($pattern)" \
+      -- . ':(exclude)NOTICE' ':(exclude)LICENSE' ':(exclude).github/CODEOWNERS' \
+      ':(exclude)deps/**' ':(exclude)_build/**' ':(exclude)**/node_modules/**' || true
   )"
 
   if [[ -n "$matches" ]]; then
-    say "Private workspace/company terms still present:"
+    say "Private names still present:"
     say "$matches"
     fail=1
   fi

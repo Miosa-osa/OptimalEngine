@@ -95,4 +95,4 @@ private cache data
 ```
 
 Each clone gets its own local memory store.
-The public repo ships the engine code and safe public examples, not Roberto's private memory.
+The public repo ships the engine code and safe public examples, not the owner's private memory.

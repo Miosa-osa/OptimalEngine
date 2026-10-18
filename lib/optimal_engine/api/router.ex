@@ -22,6 +22,7 @@ defmodule OptimalEngine.API.Router do
 
   use Plug.Router
 
+  alias OptimalEngine.API.Actor
   alias OptimalEngine.API.Pagination
   alias OptimalEngine.Graph.Analyzer, as: GraphAnalyzer
   alias OptimalEngine.Health
@@ -298,7 +299,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/operating-projection" do
-    workspace = query_param(conn, "workspace", "default:miosa")
+    workspace = query_param(conn, "workspace", "default")
 
     case OptimalEngine.OperatingProjection.workspace(workspace) do
       {:ok, projection} -> json(conn, projection)
@@ -307,7 +308,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/rhythm/draft" do
-    workspace = query_param(conn, "workspace", "default:miosa")
+    workspace = query_param(conn, "workspace", "default")
 
     case OptimalEngine.OperatingProjection.daily_draft(workspace) do
       {:ok, draft} -> json(conn, %{workspace_id: workspace, draft: draft})
@@ -329,7 +330,9 @@ defmodule OptimalEngine.API.Router do
     body = conn.body_params || %{}
     decision = if body["decision"] == "accept", do: :accept, else: :reject
 
-    case OptimalEngine.ReviewQueue.decide_route(id, decision, body["workspace"]) do
+    case OptimalEngine.ReviewQueue.decide_route(id, decision, body["workspace"],
+           actor_id: Actor.of(conn, body)
+         ) do
       {:ok, result} -> json(conn, %{result: result})
       {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
     end
@@ -345,7 +348,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/entities/quality" do
-    workspace = query_param(conn, "workspace", "default:miosa")
+    workspace = query_param(conn, "workspace", "default")
 
     case OptimalEngine.EntityQuality.run(workspace) do
       {:ok, quality} -> json(conn, quality)
@@ -354,7 +357,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/entities/review" do
-    workspace = query_param(conn, "workspace", "default:miosa")
+    workspace = query_param(conn, "workspace", "default")
     limit = query_param(conn, "limit", "50") |> parse_int(50)
 
     case OptimalEngine.EntityResolution.queue(workspace, limit: limit) do
@@ -364,7 +367,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/entities/:id/history" do
-    workspace = query_param(conn, "workspace", "default:miosa")
+    workspace = query_param(conn, "workspace", "default")
 
     case OptimalEngine.EntityRegistry.history(id, workspace) do
       {:ok, history} -> json(conn, %{entity_id: id, workspace_id: workspace, history: history})
@@ -373,7 +376,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/entities/:id/projection" do
-    workspace = query_param(conn, "workspace", "default:miosa")
+    workspace = query_param(conn, "workspace", "default")
     opts = if as_of = query_param(conn, "as_of", nil), do: [as_of: as_of], else: []
 
     case OptimalEngine.EntityProjection.build(id, workspace, opts) do
@@ -384,7 +387,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/entities/:id" do
-    workspace = query_param(conn, "workspace", "default:miosa")
+    workspace = query_param(conn, "workspace", "default")
     opts = if as_of = query_param(conn, "as_of", nil), do: [as_of: as_of], else: []
 
     case OptimalEngine.EntityRegistry.get(id, workspace, opts) do
@@ -399,7 +402,7 @@ defmodule OptimalEngine.API.Router do
 
     opts = [
       workspace_id: body["workspace"],
-      actor_id: body["actor_id"] || "user:roberto",
+      actor_id: Actor.of(conn, body),
       reason: body["reason"] || "reviewed identity merge"
     ]
 
@@ -434,7 +437,7 @@ defmodule OptimalEngine.API.Router do
     else
       opts = [
         workspace_id: body["workspace"],
-        actor_id: body["actor_id"] || "user:roberto",
+        actor_id: Actor.of(conn, body),
         entity_id: body["entity_id"],
         confidence: body["confidence"] || 1.0,
         reason: body["reason"]
@@ -691,7 +694,7 @@ defmodule OptimalEngine.API.Router do
 
     case OptimalEngine.Storage.PolicyStore.put_policy(workspace_id, use_cases,
            provider_overrides: Map.get(body, "provider_overrides", %{}),
-           actor_id: conn.assigns[:current_principal_id]
+           actor_id: Actor.of(conn)
          ) do
       {:ok, policy} -> json(conn, policy)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -715,7 +718,7 @@ defmodule OptimalEngine.API.Router do
     attrs = %{
       workspace_id: workspace_id,
       device_id: Map.get(body, "device_id"),
-      actor_id: conn.assigns[:current_principal_id],
+      actor_id: Actor.of(conn),
       entity_type: Map.get(body, "entity_type"),
       entity_id: Map.get(body, "entity_id"),
       operation: Map.get(body, "operation"),
@@ -727,8 +730,14 @@ defmodule OptimalEngine.API.Router do
     attrs = attrs |> Enum.reject(fn {_key, value} -> is_nil(value) end) |> Map.new()
 
     case OptimalEngine.Storage.PolicyStore.append_mutation(attrs) do
-      {:ok, mutation} -> conn |> put_status(201) |> json(mutation)
-      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+      {:ok, mutation} ->
+        conn |> put_status(201) |> json(mutation)
+
+      {:error, :idempotency_key_conflict} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "idempotency_key_conflict"}))
+
+      {:error, reason} ->
+        send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
@@ -2044,7 +2053,7 @@ defmodule OptimalEngine.API.Router do
         Map.get(body, "tenant_id", conn.assigns[:current_tenant] || "default")
       )
 
-    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+    actor_id = Actor.of(conn, body)
 
     opts =
       [
@@ -2055,8 +2064,8 @@ defmodule OptimalEngine.API.Router do
         limit: parse_optional_positive_int(Map.get(body, "limit")),
         continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
       ]
-      |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
-      |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+      |> put_governed_grant(conn, body, "allowed_partitions", :allowed_partitions)
+      |> put_governed_grant(conn, body, "allowed_security_labels", :allowed_security_labels)
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
     case MemoryCore.refresh_stale_context_packages(opts) do
@@ -2132,15 +2141,15 @@ defmodule OptimalEngine.API.Router do
         [
           tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
           workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
-          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          actor_id: Actor.of(conn, body),
           active_memory_pool_id: id,
           request_intent: Map.get(body, "request_intent", "recall"),
           time_mode: Map.get(body, "time_mode", "current_valid"),
           detail_depth: Map.get(body, "detail_depth", "summary"),
           limit: parse_optional_positive_int(Map.get(body, "limit"))
         ]
-        |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
-        |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+        |> put_governed_grant(conn, body, "allowed_partitions", :allowed_partitions)
+        |> put_governed_grant(conn, body, "allowed_security_labels", :allowed_security_labels)
         |> reject_nil_keyword()
 
       with {:ok, package} <- MemoryCore.retrieve(query, opts),
@@ -2166,11 +2175,11 @@ defmodule OptimalEngine.API.Router do
 
     opts =
       [
-        actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+        actor_id: Actor.of(conn, body),
         continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
       ]
-      |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
-      |> maybe_put_string_list(body, "allowed_security_labels", :allowed_security_labels)
+      |> put_governed_grant(conn, body, "allowed_partitions", :allowed_partitions)
+      |> put_governed_grant(conn, body, "allowed_security_labels", :allowed_security_labels)
       |> reject_nil_keyword()
 
     case MemoryCore.refresh_pool_context_packages(id, opts) do
@@ -2203,7 +2212,7 @@ defmodule OptimalEngine.API.Router do
     else
       opts =
         [
-          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          actor_id: Actor.of(conn, body),
           source_type: Map.get(body, "source_type", "pool_observation"),
           observation_kind: Map.get(body, "observation_kind", "observation"),
           claim_text: Map.get(body, "claim_text", observation),
@@ -2340,7 +2349,7 @@ defmodule OptimalEngine.API.Router do
     body = conn.body_params || %{}
     workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
     tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
-    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+    actor_id = Actor.of(conn, body)
 
     case MemoryCore.reject_claim(id,
            workspace_id: workspace_id,
@@ -2364,7 +2373,7 @@ defmodule OptimalEngine.API.Router do
     body = conn.body_params || %{}
     workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
     tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
-    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+    actor_id = Actor.of(conn, body)
 
     opts =
       [
@@ -2442,31 +2451,37 @@ defmodule OptimalEngine.API.Router do
   # false) they are open — same behaviour as every other route.
 
   # POST /api/auth/keys — mint a new key. Returns id, key, prefix.
-  # Body: {name, scopes?, workspace_scope?, expires_at?}
+  # Body: {name, scopes?, workspace_scope?, expires_at?, principal_id?,
+  #        allowed_partitions?, allowed_security_labels?, permissions?}
+  #
+  # Delegation only narrows (OptimalEngine.Auth.KeyIssuance): a key minted by
+  # another key never exceeds its minter's scopes, workspaces, governed
+  # grants or lifetime, and its principal must exist in the tenant.
   post "/api/auth/keys" do
     body = conn.body_params || %{}
-    name = Map.get(body, "name")
     tenant_id = conn.assigns[:current_tenant] || "default"
 
-    if not (is_binary(name) and name != "") do
-      send_resp(conn, 400, Jason.encode!(%{error: "name is required"}))
+    with {:ok, attrs} <-
+           OptimalEngine.Auth.KeyIssuance.attrs(conn.assigns[:current_api_key], tenant_id, body),
+         {:ok, %{id: id, key: key, secret: _secret}} <- ApiKey.mint(attrs) do
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(201, Jason.encode!(%{id: id, key: key, prefix: String.slice(key, 0, 8)}))
     else
-      attrs =
-        %{tenant_id: tenant_id, name: name}
-        |> maybe_put(:scopes, Map.get(body, "scopes"))
-        |> maybe_put(:workspace_scope, Map.get(body, "workspace_scope"))
-        |> maybe_put(:expires_at, Map.get(body, "expires_at"))
-        |> maybe_put(:principal_id, Map.get(body, "principal_id"))
+      {:error, reason} when reason in ["name is required"] ->
+        send_resp(conn, 400, Jason.encode!(%{error: reason}))
 
-      case ApiKey.mint(attrs) do
-        {:ok, %{id: id, key: key, secret: _secret}} ->
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(201, Jason.encode!(%{id: id, key: key, prefix: String.slice(key, 0, 8)}))
+      {:error, "principal_not_found" = reason} ->
+        send_resp(conn, 422, Jason.encode!(%{error: reason}))
 
-        {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-      end
+      {:error, "invalid " <> _ = reason} ->
+        send_resp(conn, 400, Jason.encode!(%{error: reason}))
+
+      {:error, reason} when is_binary(reason) ->
+        send_resp(conn, 403, Jason.encode!(%{error: reason}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
@@ -2499,16 +2514,18 @@ defmodule OptimalEngine.API.Router do
 
   # POST /api/auth/keys/:id/revoke — soft revoke a key.
   post "/api/auth/keys/:id/revoke" do
-    case ApiKey.revoke(id) do
+    case ApiKey.revoke(id, conn.assigns[:current_tenant] || "default") do
       :ok -> send_resp(conn, 204, "")
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "key not found"}))
       {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
   # DELETE /api/auth/keys/:id — hard delete a key.
   delete "/api/auth/keys/:id" do
-    case ApiKey.delete(id) do
+    case ApiKey.delete(id, conn.assigns[:current_tenant] || "default") do
       :ok -> send_resp(conn, 204, "")
+      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "key not found"}))
       {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
@@ -2583,17 +2600,64 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # POST /api/backup — run an online SQLite backup and return the file info.
-  # Body: {path?: "/tmp/backup.db"} — path defaults to a timestamped temp file.
-  # Returns: {path, size_bytes, rows_backed_up, duration_ms}
+  # POST /api/backup — online backup into the configured backup directory.
+  # Body: {name?} (a file name) or {path?} (must resolve inside the backup
+  # directory). The directory is OPTIMAL_BACKUP_DIR, default "backups" beside
+  # the database; a request can never write a backup anywhere else.
+  # Returns: {id, path, size_bytes, rows_backed_up, duration_ms, checksum_sha256,
+  #           integrity_status}
   post "/api/backup" do
     body = conn.body_params || %{}
 
-    target_path =
-      Map.get(body, "path") ||
-        Path.join(System.tmp_dir!(), "optimal-backup-#{System.os_time(:second)}.db")
+    with {:ok, target_path} <- backup_target(body),
+         result <- OptimalEngine.Backup.create(target_path) do
+      backup_response(conn, result)
+    else
+      {:error, reason} -> send_resp(conn, 400, Jason.encode!(%{error: reason}))
+    end
+  end
 
-    case OptimalEngine.Backup.create(target_path) do
+  defp backup_target(body) do
+    dir = backup_dir()
+    File.mkdir_p!(dir)
+
+    case body do
+      %{"path" => path} when is_binary(path) ->
+        expanded = Path.expand(path, dir)
+
+        if String.starts_with?(expanded, dir <> "/"),
+          do: {:ok, expanded},
+          else: {:error, "backup path must be inside the backup directory"}
+
+      %{"path" => _} ->
+        {:error, "invalid path"}
+
+      %{"name" => name} when is_binary(name) ->
+        if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/, name),
+          do: {:ok, Path.join(dir, name)},
+          else: {:error, "invalid backup name"}
+
+      %{"name" => _} ->
+        {:error, "invalid backup name"}
+
+      _ ->
+        {:ok, Path.join(dir, "optimal-backup-#{System.os_time(:second)}.db")}
+    end
+  end
+
+  defp backup_dir do
+    case Application.get_env(:optimal_engine, :backup_dir) do
+      dir when is_binary(dir) and dir != "" ->
+        Path.expand(dir)
+
+      _ ->
+        db_path = Application.get_env(:optimal_engine, :db_path, ".optimal/index.db")
+        db_path |> Path.expand() |> Path.dirname() |> Path.join("backups")
+    end
+  end
+
+  defp backup_response(conn, result) do
+    case result do
       {:ok, info} ->
         json(conn, %{
           id: info.id,
@@ -2718,7 +2782,7 @@ defmodule OptimalEngine.API.Router do
     else
       workspace_id = Map.get(body, "workspace", "default")
 
-      opts = governed_retrieval_opts(body, workspace_id, :hybrid)
+      opts = governed_retrieval_opts(conn, body, workspace_id, :hybrid)
 
       case OptimalEngine.MemoryCore.retrieve(query, opts) do
         {:ok, package} ->
@@ -2756,7 +2820,7 @@ defmodule OptimalEngine.API.Router do
       send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
     else
       workspace = Map.get(body, "workspace", "default")
-      opts = governed_retrieval_opts(body, workspace, :reconstructive)
+      opts = governed_retrieval_opts(conn, body, workspace, :reconstructive)
 
       case OptimalEngine.MemoryCore.retrieve(query, opts) do
         {:ok, result} -> json(conn, OptimalEngine.MemoryCore.ContextPackage.to_map(result))
@@ -2773,8 +2837,8 @@ defmodule OptimalEngine.API.Router do
       OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
         tenant_id: Map.get(body, "tenant_id", "default"),
         workspace_id: Map.get(body, "workspace", "default"),
-        actor_id: Map.get(body, "actor_id", "user:roberto"),
-        permissions: Map.get(body, "permissions", [])
+        actor_id: Actor.of(conn, body),
+        permissions: governed_grant(conn, body, "permissions") || []
       })
 
     opts =
@@ -2797,7 +2861,7 @@ defmodule OptimalEngine.API.Router do
       OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
         tenant_id: Map.get(body, "tenant_id", "default"),
         workspace_id: Map.get(body, "workspace", "default"),
-        actor_id: Map.get(body, "actor_id", "user:roberto")
+        actor_id: Actor.of(conn, body)
       })
 
     case OptimalEngine.MemoryCore.ReconstructionLearning.propose_consolidation(scope,
@@ -2815,7 +2879,7 @@ defmodule OptimalEngine.API.Router do
       OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
         tenant_id: Map.get(body, "tenant_id", "default"),
         workspace_id: Map.get(body, "workspace", "default"),
-        actor_id: Map.get(body, "actor_id", "user:roberto")
+        actor_id: Actor.of(conn, body)
       })
 
     case OptimalEngine.MemoryCore.AssociativeProjection.rebuild(scope) do
@@ -2834,8 +2898,8 @@ defmodule OptimalEngine.API.Router do
 
     questions =
       Map.get(body, "questions", [
-        "What is the current Commas commitment and how did it evolve?",
-        "What changed in the TerraWatt commercial plan?",
+        "What is the current Northwind commitment and how did it evolve?",
+        "What changed in the Contoso commercial plan?",
         "Which Optimal Engine problems were found, fixed, and verified?"
       ])
 
@@ -2846,9 +2910,9 @@ defmodule OptimalEngine.API.Router do
 
       {:ok, result} =
         OptimalEngine.ReconstructionEvaluation.run(cases,
-          workspace_id: Map.get(body, "workspace", "default:miosa"),
+          workspace_id: Map.get(body, "workspace", "default"),
           tenant_id: Map.get(body, "tenant_id", "default"),
-          actor_id: Map.get(body, "actor_id", "user:roberto")
+          actor_id: Actor.of(conn, body)
         )
 
       json(conn, result)
@@ -2869,12 +2933,29 @@ defmodule OptimalEngine.API.Router do
       full_test_failures: supplied_verification["full_test_failures"]
     }
 
+    # Verification results are attested by the caller, not measured here, so
+    # the persisted evidence names who attested which results.
+    attested = for {field, value} <- verification, not is_nil(value), do: to_string(field)
+
+    supplied_evidence =
+      case Map.get(body, "evidence", []) do
+        list when is_list(list) -> list
+        _ -> []
+      end
+
+    attestation =
+      if attested == [],
+        do: [],
+        else: [%{"kind" => "attestation", "actor_id" => Actor.of(conn, body), "fields" => attested}]
+
+    evidence = supplied_evidence ++ attestation
+
     case OptimalEngine.Optimality.classify(
            tenant_id: Map.get(body, "tenant_id", "default"),
-           workspace_id: Map.get(body, "workspace", "default:miosa"),
+           workspace_id: Map.get(body, "workspace", "default"),
            assessment_scope: Map.get(body, "assessment_scope", "system"),
            verification: verification,
-           evidence: Map.get(body, "evidence", [])
+           evidence: evidence
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2882,7 +2963,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/data-steward/dashboard" do
-    workspace = query_param(conn, "workspace", "default:miosa")
+    workspace = query_param(conn, "workspace", "default")
     tenant = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
 
     case OptimalEngine.DataSteward.dashboard(workspace, tenant_id: tenant) do
@@ -2905,9 +2986,9 @@ defmodule OptimalEngine.API.Router do
 
     if decision in [:accept, :reject] and is_list(body["ids"]) and body["ids"] != [] do
       case OptimalEngine.DataSteward.decide_claims(body["ids"], decision,
-             workspace_id: body["workspace"] || "default:miosa",
+             workspace_id: body["workspace"] || "default",
              tenant_id: body["tenant_id"] || "default",
-             actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+             actor_id: Actor.of(conn, body)
            ) do
         {:ok, result} -> json(conn, result)
       end
@@ -2922,7 +3003,7 @@ defmodule OptimalEngine.API.Router do
 
     if decision in [:accept, :reject] and is_list(body["items"]) and body["items"] != [] do
       case OptimalEngine.DataSteward.decide_routes(body["items"], decision,
-             actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+             actor_id: Actor.of(conn, body)
            ) do
         {:ok, result} -> json(conn, result)
       end
@@ -2934,9 +3015,9 @@ defmodule OptimalEngine.API.Router do
   post "/api/data-steward/recheck" do
     body = conn.body_params || %{}
 
-    case OptimalEngine.DataSteward.recheck(body["workspace"] || "default:miosa",
+    case OptimalEngine.DataSteward.recheck(body["workspace"] || "default",
            tenant_id: body["tenant_id"] || "default",
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           actor_id: Actor.of(conn, body)
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2949,7 +3030,7 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.DataSteward.repair_orphan_scope(
            body["source_workspace_id"],
            body["target_workspace_id"],
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           actor_id: Actor.of(conn, body)
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2962,7 +3043,7 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.DataSteward.rename_workspace(
            body["source_workspace_id"],
            body["target_workspace_id"],
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           actor_id: Actor.of(conn, body)
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2972,9 +3053,7 @@ defmodule OptimalEngine.API.Router do
   post "/api/data-steward/nodes/repair-types" do
     body = conn.body_params || %{}
 
-    case OptimalEngine.DataSteward.repair_node_types(
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
-         ) do
+    case OptimalEngine.DataSteward.repair_node_types(actor_id: Actor.of(conn, body)) do
       {:ok, result} -> json(conn, %{updated_nodes: result})
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
@@ -2983,9 +3062,7 @@ defmodule OptimalEngine.API.Router do
   post "/api/data-steward/hierarchy/repair-deterministic" do
     body = conn.body_params || %{}
 
-    case OptimalEngine.DataSteward.repair_deterministic_hierarchy(
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
-         ) do
+    case OptimalEngine.DataSteward.repair_deterministic_hierarchy(actor_id: Actor.of(conn, body)) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
@@ -3003,14 +3080,14 @@ defmodule OptimalEngine.API.Router do
   defp parse_review_decision("reject"), do: :reject
   defp parse_review_decision(_), do: :invalid
 
-  defp governed_retrieval_opts(body, workspace_id, strategy) do
+  defp governed_retrieval_opts(conn, body, workspace_id, strategy) do
     [
       tenant_id: Map.get(body, "tenant_id", "default"),
       workspace_id: workspace_id,
-      actor_id: Map.get(body, "actor_id", "user:roberto"),
-      permissions: Map.get(body, "permissions", []),
-      allowed_partitions: Map.get(body, "allowed_partitions", []),
-      allowed_security_labels: Map.get(body, "allowed_security_labels", []),
+      actor_id: Actor.of(conn, body),
+      permissions: governed_grant(conn, body, "permissions") || [],
+      allowed_partitions: governed_grant(conn, body, "allowed_partitions") || [],
+      allowed_security_labels: governed_grant(conn, body, "allowed_security_labels") || [],
       time_mode: Map.get(body, "time_mode", "current_valid"),
       strategy: strategy,
       limit: parse_int(body["limit"], 10),
@@ -3358,11 +3435,24 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp maybe_put_string_list(keyword, body, body_key, opt_key) do
-    if Map.has_key?(body, body_key) do
-      Keyword.put(keyword, opt_key, string_list_param(body, body_key))
-    else
-      keyword
+  # Governed grants (permissions, partitions, security labels) widen what a
+  # caller may see or do, so a keyed caller gets them only from its verified
+  # key metadata (principal_grants/2) and its request body can never assert
+  # them. An anonymous caller exists only when authentication is not
+  # required; it is the trusted local operator (it could mint itself any key)
+  # and may pass grants in the body.
+  defp governed_grant(conn, body, grant) do
+    cond do
+      conn.assigns[:current_api_key] -> principal_grants(conn, grant)
+      Map.has_key?(body, grant) -> string_list_param(body, grant)
+      true -> nil
+    end
+  end
+
+  defp put_governed_grant(keyword, conn, body, grant, opt_key) do
+    case governed_grant(conn, body, grant) do
+      nil -> keyword
+      grants -> Keyword.put(keyword, opt_key, grants)
     end
   end
 

@@ -102,6 +102,7 @@ defmodule OptimalEngine.API.AuthPlug do
         conn
         |> assign(:current_tenant, key.tenant_id)
         |> assign(:current_principal, key.principal_id || :anonymous)
+        |> assign(:current_principal_id, key.principal_id || "api_key:" <> key.id)
         |> assign(:current_api_key, key)
         |> check_workspace_scope()
 

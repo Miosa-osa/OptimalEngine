@@ -965,13 +965,13 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
         "id" => "msg-abc",
         "body" => %{"content" => "<p>Hello team!</p>"},
         "lastModifiedDateTime" => "2024-04-15T09:30:00Z",
-        "from" => %{"user" => %{"displayName" => "Roberto"}}
+        "from" => %{"user" => %{"displayName" => "Avery"}}
       }
 
       {:ok, signal} = Teams.transform(raw)
       assert signal.genre == "message"
       assert signal.id =~ "teams"
-      assert "Roberto" in signal.entities
+      assert "Avery" in signal.entities
     end
 
     test "transform/1 strips HTML from body content" do

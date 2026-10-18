@@ -122,7 +122,7 @@ defmodule OptimalEngine.Wiki.StoreTest do
     citations = [
       %{
         chunk_id: chunk_id,
-        text: "Greice signed the Phase 2 retainer for $12k.",
+        text: "The client signed the phase 2 retainer for $5k.",
         uri: "optimal://chunks/#{chunk_id}"
       }
     ]

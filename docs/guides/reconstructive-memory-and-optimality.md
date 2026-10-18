@@ -14,7 +14,7 @@ All application callers use the same Retrieval Coordinator Interface:
 OptimalEngine.MemoryCore.retrieve(query,
   tenant_id: "default",
   workspace_id: "default:miosa",
-  actor_id: "user:roberto",
+  actor_id: "user:example",
   allowed_security_labels: [],
   allowed_partitions: [],
   time_mode: "current_valid",

@@ -77,8 +77,8 @@ def build_case(
         question = f"What is the reviewed Project {project} budget?"
         required, forbidden = ["$2400"], ["$900"]
     elif task == "prospective_memory":
-        content = f"When Roberto says ORBIT, remind him to verify the backup checksum before deployment. {noise}"
-        question = "ORBIT. What must Roberto be reminded to do?"
+        content = f"When Avery says ORBIT, remind them to verify the backup checksum before deployment. {noise}"
+        question = "ORBIT. What must Avery be reminded to do?"
         required = ["verify", "backup checksum"]
     elif task == "trigger_response":
         content = f"Trigger rule: when the phrase BLUE COMET appears, respond with ESCALATE-SECURITY. {noise}"

@@ -92,10 +92,10 @@ defmodule OptimalEngine.Insight.Remember do
 
   ## Examples
 
-      Remember.record_decision("Price AI Masters at $2K per seat",
-        rationale: "Matches Ed's call; keeps margin above 60%",
-        decided_by: "roberto",
-        workspace_id: "ai-masters")
+      Remember.record_decision("Price the starter plan at $20 per seat",
+        rationale: "Matches the pricing review; keeps margin above 60%",
+        decided_by: "owner",
+        workspace_id: "example")
   """
   @spec record_decision(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def record_decision(decision, opts \\ []) when is_binary(decision) do

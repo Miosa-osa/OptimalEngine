@@ -8,8 +8,8 @@
       "warmup": 3,
       "queries": [
         "Optimal Engine hierarchy repair",
-        "current Commas commitment",
-        "TerraWatt commercial plan"
+        "current Northwind commitment",
+        "Contoso commercial plan"
       ],
       "targets": {
         "search": {"p95_ms": 250, "error_rate": 0.0},

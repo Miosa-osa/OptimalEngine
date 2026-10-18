@@ -1,0 +1,192 @@
+defmodule OptimalEngine.Auth.KeyIssuance do
+  @moduledoc """
+  Rules for minting an API key through the HTTP API.
+
+  Delegation only narrows. A key minted by another key can never hold an
+  operation scope, a workspace, a governed grant, or a lifetime its minter
+  lacks; a field the request omits is inherited from the minter instead of
+  falling back to the unrestricted default. A minter whose scopes include
+  `"*"` is the tenant's root authority and may issue any scopes and grants,
+  but never a workspace or lifetime outside its own.
+
+  The principal a new key acts as must already exist in the minter's tenant.
+  An anonymous trusted local caller (authentication not required, no key)
+  mints without a parent and is bound only by the principal check.
+
+  Governed grants are the key metadata lists that governed recall reads:
+  `allowed_partitions`, `allowed_security_labels`, and `permissions`.
+  """
+
+  alias OptimalEngine.Auth.ApiKey
+  alias OptimalEngine.Identity.Principal
+
+  @grant_fields ~w(allowed_partitions allowed_security_labels permissions)
+
+  @doc "The governed grant fields a key may carry in its metadata."
+  @spec grant_fields() :: [String.t()]
+  def grant_fields, do: @grant_fields
+
+  @doc """
+  Builds `ApiKey.mint/1` attrs for a request `body` minted by `parent` (the
+  caller's verified key, or nil for an anonymous local caller) in
+  `tenant_id`.
+
+  Returns `{:ok, attrs}` or `{:error, reason}` where `reason` is a stable
+  string suitable for an API error body.
+  """
+  @spec attrs(ApiKey.t() | nil, String.t(), map()) :: {:ok, map()} | {:error, String.t()}
+  def attrs(parent, tenant_id, body) when is_binary(tenant_id) and is_map(body) do
+    with {:ok, name} <- name(body),
+         {:ok, scopes} <- scopes(parent, body),
+         {:ok, workspace_scope} <- workspace_scope(parent, body),
+         {:ok, expires_at} <- expires_at(parent, body),
+         {:ok, principal_id} <- principal(tenant_id, body),
+         {:ok, grants} <- grants(parent, body) do
+      attrs =
+        %{
+          tenant_id: tenant_id,
+          name: name,
+          scopes: scopes,
+          workspace_scope: workspace_scope,
+          expires_at: expires_at,
+          principal_id: principal_id,
+          metadata: grants
+        }
+        |> Map.reject(fn {_field, value} -> is_nil(value) end)
+
+      {:ok, attrs}
+    end
+  end
+
+  defp name(%{"name" => name}) when is_binary(name) do
+    if String.trim(name) == "", do: {:error, "name is required"}, else: {:ok, name}
+  end
+
+  defp name(_body), do: {:error, "name is required"}
+
+  defp scopes(parent, body) do
+    with {:ok, requested} <- string_list(body, "scopes", inherited(parent, :scopes)) do
+      if root?(parent) or subset?(requested, parent && parent.scopes),
+        do: {:ok, requested},
+        else: {:error, "scope_exceeds_minter"}
+    end
+  end
+
+  defp workspace_scope(parent, body) do
+    with {:ok, requested} <-
+           string_list(body, "workspace_scope", inherited(parent, :workspace_scope)) do
+      if subset?(requested, parent && parent.workspace_scope),
+        do: {:ok, requested},
+        else: {:error, "workspace_scope_exceeds_minter"}
+    end
+  end
+
+  defp expires_at(parent, body) do
+    parent_expiry = parent && parent.expires_at
+
+    case {Map.get(body, "expires_at"), parent_expiry} do
+      {nil, nil} ->
+        {:ok, nil}
+
+      {nil, inherited} ->
+        {:ok, inherited}
+
+      {requested, nil} ->
+        with {:ok, _dt} <- parse_time(requested), do: {:ok, requested}
+
+      {requested, ceiling} ->
+        with {:ok, requested_dt} <- parse_time(requested),
+             {:ok, ceiling_dt} <- parse_time(ceiling) do
+          if DateTime.compare(requested_dt, ceiling_dt) == :gt,
+            do: {:error, "expiry_exceeds_minter"},
+            else: {:ok, requested}
+        end
+    end
+  end
+
+  defp principal(_tenant_id, body) when not is_map_key(body, "principal_id"), do: {:ok, nil}
+  defp principal(_tenant_id, %{"principal_id" => nil}), do: {:ok, nil}
+
+  defp principal(tenant_id, %{"principal_id" => id}) when is_binary(id) and id != "" do
+    case Principal.get(id, tenant_id) do
+      {:ok, _principal} -> {:ok, id}
+      _ -> {:error, "principal_not_found"}
+    end
+  end
+
+  defp principal(_tenant_id, _body), do: {:error, "invalid principal_id"}
+
+  defp grants(parent, body) do
+    Enum.reduce_while(@grant_fields, {:ok, %{}}, fn field, {:ok, acc} ->
+      case grant(parent, body, field) do
+        {:ok, nil} -> {:cont, {:ok, acc}}
+        {:ok, values} -> {:cont, {:ok, Map.put(acc, field, values)}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp grant(parent, body, field) do
+    held = parent_grant(parent, field)
+
+    with {:ok, requested} <- string_list(body, field, held) do
+      cond do
+        is_nil(requested) -> {:ok, nil}
+        is_nil(parent) or root?(parent) -> {:ok, requested}
+        subset?(requested, held || []) -> {:ok, requested}
+        true -> {:error, "#{field}_exceeds_minter"}
+      end
+    end
+  end
+
+  defp parent_grant(nil, _field), do: nil
+
+  defp parent_grant(%ApiKey{metadata: %{} = metadata}, field) do
+    case Map.get(metadata, field) do
+      values when is_list(values) -> Enum.map(values, &to_string/1)
+      _ -> nil
+    end
+  end
+
+  defp parent_grant(_parent, _field), do: nil
+
+  defp inherited(nil, _field), do: nil
+  defp inherited(parent, field), do: Map.get(parent, field)
+
+  # A requested list must be strings only; absent means the given default.
+  defp string_list(body, field, default) do
+    case Map.get(body, field) do
+      nil ->
+        {:ok, default}
+
+      values when is_list(values) ->
+        if Enum.all?(values, &(is_binary(&1) and &1 != "")),
+          do: {:ok, Enum.uniq(values)},
+          else: {:error, "invalid #{field}"}
+
+      _ ->
+        {:error, "invalid #{field}"}
+    end
+  end
+
+  defp root?(nil), do: false
+  defp root?(parent), do: "*" in (parent.scopes || [])
+
+  # Every requested value must be held; a held "*" covers anything, and a
+  # requested "*" is only covered by a held "*". No minter means no bound.
+  defp subset?(nil, _held), do: true
+  defp subset?(_requested, nil), do: true
+
+  defp subset?(requested, held) do
+    "*" in held or Enum.all?(requested, &(&1 != "*" and &1 in held))
+  end
+
+  defp parse_time(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _offset} -> {:ok, dt}
+      _ -> {:error, "invalid expires_at"}
+    end
+  end
+
+  defp parse_time(_value), do: {:error, "invalid expires_at"}
+end
