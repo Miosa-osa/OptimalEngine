@@ -142,6 +142,10 @@ defmodule OptimalEngine.API.RouterTest do
       assert {:ok, body} = Jason.decode(conn.resp_body)
       assert body["count"] >= 13
       assert Enum.any?(body["providers"], &(&1["id"] == "postgres"))
+      assert Enum.all?(body["providers"], &is_boolean(&1["adapter_implemented"]))
+      postgres = Enum.find(body["providers"], &(&1["id"] == "postgres"))
+      refute postgres["adapter_implemented"]
+      assert postgres["lifecycle_state"] == "adapter_missing"
       refute conn.resp_body =~ "private-user"
       refute conn.resp_body =~ "private-pass"
     end
@@ -197,6 +201,84 @@ defmodule OptimalEngine.API.RouterTest do
       listed = request(:get, "/api/storage/workspaces/#{workspace_id}/mutations?after=0")
       assert listed.status == 200
       assert {:ok, %{"count" => 1}} = Jason.decode(listed.resp_body)
+
+      other =
+        request(:post, "/api/workspaces", %{
+          "slug" => "storage-api-other-#{suffix}",
+          "name" => "Storage API Other #{suffix}"
+        })
+
+      assert {:ok, %{"id" => other_id}} = Jason.decode(other.resp_body)
+
+      collision =
+        request(:post, "/api/storage/workspaces/#{other_id}/mutations", %{
+          "device_id" => "api-device",
+          "entity_type" => "claim",
+          "entity_id" => "claim-2",
+          "operation" => "create",
+          "payload" => %{"text" => "Other"},
+          "idempotency_key" => "api-mutation-#{suffix}"
+        })
+
+      assert collision.status == 409
+      refute collision.resp_body =~ "Scoped"
+    end
+  end
+
+  describe "POST /api/backup" do
+    setup do
+      original = Application.get_env(:optimal_engine, :backup_dir)
+      dir = Path.join(System.tmp_dir!(), "api-backups-#{System.unique_integer([:positive])}")
+      Application.put_env(:optimal_engine, :backup_dir, dir)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:optimal_engine, :backup_dir, original),
+          else: Application.delete_env(:optimal_engine, :backup_dir)
+
+        File.rm_rf(dir)
+      end)
+
+      %{dir: dir}
+    end
+
+    test "writes a named backup inside the engine backup directory", %{dir: dir} do
+      conn = request(:post, "/api/backup", %{"path" => "named.db"})
+      assert conn.status == 200
+
+      assert {:ok, %{"path" => path, "integrity_status" => "verified"}} =
+               Jason.decode(conn.resp_body)
+
+      assert path == Path.join(dir, "named.db")
+      assert File.regular?(path)
+    end
+
+    test "accepts a name field with the same confinement", %{dir: dir} do
+      conn = request(:post, "/api/backup", %{"name" => "by-name.db"})
+      assert conn.status == 200
+      assert {:ok, %{"path" => path}} = Jason.decode(conn.resp_body)
+      assert path == Path.join(dir, "by-name.db")
+
+      assert request(:post, "/api/backup", %{"name" => "../by-name.db"}).status == 400
+    end
+
+    test "defaults to a timestamped file inside the backup directory", %{dir: dir} do
+      conn = request(:post, "/api/backup", %{})
+      assert conn.status == 200
+      assert {:ok, %{"path" => path}} = Jason.decode(conn.resp_body)
+      assert Path.dirname(path) == dir
+    end
+
+    test "rejects paths outside the backup directory", %{dir: dir} do
+      outside = Path.join(System.tmp_dir!(), "escape-#{System.unique_integer([:positive])}.db")
+
+      for path <- [outside, "../escape.db", "nested/../../escape.db", "sub/dir.db", ""] do
+        conn = request(:post, "/api/backup", %{"path" => path})
+        assert conn.status == 400, "#{inspect(path)} was accepted"
+      end
+
+      refute File.exists?(outside)
+      refute File.exists?(Path.join(Path.dirname(dir), "escape.db"))
     end
   end
 

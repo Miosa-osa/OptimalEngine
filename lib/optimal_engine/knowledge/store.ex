@@ -154,17 +154,23 @@ defmodule OptimalEngine.Knowledge.Store do
   end
 
   def handle_call({:sparql, query_string}, _from, state) do
-    if function_exported?(state.backend, :sparql, 2) do
-      # Backend implements native SPARQL (optional callback)
-      result = state.backend.sparql(state.backend_state, query_string)
-      {:reply, result, state}
-    else
-      # Use MIOSA's native pure-Elixir SPARQL engine
-      result =
-        OptimalEngine.Knowledge.SPARQL.query(query_string, state.backend, state.backend_state)
+    # Prefer a backend's native SPARQL; a backend without one (or one that
+    # declines with :sparql_not_supported) runs on the pure-Elixir engine.
+    native =
+      if function_exported?(state.backend, :sparql, 2),
+        do: state.backend.sparql(state.backend_state, query_string),
+        else: {:error, :sparql_not_supported}
 
-      {:reply, result, state}
-    end
+    result =
+      case native do
+        {:error, :sparql_not_supported} ->
+          OptimalEngine.Knowledge.SPARQL.query(query_string, state.backend, state.backend_state)
+
+        other ->
+          other
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call(:count, _from, state) do

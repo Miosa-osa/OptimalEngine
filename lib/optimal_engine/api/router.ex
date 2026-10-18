@@ -2687,80 +2687,24 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # POST /api/backup — online backup into the configured backup directory.
-  # Body: {name?} (a file name) or {path?} (must resolve inside the backup
-  # directory). The directory is OPTIMAL_BACKUP_DIR, default "backups" beside
-  # the database; a request can never write a backup anywhere else.
-  # Returns: {id, path, size_bytes, rows_backed_up, duration_ms, checksum_sha256,
-  #           integrity_status}
+  # POST /api/backup — run an online SQLite backup and return the file info.
+  # Body: {name?: "snapshot.db"} or {path?: "snapshot.db"} — a file directly
+  # inside the engine backup directory (OPTIMAL_BACKUP_DIR); defaults to a
+  # timestamped name. Anything that resolves elsewhere is rejected with 400.
+  # Returns: {path, size_bytes, rows_backed_up, duration_ms}
   post "/api/backup" do
     body = conn.body_params || %{}
+    requested = Map.get(body, "name") || Map.get(body, "path")
 
-    with {:ok, target_path} <- backup_target(body),
-         result <- OptimalEngine.Backup.create(target_path) do
-      backup_response(conn, result)
+    with {:ok, target_path} <- OptimalEngine.Backup.resolve_target(requested) do
+      run_backup(conn, target_path)
     else
-      {:error, reason} -> send_resp(conn, 400, Jason.encode!(%{error: reason}))
-    end
-  end
-
-  defp backup_target(body) do
-    dir = backup_dir()
-    File.mkdir_p!(dir)
-
-    case body do
-      %{"path" => path} when is_binary(path) ->
-        expanded = Path.expand(path, dir)
-
-        if String.starts_with?(expanded, dir <> "/"),
-          do: {:ok, expanded},
-          else: {:error, "backup path must be inside the backup directory"}
-
-      %{"path" => _} ->
-        {:error, "invalid path"}
-
-      %{"name" => name} when is_binary(name) ->
-        if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/, name),
-          do: {:ok, Path.join(dir, name)},
-          else: {:error, "invalid backup name"}
-
-      %{"name" => _} ->
-        {:error, "invalid backup name"}
-
-      _ ->
-        {:ok, Path.join(dir, "optimal-backup-#{System.os_time(:second)}.db")}
-    end
-  end
-
-  defp backup_dir do
-    case Application.get_env(:optimal_engine, :backup_dir) do
-      dir when is_binary(dir) and dir != "" ->
-        Path.expand(dir)
-
-      _ ->
-        db_path = Application.get_env(:optimal_engine, :db_path, ".optimal/index.db")
-        db_path |> Path.expand() |> Path.dirname() |> Path.join("backups")
-    end
-  end
-
-  defp backup_response(conn, result) do
-    case result do
-      {:ok, info} ->
-        json(conn, %{
-          id: info.id,
-          path: info.target,
-          size_bytes: info.size_bytes,
-          rows_backed_up: info.rows_backed_up,
-          duration_ms: info.duration_ms,
-          checksum_sha256: info.checksum_sha256,
-          integrity_status: info.integrity_status
-        })
-
-      {:error, {:target_exists, path}} ->
-        send_resp(conn, 409, Jason.encode!(%{error: "backup target already exists: #{path}"}))
-
-      {:error, {:parent_missing, dir}} ->
-        send_resp(conn, 400, Jason.encode!(%{error: "parent directory missing: #{dir}"}))
+      {:error, {:outside_backup_dir, _dir}} ->
+        send_resp(
+          conn,
+          400,
+          Jason.encode!(%{error: "backup path must name a file inside the engine backup directory"})
+        )
 
       {:error, reason} ->
         send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
@@ -3239,6 +3183,30 @@ defmodule OptimalEngine.API.Router do
   # ---------------------------------------------------------------------------
   # Helpers: response
   # ---------------------------------------------------------------------------
+
+  defp run_backup(conn, target_path) do
+    case OptimalEngine.Backup.create(target_path) do
+      {:ok, info} ->
+        json(conn, %{
+          id: info.id,
+          path: info.target,
+          size_bytes: info.size_bytes,
+          rows_backed_up: info.rows_backed_up,
+          duration_ms: info.duration_ms,
+          checksum_sha256: info.checksum_sha256,
+          integrity_status: info.integrity_status
+        })
+
+      {:error, {:target_exists, path}} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "backup target already exists: #{path}"}))
+
+      {:error, {:parent_missing, dir}} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "parent directory missing: #{dir}"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
 
   defp parse_review_decision("accept"), do: :accept
   defp parse_review_decision("reject"), do: :reject

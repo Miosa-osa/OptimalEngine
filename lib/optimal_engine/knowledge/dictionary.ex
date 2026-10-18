@@ -169,6 +169,16 @@ defmodule OptimalEngine.Knowledge.Dictionary do
     end
   end
 
+  @doc """
+  Load previously allocated `{term, id}` pairs, e.g. from a persistent
+  backend after a restart. The sequence counter advances past the highest
+  restored ID so new terms never reuse a persisted ID.
+  """
+  @spec restore(dict_ref(), [{String.t(), term_id()}]) :: :ok
+  def restore(dict, pairs) when is_list(pairs) do
+    GenServer.call(dict, {:restore, pairs})
+  end
+
   @doc "Return the current number of allocated (non-inline) term IDs."
   @spec size(dict_ref()) :: non_neg_integer()
   def size(dict) do
@@ -216,6 +226,20 @@ defmodule OptimalEngine.Knowledge.Dictionary do
       end)
 
     {:reply, results, state}
+  end
+
+  def handle_call({:restore, pairs}, _from, state) do
+    max_seq =
+      Enum.reduce(pairs, 0, fn {term, id}, acc ->
+        :ets.insert(state.str2id, {term, id})
+        :ets.insert(state.id2str, {id, term})
+        max(acc, id &&& @payload_mask)
+      end)
+
+    if max_seq + 1 > :atomics.get(state.counter, 1),
+      do: :atomics.put(state.counter, 1, max_seq + 1)
+
+    {:reply, :ok, state}
   end
 
   def handle_call(:size, _from, state) do

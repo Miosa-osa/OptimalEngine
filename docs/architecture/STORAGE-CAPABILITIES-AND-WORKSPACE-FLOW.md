@@ -137,7 +137,11 @@ flowchart LR
 
 ## Activation Rules
 
-A provider has one of five lifecycle states.
+A provider has one of six lifecycle states.
+
+`adapter_missing` means the engine ships no adapter for the provider.
+It outranks configuration and probes: a reachable endpoint the engine cannot talk to is not available storage.
+Every provider reports `adapter_implemented`, and today only the embedded local providers have adapters.
 
 `active` means a default local provider is currently part of the running engine.
 
@@ -150,6 +154,7 @@ A provider has one of five lifecycle states.
 `unavailable` means configuration exists but the health probe failed.
 
 The planner reports `ready: true` only when every selected provider is `active` or `available`.
+Plans list selected providers without an adapter under `adapter_missing`.
 
 Configuration values and credentials are never returned by the provider API and are never stored in workspace policies.
 
@@ -165,7 +170,8 @@ The replication ledger is append-only, workspace-scoped, idempotent, and ordered
 
 Replica cursors can only move forward.
 
-The ledger provides the durable contract needed for multi-device synchronization, while NATS JetStream can carry those mutations between processes when distributed transport is required.
+The ledger provides the durable contract needed for multi-device synchronization.
+NATS JetStream is the planned transport for carrying those mutations between processes, but its adapter is not implemented yet.
 
 Transport delivery does not replace the ledger.
 

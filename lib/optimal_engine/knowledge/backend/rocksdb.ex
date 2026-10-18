@@ -17,6 +17,13 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
   per store instance. The process is started by `init/2` and terminated by
   `terminate/1`. All encode/decode operations go through this process.
 
+  The mapping is persisted in the `"terms"` column family (`<<id::64>> => term`)
+  in the same write batch as each quad, and `init/2` restores it, so quads
+  written before a restart decode to the same terms afterwards. A store that
+  holds quads but no persisted terms (written before the dictionary was
+  durable) cannot be decoded; `init/2` discards that projection so it is
+  rebuilt from SQLite edges instead of being misread.
+
   ## Availability
 
   This module compiles unconditionally but requires the `:rocksdb` NIF (provided
@@ -31,6 +38,7 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
               {:rocksdb, :batch_delete, 3},
               {:rocksdb, :batch_put, 4},
               {:rocksdb, :close, 1},
+              {:rocksdb, :delete_range, 5},
               {:rocksdb, :get, 4},
               {:rocksdb, :iterator, 3},
               {:rocksdb, :iterator_close, 1},
@@ -47,7 +55,8 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
   # Column family names — order matters for :rocksdb.open/3 with CF descriptors.
   # "default" must be first; RocksDB requires it in the descriptor list.
   # Names are stored as Elixir binaries for Map keys; the NIF receives charlists.
-  @cf_names ["default", "gspo", "gpos", "gosp", "spog", "posg", "ospg"]
+  @cf_names ["default", "gspo", "gpos", "gosp", "spog", "posg", "ospg", "terms"]
+  @quad_cfs ["gspo", "gpos", "gosp", "spog", "posg", "ospg"]
 
   defstruct [:db, :cf_handles, :dict_pid, :path, :store_id]
 
@@ -60,18 +69,18 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
     path = Keyword.get(opts, :path, "/tmp/miosa_knowledge_rocksdb/#{store_id}")
 
     with :ok <- File.mkdir_p(path),
+         {:ok, db, cf_handles} <- open_db(path),
+         state = %__MODULE__{
+           db: db,
+           cf_handles: Enum.zip(@cf_names, cf_handles) |> Map.new(),
+           path: path,
+           store_id: store_id
+         },
+         {:ok, terms} <- load_terms(state),
+         :ok <- discard_undecodable_projection(state, terms),
          {:ok, dict_pid} <- Dictionary.start_link([]),
-         {:ok, db, cf_handles} <- open_db(path) do
-      cf_map = Enum.zip(@cf_names, cf_handles) |> Map.new()
-
-      {:ok,
-       %__MODULE__{
-         db: db,
-         cf_handles: cf_map,
-         dict_pid: dict_pid,
-         path: path,
-         store_id: store_id
-       }}
+         :ok <- Dictionary.restore(dict_pid, terms) do
+      {:ok, %{state | dict_pid: dict_pid}}
     else
       {:error, reason} -> {:error, reason}
       error -> {:error, error}
@@ -90,6 +99,11 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
          {:ok, p_id} <- Dictionary.encode(state.dict_pid, p),
          {:ok, o_id} <- Dictionary.encode(state.dict_pid, o),
          {:ok, batch} <- :rocksdb.batch() do
+      # Term mappings travel with the quad so a restart can decode it.
+      for {term, id} <- [{g, g_id}, {s, s_id}, {p, p_id}, {o, o_id}] do
+        :rocksdb.batch_put(batch, cf(state, "terms"), <<id::unsigned-big-integer-size(64)>>, term)
+      end
+
       # Graph-scoped indices
       :rocksdb.batch_put(batch, cf(state, "gspo"), encode_key([g_id, s_id, p_id, o_id]), "")
       :rocksdb.batch_put(batch, cf(state, "gpos"), encode_key([g_id, p_id, o_id, s_id]), "")
@@ -197,6 +211,46 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
   # ---------------------------------------------------------------------------
   # Private — DB open
   # ---------------------------------------------------------------------------
+
+  defp load_terms(state) do
+    {:ok, iter} = :rocksdb.iterator(state.db, cf(state, "terms"), [])
+
+    terms =
+      Stream.unfold(:rocksdb.iterator_move(iter, :first), fn
+        {:ok, <<id::unsigned-big-integer-size(64)>>, term} ->
+          {{term, id}, :rocksdb.iterator_move(iter, :next)}
+
+        _ ->
+          nil
+      end)
+      |> Enum.to_list()
+
+    :rocksdb.iterator_close(iter)
+    {:ok, terms}
+  end
+
+  # Quads whose IDs have no persisted terms are unreadable. The graph is a
+  # projection of SQLite edges, so drop it and let hydration rebuild it.
+  defp discard_undecodable_projection(state, []) do
+    if count_cf(state, "gspo") > 0 do
+      require Logger
+
+      Logger.warning(
+        "[Knowledge.RocksDB] #{state.path} holds quads without a term dictionary; discarding the projection for rebuild"
+      )
+
+      low = <<0::256>>
+      high = :binary.copy(<<255>>, 33)
+
+      Enum.each(@quad_cfs, fn name ->
+        :ok = :rocksdb.delete_range(state.db, cf(state, name), low, high, [])
+      end)
+    end
+
+    :ok
+  end
+
+  defp discard_undecodable_projection(_state, _terms), do: :ok
 
   defp open_db(path) do
     db_opts = [create_if_missing: true, create_missing_column_families: true]
