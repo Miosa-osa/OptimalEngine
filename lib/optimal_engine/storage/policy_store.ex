@@ -101,8 +101,18 @@ defmodule OptimalEngine.Storage.PolicyStore do
                occurred_at
              ]
            ) do
-        :ok -> resolve_appended(tenant_id, attrs.workspace_id, idempotency_key)
-        {:error, reason} -> {:error, reason}
+        :ok ->
+          fingerprint = %{
+            entity_type: attrs.entity_type,
+            entity_id: attrs.entity_id,
+            operation: to_string(attrs.operation),
+            payload_hash: payload_hash
+          }
+
+          resolve_appended(tenant_id, attrs.workspace_id, idempotency_key, fingerprint)
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -110,11 +120,20 @@ defmodule OptimalEngine.Storage.PolicyStore do
   # `INSERT OR IGNORE` cannot say which uniqueness rule skipped the row, and
   # idempotency keys are unique across the whole ledger. Resolve strictly
   # inside the caller's scope so a colliding key can never hand back another
-  # workspace's mutation or payload.
-  defp resolve_appended(tenant_id, workspace_id, idempotency_key) do
+  # workspace's mutation or payload, and only treat it as a replay when the
+  # stored mutation is the same change (entity, operation, payload).
+  defp resolve_appended(tenant_id, workspace_id, idempotency_key, fingerprint) do
     case get_mutation_by_idempotency_key(tenant_id, workspace_id, idempotency_key) do
-      {:error, :not_found} -> classify_ignored_append(idempotency_key)
-      result -> result
+      {:ok, mutation} ->
+        if Map.take(mutation, Map.keys(fingerprint)) == fingerprint,
+          do: {:ok, mutation},
+          else: {:error, :idempotency_key_conflict}
+
+      {:error, :not_found} ->
+        classify_ignored_append(idempotency_key)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
