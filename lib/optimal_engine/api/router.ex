@@ -3173,6 +3173,7 @@ defmodule OptimalEngine.API.Router do
   post("/api/routing/seed", do: OperatingAPI.seed_rules(conn))
 
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
+  forward("/api/data", to: OptimalEngine.API.AppDataRouter)
 
   match _ do
     send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
