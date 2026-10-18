@@ -9,6 +9,7 @@ defmodule OptimalEngine.Signal.Classifier.Analyzer do
   """
 
   alias OptimalEngine.Signal.Envelope, as: Signal
+  alias OptimalEngine.Signal.ModeDetector
 
   # ── Type → Genre / Structure mapping ──
 
@@ -47,33 +48,42 @@ defmodule OptimalEngine.Signal.Classifier.Analyzer do
 
   # ── Inference ──────────────────────────────────────────────────
 
-  @doc "Infers the signal mode from data type and content."
+  @doc """
+  Infers the signal mode from the data payload.
+
+  Text is read by `OptimalEngine.Signal.ModeDetector`; a structured payload
+  (map or list) is data.
+  """
   @spec infer_mode(Signal.t()) :: atom()
   def infer_mode(%Signal{data: data}) when is_binary(data) do
-    if code_like?(data), do: :code, else: :linguistic
+    data |> ModeDetector.detect() |> elem(0)
   end
 
-  def infer_mode(%Signal{data: data}) when is_map(data), do: :code
-  def infer_mode(%Signal{data: data}) when is_list(data), do: :code
+  def infer_mode(%Signal{data: data}) when is_map(data), do: :data
+  def infer_mode(%Signal{data: data}) when is_list(data), do: :data
   def infer_mode(_), do: :linguistic
 
-  @doc "Infers the signal genre from the type string segments."
+  @doc "Infers the signal genre from the type string segments, defaulting to `:chat`."
   @spec infer_genre(Signal.t()) :: atom()
-  def infer_genre(%Signal{type: type}) when is_binary(type) do
-    segments = String.split(type, ".")
+  def infer_genre(signal), do: genre_from_type(signal) || :chat
 
-    genre_segment =
-      Enum.find(segments, fn seg ->
-        Map.has_key?(@type_genre_map, seg)
-      end)
-
-    case genre_segment do
-      nil -> :chat
-      seg -> elem(@type_genre_map[seg], 0)
-    end
+  @doc """
+  The genre named by a type string segment (e.g. `"x.spec.created"` gives
+  `:spec`), or nil when no segment names a genre.
+  """
+  @spec genre_from_type(Signal.t()) :: atom() | nil
+  def genre_from_type(%Signal{type: type}) when is_binary(type) do
+    type
+    |> String.split(".")
+    |> Enum.find_value(fn seg ->
+      case Map.fetch(@type_genre_map, seg) do
+        {:ok, {genre, _structure}} -> genre
+        :error -> nil
+      end
+    end)
   end
 
-  def infer_genre(_), do: :chat
+  def genre_from_type(_), do: nil
 
   @doc "Infers the signal action type from the last type segment."
   @spec infer_type(Signal.t()) :: atom()
@@ -184,27 +194,13 @@ defmodule OptimalEngine.Signal.Classifier.Analyzer do
 
   # ── Heuristics ──────────────────────────────────────────────────
 
-  @doc "Returns true if the string looks like source code."
-  @spec code_like?(String.t()) :: boolean()
-  def code_like?(str) when is_binary(str) do
-    code_indicators = [
-      "def ",
-      "fn ",
-      "->",
-      "|>",
-      "defmodule",
-      "import ",
-      "require ",
-      "function",
-      "const ",
-      "let ",
-      "var ",
-      "class ",
-      "{",
-      "}",
-      "=>"
-    ]
+  @doc """
+  Returns true if the string is predominantly source code.
 
-    Enum.any?(code_indicators, &String.contains?(str, &1))
-  end
+  Delegates to `OptimalEngine.Signal.ModeDetector`, which needs real syntax
+  rather than a keyword anywhere in the text: "we require a first class fix"
+  is prose.
+  """
+  @spec code_like?(String.t()) :: boolean()
+  def code_like?(str) when is_binary(str), do: ModeDetector.code?(str)
 end

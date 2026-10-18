@@ -18,7 +18,7 @@ defmodule OptimalEngine.Signal.GenreRegistry do
     * `valid?/1`       — membership check
     * `category/1`     — the genre's taxonomy category
     * `skeleton/1`     — the ordered section skeleton for composition
-    * `detect/1`       — classify free text to the best-matching genre name
+    * `detect/2`       — classify free text to the best-matching genre name
 
   Each entry is a map:
 
@@ -70,6 +70,20 @@ defmodule OptimalEngine.Signal.GenreRegistry do
 
                    {g.genre, Enum.uniq(name_words ++ section_words)}
                  end)
+
+  # Words match whole, so "win" does not match "window"; a trailing plural "s"
+  # is folded on both sides so "requirement" still matches "requirements".
+  @plural ~r/^(.{2,}[^s])s$/
+
+  # Per genre: folded name tokens (3 points each) and folded section words
+  # (1 point each), precomputed so scoring is set lookups only.
+  @scoring_index (for {genre, keywords} <- @keyword_index do
+                    tokens = String.split(genre, "-", trim: true)
+                    names = tokens |> Enum.filter(&(String.length(&1) > 2))
+
+                    {genre, Enum.map(names, &Regex.replace(@plural, &1, "\\1")),
+                     Enum.map(keywords -- tokens, &Regex.replace(@plural, &1, "\\1"))}
+                  end)
 
   @doc "Returns every genre entry in the canonical registry."
   @spec all() :: [map()]
@@ -128,45 +142,40 @@ defmodule OptimalEngine.Signal.GenreRegistry do
   @doc """
   Detects the best-matching genre for free text via keyword scoring across the
   full registry. Returns a genre name string, defaulting to `"note"` when no
-  genre accumulates a positive score.
+  genre reaches `:min_score` (default 1, any positive score).
 
-  This is intentionally a coarse fallback: the pipeline classifier first tries
-  its high-precision regex patterns and only consults `detect/1` when those
-  produce the default. Scoring rewards genre-name token hits over section-word
-  hits so that, e.g., text mentioning "decision" maps to `decision-log`/`adr`
-  rather than any genre that happens to contain a "Decision" section.
+  This is intentionally a coarse fallback: `OptimalEngine.Signal.GenreDetector`
+  first tries form and heading cues and only consults `detect/2` with a
+  higher `:min_score` when those find nothing. Scoring rewards genre-name
+  token hits over section-word hits so that, e.g., text mentioning "decision"
+  maps to `decision-log`/`adr` rather than any genre that happens to contain a
+  "Decision" section. Words match whole, so "win" does not match "window".
   """
-  @spec detect(String.t()) :: String.t()
-  def detect(text) when is_binary(text) do
-    down = String.downcase(text)
+  @spec detect(String.t(), keyword()) :: String.t()
+  def detect(text, opts \\ [])
+
+  def detect(text, opts) when is_binary(text) do
+    words = word_set(text)
+    min_score = Keyword.get(opts, :min_score, 1)
 
     {best, score} =
-      Enum.reduce(@keyword_index, {@default_genre, 0}, fn {genre, keywords}, {bg, bs} ->
-        s = score_genre(genre, keywords, down)
+      Enum.reduce(@scoring_index, {@default_genre, 0}, fn {genre, names, sections}, {bg, bs} ->
+        s =
+          3 * Enum.count(names, &MapSet.member?(words, &1)) +
+            Enum.count(sections, &MapSet.member?(words, &1))
+
         if s > bs, do: {genre, s}, else: {bg, bs}
       end)
 
-    if score > 0, do: best, else: @default_genre
+    if score >= min_score, do: best, else: @default_genre
   end
 
-  def detect(_), do: @default_genre
+  def detect(_, _opts), do: @default_genre
 
-  # Name-token hits weigh 3x; section-word hits weigh 1x.
-  defp score_genre(genre, keywords, down) do
-    name_tokens = String.split(genre, "-", trim: true)
-
-    name_score =
-      Enum.count(name_tokens, fn t ->
-        String.length(t) > 2 and word_present?(down, t)
-      end) * 3
-
-    section_score =
-      Enum.count(keywords -- name_tokens, fn w -> word_present?(down, w) end)
-
-    name_score + section_score
-  end
-
-  defp word_present?(down, word) do
-    String.contains?(down, word)
+  defp word_set(text) do
+    text
+    |> String.downcase()
+    |> String.split(~r/[^a-z0-9]+/, trim: true)
+    |> MapSet.new(&Regex.replace(@plural, &1, "\\1"))
   end
 end

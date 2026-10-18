@@ -15,26 +15,27 @@ defmodule OptimalEngine.Bridge.Signal do
   """
 
   alias OptimalEngine.Signal, as: OptSignal
+  alias OptimalEngine.Signal.Classifier.Analyzer
   alias OptimalEngine.Signal.Envelope
 
   @doc """
-  Augments an OptimalEngine.Signal with OptimalEngine.Signal.Core classification.
+  Fills the dimensions the pipeline left unresolved (`nil`) using
+  `OptimalEngine.Signal.Classifier` inference over the raw text.
 
-  Takes an already-classified OptSignal and fills any nil dimensions using
-  OptimalEngine.Signal.Classifier inference. Returns the enriched signal.
+  A dimension the pipeline already resolved is never replaced, including the
+  values that happen to equal a default (`:linguistic`, `"note"`, `:inform`):
+  those are classifications, not blanks. Mode is inferred from the text
+  itself, and genre is filled only when the envelope type names one, never
+  with the analyzer's `:chat` fallback.
   """
   @spec enhance_classification(OptSignal.t(), String.t()) :: OptSignal.t()
   def enhance_classification(%OptSignal{} = signal, raw_text) do
-    classification =
-      signal
-      |> to_envelope(raw_text)
-      |> OptimalEngine.Signal.Classifier.classify()
+    envelope = classification_envelope(signal, raw_text)
 
-    # Only fill dimensions that are nil or default
     signal
-    |> maybe_fill(:mode, classification[:mode], :linguistic)
-    |> maybe_fill_genre(classification[:genre])
-    |> maybe_fill(:type, classification[:type], :inform)
+    |> fill_mode(envelope)
+    |> fill_genre(envelope)
+    |> fill_type(envelope)
   end
 
   @doc """
@@ -77,13 +78,21 @@ defmodule OptimalEngine.Bridge.Signal do
     _ -> %{}
   end
 
-  defp to_envelope(signal, raw_text \\ nil)
-
-  defp to_envelope(%OptSignal{} = signal, raw_text) do
+  # Classification reads the text, so the envelope carries it as text. The
+  # audit envelope wraps it in a map, which Mode inference would read as data.
+  defp classification_envelope(%OptSignal{} = signal, raw_text) do
     Envelope.new!(
       signal_type_string(signal),
       source: signal.node || "optimal-engine",
-      data: %{"text" => raw_text || signal.content || ""},
+      data: raw_text || signal.content || ""
+    )
+  end
+
+  defp to_envelope(%OptSignal{} = signal) do
+    Envelope.new!(
+      signal_type_string(signal),
+      source: signal.node || "optimal-engine",
+      data: %{"text" => signal.content || ""},
       signal_mode: normalize_mode(signal.mode),
       signal_genre: normalize_genre(signal.genre),
       signal_type: normalize_type(signal.type),
@@ -121,31 +130,24 @@ defmodule OptimalEngine.Bridge.Signal do
     "optimal.#{g || "note"}.#{t || "inform"}"
   end
 
-  defp maybe_fill(signal, :mode, inferred, default) do
-    if signal.mode == nil or signal.mode == default do
-      case inferred do
-        nil -> signal
-        val -> %{signal | mode: normalize_mode(val)}
-      end
-    else
-      signal
+  defp fill_mode(%OptSignal{mode: nil} = signal, envelope),
+    do: %{signal | mode: normalize_mode(Analyzer.infer_mode(envelope))}
+
+  defp fill_mode(signal, _envelope), do: signal
+
+  defp fill_genre(%OptSignal{genre: genre} = signal, envelope) when genre in [nil, ""] do
+    case Analyzer.genre_from_type(envelope) do
+      nil -> signal
+      inferred -> %{signal | genre: to_string(inferred)}
     end
   end
 
-  defp maybe_fill(signal, :type, inferred, default) do
-    if signal.type == nil or signal.type == default do
-      case inferred do
-        nil -> signal
-        val -> %{signal | type: normalize_type(val)}
-      end
-    else
-      signal
-    end
-  end
+  defp fill_genre(signal, _envelope), do: signal
 
-  defp maybe_fill_genre(signal, nil), do: signal
-  defp maybe_fill_genre(%{genre: g} = signal, _) when g != nil and g != "note", do: signal
-  defp maybe_fill_genre(signal, inferred), do: %{signal | genre: to_string(inferred)}
+  defp fill_type(%OptSignal{type: nil} = signal, envelope),
+    do: %{signal | type: normalize_type(Analyzer.infer_type(envelope))}
+
+  defp fill_type(signal, _envelope), do: signal
 
   defp normalize_mode(:code), do: :code
   defp normalize_mode(:visual), do: :visual

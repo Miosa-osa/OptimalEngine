@@ -5,10 +5,10 @@ defmodule OptimalEngine.Signal.ClassifierTest do
   alias OptimalEngine.Signal.Classifier
 
   describe "classify/1" do
-    test "infers :code mode for map data" do
+    test "infers :data mode for map data" do
       signal = Signal.new!("miosa.test", source: "/t", data: %{key: "val"})
       c = Classifier.classify(signal)
-      assert c.mode == :code
+      assert c.mode == :data
     end
 
     test "infers :linguistic mode for plain text data" do
