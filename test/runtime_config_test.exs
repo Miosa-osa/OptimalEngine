@@ -98,6 +98,16 @@ defmodule OptimalEngine.RuntimeConfigTest do
   end
 
   test "release channel comes from the environment and rejects unknown channels" do
+    original = System.get_env("OPTIMAL_RELEASE_CHANNEL")
+
+    on_exit(fn ->
+      if original do
+        System.put_env("OPTIMAL_RELEASE_CHANNEL", original)
+      else
+        System.delete_env("OPTIMAL_RELEASE_CHANNEL")
+      end
+    end)
+
     System.put_env("OPTIMAL_RELEASE_CHANNEL", "beta")
     config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
     assert get_in(config, [:optimal_engine, :release_channel]) == "beta"
