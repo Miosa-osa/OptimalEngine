@@ -77,7 +77,7 @@ An alert fires when every step moved the wrong way: any metric, the inbound and 
 
 ## System 3* audit
 
-Each week a random sample (default 10) of the Signals a workspace sent is scored with triple-layer verification: formal 0.40 (title, body, recorded dimensions, required sections when the text has headings), semantic 0.35 (recorded genre and mode against what the text reads as, read independently of the classifier, and the S/N estimate), information 0.25 (novelty against the 30 Signals before it).
+Each week a random sample (default 10) of the Signals a workspace sent is scored with triple-layer verification: formal 0.40 (title, body, recorded dimensions, required sections when the text has headings), semantic 0.35 (recorded genre and mode against what the text reads as now, so Signals stored by an older classification are caught, and the S/N estimate), information 0.25 (novelty against the 30 Signals before it).
 When a workspace sent none, received Signals are sampled and `basis` says so.
 A sample scoring under 0.5, or with any one layer under 0.4, is flagged, listed by `GET /api/viability/audit?workspace=&state=flagged`, shown in the brief, and confirmed or dismissed with `POST /api/viability/audit/:id/review {workspace, decision, note}`.
 

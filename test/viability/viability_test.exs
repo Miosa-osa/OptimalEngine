@@ -439,17 +439,7 @@ defmodule OptimalEngine.ViabilityTest do
       assert Enum.any?(bad.findings, &(&1 =~ "repeats an earlier Signal"))
     end
 
-    test "reads the mode from the text, independently of the classifier" do
-      assert Audit.plausible_mode(
-               "Speaker 1: thanks for joining. Speaker 2: I will send it Monday."
-             ) == "linguistic"
-
-      assert Audit.plausible_mode("def run(x) do\n  x + 1\nend\nimport Foo\nconst y = 2;") == "code"
-
-      assert Audit.plausible_mode(
-               "id,amount,date,status\n1,40,2026-10-01,paid\n2,55,2026-10-02,due"
-             ) == "data"
-
+    test "re-reads the stored mode from the text" do
       scored =
         Audit.score(
           %{
