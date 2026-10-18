@@ -19,6 +19,7 @@ RUN apt-get update -qq && \
         git \
         libssl-dev \
         zlib1g-dev \
+        libzstd-dev \
         libsnappy-dev \
         libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -93,6 +94,7 @@ RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         libsnappy1v5 \
+        libzstd1 \
         libsqlite3-0 \
         libssl3 \
         libstdc++6 \
