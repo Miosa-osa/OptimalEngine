@@ -11,9 +11,16 @@ defmodule Mix.Tasks.Optimal.Conformance do
 
   The suite checks the release contract, that authentication is enforced, that
   a workspace-scoped key cannot read another workspace, a decision and the
-  evidence chain, every store family, replication status, the viability report,
-  and the operating routes (boot, brief, loops). Each check reports pass, fail,
-  or skip with the evidence that decided it.
+  evidence chain, every store family as the Engine lists them, the size gauges
+  and profiles, a use-case preset, the pre-send draft check, analysis reports
+  and the job queue, replication status, the viability report, and the operating
+  routes (boot, brief, loops). Each check reports pass, fail, or skip with the
+  evidence that decided it.
+
+  When `scripts/store_reality_proof.exs` is present the run also executes it, as
+  a separate process against a disposable store under the system temp directory,
+  and reports its per-store verdict as one more check. `--no-store-proof` leaves
+  it out.
 
   The run creates its own workspaces and key, revokes and archives them, and
   reports leftovers as a failure. It does not start or stop an Engine and never
@@ -29,6 +36,8 @@ defmodule Mix.Tasks.Optimal.Conformance do
     * `--prefix <slug>` - slug prefix for workspaces the run creates (default `conformance`)
     * `--timeout <seconds>` - per-request timeout (default 30)
     * `--json <path>` - write the JSON report to a file instead of standard output
+    * `--store-proof <path>` - store reality proof to run (default `scripts/store_reality_proof.exs` when present)
+    * `--no-store-proof` - skip the store reality proof
     * `--extra-checks <path>` - an Elixir file returning additional check maps
     * `--quiet` - print only the summary and the failing checks
 
@@ -48,6 +57,8 @@ defmodule Mix.Tasks.Optimal.Conformance do
     timeout: :integer,
     json: :string,
     extra_checks: :string,
+    store_proof: :string,
+    no_store_proof: :boolean,
     quiet: :boolean,
     help: :boolean
   ]
@@ -87,7 +98,8 @@ defmodule Mix.Tasks.Optimal.Conformance do
         other: opts[:other_workspace],
         prefix: opts[:prefix],
         timeout: (opts[:timeout] || 30) * 1000,
-        extra_checks: opts[:extra_checks]
+        extra_checks: opts[:extra_checks],
+        store_proof: store_proof(opts)
       )
 
     write_report(report, opts)
@@ -99,6 +111,18 @@ defmodule Mix.Tasks.Optimal.Conformance do
       Mix.raise(
         "conformance failed: #{get_in(report, ["summary", "failed"])} of #{get_in(report, ["summary", "checks"])} checks failed"
       )
+    end
+  end
+
+  # The store proof is a host-side proof of this checkout, not of the Engine the
+  # caller pointed at, so it runs only when the script is there and the caller
+  # did not turn it off.
+  defp store_proof(opts) do
+    cond do
+      opts[:no_store_proof] -> nil
+      is_binary(opts[:store_proof]) -> opts[:store_proof]
+      File.exists?("scripts/store_reality_proof.exs") -> "scripts/store_reality_proof.exs"
+      true -> nil
     end
   end
 
