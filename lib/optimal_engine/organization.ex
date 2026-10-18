@@ -37,6 +37,24 @@ defmodule OptimalEngine.Organization do
 
   def default_id, do: @default_id
 
+  @doc """
+  The default organization of `tenant_id`, created on first use: `default`
+  for the default tenant, `<tenant>:default` for any other.
+  """
+  @spec default_for(String.t()) :: String.t()
+  def default_for(tenant_id) do
+    id = if tenant_id == Tenant.default_id(), do: @default_id, else: "#{tenant_id}:default"
+
+    case get(id) do
+      {:ok, _organization} ->
+        id
+
+      {:error, :not_found} ->
+        {:ok, _} = create(%{id: id, tenant_id: tenant_id, slug: "default", name: tenant_id})
+        id
+    end
+  end
+
   @spec create(map()) :: {:ok, t()} | {:error, term()}
   def create(%{slug: slug, name: name} = attrs) when is_binary(slug) and is_binary(name) do
     tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())

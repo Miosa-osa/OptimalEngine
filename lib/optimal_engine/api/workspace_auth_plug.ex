@@ -53,7 +53,7 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # workspace-scoped and authorized even when no workspace is named
   # (implicit "default"), so a new route is scoped unless it is listed here.
   # Global routes are still checked when they explicitly name a workspace.
-  @global_roots ~w(architectures auth authority backup bundles federation maintenance
+  @global_roots ~w(architectures auth authority backup bundles federation init maintenance
                    metrics organizations principals resolve routing scope status storage
                    stores topology version)
 

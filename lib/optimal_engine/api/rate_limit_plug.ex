@@ -13,7 +13,7 @@ defmodule OptimalEngine.API.RateLimitPlug do
 
   1. `api_key.metadata["rate_limit_per_minute"]` — per-key override.
   2. `Workspace.Config.get_section(workspace_slug, :rate_limit)` — per-workspace config.
-  3. Module default: 100 req/min, 200 burst capacity.
+  3. The size profile (OptimalEngine.Sizing): 300 to 6,000 requests per minute by profile.
 
   ## Response headers
 
@@ -47,8 +47,6 @@ defmodule OptimalEngine.API.RateLimitPlug do
   alias OptimalEngine.API.RateLimiter
   alias OptimalEngine.Workspace.Config, as: WorkspaceConfig
 
-  @default_per_minute 100
-  @default_capacity 200
   @default_exempt ["/api/status", "/api/health"]
 
   # ── Plug callbacks ───────────────────────────────────────────────────────────
@@ -57,19 +55,13 @@ defmodule OptimalEngine.API.RateLimitPlug do
   def init(opts) do
     app_defaults = Application.get_env(:optimal_engine, :api_rate_limit, [])
 
+    # Unset limits come from the size profile at request time
+    # (OptimalEngine.Sizing), so a profile set at runtime applies.
     %{
       default_capacity:
-        Keyword.get(
-          opts,
-          :default_capacity,
-          Keyword.get(app_defaults, :default_capacity, @default_capacity)
-        ),
+        Keyword.get(opts, :default_capacity, Keyword.get(app_defaults, :default_capacity)),
       default_per_minute:
-        Keyword.get(
-          opts,
-          :default_per_minute,
-          Keyword.get(app_defaults, :default_per_minute, @default_per_minute)
-        ),
+        Keyword.get(opts, :default_per_minute, Keyword.get(app_defaults, :default_per_minute)),
       exempt_paths: Keyword.get(opts, :exempt_paths, @default_exempt)
     }
   end
@@ -123,6 +115,14 @@ defmodule OptimalEngine.API.RateLimitPlug do
   end
 
   defp resolve_limits(api_key, config) do
+    profile_rate = OptimalEngine.Sizing.tuning(:api_per_minute)
+
+    config = %{
+      config
+      | default_capacity: config.default_capacity || profile_rate,
+        default_per_minute: config.default_per_minute || profile_rate
+    }
+
     # 1. Per-key metadata override.
     key_limit = api_key && get_in(api_key, [Access.key(:metadata, %{}), "rate_limit_per_minute"])
 
