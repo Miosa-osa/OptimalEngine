@@ -2594,32 +2594,22 @@ defmodule OptimalEngine.API.Router do
   end
 
   # POST /api/backup — run an online SQLite backup and return the file info.
-  # Body: {path?: "/tmp/backup.db"} — path defaults to a timestamped temp file.
+  # Body: {path?: "snapshot.db"} — a file name inside the engine backup
+  # directory (OPTIMAL_BACKUP_DIR); defaults to a timestamped name. Paths that
+  # resolve outside that directory are rejected with 400.
   # Returns: {path, size_bytes, rows_backed_up, duration_ms}
   post "/api/backup" do
     body = conn.body_params || %{}
 
-    target_path =
-      Map.get(body, "path") ||
-        Path.join(System.tmp_dir!(), "optimal-backup-#{System.os_time(:second)}.db")
-
-    case OptimalEngine.Backup.create(target_path) do
-      {:ok, info} ->
-        json(conn, %{
-          id: info.id,
-          path: info.target,
-          size_bytes: info.size_bytes,
-          rows_backed_up: info.rows_backed_up,
-          duration_ms: info.duration_ms,
-          checksum_sha256: info.checksum_sha256,
-          integrity_status: info.integrity_status
-        })
-
-      {:error, {:target_exists, path}} ->
-        send_resp(conn, 409, Jason.encode!(%{error: "backup target already exists: #{path}"}))
-
-      {:error, {:parent_missing, dir}} ->
-        send_resp(conn, 400, Jason.encode!(%{error: "parent directory missing: #{dir}"}))
+    with {:ok, target_path} <- OptimalEngine.Backup.resolve_target(Map.get(body, "path")) do
+      run_backup(conn, target_path)
+    else
+      {:error, {:outside_backup_dir, _dir}} ->
+        send_resp(
+          conn,
+          400,
+          Jason.encode!(%{error: "backup path must name a file inside the engine backup directory"})
+        )
 
       {:error, reason} ->
         send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
@@ -3008,6 +2998,30 @@ defmodule OptimalEngine.API.Router do
   # ---------------------------------------------------------------------------
   # Helpers: response
   # ---------------------------------------------------------------------------
+
+  defp run_backup(conn, target_path) do
+    case OptimalEngine.Backup.create(target_path) do
+      {:ok, info} ->
+        json(conn, %{
+          id: info.id,
+          path: info.target,
+          size_bytes: info.size_bytes,
+          rows_backed_up: info.rows_backed_up,
+          duration_ms: info.duration_ms,
+          checksum_sha256: info.checksum_sha256,
+          integrity_status: info.integrity_status
+        })
+
+      {:error, {:target_exists, path}} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "backup target already exists: #{path}"}))
+
+      {:error, {:parent_missing, dir}} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "parent directory missing: #{dir}"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
 
   defp parse_review_decision("accept"), do: :accept
   defp parse_review_decision("reject"), do: :reject

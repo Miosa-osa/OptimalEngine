@@ -225,6 +225,54 @@ defmodule OptimalEngine.API.RouterTest do
     end
   end
 
+  describe "POST /api/backup" do
+    setup do
+      original = Application.get_env(:optimal_engine, :backup_dir)
+      dir = Path.join(System.tmp_dir!(), "api-backups-#{System.unique_integer([:positive])}")
+      Application.put_env(:optimal_engine, :backup_dir, dir)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:optimal_engine, :backup_dir, original),
+          else: Application.delete_env(:optimal_engine, :backup_dir)
+
+        File.rm_rf(dir)
+      end)
+
+      %{dir: dir}
+    end
+
+    test "writes a named backup inside the engine backup directory", %{dir: dir} do
+      conn = request(:post, "/api/backup", %{"path" => "named.db"})
+      assert conn.status == 200
+
+      assert {:ok, %{"path" => path, "integrity_status" => "verified"}} =
+               Jason.decode(conn.resp_body)
+
+      assert path == Path.join(dir, "named.db")
+      assert File.regular?(path)
+    end
+
+    test "defaults to a timestamped file inside the backup directory", %{dir: dir} do
+      conn = request(:post, "/api/backup", %{})
+      assert conn.status == 200
+      assert {:ok, %{"path" => path}} = Jason.decode(conn.resp_body)
+      assert Path.dirname(path) == dir
+    end
+
+    test "rejects paths outside the backup directory", %{dir: dir} do
+      outside = Path.join(System.tmp_dir!(), "escape-#{System.unique_integer([:positive])}.db")
+
+      for path <- [outside, "../escape.db", "nested/../../escape.db", "sub/dir.db", ""] do
+        conn = request(:post, "/api/backup", %{"path" => path})
+        assert conn.status == 400, "#{inspect(path)} was accepted"
+      end
+
+      refute File.exists?(outside)
+      refute File.exists?(Path.join(Path.dirname(dir), "escape.db"))
+    end
+  end
+
   describe "POST /api/workspaces" do
     test "creates workspaces through topology lifecycle and seeds node types" do
       suffix = System.unique_integer([:positive])

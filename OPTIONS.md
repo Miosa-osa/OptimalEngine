@@ -43,6 +43,7 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_API_INTERFACE` | `127.0.0.1` | Bind address for an environment-enabled listener. |
 | `OPTIMAL_ENGINE_DB` | `.optimal/index.db` | Local SQLite store path. |
 | `OPTIMAL_ENGINE_CACHE` | `.optimal/cache` | Local cache path. |
+| `OPTIMAL_BACKUP_DIR` | `backups/` beside the database | Only directory `POST /api/backup` may write into; restores verify the catalog checksum first. |
 | `OPTIMAL_ENGINE_ROOT` | repo root | Engine root for source-checkout usage. |
 | `OPTIMAL_KNOWLEDGE_BACKEND` | `rocksdb` when available | Graph backend selection. |
 | `CONNECTOR_KEY` | generated into `.optimal/connector_key` | Local connector secret. Connector credentials are refused without it; they are never stored in plaintext. |

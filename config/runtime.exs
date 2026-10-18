@@ -44,9 +44,19 @@ topology_full_path =
     Path.join(File.cwd!(), ".optimal/topology.yaml")
   )
 
+resolved_db_path = System.get_env("OPTIMAL_ENGINE_DB", db_path)
+
+backup_dir =
+  Application.get_env(
+    :optimal_engine,
+    :backup_dir,
+    Path.join(Path.dirname(resolved_db_path), "backups")
+  )
+
 config :optimal_engine,
   root_path: System.get_env("OPTIMAL_ENGINE_ROOT", root_path),
-  db_path: System.get_env("OPTIMAL_ENGINE_DB", db_path),
+  db_path: resolved_db_path,
+  backup_dir: System.get_env("OPTIMAL_BACKUP_DIR", backup_dir),
   cache_path: System.get_env("OPTIMAL_ENGINE_CACHE", cache_path),
   topology_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY", topology_path),
   topology_full_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY_FULL", topology_full_path)
