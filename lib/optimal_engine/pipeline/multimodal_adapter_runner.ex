@@ -58,23 +58,32 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunner do
   end
 
   defp execute_command(asset, tool, command, opts) do
-    args =
-      Keyword.get(opts, :args) || MultimodalToolRegistry.default_args(tool.id, asset.storage_path)
+    # An adapter command takes a file argument, so an asset held in an object
+    # store is materialized on disk first. A local asset resolves to itself.
+    with {:ok, path} <- MemoryCore.materialize_asset(asset, opts) do
+      args = Keyword.get(opts, :args) || MultimodalToolRegistry.default_args(tool.id, path)
 
-    case System.cmd(command, args, stderr_to_stdout: true) do
-      {output, 0} ->
-        record(asset, tool, opts,
-          status: "completed",
-          output_text: normalize_output(output),
-          metadata: command_metadata(command, args, opts)
-        )
+      case System.cmd(command, args, stderr_to_stdout: true) do
+        {output, 0} ->
+          record(asset, tool, opts,
+            status: "completed",
+            output_text: normalize_output(output),
+            metadata: command_metadata(command, args, opts)
+          )
 
-      {output, exit_status} ->
+        {output, exit_status} ->
+          record(asset, tool, opts,
+            status: "failed",
+            output_text: normalize_output(output),
+            error_reason: "command exited with status #{exit_status}",
+            metadata: command_metadata(command, args, opts)
+          )
+      end
+    else
+      {:error, reason} ->
         record(asset, tool, opts,
           status: "failed",
-          output_text: normalize_output(output),
-          error_reason: "command exited with status #{exit_status}",
-          metadata: command_metadata(command, args, opts)
+          error_reason: "asset bytes unavailable: #{inspect(reason)}"
         )
     end
   rescue
