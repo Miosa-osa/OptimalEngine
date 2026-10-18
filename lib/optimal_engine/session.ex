@@ -242,11 +242,17 @@ defmodule OptimalEngine.Session do
   defp generate_summary(%{messages: []}, _compressed), do: "(empty session)"
 
   defp generate_summary(%{messages: messages}, compressed) do
-    if OptimalEngine.Embed.Ollama.available?() do
+    if llm_summaries?() and OptimalEngine.Embed.Ollama.available?() do
       llm_summary(compressed)
     else
       fallback_summary(messages)
     end
+  end
+
+  # `config :optimal_engine, :session, llm_summary: false` keeps commits
+  # deterministic (and off the model) where no generator should be used.
+  defp llm_summaries? do
+    :optimal_engine |> Application.get_env(:session, []) |> Keyword.get(:llm_summary, true)
   end
 
   defp llm_summary(transcript) do
