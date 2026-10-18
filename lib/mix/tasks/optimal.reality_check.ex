@@ -1399,7 +1399,19 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     end)
   end
 
+  # Connector credentials are only ever stored encrypted, so the governed
+  # connector probes need a master key; without one, report that honestly.
   defp connector_probes(state) do
+    if Connectors.credentials_ready?() do
+      governed_connector_probes(state)
+    else
+      probe(state, "Connectors.credentials_ready?", fn ->
+        {:error, "CONNECTOR_KEY is not configured; connector credentials cannot be stored"}
+      end)
+    end
+  end
+
+  defp governed_connector_probes(state) do
     suffix = System.unique_integer([:positive])
     connector_id = "reality-slack-#{suffix}"
     workspace_id = "default:reality-connector-#{suffix}"
@@ -1427,7 +1439,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
           do: {:ok, "#{length(kinds)} kinds"},
           else: {:error, "missing core adapters"}
       end)
-      |> probe("Connectors.credentials_ready? (no key required in dev)", fn ->
+      |> probe("Connectors.credentials_ready?", fn ->
         {:ok, to_string(Connectors.credentials_ready?())}
       end)
       |> probe("connector governance blocks runner without grants", fn ->

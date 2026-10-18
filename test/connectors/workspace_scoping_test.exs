@@ -54,6 +54,16 @@ defmodule OptimalEngine.Connectors.WorkspaceScopingTest do
   end
 
   setup do
+    # Credentials are only persisted as an encrypted envelope.
+    original_key = System.get_env("CONNECTOR_KEY")
+    System.put_env("CONNECTOR_KEY", Base.encode16(:crypto.strong_rand_bytes(32), case: :lower))
+
+    on_exit(fn ->
+      if original_key,
+        do: System.put_env("CONNECTOR_KEY", original_key),
+        else: System.delete_env("CONNECTOR_KEY")
+    end)
+
     suffix = System.unique_integer([:positive])
 
     {:ok, id: "ws-scope-connector-#{suffix}", workspace: "connector-ws-b-#{suffix}"}
