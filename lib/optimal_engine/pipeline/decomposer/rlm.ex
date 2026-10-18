@@ -64,11 +64,37 @@ defmodule OptimalEngine.Pipeline.Decomposer.RLM do
     end
   end
 
+  @doc false
+  # `System.cmd/3` cannot write to a child's stdin, so the payload is staged in
+  # a private temporary file and redirected into the sidecar by a shell.
+  @spec run_with_stdin(String.t(), [String.t()], keyword()) :: {String.t(), non_neg_integer()}
+  def run_with_stdin(executable, args, opts) do
+    {input, cmd_opts} = Keyword.pop(opts, :input, "")
+    path = Path.join(System.tmp_dir!(), "optimal-rlm-#{System.unique_integer([:positive])}.json")
+
+    try do
+      File.open!(path, [:write, :exclusive, :binary], fn file ->
+        File.chmod!(path, 0o600)
+        IO.binwrite(file, input)
+      end)
+
+      env = [{"OPTIMAL_RLM_INPUT", path} | Keyword.get(cmd_opts, :env, [])]
+
+      System.cmd(
+        "sh",
+        ["-c", ~S(exec "$0" "$@" < "$OPTIMAL_RLM_INPUT"), executable | args],
+        Keyword.put(cmd_opts, :env, env)
+      )
+    after
+      File.rm(path)
+    end
+  end
+
   defp invoke(payload, opts) do
     {executable, prefix_args} = command(opts)
     args = prefix_args ++ [script(opts)]
     timeout = Keyword.get(opts, :timeout, @default_timeout)
-    runner = Keyword.get(opts, :runner, &System.cmd/3)
+    runner = Keyword.get(opts, :runner, &run_with_stdin/3)
 
     task =
       Task.async(fn ->
