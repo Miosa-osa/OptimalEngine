@@ -2594,14 +2594,15 @@ defmodule OptimalEngine.API.Router do
   end
 
   # POST /api/backup — run an online SQLite backup and return the file info.
-  # Body: {path?: "snapshot.db"} — a file name inside the engine backup
-  # directory (OPTIMAL_BACKUP_DIR); defaults to a timestamped name. Paths that
-  # resolve outside that directory are rejected with 400.
+  # Body: {name?: "snapshot.db"} or {path?: "snapshot.db"} — a file directly
+  # inside the engine backup directory (OPTIMAL_BACKUP_DIR); defaults to a
+  # timestamped name. Anything that resolves elsewhere is rejected with 400.
   # Returns: {path, size_bytes, rows_backed_up, duration_ms}
   post "/api/backup" do
     body = conn.body_params || %{}
+    requested = Map.get(body, "name") || Map.get(body, "path")
 
-    with {:ok, target_path} <- OptimalEngine.Backup.resolve_target(Map.get(body, "path")) do
+    with {:ok, target_path} <- OptimalEngine.Backup.resolve_target(requested) do
       run_backup(conn, target_path)
     else
       {:error, {:outside_backup_dir, _dir}} ->

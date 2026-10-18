@@ -253,6 +253,15 @@ defmodule OptimalEngine.API.RouterTest do
       assert File.regular?(path)
     end
 
+    test "accepts a name field with the same confinement", %{dir: dir} do
+      conn = request(:post, "/api/backup", %{"name" => "by-name.db"})
+      assert conn.status == 200
+      assert {:ok, %{"path" => path}} = Jason.decode(conn.resp_body)
+      assert path == Path.join(dir, "by-name.db")
+
+      assert request(:post, "/api/backup", %{"name" => "../by-name.db"}).status == 400
+    end
+
     test "defaults to a timestamped file inside the backup directory", %{dir: dir} do
       conn = request(:post, "/api/backup", %{})
       assert conn.status == 200
