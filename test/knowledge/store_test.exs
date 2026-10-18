@@ -36,8 +36,16 @@ defmodule OptimalEngine.Knowledge.StoreTest do
     assert count == 0
   end
 
-  test "sparql returns not supported for ETS backend", %{store: store} do
-    assert {:error, :sparql_not_supported} = Store.sparql(store, "SELECT ?s WHERE { ?s ?p ?o }")
+  test "sparql falls back to the built-in engine for the ETS backend", %{store: store} do
+    :ok = Store.assert(store, "alice", "knows", "bob")
+    :ok = Store.assert(store, "bob", "knows", "carol")
+
+    assert {:ok, [%{"o" => "bob"}]} = Store.sparql(store, "SELECT ?o WHERE { <alice> <knows> ?o }")
+
+    assert {:ok, [%{"c" => "carol"}]} =
+             Store.sparql(store, "SELECT ?c WHERE { <alice> <knows> ?b . ?b <knows> ?c }")
+
+    assert {:error, _} = Store.sparql(store, "NOT SPARQL AT ALL")
   end
 
   test "count returns number of triples", %{store: store} do
