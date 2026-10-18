@@ -3172,6 +3172,8 @@ defmodule OptimalEngine.API.Router do
   post("/api/routing/feedback", do: OperatingAPI.feedback(conn))
   post("/api/routing/seed", do: OperatingAPI.seed_rules(conn))
 
+  get("/api/read", do: OptimalEngine.API.ReadAPI.read(conn))
+
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
 
   match _ do
