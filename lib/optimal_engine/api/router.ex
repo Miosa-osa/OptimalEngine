@@ -727,8 +727,18 @@ defmodule OptimalEngine.API.Router do
     attrs = attrs |> Enum.reject(fn {_key, value} -> is_nil(value) end) |> Map.new()
 
     case OptimalEngine.Storage.PolicyStore.append_mutation(attrs) do
-      {:ok, mutation} -> conn |> put_status(201) |> json(mutation)
-      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+      {:ok, mutation} ->
+        conn |> put_status(201) |> json(mutation)
+
+      {:error, :idempotency_key_conflict} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{error: "idempotency key already used by another scope"})
+        )
+
+      {:error, reason} ->
+        send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 

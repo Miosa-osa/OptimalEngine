@@ -201,6 +201,27 @@ defmodule OptimalEngine.API.RouterTest do
       listed = request(:get, "/api/storage/workspaces/#{workspace_id}/mutations?after=0")
       assert listed.status == 200
       assert {:ok, %{"count" => 1}} = Jason.decode(listed.resp_body)
+
+      other =
+        request(:post, "/api/workspaces", %{
+          "slug" => "storage-api-other-#{suffix}",
+          "name" => "Storage API Other #{suffix}"
+        })
+
+      assert {:ok, %{"id" => other_id}} = Jason.decode(other.resp_body)
+
+      collision =
+        request(:post, "/api/storage/workspaces/#{other_id}/mutations", %{
+          "device_id" => "api-device",
+          "entity_type" => "claim",
+          "entity_id" => "claim-2",
+          "operation" => "create",
+          "payload" => %{"text" => "Other"},
+          "idempotency_key" => "api-mutation-#{suffix}"
+        })
+
+      assert collision.status == 409
+      refute collision.resp_body =~ "Scoped"
     end
   end
 
