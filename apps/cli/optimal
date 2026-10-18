@@ -1,0 +1,1219 @@
+#!/bin/sh
+# optimal: the Optimal Engine client CLI. `oe` is the same program under another name.
+#
+# Talks to any Optimal Engine over HTTP(S): a local engine, a managed engine, or one
+# named by a profile. Needs only a POSIX shell, curl 7.55 or newer, and awk.
+# The API key goes to curl on stdin, so it never appears in a process list, and it is
+# never printed. Identity comes from the key; the client never sends an actor.
+#
+# Configuration, highest precedence first (see docs/guides/cli.md):
+#   flags        --api <url>, --key-file <path>, --workspace <id>, --profile <name|path>
+#   environment  OPTIMAL_ENGINE_URL (then OE_API, OPTIMAL_ENGINE_API_URL),
+#                OPTIMAL_ENGINE_API_KEY (then OPTIMAL_ENGINE_API_KEY_FILE, OPTIMAL_API_KEY),
+#                OPTIMAL_WORKSPACE
+#   profile      ${XDG_CONFIG_HOME:-~/.config}/optimal/profile with url=, key=, workspace=
+
+set -u
+umask 077
+
+OPTIMAL_CLI_VERSION=0.3.1
+DEFAULT_URL=http://127.0.0.1:4200
+
+PROG=${0##*/}
+case $PROG in optimal | oe) ;; *) PROG=optimal ;; esac
+
+EX_USAGE=64
+EX_UNAVAILABLE=69
+EX_NOPERM=77
+EX_CONFIG=78
+
+NL='
+'
+CR=$(printf '\r')
+
+# --- output ---------------------------------------------------------------------
+
+# Replaces every occurrence of the configured key with [redacted].
+redact() {
+  _r_s=$1
+  _r_out=
+  if [ -n "${CFG_KEY:-}" ]; then
+    while :; do
+      case $_r_s in
+        *"$CFG_KEY"*)
+          _r_out=$_r_out${_r_s%%"$CFG_KEY"*}'[redacted]'
+          _r_s=${_r_s#*"$CFG_KEY"}
+          ;;
+        *) break ;;
+      esac
+    done
+  fi
+  printf '%s' "$_r_out$_r_s"
+}
+
+err() { printf '%s: %s\n' "$PROG" "$(redact "$*")" >&2; }
+die() {
+  _d_code=$1
+  shift
+  err "$@"
+  exit "$_d_code"
+}
+usage_die() { die "$EX_USAGE" "$* (see '$PROG help')"; }
+verbose() { [ -n "${O_verbose:-}" ] && printf '%s\n' "$(redact "$*")" >&2; return 0; }
+
+# Single-quotes a value for eval.
+q() {
+  _q=$(printf '%sx' "$1" | sed "s/'/'\\\\''/g")
+  printf "'%s'" "${_q%x}"
+}
+
+trim() {
+  _t_v=$1
+  _t_v=${_t_v#"${_t_v%%[![:space:]]*}"}
+  _t_v=${_t_v%"${_t_v##*[![:space:]]}"}
+  printf '%s' "$_t_v"
+}
+
+# --- JSON (awk, byte-wise) ------------------------------------------------------
+
+# stdin -> one JSON string literal.
+JSTR_AWK='
+BEGIN {
+  for (i = 1; i < 32; i++) esc[sprintf("%c", i)] = sprintf("\\u%04x", i)
+  esc["\t"] = "\\t"; esc["\r"] = "\\r"; esc["\""] = "\\\""; esc["\\"] = "\\\\"
+  special = "[" sprintf("%c", 1) "-" sprintf("%c", 31) "\"\\\\]"
+  printf "\""
+}
+{
+  if (NR > 1) printf "\\n"
+  if ($0 !~ special) { printf "%s", $0; next }
+  n = length($0)
+  for (i = 1; i <= n; i++) {
+    c = substr($0, i, 1)
+    if (c in esc) printf "%s", esc[c]; else printf "%s", c
+  }
+}
+END { printf "\"" }
+'
+
+# stdin JSON document -> the raw JSON value at the dotted top-level path; exit 3 if absent.
+JFIELD_AWK='
+function trim(s) { sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s }
+function field(s, key,    n, i, c, depth, instr, esc, expect, kbeg, want, vbeg) {
+  n = length(s); depth = 0; instr = 0; esc = 0; expect = 0; want = 0; vbeg = 0; kbeg = 0
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (instr) {
+      if (esc) esc = 0
+      else if (c == "\\") esc = 1
+      else if (c == "\"") {
+        instr = 0
+        if (kbeg) { if (substr(s, kbeg, i - kbeg) == key) want = 1; kbeg = 0 }
+      }
+      continue
+    }
+    if (c == "\"") { instr = 1; if (depth == 1 && expect) { kbeg = i + 1; expect = 0 }; continue }
+    if (c == "{" || c == "[") { depth++; if (depth == 1) expect = (c == "{"); continue }
+    if (c == "}" || c == "]") {
+      if (depth == 1 && vbeg) { found = 1; return trim(substr(s, vbeg, i - vbeg)) }
+      depth--; continue
+    }
+    if (depth == 1) {
+      if (c == ":" && want && !vbeg) vbeg = i + 1
+      else if (c == ",") {
+        if (vbeg) { found = 1; return trim(substr(s, vbeg, i - vbeg)) }
+        expect = 1; want = 0
+      }
+    }
+  }
+  return ""
+}
+{ doc = doc $0 "\n" }
+END {
+  np = split(path, parts, "[.]")
+  for (p = 1; p <= np; p++) { found = 0; doc = field(doc, parts[p]); if (!found) exit 3 }
+  printf "%s", doc
+}
+'
+
+# stdin JSON string literal -> its text.
+JTEXT_AWK='
+function hexval(h,    i, v, d) {
+  v = 0; h = tolower(h)
+  for (i = 1; i <= 4; i++) { d = index("0123456789abcdef", substr(h, i, 1)) - 1; if (d < 0) return -1; v = v * 16 + d }
+  return v
+}
+function putcp(cp) {
+  if (cp < 128) printf "%c", cp
+  else if (cp < 2048) printf "%c%c", 192 + int(cp / 64), 128 + cp % 64
+  else if (cp < 65536) printf "%c%c%c", 224 + int(cp / 4096), 128 + int(cp / 64) % 64, 128 + cp % 64
+  else printf "%c%c%c%c", 240 + int(cp / 262144), 128 + int(cp / 4096) % 64, 128 + int(cp / 64) % 64, 128 + cp % 64
+}
+{ doc = doc (NR > 1 ? "\n" : "") $0 }
+END {
+  if (substr(doc, 1, 1) != "\"") { printf "%s", doc; exit }
+  body = substr(doc, 2, length(doc) - 2)
+  while ((p = index(body, "\\")) > 0) {
+    printf "%s", substr(body, 1, p - 1)
+    e = substr(body, p + 1, 1); adv = 2
+    if (e == "n") printf "\n"
+    else if (e == "t") printf "\t"
+    else if (e == "r") printf "\r"
+    else if (e == "b") printf "\b"
+    else if (e == "f") printf "\f"
+    else if (e == "u") {
+      cp = hexval(substr(body, p + 2, 4)); adv = 6
+      if (cp >= 55296 && cp < 56320 && substr(body, p + 6, 2) == "\\u") {
+        lo = hexval(substr(body, p + 8, 4))
+        if (lo >= 56320 && lo < 57344) { cp = 65536 + (cp - 55296) * 1024 + (lo - 56320); adv = 12 }
+      }
+      if (cp > 0) putcp(cp)
+    }
+    else printf "%s", e
+    body = substr(body, p + adv)
+  }
+  printf "%s", body
+}
+'
+
+jstr() { printf '%s' "$1" | LC_ALL=C awk "$JSTR_AWK"; }
+jfield() { LC_ALL=C awk -v path="$1" "$JFIELD_AWK"; }
+jtext() { LC_ALL=C awk "$JTEXT_AWK"; }
+
+# jobj key value [key value]...: a JSON object of the non-empty values.
+# Values are strings; a key written as @key takes a raw JSON value.
+jobj() {
+  _j=
+  while [ $# -ge 2 ]; do
+    _jk=$1
+    _jv=$2
+    shift 2
+    [ -n "$_jv" ] || continue
+    case $_jk in
+      @*) _jk=${_jk#@} ;;
+      *) _jv=$(jstr "$_jv") ;;
+    esac
+    _j="$_j${_j:+,}\"$_jk\":$_jv"
+  done
+  printf '{%s}' "$_j"
+}
+
+# The string value of a top-level field, or empty.
+field_text() {
+  _ft=$(printf '%s' "$1" | jfield "$2") || return 1
+  case $_ft in
+    '"'*) printf '%s' "$_ft" | jtext ;;
+    null) ;;
+    *) printf '%s' "$_ft" ;;
+  esac
+}
+
+# --- arguments ------------------------------------------------------------------
+
+POS=
+value_opt() {
+  case $1 in
+    api | url | workspace | profile | key-file | field | limit | offset | timeout | genre | title | node | \
+      tier | kind | owner | counterparty | due | due-before | reason | source-uri | state | cadence | \
+      timezone | type | intent | scale | modality | path | action | resource | data-class | subject | \
+      ttl | sender | domain | label | channel | text | since | name | workspaces | date | query | \
+      audience | justification) return 0 ;;
+  esac
+  return 1
+}
+bool_opt() {
+  case $1 in
+    verbose | pretty | raw | literal | disposable | force | help | version) return 0 ;;
+  esac
+  return 1
+}
+setopt() {
+  _so=$1
+  [ "$_so" = url ] && _so=api
+  _so=$(printf '%s' "$_so" | tr '-' '_')
+  eval "O_$_so=\$2"
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    _a=$1
+    shift
+    case $_a in
+      --)
+        while [ $# -gt 0 ]; do
+          POS="$POS $(q "$1")"
+          shift
+        done
+        ;;
+      --*=*)
+        _n=${_a%%=*}
+        _n=${_n#--}
+        value_opt "$_n" || usage_die "unknown option --$_n"
+        setopt "$_n" "${_a#*=}"
+        ;;
+      --*)
+        _n=${_a#--}
+        if value_opt "$_n"; then
+          [ $# -gt 0 ] || usage_die "--$_n needs a value"
+          setopt "$_n" "$1"
+          shift
+        elif bool_opt "$_n"; then
+          setopt "$_n" 1
+        else
+          usage_die "unknown option --$_n"
+        fi
+        ;;
+      -w | -n)
+        [ $# -gt 0 ] || usage_die "$_a needs a value"
+        if [ "$_a" = -w ]; then setopt workspace "$1"; else setopt limit "$1"; fi
+        shift
+        ;;
+      -v) setopt verbose 1 ;;
+      -h) setopt help 1 ;;
+      -?*) usage_die "unknown option $_a" ;;
+      *) POS="$POS $(q "$_a")" ;;
+    esac
+  done
+}
+
+# --- configuration --------------------------------------------------------------
+
+load_profile() {
+  P_URL=
+  P_KEY=
+  P_WS=
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _line=$(trim "$_line")
+    case $_line in '' | '#'*) continue ;; *=*) ;; *) continue ;; esac
+    _k=$(trim "${_line%%=*}")
+    _v=$(trim "${_line#*=}")
+    case $_v in
+      \"*\")
+        _v=${_v#\"}
+        _v=${_v%\"}
+        ;;
+      \'*\')
+        _v=${_v#\'}
+        _v=${_v%\'}
+        ;;
+    esac
+    case $_k in
+      url | OPTIMAL_ENGINE_URL) P_URL=$_v ;;
+      key | OPTIMAL_ENGINE_API_KEY) P_KEY=$_v ;;
+      workspace | OPTIMAL_WORKSPACE) P_WS=$_v ;;
+    esac
+  done <"$1"
+  if [ -n "$P_KEY" ] && [ -n "$(find "$1" -prune \( -perm -040 -o -perm -004 \) -print 2>/dev/null)" ]; then
+    err "warning: $1 holds a key and is readable by other users; run: chmod 600 $1"
+  fi
+}
+
+read_key_file() {
+  [ -r "$1" ] || die "$EX_CONFIG" "cannot read key file $1"
+  IFS= read -r _kf <"$1" || [ -n "${_kf:-}" ] || die "$EX_CONFIG" "key file $1 is empty"
+  trim "$_kf"
+}
+
+resolve_config() {
+  _cfg_home=${XDG_CONFIG_HOME:-${HOME:-}/.config}
+  P_URL= P_KEY= P_WS= PROFILE= PROFILE_EXPLICIT=
+  _pf=${O_profile:-${OPTIMAL_PROFILE:-}}
+  if [ -n "$_pf" ]; then
+    case $_pf in */*) PROFILE=$_pf ;; *) PROFILE=$_cfg_home/optimal/profiles/$_pf ;; esac
+    [ -f "$PROFILE" ] || die "$EX_CONFIG" "profile not found: $PROFILE"
+    PROFILE_EXPLICIT=1
+    load_profile "$PROFILE"
+  elif [ -f "$_cfg_home/optimal/profile" ]; then
+    PROFILE=$_cfg_home/optimal/profile
+    load_profile "$PROFILE"
+  fi
+
+  if [ -n "${O_api:-}" ]; then
+    CFG_URL=$O_api CFG_URL_SRC=--api
+  elif [ -n "$PROFILE_EXPLICIT" ] && [ -n "$P_URL" ]; then
+    CFG_URL=$P_URL CFG_URL_SRC="profile $PROFILE"
+  elif [ -n "${OPTIMAL_ENGINE_URL:-}" ]; then
+    CFG_URL=$OPTIMAL_ENGINE_URL CFG_URL_SRC=OPTIMAL_ENGINE_URL
+  elif [ -n "${OE_API:-}" ]; then
+    CFG_URL=$OE_API CFG_URL_SRC=OE_API
+  elif [ -n "${OPTIMAL_ENGINE_API_URL:-}" ]; then
+    CFG_URL=$OPTIMAL_ENGINE_API_URL CFG_URL_SRC=OPTIMAL_ENGINE_API_URL
+  elif [ -n "$P_URL" ]; then
+    CFG_URL=$P_URL CFG_URL_SRC="profile $PROFILE"
+  else
+    CFG_URL=$DEFAULT_URL CFG_URL_SRC=default
+  fi
+  while :; do case $CFG_URL in */) CFG_URL=${CFG_URL%/} ;; *) break ;; esac; done
+  case $CFG_URL in
+    http://?* | https://?*) ;;
+    *) die "$EX_CONFIG" "Engine URL must start with http:// or https:// (from $CFG_URL_SRC)" ;;
+  esac
+
+  # A profile's key goes only to that profile's own URL.
+  _profile_key_ok=
+  if [ -n "$P_KEY" ]; then
+    _purl=$P_URL
+    while :; do case $_purl in */) _purl=${_purl%/} ;; *) break ;; esac; done
+    if [ -z "$_purl" ]; then
+      err "warning: the key in $PROFILE is ignored because the profile has no url"
+    elif [ "$_purl" = "$CFG_URL" ]; then
+      _profile_key_ok=1
+    fi
+  fi
+  if [ -n "${O_key_file:-}" ]; then
+    CFG_KEY=$(read_key_file "$O_key_file") || exit
+    CFG_KEY_SRC="--key-file $O_key_file"
+  elif [ -n "$PROFILE_EXPLICIT" ] && [ -n "$_profile_key_ok" ]; then
+    CFG_KEY=$P_KEY CFG_KEY_SRC="profile $PROFILE"
+  elif [ -n "${OPTIMAL_ENGINE_API_KEY:-}" ]; then
+    CFG_KEY=$OPTIMAL_ENGINE_API_KEY CFG_KEY_SRC=OPTIMAL_ENGINE_API_KEY
+  elif [ -n "${OPTIMAL_ENGINE_API_KEY_FILE:-}" ]; then
+    CFG_KEY=$(read_key_file "$OPTIMAL_ENGINE_API_KEY_FILE") || exit
+    CFG_KEY_SRC="OPTIMAL_ENGINE_API_KEY_FILE $OPTIMAL_ENGINE_API_KEY_FILE"
+  elif [ -n "${OPTIMAL_API_KEY:-}" ]; then
+    CFG_KEY=$OPTIMAL_API_KEY CFG_KEY_SRC=OPTIMAL_API_KEY
+  elif [ -n "$_profile_key_ok" ]; then
+    CFG_KEY=$P_KEY CFG_KEY_SRC="profile $PROFILE"
+  else
+    CFG_KEY= CFG_KEY_SRC=
+  fi
+  CFG_KEY=$(trim "$CFG_KEY")
+  case $CFG_KEY in *"$NL"* | *"$CR"*) die "$EX_CONFIG" "the API key from $CFG_KEY_SRC contains a line break" ;; esac
+  if [ -z "$CFG_KEY" ] && [ -n "$P_KEY" ] && [ -z "$_profile_key_ok" ]; then
+    verbose "* profile key not used: its url differs from $CFG_URL"
+  fi
+
+  if [ -n "${O_workspace:-}" ]; then
+    CFG_WS=$O_workspace CFG_WS_SRC=--workspace
+  elif [ -n "$PROFILE_EXPLICIT" ] && [ -n "$P_WS" ]; then
+    CFG_WS=$P_WS CFG_WS_SRC="profile $PROFILE"
+  elif [ -n "${OPTIMAL_WORKSPACE:-}" ]; then
+    CFG_WS=$OPTIMAL_WORKSPACE CFG_WS_SRC=OPTIMAL_WORKSPACE
+  elif [ -n "$P_WS" ]; then
+    CFG_WS=$P_WS CFG_WS_SRC="profile $PROFILE"
+  else
+    CFG_WS= CFG_WS_SRC=
+  fi
+
+  TIMEOUT=${O_timeout:-${OPTIMAL_TIMEOUT:-120}}
+  verbose "* engine $(mask_url "$CFG_URL") (from $CFG_URL_SRC)"
+  verbose "* key ${CFG_KEY_SRC:+from $CFG_KEY_SRC}${CFG_KEY_SRC:-not configured}"
+  verbose "* workspace ${CFG_WS:-<none>}${CFG_WS_SRC:+ (from $CFG_WS_SRC)}"
+}
+
+mask_url() {
+  case $1 in
+    *://*@*)
+      _mu_rest=${1#*://}
+      _mu_auth=${_mu_rest%%/*}
+      case $_mu_auth in *@*) printf '%s://[redacted]@%s' "${1%%://*}" "${_mu_rest#*@}" && return ;; esac
+      ;;
+  esac
+  printf '%s' "$1"
+}
+
+url_hostport() {
+  _uh=${1#*://}
+  _uh=${_uh%%/*}
+  _uh=${_uh##*@}
+  printf '%s' "$_uh"
+}
+url_host() {
+  _uh=$(url_hostport "$1")
+  case $_uh in
+    \[*\]*)
+      _uh=${_uh%%]*}
+      _uh=${_uh#\[}
+      ;;
+    *) _uh=${_uh%:*} ;;
+  esac
+  printf '%s' "$_uh"
+}
+url_port() {
+  _up=$(url_hostport "$1")
+  case $_up in
+    \[*\]:*) _up=${_up##*]:} ;;
+    \[*\]) _up= ;;
+    *:*) _up=${_up##*:} ;;
+    *) _up= ;;
+  esac
+  if [ -z "$_up" ]; then case $1 in https:*) _up=443 ;; *) _up=80 ;; esac; fi
+  printf '%s' "$_up"
+}
+is_local_url() {
+  case $(url_host "$CFG_URL") in 127.0.0.1 | localhost | ::1) return 0 ;; esac
+  return 1
+}
+
+# --- HTTP -----------------------------------------------------------------------
+
+TMP_FILES=
+cleanup() { [ -z "$TMP_FILES" ] || eval "rm -f $TMP_FILES"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+mktmp() {
+  _t=$(mktemp "${TMPDIR:-/tmp}/optimal.XXXXXX") || die 1 "cannot create a temporary file"
+  TMP_FILES="$TMP_FILES $(q "$_t")"
+}
+
+CURL_CHECKED=
+check_curl() {
+  [ -n "$CURL_CHECKED" ] && return 0
+  command -v curl >/dev/null 2>&1 || die "$EX_CONFIG" "curl is required"
+  if [ -n "$CFG_KEY" ]; then
+    # curl reads the Authorization header from stdin (-H @-) since 7.55.
+    _cv=$(curl --version 2>/dev/null | awk 'NR == 1 { print $2 }')
+    _cmaj=${_cv%%.*}
+    _cmin=${_cv#*.}
+    _cmin=${_cmin%%.*}
+    case $_cmaj$_cmin in *[!0-9]* | '') ;; *)
+      if [ "$_cmaj" -lt 7 ] || { [ "$_cmaj" -eq 7 ] && [ "$_cmin" -lt 55 ]; }; then
+        die "$EX_CONFIG" "curl $_cv is too old to send the key safely; curl 7.55 or newer is required"
+      fi
+      ;;
+    esac
+  fi
+  CURL_CHECKED=1
+}
+
+# transport METHOD PATH BODY [name value]...
+# Name/value pairs become URL query parameters (empty values are skipped).
+# Sets R_CODE (000 when no response), R_RC (curl exit), R_BODY, R_ERR, R_URL. Never exits.
+transport() {
+  check_curl
+  _tm=$1 _tp=$2 _tb=$3
+  shift 3
+  mktmp
+  _tout=$_t
+  mktmp
+  _terr=$_t
+  _targs="-sS -o $(q "$_tout") -w '%{http_code} %{url_effective}' --connect-timeout 10 --max-time $(q "$TIMEOUT") -H 'Accept: application/json' -H $(q "User-Agent: optimal-cli/$OPTIMAL_CLI_VERSION")"
+  if [ "$_tm" = GET ]; then
+    [ $# -gt 0 ] && _targs="$_targs -G"
+    while [ $# -ge 2 ]; do
+      [ -n "$2" ] && _targs="$_targs --data-urlencode $(q "$1=$2")"
+      shift 2
+    done
+  else
+    _targs="$_targs -X $_tm"
+    if [ -n "$_tb" ]; then
+      mktmp
+      printf '%s' "$_tb" >"$_t"
+      _targs="$_targs -H 'Content-Type: application/json' --data-binary $(q "@$_t")"
+    fi
+  fi
+  _turl=$CFG_URL$_tp
+  if [ -n "$CFG_KEY" ]; then
+    verbose "> $_tm $(mask_url "$_turl")" "(Authorization: Bearer [redacted])"
+    _tw=$(printf 'Authorization: Bearer %s\n' "$CFG_KEY" | eval "curl $_targs -H @- $(q "$_turl")" 2>"$_terr")
+  else
+    verbose "> $_tm $(mask_url "$_turl")" "(no key)"
+    _tw=$(eval "curl $_targs $(q "$_turl")" 2>"$_terr")
+  fi
+  R_RC=$?
+  R_CODE=${_tw%% *}
+  R_URL=${_tw#* }
+  case $R_CODE in [0-9][0-9][0-9]) ;; *) R_CODE=000 ;; esac
+  R_BODY=$(cat "$_tout" 2>/dev/null)
+  R_ERR=$(cat "$_terr" 2>/dev/null)
+  verbose "< HTTP $R_CODE $(mask_url "$R_URL")"
+  return 0
+}
+
+# call METHOD PATH BODY [name value]...: transport, then fail loudly on anything but 2xx.
+call() {
+  _cm=$1 _cp=$2
+  transport "$@"
+  if [ "$R_CODE" = 000 ]; then
+    case $R_RC in
+      28) die "$EX_UNAVAILABLE" "the Engine at $(mask_url "$CFG_URL") did not answer within ${TIMEOUT}s" ;;
+      *) die "$EX_UNAVAILABLE" "cannot reach the Engine at $(mask_url "$CFG_URL") (from $CFG_URL_SRC): ${R_ERR:-curl exit $R_RC}" ;;
+    esac
+  fi
+  [ "$R_RC" = 0 ] || die "$EX_UNAVAILABLE" "incomplete response from $_cm $_cp: ${R_ERR:-curl exit $R_RC}"
+  case $R_CODE in 2??) return 0 ;; esac
+  _ce=$(field_text "$R_BODY" error 2>/dev/null) || _ce=
+  case $R_CODE in
+    401)
+      if [ -z "$CFG_KEY" ]; then
+        die "$EX_NOPERM" "authentication required (HTTP 401${_ce:+: $_ce}): set OPTIMAL_ENGINE_API_KEY or add key= to your profile"
+      fi
+      die "$EX_NOPERM" "authentication failed (HTTP 401${_ce:+: $_ce}): the Engine rejected the key from $CFG_KEY_SRC"
+      ;;
+    403)
+      case $_ce in
+        permission_scope_denied) _ch=": the key lacks the scope for $_cm $_cp" ;;
+        workspace_scope_denied) _ch=": the key is not scoped to workspace ${WS:-default}" ;;
+        tenant_scope_denied) _ch=": the request names another tenant" ;;
+        actor_identity_mismatch | reviewer_identity_mismatch) _ch=": identity comes from the key; the request named someone else" ;;
+        *) _ch= ;;
+      esac
+      print_error_body
+      die "$EX_NOPERM" "permission denied (HTTP 403${_ce:+: $_ce})$_ch"
+      ;;
+    400)
+      if [ "$_ce" = workspace_required ]; then
+        die "$EX_USAGE" "workspace required (HTTP 400: workspace_required): this key is limited to named workspaces; pass --workspace <id> or set OPTIMAL_WORKSPACE"
+      fi
+      ;;
+  esac
+  print_error_body
+  die 1 "HTTP $R_CODE from $_cm $_cp${_ce:+: $_ce}"
+}
+
+# Shows a server error body when it says more than {"error": code}.
+print_error_body() {
+  [ -n "$R_BODY" ] || return 0
+  _pe=$(printf '%s' "$R_BODY" | tr -d ' \n')
+  [ "$_pe" = "$(printf '{"error":"%s"}' "$_ce" | tr -d ' \n')" ] && return 0
+  printf '%s\n' "$(redact "$R_BODY")" >&2
+}
+
+want_pretty() {
+  [ -n "${O_raw:-}" ] && return 1
+  [ -n "${O_pretty:-}" ] && return 0
+  [ -t 1 ]
+}
+
+# emit JSON: applies --field, pretty printing, and redaction.
+emit() {
+  _eo=$1
+  [ -n "$_eo" ] || return 0
+  if [ -n "${O_field:-}" ]; then
+    _eo=$(printf '%s' "$_eo" | jfield "$O_field") || die 1 "the response has no field '$O_field'"
+  fi
+  _eo=$(redact "$_eo")
+  case $_eo in
+    '"'*)
+      printf '%s' "$_eo" | jtext
+      printf '\n'
+      return 0
+      ;;
+  esac
+  if want_pretty; then
+    if command -v jq >/dev/null 2>&1; then
+      printf '%s\n' "$_eo" | jq . 2>/dev/null && return 0
+    elif command -v python3 >/dev/null 2>&1; then
+      printf '%s\n' "$_eo" | python3 -m json.tool 2>/dev/null && return 0
+    fi
+  fi
+  printf '%s\n' "$_eo"
+}
+
+get() {
+  call GET "$@"
+  emit "$R_BODY"
+}
+post() {
+  call POST "$1" "$2"
+  emit "$R_BODY"
+}
+
+# --- command helpers ------------------------------------------------------------
+
+# need_text VALUE LABEL: VALUE, or stdin when VALUE is "-".
+need_text() {
+  if [ "$1" = - ]; then
+    _nt=$(cat)
+  else
+    _nt=$1
+  fi
+  [ -n "$(trim "$_nt")" ] || usage_die "missing $2"
+  printf '%s' "$_nt"
+}
+
+# use_ws [POSITIONAL]: the workspace for this command (positional, flag, env, profile).
+use_ws() {
+  if [ -n "${1:-}" ]; then
+    if [ -n "${O_workspace:-}" ] && [ "$O_workspace" != "$1" ]; then
+      usage_die "workspace given twice ($O_workspace and $1)"
+    fi
+    WS=$1
+  else
+    WS=$CFG_WS
+  fi
+}
+
+too_many() { [ "$1" -le "$2" ] || usage_die "too many arguments for '$3'"; }
+
+remember_kind() {
+  _rk_kind=$1 _rk_label=$2 _rk_text=$3
+  _meta=$(jobj kind "$_rk_kind" source optimal-cli owner "${O_owner:-}" due "${O_due:-}")
+  post /api/memory/remember "$(jobj content "$_rk_label: $_rk_text" workspace "$WS" @force true @metadata "$_meta")"
+}
+
+# --- operator commands ----------------------------------------------------------
+
+self_path() {
+  _sp=$0
+  case $_sp in */*) ;; *) _sp=$(command -v -- "$_sp" 2>/dev/null) || _sp=$0 ;; esac
+  while [ -L "$_sp" ]; do
+    _sl=$(readlink "$_sp") || break
+    case $_sl in /*) _sp=$_sl ;; *) _sp=${_sp%/*}/$_sl ;; esac
+  done
+  printf '%s' "$_sp"
+}
+
+checkout_dir() {
+  if [ -n "${OPTIMAL_ENGINE_CHECKOUT:-}" ]; then
+    _co=$OPTIMAL_ENGINE_CHECKOUT
+  else
+    _co=$(cd "$(dirname "$(self_path)")/../.." 2>/dev/null && pwd) || return 1
+  fi
+  [ -f "$_co/mix.exs" ] && [ -f "$_co/lib/optimal_engine.ex" ] && [ -f "$_co/scripts/run-engine.sh" ] || return 1
+  printf '%s' "$_co"
+}
+
+refuse() {
+  die "$EX_CONFIG" "'$1' is an operator command: it runs only against a local Engine from an Engine checkout, and $2. The Engine API has no maintenance endpoint for it, so nothing was changed. For a managed Engine, use the platform's maintenance controls."
+}
+
+# operator CMD: sets CHECKOUT, PIDFILE, LOGFILE, or refuses.
+operator() {
+  is_local_url || refuse "$1" "$(mask_url "$CFG_URL") is not a local Engine"
+  CHECKOUT=$(checkout_dir) || refuse "$1" "this $PROG is not running from an Engine checkout (set OPTIMAL_ENGINE_CHECKOUT)"
+  PIDFILE=$CHECKOUT/.optimal/cli-engine.pid
+  LOGFILE=$CHECKOUT/.optimal/cli-engine.log
+}
+
+proc_args() {
+  if [ -r "/proc/$1/cmdline" ]; then
+    tr '\000' ' ' <"/proc/$1/cmdline"
+  else
+    ps -p "$1" -o args= 2>/dev/null
+  fi
+}
+
+# Reads the pid file; sets OWN_PID when it names a live process started by this CLI.
+own_engine() {
+  OWN_PID=
+  [ -f "$PIDFILE" ] || return 1
+  { IFS= read -r _opid && IFS= read -r _oargs; } <"$PIDFILE"
+  case ${_opid:-} in '' | *[!0-9]*) rm -f "$PIDFILE" && return 1 ;; esac
+  if ! kill -0 "$_opid" 2>/dev/null; then
+    rm -f "$PIDFILE"
+    return 1
+  fi
+  if [ "$(proc_args "$_opid")" != "${_oargs:-}" ]; then
+    # The pid now belongs to another process.
+    rm -f "$PIDFILE"
+    return 1
+  fi
+  OWN_PID=$_opid
+}
+
+engine_answers() {
+  transport GET /api/health ""
+  [ "$R_CODE" != 000 ]
+}
+
+op_start() {
+  operator start
+  if engine_answers; then
+    if own_engine; then
+      printf 'Engine already running at %s (started by this CLI, pid %s)\n' "$(mask_url "$CFG_URL")" "$OWN_PID"
+    else
+      printf 'An Engine is already answering at %s (not started by this CLI)\n' "$(mask_url "$CFG_URL")"
+    fi
+    return 0
+  fi
+  mkdir -p "$CHECKOUT/.optimal"
+  _port=$(url_port "$CFG_URL")
+  (
+    cd "$CHECKOUT" || exit 1
+    OPTIMAL_API_PORT=$_port
+    OPTIMAL_API_INTERFACE=127.0.0.1
+    export OPTIMAL_API_PORT OPTIMAL_API_INTERFACE
+    exec nohup scripts/run-engine.sh
+  ) >>"$LOGFILE" 2>&1 </dev/null &
+  _spid=$!
+  _wait=${OPTIMAL_START_TIMEOUT:-120}
+  while [ "$_wait" -gt 0 ]; do
+    if ! kill -0 "$_spid" 2>/dev/null; then
+      tail -n 20 "$LOGFILE" >&2 2>/dev/null
+      die 1 "the Engine exited during start; log: $LOGFILE"
+    fi
+    if engine_answers; then
+      printf '%s\n%s\n' "$_spid" "$(proc_args "$_spid")" >"$PIDFILE"
+      printf 'Engine started at %s (pid %s, log %s)\n' "$(mask_url "$CFG_URL")" "$_spid" "$LOGFILE"
+      return 0
+    fi
+    sleep 1
+    _wait=$((_wait - 1))
+  done
+  die 1 "the Engine did not answer within ${OPTIMAL_START_TIMEOUT:-120}s (pid $_spid still running); log: $LOGFILE"
+}
+
+op_stop() {
+  operator stop
+  if ! own_engine; then
+    if engine_answers; then
+      refuse_stop="an Engine is answering at $(mask_url "$CFG_URL") that this CLI did not start; it never stops a process it did not start"
+      die "$EX_CONFIG" "$refuse_stop"
+    fi
+    printf 'No Engine started by this CLI is running\n'
+    return 0
+  fi
+  kill -TERM "$OWN_PID" 2>/dev/null
+  _wait=30
+  while [ "$_wait" -gt 0 ] && kill -0 "$OWN_PID" 2>/dev/null; do
+    sleep 1
+    _wait=$((_wait - 1))
+  done
+  if kill -0 "$OWN_PID" 2>/dev/null; then
+    if [ -z "${O_force:-}" ]; then
+      die 1 "the Engine (pid $OWN_PID) did not stop within 30s; rerun with --force to send SIGKILL"
+    fi
+    kill -KILL "$OWN_PID" 2>/dev/null
+  fi
+  rm -f "$PIDFILE"
+  printf 'Engine stopped (pid %s)\n' "$OWN_PID"
+}
+
+op_log() {
+  operator log
+  [ -f "$LOGFILE" ] || die 1 "no log from an Engine started by this CLI ($LOGFILE)"
+  tail -n "${O_limit:-200}" "$LOGFILE"
+}
+
+# op_task COMMAND MIX_TASK [args]: a Mix maintenance task that needs the store to itself.
+op_task() {
+  _ot_cmd=$1 _ot_task=$2
+  shift 2
+  operator "$_ot_cmd"
+  if engine_answers; then
+    if own_engine; then _ot_hint="run '$PROG stop' first"; else _ot_hint="stop it first (this CLI did not start it)"; fi
+    die "$EX_CONFIG" "'$_ot_cmd' needs the store to itself, but an Engine is answering at $(mask_url "$CFG_URL"); $_ot_hint"
+  fi
+  command -v mix >/dev/null 2>&1 || die "$EX_CONFIG" "'$_ot_cmd' needs Elixir (mix) in this checkout"
+  # Same store defaults as scripts/run-engine.sh, so the task sees the Engine's data.
+  _ot_parent=$(cd "$CHECKOUT/.." && pwd)
+  cd "$CHECKOUT" || exit 1
+  OPTIMAL_ENGINE_ROOT=${OPTIMAL_ENGINE_ROOT:-$_ot_parent/workspaces} \
+    OPTIMAL_ENGINE_DB=${OPTIMAL_ENGINE_DB:-$CHECKOUT/.optimal/index.db} \
+    OPTIMAL_ENGINE_CACHE=${OPTIMAL_ENGINE_CACHE:-$CHECKOUT/.optimal/cache} \
+    exec mix "$_ot_task" "$@"
+}
+
+# --- usage ----------------------------------------------------------------------
+
+usage() {
+  cat <<EOF
+$PROG $OPTIMAL_CLI_VERSION: Optimal Engine client (optimal and oe are the same program)
+
+Usage: $PROG [options] <command> [arguments]
+
+Session
+  boot [ws]                        day, rhythm note, fires, open loops, brief, protocol
+  today [ws] [--cadence daily|weekly|monthly]   current rhythm note (alias: rhythm)
+  fires [ws]                       overdue and due-today loops (from boot)
+  brief [--workspaces a,b|*]       ranked items that need a decision today
+  protocol [ws]                    the agent operating protocol
+  commitments [ws]                 evidence-linked operating projection
+
+Loops
+  loops [list] [ws] [--state open|closed|dropped] [--owner] [--kind] [--due-before]
+  loops add "title" [ws] [--kind commitment|owed_reply|follow_up|payment_due|payment_owed|decision_needed]
+                             [--owner] [--counterparty] [--due YYYY-MM-DD] [--source-uri]
+  loops close|drop <id> [--reason] [--source-uri]
+  loops reopen <id>
+  loops extract [ws] [--since]
+
+Retrieve
+  search "query" [ws] [--limit] [--offset] [--type memory]   (alias: find)
+  grep "query" [ws] [--intent] [--scale] [--modality] [--literal] [--path]
+  assemble "topic" [ws]            tiered context package with sources
+  read <optimal://uri|id> [ws] [--tier l0|l1|full]
+  ask "question" [ws]              answer across retrieved context (alias: rag)
+  reconstruct "question" [ws]      cited memory reconstruction
+  memory [ws] [--limit] [--query]  workspace memories (alias: memories)
+  claims [ws] [--limit]            pending claims
+  review [ws]                      recent memories and the claim review queue
+
+Record
+  capture "text" [ws] [genre] [--title] [--node]   ingest a signal (alias: signal)
+  aware "text" [ws]                capture, remember, and show related context
+  note|lesson|decision|task|close "text" [ws] [--owner] [--due]
+  remember "text" [ws]             durable memory
+
+Route and authority
+  routing [review [state]]         routing review queue
+  routing rules [ws]
+  routing classify [--sender] [--domain] [--label] [--channel] [--title] [--text]
+  authority effective [ws] [--subject]
+  authority decide --action <a> --resource <optimal://...> [--data-class] [--subject] [ws]
+  authority request --action <a> --resource <optimal://...> [--data-class] [--ttl] [--justification] [ws]
+
+Engine
+  status | health | version | doctor | url | workspaces | organizations
+  api <METHOD> /api/<path> [json|-]  any other route, with the same auth
+
+Operator (local Engine from an Engine checkout only)
+  start | stop [--force] | restart | log [-n lines]
+  index [args] | graph [backfill] [args] | reality-check --disposable
+  backup [--name file]             server-side backup (admin scope), local or remote
+
+Options
+  --api <url>          Engine URL (env OPTIMAL_ENGINE_URL, OE_API; default $DEFAULT_URL)
+  --key-file <path>    file holding the API key (env OPTIMAL_ENGINE_API_KEY, OPTIMAL_ENGINE_API_KEY_FILE)
+  -w, --workspace <id> workspace id (env OPTIMAL_WORKSPACE)
+  --profile <name|path>  profile file (default ~/.config/optimal/profile; env OPTIMAL_PROFILE)
+  -n, --limit <n>      result limit
+  --field <a.b>        print one field of the JSON response (strings print as text)
+  --pretty | --raw     force or disable pretty JSON (default: pretty on a terminal)
+  --timeout <s>        request timeout in seconds (default 120)
+  -v, --verbose        show requests and configuration sources on stderr (never the key)
+  --version            print the client version
+
+Exit codes: 0 ok, 1 failed, 64 usage, 69 Engine unreachable, 77 auth or permission, 78 config or refused.
+EOF
+}
+
+# --- main -----------------------------------------------------------------------
+
+parse_args "$@"
+eval "set -- $POS"
+for _num in limit offset timeout; do
+  eval "_nv=\${O_$_num:-}"
+  case $_nv in *[!0-9]*) usage_die "--$_num takes a whole number" ;; esac
+done
+
+if [ -n "${O_version:-}" ]; then
+  printf '%s %s\n' "$PROG" "$OPTIMAL_CLI_VERSION"
+  exit 0
+fi
+CMD=${1:-help}
+[ $# -gt 0 ] && shift
+if [ -n "${O_help:-}" ] || [ "$CMD" = help ]; then
+  usage
+  exit 0
+fi
+
+resolve_config
+WS=$CFG_WS
+
+case $CMD in
+  boot)
+    too_many $# 1 boot
+    use_ws "${1:-}"
+    get /api/boot "" workspace "$WS" timezone "${O_timezone:-}"
+    ;;
+  today | rhythm)
+    too_many $# 1 "$CMD"
+    use_ws "${1:-}"
+    get /api/rhythm/current "" workspace "$WS" cadence "${O_cadence:-}" timezone "${O_timezone:-}"
+    ;;
+  fires)
+    too_many $# 1 fires
+    use_ws "${1:-}"
+    O_field=${O_field:-fires}
+    get /api/boot "" workspace "$WS" timezone "${O_timezone:-}"
+    ;;
+  brief)
+    too_many $# 1 brief
+    use_ws "${1:-}"
+    if [ -n "${O_workspaces:-}" ]; then
+      get /api/brief "" workspaces "$O_workspaces" limit "${O_limit:-}"
+    else
+      get /api/brief "" workspace "$WS" limit "${O_limit:-}"
+    fi
+    ;;
+  protocol)
+    too_many $# 1 protocol
+    use_ws "${1:-}"
+    get /api/protocol "" workspace "$WS"
+    ;;
+  commitments)
+    too_many $# 1 commitments
+    use_ws "${1:-}"
+    get /api/operating-projection "" workspace "$WS"
+    ;;
+  loops | loop)
+    _sub=${1:-list}
+    case $_sub in
+      list | ls | add | create | close | drop | reopen | extract) shift ;;
+      *) _sub=list ;;
+    esac
+    case $_sub in
+      list | ls)
+        too_many $# 1 "loops list"
+        use_ws "${1:-}"
+        if [ -n "${O_workspaces:-}" ]; then _lw=workspaces _lv=$O_workspaces; else _lw=workspace _lv=$WS; fi
+        get /api/loops "" "$_lw" "$_lv" state "${O_state:-}" owner "${O_owner:-}" kind "${O_kind:-}" \
+          due_before "${O_due_before:-}" limit "${O_limit:-}"
+        ;;
+      add | create)
+        too_many $# 2 "loops add"
+        _title=$(need_text "${1:-}" "loop title") || exit
+        use_ws "${2:-}"
+        post /api/loops "$(jobj workspace "$WS" title "$_title" kind "${O_kind:-}" owner "${O_owner:-}" \
+          counterparty "${O_counterparty:-}" due_at "${O_due:-}" source_uri "${O_source_uri:-}")"
+        ;;
+      close | drop | reopen)
+        too_many $# 1 "loops $_sub"
+        [ -n "${1:-}" ] || usage_die "missing loop id"
+        case $1 in *[!A-Za-z0-9_-]*) usage_die "invalid loop id" ;; esac
+        post "/api/loops/$1/$_sub" "$(jobj workspace "$WS" reason "${O_reason:-}" source_uri "${O_source_uri:-}")"
+        ;;
+      extract)
+        too_many $# 1 "loops extract"
+        use_ws "${1:-}"
+        post /api/loops/extract "$(jobj workspace "$WS" since "${O_since:-}")"
+        ;;
+      *) usage_die "unknown loops command '$_sub'" ;;
+    esac
+    ;;
+  search | find)
+    too_many $# 2 "$CMD"
+    _q=$(need_text "${1:-}" "search query") || exit
+    use_ws "${2:-}"
+    get /api/search "" q "$_q" workspace "$WS" limit "${O_limit:-}" offset "${O_offset:-}" type "${O_type:-}"
+    ;;
+  grep)
+    too_many $# 2 grep
+    _q=$(need_text "${1:-}" "grep query") || exit
+    use_ws "${2:-}"
+    get /api/grep "" q "$_q" workspace "$WS" limit "${O_limit:-}" offset "${O_offset:-}" \
+      intent "${O_intent:-}" scale "${O_scale:-}" modality "${O_modality:-}" \
+      literal "${O_literal:+true}" path "${O_path:-}"
+    ;;
+  assemble)
+    too_many $# 2 assemble
+    _q=$(need_text "${1:-}" "topic") || exit
+    use_ws "${2:-}"
+    post /api/assemble "$(jobj query "$_q" workspace "$WS" @limit "${O_limit:-}")"
+    ;;
+  ask | rag)
+    too_many $# 2 "$CMD"
+    _q=$(need_text "${1:-}" "question") || exit
+    use_ws "${2:-}"
+    post /api/rag "$(jobj query "$_q" workspace "$WS" audience "${O_audience:-}")"
+    ;;
+  reconstruct)
+    too_many $# 2 reconstruct
+    _q=$(need_text "${1:-}" "question") || exit
+    use_ws "${2:-}"
+    post /api/reconstruct "$(jobj query "$_q" workspace "$WS")"
+    ;;
+  read)
+    too_many $# 2 read
+    [ -n "${1:-}" ] || usage_die "missing optimal:// URI or context id"
+    use_ws "${2:-}"
+    case $1 in
+      optimal://*) get /api/read "" uri "$1" workspace "$WS" tier "${O_tier:-}" ;;
+      *) get /api/read "" id "$1" workspace "$WS" tier "${O_tier:-}" ;;
+    esac
+    ;;
+  memory | memories)
+    too_many $# 1 "$CMD"
+    use_ws "${1:-}"
+    get /api/memory "" workspace "$WS" limit "${O_limit:-}" offset "${O_offset:-}" q "${O_query:-}"
+    ;;
+  claims)
+    too_many $# 1 claims
+    use_ws "${1:-}"
+    get /api/memory-core/claims "" workspace "$WS" kind actionable limit "${O_limit:-}"
+    ;;
+  review)
+    too_many $# 1 review
+    use_ws "${1:-}"
+    call GET /api/memory "" workspace "$WS" limit "${O_limit:-10}"
+    _mem=$R_BODY
+    call GET /api/memory-core/claim-review "" workspace "$WS" limit "${O_limit:-10}"
+    emit "{\"memories\":$_mem,\"claims\":$R_BODY}"
+    ;;
+  capture | signal)
+    too_many $# 3 "$CMD"
+    _text=$(need_text "${1:-}" "signal text") || exit
+    use_ws "${2:-}"
+    _genre=${O_genre:-${3:-}}
+    if [ -n "${3:-}" ] && [ -n "${O_genre:-}" ] && [ "$3" != "$O_genre" ]; then usage_die "genre given twice"; fi
+    post /api/ingest "$(jobj text "$_text" workspace "$WS" genre "$_genre" title "${O_title:-}" \
+      node "${O_node:-}" @extract_claims true)"
+    ;;
+  aware)
+    too_many $# 2 aware
+    _text=$(need_text "${1:-}" "signal text") || exit
+    use_ws "${2:-}"
+    call POST /api/ingest "$(jobj text "$_text" workspace "$WS" genre "${O_genre:-observation}" \
+      title "${O_title:-aware}" node "${O_node:-}" @extract_claims true)"
+    _captured=$R_BODY
+    call POST /api/memory/remember "$(jobj content "Aware observation: $_text" workspace "$WS" @force true \
+      @metadata "$(jobj kind aware source optimal-cli)")"
+    _remembered=$R_BODY
+    call GET /api/search "" q "$_text" workspace "$WS" limit "${O_limit:-5}"
+    emit "{\"captured\":$_captured,\"remembered\":$_remembered,\"related\":$R_BODY}"
+    ;;
+  note | lesson | decision | task | close)
+    too_many $# 2 "$CMD"
+    _text=$(need_text "${1:-}" "$CMD text") || exit
+    use_ws "${2:-}"
+    case $CMD in
+      note) remember_kind note Note "$_text" ;;
+      lesson) remember_kind lesson Lesson "$_text" ;;
+      decision) remember_kind decision Decision "$_text" ;;
+      task) remember_kind task Task "$_text" ;;
+      close) remember_kind close Close-loop "$_text" ;;
+    esac
+    ;;
+  remember)
+    too_many $# 2 remember
+    _text=$(need_text "${1:-}" "memory text") || exit
+    use_ws "${2:-}"
+    post /api/memory/remember "$(jobj content "$_text" workspace "$WS" @force true)"
+    ;;
+  routing)
+    _sub=${1:-review}
+    [ $# -gt 0 ] && shift
+    case $_sub in
+      review | unresolved)
+        too_many $# 1 "routing review"
+        [ "$_sub" = unresolved ] && set -- unresolved
+        get /api/review/routing "" state "${1:-${O_state:-}}" limit "${O_limit:-}"
+        ;;
+      rules)
+        too_many $# 1 "routing rules"
+        use_ws "${1:-}"
+        get /api/routing/rules "" workspace "$WS"
+        ;;
+      classify)
+        too_many $# 1 "routing classify"
+        _rtext=${O_text:-${1:-}}
+        [ "$_rtext" = - ] && _rtext=$(cat)
+        _labels=
+        [ -n "${O_label:-}" ] && _labels="[$(jstr "$O_label")]"
+        _sender=${O_sender:-}
+        [ -z "$_sender" ] && [ -n "${O_domain:-}" ] && _sender="sender@$O_domain"
+        post /api/routing/classify "$(jobj sender "$_sender" @labels "$_labels" channel "${O_channel:-}" \
+          title "${O_title:-}" text "$_rtext")"
+        ;;
+      *) usage_die "unknown routing command '$_sub'" ;;
+    esac
+    ;;
+  authority)
+    _sub=${1:-}
+    [ $# -gt 0 ] && shift
+    too_many $# 1 "authority $_sub"
+    use_ws "${1:-}"
+    case $_sub in
+      effective)
+        get /api/authority/effective "" workspace_id "$WS" subject "${O_subject:-}"
+        ;;
+      decide)
+        [ -n "${O_action:-}" ] && [ -n "${O_resource:-}" ] || usage_die "authority decide needs --action and --resource"
+        post /api/authority/decide "$(jobj workspace_id "$WS" action "$O_action" resource "$O_resource" \
+          data_class "${O_data_class:-}" subject "${O_subject:-}")"
+        ;;
+      request)
+        [ -n "${O_action:-}" ] && [ -n "${O_resource:-}" ] || usage_die "authority request needs --action and --resource"
+        case ${O_ttl:-} in *[!0-9]*) usage_die "--ttl takes seconds" ;; esac
+        post /api/authority/requests "$(jobj workspace_id "$WS" action "$O_action" resource "$O_resource" \
+          data_class "${O_data_class:-}" @ttl_seconds "${O_ttl:-}" justification "${O_justification:-}")"
+        ;;
+      *) usage_die "authority needs effective, decide or request" ;;
+    esac
+    ;;
+  workspaces)
+    too_many $# 0 workspaces
+    get /api/workspaces "" status all
+    ;;
+  organizations)
+    too_many $# 0 organizations
+    get /api/organizations "" status all
+    ;;
+  status)
+    too_many $# 0 status
+    get /api/status ""
+    ;;
+  health)
+    too_many $# 0 health
+    get /api/health ""
+    ;;
+  version)
+    too_many $# 0 version
+    _client="{\"name\":\"optimal\",\"version\":\"$OPTIMAL_CLI_VERSION\"}"
+    transport GET /api/version ""
+    case $R_CODE in
+      2??) emit "{\"client\":$_client,\"engine\":$R_BODY}" ;;
+      *) emit "{\"client\":$_client,\"engine\":null}" ;;
+    esac
+    ;;
+  url)
+    mask_url "$CFG_URL"
+    printf '\n'
+    ;;
+  doctor)
+    printf 'client     %s %s\n' "$PROG" "$OPTIMAL_CLI_VERSION"
+    printf 'engine     %s (from %s)\n' "$(mask_url "$CFG_URL")" "$CFG_URL_SRC"
+    if [ -n "$CFG_KEY" ]; then
+      printf 'key        configured (from %s)\n' "$CFG_KEY_SRC"
+      case $CFG_URL in
+        http://*) is_local_url || printf 'warning    the key is sent over unencrypted http to %s\n' "$(url_host "$CFG_URL")" ;;
+      esac
+    else
+      printf 'key        not configured\n'
+    fi
+    printf 'workspace  %s\n' "${CFG_WS:-<none; the Engine default applies>}${CFG_WS_SRC:+ (from $CFG_WS_SRC)}"
+    printf 'profile    %s\n' "${PROFILE:-<none>}"
+    printf 'curl       %s\n' "$(curl --version 2>/dev/null | awk 'NR == 1 { print $2 }')"
+    if _dco=$(checkout_dir); then printf 'checkout   %s\n' "$_dco"; fi
+    transport GET /api/health ""
+    case $R_CODE in
+      000) printf 'health     unreachable (%s)\n' "$(redact "${R_ERR:-curl exit $R_RC}")" && exit "$EX_UNAVAILABLE" ;;
+      2??) printf 'health     HTTP %s %s\n' "$R_CODE" "$(field_text "$R_BODY" status 2>/dev/null)" ;;
+      *) printf 'health     HTTP %s %s\n' "$R_CODE" "$(field_text "$R_BODY" error 2>/dev/null)" && exit 1 ;;
+    esac
+    ;;
+  api)
+    [ $# -ge 2 ] || usage_die "usage: $PROG api <GET|POST|PUT|PATCH|DELETE> /api/<path> [json|-]"
+    too_many $# 3 api
+    _am=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
+    case $_am in GET | POST | PUT | PATCH | DELETE) ;; *) usage_die "unsupported method $1" ;; esac
+    case $2 in /api/*) ;; *) usage_die "path must start with /api/" ;; esac
+    _ab=${3:-}
+    [ "$_ab" = - ] && _ab=$(cat)
+    [ "$_am" = GET ] && [ -n "$_ab" ] && usage_die "GET takes no body; put parameters in the path"
+    [ "$_am" != GET ] && [ -z "$_ab" ] && _ab='{}'
+    call "$_am" "$2" "$_ab"
+    emit "$R_BODY"
+    ;;
+  backup)
+    too_many $# 0 backup
+    post /api/backup "$(jobj name "${O_name:-}")"
+    ;;
+  start)
+    too_many $# 0 start
+    op_start
+    ;;
+  stop)
+    too_many $# 0 stop
+    op_stop
+    ;;
+  restart)
+    too_many $# 0 restart
+    op_stop
+    op_start
+    ;;
+  log | logs)
+    too_many $# 0 "$CMD"
+    op_log
+    ;;
+  index)
+    op_task index optimal.index "$@"
+    ;;
+  graph)
+    if [ "${1:-}" = backfill ]; then
+      shift
+      op_task "graph backfill" optimal.graph_backfill "$@"
+    fi
+    op_task graph optimal.graph "$@"
+    ;;
+  reality-check | reality_check)
+    [ -n "${O_disposable:-}" ] || usage_die "reality-check writes diagnostic fixtures; run it only on a disposable store and pass --disposable"
+    op_task reality-check optimal.reality_check "$@"
+    ;;
+  *)
+    usage_die "unknown command '$CMD'"
+    ;;
+esac

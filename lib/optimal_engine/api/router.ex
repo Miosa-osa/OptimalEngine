@@ -3220,6 +3220,9 @@ defmodule OptimalEngine.API.Router do
   post("/api/agent-actions", do: ViabilityAPI.actions_record(conn))
   get("/api/agent-actions/:id", do: ViabilityAPI.actions_trace(conn, id))
 
+  # ── Read one context by URI or id (OptimalEngine.API.ReadAPI) ────────────
+  get("/api/read", do: OptimalEngine.API.ReadAPI.read(conn))
+
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
 
   match _ do

@@ -545,7 +545,7 @@ The top-level folders are product surfaces, not random piles of code:
 | --- | --- |
 | `lib/` | Elixir/OTP runtime: topology, intake, memory, retrieval, API, wiki/export, governance, evaluation. |
 | `test/` | Runtime, API, topology, wiki, memory, connector, and evaluation tests. |
-| `apps/` | App surfaces such as docs and MCP server packages. |
+| `apps/` | App surfaces: docs, the MCP server, and the `optimal` client CLI. |
 | `desktop/` | Desktop/app shell surface. |
 | `extensions/` | Browser and Raycast integration surfaces. |
 | `sdks/` | TypeScript, Python, and UI/client SDKs. |
@@ -784,8 +784,9 @@ A reachable HTTP failure stops the command; only an unconfigured default-local p
 Native commands and that fallback use trusted local `mix optimal.*` access, so configure the local store deliberately.
 For production/API deployment, use the OTP release or container shape instead of treating the checkout wrapper as the server binary.
 
-There are three CLI surfaces:
+There are four CLI surfaces:
 
+- `apps/cli/optimal` (alias `oe`) is the client for any running Engine, local or remote, over HTTP(S) with a scoped key; it needs only `curl`. See the [client CLI and MCP guide](docs/guides/cli.md).
 - `bin/optimal` is the source-checkout command for humans, local agents, scripts, and fresh clones.
 - `lib/optimal_engine/cli.ex` is the packaged CLI router for a compiled `optimal` command.
 - `mix optimal.*` tasks are the native development surface where the implementation lives.
