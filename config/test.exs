@@ -24,6 +24,8 @@ config :optimal_engine, :api_rate_limit,
   default_capacity: 10_000,
   default_per_minute: 10_000
 
+config :optimal_engine, :metric_history, enabled: false
+
 config :optimal_engine, :context_refresh_scheduler,
   enabled: false,
   boot_delay_ms: 1_000,
