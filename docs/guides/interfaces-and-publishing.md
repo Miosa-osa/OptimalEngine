@@ -152,10 +152,12 @@ Explicitly set operation scopes when minting keys: omitting them currently creat
 | `write` | Ordinary intake, memory writes, batch imports, and projection updates. |
 | `claims:review` | Claim promotion/rejection and `/api/data-steward/claims/decide`. |
 | `topology:write` | Organization, workspace/config, Node, entity/relationship, routing-review, and storage-policy mutations. |
+| `data:admin` | App data schema changes, app schema migrations, and data keys under `/api/data` ([App data API](app-data-api.md)). |
 | `admin` | API-key administration, backups, and corpus maintenance. |
 | `*` | All operation grants; tenant and workspace checks still apply. |
 
 Grants are additive: `write` does not imply `read`, review, topology, or administration.
+A data key (minted through `POST /api/data/keys`) holds only `read` and `write`, is limited to one workspace's app data, and is refused on every route outside `/api/data`.
 `POST /api/memory/:id/promote` updates a wiki projection and requires `write`; it does not accept a Claim as a canonical Fact.
 
 For authenticated calls, omitted `tenant` or `tenant_id` resolves to the key's tenant.
