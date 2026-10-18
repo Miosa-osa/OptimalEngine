@@ -36,7 +36,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @format "optimal-workspace-bundle"
   @version 1
   # Engine bookkeeping that names a workspace but is not its data.
-  @excluded ~w(sync_cursors metric_samples workspaces uri_redirects federation_peers)
+  @excluded ~w(sync_cursors metric_samples workspaces uri_redirects federation_peers
+               sync_capture sync_workspaces sync_peers sync_conflicts sync_mutations)
   @children %{"memory_reconstruction_steps" => {"run_id", "memory_reconstruction_runs"}}
 
   @doc """
@@ -68,7 +69,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
               "metadata" => workspace.metadata
             },
             "tables" => tables,
-            "files" => files
+            "files" => files,
+            "ledger_sequence" => ledger_sequence(tenant_id, workspace_id)
           }
           |> then(&Map.put(&1, "bundle_sha256", CanonicalJSON.hash(&1)))
 
@@ -691,6 +693,18 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp root, do: Application.get_env(:optimal_engine, :root_path, File.cwd!())
 
   defp sha256(content), do: :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+
+  # The replication ledger's high-water mark when the bundle was taken: a
+  # replica seeded from this bundle pulls from here.
+  defp ledger_sequence(tenant_id, workspace_id) do
+    case Store.raw_query(
+           "SELECT COALESCE(MAX(sequence), 0) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2",
+           [tenant_id, workspace_id]
+         ) do
+      {:ok, [[n]]} -> n
+      _ -> 0
+    end
+  end
 
   defp engine_version, do: Application.spec(:optimal_engine, :vsn) |> to_string()
 

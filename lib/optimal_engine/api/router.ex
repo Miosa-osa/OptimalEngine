@@ -3192,6 +3192,18 @@ defmodule OptimalEngine.API.Router do
   post("/api/bundles/import", do: ScopeAPI.import_bundle(conn))
   get("/api/resolve", do: ScopeAPI.resolve(conn))
 
+  # ── Replication (OptimalEngine.API.SyncAPI) ──────────────────────────────
+  alias OptimalEngine.API.SyncAPI
+
+  get("/api/sync/changes", do: SyncAPI.changes(conn))
+  post("/api/sync/changes", do: SyncAPI.apply(conn))
+  post("/api/sync/enable", do: SyncAPI.enable(conn))
+  post("/api/sync/peers", do: SyncAPI.add_peer(conn))
+  post("/api/sync/run", do: SyncAPI.run(conn))
+  get("/api/sync/status", do: SyncAPI.status(conn))
+  get("/api/sync/conflicts", do: SyncAPI.conflicts(conn))
+  post("/api/sync/conflicts/:id/resolve", do: SyncAPI.resolve(conn, id))
+
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
 
   match _ do

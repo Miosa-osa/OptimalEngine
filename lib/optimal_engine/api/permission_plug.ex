@@ -90,6 +90,9 @@ defmodule OptimalEngine.API.PermissionPlug do
       match?(["api", "authority" | _], conn.path_info) ->
         authority_scope(conn.method, tl(tl(conn.path_info)))
 
+      match?(["api", "sync" | _], conn.path_info) ->
+        sync_scope(conn.method, tl(tl(conn.path_info)))
+
       String.starts_with?(path, "/api/auth/keys") or String.starts_with?(path, "/api/principals") or
         path == "/api/backup" or String.starts_with?(path, "/api/topology") or
         String.starts_with?(path, "/api/bundles") or
@@ -135,6 +138,11 @@ defmodule OptimalEngine.API.PermissionPlug do
     do: "authority:enforce"
 
   defp authority_scope(_method, _route), do: "authority:admin"
+
+  # Replication: a replica key holds "sync"; configuring sync is admin.
+  defp sync_scope(_method, ["changes"]), do: "sync"
+  defp sync_scope("GET", _route), do: "read"
+  defp sync_scope(_method, _route), do: "admin"
 
   defp topology_path?(["api", "storage", "workspaces", _, "policy"]), do: true
   defp topology_path?(["api", root | _]), do: root in @topology_roots

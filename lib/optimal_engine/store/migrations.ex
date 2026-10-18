@@ -110,8 +110,91 @@ defmodule OptimalEngine.Store.Migrations do
       migration_062_multi_profile_memory_embeddings(),
       migration_063_authority(),
       migration_064_operating_layer(),
-      migration_065_scope_and_portability()
+      migration_065_scope_and_portability(),
+      migration_067_replication()
     ]
+  end
+
+  # 66 is the app data layer.
+  defp migration_067_replication do
+    {67, "replication: replica identity, change capture, synced workspaces, peers, conflicts",
+     [
+       {"sync_identity",
+        """
+        CREATE TABLE IF NOT EXISTS sync_identity (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          replica_id TEXT NOT NULL,
+          applying INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """},
+       {"sync_identity_seed",
+        "INSERT OR IGNORE INTO sync_identity (id, replica_id) VALUES (1, 'rep_' || lower(hex(randomblob(12))))"},
+       {"sync_capture",
+        """
+        CREATE TABLE IF NOT EXISTS sync_capture (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          table_name TEXT NOT NULL,
+          operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'delete')),
+          workspace_id TEXT NOT NULL,
+          entity_key TEXT,
+          row_data TEXT NOT NULL,
+          blob_data TEXT,
+          occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+        )
+        """},
+       {"sync_workspaces",
+        """
+        CREATE TABLE IF NOT EXISTS sync_workspaces (
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          enabled_by TEXT,
+          enabled_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          PRIMARY KEY (workspace_id)
+        )
+        """},
+       {"sync_peers",
+        """
+        CREATE TABLE IF NOT EXISTS sync_peers (
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          url TEXT NOT NULL,
+          credential TEXT NOT NULL,
+          policy TEXT NOT NULL DEFAULT 'both' CHECK (policy IN ('push', 'pull', 'both', 'none')),
+          max_class TEXT NOT NULL DEFAULT 'confidential',
+          peer_replica_id TEXT,
+          last_pulled_seq INTEGER NOT NULL DEFAULT 0,
+          last_pushed_seq INTEGER NOT NULL DEFAULT 0,
+          last_sync_at TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          message TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          PRIMARY KEY (tenant_id, workspace_id, url)
+        )
+        """},
+       {"sync_conflicts",
+        """
+        CREATE TABLE IF NOT EXISTS sync_conflicts (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          table_name TEXT NOT NULL,
+          entity_key TEXT,
+          kind TEXT NOT NULL,
+          resolution TEXT NOT NULL,
+          local_payload TEXT,
+          remote_payload TEXT,
+          remote_device TEXT,
+          state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'resolved')),
+          detail TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          resolved_by TEXT,
+          resolved_at TEXT
+        )
+        """},
+       {"idx_sync_conflicts_state",
+        "CREATE INDEX IF NOT EXISTS idx_sync_conflicts_state ON sync_conflicts(tenant_id, workspace_id, state)"}
+     ]}
   end
 
   defp migration_065_scope_and_portability do
