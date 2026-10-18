@@ -656,7 +656,9 @@ defmodule OptimalEngine.AppDataTest do
             %{"priority" => %{"like" => "%"}},
             %{"priority" => "1; DROP TABLE contexts"},
             %{"tags" => %{"gt" => 1}},
-            %{"title\" OR 1=1 --" => 1}
+            %{"title\" OR 1=1 --" => 1},
+            Enum.reduce(1..12, %{"done" => true}, fn _, inner -> %{"not" => inner} end),
+            %{"or" => Enum.map(1..201, &%{"priority" => &1})}
           ] do
         assert {:error, {:validation, [_]}} = AppData.query(s, "tasks", %{"where" => where})
       end

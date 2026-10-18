@@ -228,7 +228,7 @@ Upsert keys must be `id` or the fields of a unique index.
 ```
 
 - `where` maps a field to a value (equality; `null` means is null) or to operators: `eq`, `ne` (null safe), `gt`, `gte`, `lt`, `lte`, `in`, `nin` (up to 1,000 values), `contains` (substring for `string` and `text`; array membership for `json`), `is_null`.
-- `and` and `or` take lists, `not` takes an object.
+- `and` and `or` take lists, `not` takes an object; nesting is limited to 8 levels and 200 conditions.
 - A dotted path (`project.status`) filters through a reference field: the referenced row must exist, be visible to the caller, and match.
 - `sort` takes up to 4 keys; `-field` or `{"field": f, "dir": "desc"}` sorts descending.
   SQLite order applies: nulls first ascending, last descending.
@@ -302,7 +302,7 @@ Later operations can reference records created earlier in the same transaction b
 | `DELETE /collections/:name/records/:id/files/:file_id` | `workspace` | 200 |
 
 Bytes are preserved through the Engine's governed asset store: content addressed, recorded as an asset with a Source Package in the record's workspace.
-The API accepts JSON only, so uploads are base64 in the body and one file is at most 6,000,000 bytes; a record holds at most 100 files.
+The API accepts JSON only, so uploads are base64 in the body and one file is at most 5,900,000 bytes (its base64 fits the 8 MB JSON request limit); a record holds at most 100 files.
 Downloads are `Content-Disposition: attachment` with `X-Content-Type-Options: nosniff` and honor one byte range per request.
 Uploading or removing a file does not change the record's version.
 Deleting a record removes its file links; the asset bytes stay as preserved evidence.
@@ -422,7 +422,7 @@ Bcrypt runs in each request's own process, so concurrent requests use more cores
 Until verified keys are cached, keep calls coarse: bulk inserts, transactions, larger pages, and one data key per session rather than per request.
 Trusted local mode (no key) skips verification.
 
-Hard limits: 5,000 operations per bulk insert or transaction; 1,000 records per page; 1,000 values per `in`; 4 sort keys; 8 includes; 6,000,000 bytes per file upload (JSON request limit); 100 files per record.
+Hard limits: 5,000 operations per bulk insert or transaction; 1,000 records per page; 1,000 values per `in`; 4 sort keys; 8 includes; 5,900,000 bytes per file upload (JSON request limit); 8 levels of `where` nesting and 200 conditions; 100 files per record.
 
 ## Durability
 
