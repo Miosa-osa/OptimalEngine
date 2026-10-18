@@ -101,9 +101,30 @@ defmodule OptimalEngine.Storage.PolicyStore do
                occurred_at
              ]
            ) do
-        :ok -> get_mutation_by_idempotency_key(idempotency_key)
+        :ok -> resolve_appended(tenant_id, attrs.workspace_id, idempotency_key)
         {:error, reason} -> {:error, reason}
       end
+    end
+  end
+
+  # `INSERT OR IGNORE` cannot say which uniqueness rule skipped the row, and
+  # idempotency keys are unique across the whole ledger. Resolve strictly
+  # inside the caller's scope so a colliding key can never hand back another
+  # workspace's mutation or payload.
+  defp resolve_appended(tenant_id, workspace_id, idempotency_key) do
+    case get_mutation_by_idempotency_key(tenant_id, workspace_id, idempotency_key) do
+      {:error, :not_found} -> classify_ignored_append(idempotency_key)
+      result -> result
+    end
+  end
+
+  defp classify_ignored_append(idempotency_key) do
+    case Store.raw_query("SELECT 1 FROM sync_mutations WHERE idempotency_key = ?1", [
+           idempotency_key
+         ]) do
+      {:ok, [_ | _]} -> {:error, :idempotency_key_conflict}
+      {:ok, []} -> {:error, :mutation_id_conflict}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -148,15 +169,16 @@ defmodule OptimalEngine.Storage.PolicyStore do
     end
   end
 
-  defp get_mutation_by_idempotency_key(key) do
+  defp get_mutation_by_idempotency_key(tenant_id, workspace_id, key) do
     case Store.raw_query(
            """
            SELECT sequence, id, tenant_id, organization_id, workspace_id,
                   device_id, actor_id, entity_type, entity_id, operation,
                   payload, payload_hash, idempotency_key, occurred_at, recorded_at
-           FROM sync_mutations WHERE idempotency_key = ?1
+           FROM sync_mutations
+           WHERE tenant_id = ?1 AND workspace_id = ?2 AND idempotency_key = ?3
            """,
-           [key]
+           [tenant_id, workspace_id, key]
          ) do
       {:ok, [row]} -> {:ok, mutation_from_row(row)}
       {:ok, []} -> {:error, :not_found}
