@@ -146,5 +146,5 @@ mix optimal.connector run <id>                # one sync cycle
 mix optimal.pull                              # every enabled connector, once
 ```
 
-The Runner writes one `connector_runs` row per invocation, advances the cursor only on success, disables a connector on a fatal error, and retries rate limits and transient failures with backoff.
+The Runner writes one `connector_runs` row for every sync it attempts, including one whose adapter could not be initialised, advances the cursor only on success, disables a connector on a fatal error, and retries rate limits and transient failures with backoff.
 `OptimalEngine.Connectors.PullScheduler` is the driver: on an interval it runs each enabled connector once and drives the produced Signals through `OptimalEngine.Pipeline.Intake`, which is where routing, loops and outward tagging happen.
