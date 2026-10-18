@@ -1,0 +1,975 @@
+{
+  "kind": "notion",
+  "note": "Recorded shapes of the Notion API: database search (two pages), database query with and without a last_edited_time filter (a two-page walk, an incremental answer, an idle answer), block children (one paginated), and the error answers a database or a page body can give (not shared, rate limited, server error, revoked token). Invented data only.",
+  "routes": [
+    {
+      "name": "search_databases_page_1",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/search"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "database",
+            "id": "0a000000-0000-4000-8000-000000000001",
+            "title": [
+              {
+                "type": "text",
+                "text": {
+                  "content": "Projects",
+                  "link": null
+                },
+                "plain_text": "Projects",
+                "href": null
+              }
+            ],
+            "created_time": "2026-09-01T08:00:00.000Z",
+            "last_edited_time": "2026-09-01T08:00:00.000Z"
+          },
+          {
+            "object": "database",
+            "id": "0a000000-0000-4000-8000-000000000002",
+            "title": [
+              {
+                "type": "text",
+                "text": {
+                  "content": "Notes",
+                  "link": null
+                },
+                "plain_text": "Notes",
+                "href": null
+              }
+            ],
+            "created_time": "2026-09-01T08:00:00.000Z",
+            "last_edited_time": "2026-09-01T08:00:00.000Z"
+          }
+        ],
+        "next_cursor": "search-cursor-2",
+        "has_more": true,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "search_databases_page_2",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/search"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "database",
+            "id": "0a000000-0000-4000-8000-000000000003",
+            "title": [
+              {
+                "type": "text",
+                "text": {
+                  "content": "Archive",
+                  "link": null
+                },
+                "plain_text": "Archive",
+                "href": null
+              }
+            ],
+            "created_time": "2026-09-01T08:00:00.000Z",
+            "last_edited_time": "2026-09-01T08:00:00.000Z"
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "projects_query_first_run_page_1",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000001/query"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "page",
+            "id": "1b000000-0000-4000-8000-000000000001",
+            "created_time": "2026-09-20T09:00:00.000Z",
+            "last_edited_time": "2026-10-01T09:00:00.000Z",
+            "archived": false,
+            "parent": {
+              "type": "database_id",
+              "database_id": "0a000000-0000-4000-8000-000000000001"
+            },
+            "url": "https://www.notion.so/1b000000000040008000000000000001",
+            "properties": {
+              "Status": {
+                "id": "a%3Ds",
+                "type": "select",
+                "select": {
+                  "name": "In progress"
+                }
+              },
+              "Name": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "Launch plan",
+                      "link": null
+                    },
+                    "plain_text": "Launch plan",
+                    "href": null
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "object": "page",
+            "id": "1b000000-0000-4000-8000-000000000002",
+            "created_time": "2026-09-21T09:00:00.000Z",
+            "last_edited_time": "2026-10-02T10:00:00.000Z",
+            "archived": false,
+            "parent": {
+              "type": "database_id",
+              "database_id": "0a000000-0000-4000-8000-000000000001"
+            },
+            "url": "https://www.notion.so/1b000000000040008000000000000002",
+            "properties": {
+              "Status": {
+                "id": "a%3Ds",
+                "type": "select",
+                "select": {
+                  "name": "Planned"
+                }
+              },
+              "Task name": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "Q3 ",
+                      "link": null
+                    },
+                    "plain_text": "Q3 ",
+                    "href": null
+                  },
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "roadmap",
+                      "link": null
+                    },
+                    "plain_text": "roadmap",
+                    "href": null
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "next_cursor": "projects-cursor-2",
+        "has_more": true,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "projects_query_first_run_page_2",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000001/query"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "page",
+            "id": "1b000000-0000-4000-8000-000000000003",
+            "created_time": "2026-09-22T09:00:00.000Z",
+            "last_edited_time": "2026-10-03T11:00:00.000Z",
+            "archived": false,
+            "parent": {
+              "type": "database_id",
+              "database_id": "0a000000-0000-4000-8000-000000000001"
+            },
+            "url": "https://www.notion.so/1b000000000040008000000000000003",
+            "properties": {
+              "Status": {
+                "id": "a%3Ds",
+                "type": "select",
+                "select": {
+                  "name": "Done"
+                }
+              },
+              "Title": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "Pricing review",
+                      "link": null
+                    },
+                    "plain_text": "Pricing review",
+                    "href": null
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "projects_query_after_cursor",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000001/query"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "page",
+            "id": "1b000000-0000-4000-8000-000000000002",
+            "created_time": "2026-09-21T09:00:00.000Z",
+            "last_edited_time": "2026-10-05T08:30:00.000Z",
+            "archived": false,
+            "parent": {
+              "type": "database_id",
+              "database_id": "0a000000-0000-4000-8000-000000000001"
+            },
+            "url": "https://www.notion.so/1b000000000040008000000000000002",
+            "properties": {
+              "Status": {
+                "id": "a%3Ds",
+                "type": "select",
+                "select": {
+                  "name": "In progress"
+                }
+              },
+              "Task name": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "Q3 ",
+                      "link": null
+                    },
+                    "plain_text": "Q3 ",
+                    "href": null
+                  },
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "roadmap",
+                      "link": null
+                    },
+                    "plain_text": "roadmap",
+                    "href": null
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "projects_query_nothing_new",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000001/query"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "notes_query_first_run",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000002/query"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "page",
+            "id": "1b000000-0000-4000-8000-000000000004",
+            "created_time": "2026-10-04T11:00:00.000Z",
+            "last_edited_time": "2026-10-04T12:00:00.000Z",
+            "archived": false,
+            "parent": {
+              "type": "database_id",
+              "database_id": "0a000000-0000-4000-8000-000000000002"
+            },
+            "url": "https://www.notion.so/1b000000000040008000000000000004",
+            "properties": {
+              "Status": {
+                "id": "a%3Ds",
+                "type": "select",
+                "select": {
+                  "name": "Open"
+                }
+              },
+              "Name": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "Meeting notes",
+                      "link": null
+                    },
+                    "plain_text": "Meeting notes",
+                    "href": null
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "object": "page",
+            "id": "1b000000-0000-4000-8000-000000000005",
+            "created_time": "2026-10-04T12:30:00.000Z",
+            "last_edited_time": "2026-10-04T12:30:00.000Z",
+            "archived": false,
+            "parent": {
+              "type": "database_id",
+              "database_id": "0a000000-0000-4000-8000-000000000002"
+            },
+            "url": "https://www.notion.so/1b000000000040008000000000000005",
+            "properties": {
+              "Status": {
+                "id": "a%3Ds",
+                "type": "select",
+                "select": {
+                  "name": "Open"
+                }
+              },
+              "Name": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "Empty page",
+                      "link": null
+                    },
+                    "plain_text": "Empty page",
+                    "href": null
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "notes_query_nothing_new",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000002/query"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "archive_query_empty",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000003/query"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "private_query_not_shared",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000004/query"
+      },
+      "status": 404,
+      "body": {
+        "object": "error",
+        "status": 404,
+        "code": "object_not_found",
+        "message": "Could not find database with ID: 0a000000-0000-4000-8000-000000000004. Make sure the relevant pages and databases are shared with your integration."
+      }
+    },
+    {
+      "name": "limited_query_rate_limited",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000005/query"
+      },
+      "status": 429,
+      "headers": {
+        "retry-after": "3"
+      },
+      "body": {
+        "object": "error",
+        "status": 429,
+        "code": "rate_limited",
+        "message": "You have been rate limited. Please try again in a few minutes."
+      }
+    },
+    {
+      "name": "broken_query_server_error",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000006/query"
+      },
+      "status": 500,
+      "body": {
+        "object": "error",
+        "status": 500,
+        "code": "internal_server_error",
+        "message": "An unexpected error occurred."
+      }
+    },
+    {
+      "name": "revoked_query_unauthorized",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000007/query"
+      },
+      "status": 401,
+      "body": {
+        "object": "error",
+        "status": 401,
+        "code": "unauthorized",
+        "message": "API token is invalid."
+      }
+    },
+    {
+      "name": "busy_query",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000008/query"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "page",
+            "id": "1b000000-0000-4000-8000-000000000006",
+            "created_time": "2026-10-06T08:00:00.000Z",
+            "last_edited_time": "2026-10-06T09:00:00.000Z",
+            "archived": false,
+            "parent": {
+              "type": "database_id",
+              "database_id": "0a000000-0000-4000-8000-000000000008"
+            },
+            "url": "https://www.notion.so/1b000000000040008000000000000006",
+            "properties": {
+              "Status": {
+                "id": "a%3Ds",
+                "type": "select",
+                "select": {
+                  "name": "Open"
+                }
+              },
+              "Name": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "Busy page",
+                      "link": null
+                    },
+                    "plain_text": "Busy page",
+                    "href": null
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "locked_query",
+      "match": {
+        "method": "POST",
+        "contains": "/v1/databases/0a000000-0000-4000-8000-000000000009/query"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "page",
+            "id": "1b000000-0000-4000-8000-000000000007",
+            "created_time": "2026-10-06T09:00:00.000Z",
+            "last_edited_time": "2026-10-06T10:00:00.000Z",
+            "archived": false,
+            "parent": {
+              "type": "database_id",
+              "database_id": "0a000000-0000-4000-8000-000000000009"
+            },
+            "url": "https://www.notion.so/1b000000000040008000000000000007",
+            "properties": {
+              "Status": {
+                "id": "a%3Ds",
+                "type": "select",
+                "select": {
+                  "name": "Open"
+                }
+              },
+              "Name": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {
+                      "content": "Locked page",
+                      "link": null
+                    },
+                    "plain_text": "Locked page",
+                    "href": null
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "page_or_database",
+        "page_or_database": {}
+      }
+    },
+    {
+      "name": "blocks_launch_plan",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/blocks/1b000000-0000-4000-8000-000000000001/children"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "block",
+            "type": "heading_1",
+            "has_children": false,
+            "archived": false,
+            "heading_1": {
+              "is_toggleable": false,
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Launch plan",
+                    "link": null
+                  },
+                  "plain_text": "Launch plan",
+                  "href": null
+                }
+              ]
+            }
+          },
+          {
+            "object": "block",
+            "type": "paragraph",
+            "has_children": false,
+            "archived": false,
+            "paragraph": {
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Send the signed order form to Example Co by Friday.",
+                    "link": null
+                  },
+                  "plain_text": "Send the signed order form to Example Co by Friday.",
+                  "href": null
+                }
+              ]
+            }
+          },
+          {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "has_children": false,
+            "archived": false,
+            "bulleted_list_item": {
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Confirm pricing with Jane Example",
+                    "link": null
+                  },
+                  "plain_text": "Confirm pricing with Jane Example",
+                  "href": null
+                }
+              ]
+            }
+          },
+          {
+            "object": "block",
+            "type": "divider",
+            "has_children": false,
+            "archived": false,
+            "divider": {}
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "block",
+        "block": {}
+      }
+    },
+    {
+      "name": "blocks_q3_roadmap_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/blocks/1b000000-0000-4000-8000-000000000002/children"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "block",
+            "type": "heading_2",
+            "has_children": false,
+            "archived": false,
+            "heading_2": {
+              "is_toggleable": false,
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Goals",
+                    "link": null
+                  },
+                  "plain_text": "Goals",
+                  "href": null
+                }
+              ]
+            }
+          },
+          {
+            "object": "block",
+            "type": "numbered_list_item",
+            "has_children": false,
+            "archived": false,
+            "numbered_list_item": {
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Ship the connector fixtures",
+                    "link": null
+                  },
+                  "plain_text": "Ship the connector fixtures",
+                  "href": null
+                }
+              ]
+            }
+          }
+        ],
+        "next_cursor": "blocks-cursor-2",
+        "has_more": true,
+        "type": "block",
+        "block": {}
+      }
+    },
+    {
+      "name": "blocks_q3_roadmap_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/blocks/1b000000-0000-4000-8000-000000000002/children?page_size=100&start_cursor=blocks-cursor-2"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "block",
+            "type": "to_do",
+            "has_children": false,
+            "archived": false,
+            "to_do": {
+              "checked": false,
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Review the cursor design",
+                    "link": null
+                  },
+                  "plain_text": "Review the cursor design",
+                  "href": null
+                }
+              ]
+            }
+          },
+          {
+            "object": "block",
+            "type": "quote",
+            "has_children": false,
+            "archived": false,
+            "quote": {
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Measure twice, cut once.",
+                    "link": null
+                  },
+                  "plain_text": "Measure twice, cut once.",
+                  "href": null
+                }
+              ]
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "block",
+        "block": {}
+      }
+    },
+    {
+      "name": "blocks_pricing_review",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/blocks/1b000000-0000-4000-8000-000000000003/children"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "block",
+            "type": "paragraph",
+            "has_children": false,
+            "archived": false,
+            "paragraph": {
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Pricing for Example Co is unchanged.",
+                    "link": null
+                  },
+                  "plain_text": "Pricing for Example Co is unchanged.",
+                  "href": null
+                }
+              ]
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "block",
+        "block": {}
+      }
+    },
+    {
+      "name": "blocks_meeting_notes",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/blocks/1b000000-0000-4000-8000-000000000004/children"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [
+          {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "has_children": false,
+            "archived": false,
+            "bulleted_list_item": {
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Agenda: kickoff",
+                    "link": null
+                  },
+                  "plain_text": "Agenda: kickoff",
+                  "href": null
+                }
+              ]
+            }
+          },
+          {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "has_children": false,
+            "archived": false,
+            "bulleted_list_item": {
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Action: Jane Example sends the order form",
+                    "link": null
+                  },
+                  "plain_text": "Action: Jane Example sends the order form",
+                  "href": null
+                }
+              ]
+            }
+          },
+          {
+            "object": "block",
+            "type": "to_do",
+            "has_children": false,
+            "archived": false,
+            "to_do": {
+              "checked": false,
+              "color": "default",
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Book the follow-up call",
+                    "link": null
+                  },
+                  "plain_text": "Book the follow-up call",
+                  "href": null
+                }
+              ]
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "block",
+        "block": {}
+      }
+    },
+    {
+      "name": "blocks_empty_page",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/blocks/1b000000-0000-4000-8000-000000000005/children"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "results": [],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "block",
+        "block": {}
+      }
+    },
+    {
+      "name": "blocks_busy_page_rate_limited",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/blocks/1b000000-0000-4000-8000-000000000006/children"
+      },
+      "status": 429,
+      "headers": {
+        "retry-after": "5"
+      },
+      "body": {
+        "object": "error",
+        "status": 429,
+        "code": "rate_limited",
+        "message": "You have been rate limited. Please try again in a few minutes."
+      }
+    },
+    {
+      "name": "blocks_locked_page_not_found",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/blocks/1b000000-0000-4000-8000-000000000007/children"
+      },
+      "status": 404,
+      "body": {
+        "object": "error",
+        "status": 404,
+        "code": "object_not_found",
+        "message": "Could not find block with ID: 1b000000-0000-4000-8000-000000000007. Make sure the relevant pages and databases are shared with your integration."
+      }
+    }
+  ]
+}

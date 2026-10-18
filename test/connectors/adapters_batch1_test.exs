@@ -544,7 +544,7 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
       :ets.delete(calls)
     end
 
-    test "sync/2 propagates cursor as last_edited_time" do
+    test "sync/2 parks the cursor on the latest last_edited_time of each database" do
       page = %{
         "id" => "page-1",
         "last_edited_time" => "2026-06-01T00:00:00Z",
@@ -561,17 +561,19 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
         assert {:ok, %{cursor: cursor, signals: signals}} =
                  OptimalEngine.Connectors.Adapters.Notion.sync(@notion_state, nil)
 
-        assert cursor == "2026-06-01T00:00:00Z"
+        assert Jason.decode!(cursor) == %{"db-1" => "2026-06-01T00:00:00Z"}
         assert length(signals) == 1
       end)
     end
 
-    test "sync/2 skips databases that return 401 and continues (db-level error isolation)" do
-      # Notion sync uses Enum.reduce -- per-database HTTP errors are skipped.
+    test "sync/2 returns :auth_expired when the token is rejected, not an empty success" do
+      # A 401 is a property of the token, not of one database: it ends the sync
+      # so the Runner can refresh the credential. Failures particular to one
+      # database (404, 403) are skipped; see test/connectors/notion_test.exs.
       mock = fn _url, _opts -> httpc_status(401) end
 
       with_mock(mock, fn ->
-        assert {:ok, %{signals: [], cursor: _}} =
+        assert {:error, :auth_expired} =
                  OptimalEngine.Connectors.Adapters.Notion.sync(@notion_state, nil)
       end)
     end
