@@ -1,19 +1,39 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1 — builder
-# Compile deps and produce an OTP release via `mix release optimal`
+# Compile deps and produce an OTP release via `mix release optimal`.
+#
+# Toolchain: Elixir 1.19.5 / OTP 28, the pair this release is developed and
+# tested on. Elixir needs a newer runtime than the previous 1.17.3 pin.
+# RocksDB builds its NIF through CMake, so the builder carries cmake and a
+# C++ toolchain as well as gcc/make and the SQLite headers.
 # ─────────────────────────────────────────────────────────────────────────────
-FROM hexpm/elixir:1.17.3-erlang-26.2.5-debian-bookworm-20260610-slim AS builder
+FROM hexpm/elixir:1.19.5-erlang-28.1.1-debian-bookworm-20260824-slim AS builder
 
-# Build-time tools: native extensions need gcc/make; libsqlite3-dev for exqlite
+# Build-time tools. build-essential + cmake build the RocksDB and SQLite NIFs,
+# libsnappy-dev is the Snappy codec RocksDB links against, libsqlite3-dev is
+# the exqlite C header, git satisfies the rebar3 pre-hook of :rocksdb.
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         build-essential \
+        cmake \
         git \
-        libsqlite3-dev \
         libsnappy-dev \
+        libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Release identity baked into the build. The release reports these through
+# /api/version, so an operator can compare a running Engine with the image
+# that was published. Pass them from CI:
+#   docker build -f deploy/Dockerfile.engine \
+#     --build-arg OPTIMAL_ENGINE_GIT_SHA=$(git rev-parse HEAD) \
+#     --build-arg OPTIMAL_ENGINE_BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+#     --build-arg OPTIMAL_RELEASE_CHANNEL=stable -t optimal-engine .
+# Unset values fall back to the checkout's commit and the build clock.
+ARG OPTIMAL_ENGINE_GIT_SHA=
+ARG OPTIMAL_ENGINE_BUILD_TIMESTAMP=
+ARG OPTIMAL_RELEASE_CHANNEL=dev
 
 # The rebar3 pre-hook of :rocksdb shells out to git inside /app; the build
 # context copies only mix.exs/lib/config/priv, so .git never arrives and the
@@ -44,8 +64,12 @@ COPY config/    ./config/
 COPY priv/      ./priv/
 COPY README.md  ./README.md
 
-# Build release — named `optimal` (matches releases() in mix.exs)
-RUN mix release optimal --overwrite
+# Build release — named `optimal` (matches releases() in mix.exs).
+# The empty build args are treated as absent by OptimalEngine.Version, so an
+# image built without them reports the compilation time instead of a blank.
+RUN OPTIMAL_ENGINE_GIT_SHA="${OPTIMAL_ENGINE_GIT_SHA}" \
+    OPTIMAL_ENGINE_BUILD_TIMESTAMP="${OPTIMAL_ENGINE_BUILD_TIMESTAMP}" \
+    mix release optimal --overwrite
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 — runtime
@@ -53,10 +77,12 @@ RUN mix release optimal --overwrite
 # ─────────────────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
-# Erlang runtime needs: openssl/libssl, ncurses, libstdc++; exqlite needs libsqlite3
+# Erlang runtime needs: openssl/libssl, ncurses, libstdc++; exqlite needs
+# libsqlite3, and the RocksDB NIF needs Snappy at run time, not only to build.
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
+        libsnappy1v5 \
         libsqlite3-0 \
         libssl3 \
         libstdc++6 \
@@ -73,9 +99,12 @@ WORKDIR /app
 # Copy the release from builder
 COPY --from=builder --chown=optimal:optimal /app/_build/prod/rel/optimal ./
 
-# /data is the single persistent volume:
+# /data is the single writable volume:
 #   /data/.optimal/     — SQLite DB + cache
 #   /data/<workspaces>/ — Markdown signal files
+# Create it owned by the runtime user so a fresh named volume is writable,
+# and so data written by one container survives a restart or an image swap.
+RUN mkdir -p /data/.optimal && chown -R optimal:optimal /data
 VOLUME ["/data"]
 
 USER optimal
@@ -99,9 +128,24 @@ ENV OPTIMAL_ENGINE_ROOT=/data \
     OPTIMAL_API_ENABLED=true \
     OPTIMAL_API_PORT=4200 \
     OPTIMAL_API_INTERFACE=0.0.0.0 \
-    RELEASE_COOKIE=optimal_engine_docker
+    OPTIMAL_RELEASE_CHANNEL=dev
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD wget -qO- "http://localhost:4200/api/health" || exit 1
+# Secrets are environment-only and carry no value in the image:
+#   OPTIMAL_AUTHORITY_KEY   wraps the authority signing keys
+#   CONNECTOR_KEY           encrypts connector credentials
+#   RELEASE_COOKIE          Erlang distribution cookie; the release writes a
+#                           random one at build time, shared only when set
+#   OPTIMAL_ENGINE_API_KEY  an Engine API key, used by the health check below
+# The health check reads /api/health, which is authenticated whenever
+# OPTIMAL_AUTH_REQUIRED is true. Set OPTIMAL_ENGINE_API_KEY to a key scoped to
+# the workspaces the probe should see; without it the probe is anonymous and
+# the container reports unhealthy while authentication is enforced.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD if [ -n "$OPTIMAL_ENGINE_API_KEY" ]; then \
+          wget -qO- --header="Authorization: Bearer $OPTIMAL_ENGINE_API_KEY" \
+            "http://127.0.0.1:${OPTIMAL_API_PORT}/api/health" > /dev/null; \
+        else \
+          wget -qO- "http://127.0.0.1:${OPTIMAL_API_PORT}/api/health" > /dev/null; \
+        fi
 
 CMD ["/app/bin/optimal", "start"]
