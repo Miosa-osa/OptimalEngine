@@ -232,6 +232,32 @@ retrieval and RAG
 compliance workflows
 ```
 
+To prove every logical store works, not just that its tables exist, run the store reality suite:
+
+```bash
+mix test test/stores/store_reality_test.exs
+```
+
+It exercises each store in `GET /api/stores` through its public API with a write, a read, a persistence check, and a failure path.
+Persistence is checked through an independent read-only SQLite connection, a reopen of the backing files (RocksDB), or a rebuild from durable state (ETS graph and hot cache).
+The suite fails when the catalog gains a store without a proof.
+
+The same proof runs against a live engine process with `scripts/store_reality_proof.exs`.
+It writes fixture rows, so point it at disposable paths and a spare port, never at a live store:
+
+```bash
+D=$(mktemp -d)
+MIX_ENV=test OPTIMAL_API_ENABLED=true OPTIMAL_API_PORT=4310 \
+  OPTIMAL_ENGINE_ROOT=$D/root OPTIMAL_ENGINE_DB=$D/engine.db \
+  OPTIMAL_ENGINE_CACHE=$D/cache OPTIMAL_BACKUP_DIR=$D/backups \
+  OPTIMAL_KNOWLEDGE_ROCKSDB_PATH=$D/knowledge-rocksdb \
+  STORE_PROOF_OUT=$D/store-proof.json \
+  mix run scripts/store_reality_proof.exs
+```
+
+The JSON report lists `{store, status, evidence}` for every store, the provider adapter inventory read from the live API, and the deep audit result.
+It exits non-zero when any store fails.
+
 To prove the live local graph is running on RocksDB:
 
 ```bash
