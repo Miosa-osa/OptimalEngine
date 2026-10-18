@@ -112,8 +112,31 @@ defmodule OptimalEngine.Store.Migrations do
       migration_064_operating_layer(),
       migration_065_scope_and_portability(),
       migration_067_replication(),
-      migration_068_viability()
+      migration_068_viability(),
+      migration_069_analysis_reports()
     ]
+  end
+
+  defp migration_069_analysis_reports do
+    {69, "analysis reports from scheduled Engine jobs",
+     [
+       {"analysis_reports",
+        """
+        CREATE TABLE IF NOT EXISTS analysis_reports (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          job_id TEXT,
+          status TEXT NOT NULL CHECK (status IN ('ok', 'failed')),
+          summary TEXT NOT NULL,
+          report TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """},
+       {"idx_analysis_reports_scope",
+        "CREATE INDEX IF NOT EXISTS idx_analysis_reports_scope ON analysis_reports(tenant_id, workspace_id, kind, created_at)"}
+     ]}
   end
 
   defp migration_068_viability do

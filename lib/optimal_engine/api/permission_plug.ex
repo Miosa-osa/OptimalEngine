@@ -93,7 +93,14 @@ defmodule OptimalEngine.API.PermissionPlug do
       match?(["api", "sync" | _], conn.path_info) ->
         sync_scope(conn.method, tl(tl(conn.path_info)))
 
-      mutation and path in ["/api/viability/snapshot", "/api/viability/audit/run", "/api/init"] ->
+      mutation and
+          (path in [
+             "/api/viability/snapshot",
+             "/api/viability/audit/run",
+             "/api/init",
+             "/api/analyses/run"
+           ] or
+             String.starts_with?(path, "/api/jobs/")) ->
         "admin"
 
       mutation and path == "/api/agent-actions" and

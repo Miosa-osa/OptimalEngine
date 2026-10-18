@@ -59,3 +59,26 @@ Fields: `sender`, `domain` (also matches subdomains), `label`, `channel`, `keywo
 `classify` proposes a workspace with confidence `high` (score at least 8 and a margin of 5), `review`, or `unresolved`, and lists the rules that fired.
 Feedback moves a rule's effective weight: `weight * (1 + accepted) / (1 + rejected)`.
 `POST /api/routing/seed` loads the keyword rules of the deployment's routing rules file (`OPTIMAL_CORPUS_RULES`).
+
+## Analyses as jobs
+
+The Engine runs its standing analyses as durable jobs (`OptimalEngine.Jobs`: retries with backoff, then a dead letter) and keeps a report of each run.
+
+| Kind | Scope | Report |
+| --- | --- | --- |
+| `promises` | each workspace | loops detected and closed by reply in the last 7 days, open loops by kind, the overdue ones |
+| `workspace_population` | the intake workspace | items placed in their workspace and items queued for routing review |
+| `meeting_archive` | workspaces with zoom, teams, or fathom connectors | each connector's pull result |
+| `file_audit` | the tenant | the storage audit checks and the hierarchy issue count |
+| `storage_usage` | the tenant | usage against the size profile and the resize advice |
+| `retention_sweep` | the tenant | the retention policies applied, held items skipped |
+
+Each kind runs once a day per workspace (a worker schedules and drains every five minutes, `OPTIMAL_ANALYSES_INTERVAL_MS`, 0 disables).
+
+```
+GET  /api/analyses?workspace=<id>&kind=promises
+POST /api/analyses/run {"workspace": "<id>", "kind": "promises"}     (admin; runs now and returns the report)
+GET  /api/jobs?workspace=<id>&status=dead
+GET  /api/jobs/dead?workspace=<id>
+POST /api/jobs/dead/<id>/replay {"workspace": "<id>"}     (admin)
+```

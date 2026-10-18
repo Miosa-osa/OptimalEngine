@@ -3174,6 +3174,15 @@ defmodule OptimalEngine.API.Router do
   # ── Read one context by URI or id (OptimalEngine.API.ReadAPI) ────────────
   get("/api/read", do: OptimalEngine.API.ReadAPI.read(conn))
 
+  # ── Analyses and the job queue (OptimalEngine.API.AnalysesAPI) ──────────
+  alias OptimalEngine.API.AnalysesAPI
+
+  get("/api/analyses", do: AnalysesAPI.reports(conn))
+  post("/api/analyses/run", do: AnalysesAPI.run(conn))
+  get("/api/jobs", do: AnalysesAPI.jobs(conn))
+  get("/api/jobs/dead", do: AnalysesAPI.dead(conn))
+  post("/api/jobs/dead/:id/replay", do: AnalysesAPI.replay(conn, id))
+
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
 
   match _ do

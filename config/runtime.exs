@@ -179,6 +179,11 @@ if profile = System.get_env("OPTIMAL_SIZE_PROFILE") do
   config :optimal_engine, :size_profile, profile
 end
 
+# Analyses: how often the day's analysis jobs are scheduled and drained.
+if interval = System.get_env("OPTIMAL_ANALYSES_INTERVAL_MS") do
+  config :optimal_engine, :analyses_interval_ms, String.to_integer(interval)
+end
+
 # Viability: how often snapshots and the weekly audit are brought up to date.
 if interval = System.get_env("OPTIMAL_VIABILITY_INTERVAL_MS") do
   config :optimal_engine, :viability_interval_ms, String.to_integer(interval)
