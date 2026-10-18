@@ -517,4 +517,25 @@ defmodule OptimalEngine.API.AppDataRouterTest do
       end)
     end
   end
+
+  describe "Optimal Authority classification" do
+    test "data routes map to search, admin, erase, read, and write actions" do
+      action = fn method, path ->
+        conn(method, path)
+        |> Plug.Conn.assign(:workspace_id, "default:x")
+        |> OptimalEngine.API.AuthorityPlug.describe("default")
+        |> Map.fetch!(:action)
+      end
+
+      assert action.(:post, "/api/data/collections/tasks/query") == "search"
+      assert action.(:get, "/api/data/collections/tasks/records") == "read"
+      assert action.(:post, "/api/data/collections/tasks/records") == "write"
+      assert action.(:delete, "/api/data/collections/tasks/records/r1") == "erase"
+      assert action.(:post, "/api/data/collections") == "admin"
+      assert action.(:patch, "/api/data/collections/tasks") == "admin"
+      assert action.(:delete, "/api/data/collections/tasks") == "admin"
+      assert action.(:post, "/api/data/migrations") == "admin"
+      assert action.(:post, "/api/data/keys") == "admin"
+    end
+  end
 end
