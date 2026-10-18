@@ -413,37 +413,59 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
       :ets.delete(calls)
     end
 
-    test "sync/2 skips channels that return ratelimited and continues (channel-level isolation)" do
-      # Slack sync uses Enum.reduce -- per-channel rate limit errors are swallowed.
+    test "sync/2 reports a rate limit instead of an empty success" do
+      # A rate limit before anything was read is returned to the Runner, which
+      # backs off and retries. Reporting it as an empty sync would hide it.
       mock = fn _url, _opts ->
         httpc_ok(%{"ok" => false, "error" => "ratelimited"})
       end
 
       with_mock(mock, fn ->
-        assert {:ok, %{signals: [], cursor: _}} =
+        assert {:error, :rate_limited} =
                  OptimalEngine.Connectors.Adapters.Slack.sync(@slack_state, nil)
       end)
     end
 
-    test "sync/2 encodes cursor as channel_id:oldest_ts" do
+    test "sync/2 returns {:error, :auth_expired} on HTTP 401" do
+      mock = fn _url, _opts -> httpc_status(401) end
+
+      with_mock(mock, fn ->
+        assert {:error, :auth_expired} =
+                 OptimalEngine.Connectors.Adapters.Slack.sync(@slack_state, nil)
+      end)
+    end
+
+    test "sync/2 returns {:error, :rate_limited} on HTTP 429" do
+      mock = fn _url, _opts -> httpc_status(429) end
+
+      with_mock(mock, fn ->
+        assert {:error, :rate_limited} =
+                 OptimalEngine.Connectors.Adapters.Slack.sync(@slack_state, nil)
+      end)
+    end
+
+    test "sync/2 keeps one position per channel in the cursor" do
       mock = fn url, _opts ->
-        if String.contains?(url, "conversations.history") do
-          httpc_ok(%{
-            "ok" => true,
-            "messages" => [%{"ts" => "1700000001.000000", "text" => "hi", "user" => "U1"}],
-            "has_more" => true
-          })
-        else
-          httpc_ok(%{"ok" => true, "messages" => [], "has_more" => false})
-        end
+        ts =
+          if String.contains?(url, "channel=C01"),
+            do: "1700000001.000000",
+            else: "1700000002.000000"
+
+        httpc_ok(%{
+          "ok" => true,
+          "messages" => [%{"ts" => ts, "text" => "hi", "user" => "U1"}],
+          "has_more" => false
+        })
       end
 
       with_mock(mock, fn ->
-        assert {:ok, %{cursor: cursor}} =
+        assert {:ok, %{signals: [_, _], cursor: cursor}} =
                  OptimalEngine.Connectors.Adapters.Slack.sync(@slack_state, nil)
 
-        # cursor is "channel_id:oldest_ts" or "channel_id:"
-        assert is_binary(cursor) or is_nil(cursor)
+        assert Jason.decode!(cursor) == %{
+                 "C01" => %{"oldest" => "1700000001.000000"},
+                 "C02" => %{"oldest" => "1700000002.000000"}
+               }
       end)
     end
 
