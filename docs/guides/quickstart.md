@@ -140,8 +140,9 @@ mix optimal.conformance --url http://127.0.0.1:4200 --key "$OPTIMAL_ENGINE_API_K
 
 `version` prints the release identity the running Engine reports: application version, release channel, git commit, build time, API version, and expected migration.
 `mix optimal.conformance` runs the conformance suite against a live Engine and prints a JSON report with pass, fail, or skip plus the evidence per check.
-It checks the release contract, that authentication is enforced, that a workspace-scoped key cannot read another workspace, a decision and the evidence chain, every store family, replication status, the viability report, and the operating routes.
+It checks the release contract, that authentication is enforced, that a workspace-scoped key cannot read another workspace, a decision and the evidence chain, every store family, the size gauges, a use-case preset, the pre-send draft check, analysis reports and the job queue, replication status, the viability report, and the operating routes.
 It creates its own workspaces and key, cleans them up, and exits non-zero on any failure, so it can gate a release.
+In a checkout it also runs the store reality proof against a disposable store of its own, which is what proves every logical store rather than only its inventory.
 See [release identity](versioning-and-releases.md) for the identity it compares against.
 
 ## Where To Go Next
@@ -150,6 +151,8 @@ See [release identity](versioning-and-releases.md) for the identity it compares 
 | --- | --- |
 | Every client command | [Client CLI and MCP server](cli.md) |
 | A first real workspace, end to end | [First workspace story](first-workspace-story.md) |
+| Sizes, when to grow, and use-case presets | [Sizes and presets](sizing-and-presets.md) |
+| One setup per use case, with the calls that use it | [Recipes](recipes.md) |
 | Agent loops over the operating routes | [Operating layer](operating-layer.md) |
 | The protocol an agent follows | [Agent CLI SOP](agent-cli-sop.md) |
 | Native engine tasks and stores | [Mix tasks](mix-tasks.md) |

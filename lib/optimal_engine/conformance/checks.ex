@@ -40,7 +40,15 @@ defmodule OptimalEngine.Conformance.Checks do
   @spec all() :: [check()]
   def all do
     version() ++
-      auth() ++ scope() ++ authority() ++ stores() ++ sync() ++ viability() ++ operating()
+      auth() ++
+      scope() ++
+      authority() ++
+      stores() ++
+      storage() ++
+      setup() ++
+      signal() ++
+      analyses() ++
+      sync() ++ viability() ++ operating()
   end
 
   @doc """
@@ -491,6 +499,334 @@ defmodule OptimalEngine.Conformance.Checks do
 
             {:error, reason} ->
               {:fail, %{url: "/api/stores/audit", error: inspect(reason)}}
+          end
+        end
+      }
+    ]
+  end
+
+  # ---------------------------------------------------------------------------
+  # storage
+  # ---------------------------------------------------------------------------
+
+  defp storage do
+    [
+      %{
+        id: "storage.usage",
+        group: "storage",
+        description: "the size profile, its gauges, and the boot time answer for this Engine",
+        run: fn client, _context ->
+          with {:ok, response} <- fetch_json(client, "/api/storage") do
+            gauges = List.wrap(get_in(response.body, ["gauges"]))
+            names = gauges |> Enum.map(&Map.get(&1, "name")) |> Enum.reject(&is_nil/1)
+            unread = Enum.filter(gauges, &(is_nil(&1["used"]) or is_nil(&1["percent"])))
+
+            evidence = %{
+              url: "/api/storage",
+              status: response.status,
+              profile: get_in(response.body, ["profile", "id"]),
+              gauges: names,
+              worst: get_in(response.body, ["worst"]),
+              recommendation: get_in(response.body, ["recommendation"]),
+              boot_ms: response.body["boot_ms"],
+              missing_gauge_readings: unread
+            }
+
+            cond do
+              response.status != 200 ->
+                {:fail, Map.put(evidence, :expectation, "200 with the size gauges")}
+
+              is_nil(evidence.profile) or names == [] ->
+                {:fail, Map.put(evidence, :expectation, "a profile and at least one gauge")}
+
+              unread != [] ->
+                {:fail, Map.put(evidence, :expectation, "every gauge reports used and percent")}
+
+              not is_integer(evidence.boot_ms) ->
+                {:fail, Map.put(evidence, :expectation, "a boot time in milliseconds")}
+
+              true ->
+                {:ok, evidence}
+            end
+          else
+            {:error, evidence} -> {:fail, evidence}
+          end
+        end
+      },
+      %{
+        id: "storage.profiles",
+        group: "storage",
+        description: "the size profiles are listed and one of them is active",
+        run: fn client, _context ->
+          with {:ok, response} <- fetch_json(client, "/api/storage/profiles") do
+            ids =
+              response.body
+              |> Map.get("profiles", [])
+              |> List.wrap()
+              |> Enum.map(&Map.get(&1, "id"))
+              |> Enum.reject(&is_nil/1)
+
+            active = response.body["active"]
+
+            evidence = %{
+              url: "/api/storage/profiles",
+              status: response.status,
+              profile_ids: ids,
+              active: active
+            }
+
+            if response.status == 200 and active in ids and length(ids) > 1 do
+              {:ok, evidence}
+            else
+              {:fail,
+               Map.put(evidence, :expectation, "200 listing the profiles with one of them active")}
+            end
+          else
+            {:error, evidence} -> {:fail, evidence}
+          end
+        end
+      }
+    ]
+  end
+
+  # ---------------------------------------------------------------------------
+  # setup
+  # ---------------------------------------------------------------------------
+
+  defp setup do
+    [
+      %{
+        id: "setup.preset_applies",
+        group: "setup",
+        description: "a listed use-case preset builds a workspace, and the run removes it again",
+        run: fn client, context ->
+          case Client.get(client, "/api/init/presets") do
+            {:ok, %{status: 200, body: %{"presets" => presets}}}
+            when is_list(presets) and presets != [] ->
+              case presets
+                   |> Enum.map(&Map.get(&1, "id"))
+                   |> Enum.reject(&is_nil/1)
+                   |> List.first() do
+                nil ->
+                  {:fail,
+                   %{
+                     url: "/api/init/presets",
+                     presets: presets,
+                     expectation: "each preset names an id"
+                   }}
+
+                preset ->
+                  apply_preset(client, preset, context)
+              end
+
+            {:ok, %{status: status, body: body}} ->
+              {:fail,
+               %{
+                 url: "/api/init/presets",
+                 status: status,
+                 body: body,
+                 expectation: "200 listing at least one use-case preset"
+               }}
+
+            {:error, reason} ->
+              {:fail, %{url: "/api/init/presets", error: inspect(reason)}}
+          end
+        end
+      }
+    ]
+  end
+
+  defp apply_preset(client, preset, context) do
+    slug = "#{context.prefix}-#{context.run_id}-preset"
+
+    case Client.post(client, "/api/init", %{"for" => preset, "slug" => slug, "name" => slug}) do
+      {:ok, %{status: 200, body: body}} when is_map(body) ->
+        workspace = body["workspace_id"] || slug
+        listed = workspace_listed?(client, slug)
+        archived = Client.post(client, "/api/workspaces/#{URI.encode_www_form(workspace)}/archive")
+
+        evidence = %{
+          url: "POST /api/init",
+          preset: preset,
+          workspace: workspace,
+          response_keys: map_keys(body),
+          created: Map.get(body, "created"),
+          listed_as_a_workspace: listed,
+          archive: describe(archived)
+        }
+
+        if not is_nil(Map.get(body, "workspace_id")) and listed and ok_status?(archived, 204) do
+          {:ok, evidence}
+        else
+          {:fail,
+           Map.put(
+             evidence,
+             :expectation,
+             "200 naming the new workspace, the workspace is listed, and the run archives it"
+           )}
+        end
+
+      {:ok, %{status: status, body: body}} ->
+        {:fail,
+         %{
+           url: "POST /api/init",
+           preset: preset,
+           status: status,
+           body: body,
+           expectation: "200 applying a preset (the key needs the admin scope)"
+         }}
+
+      {:error, reason} ->
+        {:fail, %{url: "POST /api/init", preset: preset, error: inspect(reason)}}
+    end
+  end
+
+  defp workspace_listed?(client, slug) do
+    case Client.get(client, "/api/workspaces", query: [status: "all", limit: 500]) do
+      {:ok, %{status: 200, body: body}} ->
+        body |> Map.get("workspaces", []) |> List.wrap() |> Enum.any?(&(&1["slug"] == slug))
+
+      _ ->
+        false
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # signal
+  # ---------------------------------------------------------------------------
+
+  defp signal do
+    [
+      %{
+        id: "signal.pre_send_check",
+        group: "signal",
+        description: "a draft is checked before it is sent, and the verdict names its flags",
+        run: fn client, context ->
+          drafts = [
+            %{
+              "draft" =>
+                "Delivery update: the supplier renewal moved to the 14th. The contract review is still open, and I will close it on Friday.",
+              "genre" => "note",
+              "type" => "inform"
+            },
+            %{"draft" => "hey quick q", "genre" => "note", "type" => "inform"}
+          ]
+
+          # The check records a signal event when it is given a workspace, so it
+          # is given the disposable one when this run has one.
+          results =
+            Enum.map(drafts, fn draft ->
+              body =
+                draft
+                |> Map.put("receiver", %{})
+                |> maybe_put("workspace", context.write_target)
+
+              {draft["draft"], Client.post(client, "/api/signals/check", body)}
+            end)
+
+          failures =
+            for {_draft, result} <- results, not ok_status?(result, 200), do: describe(result)
+
+          evidence = %{
+            url: "POST /api/signals/check",
+            workspace: context.write_target,
+            results: Enum.map(results, &describe_check/1)
+          }
+
+          if failures == [] do
+            {:ok, evidence}
+          else
+            {:fail, Map.put(evidence, :expectation, "200 with a check report for every draft")}
+          end
+        end
+      }
+    ]
+  end
+
+  defp describe_check({draft, {:ok, %{status: status, body: body}}}) do
+    %{
+      draft: String.slice(draft, 0, 60),
+      status: status,
+      ok: body["ok"],
+      words: body["words"],
+      detected: body["detected"],
+      flags: body |> Map.get("flags", []) |> List.wrap() |> Enum.map(&Map.get(&1, "code"))
+    }
+  end
+
+  defp describe_check({draft, {:error, reason}}),
+    do: %{draft: String.slice(draft, 0, 60), error: inspect(reason)}
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # ---------------------------------------------------------------------------
+  # analyses and jobs
+  # ---------------------------------------------------------------------------
+
+  defp analyses do
+    [
+      %{
+        id: "analyses.reports",
+        group: "analyses",
+        description: "the analysis reports for a workspace are listed with the kinds that can run",
+        run: fn client, context ->
+          with {:ok, response} <-
+                 fetch_json(client, "/api/analyses", query: [workspace: context.primary]) do
+            reports = List.wrap(response.body["reports"])
+            kinds = List.wrap(response.body["kinds"])
+
+            evidence = %{
+              url: "/api/analyses",
+              workspace: context.primary,
+              status: response.status,
+              reports: length(reports),
+              kinds: kinds
+            }
+
+            cond do
+              response.status != 200 ->
+                {:fail, Map.put(evidence, :expectation, "200 with the analysis reports")}
+
+              not is_list(response.body["reports"]) or kinds == [] ->
+                {:fail,
+                 Map.put(evidence, :expectation, "a report list and the runnable analysis kinds")}
+
+              Enum.any?(kinds, &(not is_binary(&1))) ->
+                {:fail, Map.put(evidence, :expectation, "each runnable analysis kind is named")}
+
+              true ->
+                {:ok, evidence}
+            end
+          else
+            {:error, evidence} -> {:fail, evidence}
+          end
+        end
+      },
+      %{
+        id: "jobs.queue",
+        group: "analyses",
+        description: "the job queue and its dead letters answer for a workspace",
+        run: fn client, context ->
+          with {:ok, jobs} <- fetch_json(client, "/api/jobs", query: [workspace: context.primary]),
+               {:ok, dead} <-
+                 fetch_json(client, "/api/jobs/dead", query: [workspace: context.primary]) do
+            evidence = %{
+              jobs_url: "/api/jobs",
+              jobs_status: jobs.status,
+              jobs: length(List.wrap(jobs.body["jobs"])),
+              dead_status: dead.status,
+              dead_letters: length(List.wrap(dead.body["dead_letters"]))
+            }
+
+            if jobs.status == 200 and dead.status == 200 and is_list(jobs.body["jobs"]) and
+                 is_list(dead.body["dead_letters"]) do
+              {:ok, evidence}
+            else
+              {:fail, Map.put(evidence, :expectation, "200 with a job list and a dead letter list")}
+            end
+          else
+            {:error, evidence} -> {:fail, evidence}
           end
         end
       }

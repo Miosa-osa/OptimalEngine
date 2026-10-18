@@ -44,7 +44,9 @@ defmodule OptimalEngine.ConformanceTest do
       assert report["workspaces"]["created_by_this_run"] != []
 
       groups = report["checks"] |> Enum.map(& &1["group"]) |> Enum.uniq() |> Enum.sort()
-      assert groups == ~w(auth authority cleanup operating scope stores sync version viability)
+
+      assert groups ==
+               ~w(analyses auth authority cleanup operating scope setup signal storage stores sync version viability)
 
       assert report["checks"] |> Enum.all?(&is_map(&1["evidence"]))
 
@@ -249,6 +251,15 @@ defmodule OptimalEngine.ConformanceTest do
       assert_received {:request, request}
       assert request.headers == []
     end
+  end
+
+  defp write_script(contents) do
+    path =
+      Path.join(System.tmp_dir!(), "conformance-proof-#{System.unique_integer([:positive])}.exs")
+
+    File.write!(path, contents)
+    on_exit(fn -> File.rm(path) end)
+    path
   end
 
   defp write_extra(contents) do
