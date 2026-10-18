@@ -110,7 +110,7 @@ defmodule OptimalEngine.Store.Migrations do
       migration_062_multi_profile_memory_embeddings(),
       migration_063_authority(),
       migration_064_operating_layer(),
-      migration_065_app_data()
+      migration_066_app_data()
     ]
   end
 
@@ -118,8 +118,8 @@ defmodule OptimalEngine.Store.Migrations do
   # the durable change feed, applied app schema migrations, files attached to
   # records, and the rebuildable semantic projection. Each collection's own
   # records live in an Engine-generated table created at runtime.
-  defp migration_065_app_data do
-    {65, "app data: collections, change feed, app migrations, record files, embeddings",
+  defp migration_066_app_data do
+    {66, "app data: collections, change feed, app migrations, record files, embeddings",
      [
        {"data_collections",
         """
