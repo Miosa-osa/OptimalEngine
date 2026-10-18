@@ -50,6 +50,8 @@ defmodule OptimalEngine.Identity.Principal do
     external_id = Map.get(attrs, :external_id)
     metadata = Map.get(attrs, :metadata, %{})
 
+    # Principal ids are global; an id owned by another tenant is never
+    # updated from this one.
     sql = """
     INSERT INTO principals (id, tenant_id, kind, display_name, external_id, metadata)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -57,8 +59,24 @@ defmodule OptimalEngine.Identity.Principal do
       display_name = excluded.display_name,
       external_id  = excluded.external_id,
       metadata     = excluded.metadata
+    WHERE principals.tenant_id = excluded.tenant_id
     """
 
+    with :ok <- id_available(id, tenant_id) do
+      write(sql, id, tenant_id, kind, display_name, external_id, metadata)
+    end
+  end
+
+  defp id_available(id, tenant_id) do
+    case Store.raw_query("SELECT tenant_id FROM principals WHERE id = ?1", [id]) do
+      {:ok, [[^tenant_id]]} -> :ok
+      {:ok, []} -> :ok
+      {:ok, [[_other]]} -> {:error, :principal_id_taken}
+      other -> other
+    end
+  end
+
+  defp write(sql, id, tenant_id, kind, display_name, external_id, metadata) do
     case Store.raw_query(sql, [
            id,
            tenant_id,
@@ -97,6 +115,27 @@ defmodule OptimalEngine.Identity.Principal do
       {:ok, []} -> {:error, :not_found}
       other -> other
     end
+  end
+
+  @doc "Principals in a tenant, optionally of one kind, ordered by id."
+  @spec list(String.t(), keyword()) :: [t()]
+  def list(tenant_id, opts \\ []) do
+    {where, params} =
+      case opts[:kind] do
+        kind when kind in [:user, :agent, :service] ->
+          {"WHERE tenant_id = ?1 AND kind = ?2", [tenant_id, Atom.to_string(kind)]}
+
+        _ ->
+          {"WHERE tenant_id = ?1", [tenant_id]}
+      end
+
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT id, tenant_id, kind, display_name, external_id, created_at, metadata FROM principals #{where} ORDER BY id LIMIT 1000",
+        params
+      )
+
+    Enum.map(rows, &row_to_struct/1)
   end
 
   @doc "Returns every group id the principal belongs to."

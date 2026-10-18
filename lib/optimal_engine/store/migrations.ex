@@ -107,8 +107,211 @@ defmodule OptimalEngine.Store.Migrations do
       migration_059_governed_reconstruction(),
       migration_060_data_quality_observability(),
       migration_061_memory_embeddings(),
-      migration_062_multi_profile_memory_embeddings()
+      migration_062_multi_profile_memory_embeddings(),
+      migration_063_authority()
     ]
+  end
+
+  defp migration_063_authority do
+    {63, "authority: keys, policy packs, grants, approvals, local denies, evidence chain",
+     [
+       {"authority_keys",
+        """
+        CREATE TABLE IF NOT EXISTS authority_keys (
+          kid TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          purpose TEXT NOT NULL CHECK (purpose IN ('grant', 'evidence')),
+          public_key TEXT NOT NULL,
+          private_key TEXT NOT NULL,
+          wrapped INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'retired', 'revoked')),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+          retired_at TEXT,
+          revoked_at TEXT
+        )
+        """},
+       {"idx_authority_keys_scope",
+        "CREATE INDEX IF NOT EXISTS idx_authority_keys_scope ON authority_keys(tenant_id, purpose, status)"},
+       {"authority_policies",
+        """
+        CREATE TABLE IF NOT EXISTS authority_policies (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          scope_type TEXT NOT NULL CHECK (scope_type IN ('tenant', 'workspace', 'subject')),
+          scope_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          hash TEXT NOT NULL,
+          document TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'retired')),
+          published_by TEXT,
+          published_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+          UNIQUE (tenant_id, scope_type, scope_id, version)
+        )
+        """},
+       {"idx_authority_policies_active",
+        "CREATE INDEX IF NOT EXISTS idx_authority_policies_active ON authority_policies(tenant_id, scope_type, scope_id, status)"},
+       {"authority_grants",
+        """
+        CREATE TABLE IF NOT EXISTS authority_grants (
+          jti TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT,
+          issuer TEXT NOT NULL,
+          audience TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          action TEXT NOT NULL,
+          resource TEXT NOT NULL,
+          data_class TEXT NOT NULL,
+          command_hash TEXT,
+          parent_jti TEXT REFERENCES authority_grants(jti),
+          delegable INTEGER NOT NULL DEFAULT 0,
+          max_uses INTEGER NOT NULL DEFAULT 1 CHECK (max_uses > 0),
+          uses INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
+          status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'revoked', 'consumed', 'expired')),
+          not_before INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          claims TEXT NOT NULL,
+          token_hash TEXT NOT NULL,
+          kid TEXT NOT NULL,
+          policy_hash TEXT,
+          rule_id TEXT,
+          approval_id TEXT,
+          issued_by TEXT,
+          issued_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+          revoked_at TEXT,
+          revoked_by TEXT,
+          revoked_reason TEXT
+        )
+        """},
+       {"idx_authority_grants_subject",
+        "CREATE INDEX IF NOT EXISTS idx_authority_grants_subject ON authority_grants(tenant_id, subject, status)"},
+       {"idx_authority_grants_parent",
+        "CREATE INDEX IF NOT EXISTS idx_authority_grants_parent ON authority_grants(tenant_id, parent_jti)"},
+       {"authority_requests",
+        """
+        CREATE TABLE IF NOT EXISTS authority_requests (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          action TEXT NOT NULL,
+          resource TEXT NOT NULL,
+          workspace_id TEXT,
+          data_class TEXT,
+          ttl_seconds INTEGER,
+          command_sha256 TEXT,
+          justification TEXT,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
+          requested_by TEXT,
+          requested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+          decided_by TEXT,
+          decided_at TEXT,
+          decision_reason TEXT,
+          decision TEXT,
+          grant_jti TEXT
+        )
+        """},
+       {"idx_authority_requests_status",
+        "CREATE INDEX IF NOT EXISTS idx_authority_requests_status ON authority_requests(tenant_id, status)"},
+       {"authority_local_denies",
+        """
+        CREATE TABLE IF NOT EXISTS authority_local_denies (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT,
+          subject TEXT NOT NULL,
+          action TEXT NOT NULL,
+          resource TEXT NOT NULL,
+          reason TEXT,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+          lifted_at TEXT,
+          lifted_by TEXT
+        )
+        """},
+       {"idx_authority_local_denies_active",
+        "CREATE INDEX IF NOT EXISTS idx_authority_local_denies_active ON authority_local_denies(tenant_id, lifted_at)"},
+       {"authority_evidence",
+        """
+        CREATE TABLE IF NOT EXISTS authority_evidence (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          tenant_seq INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          jti TEXT,
+          subject TEXT,
+          action TEXT,
+          resource TEXT,
+          workspace_id TEXT,
+          detail TEXT NOT NULL,
+          prev_hash TEXT NOT NULL,
+          hash TEXT NOT NULL,
+          kid TEXT NOT NULL,
+          signature TEXT NOT NULL,
+          recorded_at TEXT NOT NULL,
+          UNIQUE (tenant_id, tenant_seq)
+        )
+        """},
+       {"idx_authority_evidence_jti",
+        "CREATE INDEX IF NOT EXISTS idx_authority_evidence_jti ON authority_evidence(tenant_id, jti)"},
+       {"authority_checkpoints",
+        """
+        CREATE TABLE IF NOT EXISTS authority_checkpoints (
+          tenant_id TEXT NOT NULL,
+          tenant_seq INTEGER NOT NULL,
+          hash TEXT NOT NULL,
+          kid TEXT NOT NULL,
+          signature TEXT NOT NULL,
+          anchor TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+          PRIMARY KEY (tenant_id, tenant_seq)
+        )
+        """},
+       {"authority_issuers",
+        """
+        CREATE TABLE IF NOT EXISTS authority_issuers (
+          tenant_id TEXT NOT NULL,
+          issuer TEXT NOT NULL,
+          jwks TEXT NOT NULL,
+          max_staleness_seconds INTEGER NOT NULL DEFAULT 300,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+          revocations_synced_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+          PRIMARY KEY (tenant_id, issuer)
+        )
+        """},
+       {"authority_revocations",
+        """
+        CREATE TABLE IF NOT EXISTS authority_revocations (
+          tenant_id TEXT NOT NULL,
+          issuer TEXT NOT NULL,
+          jti TEXT NOT NULL,
+          reason TEXT,
+          received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+          PRIMARY KEY (tenant_id, issuer, jti)
+        )
+        """},
+       {"authority_consumed",
+        """
+        CREATE TABLE IF NOT EXISTS authority_consumed (
+          tenant_id TEXT NOT NULL,
+          issuer TEXT NOT NULL,
+          jti TEXT NOT NULL,
+          uses INTEGER NOT NULL DEFAULT 0,
+          first_used_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+          PRIMARY KEY (tenant_id, issuer, jti)
+        )
+        """},
+       {"authority_settings",
+        """
+        CREATE TABLE IF NOT EXISTS authority_settings (
+          tenant_id TEXT PRIMARY KEY,
+          mode TEXT NOT NULL CHECK (mode IN ('off', 'observe', 'enforce')),
+          updated_by TEXT,
+          updated_at TEXT
+        )
+        """}
+     ]}
   end
 
   defp migration_062_multi_profile_memory_embeddings do
