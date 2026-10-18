@@ -25,11 +25,11 @@ defmodule OptimalEngine.TestSupport.S3Stub do
 
   Options:
 
-    * `:port` — TCP port, 0 picks a free one (default 0)
-    * `:bucket` — the single bucket it serves (default "engine-test")
-    * `:access_key_id`, `:secret_access_key` — credentials it accepts
-    * `:region` — region it expects in the credential scope (default "us-east-1")
-    * `:agent` — reuse an existing state agent instead of starting one
+    * `:port` - TCP port, 0 picks a free one (default 0)
+    * `:bucket` - the single bucket it serves (default "engine-test")
+    * `:access_key_id`, `:secret_access_key` - credentials it accepts
+    * `:region` - region it expects in the credential scope (default "us-east-1")
+    * `:agent` - reuse an existing state agent instead of starting one
 
   Returns `{:ok, %{port: port, ref: ref, agent: agent}}`.
   """

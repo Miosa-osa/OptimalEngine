@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Optimal.Backup do
   @shortdoc "Create a live backup of the engine database"
 
   @moduledoc """
-  Online SQLite backup — runs without blocking the engine.
+  Online SQLite backup - runs without blocking the engine.
 
   ## Usage
 
@@ -23,8 +23,8 @@ defmodule Mix.Tasks.Optimal.Backup do
 
   ## Related
 
-      mix optimal.restore <path>                  — restore a backup (engine must be stopped)
-      mix optimal.restore --from-offsite <id>     — restore an offsite copy
+      mix optimal.restore <path>                  - restore a backup (engine must be stopped)
+      mix optimal.restore --from-offsite <id>     - restore an offsite copy
   """
 
   use Mix.Task

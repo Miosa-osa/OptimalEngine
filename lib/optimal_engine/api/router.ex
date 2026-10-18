@@ -2713,7 +2713,7 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # GET /api/backup/offsite — backups with a copy in the object store, newest
+  # GET /api/backup/offsite - backups with a copy in the object store, newest
   # first, with the local path, the object URI, and the checksum both are held to.
   get "/api/backup/offsite" do
     case OptimalEngine.Backup.list_offsite() do
@@ -2722,7 +2722,7 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # POST /api/backup/offsite/restore — restore an offsite copy into a database
+  # POST /api/backup/offsite/restore - restore an offsite copy into a database
   # path without touching the live database.
   # Body: {backup_id: "backup_...", target?: "/tmp/restore/index.db"}
   post "/api/backup/offsite/restore" do
