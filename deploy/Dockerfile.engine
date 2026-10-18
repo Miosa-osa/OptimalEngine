@@ -68,15 +68,16 @@ COPY README.md  ./README.md
 # The empty build args are treated as absent by OptimalEngine.Version, so an
 # image built without them reports the compilation time instead of a blank.
 #
-# The release identity is compiled into OptimalEngine.Version, so Mix must not
-# reuse an earlier build of that module: a cached compile would bake the previous
-# commit and build time into a new image, and deleting the compiled module is not
-# enough, because Mix does not notice a missing output. Touching the source makes
-# Mix rebuild it from the build arguments above.
-RUN touch lib/optimal_engine/version.ex && \
-    OPTIMAL_ENGINE_GIT_SHA="${OPTIMAL_ENGINE_GIT_SHA}" \
-    OPTIMAL_ENGINE_BUILD_TIMESTAMP="${OPTIMAL_ENGINE_BUILD_TIMESTAMP}" \
-    mix release optimal --overwrite
+# The release identity is compiled in, and Mix decides staleness by source
+# mtime, cache contents, and the compiler version rather than by the values in
+# the environment. A warm _build would therefore bake the previous commit and
+# build time into a new image. Compiling the project with the build arguments in
+# the environment, and then assembling the release, always reports the commit
+# this image was built from.
+RUN export OPTIMAL_ENGINE_GIT_SHA="${OPTIMAL_ENGINE_GIT_SHA}" \
+           OPTIMAL_ENGINE_BUILD_TIMESTAMP="${OPTIMAL_ENGINE_BUILD_TIMESTAMP}" \
+    && mix compile --force \
+    && mix release optimal --overwrite
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 — runtime
