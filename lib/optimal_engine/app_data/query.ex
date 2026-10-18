@@ -114,7 +114,7 @@ defmodule OptimalEngine.AppData.Query do
       end)
 
     sql =
-      ~s[SELECT #{Enum.join(select, ", ")} FROM "#{c.table}" t#{join_sql} WHERE (#{where_sql}) AND (#{cursor_sql}) ORDER BY #{order} LIMIT ?]
+      ~s[#{join_sql} SELECT #{Enum.join(select, ", ")} FROM #{source(c, mode)} WHERE (#{where_sql}) AND (#{cursor_sql}) ORDER BY #{order} LIMIT ?]
 
     params = join_params ++ where_params ++ cursor_params ++ [plan.limit + 1]
 
@@ -157,14 +157,20 @@ defmodule OptimalEngine.AppData.Query do
   defp with_owner(%{scope: scope, c: c, where: {sql, params}}),
     do: Records.owner_filter(scope, c, sql, params)
 
+  # Full-text matches are computed once (FTS5 first, materialized), then
+  # joined to the collection by primary key. Letting SQLite drive the join
+  # from the collection side probes FTS5 once per candidate row instead.
   defp join(c, {:text, query}) when is_binary(query) do
     fts = Collections.fts_table(c)
 
-    {~s[ JOIN (SELECT rowid AS _rid, bm25("#{fts}") AS _score FROM "#{fts}" WHERE "#{fts}" MATCH ?) s ON s._rid = t."_rowid"],
+    {~s[WITH s AS MATERIALIZED (SELECT rowid AS _rid, bm25("#{fts}") AS _score FROM "#{fts}" WHERE "#{fts}" MATCH ?)],
      [query]}
   end
 
   defp join(_c, _mode), do: {"", []}
+
+  defp source(c, {:text, _}), do: ~s[s CROSS JOIN "#{c.table}" t ON t."_rowid" = s._rid]
+  defp source(c, _mode), do: ~s["#{c.table}" t]
 
   defp score_expr({:text, _}), do: "s._score"
   defp score_expr(_mode), do: "NULL"
@@ -174,7 +180,7 @@ defmodule OptimalEngine.AppData.Query do
   defp count(%{spec: %{"count" => true}} = plan, join_sql, join_params, where_sql, where_params) do
     SQL.scalar(
       :store,
-      ~s[SELECT COUNT(*) FROM "#{plan.c.table}" t#{join_sql} WHERE #{where_sql}],
+      ~s[#{join_sql} SELECT COUNT(*) FROM #{source(plan.c, plan.mode)} WHERE #{where_sql}],
       join_params ++ where_params
     )
   end
