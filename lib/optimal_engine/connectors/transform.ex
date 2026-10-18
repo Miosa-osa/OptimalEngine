@@ -78,6 +78,46 @@ defmodule OptimalEngine.Connectors.Transform do
   end
 
   @doc """
+  Parse an epoch timestamp into a `DateTime`. Accepts milliseconds or seconds,
+  as a number or a decimal string, which is the shape several APIs use (Gmail's
+  `internalDate`, Stripe's `created`). Values above 10^11 are read as
+  milliseconds and anything smaller as seconds: no millisecond timestamp in use
+  today is that small, and no second timestamp that large has happened yet.
+  Returns the fallback (defaulting to now) when the input is missing or not a
+  number.
+  """
+  @spec parse_epoch(term(), DateTime.t() | nil) :: DateTime.t()
+  def parse_epoch(value, fallback \\ nil)
+  def parse_epoch(nil, fallback), do: fallback || DateTime.utc_now()
+
+  def parse_epoch(value, fallback) when is_number(value), do: epoch_to_datetime(value, fallback)
+
+  def parse_epoch(value, fallback) when is_binary(value) do
+    case Integer.parse(value) do
+      {n, _rest} -> epoch_to_datetime(n, fallback)
+      :error -> parse_iso8601(value, fallback)
+    end
+  end
+
+  def parse_epoch(_value, fallback), do: fallback || DateTime.utc_now()
+
+  defp epoch_to_datetime(value, fallback) when value > 100_000_000_000 do
+    DateTime.from_unix(trunc(value), :millisecond)
+    |> case do
+      {:ok, dt} -> dt
+      _ -> fallback || DateTime.utc_now()
+    end
+  end
+
+  defp epoch_to_datetime(value, fallback) do
+    DateTime.from_unix(trunc(value), :second)
+    |> case do
+      {:ok, dt} -> dt
+      _ -> fallback || DateTime.utc_now()
+    end
+  end
+
+  @doc """
   Best-effort plain-text extraction from HTML or multi-line strings.
   Strips tags, collapses whitespace, trims.
   """

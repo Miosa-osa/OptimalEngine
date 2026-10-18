@@ -38,8 +38,8 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   require Logger
 
   alias OptimalEngine.Connectors
-  alias OptimalEngine.Connectors.Registry
-  alias OptimalEngine.Pipeline.Intake
+  alias OptimalEngine.Connectors.{Registry, Routing}
+  alias OptimalEngine.Tenancy.Tenant
 
   @default_boot_delay_ms 2 * 60 * 1_000
   @default_interval_ms 24 * 60 * 60 * 1_000
@@ -180,8 +180,10 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   end
 
   # The sink the Runner invokes with the connector's emitted signals + a
-  # scope map carrying the workspace. Each signal's body is re-driven
-  # through the full intake pipeline, attributed to the connector workspace.
+  # scope map carrying the workspace, the connector id and its config. Each
+  # signal's body is re-driven through the full intake pipeline, attributed to
+  # the workspace `Connectors.Routing` resolves for it, and what it implies
+  # (open loops, outward evidence) is recorded alongside the ingest.
   @doc false
   def intake_sink do
     fn signals, scope ->
@@ -199,12 +201,9 @@ defmodule OptimalEngine.Connectors.PullScheduler do
     if String.trim(content) == "" do
       :ok
     else
-      intake_opts =
-        [workspace_id: Map.get(scope, :workspace_id, "default")]
-        |> maybe_put(:genre, signal.genre)
-        |> maybe_put(:title, signal.title)
+      tenant_id = Map.get(scope, :tenant_id) || Tenant.default_id()
 
-      case Intake.process(content, intake_opts) do
+      case Routing.intake_signal(tenant_id, signal, scope) do
         {:ok, _result} ->
           :ok
 
