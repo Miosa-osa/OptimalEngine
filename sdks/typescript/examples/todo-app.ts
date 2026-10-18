@@ -108,6 +108,12 @@ check(
 const text = await todo.query({ search: "invoice", count: true, limit: 5 });
 check("full-text search on title", (text.count ?? 0) === 200 && text.records.every((r) => r.data.title.includes("invoice")), `${text.count} matches`);
 
+const caps = await data.capabilities();
+const semanticStatus = caps["semantic"] as { available: boolean; model: string };
+if (semanticStatus.available) {
+  const rebuilt = await todo.rebuildEmbeddings();
+  console.log(`INFO  embeddings ready: ${rebuilt.indexed} indexed, ${rebuilt.unchanged} unchanged, ${rebuilt.failed} failed (model ${rebuilt.model})`);
+}
 const semantic = await todo
   .query({ semantic: "paying bills and money", limit: 3, where: { owner: "user-a" } })
   .catch((e: unknown) => e);
@@ -134,7 +140,13 @@ const visible = await asUserA.query({ count: true, limit: 1 });
 const bTask = (await todo.query({ where: { owner: "user-b" }, limit: 1 })).records[0];
 const readB = bTask ? await asUserA.get(bTask.id).catch((e: unknown) => e) : null;
 const spoof = await asUserA.create({ title: "spoofed", owner: "user-b" }).catch((e: unknown) => e);
-check("end-user key sees only owner A's tasks", visible.count === 501, `${visible.count} visible`);
+const ownedByA = (await todo.query({ where: { owner: "user-a" }, count: true, limit: 0 })).count;
+const allTasks = (await todo.query({ count: true, limit: 0 })).count;
+check(
+  "end-user key sees only owner A's tasks",
+  visible.count === ownedByA && visible.records.every((r) => r.data.owner === "user-a"),
+  `${visible.count} visible of ${allTasks}; user-a owns ${ownedByA}`,
+);
 check("end-user key cannot read owner B's task", readB instanceof DataError && readB.status === 404);
 check("end-user key cannot create a task for owner B", spoof instanceof DataError && spoof.code === "owner_mismatch");
 await data.revokeKey(userKey.id);
