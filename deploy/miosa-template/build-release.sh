@@ -19,7 +19,7 @@ if [ "$(uname -m)" != "x86_64" ] && [ "${ALLOW_NON_X86:-0}" != "1" ]; then
   exit 2
 fi
 
-args=()
+args=(--build-arg "OPTIMAL_ENGINE_GIT_SHA=${OPTIMAL_ENGINE_GIT_SHA:-$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)}")
 [ -n "${BUILDER_IMAGE:-}" ] && args+=(--build-arg "BUILDER_IMAGE=$BUILDER_IMAGE")
 docker build --target release "${args[@]}" -f "$root/deploy/Dockerfile.engine" -o "type=local,dest=$out" "$root"
 test -s "$out/optimal-engine.tgz"

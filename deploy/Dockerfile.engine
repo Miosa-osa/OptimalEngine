@@ -72,6 +72,11 @@ COPY lib/       ./lib/
 COPY config/    ./config/
 COPY priv/      ./priv/
 COPY README.md  ./README.md
+# Compile-time release identity (OptimalEngine.Version reads it). There is no .git in the
+# build context, so the commit comes in as a build argument.
+COPY engine-contract.json ./engine-contract.json
+ARG OPTIMAL_ENGINE_GIT_SHA=unknown
+ENV OPTIMAL_ENGINE_GIT_SHA=${OPTIMAL_ENGINE_GIT_SHA}
 
 # Build release — named `optimal` (matches releases() in mix.exs).
 # The empty build args are treated as absent by OptimalEngine.Version, so an
