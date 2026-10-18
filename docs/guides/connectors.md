@@ -11,10 +11,10 @@ Twenty adapters ship with the Engine.
 
 | Kind | Source | Auth | What it pulls |
 | --- | --- | --- | --- |
-| `:gmail` | Gmail | OAuth2 | messages and threads, bounded by a lookback window |
-| `:drive` | Google Drive | OAuth2 | files and documents |
-| `:notion` | Notion | token | pages and databases |
-| `:slack` | Slack | OAuth2 | channels, threads and messages |
+| `:gmail` | Gmail | OAuth2 | messages, bounded by a lookback window, then the change history |
+| `:drive` | Google Drive | OAuth2 | files, with the text of the document types that have any |
+| `:notion` | Notion | token | pages in the configured databases, with their blocks |
+| `:slack` | Slack | OAuth2 | channel history and its messages |
 | `:teams` | Microsoft Teams | token | channel messages |
 | `:zoom` | Zoom | token | recorded meetings |
 | `:hubspot` | HubSpot | token or OAuth2 | CRM objects |

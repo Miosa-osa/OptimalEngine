@@ -71,7 +71,9 @@ defmodule OptimalEngine.Test.ConnectorFixtureStub do
   def uninstall(%{table: table}) do
     Application.delete_env(:optimal_engine, :http_mock)
 
-    if :ets.whereis(@calls_table) != :undefined, do: :ets.delete(table, :all)
+    # `:ets.delete/2` removes one object by key; the whole table is what this
+    # wants, so that a test reading `calls/1` after `uninstall/1` sees nothing.
+    if :ets.whereis(@calls_table) != :undefined, do: :ets.delete_all_objects(table)
     :ok
   end
 
