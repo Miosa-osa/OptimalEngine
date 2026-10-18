@@ -339,7 +339,7 @@ defmodule OptimalEngine.API.RagStreamTest do
           skip_wiki: true
         )
 
-      messages = collect_stream_messages([], 10_000)
+      messages = collect_stream_messages([], deadline_in(30_000))
 
       events =
         Enum.filter(messages, fn
@@ -365,7 +365,7 @@ defmodule OptimalEngine.API.RagStreamTest do
           skip_wiki: true
         )
 
-      messages = collect_stream_messages([], 10_000)
+      messages = collect_stream_messages([], deadline_in(30_000))
 
       intent_pos =
         Enum.find_index(messages, fn
@@ -390,8 +390,14 @@ defmodule OptimalEngine.API.RagStreamTest do
   # ── private helpers ───────────────────────────────────────────────────────
 
   # Collects {:rag_stream_event, _, _} and {:rag_stream_done, _} messages
-  # until :rag_stream_done or :rag_stream_error is received, or timeout fires.
-  defp collect_stream_messages(acc, timeout) do
+  # until :rag_stream_done or :rag_stream_error is received, or the overall
+  # deadline passes. The deadline is absolute (not reset per message) so a
+  # slow pipeline under full-suite load gets the whole budget.
+  defp deadline_in(ms), do: System.monotonic_time(:millisecond) + ms
+
+  defp collect_stream_messages(acc, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
     receive do
       {:rag_stream_done, _} = msg ->
         Enum.reverse([msg | acc])
@@ -400,12 +406,12 @@ defmodule OptimalEngine.API.RagStreamTest do
         Enum.reverse([msg | acc])
 
       {:rag_stream_event, _, _} = msg ->
-        collect_stream_messages([msg | acc], timeout)
+        collect_stream_messages([msg | acc], deadline)
 
       _other ->
-        collect_stream_messages(acc, timeout)
+        collect_stream_messages(acc, deadline)
     after
-      timeout ->
+      remaining ->
         Enum.reverse(acc)
     end
   end
