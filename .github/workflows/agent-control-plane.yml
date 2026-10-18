@@ -61,3 +61,5 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p 'test_fresh_agent_review.py'
       - name: Authenticated wrapper routing regressions
         run: python3 -m unittest discover -s scripts/tests -p 'test_optimal_wrapper.py'
+      - name: Packaged client CLI regressions
+        run: python3 -m unittest discover -s scripts/tests -p 'test_optimal_cli.py'
