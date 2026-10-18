@@ -1070,6 +1070,7 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
         %{key: workspace_id, slug: workspace_id, tenant_id: "default"}
     end
   end
+
   defp row_to_asset([
          id,
          tenant_id,

@@ -176,6 +176,33 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
     assert S3Stub.object_keys(stub.agent) == []
   end
 
+  test "the storage audit counts an offsite-only backup as present, and reports a lost object", %{
+    stub: stub,
+    backing: backing
+  } do
+    info = take_backup(backing, "audit-offsite.db", offsite: true)
+
+    assert %{copies: ["local"]} = audit_check("verified_backup")
+
+    # The local copy goes away; the offsite object is now the only one, and the
+    # audit confirms it rather than calling the backup missing.
+    File.rm!(info.target)
+    assert %{copies: ["offsite"], offsite_uri: uri} = audit_check("verified_backup")
+    assert uri == info.offsite.uri
+
+    # If the object is gone too, that is a real failure.
+    :ok = OptimalEngine.Storage.S3.delete_object(info.offsite.key)
+    assert audit_check("verified_backup") == ":verified_backup_unreachable"
+
+    assert S3Stub.object_keys(stub.agent) == []
+  end
+
+  defp audit_check(name) do
+    OptimalEngine.StorageAudit.run().checks
+    |> Enum.find(&(&1.name == name))
+    |> Map.get(:detail)
+  end
+
   defp row_counts(db_path) do
     for table <- ~w(workspaces contexts memories backup_records), into: %{} do
       {table, scalar(db_path, "SELECT COUNT(*) FROM #{table}")}
