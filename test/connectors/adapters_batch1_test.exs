@@ -662,11 +662,24 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
             String.contains?(url, "startPageToken") ->
               httpc_ok(%{"startPageToken" => "start_tok_1"})
 
+            # A Google Doc has text to export; the PDF has none, so it is not
+            # emitted (an empty-content Signal is dropped by the intake sink).
+            String.contains?(url, "/files/f1/export") ->
+              {:ok,
+               {{~c"HTTP/1.1", 200, ~c"OK"}, [{~c"content-type", ~c"text/markdown"}],
+                "# Notes\n\nQuarterly plan."}}
+
             String.contains?(url, "/files") ->
               httpc_ok(%{
                 "files" => [
                   %{
                     "id" => "f1",
+                    "name" => "Notes",
+                    "mimeType" => "application/vnd.google-apps.document",
+                    "modifiedTime" => "2026-01-01T00:00:00Z"
+                  },
+                  %{
+                    "id" => "f2",
                     "name" => "doc.pdf",
                     "mimeType" => "application/pdf",
                     "modifiedTime" => "2026-01-01T00:00:00Z"
@@ -685,7 +698,8 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
 
         assert length(signals) == 1
         [sig] = signals
-        assert sig.title == "doc.pdf"
+        assert sig.title == "Notes"
+        assert sig.content == "# Notes\n\nQuarterly plan."
       end)
 
       :ets.delete(calls)
