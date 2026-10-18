@@ -24,6 +24,7 @@ from ._transport import (
     raise_for_status,
     translate_httpx_error,
 )
+from .data import AsyncDataResource
 from .memory import AsyncMemoryResource
 from .profile import AsyncWikiResource
 from .retrieval import AsyncRecallResource, AsyncRetrievalMixin
@@ -51,6 +52,7 @@ class AsyncOptimalEngine(AsyncRetrievalMixin):
         tenant: str = "default",
         timeout: float | httpx.Timeout | None = None,
         headers: Mapping[str, str] | None = None,
+        api_key: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         """Create a new async client. See :class:`OptimalEngine` for params."""
@@ -59,6 +61,8 @@ class AsyncOptimalEngine(AsyncRetrievalMixin):
         self.tenant = tenant
 
         merged_headers = dict(DEFAULT_HEADERS)
+        if api_key is not None:
+            merged_headers["Authorization"] = f"Bearer {api_key}"
         if headers:
             merged_headers.update(headers)
 
@@ -73,6 +77,7 @@ class AsyncOptimalEngine(AsyncRetrievalMixin):
             self._owns_http = True
 
         self.memory = AsyncMemoryResource(self)
+        self.data = AsyncDataResource(self)
         self.workspaces = AsyncWorkspaceResource(self)
         self.recall = AsyncRecallResource(self)
         self.wiki = AsyncWikiResource(self)
