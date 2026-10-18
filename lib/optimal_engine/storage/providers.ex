@@ -100,16 +100,17 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "s3",
-      adapter: nil,
+      adapter: OptimalEngine.Storage.S3.Adapter,
       name: "S3-compatible object storage",
       kind: "service",
       role: "canonical_artifact",
       capabilities: ~w(objects assets backups)a,
       activation: "cloud_team",
-      probe: {:http, "OPTIMAL_S3_ENDPOINT", "/"},
+      probe: :s3,
       required_env:
         ~w(OPTIMAL_S3_ENDPOINT OPTIMAL_S3_BUCKET OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY),
-      optional_env: []
+      optional_env:
+        ~w(OPTIMAL_S3_REGION OPTIMAL_S3_PREFIX OPTIMAL_S3_PATH_STYLE OPTIMAL_S3_TIMEOUT_MS OPTIMAL_S3_MAX_RETRIES)
     },
     %{
       id: "nats_jetstream",
@@ -251,6 +252,11 @@ defmodule OptimalEngine.Storage.Providers do
       _ -> :unreachable
     end
   end
+
+  # The S3 probe is an authenticated request against the bucket, not a bare
+  # connection test: an endpoint that answers an unauthenticated ping with 403
+  # must not be reported as healthy storage.
+  defp run_probe(:s3), do: OptimalEngine.Storage.S3.Adapter.health()
 
   defp run_probe(:root_path) do
     path = Application.get_env(:optimal_engine, :root_path, ".")
