@@ -8,8 +8,9 @@ defmodule OptimalEngine.API.PermissionPlug do
   remains available, but claim review still requires an explicit reviewer.
   Authenticated review identities come from the key, never request input.
   """
-  @read_posts ~w(/api/rag /api/assemble /api/reconstruct /api/render/context /api/storage/plan)
-  @topology_roots ~w(nodes organizations entities entity-mentions entity-relationships review data-steward workspaces)
+  @read_posts ~w(/api/rag /api/assemble /api/reconstruct /api/render/context /api/storage/plan /api/routing/classify)
+  @topology_roots ~w(nodes organizations entities entity-mentions entity-relationships review data-steward workspaces
+                     topology routing protocol)
   @behaviour Plug
   import Plug.Conn
 
@@ -90,7 +91,7 @@ defmodule OptimalEngine.API.PermissionPlug do
         authority_scope(conn.method, tl(tl(conn.path_info)))
 
       String.starts_with?(path, "/api/auth/keys") or String.starts_with?(path, "/api/principals") or
-        path == "/api/backup" or
+        path == "/api/backup" or String.starts_with?(path, "/api/topology") or
           (mutation and String.starts_with?(path, "/api/maintenance/")) ->
         "admin"
 

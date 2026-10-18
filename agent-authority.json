@@ -529,6 +529,17 @@
       "owns": []
     },
     {
+      "id": "docs-guides-operating-layer",
+      "path": "docs/guides/operating-layer.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-18",
+      "owns": []
+    },
+    {
       "id": "docs-guides-optimal-authority",
       "path": "docs/guides/optimal-authority.md",
       "kind": "contract",
