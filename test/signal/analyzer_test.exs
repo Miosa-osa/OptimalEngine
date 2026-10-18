@@ -14,14 +14,21 @@ defmodule OptimalEngine.Signal.Classifier.AnalyzerTest do
   # --- infer_mode/1 ---
 
   describe "infer_mode/1" do
-    test "returns :code for map data" do
+    test "returns :data for map data" do
       s = signal("miosa.test", data: %{key: "val"})
-      assert Analyzer.infer_mode(s) == :code
+      assert Analyzer.infer_mode(s) == :data
     end
 
-    test "returns :code for list data" do
+    test "returns :data for list data" do
       s = signal("miosa.test", data: [1, 2, 3])
-      assert Analyzer.infer_mode(s) == :code
+      assert Analyzer.infer_mode(s) == :data
+    end
+
+    test "reads a text payload by content, not by its container" do
+      assert Analyzer.infer_mode(signal("optimal.test", data: "a,b,c\n1,2,3\n4,5,6")) == :data
+
+      prose = "We require a first class fix before the import of new accounts."
+      assert Analyzer.infer_mode(signal("optimal.test", data: prose)) == :linguistic
     end
 
     test "returns :linguistic for plain text data" do
@@ -468,6 +475,14 @@ defmodule OptimalEngine.Signal.Classifier.AnalyzerTest do
 
     test "returns false for plain English text" do
       refute Analyzer.code_like?("This is a plain English sentence about nothing.")
+    end
+
+    test "returns false for prose that mentions code keywords" do
+      refute Analyzer.code_like?(
+               "We require a first class fix; the function of the team is review."
+             )
+
+      refute Analyzer.code_like?("Let me know if the import {draft} looks right => thanks")
     end
 
     test "returns false for empty string" do

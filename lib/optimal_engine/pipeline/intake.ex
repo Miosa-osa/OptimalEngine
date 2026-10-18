@@ -102,6 +102,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   alias OptimalEngine.Pipeline.Router, as: Router
   alias OptimalEngine.Pipeline.SemanticProcessor, as: SemanticProcessor
   alias OptimalEngine.Signal
+  alias OptimalEngine.Signal.ModeDetector
   alias OptimalEngine.Store
   alias OptimalEngine.Routing
   alias OptimalEngine.URI
@@ -149,6 +150,54 @@ defmodule OptimalEngine.Pipeline.Intake do
     GenServer.call(__MODULE__, {:process, raw_text, opts}, 30_000)
   end
 
+  @doc """
+  The classification phase of `process/2`, without persisting anything: the
+  pipeline classifier, the caller's overrides and the Signal Theory bridge.
+  `process/2` stores exactly the Mode, Genre and Type this returns.
+
+  Accepts the classification options of `process/2` (`:genre`, `:title`,
+  `:node`, `:entities`, `:type`) plus `:known_entities` (default `[]`).
+  The returned signal has no id or timestamps yet.
+  """
+  @spec classify(String.t(), keyword()) :: Signal.t()
+  def classify(raw_text, opts \\ []) when is_binary(raw_text) do
+    # Merge explicit entities into known entities for extraction
+    extra_entities = Keyword.get(opts, :entities, [])
+    all_known = Enum.uniq(Keyword.get(opts, :known_entities, []) ++ extra_entities)
+    genre = Keyword.get(opts, :genre)
+
+    # Intake always produces a signal unless the caller explicitly forces another type.
+    # Without this, content with an empty path is classified as :resource and loses
+    # all Mode + Genre + Type + Format + Structure dimensions.
+    forced_type = Keyword.get(opts, :type, :signal)
+    classify_opts = [path: "", known_entities: all_known, type: forced_type, genre: genre]
+
+    ctx = Classifier.classify_context(raw_text, classify_opts)
+
+    signal =
+      case ctx.signal do
+        %Signal{} = sig ->
+          sig
+
+        nil ->
+          # Build a minimal signal from the context for non-signal types; the
+          # context carries no Mode, so read it from the text.
+          sig = Context.to_signal(ctx)
+          {_frontmatter, body} = Classifier.parse_frontmatter(raw_text)
+          %{sig | mode: ModeDetector.resolve(body, genre: genre || sig.genre)}
+      end
+
+    # Apply option overrides
+    signal
+    |> maybe_override(:title, Keyword.get(opts, :title))
+    |> maybe_override(:genre, genre)
+    |> maybe_override(:node, Keyword.get(opts, :node))
+    |> maybe_merge_entities(extra_entities)
+    |> then(fn s -> %{s | content: raw_text, format: :markdown} end)
+    |> enhance_with_signal_bridge(raw_text)
+    |> regenerate_summaries()
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer Callbacks
   # ---------------------------------------------------------------------------
@@ -178,7 +227,6 @@ defmodule OptimalEngine.Pipeline.Intake do
     # so reject/quarantine/failure paths can never lose the source evidence.
     with :ok <- persist_source_package(source_package),
          {:ok, signal} <- classify_step(raw_text, opts),
-         signal = enhance_with_signal_bridge(signal, raw_text),
          {:ok, signal} <- quality_gate(signal, source_package, scope),
          {:ok, signal, routed_to} <- route_step(signal, opts),
          {:ok, primary_path} <- write_step(signal, scope),
@@ -433,7 +481,7 @@ defmodule OptimalEngine.Pipeline.Intake do
     end
   end
 
-  # Augment signal classification with the bridge classifier when available.
+  # Fill any dimension the classifier left unresolved via the bridge classifier.
   defp enhance_with_signal_bridge(signal, raw_text) do
     BridgeSignal.enhance_classification(signal, raw_text)
   rescue
@@ -498,49 +546,14 @@ defmodule OptimalEngine.Pipeline.Intake do
     # are the gazetteer that drives entity extraction + semantic graph edges.
     known_entities = Enum.uniq(topology_entities(topology) ++ db_entity_names())
 
-    # Merge explicit entities into known entities for extraction
-    extra_entities = Keyword.get(opts, :entities, [])
-    all_known = Enum.uniq(known_entities ++ extra_entities)
-
-    # Intake always produces a signal unless the caller explicitly forces another type.
-    # Without this, content with an empty path is classified as :resource and loses
-    # all Mode + Genre + Type + Format + Structure dimensions.
-    forced_type = Keyword.get(opts, :type, :signal)
-    classify_opts = [path: "", known_entities: all_known, type: forced_type]
-
-    ctx = Classifier.classify_context(raw_text, classify_opts)
-
-    signal =
-      case ctx.signal do
-        %Signal{} = sig ->
-          sig
-
-        nil ->
-          # Build a minimal signal from the context for non-signal types
-          Context.to_signal(ctx)
-      end
-
     now = DateTime.utc_now()
-    id = generate_id(raw_text, now)
 
-    # Apply option overrides
     signal =
-      signal
-      |> maybe_override(:title, Keyword.get(opts, :title))
-      |> maybe_override(:genre, Keyword.get(opts, :genre))
-      |> maybe_override(:node, Keyword.get(opts, :node))
-      |> maybe_merge_entities(extra_entities)
+      raw_text
+      |> classify(Keyword.put(opts, :known_entities, known_entities))
       |> then(fn s ->
-        %{
-          s
-          | id: id,
-            created_at: now,
-            modified_at: now,
-            content: raw_text,
-            format: :markdown
-        }
+        %{s | id: generate_id(raw_text, now), created_at: now, modified_at: now}
       end)
-      |> regenerate_summaries()
 
     {:ok, signal}
   end

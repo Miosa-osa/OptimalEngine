@@ -17,7 +17,7 @@ defmodule OptimalEngine.Signal.Envelope do
 
   | Dimension | Field | Values |
   |-----------|-------|--------|
-  | Mode (M) | `signal_mode` | `:linguistic`, `:visual`, `:code`, `:mixed` |
+  | Mode (M) | `signal_mode` | `:linguistic`, `:visual`, `:code`, `:data`, `:mixed` |
   | Genre (G) | `signal_genre` | `:spec`, `:report`, `:pr`, `:adr`, `:brief`, `:chat`, `:error`, `:progress`, `:alert` |
   | Type (T) | `signal_type` | `:direct`, `:inform`, `:commit`, `:decide`, `:express` |
   | Format (F) | `signal_format` | `:markdown`, `:code`, `:json`, `:cli`, `:diff`, `:table` |
@@ -33,7 +33,7 @@ defmodule OptimalEngine.Signal.Envelope do
   alias OptimalEngine.Signal.Envelope.Builder
   alias OptimalEngine.Signal.Envelope.Validation
 
-  @type signal_mode :: :linguistic | :visual | :code | :mixed
+  @type signal_mode :: :linguistic | :visual | :code | :data | :mixed
   @type signal_genre ::
           :spec | :report | :pr | :adr | :brief | :chat | :error | :progress | :alert
   @type signal_type :: :direct | :inform | :commit | :decide | :express
@@ -175,7 +175,7 @@ defmodule OptimalEngine.Signal.Envelope do
 
   ## Options
 
-  - `:mode` - Signal mode (`:linguistic`, `:visual`, `:code`, `:mixed`)
+  - `:mode` - Signal mode (`:linguistic`, `:visual`, `:code`, `:data`, `:mixed`)
   - `:genre` - Signal genre (`:spec`, `:report`, `:pr`, `:adr`, `:brief`, `:chat`, `:error`, `:progress`, `:alert`)
   - `:type` - Signal type (`:direct`, `:inform`, `:commit`, `:decide`, `:express`)
   - `:format` - Signal format (`:markdown`, `:code`, `:json`, `:cli`, `:diff`, `:table`)

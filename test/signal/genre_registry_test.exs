@@ -71,8 +71,13 @@ defmodule OptimalEngine.Signal.GenreRegistryTest do
       assert sig.genre == "brief"
     end
 
-    test "falls back gracefully to note for unstructured chatter" do
+    test "classifies unstructured chatter as a message, not a structured genre" do
       sig = Classifier.classify("hey just checking in, nothing much happening")
+      assert sig.genre == "message"
+    end
+
+    test "falls back gracefully to note for an unaddressed observation" do
+      sig = Classifier.classify("nothing much happening with the export this week")
       assert sig.genre == "note"
     end
   end
