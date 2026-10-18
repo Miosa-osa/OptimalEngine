@@ -11,8 +11,8 @@ defmodule OptimalEngine.Retrieval.QualityBenchmarkTest do
     old = "mem_benchmark_old_#{suffix}"
 
     for {id, content} <- [
-          {exact, "Task: Commas follow up for feedback and schedule the next working session"},
-          {old, "Historical redacted deployment transcript and billing discussion"}
+          {exact, "Task: Northwind follow up for feedback and schedule the next working session"},
+          {old, "Historical Fabrikam deployment transcript and billing discussion"}
         ] do
       assert {:ok, _} =
                Store.raw_query(
@@ -23,11 +23,11 @@ defmodule OptimalEngine.Retrieval.QualityBenchmarkTest do
 
     on_exit(fn -> Store.raw_query("DELETE FROM memories WHERE id IN (?1, ?2)", [exact, old]) end)
 
-    query = "Commas follow up feedback next working session"
+    query = "Northwind follow up feedback next working session"
     assert {:ok, [first | _]} = Search.search(query, workspace_id: workspace)
     assert first.id == exact
     assert {:ok, assembled} = ContextAssembler.assemble(query, workspace_id: workspace)
-    assert assembled.l2 =~ "Commas"
-    refute assembled.l2 =~ "redacted"
+    assert assembled.l2 =~ "Northwind"
+    refute assembled.l2 =~ "Fabrikam"
   end
 end

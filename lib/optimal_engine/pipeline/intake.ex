@@ -1120,7 +1120,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   end
 
   # Entity names from the canonical Topology.Node table. Includes each node's
-  # full name plus its first token (so "redacted" also matches "Pedro").
+  # full name plus its first token (so "Jane Example" also matches "Jane").
   # Resilient: any failure yields [] so intake never breaks on a topology read.
   defp db_entity_names do
     nodes =

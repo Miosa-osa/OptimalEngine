@@ -3,102 +3,70 @@ defmodule OptimalEngine.CorpusOrganizer do
 
   alias OptimalEngine.Store
 
-  @source_workspace "default:knowledge-intake"
+  @default_source_workspace "default:knowledge-intake"
   @minimum_score 8
   @minimum_margin 5
 
-  @rules %{
-    "default:clinic-iq" => [
-      {"redacted", 10},
-      {"clinic iq", 10},
-      {"redacted", 5},
-      {"redacted", 4},
-      {"the redacted", 4}
-    ],
-    "default:redacted" => [
-      {"redacted", 10},
-      {"redacted", 10},
-      {"redacted", 10},
-      {"redacted", 10},
-      {"redacted", 10},
-      {"redacted murphy", 6},
-      {"redacted", 6},
-      {"steven redacted", 6}
-    ],
-    "default:redacted" => [
-      {"redacted", 10},
-      {"ai university", 8},
-      {"redacted", 6},
-      {"redacted", 5}
-    ],
-    "redacted" => [
-      {"redacted", 10},
-      {"growth systems audit", 10},
-      {"book a solutions call", 8}
-    ],
-    "default:businessos" => [
-      {"businessos", 10},
-      {"business os", 8},
-      {"module installation", 5},
-      {"desktop canvas", 5}
-    ],
-    "default:compute" => [
-      {"firecracker", 10},
-      {"microvm", 8},
-      {"bring-your-own-cloud", 8},
-      {"bring your own cloud", 8}
-    ],
-    "default:osa-agent" => [
-      {"osa agent", 10},
-      {"osa harness", 10},
-      {"miosa cli", 8}
-    ],
-    "default:agency-accelerants" => [
-      {"redacted", 10},
-      {"aa community", 8}
-    ],
-    "default:consortium-ai" => [
-      {"consortium ai", 10},
-      {"my custom os", 8},
-      {"redacted", 5}
-    ],
-    "default:pe-investors" => [
-      {"pe investors", 10},
-      {"private equity", 7},
-      {"investor deck", 6}
-    ],
-    "default:redacted" => [
-      {"personal brand", 8},
-      {"builder content", 8}
-    ],
-    "default:redacted" => [
-      {"signal theory", 10},
-      {"optimal system", 8},
-      {"signal-to-noise", 5}
-    ],
-    "default:canopy" => [
-      {"canopy protocol", 10},
-      {"canopy workspace", 8}
-    ],
-    "default:miosa" => [
-      {"miosa platform", 8},
-      {"optimal engine", 8},
-      {"miosa.app", 8},
-      {"fanbasis", 5},
-      {"fan basis", 5}
-    ]
-  }
+  @doc """
+  The routing rules: a map of target workspace id to `{marker, weight}`
+  pairs. Rules are deployment data, not code. They come from
+  `config :optimal_engine, :corpus_routing_rules` when set, else from the
+  `rules` section of the routing rules file (`OptimalEngine.RoutingRules`,
+  env `OPTIMAL_CORPUS_RULES`):
+
+      rules:
+        default:example-client:
+          - {marker: "example client", weight: 10}
+          - {marker: "example project", weight: 5}
+
+  With no rules configured every record stays in routing review.
+  """
+  @spec rules() :: %{String.t() => [{String.t(), pos_integer()}]}
+  def rules do
+    case Application.get_env(:optimal_engine, :corpus_routing_rules) do
+      rules when is_map(rules) -> normalize_rules(rules)
+      _ -> normalize_rules(OptimalEngine.RoutingRules.section("rules"))
+    end
+  end
+
+  @doc "The intake workspace the organizer routes from (configurable)."
+  @spec source_workspace() :: String.t()
+  def source_workspace do
+    case Application.get_env(:optimal_engine, :corpus_source_workspace) do
+      id when is_binary(id) and id != "" -> id
+      _ -> @default_source_workspace
+    end
+  end
+
+  defp normalize_rules(rules) do
+    for {workspace_id, markers} <- rules, is_list(markers), into: %{} do
+      {to_string(workspace_id), Enum.flat_map(markers, &normalize_marker/1)}
+    end
+  end
+
+  defp normalize_marker({marker, weight}) when is_binary(marker) and is_integer(weight),
+    do: [{String.downcase(marker), weight}]
+
+  defp normalize_marker(%{"marker" => marker, "weight" => weight})
+       when is_binary(marker) and is_integer(weight),
+       do: [{String.downcase(marker), weight}]
+
+  defp normalize_marker(_marker), do: []
 
   def classify(text) when is_binary(text) do
     classify_fields(text, text, "")
   end
 
-  def classify_fields(title, abstract, content) do
+  def classify_fields(title, abstract, content),
+    do: classify_fields(title, abstract, content, rules())
+
+  @doc false
+  def classify_fields(title, abstract, content, rules) do
     prominent = normalize("#{title}\n#{abstract}")
     body = normalize(content)
 
     ranked =
-      @rules
+      rules
       |> Enum.map(fn {workspace_id, markers} ->
         hits =
           markers
@@ -115,7 +83,11 @@ defmodule OptimalEngine.CorpusOrganizer do
       end)
       |> Enum.sort_by(fn {_workspace, score, _hits} -> score end, :desc)
 
-    [{workspace_id, score, hits} | rest] = ranked
+    {workspace_id, score, hits, rest} =
+      case ranked do
+        [{workspace_id, score, hits} | rest] -> {workspace_id, score, hits, rest}
+        [] -> {nil, 0, [], []}
+      end
 
     second_score =
       rest |> List.first() |> then(fn entry -> if entry, do: elem(entry, 1), else: 0 end)
@@ -138,11 +110,13 @@ defmodule OptimalEngine.CorpusOrganizer do
     with {:ok, rows} <-
            Store.raw_query(
              "SELECT id, title, l0_abstract, content FROM contexts WHERE workspace_id = ?1 AND archived_at IS NULL LIMIT ?2",
-             [@source_workspace, limit]
+             [source_workspace(), limit]
            ) do
+      rules = rules()
+
       proposals =
         Enum.map(rows, fn [id, title, l0, content] ->
-          result = classify_fields(title, l0, content)
+          result = classify_fields(title, l0, content, rules)
           Map.merge(result, %{id: id, title: title})
         end)
 
@@ -187,7 +161,7 @@ defmodule OptimalEngine.CorpusOrganizer do
           case Store.txn_execute(
                  txn,
                  "UPDATE contexts SET metadata = json_set(COALESCE(metadata, '{}'), '$.routing_review', json(?1)) WHERE id = ?2 AND workspace_id = ?3 AND archived_at IS NULL",
-                 [routing_review, proposal.id, @source_workspace]
+                 [routing_review, proposal.id, source_workspace()]
                ) do
             {:ok, changed} -> {:cont, {:ok, count + changed}}
             {:error, reason} -> {:halt, {:error, reason}}
@@ -226,8 +200,10 @@ defmodule OptimalEngine.CorpusOrganizer do
   end
 
   def move_context(context_id, target_workspace_id) do
+    source = source_workspace()
+
     Store.transaction(fn txn ->
-      with {:ok, [[@source_workspace]]} <-
+      with {:ok, [[^source]]} <-
              Store.txn_query(
                txn,
                "SELECT workspace_id FROM contexts WHERE id = ?1 AND archived_at IS NULL",

@@ -25,7 +25,7 @@ The engine should keep making that wrapper easier to use, not force agents into 
 
 Every API path and write path must preserve tenant, organization, workspace, Node, and policy scope.
 Downloaded users must use their own local engine data.
-Roberto's private engine data must never leak into public repos, packaged apps, seed data, fixtures, or docs.
+The owner's private engine data must never leak into public repos, packaged apps, seed data, fixtures, or docs.
 
 ## Setup
 

@@ -81,11 +81,12 @@ defmodule OptimalEngine.Identity.ACL do
   A principal `can?` a resource when **any** of the following is true:
     * an ACL grants it directly to the principal
     * an ACL grants it to any group the principal belongs to
-    * NO ACL exists for the resource at all (permissive default for Phase 1)
 
-  Phase 8 will tighten the default from permissive to deny-if-absent when the
-  wiki-first retrieval path is fully wired. For now, the permissive default
-  lets the 689 pre-Phase-1 tests continue to pass.
+  A resource with no ACL rows follows the absent policy: `opts[:absent]` when
+  given, else `config :optimal_engine, :acl_absent` (`:deny` whenever
+  authentication is required, `:allow` for anonymous local use; see
+  `OPTIMAL_ACL_ABSENT`). Permissions are ranked: `admin` satisfies `write`
+  and `read`, `write` satisfies `read`.
   """
   @spec can?(String.t(), String.t(), permission(), keyword()) :: boolean()
   def can?(principal_id, resource_uri, permission, opts \\ [])
@@ -95,25 +96,39 @@ defmodule OptimalEngine.Identity.ACL do
 
     case list_for_resource(tenant_id, resource_uri) do
       [] ->
-        true
+        absent_policy(opts) == :allow
 
       acls ->
         {:ok, group_ids} = OptimalEngine.Identity.Principal.groups(principal_id)
         group_set = MapSet.new(group_ids)
-        perm_str = Atom.to_string(permission)
+        needed = rank(Atom.to_string(permission))
 
         Enum.any?(acls, fn
-          %{principal_id: ^principal_id, permission: ^perm_str} ->
-            true
+          %{principal_id: ^principal_id, permission: granted} ->
+            rank(granted) >= needed
 
-          %{group_id: gid, permission: ^perm_str} when is_binary(gid) ->
-            MapSet.member?(group_set, gid)
+          %{group_id: gid, permission: granted} when is_binary(gid) ->
+            MapSet.member?(group_set, gid) and rank(granted) >= needed
 
           _ ->
             false
         end)
     end
   end
+
+  @doc "The policy for resources with no ACL rows: `:allow` or `:deny`."
+  @spec absent_policy(keyword()) :: :allow | :deny
+  def absent_policy(opts \\ []) do
+    case Keyword.get(opts, :absent, Application.get_env(:optimal_engine, :acl_absent, :allow)) do
+      :allow -> :allow
+      _ -> :deny
+    end
+  end
+
+  defp rank("admin"), do: 3
+  defp rank("write"), do: 2
+  defp rank("read"), do: 1
+  defp rank(_unknown), do: 0
 
   @doc "Returns the list of ACL rows for a resource within a tenant."
   @spec list_for_resource(String.t(), String.t()) :: [map()]

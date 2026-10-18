@@ -8,7 +8,7 @@ defmodule OptimalEngine.API.PermissionPlug do
   remains available, but claim review still requires an explicit reviewer.
   Authenticated review identities come from the key, never request input.
   """
-  @read_posts ~w(/api/rag /api/assemble /api/reconstruct /api/render/context /api/storage/plan /api/optimality/classify)
+  @read_posts ~w(/api/rag /api/assemble /api/reconstruct /api/render/context /api/storage/plan)
   @topology_roots ~w(nodes organizations entities entity-mentions entity-relationships review data-steward workspaces)
   @behaviour Plug
   import Plug.Conn
@@ -33,8 +33,29 @@ defmodule OptimalEngine.API.PermissionPlug do
       scope == "claims:review" ->
         authorize_reviewer(conn, key)
 
+      key && conn.method not in ["GET", "HEAD", "OPTIONS"] ->
+        bind_actor(conn, key)
+
       true ->
         conn
+    end
+  end
+
+  # Every authenticated mutation acts as the key's principal. A body that
+  # names a different actor is refused; an absent actor is filled in, so no
+  # handler can record a caller-chosen identity.
+  @actor_fields ~w(actor_id verifier_id created_by)
+
+  defp bind_actor(conn, key) do
+    principal = key.principal_id || "api_key:" <> key.id
+    body = conn.body_params
+    body = if is_map(body) and not is_struct(body), do: body, else: %{}
+
+    if Enum.any?(@actor_fields, fn field -> body[field] not in [nil, principal] end) do
+      deny(conn, "actor_identity_mismatch")
+    else
+      body = Map.put(body, "actor_id", principal)
+      %{conn | body_params: body, params: Map.merge(conn.params, body)}
     end
   end
 

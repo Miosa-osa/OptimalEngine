@@ -192,6 +192,55 @@ defmodule OptimalEngine.Auth.ApiKey do
     end
   end
 
+  @doc """
+  Soft-revoke a key by id within `tenant_id`. Returns `{:error, :not_found}`
+  when the key does not exist in that tenant, so one tenant can never revoke
+  another tenant's key.
+  """
+  @spec revoke(String.t(), String.t()) :: :ok | {:error, :not_found | term()}
+  def revoke(id, tenant_id) when is_binary(id) and is_binary(tenant_id) do
+    with :ok <- owned_by(id, tenant_id) do
+      case Store.raw_query(
+             """
+             UPDATE api_keys SET revoked_at = datetime('now')
+             WHERE id = ?1 AND tenant_id = ?2 AND revoked_at IS NULL
+             """,
+             [id, tenant_id]
+           ) do
+        {:ok, _} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  @doc """
+  Hard-delete a key by id within `tenant_id`. Returns `{:error, :not_found}`
+  when the key does not exist in that tenant.
+  """
+  @spec delete(String.t(), String.t()) :: :ok | {:error, :not_found | term()}
+  def delete(id, tenant_id) when is_binary(id) and is_binary(tenant_id) do
+    with :ok <- owned_by(id, tenant_id) do
+      case Store.raw_query("DELETE FROM api_keys WHERE id = ?1 AND tenant_id = ?2", [
+             id,
+             tenant_id
+           ]) do
+        {:ok, _} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  defp owned_by(id, tenant_id) do
+    case Store.raw_query("SELECT 1 FROM api_keys WHERE id = ?1 AND tenant_id = ?2", [
+           id,
+           tenant_id
+         ]) do
+      {:ok, [_ | _]} -> :ok
+      {:ok, []} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @doc "Hard-delete a key by id. Permanent."
   @spec delete(String.t()) :: :ok | {:error, term()}
   def delete(id) when is_binary(id) do
@@ -271,10 +320,11 @@ defmodule OptimalEngine.Auth.ApiKey do
 
   defp expired?(%__MODULE__{expires_at: nil}), do: false
 
+  # An expiry that cannot be read fails closed: the key is treated as expired.
   defp expired?(%__MODULE__{expires_at: ts}) do
     case DateTime.from_iso8601(ts) do
       {:ok, dt, _} -> DateTime.compare(dt, DateTime.utc_now()) == :lt
-      _ -> false
+      _ -> true
     end
   end
 

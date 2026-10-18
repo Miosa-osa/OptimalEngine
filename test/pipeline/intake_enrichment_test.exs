@@ -115,15 +115,15 @@ defmodule OptimalEngine.Pipeline.IntakeEnrichmentTest do
       ws = unique_workspace()
 
       text = """
-      Roberto met with Jordan and Michael to discuss the platform strategy.
-      They decided to move forward with the redacted.
+      Avery met with Sam and Riley to discuss the platform strategy.
+      They decided to move forward with the new architecture.
       """
 
       assert {:ok, _result} =
                Intake.process(text,
                  genre: "note",
                  workspace_id: ws,
-                 entities: ["Roberto", "Jordan", "Michael"]
+                 entities: ["Avery", "Sam", "Riley"]
                )
 
       # Allow async tasks and synchronous assert_edge calls to land.

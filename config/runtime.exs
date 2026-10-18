@@ -2,7 +2,7 @@ import Config
 
 # BusinessOS runtime config for the BUNDLED OptimalEngine.
 #
-# This replaces the OptimalOS-private overlay (which hardcoded Roberto's personal
+# This replaces the OptimalOS-private overlay (which hardcoded one operator's personal
 # workspace path). Everything here is env-driven so the desktop EngineManager can
 # point the bundled engine at a per-user data directory and a free port, and so a
 # downloaded user gets their OWN fresh config from these templated defaults -
@@ -109,6 +109,36 @@ auth_required =
   end
 
 config :optimal_engine, :auth, Keyword.put(auth_config, :auth_required, auth_required)
+
+# Who an anonymous local request acts as (auth not required, no key). Keyed
+# requests always act as their key's principal (OptimalEngine.API.Actor).
+if operator = System.get_env("OPTIMAL_LOCAL_OPERATOR") do
+  config :optimal_engine, :local_operator_id, operator
+end
+
+# Access lists: what ACL.can?/4 answers for a resource with no ACL rows.
+# Defaults to deny whenever authentication is required; set
+# OPTIMAL_ACL_ABSENT=allow|deny to choose explicitly.
+acl_absent =
+  case System.get_env("OPTIMAL_ACL_ABSENT") do
+    nil -> if auth_required, do: :deny, else: :allow
+    "allow" -> :allow
+    "deny" -> :deny
+    _ -> raise ArgumentError, "OPTIMAL_ACL_ABSENT must be allow or deny"
+  end
+
+config :optimal_engine, :acl_absent, acl_absent
+
+# Corpus routing rules (CorpusOrganizer) are deployment data: a YAML or JSON
+# file mapping target workspaces to weighted markers.
+if corpus_rules = System.get_env("OPTIMAL_CORPUS_RULES") do
+  config :optimal_engine, :corpus_routing_rules_path, corpus_rules
+end
+
+# Where POST /api/backup writes. Defaults to "backups" beside the database.
+if backup_dir = System.get_env("OPTIMAL_BACKUP_DIR") do
+  config :optimal_engine, :backup_dir, backup_dir
+end
 
 # Local HTTP API - enabled on demand (the bundled engine turns it on; other
 # contexts leave it off). Port is env-driven so it can dodge a busy :4200.

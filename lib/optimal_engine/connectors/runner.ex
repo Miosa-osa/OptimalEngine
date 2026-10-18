@@ -606,8 +606,12 @@ defmodule OptimalEngine.Connectors.Runner do
     workspace_id = Map.get(attrs, :workspace_id, "default")
     enabled = if Map.get(attrs, :enabled, true), do: 1, else: 0
 
-    sanitized = maybe_encrypt_credentials(config)
+    with {:ok, sanitized} <- maybe_encrypt_credentials(config) do
+      write_row(id, kind, tenant_id, workspace_id, enabled, sanitized, attrs)
+    end
+  end
 
+  defp write_row(id, kind, tenant_id, workspace_id, enabled, sanitized, attrs) do
     sql = """
     INSERT INTO connectors (id, tenant_id, workspace_id, kind, config, cursor, enabled)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -631,21 +635,44 @@ defmodule OptimalEngine.Connectors.Runner do
     end
   end
 
-  defp maybe_encrypt_credentials(%{"credentials" => creds} = config) when is_map(creds) do
-    case Credential.encrypt(creds) do
-      {:ok, envelope} ->
-        config
-        |> Map.delete("credentials")
-        |> Map.put("credentials_ciphertext", envelope)
+  # Credentials are encrypted whether the caller used a string or an atom
+  # key. Without CONNECTOR_KEY, a deployment that requires authentication
+  # refuses to store them; an open local development engine keeps them in
+  # plaintext and logs a warning.
+  defp maybe_encrypt_credentials(config) do
+    case credentials(config) do
+      nil ->
+        {:ok, config}
 
-      {:error, _} ->
-        # Key missing: keep plaintext for dev/test, but log loudly so
-        # ops can't miss it in production.
-        Logger.warning("Connector credentials stored in plaintext — CONNECTOR_KEY not configured.")
+      creds ->
+        config = config |> Map.delete("credentials") |> Map.delete(:credentials)
 
-        config
+        case Credential.encrypt(creds) do
+          {:ok, envelope} ->
+            {:ok, Map.put(config, "credentials_ciphertext", envelope)}
+
+          {:error, _} ->
+            if auth_required?() do
+              {:error, :connector_key_missing}
+            else
+              Logger.warning(
+                "Connector credentials stored in plaintext - CONNECTOR_KEY not configured."
+              )
+
+              {:ok, Map.put(config, "credentials", creds)}
+            end
+        end
     end
   end
 
-  defp maybe_encrypt_credentials(config), do: config
+  defp credentials(config) do
+    case Map.get(config, "credentials") || Map.get(config, :credentials) do
+      creds when is_map(creds) -> creds
+      _ -> nil
+    end
+  end
+
+  defp auth_required? do
+    :optimal_engine |> Application.get_env(:auth, []) |> Keyword.get(:auth_required, false)
+  end
 end

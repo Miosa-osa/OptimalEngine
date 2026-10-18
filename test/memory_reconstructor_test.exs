@@ -11,12 +11,13 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     actor = "user:test-#{suffix}"
 
     facts = [
-      {"fact_commas_#{suffix}",
-       "Commas commitment requires customer feedback before the next working session", "[]", "[]"},
+      {"fact_northwind_#{suffix}",
+       "Northwind commitment requires customer feedback before the next working session", "[]",
+       "[]"},
       {"fact_feedback_#{suffix}",
-       "Customer feedback changed the Commas onboarding and commercial plan", "[]", "[]"},
+       "Customer feedback changed the Northwind onboarding and commercial plan", "[]", "[]"},
       {"fact_session_#{suffix}",
-       "The next Commas working session decides commitment ownership and timing", "[]", "[]"}
+       "The next Northwind working session decides commitment ownership and timing", "[]", "[]"}
     ]
 
     Enum.each(facts, fn {id, text, labels, partitions} ->
@@ -50,7 +51,7 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     actor: actor
   } do
     assert {:ok, package} =
-             MemoryCore.retrieve("Commas commitment customer feedback",
+             MemoryCore.retrieve("Northwind commitment customer feedback",
                tenant_id: "default",
                workspace_id: workspace,
                actor_id: actor,
@@ -68,7 +69,7 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     assert package.retrieval_plan.reconstruction.required_evidence_roles == ["primary"]
     assert package.retrieval_plan.reconstruction.missing_evidence_roles == []
     assert package.retrieval_plan.reconstruction.stop_reason == "coverage_satisfied"
-    assert package.sections.reconstruction =~ "Commas"
+    assert package.sections.reconstruction =~ "Northwind"
 
     assert {:ok, [["completed", package_id, steps, paths]]} =
              Store.raw_query(
@@ -111,13 +112,13 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     insert_fact(
       restricted_id,
       workspace,
-      "Commas restricted acquisition secret",
+      "Northwind restricted acquisition secret",
       ~s(["executive"]),
       ~s(["board"])
     )
 
     assert {:ok, package} =
-             MemoryCore.retrieve("Commas restricted acquisition secret",
+             MemoryCore.retrieve("Northwind restricted acquisition secret",
                tenant_id: "default",
                workspace_id: workspace,
                actor_id: actor,
@@ -128,7 +129,7 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     refute package.sections.reconstruction =~ "acquisition secret"
 
     assert {:ok, allowed} =
-             MemoryCore.retrieve("Commas restricted acquisition secret",
+             MemoryCore.retrieve("Northwind restricted acquisition secret",
                tenant_id: "default",
                workspace_id: workspace,
                actor_id: actor,
@@ -201,7 +202,7 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     scope = scope(workspace, actor)
     assert {:ok, first} = AssociativeProjection.rebuild(scope)
     assert first.associations > 0
-    assert {:ok, paths} = AssociativeProjection.expand(["commas"], scope)
+    assert {:ok, paths} = AssociativeProjection.expand(["northwind"], scope)
     assert paths != []
     assert {:ok, second} = AssociativeProjection.rebuild(scope)
     assert second.associations == first.associations
@@ -251,7 +252,7 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
   end
 
   defp reconstruct(workspace, actor) do
-    MemoryCore.retrieve("Commas commitment customer feedback",
+    MemoryCore.retrieve("Northwind commitment customer feedback",
       tenant_id: "default",
       workspace_id: workspace,
       actor_id: actor,

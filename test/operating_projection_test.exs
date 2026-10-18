@@ -11,7 +11,7 @@ defmodule OptimalEngine.OperatingProjectionTest do
     assert {:ok, _} =
              Store.raw_query(
                "INSERT INTO memories (id, workspace_id, content, root_memory_id, metadata) VALUES (?1, ?2, ?3, ?1, ?4)",
-               [id, workspace, "Task: Owner: Roberto. Follow up with Commas", ~s({"kind":"task"})]
+               [id, workspace, "Task: Owner: Avery. Follow up with Northwind", ~s({"kind":"task"})]
              )
 
     on_exit(fn -> Store.raw_query("DELETE FROM memories WHERE id = ?1", [id]) end)
@@ -22,6 +22,6 @@ defmodule OptimalEngine.OperatingProjectionTest do
     assert projection.inventory.memories == 1
     assert projection.inventory.recent_memories_sampled == 1
     assert {:ok, draft} = OperatingProjection.daily_draft(workspace)
-    assert draft =~ "Follow up with Commas"
+    assert draft =~ "Follow up with Northwind"
   end
 end

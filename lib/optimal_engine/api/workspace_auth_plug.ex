@@ -10,13 +10,18 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   For every request it:
 
   1. Resolves EVERY workspace id the request names — the `:id` path segment
-     on `/api/workspaces/:id*`, the `"workspace"` body field, and the
-     `"workspace"` query parameter. Authorizing all of them (not just the one
+     on `/api/workspaces/:id*` and `/api/storage/workspaces/:id*`, and the
+     `"workspace"` and `"workspace_id"` body fields and query parameters. Authorizing all of them (not just the one
      a given handler happens to read) means a body/query mismatch can never
-     smuggle a second, unauthorized workspace past the check. When a
-     workspace-scoped path names none, the implicit `"default"` workspace is
-     authorized instead — preserving single-workspace behavior while keeping
-     it tenant-checked.
+     smuggle a second, unauthorized workspace past the check. Every `/api`
+     route is workspace-scoped except the global families in
+     `@global_roots`; when a workspace-scoped route names no workspace, the
+     implicit `"default"` workspace is authorized instead — preserving
+     single-workspace behavior while keeping it tenant-checked. A key
+     restricted to named workspaces must name one: if its scope does not
+     include `"default"`, the request is refused with **400**
+     `{"error":"workspace_required"}` instead of silently reading the
+     default workspace.
   2. Enforces, for each requested workspace id:
      * **tenant ownership** — a workspace registered to another tenant (or an
        unregistered `"<tenant>:<slug>"` id with a foreign tenant prefix)
@@ -43,13 +48,13 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
   alias OptimalEngine.Workspace
 
-  # Endpoint families that serve workspace-scoped data. Requests under these
-  # paths are authorized even when no workspace is named (implicit "default").
-  # Paths outside these families are only checked when they explicitly name a
-  # workspace.
-  @workspace_scoped_roots ~w(activity batch graph grep health memory node
-                             optimal profile rag recall render search signals
-                             subscriptions wiki workspace workspaces)
+  # Endpoint families that serve no workspace data: engine status, catalogs,
+  # tenant-level administration and keys. Every other /api family is
+  # workspace-scoped and authorized even when no workspace is named
+  # (implicit "default"), so a new route is scoped unless it is listed here.
+  # Global routes are still checked when they explicitly name a workspace.
+  @global_roots ~w(architectures auth backup maintenance metrics organizations
+                   status storage stores version)
 
   @impl true
   def init(opts), do: opts
@@ -66,6 +71,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
       Enum.any?(requested, &(not is_binary(&1))) ->
         halt_json(conn, 400, "invalid workspace")
 
+      requested == [] and not key_allows_implicit_default?(conn.assigns[:current_api_key]) ->
+        halt_json(conn, 400, "workspace_required")
+
       true ->
         authorize_all(conn, if(requested == [], do: ["default"], else: requested))
     end
@@ -75,8 +83,10 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # Requested-workspace resolution
   # ---------------------------------------------------------------------------
 
+  @workspace_fields ~w(workspace workspace_id)
+
   defp requested_workspaces(conn) do
-    [path_workspace(conn), body_workspace(conn), query_workspace(conn)]
+    [path_workspace(conn) | body_workspaces(conn) ++ query_workspaces(conn)]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.uniq()
   end
@@ -89,18 +99,31 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
   defp path_workspace(_conn), do: nil
 
-  defp body_workspace(%{body_params: %Plug.Conn.Unfetched{}}), do: nil
-  defp body_workspace(%{body_params: params}) when is_map(params), do: Map.get(params, "workspace")
-  defp body_workspace(_conn), do: nil
+  defp body_workspaces(%{body_params: %Plug.Conn.Unfetched{}}), do: []
 
-  defp query_workspace(conn), do: Map.get(conn.query_params, "workspace")
+  defp body_workspaces(%{body_params: params}) when is_map(params),
+    do: Enum.map(@workspace_fields, &Map.get(params, &1))
+
+  defp body_workspaces(_conn), do: []
+
+  defp query_workspaces(conn), do: Enum.map(@workspace_fields, &Map.get(conn.query_params, &1))
 
   # GET/POST /api/workspaces (list/create) are tenant-parameterized, not
   # workspace-parameterized — only the /:id subroutes name a workspace, and
   # those are caught by path_workspace/1 above.
   defp workspace_scoped_path?(%{path_info: ["api", "workspaces"]}), do: false
-  defp workspace_scoped_path?(%{path_info: ["api", root | _]}), do: root in @workspace_scoped_roots
+  defp workspace_scoped_path?(%{path_info: ["api", root | _]}), do: root not in @global_roots
   defp workspace_scoped_path?(_conn), do: false
+
+  # Anonymous callers and keys whose scope covers "default" may rely on the
+  # implicit default workspace; a key restricted to other workspaces must
+  # name the one it means.
+  defp key_allows_implicit_default?(nil), do: true
+
+  defp key_allows_implicit_default?(api_key) do
+    scope = api_key.workspace_scope || []
+    "*" in scope or "default" in scope
+  end
 
   # ---------------------------------------------------------------------------
   # Authorization

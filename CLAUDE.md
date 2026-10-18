@@ -98,7 +98,7 @@ BusinessOS owns app state, windows, sessions, users, roles, workspace records, a
 Optimal Engine owns knowledge, memory, source packages, claims, facts, retrieval, graph, RAG, and context packages.
 
 Every BusinessOS call into Optimal Engine must include explicit tenant, organization, and workspace scope.
-Downloaded users run their own local engine and must not read Roberto's private engine data.
+Downloaded users run their own local engine and must not read the owner's private engine data.
 
 ## Authority validation
 

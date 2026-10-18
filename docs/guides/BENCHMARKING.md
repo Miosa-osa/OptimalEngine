@@ -134,7 +134,7 @@ Add four versioned dataset adapters next:
 3. A BEIR subset for lexical, vector, hybrid, and reranked retrieval comparison.
 4. An OptimalOS Gold dataset containing reviewed Facts, expected object links, forbidden links, effective dates, and authorization envelopes.
 
-The OptimalOS Gold dataset is the release gate because public corpora cannot represent Roberto's actual domain, policies, or Workspace topology.
+The OptimalOS Gold dataset is the release gate because public corpora cannot represent the owner's actual domain, policies, or Workspace topology.
 
 ## Commands
 

@@ -25,17 +25,17 @@ defmodule OptimalEngine.EntitySpineTest do
   end
 
   test "resolves aliases to durable canonical identity and records review", %{workspace: workspace} do
-    assert {:ok, roberto} =
+    assert {:ok, avery} =
              EntityRegistry.register(%{
                workspace_id: workspace,
                entity_kind: "person",
-               canonical_name: "Roberto H. Luna",
+               canonical_name: "Avery Example",
                created_by: "test",
-               aliases: [%{alias: "redacted"}],
+               aliases: [%{alias: "Avery Q. Example"}],
                identifiers: [
                  %{
                    namespace: "email",
-                   value: "roberto@miosa.ai",
+                   value: "avery@example.com",
                    verification_status: "verified"
                  }
                ]
@@ -45,22 +45,22 @@ defmodule OptimalEngine.EntitySpineTest do
              EntityResolution.resolve(%{
                workspace_id: workspace,
                proposed_kind: "person",
-               surface_text: "redacted",
+               surface_text: "Avery Q. Example",
                source_span: %{start: 10, end: 23}
              })
 
     assert [%{id: id, score: 1.0}] = mention.candidates
-    assert id == roberto.id
+    assert id == avery.id
 
     assert {:ok, decision} =
              EntityResolution.decide(mention.id, :link,
                workspace_id: workspace,
                actor_id: "test:reviewer",
-               entity_id: roberto.id,
+               entity_id: avery.id,
                reason: "exact reviewed alias"
              )
 
-    assert decision.entity_id == roberto.id
+    assert decision.entity_id == avery.id
     assert {:ok, []} = EntityResolution.queue(workspace)
     assert {:ok, %{unresolved_mentions: 0, orphan_resolutions: 0}} = EntityQuality.run(workspace)
   end
@@ -70,7 +70,7 @@ defmodule OptimalEngine.EntitySpineTest do
              EntityResolution.resolve(%{
                workspace_id: workspace,
                proposed_kind: "organization",
-               surface_text: "Commas"
+               surface_text: "Northwind"
              })
 
     assert {:ok, %{entity_id: entity_id}} =
@@ -80,7 +80,7 @@ defmodule OptimalEngine.EntitySpineTest do
                reason: "confirmed organization"
              )
 
-    assert {:ok, %{id: ^entity_id, canonical_name: "Commas", entity_kind: "organization"}} =
+    assert {:ok, %{id: ^entity_id, canonical_name: "Northwind", entity_kind: "organization"}} =
              EntityRegistry.get(entity_id, workspace)
   end
 
@@ -127,7 +127,7 @@ defmodule OptimalEngine.EntitySpineTest do
              EntityRegistry.register(%{
                workspace_id: workspace,
                entity_kind: "person",
-               canonical_name: "redacted"
+               canonical_name: "Avery Q. Example"
              })
 
     assert {:ok, organization} =

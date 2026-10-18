@@ -115,13 +115,13 @@ defmodule OptimalEngine.MemoryCore.ActiveDecisionsClusterTest do
       assert count("SELECT COUNT(*) FROM decisions WHERE workspace_id = ?1", [workspace_id]) == 0
 
       {:ok, decision} =
-        Remember.record_decision("Price redacted at $2K per seat",
-          rationale: "Matches Ed's call; keeps margin above 60%",
-          decided_by: "roberto",
+        Remember.record_decision("Price the starter plan at $20 per seat",
+          rationale: "Matches the pricing review; keeps margin above 60%",
+          decided_by: "owner",
           workspace_id: workspace_id
         )
 
-      assert decision.decided_by == "roberto"
+      assert decision.decided_by == "owner"
 
       assert count("SELECT COUNT(*) FROM decisions WHERE workspace_id = ?1", [workspace_id]) == 1
 
@@ -131,10 +131,10 @@ defmodule OptimalEngine.MemoryCore.ActiveDecisionsClusterTest do
           [workspace_id]
         )
 
-      assert title == "Price redacted at $2K per seat"
-      assert dec == "Price redacted at $2K per seat"
-      assert rationale == "Matches Ed's call; keeps margin above 60%"
-      assert decided_by == "roberto"
+      assert title == "Price the starter plan at $20 per seat"
+      assert dec == "Price the starter plan at $20 per seat"
+      assert rationale == "Matches the pricing review; keeps margin above 60%"
+      assert decided_by == "owner"
     end
   end
 

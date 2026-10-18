@@ -52,8 +52,8 @@ defmodule OptimalEngine.Retrieval.ContextLoopTest do
     workspace_id = "assemble-focus-#{suffix}"
     exact_id = "mem_assemble_exact_#{suffix}"
     noise_id = "mem_assemble_noise_#{suffix}"
-    phrase = "Commas follow up for feedback and schedule the next working session #{suffix}"
-    query = "Commas follow up feedback next working session #{suffix}"
+    phrase = "Northwind follow up for feedback and schedule the next working session #{suffix}"
+    query = "Northwind follow up feedback next working session #{suffix}"
 
     for {id, content} <- [
           {exact_id, phrase},
