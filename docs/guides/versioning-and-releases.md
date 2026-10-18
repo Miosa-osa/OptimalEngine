@@ -56,9 +56,11 @@ The Engine image records the channel as its `OPTIMAL_RELEASE_CHANNEL` default, w
 ## Conformance as a release gate
 
 `mix optimal.conformance --url <engine url> --key <key>` checks a live Engine against this contract and its operating surface, and prints a JSON report with pass, fail, or skip and the evidence per check.
-It covers the release contract, enforced authentication, workspace-scoped keys, a decision and the evidence chain, every store family, replication status, the viability report, and the operating routes.
+It covers the release contract, enforced authentication, workspace-scoped keys, a decision and the evidence chain, every store family the Engine lists, the size gauges and profiles, a use-case preset applied and removed, the pre-send draft check, analysis reports and the job queue, replication status, the viability report, and the operating routes.
 It exits non-zero on any failure.
 A release candidate earns promotion to a channel only when a run against a fresh Engine passes.
+When `scripts/store_reality_proof.exs` is present the run also executes it as a separate process against a disposable store under the system temp directory, and reports its per-store verdict as one more check; `--no-store-proof` leaves it out.
+That proof answers for the code in the checkout, while the other checks answer for the Engine the caller named.
 
 ## Version policy
 

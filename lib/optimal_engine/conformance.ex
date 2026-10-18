@@ -15,7 +15,7 @@ defmodule OptimalEngine.Conformance do
   reconfigure one, and it never reads or writes the store directly.
   """
 
-  alias OptimalEngine.Conformance.{Checks, Client}
+  alias OptimalEngine.Conformance.{Checks, Client, StoreProof}
 
   @report_version 1
 
@@ -35,6 +35,9 @@ defmodule OptimalEngine.Conformance do
     * `:other` - a second workspace the key must not be able to read
     * `:prefix` - slug prefix for workspaces the run creates (default "conformance")
     * `:extra_checks` - path to a file returning additional checks
+    * `:store_proof` - path to the store reality proof to run as one more check,
+      or nil to leave it out. It runs in a separate process against a disposable
+      store, never the configured one.
     * `:now` - a `DateTime` for the report timestamps, for tests
   """
   @spec run(options()) :: map()
@@ -51,7 +54,11 @@ defmodule OptimalEngine.Conformance do
 
     context = setup(client, opts)
 
-    checks = setup_checks(context) ++ Checks.all() ++ maybe_external_checks(opts)
+    checks =
+      setup_checks(context) ++
+        Checks.all() ++
+        StoreProof.check(Keyword.get(opts, :store_proof)) ++
+        maybe_external_checks(opts)
 
     results = Enum.map(checks, &run_check(&1, client, context))
 
@@ -112,6 +119,7 @@ defmodule OptimalEngine.Conformance do
       primary: primary,
       other: other,
       created: Enum.filter(created, & &1.created),
+      prefix: Keyword.get(opts, :prefix) || "conformance",
       setup_error: Enum.join(errors, "; ") |> then(&if(&1 == "", do: nil, else: &1)),
       # A probe that writes only runs in a workspace this run created and
       # archives, never in a workspace the operator named.
