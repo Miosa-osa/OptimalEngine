@@ -116,8 +116,10 @@ defmodule OptimalEngine.Memory.Versioned do
       `was_existing: true`. No new row is written.
     - `"bump_version"` — calls `update/2` on the existing memory, promoting
       it to v(n+1) with the caller's attrs. Returns the new version.
-    - `"always_insert"` — skips the dedup check entirely (escape hatch for
-      tests and bulk-import pipelines).
+    - `"always_insert"` — skips the pre-insert dedup lookup (for bulk-import
+      pipelines). The dedup index still holds: a live memory with the same
+      content in the same scope and audience is refused with
+      `{:error, :duplicate_content}`, never silently dropped.
 
   The dedup check only considers *live* memories (`is_forgotten = 0`,
   `is_latest = 1`). A forgotten memory with the same content will not block
@@ -365,8 +367,13 @@ defmodule OptimalEngine.Memory.Versioned do
         notify_surfacer(mem)
         {:ok, mem}
 
-      other ->
-        other
+      {:error, reason} ->
+        # The partial unique index rejects a second live copy of the same
+        # content; report that as a duplicate rather than a raw SQL error.
+        case VStore.find_by_content_hash(tenant_id, workspace_id, audience, content_hash) do
+          {:ok, _existing} -> {:error, :duplicate_content}
+          _ -> {:error, reason}
+        end
     end
   end
 
