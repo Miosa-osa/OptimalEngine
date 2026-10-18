@@ -8,6 +8,10 @@
 # C++ toolchain as well as gcc/make and the SQLite headers.
 # ─────────────────────────────────────────────────────────────────────────────
 FROM hexpm/elixir:1.19.5-erlang-28.1.1-debian-bookworm-20260824-slim AS builder
+# BUILDER_IMAGE must be Debian bookworm based. A build host without Docker Hub access can
+# point it at an image it already has, for example elixir:1.18.2-otp-27.
+ARG BUILDER_IMAGE=hexpm/elixir:1.17.3-erlang-26.2.5-debian-bookworm-20260610-slim
+FROM ${BUILDER_IMAGE} AS builder
 
 # Build-time tools. build-essential + cmake build the RocksDB and SQLite NIFs,
 # libsnappy-dev is the Snappy codec RocksDB links against, libsqlite3-dev is
@@ -83,6 +87,42 @@ RUN export OPTIMAL_ENGINE_GIT_SHA="${OPTIMAL_ENGINE_GIT_SHA}" \
            OPTIMAL_ENGINE_BUILD_TIMESTAMP="${OPTIMAL_ENGINE_BUILD_TIMESTAMP}" \
     && mix compile --force \
     && mix release optimal --overwrite
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1b — release tarball for MIOSA sandbox templates
+# `docker build --target release -o type=local,dest=out -f deploy/Dockerfile.engine .`
+# writes out/optimal-engine.tgz: the OTP release (it carries its own ERTS) plus the
+# few shared libraries a MIOSA base sandbox does not have, and a start script that
+# points the loader at them. No registry is involved; see deploy/miosa-template/.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM builder AS packager
+
+RUN set -eux; \
+    mkdir -p /pkg/optimal-engine/libextra; \
+    cp -a /app/_build/prod/rel/optimal/. /pkg/optimal-engine/; \
+    for lib in libsnappy.so.1 libzstd.so.1 liblz4.so.1 libbz2.so.1.0; do \
+      path="$(ldconfig -p | awk -v l="$lib" '$1 == l {print $NF; exit}')"; \
+      test -n "$path"; \
+      cp -L "$path" /pkg/optimal-engine/libextra/; \
+    done; \
+    printf '%s\n' '#!/bin/sh' \
+      'ROOT="$(cd "$(dirname "$0")" && pwd)"' \
+      'export LD_LIBRARY_PATH="$ROOT/libextra${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+      'export RELEASE_COOKIE="${RELEASE_COOKIE:-optimal_engine_sandbox}"' \
+      'export OPTIMAL_API_ENABLED="${OPTIMAL_API_ENABLED:-true}"' \
+      'export OPTIMAL_API_INTERFACE="${OPTIMAL_API_INTERFACE:-0.0.0.0}"' \
+      'export OPTIMAL_API_PORT="${OPTIMAL_API_PORT:-4200}"' \
+      'export OPTIMAL_ENGINE_ROOT="${OPTIMAL_ENGINE_ROOT:-/data}"' \
+      'export OPTIMAL_ENGINE_DB="${OPTIMAL_ENGINE_DB:-/data/.optimal/index.db}"' \
+      'export OPTIMAL_ENGINE_CACHE="${OPTIMAL_ENGINE_CACHE:-/data/.optimal/cache}"' \
+      'mkdir -p /data/.optimal' \
+      'exec "$ROOT/bin/optimal" start' \
+      > /pkg/optimal-engine/start-engine; \
+    chmod +x /pkg/optimal-engine/start-engine; \
+    tar czf /pkg/optimal-engine.tgz -C /pkg optimal-engine
+
+FROM scratch AS release
+COPY --from=packager /pkg/optimal-engine.tgz /optimal-engine.tgz
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 — runtime

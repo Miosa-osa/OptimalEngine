@@ -1,22 +1,37 @@
 # Optimal Engine as a MIOSA sandbox template
 
-This is how a workspace's Memory is built: the Engine image runs as an always-on MIOSA sandbox.
+A workspace's Memory is the Engine running as an always-on MIOSA sandbox.
+The image path uses only MIOSA's own infrastructure: no registry, no GitHub, no public package.
 
-## Steps
+## How it gets there
 
-1. Build `deploy/Dockerfile.engine` and push it to a registry MIOSA can pull from.
-   Note the digest (`repo@sha256:<64 hex>`).
-   A tag is refused: it can move under a running Memory.
-2. Create the template in the organization:
+1. **Build the release** on an x86_64 MIOSA build host (Docker, no registry login):
 
    ```bash
-   MIOSA_API_KEY=... ENGINE_IMAGE=repo@sha256:... deploy/miosa-template/create-template.sh --dry-run
-   MIOSA_API_KEY=... ENGINE_IMAGE=repo@sha256:... deploy/miosa-template/create-template.sh
+   deploy/miosa-template/build-release.sh out/
    ```
 
-   `--dry-run` validates the BuildSpec with the platform and creates nothing.
-3. Wait for the build: `miosa template builds optimal-engine`.
-4. Start a Memory from Optimal (`workspace_memory_launch`) or create the sandbox by hand with the environment below.
+   This runs `docker build --target release` and writes `out/optimal-engine.tgz`: the OTP release (it carries its own ERTS), the four shared libraries a base sandbox lacks (snappy, zstd, lz4, bzip2), and `start-engine`.
+   The rocksdb compile takes 30 to 60 minutes.
+2. **Stage it in a MIOSA bucket** of the organization that builds the template:
+
+   ```bash
+   MIOSA_API_KEY=... BUCKET_ID=<uuid> deploy/miosa-template/stage-release.sh out/optimal-engine.tgz
+   ```
+
+   It prints `RELEASE_URL` (presigned, 24 hours) and `RELEASE_SHA256`.
+   The bucket's access policy must be `signed`, not `private`.
+3. **Create the template** (validate first):
+
+   ```bash
+   MIOSA_API_KEY=... RELEASE_URL=... RELEASE_SHA256=... deploy/miosa-template/create-template.sh --dry-run
+   MIOSA_API_KEY=... RELEASE_URL=... RELEASE_SHA256=... deploy/miosa-template/create-template.sh
+   ```
+
+   The template is the `miosa-sandbox` base plus steps that download the tarball, check its sha256 and unpack it into `/opt/optimal-engine`.
+   MIOSA builds it in a Firecracker guest (`from` plus `steps`).
+4. Watch the build: `miosa template builds optimal-engine`.
+5. Start a Memory from Optimal (`workspace_memory_launch`), or create a sandbox from the template by hand with the environment below.
 
 ## Environment a Memory needs
 
@@ -29,7 +44,6 @@ This is how a workspace's Memory is built: the Engine image runs as an always-on
 
 ## Open items
 
-- The image defaults `OLLAMA_HOST` to a Docker host address that does not exist in a sandbox.
-  Embeddings are local or bring-your-own; point `OLLAMA_HOST` at the user's own model, or leave retrieval to full-text search.
+- Embeddings are local or bring-your-own; the Engine's default `OLLAMA_HOST` points at nothing in a sandbox.
 - A template belongs to one organization.
   Other organizations need it created in theirs until the platform ships it as a built-in template.
