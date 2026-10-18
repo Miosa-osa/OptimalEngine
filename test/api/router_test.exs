@@ -142,6 +142,10 @@ defmodule OptimalEngine.API.RouterTest do
       assert {:ok, body} = Jason.decode(conn.resp_body)
       assert body["count"] >= 13
       assert Enum.any?(body["providers"], &(&1["id"] == "postgres"))
+      assert Enum.all?(body["providers"], &is_boolean(&1["adapter_implemented"]))
+      postgres = Enum.find(body["providers"], &(&1["id"] == "postgres"))
+      refute postgres["adapter_implemented"]
+      assert postgres["lifecycle_state"] == "adapter_missing"
       refute conn.resp_body =~ "private-user"
       refute conn.resp_body =~ "private-pass"
     end
