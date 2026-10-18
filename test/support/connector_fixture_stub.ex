@@ -43,6 +43,14 @@ defmodule OptimalEngine.Test.ConnectorFixtureStub do
   which answers every request with that status and no body. Use it for the
   error paths a recording does not carry. `headers:` takes the same name and
   value pairs as a route, for a `429` that names its `Retry-After`.
+
+  To fail one call rather than all of them, name it:
+
+      install(:gmail, fail: {"/messages/msg-0004", 500})
+
+  Every request whose URL contains the fragment answers that status, and every
+  other request is answered from the recording. This is how a test drives a
+  failure part-way through a pull, where the calls before it have to succeed.
   """
 
   @fixtures_root "test/fixtures/connectors"
@@ -132,15 +140,30 @@ defmodule OptimalEngine.Test.ConnectorFixtureStub do
     {:error, :econnrefused}
   end
 
-  defp respond(_kind, _routes, _counters, _call, override) when override != [] do
-    httpc_ok(
-      Keyword.get(override, :body, %{}),
-      Keyword.get(override, :status, 200),
-      response_headers(Keyword.get(override, :headers))
-    )
+  # A named failure answers only the calls it names; every other call in the
+  # same test is answered from the recording, which is what lets a test fail a
+  # request part-way through a pull whose earlier calls had to succeed.
+  defp respond(kind, routes, counters, call, override) when override != [] do
+    case Keyword.get(override, :fail) do
+      {fragment, status} ->
+        if String.contains?(call.url, fragment),
+          do: httpc_ok(%{}, status),
+          else: respond_from_recording(kind, routes, counters, call)
+
+      nil ->
+        httpc_ok(
+          Keyword.get(override, :body, %{}),
+          Keyword.get(override, :status, 200),
+          response_headers(Keyword.get(override, :headers))
+        )
+    end
   end
 
-  defp respond(kind, routes, counters, call, _override) do
+  defp respond(kind, routes, counters, call, _no_override) do
+    respond_from_recording(kind, routes, counters, call)
+  end
+
+  defp respond_from_recording(kind, routes, counters, call) do
     case match(kind, routes, counters, call) do
       nil ->
         raise "no recorded fixture for #{call.method} #{call.url}"
@@ -238,7 +261,7 @@ defmodule OptimalEngine.Test.ConnectorFixtureStub do
     end)
   end
 
-  defp httpc_ok(body, status, extra_headers) do
+  defp httpc_ok(body, status, extra_headers \\ []) do
     headers =
       [{"content-type", "application/json"}, {"date", "Mon, 01 Jan 2026 00:00:00 GMT"}] ++
         extra_headers
