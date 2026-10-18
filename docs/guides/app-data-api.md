@@ -84,7 +84,7 @@ The table has system columns (`_rowid INTEGER PRIMARY KEY`, `id TEXT UNIQUE`, `_
 Declared indexes are SQLite indexes on that table, created inside the transaction that declares them.
 Full-text search fields are an FTS5 external-content table over the collection (`unicode61`, diacritics removed), kept in sync by insert, update and delete triggers.
 Reference fields are SQLite foreign keys to the referenced collection's `id`.
-A registry row in `data_collections` holds the schema; the change feed, the app migration ledger, record files, and embeddings have their own tables (migration 65).
+A registry row in `data_collections` holds the schema; the change feed, the app migration ledger, record files, and embeddings have their own tables (migration 66).
 
 Why one table per collection rather than one generic table of JSON documents with expression indexes:
 

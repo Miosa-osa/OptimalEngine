@@ -20,7 +20,7 @@ retrieval and projection component versions
 Read it from `GET /api/version`.
 The lightweight `GET /api/health` and `GET /api/status` responses include the same identity.
 
-The current tracked contract is application `0.3.1`, API `v1`, contract schema `1`, expected migration `65`.
+The current tracked contract is application `0.3.1`, API `v1`, contract schema `1`, expected migration `66`.
 [engine-contract.json](../../engine-contract.json) supplies repository, schema, and capability metadata to [Version.info/0](../../lib/optimal_engine/version.ex) at compilation.
 [test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
 Git SHA and timestamp are build-time metadata; changing branches does not prove an already running process changed.
