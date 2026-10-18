@@ -4,12 +4,7 @@
   "build_spec": {
     "from": "miosa-sandbox",
     "size": "medium",
-    "steps": [
-      { "run": "curl -fsSL --retry 3 --retry-delay 2 -o /tmp/optimal-engine.tgz '__RELEASE_URL__'", "timeout": 600 },
-      { "run": "echo '__RELEASE_SHA256__  /tmp/optimal-engine.tgz' | sha256sum -c -" },
-      { "run": "mkdir -p /opt /data/.optimal && tar xzf /tmp/optimal-engine.tgz -C /opt && rm -f /tmp/optimal-engine.tgz", "timeout": 300 },
-      { "run": "/opt/optimal-engine/bin/optimal version" }
-    ],
+    "steps": "__STEPS__",
     "env": {
       "OPTIMAL_API_ENABLED": "true",
       "OPTIMAL_API_PORT": "4200",
@@ -20,8 +15,10 @@
     "workdir": "/opt/optimal-engine",
     "user": "root",
     "startCmd": "/opt/optimal-engine/start-engine",
-    "readyCmd": "curl -fsS http://127.0.0.1:4200/api/health",
+    "readyCmd": "test \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4200/api/health)\" = 401",
     "previewPort": 4200,
-    "artifactPaths": ["/data"]
+    "artifactPaths": [
+      "/data"
+    ]
   }
 }
