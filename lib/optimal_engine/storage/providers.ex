@@ -202,6 +202,43 @@ defmodule OptimalEngine.Storage.Providers do
   @spec provider_ids() :: [String.t()]
   def provider_ids, do: Enum.map(@providers, & &1.id)
 
+  @doc """
+  Round-trip proofs for the service providers, one entry per provider.
+
+  A provider with an adapter is proved by writing and reading back an object;
+  a provider without one is reported `adapter_missing`, which is the truth about
+  it and not a passing grade. An unconfigured provider is `skipped`: nothing was
+  attempted, so nothing is claimed.
+
+  Embedded providers are absent here on purpose; their stores are proved by the
+  logical store proofs instead of by a connection.
+  """
+  @spec proofs(keyword()) :: [map()]
+  def proofs(opts \\ []) do
+    @providers
+    |> Enum.filter(&(&1.kind in ["service", "enterprise_partner"]))
+    |> Enum.map(&proof_for(&1, opts))
+  end
+
+  defp proof_for(%{id: "s3"} = provider, opts) do
+    if Enum.all?(provider.required_env, &present_env?/1) do
+      case OptimalEngine.Storage.S3.Adapter.probe(opts) do
+        {:ok, evidence} -> %{provider: "s3", status: "pass", evidence: evidence}
+        {:error, reason} -> %{provider: "s3", status: "fail", evidence: %{error: inspect(reason)}}
+      end
+    else
+      %{provider: "s3", status: "skipped", reason: "not configured"}
+    end
+  end
+
+  defp proof_for(provider, _opts) do
+    %{
+      provider: provider.id,
+      status: "adapter_missing",
+      reason: "the engine ships no adapter for this provider"
+    }
+  end
+
   defp inspect_provider(provider, opts) do
     configured = Enum.all?(provider.required_env, &present_env?/1)
     missing = Enum.reject(provider.required_env, &present_env?/1)

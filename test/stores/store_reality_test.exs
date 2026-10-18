@@ -20,7 +20,8 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
   alias OptimalEngine.MemoryCore.SourcePackage
   alias OptimalEngine.Models.Registry
   alias OptimalEngine.Pipeline.DecompositionRuns
-  alias OptimalEngine.Storage.PolicyStore
+  alias OptimalEngine.Storage.{PolicyStore, Providers}
+  alias OptimalEngine.TestSupport.S3Stub
   alias OptimalEngine.Store.{FileCache, Vectors}
   alias OptimalEngine.Telemetry.History
   alias OptimalEngine.WorkspaceTopology
@@ -526,8 +527,94 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
     end
   end
 
-  # ─── helpers ───────────────────────────────────────────────────────────────
+  describe "s3 provider" do
+    @s3_env ~w(OPTIMAL_S3_ENDPOINT OPTIMAL_S3_BUCKET OPTIMAL_S3_REGION OPTIMAL_S3_ACCESS_KEY_ID
+               OPTIMAL_S3_SECRET_ACCESS_KEY)
 
+    setup do
+      previous = Map.new(@s3_env, &{&1, System.get_env(&1)})
+
+      ref = S3Stub.ref()
+      on_exit(fn -> S3Stub.stop(ref) end)
+      {:ok, stub} = S3Stub.start(ref: ref, bucket: "engine-test")
+
+      on_exit(fn ->
+        Enum.each(previous, fn
+          {name, nil} -> System.delete_env(name)
+          {name, value} -> System.put_env(name, value)
+        end)
+      end)
+
+      %{stub: stub}
+    end
+
+    defp point_at(stub) do
+      System.put_env("OPTIMAL_S3_ENDPOINT", stub.endpoint)
+      System.put_env("OPTIMAL_S3_BUCKET", stub.bucket)
+      System.put_env("OPTIMAL_S3_ACCESS_KEY_ID", stub.access_key_id)
+      System.put_env("OPTIMAL_S3_SECRET_ACCESS_KEY", stub.secret_access_key)
+      System.put_env("OPTIMAL_S3_REGION", stub.region)
+    end
+
+    test "an unconfigured provider is skipped rather than claimed", %{stub: _stub} do
+      Enum.each(@s3_env, &System.delete_env/1)
+
+      proofs = Providers.proofs()
+
+      assert %{provider: "s3", status: "skipped", reason: "not configured"} =
+               Enum.find(proofs, &(&1.provider == "s3"))
+
+      for proof <- proofs, proof.provider != "s3" do
+        assert proof.status == "adapter_missing"
+      end
+    end
+
+    test "a configured provider passes a real round trip and the rest stay adapter_missing", %{
+      stub: stub
+    } do
+      point_at(stub)
+
+      proofs = Providers.proofs()
+      s3 = Enum.find(proofs, &(&1.provider == "s3"))
+
+      assert s3.status == "pass"
+      assert s3.evidence.deleted
+      assert s3.evidence.listed
+      assert byte_size(s3.evidence.checksum_sha256) == 64
+      assert s3.evidence.size_bytes > 0
+      assert s3.evidence.key =~ "health/"
+
+      for proof <- proofs, proof.provider != "s3" do
+        assert proof.status == "adapter_missing", "#{proof.provider} is #{proof.status}"
+        assert proof.reason =~ "no adapter"
+      end
+
+      # The same configuration that passes the proof is reported as available,
+      # and the object it wrote was cleaned up.
+      assert {:ok, provider} = Providers.get("s3", probe: true)
+      assert provider.lifecycle_state == "available"
+      assert S3Stub.object_keys(stub.agent) == []
+    end
+
+    test "a configured but unreachable provider fails its proof", %{stub: stub} do
+      point_at(stub)
+
+      {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+      {:ok, port} = :inet.port(socket)
+      :gen_tcp.close(socket)
+
+      System.put_env("OPTIMAL_S3_ENDPOINT", "http://127.0.0.1:#{port}")
+      System.put_env("OPTIMAL_S3_MAX_RETRIES", "0")
+
+      assert %{provider: "s3", status: "fail"} =
+               Providers.proofs() |> Enum.find(&(&1.provider == "s3"))
+
+      assert {:ok, provider} = Providers.get("s3", probe: true)
+      refute provider.lifecycle_state in ["active", "available"]
+    end
+  end
+
+  # ─── helpers ───────────────────────────────────────────────────────────────
   defp context!(ws, id, text) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
