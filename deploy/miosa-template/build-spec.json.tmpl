@@ -2,21 +2,25 @@
   "name": "optimal-engine",
   "description": "Optimal Engine: a workspace's Memory (search, graph, claims). Auth required; the first key arrives as OPTIMAL_BOOTSTRAP_KEY.",
   "build_spec": {
-    "from": { "image": "__ENGINE_IMAGE__" },
+    "from": "miosa-sandbox",
     "size": "medium",
+    "steps": [
+      { "run": "curl -fsSL --retry 3 --retry-delay 2 -o /tmp/optimal-engine.tgz '__RELEASE_URL__'", "timeout": 600 },
+      { "run": "echo '__RELEASE_SHA256__  /tmp/optimal-engine.tgz' | sha256sum -c -" },
+      { "run": "mkdir -p /opt /data/.optimal && tar xzf /tmp/optimal-engine.tgz -C /opt && rm -f /tmp/optimal-engine.tgz", "timeout": 300 },
+      { "run": "/opt/optimal-engine/bin/optimal version" }
+    ],
     "env": {
       "OPTIMAL_API_ENABLED": "true",
       "OPTIMAL_API_PORT": "4200",
       "OPTIMAL_API_INTERFACE": "0.0.0.0",
       "OPTIMAL_AUTH_REQUIRED": "true",
-      "OPTIMAL_ENGINE_ROOT": "/data",
-      "OPTIMAL_ENGINE_DB": "/data/.optimal/index.db",
-      "OPTIMAL_ENGINE_CACHE": "/data/.optimal/cache"
+      "OPTIMAL_ENGINE_ROOT": "/data"
     },
-    "workdir": "/app",
+    "workdir": "/opt/optimal-engine",
     "user": "root",
-    "startCmd": "mkdir -p /data/.optimal && exec /app/bin/optimal start",
-    "readyCmd": "wget -qO- http://127.0.0.1:4200/api/health",
+    "startCmd": "/opt/optimal-engine/start-engine",
+    "readyCmd": "curl -fsS http://127.0.0.1:4200/api/health",
     "previewPort": 4200,
     "artifactPaths": ["/data"]
   }
