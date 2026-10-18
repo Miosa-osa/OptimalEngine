@@ -111,6 +111,41 @@ defmodule OptimalEngine.Connectors.GmailTest do
       {:ok, state} = Gmail.init(@config)
       assert {:error, _reason} = Gmail.sync(state, nil)
     end
+
+    test "a revoked refresh token is :auth_expired, not a token error" do
+      stub =
+        ConnectorFixtureStub.install(:gmail,
+          status: 400,
+          body: %{"error" => "invalid_grant", "error_description" => "Token has been revoked."}
+        )
+
+      on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
+
+      {:ok, state} = Gmail.init(@config)
+      assert {:error, :auth_expired} = Gmail.sync(state, nil)
+    end
+  end
+
+  describe "a message that cannot be fetched" do
+    test "a failure fails the sync, so the cursor cannot skip past it" do
+      stub = ConnectorFixtureStub.install(:gmail, fail: {"/messages/msg-0004", 500})
+      on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
+
+      {:ok, state} = Gmail.init(@config)
+
+      # The recorded history poll succeeded and named the message; the fetch is
+      # what failed. Reporting it as an empty batch would advance the cursor past
+      # a message no later run could find again.
+      assert {:error, :transient} = Gmail.sync(state, "900001")
+    end
+
+    test "a message deleted between the list and the fetch is skipped, not fatal" do
+      stub = ConnectorFixtureStub.install(:gmail, fail: {"/messages/msg-0004", 404})
+      on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
+
+      {:ok, state} = Gmail.init(@config)
+      assert {:ok, %{signals: [], cursor: "900002"}} = Gmail.sync(state, "900001")
+    end
   end
 
   describe "transform/1" do

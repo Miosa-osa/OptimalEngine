@@ -59,6 +59,10 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
      })}
   end
 
+  # A record that is not a message is not a crash: every adapter answers with the
+  # same error shape for something it cannot read.
+  def transform(_raw), do: {:error, :invalid_payload}
+
   # ---- private ----------------------------------------------------------------
 
   defp refresh_access_token(state) do
@@ -72,11 +76,20 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
     case HTTP.post_json(@token_url, body) do
       {:ok, %{status: 200, body: %{"access_token" => token}}} -> {:ok, token}
       {:ok, %{status: 401}} -> {:error, :auth_expired}
+      # A revoked refresh token comes back as a 400 naming invalid_grant, which
+      # is an auth failure rather than a malformed request.
+      {:ok, %{status: 400, body: body}} -> revoked_or(body)
       {:ok, %{status: 429}} -> {:error, :rate_limited}
       {:ok, %{status: status}} when status >= 500 -> {:error, :transient}
       {:ok, %{body: body}} -> {:error, {:token_error, body}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp revoked_or(body) do
+    if body |> inspect() |> String.contains?("invalid_grant"),
+      do: {:error, :auth_expired},
+      else: {:error, {:token_error, body}}
   end
 
   # The initial pull walks every page of the message list, then parks the
@@ -187,23 +200,32 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
     end
   end
 
+  # A message can go missing between the list and the fetch, which is not a
+  # failure. Any other failure is one: reporting it as a smaller batch would
+  # advance the cursor past messages that were never read, and the history they
+  # are only listed in is gone by the next run. Failing the sync leaves the
+  # cursor where it was, so nothing is skipped.
   defp enrich_and_return(message_stubs, next_cursor, headers) do
-    signals =
-      message_stubs
-      |> Enum.flat_map(fn %{"id" => id} ->
-        case fetch_message(id, headers) do
-          {:ok, msg} ->
-            case transform(msg) do
-              {:ok, s} -> [s]
-              _ -> []
-            end
+    message_stubs
+    |> Enum.reduce_while({:ok, []}, fn %{"id" => id}, {:ok, acc} ->
+      case fetch_message(id, headers) do
+        {:ok, msg} ->
+          case transform(msg) do
+            {:ok, signal} -> {:cont, {:ok, [signal | acc]}}
+            {:error, _reason} -> {:cont, {:ok, acc}}
+          end
 
-          _ ->
-            []
-        end
-      end)
+        {:error, {:http, 404}} ->
+          {:cont, {:ok, acc}}
 
-    {:ok, %{signals: signals, cursor: next_cursor}}
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, signals} -> {:ok, %{signals: Enum.reverse(signals), cursor: next_cursor}}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp fetch_message(id, headers) do
@@ -211,6 +233,9 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
 
     case HTTP.get_json(url, headers: headers) do
       {:ok, %{status: 200, body: msg}} -> {:ok, msg}
+      {:ok, %{status: 401}} -> {:error, :auth_expired}
+      {:ok, %{status: 429}} -> {:error, :rate_limited}
+      {:ok, %{status: status}} when status >= 500 -> {:error, :transient}
       {:ok, %{status: status}} -> {:error, {:http, status}}
       {:error, reason} -> {:error, reason}
     end
