@@ -101,9 +101,49 @@ defmodule OptimalEngine.Storage.PolicyStore do
                occurred_at
              ]
            ) do
-        :ok -> replayed_or_recorded(attrs.workspace_id, idempotency_key, payload_hash, attrs)
-        {:error, reason} -> {:error, reason}
+        :ok ->
+          fingerprint = %{
+            entity_type: attrs.entity_type,
+            entity_id: attrs.entity_id,
+            operation: to_string(attrs.operation),
+            payload_hash: payload_hash
+          }
+
+          resolve_appended(tenant_id, attrs.workspace_id, idempotency_key, fingerprint)
+
+        {:error, reason} ->
+          {:error, reason}
       end
+    end
+  end
+
+  # `INSERT OR IGNORE` cannot say which uniqueness rule skipped the row, and
+  # idempotency keys are unique across the whole ledger. Resolve strictly
+  # inside the caller's scope so a colliding key can never hand back another
+  # workspace's mutation or payload, and only treat it as a replay when the
+  # stored mutation is the same change (entity, operation, payload).
+  defp resolve_appended(tenant_id, workspace_id, idempotency_key, fingerprint) do
+    case get_mutation_by_idempotency_key(tenant_id, workspace_id, idempotency_key) do
+      {:ok, mutation} ->
+        if Map.take(mutation, Map.keys(fingerprint)) == fingerprint,
+          do: {:ok, mutation},
+          else: {:error, :idempotency_key_conflict}
+
+      {:error, :not_found} ->
+        classify_ignored_append(idempotency_key)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp classify_ignored_append(idempotency_key) do
+    case Store.raw_query("SELECT 1 FROM sync_mutations WHERE idempotency_key = ?1", [
+           idempotency_key
+         ]) do
+      {:ok, [_ | _]} -> {:error, :idempotency_key_conflict}
+      {:ok, []} -> {:error, :mutation_id_conflict}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -148,36 +188,16 @@ defmodule OptimalEngine.Storage.PolicyStore do
     end
   end
 
-  # An idempotency key is honored only inside its own workspace and only for
-  # the same mutation: a key already used by another workspace, or reused for
-  # a different entity, operation or payload, is a conflict and never returns
-  # the other row.
-  defp replayed_or_recorded(workspace_id, idempotency_key, payload_hash, attrs) do
-    case get_mutation_by_idempotency_key(workspace_id, idempotency_key) do
-      {:ok, mutation} ->
-        if mutation.payload_hash == payload_hash and mutation.entity_type == attrs.entity_type and
-             mutation.entity_id == attrs.entity_id and
-             mutation.operation == to_string(attrs.operation),
-           do: {:ok, mutation},
-           else: {:error, :idempotency_key_conflict}
-
-      {:error, :not_found} ->
-        {:error, :idempotency_key_conflict}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp get_mutation_by_idempotency_key(workspace_id, key) do
+  defp get_mutation_by_idempotency_key(tenant_id, workspace_id, key) do
     case Store.raw_query(
            """
            SELECT sequence, id, tenant_id, organization_id, workspace_id,
                   device_id, actor_id, entity_type, entity_id, operation,
                   payload, payload_hash, idempotency_key, occurred_at, recorded_at
-           FROM sync_mutations WHERE workspace_id = ?1 AND idempotency_key = ?2
+           FROM sync_mutations
+           WHERE tenant_id = ?1 AND workspace_id = ?2 AND idempotency_key = ?3
            """,
-           [workspace_id, key]
+           [tenant_id, workspace_id, key]
          ) do
       {:ok, [row]} -> {:ok, mutation_from_row(row)}
       {:ok, []} -> {:error, :not_found}

@@ -60,8 +60,16 @@ defmodule Mix.Tasks.Optimal.Connector do
       |> File.read!()
       |> Jason.decode!()
 
-    {:ok, id} = Connectors.register(%{id: id, kind: kind, config: config, tenant_id: tenant})
-    IO.puts("Registered connector #{id} (#{kind}).")
+    case Connectors.register(%{id: id, kind: kind, config: config, tenant_id: tenant}) do
+      {:ok, id} ->
+        IO.puts("Registered connector #{id} (#{kind}).")
+
+      {:error, :connector_key_missing} ->
+        Mix.raise("Connector credentials require CONNECTOR_KEY (hex-encoded 32 bytes).")
+
+      {:error, reason} ->
+        Mix.raise("Connector registration failed: #{inspect(reason)}")
+    end
   end
 
   defp do_run(id, parsed) do

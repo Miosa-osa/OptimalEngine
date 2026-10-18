@@ -4,7 +4,9 @@ defmodule OptimalEngine.Storage.Planner do
 
   Plans are advisory. They never enable a provider or move data. Activation is
   an explicit, reviewed deployment decision because canonical-store changes and
-  cross-workspace routing have a large blast radius.
+  cross-workspace routing have a large blast radius. A plan that selects a
+  provider without an engine adapter lists it under `adapter_missing` and is
+  never `ready`.
   """
 
   alias OptimalEngine.Storage.Providers
@@ -98,6 +100,7 @@ defmodule OptimalEngine.Storage.Planner do
          providers: selected,
          ready: Enum.all?(selected, &ready?/1),
          activation_required: Enum.filter(selected, &(not ready?(&1))) |> Enum.map(& &1.id),
+         adapter_missing: Enum.reject(selected, & &1.adapter_implemented) |> Enum.map(& &1.id),
          invariant:
            "Canonical data remains governed by its domain owner; projections and transports never become truth."
        }}

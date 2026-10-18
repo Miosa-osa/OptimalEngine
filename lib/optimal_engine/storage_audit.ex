@@ -214,7 +214,7 @@ defmodule OptimalEngine.StorageAudit do
   defp cache do
     case :ets.info(:optimal_engine_store_cache, :size) do
       :undefined -> {:error, :cache_unavailable}
-      size -> {:ok, %{entries: size}}
+      size -> {:ok, %{entries: size, file_cache: OptimalEngine.Store.FileCache.stats()}}
     end
   end
 

@@ -114,7 +114,7 @@ defmodule OptimalEngine.Memory.DedupTest do
   # ---------------------------------------------------------------------------
 
   describe "dedup — always_insert policy" do
-    test "same content with always_insert → both rows created" do
+    test "a live duplicate is refused by the dedup index, never silently dropped" do
       workspace_id = ws()
 
       {:ok, first} =
@@ -124,20 +124,23 @@ defmodule OptimalEngine.Memory.DedupTest do
           dedup: "always_insert"
         })
 
-      {:ok, second} =
-        Memory.create(%{
-          content: "duplicate me",
-          workspace_id: workspace_id,
-          dedup: "always_insert"
-        })
-
-      # Two distinct rows
-      refute first.id == second.id
       assert first.was_existing == false
-      assert second.was_existing == false
+
+      assert {:error, :duplicate_content} =
+               Memory.create(%{
+                 content: "duplicate me",
+                 workspace_id: workspace_id,
+                 dedup: "always_insert"
+               })
+
+      assert {:ok, [[1]]} =
+               OptimalEngine.Store.raw_query(
+                 "SELECT COUNT(*) FROM memories WHERE workspace_id = ?1 AND is_latest = 1",
+                 [workspace_id]
+               )
     end
 
-    test "always_insert accepts atom policy" do
+    test "always_insert accepts atom policy and inserts distinct content" do
       workspace_id = ws()
 
       {:ok, first} =
@@ -149,7 +152,7 @@ defmodule OptimalEngine.Memory.DedupTest do
 
       {:ok, second} =
         Memory.create(%{
-          content: "atom policy",
+          content: "atom policy, second row",
           workspace_id: workspace_id,
           dedup: :always_insert
         })

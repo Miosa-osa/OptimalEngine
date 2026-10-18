@@ -598,20 +598,24 @@ defmodule OptimalEngine.Connectors.Runner do
 
   `attrs` may include `:workspace_id` (default `"default"`) — every signal
   the connector ingests is attributed to that workspace.
+
+  Credentials under `"credentials"` or `:credentials` are stored only as an
+  encrypted `credentials_ciphertext` envelope. Without a configured
+  `CONNECTOR_KEY` the write is refused with `{:error, :connector_key_missing}`.
   """
   @spec upsert_row(map()) :: {:ok, String.t()} | {:error, term()}
   def upsert_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
+    with {:ok, sanitized} <- encrypt_credentials(config) do
+      write_row(id, kind, sanitized, attrs)
+    end
+  end
+
+  defp write_row(id, kind, sanitized, attrs) do
     tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
     workspace_id = Map.get(attrs, :workspace_id, "default")
     enabled = if Map.get(attrs, :enabled, true), do: 1, else: 0
 
-    with {:ok, sanitized} <- maybe_encrypt_credentials(config) do
-      write_row(id, kind, tenant_id, workspace_id, enabled, sanitized, attrs)
-    end
-  end
-
-  defp write_row(id, kind, tenant_id, workspace_id, enabled, sanitized, attrs) do
     sql = """
     INSERT INTO connectors (id, tenant_id, workspace_id, kind, config, cursor, enabled)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -635,44 +639,41 @@ defmodule OptimalEngine.Connectors.Runner do
     end
   end
 
-  # Credentials are encrypted whether the caller used a string or an atom
-  # key. Without CONNECTOR_KEY, a deployment that requires authentication
-  # refuses to store them; an open local development engine keeps them in
-  # plaintext and logs a warning.
-  defp maybe_encrypt_credentials(config) do
-    case credentials(config) do
-      nil ->
-        {:ok, config}
+  # Credentials may arrive under a string or an atom key; both are lifted into
+  # one envelope. Without a master key the row is refused: auth material is
+  # never written to the connectors table in plaintext.
+  defp encrypt_credentials(config) do
+    {string_creds, config} = Map.pop(config, "credentials")
+    {atom_creds, config} = Map.pop(config, :credentials)
 
-      creds ->
-        config = config |> Map.delete("credentials") |> Map.delete(:credentials)
-
-        case Credential.encrypt(creds) do
-          {:ok, envelope} ->
-            {:ok, Map.put(config, "credentials_ciphertext", envelope)}
-
-          {:error, _} ->
-            if auth_required?() do
-              {:error, :connector_key_missing}
-            else
-              Logger.warning(
-                "Connector credentials stored in plaintext - CONNECTOR_KEY not configured."
-              )
-
-              {:ok, Map.put(config, "credentials", creds)}
-            end
-        end
+    with {:ok, creds} <- merge_credentials(atom_creds, string_creds) do
+      seal_credentials(config, creds)
     end
   end
 
-  defp credentials(config) do
-    case Map.get(config, "credentials") || Map.get(config, :credentials) do
-      creds when is_map(creds) -> creds
-      _ -> nil
+  defp seal_credentials(config, nil), do: {:ok, config}
+
+  defp seal_credentials(config, creds) do
+    case Credential.encrypt(creds) do
+      {:ok, envelope} ->
+        {:ok, Map.put(config, "credentials_ciphertext", envelope)}
+
+      {:error, :key_missing} ->
+        Logger.error("Connector credentials refused: CONNECTOR_KEY is not configured.")
+        {:error, :connector_key_missing}
     end
   end
 
-  defp auth_required? do
-    :optimal_engine |> Application.get_env(:auth, []) |> Keyword.get(:auth_required, false)
+  defp merge_credentials(nil, nil), do: {:ok, nil}
+
+  defp merge_credentials(atom_creds, string_creds)
+       when (is_nil(atom_creds) or is_map(atom_creds)) and
+              (is_nil(string_creds) or is_map(string_creds)) do
+    {:ok, Map.merge(stringify_keys(atom_creds), stringify_keys(string_creds))}
   end
+
+  defp merge_credentials(_atom_creds, _string_creds), do: {:error, :invalid_credentials}
+
+  defp stringify_keys(nil), do: %{}
+  defp stringify_keys(map), do: Map.new(map, fn {k, v} -> {to_string(k), v} end)
 end

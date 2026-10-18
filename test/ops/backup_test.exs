@@ -50,4 +50,93 @@ defmodule OptimalEngine.BackupTest do
     {:ok, _} = Backup.create(target)
     assert {:error, :supervisor_still_running} = Backup.restore(target)
   end
+
+  describe "restore/2 into a target path" do
+    test "restores a cataloged backup and proves the bytes match", %{tmp_dir: tmp} do
+      source = Path.join(tmp, "source.db")
+      target = Path.join(tmp, "restored.db")
+      {:ok, info} = Backup.create(source)
+
+      assert {:ok, result} = Backup.restore(source, target: target)
+      assert result.target == target
+      assert result.checksum_sha256 == info.checksum_sha256
+      assert result.archived == nil
+      assert {:ok, :ok} = Backup.verify(target)
+      assert sha256(target) == info.checksum_sha256
+    end
+
+    test "rejects a backup whose bytes no longer match the catalog", %{tmp_dir: tmp} do
+      source = Path.join(tmp, "tampered.db")
+      target = Path.join(tmp, "never.db")
+      {:ok, info} = Backup.create(source)
+      File.write!(source, "tamper", [:append])
+
+      assert {:error, {:checksum_mismatch, expected, actual}} =
+               Backup.restore(source, target: target)
+
+      assert expected == info.checksum_sha256
+      refute actual == expected
+      refute File.exists?(target)
+    end
+
+    test "refuses an uncataloged file unless a checksum is supplied", %{tmp_dir: tmp} do
+      source = Path.join(tmp, "cataloged.db")
+      copy = Path.join(tmp, "copied.db")
+      target = Path.join(tmp, "from-copy.db")
+      {:ok, info} = Backup.create(source)
+      File.cp!(source, copy)
+
+      assert {:error, :backup_not_cataloged} = Backup.restore(copy, target: target)
+      refute File.exists?(target)
+
+      assert {:error, {:checksum_mismatch, _, _}} =
+               Backup.restore(copy, target: target, checksum_sha256: String.duplicate("0", 64))
+
+      assert {:ok, _} = Backup.restore(copy, target: target, checksum_sha256: info.checksum_sha256)
+      assert sha256(target) == info.checksum_sha256
+    end
+
+    test "archives the current target with its sidecars and clears stale -wal/-shm",
+         %{tmp_dir: tmp} do
+      source = Path.join(tmp, "fresh.db")
+      target = Path.join(tmp, "live.db")
+      {:ok, info} = Backup.create(source)
+
+      File.write!(target, "old main")
+      File.write!(target <> "-wal", "stale wal")
+      File.write!(target <> "-shm", "stale shm")
+
+      assert {:ok, %{archived: archived}} = Backup.restore(source, target: target)
+      assert File.read!(archived) == "old main"
+      assert File.read!(archived <> "-wal") == "stale wal"
+      assert File.read!(archived <> "-shm") == "stale shm"
+
+      refute File.exists?(target <> "-wal")
+      refute File.exists?(target <> "-shm")
+      assert sha256(target) == info.checksum_sha256
+      assert {:ok, :ok} = Backup.verify(target)
+    end
+
+    test "refuses a source with an uncheckpointed -wal sidecar", %{tmp_dir: tmp} do
+      source = Path.join(tmp, "walled.db")
+      target = Path.join(tmp, "walled-target.db")
+      {:ok, _info} = Backup.create(source)
+      File.write!(source <> "-wal", "pending frames")
+
+      assert {:error, {:source_has_wal, _}} = Backup.restore(source, target: target)
+      refute File.exists?(target)
+    end
+
+    test "refuses to replace the live database while the engine runs", %{tmp_dir: tmp} do
+      source = Path.join(tmp, "live-attempt.db")
+      {:ok, _} = Backup.create(source)
+      live = Application.fetch_env!(:optimal_engine, :db_path)
+
+      assert {:error, :supervisor_still_running} = Backup.restore(source, target: live)
+    end
+  end
+
+  defp sha256(path) do
+    :crypto.hash(:sha256, File.read!(path)) |> Base.encode16(case: :lower)
+  end
 end

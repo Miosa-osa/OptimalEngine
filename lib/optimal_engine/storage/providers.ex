@@ -5,11 +5,18 @@ defmodule OptimalEngine.Storage.Providers do
   Optional providers are configured only through environment references. The
   returned inventory reports which variables are present but never returns
   their values.
+
+  A provider is only usable when the engine ships an adapter for it. Providers
+  listed without an implementing module report `adapter_implemented: false`
+  and the `adapter_missing` lifecycle state, regardless of configuration or a
+  reachable endpoint: a healthy remote service the engine cannot talk to is
+  not available storage.
   """
 
   @providers [
     %{
       id: "sqlite",
+      adapter: OptimalEngine.Store,
       name: "SQLite",
       kind: "embedded",
       role: "canonical",
@@ -21,6 +28,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "fts5",
+      adapter: OptimalEngine.Store,
       name: "SQLite FTS5",
       kind: "embedded",
       role: "projection",
@@ -32,6 +40,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "embedded_vectors",
+      adapter: OptimalEngine.Store.Vectors,
       name: "Embedded vectors",
       kind: "embedded",
       role: "projection",
@@ -43,6 +52,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "rocksdb",
+      adapter: OptimalEngine.Knowledge.Backend.RocksDB,
       name: "RocksDB",
       kind: "embedded",
       role: "projection",
@@ -54,6 +64,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "filesystem",
+      adapter: OptimalEngine.MemoryCore.AssetStore,
       name: "Local filesystem",
       kind: "embedded",
       role: "canonical_artifact",
@@ -65,6 +76,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "ets",
+      adapter: OptimalEngine.Store,
       name: "Erlang ETS",
       kind: "embedded",
       role: "ephemeral",
@@ -76,6 +88,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "postgres",
+      adapter: nil,
       name: "PostgreSQL",
       kind: "service",
       role: "canonical",
@@ -87,6 +100,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "s3",
+      adapter: nil,
       name: "S3-compatible object storage",
       kind: "service",
       role: "canonical_artifact",
@@ -99,6 +113,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "nats_jetstream",
+      adapter: nil,
       name: "NATS JetStream",
       kind: "service",
       role: "transport",
@@ -110,6 +125,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "valkey",
+      adapter: nil,
       name: "Valkey",
       kind: "service",
       role: "ephemeral",
@@ -121,6 +137,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "qdrant",
+      adapter: nil,
       name: "Qdrant",
       kind: "service",
       role: "projection",
@@ -132,6 +149,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "duckdb",
+      adapter: nil,
       name: "DuckDB and Parquet",
       kind: "embedded",
       role: "projection",
@@ -143,6 +161,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "openbao",
+      adapter: nil,
       name: "OpenBao",
       kind: "service",
       role: "secrets",
@@ -154,6 +173,7 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "fractal",
+      adapter: nil,
       name: "Fractal Computing",
       kind: "enterprise_partner",
       role: "enterprise_substrate",
@@ -194,10 +214,13 @@ defmodule OptimalEngine.Storage.Providers do
         true -> :configured
       end
 
-    lifecycle_state = lifecycle_state(provider, configured, health)
+    adapter_implemented = adapter_implemented?(provider.adapter)
+    lifecycle_state = lifecycle_state(provider, adapter_implemented, configured, health)
 
     provider
-    |> Map.drop([:probe, :required_env, :optional_env])
+    |> Map.drop([:adapter, :probe, :required_env, :optional_env])
+    |> Map.put(:adapter_implemented, adapter_implemented)
+    |> Map.put(:adapter_module, adapter_name(provider.adapter, adapter_implemented))
     |> Map.put(:configured, configured)
     |> Map.put(:health, Atom.to_string(health))
     |> Map.put(:lifecycle_state, lifecycle_state)
@@ -206,11 +229,19 @@ defmodule OptimalEngine.Storage.Providers do
     |> Map.put(:missing_environment, missing)
   end
 
-  defp lifecycle_state(%{activation: "default_local"}, true, :healthy), do: "active"
-  defp lifecycle_state(_provider, false, _health), do: "not_configured"
-  defp lifecycle_state(_provider, true, :healthy), do: "available"
-  defp lifecycle_state(_provider, true, :configured), do: "configured_unverified"
-  defp lifecycle_state(_provider, true, _health), do: "unavailable"
+  # A missing adapter outranks every configuration or probe result.
+  defp lifecycle_state(_provider, false, _configured, _health), do: "adapter_missing"
+  defp lifecycle_state(%{activation: "default_local"}, true, true, :healthy), do: "active"
+  defp lifecycle_state(_provider, true, false, _health), do: "not_configured"
+  defp lifecycle_state(_provider, true, true, :healthy), do: "available"
+  defp lifecycle_state(_provider, true, true, :configured), do: "configured_unverified"
+  defp lifecycle_state(_provider, true, true, _health), do: "unavailable"
+
+  defp adapter_implemented?(nil), do: false
+  defp adapter_implemented?(module) when is_atom(module), do: Code.ensure_loaded?(module)
+
+  defp adapter_name(module, true), do: module |> Module.split() |> Enum.join(".")
+  defp adapter_name(_module, false), do: nil
 
   defp run_probe(:runtime), do: :healthy
 

@@ -365,9 +365,9 @@ defmodule OptimalEngine.Store do
   def txn_query({:txn, db}, sql, params \\ []) do
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
          :ok <- Exqlite.Sqlite3.bind(stmt, params) do
-      rows = collect_rows_raw(db, stmt, [])
+      result = collect_rows_raw(db, stmt, [])
       Exqlite.Sqlite3.release(db, stmt)
-      {:ok, rows}
+      result
     end
   end
 
@@ -562,7 +562,7 @@ defmodule OptimalEngine.Store do
            :ok <- Exqlite.Sqlite3.bind(stmt, params) do
         contexts = collect_context_rows(state.db, stmt, [])
         Exqlite.Sqlite3.release(state.db, stmt)
-        {:ok, contexts}
+        contexts
       end
 
     {:reply, result, state}
@@ -616,7 +616,7 @@ defmodule OptimalEngine.Store do
            :ok <- Exqlite.Sqlite3.bind(stmt, params) do
         rows = collect_rows_raw(state.db, stmt, [])
         Exqlite.Sqlite3.release(state.db, stmt)
-        {:ok, rows}
+        rows
       end
 
     {:reply, result, state}
@@ -1619,19 +1619,22 @@ defmodule OptimalEngine.Store do
   # Private: Collection helpers
   # ---------------------------------------------------------------------------
 
+  # A step error (constraint violation, malformed FTS query, I/O failure) is
+  # returned as an error: reporting the rows read so far as success would let
+  # a failed write look like it succeeded.
   defp collect_context_rows(db, stmt, acc) do
     case Exqlite.Sqlite3.step(db, stmt) do
       {:row, row} -> collect_context_rows(db, stmt, [Context.from_row(row) | acc])
-      :done -> Enum.reverse(acc)
-      {:error, _} -> Enum.reverse(acc)
+      :done -> {:ok, Enum.reverse(acc)}
+      {:error, reason} -> {:error, reason}
     end
   end
 
   defp collect_rows_raw(db, stmt, acc) do
     case Exqlite.Sqlite3.step(db, stmt) do
       {:row, row} -> collect_rows_raw(db, stmt, [row | acc])
-      :done -> Enum.reverse(acc)
-      {:error, _} -> Enum.reverse(acc)
+      :done -> {:ok, Enum.reverse(acc)}
+      {:error, reason} -> {:error, reason}
     end
   end
 

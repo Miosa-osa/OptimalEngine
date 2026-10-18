@@ -889,16 +889,24 @@ defmodule OptimalEngine.Retrieval.Search do
     :math.exp(-decay_constant * hours_old)
   end
 
+  # Stopwords are dropped unless they are the whole query. A query with no
+  # searchable terms becomes the empty phrase, which FTS5 accepts and matches
+  # nothing (a bare "*" is a syntax error, not a wildcard).
   defp sanitize_fts_query(query) do
-    terms =
+    words =
       ~r/[\p{L}\p{N}_-]+/u
       |> Regex.scan(String.downcase(query))
       |> List.flatten()
-      |> Enum.reject(&MapSet.member?(@memory_fts_stopwords, &1))
       |> Enum.uniq()
 
+    terms =
+      case Enum.reject(words, &MapSet.member?(@memory_fts_stopwords, &1)) do
+        [] -> words
+        content_words -> content_words
+      end
+
     case terms do
-      [] -> "*"
+      [] -> ~s("")
       _ -> Enum.map_join(terms, " OR ", &"\"#{&1}\"")
     end
   end
