@@ -1827,7 +1827,7 @@ defmodule OptimalEngine.API.Router do
         |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
         |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
         |> maybe_put(:metadata, Map.get(body, "metadata"))
-        |> maybe_put(:actor_id, Map.get(body, "actor_id"))
+        |> Map.put(:actor_id, Actor.of(conn, body))
         |> maybe_put(:access_policy_id, Map.get(body, "access_policy_id"))
         |> maybe_put(:security_labels, string_list_param(body, "security_labels"))
         |> maybe_put(:partition_ids, string_list_param(body, "partition_ids"))
@@ -2918,12 +2918,10 @@ defmodule OptimalEngine.API.Router do
     if not (is_binary(text) and String.trim(text) != "") do
       send_resp(conn, 400, Jason.encode!(%{error: "text is required"}))
     else
-      # The tenant and the acting principal come from the authenticated key.
+      # The tenant and the acting principal come from the authenticated key;
+      # an anonymous local caller may name the actor, else it is the operator.
       intake_opts =
-        [tenant_id: conn.assigns[:current_tenant] || "default"]
-        |> then(fn acc ->
-          if(v = body["actor_id"], do: Keyword.put(acc, :actor_id, v), else: acc)
-        end)
+        [tenant_id: conn.assigns[:current_tenant] || "default", actor_id: Actor.of(conn, body)]
         |> then(fn acc -> if(v = body["genre"], do: Keyword.put(acc, :genre, v), else: acc) end)
         |> then(fn acc -> if(v = body["title"], do: Keyword.put(acc, :title, v), else: acc) end)
         |> then(fn acc -> if(v = body["node"], do: Keyword.put(acc, :node, v), else: acc) end)
@@ -3085,16 +3083,21 @@ defmodule OptimalEngine.API.Router do
     json(conn, reconstruction_quality(workspace))
   end
 
+  # POST /api/memory/reconstruction/benchmark - measures reconstruction on the
+  # questions the caller sends. There is no default set: a benchmark of
+  # placeholder questions would report numbers about nothing.
   post "/api/memory/reconstruction/benchmark" do
     body = conn.body_params || %{}
+    questions = Map.get(body, "questions")
 
-    questions =
-      Map.get(body, "questions", [
-        "What is the current Northwind commitment and how did it evolve?",
-        "What changed in the Contoso commercial plan?",
-        "Which Optimal Engine problems were found, fixed, and verified?"
-      ])
+    if questions in [nil, []] do
+      send_resp(conn, 400, Jason.encode!(%{error: "questions_required"}))
+    else
+      run_reconstruction_benchmark(conn, body, questions)
+    end
+  end
 
+  defp run_reconstruction_benchmark(conn, body, questions) do
     if is_list(questions) and Enum.all?(questions, &is_binary/1) do
       cases =
         Enum.with_index(questions, 1)
