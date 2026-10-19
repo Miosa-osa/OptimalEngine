@@ -4,6 +4,9 @@ defmodule OptimalEngine.API.PermissionPlug do
 
   `read` and `write` grant ordinary operations; governed review, topology changes,
   and administration require `claims:review`, `topology:write`, and `admin`.
+  App data schema changes, app migrations and data keys (`/api/data`) require
+  `data:admin`. A data key (API key whose metadata carries `data_access`) is
+  confined to `/api/data`; every other route refuses it.
   `*` is an explicit unrestricted grant. Trusted local anonymous development
   remains available, but claim review still requires an explicit reviewer.
   Authenticated review identities come from the key, never request input.
@@ -28,6 +31,9 @@ defmodule OptimalEngine.API.PermissionPlug do
     key = conn.assigns[:current_api_key]
 
     cond do
+      key && data_key?(key) && not match?(["api", "data" | _], conn.path_info) ->
+        deny(conn, "data_key_confined")
+
       key && "*" not in key.scopes && scope not in key.scopes ->
         deny(conn, "permission_scope_denied")
 
@@ -108,6 +114,9 @@ defmodule OptimalEngine.API.PermissionPlug do
              conn.body_params["stage"] in ["approval", "denial"]) ->
         "authority:enforce"
 
+      match?(["api", "data" | _], conn.path_info) ->
+        data_scope(conn.method, tl(tl(conn.path_info)))
+
       String.starts_with?(path, "/api/auth/keys") or String.starts_with?(path, "/api/principals") or
         path == "/api/backup" or String.starts_with?(path, "/api/topology") or
         String.starts_with?(path, "/api/bundles") or
@@ -158,6 +167,22 @@ defmodule OptimalEngine.API.PermissionPlug do
   defp sync_scope(_method, ["changes"]), do: "sync"
   defp sync_scope("GET", _route), do: "read"
   defp sync_scope(_method, _route), do: "admin"
+
+  # App data routes (OptimalEngine.API.AppDataRouter): schema, migrations
+  # and data keys need data:admin; queries posted as JSON are reads.
+  defp data_scope(_method, ["keys" | _]), do: "data:admin"
+  defp data_scope("POST", ["collections"]), do: "data:admin"
+
+  defp data_scope(method, ["collections", _name]) when method in ["PATCH", "DELETE"],
+    do: "data:admin"
+
+  defp data_scope("POST", ["migrations"]), do: "data:admin"
+  defp data_scope("POST", ["collections", _name, "query"]), do: "read"
+  defp data_scope(method, _route) when method in ["GET", "HEAD"], do: "read"
+  defp data_scope(_method, _route), do: "write"
+
+  defp data_key?(%{metadata: %{"data_access" => %{}}}), do: true
+  defp data_key?(_key), do: false
 
   defp topology_path?(["api", "storage", "workspaces", _, "policy"]), do: true
   defp topology_path?(["api", root | _]), do: root in @topology_roots

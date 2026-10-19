@@ -125,8 +125,15 @@ defmodule OptimalEngine.ViabilityTest do
     id
   end
 
-  defp event(ctx, attrs),
-    do: {:ok, _} = SignalEvents.record(ctx.tenant, Map.put(attrs, "workspace_id", ctx.workspace))
+  # Events land inside the fixed window unless a test names their time.
+  defp event(ctx, attrs) do
+    attrs =
+      attrs
+      |> Map.put("workspace_id", ctx.workspace)
+      |> Map.put_new("occurred_at", "2026-10-16T10:00:00Z")
+
+    {:ok, _} = SignalEvents.record(ctx.tenant, attrs)
+  end
 
   defp metric(result, name), do: Enum.find(result.metrics, &(&1.name == name))
 

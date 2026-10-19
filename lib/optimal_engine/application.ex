@@ -51,6 +51,10 @@ defmodule OptimalEngine.Application do
       {Registry, keys: :unique, name: OptimalEngine.SessionRegistry},
       {DynamicSupervisor, name: OptimalEngine.SessionSupervisor, strategy: :one_for_one},
 
+      # ── App data (collections API): change-feed wakeups, semantic indexing ─
+      {Registry, keys: :duplicate, name: OptimalEngine.AppData.Registry},
+      {Task.Supervisor, name: OptimalEngine.AppData.TaskSupervisor},
+
       # ── Knowledge subsystem (graph store + OWL 2 RL reasoner) ────────────
       # The registry is permanent. The default store is started as a permanent
       # named GenServer so Graph.assert_edge can find it via Registry lookup.

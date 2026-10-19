@@ -113,6 +113,25 @@ async for event in client.surface.stream(sub.id):
 
 ---
 
+## App data
+
+`client.data` uses the Engine as an app database: collections, versioned records, queries with cursors, transactions, files, the change feed, migrations, and data keys.
+See `docs/guides/app-data-api.md` in the Engine repository.
+
+```python
+from optimal_engine import ConflictError, OptimalEngine
+
+with OptimalEngine(base_url="http://localhost:4200", api_key="oe_...", workspace="default:todo") as client:
+    tasks = client.data.collection("tasks")
+    task = tasks.create({"title": "write the report", "owner": "user-a"})
+    for t in tasks.iterate(where={"owner": "user-a", "done": False}, sort=["due"]):
+        print(t["data"]["title"])
+    try:
+        tasks.update(task["id"], {"done": True}, version=task["version"])
+    except ConflictError as exc:
+        print(exc.body["error"], exc.body.get("current_version"))
+```
+
 ## Adapters
 
 ### OpenAI Agents SDK

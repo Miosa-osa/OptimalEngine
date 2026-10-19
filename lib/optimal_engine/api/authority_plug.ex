@@ -128,6 +128,12 @@ defmodule OptimalEngine.API.AuthorityPlug do
   defp decision_kind(:ask), do: "decision.ask"
 
   defp action(method, [root | _]) when root in @admin_roots and method != "GET", do: "admin"
+  defp action("POST", ["data", "collections", _name, "query"]), do: "search"
+  defp action(_method, ["data", "keys" | _]), do: "admin"
+  defp action("POST", ["data", route]) when route in ["collections", "migrations"], do: "admin"
+
+  defp action(method, ["data", "collections", _name]) when method in ["PATCH", "DELETE"],
+    do: "admin"
 
   defp action(_method, ["storage", "workspaces", _id, segment | _])
        when segment in ["mutations", "cursors"], do: "sync"

@@ -3225,6 +3225,7 @@ defmodule OptimalEngine.API.Router do
   post("/api/jobs/dead/:id/replay", do: AnalysesAPI.replay(conn, id))
 
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
+  forward("/api/data", to: OptimalEngine.API.AppDataRouter)
 
   match _ do
     send_resp(conn, 404, Jason.encode!(%{error: "not found"}))

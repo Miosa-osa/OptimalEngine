@@ -111,6 +111,7 @@ defmodule OptimalEngine.Store.Migrations do
       migration_063_authority(),
       migration_064_operating_layer(),
       migration_065_scope_and_portability(),
+      migration_066_app_data(),
       migration_067_replication(),
       migration_068_viability(),
       migration_069_analysis_reports()
@@ -228,7 +229,101 @@ defmodule OptimalEngine.Store.Migrations do
      ]}
   end
 
-  # 66 is the app data layer.
+  # App data (OptimalEngine.AppData): the registry of app-defined collections,
+  # the durable change feed, applied app schema migrations, files attached to
+  # records, and the rebuildable semantic projection. Each collection's own
+  # records live in an Engine-generated table created at runtime.
+  defp migration_066_app_data do
+    {66, "app data: collections, change feed, app migrations, record files, embeddings",
+     [
+       {"data_collections",
+        """
+        CREATE TABLE IF NOT EXISTS data_collections (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          table_name TEXT NOT NULL UNIQUE,
+          schema TEXT NOT NULL,
+          schema_version INTEGER NOT NULL DEFAULT 1,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+          UNIQUE (tenant_id, workspace_id, name)
+        )
+        """},
+       {"data_changes",
+        """
+        CREATE TABLE IF NOT EXISTS data_changes (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          collection_id TEXT NOT NULL,
+          collection TEXT NOT NULL,
+          record_id TEXT,
+          op TEXT NOT NULL CHECK (op IN ('create', 'update', 'delete', 'schema', 'drop')),
+          version INTEGER,
+          owner TEXT,
+          actor TEXT,
+          data TEXT,
+          txn_id TEXT,
+          at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+        """},
+       {"idx_data_changes_scope",
+        "CREATE INDEX IF NOT EXISTS idx_data_changes_scope ON data_changes(tenant_id, workspace_id, seq)"},
+       {"idx_data_changes_collection",
+        "CREATE INDEX IF NOT EXISTS idx_data_changes_collection ON data_changes(collection_id, seq)"},
+       {"data_schema_migrations",
+        """
+        CREATE TABLE IF NOT EXISTS data_schema_migrations (
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          app TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          checksum TEXT NOT NULL,
+          applied_by TEXT,
+          applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+          PRIMARY KEY (tenant_id, workspace_id, app, version)
+        )
+        """},
+       {"data_files",
+        """
+        CREATE TABLE IF NOT EXISTS data_files (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          collection_id TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          content_type TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          content_hash TEXT NOT NULL,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+        """},
+       {"idx_data_files_record",
+        "CREATE INDEX IF NOT EXISTS idx_data_files_record ON data_files(collection_id, record_id)"},
+       {"data_embeddings",
+        """
+        CREATE TABLE IF NOT EXISTS data_embeddings (
+          collection_id TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          model TEXT NOT NULL,
+          dimensions INTEGER NOT NULL,
+          embedding BLOB NOT NULL,
+          content_hash TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+          PRIMARY KEY (collection_id, record_id)
+        )
+        """}
+     ]}
+  end
+
   defp migration_067_replication do
     {67, "replication: replica identity, change capture, synced workspaces, peers, conflicts",
      [

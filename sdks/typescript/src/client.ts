@@ -1,3 +1,4 @@
+import { DataClient } from "./data.js";
 import { HttpClient } from "./http.js";
 import { MemoryClient } from "./memory.js";
 import { WikiClient } from "./profile.js";
@@ -197,6 +198,21 @@ export class OptimalEngine {
         ? { description: opts.description }
         : {}),
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // App data (/api/data)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * App data API for a workspace: collections, records, queries,
+   * transactions, files, change feed, migrations, and data keys.
+   */
+  data(workspace: string | undefined = this.defaultWorkspace): DataClient {
+    if (workspace === undefined) {
+      throw new Error("data() needs a workspace (argument or config.workspace)");
+    }
+    return new DataClient(this.http, workspace);
   }
 
   // ---------------------------------------------------------------------------

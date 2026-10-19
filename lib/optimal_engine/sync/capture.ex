@@ -56,9 +56,33 @@ defmodule OptimalEngine.Sync.Capture do
         {:skipped, :too_many_columns}
 
       true ->
-        statements(table, columns)
-        |> Enum.each(fn sql -> :ok = Store.raw_execute(sql, []) end)
+        statements = statements(table, columns)
+        creates = Enum.reject(statements, &String.starts_with?(&1, "DROP"))
+
+        # Triggers already in place are left alone, so a restart does no DDL;
+        # a changed table is re-triggered in one transaction.
+        if installed_triggers(table) == MapSet.new(creates, &String.trim/1) do
+          :ok
+        else
+          {:ok, _} =
+            Store.transaction(fn txn ->
+              Enum.each(statements, fn sql -> {:ok, _} = Store.txn_execute(txn, sql, []) end)
+              {:ok, :installed}
+            end)
+
+          :ok
+        end
     end
+  end
+
+  defp installed_triggers(table) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 AND name LIKE 'sync_capture_%'",
+        [table]
+      )
+
+    MapSet.new(rows, fn [sql] -> String.trim(sql || "") end)
   end
 
   @doc "Removes capture triggers from every table."
