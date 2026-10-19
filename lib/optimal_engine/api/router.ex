@@ -3459,10 +3459,15 @@ defmodule OptimalEngine.API.Router do
     %{
       action: Atom.to_string(result.action),
       memory: result.memory && memory_to_map(result.memory),
+      pending_claim_id: pending_claim_id(Map.get(result, :pending_claim)),
       gate: memory_intake_gate_to_map(result.gate),
       dedup: memory_intake_dedup_to_map(Map.get(result, :dedup))
     }
   end
+
+  # The claim a review accepts or rejects (/api/memory-core/claims/:id/promote|reject).
+  defp pending_claim_id(%{id: id}) when is_binary(id), do: id
+  defp pending_claim_id(_), do: nil
 
   defp memory_intake_gate_to_map(nil), do: nil
 
