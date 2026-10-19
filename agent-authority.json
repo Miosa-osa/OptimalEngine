@@ -916,6 +916,17 @@
       "version": 1,
       "effective": "2026-10-19",
       "owns": []
+    },
+    {
+      "id": "deploy-miosa-template-readme",
+      "path": "deploy/miosa-template/README.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-19",
+      "owns": []
     }
   ],
   "inventory": [
