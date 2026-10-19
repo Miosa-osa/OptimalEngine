@@ -27,6 +27,9 @@ defmodule OptimalEngine.Conformance.Checks do
 
   alias OptimalEngine.Conformance.Client
 
+  @list_page 200
+  @list_cap 20_000
+
   @type evidence :: term()
   @type result :: {:ok, evidence()} | {:fail, evidence()} | {:skip, String.t()}
   @type check :: %{
@@ -642,7 +645,7 @@ defmodule OptimalEngine.Conformance.Checks do
     case Client.post(client, "/api/init", %{"for" => preset, "slug" => slug, "name" => slug}) do
       {:ok, %{status: 200, body: body}} when is_map(body) ->
         workspace = body["workspace_id"] || slug
-        listed = workspace_listed?(client, slug)
+        listed = workspace_found?(client, workspace, slug)
         archived = Client.post(client, "/api/workspaces/#{URI.encode_www_form(workspace)}/archive")
 
         evidence = %{
@@ -681,13 +684,12 @@ defmodule OptimalEngine.Conformance.Checks do
     end
   end
 
-  defp workspace_listed?(client, slug) do
-    case Client.get(client, "/api/workspaces", query: [status: "all", limit: 500]) do
-      {:ok, %{status: 200, body: body}} ->
-        body |> Map.get("workspaces", []) |> List.wrap() |> Enum.any?(&(&1["slug"] == slug))
-
-      _ ->
-        false
+  # The new workspace is read back by id: a list page would miss it on an
+  # Engine that holds more workspaces than one page returns.
+  defp workspace_found?(client, workspace_id, slug) do
+    case Client.get(client, "/api/workspaces/#{URI.encode_www_form(workspace_id)}") do
+      {:ok, %{status: 200, body: %{} = body}} -> body["id"] == workspace_id or body["slug"] == slug
+      _ -> false
     end
   end
 
@@ -1031,8 +1033,8 @@ defmodule OptimalEngine.Conformance.Checks do
       group: "cleanup",
       description: "the run leaves no workspace or key behind",
       run: fn client, context ->
-        workspaces = Client.get(client, "/api/workspaces", query: [status: "all", limit: 500])
-        keys = Client.get(client, "/api/auth/keys", query: [limit: 500])
+        workspaces = list_all(client, "/api/workspaces", "workspaces", status: "all")
+        keys = list_all(client, "/api/auth/keys", "keys", [])
 
         leftovers = %{
           workspaces:
@@ -1209,6 +1211,24 @@ defmodule OptimalEngine.Conformance.Checks do
   end
 
   defp describe_search(response), do: describe(response)
+
+  # Every page of a list route, gathered into one response of the same shape.
+  # A list route answers at most 200 entries per page, so a single
+  # page would hide leftovers on an Engine holding more than that.
+  defp list_all(client, path, key, query, offset \\ 0, acc \\ []) do
+    case Client.get(client, path, query: query ++ [limit: @list_page, offset: offset]) do
+      {:ok, %{status: 200, body: %{} = body} = response} ->
+        page = body |> Map.get(key, []) |> List.wrap()
+        acc = acc ++ page
+
+        if length(page) < @list_page or offset + @list_page >= @list_cap,
+          do: {:ok, %{response | body: Map.put(body, key, acc)}},
+          else: list_all(client, path, key, query, offset + @list_page, acc)
+
+      other ->
+        other
+    end
+  end
 
   defp count_of({:ok, %{body: body}}, key), do: body |> Map.get(key, []) |> List.wrap() |> length()
   defp count_of(_response, _key), do: nil

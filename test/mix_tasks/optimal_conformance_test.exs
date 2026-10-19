@@ -43,6 +43,36 @@ defmodule Mix.Tasks.Optimal.ConformanceTest do
              ])
   end
 
+  test "passes on an Engine holding more workspaces than one list page", %{key: key, url: url} do
+    # Names that sort before every workspace the run creates, beyond the 500 a
+    # single list page returns.
+    prefix = "aaa-page-#{System.unique_integer([:positive])}"
+
+    for n <- 1..520 do
+      {:ok, _} =
+        OptimalEngine.Store.raw_query(
+          "INSERT INTO workspaces (id, tenant_id, slug, name, status, metadata) VALUES (?1, 'default', ?2, ?3, 'active', '{}')",
+          ["default:#{prefix}-#{n}", "#{prefix}-#{n}", "AAA #{prefix} #{n}"]
+        )
+    end
+
+    on_exit(fn ->
+      OptimalEngine.Store.raw_query("DELETE FROM workspaces WHERE slug LIKE ?1", ["#{prefix}-%"])
+    end)
+
+    assert :ok =
+             Mix.Tasks.Optimal.Conformance.run([
+               "--url",
+               url,
+               "--key",
+               key,
+               "--quiet",
+               "--no-store-proof",
+               "--prefix",
+               "conf-page"
+             ])
+  end
+
   test "fails with a non-zero status when a check fails", %{url: url} do
     assert_raise Mix.Error, ~r/conformance failed/, fn ->
       Mix.Tasks.Optimal.Conformance.run(["--url", url, "--key", "not-a-key", "--quiet"])
