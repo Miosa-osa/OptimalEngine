@@ -238,6 +238,25 @@ OLLAMA_HOST                  local model server URL
 OPTIMAL_VLM_MODEL            local visual model name for configured adapters
 ```
 
+An object store is optional and off by default. A deployment that wants assets or
+offsite backups in a bucket sets:
+
+```text
+OPTIMAL_S3_ENDPOINT           S3-compatible endpoint base URL
+OPTIMAL_S3_BUCKET             bucket name
+OPTIMAL_S3_REGION             region for the credential scope; default us-east-1
+OPTIMAL_S3_ACCESS_KEY_ID      access key id
+OPTIMAL_S3_SECRET_ACCESS_KEY  secret access key
+OPTIMAL_S3_PREFIX             optional key prefix owned by this engine
+OPTIMAL_S3_PATH_STYLE         "false" for virtual-hosted addressing; default path style
+OPTIMAL_ASSET_STORAGE         s3 to store workspace asset bytes in the bucket
+```
+
+A workspace can select the bucket for its assets through its storage policy
+instead of the engine-wide setting. Read
+[Storage providers](storage-providers.md) for the provider inventory, the health
+probe, and the offsite backup and restore drill.
+
 Production can add environment variables or secret-manager entries for connector
 credentials, hosted model keys, API keys, and SSO/IAM configuration. Those
 values should be referenced by tool/model/connector definitions, not copied into

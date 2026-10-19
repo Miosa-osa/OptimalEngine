@@ -205,6 +205,12 @@ For install profiles, Docker guidance, hosted/local multimodal adapter options,
 and enterprise readiness checks, read
 [Installation and deployment](guides/installation-and-deployment.md).
 
+For S3-compatible object storage, workspace assets on a bucket, and offsite
+backups with a restore drill, read
+[Storage providers](guides/storage-providers.md).
+The provider inventory that this guide describes is served by
+`GET /api/storage/providers`.
+
 ## User And Agent Flow
 
 ```mermaid

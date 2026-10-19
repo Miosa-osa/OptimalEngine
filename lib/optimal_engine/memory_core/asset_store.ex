@@ -19,8 +19,8 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
   }
 
   alias OptimalEngine.Pipeline.MultimodalToolRegistry
+  alias OptimalEngine.Storage.Assets
   alias OptimalEngine.Pipeline.Parser.Asset
-  alias OptimalEngine.Workspace.Filesystem
 
   @spec store_file(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def store_file(path, opts \\ []) when is_binary(path) do
@@ -34,13 +34,21 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
   def store_asset(asset, opts \\ [])
 
   def store_asset(%Asset{path: path} = asset, opts) when is_binary(path) do
-    with {:ok, storage_path} <- copy_asset(asset, opts),
+    with {:ok, stored} <- copy_asset(asset, opts),
+         storage_path = stored.storage_path,
          {:ok, source_package} <- record_source_package(asset, storage_path, opts),
          asset_id = asset_id(asset, source_package),
-         :ok <- upsert_asset(asset_id, asset, storage_path, source_package, opts),
+         :ok <-
+           upsert_asset(
+             asset_id,
+             asset,
+             storage_path,
+             source_package,
+             Keyword.put(opts, :metadata, stored.metadata)
+           ),
          :ok <- record_derivation(asset_id, asset, source_package, opts),
          {:ok, stored_asset} <- get(asset_id, opts) do
-      {:ok, %{asset: stored_asset, source_package: source_package}}
+      {:ok, %{asset: stored_asset, source_package: source_package, storage_backend: stored.backend}}
     end
   end
 
@@ -265,6 +273,38 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
       end
     end
   end
+
+  @doc """
+  The bytes of an asset, from whichever backend holds them.
+
+  The asset row records where its bytes live: a local path under the workspace
+  asset directory by default, or an `s3://` object reference when the workspace
+  storage policy selects the S3 backend. Callers read through this function
+  rather than opening `storage_path` directly so both backends work.
+  """
+  @spec read_asset(String.t() | map(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def read_asset(asset_or_id, opts \\ [])
+
+  def read_asset(asset_id, opts) when is_binary(asset_id) do
+    with {:ok, asset} <- get(asset_id, opts), do: read_asset(asset, opts)
+  end
+
+  def read_asset(%{storage_path: storage_path}, opts), do: Assets.read(storage_path, opts)
+
+  @doc """
+  A local path holding the asset's bytes, for tools that require a file.
+  A local asset resolves to its own path; an object asset is downloaded once
+  into the engine cache.
+  """
+  @spec materialize_asset(String.t() | map(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def materialize_asset(asset_or_id, opts \\ [])
+
+  def materialize_asset(asset_id, opts) when is_binary(asset_id) do
+    with {:ok, asset} <- get(asset_id, opts), do: materialize_asset(asset, opts)
+  end
+
+  def materialize_asset(%{storage_path: storage_path}, opts),
+    do: Assets.materialize(storage_path, opts)
 
   @spec get(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found | term()}
   def get(asset_id, opts \\ []) when is_binary(asset_id) do
@@ -868,28 +908,21 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
   end
 
   defp copy_asset(%Asset{} = asset, opts) do
-    root = Application.get_env(:optimal_engine, :root_path, File.cwd!())
     workspace_id = Keyword.get(opts, :workspace_id, "default")
-    workspace_slug = workspace_slug(workspace_id)
-    workspace_path = Filesystem.path(root, workspace_slug)
-    hash_slug = String.replace_prefix(asset.hash, "sha256:", "")
-    shard = String.slice(hash_slug, 0, 2) || "00"
-    ext = asset.path |> Path.extname() |> String.downcase()
-    target_dir = Path.join([workspace_path, "assets", shard])
-    target_path = Path.join(target_dir, "#{hash_slug}#{ext}")
+    scope = workspace_scope(workspace_id)
 
-    with :ok <- File.mkdir_p(target_dir),
-         :ok <- maybe_copy(asset.path, target_path) do
-      {:ok, target_path}
-    end
-  end
+    attrs = %{
+      tenant_id: Keyword.get(opts, :tenant_id, scope.tenant_id),
+      # The local path keeps using the workspace directory key, while an object
+      # key uses the readable tenant and slug so a bucket stays browsable.
+      workspace_id: scope.slug,
+      workspace_key: scope.key,
+      hash: asset.hash,
+      extension: asset.path |> Path.extname(),
+      size: asset.size
+    }
 
-  defp maybe_copy(source_path, target_path) do
-    if File.exists?(target_path) do
-      :ok
-    else
-      File.cp(source_path, target_path)
-    end
+    Assets.store(asset.path, attrs, opts)
   end
 
   defp record_source_package(%Asset{} = asset, storage_path, opts) do
@@ -1026,11 +1059,15 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
     OptimalEngine.MemoryCore.Store.insert_derivation_entry(ledger)
   end
 
-  # The workspace's directory key (Workspace.Filesystem.path/2 accepts ids).
-  defp workspace_slug(workspace_id) do
+  # The workspace's directory key (Workspace.Filesystem.path/2 accepts ids), its
+  # readable slug for object keys, and its tenant for the storage prefix.
+  defp workspace_scope(workspace_id) do
     case Workspace.get(workspace_id) do
-      {:ok, workspace} -> workspace.id
-      _ -> workspace_id
+      {:ok, workspace} ->
+        %{key: workspace.id, slug: workspace.slug || workspace.id, tenant_id: workspace.tenant_id}
+
+      _ ->
+        %{key: workspace_id, slug: workspace_id, tenant_id: "default"}
     end
   end
 

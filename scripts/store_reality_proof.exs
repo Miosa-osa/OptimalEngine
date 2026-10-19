@@ -62,6 +62,7 @@ defmodule StoreRealityProof do
     checked_ids = checks |> Enum.map(&elem(&1, 0)) |> Enum.sort()
     stores = Enum.map(checks, fn {id, fun} -> prove(id, fun, ctx) end)
     providers = providers()
+    provider_proofs = Providers.proofs()
 
     report = %{
       generated_at: DateTime.utc_now() |> DateTime.to_iso8601(),
@@ -81,6 +82,7 @@ defmodule StoreRealityProof do
       },
       stores: stores,
       providers: providers,
+      provider_proofs: provider_proofs,
       storage_audit: audit(),
       summary: %{
         stores: length(stores),
@@ -89,7 +91,10 @@ defmodule StoreRealityProof do
         providers: length(providers.inventory),
         providers_with_adapter: Enum.count(providers.inventory, & &1.adapter_implemented),
         providers_adapter_missing:
-          providers.inventory |> Enum.reject(& &1.adapter_implemented) |> Enum.map(& &1.id)
+          providers.inventory |> Enum.reject(& &1.adapter_implemented) |> Enum.map(& &1.id),
+        providers_proved: Enum.count(provider_proofs, &(&1.status == "pass")),
+        providers_proof_failed: Enum.count(provider_proofs, &(&1.status == "fail")),
+        providers_proof_skipped: Enum.count(provider_proofs, &(&1.status == "skipped"))
       }
     }
 
@@ -102,7 +107,14 @@ defmodule StoreRealityProof do
     end
 
     File.rm_rf(scratch)
-    if report.summary.failed == 0 and report.catalog_coverage.complete, do: 0, else: 1
+
+    # A configured provider must prove itself. An unconfigured one is skipped
+    # rather than failed, because nothing was attempted and nothing is claimed.
+    ok? =
+      report.summary.failed == 0 and report.catalog_coverage.complete and
+        report.summary.providers_proof_failed == 0
+
+    if ok?, do: 0, else: 1
   end
 
   defp prove(id, fun, ctx) do
