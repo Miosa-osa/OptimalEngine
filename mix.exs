@@ -62,7 +62,7 @@ defmodule OptimalEngine.MixProject do
       {:tz, "~> 0.28"},
 
       # Optional knowledge graph substrate
-      {:rdf, "~> 2.0"},
+      {:rdf, "~> 3.0"},
       {:rocksdb, "~> 3.1"},
 
       # Signal and option validation
