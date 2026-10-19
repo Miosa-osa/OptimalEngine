@@ -905,6 +905,17 @@
       "version": 1,
       "effective": "2026-09-08",
       "owns": []
+    },
+    {
+      "id": "api-reference",
+      "path": "docs/reference/api.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-19",
+      "owns": []
     }
   ],
   "inventory": [
