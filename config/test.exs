@@ -45,6 +45,10 @@ config :optimal_engine, :context_refresh_scheduler,
 
 # Unit and integration tests must not depend on a developer's local Ollama.
 # Dedicated model integration tests call the adapters explicitly.
+# Ollama points at a closed port, so no test can load a model on the host
+# (a developer machine behaves like CI, which has no Ollama); tests that need
+# a model server start a stub and set the host themselves.
+config :optimal_engine, :ollama, host: "http://127.0.0.1:9"
 config :optimal_engine, :hybrid_search, vector_enabled: false
 config :optimal_engine, :memory_embeddings, auto_index: false
 config :optimal_engine, :embed, on_ingest: false
