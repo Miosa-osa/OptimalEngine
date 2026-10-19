@@ -240,6 +240,38 @@ defmodule OptimalEngine.Connectors.PullSchedulerTest do
     end
   end
 
+  describe "run rows under concurrency" do
+    test "connectors running at the same time each close their own run row", ctx do
+      ids =
+        for n <- 1..16 do
+          config = %{"marker" => "c#{n}", "fail" => rem(n, 2) == 0}
+          {register(ctx, "c#{n}", ctx.inbox, config), rem(n, 2) == 0}
+        end
+
+      Stub.stop_listening()
+
+      ids
+      |> Task.async_stream(fn {id, _fails} -> Runner.run(id, adapter: Stub) end,
+        max_concurrency: 16,
+        timeout: 30_000
+      )
+      |> Enum.each(fn {:ok, _result} -> :ok end)
+
+      for {id, fails} <- ids do
+        {:ok, rows} =
+          Store.raw_query(
+            "SELECT status, completed_at, error_detail FROM connector_runs WHERE connector_id = ?1",
+            [id]
+          )
+
+        expected = if fails, do: "error", else: "success"
+
+        assert match?([[^expected, completed_at, _detail]] when is_binary(completed_at), rows),
+               "#{id} expected one #{expected} row, got #{inspect(rows)}"
+      end
+    end
+  end
+
   describe "failures" do
     test "a failed pull is logged as a warning with its reason and kept as the last error", ctx do
       failing = register(ctx, "failing", ctx.inbox, %{"marker" => "failing", "fail" => true})

@@ -582,18 +582,20 @@ defmodule OptimalEngine.Connectors.Runner do
     end
   end
 
+  # The id comes back from the INSERT itself. A separate
+  # `SELECT last_insert_rowid()` can read another writer's row when runs
+  # overlap, and the run would then close someone else's row.
   defp start_run_row(row) do
-    {:ok, _} =
+    {:ok, [[id]]} =
       Store.raw_query(
         """
         INSERT INTO connector_runs (tenant_id, workspace_id, connector_id, cursor_before, status)
         VALUES (?1, ?2, ?3, ?4, 'running')
+        RETURNING id
         """,
         [row.tenant_id, row.workspace_id, row.id, row.cursor]
       )
 
-    # SQLite returns the last insert id via a small follow-up query
-    {:ok, [[id]]} = Store.raw_query("SELECT last_insert_rowid()", [])
     id
   end
 

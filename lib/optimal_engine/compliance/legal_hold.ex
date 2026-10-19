@@ -32,15 +32,17 @@ defmodule OptimalEngine.Compliance.LegalHold do
       when is_binary(signal_id) and is_binary(held_by) and is_binary(reason) do
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
 
-    with {:ok, _} <-
+    # RETURNING keeps the id with its own INSERT; a follow-up
+    # last_insert_rowid() can read another writer's row.
+    with {:ok, [[id]]} <-
            Store.raw_query(
              """
              INSERT INTO legal_holds (tenant_id, signal_id, held_by, reason)
              VALUES (?1, ?2, ?3, ?4)
+             RETURNING id
              """,
              [tenant_id, signal_id, held_by, reason]
-           ),
-         {:ok, [[id]]} <- Store.raw_query("SELECT last_insert_rowid()", []) do
+           ) do
       {:ok, id}
     end
   end
