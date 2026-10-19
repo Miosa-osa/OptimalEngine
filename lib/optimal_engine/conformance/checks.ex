@@ -48,7 +48,7 @@ defmodule OptimalEngine.Conformance.Checks do
       setup() ++
       signal() ++
       analyses() ++
-      sync() ++ viability() ++ operating()
+      sync() ++ viability() ++ operating() ++ documentation()
   end
 
   @doc """
@@ -1230,6 +1230,46 @@ defmodule OptimalEngine.Conformance.Checks do
   # still operates, which is what the check is about.
   defp active?(entry) do
     entry["status"] in [nil, "active"] and is_nil(entry["revoked_at"])
+  end
+
+  # ---------------------------------------------------------------------------
+  # documentation
+  # ---------------------------------------------------------------------------
+
+  # The reference is generated from the routers, so this check reads the same
+  # files this build came from. A packaged build without the repository skips:
+  # claiming a pass there would attest a file it never read.
+  defp documentation do
+    [
+      %{
+        id: "docs.api_reference",
+        group: "documentation",
+        description: "the published API reference matches the routes this build serves",
+        run: fn _client, _context -> api_reference() end
+      }
+    ]
+  end
+
+  defp api_reference do
+    if Code.ensure_loaded?(Mix.Project) and Mix.Project.get() do
+      root = Mix.Project.project_file() |> Path.dirname()
+
+      case OptimalEngine.API.Reference.check(root) do
+        :ok ->
+          {:ok,
+           %{
+             file: "docs/reference/api.md",
+             routes: length(OptimalEngine.API.Reference.routes(root))
+           }}
+
+        {:drift, drift} ->
+          {:fail, Map.put(drift, :file, "docs/reference/api.md")}
+      end
+    else
+      {:skip, "no repository checkout in this build, so docs/reference/api.md cannot be checked"}
+    end
+  rescue
+    error -> {:fail, %{file: "docs/reference/api.md", error: Exception.message(error)}}
   end
 
   defp normalize_external(check, path) when is_map(check) do
