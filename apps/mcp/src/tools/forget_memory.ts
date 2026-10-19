@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { engine, EngineError } from "../client.js";
+import { config } from "../config.js";
 
 export function registerForgetMemory(server: McpServer): void {
   server.tool(
@@ -9,6 +10,12 @@ export function registerForgetMemory(server: McpServer): void {
     "Soft-forget a memory by id. Optional reason (recorded for audit) and forget_after (ISO timestamp). Memory is marked is_forgotten but row is preserved. Use when the user says to forget something or when info is superseded.",
     {
       id: z.string().min(1).describe("ID of the memory to forget."),
+      workspace: z
+        .string()
+        .optional()
+        .describe(
+          `Workspace the memory belongs to. Defaults to "${config.defaultWorkspace}".`,
+        ),
       reason: z
         .string()
         .optional()
@@ -22,9 +29,13 @@ export function registerForgetMemory(server: McpServer): void {
           "ISO 8601 timestamp after which the memory should be treated as forgotten. Omit to forget immediately.",
         ),
     },
-    async ({ id, reason, forget_after }) => {
+    async ({ id, workspace, reason, forget_after }) => {
       try {
-        await engine.forgetMemory(id, { reason, forget_after });
+        await engine.forgetMemory(id, {
+          workspace: workspace ?? config.defaultWorkspace,
+          reason,
+          forget_after,
+        });
         return {
           content: [
             {

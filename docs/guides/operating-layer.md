@@ -5,7 +5,7 @@ Everything is stored in the Engine and works on a fresh org with empty-state ans
 
 | Route | CLI | What it returns |
 | --- | --- | --- |
-| `GET /api/boot?workspace=` | `mix optimal.operate boot` | The actual day in the workspace's time zone, today's rhythm note, fires (overdue and due-today loops), open loop counts, recent decisions, stale items, the brief, and the operating protocol |
+| `GET /api/boot?workspace=` | `mix optimal.operate boot` | The actual day in the workspace's time zone, today's rhythm note, fires (overdue and due-today loops), open loop counts, recent decisions, stale items, the brief, the operating protocol, and the org policy the workspace follows (`org_policy`) |
 | `GET /api/brief?workspace=` or `?workspaces=a,b` or `?workspaces=*` | `mix optimal.operate brief` | Ranked items that need a decision today, each with sources and a next action |
 | `GET /api/loops`, `POST /api/loops`, `POST /api/loops/:id/{close,drop,reopen}` | `mix optimal.operate loops` | Open loops: commitments, owed replies, follow-ups, money due or owed, decisions needed |
 | `POST /api/loops/extract {workspace, since?}` | `mix optimal.operate extract` | Detects loops in recent contexts and closes loops answered in their thread |
@@ -14,6 +14,8 @@ Everything is stored in the Engine and works on a fresh org with empty-state ans
 | `GET /api/protocol?workspace=`, `PUT /api/protocol` | `mix optimal.operate protocol` | The agent operating protocol: workspace version, else tenant version, else the Engine default |
 | `GET /api/topology/export`, `POST /api/topology/import` | `mix optimal.operate topology-export`, `topology-import` | Organizations, workspaces, and people as one portable document |
 | `GET/POST/DELETE /api/routing/rules`, `POST /api/routing/classify`, `POST /api/routing/feedback`, `POST /api/routing/seed` | `mix optimal.operate seed-routing` | Per-workspace routing rules that learn from accept and reject |
+
+Chats and agents commit what they did with `POST /api/sessions/commit`, and every workspace reads the policy of its organization's org section; both are in `chat-memory.md`.
 
 ## Open loops
 
