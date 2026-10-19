@@ -33,29 +33,37 @@ defmodule OptimalEngine.Store.Vectors do
   Uses INSERT OR REPLACE, so calling `store/2` again for the same `context_id`
   overwrites the previous embedding.
 
+  The vector takes the tenant and workspace of its context, so bundles, sync
+  and erasure that select by scope find it. A vector stored before its
+  context row exists takes `:workspace_id` and that workspace's tenant.
+
   Returns `:ok` or `{:error, reason}`; an empty or non-numeric embedding is
   rejected with `{:error, :invalid_embedding}`.
   """
-  @spec store(String.t(), [float()]) :: :ok | {:error, term()}
-  def store(context_id, embedding) when is_binary(context_id) and is_list(embedding) do
+  @spec store(String.t(), [float()], keyword()) :: :ok | {:error, term()}
+  def store(context_id, embedding, opts \\ [])
+      when is_binary(context_id) and is_list(embedding) do
     if valid_embedding?(embedding),
-      do: do_store(context_id, embedding),
+      do: do_store(context_id, embedding, Keyword.get(opts, :workspace_id)),
       else: {:error, :invalid_embedding}
   end
 
-  defp do_store(context_id, embedding) do
+  defp do_store(context_id, embedding, workspace_id) do
     blob = encode_embedding(embedding)
     dims = length(embedding)
 
     sql = """
-    INSERT OR REPLACE INTO vectors (context_id, embedding, dimensions)
-    VALUES (?1, ?2, ?3)
+    INSERT OR REPLACE INTO vectors (context_id, embedding, dimensions, tenant_id, workspace_id)
+    VALUES (?1, ?2, ?3,
+      COALESCE((SELECT tenant_id FROM contexts WHERE id = ?1),
+               (SELECT tenant_id FROM workspaces WHERE id = ?4), 'default'),
+      COALESCE((SELECT workspace_id FROM contexts WHERE id = ?1), ?4, 'default'))
     """
 
     # `{:blob, _}` forces exqlite to bind as BLOB. Raw binary otherwise
     # binds as TEXT and gets truncated at the first null byte — which is
     # catastrophic for float32 data.
-    case Store.raw_query(sql, [context_id, {:blob, blob}, dims]) do
+    case Store.raw_query(sql, [context_id, {:blob, blob}, dims, workspace_id]) do
       {:ok, _} ->
         Logger.debug("[VectorStore] Stored embedding for #{context_id} (#{dims} dims)")
         :ok

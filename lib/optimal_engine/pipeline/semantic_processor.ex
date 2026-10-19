@@ -228,7 +228,7 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
 
     case Ollama.embed(embed_input) do
       {:ok, vector} ->
-        case VectorStore.store(id, vector) do
+        case VectorStore.store(id, vector, workspace_id: context.workspace_id) do
           :ok ->
             Logger.debug("[SemanticProcessor] Stored embedding for context #{id}")
 

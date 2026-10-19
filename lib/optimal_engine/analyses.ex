@@ -6,7 +6,7 @@ defmodule OptimalEngine.Analyses do
   | Kind | Scope | What it does |
   | --- | --- | --- |
   | `promises` | each workspace | detects commitments, owed replies, payments and decisions in recent Signals, closes the ones answered in their thread, and reports what is open and overdue |
-  | `workspace_population` | the intake workspace | moves high-confidence intake items to their workspace and queues the rest for routing review |
+  | `workspace_population` | the intake workspace | with placement by meaning on, first embeds up to 200 of the tenant's documents that have no vector; then moves high-confidence intake items to their workspace and queues the rest for routing review |
   | `meeting_archive` | workspaces with meeting connectors | pulls new meetings from the workspace's meeting connectors into the workspace |
   | `file_audit` | the tenant | storage and hierarchy audits: index and graph parity, isolation, leaked fixtures, asset paths, workspace and node structure |
   | `storage_usage` | the tenant | usage against the size profile (`OptimalEngine.Sizing`) with the resize advice |
@@ -30,6 +30,7 @@ defmodule OptimalEngine.Analyses do
   }
 
   alias OptimalEngine.Connectors.{PullScheduler, Runner}
+  alias OptimalEngine.Embed.Backfill
   alias OptimalEngine.Operating.Loops
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Workspace
@@ -202,10 +203,11 @@ defmodule OptimalEngine.Analyses do
      }}
   end
 
-  defp analyze("workspace_population", _tenant_id, workspace_id, _payload) do
+  defp analyze("workspace_population", tenant_id, workspace_id, payload) do
     if workspace_id != CorpusOrganizer.source_workspace() do
       {:ok, "Not the intake workspace; nothing to place.", %{"moved" => 0, "queued" => 0}}
     else
+      embedding = embed_for_placement(tenant_id, payload)
       {:ok, preview} = CorpusOrganizer.preview()
 
       moved =
@@ -215,9 +217,16 @@ defmodule OptimalEngine.Analyses do
         end
 
       {:ok, queued} = CorpusOrganizer.queue_remaining(preview: preview)
+      by_meaning = Map.get(preview.by_method, :semantic, 0)
 
-      {:ok, "#{moved} items placed in their workspace, #{queued} queued for routing review.",
-       %{"moved" => moved, "queued" => queued}}
+      {:ok,
+       "#{moved} items placed in their workspace (#{by_meaning} by meaning), #{queued} queued for routing review.",
+       %{
+         "moved" => moved,
+         "moved_by_meaning" => by_meaning,
+         "queued" => queued,
+         "embedding" => embedding
+       }}
     end
   end
 
@@ -270,6 +279,17 @@ defmodule OptimalEngine.Analyses do
   end
 
   defp analyze(kind, _tenant_id, _workspace_id, _payload), do: {:error, {:unknown_analysis, kind}}
+
+  # Placement by meaning compares document vectors, so documents still
+  # without one are embedded first, a bounded number per run.
+  defp embed_for_placement(tenant_id, payload) do
+    if CorpusOrganizer.semantic_settings() do
+      case Backfill.run(tenant_id: tenant_id, limit: payload["embed_limit"] || 200) do
+        {:ok, result} -> json_safe(result)
+        {:error, reason} -> %{"error" => inspect(reason)}
+      end
+    end
+  end
 
   # -- scheduling --------------------------------------------------------------
 

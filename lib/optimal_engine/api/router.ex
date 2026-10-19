@@ -525,6 +525,50 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # Documents with no document vector (OptimalEngine.Embed.Backfill), in the
+  # caller's tenant or one of its workspaces (`workspace`).
+  get "/api/maintenance/embeddings" do
+    with {:ok, scope} <- embedding_scope(conn, query_param(conn, "workspace", nil)),
+         {:ok, status} <- OptimalEngine.Embed.Backfill.status(scope) do
+      json(conn, Map.put(status, :scope, Map.new(scope)))
+    else
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "workspace not found"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  # Embeds up to `limit` (default 100, at most 1,000) of those documents.
+  post "/api/maintenance/embeddings" do
+    body = conn.body_params || %{}
+    limit = if is_integer(body["limit"]), do: body["limit"] |> max(1) |> min(1_000), else: 100
+
+    with {:ok, scope} <- embedding_scope(conn, body["workspace"]),
+         {:ok, result} <- OptimalEngine.Embed.Backfill.run([limit: limit] ++ scope) do
+      json(conn, Map.put(result, :scope, Map.new(scope)))
+    else
+      {:error, :not_found} ->
+        conn |> put_status(404) |> json(%{error: "workspace not found"})
+
+      {:error, {:embedder_unavailable, reason}} ->
+        conn |> put_status(503) |> json(%{error: "embedder unavailable", reason: inspect(reason)})
+
+      {:error, reason} ->
+        conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  defp embedding_scope(conn, workspace) when workspace in [nil, ""],
+    do: {:ok, [tenant_id: conn.assigns[:current_tenant] || "default"]}
+
+  defp embedding_scope(conn, workspace) do
+    tenant_id = conn.assigns[:current_tenant] || "default"
+
+    case OptimalEngine.Workspace.get(workspace) do
+      {:ok, %{id: id, tenant_id: ^tenant_id}} -> {:ok, [workspace_id: id]}
+      _ -> {:error, :not_found}
+    end
+  end
+
   get "/api/stats" do
     case OptimalEngine.stats() do
       {:ok, stats} -> json(conn, stats)
