@@ -2526,29 +2526,8 @@ defmodule OptimalEngine.API.Router do
   # an operator key. Any authenticated key may call it, whatever its scopes.
   get "/api/auth/whoami" do
     case conn.assigns[:current_api_key] do
-      nil ->
-        json(conn, %{authenticated: false})
-
-      key ->
-        json(conn, %{
-          authenticated: true,
-          key_id: key.id,
-          name: key.name,
-          principal_id: key.principal_id,
-          tenant_id: key.tenant_id,
-          scopes: key.scopes,
-          workspace_scope: key.workspace_scope,
-          expires_at: key.expires_at
-        })
-    end
-  end
-
-  # GET /api/auth/self - who the Engine takes the caller to be: the presenting
-  # key's tenant, acting principal, scopes and workspace scope (scope `read`,
-  # no workspace needed). Without a key, on an Engine that does not require
-  # one, it describes the local operator every anonymous request acts as.
-  get "/api/auth/self" do
-    case conn.assigns[:current_api_key] do
+      # Only reachable on an Engine that does not require a key: every
+      # anonymous request acts as the local operator, with everything open.
       nil ->
         json(conn, %{
           authenticated: false,
@@ -2564,8 +2543,10 @@ defmodule OptimalEngine.API.Router do
         json(conn, %{
           authenticated: true,
           key_id: key.id,
-          tenant_id: key.tenant_id,
+          name: key.name,
+          # The principal the Engine acts as: the key's own, or the key id.
           principal_id: Actor.of(conn),
+          tenant_id: key.tenant_id,
           scopes: key.scopes,
           workspace_scope: key.workspace_scope,
           expires_at: key.expires_at

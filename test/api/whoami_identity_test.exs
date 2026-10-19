@@ -1,6 +1,6 @@
-defmodule OptimalEngine.API.AuthSelfTest do
+defmodule OptimalEngine.API.WhoamiIdentityTest do
   @moduledoc """
-  `GET /api/auth/self` (and `/v1/auth/self`) tells a client which tenant,
+  `GET /api/auth/whoami` (and `/v1/auth/whoami`) tells a client which tenant,
   principal and workspaces the key it presents covers, so a misconfigured
   client sees its scope instead of an opaque 400, 403 or 404. Without a key
   on an Engine that does not require one, it describes the local operator.
@@ -67,7 +67,7 @@ defmodule OptimalEngine.API.AuthSelfTest do
         principal_id: "agent:sales-#{ctx.n}"
       })
 
-    for path <- ["/api/auth/self", "/v1/auth/self"] do
+    for path <- ["/api/auth/whoami", "/v1/auth/whoami"] do
       conn = call(path, key)
       assert conn.status == 200
       body = Jason.decode!(conn.resp_body)
@@ -86,7 +86,7 @@ defmodule OptimalEngine.API.AuthSelfTest do
   test "a key without a principal acts as its key id", ctx do
     {id, key} = mint(ctx.tenant, %{scopes: ["read"], workspace_scope: ["*"]})
 
-    body = call("/api/auth/self", key) |> Map.get(:resp_body) |> Jason.decode!()
+    body = call("/api/auth/whoami", key) |> Map.get(:resp_body) |> Jason.decode!()
     assert body["principal_id"] == "api_key:" <> id
   end
 
@@ -94,19 +94,11 @@ defmodule OptimalEngine.API.AuthSelfTest do
     {_id, key} =
       mint(ctx.tenant, %{scopes: ["read"], workspace_scope: ["#{ctx.tenant}:only"]})
 
-    assert call("/api/auth/self", key).status == 200
-  end
-
-  test "it needs the read scope", ctx do
-    {_id, key} = mint(ctx.tenant, %{scopes: ["write"], workspace_scope: ["*"]})
-
-    conn = call("/api/auth/self", key)
-    assert conn.status == 403
-    assert Jason.decode!(conn.resp_body)["error"] == "permission_scope_denied"
+    assert call("/api/auth/whoami", key).status == 200
   end
 
   test "without a key on a local Engine it describes the local operator" do
-    conn = call("/api/auth/self")
+    conn = call("/api/auth/whoami")
     assert conn.status == 200
     body = Jason.decode!(conn.resp_body)
 
@@ -121,7 +113,7 @@ defmodule OptimalEngine.API.AuthSelfTest do
 
   test "without a key when auth is required it is 401" do
     with_auth_required(fn ->
-      conn = call("/api/auth/self")
+      conn = call("/api/auth/whoami")
       assert conn.status == 401
       assert Jason.decode!(conn.resp_body)["error"] == "missing_api_key"
     end)

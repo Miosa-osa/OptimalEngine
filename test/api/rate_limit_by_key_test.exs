@@ -60,7 +60,7 @@ defmodule OptimalEngine.API.RateLimitByKeyTest do
     Router.call(conn, @opts)
   end
 
-  defp spend(token, times), do: for(_ <- 1..times, do: call("/api/auth/self", token).status)
+  defp spend(token, times), do: for(_ <- 1..times, do: call("/api/auth/whoami", token).status)
 
   test "two keys from the same address have separate buckets", ctx do
     {_a, key_a} = mint(ctx.tenant)
@@ -68,22 +68,22 @@ defmodule OptimalEngine.API.RateLimitByKeyTest do
 
     assert spend(key_a, 3) == [200, 200, 200]
 
-    conn = call("/api/auth/self", key_a)
+    conn = call("/api/auth/whoami", key_a)
     assert conn.status == 429
     assert %{"error" => "rate_limited", "retry_after_ms" => ms} = Jason.decode!(conn.resp_body)
     assert is_integer(ms) and ms > 0
     assert [_] = get_resp_header(conn, "retry-after")
 
-    assert call("/api/auth/self", key_b).status == 200
+    assert call("/api/auth/whoami", key_b).status == 200
   end
 
   test "a keyed caller does not spend the address bucket of anonymous callers", ctx do
     {_a, key_a} = mint(ctx.tenant)
 
     assert spend(key_a, 3) == [200, 200, 200]
-    assert call("/api/auth/self", key_a).status == 429
+    assert call("/api/auth/whoami", key_a).status == 429
 
-    assert call("/api/auth/self").status == 200
+    assert call("/api/auth/whoami").status == 200
   end
 
   test "an invalid key never spends a real key's bucket", ctx do
@@ -101,24 +101,24 @@ defmodule OptimalEngine.API.RateLimitByKeyTest do
 
     assert spend(forged, 3) == [401, 401, 401]
 
-    conn = call("/api/auth/self", forged)
+    conn = call("/api/auth/whoami", forged)
     assert conn.status == 429
     assert Jason.decode!(conn.resp_body)["error"] == "rate_limited"
 
-    assert call("/api/auth/self").status == 429
+    assert call("/api/auth/whoami").status == 429
   end
 
   test "a key's own rate_limit_per_minute sets its bucket", ctx do
     {_id, key} = mint(ctx.tenant, %{"rate_limit_per_minute" => 2})
 
     assert spend(key, 2) == [200, 200]
-    assert call("/api/auth/self", key).status == 429
+    assert call("/api/auth/whoami", key).status == 429
   end
 
   test "health, status and Prometheus metrics stay exempt for keyed callers", ctx do
     {_id, key} = mint(ctx.tenant)
     assert spend(key, 3) == [200, 200, 200]
-    assert call("/api/auth/self", key).status == 429
+    assert call("/api/auth/whoami", key).status == 429
 
     for path <- ["/api/health", "/api/status", "/api/metrics/prometheus", "/v1/health"] do
       refute call(path, key).status == 429, "#{path} was rate limited"
@@ -134,11 +134,11 @@ defmodule OptimalEngine.API.RateLimitByKeyTest do
       {_a, key_a} = mint(ctx.tenant)
       {_b, key_b} = mint(ctx.tenant)
 
-      conn = call("/api/auth/self", key_a)
+      conn = call("/api/auth/whoami", key_a)
       assert get_resp_header(conn, "x-ratelimit-limit") == ["2"]
-      assert call("/api/auth/self", key_a).status == 200
-      assert call("/api/auth/self", key_a).status == 429
-      assert call("/api/auth/self", key_b).status == 200
+      assert call("/api/auth/whoami", key_a).status == 200
+      assert call("/api/auth/whoami", key_a).status == 429
+      assert call("/api/auth/whoami", key_b).status == 200
     after
       if original_rate,
         do: Application.put_env(:optimal_engine, :api_per_minute, original_rate),
@@ -161,7 +161,7 @@ defmodule OptimalEngine.API.RateLimitByKeyTest do
       %{"key" => key} = Jason.decode!(conn.resp_body)
 
       assert spend(key, 2) == [200, 200]
-      assert call("/api/auth/self", key).status == 429
+      assert call("/api/auth/whoami", key).status == 429
     end
 
     test "rate_limit_per_minute must be a positive integer" do
