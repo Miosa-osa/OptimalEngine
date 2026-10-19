@@ -32,16 +32,21 @@ A bundle is a gzip tar file with `manifest.json`, one JSON-lines file per table,
 It carries every row of every table with a `workspace_id` column, child rows without one, the principals the workspace's memberships name, and workspace-scoped operating documents.
 Embeddings and other binary columns travel as base64, so vectors are copied, not recomputed; full-text indexes fill through the Engine's triggers as rows are inserted.
 Authority state (keys, packs, grants, evidence), replica cursors, metric samples, redirects, and federation peers stay with the Engine.
+Connectors (their credentials are sealed with the source Engine's `CONNECTOR_KEY`), their run log, queued jobs, and processor runs stay too: register the connectors again on the target.
 
 | Step | Route (admin) |
 | --- | --- |
-| Export, optionally reserving a move | `POST /api/workspaces/:id/bundle {"for_move": true}` returns the bundle name and `bundle_sha256` |
+| Export, optionally reserving a move | `POST /api/workspaces/:id/bundle {"for_move": true}` returns the bundle name, `bundle_sha256`, and `ledger_sequence` (the mark a seeded replica pulls from) |
 | Download | `GET /api/bundles/:name` |
 | Import on the target | `POST /api/bundles/import {"bundle": "<name>", "mode": "create|merge", "workspace_id"?, "organization_id"?}`, or the raw file with `content-type: application/gzip` |
 | Finalize on the source | `POST /api/workspaces/:id/finalize-move {"bundle_sha256", "target_url", "target_workspace_id"}` |
 | Resolve a citation | `GET /api/resolve?uri=optimal://<workspace>/...` returns `local` or `moved` with the new location |
 
-Import verifies the manifest, every table file, and every file checksum before writing anything, then writes all rows in one transaction with foreign keys checked at commit.
+Import verifies the manifest, every table file, and every file checksum before writing anything.
+Rows are then written in short transactions of 1,000 rows, tables in foreign-key order and the rows of a self-referencing table (memories, nodes) parents first, with foreign keys checked at each commit.
+A large workspace therefore never holds the Engine's single writer long enough to stall other requests or time out.
+A failed `create` removes every row it wrote and the workspace record, so it can simply be retried; a failed `merge` can be run again, because it only adds missing rows.
+Registry rows every Engine derives under the same id (principals, model call operations) are kept when the target already has them.
 Tenant and workspace ids are rewritten to the target; integer row ids are reassigned.
 `create` refuses an existing workspace; `merge` keeps existing rows.
 The source deletes nothing until `finalize-move` receives the same `bundle_sha256` the target reported, then removes the workspace's rows and files, archives the workspace, and records a redirect so `optimal://` citations keep resolving.

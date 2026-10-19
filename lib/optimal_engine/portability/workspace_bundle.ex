@@ -12,21 +12,28 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   Every table that carries a `workspace_id` column is included, plus child
   rows that hang off them without one, the principals the workspace's
-  memberships name, and workspace-scoped operating documents. Embeddings and
+  memberships name, and workspace-scoped operating documents. Connectors,
+  their run log and queued jobs stay with the Engine that runs them. Embeddings and
   other binary columns travel as base64, so vectors are copied, not
   recomputed; full-text indexes are filled by the Engine's own triggers as
   rows are inserted. Authority state (keys, packs, grants, evidence) stays
   with the Engine that issued it; replica cursors and metric samples are
   operational and are not moved.
 
-  Import verifies every checksum before writing, writes all rows in one
-  transaction with foreign keys checked at commit, rewrites tenant and
+  Import verifies every checksum before writing, rewrites tenant and
   workspace ids to the target, lets integer row ids be reassigned, and
   either refuses an existing workspace (`mode: :create`, default) or keeps
-  existing rows (`mode: :merge`). `finalize_move/4` then removes the
+  existing rows (`mode: :merge`). Rows are written in short transactions of
+  `:batch_rows` rows (default 1,000), tables in foreign-key order and rows of
+  a self-referencing table parents first, so a large workspace never holds
+  the single-writer Store long enough to stall the Engine or time out. A
+  failed create import removes everything it wrote and the workspace record;
+  a failed merge can be run again (it only adds missing rows). `finalize_move/4` then removes the
   workspace from the source Engine and records a redirect, so `optimal://`
   citations keep resolving (`resolve/2`).
   """
+
+  require Logger
 
   alias OptimalEngine.Authority.CanonicalJSON
   alias OptimalEngine.Store
@@ -35,10 +42,18 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   @format "optimal-workspace-bundle"
   @version 1
-  # Engine bookkeeping that names a workspace but is not its data.
+  # Engine bookkeeping that names a workspace but is not its data. Connectors
+  # carry credentials sealed with this Engine's CONNECTOR_KEY and pull on this
+  # Engine's schedule, so they and their run log stay here (the target
+  # registers its own); queued jobs would run twice.
   @excluded ~w(sync_cursors metric_samples workspaces uri_redirects federation_peers
-               sync_capture sync_workspaces sync_peers sync_conflicts sync_mutations)
+               sync_capture sync_workspaces sync_peers sync_conflicts sync_mutations
+               connectors connector_runs jobs processor_runs)
+  # Registry rows every Engine derives for itself under the same id: a target
+  # that already holds one keeps it.
+  @keep_existing ~w(principals model_call_operations)
   @children %{"memory_reconstruction_steps" => {"run_id", "memory_reconstruction_runs"}}
+  @batch_rows 1_000
 
   @doc """
   Writes a bundle for `workspace_id` to `path`. Returns the manifest.
@@ -98,7 +113,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
            :ok <- verify(manifest, staging),
            {:ok, plan} <- plan(manifest, tenant_id, opts),
            :ok <- compatible(manifest, staging),
-           {:ok, counts} <- write_rows(manifest, staging, plan),
+           {:ok, counts} <- write_rows(manifest, staging, plan, opts),
            {:ok, file_count} <- write_files(manifest, staging, plan) do
         {:ok,
          %{
@@ -446,54 +461,163 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     if missing == [], do: :ok, else: {:error, {:incompatible_tables, missing}}
   end
 
-  defp write_rows(manifest, staging, plan) do
+  defp write_rows(manifest, staging, plan, opts) do
     insert = if plan.mode == :merge, do: "INSERT OR IGNORE", else: "INSERT"
+    batch_rows = opts |> Keyword.get(:batch_rows, @batch_rows) |> max(1)
+    names = Enum.map(manifest["tables"], & &1["name"])
 
-    # Schema reads go through the Store process, so they happen before the
+    # Schema reads go through the Store process, so they happen before any
     # transaction (which runs inside that process).
-    drops = Map.new(manifest["tables"], &{&1["name"], autoincrement_key(columns(&1["name"]))})
+    drops = Map.new(names, &{&1, autoincrement_key(columns(&1))})
+    keys = Map.new(names, &{&1, foreign_keys(&1)})
 
+    result =
+      names
+      |> parents_first(keys)
+      |> Enum.reduce_while({:ok, %{}}, fn name, {:ok, counts} ->
+        verb = if name in @keep_existing, do: "INSERT OR IGNORE", else: insert
+
+        rows =
+          Path.join([staging, "tables", name <> ".jsonl"])
+          |> File.stream!()
+          |> Stream.map(&Jason.decode!/1)
+          |> Stream.map(&(&1 |> rewrite(name, plan) |> Map.drop(drops[name])))
+          |> self_parents_first(Enum.filter(keys[name], &(&1.table == name)))
+
+        case write_batches(name, rows, verb, batch_rows) do
+          {:ok, written} -> {:cont, {:ok, Map.put(counts, name, written)}}
+          {:error, reason} -> {:halt, {:error, {:import_failed, name, reason}}}
+        end
+      end)
+
+    with {:error, _} = error <- result do
+      if plan.mode == :create, do: undo_create(plan)
+      error
+    end
+  end
+
+  # Each batch is its own transaction with foreign keys checked at its commit;
+  # parents are always written in an earlier batch than their children.
+  defp write_batches(name, rows, verb, batch_rows) do
+    rows
+    |> Stream.chunk_every(batch_rows)
+    |> Enum.reduce_while({:ok, 0}, fn batch, {:ok, total} ->
+      case write_batch(name, batch, verb) do
+        {:ok, written} -> {:cont, {:ok, total + written}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp write_batch(name, batch, verb) do
     Store.transaction(fn txn ->
       {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
 
-      counts =
-        Enum.reduce(manifest["tables"], %{}, fn table, acc ->
-          name = table["name"]
-          drop = drops[name]
+      written =
+        Enum.reduce(batch, 0, fn row, count ->
+          names = Map.keys(row)
 
-          rows =
-            Path.join([staging, "tables", name <> ".jsonl"])
-            |> File.stream!()
-            |> Stream.map(&Jason.decode!/1)
-            |> Enum.map(&rewrite(&1, name, plan))
+          placeholders =
+            names |> Enum.with_index(1) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
 
-          written =
-            Enum.reduce(rows, 0, fn row, count ->
-              row = Map.drop(row, drop)
-              names = Map.keys(row)
+          {:ok, changed} =
+            Store.txn_execute(
+              txn,
+              "#{verb} INTO #{quote_name(name)} (#{Enum.map_join(names, ", ", &quote_name/1)}) VALUES (#{placeholders})",
+              Enum.map(names, &decode_value(row[&1]))
+            )
 
-              placeholders =
-                names |> Enum.with_index(1) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
-
-              verb = if name == "principals", do: "INSERT OR IGNORE", else: insert
-
-              {:ok, changed} =
-                Store.txn_execute(
-                  txn,
-                  "#{verb} INTO #{quote_name(name)} (#{Enum.map_join(names, ", ", &quote_name/1)}) VALUES (#{placeholders})",
-                  Enum.map(names, &decode_value(row[&1]))
-                )
-
-              count + changed
-            end)
-
-          Map.put(acc, name, written)
+          count + changed
         end)
 
-      {:ok, counts}
+      {:ok, written}
     end)
   rescue
-    error -> {:error, {:import_failed, Exception.message(error)}}
+    error -> {:error, Exception.message(error)}
+  end
+
+  # A failed create import leaves nothing behind: its rows, then the
+  # workspace record it made.
+  defp undo_create(plan) do
+    delete_rows(plan.tenant_id, plan.workspace_id)
+    Store.raw_query("DELETE FROM workspaces WHERE id = ?1", [plan.workspace_id])
+  rescue
+    error ->
+      Logger.error(
+        "[WorkspaceBundle] could not remove the failed import of #{plan.workspace_id}: #{Exception.message(error)}"
+      )
+  end
+
+  # Tables a table points at come first; tables outside the bundle and
+  # self-references do not constrain the order, and a cycle keeps its tables
+  # in bundle order.
+  defp parents_first(names, keys) do
+    in_bundle = MapSet.new(names)
+
+    deps =
+      Map.new(names, fn name ->
+        parents =
+          for %{table: parent} <- keys[name], parent != name, parent in in_bundle, do: parent
+
+        {name, MapSet.new(parents)}
+      end)
+
+    order(names, deps, MapSet.new(), [])
+  end
+
+  defp order([], _deps, _placed, acc), do: Enum.reverse(acc)
+
+  defp order(pending, deps, placed, acc) do
+    case Enum.split_with(pending, &MapSet.subset?(deps[&1], placed)) do
+      {[], [first | rest]} -> order(rest, deps, MapSet.put(placed, first), [first | acc])
+      {ready, rest} -> order(rest, deps, Enum.into(ready, placed), Enum.reverse(ready) ++ acc)
+    end
+  end
+
+  # Rows of a table that points at itself (a memory's parent memory, a node's
+  # parent node) are ordered so a parent precedes its children; other tables
+  # stream through unchanged.
+  defp self_parents_first(rows, []), do: rows
+
+  defp self_parents_first(rows, self_keys) do
+    rows = Enum.to_list(rows)
+    ids = for row <- rows, key <- self_keys, into: MapSet.new(), do: row[key.to]
+    place_rows(rows, self_keys, ids, MapSet.new(), [])
+  end
+
+  defp place_rows([], _keys, _ids, _placed, acc), do: Enum.reverse(acc)
+
+  defp place_rows(pending, keys, ids, placed, acc) do
+    ready? = fn row ->
+      Enum.all?(keys, fn key ->
+        parent = row[key.from]
+        is_nil(parent) or not MapSet.member?(ids, parent) or MapSet.member?(placed, parent)
+      end)
+    end
+
+    case Enum.split_with(pending, ready?) do
+      {[], [first | rest]} ->
+        place_rows(rest, keys, ids, mark(placed, first, keys), [first | acc])
+
+      {ready, rest} ->
+        placed = Enum.reduce(ready, placed, &mark(&2, &1, keys))
+        place_rows(rest, keys, ids, placed, Enum.reverse(ready) ++ acc)
+    end
+  end
+
+  defp mark(placed, row, keys), do: Enum.reduce(keys, placed, &MapSet.put(&2, row[&1.to]))
+
+  defp foreign_keys(table) do
+    case Store.raw_query(
+           "SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list(?1)",
+           [table]
+         ) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [parent, from, to] -> %{table: parent, from: from, to: to} end)
+
+      _ ->
+        []
+    end
   end
 
   defp rewrite(row, "principals", plan), do: Map.put(row, "tenant_id", plan.tenant_id)

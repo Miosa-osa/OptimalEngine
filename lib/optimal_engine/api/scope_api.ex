@@ -93,7 +93,9 @@ defmodule OptimalEngine.API.ScopeAPI do
           tables: length(manifest["tables"]),
           rows: Enum.sum(Enum.map(manifest["tables"], & &1["rows"])),
           files: length(manifest["files"]),
-          for_move: body["for_move"] == true
+          for_move: body["for_move"] == true,
+          # A replica seeded from this bundle pulls from this ledger mark.
+          ledger_sequence: manifest["ledger_sequence"]
         })
 
       {:error, :not_found} ->
