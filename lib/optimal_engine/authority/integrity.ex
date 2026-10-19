@@ -203,7 +203,8 @@ defmodule OptimalEngine.Authority.Integrity do
 
   defp key_findings(tenant_id, evidence) do
     minted =
-      for %{"kind" => "key.minted", "detail" => %{"key_id" => id, "key_sha256" => hash}} <- evidence,
+      for %{"kind" => "key.minted", "detail" => %{"key_id" => id, "key_sha256" => hash}} <-
+            evidence,
           into: %{},
           do: {id, hash}
 
