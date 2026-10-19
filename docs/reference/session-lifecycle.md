@@ -47,3 +47,5 @@ accepted assertion -> Fact
 contextual meaning -> Memory Object
 ```
 
+Over HTTP a client commits a finished chat with `POST /api/sessions/commit`, which keeps it this way and records the session as an Episode (`../guides/chat-memory.md`).
+

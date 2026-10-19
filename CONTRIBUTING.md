@@ -34,9 +34,11 @@ tests; use CI as the source of truth for the exact count on your branch.
 **Start the engine locally**
 
 ```bash
-mix run --no-halt
-# HTTP API available at http://localhost:4000
+OPTIMAL_API_ENABLED=true OPTIMAL_API_PORT=4300 mix run --no-halt
+# HTTP API at http://127.0.0.1:4300
 ```
+
+The API is off unless `OPTIMAL_API_ENABLED=true` is set; pick a port no other Engine on the machine is serving (4200 is the default for an installed Engine).
 
 ---
 

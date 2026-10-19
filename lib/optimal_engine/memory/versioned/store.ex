@@ -374,6 +374,24 @@ defmodule OptimalEngine.Memory.Versioned.Store do
     Store.raw_query(sql, [workspace_id, root_id])
   end
 
+  @doc """
+  The live memories (latest version, not forgotten) of a tenant's workspace
+  whose `metadata.kind` is `kind`, oldest first.
+  """
+  @spec list_by_kind(String.t(), String.t(), String.t(), pos_integer()) ::
+          {:ok, [list()]} | {:error, term()}
+  def list_by_kind(tenant_id, workspace_id, kind, limit) do
+    sql = """
+    SELECT #{@select_cols} FROM memories
+    WHERE tenant_id = ?1 AND workspace_id = ?2 AND is_latest = 1 AND is_forgotten = 0
+      AND (CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.kind') END) = ?3
+    ORDER BY created_at ASC, id ASC
+    LIMIT ?4
+    """
+
+    Store.raw_query(sql, [tenant_id, workspace_id, kind, limit])
+  end
+
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------

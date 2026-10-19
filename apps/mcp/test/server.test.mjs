@@ -74,6 +74,7 @@ test("lists the operating, context, record, and authority tools", async () => {
     "boot", "brief", "loops_list", "loops_add", "loops_close", "protocol", "search",
     "assemble", "read", "capture", "record", "close", "authority_decide", "authority_effective",
     "check_draft", "viability", "action_step", "action_chain",
+    "session_commit", "sessions_list", "session_get", "org_policy",
   ]) {
     assert.ok(names.includes(name), `missing tool ${name}`);
   }
@@ -109,6 +110,16 @@ test("maps each tool to its route", async () => {
     ["viability", {}, "GET", "/api/viability"],
     ["action_step", { stage: "request", action: "send_email" }, "POST", "/api/agent-actions"],
     ["action_chain", { id: "act_1" }, "GET", "/api/agent-actions/act_1"],
+    [
+      "session_commit",
+      { correlation_id: "chat_1", messages: [{ role: "user", content: "Ship Friday" }] },
+      "POST",
+      "/api/sessions/commit",
+    ],
+    ["sessions_list", {}, "GET", "/api/sessions"],
+    ["session_get", { id: "ses_1" }, "GET", "/api/sessions/ses_1"],
+    ["org_policy", {}, "GET", "/api/org-policy"],
+    ["forget_memory", { id: "mem_1" }, "POST", "/api/memory/mem_1/forget"],
   ];
   for (const [name, args, method, path] of cases) {
     const result = await call(name, args);
@@ -143,6 +154,35 @@ test("records match the CLI shape and never name an actor", async () => {
       assert.equal(field in requests[0].body, false, `${name} sent ${field}`);
     }
   }
+});
+
+test("chat sessions go to the default workspace and never name an actor", async () => {
+  await call("session_commit", {
+    correlation_id: "chat_1",
+    title: "Launch",
+    messages: [{ role: "user", content: "We decided to ship Friday.", at: "2026-10-18T09:00:00Z" }],
+    learned: [{ content: "Send the deck", category: "task", owner: "user:jane", due: "2026-10-23" }],
+  });
+  assert.deepEqual(requests[0].body, {
+    workspace: "default:sales",
+    source: "optimal-mcp",
+    correlation_id: "chat_1",
+    title: "Launch",
+    messages: [{ role: "user", content: "We decided to ship Friday.", at: "2026-10-18T09:00:00Z" }],
+    learned: [{ content: "Send the deck", category: "task", owner: "user:jane", due: "2026-10-23" }],
+  });
+  await call("session_get", { id: "ses_1", include_transcript: true });
+  assert.deepEqual(requests[0].query, { workspace: "default:sales", include: "transcript" });
+  await call("org_policy", {});
+  assert.equal(requests[0].query.workspace, "default:sales");
+  await call("forget_memory", { id: "mem_1", reason: "superseded" });
+  assert.deepEqual(requests[0].body, { workspace: "default:sales", reason: "superseded" });
+  const refused = await call("session_commit", {
+    correlation_id: "chat_1",
+    messages: [{ role: "robot", content: "x" }],
+  });
+  assert.equal(refused.isError, true);
+  assert.equal(requests.length, 0);
 });
 
 test("refusals carry the error code and never the key", async () => {

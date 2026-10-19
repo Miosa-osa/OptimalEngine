@@ -3,7 +3,8 @@ defmodule OptimalEngine.Operating.Boot do
   The session boot an agent or person reads before acting in a workspace:
   the actual day in the workspace's time zone, today's rhythm note, the
   fires (overdue and due-today loops), open loop counts, recent decisions,
-  items gone stale, and the operating protocol.
+  items gone stale, the operating protocol, and the org policy the workspace
+  inherits from its tenant's org section (`OptimalEngine.OrgPolicy`).
 
   Everything comes from Engine data, so a fresh org gets a valid empty-state
   boot and an existing org gets its real state; nothing is read from local
@@ -11,10 +12,11 @@ defmodule OptimalEngine.Operating.Boot do
   """
 
   alias OptimalEngine.Operating.{Brief, Loops, Protocol, Rhythm}
-  alias OptimalEngine.Store
+  alias OptimalEngine.{OrgPolicy, Store}
 
   @doc """
-  Builds the boot for `workspace_id`. Options: `:timezone`, `:date` (tests).
+  Builds the boot for `workspace_id`. Options: `:timezone`, `:date` (tests),
+  `:actor` (the reading principal, for authority decisions on org policy).
   """
   @spec build(String.t(), String.t(), keyword()) :: map()
   def build(tenant_id, workspace_id, opts \\ []) do
@@ -49,7 +51,8 @@ defmodule OptimalEngine.Operating.Boot do
       recent_decisions: recent_decisions(tenant_id, workspace_id, date),
       stale: stale(tenant_id, workspace_id, date),
       brief: Map.take(brief, [:items, :counts]),
-      protocol: %{source: protocol.source, hash: protocol.hash, content: protocol.content}
+      protocol: %{source: protocol.source, hash: protocol.hash, content: protocol.content},
+      org_policy: OrgPolicy.for_workspace(tenant_id, workspace_id, actor: opts[:actor])
     }
   end
 

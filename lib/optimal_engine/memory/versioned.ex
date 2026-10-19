@@ -191,6 +191,20 @@ defmodule OptimalEngine.Memory.Versioned do
   end
 
   @doc """
+  The live memories (latest version, not forgotten) of a tenant's workspace
+  whose `metadata.kind` is `kind`, oldest first. Options: `:limit`
+  (default 100).
+  """
+  @spec list_by_kind(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, [t()]} | {:error, term()}
+  def list_by_kind(tenant_id, workspace_id, kind, opts \\ []) do
+    case VStore.list_by_kind(tenant_id, workspace_id, kind, Keyword.get(opts, :limit, 100)) do
+      {:ok, rows} -> {:ok, Enum.map(rows, &row_to_struct/1)}
+      other -> other
+    end
+  end
+
+  @doc """
   Counts memories matching the same filter opts as `list/1` (minus limit/offset).
   """
   @spec count(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}

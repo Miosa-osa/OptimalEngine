@@ -48,9 +48,14 @@ PUT /api/workspaces/<tenant>:sales/share {"share_up": "read"}
 GET /api/federation/search?q=renewal
 GET /api/brief?workspaces=*
 GET /api/viability?workspaces=*
+optimal init --for business --slug org --name Org
+PUT /api/org-section {"workspace_id": "<tenant>:org"}
+POST /api/memory {"workspace": "<tenant>:org", "content": "Every outbound quote needs a second reviewer.", "metadata": {"kind": "policy"}}
+GET /api/org-policy?workspace=<tenant>:sales
 ```
 
 A key scoped to some workspaces sees only those in every org view.
+Policy kept in the org section flows down read-only to every workspace's boot and context assembly (`chat-memory.md`).
 
 ## One Engine per customer
 

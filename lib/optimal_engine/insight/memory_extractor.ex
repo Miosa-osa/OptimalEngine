@@ -52,11 +52,15 @@ defmodule OptimalEngine.Insight.MemoryExtractor do
       }
 
   Always succeeds — failures fall back through regex, then to empty list.
+
+  Options:
+  - `:llm` - `false` skips the model and uses the regex extraction only
+    (default `true`)
   """
-  @spec extract(String.t()) :: {:ok, [map()]}
-  def extract(text) when is_binary(text) do
+  @spec extract(String.t(), keyword()) :: {:ok, [map()]}
+  def extract(text, opts \\ []) when is_binary(text) do
     memories =
-      if Ollama.available?() do
+      if Keyword.get(opts, :llm, true) and Ollama.available?() do
         llm_extract(text)
       else
         regex_extract(text)

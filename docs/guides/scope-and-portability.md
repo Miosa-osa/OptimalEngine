@@ -17,6 +17,7 @@ On disk, each workspace has its own directory: the default tenant keeps `<root>/
 Each workspace has a share-up policy for org-wide views: `read` shares its results upward, `none` keeps them inside.
 The default is `read`, except workspaces whose `visibility` is `private` or `client`, which default to `none`.
 `PUT /api/workspaces/:id/share {"share_up": "read|none", "visibility": "private|client|internal"}` changes it (scope `topology:write`) and records the change in the authority evidence chain.
+An org section set to `none` also keeps its policy from flowing down to the other workspaces (`chat-memory.md`).
 
 ## Federated search
 
