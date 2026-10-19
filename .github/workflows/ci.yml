@@ -21,7 +21,9 @@ jobs:
   test:
     name: test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # A cold cache (any mix.lock change) compiles RocksDB from source: about
+    # 12 minutes on the 1.19 / OTP 28 job before the tests start.
+    timeout-minutes: 25
 
     strategy:
       fail-fast: true
