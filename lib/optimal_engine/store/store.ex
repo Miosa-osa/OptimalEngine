@@ -62,6 +62,8 @@ defmodule OptimalEngine.Store do
     `{:error, {:invalid_transaction_return, other}}`.
   """
 
+  @behaviour OptimalEngine.Store.Adapter
+
   use GenServer
   require Logger
 
