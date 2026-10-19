@@ -23,6 +23,8 @@ defmodule OptimalEngine.API.Router do
   use Plug.Router
   use Plug.ErrorHandler
 
+  @busy_detail "the Engine's store is busy; retry shortly"
+
   alias OptimalEngine.API.Actor
   alias OptimalEngine.API.Pagination
   alias OptimalEngine.Graph.Analyzer, as: GraphAnalyzer
@@ -181,7 +183,7 @@ defmodule OptimalEngine.API.Router do
     memory_search_mode = query_param(conn, "memory_search_mode", "hybrid")
     {offset, limit} = Pagination.parse(conn, 10)
 
-    {results, total} =
+    found =
       if q == "" do
         {[], 0}
       else
@@ -220,18 +222,32 @@ defmodule OptimalEngine.API.Router do
             page = all |> Enum.drop(offset) |> Enum.take(limit)
             {page, total}
 
+          # The Store did not answer in time: say so, rather than an empty
+          # result list that reads as "nothing found".
+          {:error, :busy} ->
+            :busy
+
           _ ->
             {[], 0}
         end
       end
 
-    pagination = Pagination.wrap(results, total, offset, limit)
+    case found do
+      :busy ->
+        conn
+        |> put_resp_header("retry-after", "1")
+        |> put_status(503)
+        |> json(%{error: "busy", detail: @busy_detail})
 
-    json(conn, %{
-      query: q,
-      results: results,
-      pagination: pagination.pagination
-    })
+      {results, total} ->
+        pagination = Pagination.wrap(results, total, offset, limit)
+
+        json(conn, %{
+          query: q,
+          results: results,
+          pagination: pagination.pagination
+        })
+    end
   end
 
   # GET /api/grep — hybrid semantic + literal grep over a workspace.
@@ -5296,6 +5312,15 @@ defmodule OptimalEngine.API.Router do
   # 500. Server errors never echo the exception; Plug.ErrorHandler re-raises
   # them afterwards, so they are still logged.
   @impl Plug.ErrorHandler
+  # A call that timed out waiting on a busy process (the single-writer Store
+  # during a long write or right after boot) is a retryable 503, not a 500.
+  def handle_errors(conn, %{kind: :exit, reason: {:timeout, {GenServer, :call, _}}}) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> put_resp_header("retry-after", "1")
+    |> send_resp(503, Jason.encode!(%{error: "busy", detail: @busy_detail}))
+  end
+
   def handle_errors(conn, %{reason: reason}) do
     error =
       case reason do

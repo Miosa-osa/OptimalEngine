@@ -63,6 +63,14 @@ defmodule OptimalEngine.Store do
 
   defdelegate raw_query(sql, params \\ []), to: @adapter
 
+  @doc """
+  How long a raw query or statement waits for the Store, in milliseconds
+  (`config :optimal_engine, :store_call_timeout_ms`, default 15,000). A
+  caller that waits longer exits with a timeout.
+  """
+  @spec call_timeout() :: pos_integer()
+  def call_timeout, do: Application.get_env(:optimal_engine, :store_call_timeout_ms, 15_000)
+
   defdelegate raw_execute(sql, params \\ []), to: @adapter
 
   defdelegate transaction(fun, timeout \\ 30_000), to: @adapter
