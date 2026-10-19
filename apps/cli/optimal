@@ -51,6 +51,34 @@ redact() {
   printf '%s' "$_r_out$_r_s"
 }
 
+
+# compat_mismatch CLIENT ENGINE: 0 when they agree (or either is unparsable),
+# 1 on a major mismatch, 2 on a minor mismatch. A patch difference is silent.
+compat_mismatch() {
+  _cm_v=$1 _cm_e=$2
+  case $_cm_v in [0-9]*.[0-9]*.[0-9]*) ;; *) return 0 ;; esac
+  case $_cm_e in [0-9]*.[0-9]*.[0-9]*) ;; *) return 0 ;; esac
+  _cm_vm=${_cm_v%%.*}
+  _cm_vr=${_cm_v#*.}
+  _cm_vn=${_cm_vr%%.*}
+  _cm_em=${_cm_e%%.*}
+  _cm_er=${_cm_e#*.}
+  _cm_en=${_cm_er%%.*}
+  [ "$_cm_vm" = "$_cm_em" ] || return 1
+  [ "$_cm_vn" = "$_cm_en" ] || return 2
+  return 0
+}
+
+# compat_json CLIENT ENGINE: the machine-readable comparison for 'version'.
+compat_json() {
+  compat_mismatch "$1" "$2"
+  case $? in
+    1) printf '{"ok":false,"reason":"major_mismatch","client":"%s","engine":"%s"}' "$1" "$2" ;;
+    2) printf '{"ok":false,"reason":"minor_mismatch","client":"%s","engine":"%s"}' "$1" "$2" ;;
+    *) printf '{"ok":true,"client":"%s","engine":"%s"}' "$1" "$2" ;;
+  esac
+}
+
 err() { printf '%s: %s\n' "$PROG" "$(redact "$*")" >&2; }
 die() {
   _d_code=$1
@@ -1291,7 +1319,11 @@ case $CMD in
     _client="{\"name\":\"optimal\",\"version\":\"$OPTIMAL_CLI_VERSION\"}"
     transport GET /api/version ""
     case $R_CODE in
-      2??) emit "{\"client\":$_client,\"engine\":$R_BODY}" ;;
+      2??)
+        _eng_ver=$(printf '%s' "$R_BODY" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' | head -1)
+        _compat=$(compat_json "$OPTIMAL_CLI_VERSION" "$_eng_ver")
+        emit "{\"client\":$_client,\"engine\":$R_BODY,\"compatibility\":$_compat}"
+        ;;
       *) emit "{\"client\":$_client,\"engine\":null}" ;;
     esac
     ;;
@@ -1320,6 +1352,18 @@ case $CMD in
       2??) printf 'health     HTTP %s %s\n' "$R_CODE" "$(field_text "$R_BODY" status 2>/dev/null)" ;;
       *) printf 'health     HTTP %s %s\n' "$R_CODE" "$(field_text "$R_BODY" error 2>/dev/null)" && exit 1 ;;
     esac
+    transport GET /api/version ""
+    if [ "$R_CODE" = "200" ]; then
+      _eng_ver=$(printf '%s' "$R_BODY" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' | head -1)
+      compat_mismatch "$OPTIMAL_CLI_VERSION" "$_eng_ver"
+      case $? in
+        1) printf 'compat     INCOMPATIBLE: client %s, engine %s; upgrade the client\n' "$OPTIMAL_CLI_VERSION" "$_eng_ver" && exit "$EX_CONFIG" ;;
+        2) printf 'compat     outdated: client %s, engine %s (a minor difference; upgrade when convenient)\n' "$OPTIMAL_CLI_VERSION" "$_eng_ver" ;;
+        *) printf 'compat     ok: client %s, engine %s\n' "$OPTIMAL_CLI_VERSION" "$_eng_ver" ;;
+      esac
+    else
+      printf 'compat     unknown (no /api/version: HTTP %s)\n' "$R_CODE"
+    fi
     ;;
   api)
     [ $# -ge 2 ] || usage_die "usage: $PROG api <GET|POST|PUT|PATCH|DELETE> /api/<path> [json|-]"

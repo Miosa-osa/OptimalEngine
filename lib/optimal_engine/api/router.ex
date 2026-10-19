@@ -42,6 +42,7 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Wiki
 
   plug(OptimalEngine.API.VersionPlug)
+  plug(OptimalEngine.API.ClientCompatibilityPlug)
   plug(:cors)
   plug(:match)
 
