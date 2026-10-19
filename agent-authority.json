@@ -463,6 +463,17 @@
       "owns": []
     },
     {
+      "id": "docs-guides-chat-memory",
+      "path": "docs/guides/chat-memory.md",
+      "kind": "contract",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-19",
+      "owns": []
+    },
+    {
       "id": "docs-guides-cli",
       "path": "docs/guides/cli.md",
       "kind": "reference",

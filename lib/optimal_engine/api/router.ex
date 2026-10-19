@@ -553,9 +553,16 @@ defmodule OptimalEngine.API.Router do
     # Pass ?full=true for the heavy 10-check knowledge-base diagnostics.
     case query_param(conn, "full", "false") do
       "true" ->
-        workspace = query_param(conn, "workspace", "default")
-        {:ok, checks} = HealthDiagnostics.run(workspace_id: workspace)
-        json(conn, %{health: format_health(checks), release: OptimalEngine.Version.info()})
+        # Liveness is global; the full diagnostics read one workspace, so a
+        # key restricted to other workspaces must name one it covers.
+        workspace = named_workspace(conn) || "default"
+
+        if key_covers_workspace?(conn.assigns[:current_api_key], workspace) do
+          {:ok, checks} = HealthDiagnostics.run(workspace_id: workspace)
+          json(conn, %{health: format_health(checks), release: OptimalEngine.Version.info()})
+        else
+          send_resp(conn, 400, Jason.encode!(%{error: "workspace_required"}))
+        end
 
       _ ->
         report = Health.ready(skip: [:embedder])
@@ -1216,7 +1223,7 @@ defmodule OptimalEngine.API.Router do
   get "/api/signals/:id" do
     workspace = query_param(conn, "workspace", "default")
 
-    case signal_detail(id, workspace) do
+    case signal_detail(id, workspace, conn.assigns[:current_tenant] || "default") do
       nil -> send_resp(conn, 404, Jason.encode!(%{error: "signal not found"}))
       detail -> json(conn, detail)
     end
@@ -1334,24 +1341,9 @@ defmodule OptimalEngine.API.Router do
         _ -> :active
       end
 
-    total =
-      case OptimalEngine.Workspace.count(
-             tenant_id: tenant_id,
-             organization_id: organization_id,
-             status: status
-           ) do
-        {:ok, n} -> n
-        _ -> 0
-      end
-
-    case OptimalEngine.Workspace.list(
-           tenant_id: tenant_id,
-           organization_id: organization_id,
-           status: status,
-           limit: limit,
-           offset: offset
-         ) do
-      {:ok, list} ->
+    # A key restricted to named workspaces lists only those.
+    case listed_workspaces(conn, tenant_id, organization_id, status, offset, limit) do
+      {:ok, list, total} ->
         ws = Enum.map(list, &workspace_to_map/1)
         pagination = Pagination.wrap(ws, total, offset, limit)
 
@@ -1881,49 +1873,61 @@ defmodule OptimalEngine.API.Router do
   # GET /api/memory/:id/versions — version chain for a memory (BEFORE bare /:id).
   # Returns: {memory_id, root_id, versions: [...]} in chronological order.
   get "/api/memory/:id/versions" do
-    case OptimalEngine.Memory.versions(id) do
-      {:ok, vs} ->
-        root_id = vs |> List.first() |> then(fn v -> v && v.root_memory_id end)
+    with_memory(conn, id, :read, fn conn, _memory, _inherited ->
+      case OptimalEngine.Memory.versions(id) do
+        {:ok, vs} ->
+          root_id = vs |> List.first() |> then(fn v -> v && v.root_memory_id end)
 
-        json(conn, %{
-          memory_id: id,
-          root_id: root_id,
-          versions: Enum.map(vs, &memory_to_map/1)
-        })
+          json(conn, %{
+            memory_id: id,
+            root_id: root_id,
+            versions: Enum.map(vs, &memory_to_map/1)
+          })
 
-      {:error, :not_found} ->
-        send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
+        {:error, :not_found} ->
+          send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
 
-      {:error, reason} ->
-        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-    end
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end)
   end
 
   # GET /api/memory/:id/relations — inbound + outbound relation graph (BEFORE bare /:id).
   # Returns: {memory_id, inbound: [...], outbound: [...]}
   get "/api/memory/:id/relations" do
-    case OptimalEngine.Memory.relations(id) do
-      {:ok, rels} ->
-        {inbound, outbound} =
-          Enum.split_with(rels, fn r -> to_string(r.target_id) == id end)
+    with_memory(conn, id, :read, fn conn, _memory, _inherited ->
+      case OptimalEngine.Memory.relations(id) do
+        {:ok, rels} ->
+          {inbound, outbound} =
+            Enum.split_with(rels, fn r -> to_string(r.target_id) == id end)
 
-        json(conn, %{memory_id: id, inbound: inbound, outbound: outbound})
+          json(conn, %{memory_id: id, inbound: inbound, outbound: outbound})
 
-      {:error, :not_found} ->
-        send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
+        {:error, :not_found} ->
+          send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
 
-      {:error, reason} ->
-        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-    end
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end)
   end
 
-  # GET /api/memory/:id — fetch one memory by id.
+  # GET /api/memory/:id - fetch one memory by id. Org policy read from
+  # another workspace of the tenant is labeled with its source.
   get "/api/memory/:id" do
-    case OptimalEngine.Memory.get(id) do
-      {:ok, mem} -> json(conn, memory_to_map(mem))
-      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-    end
+    with_memory(conn, id, :read_policy, fn
+      conn, mem, false ->
+        json(conn, memory_to_map(mem))
+
+      conn, mem, true ->
+        json(
+          conn,
+          mem
+          |> memory_to_map()
+          |> Map.merge(%{inherited: true, source_workspace_id: mem.workspace_id})
+        )
+    end)
   end
 
   # GET /api/memory — list memories for a workspace.
@@ -1984,19 +1988,21 @@ defmodule OptimalEngine.API.Router do
   # POST /api/memory/:id/forget — mark a memory as forgotten.
   # Body: {reason?, forget_after?}  Returns: 204.
   post "/api/memory/:id/forget" do
-    body = conn.body_params || %{}
+    with_memory(conn, id, :write, fn conn, _memory, _inherited ->
+      body = conn.body_params || %{}
 
-    opts =
-      []
-      |> api_maybe_put(:reason, Map.get(body, "reason"))
-      |> api_maybe_put(:forget_after, Map.get(body, "forget_after"))
+      opts =
+        []
+        |> api_maybe_put(:reason, Map.get(body, "reason"))
+        |> api_maybe_put(:forget_after, Map.get(body, "forget_after"))
 
-    case OptimalEngine.Memory.forget(id, opts) do
-      {:ok, _} -> send_resp(conn, 204, "")
-      :ok -> send_resp(conn, 204, "")
-      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-    end
+      case OptimalEngine.Memory.forget(id, opts) do
+        {:ok, _} -> send_resp(conn, 204, "")
+        :ok -> send_resp(conn, 204, "")
+        {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
+        {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end)
   end
 
   # POST /api/memory/:id/update — create a new version of a memory.
@@ -2019,49 +2025,53 @@ defmodule OptimalEngine.API.Router do
 
   # DELETE /api/memory/:id — hard delete. Returns: 204.
   delete "/api/memory/:id" do
-    case OptimalEngine.Memory.delete(id) do
-      :ok -> send_resp(conn, 204, "")
-      {:ok, _} -> send_resp(conn, 204, "")
-      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-    end
+    with_memory(conn, id, :write, fn conn, _memory, _inherited ->
+      case OptimalEngine.Memory.delete(id) do
+        :ok -> send_resp(conn, 204, "")
+        {:ok, _} -> send_resp(conn, 204, "")
+        {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
+        {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end)
   end
 
   # POST /api/memory/:id/promote — manually promote a memory to a wiki page section.
   # Body: {"slug": "my-page", "audience"?: "default", "workspace"?: "default"}
   # Returns: 200 + updated page, 404 if memory not found.
   post "/api/memory/:id/promote" do
-    body = conn.body_params || %{}
-    slug = Map.get(body, "slug")
+    with_memory(conn, id, :write, fn conn, _memory, _inherited ->
+      body = conn.body_params || %{}
+      slug = Map.get(body, "slug")
 
-    if not (is_binary(slug) and slug != "") do
-      send_resp(conn, 400, Jason.encode!(%{error: "slug is required"}))
-    else
-      workspace_id = Map.get(body, "workspace", "default")
-      audience = Map.get(body, "audience", "default")
-      tenant_id = Map.get(body, "tenant", "default")
+      if not (is_binary(slug) and slug != "") do
+        send_resp(conn, 400, Jason.encode!(%{error: "slug is required"}))
+      else
+        workspace_id = Map.get(body, "workspace", "default")
+        audience = Map.get(body, "audience", "default")
+        tenant_id = Map.get(body, "tenant", "default")
 
-      opts = [workspace_id: workspace_id, tenant_id: tenant_id, audience: audience]
+        opts = [workspace_id: workspace_id, tenant_id: tenant_id, audience: audience]
 
-      case OptimalEngine.Memory.WikiBridge.promote_memory_to_wiki(id, slug, opts) do
-        {:ok, page} ->
-          json(conn, %{
-            slug: page.slug,
-            audience: page.audience,
-            version: page.version,
-            workspace_id: page.workspace_id,
-            body: page.body,
-            last_curated: page.last_curated,
-            curated_by: page.curated_by
-          })
+        case OptimalEngine.Memory.WikiBridge.promote_memory_to_wiki(id, slug, opts) do
+          {:ok, page} ->
+            json(conn, %{
+              slug: page.slug,
+              audience: page.audience,
+              version: page.version,
+              workspace_id: page.workspace_id,
+              body: page.body,
+              last_curated: page.last_curated,
+              curated_by: page.curated_by
+            })
 
-        {:error, :not_found} ->
-          send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
+          {:error, :not_found} ->
+            send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
 
-        {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+          {:error, reason} ->
+            send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        end
       end
-    end
+    end)
   end
 
   # ── Memory Core claim governance ──────────────────────────────────────────
@@ -2907,7 +2917,15 @@ defmodule OptimalEngine.API.Router do
               candidate_count: length(package.returned_object_links),
               selected_sources: package.returned_object_links,
               mcts_enabled: false
-            }
+            },
+            # The rules every agent in the tenant follows, from its org
+            # section, labeled with their source (OptimalEngine.OrgPolicy).
+            org_policy:
+              OptimalEngine.OrgPolicy.for_workspace(
+                conn.assigns[:current_tenant] || "default",
+                workspace_id,
+                actor: Actor.of(conn)
+              )
           })
 
         {:error, reason} ->
@@ -3255,6 +3273,21 @@ defmodule OptimalEngine.API.Router do
   get("/api/jobs", do: AnalysesAPI.jobs(conn))
   get("/api/jobs/dead", do: AnalysesAPI.dead(conn))
   post("/api/jobs/dead/:id/replay", do: AnalysesAPI.replay(conn, id))
+
+  # ── Chat sessions (OptimalEngine.API.SessionAPI) ─────────────────────────
+  alias OptimalEngine.API.SessionAPI
+
+  post("/api/sessions/commit", do: SessionAPI.commit(conn))
+  get("/api/sessions", do: SessionAPI.list(conn))
+  get("/api/sessions/:id", do: SessionAPI.show(conn, id))
+
+  # ── Org section and org policy (OptimalEngine.API.OrgPolicyAPI) ──────────
+  alias OptimalEngine.API.OrgPolicyAPI
+
+  get("/api/org-section", do: OrgPolicyAPI.section(conn))
+  put("/api/org-section", do: OrgPolicyAPI.designate(conn))
+  delete("/api/org-section", do: OrgPolicyAPI.clear(conn))
+  get("/api/org-policy", do: OrgPolicyAPI.policy(conn))
 
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
   forward("/api/data", to: OptimalEngine.API.AppDataRouter)
@@ -3767,8 +3800,120 @@ defmodule OptimalEngine.API.Router do
 
   defp asset_upload_error(reason), do: inspect(reason)
 
+  # A memory addressed by id belongs to one workspace of one tenant. A caller
+  # acts on it only when its key's workspace scope covers that workspace and
+  # the workspace the request names (if any) is the memory's own; otherwise
+  # the memory is not found (404), as is another tenant's memory or one this
+  # Engine does not serve. Org policy (OptimalEngine.OrgPolicy) is the one
+  # record a workspace reads from outside itself: `:read_policy` serves it
+  # labeled as inherited, and every other route on it is 403 (read-only).
+  # `fun` receives the memory and whether it was inherited.
+  defp with_memory(conn, id, access, fun) do
+    tenant_id = conn.assigns[:current_tenant] || "default"
+    named = named_workspace(conn)
+
+    case OptimalEngine.Memory.get(id) do
+      {:ok, mem} ->
+        cond do
+          mem.tenant_id != tenant_id or not OptimalEngine.Scope.serves?(mem.workspace_id) ->
+            memory_not_found(conn)
+
+          key_covers_workspace?(conn.assigns[:current_api_key], mem.workspace_id) and
+              named in [nil, mem.workspace_id] ->
+            fun.(conn, mem, false)
+
+          OptimalEngine.OrgPolicy.readable?(
+            tenant_id,
+            named || conn.assigns[:workspace_id] || "default",
+            mem,
+            actor: Actor.of(conn)
+          ) ->
+            if access == :read_policy,
+              do: fun.(conn, mem, true),
+              else: send_resp(conn, 403, Jason.encode!(%{error: "workspace_scope_denied"}))
+
+          true ->
+            memory_not_found(conn)
+        end
+
+      {:error, :not_found} ->
+        memory_not_found(conn)
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  defp memory_not_found(conn),
+    do: send_resp(conn, 404, Jason.encode!(%{error: "memory not found"}))
+
+  # The workspace a request names in its query or body, or nil.
+  defp named_workspace(conn) do
+    conn = Plug.Conn.fetch_query_params(conn)
+
+    body =
+      if is_map(conn.body_params) and not is_struct(conn.body_params),
+        do: conn.body_params,
+        else: %{}
+
+    Enum.find_value(
+      [
+        conn.query_params["workspace"],
+        conn.query_params["workspace_id"],
+        body["workspace"],
+        body["workspace_id"]
+      ],
+      &(is_binary(&1) and &1 != "" and &1)
+    )
+  end
+
+  defp listed_workspaces(conn, tenant_id, organization_id, status, offset, limit) do
+    filters = [tenant_id: tenant_id, organization_id: organization_id, status: status]
+
+    case conn.assigns[:current_api_key] do
+      %{workspace_scope: scope} when is_list(scope) ->
+        if "*" in scope do
+          page_of_workspaces(filters, offset, limit)
+        else
+          with {:ok, all} <-
+                 OptimalEngine.Workspace.list(filters ++ [limit: 100_000, offset: 0]) do
+            visible = Enum.filter(all, &(&1.id in scope))
+            {:ok, Enum.slice(visible, offset, limit), length(visible)}
+          end
+        end
+
+      _ ->
+        page_of_workspaces(filters, offset, limit)
+    end
+  end
+
+  defp page_of_workspaces(filters, offset, limit) do
+    total =
+      case OptimalEngine.Workspace.count(filters) do
+        {:ok, n} -> n
+        _ -> 0
+      end
+
+    with {:ok, list} <- OptimalEngine.Workspace.list(filters ++ [limit: limit, offset: offset]) do
+      {:ok, list, total}
+    end
+  end
+
+  defp key_covers_workspace?(nil, _workspace_id), do: true
+
+  defp key_covers_workspace?(key, workspace_id) do
+    scope = key.workspace_scope || []
+    "*" in scope or workspace_id in scope
+  end
+
   # Shared handler for update/extend/derive — each takes (id, attrs) and returns {:ok, mem}.
   defp memory_mutation_endpoint(conn, id, fun) do
+    with_memory(conn, id, :write, fn conn, _memory, _inherited ->
+      memory_mutation(conn, id, fun)
+    end)
+  end
+
+  defp memory_mutation(conn, id, fun) do
     body = conn.body_params || %{}
     content = Map.get(body, "content")
 
@@ -4496,8 +4641,8 @@ defmodule OptimalEngine.API.Router do
   # every layer the engine tracks. The parent row is fetched with a
   # workspace_id guard so an id from another workspace yields nil (→ 404);
   # the child fetchers below are only reachable once that guard passed.
-  defp signal_detail(id, workspace_id) do
-    with {:ok, [row]} <- signal_row(id, workspace_id) do
+  defp signal_detail(id, workspace_id, tenant_id) do
+    with {:ok, [row]} <- signal_row(id, workspace_id, tenant_id) do
       [
         ctx_id,
         uri,
@@ -4547,16 +4692,16 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp signal_row(id, workspace_id) do
+  defp signal_row(id, workspace_id, tenant_id) do
     Store.raw_query(
       """
       SELECT id, uri, title, genre, mode, signal_type, format, structure, node,
              sn_ratio, content, l0_abstract, l1_overview, modified_at,
              architecture_id
       FROM contexts
-      WHERE id = ?1 AND workspace_id = ?2 LIMIT 1
+      WHERE id = ?1 AND workspace_id = ?2 AND tenant_id = ?3 LIMIT 1
       """,
-      [id, workspace_id]
+      [id, workspace_id, tenant_id]
     )
   end
 

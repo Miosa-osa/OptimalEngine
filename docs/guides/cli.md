@@ -115,6 +115,10 @@ Text arguments may be `-` to read standard input.
 | `aware "text" [ws]` | capture, remember, then search for related context |
 | `note\|lesson\|decision\|task\|close "text" [ws] [--owner --due]` | `POST /api/memory/remember` as `Note:`, `Lesson:`, `Decision:`, `Task:`, `Close-loop:` with `metadata.kind` |
 | `remember "text" [ws]` | `POST /api/memory/remember` |
+| `session commit <messages.json\|-> [ws] --correlation-id <id> [--title --summary]` | `POST /api/sessions/commit` |
+| `session [list] [ws] [--correlation-id]` (alias `sessions`), `session show <id> [ws] [--transcript]` | `GET /api/sessions`, `GET /api/sessions/:id` |
+| `policy [ws]` (alias `org-policy`) | `GET /api/org-policy` |
+| `org-section [show\|set <workspace>\|clear]` | `GET`, `PUT`, `DELETE /api/org-section` (set and clear: admin scope) |
 | `routing [review [state]]`, `routing rules [ws]` | `GET /api/review/routing`, `GET /api/routing/rules` |
 | `routing classify [--sender --label --channel --title --text]` | `POST /api/routing/classify` |
 | `authority effective [ws] [--subject]` | `GET /api/authority/effective` |
@@ -181,7 +185,8 @@ It sends the key as a bearer token and logs one line to stderr naming the URL an
 
 Tools for the operating loop: `boot`, `brief`, `protocol`, `loops_list`, `loops_add`, `loops_close`, `search`, `assemble`, `read`, `capture`, `record` (note, lesson, decision, task), `close`, `authority_decide`, and `authority_effective`.
 They write the same records as the client and never name an actor.
-The earlier tools remain: `ask`, `grep`, `profile`, `add_memory`, `forget_memory`, `recall`, `wiki_get`, `workspaces`, and `render_context`.
+For chats: `session_commit`, `sessions_list`, `session_get`, and `org_policy` (`chat-memory.md`).
+The earlier tools remain: `ask`, `grep`, `profile`, `add_memory`, `forget_memory` (sends the workspace the memory belongs to), `recall`, `wiki_get`, `workspaces`, and `render_context`.
 
 Register it with a harness as a stdio server running `node <path>/apps/mcp/dist/index.js` with those environment variables.
 `npm test` builds the server and checks tool listing, routes, bearer authentication, and that keys never appear in results.

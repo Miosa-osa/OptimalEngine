@@ -217,13 +217,13 @@ value_opt() {
       tier | kind | owner | counterparty | due | due-before | reason | source-uri | state | cadence | \
       timezone | type | intent | scale | modality | path | action | resource | data-class | subject | \
       ttl | sender | domain | label | channel | text | since | name | workspaces | date | query | \
-      audience | justification | for | slug | days | bandwidth) return 0 ;;
+      audience | justification | for | slug | days | bandwidth | correlation-id | summary) return 0 ;;
   esac
   return 1
 }
 bool_opt() {
   case $1 in
-    verbose | pretty | raw | literal | disposable | force | help | version) return 0 ;;
+    verbose | pretty | raw | literal | disposable | force | help | version | transcript) return 0 ;;
   esac
   return 1
 }
@@ -839,6 +839,15 @@ Record
   note|lesson|decision|task|close "text" [ws] [--owner] [--due]
   remember "text" [ws]             durable memory
 
+Chat sessions and org policy
+  session commit <messages.json|-> [ws] --correlation-id <chat id> [--title] [--summary]
+                                   store a finished chat (a JSON array of {role, content, at?})
+                                   as an episode; what it learned goes to the claim review queue
+  session [list] [ws] [--correlation-id]   committed chats, newest first (alias: sessions)
+  session show <id> [ws] [--transcript]    one chat with the review status of what it learned
+  policy [ws]                      org policy the workspace follows (alias: org-policy)
+  org-section [show | set <workspace> | clear]   the tenant's org section (set and clear: admin scope)
+
 Route and authority
   routing [review [state]]         routing review queue
   routing rules [ws]
@@ -947,7 +956,7 @@ case $CMD in
   loops | loop)
     _sub=${1:-list}
     case $_sub in
-      list | ls | add | create | close | drop | reopen | extract) shift ;;
+      list | ls | add | create | close | drop | reopen | extract) [ $# -gt 0 ] && shift ;;
       *) _sub=list ;;
     esac
     case $_sub in
@@ -1077,6 +1086,74 @@ case $CMD in
     _text=$(need_text "${1:-}" "memory text") || exit
     use_ws "${2:-}"
     post /api/memory/remember "$(jobj content "$_text" workspace "$WS" @force true)"
+    ;;
+  session | sessions)
+    _sub=${1:-list}
+    case $_sub in
+      list | ls | commit | show | get) [ $# -gt 0 ] && shift ;;
+      *) _sub=list ;;
+    esac
+    case $_sub in
+      list | ls)
+        too_many $# 1 "session list"
+        use_ws "${1:-}"
+        get /api/sessions "" workspace "$WS" correlation_id "${O_correlation_id:-}" \
+          limit "${O_limit:-}" offset "${O_offset:-}"
+        ;;
+      commit)
+        too_many $# 2 "session commit"
+        [ -n "${1:-}" ] || usage_die "session commit needs a messages file (a JSON array) or -"
+        [ -n "${O_correlation_id:-}" ] || usage_die "session commit needs --correlation-id <chat id>"
+        if [ "$1" = - ]; then
+          _msgs=$(cat)
+        else
+          [ -r "$1" ] || usage_die "cannot read messages file $1"
+          _msgs=$(cat "$1")
+        fi
+        _msgs=$(trim "$_msgs")
+        case $_msgs in
+          '['*']') ;;
+          *) usage_die "the messages file must hold a JSON array of {role, content, at?}" ;;
+        esac
+        use_ws "${2:-}"
+        post /api/sessions/commit "$(jobj workspace "$WS" correlation_id "$O_correlation_id" \
+          title "${O_title:-}" summary "${O_summary:-}" source optimal-cli @messages "$_msgs")"
+        ;;
+      show | get)
+        too_many $# 2 "session show"
+        [ -n "${1:-}" ] || usage_die "missing session id"
+        case $1 in *[!A-Za-z0-9_-]*) usage_die "invalid session id" ;; esac
+        use_ws "${2:-}"
+        get "/api/sessions/$1" "" workspace "$WS" include "${O_transcript:+transcript}"
+        ;;
+    esac
+    ;;
+  policy | org-policy)
+    too_many $# 1 "$CMD"
+    use_ws "${1:-}"
+    get /api/org-policy "" workspace "$WS"
+    ;;
+  org-section)
+    _sub=${1:-show}
+    [ $# -gt 0 ] && shift
+    case $_sub in
+      show)
+        too_many $# 0 org-section
+        get /api/org-section ""
+        ;;
+      set)
+        too_many $# 1 "org-section set"
+        [ -n "${1:-}" ] || usage_die "org-section set needs a workspace id"
+        call PUT /api/org-section "$(jobj workspace_id "$1")"
+        emit "$R_BODY"
+        ;;
+      clear)
+        too_many $# 0 "org-section clear"
+        call DELETE /api/org-section ""
+        emit "$R_BODY"
+        ;;
+      *) usage_die "org-section needs show, set or clear" ;;
+    esac
     ;;
   routing)
     _sub=${1:-review}
