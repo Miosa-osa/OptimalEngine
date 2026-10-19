@@ -1,4 +1,6 @@
 import Config
 
-# Local dev: enable the HTTP API so the desktop can reach the engine.
-config :optimal_engine, :api, enabled: true, port: 4200, interface: "127.0.0.1"
+# The HTTP API is off unless asked for (OPTIMAL_API_ENABLED=true, see
+# config/runtime.exs). Every launcher sets it (scripts/run-engine.sh, the
+# release image, docker-compose), so a bare `mix run` in a checkout never
+# binds a port another Engine on this machine may be serving.
