@@ -3288,6 +3288,33 @@ defmodule OptimalEngine.API.Router do
   put("/api/org-section", do: OrgPolicyAPI.designate(conn))
   delete("/api/org-section", do: OrgPolicyAPI.clear(conn))
   get("/api/org-policy", do: OrgPolicyAPI.policy(conn))
+  # POST /api/reindex - enqueue a full reindex of the engine root. Writers that
+  # change files post an empty body; a request that arrives while a reindex is
+  # already queued or running returns that job instead of adding another.
+  # Admin only (PermissionPlug): a full crawl reads every workspace's files.
+  post "/api/reindex" do
+    body =
+      if is_map(conn.body_params) and not is_struct(conn.body_params),
+        do: conn.body_params,
+        else: %{}
+
+    workspace_id = body["workspace"] || conn.assigns[:workspace_id] || "default"
+
+    case OptimalEngine.Reindex.enqueue(workspace_id) do
+      {:ok, job, :queued} ->
+        conn
+        |> put_status(202)
+        |> json(%{status: "queued", job_id: job.id, kind: job.kind})
+
+      {:ok, job, :already_running} ->
+        conn
+        |> put_status(202)
+        |> json(%{status: "already_running", job_id: job.id, kind: job.kind})
+
+      {:error, reason} ->
+        send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
 
   forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
   forward("/api/data", to: OptimalEngine.API.AppDataRouter)

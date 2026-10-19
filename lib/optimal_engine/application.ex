@@ -111,7 +111,10 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Viability.Scheduler,
 
       # ── Analyses as scheduled jobs (promises, audits, usage, retention) ──
-      OptimalEngine.Analyses.Worker
+      OptimalEngine.Analyses.Worker,
+
+      # ── Reindex requests posted by writers after they change files ───────
+      OptimalEngine.Reindex.Worker
     ]
   end
 

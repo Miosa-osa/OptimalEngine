@@ -241,6 +241,30 @@ defmodule OptimalEngine.Jobs do
     with {:ok, rows} <- Store.raw_query(sql, params), do: {:ok, Enum.map(rows, &job_from_row/1)}
   end
 
+  @doc """
+  Return the workspace's queued or running job of a kind, if one exists.
+
+  Callers use this to coalesce repeated requests onto one job: a save loop that
+  asks for the same work ten times should not enqueue ten jobs that each refuse
+  to run because the first one already is.
+  """
+  @spec active(String.t(), String.t()) :: {:ok, job() | nil} | {:error, term()}
+  def active(workspace_id, kind) when is_binary(workspace_id) and is_binary(kind) do
+    case Store.raw_query(
+           """
+           SELECT #{@job_columns} FROM jobs
+           WHERE workspace_id = ?1 AND kind = ?2 AND status IN ('available', 'running')
+           ORDER BY inserted_at ASC, id ASC
+           LIMIT 1
+           """,
+           [workspace_id, kind]
+         ) do
+      {:ok, [row]} -> {:ok, job_from_row(row)}
+      {:ok, []} -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @doc "List a workspace's dead letters, newest first."
   @spec dead_letters(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def dead_letters(workspace_id, opts \\ []) when is_binary(workspace_id) do
