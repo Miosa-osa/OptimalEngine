@@ -414,6 +414,10 @@ defmodule OptimalEngine.API.RouterTest do
       assert {:ok, list_body} = Jason.decode(list_conn.resp_body)
       assert list_body["count"] == 1
 
+      # The answer names the pending claim, so a client can accept or reject it.
+      assert is_binary(first_body["pending_claim_id"])
+      assert Enum.map(list_body["claims"], & &1["id"]) == [first_body["pending_claim_id"]]
+
       duplicate_conn =
         request(:post, "/api/memory/remember", %{
           "workspace" => workspace_id,
