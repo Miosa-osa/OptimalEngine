@@ -19,7 +19,11 @@ env:
 
 jobs:
   test:
-    name: test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    # Stable job names: branch protection requires these two checks, so a
+    # toolchain move must not silently retire a required check the way
+    # "test (Elixir 1.17.3 / OTP 26.2)" did. The versions are in the matrix
+    # below and in the log, not in the check name.
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     # A cold cache (any mix.lock change) compiles RocksDB from source: about
     # 12 minutes on the 1.19 / OTP 28 job before the tests start.
@@ -33,12 +37,14 @@ jobs:
           # Formatting is checked here, with the formatter contributors use.
           - otp: "28.1.1"
             elixir: "1.19.5"
+            name: test-current
             release: true
           # The documented floor (`mix.exs` elixir: "~> 1.17"). OTP 27 is the
           # oldest runtime the HTTP stack compiles on (cowlib 2.21 uses maybe
           # expressions).
           - otp: "27.3"
             elixir: "1.17.3"
+            name: test-floor
             release: false
 
     steps:
