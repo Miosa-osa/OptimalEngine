@@ -84,3 +84,16 @@ GET  /api/jobs?workspace=<id>&status=dead
 GET  /api/jobs/dead?workspace=<id>
 POST /api/jobs/dead/<id>/replay {"workspace": "<id>"}     (admin)
 ```
+
+## Reindex Requests
+
+A writer that changes files in the engine root asks for a crawl instead of running one inline.
+
+```
+POST /api/reindex {"workspace": "<id>"}     (admin; returns 202)
+```
+
+The request becomes a durable `reindex` job, so it survives a restart and retries on failure.
+While one reindex is queued or running, another request returns that job with `status: "already_running"` instead of adding a second one.
+The job completes once `OptimalEngine.Pipeline.Indexer` has started the crawl, not when the crawl finishes; `GET /api/jobs?workspace=<id>` shows the job and `GET /api/status` reports indexing progress.
+The crawl reads the whole engine root, not one workspace, which is why the route needs the `admin` scope.

@@ -27,6 +27,7 @@ config :optimal_engine, :api_rate_limit,
 # Viability passes and analyses run on demand in tests.
 config :optimal_engine, :viability_interval_ms, 0
 config :optimal_engine, :analyses_interval_ms, 0
+config :optimal_engine, :reindex_interval_ms, 0
 
 config :optimal_engine, :metric_history, enabled: false
 config :optimal_engine, :session, llm_summary: false, llm_extraction: false
