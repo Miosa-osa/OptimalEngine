@@ -139,6 +139,28 @@ defmodule OptimalEngine.Storage.S3Test do
       on_exit(fn -> File.rm_rf(tmp) end)
     end
 
+    test "get_object_to_file streams to disk and leaves nothing behind on a miss", %{stub: stub} do
+      tmp = Path.join(System.tmp_dir!(), "s3-stream-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf(tmp) end)
+
+      bytes = :crypto.strong_rand_bytes(3 * 1_048_576 + 17)
+      key = S3.object_key(["streamed", "large.bin"])
+      assert {:ok, _} = S3.put_object(key, bytes, multipart_threshold: byte_size(bytes) + 1)
+      assert S3Stub.object_body(stub.agent, key) == bytes
+
+      target = Path.join([tmp, "nested", "large.bin"])
+      assert {:ok, downloaded} = S3.get_object_to_file(key, target)
+      assert downloaded.path == target
+      assert downloaded.size_bytes == byte_size(bytes)
+      assert downloaded.checksum_sha256 == S3.sha256(bytes)
+      refute Map.has_key?(downloaded, :body)
+      assert File.read!(target) == bytes
+
+      missing = Path.join(tmp, "missing.bin")
+      assert {:error, :not_found} = S3.get_object_to_file("streamed/absent.bin", missing)
+      assert Path.wildcard(Path.join(tmp, "missing.bin*")) == []
+    end
+
     test "the stub rejects a request signed with the wrong secret", %{stub: stub} do
       System.put_env("OPTIMAL_S3_SECRET_ACCESS_KEY", "not-the-stub-secret")
       assert {:error, :access_denied} = S3.put_object("rejected/key.txt", "bytes")

@@ -111,7 +111,8 @@ mix optimal.wiki check node-first-project --workspace default:my-workspace
 | `mix optimal.api` | Start the HTTP API. |
 | `mix optimal.graph_ui` | Launch the graph visualizer against a running API. |
 | `mix optimal.compliance` | Compliance workflows. |
-| `mix optimal.backup` | Backup runtime state. |
+| `mix optimal.backup` | Take a verified backup; `--offsite` encrypts it with `OPTIMAL_BACKUP_KEY` and ships it; `--list-offsite` and `--list-offsite-objects` show the copies. |
+| `mix optimal.restore` | Restore a local backup, a cataloged offsite copy (`--from-offsite`), or a sealed object without a catalog (`--from-offsite-key`). |
 | `mix optimal.migrate` | Run/verify store migrations. |
 
 Tool, MCP, API, connector, script, and model outputs should flow through

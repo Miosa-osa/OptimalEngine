@@ -204,6 +204,46 @@ if interval = System.get_env("OPTIMAL_ANALYSES_INTERVAL_MS") do
   config :optimal_engine, :analyses_interval_ms, String.to_integer(interval)
 end
 
+# Offsite backups: how often a verified backup is taken, encrypted with
+# OPTIMAL_BACKUP_KEY, and shipped to the object store (0 or unset disables),
+# and how many scheduled copies are kept offsite and locally.
+offsite_interval = String.trim(System.get_env("OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS", ""))
+
+if offsite_interval != "" do
+  interval = String.to_integer(offsite_interval)
+
+  unless interval == 0 or interval >= 60_000,
+    do:
+      raise(
+        ArgumentError,
+        "OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS must be 0 (off) or at least 60000"
+      )
+
+  config :optimal_engine, :offsite_backup_interval_ms, interval
+end
+
+offsite_keep = String.trim(System.get_env("OPTIMAL_OFFSITE_BACKUP_KEEP", ""))
+
+if offsite_keep != "" do
+  keep = String.to_integer(offsite_keep)
+
+  unless keep >= 1,
+    do: raise(ArgumentError, "OPTIMAL_OFFSITE_BACKUP_KEEP must be at least 1")
+
+  config :optimal_engine, :offsite_backup_keep, keep
+end
+
+offsite_keep_local = String.trim(System.get_env("OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL", ""))
+
+if offsite_keep_local != "" do
+  keep_local = String.to_integer(offsite_keep_local)
+
+  unless keep_local >= 0,
+    do: raise(ArgumentError, "OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL must be 0 or more")
+
+  config :optimal_engine, :offsite_backup_keep_local, keep_local
+end
+
 # Viability: how often snapshots and the weekly audit are brought up to date.
 if interval = System.get_env("OPTIMAL_VIABILITY_INTERVAL_MS") do
   config :optimal_engine, :viability_interval_ms, String.to_integer(interval)

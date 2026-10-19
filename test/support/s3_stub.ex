@@ -550,13 +550,15 @@ defmodule OptimalEngine.TestSupport.S3Stub do
 
   defp canonical_query(""), do: ""
 
+  # The query arrives percent-encoded; S3 decodes each name and value and
+  # encodes it again, so an encoded "/" in a prefix is not encoded twice.
   defp canonical_query(query_string) do
     query_string
     |> String.split("&")
     |> Enum.map(fn pair ->
       case String.split(pair, "=", parts: 2) do
-        [name, value] -> {encode(name), encode(value)}
-        [name] -> {encode(name), ""}
+        [name, value] -> {encode(URI.decode(name)), encode(URI.decode(value))}
+        [name] -> {encode(URI.decode(name)), ""}
       end
     end)
     |> Enum.sort()
