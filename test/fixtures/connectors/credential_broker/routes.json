@@ -1,0 +1,21 @@
+{
+  "kind": "credential_broker",
+  "note": "The shape of an outside broker answering a connector's credential request. Invented data only.",
+  "routes": [
+    {
+      "name": "short_lived_credential",
+      "match": {
+        "method": "POST",
+        "contains": "connect.example.com/api/credentials"
+      },
+      "status": 200,
+      "body": {
+        "credentials": {
+          "api_key": "example-broker-issued-key",
+          "account": "jane@example.com"
+        },
+        "expires_at": "2026-10-18T12:05:00Z"
+      }
+    }
+  ]
+}

@@ -228,13 +228,17 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
           String.contains?(url, "/messages?") ->
             httpc_ok(%{"messages" => [], "nextPageToken" => nil})
 
+          # A full sync parks the cursor on the mailbox's current historyId.
+          String.contains?(url, "/profile") ->
+            httpc_ok(%{"historyId" => "900001"})
+
           true ->
             httpc_ok(%{})
         end
       end
 
       with_mock(base_mock, fn ->
-        assert {:ok, %{signals: _, cursor: _}} =
+        assert {:ok, %{signals: _, cursor: "900001"}} =
                  OptimalEngine.Connectors.Adapters.Gmail.sync(@gmail_state, nil)
 
         assert :ets.lookup(token_called, :called) == [{:called, true}]
@@ -409,37 +413,59 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
       :ets.delete(calls)
     end
 
-    test "sync/2 skips channels that return ratelimited and continues (channel-level isolation)" do
-      # Slack sync uses Enum.reduce -- per-channel rate limit errors are swallowed.
+    test "sync/2 reports a rate limit instead of an empty success" do
+      # A rate limit before anything was read is returned to the Runner, which
+      # backs off and retries. Reporting it as an empty sync would hide it.
       mock = fn _url, _opts ->
         httpc_ok(%{"ok" => false, "error" => "ratelimited"})
       end
 
       with_mock(mock, fn ->
-        assert {:ok, %{signals: [], cursor: _}} =
+        assert {:error, :rate_limited} =
                  OptimalEngine.Connectors.Adapters.Slack.sync(@slack_state, nil)
       end)
     end
 
-    test "sync/2 encodes cursor as channel_id:oldest_ts" do
+    test "sync/2 returns {:error, :auth_expired} on HTTP 401" do
+      mock = fn _url, _opts -> httpc_status(401) end
+
+      with_mock(mock, fn ->
+        assert {:error, :auth_expired} =
+                 OptimalEngine.Connectors.Adapters.Slack.sync(@slack_state, nil)
+      end)
+    end
+
+    test "sync/2 returns {:error, :rate_limited} on HTTP 429" do
+      mock = fn _url, _opts -> httpc_status(429) end
+
+      with_mock(mock, fn ->
+        assert {:error, :rate_limited} =
+                 OptimalEngine.Connectors.Adapters.Slack.sync(@slack_state, nil)
+      end)
+    end
+
+    test "sync/2 keeps one position per channel in the cursor" do
       mock = fn url, _opts ->
-        if String.contains?(url, "conversations.history") do
-          httpc_ok(%{
-            "ok" => true,
-            "messages" => [%{"ts" => "1700000001.000000", "text" => "hi", "user" => "U1"}],
-            "has_more" => true
-          })
-        else
-          httpc_ok(%{"ok" => true, "messages" => [], "has_more" => false})
-        end
+        ts =
+          if String.contains?(url, "channel=C01"),
+            do: "1700000001.000000",
+            else: "1700000002.000000"
+
+        httpc_ok(%{
+          "ok" => true,
+          "messages" => [%{"ts" => ts, "text" => "hi", "user" => "U1"}],
+          "has_more" => false
+        })
       end
 
       with_mock(mock, fn ->
-        assert {:ok, %{cursor: cursor}} =
+        assert {:ok, %{signals: [_, _], cursor: cursor}} =
                  OptimalEngine.Connectors.Adapters.Slack.sync(@slack_state, nil)
 
-        # cursor is "channel_id:oldest_ts" or "channel_id:"
-        assert is_binary(cursor) or is_nil(cursor)
+        assert Jason.decode!(cursor) == %{
+                 "C01" => %{"oldest" => "1700000001.000000"},
+                 "C02" => %{"oldest" => "1700000002.000000"}
+               }
       end)
     end
 
@@ -540,7 +566,7 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
       :ets.delete(calls)
     end
 
-    test "sync/2 propagates cursor as last_edited_time" do
+    test "sync/2 parks the cursor on the latest last_edited_time of each database" do
       page = %{
         "id" => "page-1",
         "last_edited_time" => "2026-06-01T00:00:00Z",
@@ -557,17 +583,19 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
         assert {:ok, %{cursor: cursor, signals: signals}} =
                  OptimalEngine.Connectors.Adapters.Notion.sync(@notion_state, nil)
 
-        assert cursor == "2026-06-01T00:00:00Z"
+        assert Jason.decode!(cursor) == %{"db-1" => "2026-06-01T00:00:00Z"}
         assert length(signals) == 1
       end)
     end
 
-    test "sync/2 skips databases that return 401 and continues (db-level error isolation)" do
-      # Notion sync uses Enum.reduce -- per-database HTTP errors are skipped.
+    test "sync/2 returns :auth_expired when the token is rejected, not an empty success" do
+      # A 401 is a property of the token, not of one database: it ends the sync
+      # so the Runner can refresh the credential. Failures particular to one
+      # database (404, 403) are skipped; see test/connectors/notion_test.exs.
       mock = fn _url, _opts -> httpc_status(401) end
 
       with_mock(mock, fn ->
-        assert {:ok, %{signals: [], cursor: _}} =
+        assert {:error, :auth_expired} =
                  OptimalEngine.Connectors.Adapters.Notion.sync(@notion_state, nil)
       end)
     end
@@ -658,11 +686,24 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
             String.contains?(url, "startPageToken") ->
               httpc_ok(%{"startPageToken" => "start_tok_1"})
 
+            # A Google Doc has text to export; the PDF has none, so it is not
+            # emitted (an empty-content Signal is dropped by the intake sink).
+            String.contains?(url, "/files/f1/export") ->
+              {:ok,
+               {{~c"HTTP/1.1", 200, ~c"OK"}, [{~c"content-type", ~c"text/markdown"}],
+                "# Notes\n\nQuarterly plan."}}
+
             String.contains?(url, "/files") ->
               httpc_ok(%{
                 "files" => [
                   %{
                     "id" => "f1",
+                    "name" => "Notes",
+                    "mimeType" => "application/vnd.google-apps.document",
+                    "modifiedTime" => "2026-01-01T00:00:00Z"
+                  },
+                  %{
+                    "id" => "f2",
                     "name" => "doc.pdf",
                     "mimeType" => "application/pdf",
                     "modifiedTime" => "2026-01-01T00:00:00Z"
@@ -681,7 +722,8 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
 
         assert length(signals) == 1
         [sig] = signals
-        assert sig.title == "doc.pdf"
+        assert sig.title == "Notes"
+        assert sig.content == "# Notes\n\nQuarterly plan."
       end)
 
       :ets.delete(calls)

@@ -42,9 +42,10 @@ defmodule Mix.Tasks.Optimal.Connector do
   end
 
   defp do_list do
-    IO.puts("Available adapters (14 total):\n")
+    summary = Registry.summary()
+    IO.puts("Available adapters (#{length(summary)} total):\n")
 
-    Registry.summary()
+    summary
     |> Enum.each(fn {kind, name, auth} ->
       IO.puts("  #{pad(kind)} #{pad(name, 22)} auth=#{auth}")
     end)

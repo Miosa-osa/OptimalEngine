@@ -1,0 +1,259 @@
+{
+  "kind": "drive",
+  "note": "Recorded shapes of the Google Drive v3 API: token refresh, changes.getStartPageToken, a two-page files.list, files.export for the Google Workspace types, files.get?alt=media for a text file, an export refused as too large, and a two-page changes.list that ends in newStartPageToken. Invented data only.",
+  "routes": [
+    {
+      "name": "token_refresh",
+      "match": {
+        "method": "POST",
+        "contains": "oauth2.googleapis.com/token"
+      },
+      "status": 200,
+      "body": {
+        "access_token": "ya29.example-access-token",
+        "expires_in": 3599,
+        "token_type": "Bearer"
+      }
+    },
+    {
+      "name": "start_page_token",
+      "match": {
+        "method": "GET",
+        "contains": "/changes/startPageToken"
+      },
+      "status": 200,
+      "body": {
+        "kind": "drive#startPageToken",
+        "startPageToken": "7001"
+      }
+    },
+    {
+      "name": "files_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/drive/v3/files?"
+      },
+      "status": 200,
+      "body": {
+        "kind": "drive#fileList",
+        "incompleteSearch": false,
+        "nextPageToken": "FILES-PAGE-2",
+        "files": [
+          {
+            "id": "doc-0001",
+            "name": "Example Co kickoff notes",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-10-16T09:30:00.000Z",
+            "trashed": false
+          },
+          {
+            "id": "sheet-0001",
+            "name": "Example Co pipeline",
+            "mimeType": "application/vnd.google-apps.spreadsheet",
+            "modifiedTime": "2026-10-15T14:00:00.000Z",
+            "trashed": false
+          },
+          {
+            "id": "pdf-0001",
+            "name": "Signed order form.pdf",
+            "mimeType": "application/pdf",
+            "modifiedTime": "2026-10-14T11:00:00.000Z",
+            "size": "184320",
+            "trashed": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "files_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "pageToken=FILES-PAGE-2"
+      },
+      "status": 200,
+      "body": {
+        "kind": "drive#fileList",
+        "incompleteSearch": false,
+        "files": [
+          {
+            "id": "slides-0001",
+            "name": "Example Co proposal deck",
+            "mimeType": "application/vnd.google-apps.presentation",
+            "modifiedTime": "2026-10-13T16:45:00.000Z",
+            "trashed": false
+          },
+          {
+            "id": "txt-0001",
+            "name": "call-notes.txt",
+            "mimeType": "text/plain",
+            "modifiedTime": "2026-10-12T08:15:00.000Z",
+            "size": "112",
+            "trashed": false
+          },
+          {
+            "id": "folder-0001",
+            "name": "Example Co",
+            "mimeType": "application/vnd.google-apps.folder",
+            "modifiedTime": "2026-10-11T10:00:00.000Z",
+            "trashed": false
+          },
+          {
+            "id": "doc-big",
+            "name": "Company handbook",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-10-10T10:00:00.000Z",
+            "trashed": false
+          },
+          {
+            "id": "photo-0001",
+            "name": "Site visit.jpg",
+            "mimeType": "image/jpeg",
+            "modifiedTime": "2026-10-09T10:00:00.000Z",
+            "size": "2048000",
+            "trashed": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "export_doc_0001",
+      "match": {
+        "method": "GET",
+        "contains": "/files/doc-0001/export"
+      },
+      "status": 200,
+      "body": "# Example Co kickoff notes\n\nJane Example will send the signed order form by Friday.\n\n- Delivery address to be confirmed\n- Invoice INV-0007 is due 2026-11-01\n"
+    },
+    {
+      "name": "export_sheet_0001",
+      "match": {
+        "method": "GET",
+        "contains": "/files/sheet-0001/export"
+      },
+      "status": 200,
+      "body": "Deal,Stage,Owner\nExample Co order,Proposal,Jane Example\nSample Ltd renewal,Negotiation,Sam Sample\n"
+    },
+    {
+      "name": "export_slides_0001",
+      "match": {
+        "method": "GET",
+        "contains": "/files/slides-0001/export"
+      },
+      "status": 200,
+      "body": "Example Co proposal\n\nScope: onboarding and delivery for the first quarter.\n"
+    },
+    {
+      "name": "download_txt_0001",
+      "match": {
+        "method": "GET",
+        "contains": "/files/txt-0001?alt=media"
+      },
+      "status": 200,
+      "body": "Call with Sam Sample: confirmed the delivery address and the Friday deadline.\n"
+    },
+    {
+      "name": "export_doc_big",
+      "match": {
+        "method": "GET",
+        "contains": "/files/doc-big/export"
+      },
+      "status": 403,
+      "body": {
+        "error": {
+          "code": 403,
+          "message": "This file is too large to be exported.",
+          "errors": [
+            {
+              "message": "This file is too large to be exported.",
+              "domain": "global",
+              "reason": "exportSizeLimitExceeded"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "changes_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "pageToken=7001"
+      },
+      "status": 200,
+      "body": {
+        "kind": "drive#changeList",
+        "nextPageToken": "7002",
+        "changes": [
+          {
+            "kind": "drive#change",
+            "changeType": "file",
+            "removed": false,
+            "fileId": "doc-0001",
+            "file": {
+              "id": "doc-0001",
+              "name": "Example Co kickoff notes",
+              "mimeType": "application/vnd.google-apps.document",
+              "modifiedTime": "2026-10-17T08:00:00.000Z",
+              "trashed": false
+            }
+          },
+          {
+            "kind": "drive#change",
+            "changeType": "file",
+            "removed": true,
+            "fileId": "gone-0001"
+          }
+        ]
+      }
+    },
+    {
+      "name": "changes_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "pageToken=7002"
+      },
+      "status": 200,
+      "body": {
+        "kind": "drive#changeList",
+        "newStartPageToken": "7003",
+        "changes": [
+          {
+            "kind": "drive#change",
+            "changeType": "file",
+            "removed": false,
+            "fileId": "doc-0003",
+            "file": {
+              "id": "doc-0003",
+              "name": "Delivery schedule",
+              "mimeType": "application/vnd.google-apps.document",
+              "modifiedTime": "2026-10-17T09:30:00.000Z",
+              "starred": true,
+              "trashed": false
+            }
+          },
+          {
+            "kind": "drive#change",
+            "changeType": "file",
+            "removed": false,
+            "fileId": "trashed-0001",
+            "file": {
+              "id": "trashed-0001",
+              "name": "Old draft",
+              "mimeType": "application/vnd.google-apps.document",
+              "modifiedTime": "2026-10-17T09:45:00.000Z",
+              "trashed": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "export_doc_0003",
+      "match": {
+        "method": "GET",
+        "contains": "/files/doc-0003/export"
+      },
+      "status": 200,
+      "body": "# Delivery schedule\n\nDelivery to the Example Co warehouse is booked for Thursday.\n"
+    }
+  ]
+}

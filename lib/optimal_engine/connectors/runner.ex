@@ -20,7 +20,7 @@ defmodule OptimalEngine.Connectors.Runner do
   `OptimalEngine.Pipeline.Intake.ingest_signals/1`.
   """
 
-  alias OptimalEngine.Connectors.{AssetIngest, Credential, Registry}
+  alias OptimalEngine.Connectors.{AssetIngest, Credential, CredentialSource, Registry, Routing}
   alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
@@ -83,14 +83,21 @@ defmodule OptimalEngine.Connectors.Runner do
   defp run_raw(connector_id, opts) do
     with {:ok, row} <- fetch_connector(connector_id),
          :ok <- ensure_enabled(row),
-         {:ok, mod} <- lookup_adapter(row.kind, opts),
-         {:ok, state} <- init_adapter(mod, row.config) do
+         {:ok, mod} <- lookup_adapter(row.kind, opts) do
+      # The run row is opened before the adapter is initialised so that a
+      # failure to initialise — a broker that refused, config the adapter
+      # rejects, a credential the Engine cannot decrypt — still leaves one
+      # audit row naming the reason, as this module promises.
       run_id = start_run_row(row)
 
       result =
-        row
-        |> do_sync_with_retries(mod, state, opts)
-        |> finalize(row, run_id, opts)
+        case init_adapter(mod, row) do
+          {:ok, state} ->
+            row |> do_sync_with_retries(mod, state, opts) |> finalize(row, run_id, opts)
+
+          {:error, reason} ->
+            finalize({:error, reason}, row, run_id, opts)
+        end
 
       {:ok, result}
     end
@@ -329,14 +336,31 @@ defmodule OptimalEngine.Connectors.Runner do
     ArgumentError -> {:error, :unknown_kind}
   end
 
-  defp init_adapter(mod, config) do
-    config = maybe_decrypt_credentials(config)
+  # Credentials are resolved here, just before the adapter is initialised, and
+  # only for the length of this sync cycle: from the encrypted envelope for a
+  # self-hosted connector, or from the outside broker for a managed one. A
+  # broker that refuses or is unreachable fails the sync before any adapter
+  # code runs, so the operator sees the broker's reason rather than a
+  # confusing "missing credentials" from the adapter.
+  defp init_adapter(mod, row) do
+    config = maybe_decrypt_credentials(row.config)
 
-    case mod.init(config) do
-      {:ok, state} -> {:ok, state}
-      {:error, _} = err -> err
-      other -> {:error, {:bad_init_return, other}}
+    with {:ok, config} <- CredentialSource.hydrate(config, credential_scope(row)) do
+      case mod.init(config) do
+        {:ok, state} -> {:ok, state}
+        {:error, _} = err -> err
+        other -> {:error, {:bad_init_return, other}}
+      end
     end
+  end
+
+  defp credential_scope(row) do
+    %{
+      id: row.id,
+      kind: row.kind,
+      tenant_id: row.tenant_id,
+      workspace_id: row.workspace_id
+    }
   end
 
   defp register_governed_connector_tool(row, mod, opts) do
@@ -568,7 +592,9 @@ defmodule OptimalEngine.Connectors.Runner do
     sink.(signals, %{
       workspace_id: row.workspace_id,
       tenant_id: row.tenant_id,
-      connector_id: row.id
+      connector_id: row.id,
+      kind: row.kind,
+      config: row.config
     })
   end
 
@@ -606,7 +632,8 @@ defmodule OptimalEngine.Connectors.Runner do
   @spec upsert_row(map()) :: {:ok, String.t()} | {:error, term()}
   def upsert_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
-    with {:ok, sanitized} <- encrypt_credentials(config) do
+    with :ok <- Routing.validate_config(config),
+         {:ok, sanitized} <- encrypt_credentials(config) do
       write_row(id, kind, sanitized, attrs)
     end
   end
@@ -643,11 +670,16 @@ defmodule OptimalEngine.Connectors.Runner do
   # one envelope. Without a master key the row is refused: auth material is
   # never written to the connectors table in plaintext.
   defp encrypt_credentials(config) do
-    {string_creds, config} = Map.pop(config, "credentials")
-    {atom_creds, config} = Map.pop(config, :credentials)
+    # The persistable check runs before the credentials are lifted out, so a
+    # broker-sourced connector that also carries auth material is refused
+    # rather than quietly storing a second copy of the account.
+    with :ok <- CredentialSource.check_persistable(config) do
+      {string_creds, config} = Map.pop(config, "credentials")
+      {atom_creds, config} = Map.pop(config, :credentials)
 
-    with {:ok, creds} <- merge_credentials(atom_creds, string_creds) do
-      seal_credentials(config, creds)
+      with {:ok, creds} <- merge_credentials(atom_creds, string_creds) do
+        seal_credentials(config, creds)
+      end
     end
   end
 

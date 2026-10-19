@@ -452,6 +452,17 @@
       "owns": []
     },
     {
+      "id": "docs-guides-connectors",
+      "path": "docs/guides/connectors.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-18",
+      "owns": []
+    },
+    {
       "id": "docs-guides-cli",
       "path": "docs/guides/cli.md",
       "kind": "reference",

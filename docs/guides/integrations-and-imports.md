@@ -209,3 +209,10 @@ resolve organization/workspace scope
 
 If an agent cannot determine receiver, channel, owning Node, or source objects
 for a package, it should ask before writing package files.
+
+## Connector sync
+
+A connector is the running form of a connection: the adapter list, the config
+fields, the two credential sources (the Engine's encrypted store, or an outside
+broker such as MIOSA Connect), and what happens to a Signal after a connector
+emits it are in [Connectors](connectors.md).

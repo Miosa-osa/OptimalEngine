@@ -1,0 +1,155 @@
+{
+  "kind": "stripe",
+  "note": "Recorded shapes of the Stripe list API: a two-page customer list paged with starting_after, a one-page invoice list (one outstanding, one paid), a one-page charge list, and a resume id that Stripe no longer knows. Invented data only.",
+  "routes": [
+    {
+      "name": "customers_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/customers?limit=100"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "object": "list",
+        "url": "/v1/customers",
+        "has_more": true,
+        "data": [
+          {
+            "id": "cus_0001",
+            "object": "customer",
+            "email": "jane@example.com",
+            "name": "Jane Example",
+            "created": 1793016000,
+            "description": "Example Co primary contact"
+          },
+          {
+            "id": "cus_0002",
+            "object": "customer",
+            "email": "sam@example.com",
+            "name": "Sam Sample",
+            "created": 1793019600,
+            "description": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "customers_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/customers?limit=100&starting_after=cus_0002"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "object": "list",
+        "url": "/v1/customers",
+        "has_more": false,
+        "data": [
+          {
+            "id": "cus_0003",
+            "object": "customer",
+            "email": "accounts@example.com",
+            "name": null,
+            "created": 1793023200,
+            "description": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "customers_resume_id_gone",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/customers?limit=100&starting_after=cus_gone"
+      },
+      "status": 400,
+      "body": {
+        "error": {
+          "type": "invalid_request_error",
+          "code": "resource_missing",
+          "message": "No such customer: 'cus_gone'"
+        }
+      }
+    },
+    {
+      "name": "invoices_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/invoices?limit=100"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "url": "/v1/invoices",
+        "has_more": false,
+        "data": [
+          {
+            "id": "in_0001",
+            "object": "invoice",
+            "number": "INV-0007",
+            "customer_email": "jane@example.com",
+            "customer_name": "Jane Example",
+            "amount_due": 120000,
+            "amount_paid": 0,
+            "currency": "usd",
+            "status": "open",
+            "created": 1793016000,
+            "due_date": 1793491200,
+            "hosted_invoice_url": "https://invoice.example.com/i/in_0001"
+          },
+          {
+            "id": "in_0002",
+            "object": "invoice",
+            "number": "INV-0006",
+            "customer_email": "sam@example.com",
+            "customer_name": "Sam Sample",
+            "amount_due": 50000,
+            "amount_paid": 50000,
+            "currency": "usd",
+            "status": "paid",
+            "created": 1793019600,
+            "due_date": 1792022400,
+            "hosted_invoice_url": "https://invoice.example.com/i/in_0002"
+          }
+        ]
+      }
+    },
+    {
+      "name": "charges_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/v1/charges?limit=100"
+      },
+      "status": 200,
+      "body": {
+        "object": "list",
+        "url": "/v1/charges",
+        "has_more": false,
+        "data": [
+          {
+            "id": "ch_0001",
+            "object": "charge",
+            "amount": 50000,
+            "currency": "usd",
+            "status": "succeeded",
+            "created": 1793019600,
+            "receipt_email": "sam@example.com",
+            "description": "Example Co subscription"
+          },
+          {
+            "id": "ch_0002",
+            "object": "charge",
+            "amount": 2500,
+            "currency": "usd",
+            "status": "failed",
+            "created": 1793023200,
+            "receipt_email": "jane@example.com",
+            "description": null
+          }
+        ]
+      }
+    }
+  ]
+}

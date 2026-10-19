@@ -1,0 +1,218 @@
+{
+  "kind": "gmail",
+  "note": "Recorded shapes of the Gmail API: token refresh, a two-page message list, message fetch with metadata headers, profile historyId, and an incremental history poll. Invented data only.",
+  "routes": [
+    {
+      "name": "token_refresh",
+      "match": {
+        "method": "POST",
+        "contains": "oauth2.googleapis.com/token"
+      },
+      "status": 200,
+      "body": {
+        "access_token": "ya29.example-access-token",
+        "expires_in": 3599,
+        "token_type": "Bearer"
+      }
+    },
+    {
+      "name": "messages_list_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/messages?maxResults=100"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "messages": [
+          {
+            "id": "msg-0001",
+            "threadId": "thread-0001"
+          },
+          {
+            "id": "msg-0002",
+            "threadId": "thread-0002"
+          }
+        ],
+        "nextPageToken": "PAGE2",
+        "resultSizeEstimate": 3
+      }
+    },
+    {
+      "name": "messages_list_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "pageToken=PAGE2"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "messages": [
+          {
+            "id": "msg-0003",
+            "threadId": "thread-0003"
+          }
+        ],
+        "resultSizeEstimate": 3
+      }
+    },
+    {
+      "name": "message_msg_0001",
+      "match": {
+        "method": "GET",
+        "contains": "/messages/msg-0001"
+      },
+      "status": 200,
+      "body": {
+        "id": "msg-0001",
+        "threadId": "thread-0001",
+        "internalDate": "1793016000000",
+        "snippet": "Please send the signed order form by Friday.",
+        "payload": {
+          "headers": [
+            {
+              "name": "Subject",
+              "value": "Order form for Example Co"
+            },
+            {
+              "name": "From",
+              "value": "Jane Example <jane@example.com>"
+            },
+            {
+              "name": "Date",
+              "value": "Sun, 26 Oct 2026 09:00:00 +0000"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "message_msg_0002",
+      "match": {
+        "method": "GET",
+        "contains": "/messages/msg-0002"
+      },
+      "status": 200,
+      "body": {
+        "id": "msg-0002",
+        "threadId": "thread-0002",
+        "internalDate": "1793019600000",
+        "snippet": "Invoice INV-0007 payment is due 2026-11-01.",
+        "payload": {
+          "headers": [
+            {
+              "name": "Subject",
+              "value": "Invoice INV-0007 overdue"
+            },
+            {
+              "name": "From",
+              "value": "Accounts <accounts@example.com>"
+            },
+            {
+              "name": "Date",
+              "value": "Sun, 26 Oct 2026 10:00:00 +0000"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "message_msg_0003",
+      "match": {
+        "method": "GET",
+        "contains": "/messages/msg-0003"
+      },
+      "status": 200,
+      "body": {
+        "id": "msg-0003",
+        "threadId": "thread-0003",
+        "internalDate": "1793023200000",
+        "snippet": "Thanks, noted.",
+        "payload": {
+          "headers": [
+            {
+              "name": "Subject",
+              "value": "Re: kickoff"
+            },
+            {
+              "name": "From",
+              "value": "Sam Sample <sam@example.com>"
+            },
+            {
+              "name": "Date",
+              "value": "Sun, 26 Oct 2026 11:00:00 +0000"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "profile",
+      "match": {
+        "method": "GET",
+        "contains": "/profile"
+      },
+      "status": 200,
+      "body": {
+        "emailAddress": "jane@example.com",
+        "messagesTotal": 3,
+        "threadsTotal": 3,
+        "historyId": "900001"
+      }
+    },
+    {
+      "name": "history_poll",
+      "match": {
+        "method": "GET",
+        "contains": "/history?startHistoryId="
+      },
+      "status": 200,
+      "body": {
+        "history": [
+          {
+            "id": "900002",
+            "messagesAdded": [
+              {
+                "message": {
+                  "id": "msg-0004",
+                  "threadId": "thread-0004"
+                }
+              }
+            ]
+          }
+        ],
+        "historyId": "900002"
+      }
+    },
+    {
+      "name": "message_msg_0004",
+      "match": {
+        "method": "GET",
+        "contains": "/messages/msg-0004"
+      },
+      "status": 200,
+      "body": {
+        "id": "msg-0004",
+        "threadId": "thread-0004",
+        "internalDate": "1793026800000",
+        "snippet": "Can you confirm the delivery address please?",
+        "payload": {
+          "headers": [
+            {
+              "name": "Subject",
+              "value": "Delivery address"
+            },
+            {
+              "name": "From",
+              "value": "Jane Example <jane@example.com>"
+            },
+            {
+              "name": "Date",
+              "value": "Sun, 26 Oct 2026 12:00:00 +0000"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

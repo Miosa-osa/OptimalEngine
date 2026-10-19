@@ -1,0 +1,105 @@
+{
+  "kind": "beehiiv",
+  "note": "Recorded shapes of the beehiiv API: a two-page post list and a one-page subscription list. The recording models a publication whose page size is capped at 2, which keeps the two-page walk small; the adapter pages by total_pages. Invented data only.",
+  "routes": [
+    {
+      "name": "posts_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/posts?limit=100&page=1"
+      },
+      "status": 200,
+      "body": {
+        "data": [
+          {
+            "id": "post_0001",
+            "title": "Example Co launch notes",
+            "subtitle": "What shipped this quarter",
+            "preview_text": "A short look at what Example Co shipped this quarter.",
+            "web_url": "https://news.example.com/p/launch-notes",
+            "publish_date": 1792486800,
+            "status": "confirmed",
+            "content_tags": [
+              "product",
+              "updates"
+            ]
+          },
+          {
+            "id": "post_0002",
+            "title": "Five lessons from customers",
+            "subtitle": "<p>Notes from <strong>Example Co</strong> customer calls</p>",
+            "preview_text": "",
+            "web_url": "https://news.example.com/p/five-lessons",
+            "publish_date": 1792659600,
+            "status": "confirmed",
+            "content_tags": []
+          }
+        ],
+        "page": 1,
+        "limit": 2,
+        "total_results": 3,
+        "total_pages": 2
+      }
+    },
+    {
+      "name": "posts_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "/posts?limit=100&page=2"
+      },
+      "status": 200,
+      "body": {
+        "data": [
+          {
+            "id": "post_0003",
+            "title": "Roadmap preview",
+            "subtitle": null,
+            "preview_text": "<p>What is coming <em>next</em> at Example Co.</p>",
+            "web_url": "https://news.example.com/p/roadmap-preview",
+            "publish_date": 1792832400,
+            "status": "confirmed",
+            "content_tags": [
+              "roadmap"
+            ]
+          }
+        ],
+        "page": 2,
+        "limit": 2,
+        "total_results": 3,
+        "total_pages": 2
+      }
+    },
+    {
+      "name": "subscriptions_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/subscriptions?limit=100&page=1"
+      },
+      "status": 200,
+      "body": {
+        "data": [
+          {
+            "id": "sub_0001",
+            "email": "jane@example.com",
+            "status": "active",
+            "created": 1792929600,
+            "subscription_tier": "free",
+            "utm_source": "newsletter"
+          },
+          {
+            "id": "sub_0002",
+            "email": "sam@example.com",
+            "status": "active",
+            "created": 1793005200,
+            "subscription_tier": "premium",
+            "utm_source": null
+          }
+        ],
+        "page": 1,
+        "limit": 2,
+        "total_results": 2,
+        "total_pages": 1
+      }
+    }
+  ]
+}

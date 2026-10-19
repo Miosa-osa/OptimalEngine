@@ -1,0 +1,293 @@
+{
+  "kind": "go_high_level",
+  "note": "Recorded shapes of the GoHighLevel v2 API: a two-page contact list, a conversation list with one conversation's messages and one whose messages are gone, a two-page opportunity list, and an empty second location. Invented data only.",
+  "routes": [
+    {
+      "name": "contacts_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/contacts/?locationId=loc_0001&limit=100"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "contacts": [
+          {
+            "id": "contact_0001",
+            "firstName": "Jane",
+            "lastName": "Example",
+            "email": "jane@example.com",
+            "phone": "+15550100",
+            "dateUpdated": "2026-10-26T09:00:00.000Z",
+            "tags": [
+              "lead",
+              "example"
+            ],
+            "locationId": "loc_0001"
+          },
+          {
+            "id": "contact_0002",
+            "firstName": "Sam",
+            "lastName": "Sample",
+            "email": "Sam@Example.com",
+            "phone": "+15550101",
+            "dateUpdated": "2026-10-26T10:00:00.000Z",
+            "tags": [],
+            "locationId": "loc_0001"
+          }
+        ],
+        "meta": {
+          "total": 3,
+          "startAfterId": "contact_0002",
+          "nextPageUrl": "https://services.leadconnectorhq.com/contacts/?locationId=loc_0001&startAfterId=contact_0002&limit=100"
+        }
+      }
+    },
+    {
+      "name": "contacts_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "/contacts/?locationId=loc_0001&limit=100&startAfter=contact_0002"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "contacts": [
+          {
+            "id": "contact_0003",
+            "firstName": "Pat",
+            "lastName": "Placeholder",
+            "email": "pat@example.com",
+            "phone": null,
+            "dateUpdated": "2026-10-26T11:00:00.000Z",
+            "tags": [
+              "newsletter"
+            ],
+            "locationId": "loc_0001"
+          }
+        ],
+        "meta": {
+          "total": 3,
+          "startAfterId": "contact_0003",
+          "nextPageUrl": null
+        }
+      }
+    },
+    {
+      "name": "conversations_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/conversations/search?locationId=loc_0001&limit=100"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "conversations": [
+          {
+            "id": "conv_0001",
+            "contactId": "contact_0001",
+            "locationId": "loc_0001",
+            "fullName": "Jane Example",
+            "email": "jane@example.com",
+            "lastMessageBody": "Missed call",
+            "lastMessageDate": 1793014200000,
+            "type": "TYPE_PHONE"
+          },
+          {
+            "id": "conv_0002",
+            "contactId": "contact_0002",
+            "locationId": "loc_0001",
+            "fullName": "Sam Sample",
+            "email": "sam@example.com",
+            "lastMessageBody": "Thanks, noted.",
+            "lastMessageDate": 1793019600000,
+            "type": "TYPE_SMS"
+          }
+        ],
+        "total": 2
+      }
+    },
+    {
+      "name": "conversations_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "/conversations/search?locationId=loc_0001&limit=100&startAfterDate=1793019600000"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "conversations": [],
+        "total": 2
+      }
+    },
+    {
+      "name": "messages_conv_0001",
+      "match": {
+        "method": "GET",
+        "contains": "/conversations/conv_0001/messages"
+      },
+      "status": 200,
+      "body": {
+        "messages": {
+          "lastMessageId": "msg_0001",
+          "nextPage": false,
+          "messages": [
+            {
+              "id": "msg_0003",
+              "body": "Great, see you then.",
+              "direction": "inbound",
+              "dateAdded": "2026-10-26T11:00:00.000Z",
+              "type": "TYPE_SMS"
+            },
+            {
+              "id": "msg_0004",
+              "body": "Missed call",
+              "direction": "inbound",
+              "dateAdded": "2026-10-26T11:30:00.000Z",
+              "type": "TYPE_CALL"
+            },
+            {
+              "id": "msg_0001",
+              "body": "<p>Hello, can we move the call to Friday.</p>",
+              "direction": "inbound",
+              "dateAdded": "2026-10-26T09:00:00.000Z",
+              "type": "TYPE_EMAIL",
+              "from": "Jane Example <Jane@Example.com>"
+            },
+            {
+              "id": "msg_0002",
+              "body": "Friday works for us.",
+              "direction": "outbound",
+              "dateAdded": "2026-10-26T10:00:00.000Z",
+              "type": "TYPE_SMS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "messages_conv_0002_gone",
+      "match": {
+        "method": "GET",
+        "contains": "/conversations/conv_0002/messages"
+      },
+      "status": 404,
+      "body": {
+        "statusCode": 404,
+        "message": "Conversation not found"
+      }
+    },
+    {
+      "name": "opportunities_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "/opportunities/search?location_id=loc_0001&limit=100"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "opportunities": [
+          {
+            "id": "opp_0001",
+            "name": "Example Co onboarding",
+            "monetaryValue": 120,
+            "status": "open",
+            "contactId": "contact_0001",
+            "pipelineStageName": "Proposal",
+            "updatedAt": "2026-10-26T12:00:00.000Z",
+            "contact": {
+              "id": "contact_0001",
+              "name": "Jane Example",
+              "email": "jane@example.com"
+            }
+          },
+          {
+            "id": "opp_0002",
+            "name": "Example Co renewal",
+            "monetaryValue": 0,
+            "status": "won",
+            "contactId": "contact_0001",
+            "updatedAt": "2026-10-26T12:30:00.000Z"
+          }
+        ],
+        "meta": {
+          "total": 3,
+          "startAfterId": "opp_0002",
+          "nextPageUrl": "https://services.leadconnectorhq.com/opportunities/search?location_id=loc_0001&startAfterId=opp_0002&limit=100"
+        }
+      }
+    },
+    {
+      "name": "opportunities_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "/opportunities/search?location_id=loc_0001&limit=100&startAfter=opp_0002"
+      },
+      "status": 200,
+      "times": 1,
+      "body": {
+        "opportunities": [
+          {
+            "id": "opp_0003",
+            "name": "Sample Pilot",
+            "monetaryValue": 1250.5,
+            "currency": "EUR",
+            "status": "lost",
+            "contactId": "contact_0002",
+            "pipelineStageName": "Negotiation Sent",
+            "updatedAt": "2026-10-26T13:00:00.000Z"
+          }
+        ],
+        "meta": {
+          "total": 3,
+          "startAfterId": "opp_0003",
+          "nextPageUrl": null
+        }
+      }
+    },
+    {
+      "name": "location_2_contacts_empty",
+      "match": {
+        "method": "GET",
+        "contains": "/contacts/?locationId=loc_0002"
+      },
+      "status": 200,
+      "body": {
+        "contacts": [],
+        "meta": {
+          "total": 0,
+          "startAfterId": null,
+          "nextPageUrl": null
+        }
+      }
+    },
+    {
+      "name": "location_2_conversations_empty",
+      "match": {
+        "method": "GET",
+        "contains": "/conversations/search?locationId=loc_0002"
+      },
+      "status": 200,
+      "body": {
+        "conversations": [],
+        "total": 0
+      }
+    },
+    {
+      "name": "location_2_opportunities_empty",
+      "match": {
+        "method": "GET",
+        "contains": "/opportunities/search?location_id=loc_0002"
+      },
+      "status": 200,
+      "body": {
+        "opportunities": [],
+        "meta": {
+          "total": 0,
+          "startAfterId": null,
+          "nextPageUrl": null
+        }
+      }
+    }
+  ]
+}

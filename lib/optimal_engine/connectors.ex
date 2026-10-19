@@ -8,9 +8,10 @@ defmodule OptimalEngine.Connectors do
 
   See `OptimalEngine.Connectors.Behaviour` for the adapter contract.
 
-  The 14 adapters live under `OptimalEngine.Connectors.Adapters.*`:
+  The 20 adapters live under `OptimalEngine.Connectors.Adapters.*`:
   Slack, Gmail, Drive, Notion, Jira, Linear, GitHub, Zoom, Confluence,
-  Teams, Dropbox, OneDrive, Salesforce, HubSpot.
+  Teams, Dropbox, OneDrive, Salesforce, HubSpot, GoHighLevel, Stripe,
+  beehiiv, JotForm, Fathom, and the local sources folder.
   """
 
   alias OptimalEngine.Connectors.{AssetIngest, Credential, Registry, Runner}
