@@ -114,8 +114,52 @@ defmodule OptimalEngine.Store.Migrations do
       migration_066_app_data(),
       migration_067_replication(),
       migration_068_viability(),
-      migration_069_analysis_reports()
+      migration_069_analysis_reports(),
+      migration_070_repair_vector_and_chunk_scope()
     ]
+  end
+
+  # Document vectors were stored without a scope (they kept the column
+  # default), and chunks moved with an older placement path kept their old
+  # workspace. Every derived row takes the scope of the document it belongs to.
+  defp migration_070_repair_vector_and_chunk_scope do
+    {70, "repair vector, chunk and chunk embedding scope from their documents",
+     [
+       {"repair_vectors_scope",
+        """
+        UPDATE vectors
+        SET tenant_id = (SELECT c.tenant_id FROM contexts c WHERE c.id = vectors.context_id),
+            workspace_id = (SELECT c.workspace_id FROM contexts c WHERE c.id = vectors.context_id)
+        WHERE EXISTS (
+          SELECT 1 FROM contexts c
+          WHERE c.id = vectors.context_id
+            AND (c.tenant_id IS NOT vectors.tenant_id OR c.workspace_id IS NOT vectors.workspace_id)
+        )
+        """},
+       {"repair_chunks_scope",
+        """
+        UPDATE chunks
+        SET tenant_id = (SELECT c.tenant_id FROM contexts c WHERE c.id = chunks.signal_id),
+            workspace_id = (SELECT c.workspace_id FROM contexts c WHERE c.id = chunks.signal_id)
+        WHERE EXISTS (
+          SELECT 1 FROM contexts c
+          WHERE c.id = chunks.signal_id
+            AND (c.tenant_id IS NOT chunks.tenant_id OR c.workspace_id IS NOT chunks.workspace_id)
+        )
+        """},
+       {"repair_chunk_embeddings_scope",
+        """
+        UPDATE chunk_embeddings
+        SET tenant_id = (SELECT ch.tenant_id FROM chunks ch WHERE ch.id = chunk_embeddings.chunk_id),
+            workspace_id = (SELECT ch.workspace_id FROM chunks ch WHERE ch.id = chunk_embeddings.chunk_id)
+        WHERE EXISTS (
+          SELECT 1 FROM chunks ch
+          WHERE ch.id = chunk_embeddings.chunk_id
+            AND (ch.tenant_id IS NOT chunk_embeddings.tenant_id
+                 OR ch.workspace_id IS NOT chunk_embeddings.workspace_id)
+        )
+        """}
+     ]}
   end
 
   defp migration_069_analysis_reports do

@@ -62,6 +62,30 @@ Fields: `sender`, `domain` (also matches subdomains), `label`, `channel`, `keywo
 Feedback moves a rule's effective weight: `weight * (1 + accepted) / (1 + rejected)`.
 `POST /api/routing/seed` loads the keyword rules of the deployment's routing rules file (`OPTIMAL_CORPUS_RULES`).
 
+## Placement by meaning
+
+The intake organizer (`OptimalEngine.CorpusOrganizer`) places intake records by name markers, and by meaning when the `semantic` section of the routing rules file (or `config :optimal_engine, :corpus_semantic_placement`) enables it:
+
+```yaml
+semantic:
+  enabled: true
+  margin: 0.04          # best workspace similarity minus the runner-up
+  min_similarity: 0.0   # floor for the best workspace's similarity
+  min_examples: 5       # filed documents with vectors a target workspace needs
+  exclude: [default:example-private]
+```
+
+A record's document vector is compared with the centroid of each target workspace's filed document vectors.
+Targets are the active workspaces of the intake workspace's tenant with at least `min_examples` vectors, other than the intake and the excluded ones; at least two are needed, so a margin exists.
+A record is placed when its best workspace clears the floor and the margin and no name marker proposes another workspace.
+A record that is not placed keeps the closest workspace as its proposal in its routing review entry (`routing_review.semantic`).
+Every placement, by markers or by meaning, keeps its evidence on the record as `metadata.routing_placement` (method, workspace, similarity or score, margin, time).
+
+Only documents with a vector take part.
+`GET /api/maintenance/embeddings` counts active documents without one (`?workspace=` for one workspace), and `POST /api/maintenance/embeddings {"limit": 100, "workspace"?}` embeds them with the configured text model; both need `admin` and stay in the caller's tenant.
+An unreachable embedder answers 503.
+With placement by meaning on, the daily `workspace_population` analysis embeds up to 200 such documents before it places.
+
 ## Analyses as jobs
 
 The Engine runs its standing analyses as durable jobs (`OptimalEngine.Jobs`: retries with backoff, then a dead letter) and keeps a report of each run.
@@ -69,7 +93,7 @@ The Engine runs its standing analyses as durable jobs (`OptimalEngine.Jobs`: ret
 | Kind | Scope | Report |
 | --- | --- | --- |
 | `promises` | each workspace | loops detected and closed by reply in the last 7 days, open loops by kind, the overdue ones |
-| `workspace_population` | the intake workspace | items placed in their workspace and items queued for routing review |
+| `workspace_population` | the intake workspace | items placed in their workspace (by name markers, or by meaning when enabled) and items queued for routing review; with placement by meaning on, it first embeds up to 200 documents that have no vector (`embed_limit` in the payload) |
 | `meeting_archive` | workspaces with zoom, teams, or fathom connectors | each connector's pull result |
 | `file_audit` | the tenant | the storage audit checks and the hierarchy issue count |
 | `storage_usage` | the tenant | usage against the size profile and the resize advice |

@@ -7,7 +7,7 @@ Every route below is served under `/api`.
 A request carries `Authorization: Bearer oe_<id>_<secret>` unless the Engine runs with `OPTIMAL_AUTH_REQUIRED=false`.
 Authentication, workspace scope, and operation grants are enforced by `OptimalEngine.API.PermissionPlug`; `read` and `write` cover ordinary operations, while administration, app-data schema changes, claim review, and authority operations require their own grant.
 
-Routes: 285
+Routes: 287
 
 | Method | Path | Router |
 | --- | --- | --- |
@@ -127,6 +127,7 @@ Routes: 285
 | POST | `/api/loops/:id/:action` | Router |
 | POST | `/api/loops/extract` | Router |
 | GET, POST | `/api/maintenance/corpus-organization` | Router |
+| GET, POST | `/api/maintenance/embeddings` | Router |
 | GET, POST | `/api/memory` | Router |
 | POST | `/api/memory-core/active-pools` | Router |
 | GET | `/api/memory-core/active-pools/:id` | Router |
