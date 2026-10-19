@@ -65,6 +65,31 @@ defmodule OptimalEngine.Auth.ApiKeyTest do
     end
   end
 
+  describe "list/2 paging" do
+    test "keys minted in the same second page without gaps or repeats" do
+      tenant = "paging-#{System.unique_integer([:positive])}"
+      {:ok, _} = OptimalEngine.Tenancy.Tenant.create(%{id: tenant, name: "Paging #{tenant}"})
+
+      minted =
+        for n <- 1..60 do
+          {:ok, %{id: id}} = ApiKey.mint(%{tenant_id: tenant, name: "key #{n}"})
+          id
+        end
+
+      pages =
+        for offset <- [0, 25, 50] do
+          {:ok, keys} = ApiKey.list(tenant, limit: 25, offset: offset)
+          Enum.map(keys, & &1.id)
+        end
+
+      listed = List.flatten(pages)
+      assert length(listed) == 60
+      assert Enum.sort(listed) == Enum.sort(minted)
+      # Newest first.
+      assert hd(listed) == List.last(minted)
+    end
+  end
+
   describe "verify/1" do
     test "returns {:ok, key} for a valid token" do
       assert {:ok, %{key: token, id: id}} =
