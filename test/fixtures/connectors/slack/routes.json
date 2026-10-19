@@ -1,0 +1,420 @@
+{
+  "kind": "slack",
+  "note": "Recorded shapes of the Slack Web API: a two-page conversations.list (paged with response_metadata.next_cursor, whose base64 padding must be URL-encoded), conversations.history returned newest first with and without oldest and latest, a has_more page, and the {\"ok\": false, \"error\": ...} envelope Slack uses for application errors, plus a 429 with Retry-After and a 503. Invented data only.",
+  "routes": [
+    {
+      "name": "channels_list_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.list?types=public_channel,private_channel&limit=200"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "channels": [
+          {
+            "id": "C0EXAMPLE1",
+            "name": "general",
+            "is_channel": true,
+            "is_group": false,
+            "is_private": false,
+            "is_archived": false,
+            "is_member": true,
+            "created": 1790000000,
+            "num_members": 12
+          },
+          {
+            "id": "C0EXAMPLE2",
+            "name": "sales",
+            "is_channel": true,
+            "is_group": false,
+            "is_private": false,
+            "is_archived": false,
+            "is_member": true,
+            "created": 1790000000,
+            "num_members": 12
+          }
+        ],
+        "response_metadata": {
+          "next_cursor": "dGVhbTpDMDNFWEFNUExF="
+        }
+      }
+    },
+    {
+      "name": "channels_list_page_2",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.list?types=public_channel,private_channel&limit=200&cursor=dGVhbTpDMDNFWEFNUExF%3D"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "channels": [
+          {
+            "id": "C0EXAMPLE3",
+            "name": "leadership",
+            "is_channel": false,
+            "is_group": true,
+            "is_private": true,
+            "is_archived": false,
+            "is_member": true,
+            "created": 1790000000,
+            "num_members": 12
+          }
+        ],
+        "response_metadata": {
+          "next_cursor": ""
+        }
+      }
+    },
+    {
+      "name": "general_page_1_newest",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0EXAMPLE1&limit=200"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [
+          {
+            "type": "message",
+            "user": "U0JANE001",
+            "text": "Thanks. Invoice INV-0007 will follow on Friday.",
+            "ts": "1793017200.000500",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-0005-4a00-8000-000000000005"
+          },
+          {
+            "type": "message",
+            "user": "U0JOHN002",
+            "text": "Confirmed, the address on file is correct.",
+            "ts": "1793016900.000400",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-0004-4a00-8000-000000000004"
+          },
+          {
+            "type": "message",
+            "user": "U0JANE001",
+            "text": "Can you confirm the delivery address please?",
+            "ts": "1793016600.000300",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-0003-4a00-8000-000000000003"
+          }
+        ],
+        "has_more": true,
+        "pin_count": 0,
+        "response_metadata": {
+          "next_cursor": "bmV4dF90czoxNzkzMDE2NjAwMDAwMzAw"
+        }
+      }
+    },
+    {
+      "name": "general_page_2_older_than_m3",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0EXAMPLE1&limit=200&latest=1793016600.000300"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [
+          {
+            "type": "message",
+            "user": "U0BOT0001",
+            "text": "Draft order form is in the shared folder.",
+            "ts": "1793016300.000200",
+            "team": "T0EXAMPLE1",
+            "bot_id": "B0EXAMPLE1",
+            "app_id": "A0EXAMPLE1"
+          },
+          {
+            "type": "message",
+            "user": "U0JANE001",
+            "text": "Kickoff for Example Co is Monday at 10am.",
+            "ts": "1793016000.000100",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-0001-4a00-8000-000000000001"
+          }
+        ],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "general_gap_between_m1_and_m3",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0EXAMPLE1&limit=200&oldest=1793016000.000100&latest=1793016600.000300"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [
+          {
+            "type": "message",
+            "user": "U0BOT0001",
+            "text": "Draft order form is in the shared folder.",
+            "ts": "1793016300.000200",
+            "team": "T0EXAMPLE1",
+            "bot_id": "B0EXAMPLE1",
+            "app_id": "A0EXAMPLE1"
+          }
+        ],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "general_after_m5",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0EXAMPLE1&limit=200&oldest=1793017200.000500"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [
+          {
+            "type": "message",
+            "user": "U0JOHN002",
+            "text": "Invoice INV-0007 is attached.",
+            "ts": "1793017500.000600",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-0006-4a00-8000-000000000006"
+          }
+        ],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "general_after_m6",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0EXAMPLE1&limit=200&oldest=1793017500.000600"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "sales_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0EXAMPLE2&limit=200"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [
+          {
+            "type": "message",
+            "user": "U0JANE001",
+            "text": "Example Co accepted quote Q-0042.",
+            "ts": "1793016700.000200",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-1002-4a00-8000-000000001002"
+          },
+          {
+            "type": "message",
+            "user": "U0JOHN002",
+            "text": "Quote Q-0042 sent to Example Co.",
+            "ts": "1793016100.000100",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-1001-4a00-8000-000000001001"
+          }
+        ],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "sales_after_s2",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0EXAMPLE2&limit=200&oldest=1793016700.000200"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "leadership_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0EXAMPLE3&limit=200"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [
+          {
+            "type": "message",
+            "user": "U0JANE001",
+            "text": "Budget review moves to next Tuesday.",
+            "ts": "1793016800.000100",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-2001-4a00-8000-000000002001"
+          }
+        ],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "leadership_after_p1",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0EXAMPLE3&limit=200&oldest=1793016800.000100"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "standup_page_1",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0FLAKY&limit=200"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [
+          {
+            "type": "message",
+            "user": "U0JOHN002",
+            "text": "Standup notes, part three.",
+            "ts": "1793016800.000300",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-3003-4a00-8000-000000003003"
+          },
+          {
+            "type": "message",
+            "user": "U0JOHN002",
+            "text": "Standup notes, part two.",
+            "ts": "1793016400.000200",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-3002-4a00-8000-000000003002"
+          }
+        ],
+        "has_more": true,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "standup_page_2_outage",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0FLAKY&limit=200&latest=1793016400.000200"
+      },
+      "status": 503,
+      "times": 1,
+      "body": {
+        "ok": false,
+        "error": "service_unavailable"
+      }
+    },
+    {
+      "name": "standup_page_2_recovered",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0FLAKY&limit=200&latest=1793016400.000200"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [
+          {
+            "type": "message",
+            "user": "U0JOHN002",
+            "text": "Standup notes, part one.",
+            "ts": "1793016200.000100",
+            "team": "T0EXAMPLE1",
+            "client_msg_id": "6f0c1d2e-3001-4a00-8000-000000003001"
+          }
+        ],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "standup_after_f3",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0FLAKY&limit=200&oldest=1793016800.000300"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "messages": [],
+        "has_more": false,
+        "pin_count": 0
+      }
+    },
+    {
+      "name": "bot_not_in_channel",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0NOTMEMBER"
+      },
+      "status": 200,
+      "body": {
+        "ok": false,
+        "error": "not_in_channel"
+      }
+    },
+    {
+      "name": "rate_limited_with_retry_after",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0LIMITED"
+      },
+      "status": 429,
+      "headers": {
+        "retry-after": "3"
+      },
+      "body": {
+        "ok": false,
+        "error": "ratelimited"
+      }
+    },
+    {
+      "name": "service_unavailable",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0UNAVAIL"
+      },
+      "status": 503,
+      "body": {
+        "ok": false,
+        "error": "service_unavailable"
+      }
+    },
+    {
+      "name": "token_revoked_mid_run",
+      "match": {
+        "method": "GET",
+        "contains": "conversations.history?channel=C0BADAUTH"
+      },
+      "status": 200,
+      "body": {
+        "ok": false,
+        "error": "invalid_auth"
+      }
+    }
+  ]
+}

@@ -1,15 +1,41 @@
 defmodule OptimalEngine.Connectors.Adapters.Slack do
   @moduledoc """
-  Slack connector -- channels, threads, DMs, files.
+  Slack connector -- the message history of channels.
 
   ## Required config keys
-    * `:workspace_id`, `:channels` (list; empty = all)
+    * `:workspace_id`, `:channels` (list of channel ids; empty = every channel
+      the bot can list)
+
+  ## Optional config keys
+    * `:max_pages` -- history pages (200 messages each) read per channel per run
+      (default 10). A channel with more history is finished by the next run.
 
   ## Credentials
     * `:bot_token` -- starts with `xoxb-...`
 
+  ## What is read
+  The top-level messages of each channel (`conversations.history`). Thread
+  replies, files and direct messages are not read yet.
+
   ## Cursor shape
-  Opaque: `"<channel_id>:<oldest_ts>"`. Initial sync: `nil`.
+  Opaque: a JSON object with one position per channel id. Initial sync: `nil`.
+  A cursor this adapter did not write is read as `nil`, which starts over.
+
+  `conversations.history` returns messages newest first; `oldest` and `latest`
+  are exclusive bounds. A channel's position is:
+
+    * `"oldest"` -- everything at or before this `ts` has been read, so the next
+      run asks for messages after it.
+    * `"latest"` and `"head"` -- present only while a run stopped part-way
+      through the channel (its page budget ran out, or a request failed after
+      the first page). Messages between `"oldest"` and `"latest"` are still
+      unread, and `"head"` is the newest `ts` already read: the next run reads
+      the gap and then moves `"oldest"` up to `"head"`.
+
+  A rate limit or a server error part-way through the channel list stops the
+  run but keeps what was read; the positions say exactly where each channel
+  got to. When nothing was read yet the error is returned so the Runner can
+  back off. An expired token always fails the whole run.
   """
 
   use OptimalEngine.Connectors.Adapters.Base,
@@ -19,58 +45,29 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
     required_keys: [:workspace_id, :channels],
     credential_keys: [:bot_token]
 
+  require Logger
+
   alias OptimalEngine.Connectors.HTTP
 
   @base_url "https://slack.com/api"
   @page_size 200
+  @max_pages 10
+  @max_list_pages 50
+  @position_keys ["oldest", "latest", "head"]
+
+  # Slack answers application errors with HTTP 200 and {"ok": false, "error": code}.
+  @auth_errors ~w(invalid_auth not_authed token_expired token_revoked account_inactive)
+  @transient_errors ~w(internal_error fatal_error service_unavailable request_timeout)
+  # About one channel, not the connector: the bot is not a member, the channel is gone.
+  @channel_errors ~w(channel_not_found not_in_channel access_denied method_not_supported_for_channel_type)
 
   @impl true
   def sync(state, cursor) do
-    token = pick(state, :bot_token)
-    headers = [{"authorization", "Bearer #{token}"}]
+    headers = [{"authorization", "Bearer #{pick(state, :bot_token)}"}]
 
-    channels_cfg = pick(state, :channels, [])
-
-    channel_ids =
-      case channels_cfg do
-        [] -> fetch_all_channels(headers)
-        ids when is_list(ids) -> ids
-        _ -> []
-      end
-
-    {channel_id, oldest} = parse_cursor(cursor)
-
-    # If cursor has a specific channel, resume only that channel
-    channels_to_sync =
-      if channel_id && channel_id != "" do
-        [channel_id]
-      else
-        channel_ids
-      end
-
-    {signals, next_cursor} =
-      Enum.reduce(channels_to_sync, {[], nil}, fn ch_id, {acc, _last_cursor} ->
-        ch_oldest = if ch_id == channel_id, do: oldest, else: nil
-
-        case fetch_messages(ch_id, ch_oldest, headers) do
-          {:ok, messages, next_ts} ->
-            new_signals =
-              Enum.flat_map(messages, fn msg ->
-                case transform(msg) do
-                  {:ok, s} -> [s]
-                  _ -> []
-                end
-              end)
-
-            new_cursor = if next_ts, do: "#{ch_id}:#{next_ts}", else: "#{ch_id}:"
-            {acc ++ new_signals, new_cursor}
-
-          {:error, _} ->
-            {acc, "#{ch_id}:"}
-        end
-      end)
-
-    {:ok, %{signals: signals, cursor: next_cursor}}
+    with {:ok, channel_ids} <- channel_ids(pick(state, :channels, []), headers) do
+      pull_channels(channel_ids, decode_cursor(cursor), max_pages(state), headers)
+    end
   end
 
   @impl true
@@ -87,75 +84,274 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
        path: Transform.source_uri(:slack, ext_id),
        genre: "message",
        entities: [user],
-       modified_at: parse_ts(raw["ts"])
+       modified_at: Transform.parse_epoch(raw["ts"])
      })}
   end
 
-  # ---- private ----------------------------------------------------------------
+  # ---- channels ---------------------------------------------------------------
 
-  defp fetch_all_channels(headers) do
-    url = "#{@base_url}/conversations.list?types=public_channel,private_channel&limit=#{@page_size}"
+  defp channel_ids([], headers), do: list_channels(nil, headers, [], 1)
 
-    case HTTP.get_json(url, headers: headers) do
-      {:ok, %{status: 200, body: %{"ok" => true, "channels" => chs}}} ->
-        Enum.map(chs, & &1["id"])
+  defp channel_ids(ids, _headers) when is_list(ids),
+    do: {:ok, ids |> Enum.map(&to_string/1) |> Enum.uniq()}
 
-      _ ->
-        []
+  defp channel_ids(_other, _headers), do: {:error, {:invalid_config, :channels}}
+
+  # Follows `response_metadata.next_cursor` until Slack returns an empty one.
+  defp list_channels(cursor, headers, acc, page) do
+    url =
+      "#{@base_url}/conversations.list?types=public_channel,private_channel&limit=#{@page_size}" <>
+        param("cursor", cursor)
+
+    case call(url, headers) do
+      {:ok, body} ->
+        ids = Enum.uniq(acc ++ Enum.map(body["channels"] || [], & &1["id"]))
+
+        case next_page(body) do
+          nil ->
+            {:ok, ids}
+
+          _next when page >= @max_list_pages ->
+            Logger.warning("[Connectors.Slack] channel list cut at #{page} pages")
+            {:ok, ids}
+
+          next ->
+            list_channels(next, headers, ids, page + 1)
+        end
+
+      {:error, failure} ->
+        {:error, failure_reason(failure)}
     end
   end
 
-  defp fetch_messages(channel_id, oldest, headers) do
+  defp next_page(%{"response_metadata" => %{"next_cursor" => next}})
+       when is_binary(next) and next != "",
+       do: next
+
+  defp next_page(_body), do: nil
+
+  defp failure_reason({:skip, code}), do: {:slack_error, code}
+  defp failure_reason({_kind, reason}), do: reason
+
+  # ---- the run ----------------------------------------------------------------
+
+  # Reads the channels in order. The accumulator is the signals so far (in
+  # reverse) and the cursor positions.
+  defp pull_channels(channel_ids, positions, max_pages, headers) do
+    channel_ids
+    |> Enum.reduce_while({:ok, {[], positions}}, fn ch_id, {:ok, {signals, acc_positions}} ->
+      {messages, position, outcome} =
+        pull_channel(ch_id, Map.get(positions, ch_id, %{}), max_pages, headers)
+
+      progress = {
+        Enum.reduce(to_signals(messages), signals, &[&1 | &2]),
+        put_position(acc_positions, ch_id, position)
+      }
+
+      case outcome do
+        done when done in [:done, :more] ->
+          {:cont, {:ok, progress}}
+
+        {:skip, code} ->
+          Logger.warning("[Connectors.Slack] skipped channel #{ch_id}: #{code}")
+          {:cont, {:ok, progress}}
+
+        {:retry, reason} ->
+          {:halt, {:retry, reason, progress}}
+
+        {:abort, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> finish()
+  end
+
+  defp finish({:ok, progress}), do: {:ok, result(progress)}
+  defp finish({:error, reason}), do: {:error, reason}
+
+  # Nothing was read before the rate limit or the server error, so there is
+  # nothing to keep: the error goes to the Runner, which backs off and retries.
+  defp finish({:retry, reason, {[], _positions}}), do: {:error, reason}
+
+  defp finish({:retry, reason, progress}) do
+    Logger.warning(
+      "[Connectors.Slack] stopped early (#{inspect(reason)}); the next run resumes from the saved positions"
+    )
+
+    {:ok, result(progress)}
+  end
+
+  defp result({signals, positions}) do
+    %{signals: Enum.reverse(signals), cursor: encode_cursor(positions)}
+  end
+
+  # One channel: the messages read (oldest first), the position to save, and how it ended.
+  defp pull_channel(ch_id, position, max_pages, headers) do
+    {messages, outcome} =
+      fetch_pages(ch_id, position["oldest"], position["latest"], max_pages, headers, [])
+
+    {Enum.reverse(messages), next_position(position, messages, outcome), outcome}
+  end
+
+  # Pages backwards from `latest` (or from now) down to `oldest`. `latest` is
+  # the page-back bound: `oldest` only ever marks where to stop.
+  defp fetch_pages(ch_id, oldest, latest, pages_left, headers, acc) do
+    case history_page(ch_id, oldest, latest, headers) do
+      {:ok, page, has_more?} ->
+        acc = acc ++ page
+
+        cond do
+          not has_more? or page == [] -> {acc, :done}
+          pages_left <= 1 -> {acc, :more}
+          true -> fetch_pages(ch_id, oldest, oldest_ts(page), pages_left - 1, headers, acc)
+        end
+
+      {:error, failure} ->
+        {acc, failure}
+    end
+  end
+
+  defp history_page(ch_id, oldest, latest, headers) do
     url =
-      "#{@base_url}/conversations.history?channel=#{channel_id}&limit=#{@page_size}" <>
-        if(oldest, do: "&oldest=#{oldest}", else: "")
+      "#{@base_url}/conversations.history?channel=#{URI.encode_www_form(ch_id)}&limit=#{@page_size}" <>
+        param("oldest", oldest) <> param("latest", latest)
 
+    with {:ok, body} <- call(url, headers) do
+      {:ok, body["messages"] || [], body["has_more"] == true}
+    end
+  end
+
+  # The whole window was read: everything up to the newest `ts` seen is done.
+  defp next_position(position, messages, :done) do
+    case position["head"] || newest_ts(messages) do
+      nil -> Map.drop(position, ["latest", "head"])
+      ts -> %{"oldest" => ts}
+    end
+  end
+
+  defp next_position(position, [], _unfinished), do: position
+
+  # Stopped before the lower bound: park the gap, and keep the newest `ts`
+  # seen so that closing the gap can move `oldest` past everything.
+  defp next_position(position, messages, _unfinished) do
+    position
+    |> Map.put("latest", oldest_ts(messages))
+    |> Map.put_new("head", newest_ts(messages))
+  end
+
+  # ---- requests ---------------------------------------------------------------
+
+  # `{:ok, body}`, or `{:error, failure}` where failure says what the run should do:
+  # `{:skip, code}` (this channel only), `{:retry, reason}` (stop, keep progress,
+  # the Runner may back off), `{:abort, reason}` (fail the run).
+  defp call(url, headers) do
     case HTTP.get_json(url, headers: headers) do
-      {:ok, %{status: 200, body: %{"ok" => true, "messages" => messages} = body}} ->
-        next_ts =
-          if body["has_more"] do
-            messages |> Enum.map(& &1["ts"]) |> Enum.min(fn -> nil end)
-          else
-            nil
-          end
+      {:ok, %{status: 200, body: %{"ok" => true} = body}} ->
+        {:ok, body}
 
-        {:ok, messages, next_ts}
+      {:ok, %{status: 200, body: %{"ok" => false, "error" => code}}} ->
+        {:error, classify(code)}
 
-      {:ok, %{status: 200, body: %{"ok" => false, "error" => "ratelimited"}}} ->
-        {:error, :rate_limited}
-
-      {:ok, %{status: 200, body: %{"ok" => false, "error" => "token_expired"}}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{status: 429}} ->
-        {:error, :rate_limited}
+      {:ok, %{status: 429, headers: response_headers}} ->
+        {:error, {:retry, rate_limited(response_headers)}}
 
       {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
+        {:error, {:abort, :auth_expired}}
 
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, %{status: status}} when status >= 500 ->
+        {:error, {:retry, :transient}}
+
+      {:ok, %{status: status}} ->
+        {:error, {:abort, {:http, status}}}
+
+      {:error, _reason} ->
+        {:error, {:retry, :transient}}
+    end
+  end
+
+  defp classify("ratelimited"), do: {:retry, :rate_limited}
+  defp classify(code) when code in @auth_errors, do: {:abort, :auth_expired}
+  defp classify(code) when code in @transient_errors, do: {:retry, :transient}
+  defp classify(code) when code in @channel_errors, do: {:skip, code}
+  defp classify(code), do: {:abort, {:slack_error, code}}
+
+  defp rate_limited(headers) do
+    case HTTP.retry_after(headers) do
+      nil -> :rate_limited
+      ms -> {:rate_limited, ms}
+    end
+  end
+
+  defp param(_name, nil), do: ""
+  defp param(name, value), do: "&#{name}=#{URI.encode_www_form(value)}"
+
+  # ---- cursor -----------------------------------------------------------------
+
+  defp decode_cursor(cursor) when is_binary(cursor) do
+    case Jason.decode(cursor) do
+      {:ok, %{} = positions} ->
+        Map.new(positions, fn {ch_id, position} -> {ch_id, clean_position(position)} end)
 
       _ ->
-        {:ok, [], nil}
+        %{}
     end
   end
 
-  defp parse_cursor(nil), do: {"", nil}
+  defp decode_cursor(_cursor), do: %{}
 
-  defp parse_cursor(cursor) when is_binary(cursor) do
-    case String.split(cursor, ":", parts: 2) do
-      [ch_id, oldest] -> {ch_id, if(oldest == "", do: nil, else: oldest)}
-      _ -> {"", nil}
+  defp clean_position(%{} = position) do
+    position
+    |> Map.take(@position_keys)
+    |> Enum.filter(fn {_key, ts} -> is_binary(ts) end)
+    |> Map.new()
+  end
+
+  defp clean_position(_position), do: %{}
+
+  defp encode_cursor(positions) when map_size(positions) == 0, do: nil
+  defp encode_cursor(positions), do: Jason.encode!(positions)
+
+  defp put_position(positions, ch_id, position) when map_size(position) == 0,
+    do: Map.delete(positions, ch_id)
+
+  defp put_position(positions, ch_id, position), do: Map.put(positions, ch_id, position)
+
+  # ---- messages ---------------------------------------------------------------
+
+  defp to_signals(messages) do
+    Enum.flat_map(messages, fn msg ->
+      case transform(msg) do
+        {:ok, signal} -> [signal]
+        _ -> []
+      end
+    end)
+  end
+
+  defp max_pages(state) do
+    case pick(state, :max_pages) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @max_pages
     end
   end
 
-  defp parse_ts(nil), do: DateTime.utc_now()
+  defp newest_ts(messages), do: messages |> timestamps() |> Enum.max_by(&ts_key/1, fn -> nil end)
+  defp oldest_ts(messages), do: messages |> timestamps() |> Enum.min_by(&ts_key/1, fn -> nil end)
 
-  defp parse_ts(ts) when is_binary(ts) do
-    case Float.parse(ts) do
-      {f, _} -> f |> round() |> DateTime.from_unix!()
-      _ -> DateTime.utc_now()
+  defp timestamps(messages) do
+    for %{"ts" => ts} <- messages, is_binary(ts), do: ts
+  end
+
+  # A Slack `ts` is "<seconds>.<microseconds>". Compared as numbers, not text.
+  defp ts_key(ts) do
+    [seconds | fraction] = String.split(ts, ".", parts: 2)
+    micros = fraction |> List.first("") |> String.pad_trailing(6, "0")
+    {to_int(seconds), to_int(micros)}
+  end
+
+  defp to_int(text) do
+    case Integer.parse(text) do
+      {n, _rest} -> n
+      :error -> 0
     end
   end
 end

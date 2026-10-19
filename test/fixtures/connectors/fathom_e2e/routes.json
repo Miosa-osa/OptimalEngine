@@ -1,0 +1,78 @@
+{
+  "kind": "fathom_e2e",
+  "note": "A recording of the whole connector path for the end-to-end test: the Engine asks the outside broker for a short-lived credential, then pulls one page of meetings from Fathom with that credential. Invented data only. The adapter under test is the real :fathom adapter; only its HTTP answers are recorded.",
+  "routes": [
+    {
+      "name": "broker_credential",
+      "match": {
+        "method": "POST",
+        "contains": "connect.example.com/api/credentials"
+      },
+      "status": 200,
+      "body": {
+        "credentials": {
+          "api_key": "example-broker-issued-key"
+        },
+        "expires_at": "2026-10-18T12:05:00Z"
+      }
+    },
+    {
+      "name": "meetings",
+      "match": {
+        "method": "GET",
+        "contains": "api.fathom.ai/external/v1/meetings"
+      },
+      "status": 200,
+      "body": {
+        "limit": 100,
+        "next_cursor": null,
+        "items": [
+          {
+            "title": "Discovery call with Example Co",
+            "meeting_title": "Discovery call",
+            "recording_id": 100000001,
+            "recording_start_time": "2026-10-14T15:00:00Z",
+            "recording_end_time": "2026-10-14T15:45:00Z",
+            "url": "https://fathom.video/calls/100000001",
+            "calendar_invitees": [
+              {
+                "name": "Jane Example",
+                "email": "jane@example.com",
+                "email_domain": "example.com",
+                "is_external": true
+              }
+            ],
+            "transcript": [
+              {
+                "speaker": {
+                  "display_name": "Jane Example",
+                  "matched_calendar_invitee_email": "jane@example.com"
+                },
+                "text": "Could you please confirm the delivery address?",
+                "timestamp": "00:00:12"
+              },
+              {
+                "speaker": {
+                  "display_name": "Sam Sample"
+                },
+                "text": "I will send the proposal tomorrow.",
+                "timestamp": "00:01:03"
+              }
+            ],
+            "default_summary": {
+              "template_name": "Default",
+              "markdown_formatted": "## Summary\n\nDiscovery call with Example Co."
+            },
+            "action_items": [
+              {
+                "description": "Send the proposal",
+                "completed": false,
+                "recording_timestamp": "00:01:03"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -4,6 +4,7 @@ defmodule OptimalEngine.Connectors.RunnerTest do
   alias OptimalEngine.Connectors
   alias OptimalEngine.Connectors.{Runner, Transform}
   alias OptimalEngine.Store
+  alias OptimalEngine.Test.ConnectorFixtureStub
 
   setup do
     # Credentials are only persisted as an encrypted envelope.
@@ -33,13 +34,15 @@ defmodule OptimalEngine.Connectors.RunnerTest do
         }
       })
 
+    # Slack answers the test token with its invalid_auth envelope. That is
+    # reported as :auth_expired, not as an empty successful sync.
+    stub = ConnectorFixtureStub.install(:slack, body: %{"ok" => false, "error" => "invalid_auth"})
+    on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
+
     {:ok, result} = Runner.run(id, governed: false)
 
-    # Slack sync now runs real HTTP code. With test credentials its reduce loop
-    # skips per-item auth errors and returns {:ok, %{signals: []}}, so the runner
-    # reports :success. Either way it is never :not_implemented.
-    assert result.status in [:success, :error]
-    refute result.reason == :not_implemented
+    assert result.status == :error
+    assert result.reason == :auth_expired
 
     # A run row was written
     {:ok, [[count]]} =
@@ -260,6 +263,9 @@ defmodule OptimalEngine.Connectors.RunnerTest do
         }
       })
 
+    stub = ConnectorFixtureStub.install(:slack, body: %{"ok" => false, "error" => "invalid_auth"})
+    on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
+
     assert {:ok, result} =
              Runner.run(id,
                workspace_id: workspace_id,
@@ -273,10 +279,10 @@ defmodule OptimalEngine.Connectors.RunnerTest do
     assert result.governance_run.tool_name == "connector.slack.sync"
     assert result.governance_run.decision_state == "allowed"
     assert result.governance_run.run_status == "completed"
-    # Slack adapter now runs real HTTP; with test creds it returns success
-    # (empty signals). The governance layer still records the run either way.
-    assert result.connector_result.status in ["success", "error"]
-    refute result.connector_result.reason == "not_implemented"
+    # The connector's own sync failed (Slack rejected the token), and the
+    # governance layer still records the run as completed.
+    assert result.connector_result.status == "error"
+    assert result.connector_result.reason == "auth_expired"
 
     {:ok, [[connector_runs]]} =
       Store.raw_query("SELECT COUNT(*) FROM connector_runs WHERE connector_id = ?1", [id])
