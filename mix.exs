@@ -56,6 +56,7 @@ defmodule OptimalEngine.MixProject do
     [
       # Storage & serialization
       {:exqlite, "~> 0.27"},
+      {:postgrex, "~> 0.22"},
       {:jason, "~> 1.4"},
       {:yaml_elixir, "~> 2.11"},
       {:tz, "~> 0.28"},
