@@ -15,6 +15,11 @@ defmodule OptimalEngine.Auth.KeyIssuance do
 
   Governed grants are the key metadata lists that governed recall reads:
   `allowed_partitions`, `allowed_security_labels`, and `permissions`.
+
+  `rate_limit_per_minute` (a positive integer) gives the key its own rate
+  limit bucket instead of the size profile's (`OptimalEngine.API.RateLimitPlug`).
+  Like a lifetime it only narrows: a minter with a limit issues keys at or
+  under it, and a key it mints without one inherits it.
   """
 
   alias OptimalEngine.Auth.ApiKey
@@ -41,7 +46,8 @@ defmodule OptimalEngine.Auth.KeyIssuance do
          {:ok, workspace_scope} <- workspace_scope(parent, body),
          {:ok, expires_at} <- expires_at(parent, body),
          {:ok, principal_id} <- principal(tenant_id, body),
-         {:ok, grants} <- grants(parent, body) do
+         {:ok, grants} <- grants(parent, body),
+         {:ok, rate_limit} <- rate_limit(parent, body) do
       attrs =
         %{
           tenant_id: tenant_id,
@@ -50,7 +56,7 @@ defmodule OptimalEngine.Auth.KeyIssuance do
           workspace_scope: workspace_scope,
           expires_at: expires_at,
           principal_id: principal_id,
-          metadata: grants
+          metadata: put_rate_limit(grants, rate_limit)
         }
         |> Map.reject(fn {_field, value} -> is_nil(value) end)
 
@@ -103,6 +109,36 @@ defmodule OptimalEngine.Auth.KeyIssuance do
         end
     end
   end
+
+  defp rate_limit(parent, body) do
+    held = parent_rate_limit(parent)
+
+    case {Map.get(body, "rate_limit_per_minute"), held} do
+      {nil, held} ->
+        {:ok, held}
+
+      {requested, _held} when not is_integer(requested) or requested < 1 ->
+        {:error, "invalid rate_limit_per_minute"}
+
+      {requested, nil} ->
+        {:ok, requested}
+
+      {requested, held} when requested <= held ->
+        {:ok, requested}
+
+      _ ->
+        {:error, "rate_limit_exceeds_minter"}
+    end
+  end
+
+  defp parent_rate_limit(%ApiKey{metadata: %{"rate_limit_per_minute" => limit}})
+       when is_integer(limit) and limit > 0,
+       do: limit
+
+  defp parent_rate_limit(_parent), do: nil
+
+  defp put_rate_limit(metadata, nil), do: metadata
+  defp put_rate_limit(metadata, limit), do: Map.put(metadata, "rate_limit_per_minute", limit)
 
   defp principal(_tenant_id, body) when not is_map_key(body, "principal_id"), do: {:ok, nil}
   defp principal(_tenant_id, %{"principal_id" => nil}), do: {:ok, nil}

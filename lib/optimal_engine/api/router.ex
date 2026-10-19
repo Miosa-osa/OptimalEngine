@@ -51,11 +51,14 @@ defmodule OptimalEngine.API.Router do
     pass: ["application/json", "application/gzip"]
   )
 
+  plug(OptimalEngine.API.AuthPlug)
+
+  # Rate limiting runs on the verified key: every key has its own bucket, and
+  # only unauthenticated requests share the peer IP's. AuthPlug charges the
+  # IP bucket for a request it refuses, so a forged key spends no key's bucket.
   plug(OptimalEngine.API.RateLimitPlug,
     exempt_paths: ["/api/status", "/api/health", "/api/metrics/prometheus"]
   )
-
-  plug(OptimalEngine.API.AuthPlug)
 
   # Workspace authorization — must run after AuthPlug (needs :current_tenant /
   # :current_api_key) and before :dispatch. Resolves the requested workspace
@@ -2510,6 +2513,36 @@ defmodule OptimalEngine.API.Router do
           name: key.name,
           principal_id: key.principal_id,
           tenant_id: key.tenant_id,
+          scopes: key.scopes,
+          workspace_scope: key.workspace_scope,
+          expires_at: key.expires_at
+        })
+    end
+  end
+
+  # GET /api/auth/self - who the Engine takes the caller to be: the presenting
+  # key's tenant, acting principal, scopes and workspace scope (scope `read`,
+  # no workspace needed). Without a key, on an Engine that does not require
+  # one, it describes the local operator every anonymous request acts as.
+  get "/api/auth/self" do
+    case conn.assigns[:current_api_key] do
+      nil ->
+        json(conn, %{
+          authenticated: false,
+          key_id: nil,
+          tenant_id: conn.assigns[:current_tenant] || "default",
+          principal_id: Actor.of(conn),
+          scopes: ["*"],
+          workspace_scope: ["*"],
+          expires_at: nil
+        })
+
+      key ->
+        json(conn, %{
+          authenticated: true,
+          key_id: key.id,
+          tenant_id: key.tenant_id,
+          principal_id: Actor.of(conn),
           scopes: key.scopes,
           workspace_scope: key.workspace_scope,
           expires_at: key.expires_at

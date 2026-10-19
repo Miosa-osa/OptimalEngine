@@ -10,7 +10,8 @@ defmodule OptimalEngine.API.AuthPlug do
   3. If token present → `ApiKey.verify/1`:
      - Success → assigns `current_tenant`, `current_principal`, `current_api_key`.
        Fires async `ApiKey.record_usage/1`.
-     - Failure → halts with 401 and the relevant error atom as a string.
+     - Failure → halts with 401 and the relevant error atom as a string, after
+       charging the peer IP's rate limit bucket (429 once it is empty).
   4. Workspace scope check (when `conn.assigns[:workspace_id]` is set):
      - Key's `workspace_scope` must include the workspace id or contain `"*"`.
      - Mismatch → halts with 403 `{"error":"workspace_scope_denied"}`.
@@ -34,6 +35,7 @@ defmodule OptimalEngine.API.AuthPlug do
 
   import Plug.Conn
 
+  alias OptimalEngine.API.RateLimitPlug
   alias OptimalEngine.Auth.ApiKey
 
   @impl true
@@ -154,11 +156,19 @@ defmodule OptimalEngine.API.AuthPlug do
   # Error responses
   # ---------------------------------------------------------------------------
 
+  # A refused request is unauthenticated, so it spends the peer IP's rate
+  # limit bucket, never a key's; once that bucket is empty the answer is 429.
   defp halt_401(conn, error) do
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(401, Jason.encode!(%{error: error}))
-    |> halt()
+    case RateLimitPlug.unauthenticated(conn) do
+      {:ok, conn} ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(401, Jason.encode!(%{error: error}))
+        |> halt()
+
+      {:halt, conn} ->
+        conn
+    end
   end
 
   defp halt_403(conn, error) do

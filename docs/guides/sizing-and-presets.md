@@ -26,6 +26,12 @@ It sets the SQLite page cache and memory map, the hot context cache, and the API
 
 Explicit configuration always wins: `config :optimal_engine, :context_cache_entries`, `:sqlite_cache_mib`, `:sqlite_mmap_mib`, `:api_per_minute`, and `:api_rate_limit`.
 
+The rate limit is applied after authentication, so every API key has its own bucket of that size.
+A key minted with `rate_limit_per_minute` (`POST /api/auth/keys`) gets that allowance instead, and a key never mints one above its own.
+Requests without a key share their IP address's bucket, and so does a request with an invalid, revoked or expired key, which can never spend a real key's bucket.
+Over the limit the answer is 429 `{"error": "rate_limited", "retry_after_ms": N}` with a `Retry-After` header.
+`/api/health`, `/api/status` and `/api/metrics/prometheus` are never limited.
+
 ## Usage gauges
 
 `GET /api/storage` returns the active profile, one gauge per measure, the worst one, the recommendation, and how long the last boot took (`boot_ms`).
