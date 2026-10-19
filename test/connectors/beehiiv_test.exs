@@ -84,6 +84,37 @@ defmodule OptimalEngine.Connectors.BeehiivTest do
     end
   end
 
+  describe "families" do
+    test "families: [posts] reads posts only and never asks for subscribers", %{stub: stub} do
+      {:ok, state} = Beehiiv.init(Map.put(@config, "families", ["posts"]))
+
+      assert {:ok, %{signals: signals, cursor: nil}} = Beehiiv.sync(state, nil)
+      assert Enum.map(signals, & &1.genre) == ["post", "post", "post"]
+
+      urls = stub |> ConnectorFixtureStub.calls() |> Enum.map(& &1.url)
+      refute Enum.any?(urls, &String.contains?(&1, "/subscriptions"))
+    end
+
+    test "a cursor for a family the row no longer reads starts over on the first one", %{
+      stub: stub
+    } do
+      {:ok, state} = Beehiiv.init(Map.put(@config, "families", ["posts"]))
+
+      assert {:ok, %{signals: signals}} = Beehiiv.sync(state, "subscribers:1")
+      assert Enum.all?(signals, &(&1.genre == "post"))
+
+      [first | _] = ConnectorFixtureStub.calls(stub)
+      assert String.ends_with?(first.url, "/posts?limit=100&page=1")
+    end
+
+    test "an unknown or empty family list is a config error, not a silent full read" do
+      for families <- [["posts", "likes"], [], "posts"] do
+        {:ok, state} = Beehiiv.init(Map.put(@config, "families", families))
+        assert {:error, {:invalid_config, :families}} = Beehiiv.sync(state, nil)
+      end
+    end
+  end
+
   describe "cursor" do
     test "advances by page and family when the page bound is reached" do
       {:ok, state} = Beehiiv.init(Map.put(@config, "max_pages", 1))

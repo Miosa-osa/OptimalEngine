@@ -6,6 +6,9 @@ defmodule OptimalEngine.Connectors.Adapters.Beehiiv do
     * `:publication_id` -- the publication to read (`pub_...`)
     * optional `:max_pages` -- pages fetched per run across both record
       families (default 20)
+    * optional `:families` -- the record families to read, `["posts"]`,
+      `["subscribers"]` or both (default both). Subscribers are personal
+      data; a knowledge base that only needs the newsletter reads posts.
 
   ## Credentials
     * `:api_key` -- a beehiiv API key, sent as a bearer token
@@ -43,12 +46,15 @@ defmodule OptimalEngine.Connectors.Adapters.Beehiiv do
   def sync(state, cursor) do
     publication = URI.encode(to_string(pick(state, :publication_id)), &URI.char_unreserved?/1)
 
-    ctx = %{
-      base: "#{@base_url}/#{publication}",
-      headers: [{"authorization", "Bearer #{pick(state, :api_key)}"}]
-    }
+    with {:ok, families} <- families(state) do
+      ctx = %{
+        base: "#{@base_url}/#{publication}",
+        headers: [{"authorization", "Bearer #{pick(state, :api_key)}"}],
+        families: families
+      }
 
-    walk(ctx, parse_cursor(cursor), [], max_pages(state))
+      walk(ctx, parse_cursor(cursor, families), [], max_pages(state))
+    end
   end
 
   # The two record families have no marker in common, so the shape decides: a
@@ -72,7 +78,7 @@ defmodule OptimalEngine.Connectors.Adapters.Beehiiv do
     with {:ok, body} <- fetch_page(ctx, family, page),
          {:ok, records} <- records(body) do
       acc = Enum.reduce(records, acc, &add_signal/2)
-      walk(ctx, next_position(position, body), acc, budget - 1)
+      walk(ctx, next_position(position, body, ctx.families), acc, budget - 1)
     end
   end
 
@@ -101,32 +107,50 @@ defmodule OptimalEngine.Connectors.Adapters.Beehiiv do
 
   # Another page of the same family while `page < total_pages`; otherwise the
   # first page of the next family, or `:done` after the last one.
-  defp next_position({family, page}, %{"total_pages" => total})
+  defp next_position({family, page}, %{"total_pages" => total}, _families)
        when is_integer(total) and page < total,
        do: {family, page + 1}
 
-  defp next_position({family, _page}, _body) do
-    index = Enum.find_index(@families, &(&1 == family))
+  defp next_position({family, _page}, _body, families) do
+    index = Enum.find_index(families, &(&1 == family))
 
-    case Enum.at(@families, index + 1) do
+    case Enum.at(families, index + 1) do
       nil -> :done
       next_family -> {next_family, 1}
     end
   end
 
-  defp parse_cursor(nil), do: {hd(@families), 1}
-
-  defp parse_cursor(cursor) when is_binary(cursor) do
+  # A cursor for a family the row no longer reads starts over on the first one.
+  defp parse_cursor(cursor, families) when is_binary(cursor) do
     with [family, page] <- String.split(cursor, ":", parts: 2),
-         true <- family in @families,
+         true <- family in families,
          {page, ""} when page >= 1 <- Integer.parse(page) do
       {family, page}
     else
-      _ -> {hd(@families), 1}
+      _ -> {hd(families), 1}
     end
   end
 
-  defp parse_cursor(_cursor), do: {hd(@families), 1}
+  defp parse_cursor(_cursor, families), do: {hd(families), 1}
+
+  # The configured families in walk order; anything else is refused rather
+  # than widened to a full read.
+  defp families(state) do
+    case pick(state, :families) do
+      nil ->
+        {:ok, @families}
+
+      names when is_list(names) and names != [] ->
+        names = Enum.map(names, &to_string/1)
+
+        if Enum.all?(names, &(&1 in @families)),
+          do: {:ok, Enum.filter(@families, &(&1 in names))},
+          else: {:error, {:invalid_config, :families}}
+
+      _other ->
+        {:error, {:invalid_config, :families}}
+    end
+  end
 
   defp encode_cursor({family, page}), do: "#{family}:#{page}"
 
