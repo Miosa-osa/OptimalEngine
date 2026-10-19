@@ -94,7 +94,7 @@ defmodule OptimalEngine.Storage.Providers do
       role: "canonical",
       capabilities: ~w(relational temporal document geospatial time_series)a,
       activation: "cloud_team",
-      probe: {:tcp_url, "OPTIMAL_POSTGRES_URL", 5432},
+      probe: {:postgres_url, "OPTIMAL_POSTGRES_URL"},
       required_env: ["OPTIMAL_POSTGRES_URL"],
       optional_env: []
     },
@@ -306,6 +306,15 @@ defmodule OptimalEngine.Storage.Providers do
 
   defp run_probe({:executable, executable}) do
     if System.find_executable(executable), do: :healthy, else: :not_installed
+  end
+
+  # A TCP accept is not a database. The PostgreSQL probe runs a real query, so
+  # a wrong database or credential reports unreachable instead of healthy.
+  defp run_probe({:postgres_url, _env}) do
+    case OptimalEngine.Storage.Postgres.health() do
+      :healthy -> :healthy
+      _ -> :unreachable
+    end
   end
 
   defp run_probe({:tcp_url, env, default_port}) do
