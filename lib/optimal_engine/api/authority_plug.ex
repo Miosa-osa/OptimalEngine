@@ -150,9 +150,14 @@ defmodule OptimalEngine.API.AuthorityPlug do
   defp action("DELETE", _route), do: "erase"
   defp action(_method, _route), do: "write"
 
-  defp data_class(nil), do: "internal"
+  @doc """
+  The data class of a workspace for authority decisions: its
+  `metadata.data_class`, `restricted` for an unknown class, else `internal`.
+  """
+  @spec data_class(String.t() | nil) :: String.t()
+  def data_class(nil), do: "internal"
 
-  defp data_class(workspace_id) do
+  def data_class(workspace_id) do
     case OptimalEngine.Workspace.get(workspace_id) do
       {:ok, %{metadata: %{"data_class" => class}}} ->
         if class in OptimalEngine.Authority.Policy.data_classes(), do: class, else: "restricted"

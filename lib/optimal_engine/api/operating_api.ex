@@ -21,7 +21,15 @@ defmodule OptimalEngine.API.OperatingAPI do
   def boot(conn) do
     conn = fetch_query_params(conn)
     workspace_id = conn.query_params["workspace"] || conn.assigns[:workspace_id] || "default"
-    json(conn, 200, Boot.build(tenant(conn), workspace_id, timezone: conn.query_params["timezone"]))
+
+    json(
+      conn,
+      200,
+      Boot.build(tenant(conn), workspace_id,
+        timezone: conn.query_params["timezone"],
+        actor: Actor.of(conn)
+      )
+    )
   end
 
   def brief(conn) do

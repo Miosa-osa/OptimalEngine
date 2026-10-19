@@ -114,6 +114,19 @@ defmodule OptimalEngine.Session do
     end
   end
 
+  @doc """
+  The summary a commit stores for `messages` (maps with `:role` and
+  `:content`), without starting a session: a model summary when model
+  summaries are enabled and a model answers, otherwise the first user
+  messages. `OptimalEngine.ChatSession` uses it for chats committed over
+  HTTP.
+  """
+  @spec summarize([map()]) :: String.t()
+  def summarize(messages) when is_list(messages) do
+    state = %__MODULE__{id: "summary", started_at: DateTime.utc_now(), messages: messages}
+    generate_summary(state, compressed_transcript(state))
+  end
+
   @doc "Lists all active session IDs."
   @spec list_sessions() :: [String.t()]
   def list_sessions do
@@ -185,20 +198,8 @@ defmodule OptimalEngine.Session do
 
   @impl true
   def handle_call(:commit, _from, state) do
-    # Compress transcript if the session is large (best-effort, never blocks)
     transcript = render_context(state)
-
-    compressed =
-      if SessionCompressor.should_compress?(state.messages) do
-        case SessionCompressor.compress(transcript) do
-          {:ok, c} -> c
-          _ -> transcript
-        end
-      else
-        transcript
-      end
-
-    summary = generate_summary(state, compressed)
+    summary = generate_summary(state, compressed_transcript(state))
     new_state = %{state | committed: true, summary: summary}
 
     persist_session(new_state)
@@ -238,6 +239,22 @@ defmodule OptimalEngine.Session do
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
+
+  # The transcript the summary model reads: compressed when the session is
+  # large (best-effort, never blocks). Without model summaries nothing reads
+  # it, so nothing is compressed.
+  defp compressed_transcript(state) do
+    transcript = render_context(state)
+
+    if llm_summaries?() and SessionCompressor.should_compress?(state.messages) do
+      case SessionCompressor.compress(transcript) do
+        {:ok, c} -> c
+        _ -> transcript
+      end
+    else
+      transcript
+    end
+  end
 
   defp generate_summary(%{messages: []}, _compressed), do: "(empty session)"
 

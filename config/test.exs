@@ -29,7 +29,7 @@ config :optimal_engine, :viability_interval_ms, 0
 config :optimal_engine, :analyses_interval_ms, 0
 
 config :optimal_engine, :metric_history, enabled: false
-config :optimal_engine, :session, llm_summary: false
+config :optimal_engine, :session, llm_summary: false, llm_extraction: false
 
 config :optimal_engine, :context_refresh_scheduler,
   enabled: false,

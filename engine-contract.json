@@ -7,6 +7,8 @@
   "capabilities": [
     "workspace_mix_tasks",
     "governed_claim_review",
-    "scoped_memory_retrieval"
+    "scoped_memory_retrieval",
+    "chat_session_commit",
+    "org_policy_flow_down"
   ]
 }
