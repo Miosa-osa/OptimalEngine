@@ -27,7 +27,7 @@ Twenty adapters ship with the Engine.
 | `:onedrive` | OneDrive | token | files |
 | `:go_high_level` | GoHighLevel | token | contacts, conversations with messages, opportunities |
 | `:stripe` | Stripe | token | customers, invoices, charges |
-| `:beehiiv` | beehiiv | token | posts and subscribers |
+| `:beehiiv` | beehiiv | token | posts and subscribers (`families: ["posts"]` reads posts only) |
 | `:jot_form` | JotForm | token | form submissions |
 | `:fathom` | Fathom | token | recorded meetings with summary, transcript and action items |
 | `:sources_folder` | a local folder | none | markdown files on disk |
