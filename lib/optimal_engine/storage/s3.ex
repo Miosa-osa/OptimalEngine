@@ -20,10 +20,19 @@ defmodule OptimalEngine.Storage.S3 do
   OPTIMAL_S3_PATH_STYLE         "false" for virtual-hosted addressing (default path style)
   OPTIMAL_S3_TIMEOUT_MS         per-request timeout (default 30000)
   OPTIMAL_S3_MAX_RETRIES        retries for transport errors and 5xx/429 (default 2)
+  OPTIMAL_S3_CREDENTIALS_FILE   optional file holding the access key id and secret
   ```
 
-  Credentials are read from the environment on every call and are never
-  returned by any public function, logged, or placed in an error value.
+  The credentials file holds either two lines (the access key id, then the
+  secret) or `KEY=VALUE` lines naming `OPTIMAL_S3_ACCESS_KEY_ID` and
+  `OPTIMAL_S3_SECRET_ACCESS_KEY` (or the AWS names `aws_access_key_id` and
+  `aws_secret_access_key`). Blank lines, `#` comments, `[section]` headers,
+  `export`, and surrounding quotes are allowed. A value set in the environment
+  always wins over the file.
+
+  Credentials are read on every call, so replacing the file rotates them
+  without a restart. They are never returned by any public function, logged,
+  or placed in an error value.
   """
 
   require Logger
@@ -36,6 +45,22 @@ defmodule OptimalEngine.Storage.S3 do
   @empty_sha256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   @algorithm "AWS4-HMAC-SHA256"
   @service "s3"
+
+  @credential_fields %{
+    "OPTIMAL_S3_ACCESS_KEY_ID" => :access_key_id,
+    "OPTIMAL_S3_SECRET_ACCESS_KEY" => :secret_access_key
+  }
+  @credential_vars Map.keys(@credential_fields)
+
+  # Names a credentials file may use, compared case-insensitively.
+  @credential_names %{
+    "optimal_s3_access_key_id" => :access_key_id,
+    "aws_access_key_id" => :access_key_id,
+    "access_key_id" => :access_key_id,
+    "optimal_s3_secret_access_key" => :secret_access_key,
+    "aws_secret_access_key" => :secret_access_key,
+    "secret_access_key" => :secret_access_key
+  }
 
   @type config :: %{
           endpoint: URI.t(),
@@ -62,12 +87,17 @@ defmodule OptimalEngine.Storage.S3 do
   needs them. It is for internal callers (the adapter and the offsite backup
   path) and must never be serialized into an API response.
   """
-  @spec config() :: {:ok, config()} | {:error, :not_configured | :invalid_endpoint}
+  @spec config() ::
+          {:ok, config()}
+          | {:error,
+             :not_configured
+             | :invalid_endpoint
+             | :credentials_file_unreadable
+             | :credentials_file_invalid}
   def config do
     with {:ok, endpoint} <- endpoint(),
          {:ok, bucket} <- required("OPTIMAL_S3_BUCKET"),
-         {:ok, key_id} <- required("OPTIMAL_S3_ACCESS_KEY_ID"),
-         {:ok, secret} <- required("OPTIMAL_S3_SECRET_ACCESS_KEY") do
+         {:ok, key_id, secret} <- credentials() do
       {:ok,
        %{
          endpoint: endpoint,
@@ -82,6 +112,21 @@ defmodule OptimalEngine.Storage.S3 do
        }}
     end
   end
+
+  @doc """
+  True when `name` is a credential variable that the environment leaves unset
+  but `OPTIMAL_S3_CREDENTIALS_FILE` supplies. Lets the provider inventory count
+  credentials from the file as configured without ever exposing them.
+  """
+  @spec credential_in_file?(String.t()) :: boolean()
+  def credential_in_file?(name) when name in @credential_vars do
+    case file_credentials() do
+      {:ok, values} -> is_binary(values[@credential_fields[name]])
+      {:error, _reason} -> false
+    end
+  end
+
+  def credential_in_file?(_name), do: false
 
   @doc """
   A bucket/prefix path joined from segments, with empty segments dropped.
@@ -129,19 +174,22 @@ defmodule OptimalEngine.Storage.S3 do
   @spec put_object(String.t(), iodata(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def put_object(key, body, opts \\ []) when is_binary(key) do
-    body = IO.iodata_to_binary(body)
+    with :ok <- check_key(key) do
+      body = IO.iodata_to_binary(body)
 
-    if byte_size(body) > Keyword.get(opts, :multipart_threshold, @multipart_threshold) do
-      multipart_put(key, body, opts)
-    else
-      put_single(key, body, opts)
+      if byte_size(body) > Keyword.get(opts, :multipart_threshold, @multipart_threshold) do
+        multipart_put(key, body, opts)
+      else
+        put_single(key, body, opts)
+      end
     end
   end
 
   @doc "Store a file under a key without loading it into memory when it fits in one request."
   @spec put_file(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def put_file(key, path, opts \\ []) when is_binary(key) and is_binary(path) do
-    with {:ok, %{size: size}} <- stat_file(path) do
+    with :ok <- check_key(key),
+         {:ok, %{size: size}} <- stat_file(path) do
       if size > Keyword.get(opts, :multipart_threshold, @multipart_threshold) do
         multipart_put_file(key, path, size, opts)
       else
@@ -153,7 +201,8 @@ defmodule OptimalEngine.Storage.S3 do
   @doc "Fetch an object body."
   @spec get_object(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def get_object(key, opts \\ []) when is_binary(key) do
-    with {:ok, config} <- config(),
+    with :ok <- check_key(key),
+         {:ok, config} <- config(),
          request = request(:get, key, opts),
          {:ok, response} <- send_request(config, request, opts),
          {:ok, response} <- expect_success(response) do
@@ -168,21 +217,54 @@ defmodule OptimalEngine.Storage.S3 do
     end
   end
 
-  @doc "Fetch an object straight into a file, creating parent directories."
+  @doc """
+  Fetch an object straight into a file, creating parent directories.
+
+  The body is streamed to disk rather than held in memory, so a multi-gigabyte
+  object downloads in constant memory. It lands in a temporary file beside
+  `path` and is renamed into place only when the download completed, so a
+  failed or interrupted download never leaves a partial file at `path`.
+  """
   @spec get_object_to_file(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def get_object_to_file(key, path, opts \\ []) when is_binary(key) and is_binary(path) do
-    with {:ok, %{body: body} = object} <- get_object(key, opts),
-         :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- write_file(path, body) do
-      {:ok, Map.put(object, :path, path)}
+    partial = "#{path}.part-#{System.unique_integer([:positive])}"
+
+    result =
+      with :ok <- check_key(key),
+           {:ok, config} <- config(),
+           :ok <- make_parent(path),
+           request = request(:get, key, opts),
+           {:ok, response} <- send_request(config, request, Keyword.put(opts, :stream_to, partial)),
+           {:ok, response} <- expect_success(response),
+           {:ok, %{size: size}} <- stat_file(partial),
+           {:ok, checksum} <- file_sha256(partial),
+           :ok <- rename_file(partial, path) do
+        {:ok,
+         %{
+           path: path,
+           size_bytes: size,
+           checksum_sha256: checksum,
+           etag: header(response, "etag"),
+           content_type: header(response, "content-type")
+         }}
+      end
+
+    case result do
+      {:ok, _object} ->
+        result
+
+      error ->
+        File.rm(partial)
+        error
     end
   end
 
   @doc "Object metadata without transferring the body."
   @spec head_object(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def head_object(key, opts \\ []) when is_binary(key) do
-    with {:ok, config} <- config(),
+    with :ok <- check_key(key),
+         {:ok, config} <- config(),
          request = request(:head, key, opts),
          {:ok, response} <- send_request(config, request, opts),
          {:ok, response} <- expect_success(response) do
@@ -213,7 +295,8 @@ defmodule OptimalEngine.Storage.S3 do
   @doc "Delete an object. Deleting a missing key succeeds, as S3 does."
   @spec delete_object(String.t(), keyword()) :: :ok | {:error, term()}
   def delete_object(key, opts \\ []) when is_binary(key) do
-    with {:ok, config} <- config(),
+    with :ok <- check_key(key),
+         {:ok, config} <- config(),
          request = request(:delete, key, opts),
          {:ok, response} <- send_request(config, request, opts) do
       if response.status in [200, 204] do
@@ -257,6 +340,13 @@ defmodule OptimalEngine.Storage.S3 do
 
   # An operation is a method, a key, and query parameters. Building it once and
   # signing it in one place keeps every call path on the same signing code.
+  # A key with no name in it would address the bucket itself: a GET lists the
+  # bucket and a DELETE removes an empty one. Object calls refuse it before
+  # anything is sent.
+  defp check_key(key) do
+    if String.trim(key, "/") == "", do: {:error, :invalid_object_key}, else: :ok
+  end
+
   defp request(method, key, opts) do
     %{
       method: method,
@@ -566,7 +656,23 @@ defmodule OptimalEngine.Storage.S3 do
     timeout = Keyword.get(opts, :timeout, config.timeout)
     http_opts = [timeout: timeout, connect_timeout: min(timeout, 5_000), ssl: ssl_opts(config)]
 
-    body_format = if request.method == :head, do: [], else: [body_format: :binary]
+    stream_to = Keyword.get(opts, :stream_to)
+
+    # A streamed download writes a 200 body straight to the file; any other
+    # status still comes back in memory so its error can be read. A retry
+    # starts the file over.
+    body_format =
+      cond do
+        request.method == :head ->
+          []
+
+        is_binary(stream_to) ->
+          File.rm(stream_to)
+          [body_format: :binary, stream: String.to_charlist(stream_to)]
+
+        true ->
+          [body_format: :binary]
+      end
 
     # :httpc is strict about the shape of a request: a body-carrying method
     # needs the four-element form, and its content type must be a string
@@ -581,6 +687,11 @@ defmodule OptimalEngine.Storage.S3 do
       end
 
     case :httpc.request(request.method, http_request, http_opts, body_format) do
+      {:ok, :saved_to_file} ->
+        # An empty 200 body may leave no file behind.
+        unless File.exists?(stream_to), do: File.touch(stream_to)
+        {:ok, %{status: 200, headers: %{}, body: ""}}
+
       {:ok, {{_version, status, _reason}, response_headers, body}} ->
         {:ok,
          %{status: status, headers: normalize_headers(response_headers), body: to_binary(body)}}
@@ -806,6 +917,102 @@ defmodule OptimalEngine.Storage.S3 do
     end
   end
 
+  # The environment wins value by value; the credentials file is read only when
+  # the environment leaves a credential unset.
+  defp credentials do
+    from_env = %{
+      access_key_id: optional("OPTIMAL_S3_ACCESS_KEY_ID", ""),
+      secret_access_key: optional("OPTIMAL_S3_SECRET_ACCESS_KEY", "")
+    }
+
+    if from_env.access_key_id != "" and from_env.secret_access_key != "" do
+      {:ok, from_env.access_key_id, from_env.secret_access_key}
+    else
+      with {:ok, from_file} <- file_credentials() do
+        merged =
+          Map.merge(from_file, from_env, fn _field, file, env ->
+            if env == "", do: file, else: env
+          end)
+
+        case {merged[:access_key_id], merged[:secret_access_key],
+              optional("OPTIMAL_S3_CREDENTIALS_FILE", "")} do
+          {id, secret, _file}
+          when is_binary(id) and id != "" and is_binary(secret) and secret != "" ->
+            {:ok, id, secret}
+
+          {_id, _secret, ""} ->
+            {:error, :not_configured}
+
+          _incomplete ->
+            {:error, :credentials_file_invalid}
+        end
+      end
+    end
+  end
+
+  defp file_credentials do
+    case optional("OPTIMAL_S3_CREDENTIALS_FILE", "") do
+      "" ->
+        {:ok, %{}}
+
+      path ->
+        case File.read(path) do
+          {:ok, contents} -> parse_credentials(contents)
+          {:error, _reason} -> {:error, :credentials_file_unreadable}
+        end
+    end
+  end
+
+  # Two forms: KEY=VALUE lines naming the credentials, or exactly two bare
+  # lines (the access key id, then the secret). A bare secret may contain "=",
+  # so a line only counts as an assignment when it names a known credential.
+  defp parse_credentials(contents) do
+    lines =
+      contents
+      |> String.split(~r/\r?\n/)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == "" or String.starts_with?(&1, "#") or section_header?(&1)))
+
+    assignments = for line <- lines, assignment = credential_assignment(line), do: assignment
+
+    cond do
+      assignments != [] ->
+        {:ok, Map.new(assignments)}
+
+      match?([_, _], lines) ->
+        [key_id, secret] = Enum.map(lines, &unquote_value/1)
+        {:ok, %{access_key_id: key_id, secret_access_key: secret}}
+
+      true ->
+        {:error, :credentials_file_invalid}
+    end
+  end
+
+  defp section_header?(line), do: String.starts_with?(line, "[") and String.ends_with?(line, "]")
+
+  defp credential_assignment(line) do
+    with [_, name, value] <-
+           Regex.run(~r/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/, line),
+         field when not is_nil(field) <- Map.get(@credential_names, String.downcase(name)),
+         value when value != "" <- unquote_value(value) do
+      {field, value}
+    else
+      _ -> nil
+    end
+  end
+
+  defp unquote_value(value) do
+    value = String.trim(value)
+
+    case value do
+      <<mark, rest::binary>> when mark in [?", ?'] and byte_size(rest) > 0 ->
+        if String.ends_with?(rest, <<mark>>), do: String.slice(rest, 0..-2//1), else: value
+
+      _ ->
+        value
+    end
+  end
+
   defp optional(name, default) do
     case System.get_env(name) do
       value when is_binary(value) ->
@@ -982,10 +1189,17 @@ defmodule OptimalEngine.Storage.S3 do
     end
   end
 
-  defp write_file(path, body) do
-    case File.write(path, body) do
+  defp make_parent(path) do
+    case File.mkdir_p(Path.dirname(path)) do
       :ok -> :ok
       {:error, reason} -> {:error, {:write_failed, path, reason}}
+    end
+  end
+
+  defp rename_file(from, to) do
+    case File.rename(from, to) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:write_failed, to, reason}}
     end
   end
 

@@ -3,15 +3,21 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
   The offsite drill: take a backup, ship it to the object store, delete the
   local copy, and restore from the object into a fresh data directory. The
   restored database must pass integrity_check and hold the same rows.
+
+  Offsite copies are sealed with `OPTIMAL_BACKUP_KEY` before they leave the
+  machine, so the object store only ever holds ciphertext.
   """
 
   use ExUnit.Case, async: false
 
   alias OptimalEngine.{Backup, Store}
+  alias OptimalEngine.Backup.Envelope
+  alias OptimalEngine.Storage.S3
   alias OptimalEngine.TestSupport.S3Stub
 
   @s3_env ~w(OPTIMAL_S3_ENDPOINT OPTIMAL_S3_BUCKET OPTIMAL_S3_REGION OPTIMAL_S3_ACCESS_KEY_ID
-             OPTIMAL_S3_SECRET_ACCESS_KEY OPTIMAL_S3_PREFIX)
+             OPTIMAL_S3_SECRET_ACCESS_KEY OPTIMAL_S3_PREFIX OPTIMAL_S3_MAX_RETRIES
+             OPTIMAL_BACKUP_KEY)
 
   setup do
     previous_env = Map.new(@s3_env, &{&1, System.get_env(&1)})
@@ -31,6 +37,7 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
     System.put_env("OPTIMAL_S3_ACCESS_KEY_ID", stub.access_key_id)
     System.put_env("OPTIMAL_S3_SECRET_ACCESS_KEY", stub.secret_access_key)
     System.put_env("OPTIMAL_S3_REGION", stub.region)
+    System.put_env("OPTIMAL_BACKUP_KEY", Base.encode16(:crypto.strong_rand_bytes(32)))
 
     on_exit(fn ->
       Enum.each(previous_env, fn
@@ -55,7 +62,7 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
     info
   end
 
-  test "a backup is shipped offsite and its catalog row records the copy", %{
+  test "a backup is shipped offsite sealed, and its catalog row records the copy", %{
     stub: stub,
     backing: backing
   } do
@@ -65,7 +72,21 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
     assert info.offsite.status == "shipped"
     assert info.offsite.uri =~ "s3://#{stub.bucket}/"
     assert info.offsite.checksum_sha256 == info.checksum_sha256
-    assert S3Stub.object_body(stub.agent, info.offsite.key) == File.read!(info.target)
+    assert info.offsite.encrypted == true
+    assert info.offsite.cipher == "AES-256-GCM"
+
+    # The object store holds ciphertext only: not the local bytes, not a SQLite
+    # file, and nothing of the database's header.
+    object = S3Stub.object_body(stub.agent, info.offsite.key)
+    local = File.read!(info.target)
+    refute object == local
+    refute String.starts_with?(object, "SQLite format 3")
+    assert :binary.match(object, binary_part(local, 0, 100)) == :nomatch
+    assert info.offsite.ciphertext_sha256 == sha256(object)
+    assert info.offsite.ciphertext_bytes == byte_size(object)
+
+    {:ok, key} = Envelope.backup_key()
+    assert info.offsite.key_id == Envelope.key_id(key)
 
     assert {:ok, listed_all} = Backup.list_offsite()
     listed = Enum.find(listed_all, &(&1.id == info.id))
@@ -74,9 +95,45 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
     assert listed.offsite_key == info.offsite.key
     assert listed.checksum_sha256 == info.checksum_sha256
     assert listed.local_path == Path.expand(info.target)
+    assert listed.encrypted == true
+    assert listed.ciphertext_sha256 == sha256(object)
+    assert listed.key_id == info.offsite.key_id
 
-    assert {:ok, [[1]]} =
-             Store.raw_query("SELECT offsite FROM backup_records WHERE id = ?1", [info.id])
+    assert {:ok, [[1, 1, metadata]]} =
+             Store.raw_query(
+               "SELECT offsite, encrypted, metadata FROM backup_records WHERE id = ?1",
+               [info.id]
+             )
+
+    metadata = Jason.decode!(metadata)
+    assert metadata["offsite_ciphertext_sha256"] == sha256(object)
+    assert metadata["offsite_cipher"] == "AES-256-GCM"
+
+    # The sealed temporary file never outlives the upload.
+    assert Path.wildcard(Path.join(backing, "*.enc*")) == []
+  end
+
+  test "without OPTIMAL_BACKUP_KEY nothing is uploaded, and the refusal says why", %{
+    stub: stub,
+    backing: backing
+  } do
+    System.delete_env("OPTIMAL_BACKUP_KEY")
+    info = take_backup(backing, "no-key.db", offsite: true)
+
+    assert info.offsite.status == "failed"
+    assert info.offsite.reason == ":backup_key_missing"
+    assert info.offsite.message =~ "OPTIMAL_BACKUP_KEY"
+    assert File.regular?(info.target)
+    assert S3Stub.object_keys(stub.agent) == []
+
+    assert {:ok, [[0, 0]]} =
+             Store.raw_query("SELECT offsite, encrypted FROM backup_records WHERE id = ?1", [
+               info.id
+             ])
+
+    System.put_env("OPTIMAL_BACKUP_KEY", "too-short")
+    assert {:error, :backup_key_invalid} = Backup.ship_offsite(info.id)
+    assert S3Stub.object_keys(stub.agent) == []
   end
 
   test "an offsite restore into a fresh data directory reproduces the backup", %{
@@ -99,7 +156,8 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
     assert restored.target == Path.join(data_dir, "index.db")
     assert restored.source_uri == info.offsite.uri
     assert restored.checksum_sha256 == info.checksum_sha256
-    assert restored.source_bytes == info.size_bytes
+    assert restored.encrypted
+    assert restored.source_bytes == info.offsite.ciphertext_bytes
     assert restored.archived == nil
     assert restored.download_path == nil
 
@@ -108,7 +166,7 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
 
     # The temporary download is gone and the object is untouched, so the drill
     # can be run again with the same backup.
-    assert Path.wildcard(Path.join(System.tmp_dir!(), "optimal-offsite-restore/*.db")) == []
+    assert Path.wildcard(Path.join(System.tmp_dir!(), "optimal-offsite-restore/*")) == []
     assert S3Stub.object_body(stub.agent, info.offsite.key) != nil
 
     assert {:ok, again} = Backup.restore_offsite(info.id, data_dir: data_dir)
@@ -146,6 +204,92 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
              Backup.restore_offsite(info.id, data_dir: Path.join(tmp, "never"))
 
     refute File.exists?(Path.join([tmp, "never", "index.db"]))
+  end
+
+  test "a restore with the wrong key or no key fails cleanly and writes nothing", %{
+    backing: backing,
+    tmp: tmp
+  } do
+    info = take_backup(backing, "wrong-key.db", offsite: true)
+    target_dir = Path.join(tmp, "wrong-key-restore")
+
+    System.put_env("OPTIMAL_BACKUP_KEY", Base.encode16(:crypto.strong_rand_bytes(32)))
+
+    assert {:error, {:backup_key_mismatch, key_id}} =
+             Backup.restore_offsite(info.id, data_dir: target_dir)
+
+    assert key_id == info.offsite.key_id
+    refute File.exists?(Path.join(target_dir, "index.db"))
+
+    System.delete_env("OPTIMAL_BACKUP_KEY")
+
+    assert {:error, :backup_key_missing} =
+             Backup.restore_offsite(info.id, data_dir: target_dir)
+
+    refute File.exists?(Path.join(target_dir, "index.db"))
+    assert Path.wildcard(Path.join(System.tmp_dir!(), "optimal-offsite-restore/*")) == []
+  end
+
+  test "a sealed object restores without its catalog row, as after losing the machine", %{
+    stub: stub,
+    backing: backing,
+    tmp: tmp
+  } do
+    info = take_backup(backing, "disaster.db", offsite: true)
+    before = row_counts(info.target)
+    File.rm!(info.target)
+
+    assert {:ok, listing} = Backup.list_offsite_objects()
+    assert info.offsite.key in listing.keys
+
+    # A changed byte anywhere in the object fails authentication.
+    object = S3Stub.object_body(stub.agent, info.offsite.key)
+    position = byte_size(object) - 40
+    <<head::binary-size(position), byte, rest::binary>> = object
+    tampered_key = info.offsite.key <> ".tampered"
+    assert {:ok, _} = S3.put_object(tampered_key, head <> <<Bitwise.bxor(byte, 1)>> <> rest)
+
+    assert {:error, {:backup_decrypt_failed, {:chunk, _}}} =
+             Backup.restore_offsite_object(tampered_key, data_dir: Path.join(tmp, "tampered"))
+
+    refute File.exists?(Path.join([tmp, "tampered", "index.db"]))
+
+    data_dir = Path.join(tmp, "recovered")
+
+    assert {:ok, restored} = Backup.restore_offsite_object(info.offsite.key, data_dir: data_dir)
+    assert restored.backup_id == info.id
+    assert restored.checksum_sha256 == info.checksum_sha256
+    assert {:ok, :ok} = Backup.verify(restored.target)
+    assert row_counts(restored.target) == before
+    assert Path.wildcard(Path.join(System.tmp_dir!(), "optimal-offsite-restore/*")) == []
+  end
+
+  test "a plaintext copy shipped before encryption existed still restores", %{
+    stub: stub,
+    backing: backing,
+    tmp: tmp
+  } do
+    info = take_backup(backing, "legacy-plain.db")
+    before = row_counts(info.target)
+    key = S3.object_key(["backups", "default", Path.basename(info.target)])
+    assert {:ok, _} = S3.put_file(key, info.target)
+
+    metadata = Jason.encode!(%{"offsite_key" => key, "offsite_uri" => S3.uri(key)})
+
+    :ok =
+      Store.raw_execute(
+        "UPDATE backup_records SET offsite = 1, encrypted = 0, metadata = ?1 WHERE id = ?2",
+        [metadata, info.id]
+      )
+
+    File.rm!(info.target)
+    System.delete_env("OPTIMAL_BACKUP_KEY")
+
+    assert {:ok, restored} =
+             Backup.restore_offsite(info.id, data_dir: Path.join(tmp, "legacy-restore"))
+
+    assert row_counts(restored.target) == before
+    assert S3Stub.object_body(stub.agent, key) != nil
   end
 
   test "a backup that is not in the catalog is never shipped", %{backing: backing} do
@@ -202,6 +346,8 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
     |> Enum.find(&(&1.name == name))
     |> Map.get(:detail)
   end
+
+  defp sha256(data), do: :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
 
   defp row_counts(db_path) do
     for table <- ~w(workspaces contexts memories backup_records), into: %{} do

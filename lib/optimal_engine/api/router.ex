@@ -2762,11 +2762,19 @@ defmodule OptimalEngine.API.Router do
   end
 
   # GET /api/backup/offsite - backups with a copy in the object store, newest
-  # first, with the local path, the object URI, and the checksum both are held to.
+  # first, with the local path, the object URI, and the checksum both are held to,
+  # plus the scheduled offsite backup status (never the backup key itself).
   get "/api/backup/offsite" do
     case OptimalEngine.Backup.list_offsite() do
-      {:ok, backups} -> json(conn, %{backups: backups, count: length(backups)})
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      {:ok, backups} ->
+        json(conn, %{
+          backups: backups,
+          count: length(backups),
+          schedule: OptimalEngine.Backup.Schedule.status()
+        })
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 

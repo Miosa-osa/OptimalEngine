@@ -111,6 +111,24 @@ defmodule OptimalEngine.Storage.S3Test do
       assert {:error, :not_found} = S3.head_object("absent/key.txt")
     end
 
+    test "an empty key is refused before any request reaches the bucket", %{stub: stub} do
+      path = Path.join(System.tmp_dir!(), "s3-empty-key-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm(path) end)
+      File.write!(path, "body")
+
+      for key <- ["", "/", "//"] do
+        assert {:error, :invalid_object_key} = S3.put_object(key, "body")
+        assert {:error, :invalid_object_key} = S3.put_file(key, path)
+        assert {:error, :invalid_object_key} = S3.get_object(key)
+        assert {:error, :invalid_object_key} = S3.get_object_to_file(key, path <> ".out")
+        assert {:error, :invalid_object_key} = S3.head_object(key)
+        assert {:error, :invalid_object_key} = S3.delete_object(key)
+      end
+
+      assert S3Stub.requests(stub.agent) == []
+      refute File.exists?(path <> ".out")
+    end
+
     test "keys with characters that need encoding survive the signature", %{stub: stub} do
       key = S3.object_key(["workspaces", "acme team", "hash+name=v1.bin"])
 
@@ -137,6 +155,28 @@ defmodule OptimalEngine.Storage.S3Test do
       assert downloaded.checksum_sha256 == put.checksum_sha256
 
       on_exit(fn -> File.rm_rf(tmp) end)
+    end
+
+    test "get_object_to_file streams to disk and leaves nothing behind on a miss", %{stub: stub} do
+      tmp = Path.join(System.tmp_dir!(), "s3-stream-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf(tmp) end)
+
+      bytes = :crypto.strong_rand_bytes(3 * 1_048_576 + 17)
+      key = S3.object_key(["streamed", "large.bin"])
+      assert {:ok, _} = S3.put_object(key, bytes, multipart_threshold: byte_size(bytes) + 1)
+      assert S3Stub.object_body(stub.agent, key) == bytes
+
+      target = Path.join([tmp, "nested", "large.bin"])
+      assert {:ok, downloaded} = S3.get_object_to_file(key, target)
+      assert downloaded.path == target
+      assert downloaded.size_bytes == byte_size(bytes)
+      assert downloaded.checksum_sha256 == S3.sha256(bytes)
+      refute Map.has_key?(downloaded, :body)
+      assert File.read!(target) == bytes
+
+      missing = Path.join(tmp, "missing.bin")
+      assert {:error, :not_found} = S3.get_object_to_file("streamed/absent.bin", missing)
+      assert Path.wildcard(Path.join(tmp, "missing.bin*")) == []
     end
 
     test "the stub rejects a request signed with the wrong secret", %{stub: stub} do

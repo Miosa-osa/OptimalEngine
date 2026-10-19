@@ -117,6 +117,9 @@ defmodule OptimalEngine.Application do
       # ── Analyses as scheduled jobs (promises, audits, usage, retention) ──
       OptimalEngine.Analyses.Worker,
 
+      # ── Scheduled offsite backups (encrypted, pruned; off unless configured) ─
+      OptimalEngine.Backup.Schedule.Worker,
+
       # ── Reindex requests posted by writers after they change files ───────
       OptimalEngine.Reindex.Worker
     ]

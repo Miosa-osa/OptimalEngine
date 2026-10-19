@@ -21,13 +21,18 @@ defmodule OptimalEngine.Backup do
         target: "/tmp/engine-restored.db"
       )
 
-  The backup is not encrypted. Treat the file as sensitive —
+  The local backup is not encrypted. Treat the file as sensitive:
   connector credentials live in it (encrypted envelope, but the
   envelope key lives outside the DB by design).
+
+  An offsite copy is always encrypted before it leaves the machine
+  (`OptimalEngine.Backup.Envelope`, key from `OPTIMAL_BACKUP_KEY`). Without
+  that key an offsite copy is refused; it is never uploaded in plaintext.
   """
 
   require Logger
 
+  alias OptimalEngine.Backup.Envelope
   alias OptimalEngine.Storage.S3
   alias OptimalEngine.Store
 
@@ -48,10 +53,12 @@ defmodule OptimalEngine.Backup do
 
   Options:
 
-    * `:offsite` - when true, copy the verified backup to the S3 object store
-      after it is cataloged. The local backup is complete either way; a failed
-      ship is reported in `:offsite` with `status: "failed"` rather than
-      discarding it or pretending the copy exists.
+    * `:offsite` - when true, encrypt the verified backup and copy it to the
+      S3 object store after it is cataloged. The local backup is complete
+      either way; a failed ship is reported in `:offsite` with
+      `status: "failed"` and a `message` saying why, rather than discarding it
+      or pretending the copy exists.
+    * `:metadata` - extra catalog metadata for the `backup_records` row
 
   Returns the backup result with an `:offsite` key: `nil` when no offsite copy
   was requested, `%{status: "shipped", ...}`, or `%{status: "failed", ...}`.
@@ -70,7 +77,15 @@ defmodule OptimalEngine.Backup do
          {:ok, integrity} <- verify(target_path),
          integrity_status <- if(integrity == :ok, do: "verified", else: "failed"),
          id <- backup_id(),
-         :ok <- catalog_backup(id, target_path, size, checksum, integrity_status) do
+         :ok <-
+           catalog_backup(
+             id,
+             target_path,
+             size,
+             checksum,
+             integrity_status,
+             Keyword.get(opts, :metadata, %{})
+           ) do
       {:ok,
        %{
          id: id,
@@ -89,31 +104,40 @@ defmodule OptimalEngine.Backup do
     if Keyword.get(opts, :offsite, false) do
       case ship_offsite(id, Keyword.take(opts, [:tenant_id, :timeout])) do
         {:ok, offsite} -> offsite
-        {:error, reason} -> %{status: "failed", reason: inspect(reason)}
+        {:error, reason} -> %{status: "failed", reason: inspect(reason), message: explain(reason)}
       end
     end
   end
 
   @doc """
-  Copy a cataloged, verified backup to the object store and mark its catalog
-  row offsite.
+  Encrypt a cataloged, verified backup, copy the ciphertext to the object
+  store, and mark its catalog row offsite and encrypted.
 
-  The backup must already be a verified `backup_records` row: the local file is
-  re-hashed and checked against the catalog checksum before anything is
-  uploaded, and the checksum the object store reports back must match too. A
-  mismatch deletes the object it just wrote rather than leaving an unverifiable
-  copy in the bucket.
+  The backup key comes from `OPTIMAL_BACKUP_KEY`; without it nothing is
+  uploaded and `{:error, :backup_key_missing}` is returned. The backup must
+  already be a verified `backup_records` row: the local file is re-hashed
+  while it is encrypted and must match the catalog checksum before anything is
+  uploaded, and the checksum the object store reports back must match the
+  ciphertext. A mismatch deletes the object it just wrote rather than leaving
+  an unverifiable copy in the bucket.
 
-  The object key is `backups/<tenant>/<file name>` under the configured prefix.
+  The sealed copy is written beside the local backup and removed once the
+  upload finished, so the database never sits in memory and the object store
+  only ever receives ciphertext. The catalog records the plaintext checksum
+  (`checksum_sha256`), the ciphertext checksum, the cipher, and the id of the
+  key that sealed it.
+
+  The object key is `backups/<tenant>/<file name>.enc` under the configured
+  prefix.
   """
   @spec ship_offsite(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def ship_offsite(backup_id, opts \\ []) when is_binary(backup_id) do
-    with {:ok, row} <- catalog_row(backup_id, opts),
+    with {:ok, backup_key} <- Envelope.backup_key(),
+         {:ok, row} <- catalog_row(backup_id, opts),
          :ok <- ensure_local_copy(row),
-         :ok <- local_matches_catalog(row),
          key <- offsite_key(row.target, opts),
-         {:ok} <- ship_object(key, row),
-         :ok <- mark_offsite(row, key) do
+         {:ok, sealed} <- seal_and_ship(key, row, backup_key),
+         :ok <- mark_offsite(row, key, sealed) do
       {:ok,
        %{
          status: "shipped",
@@ -122,16 +146,52 @@ defmodule OptimalEngine.Backup do
          key: key,
          checksum_sha256: row.checksum_sha256,
          size_bytes: row.size_bytes,
-         provider: "s3"
+         provider: "s3",
+         encrypted: true,
+         cipher: sealed.cipher,
+         key_id: sealed.key_id,
+         ciphertext_sha256: sealed.ciphertext_sha256,
+         ciphertext_bytes: sealed.ciphertext_bytes
        }}
+    end
+  end
+
+  defp seal_and_ship(key, row, backup_key) do
+    sealed_path = "#{row.target}.offsite-#{System.unique_integer([:positive])}.enc"
+
+    try do
+      with {:ok, sealed} <- seal(row, sealed_path, backup_key),
+           {:ok} <- ship_object(key, sealed_path, sealed.ciphertext_sha256) do
+        {:ok, sealed}
+      end
+    after
+      File.rm(sealed_path)
+    end
+  end
+
+  # The local file is hashed while it is encrypted, so a backup that no longer
+  # matches its catalog checksum is refused before anything is uploaded.
+  defp seal(row, sealed_path, backup_key) do
+    case Envelope.seal_file(row.target, sealed_path, backup_key,
+           plaintext_sha256: row.checksum_sha256,
+           backup_id: row.id
+         ) do
+      {:ok, sealed} ->
+        {:ok, sealed}
+
+      {:error, {:plaintext_checksum_mismatch, expected, actual}} ->
+        {:error, {:checksum_mismatch, expected, actual}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   # Only the checksum check runs after a successful upload, so that is the only
   # path where an object may be sitting in the bucket and has to be removed.
-  defp ship_object(key, row) do
-    with {:ok, object} <- S3.put_file(key, row.target, []) do
-      case match_object_checksum(object, row) do
+  defp ship_object(key, path, expected) do
+    with {:ok, object} <- S3.put_file(key, path, []) do
+      case match_object_checksum(object, expected) do
         :ok ->
           {:ok}
 
@@ -142,10 +202,10 @@ defmodule OptimalEngine.Backup do
     end
   end
 
-  defp match_object_checksum(%{checksum_sha256: object_checksum}, %{checksum_sha256: catalog}) do
-    if object_checksum == catalog,
+  defp match_object_checksum(%{checksum_sha256: object_checksum}, expected) do
+    if object_checksum == expected,
       do: :ok,
-      else: {:error, {:offsite_checksum_mismatch, catalog, object_checksum}}
+      else: {:error, {:offsite_checksum_mismatch, expected, object_checksum}}
   end
 
   # An object that did not match the catalog checksum must not stay in the
@@ -166,28 +226,27 @@ defmodule OptimalEngine.Backup do
     if File.regular?(target), do: :ok, else: {:error, {:local_backup_missing, target}}
   end
 
-  defp local_matches_catalog(%{target: target, checksum_sha256: expected}) do
-    case checksum_sha256(target) do
-      ^expected -> :ok
-      actual -> {:error, {:checksum_mismatch, expected, actual}}
-    end
-  end
-
   defp offsite_key(target, opts) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
-    S3.object_key(["backups", tenant_id, Path.basename(target)])
+    S3.object_key(["backups", tenant_id, Path.basename(target) <> ".enc"])
   end
 
-  defp mark_offsite(row, key) do
+  defp mark_offsite(row, key, sealed) do
     metadata =
       row.metadata
       |> Map.put("offsite_uri", S3.uri(key))
       |> Map.put("offsite_key", key)
       |> Map.put("offsite_provider", "s3")
       |> Map.put("offsite_shipped_at", DateTime.utc_now() |> DateTime.to_iso8601())
+      |> Map.put("offsite_encrypted", true)
+      |> Map.put("offsite_format", sealed.format)
+      |> Map.put("offsite_cipher", sealed.cipher)
+      |> Map.put("offsite_key_id", sealed.key_id)
+      |> Map.put("offsite_ciphertext_sha256", sealed.ciphertext_sha256)
+      |> Map.put("offsite_ciphertext_bytes", sealed.ciphertext_bytes)
 
     case Store.raw_execute(
-           "UPDATE backup_records SET offsite = 1, metadata = ?1, verified_at = datetime('now') WHERE id = ?2",
+           "UPDATE backup_records SET offsite = 1, encrypted = 1, metadata = ?1, verified_at = datetime('now') WHERE id = ?2",
            [Jason.encode!(metadata), row.id]
          ) do
       :ok -> :ok
@@ -198,53 +257,84 @@ defmodule OptimalEngine.Backup do
   @doc """
   Backups with an offsite copy, newest first.
 
-  Each entry carries the local path, the object URI it was shipped to, and the
-  checksum both copies are verified against, so a restore can be planned and
-  audited without the bucket being reachable.
+  Each entry carries the local path, the object URI it was shipped to, the
+  plaintext checksum a restore is held to, and for an encrypted copy the
+  ciphertext checksum and the id of the key that sealed it, so a restore can be
+  planned and audited without the bucket being reachable.
   """
   @spec list_offsite(keyword()) :: {:ok, [map()]} | {:error, term()}
   def list_offsite(opts \\ []) do
     limit = Keyword.get(opts, :limit, 25)
 
     sql = """
-    SELECT id, storage_uri, size_bytes, checksum_sha256, integrity_status, created_at, verified_at, metadata
+    SELECT id, storage_uri, size_bytes, checksum_sha256, integrity_status, created_at, verified_at,
+           metadata, encrypted
     FROM backup_records
     WHERE offsite = 1
-    ORDER BY created_at DESC LIMIT ?1
+    ORDER BY created_at DESC, rowid DESC LIMIT ?1
     """
 
     case Store.raw_query(sql, [limit]) do
       {:ok, rows} ->
-        {:ok,
-         Enum.map(rows, fn [id, uri, size, checksum, integrity, created, verified, metadata] ->
-           metadata = decode_metadata(metadata)
-
-           %{
-             id: id,
-             local_path: uri,
-             offsite_uri: metadata["offsite_uri"],
-             offsite_key: metadata["offsite_key"],
-             shipped_at: metadata["offsite_shipped_at"],
-             size_bytes: size,
-             checksum_sha256: checksum,
-             integrity_status: integrity,
-             created_at: created,
-             verified_at: verified
-           }
-         end)}
+        {:ok, Enum.map(rows, &offsite_entry/1)}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
+  defp offsite_entry([id, uri, size, checksum, integrity, created, verified, metadata, encrypted]) do
+    metadata = decode_metadata(metadata)
+
+    %{
+      id: id,
+      local_path: uri,
+      offsite_uri: metadata["offsite_uri"],
+      offsite_key: metadata["offsite_key"],
+      shipped_at: metadata["offsite_shipped_at"],
+      size_bytes: size,
+      checksum_sha256: checksum,
+      integrity_status: integrity,
+      created_at: created,
+      verified_at: verified,
+      encrypted: encrypted == 1,
+      cipher: metadata["offsite_cipher"],
+      key_id: metadata["offsite_key_id"],
+      ciphertext_sha256: metadata["offsite_ciphertext_sha256"],
+      ciphertext_bytes: metadata["offsite_ciphertext_bytes"]
+    }
+  end
+
+  @doc """
+  Every object under `backups/<tenant>/` in the object store, whether or not
+  this engine's catalog knows it. After losing the machine the catalog is gone
+  with it, and this listing is how the copies are found again;
+  `restore_offsite_object/2` restores one by its key.
+  """
+  @spec list_offsite_objects(keyword()) :: {:ok, map()} | {:error, term()}
+  def list_offsite_objects(opts \\ []) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    base = S3.object_key(["backups", tenant_id]) <> "/"
+    max_pages = Keyword.get(opts, :max_pages, 10)
+
+    with {:ok, listing} <- S3.list_objects(Path.join("backups", tenant_id), max_pages: max_pages) do
+      keys = listing.keys |> Enum.filter(&String.starts_with?(&1, base)) |> Enum.sort(:desc)
+      {:ok, %{keys: keys, count: length(keys), more: listing.truncated}}
+    end
+  end
+
   @doc """
   Restore an offsite backup into a database path.
 
-  The object is downloaded, its SHA-256 must match the catalog checksum, and
-  the restored database must pass the same checks `restore/2` applies. The
-  temporary download is removed afterwards; the local backup and its catalog row
-  are left untouched, so a drill is repeatable.
+  The object is downloaded and checked against the catalog: an encrypted copy
+  must match the recorded ciphertext checksum, is decrypted with
+  `OPTIMAL_BACKUP_KEY`, and its plaintext must match the catalog checksum; a
+  plaintext copy shipped before encryption existed must match the catalog
+  checksum directly. The restored database must then pass the same checks
+  `restore/2` applies. A wrong or missing key fails before anything is
+  downloaded. The temporary download and plaintext are removed afterwards; the
+  local backup, its catalog row, and the object are left untouched, so a drill
+  is repeatable.
 
   Options:
 
@@ -258,20 +348,24 @@ defmodule OptimalEngine.Backup do
   def restore_offsite(backup_id, opts \\ []) when is_binary(backup_id) do
     with {:ok, row} <- catalog_row(backup_id, opts),
          :ok <- ensure_offsite(row),
+         {:ok, backup_key} <- restore_key(row),
          {:ok, target} <- restore_target(opts) do
-      download = download_path(backup_id)
+      download = download_path(backup_id, if(row.encrypted, do: ".enc", else: ".db"))
+      plaintext = download_path(backup_id, ".db")
 
       try do
         with {:ok, object} <- S3.get_object_to_file(row.offsite_key, download),
              :ok <- match_download(object, row),
+             {:ok, source} <- unseal(download, plaintext, backup_key),
              {:ok, restored} <-
-               restore(download, target: target, checksum_sha256: row.checksum_sha256) do
+               restore(source, target: target, checksum_sha256: row.checksum_sha256) do
           {:ok,
            %{
              backup_id: row.id,
              source_uri: S3.uri(row.offsite_key),
              source_bytes: object.size_bytes,
              checksum_sha256: row.checksum_sha256,
+             encrypted: row.encrypted,
              target: restored.target,
              archived: restored.archived,
              download_path: if(Keyword.get(opts, :keep_download, false), do: download)
@@ -279,8 +373,133 @@ defmodule OptimalEngine.Backup do
         end
       after
         unless Keyword.get(opts, :keep_download, false), do: File.rm(download)
+        File.rm(plaintext)
       end
     end
+  end
+
+  @doc """
+  Restore a sealed offsite object by its key, without a catalog row.
+
+  This is the path after losing the machine: the catalog went with it, but the
+  sealed object carries its own plaintext checksum and the id of the key that
+  sealed it. The object is decrypted with `OPTIMAL_BACKUP_KEY`, every chunk is
+  authenticated, and the plaintext must match the checksum sealed into the
+  object before `restore/2` applies its usual checks. Only sealed copies are
+  accepted; find the keys with `list_offsite_objects/1`.
+
+  Takes the same `:target`, `:data_dir`, and `:keep_download` options as
+  `restore_offsite/2`.
+  """
+  @spec restore_offsite_object(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def restore_offsite_object(object_key, opts \\ []) when is_binary(object_key) do
+    with {:ok, backup_key} <- Envelope.backup_key(),
+         {:ok, target} <- restore_target(opts) do
+      name = "object-" <> (S3.sha256(object_key) |> binary_part(0, 16))
+      download = download_path(name, ".enc")
+      plaintext = download_path(name, ".db")
+
+      try do
+        with {:ok, object} <- S3.get_object_to_file(object_key, download),
+             {:ok, opened} <- Envelope.open_file(download, plaintext, backup_key),
+             {:ok, restored} <-
+               restore(plaintext, target: target, checksum_sha256: opened.plaintext_sha256) do
+          {:ok,
+           %{
+             backup_id: opened.header["backup_id"],
+             source_uri: S3.uri(object_key),
+             source_bytes: object.size_bytes,
+             ciphertext_sha256: object.checksum_sha256,
+             checksum_sha256: opened.plaintext_sha256,
+             sealed_at: opened.header["sealed_at"],
+             key_id: opened.key_id,
+             encrypted: true,
+             target: restored.target,
+             archived: restored.archived,
+             download_path: if(Keyword.get(opts, :keep_download, false), do: download)
+           }}
+        end
+      after
+        unless Keyword.get(opts, :keep_download, false), do: File.rm(download)
+        File.rm(plaintext)
+      end
+    end
+  end
+
+  @doc """
+  A sentence an operator can act on for an offsite backup or restore failure.
+  Falls back to the inspected reason for anything without a known cause.
+  """
+  @spec explain(term()) :: String.t()
+  def explain(:backup_key_missing),
+    do:
+      "OPTIMAL_BACKUP_KEY is not set. Offsite copies are encrypted before upload and are never sent in plaintext; set a 64 hex character key (openssl rand -hex 32) and keep a copy away from this machine."
+
+  def explain(:invalid_object_key),
+    do: "The object key is empty. Name the object, for example backups/default/<file>.db.enc."
+
+  def explain(:backup_key_invalid),
+    do: "OPTIMAL_BACKUP_KEY must be 64 hex characters (32 bytes)."
+
+  def explain({:backup_key_mismatch, key_id}),
+    do:
+      "This copy was sealed with a different backup key (key id #{key_id}). Set OPTIMAL_BACKUP_KEY to that key to restore it."
+
+  def explain({:backup_decrypt_failed, _where}),
+    do: "The copy failed authentication: it was changed or corrupted after it was sealed."
+
+  def explain(:not_a_sealed_backup),
+    do: "The object is not a sealed Optimal Engine backup."
+
+  def explain({:offsite_download_mismatch, _expected, _actual}),
+    do: "The downloaded object does not match the checksum recorded when it was shipped."
+
+  def explain(:not_configured),
+    do:
+      "The object store is not configured: set OPTIMAL_S3_ENDPOINT, OPTIMAL_S3_BUCKET, and the access key id and secret."
+
+  def explain(:credentials_file_unreadable),
+    do: "OPTIMAL_S3_CREDENTIALS_FILE names a file the engine cannot read."
+
+  def explain(:credentials_file_invalid),
+    do:
+      "OPTIMAL_S3_CREDENTIALS_FILE must hold the access key id and the secret, as two lines or as KEY=VALUE lines."
+
+  def explain(reason), do: inspect(reason)
+
+  # An encrypted copy needs the key that sealed it; checking the key id first
+  # refuses a wrong key before a large object is downloaded.
+  defp restore_key(%{encrypted: false}), do: {:ok, nil}
+
+  defp restore_key(%{metadata: metadata}) do
+    with {:ok, key} <- Envelope.backup_key() do
+      case metadata["offsite_key_id"] do
+        sealed_with when is_binary(sealed_with) ->
+          if Envelope.key_id(key) == sealed_with,
+            do: {:ok, key},
+            else: {:error, {:backup_key_mismatch, sealed_with}}
+
+        _ ->
+          {:ok, key}
+      end
+    end
+  end
+
+  defp unseal(download, _plaintext, nil), do: {:ok, download}
+
+  defp unseal(download, plaintext, backup_key) do
+    with {:ok, _opened} <- Envelope.open_file(download, plaintext, backup_key),
+         do: {:ok, plaintext}
+  end
+
+  # An encrypted copy is held to the ciphertext checksum recorded when it was
+  # shipped; a plaintext copy is held to the backup's own checksum.
+  defp match_download(%{checksum_sha256: downloaded}, %{encrypted: true, metadata: metadata}) do
+    expected = metadata["offsite_ciphertext_sha256"]
+
+    if downloaded == expected,
+      do: :ok,
+      else: {:error, {:offsite_download_mismatch, expected, downloaded}}
   end
 
   defp match_download(%{checksum_sha256: downloaded}, %{checksum_sha256: catalog}) do
@@ -312,11 +531,11 @@ defmodule OptimalEngine.Backup do
     end
   end
 
-  defp download_path(backup_id) do
+  defp download_path(name, extension) do
     Path.join([
       System.tmp_dir!(),
       "optimal-offsite-restore",
-      "#{backup_id}-#{System.unique_integer([:positive])}.db"
+      "#{name}-#{System.unique_integer([:positive])}#{extension}"
     ])
   end
 
@@ -327,7 +546,7 @@ defmodule OptimalEngine.Backup do
     catalog_path = Keyword.get(opts, :catalog_path, Application.get_env(:optimal_engine, :db_path))
 
     sql = """
-    SELECT id, storage_uri, size_bytes, checksum_sha256, offsite, metadata
+    SELECT id, storage_uri, size_bytes, checksum_sha256, offsite, metadata, encrypted
     FROM backup_records
     WHERE id = ?1 AND status = 'completed'
     LIMIT 1
@@ -352,7 +571,7 @@ defmodule OptimalEngine.Backup do
     end
   end
 
-  defp row_from([[id, uri, size, checksum, offsite, metadata]], _backup_id)
+  defp row_from([[id, uri, size, checksum, offsite, metadata, encrypted]], _backup_id)
        when is_binary(checksum) do
     metadata = decode_metadata(metadata)
 
@@ -363,12 +582,13 @@ defmodule OptimalEngine.Backup do
        size_bytes: size,
        checksum_sha256: checksum,
        offsite: offsite == 1,
+       encrypted: encrypted == 1,
        offsite_key: metadata["offsite_key"],
        metadata: metadata
      }}
   end
 
-  defp row_from([[id, _uri, _size, nil, _offsite, _metadata]], _backup_id),
+  defp row_from([[id, _uri, _size, nil, _offsite, _metadata, _encrypted]], _backup_id),
     do: {:error, {:backup_not_verified, id}}
 
   defp row_from(_rows, backup_id), do: {:error, {:backup_not_cataloged, backup_id}}
@@ -563,15 +783,17 @@ defmodule OptimalEngine.Backup do
     end
   end
 
-  defp catalog_backup(id, path, size, checksum, integrity_status) do
+  defp catalog_backup(id, path, size, checksum, integrity_status, metadata) do
     sql = """
     INSERT INTO backup_records (
       id, tenant_id, storage_provider, storage_uri, status, encrypted, offsite,
-      size_bytes, checksum_sha256, integrity_status, verified_at
-    ) VALUES (?1, 'default', 'local', ?2, 'completed', 0, 0, ?3, ?4, ?5, datetime('now'))
+      size_bytes, checksum_sha256, integrity_status, verified_at, metadata
+    ) VALUES (?1, 'default', 'local', ?2, 'completed', 0, 0, ?3, ?4, ?5, datetime('now'), ?6)
     """
 
-    case Store.raw_query(sql, [id, Path.expand(path), size, checksum, integrity_status]) do
+    params = [id, Path.expand(path), size, checksum, integrity_status, Jason.encode!(metadata)]
+
+    case Store.raw_query(sql, params) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, {:catalog_failed, reason}}
     end

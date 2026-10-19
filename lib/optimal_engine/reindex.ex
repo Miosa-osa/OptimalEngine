@@ -94,7 +94,7 @@ defmodule OptimalEngine.Reindex do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  defp run(job, owner, opts) do
+  defp run(job, owner, _opts) do
     case perform(job) do
       :ok ->
         case Jobs.complete(job.id, owner) do

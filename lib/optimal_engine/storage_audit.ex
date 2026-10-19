@@ -2,6 +2,7 @@ defmodule OptimalEngine.StorageAudit do
   @moduledoc "Deep, read-only health audit for every engine storage layer."
 
   alias OptimalEngine.{Backup, StorageCatalog, Store}
+  alias OptimalEngine.Backup.Schedule
   alias OptimalEngine.Storage.{Assets, S3}
   alias OptimalEngine.Pipeline.Decomposer.RLM
 
@@ -20,6 +21,7 @@ defmodule OptimalEngine.StorageAudit do
       check("active_test_fixtures", &active_test_fixtures/0),
       check("asset_files", &asset_files/0),
       check("verified_backup", &verified_backup/0),
+      check("offsite_backup_schedule", &offsite_backup_schedule/0),
       check("rlm_runtime", &rlm_runtime/0),
       check("cache", &cache/0)
     ]
@@ -212,6 +214,24 @@ defmodule OptimalEngine.StorageAudit do
       other ->
         {:error, other}
     end
+  end
+
+  # Scheduled offsite backups that are failing, stale, or cannot run are a
+  # storage failure rather than a footnote. A schedule that is off passes.
+  defp offsite_backup_schedule do
+    status = Schedule.status()
+
+    detail = %{
+      state: status.state,
+      enabled: status.enabled,
+      interval_ms: status.interval_ms,
+      last_success_at: status.last_success && status.last_success.shipped_at,
+      last_error: status.last_job && status.last_job.last_error,
+      dead_letters: status.dead_letters.count,
+      problem: if(status.enabled, do: status.encryption.problem || status.object_store.problem)
+    }
+
+    if Schedule.failing_state?(status.state), do: {:error, detail}, else: {:ok, detail}
   end
 
   # An offsite-only backup is confirmed by asking the object store for it, so a

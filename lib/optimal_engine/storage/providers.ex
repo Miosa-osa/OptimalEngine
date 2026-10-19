@@ -110,7 +110,7 @@ defmodule OptimalEngine.Storage.Providers do
       required_env:
         ~w(OPTIMAL_S3_ENDPOINT OPTIMAL_S3_BUCKET OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY),
       optional_env:
-        ~w(OPTIMAL_S3_REGION OPTIMAL_S3_PREFIX OPTIMAL_S3_PATH_STYLE OPTIMAL_S3_TIMEOUT_MS OPTIMAL_S3_MAX_RETRIES)
+        ~w(OPTIMAL_S3_REGION OPTIMAL_S3_PREFIX OPTIMAL_S3_PATH_STYLE OPTIMAL_S3_TIMEOUT_MS OPTIMAL_S3_MAX_RETRIES OPTIMAL_S3_CREDENTIALS_FILE)
     },
     %{
       id: "nats_jetstream",
@@ -366,10 +366,16 @@ defmodule OptimalEngine.Storage.Providers do
     end
   end
 
+  # S3 credentials may come from OPTIMAL_S3_CREDENTIALS_FILE instead of the
+  # environment; the file is consulted only for a value the environment leaves
+  # unset, and only whether it is present is reported.
   defp present_env?(name) do
     case System.get_env(name) do
-      value when is_binary(value) -> String.trim(value) != ""
-      _ -> false
+      value when is_binary(value) ->
+        String.trim(value) != "" or OptimalEngine.Storage.S3.credential_in_file?(name)
+
+      _ ->
+        OptimalEngine.Storage.S3.credential_in_file?(name)
     end
   end
 

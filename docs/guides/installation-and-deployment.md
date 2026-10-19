@@ -249,13 +249,24 @@ OPTIMAL_S3_ACCESS_KEY_ID      access key id
 OPTIMAL_S3_SECRET_ACCESS_KEY  secret access key
 OPTIMAL_S3_PREFIX             optional key prefix owned by this engine
 OPTIMAL_S3_PATH_STYLE         "false" for virtual-hosted addressing; default path style
+OPTIMAL_S3_CREDENTIALS_FILE   optional file with the access key id and secret; environment wins
 OPTIMAL_ASSET_STORAGE         s3 to store workspace asset bytes in the bucket
+```
+
+Offsite backups are encrypted before upload and need a backup key; the engine can also take them on a schedule:
+
+```text
+OPTIMAL_BACKUP_KEY                   64 hex characters; offsite copies are refused without it
+OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS   scheduled offsite backups; 0 or unset disables
+OPTIMAL_OFFSITE_BACKUP_KEEP          scheduled offsite copies kept; default 14
+OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL    scheduled local files kept; default 3
 ```
 
 A workspace can select the bucket for its assets through its storage policy
 instead of the engine-wide setting. Read
 [Storage providers](storage-providers.md) for the provider inventory, the health
-probe, and the offsite backup and restore drill.
+probe, offsite backup encryption and key handling, the schedule, and the restore
+drill.
 
 Production can add environment variables or secret-manager entries for connector
 credentials, hosted model keys, API keys, and SSO/IAM configuration. Those
