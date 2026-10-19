@@ -355,6 +355,73 @@ defmodule OptimalEngine.SyncTest do
       assert peer.pending_push == 0
     end
 
+    test "a relay peer pulls from <base>/pull and pushes to <base>/push, and repeating it changes nothing",
+         ctx do
+      remote_id = "relayed-#{ctx.n}"
+      engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
+      calls = :ets.new(:relay_calls, [:public, :bag])
+      base = "https://api.example/api/v1/engines/e1/sync"
+
+      Application.put_env(:optimal_engine, :http_mock, fn url, opts ->
+        :ets.insert(calls, {opts[:method], url})
+        assert {"authorization", "Bearer relay-key"} in opts[:headers]
+
+        case opts[:method] do
+          :get ->
+            respond(200, %{
+              "mutations" => [
+                mutation(ctx, %{
+                  "id" => "mut_relay_#{ctx.n}",
+                  "device_id" => "rep_cloud",
+                  "payload" => context_row(remote_id, "Through the relay", ctx.ws, ctx.tenant)
+                })
+              ],
+              "cursor" => 7,
+              "engine" => engine
+            })
+
+          :post ->
+            respond(200, %{"applied" => length(opts[:body]["mutations"])})
+        end
+      end)
+
+      assert {:ok, _} =
+               Sync.add_peer(
+                 ctx.tenant,
+                 %{"workspace_id" => ctx.ws, "url" => "relay+" <> base, "api_key" => "relay-key"},
+                 "u"
+               )
+
+      insert_context(ctx.tenant, ctx.ws, "offline-#{ctx.n}", "Written offline")
+
+      [first] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert first.status == "active"
+      assert {:ok, %{applied: 1}} = first.pull
+      assert {:ok, %{sent: 1}} = first.push
+
+      [second] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert {:ok, %{sent: 0}} = second.push
+
+      urls = :ets.tab2list(calls)
+      assert Enum.all?(urls, fn {_m, u} -> String.starts_with?(u, base) end)
+      assert Enum.any?(urls, fn {m, u} -> m == :get and u =~ base <> "/pull?" end)
+      assert Enum.any?(urls, fn {m, u} -> m == :post and u == base <> "/push" end)
+      refute Enum.any?(urls, fn {_m, u} -> u =~ "/api/sync/changes" end)
+
+      # Exactly once: the pulled context exists once, the offline one was sent once.
+      assert {:ok, [[1]]} =
+               Store.raw_query("SELECT count(*) FROM contexts WHERE id = ?1", [remote_id])
+    end
+
+    test "a relay url must still be http(s)", ctx do
+      assert {:error, :invalid_url} =
+               Sync.add_peer(
+                 ctx.tenant,
+                 %{"workspace_id" => ctx.ws, "url" => "relay+ftp://x", "api_key" => "k"},
+                 "u"
+               )
+    end
+
     test "a peer on another schema version pauses sync with a message", ctx do
       Application.put_env(:optimal_engine, :http_mock, fn _url, _opts ->
         respond(200, %{

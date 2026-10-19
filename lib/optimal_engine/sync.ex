@@ -196,7 +196,7 @@ defmodule OptimalEngine.Sync do
       not (is_binary(attrs["workspace_id"]) and attrs["workspace_id"] != "") ->
         {:error, :workspace_id_required}
 
-      not (is_binary(attrs["url"]) and String.match?(attrs["url"], ~r{\Ahttps?://})) ->
+      not (is_binary(attrs["url"]) and String.match?(attrs["url"], ~r{\A(relay\+)?https?://})) ->
         {:error, :invalid_url}
 
       not is_binary(attrs["api_key"]) ->
@@ -738,10 +738,20 @@ defmodule OptimalEngine.Sync do
   # ---------------------------------------------------------------------------
   # Peers
 
+  # A relay peer (`relay+https://host/api/v1/engines/<id>/sync`) is a MIOSA relay
+  # in front of a managed Engine, which a laptop behind NAT can reach but a
+  # managed Engine cannot dial back. The laptop is always the initiator: it pulls
+  # from `<base>/pull` and pushes to `<base>/push`, with the same bodies as
+  # `/api/sync/changes`. Nothing here opens a connection to another Engine.
+  defp pull_url(%{url: "relay+" <> base}), do: base <> "/pull?"
+  defp pull_url(%{url: url}), do: url <> "/api/sync/changes?"
+
+  defp push_url(%{url: "relay+" <> base}), do: base <> "/push"
+  defp push_url(%{url: url}), do: url <> "/api/sync/changes"
+
   defp pull(peer, key) do
     url =
-      peer.url <>
-        "/api/sync/changes?" <>
+      pull_url(peer) <>
         URI.encode_query(%{
           "workspace" => peer.workspace_id,
           "since" => peer.last_pulled_seq,
@@ -814,7 +824,7 @@ defmodule OptimalEngine.Sync do
         "mutations" => mutations
       }
 
-      case HTTP.post_json(peer.url <> "/api/sync/changes", body,
+      case HTTP.post_json(push_url(peer), body,
              headers: headers(key),
              timeout: 30_000
            ) do
