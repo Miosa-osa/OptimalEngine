@@ -4,6 +4,15 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
 
   ## Required config keys
     * `:user_email`, `:labels` (list of label names to sync; default all)
+    * optional `:exclude_categories` -- Gmail tabs left out (default
+      `["promotions", "social", "updates", "forums"]`; `[]` reads every tab).
+      Spam, trash and drafts are never read.
+
+  ## What a message becomes
+  Each message is fetched in full: the Signal's title is the subject, its
+  content is a From / To / Cc / Date / Subject header block followed by the
+  text body (the text/plain part, else the text/html part reduced to text,
+  cut at 20,000 characters), and it is dated when the mail arrived.
 
   ## Credentials
     * `:oauth_refresh_token` -- long-lived OAuth2 refresh token
@@ -27,6 +36,9 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
   @base_url "https://gmail.googleapis.com/gmail/v1/users/me"
   @page_size 100
   @max_pages 20
+  @default_excluded_categories ~w(promotions social updates forums)
+  @skipped_labels ~w(SPAM TRASH DRAFT)
+  @max_body_chars 20_000
 
   @impl true
   def sync(state, cursor) do
@@ -43,19 +55,32 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
   @impl true
   def transform(raw) when is_map(raw) do
     ext_id = raw["id"] || ""
-    subject = get_header(raw, "Subject") || "(no subject)"
+    subject = get_header(raw, "Subject")
     from = get_header(raw, "From") || ""
+    received_at = Transform.parse_epoch(raw["internalDate"])
+
+    header_block =
+      [
+        {"From", from},
+        {"To", get_header(raw, "To")},
+        {"Cc", get_header(raw, "Cc")},
+        {"Date", get_header(raw, "Date")},
+        {"Subject", subject}
+      ]
+      |> Enum.reject(fn {_name, value} -> value in [nil, ""] end)
+      |> Enum.map_join("\n", fn {name, value} -> "#{name}: #{value}" end)
 
     {:ok,
      Transform.new_signal(%{
        id: Transform.signal_id(:gmail, ext_id),
-       title: String.slice(subject, 0, 120),
-       content: Transform.strip_html(raw["snippet"] || raw["body"] || ""),
+       title: String.slice(subject || "(no subject)", 0, 120),
+       content: join_nonempty([header_block, body_text(raw)], "\n\n"),
        path: Transform.source_uri(:gmail, ext_id),
        genre: "email",
        mode: :linguistic,
        entities: extract_addresses(from),
-       modified_at: Transform.parse_epoch(raw["internalDate"])
+       created_at: received_at,
+       modified_at: received_at
      })}
   end
 
@@ -116,9 +141,14 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
         query
       end
 
+    query =
+      state
+      |> excluded_categories()
+      |> Enum.reduce(query, &"#{&2} -category:#{&1}")
+
     with {:ok, message_stubs} <- fetch_all_messages(query, headers),
          {:ok, cursor} <- current_history_id(headers) do
-      enrich_and_return(message_stubs, cursor, headers)
+      enrich_and_return(message_stubs, cursor, headers, state)
     end
   end
 
@@ -181,7 +211,7 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
           |> Enum.map(fn %{"message" => m} -> m end)
 
         next_cursor = body["historyId"] || history_id
-        enrich_and_return(messages, next_cursor, headers)
+        enrich_and_return(messages, next_cursor, headers, state)
 
       {:ok, %{status: 404}} ->
         # A history id older than the mailbox's retention window. Start over
@@ -205,14 +235,20 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
   # advance the cursor past messages that were never read, and the history they
   # are only listed in is gone by the next run. Failing the sync leaves the
   # cursor where it was, so nothing is skipped.
-  defp enrich_and_return(message_stubs, next_cursor, headers) do
+  defp enrich_and_return(message_stubs, next_cursor, headers, state) do
+    skipped = skipped_labels(state)
+
     message_stubs
     |> Enum.reduce_while({:ok, []}, fn %{"id" => id}, {:ok, acc} ->
       case fetch_message(id, headers) do
         {:ok, msg} ->
-          case transform(msg) do
-            {:ok, signal} -> {:cont, {:ok, [signal | acc]}}
-            {:error, _reason} -> {:cont, {:ok, acc}}
+          # The history log names every added message, whatever its tab or
+          # folder, so the filter the list query applies is applied here too.
+          with false <- Enum.any?(msg["labelIds"] || [], &(&1 in skipped)),
+               {:ok, signal} <- transform(msg) do
+            {:cont, {:ok, [signal | acc]}}
+          else
+            _skipped_or_invalid -> {:cont, {:ok, acc}}
           end
 
         {:error, {:http, 404}} ->
@@ -229,7 +265,9 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
   end
 
   defp fetch_message(id, headers) do
-    url = "#{@base_url}/messages/#{id}?format=metadata&metadataHeaders=Subject,From,Date"
+    # The full format carries every header and the body. (A comma-separated
+    # `metadataHeaders` value is ignored by Gmail and returns no headers.)
+    url = "#{@base_url}/messages/#{id}?format=full"
 
     case HTTP.get_json(url, headers: headers) do
       {:ok, %{status: 200, body: msg}} -> {:ok, msg}
@@ -241,14 +279,73 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
     end
   end
 
+  # Header names are case-insensitive (RFC 5322).
   defp get_header(%{"payload" => %{"headers" => headers}}, name) when is_list(headers) do
+    wanted = String.downcase(name)
+
     Enum.find_value(headers, fn
-      %{"name" => ^name, "value" => v} -> v
-      _ -> nil
+      %{"name" => header, "value" => value} when is_binary(header) ->
+        if String.downcase(header) == wanted, do: value
+
+      _ ->
+        nil
     end)
   end
 
   defp get_header(_, _), do: nil
+
+  # The text/plain part, else the text/html part reduced to text, else the
+  # snippet; cut to a bounded size.
+  defp body_text(raw) do
+    payload = raw["payload"] || %{}
+
+    text =
+      case find_part(payload, "text/plain") do
+        nil ->
+          case find_part(payload, "text/html") do
+            nil -> Transform.strip_html(raw["snippet"] || raw["body"] || "")
+            html -> Transform.strip_html(html)
+          end
+
+        plain ->
+          plain
+      end
+
+    text
+    |> String.replace("\r\n", "\n")
+    |> String.replace(~r/\n{3,}/, "\n\n")
+    |> String.trim()
+    |> String.slice(0, @max_body_chars)
+  end
+
+  defp find_part(%{"mimeType" => mime, "body" => %{"data" => data}}, mime) when is_binary(data) do
+    case Base.url_decode64(data, padding: false) do
+      {:ok, text} -> if String.valid?(text), do: text
+      :error -> nil
+    end
+  end
+
+  defp find_part(%{"parts" => parts}, mime) when is_list(parts),
+    do: Enum.find_value(parts, &find_part(&1, mime))
+
+  defp find_part(_part, _mime), do: nil
+
+  defp join_nonempty(pieces, separator) do
+    pieces |> Enum.reject(&(&1 in [nil, ""])) |> Enum.join(separator)
+  end
+
+  defp excluded_categories(state) do
+    case pick(state, :exclude_categories) do
+      nil -> @default_excluded_categories
+      list when is_list(list) -> Enum.map(list, &(&1 |> to_string() |> String.downcase()))
+      _other -> @default_excluded_categories
+    end
+  end
+
+  defp skipped_labels(state) do
+    @skipped_labels ++
+      Enum.map(excluded_categories(state), &("CATEGORY_" <> String.upcase(&1)))
+  end
 
   defp extract_addresses(header) when is_binary(header) do
     Regex.scan(~r/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/, header)

@@ -65,8 +65,18 @@ Every adapter also reads an optional `"max_pages"` where its listing is paginate
 | `"review_workspace_id"` | where a low-confidence route waits for a person |
 | `"routing_walled_workspaces"` | workspaces only an identity rule may open |
 | `"outward_topic"` | tags every Signal from this connector as outward evidence |
+| `"write_files"` | `true` also writes a markdown file per pulled item into the workspace folder; default `false` |
 
 An adapter's own keys, such as `user_email` for Gmail or `location_ids` for GoHighLevel, are listed in its moduledoc.
+Gmail also reads `"exclude_categories"`: the inbox tabs it leaves out, `["promotions", "social", "updates", "forums"]` by default, `[]` for every tab.
+Spam, trash and drafts are never read, and each message is stored with its sender, recipients, date, subject and text body.
+
+## Where pulled items are stored
+
+A pulled item is stored in the database only: one row per source item and workspace, keyed by the item's id in its source, so a later pull of the same item replaces its row instead of adding another.
+The row's uri is the item's source uri (for example `optimal://connectors/gmail/<message id>`), it has no file path, and it is dated when the item happened, not when it was pulled.
+Search, retrieval and routing read the row like any other context.
+A mailbox, a form or a newsletter therefore never becomes thousands of markdown files; set `"write_files": true` on a connector that should also project its items to disk.
 
 ## Credential sources
 
