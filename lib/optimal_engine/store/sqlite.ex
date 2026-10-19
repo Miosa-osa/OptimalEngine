@@ -241,18 +241,21 @@ defmodule OptimalEngine.Store.SQLite do
 
   @doc "Starts the Store GenServer."
   @spec start_link(keyword()) :: GenServer.on_start()
+  @impl OptimalEngine.Store.Adapter
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
   @doc "Inserts or replaces a Context in SQLite + ETS cache."
   @spec insert_context(Context.t()) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_context(%Context{} = context) do
     GenServer.call(__MODULE__, {:insert_context, context}, 10_000)
   end
 
   @doc "Inserts multiple contexts in a single transaction."
   @spec insert_contexts([Context.t()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_contexts(contexts) when is_list(contexts) do
     GenServer.call(__MODULE__, {:insert_contexts, contexts}, 60_000)
   end
@@ -262,12 +265,14 @@ defmodule OptimalEngine.Store.SQLite do
   Wraps the signal in a Context struct of type :signal before storing.
   """
   @spec insert_signal(Signal.t()) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_signal(%Signal{} = signal) do
     insert_context(Context.from_signal(signal))
   end
 
   @doc "Inserts multiple signals in a single transaction (backward compat)."
   @spec insert_signals([Signal.t()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_signals(signals) when is_list(signals) do
     contexts = Enum.map(signals, &Context.from_signal/1)
     insert_contexts(contexts)
@@ -275,6 +280,7 @@ defmodule OptimalEngine.Store.SQLite do
 
   @doc "Retrieves a Context by ID. Checks ETS cache first, then SQLite."
   @spec get_context(String.t()) :: {:ok, Context.t()} | {:error, :not_found}
+  @impl OptimalEngine.Store.Adapter
   def get_context(id) when is_binary(id) do
     case :ets.lookup(@ets_table, id) do
       [{^id, ctx}] when is_struct(ctx, Context) ->
@@ -288,6 +294,7 @@ defmodule OptimalEngine.Store.SQLite do
 
   @doc "Retrieves a Signal by ID (backward compat). Returns the embedded signal."
   @spec get_signal(String.t()) :: {:ok, Signal.t()} | {:error, :not_found}
+  @impl OptimalEngine.Store.Adapter
   def get_signal(id) when is_binary(id) do
     case get_context(id) do
       {:ok, ctx} -> {:ok, Context.to_signal(ctx)}
@@ -297,6 +304,7 @@ defmodule OptimalEngine.Store.SQLite do
 
   @doc "Returns all contexts belonging to a node."
   @spec get_by_node(String.t(), keyword()) :: {:ok, [Context.t()]} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def get_by_node(node, opts \\ []) when is_binary(node) do
     type_filter = Keyword.get(opts, :type)
     GenServer.call(__MODULE__, {:get_by_node, node, type_filter}, 10_000)
@@ -304,18 +312,21 @@ defmodule OptimalEngine.Store.SQLite do
 
   @doc "Returns aggregated stats about the store."
   @spec stats() :: {:ok, map()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def stats do
     GenServer.call(__MODULE__, :stats)
   end
 
   @doc "Deletes a context by ID."
   @spec delete_context(String.t()) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def delete_context(id) when is_binary(id) do
     GenServer.call(__MODULE__, {:delete_context, id})
   end
 
   @doc "Deletes a signal by ID (backward compat)."
   @spec delete_signal(String.t()) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def delete_signal(id), do: delete_context(id)
 
   @doc """
@@ -324,18 +335,21 @@ defmodule OptimalEngine.Store.SQLite do
   `transaction/2`.
   """
   @spec evict_cached([String.t()]) :: :ok
+  @impl OptimalEngine.Store.Adapter
   def evict_cached(ids) when is_list(ids) do
     Enum.each(ids, &:ets.delete(@ets_table, &1))
   end
 
   @doc "Executes a raw SELECT query. Returns list of rows."
   @spec raw_query(String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def raw_query(sql, params \\ []) do
     GenServer.call(__MODULE__, {:raw_query, sql, params}, 15_000)
   end
 
   @doc "Executes a raw non-SELECT statement with bound parameters."
   @spec raw_execute(String.t(), [term()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def raw_execute(sql, params \\ []) do
     GenServer.call(__MODULE__, {:raw_execute, sql, params}, 15_000)
   end
@@ -357,6 +371,7 @@ defmodule OptimalEngine.Store.SQLite do
   """
   @spec transaction((term() -> {:ok, term()} | {:error, term()}), timeout()) ::
           {:ok, term()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def transaction(fun, timeout \\ 30_000) when is_function(fun, 1) do
     case GenServer.call(__MODULE__, {:transaction, fun}, timeout) do
       {:__txn_raise__, kind, reason, stacktrace} -> :erlang.raise(kind, reason, stacktrace)
@@ -366,6 +381,7 @@ defmodule OptimalEngine.Store.SQLite do
 
   @doc "Executes a SELECT inside a `transaction/2` fun. Returns `{:ok, rows}`."
   @spec txn_query(term(), String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def txn_query({:txn, db}, sql, params \\ []) do
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
          :ok <- Exqlite.Sqlite3.bind(stmt, params) do
@@ -382,6 +398,7 @@ defmodule OptimalEngine.Store.SQLite do
   """
   @spec txn_execute(term(), String.t(), [term()]) ::
           {:ok, non_neg_integer()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def txn_execute({:txn, db}, sql, params \\ []) do
     with :ok <- exec_stmt(db, sql, params) do
       Exqlite.Sqlite3.changes(db)
@@ -395,6 +412,7 @@ defmodule OptimalEngine.Store.SQLite do
   (struct or map with the right keys). Idempotent on `chunk.id`.
   """
   @spec insert_chunks([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_chunks(chunks) when is_list(chunks) do
     GenServer.call(__MODULE__, {:insert_chunks, chunks}, 60_000)
   end
@@ -405,6 +423,7 @@ defmodule OptimalEngine.Store.SQLite do
   or equivalent maps. Idempotent on `chunk_id`.
   """
   @spec insert_classifications([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_classifications(rows) when is_list(rows) do
     GenServer.call(__MODULE__, {:insert_classifications, rows}, 60_000)
   end
@@ -415,6 +434,7 @@ defmodule OptimalEngine.Store.SQLite do
   or equivalent maps. Idempotent on `chunk_id`.
   """
   @spec insert_intents([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_intents(rows) when is_list(rows) do
     GenServer.call(__MODULE__, {:insert_intents, rows}, 60_000)
   end
@@ -428,6 +448,7 @@ defmodule OptimalEngine.Store.SQLite do
   bytes per row for nomic-class models.
   """
   @spec insert_embeddings([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_embeddings(rows) when is_list(rows) do
     GenServer.call(__MODULE__, {:insert_embeddings, rows}, 60_000)
   end
@@ -440,6 +461,7 @@ defmodule OptimalEngine.Store.SQLite do
   float32 BLOBs (same encoding as chunk_embeddings.vector).
   """
   @spec insert_clusters([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_clusters(rows) when is_list(rows) do
     GenServer.call(__MODULE__, {:insert_clusters, rows}, 60_000)
   end
@@ -451,6 +473,7 @@ defmodule OptimalEngine.Store.SQLite do
   Each row: `%{cluster_id, chunk_id, tenant_id, weight}`.
   """
   @spec insert_cluster_members([map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def insert_cluster_members(rows) when is_list(rows) do
     GenServer.call(__MODULE__, {:insert_cluster_members, rows}, 60_000)
   end
