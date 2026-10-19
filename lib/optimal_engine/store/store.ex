@@ -378,10 +378,9 @@ defmodule OptimalEngine.Store do
   """
   @spec txn_execute(term(), String.t(), [term()]) ::
           {:ok, non_neg_integer()} | {:error, term()}
-  def txn_execute({:txn, db} = txn, sql, params \\ []) do
-    with :ok <- exec_stmt(db, sql, params),
-         {:ok, [[changes]]} <- txn_query(txn, "SELECT changes()") do
-      {:ok, changes}
+  def txn_execute({:txn, db}, sql, params \\ []) do
+    with :ok <- exec_stmt(db, sql, params) do
+      Exqlite.Sqlite3.changes(db)
     end
   end
 

@@ -26,6 +26,7 @@ from ._transport import (
     raise_for_status,
     translate_httpx_error,
 )
+from .data import DataResource
 from .memory import MemoryResource
 from .profile import WikiResource
 from .retrieval import RecallResource, RetrievalMixin
@@ -59,6 +60,7 @@ class OptimalEngine(RetrievalMixin):
         tenant: str = "default",
         timeout: float | httpx.Timeout | None = None,
         headers: Mapping[str, str] | None = None,
+        api_key: str | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
         """Create a new client.
@@ -70,6 +72,7 @@ class OptimalEngine(RetrievalMixin):
             timeout: Per-request timeout; accepts a number of seconds or
                 an :class:`httpx.Timeout`. Defaults to 60s read / 10s connect.
             headers: Extra headers merged on every request.
+            api_key: Engine API key, sent as ``Authorization: Bearer``.
             http_client: Bring-your-own :class:`httpx.Client`. The SDK will
                 NOT close it for you in that case.
         """
@@ -78,6 +81,8 @@ class OptimalEngine(RetrievalMixin):
         self.tenant = tenant
 
         merged_headers = dict(DEFAULT_HEADERS)
+        if api_key is not None:
+            merged_headers["Authorization"] = f"Bearer {api_key}"
         if headers:
             merged_headers.update(headers)
 
@@ -93,6 +98,7 @@ class OptimalEngine(RetrievalMixin):
 
         # Resource handlers — composition, not inheritance.
         self.memory = MemoryResource(self)
+        self.data = DataResource(self)
         self.workspaces = WorkspaceResource(self)
         self.recall = RecallResource(self)
         self.wiki = WikiResource(self)

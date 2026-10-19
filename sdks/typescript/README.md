@@ -194,6 +194,45 @@ const tools = optimalEngineAgentTools(engine);
 // Pass `tools` to your Agent constructor
 ```
 
+## App Data
+
+`engine.data(workspace)` uses the Engine as an app database: collections with typed fields, versioned records, filter and search queries with cursors, transactions, files, a resumable change feed, schema migrations, and data keys for end users.
+See `docs/guides/app-data-api.md` in the Engine repository for every route and limit.
+
+```ts
+import { DataError, OptimalEngine, defineCollection, type RecordOf } from "@optimal-engine/client";
+
+const tasks = defineCollection({
+  name: "tasks",
+  fields: [
+    { name: "title", type: "string", required: true },
+    { name: "done", type: "boolean", default: false },
+    { name: "due", type: "datetime" },
+    { name: "owner", type: "string" },
+  ],
+  owner_field: "owner",
+  indexes: [{ fields: ["owner", "done", "due"] }],
+  search: { text: ["title"] },
+} as const);
+type Task = RecordOf<typeof tasks>; // { title: string; done: boolean | null; ... }
+
+const data = new OptimalEngine({ baseUrl, apiKey, workspace: "default:todo" }).data();
+await data.migrate("todo", [{ version: 1, operations: [{ op: "create_collection", collection: tasks }] }]);
+
+const todo = data.collection<Task>("tasks");
+const task = await todo.create({ title: "write the report", owner: "user-a" });
+for await (const t of todo.iterate({ where: { owner: "user-a", done: false }, sort: ["due"] })) {
+  console.log(t.data.title);
+}
+try {
+  await todo.update(task.id, { done: true }, { version: task.version });
+} catch (e) {
+  if (e instanceof DataError && e.code === "version_conflict") { /* reload and retry */ }
+}
+```
+
+`examples/todo-app.ts` is a complete reference app (run it after `npm run build`).
+
 ## Error Handling
 
 Non-2xx responses throw `OptimalEngineError`:

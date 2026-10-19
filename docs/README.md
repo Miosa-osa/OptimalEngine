@@ -87,6 +87,8 @@ Read these in order:
    How custom apps, dashboards, MCP clients, public links, static sites,
    package delivery flows, and deployment tools should sit on top of the
    backend without becoming a second source of truth.
+   Apps that keep their own records in the Engine use the
+   [App data API](guides/app-data-api.md).
 
 18. [Agentic loops](guides/agentic-loops.md)
    How goal-driven and scheduled loops use context, tools, validation gates,

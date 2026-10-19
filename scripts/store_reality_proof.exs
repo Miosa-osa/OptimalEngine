@@ -33,6 +33,10 @@ defmodule StoreRealityProof do
   alias OptimalEngine.WorkspaceTopology
 
   def run do
+    # Boot work on a fresh store (change capture triggers) finishes before any
+    # independent connection reads the database.
+    if Process.whereis(OptimalEngine.Sync.Scheduler), do: OptimalEngine.Sync.Scheduler.tick()
+
     suffix = System.unique_integer([:positive])
     scratch = Path.join(System.tmp_dir!(), "store-proof-#{suffix}")
     File.mkdir_p!(scratch)
