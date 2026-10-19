@@ -17,7 +17,7 @@ install
 
 Required:
 
-- Erlang/OTP 26+
+- Erlang/OTP 27+
 - Elixir `~> 1.17`
 - Git
 - C toolchain for the SQLite NIF

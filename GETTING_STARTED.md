@@ -13,7 +13,7 @@ Requirements:
 | Tool | Use |
 | --- | --- |
 | Elixir `~> 1.17` | Engine runtime and CLI tasks. |
-| Erlang/OTP 26+ | BEAM runtime. |
+| Erlang/OTP 27+ | BEAM runtime. |
 | C toolchain | SQLite NIF build. |
 | Node 20+ | Optional app/site/docs surfaces only. |
 | `pdftotext`, `tesseract`, `ffmpeg` | Optional multimodal extraction helpers. |

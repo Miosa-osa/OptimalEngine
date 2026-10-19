@@ -30,7 +30,7 @@ area. A package is a receiver/channel bundle; it is not a note.
 Required:
 
 ```text
-Erlang/OTP 26+
+Erlang/OTP 27+
 Elixir ~> 1.17
 Git
 C toolchain for the SQLite NIF

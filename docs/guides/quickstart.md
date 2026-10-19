@@ -17,7 +17,7 @@ a search result and a cited read of that source
 
 ### Option A: from a checkout
 
-Requirements: Erlang/OTP 26 or newer, Elixir `~> 1.17`, git, a C toolchain for the SQLite NIF, and Snappy when you want the RocksDB knowledge backend.
+Requirements: Erlang/OTP 27 or newer, Elixir `~> 1.17`, git, a C toolchain for the SQLite NIF, and Snappy when you want the RocksDB knowledge backend.
 
 ```bash
 git clone https://github.com/Miosa-osa/OptimalEngine.git

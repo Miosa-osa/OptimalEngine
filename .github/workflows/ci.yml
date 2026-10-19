@@ -27,12 +27,17 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          # Single supported version pair — matches the project's documented
-          # requirement (`mix.exs` → elixir: "~> 1.17"). Halves minute usage
-          # vs the previous 2-version matrix. Add OTP 27 here later once the
-          # project officially supports it.
-          - otp: "26.2"
+          # The pair the release image ships (deploy/Dockerfile.engine).
+          # Formatting is checked here, with the formatter contributors use.
+          - otp: "28.1.1"
+            elixir: "1.19.5"
+            release: true
+          # The documented floor (`mix.exs` elixir: "~> 1.17"). OTP 27 is the
+          # oldest runtime the HTTP stack compiles on (cowlib 2.21 uses maybe
+          # expressions).
+          - otp: "27.3"
             elixir: "1.17.3"
+            release: false
 
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +66,7 @@ jobs:
         run: mix deps.get
 
       - name: Check formatting
+        if: matrix.release
         run: mix format --check-formatted
 
       - name: Compile

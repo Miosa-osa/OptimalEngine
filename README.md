@@ -770,7 +770,7 @@ This section is the same ground in more detail.
 Requirements:
 
 - Elixir `~> 1.17`
-- Erlang/OTP 26+
+- Erlang/OTP 27+
 - Node 20+ for app/site surfaces
 - A local C toolchain for optional native dependencies
 - Snappy for the RocksDB knowledge graph backend
