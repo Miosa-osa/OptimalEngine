@@ -46,7 +46,7 @@ defmodule OptimalEngine.ConformanceTest do
       groups = report["checks"] |> Enum.map(& &1["group"]) |> Enum.uniq() |> Enum.sort()
 
       assert groups ==
-               ~w(analyses auth authority cleanup operating scope setup signal storage stores sync version viability)
+               ~w(analyses auth authority cleanup documentation operating scope setup signal storage stores sync version viability)
 
       assert report["checks"] |> Enum.all?(&is_map(&1["evidence"]))
 
