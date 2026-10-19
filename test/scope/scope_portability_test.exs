@@ -313,6 +313,89 @@ defmodule OptimalEngine.ScopePortabilityTest do
              )
     end
 
+    test "a bundle imports in small batches, parents before children", ctx do
+      # The older memory points at the newer one, so in export order the child
+      # row comes before its parent.
+      {:ok, parent} =
+        OptimalEngine.Memory.create(%{
+          content: "Parent memory for the batch import",
+          workspace_id: ctx.open,
+          tenant_id: ctx.tenant
+        })
+
+      {:ok, _} =
+        Store.raw_query("UPDATE memories SET parent_memory_id = ?1 WHERE id = ?2", [
+          parent.id,
+          ctx.memory_id
+        ])
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      target = "batch-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Batch target"})
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, batch_rows: 1)
+
+      assert {:ok, [[parent_id]]} =
+               Store.raw_query(
+                 "SELECT parent_memory_id FROM memories WHERE id = ?1 AND workspace_id = ?2",
+                 [ctx.memory_id, summary.workspace_id]
+               )
+
+      assert parent_id == parent.id
+      assert summary.rows["memories"] == 2
+    end
+
+    test "connectors, their run log and queued jobs stay with the Engine that runs them", ctx do
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO connectors (id, tenant_id, workspace_id, kind, config, enabled) VALUES (?1, ?2, ?3, 'gmail', '{}', 1)",
+          ["bundle-conn-#{ctx.n}", ctx.tenant, ctx.open]
+        )
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      names = Enum.map(manifest["tables"], & &1["name"])
+
+      for operational <- ~w(connectors connector_runs jobs processor_runs) do
+        refute operational in names, "#{operational} travelled in the bundle"
+      end
+
+      assert "contexts" in names
+    end
+
+    test "a failed import leaves no workspace and no rows behind", ctx do
+      {:ok, _manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+
+      # The source still holds its rows, and row ids are unique per database,
+      # so writing the contexts collides part way through the import.
+      target = "failed-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Failed target"})
+
+      assert {:error, {:import_failed, _table, _reason}} =
+               WorkspaceBundle.import(ctx.path, target, batch_rows: 1)
+
+      assert {:error, :not_found} = OptimalEngine.Workspace.get("#{target}:open")
+
+      for table <- ~w(contexts memories memory_embeddings open_loops) do
+        assert {:ok, [[0]]} =
+                 Store.raw_query(
+                   "SELECT COUNT(*) FROM #{table} WHERE workspace_id = ?1",
+                   ["#{target}:open"]
+                 )
+      end
+
+      # The source is untouched.
+      assert {:ok, [[n]]} =
+               Store.raw_query("SELECT COUNT(*) FROM contexts WHERE workspace_id = ?1", [ctx.open])
+
+      assert n >= 1
+    end
+
     test "a tampered bundle is refused before anything is written", ctx do
       {:ok, _manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
       dir = Path.join(System.tmp_dir!(), "tamper-#{ctx.n}")
@@ -377,6 +460,31 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       assert {:local, _} =
                WorkspaceBundle.resolve(ctx.tenant, "optimal://#{ctx.private}/contexts/y")
+    end
+
+    test "the export route names the ledger mark a seeded replica pulls from", ctx do
+      {:ok, _} = OptimalEngine.Sync.enable(ctx.tenant, ctx.open, "user:owner")
+
+      {:ok, %{key: admin}} =
+        ApiKey.mint(%{tenant_id: ctx.tenant, name: "admin", scopes: ["*"], workspace_scope: ["*"]})
+
+      original = Application.get_env(:optimal_engine, :auth, [])
+
+      Application.put_env(
+        :optimal_engine,
+        :auth,
+        Keyword.merge(original, auth_required: true, bcrypt_cost: 4)
+      )
+
+      try do
+        conn = call(:post, "/api/workspaces/#{URI.encode_www_form(ctx.open)}/bundle", admin)
+        assert conn.status == 201
+        body = Jason.decode!(conn.resp_body)
+        assert is_integer(body["ledger_sequence"])
+        assert is_binary(body["bundle_sha256"])
+      after
+        Application.put_env(:optimal_engine, :auth, original)
+      end
     end
 
     test "bundle routes need admin and stay inside the bundles folder", ctx do
