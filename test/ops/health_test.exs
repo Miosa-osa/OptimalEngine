@@ -30,4 +30,15 @@ defmodule OptimalEngine.HealthTest do
     refute Map.has_key?(r.checks, :embedder)
     refute Map.has_key?(r.checks, :credential_key)
   end
+
+  test "status_of/1 follows the report it is given" do
+    assert Health.status_of(%{ok?: true, degraded: []}) == :up
+    assert Health.status_of(%{ok?: true, degraded: [:embedder]}) == :degraded
+    assert Health.status_of(%{ok?: false, degraded: []}) == :down
+  end
+
+  test "status/1 honors :skip, so a skipped check cannot degrade it" do
+    skip = [:embedder, :credential_key]
+    assert Health.status(skip: skip) == Health.status_of(Health.ready(skip: skip))
+  end
 end

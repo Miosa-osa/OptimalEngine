@@ -41,6 +41,15 @@ defmodule OptimalEngine.Version do
                         DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
                     end)
 
+  # The channel a release build was made for. `config/runtime.exs` reads
+  # OPTIMAL_RELEASE_CHANNEL at boot, but a packaged release started without that
+  # variable (the MIOSA tarball's start script, a template) would then report
+  # `dev` whatever it was built for. The build's own value is the default.
+  @build_channel (case System.get_env("OPTIMAL_RELEASE_CHANNEL") do
+                    channel when channel in ~w(stable beta pinned) -> channel
+                    _ -> @default_release_channel
+                  end)
+
   @spec info() :: map()
   def info do
     %{
@@ -81,7 +90,7 @@ defmodule OptimalEngine.Version do
   def release_channel do
     case Application.get_env(:optimal_engine, :release_channel) do
       channel when is_binary(channel) and channel != "" -> channel
-      _ -> @default_release_channel
+      _ -> @build_channel
     end
   end
 
