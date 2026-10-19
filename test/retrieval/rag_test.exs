@@ -188,9 +188,12 @@ defmodule OptimalEngine.Retrieval.RAGTest do
       tenant_id = "rag-tenant-#{System.unique_integer([:positive])}"
       derived_workspace_id = "#{tenant_id}:default"
 
+      # The memory belongs to the tenant whose default workspace holds it;
+      # retrieval reads only the asking tenant's rows.
       {:ok, _memory} =
         OptimalEngine.Memory.create(%{
           workspace_id: derived_workspace_id,
+          tenant_id: tenant_id,
           audience: "default",
           content:
             "Conversation bench: Project Borealis handled billing. Decision: adopt usage-based billing."

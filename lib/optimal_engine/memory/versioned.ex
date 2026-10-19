@@ -128,7 +128,7 @@ defmodule OptimalEngine.Memory.Versioned do
   @spec create(map()) :: {:ok, t()} | {:error, term()}
   def create(%{content: content} = attrs) when is_binary(content) and content != "" do
     workspace_id = Map.get(attrs, :workspace_id, Workspace.default_id())
-    tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
+    tenant_id = Map.get(attrs, :tenant_id) || workspace_tenant(workspace_id)
     audience = Map.get(attrs, :audience, "default")
     dedup_policy = resolve_dedup_policy(attrs)
     content_hash = compute_content_hash(content)
@@ -355,6 +355,15 @@ defmodule OptimalEngine.Memory.Versioned do
   # ---------------------------------------------------------------------------
 
   # Actual insert path — shared by create/1 (new row) after dedup check.
+  # A memory belongs to its workspace's tenant: a caller that names only the
+  # workspace gets that tenant, so tenant-scoped retrieval finds the memory.
+  defp workspace_tenant(workspace_id) do
+    case Workspace.get(workspace_id) do
+      {:ok, %{tenant_id: tenant_id}} when is_binary(tenant_id) -> tenant_id
+      _unregistered -> Tenant.default_id()
+    end
+  end
+
   defp do_insert(attrs, workspace_id, tenant_id, audience, content, content_hash) do
     id = generate_id()
 
