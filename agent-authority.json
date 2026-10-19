@@ -575,6 +575,17 @@
       "owns": []
     },
     {
+      "id": "docs-guides-quickstart",
+      "path": "docs/guides/quickstart.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-18",
+      "owns": []
+    },
+    {
       "id": "docs-guides-reconstructive-memory-and-optimality",
       "path": "docs/guides/reconstructive-memory-and-optimality.md",
       "kind": "reference",
@@ -680,8 +691,8 @@
       "status": "active",
       "owner": "platform",
       "scope": "optimal-engine",
-      "version": 2,
-      "effective": "2026-09-08",
+      "version": 3,
+      "effective": "2026-10-18",
       "owns": []
     },
     {

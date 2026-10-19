@@ -120,6 +120,16 @@ defmodule OptimalEngine.StorageCatalog do
     }
   }
 
+  @doc """
+  The identifiers of every logical store this build declares.
+
+  Unlike `list/0` this reads no store, so a client that is not the running
+  Engine (a conformance run, a build check) can compare what an Engine serves
+  against what this build contains.
+  """
+  @spec family_ids() :: [String.t()]
+  def family_ids, do: Enum.map(@stores, & &1.id)
+
   @spec list() :: [map()]
   def list do
     Enum.map(@stores, fn store ->

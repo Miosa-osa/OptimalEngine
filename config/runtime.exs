@@ -139,6 +139,20 @@ acl_absent =
 
 config :optimal_engine, :acl_absent, acl_absent
 
+# Release channel: which release stream this Engine serves. Reported by
+# /api/version so an operator or update controller can compare the running
+# build with the channel it intended. Absent means an unversioned local build.
+case System.get_env("OPTIMAL_RELEASE_CHANNEL") do
+  nil ->
+    :ok
+
+  channel when channel in ~w(dev stable beta pinned) ->
+    config :optimal_engine, :release_channel, channel
+
+  _ ->
+    raise ArgumentError, "OPTIMAL_RELEASE_CHANNEL must be dev, stable, beta, or pinned"
+end
+
 # Corpus routing rules (CorpusOrganizer) are deployment data: a YAML or JSON
 # file mapping target workspaces to weighted markers.
 if corpus_rules = System.get_env("OPTIMAL_CORPUS_RULES") do
