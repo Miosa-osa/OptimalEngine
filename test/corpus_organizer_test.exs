@@ -75,4 +75,69 @@ defmodule OptimalEngine.CorpusOrganizerTest do
       File.rm_rf!(dir)
     end
   end
+
+  describe "intake in the store" do
+    setup do
+      n = System.unique_integer([:positive])
+      workspace = "default:intake-#{n}"
+
+      {:ok, _} =
+        OptimalEngine.Store.raw_query(
+          "INSERT INTO workspaces (id, tenant_id, slug, name, status, metadata) VALUES (?1, 'default', ?2, ?2, 'active', '{}')",
+          [workspace, "intake-#{n}"]
+        )
+
+      original = Application.get_env(:optimal_engine, :corpus_source_workspace)
+      Application.put_env(:optimal_engine, :corpus_source_workspace, workspace)
+
+      on_exit(fn ->
+        if is_nil(original),
+          do: Application.delete_env(:optimal_engine, :corpus_source_workspace),
+          else: Application.put_env(:optimal_engine, :corpus_source_workspace, original)
+      end)
+
+      for i <- 1..250 do
+        {:ok, _} =
+          OptimalEngine.Store.raw_query(
+            "INSERT INTO contexts (id, tenant_id, workspace_id, type, title, content, created_at) VALUES (?1, 'default', ?2, 'signal', ?3, ?4, datetime('now'))",
+            [
+              "intake-#{n}-#{String.pad_leading(Integer.to_string(i), 4, "0")}",
+              workspace,
+              "Weekly note #{i}",
+              "General discussion with no workspace markers, item #{i}."
+            ]
+          )
+      end
+
+      %{workspace: workspace}
+    end
+
+    test "the preview reads every intake record in pages" do
+      assert {:ok, preview} = CorpusOrganizer.preview(page_size: 40)
+      assert preview.total == 250
+      assert length(preview.unresolved) == 250
+    end
+
+    test "queueing writes each review entry once and leaves unchanged entries alone",
+         %{workspace: workspace} do
+      assert {:ok, 250} = CorpusOrganizer.queue_remaining(page_size: 40, batch_size: 60)
+
+      {:ok, [[queued_at]]} =
+        OptimalEngine.Store.raw_query(
+          "SELECT json_extract(metadata, '$.routing_review.queued_at') FROM contexts WHERE workspace_id = ?1 ORDER BY id LIMIT 1",
+          [workspace]
+        )
+
+      assert is_binary(queued_at)
+      assert {:ok, 0} = CorpusOrganizer.queue_remaining(page_size: 40, batch_size: 60)
+
+      {:ok, [[again]]} =
+        OptimalEngine.Store.raw_query(
+          "SELECT json_extract(metadata, '$.routing_review.queued_at') FROM contexts WHERE workspace_id = ?1 ORDER BY id LIMIT 1",
+          [workspace]
+        )
+
+      assert again == queued_at
+    end
+  end
 end
