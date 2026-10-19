@@ -7,10 +7,9 @@
 # RocksDB builds its NIF through CMake, so the builder carries cmake and a
 # C++ toolchain as well as gcc/make and the SQLite headers.
 # ─────────────────────────────────────────────────────────────────────────────
-FROM hexpm/elixir:1.19.5-erlang-28.1.1-debian-bookworm-20260824-slim AS builder
 # BUILDER_IMAGE must be Debian bookworm based. A build host without Docker Hub access can
-# point it at an image it already has, for example elixir:1.18.2-otp-27.
-ARG BUILDER_IMAGE=hexpm/elixir:1.17.3-erlang-26.2.5-debian-bookworm-20260610-slim
+# point it at an image it already has, for example elixir:1.19.5-otp-28.
+ARG BUILDER_IMAGE=hexpm/elixir:1.19.5-erlang-28.1.1-debian-bookworm-20260824-slim
 FROM ${BUILDER_IMAGE} AS builder
 
 # Build-time tools. build-essential + cmake build the RocksDB and SQLite NIFs,
