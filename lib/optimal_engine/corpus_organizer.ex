@@ -104,16 +104,17 @@ defmodule OptimalEngine.CorpusOrganizer do
     }
   end
 
+  # Intake is read and written in pages and batches so the Store, which
+  # serializes every query, is free for other callers between them.
+  @page_size 50
+  @batch_size 200
+
   def preview(opts \\ []) do
     limit = Keyword.get(opts, :limit, 10_000)
+    page_size = Keyword.get(opts, :page_size, @page_size)
+    rules = rules()
 
-    with {:ok, rows} <-
-           Store.raw_query(
-             "SELECT id, title, l0_abstract, content FROM contexts WHERE workspace_id = ?1 AND archived_at IS NULL LIMIT ?2",
-             [source_workspace(), limit]
-           ) do
-      rules = rules()
-
+    with {:ok, rows} <- intake_rows(source_workspace(), "", limit, page_size, []) do
       proposals =
         Enum.map(rows, fn [id, title, l0, content] ->
           result = classify_fields(title, l0, content, rules)
@@ -124,8 +125,37 @@ defmodule OptimalEngine.CorpusOrganizer do
     end
   end
 
+  # `:preview` reuses a preview the caller already read, so one run reads
+  # the intake once.
+  defp given_or_fresh_preview(opts) do
+    case Keyword.get(opts, :preview) do
+      %{high_confidence: _, review: _, unresolved: _} = preview -> {:ok, preview}
+      _ -> preview(opts)
+    end
+  end
+
+  defp intake_rows(_workspace, _after_id, remaining, _page_size, acc) when remaining <= 0,
+    do: {:ok, acc |> Enum.reverse() |> Enum.concat()}
+
+  defp intake_rows(workspace, after_id, remaining, page_size, acc) do
+    case Store.raw_query(
+           "SELECT id, title, l0_abstract, content FROM contexts WHERE workspace_id = ?1 AND archived_at IS NULL AND id > ?2 ORDER BY id LIMIT ?3",
+           [workspace, after_id, min(page_size, remaining)]
+         ) do
+      {:ok, []} ->
+        {:ok, acc |> Enum.reverse() |> Enum.concat()}
+
+      {:ok, rows} ->
+        [last_id | _] = List.last(rows)
+        intake_rows(workspace, last_id, remaining - length(rows), page_size, [rows | acc])
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
   def apply_high_confidence(opts \\ []) do
-    with {:ok, preview} <- preview(opts) do
+    with {:ok, preview} <- given_or_fresh_preview(opts) do
       results =
         Enum.map(preview.high_confidence, fn proposal ->
           {proposal, move_context(proposal.id, proposal.workspace_id)}
@@ -141,34 +171,66 @@ defmodule OptimalEngine.CorpusOrganizer do
     end
   end
 
+  @doc """
+  Writes a routing review entry on every intake record that is not placed
+  automatically. A record already queued with the same state and proposal
+  is left alone, so a daily run rewrites nothing that did not change.
+  Writes run in transactions of `:batch_size` (default 200). Returns the
+  number of entries written.
+  """
   def queue_remaining(opts \\ []) do
-    with {:ok, preview} <- preview(opts) do
-      proposals = preview.review ++ preview.unresolved
+    batch_size = Keyword.get(opts, :batch_size, @batch_size)
 
-      Store.transaction(fn txn ->
-        Enum.reduce_while(proposals, {:ok, 0}, fn proposal, {:ok, count} ->
-          routing_review =
-            Jason.encode!(%{
-              "state" => Atom.to_string(proposal.confidence),
-              "proposed_workspace_id" => proposal.proposed_workspace_id,
-              "score" => proposal.score,
-              "margin" => proposal.margin,
-              "markers" => proposal.markers,
-              "queued_at" =>
-                DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-            })
-
-          case Store.txn_execute(
-                 txn,
-                 "UPDATE contexts SET metadata = json_set(COALESCE(metadata, '{}'), '$.routing_review', json(?1)) WHERE id = ?2 AND workspace_id = ?3 AND archived_at IS NULL",
-                 [routing_review, proposal.id, source_workspace()]
-               ) do
-            {:ok, changed} -> {:cont, {:ok, count + changed}}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
-        end)
+    with {:ok, preview} <- given_or_fresh_preview(opts) do
+      (preview.review ++ preview.unresolved)
+      |> Enum.chunk_every(batch_size)
+      |> Enum.reduce_while({:ok, 0}, fn batch, {:ok, count} ->
+        case queue_batch(batch) do
+          {:ok, written} -> {:cont, {:ok, count + written}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
       end)
     end
+  end
+
+  defp queue_batch(proposals) do
+    queued_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+    Store.transaction(fn txn ->
+      Enum.reduce_while(proposals, {:ok, 0}, fn proposal, {:ok, count} ->
+        state = Atom.to_string(proposal.confidence)
+
+        routing_review =
+          Jason.encode!(%{
+            "state" => state,
+            "proposed_workspace_id" => proposal.proposed_workspace_id,
+            "score" => proposal.score,
+            "margin" => proposal.margin,
+            "markers" => proposal.markers,
+            "queued_at" => queued_at
+          })
+
+        case Store.txn_execute(
+               txn,
+               """
+               UPDATE contexts SET metadata = json_set(COALESCE(metadata, '{}'), '$.routing_review', json(?1))
+               WHERE id = ?2 AND workspace_id = ?3 AND archived_at IS NULL
+                 AND (json_extract(metadata, '$.routing_review.state') IS NOT ?4
+                      OR json_extract(metadata, '$.routing_review.proposed_workspace_id') IS NOT ?5)
+               """,
+               [
+                 routing_review,
+                 proposal.id,
+                 source_workspace(),
+                 state,
+                 proposal.proposed_workspace_id
+               ]
+             ) do
+          {:ok, changed} -> {:cont, {:ok, count + changed}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+    end)
   end
 
   def deduplicate_exact do

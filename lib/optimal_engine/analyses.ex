@@ -206,13 +206,15 @@ defmodule OptimalEngine.Analyses do
     if workspace_id != CorpusOrganizer.source_workspace() do
       {:ok, "Not the intake workspace; nothing to place.", %{"moved" => 0, "queued" => 0}}
     else
+      {:ok, preview} = CorpusOrganizer.preview()
+
       moved =
-        case CorpusOrganizer.apply_high_confidence() do
+        case CorpusOrganizer.apply_high_confidence(preview: preview) do
           {:ok, %{moved: moved}} -> moved
           {:error, %{moved: moved}} -> moved
         end
 
-      {:ok, queued} = CorpusOrganizer.queue_remaining()
+      {:ok, queued} = CorpusOrganizer.queue_remaining(preview: preview)
 
       {:ok, "#{moved} items placed in their workspace, #{queued} queued for routing review.",
        %{"moved" => moved, "queued" => queued}}
