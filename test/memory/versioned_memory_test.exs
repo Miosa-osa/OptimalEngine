@@ -61,6 +61,36 @@ defmodule OptimalEngine.Memory.VersionedTest do
       assert mem.tenant_id == "default"
     end
 
+    test "a memory named only by its workspace takes that workspace's tenant" do
+      tenant = "mem-tenant-#{System.unique_integer([:positive])}"
+      workspace_id = "#{tenant}:notes"
+
+      {:ok, _} = OptimalEngine.Tenancy.Tenant.create(%{id: tenant, name: tenant})
+
+      {:ok, _} =
+        OptimalEngine.Store.raw_query(
+          "INSERT INTO workspaces (id, tenant_id, slug, name, status, metadata) VALUES (?1, ?2, 'notes', 'Notes', 'active', '{}')",
+          [workspace_id, tenant]
+        )
+
+      assert {:ok, mem} =
+               Memory.create(%{content: "scoped by its workspace", workspace_id: workspace_id})
+
+      assert mem.tenant_id == tenant
+
+      # An explicit tenant still wins, and an unregistered workspace keeps the default.
+      assert {:ok, explicit} =
+               Memory.create(%{
+                 content: "explicit",
+                 workspace_id: workspace_id,
+                 tenant_id: "default"
+               })
+
+      assert explicit.tenant_id == "default"
+      assert {:ok, loose} = Memory.create(%{content: "loose", workspace_id: ws()})
+      assert loose.tenant_id == "default"
+    end
+
     test "deduplication is tenant scoped" do
       workspace_id = ws()
       attrs = %{content: "same content", workspace_id: workspace_id}

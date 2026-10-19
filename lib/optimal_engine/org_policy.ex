@@ -12,8 +12,9 @@ defmodule OptimalEngine.OrgPolicy do
   A versioned memory in the org section whose `metadata.kind` is `"policy"`
   (latest version, not forgotten) is org policy. Every workspace of the
   tenant reads it, labeled with `source_workspace_id` and `inherited: true`:
-  in boot, in context assembly, in `GET /api/org-policy`, and by id
-  (`GET /api/memory/:id`). Nothing else of the org section is readable from
+  in boot, in context assembly, in `/api/rag` and `/api/recall/*`, in
+  `GET /api/org-policy`, by id (`GET /api/memory/:id`), and as matching hits
+  in `GET /api/search` (`matching/4`). Nothing else of the org section is readable from
   another workspace, and policy is written only with a key that can write
   the org section itself: the memory routes check the memory's own workspace
   against the key.
@@ -34,6 +35,7 @@ defmodule OptimalEngine.OrgPolicy do
   alias OptimalEngine.API.{Actor, AuthorityPlug}
   alias OptimalEngine.Authority.{Decision, Evidence, LocalDeny, Settings}
   alias OptimalEngine.Memory.Versioned
+  alias OptimalEngine.Retrieval.Search
   alias OptimalEngine.{Scope, Workspace}
   alias OptimalEngine.Tenancy.Tenant
 
@@ -161,6 +163,46 @@ defmodule OptimalEngine.OrgPolicy do
 
           result(org, true, label_all(shown, true), length(withheld), nil)
         end
+    end
+  end
+
+  @doc """
+  The org policy `workspace_id` reads that matches `query`: memory search hits
+  in the org section that are live policy admitted by the same deny-wins rules
+  as `for_workspace/3`, best match first. Each is labeled inherited
+  (`label/2`) and carries the search `score` and `title`. Empty for the org
+  section itself, whose policy its own search already finds. Options:
+  `:actor` (as in `for_workspace/3`), `:limit` (default 10).
+  """
+  @spec matching(String.t(), String.t(), String.t(), keyword()) :: [map()]
+  def matching(tenant_id, workspace_id, query, opts \\ []) do
+    case for_workspace(tenant_id, workspace_id, opts) do
+      %{inherited: true, org_workspace_id: org, memories: [_ | _] = memories} ->
+        admitted = Map.new(memories, &{&1.id, &1})
+
+        case Search.search(query,
+               workspace_id: org,
+               tenant_id: tenant_id,
+               type: :memory,
+               memory_search_mode: :lexical,
+               limit: @max_memories
+             ) do
+          {:ok, hits} ->
+            hits
+            |> Enum.filter(&Map.has_key?(admitted, &1.id))
+            |> Enum.take(Keyword.get(opts, :limit, 10))
+            |> Enum.map(fn hit ->
+              admitted
+              |> Map.fetch!(hit.id)
+              |> Map.merge(%{score: hit.score, title: hit.title})
+            end)
+
+          _ ->
+            []
+        end
+
+      _ ->
+        []
     end
   end
 

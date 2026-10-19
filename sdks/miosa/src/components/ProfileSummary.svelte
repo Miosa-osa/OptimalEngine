@@ -13,7 +13,8 @@
 
   const profile = useProfile(engine, { audience, node });
 
-  const TIERS: { key: keyof typeof profile.profile; label: string }[] = [
+  type TierKey = 'static' | 'dynamic' | 'curated' | 'activity';
+  const TIERS: { key: TierKey; label: string }[] = [
     { key: 'static', label: 'Static' },
     { key: 'dynamic', label: 'Dynamic' },
     { key: 'curated', label: 'Curated' },

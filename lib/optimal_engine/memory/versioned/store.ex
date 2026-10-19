@@ -107,6 +107,7 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   @doc """
   Lists memories filtered by opts:
     - `:workspace_id` (required) — defaults to "default"
+    - `:tenant_id` — only that tenant's memories; absent means any tenant
     - `:audience` — filter by audience string
     - `:include_forgotten` — default false
     - `:include_old_versions` — default false (only is_latest=1)
@@ -120,35 +121,27 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   """
   @spec list(keyword()) :: {:ok, [list()]} | {:error, term()}
   def list(opts) do
-    workspace_id = Keyword.get(opts, :workspace_id, "default")
-    audience = Keyword.get(opts, :audience)
-    include_forgotten = Keyword.get(opts, :include_forgotten, false)
-    include_old = Keyword.get(opts, :include_old_versions, false)
+    filters = filters(opts)
     limit = Keyword.get(opts, :limit, 50)
     offset = Keyword.get(opts, :offset, 0)
     q = opts |> Keyword.get(:q) |> normalize_fts_query()
 
     if q do
-      list_with_fts(workspace_id, audience, include_forgotten, include_old, limit, offset, q)
+      list_with_fts(filters, limit, offset, q)
     else
-      list_without_fts(workspace_id, audience, include_forgotten, include_old, limit, offset)
+      list_without_fts(filters, limit, offset)
     end
   end
 
   @doc """
   Counts total memories matching the same filter opts as `list/1`.
-  Accepts `:workspace_id`, `:audience`, `:include_forgotten`, `:include_old_versions`.
+  Accepts `:workspace_id`, `:tenant_id`, `:audience`, `:include_forgotten`,
+  `:include_old_versions`.
   Returns `{:ok, non_neg_integer()}`.
   """
   @spec count(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def count(opts) do
-    workspace_id = Keyword.get(opts, :workspace_id, "default")
-    audience = Keyword.get(opts, :audience)
-    include_forgotten = Keyword.get(opts, :include_forgotten, false)
-    include_old = Keyword.get(opts, :include_old_versions, false)
-
-    {conditions, params} =
-      build_filter_conditions(workspace_id, audience, include_forgotten, include_old, "m")
+    {conditions, params} = build_filter_conditions(filters(opts), "m")
 
     where = Enum.join(conditions, " AND ")
 
@@ -165,10 +158,19 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   # Private — list helpers
   # ---------------------------------------------------------------------------
 
+  defp filters(opts) do
+    %{
+      workspace_id: Keyword.get(opts, :workspace_id, "default"),
+      tenant_id: Keyword.get(opts, :tenant_id),
+      audience: Keyword.get(opts, :audience),
+      include_forgotten: Keyword.get(opts, :include_forgotten, false),
+      include_old: Keyword.get(opts, :include_old_versions, false)
+    }
+  end
+
   # Plain list path (no FTS). Builds a dynamic WHERE using positional params.
-  defp list_without_fts(workspace_id, audience, include_forgotten, include_old, limit, offset) do
-    {conditions, params} =
-      build_filter_conditions(workspace_id, audience, include_forgotten, include_old, "m")
+  defp list_without_fts(filters, limit, offset) do
+    {conditions, params} = build_filter_conditions(filters, "m")
 
     param_idx = length(params) + 1
     where = Enum.join(conditions, " AND ")
@@ -186,18 +188,9 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   # FTS path: JOIN memories against memories_fts on rowid, filter with MATCH,
   # apply the same workspace/audience/forgotten/latest constraints, and order
   # by BM25 rank (negated — lower raw value = better match in SQLite).
-  defp list_with_fts(
-         workspace_id,
-         audience,
-         include_forgotten,
-         include_old,
-         limit,
-         offset,
-         fts_query
-       ) do
+  defp list_with_fts(filters, limit, offset, fts_query) do
     # ?1 = fts_query; build the rest of the conditions starting at ?2.
-    {conditions, base_params} =
-      build_filter_conditions(workspace_id, audience, include_forgotten, include_old, "m", 2)
+    {conditions, base_params} = build_filter_conditions(filters, "m", 2)
 
     params = [fts_query | base_params]
     param_idx = length(params) + 1
@@ -219,35 +212,24 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   # `table_alias` is the SQL alias prefix (e.g. "m").
   # `start_idx` is the first positional param index (default 1 for non-FTS,
   # 2 for FTS where ?1 is the FTS query term).
-  defp build_filter_conditions(
-         workspace_id,
-         audience,
-         include_forgotten,
-         include_old,
-         table_alias,
-         start_idx \\ 1
-       ) do
-    conditions = ["#{table_alias}.workspace_id = ?#{start_idx}"]
-    params = [workspace_id]
-    param_idx = start_idx + 1
-
-    {conditions, params, param_idx} =
-      if audience do
-        {conditions ++ ["#{table_alias}.audience = ?#{param_idx}"], params ++ [audience],
-         param_idx + 1}
-      else
-        {conditions, params, param_idx}
-      end
-
-    _ = param_idx
+  defp build_filter_conditions(filters, table_alias, start_idx \\ 1) do
+    # The workspace always filters (nil matches nothing); tenant and audience
+    # filter only when given.
+    {conditions, params, _next_idx} =
+      [{"tenant_id", filters.tenant_id}, {"audience", filters.audience}]
+      |> Enum.reject(fn {_column, value} -> is_nil(value) end)
+      |> then(&[{"workspace_id", filters.workspace_id} | &1])
+      |> Enum.reduce({[], [], start_idx}, fn {column, value}, {conditions, params, idx} ->
+        {conditions ++ ["#{table_alias}.#{column} = ?#{idx}"], params ++ [value], idx + 1}
+      end)
 
     conditions =
-      if not include_forgotten,
+      if not filters.include_forgotten,
         do: conditions ++ ["#{table_alias}.is_forgotten = 0"],
         else: conditions
 
     conditions =
-      if not include_old,
+      if not filters.include_old,
         do: conditions ++ ["#{table_alias}.is_latest = 1"],
         else: conditions
 

@@ -37,6 +37,9 @@ defmodule OptimalEngine.Retrieval.Grep do
   - `:limit`        — max results (default 25)
   - `:literal`      — when true, skip semantic search and match only FTS BM25
   - `:snippet_len`  — bytes for snippet window (default 200)
+  - `:tenant_id`, `:principal`, `:acl_absent` — passed to
+    `OptimalEngine.Retrieval.Search`: read only that tenant's rows and drop
+    what the principal may not read per ACL rows
   """
 
   require Logger
@@ -90,6 +93,9 @@ defmodule OptimalEngine.Retrieval.Grep do
     search_opts =
       [workspace_id: workspace_id, limit: limit * 4]
       |> maybe_put(:node, extract_node_filter(path_prefix))
+      |> maybe_put(:tenant_id, Keyword.get(opts, :tenant_id))
+      |> maybe_put(:principal, Keyword.get(opts, :principal))
+      |> maybe_put(:acl_absent, Keyword.get(opts, :acl_absent))
 
     raw_result =
       try do

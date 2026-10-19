@@ -51,11 +51,14 @@ defmodule OptimalEngine.API.Router do
     pass: ["application/json", "application/gzip"]
   )
 
+  plug(OptimalEngine.API.AuthPlug)
+
+  # Rate limiting runs on the verified key: every key has its own bucket, and
+  # only unauthenticated requests share the peer IP's. AuthPlug charges the
+  # IP bucket for a request it refuses, so a forged key spends no key's bucket.
   plug(OptimalEngine.API.RateLimitPlug,
     exempt_paths: ["/api/status", "/api/health", "/api/metrics/prometheus"]
   )
-
-  plug(OptimalEngine.API.AuthPlug)
 
   # Workspace authorization — must run after AuthPlug (needs :current_tenant /
   # :current_api_key) and before :dispatch. Resolves the requested workspace
@@ -159,10 +162,16 @@ defmodule OptimalEngine.API.Router do
     })
   end
 
+  # GET /api/search - ranked contexts and memories of one workspace. Every
+  # result carries `inherited` and `source_workspace_id`: matching org policy
+  # of the tenant's org section is mixed in labeled `inherited: true`
+  # (OptimalEngine.OrgPolicy.matching/4). A keyed caller's results honor ACL
+  # rows (retrieval_scope/1).
   get "/api/search" do
     q = query_param(conn, "q", "")
     workspace = query_param(conn, "workspace", "default")
     tenant = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
+    scope = retrieval_scope(conn)
     type = if query_param(conn, "type", "") == "memory", do: :memory, else: nil
     memory_embedding_model = query_param(conn, "memory_embedding_model", nil)
     memory_embedding_provider_model = query_param(conn, "memory_embedding_provider_model", nil)
@@ -183,21 +192,29 @@ defmodule OptimalEngine.API.Router do
             min(limit + offset + 200, 200)
           end
 
-        case OptimalEngine.search(q,
-               limit: fetch_limit,
-               workspace_id: workspace,
-               tenant_id: tenant,
-               type: type,
-               memory_search_mode: memory_search_mode,
-               memory_embedding_provider_model:
-                 memory_embedding_provider_model || memory_embedding_model,
-               memory_inference_embedding_model: memory_inference_embedding_model,
-               memory_query_prefix: memory_query_prefix,
-               memory_embedding_model:
-                 memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()
+        case OptimalEngine.search(
+               q,
+               [
+                 limit: fetch_limit,
+                 workspace_id: workspace,
+                 tenant_id: tenant,
+                 type: type,
+                 memory_search_mode: memory_search_mode,
+                 memory_embedding_provider_model:
+                   memory_embedding_provider_model || memory_embedding_model,
+                 memory_inference_embedding_model: memory_inference_embedding_model,
+                 memory_query_prefix: memory_query_prefix,
+                 memory_embedding_model:
+                   memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()
+               ] ++ Keyword.take(scope, [:principal, :acl_absent])
              ) do
           {:ok, contexts} ->
-            all = format_search_results(contexts)
+            inherited =
+              if type in [nil, :memory],
+                do: inherited_policy_results(conn, tenant, workspace, q),
+                else: []
+
+            all = merge_by_score(format_search_results(contexts, workspace), inherited)
             total = length(all)
             page = all |> Enum.drop(offset) |> Enum.take(limit)
             {page, total}
@@ -250,6 +267,7 @@ defmodule OptimalEngine.API.Router do
           limit: limit + offset,
           literal: literal?
         ]
+        |> Keyword.merge(retrieval_scope(conn))
         |> api_maybe_put(:intent, parse_atom(intent, nil))
         |> api_maybe_put(:scale, parse_atom(scale, nil))
         |> api_maybe_put(:modality, parse_atom(modality, nil))
@@ -826,9 +844,9 @@ defmodule OptimalEngine.API.Router do
     case Map.get(body, "query") do
       q when is_binary(q) and q != "" ->
         receiver =
-          Receiver.new(%{
-            format: parse_atom(body["format"], :markdown),
-            bandwidth: parse_atom(body["bandwidth"], :medium),
+          retrieval_receiver(conn, %{
+            format: rag_format(body["format"]),
+            bandwidth: rag_bandwidth(body["bandwidth"]),
             audience: body["audience"] || "default"
           })
 
@@ -841,6 +859,7 @@ defmodule OptimalEngine.API.Router do
             skip_intent: parse_bool(body["skip_intent"], false),
             skip_wiki: parse_bool(body["skip_wiki"], false)
           ]
+          |> Keyword.merge(Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent]))
           |> api_maybe_put(:hybrid_limit, parse_int(body["hybrid_limit"], nil))
           |> api_maybe_put(:memory_limit, parse_int(body["memory_limit"], nil))
           |> api_maybe_put(:strategy, retrieval_strategy(body["strategy"]))
@@ -856,7 +875,7 @@ defmodule OptimalEngine.API.Router do
 
         case Retrieval.ask(q, rag_opts) do
           {:ok, result} ->
-            json(conn, render_rag_result(result))
+            json(conn, result |> render_rag_result() |> with_org_policy(conn, workspace_id))
 
           {:error, reason} ->
             send_resp(conn, 502, Jason.encode!(%{error: inspect(reason)}))
@@ -884,9 +903,9 @@ defmodule OptimalEngine.API.Router do
       send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
     else
       receiver =
-        Receiver.new(%{
-          format: parse_atom(query_param(conn, "format", "markdown"), :markdown),
-          bandwidth: parse_atom(query_param(conn, "bandwidth", "medium"), :medium),
+        retrieval_receiver(conn, %{
+          format: rag_format(query_param(conn, "format", "markdown")),
+          bandwidth: rag_bandwidth(query_param(conn, "bandwidth", "medium")),
           audience: query_param(conn, "audience", "default")
         })
 
@@ -896,6 +915,7 @@ defmodule OptimalEngine.API.Router do
       # It is ignored in production (non-test) builds.
       rag_opts =
         [workspace_id: workspace_id]
+        |> Keyword.merge(Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent]))
         |> then(fn opts ->
           if Mix.env() == :test and query_param(conn, "skip_intent", "") == "true" do
             Keyword.put(opts, :skip_intent, true)
@@ -936,14 +956,19 @@ defmodule OptimalEngine.API.Router do
          spec_name when is_binary(spec_name) and spec_name != "" <- spec_name,
          {:ok, spec} <- OptimalEngine.Render.Registry.get(workspace_id, spec_name) do
       receiver =
-        Receiver.new(%{
+        retrieval_receiver(conn, %{
           format: :markdown,
           bandwidth: spec.bandwidth,
           audience: spec.audience,
           genre: spec.genre
         })
 
-      {:ok, rag_result} = Retrieval.ask(source, receiver: receiver, workspace_id: workspace_id)
+      {:ok, rag_result} =
+        Retrieval.ask(
+          source,
+          [receiver: receiver, workspace_id: workspace_id] ++
+            Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent])
+        )
 
       json(conn, %{
         spec: OptimalEngine.Render.Spec.to_map(spec),
@@ -1824,7 +1849,7 @@ defmodule OptimalEngine.API.Router do
         |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
         |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
         |> maybe_put(:metadata, Map.get(body, "metadata"))
-        |> maybe_put(:actor_id, Map.get(body, "actor_id"))
+        |> Map.put(:actor_id, Actor.of(conn, body))
         |> maybe_put(:access_policy_id, Map.get(body, "access_policy_id"))
         |> maybe_put(:security_labels, string_list_param(body, "security_labels"))
         |> maybe_put(:partition_ids, string_list_param(body, "partition_ids"))
@@ -1960,6 +1985,7 @@ defmodule OptimalEngine.API.Router do
     filter_opts =
       [
         workspace_id: workspace_id,
+        tenant_id: conn.assigns[:current_tenant] || "default",
         include_forgotten: include_forgotten,
         include_old_versions: include_old_versions
       ]
@@ -2500,15 +2526,26 @@ defmodule OptimalEngine.API.Router do
   # an operator key. Any authenticated key may call it, whatever its scopes.
   get "/api/auth/whoami" do
     case conn.assigns[:current_api_key] do
+      # Only reachable on an Engine that does not require a key: every
+      # anonymous request acts as the local operator, with everything open.
       nil ->
-        json(conn, %{authenticated: false})
+        json(conn, %{
+          authenticated: false,
+          key_id: nil,
+          tenant_id: conn.assigns[:current_tenant] || "default",
+          principal_id: Actor.of(conn),
+          scopes: ["*"],
+          workspace_scope: ["*"],
+          expires_at: nil
+        })
 
       key ->
         json(conn, %{
           authenticated: true,
           key_id: key.id,
           name: key.name,
-          principal_id: key.principal_id,
+          # The principal the Engine acts as: the key's own, or the key id.
+          principal_id: Actor.of(conn),
           tenant_id: key.tenant_id,
           scopes: key.scopes,
           workspace_scope: key.workspace_scope,
@@ -2885,12 +2922,10 @@ defmodule OptimalEngine.API.Router do
     if not (is_binary(text) and String.trim(text) != "") do
       send_resp(conn, 400, Jason.encode!(%{error: "text is required"}))
     else
-      # The tenant and the acting principal come from the authenticated key.
+      # The tenant and the acting principal come from the authenticated key;
+      # an anonymous local caller may name the actor, else it is the operator.
       intake_opts =
-        [tenant_id: conn.assigns[:current_tenant] || "default"]
-        |> then(fn acc ->
-          if(v = body["actor_id"], do: Keyword.put(acc, :actor_id, v), else: acc)
-        end)
+        [tenant_id: conn.assigns[:current_tenant] || "default", actor_id: Actor.of(conn, body)]
         |> then(fn acc -> if(v = body["genre"], do: Keyword.put(acc, :genre, v), else: acc) end)
         |> then(fn acc -> if(v = body["title"], do: Keyword.put(acc, :title, v), else: acc) end)
         |> then(fn acc -> if(v = body["node"], do: Keyword.put(acc, :node, v), else: acc) end)
@@ -3052,16 +3087,21 @@ defmodule OptimalEngine.API.Router do
     json(conn, reconstruction_quality(workspace))
   end
 
+  # POST /api/memory/reconstruction/benchmark - measures reconstruction on the
+  # questions the caller sends. There is no default set: a benchmark of
+  # placeholder questions would report numbers about nothing.
   post "/api/memory/reconstruction/benchmark" do
     body = conn.body_params || %{}
+    questions = Map.get(body, "questions")
 
-    questions =
-      Map.get(body, "questions", [
-        "What is the current Northwind commitment and how did it evolve?",
-        "What changed in the Contoso commercial plan?",
-        "Which Optimal Engine problems were found, fixed, and verified?"
-      ])
+    if questions in [nil, []] do
+      send_resp(conn, 400, Jason.encode!(%{error: "questions_required"}))
+    else
+      run_reconstruction_benchmark(conn, body, questions)
+    end
+  end
 
+  defp run_reconstruction_benchmark(conn, body, questions) do
     if is_list(questions) and Enum.all?(questions, &is_binary/1) do
       cases =
         Enum.with_index(questions, 1)
@@ -4079,6 +4119,95 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # Who HTTP retrieval reads for: the authenticated tenant and, for a keyed
+  # caller, its principal, so ACL rows apply (OptimalEngine.Identity.ACL).
+  # WorkspaceAuthPlug has already confined the key to the workspace it names,
+  # so a resource with no ACL rows stays readable (`acl_absent: :allow`);
+  # grant rows restrict a resource to the principals and groups they name,
+  # and a deny row wins. An anonymous local caller is the trusted operator:
+  # tenant only, no ACL filtering.
+  defp retrieval_scope(conn) do
+    tenant = conn.assigns[:current_tenant] || "default"
+
+    case conn.assigns[:current_api_key] do
+      nil -> [tenant_id: tenant]
+      _key -> [tenant_id: tenant, principal: Actor.of(conn), acl_absent: :allow]
+    end
+  end
+
+  # The receiver of an HTTP retrieval: the caller's tenant, and for a keyed
+  # caller its principal as the receiver id (the RAG path filters by it).
+  defp retrieval_receiver(conn, attrs) do
+    scope = retrieval_scope(conn)
+
+    attrs
+    |> Map.put(:tenant_id, scope[:tenant_id])
+    |> then(fn attrs ->
+      if scope[:principal], do: Map.put(attrs, :id, scope[:principal]), else: attrs
+    end)
+    |> Receiver.new()
+  end
+
+  # Envelope formats and bandwidths a receiver understands; anything else is
+  # the default instead of a crash further down.
+  defp rag_format(value) when value in ["plain", "markdown", "claude", "openai"],
+    do: String.to_existing_atom(value)
+
+  defp rag_format(_value), do: :markdown
+
+  defp rag_bandwidth(value) when value in ["small", "medium", "large"],
+    do: String.to_existing_atom(value)
+
+  defp rag_bandwidth(_value), do: :medium
+
+  # The org policy the workspace follows, as boot and assemble carry it.
+  defp with_org_policy(result, conn, workspace_id) do
+    Map.put(
+      result,
+      :org_policy,
+      OptimalEngine.OrgPolicy.for_workspace(
+        conn.assigns[:current_tenant] || "default",
+        workspace_id,
+        actor: Actor.of(conn)
+      )
+    )
+  end
+
+  # Org policy of the tenant's org section matching a search, shaped like
+  # the workspace's own results and labeled with its source.
+  defp inherited_policy_results(conn, tenant, workspace, q) do
+    tenant
+    |> OptimalEngine.OrgPolicy.matching(workspace, q, actor: Actor.of(conn))
+    |> Enum.map(fn memory ->
+      %{
+        id: memory.id,
+        title: memory.title,
+        node: "memory-core",
+        genre: nil,
+        uri: memory.uri,
+        content: memory.content,
+        l0_abstract: memory.content,
+        sn_ratio: nil,
+        score: memory.score,
+        workspace_id: memory.source_workspace_id,
+        metadata: memory.metadata,
+        inherited: true,
+        source_workspace_id: memory.source_workspace_id
+      }
+    end)
+  end
+
+  # Inserts `extra` (best first) into `results` by score, keeping the order
+  # of `results` as it is.
+  defp merge_by_score(results, []), do: results
+  defp merge_by_score([], extra), do: extra
+
+  defp merge_by_score([result | results], [hit | hits] = extra) do
+    if (hit.score || 0.0) > (result.score || 0.0),
+      do: [hit | merge_by_score([result | results], hits)],
+      else: [result | merge_by_score(results, extra)]
+  end
+
   # The actor recorded in the governed scope envelope is the authenticated
   # principal set by AuthPlug — never a body-asserted name.
   defp authenticated_actor(conn) do
@@ -4188,9 +4317,16 @@ defmodule OptimalEngine.API.Router do
         Jason.encode!(%{error: "missing required parameter(s) — recall query was too short"})
       )
     else
-      receiver = Receiver.new(%{format: :markdown, bandwidth: :medium, audience: audience})
-      {:ok, result} = Retrieval.ask(q, receiver: receiver, workspace_id: workspace)
-      json(conn, Map.put(result, :recall_query, q))
+      receiver =
+        retrieval_receiver(conn, %{format: :markdown, bandwidth: :medium, audience: audience})
+
+      opts =
+        [receiver: receiver, workspace_id: workspace]
+        |> Keyword.merge(Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent]))
+
+      {:ok, result} = Retrieval.ask(q, opts)
+
+      json(conn, result |> Map.put(:recall_query, q) |> with_org_policy(conn, workspace))
     end
   end
 
@@ -5065,8 +5201,10 @@ defmodule OptimalEngine.API.Router do
   defp format_gaps(_), do: []
 
   # OptimalEngine.search/2 returns [%Context{}]
-  defp format_search_results(contexts) when is_list(contexts) do
+  defp format_search_results(contexts, workspace) when is_list(contexts) do
     Enum.map(contexts, fn ctx ->
+      source = Map.get(ctx, :workspace_id) || workspace
+
       %{
         id: Map.get(ctx, :id),
         title: Map.get(ctx, :title),
@@ -5078,12 +5216,14 @@ defmodule OptimalEngine.API.Router do
         sn_ratio: Map.get(ctx, :sn_ratio),
         score: Map.get(ctx, :score),
         workspace_id: Map.get(ctx, :workspace_id),
-        metadata: Map.get(ctx, :metadata)
+        metadata: Map.get(ctx, :metadata),
+        inherited: false,
+        source_workspace_id: source
       }
     end)
   end
 
-  defp format_search_results(_), do: []
+  defp format_search_results(_, _workspace), do: []
 
   # HealthDiagnostics.run/0 returns [%{name:, severity:, message:, details:, fix:}]
   defp format_health(checks) when is_list(checks) do

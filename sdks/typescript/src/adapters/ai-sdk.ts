@@ -43,27 +43,28 @@ export function optimalEngineTools(
   return {
     /**
      * Ask the second brain a question. Curated wiki first, hybrid search
-     * second. Returns ACL-scoped, audience-shaped, bandwidth-matched envelope
-     * with hot citations.
+     * second. Returns an ACL-scoped, audience-shaped, bandwidth-matched
+     * envelope: `envelope.body` is the context text, `envelope.sources`
+     * lists the `optimal://` URIs it came from.
      */
     askEngine: tool({
       description:
-        "Ask the second brain a question. Curated wiki first, hybrid search second. Returns ACL-scoped, audience-shaped, bandwidth-matched envelope with hot citations.",
+        "Ask the second brain a question. Curated wiki first, hybrid search second. Returns an ACL-scoped, audience-shaped, bandwidth-matched envelope: envelope.body is the context text and envelope.sources lists the URIs it came from.",
       inputSchema: z.object({
         query: z.string().describe("The question to ask the engine."),
         audience: z
           .string()
           .optional()
-          .describe("Audience scope — e.g. 'public' or 'internal'."),
+          .describe("Audience scope - e.g. 'public' or 'internal'."),
         format: z
-          .string()
+          .enum(["plain", "markdown", "claude", "openai"])
           .optional()
-          .describe("Desired response format hint, e.g. 'markdown'."),
+          .describe("Envelope format. Defaults to 'markdown'."),
         bandwidth: z
-          .enum(["l0", "l1", "full"])
+          .enum(["small", "medium", "large"])
           .optional()
           .describe(
-            "Response depth: l0 = headline only, l1 = summary, full = complete.",
+            "How much context the envelope may carry: small, medium (default) or large.",
           ),
       }),
       execute: async (params, _options) => {
@@ -85,7 +86,7 @@ export function optimalEngineTools(
      */
     searchMemory: tool({
       description:
-        "Search long-term memory using hybrid semantic and keyword search. Returns ranked hits with content excerpts.",
+        "Search long-term memory using hybrid semantic and keyword search. Returns ranked hits with content and an abstract. Hits with inherited=true are org policy memories from source_workspace_id.",
       inputSchema: z.object({
         query: z.string().describe("Search query."),
         limit: z
@@ -94,11 +95,23 @@ export function optimalEngineTools(
           .positive()
           .optional()
           .describe("Maximum number of results to return."),
+        offset: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("Number of results to skip, for paging."),
+        type: z
+          .enum(["memory"])
+          .optional()
+          .describe("Set to 'memory' to return only durable memories."),
       }),
       execute: async (params, _options) => {
         return client.search(params.query, {
           ...(ws !== undefined ? { workspace: ws } : {}),
           ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          ...(params.offset !== undefined ? { offset: params.offset } : {}),
+          ...(params.type !== undefined ? { type: params.type } : {}),
         });
       },
     }),
@@ -108,14 +121,19 @@ export function optimalEngineTools(
      */
     grepMemory: tool({
       description:
-        "Grep long-term memory with structured intent, scale, and modality filters. More precise than search when you know the shape of what you want.",
+        "Grep long-term memory with structured intent, scale, and modality filters. More precise than search when you know the shape of what you want. Returns chunk hits: slug (the node), snippet, scale, intent, score.",
       inputSchema: z.object({
         query: z.string().describe("Pattern or phrase to grep for."),
         intent: z
           .string()
           .optional()
-          .describe("Query intent hint, e.g. 'decision', 'action', 'fact'."),
-        scale: z.string().optional().describe("Scale filter."),
+          .describe(
+            "Chunk intent filter. One of: request_info, propose_decision, record_fact, express_concern, commit_action, reference, narrate, reflect, specify, measure. Other values are ignored.",
+          ),
+        scale: z
+          .enum(["document", "section", "paragraph", "chunk"])
+          .optional()
+          .describe("Chunk scale filter."),
         modality: z
           .string()
           .optional()
@@ -126,6 +144,16 @@ export function optimalEngineTools(
           .positive()
           .optional()
           .describe("Maximum number of results."),
+        offset: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("Number of results to skip, for paging."),
+        path: z
+          .string()
+          .optional()
+          .describe("Restrict to a node slug or slug prefix."),
       }),
       execute: async (params, _options) => {
         return client.grep(params.query, {
@@ -136,6 +164,8 @@ export function optimalEngineTools(
             ? { modality: params.modality }
             : {}),
           ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          ...(params.offset !== undefined ? { offset: params.offset } : {}),
+          ...(params.path !== undefined ? { path: params.path } : {}),
         });
       },
     }),
@@ -158,7 +188,7 @@ export function optimalEngineTools(
           .string()
           .optional()
           .describe(
-            "ISO 8601 timestamp — only return actions after this point in time.",
+            "ISO 8601 timestamp - only return actions after this point in time.",
           ),
       }),
       execute: async (params, _options) => {
@@ -199,7 +229,7 @@ export function optimalEngineTools(
      */
     addMemory: tool({
       description:
-        "Add a fact, decision, or observation to long-term memory. Cited and integrity-gated — every memory ties to a source. Use when the user mentions information that should persist.",
+        "Add a fact, decision, or observation to long-term memory. Cited and integrity-gated - every memory ties to a source. Use when the user mentions information that should persist.",
       inputSchema: z.object({
         content: z
           .string()
@@ -207,7 +237,7 @@ export function optimalEngineTools(
         audience: z
           .string()
           .optional()
-          .describe("Audience scope — e.g. 'public' or 'internal'."),
+          .describe("Audience scope - e.g. 'public' or 'internal'."),
         citationUri: z
           .string()
           .url()
@@ -260,7 +290,7 @@ export function optimalEngineTools(
           .string()
           .optional()
           .describe(
-            "ISO 8601 datetime — schedule forgetting for the future instead of immediately.",
+            "ISO 8601 datetime - schedule forgetting for the future instead of immediately.",
           ),
       }),
       execute: async (params, _options) => {
