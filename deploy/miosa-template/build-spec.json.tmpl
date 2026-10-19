@@ -1,0 +1,24 @@
+{
+  "name": "optimal-engine",
+  "description": "Optimal Engine: a workspace's Memory (search, graph, claims). Auth required; the first key arrives as OPTIMAL_BOOTSTRAP_KEY.",
+  "build_spec": {
+    "from": "miosa-sandbox",
+    "size": "medium",
+    "steps": "__STEPS__",
+    "env": {
+      "OPTIMAL_API_ENABLED": "true",
+      "OPTIMAL_API_PORT": "4200",
+      "OPTIMAL_API_INTERFACE": "0.0.0.0",
+      "OPTIMAL_AUTH_REQUIRED": "true",
+      "OPTIMAL_ENGINE_ROOT": "/data"
+    },
+    "workdir": "/opt/optimal-engine",
+    "user": "root",
+    "startCmd": "/opt/optimal-engine/start-engine",
+    "readyCmd": "test \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4200/api/health)\" = 401",
+    "previewPort": 4200,
+    "artifactPaths": [
+      "/data"
+    ]
+  }
+}

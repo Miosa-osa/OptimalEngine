@@ -28,7 +28,11 @@ defmodule OptimalEngine.Application do
       {:ok, pid} ->
         OptimalEngine.Sizing.boot_finished()
         Logger.info("[OptimalEngine] Supervision tree started (#{inspect(pid)})")
-        {:ok, pid}
+
+        case OptimalEngine.Auth.Bootstrap.run() do
+          :ok -> {:ok, pid}
+          {:error, _} = err -> err
+        end
 
       {:error, reason} = err ->
         Logger.error("[OptimalEngine] Failed to start: #{inspect(reason)}")
