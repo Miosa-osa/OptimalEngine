@@ -49,13 +49,15 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   alias OptimalEngine.Workspace
 
   # Endpoint families that serve no workspace data: engine status, catalogs,
-  # tenant-level administration and keys. Every other /api family is
+  # tenant-level administration and keys. Connectors list across the key's
+  # workspaces, and a connector id is authorized against its own workspace by
+  # OptimalEngine.API.ConnectorScopePlug. Every other /api family is
   # workspace-scoped and authorized even when no workspace is named
   # (implicit "default"), so a new route is scoped unless it is listed here.
   # Global routes are still checked when they explicitly name a workspace.
-  @global_roots ~w(architectures auth authority backup bundles federation health init
-                   maintenance metrics org-section organizations principals resolve routing
-                   scope status storage stores topology version)
+  @global_roots ~w(architectures auth authority backup bundles connectors federation health
+                   init maintenance metrics org-section organizations principals resolve
+                   routing scope status storage stores topology version)
 
   @impl true
   def init(opts), do: opts

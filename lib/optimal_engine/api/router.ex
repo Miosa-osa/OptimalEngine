@@ -62,6 +62,8 @@ defmodule OptimalEngine.API.Router do
   # (path/body/query), sets conn.assigns[:workspace_id], and fails closed:
   # 403 on API-key workspace_scope mismatch, 404 on another tenant's workspace.
   plug(OptimalEngine.API.WorkspaceAuthPlug)
+  # A connector id names its workspace: resolve it, 404 outside the key's scope.
+  plug(OptimalEngine.API.ConnectorScopePlug)
   plug(OptimalEngine.API.PermissionPlug)
   plug(OptimalEngine.API.AuthorityPlug)
   plug(:dispatch)
@@ -624,7 +626,12 @@ defmodule OptimalEngine.API.Router do
         :exit, _ -> %{counters: %{}, histograms: %{}, uptime_ms: 0}
       end
 
-    json(conn, Map.put(snap, :sizing, OptimalEngine.Sizing.usage()))
+    json(
+      conn,
+      snap
+      |> Map.put(:sizing, OptimalEngine.Sizing.usage())
+      |> Map.put(:connectors, OptimalEngine.API.ConnectorsAPI.metrics(conn))
+    )
   end
 
   # Agent-facing inventory of every logical data store and index.
@@ -3318,6 +3325,17 @@ defmodule OptimalEngine.API.Router do
   put("/api/org-section", do: OrgPolicyAPI.designate(conn))
   delete("/api/org-section", do: OrgPolicyAPI.clear(conn))
   get("/api/org-policy", do: OrgPolicyAPI.policy(conn))
+
+  # ── Connectors (OptimalEngine.API.ConnectorsAPI) ─────────────────────────
+  alias OptimalEngine.API.ConnectorsAPI
+
+  get("/api/connectors", do: ConnectorsAPI.list(conn))
+  post("/api/connectors", do: ConnectorsAPI.create(conn))
+  get("/api/connectors/:id", do: ConnectorsAPI.show(conn, id))
+  patch("/api/connectors/:id", do: ConnectorsAPI.update(conn, id))
+  delete("/api/connectors/:id", do: ConnectorsAPI.delete(conn, id))
+  post("/api/connectors/:id/run", do: ConnectorsAPI.run(conn, id))
+
   # POST /api/reindex - enqueue a full reindex of the engine root. Writers that
   # change files post an empty body; a request that arrives while a reindex is
   # already queued or running returns that job instead of adding another.
