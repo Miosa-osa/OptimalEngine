@@ -677,11 +677,13 @@ operator() {
   LOGFILE=$CHECKOUT/.optimal/cli-engine.log
 }
 
+# One line per process: arguments may hold newlines, and the pid file keeps
+# the arguments on a single line.
 proc_args() {
   if [ -r "/proc/$1/cmdline" ]; then
-    tr '\000' ' ' <"/proc/$1/cmdline"
+    tr '\000\n' '  ' <"/proc/$1/cmdline"
   else
-    ps -p "$1" -o args= 2>/dev/null
+    ps -p "$1" -o args= 2>/dev/null | tr '\n' ' '
   fi
 }
 
