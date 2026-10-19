@@ -290,8 +290,38 @@ defmodule OptimalEngine.Test.ConnectorFixtureStub do
 
   defp ensure_table(name) do
     case :ets.whereis(name) do
-      :undefined -> :ets.new(name, [:named_table, :public, :set])
+      :undefined -> create_table(name)
       _ -> name
+    end
+  end
+
+  # The table must outlive the test process that happens to create it. When it
+  # was owned by that process, the next test's `whereis` could see it just
+  # before the first test exited and then insert into a table that was gone.
+  defp create_table(name) do
+    parent = self()
+    ref = make_ref()
+
+    {_pid, monitor} =
+      spawn_monitor(fn ->
+        try do
+          :ets.new(name, [:named_table, :public, :set])
+          send(parent, {ref, :created})
+        rescue
+          # Another test created it first.
+          ArgumentError -> send(parent, {ref, :created})
+        end
+
+        Process.sleep(:infinity)
+      end)
+
+    receive do
+      {^ref, :created} ->
+        Process.demonitor(monitor, [:flush])
+        name
+
+      {:DOWN, ^monitor, _, _, _} ->
+        name
     end
   end
 

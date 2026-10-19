@@ -77,48 +77,68 @@ defmodule OptimalEngine.Auth.ApiKey do
     tenant_id = fetch!(attrs, :tenant_id)
 
     case Tenant.get(tenant_id) do
-      {:ok, _tenant} -> mint_in(tenant_id, attrs)
+      {:ok, _tenant} -> mint_in(attrs)
       _ -> {:error, :tenant_not_found}
     end
   end
 
-  defp mint_in(tenant_id, attrs) do
-    name = fetch!(attrs, :name)
+  defp mint_in(attrs) do
     id = generate_id()
     secret = generate_secret()
-    prefix = String.slice(secret, 0, 8)
-    hashed = Bcrypt.hash_pwd_salt(secret, log_rounds: bcrypt_cost())
 
-    principal_id = get_attr(attrs, :principal_id)
-    scopes = get_attr(attrs, :scopes, ["*"])
-    workspace_scope = get_attr(attrs, :workspace_scope, ["*"])
-    expires_at = get_attr(attrs, :expires_at)
-    metadata = get_attr(attrs, :metadata, %{})
+    case insert_key(id, secret, attrs) do
+      :ok -> {:ok, %{id: id, secret: secret, key: build_token(id, secret)}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
+  @doc """
+  Register a key whose token the operator already chose, so an unattended
+  instance can boot with a usable credential.
+
+  Idempotent: the token's id is the identity. Same id and secret returns
+  `{:ok, :exists}`. Same id with a different secret is `{:error, :id_conflict}`
+  and nothing is changed. A revoked id is `{:error, :revoked}`: a revoked token is never revived. The secret must be at least 32 bytes.
+
+  `attrs` are the same as `mint/1` without the token parts.
+  """
+  @spec ensure(String.t(), map()) ::
+          {:ok, :created | :exists}
+          | {:error, :invalid_token | :weak_secret | :id_conflict | :revoked | term()}
+  def ensure(token, attrs) when is_binary(token) do
+    with {:ok, id, secret} <- parse_token_result(token),
+         :ok <- strong_secret(secret) do
+      case get_by_id(id) do
+        {:ok, existing} ->
+          cond do
+            not Bcrypt.verify_pass(secret, existing.hashed_secret) -> {:error, :id_conflict}
+            revoked?(existing) -> {:error, :revoked}
+            true -> {:ok, :exists}
+          end
+
+        {:error, :not_found} ->
+          with {:ok, _tenant} <- tenant_exists(attrs),
+               :ok <- insert_key(id, secret, attrs),
+               do: {:ok, :created}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  @doc "Soft-revoke every live key of a tenant whose metadata has `source` equal to `source`, except `keep_id`."
+  @spec revoke_source(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def revoke_source(tenant_id, source, keep_id) do
     sql = """
-    INSERT INTO api_keys
-      (id, tenant_id, principal_id, hashed_secret, prefix, name, scopes, workspace_scope, expires_at, metadata)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+    UPDATE api_keys SET revoked_at = datetime('now')
+    WHERE tenant_id = ?1 AND revoked_at IS NULL AND id != ?2
+      AND json_extract(metadata, '$.source') = ?3
     """
 
-    case Store.raw_query(sql, [
-           id,
-           tenant_id,
-           principal_id,
-           hashed,
-           prefix,
-           name,
-           Jason.encode!(scopes),
-           Jason.encode!(workspace_scope),
-           expires_at,
-           Jason.encode!(metadata)
-         ]) do
-      {:ok, _} ->
-        key = build_token(id, secret)
-        {:ok, %{id: id, secret: secret, key: key}}
-
-      {:error, reason} ->
-        {:error, reason}
+    case Store.raw_query(sql, [tenant_id, keep_id, source]) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -315,6 +335,53 @@ defmodule OptimalEngine.Auth.ApiKey do
   defp generate_secret do
     :crypto.strong_rand_bytes(@secret_bytes) |> Base.url_encode64(padding: false)
   end
+
+  defp tenant_exists(attrs) do
+    case Tenant.get(fetch!(attrs, :tenant_id)) do
+      {:ok, tenant} -> {:ok, tenant}
+      _ -> {:error, :tenant_not_found}
+    end
+  end
+
+  defp insert_key(id, secret, attrs) do
+    tenant_id = fetch!(attrs, :tenant_id)
+    name = fetch!(attrs, :name)
+    hashed = Bcrypt.hash_pwd_salt(secret, log_rounds: bcrypt_cost())
+
+    sql = """
+    INSERT INTO api_keys
+      (id, tenant_id, principal_id, hashed_secret, prefix, name, scopes, workspace_scope, expires_at, metadata)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+    """
+
+    params = [
+      id,
+      tenant_id,
+      get_attr(attrs, :principal_id),
+      hashed,
+      String.slice(secret, 0, 8),
+      name,
+      Jason.encode!(get_attr(attrs, :scopes, ["*"])),
+      Jason.encode!(get_attr(attrs, :workspace_scope, ["*"])),
+      get_attr(attrs, :expires_at),
+      Jason.encode!(get_attr(attrs, :metadata, %{}))
+    ]
+
+    case Store.raw_query(sql, params) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp parse_token_result(token) do
+    case parse_token(token) do
+      {:ok, id, secret} -> {:ok, id, secret}
+      :error -> {:error, :invalid_token}
+    end
+  end
+
+  defp strong_secret(secret) when byte_size(secret) >= 32, do: :ok
+  defp strong_secret(_), do: {:error, :weak_secret}
 
   defp build_token(id, secret), do: "#{@token_prefix}#{id}_#{secret}"
 
