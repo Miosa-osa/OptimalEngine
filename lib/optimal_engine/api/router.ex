@@ -2488,6 +2488,28 @@ defmodule OptimalEngine.API.Router do
   # (auth_required: true) they require the `admin` scope. In dev (auth_required:
   # false) they are open — same behaviour as every other route.
 
+  # GET /api/auth/whoami - the caller's own key metadata, never the secret.
+  # A client uses it to confirm the key it holds is workspace-scoped instead of
+  # an operator key. Any authenticated key may call it, whatever its scopes.
+  get "/api/auth/whoami" do
+    case conn.assigns[:current_api_key] do
+      nil ->
+        json(conn, %{authenticated: false})
+
+      key ->
+        json(conn, %{
+          authenticated: true,
+          key_id: key.id,
+          name: key.name,
+          principal_id: key.principal_id,
+          tenant_id: key.tenant_id,
+          scopes: key.scopes,
+          workspace_scope: key.workspace_scope,
+          expires_at: key.expires_at
+        })
+    end
+  end
+
   # POST /api/auth/keys — mint a new key. Returns id, key, prefix.
   # Body: {name, scopes?, workspace_scope?, expires_at?, principal_id?,
   #        allowed_partitions?, allowed_security_labels?, permissions?}

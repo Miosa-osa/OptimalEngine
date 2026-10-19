@@ -31,6 +31,9 @@ defmodule OptimalEngine.API.PermissionPlug do
     key = conn.assigns[:current_api_key]
 
     cond do
+      key && introspection_path?(conn) ->
+        conn
+
       key && data_key?(key) && not match?(["api", "data" | _], conn.path_info) ->
         deny(conn, "data_key_confined")
 
@@ -183,6 +186,12 @@ defmodule OptimalEngine.API.PermissionPlug do
   defp data_scope("POST", ["collections", _name, "query"]), do: "read"
   defp data_scope(method, _route) when method in ["GET", "HEAD"], do: "read"
   defp data_scope(_method, _route), do: "write"
+
+  # A client must be able to read its own key metadata whatever scopes it
+  # holds: that is how it learns it was handed an operator key.
+  defp introspection_path?(conn) do
+    conn.method in ["GET", "HEAD"] and "/" <> Enum.join(conn.path_info, "/") == "/api/auth/whoami"
+  end
 
   defp data_key?(%{metadata: %{"data_access" => %{}}}), do: true
   defp data_key?(_key), do: false
