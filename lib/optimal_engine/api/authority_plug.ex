@@ -136,7 +136,8 @@ defmodule OptimalEngine.API.AuthorityPlug do
     do: "admin"
 
   defp action(_method, ["storage", "workspaces", _id, segment | _])
-       when segment in ["mutations", "cursors"], do: "sync"
+       when segment in ["mutations", "cursors"],
+       do: "sync"
 
   defp action(_method, ["sync" | _]), do: "sync"
 
