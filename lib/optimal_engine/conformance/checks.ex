@@ -1245,31 +1245,48 @@ defmodule OptimalEngine.Conformance.Checks do
         id: "docs.api_reference",
         group: "documentation",
         description: "the published API reference matches the routes this build serves",
-        run: fn _client, _context -> api_reference() end
+        run: fn client, _context -> api_reference(client) end
       }
     ]
   end
 
-  defp api_reference do
+  defp api_reference(client) do
     if Code.ensure_loaded?(Mix.Project) and Mix.Project.get() do
-      root = Mix.Project.project_file() |> Path.dirname()
+      # The file comparison alone proves the checkout is consistent. It only
+      # attests this Engine when this Engine answered, so an unreachable one
+      # fails the check instead of passing on a local file read.
+      case Client.get(client, "/api/version") do
+        {:ok, %{status: 200}} ->
+          compare_reference()
 
-      case OptimalEngine.API.Reference.check(root) do
-        :ok ->
-          {:ok,
-           %{
-             file: "docs/reference/api.md",
-             routes: length(OptimalEngine.API.Reference.routes(root))
-           }}
+        {:ok, %{status: status}} ->
+          {:fail,
+           %{file: "docs/reference/api.md", error: "engine answered /api/version with #{status}"}}
 
-        {:drift, drift} ->
-          {:fail, Map.put(drift, :file, "docs/reference/api.md")}
+        {:error, reason} ->
+          {:fail, %{file: "docs/reference/api.md", error: "engine unreachable: #{inspect(reason)}"}}
       end
     else
       {:skip, "no repository checkout in this build, so docs/reference/api.md cannot be checked"}
     end
   rescue
     error -> {:fail, %{file: "docs/reference/api.md", error: Exception.message(error)}}
+  end
+
+  defp compare_reference do
+    root = Mix.Project.project_file() |> Path.dirname()
+
+    case OptimalEngine.API.Reference.check(root) do
+      :ok ->
+        {:ok,
+         %{
+           file: "docs/reference/api.md",
+           routes: length(OptimalEngine.API.Reference.routes(root))
+         }}
+
+      {:drift, drift} ->
+        {:fail, Map.put(drift, :file, "docs/reference/api.md")}
+    end
   end
 
   defp normalize_external(check, path) when is_map(check) do
