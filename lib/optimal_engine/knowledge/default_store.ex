@@ -17,7 +17,7 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
 
   require Logger
 
-  alias OptimalEngine.Graph
+  alias OptimalEngine.Knowledge.Hydration
   alias OptimalEngine.Knowledge.Store, as: KnowledgeStore
 
   @store_id "default"
@@ -114,9 +114,13 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
         do: store_pid,
         else: store_name
 
-    case Graph.hydrate_triple_store(target) do
-      {:ok, count} ->
-        Logger.info("[DefaultStore] Triple store hydrated with #{count} edges from SQLite")
+    {backend, backend_opts} = configured_backend()
+
+    case Hydration.run(target, backend, backend_opts) do
+      {:ok, %{loaded: count, after_edge_id: after_id}} ->
+        Logger.info(
+          "[DefaultStore] Triple store hydrated with #{count} edges from SQLite (after edge #{after_id})"
+        )
 
       {:error, reason} ->
         Logger.warning("[DefaultStore] Triple store hydration failed: #{inspect(reason)}")
