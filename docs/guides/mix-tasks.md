@@ -106,7 +106,7 @@ mix optimal.wiki check node-first-project --workspace default:my-workspace
 
 | Task | Purpose |
 | --- | --- |
-| `mix optimal.connector` | Connector registry/sync operations. |
+| `mix optimal.connector` | Register a connector into a workspace, list connectors with their run status, list adapters, and run one sync. |
 | `mix optimal.auth` | Mint, list, revoke, and delete API keys for apps, MCP servers, remote agents, and scripts. |
 | `mix optimal.api` | Start the HTTP API. |
 | `mix optimal.graph_ui` | Launch the graph visualizer against a running API. |

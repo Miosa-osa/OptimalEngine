@@ -66,16 +66,21 @@ config :optimal_engine, :context_refresh_scheduler,
   batch_limit: 50,
   workspace_limit: 100
 
-# Connector pull loop — the periodic intake FEED. Runs each enabled
-# connector once per interval and drives emitted signals through intake.
+# Connector pull loop, the periodic intake FEED. Every tick it starts the
+# tenant's enabled connector rows whose cadence has passed (a row's own
+# "interval_ms" or "cadence", else its kind's default, else interval_ms) and
+# drives emitted signals through intake.
 config :optimal_engine, :pull_scheduler,
   enabled: true,
   boot_delay_ms: 2 * 60 * 1_000,
+  tick_ms: 60 * 1_000,
   interval_ms: 24 * 60 * 60 * 1_000,
+  max_concurrency: 3,
   tenant_id: "default"
 
-# Connectors enabled for the pull loop. Each entry is a bare kind atom
-# (default config) or a map %{kind:, workspace_id:, config:}.
+# Connector specs the pull loop provisions when their row is missing. Each
+# entry is a bare kind atom (default config) or a map
+# %{kind:, workspace_id:, config:}. A spec never changes an existing row.
 config :optimal_engine, :connectors, enabled: [:sources_folder]
 
 config :logger, :console,

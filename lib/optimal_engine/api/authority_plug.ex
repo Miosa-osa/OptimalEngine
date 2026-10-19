@@ -140,6 +140,10 @@ defmodule OptimalEngine.API.AuthorityPlug do
        do: "sync"
 
   defp action(_method, ["sync" | _]), do: "sync"
+  defp action("POST", ["connectors", _id, "run"]), do: "write"
+
+  defp action(method, ["connectors" | _]) when method not in ["GET", "HEAD"],
+    do: "admin"
 
   defp action("GET", ["batch", "export" | _]), do: "export"
 

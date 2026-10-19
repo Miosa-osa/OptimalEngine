@@ -32,6 +32,10 @@ config :optimal_engine, :reindex_interval_ms, 0
 config :optimal_engine, :metric_history, enabled: false
 config :optimal_engine, :session, llm_summary: false, llm_extraction: false
 
+# The connector pull loop runs on demand in tests: a live loop would pull
+# every test's connector rows in the background.
+config :optimal_engine, :pull_scheduler, enabled: false
+
 config :optimal_engine, :context_refresh_scheduler,
   enabled: false,
   boot_delay_ms: 1_000,

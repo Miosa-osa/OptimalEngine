@@ -10,6 +10,11 @@ defmodule OptimalEngine.Connectors.Runner do
     * `{:error, :fatal}` flips `connectors.enabled = 0` so it stops paging
     * Rate-limit errors sleep + retry up to `:max_retries` times
     * Transient errors back off exponentially (100ms → 200ms → … capped)
+    * One run per connector at a time, whoever asks (the scheduler, the API,
+      the CLI, an analysis): a second request while one is in progress is
+      `{:error, :already_running}`
+    * A connector whose workspace was archived fails its run with
+      `:workspace_archived` instead of pulling into a retired workspace
 
   This module doesn't know about specific adapters — it receives the
   module + row and drives the contract. The adapter's job is to map
@@ -20,7 +25,16 @@ defmodule OptimalEngine.Connectors.Runner do
   `OptimalEngine.Pipeline.Intake.ingest_signals/1`.
   """
 
-  alias OptimalEngine.Connectors.{AssetIngest, Credential, CredentialSource, Registry, Routing}
+  alias OptimalEngine.Connectors.{
+    AssetIngest,
+    Cadence,
+    Credential,
+    CredentialSource,
+    Registry,
+    Routing,
+    Rows
+  }
+
   alias OptimalEngine.MemoryCore.ToolModelGovernance
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
@@ -57,6 +71,7 @@ defmodule OptimalEngine.Connectors.Runner do
   @default_max_retries 5
   @base_backoff_ms 100
   @max_backoff_ms 30_000
+  @run_registry OptimalEngine.Connectors.RunRegistry
 
   @doc """
   Run one sync cycle for the connector identified by `connector_id`.
@@ -80,26 +95,66 @@ defmodule OptimalEngine.Connectors.Runner do
     end
   end
 
+  @doc "Whether a run of this connector is in progress anywhere in this Engine."
+  @spec running?(String.t()) :: boolean()
+  def running?(connector_id) when is_binary(connector_id) do
+    Process.whereis(@run_registry) != nil and
+      Elixir.Registry.lookup(@run_registry, connector_id) != []
+  end
+
   defp run_raw(connector_id, opts) do
+    with_run_lock(connector_id, fn -> do_run_raw(connector_id, opts) end)
+  end
+
+  # The run registry holds one entry per connector for as long as its run
+  # lasts, and drops it when the running process exits however it exits.
+  # Without the registry (a bare script that did not start the application)
+  # there is no other runner to collide with.
+  defp with_run_lock(connector_id, fun) do
+    if Process.whereis(@run_registry) do
+      case Elixir.Registry.register(@run_registry, connector_id, nil) do
+        {:ok, _owner} ->
+          try do
+            fun.()
+          after
+            Elixir.Registry.unregister(@run_registry, connector_id)
+          end
+
+        {:error, {:already_registered, _pid}} ->
+          {:error, :already_running}
+      end
+    else
+      fun.()
+    end
+  end
+
+  defp do_run_raw(connector_id, opts) do
     with {:ok, row} <- fetch_connector(connector_id),
          :ok <- ensure_enabled(row),
          {:ok, mod} <- lookup_adapter(row.kind, opts) do
       # The run row is opened before the adapter is initialised so that a
       # failure to initialise — a broker that refused, config the adapter
-      # rejects, a credential the Engine cannot decrypt — still leaves one
-      # audit row naming the reason, as this module promises.
+      # rejects, a credential the Engine cannot decrypt, a workspace that was
+      # archived — still leaves one audit row naming the reason, as this
+      # module promises.
       run_id = start_run_row(row)
 
       result =
-        case init_adapter(mod, row) do
-          {:ok, state} ->
-            row |> do_sync_with_retries(mod, state, opts) |> finalize(row, run_id, opts)
-
-          {:error, reason} ->
-            finalize({:error, reason}, row, run_id, opts)
+        with :ok <- workspace_open(row),
+             {:ok, state} <- init_adapter(mod, row) do
+          row |> do_sync_with_retries(mod, state, opts) |> finalize(row, run_id, opts)
+        else
+          {:error, reason} -> finalize({:error, reason}, row, run_id, opts)
         end
 
       {:ok, result}
+    end
+  end
+
+  defp workspace_open(%{workspace_id: workspace_id}) do
+    case OptimalEngine.Workspace.get(workspace_id) do
+      {:ok, %{status: :archived}} -> {:error, :workspace_archived}
+      _active_or_unregistered -> :ok
     end
   end
 
@@ -527,18 +582,20 @@ defmodule OptimalEngine.Connectors.Runner do
     end
   end
 
+  # The id comes back from the INSERT itself. A separate
+  # `SELECT last_insert_rowid()` can read another writer's row when runs
+  # overlap, and the run would then close someone else's row.
   defp start_run_row(row) do
-    {:ok, _} =
+    {:ok, [[id]]} =
       Store.raw_query(
         """
         INSERT INTO connector_runs (tenant_id, workspace_id, connector_id, cursor_before, status)
         VALUES (?1, ?2, ?3, ?4, 'running')
+        RETURNING id
         """,
         [row.tenant_id, row.workspace_id, row.id, row.cursor]
       )
 
-    # SQLite returns the last insert id via a small follow-up query
-    {:ok, [[id]]} = Store.raw_query("SELECT last_insert_rowid()", [])
     id
   end
 
@@ -622,45 +679,100 @@ defmodule OptimalEngine.Connectors.Runner do
   Upsert a connector row. This is the only place config JSON is
   written so we can enforce shape + encrypt credentials centrally.
 
-  `attrs` may include `:workspace_id` (default `"default"`) — every signal
-  the connector ingests is attributed to that workspace.
+  `attrs` may include `:workspace_id` — every signal the connector ingests is
+  attributed to that workspace. Without one, an existing row keeps its
+  workspace and a new row lands in the tenant's intake workspace
+  (`OptimalEngine.Connectors.Rows.default_workspace/2`), or the write is
+  refused with `{:error, :no_intake_workspace}` when the tenant has no
+  active one.
 
   Credentials under `"credentials"` or `:credentials` are stored only as an
   encrypted `credentials_ciphertext` envelope. Without a configured
   `CONNECTOR_KEY` the write is refused with `{:error, :connector_key_missing}`.
+  A cadence the scheduler could not honour is refused with
+  `{:error, :invalid_cadence}`.
   """
   @spec upsert_row(map()) :: {:ok, String.t()} | {:error, term()}
   def upsert_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
-    with :ok <- Routing.validate_config(config),
-         {:ok, sanitized} <- encrypt_credentials(config) do
-      write_row(id, kind, sanitized, attrs)
+    with {:ok, sanitized} <- validate_and_seal(config),
+         {:ok, workspace_id} <- row_workspace(id, attrs) do
+      write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :update)
     end
   end
 
-  defp write_row(id, kind, sanitized, attrs) do
+  @doc """
+  Insert a connector row only when no row of that id exists; an existing row
+  is left exactly as it is. Validates and seals like `upsert_row/1`.
+  Returns `{:ok, :created}` or `{:ok, :exists}`.
+  """
+  @spec provision_row(map()) :: {:ok, :created | :exists} | {:error, term()}
+  def provision_row(%{id: id, kind: kind, config: config} = attrs)
+      when is_binary(id) and is_atom(kind) and is_map(config) do
+    with {:ok, sanitized} <- validate_and_seal(config),
+         {:ok, workspace_id} <- row_workspace(id, attrs) do
+      write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :keep)
+    end
+  end
+
+  defp validate_and_seal(config) do
+    with :ok <- Routing.validate_config(config),
+         :ok <- Cadence.validate(config) do
+      encrypt_credentials(config)
+    end
+  end
+
+  defp row_workspace(id, attrs) do
+    case Map.get(attrs, :workspace_id) do
+      workspace_id when is_binary(workspace_id) and workspace_id != "" ->
+        {:ok, workspace_id}
+
+      _none ->
+        case Store.raw_query("SELECT workspace_id FROM connectors WHERE id = ?1", [id]) do
+          {:ok, [[workspace_id]]} when is_binary(workspace_id) ->
+            {:ok, workspace_id}
+
+          _new ->
+            Rows.default_workspace(Map.get(attrs, :tenant_id, Tenant.default_id()))
+        end
+    end
+  end
+
+  defp write_row(id, kind, sanitized, attrs, on_conflict) do
     tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
-    workspace_id = Map.get(attrs, :workspace_id, "default")
     enabled = if Map.get(attrs, :enabled, true), do: 1, else: 0
+
+    conflict =
+      case on_conflict do
+        :update ->
+          """
+          ON CONFLICT(id) DO UPDATE SET
+            workspace_id = excluded.workspace_id,
+            config  = excluded.config,
+            enabled = excluded.enabled
+          """
+
+        :keep ->
+          "ON CONFLICT(id) DO NOTHING RETURNING id"
+      end
 
     sql = """
     INSERT INTO connectors (id, tenant_id, workspace_id, kind, config, cursor, enabled)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-    ON CONFLICT(id) DO UPDATE SET
-      workspace_id = excluded.workspace_id,
-      config  = excluded.config,
-      enabled = excluded.enabled
+    #{conflict}
     """
 
     case Store.raw_query(sql, [
            id,
            tenant_id,
-           workspace_id,
+           attrs.workspace_id,
            Atom.to_string(kind),
            Jason.encode!(sanitized),
            Map.get(attrs, :cursor),
            enabled
          ]) do
+      {:ok, [[^id]]} when on_conflict == :keep -> {:ok, :created}
+      {:ok, []} when on_conflict == :keep -> {:ok, :exists}
       {:ok, _} -> {:ok, id}
       other -> other
     end

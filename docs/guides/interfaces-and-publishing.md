@@ -153,6 +153,7 @@ Explicitly set operation scopes when minting keys: omitting them currently creat
 | `claims:review` | Claim promotion/rejection and `/api/data-steward/claims/decide`. |
 | `topology:write` | Organization, workspace/config, Node, entity/relationship, routing-review, and storage-policy mutations. |
 | `data:admin` | App data schema changes, app schema migrations, and data keys under `/api/data` ([App data API](app-data-api.md)). |
+| `connectors:write` | Registering, changing, and deleting connectors under `/api/connectors` ([Connectors](connectors.md)); `admin` also grants this. Running a connector needs `write`. |
 | `admin` | API-key administration, backups, and corpus maintenance. |
 | `*` | All operation grants; tenant and workspace checks still apply. |
 

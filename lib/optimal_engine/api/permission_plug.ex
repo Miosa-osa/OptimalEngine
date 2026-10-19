@@ -4,6 +4,8 @@ defmodule OptimalEngine.API.PermissionPlug do
 
   `read` and `write` grant ordinary operations; governed review, topology changes,
   and administration require `claims:review`, `topology:write`, and `admin`.
+  Registering, changing and deleting connectors needs `connectors:write` or
+  `admin`; running one needs `write`.
   App data schema changes, app migrations and data keys (`/api/data`) require
   `data:admin`. A data key (API key whose metadata carries `data_access`) is
   confined to `/api/data`; every other route refuses it.
@@ -37,7 +39,7 @@ defmodule OptimalEngine.API.PermissionPlug do
       key && data_key?(key) && not match?(["api", "data" | _], conn.path_info) ->
         deny(conn, "data_key_confined")
 
-      key && "*" not in key.scopes && scope not in key.scopes ->
+      key && not granted?(key.scopes, scope) ->
         deny(conn, "permission_scope_denied")
 
       scope == "claims:review" ->
@@ -101,6 +103,9 @@ defmodule OptimalEngine.API.PermissionPlug do
 
       match?(["api", "sync" | _], conn.path_info) ->
         sync_scope(conn.method, tl(tl(conn.path_info)))
+
+      match?(["api", "connectors" | _], conn.path_info) ->
+        connectors_scope(conn.method, tl(tl(conn.path_info)))
 
       mutation and
           (path in [
@@ -168,6 +173,18 @@ defmodule OptimalEngine.API.PermissionPlug do
     do: "authority:enforce"
 
   defp authority_scope(_method, _route), do: "authority:admin"
+
+  # A required scope is one grant or a list of alternatives, any one of which
+  # is enough.
+  defp granted?(scopes, required) do
+    "*" in scopes or Enum.any?(List.wrap(required), &(&1 in scopes))
+  end
+
+  # Connectors: reading needs read, a run ingests data and needs write, and
+  # registering, changing or deleting one is administration.
+  defp connectors_scope(method, _route) when method in ["GET", "HEAD"], do: "read"
+  defp connectors_scope("POST", [_id, "run"]), do: "write"
+  defp connectors_scope(_method, _route), do: ["connectors:write", "admin"]
 
   # Replication: a replica key holds "sync"; configuring sync is admin.
   defp sync_scope(_method, ["changes"]), do: "sync"

@@ -94,15 +94,17 @@ defmodule OptimalEngine.Compliance.Retention do
         {:error, :scope_type_required}
 
       true ->
-        with {:ok, _} <-
+        # RETURNING keeps the id with its own INSERT; a follow-up
+        # last_insert_rowid() can read another writer's row.
+        with {:ok, [[id]]} <-
                Store.raw_query(
                  """
                  INSERT INTO retention_policies (tenant_id, scope_type, scope_value, ttl_days, action)
                  VALUES (?1, ?2, ?3, ?4, ?5)
+                 RETURNING id
                  """,
                  [tenant_id, to_string(scope_type), scope_value, ttl_days, action]
-               ),
-             {:ok, [[id]]} <- Store.raw_query("SELECT last_insert_rowid()", []) do
+               ) do
           {:ok, id}
         end
     end

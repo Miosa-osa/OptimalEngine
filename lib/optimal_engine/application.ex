@@ -106,6 +106,10 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Telemetry.HistorySampler,
 
       # ── Connector pull loop (periodic intake FEED from enabled connectors) ─
+      # The run registry holds one live run per connector for every caller;
+      # the task supervisor runs each scheduled pull in its own task.
+      {Registry, keys: :unique, name: OptimalEngine.Connectors.RunRegistry},
+      {Task.Supervisor, name: OptimalEngine.Connectors.TaskSupervisor},
       OptimalEngine.Connectors.PullScheduler,
 
       # ── Replication: change capture triggers, sealing, peer sync ─────────

@@ -9,6 +9,7 @@
     "governed_claim_review",
     "scoped_memory_retrieval",
     "chat_session_commit",
-    "org_policy_flow_down"
+    "org_policy_flow_down",
+    "connector_registry_api"
   ]
 }

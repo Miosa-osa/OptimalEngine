@@ -6,6 +6,11 @@ defmodule OptimalEngine.Connectors do
       Connectors.register(attrs)          — persist a new connector row
       Connectors.run(connector_id, opts)  — execute one governed sync cycle
 
+  Operators register, list, change and delete rows through
+  `OptimalEngine.Connectors.Rows`. The rows are the source of truth for what
+  runs: `OptimalEngine.Connectors.PullScheduler` pulls every enabled row of
+  its tenant on the row's cadence (`OptimalEngine.Connectors.Cadence`).
+
   See `OptimalEngine.Connectors.Behaviour` for the adapter contract.
 
   The 20 adapters live under `OptimalEngine.Connectors.Adapters.*`:
@@ -40,4 +45,7 @@ defmodule OptimalEngine.Connectors do
 
   @doc "`true` when the master key for credential encryption is configured."
   defdelegate credentials_ready?, to: Credential, as: :ready?
+
+  @doc "Whether a run of this connector is in progress. See `Runner.running?/1`."
+  defdelegate running?(connector_id), to: Runner
 end
