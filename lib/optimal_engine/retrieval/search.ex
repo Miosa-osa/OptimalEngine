@@ -95,7 +95,11 @@ defmodule OptimalEngine.Retrieval.Search do
   """
   @spec search(String.t(), keyword()) :: {:ok, [Context.t()]} | {:error, term()}
   def search(query, opts \\ []) when is_binary(query) do
-    GenServer.call(__MODULE__, {:search, query, opts}, 15_000)
+    # Longer than one Store call, so a search that finds the Store busy
+    # returns its own `{:error, :busy}` before this call gives up.
+    GenServer.call(__MODULE__, {:search, query, opts}, Store.call_timeout() + 5_000)
+  catch
+    :exit, {:timeout, _} -> {:error, :busy}
   end
 
   @doc "Searches within a specific node. Convenience wrapper around `search/2`."
@@ -122,6 +126,14 @@ defmodule OptimalEngine.Retrieval.Search do
 
   @impl true
   def handle_call({:search, query, opts}, _from, state) do
+    {:reply, run_search(query, opts, state), state}
+  catch
+    # A Store that does not answer in time (a long write, or the Engine
+    # warming up after boot) fails this search, not the search process.
+    :exit, {:timeout, _} -> {:reply, {:error, :busy}, state}
+  end
+
+  defp run_search(query, opts, state) do
     start = System.monotonic_time(:millisecond)
 
     # `embed_healthy?` is stronger than `available?` — it verifies Ollama
@@ -170,7 +182,7 @@ defmodule OptimalEngine.Retrieval.Search do
 
     emit_audit(query, opts, result, elapsed)
 
-    {:reply, result, state}
+    result
   end
 
   # ---------------------------------------------------------------------------

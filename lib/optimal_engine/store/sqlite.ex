@@ -344,14 +344,14 @@ defmodule OptimalEngine.Store.SQLite do
   @spec raw_query(String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def raw_query(sql, params \\ []) do
-    GenServer.call(__MODULE__, {:raw_query, sql, params}, 15_000)
+    GenServer.call(__MODULE__, {:raw_query, sql, params}, OptimalEngine.Store.call_timeout())
   end
 
   @doc "Executes a raw non-SELECT statement with bound parameters."
   @spec raw_execute(String.t(), [term()]) :: :ok | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def raw_execute(sql, params \\ []) do
-    GenServer.call(__MODULE__, {:raw_execute, sql, params}, 15_000)
+    GenServer.call(__MODULE__, {:raw_execute, sql, params}, OptimalEngine.Store.call_timeout())
   end
 
   @doc """

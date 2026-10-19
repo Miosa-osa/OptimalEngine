@@ -1,6 +1,7 @@
 defmodule OptimalEngine.Sync.Scheduler do
   @moduledoc """
-  Keeps replication moving: installs capture triggers at startup, seals
+  Keeps replication moving: installs capture triggers at startup (retrying
+  every 30 seconds, `:sync_install_retry_ms`, until it succeeds), seals
   captured changes, and runs every active peer on an interval (default 20
   seconds, `config :optimal_engine, :sync_interval_ms`) so a change on one
   replica reaches the other within a minute when both are online.
@@ -16,6 +17,7 @@ defmodule OptimalEngine.Sync.Scheduler do
   alias OptimalEngine.Sync.Capture
 
   @default_interval 20_000
+  @install_retry 30_000
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -28,15 +30,23 @@ defmodule OptimalEngine.Sync.Scheduler do
     {:ok, %{interval: Application.get_env(:optimal_engine, :sync_interval_ms, @default_interval)}}
   end
 
+  # The install is retried until it succeeds: a Store busy at startup would
+  # otherwise leave a new or changed table uncaptured until the next restart.
+  # The tick chain starts once, after the first attempt.
   @impl true
   def handle_info(:install, state) do
     case safely(&Capture.install/0) do
-      {:ok, %{tables: n}} -> Logger.debug("[Sync] capture triggers on #{n} tables")
-      other -> Logger.warning("[Sync] capture install failed: #{inspect(other)}")
+      {:ok, %{tables: n}} ->
+        Logger.debug("[Sync] capture triggers on #{n} tables")
+
+      other ->
+        retry = Application.get_env(:optimal_engine, :sync_install_retry_ms, @install_retry)
+        Logger.warning("[Sync] capture install failed, retrying in #{retry} ms: #{inspect(other)}")
+        Process.send_after(self(), :install, retry)
     end
 
-    schedule(state.interval)
-    {:noreply, state}
+    unless state[:ticking], do: schedule(state.interval)
+    {:noreply, Map.put(state, :ticking, true)}
   end
 
   def handle_info(:tick, state) do
