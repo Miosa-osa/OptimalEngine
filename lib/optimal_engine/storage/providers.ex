@@ -100,16 +100,17 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "s3",
-      adapter: nil,
+      adapter: OptimalEngine.Storage.S3.Adapter,
       name: "S3-compatible object storage",
       kind: "service",
       role: "canonical_artifact",
       capabilities: ~w(objects assets backups)a,
       activation: "cloud_team",
-      probe: {:http, "OPTIMAL_S3_ENDPOINT", "/"},
+      probe: :s3,
       required_env:
         ~w(OPTIMAL_S3_ENDPOINT OPTIMAL_S3_BUCKET OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY),
-      optional_env: []
+      optional_env:
+        ~w(OPTIMAL_S3_REGION OPTIMAL_S3_PREFIX OPTIMAL_S3_PATH_STYLE OPTIMAL_S3_TIMEOUT_MS OPTIMAL_S3_MAX_RETRIES)
     },
     %{
       id: "nats_jetstream",
@@ -201,6 +202,43 @@ defmodule OptimalEngine.Storage.Providers do
   @spec provider_ids() :: [String.t()]
   def provider_ids, do: Enum.map(@providers, & &1.id)
 
+  @doc """
+  Round-trip proofs for the service providers, one entry per provider.
+
+  A provider with an adapter is proved by writing and reading back an object;
+  a provider without one is reported `adapter_missing`, which is the truth about
+  it and not a passing grade. An unconfigured provider is `skipped`: nothing was
+  attempted, so nothing is claimed.
+
+  Embedded providers are absent here on purpose; their stores are proved by the
+  logical store proofs instead of by a connection.
+  """
+  @spec proofs(keyword()) :: [map()]
+  def proofs(opts \\ []) do
+    @providers
+    |> Enum.filter(&(&1.kind in ["service", "enterprise_partner"]))
+    |> Enum.map(&proof_for(&1, opts))
+  end
+
+  defp proof_for(%{id: "s3"} = provider, opts) do
+    if Enum.all?(provider.required_env, &present_env?/1) do
+      case OptimalEngine.Storage.S3.Adapter.probe(opts) do
+        {:ok, evidence} -> %{provider: "s3", status: "pass", evidence: evidence}
+        {:error, reason} -> %{provider: "s3", status: "fail", evidence: %{error: inspect(reason)}}
+      end
+    else
+      %{provider: "s3", status: "skipped", reason: "not configured"}
+    end
+  end
+
+  defp proof_for(provider, _opts) do
+    %{
+      provider: provider.id,
+      status: "adapter_missing",
+      reason: "the engine ships no adapter for this provider"
+    }
+  end
+
   defp inspect_provider(provider, opts) do
     configured = Enum.all?(provider.required_env, &present_env?/1)
     missing = Enum.reject(provider.required_env, &present_env?/1)
@@ -251,6 +289,11 @@ defmodule OptimalEngine.Storage.Providers do
       _ -> :unreachable
     end
   end
+
+  # The S3 probe is an authenticated request against the bucket, not a bare
+  # connection test: an endpoint that answers an unauthenticated ping with 403
+  # must not be reported as healthy storage.
+  defp run_probe(:s3), do: OptimalEngine.Storage.S3.Adapter.health()
 
   defp run_probe(:root_path) do
     path = Application.get_env(:optimal_engine, :root_path, ".")

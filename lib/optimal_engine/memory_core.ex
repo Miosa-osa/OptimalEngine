@@ -28,6 +28,8 @@ defmodule OptimalEngine.MemoryCore do
   defdelegate store_asset_file(path, opts \\ []), to: AssetStore, as: :store_file
   defdelegate store_asset(asset, opts \\ []), to: AssetStore, as: :store_asset
   defdelegate get_asset(asset_id, opts \\ []), to: AssetStore, as: :get
+  defdelegate read_asset(asset_or_id, opts \\ []), to: AssetStore
+  defdelegate materialize_asset(asset_or_id, opts \\ []), to: AssetStore
 
   defdelegate record_asset_adapter_run(asset_id, opts \\ []),
     to: AssetStore,

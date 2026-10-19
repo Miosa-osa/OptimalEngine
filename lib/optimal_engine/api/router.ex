@@ -2691,13 +2691,15 @@ defmodule OptimalEngine.API.Router do
   # Body: {name?: "snapshot.db"} or {path?: "snapshot.db"} — a file directly
   # inside the engine backup directory (OPTIMAL_BACKUP_DIR); defaults to a
   # timestamped name. Anything that resolves elsewhere is rejected with 400.
-  # Returns: {path, size_bytes, rows_backed_up, duration_ms}
+  # Add {offsite: true} to also copy the verified backup to the configured
+  # object store; the response reports the copy's status either way.
+  # Returns: {path, size_bytes, rows_backed_up, duration_ms, offsite}
   post "/api/backup" do
     body = conn.body_params || %{}
     requested = Map.get(body, "name") || Map.get(body, "path")
 
     with {:ok, target_path} <- OptimalEngine.Backup.resolve_target(requested) do
-      run_backup(conn, target_path)
+      run_backup(conn, target_path, offsite: Map.get(body, "offsite", false) == true)
     else
       {:error, {:outside_backup_dir, _dir}} ->
         send_resp(
@@ -2705,6 +2707,45 @@ defmodule OptimalEngine.API.Router do
           400,
           Jason.encode!(%{error: "backup path must name a file inside the engine backup directory"})
         )
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/backup/offsite - backups with a copy in the object store, newest
+  # first, with the local path, the object URI, and the checksum both are held to.
+  get "/api/backup/offsite" do
+    case OptimalEngine.Backup.list_offsite() do
+      {:ok, backups} -> json(conn, %{backups: backups, count: length(backups)})
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/backup/offsite/restore - restore an offsite copy into a database
+  # path without touching the live database.
+  # Body: {backup_id: "backup_...", target?: "/tmp/restore/index.db"}
+  post "/api/backup/offsite/restore" do
+    body = conn.body_params || %{}
+
+    with backup_id when is_binary(backup_id) <- Map.get(body, "backup_id"),
+         target when is_binary(target) <- Map.get(body, "target"),
+         {:ok, result} <-
+           OptimalEngine.Backup.restore_offsite(backup_id, target: target) do
+      json(conn, result)
+    else
+      nil ->
+        send_resp(
+          conn,
+          422,
+          Jason.encode!(%{error: "backup_id and target are required"})
+        )
+
+      {:error, :restore_target_required} ->
+        send_resp(conn, 422, Jason.encode!(%{error: "target is required"}))
+
+      {:error, {:backup_not_cataloged, id}} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "backup not found: #{id}"}))
 
       {:error, reason} ->
         send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
@@ -3193,8 +3234,8 @@ defmodule OptimalEngine.API.Router do
   # Helpers: response
   # ---------------------------------------------------------------------------
 
-  defp run_backup(conn, target_path) do
-    case OptimalEngine.Backup.create(target_path) do
+  defp run_backup(conn, target_path, opts) do
+    case OptimalEngine.Backup.create(target_path, opts) do
       {:ok, info} ->
         json(conn, %{
           id: info.id,
@@ -3203,7 +3244,8 @@ defmodule OptimalEngine.API.Router do
           rows_backed_up: info.rows_backed_up,
           duration_ms: info.duration_ms,
           checksum_sha256: info.checksum_sha256,
-          integrity_status: info.integrity_status
+          integrity_status: info.integrity_status,
+          offsite: info.offsite
         })
 
       {:error, {:target_exists, path}} ->

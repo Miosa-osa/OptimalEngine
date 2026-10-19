@@ -507,6 +507,17 @@
       "owns": []
     },
     {
+      "id": "docs-guides-storage-providers",
+      "path": "docs/guides/storage-providers.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-18",
+      "owns": []
+    },
+    {
       "id": "docs-guides-integrations-and-imports",
       "path": "docs/guides/integrations-and-imports.md",
       "kind": "reference",
