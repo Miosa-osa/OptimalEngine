@@ -53,6 +53,22 @@ defmodule OptimalEngine.API.HardeningTest do
     Router.call(conn, Router.init([]))
   end
 
+  # The request raises after the error handler answered; the test adapter
+  # reports the sent response to this process.
+  defp error_sent(fun) do
+    try do
+      fun.()
+      flunk("expected the request to raise after sending a response")
+    rescue
+      _ ->
+        receive do
+          {ref, {status, headers, body}} when is_reference(ref) -> {status, headers, body}
+        after
+          0 -> flunk("no response was sent")
+        end
+    end
+  end
+
   test "a workspace id that is a path is refused", ctx do
     root = key(ctx.tenant, ["*"], ["*"])
 
@@ -157,6 +173,67 @@ defmodule OptimalEngine.API.HardeningTest do
 
     {:ok, [[tenant]]} = Store.raw_query("SELECT tenant_id FROM contexts WHERE id = ?1", [id])
     assert tenant == ctx.tenant
+  end
+
+  test "offsite backup routes need an admin key and restore only inside the restore directory",
+       ctx do
+    writer = key(ctx.tenant, ["read", "write"], ["*"])
+    admin = key(ctx.tenant, ["*"], ["*"])
+
+    restore = fn token, target ->
+      call(:post, "/api/backup/offsite/restore", token, %{
+        "backup_id" => "backup_missing",
+        "target" => target
+      })
+    end
+
+    assert call(:get, "/api/backup/offsite", writer).status == 403
+    assert restore.(writer, "drill.db").status == 403
+
+    victim = Path.join(System.tmp_dir!(), "harden-victim-#{ctx.n}.txt")
+    File.write!(victim, "keep me")
+    on_exit(fn -> File.rm(victim) end)
+
+    restores = Path.join(OptimalEngine.Backup.backup_dir(), "restores")
+    File.mkdir_p!(restores)
+    link = Path.join(restores, "harden-link-#{ctx.n}.db")
+    File.ln_s!(victim, link)
+    on_exit(fn -> File.rm(link) end)
+
+    live = Application.get_env(:optimal_engine, :db_path)
+
+    for target <- [victim, "../escape-#{ctx.n}.db", "nested/x.db", "", Path.basename(link), live] do
+      assert restore.(admin, target).status == 400, "#{inspect(target)}"
+    end
+
+    assert File.read!(victim) == "keep me"
+    assert restore.(admin, "drill-#{ctx.n}.db").status == 404
+    assert call(:get, "/api/backup/offsite", admin).status == 200
+  end
+
+  test "the corpus organization preview needs an admin key", ctx do
+    reader = key(ctx.tenant, ["read"], ["*"])
+    admin = key(ctx.tenant, ["*"], ["*"])
+
+    assert call(:get, "/api/maintenance/corpus-organization", reader).status == 403
+    assert call(:get, "/api/maintenance/corpus-organization", admin).status == 200
+  end
+
+  test "a malformed JSON body is a 400 with a JSON error, not an empty 500", ctx do
+    writer = key(ctx.tenant, ["read", "write"], [ctx.workspace])
+
+    for body <- [~s({"workspace":), "not json", ~s({"title":"a\\q"})] do
+      {status, _headers, resp} =
+        error_sent(fn ->
+          conn(:post, "/api/ingest", body)
+          |> put_req_header("content-type", "application/json")
+          |> put_req_header("authorization", "Bearer " <> writer)
+          |> Router.call(Router.init([]))
+        end)
+
+      assert status == 400
+      assert %{"error" => "invalid_json"} = Jason.decode!(resp)
+    end
   end
 
   test "a verified key skips bcrypt but still honors revocation", ctx do

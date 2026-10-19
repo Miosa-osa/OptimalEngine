@@ -142,12 +142,18 @@ sqlite3 /tmp/restore-drill/index.db "PRAGMA integrity_check;"
 sqlite3 /tmp/restore-drill/index.db "SELECT COUNT(*) FROM workspaces;"
 ```
 
-Over HTTP:
+Over HTTP, with an admin key:
 
 ```bash
 curl -s -X POST "$URL/api/backup/offsite/restore" -H 'content-type: application/json' \
-  -d '{"backup_id": "<backup-id>", "target": "/tmp/restore-drill/index.db"}' | jq
+  -d '{"backup_id": "<backup-id>", "target": "drill.db"}' | jq
 ```
+
+An HTTP restore writes only to a file directly inside `restores/` under the engine backup directory (`OPTIMAL_BACKUP_DIR`).
+An absolute path, a nested path, `..`, an existing symlink, or the live database is refused with 400, so no API key can make the Engine overwrite a file elsewhere on the host.
+Restoring into another directory is an operator action: `mix optimal.restore --from-offsite <backup-id> --data-dir <dir>` on the host.
+Every `/api/backup` route needs the `admin` scope.
+A backup holds the whole Engine database, every tenant in it, so in an Engine shared by several tenants give admin keys only to the Engine's operator.
 
 The bucket is read, never modified, and the temporary download is removed afterwards, so the same drill can be repeated against the same backup.
 Restoring over the live database still requires the engine to be stopped, and the restore refuses to run while the supervisor is up.

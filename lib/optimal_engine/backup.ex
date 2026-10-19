@@ -473,6 +473,38 @@ defmodule OptimalEngine.Backup do
   end
 
   @doc """
+  Resolve a caller-supplied restore name to a file directly inside
+  `restores/` under `backup_dir/0`, creating the directory when needed.
+  Over HTTP a restore never writes anywhere else: absolute paths, nested
+  paths, `..` segments, an existing symlink, and the live database are
+  refused. Operators restoring elsewhere use `mix optimal.restore`.
+  """
+  @spec resolve_restore_target(String.t() | nil) ::
+          {:ok, String.t()} | {:error, {:outside_restore_dir, String.t()}}
+  def resolve_restore_target(name) do
+    dir = Path.join(backup_dir(), "restores")
+    expanded = if is_binary(name) and String.trim(name) != "", do: Path.expand(name, dir)
+    live = Application.get_env(:optimal_engine, :db_path)
+
+    cond do
+      is_nil(expanded) ->
+        {:error, {:outside_restore_dir, dir}}
+
+      Path.dirname(expanded) != dir ->
+        {:error, {:outside_restore_dir, dir}}
+
+      is_binary(live) and expanded == Path.expand(live) ->
+        {:error, {:outside_restore_dir, dir}}
+
+      match?({:ok, %{type: :symlink}}, File.lstat(expanded)) ->
+        {:error, {:outside_restore_dir, dir}}
+
+      true ->
+        with :ok <- File.mkdir_p(dir), do: {:ok, expanded}
+    end
+  end
+
+  @doc """
   Quick integrity check on a backup file — opens it as a read-only
   SQLite, runs `PRAGMA integrity_check`, and closes. Returns
   `{:ok, :ok}` for clean DBs or `{:ok, issues}` for anything else.

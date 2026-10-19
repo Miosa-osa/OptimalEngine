@@ -118,11 +118,12 @@ defmodule OptimalEngine.API.PermissionPlug do
         data_scope(conn.method, tl(tl(conn.path_info)))
 
       String.starts_with?(path, "/api/auth/keys") or String.starts_with?(path, "/api/principals") or
-        path == "/api/backup" or String.starts_with?(path, "/api/topology") or
+        path == "/api/backup" or String.starts_with?(path, "/api/backup/") or
+        String.starts_with?(path, "/api/topology") or
         String.starts_with?(path, "/api/bundles") or
         String.starts_with?(path, "/api/federation/peers") or
         Regex.match?(~r{^/api/workspaces/[^/]+/(bundle|finalize-move)$}, path) or
-          (mutation and String.starts_with?(path, "/api/maintenance/")) ->
+          String.starts_with?(path, "/api/maintenance/") ->
         "admin"
 
       mutation and

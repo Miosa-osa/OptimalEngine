@@ -21,6 +21,7 @@ defmodule OptimalEngine.API.Router do
   """
 
   use Plug.Router
+  use Plug.ErrorHandler
 
   alias OptimalEngine.API.Actor
   alias OptimalEngine.API.Pagination
@@ -2737,16 +2738,18 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # POST /api/backup/offsite/restore - restore an offsite copy into a database
-  # path without touching the live database.
-  # Body: {backup_id: "backup_...", target?: "/tmp/restore/index.db"}
+  # POST /api/backup/offsite/restore - restore an offsite copy into a file
+  # directly inside `restores/` under the engine backup directory, never the
+  # live database. Admin only.
+  # Body: {backup_id: "backup_...", target: "drill.db"}
   post "/api/backup/offsite/restore" do
     body = conn.body_params || %{}
 
     with backup_id when is_binary(backup_id) <- Map.get(body, "backup_id"),
          target when is_binary(target) <- Map.get(body, "target"),
+         {:ok, target_path} <- OptimalEngine.Backup.resolve_restore_target(target),
          {:ok, result} <-
-           OptimalEngine.Backup.restore_offsite(backup_id, target: target) do
+           OptimalEngine.Backup.restore_offsite(backup_id, target: target_path) do
       json(conn, result)
     else
       nil ->
@@ -2754,6 +2757,16 @@ defmodule OptimalEngine.API.Router do
           conn,
           422,
           Jason.encode!(%{error: "backup_id and target are required"})
+        )
+
+      {:error, {:outside_restore_dir, _dir}} ->
+        send_resp(
+          conn,
+          400,
+          Jason.encode!(%{
+            error:
+              "target must name a file inside the restores directory of the engine backup directory"
+          })
         )
 
       {:error, :restore_target_required} ->
@@ -4865,4 +4878,24 @@ defmodule OptimalEngine.API.Router do
   end
 
   defp format_health(_), do: []
+
+  # An exception in a plug or route still gets a JSON answer with the status
+  # the exception carries: a malformed body is the caller's 400, not an empty
+  # 500. Server errors never echo the exception; Plug.ErrorHandler re-raises
+  # them afterwards, so they are still logged.
+  @impl Plug.ErrorHandler
+  def handle_errors(conn, %{reason: reason}) do
+    error =
+      case reason do
+        %Plug.Parsers.ParseError{} -> "invalid_json"
+        %Plug.Parsers.UnsupportedMediaTypeError{} -> "unsupported_media_type"
+        %Plug.Parsers.RequestTooLargeError{} -> "request_too_large"
+        _ when conn.status in 400..499 -> "bad_request"
+        _ -> "internal_error"
+      end
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(conn.status, Jason.encode!(%{error: error}))
+  end
 end
