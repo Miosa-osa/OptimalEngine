@@ -150,7 +150,8 @@ class VersionAndAliasTests(CliTestCase):
                         'assemble', 'read', 'capture', 'aware', 'note', 'lesson', 'decision', 'task',
                         'close', 'memory', 'claims', 'review', 'routing', 'authority', 'status',
                         'version', 'start', 'stop', 'restart', 'log', 'index', 'graph',
-                        'reality-check', 'backup', 'init', 'size', 'viability', 'chain', 'check', 'analyses', 'jobs']:
+                        'reality-check', 'backup', 'init', 'size', 'viability', 'chain', 'check', 'analyses', 'jobs',
+                        'session', 'sessions', 'policy', 'org-section']:
             self.assertIn(command, text)
 
 
@@ -195,6 +196,52 @@ class RouteMappingTests(CliTestCase):
             self.check(['loops', action, 'loop_abc-1', '-w', ws, '--reason', 'done'], 'POST',
                        f'/api/loops/loop_abc-1/{action}', body={'workspace': ws})
         self.check(['loops', 'extract', ws], 'POST', '/api/loops/extract', body={'workspace': ws})
+
+    def test_chat_session_and_org_policy_commands(self):
+        ws = 'default:sales'
+        messages = [{'role': 'user', 'content': 'We decided to ship Friday.', 'at': '2026-10-18T09:00:00Z'},
+                    {'role': 'assistant', 'content': 'Noted.'}]
+        path = self.dir / 'chat.json'
+        path.write_text(json.dumps(messages))
+        request = self.check(['session', 'commit', str(path), ws, '--correlation-id', 'chat_1',
+                              '--title', 'Launch'], 'POST', '/api/sessions/commit',
+                             body={'workspace': ws, 'correlation_id': 'chat_1', 'title': 'Launch',
+                                   'source': 'optimal-cli', 'messages': messages})
+        self.assertNotIn('summary', request['body'])
+        self.check(['session', 'commit', '-', ws, '--correlation-id', 'chat_2', '--summary', 'Ship Friday'],
+                   'POST', '/api/sessions/commit', body={'summary': 'Ship Friday', 'messages': messages},
+                   stdin=json.dumps(messages))
+        self.check(['session', ws], 'GET', '/api/sessions', {'workspace': ws})
+        self.check(['sessions', 'list', ws, '--correlation-id', 'chat_1'], 'GET', '/api/sessions',
+                   {'workspace': ws, 'correlation_id': 'chat_1'})
+        self.check(['session', 'show', 'ses_abc', ws, '--transcript'], 'GET', '/api/sessions/ses_abc',
+                   {'workspace': ws, 'include': 'transcript'})
+        request = self.check(['session', 'show', 'ses_abc', ws], 'GET', '/api/sessions/ses_abc')
+        self.assertNotIn('include', request['query'])
+        self.check(['policy', ws], 'GET', '/api/org-policy', {'workspace': ws})
+        self.check(['org-policy', ws], 'GET', '/api/org-policy', {'workspace': ws})
+        self.check(['org-section'], 'GET', '/api/org-section')
+        self.check(['org-section', 'set', 'default:org'], 'PUT', '/api/org-section',
+                   body={'workspace_id': 'default:org'})
+        self.check(['org-section', 'clear'], 'DELETE', '/api/org-section')
+        for args in [['session', 'commit', str(path), ws],
+                     ['session', 'commit', '-', ws, '--correlation-id', 'c'],
+                     ['session', 'show', 'bad id', ws],
+                     ['org-section', 'set'],
+                     ['org-section', 'move']]:
+            result = self.run_cli(*args, stdin='{"role": "user"}')
+            self.assertEqual(result.returncode, 64, (args, result.stderr))
+
+    def test_subcommands_without_arguments_under_dash(self):
+        dash = shutil.which('dash')
+        if not dash:
+            self.skipTest('dash is not installed')
+        self.env['OPTIMAL_WORKSPACE'] = 'default:sales'
+        for command, path in [('loops', '/api/loops'), ('session', '/api/sessions')]:
+            self.fake.requests.clear()
+            result = self.run_cli(command, shell=dash)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.fake.requests[0]['path'], path)
 
     def test_retrieval_commands(self):
         ws = 'default:sales'

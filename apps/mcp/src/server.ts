@@ -19,6 +19,7 @@ import { registerContext } from "./tools/context.js";
 import { registerRecord } from "./tools/record.js";
 import { registerAuthority } from "./tools/authority.js";
 import { registerGovernance } from "./tools/governance.js";
+import { registerSessions } from "./tools/sessions.js";
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -41,6 +42,7 @@ export function createServer(): McpServer {
   registerRecord(server);
   registerAuthority(server);
   registerGovernance(server);
+  registerSessions(server);
 
   return server;
 }

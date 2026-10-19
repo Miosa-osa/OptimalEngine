@@ -262,9 +262,12 @@ export const engine = {
 
   forgetMemory(
     id: string,
-    body: { reason?: string; forget_after?: string },
+    body: { workspace: string; reason?: string; forget_after?: string },
   ): Promise<void> {
-    return request<void>(`/api/memory/${id}/forget`, { method: "POST", body });
+    return request<void>(`/api/memory/${encodeURIComponent(id)}/forget`, {
+      method: "POST",
+      body,
+    });
   },
 
   recall(
@@ -401,6 +404,49 @@ export const engine = {
       method: "POST",
       body,
     });
+  },
+
+  // -- chat sessions and org policy -------------------------------------------
+
+  commitSession(body: {
+    workspace: string;
+    correlation_id: string;
+    messages: Array<{ role: string; content: string; at?: string }>;
+    title?: string;
+    summary?: string;
+    source?: string;
+    learned?: Array<{
+      content: string;
+      category?: string;
+      owner?: string;
+      due?: string;
+    }>;
+  }): Promise<JsonObject> {
+    return request<JsonObject>("/api/sessions/commit", {
+      method: "POST",
+      body,
+    });
+  },
+
+  listSessions(params: {
+    workspace: string;
+    correlation_id?: string;
+    limit?: number;
+  }): Promise<JsonObject> {
+    return request<JsonObject>("/api/sessions", { params });
+  },
+
+  getSession(
+    id: string,
+    params: { workspace: string; include?: string },
+  ): Promise<JsonObject> {
+    return request<JsonObject>(`/api/sessions/${encodeURIComponent(id)}`, {
+      params,
+    });
+  },
+
+  orgPolicy(params: { workspace: string }): Promise<JsonObject> {
+    return request<JsonObject>("/api/org-policy", { params });
   },
 
   // -- authority -------------------------------------------------------------
