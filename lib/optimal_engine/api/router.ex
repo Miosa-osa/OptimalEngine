@@ -1620,17 +1620,29 @@ defmodule OptimalEngine.API.Router do
 
   # POST /api/subscriptions/:id/pause
   post "/api/subscriptions/:id/pause" do
-    case OptimalEngine.Memory.Subscription.pause(id) do
-      :ok -> send_resp(conn, 204, "")
-      other -> send_resp(conn, 500, Jason.encode!(%{error: inspect(other)}))
+    with {:ok, _sub} <- owned_subscription(conn, id),
+         :ok <- OptimalEngine.Memory.Subscription.pause(id) do
+      send_resp(conn, 204, "")
+    else
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "subscription not found"}))
+
+      other ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(other)}))
     end
   end
 
   # POST /api/subscriptions/:id/resume
   post "/api/subscriptions/:id/resume" do
-    case OptimalEngine.Memory.Subscription.resume(id) do
-      :ok -> send_resp(conn, 204, "")
-      other -> send_resp(conn, 500, Jason.encode!(%{error: inspect(other)}))
+    with {:ok, _sub} <- owned_subscription(conn, id),
+         :ok <- OptimalEngine.Memory.Subscription.resume(id) do
+      send_resp(conn, 204, "")
+    else
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "subscription not found"}))
+
+      other ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(other)}))
     end
   end
 
@@ -1641,19 +1653,13 @@ defmodule OptimalEngine.API.Router do
   # Returns 404 if the subscription is not found.
   # Returns 400 if the subscription has no webhook_url configured.
   post "/api/subscriptions/:id/test-webhook" do
-    alias OptimalEngine.Memory.{Subscription, Webhook}
+    alias OptimalEngine.Memory.Webhook
 
-    subs =
-      case Subscription.list(status: :all) do
-        {:ok, list} -> list
-        _ -> []
-      end
-
-    case Enum.find(subs, &(&1.id == id)) do
-      nil ->
+    case owned_subscription(conn, id) do
+      {:error, :not_found} ->
         send_resp(conn, 404, Jason.encode!(%{error: "subscription not found"}))
 
-      sub ->
+      {:ok, sub} ->
         webhook_url = get_in(sub.metadata, ["webhook_url"])
 
         if is_nil(webhook_url) or webhook_url == "" do
@@ -1684,9 +1690,15 @@ defmodule OptimalEngine.API.Router do
 
   # DELETE /api/subscriptions/:id
   delete "/api/subscriptions/:id" do
-    case OptimalEngine.Memory.Subscription.delete(id) do
-      :ok -> send_resp(conn, 204, "")
-      other -> send_resp(conn, 500, Jason.encode!(%{error: inspect(other)}))
+    with {:ok, _sub} <- owned_subscription(conn, id),
+         :ok <- OptimalEngine.Memory.Subscription.delete(id) do
+      send_resp(conn, 204, "")
+    else
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "subscription not found"}))
+
+      other ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(other)}))
     end
   end
 
@@ -1845,17 +1857,20 @@ defmodule OptimalEngine.API.Router do
   #   {"filename": "call.wav", "content_base64": "...", "workspace": "default"}
   #
   # Optional adapter execution:
-  #   {"adapter_id": "openai_whisper", "command": "printf", "args": ["..."]}
+  #   {"adapter_id": "openai_whisper"} (the command is the server's, never the request's)
   post "/api/assets" do
     body = conn.body_params || %{}
 
-    case asset_upload_source_path(body) do
+    case asset_upload_source_path(conn, body) do
       {:ok, source_path, cleanup} ->
         try do
           handle_asset_upload(conn, body, source_path)
         after
           cleanup.()
         end
+
+      {:error, :path_not_allowed} ->
+        send_resp(conn, 403, Jason.encode!(%{error: asset_upload_error(:path_not_allowed)}))
 
       {:error, reason} ->
         send_resp(conn, 400, Jason.encode!(%{error: asset_upload_error(reason)}))
@@ -2810,8 +2825,12 @@ defmodule OptimalEngine.API.Router do
     if not (is_binary(text) and String.trim(text) != "") do
       send_resp(conn, 400, Jason.encode!(%{error: "text is required"}))
     else
+      # The tenant and the acting principal come from the authenticated key.
       intake_opts =
-        []
+        [tenant_id: conn.assigns[:current_tenant] || "default"]
+        |> then(fn acc ->
+          if(v = body["actor_id"], do: Keyword.put(acc, :actor_id, v), else: acc)
+        end)
         |> then(fn acc -> if(v = body["genre"], do: Keyword.put(acc, :genre, v), else: acc) end)
         |> then(fn acc -> if(v = body["title"], do: Keyword.put(acc, :title, v), else: acc) end)
         |> then(fn acc -> if(v = body["node"], do: Keyword.put(acc, :node, v), else: acc) end)
@@ -3459,16 +3478,16 @@ defmodule OptimalEngine.API.Router do
   defp truthy?(1), do: true
   defp truthy?(_value), do: nil
 
-  defp asset_upload_source_path(body) do
+  defp asset_upload_source_path(conn, body) do
     path = Map.get(body, "path")
     content_base64 = Map.get(body, "content_base64")
 
     cond do
       is_binary(path) and String.trim(path) != "" ->
-        if File.exists?(path) do
-          {:ok, path, fn -> :ok end}
-        else
-          {:error, :path_not_found}
+        with :ok <- server_path_allowed(conn, path) do
+          if File.exists?(path),
+            do: {:ok, path, fn -> :ok end},
+            else: {:error, :path_not_found}
         end
 
       is_binary(content_base64) and String.trim(content_base64) != "" ->
@@ -3486,6 +3505,79 @@ defmodule OptimalEngine.API.Router do
       true ->
         {:error, :asset_source_required}
     end
+  end
+
+  # Importing a file already on the server reads the server's disk, so it
+  # needs an admin key (or the open local mode) and a path inside an import
+  # root: the Engine root, or OPTIMAL_ASSET_IMPORT_ROOTS. No component of the
+  # path may be a symbolic link.
+  defp server_path_allowed(conn, path) do
+    key = conn.assigns[:current_api_key]
+    admin? = is_nil(key) or "*" in key.scopes or "admin" in key.scopes
+    expanded = Path.expand(path)
+
+    roots =
+      [
+        Application.get_env(:optimal_engine, :root_path)
+        | Application.get_env(:optimal_engine, :asset_import_roots, [])
+      ]
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&Path.expand/1)
+
+    inside? = Enum.any?(roots, &String.starts_with?(expanded, &1 <> "/"))
+
+    if admin? and inside? and not symlinked?(expanded, roots),
+      do: :ok,
+      else: {:error, :path_not_allowed}
+  end
+
+  defp symlinked?(path, roots) do
+    root = Enum.find(roots, &String.starts_with?(path, &1 <> "/"))
+
+    path
+    |> Path.relative_to(root)
+    |> Path.split()
+    |> Enum.scan(root, &Path.join(&2, &1))
+    |> Enum.any?(&match?({:ok, %{type: :symlink}}, File.lstat(&1)))
+  end
+
+  # A subscription is reachable only from its own tenant and, for a scoped
+  # key, from a key that covers its workspace; anything else is not found.
+  defp owned_subscription(conn, id) do
+    with {:ok, [[workspace_id]]} <-
+           OptimalEngine.Store.raw_query(
+             "SELECT workspace_id FROM surfacing_subscriptions WHERE id = ?1",
+             [id]
+           ),
+         true <- workspace_reachable?(conn, workspace_id),
+         {:ok, subs} <-
+           OptimalEngine.Memory.Subscription.list(
+             workspace_id: workspace_id,
+             status: :all,
+             limit: 100_000
+           ),
+         %{} = sub <- Enum.find(subs, &(&1.id == id)) do
+      {:ok, sub}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp workspace_reachable?(conn, workspace_id) do
+    tenant = conn.assigns[:current_tenant] || "default"
+    key = conn.assigns[:current_api_key]
+
+    tenant_ok =
+      case OptimalEngine.Workspace.get(workspace_id) do
+        {:ok, workspace} -> workspace.tenant_id == tenant
+        _ -> tenant == "default"
+      end
+
+    scope_ok =
+      is_nil(key) or "*" in (key.workspace_scope || []) or
+        workspace_id in (key.workspace_scope || [])
+
+    tenant_ok and scope_ok
   end
 
   defp write_upload_tempfile(bytes, filename) when is_binary(bytes) do
@@ -3562,9 +3654,9 @@ defmodule OptimalEngine.API.Router do
       adapter_id when is_binary(adapter_id) and adapter_id != "" ->
         adapter_opts =
           store_opts
+          # The command an adapter runs comes from the server's tool registry
+          # and configuration, never from the request.
           |> Keyword.merge(
-            command: Map.get(body, "command"),
-            args: Map.get(body, "args", []),
             adapter_role: Map.get(body, "adapter_role"),
             auto_extract: parse_bool(Map.get(body, "auto_extract"), true),
             confidence: Map.get(body, "confidence"),
@@ -3647,6 +3739,10 @@ defmodule OptimalEngine.API.Router do
   defp asset_upload_error(:asset_source_required), do: "path or content_base64 is required"
   defp asset_upload_error(:path_not_found), do: "path not found"
   defp asset_upload_error(:invalid_base64), do: "content_base64 is invalid"
+
+  defp asset_upload_error(:path_not_allowed),
+    do:
+      "a server path needs an admin key and must be inside an import root; send content_base64 instead"
 
   defp asset_upload_error({:write_failed, reason}),
     do: "could not write upload temp file: #{reason}"

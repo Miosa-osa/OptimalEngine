@@ -69,7 +69,7 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
       requested == [] and not workspace_scoped_path?(conn) ->
         conn
 
-      Enum.any?(requested, &(not is_binary(&1))) ->
+      Enum.any?(requested, &(not valid_workspace_id?(&1))) ->
         halt_json(conn, 400, "invalid workspace")
 
       requested == [] and org_scope_request?(conn) ->
@@ -86,6 +86,16 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # ---------------------------------------------------------------------------
   # Requested-workspace resolution
   # ---------------------------------------------------------------------------
+
+  # Workspace ids name directories and object keys, so a requested id is a
+  # plain identifier: letters, digits, '.', '_', '-', one ':' between tenant
+  # and slug, and never a path.
+  @workspace_id ~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}(:[A-Za-z0-9][A-Za-z0-9._-]{0,127})?\z/
+
+  defp valid_workspace_id?(id) when is_binary(id),
+    do: Regex.match?(@workspace_id, id) and not String.contains?(id, "..")
+
+  defp valid_workspace_id?(_id), do: false
 
   @workspace_fields ~w(workspace workspace_id)
 

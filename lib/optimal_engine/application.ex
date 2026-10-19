@@ -80,6 +80,9 @@ defmodule OptimalEngine.Application do
       # ── HTTP API rate limiter (owns the ETS bucket table) ────────────────
       OptimalEngine.API.RateLimiter,
 
+      # ── Verified API key cache (bcrypt once per key and secret) ──────────
+      OptimalEngine.Auth.KeyCache,
+
       # ── Wiki maintenance (periodic staleness scan + re-curation) ─────────
       OptimalEngine.Wiki.Scheduler,
 

@@ -1530,6 +1530,8 @@ defmodule OptimalEngine.Store do
     end
   end
 
+  # A context belongs to its workspace's tenant; an unregistered workspace
+  # stays in the default tenant.
   defp do_insert(db, %Context{} = ctx) do
     row = Context.to_row(ctx)
 
@@ -1540,14 +1542,15 @@ defmodule OptimalEngine.Store do
       mode, genre, signal_type, format, structure,
       node, sn_ratio, entities,
       created_at, modified_at, valid_from, valid_until, supersedes,
-      routed_to, metadata, workspace_id
+      routed_to, metadata, workspace_id, tenant_id
     ) VALUES (
       ?1, ?2, ?3, ?4, ?5,
       ?6, ?7, ?8,
       ?9, ?10, ?11, ?12, ?13,
       ?14, ?15, ?16,
       ?17, ?18, ?19, ?20, ?21,
-      ?22, ?23, ?24
+      ?22, ?23, ?24,
+      COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?24), 'default')
     )
     """
 

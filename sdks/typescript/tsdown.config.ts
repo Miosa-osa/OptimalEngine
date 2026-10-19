@@ -8,6 +8,8 @@ export default defineConfig({
   },
   format: ["esm", "cjs"],
   dts: true,
+  // Unhashed declaration names, so package.json "types" resolves.
+  hash: false,
   clean: true,
   target: "es2022",
   treeshake: true,
