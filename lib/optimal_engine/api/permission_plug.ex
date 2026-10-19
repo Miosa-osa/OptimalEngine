@@ -104,7 +104,8 @@ defmodule OptimalEngine.API.PermissionPlug do
              "/api/viability/snapshot",
              "/api/viability/audit/run",
              "/api/init",
-             "/api/analyses/run"
+             "/api/analyses/run",
+             "/api/org-section"
            ] or
              String.starts_with?(path, "/api/jobs/")) ->
         "admin"
