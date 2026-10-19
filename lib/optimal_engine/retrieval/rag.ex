@@ -58,6 +58,7 @@ defmodule OptimalEngine.Retrieval.RAG do
 
   alias OptimalEngine.MemoryCore.{ContextPackage, RetrievalCoordinator, ScopeEnvelope}
   alias OptimalEngine.{Memory, Store}
+  alias OptimalEngine.Identity.ACL
   alias OptimalEngine.Wiki.Directives
 
   require Logger
@@ -97,7 +98,10 @@ defmodule OptimalEngine.Retrieval.RAG do
     * `:hybrid_limit` — max chunks pulled from hybrid search (default 20)
     * `:skip_wiki` — bypass Tier 3 entirely (testing / debugging)
     * `:skip_intent` — bypass intent expansion (testing)
-    * `:tenant_id` — override tenant scope (defaults to `receiver.tenant_id`)
+    * `:tenant_id` — override tenant scope (defaults to `receiver.tenant_id`);
+      retrieval reads only that tenant's contexts and memories
+    * `:acl_absent` — `:allow | :deny` for resources with no ACL rows when the
+      receiver has an `id` (its principal); defaults to the configured policy
     * `:workspace_id` — scope retrieval to a workspace. Defaults to the
       tenant's own default workspace (`"default"` for the default tenant,
       `"<tenant_id>:default"` otherwise) — never to a workspace shared
@@ -342,8 +346,9 @@ defmodule OptimalEngine.Retrieval.RAG do
     expanded = Map.get(intent, :expanded_query, query)
 
     search_opts =
-      [limit: limit, workspace_id: workspace_id]
+      [limit: limit, workspace_id: workspace_id, tenant_id: tenant_id(opts, receiver)]
       |> maybe_put(:principal, receiver.id)
+      |> maybe_put(:acl_absent, Keyword.get(opts, :acl_absent))
 
     candidates = safe_search(expanded, search_opts)
 
@@ -398,10 +403,12 @@ defmodule OptimalEngine.Retrieval.RAG do
       |> Enum.reduce_while([], fn memory_query, [] ->
         case Memory.list(
                workspace_id: workspace_id,
+               tenant_id: tenant_id(opts, receiver),
                audience: receiver.audience,
                q: memory_query,
                limit: limit
-             ) do
+             )
+             |> readable_memories(receiver, opts) do
           [] -> {:cont, []}
           memories -> {:halt, memories}
         end
@@ -440,6 +447,26 @@ defmodule OptimalEngine.Retrieval.RAG do
            truncated?: plan.truncated?
          }}
     end
+  end
+
+  defp tenant_id(opts, receiver), do: Keyword.get(opts, :tenant_id) || receiver.tenant_id
+
+  # The same access-list rule Search applies to memory hits, by the memory's
+  # retrieval URI.
+  defp readable_memories(memories, %Receiver{id: nil}, _opts), do: memories
+
+  defp readable_memories(memories, receiver, opts) do
+    acl_opts =
+      [tenant_id: tenant_id(opts, receiver)]
+      |> maybe_put(:absent, Keyword.get(opts, :acl_absent))
+
+    ACL.filter(
+      receiver.id,
+      memories,
+      &"optimal://memory/#{&1.workspace_id}/#{&1.id}",
+      :read,
+      acl_opts
+    )
   end
 
   @memory_stopwords MapSet.new(~w[

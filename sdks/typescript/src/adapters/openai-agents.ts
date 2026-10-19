@@ -61,16 +61,19 @@ export function optimalEngineAgentTools(
     make({
       name: "ask_engine",
       description:
-        "Ask the second brain a question. Curated wiki first, hybrid search second. Returns ACL-scoped, audience-shaped, bandwidth-matched envelope with hot citations.",
+        "Ask the second brain a question. Curated wiki first, hybrid search second. Returns an ACL-scoped, audience-shaped, bandwidth-matched envelope: envelope.body is the context text and envelope.sources lists the URIs it came from.",
       parameters: z.object({
         query: z.string().describe("The question to ask the engine."),
         audience: z.string().optional().describe("Audience scope."),
-        format: z.string().optional().describe("Response format hint."),
+        format: z
+          .enum(["plain", "markdown", "claude", "openai"])
+          .optional()
+          .describe("Envelope format. Defaults to 'markdown'."),
         bandwidth: z
-          .enum(["l0", "l1", "full"])
+          .enum(["small", "medium", "large"])
           .optional()
           .describe(
-            "Response depth: l0 = headline, l1 = summary, full = complete.",
+            "How much context the envelope may carry: small, medium (default) or large.",
           ),
       }),
       execute: async (params) => {
@@ -90,15 +93,27 @@ export function optimalEngineAgentTools(
     make({
       name: "search_memory",
       description:
-        "Search long-term memory using hybrid semantic and keyword search.",
+        "Search long-term memory using hybrid semantic and keyword search. Hits with inherited=true are org policy memories from source_workspace_id.",
       parameters: z.object({
         query: z.string().describe("Search query."),
         limit: z.number().int().positive().optional().describe("Max results."),
+        offset: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("Results to skip, for paging."),
+        type: z
+          .enum(["memory"])
+          .optional()
+          .describe("Set to 'memory' to return only durable memories."),
       }),
       execute: async (params) => {
         return client.search(params.query, {
           ...(ws !== undefined ? { workspace: ws } : {}),
           ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          ...(params.offset !== undefined ? { offset: params.offset } : {}),
+          ...(params.type !== undefined ? { type: params.type } : {}),
         });
       },
     }),
@@ -106,13 +121,31 @@ export function optimalEngineAgentTools(
     make({
       name: "grep_memory",
       description:
-        "Grep long-term memory with structured intent, scale, and modality filters.",
+        "Grep long-term memory with structured intent, scale, and modality filters. Returns chunk hits: slug (the node), snippet, scale, intent, score.",
       parameters: z.object({
         query: z.string().describe("Pattern or phrase to grep for."),
-        intent: z.string().optional().describe("Query intent hint."),
-        scale: z.string().optional().describe("Scale filter."),
+        intent: z
+          .string()
+          .optional()
+          .describe(
+            "Chunk intent filter. One of: request_info, propose_decision, record_fact, express_concern, commit_action, reference, narrate, reflect, specify, measure. Other values are ignored.",
+          ),
+        scale: z
+          .enum(["document", "section", "paragraph", "chunk"])
+          .optional()
+          .describe("Chunk scale filter."),
         modality: z.string().optional().describe("Modality filter."),
         limit: z.number().int().positive().optional().describe("Max results."),
+        offset: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("Results to skip, for paging."),
+        path: z
+          .string()
+          .optional()
+          .describe("Restrict to a node slug or slug prefix."),
       }),
       execute: async (params) => {
         return client.grep(params.query, {
@@ -123,6 +156,8 @@ export function optimalEngineAgentTools(
             ? { modality: params.modality }
             : {}),
           ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          ...(params.offset !== undefined ? { offset: params.offset } : {}),
+          ...(params.path !== undefined ? { path: params.path } : {}),
         });
       },
     }),
@@ -168,7 +203,7 @@ export function optimalEngineAgentTools(
     make({
       name: "add_memory",
       description:
-        "Add a fact, decision, or observation to long-term memory. Cited and integrity-gated — every memory ties to a source. Use when the user mentions information that should persist.",
+        "Add a fact, decision, or observation to long-term memory. Cited and integrity-gated - every memory ties to a source. Use when the user mentions information that should persist.",
       parameters: z.object({
         content: z.string().describe("Content to store."),
         audience: z.string().optional().describe("Audience scope."),

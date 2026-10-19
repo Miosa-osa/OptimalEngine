@@ -22,7 +22,7 @@ import type {
 import { WorkspaceClient } from "./workspace.js";
 
 export class OptimalEngine {
-  /** Raw HTTP client — exposed for advanced use; prefer the typed sub-clients. */
+  /** Raw HTTP client - exposed for advanced use; prefer the typed sub-clients. */
   readonly http: HttpClient;
 
   /** Memory CRUD operations. */
@@ -73,15 +73,19 @@ export class OptimalEngine {
 
   /**
    * Ask the second brain a question. Curated wiki first, hybrid search second.
-   * Returns an ACL-scoped, audience-shaped, bandwidth-matched envelope with
-   * hot citations.
+   * Returns an ACL-scoped, audience-shaped, bandwidth-matched envelope:
+   * `result.envelope.body` is the context text and `result.envelope.sources`
+   * lists the `optimal://` URIs it was built from. There is no synthesized
+   * `answer`; read the envelope.
    */
   ask(query: string, opts: AskOptions = {}): Promise<AskResult> {
     return this.retrieval.ask(query, opts);
   }
 
   /**
-   * Hybrid semantic + keyword search across memory.
+   * Hybrid semantic + keyword search across memory. Hits carry `inherited` and
+   * `source_workspace_id` so org policy memories are distinguishable from the
+   * workspace's own. Pass `type: "memory"` to restrict to durable memories.
    */
   search(query: string, opts: SearchOptions = {}): Promise<SearchResult> {
     return this.retrieval.search(query, opts);
@@ -89,6 +93,8 @@ export class OptimalEngine {
 
   /**
    * Structured grep across memory with intent, scale, and modality filters.
+   * Hits are chunks: `slug` names the node, `snippet` is the matching text.
+   * `path` restricts to a node slug or slug prefix.
    */
   grep(query: string, opts: GrepOptions = {}): Promise<GrepResult> {
     return this.retrieval.grep(query, opts);
@@ -103,7 +109,7 @@ export class OptimalEngine {
   }
 
   // ---------------------------------------------------------------------------
-  // Lifecycle — drive the engine, not just read it.
+  // Lifecycle - drive the engine, not just read it.
   // ingest -> source -> signal -> claim -> fact -> memory (+ chunks, embeddings,
   // episodes, semantic edges). assemble -> MCTS tiered context. createNode ->
   // topology gazetteer used for entity extraction.

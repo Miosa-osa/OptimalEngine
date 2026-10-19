@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { EngineContext } from '../engine.js';
-  import type { RecallItem } from '@optimal-engine/client';
-  import SignalCard from './SignalCard.svelte';
+  import type { RecallResult } from '@optimal-engine/client';
 
   type Tab = 'actions' | 'who' | 'when' | 'where' | 'owns';
 
@@ -23,7 +22,7 @@
   let activeTab = $state<Tab>(defaultTab);
   let loading = $state(false);
   let error = $state<string | null>(null);
-  let results = $state<RecallItem[]>([]);
+  let result = $state<RecallResult | null>(null);
 
   // Per-tab field state
   let actorsTopic = $state('');
@@ -39,9 +38,9 @@
     const ws = engine.getWorkspace();
     loading = true;
     error = null;
-    results = [];
+    result = null;
     try {
-      let res;
+      let res: RecallResult | undefined;
       switch (activeTab) {
         case 'actions':
           res = await engine.client.recall.actions({
@@ -77,7 +76,7 @@
           });
           break;
       }
-      results = res?.items ?? [];
+      result = res ?? null;
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -87,7 +86,7 @@
 
   function onTabChange(tab: Tab) {
     activeTab = tab;
-    results = [];
+    result = null;
     error = null;
   }
 
@@ -123,7 +122,7 @@
     {/each}
   </div>
 
-  <!-- Input area — changes per tab -->
+  <!-- Input area - changes per tab -->
   <div class="rw-inputs" role="tabpanel" onkeydown={onKeydown}>
     {#if activeTab === 'actions'}
       <div class="rw-row">
@@ -172,18 +171,20 @@
 
   <!-- Results -->
   <div class="rw-results" role="region" aria-label="Recall results" aria-live="polite">
-    {#if !loading && results.length === 0 && !error}
+    {#if !loading && !error && (result === null || result.source === 'empty' || result.envelope.body.trim() === '')}
       <div class="oe-empty rw-empty">
         <span>No results for this recall.</span>
       </div>
-    {:else}
-      {#each results as item (item.id ?? item.content ?? Math.random())}
-        <SignalCard
-          id={item.id ?? ''}
-          title={item.content?.slice(0, 80) ?? '(no content)'}
-          createdAt={item.timestamp}
-        />
-      {/each}
+    {:else if result}
+      <div class="rw-query">{result.recall_query}</div>
+      <div class="rw-body">{result.envelope.body}</div>
+      {#if result.envelope.sources.length > 0}
+        <div class="rw-sources" aria-label="Sources">
+          {#each result.envelope.sources as uri}
+            <span class="oe-cite" title={uri} aria-label="Source: {uri}">{uri.replace('optimal://', '')}</span>
+          {/each}
+        </div>
+      {/if}
     {/if}
   </div>
 </div>
@@ -307,6 +308,25 @@
     flex-direction: column;
     gap: 0.3rem;
     min-height: 1px;
+  }
+
+  .rw-query {
+    font-size: 0.74rem;
+    color: var(--dt4, #555);
+  }
+
+  .rw-body {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.86rem;
+    line-height: 1.5;
+    color: var(--dt, #f1f1f3);
+  }
+
+  .rw-sources {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
   }
 
   .rw-empty {

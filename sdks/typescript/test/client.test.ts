@@ -31,8 +31,33 @@ function lastFetchCall(): { url: string; init: RequestInit } {
   return { url: call[0] as string, init: call[1] as RequestInit };
 }
 
+// A `POST /api/rag` body as the Engine serves it. Shape tests live in
+// retrieval-shapes.test.ts; this fixture only keeps the request tests honest.
+const RAG_RESPONSE = {
+  source: "chunks",
+  envelope: { body: "42", format: "markdown", sources: [], warnings: [] },
+  trace: {
+    intent: {},
+    "wiki_hit?": false,
+    n_candidates: 0,
+    n_delivered: 0,
+    "truncated?": false,
+    elapsed_ms: 1,
+  },
+  org_policy: {
+    org_workspace_id: null,
+    inherited: false,
+    count: 0,
+    memories: [],
+    withheld: 0,
+    withheld_reason: null,
+  },
+};
+
+const PAGINATION = { offset: 0, limit: 10, total: 0, has_more: false };
+
 // ---------------------------------------------------------------------------
-// OptimalEngine — construction
+// OptimalEngine - construction
 // ---------------------------------------------------------------------------
 
 describe("OptimalEngine", () => {
@@ -68,7 +93,7 @@ describe("OptimalEngine", () => {
 
   describe("ask", () => {
     it("should POST to /api/rag with query", async () => {
-      mockFetch(200, { answer: "42", citations: [] });
+      mockFetch(200, RAG_RESPONSE);
       const client = new OptimalEngine({ baseUrl: "http://localhost:4200" });
 
       const result = await client.ask("What is the meaning of life?");
@@ -78,18 +103,18 @@ describe("OptimalEngine", () => {
       expect(init.method).toBe("POST");
       const body = JSON.parse(init.body as string);
       expect(body.query).toBe("What is the meaning of life?");
-      expect(result.answer).toBe("42");
+      expect(result.envelope.body).toBe("42");
     });
 
     it("should forward workspace, audience, format, bandwidth", async () => {
-      mockFetch(200, { answer: "ok" });
+      mockFetch(200, RAG_RESPONSE);
       const client = new OptimalEngine();
 
       await client.ask("q", {
         workspace: "ws1",
         audience: "internal",
         format: "markdown",
-        bandwidth: "l1",
+        bandwidth: "medium",
       });
 
       const { init } = lastFetchCall();
@@ -97,11 +122,11 @@ describe("OptimalEngine", () => {
       expect(body.workspace).toBe("ws1");
       expect(body.audience).toBe("internal");
       expect(body.format).toBe("markdown");
-      expect(body.bandwidth).toBe("l1");
+      expect(body.bandwidth).toBe("medium");
     });
 
     it("should apply default workspace when none is given per-call", async () => {
-      mockFetch(200, { answer: "ok" });
+      mockFetch(200, RAG_RESPONSE);
       const client = new OptimalEngine({ workspace: "default-ws" });
 
       await client.ask("q");
@@ -118,7 +143,11 @@ describe("OptimalEngine", () => {
 
   describe("search", () => {
     it("should GET /api/search with q param", async () => {
-      mockFetch(200, { results: [] });
+      mockFetch(200, {
+        query: "typescript",
+        results: [],
+        pagination: PAGINATION,
+      });
       const client = new OptimalEngine();
 
       await client.search("typescript", { limit: 10 });
@@ -137,13 +166,18 @@ describe("OptimalEngine", () => {
 
   describe("grep", () => {
     it("should GET /api/grep with all provided params", async () => {
-      mockFetch(200, { results: [] });
+      mockFetch(200, {
+        query: "pattern",
+        workspace_id: "ws2",
+        results: [],
+        pagination: PAGINATION,
+      });
       const client = new OptimalEngine();
 
       await client.grep("pattern", {
         workspace: "ws2",
         intent: "decision",
-        scale: "micro",
+        scale: "paragraph",
         modality: "text",
         limit: 5,
         literal: true,
@@ -262,7 +296,7 @@ describe("OptimalEngine", () => {
 
   describe("recall.actions", () => {
     it("should GET /api/recall/actions with topic param", async () => {
-      mockFetch(200, { items: [] });
+      mockFetch(200, { ...RAG_RESPONSE, recall_query: "what actions about auth" });
       const client = new OptimalEngine();
 
       await client.recall.actions({
@@ -281,7 +315,7 @@ describe("OptimalEngine", () => {
 
   describe("recall.who", () => {
     it("should GET /api/recall/who", async () => {
-      mockFetch(200, { items: [] });
+      mockFetch(200, { ...RAG_RESPONSE, recall_query: "who is the owner of deployment" });
       const client = new OptimalEngine();
 
       await client.recall.who({ topic: "deployment" });

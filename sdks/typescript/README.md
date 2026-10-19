@@ -1,19 +1,19 @@
 # @optimal-engine/client
 
-TypeScript client for the [Optimal Engine](https://github.com/OptimalEngine/OptimalEngine) — open-source memory infrastructure for AI agents.
+TypeScript client for the [Optimal Engine](https://github.com/OptimalEngine/OptimalEngine) - open-source memory infrastructure for AI agents.
 
-- Native `fetch` — works in Node 20+, browsers, Cloudflare Workers, Deno
+- Native `fetch` - works in Node 20+, browsers, Cloudflare Workers, Deno
 - Strict TypeScript with branded ID types and `exactOptionalPropertyTypes`
 - Dual ESM + CJS output, fully tree-shakable
 - Vercel AI SDK (v6) adapter included
 - OpenAI Agents SDK adapter included
-- Zero runtime dependencies (peer deps only: `ai`, `zod`, `openai` — all optional)
+- Zero runtime dependencies (peer deps only: `ai`, `zod`, `openai` - all optional)
 
 ## Install
 
 ```bash
 npm install @optimal-engine/client
-# peer deps — install only what you use
+# peer deps - install only what you use
 npm install ai zod        # for Vercel AI SDK adapter
 npm install openai zod    # for OpenAI Agents adapter
 ```
@@ -26,14 +26,15 @@ import { OptimalEngine } from "@optimal-engine/client";
 const client = new OptimalEngine({
   baseUrl: "http://localhost:4200", // default
   workspace: "my-workspace",        // applied to every call unless overridden
-  apiKey: process.env.ENGINE_KEY,   // optional — future-proofing
+  apiKey: process.env.ENGINE_KEY,   // optional - future-proofing
 });
 
 // Ask the second brain
 const result = await client.ask("What did we decide about the auth flow?", {
-  bandwidth: "l1",   // l0 = headline, l1 = summary, full = complete
+  bandwidth: "medium",   // small | medium | large
 });
-console.log(result.answer);
+console.log(result.envelope.body);    // the context text
+console.log(result.envelope.sources); // optimal:// URIs it was built from
 
 // Store a memory
 const mem = await client.memory.create({
@@ -54,7 +55,16 @@ const decisions = await client.recall.actions({
 });
 
 // Search
-const hits = await client.search("refresh token rotation", { limit: 5 });
+const found = await client.search("refresh token rotation", { limit: 5 });
+for (const hit of found.results) {
+  console.log(hit.title, hit.inherited ? `(from ${hit.source_workspace_id})` : "");
+}
+
+// Grep chunks
+const grepped = await client.grep("rotation", { scale: "paragraph", path: "auth/" });
+for (const hit of grepped.results) {
+  console.log(hit.slug, hit.snippet);
+}
 
 // Profile
 const profile = await client.profile({ bandwidth: "full" });
@@ -67,17 +77,48 @@ const profile = await client.profile({ bandwidth: "full" });
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `baseUrl` | `string` | `http://localhost:4200` | Engine base URL |
-| `apiKey` | `string` | — | Sent as `Bearer` token when provided |
-| `workspace` | `string` | — | Default workspace for all calls |
+| `apiKey` | `string` | none | Sent as `Bearer` token when provided |
+| `workspace` | `string` | none | Default workspace for all calls |
 
 ### Retrieval
 
 ```typescript
 await client.ask(query, { workspace?, audience?, format?, bandwidth? })
-await client.search(query, { workspace?, limit? })
-await client.grep(query, { workspace?, intent?, scale?, modality?, limit?, literal? })
+await client.search(query, { workspace?, limit?, offset?, type? })
+await client.grep(query, { workspace?, intent?, scale?, modality?, limit?, offset?, literal?, path? })
 await client.profile({ workspace?, audience?, bandwidth?, node? })
 ```
+
+Option values:
+
+| Option | Values |
+|--------|--------|
+| `ask` `format` | `plain`, `markdown`, `claude`, `openai` |
+| `ask` `bandwidth` | `small`, `medium`, `large` |
+| `search` `type` | `memory` (durable memories only) |
+| `grep` `scale` | `document`, `section`, `paragraph`, `chunk` |
+| `grep` `path` | A node slug or slug prefix |
+| `profile` `bandwidth` | `l0`, `l1`, `full` |
+
+Response shapes, as the Engine serves them:
+
+| Call | Result |
+|------|--------|
+| `ask` | `{ source, envelope: { body, format, sources, warnings }, trace, org_policy, context_package? }` |
+| `search` | `{ query, results: SearchHit[], pagination }` |
+| `grep` | `{ query, workspace_id, results: GrepHit[], pagination }` |
+| `recall.*` | The `ask` result plus `recall_query`, the question the Engine asked |
+
+A `SearchHit` has `id`, `title`, `node`, `genre`, `uri`, `content`, `l0_abstract`, `sn_ratio`, `score`, `workspace_id`, `metadata`, `inherited`, and `source_workspace_id`.
+Every field except `id` and `inherited` can be `null`.
+`inherited: true` marks an org policy memory inherited from the tenant's org section.
+`source_workspace_id` names the workspace it came from.
+
+A `GrepHit` is one chunk: `slug` (the node it belongs to), `scale`, `intent`, `sn_ratio`, `modality`, `snippet`, and `score`.
+There is no `id` or `content` on a grep hit.
+
+`pagination` is `{ offset, limit, total, has_more }`.
+`org_policy` lists the org policy memories that apply, how many were withheld for the audience, and why.
 
 ### Memory
 
@@ -251,8 +292,20 @@ try {
 
 ## Bandwidth Levels
 
+`profile` and `ask` use different bandwidth sets.
+
+Profile bandwidth (`GET /api/profile`):
+
 | Level | Description |
 |-------|-------------|
-| `l0` | Headline only — minimal tokens |
-| `l1` | Summary — balanced |
-| `full` | Complete envelope with all tiers and citations |
+| `l0` | Headline only, minimal tokens |
+| `l1` | Summary, balanced |
+| `full` | All tiers |
+
+Ask bandwidth (`POST /api/rag`):
+
+| Level | Description |
+|-------|-------------|
+| `small` | Smallest envelope |
+| `medium` | Default |
+| `large` | Largest envelope |

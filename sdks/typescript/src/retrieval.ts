@@ -37,6 +37,8 @@ export class RetrievalClient {
       q: query,
       ...(workspace !== undefined ? { workspace } : {}),
       ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+      ...(opts.offset !== undefined ? { offset: opts.offset } : {}),
+      ...(opts.type !== undefined ? { type: opts.type } : {}),
     });
     return this.http.get<SearchResult>(`/api/search${qs}`);
   }
@@ -50,7 +52,9 @@ export class RetrievalClient {
       ...(opts.scale !== undefined ? { scale: opts.scale } : {}),
       ...(opts.modality !== undefined ? { modality: opts.modality } : {}),
       ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+      ...(opts.offset !== undefined ? { offset: opts.offset } : {}),
       ...(opts.literal !== undefined ? { literal: opts.literal } : {}),
+      ...(opts.path !== undefined ? { path: opts.path } : {}),
     });
     return this.http.get<GrepResult>(`/api/grep${qs}`);
   }

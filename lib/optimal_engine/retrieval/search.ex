@@ -22,6 +22,13 @@ defmodule OptimalEngine.Retrieval.Search do
   - `:limit`  — max results (default 10)
   - `:offset` — pagination offset (default 0)
   - `:min_score` — drop results below this score (default 0.0)
+  - `:workspace_id` — workspace to search (default `"default"`)
+  - `:tenant_id` — read only this tenant's memories (default `"default"`);
+    contexts belong to their workspace's tenant, which the caller's workspace
+    authorization already checks
+  - `:principal` — drop results the principal may not read per ACL rows
+  - `:acl_absent` — `:allow | :deny` for resources with no ACL rows (default
+    `config :optimal_engine, :acl_absent`)
 
   ## Backward compatibility
 
@@ -34,6 +41,7 @@ defmodule OptimalEngine.Retrieval.Search do
   require Logger
 
   alias OptimalEngine.Context
+  alias OptimalEngine.Identity.ACL
   alias OptimalEngine.Retrieval.IntentAnalyzer, as: IntentAnalyzer
   alias OptimalEngine.Embed.Ollama, as: Ollama
   alias OptimalEngine.Store
@@ -175,21 +183,30 @@ defmodule OptimalEngine.Retrieval.Search do
         {:ok, hits}
 
       principal_id when is_binary(principal_id) ->
-        tenant_id = Keyword.get(opts, :tenant_id, OptimalEngine.Tenancy.Tenant.default_id())
-
-        filtered =
-          Enum.filter(hits, fn hit ->
-            uri = Map.get(hit, :uri) || Map.get(hit, :id)
-
-            uri == nil or
-              OptimalEngine.Identity.ACL.can?(principal_id, uri, :read, tenant_id: tenant_id)
-          end)
-
-        {:ok, filtered}
+        {:ok,
+         ACL.filter(
+           principal_id,
+           hits,
+           &(Map.get(&1, :uri) || Map.get(&1, :id)),
+           :read,
+           acl_opts(opts)
+         )}
     end
   end
 
   defp filter_by_principal(other, _opts), do: other
+
+  # `:acl_absent` decides resources with no ACL rows for this search (HTTP
+  # retrieval passes `:allow`: the key's workspace scope already covers them);
+  # without it the configured policy applies (`OPTIMAL_ACL_ABSENT`).
+  defp acl_opts(opts) do
+    tenant = [tenant_id: Keyword.get(opts, :tenant_id, OptimalEngine.Tenancy.Tenant.default_id())]
+
+    case Keyword.get(opts, :acl_absent) do
+      nil -> tenant
+      absent -> Keyword.put(tenant, :absent, absent)
+    end
+  end
 
   defp merge_durable_memories({:ok, context_hits}, query, opts) do
     type_filter = Keyword.get(opts, :type)
@@ -330,15 +347,8 @@ defmodule OptimalEngine.Retrieval.Search do
 
   defp filter_memory_candidates(candidates, opts) do
     case Keyword.get(opts, :principal) do
-      nil ->
-        candidates
-
-      principal_id ->
-        tenant_id = Keyword.get(opts, :tenant_id, OptimalEngine.Tenancy.Tenant.default_id())
-
-        Enum.filter(candidates, fn candidate ->
-          OptimalEngine.Identity.ACL.can?(principal_id, candidate.uri, :read, tenant_id: tenant_id)
-        end)
+      nil -> candidates
+      principal_id -> ACL.filter(principal_id, candidates, & &1.uri, :read, acl_opts(opts))
     end
   end
 

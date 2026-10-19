@@ -24,7 +24,15 @@ export function asWikiSlug(v: string): WikiSlug {
 // Shared enums / literals
 // ---------------------------------------------------------------------------
 
+/**
+ * Bandwidth of `GET /api/profile`: l0 headline, l1 summary, full all tiers.
+ * `ask` uses a different set, see {@link RagBandwidth}.
+ */
 export type Bandwidth = "l0" | "l1" | "full";
+/** Bandwidth of `POST /api/rag`: how much context the envelope may carry. */
+export type RagBandwidth = "small" | "medium" | "large";
+/** Envelope format of `POST /api/rag`. */
+export type RagFormat = "plain" | "markdown" | "claude" | "openai";
 export type Audience = string; // workspace-defined; e.g. "public" | "internal"
 export type RecallScope = "workspace" | "topic" | "actor" | "global";
 export type SubscriptionCategory = string;
@@ -36,7 +44,7 @@ export type SubscriptionCategory = string;
 export interface OptimalEngineConfig {
   /** Base URL of the Optimal Engine HTTP API. Defaults to http://localhost:4200 */
   baseUrl?: string;
-  /** Optional API key — sent as Bearer token when provided. */
+  /** Optional API key - sent as Bearer token when provided. */
   apiKey?: string;
   /** Default workspace applied to every call unless overridden per-call. */
   workspace?: string;
@@ -53,77 +61,165 @@ export interface OptimalEngineErrorBody {
 }
 
 // ---------------------------------------------------------------------------
-// RAG / retrieval
+// Pagination (search, grep)
+// ---------------------------------------------------------------------------
+
+export interface Pagination {
+  offset: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// RAG / retrieval (POST /api/rag, GET /api/recall/*)
 // ---------------------------------------------------------------------------
 
 export interface AskOptions {
   workspace?: string;
   audience?: Audience;
-  format?: string;
-  bandwidth?: Bandwidth;
+  format?: RagFormat;
+  bandwidth?: RagBandwidth;
+}
+
+/** Where the answer context came from. */
+export type RagSource =
+  | "wiki"
+  | "chunks"
+  | "memory"
+  | "empty"
+  | "context_package";
+
+/** The receiver-shaped context an agent reads. `body` is the text to use. */
+export interface RagEnvelope {
+  body: string;
+  format: RagFormat;
+  /** `optimal://` URIs of the contexts the body was built from. */
+  sources: string[];
+  warnings: unknown[];
+}
+
+/** Retrieval trace. The `?` in two key names is part of the wire format. */
+export interface RagTrace {
+  intent: Record<string, unknown>;
+  "wiki_hit?": boolean;
+  n_candidates: number;
+  n_delivered: number;
+  "truncated?": boolean;
+  elapsed_ms: number;
+}
+
+/** A durable org policy memory inherited from the tenant's org section. */
+export interface OrgPolicyMemory {
+  id: string;
+  uri: string;
+  content: string;
+  version: number;
+  audience: Audience;
+  citation_uri: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  /** Workspace the policy was authored in. */
+  source_workspace_id: string;
+  inherited: boolean;
+}
+
+export interface OrgPolicyBlock {
+  org_workspace_id: string | null;
+  inherited: boolean;
+  count: number;
+  memories: OrgPolicyMemory[];
+  /** Policies the caller's audience may not see. */
+  withheld: number;
+  withheld_reason: string | null;
 }
 
 export interface AskResult {
-  answer: string;
-  citations?: Citation[];
-  envelope?: Record<string, unknown>;
-  [key: string]: unknown;
-}
-
-export interface Citation {
-  id: MemoryId;
-  uri?: string;
-  score?: number;
-  excerpt?: string;
-  [key: string]: unknown;
+  source: RagSource;
+  envelope: RagEnvelope;
+  trace: RagTrace;
+  org_policy: OrgPolicyBlock;
+  /** Present when `source` is `"context_package"`. */
+  context_package?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
-// Search
+// Search (GET /api/search)
 // ---------------------------------------------------------------------------
 
 export interface SearchOptions {
   workspace?: string;
   limit?: number;
+  offset?: number;
+  /** `"memory"` restricts results to durable memories. */
+  type?: "memory";
 }
 
 export interface SearchResult {
+  query: string;
   results: SearchHit[];
-  [key: string]: unknown;
+  pagination: Pagination;
 }
 
 export interface SearchHit {
-  id: MemoryId;
-  content: string;
-  score?: number;
-  audience?: Audience;
-  metadata?: Record<string, unknown>;
-  [key: string]: unknown;
+  id: string;
+  title: string | null;
+  node: string | null;
+  genre: string | null;
+  uri: string | null;
+  content: string | null;
+  l0_abstract: string | null;
+  sn_ratio: number | null;
+  score: number | null;
+  workspace_id: string | null;
+  metadata: Record<string, unknown> | null;
+  /** True for an org policy memory inherited from the tenant's org section. */
+  inherited: boolean;
+  /** Workspace the hit came from. Equals the hit's own workspace unless inherited. */
+  source_workspace_id: string | null;
 }
 
 // ---------------------------------------------------------------------------
-// Grep
+// Grep (GET /api/grep)
 // ---------------------------------------------------------------------------
+
+export type GrepScale = "document" | "section" | "paragraph" | "chunk";
 
 export interface GrepOptions {
   workspace?: string;
+  /**
+   * One of the Engine's canonical intents: request_info, propose_decision,
+   * record_fact, express_concern, commit_action, reference, narrate, reflect,
+   * specify, measure. Other values are ignored by the Engine.
+   */
   intent?: string;
-  scale?: string;
+  scale?: GrepScale;
   modality?: string;
   limit?: number;
+  offset?: number;
   literal?: boolean;
+  /** Restrict to a node slug or slug prefix. */
+  path?: string;
 }
 
 export interface GrepResult {
+  query: string;
+  workspace_id: string;
   results: GrepHit[];
-  [key: string]: unknown;
+  pagination: Pagination;
 }
 
+/** One matching chunk, with the signal trace of the chunk. */
 export interface GrepHit {
-  id: MemoryId;
-  content: string;
-  score?: number;
-  [key: string]: unknown;
+  /** Slug of the node the chunk belongs to. */
+  slug: string;
+  scale: GrepScale;
+  intent: string | null;
+  sn_ratio: number | null;
+  modality: string | null;
+  snippet: string;
+  score: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,17 +273,9 @@ export interface RecallOwnsOptions {
   workspace?: string;
 }
 
-export interface RecallResult {
-  items: RecallItem[];
-  [key: string]: unknown;
-}
-
-export interface RecallItem {
-  id?: MemoryId;
-  content?: string;
-  timestamp?: string;
-  actor?: string;
-  [key: string]: unknown;
+/** Same object as {@link AskResult}, plus the question the Engine asked. */
+export interface RecallResult extends AskResult {
+  recall_query: string;
 }
 
 // ---------------------------------------------------------------------------
