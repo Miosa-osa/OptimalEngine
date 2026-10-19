@@ -352,6 +352,7 @@ Applying stops at the first failing version, which rolls back alone: the error n
 | Status | `error` | Meaning |
 | --- | --- | --- |
 | 400 | `workspace_required`, `workspace_mismatch` | Name exactly one workspace. |
+| 400, 413, 415 | `invalid_json`, `request_too_large`, `unsupported_media_type` | The body is not valid JSON, is over the request size limit, or has a content type the Engine does not parse; every Engine route answers these the same way. |
 | 401 | `missing_api_key`, `invalid_api_key`, `api_key_revoked`, `api_key_expired` | Authentication. |
 | 403 | `permission_scope_denied`, `workspace_scope_denied`, `data_key_confined`, `collection_not_allowed`, `operation_not_allowed`, `owner_mismatch`, `owner_scope_cascade`, `data_admin_required` | Authorization. |
 | 404 | `collection_not_found`, `record_not_found`, `file_not_found`, `index_not_found`, `field_not_found`, `key_not_found` | Absent, or not visible to the caller. |
