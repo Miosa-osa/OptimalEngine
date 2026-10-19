@@ -128,6 +128,13 @@ print("back:", json.dumps(back, sort_keys=True))
 sys.exit(1)
 PY
 
+echo "== step 8: authority requests (what the console proxies)"
+code=$(curl -s -o "$DATA/authority.json" -w "%{http_code}" \
+  -H "Authorization: Bearer $key" "$url/api/authority/requests?status=pending")
+echo "AUTHORITY_STATUS=$code"
+head -c 300 "$DATA/authority.json" || true
+echo
+
 elapsed=$(( $(date +%s) - started ))
 echo "QUICKSTART_SECONDS=$elapsed"
 [ "$elapsed" -lt 900 ] || fail "the quickstart took longer than 15 minutes"
