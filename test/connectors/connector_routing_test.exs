@@ -90,6 +90,40 @@ defmodule OptimalEngine.Connectors.ConnectorRoutingTest do
      sender: "jane@#{domain}"}
   end
 
+  describe "what a pulled Signal leaves on disk" do
+    test "nothing: it is stored in the database once, by its source id", ctx do
+      files_before = signal_files()
+
+      run_scripted(ctx, [%{"id" => "disk-1", "modified_at" => "2026-10-14T09:30:00Z"}])
+      # A second pull of the same item replaces its row.
+      Store.raw_query("UPDATE connectors SET cursor = NULL WHERE id = ?1", [ctx.connector_id])
+
+      {:ok, _} =
+        Runner.run(ctx.connector_id,
+          adapter: ScriptedAdapter,
+          signal_sink: PullScheduler.intake_sink()
+        )
+
+      assert contexts_in(ctx.workspace, ctx.title) == 1
+      assert signal_files() -- files_before == []
+
+      {:ok, [[uri, path]]} =
+        Store.raw_query("SELECT uri, path FROM contexts WHERE workspace_id = ?1 AND title = ?2", [
+          ctx.workspace,
+          ctx.title
+        ])
+
+      assert uri == "optimal://connectors/scripted/disk-1"
+      assert path in [nil, ""]
+    end
+
+    test "a connector with write_files: true still writes markdown", ctx do
+      files_before = signal_files()
+      run_scripted(ctx, [%{"id" => "disk-2"}], config: %{"write_files" => true})
+      refute signal_files() -- files_before == []
+    end
+  end
+
   describe "routing rules run before the connector's own workspace" do
     test "a sender rule claims the Signal for the workspace it names", ctx do
       add_rule(ctx.other, "sender", ctx.sender)
@@ -318,6 +352,11 @@ defmodule OptimalEngine.Connectors.ConnectorRoutingTest do
 
     assert result.status == :success
     result
+  end
+
+  defp signal_files do
+    root = Application.get_env(:optimal_engine, :root_path, "")
+    Path.wildcard(Path.join(root, "**/signals/*.md"))
   end
 
   defp add_rule(workspace_id, field, pattern, weight \\ 10) do

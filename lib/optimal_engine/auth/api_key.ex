@@ -198,12 +198,14 @@ defmodule OptimalEngine.Auth.ApiKey do
     limit = Keyword.get(opts, :limit, 50)
     offset = Keyword.get(opts, :offset, 0)
 
+    # created_at has one-second resolution, so keys minted in the same second
+    # tie; rowid breaks the tie, newest first, so pages never skip or repeat.
     sql = """
     SELECT id, tenant_id, principal_id, prefix, name, scopes, workspace_scope,
            expires_at, created_at, last_used_at, revoked_at, metadata
     FROM api_keys
     WHERE tenant_id = ?1 AND revoked_at IS NULL
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC, rowid DESC
     LIMIT ?2 OFFSET ?3
     """
 

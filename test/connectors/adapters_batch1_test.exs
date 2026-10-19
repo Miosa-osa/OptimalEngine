@@ -329,7 +329,10 @@ defmodule OptimalEngine.Connectors.AdaptersBatch1Test do
                OptimalEngine.Connectors.Adapters.Gmail.transform(raw)
 
       assert sig.title == "Test subject"
-      assert sig.content == "Hello from test"
+      # The header block, then the body (here only the snippet is present).
+      assert sig.content ==
+               "From: Alice <alice@example.com>\nSubject: Test subject\n\nHello from test"
+
       assert sig.genre == "email"
       assert "alice@example.com" in sig.entities
       assert sig.path =~ "optimal://connectors/gmail/abc123"

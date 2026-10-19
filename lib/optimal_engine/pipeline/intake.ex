@@ -144,6 +144,15 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   Options include all classification overrides plus:
   - `:workspace_id` — target workspace (default: "default")
+  - `:write_files` — `false` stores the signal in the database only: no
+    markdown file, no cross-reference copies, no summary sidecars (default
+    `true`). Connector pulls use this.
+  - `:source_id` — a stable id for the item in its source; the row id is
+    derived from it and the workspace, so ingesting the same item again
+    replaces its row instead of adding another
+  - `:source_uri` — the row's uri when no file is written
+  - `:occurred_at` — when the item happened (a `DateTime`); dates the signal
+    instead of the time of intake
   """
   @spec process(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def process(raw_text, opts \\ []) when is_binary(raw_text) do
@@ -226,12 +235,12 @@ defmodule OptimalEngine.Pipeline.Intake do
     # Source-first: the Source Package is committed BEFORE any interpretation,
     # so reject/quarantine/failure paths can never lose the source evidence.
     with :ok <- persist_source_package(source_package),
-         {:ok, signal} <- classify_step(raw_text, opts),
+         {:ok, signal} <- classify_step(raw_text, scope, opts),
          {:ok, signal} <- quality_gate(signal, source_package, scope),
          {:ok, signal, routed_to} <- route_step(signal, opts),
-         {:ok, primary_path} <- write_step(signal, scope),
-         {:ok, cross_paths} <- cross_ref_step(signal, routed_to, scope),
-         {:ok, context} <- index_step(signal, primary_path, scope),
+         {:ok, primary_path} <- write_step(signal, scope, opts),
+         {:ok, cross_paths} <- cross_ref_step(signal, routed_to, scope, opts),
+         {:ok, context} <- index_step(signal, primary_path, scope, opts),
          {:ok, pending_claim} <-
            extract_claims_step(source_package, signal, scope, opts) do
       # Persist detail objects for each extracted entity as a step record
@@ -269,8 +278,8 @@ defmodule OptimalEngine.Pipeline.Intake do
       # predicates queryable via Graph.assert_edge. Never fails the pipeline.
       emit_semantic_edges(signal, context, scope)
 
-      uri = URI.from_path(primary_path)
-      primary_relative = relative(primary_path)
+      uri = context.uri
+      files_written = if primary_path, do: [relative(primary_path)], else: []
       cross_relatives = Enum.map(cross_paths, &relative/1)
 
       # Semantic processing: LLM-enhanced L0/L1 + embedding (async, non-blocking)
@@ -288,7 +297,7 @@ defmodule OptimalEngine.Pipeline.Intake do
         signal: signal,
         context: context,
         source_package: source_package,
-        files_written: [primary_relative],
+        files_written: files_written,
         routed_to: routed_to,
         cross_references: cross_relatives,
         uri: uri,
@@ -538,7 +547,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   end
 
   # Step 1: Classify
-  defp classify_step(raw_text, opts) do
+  defp classify_step(raw_text, scope, opts) do
     topology = load_topology()
 
     # Known entities come from (1) the legacy topology.yaml endpoints and
@@ -547,12 +556,14 @@ defmodule OptimalEngine.Pipeline.Intake do
     known_entities = Enum.uniq(topology_entities(topology) ++ db_entity_names())
 
     now = DateTime.utc_now()
+    occurred_at = occurred_at(opts) || now
+    id = source_context_id(scope.workspace_id, opts) || generate_id(raw_text, now)
 
     signal =
       raw_text
       |> classify(Keyword.put(opts, :known_entities, known_entities))
       |> then(fn s ->
-        %{s | id: generate_id(raw_text, now), created_at: now, modified_at: now}
+        %{s | id: id, created_at: occurred_at, modified_at: occurred_at}
       end)
 
     {:ok, signal}
@@ -579,12 +590,18 @@ defmodule OptimalEngine.Pipeline.Intake do
   end
 
   # Step 3: Write primary file (Node folders resolve through workspace topology)
-  defp write_step(%Signal{} = signal, %ScopeEnvelope{} = scope) do
-    Writer.write_signal(signal, ScopeEnvelope.folder_scope(scope))
+  defp write_step(%Signal{} = signal, %ScopeEnvelope{} = scope, opts) do
+    if write_files?(opts),
+      do: Writer.write_signal(signal, ScopeEnvelope.folder_scope(scope)),
+      else: {:ok, nil}
   end
 
   # Step 4: Write cross-references
-  defp cross_ref_step(%Signal{} = signal, routed_to, %ScopeEnvelope{} = scope) do
+  defp cross_ref_step(%Signal{} = signal, routed_to, %ScopeEnvelope{} = scope, opts) do
+    if write_files?(opts), do: write_cross_refs(signal, routed_to, scope), else: {:ok, []}
+  end
+
+  defp write_cross_refs(%Signal{} = signal, routed_to, %ScopeEnvelope{} = scope) do
     folder_scope = ScopeEnvelope.folder_scope(scope)
     primary_folder = Writer.node_to_folder(signal.node, folder_scope)
 
@@ -597,10 +614,16 @@ defmodule OptimalEngine.Pipeline.Intake do
     Writer.write_cross_references(signal, cross_nodes, folder_scope)
   end
 
-  # Step 5: Index — write the primary file to SQLite via Indexer
-  defp index_step(%Signal{} = signal, primary_path, %ScopeEnvelope{} = scope) do
+  # Step 5: Index — write the primary file to SQLite via Indexer. Without a
+  # file the row is the only copy: its uri is the source's, and it has no path.
+  defp index_step(%Signal{} = signal, primary_path, %ScopeEnvelope{} = scope, opts) do
     # Build a complete context for storage
-    uri = URI.from_path(primary_path)
+    uri =
+      if primary_path,
+        do: URI.from_path(primary_path),
+        else:
+          Keyword.get(opts, :source_uri) || "optimal://#{scope.workspace_id}/signals/#{signal.id}"
+
     workspace_id = scope.workspace_id
 
     context = %Context{
@@ -625,7 +648,7 @@ defmodule OptimalEngine.Pipeline.Intake do
 
     case Store.insert_context(context) do
       :ok ->
-        index_cross_refs(signal, scope)
+        if primary_path, do: index_cross_refs(signal, scope)
         {:ok, context}
 
       {:error, _} = err ->
@@ -967,6 +990,29 @@ defmodule OptimalEngine.Pipeline.Intake do
   defp relative(abs_path) do
     root = Application.get_env(:optimal_engine, :root_path, "")
     String.replace_prefix(abs_path, root <> "/", "")
+  end
+
+  defp write_files?(opts), do: Keyword.get(opts, :write_files, true) != false
+
+  defp occurred_at(opts) do
+    case Keyword.get(opts, :occurred_at) do
+      %DateTime{} = at -> at
+      _none -> nil
+    end
+  end
+
+  # Stable per workspace: the same source item in one workspace is one row,
+  # and the same item pulled into two workspaces is two.
+  defp source_context_id(workspace_id, opts) do
+    case Keyword.get(opts, :source_id) do
+      source_id when is_binary(source_id) and source_id != "" ->
+        :crypto.hash(:sha256, "#{workspace_id}\0#{source_id}")
+        |> Base.encode16(case: :lower)
+        |> String.slice(0, 32)
+
+      _none ->
+        nil
+    end
   end
 
   defp generate_id(text, dt) do

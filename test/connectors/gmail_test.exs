@@ -2,8 +2,9 @@ defmodule OptimalEngine.Connectors.GmailTest do
   @moduledoc """
   Gmail adapter end to end against a recorded Gmail API recording
   (`test/fixtures/connectors/gmail/routes.json`): token refresh, a two-page
-  message list, message fetch with metadata headers, the profile historyId, and
-  an incremental history poll.
+  message list, full-format message fetch, the profile historyId, and an
+  incremental history poll. Only the full-format fetch is recorded, so an
+  adapter that asks for less finds no message.
   """
 
   use ExUnit.Case, async: false
@@ -52,24 +53,64 @@ defmodule OptimalEngine.Connectors.GmailTest do
                k == "authorization" and v == "Bearer ya29.example-access-token"
              end)
 
-      # The initial pull is bounded by the lookback window, not by everything.
+      # The initial pull is bounded by the lookback window, not by everything,
+      # and leaves out Gmail's promotions, social, updates and forums tabs.
       [list_call | _] = ConnectorFixtureStub.calls_matching(stub, "/messages?maxResults=100")
-      assert String.contains?(list_call.url, "q=after%3A")
+      query = list_call.url |> URI.parse() |> Map.get(:query) |> URI.decode_query() |> Map.get("q")
+      assert query =~ ~r/^after:\d+ /
+
+      for category <- ~w(promotions social updates forums) do
+        assert query =~ "-category:#{category}"
+      end
     end
 
-    test "maps sender, subject, snippet and the epoch-millisecond date", %{stub: _stub} do
+    test "maps sender, subject, the whole text body and the epoch-millisecond date", %{
+      stub: _stub
+    } do
       {:ok, state} = Gmail.init(@config)
       {:ok, %{signals: signals}} = Gmail.sync(state, nil)
 
       [order_form] = Enum.filter(signals, &(&1.title == "Order form for Example Co"))
 
       assert order_form.genre == "email"
-      assert order_form.content == "Please send the signed order form by Friday."
+      assert order_form.content =~ "From: Jane Example <jane@example.com>"
+      assert order_form.content =~ "To: Ops <ops@example.com>"
+      assert order_form.content =~ "Subject: Order form for Example Co"
+      # The text/plain body, not Gmail's short snippet.
+      assert order_form.content =~ "The second page needs both initials."
       assert "jane@example.com" in order_form.entities
       assert order_form.path == "optimal://connectors/gmail/msg-0001"
 
-      # internalDate is epoch milliseconds in a string, not ISO-8601.
+      # internalDate is epoch milliseconds in a string, not ISO-8601, and it
+      # dates the signal: when the mail arrived, not when it was pulled.
       assert DateTime.to_unix(order_form.modified_at) == 1_793_016_000
+      assert DateTime.to_unix(order_form.created_at) == 1_793_016_000
+    end
+
+    test "an HTML-only message is reduced to its text", %{stub: _stub} do
+      {:ok, state} = Gmail.init(@config)
+      {:ok, %{signals: signals}} = Gmail.sync(state, nil)
+
+      [invoice] = Enum.filter(signals, &(&1.title == "Invoice INV-0007 overdue"))
+      assert invoice.content =~ "Payment of $1,200 is due 2026-11-01."
+      refute invoice.content =~ "<b>"
+    end
+
+    test "every message is fetched in full format", %{stub: stub} do
+      {:ok, state} = Gmail.init(@config)
+      {:ok, _result} = Gmail.sync(state, nil)
+
+      fetches = ConnectorFixtureStub.calls_matching(stub, "/messages/msg-")
+      assert length(fetches) == 3
+      assert Enum.all?(fetches, &String.contains?(&1.url, "format=full"))
+    end
+
+    test "exclude_categories: [] reads every tab", %{stub: stub} do
+      {:ok, state} = Gmail.init(Map.put(@config, "exclude_categories", []))
+      {:ok, _result} = Gmail.sync(state, nil)
+
+      [list_call | _] = ConnectorFixtureStub.calls_matching(stub, "/messages?maxResults=100")
+      refute list_call.url =~ "category"
     end
   end
 
@@ -80,9 +121,12 @@ defmodule OptimalEngine.Connectors.GmailTest do
       assert {:ok, %{signals: signals, cursor: cursor}} = Gmail.sync(state, "900001")
 
       assert cursor == "900002"
+
+      # The poll also added a promotions message and a spam message; neither
+      # is kept. Header names are matched without regard to case.
       assert [signal] = signals
       assert signal.title == "Delivery address"
-      assert signal.content == "Can you confirm the delivery address please?"
+      assert signal.content =~ "Can you confirm the delivery address please? We ship on Thursday."
       assert "jane@example.com" in signal.entities
     end
   end
@@ -149,6 +193,23 @@ defmodule OptimalEngine.Connectors.GmailTest do
   end
 
   describe "transform/1" do
+    test "a long body is cut to a bounded size" do
+      long = String.duplicate("word ", 10_000)
+
+      raw = %{
+        "id" => "msg-long",
+        "payload" => %{
+          "mimeType" => "text/plain",
+          "headers" => [%{"name" => "Subject", "value" => "Long"}],
+          "body" => %{"data" => Base.url_encode64(long, padding: false)}
+        }
+      }
+
+      assert {:ok, signal} = Gmail.transform(raw)
+      assert String.length(signal.content) <= 20_100
+      assert signal.content =~ "Subject: Long"
+    end
+
     test "returns a Signal for a minimal payload" do
       raw = %{"id" => "msg-9", "snippet" => "Hello", "payload" => %{"headers" => []}}
 

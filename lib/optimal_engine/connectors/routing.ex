@@ -121,6 +121,9 @@ defmodule OptimalEngine.Connectors.Routing do
     }
   end
 
+  defp source_uri("optimal://" <> _rest = uri), do: uri
+  defp source_uri(_path), do: nil
+
   @doc """
   Drives one connector Signal through intake into its workspace, then records
   what it leaves behind: the open loops it implies, and an `outward` event when
@@ -135,13 +138,20 @@ defmodule OptimalEngine.Connectors.Routing do
     default_workspace = Map.get(scope, :workspace_id, "default")
     placed = workspace_for(tenant_id, signal, config, default_workspace)
 
+    # A pulled item is stored in the database only, once per source item, and
+    # dated when it happened. A connector that wants markdown files on disk
+    # sets `"write_files": true`.
     intake_opts =
       [
         workspace_id: placed.workspace_id,
         tenant_id: tenant_id,
         genre: signal.genre,
         title: signal.title,
-        entities: signal.entities || []
+        entities: signal.entities || [],
+        write_files: value(config, "write_files") == true,
+        source_id: signal.id,
+        source_uri: source_uri(signal.path),
+        occurred_at: signal.created_at
       ]
       |> Keyword.reject(fn {_key, value} -> is_nil(value) end)
 

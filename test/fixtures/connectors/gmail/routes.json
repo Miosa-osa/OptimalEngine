@@ -1,6 +1,6 @@
 {
   "kind": "gmail",
-  "note": "Recorded shapes of the Gmail API: token refresh, a two-page message list, message fetch with metadata headers, profile historyId, and an incremental history poll. Invented data only.",
+  "note": "Recorded shapes of the Gmail API: token refresh, a two-page message list, full-format message fetch (headers plus base64url text/plain and text/html parts), profile historyId, and an incremental history poll that also adds a promotions message and a spam message. Invented data only.",
   "routes": [
     {
       "name": "token_refresh",
@@ -57,96 +57,6 @@
       }
     },
     {
-      "name": "message_msg_0001",
-      "match": {
-        "method": "GET",
-        "contains": "/messages/msg-0001"
-      },
-      "status": 200,
-      "body": {
-        "id": "msg-0001",
-        "threadId": "thread-0001",
-        "internalDate": "1793016000000",
-        "snippet": "Please send the signed order form by Friday.",
-        "payload": {
-          "headers": [
-            {
-              "name": "Subject",
-              "value": "Order form for Example Co"
-            },
-            {
-              "name": "From",
-              "value": "Jane Example <jane@example.com>"
-            },
-            {
-              "name": "Date",
-              "value": "Sun, 26 Oct 2026 09:00:00 +0000"
-            }
-          ]
-        }
-      }
-    },
-    {
-      "name": "message_msg_0002",
-      "match": {
-        "method": "GET",
-        "contains": "/messages/msg-0002"
-      },
-      "status": 200,
-      "body": {
-        "id": "msg-0002",
-        "threadId": "thread-0002",
-        "internalDate": "1793019600000",
-        "snippet": "Invoice INV-0007 payment is due 2026-11-01.",
-        "payload": {
-          "headers": [
-            {
-              "name": "Subject",
-              "value": "Invoice INV-0007 overdue"
-            },
-            {
-              "name": "From",
-              "value": "Accounts <accounts@example.com>"
-            },
-            {
-              "name": "Date",
-              "value": "Sun, 26 Oct 2026 10:00:00 +0000"
-            }
-          ]
-        }
-      }
-    },
-    {
-      "name": "message_msg_0003",
-      "match": {
-        "method": "GET",
-        "contains": "/messages/msg-0003"
-      },
-      "status": 200,
-      "body": {
-        "id": "msg-0003",
-        "threadId": "thread-0003",
-        "internalDate": "1793023200000",
-        "snippet": "Thanks, noted.",
-        "payload": {
-          "headers": [
-            {
-              "name": "Subject",
-              "value": "Re: kickoff"
-            },
-            {
-              "name": "From",
-              "value": "Sam Sample <sam@example.com>"
-            },
-            {
-              "name": "Date",
-              "value": "Sun, 26 Oct 2026 11:00:00 +0000"
-            }
-          ]
-        }
-      }
-    },
-    {
       "name": "profile",
       "match": {
         "method": "GET",
@@ -177,6 +87,18 @@
                   "id": "msg-0004",
                   "threadId": "thread-0004"
                 }
+              },
+              {
+                "message": {
+                  "id": "msg-0005",
+                  "threadId": "thread-0005"
+                }
+              },
+              {
+                "message": {
+                  "id": "msg-0006",
+                  "threadId": "thread-0006"
+                }
               }
             ]
           }
@@ -185,30 +107,295 @@
       }
     },
     {
-      "name": "message_msg_0004",
+      "name": "message_msg_0001",
       "match": {
         "method": "GET",
-        "contains": "/messages/msg-0004"
+        "contains": "/messages/msg-0001?format=full"
       },
       "status": 200,
       "body": {
-        "id": "msg-0004",
-        "threadId": "thread-0004",
-        "internalDate": "1793026800000",
-        "snippet": "Can you confirm the delivery address please?",
+        "id": "msg-0001",
+        "threadId": "thread-0001",
+        "labelIds": [
+          "INBOX"
+        ],
+        "internalDate": "1793016000000",
+        "snippet": "Please send the signed order form by Friday.",
         "payload": {
+          "mimeType": "multipart/alternative",
           "headers": [
             {
               "name": "Subject",
-              "value": "Delivery address"
+              "value": "Order form for Example Co"
             },
             {
               "name": "From",
               "value": "Jane Example <jane@example.com>"
             },
             {
+              "name": "To",
+              "value": "Ops <ops@example.com>"
+            },
+            {
               "name": "Date",
+              "value": "Sun, 26 Oct 2026 09:00:00 +0000"
+            }
+          ],
+          "body": {
+            "size": 0
+          },
+          "parts": [
+            {
+              "partId": "0",
+              "mimeType": "text/plain",
+              "body": {
+                "size": 105,
+                "data": "SGkgdGVhbSwKClBsZWFzZSBzZW5kIHRoZSBzaWduZWQgb3JkZXIgZm9ybSBieSBGcmlkYXkuIFRoZSBzZWNvbmQgcGFnZSBuZWVkcyBib3RoIGluaXRpYWxzLgoKVGhhbmtzLApKYW5l"
+              }
+            },
+            {
+              "partId": "1",
+              "mimeType": "text/html",
+              "body": {
+                "size": 66,
+                "data": "PHA-SGkgdGVhbSw8L3A-PHA-UGxlYXNlIHNlbmQgdGhlIHNpZ25lZCBvcmRlciBmb3JtIGJ5IEZyaWRheS48L3A-"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "message_msg_0002",
+      "match": {
+        "method": "GET",
+        "contains": "/messages/msg-0002?format=full"
+      },
+      "status": 200,
+      "body": {
+        "id": "msg-0002",
+        "threadId": "thread-0002",
+        "labelIds": [
+          "INBOX"
+        ],
+        "internalDate": "1793019600000",
+        "snippet": "Invoice INV-0007 payment is due 2026-11-01.",
+        "payload": {
+          "mimeType": "multipart/alternative",
+          "headers": [
+            {
+              "name": "Subject",
+              "value": "Invoice INV-0007 overdue"
+            },
+            {
+              "name": "From",
+              "value": "Accounts <accounts@example.com>"
+            },
+            {
+              "name": "Date",
+              "value": "Sun, 26 Oct 2026 10:00:00 +0000"
+            }
+          ],
+          "body": {
+            "size": 0
+          },
+          "parts": [
+            {
+              "partId": "0",
+              "mimeType": "text/html",
+              "body": {
+                "size": 101,
+                "data": "PGh0bWw-PGJvZHk-PGgxPkludm9pY2UgSU5WLTAwMDc8L2gxPjxwPlBheW1lbnQgb2YgPGI-JDEsMjAwPC9iPiBpcyBkdWUgMjAyNi0xMS0wMS48L3A-PC9ib2R5PjwvaHRtbD4"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "message_msg_0003",
+      "match": {
+        "method": "GET",
+        "contains": "/messages/msg-0003?format=full"
+      },
+      "status": 200,
+      "body": {
+        "id": "msg-0003",
+        "threadId": "thread-0003",
+        "labelIds": [
+          "INBOX"
+        ],
+        "internalDate": "1793023200000",
+        "snippet": "Thanks, noted.",
+        "payload": {
+          "mimeType": "multipart/alternative",
+          "headers": [
+            {
+              "name": "Subject",
+              "value": "Re: kickoff"
+            },
+            {
+              "name": "From",
+              "value": "Sam Sample <sam@example.com>"
+            },
+            {
+              "name": "Date",
+              "value": "Sun, 26 Oct 2026 11:00:00 +0000"
+            }
+          ],
+          "body": {
+            "size": 0
+          },
+          "parts": [
+            {
+              "partId": "0",
+              "mimeType": "text/plain",
+              "body": {
+                "size": 30,
+                "data": "VGhhbmtzLCBub3RlZC4gU2VlIHlvdSBNb25kYXku"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "message_msg_0004",
+      "match": {
+        "method": "GET",
+        "contains": "/messages/msg-0004?format=full"
+      },
+      "status": 200,
+      "body": {
+        "id": "msg-0004",
+        "threadId": "thread-0004",
+        "labelIds": [
+          "INBOX"
+        ],
+        "internalDate": "1793026800000",
+        "snippet": "Can you confirm the delivery address please?",
+        "payload": {
+          "mimeType": "multipart/alternative",
+          "headers": [
+            {
+              "name": "subject",
+              "value": "Delivery address"
+            },
+            {
+              "name": "from",
+              "value": "Jane Example <jane@example.com>"
+            },
+            {
+              "name": "date",
               "value": "Sun, 26 Oct 2026 12:00:00 +0000"
+            }
+          ],
+          "body": {
+            "size": 0
+          },
+          "parts": [
+            {
+              "partId": "0",
+              "mimeType": "text/plain",
+              "body": {
+                "size": 65,
+                "data": "Q2FuIHlvdSBjb25maXJtIHRoZSBkZWxpdmVyeSBhZGRyZXNzIHBsZWFzZT8gV2Ugc2hpcCBvbiBUaHVyc2RheS4"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "message_msg_0005",
+      "match": {
+        "method": "GET",
+        "contains": "/messages/msg-0005?format=full"
+      },
+      "status": 200,
+      "body": {
+        "id": "msg-0005",
+        "threadId": "thread-0005",
+        "labelIds": [
+          "INBOX",
+          "CATEGORY_PROMOTIONS"
+        ],
+        "internalDate": "1793027000000",
+        "snippet": "Everything is half off.",
+        "payload": {
+          "mimeType": "multipart/alternative",
+          "headers": [
+            {
+              "name": "Subject",
+              "value": "48 hour sale"
+            },
+            {
+              "name": "From",
+              "value": "Shop <deals@example.com>"
+            },
+            {
+              "name": "Date",
+              "value": "Sun, 26 Oct 2026 12:10:00 +0000"
+            }
+          ],
+          "body": {
+            "size": 0
+          },
+          "parts": [
+            {
+              "partId": "0",
+              "mimeType": "text/plain",
+              "body": {
+                "size": 23,
+                "data": "RXZlcnl0aGluZyBpcyBoYWxmIG9mZi4"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "message_msg_0006",
+      "match": {
+        "method": "GET",
+        "contains": "/messages/msg-0006?format=full"
+      },
+      "status": 200,
+      "body": {
+        "id": "msg-0006",
+        "threadId": "thread-0006",
+        "labelIds": [
+          "SPAM"
+        ],
+        "internalDate": "1793027100000",
+        "snippet": "Claim now.",
+        "payload": {
+          "mimeType": "multipart/alternative",
+          "headers": [
+            {
+              "name": "Subject",
+              "value": "You won"
+            },
+            {
+              "name": "From",
+              "value": "Spam <spam@example.com>"
+            },
+            {
+              "name": "Date",
+              "value": "Sun, 26 Oct 2026 12:11:00 +0000"
+            }
+          ],
+          "body": {
+            "size": 0
+          },
+          "parts": [
+            {
+              "partId": "0",
+              "mimeType": "text/plain",
+              "body": {
+                "size": 10,
+                "data": "Q2xhaW0gbm93Lg"
+              }
             }
           ]
         }
