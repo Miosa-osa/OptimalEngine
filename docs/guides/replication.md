@@ -32,6 +32,13 @@ The peer key is an API key on the peer limited to the workspace with the `sync` 
 Policies per peer: `push`, `pull`, `both`, `none`.
 The data-class gate (`max_class`, default `confidential`) applies on send and on receive: a workspace whose `metadata.data_class` is above it is refused whole, and rows whose `security_labels` include a class above it never leave the Engine.
 
+### Syncing through a relay
+
+An Engine that cannot be dialed (a laptop behind NAT is the initiator; a managed Engine in an isolated network cannot dial out to peers) syncs through a relay in front of the other Engine.
+Register the peer with a `relay+` URL: `{"url": "relay+https://host/api/v1/engines/<id>/sync", "api_key": "<relay key>", "policy": "both"}`.
+Each cycle the local Engine pulls with `GET <base>/pull?workspace=&since=` and pushes with `POST <base>/push`; the bodies are those of `GET|POST /api/sync/changes`.
+The local Engine is always the initiator, no peer Engine address is stored, and the same idempotency keys make a repeated cycle change nothing.
+
 ## Conflicts
 
 When both sides changed the same row since the last sync, the newer change wins by its time and the conflict is recorded with both versions.
