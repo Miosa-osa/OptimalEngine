@@ -76,7 +76,9 @@ defmodule OptimalEngine.Graph do
 
   Options:
   - `:workspace_id` — only hydrate edges from this workspace (default: all)
-  - `:limit`        — max rows to load (default: 100_000)
+  - `:after_id`     — only edges with a larger id (default: 0, every edge)
+  - `:limit`        — max rows to load (default: `:all`; a cap leaves the
+    newest edges out of the store)
   - `:batch_size`   — rows fetched per Store call (default: 1_000)
 
   Returns `{:ok, count}` or `{:error, reason}`.
@@ -85,10 +87,12 @@ defmodule OptimalEngine.Graph do
           {:ok, non_neg_integer()} | {:error, term()}
   def hydrate_triple_store(store, opts \\ []) do
     ws = Keyword.get(opts, :workspace_id)
-    limit = Keyword.get(opts, :limit, 100_000)
-    batch_size = Keyword.get(opts, :batch_size, 1_000) |> min(limit) |> max(1)
+    limit = Keyword.get(opts, :limit, :all)
+    after_id = Keyword.get(opts, :after_id, 0)
+    batch_size = Keyword.get(opts, :batch_size, 1_000) |> max(1)
+    batch_size = if is_integer(limit), do: batch_size |> min(limit) |> max(1), else: batch_size
 
-    case hydrate_triple_store_pages(store, ws, limit, batch_size, 0, 0) do
+    case hydrate_triple_store_pages(store, ws, limit, batch_size, after_id, 0) do
       {:ok, count} = result ->
         Logger.info("[Graph] Hydrated #{count} triples into Knowledge.Store from SQLite edges")
         result
@@ -104,11 +108,11 @@ defmodule OptimalEngine.Graph do
   end
 
   defp hydrate_triple_store_pages(_store, _ws, limit, _batch_size, _last_id, count)
-       when count >= limit,
+       when is_integer(limit) and count >= limit,
        do: {:ok, count}
 
   defp hydrate_triple_store_pages(store, ws, limit, batch_size, last_id, count) do
-    page_size = min(batch_size, limit - count)
+    page_size = if limit == :all, do: batch_size, else: min(batch_size, limit - count)
 
     {sql, params} =
       case ws do
