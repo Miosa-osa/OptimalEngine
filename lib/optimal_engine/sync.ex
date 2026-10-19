@@ -392,16 +392,17 @@ defmodule OptimalEngine.Sync do
           end) ->
             {:fail, :unknown_columns, mutation}
 
+          # An append-only row is named by its capture sequence on the Engine
+          # that wrote it, so a local row with the same name is a different
+          # row: it is always added, never a conflict.
+          Capture.rowid_key?(columns) ->
+            {:apply, %{mutation: mutation, columns: columns, conflict: nil}}
+
           true ->
             conflict =
-              local_conflict(
-                tenant_id,
-                workspace_id,
-                table,
-                mutation["entity_id"],
-                local,
-                last_sync
-              )
+              tenant_id
+              |> local_conflict(workspace_id, table, mutation["entity_id"], local, last_sync)
+              |> unless_same_content(mutation)
 
             {:apply, %{mutation: mutation, columns: columns, conflict: conflict}}
         end
@@ -696,6 +697,32 @@ defmodule OptimalEngine.Sync do
       {:ok, [[at, payload]]} -> %{occurred_at: at, payload: payload}
       _ -> nil
     end
+  end
+
+  # Bookkeeping columns record when this Engine wrote a row, not what the row
+  # says. Two Engines that derive the same row (a registry entry both create at
+  # boot) differ only there, and that is not a conflict.
+  @bookkeeping_columns ~w(created_at updated_at modified_at inserted_at recorded_at indexed_at
+                          transaction_time_start transaction_time_end)
+
+  defp unless_same_content(nil, _mutation), do: nil
+
+  defp unless_same_content(%{payload: payload} = conflict, mutation) do
+    local_row =
+      case Jason.decode(payload || "") do
+        {:ok, %{"row" => row}} when is_map(row) -> row
+        _ -> %{}
+      end
+
+    remote_row = get_in(mutation, ["payload", "row"]) || %{}
+
+    same? =
+      remote_row != %{} and
+        Enum.all?(remote_row, fn {name, value} ->
+          name in @bookkeeping_columns or Map.get(local_row, name) == value
+        end)
+
+    if same?, do: nil, else: conflict
   end
 
   defp known?(id) when is_binary(id) do
