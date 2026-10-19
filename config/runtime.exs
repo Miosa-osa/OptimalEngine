@@ -193,6 +193,12 @@ if profile = System.get_env("OPTIMAL_SIZE_PROFILE") do
   config :optimal_engine, :size_profile, profile
 end
 
+# Extra directories POST /api/assets may import server files from (an admin
+# key is required; the Engine root is always allowed), separated by ':'.
+if roots = System.get_env("OPTIMAL_ASSET_IMPORT_ROOTS") do
+  config :optimal_engine, :asset_import_roots, String.split(roots, ":", trim: true)
+end
+
 # Analyses: how often the day's analysis jobs are scheduled and drained.
 if interval = System.get_env("OPTIMAL_ANALYSES_INTERVAL_MS") do
   config :optimal_engine, :analyses_interval_ms, String.to_integer(interval)

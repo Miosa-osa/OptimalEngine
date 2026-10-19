@@ -17,7 +17,9 @@ defmodule OptimalEngine.Auth.ApiKey do
 
   require Logger
 
+  alias OptimalEngine.Auth.KeyCache
   alias OptimalEngine.Store
+  alias OptimalEngine.Tenancy.Tenant
 
   @token_prefix "oe_"
   @secret_bytes 32
@@ -73,6 +75,14 @@ defmodule OptimalEngine.Auth.ApiKey do
           {:ok, %{id: String.t(), secret: String.t(), key: String.t()}} | {:error, term()}
   def mint(attrs) do
     tenant_id = fetch!(attrs, :tenant_id)
+
+    case Tenant.get(tenant_id) do
+      {:ok, _tenant} -> mint_in(tenant_id, attrs)
+      _ -> {:error, :tenant_not_found}
+    end
+  end
+
+  defp mint_in(tenant_id, attrs) do
     name = fetch!(attrs, :name)
     id = generate_id()
     secret = generate_secret()
@@ -127,7 +137,7 @@ defmodule OptimalEngine.Auth.ApiKey do
          {:lookup, {:ok, key}} <- {:lookup, get_by_id(id)},
          {:revoked, false} <- {:revoked, revoked?(key)},
          {:expired, false} <- {:expired, expired?(key)},
-         {:bcrypt, true} <- {:bcrypt, Bcrypt.verify_pass(secret, key.hashed_secret)} do
+         {:bcrypt, true} <- {:bcrypt, secret_matches?(key, secret)} do
       {:ok, key}
     else
       {:parse, _} -> {:error, :invalid}
@@ -139,6 +149,22 @@ defmodule OptimalEngine.Auth.ApiKey do
   end
 
   def verify(_), do: {:error, :invalid}
+
+  # bcrypt runs once per key and secret; later requests compare a SHA-256
+  # (OptimalEngine.Auth.KeyCache). The row is still read on every request.
+  defp secret_matches?(key, secret) do
+    cond do
+      KeyCache.verified?(key.id, secret, key.hashed_secret) ->
+        true
+
+      Bcrypt.verify_pass(secret, key.hashed_secret) ->
+        KeyCache.remember(key.id, secret, key.hashed_secret)
+        true
+
+      true ->
+        false
+    end
+  end
 
   @doc """
   List non-revoked API keys for a tenant. Secrets are never returned.
@@ -183,6 +209,8 @@ defmodule OptimalEngine.Auth.ApiKey do
   @doc "Soft-revoke a key by id. Sets `revoked_at` to the current UTC timestamp."
   @spec revoke(String.t()) :: :ok | {:error, term()}
   def revoke(id) when is_binary(id) do
+    KeyCache.forget(id)
+
     case Store.raw_query(
            "UPDATE api_keys SET revoked_at = datetime('now') WHERE id = ?1 AND revoked_at IS NULL",
            [id]
@@ -200,6 +228,8 @@ defmodule OptimalEngine.Auth.ApiKey do
   @spec revoke(String.t(), String.t()) :: :ok | {:error, :not_found | term()}
   def revoke(id, tenant_id) when is_binary(id) and is_binary(tenant_id) do
     with :ok <- owned_by(id, tenant_id) do
+      KeyCache.forget(id)
+
       case Store.raw_query(
              """
              UPDATE api_keys SET revoked_at = datetime('now')
@@ -220,6 +250,8 @@ defmodule OptimalEngine.Auth.ApiKey do
   @spec delete(String.t(), String.t()) :: :ok | {:error, :not_found | term()}
   def delete(id, tenant_id) when is_binary(id) and is_binary(tenant_id) do
     with :ok <- owned_by(id, tenant_id) do
+      KeyCache.forget(id)
+
       case Store.raw_query("DELETE FROM api_keys WHERE id = ?1 AND tenant_id = ?2", [
              id,
              tenant_id

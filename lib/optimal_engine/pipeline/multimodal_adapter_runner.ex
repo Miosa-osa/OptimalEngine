@@ -36,8 +36,13 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunner do
     end
   end
 
+  # Commands come from the caller (in-process only), the deployment's
+  # `:adapter_commands` config (`%{"tool_id" => %{command: ..., args: [...]}}`),
+  # or the tool registry. The HTTP API never passes one.
   defp execute_or_record(asset, tool, opts) do
-    command = Keyword.get(opts, :command) || tool.command
+    configured = configured_command(tool.id)
+    command = Keyword.get(opts, :command) || configured[:command] || tool.command
+    opts = if configured[:args], do: Keyword.put_new(opts, :args, configured[:args]), else: opts
 
     cond do
       is_nil(command) ->
@@ -55,6 +60,11 @@ defmodule OptimalEngine.Pipeline.MultimodalAdapterRunner do
       true ->
         execute_command(asset, tool, command, opts)
     end
+  end
+
+  defp configured_command(tool_id) do
+    commands = Application.get_env(:optimal_engine, :adapter_commands, %{})
+    Map.get(commands, to_string(tool_id)) || Map.get(commands, tool_id) || %{}
   end
 
   defp execute_command(asset, tool, command, opts) do

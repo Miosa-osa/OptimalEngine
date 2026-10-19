@@ -800,6 +800,13 @@ defmodule OptimalEngine.API.RouterTest do
       transcript_json =
         Jason.encode!(%{segments: [%{start: 0.0, end: 1.0, text: "API upload segment"}]})
 
+      # The adapter's command is deployment configuration, not request input.
+      Application.put_env(:optimal_engine, :adapter_commands, %{
+        "openai_whisper" => %{command: "printf", args: [transcript_json]}
+      })
+
+      on_exit(fn -> Application.delete_env(:optimal_engine, :adapter_commands) end)
+
       conn =
         request(:post, "/api/assets", %{
           "workspace" => workspace_id,
@@ -809,8 +816,8 @@ defmodule OptimalEngine.API.RouterTest do
           "partition_ids" => ["project-api"],
           "adapter_id" => "openai_whisper",
           "adapter_role" => "audio_transcription",
-          "command" => "printf",
-          "args" => [transcript_json],
+          "command" => "sh",
+          "args" => ["-c", "echo request commands are ignored"],
           "confidence" => 0.83,
           "precision" => 0.74
         })

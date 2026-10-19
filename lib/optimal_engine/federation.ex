@@ -83,23 +83,36 @@ defmodule OptimalEngine.Federation do
     allowed = opts[:allowed]
     limit = opts |> Keyword.get(:limit, 10) |> max(1) |> min(50)
 
-    local =
-      tenant_id
-      |> Scope.sharing_workspaces(allowed)
-      |> Enum.map(fn workspace ->
+    local_sources = Scope.sharing_workspaces(tenant_id, allowed)
+    remote_sources = sharing_peers(tenant_id, allowed)
+
+    labels =
+      Enum.map(local_sources, &{&1.id, "local"}) ++
+        Enum.map(remote_sources, &{&1.workspace_id, &1.url})
+
+    tasks =
+      Enum.map(local_sources, fn workspace ->
         Task.async(fn ->
           {workspace.id, "local", local_search(tenant_id, workspace.id, query, limit)}
         end)
-      end)
+      end) ++
+        Enum.map(remote_sources, fn peer ->
+          Task.async(fn -> {peer.workspace_id, peer.url, remote_search(peer, query, limit)} end)
+        end)
 
-    remote =
-      tenant_id
-      |> sharing_peers(allowed)
-      |> Enum.map(fn peer ->
-        Task.async(fn -> {peer.workspace_id, peer.url, remote_search(peer, query, limit)} end)
-      end)
+    # A slow source is reported as timed out instead of failing the search.
+    outcomes =
+      tasks
+      |> Task.yield_many(@timeout + 1_000)
+      |> Enum.zip(labels)
+      |> Enum.map(fn
+        {{_task, {:ok, outcome}}, _label} ->
+          outcome
 
-    outcomes = Task.await_many(local ++ remote, @timeout + 1_000)
+        {{task, _timeout_or_exit}, {workspace_id, engine}} ->
+          Task.shutdown(task, :brutal_kill)
+          {workspace_id, engine, {:error, :timeout}}
+      end)
 
     results =
       outcomes
