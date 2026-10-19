@@ -7,7 +7,7 @@ Every route below is served under `/api`.
 A request carries `Authorization: Bearer oe_<id>_<secret>` unless the Engine runs with `OPTIMAL_AUTH_REQUIRED=false`.
 Authentication, workspace scope, and operation grants are enforced by `OptimalEngine.API.PermissionPlug`; `read` and `write` cover ordinary operations, while administration, app-data schema changes, claim review, and authority operations require their own grant.
 
-Routes: 270
+Routes: 277
 
 | Method | Path | Router |
 | --- | --- | --- |
@@ -159,6 +159,8 @@ Routes: 270
 | GET | `/api/optimal/nodes` | Router |
 | GET | `/api/optimal/nodes/:slug/files` | Router |
 | POST | `/api/optimality/classify` | Router |
+| GET | `/api/org-policy` | Router |
+| GET, PUT, DELETE | `/api/org-section` | Router |
 | GET, POST | `/api/organizations` | Router |
 | GET, POST | `/api/principals` | Router |
 | GET | `/api/principals/:id` | Router |
@@ -191,6 +193,9 @@ Routes: 270
 | POST | `/api/routing/seed` | Router |
 | GET | `/api/scope` | Router |
 | GET | `/api/search` | Router |
+| GET | `/api/sessions` | Router |
+| GET | `/api/sessions/:id` | Router |
+| POST | `/api/sessions/commit` | Router |
 | GET, POST | `/api/signal-events` | Router |
 | GET | `/api/signals/:id` | Router |
 | POST | `/api/signals/check` | Router |
