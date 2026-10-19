@@ -589,7 +589,7 @@ class OperatorTests(CliTestCase):
         self.assertIn('Engine started', started.stdout)
         pid = int((checkout / '.optimal' / 'cli-engine.pid').read_text().split()[0])
         self.addCleanup(lambda: _kill_quietly(pid))
-        self.assertIn('started by this CLI', self.ok('start', program=program).stdout)
+        self.assertIn('Engine already running', self.ok('start', program=program).stdout)
         self.assertIn('Engine stopped', self.ok('stop', program=program).stdout)
         time.sleep(0.2)
         with self.assertRaises(ProcessLookupError):
