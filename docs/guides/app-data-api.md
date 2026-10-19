@@ -415,11 +415,13 @@ What the numbers mean for an app:
 - Bulk inserts and transactions amortize commit cost; prefer them for imports.
 - Concurrency does not raise write throughput: writes are serialized.
 
-Over HTTP every keyed request verifies its API key with bcrypt (cost 12 unless configured lower).
-On the same machine that verification is about 220 ms and dominates every request: measured sequentially over keep-alive against a live Engine with 1,000 tasks, a get by id was p50 223.5 ms and p95 235.5 ms, the owner query p50 217.9 ms and p95 237.1 ms, and a create p50 221.5 ms and p95 238.4 ms.
+Over HTTP a keyed request verifies its API key with bcrypt (cost 12 unless configured lower) the first time the Engine sees that key and secret.
+On the same machine that verification is about 220 ms; before verified keys were cached it dominated every request: measured sequentially over keep-alive against a live Engine with 1,000 tasks, a get by id was p50 223.5 ms and p95 235.5 ms, the owner query p50 217.9 ms and p95 237.1 ms, and a create p50 221.5 ms and p95 238.4 ms.
+`OptimalEngine.Auth.KeyCache` now remembers a verified key and secret for `:key_cache_ttl_seconds` (default 600), so later requests skip bcrypt.
+Every request still reads the key row, so revocation, expiry and a rotated secret take effect at once.
+Measured with curl against a temporary Engine, the first request with a key took 0.50 s and the next two 17 ms and 11 ms end to end.
 The data path behind it is under a millisecond (above).
-Bcrypt runs in each request's own process, so concurrent requests use more cores, but each request still pays it.
-Until verified keys are cached, keep calls coarse: bulk inserts, transactions, larger pages, and one data key per session rather than per request.
+Use one data key per session rather than per request, so a session pays bcrypt once; bulk inserts and transactions still amortize commit cost.
 Trusted local mode (no key) skips verification.
 
 Hard limits: 5,000 operations per bulk insert or transaction; 1,000 records per page; 1,000 values per `in`; 4 sort keys; 8 includes; 5,900,000 bytes per file upload (JSON request limit); 8 levels of `where` nesting and 200 conditions; 100 files per record.
