@@ -174,19 +174,22 @@ defmodule OptimalEngine.Storage.S3 do
   @spec put_object(String.t(), iodata(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def put_object(key, body, opts \\ []) when is_binary(key) do
-    body = IO.iodata_to_binary(body)
+    with :ok <- check_key(key) do
+      body = IO.iodata_to_binary(body)
 
-    if byte_size(body) > Keyword.get(opts, :multipart_threshold, @multipart_threshold) do
-      multipart_put(key, body, opts)
-    else
-      put_single(key, body, opts)
+      if byte_size(body) > Keyword.get(opts, :multipart_threshold, @multipart_threshold) do
+        multipart_put(key, body, opts)
+      else
+        put_single(key, body, opts)
+      end
     end
   end
 
   @doc "Store a file under a key without loading it into memory when it fits in one request."
   @spec put_file(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def put_file(key, path, opts \\ []) when is_binary(key) and is_binary(path) do
-    with {:ok, %{size: size}} <- stat_file(path) do
+    with :ok <- check_key(key),
+         {:ok, %{size: size}} <- stat_file(path) do
       if size > Keyword.get(opts, :multipart_threshold, @multipart_threshold) do
         multipart_put_file(key, path, size, opts)
       else
@@ -198,7 +201,8 @@ defmodule OptimalEngine.Storage.S3 do
   @doc "Fetch an object body."
   @spec get_object(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def get_object(key, opts \\ []) when is_binary(key) do
-    with {:ok, config} <- config(),
+    with :ok <- check_key(key),
+         {:ok, config} <- config(),
          request = request(:get, key, opts),
          {:ok, response} <- send_request(config, request, opts),
          {:ok, response} <- expect_success(response) do
@@ -227,7 +231,8 @@ defmodule OptimalEngine.Storage.S3 do
     partial = "#{path}.part-#{System.unique_integer([:positive])}"
 
     result =
-      with {:ok, config} <- config(),
+      with :ok <- check_key(key),
+           {:ok, config} <- config(),
            :ok <- make_parent(path),
            request = request(:get, key, opts),
            {:ok, response} <- send_request(config, request, Keyword.put(opts, :stream_to, partial)),
@@ -258,7 +263,8 @@ defmodule OptimalEngine.Storage.S3 do
   @doc "Object metadata without transferring the body."
   @spec head_object(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def head_object(key, opts \\ []) when is_binary(key) do
-    with {:ok, config} <- config(),
+    with :ok <- check_key(key),
+         {:ok, config} <- config(),
          request = request(:head, key, opts),
          {:ok, response} <- send_request(config, request, opts),
          {:ok, response} <- expect_success(response) do
@@ -289,7 +295,8 @@ defmodule OptimalEngine.Storage.S3 do
   @doc "Delete an object. Deleting a missing key succeeds, as S3 does."
   @spec delete_object(String.t(), keyword()) :: :ok | {:error, term()}
   def delete_object(key, opts \\ []) when is_binary(key) do
-    with {:ok, config} <- config(),
+    with :ok <- check_key(key),
+         {:ok, config} <- config(),
          request = request(:delete, key, opts),
          {:ok, response} <- send_request(config, request, opts) do
       if response.status in [200, 204] do
@@ -333,6 +340,13 @@ defmodule OptimalEngine.Storage.S3 do
 
   # An operation is a method, a key, and query parameters. Building it once and
   # signing it in one place keeps every call path on the same signing code.
+  # A key with no name in it would address the bucket itself: a GET lists the
+  # bucket and a DELETE removes an empty one. Object calls refuse it before
+  # anything is sent.
+  defp check_key(key) do
+    if String.trim(key, "/") == "", do: {:error, :invalid_object_key}, else: :ok
+  end
+
   defp request(method, key, opts) do
     %{
       method: method,

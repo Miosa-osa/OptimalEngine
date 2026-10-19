@@ -111,6 +111,24 @@ defmodule OptimalEngine.Storage.S3Test do
       assert {:error, :not_found} = S3.head_object("absent/key.txt")
     end
 
+    test "an empty key is refused before any request reaches the bucket", %{stub: stub} do
+      path = Path.join(System.tmp_dir!(), "s3-empty-key-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm(path) end)
+      File.write!(path, "body")
+
+      for key <- ["", "/", "//"] do
+        assert {:error, :invalid_object_key} = S3.put_object(key, "body")
+        assert {:error, :invalid_object_key} = S3.put_file(key, path)
+        assert {:error, :invalid_object_key} = S3.get_object(key)
+        assert {:error, :invalid_object_key} = S3.get_object_to_file(key, path <> ".out")
+        assert {:error, :invalid_object_key} = S3.head_object(key)
+        assert {:error, :invalid_object_key} = S3.delete_object(key)
+      end
+
+      assert S3Stub.requests(stub.agent) == []
+      refute File.exists?(path <> ".out")
+    end
+
     test "keys with characters that need encoding survive the signature", %{stub: stub} do
       key = S3.object_key(["workspaces", "acme team", "hash+name=v1.bin"])
 

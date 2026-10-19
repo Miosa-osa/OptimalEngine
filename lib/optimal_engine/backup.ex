@@ -435,6 +435,9 @@ defmodule OptimalEngine.Backup do
     do:
       "OPTIMAL_BACKUP_KEY is not set. Offsite copies are encrypted before upload and are never sent in plaintext; set a 64 hex character key (openssl rand -hex 32) and keep a copy away from this machine."
 
+  def explain(:invalid_object_key),
+    do: "The object key is empty. Name the object, for example backups/default/<file>.db.enc."
+
   def explain(:backup_key_invalid),
     do: "OPTIMAL_BACKUP_KEY must be 64 hex characters (32 bytes)."
 
