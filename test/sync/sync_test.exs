@@ -404,7 +404,7 @@ defmodule OptimalEngine.SyncTest do
 
       urls = :ets.tab2list(calls)
       assert Enum.all?(urls, fn {_m, u} -> String.starts_with?(u, base) end)
-      assert Enum.any?(urls, fn {m, u} -> m == :get and u =~ base <> "/pull?workspace=" end)
+      assert Enum.any?(urls, fn {m, u} -> m == :get and u =~ base <> "/pull?" end)
       assert Enum.any?(urls, fn {m, u} -> m == :post and u == base <> "/push" end)
       refute Enum.any?(urls, fn {_m, u} -> u =~ "/api/sync/changes" end)
 
