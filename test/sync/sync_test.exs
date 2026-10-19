@@ -262,6 +262,109 @@ defmodule OptimalEngine.SyncTest do
       assert Sync.conflicts(ctx.tenant, ctx.ws) == []
     end
 
+    test "an append-only row from the other Engine is always added, even when its row id is taken locally",
+         ctx do
+      :ok =
+        OptimalEngine.Graph.assert_edge("LocalA-#{ctx.n}", "LocalB-#{ctx.n}", "knows",
+          workspace_id: ctx.ws
+        )
+
+      {:ok, [[local_id]]} =
+        Store.raw_query("SELECT MAX(id) FROM edges WHERE workspace_id = ?1", [ctx.ws])
+
+      {:ok, _} = Capture.seal()
+
+      # An append-only row is named by its capture sequence on the Engine that
+      # wrote it, so the other Engine's unrelated edge can carry the same name.
+      {:ok, [[local_key]]} =
+        Store.raw_query(
+          "SELECT entity_id FROM sync_mutations WHERE workspace_id = ?1 AND entity_type = 'edges' ORDER BY sequence DESC LIMIT 1",
+          [ctx.ws]
+        )
+
+      remote =
+        mutation(ctx, %{
+          "entity_type" => "edges",
+          "entity_id" => local_key,
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => %{
+            "row" => %{
+              "id" => local_id,
+              "source_id" => "RemoteA-#{ctx.n}",
+              "target_id" => "RemoteB-#{ctx.n}",
+              "relation" => "knows",
+              "workspace_id" => ctx.ws,
+              "tenant_id" => ctx.tenant
+            },
+            "blobs" => %{}
+          }
+        })
+
+      assert {:ok, %{applied: 1, conflicts: 0}} = Sync.apply_changes(ctx.tenant, ctx.ws, [remote])
+
+      assert {:ok, [[2]]} =
+               Store.raw_query("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1", [ctx.ws])
+
+      assert Sync.conflicts(ctx.tenant, ctx.ws) == []
+    end
+
+    test "the same row derived on both Engines is not a conflict when only bookkeeping times differ",
+         ctx do
+      fact_id = "fact-same-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, transaction_time_start) VALUES (?1, ?2, ?3, 'Office opens at nine', '2026-10-19T10:00:00.100Z')",
+          [fact_id, ctx.tenant, ctx.ws]
+        )
+
+      {:ok, _} = Capture.seal()
+
+      same_but_for_time =
+        mutation(ctx, %{
+          "entity_type" => "facts",
+          "entity_id" => fact_id,
+          "operation" => "create",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => %{
+            "row" => %{
+              "id" => fact_id,
+              "fact_text" => "Office opens at nine",
+              "transaction_time_start" => "2026-10-19T10:00:00.900Z",
+              "workspace_id" => ctx.ws,
+              "tenant_id" => ctx.tenant
+            },
+            "blobs" => %{}
+          }
+        })
+
+      assert {:ok, %{conflicts: 0}} = Sync.apply_changes(ctx.tenant, ctx.ws, [same_but_for_time])
+      assert Sync.conflicts(ctx.tenant, ctx.ws) == []
+
+      # A real difference is still a conflict, and the newer local text stays.
+      different =
+        mutation(ctx, %{
+          "entity_type" => "facts",
+          "entity_id" => fact_id,
+          "operation" => "update",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => %{
+            "row" => %{
+              "id" => fact_id,
+              "fact_text" => "Office opens at ten",
+              "workspace_id" => ctx.ws,
+              "tenant_id" => ctx.tenant
+            },
+            "blobs" => %{}
+          }
+        })
+
+      assert {:ok, %{conflicts: 1}} = Sync.apply_changes(ctx.tenant, ctx.ws, [different])
+
+      assert {:ok, [["Office opens at nine"]]} =
+               Store.raw_query("SELECT fact_text FROM facts WHERE id = ?1", [fact_id])
+    end
+
     test "a workspace above the peer's gate is refused whole", ctx do
       {:ok, _} =
         Store.raw_query(
