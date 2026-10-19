@@ -586,10 +586,12 @@ defmodule OptimalEngine.API.Router do
 
       _ ->
         report = Health.ready(skip: [:embedder])
+        live? = Health.live?()
 
         json(conn, %{
-          status: Health.status(),
-          live: Health.live?(),
+          # From the report shown below, so the status cannot disagree with its own checks.
+          status: if(live?, do: Health.status_of(report), else: :down),
+          live: live?,
           ok?: report.ok?,
           release: OptimalEngine.Version.info(),
           degraded: report.degraded,
@@ -609,7 +611,7 @@ defmodule OptimalEngine.API.Router do
     report = Health.ready(skip: [:embedder])
 
     json(conn, %{
-      status: Health.status(),
+      status: Health.status_of(report),
       ok?: report.ok?,
       checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end),
       degraded: report.degraded,

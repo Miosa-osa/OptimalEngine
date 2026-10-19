@@ -76,6 +76,7 @@ COPY README.md  ./README.md
 COPY engine-contract.json ./engine-contract.json
 ARG OPTIMAL_ENGINE_GIT_SHA=unknown
 ENV OPTIMAL_ENGINE_GIT_SHA=${OPTIMAL_ENGINE_GIT_SHA}
+ARG OPTIMAL_RELEASE_CHANNEL=dev
 
 # Build release — named `optimal` (matches releases() in mix.exs).
 # The empty build args are treated as absent by OptimalEngine.Version, so an
@@ -89,6 +90,7 @@ ENV OPTIMAL_ENGINE_GIT_SHA=${OPTIMAL_ENGINE_GIT_SHA}
 # this image was built from.
 RUN export OPTIMAL_ENGINE_GIT_SHA="${OPTIMAL_ENGINE_GIT_SHA}" \
            OPTIMAL_ENGINE_BUILD_TIMESTAMP="${OPTIMAL_ENGINE_BUILD_TIMESTAMP}" \
+           OPTIMAL_RELEASE_CHANNEL="${OPTIMAL_RELEASE_CHANNEL}" \
     && mix compile --force \
     && mix release optimal --overwrite
 

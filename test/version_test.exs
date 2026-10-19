@@ -25,4 +25,21 @@ defmodule OptimalEngine.VersionTest do
     assert info.components.candidate_portfolio == "candidate-portfolio-v1"
     assert info.components.associative_projection == "associative-v2"
   end
+
+  test "the runtime channel setting wins, and without it the build's channel is reported" do
+    prior = Application.get_env(:optimal_engine, :release_channel)
+
+    on_exit(fn ->
+      if prior,
+        do: Application.put_env(:optimal_engine, :release_channel, prior),
+        else: Application.delete_env(:optimal_engine, :release_channel)
+    end)
+
+    Application.put_env(:optimal_engine, :release_channel, "beta")
+    assert Version.release_channel() == "beta"
+
+    Application.delete_env(:optimal_engine, :release_channel)
+    # Compiled from OPTIMAL_RELEASE_CHANNEL at build time ("dev" in a plain test build).
+    assert Version.release_channel() in Version.release_channels()
+  end
 end

@@ -66,6 +66,21 @@ defmodule OptimalEngine.API.RouterTest do
       assert body["release"]["version"] == "0.3.1"
       assert body["release"]["expected_migration"] == 69
     end
+
+    test "status agrees with the checks it reports" do
+      conn = request(:get, "/api/health")
+      {:ok, body} = Jason.decode(conn.resp_body)
+
+      expected =
+        cond do
+          not body["live"] -> "down"
+          body["ok?"] and body["degraded"] == [] -> "up"
+          body["ok?"] -> "degraded"
+          true -> "down"
+        end
+
+      assert body["status"] == expected
+    end
   end
 
   describe "GET /api/metrics" do

@@ -75,21 +75,21 @@ defmodule OptimalEngine.Health do
     }
   end
 
-  @doc "Terse summary for CLIs: `:up | :degraded | :down`."
-  @spec status() :: :up | :degraded | :down
-  def status do
-    if live?() do
-      r = ready()
-
-      cond do
-        r.ok? and r.degraded == [] -> :up
-        r.ok? -> :degraded
-        true -> :down
-      end
-    else
-      :down
-    end
+  @doc """
+  Terse summary for CLIs: `:up | :degraded | :down`. Takes the same options as
+  `ready/1`, so a caller that reports a readiness it ran with `skip:` gets a
+  status computed from that same report.
+  """
+  @spec status(keyword()) :: :up | :degraded | :down
+  def status(opts \\ []) do
+    if live?(), do: status_of(ready(opts)), else: :down
   end
+
+  @doc "The status a readiness report implies (liveness is separate)."
+  @spec status_of(readiness()) :: :up | :degraded | :down
+  def status_of(%{ok?: true, degraded: []}), do: :up
+  def status_of(%{ok?: true}), do: :degraded
+  def status_of(_), do: :down
 
   # ─── checks ──────────────────────────────────────────────────────────────
 
