@@ -253,11 +253,12 @@ defmodule OptimalEngine.DataSteward do
   def rename_workspace(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
 
-    with {:ok, [[tenant, slug, name, description, status, organization_id, metadata]]} <-
+    with {:ok, [row]} <-
            Store.raw_query(
-             "SELECT tenant_id,slug,name,description,status,organization_id,metadata FROM workspaces WHERE id=?1",
+             "SELECT tenant_id,slug,name,description,status,organization_id,metadata,external_id FROM workspaces WHERE id=?1",
              [source_workspace_id]
            ),
+         [tenant, slug, name, description, status, organization_id, metadata, external_id] = row,
          {:ok, []} <-
            Store.raw_query("SELECT id FROM workspaces WHERE id=?1", [target_workspace_id]),
          true <- target_workspace_id == tenant <> ":" <> slug,
@@ -266,15 +267,18 @@ defmodule OptimalEngine.DataSteward do
         temporary_slug =
           "__renaming__" <> slug <> "__" <> Integer.to_string(System.unique_integer([:positive]))
 
+        # The source gives up its slug and external id before the target takes
+        # them, so neither unique index sees both rows at once.
         with {:ok, _} <-
-               Store.txn_execute(txn, "UPDATE workspaces SET slug=?1 WHERE id=?2", [
-                 temporary_slug,
-                 source_workspace_id
-               ]),
+               Store.txn_execute(
+                 txn,
+                 "UPDATE workspaces SET slug=?1, external_id=NULL WHERE id=?2",
+                 [temporary_slug, source_workspace_id]
+               ),
              {:ok, _} <-
                Store.txn_execute(
                  txn,
-                 "INSERT INTO workspaces(id,tenant_id,slug,name,description,status,organization_id,metadata) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                 "INSERT INTO workspaces(id,tenant_id,slug,name,description,status,organization_id,metadata,external_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                  [
                    target_workspace_id,
                    tenant,
@@ -283,7 +287,8 @@ defmodule OptimalEngine.DataSteward do
                    description,
                    status,
                    organization_id,
-                   metadata
+                   metadata,
+                   external_id
                  ]
                ),
              {:ok, results} <-

@@ -1502,31 +1502,45 @@ defmodule OptimalEngine.API.Router do
 
   # GET /api/workspaces?tenant=default — list workspaces in an org.
   # Status filter via ?status=active|archived|all (default: active).
+  # ?external_id=<x> lists the workspaces that carry the id another system
+  # knows them by, every status unless ?status is given; the active one is
+  # the binding.
   get "/api/workspaces" do
     tenant_id = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
     organization_id = query_param(conn, "organization", nil)
+    external_id = query_param(conn, "external_id", nil)
     {offset, limit} = Pagination.parse(conn)
 
     status =
       conn
-      |> query_param("status", "active")
+      |> query_param("status", if(external_id, do: "all", else: "active"))
       |> case do
         "all" -> :all
         "archived" -> :archived
         _ -> :active
       end
 
-    # A key restricted to named workspaces lists only those.
-    case listed_workspaces(conn, tenant_id, organization_id, status, offset, limit) do
-      {:ok, list, total} ->
-        ws = Enum.map(list, &workspace_to_map/1)
-        pagination = Pagination.wrap(ws, total, offset, limit)
+    filters = [
+      tenant_id: tenant_id,
+      organization_id: organization_id,
+      external_id: external_id,
+      status: status
+    ]
 
-        json(conn, %{
-          tenant_id: tenant_id,
-          workspaces: ws,
-          pagination: pagination.pagination
-        })
+    # A key restricted to named workspaces lists only those.
+    with :ok <- external_id_lookup(external_id),
+         {:ok, list, total} <- listed_workspaces(conn, filters, offset, limit) do
+      ws = Enum.map(list, &workspace_to_map/1)
+      pagination = Pagination.wrap(ws, total, offset, limit)
+
+      json(conn, %{
+        tenant_id: tenant_id,
+        workspaces: ws,
+        pagination: pagination.pagination
+      })
+    else
+      {:error, :invalid_external_id} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "invalid_external_id"}))
 
       {:error, reason} ->
         send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
@@ -1534,7 +1548,8 @@ defmodule OptimalEngine.API.Router do
   end
 
   # POST /api/workspaces — create a workspace under a tenant.
-  # Body: {"slug":"engineering","name":"Engineering Brain","description":"…","tenant":"default"}
+  # Body: {"slug":"engineering","name":"Engineering Brain","description":"…","tenant":"default",
+  #        "external_id":"<the id another system knows it by>"}
   post "/api/workspaces" do
     body = conn.body_params || %{}
     slug = Map.get(body, "slug")
@@ -1557,7 +1572,8 @@ defmodule OptimalEngine.API.Router do
                name: name,
                description: description,
                tenant_id: tenant_id,
-               organization_id: organization_id
+               organization_id: organization_id,
+               external_id: Map.get(body, "external_id")
              }) do
           {:ok, ws} ->
             conn
@@ -1567,8 +1583,11 @@ defmodule OptimalEngine.API.Router do
           {:error, :invalid_slug} ->
             send_resp(conn, 400, Jason.encode!(%{error: "invalid_slug"}))
 
-          {:error, reason} when reason in [:slug_taken, :slug_reserved] ->
+          {:error, reason} when reason in [:slug_taken, :slug_reserved, :external_id_taken] ->
             send_resp(conn, 409, Jason.encode!(%{error: Atom.to_string(reason)}))
+
+          {:error, :invalid_external_id} ->
+            send_resp(conn, 400, Jason.encode!(%{error: "invalid_external_id"}))
 
           {:error, reason} ->
             send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
@@ -1592,7 +1611,9 @@ defmodule OptimalEngine.API.Router do
     :slug_taken,
     :slug_reserved,
     :slug_has_data,
-    :default_workspace_slug
+    :default_workspace_slug,
+    :external_id_taken,
+    :external_id_immutable
   ]
 
   patch "/api/workspaces/:id" do
@@ -1603,6 +1624,7 @@ defmodule OptimalEngine.API.Router do
       |> maybe_put(:name, Map.get(body, "name"))
       |> maybe_put(:description, Map.get(body, "description"))
       |> maybe_put(:slug, Map.get(body, "slug"))
+      |> maybe_put(:external_id, Map.get(body, "external_id"))
 
     result =
       with {:ok, workspace} <-
@@ -1626,8 +1648,8 @@ defmodule OptimalEngine.API.Router do
       {:error, :not_found} ->
         send_resp(conn, 404, Jason.encode!(%{error: "workspace not found"}))
 
-      {:error, :invalid_slug} ->
-        send_resp(conn, 400, Jason.encode!(%{error: "invalid_slug"}))
+      {:error, reason} when reason in [:invalid_slug, :invalid_external_id] ->
+        send_resp(conn, 400, Jason.encode!(%{error: Atom.to_string(reason)}))
 
       {:error, reason} when reason in @workspace_conflicts ->
         send_resp(conn, 409, Jason.encode!(%{error: Atom.to_string(reason)}))
@@ -3684,6 +3706,7 @@ defmodule OptimalEngine.API.Router do
       tenant_id: ws.tenant_id,
       organization_id: ws.organization_id,
       slug: ws.slug,
+      external_id: ws.external_id,
       name: ws.name,
       description: ws.description,
       status: Atom.to_string(ws.status),
@@ -4161,9 +4184,17 @@ defmodule OptimalEngine.API.Router do
     )
   end
 
-  defp listed_workspaces(conn, tenant_id, organization_id, status, offset, limit) do
-    filters = [tenant_id: tenant_id, organization_id: organization_id, status: status]
+  # A lookup by external id takes a well-formed one; a list or a malformed
+  # value answers 400 instead of reaching the query.
+  defp external_id_lookup(nil), do: :ok
 
+  defp external_id_lookup(external_id) do
+    if OptimalEngine.Workspace.valid_external_id?(external_id),
+      do: :ok,
+      else: {:error, :invalid_external_id}
+  end
+
+  defp listed_workspaces(conn, filters, offset, limit) do
     case conn.assigns[:current_api_key] do
       %{workspace_scope: scope} when is_list(scope) ->
         if "*" in scope do

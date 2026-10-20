@@ -254,6 +254,10 @@ defmodule OptimalEngine.API.OperatingAPI do
       {:error, {:invalid_document, errors}} ->
         json(conn, 422, %{error: "invalid_document", details: errors})
 
+      # The same answer as POST and PATCH /api/workspaces.
+      {:error, :external_id_taken} ->
+        error(conn, 409, :external_id_taken)
+
       {:error, reason} ->
         error(conn, 422, reason)
     end

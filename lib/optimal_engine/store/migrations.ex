@@ -116,8 +116,49 @@ defmodule OptimalEngine.Store.Migrations do
       migration_068_viability(),
       migration_069_analysis_reports(),
       migration_070_repair_vector_and_chunk_scope(),
-      migration_071_workspace_handles()
+      migration_071_workspace_handles(),
+      migration_072_workspace_external_id()
     ]
+  end
+
+  # The id another system knows a workspace by becomes a column, held by one
+  # active workspace of a tenant: archived rows keep the value and release it.
+  # It is filled from metadata.external_id; a malformed id, or one a lower-id
+  # active workspace already holds, stays in metadata only.
+  #
+  # Additive only (a column, an index, a backfill): an Engine rolled back to
+  # an earlier release still reads and writes the store, and
+  # metadata.external_id stays written. Every statement is safe to run again:
+  # the column add is tolerated as a duplicate, the backfill only fills what
+  # is missing, and the index is created if absent.
+  defp migration_072_workspace_external_id do
+    {72, "workspace external id: one active workspace of a tenant per outside id",
+     [
+       {"workspaces_external_id", "ALTER TABLE workspaces ADD COLUMN external_id TEXT"},
+       {"backfill_workspaces_external_id",
+        """
+        UPDATE workspaces
+        SET external_id = json_extract(metadata, '$.external_id')
+        WHERE external_id IS NULL
+          AND json_valid(metadata)
+          AND json_type(metadata, '$.external_id') = 'text'
+          AND length(json_extract(metadata, '$.external_id')) BETWEEN 1 AND 255
+          AND NOT (json_extract(metadata, '$.external_id') GLOB '*[^!-~]*')
+          AND (status != 'active' OR NOT EXISTS (
+            SELECT 1 FROM workspaces other
+            WHERE other.tenant_id = workspaces.tenant_id
+              AND other.id != workspaces.id
+              AND other.status = 'active'
+              AND (other.external_id = json_extract(workspaces.metadata, '$.external_id')
+                   OR (other.id < workspaces.id
+                       AND json_valid(other.metadata)
+                       AND json_extract(other.metadata, '$.external_id') =
+                           json_extract(workspaces.metadata, '$.external_id')))
+          ))
+        """},
+       {"idx_workspaces_tenant_external_id",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_tenant_external_id ON workspaces(tenant_id, external_id) WHERE external_id IS NOT NULL AND status = 'active'"}
+     ]}
   end
 
   # Every slug a workspace holds, now or before a rename, is one row, so a

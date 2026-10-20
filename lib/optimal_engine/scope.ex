@@ -78,11 +78,18 @@ defmodule OptimalEngine.Scope do
           if opts[:visibility], do: Map.put(m, "visibility", opts[:visibility]), else: m
         end)
 
+      # Only these keys are written, so a concurrent write of other metadata
+      # (a bound external id, a held slug) is never undone.
+      {paths, params} =
+        if opts[:visibility],
+          do: {"'$.share_up', ?2, '$.visibility', ?3", [workspace_id, value, opts[:visibility]]},
+          else: {"'$.share_up', ?2", [workspace_id, value]}
+
       {:ok, _} =
-        Store.raw_query("UPDATE workspaces SET metadata = ?2 WHERE id = ?1", [
-          workspace_id,
-          Jason.encode!(metadata)
-        ])
+        Store.raw_query(
+          "UPDATE workspaces SET metadata = json_set(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, #{paths}) WHERE id = ?1",
+          params
+        )
 
       _ =
         OptimalEngine.Authority.Evidence.append(tenant_id, "settings.changed", %{
