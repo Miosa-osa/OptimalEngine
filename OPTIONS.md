@@ -52,6 +52,7 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_ENGINE_ROOT` | repo root | Engine root for source-checkout usage. |
 | `OPTIMAL_KNOWLEDGE_BACKEND` | `rocksdb` when available | Graph backend selection. |
 | `CONNECTOR_KEY` | generated into `.optimal/connector_key` | Local connector secret. Connector credentials are refused without it; they are never stored in plaintext. |
+| `OPTIMAL_CLAIM_PROMOTION_MODE` | `auto_threshold` | `auto_threshold`: the Engine promotes Claims whose confidence meets the workspace threshold every 30 minutes, as `system:promotion-scheduler`. `manual` or `agent_review`: it promotes nothing, and every Claim waits for a reviewer with `claims:review`. Other values fail startup configuration. |
 
 Keep private values in environment variables, local secret stores, or deployment secret managers.
 Do not commit them.

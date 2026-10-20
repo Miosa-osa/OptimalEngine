@@ -97,6 +97,32 @@ defmodule OptimalEngine.RuntimeConfigTest do
     end
   end
 
+  test "claim promotion mode comes from the environment, keeps the memory settings, and rejects typos" do
+    original = System.get_env("OPTIMAL_CLAIM_PROMOTION_MODE")
+
+    on_exit(fn ->
+      if original,
+        do: System.put_env("OPTIMAL_CLAIM_PROMOTION_MODE", original),
+        else: System.delete_env("OPTIMAL_CLAIM_PROMOTION_MODE")
+    end)
+
+    System.put_env("OPTIMAL_CLAIM_PROMOTION_MODE", "manual")
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    memory = get_in(config, [:optimal_engine, :memory])
+    assert memory[:claim_promotion_mode] == :manual
+    assert memory[:auto_extract_claims] == true
+
+    System.delete_env("OPTIMAL_CLAIM_PROMOTION_MODE")
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    refute Keyword.has_key?(get_in(config, [:optimal_engine, :memory]) || [], :claim_promotion_mode)
+
+    System.put_env("OPTIMAL_CLAIM_PROMOTION_MODE", "auto")
+
+    assert_raise ArgumentError,
+                 ~r/OPTIMAL_CLAIM_PROMOTION_MODE must be auto_threshold, manual, or agent_review/,
+                 fn -> Config.Reader.read!("config/runtime.exs", env: :prod, target: :host) end
+  end
+
   test "release channel comes from the environment and rejects unknown channels" do
     original = System.get_env("OPTIMAL_RELEASE_CHANNEL")
 
