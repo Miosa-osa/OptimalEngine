@@ -368,6 +368,55 @@ defmodule OptimalEngine.OperatingTest do
                  "organizations" => [%{"slug" => "Bad Slug", "name" => "x"}]
                })
     end
+
+    test "a workspace slug the Engine cannot use is refused before anything is written", ctx do
+      org = "reserved-org-#{ctx.n}"
+
+      # The root layout's own directory names, bare or with an id.
+      for entry <- ["nodes", %{"slug" => "cache", "id" => "#{ctx.tenant}:cache"}] do
+        assert {:error, {:invalid_document, [message]}} =
+                 Portable.import(ctx.tenant, %{
+                   "organizations" => [
+                     %{"slug" => org, "name" => "Reserved", "workspaces" => [entry]}
+                   ]
+                 })
+
+        assert message =~ "reserved"
+        assert {:error, :not_found} = OptimalEngine.Organization.get("#{ctx.tenant}:#{org}")
+      end
+
+      too_long = String.duplicate("a", 129)
+
+      assert {:error, {:invalid_document, [message]}} =
+               Portable.import(ctx.tenant, %{
+                 "organizations" => [%{"slug" => org, "name" => "Long", "workspaces" => [too_long]}]
+               })
+
+      assert message =~ "slug"
+      assert {:error, :not_found} = OptimalEngine.Organization.get("#{ctx.tenant}:#{org}")
+    end
+
+    test "a workspace that cannot be created is an error, not a crash", ctx do
+      # A workspace whose id the slug would derive, held under another slug
+      # and with no handle row: created rows would collide with it.
+      ghost = "ghost-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO workspaces (id, tenant_id, slug, name, status, metadata) VALUES (?1, ?2, ?3, 'Ghost', 'active', '{}')",
+          ["#{ctx.tenant}:#{ghost}", ctx.tenant, "elsewhere-#{ctx.n}"]
+        )
+
+      assert {:error, {:invalid_document, [message]}} =
+               Portable.import(ctx.tenant, %{
+                 "organizations" => [
+                   %{"slug" => "ghost-org-#{ctx.n}", "name" => "Ghost", "workspaces" => [ghost]}
+                 ]
+               })
+
+      assert message =~ ghost
+      assert message =~ "slug_taken"
+    end
   end
 
   describe "routing rules" do

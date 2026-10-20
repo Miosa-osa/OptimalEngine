@@ -115,8 +115,93 @@ defmodule OptimalEngine.Store.Migrations do
       migration_067_replication(),
       migration_068_viability(),
       migration_069_analysis_reports(),
-      migration_070_repair_vector_and_chunk_scope()
+      migration_070_repair_vector_and_chunk_scope(),
+      migration_071_workspace_handles()
     ]
+  end
+
+  # Every slug a workspace holds, now or before a rename, is one row, so a
+  # slug is claimed by a unique key in the same transaction that writes it.
+  # Earlier releases kept held slugs in metadata.previous_slugs.
+  #
+  # Where two workspaces of a tenant name the same slug the backfill is
+  # deterministic: a current slug beats a slug held before a rename, and the
+  # older workspace (created_at, then id) keeps a slug both held. The slugs it
+  # could not give are logged by `report_skipped_handles/1`.
+  defp migration_071_workspace_handles do
+    {71, "workspace handles: every slug a workspace holds",
+     [
+       {"workspace_handles",
+        """
+        CREATE TABLE IF NOT EXISTS workspace_handles (
+          tenant_id TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          PRIMARY KEY (tenant_id, slug)
+        )
+        """},
+       {"idx_workspace_handles_workspace",
+        "CREATE INDEX IF NOT EXISTS idx_workspace_handles_workspace ON workspace_handles(workspace_id)"},
+       {"backfill_current_slugs",
+        """
+        INSERT OR IGNORE INTO workspace_handles (tenant_id, slug, workspace_id)
+        SELECT tenant_id, slug, id FROM workspaces
+        ORDER BY created_at, id
+        """},
+       {"backfill_previous_slugs",
+        """
+        INSERT OR IGNORE INTO workspace_handles (tenant_id, slug, workspace_id)
+        SELECT w.tenant_id, held.value, w.id
+        FROM workspaces w,
+             json_each(CASE WHEN json_valid(w.metadata) THEN json_extract(w.metadata, '$.previous_slugs') END) held
+        WHERE held.type = 'text'
+        ORDER BY w.created_at, w.id, held.key
+        """}
+     ]}
+  end
+
+  @doc false
+  # Slugs a workspace held before a rename (metadata.previous_slugs) that
+  # migration 71 could not give it, because another workspace of the tenant
+  # holds them. Each is logged with both workspaces. Returns them.
+  @spec report_skipped_handles(any()) :: [map()]
+  def report_skipped_handles(db) do
+    sql = """
+    SELECT w.tenant_id, held.value, w.id, h.workspace_id
+    FROM workspaces w
+    JOIN json_each(CASE WHEN json_valid(w.metadata) THEN json_extract(w.metadata, '$.previous_slugs') END) held
+    JOIN workspace_handles h ON h.tenant_id = w.tenant_id AND h.slug = held.value
+    WHERE held.type = 'text' AND h.workspace_id != w.id
+    ORDER BY w.tenant_id, held.value, w.created_at, w.id
+    """
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(db, sql)
+
+    skipped =
+      stmt
+      |> Stream.unfold(fn stmt ->
+        case Exqlite.Sqlite3.step(db, stmt) do
+          {:row, [tenant, slug, workspace, holder]} ->
+            {%{tenant_id: tenant, slug: slug, workspace_id: workspace, held_by: holder}, stmt}
+
+          _ ->
+            nil
+        end
+      end)
+      |> Enum.to_list()
+
+    Exqlite.Sqlite3.release(db, stmt)
+
+    Enum.each(skipped, fn row ->
+      Logger.warning(
+        "[Migrations] 071: workspace #{row.workspace_id} held the slug #{inspect(row.slug)} before a rename, " <>
+          "but #{row.held_by} holds it in tenant #{row.tenant_id}; " <>
+          "a link written with it names #{row.held_by}"
+      )
+    end)
+
+    skipped
   end
 
   # Document vectors were stored without a scope (they kept the column
@@ -1079,11 +1164,16 @@ defmodule OptimalEngine.Store.Migrations do
     Enum.each(pending, fn {version, description, statements} ->
       Logger.info("[Migrations] Applying #{pad(version)} — #{description}")
       Enum.each(statements, fn {label, sql} -> safe_execute(db, label, sql) end)
+      after_apply(db, version)
       record_migration!(db, version, description)
     end)
 
     :ok
   end
+
+  # Work a migration's statements cannot do, once they have run.
+  defp after_apply(db, 71), do: report_skipped_handles(db)
+  defp after_apply(_db, _version), do: :ok
 
   @doc """
   Returns the set of applied migration versions.

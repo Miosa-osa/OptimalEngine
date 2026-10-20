@@ -32,7 +32,7 @@ defmodule OptimalEngine.Authority.Evidence do
             could_not_enforce external.receipt issuer.registered revocations.received
             settings.changed key.rotated key.minted key.revoked integrity.finding
             agent_action.step connector.registered connector.changed connector.deleted
-            connector.run)
+            connector.run workspace.renamed)
 
   @doc "The evidence kinds the Engine records."
   @spec kinds() :: [String.t()]
@@ -45,70 +45,80 @@ defmodule OptimalEngine.Authority.Evidence do
   @spec append(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def append(tenant_id, kind, attrs \\ %{}) when kind in @kinds do
     with {:ok, key} <- Keys.active(tenant_id, "evidence") do
-      Store.transaction(fn txn ->
-        {:ok, rows} =
-          Store.txn_query(
-            txn,
-            "SELECT tenant_seq, hash FROM authority_evidence WHERE tenant_id = ?1 ORDER BY tenant_seq DESC LIMIT 1",
-            [tenant_id]
-          )
-
-        {seq, prev_hash} =
-          case rows do
-            [[last_seq, last_hash]] -> {last_seq + 1, last_hash}
-            [] -> {1, @genesis}
-          end
-
-        entry = %{
-          "tenant_id" => tenant_id,
-          "seq" => seq,
-          "id" => "ev_" <> random_id(),
-          "kind" => kind,
-          "jti" => attrs[:jti],
-          "subject" => attrs[:subject],
-          "action" => attrs[:action],
-          "resource" => attrs[:resource],
-          "workspace_id" => attrs[:workspace_id],
-          "detail" => attrs[:detail] || %{},
-          "prev_hash" => prev_hash,
-          "recorded_at" =>
-            DateTime.utc_now() |> DateTime.truncate(:microsecond) |> DateTime.to_iso8601()
-        }
-
-        hash = CanonicalJSON.hash(entry)
-        signature = Keys.sign(key, hash) |> JWS.encode64()
-
-        {:ok, 1} =
-          Store.txn_execute(
-            txn,
-            """
-            INSERT INTO authority_evidence
-              (id, tenant_id, tenant_seq, kind, jti, subject, action, resource, workspace_id,
-               detail, prev_hash, hash, kid, signature, recorded_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-            """,
-            [
-              entry["id"],
-              tenant_id,
-              seq,
-              kind,
-              entry["jti"],
-              entry["subject"],
-              entry["action"],
-              entry["resource"],
-              entry["workspace_id"],
-              CanonicalJSON.encode(entry["detail"]),
-              prev_hash,
-              hash,
-              key.kid,
-              signature,
-              entry["recorded_at"]
-            ]
-          )
-
-        {:ok, Map.merge(entry, %{"hash" => hash, "kid" => key.kid, "signature" => signature})}
-      end)
+      Store.transaction(fn txn -> append_in(txn, key, tenant_id, kind, attrs) end)
     end
+  end
+
+  @doc """
+  Appends one entry inside a Store transaction the caller already holds, so
+  the entry commits or rolls back with the caller's own writes. `key` is the
+  tenant's active evidence key (`OptimalEngine.Authority.Keys.active/2`); the
+  caller fetches it before the transaction opens, because creating one writes
+  to the Store. Takes the same `attrs` as `append/3`.
+  """
+  @spec append_in(term(), map(), String.t(), String.t(), map()) :: {:ok, map()}
+  def append_in(txn, key, tenant_id, kind, attrs \\ %{}) when kind in @kinds do
+    {:ok, rows} =
+      Store.txn_query(
+        txn,
+        "SELECT tenant_seq, hash FROM authority_evidence WHERE tenant_id = ?1 ORDER BY tenant_seq DESC LIMIT 1",
+        [tenant_id]
+      )
+
+    {seq, prev_hash} =
+      case rows do
+        [[last_seq, last_hash]] -> {last_seq + 1, last_hash}
+        [] -> {1, @genesis}
+      end
+
+    entry = %{
+      "tenant_id" => tenant_id,
+      "seq" => seq,
+      "id" => "ev_" <> random_id(),
+      "kind" => kind,
+      "jti" => attrs[:jti],
+      "subject" => attrs[:subject],
+      "action" => attrs[:action],
+      "resource" => attrs[:resource],
+      "workspace_id" => attrs[:workspace_id],
+      "detail" => attrs[:detail] || %{},
+      "prev_hash" => prev_hash,
+      "recorded_at" =>
+        DateTime.utc_now() |> DateTime.truncate(:microsecond) |> DateTime.to_iso8601()
+    }
+
+    hash = CanonicalJSON.hash(entry)
+    signature = Keys.sign(key, hash) |> JWS.encode64()
+
+    {:ok, 1} =
+      Store.txn_execute(
+        txn,
+        """
+        INSERT INTO authority_evidence
+          (id, tenant_id, tenant_seq, kind, jti, subject, action, resource, workspace_id,
+           detail, prev_hash, hash, kid, signature, recorded_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        """,
+        [
+          entry["id"],
+          tenant_id,
+          seq,
+          kind,
+          entry["jti"],
+          entry["subject"],
+          entry["action"],
+          entry["resource"],
+          entry["workspace_id"],
+          CanonicalJSON.encode(entry["detail"]),
+          prev_hash,
+          hash,
+          key.kid,
+          signature,
+          entry["recorded_at"]
+        ]
+      )
+
+    {:ok, Map.merge(entry, %{"hash" => hash, "kid" => key.kid, "signature" => signature})}
   end
 
   @doc "Entries after `after_seq` (exclusive), oldest first."

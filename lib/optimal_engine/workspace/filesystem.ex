@@ -53,6 +53,14 @@ defmodule OptimalEngine.Workspace.Filesystem do
   end
 
   @doc """
+  Directory names the engine root uses for itself. A default-tenant
+  workspace lives in `<root>/<slug>`, so no workspace slug may be one of
+  them.
+  """
+  @spec reserved_names() :: [String.t()]
+  def reserved_names, do: ~w(nodes assets architectures tenants cache)
+
+  @doc """
   Provisions the directory tree for a workspace. Returns `{:ok, path}` with
   the absolute workspace path on success; `{:error, reason}` on failure.
 
@@ -82,24 +90,6 @@ defmodule OptimalEngine.Workspace.Filesystem do
       Logger.info("[Workspace.Filesystem] provisioned #{slug} at #{workspace_path}")
       {:ok, workspace_path}
     end
-  end
-
-  @doc """
-  Returns the on-disk path for a wiki slug inside a workspace.
-  e.g. `wiki_path(root, "engineering", "core-platform-architecture")`
-  → `<root>/engineering/.wiki/core-platform-architecture.md`
-  """
-  @spec wiki_path(String.t(), String.t(), String.t()) :: String.t()
-  def wiki_path(root, workspace_slug, slug) do
-    Path.join([path(root, workspace_slug), ".wiki", "#{slug}.md"])
-  end
-
-  @doc """
-  Returns the signals directory for a node inside a workspace.
-  """
-  @spec node_signals_path(String.t(), String.t(), String.t()) :: String.t()
-  def node_signals_path(root, workspace_slug, node_slug) do
-    Path.join([path(root, workspace_slug), "nodes", node_slug, "signals"])
   end
 
   # ── Helpers ─────────────────────────────────────────────────────────────

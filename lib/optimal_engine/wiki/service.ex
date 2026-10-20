@@ -145,7 +145,7 @@ defmodule OptimalEngine.Wiki.Service do
 
     ## Summary
 
-    #{node.name} is a #{node.kind} Node in workspace #{workspace.slug}. It exists to hold purpose, state, context, relationships, decisions, and projections for this area of work. {{cite: #{citation}}}
+    #{node.name} is a #{node.kind} Node in workspace `#{workspace.id}`. It exists to hold purpose, state, context, relationships, decisions, and projections for this area of work. {{cite: #{citation}}}
 
     ## Identity
 
@@ -264,18 +264,12 @@ defmodule OptimalEngine.Wiki.Service do
     end
   end
 
+  # The page goes in the workspace's own directory, which is keyed by its id,
+  # so a rename never moves where its pages are written.
   defp persist_projection(page, workspace, workspace_path, opts) do
     markdown = Wiki.to_markdown(page)
-
-    root =
-      if workspace.slug == "default" do
-        workspace_path
-      else
-        Path.dirname(workspace_path)
-      end
-
-    path = WorkspaceFilesystem.wiki_path(root, workspace.slug, page.slug)
-    destination_uri = "file://#{Path.relative_to(path, workspace_path)}"
+    path = Path.join([workspace_path, ".wiki", page.slug <> ".md"])
+    destination_uri = "file://.wiki/#{page.slug}.md"
     actor_id = Keyword.fetch!(opts, :actor_id)
 
     with :ok <- File.mkdir_p(Path.dirname(path)),

@@ -46,7 +46,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # carry credentials sealed with this Engine's CONNECTOR_KEY and pull on this
   # Engine's schedule, so they and their run log stay here (the target
   # registers its own); queued jobs would run twice.
-  @excluded ~w(sync_cursors metric_samples workspaces uri_redirects federation_peers
+  @excluded ~w(sync_cursors metric_samples workspaces workspace_handles uri_redirects federation_peers
                sync_capture sync_workspaces sync_peers sync_conflicts sync_mutations
                connectors connector_runs jobs processor_runs)
   # Registry rows every Engine derives for itself under the same id: a target
@@ -250,10 +250,13 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   def resolve(_tenant_id, _uri), do: {:error, :invalid_uri}
 
+  # An address written with a slug names the workspace by its id, which is
+  # then resolved as any address by id is: a workspace that moved answers
+  # `{:moved, location}`, not local.
   defp resolve_handle(tenant_id, handle, path) do
     with [^tenant_id, slug] <- String.split(handle, ":", parts: 2),
          {:ok, workspace} <- Workspace.get_by_handle(slug, tenant_id) do
-      {:local, "optimal://" <> Enum.join([workspace.id | path], "/")}
+      resolve(tenant_id, "optimal://" <> Enum.join([workspace.id | path], "/"))
     else
       _ -> {:error, :not_found}
     end
@@ -414,14 +417,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp plan(manifest, tenant_id, opts) do
     source = manifest["workspace"]
     mode = Keyword.get(opts, :mode, :create)
+    target_id = opts[:workspace_id] || target_id(source, tenant_id, mode)
 
-    target_id =
-      opts[:workspace_id] ||
-        if tenant_id == "default",
-          do: "default:" <> source["slug"],
-          else: "#{tenant_id}:#{source["slug"]}"
-
-    target_slug = target_id |> String.split(":", parts: 2) |> List.last()
+    # A renamed workspace keeps its id and its current slug; any other
+    # target takes the slug its id names.
+    target_slug =
+      if target_id == source["id"],
+        do: source["slug"],
+        else: target_id |> String.split(":", parts: 2) |> List.last()
 
     case {Workspace.get(target_id), mode} do
       {{:ok, _existing}, :create} ->
@@ -439,7 +442,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           slug: target_slug,
           name: source["name"] || target_slug,
           description: source["description"],
-          metadata: Map.put(source["metadata"] || %{}, "imported_from", source["id"])
+          # Slugs the source held are reserved on the source Engine only.
+          metadata:
+            (source["metadata"] || %{})
+            |> Map.drop(["previous_slugs"])
+            |> Map.put("imported_from", source["id"])
         }
 
         attrs =
@@ -456,6 +463,28 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           error ->
             error
         end
+    end
+  end
+
+  # A workspace keeps its id when it lands in the tenant it came from and the
+  # id is free there (or, for a merge, already the target): a renamed
+  # workspace's id is not the one its slug derives, and links name the id.
+  # Anywhere else the id derives from the slug, as for a new workspace.
+  defp target_id(source, tenant_id, mode) do
+    derived =
+      if tenant_id == "default",
+        do: "default:" <> source["slug"],
+        else: "#{tenant_id}:#{source["slug"]}"
+
+    id = source["id"]
+
+    same_tenant? = is_binary(id) and match?([^tenant_id, _slug], String.split(id, ":", parts: 2))
+
+    cond do
+      not same_tenant? -> derived
+      mode == :merge -> id
+      match?({:error, :not_found}, Workspace.get(id)) -> id
+      true -> derived
     end
   end
 

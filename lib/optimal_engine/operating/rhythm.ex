@@ -106,7 +106,9 @@ defmodule OptimalEngine.Operating.Rhythm do
 
   @doc """
   The note for the current period of `cadence`, generated on first request.
-  Options: `:timezone` (overrides the workspace's), `:date` (for tests).
+  Options: `:timezone` (overrides the workspace's), `:date` (for tests),
+  `:generate` (`false` returns the note a first request would write, with
+  `stored: false`, and writes nothing). A stored note has `stored: true`.
   """
   @spec current(String.t(), String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, atom()}
   def current(tenant_id, workspace_id, cadence \\ "daily", opts \\ [])
@@ -119,10 +121,23 @@ defmodule OptimalEngine.Operating.Rhythm do
       end
 
     key = period(cadence, date)
+    generate? = Keyword.get(opts, :generate, true)
 
     case note(tenant_id, workspace_id, cadence, key) do
       {:ok, note} ->
-        {:ok, Map.put(note, :timezone, timezone)}
+        {:ok, Map.merge(note, %{timezone: timezone, stored: true})}
+
+      {:error, :not_found} when not generate? ->
+        {:ok,
+         %{
+           workspace_id: workspace_id,
+           cadence: cadence,
+           period: key,
+           content: render(tenant_id, workspace_id, cadence, date, key),
+           generated: true,
+           stored: false,
+           timezone: timezone
+         }}
 
       {:error, :not_found} ->
         content = render(tenant_id, workspace_id, cadence, date, key)
@@ -137,7 +152,7 @@ defmodule OptimalEngine.Operating.Rhythm do
           )
 
         with {:ok, note} <- note(tenant_id, workspace_id, cadence, key),
-             do: {:ok, Map.put(note, :timezone, timezone)}
+             do: {:ok, Map.merge(note, %{timezone: timezone, stored: true})}
     end
   end
 

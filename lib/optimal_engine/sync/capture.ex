@@ -23,10 +23,14 @@ defmodule OptimalEngine.Sync.Capture do
 
   @excluded ~w(sync_capture sync_mutations sync_cursors sync_workspaces sync_peers sync_conflicts
                metric_samples uri_redirects federation_peers events connector_runs processor_runs
-               surfacing_events workspaces audit_samples)
+               surfacing_events workspaces workspace_handles audit_samples)
   @max_columns 60
 
-  @doc "Installs (or refreshes) capture triggers on every eligible table."
+  @doc """
+  Installs (or refreshes) capture triggers on every eligible table, and
+  removes any from a table that is excluded: an earlier binary, whose list of
+  excluded tables was shorter, may have put one there.
+  """
   @spec install() :: {:ok, %{tables: non_neg_integer(), skipped: [String.t()]}}
   def install do
     {installed, skipped} =
@@ -37,16 +41,22 @@ defmodule OptimalEngine.Sync.Capture do
         end
       end)
 
+    drop_triggers_on_excluded_tables()
+
     {:ok, %{tables: installed, skipped: Enum.reverse(skipped)}}
   end
 
-  @doc "Installs capture triggers on one table (for tables created at runtime)."
+  @doc """
+  Installs capture triggers on one table (for tables created at runtime). A
+  table that is excluded gets none, and loses any it has.
+  """
   @spec install(String.t()) :: :ok | {:skipped, atom()}
   def install(table) do
     columns = columns(table)
 
     cond do
-      table in @excluded or String.starts_with?(table, "authority_") ->
+      excluded?(table) ->
+        drop_capture_triggers(table)
         {:skipped, :excluded}
 
       not Enum.any?(columns, &(&1.name == "workspace_id")) ->
@@ -73,6 +83,30 @@ defmodule OptimalEngine.Sync.Capture do
           :ok
         end
     end
+  end
+
+  defp excluded?(table), do: table in @excluded or String.starts_with?(table, "authority_")
+
+  defp drop_triggers_on_excluded_tables do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT DISTINCT tbl_name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync_capture_%'",
+        []
+      )
+
+    rows |> List.flatten() |> Enum.filter(&excluded?/1) |> Enum.each(&drop_capture_triggers/1)
+  end
+
+  defp drop_capture_triggers(table) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 AND name LIKE 'sync_capture_%'",
+        [table]
+      )
+
+    Enum.each(rows, fn [name] ->
+      :ok = Store.raw_execute("DROP TRIGGER IF EXISTS #{quote_name(name)}", [])
+    end)
   end
 
   defp installed_triggers(table) do

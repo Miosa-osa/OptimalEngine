@@ -57,7 +57,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       )
   end
 
-  defp call(method, path, token \\ nil) do
+  defp call(method, path, token) do
     conn = conn(method, path)
     conn = if token, do: put_req_header(conn, "authorization", "Bearer " <> token), else: conn
     Router.call(conn, Router.init([]))
@@ -313,6 +313,32 @@ defmodule OptimalEngine.ScopePortabilityTest do
              )
     end
 
+    test "a renamed workspace keeps its id when moved into its own tenant, not its old slugs",
+         ctx do
+      {:ok, _} = Workspace.update(ctx.open, %{slug: "open-renamed"})
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+
+      # The source gives the workspace up, then the record goes too: the
+      # target Engine has never seen this id.
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      {:ok, _} = Store.raw_query("DELETE FROM uri_redirects WHERE workspace_id = ?1", [ctx.open])
+      {:ok, _} = Store.raw_query("DELETE FROM workspaces WHERE id = ?1", [ctx.open])
+
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, ctx.tenant)
+      assert summary.workspace_id == ctx.open
+
+      {:ok, moved} = Workspace.get(ctx.open)
+      assert moved.slug == "open-renamed"
+      refute Map.has_key?(moved.metadata, "previous_slugs")
+      assert Workspace.handles(ctx.open) == ["open-renamed"]
+    end
+
     test "a bundle imports in small batches, parents before children", ctx do
       # The older memory points at the newer one, so in export order the child
       # row comes before its parent.
@@ -460,6 +486,48 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       assert {:local, _} =
                WorkspaceBundle.resolve(ctx.tenant, "optimal://#{ctx.private}/contexts/y")
+    end
+
+    test "a link written with a renamed workspace's slug answers moved once it has moved", ctx do
+      # The workspace is renamed, then moved: its id (the redirect's key) is
+      # not the slug the link names.
+      {:ok, _} = Workspace.update(ctx.open, %{slug: "open-renamed"})
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      target = %{"target_url" => "https://own-engine.example", "target_workspace_id" => "own:open"}
+
+      assert {:ok, _} =
+               WorkspaceBundle.finalize_move(
+                 ctx.tenant,
+                 ctx.open,
+                 manifest["bundle_sha256"],
+                 target
+               )
+
+      moved = %{
+        "engine_url" => "https://own-engine.example",
+        "workspace_id" => "own:open",
+        "uri" => "optimal://own:open/contexts/x"
+      }
+
+      by_id = "optimal://#{ctx.open}/contexts/x"
+      by_new_slug = "optimal://#{ctx.tenant}:open-renamed/contexts/x"
+
+      assert {:moved, ^moved} = WorkspaceBundle.resolve(ctx.tenant, by_id)
+      assert {:moved, ^moved} = WorkspaceBundle.resolve(ctx.tenant, by_new_slug)
+
+      assert {:moved, %{"uri" => "optimal://own:open"}} =
+               WorkspaceBundle.resolve(ctx.tenant, "optimal://#{ctx.tenant}:open-renamed")
+
+      # A workspace that did not move still answers local by its id.
+      {:ok, _} = Workspace.update(ctx.private, %{slug: "private-renamed"})
+
+      assert {:local, "optimal://#{ctx.private}/contexts/y"} ==
+               WorkspaceBundle.resolve(
+                 ctx.tenant,
+                 "optimal://#{ctx.tenant}:private-renamed/contexts/y"
+               )
     end
 
     test "the export route names the ledger mark a seeded replica pulls from", ctx do

@@ -9,10 +9,13 @@ Modes:
   full       Creates its own workspaces, principals and keys and exercises
              every route the criteria name. For a disposable Engine or a
              managed QA Engine, with an admin key.
-  read-only  Sends GET requests only, enforced in the client below, and
-             prints counts, dates, metric values and booleans: never
-             content, titles, names, emails, workspace ids or keys. For an
-             owner's private Engine.
+  read-only  Sends GET requests only, enforced in the client below. Every
+             line names the tenant and the workspace it read; the rest is
+             counts, dates, metric values, booleans and Engine-defined
+             labels, never content, titles, names, emails or keys. For an
+             owner's private Engine. Boot is read only with BOOT=1, with
+             generate=false, and only from an Engine whose /api/version
+             lists boot_generate_option, so the run writes nothing.
 
 Environment:
   ENGINE_URL        the Engine
@@ -20,6 +23,7 @@ Environment:
   WORKSPACE         the workspace read-only mode reports on
   PROOF_FRESH       1 when the wrapper started this Engine on an empty store
   CLASSIFY_PLAN     0 skips the re-run classification plan in read-only mode
+  BOOT              1 adds GET /api/boot?generate=false in read-only mode, if the Engine supports it
   KEEP              1 leaves the proof's workspaces active and its keys valid
 
 Exit: 0 when every check passed or was skipped, 1 when one failed, 2 when
@@ -107,6 +111,7 @@ class Engine:
         self.key = key or None
         self.read_only = read_only
         self.sent = {}
+        self.capabilities = set()
 
     def call(self, method, path, body=None, query=None, key="own", timeout=120):
         if self.read_only and method != "GET":
@@ -144,6 +149,9 @@ class Engine:
 
 
 RESULTS = []
+
+# Listed by `GET /api/version` on an Engine whose boot takes `generate=false`.
+BOOT_CAPABILITY = "boot_generate_option"
 
 
 def report(check_id, outcome, facts):
@@ -542,7 +550,7 @@ class Full:
         )
 
     def open_loops_and_brief(self):
-        # The live criterion is a copy of tenant zero (read-only mode); here
+        # The live criterion runs on an owner's Engine (read-only mode); here
         # the same reads run on loops this proof creates, with sources.
         due = date.fromordinal(date.today().toordinal() + 2).isoformat()
         for n in range(2):
@@ -850,7 +858,7 @@ class Full:
                 "predicted_failure": failure,
                 "s4_after_one_outward_signal": "present",
                 "verdict": after["summary"]["verdict"],
-                "note": "the dated tenant-zero diagnosis is the read-only run",
+                "note": "the dated diagnosis on an owner's Engine is the read-only run",
             },
         )
 
@@ -1030,32 +1038,63 @@ def share(modes, mode):
     return round(modes.get(mode, 0) / total, 4) if total else None
 
 
-def boot_and_brief(engine, ws):
-    status, boot = engine.call("GET", "/api/boot", query={"workspace": ws})
-    expect(status == 200, "GET /api/boot answered %s" % status)
+def boot_and_brief(engine, ws, boot=True):
+    """Today's date, open loops, and the owed replies the brief lists.
+
+    With `boot`, the date is the workspace's own (time zone) and comes from
+    GET /api/boot?generate=false, which reads today's rhythm note without
+    writing it on an Engine that knows the option. Without it, the date is
+    the brief's (UTC) and the loops come from GET /api/loops.
+    """
     status, brief = engine.call("GET", "/api/brief", query={"workspace": ws, "limit": 200})
     expect(status == 200, "GET /api/brief answered %s" % status)
+
+    if boot:
+        status, body = engine.call(
+            "GET", "/api/boot", query={"workspace": ws, "generate": "false"}
+        )
+        expect(status == 200, "GET /api/boot answered %s" % status)
+        day = {
+            "date": body["date"],
+            "date_basis": "workspace time zone (boot)",
+            "date_is_today": body["date"] == local_today(body["timezone"]),
+            "open_loops": body["open_loops"]["total"],
+            "open_loops_by_kind": body["open_loops"]["by_kind"],
+            "fires": len(body["fires"]),
+            "recent_decisions": len(body["recent_decisions"]),
+            "rhythm_note_stored_before": body["rhythm"].get("stored"),
+        }
+    else:
+        status, loops = engine.call(
+            "GET", "/api/loops", query={"workspace": ws, "state": "open", "limit": 1000}
+        )
+        expect(status == 200, "GET /api/loops answered %s" % status)
+        by_kind = {}
+        for loop in loops["loops"]:
+            by_kind[loop.get("kind")] = by_kind.get(loop.get("kind"), 0) + 1
+        day = {
+            "date": brief["date"],
+            "date_basis": "UTC (brief; BOOT=1 reads boot)",
+            "date_is_today": brief["date"] == datetime.now(timezone.utc).date().isoformat(),
+            "open_loops": loops["count"],
+            "open_loops_by_kind": by_kind,
+        }
 
     owed = [i for i in brief["items"] if i.get("kind") == "owed_reply"]
     with_sources = [i for i in owed if i.get("sources")]
     cited = all(
         isinstance(src, str) and src.startswith("optimal://") for i in with_sources for src in i["sources"]
     )
-    return {
-        "date": boot["date"],
-        "date_is_today": boot["date"] == local_today(boot["timezone"]),
-        "timezone_set": bool(boot.get("timezone")),
-        "open_loops": boot["open_loops"]["total"],
-        "open_loops_by_kind": boot["open_loops"]["by_kind"],
-        "fires": len(boot["fires"]),
-        "recent_decisions": len(boot["recent_decisions"]),
-        "rhythm_generated": boot["rhythm"]["generated"],
-        "brief_items": len(brief["items"]),
-        "brief_by_category": brief["counts"],
-        "owed_replies_in_brief": len(owed),
-        "owed_replies_with_sources": len(with_sources),
-        "sources_are_optimal_uris": cited,
-    }
+    day.update(
+        {
+            "brief_items": len(brief["items"]),
+            "brief_by_category": brief["counts"],
+            "owed_replies_in_brief": len(owed),
+            "owed_replies_with_sources": len(with_sources),
+            "sources_are_optimal_uris": cited,
+        }
+    )
+    return day
 
 
 def classification_facts(engine, ws, plan):
@@ -1165,7 +1204,13 @@ def read_only_checks(engine, ws, prefix="", plan=True, tenant=None):
         report(prefix + check_id, outcome, dict({"tenant": tenant, "workspace": ws}, **facts))
 
     def wo41_2():
-        facts = boot_and_brief(engine, ws)
+        # An Engine without the option would write today's rhythm note when
+        # asked for boot, so boot is read only from one that lists it.
+        wanted = os.environ.get("BOOT") == "1"
+        boot = wanted and BOOT_CAPABILITY in engine.capabilities
+        facts = boot_and_brief(engine, ws, boot=boot)
+        if wanted and not boot:
+            facts["boot"] = "not read: this Engine does not list %s, so GET /api/boot would write the note" % BOOT_CAPABILITY
         ok = (
             facts["date_is_today"]
             and facts["open_loops"] > 0
@@ -1269,6 +1314,7 @@ def main():
             status, version = engine.call("GET", "/api/version")
             if status in (401, 403):
                 raise Unreachable("the Engine refused the key (%s)" % status)
+            engine.capabilities = set((version or {}).get("capabilities") or [])
             status, me = engine.call("GET", "/api/auth/whoami")
             tenant = (me or {}).get("tenant_id") if status == 200 else "unknown"
             print(

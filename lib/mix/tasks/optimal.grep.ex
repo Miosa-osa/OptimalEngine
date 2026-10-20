@@ -199,7 +199,7 @@ defmodule Mix.Tasks.Optimal.Grep do
   defp resolve_workspace_id("default"), do: "default"
 
   defp resolve_workspace_id(slug) do
-    case OptimalEngine.Workspace.get_by_slug(
+    case OptimalEngine.Workspace.get_by_handle(
            slug,
            OptimalEngine.Tenancy.Tenant.default_id()
          ) do

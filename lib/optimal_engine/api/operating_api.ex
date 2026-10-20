@@ -18,6 +18,22 @@ defmodule OptimalEngine.API.OperatingAPI do
 
   # -- boot and brief ----------------------------------------------------------
 
+  # The first request of a period writes its rhythm note. It does so only for
+  # a caller who may write, and not when the request says `generate=false` (or
+  # `0`): a read key reads, whatever it asks.
+  defp generate?(conn) do
+    conn.query_params["generate"] not in ["false", "0"] and may_write?(conn)
+  end
+
+  # An anonymous local caller is trusted as the local operator; a key needs
+  # the `write` grant (or `*`), as `PermissionPlug` requires for a mutation.
+  defp may_write?(conn) do
+    case conn.assigns[:current_api_key] do
+      %{scopes: scopes} -> "*" in scopes or "write" in scopes
+      _ -> true
+    end
+  end
+
   def boot(conn) do
     conn = fetch_query_params(conn)
     workspace_id = conn.query_params["workspace"] || conn.assigns[:workspace_id] || "default"
@@ -27,7 +43,8 @@ defmodule OptimalEngine.API.OperatingAPI do
       200,
       Boot.build(tenant(conn), workspace_id,
         timezone: conn.query_params["timezone"],
-        actor: Actor.of(conn)
+        actor: Actor.of(conn),
+        generate: generate?(conn)
       )
     )
   end
@@ -117,7 +134,8 @@ defmodule OptimalEngine.API.OperatingAPI do
     cadence = conn.query_params["cadence"] || "daily"
 
     case Rhythm.current(tenant(conn), workspace_id, cadence,
-           timezone: conn.query_params["timezone"]
+           timezone: conn.query_params["timezone"],
+           generate: generate?(conn)
          ) do
       {:ok, note} -> json(conn, 200, note)
       {:error, reason} -> error(conn, 422, reason)

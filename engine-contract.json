@@ -3,13 +3,14 @@
   "repository": "Miosa-osa/OptimalEngine",
   "version": "0.3.3",
   "api_version": "v1",
-  "expected_migration": 70,
+  "expected_migration": 71,
   "capabilities": [
     "workspace_mix_tasks",
     "governed_claim_review",
     "scoped_memory_retrieval",
     "chat_session_commit",
     "org_policy_flow_down",
-    "connector_registry_api"
+    "connector_registry_api",
+    "boot_generate_option"
   ]
 }
