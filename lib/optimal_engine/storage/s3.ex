@@ -768,7 +768,7 @@ defmodule OptimalEngine.Storage.S3 do
 
   defp trace(config, canonical_request, string_to_sign, signature) do
     if optional("OPTIMAL_S3_TRACE", "") == "1" do
-      Logger.debug(fn ->
+      Logger.info(fn ->
         """
         s3 sign trace (endpoint #{config.endpoint.scheme}://#{config.endpoint.authority}#{endpoint_path(config)}, bucket #{config.bucket})
         canonical request:
