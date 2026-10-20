@@ -729,6 +729,13 @@ defmodule OptimalEngine.Embed.TextTest do
         Store.raw_query("SELECT COUNT(DISTINCT text) FROM chunks WHERE signal_id = ?1", [id])
 
       assert distinct >= 3
+
+      # And the chunk connection itself carried one request with several inputs, the
+      # paragraphs among them.
+      batch = Enum.find(silent_bodies([]), &match?(%{"input" => [_, _ | _]}, &1))
+      assert batch, "no request carried more than one input"
+      assert Enum.any?(batch["input"], &(&1 =~ "The renewal moves to Thursday"))
+      assert Enum.any?(batch["input"], &(&1 =~ "Hiring opens two roles in March"))
     end
 
     test "a failed query embedding marks the endpoint unhealthy for the probe window",
@@ -993,7 +1000,48 @@ defmodule OptimalEngine.Embed.TextTest do
   defp hold(listen, held, parent) do
     {:ok, socket} = :gen_tcp.accept(listen)
     send(parent, :silent_connection)
+    reader = spawn_link(fn -> report_body(socket, parent) end)
+    :ok = :gen_tcp.controlling_process(socket, reader)
     hold(listen, [socket | held], parent)
+  end
+
+  # Reads one request without answering it and reports its decoded JSON body, so a
+  # test can see what a connection carried; the socket stays open until the test ends.
+  defp report_body(socket, parent) do
+    with {:ok, head, rest} <- read_head(socket, ""),
+         [_, length] <- Regex.run(~r/\r\ncontent-length:\s*(\d+)/i, head),
+         {:ok, body} <- read_body(socket, rest, String.to_integer(length)),
+         {:ok, decoded} <- Jason.decode(body) do
+      send(parent, {:silent_body, decoded})
+    end
+
+    Process.sleep(:infinity)
+  end
+
+  defp read_head(socket, acc) do
+    case :binary.split(acc, "\r\n\r\n") do
+      [head, rest] ->
+        {:ok, head, rest}
+
+      [_] ->
+        with {:ok, data} <- :gen_tcp.recv(socket, 0, 2_000), do: read_head(socket, acc <> data)
+    end
+  end
+
+  defp read_body(_socket, acc, length) when byte_size(acc) >= length,
+    do: {:ok, binary_part(acc, 0, length)}
+
+  defp read_body(socket, acc, length) do
+    with {:ok, data} <- :gen_tcp.recv(socket, 0, 2_000),
+         do: read_body(socket, acc <> data, length)
+  end
+
+  defp silent_bodies(acc) do
+    receive do
+      {:silent_body, body} -> silent_bodies([body | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 
   defp start_stub(respond) do

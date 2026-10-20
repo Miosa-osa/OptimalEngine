@@ -106,8 +106,8 @@ defmodule OptimalEngine.Pipeline.Embedder do
   # The text a chunk is embedded by, when dispatch/2 knows it before any other model
   # runs: the text of text, code, data and mixed chunks, an audio chunk's transcript,
   # and the text (OCR, captions) of an image or video with no asset that vision
-  # embeds first. A transcript whisper makes, or text used after vision fails, is
-  # embedded on its own.
+  # embeds first. A transcript whisper makes, or a video's text used after vision
+  # fails, is embedded on its own.
   defp batch_text(%Chunk{modality: m, text: text}, _opts)
        when m in [:text, :code, :data, :mixed, :audio],
        do: present(text)
@@ -245,12 +245,13 @@ defmodule OptimalEngine.Pipeline.Embedder do
     end
   end
 
-  defp dispatch(%Chunk{modality: :audio, asset_ref: ref}, opts) when is_binary(ref) do
+  defp dispatch(%Chunk{modality: :audio, asset_ref: ref} = chunk, opts) when is_binary(ref) do
     # No transcript yet — ask whisper.
-    asset_path = get_in(opts, [:asset_paths, ref])
+    case asset_file(chunk, opts) do
+      nil ->
+        {:error, :asset_unavailable}
 
-    cond do
-      is_binary(asset_path) and File.exists?(asset_path) ->
+      asset_path ->
         case Whisper.transcribe(asset_path, opts) do
           {:ok, %{text: text}} when text != "" ->
             with {:ok, vector} <- governed_embed_text(text, opts) do
@@ -260,9 +261,6 @@ defmodule OptimalEngine.Pipeline.Embedder do
           _ ->
             {:error, :transcript_unavailable}
         end
-
-      true ->
-        {:error, :asset_unavailable}
     end
   end
 

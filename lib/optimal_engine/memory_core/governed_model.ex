@@ -87,8 +87,8 @@ defmodule OptimalEngine.MemoryCore.GovernedModel do
 
   # ─── internal ──────────────────────────────────────────────────────────────
 
-  # Everything here, the caller's :classify included, is fail-open: a raise or throw
-  # is logged and the wrapped call's result still returns.
+  # Everything here is fail-open: a raise or throw is logged and the wrapped call's
+  # result still returns. A :classify that raises is recorded as "unclassified".
   defp log_model_run(function_name, input_payload, result, latency_ms, opts) do
     record_model_run(function_name, input_payload, result, latency_ms, opts)
   rescue
@@ -104,12 +104,26 @@ defmodule OptimalEngine.MemoryCore.GovernedModel do
       )
   end
 
+  # A :classify that raises still leaves the run in the audit trail, marked
+  # "unclassified" with only the exception's module, never the result.
+  defp classify(fun, result, function_name) do
+    fun.(result)
+  rescue
+    exception ->
+      Logger.warning(
+        "[GovernedModel] classify raised for #{function_name}: " <> Exception.message(exception)
+      )
+
+      {"unclassified", %{classify_error: inspect(exception.__struct__)}}
+  end
+
   defp record_model_run(function_name, input_payload, result, latency_ms, opts) do
     workspace_id = Keyword.get(opts, :workspace_id, "default")
     model_id = opts[:model_id]
     model_task_type = Keyword.get(opts, :model_task_type, "generation")
 
-    {status, output_payload} = Keyword.get(opts, :classify, &classify_result/1).(result)
+    {status, output_payload} =
+      classify(Keyword.get(opts, :classify, &classify_result/1), result, function_name)
 
     record_opts =
       [

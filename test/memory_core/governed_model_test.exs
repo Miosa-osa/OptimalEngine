@@ -82,7 +82,7 @@ defmodule OptimalEngine.MemoryCore.GovernedModelTest do
     assert metadata["model_id"] == "nomic-embed-text"
   end
 
-  test "a :classify that raises is fail-open: the result still returns and a warning is logged" do
+  test "a :classify that raises is fail-open: the result returns and the run is unclassified" do
     fn_name = "test.classify_raises_#{System.unique_integer([:positive])}"
 
     log =
@@ -94,8 +94,9 @@ defmodule OptimalEngine.MemoryCore.GovernedModelTest do
                  )
       end)
 
-    assert log =~ "governance logging raised for #{fn_name}: classify broke"
-    assert runs_for(fn_name) == []
+    assert log =~ "classify raised for #{fn_name}: classify broke"
+    assert [[^fn_name, _status, _decision, _latency, metadata_json]] = runs_for(fn_name)
+    assert Jason.decode!(metadata_json)["call_status"] == "unclassified"
   end
 
   test "disabling the flag bypasses governance entirely (no run row, result passthrough)" do
