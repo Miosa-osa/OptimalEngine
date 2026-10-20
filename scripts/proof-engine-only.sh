@@ -38,9 +38,15 @@ echo "== step 1: dependencies"
 mix deps.get >/dev/null
 
 echo "== step 2: mint the first key"
-key=$(mix optimal.auth mint --name root --workspace '*' --json 2>/dev/null |
-  sed -n 's/.*"key":"\([^"]*\)".*/\1/p' | head -1)
-[ -n "$key" ] || fail "mint printed no key"
+mint_out=$(mix optimal.auth mint --name root --workspace '*' --json 2>/dev/null || true)
+key=$(printf '%s' "$mint_out" |
+  grep -o '"key"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 |
+  sed 's/.*"\([^"]*\)"$/\1/')
+if [ -z "$key" ]; then
+  printf '%s\n' "$mint_out" | tail -8 |
+    sed 's/"key"[[:space:]]*:[[:space:]]*"[^"]*"/"key":"REDACTED"/'
+  fail "mint printed no key"
+fi
 
 echo "== step 3: start the Engine"
 mix run --no-halt >"$DATA/server.log" 2>&1 &
