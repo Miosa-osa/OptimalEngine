@@ -614,6 +614,67 @@ defmodule OptimalEngine.SyncGateTest do
       assert Enum.any?(later, &(&1.entity_id == "evt-#{ctx.n}"))
     end
 
+    test "a peer that pulls GET /api/sync/changes is handed nothing restricted", ctx do
+      # The route runs as the default tenant, so the workspace does too.
+      {:ok, ws} = Workspace.create(%{slug: "pull-#{ctx.n}", name: "Pull #{ctx.n}"})
+      {:ok, _} = Sync.enable("default", ws.id, "user:owner")
+      pull = %{ctx | tenant: "default", ws: ws.id}
+
+      secret = remember(pull, "Wire 7781 to Harborview, routing 4407", ["restricted"])
+      open = remember(pull, "Standup is at ten", ["internal"])
+
+      conn =
+        Plug.Test.conn(
+          :get,
+          "/api/sync/changes?" <> URI.encode_query(%{"workspace" => ws.id, "since" => 0})
+        )
+        |> OptimalEngine.API.Router.call(OptimalEngine.API.Router.init([]))
+
+      assert conn.status == 200
+      page = Jason.decode!(conn.resp_body)
+
+      refute about?(page["mutations"], secret.memory.id)
+      refute about?(page["mutations"], secret.source_package.id)
+      refute carries?(page["mutations"], "Harborview")
+      assert sent?(page["mutations"], "memories", open.memory.id)
+
+      # The cursor moves past what was held, so a puller is not stuck on it.
+      assert page["cursor"] >= Enum.max(Enum.map(page["mutations"], & &1["sequence"]))
+    end
+
+    test "a restricted row the relay serves on a pull is not applied here", ctx do
+      id = "mem_cloud_secret_#{ctx.n}"
+
+      cloud = [
+        %{
+          "sequence" => 1,
+          "id" => "mut_cloud_#{ctx.n}_1",
+          "device_id" => "rep_cloud",
+          "entity_type" => "memories",
+          "entity_id" => id,
+          "operation" => "create",
+          "occurred_at" => "2026-10-20T12:00:00.000",
+          "payload_hash" => "h",
+          "idempotency_key" => "rep_cloud:1",
+          "payload" => %{
+            "row" => %{
+              "id" => id,
+              "tenant_id" => ctx.tenant,
+              "workspace_id" => ctx.ws,
+              "content" => "Cloud-side wire 5530 to Harborview",
+              "metadata" => Jason.encode!(%{"security_labels" => ["restricted"]})
+            },
+            "blobs" => %{}
+          }
+        }
+      ]
+
+      {result, _sent} = push(ctx, cloud: cloud)
+
+      assert {:ok, %{applied: 0, skipped: %{gated: 1}}} = result.pull
+      assert {:error, :not_found} = Memory.get(id)
+    end
+
     test "a received memory that carries restricted labels in its metadata is not applied", ctx do
       row = fn id, metadata ->
         %{
@@ -894,7 +955,8 @@ defmodule OptimalEngine.SyncGateTest do
   # workspace.
   defp push(ctx, opts \\ []) do
     pushed = :ets.new(:pushed, [:public, :bag])
-    relay(ctx, pushed)
+    cloud = Keyword.get(opts, :cloud, [])
+    relay(ctx, pushed, cloud)
 
     {:ok, _} =
       Sync.add_peer(
@@ -903,7 +965,7 @@ defmodule OptimalEngine.SyncGateTest do
           "workspace_id" => ctx.ws,
           "url" => @relay,
           "api_key" => "relay-key",
-          "policy" => "push",
+          "policy" => if(cloud == [], do: "push", else: "both"),
           "max_class" => Keyword.get(opts, :max_class, "confidential")
         },
         "u"
@@ -915,7 +977,7 @@ defmodule OptimalEngine.SyncGateTest do
     {result, for({:mutations, mutations} <- :ets.tab2list(pushed), m <- mutations, do: m)}
   end
 
-  defp relay(ctx, pushed) do
+  defp relay(ctx, pushed, cloud) do
     engine = %{
       "replica_id" => "rep_cloud",
       "migration" => Sync.engine_info()["migration"],
@@ -939,8 +1001,12 @@ defmodule OptimalEngine.SyncGateTest do
           answer(200, %{
             "data" => %{
               "workspace_id" => ctx.ws,
-              "mutations" => [],
-              "cursor" => 0,
+              "mutations" => if(query["since"] == "0", do: cloud, else: []),
+              "cursor" =>
+                if(query["since"] == "0",
+                  do: length(cloud),
+                  else: String.to_integer(query["since"] || "0")
+                ),
               "more" => false,
               "engine" => engine
             }
