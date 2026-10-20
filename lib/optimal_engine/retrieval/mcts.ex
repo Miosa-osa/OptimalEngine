@@ -15,7 +15,8 @@ defmodule OptimalEngine.Retrieval.MCTS do
   Children add one not-yet-chosen candidate that still fits the budget.
 
   - **Selection**  — descend by UCT until a node with unexpanded children.
-  - **Expansion**  — add one random affordable child.
+  - **Expansion**  - add one affordable child, picked pseudo-randomly from the
+                     node itself (see Determinism).
   - **Rollout**    — greedily fill the remaining budget by marginal reward
                      (relevance * novelty), simulating to a terminal set.
   - **Backprop**   — propagate the terminal reward up the visited path.
@@ -23,6 +24,16 @@ defmodule OptimalEngine.Retrieval.MCTS do
   After `iterations`, the best selection seen (highest terminal reward) is
   returned — not just the most-visited root child, so a single lucky
   high-coverage rollout is never lost.
+
+  ## Determinism
+
+  The same candidates, in the same order, with the same budget select the same
+  set, in the same order, on every call and on every machine. Expansion picks
+  its child by hashing the node it expands and that node's visit count, not by
+  drawing from the process's random state, so exploration still spreads over
+  the children but does not depend on the clock or on what ran before. The
+  selected set is returned best first, ordered by
+  `OptimalEngine.Retrieval.Ranking`.
 
   ## Reward
 
@@ -53,6 +64,8 @@ defmodule OptimalEngine.Retrieval.MCTS do
   packing; this module also exposes `greedy/2` for that path and so tests
   can compare the two.
   """
+
+  alias OptimalEngine.Retrieval.Ranking
 
   @chars_per_token 4
   @default_iterations 200
@@ -128,7 +141,7 @@ defmodule OptimalEngine.Retrieval.MCTS do
 
     {selected_rev, used} =
       cands
-      |> Enum.sort_by(& &1.score, :desc)
+      |> Ranking.sort()
       |> Enum.reduce({[], 0}, fn cand, {sel, tokens} ->
         if tokens + cand.tokens <= budget do
           {[cand | sel], tokens + cand.tokens}
@@ -188,7 +201,7 @@ defmodule OptimalEngine.Retrieval.MCTS do
         end
       end)
 
-    selected = Enum.map(best_set, &Map.fetch!(by_id, &1))
+    selected = best_set |> Enum.map(&Map.fetch!(by_id, &1)) |> Ranking.sort()
     used = selected |> Enum.map(& &1.tokens) |> Enum.sum()
 
     %{
@@ -227,7 +240,7 @@ defmodule OptimalEngine.Retrieval.MCTS do
     cond do
       # Expandable: add one untried affordable child, roll out from it.
       affordable_untried != [] ->
-        id = Enum.random(affordable_untried)
+        id = expansion_pick(node, affordable_untried)
         cand = by_id[id]
         child_selected = [id | node.selected]
         child_used = node.used + cand.tokens
@@ -264,6 +277,13 @@ defmodule OptimalEngine.Retrieval.MCTS do
         reward = reward(Enum.map(node.selected, &by_id[&1]), lambda)
         {backprop_local(node, reward), node.selected, reward}
     end
+  end
+
+  # Which affordable child to expand: a stable hash of the node and its visit
+  # count, so repeated visits to a node spread over its children.
+  defp expansion_pick(node, affordable_untried) do
+    index = :erlang.phash2({node.selected, node.visits}, length(affordable_untried))
+    Enum.at(affordable_untried, index)
   end
 
   defp backprop_local(node, reward) do

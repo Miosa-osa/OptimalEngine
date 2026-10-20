@@ -87,7 +87,8 @@ defmodule OptimalEngine.Store.Vectors do
   - `:type_filter`    — filter by context type (string, e.g. `"signal"`)
   - `:node_filter`    — filter by node (string, e.g. `"project-platform-launch"`)
 
-  Returns `{:ok, [{context_id, similarity_score}]}` sorted descending by score.
+  Returns `{:ok, [{context_id, similarity_score}]}` sorted descending by score;
+  equal scores order by context id, so the list is the same on every call.
   Stored vectors whose dimension differs from the query are never scored:
   cosine similarity across different embedding spaces is meaningless.
   """
@@ -113,7 +114,7 @@ defmodule OptimalEngine.Store.Vectors do
             {cid, sim}
           end)
           |> Enum.filter(fn {_cid, sim} -> sim >= min_sim end)
-          |> Enum.sort_by(fn {_cid, sim} -> sim end, :desc)
+          |> Enum.sort_by(fn {cid, sim} -> {0.0 - sim, cid} end)
           |> Enum.take(limit)
 
         {:ok, results}
@@ -162,7 +163,7 @@ defmodule OptimalEngine.Store.Vectors do
             similarity = cosine_similarity(query_embedding, decode_embedding(blob))
             Map.update(scores, context_id, similarity, &max(&1, similarity))
           end)
-          |> Enum.sort_by(fn {_context_id, similarity} -> similarity end, :desc)
+          |> Enum.sort_by(fn {context_id, similarity} -> {0.0 - similarity, context_id} end)
           |> Enum.take(limit)
 
         {:ok, results}

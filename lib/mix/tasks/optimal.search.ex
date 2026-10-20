@@ -18,6 +18,8 @@ defmodule Mix.Tasks.Optimal.Search do
     --genre      Filter by genre (signals only, e.g. spec, brief, decision-log)
     --uri        Scope to a URI prefix (e.g. optimal://nodes/project-platform-launch/)
     --limit      Max results (default 10)
+    --as-of      ISO 8601 instant the time decay measures age against
+                 (default: now); repeat it to get the same scores again
   """
 
   use Mix.Task
@@ -37,7 +39,8 @@ defmodule Mix.Tasks.Optimal.Search do
           type: :string,
           genre: :string,
           uri: :string,
-          limit: :integer
+          limit: :integer,
+          as_of: :string
         ],
         aliases: [w: :workspace, n: :node, t: :type, g: :genre, l: :limit]
       )
@@ -50,7 +53,7 @@ defmodule Mix.Tasks.Optimal.Search do
 
     search_opts =
       opts
-      |> Keyword.take([:node, :genre, :uri, :limit])
+      |> Keyword.take([:node, :genre, :uri, :limit, :as_of])
       |> Keyword.put_new(:limit, 10)
       |> maybe_put_workspace(Keyword.get(opts, :workspace))
       |> add_type_filter(Keyword.get(opts, :type))

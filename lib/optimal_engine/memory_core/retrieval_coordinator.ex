@@ -1054,6 +1054,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     excluded_sql = """
     SELECT id, security_labels, partition_ids FROM #{parts.table}
     #{excluded_where}
+    ORDER BY id
     LIMIT #{@max_redacted_links}
     """
 
@@ -1143,7 +1144,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       AND (?5 IS NULL OR modality = ?5)
       AND (?6 IS NULL OR extraction_type = ?6)
     #{and_all(auth_clauses)}
-    ORDER BY confidence DESC, created_at DESC
+    ORDER BY confidence DESC, created_at DESC, id
     LIMIT #{limit_placeholder}
     """
 
@@ -1199,7 +1200,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       )
       AND (?5 IS NULL OR workflow_family = ?5)
     #{and_all(auth_clauses)}
-    ORDER BY validation_score DESC, aggregate_confidence DESC, updated_at DESC
+    ORDER BY validation_score DESC, aggregate_confidence DESC, updated_at DESC, id
     LIMIT #{limit_placeholder}
     """
 
@@ -1265,7 +1266,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       AND (?5 IS NULL OR task_family = ?5)
       AND (?6 IS NULL OR skill_package_name = ?6)
     #{and_all(auth_clauses)}
-    ORDER BY aggregate_confidence DESC, updated_at DESC
+    ORDER BY aggregate_confidence DESC, updated_at DESC, id
     LIMIT #{limit_placeholder}
     """
 
@@ -1384,7 +1385,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         AND (?6 IS NULL OR action_class = ?6)
         AND (?7 IS NULL OR object_anchor = ?7)
       """,
-      order: "ORDER BY aggregate_confidence DESC, updated_at DESC"
+      order: "ORDER BY aggregate_confidence DESC, updated_at DESC, id"
     }
   end
 
@@ -1415,7 +1416,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         AND (?6 IS NULL OR action_class = ?6)
         AND (?7 IS NULL OR ?7 IS NOT NULL)
       """,
-      order: "ORDER BY salience DESC, aggregate_confidence DESC, updated_at DESC"
+      order: "ORDER BY salience DESC, aggregate_confidence DESC, updated_at DESC, id"
     }
   end
 

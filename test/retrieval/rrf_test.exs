@@ -35,6 +35,21 @@ defmodule OptimalEngine.Retrieval.RRFTest do
       assert Enum.map(fused, & &1.id) == [:x, :y]
     end
 
+    test "equal fused scores order by uri, whatever order the lists come in" do
+      a = %{id: "id-2", uri: "u/a", score: 0}
+      b = %{id: "id-1", uri: "u/b", score: 0}
+
+      assert ContextAssembler.fuse([[b], [a]]) |> Enum.map(& &1.uri) == ["u/a", "u/b"]
+      assert ContextAssembler.fuse([[a], [b]]) |> Enum.map(& &1.uri) == ["u/a", "u/b"]
+    end
+
+    test "a fused score keeps its exact value beside the rounded one" do
+      [fused] = ContextAssembler.fuse([[%{id: :a, score: 0}], [%{id: :a, score: 0}]])
+
+      assert fused.rank_score == 2 / 61
+      assert fused.score == Float.round(2 / 61, 6)
+    end
+
     test "fused scores are descending" do
       fused =
         ContextAssembler.fuse([

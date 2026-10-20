@@ -41,6 +41,7 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.Grep
   alias OptimalEngine.Retrieval.RagStream
+  alias OptimalEngine.Retrieval.Ranking
   alias OptimalEngine.Retrieval.Receiver
   alias OptimalEngine.SafeAtom
   alias OptimalEngine.Auth.ApiKey
@@ -202,6 +203,12 @@ defmodule OptimalEngine.API.Router do
   # of the tenant's org section is mixed in labeled `inherited: true`
   # (OptimalEngine.OrgPolicy.matching/4). A keyed caller's results honor ACL
   # rows (retrieval_scope/1).
+  #
+  # Results come back in a fixed order: exact score, then uri, then id
+  # (OptimalEngine.Retrieval.Ranking). `as_of=<ISO 8601>` is the instant the
+  # time decay measures age against (default: now), so two Engines with the same
+  # data, asked with the same `as_of`, return the same list; an `as_of` that
+  # does not parse is a 400.
   get "/api/search" do
     q = query_param(conn, "q", "")
     workspace = query_param(conn, "workspace", "default")
@@ -213,6 +220,7 @@ defmodule OptimalEngine.API.Router do
     memory_inference_embedding_model = query_param(conn, "memory_inference_embedding_model", nil)
     memory_query_prefix = query_param(conn, "memory_query_prefix", "")
     memory_search_mode = query_param(conn, "memory_search_mode", "hybrid")
+    as_of = query_param(conn, "as_of", nil)
     {offset, limit} = Pagination.parse(conn, 10)
 
     found =
@@ -235,6 +243,7 @@ defmodule OptimalEngine.API.Router do
                  tenant_id: tenant,
                  type: type,
                  memory_search_mode: memory_search_mode,
+                 as_of: as_of,
                  memory_embedding_provider_model:
                    memory_embedding_provider_model || memory_embedding_model,
                  memory_inference_embedding_model: memory_inference_embedding_model,
@@ -259,6 +268,9 @@ defmodule OptimalEngine.API.Router do
           {:error, :busy} ->
             :busy
 
+          {:error, {:invalid_as_of, _value}} ->
+            :invalid_as_of
+
           _ ->
             {[], 0}
         end
@@ -270,6 +282,9 @@ defmodule OptimalEngine.API.Router do
         |> put_resp_header("retry-after", "1")
         |> put_status(503)
         |> json(%{error: "busy", detail: @busy_detail})
+
+      :invalid_as_of ->
+        send_resp(conn, 400, Jason.encode!(%{error: "as_of must be an ISO 8601 timestamp"}))
 
       {results, total} ->
         pagination = Pagination.wrap(results, total, offset, limit)
@@ -297,6 +312,8 @@ defmodule OptimalEngine.API.Router do
   #   limit=<n>       max results (default 25)
   #   literal=true    force literal FTS match — skip semantic/vector search
   #   path=<prefix>   restrict to node slug or slug prefix
+  #   as_of=<ISO 8601> instant the time decay measures age against (default:
+  #                   now); same as on /api/search
   get "/api/grep" do
     q = query_param(conn, "q", "")
     workspace_id = query_param(conn, "workspace", "default")
@@ -306,6 +323,7 @@ defmodule OptimalEngine.API.Router do
     {offset, limit} = Pagination.parse(conn, 25)
     literal? = conn |> query_param("literal", "false") |> parse_bool(false)
     path_prefix = query_param(conn, "path", "")
+    as_of = query_param(conn, "as_of", nil)
 
     if q == "" do
       send_resp(conn, 400, Jason.encode!(%{error: "q is required"}))
@@ -321,6 +339,7 @@ defmodule OptimalEngine.API.Router do
         |> api_maybe_put(:scale, parse_atom(scale, nil))
         |> api_maybe_put(:modality, parse_atom(modality, nil))
         |> api_maybe_put(:path_prefix, if(path_prefix == "", do: nil, else: path_prefix))
+        |> api_maybe_put(:as_of, as_of)
 
       case Grep.grep(q, grep_opts) do
         {:ok, all_matches} ->
@@ -348,6 +367,9 @@ defmodule OptimalEngine.API.Router do
             results: results,
             pagination: pagination.pagination
           })
+
+        {:error, {:invalid_as_of, _value}} ->
+          send_resp(conn, 400, Jason.encode!(%{error: "as_of must be an ISO 8601 timestamp"}))
 
         {:error, reason} ->
           send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
@@ -4757,12 +4779,13 @@ defmodule OptimalEngine.API.Router do
   end
 
   # Inserts `extra` (best first) into `results` by score, keeping the order
-  # of `results` as it is.
+  # of `results` as it is. A tie in score goes by uri, then id, so the merged
+  # list is the same on every call (OptimalEngine.Retrieval.Ranking).
   defp merge_by_score(results, []), do: results
   defp merge_by_score([], extra), do: extra
 
   defp merge_by_score([result | results], [hit | hits] = extra) do
-    if (hit.score || 0.0) > (result.score || 0.0),
+    if Ranking.before?(hit, result),
       do: [hit | merge_by_score([result | results], hits)],
       else: [result | merge_by_score(results, extra)]
   end

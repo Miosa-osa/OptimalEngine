@@ -67,7 +67,10 @@ defmodule OptimalEngine.Context do
           # Extra
           metadata: map(),
           # Search score (transient — not persisted)
-          score: float() | nil
+          score: float() | nil,
+          # The exact value `score` is rounded from for display; results are
+          # ordered by it (see `OptimalEngine.Retrieval.Ranking`)
+          rank_score: float() | nil
         }
 
   defstruct [
@@ -87,6 +90,7 @@ defmodule OptimalEngine.Context do
     :valid_until,
     :supersedes,
     :score,
+    :rank_score,
     sn_ratio: 0.5,
     entities: [],
     routed_to: [],

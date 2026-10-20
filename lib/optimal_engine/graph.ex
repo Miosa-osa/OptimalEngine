@@ -801,6 +801,7 @@ defmodule OptimalEngine.Graph do
 
   Returns `{:ok, [context_id]}` ranked by how many query-reachable entities
   mention each context (descending), so densely-connected contexts surface first.
+  Contexts with the same count are ordered by id.
 
   Options:
   - `:workspace_id` - workspace to scope to (default: "default")
@@ -824,7 +825,7 @@ defmodule OptimalEngine.Graph do
 
     ranked =
       context_scores
-      |> Enum.sort_by(fn {_id, score} -> score end, :desc)
+      |> Enum.sort_by(fn {id, score} -> {-score, id} end)
       |> Enum.map(fn {id, _score} -> id end)
       |> Enum.take(limit)
 

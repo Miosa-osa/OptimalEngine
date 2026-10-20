@@ -226,7 +226,7 @@ defmodule OptimalEngine.Retrieval.L0Cache do
       AND node NOT LIKE 'node-b-%'
       AND title NOT LIKE 'Backfill %'
       AND title NOT LIKE 'bf task %'
-    ORDER BY node, title
+    ORDER BY node, title, id
     LIMIT 30
     """
 
@@ -263,7 +263,7 @@ defmodule OptimalEngine.Retrieval.L0Cache do
     FROM memories
     WHERE is_latest = 1 AND is_forgotten = 0
     GROUP BY kind
-    ORDER BY cnt DESC
+    ORDER BY cnt DESC, kind
     """
 
     case Store.raw_query(sql) do
@@ -318,7 +318,7 @@ defmodule OptimalEngine.Retrieval.L0Cache do
     WHERE type = 'signal'
       AND (signal_type IN ('direct', 'decide') OR genre IN ('plan', 'standup'))
       AND modified_at >= datetime('now', '-7 days')
-    ORDER BY modified_at DESC
+    ORDER BY modified_at DESC, id
     LIMIT 5
     """
 
@@ -347,7 +347,7 @@ defmodule OptimalEngine.Retrieval.L0Cache do
     WHERE type = 'signal'
       AND genre IN ('decision-log', 'adr', 'decide')
       AND modified_at >= datetime('now', '-30 days')
-    ORDER BY modified_at DESC
+    ORDER BY modified_at DESC, id
     LIMIT 5
     """
 
@@ -376,7 +376,7 @@ defmodule OptimalEngine.Retrieval.L0Cache do
     JOIN contexts c ON c.id = e.context_id
     WHERE c.modified_at >= datetime('now', '-30 days')
     GROUP BY e.name
-    ORDER BY mention_count DESC
+    ORDER BY mention_count DESC, e.name
     LIMIT 8
     """
 

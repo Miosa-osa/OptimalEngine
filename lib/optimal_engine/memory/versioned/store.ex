@@ -178,7 +178,7 @@ defmodule OptimalEngine.Memory.Versioned.Store do
     sql = """
     SELECT #{prefixed_select_cols("m")} FROM memories m
     WHERE #{where}
-    ORDER BY m.created_at DESC
+    ORDER BY m.created_at DESC, m.id
     LIMIT ?#{param_idx} OFFSET ?#{param_idx + 1}
     """
 
@@ -201,7 +201,7 @@ defmodule OptimalEngine.Memory.Versioned.Store do
     JOIN memories m ON m.rowid = memories_fts.rowid
     WHERE memories_fts MATCH ?1
       AND #{where}
-    ORDER BY bm25(memories_fts) ASC
+    ORDER BY bm25(memories_fts) ASC, m.id
     LIMIT ?#{param_idx} OFFSET ?#{param_idx + 1}
     """
 

@@ -44,6 +44,13 @@ defmodule OptimalEngine.Retrieval.CandidatePortfolioTest do
     assert CandidatePortfolio.select(rankings, 4) == CandidatePortfolio.select(rankings, 4)
   end
 
+  test "keeps the exact fused score beside the rounded one" do
+    [selected] = CandidatePortfolio.select([[hit("a")], [hit("a")]], 1)
+
+    assert selected.rank_score == 2 / 61
+    assert selected.score == Float.round(2 / 61, 6)
+  end
+
   test "handles empty and invalid budgets" do
     assert CandidatePortfolio.select([], 10) == []
     assert CandidatePortfolio.select([[hit("a")]], 0) == []

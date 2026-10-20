@@ -27,6 +27,7 @@ defmodule OptimalEngine.Bridge.Knowledge do
   require Logger
 
   alias OptimalEngine.Graph
+  alias OptimalEngine.Retrieval.Ranking
   alias OptimalEngine.Store
 
   @store_name :optimal_knowledge
@@ -42,6 +43,10 @@ defmodule OptimalEngine.Bridge.Knowledge do
   For each result, checks if its entities appear connected to the query terms
   in the results' workspace (`opts` as the moduledoc describes).
   Connected results get a score boost.
+
+  The boost multiplies the exact score (`rank_score`), not the rounded one, and
+  rounds only the displayed `score` (`OptimalEngine.Retrieval.Ranking`). It
+  keeps the order of `results`: it changes scores, never positions.
   """
   @spec graph_boost([map()], String.t(), keyword()) :: [map()]
   def graph_boost(results, query, opts \\ []) when is_list(results) and is_binary(query) do
@@ -60,9 +65,10 @@ defmodule OptimalEngine.Bridge.Knowledge do
           |> Enum.count(&MapSet.member?(connected_entities, &1))
           |> then(fn count -> 1.0 + count * 0.1 end)
 
-        case Map.get(result, :score) do
-          score when is_number(score) -> %{result | score: Float.round(score * boost, 4)}
-          _ -> result
+        if is_number(Map.get(result, :score)) do
+          Ranking.put_score(result, Ranking.exact_score(result) * boost, 4)
+        else
+          result
         end
       end)
     end

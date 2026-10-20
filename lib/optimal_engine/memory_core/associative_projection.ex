@@ -94,7 +94,7 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
           )
         END)
         #{temporal}
-      ORDER BY confidence DESC, precision_score DESC, updated_at DESC
+      ORDER BY confidence DESC, precision_score DESC, updated_at DESC, id
       LIMIT ?#{base + 2}
       """
 
