@@ -205,20 +205,31 @@ defmodule OptimalEngine.CorpusOrganizerTest do
       Application.put_env(:optimal_engine, :corpus_semantic_placement, %{
         enabled: true,
         method: :agree,
-        k: 0,
-        share: "high"
+        share: 1
       })
 
-      assert %{method: :agree, k: 10, share: 0.8} = CorpusOrganizer.semantic_settings()
+      assert %{method: :agree, k: 10, share: 1} = CorpusOrganizer.semantic_settings()
+    end
 
-      Application.put_env(:optimal_engine, :corpus_semantic_placement, %{
-        "enabled" => true,
-        "method" => "nearest"
-      })
+    test "an unknown method, or a k or share out of range, turns placement by meaning off" do
+      for invalid <- [
+            %{"method" => "nearest"},
+            %{"k" => 0},
+            %{"k" => 2.5},
+            %{"share" => 0},
+            %{"share" => 1.5},
+            %{"share" => "high"}
+          ] do
+        Application.put_env(
+          :optimal_engine,
+          :corpus_semantic_placement,
+          Map.put(invalid, "enabled", true)
+        )
 
-      assert ExUnit.CaptureLog.capture_log(fn ->
-               assert CorpusOrganizer.semantic_settings() == nil
-             end) =~ "unknown semantic method"
+        assert ExUnit.CaptureLog.capture_log(fn ->
+                 assert CorpusOrganizer.semantic_settings() == nil
+               end) =~ "placement by meaning is off"
+      end
     end
 
     test "is off unless enabled", ctx do
@@ -287,9 +298,8 @@ defmodule OptimalEngine.CorpusOrganizerTest do
       assert queued == ctx.beta
     end
 
-    test "a marker proposal for another workspace blocks placement by meaning", ctx do
-      enable()
-
+    test "a marker proposal for another workspace blocks placement by meaning, in every method",
+         ctx do
       Application.put_env(:optimal_engine, :corpus_routing_rules, %{
         ctx.beta => [{"beta launch", 5}]
       })
@@ -299,27 +309,86 @@ defmodule OptimalEngine.CorpusOrganizerTest do
           title: "Beta launch notes"
         )
 
-      assert {:ok, preview} = CorpusOrganizer.preview()
-      result = proposal(preview, id)
-      assert %{confidence: :review, workspace_id: nil} = result
-      assert result.proposed_workspace_id == ctx.beta
-      assert result.semantic.workspace_id == ctx.alpha
+      for method <- ~w(centroid knn agree) do
+        enable(%{method: method, k: 3})
+        assert {:ok, preview} = CorpusOrganizer.preview()
+        result = proposal(preview, id)
+        assert result.semantic.method == String.to_existing_atom(method)
+        assert %{confidence: :review, workspace_id: nil} = result
+        assert result.proposed_workspace_id == ctx.beta
+        assert result.semantic.workspace_id == ctx.alpha
+      end
     end
 
     test "a workspace with too few documents and an excluded workspace are never targets", ctx do
+      enable(%{exclude: [ctx.alpha]})
       near_small = filed!(ctx.tenant, ctx.intake, "near-small-#{ctx.n}", [0.0, 0.0, 1.0, 0.05])
       near_alpha = filed!(ctx.tenant, ctx.intake, "near-alpha-#{ctx.n}", [1.0, 0.05, 0.0, 0.0])
 
-      for method <- ~w(centroid knn agree) do
-        enable(%{exclude: [ctx.alpha], method: method, k: 3})
+      assert {:ok, preview} = CorpusOrganizer.preview()
+
+      for id <- [near_small, near_alpha] do
+        result = proposal(preview, id)
+        refute result.workspace_id in [ctx.small, ctx.alpha]
+        refute result.proposed_workspace_id in [ctx.small, ctx.alpha]
+      end
+    end
+
+    test "by nearest documents: small and excluded workspaces vote but never win, among three targets",
+         ctx do
+      {:ok, gamma} =
+        OptimalEngine.Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "gamma",
+          name: "gamma"
+        })
+
+      for i <- 1..4,
+          do: filed!(ctx.tenant, gamma.id, "gamma-#{ctx.n}-#{i}", [0.0, 0.0, 0.1 * i, 1.0])
+
+      near_small = filed!(ctx.tenant, ctx.intake, "three-small-#{ctx.n}", [0.0, 0.0, 1.0, 0.05])
+      near_alpha = filed!(ctx.tenant, ctx.intake, "three-alpha-#{ctx.n}", [1.0, 0.05, 0.0, 0.0])
+
+      for method <- ~w(knn agree) do
+        enable(%{exclude: [ctx.alpha], method: method, k: 5})
         assert {:ok, preview} = CorpusOrganizer.preview()
 
-        for id <- [near_small, near_alpha] do
-          result = proposal(preview, id)
-          refute result.workspace_id in [ctx.small, ctx.alpha], method
-          refute result.proposed_workspace_id in [ctx.small, ctx.alpha], method
-        end
+        # The two small documents are the closest and dilute the vote; the
+        # leading target is the third one.
+        small = proposal(preview, near_small)
+        assert %{confidence: :review, workspace_id: nil} = small
+        assert small.proposed_workspace_id == gamma.id
+        assert %{votes: 3, neighbours: 5} = small.semantic
+        assert small.semantic.share < 0.5
+
+        # Four excluded documents are the closest; one target document votes.
+        alpha = proposal(preview, near_alpha)
+        assert %{confidence: :review, workspace_id: nil} = alpha
+        assert alpha.proposed_workspace_id == ctx.beta
+        assert %{votes: 1, neighbours: 5} = alpha.semantic
+        assert alpha.semantic.share < 0.2
       end
+    end
+
+    test "by nearest documents: only documents of the record's dimensions vote", ctx do
+      for i <- 1..3 do
+        filed!(ctx.tenant, ctx.alpha, "alpha-short-#{ctx.n}-#{i}", [1.0, 0.0, 0.1 * i])
+        filed!(ctx.tenant, ctx.beta, "beta-short-#{ctx.n}-#{i}", [0.0, 1.0, 0.1 * i])
+      end
+
+      short = filed!(ctx.tenant, ctx.intake, "short-#{ctx.n}", [1.0, 0.05, 0.0])
+      long = filed!(ctx.tenant, ctx.intake, "long-#{ctx.n}", [1.0, 0.05, 0.0, 0.0])
+
+      enable(%{method: "knn", k: 20, share: 0.8})
+      assert {:ok, preview} = CorpusOrganizer.preview()
+
+      result = proposal(preview, short)
+      assert %{confidence: :high, method: :semantic} = result
+      assert result.workspace_id == ctx.alpha
+      assert %{votes: 3, neighbours: 6} = result.semantic
+
+      assert %{votes: 4, neighbours: 10} = proposal(preview, long).semantic
     end
 
     test "by nearest documents: a record whose closest filed documents are all in one workspace is placed there, with the vote as evidence",
@@ -431,6 +500,7 @@ defmodule OptimalEngine.CorpusOrganizerTest do
       assert result.workspace_id == ctx.alpha
       assert %{method: :agree, share: 1.0, votes: 3} = result.semantic
       assert result.semantic.centroid_workspace_id == ctx.alpha
+      assert result.semantic.centroid_similarity > 0.95
       assert result.semantic.margin >= 0.04
 
       assert {:ok, %{moved: 1}} = CorpusOrganizer.apply_high_confidence(preview: preview)
@@ -446,6 +516,8 @@ defmodule OptimalEngine.CorpusOrganizerTest do
       assert placement["share"] == 1.0
       assert placement["margin"] >= 0.04
       assert placement["centroid_workspace_id"] == ctx.alpha
+      assert placement["centroid_similarity"] > 0.95
+      assert placement["similarity"] > 0.99
     end
 
     test "the daily population job places by meaning and reports it", ctx do

@@ -63,7 +63,7 @@ defmodule OptimalEngine.CorpusOrganizer do
         method: centroid      # centroid (the default), knn, or agree
         margin: 0.04          # centroid, agree: best centroid similarity minus the runner-up
         k: 10                 # knn, agree: the nearest filed documents that vote
-        share: 0.8            # knn, agree: least share of the vote the winner needs
+        share: 0.8            # knn, agree: least share of the vote to win (0 < share <= 1)
         min_similarity: 0.0   # floor for the best similarity (below)
         min_examples: 5       # filed documents with vectors a target needs
         exclude: [default:example-private]
@@ -80,14 +80,16 @@ defmodule OptimalEngine.CorpusOrganizer do
       its similarity. Documents of small or excluded workspaces vote, but
       only a target can win. The record is placed when the leading target
       holds at least `share` of the vote and its closest document clears
-      `min_similarity`. A workspace with fewer documents than the vote
-      needs cannot win it, so small workspaces do not attract records.
+      `min_similarity`. Votes are weighted by similarity, so a workspace
+      with fewer than `share * k` of the neighbours can still win when its
+      documents are much closer than the others; in practice a workspace
+      needs most of the neighbours, and a small one rarely attracts records.
     * `agree` places only when `knn` places and the closest centroid is the
       same workspace, at least `margin` ahead of the runner-up.
 
   In every method a name marker proposing another workspace blocks the
-  placement. An unknown method turns placement by meaning off. Returns the
-  settings, or `nil`.
+  placement. An unknown method, or a `k` or `share` out of range, turns
+  placement by meaning off with a warning. Returns the settings, or `nil`.
   """
   @spec semantic_settings() :: map() | nil
   def semantic_settings do
@@ -100,47 +102,53 @@ defmodule OptimalEngine.CorpusOrganizer do
       |> Map.new(fn {key, value} -> {to_string(key), value} end)
 
     if raw["enabled"] == true do
-      case semantic_method(raw["method"]) do
-        nil ->
+      with {:ok, method} <- semantic_method(raw["method"]),
+           {:ok, k} <- vote_size(raw["k"]),
+           {:ok, share} <- vote_share(raw["share"]) do
+        %{
+          method: method,
+          margin: number(raw["margin"], @semantic_margin),
+          min_similarity: number(raw["min_similarity"], 0.0),
+          min_examples: number(raw["min_examples"], @semantic_min_examples),
+          exclude: raw["exclude"] |> List.wrap() |> Enum.map(&to_string/1),
+          k: k,
+          share: share
+        }
+      else
+        {:error, setting, value} ->
           Logger.warning(
-            "[CorpusOrganizer] unknown semantic method #{inspect(raw["method"])}; placement by meaning is off"
+            "[CorpusOrganizer] semantic #{setting} #{inspect(value)} is not valid; placement by meaning is off"
           )
 
           nil
-
-        method ->
-          %{
-            method: method,
-            margin: number(raw["margin"], @semantic_margin),
-            min_similarity: number(raw["min_similarity"], 0.0),
-            min_examples: number(raw["min_examples"], @semantic_min_examples),
-            exclude: raw["exclude"] |> List.wrap() |> Enum.map(&to_string/1),
-            k: positive_integer(raw["k"], @semantic_k),
-            share: number(raw["share"], @semantic_share)
-          }
       end
     end
   end
 
-  defp semantic_method(nil), do: :centroid
-  defp semantic_method(method) when method in [:centroid, :knn, :agree], do: method
+  defp semantic_method(nil), do: {:ok, :centroid}
+  defp semantic_method(method) when method in [:centroid, :knn, :agree], do: {:ok, method}
 
   defp semantic_method(method) when is_binary(method) do
     case String.downcase(method) do
-      "centroid" -> :centroid
-      "knn" -> :knn
-      "agree" -> :agree
-      _ -> nil
+      "centroid" -> {:ok, :centroid}
+      "knn" -> {:ok, :knn}
+      "agree" -> {:ok, :agree}
+      _ -> {:error, "method", method}
     end
   end
 
-  defp semantic_method(_method), do: nil
+  defp semantic_method(method), do: {:error, "method", method}
+
+  defp vote_size(nil), do: {:ok, @semantic_k}
+  defp vote_size(k) when is_integer(k) and k > 0, do: {:ok, k}
+  defp vote_size(k), do: {:error, "k", k}
+
+  defp vote_share(nil), do: {:ok, @semantic_share}
+  defp vote_share(share) when is_number(share) and share > 0 and share <= 1, do: {:ok, share}
+  defp vote_share(share), do: {:error, "share", share}
 
   defp number(value, _default) when is_number(value), do: value
   defp number(_value, default), do: default
-
-  defp positive_integer(value, _default) when is_integer(value) and value > 0, do: value
-  defp positive_integer(_value, default), do: default
 
   defp normalize_rules(rules) do
     for {workspace_id, markers} <- rules, is_list(markers), into: %{} do
@@ -220,7 +228,7 @@ defmodule OptimalEngine.CorpusOrganizer do
     source = source_workspace()
 
     with {:ok, rows} <- intake_rows(source, "", limit, page_size, []),
-         {:ok, placer} <- semantic_placer(source, semantic_settings()) do
+         {:ok, placer} <- semantic_placer(source, semantic_settings(), Enum.map(rows, &hd/1)) do
       proposals =
         Enum.map(rows, fn [id, title, l0, content] ->
           title
@@ -235,9 +243,11 @@ defmodule OptimalEngine.CorpusOrganizer do
 
   # -- placement by meaning ----------------------------------------------------
 
-  defp semantic_placer(_source, nil), do: {:ok, %{settings: nil}}
+  defp semantic_placer(_source, nil, _ids), do: {:ok, %{settings: nil}}
 
-  defp semantic_placer(source, settings) do
+  # Compares only the records the preview read (`ids`), so a preview with a
+  # `:limit` costs that many comparisons on the request path.
+  defp semantic_placer(source, settings, ids) do
     tenant_id =
       case Store.raw_query("SELECT tenant_id FROM workspaces WHERE id = ?1", [source]) do
         {:ok, [[tenant_id]]} -> tenant_id
@@ -247,7 +257,7 @@ defmodule OptimalEngine.CorpusOrganizer do
     vote? = settings.method in [:knn, :agree]
 
     with {:ok, {sums, documents}} <- filed_vectors(tenant_id, source, vote?, "", {%{}, []}),
-         {:ok, vectors} <- intake_vectors(source, "", %{}) do
+         {:ok, vectors} <- intake_vectors(ids) do
       targets =
         for {{workspace_id, dims}, {_sum, count}} <- sums,
             count >= settings.min_examples,
@@ -326,44 +336,42 @@ defmodule OptimalEngine.CorpusOrganizer do
 
   defp voter(documents, _keep, _workspace_id, _blob, _values, _norm), do: documents
 
-  # Intake document vectors by id, kept as stored bytes until compared.
-  defp intake_vectors(source, after_id, vectors) do
-    case Store.raw_query(
-           """
-           SELECT c.id, v.embedding
-           FROM vectors v
-           JOIN contexts c ON c.id = v.context_id
-           WHERE c.workspace_id = ?1 AND c.archived_at IS NULL AND c.id > ?2
-           ORDER BY c.id
-           LIMIT ?3
-           """,
-           [source, after_id, @page_size * 10]
-         ) do
-      {:ok, []} ->
-        {:ok, vectors}
+  # The document vectors of the previewed intake records by id, read in
+  # batches and kept as stored bytes until compared.
+  defp intake_vectors(ids) do
+    ids
+    |> Enum.chunk_every(@batch_size)
+    |> Enum.reduce_while({:ok, %{}}, fn batch, {:ok, vectors} ->
+      placeholders = Enum.map_join(1..length(batch), ", ", &"?#{&1}")
 
-      {:ok, rows} ->
-        vectors = Enum.reduce(rows, vectors, fn [id, blob], acc -> Map.put(acc, id, blob) end)
-        [last_id | _] = List.last(rows)
-        intake_vectors(source, last_id, vectors)
+      case Store.raw_query(
+             "SELECT context_id, embedding FROM vectors WHERE context_id IN (#{placeholders})",
+             batch
+           ) do
+        {:ok, rows} ->
+          vectors = Enum.reduce(rows, vectors, fn [id, blob], acc -> Map.put(acc, id, blob) end)
+          {:cont, {:ok, vectors}}
 
-      {:error, _} = error ->
-        error
-    end
+        {:error, _} = error ->
+          {:halt, error}
+      end
+    end)
   end
 
   # The `k` filed documents closest to each intake vector, by intake id, as
-  # `{dimensions, [{workspace_id, similarity}]}` nearest first. The intake is
-  # split into one part per scheduler; each part compares its records with
-  # every filed document of the same dimensions.
+  # `{dimensions, [{workspace_id, similarity}]}` nearest first. The records
+  # are split over all schedulers but one, which stays free for requests and
+  # the Store; each part compares its records with every filed document of
+  # the same dimensions.
   defp nearest(vectors, documents, k) do
-    parts = System.schedulers_online()
+    parts = max(System.schedulers_online() - 1, 1)
     size = max(div(map_size(vectors) + parts - 1, parts), 1)
 
     vectors
     |> Enum.chunk_every(size)
     |> Task.async_stream(
       fn part -> Enum.map(part, fn {id, blob} -> {id, nearest_to(blob, documents, k)} end) end,
+      max_concurrency: parts,
       ordered: false,
       timeout: :infinity
     )
@@ -452,6 +460,7 @@ defmodule OptimalEngine.CorpusOrganizer do
             Map.merge(vote, %{
               method: :agree,
               centroid_workspace_id: centroid.workspace_id,
+              centroid_similarity: centroid.similarity,
               margin: centroid.margin
             })
 
@@ -709,8 +718,8 @@ defmodule OptimalEngine.CorpusOrganizer do
   end
 
   # Placement by meaning keeps the method and its numbers: similarity and
-  # margin (centroid); similarity, share, votes and neighbours (knn); both,
-  # with the centroid's workspace (agree).
+  # margin (centroid); similarity, share, votes and neighbours (knn); all of
+  # them with the centroid's workspace and similarity (agree).
   defp evidence(%{method: :semantic, semantic: semantic, workspace_id: workspace_id}) do
     semantic
     |> Map.drop([:method, :workspace_id])

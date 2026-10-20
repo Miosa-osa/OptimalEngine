@@ -71,7 +71,7 @@ semantic:
   enabled: true
   method: knn           # centroid (the default), knn, or agree
   k: 10                 # knn, agree: the nearest filed documents that vote
-  share: 0.8            # knn, agree: least share of the vote the leading workspace needs
+  share: 0.8            # knn, agree: least share of the vote to win (0 < share <= 1)
   min_similarity: 0.75  # floor for the best similarity (see the table)
   margin: 0.04          # centroid, agree: best centroid similarity minus the runner-up
   min_examples: 5       # filed documents with vectors a target workspace needs
@@ -83,16 +83,18 @@ Targets are the active workspaces of the intake workspace's tenant with at least
 | Method | A record is placed when |
 | --- | --- |
 | `centroid` | the closest centroid of a target's filed document vectors clears `min_similarity` and beats the runner-up by `margin` |
-| `knn` | among the `k` filed documents closest to the record, the leading target holds at least `share` of the vote (each document votes for its workspace with its similarity) and its closest document clears `min_similarity`; documents of every active workspace of the tenant vote, so small and excluded workspaces dilute the vote but cannot win it |
+| `knn` | among the `k` filed documents closest to the record, the leading target holds at least `share` of the vote (each document votes for its workspace with its similarity) and its closest document clears `min_similarity`; documents of every active workspace of the tenant vote, so small and excluded workspaces dilute the vote, but only a target can win it |
 | `agree` | `knn` places it and the closest centroid is the same workspace, at least `margin` ahead of the runner-up |
 
-In every method a name marker that proposes another workspace blocks the placement, and an unknown method turns placement by meaning off.
+In every method a name marker that proposes another workspace blocks the placement.
+An unknown method, a `k` that is not a positive integer, or a `share` that is not above 0 and at most 1 turns placement by meaning off, with a warning.
 A record that is not placed keeps the leading workspace as its proposal in its routing review entry (`routing_review.semantic`, with the method and its numbers).
 Every placement, by markers or by meaning, keeps its evidence on the record as `metadata.routing_placement`: the method (`markers` or `semantic`), the workspace, the time, and the numbers.
-A placement by meaning names its `semantic_method` and keeps `similarity` and `margin` (centroid); `similarity`, `share`, `votes` and `neighbours` (knn); or all of them with the centroid's workspace (agree).
+A placement by meaning names its `semantic_method` and keeps `similarity` and `margin` (centroid); `similarity`, `share`, `votes` and `neighbours` (knn); or all of these with the centroid's workspace and similarity (`centroid_workspace_id`, `centroid_similarity`) and margin (agree).
 
 A centroid favours small, focused workspaces: a record of the right kind but the wrong subject lands closer to their centroid than to the centroid of a large, varied workspace.
-The nearest documents do not have that bias: a workspace with fewer documents than the vote needs (`share` of `k`) cannot win it.
+The nearest documents have much less of that bias: votes are weighted by similarity, so a workspace usually needs most of the `k` neighbours to reach `share`.
+It can win with fewer only when its documents are much closer than the rest (with `k` 10 and `share` 0.8, seven neighbours at 0.90 against three at 0.50 hold 0.81 of the vote), so a small workspace rarely attracts records.
 On one deployment (about 1,900 filed documents in 13 target workspaces, 768-dimension `nomic-embed-text` vectors), leave-one-out over the filed documents gave:
 
 | Settings | Precision | Coverage | Worst workspace precision (3 or more placed) |
@@ -103,7 +105,7 @@ On one deployment (about 1,900 filed documents in 13 target workspaces, 768-dime
 
 The similarity floor keeps short or generic records, such as contact form submissions and small talk, in review: their closest documents stay below it even when the vote is unanimous.
 The right floor depends on the embedding model; 0.75 suits `nomic-embed-text`.
-`knn` and `agree` compare every intake record with every filed document of the same dimensions, spread over the schedulers.
+`knn` and `agree` compare each intake record the preview reads (its `limit`) with every filed document of the same dimensions, spread over all schedulers but one, which stays free for requests and the Store.
 
 Only documents with a vector take part.
 `GET /api/maintenance/embeddings` counts active documents without one (`?workspace=` for one workspace), and `POST /api/maintenance/embeddings {"limit": 100, "workspace"?}` embeds them with the configured text model; both need `admin` and stay in the caller's tenant.
