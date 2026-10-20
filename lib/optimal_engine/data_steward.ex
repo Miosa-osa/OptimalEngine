@@ -50,7 +50,7 @@ defmodule OptimalEngine.DataSteward do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
     with {:ok, entity_quality} <- EntityQuality.run(workspace_id),
-         {:ok, orphan_scopes} <- orphan_scopes(),
+         {:ok, orphan_scopes} <- orphan_scopes(tenant_id),
          {:ok, claims} <- claim_clusters(workspace_id, tenant_id, @default_limit),
          {:ok, routes} <- route_clusters(@default_limit),
          {:ok, entities} <- entity_clusters(workspace_id, @default_limit),
@@ -206,23 +206,28 @@ defmodule OptimalEngine.DataSteward do
     {:ok, summarize(results)}
   end
 
-  def orphan_scopes do
+  @doc """
+  Workspace ids that own records of `tenant_id` and are not registered as a
+  workspace, with how many records each owns. Only the tenant's own records
+  are counted.
+  """
+  def orphan_scopes(tenant_id) do
     with {:ok, rows} <-
            Store.raw_query(
              """
              SELECT owned.workspace_id, owned.record_count
              FROM (
                SELECT workspace_id, COUNT(*) record_count FROM (
-                 SELECT workspace_id FROM contexts WHERE archived_at IS NULL
-                 UNION ALL SELECT workspace_id FROM memories WHERE is_latest=1 AND is_forgotten=0
-                 UNION ALL SELECT workspace_id FROM claims
+                 SELECT workspace_id FROM contexts WHERE archived_at IS NULL AND tenant_id=?1
+                 UNION ALL SELECT workspace_id FROM memories WHERE is_latest=1 AND is_forgotten=0 AND tenant_id=?1
+                 UNION ALL SELECT workspace_id FROM claims WHERE tenant_id=?1
                ) GROUP BY workspace_id
              ) owned
              LEFT JOIN workspaces registered ON registered.id=owned.workspace_id
              WHERE registered.id IS NULL
              ORDER BY owned.record_count DESC
              """,
-             []
+             [tenant_id]
            ) do
       {:ok,
        Enum.map(rows, fn [workspace_id, count] ->
@@ -231,22 +236,38 @@ defmodule OptimalEngine.DataSteward do
     end
   end
 
+  @doc """
+  Moves the rows of `tenant_id` that name an unregistered workspace id to a
+  registered workspace of the same tenant. Options: `:actor_id`, `:tenant_id`
+  (both required).
+
+  The target must be an active workspace of the tenant. The source must not be
+  registered: not in another tenant, in any state, and not an active workspace
+  of this one (an archived workspace of the tenant itself can still be repaired
+  from). Only the tenant's rows move. A table with no tenant column cannot be
+  told apart by tenant for an id nobody owns, so it is left as it is and
+  listed in `unscoped_tables` with the rows it holds.
+  """
   def repair_orphan_scope(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
+    tenant = Keyword.fetch!(opts, :tenant_id)
 
-    with {:ok, [[tenant]]} <- registered_workspace(target_workspace_id),
-         {:ok, []} <- registered_workspace(source_workspace_id),
+    with :ok <- check_target(tenant, target_workspace_id),
+         :ok <- check_orphan_source(tenant, source_workspace_id),
          {:ok, tables} <- workspace_tables(),
          {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
+      {scoped, unscoped} = Enum.split_with(tables, & &1.tenant_scoped?)
+      unscoped_tables = rows_left(unscoped, source_workspace_id)
+
       Store.transaction(fn txn ->
         outcome =
-          Enum.reduce_while(tables, {:ok, []}, fn table, {:ok, results} ->
+          Enum.reduce_while(scoped, {:ok, []}, fn table, {:ok, results} ->
             case Store.txn_execute(
                    txn,
-                   "UPDATE \"#{table}\" SET workspace_id=?1 WHERE workspace_id=?2",
-                   [target_workspace_id, source_workspace_id]
+                   "UPDATE \"#{table.name}\" SET workspace_id=?1 WHERE workspace_id=?2 AND tenant_id=?3",
+                   [target_workspace_id, source_workspace_id, tenant]
                  ) do
-              {:ok, count} -> {:cont, {:ok, [%{table: table, updated: count} | results]}}
+              {:ok, count} -> {:cont, {:ok, [%{table: table.name, updated: count} | results]}}
               {:error, _} = error -> {:halt, error}
             end
           end)
@@ -276,24 +297,28 @@ defmodule OptimalEngine.DataSteward do
              actor_id: actor_id,
              updated_records: updated,
              tables: Enum.filter(results, &(&1.updated > 0)),
+             unscoped_tables: unscoped_tables,
              rekey_recorded: updated > 0 and not is_nil(evidence_key)
            }}
         end
       end)
-    else
-      {:ok, [_ | _]} -> {:error, :source_workspace_is_registered}
-      {:ok, []} -> {:error, :target_workspace_not_registered}
-      error -> error
     end
   end
 
+  @doc """
+  Makes a workspace's id match its slug, moving its rows. Options:
+  `:actor_id`, `:tenant_id` (both required). The source must be a workspace
+  of the tenant; one of another tenant is not found. Only the tenant's rows
+  move.
+  """
   def rename_workspace(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
+    tenant_id = Keyword.fetch!(opts, :tenant_id)
 
     with {:ok, [row]} <-
            Store.raw_query(
-             "SELECT tenant_id,slug,name,description,status,organization_id,metadata,external_id FROM workspaces WHERE id=?1",
-             [source_workspace_id]
+             "SELECT tenant_id,slug,name,description,status,organization_id,metadata,external_id FROM workspaces WHERE id=?1 AND tenant_id=?2",
+             [source_workspace_id, tenant_id]
            ),
          [tenant, slug, name, description, status, organization_id, metadata, external_id] = row,
          {:ok, []} <-
@@ -331,7 +356,7 @@ defmodule OptimalEngine.DataSteward do
                  ]
                ),
              {:ok, results} <-
-               rename_tables(txn, tables, source_workspace_id, target_workspace_id),
+               rename_tables(txn, tables, source_workspace_id, target_workspace_id, tenant),
              # Every slug the workspace holds goes with it; deleting the old
              # record would otherwise delete them (workspace_handles cascades).
              {:ok, handles_moved} <-
@@ -535,12 +560,47 @@ defmodule OptimalEngine.DataSteward do
     )
   end
 
-  defp registered_workspace(workspace_id) do
-    Store.raw_query("SELECT tenant_id FROM workspaces WHERE id=?1 AND status='active'", [
-      workspace_id
-    ])
+  # The target of a repair is an active workspace of the caller's tenant; one
+  # of another tenant is not registered as far as the caller can tell.
+  defp check_target(tenant, workspace_id) do
+    case Store.raw_query("SELECT tenant_id FROM workspaces WHERE id=?1 AND status='active'", [
+           workspace_id
+         ]) do
+      {:ok, [[^tenant]]} -> :ok
+      {:ok, _} -> {:error, :target_workspace_not_registered}
+      error -> error
+    end
   end
 
+  # An orphan source has no workspace record. A record of another tenant, in
+  # any state, or an active one of this tenant, is a registered workspace
+  # whose rows are not to be taken; an archived workspace of this tenant is
+  # still repaired from.
+  defp check_orphan_source(tenant, workspace_id) do
+    case Store.raw_query("SELECT tenant_id, status FROM workspaces WHERE id=?1", [workspace_id]) do
+      {:ok, []} -> :ok
+      {:ok, [[^tenant, "archived"]]} -> :ok
+      {:ok, _} -> {:error, :source_workspace_is_registered}
+      error -> error
+    end
+  end
+
+  # Rows an orphan repair leaves because their table has no tenant column.
+  defp rows_left(tables, workspace_id) do
+    Enum.flat_map(tables, fn table ->
+      case Store.raw_query(
+             "SELECT COUNT(*) FROM \"#{table.name}\" WHERE workspace_id=?1",
+             [workspace_id]
+           ) do
+        {:ok, [[rows]]} when rows > 0 -> [%{table: table.name, rows: rows}]
+        _ -> []
+      end
+    end)
+  end
+
+  # The tables an id repair re-keys: those with a workspace_id column that are
+  # not left alone (@not_rekeyed), with whether they also have a tenant_id
+  # column to bind the move to the caller's tenant.
   defp workspace_tables do
     with {:ok, rows} <-
            Store.raw_query(
@@ -551,16 +611,20 @@ defmodule OptimalEngine.DataSteward do
         rows
         |> List.flatten()
         |> Enum.filter(&safe_identifier?/1)
-        |> Enum.filter(fn table ->
+        |> Enum.reject(&(&1 in @not_rekeyed))
+        |> Enum.flat_map(fn table ->
           case Store.raw_query("PRAGMA table_info(\"#{table}\")", []) do
             {:ok, columns} ->
-              Enum.any?(columns, fn column -> Enum.at(column, 1) == "workspace_id" end)
+              names = Enum.map(columns, &Enum.at(&1, 1))
+
+              if "workspace_id" in names,
+                do: [%{name: table, tenant_scoped?: "tenant_id" in names}],
+                else: []
 
             _ ->
-              false
+              []
           end
         end)
-        |> Enum.reject(&(&1 in @not_rekeyed))
 
       {:ok, tables}
     end
@@ -579,7 +643,7 @@ defmodule OptimalEngine.DataSteward do
           {:ok, [[1]]},
           Store.txn_query(
             txn,
-            "SELECT EXISTS (SELECT 1 FROM \"#{table}\" WHERE workspace_id=?1)",
+            "SELECT EXISTS (SELECT 1 FROM \"#{table.name}\" WHERE workspace_id=?1)",
             [target]
           )
         )
@@ -588,17 +652,21 @@ defmodule OptimalEngine.DataSteward do
     if held, do: {:error, :target_workspace_has_rows}, else: :ok
   end
 
-  defp rename_tables(txn, tables, source, target) do
+  # A registered source belongs to one tenant, so a table without a tenant
+  # column holds only that workspace's rows; a table with one is bound to the
+  # tenant as well, so rows another tenant wrote under the id stay put.
+  defp rename_tables(txn, tables, source, target, tenant) do
     Enum.reduce_while(tables, {:ok, []}, fn table, {:ok, results} ->
-      case Store.txn_execute(
-             txn,
-             "UPDATE \"#{table}\" SET workspace_id=?1 WHERE workspace_id=?2",
-             [
-               target,
-               source
-             ]
-           ) do
-        {:ok, count} -> {:cont, {:ok, [%{table: table, updated: count} | results]}}
+      {sql, params} =
+        if table.tenant_scoped? do
+          {"UPDATE \"#{table.name}\" SET workspace_id=?1 WHERE workspace_id=?2 AND tenant_id=?3",
+           [target, source, tenant]}
+        else
+          {"UPDATE \"#{table.name}\" SET workspace_id=?1 WHERE workspace_id=?2", [target, source]}
+        end
+
+      case Store.txn_execute(txn, sql, params) do
+        {:ok, count} -> {:cont, {:ok, [%{table: table.name, updated: count} | results]}}
         error -> {:halt, error}
       end
     end)

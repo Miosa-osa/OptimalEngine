@@ -72,9 +72,16 @@ Portable topology documents name workspaces by slug (and by id for a renamed one
 ## Repairing a workspace id
 
 A rename keeps the id. An operator can also make the id match the slug, or attach rows written to an unregistered id, with `POST /api/data-steward/workspaces/rename {source_workspace_id, target_workspace_id}` and `POST /api/data-steward/workspaces/repair {source_workspace_id, target_workspace_id}` (`topology:write`).
-Both move every row that names the workspace to the new id in one transaction, and the answer lists the tables (`tables`, `updated_records` for a repair, `handles_moved` for a rename).
+Both move every row of the caller's tenant that names the workspace to the new id in one transaction, and the answer lists the tables (`tables`, `updated_records` for a repair, `handles_moved` for a rename).
 A rename also moves the slugs the workspace holds, and a repair moves rows only (the target must already be a registered workspace).
 A rename is refused (`target_workspace_has_rows`, nothing moves) when the new id already holds rows in any workspace table: that is other data written under the id, and a rename is the same workspace under a new id. Merge those rows into the workspace first with `workspaces/repair`, which records the move as a merge, then rename.
+
+Both act inside the caller's tenant.
+The route authorizes `source_workspace_id` and `target_workspace_id` like any workspace a request names, so a key restricted to some workspaces must hold both, and a workspace of another tenant answers `404` as if it were absent.
+The source of a rename must be a workspace of the tenant.
+The target of a repair must be an active workspace of the tenant, and its source must not be registered: a workspace of another tenant, in any state, or an active workspace of this tenant, is refused (`source_workspace_is_registered`); an archived workspace of this tenant can still be repaired from.
+Every move is bound to the tenant (`AND tenant_id = ?`), so rows another tenant wrote under an id both use stay where they are.
+A table with no tenant column (the entity resolution tables, for example) is moved by a rename, whose source is registered to one tenant, but not by a repair, whose source belongs to nobody: the answer lists it under `unscoped_tables` with the rows it holds, and they are left as they are.
 
 Signed evidence is not rewritten, because each entry is hashed and signed over the workspace id it names.
 `authority_evidence` is left alone, and the repair is appended to it as a signed `workspace.rekeyed` entry (from, to, who, mode) in the same transaction, which the answer reports as `rekey_recorded: true`.

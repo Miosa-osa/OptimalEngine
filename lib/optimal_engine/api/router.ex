@@ -3435,7 +3435,8 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.DataSteward.repair_orphan_scope(
            body["source_workspace_id"],
            body["target_workspace_id"],
-           actor_id: Actor.of(conn, body)
+           actor_id: Actor.of(conn, body),
+           tenant_id: conn.assigns[:current_tenant] || "default"
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -3448,7 +3449,8 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.DataSteward.rename_workspace(
            body["source_workspace_id"],
            body["target_workspace_id"],
-           actor_id: Actor.of(conn, body)
+           actor_id: Actor.of(conn, body),
+           tenant_id: conn.assigns[:current_tenant] || "default"
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))

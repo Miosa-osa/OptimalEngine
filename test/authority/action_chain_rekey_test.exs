@@ -81,7 +81,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
   defp repair_id(tenant, from_id, new_slug) do
     {:ok, _} = Workspace.update(from_id, %{slug: new_slug})
     target = "#{tenant}:#{new_slug}"
-    {:ok, result} = DataSteward.rename_workspace(from_id, target, actor_id: "user:steward")
+
+    {:ok, result} =
+      DataSteward.rename_workspace(from_id, target, tenant_id: tenant, actor_id: "user:steward")
+
     {target, result}
   end
 
@@ -286,7 +289,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       first = chain(tenant, orphan)
 
       assert {:ok, %{rekey_recorded: true}} =
-               DataSteward.repair_orphan_scope(orphan, registered, actor_id: "user:steward")
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       second = chain(tenant, orphan)
 
@@ -309,7 +315,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       assert trace!(tenant, correlation).workspace_id == orphan
 
       assert {:ok, result} =
-               DataSteward.repair_orphan_scope(orphan, registered, actor_id: "user:steward")
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert result.rekey_recorded
 
@@ -324,6 +333,7 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
          %{tenant: tenant, workspace: registered, n: n} do
       assert {:ok, result} =
                DataSteward.repair_orphan_scope("#{tenant}:empty-#{n}", registered,
+                 tenant_id: tenant,
                  actor_id: "user:steward"
                )
 
@@ -578,7 +588,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       without_authority_key()
 
       assert {:error, :evidence_key_unavailable} =
-               DataSteward.rename_workspace(old, "#{tenant}:ops-nokey", actor_id: "user:steward")
+               DataSteward.rename_workspace(old, "#{tenant}:ops-nokey",
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert {:ok, %{id: ^old}} = Workspace.get(old)
       assert {:error, :not_found} = Workspace.get("#{tenant}:ops-nokey")
@@ -599,7 +612,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       without_authority_key()
 
       assert {:error, :evidence_key_unavailable} =
-               DataSteward.repair_orphan_scope(orphan, registered, actor_id: "user:steward")
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert {:ok, [[4]]} =
                Store.raw_query(
@@ -617,6 +633,7 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
         capture_log(fn ->
           assert {:ok, result} =
                    DataSteward.rename_workspace(old, "#{tenant}:ops-quiet",
+                     tenant_id: tenant,
                      actor_id: "user:steward"
                    )
 
@@ -671,7 +688,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       refuse_evidence("workspace.rekeyed")
 
       assert_raise MatchError, fn ->
-        DataSteward.rename_workspace(old, "#{tenant}:ops-atomic", actor_id: "user:steward")
+        DataSteward.rename_workspace(old, "#{tenant}:ops-atomic",
+          tenant_id: tenant,
+          actor_id: "user:steward"
+        )
       end
 
       assert {:ok, %{id: ^old}} = Workspace.get(old)
@@ -962,7 +982,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       chain(tenant, orphan)
 
       assert {:ok, %{rekey_recorded: true}} =
-               DataSteward.repair_orphan_scope(orphan, registered, actor_id: "user:steward")
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       # Issued after the repair, under the orphan id: the repair does not
       # make that id mean the registered workspace.
