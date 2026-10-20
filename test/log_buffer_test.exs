@@ -57,8 +57,17 @@ defmodule OptimalEngine.LogBufferTest do
           "key oe_#{@key_id}_abc-DEF_123 and ?h=Bearer%20oe_#{@key_id}_ghi456&k=%3Doe_#{@key_id}_jkl789"
         )
 
-      assert line =~ "oe_#{@key_id}_[redacted]"
+      assert line =~ "oe_[redacted]"
       for secret <- ["abc-DEF_123", "ghi456", "jkl789"], do: refute(line =~ secret)
+    end
+
+    test "Engine API keys an operator chose, base64 secrets included" do
+      line = stored("bootstrap oe_my-own-key_s3cr3t, oe_ops_dGhpcyBpcyBhIHNlY3JldA== (set)")
+
+      for secret <- ["my-own-key_s3cr3t", "s3cr3t", "dGhpcyBpcyBhIHNlY3JldA"],
+          do: refute(line =~ secret)
+
+      assert line =~ "(set)"
     end
 
     test "bearer tokens" do
@@ -68,15 +77,30 @@ defmodule OptimalEngine.LogBufferTest do
     end
 
     test "basic credentials" do
-      line = stored("sent Basic dXNlcjpwYXNzd29yZA==")
+      line = stored("sent Basic dXNlcjpwYXNzd29yZA== and Basic dXNlcjpwYXNz")
       assert line =~ "Basic [redacted]"
       refute line =~ "dXNlcjpwYXNzd29yZA"
+      refute line =~ "dXNlcjpwYXNz"
+    end
+
+    test "basic as a word, not an auth scheme, is kept" do
+      line = stored("running in basic mode with Basic Configuration")
+      assert line =~ "basic mode with Basic Configuration"
     end
 
     test "URL userinfo" do
       line = stored("fetching https://deploy:hunter2@objects.example.com/bucket")
       assert line =~ "https://[redacted]@objects.example.com/bucket"
       refute line =~ "hunter2"
+    end
+
+    test "URL userinfo without a password, and a password holding an @" do
+      line =
+        stored("https://tok3n-only@a.example/x and https://user:p@ss-w0rd@b.example/y?q=1")
+
+      assert line =~ "https://[redacted]@a.example/x"
+      assert line =~ "https://[redacted]@b.example/y?q=1"
+      for secret <- ["tok3n-only", "p@ss", "ss-w0rd"], do: refute(line =~ secret)
     end
 
     test "key and value pairs in an inspected map, a keyword list, a header tuple and a query" do
@@ -98,7 +122,41 @@ defmodule OptimalEngine.LogBufferTest do
       end
 
       assert line =~ "eu-west-1"
-      assert line =~ "next=2"
+      assert line =~ ~s(secret_access_key: "[redacted]")
+      # An unquoted value is redacted to the next whitespace, the rest of a query included.
+      assert line =~ "token=[redacted] x-optimal-grant"
+    end
+
+    test "credential names at the end of longer names" do
+      line =
+        stored(
+          "AWS_SECRET_ACCESS_KEY=wJal1 db_password=dbpw1 " <>
+            inspect(%{"notion_token" => "nt-tok1"}) <> " slack_bot_token=sbt-1"
+        )
+
+      for secret <- ~w(wJal1 dbpw1 nt-tok1 sbt-1), do: refute(line =~ secret, "#{secret}: #{line}")
+    end
+
+    test "JSON inside an inspected string" do
+      line = stored(inspect(~s({"password":"jpw-1","api_key":"jak-1"})))
+      for secret <- ~w(jpw-1 jak-1), do: refute(line =~ secret, "#{secret}: #{line}")
+    end
+
+    test "charlist values" do
+      line = stored(inspect(password: ~c"clpw-1") <> " secret: 'sqsec-1'")
+      for secret <- ~w(clpw-1 sqsec-1), do: refute(line =~ secret, "#{secret}: #{line}")
+    end
+
+    test "a value is redacted to its end, not to its first separator" do
+      line =
+        stored(
+          "password=tail1&tail2 authorization: Token tok-tail3 " <>
+            inspect(%{password: "has space&more"})
+        )
+
+      for secret <- ["tail1", "tail2", "tok-tail3", "has space", "more"] do
+        refute line =~ secret, "#{secret}: #{line}"
+      end
     end
 
     test "provider tokens with a known prefix" do
@@ -110,6 +168,19 @@ defmodule OptimalEngine.LogBufferTest do
 
       for secret <- ~w(AbCdEfGh12345678 AbCdEfGh1234 1234567890-abcdefgh) do
         refute line =~ secret, "#{secret} survived: #{line}"
+      end
+    end
+
+    test "more provider prefixes" do
+      line =
+        stored(
+          "github_pat_11ABCDEFG0abcdefghijkl ntn_1234567890abcdefgh secret_AbCdEfGhIjKlMnOp " <>
+            "ya29.a0AfH6SMBxyzxyzxyz rk_live_1234567890abcd whsec_1234567890abcdef"
+        )
+
+      for secret <-
+            ~w(11ABCDEFG0abcdefghijkl 1234567890abcdef AbCdEfGhIjKlMnOp a0AfH6SMBxyzxyzxyz live_1234567890abcd) do
+        refute line =~ secret, "#{secret}: #{line}"
       end
     end
 
@@ -133,6 +204,12 @@ defmodule OptimalEngine.LogBufferTest do
     refute line =~ "\e"
     refute line =~ "\a"
     assert line =~ "?[31mred?[0m bell? tab\there"
+  end
+
+  test "C1 controls and the Unicode line and paragraph separators are replaced" do
+    line = stored("a\u0085b\u009bc\u2028d\u2029e café")
+    for char <- ["\u0085", "\u009b", "\u2028", "\u2029"], do: refute(line =~ char)
+    assert line =~ "a?b?c?d?e café"
   end
 
   test "a level the logger rejects leaves the Engine running without the handler" do

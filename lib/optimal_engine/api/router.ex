@@ -3720,7 +3720,13 @@ defmodule OptimalEngine.API.Router do
         do: conn.body_params,
         else: %{}
 
-    workspace_id = body["workspace"] || conn.assigns[:workspace_id] || "default"
+    # An empty "workspace" names no workspace: the implicit default applies, as
+    # WorkspaceAuthPlug authorized it.
+    workspace_id =
+      case body["workspace"] do
+        named when is_binary(named) and named != "" -> named
+        _absent -> conn.assigns[:workspace_id] || "default"
+      end
 
     case OptimalEngine.Reindex.enqueue(workspace_id) do
       {:ok, job, :queued} ->

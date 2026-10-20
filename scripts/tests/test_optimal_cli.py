@@ -655,6 +655,16 @@ class CompatibilityEdgeTests(CliTestCase):
         self.assertEqual(result.returncode, 78, result.stderr)
         self.assertIn(f'upgrade the client to {engine}', result.stderr)
 
+    def test_the_426_message_carries_no_control_characters(self):
+        self.fake.routes[('GET', '/api/boot')] = (426, {'error': 'client_incompatible\x1b[2J',
+                                                        'engine': '9.0.0\x1b]0;title\x07'})
+        result = self.run_cli('boot')
+        self.assertEqual(result.returncode, 78, result.stderr)
+        self.assertNotIn('\x1b', result.stderr)
+        self.assertNotIn('\x07', result.stderr)
+        self.assertIn('the Engine (9.0.0', result.stderr)
+        self.assertIn('client_incompatible', result.stderr)
+
     def test_an_unreadable_outdated_header_is_not_echoed(self):
         self.fake.headers['x-optimal-client-outdated'] = 'garbage\x1b]0;title\x07'
         result = self.ok('boot')
