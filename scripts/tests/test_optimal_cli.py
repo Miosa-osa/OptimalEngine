@@ -729,7 +729,7 @@ class BuildTests(unittest.TestCase):
                 prefix = f'optimal-{version}-linux-arm64'
                 self.assertTrue(members[f'{prefix}/oe'].issym())
                 self.assertEqual(members[f'{prefix}/oe'].linkname, 'optimal')
-                for name in ['optimal', 'install.sh', 'LICENSE', 'VERSION']:
+                for name in ['optimal', 'install.sh', 'install-client.sh', 'LICENSE', 'VERSION']:
                     self.assertIn(f'{prefix}/{name}', members)
                 tar.extractall(out, filter='tar') if sys.version_info >= (3, 12) else tar.extractall(out)
             bindir = Path(out) / 'prefix'

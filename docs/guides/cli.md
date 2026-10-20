@@ -34,7 +34,7 @@ apps/cli/install.sh ~/.local     # or: ln -s "$PWD/apps/cli/optimal" ~/.local/bi
 
 Build the archives with `apps/cli/build.sh [out-dir]` (default `dist/cli`).
 It writes `optimal-<version>-<os>-<arch>.tar.gz` for linux-amd64, linux-arm64, darwin-amd64 and darwin-arm64, and their lines in `SHA256SUMS`.
-Each archive holds `optimal`, the `oe` link, `install.sh`, `LICENSE`, and `VERSION`.
+Each archive holds `optimal`, the `oe` link, `install.sh`, `install-client.sh` (the machine installer of the same release), `LICENSE`, and `VERSION`.
 The client version is the Engine version from `mix.exs`; the build refuses to run when they differ.
 `apps/mcp/build.sh [out-dir]` adds `optimal-engine-mcp-<version>.tar.gz`, the MCP server with its production dependencies, to the same directory and `SHA256SUMS`.
 CI builds both on every run and attaches them to the GitHub release of a `v*` tag.
@@ -213,5 +213,5 @@ Codex gives a stdio server only a fixed environment, so the Codex table lists th
 
 `scripts/tests/test_optimal_cli.py` checks the client against a fake HTTP server: route mapping, URL encoding and JSON escaping, configuration precedence, the bearer header, that the key never reaches a process argument list or any output, error codes, operator refusals, the start and stop of a process the client started, a minimal tool PATH, other shells, and the release archives.
 Run it with `python3 -m unittest discover -s scripts/tests -p 'test_optimal_cli.py'`; set `OPTIMAL_CLI_TEST_SHELL=dash` to run every case under another shell.
-`scripts/tests/test_install_client.py` runs `install-client.sh` in a temporary home against release files and a fake Engine: exit codes, checksums, a tampered CLI or MCP archive leaving the install untouched, directory, HTTPS and pinned HTTP sources, the shared install found without a prefix, the profile and its modes, verification from the profile, a 0.3.2 release, harness registration with Codex `env_vars`, and that the key is never a program argument or in a harness configuration.
+`scripts/tests/test_install_client.py` runs `install-client.sh` in a temporary home against release files and a fake Engine: exit codes, checksums, a tampered CLI or MCP archive or a full disk leaving the install untouched, directory, HTTPS and pinned HTTP sources, the shared install found without a prefix, root never installing into its own home, the installer refreshed from the CLI archive, the profile and its modes, verification from the profile and the environment, a 0.3.2 release, harness registration with Codex `env_vars` (a symlinked, unreadable or unfilterable Codex config included), and that the key is never a program argument or in a harness configuration.
 Set `OPTIMAL_CLIENT_TEST_RELEASE_DIR` to a directory of real release files to install those instead of a stand-in MCP archive.

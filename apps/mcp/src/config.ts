@@ -31,7 +31,10 @@ interface Profile {
   path: string;
   url?: string;
   key?: string;
-  /** A file holding the key, read only when the key is used. */
+  /**
+   * A file holding the key. loadConfig reads it once, at start, and only when the
+   * profile's key is the one used.
+   */
   keyFile?: string;
   workspace?: string;
 }

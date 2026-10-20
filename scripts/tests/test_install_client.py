@@ -96,8 +96,9 @@ def mcp_archive(out, version, reports=None, archive_version=None, flat=False):
                         *members], check=True)
 
 
-def cli_archive(out, version):
-    """This checkout's CLI, relabelled as another version, for this platform only."""
+def cli_archive(out, version, installer=None):
+    """This checkout's CLI, relabelled as another version, for this platform only; with
+    installer, the archive carries that text as install-client.sh (0.3.3 and later do)."""
     with tempfile.TemporaryDirectory() as stage:
         name = f'optimal-{version}-{platform()}'
         root = Path(stage) / name
@@ -107,6 +108,8 @@ def cli_archive(out, version):
         (root / 'optimal').chmod(0o755)
         (root / 'oe').symlink_to('optimal')
         (root / 'VERSION').write_text(version + '\n')
+        if installer is not None:
+            (root / 'install-client.sh').write_text(installer)
         subprocess.run(['tar', '-C', stage, '-czf', str(Path(out) / f'{name}.tar.gz'), name], check=True)
 
 
@@ -201,6 +204,17 @@ class InstallClientTestCase(unittest.TestCase):
         self.env['OPTIMAL_CLIENT_REGISTER_MCP'] = '1'
         return calls
 
+    def fake(self, name, body):
+        """A program first on PATH, written as a shell script."""
+        path = self.fakes / name
+        path.write_text('#!/bin/sh\n' + body)
+        path.chmod(0o755)
+        return path
+
+    def installed_state(self, paths):
+        """What a refused install must not change: inode, mtime and bytes."""
+        return {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths}
+
     def serve(self, directory):
         server = ThreadingHTTPServer(('127.0.0.1', 0), partial(QuietFiles, directory=str(directory)))
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -242,6 +256,17 @@ class InstallTests(InstallClientTestCase):
         self.assertIn('MCP server skipped', result.stdout)
         self.assertFalse((self.prefix / 'bin' / 'optimal-engine-mcp').exists())
 
+    @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
+    def test_a_cli_only_install_removes_an_earlier_mcp_server(self):
+        self.run_installer('install')
+        self.env['OPTIMAL_CLIENT_SKIP_MCP'] = '1'
+        result = self.run_installer('install', 'verify')
+        self.assertIn('removed the earlier MCP server', result.stdout)
+        self.assertFalse((self.prefix / 'mcp').exists())
+        self.assertFalse((self.prefix / 'bin' / 'optimal-engine-mcp').exists())
+        self.assertFalse(os.path.lexists(self.bin / 'optimal-engine-mcp'))
+        self.assertTrue((self.bin / 'optimal').exists())
+
     def test_a_tampered_cli_archive_is_refused_and_nothing_is_installed(self):
         copy = self.copy_release()
         for archive in copy.glob(f'optimal-{VERSION}-*.tar.gz'):
@@ -271,6 +296,48 @@ class InstallTests(InstallClientTestCase):
         self.env['OPTIMAL_CLIENT_PREFIX'] = str(self.dir / 'fresh')
         self.assertEqual(self.run_installer('install', check=False).returncode, 65)
         self.assertFalse((self.dir / 'fresh').exists())
+
+    def test_a_failed_copy_into_the_prefix_changes_nothing(self):
+        """A full disk during the copies: exit 73, no file replaced, no copy left behind."""
+        self.run_installer('install')
+        paths = [self.prefix / 'bin' / 'optimal', self.prefix / 'bin' / 'install-client.sh',
+                 self.prefix / 'VERSION']
+        # The MCP server is the large copy; install-client.sh is the last one.
+        failing = ['install-client.sh.new.']
+        if NODE:
+            paths += [self.prefix / 'bin' / 'optimal-engine-mcp', self.prefix / 'mcp' / 'dist' / 'index.js']
+            failing.insert(0, '/mcp.new.')
+        before = self.installed_state(paths)
+        oe = os.readlink(self.prefix / 'bin' / 'oe')
+        real_cp = shutil.which('cp')
+        for pattern in failing:
+            with self.subTest(failing=pattern):
+                self.fake('cp', f'case "$*" in *"{pattern}"*) echo "cp: No space left on device" >&2; exit 1 ;; esac\n'
+                                f'exec "{real_cp}" "$@"\n')
+                result = self.run_installer('install', check=False)
+                self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+                self.assertIn('No space left on device', result.stderr)
+                self.assertIn('the installed client is unchanged', result.stderr)
+                self.assertEqual(self.installed_state(paths), before)
+                self.assertEqual(os.readlink(self.prefix / 'bin' / 'oe'), oe)
+                leftovers = [p.name for d in [self.prefix, self.prefix / 'bin'] for p in d.iterdir()
+                             if '.new.' in p.name or '.old.' in p.name]
+                self.assertEqual(leftovers, [])
+        (self.fakes / 'cp').unlink()
+        self.run_installer('install', 'verify')
+
+    def test_the_installed_installer_comes_from_the_cli_archive(self):
+        release = self.dir / 'with-installer'
+        release.mkdir()
+        refreshed = INSTALLER.read_text() + '# refreshed from the archive\n'
+        cli_archive(release, VERSION, installer=refreshed)
+        mcp_archive(release, VERSION)
+        write_sums(release)
+        self.env['OPTIMAL_CLIENT_SOURCE'] = str(release)
+        self.run_installer('install')
+        copy = self.prefix / 'bin' / 'install-client.sh'
+        self.assertEqual(copy.read_text(), refreshed)
+        self.assertEqual(stat.S_IMODE(copy.stat().st_mode), 0o755)
 
     @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
     def test_the_mcp_version_is_checked_in_the_archive_and_in_its_answer(self):
@@ -330,7 +397,7 @@ class InstallTests(InstallClientTestCase):
 
     def test_input_errors_exit_64(self):
         self.assertEqual(self.run_installer('upgrade', check=False).returncode, 64)
-        for version in ['0.3.3-rc1', '0.3', '1.2.3x', ' 0.3.3']:
+        for version in ['0.3.3-rc1', '0.3', '1.2.3x', ' 0.3.3', '0.3.3\nx', '0..3', '1.2.3.4']:
             self.env['OPTIMAL_CLIENT_VERSION'] = version
             self.assertEqual(self.run_installer('install', check=False).returncode, 64, version)
         del self.env['OPTIMAL_CLIENT_VERSION']
@@ -397,6 +464,41 @@ class PrefixTests(InstallClientTestCase):
         self.assertEqual(result.returncode, 70)
         self.assertIn('no client is installed', result.stderr)
 
+    def test_root_installs_into_the_system_prefix_never_its_home(self):
+        self.fake('id', 'echo 0\n')
+        del self.env['OPTIMAL_CLIENT_PREFIX']
+        own_home = self.home / '.local' / 'share' / 'optimal'
+
+        # As root with no install anywhere, the other commands name the system prefix.
+        result = self.run_installer('verify', check=False)
+        self.assertEqual(result.returncode, 70)
+        self.assertIn(f'no client is installed in {self.system_prefix}', result.stderr)
+
+        # A system prefix that cannot be created fails; root's home is never the fallback.
+        blocked = self.dir / 'blocked'
+        blocked.write_text('a file, not a directory')
+        self.env['OPTIMAL_CLIENT_SYSTEM_PREFIX'] = str(blocked / 'optimal')
+        result = self.run_installer('install', check=False)
+        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+        self.assertFalse(own_home.exists())
+
+        # A missing system prefix, parents and all, is created.
+        system = self.dir / 'fresh-root' / 'opt' / 'optimal'
+        self.env['OPTIMAL_CLIENT_SYSTEM_PREFIX'] = str(system)
+        self.run_installer('install', 'verify')
+        self.assertEqual((system / 'VERSION').read_text().strip(), VERSION)
+        self.assertFalse(own_home.exists())
+
+    def test_an_unreadable_version_file_is_named(self):
+        self.run_installer('install')
+        version_file = self.prefix / 'VERSION'
+        for text in ['not a version\n', '']:
+            with self.subTest(text=text):
+                version_file.write_text(text)
+                result = self.run_installer('verify', check=False)
+                self.assertEqual(result.returncode, 70)
+                self.assertIn(f'{version_file} does not hold a version', result.stderr)
+
 
 class ConfigureAndVerifyTests(InstallClientTestCase):
     def test_profile_names_the_key_file_and_verify_proves_the_profile(self):
@@ -407,10 +509,10 @@ class ConfigureAndVerifyTests(InstallClientTestCase):
         result = self.run_installer()
         output = result.stdout + result.stderr
         self.assertNotIn(KEY, output)
-        self.assertIn('ok: whoami', output)
-        self.assertIn('from the profile', output)
+        for source in ['profile', 'environment']:
+            self.assertIn(f'ok: whoami against {engine.url} from the {source}', output)
+            self.assertIn(f'ok: search against {engine.url} from the {source}', output)
         self.assertIn('authenticated: true', output)
-        self.assertIn('ok: search', output)
 
         config = self.home / '.config' / 'optimal'
         profile = config / 'profile'
@@ -429,16 +531,24 @@ class ConfigureAndVerifyTests(InstallClientTestCase):
         search = next(r for r in engine.requests if r['path'] == '/api/search')
         self.assertEqual(search['query']['workspace'], 'default:sales')
 
-    def test_verify_uses_the_profile_not_the_environment(self):
+    def test_verify_checks_the_profile_and_the_environment(self):
         engine = self.engine()
         self.env.update(OPTIMAL_ENGINE_URL=engine.url, OPTIMAL_ENGINE_API_KEY_FILE=str(self.key_file()),
                         OPTIMAL_WORKSPACE='default:sales')
         self.run_installer()
-        # A broken profile fails verify even with a working environment.
         profile = self.home / '.config' / 'optimal' / 'profile'
-        profile.write_text(profile.read_text().replace('key_file=', 'key_file=/nonexistent'))
+        good = profile.read_text()
+        # A broken profile fails verify even with a working environment.
+        profile.write_text(good.replace('key_file=', 'key_file=/nonexistent'))
         result = self.run_installer('verify', check=False)
         self.assertEqual(result.returncode, 78)
+        # A broken environment fails verify even with a working profile.
+        profile.write_text(good)
+        self.env['OPTIMAL_ENGINE_URL'] = 'http://127.0.0.1:9'
+        result = self.run_installer('verify', check=False)
+        self.assertEqual(result.returncode, 69)
+        self.assertIn('ok: search against', result.stdout)
+        self.assertIn('from the profile', result.stdout)
 
     def test_an_inline_key_is_written_only_to_a_private_profile(self):
         engine = self.engine()
@@ -449,6 +559,16 @@ class ConfigureAndVerifyTests(InstallClientTestCase):
         profile = self.home / '.config' / 'optimal' / 'profile'
         self.assertEqual(stat.S_IMODE(profile.stat().st_mode), 0o600)
         self.assertIn(f'key={KEY}\n', profile.read_text())
+
+    def test_with_both_key_variables_the_profile_names_the_file(self):
+        self.env.update(OPTIMAL_ENGINE_URL='https://engine.example.invalid', OPTIMAL_ENGINE_API_KEY=KEY,
+                        OPTIMAL_ENGINE_API_KEY_FILE=str(self.key_file('file-key-0b8a7c')))
+        result = self.run_installer('install', 'configure')
+        self.assertIn('both set', result.stderr)
+        self.assertNotIn(KEY, result.stdout + result.stderr)
+        profile = (self.home / '.config' / 'optimal' / 'profile').read_text()
+        self.assertIn(f'key_file={self.dir / "engine-key"}\n', profile)
+        self.assertNotIn('key=', profile.replace('key_file=', ''))
 
     def test_a_changed_profile_keeps_the_earlier_one(self):
         engine = self.engine(require_key=None)
@@ -493,6 +613,8 @@ class ConfigureAndVerifyTests(InstallClientTestCase):
         self.assertIn(f'key={KEY}\n', profile)
         self.assertNotIn('key_file=', profile)
         self.assertTrue(all(r['auth'] == f'Bearer {KEY}' for r in engine.requests))
+        # Its CLI archive carries no installer, so the running script is the installed copy.
+        self.assertEqual((self.prefix / 'bin' / 'install-client.sh').read_bytes(), INSTALLER.read_bytes())
 
     def test_engine_check_failures_carry_the_cli_exit_code(self):
         self.run_installer('install')
@@ -547,8 +669,8 @@ class SecretTests(InstallClientTestCase):
 
 # What `register` runs besides the harness programs. The tests put only these and
 # fakes on PATH, so a real `claude` or `codex` on the test machine is never run.
-REGISTER_TOOLS = ['sh', 'awk', 'cat', 'chmod', 'cp', 'dirname', 'grep', 'head', 'mkdir', 'mktemp', 'mv',
-                  'rm', 'sed', 'uname']
+REGISTER_TOOLS = ['sh', 'awk', 'cat', 'chmod', 'cp', 'dirname', 'grep', 'head', 'id', 'mkdir', 'mktemp', 'mv',
+                  'readlink', 'rm', 'sed', 'uname']
 
 
 class RegisterTests(InstallClientTestCase):
@@ -618,6 +740,63 @@ class RegisterTests(InstallClientTestCase):
         toml = (self.home / '.codex' / 'config.toml').read_text()
         self.assertIn(f'command = "{self.launcher}"', toml)
         self.assertNotIn('env_vars', toml)
+
+    def test_an_unknown_codex_version_gets_env_vars_and_a_warning(self):
+        for case, codex in [('not on PATH', None), ('no version', 'codex development build')]:
+            with self.subTest(case=case):
+                codex_home = self.dir / f'codex-{len(case)}'
+                codex_home.mkdir()
+                self.env['CODEX_HOME'] = str(codex_home)
+                if codex is None:
+                    (self.fakes / 'codex').unlink(missing_ok=True)
+                else:
+                    self.fake_harnesses(codex_version=codex)
+                result = self.run_installer('register')
+                self.assertIn('Codex version unknown', result.stderr)
+                self.assertIn(ENV_VARS, (codex_home / 'config.toml').read_text())
+
+    def test_a_symlinked_codex_config_stays_a_symlink(self):
+        codex_home = self.home / '.codex'
+        codex_home.mkdir()
+        dotfiles = self.dir / 'dotfiles'
+        dotfiles.mkdir()
+        (dotfiles / 'codex.toml').write_text('model = "example-model"\n')
+        link = codex_home / 'config.toml'
+        link.symlink_to('../../dotfiles/codex.toml')
+        self.run_installer('register')
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), '../../dotfiles/codex.toml')
+        toml = (dotfiles / 'codex.toml').read_text()
+        self.assertIn('model = "example-model"', toml)
+        self.assertIn(f'command = "{self.launcher}"', toml)
+        self.assertEqual(stat.S_IMODE((dotfiles / 'codex.toml').stat().st_mode), 0o600)
+        self.assertEqual([p.name for p in dotfiles.iterdir()], ['codex.toml'])
+
+    def test_a_codex_config_that_cannot_be_rewritten_is_left_alone(self):
+        codex_home = self.home / '.codex'
+        codex_home.mkdir()
+        config = codex_home / 'config.toml'
+        original = 'model = "example-model"\n\n[mcp_servers.other]\ncommand = "other-server"\n'
+        config.write_text(original)
+
+        # The filter fails (here: awk exits 2): exit 73, the config as it was, no temporary file.
+        self.fake('awk', 'exit 2\n')
+        result = self.run_installer('register', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'could not write {config}; it is unchanged', result.stderr)
+        self.assertEqual(config.read_text(), original)
+        self.assertEqual([p.name for p in codex_home.iterdir()], ['config.toml'])
+        (self.fakes / 'awk').unlink()
+
+        # A config this user cannot read, like a root-owned 0600 file in an agent's home.
+        if os.geteuid() != 0:
+            config.chmod(0o200)
+            self.addCleanup(config.chmod, 0o600)
+            result = self.run_installer('register', check=False)
+            self.assertEqual(result.returncode, 73)
+            self.assertIn(f'cannot read and write {config}', result.stderr)
+            config.chmod(0o600)
+            self.assertEqual(config.read_text(), original)
 
     def test_a_registration_that_cannot_be_written_exits_73(self):
         self.fake_harnesses(claude_exit=1)
