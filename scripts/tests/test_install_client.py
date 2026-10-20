@@ -423,6 +423,126 @@ class InstallTests(InstallClientTestCase):
         self.assertEqual((self.prefix / 'VERSION').read_text().strip(), VERSION)
         self.assertFalse((self.prefix / 'mcp.old').exists())
 
+    def test_install_needs_a_source(self):
+        del self.env['OPTIMAL_CLIENT_SOURCE']
+        result = self.run_installer('install', check=False)
+        self.assertEqual(result.returncode, 64)
+        self.assertIn('OPTIMAL_CLIENT_SOURCE is required for install', result.stderr)
+        self.assertFalse(self.prefix.exists())
+        self.assertNotIn('github', (result.stdout + result.stderr).lower())
+        self.assertNotIn('github.com', INSTALLER.read_text())
+
+    def leftovers(self):
+        return sorted(p.name for d in [self.prefix, self.prefix / 'bin'] if d.is_dir() for p in d.iterdir()
+                      if '.new.' in p.name or '.old.' in p.name)
+
+    def dead_pid(self):
+        process = subprocess.Popen(['true'])
+        process.wait()
+        return process.pid
+
+    @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
+    def test_a_signal_between_the_mcp_renames_puts_the_server_back(self):
+        self.run_installer('install')
+        paths = [self.prefix / 'mcp' / 'dist' / 'index.js', self.prefix / 'bin' / 'optimal', self.prefix / 'VERSION']
+        before = self.installed_state(paths)
+        real_mv = shutil.which('mv')
+        # The second MCP rename: the installer is stopped after the first moved the server aside.
+        self.fake('mv', f'case "$*" in *"/mcp.new."*) kill -TERM $PPID; exit 1 ;; esac\nexec "{real_mv}" "$@"\n')
+        result = self.run_installer('install', check=False)
+        self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
+        self.assertEqual(self.installed_state(paths), before)
+        self.assertEqual(self.leftovers(), [])
+        (self.fakes / 'mv').unlink()
+        self.run_installer('install', 'verify')
+
+    def test_a_later_install_sweeps_what_a_killed_one_left(self):
+        self.run_installer('install')
+        dead = self.dead_pid()
+        (self.prefix / f'mcp.new.{dead}').mkdir()
+        (self.prefix / 'bin' / f'optimal.new.{dead}').write_text('half a copy')
+        (self.prefix / f'VERSION.new.{dead}').write_text(VERSION + '\n')
+        # A copy of a run that is still going is not touched.
+        live = self.prefix / 'bin' / f'oe.new.{os.getpid()}'
+        live.write_text('a live copy')
+        if NODE:
+            # Killed between the two MCP renames: the server was moved aside.
+            (self.prefix / 'mcp').rename(self.prefix / f'mcp.old.new.{dead}')
+        result = self.run_installer('install', 'verify')
+        if NODE:
+            self.assertIn(f'put back {self.prefix}/mcp', result.stderr)
+            self.assertTrue((self.prefix / 'mcp' / 'dist' / 'index.js').is_file())
+        self.assertEqual(self.leftovers(), [live.name])
+
+    @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
+    def test_a_failed_removal_of_the_old_mcp_server_finishes_the_install(self):
+        self.run_installer('install')
+        before = self.installed_state([self.prefix / 'VERSION', self.prefix / 'bin' / 'optimal'])
+        real_rm = shutil.which('rm')
+        self.fake('rm', f'case "$*" in *"/mcp.old.new."*) echo "rm: Permission denied" >&2; exit 1 ;; esac\n'
+                        f'exec "{real_rm}" "$@"\n')
+        result = self.run_installer('install', 'verify')
+        self.assertIn('the next install removes it', result.stderr)
+        after = self.installed_state([self.prefix / 'VERSION', self.prefix / 'bin' / 'optimal'])
+        for path in before:
+            self.assertNotEqual(after[path][:2], before[path][:2], f'{path} was not replaced')
+        self.assertEqual(len([n for n in self.leftovers() if n.startswith('mcp.old.new.')]), 1)
+        (self.fakes / 'rm').unlink()
+        self.run_installer('install')
+        self.assertEqual(self.leftovers(), [])
+
+    def test_program_links_replace_only_an_absent_entry_or_an_optimal_link(self):
+        self.bin.mkdir()
+        other = self.bin / 'oe'
+        other.write_text('#!/bin/sh\necho another oe\n')
+        older = self.dir / 'older-prefix'
+        (older / 'bin').mkdir(parents=True)
+        (older / 'VERSION').write_text('0.3.2\n')
+        (older / 'bin' / 'optimal').write_text('#!/bin/sh\n')
+        (self.bin / 'optimal').symlink_to(older / 'bin' / 'optimal')
+        foreign = self.bin / 'optimal-engine-mcp'
+        foreign.symlink_to(shutil.which('sh'))
+        result = self.run_installer('install')
+        self.assertEqual(other.read_text(), '#!/bin/sh\necho another oe\n')
+        self.assertIn(f'{other} exists and is not a link into an Optimal prefix', result.stderr)
+        self.assertEqual(os.readlink(self.bin / 'optimal'), str(self.prefix / 'bin' / 'optimal'))
+        self.assertEqual(os.readlink(foreign), shutil.which('sh'))
+        self.assertIn(f'linked optimal into {self.bin}', result.stdout)
+        if NODE:
+            self.assertIn(f'{foreign} exists and is not a link into an Optimal prefix', result.stderr)
+
+    def test_an_mcp_server_this_installer_did_not_put_there_is_left_alone(self):
+        # A prefix with no earlier install: its mcp/ belongs to something else.
+        foreign = self.prefix / 'mcp'
+        foreign.mkdir(parents=True)
+        (foreign / 'keep').write_text('not ours')
+        for skip in ['0', '1']:
+            with self.subTest(skip_mcp=skip):
+                if skip == '1' or not NODE:
+                    self.env['OPTIMAL_CLIENT_SKIP_MCP'] = '1'
+                result = self.run_installer('install', check=False)
+                self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+                self.assertIn(f'{foreign} was not installed by install-client.sh', result.stderr)
+                self.assertEqual((foreign / 'keep').read_text(), 'not ours')
+                self.assertFalse((self.prefix / 'bin').exists())
+        self.env.pop('OPTIMAL_CLIENT_SKIP_MCP', None)
+        if not NODE:
+            self.env['OPTIMAL_CLIENT_SKIP_MCP'] = '1'
+
+        # An installed prefix whose launcher is not this installer's.
+        shutil.rmtree(foreign)
+        self.run_installer('install')
+        launcher = self.prefix / 'bin' / 'optimal-engine-mcp'
+        launcher.write_text('#!/bin/sh\nexec something-else\n')
+        for skip in ['0', '1']:
+            with self.subTest(launcher=True, skip_mcp=skip):
+                if skip == '1':
+                    self.env['OPTIMAL_CLIENT_SKIP_MCP'] = '1'
+                result = self.run_installer('install', check=False)
+                self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+                self.assertIn(f'{launcher} was not installed by install-client.sh', result.stderr)
+                self.assertEqual(launcher.read_text(), '#!/bin/sh\nexec something-else\n')
+
 
 class PrefixTests(InstallClientTestCase):
     """The machine-start path: root installs once, then each agent user runs the copy."""
@@ -669,8 +789,8 @@ class SecretTests(InstallClientTestCase):
 
 # What `register` runs besides the harness programs. The tests put only these and
 # fakes on PATH, so a real `claude` or `codex` on the test machine is never run.
-REGISTER_TOOLS = ['sh', 'awk', 'cat', 'chmod', 'cp', 'dirname', 'grep', 'head', 'id', 'mkdir', 'mktemp', 'mv',
-                  'readlink', 'rm', 'sed', 'uname']
+REGISTER_TOOLS = ['sh', 'awk', 'cat', 'chmod', 'cp', 'dirname', 'grep', 'head', 'id', 'ls', 'mkdir', 'mktemp',
+                  'mv', 'readlink', 'rm', 'sed', 'uname']
 
 
 class RegisterTests(InstallClientTestCase):
@@ -771,6 +891,31 @@ class RegisterTests(InstallClientTestCase):
         self.assertIn(f'command = "{self.launcher}"', toml)
         self.assertEqual(stat.S_IMODE((dotfiles / 'codex.toml').stat().st_mode), 0o600)
         self.assertEqual([p.name for p in dotfiles.iterdir()], ['codex.toml'])
+
+    def test_as_root_codex_home_must_be_roots_and_config_no_symlink(self):
+        self.fake('id', 'echo 0\n')
+        # The test user, not root, owns this directory.
+        codex_home = self.dir / 'agent-codex'
+        codex_home.mkdir()
+        self.env['CODEX_HOME'] = str(codex_home)
+        result = self.run_installer('register', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'does not write into {codex_home}, which uid {os.getuid()} owns', result.stderr)
+        self.assertEqual(list(codex_home.iterdir()), [])
+
+        target = self.dir / 'elsewhere.toml'
+        target.write_text('model = "example-model"\n')
+        (codex_home / 'config.toml').symlink_to(target)
+        result = self.run_installer('register', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'does not write through the symlink {codex_home}/config.toml', result.stderr)
+        self.assertEqual(target.read_text(), 'model = "example-model"\n')
+
+        # A CODEX_HOME root creates is root's.
+        fresh = self.dir / 'root-codex'
+        self.env['CODEX_HOME'] = str(fresh)
+        self.run_installer('register')
+        self.assertIn(f'command = "{self.launcher}"', (fresh / 'config.toml').read_text())
 
     def test_a_codex_config_that_cannot_be_rewritten_is_left_alone(self):
         codex_home = self.home / '.codex'
