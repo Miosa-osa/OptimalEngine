@@ -14,7 +14,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Read-only by default; the one job that writes (release-client) asks for it.
+# Read-only: no job writes to the repository or publishes release assets.
 permissions:
   contents: read
 
@@ -157,42 +157,3 @@ jobs:
           name: optimal-client
           path: dist/client/
           if-no-files-found: error
-
-  release-client:
-    # On a v* tag only, after every check passed: attach the built files to the
-    # GitHub release. No checkout and no npm here, and an existing asset is never
-    # replaced.
-    name: attach client files to the release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, mcp, client]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: optimal-client
-          path: client
-
-      - name: Check the files against SHA256SUMS
-        working-directory: client
-        run: sha256sum --check --strict SHA256SUMS
-
-      - name: Attach to the release, refusing to overwrite
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          gh release view "$TAG" >/dev/null 2>&1 ||
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes "Optimal Engine $TAG"
-          existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-          for file in client/*; do
-            name=$(basename "$file")
-            if printf '%s\n' "$existing" | grep -Fxq "$name"; then
-              echo "::error::$name is already attached to $TAG; assets are never replaced"
-              exit 1
-            fi
-          done
-          gh release upload "$TAG" client/*

@@ -32,7 +32,7 @@ Otherwise it is `~/.local/share/optimal`.
 | `optimal-engine-mcp-<version>.tar.gz`, one for every platform | `apps/mcp/build.sh` |
 | `SHA256SUMS` | both builds |
 
-CI builds them on every run; on a `v*` tag, after every check passed, a separate job attaches them to the GitHub release and never replaces an existing asset.
+CI builds and tests them on every run; release files are built on the release build host from the tagged source, not published from CI.
 A MIOSA image does not download from GitHub: the Engine release staging directory on the build host holds the same files, and its manifest records their sha256.
 The script also accepts a flat MCP archive (`dist/`, `node_modules/`, `package.json` at its root), the layout staged for 0.3.2.
 
