@@ -37,7 +37,7 @@ It writes `optimal-<version>-<os>-<arch>.tar.gz` for linux-amd64, linux-arm64, d
 Each archive holds `optimal`, the `oe` link, `install.sh`, `install-client.sh` (the machine installer of the same release), `LICENSE`, and `VERSION`.
 The client version is the Engine version from `mix.exs`; the build refuses to run when they differ.
 `apps/mcp/build.sh [out-dir]` adds `optimal-engine-mcp-<version>.tar.gz`, the MCP server with its production dependencies, to the same directory and `SHA256SUMS`.
-CI builds both on every run and attaches them to the GitHub release of a `v*` tag.
+CI builds and tests both on every run; the release files are built from the tagged source on the release build host and staged there with `SHA256SUMS`.
 
 To put the client and the MCP server on a machine in one step, with every archive's sha256 checked, use `deploy/miosa-template/install-client.sh`:
 
