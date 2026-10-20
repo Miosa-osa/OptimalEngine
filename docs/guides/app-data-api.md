@@ -266,10 +266,11 @@ A query embeds its text with the same embedder and ranks the records matching `w
 When no embedder answers, the query returns 503 `semantic_unavailable` with the reason.
 It never falls back silently to another kind of search.
 `GET /api/data/capabilities` reports whether semantic search is available right now.
+The default embedder is the Engine's text embedder, so `OPTIMAL_EMBED_URL` moves app data embeddings to a shared endpoint too (see [text embedding options](../../OPTIONS.md#text-embeddings)).
 
 ```elixir
 config :optimal_engine, :app_data,
-  embedder: OptimalEngine.Embed.Ollama,   # any module with embed(text, opts)
+  embedder: OptimalEngine.Embed.Text,     # any module with embed(text, opts)
   embed_model: "nomic-embed-text",
   semantic_indexing: :async               # :async | :sync | :off
 ```

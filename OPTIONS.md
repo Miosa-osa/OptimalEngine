@@ -57,6 +57,44 @@ bin/optimal close "what changed and how verified"
 Keep private values in environment variables, local secret stores, or deployment secret managers.
 Do not commit them.
 
+## Text Embeddings
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama for generation, vision, and text embeddings when `OPTIMAL_EMBED_URL` is unset. |
+| `OPTIMAL_EMBED_MODEL` | `nomic-embed-text` | Text embedding model, whichever endpoint serves it. |
+| `OPTIMAL_EMBED_URL` | unset | Embedding endpoint for every text embedding, for example a shared gateway's `/v1/embeddings`. |
+| `OPTIMAL_EMBED_DIALECT` | inferred | `openai` or `ollama`; other values fail startup configuration. |
+| `OPTIMAL_EMBED_API_KEY` | unset | Key sent to `OPTIMAL_EMBED_URL` as a bearer token. |
+| `OPTIMAL_EMBED_API_KEY_FILE` | unset | File holding that key, used when `OPTIMAL_EMBED_API_KEY` is unset. |
+| `OPTIMAL_EMBED_DIMENSIONS` | 768 for `nomic-embed-text` | Vector width the endpoint must return; other values fail startup configuration unless a positive whole number. |
+
+With `OPTIMAL_EMBED_URL` unset, text embeddings come from Ollama at `OLLAMA_HOST`, exactly as before.
+With it set, the semantic pipeline at intake, chunk embeddings, search queries, durable memory projections, app data, and the embedding backfill all embed through that endpoint.
+An Engine with no local model still embeds each ingested document there, so semantic search finds it.
+The URL must be `http` or `https`; an empty value counts as unset.
+A URL whose path ends in `/api/embed` speaks Ollama's native API, and any other URL speaks the OpenAI-compatible `POST /v1/embeddings` API.
+`OPTIMAL_EMBED_DIALECT` overrides that inference.
+A URL that stops short of the request path gets it appended: `/v1/embeddings` (or `/embeddings` after `/v1`) for OpenAI, `/api/embed` for Ollama.
+The key goes only to `OPTIMAL_EMBED_URL`, never to `OLLAMA_HOST`.
+It is read when a request is made, so a rotated key file takes effect without a restart, and it never enters the application configuration, a log line, or the store.
+An endpoint that refuses the key (HTTP 401 or 403) is logged as an error naming the status and these variables, the health check reports `embedder_unauthorized`, and the embedding backfill stops instead of counting every document as failed.
+An endpoint that cannot serve right now (402 out of credit, 404 no such model, 429 rate limited, 5xx such as the gateway's 502 `embedding_backend_unavailable`) or does not answer makes semantic retrieval unavailable for the moment.
+Capture and intake still succeed, search serves full-text results, the document is embedded later by the backfill, and the backfill itself stops.
+Log lines name the endpoint, the status, and the endpoint's error code; they never carry the text sent for embedding or the key.
+`OPTIMAL_EMBED_URL` is where the Engine sends its requests, usually MIOSA's gateway; it is not the gateway's own `OPTIMAL_EMBED_UPSTREAM_URL`, which names the model server behind the gateway.
+Inputs are capped at 6,000 characters after invalid UTF-8 is replaced, and identical inputs are served from the filesystem cache.
+Ollama's cache entries are keyed by the model and the input, as before; an endpoint's are keyed by the endpoint, the model and the input, so vectors from one never answer for the other.
+An endpoint's vectors must have the model's width; a different width is refused as `embed_dimension_mismatch`, logged with the two widths, never cached, and stops a backfill.
+A cached vector of another width than the model now needs, after the width setting changed, is fetched again.
+Stored vectors of another dimension are never scored, so a model with a different dimension cannot mix with an existing index.
+A request waits at most 5 seconds; an endpoint that accepts the connection and never answers counts as unavailable, and the search path's health probe gives up after 2 seconds.
+A request that finds the endpoint unavailable marks it unhealthy for the process that made it, for 60 seconds (`config :optimal_engine, :text_embedding, health_ttl_ms:`), so its searches skip the vector hop instead of waiting again; a successful request clears the mark.
+With an endpoint, the text chunks of an ingested document go out in one batched request, recorded as one governed model call (`embedder.embed_text_batch`, with the input count and size, never the text), so an unavailable endpoint is asked once per document, not once per chunk.
+With Ollama at `OLLAMA_HOST`, each chunk is embedded on its own, as before.
+A batch answered 429 with a `Retry-After` of at most 60 seconds is retried once after that wait; a single embedding, such as a search query, is not.
+A key sent over plain `http` to another machine is warned about once, without the key.
+
 ## Knowledge Graph Backend
 
 Use RocksDB for normal local persistence:

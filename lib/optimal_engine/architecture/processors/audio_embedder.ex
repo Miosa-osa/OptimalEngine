@@ -8,7 +8,8 @@ defmodule OptimalEngine.Architecture.Processors.AudioEmbedder do
 
   @behaviour OptimalEngine.Architecture.Processor
 
-  alias OptimalEngine.Embed.{Ollama, Whisper}
+  alias OptimalEngine.Embed.Whisper
+  alias OptimalEngine.Embed.Text, as: TextEmbedder
 
   @impl true
   def id, do: :audio_embedder
@@ -26,7 +27,7 @@ defmodule OptimalEngine.Architecture.Processors.AudioEmbedder do
   def process(_field, value, _state) do
     with {:ok, path} <- resolve(value),
          {:ok, %{text: text}} when text != "" <- Whisper.transcribe(path),
-         {:ok, vector} <- Ollama.embed_text(text) do
+         {:ok, vector} <- TextEmbedder.embed(text) do
       {:ok,
        %{
          kind: :embedding,

@@ -43,7 +43,7 @@ defmodule OptimalEngine.Retrieval.Search do
   alias OptimalEngine.Context
   alias OptimalEngine.Identity.ACL
   alias OptimalEngine.Retrieval.IntentAnalyzer, as: IntentAnalyzer
-  alias OptimalEngine.Embed.Ollama, as: Ollama
+  alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Store
   alias OptimalEngine.Routing
   alias OptimalEngine.Store.Vectors, as: VectorStore
@@ -136,9 +136,9 @@ defmodule OptimalEngine.Retrieval.Search do
   defp run_search(query, opts, state) do
     start = System.monotonic_time(:millisecond)
 
-    # `embed_healthy?` is stronger than `available?` — it verifies Ollama
-    # actually returns a non-empty vector, not just that /api/tags
-    # responds. When embeddings are flaky (missing model / partial
+    # `healthy?` verifies the text embedder (Ollama, or the endpoint in
+    # OPTIMAL_EMBED_URL) actually returns a non-empty vector, not just
+    # that it answers. When embeddings are flaky (missing model / partial
     # load / cold start) we skip the whole hybrid path and serve
     # FTS-only results so retrieval stays sub-second instead of
     # queuing behind a slow embed.
@@ -153,7 +153,7 @@ defmodule OptimalEngine.Retrieval.Search do
       if memory_only do
         {:ok, []}
       else
-        if vector_allowed and hybrid_enabled?() and Ollama.embed_healthy?() do
+        if vector_allowed and hybrid_enabled?() and TextEmbedder.healthy?() do
           case do_hybrid_search(query, opts, state.topology) do
             {:ok, _} = ok -> ok
             {:error, _} -> do_search(query, opts, state.topology)
@@ -598,12 +598,12 @@ defmodule OptimalEngine.Retrieval.Search do
         _ -> []
       end
 
-    # Step 3: Run vector search. Ollama sometimes returns an empty
+    # Step 3: Run vector search. The embedder sometimes returns an empty
     # embedding list for degenerate queries (empty strings, very short
     # tokens, partial model load). Skip the vector hop in that case so
     # we don't chase a zero-vector through VectorStore.
     {vector_results, chunk_results} =
-      case Ollama.embed(query) do
+      case TextEmbedder.embed(query) do
         {:ok, query_embedding} when is_list(query_embedding) and query_embedding != [] ->
           vector_opts = [
             limit: limit * 3,

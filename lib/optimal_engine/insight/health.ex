@@ -452,7 +452,8 @@ defmodule OptimalEngine.Insight.Health do
           message: "#{coverage}% of contexts have embeddings (#{vec_count}/#{ctx_count})",
           details: [%{vectors: vec_count, contexts: ctx_count, coverage_pct: coverage}],
           fix:
-            "Embeddings require Ollama with `nomic-embed-text`. Run `mix optimal.index` to generate."
+            "Embeddings need `nomic-embed-text` from Ollama or OPTIMAL_EMBED_URL. " <>
+              "Run `mix optimal.index` to generate."
         }
 
       {:ok, [[_vec_count, 0]]} ->

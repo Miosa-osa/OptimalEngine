@@ -45,9 +45,13 @@ Machines that use a Memory get the `optimal` CLI and the Engine MCP server from 
 | `OPTIMAL_BOOTSTRAP_KEY` | `oe_<24 hex>_<secret of 32+ chars>`, chosen by the operator (Optimal derives it per workspace) |
 | `OPTIMAL_BOOTSTRAP_SCOPES` | `read,write` |
 | `OPTIMAL_BOOTSTRAP_WORKSPACES` | the Engine workspace slug the instance serves |
+| `OPTIMAL_EMBED_URL` | the shared embedding endpoint, the gateway's `POST /v1/embeddings` as the Engine's network reaches it |
+| `OPTIMAL_EMBED_API_KEY` or `OPTIMAL_EMBED_API_KEY_FILE` | the Engine's gateway key, sent as a bearer token |
+
+With `OPTIMAL_EMBED_URL` set, a Memory embeds every document and query through the gateway and runs no model of its own (see [text embedding options](../../OPTIONS.md#text-embeddings)).
 
 ## Open items
 
-- Embeddings are local or bring-your-own; the Engine's default `OLLAMA_HOST` points at nothing in a sandbox.
+- Without `OPTIMAL_EMBED_URL` a Memory embeds through `OLLAMA_HOST`, which points at nothing in a sandbox, so search is full-text only.
 - A template belongs to one organization.
   Other organizations need it created in theirs until the platform ships it as a built-in template.

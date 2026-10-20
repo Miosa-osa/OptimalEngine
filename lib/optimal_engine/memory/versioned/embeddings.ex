@@ -6,7 +6,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
   This projection is workspace scoped and can be deleted and rebuilt safely.
   """
 
-  alias OptimalEngine.Embed.Ollama
+  alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Memory.Versioned
   alias OptimalEngine.Memory.Versioned.RetrievalDocument
   alias OptimalEngine.Store
@@ -22,7 +22,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
   @spec embed_query(String.t(), keyword()) :: {:ok, [float()]} | {:error, term()}
   def embed_query(query, opts \\ []) do
     prefix = Keyword.get(opts, :query_prefix, "")
-    Ollama.embed(prefix <> query, model: Keyword.get(opts, :model, model()))
+    TextEmbedder.embed(prefix <> query, model: Keyword.get(opts, :model, model()))
   end
 
   @spec index(Versioned.t(), keyword()) :: :ok | {:error, term()}
@@ -32,7 +32,9 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
     provider_model = Keyword.get(opts, :provider_model, projection_model)
 
     embedder =
-      Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: provider_model) end)
+      Keyword.get(opts, :embedder, fn content ->
+        TextEmbedder.embed(content, model: provider_model)
+      end)
 
     with {:ok, document} <- retrieval_document(memory, opts),
          {:ok, vector} when is_list(vector) and vector != [] <-
@@ -118,7 +120,9 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
     document_profile = Keyword.get(opts, :document_profile)
 
     embedder =
-      Keyword.get(opts, :embedder, fn content -> Ollama.embed(content, model: provider_model) end)
+      Keyword.get(opts, :embedder, fn content ->
+        TextEmbedder.embed(content, model: provider_model)
+      end)
 
     tenant_id = Keyword.get(opts, :tenant_id, "default")
     limit = Keyword.get(opts, :limit, 100_000)

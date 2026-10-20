@@ -10,7 +10,7 @@ defmodule OptimalEngine.MemoryCore.GovernedModel do
 
   ## Contract
 
-      GovernedModel.call_model("embed_text", input_payload, fn -> Ollama.embed_text(text) end,
+      GovernedModel.call_model("embed_text", input_payload, fn -> Embed.Text.embed(text) end,
         model_id: "nomic-embed-text",
         model_task_type: "embedding",
         workspace_id: "default"
@@ -58,6 +58,9 @@ defmodule OptimalEngine.MemoryCore.GovernedModel do
     * `:workspace_id` — governance scope (default "default")
     * `:actor_id` — requesting actor (default "engine")
     * `:metadata` — extra metadata merged onto the run
+    * `:classify` - a function mapping the result to `{call_status, output_payload}`,
+      for a result whose shape the default does not describe, such as a batch of
+      results (default: by the result's shape)
   """
   @spec call_model(String.t(), map(), (-> result), keyword()) :: result
         when result: term()
@@ -89,7 +92,7 @@ defmodule OptimalEngine.MemoryCore.GovernedModel do
     model_id = opts[:model_id]
     model_task_type = Keyword.get(opts, :model_task_type, "generation")
 
-    {status, output_payload} = classify_result(result)
+    {status, output_payload} = Keyword.get(opts, :classify, &classify_result/1).(result)
 
     record_opts =
       [

@@ -15,21 +15,24 @@ defmodule OptimalEngine.Embed.Backfill do
     * `:workspace_id` or `:tenant_id` narrow the scope (default: every tenant);
     * `:limit` caps the documents one run tries (default 500);
     * `:embed` is a one-argument function returning `{:ok, vector}` (default:
-      the configured Ollama text model, bypassing the query cache, since each
-      document is embedded once).
+      the Engine's text embedder, `OptimalEngine.Embed.Text`, bypassing the
+      query cache, since each document is embedded once). The default embeds
+      a page in one call (`OptimalEngine.Embed.Text.embed_many/2`), so an
+      embedding endpoint gets a few requests per page instead of one per
+      document.
 
-  An unreachable embedder stops the run with
-  `{:error, {:embedder_unavailable, reason}}`; a document the embedder
-  rejects is counted as failed and the run goes on.
+  An embedder that is unreachable, refuses the key, is out of credit or is
+  rate limiting stops the run with `{:error, {:embedder_unavailable, reason}}`
+  (`OptimalEngine.Embed.Text.unavailable?/1`); a document the embedder rejects
+  is counted as failed and the run goes on.
   """
 
-  alias OptimalEngine.Embed.Ollama
+  alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Store
   alias OptimalEngine.Store.Vectors
 
   @limit 500
   @page 50
-  @unavailable [:ollama_unavailable]
 
   @type result :: %{
           embedded: non_neg_integer(),
@@ -52,7 +55,12 @@ defmodule OptimalEngine.Embed.Backfill do
   @spec run(keyword()) :: {:ok, result()} | {:error, term()}
   def run(opts \\ []) do
     limit = Keyword.get(opts, :limit, @limit)
-    embed = Keyword.get(opts, :embed, &Ollama.embed(&1, cache: false))
+
+    embed =
+      case Keyword.get(opts, :embed) do
+        nil -> &TextEmbedder.embed_many(&1, cache: false)
+        one -> &TextEmbedder.embed_each(&1, one)
+      end
 
     with {:ok, counts} <- pages(opts, embed, "", limit, %{embedded: 0, failed: 0}),
          {:ok, %{missing: remaining}} <- status(opts) do
@@ -90,17 +98,22 @@ defmodule OptimalEngine.Embed.Backfill do
   end
 
   defp embed_page(rows, embed, counts) do
-    Enum.reduce_while(rows, {:ok, counts}, fn [id, workspace_id, title, l0, content],
-                                              {:ok, counts} ->
-      case embed.(input(title, l0, content)) do
+    inputs = Enum.map(rows, fn [_id, _ws, title, l0, content] -> input(title, l0, content) end)
+
+    rows
+    |> Enum.zip(embed.(inputs))
+    |> Enum.reduce_while({:ok, counts}, fn {[id, workspace_id | _], result}, {:ok, counts} ->
+      case result do
         {:ok, vector} ->
           case Vectors.store(id, vector, workspace_id: workspace_id) do
             :ok -> {:cont, {:ok, %{counts | embedded: counts.embedded + 1}}}
             {:error, _} -> {:cont, {:ok, %{counts | failed: counts.failed + 1}}}
           end
 
-        {:error, reason} when reason in @unavailable ->
-          {:halt, {:error, {:embedder_unavailable, reason}}}
+        {:error, reason} ->
+          if TextEmbedder.unavailable?(reason),
+            do: {:halt, {:error, {:embedder_unavailable, reason}}},
+            else: {:cont, {:ok, %{counts | failed: counts.failed + 1}}}
 
         _ ->
           {:cont, {:ok, %{counts | failed: counts.failed + 1}}}

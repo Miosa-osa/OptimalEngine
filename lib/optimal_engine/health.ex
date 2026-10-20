@@ -30,7 +30,7 @@ defmodule OptimalEngine.Health do
   """
 
   alias OptimalEngine.Connectors.Credential
-  alias OptimalEngine.Embed.Ollama
+  alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Store
 
   @type check_result :: :ok | {:warn, term()} | {:error, term()}
@@ -131,16 +131,28 @@ defmodule OptimalEngine.Health do
     end
   end
 
+  # Each failure is named for what the operator has to fix: "unreachable"
+  # would send them to the network when the key, the credit or the model is
+  # the problem.
   defp run_check(:embedder) do
-    case safe_ollama_ping() do
+    case safe_embed_ping() do
       :ok -> :ok
-      {:error, reason} -> {:warn, {:embedder_unreachable, reason}}
+      {:error, reason} -> {:warn, embedder_problem(reason)}
     end
   end
 
-  defp safe_ollama_ping do
+  defp embedder_problem({:embed_unauthorized, status}), do: {:embedder_unauthorized, status}
+  defp embedder_problem({:embed_unavailable, status}), do: {:embedder_unavailable, status}
+  defp embedder_problem({:embed_api_key, reason}), do: {:embedder_key_unreadable, reason}
+
+  defp embedder_problem({:embed_dimension_mismatch, got, want}),
+    do: {:embedder_dimension_mismatch, got, want}
+
+  defp embedder_problem(reason), do: {:embedder_unreachable, reason}
+
+  defp safe_embed_ping do
     try do
-      case Ollama.embed("health", model: "nomic-embed-text", cache: false) do
+      case TextEmbedder.embed("health", cache: false) do
         {:ok, _} -> :ok
         {:error, reason} -> {:error, reason}
       end

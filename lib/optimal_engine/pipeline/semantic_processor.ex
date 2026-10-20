@@ -4,15 +4,17 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
 
   Wraps `Ollama` to produce richer, semantically meaningful tiered summaries
   than the regex-based `Classifier` can provide. When Ollama is unavailable the
-  module is a silent no-op — the caller already holds regex-generated L0/L1 from
-  `Classifier` and the pipeline continues unchanged.
+  summaries are skipped: the caller already holds regex-generated L0/L1 from
+  `Classifier` and the pipeline continues unchanged. The document is still
+  embedded when `OPTIMAL_EMBED_URL` names an embedding endpoint, so an Engine
+  without a local model stays searchable by meaning.
 
   ## Processing pipeline (when Ollama is reachable)
 
   1. Generate a one-sentence L0 abstract via LLM.
   2. Generate a 2-3 paragraph L1 overview via LLM.
   3. Build a combined embedding input: `title + l0_abstract + content`.
-  4. Embed via `Ollama.embed/2` and persist via `VectorStore.store/2`.
+  4. Embed via `OptimalEngine.Embed.Text.embed/2` and persist via `VectorStore.store/2`.
   5. Update the Context struct with the new L0/L1 strings.
   6. Write `.abstract.md` and `.overview.md` sidecar files alongside the source.
 
@@ -26,6 +28,7 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
 
   alias OptimalEngine.Context
   alias OptimalEngine.Embed.Ollama, as: Ollama
+  alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Store.Vectors, as: VectorStore
 
   @l0_max 200
@@ -44,7 +47,8 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
   Enriches a Context with LLM-generated L0/L1 summaries and a stored embedding.
 
   Always returns `{:ok, context}`. When Ollama is unavailable the context is
-  returned unchanged. Partial failures (e.g. embedding succeeds but sidecar
+  returned unchanged, after storing its embedding when an embedding endpoint
+  is configured. Partial failures (e.g. embedding succeeds but sidecar
   write fails) are logged and do not abort the call.
   """
   @spec process(Context.t()) :: {:ok, Context.t()}
@@ -56,6 +60,10 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
 
       Ollama.available?() ->
         run_semantic_pipeline(context)
+
+      TextEmbedder.endpoint_configured?() ->
+        generate_and_store_embedding(context)
+        {:ok, context}
 
       true ->
         Logger.debug("[SemanticProcessor] Ollama unavailable, skipping semantic processing")
@@ -226,7 +234,7 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
   defp generate_and_store_embedding(%Context{id: id} = context) do
     embed_input = build_embed_input(context)
 
-    case Ollama.embed(embed_input) do
+    case TextEmbedder.embed(embed_input) do
       {:ok, vector} ->
         case VectorStore.store(id, vector, workspace_id: context.workspace_id) do
           :ok ->
@@ -239,7 +247,7 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
         end
 
       {:error, reason} ->
-        Logger.warning("[SemanticProcessor] Ollama.embed failed for #{id}: #{inspect(reason)}")
+        Logger.warning("[SemanticProcessor] embedding failed for #{id}: #{inspect(reason)}")
     end
   rescue
     e ->
