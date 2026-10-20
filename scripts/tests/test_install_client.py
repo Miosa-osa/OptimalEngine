@@ -43,6 +43,9 @@ def node_ok():
 
 
 NODE = node_ok()
+# The shell that runs the installer: OPTIMAL_CLIENT_TEST_SHELL=dash (or bash) runs every case
+# under that shell instead of sh.
+INSTALL_SHELL = shutil.which(os.environ.get('OPTIMAL_CLIENT_TEST_SHELL', 'sh')) or 'sh'
 
 
 def platform():
@@ -79,21 +82,33 @@ def write_sums(out):
     (Path(out) / 'SHA256SUMS').write_text('\n'.join(lines) + '\n')
 
 
-def mcp_archive(out, version, reports=None, archive_version=None, flat=False):
-    """A stand-in MCP server archive: one top directory, or flat like the 0.3.2 files."""
+def mcp_archive(out, version, reports=None, archive_version=None, flat=False, read_only=False):
+    """A stand-in MCP server archive: one top directory, or flat like the 0.3.2 files; with
+    read_only, node_modules holds a read-only package directory, as published packages may."""
     with tempfile.TemporaryDirectory() as stage:
         name = f'optimal-engine-mcp-{version}'
         root = Path(stage) if flat else Path(stage) / name
         (root / 'dist').mkdir(parents=True)
         (root / 'node_modules').mkdir()
+        if read_only:
+            package = root / 'node_modules' / 'read-only-package'
+            package.mkdir()
+            (package / 'index.js').write_text('module.exports = {};\n')
         (root / 'dist' / 'index.js').write_text(stand_in_server(reports or version))
         (root / 'package.json').write_text(json.dumps(
             {'name': 'stand-in', 'version': archive_version or version, 'type': 'commonjs'}, indent=2))
         if not flat:
             (root / 'VERSION').write_text((archive_version or version) + '\n')
         members = ['dist', 'node_modules', 'package.json'] if flat else [name]
-        subprocess.run(['tar', '-C', str(root if flat else stage), '-czf', str(Path(out) / f'{name}.tar.gz'),
-                        *members], check=True)
+        if read_only:
+            (package / 'index.js').chmod(0o444)
+            package.chmod(0o555)
+        try:
+            subprocess.run(['tar', '-C', str(root if flat else stage), '-czf',
+                            str(Path(out) / f'{name}.tar.gz'), *members], check=True)
+        finally:
+            if read_only:
+                package.chmod(0o755)
 
 
 def cli_archive(out, version, installer=None):
@@ -165,7 +180,7 @@ class InstallClientTestCase(unittest.TestCase):
             self.env['OPTIMAL_CLIENT_SKIP_MCP'] = '1'
 
     def run_installer(self, *args, check=True, script=INSTALLER):
-        result = subprocess.run(['sh', str(script), *args], env=self.env, capture_output=True,
+        result = subprocess.run([INSTALL_SHELL, str(script), *args], env=self.env, capture_output=True,
                                 text=True, timeout=120)
         if check:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -214,6 +229,20 @@ class InstallClientTestCase(unittest.TestCase):
     def installed_state(self, paths):
         """What a refused install must not change: inode, mtime and bytes."""
         return {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths}
+
+    def fake_root_ls(self):
+        """ls reports root ownership, with FAKE_LS_MODE (default drwx------), for any path."""
+        self.fake('ls', 'mode=${FAKE_LS_MODE:-drwx------}\nfor last; do :; done\n'
+                        'printf "%s 2 0 0 64 Jan  1 00:00 %s\\n" "$mode" "$last"\n')
+
+    def leftovers(self):
+        return sorted(p.name for d in [self.prefix, self.prefix / 'bin'] if d.is_dir() for p in d.iterdir()
+                      if '.new.' in p.name or '.old.' in p.name or p.name == '.install.lock')
+
+    def dead_pid(self):
+        process = subprocess.Popen(['true'])
+        process.wait()
+        return process.pid
 
     def serve(self, directory):
         server = ThreadingHTTPServer(('127.0.0.1', 0), partial(QuietFiles, directory=str(directory)))
@@ -419,9 +448,11 @@ class InstallTests(InstallClientTestCase):
 
     def test_reinstalling_is_idempotent(self):
         self.run_installer()
+        links = {p.name: os.readlink(p) for p in self.bin.iterdir()}
         self.run_installer()
         self.assertEqual((self.prefix / 'VERSION').read_text().strip(), VERSION)
-        self.assertFalse((self.prefix / 'mcp.old').exists())
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual({p.name: os.readlink(p) for p in self.bin.iterdir()}, links)
 
     def test_install_needs_a_source(self):
         del self.env['OPTIMAL_CLIENT_SOURCE']
@@ -432,39 +463,82 @@ class InstallTests(InstallClientTestCase):
         self.assertNotIn('github', (result.stdout + result.stderr).lower())
         self.assertNotIn('github.com', INSTALLER.read_text())
 
-    def leftovers(self):
-        return sorted(p.name for d in [self.prefix, self.prefix / 'bin'] if d.is_dir() for p in d.iterdir()
-                      if '.new.' in p.name or '.old.' in p.name)
+    @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
+    def test_read_only_package_directories_never_stop_an_upgrade_or_the_cleanup(self):
+        release = self.dir / 'read-only'
+        release.mkdir()
+        subprocess.run(['sh', str(CLI_BUILD), str(release)], check=True, capture_output=True, timeout=60)
+        mcp_archive(release, VERSION, read_only=True)
+        write_sums(release)
+        scratch = self.dir / 'scratch'
+        scratch.mkdir()
+        self.env.update(OPTIMAL_CLIENT_SOURCE=str(release), TMPDIR=str(scratch))
+        self.addCleanup(subprocess.run, ['chmod', '-R', 'u+w', str(self.dir)])
+        self.run_installer('install')
+        result = self.run_installer('install', 'verify')
+        self.assertNotIn('cannot remove', result.stderr)
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(list(scratch.iterdir()), [])
 
-    def dead_pid(self):
-        process = subprocess.Popen(['true'])
-        process.wait()
-        return process.pid
+
+class RecoveryTests(InstallClientTestCase):
+    """Interrupted, killed and concurrent installs, and what an earlier one left."""
+
+    def mv_signal(self, pattern, signal='TERM'):
+        real_mv = shutil.which('mv')
+        self.fake('mv', f'case "$*" in *"{pattern}"*) kill -{signal} $PPID; exit 1 ;; esac\n'
+                        f'exec "{real_mv}" "$@"\n')
 
     @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
     def test_a_signal_between_the_mcp_renames_puts_the_server_back(self):
         self.run_installer('install')
         paths = [self.prefix / 'mcp' / 'dist' / 'index.js', self.prefix / 'bin' / 'optimal', self.prefix / 'VERSION']
         before = self.installed_state(paths)
-        real_mv = shutil.which('mv')
-        # The second MCP rename: the installer is stopped after the first moved the server aside.
-        self.fake('mv', f'case "$*" in *"/mcp.new."*) kill -TERM $PPID; exit 1 ;; esac\nexec "{real_mv}" "$@"\n')
-        result = self.run_installer('install', check=False)
-        self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
-        self.assertEqual(self.installed_state(paths), before)
-        self.assertEqual(self.leftovers(), [])
+        for signal, code in [('TERM', 143), ('HUP', 129), ('INT', 130)]:
+            with self.subTest(signal=signal):
+                # The second MCP rename: stopped after the first moved the server aside.
+                self.mv_signal('/mcp.new.', signal)
+                result = self.run_installer('install', check=False)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertEqual(self.installed_state(paths), before)
+                self.assertEqual(self.leftovers(), [])
         (self.fakes / 'mv').unlink()
         self.run_installer('install', 'verify')
 
-    def test_a_later_install_sweeps_what_a_killed_one_left(self):
+    @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
+    def test_an_interrupted_first_install_still_owns_what_it_left(self):
+        # Stopped after the MCP server was renamed in, before the launcher and VERSION.
+        self.mv_signal('optimal-engine-mcp.new.')
+        self.assertEqual(self.run_installer('install', check=False).returncode, 143)
+        self.assertTrue((self.prefix / 'mcp' / 'dist' / 'index.js').is_file())
+        self.assertFalse((self.prefix / 'VERSION').exists())
+        self.assertFalse((self.prefix / 'bin' / 'optimal-engine-mcp').exists())
+        (self.fakes / 'mv').unlink()
+        self.run_installer('install', 'verify')
+
+        # mcp/ without its mark file, beside a marked launcher, with no VERSION: an
+        # install from before the mark file.
+        (self.prefix / 'mcp' / '.install-client').unlink()
+        (self.prefix / 'VERSION').unlink()
+        self.run_installer('install', 'verify')
+
+    def test_a_later_install_sweeps_only_what_dead_runs_left(self):
         self.run_installer('install')
         dead = self.dead_pid()
         (self.prefix / f'mcp.new.{dead}').mkdir()
         (self.prefix / 'bin' / f'optimal.new.{dead}').write_text('half a copy')
         (self.prefix / f'VERSION.new.{dead}').write_text(VERSION + '\n')
-        # A copy of a run that is still going is not touched.
-        live = self.prefix / 'bin' / f'oe.new.{os.getpid()}'
-        live.write_text('a live copy')
+        kept = [
+            # A run still going, as this test process; and another user's process (pid 1
+            # answers kill -0 with EPERM when this is not root), both alive.
+            self.prefix / 'bin' / f'oe.new.{os.getpid()}',
+            self.prefix / f'mcp.old.new.{os.getpid()}',
+            self.prefix / 'bin' / 'optimal.new.1',
+            # Not a name this installer uses.
+            self.prefix / 'bin' / f'rg.new.{dead}',
+        ]
+        for path in kept:
+            path.mkdir() if path.name.startswith('mcp') else path.write_text('keep')
         if NODE:
             # Killed between the two MCP renames: the server was moved aside.
             (self.prefix / 'mcp').rename(self.prefix / f'mcp.old.new.{dead}')
@@ -472,7 +546,38 @@ class InstallTests(InstallClientTestCase):
         if NODE:
             self.assertIn(f'put back {self.prefix}/mcp', result.stderr)
             self.assertTrue((self.prefix / 'mcp' / 'dist' / 'index.js').is_file())
-        self.assertEqual(self.leftovers(), [live.name])
+        self.assertEqual(self.leftovers(), sorted(p.name for p in kept if '.new.' in p.name or '.old.' in p.name))
+        for path in kept:
+            self.assertTrue(path.exists(), path)
+
+    @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
+    def test_a_server_that_cannot_be_put_back_is_kept(self):
+        self.run_installer('install')
+        dead = self.dead_pid()
+        aside = self.prefix / f'mcp.old.new.{dead}'
+        (self.prefix / 'mcp').rename(aside)
+        real_mv = shutil.which('mv')
+        self.fake('mv', f'case "$1" in *"/mcp.old.new.{dead}") echo "mv: refused" >&2; exit 1 ;; esac\n'
+                        f'exec "{real_mv}" "$@"\n')
+        result = self.run_installer('install')
+        self.assertIn(f'cannot put {aside} back', result.stderr)
+        self.assertTrue((aside / 'dist' / 'index.js').is_file())
+        self.assertTrue((self.prefix / 'mcp' / 'dist' / 'index.js').is_file())
+
+    @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
+    def test_an_abort_after_the_sweep_keeps_the_server_it_put_back(self):
+        self.run_installer('install')
+        original = (self.prefix / 'mcp' / 'dist' / 'index.js').read_bytes()
+        dead = self.dead_pid()
+        (self.prefix / 'mcp').rename(self.prefix / f'mcp.old.new.{dead}')
+        real_cp = shutil.which('cp')
+        self.fake('cp', f'case "$*" in *"/mcp.new."*) echo "cp: No space left on device" >&2; exit 1 ;; esac\n'
+                        f'exec "{real_cp}" "$@"\n')
+        result = self.run_installer('install', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn('put back', result.stderr)
+        self.assertEqual((self.prefix / 'mcp' / 'dist' / 'index.js').read_bytes(), original)
+        self.assertEqual(self.leftovers(), [])
 
     @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
     def test_a_failed_removal_of_the_old_mcp_server_finishes_the_install(self):
@@ -491,25 +596,48 @@ class InstallTests(InstallClientTestCase):
         self.run_installer('install')
         self.assertEqual(self.leftovers(), [])
 
-    def test_program_links_replace_only_an_absent_entry_or_an_optimal_link(self):
-        self.bin.mkdir()
-        other = self.bin / 'oe'
-        other.write_text('#!/bin/sh\necho another oe\n')
-        older = self.dir / 'older-prefix'
-        (older / 'bin').mkdir(parents=True)
-        (older / 'VERSION').write_text('0.3.2\n')
-        (older / 'bin' / 'optimal').write_text('#!/bin/sh\n')
-        (self.bin / 'optimal').symlink_to(older / 'bin' / 'optimal')
-        foreign = self.bin / 'optimal-engine-mcp'
-        foreign.symlink_to(shutil.which('sh'))
+    @unittest.skipUnless(NODE, 'needs Node.js 20 or newer')
+    def test_a_failed_cli_only_removal_is_finished_by_the_next_install(self):
+        self.run_installer('install')
+        real_rm = shutil.which('rm')
+        self.fake('rm', f'case "$*" in *"-rf {self.prefix}/mcp") echo "rm: busy" >&2; exit 1 ;; esac\n'
+                        f'exec "{real_rm}" "$@"\n')
+        self.env['OPTIMAL_CLIENT_SKIP_MCP'] = '1'
         result = self.run_installer('install')
-        self.assertEqual(other.read_text(), '#!/bin/sh\necho another oe\n')
-        self.assertIn(f'{other} exists and is not a link into an Optimal prefix', result.stderr)
-        self.assertEqual(os.readlink(self.bin / 'optimal'), str(self.prefix / 'bin' / 'optimal'))
-        self.assertEqual(os.readlink(foreign), shutil.which('sh'))
-        self.assertIn(f'linked optimal into {self.bin}', result.stdout)
-        if NODE:
-            self.assertIn(f'{foreign} exists and is not a link into an Optimal prefix', result.stderr)
+        self.assertIn('cannot remove the earlier MCP server', result.stderr)
+        # The launcher stays while mcp/ does, so the next install can tell both are its own.
+        self.assertTrue((self.prefix / 'bin' / 'optimal-engine-mcp').is_file())
+        (self.fakes / 'rm').unlink()
+        result = self.run_installer('install', 'verify')
+        self.assertIn('removed the earlier MCP server', result.stdout)
+        self.assertFalse((self.prefix / 'mcp').exists())
+        self.assertFalse((self.prefix / 'bin' / 'optimal-engine-mcp').exists())
+
+    def test_one_install_at_a_time(self):
+        self.run_installer('install')
+        command = ['hostname'] if shutil.which('hostname') else ['uname', '-n']
+        hostname = subprocess.run(command, capture_output=True, text=True).stdout.strip()
+        lock = self.prefix / '.install.lock'
+        for holder, code in [(f'{os.getpid()} {hostname}', 75), (f'{self.dead_pid()} other-host', 75)]:
+            with self.subTest(holder=holder):
+                lock.mkdir()
+                (lock / 'owner').write_text(holder + '\n')
+                result = self.run_installer('install', check=False)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertIn(f'another install holds {lock}', result.stderr)
+                self.assertTrue(lock.is_dir())
+                shutil.rmtree(lock)
+
+        # A holder on this machine that is gone is taken over.
+        lock.mkdir()
+        (lock / 'owner').write_text(f'{self.dead_pid()} {hostname}\n')
+        result = self.run_installer('install')
+        self.assertIn('taking over', result.stderr)
+        self.assertFalse(lock.exists())
+
+
+class OwnershipTests(InstallClientTestCase):
+    """What install replaces: only its own MCP server and launcher, and only Optimal links."""
 
     def test_an_mcp_server_this_installer_did_not_put_there_is_left_alone(self):
         # A prefix with no earlier install: its mcp/ belongs to something else.
@@ -525,15 +653,20 @@ class InstallTests(InstallClientTestCase):
                 self.assertIn(f'{foreign} was not installed by install-client.sh', result.stderr)
                 self.assertEqual((foreign / 'keep').read_text(), 'not ours')
                 self.assertFalse((self.prefix / 'bin').exists())
+
+        # The check runs before anything is fetched.
+        self.env['OPTIMAL_CLIENT_SOURCE'] = str(self.dir / 'nonexistent')
+        self.assertEqual(self.run_installer('install', check=False).returncode, 73)
+        self.env['OPTIMAL_CLIENT_SOURCE'] = str(self.release)
         self.env.pop('OPTIMAL_CLIENT_SKIP_MCP', None)
         if not NODE:
             self.env['OPTIMAL_CLIENT_SKIP_MCP'] = '1'
 
-        # An installed prefix whose launcher is not this installer's.
+        # An installed prefix whose launcher is not this installer's, even with the marked mcp/.
         shutil.rmtree(foreign)
         self.run_installer('install')
         launcher = self.prefix / 'bin' / 'optimal-engine-mcp'
-        launcher.write_text('#!/bin/sh\nexec something-else\n')
+        launcher.write_text('#!/bin/sh\n# installed by install-client.sh, it says\nexec something-else\n')
         for skip in ['0', '1']:
             with self.subTest(launcher=True, skip_mcp=skip):
                 if skip == '1':
@@ -541,7 +674,58 @@ class InstallTests(InstallClientTestCase):
                 result = self.run_installer('install', check=False)
                 self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
                 self.assertIn(f'{launcher} was not installed by install-client.sh', result.stderr)
-                self.assertEqual(launcher.read_text(), '#!/bin/sh\nexec something-else\n')
+                self.assertIn('something-else', launcher.read_text())
+
+    def optimal_root(self, name, version='0.3.2', cli='OPTIMAL_CLI_VERSION=0.3.2\n'):
+        root = self.dir / name
+        (root / 'bin').mkdir(parents=True)
+        (root / 'VERSION').write_text(version + '\n')
+        (root / 'bin' / 'optimal').write_text('#!/bin/sh\n' + cli)
+        (root / 'bin' / 'oe').symlink_to('optimal')
+        return root
+
+    def test_program_links_replace_only_an_absent_entry_a_dangling_link_or_an_optimal_link(self):
+        self.bin.mkdir()
+        older = self.optimal_root('older-prefix')
+        crafted = self.optimal_root('crafted', version='not a version')
+        no_cli = self.optimal_root('no-cli', cli='echo something else\n')
+        directory = self.optimal_root('directory')
+        (directory / 'bin' / 'optimal-engine-mcp').mkdir()
+        cases = {
+            # Replaced: an older Optimal prefix, relative or absolute, and a dangling link.
+            'optimal': os.path.relpath(older / 'bin' / 'optimal', self.bin),
+            'oe': str(self.dir / 'gone' / 'bin' / 'oe'),
+        }
+        for name, target in cases.items():
+            (self.bin / name).symlink_to(target)
+        result = self.run_installer('install')
+        for name in cases:
+            self.assertEqual(os.readlink(self.bin / name), str(self.prefix / 'bin' / name))
+        self.assertIn('linked optimal oe', result.stdout)
+
+        # Kept: another program, a crafted root, a root with no client CLI, a directory.
+        kept = {
+            'optimal': str(crafted / 'bin' / 'optimal'),
+            'oe': str(no_cli / 'bin' / 'oe'),
+            'optimal-engine-mcp': str(directory / 'bin' / 'optimal-engine-mcp'),
+        }
+        for name, target in kept.items():
+            (self.bin / name).unlink(missing_ok=True)
+            (self.bin / name).symlink_to(target)
+        result = self.run_installer('install')
+        for name, target in kept.items():
+            if name == 'optimal-engine-mcp' and not NODE:
+                continue
+            self.assertEqual(os.readlink(self.bin / name), target)
+            self.assertIn(f'{self.bin / name} exists and is not a link into an Optimal prefix', result.stderr)
+        self.assertEqual(list((directory / 'bin' / 'optimal-engine-mcp').iterdir()), [])
+        self.assertIn(f'linked nothing into {self.bin}', result.stderr)
+
+        other = self.bin / 'oe'
+        other.unlink()
+        other.write_text('#!/bin/sh\necho another oe\n')
+        self.run_installer('install')
+        self.assertEqual(other.read_text(), '#!/bin/sh\necho another oe\n')
 
 
 class PrefixTests(InstallClientTestCase):
@@ -758,6 +942,30 @@ class ConfigureAndVerifyTests(InstallClientTestCase):
         self.assertEqual(self.run_installer('configure', check=False).returncode, 64)
         self.assertFalse((self.home / '.config' / 'optimal' / 'profile').exists())
 
+    @unittest.skipIf(os.geteuid() == 0, 'needs directories another user than root owns')
+    def test_as_root_configure_writes_only_under_a_home_root_owns(self):
+        self.fake('id', 'echo 0\n')
+        self.env['OPTIMAL_ENGINE_URL'] = 'https://engine.example.invalid'
+        result = self.run_installer('configure', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'as root, configure does not write under {self.home}, which uid {os.getuid()} owns',
+                      result.stderr)
+        self.assertFalse((self.home / '.config').exists())
+
+        # A symlinked config directory is refused even where root owns everything.
+        self.fake_root_ls()
+        elsewhere = self.dir / 'elsewhere'
+        elsewhere.mkdir()
+        (self.home / '.config').symlink_to(elsewhere)
+        result = self.run_installer('configure', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'does not write through the symlink {self.home}/.config', result.stderr)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        (self.home / '.config').unlink()
+
+        self.run_installer('configure')
+        self.assertTrue((self.home / '.config' / 'optimal' / 'profile').is_file())
+
     def test_no_engine_url_writes_no_profile(self):
         result = self.run_installer('configure')
         self.assertIn('no profile written', result.stdout)
@@ -892,17 +1100,30 @@ class RegisterTests(InstallClientTestCase):
         self.assertEqual(stat.S_IMODE((dotfiles / 'codex.toml').stat().st_mode), 0o600)
         self.assertEqual([p.name for p in dotfiles.iterdir()], ['codex.toml'])
 
-    def test_as_root_codex_home_must_be_roots_and_config_no_symlink(self):
+    @unittest.skipIf(os.geteuid() == 0, 'needs directories another user than root owns')
+    def test_as_root_register_writes_only_where_root_owns_the_directory(self):
         self.fake('id', 'echo 0\n')
-        # The test user, not root, owns this directory.
+        uid = os.getuid()
+
+        # Claude Code keeps its user scope in CLAUDE_CONFIG_DIR, here the test user's.
+        result = self.run_installer('register', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'as root, register does not write under {self.home}, which uid {uid} owns',
+                      result.stderr)
+        self.assertFalse(self.calls.exists())
+        (self.fakes / 'claude').unlink()
+
+        # A CODEX_HOME, or the directory it is in, that another user owns.
         codex_home = self.dir / 'agent-codex'
         codex_home.mkdir()
         self.env['CODEX_HOME'] = str(codex_home)
         result = self.run_installer('register', check=False)
         self.assertEqual(result.returncode, 73)
-        self.assertIn(f'does not write into {codex_home}, which uid {os.getuid()} owns', result.stderr)
+        self.assertIn(f'which uid {uid} owns', result.stderr)
         self.assertEqual(list(codex_home.iterdir()), [])
 
+        # Below, ls reports root as the owner of everything, so each other rule shows.
+        self.fake_root_ls()
         target = self.dir / 'elsewhere.toml'
         target.write_text('model = "example-model"\n')
         (codex_home / 'config.toml').symlink_to(target)
@@ -910,8 +1131,25 @@ class RegisterTests(InstallClientTestCase):
         self.assertEqual(result.returncode, 73)
         self.assertIn(f'does not write through the symlink {codex_home}/config.toml', result.stderr)
         self.assertEqual(target.read_text(), 'model = "example-model"\n')
+        (codex_home / 'config.toml').unlink()
 
-        # A CODEX_HOME root creates is root's.
+        linked = self.dir / 'linked-codex'
+        linked.symlink_to(codex_home)
+        self.env['CODEX_HOME'] = str(linked)
+        result = self.run_installer('register', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'does not write through the symlink {linked}', result.stderr)
+
+        self.env.update(CODEX_HOME=str(codex_home), FAKE_LS_MODE='drwxrwxrwt')
+        result = self.run_installer('register', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'into {codex_home}, which group or others can write', result.stderr)
+        self.assertEqual(list(codex_home.iterdir()), [])
+
+        # A CODEX_HOME root owns, or creates, is written.
+        del self.env['FAKE_LS_MODE']
+        self.run_installer('register')
+        self.assertIn(f'command = "{self.launcher}"', (codex_home / 'config.toml').read_text())
         fresh = self.dir / 'root-codex'
         self.env['CODEX_HOME'] = str(fresh)
         self.run_installer('register')
