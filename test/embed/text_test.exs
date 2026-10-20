@@ -389,6 +389,47 @@ defmodule OptimalEngine.Embed.TextTest do
       assert %{"call_status" => "failed"} = Jason.decode!(metadata)
     end
 
+    test "media chunks embedded by their text join the batch; vision assets do not",
+         %{tag: tag} do
+      use_endpoint(start_stub(&openai_meaning/2))
+      image = Path.join(System.tmp_dir!(), "embed-batch-#{tag}.png")
+      File.write!(image, "not really a picture")
+      on_exit(fn -> File.rm(image) end)
+
+      chunks = [
+        Chunk.new(id: "text-#{tag}", modality: :text, text: "text chunk #{tag}"),
+        Chunk.new(id: "audio-#{tag}", modality: :audio, text: "audio transcript #{tag}"),
+        Chunk.new(id: "ocr-#{tag}", modality: :image, text: "scanned text #{tag}"),
+        Chunk.new(id: "frame-#{tag}", modality: :video, asset_ref: "clip", text: "caption #{tag}"),
+        Chunk.new(id: "vision-#{tag}", modality: :image, asset_ref: "pic", text: "alt #{tag}")
+      ]
+
+      capture_log(fn ->
+        assert {:ok, embeddings, %{errors: errors}} =
+                 Embedder.embed_tree(%ChunkTree{chunks: chunks}, asset_paths: %{"pic" => image})
+
+        send(self(), {:embedded, embeddings, errors})
+      end)
+
+      assert_received {:embed_request, _, _, %{"input" => inputs}}
+
+      assert inputs == [
+               "text chunk #{tag}",
+               "audio transcript #{tag}",
+               "scanned text #{tag}",
+               "caption #{tag}"
+             ]
+
+      refute_received {:embed_request, _, _, _}
+
+      assert_received {:embedded, embeddings, errors}
+
+      assert Enum.map(embeddings, & &1.chunk_id) ==
+               ["text-#{tag}", "audio-#{tag}", "ocr-#{tag}", "frame-#{tag}"]
+
+      assert [{"vision-" <> _, _reason}] = errors
+    end
+
     test "a cached vector of another width than the model now needs is fetched again",
          %{tag: tag} do
       {:ok, width} = Agent.start_link(fn -> 4 end)
@@ -482,6 +523,37 @@ defmodule OptimalEngine.Embed.TextTest do
         )
 
       assert elapsed < 1_000
+    end
+
+    test "a cache hit never clears the unhealthy mark", %{tag: tag} do
+      {:ok, mode} = Agent.start_link(fn -> :up end)
+
+      use_endpoint(
+        start_stub(fn path, body ->
+          case Agent.get(mode, & &1) do
+            :up -> openai_meaning(path, body)
+            :down -> {502, %{"error" => %{"code" => "embedding_backend_unavailable"}}}
+          end
+        end)
+      )
+
+      assert {:ok, _vector} = Text.embed("cached #{tag}")
+      Agent.update(mode, fn _ -> :down end)
+
+      capture_log(fn ->
+        assert {:error, {:embed_unavailable, 502}} = Text.embed("fresh #{tag}", cache: false)
+      end)
+
+      refute Text.healthy?()
+      # Served from the cache: no request, so it says nothing about the endpoint.
+      assert {:ok, _vector} = Text.embed("cached #{tag}")
+      refute Text.healthy?()
+      assert [{:ok, _vector}] = Text.embed_many(["cached #{tag}"])
+      refute Text.healthy?()
+
+      assert_received {:embed_request, _, _, %{"input" => "cached " <> _}}
+      assert_received {:embed_request, _, _, %{"input" => "fresh " <> _}}
+      refute_received {:embed_request, _, _, _}
     end
 
     test "the unhealthy mark lasts the health window, and a success clears it", %{tag: tag} do
@@ -626,11 +698,16 @@ defmodule OptimalEngine.Embed.TextTest do
       Application.put_env(:optimal_engine, :semantic_processing, enabled: true)
       Application.put_env(:optimal_engine, :embed, on_ingest: true)
 
+      # Distinct paragraphs become distinct text chunks, so a batch holds several inputs.
+      text =
+        "Hung endpoint #{tag}: pricing stays as it is.\n\n" <>
+          "The renewal moves to Thursday for every account.\n\n" <>
+          "Hiring opens two roles in March, both remote."
+
       capture_log(fn ->
         send(
           self(),
-          Intake.process(
-            "Hung endpoint #{tag}: the first note. The second note. The third note.",
+          Intake.process(text,
             workspace_id: "embed-hung-#{tag}",
             write_files: false,
             source_id: "embed-hung:#{tag}"
@@ -645,7 +722,20 @@ defmodule OptimalEngine.Embed.TextTest do
         refute_receive :silent_connection, 1_500
       end)
 
-      assert_received {:ok, %{context: %{id: _}}}
+      assert_received {:ok, %{context: %{id: id}}}
+      # The chunks are stored before they are embedded: the one chunk connection was
+      # a batch of every distinct paragraph, not a single chunk.
+      {:ok, [[distinct]]} =
+        Store.raw_query("SELECT COUNT(DISTINCT text) FROM chunks WHERE signal_id = ?1", [id])
+
+      assert distinct >= 3
+
+      # And the chunk connection itself carried one request with several inputs, the
+      # paragraphs among them.
+      batch = Enum.find(silent_bodies([]), &match?(%{"input" => [_, _ | _]}, &1))
+      assert batch, "no request carried more than one input"
+      assert Enum.any?(batch["input"], &(&1 =~ "The renewal moves to Thursday"))
+      assert Enum.any?(batch["input"], &(&1 =~ "Hiring opens two roles in March"))
     end
 
     test "a failed query embedding marks the endpoint unhealthy for the probe window",
@@ -910,7 +1000,48 @@ defmodule OptimalEngine.Embed.TextTest do
   defp hold(listen, held, parent) do
     {:ok, socket} = :gen_tcp.accept(listen)
     send(parent, :silent_connection)
+    reader = spawn_link(fn -> report_body(socket, parent) end)
+    :ok = :gen_tcp.controlling_process(socket, reader)
     hold(listen, [socket | held], parent)
+  end
+
+  # Reads one request without answering it and reports its decoded JSON body, so a
+  # test can see what a connection carried; the socket stays open until the test ends.
+  defp report_body(socket, parent) do
+    with {:ok, head, rest} <- read_head(socket, ""),
+         [_, length] <- Regex.run(~r/\r\ncontent-length:\s*(\d+)/i, head),
+         {:ok, body} <- read_body(socket, rest, String.to_integer(length)),
+         {:ok, decoded} <- Jason.decode(body) do
+      send(parent, {:silent_body, decoded})
+    end
+
+    Process.sleep(:infinity)
+  end
+
+  defp read_head(socket, acc) do
+    case :binary.split(acc, "\r\n\r\n") do
+      [head, rest] ->
+        {:ok, head, rest}
+
+      [_] ->
+        with {:ok, data} <- :gen_tcp.recv(socket, 0, 2_000), do: read_head(socket, acc <> data)
+    end
+  end
+
+  defp read_body(_socket, acc, length) when byte_size(acc) >= length,
+    do: {:ok, binary_part(acc, 0, length)}
+
+  defp read_body(socket, acc, length) do
+    with {:ok, data} <- :gen_tcp.recv(socket, 0, 2_000),
+         do: read_body(socket, acc <> data, length)
+  end
+
+  defp silent_bodies(acc) do
+    receive do
+      {:silent_body, body} -> silent_bodies([body | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 
   defp start_stub(respond) do

@@ -87,12 +87,43 @@ defmodule OptimalEngine.MemoryCore.GovernedModel do
 
   # ─── internal ──────────────────────────────────────────────────────────────
 
+  # Everything here is fail-open: a raise or throw is logged and the wrapped call's
+  # result still returns. A :classify that raises is recorded as "unclassified".
   defp log_model_run(function_name, input_payload, result, latency_ms, opts) do
+    record_model_run(function_name, input_payload, result, latency_ms, opts)
+  rescue
+    exception ->
+      Logger.warning(
+        "[GovernedModel] governance logging raised for #{function_name}: " <>
+          Exception.message(exception)
+      )
+  catch
+    kind, reason ->
+      Logger.warning(
+        "[GovernedModel] governance logging threw (#{kind}) for #{function_name}: #{inspect(reason)}"
+      )
+  end
+
+  # A :classify that raises still leaves the run in the audit trail, marked
+  # "unclassified" with only the exception's module, never the result.
+  defp classify(fun, result, function_name) do
+    fun.(result)
+  rescue
+    exception ->
+      Logger.warning(
+        "[GovernedModel] classify raised for #{function_name}: " <> Exception.message(exception)
+      )
+
+      {"unclassified", %{classify_error: inspect(exception.__struct__)}}
+  end
+
+  defp record_model_run(function_name, input_payload, result, latency_ms, opts) do
     workspace_id = Keyword.get(opts, :workspace_id, "default")
     model_id = opts[:model_id]
     model_task_type = Keyword.get(opts, :model_task_type, "generation")
 
-    {status, output_payload} = Keyword.get(opts, :classify, &classify_result/1).(result)
+    {status, output_payload} =
+      classify(Keyword.get(opts, :classify, &classify_result/1), result, function_name)
 
     record_opts =
       [
@@ -112,28 +143,15 @@ defmodule OptimalEngine.MemoryCore.GovernedModel do
           )
       ]
 
-    try do
-      ensure_operation(function_name, workspace_id, model_id, model_task_type)
+    ensure_operation(function_name, workspace_id, model_id, model_task_type)
 
-      case Governance.record_model_call(function_name, input_payload, record_opts) do
-        {:ok, _run} ->
-          :ok
+    case Governance.record_model_call(function_name, input_payload, record_opts) do
+      {:ok, _run} ->
+        :ok
 
-        {:error, reason} ->
-          Logger.warning(
-            "[GovernedModel] failed to record model_call_run for #{function_name}: #{inspect(reason)}"
-          )
-      end
-    rescue
-      exception ->
+      {:error, reason} ->
         Logger.warning(
-          "[GovernedModel] governance logging raised for #{function_name}: " <>
-            Exception.message(exception)
-        )
-    catch
-      kind, reason ->
-        Logger.warning(
-          "[GovernedModel] governance logging threw (#{kind}) for #{function_name}: #{inspect(reason)}"
+          "[GovernedModel] failed to record model_call_run for #{function_name}: #{inspect(reason)}"
         )
     end
   end

@@ -83,19 +83,17 @@ defmodule OptimalEngine.Pipeline.Embedder do
     {:ok, Enum.reverse(embeddings), %{errors: Enum.reverse(errors)}}
   end
 
-  # With an embedding endpoint the text chunks of a tree go out together: a few
-  # batched requests (a shared gateway meters requests), governed as one model
-  # call, and an unavailable endpoint is asked once, not once per chunk. Ollama
-  # at OLLAMA_HOST embeds chunk by chunk as before, so a slow first model load
-  # costs only the chunk it hits.
+  # With an embedding endpoint, every chunk of a tree that is embedded by its text
+  # goes out together (see batch_text/2): a few batched requests (a shared gateway
+  # meters requests), governed as one model call, and an unavailable endpoint is
+  # asked once, not once per chunk. Ollama at OLLAMA_HOST embeds chunk by chunk as
+  # before, so a slow first model load costs only the chunk it hits.
   defp with_text_vectors(chunks, opts) do
     if TextEmbedder.endpoint_configured?() do
       texts =
         chunks
-        |> Enum.filter(fn %Chunk{modality: m, text: text} ->
-          m in [:text, :code, :data, :mixed] and is_binary(text) and text != ""
-        end)
-        |> Enum.map(& &1.text)
+        |> Enum.map(&batch_text(&1, opts))
+        |> Enum.reject(&is_nil/1)
         |> Enum.uniq()
 
       vectors = texts |> Enum.zip(governed_embed_batch(texts, opts)) |> Map.new()
@@ -104,6 +102,37 @@ defmodule OptimalEngine.Pipeline.Embedder do
       opts
     end
   end
+
+  # The text a chunk is embedded by, when dispatch/2 knows it before any other model
+  # runs: the text of text, code, data and mixed chunks, an audio chunk's transcript,
+  # and the text (OCR, captions) of an image or video with no asset that vision
+  # embeds first. A transcript whisper makes, or a video's text used after vision
+  # fails, is embedded on its own.
+  defp batch_text(%Chunk{modality: m, text: text}, _opts)
+       when m in [:text, :code, :data, :mixed, :audio],
+       do: present(text)
+
+  defp batch_text(%Chunk{modality: :image} = chunk, opts) do
+    if asset_file(chunk, opts), do: nil, else: present(chunk.text)
+  end
+
+  defp batch_text(%Chunk{modality: :video} = chunk, opts) do
+    path = asset_file(chunk, opts)
+    if path && image_asset?(path), do: nil, else: present(chunk.text)
+  end
+
+  defp batch_text(_chunk, _opts), do: nil
+
+  defp present(text) when is_binary(text) and text != "", do: text
+  defp present(_text), do: nil
+
+  # The chunk's asset on disk, when the caller passed a path for its `asset_ref`.
+  defp asset_file(%Chunk{asset_ref: ref}, opts) when is_binary(ref) do
+    path = get_in(opts, [:asset_paths, ref])
+    if is_binary(path) and File.exists?(path), do: path
+  end
+
+  defp asset_file(_chunk, _opts), do: nil
 
   @doc """
   Embed every chunk in a tree and persist the vectors to `chunk_embeddings`.
@@ -183,10 +212,10 @@ defmodule OptimalEngine.Pipeline.Embedder do
   defp dispatch(%Chunk{modality: :image, asset_ref: ref} = chunk, opts) when is_binary(ref) do
     # The chunk carries `asset_ref` = content hash. Pipeline.run/2 can preserve
     # parser assets through MemoryCore.AssetStore before building this lookup.
-    asset_path = get_in(opts, [:asset_paths, ref])
+    asset_path = asset_file(chunk, opts)
 
     cond do
-      is_binary(asset_path) and File.exists?(asset_path) ->
+      asset_path != nil ->
         case governed_embed_image(asset_path, opts) do
           {:ok, vector} -> {:ok, vector, model_name(opts, :image), :image}
           {:error, _} = err -> err
@@ -216,12 +245,13 @@ defmodule OptimalEngine.Pipeline.Embedder do
     end
   end
 
-  defp dispatch(%Chunk{modality: :audio, asset_ref: ref}, opts) when is_binary(ref) do
+  defp dispatch(%Chunk{modality: :audio, asset_ref: ref} = chunk, opts) when is_binary(ref) do
     # No transcript yet — ask whisper.
-    asset_path = get_in(opts, [:asset_paths, ref])
+    case asset_file(chunk, opts) do
+      nil ->
+        {:error, :asset_unavailable}
 
-    cond do
-      is_binary(asset_path) and File.exists?(asset_path) ->
+      asset_path ->
         case Whisper.transcribe(asset_path, opts) do
           {:ok, %{text: text}} when text != "" ->
             with {:ok, vector} <- governed_embed_text(text, opts) do
@@ -231,9 +261,6 @@ defmodule OptimalEngine.Pipeline.Embedder do
           _ ->
             {:error, :transcript_unavailable}
         end
-
-      true ->
-        {:error, :asset_unavailable}
     end
   end
 
@@ -241,10 +268,10 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   # Video: prefer vision embedding on keyframe assets, fall back to text.
   defp dispatch(%Chunk{modality: :video, asset_ref: ref} = chunk, opts) when is_binary(ref) do
-    asset_path = get_in(opts, [:asset_paths, ref])
+    asset_path = asset_file(chunk, opts)
 
     cond do
-      is_binary(asset_path) and File.exists?(asset_path) and image_asset?(asset_path) ->
+      asset_path != nil and image_asset?(asset_path) ->
         case governed_embed_image(asset_path, opts) do
           {:ok, vector} -> {:ok, vector, "vision+" <> model_name(opts, :image), :video}
           {:error, _} -> fallback_text(chunk, opts, :video)

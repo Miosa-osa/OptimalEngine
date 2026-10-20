@@ -90,7 +90,8 @@ A cached vector of another width than the model now needs, after the width setti
 Stored vectors of another dimension are never scored, so a model with a different dimension cannot mix with an existing index.
 A request waits at most 5 seconds; an endpoint that accepts the connection and never answers counts as unavailable, and the search path's health probe gives up after 2 seconds.
 A request that finds the endpoint unavailable marks it unhealthy for the process that made it, for 60 seconds (`config :optimal_engine, :text_embedding, health_ttl_ms:`), so its searches skip the vector hop instead of waiting again; a successful request clears the mark.
-With an endpoint, the text chunks of an ingested document go out in one batched request, recorded as one governed model call (`embedder.embed_text_batch`, with the input count and size, never the text), so an unavailable endpoint is asked once per document, not once per chunk.
+With an endpoint, the chunks of an ingested document that are embedded by text (text, audio transcripts, and the OCR or caption text of images and video without an asset embedded by vision) go out in one batched request, recorded as one governed model call (`embedder.embed_text_batch`, with the input count and size, never the text), so an unavailable endpoint is asked once per document, not once per chunk.
+A transcript whisper makes, or a video's text used after vision fails, goes out on its own, so each such chunk can wait out the timeout once more.
 With Ollama at `OLLAMA_HOST`, each chunk is embedded on its own, as before.
 A batch answered 429 with a `Retry-After` of at most 60 seconds is retried once after that wait; a single embedding, such as a search query, is not.
 A key sent over plain `http` to another machine is warned about once, without the key.
