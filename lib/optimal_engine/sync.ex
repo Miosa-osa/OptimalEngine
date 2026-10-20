@@ -34,7 +34,7 @@ defmodule OptimalEngine.Sync do
   alias OptimalEngine.Connectors.{Credential, HTTP}
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Store
-  alias OptimalEngine.Sync.{Capture, Gate}
+  alias OptimalEngine.Sync.{Capture, Gate, Lineage}
 
   @classes ~w(public internal confidential restricted)
   @page 500
@@ -584,10 +584,18 @@ defmodule OptimalEngine.Sync do
 
     keys = Capture.key_columns(columns)
     append_only = Capture.rowid_key?(columns)
+
+    case grow_labels(txn, table, keys, row, mutation["operation"], append_only) do
+      {:ok, row} -> write_row(txn, table, mutation["operation"], keys, append_only, row)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp write_row(txn, table, operation, keys, append_only, row) do
     t = quote_name(table)
 
     {sql, params} =
-      case {mutation["operation"], append_only} do
+      case {operation, append_only} do
         {"delete", _} ->
           where =
             keys
@@ -622,6 +630,105 @@ defmodule OptimalEngine.Sync do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  # Labels only grow when a change is applied: a row this Engine already holds
+  # keeps the labels, the metadata labels and the classification level it has,
+  # whatever the sender wrote and however old its change is. What the change
+  # carries is joined with what is held; a change that carries all of it is
+  # written as sent. Labels that cannot be read count as `restricted`.
+  defp grow_labels(_txn, _table, _keys, row, "delete", _append_only), do: {:ok, row}
+  defp grow_labels(_txn, _table, _keys, row, _operation, true), do: {:ok, row}
+  defp grow_labels(_txn, _table, [], row, _operation, _append_only), do: {:ok, row}
+
+  defp grow_labels(txn, table, keys, row, _operation, false) do
+    spec = Lineage.spec(table)
+    columns = if spec, do: label_columns(spec, row), else: []
+
+    if columns == [] or not Enum.all?(keys, &Map.has_key?(row, &1)) do
+      {:ok, row}
+    else
+      where =
+        keys
+        |> Enum.with_index(1)
+        |> Enum.map_join(" AND ", fn {key, index} -> "#{quote_name(key)} = ?#{index}" end)
+
+      sql =
+        "SELECT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} WHERE #{where}"
+
+      case Store.txn_query(txn, sql, Enum.map(keys, &row[&1])) do
+        {:ok, [held]} -> {:ok, keep_held(spec, row, Map.new(Enum.zip(columns, held)))}
+        {:ok, []} -> {:ok, row}
+        {:error, reason} -> {:error, {:labels_unreadable, reason}}
+      end
+    end
+  end
+
+  # The columns of the change that say how classified the row is.
+  defp label_columns(spec, row) do
+    [
+      if(spec.labels, do: "security_labels"),
+      if(spec.partitions, do: "partition_ids"),
+      spec.meta,
+      spec.class
+    ]
+    |> Enum.filter(&(&1 && Map.has_key?(row, &1)))
+  end
+
+  defp keep_held(spec, row, held) do
+    row
+    |> keep_labels("security_labels", spec.labels, held)
+    |> keep_labels("partition_ids", spec.partitions, held)
+    |> keep_metadata_labels(spec.meta, held)
+    |> keep_class(spec.class, held)
+  end
+
+  defp keep_labels(row, _column, false, _held), do: row
+
+  defp keep_labels(row, column, true, held) do
+    sent = SecurityLabels.labels(plain(row[column]))
+
+    case SecurityLabels.labels(plain(held[column])) -- sent do
+      [] -> row
+      missing -> Map.put(row, column, Jason.encode!(sent ++ missing))
+    end
+  end
+
+  defp keep_metadata_labels(row, nil, _held), do: row
+
+  defp keep_metadata_labels(row, column, held) do
+    sent = row[column] |> plain() |> SecurityLabels.metadata_map()
+    kept = held[column] |> plain() |> SecurityLabels.metadata_map()
+
+    {merged, changed?} =
+      Enum.reduce(["security_labels", "partition_ids"], {sent, false}, fn key, {acc, changed?} ->
+        carried = SecurityLabels.labels(plain(acc[key]))
+
+        case SecurityLabels.labels(plain(kept[key])) -- carried do
+          [] -> {acc, changed?}
+          missing -> {Map.put(acc, key, carried ++ missing), true}
+        end
+      end)
+
+    if changed?, do: Map.put(row, column, Jason.encode!(merged)), else: row
+  end
+
+  # Only a level above `internal` (the column's default, which says nothing)
+  # is kept; a level this Engine does not know is the highest.
+  defp keep_class(row, nil, _held), do: row
+
+  defp keep_class(row, column, held) do
+    kept = plain(held[column])
+
+    if class_level(kept) >= 2 and class_level(kept) > class_level(plain(row[column])),
+      do: Map.put(row, column, kept),
+      else: row
+  end
+
+  defp class_level(value) when value in [nil, ""], do: 0
+  defp class_level(value), do: SecurityLabels.class_rank(value) || 3
+
+  defp plain({:blob, bytes}), do: bytes
+  defp plain(value), do: value
 
   defp record_ledger(txn, tenant_id, workspace_id, mutation) do
     payload = Jason.encode!(mutation["payload"])

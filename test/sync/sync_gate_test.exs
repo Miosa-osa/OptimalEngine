@@ -727,11 +727,9 @@ defmodule OptimalEngine.SyncGateTest do
         refute sent?(sent, "source_packages", source_id)
       end
 
-      # The local versions of the fact stay home too. (The older version that
-      # came from the other Engine unlabelled is a stale snapshot of a row that
-      # has labels now: the follow-up for stale snapshots covers it.)
-      refute carries?(sent, "Wire code 4471")
-      refute carries?(sent, "Wire code 4472")
+      # Every version of the fact stays home, the older one that came from the
+      # other Engine unlabelled included: the row has labels now.
+      refute carries?(sent, "Wire code")
     end
 
     test "the labels of the remote version reach the claims", ctx do
@@ -846,6 +844,277 @@ defmodule OptimalEngine.SyncGateTest do
 
       assert {:ok, %{applied: 0, skipped: %{gated: 1}}} =
                Sync.apply_changes(ctx.tenant, ctx.ws, [mutation])
+    end
+  end
+
+  # -- changes written before a row was labelled -------------------------------------------
+
+  describe "stale snapshots" do
+    test "a change captured before the row was labelled is held with the row", ctx do
+      id = "fact-late-#{ctx.n}"
+      fact(ctx, id, "Wire code 5501", [])
+      {:ok, _} = Capture.seal()
+
+      {:ok, _} =
+        Store.raw_query("UPDATE facts SET security_labels = '[\"restricted\"]' WHERE id = ?1", [id])
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      refute sent?(sent, "facts", id)
+      refute carries?(sent, "Wire code 5501")
+    end
+
+    test "a change captured before a memory was labelled is held with the memory", ctx do
+      {:ok, memory} =
+        Versioned.create(%{
+          content: "Vault door code 9921",
+          workspace_id: ctx.ws,
+          tenant_id: ctx.tenant
+        })
+
+      {:ok, _} = Capture.seal()
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json('[\"restricted\"]')) WHERE id = ?1",
+          [memory.id]
+        )
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      refute sent?(sent, "memories", memory.id)
+      refute carries?(sent, "Vault door code 9921")
+    end
+
+    test "a change to a row that is gone is classified as it was written", ctx do
+      plain = "fact-gone-plain-#{ctx.n}"
+      secret = "fact-gone-secret-#{ctx.n}"
+      fact(ctx, plain, "Gone but public 5502", [])
+      fact(ctx, secret, "Gone and secret 5503", ["restricted"])
+      {:ok, _} = Capture.seal()
+      {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id IN (?1, ?2)", [plain, secret])
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      assert carries?(sent, "Gone but public 5502")
+      refute carries?(sent, "Gone and secret 5503")
+    end
+
+    test "a change to a row that stays unlabelled is still sent", ctx do
+      id = "fact-open-#{ctx.n}"
+      fact(ctx, id, "Open fact 5504", [])
+      {:ok, _} = Capture.seal()
+
+      {:ok, _} =
+        Store.raw_query("UPDATE facts SET fact_text = 'Open fact 5505' WHERE id = ?1", [id])
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      assert carries?(sent, "Open fact 5504")
+      assert carries?(sent, "Open fact 5505")
+    end
+  end
+
+  # -- applying a change to a row that is held here ----------------------------------------
+
+  describe "labels only grow when a change is applied" do
+    test "a fact keeps its labels when the other Engine sends it without them", ctx do
+      id = "fact-grow-#{ctx.n}"
+      fact(ctx, id, "Original 7701", ["restricted"])
+
+      remote_change(ctx, "facts", id, %{"fact_text" => "Edited 7701", "security_labels" => "[]"})
+
+      assert stored("facts", id, "fact_text") == "Edited 7701"
+      assert label_list("facts", id) == ["restricted"]
+    end
+
+    test "the labels of both sides are kept", ctx do
+      id = "fact-both-#{ctx.n}"
+      fact(ctx, id, "Original 7702", ["restricted", "private"])
+
+      remote_change(ctx, "facts", id, %{"security_labels" => ~s(["internal","team-a"])})
+
+      assert Enum.sort(label_list("facts", id)) == ["internal", "private", "restricted", "team-a"]
+    end
+
+    test "labels held here that cannot be read count as restricted", ctx do
+      id = "fact-bad-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, security_labels) VALUES (?1, ?2, ?3, 'Original 7703', 'not a list')",
+          [id, ctx.tenant, ctx.ws]
+        )
+
+      remote_change(ctx, "facts", id, %{"security_labels" => ~s(["private"])})
+
+      assert Enum.sort(label_list("facts", id)) == ["private", "restricted"]
+    end
+
+    test "a memory keeps the labels in its metadata", ctx do
+      %{memory: memory} = remember(ctx, "Secret 7704", ["restricted"])
+
+      remote_change(ctx, "memories", memory.id, %{"content" => "Edited 7704", "metadata" => "{}"})
+
+      assert stored("memories", memory.id, "content") == "Edited 7704"
+
+      assert Jason.decode!(stored("memories", memory.id, "metadata"))["security_labels"] == [
+               "restricted"
+             ]
+    end
+
+    test "the other keys of the sender's metadata are kept beside the labels", ctx do
+      %{memory: memory} = remember(ctx, "Secret 7705", ["restricted"])
+
+      remote_change(ctx, "memories", memory.id, %{"metadata" => ~s({"source":"phone"})})
+
+      metadata = Jason.decode!(stored("memories", memory.id, "metadata"))
+      assert metadata["security_labels"] == ["restricted"]
+      assert metadata["source"] == "phone"
+    end
+
+    test "partitions grow the same way", ctx do
+      id = "fact-parts-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, partition_ids) VALUES (?1, ?2, ?3, 'Original 7709', ?4)",
+          [id, ctx.tenant, ctx.ws, ~s(["team-a"])]
+        )
+
+      remote_change(ctx, "facts", id, %{"partition_ids" => ~s(["team-b"])})
+      assert Enum.sort(Jason.decode!(stored("facts", id, "partition_ids"))) == ["team-a", "team-b"]
+
+      remote_change(ctx, "facts", id, %{"partition_ids" => "[]"})
+      assert Enum.sort(Jason.decode!(stored("facts", id, "partition_ids"))) == ["team-a", "team-b"]
+    end
+
+    test "the partitions in a memory's metadata are kept beside its labels", ctx do
+      %{memory: memory} = remember(ctx, "Atlas notes 7710", ["internal"])
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE memories SET metadata = json_set(metadata, '$.partition_ids', json('[\"team-a\"]')) WHERE id = ?1",
+          [memory.id]
+        )
+
+      remote_change(ctx, "memories", memory.id, %{"metadata" => ~s({"source":"phone"})})
+
+      metadata = Jason.decode!(stored("memories", memory.id, "metadata"))
+      assert metadata["partition_ids"] == ["team-a"]
+      assert metadata["security_labels"] == ["internal"]
+      assert metadata["source"] == "phone"
+    end
+
+    test "a chunk keeps the higher classification level", ctx do
+      insert_context(ctx, "doc-grow-#{ctx.n}", "Doc")
+      insert_chunk(ctx, "chk-grow-#{ctx.n}", "doc-grow-#{ctx.n}", "Text 7706", "restricted")
+      insert_chunk(ctx, "chk-up-#{ctx.n}", "doc-grow-#{ctx.n}", "Text 7707", "internal")
+
+      remote_change(ctx, "chunks", "chk-grow-#{ctx.n}", %{"classification_level" => "internal"})
+      remote_change(ctx, "chunks", "chk-up-#{ctx.n}", %{"classification_level" => "confidential"})
+
+      assert stored("chunks", "chk-grow-#{ctx.n}", "classification_level") == "restricted"
+      assert stored("chunks", "chk-up-#{ctx.n}", "classification_level") == "confidential"
+    end
+
+    test "a change that does not lower anything is stored as the sender wrote it", ctx do
+      id = "fact-same-#{ctx.n}"
+      fact(ctx, id, "Original 7708", ["private"])
+
+      remote_change(ctx, "facts", id, %{
+        "fact_text" => "Edited 7708",
+        "security_labels" => ~s(["private"])
+      })
+
+      assert stored("facts", id, "security_labels") == ~s(["private"])
+    end
+  end
+
+  # -- the cost of a pull ------------------------------------------------------------------
+
+  describe "the lineage index is shared between gates" do
+    setup ctx do
+      OptimalEngine.Sync.GateCache.clear()
+
+      for i <- 1..6 do
+        {:ok, _} =
+          Versioned.create(%{
+            content: "Plain note #{i}",
+            workspace_id: ctx.ws,
+            tenant_id: ctx.tenant
+          })
+      end
+
+      on_exit(fn -> Application.delete_env(:optimal_engine, :sync_gate_cache_ttl_ms) end)
+      :ok
+    end
+
+    test "a pull of many pages scans the workspace once", ctx do
+      {pages, builds} = counting_builds(fn -> pull_all(ctx, 2) end)
+
+      assert pages >= 3
+      assert Enum.count(builds, &(&1 == :index)) == 1
+      assert Enum.count(builds, &(&1 == :holds_above)) <= 1
+    end
+
+    test "without the cache every page scans it again", ctx do
+      Application.put_env(:optimal_engine, :sync_gate_cache_ttl_ms, 0)
+
+      {pages, builds} = counting_builds(fn -> pull_all(ctx, 2) end)
+
+      assert pages >= 3
+      assert Enum.count(builds, &(&1 == :index)) > 1
+    end
+
+    test "a second pull with nothing written in between scans nothing", ctx do
+      pull_all(ctx, 2)
+
+      {_pages, builds} = counting_builds(fn -> pull_all(ctx, 2) end)
+
+      assert builds == []
+    end
+
+    test "a source labelled after the index was cached is honoured", ctx do
+      first = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      assert first["mutations"] != []
+
+      source = restricted_source(ctx, "Board minutes 8801")
+      insert_context(ctx, "doc-late-#{ctx.n}", "Board minutes")
+      ledger(ctx, source, "doc-late-#{ctx.n}", ["restricted"])
+
+      second = Sync.changes(ctx.tenant, ctx.ws, since: first["cursor"], limit: 2_000)
+
+      refute sent?(second["mutations"], "contexts", "doc-late-#{ctx.n}")
+      refute carries?(second["mutations"], "Board minutes 8801")
+    end
+
+    test "a workspace that does not sync is scanned by every gate", ctx do
+      plain = "plain-#{ctx.n}"
+
+      {:ok, workspace} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: plain,
+          name: "Plain"
+        })
+
+      memory = %{
+        "entity_type" => "memories",
+        "entity_id" => "mem-x",
+        "operation" => "create",
+        "payload" => %{"row" => %{"id" => "mem-x", "metadata" => "{}"}, "blobs" => %{}}
+      }
+
+      {_, builds} =
+        counting_builds(fn ->
+          for _ <- 1..2 do
+            Gate.with_gate(ctx.tenant, workspace.id, "internal", &Gate.hold?(&1, memory))
+          end
+        end)
+
+      assert Enum.count(builds, &(&1 == :index)) == 2
     end
   end
 
@@ -1461,6 +1730,83 @@ defmodule OptimalEngine.SyncGateTest do
       [next.id | ids]
     end)
     |> Enum.reverse()
+  end
+
+  # A change to the row `id` of `table` as the other Engine would send it: the
+  # row as stored here with `changes`, written after anything done here.
+  defp remote_change(ctx, table, id, changes) do
+    names = table |> Capture.columns() |> Enum.map(& &1.name)
+
+    {:ok, [values]} =
+      Store.raw_query(
+        "SELECT #{Enum.map_join(names, ", ", &~s("#{&1}"))} FROM #{table} WHERE id = ?1",
+        [id]
+      )
+
+    mutation = %{
+      "id" => "mut_remote_#{table}_#{System.unique_integer([:positive])}",
+      "device_id" => "rep_remote",
+      "entity_type" => table,
+      "entity_id" => id,
+      "operation" => "update",
+      "occurred_at" => "2099-01-01T00:00:00.000",
+      "payload" => %{
+        "row" => names |> Enum.zip(values) |> Map.new() |> Map.merge(changes),
+        "blobs" => %{}
+      }
+    }
+
+    assert {:ok, %{applied: 1}} =
+             Sync.apply_changes(ctx.tenant, ctx.ws, [mutation], since: "2099-12-31T00:00:00")
+  end
+
+  defp stored(table, id, column) do
+    {:ok, [[value]]} = Store.raw_query("SELECT #{column} FROM #{table} WHERE id = ?1", [id])
+    value
+  end
+
+  defp label_list(table, id), do: table |> stored(id, "security_labels") |> Jason.decode!()
+
+  # Pulls a workspace a page of `limit` mutations at a time, as a peer does.
+  # Returns the number of pages.
+  defp pull_all(ctx, limit, since \\ 0, pages \\ 1) do
+    page = Sync.changes(ctx.tenant, ctx.ws, since: since, limit: limit)
+
+    if page["more"],
+      do: pull_all(ctx, limit, page["cursor"], pages + 1),
+      else: pages
+  end
+
+  # Runs `fun`, returning its result and what the gate scanned the workspace
+  # for while it ran (`:index`, `:holds_above`).
+  defp counting_builds(fun) do
+    id = {:gate_builds, System.unique_integer([:positive])}
+    parent = self()
+
+    :ok =
+      :telemetry.attach(
+        id,
+        [:optimal_engine, :sync, :gate_build],
+        fn _event, _measurements, %{what: what}, _config -> send(parent, {:gate_build, what}) end,
+        nil
+      )
+
+    result =
+      try do
+        fun.()
+      after
+        :telemetry.detach(id)
+      end
+
+    {result, drain_builds([])}
+  end
+
+  defp drain_builds(acc) do
+    receive do
+      {:gate_build, what} -> drain_builds([what | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 
   defp restricted_source(ctx, text, opts \\ []) do

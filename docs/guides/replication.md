@@ -60,11 +60,19 @@ A dense mesh of links that cycles back on itself (every row naming every other) 
 The push cycle ends in an error with nothing sent and its cursor where it was, so the next cycle classifies the same rows again; a workspace that cannot be read is not assumed to be open.
 - A value SQLite holds as a BLOB travels in `payload.blobs`; a label stored that way is read like any other, on send and on receive.
 - An aggregate (`analysis_reports`, `data_quality_snapshots`, `rhythm_notes`, `sessions`, a wiki page or cluster that names nothing, an edge between entity names) has no row to point at, so it stays home while the workspace holds anything above the peer's class.
+- A change is held at the higher of the row as the ledger recorded it and the row as it is stored now.
+An older version of a row that has labels today (it was labelled afterwards, or a version arrived from another Engine without them) stays home with the row.
 - A delete carries only the row's key.
 It stays home when the row's earlier changes in the local ledger were held, so a peer that never had the row is not told of it.
 
 Receiving reads what a row carries: its `security_labels`, the `security_labels` in its `metadata`, or its `classification_level`.
 A batch arrives with its sources possibly not yet here, so the sender's gate is the one that follows lineage.
+
+Labels only grow when a change is applied.
+A row this Engine already holds keeps the `security_labels`, the `partition_ids`, the `metadata.security_labels` and `metadata.partition_ids`, and the `classification_level` (above `internal`) it has, whatever the sender wrote and however old its change is: the two sets of labels are joined, and a higher level wins.
+Labels held here that cannot be read count as `restricted`.
+A change that carries everything the row holds is written as sent.
+The ledger keeps the change as it was received, so another peer that is pulled from the ledger gets the sender's labels, and a cleared peer behind this one learns of the extra labels only from the sender.
 
 A versioned memory has no label column, so `security_labels` given when a memory is remembered or created are kept in its `metadata`, and its versions and children carry them.
 A document that Intake writes names its source package and carries its labels in `metadata` from the first write, and its chunks are written at its class.
@@ -76,6 +84,12 @@ It is held by the labels of the row it carries itself (`security_labels`, `parti
 The cursor moves past what the gate holds, and the class is read when the row is sent.
 A row held then is not sent later because its source package arrived after it, or because a label on its source was lowered; only a new change to the row, or to a row it derives from, is classified again.
 So label before writing, and write the source before what derives from it.
+
+A gate reads the workspace once for what it needs to classify many rows: the index of the documents and memories derived from labelled sources, and whether the workspace holds anything above the peer's class.
+That scan is kept between gates (a pull of many pages, the next push cycle) while nothing was written: the key is the workspace and the class, and the stamp is the write sequence of the change capture and the ledger, which every write to a replicated table of a syncing workspace moves.
+An entry also expires after `config :optimal_engine, :sync_gate_cache_ttl_ms` (default `30000`; `0` turns the cache off), which bounds how long a write that capture does not see, such as an in-place update of a table without a key, can go unnoticed.
+A workspace that does not sync is not captured, so it is never cached.
+The scans emit `[:optimal_engine, :sync, :gate_build]` telemetry with `what: :index | :holds_above`.
 
 ### What a read key sees of exports, conflicts and the ledger
 
