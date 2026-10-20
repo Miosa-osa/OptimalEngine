@@ -389,6 +389,47 @@ defmodule OptimalEngine.Embed.TextTest do
       assert %{"call_status" => "failed"} = Jason.decode!(metadata)
     end
 
+    test "media chunks embedded by their text join the batch; vision assets do not",
+         %{tag: tag} do
+      use_endpoint(start_stub(&openai_meaning/2))
+      image = Path.join(System.tmp_dir!(), "embed-batch-#{tag}.png")
+      File.write!(image, "not really a picture")
+      on_exit(fn -> File.rm(image) end)
+
+      chunks = [
+        Chunk.new(id: "text-#{tag}", modality: :text, text: "text chunk #{tag}"),
+        Chunk.new(id: "audio-#{tag}", modality: :audio, text: "audio transcript #{tag}"),
+        Chunk.new(id: "ocr-#{tag}", modality: :image, text: "scanned text #{tag}"),
+        Chunk.new(id: "frame-#{tag}", modality: :video, asset_ref: "clip", text: "caption #{tag}"),
+        Chunk.new(id: "vision-#{tag}", modality: :image, asset_ref: "pic", text: "alt #{tag}")
+      ]
+
+      capture_log(fn ->
+        assert {:ok, embeddings, %{errors: errors}} =
+                 Embedder.embed_tree(%ChunkTree{chunks: chunks}, asset_paths: %{"pic" => image})
+
+        send(self(), {:embedded, embeddings, errors})
+      end)
+
+      assert_received {:embed_request, _, _, %{"input" => inputs}}
+
+      assert inputs == [
+               "text chunk #{tag}",
+               "audio transcript #{tag}",
+               "scanned text #{tag}",
+               "caption #{tag}"
+             ]
+
+      refute_received {:embed_request, _, _, _}
+
+      assert_received {:embedded, embeddings, errors}
+
+      assert Enum.map(embeddings, & &1.chunk_id) ==
+               ["text-#{tag}", "audio-#{tag}", "ocr-#{tag}", "frame-#{tag}"]
+
+      assert [{"vision-" <> _, _reason}] = errors
+    end
+
     test "a cached vector of another width than the model now needs is fetched again",
          %{tag: tag} do
       {:ok, width} = Agent.start_link(fn -> 4 end)
@@ -482,6 +523,37 @@ defmodule OptimalEngine.Embed.TextTest do
         )
 
       assert elapsed < 1_000
+    end
+
+    test "a cache hit never clears the unhealthy mark", %{tag: tag} do
+      {:ok, mode} = Agent.start_link(fn -> :up end)
+
+      use_endpoint(
+        start_stub(fn path, body ->
+          case Agent.get(mode, & &1) do
+            :up -> openai_meaning(path, body)
+            :down -> {502, %{"error" => %{"code" => "embedding_backend_unavailable"}}}
+          end
+        end)
+      )
+
+      assert {:ok, _vector} = Text.embed("cached #{tag}")
+      Agent.update(mode, fn _ -> :down end)
+
+      capture_log(fn ->
+        assert {:error, {:embed_unavailable, 502}} = Text.embed("fresh #{tag}", cache: false)
+      end)
+
+      refute Text.healthy?()
+      # Served from the cache: no request, so it says nothing about the endpoint.
+      assert {:ok, _vector} = Text.embed("cached #{tag}")
+      refute Text.healthy?()
+      assert [{:ok, _vector}] = Text.embed_many(["cached #{tag}"])
+      refute Text.healthy?()
+
+      assert_received {:embed_request, _, _, %{"input" => "cached " <> _}}
+      assert_received {:embed_request, _, _, %{"input" => "fresh " <> _}}
+      refute_received {:embed_request, _, _, _}
     end
 
     test "the unhealthy mark lasts the health window, and a success clears it", %{tag: tag} do
@@ -626,11 +698,16 @@ defmodule OptimalEngine.Embed.TextTest do
       Application.put_env(:optimal_engine, :semantic_processing, enabled: true)
       Application.put_env(:optimal_engine, :embed, on_ingest: true)
 
+      # Distinct paragraphs become distinct text chunks, so a batch holds several inputs.
+      text =
+        "Hung endpoint #{tag}: pricing stays as it is.\n\n" <>
+          "The renewal moves to Thursday for every account.\n\n" <>
+          "Hiring opens two roles in March, both remote."
+
       capture_log(fn ->
         send(
           self(),
-          Intake.process(
-            "Hung endpoint #{tag}: the first note. The second note. The third note.",
+          Intake.process(text,
             workspace_id: "embed-hung-#{tag}",
             write_files: false,
             source_id: "embed-hung:#{tag}"
@@ -645,7 +722,13 @@ defmodule OptimalEngine.Embed.TextTest do
         refute_receive :silent_connection, 1_500
       end)
 
-      assert_received {:ok, %{context: %{id: _}}}
+      assert_received {:ok, %{context: %{id: id}}}
+      # The chunks are stored before they are embedded: the one chunk connection was
+      # a batch of every distinct paragraph, not a single chunk.
+      {:ok, [[distinct]]} =
+        Store.raw_query("SELECT COUNT(DISTINCT text) FROM chunks WHERE signal_id = ?1", [id])
+
+      assert distinct >= 3
     end
 
     test "a failed query embedding marks the endpoint unhealthy for the probe window",

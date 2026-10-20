@@ -82,6 +82,22 @@ defmodule OptimalEngine.MemoryCore.GovernedModelTest do
     assert metadata["model_id"] == "nomic-embed-text"
   end
 
+  test "a :classify that raises is fail-open: the result still returns and a warning is logged" do
+    fn_name = "test.classify_raises_#{System.unique_integer([:positive])}"
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, [1, 2]} =
+                 GovernedModel.call_model(fn_name, %{"inputs" => 2}, fn -> {:ok, [1, 2]} end,
+                   model_id: "nomic-embed-text",
+                   classify: fn _result -> raise "classify broke" end
+                 )
+      end)
+
+    assert log =~ "governance logging raised for #{fn_name}: classify broke"
+    assert runs_for(fn_name) == []
+  end
+
   test "disabling the flag bypasses governance entirely (no run row, result passthrough)" do
     Application.put_env(:optimal_engine, :governance, log_model_calls: false)
     on_exit(fn -> Application.put_env(:optimal_engine, :governance, log_model_calls: true) end)
