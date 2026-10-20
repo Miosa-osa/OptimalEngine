@@ -26,6 +26,15 @@ Results carry `source_workspace_id` and `source_engine`; `sources` reports each 
 Peers are registered with `POST /api/federation/peers {"workspace_id", "url", "api_key", "share_up"}` (admin); the key is encrypted with `CONNECTOR_KEY` and never returned.
 Nothing is copied: a workspace Engine's data is only queried.
 
+## Renaming a workspace
+
+`PATCH /api/workspaces/:id {"slug": "<new slug>", "name": "<new name>"}` (`topology:write`) renames a workspace without moving it.
+The id never changes, so every row, file, key, and `optimal://` link that names the id keeps working.
+The slug it replaces is kept in `metadata.previous_slugs` and stays the workspace's handle: no other workspace can take it (`409 slug_taken`), and a topology file written with it still names this workspace.
+`GET /api/resolve?uri=optimal://<tenant>:<slug>/...` written with any slug the workspace holds or held answers `local` with the address by its id.
+A request that names `<tenant>:<slug>` where a workspace id belongs, and that slug is not the id, answers `409 {"error": "not_a_workspace_id", "workspace_id": "<id>"}` to a key that covers the workspace, so nothing is written beside the real workspace.
+A slug is lowercase letters, digits, and dashes; the singleton `default` workspace keeps its slug.
+
 ## Moving a workspace (split, merge, seed)
 
 A bundle is a gzip tar file with `manifest.json`, one JSON-lines file per table, and the workspace's files.

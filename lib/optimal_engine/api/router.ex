@@ -1308,6 +1308,12 @@ defmodule OptimalEngine.API.Router do
     json(conn, %{nodes: workspace_nodes(workspace)})
   end
 
+  # GET /api/signals/classification?workspace=&plan=true: counts of the
+  # workspace's Signals by genre and mode, stored and as re-running
+  # classification would set them. Declared before /api/signals/:id so
+  # "classification" is never read as a signal id.
+  get("/api/signals/classification", do: OptimalEngine.API.ViabilityAPI.classification(conn))
+
   # GET /api/signals/:id — full signal granularity: chunks (4 scales),
   # entities (by type), classification, intent, clusters, wiki citations.
   # This is the "see everything the engine knows about this one data point"
@@ -1484,6 +1490,9 @@ defmodule OptimalEngine.API.Router do
             |> put_resp_content_type("application/json")
             |> send_resp(201, Jason.encode!(workspace_to_map(ws)))
 
+          {:error, :slug_taken} ->
+            send_resp(conn, 409, Jason.encode!(%{error: "slug_taken"}))
+
           {:error, reason} ->
             send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
         end
@@ -1499,7 +1508,9 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # PATCH /api/workspaces/:id — rename / re-describe.
+  # PATCH /api/workspaces/:id: rename or re-describe. A new slug keeps the
+  # id (OptimalEngine.Workspace.update/2): links that name the id keep
+  # resolving and the old slug stays this workspace's handle.
   patch "/api/workspaces/:id" do
     body = conn.body_params || %{}
 
@@ -1507,6 +1518,7 @@ defmodule OptimalEngine.API.Router do
       %{}
       |> maybe_put(:name, Map.get(body, "name"))
       |> maybe_put(:description, Map.get(body, "description"))
+      |> maybe_put(:slug, Map.get(body, "slug"))
 
     result =
       with {:ok, workspace} <- OptimalEngine.Workspace.update(id, attrs) do
@@ -1520,9 +1532,20 @@ defmodule OptimalEngine.API.Router do
       end
 
     case result do
-      {:ok, ws} -> json(conn, workspace_to_map(ws))
-      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "workspace not found"}))
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      {:ok, ws} ->
+        json(conn, workspace_to_map(ws))
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "workspace not found"}))
+
+      {:error, :invalid_slug} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "invalid_slug"}))
+
+      {:error, reason} when reason in [:slug_taken, :default_workspace_slug] ->
+        send_resp(conn, 409, Jason.encode!(%{error: Atom.to_string(reason)}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 

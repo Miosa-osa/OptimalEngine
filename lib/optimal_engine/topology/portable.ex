@@ -203,7 +203,7 @@ defmodule OptimalEngine.Topology.Portable do
   end
 
   defp ensure_workspace(tenant_id, org_id, slug, acc) do
-    case Workspace.get_by_slug(slug, tenant_id) do
+    case Workspace.get_by_handle(slug, tenant_id) do
       {:ok, %{organization_id: ^org_id}} ->
         acc
 
@@ -234,7 +234,7 @@ defmodule OptimalEngine.Topology.Portable do
       })
 
     Enum.each(person["workspaces"] || [], fn slug ->
-      case Workspace.get_by_slug(slug, tenant_id) do
+      case Workspace.get_by_handle(slug, tenant_id) do
         {:ok, workspace} -> Workspace.add_member(workspace.id, person["id"])
         _ -> :ok
       end

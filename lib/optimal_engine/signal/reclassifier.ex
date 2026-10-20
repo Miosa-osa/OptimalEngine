@@ -89,6 +89,53 @@ defmodule OptimalEngine.Signal.Reclassifier do
     end
   end
 
+  @doc """
+  Counts the stored signals of `workspace_id` by genre and mode, for
+  example `%{"transcript" => %{"linguistic" => 12, "code" => 3}}`. A missing
+  genre or mode counts as `"none"`. Reads only.
+  """
+  @spec distribution(String.t()) ::
+          %{optional(String.t()) => %{optional(String.t()) => pos_integer()}}
+  def distribution(workspace_id) when is_binary(workspace_id) do
+    {:ok, rows} =
+      Store.raw_query(
+        """
+        SELECT genre, mode, COUNT(*) FROM contexts
+        WHERE type = 'signal' AND workspace_id = ?1
+        GROUP BY genre, mode
+        """,
+        [workspace_id]
+      )
+
+    Enum.reduce(rows, %{}, fn [genre, mode, count], acc -> add(acc, genre, mode, count) end)
+  end
+
+  @doc """
+  The `distribution/1` a workspace would have once `changes` (from `plan/2`)
+  were applied: what re-running classification produces, without writing it.
+
+  With `keep_genre: true` every Signal stays under the genre it is stored
+  with and only its mode moves, which answers how the Signals stored as one
+  genre (for example `"chat"`) would be read once re-run.
+  """
+  @spec apply_to_distribution(map(), [change()], keyword()) :: map()
+  def apply_to_distribution(distribution, changes, opts \\ []) do
+    keep_genre? = Keyword.get(opts, :keep_genre, false)
+
+    Enum.reduce(changes, distribution, fn %{from: {mode, genre}, to: {new_mode, new_genre}}, acc ->
+      acc |> add(genre, mode, -1) |> add(if(keep_genre?, do: genre, else: new_genre), new_mode, 1)
+    end)
+  end
+
+  defp add(distribution, genre, mode, n) do
+    genre = to_string(genre || "none")
+    mode = to_string(mode || "none")
+    modes = distribution |> Map.get(genre, %{}) |> Map.update(mode, n, &(&1 + n))
+    modes = if modes[mode] == 0, do: Map.delete(modes, mode), else: modes
+
+    if modes == %{}, do: Map.delete(distribution, genre), else: Map.put(distribution, genre, modes)
+  end
+
   @doc "Counts `{from, to}` transitions for mode and for genre."
   @spec summarize([change()]) :: %{mode: map(), genre: map()}
   def summarize(changes) do

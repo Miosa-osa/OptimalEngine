@@ -14,6 +14,7 @@ defmodule OptimalEngine.API.ViabilityAPI do
   | `POST /api/viability/audit/:id/review {workspace, decision, note}` | write |
   | `GET /api/signal-events?workspace=&kind=`, `POST /api/signal-events` | read, write |
   | `POST /api/signals/check {draft, receiver, genre, type, workspace}` (pre-send check) | write |
+  | `GET /api/signals/classification?workspace=&plan=` (counts by genre and mode) | read |
   | `GET /api/agent-actions?workspace=`, `GET /api/agent-actions/:id?workspace=` | read |
   | `POST /api/agent-actions` (stages approval and denial need `authority:enforce`) | write |
 
@@ -25,7 +26,7 @@ defmodule OptimalEngine.API.ViabilityAPI do
 
   alias OptimalEngine.API.{Actor, OperatingAPI}
   alias OptimalEngine.Authority.ActionChain
-  alias OptimalEngine.Signal.PreSend
+  alias OptimalEngine.Signal.{PreSend, Reclassifier}
   alias OptimalEngine.Store
   alias OptimalEngine.Viability
   alias OptimalEngine.Viability.{Audit, Metrics, SignalEvents}
@@ -175,6 +176,48 @@ defmodule OptimalEngine.API.ViabilityAPI do
       _ ->
         error(conn, 400, "draft is required")
     end
+  end
+
+  # -- classification ------------------------------------------------------------
+
+  # Counts only: how the workspace's stored Signals are classified by genre
+  # and mode, and with plan=true how re-running classification would
+  # classify them (`OptimalEngine.Signal.Reclassifier.plan/1`), without
+  # writing. No content, title, or id leaves the Engine.
+  def classification(conn) do
+    conn = fetch_query_params(conn)
+    workspace_id = workspace(conn)
+    stored = Reclassifier.distribution(workspace_id)
+    result = %{workspace_id: workspace_id, signals: total(stored), stored: stored}
+
+    if conn.query_params["plan"] in ["true", "1"] do
+      {:ok, %{scanned: scanned, changes: changes}} = Reclassifier.plan(workspace_id)
+      summary = Reclassifier.summarize(changes)
+
+      plan = %{
+        scanned: scanned,
+        changes: length(changes),
+        planned: Reclassifier.apply_to_distribution(stored, changes),
+        planned_modes_by_stored_genre:
+          Reclassifier.apply_to_distribution(stored, changes, keep_genre: true),
+        mode_transitions: transitions(summary.mode),
+        genre_transitions: transitions(summary.genre)
+      }
+
+      json(conn, 200, Map.put(result, :plan, plan))
+    else
+      json(conn, 200, result)
+    end
+  end
+
+  defp total(distribution) do
+    distribution |> Map.values() |> Enum.flat_map(&Map.values/1) |> Enum.sum()
+  end
+
+  defp transitions(counts) do
+    counts
+    |> Enum.map(fn {{from, to}, count} -> %{from: from, to: to, count: count} end)
+    |> Enum.sort_by(&(-&1.count))
   end
 
   # -- agent action chains -------------------------------------------------------

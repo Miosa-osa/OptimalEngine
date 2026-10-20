@@ -220,7 +220,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @doc """
   Resolves an `optimal://<workspace>/...` address: `{:local, uri}` when this
   Engine serves it, `{:moved, location}` when the workspace moved, or
-  `{:error, :not_found}`.
+  `{:error, :not_found}`. An address written with a slug the workspace holds
+  now or held before a rename resolves locally to the address by its id.
   """
   @spec resolve(String.t(), String.t()) :: {:local, String.t()} | {:moved, map()} | {:error, atom()}
   def resolve(tenant_id, "optimal://" <> rest = uri) do
@@ -241,12 +242,22 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       _ ->
         case Workspace.get(workspace_id) do
           {:ok, %{tenant_id: ^tenant_id}} -> {:local, uri}
+          {:error, :not_found} -> resolve_handle(tenant_id, workspace_id, path)
           _ -> {:error, :not_found}
         end
     end
   end
 
   def resolve(_tenant_id, _uri), do: {:error, :invalid_uri}
+
+  defp resolve_handle(tenant_id, handle, path) do
+    with [^tenant_id, slug] <- String.split(handle, ":", parts: 2),
+         {:ok, workspace} <- Workspace.get_by_handle(slug, tenant_id) do
+      {:local, "optimal://" <> Enum.join([workspace.id | path], "/")}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # Export
