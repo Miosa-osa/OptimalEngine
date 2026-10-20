@@ -715,7 +715,10 @@ defmodule OptimalEngine.SyncGateTest do
 
   describe "the lineage map" do
     test "classifies every table the Engine replicates" do
-      unclassified = Capture.eligible_tables() -- Lineage.tables()
+      replicated = replicated_tables()
+      assert replicated != []
+
+      unclassified = replicated -- Lineage.tables()
 
       assert unclassified == [],
              "classify #{inspect(unclassified)} in OptimalEngine.Sync.Lineage before they replicate"
@@ -782,6 +785,17 @@ defmodule OptimalEngine.SyncGateTest do
     if next_after > after_sequence and length(acc) < 500,
       do: read_ledger(ws, next_after, limit, acc),
       else: {acc, next_after}
+  end
+
+  # Whatever set the Engine replicates: the allow-list when Capture has one,
+  # else every table it captures. The map is checked against that set, never
+  # against a count.
+  defp replicated_tables do
+    Code.ensure_loaded!(Capture)
+
+    if function_exported?(Capture, :replicated_tables, 0),
+      do: apply(Capture, :replicated_tables, []),
+      else: Capture.eligible_tables()
   end
 
   defp ref_targets(spec) do
