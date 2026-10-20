@@ -218,9 +218,10 @@ defmodule OptimalEngine.API.ViabilityAPI do
     json(conn, 200, Map.put(result, :plan, plan))
   end
 
-  # The Store did not answer: a busy Store is retryable, anything else is
-  # reported without the exception.
-  defp store_error(conn, reason) do
+  @doc false
+  # The Store did not answer: a busy or locked Store is retryable (503 with
+  # Retry-After), anything else is reported without the failure's text.
+  def store_error(conn, reason) do
     if busy?(reason) do
       conn
       |> put_resp_header("retry-after", "1")
@@ -230,8 +231,11 @@ defmodule OptimalEngine.API.ViabilityAPI do
     end
   end
 
+  # What the Store gives back: `:busy` from a call that timed out, or the
+  # SQLite driver's reason, a string such as "database is locked".
   defp busy?(:busy), do: true
   defp busy?(:timeout), do: true
+  defp busy?(reason) when is_binary(reason), do: reason =~ ~r/busy|locked/i
   defp busy?(%{message: message}) when is_binary(message), do: message =~ ~r/busy|locked/i
   defp busy?(_reason), do: false
 

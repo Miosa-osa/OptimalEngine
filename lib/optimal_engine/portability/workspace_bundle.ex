@@ -250,10 +250,13 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   def resolve(_tenant_id, _uri), do: {:error, :invalid_uri}
 
+  # An address written with a slug names the workspace by its id, which is
+  # then resolved as any address by id is: a workspace that moved answers
+  # `{:moved, location}`, not local.
   defp resolve_handle(tenant_id, handle, path) do
     with [^tenant_id, slug] <- String.split(handle, ":", parts: 2),
          {:ok, workspace} <- Workspace.get_by_handle(slug, tenant_id) do
-      {:local, "optimal://" <> Enum.join([workspace.id | path], "/")}
+      resolve(tenant_id, "optimal://" <> Enum.join([workspace.id | path], "/"))
     else
       _ -> {:error, :not_found}
     end

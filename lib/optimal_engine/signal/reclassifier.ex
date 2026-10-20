@@ -69,7 +69,7 @@ defmodule OptimalEngine.Signal.Reclassifier do
   Options: `:tenant_id` (only that tenant's signals), `:batch_size`.
 
   Returns `{:ok, %{scanned: n, changes: [change]}}`, or `{:error, reason}`
-  when the Store does not answer.
+  when the Store does not answer (`:busy` when it did not in time).
   """
   @spec plan(String.t(), keyword()) ::
           {:ok, %{scanned: non_neg_integer(), changes: [change()]}} | {:error, term()}
@@ -106,13 +106,21 @@ defmodule OptimalEngine.Signal.Reclassifier do
     {where, params} = scope(workspace_id, opts[:tenant_id])
 
     with {:ok, rows} <-
-           Store.raw_query(
+           query(
              "SELECT genre, mode, COUNT(*) FROM contexts WHERE #{where} GROUP BY genre, mode",
              params
            ) do
       {:ok,
        Enum.reduce(rows, %{}, fn [genre, mode, count], acc -> add(acc, genre, mode, count) end)}
     end
+  end
+
+  # A Store that does not answer within its call timeout is busy, not a crash
+  # (as in `Retrieval.Search`): the caller may retry.
+  defp query(sql, params) do
+    Store.raw_query(sql, params)
+  catch
+    :exit, {:timeout, _} -> {:error, :busy}
   end
 
   # The signals of one workspace, and of one tenant when it is given:
@@ -192,7 +200,7 @@ defmodule OptimalEngine.Signal.Reclassifier do
   defp scan({where, params} = scope, after_id, batch_size, acc) do
     next = length(params) + 1
 
-    case Store.raw_query(
+    case query(
            """
            SELECT id, content, mode, genre, path, l0_abstract
            FROM contexts

@@ -162,6 +162,100 @@ defmodule OptimalEngine.API.WorkspaceRenameTest do
     assert entry["subject"] == renamer
     assert entry["detail"]["from"] == slug
     assert entry["detail"]["to"] == renamed
+    assert :ok = Evidence.verify_one("default", entry)
+  end
+
+  test "the evidence names the authority the renamer held, never admin it did not", %{
+    workspace: workspace,
+    slug: slug,
+    renamed: renamed,
+    n: n
+  } do
+    # A key that can change topology but is not an administrator.
+    scoped = key("user:scoped-#{n}", ["read", "topology:write"], [workspace.id])
+    assert {200, _} = rename(workspace, renamed, scoped)
+
+    # An unrestricted key, and an anonymous local caller.
+    {:ok, other} = Workspace.create(%{slug: "rename-star-#{n}", name: "Star"})
+    unrestricted = key("user:star-#{n}", ["*"], ["*"])
+    assert {200, _} = rename(other, "rename-star-new-#{n}", unrestricted)
+    {:ok, local} = Workspace.create(%{slug: "rename-local-#{n}", name: "Local"})
+    assert {200, _} = rename(local, "rename-local-new-#{n}")
+
+    entries = Evidence.list("default", kind: "workspace.renamed")
+    entry_for = fn workspace -> Enum.find(entries, &(&1["workspace_id"] == workspace.id)) end
+
+    scoped_entry = entry_for.(workspace)
+    assert scoped_entry["detail"]["from"] == slug
+    assert scoped_entry["action"] == "write"
+    assert scoped_entry["detail"]["authority"] == ["read", "topology:write"]
+    refute "admin" in scoped_entry["detail"]["authority"]
+
+    assert entry_for.(other)["detail"]["authority"] == ["*"]
+    assert entry_for.(local)["detail"]["authority"] == ["local"]
+    assert entry_for.(local)["subject"] == "local:operator"
+  end
+
+  test "a workspace with no handle row keeps its old slug when it is renamed", %{n: n} do
+    # A workspace written without going through Workspace.create.
+    id = "default:nohandle-#{n}"
+    old = "nohandle-#{n}"
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO workspaces (id, tenant_id, slug, name, status, metadata) VALUES (?1, 'default', ?2, 'No handle', 'active', '{}')",
+        [id, old]
+      )
+
+    assert Workspace.handles(id) == []
+    assert {:ok, %{slug: new}} = Workspace.update(id, %{slug: "nohandle-new-#{n}"})
+
+    assert Enum.sort(Workspace.handles(id)) == Enum.sort([old, new])
+    assert {:ok, %{id: ^id}} = Workspace.get_by_handle(old, "default")
+    assert {:error, :slug_taken} = Workspace.create(%{slug: old, name: "Taker"})
+  end
+
+  test "a handle only names a workspace of its own tenant", %{n: n} do
+    other_tenant = "rename-foreign-#{n}"
+    {:ok, _} = OptimalEngine.Tenancy.Tenant.create(%{id: other_tenant, name: "Foreign #{n}"})
+
+    {:ok, foreign} =
+      Workspace.create(%{
+        tenant_id: other_tenant,
+        organization_id: OptimalEngine.Organization.default_for(other_tenant),
+        slug: "foreign",
+        name: "Foreign"
+      })
+
+    # A handle row that points across tenants (it cannot be written through
+    # the API) names nothing.
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO workspace_handles (tenant_id, slug, workspace_id) VALUES ('default', ?1, ?2)",
+        ["crossed-#{n}", foreign.id]
+      )
+
+    assert {:error, :not_found} = Workspace.get_by_handle("crossed-#{n}", "default")
+    assert {:ok, %{id: id}} = Workspace.get_by_handle("foreign", other_tenant)
+    assert id == foreign.id
+  end
+
+  test "create refuses a slug that is not lowercase letters, digits and dashes", %{n: n} do
+    for bad <- ["Not A Slug", "UPPER-#{n}", "under_score-#{n}", "dot.ted-#{n}", "-lead-#{n}", ""] do
+      assert {:error, :invalid_slug} = Workspace.create(%{slug: bad, name: "Bad"}),
+             "#{inspect(bad)} should be refused"
+
+      assert {:error, :not_found} = Workspace.get_by_slug(bad, "default")
+    end
+
+    too_long = String.duplicate("a", 129)
+    assert {:error, :invalid_slug} = Workspace.create(%{slug: too_long, name: "Long"})
+
+    assert {400, %{"error" => "invalid_slug"}} =
+             request(:post, "/api/workspaces", %{slug: "Bad Slug #{n}", name: "Bad"})
+
+    fine = "fine-slug-#{n}"
+    assert {:ok, %{slug: ^fine}} = Workspace.create(%{slug: fine, name: "Fine"})
   end
 
   test "a rename onto a slug whose id already holds rows is refused", %{

@@ -17,9 +17,10 @@
 #       Sends GET requests only and names the tenant and workspace it read;
 #       everything else it prints is counts, dates, metric values and
 #       booleans, never content, titles, names, emails or keys. For an
-#       owner's private Engine. Boot is read only with BOOT=1, and then with
-#       generate=false, so today's rhythm note is not written (an Engine
-#       older than that option still writes it).
+#       owner's private Engine. Boot is read only with BOOT=1, with
+#       generate=false, and only from an Engine whose /api/version lists
+#       boot_generate_option, so today's rhythm note is never written (an
+#       Engine without the option would write it, so boot is skipped there).
 #       GET /api/signals/classification?plan=true reads every Signal of the
 #       workspace (CLASSIFY_PLAN=0 skips that).
 #

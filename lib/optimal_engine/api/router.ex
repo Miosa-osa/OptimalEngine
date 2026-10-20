@@ -1490,6 +1490,9 @@ defmodule OptimalEngine.API.Router do
             |> put_resp_content_type("application/json")
             |> send_resp(201, Jason.encode!(workspace_to_map(ws)))
 
+          {:error, :invalid_slug} ->
+            send_resp(conn, 400, Jason.encode!(%{error: "invalid_slug"}))
+
           {:error, reason} when reason in [:slug_taken, :slug_reserved] ->
             send_resp(conn, 409, Jason.encode!(%{error: Atom.to_string(reason)}))
 
@@ -1529,7 +1532,10 @@ defmodule OptimalEngine.API.Router do
 
     result =
       with {:ok, workspace} <-
-             OptimalEngine.Workspace.update(id, attrs, actor: Actor.of(conn, body)) do
+             OptimalEngine.Workspace.update(id, attrs,
+               actor: Actor.of(conn, body),
+               authority: grants(conn)
+             ) do
         case Map.get(body, "organization") do
           organization_id when is_binary(organization_id) ->
             OptimalEngine.Workspace.assign_organization(workspace.id, organization_id)
@@ -4179,6 +4185,15 @@ defmodule OptimalEngine.API.Router do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, val), do: Map.put(map, key, val)
+
+  # What a request acts under, for records of who did what: its key's scopes,
+  # or "local" for an anonymous local caller.
+  defp grants(conn) do
+    case conn.assigns[:current_api_key] do
+      %{scopes: scopes} when is_list(scopes) -> scopes
+      _ -> ["local"]
+    end
+  end
 
   # Coerce an arbitrary metadata value from the request body into a string-keyed map.
   defp coerce_metadata(nil), do: %{}

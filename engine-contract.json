@@ -10,6 +10,7 @@
     "scoped_memory_retrieval",
     "chat_session_commit",
     "org_policy_flow_down",
-    "connector_registry_api"
+    "connector_registry_api",
+    "boot_generate_option"
   ]
 }

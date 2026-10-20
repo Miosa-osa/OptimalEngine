@@ -13,8 +13,9 @@ Modes:
              line names the tenant and the workspace it read; the rest is
              counts, dates, metric values, booleans and Engine-defined
              labels, never content, titles, names, emails or keys. For an
-             owner's private Engine. Boot is read only with BOOT=1, and
-             then with generate=false, so the run writes nothing.
+             owner's private Engine. Boot is read only with BOOT=1, with
+             generate=false, and only from an Engine whose /api/version
+             lists boot_generate_option, so the run writes nothing.
 
 Environment:
   ENGINE_URL        the Engine
@@ -22,7 +23,7 @@ Environment:
   WORKSPACE         the workspace read-only mode reports on
   PROOF_FRESH       1 when the wrapper started this Engine on an empty store
   CLASSIFY_PLAN     0 skips the re-run classification plan in read-only mode
-  BOOT              1 adds GET /api/boot?generate=false in read-only mode
+  BOOT              1 adds GET /api/boot?generate=false in read-only mode, if the Engine supports it
   KEEP              1 leaves the proof's workspaces active and its keys valid
 
 Exit: 0 when every check passed or was skipped, 1 when one failed, 2 when
@@ -110,6 +111,7 @@ class Engine:
         self.key = key or None
         self.read_only = read_only
         self.sent = {}
+        self.capabilities = set()
 
     def call(self, method, path, body=None, query=None, key="own", timeout=120):
         if self.read_only and method != "GET":
@@ -147,6 +149,9 @@ class Engine:
 
 
 RESULTS = []
+
+# Listed by `GET /api/version` on an Engine whose boot takes `generate=false`.
+BOOT_CAPABILITY = "boot_generate_option"
 
 
 def report(check_id, outcome, facts):
@@ -1199,7 +1204,13 @@ def read_only_checks(engine, ws, prefix="", plan=True, tenant=None):
         report(prefix + check_id, outcome, dict({"tenant": tenant, "workspace": ws}, **facts))
 
     def wo41_2():
-        facts = boot_and_brief(engine, ws, boot=os.environ.get("BOOT") == "1")
+        # An Engine without the option would write today's rhythm note when
+        # asked for boot, so boot is read only from one that lists it.
+        wanted = os.environ.get("BOOT") == "1"
+        boot = wanted and BOOT_CAPABILITY in engine.capabilities
+        facts = boot_and_brief(engine, ws, boot=boot)
+        if wanted and not boot:
+            facts["boot"] = "not read: this Engine does not list %s, so GET /api/boot would write the note" % BOOT_CAPABILITY
         ok = (
             facts["date_is_today"]
             and facts["open_loops"] > 0
@@ -1303,6 +1314,7 @@ def main():
             status, version = engine.call("GET", "/api/version")
             if status in (401, 403):
                 raise Unreachable("the Engine refused the key (%s)" % status)
+            engine.capabilities = set((version or {}).get("capabilities") or [])
             status, me = engine.call("GET", "/api/auth/whoami")
             tenant = (me or {}).get("tenant_id") if status == 200 else "unknown"
             print(

@@ -92,24 +92,6 @@ defmodule OptimalEngine.Workspace.Filesystem do
     end
   end
 
-  @doc """
-  Returns the on-disk path for a wiki slug inside a workspace.
-  e.g. `wiki_path(root, "engineering", "core-platform-architecture")`
-  → `<root>/engineering/.wiki/core-platform-architecture.md`
-  """
-  @spec wiki_path(String.t(), String.t(), String.t()) :: String.t()
-  def wiki_path(root, workspace_slug, slug) do
-    Path.join([path(root, workspace_slug), ".wiki", "#{slug}.md"])
-  end
-
-  @doc """
-  Returns the signals directory for a node inside a workspace.
-  """
-  @spec node_signals_path(String.t(), String.t(), String.t()) :: String.t()
-  def node_signals_path(root, workspace_slug, node_slug) do
-    Path.join([path(root, workspace_slug), "nodes", node_slug, "signals"])
-  end
-
   # ── Helpers ─────────────────────────────────────────────────────────────
 
   defp maybe_write_schema(workspace_path, slug) do

@@ -23,6 +23,7 @@ defmodule OptimalEngine.Workspace do
   tables created in migration 026.
   """
 
+  alias OptimalEngine.Authority.{Evidence, Keys}
   alias OptimalEngine.Store
   alias OptimalEngine.Organization
   alias OptimalEngine.Tenancy.Tenant
@@ -38,6 +39,17 @@ defmodule OptimalEngine.Workspace do
   # Tables whose rows a workspace record owns rather than names; the check
   # for rows under an unregistered id skips them.
   @own_tables ~w(workspaces workspace_handles)
+  # The tables that check reads: those with an index that starts at
+  # workspace_id, so asking one for one id is an index lookup, never a scan.
+  @indexed_by_workspace """
+  SELECT m.name FROM sqlite_master m
+  WHERE m.type = 'table' AND m.sql NOT LIKE 'CREATE VIRTUAL TABLE%'
+    AND EXISTS (
+      SELECT 1 FROM pragma_index_list(m.name) il
+      JOIN pragma_index_info(il.name) ii
+      WHERE ii.seqno = 0 AND ii.name = 'workspace_id'
+    )
+  """
   @allowed_roles [:owner, :member, :viewer]
 
   @type status :: :active | :archived
@@ -113,7 +125,7 @@ defmodule OptimalEngine.Workspace do
       {:error, :not_found} ->
         case Store.raw_query(
                select_sql() <>
-                 " WHERE id = (SELECT workspace_id FROM workspace_handles WHERE tenant_id = ?1 AND slug = ?2)",
+                 " WHERE tenant_id = ?1 AND id = (SELECT workspace_id FROM workspace_handles WHERE tenant_id = ?1 AND slug = ?2)",
                [tenant_id, slug]
              ) do
           {:ok, [row]} -> {:ok, row_to_struct(row)}
@@ -200,7 +212,8 @@ defmodule OptimalEngine.Workspace do
   (defaults to default tenant), `description`, `metadata`. Slug becomes
   part of the id (`tenant_id:slug` for non-default tenants, plain
   `default` for the singleton default-tenant default-workspace case).
-  Errors: `:slug_taken`, `:slug_reserved`.
+  A slug is lowercase letters, digits and dashes (`check_slug/1`).
+  Errors: `:invalid_slug`, `:slug_reserved`, `:slug_taken`.
   """
   @spec create(map()) :: {:ok, t()} | {:error, term()}
   def create(%{slug: slug, name: name} = attrs) when is_binary(slug) and is_binary(name) do
@@ -217,9 +230,9 @@ defmodule OptimalEngine.Workspace do
 
     params = [id, tenant_id, organization_id, slug, name, description, Jason.encode!(metadata)]
 
-    with {:ok, organization} <- Organization.get(organization_id),
+    with :ok <- check_slug(slug),
+         {:ok, organization} <- Organization.get(organization_id),
          true <- organization.tenant_id == tenant_id || {:error, :organization_tenant_mismatch},
-         :ok <- not_reserved(slug),
          {:ok, _} <- insert_unless_taken(tenant_id, slug, id, sql, params) do
       root = Application.get_env(:optimal_engine, :root_path, File.cwd!())
 
@@ -268,11 +281,20 @@ defmodule OptimalEngine.Workspace do
   A new slug renames the workspace without moving it: the id stays, so every
   row, file, key, and `optimal://` link that names the id keeps working. The
   slug it replaces stays this workspace's handle (`workspace_handles`,
-  `get_by_handle/2`), so no other workspace can take it. A slug whose
-  derived id already holds rows (written to that id before it was
-  registered) is refused, so a rename never adopts them. Every rename is
-  recorded in the authority evidence chain (`workspace.renamed`) with the
-  actor given as `opts[:actor]`.
+  `get_by_handle/2`), so no other workspace can take it, even when the
+  workspace had no handle row yet. A slug whose derived id already holds rows
+  (written to that id before it was registered) is refused, so a rename never
+  adopts them; the check reads the tables indexed by workspace, which hold
+  the documents, chunks, memories, nodes, and wiki.
+
+  Every rename is recorded in the authority evidence chain
+  (`workspace.renamed`) in the same transaction as the rename, so one never
+  commits without the other. An Engine that cannot sign evidence (no evidence
+  key) still renames and logs a warning.
+
+  Options for the rename's record: `:actor` (who renamed it) and `:authority`
+  (the grants they acted under, a list of strings; the API passes the key's
+  scopes, or `["local"]` for an anonymous local caller).
   Errors: `:invalid_slug`, `:slug_reserved`, `:slug_taken`, `:slug_has_data`,
   `:default_workspace_slug`.
   """
@@ -288,28 +310,30 @@ defmodule OptimalEngine.Workspace do
           slug: slug
       }
 
-      with {:ok, _} <- write_unless_taken(current, updated) do
-        if slug != current.slug, do: record_rename(current, slug, opts[:actor])
-        {:ok, updated}
-      end
+      with {:ok, _} <- write_unless_taken(current, updated, opts), do: {:ok, updated}
     end
   end
 
   defp next_slug(current, nil), do: {:ok, current.slug}
   defp next_slug(%{slug: slug}, slug), do: {:ok, slug}
 
-  defp next_slug(current, slug) do
-    cond do
-      current.id == @default_id -> {:error, :default_workspace_slug}
-      not (is_binary(slug) and Regex.match?(@slug_format, slug)) -> {:error, :invalid_slug}
-      true -> with :ok <- not_reserved(slug), do: {:ok, slug}
-    end
-  end
+  defp next_slug(%{id: @default_id}, _slug), do: {:error, :default_workspace_slug}
+  defp next_slug(_current, slug), do: with(:ok <- check_slug(slug), do: {:ok, slug})
 
-  # A default-tenant workspace lives in `<root>/<slug>` beside the root's own
-  # directories, so a slug may never name one of them.
-  defp not_reserved(slug) do
-    if slug in Filesystem.reserved_names(), do: {:error, :slug_reserved}, else: :ok
+  @doc """
+  Checks a slug for use as a workspace's handle: lowercase letters, digits
+  and dashes, at most 128 characters, starting with a letter or digit
+  (`{:error, :invalid_slug}`), and not the name of one of the engine root's
+  own directories (`{:error, :slug_reserved}`): a default-tenant workspace
+  lives in `<root>/<slug>` beside them.
+  """
+  @spec check_slug(term()) :: :ok | {:error, :invalid_slug | :slug_reserved}
+  def check_slug(slug) do
+    cond do
+      not (is_binary(slug) and Regex.match?(@slug_format, slug)) -> {:error, :invalid_slug}
+      slug in Filesystem.reserved_names() -> {:error, :slug_reserved}
+      true -> :ok
+    end
   end
 
   # Each conflict check runs in one Store transaction with its write, so two
@@ -325,35 +349,56 @@ defmodule OptimalEngine.Workspace do
     end)
   end
 
-  defp write_unless_taken(current, updated) do
+  defp write_unless_taken(current, updated, opts) do
     tenant_id = current.tenant_id
-    derived_id = derive_id(tenant_id, updated.slug)
     renamed? = updated.slug != current.slug
+    # Fetched before the transaction opens: creating a key writes to the Store.
+    evidence_key = if renamed?, do: evidence_key(current)
 
     Store.transaction(fn txn ->
-      cond do
-        renamed? and handle_taken?(txn, tenant_id, updated.slug, derived_id, current.id) ->
-          {:error, :slug_taken}
-
-        renamed? and derived_id != current.id and rows_under?(txn, derived_id) ->
-          {:error, :slug_has_data}
-
-        true ->
-          with {:ok, _} <-
-                 Store.txn_execute(
-                   txn,
-                   "UPDATE workspaces SET name = ?1, description = ?2, metadata = ?3, slug = ?4 WHERE id = ?5",
-                   [
-                     updated.name,
-                     updated.description,
-                     Jason.encode!(updated.metadata),
-                     updated.slug,
-                     current.id
-                   ]
-                 ),
-               do: add_handle(txn, tenant_id, updated.slug, current.id)
+      with :ok <- if(renamed?, do: check_target(txn, current, updated), else: :ok),
+           {:ok, _} <-
+             Store.txn_execute(
+               txn,
+               "UPDATE workspaces SET name = ?1, description = ?2, metadata = ?3, slug = ?4 WHERE id = ?5",
+               [
+                 updated.name,
+                 updated.description,
+                 Jason.encode!(updated.metadata),
+                 updated.slug,
+                 current.id
+               ]
+             ),
+           # The slug it leaves stays its handle even if no row held it yet.
+           {:ok, _} <- add_handle(txn, tenant_id, current.slug, current.id),
+           {:ok, _} <- add_handle(txn, tenant_id, updated.slug, current.id),
+           :ok <-
+             if(renamed?, do: record_rename(txn, evidence_key, current, updated, opts), else: :ok) do
+        {:ok, :written}
       end
     end)
+  end
+
+  # A rename needs a slug no other workspace holds, and an id that holds no
+  # rows of its own.
+  defp check_target(txn, current, updated) do
+    tenant_id = current.tenant_id
+    derived_id = derive_id(tenant_id, updated.slug)
+
+    cond do
+      handle_taken?(txn, tenant_id, updated.slug, derived_id, current.id) ->
+        {:error, :slug_taken}
+
+      derived_id == current.id ->
+        :ok
+
+      true ->
+        case rows_under(txn, derived_id) do
+          {:ok, false} -> :ok
+          {:ok, true} -> {:error, :slug_has_data}
+          {:error, _reason} = error -> error
+        end
+    end
   end
 
   defp add_handle(txn, tenant_id, slug, id) do
@@ -384,57 +429,62 @@ defmodule OptimalEngine.Workspace do
 
   # Writes to an unregistered "<tenant>:<slug>" id are allowed, so an id can
   # hold rows before any workspace has it. A rename onto that slug would
-  # strand them behind the renamed workspace's handle.
-  defp rows_under?(txn, workspace_id) do
-    {:ok, tables} =
-      Store.txn_query(
-        txn,
-        """
-        SELECT m.name FROM sqlite_master m
-        WHERE m.type = 'table' AND m.sql NOT LIKE 'CREATE VIRTUAL TABLE%'
-          AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) c WHERE c.name = 'workspace_id')
-        """,
-        []
-      )
-
-    tables
-    |> List.flatten()
-    |> Enum.reject(&(&1 in @own_tables))
-    |> Enum.any?(fn table ->
-      match?(
-        {:ok, [_ | _]},
-        Store.txn_query(
-          txn,
-          ~s(SELECT 1 FROM "#{table}" WHERE workspace_id = ?1 LIMIT 1),
-          [workspace_id]
-        )
-      )
-    end)
+  # strand them behind the renamed workspace's handle. Only the tables
+  # indexed by workspace are asked (@indexed_by_workspace), each by one index
+  # lookup, so the check stays short while it holds the Store's one writer.
+  defp rows_under(txn, workspace_id) do
+    with {:ok, tables} <- Store.txn_query(txn, @indexed_by_workspace, []) do
+      tables
+      |> List.flatten()
+      |> Enum.reject(&(&1 in @own_tables))
+      |> Enum.reduce_while({:ok, false}, fn table, _found ->
+        case Store.txn_query(txn, ~s(SELECT 1 FROM "#{table}" WHERE workspace_id = ?1 LIMIT 1), [
+               workspace_id
+             ]) do
+          {:ok, [_ | _]} -> {:halt, {:ok, true}}
+          {:ok, []} -> {:cont, {:ok, false}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+    end
   end
 
-  defp record_rename(current, slug, actor) do
-    actor = actor || "system:engine"
-
-    case OptimalEngine.Authority.Evidence.append(current.tenant_id, "workspace.renamed", %{
-           subject: actor,
-           action: "admin",
-           resource: "optimal://#{current.id}",
-           workspace_id: current.id,
-           detail: %{"from" => current.slug, "to" => slug, "by" => actor}
-         }) do
-      {:ok, _entry} ->
-        :ok
+  defp evidence_key(workspace) do
+    case Keys.active(workspace.tenant_id, "evidence") do
+      {:ok, key} ->
+        key
 
       {:error, reason} ->
         Logger.warning(
-          "[Workspace] rename of #{current.id} not recorded as evidence: #{inspect(reason)}"
+          "[Workspace] rename of #{workspace.id} will not be recorded as evidence: #{inspect(reason)}"
         )
+
+        nil
     end
-  rescue
-    error ->
-      Logger.warning(
-        "[Workspace] rename of #{current.id} not recorded as evidence: #{Exception.message(error)}"
-      )
+  end
+
+  defp record_rename(_txn, nil, _current, _updated, _opts), do: :ok
+
+  defp record_rename(txn, key, current, updated, opts) do
+    actor = opts[:actor] || "system:engine"
+
+    # The action is the one the Authority plug names for this route (a PATCH
+    # is a write); what the caller actually held is in the detail.
+    {:ok, _entry} =
+      Evidence.append_in(txn, key, current.tenant_id, "workspace.renamed", %{
+        subject: actor,
+        action: "write",
+        resource: "optimal://#{current.id}",
+        workspace_id: current.id,
+        detail: %{
+          "from" => current.slug,
+          "to" => updated.slug,
+          "by" => actor,
+          "authority" => opts[:authority] || ["system"]
+        }
+      })
+
+    :ok
   end
 
   @doc "Moves a workspace to another organization in the same tenant."

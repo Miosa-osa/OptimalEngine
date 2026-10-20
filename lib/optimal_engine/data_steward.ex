@@ -17,6 +17,13 @@ defmodule OptimalEngine.DataSteward do
 
   @default_limit 100
 
+  # Tables a change of workspace id does not re-key. `workspaces` is the
+  # record being replaced, and the handles move by their own step.
+  # `authority_evidence` is hashed and signed over the workspace id each entry
+  # names, so a rewritten row no longer verifies: an entry keeps the id the
+  # workspace had when it was written.
+  @not_rekeyed ~w(workspaces workspace_handles authority_evidence)
+
   def dashboard(workspace_id, opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
@@ -281,6 +288,14 @@ defmodule OptimalEngine.DataSteward do
                ),
              {:ok, results} <-
                rename_tables(txn, tables, source_workspace_id, target_workspace_id),
+             # Every slug the workspace holds goes with it; deleting the old
+             # record would otherwise delete them (workspace_handles cascades).
+             {:ok, handles_moved} <-
+               Store.txn_execute(
+                 txn,
+                 "UPDATE workspace_handles SET workspace_id=?1 WHERE workspace_id=?2",
+                 [target_workspace_id, source_workspace_id]
+               ),
              {:ok, _} <-
                Store.txn_execute(txn, "DELETE FROM workspaces WHERE id=?1", [source_workspace_id]) do
           {:ok,
@@ -288,7 +303,8 @@ defmodule OptimalEngine.DataSteward do
              source_workspace_id: source_workspace_id,
              target_workspace_id: target_workspace_id,
              actor_id: actor_id,
-             tables: results
+             tables: results,
+             handles_moved: handles_moved
            }}
         end
       end)
@@ -452,7 +468,7 @@ defmodule OptimalEngine.DataSteward do
               false
           end
         end)
-        |> Enum.reject(&(&1 == "workspaces"))
+        |> Enum.reject(&(&1 in @not_rekeyed))
 
       {:ok, tables}
     end
