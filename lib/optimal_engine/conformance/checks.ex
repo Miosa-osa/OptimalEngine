@@ -263,6 +263,12 @@ defmodule OptimalEngine.Conformance.Checks do
             {:ok, %{status: 201, body: %{"id" => id, "key" => key}}} ->
               scoped = Client.new(url: context.url, key: key, transport: context.transport)
 
+              minted_scopes =
+                case Client.get(scoped, "/api/auth/whoami") do
+                  {:ok, %{body: %{"scopes" => scopes}}} -> scopes
+                  _ -> nil
+                end
+
               allowed =
                 Client.get(scoped, "/api/search",
                   query: [q: context.run_id, workspace: context.primary, limit: 1]
@@ -276,14 +282,22 @@ defmodule OptimalEngine.Conformance.Checks do
               revocation = Client.delete(client, "/api/auth/keys/#{id}")
 
               evidence = %{
-                minted_scopes: ["read"],
                 minted_workspace_scope: [context.primary],
+                minted_scopes: minted_scopes,
                 own_workspace: describe_search(allowed),
                 other_workspace: describe(denied),
                 revocation: describe(revocation)
               }
 
               cond do
+                minted_scopes != ["read"] ->
+                  {:fail,
+                   Map.put(
+                     evidence,
+                     :expectation,
+                     "the minted key reports scopes [\"read\"], got #{inspect(minted_scopes)}"
+                   )}
+
                 not ok_status?(allowed, 200) ->
                   {:fail,
                    Map.put(
