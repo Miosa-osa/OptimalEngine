@@ -8,9 +8,13 @@ defmodule OptimalEngine.API.Reference do
   `mix optimal.api.reference --check` fails when `docs/reference/api.md` is
   stale, and conformance runs the same check.
 
-  Only the route table is generated. Scope rules stay in
-  `OptimalEngine.API.PermissionPlug`, which is the code that enforces them.
+  Each route is classified by the code that enforces it: the operation
+  grant from `OptimalEngine.API.PermissionPlug.grant_label/2` and the
+  workspace scope from `OptimalEngine.API.WorkspaceAuthPlug.workspace_scoped?/1`,
+  so a classification cannot drift from enforcement either.
   """
+
+  alias OptimalEngine.API.{PermissionPlug, WorkspaceAuthPlug}
 
   @main_router "lib/optimal_engine/api/router.ex"
   @output "docs/reference/api.md"
@@ -68,7 +72,9 @@ defmodule OptimalEngine.API.Reference do
         methods =
           routes_for_path |> Enum.map(& &1.method) |> Enum.sort_by(&Map.get(@method_order, &1, 9))
 
-        "| #{Enum.join(methods, ", ")} | `#{route.path}` | #{route.router} |"
+        %{grant: grant, workspace: workspace} = classify(route.path, methods)
+
+        "| #{Enum.join(methods, ", ")} | `#{route.path}` | #{route.router} | #{grant} | #{workspace} |"
       end)
 
     """
@@ -79,14 +85,41 @@ defmodule OptimalEngine.API.Reference do
 
     Every route below is served under `/api`.
     A request carries `Authorization: Bearer oe_<id>_<secret>` unless the Engine runs with `OPTIMAL_AUTH_REQUIRED=false`.
+    With `OPTIMAL_AUTH_REQUIRED=true` every route refuses a request without a valid key, health and version included.
     Authentication, workspace scope, and operation grants are enforced by `OptimalEngine.API.PermissionPlug`; `read` and `write` cover ordinary operations, while administration, app-data schema changes, claim review, and authority operations require their own grant.
+
+    Grant is the operation grant the key needs (alternatives joined by `or`), read from `OptimalEngine.API.PermissionPlug`.
+    Workspace is `workspace` when the route is authorized for the workspaces it names (the implicit `default` when it names none), and `tenant` when it is tenant-wide; read from `OptimalEngine.API.WorkspaceAuthPlug`.
+    A key whose metadata grants app data access (`/api/data/keys`) is confined to `/api/data` whatever its grant.
 
     Routes: #{length(routes)}
 
-    | Method | Path | Router |
-    | --- | --- | --- |
+    | Method | Path | Router | Grant | Workspace |
+    | --- | --- | --- | --- | --- |
     #{Enum.join(rows, "\n")}
     """
+  end
+
+  @doc """
+  The classification of a route path served for `methods`: the operation
+  grant (per method when the methods differ) and whether it is
+  workspace-scoped or tenant-wide.
+  """
+  @spec classify(String.t(), [String.t()]) :: %{grant: String.t(), workspace: String.t()}
+  def classify(path, methods) do
+    path_info = String.split(path, "/", trim: true)
+    labels = Enum.map(methods, &{&1, PermissionPlug.grant_label(&1, path_info)})
+
+    grant =
+      case labels |> Enum.map(&elem(&1, 1)) |> Enum.uniq() do
+        [label] -> label
+        _ -> Enum.map_join(labels, "; ", fn {method, label} -> "#{method}: #{label}" end)
+      end
+
+    %{
+      grant: grant,
+      workspace: if(WorkspaceAuthPlug.workspace_scoped?(path_info), do: "workspace", else: "tenant")
+    }
   end
 
   @doc """
@@ -174,7 +207,7 @@ defmodule OptimalEngine.API.Reference do
     content
     |> String.split("\n")
     |> Enum.flat_map(fn line ->
-      case Regex.run(~r/^\|\s*([A-Z, ]+)\s*\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|$/, line) do
+      case Regex.run(~r/^\|\s*([A-Z, ]+)\s*\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|/, line) do
         [_, methods, path, router] ->
           for method <- String.split(methods, ","),
               do: %{method: String.trim(method), path: path, router: String.trim(router)}

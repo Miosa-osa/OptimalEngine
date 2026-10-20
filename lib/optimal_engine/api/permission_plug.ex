@@ -94,18 +94,37 @@ defmodule OptimalEngine.API.PermissionPlug do
   end
 
   defp required_scope(conn) do
-    path = "/" <> Enum.join(conn.path_info, "/")
-    mutation = conn.method not in ["GET", "HEAD", "OPTIONS"]
+    body =
+      if is_map(conn.body_params) and not is_struct(conn.body_params),
+        do: conn.body_params,
+        else: %{}
+
+    required_grant(conn.method, conn.path_info, body)
+  end
+
+  @doc """
+  The operation grant a request needs: one scope, or a list of alternatives
+  any one of which is enough.
+
+  `body` matters only for `POST /api/agent-actions`, whose `approval` and
+  `denial` stages need `authority:enforce`. The public API reference
+  (`OptimalEngine.API.Reference`) labels every route with this function, so
+  the documented grant is the enforced one.
+  """
+  @spec required_grant(String.t(), [String.t()], map()) :: String.t() | [String.t()]
+  def required_grant(method, path_info, body \\ %{}) do
+    path = "/" <> Enum.join(path_info, "/")
+    mutation = method not in ["GET", "HEAD", "OPTIONS"]
 
     cond do
-      match?(["api", "authority" | _], conn.path_info) ->
-        authority_scope(conn.method, tl(tl(conn.path_info)))
+      match?(["api", "authority" | _], path_info) ->
+        authority_scope(method, tl(tl(path_info)))
 
-      match?(["api", "sync" | _], conn.path_info) ->
-        sync_scope(conn.method, tl(tl(conn.path_info)))
+      match?(["api", "sync" | _], path_info) ->
+        sync_scope(method, tl(tl(path_info)))
 
-      match?(["api", "connectors" | _], conn.path_info) ->
-        connectors_scope(conn.method, tl(tl(conn.path_info)))
+      match?(["api", "connectors" | _], path_info) ->
+        connectors_scope(method, tl(tl(path_info)))
 
       mutation and
           (path in [
@@ -119,13 +138,11 @@ defmodule OptimalEngine.API.PermissionPlug do
              String.starts_with?(path, "/api/jobs/")) ->
         "admin"
 
-      mutation and path == "/api/agent-actions" and
-          (is_map(conn.body_params) and not is_struct(conn.body_params) and
-             conn.body_params["stage"] in ["approval", "denial"]) ->
+      mutation and path == "/api/agent-actions" and body["stage"] in ["approval", "denial"] ->
         "authority:enforce"
 
-      match?(["api", "data" | _], conn.path_info) ->
-        data_scope(conn.method, tl(tl(conn.path_info)))
+      match?(["api", "data" | _], path_info) ->
+        data_scope(method, tl(tl(path_info)))
 
       String.starts_with?(path, "/api/auth/keys") or String.starts_with?(path, "/api/principals") or
         path == "/api/backup" or String.starts_with?(path, "/api/backup/") or
@@ -141,10 +158,10 @@ defmodule OptimalEngine.API.PermissionPlug do
              path == "/api/data-steward/claims/decide") ->
         "claims:review"
 
-      mutation and topology_path?(conn.path_info) ->
+      mutation and topology_path?(path_info) ->
         "topology:write"
 
-      conn.method == "POST" and path in @read_posts ->
+      method == "POST" and path in @read_posts ->
         "read"
 
       mutation ->
@@ -154,6 +171,22 @@ defmodule OptimalEngine.API.PermissionPlug do
         "read"
     end
   end
+
+  @doc """
+  The grant a route needs, as the API reference prints it: alternatives are
+  joined with `or`, `GET /api/auth/whoami` answers any valid key, and
+  `POST /api/agent-actions` names the stages that need more than `write`.
+  """
+  @spec grant_label(String.t(), [String.t()]) :: String.t()
+  def grant_label("GET", ["api", "auth", "whoami"]), do: "any key"
+
+  def grant_label("POST", ["api", "agent-actions"] = path_info) do
+    "#{required_grant("POST", path_info)}; stages approval and denial: " <>
+      required_grant("POST", path_info, %{"stage" => "approval"})
+  end
+
+  def grant_label(method, path_info),
+    do: method |> required_grant(path_info) |> List.wrap() |> Enum.join(" or ")
 
   # Authority routes (OptimalEngine.API.AuthorityRouter): verification
   # material and a subject's own requests need ordinary scopes; reading the

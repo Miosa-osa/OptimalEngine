@@ -149,12 +149,22 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
       Map.get(conn.query_params, "workspaces") == "*"
   end
 
+  defp workspace_scoped_path?(conn), do: workspace_scoped?(conn.path_info)
+
+  @doc """
+  Whether a route is workspace-scoped: authorized for the workspaces it
+  names, or for the implicit `"default"` when it names none. Every other
+  route is tenant-wide, though a workspace it names is still checked. The
+  public API reference (`OptimalEngine.API.Reference`) labels every route
+  with this function.
+  """
+  @spec workspace_scoped?([String.t()]) :: boolean()
   # GET/POST /api/workspaces (list/create) are tenant-parameterized, not
   # workspace-parameterized — only the /:id subroutes name a workspace, and
   # those are caught by path_workspace/1 above.
-  defp workspace_scoped_path?(%{path_info: ["api", "workspaces"]}), do: false
-  defp workspace_scoped_path?(%{path_info: ["api", root | _]}), do: root not in @global_roots
-  defp workspace_scoped_path?(_conn), do: false
+  def workspace_scoped?(["api", "workspaces"]), do: false
+  def workspace_scoped?(["api", root | _]), do: root not in @global_roots
+  def workspace_scoped?(_path_info), do: false
 
   # Anonymous callers and keys whose scope covers "default" may rely on the
   # implicit default workspace; a key restricted to other workspaces must

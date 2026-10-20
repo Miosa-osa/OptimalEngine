@@ -123,7 +123,8 @@ apps/cli/optimal assemble "supplier renewal" personal
 ```
 
 `search` returns matching memories and signals with their identifiers.
-`assemble` returns a tiered context package with its sources, which is what an agent should read before answering.
+`ask` answers from the workspace's sources and lists each one it used by its `optimal://` link (`envelope.sources`).
+`assemble` returns the governed context package an agent should read before acting: reviewed Facts and Memory Objects with their sources, so a new source appears there once its claims are promoted.
 `read` opens one item by its `optimal://` URI.
 
 ```bash

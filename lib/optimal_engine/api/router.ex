@@ -1308,6 +1308,12 @@ defmodule OptimalEngine.API.Router do
     json(conn, %{nodes: workspace_nodes(workspace)})
   end
 
+  # GET /api/signals/classification?workspace=&plan=true: counts of the
+  # workspace's Signals by genre and mode, stored and as re-running
+  # classification would set them. Declared before /api/signals/:id so
+  # "classification" is never read as a signal id.
+  get("/api/signals/classification", do: OptimalEngine.API.ViabilityAPI.classification(conn))
+
   # GET /api/signals/:id — full signal granularity: chunks (4 scales),
   # entities (by type), classification, intent, clusters, wiki citations.
   # This is the "see everything the engine knows about this one data point"
