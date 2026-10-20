@@ -10,7 +10,7 @@ defmodule OptimalEngine.MemoryCore.GovernedModel do
 
   ## Contract
 
-      GovernedModel.call_model("embed_text", input_payload, fn -> Ollama.embed_text(text) end,
+      GovernedModel.call_model("embed_text", input_payload, fn -> Embed.Text.embed(text) end,
         model_id: "nomic-embed-text",
         model_task_type: "embedding",
         workspace_id: "default"

@@ -148,4 +148,52 @@ defmodule OptimalEngine.RuntimeConfigTest do
                  ~r/OPTIMAL_RELEASE_CHANNEL must be dev, stable, beta, or pinned/,
                  fn -> Config.Reader.read!("config/runtime.exs", env: :prod, target: :host) end
   end
+
+  test "an embedding endpoint comes from the environment, keeps its key out of the config, and rejects typos" do
+    names =
+      ~w(OPTIMAL_EMBED_URL OPTIMAL_EMBED_DIALECT OPTIMAL_EMBED_API_KEY OPTIMAL_EMBED_API_KEY_FILE)
+
+    original = Map.new(names, &{&1, System.get_env(&1)})
+
+    on_exit(fn ->
+      Enum.each(original, fn
+        {name, nil} -> System.delete_env(name)
+        {name, value} -> System.put_env(name, value)
+      end)
+    end)
+
+    Enum.each(names, &System.delete_env/1)
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    assert get_in(config, [:optimal_engine, :text_embedding, :url]) == nil
+
+    System.put_env("OPTIMAL_EMBED_URL", "https://gateway.example.com/v1/embeddings")
+    System.put_env("OPTIMAL_EMBED_DIALECT", "openai")
+    System.put_env("OPTIMAL_EMBED_API_KEY", "runtime-test-key-0123456789")
+    System.put_env("OPTIMAL_EMBED_API_KEY_FILE", "/run/secrets/embed-key")
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    embedding = get_in(config, [:optimal_engine, :text_embedding])
+
+    assert embedding[:url] == "https://gateway.example.com/v1/embeddings"
+    assert embedding[:dialect] == :openai
+    assert embedding[:api_key_file] == "/run/secrets/embed-key"
+    refute inspect(config) =~ "runtime-test-key-0123456789"
+
+    System.put_env("OPTIMAL_EMBED_URL", "")
+    System.put_env("OPTIMAL_EMBED_DIALECT", "")
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    assert get_in(config, [:optimal_engine, :text_embedding, :url]) == nil
+
+    System.put_env("OPTIMAL_EMBED_DIALECT", "cohere")
+
+    assert_raise ArgumentError, ~r/OPTIMAL_EMBED_DIALECT must be openai or ollama/, fn ->
+      Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    end
+
+    System.delete_env("OPTIMAL_EMBED_DIALECT")
+    System.put_env("OPTIMAL_EMBED_URL", "gateway.example.com/v1/embeddings")
+
+    assert_raise ArgumentError, ~r/OPTIMAL_EMBED_URL must be an http or https URL/, fn ->
+      Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    end
+  end
 end

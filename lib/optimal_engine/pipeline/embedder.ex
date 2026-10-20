@@ -32,6 +32,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
   """
 
   alias OptimalEngine.Embed.{Ollama, Whisper}
+  alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.MemoryCore.GovernedModel
   alias OptimalEngine.Pipeline.Decomposer.{Chunk, ChunkTree}
   alias OptimalEngine.Pipeline.Embedder.Embedding
@@ -263,7 +264,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
     GovernedModel.call_model(
       "embedder.embed_text",
       %{"chars" => String.length(text)},
-      fn -> Ollama.embed_text(text, opts) end,
+      fn -> TextEmbedder.embed(text, opts) end,
       model_id: model,
       model_task_type: "embedding",
       workspace_id: Keyword.get(opts, :workspace_id, "default")

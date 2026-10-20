@@ -30,7 +30,7 @@ defmodule OptimalEngine.Health do
   """
 
   alias OptimalEngine.Connectors.Credential
-  alias OptimalEngine.Embed.Ollama
+  alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Store
 
   @type check_result :: :ok | {:warn, term()} | {:error, term()}
@@ -131,16 +131,19 @@ defmodule OptimalEngine.Health do
     end
   end
 
+  # A refused key is named as such: every embedding fails until it is fixed,
+  # and "unreachable" would send the operator to the wrong place.
   defp run_check(:embedder) do
-    case safe_ollama_ping() do
+    case safe_embed_ping() do
       :ok -> :ok
+      {:error, {:embed_unauthorized, status}} -> {:warn, {:embedder_unauthorized, status}}
       {:error, reason} -> {:warn, {:embedder_unreachable, reason}}
     end
   end
 
-  defp safe_ollama_ping do
+  defp safe_embed_ping do
     try do
-      case Ollama.embed("health", model: "nomic-embed-text", cache: false) do
+      case TextEmbedder.embed("health", cache: false) do
         {:ok, _} -> :ok
         {:error, reason} -> {:error, reason}
       end

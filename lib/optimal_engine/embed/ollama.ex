@@ -10,8 +10,6 @@ defmodule OptimalEngine.Embed.Ollama do
 
   require Logger
 
-  alias OptimalEngine.Store.FileCache
-
   @availability_ttl_ms 60_000
   @availability_cache_key :ollama_availability_cache
 
@@ -89,63 +87,38 @@ defmodule OptimalEngine.Embed.Ollama do
   end
 
   @doc """
-  Generates a text embedding vector for the given input.
+  Generates a text embedding with Ollama at `OLLAMA_HOST`.
 
-  Returns `{:ok, [float()]}` — a 768-dimension vector from nomic-embed-text.
+  Returns `{:ok, [float()]}`: a 768-dimension vector from nomic-embed-text.
+  The Engine's own text embeddings go through `OptimalEngine.Embed.Text`,
+  which uses `OPTIMAL_EMBED_URL` when it is set; this function always asks
+  Ollama.
 
   ## Options
-  - `:model` — override the default embed model
-  - `:cache` — `false` bypasses the filesystem embedding cache (default `true`)
+  - `:model` - override the default embed model
+  - `:cache` - `false` bypasses the filesystem embedding cache (default `true`)
   """
   @spec embed(String.t(), keyword()) :: {:ok, [float()]} | {:error, atom()}
   def embed(text, opts \\ []), do: embed_text(text, opts)
 
   @doc """
-  Embed text using the configured text-embedding model.
-  Default model: `nomic-embed-text` (configurable via `:optimal_engine, :ollama, :embed_model`).
+  Embed text with Ollama at `OLLAMA_HOST` using the configured text-embedding
+  model. Default model: `nomic-embed-text` (configurable via
+  `:optimal_engine, :ollama, :embed_model`).
 
-  Returns `{:ok, [float()]}` — a single 768-dim vector — or `{:error, reason}`.
+  The input is capped and cached as in `OptimalEngine.Embed.Text.embed/2`.
+  Returns `{:ok, [float()]}`, a single 768-dim vector, or `{:error, reason}`.
   """
   @spec embed_text(String.t(), keyword()) :: {:ok, [float()]} | {:error, atom()}
-  # Embedding models have a bounded context window; nomic-embed-text rejects
-  # oversized input with HTTP 400 ("input length exceeds the context length").
-  # Cap input so large chunks embed (truncated) instead of being skipped.
-  # nomic-embed-text's effective window is ~2048 tokens; ~4 chars/token, kept
-  # conservative so even token-dense text stays under the limit.
-  @max_embed_chars 6_000
-
   def embed_text(text, opts \\ []) when is_binary(text) do
-    if String.trim(text) == "" do
-      {:error, :empty_input}
-    else
-      do_embed_text(text, opts)
-    end
+    OptimalEngine.Embed.Text.embed_via_ollama(text, opts)
   end
 
-  defp do_embed_text(text, opts) do
-    cfg = config()
-    model = Keyword.get(opts, :model, cfg[:embed_model])
-
-    capped =
-      if String.length(text) > @max_embed_chars do
-        String.slice(text, 0, @max_embed_chars)
-      else
-        text
-      end
-
-    # Embeddings are deterministic per model and input, so identical text is
-    # served from the rebuildable filesystem cache across restarts.
-    if Keyword.get(opts, :cache, true) do
-      FileCache.fetch("embeddings", "#{model}\0#{capped}", fn ->
-        request_text_embedding(model, capped)
-      end)
-    else
-      request_text_embedding(model, capped)
-    end
-  end
-
-  defp request_text_embedding(model, capped) do
-    body = %{"model" => model, "input" => capped}
+  @doc false
+  # One /api/embed call, no cap and no cache: `OptimalEngine.Embed.Text` does both.
+  @spec request_embedding(String.t(), String.t()) :: {:ok, [float()]} | {:error, term()}
+  def request_embedding(model, input) do
+    body = %{"model" => model, "input" => input}
 
     case post_json("/api/embed", body) do
       {:ok, %{"embeddings" => [first | _]}} when is_list(first) ->

@@ -1,7 +1,7 @@
 defmodule OptimalEngine.Architecture.Processors.TextEmbedder do
   @moduledoc """
-  Text embedding processor — wraps the engine's Phase 5 embedder
-  (`OptimalEngine.Embed.Ollama`) under the generic Processor contract.
+  Text embedding processor: wraps the Engine's text embedder
+  (`OptimalEngine.Embed.Text`) under the generic Processor contract.
 
   Emits: `:embedding` with a 768-d vector (aligned with the engine's
   multi-modal space).
@@ -9,7 +9,7 @@ defmodule OptimalEngine.Architecture.Processors.TextEmbedder do
 
   @behaviour OptimalEngine.Architecture.Processor
 
-  alias OptimalEngine.Embed.Ollama
+  alias OptimalEngine.Embed
 
   @impl true
   def id, do: :text_embedder
@@ -25,7 +25,7 @@ defmodule OptimalEngine.Architecture.Processors.TextEmbedder do
 
   @impl true
   def process(_field, value, _state) when is_binary(value) do
-    case Ollama.embed(value, model: "nomic-embed-text") do
+    case Embed.Text.embed(value, model: "nomic-embed-text") do
       {:ok, vector} ->
         {:ok,
          %{

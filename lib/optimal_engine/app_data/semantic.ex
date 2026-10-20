@@ -8,7 +8,7 @@ defmodule OptimalEngine.AppData.Semantic do
   asynchronously by default, synchronously or not at all by configuration:
 
       config :optimal_engine, :app_data,
-        embedder: OptimalEngine.Embed.Ollama,   # module with embed/2
+        embedder: OptimalEngine.Embed.Text,     # module with embed/2
         embed_model: "nomic-embed-text",
         semantic_indexing: :async               # :async | :sync | :off
 
@@ -29,11 +29,10 @@ defmodule OptimalEngine.AppData.Semantic do
   @spec config() :: %{embedder: module(), model: String.t(), indexing: atom()}
   def config do
     cfg = Application.get_env(:optimal_engine, :app_data, [])
-    ollama = Application.get_env(:optimal_engine, :ollama, [])
 
     %{
-      embedder: Keyword.get(cfg, :embedder, OptimalEngine.Embed.Ollama),
-      model: Keyword.get(cfg, :embed_model, ollama[:embed_model] || "nomic-embed-text"),
+      embedder: Keyword.get(cfg, :embedder, OptimalEngine.Embed.Text),
+      model: Keyword.get(cfg, :embed_model, OptimalEngine.Embed.Text.model()),
       indexing: Keyword.get(cfg, :semantic_indexing, :async)
     }
   end

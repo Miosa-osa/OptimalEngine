@@ -106,6 +106,49 @@ config :optimal_engine,
            )
        )
 
+# Text embeddings come from Ollama at OLLAMA_HOST unless OPTIMAL_EMBED_URL names
+# another endpoint, such as a shared, metered gateway (OptimalEngine.Embed.Text).
+# An empty value counts as unset. The key is read from OPTIMAL_EMBED_API_KEY or
+# the file in OPTIMAL_EMBED_API_KEY_FILE when a request is made, so it never
+# enters the application environment.
+text_embedding_config = Application.get_env(:optimal_engine, :text_embedding, [])
+
+embed_url =
+  case System.get_env("OPTIMAL_EMBED_URL") do
+    blank when blank in [nil, ""] ->
+      Keyword.get(text_embedding_config, :url)
+
+    url ->
+      url = String.trim(url)
+      uri = URI.parse(url)
+
+      if uri.scheme in ["http", "https"] and uri.host not in [nil, ""] do
+        url
+      else
+        raise ArgumentError, "OPTIMAL_EMBED_URL must be an http or https URL"
+      end
+  end
+
+embed_dialect =
+  case System.get_env("OPTIMAL_EMBED_DIALECT") do
+    blank when blank in [nil, ""] -> Keyword.get(text_embedding_config, :dialect)
+    "openai" -> :openai
+    "ollama" -> :ollama
+    _ -> raise ArgumentError, "OPTIMAL_EMBED_DIALECT must be openai or ollama"
+  end
+
+config :optimal_engine,
+       :text_embedding,
+       Keyword.merge(text_embedding_config,
+         url: embed_url,
+         dialect: embed_dialect,
+         api_key_file:
+           System.get_env(
+             "OPTIMAL_EMBED_API_KEY_FILE",
+             Keyword.get(text_embedding_config, :api_key_file)
+           )
+       )
+
 # Authentication is an explicit deployment choice. Preserve configured defaults
 # when absent; reject typos instead of silently exposing an anonymous service.
 auth_config = Application.get_env(:optimal_engine, :auth, [])
