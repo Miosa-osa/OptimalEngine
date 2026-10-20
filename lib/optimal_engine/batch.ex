@@ -32,6 +32,7 @@ defmodule OptimalEngine.Batch do
 
   alias OptimalEngine.Memory
   alias OptimalEngine.Pipeline.Intake
+  alias OptimalEngine.ReadScope
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Wiki
@@ -117,6 +118,8 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:workspace_id` — source workspace (default: `"default"`)
+    - `:reader` — the `OptimalEngine.ReadScope` of a keyed caller: only the
+      signals it may see are exported (nil exports all)
   """
   @spec export_signals(keyword()) :: {:ok, list(map())}
   def export_signals(opts \\ []) do
@@ -137,7 +140,15 @@ defmodule OptimalEngine.Batch do
         _ -> []
       end
 
-    {:ok, signals}
+    {:ok,
+     ReadScope.filter(
+       Keyword.get(opts, :reader),
+       workspace_id,
+       "contexts",
+       signals,
+       & &1.id,
+       & &1.uri
+     )}
   end
 
   @doc """
@@ -146,6 +157,8 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:workspace_id` — source workspace (default: `"default"`)
+    - `:reader` — the `OptimalEngine.ReadScope` of a keyed caller: only the
+      memories it may see are exported (nil exports all)
   """
   @spec export_memories(keyword()) :: {:ok, list(map())}
   def export_memories(opts \\ []) do
@@ -168,7 +181,15 @@ defmodule OptimalEngine.Batch do
         _ -> []
       end
 
-    {:ok, memories}
+    {:ok,
+     ReadScope.filter(
+       Keyword.get(opts, :reader),
+       workspace_id,
+       "memories",
+       memories,
+       & &1.id,
+       &"optimal://memory/#{&1.workspace_id}/#{&1.id}"
+     )}
   end
 
   @doc """
@@ -177,14 +198,27 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:tenant_id` — tenant id (default: the platform default tenant)
+    - `:reader` — the `OptimalEngine.ReadScope` of a keyed caller: only the
+      signals, memories and wiki pages it may see are exported (nil exports all)
   """
   @spec export_workspace(String.t(), keyword()) :: {:ok, map()}
   def export_workspace(workspace_id, opts \\ []) when is_binary(workspace_id) do
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
+    reader = Keyword.get(opts, :reader)
 
-    {:ok, signals} = export_signals(workspace_id: workspace_id)
-    {:ok, memories} = export_memories(workspace_id: workspace_id)
-    wiki_pages = export_wiki_pages(workspace_id, tenant_id)
+    {:ok, signals} = export_signals(workspace_id: workspace_id, reader: reader)
+    {:ok, memories} = export_memories(workspace_id: workspace_id, reader: reader)
+
+    wiki_pages =
+      ReadScope.filter_rows(
+        reader,
+        workspace_id,
+        "wiki_pages",
+        export_wiki_pages(workspace_id, tenant_id),
+        &wiki_row/1,
+        &"wiki:#{&1.slug}:#{&1.audience}"
+      )
+
     config = export_workspace_config(workspace_id)
 
     snapshot = %{
@@ -297,6 +331,19 @@ defmodule OptimalEngine.Batch do
       _ ->
         []
     end
+  end
+
+  # A wiki page as the columns the lineage reads it by.
+  defp wiki_row(page) do
+    %{
+      "tenant_id" => page.tenant_id,
+      "workspace_id" => page.workspace_id,
+      "slug" => page.slug,
+      "audience" => page.audience,
+      "version" => page.version,
+      "frontmatter" => page.frontmatter,
+      "body" => page.body
+    }
   end
 
   defp export_workspace_config(workspace_id) do
