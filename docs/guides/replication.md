@@ -68,13 +68,24 @@ The cursor moves past what the gate holds, and the class is read when the row is
 A row held then is not sent later because its source package arrived after it, or because a label on its source was lowered; only a new change to the row, or to a row it derives from, is classified again.
 So label before writing, and write the source before what derives from it.
 
+### What a read key sees of exports and conflicts
+
+`GET /api/batch/export/{memories,signals,workspace}` and `GET /api/sync/conflicts` return row text, so they filter by the caller the way governed retrieval does.
+A keyed caller sees a row only when every label and partition the row carries is among the `allowed_security_labels` and `allowed_partitions` in its key's metadata, and its principal may read the row by the access lists (`OptimalEngine.Identity.ACL`).
+A row carries the labels of the rows it was copied or derived from, and a row whose source cannot be found is seen by no one, so a memory staged from a restricted source package is not exported to a key that lacks `restricted`.
+A key with no grants sees only rows that carry no label and no partition; give an export key the labels it should read.
+An export leaves out what a key may not see.
+A conflict keeps its table, key, kind and state, and a version of the row the key may not see is replaced by `{"redacted": "security_labels"}` with `redacted: true` on the conflict.
+An anonymous local caller (no key, authentication not required) is the trusted operator and sees everything.
+A wiki page that names nothing, and any other aggregate, carries every label in its workspace.
+
 Limits worth knowing:
+
 
 - A row names another row's id in free-form metadata in places (the encoding gate records the memory a new one is most like).
 That is an opaque id, not the row, and the gate does not scrub it.
 - Rows that already reached a peer before a label or lineage existed stay there.
 A held delete does not reach the peer, so purge them on the peer directly.
-- A conflict record (`GET /api/sync/conflicts`) and the batch exports (`GET /api/batch/export/*`) carry row text under the `read` scope, outside the gate.
 
 ### Syncing through a relay
 

@@ -715,8 +715,8 @@ defmodule OptimalEngine.Sync do
       # The claims quote the fact, so they carry its labels: those of both
       # versions and of the fact now. `fact_id` lets the gate follow a later
       # relabel of the fact.
-      labels =
-        conflict_labels(tenant_id, workspace_id, mutation["entity_id"], [local_row, remote_row])
+      {labels, partitions} =
+        conflict_scope(tenant_id, workspace_id, mutation["entity_id"], [local_row, remote_row])
 
       source =
         SourcePackage.from_text("Replication conflict on fact #{mutation["entity_id"]}\n" <> raw,
@@ -725,11 +725,12 @@ defmodule OptimalEngine.Sync do
           source_type: "sync_conflict",
           source_system: "optimal-sync",
           security_labels: labels,
+          partition_ids: partitions,
           metadata: %{"sync_conflict" => true, "fact_id" => mutation["entity_id"]}
         )
 
       _ = CoreStore.insert_source_package(source)
-      raise_source_labels(source.id, labels, mutation["entity_id"])
+      raise_source_scope(source.id, labels, partitions, mutation["entity_id"])
 
       Enum.each(texts, fn {side, text} ->
         CoreStore.insert_claim(%{
@@ -739,6 +740,7 @@ defmodule OptimalEngine.Sync do
           source_package_id: source.id,
           claim_text: text,
           security_labels: labels,
+          partition_ids: partitions,
           lifecycle_state: "pending",
           review_status: "unreviewed",
           metadata: %{"sync_conflict" => true, "side" => side, "fact_id" => mutation["entity_id"]}
@@ -750,55 +752,85 @@ defmodule OptimalEngine.Sync do
       Logger.warning("[Sync] could not raise fact conflict claims: #{Exception.message(error)}")
   end
 
-  # The labels of a contested fact: both versions' and the stored fact's. A
-  # value that cannot be read counts as `restricted`; a Store error raises,
-  # and the conflict is then not turned into claims at all.
-  defp conflict_labels(tenant_id, workspace_id, fact_id, rows) do
+  # The labels and partitions of a contested fact: both versions' and the
+  # stored fact's. A value that cannot be read counts as `restricted`; a Store
+  # error raises, and the conflict is then not turned into claims at all.
+  defp conflict_scope(tenant_id, workspace_id, fact_id, rows) do
     stored =
       case Store.raw_query(
-             "SELECT security_labels FROM facts WHERE id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
+             "SELECT security_labels, partition_ids FROM facts WHERE id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
              [fact_id, tenant_id, workspace_id]
            ) do
-        {:ok, [[value]]} -> [value]
-        {:ok, []} -> []
-        {:error, reason} -> raise "could not read fact #{fact_id}: #{inspect(reason)}"
+        {:ok, [[labels, partitions]]} ->
+          [%{"security_labels" => labels, "partition_ids" => partitions}]
+
+        {:ok, []} ->
+          []
+
+        {:error, reason} ->
+          raise "could not read fact #{fact_id}: #{inspect(reason)}"
       end
 
-    Enum.reduce(Enum.map(rows, & &1["security_labels"]) ++ stored, [], fn value, labels ->
-      case SecurityLabels.decode(value) do
-        {:ok, _} -> SecurityLabels.merge(labels, value)
-        :invalid -> SecurityLabels.merge(labels, ["restricted"])
-      end
+    Enum.reduce(rows ++ stored, {[], []}, fn row, {labels, partitions} ->
+      {labels, bad_labels?} = join_values(labels, row["security_labels"])
+      {partitions, bad_partitions?} = join_values(partitions, row["partition_ids"])
+
+      labels =
+        if bad_labels? or bad_partitions?,
+          do: SecurityLabels.merge(labels, ["restricted"]),
+          else: labels
+
+      {labels, partitions}
     end)
+  end
+
+  defp join_values(joined, value) do
+    case SecurityLabels.decode(value) do
+      {:ok, _} -> {SecurityLabels.merge(joined, value), false}
+      :invalid -> {joined, true}
+    end
   end
 
   # `insert_source_package` keeps the package that is already there when the
   # same conflict text is raised again, with the labels and the metadata it had.
-  # Its labels only ever grow, and it names the fact either way. A Store error
-  # raises, so no claims are raised beside a package whose labels were not set.
-  defp raise_source_labels(source_id, labels, fact_id) do
-    with {:ok, [[stored]]} <-
-           Store.raw_query("SELECT security_labels FROM source_packages WHERE id = ?1", [source_id]),
-         merged =
-           (case SecurityLabels.decode(stored) do
-              {:ok, _} -> SecurityLabels.merge(stored, labels)
-              :invalid -> SecurityLabels.merge(["restricted"], labels)
-            end),
+  # Its labels and partitions only ever grow, and it names the fact either way.
+  # A Store error raises, so no claims are raised beside a package whose labels
+  # were not set.
+  defp raise_source_scope(source_id, labels, partitions, fact_id) do
+    with {:ok, [[stored_labels, stored_partitions]]} <-
+           Store.raw_query(
+             "SELECT security_labels, partition_ids FROM source_packages WHERE id = ?1",
+             [source_id]
+           ),
+         {merged_labels, merged_partitions} =
+           merge_scope(labels, partitions, stored_labels, stored_partitions),
          {:ok, _} <-
            Store.raw_query(
              """
              UPDATE source_packages
-             SET security_labels = ?2,
-                 metadata = json_set(COALESCE(metadata, '{}'), '$.sync_conflict', json('true'), '$.fact_id', ?3)
+             SET security_labels = ?2, partition_ids = ?3,
+                 metadata = json_set(COALESCE(metadata, '{}'), '$.sync_conflict', json('true'), '$.fact_id', ?4)
              WHERE id = ?1
              """,
-             [source_id, Jason.encode!(merged), fact_id]
+             [source_id, Jason.encode!(merged_labels), Jason.encode!(merged_partitions), fact_id]
            ) do
       :ok
     else
       {:ok, []} -> :ok
       {:error, reason} -> raise "could not label conflict source #{source_id}: #{inspect(reason)}"
     end
+  end
+
+  defp merge_scope(labels, partitions, stored_labels, stored_partitions) do
+    {merged_labels, bad_labels?} = join_values(labels, stored_labels)
+    {merged_partitions, bad_partitions?} = join_values(partitions, stored_partitions)
+
+    merged_labels =
+      if bad_labels? or bad_partitions?,
+        do: SecurityLabels.merge(merged_labels, ["restricted"]),
+        else: merged_labels
+
+    {merged_labels, merged_partitions}
   end
 
   defp local_conflict(tenant_id, workspace_id, table, entity_id, local, last_sync) do

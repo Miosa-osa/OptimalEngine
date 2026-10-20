@@ -26,6 +26,7 @@ defmodule OptimalEngine.API.Router do
   @busy_detail "the Engine's store is busy; retry shortly"
 
   alias OptimalEngine.API.Actor
+  alias OptimalEngine.API.Reader
   alias OptimalEngine.API.Pagination
   alias OptimalEngine.Graph.Analyzer, as: GraphAnalyzer
   alias OptimalEngine.Health
@@ -2962,7 +2963,7 @@ defmodule OptimalEngine.API.Router do
   get "/api/batch/export/signals" do
     workspace_id = query_param(conn, "workspace", "default")
 
-    case OptimalEngine.Batch.export_signals(workspace_id: workspace_id) do
+    case OptimalEngine.Batch.export_signals(workspace_id: workspace_id, reader: Reader.scope(conn)) do
       {:ok, signals} -> json(conn, %{workspace_id: workspace_id, signals: signals})
     end
   end
@@ -2972,7 +2973,7 @@ defmodule OptimalEngine.API.Router do
   get "/api/batch/export/memories" do
     workspace_id = query_param(conn, "workspace", "default")
 
-    case OptimalEngine.Batch.export_memories(workspace_id: workspace_id) do
+    case OptimalEngine.Batch.export_memories(workspace_id: workspace_id, reader: Reader.scope(conn)) do
       {:ok, memories} -> json(conn, %{workspace_id: workspace_id, memories: memories})
     end
   end
@@ -2983,7 +2984,10 @@ defmodule OptimalEngine.API.Router do
     workspace_id = query_param(conn, "workspace", "default")
     tenant_id = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
 
-    case OptimalEngine.Batch.export_workspace(workspace_id, tenant_id: tenant_id) do
+    case OptimalEngine.Batch.export_workspace(workspace_id,
+           tenant_id: tenant_id,
+           reader: Reader.scope(conn)
+         ) do
       {:ok, snapshot} -> json(conn, snapshot)
     end
   end
