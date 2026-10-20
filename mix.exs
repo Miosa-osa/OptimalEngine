@@ -95,11 +95,21 @@ defmodule OptimalEngine.MixProject do
       "optimal.search": ["run -e 'Mix.Tasks.Optimal.Search.run(System.argv())'"],
       # Wipe the test SQLite store before every run so schema drift from
       # an older migration set can't leak into the current test process.
-      test: [
-        "cmd rm -f /tmp/optimal_engine_test_0.db /tmp/optimal_engine_test_0.db-wal /tmp/optimal_engine_test_0.db-shm",
-        "test"
-      ]
+      test: [&wipe_test_store/1, "test"]
     ]
+  end
+
+  # The test store directory, inside this checkout (config/test.exs).
+  defp test_store_dir, do: Path.expand("_build/test_store", __DIR__)
+
+  defp wipe_test_store(_args) do
+    db =
+      Path.join(
+        test_store_dir(),
+        "optimal_engine_test_#{System.get_env("MIX_TEST_PARTITION", "0")}.db"
+      )
+
+    Enum.each(["", "-wal", "-shm"], &File.rm(db <> &1))
   end
 
   defp description do
