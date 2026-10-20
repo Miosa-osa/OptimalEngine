@@ -81,6 +81,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
               "slug" => workspace.slug,
               "name" => workspace.name,
               "description" => workspace.description,
+              "external_id" => workspace.external_id,
               "metadata" => workspace.metadata
             },
             "tables" => tables,
@@ -123,7 +124,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
            rows: counts,
            files: file_count,
            bundle_sha256: manifest["bundle_sha256"],
-           source_workspace_id: manifest["workspace"]["id"]
+           source_workspace_id: manifest["workspace"]["id"],
+           external_id: plan.external_id,
+           imported_external_id: plan.imported_external_id
          }}
       end
     after
@@ -167,17 +170,18 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       deleted = delete_rows(tenant_id, workspace_id)
       File.rm_rf(Filesystem.path(root(), workspace_id))
 
-      metadata =
-        Map.merge(workspace.metadata, %{
-          "moved_to" => target_url,
-          "moved_at" => DateTime.utc_now() |> DateTime.to_iso8601()
-        })
-
+      # Only the move keys are written; the archived stub keeps its slugs and
+      # its external id value (archiving releases the id itself).
       {:ok, _} =
-        Store.raw_query("UPDATE workspaces SET status = 'archived', metadata = ?2 WHERE id = ?1", [
-          workspace_id,
-          Jason.encode!(metadata)
-        ])
+        Store.raw_query(
+          """
+          UPDATE workspaces SET status = 'archived',
+            metadata = json_set(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                                '$.moved_to', ?2, '$.moved_at', ?3)
+          WHERE id = ?1
+          """,
+          [workspace_id, target_url, DateTime.utc_now() |> DateTime.to_iso8601()]
+        )
 
       {:ok, _} =
         Store.raw_query(
@@ -432,37 +436,79 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
       {{:ok, existing}, :merge} ->
         if existing.tenant_id == tenant_id,
-          do: {:ok, %{workspace_id: target_id, tenant_id: tenant_id, mode: :merge, source: source}},
+          do:
+            {:ok,
+             %{
+               workspace_id: target_id,
+               tenant_id: tenant_id,
+               mode: :merge,
+               source: source,
+               external_id: existing.external_id,
+               imported_external_id: nil
+             }},
           else: {:error, :workspace_exists}
 
       {{:error, :not_found}, _mode} ->
+        metadata = source["metadata"] || %{}
+
         attrs = %{
           id: target_id,
           tenant_id: tenant_id,
           slug: target_slug,
           name: source["name"] || target_slug,
           description: source["description"],
+          external_id: source["external_id"] || metadata["external_id"],
           # Slugs the source held are reserved on the source Engine only.
           metadata:
-            (source["metadata"] || %{})
-            |> Map.drop(["previous_slugs"])
-            |> Map.put("imported_from", source["id"])
+            metadata
+            |> Map.drop(["previous_slugs", "external_id"])
+            |> Map.put("imported_from", source["id"]),
+          organization_id:
+            opts[:organization_id] || OptimalEngine.Organization.default_for(tenant_id)
         }
 
-        attrs =
-          Map.put(
-            attrs,
-            :organization_id,
-            opts[:organization_id] || OptimalEngine.Organization.default_for(tenant_id)
-          )
-
-        case Workspace.create(attrs) do
-          {:ok, _} ->
-            {:ok, %{workspace_id: target_id, tenant_id: tenant_id, mode: mode, source: source}}
+        case create_keeping_external_id(attrs) do
+          {:ok, workspace, set_aside} ->
+            {:ok,
+             %{
+               workspace_id: target_id,
+               tenant_id: tenant_id,
+               mode: mode,
+               source: source,
+               external_id: workspace.external_id,
+               imported_external_id: set_aside
+             }}
 
           error ->
             error
         end
+    end
+  end
+
+  # An external id names at most one active workspace of a tenant (an
+  # archived holder released it), so a copy into a tenant where an active
+  # workspace holds it, or a bundle carrying a malformed one, gets none: the
+  # copy keeps it as `imported_external_id` and the import summary reports it.
+  defp create_keeping_external_id(%{external_id: nil} = attrs) do
+    with {:ok, workspace} <- Workspace.create(attrs), do: {:ok, workspace, nil}
+  end
+
+  defp create_keeping_external_id(%{external_id: external_id} = attrs) do
+    case Workspace.create(attrs) do
+      {:ok, workspace} ->
+        {:ok, workspace, nil}
+
+      {:error, reason} when reason in [:external_id_taken, :invalid_external_id] ->
+        aside = %{
+          attrs
+          | external_id: nil,
+            metadata: Map.put(attrs.metadata, "imported_external_id", external_id)
+        }
+
+        with {:ok, workspace} <- Workspace.create(aside), do: {:ok, workspace, external_id}
+
+      error ->
+        error
     end
   end
 

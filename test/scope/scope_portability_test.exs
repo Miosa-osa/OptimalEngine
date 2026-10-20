@@ -339,6 +339,123 @@ defmodule OptimalEngine.ScopePortabilityTest do
       assert Workspace.handles(ctx.open) == ["open-renamed"]
     end
 
+    test "a bundle carries the external id into another tenant", ctx do
+      external = "bundle-ext-#{ctx.n}"
+      {:ok, _} = Workspace.update(ctx.open, %{external_id: external, slug: "opened"})
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      assert manifest["workspace"]["external_id"] == external
+
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      # The archived source keeps its external id value and its slugs.
+      assert {:ok, %{status: :archived, external_id: ^external}} = Workspace.get(ctx.open)
+
+      target = "bundle-ext-target-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Target"})
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert summary.workspace_id == "#{target}:opened"
+      assert summary.external_id == external
+      assert summary.imported_external_id == nil
+
+      assert {:ok, %{id: id}} = Workspace.get_by_external_id(external, target)
+      assert id == summary.workspace_id
+
+      # The slugs it held before stay reserved on the Engine it came from only.
+      assert Workspace.handles(id) == ["opened"]
+    end
+
+    test "an import into the tenant of an archived holder keeps the external id", ctx do
+      external = "bundle-archived-#{ctx.n}"
+      {:ok, _} = Workspace.update(ctx.open, %{external_id: external})
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://same.example"
+        })
+
+      copy = "#{ctx.tenant}:copy"
+
+      assert {:ok, summary} =
+               WorkspaceBundle.import(ctx.path, ctx.tenant,
+                 workspace_id: copy,
+                 organization_id: "#{ctx.tenant}:org"
+               )
+
+      assert summary.external_id == external
+      assert summary.imported_external_id == nil
+
+      assert {:ok, %{id: ^copy}} = Workspace.get_by_external_id(external, ctx.tenant)
+      assert {:ok, %{status: :archived, external_id: ^external}} = Workspace.get(ctx.open)
+    end
+
+    test "an import into a tenant where an active workspace holds the external id keeps it aside",
+         ctx do
+      external = "bundle-held-#{ctx.n}"
+      {:ok, _} = Workspace.update(ctx.open, %{external_id: external})
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://same.example"
+        })
+
+      # Another workspace of the tenant was bound to the id after the move.
+      {:ok, _} = Workspace.update(ctx.private, %{external_id: external})
+      copy = "#{ctx.tenant}:copy"
+
+      assert {:ok, summary} =
+               WorkspaceBundle.import(ctx.path, ctx.tenant,
+                 workspace_id: copy,
+                 organization_id: "#{ctx.tenant}:org"
+               )
+
+      assert summary.workspace_id == copy
+      assert summary.external_id == nil
+      assert summary.imported_external_id == external
+
+      assert {:ok, imported} = Workspace.get(copy)
+      assert imported.external_id == nil
+      assert imported.metadata["imported_external_id"] == external
+      refute Map.has_key?(imported.metadata, "external_id")
+
+      assert {:ok, %{id: holder}} = Workspace.get_by_external_id(external, ctx.tenant)
+      assert holder == ctx.private
+    end
+
+    test "metadata writes that set one key keep the workspace's identity", ctx do
+      external = "keys-#{ctx.n}"
+      {:ok, _} = Workspace.update(ctx.open, %{external_id: external, slug: "open-renamed"})
+      {:ok, _} = Scope.set_share_up(ctx.tenant, ctx.open, "none", "user:owner")
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://keys.example"
+        })
+
+      assert {:ok, [[^external, previous, "none", "https://keys.example"]]} =
+               Store.raw_query(
+                 """
+                 SELECT json_extract(metadata, '$.external_id'), json_extract(metadata, '$.previous_slugs'),
+                        json_extract(metadata, '$.share_up'), json_extract(metadata, '$.moved_to')
+                 FROM workspaces WHERE id = ?1
+                 """,
+                 [ctx.open]
+               )
+
+      assert Jason.decode!(previous) == ["open"]
+    end
+
     test "a bundle imports in small batches, parents before children", ctx do
       # The older memory points at the newer one, so in export order the child
       # row comes before its parent.

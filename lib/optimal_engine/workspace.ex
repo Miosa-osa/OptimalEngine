@@ -21,6 +21,15 @@ defmodule OptimalEngine.Workspace do
 
   This module is the facade over the `workspaces` and `workspace_members`
   tables created in migration 026.
+
+  Identity: a workspace's slugs (current and held) are rows of
+  `workspace_handles` (migration 71), and the id another system knows it by
+  is the `external_id` column (migration 72). An external id names at most
+  one active workspace of a tenant (a partial unique index over active rows);
+  an archived workspace keeps the value for history and releases it, so the
+  outside workspace can be bound to another. Nothing un-archives a workspace
+  today: a path that ever does must re-check the binding and answer
+  `:external_id_taken` when another active workspace holds the id.
   """
 
   alias OptimalEngine.Authority.{Evidence, Keys}
@@ -50,6 +59,14 @@ defmodule OptimalEngine.Workspace do
       WHERE ii.seqno = 0 AND ii.name = 'workspace_id'
     )
   """
+  # The id another system knows a workspace by: 1 to 255 printable ASCII
+  # bytes without spaces, compared exactly, held by one active workspace of a
+  # tenant, set once. The `workspaces.external_id` column holds it.
+  @external_id_format ~r/\A[\x21-\x7E]{1,255}\z/
+  # Metadata keys that mirror the external id column and the handles, so an
+  # Engine rolled back to an earlier release still finds them; a metadata
+  # replacement never sets them.
+  @identity_keys ~w(previous_slugs external_id)
   @allowed_roles [:owner, :member, :viewer]
 
   @type status :: :active | :archived
@@ -65,6 +82,7 @@ defmodule OptimalEngine.Workspace do
           status: status(),
           created_at: String.t() | nil,
           archived_at: String.t() | nil,
+          external_id: String.t() | nil,
           metadata: map()
         }
 
@@ -77,6 +95,7 @@ defmodule OptimalEngine.Workspace do
             status: :active,
             created_at: nil,
             archived_at: nil,
+            external_id: nil,
             metadata: %{}
 
   # ── Defaults ────────────────────────────────────────────────────────────
@@ -154,8 +173,27 @@ defmodule OptimalEngine.Workspace do
   end
 
   @doc """
+  Returns the active workspace another system knows by `external_id` in
+  `tenant_id` (its binding), or `{:error, :not_found}`. Archived workspaces
+  that held the id are listed by `list/1` with `status: :all`.
+  """
+  @spec get_by_external_id(String.t(), String.t()) :: {:ok, t()} | {:error, :not_found}
+  def get_by_external_id(external_id, tenant_id)
+      when is_binary(external_id) and is_binary(tenant_id) do
+    case Store.raw_query(
+           select_sql() <> " WHERE tenant_id = ?1 AND external_id = ?2 AND status = 'active'",
+           [tenant_id, external_id]
+         ) do
+      {:ok, [row]} -> {:ok, row_to_struct(row)}
+      {:ok, []} -> {:error, :not_found}
+      other -> other
+    end
+  end
+
+  @doc """
   Lists workspaces in a tenant. Options:
     * `:status`    — `:active` (default) | `:archived` | `:all`
+    * `:external_id`: only the workspaces that carry this external id
     * `:tenant_id` — defaults to the default tenant
     * `:limit`     — max rows (default 50)
     * `:offset`    — row offset for pagination (default 0)
@@ -168,7 +206,7 @@ defmodule OptimalEngine.Workspace do
     limit = Keyword.get(opts, :limit, 50)
     offset = Keyword.get(opts, :offset, 0)
 
-    {where, params} = list_scope(tenant_id, organization_id, status)
+    {where, params} = list_scope(tenant_id, organization_id, status, opts[:external_id])
 
     sql =
       select_sql() <>
@@ -185,7 +223,8 @@ defmodule OptimalEngine.Workspace do
   end
 
   @doc """
-  Counts workspaces in a tenant. Accepts the same `:tenant_id` and `:status` opts as `list/1`.
+  Counts workspaces in a tenant. Accepts the same `:tenant_id`, `:status`,
+  and `:external_id` opts as `list/1`.
   """
   @spec count(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def count(opts \\ []) do
@@ -193,7 +232,7 @@ defmodule OptimalEngine.Workspace do
     organization_id = Keyword.get(opts, :organization_id)
     status = Keyword.get(opts, :status, :active)
 
-    {where, params} = list_scope(tenant_id, organization_id, status)
+    {where, params} = list_scope(tenant_id, organization_id, status, opts[:external_id])
     sql = "SELECT COUNT(*) FROM workspaces" <> where
 
     case Store.raw_query(sql, params) do
@@ -209,31 +248,38 @@ defmodule OptimalEngine.Workspace do
 
   @doc """
   Creates a workspace. Required: `slug`, `name`. Optional: `tenant_id`
-  (defaults to default tenant), `description`, `metadata`. Slug becomes
-  part of the id (`tenant_id:slug` for non-default tenants, plain
-  `default` for the singleton default-tenant default-workspace case).
+  (defaults to default tenant), `description`, `metadata`, `external_id`
+  (or `metadata["external_id"]`). Slug becomes part of the id
+  (`tenant_id:slug` for non-default tenants, plain `default` for the
+  singleton default-tenant default-workspace case), and becomes the
+  workspace's handle.
   A slug is lowercase letters, digits and dashes (`check_slug/1`).
-  Errors: `:invalid_slug`, `:slug_reserved`, `:slug_taken`.
+  Errors: `:invalid_slug`, `:slug_reserved`, `:slug_taken`, `:external_id_taken`,
+  `:invalid_external_id`.
   """
   @spec create(map()) :: {:ok, t()} | {:error, term()}
   def create(%{slug: slug, name: name} = attrs) when is_binary(slug) and is_binary(name) do
     tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
     organization_id = Map.get(attrs, :organization_id, Organization.default_id())
     description = Map.get(attrs, :description)
-    metadata = Map.get(attrs, :metadata, %{})
+    metadata = Map.get(attrs, :metadata) || %{}
     id = Map.get(attrs, :id) || derive_id(tenant_id, slug)
 
-    sql = """
-    INSERT INTO workspaces (id, tenant_id, organization_id, slug, name, description, status, metadata)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7)
-    """
-
-    params = [id, tenant_id, organization_id, slug, name, description, Jason.encode!(metadata)]
-
     with :ok <- check_slug(slug),
+         {:ok, external_id} <- requested_external_id(attrs, metadata),
          {:ok, organization} <- Organization.get(organization_id),
          true <- organization.tenant_id == tenant_id || {:error, :organization_tenant_mismatch},
-         {:ok, _} <- insert_unless_taken(tenant_id, slug, id, sql, params) do
+         workspace = %__MODULE__{
+           id: id,
+           tenant_id: tenant_id,
+           organization_id: organization_id,
+           slug: slug,
+           name: name,
+           description: description,
+           external_id: external_id,
+           metadata: with_identity(metadata, external_id, [])
+         },
+         {:ok, _} <- insert_unless_taken(workspace) do
       root = Application.get_env(:optimal_engine, :root_path, File.cwd!())
 
       case Filesystem.provision(id, root: root) do
@@ -243,29 +289,16 @@ defmodule OptimalEngine.Workspace do
               :ok
 
             {:error, reason} ->
-              require Logger
-
               Logger.warning(
                 "[Workspace.create] config write failed for #{slug}: #{inspect(reason)}"
               )
           end
 
         {:error, reason} ->
-          require Logger
           Logger.warning("[Workspace.create] FS provision failed for #{slug}: #{inspect(reason)}")
       end
 
-      {:ok,
-       %__MODULE__{
-         id: id,
-         tenant_id: tenant_id,
-         organization_id: organization_id,
-         slug: slug,
-         name: name,
-         description: description,
-         status: :active,
-         metadata: metadata
-       }}
+      {:ok, workspace}
     else
       false -> {:error, :organization_tenant_mismatch}
       other -> other
@@ -276,43 +309,78 @@ defmodule OptimalEngine.Workspace do
 
   @doc """
   Updates a workspace's mutable fields: `:name`, `:description`,
-  `:metadata`, and `:slug`. Tenant and id are immutable.
+  `:metadata`, `:slug`, and `:external_id`. Tenant and id are immutable.
 
   A new slug renames the workspace without moving it: the id stays, so every
   row, file, key, and `optimal://` link that names the id keeps working. The
   slug it replaces stays this workspace's handle (`workspace_handles`,
-  `get_by_handle/2`), so no other workspace can take it, even when the
-  workspace had no handle row yet. A slug whose derived id already holds rows
-  (written to that id before it was registered) is refused, so a rename never
-  adopts them; the check reads the tables indexed by workspace, which hold
-  the documents, chunks, memories, nodes, and wiki.
+  `get_by_handle/2`, mirrored in `metadata.previous_slugs`), so no other
+  workspace can take it, even when the workspace had no handle row yet. A
+  slug whose derived id already holds rows (written to that id before it was
+  registered) is refused, so a rename never adopts them; the check reads the
+  tables indexed by workspace, which hold the documents, chunks, memories,
+  nodes, and wiki.
 
   Every rename is recorded in the authority evidence chain
   (`workspace.renamed`) in the same transaction as the rename, so one never
   commits without the other. An Engine that cannot sign evidence (no evidence
-  key) still renames and logs a warning.
+  key) still renames and logs a warning. Options for the rename's record:
+  `:actor` (who renamed it) and `:authority` (the grants they acted under, a
+  list of strings; the API passes the key's scopes, or `["local"]` for an
+  anonymous local caller).
 
-  Options for the rename's record: `:actor` (who renamed it) and `:authority`
-  (the grants they acted under, a list of strings; the API passes the key's
-  scopes, or `["local"]` for an anonymous local caller).
-  Errors: `:invalid_slug`, `:slug_reserved`, `:slug_taken`, `:slug_has_data`,
-  `:default_workspace_slug`.
+  An external id (`:external_id`, or `"external_id"` inside `:metadata`) can
+  be set when the workspace has none and no other active workspace of the
+  tenant holds it; once set it never changes, because the system that holds
+  it finds the workspace by it. Replacing `:metadata` keeps `previous_slugs`
+  and `external_id`.
+
+  The row is read, checked, and written in one Store transaction, so
+  concurrent updates never undo each other's slug or external id.
+  Errors: `:not_found`, `:invalid_slug`, `:slug_reserved`, `:slug_taken`,
+  `:slug_has_data`, `:default_workspace_slug`, `:invalid_external_id`,
+  `:external_id_taken`, `:external_id_immutable`.
   """
   @spec update(String.t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
   def update(id, attrs, opts \\ []) when is_binary(id) and is_map(attrs) do
-    with {:ok, current} <- get(id),
-         {:ok, slug} <- next_slug(current, Map.get(attrs, :slug)) do
-      updated = %{
-        current
-        | name: Map.get(attrs, :name, current.name),
-          description: Map.get(attrs, :description, current.description),
-          metadata: Map.get(attrs, :metadata, current.metadata),
-          slug: slug
-      }
+    given_metadata = Map.get(attrs, :metadata)
 
-      with {:ok, _} <- write_unless_taken(current, updated, opts), do: {:ok, updated}
+    # Fetched before the transaction opens, because creating a key writes to
+    # the Store; a workspace's tenant never changes, so the read is safe.
+    evidence_key = if Map.has_key?(attrs, :slug), do: rename_evidence_key(id)
+
+    with {:ok, requested} <- requested_external_id(attrs, given_metadata || %{}),
+         {:ok, {_current, updated}} <-
+           Store.transaction(
+             &write_unless_taken(&1, id, attrs, given_metadata, requested, {evidence_key, opts})
+           ) do
+      {:ok, updated}
     end
   end
+
+  # The external id a create or update asks for: `:external_id`, else
+  # `metadata["external_id"]`; both given must agree.
+  defp requested_external_id(attrs, metadata) do
+    from_metadata = if is_map(metadata), do: Map.get(metadata, "external_id")
+
+    case {Map.get(attrs, :external_id), from_metadata} do
+      {nil, nil} -> {:ok, nil}
+      {nil, given} -> validated_external_id(given)
+      {given, nil} -> validated_external_id(given)
+      {given, given} -> validated_external_id(given)
+      _different -> {:error, :invalid_external_id}
+    end
+  end
+
+  defp validated_external_id(id) do
+    if is_binary(id) and Regex.match?(@external_id_format, id),
+      do: {:ok, id},
+      else: {:error, :invalid_external_id}
+  end
+
+  @doc "True when `id` is a valid external id: 1 to 255 printable ASCII bytes, no spaces."
+  @spec valid_external_id?(term()) :: boolean()
+  def valid_external_id?(id), do: match?({:ok, _}, validated_external_id(id))
 
   defp next_slug(current, nil), do: {:ok, current.slug}
   defp next_slug(%{slug: slug}, slug), do: {:ok, slug}
@@ -336,60 +404,126 @@ defmodule OptimalEngine.Workspace do
     end
   end
 
+  defp next_external_id(current, nil), do: {:ok, current.external_id}
+
+  defp next_external_id(current, external_id) do
+    case current.external_id do
+      nil -> {:ok, external_id}
+      ^external_id -> {:ok, external_id}
+      _other -> {:error, :external_id_immutable}
+    end
+  end
+
+  # Metadata as stored: the caller's keys, with the identity keys mirroring
+  # the external id column and the handles the workspace held before.
+  defp with_identity(metadata, external_id, held) do
+    metadata
+    |> Map.drop(@identity_keys)
+    |> then(fn m -> if external_id, do: Map.put(m, "external_id", external_id), else: m end)
+    |> then(fn m -> if held == [], do: m, else: Map.put(m, "previous_slugs", held) end)
+  end
+
   # Each conflict check runs in one Store transaction with its write, so two
-  # requests can never both take one slug.
-  defp insert_unless_taken(tenant_id, slug, id, sql, params) do
+  # requests can never both take one slug or one external id.
+  defp insert_unless_taken(workspace) do
+    %{tenant_id: tenant_id, id: id, slug: slug, external_id: external_id} = workspace
+
     Store.transaction(fn txn ->
-      if handle_taken?(txn, tenant_id, slug, id, nil) do
-        {:error, :slug_taken}
-      else
-        with {:ok, _} <- Store.txn_execute(txn, sql, params),
-             do: add_handle(txn, tenant_id, slug, id)
+      cond do
+        handle_taken?(txn, tenant_id, slug, id, nil) ->
+          {:error, :slug_taken}
+
+        external_id_taken?(txn, tenant_id, external_id, nil) ->
+          {:error, :external_id_taken}
+
+        true ->
+          with {:ok, _} <- insert(txn, workspace), do: add_handle(txn, tenant_id, slug, id)
       end
     end)
   end
 
-  defp write_unless_taken(current, updated, opts) do
-    tenant_id = current.tenant_id
-    renamed? = updated.slug != current.slug
-    # Fetched before the transaction opens: creating a key writes to the Store.
-    evidence_key = if renamed?, do: evidence_key(current)
+  defp insert(txn, workspace) do
+    case Store.txn_execute(
+           txn,
+           """
+           INSERT INTO workspaces (id, tenant_id, organization_id, slug, name, description, status, metadata, external_id)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8)
+           """,
+           [
+             workspace.id,
+             workspace.tenant_id,
+             workspace.organization_id,
+             workspace.slug,
+             workspace.name,
+             workspace.description,
+             Jason.encode!(workspace.metadata),
+             workspace.external_id
+           ]
+         ) do
+      {:ok, _} = ok -> ok
+      {:error, reason} -> {:error, constraint(reason)}
+    end
+  end
 
-    Store.transaction(fn txn ->
-      with :ok <- if(renamed?, do: check_target(txn, current, updated), else: :ok),
-           {:ok, _} <-
-             Store.txn_execute(
-               txn,
-               "UPDATE workspaces SET name = ?1, description = ?2, metadata = ?3, slug = ?4 WHERE id = ?5",
-               [
-                 updated.name,
-                 updated.description,
-                 Jason.encode!(updated.metadata),
-                 updated.slug,
-                 current.id
-               ]
-             ),
-           # The slug it leaves stays its handle even if no row held it yet.
-           {:ok, _} <- add_handle(txn, tenant_id, current.slug, current.id),
-           {:ok, _} <- add_handle(txn, tenant_id, updated.slug, current.id),
+  # The whole update runs on the row as read inside the transaction: the
+  # slug, the external id and the metadata are computed from it, checked,
+  # and written before any other writer can change it.
+  defp write_unless_taken(txn, id, attrs, given_metadata, requested, {evidence_key, opts}) do
+    with {:ok, current} <- locked(txn, id),
+         {:ok, slug} <- next_slug(current, Map.get(attrs, :slug)),
+         {:ok, external_id} <- next_external_id(current, requested),
+         :ok <- unless_taken(txn, current, slug, external_id),
+         {:ok, held} <- hold_handles(txn, current, slug) do
+      updated = %{
+        current
+        | name: Map.get(attrs, :name, current.name),
+          description: Map.get(attrs, :description, current.description),
+          slug: slug,
+          external_id: external_id,
+          metadata: with_identity(given_metadata || current.metadata, external_id, held)
+      }
+
+      with {:ok, updated} <- write(txn, updated),
            :ok <-
-             if(renamed?, do: record_rename(txn, evidence_key, current, updated, opts), else: :ok) do
-        {:ok, :written}
+             if(slug != current.slug,
+               do: record_rename(txn, evidence_key, current, updated, opts),
+               else: :ok
+             ) do
+        {:ok, {current, updated}}
       end
-    end)
+    end
+  end
+
+  defp locked(txn, id) do
+    case Store.txn_query(txn, select_sql() <> " WHERE id = ?1", [id]) do
+      {:ok, [row]} -> {:ok, row_to_struct(row)}
+      {:ok, []} -> {:error, :not_found}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp unless_taken(txn, current, slug, external_id) do
+    %{tenant_id: tenant_id, id: id} = current
+    derived_id = derive_id(tenant_id, slug)
+    renamed? = slug != current.slug
+
+    with :ok <-
+           if(renamed?, do: rename_target_free(txn, tenant_id, slug, derived_id, id), else: :ok) do
+      if external_id != current.external_id and
+           external_id_taken?(txn, tenant_id, external_id, id),
+         do: {:error, :external_id_taken},
+         else: :ok
+    end
   end
 
   # A rename needs a slug no other workspace holds, and an id that holds no
   # rows of its own.
-  defp check_target(txn, current, updated) do
-    tenant_id = current.tenant_id
-    derived_id = derive_id(tenant_id, updated.slug)
-
+  defp rename_target_free(txn, tenant_id, slug, derived_id, id) do
     cond do
-      handle_taken?(txn, tenant_id, updated.slug, derived_id, current.id) ->
+      handle_taken?(txn, tenant_id, slug, derived_id, id) ->
         {:error, :slug_taken}
 
-      derived_id == current.id ->
+      derived_id == id ->
         :ok
 
       true ->
@@ -401,12 +535,68 @@ defmodule OptimalEngine.Workspace do
     end
   end
 
+  # The workspace holds its old and new slugs (one written before the handles
+  # table may have no row yet). Returns the slugs it held before, oldest first.
+  defp hold_handles(txn, current, slug) do
+    with {:ok, _} <- add_handle(txn, current.tenant_id, current.slug, current.id),
+         {:ok, _} <- add_handle(txn, current.tenant_id, slug, current.id),
+         {:ok, rows} <-
+           Store.txn_query(
+             txn,
+             "SELECT slug FROM workspace_handles WHERE workspace_id = ?1 AND slug != ?2 ORDER BY created_at, rowid",
+             [current.id, slug]
+           ) do
+      {:ok, List.flatten(rows)}
+    end
+  end
+
+  # The external id is bound only where the row has none or the same one and
+  # no other active workspace of the tenant holds it, so the write itself can
+  # never replace a bound id or bind a held one.
+  defp write(txn, updated) do
+    case Store.txn_execute(
+           txn,
+           """
+           UPDATE workspaces SET name = ?1, description = ?2, metadata = ?3, slug = ?4, external_id = ?5
+           WHERE id = ?6 AND (external_id IS NULL OR external_id = ?5)
+             AND (?5 IS NULL OR NOT EXISTS (
+               SELECT 1 FROM workspaces holder
+               WHERE holder.tenant_id = workspaces.tenant_id AND holder.external_id = ?5
+                 AND holder.status = 'active' AND holder.id != workspaces.id))
+           """,
+           [
+             updated.name,
+             updated.description,
+             Jason.encode!(updated.metadata),
+             updated.slug,
+             updated.external_id,
+             updated.id
+           ]
+         ) do
+      {:ok, 1} -> {:ok, updated}
+      {:ok, 0} -> {:error, :not_found}
+      {:error, reason} -> {:error, constraint(reason)}
+    end
+  end
+
   defp add_handle(txn, tenant_id, slug, id) do
     Store.txn_execute(
       txn,
       "INSERT OR IGNORE INTO workspace_handles (tenant_id, slug, workspace_id) VALUES (?1, ?2, ?3)",
       [tenant_id, slug, id]
     )
+  end
+
+  # The unique indexes stand behind the checks above.
+  defp constraint(reason) do
+    message = if is_binary(reason), do: reason, else: inspect(reason)
+
+    cond do
+      message =~ "workspaces.external_id" -> :external_id_taken
+      message =~ "workspaces.slug" or message =~ "workspace_handles" -> :slug_taken
+      message =~ "workspaces.id" -> :slug_taken
+      true -> reason
+    end
   end
 
   # A slug is taken when another workspace of the tenant uses it now or held
@@ -422,6 +612,21 @@ defmodule OptimalEngine.Workspace do
         LIMIT 1
         """,
         [tenant_id, slug, id, except_id || ""]
+      )
+
+    rows != []
+  end
+
+  # Only an active workspace holds an external id; an archived one released it.
+  defp external_id_taken?(_txn, _tenant_id, nil, _except_id), do: false
+
+  defp external_id_taken?(txn, tenant_id, external_id, except_id) do
+    {:ok, rows} =
+      Store.txn_query(
+        txn,
+        "SELECT 1 FROM workspaces WHERE tenant_id = ?1 AND external_id = ?2 AND id != ?3 " <>
+          "AND status = 'active' LIMIT 1",
+        [tenant_id, external_id, except_id || ""]
       )
 
     rows != []
@@ -446,6 +651,13 @@ defmodule OptimalEngine.Workspace do
           {:error, _reason} = error -> {:halt, error}
         end
       end)
+    end
+  end
+
+  defp rename_evidence_key(id) do
+    case get(id) do
+      {:ok, workspace} -> evidence_key(workspace)
+      _ -> nil
     end
   end
 
@@ -506,7 +718,11 @@ defmodule OptimalEngine.Workspace do
     end
   end
 
-  @doc "Soft-deletes a workspace by setting `status = 'archived'`."
+  @doc """
+  Soft-deletes a workspace by setting `status = 'archived'`. It keeps its
+  handles and its external id value; the external id is released, so another
+  workspace of the tenant can be bound to it.
+  """
   @spec archive(String.t()) :: :ok | {:error, term()}
   def archive(id) when is_binary(id) do
     case Store.raw_query(
@@ -591,7 +807,7 @@ defmodule OptimalEngine.Workspace do
   def workspaces_of(principal_id) when is_binary(principal_id) do
     sql = """
     SELECT w.id, w.tenant_id, w.organization_id, w.slug, w.name, w.description, w.status,
-           w.created_at, w.archived_at, w.metadata, m.role
+           w.created_at, w.archived_at, w.metadata, w.external_id, m.role
     FROM workspaces w
     INNER JOIN workspace_members m ON m.workspace_id = w.id
     WHERE m.principal_id = ?1 AND m.ended_at IS NULL AND w.status = 'active'
@@ -602,7 +818,7 @@ defmodule OptimalEngine.Workspace do
       {:ok, rows} ->
         {:ok,
          Enum.map(rows, fn row ->
-           {ws_row, [role]} = Enum.split(row, 10)
+           {ws_row, [role]} = Enum.split(row, 11)
            {row_to_struct(ws_row), String.to_atom(role)}
          end)}
 
@@ -628,14 +844,19 @@ defmodule OptimalEngine.Workspace do
   end
 
   defp select_sql do
-    "SELECT id, tenant_id, organization_id, slug, name, description, status, created_at, archived_at, metadata FROM workspaces"
+    "SELECT id, tenant_id, organization_id, slug, name, description, status, created_at, archived_at, metadata, external_id FROM workspaces"
   end
 
-  defp list_scope(tenant_id, organization_id, status) do
+  defp list_scope(tenant_id, organization_id, status, external_id) do
     {clauses, params} =
       if organization_id,
         do: {["tenant_id = ?1", "organization_id = ?2"], [tenant_id, organization_id]},
         else: {["tenant_id = ?1"], [tenant_id]}
+
+    {clauses, params} =
+      if external_id,
+        do: {clauses ++ ["external_id = ?#{length(params) + 1}"], params ++ [external_id]},
+        else: {clauses, params}
 
     case status do
       :all ->
@@ -662,8 +883,11 @@ defmodule OptimalEngine.Workspace do
          status,
          created_at,
          archived_at,
-         meta_json
+         meta_json,
+         external_id
        ]) do
+    metadata = decode_json(meta_json)
+
     %__MODULE__{
       id: id,
       tenant_id: tenant_id,
@@ -674,7 +898,13 @@ defmodule OptimalEngine.Workspace do
       status: String.to_atom(status),
       created_at: created_at,
       archived_at: archived_at,
-      metadata: decode_json(meta_json)
+      external_id: external_id,
+      # The column is the truth; metadata mirrors it for older readers.
+      metadata:
+        if(external_id,
+          do: Map.put(metadata, "external_id", external_id),
+          else: Map.delete(metadata, "external_id")
+        )
     }
   end
 

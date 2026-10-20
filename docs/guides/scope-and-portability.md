@@ -32,6 +32,7 @@ Nothing is copied: a workspace Engine's data is only queried.
 The id never changes, so every row, file, key, and `optimal://` link that names the id keeps working.
 Every slug a workspace holds, the current one and those it had before a rename, is a row of `workspace_handles` (tenant, slug, workspace id), so a slug is claimed by a unique key in the same transaction that writes it.
 No other workspace of the tenant can take a held slug (`409 slug_taken`), and a topology file written with one still names this workspace.
+The slugs held before a rename are also mirrored in `metadata.previous_slugs`, so an Engine rolled back to an earlier release still finds them.
 `GET /api/resolve?uri=optimal://<tenant>:<slug>/...` written with any slug the workspace holds or held answers `local` with the address by its id.
 A request that names `<tenant>:<slug>` where a workspace id belongs, and that slug is not the id, answers `409 {"error": "not_a_workspace_id", "workspace_id": "<id>"}` to a key that covers the workspace (`403 workspace_scope_denied` to any other key), so nothing is written beside the real workspace.
 A rename onto a slug whose id (`<tenant>:<slug>`) already holds rows, written there before any workspace had that id, is refused (`409 slug_has_data`), so a rename never adopts them.
@@ -51,6 +52,22 @@ On the importing Engine a link written with one does not resolve, and any other 
 A topology document lists a renamed workspace as `{"slug": "<slug>", "id": "<id>"}` where an unrenamed one is just its slug.
 An Engine from before workspaces could be renamed rejects a document with that entry (`invalid_document`, `invalid workspace entry`); a document that Engine exported imports here unchanged.
 A topology import also refuses, before it writes anything, a document that names a workspace slug the Engine cannot create (invalid or reserved), and it stops at the first workspace that cannot be created and names it.
+
+## External ids
+
+A workspace can carry the id another system knows it by, so that system finds it whatever its slug or name becomes.
+`POST /api/workspaces {"slug", "name", "external_id": "<id>"}` sets it at creation, and `PATCH /api/workspaces/:id {"external_id"}` (or `"external_id"` inside a metadata replacement) sets it once on a workspace that has none.
+It is stored in the `workspaces.external_id` column, mirrored in `metadata.external_id` for one release, and returned as `external_id` by `GET /api/workspaces` and `GET /api/workspaces/:id`.
+An external id is 1 to 255 printable ASCII bytes without spaces (`!` to `~`) and is compared exactly, so `ABC` and `abc` are different ids; anything else answers `400 invalid_external_id`, in a create, an update, or a lookup.
+At most one active workspace of a tenant holds an external id (`409 external_id_taken`): the tenant is the scope a mirror reads and writes, and one outside id must name one live workspace there.
+Once set on a workspace it never changes (`409 external_id_immutable`), because the system that holds it keys its own records on it.
+To bind an outside workspace to a different Engine workspace, archive the old workspace, then create or bind another: an archived workspace keeps the value for history and releases it.
+`GET /api/workspaces?external_id=<x>` lists every workspace of the tenant that carries the id, archived ones included unless `status` is given, each with its `status`, within what the caller's key covers; the active one is the binding (`Workspace.get_by_external_id/2` returns only that one).
+Nothing un-archives a workspace; a route that ever does must check the binding again and answer `409 external_id_taken` when another active workspace holds the id.
+A key with `topology:write` that is restricted to some workspaces can still learn from `409 external_id_taken` that an id is held in its tenant, the same way `409 slug_taken` tells it a slug is taken.
+A rename keeps it, and so does a metadata replacement.
+A workspace bundle carries it; an import into a tenant where an active workspace holds it creates the copy without it, keeps it as `metadata.imported_external_id`, and reports it as `imported_external_id` in the import summary.
+Portable topology documents name workspaces by slug (and by id for a renamed one), so they do not carry it.
 
 ## Moving a workspace (split, merge, seed)
 

@@ -10,7 +10,7 @@ defmodule OptimalEngine.Topology.Portable do
           name: Example Co
           status: active           # active | dormant | archived
           role: Operating company   # any other fields are kept as metadata
-          workspaces: [sales, delivery, {slug: revenue, id: "example:old-sales"}]
+          workspaces: [sales, delivery, {slug: revenue, id: "example:old-sales", external_id: ws-7}]
       people:
         - id: user:jane
           kind: user               # user | agent | service
@@ -19,10 +19,15 @@ defmodule OptimalEngine.Topology.Portable do
 
   A workspace is listed by its slug. A renamed workspace keeps the id its
   first slug derived, so it is listed as `{slug, id}`; an import creates it
-  with that id when the id belongs to the importing tenant and is free. An
-  Engine from before workspaces could be renamed rejects a document that
-  carries a `{slug, id}` entry (`invalid workspace entry`); a document it
-  exported imports here unchanged.
+  with that id when the id belongs to the importing tenant and is free. A
+  workspace with an external id is listed with it (`{slug, external_id}`);
+  an import sets it on a workspace that has none and never changes one
+  that is set. As everywhere, only an active workspace holds an external
+  id: an archived holder does not block an import, and an active holder of
+  another workspace refuses the whole import (`:external_id_taken`) before
+  anything is written. An Engine from before workspaces could be renamed
+  rejects a document that carries a `{slug, id}` entry (`invalid workspace
+  entry`); a document it exported imports here unchanged.
 
   A workspace slug is lowercase letters, digits and dashes (at most 128
   characters) and not the name of a directory of the engine root, as for
@@ -53,12 +58,14 @@ defmodule OptimalEngine.Topology.Portable do
     organizations = Map.get(document, "organizations", [])
     people = Map.get(document, "people", [])
 
-    with :ok <- validate(organizations, people) do
+    with :ok <- validate(organizations, people),
+         :ok <- external_ids_free(tenant_id, organizations) do
       summary = %{
         organizations_created: 0,
         organizations_updated: 0,
         workspaces_created: 0,
         workspaces_moved: 0,
+        external_ids_set: 0,
         people: 0
       }
 
@@ -77,9 +84,57 @@ defmodule OptimalEngine.Topology.Portable do
          )}
       end
     end
+  catch
+    {:workspace_not_written, reason} -> {:error, reason}
   end
 
   def import(_tenant_id, _document), do: {:error, :invalid_document}
+
+  # A workspace an import could not write (another active workspace took
+  # its external id after the check) ends the import with the same error.
+  defp workspace!(result) do
+    case result do
+      {:ok, workspace} -> workspace
+      {:error, reason} -> throw({:workspace_not_written, reason})
+    end
+  end
+
+  # Every external id the document would set must be free: held by no active
+  # workspace, or by the workspace the entry names, and named once.
+  defp external_ids_free(tenant_id, organizations) do
+    wanted =
+      Enum.flat_map(organizations, fn org ->
+        Enum.flat_map(org["workspaces"] || [], fn entry ->
+          with external_id when is_binary(external_id) <- entry_external_id(entry),
+               target = existing(tenant_id, entry),
+               true <- is_nil(target) or is_nil(target.external_id) do
+            [{external_id, target && target.id}]
+          else
+            _ -> []
+          end
+        end)
+      end)
+
+    duplicated? =
+      wanted |> Enum.map(&elem(&1, 0)) |> Enum.frequencies() |> Enum.any?(&(elem(&1, 1) > 1))
+
+    held? =
+      Enum.any?(wanted, fn {external_id, target_id} ->
+        case Workspace.get_by_external_id(external_id, tenant_id) do
+          {:ok, holder} -> holder.id != target_id
+          {:error, :not_found} -> false
+        end
+      end)
+
+    if duplicated? or held?, do: {:error, :external_id_taken}, else: :ok
+  end
+
+  defp existing(tenant_id, entry) do
+    case existing_workspace(tenant_id, entry_id(entry, tenant_id), entry_slug(entry)) do
+      {:ok, workspace} -> workspace
+      {:error, :not_found} -> nil
+    end
+  end
 
   @doc "Exports `tenant_id` in the import format."
   @spec export(String.t()) :: map()
@@ -265,21 +320,45 @@ defmodule OptimalEngine.Topology.Portable do
   defp ensure_workspace(tenant_id, org_id, entry, acc) do
     slug = entry_slug(entry)
     id = entry_id(entry, tenant_id)
+    external_id = entry_external_id(entry)
 
     case existing_workspace(tenant_id, id, slug) do
-      {:ok, %{organization_id: ^org_id}} ->
-        {:ok, acc}
+      {:ok, %{organization_id: ^org_id} = workspace} ->
+        {:ok, set_external_id(workspace, external_id, acc)}
 
       {:ok, workspace} ->
-        with {:ok, _} <- Workspace.assign_organization(workspace.id, org_id),
-             do: {:ok, %{acc | workspaces_moved: acc.workspaces_moved + 1}}
+        with {:ok, _} <- Workspace.assign_organization(workspace.id, org_id) do
+          acc = %{acc | workspaces_moved: acc.workspaces_moved + 1}
+          {:ok, set_external_id(workspace, external_id, acc)}
+        end
 
       {:error, :not_found} ->
-        attrs = %{tenant_id: tenant_id, organization_id: org_id, slug: slug, name: slug}
+        attrs = %{
+          tenant_id: tenant_id,
+          organization_id: org_id,
+          slug: slug,
+          name: slug,
+          external_id: external_id
+        }
+
         attrs = if id, do: Map.put(attrs, :id, id), else: attrs
 
-        with {:ok, _} <- Workspace.create(attrs),
-             do: {:ok, %{acc | workspaces_created: acc.workspaces_created + 1}}
+        case Workspace.create(attrs) do
+          {:ok, _} -> {:ok, %{acc | workspaces_created: acc.workspaces_created + 1}}
+          # Another active workspace took the id after the check: the same
+          # answer the check gives, not a document error.
+          {:error, :external_id_taken} -> throw({:workspace_not_written, :external_id_taken})
+          {:error, _} = error -> error
+        end
+    end
+  end
+
+  defp set_external_id(workspace, external_id, acc) do
+    if external_id && is_nil(workspace.external_id) do
+      workspace!(Workspace.update(workspace.id, %{external_id: external_id}))
+      %{acc | external_ids_set: acc.external_ids_set + 1}
+    else
+      acc
     end
   end
 
@@ -290,17 +369,27 @@ defmodule OptimalEngine.Topology.Portable do
     end
   end
 
-  # A workspace whose id is not the one its slug derives is listed with it.
+  # A workspace whose id is not the one its slug derives is listed with it,
+  # and one with an external id with that.
   defp workspace_entry(tenant_id, workspace) do
-    if workspace.id == Workspace.derive_id(tenant_id, workspace.slug),
-      do: workspace.slug,
-      else: %{"slug" => workspace.slug, "id" => workspace.id}
+    entry =
+      %{"slug" => workspace.slug}
+      |> then(fn e ->
+        if workspace.id == Workspace.derive_id(tenant_id, workspace.slug),
+          do: e,
+          else: Map.put(e, "id", workspace.id)
+      end)
+      |> maybe_put("external_id", workspace.external_id)
+
+    if map_size(entry) == 1, do: workspace.slug, else: entry
   end
 
   defp workspace_entry?(slug) when is_binary(slug), do: slug?(slug)
 
   defp workspace_entry?(%{"slug" => slug} = entry) when is_binary(slug),
-    do: slug?(slug) and (is_nil(entry["id"]) or is_binary(entry["id"]))
+    do:
+      slug?(slug) and (is_nil(entry["id"]) or is_binary(entry["id"])) and
+        (is_nil(entry["external_id"]) or Workspace.valid_external_id?(entry["external_id"]))
 
   defp workspace_entry?(_entry), do: false
 
@@ -313,6 +402,11 @@ defmodule OptimalEngine.Topology.Portable do
   end
 
   defp entry_id(_entry, _tenant_id), do: nil
+
+  defp entry_external_id(%{"external_id" => external_id}) when is_binary(external_id),
+    do: external_id
+
+  defp entry_external_id(_entry), do: nil
 
   defp upsert_person(tenant_id, person) do
     kind = String.to_existing_atom(person["kind"])
