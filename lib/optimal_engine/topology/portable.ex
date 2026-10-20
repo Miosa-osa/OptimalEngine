@@ -20,7 +20,10 @@ defmodule OptimalEngine.Topology.Portable do
   Import is idempotent: existing organizations and workspaces (matched by
   slug) are updated, missing ones created, and nothing is deleted. Fields the
   Engine does not model are stored in metadata and exported back, so an
-  import followed by an export returns the same document.
+  import followed by an export returns the same document, plus the tenant's
+  compatibility organization: every tenant owns one with slug `default`, which
+  holds workspaces created before organizations were first-class, and it is
+  exported even when it is empty.
   """
 
   alias OptimalEngine.{Organization, Store, Workspace}
