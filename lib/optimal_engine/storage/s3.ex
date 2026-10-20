@@ -770,7 +770,7 @@ defmodule OptimalEngine.Storage.S3 do
     if optional("OPTIMAL_S3_TRACE", "") == "1" do
       Logger.debug(fn ->
         """
-        s3 sign trace (endpoint #{config.endpoint.scheme}://#{config.endpoint.authority}, bucket #{config.bucket})
+        s3 sign trace (endpoint #{config.endpoint.scheme}://#{config.endpoint.authority}#{endpoint_path(config)}, bucket #{config.bucket})
         canonical request:
         #{canonical_request}
         string to sign:
@@ -802,11 +802,26 @@ defmodule OptimalEngine.Storage.S3 do
   # "/<bucket>/<key>" in path style and "/<key>" in virtual-hosted style. The
   # two must be derived in one place or the signature covers a path that was
   # never sent.
+  # An endpoint may live under a path, which is how MIOSA serves its own
+  # S3-compatible gateway (`/api/v1/storage/s3`). The path is part of the
+  # request and of the signature; dropping it sends every object call to the
+  # API root, where it 404s.
   defp address_path(%{path_style: true} = config, key) do
-    "/" <> encode_segment(config.bucket) <> canonical_uri(config, key)
+    endpoint_path(config) <> "/" <> encode_segment(config.bucket) <> canonical_uri(config, key)
   end
 
-  defp address_path(config, key), do: canonical_uri(config, key)
+  defp address_path(config, key), do: endpoint_path(config) <> canonical_uri(config, key)
+
+  @doc false
+  # The exact path that is signed and sent. Public so a test can pin the
+  # endpoint-path rule without an HTTP round trip.
+  def signed_path(config, key), do: address_path(config, key)
+
+  defp endpoint_path(%{endpoint: %URI{path: path}}) when is_binary(path) do
+    path |> String.trim_trailing("/") |> String.replace_prefix("//", "/")
+  end
+
+  defp endpoint_path(_config), do: ""
 
   defp request_host(%{path_style: true} = config), do: config.endpoint.authority
 
