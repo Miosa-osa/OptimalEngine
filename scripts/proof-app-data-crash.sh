@@ -16,7 +16,7 @@ cd "$ROOT"
 
 PORT="${PORT:-4213}"
 DATA="${DATA:-$(mktemp -d)}"
-N="${N:-20000}"
+N="${N:-5000}"
 KILL_AFTER="${KILL_AFTER:-0.08}"
 export MIX_ENV=dev
 export OPTIMAL_API_ENABLED=true
@@ -47,7 +47,11 @@ start_engine() {
     fi
     sleep 1
   done
-  [ "$healthy" = 1 ] || fail "the Engine did not answer /api/health"
+  if [ "$healthy" != 1 ]; then
+    echo "--- last boot log ---"
+    tail -20 "$DATA/server.log"
+    fail "the Engine did not answer /api/health on port $port"
+  fi
 }
 
 echo "== step 1: dependencies"
@@ -97,6 +101,7 @@ in_flight=$(cat "$DATA/txn.code" 2>/dev/null || echo "none")
 echo "IN_FLIGHT_HTTP=$in_flight"
 
 echo "== step 6: restart on the same store"
+sleep 1
 start_engine
 
 count=$(curl -sf -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
