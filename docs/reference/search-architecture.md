@@ -53,6 +53,36 @@ vector score
 workflow applicability
 ```
 
+## Ordering And Reproducibility
+
+Two Engines that hold the same data return the same ranked list.
+One Engine returns the same list every time it is asked.
+
+Every ranked list follows one rule (`OptimalEngine.Retrieval.Ranking`):
+
+1. Results are ordered by their exact score, best first.
+   A result carries `score`, the exact value rounded for display, and `rank_score`, the exact value.
+   Ordering reads `rank_score` and never the rounded `score`, so two hits that print the same four decimals still order by their true scores.
+2. A tie goes by `uri`, then by `id`, both ascending.
+
+Every SQL `ORDER BY` that feeds a ranked list ends in a unique column, so a tie at the edge of a candidate window cannot change which contexts are considered.
+This covers the context search, durable memory search and its embeddings, the vector store, and the governed recall queries of the Retrieval Coordinator.
+Budget-aware selection (`Retrieval.MCTS`) is reproducible for the same candidates in the same order, and returns its selection best first.
+
+Freshness decay measures age against one instant per request.
+`as_of` sets that instant: an ISO 8601 timestamp, or a `DateTime` in Elixir.
+Omit it and the Engine reads the clock once when the request starts.
+
+```text
+GET /api/search?q=renewal&workspace=sales&as_of=2026-10-20T12:00:00Z
+GET /api/grep?q=renewal&workspace=sales&as_of=2026-10-20T12:00:00Z
+mix optimal.search "renewal" --workspace sales --as-of 2026-10-20T12:00:00Z
+```
+
+To compare two Engines, send both the same `as_of` and compare the `uri` of each result in order.
+A timestamp without an offset is read as UTC, and an `as_of` that does not parse is a 400.
+Write `+` in an offset as `%2B` in a URL, or use `Z`.
+
 ## Output
 
 Retrieval returns Context Packages, not loose chunks:

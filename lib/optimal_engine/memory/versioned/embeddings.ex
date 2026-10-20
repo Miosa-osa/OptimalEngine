@@ -107,7 +107,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
         rows
         |> Enum.map(fn [id, blob] -> {id, cosine(query_embedding, decode(blob))} end)
         |> Enum.filter(fn {_id, score} -> score >= min_similarity end)
-        |> Enum.sort_by(&elem(&1, 1), :desc)
+        |> Enum.sort_by(fn {id, score} -> {0.0 - score, id} end)
         |> Enum.take(limit)
         |> Enum.flat_map(fn {id, score} ->
           case Versioned.get(id) do

@@ -40,10 +40,21 @@ defmodule OptimalEngine.Retrieval.Grep do
   - `:tenant_id`, `:principal`, `:acl_absent` — passed to
     `OptimalEngine.Retrieval.Search`: read only that tenant's rows and drop
     what the principal may not read per ACL rows
+  - `:as_of` - passed to `OptimalEngine.Retrieval.Search`: the instant the time
+    decay measures age against (default: now)
+
+  ## Ordering
+
+  Matches are ordered by their exact chunk score, best first (`score` is that
+  value rounded for display). Equal scores keep the order of the search hits
+  they come from, which `OptimalEngine.Retrieval.Ranking` makes total, then
+  the order of the chunks within a hit (section, paragraph, chunk, by id). A
+  match has no `uri` of its own, so the rank of its hit is its tie-break.
   """
 
   require Logger
 
+  alias OptimalEngine.Retrieval.Ranking
   alias OptimalEngine.Retrieval.Search, as: SearchEngine
   alias OptimalEngine.Store
 
@@ -96,6 +107,7 @@ defmodule OptimalEngine.Retrieval.Grep do
       |> maybe_put(:tenant_id, Keyword.get(opts, :tenant_id))
       |> maybe_put(:principal, Keyword.get(opts, :principal))
       |> maybe_put(:acl_absent, Keyword.get(opts, :acl_absent))
+      |> maybe_put(:as_of, Keyword.get(opts, :as_of))
 
     raw_result =
       try do
@@ -118,12 +130,19 @@ defmodule OptimalEngine.Retrieval.Grep do
       {:ok, contexts} ->
         matches =
           contexts
-          |> Enum.flat_map(
-            &explode_to_chunks(&1, query, intent_filter, scale_filter, modality_filter, snippet_len)
-          )
+          |> Enum.with_index()
+          |> Enum.flat_map(fn {ctx, hit_rank} ->
+            ctx
+            |> explode_to_chunks(query, intent_filter, scale_filter, modality_filter, snippet_len)
+            |> Enum.with_index()
+            |> Enum.map(fn {{exact, match}, chunk_rank} ->
+              {{0.0 - exact, hit_rank, chunk_rank}, match}
+            end)
+          end)
           |> apply_path_prefix(path_prefix)
-          |> Enum.sort_by(& &1.score, :desc)
+          |> Enum.sort_by(&elem(&1, 0))
           |> Enum.take(limit)
+          |> Enum.map(&elem(&1, 1))
 
         {:ok, matches}
 
@@ -138,13 +157,15 @@ defmodule OptimalEngine.Retrieval.Grep do
 
   # For each context returned by Search, pull its stored chunks from the
   # `chunks` table, apply filters, extract a snippet, and build match maps.
+  # Each match comes with its exact score, which ordering reads; the match
+  # itself carries the score rounded for display.
   #
   # When no chunks exist (pre-Phase-1 data or empty FTS hit), we fall back
   # to a document-level pseudo-chunk using the context's own content.
   defp explode_to_chunks(ctx, query, intent_filter, scale_filter, modality_filter, snippet_len) do
     node = Map.get(ctx, :node) || ""
     sn = Map.get(ctx, :sn_ratio)
-    base_score = Map.get(ctx, :score) || 0.0
+    base_score = Ranking.exact_score(ctx)
 
     chunks = fetch_chunks(ctx.id, scale_filter, modality_filter)
 
@@ -167,6 +188,7 @@ defmodule OptimalEngine.Retrieval.Grep do
               snippet: snippet,
               score: Float.round(base_score, 4)
             }
+            |> with_exact(base_score)
           ]
       end
     else
@@ -190,6 +212,7 @@ defmodule OptimalEngine.Retrieval.Grep do
                 snippet: snippet,
                 score: Float.round(chunk_score(base_score, chunk), 4)
               }
+              |> with_exact(chunk_score(base_score, chunk))
             ]
         end
       end)
@@ -315,10 +338,14 @@ defmodule OptimalEngine.Retrieval.Grep do
   defp chunk_score(base, %{scale: "chunk"}), do: base * 0.90
   defp chunk_score(base, _), do: base * 0.85
 
-  defp apply_path_prefix(matches, nil), do: matches
+  # `{exact_score, match}`: the exact score travels beside the match so
+  # ordering can read it, while the match keeps its public shape.
+  defp with_exact(match, exact), do: {exact, match}
 
-  defp apply_path_prefix(matches, prefix) do
-    Enum.filter(matches, fn m -> String.starts_with?(m.slug, prefix) end)
+  defp apply_path_prefix(ranked, nil), do: ranked
+
+  defp apply_path_prefix(ranked, prefix) do
+    Enum.filter(ranked, fn {_key, m} -> String.starts_with?(m.slug, prefix) end)
   end
 
   # Derive a node filter from a path prefix. The prefix may include a trailing

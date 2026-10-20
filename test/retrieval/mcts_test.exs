@@ -2,6 +2,7 @@ defmodule OptimalEngine.Retrieval.MCTSTest do
   use ExUnit.Case, async: true
 
   alias OptimalEngine.Retrieval.MCTS
+  alias OptimalEngine.Retrieval.Ranking
 
   describe "select/3 budget" do
     test "never exceeds the token budget" do
@@ -68,6 +69,39 @@ defmodule OptimalEngine.Retrieval.MCTSTest do
         |> MapSet.size()
 
       assert mcts_concepts >= greedy_concepts
+    end
+  end
+
+  describe "determinism" do
+    defp fixture do
+      for i <- 1..12 do
+        %{
+          id: "c#{i}",
+          score: 1.0 - rem(i, 4) * 0.1,
+          tokens: 20 + rem(i, 5),
+          concepts: MapSet.new(["k#{rem(i, 6)}", "x#{i}"])
+        }
+      end
+    end
+
+    test "the same candidates select the same set, in the same order, on every call" do
+      first = MCTS.select(fixture(), 90, iterations: 150)
+
+      for _ <- 1..5 do
+        assert MCTS.select(fixture(), 90, iterations: 150) == first
+      end
+    end
+
+    test "the selection comes back best first" do
+      %{selected: selected} = MCTS.select(fixture(), 90, iterations: 150)
+      assert selected == Ranking.sort(selected)
+    end
+
+    test "greedy orders equal scores by id, whatever order they arrive in" do
+      cands = for id <- ~w(c a b), do: %{id: id, score: 1.0, tokens: 10, concepts: MapSet.new()}
+
+      assert Enum.map(MCTS.greedy(cands, 100).selected, & &1.id) == ~w(a b c)
+      assert Enum.map(MCTS.greedy(Enum.reverse(cands), 100).selected, & &1.id) == ~w(a b c)
     end
   end
 

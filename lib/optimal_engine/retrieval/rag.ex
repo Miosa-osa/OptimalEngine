@@ -51,6 +51,7 @@ defmodule OptimalEngine.Retrieval.RAG do
     BandwidthPlanner,
     Deliver,
     IntentAnalyzer,
+    Ranking,
     Receiver,
     Search,
     WikiFirst
@@ -102,6 +103,9 @@ defmodule OptimalEngine.Retrieval.RAG do
       retrieval reads only that tenant's contexts and memories
     * `:acl_absent` — `:allow | :deny` for resources with no ACL rows when the
       receiver has an `id` (its principal); defaults to the configured policy
+    * `:as_of` - the instant the search's time decay measures age against, a
+      `DateTime` or ISO 8601 string (default: now); see
+      `OptimalEngine.Retrieval.Search`
     * `:workspace_id` — scope retrieval to a workspace. Defaults to the
       tenant's own default workspace (`"default"` for the default tenant,
       `"<tenant_id>:default"` otherwise) — never to a workspace shared
@@ -349,6 +353,7 @@ defmodule OptimalEngine.Retrieval.RAG do
       [limit: limit, workspace_id: workspace_id, tenant_id: tenant_id(opts, receiver)]
       |> maybe_put(:principal, receiver.id)
       |> maybe_put(:acl_absent, Keyword.get(opts, :acl_absent))
+      |> maybe_put(:as_of, Keyword.get(opts, :as_of))
 
     candidates = safe_search(expanded, search_opts)
 
@@ -356,6 +361,8 @@ defmodule OptimalEngine.Retrieval.RAG do
       Enum.map(candidates, fn c ->
         %{
           score: Map.get(c, :score, 0.0),
+          rank_score: Ranking.exact_score(c),
+          id: Map.get(c, :id),
           content: Map.get(c, :content) || Map.get(c, :l1_description) || "",
           title: Map.get(c, :title) || "Untitled",
           uri: Map.get(c, :uri)

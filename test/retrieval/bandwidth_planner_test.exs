@@ -30,6 +30,24 @@ defmodule OptimalEngine.Retrieval.BandwidthPlannerTest do
       assert plan.truncated?
     end
 
+    test "packs equal scores in uri order, whatever order they arrive in" do
+      items = for uri <- ~w(c a b), do: %{content: "x", score: 1.0, uri: uri}
+
+      assert BandwidthPlanner.plan(items, 10_000).kept |> Enum.map(& &1.uri) == ~w(a b c)
+
+      assert BandwidthPlanner.plan(Enum.reverse(items), 10_000).kept |> Enum.map(& &1.uri) ==
+               ~w(a b c)
+    end
+
+    test "orders by the exact score when an item carries one" do
+      items = [
+        %{content: "x", score: 1.0, rank_score: 1.00001, uri: "y"},
+        %{content: "x", score: 1.0, rank_score: 1.00002, uri: "z"}
+      ]
+
+      assert BandwidthPlanner.plan(items, 10_000).kept |> Enum.map(& &1.uri) == ["z", "y"]
+    end
+
     test "zero budget drops everything" do
       items = [%{content: "a", score: 1.0}]
       plan = BandwidthPlanner.plan(items, 0)

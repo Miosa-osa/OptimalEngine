@@ -9,6 +9,8 @@ defmodule OptimalEngine.Retrieval.CandidatePortfolio do
   before its candidates enter the portfolio.
   """
 
+  alias OptimalEngine.Retrieval.Ranking
+
   @version "candidate-portfolio-v1"
   @rrf_constant 60
 
@@ -28,7 +30,8 @@ defmodule OptimalEngine.Retrieval.CandidatePortfolio do
 
       rankings ->
         quotas = representation_quotas(rankings, limit, Keyword.get(opts, :weights))
-        fused = reciprocal_rank_scores(rankings)
+        contexts = rankings |> List.flatten() |> Map.new(&{&1.id, &1})
+        fused = reciprocal_rank_scores(rankings, contexts)
 
         reserved_ids =
           rankings
@@ -42,11 +45,10 @@ defmodule OptimalEngine.Retrieval.CandidatePortfolio do
           |> Enum.uniq()
           |> Enum.take(limit)
 
-        contexts = rankings |> List.flatten() |> Map.new(&{&1.id, &1})
         scores = Map.new(fused)
 
         Enum.map(ordered_ids, fn id ->
-          %{Map.fetch!(contexts, id) | score: Float.round(Map.fetch!(scores, id), 6)}
+          Ranking.put_score(Map.fetch!(contexts, id), Map.fetch!(scores, id), 6)
         end)
     end
   end
@@ -69,7 +71,9 @@ defmodule OptimalEngine.Retrieval.CandidatePortfolio do
     List.duplicate(quota, length(rankings))
   end
 
-  defp reciprocal_rank_scores(rankings) do
+  # `{id, score}` best first: the exact fused score, then the uri and id of the
+  # candidate, so equal scores always order the same way.
+  defp reciprocal_rank_scores(rankings, contexts) do
     rankings
     |> Enum.reduce(%{}, fn ranking, scores ->
       ranking
@@ -80,6 +84,9 @@ defmodule OptimalEngine.Retrieval.CandidatePortfolio do
         end)
       end)
     end)
-    |> Enum.sort_by(fn {id, score} -> {-score, id} end)
+    |> Enum.sort_by(fn {id, score} ->
+      {uri, context_id} = Ranking.tie_key(Map.fetch!(contexts, id))
+      {0.0 - score, uri, context_id}
+    end)
   end
 end

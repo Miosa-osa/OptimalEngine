@@ -32,6 +32,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   require Logger
 
   alias OptimalEngine.Retrieval.L0Cache, as: L0Cache
+  alias OptimalEngine.Retrieval.Ranking
   alias OptimalEngine.Retrieval.Search, as: SearchEngine
   alias OptimalEngine.Store
   alias OptimalEngine.Bridge.Knowledge
@@ -143,7 +144,12 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
 
     # FTS-only list: force vectors off so this list is a genuinely
     # independent lexical ranking, not the already-fused hybrid output.
-    scoped_opts = opts |> Keyword.put(:limit, recall)
+    # Both searches measure age against one instant, so the lists agree on how
+    # old everything is and a request is repeatable with `:as_of`.
+    scoped_opts =
+      opts
+      |> Keyword.put(:limit, recall)
+      |> Keyword.put_new_lazy(:as_of, &DateTime.utc_now/0)
 
     fts_results =
       case SearchEngine.search(query, Keyword.put(scoped_opts, :vector_enabled, false)) do
@@ -217,12 +223,15 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
     |> String.trim()
   end
 
-  # Order the union by recency (modified_at, then created_at). Dedupe by id
-  # so a document gets a single temporal rank.
+  # Order the union by recency (modified_at, then created_at), newest first,
+  # then by uri and id. Dedupe by id so a document gets a single temporal rank.
   defp temporal_ranked(results) do
     results
     |> Enum.uniq_by(&Map.get(&1, :id))
-    |> Enum.sort_by(&temporal_key/1, {:desc, DateTime})
+    |> Enum.sort_by(fn result ->
+      {uri, id} = Ranking.tie_key(result)
+      {0 - DateTime.to_unix(temporal_key(result), :microsecond), uri, id}
+    end)
   end
 
   defp temporal_key(result) do
@@ -460,9 +469,9 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
 
     score_map
     |> Enum.map(fn {_id, {fused_score, result}} ->
-      Map.put(result, :score, Float.round(fused_score, 6))
+      Ranking.put_score(result, fused_score, 6)
     end)
-    |> Enum.sort_by(& &1.score, :desc)
+    |> Ranking.sort()
   end
 
   # ---------------------------------------------------------------------------

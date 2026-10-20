@@ -100,7 +100,7 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
     |> Enum.filter(&(&1.audience == audience))
     |> Enum.map(fn p -> {score(p, query, normalized), p} end)
     |> Enum.filter(fn {score, _} -> score > 0 end)
-    |> Enum.sort_by(fn {score, _} -> score end, :desc)
+    |> Enum.sort_by(fn {score, p} -> {-score, p.slug, p.audience} end)
     |> Enum.map(fn {_, p} -> p end)
   end
 

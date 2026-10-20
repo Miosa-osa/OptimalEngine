@@ -29,6 +29,21 @@ defmodule OptimalEngine.Retrieval.Search do
   - `:principal` — drop results the principal may not read per ACL rows
   - `:acl_absent` — `:allow | :deny` for resources with no ACL rows (default
     `config :optimal_engine, :acl_absent`)
+  - `:as_of` - the instant the time decay measures age against, a `DateTime`
+    or an ISO 8601 string (default: now; blank counts as absent). The clock is
+    read once per request. Pass it to repeat a query at the same instant, or
+    to compare two Engines holding the same data. A string that does not parse
+    answers `{:error, {:invalid_as_of, value}}`.
+
+  ## Ordering
+
+  Results are ordered by the exact score, best first, then by `uri`, then by
+  `id` (see `OptimalEngine.Retrieval.Ranking`). `score` on a result is the
+  exact value rounded for display; `rank_score` is the exact value. The
+  database queries behind the search end their `ORDER BY` in a unique column
+  too, so a tie at the edge of the candidate window cannot change which
+  contexts are considered. Two Engines with the same data, queried with the
+  same `:as_of`, return the same list.
 
   ## Backward compatibility
 
@@ -52,6 +67,7 @@ defmodule OptimalEngine.Retrieval.Search do
   alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
   alias OptimalEngine.Retrieval.ProfileRouter
   alias OptimalEngine.Retrieval.CandidatePortfolio
+  alias OptimalEngine.Retrieval.Ranking
 
   @default_limit 10
   @default_half_life 720
@@ -148,6 +164,14 @@ defmodule OptimalEngine.Retrieval.Search do
   end
 
   defp run_search(query, opts, state) do
+    with {:ok, as_of} <- resolve_as_of(Keyword.get(opts, :as_of)) do
+      # One instant for the whole request: the FTS stage, the hybrid stage and
+      # a fallback between them all measure age against the same `as_of`.
+      do_run_search(query, Keyword.put(opts, :as_of, as_of), state)
+    end
+  end
+
+  defp do_run_search(query, opts, state) do
     start = System.monotonic_time(:millisecond)
 
     # `healthy?` verifies the text embedder (Ollama, or the endpoint in
@@ -204,6 +228,32 @@ defmodule OptimalEngine.Retrieval.Search do
     result
   end
 
+  # The instant a request measures age against. Reading the clock here, once,
+  # keeps a request internally consistent; a caller-supplied `:as_of` makes it
+  # repeatable.
+  defp resolve_as_of(nil), do: {:ok, DateTime.utc_now()}
+  defp resolve_as_of(""), do: {:ok, DateTime.utc_now()}
+  defp resolve_as_of(%DateTime{} = as_of), do: {:ok, as_of}
+
+  defp resolve_as_of(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, as_of, _offset} ->
+        {:ok, as_of}
+
+      {:error, :missing_offset} ->
+        # A timestamp without an offset is read as UTC, like stored times.
+        case DateTime.from_iso8601(value <> "Z") do
+          {:ok, as_of, _offset} -> {:ok, as_of}
+          {:error, _} -> {:error, {:invalid_as_of, value}}
+        end
+
+      {:error, _} ->
+        {:error, {:invalid_as_of, value}}
+    end
+  end
+
+  defp resolve_as_of(value), do: {:error, {:invalid_as_of, value}}
+
   # ---------------------------------------------------------------------------
   # Private: principal-scoped ACL filter
   # ---------------------------------------------------------------------------
@@ -255,7 +305,7 @@ defmodule OptimalEngine.Retrieval.Search do
         else
           (context_hits ++ memory_hits)
           |> Enum.uniq_by(& &1.id)
-          |> Enum.sort_by(&(&1.score || 0.0), :desc)
+          |> Ranking.sort()
           |> Enum.take(limit)
         end
 
@@ -279,7 +329,7 @@ defmodule OptimalEngine.Retrieval.Search do
       AND m.tenant_id = ?3
       AND m.is_latest = 1
       AND m.is_forgotten = 0
-    ORDER BY lexical_score DESC, m.updated_at DESC
+    ORDER BY lexical_score DESC, m.updated_at DESC, m.id
     LIMIT ?4
     """
 
@@ -428,9 +478,9 @@ defmodule OptimalEngine.Retrieval.Search do
       end)
 
     scores
-    |> Enum.sort_by(fn {id, score} -> {-score, id} end)
+    |> Enum.map(fn {id, score} -> Ranking.put_score(Map.fetch!(contexts, id), score, 6) end)
+    |> Ranking.sort()
     |> Enum.take(limit)
-    |> Enum.map(fn {id, score} -> %{Map.fetch!(contexts, id) | score: Float.round(score, 6)} end)
   end
 
   defp max_similarity_fuse(rankings, limit) do
@@ -438,11 +488,11 @@ defmodule OptimalEngine.Retrieval.Search do
     |> List.flatten()
     |> Enum.reduce(%{}, fn context, acc ->
       Map.update(acc, context.id, context, fn existing ->
-        if context.score > existing.score, do: context, else: existing
+        if Ranking.exact_score(context) > Ranking.exact_score(existing), do: context, else: existing
       end)
     end)
     |> Map.values()
-    |> Enum.sort_by(fn context -> {-context.score, context.id} end)
+    |> Ranking.sort()
     |> Enum.take(limit)
   end
 
@@ -490,21 +540,24 @@ defmodule OptimalEngine.Retrieval.Search do
   defp semantic_memory_context(memory, score) do
     kind = Map.get(memory.metadata || %{}, "kind", "memory")
 
-    %Context{
-      id: memory.id,
-      uri: "optimal://memory/#{memory.workspace_id}/#{memory.id}",
-      type: :memory,
-      title: memory_title(kind, memory.content),
-      content: memory.content,
-      l0_abstract: memory.content,
-      l1_overview: memory.content,
-      node: "memory-core",
-      created_at: memory.created_at,
-      modified_at: memory.updated_at,
-      workspace_id: memory.workspace_id,
-      metadata: memory.metadata || %{},
-      score: Float.round(score, 4)
-    }
+    Ranking.put_score(
+      %Context{
+        id: memory.id,
+        uri: "optimal://memory/#{memory.workspace_id}/#{memory.id}",
+        type: :memory,
+        title: memory_title(kind, memory.content),
+        content: memory.content,
+        l0_abstract: memory.content,
+        l1_overview: memory.content,
+        node: "memory-core",
+        created_at: memory.created_at,
+        modified_at: memory.updated_at,
+        workspace_id: memory.workspace_id,
+        metadata: memory.metadata || %{}
+      },
+      score,
+      4
+    )
   end
 
   defp memory_context(
@@ -518,21 +571,24 @@ defmodule OptimalEngine.Retrieval.Search do
     exact_bonus =
       if String.contains?(String.downcase(content), String.downcase(query)), do: 10.0, else: 0.0
 
-    %Context{
-      id: id,
-      uri: "optimal://memory/#{workspace_id}/#{id}",
-      type: :memory,
-      title: memory_title(kind, content),
-      content: content,
-      l0_abstract: content,
-      l1_overview: content,
-      node: "memory-core",
-      created_at: parse_datetime(created_at),
-      modified_at: parse_datetime(updated_at),
-      workspace_id: workspace_id,
-      metadata: metadata,
-      score: Float.round((lexical || 0.0) + exact_bonus + 1.0, 4)
-    }
+    Ranking.put_score(
+      %Context{
+        id: id,
+        uri: "optimal://memory/#{workspace_id}/#{id}",
+        type: :memory,
+        title: memory_title(kind, content),
+        content: content,
+        l0_abstract: content,
+        l1_overview: content,
+        node: "memory-core",
+        created_at: parse_datetime(created_at),
+        modified_at: parse_datetime(updated_at),
+        workspace_id: workspace_id,
+        metadata: metadata
+      },
+      (lexical || 0.0) + exact_bonus + 1.0,
+      4
+    )
   end
 
   defp memory_title(kind, content) do
@@ -677,9 +733,11 @@ defmodule OptimalEngine.Retrieval.Search do
       end
 
     # Step 4: Merge results
-    # Build a map of context_id -> fts_score (normalized)
-    max_fts = fts_results |> Enum.map(& &1.score) |> Enum.max(fn -> 1.0 end)
-    fts_map = Map.new(fts_results, fn ctx -> {ctx.id, ctx.score / max(max_fts, 0.001)} end)
+    # Build a map of context_id -> fts_score (normalized, from the exact scores)
+    max_fts = fts_results |> Enum.map(&Ranking.exact_score/1) |> Enum.max(fn -> 1.0 end)
+
+    fts_map =
+      Map.new(fts_results, fn ctx -> {ctx.id, Ranking.exact_score(ctx) / max(max_fts, 0.001)} end)
 
     # Build a map of context_id -> vector_similarity
     vector_map =
@@ -703,32 +761,37 @@ defmodule OptimalEngine.Retrieval.Search do
     # Apply intent-based adjustments
     scored = apply_intent_adjustments(scored, intent)
 
-    # Sort, filter, limit
+    # Filter, then cut at `limit`. Every candidate that ties the score at the
+    # cut stays in, so which of them survives is decided by the result order
+    # (score, uri, id) and not by the order the ids happened to come in.
     scored =
       scored
       |> Enum.filter(fn {_id, score} -> score >= min_score end)
-      |> Enum.sort_by(fn {_id, score} -> score end, :desc)
-      |> Enum.take(limit)
+      |> Enum.sort_by(fn {id, score} -> {0.0 - score, id} end)
+      |> keep_through_cut(limit)
 
     # Resolve full Context structs for results
     # First, build a lookup from FTS results (which already have full Context structs)
     fts_lookup = Map.new(fts_results, fn ctx -> {ctx.id, ctx} end)
 
     final_results =
-      Enum.map(scored, fn {id, score} ->
+      scored
+      |> Enum.map(fn {id, score} ->
         case Map.get(fts_lookup, id) do
           nil ->
             # This result came from vector search only — need to load the context
             case load_context(id, Keyword.get(opts, :workspace_id, "default")) do
-              {:ok, ctx} -> %{ctx | score: Float.round(score, 4)}
+              {:ok, ctx} -> Ranking.put_score(ctx, score, 4)
               _ -> nil
             end
 
           ctx ->
-            %{ctx | score: Float.round(score, 4)}
+            Ranking.put_score(ctx, score, 4)
         end
       end)
       |> Enum.reject(&is_nil/1)
+      |> Ranking.sort()
+      |> Enum.take(limit)
 
     # Apply graph boost (same as FTS-only path)
     final_results = try_graph_boost(final_results, query, opts)
@@ -738,6 +801,17 @@ defmodule OptimalEngine.Retrieval.Search do
     e ->
       Logger.warning("[SearchEngine] Hybrid search failed: #{inspect(e)}, falling back to FTS")
       do_search(query, opts, topology)
+  end
+
+  # The first `limit` of `scored` (best first), plus every later entry that
+  # ties the score of the last one kept.
+  defp keep_through_cut(_scored, limit) when limit < 1, do: []
+
+  defp keep_through_cut(scored, limit) do
+    case Enum.at(scored, limit - 1) do
+      nil -> scored
+      {_id, cut_score} -> Enum.take_while(scored, fn {_id, score} -> score >= cut_score end)
+    end
   end
 
   defp load_context(id, workspace_id) do
@@ -812,13 +886,15 @@ defmodule OptimalEngine.Retrieval.Search do
       )
 
     with {:ok, rows} <- Store.raw_query(sql, params) do
-      now = DateTime.utc_now()
+      # `run_search` sets `:as_of` once per request; the fallback keeps a
+      # direct caller of this stage on a single instant too.
+      now = Keyword.get_lazy(opts, :as_of, &DateTime.utc_now/0)
 
       results =
         rows
         |> Enum.map(&build_result(&1, now, topology))
         |> Enum.filter(&(&1.score >= min_score))
-        |> Enum.sort_by(& &1.score, :desc)
+        |> Ranking.sort()
         |> Enum.take(limit)
 
       # Graph boost via OptimalEngine.Knowledge (non-blocking — falls back to unmodified results)
@@ -894,10 +970,12 @@ defmodule OptimalEngine.Retrieval.Search do
     limit_n = length(extra_values) + 2
     offset_n = limit_n + 1
 
+    # `c.uri, c.id` make the order total: contexts of equal rank always fall in
+    # the candidate window in the same order, whatever order they were stored.
     final_sql =
       base_sql <>
         conditions_sql <>
-        " ORDER BY bm25_rank DESC LIMIT ?#{limit_n} OFFSET ?#{offset_n}"
+        " ORDER BY bm25_rank DESC, c.uri, c.id LIMIT ?#{limit_n} OFFSET ?#{offset_n}"
 
     params = [fts_query] ++ extra_values ++ [limit, offset]
     {final_sql, params}
@@ -915,7 +993,7 @@ defmodule OptimalEngine.Retrieval.Search do
 
     final_score = bm25 * temporal * (0.5 + sn * 0.5)
 
-    %{ctx | score: Float.round(final_score, 4)}
+    Ranking.put_score(ctx, final_score, 4)
   end
 
   @doc false

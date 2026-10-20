@@ -126,7 +126,7 @@ defmodule OptimalEngine.Federation do
         _ ->
           []
       end)
-      |> Enum.sort_by(&(-(&1["score"] || 0)))
+      |> Enum.sort_by(&merge_key/1)
       |> Enum.take(limit)
 
     %{
@@ -149,6 +149,13 @@ defmodule OptimalEngine.Federation do
   end
 
   # ---------------------------------------------------------------------------
+
+  # Best score first; a tie goes by uri, id, then the workspace it came from, so
+  # the merged list is the same on every call. Remote hits carry only the score
+  # rounded for display, which is the most a peer's API gives.
+  defp merge_key(hit) do
+    {0 - (hit["score"] || 0), hit["uri"] || "", hit["id"] || "", hit["source_workspace_id"] || ""}
+  end
 
   defp local_search(tenant_id, workspace_id, query, limit) do
     case OptimalEngine.search(query, limit: limit, workspace_id: workspace_id, tenant_id: tenant_id) do
