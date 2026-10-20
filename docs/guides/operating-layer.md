@@ -121,3 +121,19 @@ The request becomes a durable `reindex` job, so it survives a restart and retrie
 While one reindex is queued or running, another request returns that job with `status: "already_running"` instead of adding a second one.
 The job completes once `OptimalEngine.Pipeline.Indexer` has started the crawl, not when the crawl finishes; `GET /api/jobs?workspace=<id>` shows the job and `GET /api/status` reports indexing progress.
 The crawl reads the whole engine root, not one workspace, which is why the route needs the `admin` scope.
+
+## Proving it
+
+`scripts/proof-operating-layer.sh` checks the operating layer, the viability measures, and the public API surface against a live Engine and prints one `CHECK <criterion> PASS|FAIL|SKIP` line per criterion with the facts it was judged on.
+
+| Mode | Command | Use |
+| --- | --- | --- |
+| Self-contained | `scripts/proof-operating-layer.sh` | Starts an Engine on an empty temporary store with auth required, mints a root key, and runs every check |
+| Existing Engine | `ENGINE_URL=<url> ENGINE_KEY_FILE=<admin key file> scripts/proof-operating-layer.sh` | Runs every check on uniquely named workspaces, principals, and keys, then revokes the keys and archives the workspaces (`KEEP=1` keeps them) |
+| Read-only | `ENGINE_URL=<url> [ENGINE_KEY_FILE=<file>] WORKSPACE=<id> scripts/proof-operating-layer.sh --read-only` | Sends GET requests only and prints counts, dates, metric values, and booleans, never content, titles, names, or emails |
+
+The full modes check: the empty-state answers of `optimal boot`, `optimal today`, `optimal loops`, `optimal fires`, and `GET /api/brief`; a claim promoted with a workspace key records that key's principal; a topology file imported and exported matches; workspace creation, rename, principals, and workspace keys as an outside mirror uses them, with old links resolving after a rename; every route in the [API reference](../reference/api.md) carrying a grant and a workspace scope, and refusing a request without a valid key; classification, System 4, the six metrics with R and 30 days of history, the pre-send bandwidth check, and a linked agent action chain.
+The read-only mode reports boot and the brief (today's date, open loops, owed replies with sources), classification, the viability report, metric history, and agent action chains for one workspace.
+`GET /api/boot` writes today's rhythm note when it does not exist yet, as `optimal boot` does; `CLASSIFY_PLAN=0` skips the classification plan, which reads every Signal of the workspace.
+The Engine-only quickstart has its own proof, `scripts/proof-engine-only.sh`.
+Exit codes: 0 every check passed or was skipped, 1 a check failed, 2 the Engine could not be reached or refused the key.

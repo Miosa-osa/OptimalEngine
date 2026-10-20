@@ -122,6 +122,17 @@ Each step is a row numbered within its correlation id and pointing at the step b
 Recording `approval` or `denial` needs the `authority:enforce` scope; other stages need `write`.
 The trace also follows the Engine's own flow (approval request, approval, grant, admission, release) by request or grant id, reports whether the chain is complete, verifies every step against the evidence, and names gaps such as an action without an approval.
 
+## Classification
+
+`GET /api/signals/classification?workspace=<id>` counts the workspace's Signals by genre and mode as stored (`stored`).
+With `plan=true` it also runs today's classification over them without writing anything, the same plan `mix optimal.reclassify_modes --dry-run` prints, and returns `plan.planned` (by the genre and mode a re-run sets), `plan.planned_modes_by_stored_genre` (the mode each stored genre would get, so Signals stored as `chat` stay countable), and the mode and genre transitions.
+It returns counts only, never content, titles, or ids, and needs `read`.
+The labeled evaluation set that holds the accuracy targets runs in CI: `mix test test/signal/mode_genre_eval_test.exs`.
+
+## Proving it
+
+`scripts/proof-operating-layer.sh` checks the acceptance criteria against a live Engine and prints one `CHECK` line per criterion; see [the operating layer guide](operating-layer.md#proving-it).
+
 ## CLI
 
 ```
