@@ -99,6 +99,8 @@ kill -9 "$server" 2>/dev/null || true
 wait "$curl_pid" 2>/dev/null || true
 in_flight=$(cat "$DATA/txn.code" 2>/dev/null || echo "none")
 echo "IN_FLIGHT_HTTP=$in_flight"
+head -c 400 "$DATA/txn.out" 2>/dev/null || true
+echo
 
 echo "== step 6: restart on the same store"
 sleep 1
