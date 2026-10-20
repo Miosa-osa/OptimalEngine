@@ -585,6 +585,50 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # The maintenance routes below serve the client CLI's operator commands
+  # (`optimal index`, `log` and `graph`) against an Engine that is not on the
+  # caller's machine, so they never need a shell on the Engine's host.
+
+  # Enqueues a full reindex, exactly as POST /api/reindex does.
+  post "/api/maintenance/index" do
+    enqueue_reindex(conn)
+  end
+
+  # The Engine's newest log lines (OptimalEngine.LogBuffer), oldest first:
+  # `lines` (default 200, at most the buffer's capacity). Keys and bearer tokens
+  # are redacted before a line is kept. Returns {count, capacity, text}.
+  get "/api/maintenance/log" do
+    limit = conn |> query_param("lines", "200") |> parse_int(200)
+    %{lines: lines, capacity: capacity} = OptimalEngine.LogBuffer.recent(limit)
+    json(conn, %{count: length(lines), capacity: capacity, text: Enum.join(lines, "\n")})
+  end
+
+  # Graph statistics for one workspace in the caller's tenant (`workspace`,
+  # default "default"), the report `mix optimal.graph` prints: edge counts by
+  # relation, the most connected entities, and the newest edges.
+  get "/api/maintenance/graph" do
+    tenant_id = conn.assigns[:current_tenant] || "default"
+    workspace = query_param(conn, "workspace", "default")
+
+    with {:ok, %{id: ws, tenant_id: ^tenant_id}} <- OptimalEngine.Workspace.get(workspace),
+         {:ok, edges} <- OptimalEngine.Graph.stats(workspace_id: ws),
+         {:ok, top} <- OptimalEngine.Graph.top_entities(10, workspace_id: ws),
+         {:ok, samples} <- OptimalEngine.Graph.sample_edges(8, workspace_id: ws) do
+      json(conn, %{
+        workspace_id: ws,
+        edges: edges,
+        top_entities: Enum.map(top, fn {id, count} -> %{id: id, connections: count} end),
+        sample_edges: samples
+      })
+    else
+      {:error, reason} when reason != :not_found ->
+        conn |> put_status(500) |> json(%{error: inspect(reason)})
+
+      _not_in_tenant ->
+        conn |> put_status(404) |> json(%{error: "workspace not found"})
+    end
+  end
+
   get "/api/stats" do
     case OptimalEngine.stats() do
       {:ok, stats} -> json(conn, stats)
@@ -3466,7 +3510,23 @@ defmodule OptimalEngine.API.Router do
   # change files post an empty body; a request that arrives while a reindex is
   # already queued or running returns that job instead of adding another.
   # Admin only (PermissionPlug): a full crawl reads every workspace's files.
+  # POST /api/maintenance/index is the same request under the maintenance root.
   post "/api/reindex" do
+    enqueue_reindex(conn)
+  end
+
+  forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
+  forward("/api/data", to: OptimalEngine.API.AppDataRouter)
+
+  match _ do
+    send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
+  end
+
+  # ---------------------------------------------------------------------------
+  # Helpers: response
+  # ---------------------------------------------------------------------------
+
+  defp enqueue_reindex(conn) do
     body =
       if is_map(conn.body_params) and not is_struct(conn.body_params),
         do: conn.body_params,
@@ -3489,17 +3549,6 @@ defmodule OptimalEngine.API.Router do
         send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
-
-  forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
-  forward("/api/data", to: OptimalEngine.API.AppDataRouter)
-
-  match _ do
-    send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
-  end
-
-  # ---------------------------------------------------------------------------
-  # Helpers: response
-  # ---------------------------------------------------------------------------
 
   defp run_backup(conn, target_path, opts) do
     case OptimalEngine.Backup.create(target_path, opts) do

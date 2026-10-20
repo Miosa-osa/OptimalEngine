@@ -42,7 +42,10 @@ defmodule OptimalEngine.Application do
 
   defp base_children do
     [
-      # ── Observability (comes up first so every other child's metrics are captured) ─
+      # ── Recent log lines for GET /api/maintenance/log (first, so boot is kept) ─
+      OptimalEngine.LogBuffer,
+
+      # ── Observability (comes up early so every other child's metrics are captured) ─
       OptimalEngine.Telemetry,
 
       # ── Core engine (SQLite-backed, must start first) ─────────────────────
