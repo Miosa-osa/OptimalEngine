@@ -38,6 +38,7 @@ defmodule OptimalEngine.Pipeline.Indexer do
   alias OptimalEngine.Signal
   alias OptimalEngine.Store
   alias OptimalEngine.Routing
+  alias OptimalEngine.Pipeline.Intake.Address
   alias OptimalEngine.URI
   alias OptimalEngine.Bridge.Knowledge, as: BridgeKnowledge
   alias OptimalEngine.Bridge.Memory, as: BridgeMemory
@@ -83,6 +84,9 @@ defmodule OptimalEngine.Pipeline.Indexer do
       instead of the struct default (`"default"`). Callers that index files
       on behalf of a workspace (e.g. `Pipeline.Intake` cross-references)
       MUST pass this so rows never leak into the default workspace.
+    * `:metadata`: a map merged into the Context's metadata. Intake marks the
+      rows of a signal's cross-reference copies (`"cross_ref_of"`) so writing
+      the signal again updates its copies instead of adding new ones.
   """
   @spec index_file(String.t(), keyword()) :: {:ok, Context.t()} | {:error, term()}
   def index_file(path, opts \\ []) when is_binary(path) and is_list(opts) do
@@ -232,7 +236,7 @@ defmodule OptimalEngine.Pipeline.Indexer do
 
   defp index_single_file(path, known_entities, opts) do
     with ctx when not is_nil(ctx) <- build_context(path, known_entities, opts),
-         ctx = stamp_scope(ctx, opts),
+         ctx = ctx |> stamp_scope(opts) |> stamp_metadata(opts),
          :ok <- Store.insert_context(ctx) do
       {:ok, ctx}
     else
@@ -248,6 +252,16 @@ defmodule OptimalEngine.Pipeline.Indexer do
     case Keyword.get(opts, :workspace_id) do
       workspace_id when is_binary(workspace_id) and workspace_id != "" ->
         %{ctx | workspace_id: workspace_id}
+
+      _ ->
+        ctx
+    end
+  end
+
+  defp stamp_metadata(%Context{} = ctx, opts) do
+    case Keyword.get(opts, :metadata) do
+      extra when is_map(extra) and map_size(extra) > 0 ->
+        %{ctx | metadata: Map.merge(ctx.metadata || %{}, extra)}
 
       _ ->
         ctx
@@ -530,11 +544,9 @@ defmodule OptimalEngine.Pipeline.Indexer do
   defp folder_to_node("_skills"), do: "inbox"
   defp folder_to_node(_), do: "inbox"
 
-  defp context_id(path) do
-    :crypto.hash(:sha256, path)
-    |> Base.encode16(case: :lower)
-    |> String.slice(0, 32)
-  end
+  # The id of the row of a file. `Address` reads it to tell the row of a file
+  # from the row of another document at the same address.
+  defp context_id(path), do: Address.file_index_id(path)
 
   defp posix_to_datetime(posix) when is_integer(posix), do: DateTime.from_unix!(posix)
   defp posix_to_datetime(_), do: DateTime.utc_now()

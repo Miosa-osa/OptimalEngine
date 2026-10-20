@@ -15,6 +15,10 @@ defmodule OptimalEngine.API.ReadAPI do
   When the requested tier is empty for a context, the next fuller tier is
   served and named in `served_tier`. Reading never indexes files or changes
   the store; a URI the store does not hold is 404.
+
+  A URI names one context in its workspace. Rows written before addresses were
+  unique (see `OptimalEngine.UriRepair`) may still share one; the earliest
+  active one answers, the one the repair leaves the address with.
   """
 
   import Plug.Conn
@@ -44,6 +48,7 @@ defmodule OptimalEngine.API.ReadAPI do
              l0_abstract, l1_overview, content
       FROM contexts
       WHERE #{column} = ?1 AND workspace_id = ?2
+      ORDER BY (archived_at IS NOT NULL), (created_at IS NULL), created_at, id
       LIMIT 1
       """,
       [value, workspace_id]

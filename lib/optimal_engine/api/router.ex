@@ -659,6 +659,56 @@ defmodule OptimalEngine.API.Router do
       end
   end
 
+  # Contexts that share an optimal:// URI (OptimalEngine.UriRepair), in the
+  # caller's tenant or one of its workspaces (`workspace`). GET is the plan and
+  # writes nothing; POST with `apply: true` gives each of them an address of its
+  # own (the earliest keeps the shared one) and answers what it did. Both take
+  # `limit` groups (at most 2,000) and report `groups_remaining`: the plan
+  # reads 2,000 by default, a run separates 50, so a large store is repaired in
+  # bounded requests.
+  get "/api/maintenance/uris" do
+    with {:ok, scope} <- embedding_scope(conn, query_param(conn, "workspace", nil)),
+         {:ok, report} <-
+           OptimalEngine.UriRepair.scan(
+             scope ++ [limit: uri_repair_limit(query_param(conn, "limit", nil), 2_000)]
+           ) do
+      json(conn, report)
+    else
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "workspace not found"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  post "/api/maintenance/uris" do
+    body = conn.body_params || %{}
+
+    if body["apply"] == true do
+      with {:ok, scope} <- embedding_scope(conn, body["workspace"]),
+           {:ok, report} <-
+             OptimalEngine.UriRepair.run(scope ++ [limit: uri_repair_limit(body["limit"], 50)]) do
+        json(conn, report)
+      else
+        {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "workspace not found"})
+        {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+      end
+    else
+      conn
+      |> put_status(400)
+      |> json(%{error: "apply=true is required; GET /api/maintenance/uris is the plan"})
+    end
+  end
+
+  defp uri_repair_limit(value, _default) when is_integer(value), do: value |> max(1) |> min(2_000)
+
+  defp uri_repair_limit(value, default) when is_binary(value) do
+    case Integer.parse(value) do
+      {number, ""} -> uri_repair_limit(number, default)
+      _ -> default
+    end
+  end
+
+  defp uri_repair_limit(_value, default), do: default
+
   defp embedding_scope(conn, workspace) when workspace in [nil, ""],
     do: {:ok, [tenant_id: conn.assigns[:current_tenant] || "default"]}
 

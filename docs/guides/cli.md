@@ -167,6 +167,21 @@ Text arguments may be `-` to read standard input.
 When the requested tier is empty it serves the next fuller tier and says so in `served_tier`.
 It never indexes files; a URI the store does not hold is 404.
 
+An `optimal://` URI names one context in its workspace.
+A signal's address comes from its file, `{date}-{title}.md` with the title cut to 60 characters.
+When another context already holds that name in the folder, the new context takes the name with the first 8 characters of its id before `.md`, so an ingest never replaces another context's file and a URI never names two contexts.
+A document with no usable title (empty, only symbols, or `Untitled`) always carries the suffix, `2026-03-01-untitled-9f3c01ab.md`, so its address needs no lookup to be unique.
+Ingesting a context again (same id) keeps its address.
+Addresses written before this rule can still be shared by several contexts.
+`GET /api/maintenance/uris` plans the repair (`?workspace=` for one workspace) and `POST /api/maintenance/uris {"apply": true, "workspace"?, "limit"?}` runs it; both need `admin` and stay in the caller's tenant.
+`GET` lists every context it would give a new address (`changes`), 2,000 groups at most (`?limit=`).
+A run separates `limit` groups of contexts (default 50, at most 2,000) and reports `groups_remaining`; run it again until that is 0.
+Run it with ingest idle, and keep a copy of the signal folders first: it writes files.
+The earliest active context keeps the shared address and the others get the suffixed one; each repaired row records its `previous_uri` in `metadata.uri_repair`.
+Every context gets its own file again, written from its row (`contexts.content`) before the row changes, with its cross-reference copies; the file at the kept address is rewritten from the keeper's row when it holds another context's text.
+Archived contexts, rows that index the same file, rows with no file and rows whose URI is a caller's `source_uri` are left alone and counted (`skipped_*`).
+`files_regenerated` counts the files written; a second run finds nothing to do.
+
 ## The operating loop
 
 ```bash

@@ -19,7 +19,7 @@ defmodule OptimalEngine.VersionTest do
     assert info.git_sha =~ ~r/^(unknown|[0-9a-f]{40})$/
     assert {:ok, _datetime, 0} = DateTime.from_iso8601(info.build_timestamp)
     assert info.api_version == "v1"
-    assert info.expected_migration == 76
+    assert info.expected_migration == 77
     assert info.components.evidence_plan == "evidence-plan-v1"
     assert info.components.profile_router == "profile-router-v1"
     assert info.components.candidate_portfolio == "candidate-portfolio-v1"
