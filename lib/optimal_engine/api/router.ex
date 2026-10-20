@@ -573,6 +573,20 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # The Engine operator: an admin key (PermissionPlug) of the default tenant
+  # with every workspace in scope. No key at all reaches a handler only when the
+  # Engine requires none (AuthPlug refuses it otherwise), which is the trusted
+  # local operator.
+  defp engine_operator?(conn) do
+    default = OptimalEngine.Tenancy.Tenant.default_id()
+
+    (conn.assigns[:current_tenant] || default) == default and
+      case conn.assigns[:current_api_key] do
+        nil -> true
+        api_key -> "*" in (api_key.workspace_scope || [])
+      end
+  end
+
   defp embedding_scope(conn, workspace) when workspace in [nil, ""],
     do: {:ok, [tenant_id: conn.assigns[:current_tenant] || "default"]}
 
@@ -582,6 +596,66 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.Workspace.get(workspace) do
       {:ok, %{id: id, tenant_id: ^tenant_id}} -> {:ok, [workspace_id: id]}
       _ -> {:error, :not_found}
+    end
+  end
+
+  # The maintenance routes below serve the client CLI's operator commands
+  # (`optimal index`, `log` and `graph`) against an Engine that is not on the
+  # caller's machine, so they never need a shell on the Engine's host.
+
+  # Enqueues a reindex job for the workspace named (or the implicit default,
+  # authorized by WorkspaceAuthPlug), coalesced per workspace like
+  # POST /api/reindex.
+  post "/api/maintenance/index" do
+    enqueue_reindex(conn)
+  end
+
+  # The Engine's newest log lines (OptimalEngine.LogBuffer), oldest first:
+  # `lines` (default 200, at most the buffer's capacity). Returns
+  # {count, capacity, text}. The log is the whole Engine's, every tenant's
+  # workspaces, paths and errors in it, so only the Engine operator reads it:
+  # an admin key of the default tenant whose workspace scope is "*" (or no key
+  # on an Engine that requires none). Anyone else gets 403 operator_only.
+  get "/api/maintenance/log" do
+    if engine_operator?(conn) do
+      limit = conn |> query_param("lines", "200") |> parse_int(200)
+      %{lines: lines, capacity: capacity} = OptimalEngine.LogBuffer.recent(limit)
+      json(conn, %{count: length(lines), capacity: capacity, text: Enum.join(lines, "\n")})
+    else
+      conn
+      |> put_status(403)
+      |> json(%{
+        error: "operator_only",
+        message:
+          "the Engine log covers every tenant; it needs an admin key of the default tenant whose workspace scope is *"
+      })
+    end
+  end
+
+  # Graph statistics for one workspace in the caller's tenant: the one named,
+  # or the implicit default (WorkspaceAuthPlug authorizes either), the report
+  # `mix optimal.graph` prints: edge counts by relation, the most connected
+  # entities, and the newest edges.
+  get "/api/maintenance/graph" do
+    tenant_id = conn.assigns[:current_tenant] || "default"
+    workspace = conn.assigns[:workspace_id] || "default"
+
+    with {:ok, %{id: ws, tenant_id: ^tenant_id}} <- OptimalEngine.Workspace.get(workspace),
+         {:ok, edges} <- OptimalEngine.Graph.stats(workspace_id: ws),
+         {:ok, top} <- OptimalEngine.Graph.top_entities(10, workspace_id: ws),
+         {:ok, samples} <- OptimalEngine.Graph.sample_edges(8, workspace_id: ws) do
+      json(conn, %{
+        workspace_id: ws,
+        edges: edges,
+        top_entities: Enum.map(top, fn {id, count} -> %{id: id, connections: count} end),
+        sample_edges: samples
+      })
+    else
+      {:error, reason} when reason != :not_found ->
+        conn |> put_status(500) |> json(%{error: inspect(reason)})
+
+      _not_in_tenant ->
+        conn |> put_status(404) |> json(%{error: "workspace not found"})
     end
   end
 
@@ -3466,7 +3540,23 @@ defmodule OptimalEngine.API.Router do
   # change files post an empty body; a request that arrives while a reindex is
   # already queued or running returns that job instead of adding another.
   # Admin only (PermissionPlug): a full crawl reads every workspace's files.
+  # POST /api/maintenance/index is the same request under the maintenance root.
   post "/api/reindex" do
+    enqueue_reindex(conn)
+  end
+
+  forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
+  forward("/api/data", to: OptimalEngine.API.AppDataRouter)
+
+  match _ do
+    send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
+  end
+
+  # ---------------------------------------------------------------------------
+  # Helpers: response
+  # ---------------------------------------------------------------------------
+
+  defp enqueue_reindex(conn) do
     body =
       if is_map(conn.body_params) and not is_struct(conn.body_params),
         do: conn.body_params,
@@ -3489,17 +3579,6 @@ defmodule OptimalEngine.API.Router do
         send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
-
-  forward("/api/authority", to: OptimalEngine.API.AuthorityRouter)
-  forward("/api/data", to: OptimalEngine.API.AppDataRouter)
-
-  match _ do
-    send_resp(conn, 404, Jason.encode!(%{error: "not found"}))
-  end
-
-  # ---------------------------------------------------------------------------
-  # Helpers: response
-  # ---------------------------------------------------------------------------
 
   defp run_backup(conn, target_path, opts) do
     case OptimalEngine.Backup.create(target_path, opts) do

@@ -24,6 +24,7 @@ PROG=${0##*/}
 case $PROG in optimal | oe) ;; *) PROG=optimal ;; esac
 
 EX_USAGE=64
+EX_DATAERR=65
 EX_UNAVAILABLE=69
 EX_NOPERM=77
 EX_CONFIG=78
@@ -68,6 +69,32 @@ compat_mismatch() {
   [ "$_cm_vm" = "$_cm_em" ] || return 1
   [ "$_cm_vn" = "$_cm_en" ] || return 2
   return 0
+}
+
+# version_lt A B: 0 when release A is lower than release B (numeric major.minor.patch;
+# a pre-release or build suffix such as -rc1 is ignored).
+version_lt() {
+  _vl_a=${1%%[!0-9.]*} _vl_b=${2%%[!0-9.]*}
+  for _vl_i in 1 2 3; do
+    _vl_x=${_vl_a%%.*} _vl_y=${_vl_b%%.*}
+    case $_vl_x in '' | *[!0-9]*) return 1 ;; esac
+    case $_vl_y in '' | *[!0-9]*) return 1 ;; esac
+    [ "$_vl_x" -lt "$_vl_y" ] && return 0
+    [ "$_vl_x" -gt "$_vl_y" ] && return 1
+    _vl_a=${_vl_a#*.} _vl_b=${_vl_b#*.}
+  done
+  return 1
+}
+
+# client_hint ENGINE: what to do about a client that does not match ENGINE.
+client_hint() {
+  if [ -z "$1" ]; then
+    printf 'install the client release that matches the Engine'
+  elif version_lt "$OPTIMAL_CLI_VERSION" "$1"; then
+    printf 'upgrade the client to %s' "$1"
+  else
+    printf 'install client %s to match the Engine' "$1"
+  fi
 }
 
 # compat_json CLIENT ENGINE: the machine-readable comparison for 'version'.
@@ -456,7 +483,8 @@ mask_url() {
 
 url_hostport() {
   _uh=${1#*://}
-  _uh=${_uh%%/*}
+  # The authority ends at the first /, ? or #; anything after it, including an @, is not the host.
+  _uh=${_uh%%[/?#]*}
   _uh=${_uh##*@}
   printf '%s' "$_uh"
 }
@@ -482,8 +510,18 @@ url_port() {
   if [ -z "$_up" ]; then case $1 in https:*) _up=443 ;; *) _up=80 ;; esac; fi
   printf '%s' "$_up"
 }
+# A loopback host: localhost, ::1, 0.0.0.0, or an IPv4 address in 127.0.0.0/8.
 is_local_url() {
-  case $(url_host "$CFG_URL") in 127.0.0.1 | localhost | ::1) return 0 ;; esac
+  _il=$(url_host "$CFG_URL" | tr '[:upper:]' '[:lower:]')
+  case $_il in
+    localhost | ::1 | 0.0.0.0) return 0 ;;
+    127.*.*.*)
+      case $_il in *[!0-9.]* | *..* | *.) return 1 ;; esac
+      _il=${_il#*.*.*.}
+      case $_il in *.*) return 1 ;; esac
+      return 0
+      ;;
+  esac
   return 1
 }
 
@@ -519,6 +557,28 @@ check_curl() {
   CURL_CHECKED=1
 }
 
+# warn_outdated "client=<v> engine=<v>": one stderr line per run when the Engine
+# marks this client as another minor release (x-optimal-client-outdated).
+OUTDATED_WARNED=
+warn_outdated() {
+  [ -z "$OUTDATED_WARNED" ] || return 0
+  OUTDATED_WARNED=1
+  _wo_e=
+  case $1 in *engine=*)
+    _wo_e=${1##*engine=}
+    _wo_e=${_wo_e%%[!0-9.]*}
+    ;;
+  esac
+  if [ -z "$_wo_e" ]; then
+    # The header is the Engine's text; an unreadable one is not echoed.
+    err "warning: the Engine marks this client ($OPTIMAL_CLI_VERSION) as outdated; $(client_hint "")"
+  elif version_lt "$OPTIMAL_CLI_VERSION" "$_wo_e"; then
+    err "warning: client $OPTIMAL_CLI_VERSION is outdated for Engine $_wo_e; $(client_hint "$_wo_e")"
+  else
+    err "warning: client $OPTIMAL_CLI_VERSION is newer than Engine $_wo_e; commands the Engine does not have yet will fail"
+  fi
+}
+
 # transport METHOD PATH BODY [name value]...
 # Name/value pairs become URL query parameters (empty values are skipped).
 # Sets R_CODE (000 when no response), R_RC (curl exit), R_BODY, R_ERR, R_URL. Never exits.
@@ -530,7 +590,9 @@ transport() {
   _tout=$_t
   mktmp
   _terr=$_t
-  _targs="-sS -o $(q "$_tout") -w '%{http_code} %{url_effective}' --connect-timeout 10 --max-time $(q "$TIMEOUT") -H 'Accept: application/json' -H $(q "User-Agent: optimal-cli/$OPTIMAL_CLI_VERSION")"
+  mktmp
+  _thdr=$_t
+  _targs="-sS -o $(q "$_tout") -D $(q "$_thdr") -w '%{http_code} %{url_effective}' --connect-timeout 10 --max-time $(q "$TIMEOUT") -H 'Accept: application/json' -H $(q "User-Agent: optimal-cli/$OPTIMAL_CLI_VERSION")"
   if [ "$_tm" = GET ]; then
     [ $# -gt 0 ] && _targs="$_targs -G"
     while [ $# -ge 2 ]; do
@@ -560,6 +622,9 @@ transport() {
   R_BODY=$(cat "$_tout" 2>/dev/null)
   R_ERR=$(cat "$_terr" 2>/dev/null)
   verbose "< HTTP $R_CODE $(mask_url "$R_URL")"
+  _tod=$(LC_ALL=C awk -F: 'tolower($1) == "x-optimal-client-outdated" {
+    v = substr($0, index($0, ":") + 1); gsub(/^[ \t]+|[ \t\r]+$/, "", v); print v; exit }' "$_thdr" 2>/dev/null)
+  [ -z "$_tod" ] || warn_outdated "$_tod"
   return 0
 }
 
@@ -588,6 +653,7 @@ call() {
         permission_scope_denied) _ch=": the key lacks the scope for $_cm $_cp" ;;
         workspace_scope_denied) _ch=": the key is not scoped to workspace ${WS:-default}" ;;
         tenant_scope_denied) _ch=": the request names another tenant" ;;
+        operator_only) _ch=": only the Engine operator may do this (an admin key of the default tenant whose workspace scope is *)" ;;
         actor_identity_mismatch | reviewer_identity_mismatch) _ch=": identity comes from the key; the request named someone else" ;;
         *) _ch= ;;
       esac
@@ -598,6 +664,16 @@ call() {
       if [ "$_ce" = workspace_required ]; then
         die "$EX_USAGE" "workspace required (HTTP 400: workspace_required): this key is limited to named workspaces; pass --workspace <id> or set OPTIMAL_WORKSPACE"
       fi
+      ;;
+    404)
+      # The Engine serves no such route (not a missing record): see maint.
+      if [ -n "${NO_ROUTE:-}" ] && [ "$_ce" = "not found" ]; then
+        die "$EX_CONFIG" "$NO_ROUTE"
+      fi
+      ;;
+    426)
+      _cev=$(field_text "$R_BODY" engine 2>/dev/null) || _cev=
+      die "$EX_CONFIG" "the Engine${_cev:+ ($_cev)} refuses client $OPTIMAL_CLI_VERSION (HTTP 426${_ce:+: $_ce}); $(client_hint "$_cev")"
       ;;
   esac
   print_error_body
@@ -708,12 +784,11 @@ checkout_dir() {
 }
 
 refuse() {
-  die "$EX_CONFIG" "'$1' is an operator command: it runs only against a local Engine from an Engine checkout, and $2. The Engine API has no maintenance endpoint for it, so nothing was changed. For a managed Engine, use the platform's maintenance controls."
+  die "$EX_CONFIG" "'$1' is an operator command: against a local Engine it runs only from an Engine checkout, and $2; nothing was changed"
 }
 
-# operator CMD: sets CHECKOUT, PIDFILE, LOGFILE, or refuses.
+# operator CMD: for a local Engine, sets CHECKOUT, PIDFILE, LOGFILE, or refuses.
 operator() {
-  is_local_url || refuse "$1" "$(mask_url "$CFG_URL") is not a local Engine"
   CHECKOUT=$(checkout_dir) || refuse "$1" "this $PROG is not running from an Engine checkout (set OPTIMAL_ENGINE_CHECKOUT)"
   PIDFILE=$CHECKOUT/.optimal/cli-engine.pid
   LOGFILE=$CHECKOUT/.optimal/cli-engine.log
@@ -840,6 +915,61 @@ op_task() {
     exec mix "$_ot_task" "$@"
 }
 
+# remote_refuse NAME REASON: an operator command with no route on a remote Engine.
+remote_refuse() {
+  die "$EX_CONFIG" "'$1' against the remote Engine at $(mask_url "$CFG_URL"): $2; nothing was changed"
+}
+
+# maint METHOD PATH BODY [name value]...: call, except that a route the Engine
+# does not serve (an Engine older than the route) exits 78 instead of 1.
+maint() {
+  NO_ROUTE="the Engine at $(mask_url "$CFG_URL") has no route for '$CMD' ($1 $2), so nothing was changed; upgrade the Engine"
+  call "$@"
+  NO_ROUTE=
+}
+
+# remote_op [args]: the operator command $CMD against a remote Engine. It calls the
+# Engine's maintenance route (the key needs the admin scope) and never touches a
+# local process; a command the Engine API cannot serve exits 78.
+remote_op() {
+  case $CMD in
+    start | stop | restart)
+      too_many $# 0 "$CMD"
+      remote_refuse "$CMD" "its process belongs to the platform that runs it, and the Engine API has no route to $CMD it"
+      ;;
+    log | logs)
+      too_many $# 0 "$CMD"
+      maint GET /api/maintenance/log "" lines "${O_limit:-200}"
+      _rl=$(printf '%s' "$R_BODY" | jfield text 2>/dev/null) || _rl=
+      case $_rl in '"'*) ;; *) die "$EX_DATAERR" "the Engine's answer to GET /api/maintenance/log has no log text" ;; esac
+      _rl=$(printf '%s' "$_rl" | jtext)
+      # The lines are the Engine's text: control characters other than tab never reach the terminal.
+      [ -z "$_rl" ] || printf '%s\n' "$(redact "$_rl")" | LC_ALL=C tr '\001-\010\013-\037\177' '?'
+      ;;
+    index)
+      too_many $# 0 index
+      maint POST /api/maintenance/index "$(jobj workspace "$WS")"
+      emit "$R_BODY"
+      ;;
+    graph)
+      case ${1:-} in
+        '') maint GET /api/maintenance/graph "" workspace "$WS" ;;
+        hubs | clusters | triangles)
+          too_many $# 1 "graph $1"
+          call GET "/api/graph/$1" "" workspace "$WS" limit "${O_limit:-}"
+          ;;
+        backfill) remote_refuse "graph backfill" "the Engine API has no maintenance route for it" ;;
+        *) usage_die "unknown graph command '$1'" ;;
+      esac
+      emit "$R_BODY"
+      ;;
+    reality-check | reality_check)
+      [ -n "${O_disposable:-}" ] || usage_die "reality-check writes diagnostic fixtures; run it only on a disposable store and pass --disposable"
+      remote_refuse reality-check "it writes diagnostic fixtures, so it runs only against a disposable local store"
+      ;;
+  esac
+}
+
 # --- usage ----------------------------------------------------------------------
 
 usage() {
@@ -916,9 +1046,10 @@ Engine
   whoami                           the key's own scopes and workspaces, never the key
   api <METHOD> /api/<path> [json|-]  any other route, with the same auth
 
-Operator (local Engine from an Engine checkout only)
-  start | stop [--force] | restart | log [-n lines]
-  index [args] | graph [backfill] [args] | reality-check --disposable
+Operator (a local Engine from an Engine checkout; a remote one through /api/maintenance, admin scope)
+  start | stop [--force] | restart | log [-n lines]   (remote: log only)
+  index [args] | graph [hubs|clusters|triangles|backfill] [args] | reality-check --disposable
+                                   (remote: index and graph, not backfill or reality-check)
   backup [--name file]             server-side backup (admin scope), local or remote
 
 Options
@@ -933,7 +1064,7 @@ Options
   -v, --verbose        show requests and configuration sources on stderr (never the key)
   --version            print the client version
 
-Exit codes: 0 ok, 1 failed, 64 usage, 69 Engine unreachable, 77 auth or permission, 78 config or refused.
+Exit codes: 0 ok, 1 failed, 64 usage, 65 unreadable answer, 69 Engine unreachable, 77 auth or permission, 78 config or refused.
 EOF
 }
 
@@ -959,6 +1090,16 @@ fi
 
 resolve_config
 WS=$CFG_WS
+
+# Operator commands act on a local process and store only when the Engine is local.
+case $CMD in
+  start | stop | restart | log | logs | index | graph | reality-check | reality_check)
+    is_local_url || {
+      remote_op "$@"
+      exit
+    }
+    ;;
+esac
 
 case $CMD in
   boot)

@@ -12,7 +12,7 @@ Grant is the operation grant the key needs (alternatives joined by `or`), read f
 Workspace is `workspace` when the route is authorized for the workspaces it names (the implicit `default` when it names none), and `tenant` when it is tenant-wide; read from `OptimalEngine.API.WorkspaceAuthPlug`.
 A key whose metadata grants app data access (`/api/data/keys`) is confined to `/api/data` whatever its grant.
 
-Routes: 288
+Routes: 291
 
 | Method | Path | Router | Grant | Workspace |
 | --- | --- | --- | --- | --- |
@@ -133,6 +133,9 @@ Routes: 288
 | POST | `/api/loops/extract` | Router | write | workspace |
 | GET, POST | `/api/maintenance/corpus-organization` | Router | admin | tenant |
 | GET, POST | `/api/maintenance/embeddings` | Router | admin | tenant |
+| GET | `/api/maintenance/graph` | Router | admin | workspace |
+| POST | `/api/maintenance/index` | Router | admin | workspace |
+| GET | `/api/maintenance/log` | Router | admin | tenant |
 | GET, POST | `/api/memory` | Router | GET: read; POST: write | workspace |
 | POST | `/api/memory-core/active-pools` | Router | write | workspace |
 | GET | `/api/memory-core/active-pools/:id` | Router | read | workspace |

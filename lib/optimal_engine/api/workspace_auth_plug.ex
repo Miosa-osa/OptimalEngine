@@ -163,6 +163,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # workspace-parameterized — only the /:id subroutes name a workspace, and
   # those are caught by path_workspace/1 above.
   def workspace_scoped?(["api", "workspaces"]), do: false
+  # Maintenance is a global family, but these two act on one workspace, so the
+  # implicit default is authorized like any other workspace.
+  def workspace_scoped?(["api", "maintenance", route]) when route in ~w(index graph), do: true
   def workspace_scoped?(["api", root | _]), do: root not in @global_roots
   def workspace_scoped?(_path_info), do: false
 
