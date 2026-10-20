@@ -8,7 +8,9 @@
 #   install    fetch, check and unpack both archives in a scratch directory, copy them into
 #              the prefix beside the installed files, then rename them all into place; the
 #              installer itself goes to <prefix>/bin/install-client.sh (from 0.3.3 the copy
-#              in the CLI archive, so an upgrade refreshes it)
+#              in the CLI archive, so an upgrade refreshes it). An MCP server in the prefix
+#              is replaced or removed only when an earlier install put it there, and a
+#              program link is written only where none exists or an Optimal link is.
 #   configure  write the client profile from OPTIMAL_ENGINE_URL, OPTIMAL_ENGINE_API_KEY_FILE
 #              (or OPTIMAL_ENGINE_API_KEY) and OPTIMAL_WORKSPACE; nothing when the URL is unset
 #   register   register the MCP server with Claude Code and Codex when they are installed
@@ -18,10 +20,11 @@
 # Inputs (environment):
 #   OPTIMAL_CLIENT_VERSION   release to install (default: the version below); for the other
 #                            commands, the installed <prefix>/VERSION
-#   OPTIMAL_CLIENT_SOURCE    absolute directory or https base URL holding
-#                            optimal-<v>-<os>-<arch>.tar.gz, optimal-engine-mcp-<v>.tar.gz
-#                            and SHA256SUMS (default: the GitHub release v<version>);
-#                            http:// only with both sha256 pins
+#   OPTIMAL_CLIENT_SOURCE    required for install: the absolute directory or https base URL
+#                            holding optimal-<v>-<os>-<arch>.tar.gz,
+#                            optimal-engine-mcp-<v>.tar.gz and SHA256SUMS, such as the
+#                            Engine release staging directory; http:// only with both
+#                            sha256 pins
 #   OPTIMAL_CLI_SHA256, OPTIMAL_MCP_SHA256   expected sha256 of the two archives, from a
 #                            manifest you trust. Without them SHA256SUMS from the same source
 #                            decides, which catches a corrupt download but not a changed
@@ -47,20 +50,21 @@
 # The API key is never printed or passed as an argument. The profile is mode 0600 in a 0700
 # directory. With OPTIMAL_ENGINE_API_KEY_FILE set it names that file (key_file=, for clients
 # from 0.3.3 on) and OPTIMAL_ENGINE_API_KEY is not written; programs that read the
-# environment use OPTIMAL_ENGINE_API_KEY first.
+# environment use OPTIMAL_ENGINE_API_KEY first. As root, register refuses a symlinked Codex
+# config.toml and a CODEX_HOME another user owns.
 # Exit status: 0 when every requested command succeeded; 64 usage or input error; 65 an
 # archive refused (no expected sha256, a mismatch, wrong contents or version); 66 the key
 # file cannot be read; 69 something unavailable (the source, curl, a sha256 tool,
 # Node.js 20+); 70 nothing installed, <prefix>/VERSION unreadable, or the installed client
 # or MCP server failed its check; 73 the prefix, a program link or a harness registration
-# could not be written (the earlier install and harness settings stay as they were). The
-# Engine checks in verify exit with the CLI's code: 77 key refused, 69 Engine unreachable,
-# 64 workspace required, 78 bad configuration, 1 other.
+# could not be written, or a path in the prefix is not this installer's (the earlier
+# install and harness settings stay as they were). The Engine checks in verify exit with
+# the CLI's code: 77 key refused, 69 Engine unreachable, 64 workspace required, 78 bad
+# configuration, 1 other.
 set -eu
 umask 022
 
 DEFAULT_VERSION=0.3.5
-RELEASES=https://github.com/Miosa-osa/OptimalEngine/releases/download
 SYSTEM_PREFIX=${OPTIMAL_CLIENT_SYSTEM_PREFIX:-/opt/optimal}
 # The first release whose CLI and MCP server read key_file= and report the Engine version.
 VERSIONED_SINCE=0.3.3
@@ -167,13 +171,13 @@ else
   VERSION=$DEFAULT_VERSION
 fi
 
-SOURCE=${OPTIMAL_CLIENT_SOURCE:-$RELEASES/v$VERSION}
+SOURCE=${OPTIMAL_CLIENT_SOURCE:-}
 SOURCE=${SOURCE%/}
 
 OPTIMAL=$PREFIX/bin/optimal
 LAUNCHER=$PREFIX/bin/optimal-engine-mcp
 # install copies into the prefix under this suffix, then renames; until the renames are
-# done, an exit removes the copies.
+# done, an exit removes the copies and puts back an MCP server it had moved aside.
 NEW=.new.$$
 STAGING=
 CODEX_TMP=
@@ -185,7 +189,14 @@ unstage() {
 }
 cleanup() {
   rm -rf "$WORK"
-  [ -z "$STAGING" ] || unstage
+  if [ -n "$STAGING" ]; then
+    # Interrupted between the two MCP renames: the installed server goes back.
+    if [ ! -e "$PREFIX/mcp" ] && [ -d "$PREFIX/mcp.old$NEW" ]; then
+      mv "$PREFIX/mcp.old$NEW" "$PREFIX/mcp" ||
+        warn "the earlier MCP server is in $PREFIX/mcp.old$NEW; move it back to $PREFIX/mcp"
+    fi
+    unstage
+  fi
   [ -z "$CODEX_TMP" ] || rm -f "$CODEX_TMP"
 }
 trap cleanup EXIT
@@ -366,9 +377,58 @@ exec "\$node" '$PREFIX/mcp/dist/index.js' "\$@"
 EOF
 }
 
+# check_mcp_owner: an MCP server or launcher in the prefix is replaced or removed only
+# when an earlier install put it there: <prefix>/VERSION existed before this run and the
+# launcher carries this installer's line. Anything else is left alone, with exit 73.
+check_mcp_owner() {
+  _mcp_path=
+  for _path in "$PREFIX/mcp" "$LAUNCHER"; do
+    if [ -e "$_path" ] || [ -L "$_path" ]; then
+      _mcp_path=$_path
+      break
+    fi
+  done
+  [ -n "$_mcp_path" ] || return 0
+  if [ ! -f "$PREFIX/VERSION" ]; then
+    _foreign=$_mcp_path
+  elif ! grep -q 'installed by install-client\.sh' "$LAUNCHER" 2>/dev/null; then
+    _foreign=$LAUNCHER
+    [ -e "$LAUNCHER" ] || [ -L "$LAUNCHER" ] || _foreign=$PREFIX/mcp
+  else
+    return 0
+  fi
+  die $EX_CANTCREAT "$_foreign was not installed by install-client.sh, so it is neither replaced nor removed; move it away or set another OPTIMAL_CLIENT_PREFIX"
+}
+
+# sweep: a run killed outright (SIGKILL, a power cut) leaves its copies behind, or the MCP
+# server between its two renames. What runs no longer alive left is removed, and such a
+# server is put back when the prefix has none.
+sweep() {
+  for _left in "$PREFIX"/mcp.old.new.* "$PREFIX"/mcp.new.* "$PREFIX"/VERSION.new.* \
+    "$PREFIX"/bin/*.new.*; do
+    [ -e "$_left" ] || [ -L "$_left" ] || continue
+    _pid=${_left##*.}
+    case $_pid in '' | *[!0-9]*) continue ;; esac
+    [ "$_pid" != $$ ] || continue
+    if kill -0 "$_pid" 2>/dev/null; then
+      continue
+    fi
+    case $_left in
+      "$PREFIX"/mcp.old.new.*)
+        if [ ! -e "$PREFIX/mcp" ] && mv "$_left" "$PREFIX/mcp"; then
+          warn "put back $PREFIX/mcp, which an interrupted install had left as $_left"
+          continue
+        fi
+        ;;
+    esac
+    rm -rf "$_left" || warn "cannot remove $_left, left by an interrupted install"
+  done
+}
+
 # copy_in: copies everything into the prefix under the $NEW suffix, beside the installed
 # files. This is the step that needs space; a failure leaves the install as it was.
 copy_in() {
+  sweep
   STAGING=1
   unstage
   mkdir -p "$PREFIX/bin" || cant_write "$PREFIX/bin"
@@ -397,16 +457,21 @@ move_in() {
         mv "$PREFIX/mcp.old$NEW" "$PREFIX/mcp" && cant_write "$PREFIX/mcp"
         cant_rename "$PREFIX/mcp"
       fi
-      rm -rf "$PREFIX/mcp.old$NEW"
+      # A failure here must not stop the renames halfway; the next install sweeps it.
+      rm -rf "$PREFIX/mcp.old$NEW" ||
+        warn "cannot remove $PREFIX/mcp.old$NEW; the next install removes it"
     else
       mv "$PREFIX/mcp$NEW" "$PREFIX/mcp" || cant_rename "$PREFIX/mcp"
     fi
     mv -f "$LAUNCHER$NEW" "$LAUNCHER" || cant_rename "$LAUNCHER"
   elif [ -e "$LAUNCHER" ] || [ -d "$PREFIX/mcp" ]; then
-    # A CLI-only install leaves no MCP server of another version behind.
-    rm -f "$LAUNCHER"
-    rm -rf "$PREFIX/mcp"
-    say "removed the earlier MCP server from $PREFIX"
+    # A CLI-only install leaves no MCP server of another version behind; check_mcp_owner
+    # made sure an earlier install put it there.
+    if rm -f "$LAUNCHER" && rm -rf "$PREFIX/mcp"; then
+      say "removed the earlier MCP server from $PREFIX"
+    else
+      warn "cannot remove the earlier MCP server from $PREFIX; remove $LAUNCHER and $PREFIX/mcp"
+    fi
   fi
   mv -f "$PREFIX/bin/optimal$NEW" "$OPTIMAL" || cant_rename "$OPTIMAL"
   mv -f "$PREFIX/bin/oe$NEW" "$PREFIX/bin/oe" || cant_rename "$PREFIX/bin/oe"
@@ -416,6 +481,21 @@ move_in() {
   fi
   mv -f "$PREFIX/VERSION$NEW" "$PREFIX/VERSION" || cant_rename "$PREFIX/VERSION"
   STAGING=
+}
+
+# optimal_link PATH NAME: true when PATH is a link to NAME in an Optimal prefix, this one
+# or another: <root>/bin/NAME beside <root>/VERSION and <root>/bin/optimal.
+optimal_link() {
+  [ -L "$1" ] || return 1
+  _target=$(readlink "$1") || return 1
+  [ "$_target" != "$PREFIX/bin/$2" ] || return 0
+  case $_target in
+    /*/bin/"$2")
+      _root=${_target%/bin/*}
+      [ -f "$_root/VERSION" ] && [ -f "$_root/bin/optimal" ]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 link_programs() {
@@ -430,14 +510,23 @@ link_programs() {
   [ "$BIN_DIR" != "$PREFIX/bin" ] || return 0
   _where="the client is installed in $PREFIX/bin"
   mkdir -p "$BIN_DIR" || die $EX_CANTCREAT "cannot create $BIN_DIR; $_where"
+  _linked=
   for _p in optimal oe optimal-engine-mcp; do
+    _link=$BIN_DIR/$_p
     if [ -e "$PREFIX/bin/$_p" ]; then
-      ln -sf "$PREFIX/bin/$_p" "$BIN_DIR/$_p" || die $EX_CANTCREAT "cannot link $BIN_DIR/$_p; $_where"
-    elif [ -L "$BIN_DIR/$_p" ] && [ "$(readlink "$BIN_DIR/$_p")" = "$PREFIX/bin/$_p" ]; then
-      rm -f "$BIN_DIR/$_p"
+      # Short names such as oe can belong to another program: only an absent entry or
+      # an Optimal link is written.
+      if { [ -e "$_link" ] || [ -L "$_link" ]; } && ! optimal_link "$_link" "$_p"; then
+        warn "$_link exists and is not a link into an Optimal prefix; it is left as it is (run $PREFIX/bin/$_p)"
+        continue
+      fi
+      ln -sf "$PREFIX/bin/$_p" "$_link" || die $EX_CANTCREAT "cannot link $_link; $_where"
+      _linked="$_linked $_p"
+    elif [ -L "$_link" ] && [ "$(readlink "$_link")" = "$PREFIX/bin/$_p" ]; then
+      rm -f "$_link"
     fi
   done
-  say "linked the programs into $BIN_DIR"
+  [ -z "$_linked" ] || say "linked$_linked into $BIN_DIR"
   case :${PATH:-}: in
     *:"$BIN_DIR":*) ;;
     *) warn "$BIN_DIR is not on PATH" ;;
@@ -445,6 +534,8 @@ link_programs() {
 }
 
 cmd_install() {
+  [ -n "$SOURCE" ] ||
+    die $EX_USAGE "OPTIMAL_CLIENT_SOURCE is required for install: the absolute directory or https base URL holding the release files, such as the Engine release staging directory"
   _mcp=1
   [ "${OPTIMAL_CLIENT_SKIP_MCP:-0}" != 1 ] || _mcp=
   # Everything that can refuse the install runs before anything is replaced.
@@ -466,6 +557,7 @@ cmd_install() {
       ;;
   esac
   command -v curl >/dev/null 2>&1 || warn "curl is not installed; optimal needs curl 7.55 or newer"
+  check_mcp_owner
   if [ -z "${OPTIMAL_CLI_SHA256:-}" ] || { [ -n "$_mcp" ] && [ -z "${OPTIMAL_MCP_SHA256:-}" ]; }; then
     load_sums
   fi
@@ -629,6 +721,15 @@ register_codex() {
   if [ -n "$_cv" ] && ! version_ge "$_cv" "$CODEX_ENV_VARS_SINCE"; then
     _env_vars=
     warn "Codex $_cv predates env_vars ($CODEX_ENV_VARS_SINCE): the server gets only Codex's default environment and reads the profile"
+  fi
+  # root writes only into a CODEX_HOME it owns, and never through a symlink another user
+  # could point anywhere.
+  if [ -n "$IS_ROOT" ] && [ -d "$_home" ]; then
+    [ ! -L "$_home/config.toml" ] ||
+      die $EX_CANTCREAT "as root, register does not write through the symlink $_home/config.toml; run register as the user it belongs to"
+    _owner=$(ls -ndL "$_home" | awk '{ print $3 }')
+    [ "$_owner" = 0 ] ||
+      die $EX_CANTCREAT "as root, register does not write into $_home, which uid ${_owner:-unknown} owns; run register as that user"
   fi
   if [ ! -d "$_home" ]; then
     (umask 077 && mkdir -p "$_home") || die $EX_CANTCREAT "cannot create $_home"
