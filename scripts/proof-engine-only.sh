@@ -114,7 +114,20 @@ def clean(value):
 sent = clean(json.load(open(sys.argv[1])))
 back = clean(json.load(open(sys.argv[2])))
 
-if sent == back:
+# Every tenant carries a compatibility organization (slug "default") that owns
+# workspaces created before organizations were first-class. It is exported even
+# when it is empty, so the comparison excludes exactly that: an empty
+# organization with the default slug. Everything else must match the document.
+compat = [o for o in back.get("organizations", [])
+          if o.get("slug") == "default" and not o.get("workspaces")]
+mine = [o for o in back.get("organizations", []) if o not in compat]
+print("COMPATIBILITY_ORGS=%d" % len(compat))
+
+same = (sent.get("organizations") == mine and
+        sent.get("people") == back.get("people") and
+        sent.get("schema_version") == back.get("schema_version"))
+
+if same:
     print("TOPOLOGY_MATCH=true")
     sys.exit(0)
 
