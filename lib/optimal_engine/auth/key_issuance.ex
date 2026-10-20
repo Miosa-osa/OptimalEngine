@@ -9,6 +9,10 @@ defmodule OptimalEngine.Auth.KeyIssuance do
   `"*"` is the tenant's root authority and may issue any scopes and grants,
   but never a workspace or lifetime outside its own.
 
+  Operation scopes are never unrestricted by omission: when a request leaves
+  out `scopes` and the minter is root or there is no minter, the request is
+  refused with `scopes_required`. A root minter that means `*` says so.
+
   The principal a new key acts as must already exist in the minter's tenant.
   An anonymous trusted local caller (authentication not required, no key)
   mints without a parent and is bound only by the principal check.
@@ -71,10 +75,16 @@ defmodule OptimalEngine.Auth.KeyIssuance do
   defp name(_body), do: {:error, "name is required"}
 
   defp scopes(parent, body) do
-    with {:ok, requested} <- string_list(body, "scopes", inherited(parent, :scopes)) do
-      if root?(parent) or subset?(requested, parent && parent.scopes),
-        do: {:ok, requested},
-        else: {:error, "scope_exceeds_minter"}
+    inherited = inherited(parent, :scopes)
+
+    if is_nil(Map.get(body, "scopes")) and (is_nil(inherited) or "*" in inherited) do
+      {:error, "scopes_required"}
+    else
+      with {:ok, requested} <- string_list(body, "scopes", inherited) do
+        if root?(parent) or subset?(requested, parent && parent.scopes),
+          do: {:ok, requested},
+          else: {:error, "scope_exceeds_minter"}
+      end
     end
   end
 

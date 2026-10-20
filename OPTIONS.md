@@ -111,7 +111,7 @@ The tracked [engine-contract.json](engine-contract.json) lists capabilities; [re
 A checkout pin does not attest a separately running HTTP process.
 
 Ordinary `read`/`write` clients need separate `claims:review`, `topology:write`, or `admin` grants for privileged operations.
-Omitting scopes when minting a key currently grants `*`; choose grants explicitly.
+`POST /api/auth/keys` refuses a request without `scopes` (400 `scopes_required`) unless the minting key's own scopes are named, in which case they are inherited; ask for `["*"]` explicitly when a root key is meant. `mix optimal.auth mint` (local operator shell) still defaults to `*`.
 Follow [API grants and migration](docs/guides/interfaces-and-publishing.md#api-grants-and-identity) for tenant/reviewer binding and administrator-issued replacement keys.
 
 ## Safe Defaults

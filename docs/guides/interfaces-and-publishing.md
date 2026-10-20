@@ -144,7 +144,7 @@ calling the explicit review/promotion path.
 
 An API key has operation `scopes`, a tenant, and a separate `workspace_scope` allowlist.
 All applicable checks must pass.
-Explicitly set operation scopes when minting keys: omitting them currently creates a privileged `*` key.
+Set operation scopes when minting keys. Through `POST /api/auth/keys`, omitted scopes are refused (400 `scopes_required`) unless the minting key's scopes are named, in which case they are inherited; a key is never `*` by omission. `mix optimal.auth mint` in the operator's shell still defaults to `*`.
 
 | Operation scope | Permitted operations |
 | --- | --- |
