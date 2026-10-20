@@ -217,6 +217,7 @@ Unauthenticated local mode is privileged development access, and direct CLI or d
 
 The `read` and `write` grants do not authorize Claim review, topology changes, or key administration.
 Add `claims:review`, `topology:write`, or `admin` only for the operations the client needs.
+The Engine itself still promotes high-confidence Claims on a schedule unless `OPTIMAL_CLAIM_PROMOTION_MODE=manual` (or `agent_review`) is set; set it when every Claim must be decided by a reviewer.
 Omitting operation scopes currently grants `*` privileges.
 Authenticated tenant parameters cannot override the key's tenant, and Claim reviewers are derived from its principal or key ID.
 See [API grants and migration](interfaces-and-publishing.md#api-grants-and-identity) for exact grants, identity checks, replacement-key creation, and revocation.

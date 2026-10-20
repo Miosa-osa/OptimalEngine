@@ -85,6 +85,28 @@ defmodule OptimalEngine.MemoryCore.PromotionSchedulerTest do
              Store.raw_query("SELECT COUNT(*) FROM facts WHERE workspace_id = ?1", [workspace_id])
   end
 
+  test "the configured mode applies when the call names none" do
+    workspace_id = ws()
+    _high = seed_claim(workspace_id, 0.99)
+    previous = Application.get_env(:optimal_engine, :memory, [])
+    on_exit(fn -> Application.put_env(:optimal_engine, :memory, previous) end)
+
+    Application.put_env(
+      :optimal_engine,
+      :memory,
+      Keyword.put(previous, :claim_promotion_mode, :manual)
+    )
+
+    assert {:ok, summary} =
+             PromotionScheduler.run_once(tenant_id: "default", workspace_ids: [workspace_id])
+
+    assert summary.mode == :manual
+    assert summary.promoted_count == 0
+
+    assert {:ok, [[0]]} =
+             Store.raw_query("SELECT COUNT(*) FROM facts WHERE workspace_id = ?1", [workspace_id])
+  end
+
   test "manual mode is a no-op even for high-confidence claims" do
     workspace_id = ws()
     _high = seed_claim(workspace_id, 0.99)

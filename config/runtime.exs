@@ -260,6 +260,28 @@ if authority_mode do
   config :optimal_engine, :authority_mode, authority_mode
 end
 
+# Claim promotion. By default (auto_threshold) the Engine promotes Claims
+# whose confidence meets the workspace threshold on its own; manual and
+# agent_review leave every Claim to a reviewer holding claims:review.
+claim_promotion_mode = System.get_env("OPTIMAL_CLAIM_PROMOTION_MODE")
+
+if claim_promotion_mode do
+  unless claim_promotion_mode in ~w(auto_threshold manual agent_review),
+    do:
+      raise(
+        ArgumentError,
+        "OPTIMAL_CLAIM_PROMOTION_MODE must be auto_threshold, manual, or agent_review"
+      )
+
+  config :optimal_engine,
+         :memory,
+         Keyword.put(
+           Application.get_env(:optimal_engine, :memory, []),
+           :claim_promotion_mode,
+           String.to_atom(claim_promotion_mode)
+         )
+end
+
 if issuer = System.get_env("OPTIMAL_AUTHORITY_ISSUER") do
   config :optimal_engine, :authority_issuer, issuer
 end
