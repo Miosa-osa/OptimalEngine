@@ -124,7 +124,7 @@ echo "BUCKET_OBJECT_LINES=$objects"
 
 echo "== step 6: restore the offsite copy into a second data directory"
 backup_id=$(mix optimal.backup --list-offsite 2>/dev/null |
-  grep -E '^  [0-9a-fA-F-]{36}$' | head -1 | tr -d ' ')
+  grep -E '^  backup_[0-9a-f]{32}$' | head -1 | tr -d ' ' || true)
 [ -n "$backup_id" ] || fail "no cataloged offsite backup id"
 echo "BACKUP_ID=$backup_id"
 
