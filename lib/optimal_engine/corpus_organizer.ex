@@ -4,10 +4,13 @@ defmodule OptimalEngine.CorpusOrganizer do
 
   Records are placed by name markers (`rules/0`) and, when enabled, by
   meaning (`semantic_settings/0`): a record's document vector is compared
-  with the centroid of each workspace's filed documents. A placed record
-  keeps the evidence of its placement in `metadata.routing_placement`; one
-  that is not placed gets a routing review entry with the best proposal.
+  with the centroid of each workspace's filed documents, with its nearest
+  filed documents, or both. A placed record keeps the evidence of its
+  placement in `metadata.routing_placement`; one that is not placed gets a
+  routing review entry with the best proposal.
   """
+
+  require Logger
 
   alias OptimalEngine.Store
 
@@ -16,6 +19,8 @@ defmodule OptimalEngine.CorpusOrganizer do
   @minimum_margin 5
   @semantic_margin 0.04
   @semantic_min_examples 5
+  @semantic_k 10
+  @semantic_share 0.8
 
   @doc """
   The routing rules: a map of target workspace id to `{marker, weight}`
@@ -55,16 +60,34 @@ defmodule OptimalEngine.CorpusOrganizer do
 
       semantic:
         enabled: true
-        margin: 0.04          # best workspace similarity minus the runner-up
-        min_similarity: 0.0   # floor for the best workspace's similarity
+        method: centroid      # centroid (the default), knn, or agree
+        margin: 0.04          # centroid, agree: best centroid similarity minus the runner-up
+        k: 10                 # knn, agree: the nearest filed documents that vote
+        share: 0.8            # knn, agree: least share of the vote the winner needs
+        min_similarity: 0.0   # floor for the best similarity (below)
         min_examples: 5       # filed documents with vectors a target needs
         exclude: [default:example-private]
 
   Targets are the active workspaces of the intake workspace's tenant with at
   least `min_examples` document vectors, other than the intake itself and
-  the excluded ones; there must be two, so a margin exists. A record is
-  placed when its best workspace clears the floor and the margin, and no
-  name marker proposes another workspace. Returns the settings, or `nil`.
+  the excluded ones; there must be two, so there is a choice.
+
+    * `centroid` compares the record's vector with the centroid of each
+      target's filed vectors. The record is placed when the closest centroid
+      clears `min_similarity` and beats the runner-up by `margin`.
+    * `knn` takes the `k` filed documents closest to the record, from every
+      active workspace of the tenant, and each votes for its workspace with
+      its similarity. Documents of small or excluded workspaces vote, but
+      only a target can win. The record is placed when the leading target
+      holds at least `share` of the vote and its closest document clears
+      `min_similarity`. A workspace with fewer documents than the vote
+      needs cannot win it, so small workspaces do not attract records.
+    * `agree` places only when `knn` places and the closest centroid is the
+      same workspace, at least `margin` ahead of the runner-up.
+
+  In every method a name marker proposing another workspace blocks the
+  placement. An unknown method turns placement by meaning off. Returns the
+  settings, or `nil`.
   """
   @spec semantic_settings() :: map() | nil
   def semantic_settings do
@@ -77,17 +100,47 @@ defmodule OptimalEngine.CorpusOrganizer do
       |> Map.new(fn {key, value} -> {to_string(key), value} end)
 
     if raw["enabled"] == true do
-      %{
-        margin: number(raw["margin"], @semantic_margin),
-        min_similarity: number(raw["min_similarity"], 0.0),
-        min_examples: number(raw["min_examples"], @semantic_min_examples),
-        exclude: raw["exclude"] |> List.wrap() |> Enum.map(&to_string/1)
-      }
+      case semantic_method(raw["method"]) do
+        nil ->
+          Logger.warning(
+            "[CorpusOrganizer] unknown semantic method #{inspect(raw["method"])}; placement by meaning is off"
+          )
+
+          nil
+
+        method ->
+          %{
+            method: method,
+            margin: number(raw["margin"], @semantic_margin),
+            min_similarity: number(raw["min_similarity"], 0.0),
+            min_examples: number(raw["min_examples"], @semantic_min_examples),
+            exclude: raw["exclude"] |> List.wrap() |> Enum.map(&to_string/1),
+            k: positive_integer(raw["k"], @semantic_k),
+            share: number(raw["share"], @semantic_share)
+          }
+      end
     end
   end
 
+  defp semantic_method(nil), do: :centroid
+  defp semantic_method(method) when method in [:centroid, :knn, :agree], do: method
+
+  defp semantic_method(method) when is_binary(method) do
+    case String.downcase(method) do
+      "centroid" -> :centroid
+      "knn" -> :knn
+      "agree" -> :agree
+      _ -> nil
+    end
+  end
+
+  defp semantic_method(_method), do: nil
+
   defp number(value, _default) when is_number(value), do: value
   defp number(_value, default), do: default
+
+  defp positive_integer(value, _default) when is_integer(value) and value > 0, do: value
+  defp positive_integer(_value, default), do: default
 
   defp normalize_rules(rules) do
     for {workspace_id, markers} <- rules, is_list(markers), into: %{} do
@@ -172,7 +225,7 @@ defmodule OptimalEngine.CorpusOrganizer do
         Enum.map(rows, fn [id, title, l0, content] ->
           title
           |> classify_fields(l0, content, rules)
-          |> by_meaning(Map.get(placer.vectors, id), placer)
+          |> by_meaning(id, placer)
           |> Map.merge(%{id: id, title: title})
         end)
 
@@ -182,7 +235,7 @@ defmodule OptimalEngine.CorpusOrganizer do
 
   # -- placement by meaning ----------------------------------------------------
 
-  defp semantic_placer(_source, nil), do: {:ok, %{settings: nil, centroids: [], vectors: %{}}}
+  defp semantic_placer(_source, nil), do: {:ok, %{settings: nil}}
 
   defp semantic_placer(source, settings) do
     tenant_id =
@@ -191,21 +244,39 @@ defmodule OptimalEngine.CorpusOrganizer do
         _ -> "default"
       end
 
-    with {:ok, sums} <- filed_vectors(tenant_id, source, "", %{}),
+    vote? = settings.method in [:knn, :agree]
+
+    with {:ok, {sums, documents}} <- filed_vectors(tenant_id, source, vote?, "", {%{}, []}),
          {:ok, vectors} <- intake_vectors(source, "", %{}) do
-      centroids =
-        for {{workspace_id, dims}, {sum, count}} <- sums,
+      targets =
+        for {{workspace_id, dims}, {_sum, count}} <- sums,
             count >= settings.min_examples,
             workspace_id not in settings.exclude,
+            reduce: %{} do
+          targets ->
+            Map.update(targets, dims, MapSet.new([workspace_id]), &MapSet.put(&1, workspace_id))
+        end
+
+      centroids =
+        for {{workspace_id, dims}, {sum, _count}} <- sums,
+            MapSet.member?(Map.get(targets, dims, MapSet.new()), workspace_id),
             do: %{workspace_id: workspace_id, dims: dims, centroid: unit(sum)}
 
-      {:ok, %{settings: settings, centroids: centroids, vectors: vectors}}
+      {:ok,
+       %{
+         settings: settings,
+         centroids: centroids,
+         targets: targets,
+         vectors: vectors,
+         neighbours: if(vote?, do: nearest(vectors, documents, settings.k), else: %{})
+       }}
     end
   end
 
   # Sums of unit document vectors per {workspace, dimensions} over the
-  # tenant's active, filed documents, read in pages.
-  defp filed_vectors(tenant_id, source, after_id, sums) do
+  # tenant's active, filed documents, read in pages. With `keep_documents`
+  # each document is also kept as a voter for `nearest/3`.
+  defp filed_vectors(tenant_id, source, keep_documents, after_id, {sums, documents}) do
     case Store.raw_query(
            """
            SELECT c.id, c.workspace_id, v.embedding
@@ -220,25 +291,40 @@ defmodule OptimalEngine.CorpusOrganizer do
            [tenant_id, source, after_id, @page_size * 10]
          ) do
       {:ok, []} ->
-        {:ok, sums}
+        {:ok, {sums, documents}}
 
       {:ok, rows} ->
-        sums =
-          Enum.reduce(rows, sums, fn [_id, workspace_id, blob], sums ->
-            vector = blob |> floats() |> unit()
+        acc =
+          Enum.reduce(rows, {sums, documents}, fn [_id, workspace_id, blob], {sums, documents} ->
+            values = floats(blob)
+            norm = norm(values)
+            vector = scale(values, norm)
 
-            Map.update(sums, {workspace_id, length(vector)}, {vector, 1}, fn {sum, count} ->
-              {add(sum, vector), count + 1}
-            end)
+            sums =
+              Map.update(sums, {workspace_id, length(vector)}, {vector, 1}, fn {sum, count} ->
+                {add(sum, vector), count + 1}
+              end)
+
+            {sums, voter(documents, keep_documents, workspace_id, blob, values, norm)}
           end)
 
         [last_id | _] = List.last(rows)
-        filed_vectors(tenant_id, source, last_id, sums)
+        filed_vectors(tenant_id, source, keep_documents, last_id, acc)
 
       {:error, _} = error ->
         error
     end
   end
+
+  # A filed document as a voter: its workspace, its stored vector (compared
+  # as stored, so thousands of documents cost their bytes rather than float
+  # lists), and the inverse of its norm. A vector that does not decode whole
+  # does not vote.
+  defp voter(documents, true, workspace_id, blob, values, norm)
+       when norm > 0.0 and length(values) * 4 == byte_size(blob),
+       do: [{workspace_id, blob, 1.0 / norm} | documents]
+
+  defp voter(documents, _keep, _workspace_id, _blob, _values, _norm), do: documents
 
   # Intake document vectors by id, kept as stored bytes until compared.
   defp intake_vectors(source, after_id, vectors) do
@@ -266,46 +352,148 @@ defmodule OptimalEngine.CorpusOrganizer do
     end
   end
 
-  defp by_meaning(result, blob, %{settings: settings, centroids: centroids})
-       when is_binary(blob) and not is_nil(settings) do
-    vector = blob |> floats() |> unit()
-    dims = length(vector)
+  # The `k` filed documents closest to each intake vector, by intake id, as
+  # `{dimensions, [{workspace_id, similarity}]}` nearest first. The intake is
+  # split into one part per scheduler; each part compares its records with
+  # every filed document of the same dimensions.
+  defp nearest(vectors, documents, k) do
+    parts = System.schedulers_online()
+    size = max(div(map_size(vectors) + parts - 1, parts), 1)
 
-    ranked =
-      for(
-        %{dims: ^dims} = centroid <- centroids,
-        do: {centroid.workspace_id, dot(vector, centroid.centroid)}
-      )
-      |> Enum.sort_by(&elem(&1, 1), :desc)
+    vectors
+    |> Enum.chunk_every(size)
+    |> Task.async_stream(
+      fn part -> Enum.map(part, fn {id, blob} -> {id, nearest_to(blob, documents, k)} end) end,
+      ordered: false,
+      timeout: :infinity
+    )
+    |> Enum.reduce(%{}, fn {:ok, part}, acc -> Enum.into(part, acc) end)
+  end
 
-    case ranked do
-      [{workspace_id, similarity}, {_, second} | _] ->
-        margin = similarity - second
+  defp nearest_to(blob, documents, k) do
+    query = blob |> floats() |> unit()
+    bytes = byte_size(blob)
 
-        semantic = %{
-          workspace_id: workspace_id,
-          similarity: Float.round(similarity, 4),
-          margin: Float.round(margin, 4)
-        }
+    similarities =
+      if length(query) * 4 == bytes do
+        for {workspace_id, stored, inverse_norm} <- documents,
+            byte_size(stored) == bytes,
+            do: {workspace_id, dot_stored(stored, query, 0.0) * inverse_norm}
+      else
+        []
+      end
 
+    {length(query), similarities |> Enum.sort_by(&elem(&1, 1), :desc) |> Enum.take(k)}
+  end
+
+  defp by_meaning(result, id, %{settings: %{} = settings} = placer) do
+    case meaning(settings.method, id, placer) do
+      {semantic, floor?, rule?} ->
         result
-        |> place_by_meaning(
-          semantic,
-          similarity >= settings.min_similarity,
-          margin >= settings.margin
-        )
+        |> place_by_meaning(semantic, floor?, rule?)
         |> Map.put(:semantic, semantic)
 
-      _ ->
-        by_meaning(result, nil, nil)
+      nil ->
+        by_meaning(result, id, nil)
     end
   end
 
-  defp by_meaning(result, _blob, _placer) do
+  defp by_meaning(result, _id, _placer) do
     Map.merge(result, %{method: marker_method(result), semantic: nil})
   end
 
-  defp place_by_meaning(%{confidence: :high} = result, _semantic, _floor, _margin),
+  # `{proposal, clears min_similarity?, clears the method's rule?}` for an
+  # intake record, or nil when it has no vector or nothing to compare with.
+  defp meaning(:centroid, id, %{settings: settings, centroids: centroids, vectors: vectors}) do
+    with blob when is_binary(blob) <- Map.get(vectors, id),
+         [{workspace_id, similarity}, {_, second} | _] <- ranked(blob, centroids) do
+      margin = similarity - second
+
+      semantic = %{
+        method: :centroid,
+        workspace_id: workspace_id,
+        similarity: Float.round(similarity, 4),
+        margin: Float.round(margin, 4)
+      }
+
+      {semantic, similarity >= settings.min_similarity, margin >= settings.margin}
+    else
+      _ -> nil
+    end
+  end
+
+  defp meaning(:knn, id, %{settings: settings, targets: targets, neighbours: neighbours}) do
+    with {dims, [_ | _] = voters} <- Map.get(neighbours, id),
+         eligible = Map.get(targets, dims, MapSet.new()),
+         true <- MapSet.size(eligible) >= 2,
+         {workspace_id, weight, votes, closest} <- leading(voters, eligible) do
+      share = weight / (voters |> Enum.map(&max(elem(&1, 1), 0.0)) |> Enum.sum())
+
+      semantic = %{
+        method: :knn,
+        workspace_id: workspace_id,
+        similarity: Float.round(closest, 4),
+        share: Float.round(share, 4),
+        votes: votes,
+        neighbours: length(voters)
+      }
+
+      {semantic, closest >= settings.min_similarity, share >= settings.share}
+    else
+      _ -> nil
+    end
+  end
+
+  defp meaning(:agree, id, placer) do
+    with {vote, floor?, voted?} <- meaning(:knn, id, placer) do
+      case meaning(:centroid, id, placer) do
+        {centroid, _floor?, margin?} ->
+          semantic =
+            Map.merge(vote, %{
+              method: :agree,
+              centroid_workspace_id: centroid.workspace_id,
+              margin: centroid.margin
+            })
+
+          agreed? = voted? and margin? and centroid.workspace_id == vote.workspace_id
+          {semantic, floor?, agreed?}
+
+        nil ->
+          {Map.put(vote, :method, :agree), floor?, false}
+      end
+    end
+  end
+
+  # The target with the largest vote among the nearest documents: its
+  # weight (the sum of its documents' similarities, none below zero), its
+  # votes, and its closest document's similarity. Documents of other
+  # workspaces count only in the total.
+  defp leading(voters, eligible) do
+    voters
+    |> Enum.filter(fn {workspace_id, _similarity} -> MapSet.member?(eligible, workspace_id) end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.map(fn {workspace_id, similarities} ->
+      weight = similarities |> Enum.map(&max(&1, 0.0)) |> Enum.sum()
+      {workspace_id, weight, length(similarities), Enum.max(similarities)}
+    end)
+    |> Enum.filter(fn {_workspace_id, weight, _votes, _closest} -> weight > 0.0 end)
+    |> Enum.max_by(&elem(&1, 1), &>=/2, fn -> nil end)
+  end
+
+  # Targets of the vector's dimensions by similarity of their centroid,
+  # closest first.
+  defp ranked(blob, centroids) do
+    vector = blob |> floats() |> unit()
+    dims = length(vector)
+
+    for(
+      %{dims: ^dims} = centroid <- centroids,
+      do: {centroid.workspace_id, dot(vector, centroid.centroid)}
+    )
+    |> Enum.sort_by(&elem(&1, 1), :desc)
+  end
+
+  defp place_by_meaning(%{confidence: :high} = result, _semantic, _floor, _rule),
     do: Map.put(result, :method, :markers)
 
   defp place_by_meaning(result, semantic, true, true)
@@ -318,7 +506,7 @@ defmodule OptimalEngine.CorpusOrganizer do
     })
   end
 
-  defp place_by_meaning(%{proposed_workspace_id: nil} = result, semantic, true, _margin) do
+  defp place_by_meaning(%{proposed_workspace_id: nil} = result, semantic, true, _rule) do
     Map.merge(result, %{
       proposed_workspace_id: semantic.workspace_id,
       confidence: :review,
@@ -326,21 +514,30 @@ defmodule OptimalEngine.CorpusOrganizer do
     })
   end
 
-  defp place_by_meaning(result, _semantic, _floor, _margin), do: Map.put(result, :method, nil)
+  defp place_by_meaning(result, _semantic, _floor, _rule), do: Map.put(result, :method, nil)
 
   defp marker_method(%{confidence: :high}), do: :markers
   defp marker_method(_result), do: nil
 
   defp floats(blob), do: for(<<value::float-little-32 <- blob>>, do: value)
 
-  defp unit(vector) do
-    norm = vector |> Enum.reduce(0.0, &(&1 * &1 + &2)) |> :math.sqrt()
-    if norm == 0.0, do: vector, else: Enum.map(vector, &(&1 / norm))
-  end
+  defp unit(vector), do: scale(vector, norm(vector))
+
+  defp norm(vector), do: vector |> Enum.reduce(0.0, &(&1 * &1 + &2)) |> :math.sqrt()
+
+  defp scale(vector, norm) when norm == 0.0, do: vector
+  defp scale(vector, norm), do: Enum.map(vector, &(&1 / norm))
 
   defp add(a, b), do: Enum.zip_with(a, b, &(&1 + &2))
 
   defp dot(a, b), do: Enum.zip_reduce(a, b, 0.0, &(&1 * &2 + &3))
+
+  # A stored little-endian float32 vector against a float list of the same
+  # length, without decoding the stored one into a list first.
+  defp dot_stored(<<value::float-little-32, rest::binary>>, [x | xs], acc),
+    do: dot_stored(rest, xs, acc + value * x)
+
+  defp dot_stored(<<>>, [], acc), do: acc
 
   # `:preview` reuses a preview the caller already read, so one run reads
   # the intake once.
@@ -511,13 +708,18 @@ defmodule OptimalEngine.CorpusOrganizer do
     end)
   end
 
+  # Placement by meaning keeps the method and its numbers: similarity and
+  # margin (centroid); similarity, share, votes and neighbours (knn); both,
+  # with the centroid's workspace (agree).
   defp evidence(%{method: :semantic, semantic: semantic, workspace_id: workspace_id}) do
-    %{
+    semantic
+    |> Map.drop([:method, :workspace_id])
+    |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+    |> Map.merge(%{
       "method" => "semantic",
-      "workspace_id" => workspace_id,
-      "similarity" => semantic.similarity,
-      "margin" => semantic.margin
-    }
+      "semantic_method" => Atom.to_string(semantic.method),
+      "workspace_id" => workspace_id
+    })
   end
 
   defp evidence(proposal) do
