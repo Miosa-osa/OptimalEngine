@@ -175,13 +175,16 @@ python3 - "$DATA/providers.json" <<'PY' || fail "the providers report is wrong"
 import json, sys
 
 body = json.load(open(sys.argv[1]))
-providers = body.get("providers", body)
-s3 = providers.get("s3", {})
-postgres = providers.get("postgres", {})
-print("S3_STATUS=%s POSTGRES_STATUS=%s" % (s3.get("status"), postgres.get("status")))
-if s3.get("status") not in ("available", "ok"):
+by_id = {provider.get("id"): provider for provider in body.get("providers", [])}
+s3 = by_id.get("s3", {})
+postgres = by_id.get("postgres", {})
+print(
+    "S3_CONFIGURED=%s S3_HEALTH=%s POSTGRES_HEALTH=%s"
+    % (s3.get("configured"), s3.get("health"), postgres.get("health"))
+)
+if s3.get("configured") is not True or s3.get("health") not in ("healthy", "configured"):
     sys.exit(1)
-if postgres.get("status") != "not_configured":
+if postgres.get("health") != "not_configured":
     sys.exit(1)
 PY
 
