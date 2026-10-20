@@ -20,10 +20,20 @@ defmodule OptimalEngine.Sync.Gate do
     * it is an aggregate (`analysis_reports`) and the workspace holds
       anything above the peer's class.
 
+  A Store error while classifying is not an answer: it raises, the push
+  cycle sends nothing and its cursor stays where it was, so the next cycle
+  classifies the same rows again. A workspace whose data class is not one of
+  the four is treated as `restricted`.
+
   Receiving reads only what a row carries (labels, metadata labels,
-  classification level): the sender's rows arrive in batches, so their
-  sources may not be here yet. Sender and receiver gate the same way on
-  what they can see.
+  classification level, BLOB columns included): the sender's rows arrive in
+  batches, so their sources may not be here yet. Sender and receiver gate
+  the same way on what they can see.
+
+  Classification is read when a row is sent. A source package that arrives
+  after the rows derived from it, or a label lowered on the source, does not
+  release rows already held: those rows were never sent and stay home until
+  a change to them (or to what they derive from) is captured again.
 
   Deleting is the exception to fail-closed: a delete carries only the row's
   key, so it is held only when the row's earlier changes in the local ledger
@@ -40,6 +50,7 @@ defmodule OptimalEngine.Sync.Gate do
   alias OptimalEngine.Store
   alias OptimalEngine.Sync.Lineage
 
+  @internal 1
   @restricted 3
   @max_depth 40
 
@@ -89,17 +100,36 @@ defmodule OptimalEngine.Sync.Gate do
   @spec class_rank(term()) :: non_neg_integer()
   def class_rank(class), do: SecurityLabels.class_rank(class) || 1
 
+  @doc """
+  The class rank of a workspace's own data: its `data_class`; `internal` when
+  it names none or the workspace is not there; `restricted` when it names a
+  class this Engine does not know. A Store error is raised: a workspace that
+  cannot be read is not assumed to be open.
+  """
+  @spec workspace_rank(String.t()) :: SecurityLabels.rank()
+  def workspace_rank(workspace_id) do
+    case OptimalEngine.Workspace.get(workspace_id) do
+      {:ok, %{metadata: %{"data_class" => class}}} when class in [nil, ""] ->
+        @internal
+
+      {:ok, %{metadata: %{"data_class" => class}}} ->
+        SecurityLabels.class_rank(class) || @restricted
+
+      {:ok, _workspace} ->
+        @internal
+
+      {:error, :not_found} ->
+        @internal
+
+      other ->
+        raise "the sync gate could not read the workspace: #{inspect(other)}"
+    end
+  end
+
   @doc "True when the workspace's own data class is above the gate."
   @spec workspace_above?(t()) :: boolean()
-  def workspace_above?(%__MODULE__{workspace_id: workspace_id, rank: rank}) do
-    class =
-      case OptimalEngine.Workspace.get(workspace_id) do
-        {:ok, %{metadata: %{"data_class" => class}}} -> class
-        _ -> "internal"
-      end
-
-    class_rank(class) > rank
-  end
+  def workspace_above?(%__MODULE__{workspace_id: workspace_id, rank: rank}),
+    do: workspace_rank(workspace_id) > rank
 
   # -- sending ------------------------------------------------------------------
 
@@ -139,7 +169,7 @@ defmodule OptimalEngine.Sync.Gate do
       spec ->
         if mutation["operation"] == "delete",
           do: history_rank(gate, table, spec, mutation),
-          else: top_rank(gate, table, spec, row_of(mutation), true)
+          else: top_rank(gate, table, spec, mutation_row(mutation), true)
     end
   end
 
@@ -152,7 +182,7 @@ defmodule OptimalEngine.Sync.Gate do
   """
   @spec held_on_receive?(map(), String.t()) :: boolean()
   def held_on_receive?(mutation, max_class) do
-    row = row_of(mutation)
+    row = mutation_row(mutation)
 
     rank =
       case Lineage.spec(mutation["entity_type"]) do
@@ -224,9 +254,6 @@ defmodule OptimalEngine.Sync.Gate do
 
       spec ->
         case load(table, spec, id) do
-          :error ->
-            @restricted
-
           nil ->
             cond do
               Lineage.anchor?(table) -> unresolved(strict)
@@ -383,7 +410,7 @@ defmodule OptimalEngine.Sync.Gate do
 
     for [payload] <- rows, reduce: nil do
       acc ->
-        row = row_of(%{"payload" => decode_payload(payload)})
+        row = mutation_row(%{"payload" => decode_payload(payload)})
         max_rank(acc, top_rank(gate, table, spec, row, false))
     end
   end
@@ -583,10 +610,9 @@ defmodule OptimalEngine.Sync.Gate do
     sql =
       "SELECT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} WHERE #{quote_name(key)} = ?1 LIMIT 1"
 
-    case Store.raw_query(sql, [id]) do
-      {:ok, [values]} -> columns |> Enum.zip(values) |> Map.new()
-      {:ok, []} -> nil
-      _ -> :error
+    case query!(sql, [id]) do
+      [values | _] -> columns |> Enum.zip(values) |> Map.new()
+      [] -> nil
     end
   end
 
@@ -646,8 +672,31 @@ defmodule OptimalEngine.Sync.Gate do
   defp max_rank(rank, nil), do: rank
   defp max_rank(left, right), do: max(left, right)
 
-  defp row_of(%{"payload" => %{"row" => %{} = row}}), do: row
-  defp row_of(_mutation), do: %{}
+  @doc """
+  The row a mutation carries, with its BLOB columns put back. A value SQLite
+  holds as a BLOB travels hex-encoded in `payload.blobs` and is nil in
+  `payload.row` (any column may hold one), so a label stored that way is read
+  from there. A blob that is not hex is kept as an atom no reader accepts,
+  which ranks `restricted` in a labels column.
+  """
+  @spec mutation_row(map()) :: map()
+  def mutation_row(%{"payload" => %{"row" => %{} = row} = payload}) do
+    case payload["blobs"] do
+      %{} = blobs -> Map.merge(row, Map.new(blobs, fn {name, hex} -> {name, blob_value(hex)} end))
+      _none -> row
+    end
+  end
+
+  def mutation_row(_mutation), do: %{}
+
+  defp blob_value(hex) when is_binary(hex) do
+    case Base.decode16(hex, case: :mixed) do
+      {:ok, bytes} -> bytes
+      :error -> :unreadable
+    end
+  end
+
+  defp blob_value(_hex), do: :unreadable
 
   defp unclassified(gate, table) do
     memoized(gate, {:unclassified, table}, fn ->

@@ -86,10 +86,17 @@ defmodule OptimalEngine.Sync.Lineage do
 
   @specs %{
     # Rows with their own labels.
-    "source_packages" => {:labelled, []},
+    #
+    # A source package or claim raised by a fact conflict (`Sync`) names the
+    # fact in its metadata, so it is held as long as the fact is.
+    "source_packages" => {:labelled, [{:meta_id, "fact_id", "facts"}], meta: "metadata"},
     "claims" =>
       {:labelled,
-       [{:id, "source_package_id", "source_packages"}, {:id, "signal_id", "contexts"}] ++ @entities},
+       [
+         {:id, "source_package_id", "source_packages"},
+         {:id, "signal_id", "contexts"},
+         {:meta_id, "fact_id", "facts"}
+       ] ++ @entities, meta: "metadata"},
     "facts" =>
       {:labelled,
        [
@@ -344,6 +351,7 @@ defmodule OptimalEngine.Sync.Lineage do
     "surfacing_subscriptions" => {:structural, []},
     "topology_change_requests" => {:structural, []},
     "training_runs" => {:structural, []},
+    "workspace_handles" => {:structural, []},
     "workspace_members" => {:structural, []},
     "workspace_storage_policies" => {:structural, []}
   }

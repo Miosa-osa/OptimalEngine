@@ -46,6 +46,10 @@ Sending is fail-closed:
 - A row stays home when its own labels, or those of any row it derives from, are above the peer's class.
 - A row stays home when a source package, claim or other labelled row it must derive from cannot be found, or its lineage is deeper than 40 hops.
 - A change to a table the lineage map does not know stays home, and `test/sync/sync_gate_test.exs` fails until the table is classified.
+- A workspace whose `data_class` is not one of the four classes is treated as `restricted`; a workspace with no `data_class` (or not found) is `internal`.
+- A Store error while classifying is not an answer.
+The push cycle ends in an error with nothing sent and its cursor where it was, so the next cycle classifies the same rows again; a workspace that cannot be read is not assumed to be open.
+- A value SQLite holds as a BLOB travels in `payload.blobs`; a label stored that way is read like any other, on send and on receive.
 - An aggregate (`analysis_reports`, `data_quality_snapshots`, `rhythm_notes`, `sessions`, a wiki page or cluster that names nothing, an edge between entity names) has no row to point at, so it stays home while the workspace holds anything above the peer's class.
 - A delete carries only the row's key.
 It stays home when the row's earlier changes in the local ledger were held, so a peer that never had the row is not told of it.
@@ -58,7 +62,9 @@ A document that Intake writes names its source package and carries its labels in
 Rows written before this carry no such mark and are found through the derivation ledger and the claims of their source package instead.
 
 A pulling peer does not say what it is cleared for, so what this Engine hands out (`GET /api/sync/changes` and `GET /api/storage/workspaces/:id/mutations`) is capped by the Engine's own ceiling, `config :optimal_engine, :sync_serve_max_class`, default `confidential`.
-The cursor moves past what the gate holds: a row held when it was read is not sent later because it was declassified or its lineage appeared, so label before writing.
+The cursor moves past what the gate holds, and the class is read when the row is sent.
+A row held then is not sent later because its source package arrived after it, or because a label on its source was lowered; only a new change to the row, or to a row it derives from, is classified again.
+So label before writing, and write the source before what derives from it.
 
 Limits worth knowing:
 
@@ -103,6 +109,7 @@ Its conflict check edits a daily note on both sides; that a contested fact becom
 
 When both sides changed the same row since the last sync, the newer change wins by its time and the conflict is recorded with both versions.
 For facts, both versions also become claims in the review queue, so a contested fact is decided by a person.
+The claims quote the fact, so they carry the labels of both versions and of the fact as it is stored, and they name the fact (`metadata.fact_id`, on the claims and on the source package that holds the conflict text): they stay home as long as the fact does, including when it is labelled higher later.
 Changes that cannot be applied (an unknown table or column, a constraint failure) are recorded as `apply_failed` conflicts; nothing is dropped silently.
 
 ## Version safety

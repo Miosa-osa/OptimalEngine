@@ -32,6 +32,7 @@ defmodule OptimalEngine.Sync do
   require Logger
 
   alias OptimalEngine.Connectors.{Credential, HTTP}
+  alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Store
   alias OptimalEngine.Sync.{Capture, Gate}
 
@@ -178,13 +179,13 @@ defmodule OptimalEngine.Sync do
   def apply_changes(tenant_id, workspace_id, mutations, opts \\ []) do
     {:ok, _} = Capture.seal()
     local = replica_id()
-    gate = Keyword.get(opts, :max_class, "confidential")
+    max_class = Keyword.get(opts, :max_class, "confidential")
     last_sync = opts[:since] || "1970-01-01T00:00:00"
 
-    if workspace_class(workspace_id) |> above?(gate) do
+    if Gate.workspace_rank(workspace_id) > Gate.class_rank(max_class) do
       {:error, :workspace_class_above_gate}
     else
-      plans = Enum.map(mutations, &plan(&1, tenant_id, workspace_id, local, gate, last_sync))
+      plans = Enum.map(mutations, &plan(&1, tenant_id, workspace_id, local, max_class, last_sync))
       execute(tenant_id, workspace_id, plans)
     end
   end
@@ -700,8 +701,10 @@ defmodule OptimalEngine.Sync do
     alias OptimalEngine.MemoryCore.SourcePackage
     alias OptimalEngine.MemoryCore.Store, as: CoreStore
 
-    local_text = get_in(decode(local.payload), ["row", "fact_text"])
-    remote_text = get_in(mutation, ["payload", "row", "fact_text"])
+    local_row = Gate.mutation_row(%{"payload" => decode(local.payload)})
+    remote_row = Gate.mutation_row(mutation)
+    local_text = local_row["fact_text"]
+    remote_text = remote_row["fact_text"]
 
     texts =
       Enum.reject([{"local", local_text}, {"remote", remote_text}], fn {_, text} -> is_nil(text) end)
@@ -709,15 +712,24 @@ defmodule OptimalEngine.Sync do
     if texts != [] do
       raw = Enum.map_join(texts, "\n", fn {side, text} -> "#{side}: #{text}" end)
 
+      # The claims quote the fact, so they carry its labels: those of both
+      # versions and of the fact now. `fact_id` lets the gate follow a later
+      # relabel of the fact.
+      labels =
+        conflict_labels(tenant_id, workspace_id, mutation["entity_id"], [local_row, remote_row])
+
       source =
         SourcePackage.from_text("Replication conflict on fact #{mutation["entity_id"]}\n" <> raw,
           tenant_id: tenant_id,
           workspace_id: workspace_id,
           source_type: "sync_conflict",
-          source_system: "optimal-sync"
+          source_system: "optimal-sync",
+          security_labels: labels,
+          metadata: %{"sync_conflict" => true, "fact_id" => mutation["entity_id"]}
         )
 
       _ = CoreStore.insert_source_package(source)
+      raise_source_labels(source.id, labels)
 
       Enum.each(texts, fn {side, text} ->
         CoreStore.insert_claim(%{
@@ -726,6 +738,7 @@ defmodule OptimalEngine.Sync do
           workspace_id: workspace_id,
           source_package_id: source.id,
           claim_text: text,
+          security_labels: labels,
           lifecycle_state: "pending",
           review_status: "unreviewed",
           metadata: %{"sync_conflict" => true, "side" => side, "fact_id" => mutation["entity_id"]}
@@ -735,6 +748,52 @@ defmodule OptimalEngine.Sync do
   rescue
     error ->
       Logger.warning("[Sync] could not raise fact conflict claims: #{Exception.message(error)}")
+  end
+
+  # The labels of a contested fact: both versions' and the stored fact's. A
+  # value that cannot be read counts as `restricted`; a Store error raises,
+  # and the conflict is then not turned into claims at all.
+  defp conflict_labels(tenant_id, workspace_id, fact_id, rows) do
+    stored =
+      case Store.raw_query(
+             "SELECT security_labels FROM facts WHERE id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
+             [fact_id, tenant_id, workspace_id]
+           ) do
+        {:ok, [[value]]} -> [value]
+        {:ok, []} -> []
+        {:error, reason} -> raise "could not read fact #{fact_id}: #{inspect(reason)}"
+      end
+
+    Enum.reduce(Enum.map(rows, & &1["security_labels"]) ++ stored, [], fn value, labels ->
+      case SecurityLabels.decode(value) do
+        {:ok, _} -> SecurityLabels.merge(labels, value)
+        :invalid -> SecurityLabels.merge(labels, ["restricted"])
+      end
+    end)
+  end
+
+  # `insert_source_package` keeps the package that is already there when the
+  # same conflict text is raised again; its labels only ever grow.
+  defp raise_source_labels(source_id, labels) do
+    case Store.raw_query("SELECT security_labels FROM source_packages WHERE id = ?1", [source_id]) do
+      {:ok, [[stored]]} ->
+        merged =
+          case SecurityLabels.decode(stored) do
+            {:ok, _} -> SecurityLabels.merge(stored, labels)
+            :invalid -> SecurityLabels.merge(["restricted"], labels)
+          end
+
+        {:ok, _} =
+          Store.raw_query("UPDATE source_packages SET security_labels = ?2 WHERE id = ?1", [
+            source_id,
+            Jason.encode!(merged)
+          ])
+
+        :ok
+
+      _other ->
+        :ok
+    end
   end
 
   defp local_conflict(tenant_id, workspace_id, table, entity_id, local, last_sync) do
@@ -787,16 +846,6 @@ defmodule OptimalEngine.Sync do
   defp txn_known?(txn, id) do
     sql = "SELECT 1 FROM sync_mutations WHERE id = ?1"
     match?({:ok, [_ | _]}, Store.txn_query(txn, sql, [id]))
-  end
-
-  defp above?(class, gate), do: rank(class) > rank(gate)
-  defp rank(class), do: Enum.find_index(@classes, &(&1 == class)) || 1
-
-  defp workspace_class(workspace_id) do
-    case OptimalEngine.Workspace.get(workspace_id) do
-      {:ok, %{metadata: %{"data_class" => class}}} when class in @classes -> class
-      _ -> "internal"
-    end
   end
 
   # ---------------------------------------------------------------------------

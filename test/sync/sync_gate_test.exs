@@ -711,6 +711,144 @@ defmodule OptimalEngine.SyncGateTest do
     end
   end
 
+  # -- corners that must fail closed -----------------------------------------------------
+
+  describe "fail-closed corners" do
+    test "claims raised from a confidential fact conflict stay home from an internal peer", ctx do
+      fact_conflict(ctx, ["confidential"], nil)
+
+      claims = conflict_claims(ctx)
+      assert length(claims) == 2
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      for [claim_id, source_id] <- claims do
+        refute sent?(sent, "claims", claim_id)
+        refute sent?(sent, "source_packages", source_id)
+      end
+
+      # The local versions of the fact stay home too. (The older version that
+      # came from the other Engine unlabelled is a stale snapshot of a row that
+      # has labels now: the follow-up for stale snapshots covers it.)
+      refute carries?(sent, "Wire code 4471")
+      refute carries?(sent, "Wire code 4472")
+    end
+
+    test "the labels of the remote version reach the claims", ctx do
+      fact_conflict(ctx, nil, ["confidential"])
+      assert_conflict_labels(ctx, ["confidential"])
+    end
+
+    test "the labels of the local version reach the claims", ctx do
+      fact_conflict(ctx, ["restricted"], nil)
+      assert_conflict_labels(ctx, ["restricted"])
+    end
+
+    test "the claims follow the fact when it is classified higher later", ctx do
+      fact_id = fact_conflict(ctx, ["internal"], nil)
+
+      {:ok, _} =
+        Store.raw_query("UPDATE facts SET security_labels = '[\"restricted\"]' WHERE id = ?1", [
+          fact_id
+        ])
+
+      {_result, sent} = push(ctx)
+
+      for [claim_id, source_id] <- conflict_claims(ctx) do
+        refute sent?(sent, "claims", claim_id)
+        refute sent?(sent, "source_packages", source_id)
+      end
+    end
+
+    test "a workspace with a data class this Engine does not know is treated as restricted",
+         ctx do
+      odd = create_workspace(ctx.tenant, "odd", %{"data_class" => "secret"})
+      {:ok, _} = Versioned.create(%{content: "Odd note", workspace_id: odd, tenant_id: ctx.tenant})
+
+      {result, sent} = push(%{ctx | ws: odd})
+
+      assert {:ok, %{sent: 0, gated: gated}} = result.push
+      assert gated > 0
+      assert sent == []
+      assert {:error, :workspace_class_above_gate} = Sync.apply_changes(ctx.tenant, odd, [])
+    end
+
+    test "a workspace that cannot be read sends nothing, and is sent when it can", ctx do
+      {:ok, plain} =
+        Versioned.create(%{content: "A plain note", workspace_id: ctx.ws, tenant_id: ctx.tenant})
+
+      {failed, sent} =
+        with_renamed_column("workspaces", "description", "description_x", fn ->
+          cycle(ctx, [])
+        end)
+
+      assert failed.status == "error"
+      assert {:error, {:gate_unreadable, _}} = failed.push
+      assert sent == []
+
+      {_result, later} = push(ctx)
+      assert sent?(later, "memories", plain.id)
+    end
+
+    test "a Store error while the gate reads a source holds the cycle, not the row", ctx do
+      {:ok, memory} =
+        Versioned.create(%{content: "A plain note", workspace_id: ctx.ws, tenant_id: ctx.tenant})
+
+      embed(ctx, memory.id)
+
+      {failed, sent} =
+        with_renamed_column("memories", "source_chunk_id", "source_chunk_id_x", fn ->
+          cycle(ctx, [])
+        end)
+
+      assert failed.status == "error"
+      assert {:error, {:gate_unreadable, _}} = failed.push
+      assert sent == []
+
+      # The cursor did not pass the row: the next cycle sends it.
+      {_result, later} = push(ctx)
+      assert table_sent?(later, "memory_embeddings", memory.id)
+      assert sent?(later, "memories", memory.id)
+    end
+
+    test "a label stored as a blob is read", ctx do
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, security_labels) VALUES (?1, ?2, ?3, 'Blob labelled', ?4)",
+          ["fact-blob-#{ctx.n}", ctx.tenant, ctx.ws, {:blob, ~s(["restricted"])}]
+        )
+
+      {_result, sent} = push(ctx)
+
+      refute sent?(sent, "facts", "fact-blob-#{ctx.n}")
+      refute carries?(sent, "Blob labelled")
+    end
+
+    test "a received row whose labels arrive as a blob is not applied", ctx do
+      mutation = %{
+        "id" => "mut_remote_blob_#{ctx.n}",
+        "device_id" => "rep_remote",
+        "entity_type" => "facts",
+        "entity_id" => "fact-remote-blob-#{ctx.n}",
+        "operation" => "create",
+        "occurred_at" => "2026-10-20T12:00:00.000",
+        "payload" => %{
+          "row" => %{
+            "id" => "fact-remote-blob-#{ctx.n}",
+            "tenant_id" => ctx.tenant,
+            "workspace_id" => ctx.ws,
+            "fact_text" => "Remote blob labelled",
+            "security_labels" => nil
+          },
+          "blobs" => %{"security_labels" => Base.encode16(~s(["restricted"]))}
+        }
+      }
+
+      assert {:ok, %{applied: 0, skipped: %{gated: 1}}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [mutation])
+    end
+  end
+
   # -- the map ----------------------------------------------------------------------------
 
   describe "the lineage map" do
@@ -847,6 +985,93 @@ defmodule OptimalEngine.SyncGateTest do
       )
   end
 
+  # A fact written here and edited concurrently on the other Engine: the newer
+  # (local) version wins and both versions become claims in the review queue.
+  # Returns the fact id.
+  defp fact_conflict(ctx, local_labels, remote_labels) do
+    fact_id = "fact-conflict-#{ctx.n}"
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, security_labels) VALUES (?1, ?2, ?3, 'Wire code 4471', ?4)",
+        [fact_id, ctx.tenant, ctx.ws, Jason.encode!(local_labels || [])]
+      )
+
+    {:ok, _} =
+      Store.raw_query("UPDATE facts SET fact_text = 'Wire code 4472' WHERE id = ?1", [fact_id])
+
+    {:ok, _} = Capture.seal()
+
+    remote_row =
+      %{
+        "id" => fact_id,
+        "fact_text" => "Wire code 4470",
+        "workspace_id" => ctx.ws,
+        "tenant_id" => ctx.tenant
+      }
+      |> then(
+        &if(remote_labels,
+          do: Map.put(&1, "security_labels", Jason.encode!(remote_labels)),
+          else: &1
+        )
+      )
+
+    older_remote = %{
+      "id" => "mut_remote_conflict_#{ctx.n}",
+      "device_id" => "rep_remote",
+      "entity_type" => "facts",
+      "entity_id" => fact_id,
+      "operation" => "update",
+      "occurred_at" => "2000-01-01T00:00:00.000",
+      "payload" => %{"row" => remote_row, "blobs" => %{}}
+    }
+
+    assert {:ok, %{conflicts: 1}} = Sync.apply_changes(ctx.tenant, ctx.ws, [older_remote])
+    fact_id
+  end
+
+  defp assert_conflict_labels(ctx, expected) do
+    claims = conflict_claims(ctx)
+    assert length(claims) == 2
+
+    for [claim_id, source_id] <- claims do
+      assert {:ok, [[labels]]} =
+               Store.raw_query("SELECT security_labels FROM claims WHERE id = ?1", [claim_id])
+
+      assert Jason.decode!(labels) == expected
+
+      assert {:ok, [[source_labels]]} =
+               Store.raw_query("SELECT security_labels FROM source_packages WHERE id = ?1", [
+                 source_id
+               ])
+
+      assert Jason.decode!(source_labels) == expected
+    end
+  end
+
+  # [claim id, source package id] of the claims a fact conflict raised.
+  defp conflict_claims(ctx) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT id, source_package_id FROM claims WHERE workspace_id = ?1 AND json_extract(metadata, '$.sync_conflict') = 1 ORDER BY id",
+        [ctx.ws]
+      )
+
+    rows
+  end
+
+  # Runs `fun` while `column` of `table` has another name: every read of it
+  # fails, as a read of the Store does when it errors.
+  defp with_renamed_column(table, column, renamed, fun) do
+    {:ok, _} = Store.raw_query("ALTER TABLE #{table} RENAME COLUMN #{column} TO #{renamed}", [])
+
+    try do
+      fun.()
+    after
+      {:ok, _} = Store.raw_query("ALTER TABLE #{table} RENAME COLUMN #{renamed} TO #{column}", [])
+    end
+  end
+
   defp restricted_source(ctx, text, opts \\ []) do
     source =
       SourcePackage.from_text(
@@ -968,6 +1193,13 @@ defmodule OptimalEngine.SyncGateTest do
   # returns the result with every mutation the relay received for this
   # workspace.
   defp push(ctx, opts \\ []) do
+    {result, sent} = cycle(ctx, opts)
+    assert result.status == "active", "the cycle failed: #{inspect(result)}"
+    {result, sent}
+  end
+
+  # One cycle, whatever its outcome.
+  defp cycle(ctx, opts) do
     pushed = :ets.new(:pushed, [:public, :bag])
     cloud = Keyword.get(opts, :cloud, [])
     relay(ctx, pushed, cloud)
@@ -986,7 +1218,6 @@ defmodule OptimalEngine.SyncGateTest do
       )
 
     [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
-    assert result.status == "active", "the cycle failed: #{inspect(result)}"
 
     {result, for({:mutations, mutations} <- :ets.tab2list(pushed), m <- mutations, do: m)}
   end
