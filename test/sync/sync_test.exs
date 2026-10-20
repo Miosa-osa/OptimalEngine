@@ -381,7 +381,13 @@ defmodule OptimalEngine.SyncTest do
       previous = System.get_env("CONNECTOR_KEY")
       System.put_env("CONNECTOR_KEY", Base.encode16(:crypto.strong_rand_bytes(32)))
 
+      # The scheduler runs every peer on its own timer; held here so a tick
+      # never interleaves with the cycles a test runs and counts.
+      scheduler = Process.whereis(OptimalEngine.Sync.Scheduler)
+      if scheduler, do: :sys.suspend(scheduler, 60_000)
+
       on_exit(fn ->
+        if scheduler && Process.alive?(scheduler), do: :sys.resume(scheduler)
         Application.delete_env(:optimal_engine, :http_mock)
 
         if previous,
@@ -458,62 +464,135 @@ defmodule OptimalEngine.SyncTest do
       assert peer.pending_push == 0
     end
 
-    test "a relay peer pulls from <base>/pull and pushes to <base>/push, and repeating it changes nothing",
+    test "a relay peer enables sync first, pages the pull, pushes to ?workspace= with its engine envelope, and a repeat cycle sends nothing",
          ctx do
-      remote_id = "relayed-#{ctx.n}"
-      engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
-      calls = :ets.new(:relay_calls, [:public, :bag])
-      base = "https://api.example/api/v1/engines/e1/sync"
-
-      Application.put_env(:optimal_engine, :http_mock, fn url, opts ->
-        :ets.insert(calls, {opts[:method], url})
-        assert {"authorization", "Bearer relay-key"} in opts[:headers]
-
-        case opts[:method] do
-          :get ->
-            respond(200, %{
-              "mutations" => [
-                mutation(ctx, %{
-                  "id" => "mut_relay_#{ctx.n}",
-                  "device_id" => "rep_cloud",
-                  "payload" => context_row(remote_id, "Through the relay", ctx.ws, ctx.tenant)
-                })
-              ],
-              "cursor" => 7,
-              "engine" => engine
-            })
-
-          :post ->
-            respond(200, %{"applied" => length(opts[:body]["mutations"])})
+      cloud =
+        for seq <- 1..5 do
+          mutation(ctx, %{
+            "sequence" => seq,
+            "id" => "mut_cloud_#{ctx.n}_#{seq}",
+            "device_id" => "rep_cloud",
+            "payload" => context_row("relayed-#{ctx.n}-#{seq}", "From cloud", ctx.ws, ctx.tenant)
+          })
         end
-      end)
 
-      assert {:ok, _} =
-               Sync.add_peer(
-                 ctx.tenant,
-                 %{"workspace_id" => ctx.ws, "url" => "relay+" <> base, "api_key" => "relay-key"},
-                 "u"
-               )
+      relay = fake_relay(ctx, cloud: cloud)
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "both")
+      insert_context(ctx.tenant, ctx.ws, "offline-a-#{ctx.n}", "Written offline")
+      insert_context(ctx.tenant, ctx.ws, "offline-b-#{ctx.n}", "Written offline")
 
-      insert_context(ctx.tenant, ctx.ws, "offline-#{ctx.n}", "Written offline")
-
-      [first] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      [first] = run_peers(ctx)
       assert first.status == "active"
-      assert {:ok, %{applied: 1}} = first.pull
-      assert {:ok, %{sent: 1}} = first.push
+      assert {:ok, %{applied: 5, cursor: 5, pages: 3}} = first.pull
+      assert {:ok, %{sent: 2}} = first.push
 
-      [second] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      # Status before anything moves, enable because status said it was off,
+      # then the pull loops on `more` from each cursor, then one push.
+      assert routes(relay) == [
+               {:get, "status"},
+               {:post, "enable"},
+               {:get, "pull"},
+               {:get, "pull"},
+               {:get, "pull"},
+               {:post, "push"}
+             ]
+
+      assert for({:get, "pull", query} <- calls(relay), do: query["since"]) == ["0", "2", "4"]
+
+      # Exactly once on each side.
+      assert relay |> received() |> Map.values() |> Enum.all?(&(&1 == 1))
+
+      assert relay |> received() |> Map.keys() |> length() == 2
+
+      assert {:ok, [[5]]} =
+               Store.raw_query("SELECT count(*) FROM contexts WHERE id LIKE ?1", [
+                 "relayed-#{ctx.n}-%"
+               ])
+
+      # The relay does not forward x-optimal-replica, so the cloud's next page
+      # carries the laptop's own changes back: they are skipped, not applied,
+      # and nothing new is pushed.
+      [second] = run_peers(ctx)
+      assert second.status == "active"
+      assert {:ok, %{applied: 0, skipped: %{own: 2}}} = second.pull
       assert {:ok, %{sent: 0}} = second.push
+      assert Enum.drop(routes(relay), 6) == [{:get, "status"}, {:get, "pull"}]
 
-      urls = :ets.tab2list(calls)
-      assert Enum.all?(urls, fn {_m, u} -> String.starts_with?(u, base) end)
-      assert Enum.any?(urls, fn {m, u} -> m == :get and u =~ base <> "/pull?" end)
-      assert Enum.any?(urls, fn {m, u} -> m == :post and u == base <> "/push" end)
-      refute Enum.any?(urls, fn {_m, u} -> u =~ "/api/sync/changes" end)
+      [peer] = Sync.status(ctx.tenant, ctx.ws).peers
+      assert peer.peer_replica_id == "rep_cloud"
+      assert peer.last_pulled_seq == 7
+      assert peer.pending_push == 0
+    end
 
-      # Exactly once: the pulled context exists once, the offline one was sent once.
-      assert {:ok, [[1]]} =
-               Store.raw_query("SELECT count(*) FROM contexts WHERE id = ?1", [remote_id])
+    test "a relay on another schema version pauses the peer before anything moves", ctx do
+      relay = fake_relay(ctx, status_migration: Sync.engine_info()["migration"] + 1)
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "both")
+      insert_context(ctx.tenant, ctx.ws, "held-#{ctx.n}", "Not sent")
+
+      [result] = run_peers(ctx)
+      assert result.status == "paused_version"
+      assert routes(relay) == [{:get, "status"}]
+
+      [peer] = Sync.status(ctx.tenant, ctx.ws).peers
+      assert peer.message =~ "same Engine version"
+      assert peer.pending_push == 1
+    end
+
+    test "a push the relay refuses with VERSION_MISMATCH pauses the peer and keeps the cursor",
+         ctx do
+      # A relay that cannot read the Engine's version reports no migration in
+      # status; the push is then the first place the mismatch shows.
+      relay =
+        fake_relay(ctx,
+          migration: Sync.engine_info()["migration"] + 1,
+          status_migration: :omit
+        )
+
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "push")
+      insert_context(ctx.tenant, ctx.ws, "held-#{ctx.n}", "Not applied")
+
+      [result] = run_peers(ctx)
+      assert result.status == "paused_version"
+      assert {:error, {:version_mismatch, message}} = result.push
+      assert message =~ "same Engine version"
+      assert routes(relay) == [{:get, "status"}, {:post, "enable"}, {:post, "push"}]
+
+      [peer] = Sync.status(ctx.tenant, ctx.ws).peers
+      assert peer.status == "paused_version"
+      assert peer.pending_push == 1
+    end
+
+    test "a page whose rows all stay home advances the cursor without an empty push", ctx do
+      relay = fake_relay(ctx, [])
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "push")
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, security_labels) VALUES (?1, ?2, ?3, 'Bank detail', '[\"restricted\"]')",
+          ["restricted-#{ctx.n}", ctx.tenant, ctx.ws]
+        )
+
+      [result] = run_peers(ctx)
+      assert result.status == "active"
+      assert {:ok, %{sent: 0, gated: 1}} = result.push
+      refute {:post, "push"} in routes(relay)
+
+      [peer] = Sync.status(ctx.tenant, ctx.ws).peers
+      assert peer.pending_push == 0
+    end
+
+    test "a relay refusal is kept on the peer with its reason and never the key", ctx do
+      relay = fake_relay(ctx, [])
+      {:ok, _} = add_relay_peer(ctx, "key-without-sync-scope", "both")
+
+      [result] = run_peers(ctx)
+      assert result.status == "error"
+      assert routes(relay) == [{:get, "status"}]
+
+      [peer] = Sync.peers(ctx.tenant, ctx.ws)
+      assert peer.message =~ "403"
+      assert peer.message =~ "engine:sync"
+      refute peer.message =~ "key-without-sync-scope"
     end
 
     test "a relay url must still be http(s)", ctx do
@@ -552,6 +631,206 @@ defmodule OptimalEngine.SyncTest do
       assert peer.message =~ "same Engine version"
     end
   end
+
+  # -- a fake MIOSA relay -------------------------------------------------------
+  #
+  # It enforces the contract the live relay speaks: a bearer key with the
+  # engine:sync scope (403 naming it otherwise), routes
+  # `/api/v1/engines/<id>/sync/{status,enable,pull,push}?workspace=`, success
+  # wrapped in {"data": ...}, refusals as {"error": {"code", "message"}}, push
+  # refused while sync is off or the sender's engine envelope is missing or on
+  # another migration, a non-empty mutation list in the full ledger shape,
+  # idempotency by idempotency_key, and no x-optimal-replica forwarding (pushed
+  # changes come back on the next pull). Pages are capped at two rows whatever
+  # limit the client asks for, so a client that ignores `more` falls behind.
+  # Options: `:cloud` (ledger mutations), `:migration` (the cloud's),
+  # `:status_migration` (what status reports; `:omit` for none).
+
+  @contract_keys ~w(sequence id device_id entity_type entity_id operation payload payload_hash
+                    idempotency_key occurred_at)
+
+  defp fake_relay(ctx, opts) do
+    state = :ets.new(:fake_relay, [:public])
+    migration = opts[:migration] || Sync.engine_info()["migration"]
+    engine = %{"replica_id" => "rep_cloud", "migration" => migration, "version" => "0.0.0"}
+
+    :ets.insert(state,
+      enabled: false,
+      calls: [],
+      received: %{},
+      cloud: opts[:cloud] || []
+    )
+
+    status_migration = Keyword.get(opts, :status_migration, migration)
+    prefix = "/api/v1/engines/e1/sync/"
+
+    Application.put_env(:optimal_engine, :http_mock, fn url, req ->
+      uri = URI.parse(url)
+      query = URI.decode_query(uri.query || "")
+      route = String.replace_prefix(uri.path, prefix, "")
+
+      # Peers left by earlier tests run too; only this test's are counted.
+      if query["workspace"] == ctx.ws,
+        do: update(state, :calls, &(&1 ++ [{req[:method], route, query}]))
+
+      cond do
+        {"authorization", "Bearer relay-key"} not in req[:headers] ->
+          refuse(403, "FORBIDDEN", "this key lacks the engine:sync scope")
+
+        not String.starts_with?(uri.path, prefix) ->
+          refuse(404, "NOT_FOUND", nil)
+
+        query["workspace"] != ctx.ws ->
+          refuse(400, "WORKSPACE_REQUIRED", nil)
+
+        true ->
+          relay_route(state, ctx, {req[:method], route}, query, req[:body], %{
+            engine: engine,
+            status_migration: status_migration
+          })
+      end
+    end)
+
+    state
+  end
+
+  defp relay_route(state, ctx, {:get, "status"}, _query, _body, config) do
+    data = %{
+      "workspace_id" => ctx.ws,
+      "enabled" => lookup(state, :enabled),
+      "replica_id" => "rep_cloud",
+      "ledger_sequence" => length(lookup(state, :cloud)),
+      "open_conflicts" => 0,
+      "append_only_tables" => [],
+      "peers" => [],
+      "version" => "0.0.0"
+    }
+
+    case config.status_migration do
+      :omit -> ok(data)
+      migration -> ok(Map.put(data, "migration", migration))
+    end
+  end
+
+  defp relay_route(state, ctx, {:post, "enable"}, _query, body, _config) do
+    if body == %{} do
+      :ets.insert(state, enabled: true)
+
+      ok(%{
+        "workspace_id" => ctx.ws,
+        "replica_id" => "rep_cloud",
+        "ledger_sequence" => length(lookup(state, :cloud)),
+        "triggers" => %{"tables" => 3, "skipped" => []}
+      })
+    else
+      refuse(422, "INVALID", "enable takes an empty body")
+    end
+  end
+
+  defp relay_route(state, ctx, {:get, "pull"}, query, _body, config) do
+    since = String.to_integer(query["since"] || "0")
+    limit = String.to_integer(query["limit"] || "500")
+
+    cond do
+      not lookup(state, :enabled) ->
+        refuse(409, "SYNC_NOT_ENABLED", "sync_not_enabled")
+
+      limit not in 1..2_000 ->
+        refuse(422, "INVALID", "limit must be 1..2000")
+
+      true ->
+        after_since = Enum.filter(lookup(state, :cloud), &(&1["sequence"] > since))
+        page = Enum.take(after_since, min(limit, 2))
+        cursor = if page == [], do: since, else: List.last(page)["sequence"]
+
+        ok(%{
+          "workspace_id" => ctx.ws,
+          "mutations" => page,
+          "cursor" => cursor,
+          "more" => length(after_since) > length(page),
+          "engine" => config.engine
+        })
+    end
+  end
+
+  defp relay_route(state, _ctx, {:post, "push"}, _query, body, config) do
+    sender = body["engine"]
+    mutations = body["mutations"]
+
+    cond do
+      not lookup(state, :enabled) ->
+        refuse(409, "SYNC_NOT_ENABLED", "sync_not_enabled")
+
+      not (is_map(sender) and Enum.all?(~w(replica_id migration version), &Map.has_key?(sender, &1))) ->
+        refuse(409, "VERSION_MISMATCH", "peer did not report its schema version")
+
+      sender["migration"] != config.engine["migration"] ->
+        refuse(
+          409,
+          "VERSION_MISMATCH",
+          "peer #{sender["replica_id"]} runs schema #{sender["migration"]}, this Engine runs #{config.engine["migration"]}; sync pauses until both run the same Engine version"
+        )
+
+      not (is_list(mutations) and mutations != []) ->
+        refuse(422, "MUTATIONS_REQUIRED", "mutations_required")
+
+      not Enum.all?(mutations, fn m -> Enum.all?(@contract_keys, &Map.has_key?(m, &1)) end) ->
+        refuse(422, "INVALID", "a mutation is missing a contract field")
+
+      true ->
+        received = lookup(state, :received)
+
+        {fresh, duplicates} =
+          Enum.split_with(mutations, &(not Map.has_key?(received, &1["idempotency_key"])))
+
+        update(state, :received, fn seen ->
+          Enum.reduce(mutations, seen, &Map.update(&2, &1["idempotency_key"], 1, fn n -> n end))
+        end)
+
+        update(state, :cloud, fn cloud ->
+          Enum.reduce(fresh, cloud, &(&2 ++ [Map.put(&1, "sequence", length(&2) + 1)]))
+        end)
+
+        ok(%{
+          "applied" => length(fresh),
+          "conflicts" => 0,
+          "failed" => [],
+          "skipped" => %{"duplicate" => length(duplicates)},
+          "engine" => config.engine
+        })
+    end
+  end
+
+  defp relay_route(_state, _ctx, _route, _query, _body, _config), do: refuse(404, "NOT_FOUND", nil)
+
+  defp ok(data), do: respond(200, %{"data" => data})
+
+  defp refuse(status, code, nil), do: respond(status, %{"error" => %{"code" => code}})
+
+  defp refuse(status, code, message),
+    do: respond(status, %{"error" => %{"code" => code, "message" => message}})
+
+  defp lookup(state, key), do: :ets.lookup_element(state, key, 2)
+  defp update(state, key, fun), do: :ets.insert(state, {key, fun.(lookup(state, key))})
+
+  defp calls(state), do: lookup(state, :calls)
+  defp routes(state), do: Enum.map(calls(state), fn {method, route, _query} -> {method, route} end)
+  defp received(state), do: lookup(state, :received)
+
+  defp add_relay_peer(ctx, key, policy) do
+    Sync.add_peer(
+      ctx.tenant,
+      %{
+        "workspace_id" => ctx.ws,
+        "url" => "relay+https://api.example/api/v1/engines/e1/sync",
+        "api_key" => key,
+        "policy" => policy
+      },
+      "u"
+    )
+  end
+
+  defp run_peers(ctx), do: Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
 
   test "bundles carry the ledger mark a seeded replica pulls from", ctx do
     insert_context(ctx.tenant, ctx.ws, "seed-#{ctx.n}", "Seeded")

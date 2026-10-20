@@ -35,9 +35,29 @@ The data-class gate (`max_class`, default `confidential`) applies on send and on
 ### Syncing through a relay
 
 An Engine that cannot be dialed (a laptop behind NAT is the initiator; a managed Engine in an isolated network cannot dial out to peers) syncs through a relay in front of the other Engine.
-Register the peer with a `relay+` URL: `{"url": "relay+https://host/api/v1/engines/<id>/sync", "api_key": "<relay key>", "policy": "both"}`.
-Each cycle the local Engine pulls with `GET <base>/pull?workspace=&since=` and pushes with `POST <base>/push`; the bodies are those of `GET|POST /api/sync/changes`.
+On MIOSA the relay is the control plane, and its key is a MIOSA API key with the `engine:sync` scope.
+Register the peer with a `relay+` URL: `{"workspace": "<id>", "url": "relay+https://api.miosa.ai/api/v1/engines/<engine id>/sync", "api_key": "<relay key>", "policy": "both"}`.
+The workspace id must be the same on both Engines.
+
+Each cycle the local Engine calls the relay with `Authorization: Bearer <relay key>` and `?workspace=<id>` on every route:
+
+| Step | Route | What the client does |
+| --- | --- | --- |
+| Status | `GET <base>/status` | Learns the other Engine's replica id and migration; pauses when the migration differs |
+| Enable | `POST <base>/enable` with `{}` | Only when status says `enabled: false`; idempotent |
+| Pull | `GET <base>/pull?since=&limit=` | Applies each page and keeps its `cursor`, then pulls again from it while `more` is true |
+| Push | `POST <base>/push` with `{workspace, replica_id, engine, mutations}` | Sends the local ledger a page at a time, with the sender's `engine` envelope; moves its push cursor only after a 200 |
+
+The relay wraps answers in `{"data": ...}` and refusals in `{"error": {"code", "message"}}`; the client reads both, and a direct peer's unwrapped answers too.
+Pushed mutations carry the full ledger shape, `sequence` included, exactly as `GET /api/sync/changes` returns them.
+A page whose rows all stay home under the data-class gate is not sent, and the push cursor still moves past it.
+The relay does not forward `x-optimal-replica`, so the local Engine's own changes come back on the next pull; they are skipped as its own, never applied twice, and never pushed back.
+A `409` with code `version_mismatch` pauses the peer (`status: paused_version`) and nothing is retried that cycle; while paused, a cycle makes only the status call, and sync resumes when both run the same migration.
+Any other refusal (`403` without `engine:sync`, `404` not this tenant's Engine or workspace, `409 engine_not_running`) leaves the peer in `status: error` with the code and message, never the key, and the next cycle tries again.
 The local Engine is always the initiator, no peer Engine address is stored, and the same idempotency keys make a repeated cycle change nothing.
+
+`scripts/proof-relay-client.sh` proves the relay client end to end against a managed Engine (`RELAY_BASE`, `MIOSA_API_KEY_FILE`, `WORKSPACE`), and `--stand-in` runs the same checks against a second local Engine behind a relay stand-in.
+Run it on a disposable machine, never on one that holds a live store.
 
 ## Conflicts
 
