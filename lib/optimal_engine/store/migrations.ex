@@ -141,7 +141,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_authority_evidence_kind_index(),
       migration_entity_mention_tenant(),
       migration_sync_pull_floor(),
-      migration_graph_edges()
+      migration_graph_edges(),
+      migration_077_context_address_indexes()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -481,6 +482,21 @@ defmodule OptimalEngine.Store.Migrations do
     end)
 
     skipped
+  end
+
+  # A new context takes the address of its file only when no other context in
+  # the workspace holds it (`Pipeline.Intake.Address`); these two indexes make
+  # that check a lookup instead of a scan of `contexts`. Not UNIQUE: rows
+  # written before addresses were unique still share them, and the repair
+  # (`OptimalEngine.UriRepair`) separates those.
+  defp migration_077_context_address_indexes do
+    {77, "index the address columns of contexts: workspace + uri and workspace + path",
+     [
+       {"idx_contexts_ws_uri",
+        "CREATE INDEX IF NOT EXISTS idx_contexts_ws_uri ON contexts(workspace_id, uri)"},
+       {"idx_contexts_ws_path",
+        "CREATE INDEX IF NOT EXISTS idx_contexts_ws_path ON contexts(workspace_id, path)"}
+     ]}
   end
 
   # Document vectors were stored without a scope (they kept the column

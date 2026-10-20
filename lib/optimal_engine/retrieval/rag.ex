@@ -521,7 +521,7 @@ defmodule OptimalEngine.Retrieval.RAG do
 
   defp fetch_context_body(uri) when is_binary(uri) do
     case Store.raw_query(
-           "SELECT content FROM contexts WHERE uri = ?1 LIMIT 1",
+           "SELECT content FROM contexts WHERE uri = ?1 ORDER BY (archived_at IS NOT NULL), (created_at IS NULL), created_at, id LIMIT 1",
            [uri]
          ) do
       {:ok, [[body]]} when is_binary(body) -> {:ok, body}
