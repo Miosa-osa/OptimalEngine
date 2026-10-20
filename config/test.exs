@@ -11,14 +11,20 @@ config :optimal_engine,
   api_rate_limit_capacity: 10_000,
   api_rate_limit_per_minute: 10_000
 
+# Test data lives inside this checkout (mix.exs `test_store_dir/0`), so two
+# checkouts, or two users on one shared machine, never share a database, a
+# cache or a root. A fixed /tmp path made one user's leftover database block
+# another user's run.
+test_dir = Path.expand("../_build/test_store", __DIR__)
+test_root = Path.join(test_dir, "optimal_engine_test_root")
+
 config :optimal_engine,
-  root_path: Path.expand("../tmp/optimal_engine_test_root", System.tmp_dir!()),
-  db_path: "/tmp/optimal_engine_test_#{System.get_env("MIX_TEST_PARTITION", "0")}.db",
-  cache_path: "/tmp/optimal_engine_test_cache",
-  topology_path:
-    Path.expand("../tmp/optimal_engine_test_root/.optimal/config.yaml", System.tmp_dir!()),
-  topology_full_path:
-    Path.expand("../tmp/optimal_engine_test_root/topology.yaml", System.tmp_dir!())
+  root_path: test_root,
+  db_path:
+    Path.join(test_dir, "optimal_engine_test_#{System.get_env("MIX_TEST_PARTITION", "0")}.db"),
+  cache_path: Path.join(test_dir, "optimal_engine_test_cache"),
+  topology_path: Path.join(test_root, ".optimal/config.yaml"),
+  topology_full_path: Path.join(test_root, "topology.yaml")
 
 config :optimal_engine, :api_rate_limit,
   default_capacity: 10_000,
