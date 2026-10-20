@@ -9,6 +9,7 @@ defmodule OptimalEngine.Storage.PolicyStore do
 
   alias OptimalEngine.Storage.{Planner, Providers}
   alias OptimalEngine.Store
+  alias OptimalEngine.Sync.Gate
 
   @spec get_policy(String.t()) :: {:ok, map()} | {:error, :not_found | term()}
   def get_policy(workspace_id) when is_binary(workspace_id) do
@@ -168,6 +169,66 @@ defmodule OptimalEngine.Storage.PolicyStore do
       {:ok, rows} -> {:ok, Enum.map(rows, &mutation_from_row/1)}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @doc """
+  `mutations_after/3` for a reader that is not the Engine's own replication:
+  the changes the data-class gate lets leave (`OptimalEngine.Sync.Gate`; a
+  reader is cleared up to `max_class`, default `Sync.serve_max_class/0`). A gated
+  change is skipped, so up to `limit` changes are collected from as many
+  pages of the ledger as that takes (bounded), and the sequence of the last
+  change looked at is returned to continue from.
+  """
+  @spec releasable_mutations_after(
+          String.t(),
+          non_neg_integer(),
+          pos_integer(),
+          String.t() | nil
+        ) :: {:ok, [map()], non_neg_integer()} | {:error, term()}
+  def releasable_mutations_after(workspace_id, sequence, limit \\ 100, max_class \\ nil) do
+    limit = limit |> max(1) |> min(1_000)
+    max_class = max_class || OptimalEngine.Sync.serve_max_class()
+
+    case workspace_scope(workspace_id) do
+      {:ok, tenant_id, _organization_id} ->
+        Gate.with_gate(tenant_id, workspace_id, max_class, fn gate ->
+          releasable_pages(gate, workspace_id, sequence, limit, [], 20)
+        end)
+
+      {:error, :workspace_not_found} ->
+        {:ok, [], sequence}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp releasable_pages(gate, workspace_id, after_sequence, limit, kept, rounds) do
+    want = limit - length(kept)
+
+    with {:ok, page} <- mutations_after(workspace_id, after_sequence, want) do
+      last = if page == [], do: after_sequence, else: List.last(page).sequence
+      kept = kept ++ releasable(gate, page)
+
+      if length(page) < want or length(kept) >= limit or rounds <= 1,
+        do: {:ok, kept, last},
+        else: releasable_pages(gate, workspace_id, last, limit, kept, rounds - 1)
+    end
+  end
+
+  defp releasable(gate, mutations) do
+    if Gate.workspace_above?(gate),
+      do: [],
+      else: Enum.reject(mutations, &Gate.hold_known?(gate, gate_shape(&1)))
+  end
+
+  defp gate_shape(mutation) do
+    %{
+      "entity_type" => mutation.entity_type,
+      "entity_id" => mutation.entity_id,
+      "operation" => to_string(mutation.operation),
+      "payload" => mutation.payload
+    }
   end
 
   @spec advance_cursor(String.t(), String.t(), non_neg_integer()) :: :ok | {:error, term()}

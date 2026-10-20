@@ -34,6 +34,8 @@ Authorization predicates run while candidates are expanded.
 
 Unauthorized objects never enter the ranking window, traversal state, trace, or rendered Context Package.
 
+A durable versioned memory carries the `security_labels` it was remembered with in its `metadata`, and its associations carry them too, so a labelled memory is recalled only for a caller granted its labels.
+
 Outcome feedback requires the original actor or an explicit reconstruction review permission.
 
 ## Projection Maintenance

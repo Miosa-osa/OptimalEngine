@@ -888,9 +888,19 @@ defmodule OptimalEngine.API.Router do
     after_sequence = parse_int(conn.query_params["after"], 0)
     limit = parse_int(conn.query_params["limit"], 100)
 
-    case OptimalEngine.Storage.PolicyStore.mutations_after(workspace_id, after_sequence, limit) do
-      {:ok, mutations} -> json(conn, %{mutations: mutations, count: length(mutations)})
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    # The ledger holds the text of every replicated row, so a reader sees what
+    # a replication peer cleared for `confidential` would (see Sync.Gate);
+    # `next_after` is where to continue when changes were skipped.
+    case OptimalEngine.Storage.PolicyStore.releasable_mutations_after(
+           workspace_id,
+           after_sequence,
+           limit
+         ) do
+      {:ok, mutations, next_after} ->
+        json(conn, %{mutations: mutations, count: length(mutations), next_after: next_after})
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 

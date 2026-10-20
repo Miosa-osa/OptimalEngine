@@ -20,6 +20,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   with the Engine that issued it; replica cursors and metric samples are
   operational and are not moved.
 
+  A bundle is a whole-workspace move and does not follow the data-class gate
+  of replication (`OptimalEngine.Sync.Gate`): it carries every row and file,
+  restricted ones included, because `finalize_move/4` deletes the source and
+  a move that left them behind would lose them. A replica cleared for less
+  than the workspace holds must not be seeded from it.
+
   Import verifies every checksum before writing, rewrites tenant and
   workspace ids to the target, lets integer row ids be reassigned, and
   either refuses an existing workspace (`mode: :create`, default) or keeps

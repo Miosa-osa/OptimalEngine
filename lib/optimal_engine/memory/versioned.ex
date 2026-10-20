@@ -44,6 +44,7 @@ defmodule OptimalEngine.Memory.Versioned do
 
   alias OptimalEngine.Memory.Versioned.Store, as: VStore
   alias OptimalEngine.Memory.Surfacer
+  alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Workspace
 
@@ -104,7 +105,14 @@ defmodule OptimalEngine.Memory.Versioned do
 
   Required: `:content`
   Optional: `:workspace_id`, `:tenant_id`, `:is_static`, `:audience`,
-            `:citation_uri`, `:source_chunk_id`, `:metadata`
+            `:citation_uri`, `:source_chunk_id`, `:metadata`,
+            `:security_labels`
+
+  `:security_labels` are kept in the memory's own `metadata`
+  (`"security_labels"`): the `memories` table has no label column, and a
+  memory is a copy of its source's text, so it says what class it is where
+  recall and replication read it. Versions and children of a labelled
+  memory carry its labels.
 
   ## Deduplication
 
@@ -241,7 +249,7 @@ defmodule OptimalEngine.Memory.Versioned do
         citation_uri: Map.get(attrs, :citation_uri, old.citation_uri),
         source_chunk_id: Map.get(attrs, :source_chunk_id, old.source_chunk_id),
         audience: Map.get(attrs, :audience, old.audience),
-        metadata: Map.get(attrs, :metadata, old.metadata)
+        metadata: updated_metadata(old, attrs)
       }
 
       with {:ok, _} <- VStore.insert(row_attrs),
@@ -380,7 +388,7 @@ defmodule OptimalEngine.Memory.Versioned do
       citation_uri: Map.get(attrs, :citation_uri),
       source_chunk_id: Map.get(attrs, :source_chunk_id),
       audience: audience,
-      metadata: Map.get(attrs, :metadata, %{}),
+      metadata: labelled_metadata(Map.get(attrs, :metadata, %{}), Map.get(attrs, :security_labels)),
       content_hash: content_hash
     }
 
@@ -426,7 +434,12 @@ defmodule OptimalEngine.Memory.Versioned do
     with {:ok, source} <- get(source_id),
          {:ok, child} <-
            create(
-             Map.merge(%{workspace_id: source.workspace_id, tenant_id: source.tenant_id}, attrs)
+             %{workspace_id: source.workspace_id, tenant_id: source.tenant_id}
+             |> Map.merge(attrs)
+             |> Map.put(
+               :security_labels,
+               SecurityLabels.merge(attrs[:security_labels], labels_of(source))
+             )
            ) do
       case VStore.add_relation(
              child.id,
@@ -439,6 +452,21 @@ defmodule OptimalEngine.Memory.Versioned do
         err -> err
       end
     end
+  end
+
+  # The labels a memory carries in its metadata, joined with those the caller
+  # gives; metadata with none is returned as it came.
+  defp labelled_metadata(metadata, labels), do: SecurityLabels.put(metadata, labels)
+
+  defp labels_of(%__MODULE__{metadata: metadata}),
+    do: metadata |> SecurityLabels.metadata_map() |> Map.get("security_labels")
+
+  # A new version is at least as classified as the one it replaces, whatever
+  # metadata the caller gives it.
+  defp updated_metadata(old, attrs) do
+    attrs
+    |> Map.get(:metadata, old.metadata)
+    |> labelled_metadata(SecurityLabels.merge(labels_of(old), attrs[:security_labels]))
   end
 
   defp notify_surfacer(%__MODULE__{workspace_id: ws_id, id: mem_id, metadata: meta}) do

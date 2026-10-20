@@ -32,7 +32,41 @@ Applied changes are added to the local ledger under their origin device, so a hu
 
 The peer key is an API key on the peer limited to the workspace with the `sync` scope (add `read` for status).
 Policies per peer: `push`, `pull`, `both`, `none`.
-The data-class gate (`max_class`, default `confidential`) applies on send and on receive: a workspace whose `metadata.data_class` is above it is refused whole, and rows whose `security_labels` include a class above it never leave the Engine.
+
+### Data classes
+
+A peer is cleared up to a `max_class` (`public`, `internal`, `confidential`, `restricted`; default `confidential`).
+The gate applies on send and on receive: a workspace whose `metadata.data_class` is above it is refused whole, and a row classified above it never leaves the Engine.
+A row's class is not only its own `security_labels`.
+A row copied or derived from a labelled row is as classified as its source, so a versioned memory staged from a restricted source package, the chunks, vectors and embeddings of a restricted document, and a wiki page that cites either stay home with it.
+`OptimalEngine.Sync.Lineage` names, for every replicated table, the link columns that point at the rows it derives from, and `OptimalEngine.Sync.Gate` follows them.
+
+Sending is fail-closed:
+
+- A row stays home when its own labels, or those of any row it derives from, are above the peer's class.
+- A row stays home when a source package, claim or other labelled row it must derive from cannot be found, or its lineage is deeper than 40 hops.
+- A change to a table the lineage map does not know stays home, and `test/sync/sync_gate_test.exs` fails until the table is classified.
+- An aggregate (`analysis_reports`, `data_quality_snapshots`, `rhythm_notes`, `sessions`, a wiki page or cluster that names nothing, an edge between entity names) has no row to point at, so it stays home while the workspace holds anything above the peer's class.
+- A delete carries only the row's key.
+It stays home when the row's earlier changes in the local ledger were held, so a peer that never had the row is not told of it.
+
+Receiving reads what a row carries: its `security_labels`, the `security_labels` in its `metadata`, or its `classification_level`.
+A batch arrives with its sources possibly not yet here, so the sender's gate is the one that follows lineage.
+
+A versioned memory has no label column, so `security_labels` given when a memory is remembered or created are kept in its `metadata`, and its versions and children carry them.
+A document that Intake writes names its source package and carries its labels in `metadata` from the first write, and its chunks are written at its class.
+Rows written before this carry no such mark and are found through the derivation ledger and the claims of their source package instead.
+
+A pulling peer does not say what it is cleared for, so what this Engine hands out (`GET /api/sync/changes` and `GET /api/storage/workspaces/:id/mutations`) is capped by the Engine's own ceiling, `config :optimal_engine, :sync_serve_max_class`, default `confidential`.
+The cursor moves past what the gate holds: a row held when it was read is not sent later because it was declassified or its lineage appeared, so label before writing.
+
+Limits worth knowing:
+
+- A row names another row's id in free-form metadata in places (the encoding gate records the memory a new one is most like).
+That is an opaque id, not the row, and the gate does not scrub it.
+- Rows that already reached a peer before a label or lineage existed stay there.
+A held delete does not reach the peer, so purge them on the peer directly.
+- A conflict record (`GET /api/sync/conflicts`) and the batch exports (`GET /api/batch/export/*`) carry row text under the `read` scope, outside the gate.
 
 ### Syncing through a relay
 
