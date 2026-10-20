@@ -119,15 +119,17 @@ jobs:
 
   client:
     # The files a machine needs to use an Engine: the CLI archives and the MCP
-    # server archive with SHA256SUMS. Built and installed on every run; on a v*
-    # tag they are attached to that GitHub release.
+    # server archive with SHA256SUMS. Built and installed on every run. This job
+    # runs pull request code and npm, so it holds no write token.
     name: client CLI and MCP release files
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -146,16 +148,47 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p 'test_optimal_cli.py'
           python3 -m unittest discover -s scripts/tests -p 'test_install_client.py'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: optimal-client
           path: dist/client/
+          if-no-files-found: error
 
-      - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+  release-client:
+    # On a v* tag only, after every check passed: attach the built files to the
+    # GitHub release. No checkout and no npm here, and an existing asset is never
+    # replaced.
+    name: attach client files to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, mcp, client]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: optimal-client
+          path: client
+
+      - name: Check the files against SHA256SUMS
+        working-directory: client
+        run: sha256sum --check --strict SHA256SUMS
+
+      - name: Attach to the release, refusing to overwrite
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Optimal Engine $GITHUB_REF_NAME"
-          gh release upload "$GITHUB_REF_NAME" dist/client/* --clobber
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes "Optimal Engine $TAG"
+          existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for file in client/*; do
+            name=$(basename "$file")
+            if printf '%s\n' "$existing" | grep -Fxq "$name"; then
+              echo "::error::$name is already attached to $TAG; assets are never replaced"
+              exit 1
+            fi
+          done
+          gh release upload "$TAG" client/*

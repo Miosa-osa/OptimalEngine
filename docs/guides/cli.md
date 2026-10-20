@@ -68,8 +68,8 @@ key=oe_...
 workspace=default:sales
 ```
 
-Instead of `key=`, a profile may name a file holding the key with `key_file=/path/to/key`.
-The file is read each time the key is used, so a platform that rotates it needs no new profile.
+Instead of `key=`, a profile may name a file holding the key with `key_file=/path/to/key` (from 0.3.3).
+The client reads the file each time it uses the key, so a platform that rotates it needs no new profile; the MCP server reads it when it starts.
 `key=` wins when both are present.
 `OPTIMAL_ENGINE_URL=`, `OPTIMAL_ENGINE_API_KEY=`, `OPTIMAL_ENGINE_API_KEY_FILE=` and `OPTIMAL_WORKSPACE=` are accepted as profile keys too, so a platform tool can write either form.
 A profile's key is sent only to that profile's own `url`; with a different URL from a flag or the environment, the profile key is not used.
@@ -196,6 +196,7 @@ OPTIMAL_ENGINE_URL=https://engine.example.com OPTIMAL_ENGINE_API_KEY=... OPTIMAL
 ```
 
 It reads the same settings as the client, without flags: `OPTIMAL_PROFILE`, `OPTIMAL_ENGINE_URL` (then `OE_API`, `OPTIMAL_ENGINE_API_URL`), `OPTIMAL_ENGINE_API_KEY` (then `OPTIMAL_ENGINE_API_KEY_FILE`, `OPTIMAL_API_KEY`), `OPTIMAL_WORKSPACE`, and the default profile (including `key_file=`), with the same rule that a profile key only goes to its own URL.
+It reads them once, when it starts: restart the server after its key rotates.
 It sends the key as a bearer token and logs one line to stderr naming the URL and where the key came from, never the key; error messages carry the Engine's code and are redacted.
 
 Tools for the operating loop: `boot`, `brief`, `protocol`, `loops_list`, `loops_add`, `loops_close`, `search`, `assemble`, `read`, `capture`, `record` (note, lesson, decision, task), `close`, `authority_decide`, and `authority_effective`.
@@ -204,12 +205,13 @@ For chats: `session_commit`, `sessions_list`, `session_get`, and `org_policy` (`
 The earlier tools remain: `ask`, `grep`, `profile`, `add_memory`, `forget_memory` (sends the workspace the memory belongs to), `recall`, `wiki_get`, `workspaces`, and `render_context`.
 
 Register it with a harness as a stdio server running `node <path>/apps/mcp/dist/index.js` with those environment variables.
-From a release archive, `install-client.sh` installs a launcher, `optimal-engine-mcp`, and registers it as `optimal-engine` with Claude Code (user scope) and Codex (`[mcp_servers.optimal-engine]` in `$CODEX_HOME/config.toml`).
+From a release archive, `install-client.sh` installs a launcher, `optimal-engine-mcp`, and registers it as `optimal-engine` with Claude Code (user scope) and Codex 0.47.0 or newer (`[mcp_servers.optimal-engine]` in `$CODEX_HOME/config.toml`).
+Codex gives a stdio server only a fixed environment, so the Codex table lists the Engine settings in `env_vars`; Claude Code passes its own environment.
 `npm test` builds the server and checks tool listing, routes, bearer authentication, and that keys never appear in results.
 
 ## Verification
 
 `scripts/tests/test_optimal_cli.py` checks the client against a fake HTTP server: route mapping, URL encoding and JSON escaping, configuration precedence, the bearer header, that the key never reaches a process argument list or any output, error codes, operator refusals, the start and stop of a process the client started, a minimal tool PATH, other shells, and the release archives.
 Run it with `python3 -m unittest discover -s scripts/tests -p 'test_optimal_cli.py'`; set `OPTIMAL_CLI_TEST_SHELL=dash` to run every case under another shell.
-`scripts/tests/test_install_client.py` runs `install-client.sh` in a temporary home against release files and a fake Engine: checksums, a tampered or unpinned archive, directory and HTTP sources, the profile and its modes, verification, and harness registration.
+`scripts/tests/test_install_client.py` runs `install-client.sh` in a temporary home against release files and a fake Engine: exit codes, checksums, a tampered CLI or MCP archive leaving the install untouched, directory, HTTPS and pinned HTTP sources, the shared install found without a prefix, the profile and its modes, verification from the profile, a 0.3.2 release, harness registration with Codex `env_vars`, and that the key is never a program argument or in a harness configuration.
 Set `OPTIMAL_CLIENT_TEST_RELEASE_DIR` to a directory of real release files to install those instead of a stand-in MCP archive.
