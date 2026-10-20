@@ -3,8 +3,8 @@
 # one machine, and the topology round trip from WO-41 item 4.
 #
 # It needs no account, no other product, and no network service: one Engine,
-# one minted key, one workspace, one stored source, one search, one cited
-# assembly, then import/export of a topology document.
+# one minted key, the topology round trip, one workspace, one stored source,
+# one search, and one cited assembly.
 #
 # Usage: scripts/proof-engine-only.sh
 # Exit: 0 only when every step passed and the whole run stayed under 15 minutes.
@@ -68,20 +68,10 @@ export OPTIMAL_ENGINE_URL="$url"
 export OPTIMAL_ENGINE_API_KEY="$key"
 cli=apps/cli/optimal
 
-echo "== step 4: a workspace"
-"$cli" api POST /api/workspaces '{"slug":"personal","name":"Personal Brain"}' >/dev/null ||
-  fail "creating the workspace"
-
-echo "== step 5: store a source"
-"$cli" capture "Renewal call with the supplier moved to the 14th; the contract review is still open." \
-  personal --title "Supplier renewal call" >/dev/null || fail "capturing the source"
-
-echo "== step 6: retrieve with citations"
-"$cli" search "supplier renewal" personal >/dev/null || fail "searching"
-"$cli" assemble "supplier renewal" personal >/dev/null || fail "assembling context"
-"$cli" version >/dev/null || fail "version"
-
-echo "== step 7: topology round trip"
+# On a store that has no workspace yet the export is the import document and
+# nothing else. This runs before the quickstart creates its workspace, whose
+# compatibility organization would otherwise appear in the export.
+echo "== step 4: topology round trip"
 cat >"$DATA/org.json" <<'JSON'
 {
   "schema_version": 1,
@@ -133,6 +123,19 @@ print("sent:", json.dumps(sent, sort_keys=True))
 print("back:", json.dumps(back, sort_keys=True))
 sys.exit(1)
 PY
+
+echo "== step 5: a workspace"
+"$cli" api POST /api/workspaces '{"slug":"personal","name":"Personal Brain"}' >/dev/null ||
+  fail "creating the workspace"
+
+echo "== step 6: store a source"
+"$cli" capture "Renewal call with the supplier moved to the 14th; the contract review is still open." \
+  personal --title "Supplier renewal call" >/dev/null || fail "capturing the source"
+
+echo "== step 7: retrieve with citations"
+"$cli" search "supplier renewal" personal >/dev/null || fail "searching"
+"$cli" assemble "supplier renewal" personal >/dev/null || fail "assembling context"
+"$cli" version >/dev/null || fail "version"
 
 echo "== step 8: authority requests (what the console proxies)"
 code=$(curl -s -o "$DATA/authority.json" -w "%{http_code}" \
