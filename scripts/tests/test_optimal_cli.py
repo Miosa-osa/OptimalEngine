@@ -25,7 +25,9 @@ CLI = ROOT / 'apps' / 'cli' / 'optimal'
 ALIAS = ROOT / 'apps' / 'cli' / 'oe'
 BUILD = ROOT / 'apps' / 'cli' / 'build.sh'
 KEY = 'fixture-key-7d1f0c9a5b'
-SHELL = os.environ.get('OPTIMAL_CLI_TEST_SHELL', '/bin/sh')
+# Resolved to a path, so tests that narrow PATH still find the shell under test.
+SHELL = shutil.which(os.environ.get('OPTIMAL_CLI_TEST_SHELL', '/bin/sh')) or os.environ.get(
+    'OPTIMAL_CLI_TEST_SHELL', '/bin/sh')
 ACTOR_FIELDS = {'actor_id', 'verifier_id', 'created_by'}
 
 
@@ -151,7 +153,7 @@ class VersionAndAliasTests(CliTestCase):
                         'close', 'memory', 'claims', 'review', 'routing', 'authority', 'status',
                         'version', 'start', 'stop', 'restart', 'log', 'index', 'graph',
                         'reality-check', 'backup', 'init', 'size', 'viability', 'chain', 'check', 'analyses', 'jobs',
-                        'session', 'sessions', 'policy', 'org-section']:
+                        'session', 'sessions', 'policy', 'org-section', 'whoami']:
             self.assertIn(command, text)
 
 
@@ -303,6 +305,7 @@ class RouteMappingTests(CliTestCase):
     def test_engine_commands(self):
         self.check(['status'], 'GET', '/api/status')
         self.check(['health'], 'GET', '/api/health')
+        self.check(['whoami'], 'GET', '/api/auth/whoami')
         self.check(['workspaces'], 'GET', '/api/workspaces')
         self.check(['backup', '--name', 'nightly.db'], 'POST', '/api/backup', body={'name': 'nightly.db'})
         self.check(['api', 'GET', '/api/stats'], 'GET', '/api/stats')
@@ -418,6 +421,25 @@ class ConfigTests(CliTestCase):
     def test_profile_key_never_goes_to_another_url(self):
         other = self.engine(require_key=None)
         self.write_profile(f'url=https://engine.example.invalid\nkey={KEY}\n')
+        self.ok('status')
+        self.assertIsNone(other.last['auth'])
+
+    def test_profile_key_file_is_read_each_time_it_is_used(self):
+        engine = FakeEngine()
+        self.addCleanup(engine.close)
+        key_file = self.dir / 'key'
+        key_file.write_text(KEY + '\n')
+        self.write_profile(f'url={engine.url}\nkey_file={key_file}\nworkspace=default:sales\n')
+        self.ok('whoami')
+        self.assertEqual(engine.last['auth'], f'Bearer {KEY}')
+        self.assertIn(f'key_file {key_file}', self.ok('doctor').stdout)
+        key_file.write_text('rotated-key\n')
+        self.run_cli('status')
+        self.assertEqual(engine.last['auth'], 'Bearer rotated-key')
+
+    def test_profile_key_file_is_not_read_for_another_url(self):
+        other = self.engine(require_key=None)
+        self.write_profile(f'url=https://engine.example.invalid\nkey_file={self.dir / "missing"}\n')
         self.ok('status')
         self.assertIsNone(other.last['auth'])
 

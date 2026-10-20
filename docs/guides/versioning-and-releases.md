@@ -80,7 +80,7 @@ Change a component version whenever persisted meaning or deterministic behavior 
 ## Creating a release
 
 1. Choose the next Semantic Version.
-2. Update `@version` in `mix.exs` and the matching version in `engine-contract.json` and `OPTIMAL_CLI_VERSION` in `apps/cli/optimal`; update contract migration/capability fields when their meanings change.
+2. Update `@version` in `mix.exs` and the matching version in `engine-contract.json`, `OPTIMAL_CLI_VERSION` in `apps/cli/optimal`, `version` in `apps/mcp/package.json`, `apps/mcp/package-lock.json` and `apps/mcp/src/server.ts`, and `DEFAULT_VERSION` in `deploy/miosa-template/install-client.sh`; update contract migration/capability fields when their meanings change.
 3. Run formatting, tests, release benchmarks, and `mix run --no-start scripts/check_release_version.exs`.
 4. Commit the complete release identity.
 5. Create the annotated tag `v<version>` on that exact commit.
@@ -88,7 +88,8 @@ Change a component version whenever persisted meaning or deterministic behavior 
 7. Build with `OPTIMAL_ENGINE_GIT_SHA` and `OPTIMAL_ENGINE_BUILD_TIMESTAMP` set by CI, and `OPTIMAL_RELEASE_CHANNEL` set to the channel the build serves.
    `docker build -f deploy/Dockerfile.engine --build-arg OPTIMAL_ENGINE_GIT_SHA=<sha> --build-arg OPTIMAL_ENGINE_BUILD_TIMESTAMP=<timestamp> --build-arg OPTIMAL_RELEASE_CHANNEL=stable -t optimal-engine:<version> .` passes the same three values into the image.
 8. Verify the deployed `/api/version` response against the tag, the channel, and the expected migration, and run `mix optimal.conformance` against it.
-9. Build the client CLI archives with `apps/cli/build.sh` and publish them with `SHA256SUMS`; see [Client CLI and MCP server](cli.md).
+9. CI builds the client CLI archives (`apps/cli/build.sh`) and the MCP server archive (`apps/mcp/build.sh`) and attaches them with `SHA256SUMS` to the GitHub release of the tag; both builds refuse a version that differs from `mix.exs`.
+   See [Client CLI and MCP server](cli.md) and [client install on MIOSA machines](../../deploy/miosa-template/CLIENT-INSTALL.md).
 
 CI rejects a release tag that does not exactly match the application version.
 

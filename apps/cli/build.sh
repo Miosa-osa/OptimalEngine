@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds the client CLI release artifacts:
 #   <out>/optimal-<version>-<os>-<arch>.tar.gz for linux-amd64, linux-arm64,
-#   darwin-amd64 and darwin-arm64, plus <out>/SHA256SUMS.
+#   darwin-amd64 and darwin-arm64, and their lines in <out>/SHA256SUMS (other
+#   lines, such as the MCP server's from apps/mcp/build.sh, are kept).
 # The client is one POSIX shell program, so every archive holds the same files;
 # they are named per platform so installers and images fetch by platform.
 # Usage: apps/cli/build.sh [out-dir]   (default: dist/cli)
@@ -49,5 +50,12 @@ for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
   tar -C "$stage" -czf "$out/$name.tar.gz" "$name"
 done
 
-(cd "$out" && sum optimal-"$version"-*.tar.gz >SHA256SUMS)
+(
+  cd "$out"
+  {
+    [ ! -f SHA256SUMS ] || grep -v "  optimal-$version-" SHA256SUMS || true
+    sum optimal-"$version"-*.tar.gz
+  } | sort -k 2 >SHA256SUMS.tmp
+  mv SHA256SUMS.tmp SHA256SUMS
+)
 echo "built optimal $version into $out"

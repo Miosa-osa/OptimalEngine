@@ -5,7 +5,7 @@
  *   OPTIMAL_ENGINE_URL   Engine URL (then OE_API, OPTIMAL_ENGINE_API_URL)
  *   OPTIMAL_ENGINE_API_KEY  bearer key (then OPTIMAL_ENGINE_API_KEY_FILE, OPTIMAL_API_KEY)
  *   OPTIMAL_WORKSPACE    default workspace
- *   ~/.config/optimal/profile  url=, key=, workspace= when nothing else is set
+ *   ~/.config/optimal/profile  url=, key= or key_file=, workspace= when nothing else is set
  *
  * A profile's key is only ever sent to that profile's own url.
  * All tools import from here rather than touching process.env directly.
@@ -31,6 +31,8 @@ interface Profile {
   path: string;
   url?: string;
   key?: string;
+  /** A file holding the key, read only when the key is used. */
+  keyFile?: string;
   workspace?: string;
 }
 
@@ -39,6 +41,8 @@ const PROFILE_FIELDS: Record<string, keyof Omit<Profile, "path">> = {
   OPTIMAL_ENGINE_URL: "url",
   key: "key",
   OPTIMAL_ENGINE_API_KEY: "key",
+  key_file: "keyFile",
+  OPTIMAL_ENGINE_API_KEY_FILE: "keyFile",
   workspace: "workspace",
   OPTIMAL_WORKSPACE: "workspace",
 };
@@ -101,17 +105,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EngineConfig {
     throw new Error(`Engine URL must start with http:// or https:// (from ${urlSource})`);
   }
 
-  const profileKey =
-    profile?.key && profile.url && trimSlash(profile.url) === engineUrl
-      ? profile.key
-      : undefined;
+  // A profile's key, inline or from its key_file, only for the profile's own URL.
+  const profileKeyApplies = Boolean(profile?.url && trimSlash(profile.url) === engineUrl);
+  const profileKey = (): string | undefined => {
+    if (!profileKeyApplies) return undefined;
+    if (profile?.key) return profile.key;
+    return profile?.keyFile ? firstLine(profile.keyFile) : undefined;
+  };
   const keyFile = env["OPTIMAL_ENGINE_API_KEY_FILE"];
   const keyCandidates: Array<[() => string | undefined, string]> = [
-    [() => (explicit ? profileKey : undefined), `profile ${profile?.path}`],
+    [() => (explicit ? profileKey() : undefined), `profile ${profile?.path}`],
     [() => env["OPTIMAL_ENGINE_API_KEY"], "OPTIMAL_ENGINE_API_KEY"],
     [() => (keyFile ? firstLine(keyFile) : undefined), "OPTIMAL_ENGINE_API_KEY_FILE"],
     [() => env["OPTIMAL_API_KEY"], "OPTIMAL_API_KEY"],
-    [() => (fallback ? profileKey : undefined), `profile ${profile?.path}`],
+    [() => (fallback ? profileKey() : undefined), `profile ${profile?.path}`],
   ];
   let apiKey: string | null = null;
   let keySource: string | null = null;
