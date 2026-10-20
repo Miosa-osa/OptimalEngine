@@ -14,6 +14,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default; the one job that writes (release-client) asks for it.
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -116,3 +120,79 @@ jobs:
 
       - name: Build and test
         run: npm test
+
+  client:
+    # The files a machine needs to use an Engine: the CLI archives and the MCP
+    # server archive with SHA256SUMS. Built and installed on every run. This job
+    # runs pull request code and npm, so it holds no write token.
+    name: client CLI and MCP release files
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build the CLI and MCP server archives
+        run: |
+          apps/cli/build.sh dist/client
+          apps/mcp/build.sh dist/client
+          cat dist/client/SHA256SUMS
+
+      - name: Test the CLI and install the built files
+        env:
+          OPTIMAL_CLIENT_TEST_RELEASE_DIR: dist/client
+        run: |
+          python3 -m unittest discover -s scripts/tests -p 'test_optimal_cli.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_install_client.py'
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: optimal-client
+          path: dist/client/
+          if-no-files-found: error
+
+  release-client:
+    # On a v* tag only, after every check passed: attach the built files to the
+    # GitHub release. No checkout and no npm here, and an existing asset is never
+    # replaced.
+    name: attach client files to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, mcp, client]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: optimal-client
+          path: client
+
+      - name: Check the files against SHA256SUMS
+        working-directory: client
+        run: sha256sum --check --strict SHA256SUMS
+
+      - name: Attach to the release, refusing to overwrite
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes "Optimal Engine $TAG"
+          existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for file in client/*; do
+            name=$(basename "$file")
+            if printf '%s\n' "$existing" | grep -Fxq "$name"; then
+              echo "::error::$name is already attached to $TAG; assets are never replaced"
+              exit 1
+            fi
+          done
+          gh release upload "$TAG" client/*

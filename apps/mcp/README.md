@@ -26,12 +26,15 @@ It reads the same settings as the `optimal` client, without flags:
 | `OPTIMAL_WORKSPACE` | default workspace |
 
 A profile key is only sent to its own URL.
+A profile may name its key file with `key_file=`.
+The server reads its settings, and that file, once when it starts: restart it after the key rotates.
 The key is sent as a bearer token and never logged; one line on stderr names the URL and where the key came from.
 Give the server a key with only the scopes its agent needs, for example `["read", "write"]` for one workspace.
 
 ## Register with a harness
 
 Run it as a stdio server: `node <path>/dist/index.js` (or `optimal-engine-mcp`) with the variables above in its environment.
+On a machine, `deploy/miosa-template/install-client.sh` installs it from its release archive (`apps/mcp/build.sh`, `optimal-engine-mcp-<version>.tar.gz`) and registers it with Claude Code and Codex 0.47.0 or newer, forwarding the Engine settings to Codex's server with `env_vars`; see `deploy/miosa-template/CLIENT-INSTALL.md`.
 
 ## Tools
 

@@ -1,9 +1,12 @@
 #!/bin/sh
 # Builds the client CLI release artifacts:
 #   <out>/optimal-<version>-<os>-<arch>.tar.gz for linux-amd64, linux-arm64,
-#   darwin-amd64 and darwin-arm64, plus <out>/SHA256SUMS.
+#   darwin-amd64 and darwin-arm64, and their lines in <out>/SHA256SUMS (other
+#   lines, such as the MCP server's from apps/mcp/build.sh, are kept).
 # The client is one POSIX shell program, so every archive holds the same files;
-# they are named per platform so installers and images fetch by platform.
+# they are named per platform so installers and images fetch by platform. Each
+# also carries deploy/miosa-template/install-client.sh, which installs it on a
+# machine and refreshes itself from the archive on an upgrade.
 # Usage: apps/cli/build.sh [out-dir]   (default: dist/cli)
 set -eu
 
@@ -11,17 +14,25 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 out=${1:-$root/dist/cli}
 
+installer=$root/deploy/miosa-template/install-client.sh
 version=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$root/mix.exs")
 cli_version=$(sed -n 's/^OPTIMAL_CLI_VERSION=\(.*\)$/\1/p' "$here/optimal")
+installer_version=$(sed -n 's/^DEFAULT_VERSION=\(.*\)$/\1/p' "$installer")
 [ -n "$version" ] || { echo "build: cannot read @version from mix.exs" >&2; exit 1; }
 if [ "$version" != "$cli_version" ]; then
   echo "build: apps/cli/optimal says $cli_version but mix.exs says $version" >&2
   exit 1
 fi
+if [ "$version" != "$installer_version" ]; then
+  echo "build: install-client.sh says DEFAULT_VERSION=$installer_version but mix.exs says $version" >&2
+  exit 1
+fi
 
 for shell in sh dash bash; do
   if command -v "$shell" >/dev/null 2>&1; then
-    "$shell" -n "$here/optimal" || { echo "build: $shell rejects apps/cli/optimal" >&2; exit 1; }
+    for program in "$here/optimal" "$installer"; do
+      "$shell" -n "$program" || { echo "build: $shell rejects $program" >&2; exit 1; }
+    done
   fi
 done
 
@@ -41,13 +52,20 @@ trap 'rm -rf "$stage"' EXIT
 for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
   name=optimal-$version-$platform
   mkdir -p "$stage/$name"
-  cp "$here/optimal" "$here/install.sh" "$stage/$name/"
+  cp "$here/optimal" "$here/install.sh" "$installer" "$stage/$name/"
   cp "$root/LICENSE" "$stage/$name/LICENSE"
-  chmod 0755 "$stage/$name/optimal" "$stage/$name/install.sh"
+  chmod 0755 "$stage/$name/optimal" "$stage/$name/install.sh" "$stage/$name/install-client.sh"
   ln -s optimal "$stage/$name/oe"
   printf '%s\n' "$version" >"$stage/$name/VERSION"
   tar -C "$stage" -czf "$out/$name.tar.gz" "$name"
 done
 
-(cd "$out" && sum optimal-"$version"-*.tar.gz >SHA256SUMS)
+(
+  cd "$out"
+  {
+    [ ! -f SHA256SUMS ] || grep -v "  optimal-$version-" SHA256SUMS || true
+    sum optimal-"$version"-*.tar.gz
+  } | sort -k 2 >SHA256SUMS.tmp
+  mv SHA256SUMS.tmp SHA256SUMS
+)
 echo "built optimal $version into $out"

@@ -236,4 +236,21 @@ test("configuration follows the CLI rules", async () => {
   assert.equal(fromFile.defaultWorkspace, "default:ops");
 
   assert.throws(() => loadConfig({ HOME: home, OPTIMAL_PROFILE: "missing" }), /profile not found/);
+
+  // key_file= is read when the key is used, so a rotated file takes effect.
+  writeFileSync(join(dir, "profiles", "filed"), `url=https://filed.example.invalid\nkey_file=${keyFile}\n`);
+  assert.equal(loadConfig({ HOME: home, OPTIMAL_PROFILE: "filed" }).apiKey, "file-key");
+  writeFileSync(keyFile, "rotated-key\n");
+  assert.equal(loadConfig({ HOME: home, OPTIMAL_PROFILE: "filed" }).apiKey, "rotated-key");
+
+  // A key_file for another URL is never read, so a missing one is no error.
+  const other = mkdtempSync(join(tmpdir(), "optimal-mcp-other-"));
+  mkdirSync(join(other, ".config", "optimal"), { recursive: true });
+  writeFileSync(
+    join(other, ".config", "optimal", "profile"),
+    `url=https://elsewhere.example.invalid\nkey_file=${join(other, "missing")}\n`,
+  );
+  const elsewhere = loadConfig({ HOME: other, OPTIMAL_ENGINE_URL: "http://127.0.0.1:9" });
+  assert.equal(elsewhere.engineUrl, "http://127.0.0.1:9");
+  assert.equal(elsewhere.apiKey, null);
 });

@@ -33,9 +33,20 @@ apps/cli/install.sh ~/.local     # or: ln -s "$PWD/apps/cli/optimal" ~/.local/bi
 ```
 
 Build the archives with `apps/cli/build.sh [out-dir]` (default `dist/cli`).
-It writes `optimal-<version>-<os>-<arch>.tar.gz` for linux-amd64, linux-arm64, darwin-amd64 and darwin-arm64, and `SHA256SUMS`.
-Each archive holds `optimal`, the `oe` link, `install.sh`, `LICENSE`, and `VERSION`.
+It writes `optimal-<version>-<os>-<arch>.tar.gz` for linux-amd64, linux-arm64, darwin-amd64 and darwin-arm64, and their lines in `SHA256SUMS`.
+Each archive holds `optimal`, the `oe` link, `install.sh`, `install-client.sh` (the machine installer of the same release), `LICENSE`, and `VERSION`.
 The client version is the Engine version from `mix.exs`; the build refuses to run when they differ.
+`apps/mcp/build.sh [out-dir]` adds `optimal-engine-mcp-<version>.tar.gz`, the MCP server with its production dependencies, to the same directory and `SHA256SUMS`.
+CI builds both on every run and attaches them to the GitHub release of a `v*` tag.
+
+To put the client and the MCP server on a machine in one step, with every archive's sha256 checked, use `deploy/miosa-template/install-client.sh`:
+
+```bash
+OPTIMAL_CLIENT_SOURCE=/path/to/release-files deploy/miosa-template/install-client.sh
+```
+
+It installs `optimal`, `oe` and `optimal-engine-mcp` under a prefix, writes the profile from `OPTIMAL_ENGINE_URL`, `OPTIMAL_ENGINE_API_KEY_FILE` and `OPTIMAL_WORKSPACE` when they are set, registers the MCP server with Claude Code and Codex when they are installed, and verifies the result.
+[Client install on MIOSA machines](../../deploy/miosa-template/CLIENT-INSTALL.md) lists its inputs and checks.
 
 ## Configure
 
@@ -57,7 +68,10 @@ key=oe_...
 workspace=default:sales
 ```
 
-`OPTIMAL_ENGINE_URL=`, `OPTIMAL_ENGINE_API_KEY=` and `OPTIMAL_WORKSPACE=` are accepted as profile keys too, so a platform tool can write either form.
+Instead of `key=`, a profile may name a file holding the key with `key_file=/path/to/key` (from 0.3.3).
+The client reads the file each time it uses the key, so a platform that rotates it needs no new profile; the MCP server reads it when it starts.
+`key=` wins when both are present.
+`OPTIMAL_ENGINE_URL=`, `OPTIMAL_ENGINE_API_KEY=`, `OPTIMAL_ENGINE_API_KEY_FILE=` and `OPTIMAL_WORKSPACE=` are accepted as profile keys too, so a platform tool can write either form.
 A profile's key is sent only to that profile's own `url`; with a different URL from a flag or the environment, the profile key is not used.
 The client warns when a profile holding a key is readable by other users.
 
@@ -132,6 +146,7 @@ Text arguments may be `-` to read standard input.
 | `analyses [ws] [--kind]`, `analyses run <kind> [ws]` | `GET /api/analyses`, `POST /api/analyses/run` (admin scope) |
 | `jobs [ws] [--state]` | `GET /api/jobs` |
 | `status`, `health`, `workspaces`, `organizations` | `GET /api/status`, `/api/health`, `/api/workspaces`, `/api/organizations` |
+| `whoami` | `GET /api/auth/whoami`: the key's scopes and workspaces, never the key |
 | `version` | client version and `GET /api/version` |
 | `doctor` | configuration sources, curl version, and health |
 | `api <METHOD> /api/<path> [json\|-]` | any other route, with the same authentication |
@@ -180,7 +195,8 @@ OPTIMAL_ENGINE_URL=https://engine.example.com OPTIMAL_ENGINE_API_KEY=... OPTIMAL
   node dist/index.js
 ```
 
-It reads the same settings as the client, without flags: `OPTIMAL_PROFILE`, `OPTIMAL_ENGINE_URL` (then `OE_API`, `OPTIMAL_ENGINE_API_URL`), `OPTIMAL_ENGINE_API_KEY` (then `OPTIMAL_ENGINE_API_KEY_FILE`, `OPTIMAL_API_KEY`), `OPTIMAL_WORKSPACE`, and the default profile, with the same rule that a profile key only goes to its own URL.
+It reads the same settings as the client, without flags: `OPTIMAL_PROFILE`, `OPTIMAL_ENGINE_URL` (then `OE_API`, `OPTIMAL_ENGINE_API_URL`), `OPTIMAL_ENGINE_API_KEY` (then `OPTIMAL_ENGINE_API_KEY_FILE`, `OPTIMAL_API_KEY`), `OPTIMAL_WORKSPACE`, and the default profile (including `key_file=`), with the same rule that a profile key only goes to its own URL.
+It reads them once, when it starts: restart the server after its key rotates.
 It sends the key as a bearer token and logs one line to stderr naming the URL and where the key came from, never the key; error messages carry the Engine's code and are redacted.
 
 Tools for the operating loop: `boot`, `brief`, `protocol`, `loops_list`, `loops_add`, `loops_close`, `search`, `assemble`, `read`, `capture`, `record` (note, lesson, decision, task), `close`, `authority_decide`, and `authority_effective`.
@@ -189,9 +205,13 @@ For chats: `session_commit`, `sessions_list`, `session_get`, and `org_policy` (`
 The earlier tools remain: `ask`, `grep`, `profile`, `add_memory`, `forget_memory` (sends the workspace the memory belongs to), `recall`, `wiki_get`, `workspaces`, and `render_context`.
 
 Register it with a harness as a stdio server running `node <path>/apps/mcp/dist/index.js` with those environment variables.
+From a release archive, `install-client.sh` installs a launcher, `optimal-engine-mcp`, and registers it as `optimal-engine` with Claude Code (user scope) and Codex 0.47.0 or newer (`[mcp_servers.optimal-engine]` in `$CODEX_HOME/config.toml`).
+Codex gives a stdio server only a fixed environment, so the Codex table lists the Engine settings in `env_vars`; Claude Code passes its own environment.
 `npm test` builds the server and checks tool listing, routes, bearer authentication, and that keys never appear in results.
 
 ## Verification
 
 `scripts/tests/test_optimal_cli.py` checks the client against a fake HTTP server: route mapping, URL encoding and JSON escaping, configuration precedence, the bearer header, that the key never reaches a process argument list or any output, error codes, operator refusals, the start and stop of a process the client started, a minimal tool PATH, other shells, and the release archives.
 Run it with `python3 -m unittest discover -s scripts/tests -p 'test_optimal_cli.py'`; set `OPTIMAL_CLI_TEST_SHELL=dash` to run every case under another shell.
+`scripts/tests/test_install_client.py` runs `install-client.sh` in a temporary home against release files and a fake Engine: exit codes, checksums, a tampered CLI or MCP archive or a full disk leaving the install untouched, directory, HTTPS and pinned HTTP sources, the shared install found without a prefix, root never installing into its own home, the installer refreshed from the CLI archive, the profile and its modes, verification from the profile and the environment, a 0.3.2 release, harness registration with Codex `env_vars` (a symlinked, unreadable or unfilterable Codex config included), and that the key is never a program argument or in a harness configuration.
+Set `OPTIMAL_CLIENT_TEST_RELEASE_DIR` to a directory of real release files to install those instead of a stand-in MCP archive.
