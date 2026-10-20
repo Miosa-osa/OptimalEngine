@@ -35,7 +35,12 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   ## File naming
 
   Files are written to `{root}/{workspace_dir}/{node_folder}/signals/{date}-{slug}.md`
-  where slug is the title lowercased with spaces replaced by hyphens.
+  where slug is the title lowercased with spaces replaced by hyphens, cut to 60
+  characters. The slug is not an identity: when another context already holds
+  that name in the folder, the file takes the name with a suffix of the context
+  id (`{date}-{slug}-{id8}.md`), so a URI never names two contexts and a write
+  never replaces another context's file. A context written again keeps its
+  name. See `OptimalEngine.Pipeline.Intake.Address`.
 
   `workspace_dir` follows `OptimalEngine.Workspace.Filesystem.path/2`: the
   default workspace lives at the root itself (no prefix — single-workspace
@@ -48,6 +53,7 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
 
   require Logger
 
+  alias OptimalEngine.Pipeline.Intake.Address
   alias OptimalEngine.Pipeline.Intake.Skeleton
   alias OptimalEngine.Signal
   alias OptimalEngine.Topology.Node, as: TopologyNode
@@ -65,20 +71,7 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   """
   @spec write_signal(Signal.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def write_signal(%Signal{} = signal, opts \\ []) do
-    root = root_path()
-    node_folder = node_to_folder(signal.node, opts)
-    signals_dir = Path.join([root, node_folder, "signals"])
-
-    filename = build_filename(signal)
-    path = Path.join(signals_dir, filename)
-
-    content = build_file_content(signal, opts)
-
-    with :ok <- File.mkdir_p(signals_dir),
-         :ok <- File.write(path, content) do
-      Logger.debug("[Writer] Wrote signal: #{path}")
-      {:ok, path}
-    end
+    write_to_folder(signal, node_to_folder(signal.node, opts), opts)
   end
 
   @doc """
@@ -86,6 +79,10 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
 
   Each cross-reference file is identical to the primary but includes a
   `cross_ref_from:` field in the frontmatter indicating the origin node.
+
+  Pass `:primary_path` (the path `write_signal/2` returned) and every copy is
+  named after the primary file, so a signal's copies share its name wherever
+  they land.
 
   Returns `{:ok, [path]}` — all successfully written paths.
   """
@@ -152,11 +149,14 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   @doc """
   Returns the relative path from OptimalOS root that would be written for a signal.
   Useful for display in CLI output without computing absolute paths.
+
+  The name is the one `write_signal/2` would choose now: it takes the context's
+  id into account when the plain name is held by another context.
   """
   @spec relative_path(Signal.t(), keyword()) :: String.t()
   def relative_path(%Signal{} = signal, opts \\ []) do
     node_folder = node_to_folder(signal.node, opts)
-    filename = build_filename(signal)
+    {_signals_dir, filename, _content} = target(signal, node_folder, opts)
     Path.join([node_folder, "signals", filename])
   end
 
@@ -166,35 +166,86 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   @spec signal_uri(Signal.t(), keyword()) :: String.t()
   def signal_uri(%Signal{} = signal, opts \\ []) do
     node_folder = node_to_folder(signal.node, opts)
-    filename = build_filename(signal)
-    fs_path = Path.join([root_path(), node_folder, "signals", filename])
-    URI.from_path(fs_path)
+    {signals_dir, filename, _content} = target(signal, node_folder, opts)
+    URI.from_path(Path.join(signals_dir, filename))
   end
+
+  @doc """
+  The text `write_signal/2` writes for `signal`: frontmatter and the genre
+  skeleton around the body. The repair of shared addresses uses it to write a
+  context's file from its row.
+  """
+  @spec render(Signal.t(), keyword()) :: String.t()
+  def render(%Signal{} = signal, opts \\ []), do: build_file_content(signal, opts)
+
+  @doc """
+  The part of a written file after its frontmatter: the title line and the
+  genre skeleton around the body. It depends on the title, genre and content
+  only, so it identifies the text of a context even after its summaries or
+  entities changed.
+  """
+  @spec body(Signal.t()) :: String.t()
+  def body(%Signal{} = signal), do: build_body(signal)
 
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
 
   defp write_signal_to_node(%Signal{} = signal, node, opts) do
-    root = root_path()
-    node_folder = node_to_folder(node, opts)
-    signals_dir = Path.join([root, node_folder, "signals"])
-    filename = build_filename(signal)
-    path = Path.join(signals_dir, filename)
+    write_to_folder(%{signal | node: node}, node_to_folder(node, opts), opts)
+  end
 
-    content = build_file_content(%{signal | node: node}, opts)
+  defp write_to_folder(%Signal{} = signal, node_folder, opts) do
+    {signals_dir, filename, content} = target(signal, node_folder, opts)
+    path = Path.join(signals_dir, filename)
 
     with :ok <- File.mkdir_p(signals_dir),
          :ok <- File.write(path, content) do
+      Logger.debug("[Writer] Wrote signal: #{path}")
       {:ok, path}
     end
   end
 
+  # Where, under what name and with what text a signal is written in a folder.
+  # A copy of a signal (`:primary_path`) is named after the primary file.
+  defp target(%Signal{} = signal, node_folder, opts) do
+    signals_dir = Path.join([root_path(), node_folder, "signals"])
+    content = build_file_content(signal, opts)
+
+    # An untitled document never takes the plain name; a copy is named after
+    # its primary file, which already carries whatever suffix it needed.
+    {base_name, always_suffix} =
+      case Keyword.get(opts, :primary_path) do
+        path when is_binary(path) -> {Path.basename(path), false}
+        _ -> {build_filename(signal), untitled?(signal)}
+      end
+
+    name =
+      Address.resolve(
+        signal,
+        signals_dir,
+        base_name,
+        content,
+        Keyword.put(opts, :always_suffix, always_suffix)
+      )
+
+    {signals_dir, name, content}
+  end
+
   defp build_filename(%Signal{} = signal) do
     date = date_from_signal(signal)
-    slug = slugify(signal.title || "untitled")
-    "#{date}-#{slug}.md"
+    "#{date}-#{title_slug(signal)}.md"
   end
+
+  # A title that slugs to nothing (empty, only symbols, not Latin) is untitled.
+  defp title_slug(%Signal{title: title}) do
+    case slugify(title || "untitled") do
+      "" -> "untitled"
+      slug -> slug
+    end
+  end
+
+  defp untitled?(%Signal{} = signal), do: title_slug(signal) == "untitled"
 
   defp date_from_signal(%Signal{created_at: %DateTime{} = dt}) do
     dt |> DateTime.to_date() |> Date.to_iso8601()
