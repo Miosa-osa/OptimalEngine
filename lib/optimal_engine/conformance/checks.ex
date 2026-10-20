@@ -253,8 +253,11 @@ defmodule OptimalEngine.Conformance.Checks do
         run: fn client, context ->
           name = "conformance-#{context.run_id}"
 
+          # Read only: the check searches and nothing more, and an Engine
+          # refuses a key whose scopes are left out (scopes_required).
           case Client.post(client, "/api/auth/keys", %{
                  name: name,
+                 scopes: ["read"],
                  workspace_scope: [context.primary]
                }) do
             {:ok, %{status: 201, body: %{"id" => id, "key" => key}}} ->
@@ -273,6 +276,7 @@ defmodule OptimalEngine.Conformance.Checks do
               revocation = Client.delete(client, "/api/auth/keys/#{id}")
 
               evidence = %{
+                minted_scopes: ["read"],
                 minted_workspace_scope: [context.primary],
                 own_workspace: describe_search(allowed),
                 other_workspace: describe(denied),

@@ -348,24 +348,51 @@ defmodule OptimalEngine.API.SecurityFoundationsTest do
                KeyIssuance.attrs(root, "default", %{"name" => "c", "scopes" => ["*"]})
 
       assert {:error, "workspace_scope_exceeds_minter"} =
-               KeyIssuance.attrs(root, "default", %{"name" => "c", "workspace_scope" => ["*"]})
+               KeyIssuance.attrs(root, "default", %{
+                 "name" => "c",
+                 "scopes" => ["read"],
+                 "workspace_scope" => ["*"]
+               })
+    end
+
+    test "scopes are never unrestricted by omission" do
+      root = %ApiKey{id: "root", tenant_id: "default", scopes: ["*"], workspace_scope: ["*"]}
+      reader = %ApiKey{id: "reader", tenant_id: "default", scopes: ["read"], workspace_scope: ["*"]}
+
+      assert {:error, "scopes_required"} = KeyIssuance.attrs(root, "default", %{"name" => "c"})
+      assert {:error, "scopes_required"} = KeyIssuance.attrs(nil, "default", %{"name" => "c"})
+
+      assert {:ok, %{scopes: ["*"]}} =
+               KeyIssuance.attrs(root, "default", %{"name" => "c", "scopes" => ["*"]})
+
+      assert {:ok, %{scopes: ["read", "write"]}} =
+               KeyIssuance.attrs(nil, "default", %{"name" => "c", "scopes" => ["read", "write"]})
+
+      # A minter whose scopes are named still passes them down.
+      assert {:ok, %{scopes: ["read"]}} = KeyIssuance.attrs(reader, "default", %{"name" => "c"})
     end
 
     test "the principal must exist in the tenant", ctx do
       assert {:error, "principal_not_found"} =
                KeyIssuance.attrs(nil, "default", %{
                  "name" => "c",
+                 "scopes" => ["read"],
                  "principal_id" => "agent:missing-#{ctx.suffix}"
                })
 
       assert {:error, "principal_not_found"} =
                KeyIssuance.attrs(nil, ctx.foreign_tenant, %{
                  "name" => "c",
+                 "scopes" => ["read"],
                  "principal_id" => ctx.principal
                })
 
       assert {:ok, %{principal_id: principal}} =
-               KeyIssuance.attrs(nil, "default", %{"name" => "c", "principal_id" => ctx.principal})
+               KeyIssuance.attrs(nil, "default", %{
+                 "name" => "c",
+                 "scopes" => ["read"],
+                 "principal_id" => ctx.principal
+               })
 
       assert principal == ctx.principal
     end
@@ -377,7 +404,11 @@ defmodule OptimalEngine.API.SecurityFoundationsTest do
                KeyIssuance.attrs(nil, "default", %{"name" => "c", "scopes" => "*"})
 
       assert {:error, "invalid expires_at"} =
-               KeyIssuance.attrs(nil, "default", %{"name" => "c", "expires_at" => "next week"})
+               KeyIssuance.attrs(nil, "default", %{
+                 "name" => "c",
+                 "scopes" => ["read"],
+                 "expires_at" => "next week"
+               })
     end
 
     test "the HTTP route applies the narrowing rules", ctx do

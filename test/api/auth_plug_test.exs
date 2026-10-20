@@ -234,7 +234,7 @@ defmodule OptimalEngine.API.AuthPlugTest do
 
   describe "POST /api/auth/keys" do
     test "mints a key and returns 201 with id, key, prefix" do
-      conn = call(:post, "/api/auth/keys", [], %{"name" => "my ci key"})
+      conn = call(:post, "/api/auth/keys", [], %{"name" => "my ci key", "scopes" => ["read"]})
       assert conn.status == 201
       assert {:ok, body} = Jason.decode(conn.resp_body)
       assert is_binary(body["id"])
@@ -245,6 +245,12 @@ defmodule OptimalEngine.API.AuthPlugTest do
     test "returns 400 when name is missing" do
       conn = call(:post, "/api/auth/keys", [], %{})
       assert conn.status == 400
+    end
+
+    test "returns 400 scopes_required when scopes are omitted" do
+      conn = call(:post, "/api/auth/keys", [], %{"name" => "no scopes"})
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "scopes_required"
     end
   end
 

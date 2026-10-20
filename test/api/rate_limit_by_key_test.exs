@@ -167,7 +167,10 @@ defmodule OptimalEngine.API.RateLimitByKeyTest do
     test "rate_limit_per_minute must be a positive integer" do
       for bad <- [0, -1, "10", 1.5] do
         RateLimiter.reset()
-        conn = mint_over_http(%{"name" => "bad", "rate_limit_per_minute" => bad})
+
+        conn =
+          mint_over_http(%{"name" => "bad", "scopes" => ["read"], "rate_limit_per_minute" => bad})
+
         assert conn.status == 400
         assert Jason.decode!(conn.resp_body)["error"] == "invalid rate_limit_per_minute"
       end
@@ -188,13 +191,21 @@ defmodule OptimalEngine.API.RateLimitByKeyTest do
       issuance = OptimalEngine.Auth.KeyIssuance
 
       assert {:error, "rate_limit_exceeds_minter"} =
-               issuance.attrs(parent, ctx.tenant, %{"name" => "c", "rate_limit_per_minute" => 11})
+               issuance.attrs(parent, ctx.tenant, %{
+                 "name" => "c",
+                 "scopes" => ["read"],
+                 "rate_limit_per_minute" => 11
+               })
 
       assert {:ok, %{metadata: %{"rate_limit_per_minute" => 5}}} =
-               issuance.attrs(parent, ctx.tenant, %{"name" => "c", "rate_limit_per_minute" => 5})
+               issuance.attrs(parent, ctx.tenant, %{
+                 "name" => "c",
+                 "scopes" => ["read"],
+                 "rate_limit_per_minute" => 5
+               })
 
       assert {:ok, %{metadata: %{"rate_limit_per_minute" => 10}}} =
-               issuance.attrs(parent, ctx.tenant, %{"name" => "c"})
+               issuance.attrs(parent, ctx.tenant, %{"name" => "c", "scopes" => ["read"]})
     end
   end
 end

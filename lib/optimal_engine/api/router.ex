@@ -2647,7 +2647,7 @@ defmodule OptimalEngine.API.Router do
       |> put_resp_content_type("application/json")
       |> send_resp(201, Jason.encode!(%{id: id, key: key, prefix: String.slice(key, 0, 8)}))
     else
-      {:error, reason} when reason in ["name is required"] ->
+      {:error, reason} when reason in ["name is required", "scopes_required"] ->
         send_resp(conn, 400, Jason.encode!(%{error: reason}))
 
       {:error, "principal_not_found" = reason} ->

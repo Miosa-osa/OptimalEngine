@@ -64,6 +64,8 @@ defmodule OptimalEngine.Auth.ApiKey do
   - `name`            (required) — human label ("production server", "ci/cd")
   - `principal_id`    (optional) — link to a principal
   - `scopes`          (optional) — list of scope strings, default `["*"]`
+                          (trusted Engine code only; the HTTP route never
+                          lets an omitted list become `*`, see `KeyIssuance`)
   - `workspace_scope` (optional) — list of workspace ids, default `["*"]`
   - `expires_at`      (optional) — ISO-8601 string or nil
   - `metadata`        (optional) — arbitrary map
