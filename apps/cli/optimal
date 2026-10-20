@@ -11,7 +11,8 @@
 #   environment  OPTIMAL_ENGINE_URL (then OE_API, OPTIMAL_ENGINE_API_URL),
 #                OPTIMAL_ENGINE_API_KEY (then OPTIMAL_ENGINE_API_KEY_FILE, OPTIMAL_API_KEY),
 #                OPTIMAL_WORKSPACE
-#   profile      ${XDG_CONFIG_HOME:-~/.config}/optimal/profile with url=, key=, workspace=
+#   profile      ${XDG_CONFIG_HOME:-~/.config}/optimal/profile with url=, key= or key_file=,
+#                workspace=
 
 set -u
 umask 077
@@ -309,6 +310,7 @@ parse_args() {
 load_profile() {
   P_URL=
   P_KEY=
+  P_KEY_FILE=
   P_WS=
   while IFS= read -r _line || [ -n "$_line" ]; do
     _line=$(trim "$_line")
@@ -328,6 +330,7 @@ load_profile() {
     case $_k in
       url | OPTIMAL_ENGINE_URL) P_URL=$_v ;;
       key | OPTIMAL_ENGINE_API_KEY) P_KEY=$_v ;;
+      key_file | OPTIMAL_ENGINE_API_KEY_FILE) P_KEY_FILE=$_v ;;
       workspace | OPTIMAL_WORKSPACE) P_WS=$_v ;;
     esac
   done <"$1"
@@ -342,9 +345,20 @@ read_key_file() {
   trim "$_kf"
 }
 
+# The profile's key: inline (key=), or read from its key_file= when it is used,
+# so a platform that rotates the file needs no new profile.
+use_profile_key() {
+  if [ -n "$P_KEY" ]; then
+    CFG_KEY=$P_KEY CFG_KEY_SRC="profile $PROFILE"
+  else
+    CFG_KEY=$(read_key_file "$P_KEY_FILE") || exit
+    CFG_KEY_SRC="key_file $P_KEY_FILE (profile $PROFILE)"
+  fi
+}
+
 resolve_config() {
   _cfg_home=${XDG_CONFIG_HOME:-${HOME:-}/.config}
-  P_URL= P_KEY= P_WS= PROFILE= PROFILE_EXPLICIT=
+  P_URL= P_KEY= P_KEY_FILE= P_WS= PROFILE= PROFILE_EXPLICIT=
   _pf=${O_profile:-${OPTIMAL_PROFILE:-}}
   if [ -n "$_pf" ]; then
     case $_pf in */*) PROFILE=$_pf ;; *) PROFILE=$_cfg_home/optimal/profiles/$_pf ;; esac
@@ -379,7 +393,7 @@ resolve_config() {
 
   # A profile's key goes only to that profile's own URL.
   _profile_key_ok=
-  if [ -n "$P_KEY" ]; then
+  if [ -n "$P_KEY" ] || [ -n "$P_KEY_FILE" ]; then
     _purl=$P_URL
     while :; do case $_purl in */) _purl=${_purl%/} ;; *) break ;; esac; done
     if [ -z "$_purl" ]; then
@@ -392,7 +406,7 @@ resolve_config() {
     CFG_KEY=$(read_key_file "$O_key_file") || exit
     CFG_KEY_SRC="--key-file $O_key_file"
   elif [ -n "$PROFILE_EXPLICIT" ] && [ -n "$_profile_key_ok" ]; then
-    CFG_KEY=$P_KEY CFG_KEY_SRC="profile $PROFILE"
+    use_profile_key
   elif [ -n "${OPTIMAL_ENGINE_API_KEY:-}" ]; then
     CFG_KEY=$OPTIMAL_ENGINE_API_KEY CFG_KEY_SRC=OPTIMAL_ENGINE_API_KEY
   elif [ -n "${OPTIMAL_ENGINE_API_KEY_FILE:-}" ]; then
@@ -401,13 +415,13 @@ resolve_config() {
   elif [ -n "${OPTIMAL_API_KEY:-}" ]; then
     CFG_KEY=$OPTIMAL_API_KEY CFG_KEY_SRC=OPTIMAL_API_KEY
   elif [ -n "$_profile_key_ok" ]; then
-    CFG_KEY=$P_KEY CFG_KEY_SRC="profile $PROFILE"
+    use_profile_key
   else
     CFG_KEY= CFG_KEY_SRC=
   fi
   CFG_KEY=$(trim "$CFG_KEY")
   case $CFG_KEY in *"$NL"* | *"$CR"*) die "$EX_CONFIG" "the API key from $CFG_KEY_SRC contains a line break" ;; esac
-  if [ -z "$CFG_KEY" ] && [ -n "$P_KEY" ] && [ -z "$_profile_key_ok" ]; then
+  if [ -z "$CFG_KEY" ] && [ -n "$P_KEY$P_KEY_FILE" ] && [ -z "$_profile_key_ok" ]; then
     verbose "* profile key not used: its url differs from $CFG_URL"
   fi
 
@@ -899,6 +913,7 @@ Setup and health
 
 Engine
   status | health | version | doctor | url | workspaces | organizations
+  whoami                           the key's own scopes and workspaces, never the key
   api <METHOD> /api/<path> [json|-]  any other route, with the same auth
 
 Operator (local Engine from an Engine checkout only)
@@ -1309,6 +1324,10 @@ case $CMD in
   status)
     too_many $# 0 status
     get /api/status ""
+    ;;
+  whoami)
+    too_many $# 0 whoami
+    get /api/auth/whoami ""
     ;;
   health)
     too_many $# 0 health

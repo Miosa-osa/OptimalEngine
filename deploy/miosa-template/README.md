@@ -33,6 +33,10 @@ The image path uses only MIOSA's own infrastructure: no registry, no GitHub, no 
 4. Watch the build: `miosa template builds optimal-engine`.
 5. Start a Memory from Optimal (`workspace_memory_launch`), or create a sandbox from the template by hand with the environment below.
 
+## The client on every machine
+
+Machines that use a Memory get the `optimal` CLI and the Engine MCP server from `install-client.sh`; see [CLIENT-INSTALL.md](CLIENT-INSTALL.md).
+
 ## Environment a Memory needs
 
 | Variable | Value |

@@ -929,6 +929,17 @@
       "owns": []
     },
     {
+      "id": "deploy-miosa-template-client-install",
+      "path": "deploy/miosa-template/CLIENT-INSTALL.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-20",
+      "owns": []
+    },
+    {
       "id": "postgres-provider-guide",
       "path": "docs/guides/postgres-provider.md",
       "kind": "reference",
