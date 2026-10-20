@@ -66,9 +66,11 @@ start_engine
 trap 'kill "$server" 2>/dev/null || true' EXIT
 
 echo "== step 4: a collection"
-curl -sf -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
+code=$(curl -s -o "$DATA/collection.json" -w "%{http_code}" -X POST \
+  -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
   --data '{"name":"tasks","fields":[{"name":"title","type":"string","required":true},{"name":"owner","type":"string"}],"owner_field":"owner","indexes":[{"fields":["owner"]}]}' \
-  "$url/api/data/collections" >/dev/null || fail "creating the collection"
+  "$url/api/data/collections?workspace=default:crash")
+[ "$code" = "201" ] || { cat "$DATA/collection.json"; fail "creating the collection (HTTP $code)"; }
 
 echo "== step 5: one transaction of $N creates"
 python3 - "$N" "$DATA/txn.json" <<'PY'

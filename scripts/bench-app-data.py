@@ -11,6 +11,7 @@ Usage: bench-app-data.py <base-url> <api-key> <workspace> [records] [queries]
 import json
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -27,8 +28,12 @@ def call(method, path, body=None):
     request.add_header("Authorization", "Bearer " + key)
     if payload is not None:
         request.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return json.loads(response.read() or b"{}")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        print("HTTP %d %s %s: %s" % (error.code, method, path, error.read()[:500]))
+        raise
 
 
 collection = {
