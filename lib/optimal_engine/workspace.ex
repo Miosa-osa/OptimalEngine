@@ -31,6 +31,10 @@ defmodule OptimalEngine.Workspace do
 
   @default_id "default"
   @allowed_statuses [:active, :archived]
+  # The same rule portable topology documents use for workspace slugs.
+  @slug_format ~r/\A[a-z0-9][a-z0-9-]{0,127}\z/
+  # True when the row once held the slug bound to ?2.
+  @held_slug "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.previous_slugs') END) WHERE value = ?2)"
   @allowed_roles [:owner, :member, :viewer]
 
   @type status :: :active | :archived
@@ -91,6 +95,30 @@ defmodule OptimalEngine.Workspace do
       {:ok, [row]} -> {:ok, row_to_struct(row)}
       {:ok, []} -> {:error, :not_found}
       other -> other
+    end
+  end
+
+  @doc """
+  Returns the workspace a slug names in `tenant_id`: the one whose current
+  slug it is, else the one that held it before a rename
+  (`metadata.previous_slugs`). Ids never change on a rename, so this is how
+  a link or a document written with an older slug finds its workspace.
+  """
+  @spec get_by_handle(String.t(), String.t()) :: {:ok, t()} | {:error, :not_found}
+  def get_by_handle(slug, tenant_id) when is_binary(slug) and is_binary(tenant_id) do
+    case get_by_slug(slug, tenant_id) do
+      {:error, :not_found} ->
+        case Store.raw_query(
+               select_sql() <> " WHERE tenant_id = ?1 AND #{@held_slug} LIMIT 1",
+               [tenant_id, slug]
+             ) do
+          {:ok, [row]} -> {:ok, row_to_struct(row)}
+          {:ok, []} -> {:error, :not_found}
+          other -> other
+        end
+
+      found ->
+        found
     end
   end
 
@@ -171,6 +199,7 @@ defmodule OptimalEngine.Workspace do
 
     with {:ok, organization} <- Organization.get(organization_id),
          true <- organization.tenant_id == tenant_id || {:error, :organization_tenant_mismatch},
+         :ok <- if(handle_taken?(tenant_id, slug, id, nil), do: {:error, :slug_taken}, else: :ok),
          {:ok, _} <- Store.raw_query(sql, params) do
       root = Application.get_env(:optimal_engine, :root_path, File.cwd!())
 
@@ -214,26 +243,66 @@ defmodule OptimalEngine.Workspace do
 
   @doc """
   Updates a workspace's mutable fields: `:name`, `:description`,
-  `:metadata`. Slug + tenant + id are immutable.
+  `:metadata`, and `:slug`. Tenant and id are immutable.
+
+  A new slug renames the workspace without moving it: the id stays, so every
+  row, file, key, and `optimal://` link that names the id keeps working. The
+  slug it replaces is kept in `metadata.previous_slugs` and stays this
+  workspace's handle (`get_by_handle/2`), so no other workspace can take it.
+  Errors: `:invalid_slug`, `:slug_taken`, `:default_workspace_slug`.
   """
   @spec update(String.t(), map()) :: {:ok, t()} | {:error, term()}
   def update(id, attrs) when is_binary(id) and is_map(attrs) do
-    with {:ok, current} <- get(id) do
+    with {:ok, current} <- get(id),
+         {:ok, slug, metadata} <-
+           next_slug(current, Map.get(attrs, :slug), Map.get(attrs, :metadata, current.metadata)) do
       name = Map.get(attrs, :name, current.name)
       description = Map.get(attrs, :description, current.description)
-      metadata = Map.get(attrs, :metadata, current.metadata)
 
       case Store.raw_query(
-             "UPDATE workspaces SET name = ?1, description = ?2, metadata = ?3 WHERE id = ?4",
-             [name, description, Jason.encode!(metadata), id]
+             "UPDATE workspaces SET name = ?1, description = ?2, metadata = ?3, slug = ?4 WHERE id = ?5",
+             [name, description, Jason.encode!(metadata), slug, id]
            ) do
         {:ok, _} ->
-          {:ok, %{current | name: name, description: description, metadata: metadata}}
+          {:ok, %{current | name: name, description: description, metadata: metadata, slug: slug}}
 
         other ->
           other
       end
     end
+  end
+
+  defp next_slug(current, nil, metadata), do: {:ok, current.slug, metadata}
+  defp next_slug(%{slug: slug}, slug, metadata), do: {:ok, slug, metadata}
+
+  defp next_slug(current, slug, metadata) do
+    cond do
+      current.id == @default_id ->
+        {:error, :default_workspace_slug}
+
+      not (is_binary(slug) and Regex.match?(@slug_format, slug)) ->
+        {:error, :invalid_slug}
+
+      handle_taken?(current.tenant_id, slug, derive_id(current.tenant_id, slug), current.id) ->
+        {:error, :slug_taken}
+
+      true ->
+        held = List.wrap(metadata["previous_slugs"])
+        {:ok, slug, Map.put(metadata, "previous_slugs", Enum.uniq(held ++ [current.slug]))}
+    end
+  end
+
+  # A slug is taken when another workspace of the tenant uses it now or held
+  # it before a rename, or when the id it would derive already exists.
+  defp handle_taken?(tenant_id, slug, id, except_id) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT 1 FROM workspaces WHERE id != ?4 AND " <>
+          "(id = ?3 OR (tenant_id = ?1 AND (slug = ?2 OR #{@held_slug}))) LIMIT 1",
+        [tenant_id, slug, id, except_id || ""]
+      )
+
+    rows != []
   end
 
   @doc "Moves a workspace to another organization in the same tenant."

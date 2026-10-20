@@ -35,9 +35,18 @@ defmodule OptimalEngine.HierarchyAudit do
     """)
   end
 
+  # A renamed workspace keeps its id (OptimalEngine.Workspace.update/2), so
+  # an id that is canonical for a slug the workspace held is canonical.
   defp workspace_identifiers(tenant_id) do
     query_issues(
-      "SELECT id, slug, 'noncanonical_workspace_id' FROM workspaces WHERE tenant_id=?1 AND status='active' AND id != tenant_id || ':' || slug",
+      """
+      SELECT id, slug, 'noncanonical_workspace_id' FROM workspaces
+      WHERE tenant_id=?1 AND status='active' AND id != tenant_id || ':' || slug
+        AND NOT EXISTS (
+          SELECT 1 FROM json_each(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.previous_slugs') END)
+          WHERE workspaces.id = workspaces.tenant_id || ':' || value
+        )
+      """,
       [tenant_id]
     )
   end

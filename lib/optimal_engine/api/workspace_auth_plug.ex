@@ -187,9 +187,17 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
     Enum.reduce_while(workspace_ids, conn, fn workspace_id, conn ->
       case authorize(workspace_id, tenant_id, api_key) do
-        :ok -> {:cont, conn}
-        {:error, :foreign_tenant} -> {:halt, halt_json(conn, 404, "workspace not found")}
-        {:error, :scope_denied} -> {:halt, halt_json(conn, 403, "workspace_scope_denied")}
+        :ok ->
+          {:cont, conn}
+
+        {:error, :foreign_tenant} ->
+          {:halt, halt_json(conn, 404, "workspace not found")}
+
+        {:error, :scope_denied} ->
+          {:halt, halt_json(conn, 403, "workspace_scope_denied")}
+
+        {:error, {:not_a_workspace_id, id}} ->
+          {:halt, halt_json(conn, 409, %{error: "not_a_workspace_id", workspace_id: id})}
       end
     end)
   end
@@ -202,6 +210,13 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
     with :ok <- check_engine_scope(workspace_id),
          :ok <- check_tenant_ownership(workspace_id, tenant_id) do
       check_key_scope(workspace_id, api_key)
+    else
+      # The id is named only to a caller whose key may use that workspace.
+      {:error, {:not_a_workspace_id, id}} = renamed ->
+        with :ok <- check_key_scope(id, api_key), do: renamed
+
+      error ->
+        error
     end
   end
 
@@ -223,12 +238,24 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
         # compatibility (handlers still workspace-filter every row).
         case String.split(workspace_id, ":", parts: 2) do
           [prefix, _slug] when prefix != tenant_id -> {:error, :foreign_tenant}
+          [_prefix, slug] -> renamed(slug, tenant_id)
           _ -> :ok
         end
 
       _other ->
         # Store unavailable — fail closed.
         {:error, :foreign_tenant}
+    end
+  end
+
+  # A renamed workspace keeps its id, so "<tenant>:<slug>" built from the
+  # slug it has now (or an intermediate one) is not its id. Answering with
+  # the id, instead of letting the request act on an empty unregistered
+  # workspace, keeps writes from landing beside the real one.
+  defp renamed(slug, tenant_id) do
+    case Workspace.get_by_handle(slug, tenant_id) do
+      {:ok, workspace} -> {:error, {:not_a_workspace_id, workspace.id}}
+      _ -> :ok
     end
   end
 
@@ -248,10 +275,12 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # Error responses
   # ---------------------------------------------------------------------------
 
-  defp halt_json(conn, status, error) do
+  defp halt_json(conn, status, %{} = body) do
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(status, Jason.encode!(%{error: error}))
+    |> send_resp(status, Jason.encode!(body))
     |> halt()
   end
+
+  defp halt_json(conn, status, error), do: halt_json(conn, status, %{error: error})
 end
