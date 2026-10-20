@@ -39,6 +39,7 @@ fail() {
 start_engine() {
   mix run --no-halt >>"$DATA/server.log" 2>&1 &
   server=$!
+  server_pid=$server
   local healthy=0
   for _ in $(seq 1 90); do
     if curl -sf -H "Authorization: Bearer $key" "$url/api/health" >/dev/null 2>&1; then
@@ -65,6 +66,7 @@ key=$(printf '%s' "$mint_out" |
 [ -n "$key" ] || fail "mint printed no key"
 
 url="http://127.0.0.1:$PORT"
+ws="?workspace=default:crash"
 echo "== step 3: start the Engine"
 start_engine
 trap 'kill "$server" 2>/dev/null || true' EXIT
@@ -92,7 +94,7 @@ PY
 
 curl -s -o "$DATA/txn.out" -w "%{http_code}" -X POST \
   -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
-  --data @"$DATA/txn.json" "$url/api/data/transactions" >"$DATA/txn.code" 2>/dev/null &
+  --data @"$DATA/txn.json" "$url/api/data/transactions$ws" >"$DATA/txn.code" 2>/dev/null &
 curl_pid=$!
 sleep "$KILL_AFTER"
 kill -9 "$server" 2>/dev/null || true
@@ -103,11 +105,11 @@ head -c 400 "$DATA/txn.out" 2>/dev/null || true
 echo
 
 echo "== step 6: restart on the same store"
-sleep 1
+sleep 2
 start_engine
 
 count=$(curl -sf -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
-  --data '{"count":true,"limit":0}' "$url/api/data/collections/tasks/query" |
+  --data '{"count":true,"limit":0}' "$url/api/data/collections/tasks/query$ws" |
   grep -o '"count":[0-9]*' | head -1 | cut -d: -f2)
 echo "RECORDS_AFTER_RESTART=${count:-unknown}"
 [ -n "$count" ] || fail "the restarted Engine did not answer the query"
@@ -119,7 +121,7 @@ echo "== step 7: the recovered store still writes"
 code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
   --data '{"id":"after-restart","data":{"title":"after restart","owner":"user-a"}}' \
-  "$url/api/data/collections/tasks/records")
+  "$url/api/data/collections/tasks/records$ws")
 echo "WRITE_AFTER_RESTART=$code"
 [ "$code" = "201" ] || fail "the recovered store refused a write"
 
