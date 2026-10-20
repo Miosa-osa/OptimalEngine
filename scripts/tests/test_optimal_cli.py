@@ -640,6 +640,30 @@ class CompatibilityTests(CliTestCase):
         self.assertNotIn(KEY, result.stderr)
 
 
+class CompatibilityEdgeTests(CliTestCase):
+    def setUp(self):
+        super().setUp()
+        self.fake = self.engine()
+        self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
+        self.client = mix_version()
+
+    def test_a_prerelease_engine_still_gets_an_upgrade_hint(self):
+        engine = f'{int(self.client.split(".")[0]) + 1}.0.0-rc1'
+        self.fake.routes[('GET', '/api/boot')] = (426, {'error': 'client_incompatible', 'engine': engine})
+        result = self.run_cli('boot')
+        self.assertEqual(result.returncode, 78, result.stderr)
+        self.assertIn(f'upgrade the client to {engine}', result.stderr)
+
+    def test_an_unreadable_outdated_header_is_not_echoed(self):
+        self.fake.headers['x-optimal-client-outdated'] = 'garbage\x1b]0;title\x07'
+        result = self.ok('boot')
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertIn('outdated', lines[0])
+        self.assertNotIn('garbage', result.stderr)
+        self.assertNotIn('\x1b', result.stderr)
+
+
 class OperatorTests(CliTestCase):
     OPERATOR = [['start'], ['stop'], ['restart'], ['log'], ['index'], ['graph', 'backfill'],
                 ['graph'], ['reality-check', '--disposable']]
@@ -743,6 +767,34 @@ class OperatorTests(CliTestCase):
         self.assertIn('permission_scope_denied', result.stderr)
         self.assertIn('GET /api/maintenance/log', result.stderr)
 
+    def test_remote_log_needs_the_engine_operator(self):
+        engine = self.remote_engine()
+        self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
+        engine.routes[('GET', '/api/maintenance/log')] = (403, {'error': 'operator_only'})
+        result = self.run_cli('log')
+        self.assertEqual(result.returncode, 77, result.stderr)
+        self.assertIn('HTTP 403: operator_only', result.stderr)
+        self.assertIn('default tenant', result.stderr)
+
+    def test_remote_log_without_text_is_a_data_error(self):
+        engine = self.remote_engine()
+        self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
+        for payload in [{'count': 0, 'capacity': 1000}, {'text': None}, {'text': 5}]:
+            with self.subTest(payload=payload):
+                engine.routes[('GET', '/api/maintenance/log')] = (200, payload)
+                result = self.run_cli('log')
+                self.assertEqual(result.returncode, 65, result.stderr)
+                self.assertIn('no log text', result.stderr)
+        engine.routes[('GET', '/api/maintenance/log')] = (200, {'count': 0, 'text': ''})
+        result = self.ok('log')
+        self.assertEqual(result.stdout, '')
+
+    def test_remote_log_replaces_control_characters(self):
+        engine = self.remote_engine()
+        self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
+        engine.routes[('GET', '/api/maintenance/log')] = (200, {'text': '\x1b[31mred\x1b[0m\ttab\x07'})
+        self.assertEqual(self.ok('log').stdout, '?[31mred?[0m\ttab?\n')
+
     def test_remote_operator_usage_errors(self):
         self.remote_engine()
         self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
@@ -750,6 +802,27 @@ class OperatorTests(CliTestCase):
                      ['restart', 'now']]:
             with self.subTest(args=args):
                 self.assertEqual(self.run_cli(*args).returncode, 64)
+
+    def test_which_urls_are_local(self):
+        loose = self.dir / 'loose'
+        loose.mkdir()
+        shutil.copy2(CLI, loose / 'optimal')
+        self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
+        local = ['http://[::1]:4200', 'http://LOCALHOST:4200', 'http://127.0.0.2:4200', 'http://0.0.0.0:4200',
+                 'http://user:pw@localhost:4200', 'http://127.0.0.1']
+        remote = ['http://evil.example#@localhost:4200', 'http://evil.example?@localhost:4200',
+                  'http://evil.example/@localhost:4200', 'http://localhost.evil.example:4200',
+                  'http://127.0.0.1.evil.example', 'http://127.0.0.1x:4200', 'http://[::2]:4200']
+        for url in local + remote:
+            with self.subTest(url=url):
+                self.env['OPTIMAL_ENGINE_URL'] = url
+                result = self.run_cli('restart', program=loose / 'optimal')
+                self.assertEqual(result.returncode, 78, result.stderr)
+                if url in local:
+                    self.assertIn('not running from an Engine checkout', result.stderr)
+                else:
+                    self.assertIn('against the remote Engine', result.stderr)
+        self.assertFalse(self.calls.exists())
 
     def test_local_url_outside_a_checkout_refuses(self):
         loose = self.dir / 'loose'

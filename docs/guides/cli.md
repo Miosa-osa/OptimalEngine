@@ -93,10 +93,11 @@ The client never sends `actor_id`, `verifier_id` or `created_by`; the Engine tak
 | 403 | 77 | `permission denied (HTTP 403: <code>)`, for example `permission_scope_denied` or `workspace_scope_denied` |
 | 400 `workspace_required` | 64 | The key is limited to named workspaces; pass `--workspace` or set `OPTIMAL_WORKSPACE` |
 | 426 | 78 | The Engine refuses this client's major release; the line says which client to install |
+| 200 without the field the command reads | 65 | For example a `log` answer with no `text` |
 | No response | 69 | `cannot reach the Engine at <url>` |
 | Other errors | 1 | `HTTP <status> from <method> <path>` with the Engine's code |
 
-Exit 64 is a usage error and 78 a refused operator command, a client the Engine refuses, or bad configuration.
+Exit 64 is a usage error, 65 an answer the client cannot read, and 78 a refused operator command, a client the Engine refuses, or bad configuration.
 
 ## Version compatibility
 
@@ -183,7 +184,8 @@ optimal close "What changed, how it was verified, what is unverified"
 
 ### A local Engine
 
-When the URL's host is `127.0.0.1`, `localhost` or `::1`, they act on a local process and store.
+When the URL's host is a loopback address (`localhost`, `::1`, `0.0.0.0`, or an IPv4 address in `127.0.0.0/8`, compared without regard to case), they act on a local process and store.
+The host is read from the URL's authority, which ends at the first `/`, `?` or `#`, so `http://example.com#@localhost:4200` is remote.
 They run only when the client runs from an Engine checkout (or `OPTIMAL_ENGINE_CHECKOUT` names one); otherwise they refuse with exit 78 and change nothing.
 
 * `start` runs `scripts/run-engine.sh` on the URL's port, waits for an answer, and records the process in `.optimal/cli-engine.pid` with its log in `.optimal/cli-engine.log`.
@@ -203,12 +205,17 @@ The ones the Engine API can serve call its routes with the configured key; the m
 
 | Command | Route |
 | --- | --- |
-| `index [-w ws]` | `POST /api/maintenance/index`: enqueues the same coalesced `reindex` job as `POST /api/reindex` and prints it |
-| `log [-n lines]` | `GET /api/maintenance/log?lines=<n>` (default 200): the Engine's newest log lines, printed as text |
+| `index [-w ws]` | `POST /api/maintenance/index`: enqueues a `reindex` job for the workspace (the one named, or the implicit default the key may use), coalesced per workspace like `POST /api/reindex`, and prints it |
+| `log [-n lines]` | `GET /api/maintenance/log?lines=<n>` (default 200): the Engine's newest log lines, printed as text; Engine operator only |
 | `graph [-w ws]` | `GET /api/maintenance/graph`: one workspace's edge counts by relation, most connected entities, and newest edges |
 | `graph hubs\|clusters\|triangles [-w ws] [-n]` | `GET /api/graph/hubs`, `/api/graph/clusters`, `/api/graph/triangles` |
 
-The Engine keeps its log lines in memory (`OptimalEngine.LogBuffer`): the newest 1,000 at `info` and above, one line each with a UTC timestamp and the level, with API keys and bearer tokens redacted before a line is kept.
+The Engine keeps its log lines in memory (`OptimalEngine.LogBuffer`): the newest 1,000 at `info` and above, one line each with a UTC timestamp and the level.
+Control characters other than tab are replaced with `?`, both when the Engine keeps a line and when the client prints it.
+Before a line is kept, the Engine replaces these with `[redacted]`: Engine API keys (plain or URL-encoded), `Bearer` and `Basic` credentials, the user and password of a URL, the value after a credential-like name (`api_key`, `access_token`, `refresh_token`, `token`, `secret`, `password`, `client_secret`, `secret_access_key`, `authorization`, `x-optimal-grant`, `bot_token`) in `name=value`, `name: value`, map and header-tuple forms, provider tokens with a known prefix (`sk-`, `sk-ant-`, `msk_`, `mki_`, `xox?-`, `gh?_`), AWS access key ids, and JWTs.
+A secret in any other shape is kept as logged.
+The log covers every tenant on the Engine, so only the Engine operator reads it: an admin key of the default tenant whose workspace scope is `*`.
+Any other key, including another tenant's admin key or a default-tenant admin key limited to some workspaces, gets 403 `operator_only` (exit 77).
 The buffer starts empty when the Engine starts; the `:optimal_engine` settings `:log_buffer_capacity` and `:log_buffer_level` change its size and level.
 
 `start`, `stop`, `restart`, `graph backfill` and `reality-check` exit 78 with one line that names the reason, and change nothing.

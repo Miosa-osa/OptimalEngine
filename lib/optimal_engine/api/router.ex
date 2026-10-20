@@ -573,6 +573,20 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # The Engine operator: an admin key (PermissionPlug) of the default tenant
+  # with every workspace in scope. No key at all reaches a handler only when the
+  # Engine requires none (AuthPlug refuses it otherwise), which is the trusted
+  # local operator.
+  defp engine_operator?(conn) do
+    default = OptimalEngine.Tenancy.Tenant.default_id()
+
+    (conn.assigns[:current_tenant] || default) == default and
+      case conn.assigns[:current_api_key] do
+        nil -> true
+        api_key -> "*" in (api_key.workspace_scope || [])
+      end
+  end
+
   defp embedding_scope(conn, workspace) when workspace in [nil, ""],
     do: {:ok, [tenant_id: conn.assigns[:current_tenant] || "default"]}
 
@@ -589,26 +603,42 @@ defmodule OptimalEngine.API.Router do
   # (`optimal index`, `log` and `graph`) against an Engine that is not on the
   # caller's machine, so they never need a shell on the Engine's host.
 
-  # Enqueues a full reindex, exactly as POST /api/reindex does.
+  # Enqueues a reindex job for the workspace named (or the implicit default,
+  # authorized by WorkspaceAuthPlug), coalesced per workspace like
+  # POST /api/reindex.
   post "/api/maintenance/index" do
     enqueue_reindex(conn)
   end
 
   # The Engine's newest log lines (OptimalEngine.LogBuffer), oldest first:
-  # `lines` (default 200, at most the buffer's capacity). Keys and bearer tokens
-  # are redacted before a line is kept. Returns {count, capacity, text}.
+  # `lines` (default 200, at most the buffer's capacity). Returns
+  # {count, capacity, text}. The log is the whole Engine's, every tenant's
+  # workspaces, paths and errors in it, so only the Engine operator reads it:
+  # an admin key of the default tenant whose workspace scope is "*" (or no key
+  # on an Engine that requires none). Anyone else gets 403 operator_only.
   get "/api/maintenance/log" do
-    limit = conn |> query_param("lines", "200") |> parse_int(200)
-    %{lines: lines, capacity: capacity} = OptimalEngine.LogBuffer.recent(limit)
-    json(conn, %{count: length(lines), capacity: capacity, text: Enum.join(lines, "\n")})
+    if engine_operator?(conn) do
+      limit = conn |> query_param("lines", "200") |> parse_int(200)
+      %{lines: lines, capacity: capacity} = OptimalEngine.LogBuffer.recent(limit)
+      json(conn, %{count: length(lines), capacity: capacity, text: Enum.join(lines, "\n")})
+    else
+      conn
+      |> put_status(403)
+      |> json(%{
+        error: "operator_only",
+        message:
+          "the Engine log covers every tenant; it needs an admin key of the default tenant whose workspace scope is *"
+      })
+    end
   end
 
-  # Graph statistics for one workspace in the caller's tenant (`workspace`,
-  # default "default"), the report `mix optimal.graph` prints: edge counts by
-  # relation, the most connected entities, and the newest edges.
+  # Graph statistics for one workspace in the caller's tenant: the one named,
+  # or the implicit default (WorkspaceAuthPlug authorizes either), the report
+  # `mix optimal.graph` prints: edge counts by relation, the most connected
+  # entities, and the newest edges.
   get "/api/maintenance/graph" do
     tenant_id = conn.assigns[:current_tenant] || "default"
-    workspace = query_param(conn, "workspace", "default")
+    workspace = conn.assigns[:workspace_id] || "default"
 
     with {:ok, %{id: ws, tenant_id: ^tenant_id}} <- OptimalEngine.Workspace.get(workspace),
          {:ok, edges} <- OptimalEngine.Graph.stats(workspace_id: ws),
