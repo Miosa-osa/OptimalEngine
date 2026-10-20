@@ -33,11 +33,47 @@ defmodule OptimalEngine.Authority.Evidence do
             could_not_enforce external.receipt issuer.registered revocations.received
             settings.changed key.rotated key.minted key.revoked integrity.finding
             agent_action.step connector.registered connector.changed connector.deleted
-            connector.run workspace.renamed)
+            connector.run workspace.renamed workspace.rekeyed)
 
   @doc "The evidence kinds the Engine records."
   @spec kinds() :: [String.t()]
   def kinds, do: @kinds
+
+  @doc """
+  The tenant's active evidence key, for a caller that appends inside its own
+  transaction (`append_in/5`) and so fetches the key first: creating one
+  writes to the Store. `nil` when the Engine cannot sign evidence, for
+  example the key that wraps the signing key is missing.
+  """
+  @spec signing_key(String.t()) :: map() | nil
+  def signing_key(tenant_id) do
+    case Keys.active(tenant_id, "evidence") do
+      {:ok, key} -> key
+      {:error, _reason} -> nil
+    end
+  end
+
+  @doc """
+  Whether `entry` sits where it was signed: its `prev_hash` is the hash of the
+  entry before it in the tenant's chain (the genesis hash for the first).
+  Entry hashes cover `prev_hash` and `seq`, so a signed entry copied to
+  another position, or one whose predecessor is gone, is not linked.
+  """
+  @spec linked?(String.t(), map()) :: boolean()
+  def linked?(_tenant_id, %{"seq" => 1, "prev_hash" => prev_hash}), do: prev_hash == @genesis
+
+  def linked?(tenant_id, %{"seq" => seq, "prev_hash" => prev_hash})
+      when is_integer(seq) and seq > 1 do
+    case Store.raw_query(
+           "SELECT hash FROM authority_evidence WHERE tenant_id = ?1 AND tenant_seq = ?2",
+           [tenant_id, seq - 1]
+         ) do
+      {:ok, [[hash]]} -> hash == prev_hash
+      _ -> false
+    end
+  end
+
+  def linked?(_tenant_id, _entry), do: false
 
   @doc """
   Appends one entry. `attrs` may carry `:jti`, `:subject`, `:action`,

@@ -14,13 +14,20 @@ defmodule OptimalEngine.Authority.ActionChain do
       carrying the step's canonical SHA-256 and the evidence hash of the step
       before it.
 
+  A step is verified against the workspace id inside its signed evidence
+  entry, not the live `workspace_id` column. An operator's id repair moves the
+  column (and so the chain is found under the new id) but never the signed
+  entry; the repair is itself a signed `workspace.rekeyed` entry, and a step
+  verifies only when its column is the signed id followed through the
+  re-keys recorded after it (`OptimalEngine.Authority.WorkspaceRekeys`).
+
   Steps can be reported by an outside approval system (MIOSA) or by the
   Engine's own callers. `trace/2` also follows the Engine's native authority
   flow (approval request, approval, grant, admission, release) by request id
   or grant id, so both kinds of chain read the same way.
   """
 
-  alias OptimalEngine.Authority.{CanonicalJSON, Evidence}
+  alias OptimalEngine.Authority.{CanonicalJSON, Evidence, WorkspaceRekeys}
   alias OptimalEngine.Store
 
   @stages ~w(request approval denial action result reply)
@@ -53,7 +60,8 @@ defmodule OptimalEngine.Authority.ActionChain do
          {:ok, correlation_id} <- correlation(stage, attrs["correlation_id"]),
          previous = steps(tenant_id, correlation_id),
          :ok <- order(stage, previous, workspace_id),
-         {:ok, occurred_at} <- occurred_at(attrs["occurred_at"]) do
+         {:ok, occurred_at} <- occurred_at(attrs["occurred_at"]),
+         {:ok, key} <- evidence_key(tenant_id) do
       last = List.last(previous)
       first = List.first(previous)
       detail = if is_map(attrs["detail"]), do: attrs["detail"], else: %{}
@@ -76,51 +84,62 @@ defmodule OptimalEngine.Authority.ActionChain do
       step_hash = CanonicalJSON.hash(step)
       context_id = "sig_" <> step["id"]
 
-      {:ok, _} =
-        Store.transaction(fn txn -> insert(txn, tenant_id, step, context_id, recorded_by) end)
+      # The step rows, the Signal, and the signed evidence entry are written
+      # together: a step is never left without its entry, and a workspace id
+      # repair cannot fall between them.
+      {:ok, entry} =
+        Store.transaction(fn txn ->
+          {:ok, _} = insert(txn, tenant_id, step, context_id, recorded_by)
 
-      evidence =
-        Evidence.append(tenant_id, "agent_action.step", %{
-          jti: detail["jti"],
-          subject: step["agent"],
-          action: step["action"],
-          resource: step["resource"],
-          workspace_id: workspace_id,
-          detail: %{
-            "correlation_id" => correlation_id,
-            "causation_id" => step["causation_id"],
-            "stage" => stage,
-            "seq" => step["seq"],
-            "step_id" => step["id"],
-            "context_id" => context_id,
-            "step_sha256" => step_hash,
-            "prev_step_evidence" => last && last["evidence_hash"],
-            "request_id" => detail["request_id"],
-            "recorded_by" => recorded_by
-          }
-        })
+          {:ok, entry} =
+            Evidence.append_in(txn, key, tenant_id, "agent_action.step", %{
+              jti: detail["jti"],
+              subject: step["agent"],
+              action: step["action"],
+              resource: step["resource"],
+              workspace_id: workspace_id,
+              detail: %{
+                "correlation_id" => correlation_id,
+                "causation_id" => step["causation_id"],
+                "stage" => stage,
+                "seq" => step["seq"],
+                "step_id" => step["id"],
+                "context_id" => context_id,
+                "step_sha256" => step_hash,
+                "prev_step_evidence" => last && last["evidence_hash"],
+                "request_id" => detail["request_id"],
+                "recorded_by" => recorded_by
+              }
+            })
 
-      case evidence do
-        {:ok, entry} ->
           {:ok, _} =
-            Store.raw_query(
+            Store.txn_execute(
+              txn,
               "UPDATE authority_action_steps SET evidence_id = ?2, evidence_hash = ?3 WHERE id = ?1",
               [step["id"], entry["id"], entry["hash"]]
             )
 
-          {:ok,
-           step
-           |> Map.merge(%{
-             "context_id" => context_id,
-             "step_sha256" => step_hash,
-             "evidence_id" => entry["id"],
-             "evidence_hash" => entry["hash"],
-             "recorded_by" => recorded_by
-           })}
+          {:ok, entry}
+        end)
 
-        {:error, reason} ->
-          {:error, {:evidence_failed, reason}}
-      end
+      {:ok,
+       step
+       |> Map.merge(%{
+         "context_id" => context_id,
+         "step_sha256" => step_hash,
+         "evidence_id" => entry["id"],
+         "evidence_hash" => entry["hash"],
+         "recorded_by" => recorded_by
+       })}
+    end
+  end
+
+  # Fetched before the transaction opens (creating a key writes to the
+  # Store). A step is not recorded at all when the Engine cannot sign it.
+  defp evidence_key(tenant_id) do
+    case Evidence.signing_key(tenant_id) do
+      nil -> {:error, {:evidence_failed, :evidence_key_unavailable}}
+      key -> {:ok, key}
     end
   end
 
@@ -142,6 +161,7 @@ defmodule OptimalEngine.Authority.ActionChain do
     if steps == [] and native == [] do
       {:error, :not_found}
     else
+      rekeys = WorkspaceRekeys.list(tenant_id)
       step_entries = step_evidence(tenant_id, steps)
 
       reported =
@@ -150,12 +170,12 @@ defmodule OptimalEngine.Authority.ActionChain do
 
           step
           |> Map.put("source", "reported")
-          |> Map.put("verified", verified(tenant_id, entry, step))
+          |> Map.put("verified", verified(tenant_id, entry, step, rekeys))
         end)
 
       native_steps =
         native
-        |> Enum.map(&native_step(tenant_id, &1))
+        |> Enum.map(&native_step(tenant_id, &1, rekeys))
         |> Enum.reject(&is_nil/1)
 
       ordered = Enum.sort_by(reported ++ native_steps, & &1["occurred_at"])
@@ -422,7 +442,7 @@ defmodule OptimalEngine.Authority.ActionChain do
     "action.withheld" => "result"
   }
 
-  defp native_step(tenant_id, entry) do
+  defp native_step(tenant_id, entry, rekeys) do
     case Map.get(@native_stages, entry["kind"]) do
       nil ->
         nil
@@ -432,7 +452,8 @@ defmodule OptimalEngine.Authority.ActionChain do
           "id" => entry["id"],
           "stage" => stage,
           "evidence_kind" => entry["kind"],
-          "workspace_id" => entry["workspace_id"],
+          # Signed as written; named as the workspace is now.
+          "workspace_id" => WorkspaceRekeys.current(rekeys, entry["workspace_id"], entry["seq"]),
           "agent" => entry["subject"],
           "action" => entry["action"],
           "resource" => entry["resource"],
@@ -470,12 +491,17 @@ defmodule OptimalEngine.Authority.ActionChain do
   end
 
   # A reported step is verified when its evidence entry exists, is intact and
-  # signed, and still matches the step row.
-  defp verified(_tenant_id, nil, _step), do: false
+  # signed, and still matches the step row. The step was signed under the
+  # workspace id its entry names, so it is hashed with that id; the row's live
+  # id may differ only by the workspace id repairs recorded since.
+  defp verified(_tenant_id, nil, _step, _rekeys), do: false
 
-  defp verified(tenant_id, entry, step) do
+  defp verified(tenant_id, entry, step, rekeys) do
+    signed_id = entry["workspace_id"]
+
     canonical =
       step
+      |> Map.put("workspace_id", signed_id)
       |> Map.take(
         ~w(id workspace_id correlation_id seq stage agent action resource summary detail causation_id occurred_at)
       )
@@ -483,7 +509,8 @@ defmodule OptimalEngine.Authority.ActionChain do
 
     Evidence.verify_one(tenant_id, entry) == :ok and
       entry["detail"]["step_sha256"] == canonical and
-      entry["detail"]["step_id"] == step["id"]
+      entry["detail"]["step_id"] == step["id"] and
+      WorkspaceRekeys.current(rekeys, signed_id, entry["seq"]) == step["workspace_id"]
   end
 
   defp complete?(stages) do

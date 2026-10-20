@@ -117,7 +117,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_069_analysis_reports(),
       migration_070_repair_vector_and_chunk_scope(),
       migration_071_workspace_handles(),
-      migration_072_workspace_external_id()
+      migration_072_workspace_external_id(),
+      migration_076_authority_evidence_kind_index()
     ]
   end
 
@@ -131,6 +132,18 @@ defmodule OptimalEngine.Store.Migrations do
   # metadata.external_id stays written. Every statement is safe to run again:
   # the column add is tolerated as a duplicate, the backfill only fills what
   # is missing, and the index is created if absent.
+  # Readers that follow one kind of entry (the workspace id repairs a chain is
+  # verified against, `Evidence.list(kind: ...)`) read it by tenant and kind in
+  # chain order, not by scanning the tenant's whole chain. Additive and safe
+  # to run again.
+  defp migration_076_authority_evidence_kind_index do
+    {76, "authority evidence: index by tenant, kind and sequence",
+     [
+       {"idx_authority_evidence_kind",
+        "CREATE INDEX IF NOT EXISTS idx_authority_evidence_kind ON authority_evidence(tenant_id, kind, tenant_seq)"}
+     ]}
+  end
+
   defp migration_072_workspace_external_id do
     {72, "workspace external id: one active workspace of a tenant per outside id",
      [

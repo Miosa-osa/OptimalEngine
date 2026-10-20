@@ -31,7 +31,7 @@ defmodule OptimalEngine.Authority.Admission do
   Every admission and refusal is recorded in the evidence chain.
   """
 
-  alias OptimalEngine.Authority.{Evidence, Grants, Issuers, JWS, Keys, LocalDeny}
+  alias OptimalEngine.Authority.{Evidence, Grants, Issuers, JWS, Keys, LocalDeny, WorkspaceRekeys}
 
   @skew 5
   @measurable_ceilings ~w(records bytes calls tokens)
@@ -181,20 +181,63 @@ defmodule OptimalEngine.Authority.Admission do
 
   defp times(_claims), do: {:error, :invalid_time_claims}
 
-  defp binding(%{"sub" => sub, "optimal" => %{} = optimal}, request) do
+  defp binding(%{"sub" => sub, "optimal" => %{} = optimal} = claims, request) do
     cond do
       sub != request.subject -> {:error, :wrong_subject}
       optimal["tenant"] != request.tenant_id -> {:error, :wrong_tenant}
-      optimal["workspace"] != request.workspace_id -> {:error, :wrong_workspace}
+      true -> workspace_binding(claims, optimal, request)
+    end
+  end
+
+  defp binding(_claims, _request), do: {:error, :malformed}
+
+  defp workspace_binding(claims, optimal, request) do
+    {workspace, resource} = bound_workspace(claims, optimal, request)
+
+    cond do
+      workspace != request.workspace_id -> {:error, :wrong_workspace}
       optimal["action"] != request.action -> {:error, :wrong_action}
-      not resource_covered?(optimal["resource"], request.resource) -> {:error, :wrong_resource}
+      not resource_covered?(resource, request.resource) -> {:error, :wrong_resource}
       (optimal["data_class"] || "internal") != request.data_class -> {:error, :wrong_data_class}
       command_mismatch?(optimal["command_sha256"], request) -> {:error, :command_mismatch}
       true -> :ok
     end
   end
 
-  defp binding(_claims, _request), do: {:error, :malformed}
+  # A grant names its workspace by the id it had when it was issued. When
+  # that is not the id asked for, the signed workspace id repairs recorded
+  # after the grant was issued are followed (`WorkspaceRekeys`), so a grant
+  # issued before an operator's repair still admits under the new id, and
+  # only that one. A grant issued after a repair is not changed by it, and a
+  # grant with no local issuance entry (an outside issuer's) is taken as
+  # written.
+  defp bound_workspace(claims, optimal, request) do
+    as_written = {optimal["workspace"], optimal["resource"]}
+
+    with true <- optimal["workspace"] != request.workspace_id,
+         jti when is_binary(jti) <- claims["jti"],
+         seq when is_integer(seq) <- issued_seq(request.tenant_id, jti),
+         [_ | _] = rekeys <- WorkspaceRekeys.list(request.tenant_id) do
+      {WorkspaceRekeys.current(rekeys, optimal["workspace"], seq),
+       WorkspaceRekeys.current_resource(rekeys, optimal["resource"], seq)}
+    else
+      _ -> as_written
+    end
+  end
+
+  # Where in the evidence chain the Engine recorded issuing the grant.
+  defp issued_seq(tenant_id, jti) do
+    tenant_id
+    |> Evidence.list(jti: jti)
+    |> Enum.find(fn entry ->
+      entry["kind"] in ["grant.issued", "grant.narrowed"] and
+        Evidence.verify_one(tenant_id, entry) == :ok
+    end)
+    |> case do
+      nil -> nil
+      entry -> entry["seq"]
+    end
+  end
 
   defp resource_covered?(granted, requested) when is_binary(granted) and is_binary(requested) do
     granted == requested or

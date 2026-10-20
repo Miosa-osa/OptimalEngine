@@ -32,7 +32,7 @@ defmodule OptimalEngine.Workspace do
   `:external_id_taken` when another active workspace holds the id.
   """
 
-  alias OptimalEngine.Authority.{Evidence, Keys}
+  alias OptimalEngine.Authority.Evidence
   alias OptimalEngine.Store
   alias OptimalEngine.Organization
   alias OptimalEngine.Tenancy.Tenant
@@ -662,16 +662,12 @@ defmodule OptimalEngine.Workspace do
   end
 
   defp evidence_key(workspace) do
-    case Keys.active(workspace.tenant_id, "evidence") do
-      {:ok, key} ->
-        key
+    with nil <- Evidence.signing_key(workspace.tenant_id) do
+      Logger.warning(
+        "[Workspace] rename of #{workspace.id} will not be recorded as evidence: the Engine cannot sign evidence"
+      )
 
-      {:error, reason} ->
-        Logger.warning(
-          "[Workspace] rename of #{workspace.id} will not be recorded as evidence: #{inspect(reason)}"
-        )
-
-        nil
+      nil
     end
   end
 

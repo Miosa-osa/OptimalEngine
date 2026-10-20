@@ -69,6 +69,29 @@ A rename keeps it, and so does a metadata replacement.
 A workspace bundle carries it; an import into a tenant where an active workspace holds it creates the copy without it, keeps it as `metadata.imported_external_id`, and reports it as `imported_external_id` in the import summary.
 Portable topology documents name workspaces by slug (and by id for a renamed one), so they do not carry it.
 
+## Repairing a workspace id
+
+A rename keeps the id. An operator can also make the id match the slug, or attach rows written to an unregistered id, with `POST /api/data-steward/workspaces/rename {source_workspace_id, target_workspace_id}` and `POST /api/data-steward/workspaces/repair {source_workspace_id, target_workspace_id}` (`topology:write`).
+Both move every row that names the workspace to the new id in one transaction, and the answer lists the tables (`tables`, `updated_records` for a repair, `handles_moved` for a rename).
+A rename also moves the slugs the workspace holds, and a repair moves rows only (the target must already be a registered workspace).
+
+Signed evidence is not rewritten, because each entry is hashed and signed over the workspace id it names.
+`authority_evidence` is left alone, and the repair is appended to it as a signed `workspace.rekeyed` entry (from, to, who) in the same transaction, which the answer reports as `rekey_recorded: true`.
+A repair that moves no rows records nothing (`false`).
+An agent action chain recorded under the old id still verifies, and is found under the new id, because a step is checked against the id inside its signed entry followed through the re-keys recorded after it.
+A re-key counts only when it is a signed entry of the tenant's chain, from a key that is not revoked, in the position it was signed; a row written into the table by hand explains nothing.
+Deleting a re-key does not make anything verify: the steps it explained stop verifying, and the gap shows in `Evidence.verify/1` and the integrity scan.
+Grants issued before the repair keep admitting under the new id (their workspace and resource are followed through the re-keys recorded after they were issued); a grant issued after it is not changed by it.
+
+An Engine that cannot sign evidence (the key that wraps the evidence key is missing) refuses a repair of a workspace that has agent action steps (`{"error": ":evidence_key_unavailable"}`, 422) and moves nothing, because the steps could never be verified again.
+A workspace with no steps is repaired with a warning in the log, and `rekey_recorded` is `false`.
+A repair made by a release before this check left no record, so its steps show as unverified.
+
+A repair does not rewrite what names the id inside hashed content.
+Workspace policy packs (`authority_policies.scope_id` and the resource patterns in their signed documents) and API keys (`api_keys.workspace_scope`, fingerprinted when minted) are published and minted again for the new id, which leaves evidence, rather than edited in place, which the integrity scan would report.
+Local denies move with the workspace but keep the resource pattern they were written with, so a deny written for the old id no longer matches resources under the new one: add it again for the new id.
+Open loops move, but their de-duplication key is built from the id, so a loop detected again is not matched with the one that moved.
+
 ## Moving a workspace (split, merge, seed)
 
 A bundle is a gzip tar file with `manifest.json`, one JSON-lines file per table, and the workspace's files.
