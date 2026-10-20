@@ -70,7 +70,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
   @spec embed_tree(ChunkTree.t(), keyword()) ::
           {:ok, [Embedding.t()], %{errors: [{String.t(), term()}]}}
   def embed_tree(%ChunkTree{chunks: chunks}, opts \\ []) do
-    opts = Keyword.put(opts, :text_vectors, text_vectors(chunks, opts))
+    opts = with_text_vectors(chunks, opts)
 
     {embeddings, errors} =
       Enum.reduce(chunks, {[], []}, fn chunk, {acc_emb, acc_err} ->
@@ -83,19 +83,26 @@ defmodule OptimalEngine.Pipeline.Embedder do
     {:ok, Enum.reverse(embeddings), %{errors: Enum.reverse(errors)}}
   end
 
-  # The text chunks of a tree are embedded together: an embedding endpoint gets
-  # batched requests, and an unavailable embedder is asked once, not once per
-  # chunk, so a down or hung embedder cannot hold intake for every chunk.
-  defp text_vectors(chunks, opts) do
-    texts =
-      chunks
-      |> Enum.filter(fn %Chunk{modality: m, text: text} ->
-        m in [:text, :code, :data, :mixed] and is_binary(text) and text != ""
-      end)
-      |> Enum.map(& &1.text)
-      |> Enum.uniq()
+  # With an embedding endpoint the text chunks of a tree go out together: a few
+  # batched requests (a shared gateway meters requests), governed as one model
+  # call, and an unavailable endpoint is asked once, not once per chunk. Ollama
+  # at OLLAMA_HOST embeds chunk by chunk as before, so a slow first model load
+  # costs only the chunk it hits.
+  defp with_text_vectors(chunks, opts) do
+    if TextEmbedder.endpoint_configured?() do
+      texts =
+        chunks
+        |> Enum.filter(fn %Chunk{modality: m, text: text} ->
+          m in [:text, :code, :data, :mixed] and is_binary(text) and text != ""
+        end)
+        |> Enum.map(& &1.text)
+        |> Enum.uniq()
 
-    texts |> Enum.zip(TextEmbedder.embed_many(texts, opts)) |> Map.new()
+      vectors = texts |> Enum.zip(governed_embed_batch(texts, opts)) |> Map.new()
+      Keyword.put(opts, :text_vectors, vectors)
+    else
+      opts
+    end
   end
 
   @doc """
@@ -275,23 +282,57 @@ defmodule OptimalEngine.Pipeline.Embedder do
   # it lands a model_call_run with provenance (model id) + latency + status.
   # Fail-open: governance never alters or blocks the embedding result.
 
+  # A text embedded in the tree's batch was governed with the batch.
   defp governed_embed_text(text, opts) do
-    model = model_name(opts, :text)
-    precomputed = Map.fetch(Keyword.get(opts, :text_vectors, %{}), text)
+    case Map.fetch(Keyword.get(opts, :text_vectors, %{}), text) do
+      {:ok, result} ->
+        result
 
+      :error ->
+        GovernedModel.call_model(
+          "embedder.embed_text",
+          %{"chars" => String.length(text)},
+          fn -> TextEmbedder.embed(text, Keyword.delete(opts, :text_vectors)) end,
+          model_id: model_name(opts, :text),
+          model_task_type: "embedding",
+          provider: TextEmbedder.provider(),
+          workspace_id: Keyword.get(opts, :workspace_id, "default")
+        )
+    end
+  end
+
+  # One governed call for the whole batch, recorded with the input count and
+  # size only, never the text, and with how many inputs got a vector.
+  defp governed_embed_batch([], _opts), do: []
+
+  defp governed_embed_batch(texts, opts) do
     GovernedModel.call_model(
-      "embedder.embed_text",
-      %{"chars" => String.length(text), "batched" => precomputed != :error},
-      fn ->
-        case precomputed do
-          {:ok, result} -> result
-          :error -> TextEmbedder.embed(text, Keyword.delete(opts, :text_vectors))
-        end
-      end,
-      model_id: model,
+      "embedder.embed_text_batch",
+      %{"inputs" => length(texts), "chars" => texts |> Enum.map(&String.length/1) |> Enum.sum()},
+      fn -> TextEmbedder.embed_many(texts, opts) end,
+      model_id: model_name(opts, :text),
       model_task_type: "embedding",
-      workspace_id: Keyword.get(opts, :workspace_id, "default")
+      provider: TextEmbedder.provider(),
+      workspace_id: Keyword.get(opts, :workspace_id, "default"),
+      classify: &classify_batch/1
     )
+  end
+
+  defp classify_batch(results) do
+    embedded = Enum.count(results, &match?({:ok, _vector}, &1))
+
+    payload = %{
+      "ok" => embedded > 0,
+      "result_kind" => "vectors",
+      "embedded" => embedded,
+      "failed" => length(results) - embedded
+    }
+
+    case Enum.find(results, &match?({:error, _reason}, &1)) do
+      nil -> {"completed", payload}
+      {:error, reason} when embedded == 0 -> {"failed", Map.put(payload, "error", inspect(reason))}
+      {:error, reason} -> {"completed", Map.put(payload, "error", inspect(reason))}
+    end
   end
 
   defp governed_embed_image(asset_path, opts) do

@@ -86,9 +86,13 @@ Log lines name the endpoint, the status, and the endpoint's error code; they nev
 Inputs are capped at 6,000 characters after invalid UTF-8 is replaced, and identical inputs are served from the filesystem cache.
 Ollama's cache entries are keyed by the model and the input, as before; an endpoint's are keyed by the endpoint, the model and the input, so vectors from one never answer for the other.
 An endpoint's vectors must have the model's width; a different width is refused as `embed_dimension_mismatch`, logged with the two widths, never cached, and stops a backfill.
+A cached vector of another width than the model now needs, after the width setting changed, is fetched again.
 Stored vectors of another dimension are never scored, so a model with a different dimension cannot mix with an existing index.
 A request waits at most 5 seconds; an endpoint that accepts the connection and never answers counts as unavailable, and the search path's health probe gives up after 2 seconds.
-The text chunks of an ingested document are embedded together, so an unavailable endpoint is asked once per document, not once per chunk.
+A request that finds the endpoint unavailable marks it unhealthy for the process that made it, for 60 seconds (`config :optimal_engine, :text_embedding, health_ttl_ms:`), so its searches skip the vector hop instead of waiting again; a successful request clears the mark.
+With an endpoint, the text chunks of an ingested document go out in one batched request, recorded as one governed model call (`embedder.embed_text_batch`, with the input count and size, never the text), so an unavailable endpoint is asked once per document, not once per chunk.
+With Ollama at `OLLAMA_HOST`, each chunk is embedded on its own, as before.
+A batch answered 429 with a `Retry-After` of at most 60 seconds is retried once after that wait; a single embedding, such as a search query, is not.
 A key sent over plain `http` to another machine is warned about once, without the key.
 
 ## Knowledge Graph Backend

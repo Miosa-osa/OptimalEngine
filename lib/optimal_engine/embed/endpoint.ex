@@ -22,7 +22,7 @@ defmodule OptimalEngine.Embed.Endpoint do
     * `{:embed_unauthorized, 401 | 403}` - the endpoint refused the key; logged
       as an error, because every embedding fails until the key is fixed;
     * `{:embed_api_key, reason}` - the key file cannot be read, or the key is
-      not a single line;
+      not one run of visible ASCII characters;
     * `{:embed_unavailable, status}` - an answer every following request would
       get too: 402 out of credit, 404 no such model, 429 rate limited, 5xx the
       backend down or misconfigured (MIOSA's gateway answers 502
@@ -49,7 +49,7 @@ defmodule OptimalEngine.Embed.Endpoint do
   @spec request(OptimalEngine.Embed.Text.endpoint(), String.t(), String.t()) ::
           {:ok, [number()]} | {:error, term()}
   def request(endpoint, model, input) when is_binary(input) do
-    with {:ok, [vector]} <- post(endpoint, model, input, 1), do: {:ok, vector}
+    with {:ok, [vector]} <- post(endpoint, model, input, 1, []), do: {:ok, vector}
   end
 
   @doc """
@@ -57,19 +57,27 @@ defmodule OptimalEngine.Embed.Endpoint do
 
   The caller keeps a batch within the endpoint's limits (MIOSA's gateway takes
   256 inputs and a 1 MB body).
-  """
-  @spec request_many(OptimalEngine.Embed.Text.endpoint(), String.t(), [String.t()]) ::
-          {:ok, [[number()]]} | {:error, term()}
-  def request_many(_endpoint, _model, []), do: {:ok, []}
 
-  def request_many(endpoint, model, inputs) when is_list(inputs),
-    do: post(endpoint, model, inputs, length(inputs))
+  ## Options
+
+    * `:retry_after_max_ms` - an answer of 429 whose `Retry-After` (in seconds)
+      asks for at most this wait is retried once after it (default 0: never).
+      For bulk work; an interactive caller such as a search query never waits.
+  """
+  @spec request_many(OptimalEngine.Embed.Text.endpoint(), String.t(), [String.t()], keyword()) ::
+          {:ok, [[number()]]} | {:error, term()}
+  def request_many(endpoint, model, inputs, opts \\ [])
+
+  def request_many(_endpoint, _model, [], _opts), do: {:ok, []}
+
+  def request_many(endpoint, model, inputs, opts) when is_list(inputs),
+    do: post(endpoint, model, inputs, length(inputs), opts)
 
   @doc "The vector width `model` must have at `endpoint`, or `nil` when unchecked."
   @spec dimensions(OptimalEngine.Embed.Text.endpoint(), String.t()) :: pos_integer() | nil
   def dimensions(endpoint, model), do: Map.get(endpoint, :dimensions) || @model_dimensions[model]
 
-  defp post(endpoint, model, input, count) do
+  defp post(endpoint, model, input, count, opts) do
     with {:ok, key} <- api_key(endpoint),
          {:ok, body} <- encode(model, input) do
       ensure_http_started()
@@ -92,6 +100,22 @@ defmodule OptimalEngine.Embed.Endpoint do
         {:ok, {{_version, status, _reason}, _headers, response}} when status in [401, 403] ->
           log_refused(endpoint.url, status, response, key != nil)
           {:error, {:embed_unauthorized, status}}
+
+        {:ok, {{_version, 429, _reason}, headers, response}} ->
+          case retry_after_ms(headers, Keyword.get(opts, :retry_after_max_ms, 0)) do
+            nil ->
+              Logger.warning("[Embed] #{safe_url(endpoint.url)} answered HTTP 429#{code(response)}")
+              {:error, status_error(429)}
+
+            wait ->
+              Logger.info(
+                "[Embed] #{safe_url(endpoint.url)} is rate limiting (HTTP 429); " <>
+                  "retrying once in #{wait} ms, as it asks"
+              )
+
+              Process.sleep(wait)
+              post(endpoint, model, input, count, Keyword.put(opts, :retry_after_max_ms, 0))
+          end
 
         {:ok, {{_version, status, _reason}, _headers, response}} ->
           Logger.warning(
@@ -117,6 +141,19 @@ defmodule OptimalEngine.Embed.Endpoint do
     do: {:embed_unavailable, status}
 
   defp status_error(status), do: {:http_error, status}
+
+  # The wait a 429 asks for, when it is a whole number of seconds within `max_ms`.
+  defp retry_after_ms(_headers, max_ms) when max_ms <= 0, do: nil
+
+  defp retry_after_ms(headers, max_ms) do
+    with {_name, value} <- List.keyfind(headers, ~c"retry-after", 0),
+         {seconds, ""} when seconds >= 0 <- Integer.parse(String.trim(to_string(value))),
+         wait when wait <= max_ms <- seconds * 1_000 do
+      wait
+    else
+      _ -> nil
+    end
+  end
 
   # Every embedding fails until the key is fixed, so this is an error, and it
   # says which settings to look at.
@@ -157,13 +194,13 @@ defmodule OptimalEngine.Embed.Endpoint do
     end
   end
 
-  # A key is one printable line; anything else would end up as a broken or
-  # injected header.
+  # A bearer key is visible ASCII with no spaces; anything else would end up as
+  # a broken or injected header.
   defp checked(key) do
-    if String.printable?(key) and not String.contains?(key, ["\r", "\n"]) do
+    if key =~ ~r/\A[\x21-\x7E]+\z/ do
       {:ok, key}
     else
-      Logger.error("[Embed] the embedding API key is not a single printable line")
+      Logger.error("[Embed] the embedding API key is not one run of visible ASCII characters")
       {:error, {:embed_api_key, :invalid}}
     end
   end

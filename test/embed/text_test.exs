@@ -14,7 +14,7 @@ defmodule OptimalEngine.Embed.TextTest do
 
   alias OptimalEngine.Embed.{Backfill, Endpoint, Text}
   alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
-  alias OptimalEngine.Pipeline.Decomposer.Chunk
+  alias OptimalEngine.Pipeline.Decomposer.{Chunk, ChunkTree}
   alias OptimalEngine.Pipeline.{Embedder, Intake}
   alias OptimalEngine.Retrieval.Search
   alias OptimalEngine.Store
@@ -39,9 +39,15 @@ defmodule OptimalEngine.Embed.TextTest do
       body = Jason.decode!(raw)
       authorization = get_req_header(conn, "authorization")
       send(opts[:test], {:embed_request, conn.request_path, authorization, body})
-      {status, response} = opts[:respond].(conn.request_path, body)
+
+      {status, response, headers} =
+        case opts[:respond].(conn.request_path, body) do
+          {status, response} -> {status, response, []}
+          {status, response, headers} -> {status, response, headers}
+        end
 
       conn
+      |> merge_resp_headers(headers)
       |> put_resp_content_type("application/json")
       |> send_resp(status, Jason.encode!(response))
     end
@@ -83,6 +89,33 @@ defmodule OptimalEngine.Embed.TextTest do
 
       # Ollama at OLLAMA_HOST is a closed port in tests: one call, not three.
       assert length(String.split(log, "Ollama HTTP POST /api/embed failed")) == 2
+    end
+
+    test "a tree's chunks are embedded one request each, and an unreachable one skips no other",
+         %{tag: tag} do
+      Application.delete_env(:optimal_engine, :text_embedding)
+      tree = tree(tag, ~w(first second third))
+
+      # Ollama at OLLAMA_HOST is a closed port in tests: every chunk is still tried.
+      log =
+        capture_log(fn ->
+          assert {:ok, [], %{errors: [_, _, _]}} = Embedder.embed_tree(tree)
+        end)
+
+      assert length(String.split(log, "Ollama HTTP POST /api/embed failed")) == 4
+
+      base = start_stub(fn _path, _body -> {200, %{"embeddings" => [[0.5, 0.25]]}} end)
+      ollama = Application.get_env(:optimal_engine, :ollama, [])
+      Application.put_env(:optimal_engine, :ollama, Keyword.put(ollama, :host, base))
+
+      assert {:ok, [_, _, _], %{errors: []}} = Embedder.embed_tree(tree)
+
+      for _chunk <- 1..3 do
+        assert_received {:embed_request, "/api/embed", [], %{"input" => input}}
+                        when is_binary(input)
+      end
+
+      refute_received {:embed_request, _, _, _}
     end
 
     test "text is embedded by Ollama at OLLAMA_HOST, without a key, as before", %{tag: tag} do
@@ -253,6 +286,19 @@ defmodule OptimalEngine.Embed.TextTest do
       end)
 
       refute_received {:embed_request, "/v1/embeddings", _, %{"input" => "no key " <> _}}
+
+      # A bearer key is visible ASCII: a space or a non-ASCII letter never reaches a header.
+      use_endpoint(start_stub(&openai_meaning/2))
+
+      for key <- ["two words", "cl\u00E9-#{tag}", "tab\tkey"] do
+        System.put_env("OPTIMAL_EMBED_API_KEY", key)
+
+        capture_log(fn ->
+          assert {:error, {:embed_api_key, :invalid}} = Text.embed("bad key #{tag}", cache: false)
+        end)
+      end
+
+      refute_received {:embed_request, _, _, %{"input" => "bad key " <> _}}
     end
 
     test "many texts go out in one request, in order, without the cached or blank ones",
@@ -302,6 +348,183 @@ defmodule OptimalEngine.Embed.TextTest do
         assert [{:error, {:embed_unauthorized, 401}}, {:error, {:embed_unauthorized, 401}}] =
                  Text.embed_many(["a #{tag}", "b #{tag}"], cache: false)
       end)
+    end
+
+    test "a tree's chunks go out in one request, governed as one call without the text",
+         %{tag: tag} do
+      use_endpoint(start_stub(&openai_meaning/2))
+      workspace = "embed-governed-#{tag}"
+      words = ~w(first second third)
+
+      assert {:ok, [_, _, _], %{errors: []}} =
+               Embedder.embed_tree(tree(tag, words), workspace_id: workspace)
+
+      assert_received {:embed_request, _, _, %{"input" => [_, _, _]}}
+      refute_received {:embed_request, _, _, _}
+
+      assert [[input, output, metadata]] = model_runs(workspace, "embedder.embed_text_batch")
+      chars = words |> Enum.map(&String.length("#{&1} chunk #{tag}")) |> Enum.sum()
+      assert Jason.decode!(input) == %{"inputs" => 3, "chars" => chars}
+      refute input =~ "chunk"
+
+      assert %{"ok" => true, "embedded" => 3, "failed" => 0, "result_kind" => "vectors"} =
+               Jason.decode!(output)
+
+      assert %{"provider" => "embedding_endpoint", "call_status" => "completed"} =
+               Jason.decode!(metadata)
+
+      # The chunks were governed with the batch, not one row each.
+      assert model_runs(workspace, "embedder.embed_text") == []
+
+      # A refused batch is one failed call.
+      use_endpoint(start_stub(fn _path, _body -> {502, %{"error" => %{"code" => "down"}}} end))
+
+      capture_log(fn ->
+        assert {:ok, [], %{errors: [_, _]}} =
+                 Embedder.embed_tree(tree("down-#{tag}", ~w(one two)), workspace_id: workspace)
+      end)
+
+      assert [[_input, output, metadata] | _] = model_runs(workspace, "embedder.embed_text_batch")
+      assert %{"ok" => false, "embedded" => 0, "failed" => 2} = Jason.decode!(output)
+      assert %{"call_status" => "failed"} = Jason.decode!(metadata)
+    end
+
+    test "a cached vector of another width than the model now needs is fetched again",
+         %{tag: tag} do
+      {:ok, width} = Agent.start_link(fn -> 4 end)
+
+      url =
+        start_stub(fn _path, %{"input" => input} ->
+          w = Agent.get(width, & &1)
+
+          data =
+            input
+            |> List.wrap()
+            |> Enum.with_index()
+            |> Enum.map(fn {_text, index} ->
+              %{"index" => index, "embedding" => List.duplicate(0.5, w)}
+            end)
+
+          {200, %{"data" => data}}
+        end)
+
+      use_endpoint(url, dimensions: 4)
+      assert {:ok, [_, _, _, _]} = Text.embed("width #{tag}")
+      assert_received {:embed_request, _, _, _}
+      assert [{:ok, [_, _, _, _]}] = Text.embed_many(["width #{tag}"])
+      refute_received {:embed_request, _, _, _}
+
+      # The width setting changes: the stored vector no longer fits, so it is fetched again.
+      Agent.update(width, fn _ -> 2 end)
+      use_endpoint(url, dimensions: 2)
+      assert [{:ok, [_, _]}] = Text.embed_many(["width #{tag}"])
+      assert_received {:embed_request, _, _, %{"input" => ["width " <> _]}}
+      assert {:ok, [_, _]} = Text.embed("width #{tag}")
+      refute_received {:embed_request, _, _, _}
+    end
+
+    test "a batch answered 429 waits as asked and is retried once; a single embedding is not",
+         %{tag: tag} do
+      {:ok, answers} = Agent.start_link(fn -> [] end)
+
+      use_endpoint(
+        start_stub(fn path, body ->
+          case Agent.get_and_update(answers, fn
+                 [next | rest] -> {next, rest}
+                 [] -> {:meaning, []}
+               end) do
+            :meaning ->
+              openai_meaning(path, body)
+
+            {:limited, wait} ->
+              {429, %{"error" => %{"code" => "rate_limited"}}, [{"retry-after", wait}]}
+          end
+        end)
+      )
+
+      Agent.update(answers, fn _ -> [{:limited, "1"}] end)
+
+      {elapsed, _log} =
+        :timer.tc(
+          fn ->
+            capture_log(fn ->
+              send(self(), {:results, Text.embed_many(["a #{tag}", "b #{tag}"])})
+            end)
+          end,
+          :millisecond
+        )
+
+      assert_received {:results, [{:ok, _}, {:ok, _}]}
+      assert elapsed >= 1_000
+      assert_received {:embed_request, _, _, %{"input" => [_, _]}}
+      assert_received {:embed_request, _, _, %{"input" => [_, _]}}
+
+      # Once only, and never for a wait over a minute or a single embedding.
+      for limited <- [[{:limited, "0"}, {:limited, "0"}], [{:limited, "61"}]] do
+        Agent.update(answers, fn _ -> limited end)
+
+        capture_log(fn ->
+          assert [{:error, {:embed_unavailable, 429}}] =
+                   Text.embed_many(["again #{tag} #{length(limited)}"], cache: false)
+        end)
+      end
+
+      Agent.update(answers, fn _ -> [{:limited, "1"}] end)
+
+      {elapsed, _log} =
+        :timer.tc(
+          fn ->
+            capture_log(fn ->
+              assert {:error, {:embed_unavailable, 429}} = Text.embed("query #{tag}", cache: false)
+            end)
+          end,
+          :millisecond
+        )
+
+      assert elapsed < 1_000
+    end
+
+    test "the unhealthy mark lasts the health window, and a success clears it", %{tag: tag} do
+      {:ok, mode} = Agent.start_link(fn -> :down end)
+
+      url =
+        start_stub(fn path, body ->
+          case Agent.get(mode, & &1) do
+            :up -> openai_meaning(path, body)
+            :down -> {502, %{"error" => %{"code" => "embedding_backend_unavailable"}}}
+          end
+        end)
+
+      use_endpoint(url, health_ttl_ms: 200)
+
+      capture_log(fn ->
+        assert {:error, {:embed_unavailable, 502}} = Text.embed("first #{tag}", cache: false)
+      end)
+
+      refute Text.healthy?()
+      assert_received {:embed_request, _, _, %{"input" => "first " <> _}}
+      refute_received {:embed_request, _, _, _}
+
+      # The endpoint recovers: after the window the next question probes again.
+      Agent.update(mode, fn _ -> :up end)
+      Process.sleep(250)
+      assert Text.healthy?()
+      assert_received {:embed_request, _, _, %{"input" => "probe"}}
+
+      # Down again, then a successful embedding: healthy at once, without a probe.
+      Agent.update(mode, fn _ -> :down end)
+
+      capture_log(fn ->
+        assert {:error, {:embed_unavailable, 502}} = Text.embed("second #{tag}", cache: false)
+      end)
+
+      refute Text.healthy?()
+      Agent.update(mode, fn _ -> :up end)
+      assert {:ok, _vector} = Text.embed("third #{tag}", cache: false)
+      assert Text.healthy?()
+      assert_received {:embed_request, _, _, %{"input" => "second " <> _}}
+      assert_received {:embed_request, _, _, %{"input" => "third " <> _}}
+      refute_received {:embed_request, _, _, _}
     end
 
     test "an endpoint never serves Ollama's cached vectors, nor Ollama the endpoint's",
@@ -391,6 +614,11 @@ defmodule OptimalEngine.Embed.TextTest do
       refute healthy_again
       assert again_ms < 100
 
+      # One connection for the embedding, one for the fresh process's probe.
+      assert_receive :silent_connection, 1_000
+      assert_receive :silent_connection, 1_000
+      refute_received :silent_connection
+
       root = Path.join(System.tmp_dir!(), "embed_hung_root_#{System.unique_integer([:positive])}")
       File.mkdir_p!(root)
       on_exit(fn -> File.rm_rf!(root) end)
@@ -398,28 +626,26 @@ defmodule OptimalEngine.Embed.TextTest do
       Application.put_env(:optimal_engine, :semantic_processing, enabled: true)
       Application.put_env(:optimal_engine, :embed, on_ingest: true)
 
-      {intake_ms, intake} =
-        :timer.tc(
-          fn ->
-            capture_log(fn ->
-              send(
-                self(),
-                Intake.process(
-                  "Hung endpoint #{tag}: the first note. The second note. The third note.",
-                  workspace_id: "embed-hung-#{tag}",
-                  write_files: false,
-                  source_id: "embed-hung:#{tag}"
-                )
-              )
-            end)
-          end,
-          :millisecond
+      capture_log(fn ->
+        send(
+          self(),
+          Intake.process(
+            "Hung endpoint #{tag}: the first note. The second note. The third note.",
+            workspace_id: "embed-hung-#{tag}",
+            write_files: false,
+            source_id: "embed-hung:#{tag}"
+          )
         )
 
-      assert is_binary(intake)
+        # Chunks and the document are embedded after intake returns: one connection
+        # for the chunks' batch and one for the document, each given up after the
+        # timeout, never one per chunk.
+        assert_receive :silent_connection, 5_000
+        assert_receive :silent_connection, 5_000
+        refute_receive :silent_connection, 1_500
+      end)
+
       assert_received {:ok, %{context: %{id: _}}}
-      # The chunks go out as one batch: one timeout, not one per chunk.
-      assert intake_ms < 3_000
     end
 
     test "a failed query embedding marks the endpoint unhealthy for the probe window",
@@ -664,7 +890,7 @@ defmodule OptimalEngine.Embed.TextTest do
   # Helpers
   # ---------------------------------------------------------------------------
 
-  # Accepts connections and never answers.
+  # Accepts connections and never answers; reports each one to the test.
   defp start_silent_listener do
     parent = self()
 
@@ -673,7 +899,7 @@ defmodule OptimalEngine.Embed.TextTest do
         {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
         {:ok, port} = :inet.port(listen)
         send(parent, {:silent_port, port})
-        hold(listen, [])
+        hold(listen, [], parent)
       end)
 
     on_exit(fn -> Process.exit(holder, :kill) end)
@@ -681,9 +907,10 @@ defmodule OptimalEngine.Embed.TextTest do
     "http://127.0.0.1:#{port}"
   end
 
-  defp hold(listen, held) do
+  defp hold(listen, held, parent) do
     {:ok, socket} = :gen_tcp.accept(listen)
-    hold(listen, [socket | held])
+    send(parent, :silent_connection)
+    hold(listen, [socket | held], parent)
   end
 
   defp start_stub(respond) do
@@ -733,6 +960,28 @@ defmodule OptimalEngine.Embed.TextTest do
       )
 
     id
+  end
+
+  defp tree(tag, words) do
+    chunks =
+      for word <- words do
+        Chunk.new(id: "chunk-#{word}-#{tag}", modality: :text, text: "#{word} chunk #{tag}")
+      end
+
+    %ChunkTree{chunks: chunks}
+  end
+
+  defp model_runs(workspace, function_name) do
+    {:ok, rows} =
+      Store.raw_query(
+        """
+        SELECT input_payload, output_payload, metadata FROM model_call_runs
+        WHERE workspace_id = ?1 AND function_name = ?2 ORDER BY rowid DESC
+        """,
+        [workspace, function_name]
+      )
+
+    rows
   end
 
   defp vector_dimensions(id) do
