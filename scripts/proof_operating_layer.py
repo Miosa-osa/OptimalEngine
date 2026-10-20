@@ -52,27 +52,47 @@ SIX_METRICS = [
     "feedback_loop_closure_rate",
 ]
 
-# Endpoints BusinessOS calls (the 2026-10-19 audit, test/api/reference_test.exs).
+# Engine routes the BusinessOS client calls, by path, from its optimal proxy
+# allowlist (handlers/optimal_proxy.go), its typed client
+# (optimalengine/client.go), and the Engine fake its tests run against
+# (optimalengine/enginetest). Kept equal to test/api/reference_test.exs.
 BUSINESSOS_ROUTES = [
-    ("POST", "/api/reindex"),
     ("GET", "/api/health"),
     ("POST", "/api/memory"),
     ("GET", "/api/memory"),
     ("POST", "/api/memory/:id/forget"),
-    ("POST", "/api/memory/remember"),
     ("POST", "/api/rag"),
     ("GET", "/api/recall/actions"),
     ("GET", "/api/recall/who"),
     ("GET", "/api/recall/when"),
     ("GET", "/api/recall/where"),
     ("GET", "/api/recall/owns"),
+    ("GET", "/api/search"),
     ("GET", "/api/workspaces"),
     ("POST", "/api/workspaces"),
-    ("GET", "/api/search"),
-    ("GET", "/api/graph"),
-    ("GET", "/api/grep"),
-    ("GET", "/api/wiki"),
+    ("GET", "/api/optimal/nodes"),
+    ("GET", "/api/optimal/nodes/:slug/files"),
+    ("POST", "/api/ingest"),
+    ("GET", "/api/auth/whoami"),
 ]
+# Paths the proxy passes for any method, and the prefixes it passes.
+BUSINESSOS_PATHS = [
+    "/api/health",
+    "/api/status",
+    "/api/version",
+    "/api/search",
+    "/api/grep",
+    "/api/graph",
+    "/api/rag",
+    "/api/rag/stream",
+    "/api/wiki",
+    "/api/memory",
+    "/api/assemble",
+    "/api/boot",
+    "/api/brief",
+    "/api/loops",
+]
+BUSINESSOS_PREFIXES = ["/api/memory/", "/api/recall/", "/api/wiki/", "/api/graph/", "/api/loops/"]
 
 
 class Unreachable(Exception):
@@ -306,38 +326,56 @@ class Full:
 
     def empty_state(self, ws):
         boot = self.cli("boot", ws)
-        today = local_today(boot["timezone"])
-        expect(boot["date"] == today, "boot date %s is not today %s" % (boot["date"], today))
-        expect(boot["fires"] == [], "a fresh workspace has fires")
-        expect(boot["open_loops"]["total"] == 0, "a fresh workspace has open loops")
-        expect(boot["recent_decisions"] == [], "a fresh workspace has decisions")
-        expect(boot["brief"]["items"] == [], "a fresh workspace has brief items")
-        expect(boot["rhythm"]["period"] == boot["date"], "the rhythm note is not today's")
-        expect(boot["protocol"]["content"], "no operating protocol is served")
-
         rhythm = self.cli("today", ws)
-        expect(rhythm["period"] == boot["date"], "optimal today is not today's note")
         loops = self.cli("loops", ws)
-        expect(loops == {"loops": [], "count": 0}, "optimal loops is not empty: %s" % loops)
         fires = self.cli("fires", ws)
-        expect(fires == [], "optimal fires is not empty")
         brief = self.curl("/api/brief?" + urllib.parse.urlencode({"workspace": ws}))
-        expect(brief["items"] == [] and brief["open_loops"] == 0, "the brief is not empty")
+        status, memory = self.e.call("GET", "/api/memory", query={"workspace": ws, "limit": 1})
+        memory = self.ok(status, memory, (200,), "listing memories")
+        status, signals = self.e.call("GET", "/api/signals/classification", query={"workspace": ws})
+        signals = self.ok(status, signals, (200,), "counting signals")
+
+        stale = boot["stale"]
+        counts = {
+            "boot_fires": len(boot["fires"]),
+            "boot_open_loops": boot["open_loops"]["total"],
+            "boot_loop_kinds": len(boot["open_loops"]["by_kind"]),
+            "boot_recent_decisions": len(boot["recent_decisions"]),
+            "boot_stale_loops": stale["loops_untouched_14_days"],
+            "boot_stale_contexts": stale["contexts_past_valid_until"],
+            "boot_brief_items": len(boot["brief"]["items"]),
+            "loops": loops["count"],
+            "loops_listed": len(loops["loops"]),
+            "fires": len(fires),
+            "brief_items": len(brief["items"]),
+            "brief_open_loops": brief["open_loops"],
+            "brief_categories": len(brief["counts"]),
+            "memories": memory["pagination"].get("total", memory["count"])
+            if isinstance(memory.get("pagination"), dict)
+            else memory["count"],
+            "signals": signals["signals"],
+        }
+        seeded = {name: n for name, n in counts.items() if n != 0}
+        today = local_today(boot["timezone"])
+
+        expect(not seeded, "the fresh workspace is not empty: %s" % seeded)
+        expect(boot["date"] == today, "boot date %s is not today %s" % (boot["date"], today))
+        expect(boot["rhythm"]["period"] == boot["date"], "the rhythm note is not today's")
+        expect(rhythm["period"] == boot["date"], "optimal today is not today's note")
+        expect(boot["protocol"]["content"], "no operating protocol is served")
 
         report(
             "WO-41.1",
             True,
-            {
-                "date": boot["date"],
-                "date_is_today": True,
-                "timezone": boot["timezone"],
-                "rhythm_generated": boot["rhythm"]["generated"],
-                "protocol_source": boot["protocol"]["source"],
-                "open_loops": 0,
-                "fires": 0,
-                "brief_items": 0,
-                "commands": "optimal boot, optimal today, optimal loops, optimal fires, curl /api/brief",
-            },
+            dict(
+                counts,
+                date=boot["date"],
+                date_is_today=True,
+                rhythm_period=rhythm["period"],
+                protocol_source=boot["protocol"]["source"],
+                workspace=ws,
+                commands="optimal boot, optimal today, optimal loops, optimal fires, curl /api/brief",
+            ),
         )
 
     def topology(self):
@@ -423,12 +461,24 @@ class Full:
         status, again = self.e.call("GET", "/api/topology/export")
         expect(clean(again) == back_c, "importing the exported YAML changed the topology")
 
+        # The import created these workspaces; they are this proof's to remove.
+        for slug in sent["organizations"][0]["workspaces"]:
+            ws_id = "%s:%s" % (self.tenant, slug)
+            status, _ = self.e.call("GET", "/api/workspaces/" + urllib.parse.quote(ws_id, safe=":"))
+            if status == 200:
+                self.created.append(ws_id)
+
         report(
             "WO-41.4",
             True,
             {
                 "topology_match": True,
                 "compared": "exact" if self.fresh else "imported entries present verbatim",
+                "organizations_sent": len(sent_c["organizations"]),
+                "organizations_back": len(orgs),
+                "people_sent": len(sent_c["people"]),
+                "people_back": len(back_c.get("people", [])),
+                "workspaces_sent": sum(len(o["workspaces"]) for o in sent_c["organizations"]),
                 "compatibility_orgs": len(compat),
                 "yaml_round_trip": True,
             },
@@ -483,6 +533,7 @@ class Full:
             {
                 "verifier_recorded": verifier,
                 "key_principal": reviewer_id,
+                "recorded_equals_key_principal": verifier == reviewer_id,
                 "client_named_verifier_status": impersonation,
                 "writer_key_promote_status": by_writer,
                 "assemble_facts_after_promotion": bool((ctx.get("l1") or "").strip()),
@@ -537,6 +588,30 @@ class Full:
         status, got = self.e.call("GET", "/api/principals/" + urllib.parse.quote(member, safe=":"))
         self.ok(status, got, (200,), "reading the principal")
 
+        status, listed = self.e.call("GET", "/api/principals", query={"kind": "user"})
+        listed = self.ok(status, listed, (200,), "listing principals")
+        expect(
+            any(p.get("id") == member for p in listed["principals"]),
+            "the member is not listed among the Engine's principals",
+        )
+
+        # Membership travels as the people section of a topology document.
+        status, body = self.e.call(
+            "POST",
+            "/api/topology/import",
+            {
+                "schema_version": 1,
+                "people": [
+                    {"id": member, "kind": "user", "display_name": "Proof Member", "workspaces": [slug]}
+                ],
+            },
+        )
+        self.ok(status, body, (200,), "importing the member's workspaces")
+        status, exported = self.e.call("GET", "/api/topology/export")
+        exported = self.ok(status, exported, (200,), "exporting the topology")
+        entry = next((p for p in exported.get("people", []) if p.get("id") == member), {})
+        expect(entry.get("workspaces") == [slug], "the member is not a member of the workspace")
+
         key = self.mint(member, "user", ["read", "write"], [self.mirror])
         status, me = self.e.call("GET", "/api/auth/whoami", key=key)
         me = self.ok(status, me, (200,), "whoami")
@@ -560,6 +635,7 @@ class Full:
         )
         ingested = self.ok(status, ingested, (200,), "capturing a source")
         self.mirror_signal = ingested["signal_id"]
+        self.mirror_key = key
 
         # An agent asks for workspace context: /api/rag cites the captured
         # source itself; /api/assemble is governed recall and cites only
@@ -590,7 +666,11 @@ class Full:
                 "workspace_listed_ms": visible_ms,
                 "slug_kept": True,
                 "principal_upsert_idempotent": True,
+                "member_listed_as_principal": True,
+                "principals_listed": len(listed["principals"]),
+                "member_workspaces": entry["workspaces"],
                 "key_principal": member,
+                "key_workspace_scope": me["workspace_scope"],
                 "own_workspace_status": own,
                 "other_workspace_status": foreign,
                 "rag_source": rag.get("source"),
@@ -606,29 +686,60 @@ class Full:
         read = self.ok(status, read, (200,), "reading the source by id")
         uri = read["uri"]
         expect(uri and uri.startswith("optimal://"), "the source has no optimal:// URI")
+        old_slug = "proof-mirror-" + self.sfx
+        new_slug = "proof-mirror-renamed-" + self.sfx
+        # The workspace-qualified form of the source's link, written before the rename.
+        old_link = "optimal://%s/%s" % (self.mirror, uri[len("optimal://"):])
 
         status, body = self.e.call(
             "PATCH",
             "/api/workspaces/" + urllib.parse.quote(self.mirror, safe=":"),
-            {"name": "Proof Mirror Renamed"},
+            {"name": "Proof Mirror Renamed", "slug": new_slug},
         )
-        self.ok(status, body, (200,), "renaming the workspace")
+        body = self.ok(status, body, (200,), "renaming the workspace")
         row = next(w for w in self.list_workspaces() if w["id"] == self.mirror)
+        expect(row["slug"] == new_slug, "the slug is %s after the rename" % row["slug"])
         expect(row["name"] == "Proof Mirror Renamed", "the name did not change")
-        expect(row["slug"] == "proof-mirror-" + self.sfx, "the slug changed on rename")
+        expect(row["id"] == self.mirror, "the id changed on rename")
 
         status, again = self.e.call("GET", "/api/read", query={"uri": uri, "workspace": self.mirror})
         again = self.ok(status, again, (200,), "reading the old link after the rename")
         expect(again["id"] == self.mirror_signal, "the old link resolves to another context")
 
+        resolved = {}
+        for name, link in [
+            ("old_link", old_link),
+            ("new_slug_link", "optimal://%s:%s/%s" % (self.tenant, new_slug, uri[len("optimal://"):])),
+        ]:
+            status, out = self.e.call("GET", "/api/resolve", query={"uri": link})
+            out = self.ok(status, out, (200,), "resolving the %s" % name)
+            expect(out.get("status") == "local" and out.get("uri") == old_link, "%s resolves to %s" % (name, out))
+            resolved[name] = out["status"]
+
+        # A request that builds an id from the new slug is told the real id.
+        status, told = self.e.call(
+            "GET", "/api/boot", query={"workspace": "%s:%s" % (self.tenant, new_slug)}, key=self.mirror_key
+        )
+        expect(
+            status == 409 and (told or {}).get("workspace_id") == self.mirror,
+            "naming the new slug as a workspace answered %s" % status,
+        )
+        status, taken = self.e.call("POST", "/api/workspaces", {"slug": old_slug, "name": "Taken"})
+        expect(status == 409, "the old slug was given to another workspace (%s)" % status)
+
         report(
             "WO-44.2",
             True,
             {
+                "slug_before": old_slug,
+                "slug_after": row["slug"],
+                "id_kept": True,
                 "name_updated": True,
-                "id_and_slug_kept": True,
-                "old_link_resolves": True,
-                "link_scheme": uri.split("/")[2] if uri.count("/") >= 2 else "",
+                "old_link_reads": True,
+                "resolve_old_link": resolved["old_link"],
+                "resolve_new_slug_link": resolved["new_slug_link"],
+                "new_slug_as_workspace_status": 409,
+                "old_slug_reuse_status": status,
             },
         )
 
@@ -636,7 +747,13 @@ class Full:
         rows = reference_rows()
         unclassified = [r for r in rows if not r["grant"] or r["workspace"] not in ("workspace", "tenant")]
         documented = {(m, r["path"]) for r in rows for m in r["methods"]}
+        paths = {r["path"] for r in rows}
         missing = [m + " " + p for m, p in BUSINESSOS_ROUTES if (m, p) not in documented]
+        missing += [p for p in BUSINESSOS_PATHS if p not in paths]
+        missing += [
+            p + "*" for p in BUSINESSOS_PREFIXES if not any(x.startswith(p) for x in paths)
+        ]
+        businessos_total = len(BUSINESSOS_ROUTES) + len(BUSINESSOS_PATHS) + len(BUSINESSOS_PREFIXES)
 
         # Never send an unauthenticated mutation to an Engine that is open.
         guard, _ = self.e.call("GET", "/api/health", key=None)
@@ -664,7 +781,8 @@ class Full:
         facts = {
             "documented_routes": sum(len(r["methods"]) for r in rows),
             "unclassified": len(unclassified),
-            "businessos_routes_documented": "%d/%d" % (len(BUSINESSOS_ROUTES) - len(missing), len(BUSINESSOS_ROUTES)),
+            "businessos_documented": "%d/%d" % (businessos_total - len(missing), businessos_total),
+            "businessos_missing": missing,
             "no_key_statuses": refused,
             "invalid_key_requests": forged,
             "answered_without_a_valid_key": answered[:20],
@@ -848,7 +966,7 @@ class Full:
     def read_only_smoke(self):
         ro = Engine(self.e.url, self.e.key, read_only=True)
         before = len(RESULTS)
-        read_only_checks(ro, self.ops, prefix="smoke:", plan=True)
+        read_only_checks(ro, self.ops, prefix="smoke:", plan=True, tenant=self.tenant)
         smoke = RESULTS[before:]
         del RESULTS[before:]
         crashed = [cid for cid, _status, facts in smoke if "error" in facts]
@@ -861,13 +979,29 @@ class Full:
         )
 
     def cleanup(self):
+        """On a shared Engine, remove exactly what this run created, by the ids it recorded.
+
+        The Engine's workspace delete is the archive (rows and files stay
+        until a retention sweep); keys are revoked. Principals have no
+        removal route, so they are counted.
+        """
         if os.environ.get("KEEP") == "1" or self.fresh:
             return
+        revoked = 0
         for key_id in self.minted:
-            self.e.call("POST", "/api/auth/keys/%s/revoke" % key_id, {})
+            status, _ = self.e.call("POST", "/api/auth/keys/%s/revoke" % key_id, {})
+            revoked += status == 204
+        archived = 0
         for ws in self.created:
-            self.e.call("POST", "/api/workspaces/%s/archive" % urllib.parse.quote(ws, safe=":"), {})
-        print("CLEANUP revoked_keys=%d archived_workspaces=%d" % (len(self.minted), len(self.created)))
+            path = "/api/workspaces/%s" % urllib.parse.quote(ws, safe=":")
+            self.e.call("POST", path + "/archive", {})
+            status, row = self.e.call("GET", path)
+            archived += status == 200 and (row or {}).get("status") == "archived"
+        print(
+            "CLEANUP keys_revoked=%d/%d workspaces_archived_by_id=%d/%d workspace_ids=%s"
+            % (revoked, len(self.minted), archived, len(self.created), json.dumps(self.created)),
+            flush=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1021,8 +1155,14 @@ def chain_facts(engine, ws):
     }
 
 
-def read_only_checks(engine, ws, prefix="", plan=True):
+def read_only_checks(engine, ws, prefix="", plan=True, tenant=None):
+    """The read-only criteria for one workspace. Every line names the tenant
+    and the workspace it read, and carries only counts, dates, metric values,
+    booleans, and Engine-defined labels."""
     private = not prefix
+
+    def say(check_id, outcome, facts):
+        report(prefix + check_id, outcome, dict({"tenant": tenant, "workspace": ws}, **facts))
 
     def wo41_2():
         facts = boot_and_brief(engine, ws)
@@ -1033,19 +1173,19 @@ def read_only_checks(engine, ws, prefix="", plan=True):
             and facts["owed_replies_with_sources"] == facts["owed_replies_in_brief"]
             and facts["sources_are_optimal_uris"]
         )
-        report(prefix + "WO-41.2", ok, facts)
+        say("WO-41.2", ok, facts)
 
     def wo45_1():
         facts = classification_facts(engine, ws, plan)
         if facts["status"] == 404:
-            report(prefix + "WO-45.1", None, {"status": 404, "reason": "this Engine has no GET /api/signals/classification yet"})
+            say("WO-45.1", None, {"status": 404, "reason": "this Engine has no GET /api/signals/classification yet"})
             return
         expect(facts["status"] == 200, "classification answered %s" % facts["status"])
         key = "_planned" if plan else "_stored"
         shares = [facts.get("transcript_linguistic" + key), facts.get("chat_linguistic" + key)]
         measured = [s for s in shares if s is not None]
         ok = bool(measured) and all(s >= 0.95 for s in measured)
-        report(prefix + "WO-45.1", ok, dict(facts, evaluation_set="CI: test/signal/mode_genre_eval_test.exs"))
+        say("WO-45.1", ok, dict(facts, evaluation_set="CI: test/signal/mode_genre_eval_test.exs"))
 
     def wo45_2():
         status, rep = engine.call("GET", "/api/viability", query={"workspace": ws})
@@ -1070,7 +1210,7 @@ def read_only_checks(engine, ws, prefix="", plan=True):
             ),
             "trajectory_unit_alerts": len([a for a in alerts if a.get("kind") not in ("metric", "flow")]),
         }
-        report(prefix + "WO-45.2", s4["status"] == "missing" and failure == "Blindsided by change.", facts)
+        say("WO-45.2", s4["status"] == "missing" and failure == "Blindsided by change.", facts)
 
     def wo45_3():
         facts = metrics_facts(engine, ws)
@@ -1079,17 +1219,17 @@ def read_only_checks(engine, ws, prefix="", plan=True):
             and facts["history_days"] == 30
             and facts["history_days_with_six_metrics_and_r"] == 30
         )
-        report(prefix + "WO-45.3", ok, facts)
+        say("WO-45.3", ok, facts)
 
     def wo45_5():
         facts = chain_facts(engine, ws)
-        report(prefix + "WO-45.5", facts["of_those_linked_step_to_step"] > 0, facts)
+        say("WO-45.5", facts["of_those_linked_step_to_step"] > 0, facts)
 
     guarded(prefix + "WO-41.2", wo41_2, private)
     guarded(prefix + "WO-45.1", wo45_1, private)
     guarded(prefix + "WO-45.2", wo45_2, private)
     guarded(prefix + "WO-45.3", wo45_3, private)
-    report(prefix + "WO-45.4", None, {"reason": "the pre-send check is a POST; full mode proves it"})
+    say("WO-45.4", None, {"reason": "the pre-send check is a POST; full mode proves it"})
     guarded(prefix + "WO-45.5", wo45_5, private)
 
 
@@ -1129,8 +1269,16 @@ def main():
             status, version = engine.call("GET", "/api/version")
             if status in (401, 403):
                 raise Unreachable("the Engine refused the key (%s)" % status)
-            print("ENGINE version=%s mode=read-only" % (version or {}).get("version"), flush=True)
-            read_only_checks(engine, ws, plan=os.environ.get("CLASSIFY_PLAN", "1") != "0")
+            status, me = engine.call("GET", "/api/auth/whoami")
+            tenant = (me or {}).get("tenant_id") if status == 200 else "unknown"
+            print(
+                "ENGINE version=%s mode=read-only tenant=%s workspace=%s"
+                % ((version or {}).get("version"), tenant, ws),
+                flush=True,
+            )
+            read_only_checks(
+                engine, ws, plan=os.environ.get("CLASSIFY_PLAN", "1") != "0", tenant=tenant
+            )
             print("REQUESTS GET=%d other=%d" % (engine.sent.get("GET", 0), sum(n for m, n in engine.sent.items() if m != "GET")))
         else:
             engine = Engine(url, key, read_only=False)

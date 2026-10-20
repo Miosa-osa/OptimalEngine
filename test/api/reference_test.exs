@@ -11,29 +11,36 @@ defmodule OptimalEngine.API.ReferenceTest do
 
   @root Path.expand("../..", __DIR__)
 
-  # Endpoints BusinessOS calls today, from the 2026-10-19 audit:
-  # desktop/backend-go/internal/optimalengine/client.go,
-  # internal/services/engine_sync.go, and desktop/src/main/ipc/index.ts.
+  # Engine routes the BusinessOS client calls, by path: its optimal proxy
+  # allowlist (desktop/backend-go/internal/handlers/optimal_proxy.go), its
+  # typed client (internal/optimalengine/client.go), and the Engine fake its
+  # tests run against (internal/optimalengine/enginetest). Kept equal to
+  # scripts/proof_operating_layer.py.
   @businessos_routes [
-    {"POST", "/api/reindex"},
     {"GET", "/api/health"},
     {"POST", "/api/memory"},
     {"GET", "/api/memory"},
     {"POST", "/api/memory/:id/forget"},
-    {"POST", "/api/memory/remember"},
     {"POST", "/api/rag"},
     {"GET", "/api/recall/actions"},
     {"GET", "/api/recall/who"},
     {"GET", "/api/recall/when"},
     {"GET", "/api/recall/where"},
     {"GET", "/api/recall/owns"},
+    {"GET", "/api/search"},
     {"GET", "/api/workspaces"},
     {"POST", "/api/workspaces"},
-    {"GET", "/api/search"},
-    {"GET", "/api/graph"},
-    {"GET", "/api/grep"},
-    {"GET", "/api/wiki"}
+    {"GET", "/api/optimal/nodes"},
+    {"GET", "/api/optimal/nodes/:slug/files"},
+    {"POST", "/api/ingest"},
+    {"GET", "/api/auth/whoami"}
   ]
+
+  # Paths the proxy passes for any method, and the prefixes it passes.
+  @businessos_paths ~w(/api/health /api/status /api/version /api/search /api/grep /api/graph
+                       /api/rag /api/rag/stream /api/wiki /api/memory /api/assemble /api/boot
+                       /api/brief /api/loops)
+  @businessos_prefixes ~w(/api/memory/ /api/recall/ /api/wiki/ /api/graph/ /api/loops/)
 
   test "the checked-in reference matches the routers" do
     assert Reference.check(@root) == :ok,
@@ -46,7 +53,14 @@ defmodule OptimalEngine.API.ReferenceTest do
       |> Reference.routes()
       |> MapSet.new(&{&1.method, &1.path})
 
-    missing = Enum.reject(@businessos_routes, &MapSet.member?(documented, &1))
+    paths = MapSet.new(documented, &elem(&1, 1))
+
+    missing =
+      Enum.reject(@businessos_routes, &MapSet.member?(documented, &1)) ++
+        Enum.reject(@businessos_paths, &MapSet.member?(paths, &1)) ++
+        Enum.reject(@businessos_prefixes, fn prefix ->
+          Enum.any?(paths, &String.starts_with?(&1, prefix))
+        end)
 
     assert missing == [], "undocumented Engine endpoints called by BusinessOS: #{inspect(missing)}"
   end
