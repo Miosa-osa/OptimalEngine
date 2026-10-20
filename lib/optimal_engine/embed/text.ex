@@ -16,12 +16,14 @@ defmodule OptimalEngine.Embed.Text do
       token. A shared, metered gateway keeps a small Engine from running a
       model of its own.
 
-  Either way an empty input is refused without a call, the input is capped at
-  6,000 characters, and an identical model and input is served from the
-  filesystem cache. The cache key is the model and the input, not the
-  endpoint: a shared endpoint serves the same model, so its vectors stay
-  comparable with the ones indexed locally. Stored vectors of another
-  dimension are never scored (`OptimalEngine.Store.Vectors.search/2`).
+  Either way an empty input is refused without a call, invalid UTF-8 is
+  replaced, the input is capped at 6,000 characters, and an identical input is
+  served from the filesystem cache. Ollama's entries are keyed by the model and
+  the input, as before; an endpoint's are keyed by the endpoint (without user
+  info or query), the model and the input, so vectors from one never answer
+  for the other. An endpoint's vectors must have the model's width (768 for
+  nomic-embed-text, or `OPTIMAL_EMBED_DIMENSIONS`), and stored vectors of
+  another dimension are never scored (`OptimalEngine.Store.Vectors.search/2`).
 
   Configuration (`config :optimal_engine, :text_embedding`), set from the
   environment in `config/runtime.exs`:
@@ -29,7 +31,9 @@ defmodule OptimalEngine.Embed.Text do
     * `:url` - the endpoint, or `nil` for Ollama at `OLLAMA_HOST`;
     * `:dialect` - `:openai` or `:ollama`; inferred from the URL when `nil`;
     * `:api_key_file` - a file holding the key, read on every request;
-    * `:timeout_ms` - per request (default 10,000);
+    * `:dimensions` - the vector width the endpoint must return (default 768
+      for nomic-embed-text, unchecked for other models);
+    * `:timeout_ms` - per request (default 5,000);
     * `:probe_timeout_ms` - budget of the health probe on the search path
       (default 2,000 for an endpoint).
 
@@ -47,7 +51,7 @@ defmodule OptimalEngine.Embed.Text do
   # conservative so even token-dense text stays under the limit.
   @max_chars 6_000
   @default_model "nomic-embed-text"
-  @timeout_ms 10_000
+  @timeout_ms 5_000
   @probe_timeout_ms 2_000
   @health_ttl_ms 60_000
   @batch_inputs 64
@@ -58,6 +62,7 @@ defmodule OptimalEngine.Embed.Text do
           url: String.t(),
           dialect: dialect(),
           api_key_file: String.t() | nil,
+          dimensions: pos_integer() | nil,
           timeout_ms: pos_integer()
         }
 
@@ -88,18 +93,35 @@ defmodule OptimalEngine.Embed.Text do
       model = Keyword.get(opts, :model, model())
       capped = cap(text)
 
-      if Keyword.get(opts, :cache, true) do
-        FileCache.fetch("embeddings", cache_key(model, capped), fn ->
+      result =
+        if Keyword.get(opts, :cache, true) do
+          FileCache.fetch("embeddings", cache_key(target, model, capped), fn ->
+            request(target, model, capped)
+          end)
+        else
           request(target, model, capped)
-        end)
-      else
-        request(target, model, capped)
-      end
+        end
+
+      note_unavailable(target, result)
+      result
     end
   end
 
   defp request(nil, model, input), do: Ollama.request_embedding(model, input)
   defp request(endpoint, model, input), do: Endpoint.request(endpoint, model, input)
+
+  # An endpoint that just failed is not healthy for the rest of this process's
+  # probe window: the search path skips the vector hop instead of waiting again.
+  defp note_unavailable(nil, _result), do: :ok
+
+  defp note_unavailable(endpoint, {:error, reason}) do
+    if unavailable?(reason),
+      do: Process.put(health_key(endpoint), {false, System.monotonic_time(:millisecond)})
+
+    :ok
+  end
+
+  defp note_unavailable(_endpoint, _result), do: :ok
 
   @doc """
   Embed many texts; the results come back in input order, one
@@ -109,9 +131,10 @@ defmodule OptimalEngine.Embed.Text do
   batches of at most #{@batch_inputs} inputs and #{@batch_bytes} bytes, so a
   bulk job makes a few requests instead of one per text (a shared gateway
   meters and rate-limits requests). A batch the endpoint refuses gives every
-  text in it that error. Without an endpoint each text is embedded by Ollama
-  one at a time, as `embed/2` does (see `embed_each/2`). Takes the options of
-  `embed/2`.
+  text in it that error; once a batch is `unavailable?/1`, the remaining
+  batches get that error without a request. Without an endpoint each text is
+  embedded by Ollama one at a time, as `embed/2` does, stopping the same way
+  (see `embed_each/2`). Takes the options of `embed/2`.
   """
   @spec embed_many([String.t()], keyword()) :: [{:ok, [float()]} | {:error, term()}]
   def embed_many(texts, opts \\ []) when is_list(texts) do
@@ -152,12 +175,12 @@ defmodule OptimalEngine.Embed.Text do
       Enum.map(texts, fn text ->
         cond do
           String.trim(text) == "" -> {:error, :empty_input}
-          cache? -> cached(model, cap(text))
+          cache? -> cached(endpoint, model, cap(text))
           true -> {:pending, cap(text)}
         end
       end)
 
-    fetched =
+    {fetched, _down} =
       looked_up
       |> Enum.flat_map(fn
         {:pending, input} -> [input]
@@ -165,20 +188,25 @@ defmodule OptimalEngine.Embed.Text do
       end)
       |> Enum.uniq()
       |> batches()
-      |> Enum.reduce(%{}, fn batch, acc ->
-        results =
-          case Endpoint.request_many(endpoint, model, batch) do
-            {:ok, vectors} -> Enum.zip(batch, Enum.map(vectors, &{:ok, &1}))
-            {:error, _} = error -> Enum.map(batch, &{&1, error})
-          end
+      |> Enum.reduce({%{}, nil}, fn
+        batch, {acc, {:error, _} = down} ->
+          {Map.merge(acc, Map.new(batch, &{&1, down})), down}
 
-        Map.merge(acc, Map.new(results))
+        batch, {acc, nil} ->
+          case Endpoint.request_many(endpoint, model, batch) do
+            {:ok, vectors} ->
+              {Map.merge(acc, Map.new(Enum.zip(batch, Enum.map(vectors, &{:ok, &1})))), nil}
+
+            {:error, reason} = error ->
+              note_unavailable(endpoint, error)
+              {Map.merge(acc, Map.new(batch, &{&1, error})), if(unavailable?(reason), do: error)}
+          end
       end)
 
     Enum.map(looked_up, fn
       {:pending, input} ->
         result = Map.fetch!(fetched, input)
-        if cache?, do: cache(model, input, result)
+        if cache?, do: cache(endpoint, model, input, result)
         result
 
       done ->
@@ -186,19 +214,24 @@ defmodule OptimalEngine.Embed.Text do
     end)
   end
 
-  defp cached(model, input) do
-    case FileCache.get("embeddings", cache_key(model, input)) do
+  defp cached(endpoint, model, input) do
+    case FileCache.get("embeddings", cache_key(endpoint, model, input)) do
       {:ok, vector} -> {:ok, vector}
       _miss -> {:pending, input}
     end
   end
 
-  defp cache(model, input, {:ok, vector}),
-    do: FileCache.put("embeddings", cache_key(model, input), vector)
+  defp cache(endpoint, model, input, {:ok, vector}),
+    do: FileCache.put("embeddings", cache_key(endpoint, model, input), vector)
 
-  defp cache(_model, _input, _error), do: :ok
+  defp cache(_endpoint, _model, _input, _error), do: :ok
 
-  defp cache_key(model, input), do: "#{model}\0#{input}"
+  # Ollama at OLLAMA_HOST keeps today's key; an endpoint's entries carry the
+  # endpoint, so neither answers for the other.
+  defp cache_key(nil, model, input), do: "#{model}\0#{input}"
+
+  defp cache_key(endpoint, model, input),
+    do: "#{Endpoint.safe_url(endpoint.url)}\0#{model}\0#{input}"
 
   # Batches in input order, each within the input and byte limits.
   defp batches(inputs) do
@@ -231,7 +264,10 @@ defmodule OptimalEngine.Embed.Text do
   @spec max_chars() :: pos_integer()
   def max_chars, do: @max_chars
 
+  # Invalid UTF-8 cannot be encoded as JSON, and an encoder error would carry
+  # the text; it is replaced before anything else.
   defp cap(text) do
+    text = String.replace_invalid(text)
     if String.length(text) > @max_chars, do: String.slice(text, 0, @max_chars), else: text
   end
 
@@ -251,6 +287,7 @@ defmodule OptimalEngine.Embed.Text do
           url: endpoint_url,
           dialect: dialect,
           api_key_file: blank_to_nil(cfg[:api_key_file]),
+          dimensions: cfg[:dimensions],
           timeout_ms: cfg[:timeout_ms] || @timeout_ms
         }
 
@@ -314,9 +351,11 @@ defmodule OptimalEngine.Embed.Text do
     end
   end
 
+  defp health_key(endpoint), do: {:oe_text_embed_health, endpoint.url}
+
   defp cached_probe(endpoint) do
     now = System.monotonic_time(:millisecond)
-    key = {:oe_text_embed_health, endpoint.url}
+    key = health_key(endpoint)
 
     case Process.get(key) do
       {result, cached_at} when now - cached_at < @health_ttl_ms ->
@@ -359,6 +398,7 @@ defmodule OptimalEngine.Embed.Text do
   def unavailable?({:embed_unavailable, _status}), do: true
   def unavailable?({:embed_unauthorized, _status}), do: true
   def unavailable?({:embed_api_key, _reason}), do: true
+  def unavailable?({:embed_dimension_mismatch, _got, _want}), do: true
   def unavailable?(_reason), do: false
 
   defp blank_to_nil(value) when value in [nil, ""], do: nil

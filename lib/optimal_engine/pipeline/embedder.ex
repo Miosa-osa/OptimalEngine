@@ -70,6 +70,8 @@ defmodule OptimalEngine.Pipeline.Embedder do
   @spec embed_tree(ChunkTree.t(), keyword()) ::
           {:ok, [Embedding.t()], %{errors: [{String.t(), term()}]}}
   def embed_tree(%ChunkTree{chunks: chunks}, opts \\ []) do
+    opts = Keyword.put(opts, :text_vectors, text_vectors(chunks, opts))
+
     {embeddings, errors} =
       Enum.reduce(chunks, {[], []}, fn chunk, {acc_emb, acc_err} ->
         case embed(chunk, opts) do
@@ -79,6 +81,21 @@ defmodule OptimalEngine.Pipeline.Embedder do
       end)
 
     {:ok, Enum.reverse(embeddings), %{errors: Enum.reverse(errors)}}
+  end
+
+  # The text chunks of a tree are embedded together: an embedding endpoint gets
+  # batched requests, and an unavailable embedder is asked once, not once per
+  # chunk, so a down or hung embedder cannot hold intake for every chunk.
+  defp text_vectors(chunks, opts) do
+    texts =
+      chunks
+      |> Enum.filter(fn %Chunk{modality: m, text: text} ->
+        m in [:text, :code, :data, :mixed] and is_binary(text) and text != ""
+      end)
+      |> Enum.map(& &1.text)
+      |> Enum.uniq()
+
+    texts |> Enum.zip(TextEmbedder.embed_many(texts, opts)) |> Map.new()
   end
 
   @doc """
@@ -260,11 +277,17 @@ defmodule OptimalEngine.Pipeline.Embedder do
 
   defp governed_embed_text(text, opts) do
     model = model_name(opts, :text)
+    precomputed = Map.fetch(Keyword.get(opts, :text_vectors, %{}), text)
 
     GovernedModel.call_model(
       "embedder.embed_text",
-      %{"chars" => String.length(text)},
-      fn -> TextEmbedder.embed(text, opts) end,
+      %{"chars" => String.length(text), "batched" => precomputed != :error},
+      fn ->
+        case precomputed do
+          {:ok, result} -> result
+          :error -> TextEmbedder.embed(text, Keyword.delete(opts, :text_vectors))
+        end
+      end,
       model_id: model,
       model_task_type: "embedding",
       workspace_id: Keyword.get(opts, :workspace_id, "default")

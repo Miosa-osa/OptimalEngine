@@ -28,13 +28,22 @@ defmodule OptimalEngine.Embed.Endpoint do
       backend down or misconfigured (MIOSA's gateway answers 502
       `embedding_backend_unavailable` when its upstream is down);
     * `{:http_error, status}` - any other answer than 200, about this request;
+    * `{:embed_dimension_mismatch, got, want}` - vectors of another width than
+      the model's (768 for nomic-embed-text, or `OPTIMAL_EMBED_DIMENSIONS`);
+      they would never be scored against the index, so none is returned;
     * `:embed_endpoint_unavailable` - no answer within the timeout;
-    * `:unexpected_response` or `:invalid_json` - a 200 without a vector.
+    * `:unexpected_response` or `:invalid_json` - a 200 without a vector;
+    * `:invalid_input` - the input cannot be encoded as JSON.
+
+  A key sent over plain http to a host other than this machine is warned about
+  once per endpoint, without the key.
   """
 
   require Logger
 
   @key_env "OPTIMAL_EMBED_API_KEY"
+  # Widths of the models whose index this Engine already holds.
+  @model_dimensions %{"nomic-embed-text" => 768}
 
   @doc "Embed `input` with `model` at `endpoint` (see `OptimalEngine.Embed.Text.endpoint/0`)."
   @spec request(OptimalEngine.Embed.Text.endpoint(), String.t(), String.t()) ::
@@ -56,10 +65,15 @@ defmodule OptimalEngine.Embed.Endpoint do
   def request_many(endpoint, model, inputs) when is_list(inputs),
     do: post(endpoint, model, inputs, length(inputs))
 
+  @doc "The vector width `model` must have at `endpoint`, or `nil` when unchecked."
+  @spec dimensions(OptimalEngine.Embed.Text.endpoint(), String.t()) :: pos_integer() | nil
+  def dimensions(endpoint, model), do: Map.get(endpoint, :dimensions) || @model_dimensions[model]
+
   defp post(endpoint, model, input, count) do
-    with {:ok, key} <- api_key(endpoint) do
+    with {:ok, key} <- api_key(endpoint),
+         {:ok, body} <- encode(model, input) do
       ensure_http_started()
-      body = Jason.encode!(%{"model" => model, "input" => input})
+      warn_plain_http(endpoint.url, key != nil)
       timeout = endpoint.timeout_ms
 
       http_request =
@@ -73,7 +87,7 @@ defmodule OptimalEngine.Embed.Endpoint do
 
       case :httpc.request(:post, http_request, http_opts, body_format: :binary) do
         {:ok, {{_version, 200, _reason}, _headers, response}} ->
-          parse(endpoint, response, count)
+          parse(endpoint, response, count, dimensions(endpoint, model))
 
         {:ok, {{_version, status, _reason}, _headers, response}} when status in [401, 403] ->
           log_refused(endpoint.url, status, response, key != nil)
@@ -154,6 +168,46 @@ defmodule OptimalEngine.Embed.Endpoint do
     end
   end
 
+  # The encoder's error would quote the input, so only its kind is returned.
+  defp encode(model, input) do
+    case Jason.encode(%{"model" => model, "input" => input}) do
+      {:ok, body} -> {:ok, body}
+      {:error, _reason} -> {:error, :invalid_input}
+    end
+  end
+
+  @doc false
+  # True for a plain http URL whose host is not this machine.
+  @spec plain_http_remote?(String.t()) :: boolean()
+  def plain_http_remote?(url) do
+    case URI.parse(url) do
+      %URI{scheme: "http", host: host} when is_binary(host) ->
+        not (host in ["localhost", "::1", "[::1]"] or String.starts_with?(host, "127."))
+
+      _ ->
+        false
+    end
+  end
+
+  @doc false
+  # Warns once per endpoint when a key is about to cross the network unencrypted.
+  @spec warn_plain_http(String.t(), boolean()) :: :ok
+  def warn_plain_http(_url, false), do: :ok
+
+  def warn_plain_http(url, true) do
+    flag = {__MODULE__, :plain_http_warned, url}
+
+    if plain_http_remote?(url) and :persistent_term.get(flag, false) == false do
+      :persistent_term.put(flag, true)
+
+      Logger.warning(
+        "[Embed] the embedding API key goes to #{safe_url(url)} over plain http; use https"
+      )
+    end
+
+    :ok
+  end
+
   defp headers(nil), do: [{~c"accept", ~c"application/json"}]
 
   defp headers(key) do
@@ -164,12 +218,12 @@ defmodule OptimalEngine.Embed.Endpoint do
   # Response
   # ---------------------------------------------------------------------------
 
-  defp parse(endpoint, response, count) do
+  defp parse(endpoint, response, count, want) do
     case Jason.decode(response) do
       {:ok, decoded} ->
         case vectors(endpoint.dialect, decoded) do
           {:ok, vectors} when length(vectors) == count ->
-            {:ok, vectors}
+            check_width(endpoint, vectors, want)
 
           _ ->
             Logger.warning(
@@ -182,6 +236,25 @@ defmodule OptimalEngine.Embed.Endpoint do
       {:error, _reason} ->
         Logger.warning("[Embed] #{safe_url(endpoint.url)} answered 200 with invalid JSON")
         {:error, :invalid_json}
+    end
+  end
+
+  defp check_width(_endpoint, vectors, nil), do: {:ok, vectors}
+
+  defp check_width(endpoint, vectors, want) do
+    case Enum.find(vectors, &(length(&1) != want)) do
+      nil ->
+        {:ok, vectors}
+
+      wrong ->
+        got = length(wrong)
+
+        Logger.error(
+          "[Embed] #{safe_url(endpoint.url)} answered #{got}-dimension vectors; " <>
+            "the model needs #{want}"
+        )
+
+        {:error, {:embed_dimension_mismatch, got, want}}
     end
   end
 

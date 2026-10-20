@@ -150,8 +150,13 @@ defmodule OptimalEngine.RuntimeConfigTest do
   end
 
   test "an embedding endpoint comes from the environment, keeps its key out of the config, and rejects typos" do
-    names =
-      ~w(OPTIMAL_EMBED_URL OPTIMAL_EMBED_DIALECT OPTIMAL_EMBED_API_KEY OPTIMAL_EMBED_API_KEY_FILE)
+    names = [
+      "OPTIMAL_EMBED_URL",
+      "OPTIMAL_EMBED_DIALECT",
+      "OPTIMAL_EMBED_API_KEY",
+      "OPTIMAL_EMBED_API_KEY_FILE",
+      "OPTIMAL_EMBED_DIMENSIONS"
+    ]
 
     original = Map.new(names, &{&1, System.get_env(&1)})
 
@@ -170,14 +175,23 @@ defmodule OptimalEngine.RuntimeConfigTest do
     System.put_env("OPTIMAL_EMBED_DIALECT", "openai")
     System.put_env("OPTIMAL_EMBED_API_KEY", "runtime-test-key-0123456789")
     System.put_env("OPTIMAL_EMBED_API_KEY_FILE", "/run/secrets/embed-key")
+    System.put_env("OPTIMAL_EMBED_DIMENSIONS", "1024")
     config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
     embedding = get_in(config, [:optimal_engine, :text_embedding])
 
     assert embedding[:url] == "https://gateway.example.com/v1/embeddings"
     assert embedding[:dialect] == :openai
     assert embedding[:api_key_file] == "/run/secrets/embed-key"
+    assert embedding[:dimensions] == 1024
     refute inspect(config) =~ "runtime-test-key-0123456789"
 
+    System.put_env("OPTIMAL_EMBED_DIMENSIONS", "768d")
+
+    assert_raise ArgumentError, ~r/OPTIMAL_EMBED_DIMENSIONS must be a positive whole number/, fn ->
+      Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    end
+
+    System.delete_env("OPTIMAL_EMBED_DIMENSIONS")
     System.put_env("OPTIMAL_EMBED_URL", "")
     System.put_env("OPTIMAL_EMBED_DIALECT", "")
     config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)

@@ -42,8 +42,9 @@ defmodule OptimalEngine.AppData.Semantic do
   def status do
     %{embedder: embedder, model: model, indexing: indexing} = config()
 
+    # A probe must reach the embedder, never the cache.
     available =
-      case embed(embedder, "probe", model, 2_000) do
+      case embed(embedder, "probe", model, 2_000, cache: false) do
         {:ok, _vector} -> true
         _ -> false
       end
@@ -303,8 +304,8 @@ defmodule OptimalEngine.AppData.Semantic do
 
   # ---------------------------------------------------------------------------
 
-  defp embed(embedder, text, model, timeout) do
-    task = Task.async(fn -> embedder.embed(text, model: model) end)
+  defp embed(embedder, text, model, timeout, opts \\ []) do
+    task = Task.async(fn -> embedder.embed(text, Keyword.put(opts, :model, model)) end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
       {:ok, {:ok, vector}} when is_list(vector) and vector != [] -> {:ok, vector}

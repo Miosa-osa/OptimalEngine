@@ -137,11 +137,24 @@ embed_dialect =
     _ -> raise ArgumentError, "OPTIMAL_EMBED_DIALECT must be openai or ollama"
   end
 
+embed_dimensions =
+  case System.get_env("OPTIMAL_EMBED_DIMENSIONS") do
+    blank when blank in [nil, ""] ->
+      Keyword.get(text_embedding_config, :dimensions)
+
+    value ->
+      case Integer.parse(String.trim(value)) do
+        {dimensions, ""} when dimensions > 0 -> dimensions
+        _ -> raise ArgumentError, "OPTIMAL_EMBED_DIMENSIONS must be a positive whole number"
+      end
+  end
+
 config :optimal_engine,
        :text_embedding,
        Keyword.merge(text_embedding_config,
          url: embed_url,
          dialect: embed_dialect,
+         dimensions: embed_dimensions,
          api_key_file:
            System.get_env(
              "OPTIMAL_EMBED_API_KEY_FILE",

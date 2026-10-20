@@ -131,15 +131,24 @@ defmodule OptimalEngine.Health do
     end
   end
 
-  # A refused key is named as such: every embedding fails until it is fixed,
-  # and "unreachable" would send the operator to the wrong place.
+  # Each failure is named for what the operator has to fix: "unreachable"
+  # would send them to the network when the key, the credit or the model is
+  # the problem.
   defp run_check(:embedder) do
     case safe_embed_ping() do
       :ok -> :ok
-      {:error, {:embed_unauthorized, status}} -> {:warn, {:embedder_unauthorized, status}}
-      {:error, reason} -> {:warn, {:embedder_unreachable, reason}}
+      {:error, reason} -> {:warn, embedder_problem(reason)}
     end
   end
+
+  defp embedder_problem({:embed_unauthorized, status}), do: {:embedder_unauthorized, status}
+  defp embedder_problem({:embed_unavailable, status}), do: {:embedder_unavailable, status}
+  defp embedder_problem({:embed_api_key, reason}), do: {:embedder_key_unreadable, reason}
+
+  defp embedder_problem({:embed_dimension_mismatch, got, want}),
+    do: {:embedder_dimension_mismatch, got, want}
+
+  defp embedder_problem(reason), do: {:embedder_unreachable, reason}
 
   defp safe_embed_ping do
     try do

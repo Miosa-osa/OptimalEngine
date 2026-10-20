@@ -67,6 +67,7 @@ Do not commit them.
 | `OPTIMAL_EMBED_DIALECT` | inferred | `openai` or `ollama`; other values fail startup configuration. |
 | `OPTIMAL_EMBED_API_KEY` | unset | Key sent to `OPTIMAL_EMBED_URL` as a bearer token. |
 | `OPTIMAL_EMBED_API_KEY_FILE` | unset | File holding that key, used when `OPTIMAL_EMBED_API_KEY` is unset. |
+| `OPTIMAL_EMBED_DIMENSIONS` | 768 for `nomic-embed-text` | Vector width the endpoint must return; other values fail startup configuration unless a positive whole number. |
 
 With `OPTIMAL_EMBED_URL` unset, text embeddings come from Ollama at `OLLAMA_HOST`, exactly as before.
 With it set, the semantic pipeline at intake, chunk embeddings, search queries, durable memory projections, app data, and the embedding backfill all embed through that endpoint.
@@ -82,9 +83,13 @@ An endpoint that cannot serve right now (402 out of credit, 404 no such model, 4
 Capture and intake still succeed, search serves full-text results, the document is embedded later by the backfill, and the backfill itself stops.
 Log lines name the endpoint, the status, and the endpoint's error code; they never carry the text sent for embedding or the key.
 `OPTIMAL_EMBED_URL` is where the Engine sends its requests, usually MIOSA's gateway; it is not the gateway's own `OPTIMAL_EMBED_UPSTREAM_URL`, which names the model server behind the gateway.
-Inputs are capped at 6,000 characters, and identical model and input pairs are served from the filesystem cache.
-The cache key is the model and the input, not the endpoint, because the shared model's vectors match the local model's.
+Inputs are capped at 6,000 characters after invalid UTF-8 is replaced, and identical inputs are served from the filesystem cache.
+Ollama's cache entries are keyed by the model and the input, as before; an endpoint's are keyed by the endpoint, the model and the input, so vectors from one never answer for the other.
+An endpoint's vectors must have the model's width; a different width is refused as `embed_dimension_mismatch`, logged with the two widths, never cached, and stops a backfill.
 Stored vectors of another dimension are never scored, so a model with a different dimension cannot mix with an existing index.
+A request waits at most 5 seconds; an endpoint that accepts the connection and never answers counts as unavailable, and the search path's health probe gives up after 2 seconds.
+The text chunks of an ingested document are embedded together, so an unavailable endpoint is asked once per document, not once per chunk.
+A key sent over plain `http` to another machine is warned about once, without the key.
 
 ## Knowledge Graph Backend
 

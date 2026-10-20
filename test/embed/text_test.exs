@@ -18,7 +18,7 @@ defmodule OptimalEngine.Embed.TextTest do
   alias OptimalEngine.Pipeline.{Embedder, Intake}
   alias OptimalEngine.Retrieval.Search
   alias OptimalEngine.Store
-  alias OptimalEngine.Store.Vectors
+  alias OptimalEngine.Store.{FileCache, Vectors}
 
   @key "embed-test-key-not-a-secret-0123"
   @auth "Bearer " <> @key
@@ -154,7 +154,7 @@ defmodule OptimalEngine.Embed.TextTest do
 
     test "Ollama's native dialect works at another host, with the key", %{tag: tag} do
       base = start_stub(fn _path, _body -> {200, %{"embeddings" => [[0.1, 0.2]]}} end)
-      use_endpoint(base <> "/api/embed")
+      use_endpoint(base <> "/api/embed", dimensions: 2)
       System.put_env("OPTIMAL_EMBED_API_KEY", @key)
 
       assert {:ok, [0.1, 0.2]} = Text.embed("native #{tag}", cache: false)
@@ -217,7 +217,12 @@ defmodule OptimalEngine.Embed.TextTest do
         refute log =~ "refused #{tag}"
         assert Text.unavailable?({:embed_unauthorized, status})
 
-        capture_log(fn -> refute Text.healthy?() end)
+        # The refusal already marked the endpoint unhealthy here: no probe is sent.
+        refute Text.healthy?()
+        refute_received {:embed_request, _, _, %{"input" => "probe"}}
+
+        # A process that has not seen it probes, and gets the same answer.
+        capture_log(fn -> refute Task.await(Task.async(&Text.healthy?/0)) end)
         assert_received {:embed_request, _, [@auth], %{"input" => "probe"}}
       end
 
@@ -299,6 +304,176 @@ defmodule OptimalEngine.Embed.TextTest do
       end)
     end
 
+    test "an endpoint never serves Ollama's cached vectors, nor Ollama the endpoint's",
+         %{tag: tag} do
+      ollama_stub =
+        start_stub(fn _path, _body -> {200, %{"embeddings" => [[0.5, 0.5, 0.5, 0.5]]}} end)
+
+      ollama = Application.get_env(:optimal_engine, :ollama, [])
+      Application.put_env(:optimal_engine, :ollama, Keyword.put(ollama, :host, ollama_stub))
+      endpoint_stub = start_stub(&openai_meaning/2)
+      from_ollama = [0.5, 0.5, 0.5, 0.5]
+      from_endpoint = [+0.0, 1.0, +0.0, +0.0]
+
+      # Ollama first: today's key, and the endpoint still asks its own server.
+      Application.delete_env(:optimal_engine, :text_embedding)
+      assert {:ok, ^from_ollama} = Text.embed("shared #{tag}")
+      assert_received {:embed_request, "/api/embed", _, _}
+      assert {:ok, ^from_ollama} = FileCache.get("embeddings", "nomic-embed-text\0shared #{tag}")
+
+      use_endpoint(endpoint_stub)
+      assert {:ok, ^from_endpoint} = Text.embed("shared #{tag}")
+      assert_received {:embed_request, "/v1/embeddings", _, _}
+      assert {:ok, ^from_endpoint} = Text.embed("shared #{tag}")
+      refute_received {:embed_request, _, _, _}
+
+      # The endpoint first: Ollama still asks Ollama.
+      assert {:ok, ^from_endpoint} = Text.embed("endpoint first #{tag}")
+      assert_received {:embed_request, "/v1/embeddings", _, _}
+      Application.delete_env(:optimal_engine, :text_embedding)
+      assert {:ok, ^from_ollama} = Text.embed("endpoint first #{tag}")
+      assert_received {:embed_request, "/api/embed", _, _}
+    end
+
+    test "vectors of another width are refused, never cached, and stop a batch", %{tag: tag} do
+      use_endpoint(start_stub(&openai_meaning/2), dimensions: nil)
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:embed_dimension_mismatch, 4, 768}} = Text.embed("width #{tag}")
+          assert {:error, {:embed_dimension_mismatch, 4, 768}} = Text.embed("width #{tag}")
+        end)
+
+      assert_received {:embed_request, _, _, _}
+      assert_received {:embed_request, _, _, _}
+      assert log =~ "answered 4-dimension vectors; the model needs 768"
+      refute log =~ "width #{tag}"
+      assert Text.unavailable?({:embed_dimension_mismatch, 4, 768})
+
+      texts = for n <- 1..70, do: "wide #{n} #{tag}"
+
+      capture_log(fn ->
+        results = Text.embed_many(texts, cache: false)
+        assert Enum.uniq(results) == [{:error, {:embed_dimension_mismatch, 4, 768}}]
+      end)
+
+      # The first batch is refused; the second is not sent.
+      assert_received {:embed_request, _, _, %{"input" => [_ | _]}}
+      refute_received {:embed_request, _, _, _}
+
+      use_endpoint(start_stub(&openai_meaning/2), dimensions: nil)
+      Application.put_env(:optimal_engine, :ollama, embed_model: "another-model")
+      assert {:ok, [_, _, _, _]} = Text.embed("other model #{tag}", cache: false)
+    end
+
+    test "an endpoint that accepts and never answers is unavailable within the timeouts",
+         %{tag: tag} do
+      use_endpoint(start_silent_listener(), timeout_ms: 300, probe_timeout_ms: 200)
+
+      {elapsed, _log} =
+        :timer.tc(
+          fn -> capture_log(fn -> send(self(), Text.embed("hung #{tag}")) end) end,
+          :millisecond
+        )
+
+      assert_received {:error, :embed_endpoint_unavailable}
+      assert elapsed < 2_000
+
+      # A fresh process probes, within the probe budget.
+      {probe_ms, healthy} =
+        Task.async(fn -> :timer.tc(fn -> Text.healthy?() end, :millisecond) end) |> Task.await()
+
+      refute healthy
+      assert probe_ms < 1_000
+
+      # This process saw the failure: no new probe, an immediate no.
+      {again_ms, healthy_again} = :timer.tc(fn -> Text.healthy?() end, :millisecond)
+      refute healthy_again
+      assert again_ms < 100
+
+      root = Path.join(System.tmp_dir!(), "embed_hung_root_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(root)
+      on_exit(fn -> File.rm_rf!(root) end)
+      Application.put_env(:optimal_engine, :root_path, root)
+      Application.put_env(:optimal_engine, :semantic_processing, enabled: true)
+      Application.put_env(:optimal_engine, :embed, on_ingest: true)
+
+      {intake_ms, intake} =
+        :timer.tc(
+          fn ->
+            capture_log(fn ->
+              send(
+                self(),
+                Intake.process(
+                  "Hung endpoint #{tag}: the first note. The second note. The third note.",
+                  workspace_id: "embed-hung-#{tag}",
+                  write_files: false,
+                  source_id: "embed-hung:#{tag}"
+                )
+              )
+            end)
+          end,
+          :millisecond
+        )
+
+      assert is_binary(intake)
+      assert_received {:ok, %{context: %{id: _}}}
+      # The chunks go out as one batch: one timeout, not one per chunk.
+      assert intake_ms < 3_000
+    end
+
+    test "a failed query embedding marks the endpoint unhealthy for the probe window",
+         %{tag: tag} do
+      {:ok, mode} = Agent.start_link(fn -> :up end)
+
+      use_endpoint(
+        start_stub(fn path, body ->
+          case Agent.get(mode, & &1) do
+            :up -> openai_meaning(path, body)
+            :down -> {502, %{"error" => %{"code" => "embedding_backend_unavailable"}}}
+          end
+        end)
+      )
+
+      assert Text.healthy?()
+      assert_received {:embed_request, _, _, %{"input" => "probe"}}
+
+      Agent.update(mode, fn _ -> :down end)
+
+      capture_log(fn ->
+        assert {:error, {:embed_unavailable, 502}} = Text.embed("query #{tag}", cache: false)
+      end)
+
+      refute Text.healthy?()
+      assert_received {:embed_request, _, _, %{"input" => "query " <> _}}
+      refute_received {:embed_request, _, _, %{"input" => "probe"}}
+    end
+
+    test "invalid UTF-8 is replaced instead of failing with the text in an error", %{tag: tag} do
+      use_endpoint(start_stub(&openai_meaning/2))
+      assert {:ok, _} = Text.embed("hiring " <> tag <> <<0xFF>>, cache: false)
+      assert_received {:embed_request, _, _, %{"input" => sent}}
+      assert sent == "hiring #{tag}\uFFFD"
+    end
+
+    test "a key bound for plain http on another machine is warned about once, without it" do
+      refute Endpoint.plain_http_remote?("https://gateway.example.com/v1/embeddings")
+      refute Endpoint.plain_http_remote?("http://127.0.0.1:8089/v1/embeddings")
+      refute Endpoint.plain_http_remote?("http://localhost:8089/v1/embeddings")
+      assert Endpoint.plain_http_remote?("http://10.0.0.5:8089/v1/embeddings")
+
+      url = "http://10.0.0.5:8089/v1/embeddings-#{System.unique_integer([:positive])}"
+
+      log =
+        capture_log(fn ->
+          Endpoint.warn_plain_http(url, true)
+          Endpoint.warn_plain_http(url, true)
+        end)
+
+      assert length(String.split(log, "over plain http")) == 2
+      assert capture_log(fn -> Endpoint.warn_plain_http(url <> "-nokey", false) end) == ""
+    end
+
     test "the key never enters the application environment or a logged URL" do
       System.put_env("OPTIMAL_EMBED_API_KEY", @key)
       use_endpoint("https://gateway.example.com")
@@ -354,8 +529,16 @@ defmodule OptimalEngine.Embed.TextTest do
                    )
 
           send(self(), {:context, result.context.id})
-          # The document's embedding is attempted after intake returns.
-          assert_receive {:embed_request, _, [@auth], %{"input" => "Pricing review" <> _}}, 5_000
+          # The chunks went out as one batch during intake; the document's
+          # embedding is attempted after intake returns.
+          assert_receive {:embed_request, _, [@auth], %{"input" => [_ | _] = chunks}}, 5_000
+          assert Enum.any?(chunks, &(&1 =~ "Pricing review"))
+
+          assert_receive {:embed_request, _, [@auth], %{"input" => document}}
+                         when is_binary(document),
+                         5_000
+
+          assert document =~ "Pricing review"
           Process.sleep(200)
 
           assert {:ok, hits} = Search.search("pricing review #{tag}", workspace_id: workspace)
@@ -363,6 +546,9 @@ defmodule OptimalEngine.Embed.TextTest do
 
           assert {:error, {:embedder_unavailable, {:embed_unavailable, 502}}} =
                    Backfill.run(workspace_id: workspace)
+
+          assert %{checks: %{embedder: {:warn, {:embedder_unavailable, 502}}}} =
+                   OptimalEngine.Health.ready()
         end)
 
       assert_received {:context, id}
@@ -478,6 +664,28 @@ defmodule OptimalEngine.Embed.TextTest do
   # Helpers
   # ---------------------------------------------------------------------------
 
+  # Accepts connections and never answers.
+  defp start_silent_listener do
+    parent = self()
+
+    holder =
+      spawn(fn ->
+        {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+        {:ok, port} = :inet.port(listen)
+        send(parent, {:silent_port, port})
+        hold(listen, [])
+      end)
+
+    on_exit(fn -> Process.exit(holder, :kill) end)
+    assert_receive {:silent_port, port}, 1_000
+    "http://127.0.0.1:#{port}"
+  end
+
+  defp hold(listen, held) do
+    {:ok, socket} = :gen_tcp.accept(listen)
+    hold(listen, [socket | held])
+  end
+
   defp start_stub(respond) do
     ref = :"#{__MODULE__}.Stub#{System.unique_integer([:positive])}"
     {:ok, _pid} = Plug.Cowboy.http(Stub, [test: self(), respond: respond], port: 0, ref: ref)
@@ -485,8 +693,11 @@ defmodule OptimalEngine.Embed.TextTest do
     "http://127.0.0.1:#{:ranch.get_port(ref)}"
   end
 
+  # The stubs answer in a four-dimension space, so the width check is told so;
+  # a test that wants the model's own width passes `dimensions: nil`.
   defp use_endpoint(url, extra \\ []) do
-    Application.put_env(:optimal_engine, :text_embedding, Keyword.merge([url: url], extra))
+    config = Keyword.merge([url: url, dimensions: 4], extra)
+    Application.put_env(:optimal_engine, :text_embedding, config)
   end
 
   # A four-dimension space: anything about hiring points one way, the rest another.
