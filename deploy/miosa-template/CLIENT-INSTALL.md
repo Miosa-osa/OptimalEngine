@@ -110,17 +110,17 @@ To leave a profile for processes that do not inherit that environment, and to pr
 The script exits 0 and prints, for example, on a machine with the Engine settings in its environment:
 
 ```text
-install-client: verified optimal-0.3.3-linux-amd64.tar.gz (<sha256>)
-install-client: verified optimal-engine-mcp-0.3.3.tar.gz (<sha256>)
-install-client: installed optimal 0.3.3 (alias oe) in /opt/optimal/bin
-install-client: installed optimal-engine-mcp 0.3.3 in /opt/optimal/mcp
+install-client: verified optimal-0.3.4-linux-amd64.tar.gz (<sha256>)
+install-client: verified optimal-engine-mcp-0.3.4.tar.gz (<sha256>)
+install-client: installed optimal 0.3.4 (alias oe) in /opt/optimal/bin
+install-client: installed optimal-engine-mcp 0.3.4 in /opt/optimal/mcp
 install-client: installed /opt/optimal/bin/install-client.sh for configure, register and verify
 install-client: linked the programs into /usr/local/bin
 install-client: wrote /root/.config/optimal/profile (mode 0600)
 install-client: registered optimal-engine with Claude Code (user scope)
 install-client: registered optimal-engine with Codex (/root/.codex/config.toml)
-install-client: ok: optimal 0.3.3 (oe 0.3.3)
-install-client: ok: optimal-engine-mcp 0.3.3 answers initialize
+install-client: ok: optimal 0.3.4 (oe 0.3.4)
+install-client: ok: optimal-engine-mcp 0.3.4 answers initialize
 install-client: ok: whoami against https://engine.example.com from the profile (authenticated: true, workspaces: ["default:sales"])
 install-client: ok: search against https://engine.example.com from the profile
 install-client: ok: whoami against https://engine.example.com from the environment (authenticated: true, workspaces: ["default:sales"])

@@ -116,7 +116,7 @@ defmodule OptimalEngine.ConformanceTest do
 
       assert report["summary"]["ok"] == false
       assert report["summary"]["failed"] > 0
-      assert report["engine"]["version"] == "0.3.3"
+      assert report["engine"]["version"] == "0.3.4"
 
       contract = Enum.find(report["checks"], &(&1["id"] == "version.contract"))
       assert contract["status"] == "fail"

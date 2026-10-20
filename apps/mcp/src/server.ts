@@ -24,7 +24,7 @@ import { registerSessions } from "./tools/sessions.js";
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "optimal-engine",
-    version: "0.3.3",
+    version: "0.3.4",
   });
 
   registerAsk(server);
