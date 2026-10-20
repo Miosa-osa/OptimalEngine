@@ -365,6 +365,39 @@ defmodule OptimalEngine.SyncTest do
                Store.raw_query("SELECT fact_text FROM facts WHERE id = ?1", [fact_id])
     end
 
+    test "a change planned twice before either apply commits is applied once", ctx do
+      # Apply plans outside its transaction and checks the ledger again inside
+      # it. A batch carrying the same change twice stands in for two concurrent
+      # applies (POST /api/sync/run during a scheduler tick), both planned before
+      # either committed. An append-only row would otherwise be added twice.
+      title = "Ship on Friday #{ctx.n}"
+
+      remote =
+        mutation(ctx, %{
+          "entity_type" => "decisions",
+          "entity_id" => "decision-#{ctx.n}",
+          "payload" => %{
+            "row" => %{
+              "id" => 1,
+              "title" => title,
+              "decision" => "ship",
+              "workspace_id" => ctx.ws,
+              "tenant_id" => ctx.tenant
+            },
+            "blobs" => %{}
+          }
+        })
+
+      assert {:ok, %{applied: 1, skipped: %{duplicate: 1}}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [remote, remote])
+
+      assert {:ok, [[1]]} =
+               Store.raw_query(
+                 "SELECT COUNT(*) FROM decisions WHERE workspace_id = ?1 AND title = ?2",
+                 [ctx.ws, title]
+               )
+    end
+
     test "a workspace above the peer's gate is refused whole", ctx do
       {:ok, _} =
         Store.raw_query(
@@ -389,6 +422,7 @@ defmodule OptimalEngine.SyncTest do
       on_exit(fn ->
         if scheduler && Process.alive?(scheduler), do: :sys.resume(scheduler)
         Application.delete_env(:optimal_engine, :http_mock)
+        Application.delete_env(:optimal_engine, :sync_cycle_budget_ms)
 
         if previous,
           do: System.put_env("CONNECTOR_KEY", previous),
@@ -466,17 +500,7 @@ defmodule OptimalEngine.SyncTest do
 
     test "a relay peer enables sync first, pages the pull, pushes to ?workspace= with its engine envelope, and a repeat cycle sends nothing",
          ctx do
-      cloud =
-        for seq <- 1..5 do
-          mutation(ctx, %{
-            "sequence" => seq,
-            "id" => "mut_cloud_#{ctx.n}_#{seq}",
-            "device_id" => "rep_cloud",
-            "payload" => context_row("relayed-#{ctx.n}-#{seq}", "From cloud", ctx.ws, ctx.tenant)
-          })
-        end
-
-      relay = fake_relay(ctx, cloud: cloud)
+      relay = fake_relay(ctx, cloud: cloud_ledger(ctx, 5))
       {:ok, _} = add_relay_peer(ctx, "relay-key", "both")
       insert_context(ctx.tenant, ctx.ws, "offline-a-#{ctx.n}", "Written offline")
       insert_context(ctx.tenant, ctx.ws, "offline-b-#{ctx.n}", "Written offline")
@@ -499,15 +523,9 @@ defmodule OptimalEngine.SyncTest do
 
       assert for({:get, "pull", query} <- calls(relay), do: query["since"]) == ["0", "2", "4"]
 
-      # Exactly once on each side.
-      assert relay |> received() |> Map.values() |> Enum.all?(&(&1 == 1))
-
-      assert relay |> received() |> Map.keys() |> length() == 2
-
-      assert {:ok, [[5]]} =
-               Store.raw_query("SELECT count(*) FROM contexts WHERE id LIKE ?1", [
-                 "relayed-#{ctx.n}-%"
-               ])
+      # Exactly once on each side: two changes delivered once each, five applied.
+      assert relay |> received() |> Map.values() == [1, 1]
+      assert relayed(ctx) == 5
 
       # The relay does not forward x-optimal-replica, so the cloud's next page
       # carries the laptop's own changes back: they are skipped, not applied,
@@ -538,14 +556,34 @@ defmodule OptimalEngine.SyncTest do
       assert peer.pending_push == 1
     end
 
+    test "a relay status without the other Engine's migration pauses the peer before anything moves",
+         ctx do
+      insert_context(ctx.tenant, ctx.ws, "held-#{ctx.n}", "Not sent")
+
+      for reported <- [:omit, nil] do
+        relay = fake_relay(ctx, status_migration: reported)
+        {:ok, _} = add_relay_peer(ctx, "relay-key", "both")
+
+        [result] = run_peers(ctx)
+        assert result.status == "paused_version"
+        assert routes(relay) == [{:get, "status"}]
+
+        [peer] = Sync.peers(ctx.tenant, ctx.ws)
+        assert peer.status == "paused_version"
+        assert peer.message =~ "did not report the other Engine's schema version"
+      end
+
+      assert [%{pending_push: 1}] = Sync.status(ctx.tenant, ctx.ws).peers
+    end
+
     test "a push the relay refuses with VERSION_MISMATCH pauses the peer and keeps the cursor",
          ctx do
-      # A relay that cannot read the Engine's version reports no migration in
-      # status; the push is then the first place the mismatch shows.
+      # Status matched, then the other Engine moved to another migration before
+      # the push: the refused push is where the mismatch shows.
       relay =
         fake_relay(ctx,
           migration: Sync.engine_info()["migration"] + 1,
-          status_migration: :omit
+          status_migration: Sync.engine_info()["migration"]
         )
 
       {:ok, _} = add_relay_peer(ctx, "relay-key", "push")
@@ -589,10 +627,205 @@ defmodule OptimalEngine.SyncTest do
       assert result.status == "error"
       assert routes(relay) == [{:get, "status"}]
 
+      # The fake's 403 echoes the Authorization header it was sent.
       [peer] = Sync.peers(ctx.tenant, ctx.ws)
       assert peer.message =~ "403"
       assert peer.message =~ "engine:sync"
+      assert peer.message =~ "[redacted]"
       refute peer.message =~ "key-without-sync-scope"
+      refute inspect(result) =~ "key-without-sync-scope"
+    end
+
+    test "a key-shaped value a relay echoes in an error is neither kept nor returned", ctx do
+      prefixed = "msk_u_" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+      opaque = Base.encode16(:crypto.strong_rand_bytes(24), case: :lower)
+
+      fake_relay(ctx,
+        status_error:
+          {422, "ENVIRONMENT_NOT_FOUND", "no environment named #{prefixed} or #{opaque}"}
+      )
+
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "both")
+
+      [result] = run_peers(ctx)
+      assert result.status == "error"
+
+      [peer] = Sync.peers(ctx.tenant, ctx.ws)
+      assert peer.message =~ "422"
+      assert peer.message =~ "no environment named [redacted] or [redacted]"
+
+      for secret <- [prefixed, opaque] do
+        refute peer.message =~ secret
+        refute inspect(result) =~ secret
+      end
+    end
+
+    test "a push whose acknowledgement is lost is sent again, applied once, then passed", ctx do
+      # The relay applies the page, then its answer is lost (a timeout, then a
+      # 502): the push cursor stays and the next cycle sends the page again.
+      relay = fake_relay(ctx, lost_acks: [:timeout, 502])
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "push")
+      insert_context(ctx.tenant, ctx.ws, "acked-a-#{ctx.n}", "Written offline")
+      insert_context(ctx.tenant, ctx.ws, "acked-b-#{ctx.n}", "Written offline")
+
+      [first] = run_peers(ctx)
+      assert first.status == "error"
+      assert {:error, :timeout} = first.push
+
+      [second] = run_peers(ctx)
+      assert second.status == "error"
+      assert {:error, {:http_status, 502, _}} = second.push
+      assert [%{pending_push: 2}] = Sync.status(ctx.tenant, ctx.ws).peers
+
+      [third] = run_peers(ctx)
+      assert third.status == "active"
+
+      assert {:ok, %{sent: 2, applied: 0, remote: %{"skipped" => %{"duplicate" => 2}}}} =
+               third.push
+
+      assert routes(relay) == [
+               {:get, "status"},
+               {:post, "enable"},
+               {:post, "push"},
+               {:get, "status"},
+               {:post, "push"},
+               {:get, "status"},
+               {:post, "push"}
+             ]
+
+      # Delivered three times, held once.
+      assert relay |> received() |> Map.values() == [3, 3]
+      local = Sync.replica_id()
+      held = for %{"device_id" => ^local} = m <- cloud(relay), do: m["idempotency_key"]
+      assert length(held) == 2
+      assert held == Enum.uniq(held)
+      assert [%{pending_push: 0}] = Sync.status(ctx.tenant, ctx.ws).peers
+    end
+
+    test "a pull that fails on its second page keeps the first page's cursor and resumes there",
+         ctx do
+      relay = fake_relay(ctx, cloud: cloud_ledger(ctx, 5), failed_pulls: ["2"])
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "pull")
+
+      [first] = run_peers(ctx)
+      assert first.status == "error"
+      assert {:error, {:http_status, 502, _}} = first.pull
+      assert [%{last_pulled_seq: 2, message: message}] = Sync.peers(ctx.tenant, ctx.ws)
+      assert message =~ "502"
+      assert relayed(ctx) == 2
+
+      [second] = run_peers(ctx)
+      assert second.status == "active"
+      assert {:ok, %{applied: 3, cursor: 5, skipped: skipped}} = second.pull
+      assert skipped == %{}
+      assert for({:get, "pull", query} <- calls(relay), do: query["since"]) == ["0", "2", "2", "4"]
+      assert relayed(ctx) == 5
+      assert [%{last_pulled_seq: 5}] = Sync.peers(ctx.tenant, ctx.ws)
+    end
+
+    test "a page the relay finds too large is sent again as pages half its size", ctx do
+      relay = fake_relay(ctx, max_batch: 1)
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "push")
+      insert_context(ctx.tenant, ctx.ws, "large-a-#{ctx.n}", "Written offline")
+      insert_context(ctx.tenant, ctx.ws, "large-b-#{ctx.n}", "Written offline")
+
+      [result] = run_peers(ctx)
+      assert result.status == "active"
+      assert {:ok, %{sent: 2, applied: 2, pages: 2}} = result.push
+
+      assert routes(relay) == [
+               {:get, "status"},
+               {:post, "enable"},
+               {:post, "push"},
+               {:post, "push"},
+               {:post, "push"}
+             ]
+
+      assert relay |> received() |> Map.values() == [1, 1]
+      assert [%{pending_push: 0}] = Sync.status(ctx.tenant, ctx.ws).peers
+    end
+
+    test "only an answer that says what it applied passes a page, whatever its 2xx status",
+         ctx do
+      fake_relay(ctx, push_answer: {200, %{"accepted" => true}})
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "push")
+      insert_context(ctx.tenant, ctx.ws, "acknowledged-#{ctx.n}", "Written offline")
+
+      [first] = run_peers(ctx)
+      assert first.status == "error"
+      assert {:error, {:push_not_acknowledged, ["accepted"]}} = first.push
+      assert [%{pending_push: 1}] = Sync.status(ctx.tenant, ctx.ws).peers
+
+      fake_relay(ctx, push_answer: {202, :ack})
+
+      [second] = run_peers(ctx)
+      assert second.status == "active"
+      assert {:ok, %{sent: 1, applied: 1}} = second.push
+      assert [%{pending_push: 0}] = Sync.status(ctx.tenant, ctx.ws).peers
+    end
+
+    test "paging stops when the cycle's time budget is spent and resumes on the next cycle",
+         ctx do
+      Application.put_env(:optimal_engine, :sync_cycle_budget_ms, 0)
+      relay = fake_relay(ctx, cloud: cloud_ledger(ctx, 5), max_batch: 1)
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "both")
+      insert_context(ctx.tenant, ctx.ws, "budget-a-#{ctx.n}", "Written offline")
+      insert_context(ctx.tenant, ctx.ws, "budget-b-#{ctx.n}", "Written offline")
+
+      # One page each way a cycle once the budget is spent.
+      [first] = run_peers(ctx)
+      assert first.status == "active"
+      assert {:ok, %{pages: 1, cursor: 2, more: true}} = first.pull
+      assert {:ok, %{sent: 1, pages: 1}} = first.push
+
+      [second] = run_peers(ctx)
+      assert second.status == "active"
+      assert {:ok, %{pages: 1, cursor: 4, more: true}} = second.pull
+      assert {:ok, %{sent: 1, pages: 1}} = second.push
+
+      assert for({:get, "pull", query} <- calls(relay), do: query["since"]) == ["0", "2"]
+      assert relay |> received() |> Map.values() == [1, 1]
+      assert [%{pending_push: 0}] = Sync.status(ctx.tenant, ctx.ws).peers
+    end
+
+    test "the fake relay refuses a push that is not this Engine's own, and counts every delivery",
+         ctx do
+      relay = fake_relay(ctx, [])
+      assert {200, _} = relay_call(ctx, :post, "enable", %{})
+
+      change =
+        mutation(ctx, %{
+          "sequence" => 1,
+          "payload_hash" => "h",
+          "idempotency_key" => "key-#{ctx.n}",
+          "payload" => context_row("contract-#{ctx.n}", "x", ctx.ws, ctx.tenant)
+        })
+
+      push = %{
+        "workspace" => ctx.ws,
+        "replica_id" => Sync.replica_id(),
+        "engine" => Sync.engine_info(),
+        "mutations" => [change]
+      }
+
+      for {code, body} <- [
+            {"WORKSPACE_MISMATCH", Map.put(push, "workspace", "another")},
+            {"NOT_THE_SENDER", Map.put(push, "replica_id", "rep_other")},
+            {"NOT_THE_SENDER", put_in(push, ["engine", "replica_id"], "rep_cloud")},
+            {"CURSOR_NOT_ALLOWED", Map.put(push, "cursor", 7)},
+            {"CURSOR_NOT_ALLOWED", Map.put(push, "since", 7)}
+          ] do
+        assert {422, %{"error" => %{"code" => ^code}}} = relay_call(ctx, :post, "push", body)
+      end
+
+      assert received(relay) == %{}
+
+      assert {200, %{"data" => %{"applied" => 1}}} = relay_call(ctx, :post, "push", push)
+
+      assert {200, %{"data" => %{"applied" => 0, "skipped" => %{"duplicate" => 1}}}} =
+               relay_call(ctx, :post, "push", push)
+
+      assert received(relay) == %{"key-#{ctx.n}" => 2}
     end
 
     test "a relay url must still be http(s)", ctx do
@@ -635,16 +868,27 @@ defmodule OptimalEngine.SyncTest do
   # -- a fake MIOSA relay -------------------------------------------------------
   #
   # It enforces the contract the live relay speaks: a bearer key with the
-  # engine:sync scope (403 naming it otherwise), routes
+  # engine:sync scope (403 naming it otherwise, and echoing the Authorization
+  # header it was sent), routes
   # `/api/v1/engines/<id>/sync/{status,enable,pull,push}?workspace=`, success
   # wrapped in {"data": ...}, refusals as {"error": {"code", "message"}}, push
   # refused while sync is off or the sender's engine envelope is missing or on
-  # another migration, a non-empty mutation list in the full ledger shape,
-  # idempotency by idempotency_key, and no x-optimal-replica forwarding (pushed
-  # changes come back on the next pull). Pages are capped at two rows whatever
-  # limit the client asks for, so a client that ignores `more` falls behind.
-  # Options: `:cloud` (ledger mutations), `:migration` (the cloud's),
-  # `:status_migration` (what status reports; `:omit` for none).
+  # another migration, a push only from this Engine (the body's workspace is
+  # the query's, `replica_id` and `engine.replica_id` are this Engine's) with no
+  # cursor, a non-empty mutation list in the full ledger shape, idempotency by
+  # idempotency_key (every delivery is counted), and no x-optimal-replica
+  # forwarding (pushed changes come back on the next pull). Pages are capped at
+  # two rows whatever limit the client asks for, so a client that ignores
+  # `more` falls behind.
+  #
+  # Options: `:cloud` (ledger mutations), `:migration` (the cloud's, checked on
+  # push), `:status_migration` (what status reports; `:omit` for none),
+  # `:status_error` ({status, code, message} status answers instead),
+  # `:lost_acks` (answers given instead of the acknowledgement of a push it
+  # applied, one per push: `:timeout` or an HTTP status), `:failed_pulls`
+  # (`since` values whose pull fails once with a 502), `:max_batch` (a larger
+  # push is refused with 413), `:push_answer` ({status, data} acknowledges a
+  # push instead, `:ack` for the usual answer).
 
   @contract_keys ~w(sequence id device_id entity_type entity_id operation payload payload_hash
                     idempotency_key occurred_at)
@@ -652,30 +896,40 @@ defmodule OptimalEngine.SyncTest do
   defp fake_relay(ctx, opts) do
     state = :ets.new(:fake_relay, [:public])
     migration = opts[:migration] || Sync.engine_info()["migration"]
-    engine = %{"replica_id" => "rep_cloud", "migration" => migration, "version" => "0.0.0"}
 
     :ets.insert(state,
       enabled: false,
       calls: [],
       received: %{},
-      cloud: opts[:cloud] || []
+      cloud: opts[:cloud] || [],
+      lost_acks: opts[:lost_acks] || [],
+      failed_pulls: opts[:failed_pulls] || []
     )
 
-    status_migration = Keyword.get(opts, :status_migration, migration)
+    config = %{
+      engine: %{"replica_id" => "rep_cloud", "migration" => migration, "version" => "0.0.0"},
+      sender: Sync.replica_id(),
+      status_migration: Keyword.get(opts, :status_migration, migration),
+      status_error: opts[:status_error],
+      max_batch: opts[:max_batch],
+      push_answer: opts[:push_answer]
+    }
+
     prefix = "/api/v1/engines/e1/sync/"
 
     Application.put_env(:optimal_engine, :http_mock, fn url, req ->
       uri = URI.parse(url)
       query = URI.decode_query(uri.query || "")
       route = String.replace_prefix(uri.path, prefix, "")
+      {_, authorization} = List.keyfind(req[:headers], "authorization", 0, {nil, ""})
 
       # Peers left by earlier tests run too; only this test's are counted.
       if query["workspace"] == ctx.ws,
         do: update(state, :calls, &(&1 ++ [{req[:method], route, query}]))
 
       cond do
-        {"authorization", "Bearer relay-key"} not in req[:headers] ->
-          refuse(403, "FORBIDDEN", "this key lacks the engine:sync scope")
+        authorization != "Bearer relay-key" ->
+          refuse(403, "FORBIDDEN", "this key lacks the engine:sync scope (sent: #{authorization})")
 
         not String.starts_with?(uri.path, prefix) ->
           refuse(404, "NOT_FOUND", nil)
@@ -684,10 +938,7 @@ defmodule OptimalEngine.SyncTest do
           refuse(400, "WORKSPACE_REQUIRED", nil)
 
         true ->
-          relay_route(state, ctx, {req[:method], route}, query, req[:body], %{
-            engine: engine,
-            status_migration: status_migration
-          })
+          relay_route(state, ctx, {req[:method], route}, query, req[:body], config)
       end
     end)
 
@@ -706,9 +957,10 @@ defmodule OptimalEngine.SyncTest do
       "version" => "0.0.0"
     }
 
-    case config.status_migration do
-      :omit -> ok(data)
-      migration -> ok(Map.put(data, "migration", migration))
+    case {config.status_error, config.status_migration} do
+      {{status, code, message}, _} -> refuse(status, code, message)
+      {nil, :omit} -> ok(data)
+      {nil, migration} -> ok(Map.put(data, "migration", migration))
     end
   end
 
@@ -735,6 +987,10 @@ defmodule OptimalEngine.SyncTest do
       not lookup(state, :enabled) ->
         refuse(409, "SYNC_NOT_ENABLED", "sync_not_enabled")
 
+      query["since"] in lookup(state, :failed_pulls) ->
+        update(state, :failed_pulls, &List.delete(&1, query["since"]))
+        refuse(502, "ENGINE_UNAVAILABLE", nil)
+
       limit not in 1..2_000 ->
         refuse(422, "INVALID", "limit must be 1..2000")
 
@@ -753,7 +1009,7 @@ defmodule OptimalEngine.SyncTest do
     end
   end
 
-  defp relay_route(state, _ctx, {:post, "push"}, _query, body, config) do
+  defp relay_route(state, _ctx, {:post, "push"}, query, body, config) do
     sender = body["engine"]
     mutations = body["mutations"]
 
@@ -771,37 +1027,76 @@ defmodule OptimalEngine.SyncTest do
           "peer #{sender["replica_id"]} runs schema #{sender["migration"]}, this Engine runs #{config.engine["migration"]}; sync pauses until both run the same Engine version"
         )
 
+      body["workspace"] != query["workspace"] ->
+        refuse(422, "WORKSPACE_MISMATCH", "the body names another workspace than ?workspace=")
+
+      body["replica_id"] != config.sender or sender["replica_id"] != config.sender ->
+        refuse(422, "NOT_THE_SENDER", "replica_id and engine.replica_id name the sending Engine")
+
+      Enum.any?(~w(cursor since), &Map.has_key?(body, &1)) ->
+        refuse(422, "CURSOR_NOT_ALLOWED", "a push carries no cursor")
+
       not (is_list(mutations) and mutations != []) ->
         refuse(422, "MUTATIONS_REQUIRED", "mutations_required")
 
       not Enum.all?(mutations, fn m -> Enum.all?(@contract_keys, &Map.has_key?(m, &1)) end) ->
         refuse(422, "INVALID", "a mutation is missing a contract field")
 
+      config.max_batch && length(mutations) > config.max_batch ->
+        refuse(413, "PAYLOAD_TOO_LARGE", "at most #{config.max_batch} mutations a push")
+
       true ->
-        received = lookup(state, :received)
-
-        {fresh, duplicates} =
-          Enum.split_with(mutations, &(not Map.has_key?(received, &1["idempotency_key"])))
-
-        update(state, :received, fn seen ->
-          Enum.reduce(mutations, seen, &Map.update(&2, &1["idempotency_key"], 1, fn n -> n end))
-        end)
-
-        update(state, :cloud, fn cloud ->
-          Enum.reduce(fresh, cloud, &(&2 ++ [Map.put(&1, "sequence", length(&2) + 1)]))
-        end)
-
-        ok(%{
-          "applied" => length(fresh),
-          "conflicts" => 0,
-          "failed" => [],
-          "skipped" => %{"duplicate" => length(duplicates)},
-          "engine" => config.engine
-        })
+        deliver(state, mutations, config)
     end
   end
 
   defp relay_route(_state, _ctx, _route, _query, _body, _config), do: refuse(404, "NOT_FOUND", nil)
+
+  # Applies a push once per idempotency key, counts every delivery, then
+  # acknowledges it, unless the acknowledgement is to be lost.
+  defp deliver(state, mutations, config) do
+    received = lookup(state, :received)
+
+    {fresh, duplicates} =
+      Enum.split_with(mutations, &(not Map.has_key?(received, &1["idempotency_key"])))
+
+    update(state, :received, fn seen ->
+      Enum.reduce(mutations, seen, fn m, acc ->
+        Map.update(acc, m["idempotency_key"], 1, &(&1 + 1))
+      end)
+    end)
+
+    update(state, :cloud, fn cloud ->
+      Enum.reduce(fresh, cloud, &(&2 ++ [Map.put(&1, "sequence", length(&2) + 1)]))
+    end)
+
+    ack = %{
+      "applied" => length(fresh),
+      "conflicts" => 0,
+      "failed" => [],
+      "skipped" => %{"duplicate" => length(duplicates)},
+      "engine" => config.engine
+    }
+
+    case {lookup(state, :lost_acks), config.push_answer} do
+      {[:timeout | rest], _} ->
+        :ets.insert(state, lost_acks: rest)
+        {:error, :timeout}
+
+      {[status | rest], _} ->
+        :ets.insert(state, lost_acks: rest)
+        refuse(status, "ENGINE_UNAVAILABLE", nil)
+
+      {[], {status, :ack}} ->
+        respond(status, %{"data" => ack})
+
+      {[], {status, data}} ->
+        respond(status, %{"data" => data})
+
+      {[], nil} ->
+        ok(ack)
+    end
+  end
 
   defp ok(data), do: respond(200, %{"data" => data})
 
@@ -816,6 +1111,38 @@ defmodule OptimalEngine.SyncTest do
   defp calls(state), do: lookup(state, :calls)
   defp routes(state), do: Enum.map(calls(state), fn {method, route, _query} -> {method, route} end)
   defp received(state), do: lookup(state, :received)
+  defp cloud(state), do: lookup(state, :cloud)
+
+  # Calls the fake relay as a client would, past the Engine's client.
+  defp relay_call(ctx, method, route, body) do
+    url =
+      "https://api.example/api/v1/engines/e1/sync/#{route}?" <>
+        URI.encode_query(%{"workspace" => ctx.ws})
+
+    mock = Application.get_env(:optimal_engine, :http_mock)
+    headers = [{"authorization", "Bearer relay-key"}]
+    {:ok, {{_, status, _}, _, raw}} = mock.(url, method: method, headers: headers, body: body)
+    {status, Jason.decode!(raw)}
+  end
+
+  # The cloud's ledger: `count` contexts written on the cloud Engine.
+  defp cloud_ledger(ctx, count) do
+    for seq <- 1..count do
+      mutation(ctx, %{
+        "sequence" => seq,
+        "id" => "mut_cloud_#{ctx.n}_#{seq}",
+        "device_id" => "rep_cloud",
+        "payload" => context_row("relayed-#{ctx.n}-#{seq}", "From cloud", ctx.ws, ctx.tenant)
+      })
+    end
+  end
+
+  defp relayed(ctx) do
+    {:ok, [[count]]} =
+      Store.raw_query("SELECT count(*) FROM contexts WHERE id LIKE ?1", ["relayed-#{ctx.n}-%"])
+
+    count
+  end
 
   defp add_relay_peer(ctx, key, policy) do
     Sync.add_peer(

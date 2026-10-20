@@ -35,7 +35,9 @@ defmodule OptimalEngine.Sync do
   @classes ~w(public internal confidential restricted)
   @page 500
   @cycle_pages 20
+  @cycle_budget 60_000
   @version_refused "the peer refused this Engine's schema version; sync pauses until both run the same Engine version"
+  @version_unreported "the relay did not report the other Engine's schema version; sync pauses until it does"
 
   # -- identity and enablement -------------------------------------------------
 
@@ -220,13 +222,22 @@ defmodule OptimalEngine.Sync do
     Enum.map(rows, &(&1 |> to_peer() |> run_peer()))
   end
 
-  @doc "Pulls from and pushes to one peer, honoring its policy."
+  @doc """
+  Pulls from and pushes to one peer, honoring its policy. Paging stops once
+  the cycle has run `:sync_cycle_budget_ms` (default 60 s) and resumes on the
+  next cycle, so one slow peer cannot hold the scheduler.
+  """
   @spec run_peer(map()) :: map()
   def run_peer(peer) do
+    budget = Application.get_env(:optimal_engine, :sync_cycle_budget_ms, @cycle_budget)
+    deadline = System.monotonic_time(:millisecond) + budget
+
     with {:ok, key} <- peer_key(peer),
          {:ok, peer} <- prepare(peer, key) do
       pulled =
-        if peer.policy in ["pull", "both"], do: pull(peer, key), else: {:ok, %{skipped: :policy}}
+        if peer.policy in ["pull", "both"],
+          do: pull(peer, key, deadline),
+          else: {:ok, %{skipped: :policy}}
 
       # Reload: a pull learns the peer's replica id, which push must not echo to.
       peer = reload_peer(peer)
@@ -235,7 +246,7 @@ defmodule OptimalEngine.Sync do
         cond do
           # A peer on another schema version is sent nothing until both match.
           match?({:error, {:version_mismatch, _}}, pulled) -> {:ok, %{skipped: :paused_version}}
-          peer.policy in ["push", "both"] -> push(peer, key)
+          peer.policy in ["push", "both"] -> push(peer, key, deadline)
           true -> {:ok, %{skipped: :policy}}
         end
 
@@ -423,8 +434,13 @@ defmodule OptimalEngine.Sync do
                 record_failure(txn, tenant_id, workspace_id, mutation, reason)
                 %{acc | failed: [%{id: mutation["id"], reason: reason} | acc.failed]}
 
+              # Planned outside this transaction, so a concurrent apply of the
+              # same change (`POST /api/sync/run` during a scheduler tick) may
+              # have committed it since; an append-only row would be added twice.
               {:apply, step}, acc ->
-                apply_step(txn, tenant_id, workspace_id, step, acc)
+                if txn_known?(txn, step.mutation["id"]),
+                  do: update_in(acc, [:skipped, :duplicate], &((&1 || 0) + 1)),
+                  else: apply_step(txn, tenant_id, workspace_id, step, acc)
             end
           )
 
@@ -727,6 +743,11 @@ defmodule OptimalEngine.Sync do
 
   defp known?(_id), do: true
 
+  defp txn_known?(txn, id) do
+    sql = "SELECT 1 FROM sync_mutations WHERE id = ?1"
+    match?({:ok, [_ | _]}, Store.txn_query(txn, sql, [id]))
+  end
+
   defp restricted_row?(mutation, gate) do
     labels = get_in(mutation, ["payload", "row", "security_labels"])
 
@@ -766,10 +787,11 @@ defmodule OptimalEngine.Sync do
   # managed Engine cannot dial back. The laptop is always the initiator: each
   # cycle it reads `<base>/status` (enabling sync with `<base>/enable` when the
   # status says it is off, and pausing when the other Engine runs another
-  # migration), pulls from `<base>/pull`, and pushes to `<base>/push`, each with
-  # `?workspace=`. Bodies are those of `/api/sync/changes`; the relay wraps
-  # answers in `{"data": ...}` and refusals in `{"error": {"code", "message"}}`.
-  # Nothing here opens a connection to another Engine.
+  # migration or status does not say which), pulls from `<base>/pull`, and
+  # pushes to `<base>/push`, each with `?workspace=`. Bodies are those of
+  # `/api/sync/changes`; the relay wraps answers in `{"data": ...}` and refusals
+  # in `{"error": {"code", "message"}}`. Nothing here opens a connection to
+  # another Engine.
   defp relay_url(%{url: "relay+" <> base, workspace_id: workspace}, route),
     do: base <> "/" <> route <> "?" <> URI.encode_query(%{"workspace" => workspace})
 
@@ -789,16 +811,18 @@ defmodule OptimalEngine.Sync do
 
   defp prepare(peer, _key), do: {:ok, peer}
 
-  # A relay that cannot read the other Engine's version reports no migration;
-  # the pull's engine envelope (or a refused push) is then the check.
-  defp relay_compatible(%{"migration" => _} = status), do: compatible(status)
-  defp relay_compatible(_status), do: :ok
+  # Status is the check before anything moves, so it fails closed: a status
+  # without the other Engine's migration pauses the peer like a mismatch.
+  defp relay_compatible(%{"migration" => migration} = status) when is_integer(migration),
+    do: compatible(status)
 
-  defp relay_enabled(_peer, %{"enabled" => true}, _key), do: :ok
+  defp relay_compatible(_status), do: {:error, {:version_mismatch, @version_unreported}}
 
-  defp relay_enabled(peer, _status, key) do
+  defp relay_enabled(peer, %{"enabled" => false}, key) do
     with {:ok, _} <- request(:post, relay_url(peer, "enable"), %{}, key, 15_000), do: :ok
   end
+
+  defp relay_enabled(_peer, _status, _key), do: :ok
 
   defp remember_peer_replica(peer, replica) when is_binary(replica) do
     {:ok, _} =
@@ -813,13 +837,14 @@ defmodule OptimalEngine.Sync do
   defp remember_peer_replica(peer, _replica), do: peer
 
   # Pages are pulled from the cursor while the peer says there is `more`, up to
-  # @cycle_pages a cycle; each page is applied and its cursor kept before the next.
-  defp pull(peer, key) do
+  # @cycle_pages a cycle and within the cycle's time budget; each page is
+  # applied and its cursor kept before the next.
+  defp pull(peer, key, deadline) do
     totals = %{applied: 0, skipped: %{}, failed: [], conflicts: 0, pages: 0}
-    pull_pages(peer, key, peer.last_pulled_seq, totals, @cycle_pages)
+    pull_pages(peer, key, peer.last_pulled_seq, totals, @cycle_pages, deadline)
   end
 
-  defp pull_pages(peer, key, since, totals, pages_left) do
+  defp pull_pages(peer, key, since, totals, pages_left, deadline) do
     url =
       pull_url(peer) <>
         URI.encode_query(%{"workspace" => peer.workspace_id, "since" => since, "limit" => @page})
@@ -847,24 +872,29 @@ defmodule OptimalEngine.Sync do
           pages: totals.pages + 1
       }
 
-      if page["more"] == true and cursor > since and pages_left > 1,
-        do: pull_pages(peer, key, cursor, totals, pages_left - 1),
-        else: {:ok, Map.put(totals, :cursor, cursor)}
+      more = page["more"] == true and cursor > since
+
+      if more and pages_left > 1 and in_budget?(deadline),
+        do: pull_pages(peer, key, cursor, totals, pages_left - 1, deadline),
+        else: {:ok, Map.merge(totals, %{cursor: cursor, more: more})}
     else
-      {:ok, body} -> {:error, {:http_status, 200, body}}
+      {:ok, body} -> {:error, {:not_a_change_page, Map.keys(body)}}
       {:error, _} = error -> error
     end
   end
 
-  # Local changes are pushed a page at a time, up to @cycle_pages a cycle. The
-  # push cursor moves to the last sequence of a page only after the peer
-  # answered 200 (or when every row of the page stays home, which sends nothing).
-  defp push(peer, key) do
+  # Local changes are pushed a page at a time, up to @cycle_pages a cycle and
+  # within the cycle's time budget. The push cursor moves to the last sequence
+  # of a page only after the peer acknowledged it with its `applied` count (or
+  # when every row of the page stays home, which sends nothing). A page the
+  # peer finds too large (413) is sent again as pages half its size.
+  defp push(peer, key, deadline) do
     {:ok, _} = Capture.seal()
-    push_pages(peer, key, peer.last_pushed_seq, %{sent: 0, gated: 0, pages: 0}, @cycle_pages)
+    totals = %{sent: 0, gated: 0, applied: 0, pages: 0}
+    push_pages(peer, key, peer.last_pushed_seq, totals, @cycle_pages, @page, deadline)
   end
 
-  defp push_pages(peer, key, since, totals, pages_left) do
+  defp push_pages(peer, key, since, totals, pages_left, page, deadline) do
     {:ok, rows} =
       Store.raw_query(
         """
@@ -873,7 +903,7 @@ defmodule OptimalEngine.Sync do
         WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3 AND device_id != ?4
         ORDER BY sequence LIMIT ?5
         """,
-        [peer.tenant_id, peer.workspace_id, since, peer.peer_replica_id || "", @page]
+        [peer.tenant_id, peer.workspace_id, since, peer.peer_replica_id || "", page]
       )
 
     if rows == [] do
@@ -882,27 +912,36 @@ defmodule OptimalEngine.Sync do
       mutations =
         rows |> Enum.map(&to_mutation/1) |> Enum.reject(&restricted_row?(&1, peer.max_class))
 
-      with {:ok, remote} <- send_page(peer, key, mutations) do
-        cursor = rows |> List.last() |> hd()
+      case send_page(peer, key, mutations) do
+        {:ok, remote} ->
+          cursor = rows |> List.last() |> hd()
 
-        {:ok, _} =
-          Store.raw_query(
-            "UPDATE sync_peers SET last_pushed_seq = ?4 WHERE tenant_id = ?1 AND workspace_id = ?2 AND url = ?3",
-            [peer.tenant_id, peer.workspace_id, peer.url, cursor]
-          )
+          {:ok, _} =
+            Store.raw_query(
+              "UPDATE sync_peers SET last_pushed_seq = ?4 WHERE tenant_id = ?1 AND workspace_id = ?2 AND url = ?3",
+              [peer.tenant_id, peer.workspace_id, peer.url, cursor]
+            )
 
-        totals = %{
-          totals
-          | sent: totals.sent + length(mutations),
-            gated: totals.gated + length(rows) - length(mutations),
-            pages: totals.pages + 1
-        }
+          totals = %{
+            totals
+            | sent: totals.sent + length(mutations),
+              gated: totals.gated + length(rows) - length(mutations),
+              applied: totals.applied + ((remote || %{})["applied"] || 0),
+              pages: totals.pages + 1
+          }
 
-        totals = if remote, do: Map.put(totals, :remote, remote), else: totals
+          totals = if remote, do: Map.put(totals, :remote, remote), else: totals
 
-        if length(rows) == @page and pages_left > 1,
-          do: push_pages(peer, key, cursor, totals, pages_left - 1),
-          else: {:ok, totals}
+          if length(rows) == page and pages_left > 1 and in_budget?(deadline),
+            do: push_pages(peer, key, cursor, totals, pages_left - 1, page, deadline),
+            else: {:ok, totals}
+
+        {:error, {:http_status, 413, _body}} when length(rows) > 1 ->
+          half = max(div(length(rows), 2), 1)
+          push_pages(peer, key, since, totals, pages_left, half, deadline)
+
+        {:error, _} = error ->
+          error
       end
     end
   end
@@ -919,8 +958,15 @@ defmodule OptimalEngine.Sync do
       "mutations" => mutations
     }
 
-    request(:post, push_url(peer), body, key, 30_000)
+    # Only an answer that says what it applied acknowledges the page.
+    case request(:post, push_url(peer), body, key, 30_000) do
+      {:ok, %{"applied" => applied} = remote} when is_integer(applied) -> {:ok, remote}
+      {:ok, remote} -> {:error, {:push_not_acknowledged, Map.keys(remote)}}
+      {:error, _} = error -> error
+    end
   end
+
+  defp in_budget?(deadline), do: System.monotonic_time(:millisecond) < deadline
 
   # A peer Engine answers with the result itself; a relay wraps it in
   # {"data": ...} and reports a refusal as {"error": {"code", "message"}}, where
@@ -933,12 +979,40 @@ defmodule OptimalEngine.Sync do
       end
 
     case response do
-      {:ok, %{status: 200, body: %{"data" => data}}} when is_map(data) -> {:ok, data}
-      {:ok, %{status: 200, body: data}} when is_map(data) -> {:ok, data}
-      {:ok, %{status: status, body: body}} -> {:error, refusal(status, body)}
-      {:error, _} = error -> error
+      {:ok, %{status: status, body: %{"data" => data}}} when status in 200..299 and is_map(data) ->
+        {:ok, data}
+
+      {:ok, %{status: status, body: data}} when status in 200..299 and is_map(data) ->
+        {:ok, data}
+
+      {:ok, %{status: status, body: body}} ->
+        {:error, refusal(status, scrub(body, key))}
+
+      {:error, _} = error ->
+        error
     end
   end
+
+  # A refusal is the other side's text. It is kept on the peer (`message`,
+  # served by /api/sync/status) and returned by /api/sync/run, so the peer key
+  # never stays in it, nor anything shaped like a key: a bearer token, a
+  # prefixed key (msk_, oe_, sk_, pk_, rk_), or a long opaque token.
+  @key_shaped ~r/Bearer\s+[^\s"',;}\[\]]+|\b(?:msk|oe|sk|pk|rk)_[A-Za-z0-9_\-]{6,}|\b(?=[A-Za-z0-9]*[0-9])(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{32,}\b/i
+
+  defp scrub(text, key) when is_binary(text) do
+    text =
+      if is_binary(key) and byte_size(key) >= 8,
+        do: String.replace(text, key, "[redacted]"),
+        else: text
+
+    Regex.replace(@key_shaped, text, "[redacted]")
+  end
+
+  defp scrub(map, key) when is_map(map) and not is_struct(map),
+    do: Map.new(map, fn {name, value} -> {scrub(name, key), scrub(value, key)} end)
+
+  defp scrub(list, key) when is_list(list), do: Enum.map(list, &scrub(&1, key))
+  defp scrub(other, _key), do: other
 
   defp refusal(status, body) do
     {code, message} =

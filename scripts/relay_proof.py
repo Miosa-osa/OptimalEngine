@@ -381,25 +381,28 @@ class Proof:
         if status != 200:
             return self.check("preflight", False, "relay status answered %s %s" % (status, error_code(cloud) or cloud))
         self.cloud_replica = cloud.get("replica_id")
-        self.cloud_migration = cloud.get("migration", local)
+        self.cloud_migration = cloud.get("migration")
         self.cloud_version = cloud.get("version", "")
         self.cloud_start = cloud.get("ledger_sequence", 0)
         self.local_migration = local
-        same = self.cloud_migration == local
+        self.info(
+            "relay status: workspace %s on the cloud Engine, replica %s, version %s, enabled %s, ledger %s, %d peer(s)"
+            % (self.workspace, self.cloud_replica, self.cloud_version or "unreported", cloud.get("enabled"), self.cloud_start, len(cloud.get("peers") or []))
+        )
+        # Fails closed, as the client does: a status without the other Engine's
+        # migration is not a match.
+        reported = isinstance(self.cloud_migration, int)
+        same = reported and self.cloud_migration == local
+        if not reported:
+            why = ": the relay's status carries no migration, so the client pauses"
+        elif not same:
+            why = ": run this proof from an Engine checkout on the cloud Engine's migration"
+        else:
+            why = ""
         return self.check(
             "preflight",
             same,
-            "relay status 200, workspace %s on the cloud Engine (replica %s, migration %s, enabled %s, ledger %s, %d peer(s)); laptop migration %s%s"
-            % (
-                self.workspace,
-                self.cloud_replica,
-                self.cloud_migration,
-                cloud.get("enabled"),
-                self.cloud_start,
-                len(cloud.get("peers") or []),
-                local,
-                "" if same else ": run this proof from an Engine checkout on the cloud Engine's migration",
-            ),
+            "relay status 200 reports the cloud Engine on migration %s, the laptop runs %s%s" % (self.cloud_migration, local, why),
         )
 
     def register(self):
@@ -407,7 +410,16 @@ class Proof:
         status, peer = self.laptop.request(
             "POST", "/api/sync/peers", {"workspace": self.workspace, "url": self.gate.peer_url, "api_key": os.environ["MIOSA_API_KEY"], "policy": "both"}
         )
-        self.check("relay peer", status == 201, "registered %s policy both on the laptop (HTTP %s); no Engine address is stored" % (self.gate.peer_url, status))
+        _, listed = self.laptop.request("GET", "/api/sync/status", workspace=self.workspace)
+        urls = [p.get("url") for p in (listed or {}).get("peers", [])] if isinstance(listed, dict) else []
+        engine_address = urllib.parse.urlsplit(os.environ.get("CLOUD_ENGINE_URL", "")).netloc
+        stored_engine = [u for u in urls if not str(u).startswith("relay+") or (engine_address and engine_address in str(u))]
+        self.check(
+            "relay peer",
+            status == 201 and urls == [self.gate.peer_url] and not stored_engine,
+            "registered %s policy both on the laptop (HTTP %s); its peers are %s, %d of them an Engine address"
+            % (self.gate.peer_url, status, urls, len(stored_engine)),
+        )
 
         # A workspace with sync policy none: captured on the laptop, never sent.
         _, ws = self.laptop.request("POST", "/api/workspaces", {"slug": "relay-none-" + self.run, "name": "Relay proof, policy none"})
@@ -474,9 +486,15 @@ class Proof:
         back = time.time()
         arrived, seconds = wait_for(lambda: self.all_on_cloud(ids, marker), 6 * self.interval + 60, step=2)
 
-        pending_after = self.laptop.peer(self.workspace).get("pending_push")
+        def drained():
+            left = self.laptop.peer(self.workspace).get("pending_push")
+            return ("drained", left) if left == 0 else None
+
+        drained_after, _ = wait_for(drained, 2 * self.interval + 10)
+        pending_after = drained_after[1] if drained_after else self.laptop.peer(self.workspace).get("pending_push")
         mutations, _ = self.relay.ledger(cloud_start)
         from_laptop = [m for m in mutations if m["device_id"] == self.laptop_replica]
+        laptop_ids = {m["id"] for m in from_laptop}
         creates = [m for m in mutations if m["entity_type"] == "memories" and m["operation"] == "create" and ((m.get("payload") or {}).get("row") or {}).get("id") in set(ids)]
         per_id = {}
         for m in creates:
@@ -485,6 +503,8 @@ class Proof:
         once = len(ids) == OFFLINE_WRITES and set(per_id) == set(ids) and all(n == 1 for n in per_id.values()) and len(keys) == len(creates)
         laptop_hits = self.laptop.memory_ids(self.workspace, marker)
         once = once and sorted(laptop_hits) == sorted(ids)
+        # Everything that was pending arrived, each change once, nothing left behind.
+        sent_all = isinstance(pending, int) and pending > 0 and len(from_laptop) >= pending and len(laptop_ids) == len(from_laptop) and pending_after == 0
         search = ""
         if self.cloud:
             hits = self.cloud.memory_ids(self.workspace, marker)
@@ -492,10 +512,10 @@ class Proof:
             search = "; cloud search finds %d, %d distinct" % (len(hits), len(set(hits)))
         self.check(
             "offline writes exactly once",
-            bool(arrived) and once,
+            bool(arrived) and once and sent_all,
             "%d/%d arrived %.0f s after the relay returned; laptop search finds %d; cloud ledger has %d creates for them, %d distinct ids, %d distinct idempotency keys%s; "
-            "sent: %s laptop changes were pending, the cloud ledger now holds %d changes from the laptop since the outage began, %s pending after"
-            % (len(per_id), len(ids), seconds, len(laptop_hits), len(creates), len(per_id), len(keys), search, pending, len(from_laptop), pending_after),
+            "sent: %s laptop changes were pending, the cloud ledger now holds %d changes from the laptop since the outage began (%d distinct), %s pending after"
+            % (len(per_id), len(ids), seconds, len(laptop_hits), len(creates), len(per_id), len(keys), search, pending, len(from_laptop), len(laptop_ids), pending_after),
         )
 
         # Replay: the laptop's ledger since before the outage, pushed again as is.
@@ -517,7 +537,7 @@ class Proof:
             totals["failed"] += len(result.get("failed") or [])
         self.check(
             "replay applies nothing",
-            sent > 0 and totals["applied"] == 0 and totals["conflicts"] == 0 and totals["refused"] == 0 and totals["duplicate"] + totals["failed"] == sent,
+            sent > 0 and totals["applied"] == 0 and totals["conflicts"] == 0 and totals["failed"] == 0 and totals["refused"] == 0 and totals["duplicate"] == sent,
             "the laptop's %d changes since before the outage pushed again: applied %d, skipped duplicate %d, conflicts %d, failed %d, refused %d"
             % (sent, totals["applied"], totals["duplicate"], totals["conflicts"], totals["failed"], totals["refused"]),
         )
@@ -528,17 +548,40 @@ class Proof:
             return found
 
         conflicts, _ = wait_for(note_conflicts, 2 * self.interval + 10)
-        cloud_side = ""
-        if self.cloud:
+        resolutions = ", ".join(sorted({c.get("resolution") for c in conflicts or []}))
+        if not self.cloud:
+            self.check(
+                "conflict queue",
+                bool(conflicts),
+                "the daily note %s edited on both sides: %d open conflict(s) on the laptop (%s)" % (self.period, len(conflicts or []), resolutions),
+            )
+            self.info("the cloud's conflict queue and the note's final text are not readable through the relay; set CLOUD_ENGINE_URL to check them")
+            return
+
+        def cloud_conflicts():
             _, body = self.cloud.request("GET", "/api/sync/conflicts", workspace=self.workspace)
-            cloud_side = "; cloud queue has %d for the note" % len([c for c in body.get("conflicts", []) if c.get("table") == "rhythm_notes"])
+            return [c for c in (body or {}).get("conflicts", []) if c.get("table") == "rhythm_notes" and c.get("kind") == "concurrent_change"]
+
+        def converged():
             notes = [self.note_content(engine) for engine in (self.laptop, self.cloud)]
-            cloud_side += "; both sides now read %r" % notes[0] if notes[0] == notes[1] else "; sides differ: %r" % notes
+            return notes if notes[0] is not None and notes[0] == notes[1] else None
+
+        on_cloud, _ = wait_for(cloud_conflicts, 2 * self.interval + 10)
+        notes, _ = wait_for(converged, 2 * self.interval + 10)
+        final = notes or [self.note_content(engine) for engine in (self.laptop, self.cloud)]
         self.check(
             "conflict queue",
-            bool(conflicts),
-            "the daily note %s edited on both sides: %d open conflict(s) on the laptop (%s)%s"
-            % (self.period, len(conflicts or []), ", ".join(sorted({c.get("resolution") for c in conflicts or []})), cloud_side),
+            bool(conflicts) and bool(on_cloud) and bool(notes),
+            "the daily note %s edited on both sides: %d open conflict(s) on the laptop (%s), %d on the cloud (%s); laptop reads %r, cloud reads %r"
+            % (
+                self.period,
+                len(conflicts or []),
+                resolutions,
+                len(on_cloud or []),
+                ", ".join(sorted({c.get("resolution") for c in on_cloud or []})),
+                final[0],
+                final[1],
+            ),
         )
 
     def policy_none(self):
@@ -547,18 +590,26 @@ class Proof:
         log = self.gate.entries()
         named = [e for e in log if e["workspace"] == self.none_ws]
         carried = [e for e in log if self.none_marker in e["body"]]
+        synced = [e for e in log if e["workspace"] == self.workspace]
         self.check(
             "policy none stays home",
-            len(captured) > 0 and not named and not carried,
-            "workspace %s: %d change(s) captured on the laptop; of %d relay requests, %d named it and %d carried its marker"
-            % (self.none_ws, len(captured), len(log), len(named), len(carried)),
+            len(captured) > 0 and len(synced) > 0 and not named and not carried,
+            "workspace %s: %d change(s) captured on the laptop; of %d relay requests (%d for workspace %s), %d named it and %d carried its marker"
+            % (self.none_ws, len(captured), len(log), len(synced), self.workspace, len(named), len(carried)),
         )
 
     def version_pause(self):
         older = (self.local_migration or 1) - 1
         probe = self.synthetic_mutation("memories", "create", {"id": "mem_relay_%s_version" % self.run, "content": "Never applied relayversion" + self.run, "root_memory_id": None, "metadata": "{}"})
         status, body = self.relay.request("POST", "push", {"workspace": self.workspace, "replica_id": "rep_proof_old_" + self.run, "engine": {"replica_id": "rep_proof_old_" + self.run, "migration": older, "version": "0.0.0"}, "mutations": [probe]})
-        self.check("relay refuses another migration", status == 409 and error_code(body) == "version_mismatch", "a push on migration %s answered %s %s" % (older, status, error_code(body).upper()))
+        error = body.get("error") if isinstance(body, dict) else None
+        message = error.get("message") if isinstance(error, dict) else None
+        expected = "runs schema %s" % older
+        self.check(
+            "relay refuses another migration",
+            status == 409 and error_code(body) == "version_mismatch" and expected in str(message) and "same Engine version" in str(message),
+            "a push on migration %s answered %s %s: %s" % (older, status, error_code(body).upper(), message),
+        )
 
         self.gate.skew = True
         peer, seconds = wait_for(lambda: (lambda p: p if p.get("status") == "paused_version" else None)(self.laptop.peer(self.workspace)), 3 * self.interval + 15)
@@ -568,9 +619,11 @@ class Proof:
         only_status = bool(during) and all(e["method"] == "GET" and e["route"] == "status" for e in during)
         self.gate.skew = False
         resumed, resume_seconds = wait_for(lambda: (lambda p: p if p.get("status") == "active" else None)(self.laptop.peer(self.workspace)), 3 * self.interval + 15)
+        message = str((peer or {}).get("message"))
+        skewed = "runs schema %s" % ((self.cloud_migration or 0) + 1000)
         self.check(
             "client pauses on another migration",
-            bool(peer) and only_status and bool(resumed),
+            bool(peer) and skewed in message and "same Engine version" in message and only_status and bool(resumed),
             "relay reporting migration +1000: peer paused_version after %.0f s (%s); while paused it sent %d request(s), %s; resumed active %.0f s after the versions matched"
             % (seconds, (peer or {}).get("message"), len(during), "all GET status" if only_status else [(e["method"], e["route"]) for e in during], resume_seconds),
         )

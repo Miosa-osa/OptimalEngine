@@ -184,6 +184,12 @@ if interval = System.get_env("OPTIMAL_SYNC_INTERVAL_MS") do
   config :optimal_engine, :sync_interval_ms, String.to_integer(interval)
 end
 
+# Replication: how long one peer's cycle keeps paging before it stops and
+# resumes on the next cycle.
+if budget = System.get_env("OPTIMAL_SYNC_CYCLE_BUDGET_MS") do
+  config :optimal_engine, :sync_cycle_budget_ms, String.to_integer(budget)
+end
+
 # Size profile: agent, workspace, business, platform, or scale (OptimalEngine.Sizing).
 if profile = System.get_env("OPTIMAL_SIZE_PROFILE") do
   unless profile in ~w(agent workspace business platform scale) do

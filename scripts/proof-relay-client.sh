@@ -34,7 +34,10 @@
 #
 # Run it on a disposable machine, never on a machine with a live user store.
 # The managed Engine keeps the proof's writes (marked with the run id).
-# Keys come from the environment or files and are never printed.
+# Keys come from the environment or files and are never printed. The temporary
+# data (the Engines' stores, their keys, the relay key sealed in the laptop's
+# store) is removed on exit; KEEP_DATA=1 keeps it for debugging. DATA, when
+# set, must name an empty or missing directory.
 # Exit: 0 only when every check passed.
 set -euo pipefail
 
@@ -56,7 +59,27 @@ case "${1:-}" in
 esac
 
 umask 077
-DATA="${DATA:-$(mktemp -d)}"
+if [ -n "${DATA:-}" ]; then
+  if [ -e "$DATA" ] && [ -n "$(ls -A "$DATA")" ]; then
+    echo "DATA must be an empty or missing directory: $DATA" >&2
+    exit 2
+  fi
+  mkdir -p "$DATA"
+else
+  DATA="$(mktemp -d)"
+fi
+
+# The temporary data holds every key the run uses. main runs in a pipeline
+# subshell that stops its Engines when it exits; this shell then removes it.
+remove_data() {
+  if [ "${KEEP_DATA:-}" = 1 ]; then
+    echo "== temporary data kept at $DATA (KEEP_DATA=1); it holds keys, remove it when done" >&2
+  else
+    rm -rf "$DATA"
+  fi
+}
+trap remove_data EXIT
+
 SECRETS="$DATA/secrets"
 : >"$SECRETS"
 export DATA WORKSPACE="${WORKSPACE:-default}" SYNC_INTERVAL_MS="${SYNC_INTERVAL_MS:-20000}"
@@ -80,8 +103,10 @@ else
 fi
 export MIOSA_API_KEY
 
-engine_env() { # name port
+engine_env() { # name port; only ever called in the subshell that runs the Engine
   local dir="$DATA/$1"
+  # The relay key reaches the laptop only through its peer registration.
+  unset MIOSA_API_KEY MIOSA_API_KEY_FILE CLOUD_ENGINE_KEY CLOUD_ENGINE_KEY_FILE
   export OPTIMAL_API_ENABLED=true OPTIMAL_AUTH_REQUIRED=true OPTIMAL_API_PORT="$2"
   export OPTIMAL_API_INTERFACE=127.0.0.1
   export OPTIMAL_ENGINE_ROOT="$dir/root" OPTIMAL_ENGINE_DB="$dir/root/index.db"
@@ -99,7 +124,9 @@ pids=()
 stop_engines() {
   local pid
   for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
 }
+
 names=(laptop)
 [ "$mode" = stand-in ] && names+=(cloud)
 

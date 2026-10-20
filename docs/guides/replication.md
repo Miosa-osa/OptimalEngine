@@ -23,9 +23,11 @@ Tables keyed by a single integer row id are derivations whose ids differ per Eng
 | `GET /api/sync/conflicts?workspace=`, `POST /api/sync/conflicts/:id/resolve` | read, admin | Conflicts and their resolution |
 
 A scheduler seals changes and runs every active peer every 20 seconds (`OPTIMAL_SYNC_INTERVAL_MS`), so a change reaches the other replica within a minute when both are online.
+A cycle pages up to 20 pages of 500 changes each way; once a peer's cycle has run 60 seconds (`OPTIMAL_SYNC_CYCLE_BUDGET_MS`) it finishes the page in hand and resumes on the next cycle, so one slow peer cannot hold the scheduler.
 An unreachable peer keeps its status and message and is retried on the next cycle; the local Engine keeps working offline and catches up when the peer returns, in order.
 
 Apply is idempotent by mutation id, in origin order, each change in its own savepoint inside one transaction.
+The ledger is checked again inside that transaction, so two applies of the same batch at once (`POST /api/sync/run` during a scheduler tick) still apply each change once.
 Applied changes are added to the local ledger under their origin device, so a hub forwards them to other replicas, and they are never captured again, so nothing echoes.
 
 The peer key is an API key on the peer limited to the workspace with the `sync` scope (add `read` for status).
@@ -43,21 +45,25 @@ Each cycle the local Engine calls the relay with `Authorization: Bearer <relay k
 
 | Step | Route | What the client does |
 | --- | --- | --- |
-| Status | `GET <base>/status` | Learns the other Engine's replica id and migration; pauses when the migration differs |
+| Status | `GET <base>/status` | Learns the other Engine's replica id and migration; pauses when the migration differs or status does not report one |
 | Enable | `POST <base>/enable` with `{}` | Only when status says `enabled: false`; idempotent |
 | Pull | `GET <base>/pull?since=&limit=` | Applies each page and keeps its `cursor`, then pulls again from it while `more` is true |
-| Push | `POST <base>/push` with `{workspace, replica_id, engine, mutations}` | Sends the local ledger a page at a time, with the sender's `engine` envelope; moves its push cursor only after a 200 |
+| Push | `POST <base>/push` with `{workspace, replica_id, engine, mutations}` | Sends the local ledger a page at a time, with the sender's `engine` envelope and no cursor; moves its push cursor only after a 2xx answer that reports `applied` |
 
 The relay wraps answers in `{"data": ...}` and refusals in `{"error": {"code", "message"}}`; the client reads both, and a direct peer's unwrapped answers too.
 Pushed mutations carry the full ledger shape, `sequence` included, exactly as `GET /api/sync/changes` returns them.
 A page whose rows all stay home under the data-class gate is not sent, and the push cursor still moves past it.
+A page the relay refuses as too large (`413`) is sent again as pages half its size.
+When an answer is lost after the other side applied a page (a timeout or a `502`), the cursor stays, the next cycle sends the page again, and the other side applies none of it twice.
 The relay does not forward `x-optimal-replica`, so the local Engine's own changes come back on the next pull; they are skipped as its own, never applied twice, and never pushed back.
 A `409` with code `version_mismatch` pauses the peer (`status: paused_version`) and nothing is retried that cycle; while paused, a cycle makes only the status call, and sync resumes when both run the same migration.
-Any other refusal (`403` without `engine:sync`, `404` not this tenant's Engine or workspace, `409 engine_not_running`) leaves the peer in `status: error` with the code and message, never the key, and the next cycle tries again.
+Any other refusal (`403` without `engine:sync`, `404` not this tenant's Engine or workspace, `409 engine_not_running`) leaves the peer in `status: error` with the code and message, and the next cycle tries again.
+The message never carries the peer key or anything shaped like a key (a bearer token, a prefixed key, a long opaque token), even when the relay echoes one back.
 The local Engine is always the initiator, no peer Engine address is stored, and the same idempotency keys make a repeated cycle change nothing.
 
 `scripts/proof-relay-client.sh` proves the relay client end to end against a managed Engine (`RELAY_BASE`, `MIOSA_API_KEY_FILE`, `WORKSPACE`), and `--stand-in` runs the same checks against a second local Engine behind a relay stand-in.
-Run it on a disposable machine, never on one that holds a live store.
+Run it on a disposable machine, never on one that holds a live store; it removes its temporary data, keys included, when it exits (`KEEP_DATA=1` keeps it).
+Its conflict check edits a daily note on both sides; that a contested fact becomes two claims in the review queue is proven by `test/sync/sync_test.exs`, not by this script.
 
 ## Conflicts
 
