@@ -918,7 +918,9 @@ defmodule OptimalEngine.Storage.S3 do
         uri = URI.parse(value)
 
         if is_binary(uri.host) and uri.host != "" do
-          {:ok, %{uri | path: nil, query: nil, fragment: nil}}
+          # The path is kept: a gateway may be served under one, and both the
+          # request and its signature must carry it.
+          {:ok, %{uri | query: nil, fragment: nil}}
         else
           {:error, :not_configured}
         end
