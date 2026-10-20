@@ -129,6 +129,26 @@ defmodule OptimalEngine.API.SignalClassificationTest do
     end
   end
 
+  test "counts only the caller's tenant, even for a workspace id two tenants use", %{
+    n: n,
+    tenant: tenant
+  } do
+    other = "classify-other-#{n}"
+    {:ok, _} = Tenant.create(%{id: other, name: "Other #{n}"})
+    shared = "shared-#{n}"
+    insert(tenant, shared, "s1-#{n}", @transcript, "code", "transcript")
+    insert(other, shared, "s2-#{n}", @transcript, "code", "transcript")
+    insert(other, shared, "s3-#{n}", @prose, "code", "chat")
+
+    response = request("#{@route}?workspace=#{shared}&plan=true", key(tenant, [shared]))
+
+    assert response.status == 200
+    body = Jason.decode!(response.resp_body)
+    assert body["signals"] == 1
+    assert body["stored"] == %{"transcript" => %{"code" => 1}}
+    assert body["plan"]["scanned"] == 1
+  end
+
   test "a key for another workspace is refused", %{
     tenant: tenant,
     workspace: workspace,

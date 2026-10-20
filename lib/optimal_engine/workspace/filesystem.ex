@@ -53,6 +53,14 @@ defmodule OptimalEngine.Workspace.Filesystem do
   end
 
   @doc """
+  Directory names the engine root uses for itself. A default-tenant
+  workspace lives in `<root>/<slug>`, so no workspace slug may be one of
+  them.
+  """
+  @spec reserved_names() :: [String.t()]
+  def reserved_names, do: ~w(nodes assets architectures tenants cache)
+
+  @doc """
   Provisions the directory tree for a workspace. Returns `{:ok, path}` with
   the absolute workspace path on success; `{:error, reason}` on failure.
 

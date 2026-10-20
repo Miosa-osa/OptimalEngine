@@ -32,7 +32,7 @@ defmodule OptimalEngine.Authority.Evidence do
             could_not_enforce external.receipt issuer.registered revocations.received
             settings.changed key.rotated key.minted key.revoked integrity.finding
             agent_action.step connector.registered connector.changed connector.deleted
-            connector.run)
+            connector.run workspace.renamed)
 
   @doc "The evidence kinds the Engine records."
   @spec kinds() :: [String.t()]

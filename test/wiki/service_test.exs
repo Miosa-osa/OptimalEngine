@@ -51,6 +51,34 @@ defmodule OptimalEngine.Wiki.ServiceTest do
     }
   end
 
+  test "a page rendered after a rename stays in the workspace directory", %{
+    suffix: suffix,
+    tmp_dir: tmp_dir,
+    workspace: workspace,
+    workspace_path: workspace_path,
+    project: project
+  } do
+    renamed = "wiki-renamed-#{suffix}"
+    assert {:ok, _} = Workspace.update(workspace.id, %{slug: renamed})
+
+    assert {:ok, result} =
+             WikiService.render_node_page(project.slug,
+               tenant_id: workspace.tenant_id,
+               workspace_id: workspace.id,
+               root: tmp_dir,
+               actor_id: "test"
+             )
+
+    expected = Path.join([workspace_path, ".wiki", "node-#{project.slug}.md"])
+    assert result.path == expected
+    assert File.exists?(expected)
+    refute File.exists?(Path.join(tmp_dir, renamed))
+    assert result.export.destination_uri == "file://.wiki/node-#{project.slug}.md"
+
+    # The page names the workspace by its id, which a rename never changes.
+    assert result.markdown =~ "Node in workspace `#{workspace.id}`"
+  end
+
   test "renders a node into stored wiki, markdown projection, revision, and link health", %{
     tmp_dir: tmp_dir,
     workspace: workspace,

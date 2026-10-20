@@ -23,7 +23,7 @@ defmodule OptimalEngine.Sync.Capture do
 
   @excluded ~w(sync_capture sync_mutations sync_cursors sync_workspaces sync_peers sync_conflicts
                metric_samples uri_redirects federation_peers events connector_runs processor_runs
-               surfacing_events workspaces audit_samples)
+               surfacing_events workspaces workspace_handles audit_samples)
   @max_columns 60
 
   @doc "Installs (or refreshes) capture triggers on every eligible table."

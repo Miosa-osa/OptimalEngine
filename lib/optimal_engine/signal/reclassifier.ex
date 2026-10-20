@@ -66,13 +66,17 @@ defmodule OptimalEngine.Signal.Reclassifier do
 
   @doc """
   Scans every signal in `workspace_id` and returns the changes to make.
+  Options: `:tenant_id` (only that tenant's signals), `:batch_size`.
 
-  Returns `{:ok, %{scanned: n, changes: [change]}}`.
+  Returns `{:ok, %{scanned: n, changes: [change]}}`, or `{:error, reason}`
+  when the Store does not answer.
   """
-  @spec plan(String.t(), keyword()) :: {:ok, %{scanned: non_neg_integer(), changes: [change()]}}
+  @spec plan(String.t(), keyword()) ::
+          {:ok, %{scanned: non_neg_integer(), changes: [change()]}} | {:error, term()}
   def plan(workspace_id, opts \\ []) when is_binary(workspace_id) do
     batch_size = Keyword.get(opts, :batch_size, @batch_size)
-    scan(workspace_id, "", batch_size, %{scanned: 0, changes: []})
+    scope = scope(workspace_id, opts[:tenant_id])
+    scan(scope, "", batch_size, %{scanned: 0, changes: []})
   end
 
   @doc """
@@ -92,23 +96,31 @@ defmodule OptimalEngine.Signal.Reclassifier do
   @doc """
   Counts the stored signals of `workspace_id` by genre and mode, for
   example `%{"transcript" => %{"linguistic" => 12, "code" => 3}}`. A missing
-  genre or mode counts as `"none"`. Reads only.
+  genre or mode counts as `"none"`. Options: `:tenant_id` (only that
+  tenant's signals). Reads only.
   """
-  @spec distribution(String.t()) ::
-          %{optional(String.t()) => %{optional(String.t()) => pos_integer()}}
-  def distribution(workspace_id) when is_binary(workspace_id) do
-    {:ok, rows} =
-      Store.raw_query(
-        """
-        SELECT genre, mode, COUNT(*) FROM contexts
-        WHERE type = 'signal' AND workspace_id = ?1
-        GROUP BY genre, mode
-        """,
-        [workspace_id]
-      )
+  @spec distribution(String.t(), keyword()) ::
+          {:ok, %{optional(String.t()) => %{optional(String.t()) => pos_integer()}}}
+          | {:error, term()}
+  def distribution(workspace_id, opts \\ []) when is_binary(workspace_id) do
+    {where, params} = scope(workspace_id, opts[:tenant_id])
 
-    Enum.reduce(rows, %{}, fn [genre, mode, count], acc -> add(acc, genre, mode, count) end)
+    with {:ok, rows} <-
+           Store.raw_query(
+             "SELECT genre, mode, COUNT(*) FROM contexts WHERE #{where} GROUP BY genre, mode",
+             params
+           ) do
+      {:ok,
+       Enum.reduce(rows, %{}, fn [genre, mode, count], acc -> add(acc, genre, mode, count) end)}
+    end
   end
+
+  # The signals of one workspace, and of one tenant when it is given:
+  # workspace ids that are not registered can be shared by tenants.
+  defp scope(workspace_id, nil), do: {"type = 'signal' AND workspace_id = ?1", [workspace_id]}
+
+  defp scope(workspace_id, tenant_id),
+    do: {"type = 'signal' AND workspace_id = ?1 AND tenant_id = ?2", [workspace_id, tenant_id]}
 
   @doc """
   The `distribution/1` a workspace would have once `changes` (from `plan/2`)
@@ -177,30 +189,35 @@ defmodule OptimalEngine.Signal.Reclassifier do
 
   # ── Scan ────────────────────────────────────────────────────────────────
 
-  defp scan(workspace_id, after_id, batch_size, acc) do
-    {:ok, rows} =
-      Store.raw_query(
-        """
-        SELECT id, content, mode, genre, path, l0_abstract
-        FROM contexts
-        WHERE type = 'signal' AND workspace_id = ?1 AND id > ?2
-        ORDER BY id
-        LIMIT ?3
-        """,
-        [workspace_id, after_id, batch_size]
-      )
+  defp scan({where, params} = scope, after_id, batch_size, acc) do
+    next = length(params) + 1
 
-    changes =
-      rows
-      |> Enum.map(&change_for/1)
-      |> Enum.reject(&is_nil/1)
+    case Store.raw_query(
+           """
+           SELECT id, content, mode, genre, path, l0_abstract
+           FROM contexts
+           WHERE #{where} AND id > ?#{next}
+           ORDER BY id
+           LIMIT ?#{next + 1}
+           """,
+           params ++ [after_id, batch_size]
+         ) do
+      {:ok, rows} ->
+        changes =
+          rows
+          |> Enum.map(&change_for/1)
+          |> Enum.reject(&is_nil/1)
 
-    acc = %{scanned: acc.scanned + length(rows), changes: acc.changes ++ changes}
+        acc = %{scanned: acc.scanned + length(rows), changes: acc.changes ++ changes}
 
-    case rows do
-      [] -> {:ok, acc}
-      rows when length(rows) < batch_size -> {:ok, acc}
-      rows -> scan(workspace_id, rows |> List.last() |> hd(), batch_size, acc)
+        case rows do
+          [] -> {:ok, acc}
+          rows when length(rows) < batch_size -> {:ok, acc}
+          rows -> scan(scope, rows |> List.last() |> hd(), batch_size, acc)
+        end
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

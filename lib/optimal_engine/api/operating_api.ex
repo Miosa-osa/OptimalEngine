@@ -27,7 +27,8 @@ defmodule OptimalEngine.API.OperatingAPI do
       200,
       Boot.build(tenant(conn), workspace_id,
         timezone: conn.query_params["timezone"],
-        actor: Actor.of(conn)
+        actor: Actor.of(conn),
+        generate: conn.query_params["generate"] != "false"
       )
     )
   end
@@ -117,7 +118,8 @@ defmodule OptimalEngine.API.OperatingAPI do
     cadence = conn.query_params["cadence"] || "daily"
 
     case Rhythm.current(tenant(conn), workspace_id, cadence,
-           timezone: conn.query_params["timezone"]
+           timezone: conn.query_params["timezone"],
+           generate: conn.query_params["generate"] != "false"
          ) do
       {:ok, note} -> json(conn, 200, note)
       {:error, reason} -> error(conn, 422, reason)

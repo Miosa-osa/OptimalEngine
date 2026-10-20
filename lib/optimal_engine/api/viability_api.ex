@@ -187,28 +187,53 @@ defmodule OptimalEngine.API.ViabilityAPI do
   def classification(conn) do
     conn = fetch_query_params(conn)
     workspace_id = workspace(conn)
-    stored = Reclassifier.distribution(workspace_id)
-    result = %{workspace_id: workspace_id, signals: total(stored), stored: stored}
+    scope = [tenant_id: tenant(conn)]
+    plan? = conn.query_params["plan"] in ["true", "1"]
 
-    if conn.query_params["plan"] in ["true", "1"] do
-      {:ok, %{scanned: scanned, changes: changes}} = Reclassifier.plan(workspace_id)
-      summary = Reclassifier.summarize(changes)
-
-      plan = %{
-        scanned: scanned,
-        changes: length(changes),
-        planned: Reclassifier.apply_to_distribution(stored, changes),
-        planned_modes_by_stored_genre:
-          Reclassifier.apply_to_distribution(stored, changes, keep_genre: true),
-        mode_transitions: transitions(summary.mode),
-        genre_transitions: transitions(summary.genre)
-      }
-
-      json(conn, 200, Map.put(result, :plan, plan))
+    with {:ok, stored} <- Reclassifier.distribution(workspace_id, scope),
+         {:ok, scan} <- if(plan?, do: Reclassifier.plan(workspace_id, scope), else: {:ok, nil}) do
+      classification_result(conn, workspace_id, stored, scan)
     else
-      json(conn, 200, result)
+      {:error, reason} -> store_error(conn, reason)
     end
   end
+
+  defp classification_result(conn, workspace_id, stored, nil),
+    do: json(conn, 200, %{workspace_id: workspace_id, signals: total(stored), stored: stored})
+
+  defp classification_result(conn, workspace_id, stored, %{scanned: scanned, changes: changes}) do
+    result = %{workspace_id: workspace_id, signals: total(stored), stored: stored}
+    summary = Reclassifier.summarize(changes)
+
+    plan = %{
+      scanned: scanned,
+      changes: length(changes),
+      planned: Reclassifier.apply_to_distribution(stored, changes),
+      planned_modes_by_stored_genre:
+        Reclassifier.apply_to_distribution(stored, changes, keep_genre: true),
+      mode_transitions: transitions(summary.mode),
+      genre_transitions: transitions(summary.genre)
+    }
+
+    json(conn, 200, Map.put(result, :plan, plan))
+  end
+
+  # The Store did not answer: a busy Store is retryable, anything else is
+  # reported without the exception.
+  defp store_error(conn, reason) do
+    if busy?(reason) do
+      conn
+      |> put_resp_header("retry-after", "1")
+      |> json(503, %{error: "busy", detail: "the Engine's store is busy; retry shortly"})
+    else
+      json(conn, 500, %{error: "store_error"})
+    end
+  end
+
+  defp busy?(:busy), do: true
+  defp busy?(:timeout), do: true
+  defp busy?(%{message: message}) when is_binary(message), do: message =~ ~r/busy|locked/i
+  defp busy?(_reason), do: false
 
   defp total(distribution) do
     distribution |> Map.values() |> Enum.flat_map(&Map.values/1) |> Enum.sum()

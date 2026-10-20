@@ -14,15 +14,18 @@
 #       then revokes the keys and archives the workspaces (KEEP=1 keeps them).
 #   ENGINE_URL=http://127.0.0.1:4200 [ENGINE_KEY_FILE=...] WORKSPACE=<id> \
 #     scripts/proof-operating-layer.sh --read-only
-#       Sends GET requests only and prints counts, dates, metric values and
+#       Sends GET requests only and names the tenant and workspace it read;
+#       everything else it prints is counts, dates, metric values and
 #       booleans, never content, titles, names, emails or keys. For an
-#       owner's private Engine. Note: GET /api/boot writes today's rhythm
-#       note when it does not exist yet, as `optimal boot` does, and
+#       owner's private Engine. Boot is read only with BOOT=1, and then with
+#       generate=false, so today's rhythm note is not written (an Engine
+#       older than that option still writes it).
 #       GET /api/signals/classification?plan=true reads every Signal of the
 #       workspace (CLASSIFY_PLAN=0 skips that).
 #
 # The key is read from a file or minted here, passed to the checks in the
-# environment, and never printed or put on a command line.
+# environment, and never printed or put on a command line. A temporary store
+# this script made is removed on exit unless KEEP_DATA=1.
 # Exit: 0 when every check passed or was skipped, 1 when one failed, 2 when
 # the Engine could not be reached or refused the key.
 set -euo pipefail
@@ -57,7 +60,11 @@ else
   [ "$MODE" = full ] || { echo "--read-only needs ENGINE_URL" >&2; exit 64; }
 
   PORT="${PORT:-4212}"
-  DATA="${DATA:-$(mktemp -d)}"
+  own_data=0
+  if [ -z "${DATA:-}" ]; then
+    DATA="$(mktemp -d)"
+    own_data=1
+  fi
   export MIX_ENV=dev
   export OPTIMAL_API_ENABLED=true
   export OPTIMAL_AUTH_REQUIRED=true
@@ -94,7 +101,13 @@ else
 
   mix run --no-halt >"$DATA/server.log" 2>&1 &
   server=$!
-  trap 'kill "$server" 2>/dev/null || true' EXIT
+
+  cleanup() {
+    kill "$server" 2>/dev/null || true
+    wait "$server" 2>/dev/null || true
+    if [ "$own_data" = 1 ] && [ "${KEEP_DATA:-}" != 1 ]; then rm -rf "$DATA"; fi
+  }
+  trap cleanup EXIT
 
   ENGINE_URL="http://127.0.0.1:$PORT"
   healthy=0

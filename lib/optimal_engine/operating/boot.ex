@@ -16,7 +16,8 @@ defmodule OptimalEngine.Operating.Boot do
 
   @doc """
   Builds the boot for `workspace_id`. Options: `:timezone`, `:date` (tests),
-  `:actor` (the reading principal, for authority decisions on org policy).
+  `:actor` (the reading principal, for authority decisions on org policy),
+  `:generate` (`false` reads today's rhythm note without writing it).
   """
   @spec build(String.t(), String.t(), keyword()) :: map()
   def build(tenant_id, workspace_id, opts \\ []) do
@@ -36,7 +37,13 @@ defmodule OptimalEngine.Operating.Boot do
       |> Enum.filter(&(&1.due_at && String.slice(&1.due_at, 0, 10) <= today))
       |> Enum.map(&Map.take(&1, [:id, :kind, :title, :due_at, :owner, :counterparty, :source_uri]))
 
-    {:ok, rhythm} = Rhythm.current(tenant_id, workspace_id, "daily", timezone: timezone, date: date)
+    {:ok, rhythm} =
+      Rhythm.current(tenant_id, workspace_id, "daily",
+        timezone: timezone,
+        date: date,
+        generate: opts[:generate] != false
+      )
+
     {:ok, protocol} = Protocol.get(tenant_id, workspace_id, "protocol")
     brief = Brief.build(tenant_id, workspace_ids: [workspace_id], date: date, limit: 10)
 
@@ -45,7 +52,12 @@ defmodule OptimalEngine.Operating.Boot do
       date: today,
       weekday: weekday(date),
       timezone: timezone,
-      rhythm: %{period: rhythm.period, content: rhythm.content, generated: rhythm.generated},
+      rhythm: %{
+        period: rhythm.period,
+        content: rhythm.content,
+        generated: rhythm.generated,
+        stored: rhythm.stored
+      },
       fires: fires,
       open_loops: %{total: length(loops), by_kind: Enum.frequencies_by(loops, & &1.kind)},
       recent_decisions: recent_decisions(tenant_id, workspace_id, date),

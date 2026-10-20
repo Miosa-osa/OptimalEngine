@@ -115,8 +115,43 @@ defmodule OptimalEngine.Store.Migrations do
       migration_067_replication(),
       migration_068_viability(),
       migration_069_analysis_reports(),
-      migration_070_repair_vector_and_chunk_scope()
+      migration_070_repair_vector_and_chunk_scope(),
+      migration_071_workspace_handles()
     ]
+  end
+
+  # Every slug a workspace holds, now or before a rename, is one row, so a
+  # slug is claimed by a unique key in the same transaction that writes it.
+  # Earlier releases kept held slugs in metadata.previous_slugs.
+  defp migration_071_workspace_handles do
+    {71, "workspace handles: every slug a workspace holds",
+     [
+       {"workspace_handles",
+        """
+        CREATE TABLE IF NOT EXISTS workspace_handles (
+          tenant_id TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          PRIMARY KEY (tenant_id, slug)
+        )
+        """},
+       {"idx_workspace_handles_workspace",
+        "CREATE INDEX IF NOT EXISTS idx_workspace_handles_workspace ON workspace_handles(workspace_id)"},
+       {"backfill_current_slugs",
+        """
+        INSERT OR IGNORE INTO workspace_handles (tenant_id, slug, workspace_id)
+        SELECT tenant_id, slug, id FROM workspaces
+        """},
+       {"backfill_previous_slugs",
+        """
+        INSERT OR IGNORE INTO workspace_handles (tenant_id, slug, workspace_id)
+        SELECT w.tenant_id, held.value, w.id
+        FROM workspaces w,
+             json_each(CASE WHEN json_valid(w.metadata) THEN json_extract(w.metadata, '$.previous_slugs') END) held
+        WHERE held.type = 'text'
+        """}
+     ]}
   end
 
   # Document vectors were stored without a scope (they kept the column

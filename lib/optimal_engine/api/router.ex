@@ -1490,8 +1490,8 @@ defmodule OptimalEngine.API.Router do
             |> put_resp_content_type("application/json")
             |> send_resp(201, Jason.encode!(workspace_to_map(ws)))
 
-          {:error, :slug_taken} ->
-            send_resp(conn, 409, Jason.encode!(%{error: "slug_taken"}))
+          {:error, reason} when reason in [:slug_taken, :slug_reserved] ->
+            send_resp(conn, 409, Jason.encode!(%{error: Atom.to_string(reason)}))
 
           {:error, reason} ->
             send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
@@ -1511,6 +1511,13 @@ defmodule OptimalEngine.API.Router do
   # PATCH /api/workspaces/:id: rename or re-describe. A new slug keeps the
   # id (OptimalEngine.Workspace.update/2): links that name the id keep
   # resolving and the old slug stays this workspace's handle.
+  @workspace_conflicts [
+    :slug_taken,
+    :slug_reserved,
+    :slug_has_data,
+    :default_workspace_slug
+  ]
+
   patch "/api/workspaces/:id" do
     body = conn.body_params || %{}
 
@@ -1521,7 +1528,8 @@ defmodule OptimalEngine.API.Router do
       |> maybe_put(:slug, Map.get(body, "slug"))
 
     result =
-      with {:ok, workspace} <- OptimalEngine.Workspace.update(id, attrs) do
+      with {:ok, workspace} <-
+             OptimalEngine.Workspace.update(id, attrs, actor: Actor.of(conn, body)) do
         case Map.get(body, "organization") do
           organization_id when is_binary(organization_id) ->
             OptimalEngine.Workspace.assign_organization(workspace.id, organization_id)
@@ -1541,7 +1549,7 @@ defmodule OptimalEngine.API.Router do
       {:error, :invalid_slug} ->
         send_resp(conn, 400, Jason.encode!(%{error: "invalid_slug"}))
 
-      {:error, reason} when reason in [:slug_taken, :default_workspace_slug] ->
+      {:error, reason} when reason in @workspace_conflicts ->
         send_resp(conn, 409, Jason.encode!(%{error: Atom.to_string(reason)}))
 
       {:error, reason} ->

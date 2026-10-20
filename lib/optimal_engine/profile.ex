@@ -278,7 +278,7 @@ defmodule OptimalEngine.Profile do
 
       {:error, :not_found} ->
         # Try slug lookup — caller may have passed a bare slug like "engineering"
-        Workspace.get_by_slug(workspace_id, tenant_id)
+        Workspace.get_by_handle(workspace_id, tenant_id)
 
       other ->
         other

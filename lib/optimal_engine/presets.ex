@@ -161,7 +161,7 @@ defmodule OptimalEngine.Presets do
         end
 
       slug ->
-        case Workspace.get_by_slug(slug, tenant_id) do
+        case Workspace.get_by_handle(slug, tenant_id) do
           {:ok, workspace} ->
             mark(workspace, preset)
 
