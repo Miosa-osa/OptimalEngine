@@ -1280,7 +1280,7 @@ defmodule OptimalEngine.MemoryCore.Store do
         invalidation_reason = ?4,
         updated_at = datetime('now')
     WHERE workspace_id = ?1
-      AND refresh_state != 'stale'
+      AND refresh_state NOT IN ('stale', 'failed')
       AND (
         returned_object_links LIKE '%' || ?2 || '%'
         OR returned_object_links LIKE '%' || ?3 || '%'
@@ -1314,7 +1314,7 @@ defmodule OptimalEngine.MemoryCore.Store do
         invalidation_reason = ?2,
         updated_at = datetime('now')
     WHERE workspace_id = ?1
-      AND refresh_state != 'stale'
+      AND refresh_state NOT IN ('stale', 'failed')
     """
 
     Store.raw_execute(sql, [workspace_id, Keyword.get(opts, :reason, "source_object_changed")])
@@ -1336,6 +1336,85 @@ defmodule OptimalEngine.MemoryCore.Store do
     """
 
     case Store.raw_execute(sql, [workspace_id, context_package_id]) do
+      {:ok, _count} -> :ok
+      :ok -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  Takes a stale Context Package out of the stale list because it cannot be
+  refreshed (`refresh_state` `"failed"`, the reason kept in its metadata).
+  A failed package is not marked stale again by a later invalidation.
+  """
+  @spec mark_context_package_refresh_failed(String.t(), keyword()) :: :ok | {:error, term()}
+  def mark_context_package_refresh_failed(context_package_id, opts \\ [])
+      when is_binary(context_package_id) and is_list(opts) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    reason = to_string(Keyword.get(opts, :reason, "refresh_failed"))
+
+    sql = """
+    UPDATE context_packages
+    SET refresh_state = 'failed',
+        metadata = json_set(COALESCE(NULLIF(metadata, ''), '{}'), '$.refresh_failure', ?4),
+        updated_at = datetime('now')
+    WHERE tenant_id = ?1 AND workspace_id = ?2 AND id = ?3
+      AND refresh_state = 'stale'
+    """
+
+    case Store.raw_execute(sql, [tenant_id, workspace_id, context_package_id, reason]) do
+      {:ok, _count} -> :ok
+      :ok -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  Empties a Context Package of everything it returned (links, summaries and the
+  assembled sections) and sets its `refresh_state` to `:refresh_state` (default
+  `"stale"`, so the next refresh rebuilds it under its recorded envelope). The
+  query, plan and recorded envelope stay. `:reason` is kept in its metadata.
+  """
+  @spec scrub_context_package_content(String.t(), keyword()) :: :ok | {:error, term()}
+  def scrub_context_package_content(context_package_id, opts \\ [])
+      when is_binary(context_package_id) and is_list(opts) do
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    reason = to_string(Keyword.get(opts, :reason, "scrubbed"))
+    refresh_state = to_string(Keyword.get(opts, :refresh_state, "stale"))
+
+    sql = """
+    UPDATE context_packages
+    SET memory_links = '[]',
+        fact_links = '[]',
+        workflow_links = '[]',
+        skill_package_links = '[]',
+        source_package_links = '[]',
+        evidence_links = '[]',
+        returned_object_links = '[]',
+        redacted_object_links = '[]',
+        package_confidence_summary = '{}',
+        package_precision_summary = '{}',
+        filtered_object_summary = '{}',
+        security_labels = '[]',
+        partition_ids = '[]',
+        metadata =
+          json_set(
+            json_remove(
+              COALESCE(NULLIF(metadata, ''), '{}'),
+              '$.sections', '$.asset_extraction_links', '$.workflow_links',
+              '$.skill_package_links'
+            ),
+            '$.scrubbed', ?4
+          ),
+        refresh_state = ?5,
+        invalidation_reason = CASE WHEN ?5 = 'stale' THEN ?4 ELSE invalidation_reason END,
+        updated_at = datetime('now')
+    WHERE tenant_id = ?1 AND workspace_id = ?2 AND id = ?3
+    """
+
+    case Store.raw_execute(sql, [tenant_id, workspace_id, context_package_id, reason, refresh_state]) do
       {:ok, _count} -> :ok
       :ok -> :ok
       {:error, _} = error -> error
