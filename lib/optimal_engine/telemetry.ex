@@ -17,6 +17,8 @@ defmodule OptimalEngine.Telemetry do
     * `[:optimal_engine, :search, :query]`
     * `[:optimal_engine, :retrieval, :rag]`
     * `[:optimal_engine, :connector, :run]`
+    * `[:optimal_engine, :storage, :asset_fallback]` (an asset that did not
+      reach its configured object store and was kept on the local disk)
 
   Histograms (p50/p95/p99):
     * `[:optimal_engine, :search, :latency_ms]`
@@ -41,7 +43,8 @@ defmodule OptimalEngine.Telemetry do
     {[:optimal_engine, :intake, :rejected], :"optimal_engine.intake.rejected"},
     {[:optimal_engine, :search, :query], :"optimal_engine.search.query"},
     {[:optimal_engine, :retrieval, :rag], :"optimal_engine.retrieval.rag"},
-    {[:optimal_engine, :connector, :run], :"optimal_engine.connector.run"}
+    {[:optimal_engine, :connector, :run], :"optimal_engine.connector.run"},
+    {[:optimal_engine, :storage, :asset_fallback], :"optimal_engine.storage.asset_fallback"}
   ]
 
   @histogram_events [
