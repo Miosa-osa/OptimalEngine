@@ -82,7 +82,7 @@ defmodule ProofSeedGenerate do
         batch = Enum.map(first..(first + @documents_per_batch - 1), &document(&1))
         {:ok, counts} = Store.transaction(&insert_batch(&1, scope, batch), 120_000)
         sealing = System.monotonic_time(:millisecond)
-        {:ok, _sealed} = Capture.seal_all()
+        {:ok, _sealed} = Capture.seal()
         seal_ms = System.monotonic_time(:millisecond) - sealing
         {:cont, acc |> merge(counts) |> merge(%{seal_ms: seal_ms})}
       end
