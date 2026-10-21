@@ -56,6 +56,7 @@ defmodule OptimalEngine.API.ConnectorsAPI do
     invalid_outward_topic: 422,
     invalid_walled_workspaces: 422,
     invalid_review_workspace: 422,
+    workspace_scope_denied: 403,
     no_intake_workspace: 422,
     connector_key_missing: 503,
     scheduler_unavailable: 503
@@ -92,8 +93,10 @@ defmodule OptimalEngine.API.ConnectorsAPI do
       enabled: Map.get(body, "enabled", true)
     }
 
-    case Rows.register(attrs, actor: Actor.of(conn)) do
-      {:ok, view} -> json(conn, 201, view)
+    with :ok <- review_workspace_in_scope(conn, attrs.config),
+         {:ok, view} <- Rows.register(attrs, actor: Actor.of(conn)) do
+      json(conn, 201, view)
+    else
       {:error, reason} -> error(conn, reason)
     end
   end
@@ -101,11 +104,30 @@ defmodule OptimalEngine.API.ConnectorsAPI do
   def update(conn, id) do
     changes = conn |> body() |> Map.take(@patchable)
 
-    case Rows.update(tenant(conn), id, changes, actor: Actor.of(conn)) do
-      {:ok, view} -> json(conn, 200, view)
+    with :ok <- review_workspace_in_scope(conn, Map.get(changes, "config")),
+         {:ok, view} <- Rows.update(tenant(conn), id, changes, actor: Actor.of(conn)) do
+      json(conn, 200, view)
+    else
       {:error, reason} -> error(conn, reason)
     end
   end
+
+  # The review workspace a connector names in its config is a workspace its
+  # Signals are written to, named beside the connector's own workspace rather
+  # than in a field the workspace plug reads. A key restricted to named
+  # workspaces may name only those it holds, as for the connector's own.
+  defp review_workspace_in_scope(conn, %{"review_workspace_id" => workspace_id})
+       when is_binary(workspace_id) and workspace_id != "" do
+    case visible_workspaces(conn) do
+      :all ->
+        :ok
+
+      workspace_ids ->
+        if workspace_id in workspace_ids, do: :ok, else: {:error, :workspace_scope_denied}
+    end
+  end
+
+  defp review_workspace_in_scope(_conn, _config), do: :ok
 
   def delete(conn, id) do
     case Rows.delete(tenant(conn), id, actor: Actor.of(conn)) do
