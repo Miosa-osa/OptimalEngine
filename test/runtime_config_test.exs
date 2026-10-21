@@ -87,29 +87,43 @@ defmodule OptimalEngine.RuntimeConfigTest do
     assert get_in(config, [:optimal_engine, :auth, :auth_required]) == true
   end
 
-  test "the open-network refusal is read from the environment and rejects other values" do
-    original = System.get_env("OPTIMAL_REFUSE_OPEN_NETWORK")
+  test "the open-network settings are read from the environment and reject other values" do
+    names = ["OPTIMAL_REFUSE_OPEN_NETWORK", "OPTIMAL_OPEN_NETWORK_ACKNOWLEDGED"]
+    original = Map.new(names, &{&1, System.get_env(&1)})
 
     on_exit(fn ->
-      if original,
-        do: System.put_env("OPTIMAL_REFUSE_OPEN_NETWORK", original),
-        else: System.delete_env("OPTIMAL_REFUSE_OPEN_NETWORK")
+      Enum.each(original, fn
+        {name, nil} -> System.delete_env(name)
+        {name, value} -> System.put_env(name, value)
+      end)
     end)
 
-    for {value, expected} <- [{"1", true}, {"true", true}, {"0", false}, {"false", false}] do
-      System.put_env("OPTIMAL_REFUSE_OPEN_NETWORK", value)
-      config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
-      assert get_in(config, [:optimal_engine, :refuse_open_network]) == expected
-    end
+    for {name, key} <- [
+          {"OPTIMAL_REFUSE_OPEN_NETWORK", :refuse_open_network},
+          {"OPTIMAL_OPEN_NETWORK_ACKNOWLEDGED", :open_network_acknowledged}
+        ] do
+      Enum.each(names, &System.delete_env/1)
 
-    System.delete_env("OPTIMAL_REFUSE_OPEN_NETWORK")
-    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
-    refute Keyword.has_key?(Keyword.fetch!(config, :optimal_engine), :refuse_open_network)
+      for {value, expected} <- [{"1", true}, {"true", true}, {"0", false}, {"false", false}] do
+        System.put_env(name, value)
+        config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+        assert get_in(config, [:optimal_engine, key]) == expected
+      end
 
-    System.put_env("OPTIMAL_REFUSE_OPEN_NETWORK", "yes")
+      # Empty is unset, as an unset variable passed through by a compose file is.
+      for value <- [nil, ""] do
+        if value, do: System.put_env(name, value), else: System.delete_env(name)
+        config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+        refute Keyword.has_key?(Keyword.fetch!(config, :optimal_engine), key)
+      end
 
-    assert_raise ArgumentError, ~r/OPTIMAL_REFUSE_OPEN_NETWORK must be 1 or 0/, fn ->
-      Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+      System.put_env(name, "yes")
+
+      assert_raise ArgumentError, ~r/#{name} must be 1, 0, true or false/, fn ->
+        Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+      end
+
+      System.delete_env(name)
     end
   end
 
