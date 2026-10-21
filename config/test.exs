@@ -35,6 +35,8 @@ config :optimal_engine, :viability_interval_ms, 0
 
 # Bundle jobs are run by the tests themselves (BundleJobs.drain/1), at once.
 config :optimal_engine, bundle_jobs_interval_ms: 0, bundle_job_start_delay_s: 0
+# Asset placement after an outage is run by the tests themselves.
+config :optimal_engine, :asset_reconcile_interval_ms, 0
 config :optimal_engine, :analyses_interval_ms, 0
 config :optimal_engine, :reindex_interval_ms, 0
 config :optimal_engine, :imports_interval_ms, 0

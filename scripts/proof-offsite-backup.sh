@@ -218,6 +218,8 @@ dead_port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1",
 echo "DEAD_ENDPOINT_PORT=$dead_port"
 real_endpoint="$OPTIMAL_S3_ENDPOINT"
 export OPTIMAL_ASSET_STORAGE=s3
+# The Engine tries to place assets kept on disk every two seconds (step 11).
+export OPTIMAL_ASSET_RECONCILE_INTERVAL_MS=2000
 export OPTIMAL_S3_ENDPOINT="http://127.0.0.1:$dead_port"
 source_pid=$(start_engine "$SOURCE_PORT" "$DATA/outage.log" "$OPTIMAL_ENGINE_ROOT") ||
   fail "the Engine did not start with the dead endpoint"
@@ -251,7 +253,8 @@ print("OUTAGE_WRITE_STATUS=%d STORAGE_BACKEND=%s FALLBACK_REASON=%s LOCAL_COPY_M
 
 _, metrics = call("GET", "/api/metrics")
 fallbacks = metrics.get("counters", {}).get("optimal_engine.storage.asset_fallback")
-print("ALERT_COUNTER=%s" % fallbacks)
+pending = metrics.get("gauges", {}).get("optimal_engine.storage.assets_pending_placement")
+print("ALERT_COUNTER=%s PENDING_PLACEMENT=%s" % (fallbacks, pending))
 
 _, probed = call("GET", "/api/storage/providers?probe=1")
 s3 = {p["id"]: p for p in probed["providers"]}["s3"]
@@ -268,6 +271,7 @@ checks = [
     metadata.get("storage_backend") == "filesystem",
     metadata.get("storage_fallback_reason") == "s3_upload_failed",
     fallbacks == 1,
+    pending == 1,
     s3.get("health") == "unreachable",
 ]
 sys.exit(0 if all(checks) else 1)
@@ -329,4 +333,36 @@ checks = [
 sys.exit(0 if all(checks) else 1)
 PY
 
-echo "PASS offsite backup and restore drill, S3 fallback and recovery"
+echo "== step 11: the asset kept on disk during the outage is placed in the bucket"
+python3 - "$source_url" "$key" <<'PY' || fail "the outage asset was not placed"
+import json, sys, time, urllib.request
+
+base, key = sys.argv[1], sys.argv[2]
+
+def pending():
+    request = urllib.request.Request(base + "/api/metrics")
+    request.add_header("Authorization", "Bearer " + key)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.loads(response.read()).get("gauges", {}).get("optimal_engine.storage.assets_pending_placement")
+
+started = time.time()
+left = pending()
+while left != 0 and time.time() - started < 120:
+    time.sleep(2)
+    left = pending()
+print("PENDING_PLACEMENT_AFTER_RECOVERY=%s PLACED_WITHIN_SECONDS=%.0f" % (left, time.time() - started))
+sys.exit(0 if left == 0 else 1)
+PY
+stop_engine "$source_pid" "$SOURCE_PORT"
+# Every object under the Engine's prefix, assets included (the backup listing
+# above covers backups/ only).
+mix run -e '{:ok, listing} = OptimalEngine.Storage.S3.list_objects(nil, max_pages: 20); Enum.each(listing.keys, &IO.puts/1)' \
+  >"$DATA/objects-after.log" 2>&1 ||
+  { cat "$DATA/objects-after.log"; fail "listing the bucket failed"; }
+outage_sha=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha256"])' "$DATA/outage-asset.json")
+in_bucket=$(grep -c "$outage_sha" "$DATA/objects-after.log" || true)
+echo "OUTAGE_ASSET_IN_BUCKET=$([ "$in_bucket" -ge 1 ] && echo True || echo False)"
+[ "$in_bucket" -ge 1 ] || fail "the bucket holds no object for the outage asset"
+grep -c "placed in the object store" "$DATA/recovered.log" | sed 's/^/PLACED_LOG_LINES=/'
+
+echo "PASS offsite backup and restore drill, S3 fallback, recovery and placement of the outage asset"

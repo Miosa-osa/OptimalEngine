@@ -128,9 +128,14 @@ Readers resolve through the asset store rather than opening `storage_path` direc
 A selected object store that is unconfigured or unreachable never loses the file.
 The bytes are written to the local filesystem, the asset row records `storage_fallback_reason` (`s3_upload_failed` or `s3_not_configured`), and the engine raises an alert, because an upload that failed to leave the machine must not be reported as a successful remote store.
 The alert is an error log line (`asset storage alert: ...`) and a counter an operator can alert on: `optimal_engine.storage.asset_fallback` in `GET /api/metrics`, `optimal_engine_storage_asset_fallback_total` in `GET /api/metrics/prometheus`.
+Once the object store answers again, the Engine puts those assets in the bucket (`OptimalEngine.Storage.AssetReconcile`), every ten minutes while any are pending (`OPTIMAL_ASSET_RECONCILE_INTERVAL_MS`, 0 turns it off).
+Each one is uploaded under the key a direct write would have used, read back, and compared with the local copy's SHA-256 before the asset is recorded as placed: its `storage_path` becomes the object URI, its metadata names the object and `storage_placed_at`, and the fallback reason moves to `storage_fallback_resolved`.
+The local copy stays on disk.
+An asset whose local copy no longer matches its hash, or whose object does not read back the same, stays pending; the first transport error ends a pass, so a store still down is not asked once per asset.
+An asset whose workspace now keeps assets on the local filesystem is resolved without an upload (`backend_now_filesystem`).
+The assets still waiting are the gauge `optimal_engine.storage.assets_pending_placement` in `GET /api/metrics` (`gauges`) and `optimal_engine_storage_assets_pending_placement` in Prometheus.
 `GET /api/storage/providers?probe=1` makes an authenticated request to the bucket and reports `s3` as `unreachable` while the object store is down; without `probe` it reports configuration only.
-Assets written during an outage stay on the local disk after the object store returns; new writes go to the bucket again.
-`scripts/proof-offsite-backup.sh` proves the outage and the recovery end to end against a real bucket.
+`scripts/proof-offsite-backup.sh` proves the outage, the recovery and the placement of the outage asset end to end against a real bucket.
 
 ## Offsite Backups
 

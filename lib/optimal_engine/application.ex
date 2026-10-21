@@ -155,7 +155,9 @@ defmodule OptimalEngine.Application do
       # ── Bundle export and import jobs (/api/bundles/jobs) ───────────────
       OptimalEngine.Portability.BundleWorker,
       # ── Maintenance jobs (chunk embeddings, graph edges) and the sweep ───
-      OptimalEngine.Maintenance.Worker
+      OptimalEngine.Maintenance.Worker,
+      # ── Assets kept on disk during an object store outage, placed after ───
+      OptimalEngine.Storage.AssetReconcile.Worker
     ]
   end
 

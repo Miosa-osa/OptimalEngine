@@ -155,7 +155,13 @@ defmodule OptimalEngine.Telemetry.Prometheus do
       db_count_metric("contexts", "optimal_engine_contexts_total", "Total ingested contexts"),
       db_count_metric("memories", "optimal_engine_memories_total", "Total stored memories"),
       db_count_metric("wiki_pages", "optimal_engine_wiki_pages_total", "Total wiki pages"),
-      db_active_workspaces_metric()
+      db_active_workspaces_metric(),
+      render_metric(
+        "optimal_engine_storage_assets_pending_placement",
+        :gauge,
+        "Assets kept on the local disk during an object store outage, not yet placed in the bucket",
+        OptimalEngine.Storage.AssetReconcile.pending_count()
+      )
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
