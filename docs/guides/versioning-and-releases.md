@@ -102,11 +102,18 @@ The migration that creates `graph_edges` copies the legacy `edges` table, whose 
 Before upgrading:
 
 1. Take a backup (`OptimalEngine.Release.backup/1`, or `POST /api/backup`).
-2. Find the rows another tenant keeps under a workspace id that has no workspace row, and give them a workspace of that tenant first, so their edges, contexts and entities take that tenant instead of `default`: create the workspace for a `<tenant>:<slug>` id, or move a bare id's rows into one with `POST /api/data-steward/workspaces/repair`.
+2. Find the rows another tenant's key wrote under a workspace id that has no workspace row.
+   Before this migration a context took the tenant of its workspace's row only, so a context of an unregistered id reads `default` whoever wrote it; its source package keeps the tenant of the key that wrote it, so the query reads `source_packages`.
+   The migration relabels the contexts of an unregistered `<tenant>:<slug>` id with the tenant its prefix names, and leaves a bare id with the default tenant: after the upgrade the tenant's own key reads it as empty (`GET /api/graph` answers `context_count: 0`).
+   From 0.3.9 a write that names its tenant under a bare id lands in that tenant (see "Writes under a bare workspace id" in `scope-and-portability.md`), but a row written before stays with `default`, and the tenant that wrote it cannot rewrite it: the write is refused with `context_id_in_use`.
+   `POST /api/workspaces` gives a workspace the id `<tenant>:<slug>`, so a bare id cannot be registered, and `POST /api/data-steward/workspaces/repair` moves only the rows of the caller's tenant: run as `default`, it moves these rows into a `default` workspace, not into the writing tenant's.
+   No step moves such rows to the tenant that wrote them yet.
+   The query tells you which ids and tenants are affected, and the tenant can send the documents again under a workspace of its own.
+   For an id with a `<tenant>:` prefix, create the workspace, so the maintenance routes answer for it: they answer `404 workspace not found` for an unregistered id.
 
 ```sql
-SELECT workspace_id, tenant_id, COUNT(*) AS contexts
-FROM contexts
+SELECT workspace_id, tenant_id, COUNT(*) AS source_packages
+FROM source_packages
 WHERE tenant_id <> 'default' AND workspace_id NOT IN (SELECT id FROM workspaces)
 GROUP BY workspace_id, tenant_id;
 ```
@@ -117,6 +124,10 @@ After upgrading:
    It exits non-zero when an edge write failed, and only a run where every write succeeded and the claim pass ran counts as done.
 2. Until it has run, search reads fewer graph edges (the graph boost and graph candidates), so results are mildly thinner.
 3. `GET /api/maintenance/graph` reports it per workspace in `graph_edges`: `backfill_needed` is true while the legacy table holds the workspace's rows and no backfill has completed for it or for every workspace, and false afterwards; an Engine that never had legacy edges reads false. `legacy_edges` counts the workspace's legacy rows and `edges` its graph edges.
+   Right after the upgrade `edges` equals `legacy_edges`, because the migration copies every legacy row.
+   The flag stays true even for a workspace the old key dropped nothing from, so it says the backfill has not run, not how many edges are missing.
+4. `GET /api/graph` reports `stats.edge_count`, the links it draws between contexts: contexts that mention the same entity (the `entities` table) and `cross_ref` edges.
+   It is not the number of `graph_edges` rows, and it is `0` for a workspace whose documents name no entity that a topology node or endpoint carries, before the upgrade as after it.
 
 ## Creating a release
 
