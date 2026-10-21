@@ -26,11 +26,10 @@ defmodule OptimalEngine.Connectors.CredentialSource do
 
   The reference is opaque to the Engine and may be signed by the broker, so
   it is a secret: it is sealed with `CONNECTOR_KEY`, bound to the connector's
-  id and workspace, into `config.broker_reference_ciphertext` when the row is
-  written (`seal_reference/2`), opened only for the broker call, and every
-  read API shows it as `"[redacted]"`. A reference written before sealing
-  existed, or sealed before it was bound, is read as it is and sealed (bound)
-  on the connector's next change.
+  id, into `config.broker_reference_ciphertext` when the row is written
+  (`seal_reference/2`), opened only for the broker call, and every read API
+  shows it as `"[redacted]"`. The reference is read from the seal alone, for
+  the connector it was sealed for; a plaintext one in a config is not read.
 
   `broker_url` is checked as written (`check_url/1`): `https` on port 443, a
   host named in `config :optimal_engine, :credential_broker_hosts` (the
@@ -143,7 +142,7 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   # broker names can overflow a date.
   @max_expires_in_s 315_360_000
   @default_paths ["/api/v1/connect/broker/"]
-  @url ~r|\Ahttps://([A-Za-z0-9.-]+)(?::([0-9]{1,5}))?(/[A-Za-z0-9._~!$&'()*+,;=:@/-]*)\z|
+  @url ~r|\Ahttps://([A-Za-z0-9.-]+)(?::([0-9]{1,5}))?(/[A-Za-z0-9._~!$&'()*+,=:@/-]*)\z|
   # What the broker says about a token rather than the token itself.
   @token_terms ~w(expires_at expires_in token_type)
 
@@ -233,23 +232,20 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   write is refused with `{:error, :connector_key_missing}`, as for credentials.
 
   The seal is bound to the connector it belongs to: `binding` is
-  `%{id: connector_id, workspace_id: workspace_id}` and the seal opens only
-  for that connector in that workspace, so a copy of it placed on another row
-  is not read. A config with no plaintext reference but a seal is rebound when
-  the seal was made without a binding (the older form) or for the workspace
-  the connector has moved from (`:previous_workspace_id`); a seal that cannot
-  be opened is left as it is and reported when a run needs it, so the
-  connector can still be changed. Without a `binding` the seal is the older,
-  unbound form.
+  `%{id: connector_id}` and the seal opens only for that connector, so a copy
+  of it placed on another row is not read. It is not bound to the workspace,
+  which a rename or a move changes while the connector stays the same. A config
+  with no plaintext reference is returned as it is, seal and all.
   """
-  @spec seal_reference(map(), map() | nil) ::
+  @spec seal_reference(map(), %{required(:id) => String.t()}) ::
           {:ok, map()} | {:error, :connector_key_missing | :invalid_config}
-  def seal_reference(config, binding \\ nil) when is_map(config) do
+  def seal_reference(config, %{id: id} = binding)
+      when is_map(config) and is_binary(id) and id != "" do
     {plain, config} = pop_reference(config)
 
     case plain do
       nil ->
-        {:ok, rebind(config, binding)}
+        {:ok, config}
 
       "" ->
         {:ok, Map.delete(config, @sealed_reference)}
@@ -269,47 +265,13 @@ defmodule OptimalEngine.Connectors.CredentialSource do
     end
   end
 
-  # The associated data a seal is bound to; none for the older, unbound form.
-  defp aad(%{id: id, workspace_id: workspace_id}) when is_binary(id) and is_binary(workspace_id),
-    do: "optimal.connector.broker_reference\0" <> id <> "\0" <> workspace_id
+  # The associated data a seal is bound to.
+  defp aad(%{id: id}), do: "optimal.connector.broker_reference\0" <> id
 
-  defp aad(_binding), do: ""
-
-  defp rebind(config, nil), do: config
-
-  defp rebind(config, binding) do
-    with envelope when is_binary(envelope) <- Map.get(config, @sealed_reference),
-         wanted = aad(binding),
-         {:error, _reason} <- Credential.decrypt(envelope, wanted),
-         {:ok, %{@reference => reference}} <- open_earlier(envelope, binding),
-         {:ok, rebound} <- Credential.encrypt(%{@reference => reference}, wanted) do
-      Map.put(config, @sealed_reference, rebound)
-    else
-      _unchanged -> config
-    end
-  end
-
-  # The forms a seal had before it was bound to this connector in this
-  # workspace: unbound, or bound to the workspace the connector came from.
-  defp open_earlier(envelope, binding) do
-    earlier =
-      case Map.get(binding, :previous_workspace_id) do
-        previous when is_binary(previous) and previous != binding.workspace_id ->
-          [aad(%{binding | workspace_id: previous}), ""]
-
-        _none ->
-          [""]
-      end
-
-    Enum.find_value(earlier, {:error, :unreadable}, fn aad ->
-      case Credential.decrypt(envelope, aad) do
-        {:ok, _reference} = opened -> opened
-        {:error, _reason} -> nil
-      end
-    end)
-  end
-
-  @doc "Whether the config names a broker reference, sealed or not."
+  @doc """
+  Whether the config names a broker reference. The seal is the reference; a
+  plaintext one is never read, but is still counted here so no view shows it.
+  """
   @spec reference?(map()) :: boolean()
   def reference?(config) when is_map(config) do
     not blank?(value(config, @reference)) or is_binary(Map.get(config, @sealed_reference))
@@ -381,21 +343,21 @@ defmodule OptimalEngine.Connectors.CredentialSource do
     end
   end
 
-  # The sealed reference wins; a plaintext one is a row written before sealing.
-  # A seal opens for the connector and workspace it was bound to, or, if it was
-  # sealed before it was bound, without them.
+  # The reference is read from its seal alone, and only for the connector it was
+  # sealed for. A config that holds none has no reference.
   defp reference(config, scope) do
-    case Map.get(config, @sealed_reference) do
-      envelope when is_binary(envelope) ->
-        bound = aad(%{id: value(scope, :id), workspace_id: value(scope, :workspace_id)})
-
-        case Enum.find_value(Enum.uniq([bound, ""]), &open(envelope, &1)) do
+    case {Map.get(config, @sealed_reference), value(scope, :id)} do
+      {envelope, id} when is_binary(envelope) and is_binary(id) and id != "" ->
+        case open(envelope, aad(%{id: id})) do
           nil -> {:error, :broker_reference_unreadable}
           reference -> {:ok, reference}
         end
 
-      _none ->
-        {:ok, value(config, @reference)}
+      {envelope, _no_connector} when is_binary(envelope) ->
+        {:error, :broker_reference_unreadable}
+
+      {_none, _id} ->
+        {:ok, nil}
     end
   end
 
@@ -603,12 +565,23 @@ defmodule OptimalEngine.Connectors.CredentialSource do
 
   defp normalize_host(host), do: host |> to_string() |> String.trim() |> String.downcase(:ascii)
 
+  # A prefix is a path that starts with a slash, names something under it, and
+  # holds only path characters. An empty or blank entry, `/` (everything), a
+  # `;` or a `..` allows nothing rather than everything.
   defp allowed_paths do
-    case Application.get_env(:optimal_engine, :credential_broker_paths, @default_paths) do
-      paths when is_list(paths) -> Enum.map(paths, &(&1 |> to_string() |> String.trim()))
-      paths when is_binary(paths) -> paths |> String.split(",") |> Enum.map(&String.trim/1)
-      _other -> @default_paths
-    end
+    entries =
+      case Application.get_env(:optimal_engine, :credential_broker_paths, @default_paths) do
+        paths when is_list(paths) -> Enum.map(paths, &to_string/1)
+        paths when is_binary(paths) -> String.split(paths, ",")
+        _other -> @default_paths
+      end
+
+    entries |> Enum.map(&String.trim/1) |> Enum.filter(&valid_prefix?/1)
+  end
+
+  defp valid_prefix?(prefix) when is_binary(prefix) do
+    Regex.match?(~r|\A/[A-Za-z0-9._~!$&'()*+,=:@/-]+\z|, prefix) and
+      clean_path?(prefix)
   end
 
   defp scope_scopes(config) do
