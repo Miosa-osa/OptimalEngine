@@ -83,6 +83,14 @@ defmodule OptimalEngine.LogBufferTest do
       refute line =~ "dXNlcjpwYXNz"
     end
 
+    test "basic credentials in any case" do
+      line = stored("sent basic dXNlcjpwYXNzd29yZA== and BASIC dXNlcjpwYXNz")
+      assert line =~ "basic [redacted]"
+      assert line =~ "BASIC [redacted]"
+      refute line =~ "dXNlcjpwYXNzd29yZA"
+      refute line =~ "dXNlcjpwYXNz"
+    end
+
     test "basic as a word, not an auth scheme, is kept" do
       line = stored("running in basic mode with Basic Configuration")
       assert line =~ "basic mode with Basic Configuration"

@@ -76,9 +76,9 @@ defmodule OptimalEngine.LogBuffer do
     {~r/(Bearer\s+)[^\s"',;]+/i, "\\1[redacted]"},
     # Only as an auth scheme: a credential of at least 8 base64 characters that
     # is not a plain lowercase or capitalized word.
-    {~r/(Basic\s+)(?=[A-Za-z0-9+\/]{8})(?![a-z]+(?![A-Za-z0-9+\/=]))(?![A-Z][a-z]+(?![A-Za-z0-9+\/=]))[A-Za-z0-9+\/]+=*/,
+    {~r/((?i:Basic)\s+)(?=[A-Za-z0-9+\/]{8})(?![a-z]+(?![A-Za-z0-9+\/=]))(?![A-Z][a-z]+(?![A-Za-z0-9+\/=]))[A-Za-z0-9+\/]+=*/,
      "\\1[redacted]"},
-    {~r/([a-z][a-z0-9+.-]*:\/\/)[^\/\s?#]*@/i, "\\1[redacted]@"},
+    {~r/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\/\s?#]*@/i, "\\1[redacted]@"},
     {~r/(?<![A-Za-z0-9])(authorization)(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?:[A-Za-z][A-Za-z0-9_-]*\s+)?[^\s"']+/i,
      "\\1\\2[redacted]"},
     {~r/(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|client[_-]?secret|secret[_-]?access[_-]?key|authorization|x-optimal-grant|bot_token)(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?:((?:~c)?\\?")[^"]*?(\\?"|\z)|'[^']*(?:'|\z)|[^\s"']+)/i,
@@ -88,7 +88,7 @@ defmodule OptimalEngine.LogBuffer do
     # Letters and digits only, so a name such as secret_access_key stays.
     {~r/(?<![A-Za-z0-9])secret_[A-Za-z0-9]{16,}/, "secret_[redacted]"},
     {~r/AKIA[0-9A-Z]{16}/, "[redacted]"},
-    {~r/eyJ[\w-]+\.[\w-]+\.[\w-]+/, "[redacted]"}
+    {~r/(?<![\w-])eyJ[\w-]+\.[\w-]+\.[\w-]+/, "[redacted]"}
   ]
   @control_re ~r/[\x00-\x08\x0b-\x1f\x7f\x{80}-\x{9f}\x{2028}\x{2029}]/u
 
