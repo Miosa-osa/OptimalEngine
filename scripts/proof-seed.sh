@@ -212,10 +212,12 @@ if [ "$avail_mb" -lt "$need_mb" ]; then
   exit 77
 fi
 
-echo "== step 2: keys"
-a_key=$(mint_root_key a)
+echo "== step 2: dependencies and keys"
+# A machine that has not built this checkout yet has no dependencies.
+mix deps.get >/dev/null || fail "fetching the dependencies"
+a_key=$(mint_root_key a || true)
 [ -n "$a_key" ] || fail "minting a key on Engine A printed no key"
-b_key=$(mint_root_key b)
+b_key=$(mint_root_key b || true)
 [ -n "$b_key" ] || fail "minting a key on Engine B printed no key"
 
 echo "== step 3: Engine A, the workspace, sync enabled, a replica key"
@@ -522,7 +524,7 @@ digests = {
     "chunks": "SELECT id, text FROM chunks WHERE workspace_id = ? ORDER BY id",
     "chunk_embeddings": "SELECT chunk_id, vector FROM chunk_embeddings WHERE workspace_id = ? ORDER BY chunk_id",
     "vectors": "SELECT context_id, embedding FROM vectors WHERE workspace_id = ? ORDER BY context_id",
-    "edges": "SELECT source_id, target_id, relation, weight FROM edges WHERE workspace_id = ? ORDER BY source_id, target_id, relation",
+    "graph_edges": "SELECT source_id, target_id, relation, weight FROM graph_edges WHERE workspace_id = ? ORDER BY source_id, target_id, relation",
     "memories": "SELECT id, content FROM memories WHERE workspace_id = ? ORDER BY id",
 }
 for table, sql in digests.items():

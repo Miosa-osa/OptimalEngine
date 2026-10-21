@@ -82,7 +82,7 @@ defmodule ProofSeedGenerate do
         batch = Enum.map(first..(first + @documents_per_batch - 1), &document(&1))
         {:ok, counts} = Store.transaction(&insert_batch(&1, scope, batch), 120_000)
         sealing = System.monotonic_time(:millisecond)
-        {:ok, _sealed} = Capture.seal_all()
+        {:ok, _sealed} = Capture.seal()
         seal_ms = System.monotonic_time(:millisecond) - sealing
         {:cont, acc |> merge(counts) |> merge(%{seal_ms: seal_ms})}
       end
@@ -191,7 +191,7 @@ defmodule ProofSeedGenerate do
           {:ok, n} =
             Store.txn_execute(
               txn,
-              "INSERT OR IGNORE INTO edges (source_id, target_id, relation, weight, tenant_id, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+              "INSERT OR IGNORE INTO graph_edges (source_id, target_id, relation, weight, tenant_id, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
               [
                 doc.id,
                 "seed-doc-" <> String.pad_leading(Integer.to_string(target), 7, "0"),
