@@ -75,9 +75,9 @@ defmodule OptimalEngine.Store do
 
   defdelegate transaction(fun, timeout \\ 30_000), to: @adapter
 
-  defdelegate txn_query(txn, sql, params \\ []), to: @adapter
+  defdelegate txn_query(txn, sql, params \\ [], opts \\ []), to: @adapter
 
-  defdelegate txn_execute(txn, sql, params \\ []), to: @adapter
+  defdelegate txn_execute(txn, sql, params \\ [], opts \\ []), to: @adapter
 
   defdelegate insert_chunks(chunks), to: @adapter
 
