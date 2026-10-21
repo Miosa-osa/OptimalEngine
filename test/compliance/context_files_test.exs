@@ -14,7 +14,7 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
   alias OptimalEngine.Context
   alias OptimalEngine.Identity.Principal
   alias OptimalEngine.Pipeline.Decomposer.Chunk
-  alias OptimalEngine.Pipeline.Intake.Writer
+  alias OptimalEngine.Pipeline.Intake.{Address, Writer}
   alias OptimalEngine.Store
 
   setup do
@@ -46,7 +46,7 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       id =
         context!(ctx, "primary", primary, routed: ["project-platform-launch", "operation-revenue"])
 
-      copy_id = context!(ctx, "copy", copy)
+      copy_id = copy!(ctx, "copy", "primary", copy)
       neighbour_id = context!(ctx, "neighbour", neighbour)
 
       assert {:ok, %{contexts: 2}} = DerivedData.erase_contexts("default", [id])
@@ -60,19 +60,65 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       assert count("contexts", "id", neighbour_id) == 1
     end
 
-    test "erasing a copy removes the file it was copied from too", ctx do
+    test "erasing a copy leaves the context it was copied from, and its file", ctx do
       primary = signal!(ctx, "project-platform-launch", "pricing.md")
       copy = signal!(ctx, "operation-revenue", "pricing.md")
       primary_id = context!(ctx, "primary", primary)
 
       copy_id =
-        context!(ctx, "copy", copy, routed: ["project-platform-launch", "operation-revenue"])
+        copy!(ctx, "copy", "primary", copy,
+          routed: ["project-platform-launch", "operation-revenue"]
+        )
 
-      assert {:ok, _} = DerivedData.erase_contexts("default", [copy_id])
+      assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [copy_id])
+
+      refute File.exists?(copy)
+      assert File.exists?(primary)
+      assert count("contexts", "id", primary_id) == 1
+    end
+
+    test "removes the suffixed copy of a context, and leaves the context that holds the plain name",
+         ctx do
+      primary = signal!(ctx, "project-platform-launch", "pricing.md")
+
+      id =
+        context!(ctx, "primary", primary, routed: ["project-platform-launch", "operation-revenue"])
+
+      [suffix | _] = Address.candidate_suffixes(id)
+
+      # Another context holds the plain name in the node, so the copy took the suffixed one.
+      plain = signal!(ctx, "operation-revenue", "pricing.md")
+      holder = context!(ctx, "plain-holder", plain)
+      copy = signal!(ctx, "operation-revenue", "pricing-#{suffix}.md")
+      copy_id = copy!(ctx, "suffixed-copy", "primary", copy)
+
+      assert {:ok, %{contexts: 2}} = DerivedData.erase_contexts("default", [id])
 
       refute File.exists?(primary)
       refute File.exists?(copy)
-      assert count("contexts", "id", primary_id) == 0
+      assert count("contexts", "id", copy_id) == 0
+      assert File.exists?(plain)
+      assert count("contexts", "id", holder) == 1
+    end
+
+    test "leaves a context that holds the plain name with the same text", ctx do
+      primary = signal!(ctx, "project-platform-launch", "pricing.md")
+
+      id =
+        context!(ctx, "primary", primary, routed: ["project-platform-launch", "operation-revenue"])
+
+      [suffix | _] = Address.candidate_suffixes(id)
+
+      plain = signal!(ctx, "operation-revenue", "pricing.md")
+      holder = context!(ctx, "plain-twin", plain, text: "text of primary")
+      copy = signal!(ctx, "operation-revenue", "pricing-#{suffix}.md")
+      _copy_id = copy!(ctx, "suffixed-twin-copy", "primary", copy)
+
+      assert {:ok, %{contexts: 2}} = DerivedData.erase_contexts("default", [id])
+
+      refute File.exists?(copy)
+      assert File.exists?(plain)
+      assert count("contexts", "id", holder) == 1
     end
 
     test "leaves a file a person put in a node's folder, and the files of the root", ctx do
@@ -187,6 +233,18 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       assert count("contexts", "id", theirs) == 1
     end
 
+    test "leaves a file another context names with another spelling", ctx do
+      shared = signal!(ctx, "project-platform-launch", "spelled.md")
+      respelled = Path.join(ctx.root, "project-platform-launch/signals/../signals/spelled.md")
+      stays = context!(ctx, "stays-respelled", respelled)
+      gone = context!(ctx, "gone-respelled", shared)
+
+      assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [gone])
+
+      assert File.exists?(shared)
+      assert count("contexts", "id", stays) == 1
+    end
+
     test "leaves a file that is not markdown", ctx do
       text = signal!(ctx, "project-platform-launch", "notes.txt")
       id = context!(ctx, "plain-text", text)
@@ -216,7 +274,7 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
 
     test "removes a file named for the context's id, though its text was edited", ctx do
       id = "cf-suffixed-#{ctx.n}"
-      [suffix | _] = OptimalEngine.Pipeline.Intake.Address.candidate_suffixes(id)
+      [suffix | _] = Address.candidate_suffixes(id)
       file = signal!(ctx, "project-platform-launch", "2026-03-01-pricing-#{suffix}.md")
       ^id = context!(ctx, "suffixed", file)
       File.write!(file, "edited by hand after intake wrote it")
@@ -537,7 +595,7 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       primary = signal!(ctx, "project-platform-launch", "plan.md")
       copy = signal!(ctx, "operation-revenue", "plan.md")
       id = context!(ctx, "plan", primary, routed: ["project-platform-launch", "operation-revenue"])
-      copy_id = context!(ctx, "plan-copy", copy)
+      copy_id = copy!(ctx, "plan-copy", "plan", copy)
 
       assert {:ok, %{files: files, copy_ids: [^copy_id]}} = ContextFiles.plan("default", [id])
       assert Enum.sort(files) == Enum.sort([primary, copy])
@@ -591,8 +649,8 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
     {:ok, _} =
       Store.raw_query(
         """
-        INSERT INTO contexts (id, tenant_id, workspace_id, uri, title, content, l0_abstract, l1_overview, path, routed_to, genre, node, created_at)
-        VALUES (?1, ?2, ?3, ?4, 't', ?5, ?5, ?5, ?6, ?7, 'note', 'person-operator', ?8)
+        INSERT INTO contexts (id, tenant_id, workspace_id, uri, title, content, l0_abstract, l1_overview, path, routed_to, genre, node, created_at, metadata)
+        VALUES (?1, ?2, ?3, ?4, 't', ?5, ?5, ?5, ?6, ?7, 'note', 'person-operator', ?8, ?9)
         """,
         [
           id,
@@ -602,7 +660,8 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
           text,
           path,
           Jason.encode!(Keyword.get(opts, :routed, [])),
-          created
+          created,
+          Jason.encode!(Keyword.get(opts, :metadata, %{}))
         ]
       )
 
@@ -611,6 +670,20 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       do: write_for!(id, path)
 
     id
+  end
+
+  # The row of a cross-reference copy of the context labelled `of`: the same text, and the mark
+  # intake gives a copy (`metadata.cross_ref_of`). The file holds that text too.
+  defp copy!(ctx, label, of, path, opts \\ []) do
+    context!(
+      ctx,
+      label,
+      path,
+      Keyword.merge(
+        [text: "text of #{of}", metadata: %{"cross_ref_of" => "cf-#{of}-#{ctx.n}"}],
+        opts
+      )
+    )
   end
 
   # The text intake writes for a context, in the file at `path`.
