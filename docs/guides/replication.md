@@ -254,6 +254,7 @@ This is deliberate.
 A count of what a route left out, on a route that answers a query, tells a key without the label that a row it may not see matches: `withheld` of 1 for `Zephyrcorp` is a probe for the name.
 These routes answer a probe for what the key may not see exactly as they answer one for nothing, as a record by id answers `404` as it does for a record that is not there.
 The exports, the conflict list and the ledger dump rows rather than answer a query, and a partial dump has to say it is partial, so they keep `withheld` and `complete`; the count names a volume, not a match.
+A signal the key may read embeds the clusters it belongs to and the wiki pages that cite it, which are rows of their own: a cluster is judged by its members and a page by what it cites, and one the key may not read is left out of `clusters` and `citations`.
 A search or grep decides for each hit from the row it came from (a document, a memory, a chunk), so a chunk of a restricted document is not found by a key without the label.
 A key whose grants cut a list is shown a full page of what it may see, and `offset` counts those items, not the rows behind them.
 The Engine reads on until the page and one more are found: a memory list reads up to 10,000 memories, and a search or a grep up to 1,000 hits (a ranked result is re-asked at twice the size).

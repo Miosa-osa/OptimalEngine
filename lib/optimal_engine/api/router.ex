@@ -1906,12 +1906,13 @@ defmodule OptimalEngine.API.Router do
   get "/api/signals/:id" do
     workspace = query_param(conn, "workspace", "default")
 
-    detail = signal_detail(id, workspace, conn.assigns[:current_tenant] || "default")
+    tenant = conn.assigns[:current_tenant] || "default"
+    detail = signal_detail(id, workspace, tenant)
+    reader = Reader.scope(conn)
 
-    if detail &&
-         ReadScope.visible?(Reader.scope(conn), workspace, "contexts", id, detail.uri || id),
-       do: json(conn, detail),
-       else: send_resp(conn, 404, Jason.encode!(%{error: "signal not found"}))
+    if detail && ReadScope.visible?(reader, workspace, "contexts", id, detail.uri || id),
+      do: json(conn, readable_embeds(detail, reader, workspace, tenant)),
+      else: send_resp(conn, 404, Jason.encode!(%{error: "signal not found"}))
   end
 
   # GET /api/activity — reverse-chron events (audit log). Params:
@@ -5806,6 +5807,60 @@ defmodule OptimalEngine.API.Router do
   # every layer the engine tracks. The parent row is fetched with a
   # workspace_id guard so an id from another workspace yields nil (→ 404);
   # the child fetchers below are only reachable once that guard passed.
+  # A signal the key may read embeds the clusters it belongs to and the wiki
+  # pages that cite it. Those are rows of their own: a cluster is named for its
+  # members and a page is written from everything it cites, so one can carry a
+  # restricted document's theme or slug. Only those the key may read stay.
+  defp readable_embeds(detail, nil, _workspace_id, _tenant_id), do: detail
+
+  defp readable_embeds(detail, reader, workspace_id, tenant_id) do
+    {clusters, _withheld} =
+      ReadScope.filter(
+        reader,
+        workspace_id,
+        "clusters",
+        detail.clusters,
+        & &1.id,
+        fn _cluster -> nil end
+      )
+
+    %{
+      detail
+      | clusters: clusters,
+        citations: readable_citations(detail.citations, reader, workspace_id, tenant_id)
+    }
+  end
+
+  # A citation names a page by slug and audience: it stays when the latest
+  # version of that page can be read. A page that cannot be found is not read.
+  defp readable_citations([], _reader, _workspace_id, _tenant_id), do: []
+
+  defp readable_citations(citations, reader, workspace_id, tenant_id) do
+    pages =
+      citations
+      |> Enum.map(&{&1.wiki_slug, &1.audience})
+      |> Enum.uniq()
+      |> Enum.flat_map(fn {slug, audience} ->
+        case Wiki.latest(tenant_id, slug, audience, workspace_id) do
+          {:ok, page} -> [page]
+          _ -> []
+        end
+      end)
+
+    {readable, _withheld} =
+      ReadScope.filter_rows(
+        reader,
+        workspace_id,
+        "wiki_pages",
+        pages,
+        &ReadScope.wiki_row/1,
+        &"wiki:#{&1.slug}:#{&1.audience}"
+      )
+
+    allowed = MapSet.new(readable, &{&1.slug, &1.audience})
+    Enum.filter(citations, &MapSet.member?(allowed, {&1.wiki_slug, &1.audience}))
+  end
+
   defp signal_detail(id, workspace_id, tenant_id) do
     with {:ok, [row]} <- signal_row(id, workspace_id, tenant_id) do
       [
