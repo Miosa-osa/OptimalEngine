@@ -213,9 +213,16 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     assert page["head"]["seq"] == 100 and length(page["entries"]) == 40
 
     conn = get_export(ctx.tenant, "after=40&until=100")
+    last = Jason.decode!(conn.resp_body)
+    assert %{"complete" => true, "next_after" => nil, "total" => 100} = last
 
-    assert %{"complete" => true, "next_after" => nil, "total" => 100} =
-             Jason.decode!(conn.resp_body)
+    # NDJSON: the same entries, one a line, then an export_end line with the same fields.
+    conn = get_export(ctx.tenant, "after=40&until=100&format=ndjson")
+    assert conn.status == 200
+    assert ["application/x-ndjson" <> _] = get_resp_header(conn, "content-type")
+    assert from_ndjson(conn.resp_body) == last
+
+    assert get_export(ctx.tenant, "format=xml").status == 400
   end
 
   test "an empty chain exports no head, a total of 0, and is complete", ctx do
@@ -325,6 +332,20 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     pinned = out |> File.read!() |> Jason.decode!()
     assert %{"complete" => true, "total" => 10_001, "head" => %{"seq" => 10_001}} = pinned
     assert {:ok, %{entries: 10_001}} = Evidence.verify_export(pinned)
+
+    Mix.Tasks.Optimal.Authority.run([
+      "export",
+      "--tenant",
+      ctx.tenant,
+      "--until",
+      "10001",
+      "--format",
+      "ndjson",
+      "--out",
+      out
+    ])
+
+    assert out |> File.read!() |> from_ndjson() == pinned
     expected = "Wrote #{total} entries to #{out}"
     assert_received {:mix_shell, :info, [^expected]}
   end
@@ -362,6 +383,14 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
       nil -> [page]
       next -> [page | export_pages(tenant, limit, next)]
     end
+  end
+
+  # An NDJSON export read back: the entries, and the fields of its export_end line.
+  defp from_ndjson(text) do
+    lines = text |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    {entries, [ending]} = Enum.split(lines, -1)
+    assert ending["type"] == "export_end"
+    ending |> Map.delete("type") |> Map.put("entries", entries)
   end
 
   # Pages joined into one bundle, as a verifier would: every entry, the last page's rest.

@@ -129,11 +129,12 @@ An `until` beyond the head, below `after`, or not a sequence number answers 400 
 `total` counts the whole chain from seq 1 through the head, the same on every page.
 `complete` is true only on the page whose last entry is the head, and then `next_after` is `null`.
 An empty chain exports no entries, a `null` head, a `total` of 0, and is complete.
+With `format=ndjson` a page is each entry on its own line, unchanged, then one `{"type": "export_end", ...}` line carrying the page's other fields, the same `head`, `total` and `complete` included.
 
 To export a chain of any length, read the first page, then the next ones with `after` set to `next_after` and `until` set to the first page's `head.seq`, until a page is complete.
 `Evidence.verify_export/1` checks the head's signature and that a bundle is the whole chain: it starts at seq 1, holds `total` entries, ends at the head, and says it is complete.
 A page that is not the whole chain is reported `partial`, never valid; join the pages' entries into one bundle with the last page's other fields to verify them.
-`mix optimal.authority export [--until <seq>]` writes the whole chain through the head page by page, ending complete.
+`mix optimal.authority export [--until <seq>] [--format json|ndjson]` writes the whole chain through the head page by page, ending complete.
 Verification, the integrity scan and agent action chains read the chain in pages, so none is cut short however long the chain grows.
 Outside enforcers report receipts with `POST /api/authority/evidence` (`outcome: could_not_enforce` for constraints they could not apply).
 
