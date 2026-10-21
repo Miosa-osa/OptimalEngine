@@ -365,6 +365,68 @@ defmodule OptimalEngine.Store.FileCacheMaintenanceTest do
     end
   end
 
+  describe "the sweep, directory by directory" do
+    test "removes the temporary file of a write that never finished once it is old", %{dir: dir} do
+      path = put_entry("unfinished", age_days: 0)
+      shard = Path.dirname(path)
+      old_tmp = Path.join(shard, String.duplicate("a", 64) <> ".bin.tmp-123")
+      fresh_tmp = Path.join(shard, String.duplicate("b", 64) <> ".bin.tmp-456")
+      File.write!(old_tmp, "half an entry")
+      File.write!(fresh_tmp, "half an entry")
+      age(old_tmp, 40)
+
+      assert %{files: 1} = FileCache.sweep(30 * @day)
+
+      refute File.exists?(old_tmp)
+      assert File.exists?(fresh_tmp)
+      assert File.exists?(path)
+      assert File.dir?(dir)
+    end
+
+    test "removes a directory as soon as it is empty, the cache's own root last", %{dir: dir} do
+      other = {"default", "default:cache-maintenance-other"}
+      a = put_entry("a", age_days: 40)
+      b = put_entry("b", age_days: 40, scope: other)
+      keep = put_entry("keep", age_days: 0)
+
+      assert %{files: 2} = FileCache.sweep(30 * @day)
+
+      refute File.exists?(a)
+      refute File.exists?(b)
+      assert File.exists?(keep)
+      # b's whole branch went; keep's stays.
+      assert length(Path.wildcard(Path.join(dir, "tenants/*/*"))) == 1
+
+      age(keep, 1)
+      assert %{files: 1} = FileCache.sweep(3_600)
+      refute File.exists?(Path.join(dir, "tenants"))
+      assert File.dir?(dir)
+    end
+
+    test "does not follow a link out of the cache", %{dir: dir} do
+      outside = Path.join(dir, "outside-the-cache")
+      File.mkdir_p!(outside)
+      victim = Path.join(outside, String.duplicate("d", 64) <> ".bin")
+      File.write!(victim, "not ours")
+      age(victim, 400)
+
+      shard = put_entry("linked", age_days: 0) |> Path.dirname()
+      link = Path.join(Path.dirname(shard), "ab")
+      File.rm_rf!(link)
+      File.ln_s!(outside, link)
+
+      assert %{files: 0} = FileCache.sweep(30 * @day)
+
+      assert File.exists?(victim)
+      assert {:ok, %{type: :symlink}} = File.lstat(link)
+    end
+
+    test "a cache that was never written is swept as empty" do
+      assert FileCache.sweep(30 * @day) == %{files: 0, bytes: 0}
+      assert Maintenance.sweep() == %{files: 0, bytes: 0}
+    end
+  end
+
   describe "a purge that fails" do
     setup do
       # File permissions do not bind the superuser, so the failures below cannot be made.
@@ -417,6 +479,34 @@ defmodule OptimalEngine.Store.FileCacheMaintenanceTest do
     end
   end
 
+  describe "what a report says of a failed purge" do
+    test "names the cause and the kind of file, never a path" do
+      path = "/srv/engine/cache/tenants/aa/bb/embeddings/cc/dd.bin"
+
+      assert Maintenance.reason({:purge_failed, :eacces, path}) == :eacces
+      assert Maintenance.reason({:legacy_purge_failed, :eacces, path}) == :eacces
+
+      assert Maintenance.reason({:artifact_not_removed, :checkpoint, :eacces}) ==
+               {:checkpoint, :eacces}
+
+      assert Maintenance.reason({:cache_key_unavailable, :enotdir}) ==
+               {:cache_key_unavailable, :enotdir}
+
+      # A shape it does not know may carry anything, a path included.
+      assert Maintenance.reason({:invalid_scope, {path, "workspace"}}) == :purge_failed
+      assert Maintenance.reason({:something, path}) == :purge_failed
+
+      for cause <- [
+            {:purge_failed, :eacces, path},
+            {:artifact_plan_unreadable, "no such table next to #{path}"},
+            {:invalid_scope, {path, "workspace"}}
+          ] do
+        assert %{error: error} = Maintenance.summary({:error, cause})
+        refute error =~ "/srv/engine"
+      end
+    end
+  end
+
   test "purging a workspace says how much it removed" do
     :ok = FileCache.put(@scope, "embeddings", "a", [1.0])
     :ok = FileCache.put(@scope, "embeddings", "b", [1.0])
@@ -454,20 +544,11 @@ defmodule OptimalEngine.Store.FileCacheMaintenanceTest do
     path
   end
 
-  # Where the cache keeps an entry: derived from the layout, not found by a glob, so it
-  # also works under a cache path with glob characters in it.
-  defp entry_file({tenant, workspace}, namespace, key) do
-    digest = digest(key)
-
-    Path.join([
-      FileCache.root(),
-      "tenants",
-      digest(tenant),
-      digest(workspace),
-      namespace,
-      binary_part(digest, 0, 2),
-      digest <> ".bin"
-    ])
+  # Where the cache keeps an entry, asked of the cache: not found by a glob, so it also
+  # works under a cache path with glob characters in it.
+  defp entry_file(scope, namespace, key) do
+    {:ok, path} = FileCache.entry_file(scope, namespace, key)
+    path
   end
 
   defp age(path, days) do

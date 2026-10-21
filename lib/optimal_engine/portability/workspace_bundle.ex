@@ -47,6 +47,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   require Logger
 
   alias OptimalEngine.Authority.CanonicalJSON
+  alias OptimalEngine.Compliance.Artifacts
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Store.Migrations
@@ -423,9 +424,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
              [tenant_id, workspace_id]
            ),
          true <- expected == bundle_sha256 || {:error, :checksum_mismatch} do
+      # The rows that point at the workspace's decomposition checkpoints go with it, so
+      # what the purge has to remove is read first.
+      plan = artifact_plan(workspace_id)
       deleted = delete_rows(tenant_id, workspace_id)
       File.rm_rf(Filesystem.path(root(), workspace_id))
-      cache_purged = Cache.summary(Cache.purge_workspace(workspace_id, :move))
+
+      cache_purged =
+        Cache.summary(Cache.purge_workspace(workspace_id, :move, plan_option(plan)))
 
       # Only the move keys are written; the archived stub keeps its slugs and
       # its external id value (archiving releases the id itself).
@@ -464,6 +470,16 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   def finalize_move(_tenant_id, _workspace_id, _sha, _target), do: {:error, :target_url_required}
+
+  defp artifact_plan(workspace_id) do
+    case Artifacts.plan(workspace_id) do
+      {:ok, plan} -> plan
+      {:error, _} -> nil
+    end
+  end
+
+  defp plan_option(nil), do: []
+  defp plan_option(plan), do: [plan: plan]
 
   @doc """
   Records that `workspace_id` was exported for a move, with the bundle hash

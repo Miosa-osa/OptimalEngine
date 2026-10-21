@@ -49,6 +49,7 @@ defmodule OptimalEngine.Sync do
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Signal
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Store.Migrations
   alias OptimalEngine.Sync.{Capture, Gate, GateCache, Lineage}
 
@@ -1120,7 +1121,8 @@ defmodule OptimalEngine.Sync do
               conflicts: [],
               fact_conflicts: [],
               retry: [],
-              held: []
+              held: [],
+              erased?: false
             },
             fn
               {:skip, reason, _mutation}, acc ->
@@ -1173,6 +1175,7 @@ defmodule OptimalEngine.Sync do
         if outcome.applied > 0 or outcome.conflicts != [], do: GateCache.clear()
         log_held(outcome.held)
         Enum.each(outcome.fact_conflicts, &raise_fact_claims(tenant_id, workspace_id, &1))
+        if outcome.erased?, do: purge_erased(workspace_id)
 
         {:ok,
          %{
@@ -1226,6 +1229,25 @@ defmodule OptimalEngine.Sync do
   defp cut(value) when is_binary(value), do: value |> String.slice(0, 64) |> inspect()
   defp cut(value), do: inspect(value, limit: 3, printable_limit: 64)
 
+  # A delete of a context that a peer made (an erasure, a retention delete, a move)
+  # removed its rows here, and the derived rows that went with it arrive as deletes of
+  # their own. What this Engine keeps outside the database does not: the embeddings
+  # it cached from that text, and the files of the workspace. They go once the batch
+  # has committed. A failure is logged by the purge and never fails an apply that has
+  # already committed.
+  defp note_erased(acc, "contexts", %{"operation" => "delete"}), do: %{acc | erased?: true}
+  defp note_erased(acc, _table, _mutation), do: acc
+
+  defp purge_erased(workspace_id) do
+    Cache.purge_workspace(workspace_id, :sync)
+    :ok
+  rescue
+    error ->
+      Logger.error(
+        "[Sync] could not purge the cache of #{workspace_id}: #{Exception.message(error)}"
+      )
+  end
+
   defp apply_step(
          txn,
          tenant_id,
@@ -1256,7 +1278,7 @@ defmodule OptimalEngine.Sync do
           {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
           record_ledger(txn, tenant_id, workspace_id, mutation)
 
-          acc = %{acc | applied: acc.applied + 1}
+          acc = %{acc | applied: acc.applied + 1} |> note_erased(table, mutation)
 
           if conflict do
             record_conflict(

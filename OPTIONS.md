@@ -92,16 +92,29 @@ Log lines name the endpoint, the status, and the endpoint's error code; they nev
 Inputs are capped at 6,000 characters after invalid UTF-8 is replaced, and identical inputs are served from the filesystem cache.
 Ollama's cache entries are keyed by the model and the input; an endpoint's are keyed by the endpoint, the model and the input, so vectors from one never answer for the other.
 The cache is kept per workspace, under `<cache path>/tenants/<tenant>/<workspace>/embeddings/`.
-An entry is named by the SHA-256 digest of its key and holds the vector only, so the cache never holds the text that was embedded.
+An entry is named by an HMAC-SHA256 digest of its key and holds the vector only, so the cache never holds the text that was embedded.
+The digests, which also name the tenant and workspace directories, are keyed with a secret that belongs to the install: `embed_cache.key` in the database's directory, created at first use (`config :optimal_engine, :embed_cache_key_path` moves it).
+A guess at a text, a tenant id or a workspace id therefore cannot be confirmed from the cache's file names.
+Cache files are mode 0600 and the directories the cache creates are 0700.
+The vector remains: it is derived from the text and can be inverted to approximate it, so the cache is a derived copy of the data, kept under the same access rules and removed with it, not an anonymised one.
+When the key is created, entries written under another one (an earlier digest scheme, or a key that was lost) cannot be attributed to a workspace and are removed, and the log says how many.
+If the key cannot be created or read, nothing is cached and the log names the path; lookups are misses and writes fail quietly.
 Two workspaces that embed the same text each keep their own entry.
 An embedding is cached only when its workspace is known: ingest uses the chunk's or document's workspace, a search uses the workspace being searched, and the memory and app data projections use their own.
 An embedding asked for with no workspace is computed every time.
 Deleting, archiving, moving or erasing a workspace removes everything the cache holds for it.
-Erasing a principal does the same for every workspace that held one of their contexts, and deletes the vectors and chunks derived from those contexts.
-A retention sweep that deletes a context purges its workspace's cache as well.
+What else an erasure removes and what stays in backups, with how long, is in [`docs/guides/erasure-and-retention.md`](docs/guides/erasure-and-retention.md).
+Erasing a principal does the same for every workspace that held one of their contexts, and deletes what is derived from those contexts: the document vectors, chunks and chunk vectors, entity mentions, claims and the facts that accepted them, source packages with their decomposition runs, assets and extractions, the wiki pages written from their chunks, and episodes, processor runs, decisions and edges that name them, with the files those rows point at.
+The contexts go in batches of 200, each batch one transaction together with the rows derived from it, so a failure stops the erasure with the earlier batches done and erasing the principal again finishes the rest.
+A source package shared with a context that stays is kept, and so is an asset file shared with an asset that stays.
+A retention sweep that deletes a context removes the same derived material and purges its workspace's cache as well.
+A retention `redact` that changes a context's text rewrites its abstract and overview too, removes everything derived from the original text (chunks, vectors, claims, the source package), and builds the chunks and the document vector again from the redacted text; text that redaction leaves unchanged is not touched.
+Archiving or moving a workspace also removes its decomposition checkpoints (`<cache path>/decomposition/<run>.json`, which carry chunk text, named by `decomposition_runs.checkpoint_uri`) and the local copies of its object-store assets (`<cache path>/assets/...`); an erasure or a retention delete removes those of the rows it deletes. A file is removed only if it is the one the Engine writes for the row, see [Erasure And Retention](docs/guides/erasure-and-retention.md).
+A replica that applies a peer's delete of a context purges its workspace's cache once the batch has committed.
 Entries also expire by age: a sweep at boot and every six hours removes entries last written more than `cache_max_age_days` (30) ago.
 A cache hit does not extend an entry's life.
-Deleting a single record, such as forgetting one memory, does not purge the cache, so its entry stays until it expires.
+Deleting or forgetting a single record removes the entry cached from its text when the text is at hand at that moment: a durable memory deleted or forgotten (its content and its retrieval document), an app data record deleted, or one whose indexed fields were rewritten (the old text).
+An entry whose text is not known any more stays until it expires: a memory embedded with a custom document prefix, a collection dropped whole, and a search query.
 Earlier versions kept the cache unpartitioned, with the embedded text inside each entry.
 The first boot after upgrading removes that cache, because its entries cannot be attributed to a workspace, before the API answers.
 It logs the number of files and bytes (`removed the unpartitioned embedding cache of earlier versions: N files, M bytes`), and records a `cache.legacy_purge` audit event when it removed files.

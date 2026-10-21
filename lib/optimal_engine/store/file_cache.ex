@@ -6,12 +6,22 @@ defmodule OptimalEngine.Store.FileCache do
   erasing a workspace can remove everything the cache holds for it
   (`purge_workspace/1`). Entries live at
 
-      <cache_path>/tenants/<sha256 tenant>/<sha256 workspace>/<namespace>/<xx>/<sha256 key>.bin
+      <cache_path>/tenants/<hmac tenant>/<hmac workspace>/<namespace>/<xx>/<hmac key>.bin
 
-  Directory names are digests, so an id never reaches the filesystem as a path.
-  A file is named by the digest of its key and holds only `{version, digest,
-  value}`: the key (for the embedder, the text that was embedded) is never
-  written. Entries are written atomically (temporary file plus rename) and
+  Names are HMAC-SHA256 digests under a secret that belongs to this install
+  (`embed_cache.key` in the database's directory, created at first use, readable by
+  the Engine's user only; `config :optimal_engine, :embed_cache_key_path` moves it).
+  An id never reaches the filesystem as a path, and a guess at a text, a tenant or a
+  workspace id cannot be confirmed from file names or contents without the secret.
+  A file holds only `{version, digest, value}`: the key (for the embedder, the text
+  that was embedded) is never written. Files are mode 0600 and directories 0700.
+  What remains in a file is the vector, which is itself derived from the text and can
+  be inverted to approximate it: the cache is a derived copy of the data, kept under
+  the same access rules and removed with it, not an anonymised one.
+
+  When the secret is created, entries written under another one (an earlier
+  digest scheme, or a secret that was lost) cannot be attributed to a workspace, so
+  they are removed. Entries are written atomically (temporary file plus rename) and
   carry their digest, so a partially written file can never be returned as a
   hit. Anything unreadable is deleted and reported as a miss: the cache only
   accelerates work, it never holds truth, and deleting the whole directory is
@@ -25,8 +35,11 @@ defmodule OptimalEngine.Store.FileCache do
   `OptimalEngine.Store.FileCache.Maintenance`.
   """
 
+  require Logger
+
   @version 2
   @tenants "tenants"
+  @key_file "embed_cache.key"
   # The one namespace the unpartitioned layout was ever written under.
   @legacy_namespaces ["embeddings"]
 
@@ -50,8 +63,8 @@ defmodule OptimalEngine.Store.FileCache do
       tmp = "#{path}.tmp-#{System.unique_integer([:positive])}"
       body = :erlang.term_to_binary({@version, digest, value})
 
-      with :ok <- File.mkdir_p(Path.dirname(path)),
-           :ok <- File.write(tmp, body),
+      with :ok <- mkdir_private(Path.dirname(path)),
+           :ok <- write_private(tmp, body),
            :ok <- File.rename(tmp, path) do
         :ok
       else
@@ -104,13 +117,24 @@ defmodule OptimalEngine.Store.FileCache do
     end
   end
 
+  @doc """
+  Where the entry for `key` is, or would be, kept. For diagnostics and tests; it reads
+  and writes no entry.
+  """
+  @spec entry_file(scope(), String.t(), binary()) :: {:ok, String.t()} | {:error, term()}
+  def entry_file(scope, namespace, key) when is_binary(key) do
+    with {:ok, _digest, path} <- entry_path(scope, namespace, key), do: {:ok, path}
+  end
+
   @doc "Delete every entry of a scope in a namespace."
   @spec clear(scope(), String.t()) :: :ok | {:error, term()}
   def clear(scope, namespace) do
     with {:ok, dir} <- scope_dir(scope),
-         :ok <- validate_namespace(namespace),
-         {:ok, _} <- File.rm_rf(Path.join(dir, namespace)) do
-      :ok
+         :ok <- validate_namespace(namespace) do
+      case remove_tree(Path.join(dir, namespace)) do
+        :ok -> :ok
+        {:error, reason, _path} -> {:error, reason}
+      end
     end
   end
 
@@ -121,17 +145,16 @@ defmodule OptimalEngine.Store.FileCache do
   """
   @spec purge_workspace(String.t()) :: {:ok, removed()} | {:error, term()}
   def purge_workspace(workspace_id) when is_binary(workspace_id) and workspace_id != "" do
-    target = segment(workspace_id)
-
-    result =
-      for tenant <- tenant_dirs(),
-          dir = Path.join(tenant, target),
-          directory?(dir),
-          do: dir
-
-    result
-    |> remove_trees()
-    |> tap(fn _ -> Enum.each(tenant_dirs(), &File.rmdir/1) end)
+    with {:ok, target} <- mac("workspace", workspace_id) do
+      for(
+        tenant <- tenant_dirs(),
+        dir = Path.join(tenant, target),
+        directory?(dir),
+        do: dir
+      )
+      |> remove_trees()
+      |> tap(fn _ -> Enum.each(tenant_dirs(), &File.rmdir/1) end)
+    end
   end
 
   def purge_workspace(_workspace_id), do: {:error, :invalid_workspace}
@@ -141,6 +164,9 @@ defmodule OptimalEngine.Store.FileCache do
   directories. A hit does not extend an entry's life: the age is the time
   since it was computed, so retention is a bound, not a recency rule.
 
+  The tree is walked one directory at a time and a directory is removed as soon
+  as it is empty, so a large cache is never listed whole.
+
   Only what this module wrote is touched: a file goes only at
   `tenants/<64 hex>/<64 hex>/<namespace>/<2 hex>/<64 hex>.bin`, or as the
   temporary file of a write that did not finish. A cache path that is also a
@@ -149,24 +175,42 @@ defmodule OptimalEngine.Store.FileCache do
   @spec sweep(pos_integer()) :: removed()
   def sweep(max_age_seconds) when is_integer(max_age_seconds) and max_age_seconds > 0 do
     cutoff = System.os_time(:second) - max_age_seconds
+    tenants = Path.join(root(), @tenants)
 
     removed =
-      Enum.reduce(shard_dirs(), %{files: 0, bytes: 0}, fn shard, acc ->
-        shard
-        |> files(&entry_or_tmp?/1)
-        |> Enum.reduce(acc, fn path, acc ->
-          case File.stat(path, time: :posix) do
-            {:ok, %{type: :regular, mtime: mtime, size: size}} when mtime < cutoff ->
-              if File.rm(path) == :ok, do: add(acc, 1, size), else: acc
+      sweep_dir(
+        tenants,
+        [&hex64?/1, &hex64?/1, &namespace?/1, &shard?/1],
+        cutoff,
+        %{files: 0, bytes: 0}
+      )
 
-            _ ->
-              acc
-          end
-        end)
-      end)
-
-    prune_empty_dirs()
+    File.rmdir(tenants)
     removed
+  end
+
+  # The last level is the shard, whose files are the entries.
+  defp sweep_dir(shard, [], cutoff, acc) do
+    shard
+    |> files(&entry_or_tmp?/1)
+    |> Enum.reduce(acc, fn path, acc ->
+      case File.stat(path, time: :posix) do
+        {:ok, %{type: :regular, mtime: mtime, size: size}} when mtime < cutoff ->
+          if File.rm(path) == :ok, do: add(acc, 1, size), else: acc
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp sweep_dir(dir, [keep? | levels], cutoff, acc) do
+    Enum.reduce(subdirs(dir, keep?), acc, fn child, acc ->
+      acc = sweep_dir(child, levels, cutoff, acc)
+      # Refused while it still holds an entry, which is the point.
+      File.rmdir(child)
+      acc
+    end)
   end
 
   @doc """
@@ -248,8 +292,8 @@ defmodule OptimalEngine.Store.FileCache do
 
   defp entry_path(scope, namespace, key) do
     with {:ok, dir} <- scope_dir(scope),
-         :ok <- validate_namespace(namespace) do
-      digest = digest(key)
+         :ok <- validate_namespace(namespace),
+         {:ok, digest} <- mac("entry", key) do
       {:ok, digest, Path.join([dir, namespace, binary_part(digest, 0, 2), digest <> ".bin"])}
     end
   end
@@ -257,14 +301,206 @@ defmodule OptimalEngine.Store.FileCache do
   defp scope_dir({tenant_id, workspace_id})
        when is_binary(tenant_id) and tenant_id != "" and is_binary(workspace_id) and
               workspace_id != "" do
-    {:ok, Path.join([root(), @tenants, segment(tenant_id), segment(workspace_id)])}
+    with {:ok, tenant} <- mac("tenant", tenant_id),
+         {:ok, workspace} <- mac("workspace", workspace_id) do
+      {:ok, Path.join([root(), @tenants, tenant, workspace])}
+    end
   end
 
   defp scope_dir(scope), do: {:error, {:invalid_scope, scope}}
 
-  defp segment(id), do: digest(id)
+  # ── the secret ─────────────────────────────────────────────────────────────
 
-  defp digest(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+  # HMAC-SHA256 of `value` under this install's secret, hex. The domain keeps a
+  # tenant id, a workspace id and a key from colliding with one another.
+  defp mac(domain, value) do
+    with {:ok, secret} <- secret() do
+      {:ok, :crypto.mac(:hmac, :sha256, secret, [domain, 0, value]) |> Base.encode16(case: :lower)}
+    end
+  end
+
+  @doc """
+  Where the install's secret is kept: `embed_cache.key` in the database's directory.
+  """
+  @spec key_path() :: String.t()
+  def key_path do
+    case Application.get_env(:optimal_engine, :embed_cache_key_path) do
+      path when is_binary(path) and path != "" ->
+        Path.expand(path)
+
+      _ ->
+        :optimal_engine
+        |> Application.get_env(:db_path, ".optimal/index.db")
+        |> Path.expand()
+        |> Path.dirname()
+        |> Path.join(@key_file)
+    end
+  end
+
+  @doc """
+  Make sure the secret exists, creating it (and removing entries nothing can
+  attribute any more) if it does not. Called at boot, before the first entry is
+  read or written.
+  """
+  @spec ensure_key() :: :ok | {:error, term()}
+  def ensure_key do
+    with {:ok, _secret} <- secret(), do: :ok
+  end
+
+  defp secret do
+    path = key_path()
+
+    case :persistent_term.get({__MODULE__, path}, nil) do
+      nil ->
+        with {:ok, secret} <- read_or_create_secret(path) do
+          :persistent_term.put({__MODULE__, path}, secret)
+          {:ok, secret}
+        end
+
+      secret ->
+        {:ok, secret}
+    end
+  end
+
+  defp read_or_create_secret(path) do
+    case read_secret(path) do
+      {:ok, secret} ->
+        {:ok, secret}
+
+      :missing ->
+        create_secret(path)
+
+      # Something is there that is not a key: it goes, with the entries made under whatever
+      # it was.
+      :unreadable ->
+        case File.rm(path) do
+          result when result in [:ok, {:error, :enoent}] -> create_secret(path)
+          {:error, reason} -> {:error, {:cache_key_unavailable, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:cache_key_unavailable, reason}}
+    end
+  end
+
+  defp read_secret(path) do
+    case File.read(path) do
+      {:ok, body} ->
+        case Base.decode16(String.trim(body), case: :mixed) do
+          {:ok, secret} when byte_size(secret) == 32 -> {:ok, secret}
+          _unreadable -> :unreadable
+        end
+
+      {:error, :enoent} ->
+        :missing
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Entries under another secret can never be found again by a purge, so they go before
+  # the new secret is written: a crash in between repeats the removal at the next boot.
+  # The key is published only if no key is there (a link of the finished file: complete or
+  # absent, never half written), so two callers starting together end up with one key, the
+  # first one's, and the second removes only entries that cannot be found by a purge either.
+  defp create_secret(path) do
+    secret = :crypto.strong_rand_bytes(32)
+    body = Base.encode16(secret, case: :lower)
+    tmp = path <> ".tmp-#{System.unique_integer([:positive])}"
+
+    with {:ok, removed} <- remove_all_entries(),
+         :ok <- mkdir_private(Path.dirname(path)),
+         :ok <- write_private(tmp, body),
+         :ok <- publish_key(tmp, path, body) do
+      File.rm(tmp)
+      log_unattributable(removed)
+      {:ok, secret}
+    else
+      {:error, :eexist} ->
+        File.rm(tmp)
+        # Another caller published first: its key is the install's.
+        case read_secret(path) do
+          {:ok, existing} -> {:ok, existing}
+          _not_a_key -> {:error, {:cache_key_unavailable, :eexist}}
+        end
+
+      {:error, reason} ->
+        File.rm(tmp)
+        {:error, {:cache_key_unavailable, reason}}
+    end
+  end
+
+  # A link of the finished file; a file system that cannot link gets the file created
+  # exclusively, which is the same guarantee that nothing is replaced.
+  defp publish_key(tmp, path, body) do
+    case :file.make_link(tmp, path) do
+      :ok -> :ok
+      {:error, :eexist} -> {:error, :eexist}
+      {:error, _cannot_link} -> write_private(path, body)
+    end
+  end
+
+  defp log_unattributable(%{files: 0}), do: :ok
+
+  defp log_unattributable(%{files: files, bytes: bytes}) do
+    Logger.warning(
+      "[FileCache] created the cache key; #{files} cache entries (#{bytes} bytes) written under " <>
+        "another key cannot be attributed to a workspace and were removed"
+    )
+  end
+
+  # Every entry of the cache's shape, whatever secret named it, and nothing else:
+  # `<cache_path>/tenants` can hold other things (a cache path that is also an Engine root
+  # has its tenants' workspaces there), so a directory is removed only once it is empty.
+  defp remove_all_entries do
+    tenants = Path.join(root(), @tenants)
+
+    removed =
+      sweep_dir(
+        tenants,
+        [&hex64?/1, &hex64?/1, &namespace?/1, &shard?/1],
+        System.os_time(:second) + 1,
+        %{files: 0, bytes: 0}
+      )
+
+    File.rmdir(tenants)
+    {:ok, removed}
+  end
+
+  # ── private files and directories ──────────────────────────────────────────
+
+  # Directories this module creates are 0700. One that exists is left as it is.
+  defp mkdir_private(dir) do
+    case File.mkdir(dir) do
+      :ok ->
+        File.chmod(dir, 0o700)
+
+      {:error, :eexist} ->
+        :ok
+
+      {:error, :enoent} ->
+        with :ok <- mkdir_private(Path.dirname(dir)), do: mkdir_private(dir)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # A new file, 0600 before any byte is written to it.
+  defp write_private(path, body) do
+    case :file.open(path, [:write, :exclusive, :binary]) do
+      {:ok, io} ->
+        result =
+          with :ok <- File.chmod(path, 0o600), do: :file.write(io, body)
+
+        closed = :file.close(io)
+        if result == :ok, do: closed, else: result
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp validate_namespace(namespace) when is_binary(namespace) do
     if namespace?(namespace),
@@ -391,15 +627,6 @@ defmodule OptimalEngine.Store.FileCache do
       {:error, _} ->
         {0, 0}
     end
-  end
-
-  # Deepest first, so a directory emptied by removing its children goes too.
-  # `File.rmdir/1` refuses a directory that still has entries.
-  defp prune_empty_dirs do
-    Enum.each(shard_dirs(), &File.rmdir/1)
-    Enum.each(namespace_dirs(), &File.rmdir/1)
-    Enum.each(scope_dirs(), &File.rmdir/1)
-    Enum.each(tenant_dirs(), &File.rmdir/1)
   end
 
   defp remove_file(path) do

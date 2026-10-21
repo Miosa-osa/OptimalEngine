@@ -25,6 +25,7 @@ defmodule OptimalEngine.AppData.Semantic do
   require Logger
 
   alias OptimalEngine.AppData.{Collections, Query, Records, Schema, Scope, SQL}
+  alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Store
 
   @rebuild_batch 200
@@ -161,6 +162,8 @@ defmodule OptimalEngine.AppData.Semantic do
   """
   @spec index_written([tuple()]) :: :ok
   def index_written(written) do
+    forget_replaced(written)
+
     work =
       for {c, :written, record} <- written, Schema.semantic_fields(c.schema) != [], do: {c, record}
 
@@ -170,6 +173,29 @@ defmodule OptimalEngine.AppData.Semantic do
       {work, :sync} -> index_records(work)
       {work, _async} -> start_async(work)
     end
+  end
+
+  # The text of a record that was deleted, or rewritten, is at hand in `written`: the
+  # embedding cached from it goes. A text that an update left as it was is not touched,
+  # its entry is still the record's. Collections dropped whole are not here: their
+  # records are not read, and their entries age out (`cache_max_age_days`).
+  defp forget_replaced(written) do
+    %{model: model} = config()
+
+    kept =
+      for {c, :written, record} <- written, Schema.semantic_fields(c.schema) != [] do
+        {c.id, record["id"], semantic_text(c, record["data"])}
+      end
+
+    for {c, :forget, id, data} <- written, Schema.semantic_fields(c.schema) != [] do
+      text = semantic_text(c, data)
+
+      unless text == "" or {c.id, id, text} in kept do
+        TextEmbedder.forget(text, [model: model] ++ cache_scope(c))
+      end
+    end
+
+    :ok
   end
 
   defp start_async(work) do
@@ -188,13 +214,16 @@ defmodule OptimalEngine.AppData.Semantic do
     Enum.each(work, fn {c, record} -> index_record(embedder, model, c, record) end)
   end
 
+  defp semantic_text(c, data) do
+    c.schema
+    |> Schema.semantic_fields()
+    |> Enum.map(&data[&1])
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.join("\n")
+  end
+
   defp index_record(embedder, model, c, record) do
-    text =
-      c.schema
-      |> Schema.semantic_fields()
-      |> Enum.map(&record["data"][&1])
-      |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
-      |> Enum.join("\n")
+    text = semantic_text(c, record["data"])
 
     hash = :crypto.hash(:sha256, model <> "\n" <> text) |> Base.encode16(case: :lower)
 

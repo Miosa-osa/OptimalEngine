@@ -19,18 +19,26 @@ defmodule OptimalEngine.Compliance.Retention do
                    the content remains for audit but is dropped from
                    search via a future filter.
     * `:delete`  — hard-delete the context row.
-    * `:redact`  — rewrite content through `Compliance.Redact.redact!/2`.
+    * `:redact`  — rewrite content, abstract and overview through
+                   `Compliance.Redact.redact!/2`.
 
-  A `:delete` also removes the vectors and chunks derived from the context
-  (`Compliance.DerivedData`), which nothing else ties to it, and purges the
-  filesystem cache of its workspace (`OptimalEngine.Store.FileCache`).
+  A `:delete` also removes everything derived from the context
+  (`Compliance.DerivedData`: vectors, chunks, claims, source packages, wiki pages
+  and the rest, which nothing else ties to it, and the files they point at), and
+  purges the filesystem cache of its workspace (`OptimalEngine.Store.FileCache`).
+
+  A `:redact` that changes the text removes the same derived material, which was
+  made from the unredacted text, and builds the chunks and the document vector
+  again from the redacted text (`Compliance.Reindex`). The derived material is
+  removed first: if that fails the text is left as it was and the next sweep tries
+  again. Text that redaction leaves unchanged is not reindexed.
 
   ## Trace
 
   Every action emits one audit `events` row with kind = `retention_action`.
   """
 
-  alias OptimalEngine.Compliance.{DerivedData, LegalHold, Redact}
+  alias OptimalEngine.Compliance.{DerivedData, LegalHold, Redact, Reindex}
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
 
@@ -214,7 +222,7 @@ defmodule OptimalEngine.Compliance.Retention do
   defp purge_deleted_workspaces(%{deleted_in: workspaces} = result) do
     failed =
       workspaces
-      |> Enum.map(&Cache.purge_workspace(&1, :retention))
+      |> Enum.map(&Cache.purge_workspace(&1, :retention, artifacts: false))
       |> Enum.count(&match?({:error, _}, &1))
 
     result |> Map.delete(:deleted_in) |> Map.update!(:errors, &(&1 + failed))
@@ -238,38 +246,24 @@ defmodule OptimalEngine.Compliance.Retention do
     # Derived vectors and chunks first: nothing ties them to the context, so a context
     # deleted without them leaves its text behind. If they cannot be deleted the context
     # stays, and the next sweep tries again.
-    with {:ok, _derived} <-
-           DerivedData.delete_for_contexts(
-             "SELECT id FROM contexts WHERE id = ?1 AND tenant_id = ?2",
-             [target.id, tenant_id]
-           ),
-         {:ok, _} <-
-           Store.raw_query("DELETE FROM contexts WHERE id = ?1 AND tenant_id = ?2", [
-             target.id,
-             tenant_id
-           ]) do
-      trace(target.id, "delete", tenant_id)
-      :ok
-    else
-      _ -> :error
+    case DerivedData.erase_contexts(tenant_id, [target.id]) do
+      {:ok, _removed} ->
+        trace(target.id, "delete", tenant_id)
+        :ok
+
+      _ ->
+        :error
     end
   rescue
     _ -> :error
   end
 
   defp apply_action(target, %{action: "redact"}, tenant_id) do
-    redacted = Redact.redact!(target.content || "")
-
-    case Store.raw_query(
-           "UPDATE contexts SET content = ?1 WHERE id = ?2 AND tenant_id = ?3",
-           [redacted, target.id, tenant_id]
-         ) do
-      {:ok, _} ->
-        trace(target.id, "redact", tenant_id)
-        :ok
-
-      _ ->
-        :error
+    with :ok <- redact(target, tenant_id) do
+      trace(target.id, "redact", tenant_id)
+      :ok
+    else
+      _ -> :error
     end
   rescue
     _ -> :error
@@ -292,6 +286,48 @@ defmodule OptimalEngine.Compliance.Retention do
   end
 
   defp apply_action(_target, _policy, _tenant_id), do: :ok
+
+  # Rewrites the text of a context and what was summarised from it. When nothing
+  # changes there is nothing to rebuild, so a context that was redacted by an earlier
+  # sweep costs one read.
+  defp redact(target, tenant_id) do
+    with {:ok, [[l0, l1]]} <-
+           Store.raw_query(
+             "SELECT l0_abstract, l1_overview FROM contexts WHERE id = ?1 AND tenant_id = ?2",
+             [target.id, tenant_id]
+           ) do
+      content = target.content || ""
+      redacted = Redact.redact!(content)
+      redacted_l0 = Redact.redact!(l0 || "")
+      redacted_l1 = Redact.redact!(l1 || "")
+
+      if redacted == content and redacted_l0 == (l0 || "") and redacted_l1 == (l1 || "") do
+        :ok
+      else
+        rewrite(target, tenant_id, redacted, redacted_l0, redacted_l1)
+      end
+    end
+  end
+
+  # Order matters: what was made from the old text goes first, so a failure part way
+  # leaves the old text in place for the next sweep to find, never a redacted context
+  # with an unredacted chunk or source package behind it.
+  defp rewrite(target, tenant_id, content, l0, l1) do
+    with {:ok, _removed} <- DerivedData.delete_derived([target.id]),
+         {:ok, _} <-
+           Store.raw_query(
+             """
+             UPDATE contexts SET content = ?1, l0_abstract = ?2, l1_overview = ?3,
+               metadata = CASE WHEN json_valid(metadata)
+                          THEN json_remove(metadata, '$.source_package_id') ELSE metadata END
+             WHERE id = ?4 AND tenant_id = ?5
+             """,
+             [content, l0, l1, target.id, tenant_id]
+           ) do
+      Reindex.context(target.id)
+      :ok
+    end
+  end
 
   # Audit trace: best-effort. A failure here is logged but never
   # propagates — a trace insert failure must NOT make a successful

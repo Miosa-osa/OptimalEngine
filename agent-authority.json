@@ -720,6 +720,17 @@
       "owns": []
     },
     {
+      "id": "docs-guides-erasure-and-retention",
+      "path": "docs/guides/erasure-and-retention.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-21",
+      "owns": []
+    },
+    {
       "id": "docs-guides-store-and-layer-reality",
       "path": "docs/guides/store-and-layer-reality.md",
       "kind": "reference",

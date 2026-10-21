@@ -30,6 +30,35 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
     )
   end
 
+  @doc """
+  Remove the cached embedding of the text a memory was indexed from, for a memory that
+  is being deleted or forgotten while its row is still at hand. The text is the
+  memory's content and its serialised retrieval document (both profiles), which is
+  what `index/2` and an unconfigured `rebuild/2` embed. An entry made under a custom
+  `:document_prefix`, or another provider model, cannot be rebuilt from the row and
+  is left to the workspace purge or the age sweep.
+  """
+  @spec forget_cache(Versioned.t()) :: :ok
+  def forget_cache(%Versioned{} = memory) do
+    texts = [
+      memory.content,
+      RetrievalDocument.serialize(memory),
+      RetrievalDocument.serialize(memory, RetrievalDocument.multimodal_profile())
+    ]
+
+    for text <- Enum.uniq(texts), is_binary(text), text != "" do
+      TextEmbedder.forget(text,
+        model: model(),
+        tenant_id: memory.tenant_id,
+        workspace_id: memory.workspace_id
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
   @spec index(Versioned.t(), keyword()) :: :ok | {:error, term()}
   def index(memory, opts \\ []) do
     projection_model = Keyword.get(opts, :model, model())

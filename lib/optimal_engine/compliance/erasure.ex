@@ -19,12 +19,21 @@ defmodule OptimalEngine.Compliance.Erasure do
 
   ## What is erased with a principal's contexts
 
-  A context's derived retrieval material goes with it: its document vector
-  (`vectors`), its chunks and the chunk vectors (`chunks`, `chunk_embeddings`).
-  Those rows are not tied to the context by a foreign key, so deleting the
-  context alone left them behind. The filesystem cache of every workspace that
-  held an erased context is purged too (`OptimalEngine.Store.FileCache`); it is
-  recomputable, and its entries cannot be told apart per context.
+  A context's derived material goes with it (`Compliance.DerivedData`): its
+  document vector, chunks and chunk vectors, entity mentions, claims and the
+  facts that accepted them, its source packages with their decomposition runs
+  and assets, the wiki pages written from its chunks, and its episodes,
+  processor runs, decisions and edges, and the files those rows point at. Most
+  of it is not tied to the context by a foreign key, so deleting the context
+  alone left it behind. The contexts go in batches of
+  200, each batch one transaction with
+  its derived rows: a failure stops the erasure with the earlier batches done,
+  and erasing again finishes the rest.
+
+  The filesystem cache of every workspace that held an erased context is purged
+  too (`OptimalEngine.Store.FileCache`, with the decomposition checkpoints and
+  object-store asset copies of the workspace); it is recomputable, and its
+  entries cannot be told apart per context.
 
   ## What survives
 
@@ -73,8 +82,13 @@ defmodule OptimalEngine.Compliance.Erasure do
     with {:ok, held} <- held_result,
          :ok <- gate_on_holds(held, force?),
          {:ok, workspaces} <- workspaces_of_contexts(principal_id, tenant_id),
-         {:ok, derived} <- delete_derived(principal_id, tenant_id) do
-      deleted = principal_id |> do_cascade(tenant_id) |> Map.merge(derived)
+         {:ok, context_ids} <- context_ids(principal_id, tenant_id),
+         {:ok, derived} <- erase_derived(tenant_id, context_ids, workspaces) do
+      deleted =
+        %{contexts: 0, vectors: 0, chunk_embeddings: 0, chunks: 0}
+        |> Map.merge(do_cascade(principal_id, tenant_id))
+        |> Map.merge(derived)
+
       cache_purged = purge_cache(workspaces)
       redacted = redact_audit(principal_id, tenant_id)
 
@@ -120,43 +134,44 @@ defmodule OptimalEngine.Compliance.Erasure do
     {:ok,
      %{
        principal_id: principal_id,
-       counts: %{
-         contexts:
-           count_where("contexts", "tenant_id = ?1 AND created_by = ?2", [
-             tenant_id,
-             principal_id
-           ]),
-         vectors:
-           count_where(
-             "vectors",
-             "context_id IN (SELECT id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2)",
-             [tenant_id, principal_id]
-           ),
-         chunks:
-           count_where(
-             "chunks",
-             "signal_id IN (SELECT id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2)",
-             [tenant_id, principal_id]
-           ),
-         node_members:
-           count_where("node_members", "tenant_id = ?1 AND principal_id = ?2", [
-             tenant_id,
-             principal_id
-           ]),
-         principal_skills:
-           count_where("principal_skills", "tenant_id = ?1 AND principal_id = ?2", [
-             tenant_id,
-             principal_id
-           ]),
-         role_grants:
-           count_where("role_grants", "tenant_id = ?1 AND principal_id = ?2", [
-             tenant_id,
-             principal_id
-           ]),
-         principal_groups: count_where("principal_groups", "principal_id = ?1", [principal_id]),
-         events:
-           count_where("events", "tenant_id = ?1 AND principal = ?2", [tenant_id, principal_id])
-       }
+       counts:
+         Map.merge(derived_counts(principal_id, tenant_id), %{
+           contexts:
+             count_where("contexts", "tenant_id = ?1 AND created_by = ?2", [
+               tenant_id,
+               principal_id
+             ]),
+           vectors:
+             count_where(
+               "vectors",
+               "context_id IN (SELECT id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2)",
+               [tenant_id, principal_id]
+             ),
+           chunks:
+             count_where(
+               "chunks",
+               "signal_id IN (SELECT id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2)",
+               [tenant_id, principal_id]
+             ),
+           node_members:
+             count_where("node_members", "tenant_id = ?1 AND principal_id = ?2", [
+               tenant_id,
+               principal_id
+             ]),
+           principal_skills:
+             count_where("principal_skills", "tenant_id = ?1 AND principal_id = ?2", [
+               tenant_id,
+               principal_id
+             ]),
+           role_grants:
+             count_where("role_grants", "tenant_id = ?1 AND principal_id = ?2", [
+               tenant_id,
+               principal_id
+             ]),
+           principal_groups: count_where("principal_groups", "principal_id = ?1", [principal_id]),
+           events:
+             count_where("events", "tenant_id = ?1 AND principal = ?2", [tenant_id, principal_id])
+         })
      }}
   end
 
@@ -178,31 +193,56 @@ defmodule OptimalEngine.Compliance.Erasure do
     end
   end
 
+  # The contexts go in batches, so a failure part way leaves the earlier batches gone. What the
+  # cache holds for their workspaces must not outlive them, so it is purged on the error path
+  # too; running the erasure again finishes the rest.
+  defp erase_derived(tenant_id, context_ids, workspaces) do
+    case DerivedData.erase_contexts(tenant_id, context_ids) do
+      {:ok, _derived} = ok ->
+        ok
+
+      {:error, _reason} = error ->
+        purge_cache(workspaces)
+        error
+    end
+  end
+
   # The filesystem cache of each workspace that held an erased context. A failure is
-  # reported (and logged), not raised: the rows are already gone.
+  # reported (and logged), not raised: the rows are already gone. The checkpoints and copies
+  # of the erased contexts went with their rows; those of the contexts that stay are not
+  # touched.
   defp purge_cache(workspaces) do
     workspaces
-    |> Cache.purge_workspaces(:erase)
+    |> Cache.purge_workspaces(:erase, artifacts: false)
     |> Cache.summary()
     |> Map.put(:workspaces, workspaces)
   end
 
-  # Retrieval material derived from the principal's contexts, deleted before the contexts
-  # it is selected through. A failure stops the erasure with the contexts still in place.
-  defp delete_derived(principal_id, tenant_id) do
-    DerivedData.delete_for_contexts(
-      "SELECT id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2",
-      [tenant_id, principal_id]
-    )
+  # What the derived tables beyond vectors and chunks would lose: the delete itself, run
+  # and rolled back. Not readable counts are left out of the preview.
+  defp derived_counts(principal_id, tenant_id) do
+    with {:ok, ids} <- context_ids(principal_id, tenant_id),
+         {:ok, counts} <- DerivedData.preview(tenant_id, ids) do
+      Map.drop(counts, [:contexts, :vectors, :chunks])
+    else
+      _ -> %{}
+    end
+  end
+
+  # The ids to erase, read once: the batches work from this list, so contexts created
+  # while the erasure runs are not half-erased.
+  defp context_ids(principal_id, tenant_id) do
+    case Store.raw_query(
+           "SELECT id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2",
+           [tenant_id, principal_id]
+         ) do
+      {:ok, rows} -> {:ok, List.flatten(rows)}
+      {:error, reason} -> {:error, {:erasure_scope_unreadable, reason}}
+    end
   end
 
   defp do_cascade(principal_id, tenant_id) do
     %{
-      contexts:
-        delete("contexts", "tenant_id = ?1 AND created_by = ?2", [
-          tenant_id,
-          principal_id
-        ]),
       node_members:
         delete("node_members", "tenant_id = ?1 AND principal_id = ?2", [tenant_id, principal_id]),
       principal_skills:

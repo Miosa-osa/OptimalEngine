@@ -276,9 +276,14 @@ defmodule OptimalEngine.Storage.Assets do
     end
   end
 
-  defp cached_path(key) do
+  defp cached_path(key), do: Path.join(cache_dir(), key)
+
+  @doc false
+  # Where the copies of object-store assets are kept: `<cache_path>/assets`.
+  @spec cache_dir() :: String.t()
+  def cache_dir do
     cache = Application.get_env(:optimal_engine, :cache_path, System.tmp_dir!())
-    Path.join([cache, "assets", key])
+    Path.join(cache, "assets")
   end
 
   @doc """

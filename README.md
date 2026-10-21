@@ -520,7 +520,9 @@ For org and workspace Engines, share-up, federated search, and moving a
 workspace between Engines, read
 [`docs/guides/scope-and-portability.md`](docs/guides/scope-and-portability.md);
 for keeping local and cloud Engines in step, read
-[`docs/guides/replication.md`](docs/guides/replication.md).
+[`docs/guides/replication.md`](docs/guides/replication.md);
+for what an erasure, a retention delete or a move removes and what stays in backups,
+read [`docs/guides/erasure-and-retention.md`](docs/guides/erasure-and-retention.md).
 
 For the five VSM systems, the Signal Theory proxy metrics, the variety ratio,
 trajectory alerts, the weekly audit, and agent action chains, read
