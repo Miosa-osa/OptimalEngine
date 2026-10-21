@@ -82,7 +82,8 @@ defmodule OptimalEngine.Store.Postgres do
     COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = $24),
              (SELECT t.id FROM tenants t
               WHERE t.id = CASE WHEN strpos($24, ':') > 0
-                                THEN substr($24, 1, strpos($24, ':') - 1) ELSE '' END),
+                                THEN substr($24, 1, strpos($24, ':') - 1)
+                                WHEN strpos($24, ':') = 0 THEN '' END),
              'default'))
   """
 

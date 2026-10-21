@@ -21,7 +21,7 @@ defmodule OptimalEngine.Store.Dialect do
   | `x LIKE p`, `x NOT LIKE p` | `x ILIKE (p) COLLATE "C" ESCAPE ''`, the same with `NOT` |
   | `x IS ?`, `x IS NOT 'a'` | `x IS NOT DISTINCT FROM $n`, `x IS DISTINCT FROM 'a'` |
   | `IFNULL(a, b)` | `COALESCE(a, b)` |
-  | `substr(a, 1, instr(a, b) - 1)` | `(CASE WHEN strpos(a, b) > 0 THEN substr(a, 1, strpos(a, b) - 1) ELSE '' END)` |
+  | `substr(a, 1, instr(a, b) - 1)` | `(CASE WHEN strpos(a, b) > 0 THEN substr(a, 1, strpos(a, b) - 1) WHEN strpos(a, b) = 0 THEN '' END)` |
   | `CAST(x AS INTEGER)`, `CAST(x AS REAL)` | `CAST(x AS BIGINT)`, `CAST(x AS DOUBLE PRECISION)` |
   | `json_valid(col)` | `(col IS JSON)` |
   | `x IN (SELECT value FROM json_each(?2))` | `x IN (SELECT value FROM jsonb_array_elements_text(CAST($2 AS text)::jsonb))` |
@@ -112,6 +112,9 @@ defmodule OptimalEngine.Store.Dialect do
   @unsupported [
                  {"INSERT OR REPLACE", ~r/\bINSERT\s+OR\s+REPLACE\b/i,
                   "delete-and-insert semantics; port the call site with ON CONFLICT DO UPDATE"},
+                 {"UPDATE with a conflict clause",
+                  ~r/\bUPDATE\s+OR\s+(ROLLBACK|ABORT|REPLACE|FAIL|IGNORE)\b/i,
+                  "SQLite's ON CONFLICT clause on an UPDATE; port the call site"},
                  {"REPLACE INTO", ~r/(\A|;)\s*REPLACE\s+INTO\b/i,
                   "SQLite's INSERT OR REPLACE spelled another way"},
                  {"PRAGMA", ~r/\bPRAGMA\b/i, "catalog inspection, not a statement rewrite"},
@@ -130,7 +133,7 @@ defmodule OptimalEngine.Store.Dialect do
                  {"last_insert_rowid", ~r/\blast_insert_rowid\s*\(/i,
                   "needs RETURNING at the call site"},
                  {"WITHOUT ROWID", ~r/\bWITHOUT\s+ROWID\b/i, "DDL, rewritten with the schema"},
-                 {"unmapped date/time function", ~r/\b(str|date)time\s*\(/i,
+                 {"unmapped date/time function", ~r/\b(strf|date)time\s*\(/i,
                   "a format or modifier this module does not map"}
                ] ++
                  Enum.map(@sqlite_json_functions, fn name ->
@@ -381,14 +384,16 @@ defmodule OptimalEngine.Store.Dialect do
   # tenant from a "<tenant>:<slug>" workspace id: SQLite's substr takes the
   # negative length instr(...) - 1 gives when the separator is absent and
   # returns '', PostgreSQL's substr refuses it, so the translation tests the
-  # position first. instr anywhere else is still refused.
+  # position first. A NULL value or separator gives NULL on both. instr
+  # anywhere else is still refused.
   @text_operand "(?:#{@sentinel}|\\?\\d+|#{@identifier})"
 
   defp rewrite_text_before(masked) do
     Regex.replace(
       ~r/\bsubstr\s*\(\s*(#{@text_operand})\s*,\s*1\s*,\s*instr\s*\(\s*\1\s*,\s*(#{@text_operand})\s*\)\s*-\s*1\s*\)/i,
       masked,
-      "(CASE WHEN strpos(\\1, \\2) > 0 THEN substr(\\1, 1, strpos(\\1, \\2) - 1) ELSE '' END)"
+      "(CASE WHEN strpos(\\1, \\2) > 0 THEN substr(\\1, 1, strpos(\\1, \\2) - 1) " <>
+        "WHEN strpos(\\1, \\2) = 0 THEN '' END)"
     )
   end
 

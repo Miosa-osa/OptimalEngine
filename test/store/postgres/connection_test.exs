@@ -137,7 +137,7 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
   end
 
   describe "refusals at the boundary" do
-    test "a schema change or a transaction statement in the engine's dialect is refused",
+    test "a schema change in the engine's dialect is refused, whatever comments come first",
          %{pool: pool} do
       assert {:error, {:unsupported, "schema change outside the migrations"}} =
                Connection.query(pool, "CREATE TABLE extra (a INTEGER)")
@@ -145,10 +145,26 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
       assert {:error, {:unsupported, "schema change outside the migrations"}} =
                Connection.query(pool, "  -- a comment\n  ALTER TABLE items ADD COLUMN x TEXT")
 
-      for statement <- ["BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT s", "END"] do
-        assert {:error, {:unsupported, "transaction statement outside the store's transaction"}} =
-                 Connection.query(pool, statement),
-               statement
+      assert {:error, {:unsupported, "schema change outside the migrations"}} =
+               Connection.query(pool, "/* a note */ ; CREATE INDEX extra_name ON items (name)")
+    end
+
+    test "a transaction statement raises before it reaches the database, in either dialect",
+         %{pool: pool} do
+      for statement <- [
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "SAVEPOINT s",
+            "END",
+            "/* x */ COMMIT",
+            "START TRANSACTION",
+            "ABORT"
+          ],
+          opts <- [[], [dialect: :postgres]] do
+        assert_raise ArgumentError, ~r/Store.transaction/, fn ->
+          Connection.query(pool, statement, [], opts)
+        end
       end
     end
 
@@ -168,13 +184,14 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
                    {:ok, _} = Connection.txn_query(txn, "RELEASE attempt")
                    {:ok, _} = Connection.txn_query(txn, "PRAGMA defer_foreign_keys = ON")
 
-                   assert {:error, {:unsupported, _}} = Connection.txn_query(txn, "COMMIT")
+                   assert_raise ArgumentError, fn -> Connection.txn_query(txn, "/* x */ COMMIT") end
+                   {:ok, _} = Connection.txn_query(txn, insert, ["after"])
                    {:ok, :done}
                  end,
                  5_000
                )
 
-      assert [["kept"]] = query!(pool, "SELECT name FROM items")
+      assert [["after"], ["kept"]] = query!(pool, "SELECT name FROM items ORDER BY name")
     end
 
     test "a json_extract compared to a placeholder bound to a number is refused", %{pool: pool} do
@@ -573,6 +590,22 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
     end
   end
 
+  describe "the session check" do
+    test "a database that is not UTF8 is refused: its text functions count bytes" do
+      assert :ok = Connection.session_problem(["serializable", "s1", "UTF8"], "s1")
+
+      assert {:error, message} =
+               Connection.session_problem(["serializable", "s1", "SQL_ASCII"], "s1")
+
+      assert message =~ "needs a UTF8 database"
+
+      assert {:error, message} =
+               Connection.session_problem(["read committed", "s1", "UTF8"], "s1")
+
+      assert message =~ "expected serializable with s1"
+    end
+  end
+
   describe "parity with SQLite" do
     setup do
       {:ok, db} = Exqlite.Sqlite3.open(":memory:")
@@ -628,6 +661,13 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["default"]},
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", [":ops"]},
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["a:b:c"]},
+        # NULL in gives NULL out, on both; the empty string gives ''.
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", [nil]},
+        {"SELECT substr(?1, 1, instr(?1, ?2) - 1)", ["a:b", nil]},
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", [""]},
+        # Characters, not bytes, in a UTF8 database as in SQLite.
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["école:ops"]},
+        {"SELECT substr(?1, 1, instr(?1, '・') - 1)", ["日本・東京"]},
         {"SELECT name FROM items WHERE name IN (?1, ?2) ORDER BY name", ["alpha", "beta"]},
         {"SELECT name FROM items ORDER BY name LIMIT ?1 OFFSET ?2", [2, 1]},
         {"SELECT n IS NULL, n > 3 FROM items ORDER BY name", []},
