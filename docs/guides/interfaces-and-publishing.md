@@ -166,6 +166,10 @@ A different tenant in either body or query is rejected with `403 tenant_scope_de
 A caller with no key is the `default` tenant, and `POST /api/memory-core/active-pools` refuses a body or query that names another tenant in the same way: the pool is opened in the caller's tenant, never in one the request names.
 Continue supplying the intended workspace explicitly.
 
+An Active Memory Pool id names the pool's tenant and workspace.
+Every `/api/memory-core/active-pools/:id` route answers `404 active pool not found` for a pool of another tenant, for a pool in a workspace the key's `workspace_scope` does not cover, and for a request that names a workspace other than the pool's, exactly as for an id that is no pool.
+A key scoped to the pool's workspace need not name it, and `retrieve` recalls in the pool's own tenant and workspace.
+
 At the Claim review boundary, the server uses the key's registered principal as the reviewer, or `api_key:<key-id>` when no principal is attached.
 Clients should omit `actor_id` and `verifier_id` on review requests.
 Supplying either field with a different identity returns `403 reviewer_identity_mismatch`.

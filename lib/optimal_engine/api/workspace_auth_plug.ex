@@ -86,6 +86,11 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
       requested == [] and org_scope_request?(conn) ->
         assign(conn, :org_scope, true)
 
+      # A pool id names the pool's own workspace, which PoolScopePlug authorizes
+      # (the implicit default is not this request's workspace).
+      requested == [] and pool_path?(conn) ->
+        conn
+
       requested == [] and not key_allows_implicit_default?(conn.assigns[:current_api_key]) ->
         halt_json(conn, 400, "workspace_required")
 
@@ -255,6 +260,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   end
 
   defp workspace_scoped_path?(conn), do: workspace_scoped?(conn.path_info)
+
+  defp pool_path?(%{path_info: ["api", "memory-core", "active-pools", _id | _]}), do: true
+  defp pool_path?(_conn), do: false
 
   @doc """
   Whether a route is workspace-scoped: authorized for the workspaces it
