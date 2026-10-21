@@ -105,8 +105,9 @@ A connector on the broker names the broker and its reference to the connection, 
 `broker_scopes` and `broker_timeout_ms` are optional; the timeout is 5 seconds by default and at most 30.
 The reference is opaque to the Engine, and a broker may sign it, so it is treated as a secret: the Engine seals it with `CONNECTOR_KEY` into `config.broker_reference_ciphertext` when the row is written, opens it only for the broker call, and every read API shows it as `"[redacted]"`.
 Writing a broker connector therefore needs `CONNECTOR_KEY`, exactly as stored credentials do.
-The seal is bound to the connector's id and workspace, so a copy of it on another row, or in another workspace, does not open; moving a connector to another workspace seals the reference again for it.
-A reference written before sealing existed is read as it is (no `CONNECTOR_KEY` is needed to run it), and sealed on the connector's next change, which does need `CONNECTOR_KEY`; so is a seal made before it was bound to its connector.
+The seal is bound to the connector's id, so a copy of it on another row does not open.
+It is not bound to the workspace, which a move or a rename changes while the connector stays the same.
+The reference is read from its seal alone: a plaintext `broker_reference` in a stored row is not read (no released Engine stored one), and a seal made without a connector id does not exist.
 A connector on the broker source that also carries credentials is refused at registration, so a second copy of the account can never be stored.
 
 ### The request
@@ -131,7 +132,8 @@ The call does not follow redirects, verifies the broker's certificate and host n
 The route is whatever `broker_url` names, per connector, so a broker can move its route without an Engine change.
 
 `broker_url` is checked as written, not as a parser might read it.
-It must be `https://` in lower case, on port 443 (or none), with an ASCII host listed in `OPTIMAL_CREDENTIAL_BROKER_HOSTS` (comma-separated, compared without case, no trailing dot; `config :optimal_engine, :credential_broker_hosts` in code), no user or password, no query or fragment, and a path under one of `OPTIMAL_CREDENTIAL_BROKER_PATHS` (comma-separated; default `/api/v1/connect/broker/`) with no `.`, `..`, empty or percent-encoded segment.
+It must be `https://` in lower case, on port 443 (or none), with an ASCII host listed in `OPTIMAL_CREDENTIAL_BROKER_HOSTS` (comma-separated, compared without case, no trailing dot; `config :optimal_engine, :credential_broker_hosts` in code), no user or password, no query or fragment, and a path under one of `OPTIMAL_CREDENTIAL_BROKER_PATHS` (comma-separated; default `/api/v1/connect/broker/`) with no `.`, `..`, empty, `;` or percent-encoded segment.
+An empty or blank entry in `OPTIMAL_CREDENTIAL_BROKER_PATHS`, a bare `/`, a `;` or a `..` stops the Engine at boot, since each would allow more than was meant.
 A managed Engine on MIOSA sets it to `api.miosa.ai`, and the MIOSA platform puts `https://api.miosa.ai/api/v1/connect/broker/credentials` in each connector's `broker_url` when it registers the connector.
 With no hosts listed, no broker is called and the run fails with `broker_url_not_allowed`, so a connector config can never point the Engine at an address of its choosing.
 A URL outside the list is also refused when the connector is registered or changed.
@@ -160,6 +162,7 @@ The adapter calls its API with that token through `OptimalEngine.Connectors.Acce
   Calls are https only, verify TLS, and follow no redirect by themselves: a redirect comes back as the answer it was.
   Drive's file downloads follow up to two redirects that stay on the same origin; no other redirect is followed with a token.
   Salesforce's `instance_url` must be an https URL on Salesforce's own domains, and OneDrive follows only links on Microsoft Graph's hosts.
+  Apart from Drive's same-origin downloads, no adapter follows a redirect with a credential: `Connectors.HTTP` hands a redirect back unless the caller asks for it.
 
 A stored API key is answered the same way, and the credential map reaches the adapter exactly as if it had been decrypted from the Engine's store:
 

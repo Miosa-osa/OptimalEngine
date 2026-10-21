@@ -272,7 +272,18 @@ end
 # The paths a broker URL may sit under, separated by ','. The default is
 # /api/v1/connect/broker/.
 if paths = System.get_env("OPTIMAL_CREDENTIAL_BROKER_PATHS") do
-  paths = paths |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+  paths = paths |> String.split(",") |> Enum.map(&String.trim/1)
+
+  # An empty entry, `/` (everything), a `;` or a `..` would widen the allowlist
+  # past what was meant, so a bad list stops the Engine instead.
+  Enum.each(paths, fn path ->
+    unless Regex.match?(~r|\A/[A-Za-z0-9._~!$&'()*+,=:@/-]+\z|, path) and
+             not String.contains?(path, ["..", "//"]) do
+      raise ArgumentError,
+            "OPTIMAL_CREDENTIAL_BROKER_PATHS must list path prefixes like /api/v1/connect/broker/, got: #{inspect(path)}"
+    end
+  end)
+
   config :optimal_engine, :credential_broker_paths, paths
 end
 

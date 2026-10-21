@@ -59,6 +59,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # that already holds one keeps it.
   @keep_existing ~w(principals model_call_operations)
   @children %{"memory_reconstruction_steps" => {"run_id", "memory_reconstruction_runs"}}
+  # Registry tables an export reads by membership and scope, not by a
+  # workspace_id column.
+  @principals "principals"
+  @documents "operating_documents"
   @batch_rows 1_000
 
   @doc """
@@ -311,8 +315,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     principals =
       write_table(
         staging,
-        "principals",
-        columns("principals"),
+        @principals,
+        columns(@principals),
         """
         SELECT * FROM principals WHERE id IN (
           SELECT principal_id FROM workspace_members WHERE workspace_id = ?1
@@ -325,8 +329,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     documents =
       write_table(
         staging,
-        "operating_documents",
-        columns("operating_documents"),
+        @documents,
+        columns(@documents),
         "SELECT * FROM operating_documents WHERE tenant_id = ?1 AND scope_type = 'workspace' AND scope_id = ?2",
         [tenant_id, workspace_id]
       )
@@ -397,12 +401,28 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     end
   end
 
+  @doc """
+  Exactly the tables an export can write, and so the only ones an import
+  accepts: the workspace's own tables, the child tables read through a parent,
+  and the registry tables an export selects by membership or scope (the
+  principals of the workspace's members, its operating documents).
+  """
+  @spec exportable_tables() :: [String.t()]
+  def exportable_tables do
+    Enum.uniq(workspace_tables() ++ Map.keys(@children) ++ [@principals, @documents])
+  end
+
   # A bundle carries a workspace's data, and only that. Anyone can write one
   # and sign its manifest, so the tables it names are checked against the ones
   # this Engine exports: never a table it keeps for itself (connectors and their
   # credentials, jobs, sync state) and never one the manifest invents.
+  #
+  # What a bundle may still do within those tables: add rows to the workspace it
+  # creates or merges into, and add principals to the importing tenant (every
+  # principals row is written with that tenant, and an id the Engine already has
+  # keeps its existing row).
   defp permitted(%{"tables" => tables}) when is_list(tables) do
-    allowed = workspace_tables()
+    allowed = exportable_tables()
 
     refused =
       for table <- tables, name = table_name(table), name not in allowed, do: name
