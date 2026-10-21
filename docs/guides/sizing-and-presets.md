@@ -7,10 +7,10 @@ The profile tunes the Engine to its machine and says when to grow; the preset ap
 
 | Profile | Machine (vCPU / RAM) | Disk | Embedded limits (rule of thumb) | Scales to zero | Use |
 | --- | --- | --- | --- | --- | --- |
-| `agent` | 1 / 1 GiB | 2 GiB | 50k vectors, 100k memories, 25k contexts | yes | one agent's or one end user's memory |
-| `workspace` | 1 / 2 GiB | 10 GiB | 250k vectors, 500k memories, 100k contexts | yes | one client or team workspace |
-| `business` | 2 / 4 GiB | 25 GiB | 1M vectors, 2M memories, 500k contexts | no | a whole company in one brain |
-| `platform` | 4 / 8 GiB | 100 GiB | 5M vectors, 10M memories, 2M contexts | no | a large customer, a product with many end users |
+| `agent` | 1 / 1 GiB | 2 GiB | 50k vectors, 100k memories, 10k memory candidates, 25k contexts | yes | one agent's or one end user's memory |
+| `workspace` | 1 / 2 GiB | 10 GiB | 250k vectors, 500k memories, 50k memory candidates, 100k contexts | yes | one client or team workspace |
+| `business` | 2 / 4 GiB | 25 GiB | 1M vectors, 2M memories, 200k memory candidates, 500k contexts | no | a whole company in one brain |
+| `platform` | 4 / 8 GiB | 100 GiB | 5M vectors, 10M memories, 1M memory candidates, 2M contexts | no | a large customer, a product with many end users |
 | `scale` | 8 / 16 GiB or more | 250 GiB or more | beyond embedded limits | no | vectors move to a vector provider, writers to Postgres |
 
 Set the profile with `OPTIMAL_SIZE_PROFILE` (default `business`).
@@ -42,10 +42,20 @@ Over the limit the answer is 429 `{"error": "rate_limited", "retry_after_ms": N}
 | --- | --- | --- |
 | `vectors` | rows in the vector, chunk embedding, and memory embedding stores | profile |
 | `memories` | memories | profile |
+| `memory_candidates` | pending claims of type `memory_candidate` (refreshed every 30 seconds) | profile |
 | `contexts` | contexts | profile |
 | `disk_bytes` | the database files, the file root, the cache, and the graph store (refreshed every five minutes) | profile disk |
 | `memory_bytes` | the Engine's memory in use | profile machine memory |
 | `writes_per_minute` | contexts and memories written in the last hour, per minute | profile |
+
+A memory candidate is a fact the governed memory intake wrote as a pending claim and nobody has reviewed yet.
+The intake writes the claim first.
+`POST /api/memory/remember` and `mix optimal.remember` also stage a `memories` row for it, but `Memory.remember/2` called from the library without `versioned_projection: true` does not: a fact remembered that way raises `memory_candidates` and leaves `memories` where it was.
+`POST /api/memory` (`Memory.create/1`) goes the other way: it writes the memory and stages a pending claim for it.
+So a fact can be in both gauges; read them side by side and do not add them.
+A claim leaves the gauge when its review moves it out of `pending`, and a fact the intake rejected as filler never enters it.
+The limit is a tenth of the profile's `memories` limit.
+The count reads the claims table, which no index covers for these two columns, so it is kept for 30 seconds.
 
 A gauge is `ok` under 70 percent, `watch` from 70 percent, and `over` from 100 percent.
 At 70 percent of any limit the recommendation is `resize` to the next profile, with its machine and disk; on `scale` it is `enable_providers` with the providers for the gauge (a vector provider for vectors, object storage for disk, Postgres and a stream for writes).
