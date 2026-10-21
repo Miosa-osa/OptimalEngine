@@ -17,8 +17,8 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     * nothing else: not the node's `context.md`, which collects facts from many
       signals and cannot be attributed to one, and not an asset (`Compliance.Artifacts`).
 
-  `plan/3` reads what a set of contexts owns; `remove/1` deletes those files and
-  `redact/1` rewrites them through `Compliance.Redact`, for a context whose text is
+  `plan/3` reads what a set of contexts owns; `remove/2` deletes those files and
+  `redact/2` rewrites them through `Compliance.Redact`, for a context whose text is
   redacted in place.
 
   A path in a row is data, and a bundle import writes these rows too, so a file is
@@ -27,6 +27,18 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     * a regular file, never a link or a directory, and no directory between the Engine
       root and it is a link (every component is looked at without being followed, again
       when the file is removed or rewritten);
+    * a markdown file (`.md`) that is this context's: it holds the text intake wrote for the
+      context (the body after the frontmatter, byte for byte), or it is named for the
+      context's id (the suffix intake gives a name another context held). A file a person
+      wrote or edited under the plain name, or one that holds another context's text, is
+      theirs;
+    * for a cross-reference copy, a markdown file that holds the same text as the file it was
+      copied from, or is the file of a context that indexes it, not a file of the same name
+      that somebody else put there;
+    * a file no other context holds: a row of the same workspace with the same path
+      that is not one of the contexts being erased or the copies of their files names it
+      too (the index of `path` is not unique, so a legacy or forged row can). The file
+      stays, and the row of the erased context goes;
     * strictly inside the directory of the context's workspace
       (`Workspace.Filesystem.path/2`) and so inside the Engine root, never the root or
       the workspace directory itself;
@@ -37,12 +49,24 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   Errors name the kind of file and the cause, never the path.
   """
 
+  require Logger
+
   alias OptimalEngine.Compliance.{Artifacts, Redact}
-  alias OptimalEngine.Pipeline.Intake.Writer
+  alias OptimalEngine.Context
+  alias OptimalEngine.Pipeline.Intake.{Address, Writer}
   alias OptimalEngine.Store
   alias OptimalEngine.Workspace.Filesystem
 
-  @type plan :: %{files: [String.t()], wiki_files: [String.t()], copy_ids: [String.t()]}
+  @typedoc """
+  `owned` says which workspace each planned file is in, for the second look `remove/2` and
+  `redact/2` take at who else holds it.
+  """
+  @type plan :: %{
+          files: [String.t()],
+          wiki_files: [String.t()],
+          copy_ids: [String.t()],
+          owned: %{String.t() => String.t()}
+        }
 
   @sidecars [".abstract.md", ".overview.md"]
   @not_signal_dirs ["assets", "architectures", "tenants"]
@@ -60,41 +84,56 @@ defmodule OptimalEngine.Compliance.ContextFiles do
          {:ok, workspace_dirs} <- workspace_dirs() do
       root = root()
 
-      owned =
-        for [_id, workspace_id, path, routed_to] <- rows,
+      # A file the row names is the context's own when it is in the workspace's place and
+      # is the context's (its text, or its name). Its copies are found from it.
+      placed =
+        for [id, workspace_id, path, routed_to] <- rows,
             is_binary(path),
-            do: {workspace_id, path, routed_to}
+            owned?(path, workspace_id, root, workspace_dirs),
+            do: {id, workspace_id, path, routed_to}
 
-      primary = for {workspace_id, path, _routed} <- owned, do: {workspace_id, path}
+      {mine, foreign} =
+        Enum.split_with(placed, fn {id, _workspace_id, path, _routed} ->
+          this_contexts_file?(id, path)
+        end)
 
       copies =
         if copies?,
           do:
             for(
-              {ws, path, routed} <- owned,
-              copy <- copy_paths(tenant_id, ws, path, routed),
-              do: {ws, copy}
+              {_id, workspace_id, path, routed_to} <- mine,
+              copy <- copy_paths(tenant_id, workspace_id, path, routed_to),
+              do: {workspace_id, copy, file_body(path)}
             ),
           else: []
 
-      candidates =
-        for {workspace_id, path} <- primary ++ copies,
-            file <- [path | sidecars(path)],
-            do: {workspace_id, file}
+      with {:ok, copies, copy_ids} <- verified_copies(tenant_id, copies, workspace_dirs, root) do
+        allowed = Enum.uniq(context_ids ++ copy_ids)
 
-      files =
-        candidates
-        |> Enum.uniq()
-        |> Enum.filter(fn {workspace_id, file} ->
-          owned?(file, workspace_id, root, workspace_dirs)
-        end)
-        |> Enum.map(fn {_workspace_id, file} -> Path.expand(file) end)
-        |> Enum.uniq()
+        located =
+          for {workspace_id, path} <-
+                Enum.uniq(
+                  for({_id, ws, path, _routed} <- mine, do: {ws, path}) ++
+                    for({ws, path, _body} <- copies, do: {ws, path})
+                ),
+              file <- [path | sidecars(path)],
+              owned?(file, workspace_id, root, workspace_dirs),
+              uniq: true,
+              do: {workspace_id, Path.expand(file)}
 
-      with {:ok, copy_ids} <- copy_context_ids(tenant_id, copies, workspace_dirs, root),
-           {:ok, wiki_files} <-
-             wiki_files(tenant_id, Enum.uniq(context_ids ++ copy_ids), root, workspace_dirs) do
-        {:ok, %{files: files, wiki_files: wiki_files, copy_ids: copy_ids}}
+        with {:ok, held} <- held_elsewhere(located, allowed),
+             {:ok, wiki_files} <- wiki_files(tenant_id, allowed, root, workspace_dirs) do
+          {kept, going} = Enum.split_with(located, &MapSet.member?(held, &1))
+          log_left(length(foreign), length(kept))
+
+          {:ok,
+           %{
+             files: going |> Enum.map(&elem(&1, 1)) |> Enum.uniq(),
+             wiki_files: wiki_files,
+             copy_ids: copy_ids,
+             owned: Map.new(going, fn {workspace_id, file} -> {file, workspace_id} end)
+           }}
+        end
       end
     end
   end
@@ -103,10 +142,21 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   Delete the planned files. Stops at the first one that cannot be removed and returns
   `{:error, {:artifact_not_removed, :context_file, posix}}`; a file already gone counts
   as removed.
+
+  With `except:` (the ids of the contexts being erased and the copies of their files) and
+  `owned:` (`plan.owned`), the files are looked at once more just before they go, and one
+  that a context outside `except` has come to hold stays: the plan was read before the
+  objects of the assets were deleted.
   """
-  @spec remove([String.t()]) ::
+  @spec remove([String.t()], keyword()) ::
           {:ok, %{files: non_neg_integer(), bytes: non_neg_integer()}} | {:error, term()}
-  def remove(files) when is_list(files) do
+  def remove(files, opts \\ []) when is_list(files) do
+    with {:ok, files} <- not_held(files, opts) do
+      remove_each(files)
+    end
+  end
+
+  defp remove_each(files) do
     each(files, fn file ->
       with :ok <- real_parents(file) do
         case File.lstat(file) do
@@ -136,9 +186,15 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   original, and an index of the directory would read it back. A file with nothing to
   redact is not written.
   """
-  @spec redact([String.t()]) ::
+  @spec redact([String.t()], keyword()) ::
           {:ok, %{files: non_neg_integer(), bytes: non_neg_integer()}} | {:error, term()}
-  def redact(files) when is_list(files) do
+  def redact(files, opts \\ []) when is_list(files) do
+    with {:ok, files} <- not_held(files, opts) do
+      redact_each(files)
+    end
+  end
+
+  defp redact_each(files) do
     each(files, fn file ->
       with :ok <- real_parents(file),
            {:ok, %{type: :regular, mode: mode}} <- File.lstat(file),
@@ -220,12 +276,14 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     Enum.map(@sidecars, &(base <> &1))
   end
 
-  # The contexts that index the copies: same workspace, and a path that passes the same
-  # test as the file itself.
-  defp copy_context_ids(_tenant_id, [], _dirs, _root), do: {:ok, []}
+  # The copies that are the file's copies and the contexts that index them (same
+  # workspace, and a path that passes the same test as the file itself). A file at a copy's
+  # name is a copy when it is markdown and holds the same text as the file it was copied
+  # from, or is the file of a context that indexes it; anything else is somebody's own.
+  defp verified_copies(_tenant_id, [], _dirs, _root), do: {:ok, [], []}
 
-  defp copy_context_ids(tenant_id, copies, dirs, root) do
-    paths = copies |> Enum.map(fn {_ws, path} -> path end) |> Enum.uniq()
+  defp verified_copies(tenant_id, copies, dirs, root) do
+    paths = copies |> Enum.map(fn {_ws, path, _body} -> path end) |> Enum.uniq()
 
     {sql, params} =
       if tenant_id,
@@ -238,15 +296,27 @@ defmodule OptimalEngine.Compliance.ContextFiles do
 
     case Store.raw_query(sql, params) do
       {:ok, rows} ->
-        wanted = MapSet.new(copies)
+        indexed = Enum.group_by(rows, fn [_id, ws, path] -> {ws, path} end, fn [id | _] -> id end)
+
+        verified =
+          copies
+          |> Enum.filter(fn {workspace_id, path, body} ->
+            owned?(path, workspace_id, root, dirs) and Path.extname(path) == ".md" and
+              ((is_binary(body) and file_body(path) == body) or
+                 Enum.any?(
+                   Map.get(indexed, {workspace_id, path}, []),
+                   &this_contexts_file?(&1, path)
+                 ))
+          end)
+          |> Enum.uniq_by(fn {workspace_id, path, _body} -> {workspace_id, path} end)
 
         ids =
-          for [id, workspace_id, path] <- rows,
-              MapSet.member?(wanted, {workspace_id, path}),
-              owned?(path, workspace_id, root, dirs),
+          for {workspace_id, path, _body} <- verified,
+              id <- Map.get(indexed, {workspace_id, path}, []),
+              uniq: true,
               do: id
 
-        {:ok, ids}
+        {:ok, verified, ids}
 
       {:error, reason} ->
         {:error, {:context_files_unreadable, reason}}
@@ -357,6 +427,91 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     else
       :skipped
     end
+  end
+
+  # ── is the context's ───────────────────────────────────────────────────────
+
+  # A markdown file that holds the text intake wrote for the context, or whose name carries
+  # the suffix of the context's id. The frontmatter has no id, so the text is the proof;
+  # the body (title, genre and content) is what identifies it, not the summaries around it.
+  defp this_contexts_file?(id, path) do
+    Path.extname(path) == ".md" and (named_for?(id, path) or holds_text_of?(id, path))
+  end
+
+  defp named_for?(id, path) do
+    name = Path.basename(path)
+    Enum.any?(Address.candidate_suffixes(id), &String.ends_with?(name, "-" <> &1 <> ".md"))
+  end
+
+  # The row is read from the database, not from the read cache: a rewrite of the row by
+  # raw SQL (retention) leaves the cached copy with the old text.
+  defp holds_text_of?(id, path) do
+    with body when is_binary(body) <- file_body(path),
+         :ok <- Store.evict_cached([id]),
+         {:ok, %Context{} = context} <- Store.get_context(id) do
+      signal = Context.to_signal(context)
+      body == Writer.body(signal)
+    else
+      _ -> false
+    end
+  end
+
+  # What follows the frontmatter of a file intake wrote; nil for any other file.
+  defp file_body(path) do
+    with {:ok, text} <- File.read(path),
+         {:ok, body} <- Writer.body_of_file(text) do
+      body
+    else
+      _ -> nil
+    end
+  end
+
+  # The `{workspace, file}` pairs that a context outside `allowed` also names.
+  defp held_elsewhere([], _allowed), do: {:ok, MapSet.new()}
+
+  defp held_elsewhere(located, allowed) do
+    workspaces = located |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+    paths = Enum.map(located, &elem(&1, 1))
+
+    case Store.raw_query(
+           """
+           SELECT workspace_id, path FROM contexts
+            WHERE workspace_id IN (SELECT value FROM json_each(?1))
+              AND path IN (SELECT value FROM json_each(?2))
+              AND id NOT IN (SELECT value FROM json_each(?3))
+           """,
+           [Jason.encode!(workspaces), Jason.encode!(paths), Jason.encode!(allowed)]
+         ) do
+      {:ok, rows} ->
+        {:ok, rows |> Enum.map(fn [workspace_id, path] -> {workspace_id, path} end) |> MapSet.new()}
+
+      {:error, reason} ->
+        {:error, {:context_files_unreadable, reason}}
+    end
+  end
+
+  # The second look: files a context outside `except` holds now are dropped from the list.
+  defp not_held(files, opts) do
+    with except when is_list(except) <- Keyword.get(opts, :except),
+         owned when is_map(owned) <- Keyword.get(opts, :owned) do
+      located = for file <- files, workspace_id = owned[file], do: {workspace_id, file}
+
+      with {:ok, held} <- held_elsewhere(located, except) do
+        {:ok, Enum.reject(files, fn file -> {owned[file], file} in held end)}
+      end
+    else
+      _no_second_look -> {:ok, files}
+    end
+  end
+
+  # Counts only, never a path.
+  defp log_left(0, 0), do: :ok
+
+  defp log_left(foreign, shared) do
+    Logger.info(
+      "[ContextFiles] left #{foreign} file(s) that are not the context's own " <>
+        "and #{shared} that another context holds"
+    )
   end
 
   # ── helpers ────────────────────────────────────────────────────────────────
