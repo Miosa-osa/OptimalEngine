@@ -437,14 +437,19 @@ defmodule OptimalEngine.DataSteward do
 
     with :ok <- source_registered(tenant, source_workspace_id),
          {:ok, tables} <- workspace_tables(),
-         {:ok, evidence_key} <- recording_key(tenant, source_workspace_id),
-         {:ok, move} <- plan_directory_move(source_workspace_id, target_workspace_id) do
+         {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
+      # What the filesystem says is read now; a refusal is raised below, after the checks
+      # of the rows, so a target of the wrong shape is still refused for its shape.
+      directory = plan_directory_move(source_workspace_id, target_workspace_id)
+      move = with {:ok, planned} <- directory, do: planned, else: (_refused -> nil)
+
       Store.transaction(
         fn txn ->
           with {:ok, workspace} <- read_source(txn, tenant, source_workspace_id),
                :ok <- check_rename_target(txn, workspace, tenant, target_workspace_id),
                :ok <- target_free_of_rows(txn, tables, target_workspace_id),
                :ok <- check_id_not_shared(txn, tables, source_workspace_id, tenant),
+               {:ok, _planned} <- directory,
                {:ok, renamed} <-
                  rename_in(
                    txn,
