@@ -2347,6 +2347,9 @@ defmodule OptimalEngine.API.Router do
   # Context Packages for scheduler, app, or agent callers.
   # Body: {workspace?, tenant?, actor_id?, batch_limit?, limit?,
   #        continue_on_error?, allowed_partitions?, allowed_security_labels?}
+  #
+  # The refreshed packages are returned to the caller, so they are read under
+  # the caller's grants (see put_refresh_grants/3).
   post "/api/memory-core/context-packages/refresh-stale" do
     body = conn.body_params || %{}
     workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
@@ -2369,8 +2372,7 @@ defmodule OptimalEngine.API.Router do
         limit: parse_optional_positive_int(Map.get(body, "limit")),
         continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
       ]
-      |> put_governed_grant(conn, body, "allowed_partitions", :allowed_partitions)
-      |> put_governed_grant(conn, body, "allowed_security_labels", :allowed_security_labels)
+      |> put_refresh_grants(conn, body)
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
     case MemoryCore.refresh_stale_context_packages(opts) do
@@ -2474,7 +2476,9 @@ defmodule OptimalEngine.API.Router do
   end
 
   # POST /api/memory-core/active-pools/:id/refresh-context — refresh stale
-  # Context Packages already loaded into the pool.
+  # Context Packages already loaded into the pool. The refreshed packages are
+  # returned to the caller, so they are read under the caller's grants (see
+  # put_refresh_grants/3).
   post "/api/memory-core/active-pools/:id/refresh-context" do
     body = conn.body_params || %{}
 
@@ -2483,8 +2487,7 @@ defmodule OptimalEngine.API.Router do
         actor_id: Actor.of(conn, body),
         continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
       ]
-      |> put_governed_grant(conn, body, "allowed_partitions", :allowed_partitions)
-      |> put_governed_grant(conn, body, "allowed_security_labels", :allowed_security_labels)
+      |> put_refresh_grants(conn, body)
       |> reject_nil_keyword()
 
     case MemoryCore.refresh_pool_context_packages(id, opts) do
@@ -4162,6 +4165,21 @@ defmodule OptimalEngine.API.Router do
       nil -> keyword
       grants -> Keyword.put(keyword, opt_key, grants)
     end
+  end
+
+  # A refresh re-runs a stored query and returns the new package, so it reads
+  # under the caller's own grants, exactly as governed recall does. A grant the
+  # caller does not hold (none on its key, or one that is not a list) is `[]`,
+  # which admits only rows with no label and no partition. The grants are
+  # always passed, so the refresh never falls back to the grants the package
+  # was first built for.
+  defp put_refresh_grants(keyword, conn, body) do
+    keyword
+    |> Keyword.put(:allowed_partitions, governed_grant(conn, body, "allowed_partitions") || [])
+    |> Keyword.put(
+      :allowed_security_labels,
+      governed_grant(conn, body, "allowed_security_labels") || []
+    )
   end
 
   defp reject_nil_keyword(keyword) do

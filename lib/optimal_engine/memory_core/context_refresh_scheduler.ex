@@ -4,7 +4,9 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshScheduler do
 
   The scheduler does not implement its own retrieval logic. It calls
   `OptimalEngine.MemoryCore.refresh_stale_context_packages/1`, the same governed
-  batch refresh path used by the API and Mix task.
+  batch refresh path used by the API and Mix task. It has no receiver, so each
+  package is refreshed inside the authorization envelope recorded on it and is
+  never widened.
   """
 
   use GenServer

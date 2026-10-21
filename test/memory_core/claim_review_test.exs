@@ -231,11 +231,12 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
     assert {:ok, package} =
              RetrievalCoordinator.retrieve("launch",
                workspace_id: workspace_id,
-               allowed_partitions: [],
-               allowed_security_labels: []
+               allowed_partitions: ["test"],
+               allowed_security_labels: ["internal"]
              )
 
     assert package.refresh_state == "fresh"
+    assert package.fact_links == [%{type: "fact", id: original.fact.id}]
 
     assert {:error, :context_package_not_stale} =
              MemoryCore.refresh_context_package(package.id, workspace_id: workspace_id)

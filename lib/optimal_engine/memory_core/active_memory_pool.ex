@@ -173,6 +173,14 @@ defmodule OptimalEngine.MemoryCore.ActiveMemoryPool do
     end
   end
 
+  @doc """
+  Refresh the stale Context Packages loaded into the pool and load the new ones.
+
+  `opts` go to `RetrievalCoordinator.refresh_context_package/2`, so a caller
+  that returns the refreshed packages to someone passes that receiver's
+  `:allowed_partitions` and `:allowed_security_labels`. With none, each package
+  is refreshed inside its own recorded envelope.
+  """
   @spec refresh_context_packages(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def refresh_context_packages(pool_id, opts \\ []) when is_binary(pool_id) and is_list(opts) do
     with {:ok, pool} <- get(pool_id) do

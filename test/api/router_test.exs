@@ -683,7 +683,9 @@ defmodule OptimalEngine.API.RouterTest do
         request(:post, "/api/memory-core/context-packages/refresh-stale", %{
           "workspace" => workspace_id,
           "actor_id" => "agent:api",
-          "batch_limit" => 10
+          "batch_limit" => 10,
+          "allowed_partitions" => ["api-test"],
+          "allowed_security_labels" => ["internal"]
         })
 
       assert refresh_conn.status == 200
@@ -691,7 +693,9 @@ defmodule OptimalEngine.API.RouterTest do
       assert body["stale_context_package_ids"] == [package.id]
       assert body["refreshed_count"] == 1
       assert body["error_count"] == 0
-      assert [%{"refresh_state" => "fresh"}] = body["refreshed_context_packages"]
+
+      assert [%{"refresh_state" => "fresh", "fact_links" => [_fact]}] =
+               body["refreshed_context_packages"]
 
       assert {:ok, [["refreshed"]]} =
                OptimalEngine.Store.raw_query(

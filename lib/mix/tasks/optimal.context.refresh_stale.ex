@@ -6,7 +6,8 @@ defmodule Mix.Tasks.Optimal.Context.RefreshStale do
 
   This task is intended for manual runs, cron, or scheduler wrappers. It does not
   implement separate retrieval logic; it calls the same governed batch refresh
-  service used by the API.
+  service used by the API. It has no receiver, so each package is refreshed
+  inside the authorization envelope recorded on it and is never widened.
 
   ## Usage
 

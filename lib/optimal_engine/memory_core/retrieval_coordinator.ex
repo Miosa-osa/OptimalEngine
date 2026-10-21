@@ -119,10 +119,13 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     time_mode = string_opt(opts, :time_mode, "current_valid")
     request_intent = string_opt(opts, :request_intent, "recall")
 
+    # `allow_all?` is never read from options. Only the redaction accounting in
+    # `fetch_projection_candidates/7` widens a private copy of this map, to
+    # count what was filtered, and that widened view is never returned.
     authorization = %{
       allowed_partitions: string_list_opt(opts, :allowed_partitions),
       allowed_security_labels: string_list_opt(opts, :allowed_security_labels),
-      allow_all?: Keyword.get(opts, :internal_refresh_allow_all, false)
+      allow_all?: false
     }
 
     retrieval_plan = build_retrieval_plan(query, scope, authorization, opts)
@@ -341,6 +344,29 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
+  @doc """
+  Refresh a stale Context Package by re-running its original query.
+
+  The refresh reads under an explicit authorization envelope, like any other
+  governed recall, and never with the filter off:
+
+    * `:allowed_partitions` / `:allowed_security_labels` are the grants of
+      whoever receives the refreshed package (`[]` admits only objects that
+      carry no partition ids / no security labels). A caller that hands the
+      result to someone, such as an HTTP route or an Active Memory Pool, must
+      pass both. A value that is not a list fails with
+      `{:error, :invalid_refresh_grants}`.
+    * A grant the caller leaves out is read from the authorization envelope
+      recorded on the stale package, so a maintenance refresh with no receiver
+      (the scheduler, `mix optimal.context.refresh_stale`) rebuilds the
+      package for the reader it was built for and cannot widen it. A recorded
+      envelope that cannot be read fails with
+      `{:error, :authorization_envelope_unreadable}` and the package stays
+      stale.
+
+  Other options: `:tenant_id`, `:workspace_id`, `:actor_id`, `:force`,
+  `:limit`, `:metadata`.
+  """
   @spec refresh_context_package(String.t(), keyword()) ::
           {:ok, ContextPackage.t()} | {:error, term()}
   def refresh_context_package(context_package_id, opts \\ []) when is_binary(context_package_id) do
@@ -350,8 +376,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     with {:ok, stale_package} <- get_context_package(context_package_id, tenant_id, workspace_id),
          :ok <- ensure_refreshable(stale_package, opts),
          {:ok, query} <- original_query(stale_package),
-         {:ok, refreshed_package} <-
-           retrieve(query, refresh_opts_from_package(stale_package, opts)),
+         {:ok, refresh_opts} <- refresh_opts_from_package(stale_package, opts),
+         {:ok, refreshed_package} <- retrieve(query, refresh_opts),
          :ok <-
            Store.mark_context_package_refreshed(stale_package.id,
              tenant_id: stale_package.tenant_id,
@@ -361,6 +387,15 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
+  @doc """
+  Refresh the stale Context Packages of a workspace, up to `:batch_limit`.
+
+  Each package is refreshed with `refresh_context_package/2` and the same
+  grant rules: the receiver's `:allowed_partitions` / `:allowed_security_labels`
+  apply to every package, and a refresh with none keeps each package inside its
+  own recorded envelope. A package that fails is reported in `:errors` (or
+  halts the batch with `continue_on_error: false`).
+  """
   @spec refresh_stale_context_packages(keyword()) :: {:ok, map()} | {:error, term()}
   def refresh_stale_context_packages(opts \\ []) when is_list(opts) do
     with {:ok, stale_packages} <- list_stale_context_packages(opts) do
@@ -468,41 +503,56 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   end
 
   defp refresh_opts_from_package(package, opts) do
-    auth = package.authorization_envelope
+    with {:ok, allowed_partitions} <- refresh_grant(package, opts, :allowed_partitions),
+         {:ok, allowed_security_labels} <- refresh_grant(package, opts, :allowed_security_labels) do
+      {:ok,
+       [
+         tenant_id: Keyword.get(opts, :tenant_id, package.tenant_id),
+         workspace_id: Keyword.get(opts, :workspace_id, package.workspace_id),
+         request_id: Keyword.get(opts, :request_id, package.request_id),
+         request_intent: Keyword.get(opts, :request_intent, package.request_intent),
+         actor_id:
+           Keyword.get(opts, :actor_id) ||
+             Keyword.get(opts, :requesting_actor_id) ||
+             package.requesting_actor_id,
+         active_memory_pool_id:
+           Keyword.get(opts, :active_memory_pool_id, package.active_memory_pool_id),
+         time_mode: Keyword.get(opts, :time_mode, package.time_mode),
+         detail_depth: Keyword.get(opts, :detail_depth, package.detail_depth),
+         strategy:
+           Keyword.get(opts, :strategy) ||
+             map_get(package.retrieval_plan, :strategy) ||
+             :tiered,
+         allowed_partitions: allowed_partitions,
+         allowed_security_labels: allowed_security_labels,
+         limit:
+           Keyword.get(opts, :limit) || map_get(package.retrieval_plan, :limit) || @default_limit,
+         metadata:
+           Map.merge(Keyword.get(opts, :metadata, %{}), %{
+             refreshed_from_context_package_id: package.id,
+             refreshed_from_invalidation_reason: package.invalidation_reason
+           })
+       ]}
+    end
+  end
 
-    [
-      tenant_id: Keyword.get(opts, :tenant_id, package.tenant_id),
-      workspace_id: Keyword.get(opts, :workspace_id, package.workspace_id),
-      request_id: Keyword.get(opts, :request_id, package.request_id),
-      request_intent: Keyword.get(opts, :request_intent, package.request_intent),
-      actor_id:
-        Keyword.get(opts, :actor_id) ||
-          Keyword.get(opts, :requesting_actor_id) ||
-          package.requesting_actor_id,
-      active_memory_pool_id:
-        Keyword.get(opts, :active_memory_pool_id, package.active_memory_pool_id),
-      time_mode: Keyword.get(opts, :time_mode, package.time_mode),
-      detail_depth: Keyword.get(opts, :detail_depth, package.detail_depth),
-      strategy:
-        Keyword.get(opts, :strategy) ||
-          map_get(package.retrieval_plan, :strategy) ||
-          :tiered,
-      allowed_partitions:
-        Keyword.get(opts, :allowed_partitions) ||
-          map_get(auth, :allowed_partitions) ||
-          package.partition_ids,
-      allowed_security_labels:
-        Keyword.get(opts, :allowed_security_labels) ||
-          map_get(auth, :allowed_security_labels) ||
-          package.security_labels,
-      limit: Keyword.get(opts, :limit) || map_get(package.retrieval_plan, :limit) || @default_limit,
-      metadata:
-        Map.merge(Keyword.get(opts, :metadata, %{}), %{
-          refreshed_from_context_package_id: package.id,
-          refreshed_from_invalidation_reason: package.invalidation_reason
-        })
-    ]
-    |> Keyword.put(:internal_refresh_allow_all, true)
+  # The grant a refresh reads under: the caller's when it passes one, else the
+  # one recorded on the stale package. Never the package's own object labels
+  # (they would admit exactly what the package already holds) and never an
+  # unfiltered read; anything unreadable fails closed.
+  defp refresh_grant(package, opts, key) do
+    case Keyword.get(opts, key) do
+      nil -> recorded_grant(package.authorization_envelope, key)
+      grants when is_list(grants) -> {:ok, string_list_opt(opts, key)}
+      _ -> {:error, :invalid_refresh_grants}
+    end
+  end
+
+  defp recorded_grant(envelope, key) do
+    case map_get(envelope, key) do
+      grants when is_list(grants) -> {:ok, Enum.map(grants, &to_string/1)}
+      _ -> {:error, :authorization_envelope_unreadable}
+    end
   end
 
   # ---------------------------------------------------------------------------
