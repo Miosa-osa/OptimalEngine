@@ -86,6 +86,161 @@ defmodule OptimalEngine.Jobs do
   end
 
   @doc """
+  Enqueue a job unless the workspace already has one of `kinds` queued or
+  running, checked and inserted in one Store transaction so two requests
+  never both enqueue. With `:idempotency_key`, a job the workspace already
+  holds under that key comes back first, in whatever state.
+
+  Returns `{:ok, job, :queued}` for a new job, `{:ok, job, :duplicate}` for the
+  job holding the key, and `{:ok, job, :active}` for the queued or running job
+  that kept this one out. `:tenant_id` names the tenant of a workspace that is
+  not registered yet (the target of an import that creates it); without it
+  the workspace must be active, and its tenant is read from its row. Takes
+  the other `enqueue/4` options.
+  """
+  @spec enqueue_exclusive(String.t(), [String.t()], String.t(), map(), keyword()) ::
+          {:ok, job(), :queued | :duplicate | :active} | {:error, term()}
+  def enqueue_exclusive(workspace_id, kinds, kind, payload, opts \\ [])
+      when is_binary(workspace_id) and is_list(kinds) and is_binary(kind) and is_map(payload) do
+    with :ok <- validate_kind(kind),
+         :ok <- validate_max_attempts(Keyword.get(opts, :max_attempts, @default_max_attempts)),
+         {:ok, {job, state}} <-
+           Store.transaction(fn txn ->
+             txn_enqueue_exclusive(txn, workspace_id, kinds, kind, payload, opts)
+           end) do
+      {:ok, job, state}
+    end
+  end
+
+  defp txn_enqueue_exclusive(txn, workspace_id, kinds, kind, payload, opts) do
+    key = Keyword.get(opts, :idempotency_key)
+
+    with {:ok, tenant_id} <- txn_tenant(txn, workspace_id, Keyword.get(opts, :tenant_id)),
+         {:ok, nil} <- txn_by_key(txn, tenant_id, workspace_id, key),
+         {:ok, nil} <- txn_active(txn, workspace_id, kinds) do
+      id = new_id("job_")
+      {sql, params} = insert_statement(id, tenant_id, workspace_id, kind, payload, opts)
+
+      with {:ok, _} <- Store.txn_execute(txn, sql, params),
+           {:ok, job} <- txn_get(txn, id),
+           do: {:ok, {job, :queued}}
+    else
+      {:ok, %{} = job} when is_nil(key) or job.idempotency_key != key -> {:ok, {job, :active}}
+      {:ok, %{} = job} -> {:ok, {job, :duplicate}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp txn_tenant(_txn, _workspace_id, tenant_id) when is_binary(tenant_id), do: {:ok, tenant_id}
+
+  defp txn_tenant(txn, workspace_id, nil) do
+    case Store.txn_query(
+           txn,
+           "SELECT tenant_id FROM workspaces WHERE id = ?1 AND status = 'active'",
+           [workspace_id]
+         ) do
+      {:ok, [[tenant_id]]} -> {:ok, tenant_id}
+      {:ok, []} -> {:error, :workspace_not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp txn_by_key(_txn, _tenant_id, _workspace_id, nil), do: {:ok, nil}
+
+  defp txn_by_key(txn, tenant_id, workspace_id, key) do
+    txn_one(
+      txn,
+      "tenant_id = ?1 AND workspace_id = ?2 AND idempotency_key = ?3",
+      [tenant_id, workspace_id, key]
+    )
+  end
+
+  defp txn_active(txn, workspace_id, kinds) do
+    txn_one(
+      txn,
+      "workspace_id = ?1 AND status IN ('available', 'running') AND kind IN (SELECT value FROM json_each(?2))",
+      [workspace_id, Jason.encode!(kinds)]
+    )
+  end
+
+  defp txn_one(txn, where, params) do
+    case Store.txn_query(
+           txn,
+           "SELECT #{@job_columns} FROM jobs WHERE #{where} ORDER BY inserted_at ASC, id ASC LIMIT 1",
+           params
+         ) do
+      {:ok, [row]} -> {:ok, job_from_row(row)}
+      {:ok, []} -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Take a queued job out of the queue for good: it is marked `completed`
+  without running, so nothing claims it. Returns `{:ok, job}`, or
+  `{:error, :not_queued}` when it is already running or finished.
+  """
+  @spec discard_queued(String.t()) :: {:ok, job()} | {:error, term()}
+  def discard_queued(job_id) when is_binary(job_id) do
+    Store.transaction(fn txn ->
+      case Store.txn_execute(
+             txn,
+             """
+             UPDATE jobs SET status = 'completed', completed_at = datetime('now'),
+               updated_at = datetime('now')
+             WHERE id = ?1 AND status = 'available'
+             """,
+             [job_id]
+           ) do
+        {:ok, 1} -> txn_get(txn, job_id)
+        {:ok, _} -> {:error, :not_queued}
+        {:error, reason} -> {:error, reason}
+      end
+    end)
+  end
+
+  @doc """
+  Make every running job of `kinds` claimable at once, recording `reason` as
+  its last error. For a worker that starts after the Engine stopped while it
+  held them: their leases name a worker that no longer exists. The next claim
+  counts the attempt, and dead-letters a job that has none left. Returns the
+  jobs released.
+  """
+  @spec release_running([String.t()], term()) :: {:ok, [job()]} | {:error, term()}
+  def release_running(kinds, reason) when is_list(kinds) do
+    Store.transaction(fn txn ->
+      with {:ok, rows} <-
+             Store.txn_query(
+               txn,
+               "SELECT #{@job_columns} FROM jobs WHERE status = 'running' AND kind IN (SELECT value FROM json_each(?1))",
+               [Jason.encode!(kinds)]
+             ),
+           {:ok, _} <-
+             Store.txn_execute(
+               txn,
+               """
+               UPDATE jobs SET lease_expires_at = datetime('now', '-1 seconds'), last_error = ?2,
+                 updated_at = datetime('now')
+               WHERE status = 'running' AND kind IN (SELECT value FROM json_each(?1))
+               """,
+               [Jason.encode!(kinds), error_message(reason)]
+             ) do
+        {:ok, Enum.map(rows, &job_from_row/1)}
+      end
+    end)
+  end
+
+  @doc "Any job by id, whatever its workspace; the caller checks the tenant."
+  @spec fetch(String.t()) :: {:ok, job()} | {:error, :not_found | term()}
+  def fetch(job_id) when is_binary(job_id) do
+    case Store.raw_query("SELECT #{@job_columns} FROM jobs WHERE id = ?1", [job_id]) do
+      {:ok, [row]} -> {:ok, job_from_row(row)}
+      {:ok, []} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
   Lease the next due job. Options: `:workspace_id` (default: any workspace),
   `:kinds`, `:lease_owner`, and `:lease_seconds`. Returns `{:ok, nil}` when
   nothing is due.

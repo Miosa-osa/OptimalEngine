@@ -74,18 +74,21 @@ defmodule OptimalEngine.Imports.Fetch do
   :invalid_source_url}` for a URL that is not absolute `https` (or `http` to
   an allowed host) or carries credentials, or `{:error, :source_url_refused}`
   for a host that is not allowed, does not resolve, or resolves to a
-  non-public address.
+  non-public address. `:allowed_hosts` replaces the configured allowed hosts
+  for this URL (a bundle import has its own list).
   """
-  @spec check(String.t()) :: :ok | {:error, :invalid_source_url | :source_url_refused}
-  def check(url) when is_binary(url) do
-    case target(url, :initial) do
+  @spec check(String.t(), keyword()) :: :ok | {:error, :invalid_source_url | :source_url_refused}
+  def check(url, opts \\ [])
+
+  def check(url, opts) when is_binary(url) do
+    case target(url, :initial, hosts(opts)) do
       {:ok, _target} -> :ok
       {:error, :unresolvable} -> {:error, :source_url_refused}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  def check(_url), do: {:error, :invalid_source_url}
+  def check(_url, _opts), do: {:error, :invalid_source_url}
 
   @doc """
   Downloads `url` to `dest`, refusing more than `max_bytes`. Returns
@@ -94,7 +97,8 @@ defmodule OptimalEngine.Imports.Fetch do
 
   Options: `:progress`, a function called with the bytes written so far, at
   most every five seconds while the body arrives (a job extends its lease
-  with it; `config :optimal_engine, :import_fetch_progress_ms`).
+  with it; `config :optimal_engine, :import_fetch_progress_ms`), and
+  `:allowed_hosts`, which replaces the configured allowed hosts.
   """
   @spec download(String.t(), Path.t(), pos_integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, reason()}
@@ -107,12 +111,13 @@ defmodule OptimalEngine.Imports.Fetch do
       min_rate: setting(:import_min_bytes_per_second, @default_min_bytes_per_second),
       grace_ms: setting(:import_min_rate_after_ms, @default_min_rate_after_ms),
       progress: Keyword.get(opts, :progress, fn _bytes -> :ok end),
-      progress_ms: setting(:import_fetch_progress_ms, @progress_ms)
+      progress_ms: setting(:import_fetch_progress_ms, @progress_ms),
+      hosts: hosts(opts)
     }
 
     result =
       with {:ok, _} <- Application.ensure_all_started(:ssl),
-           {:ok, target} <- target(url, :initial) do
+           {:ok, target} <- target(url, :initial, clock.hosts) do
         follow(target, dest, max_bytes, clock, @max_redirects)
       end
 
@@ -155,11 +160,11 @@ defmodule OptimalEngine.Imports.Fetch do
   end
 
   @doc "True when `host` is an allowed host (`:import_url_hosts`, `OPTIMAL_IMPORT_URL_HOSTS`)."
-  @spec allowed_host?(String.t()) :: boolean()
-  def allowed_host?(host) when is_binary(host) do
+  @spec allowed_host?(String.t(), [String.t()]) :: boolean()
+  def allowed_host?(host, hosts \\ allowed_hosts()) when is_binary(host) do
     host = String.downcase(host)
 
-    Enum.any?(allowed_hosts(), fn
+    Enum.any?(hosts, fn
       "*." <> domain -> String.ends_with?(host, "." <> domain)
       entry -> entry == host
     end)
@@ -203,8 +208,8 @@ defmodule OptimalEngine.Imports.Fetch do
 
   # ── checking a URL ─────────────────────────────────────────────────────
 
-  defp target(url, kind) do
-    if plain_url?(url), do: checked_target(url, kind), else: refused(kind)
+  defp target(url, kind, hosts) do
+    if plain_url?(url), do: checked_target(url, kind, hosts), else: refused(kind)
   end
 
   defp refused(:redirect), do: {:error, :redirect_refused}
@@ -217,10 +222,10 @@ defmodule OptimalEngine.Imports.Fetch do
 
   def plain_url?(_url), do: false
 
-  defp checked_target(url, kind) do
+  defp checked_target(url, kind, hosts) do
     uri = URI.parse(url)
     host = if is_binary(uri.host), do: String.downcase(uri.host), else: ""
-    allowed = host != "" and allowed_host?(host)
+    allowed = host != "" and allowed_host?(host, hosts)
 
     cond do
       uri.scheme not in ["https", "http"] or host == "" or uri.userinfo != nil ->
@@ -232,7 +237,7 @@ defmodule OptimalEngine.Imports.Fetch do
       uri.scheme == "http" and not allowed ->
         {:error, :invalid_source_url}
 
-      allowed_hosts() != [] and not allowed ->
+      hosts != [] and not allowed ->
         {:error, :source_url_refused}
 
       true ->
@@ -294,6 +299,13 @@ defmodule OptimalEngine.Imports.Fetch do
     end
   end
 
+  defp hosts(opts) do
+    case Keyword.fetch(opts, :allowed_hosts) do
+      {:ok, hosts} -> Enum.map(hosts, &(&1 |> to_string() |> String.trim() |> String.downcase()))
+      :error -> allowed_hosts()
+    end
+  end
+
   defp allowed_hosts do
     configured = Application.get_env(:optimal_engine, :import_url_hosts, [])
 
@@ -327,7 +339,7 @@ defmodule OptimalEngine.Imports.Fetch do
 
         with true <- plain_url?(location) || {:error, :redirect_refused},
              next when is_binary(next) <- next || {:error, :redirect_refused},
-             {:ok, next_target} <- target(next, :redirect) do
+             {:ok, next_target} <- target(next, :redirect, clock.hosts) do
           follow(next_target, dest, max_bytes, clock, hops - 1)
         end
 

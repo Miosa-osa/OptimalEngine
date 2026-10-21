@@ -150,7 +150,10 @@ defmodule OptimalEngine.Application do
       # ── Filesystem cache: legacy layout removed once, entries expire by age ─
       OptimalEngine.Store.FileCache.Maintenance,
       # ── Import jobs (Notion exports posted to /api/import/notion) ────────
-      OptimalEngine.Imports.Worker
+      OptimalEngine.Imports.Worker,
+
+      # ── Bundle export and import jobs (/api/bundles/jobs) ───────────────
+      OptimalEngine.Portability.BundleWorker
     ]
   end
 

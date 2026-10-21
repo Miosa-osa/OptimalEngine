@@ -23,7 +23,7 @@ A key without a `"*"` label grant is also not shown rows above the Engine's ceil
 The recommended grants for a machine key are `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`.
 `docs/guides/replication.md` has the rule and the routes it does not cover yet.
 
-Routes: 298
+Routes: 303
 
 | Method | Path | Router | Grant | Workspace |
 | --- | --- | --- | --- | --- |
@@ -83,6 +83,11 @@ Routes: 298
 | GET | `/api/brief` | Router | read | workspace |
 | GET | `/api/bundles/:name` | Router | admin | tenant |
 | POST | `/api/bundles/import` | Router | admin | tenant |
+| GET | `/api/bundles/jobs` | Router | admin | tenant |
+| GET | `/api/bundles/jobs/:id` | Router | admin | tenant |
+| POST | `/api/bundles/jobs/:id/cancel` | Router | admin | tenant |
+| POST | `/api/bundles/jobs/export` | Router | admin | tenant |
+| POST | `/api/bundles/jobs/import` | Router | admin | tenant |
 | GET, POST | `/api/connectors` | Router | GET: read; POST: connectors:write or admin | tenant |
 | GET, PATCH, DELETE | `/api/connectors/:id` | Router | GET: read; PATCH: connectors:write or admin; DELETE: connectors:write or admin | tenant |
 | POST | `/api/connectors/:id/run` | Router | write | tenant |

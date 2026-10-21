@@ -254,3 +254,44 @@ A bundle does not follow the data-class gate of replication (`replication.md`).
 It is a whole-workspace move for an admin: it carries every row and file, including those labelled `restricted`, because a move that left them behind would lose them when `finalize-move` deletes the source.
 Seeding a replica that is cleared for less than the workspace holds from a bundle therefore copies that data across.
 Seed such a replica only from a workspace whose data class it is cleared for.
+
+## Bundle jobs
+
+A large workspace takes minutes to export or import, so the same work also runs as a durable job: the request answers at once, and the caller follows the job.
+
+| Step | Route |
+| --- | --- |
+| Export | `POST /api/bundles/jobs/export {"workspace_id", "for_move"?}` |
+| Import | `POST /api/bundles/jobs/import {"workspace_id", "mode"?, "organization_id"?, "cross_tenant"?, "bundle" or "source_url" and "sha256"}` |
+| Follow | `GET /api/bundles/jobs/:id` |
+| List | `GET /api/bundles/jobs?workspace_id=&status=&kind=&limit=` |
+| Cancel | `POST /api/bundles/jobs/:id/cancel` |
+| Download an export | `GET /api/bundles/<result.bundle>` |
+
+Every route needs the admin grant, and a job belongs to the tenant that started it: another tenant's job is not found.
+The key's workspace scope must cover the job's workspace (the export's source, the import's target), or the answer is 403 `workspace_scope_denied`.
+A start answers 202 with the job and its status URL in `Location`.
+
+An import names its target `workspace_id` and exactly one source.
+`bundle` is a file in the caller's bundle folder, such as a finished export.
+`source_url` is an `https` URL the Engine downloads inside the job, such as a presigned object URL, with the file's `sha256`; its host must be in `OPTIMAL_BUNDLE_URL_HOSTS`, and with no host listed `source_url` is refused with 400 `source_url_not_allowed`.
+The URL is checked like the Notion import's (`docs/guides/notion-import.md`): no redirect to another host, no private address, at most `OPTIMAL_BUNDLE_MAX_BYTES`, and its signature is never stored, logged or shown, only `scheme://host/path`.
+
+An `Idempotency-Key` header (or `idempotency_key` in the body), 1 to 128 printable ASCII characters, names one job of a kind in a workspace for good.
+The same request again answers 200 with that job and `"duplicate": true`, whatever its state, before anything is fetched or written; another request under the key answers 409 `idempotency_key_reused`.
+A workspace has at most one bundle job queued or running, export and import together; another start answers 409 `bundle_job_active` with that job's id.
+The Engine runs one bundle job at a time; the others wait in order.
+
+The status carries `status` (`queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled`), `phase`, `progress` (`rows_done`, `rows_total`, `bytes_done`, `bytes_total`, `tables_done`, `tables_total`, `files_done`, `files_total`; a total is null until known), `attempt` and `max_attempts`, the times (`created_at`, `started_at`, `updated_at`, `finished_at`), `error` (`code`, `message`, `retryable`), and `result`.
+An export's result names the `bundle`, its `file_sha256` (the value to pass as `sha256` to an import), `bundle_sha256` (for `finalize-move`), `size_bytes`, the counts, `ledger_sequence`, and `expires_at`.
+An import's result names the target `workspace_id`, the rows per table, the files, and the bundle's `ledger_sequence`.
+
+A failure the Engine can retry (`fetch_failed`, `insufficient_storage`, `store_busy`, `engine_restarted`) is tried again after a minute, up to three attempts; any other ends the job `failed` at once, and `retryable: false` means the request must change.
+A failed or cancelled job leaves nothing behind: no partial export file, no download, and no rows in an import target that held nothing when the job started (a `create`, or a `merge` into an empty workspace).
+A merge into a workspace that already held rows is not rolled back; its error says `"partial": true`, and running it again converges.
+A cancel takes a queued job out at once, and stops a running one at its next page or batch.
+A job running when the Engine stops is not resumed: at the next boot its partial output is removed and it runs again from the start, and after its third attempt it fails with `engine_restarted`.
+An export reads one snapshot of the database, and a resumed export would join two, so its ledger mark would no longer describe its rows.
+
+An export job's bundle is kept for `OPTIMAL_BUNDLE_RETENTION_HOURS` (168, seven days) after it finishes, then removed; job records are kept 30 days.
+A by-name import leaves its bundle in place, a download is removed when its job ends, and the synchronous routes above work as before.
