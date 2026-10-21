@@ -167,6 +167,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       when is_binary(bundle_sha256) and is_binary(target_url) do
     with {:ok, workspace} <- Workspace.get(workspace_id),
          true <- workspace.tenant_id == tenant_id || {:error, :not_found},
+         :ok <- movable(workspace_id),
          {:ok, [[expected]]} <-
            Store.raw_query(
              "SELECT bundle_sha256 FROM uri_redirects WHERE tenant_id = ?1 AND workspace_id = ?2 AND state = 'pending'",
@@ -212,19 +213,35 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   Records that `workspace_id` was exported for a move, with the bundle hash
   the target must report back before `finalize_move/4` deletes anything.
   """
-  @spec prepare_move(String.t(), String.t(), String.t()) :: :ok
+  @spec prepare_move(String.t(), String.t(), String.t()) ::
+          :ok | {:error, :workspace_directory_is_root}
   def prepare_move(tenant_id, workspace_id, bundle_sha256) do
-    {:ok, _} =
-      Store.raw_query(
-        """
-        INSERT INTO uri_redirects (tenant_id, workspace_id, bundle_sha256, state)
-        VALUES (?1, ?2, ?3, 'pending')
-        ON CONFLICT(tenant_id, workspace_id) DO UPDATE SET bundle_sha256 = excluded.bundle_sha256, state = 'pending'
-        """,
-        [tenant_id, workspace_id, bundle_sha256]
-      )
+    with :ok <- movable(workspace_id) do
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO uri_redirects (tenant_id, workspace_id, bundle_sha256, state)
+          VALUES (?1, ?2, ?3, 'pending')
+          ON CONFLICT(tenant_id, workspace_id) DO UPDATE SET bundle_sha256 = excluded.bundle_sha256, state = 'pending'
+          """,
+          [tenant_id, workspace_id, bundle_sha256]
+        )
 
-    :ok
+      :ok
+    end
+  end
+
+  @doc """
+  `:ok` when a move may take the workspace off this Engine. The files of the
+  default workspace are the Engine's root directory, which holds every other
+  workspace too, so finishing a move could not remove them without removing
+  everything: such a move is refused with `:workspace_directory_is_root`.
+  """
+  @spec movable(String.t()) :: :ok | {:error, :workspace_directory_is_root}
+  def movable(workspace_id) do
+    if Path.expand(Filesystem.path(root(), workspace_id)) == Path.expand(root()),
+      do: {:error, :workspace_directory_is_root},
+      else: :ok
   end
 
   @doc """
