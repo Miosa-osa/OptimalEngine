@@ -19,7 +19,8 @@ defmodule OptimalEngine.DataSteward do
     MemoryCore,
     ReviewQueue,
     Store,
-    URI
+    URI,
+    Workspace
   }
 
   alias OptimalEngine.Portability.WorkspaceBundle
@@ -1184,14 +1185,16 @@ defmodule OptimalEngine.DataSteward do
   # Its shape is checked first, so a refusal does not say whether a workspace
   # of that id exists.
   defp check_rename_target(txn, %{slug: slug}, tenant, target) do
-    if target == tenant <> ":" <> slug do
+    # The target is `<tenant>:<slug>`, and an id `Workspace.check_id/2` takes: a
+    # workspace from before ids were checked may hold a slug that is not
+    # one, and the id would name a directory that is not its own.
+    with true <- target == tenant <> ":" <> slug || {:error, :target_must_match_tenant_and_slug},
+         :ok <- Workspace.check_id(target, tenant) do
       case Store.txn_query(txn, "SELECT 1 FROM workspaces WHERE id=?1", [target]) do
         {:ok, []} -> :ok
         {:ok, _} -> {:error, :target_workspace_exists}
         error -> error
       end
-    else
-      {:error, :target_must_match_tenant_and_slug}
     end
   end
 

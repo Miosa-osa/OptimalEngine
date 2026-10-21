@@ -303,6 +303,7 @@ rejected	BEGIN DEFERRED
 rejected	BEGIN IMMEDIATE
 rejected	BEGIN/**/IMMEDIATE
 rejected	DELETE FROM "…" WHERE "…" = ?
+rejected	DELETE FROM "…" WHERE "…" IN (?)
 rejected	DELETE FROM data_embeddings WHERE collection_id = ? AND (model != ? OR record_id NOT IN (SELECT "…" FROM "…"))
 rejected	EXPLAIN QUERY PLAN SELECT MAX(w.id) FROM ( SELECT id FROM chunks WHERE workspace_id = ? AND id > ? ORDER BY id LIMIT ? ) AS w
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_adapter_runs WHERE asset_id = ?
