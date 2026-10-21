@@ -63,7 +63,7 @@ defmodule OptimalEngine.Signal.GenreDetector do
 
   # Standup labels fold into three slots: done, doing, blocked. They open a
   # line or follow a sentence break ("y: on-call. t: write up. b: none").
-  @standup_label ~r/(?:^\s*+|[.;]\s++)(?:[-*]\s++)?(?:#+\s*+)?(?:\*\*)?(yesterday|today|tomorrow|blockers?|blocked|did|done yesterday|done|doing|next|issues?|Y|T|B)(?:\*\*)?\s*(?::|$)/im
+  @standup_label ~r/(?:^[^\S\n]*+|[.;]\s++)(?:[-*]\s++)?(?:#+\s*+)?(?:\*\*)?(yesterday|today|tomorrow|blockers?|blocked|did|done yesterday|done|doing|next|issues?|Y|T|B)(?:\*\*)?\s*(?::|$)/im
   @standup_slots %{
     "yesterday" => :done,
     "did" => :done,
