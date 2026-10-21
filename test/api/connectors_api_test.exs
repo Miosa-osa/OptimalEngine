@@ -111,6 +111,57 @@ defmodule OptimalEngine.API.ConnectorsAPITest do
       assert conn.status == 403
     end
 
+    test "a review workspace outside the key's scope is refused, on registration and on change",
+         ctx do
+      id = "review-#{ctx.suffix}"
+
+      body = fn review ->
+        %{
+          "id" => id,
+          "kind" => "sources_folder",
+          "workspace" => ctx.ws_a,
+          "config" => %{"root" => ctx.root, "review_workspace_id" => review}
+        }
+      end
+
+      review_of = fn ->
+        {:ok, [[review]]} =
+          Store.raw_query(
+            "SELECT json_extract(config, '$.review_workspace_id') FROM connectors WHERE id = ?1",
+            [id]
+          )
+
+        review
+      end
+
+      conn = request(ctx.operator_a, :post, "/api/connectors", body.(ctx.ws_b))
+      assert conn.status == 403
+      assert json_body(conn)["error"] == "workspace_scope_denied"
+      assert {:ok, []} = Store.raw_query("SELECT 1 FROM connectors WHERE id = ?1", [id])
+
+      # A workspace the key holds is taken.
+      assert %{status: 201} = request(ctx.operator_a, :post, "/api/connectors", body.(ctx.ws_a))
+      assert review_of.() == ctx.ws_a
+
+      conn =
+        request(ctx.operator_a, :patch, "/api/connectors/#{id}", %{
+          "config" => %{"root" => ctx.root, "review_workspace_id" => ctx.ws_b}
+        })
+
+      assert conn.status == 403
+      assert json_body(conn)["error"] == "workspace_scope_denied"
+      assert review_of.() == ctx.ws_a
+
+      # A key that covers both names either.
+      conn =
+        request(ctx.admin, :patch, "/api/connectors/#{id}", %{
+          "config" => %{"root" => ctx.root, "review_workspace_id" => ctx.ws_b}
+        })
+
+      assert conn.status == 200
+      assert review_of.() == ctx.ws_b
+    end
+
     test "needs admin or connectors:write", ctx do
       body = %{
         "id" => "folder-#{ctx.suffix}",
