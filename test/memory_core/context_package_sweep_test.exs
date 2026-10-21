@@ -209,6 +209,23 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweepTest do
            }) == 1
   end
 
+  test "the Mix task prints what it skipped, then exits 1", ctx do
+    failing = fn _sql, _params -> {:error, :database_busy} end
+
+    output =
+      capture_io(fn ->
+        assert {:shutdown, 1} =
+                 catch_exit(
+                   Mix.Tasks.Optimal.Context.Sweep.run(["--workspace", ctx.workspace_id],
+                     object_query: failing
+                   )
+                 )
+      end)
+
+    assert output =~ "Skipped 3"
+    assert output =~ "lookup_failed"
+  end
+
   test "the Mix task prints the summary and honours --dry-run", ctx do
     output =
       capture_io(fn ->

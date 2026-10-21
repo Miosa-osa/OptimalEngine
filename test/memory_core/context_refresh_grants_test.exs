@@ -271,6 +271,35 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       assert refreshed.retrieval_plan.query == @query
     end
 
+    test "a covering key that refreshes again is answered with the packages it stored", ctx do
+      _packages = build_packages!(ctx.workspace_id, ctx.rows, @builder)
+
+      {token, principal} =
+        mint_key!(["write"], %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      first = refresh_stale(ctx.workspace_id, token)
+      second = refresh_stale(ctx.workspace_id, token)
+
+      ids = fn conn ->
+        conn.resp_body
+        |> Jason.decode!()
+        |> Map.fetch!("refreshed_context_packages")
+        |> Enum.map(& &1["id"])
+        |> Enum.sort()
+      end
+
+      assert length(ids.(first)) == 2
+      assert ids.(second) == ids.(first)
+      assert rows_requested_by(ctx.workspace_id, principal) == 2
+
+      assert_within(
+        Jason.decode!(second.resp_body)["refreshed_context_packages"],
+        second.resp_body,
+        ctx.rows,
+        ["open", "public", "internal", "restricted", "partitioned"]
+      )
+    end
+
     test "the wildcard covers every package and returns every tier", ctx do
       _packages = build_packages!(ctx.workspace_id, ctx.rows, @builder)
 
@@ -352,6 +381,25 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       assert length(body["errors"]) == 2
       assert Enum.all?(body["errors"], &(&1["reason"] == "not_found"))
       assert_states(packages, "stale")
+    end
+
+    test "a covering key that refreshes the pool again changes nothing", ctx do
+      packages = build_packages!(ctx.workspace_id, ctx.rows, @builder)
+      pool_id = open_pool_with!(ctx.workspace_id, packages)
+
+      {token, _principal} =
+        mint_key!(["write"], %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      first = Jason.decode!(refresh_context(pool_id, token).resp_body)
+      assert first["refreshed_count"] == 2
+      links = pool_links(pool_id)
+      assert length(links) == 4
+
+      second = Jason.decode!(refresh_context(pool_id, token).resp_body)
+      assert second["refreshed_count"] == 0
+      assert length(second["skipped_context_package_ids"]) == 4
+      assert second["errors"] == []
+      assert pool_links(pool_id) == links
     end
 
     test "the wildcard covers the loaded packages and returns every tier", ctx do
@@ -501,6 +549,65 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
         assert refreshed.request_id == if(inherits?, do: "req-#{@builder}")
         assert refreshed.active_memory_pool_id == if(inherits?, do: pool.id)
       end
+    end
+
+    test "a refresh with no receiver carries the request and pool over", ctx do
+      {:ok, pool} =
+        MemoryCore.open_active_pool(
+          tenant_id: "default",
+          workspace_id: ctx.workspace_id,
+          task_type: "refresh_carry_#{System.unique_integer([:positive])}"
+        )
+
+      package =
+        build_package!(ctx.workspace_id, ["public"], [], @builder, active_memory_pool_id: pool.id)
+
+      make_stale!(ctx.workspace_id, ctx.rows)
+
+      assert {:ok, refreshed} =
+               RetrievalCoordinator.refresh_context_package(package.id,
+                 workspace_id: ctx.workspace_id
+               )
+
+      assert refreshed.request_id == "req-#{@builder}"
+      assert refreshed.active_memory_pool_id == pool.id
+      assert refreshed.retrieval_plan.query == @query
+      assert refreshed.sections.summary =~ @query_marker
+    end
+
+    test "a reader that only covers a package is answered with the package it stored last time",
+         ctx do
+      package = build_package!(ctx.workspace_id, ["public"], [])
+      make_stale!(ctx.workspace_id, ctx.rows)
+
+      cover = fn labels ->
+        RetrievalCoordinator.refresh_context_package(package.id,
+          workspace_id: ctx.workspace_id,
+          actor_id: "agent:other",
+          allowed_partitions: [],
+          allowed_security_labels: labels
+        )
+      end
+
+      assert {:ok, first} = cover.(["public"])
+      assert {:ok, second} = cover.(["public"])
+
+      # The same package, with the content of the refresh just run.
+      assert second.id == first.id
+      assert returned_ids(second) == ids_for(ctx.rows, ["open", "public"])
+      assert length(second.facts) == 2
+      assert refute_query_in(second)
+      assert rows_requested_by(ctx.workspace_id, "agent:other") == 1
+
+      # Other grants are another answer, so another package.
+      assert {:ok, wider} = cover.(["public", "internal"])
+      assert wider.id != first.id
+      assert rows_requested_by(ctx.workspace_id, "agent:other") == 2
+
+      # A package that went stale is not reused.
+      make_stale!(ctx.workspace_id, ctx.rows)
+      assert {:ok, third} = cover.(["public"])
+      assert third.id != first.id
     end
 
     test "a reader that only covers a package does not replace it; its requester does", ctx do
@@ -762,6 +869,28 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
         workspace_id: workspace_id,
         reason: "refresh_grants_test"
       )
+  end
+
+  defp rows_requested_by(workspace_id, actor) do
+    assert {:ok, [[count]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM context_packages WHERE workspace_id = ?1 AND requesting_actor_id = ?2",
+               [workspace_id, actor]
+             )
+
+    count
+  end
+
+  # The reused package, like any a reader that did not ask the query gets.
+  defp refute_query_in(package) do
+    refute Map.has_key?(package.retrieval_plan, :query)
+    refute package.sections.summary =~ @query_marker
+    true
+  end
+
+  defp pool_links(pool_id) do
+    {:ok, pool} = MemoryCore.get_active_pool(pool_id)
+    pool.context_package_links
   end
 
   defp stale_ids(workspace_id) do
