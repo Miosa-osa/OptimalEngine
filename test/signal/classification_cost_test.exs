@@ -53,7 +53,12 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
       end_with_spaces: "end" <> spaces <> "!",
       selector_with_spaces: "a" <> spaces <> "(",
       css_declaration_with_spaces: "a:" <> spaces <> "x",
-      json_comment_openers: "[" <> String.duplicate("/*", div(n, 2))
+      json_comment_openers: "[" <> String.duplicate("/*", div(n, 2)),
+      if_with_spaces_then_colon: "if" <> spaces <> ":",
+      while_with_spaces_then_colon: "while" <> spaces <> ":",
+      with_with_spaces_then_colon: "with" <> spaces <> ":",
+      quotes_after_a_letter: "a" <> String.duplicate("'", n) <> "1",
+      timestamp_with_spaces: "[00:00]" <> spaces <> "x"
     ]
   end
 
@@ -169,6 +174,28 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
     signal = Intake.classify(text)
     assert signal.content == text
     assert String.valid?(signal.l1_description)
+  end
+
+  test "past the classification limit, a long text's entities come from its head" do
+    Application.put_env(:optimal_engine, :classification_timeout_ms, 1)
+    head = "Contoso asked for the rollout plan.\n\n"
+    # Megabytes, so reading all of it takes well over the 1 ms limit.
+    filler = String.duplicate("The rollout continues as planned for the week. ", 100_000)
+    text = head <> filler <> "\nLater the Northwind account signed."
+
+    entities = Intake.classify(text, known_entities: ["Contoso", "Northwind"]).entities
+
+    assert "Contoso" in entities
+    refute "Northwind" in entities
+  end
+
+  test "a long text's entities come from its body, as a short text's do" do
+    frontmatter = "---\ntitle: Contoso review\n---\n"
+    body = "The rollout continues as planned for the week. "
+
+    for text <- [frontmatter <> body, frontmatter <> String.duplicate(body, 2_000)] do
+      refute "Contoso" in Intake.classify(text, known_entities: ["Contoso"]).entities
+    end
   end
 
   test "the classifier's entity extraction reads the whole text" do
