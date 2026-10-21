@@ -792,6 +792,46 @@ class LockTests(InstallClientTestCase):
                 self.assertEqual(sorted(set(writers)), sorted(str(run.pid) for run in runs))
                 self.assertEqual(self.leftovers(), [])
 
+    def test_a_lock_taken_between_the_judgment_and_the_takeover_is_never_lost(self):
+        # The lock judged stale is released and taken by another install right after this
+        # install reads it. The takeover must neither remove nor move the new holder's lock:
+        # a third install trying all the while never finds the path free.
+        stale = self.owner(pid=self.dead_pid())
+        fresh = self.owner()
+        self.lock.symlink_to(stale)
+        swapped = self.dir / 'swapped'
+        real_readlink = shutil.which('readlink')
+        self.fake('readlink', f'out=$("{real_readlink}" "$@") || exit $?\n'
+                              f'if [ "$out" = "{stale}" ] && [ ! -e "{swapped}" ]; then\n'
+                              f'  : >"{swapped}"; ln -s "{fresh}" "{self.lock}.swap"; mv -f "{self.lock}.swap" "{self.lock}"\n'
+                              f'fi\nprintf "%s\\n" "$out"\n')
+        intruded, stop = [], threading.Event()
+
+        def intrude():
+            while not stop.is_set():
+                try:
+                    os.symlink('intruder', self.lock)
+                except FileExistsError:
+                    continue
+                intruded.append(True)
+                return
+
+        intruder = threading.Thread(target=intrude, daemon=True)
+        intruder.start()
+        self.env['OPTIMAL_CLIENT_LOCK_WAIT'] = '1'
+        try:
+            result = self.run_installer('install', check=False)
+        finally:
+            stop.set()
+            intruder.join()
+        self.assertTrue(swapped.exists())
+        self.assertEqual(intruded, [], 'the lock path was free while a holder held it')
+        self.assertEqual(self.held(), fresh)
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        self.assertNotIn('took over', result.stderr)
+        self.lock.unlink()
+        self.assertEqual(self.leftovers(), [])
+
     def test_an_install_never_removes_a_lock_that_is_not_its_own(self):
         foreign = self.owner(pid=1, host='elsewhere')
         real_cp = shutil.which('cp')
