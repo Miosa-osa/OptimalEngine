@@ -45,12 +45,16 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Telemetry
   alias OptimalEngine.Wiki
 
-  # First: every plug below reads the decoded segments the router matches, and
+  # The CORS headers go on first, so the answers the next two plugs can send
+  # on their own (400 invalid_path, 426 client_incompatible) carry them and a
+  # browser reads the refusal instead of an opaque CORS failure.
+  plug(:cors)
+
+  # Then: every plug below reads the decoded segments the router matches, and
   # a path that hides a route's literal behind escapes is refused.
   plug(OptimalEngine.API.PathPlug)
   plug(OptimalEngine.API.VersionPlug)
   plug(OptimalEngine.API.ClientCompatibilityPlug)
-  plug(:cors)
   plug(:match)
 
   # A zip body (a Notion export) passes unread: OptimalEngine.API.ImportsAPI

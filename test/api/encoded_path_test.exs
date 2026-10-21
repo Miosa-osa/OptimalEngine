@@ -14,8 +14,9 @@ defmodule OptimalEngine.API.EncodedPathTest do
   import Plug.Test
   import Plug.Conn
 
-  alias OptimalEngine.API.{PathPlug, Router}
+  alias OptimalEngine.API.{AuthorityPlug, PathPlug, PermissionPlug, Router}
   alias OptimalEngine.Auth.ApiKey
+  alias OptimalEngine.Authority.{Policy, Settings}
   alias OptimalEngine.{Organization, Workspace}
   alias OptimalEngine.Tenancy.Tenant
 
@@ -145,10 +146,147 @@ defmodule OptimalEngine.API.EncodedPathTest do
       assert Jason.decode!(conn.resp_body)["error"] == "permission_scope_denied"
     end
 
+    test "an escaped slash in a workspace id is refused before the route grades it", ctx do
+      # WorkspaceAuthPlug refuses the id; PermissionPlug would grade the same
+      # path as admin. The two checks agree, and this pins the first.
+      for {method, path} <- [
+            {:get, "/api/workspaces/a%2Fb/bundle"},
+            {:post, "/api/workspaces/a%2Fb/finalize-move"}
+          ] do
+        conn = request(method, path, ctx.writer, if(method == :post, do: %{}))
+        assert conn.status == 400, "#{path} answered #{conn.status}: #{conn.resp_body}"
+        assert conn.resp_body =~ "invalid workspace"
+      end
+    end
+
     test "a control byte or text that is not UTF-8 is refused", ctx do
       for path <- ["/api/search%00", "/api/wiki/a%0Ab", "/api/wiki/%C0%AF", "/api/wiki/%FF"] do
         assert refused?(request(:get, path, ctx.writer)), path
       end
+    end
+  end
+
+  describe "the grade of a plain path" do
+    test "claims promote and reject, the steward's decision and the workspace bundle routes" do
+      grade = &PermissionPlug.required_grant/2
+
+      for op <- ["promote", "reject"] do
+        assert grade.("POST", ["api", "memory-core", "claims", "c1", op]) == "claims:review"
+        assert grade.("GET", ["api", "memory-core", "claims", "c1", op]) == "read"
+      end
+
+      assert grade.("POST", ["api", "data-steward", "claims", "decide"]) == "claims:review"
+
+      for route <- ["bundle", "finalize-move"], method <- ["GET", "POST"] do
+        assert grade.(method, ["api", "workspaces", "w1", route]) == "admin"
+      end
+
+      assert grade.("GET", ["api", "workspaces", "w1", "files"]) == "read"
+      assert grade.("GET", ["api", "workspaces", "bundle"]) == "read"
+    end
+
+    test "a path that only looks like one of those routes is graded as itself" do
+      grade = &PermissionPlug.required_grant/2
+
+      # A claim id is one segment: `a/b` is two, so this is not the review route.
+      assert grade.("POST", ["api", "memory-core", "claims", "a", "b", "promote"]) == "write"
+      assert grade.("POST", ["api", "memory-core", "claims", "c1", "promote", "x"]) == "write"
+      assert grade.("POST", ["api", "memory-core", "claims", "c1", "demote"]) == "write"
+      assert grade.("POST", ["api", "workspaces", "w1", "bundle", "x"]) == "topology:write"
+      assert grade.("POST", ["api", "memory-core", "claims"]) == "write"
+    end
+
+    test "only GET of /api/auth/whoami answers a key that holds no read grant", ctx do
+      {:ok, %{key: sync_only}} =
+        ApiKey.mint(%{
+          tenant_id: ctx.tenant,
+          name: "sync-only",
+          scopes: ["sync"],
+          workspace_scope: ["*"]
+        })
+
+      assert request(:get, "/api/auth/whoami", sync_only).status == 200
+      assert request(:post, "/api/auth/whoami", sync_only, %{}).status == 403
+      assert request(:get, "/api/auth/whoami/extra", sync_only).status == 403
+      assert request(:get, "/api/search?q=x&workspace=" <> ctx.a, sync_only).status == 403
+    end
+  end
+
+  describe "a refusal that comes before the router's own plugs" do
+    test "an invalid_path answer carries the CORS headers a browser needs", ctx do
+      conn = request(:get, "/%61pi/search", ctx.writer)
+
+      assert refused?(conn)
+      assert get_resp_header(conn, "access-control-allow-origin") == ["*"]
+      assert get_resp_header(conn, "access-control-allow-headers") != []
+      assert get_resp_header(conn, "x-api-version") == ["v1"]
+    end
+
+    test "a preflight for an invalid path is answered with the CORS headers too" do
+      conn = Router.call(conn(:options, "/api/%zz"), @opts)
+
+      assert conn.status == 400
+      assert get_resp_header(conn, "access-control-allow-origin") == ["*"]
+    end
+
+    test "an incompatible client's refusal carries them as well", ctx do
+      conn =
+        :get
+        |> conn("/api/search")
+        |> put_req_header("authorization", "Bearer " <> ctx.writer)
+        |> put_req_header("user-agent", "optimal-cli/999.0.0")
+        |> Router.call(@opts)
+
+      assert conn.status == 426
+      assert get_resp_header(conn, "access-control-allow-origin") == ["*"]
+    end
+  end
+
+  describe "the authority resource" do
+    test "a segment that holds a slash is encoded and never reads as two" do
+      conn = %{
+        conn(:put, "/api/rhythm/notes/weekly/x")
+        | path_info: ["api", "rhythm", "notes", "weekly", "2026/W1"]
+      }
+
+      assert AuthorityPlug.describe(conn, "t").resource ==
+               "optimal://engine/rhythm/notes/weekly/2026%2FW1"
+
+      # A segment that was already escaped is left as it is.
+      conn = %{conn | path_info: ["api", "rhythm", "notes", "weekly", "2026%2FW1"]}
+
+      assert AuthorityPlug.describe(conn, "t").resource ==
+               "optimal://engine/rhythm/notes/weekly/2026%2FW1"
+    end
+
+    test "a deny rule on rhythm/notes/*/* matches a period with an escaped slash", ctx do
+      :ok = Settings.put_mode(ctx.tenant, "enforce", "user:owner")
+
+      {:ok, _policy, _previous} =
+        Policy.publish(
+          ctx.tenant,
+          "tenant",
+          ctx.tenant,
+          %{
+            "name" => "no-rhythm-notes",
+            "rules" => [
+              %{
+                "id" => "no-notes",
+                "effect" => "deny",
+                "actions" => ["write"],
+                "resources" => ["optimal://*/rhythm/notes/*/*"]
+              }
+            ]
+          },
+          "user:owner"
+        )
+
+      path = "/api/rhythm/notes/weekly/2026%2FW1?workspace=" <> ctx.a
+      conn = request(:put, path, ctx.writer, %{"note" => "x"})
+
+      assert conn.status == 403, "answered #{conn.status}: #{conn.resp_body}"
+      assert conn.resp_body =~ "authority_denied"
+      assert conn.resp_body =~ "no-notes"
     end
   end
 

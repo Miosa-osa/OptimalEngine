@@ -159,13 +159,11 @@ defmodule OptimalEngine.API.PermissionPlug do
         String.starts_with?(path, "/api/topology") or
         String.starts_with?(path, "/api/bundles") or
         String.starts_with?(path, "/api/federation/peers") or
-        Regex.match?(~r{^/api/workspaces/[^/]+/(bundle|finalize-move)$}, path) or
+        workspace_bundle_path?(path_info) or
           String.starts_with?(path, "/api/maintenance/") ->
         "admin"
 
-      mutation and
-          (Regex.match?(~r{^/api/memory-core/claims/[^/]+/(promote|reject)$}, path) or
-             path == "/api/data-steward/claims/decide") ->
+      mutation and claim_review_path?(path_info) ->
         "claims:review"
 
       mutation and topology_path?(path_info) ->
@@ -251,8 +249,21 @@ defmodule OptimalEngine.API.PermissionPlug do
   # A client must be able to read its own key metadata whatever scopes it
   # holds: that is how it learns it was handed an operator key.
   defp introspection_path?(conn) do
-    conn.method in ["GET", "HEAD"] and "/" <> Enum.join(conn.path_info, "/") == "/api/auth/whoami"
+    conn.method in ["GET", "HEAD"] and conn.path_info == ["api", "auth", "whoami"]
   end
+
+  # The routes are graded by their segments, not by a pattern on the joined
+  # path: an id is exactly one segment.
+  defp workspace_bundle_path?(["api", "workspaces", _id, route]),
+    do: route in ["bundle", "finalize-move"]
+
+  defp workspace_bundle_path?(_path_info), do: false
+
+  defp claim_review_path?(["api", "memory-core", "claims", _id, op]),
+    do: op in ["promote", "reject"]
+
+  defp claim_review_path?(["api", "data-steward", "claims", "decide"]), do: true
+  defp claim_review_path?(_path_info), do: false
 
   defp data_key?(%{metadata: %{"data_access" => %{}}}), do: true
   defp data_key?(_key), do: false
