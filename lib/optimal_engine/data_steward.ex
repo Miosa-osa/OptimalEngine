@@ -11,6 +11,7 @@ defmodule OptimalEngine.DataSteward do
   alias OptimalEngine.{
     ContextHealth,
     EntityQuality,
+    EntityResolution,
     HierarchyAudit,
     MemoryCore,
     ReviewQueue,
@@ -79,7 +80,7 @@ defmodule OptimalEngine.DataSteward do
          {:ok, orphan_scopes} <- orphan_scopes(tenant_id),
          {:ok, claims} <- claim_clusters(workspace_id, tenant_id, @default_limit),
          {:ok, routes} <- route_clusters(@default_limit),
-         {:ok, entities} <- entity_clusters(workspace_id, @default_limit),
+         {:ok, entities} <- entity_clusters(workspace_id, tenant_id, @default_limit),
          {:ok, hierarchy} <- HierarchyAudit.run(tenant_id) do
       {:ok,
        %{
@@ -161,16 +162,23 @@ defmodule OptimalEngine.DataSteward do
     end
   end
 
-  def entity_clusters(workspace_id, limit \\ @default_limit) do
+  @doc """
+  The unresolved mentions of the tenant in a workspace, grouped by kind and
+  name. A mention is the tenant's by the context or source package it was
+  found in (`OptimalEngine.EntityResolution`).
+  """
+  def entity_clusters(workspace_id, tenant_id \\ "default", limit \\ @default_limit)
+      when is_binary(tenant_id) do
     with {:ok, rows} <-
            Store.raw_query(
              """
              SELECT id, surface_text, normalized_text, proposed_kind, confidence, context_id
              FROM entity_mentions
-             WHERE workspace_id=?1 AND resolution_state IN ('unresolved','ambiguous')
-             ORDER BY normalized_text, confidence DESC LIMIT ?2
+             WHERE workspace_id=?2 AND resolution_state IN ('unresolved','ambiguous')
+               AND #{EntityResolution.owned_mention_sql()}
+             ORDER BY normalized_text, confidence DESC LIMIT ?1
              """,
-             [workspace_id, limit]
+             [limit, workspace_id, tenant_id]
            ) do
       {:ok,
        rows

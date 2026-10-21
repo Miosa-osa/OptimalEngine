@@ -6,7 +6,8 @@ defmodule OptimalEngine.EntityProjection do
   def build(entity_id, workspace_id, opts \\ []) do
     as_of = Keyword.get(opts, :as_of)
 
-    with {:ok, entity} <- EntityRegistry.get(entity_id, workspace_id, entity_opts(as_of)),
+    with {:ok, entity} <-
+           EntityRegistry.get(entity_id, workspace_id, entity_opts(as_of) ++ tenant_opts(opts)),
          {:ok, relationships} <-
            RelationshipRegistry.list(entity_id, workspace_id, entity_opts(as_of)),
          {:ok, facts} <- facts(entity_id, workspace_id, as_of) do
@@ -66,4 +67,12 @@ defmodule OptimalEngine.EntityProjection do
 
   defp entity_opts(nil), do: []
   defp entity_opts(as_of), do: [as_of: as_of]
+
+  # An entity is projected for the tenant it belongs to, when one is given.
+  defp tenant_opts(opts) do
+    case Keyword.get(opts, :tenant_id) do
+      nil -> []
+      tenant -> [tenant_id: tenant]
+    end
+  end
 end

@@ -55,8 +55,13 @@ defmodule OptimalEngine.EntityRegistry do
     end
   end
 
+  @doc """
+  One entity of a workspace. Options: `:as_of`; `:tenant_id`, which limits
+  the answer to that tenant's entity (another tenant's is `:not_found`).
+  """
   def get(id, workspace_id, opts \\ []) do
     as_of = Keyword.get(opts, :as_of)
+    tenant = Keyword.get(opts, :tenant_id)
 
     temporal =
       if as_of,
@@ -65,6 +70,7 @@ defmodule OptimalEngine.EntityRegistry do
         else: ""
 
     params = if as_of, do: [id, workspace_id, as_of], else: [id, workspace_id]
+    {tenant_clause, params} = tenant_clause(tenant, params)
 
     with {:ok, rows} <-
            Store.raw_query(
@@ -72,7 +78,7 @@ defmodule OptimalEngine.EntityRegistry do
              SELECT id, workspace_id, entity_kind, canonical_name, lifecycle_state,
                     valid_time_start, valid_time_end, transaction_time_start,
                     transaction_time_end, successor_entity_id, metadata
-             FROM canonical_entities WHERE id = ?1 AND workspace_id = ?2 #{temporal}
+             FROM canonical_entities WHERE id = ?1 AND workspace_id = ?2 #{temporal}#{tenant_clause}
              """,
              params
            ) do
@@ -87,6 +93,7 @@ defmodule OptimalEngine.EntityRegistry do
     workspace = Keyword.fetch!(opts, :workspace_id)
     actor = Keyword.fetch!(opts, :actor_id)
     reason = Keyword.fetch!(opts, :reason)
+    tenant = Keyword.get(opts, :tenant_id, "default")
     now = now()
 
     Store.transaction(fn tx ->
@@ -96,14 +103,14 @@ defmodule OptimalEngine.EntityRegistry do
                "SELECT lifecycle_state FROM canonical_entities WHERE workspace_id = ?1 AND id IN (?2, ?3) ORDER BY id",
                [workspace, loser_id, winner_id]
              )
-             |> normalize_merge_rows(loser_id, winner_id, tx, workspace),
+             |> normalize_merge_rows(loser_id, winner_id, tx, workspace, tenant),
            :ok <- ensure_active(loser_state, :loser),
            :ok <- ensure_active(winner_state, :winner),
            {:ok, 1} <-
              Store.txn_execute(
                tx,
-               "UPDATE canonical_entities SET lifecycle_state='merged', transaction_time_end=?1, successor_entity_id=?2, updated_at=?1 WHERE id=?3 AND workspace_id=?4 AND lifecycle_state='active'",
-               [now, winner_id, loser_id, workspace]
+               "UPDATE canonical_entities SET lifecycle_state='merged', transaction_time_end=?1, successor_entity_id=?2, updated_at=?1 WHERE id=?3 AND workspace_id=?4 AND tenant_id=?5 AND lifecycle_state='active'",
+               [now, winner_id, loser_id, workspace, tenant]
              ),
            {:ok, _} <-
              Store.txn_execute(
@@ -114,8 +121,8 @@ defmodule OptimalEngine.EntityRegistry do
            {:ok, _} <-
              Store.txn_execute(
                tx,
-               "UPDATE entity_mentions SET resolved_entity_id=?1, updated_at=?2 WHERE resolved_entity_id=?3 AND workspace_id=?4",
-               [winner_id, now, loser_id, workspace]
+               "UPDATE entity_mentions SET resolved_entity_id=?1, updated_at=?4 WHERE resolved_entity_id=?5 AND workspace_id=?2 AND #{OptimalEngine.EntityResolution.owned_mention_sql()}",
+               [winner_id, workspace, tenant, now, loser_id]
              ),
            {:ok, 1} <-
              Store.txn_execute(
@@ -128,15 +135,29 @@ defmodule OptimalEngine.EntityRegistry do
     end)
   end
 
-  def history(id, workspace_id) do
+  @doc """
+  The lineage of an entity. With `:tenant_id` only that tenant's entity has
+  any: another tenant's is an empty history.
+  """
+  def history(id, workspace_id, opts \\ []) do
+    {tenant_clause, params} =
+      case Keyword.get(opts, :tenant_id) do
+        nil ->
+          {"", [workspace_id, id]}
+
+        tenant ->
+          {" AND EXISTS (SELECT 1 FROM canonical_entities e WHERE e.id = ?2 AND e.workspace_id = ?1 AND e.tenant_id = ?3)",
+           [workspace_id, id, tenant]}
+      end
+
     Store.raw_query(
       """
       SELECT operation, predecessor_entity_id, successor_entity_id, reason, actor_id, transaction_time
       FROM entity_lineage
-      WHERE workspace_id = ?1 AND (predecessor_entity_id = ?2 OR successor_entity_id = ?2)
+      WHERE workspace_id = ?1 AND (predecessor_entity_id = ?2 OR successor_entity_id = ?2)#{tenant_clause}
       ORDER BY transaction_time
       """,
-      [workspace_id, id]
+      params
     )
     |> case do
       {:ok, rows} ->
@@ -230,18 +251,19 @@ defmodule OptimalEngine.EntityRegistry do
     end)
   end
 
-  defp normalize_merge_rows(_result, loser_id, winner_id, tx, workspace) do
+  # Both entities have to be the tenant's, in the workspace.
+  defp normalize_merge_rows(_result, loser_id, winner_id, tx, workspace, tenant) do
     with {:ok, loser_rows} <-
            Store.txn_query(
              tx,
-             "SELECT lifecycle_state FROM canonical_entities WHERE id=?1 AND workspace_id=?2",
-             [loser_id, workspace]
+             "SELECT lifecycle_state FROM canonical_entities WHERE id=?1 AND workspace_id=?2 AND tenant_id=?3",
+             [loser_id, workspace, tenant]
            ),
          {:ok, winner_rows} <-
            Store.txn_query(
              tx,
-             "SELECT lifecycle_state FROM canonical_entities WHERE id=?1 AND workspace_id=?2",
-             [winner_id, workspace]
+             "SELECT lifecycle_state FROM canonical_entities WHERE id=?1 AND workspace_id=?2 AND tenant_id=?3",
+             [winner_id, workspace, tenant]
            ) do
       case {loser_rows, winner_rows} do
         {[[loser]], [[winner]]} -> {:ok, [[loser], [winner]]}
@@ -277,6 +299,12 @@ defmodule OptimalEngine.EntityRegistry do
       metadata: decode(metadata)
     }
   end
+
+  # The tenant is the next parameter after the ones given.
+  defp tenant_clause(nil, params), do: {"", params}
+
+  defp tenant_clause(tenant, params),
+    do: {" AND tenant_id = ?#{length(params) + 1}", params ++ [tenant]}
 
   defp validate_kind(kind) when kind in @kinds, do: :ok
   defp validate_kind(_), do: {:error, {:invalid_entity_kind, @kinds}}

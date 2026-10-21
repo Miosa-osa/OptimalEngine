@@ -405,7 +405,10 @@ defmodule OptimalEngine.API.Router do
     workspace = query_param(conn, "workspace", "default")
     limit = query_param(conn, "limit", "50") |> parse_int(50)
 
-    case OptimalEngine.EntityResolution.queue(workspace, limit: limit) do
+    case OptimalEngine.EntityResolution.queue(workspace,
+           limit: limit,
+           tenant_id: conn.assigns[:current_tenant] || "default"
+         ) do
       {:ok, items} -> json(conn, %{workspace_id: workspace, count: length(items), items: items})
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
     end
@@ -414,7 +417,9 @@ defmodule OptimalEngine.API.Router do
   get "/api/entities/:id/history" do
     workspace = query_param(conn, "workspace", "default")
 
-    case OptimalEngine.EntityRegistry.history(id, workspace) do
+    case OptimalEngine.EntityRegistry.history(id, workspace,
+           tenant_id: conn.assigns[:current_tenant] || "default"
+         ) do
       {:ok, history} -> json(conn, %{entity_id: id, workspace_id: workspace, history: history})
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
     end
@@ -422,7 +427,10 @@ defmodule OptimalEngine.API.Router do
 
   get "/api/entities/:id/projection" do
     workspace = query_param(conn, "workspace", "default")
-    opts = if as_of = query_param(conn, "as_of", nil), do: [as_of: as_of], else: []
+
+    opts =
+      if(as_of = query_param(conn, "as_of", nil), do: [as_of: as_of], else: []) ++
+        [tenant_id: conn.assigns[:current_tenant] || "default"]
 
     case OptimalEngine.EntityProjection.build(id, workspace, opts) do
       {:ok, projection} -> json(conn, projection)
@@ -433,7 +441,10 @@ defmodule OptimalEngine.API.Router do
 
   get "/api/entities/:id" do
     workspace = query_param(conn, "workspace", "default")
-    opts = if as_of = query_param(conn, "as_of", nil), do: [as_of: as_of], else: []
+
+    opts =
+      if(as_of = query_param(conn, "as_of", nil), do: [as_of: as_of], else: []) ++
+        [tenant_id: conn.assigns[:current_tenant] || "default"]
 
     case OptimalEngine.EntityRegistry.get(id, workspace, opts) do
       {:ok, entity} -> json(conn, entity)
@@ -448,7 +459,8 @@ defmodule OptimalEngine.API.Router do
     opts = [
       workspace_id: body["workspace"],
       actor_id: Actor.of(conn, body),
-      reason: body["reason"] || "reviewed identity merge"
+      reason: body["reason"] || "reviewed identity merge",
+      tenant_id: conn.assigns[:current_tenant] || "default"
     ]
 
     case OptimalEngine.EntityRegistry.merge(id, body["winner_entity_id"], opts) do
