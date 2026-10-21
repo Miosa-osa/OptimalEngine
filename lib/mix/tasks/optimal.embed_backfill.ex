@@ -110,7 +110,8 @@ defmodule Mix.Tasks.Optimal.EmbedBackfill do
     ws_by_id = Map.new(chunks, fn c -> {c.id, c.workspace_id} end)
     tree = %ChunkTree{root_chunk_id: nil, chunks: structs}
 
-    {:ok, embeddings, %{errors: errors}} = Embedder.embed_tree(tree)
+    # Each chunk is embedded once, across workspaces: nothing to gain from the cache.
+    {:ok, embeddings, %{errors: errors}} = Embedder.embed_tree(tree, cache: false)
 
     rows =
       Enum.map(embeddings, fn emb ->
@@ -201,6 +202,7 @@ defmodule Mix.Tasks.Optimal.EmbedBackfill do
     Chunk.new(
       id: c.id,
       tenant_id: c.tenant_id,
+      workspace_id: c.workspace_id,
       signal_id: c.signal_id,
       text: c.text,
       modality: to_modality(c.modality),

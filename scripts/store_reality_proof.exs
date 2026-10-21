@@ -320,15 +320,18 @@ defmodule StoreRealityProof do
     [{^id, %Context{}}] = :ets.lookup(:optimal_engine_store_cache, id)
     {:error, :not_found} = Store.get_context("missing-#{s}")
 
-    :ok = FileCache.put("proof", "key-#{s}", %{"value" => s})
+    scope = {"default", "default:proof"}
+    :ok = FileCache.put(scope, "proof", "key-#{s}", %{"value" => s})
 
     {:ok, %{"value" => ^s}} =
-      Task.async(fn -> FileCache.get("proof", "key-#{s}") end) |> Task.await()
+      Task.async(fn -> FileCache.get(scope, "proof", "key-#{s}") end) |> Task.await()
 
-    [entry] = Path.wildcard(Path.join([FileCache.root(), "proof", "*", "*.bin"]))
+    [entry] =
+      Path.wildcard(Path.join([FileCache.root(), "tenants", "*", "*", "proof", "*", "*.bin"]))
+
     File.write!(entry, "corrupt")
-    :miss = FileCache.get("proof", "key-#{s}")
-    :ok = FileCache.clear("proof")
+    :miss = FileCache.get(scope, "proof", "key-#{s}")
+    :ok = FileCache.clear(scope, "proof")
 
     {:ok,
      %{

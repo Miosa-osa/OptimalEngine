@@ -852,6 +852,7 @@ defmodule OptimalEngine.API.Router do
       snap
       |> Map.put(:sizing, OptimalEngine.Sizing.usage())
       |> Map.put(:connectors, OptimalEngine.API.ConnectorsAPI.metrics(conn))
+      |> Map.put(:gauges, OptimalEngine.Store.FileCache.LegacyPurgeRecord.gauges())
     )
   end
 
@@ -1755,7 +1756,8 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # POST /api/workspaces/:id/archive — soft delete.
+  # POST /api/workspaces/:id/archive — soft delete. A 500 naming :cache_purge_failed means the
+  # workspace is archived but its cache purge failed; posting again retries the purge.
   post "/api/workspaces/:id/archive" do
     case OptimalEngine.Workspace.archive(id) do
       :ok -> send_resp(conn, 204, "")

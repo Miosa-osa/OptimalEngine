@@ -67,7 +67,7 @@ defmodule OptimalEngine.AppData.Semantic do
     %{embedder: embedder, model: model} = config()
     min_score = semantic["min_score"] || 0.0
 
-    with {:ok, vector} <- query_vector(embedder, semantic["text"], model),
+    with {:ok, vector} <- query_vector(embedder, semantic["text"], model, cache_scope(scope)),
          {where_sql, where_params} =
            Records.owner_filter(scope, c, elem(plan.where, 0), elem(plan.where, 1)),
          {:ok, rows} <-
@@ -123,8 +123,8 @@ defmodule OptimalEngine.AppData.Semantic do
     {:bad_query, message} -> {:error, {:validation, [message]}}
   end
 
-  defp query_vector(embedder, text, model) do
-    case embed(embedder, text, model, 15_000) do
+  defp query_vector(embedder, text, model, scope_opts \\ []) do
+    case embed(embedder, text, model, 15_000, scope_opts) do
       {:ok, vector} ->
         {:ok, vector}
 
@@ -207,7 +207,7 @@ defmodule OptimalEngine.AppData.Semantic do
         :unchanged
 
       true ->
-        case embed(embedder, text, model, 15_000) do
+        case embed(embedder, text, model, 15_000, cache_scope(c)) do
           {:ok, vector} ->
             Store.raw_execute(
               "INSERT OR REPLACE INTO data_embeddings (collection_id, record_id, model, dimensions, embedding, content_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -304,7 +304,12 @@ defmodule OptimalEngine.AppData.Semantic do
 
   # ---------------------------------------------------------------------------
 
-  defp embed(embedder, text, model, timeout, opts \\ []) do
+  # Embeddings are cached in the workspace the collection belongs to, so they are
+  # removed with it. A collection and a scope both carry the tenant and workspace.
+  defp cache_scope(%{tenant_id: tenant_id, workspace_id: workspace_id}),
+    do: [tenant_id: tenant_id, workspace_id: workspace_id]
+
+  defp embed(embedder, text, model, timeout, opts) do
     task = Task.async(fn -> embedder.embed(text, Keyword.put(opts, :model, model)) end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do

@@ -234,7 +234,11 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
   defp generate_and_store_embedding(%Context{id: id} = context) do
     embed_input = build_embed_input(context)
 
-    case TextEmbedder.embed(embed_input) do
+    # Cached under the document's own tenant and workspace, so deleting or
+    # erasing the workspace removes the text's cache entry with it.
+    scope = [tenant_id: tenant_id(context), workspace_id: context.workspace_id]
+
+    case TextEmbedder.embed(embed_input, scope) do
       {:ok, vector} ->
         case VectorStore.store(id, vector, workspace_id: context.workspace_id) do
           :ok ->
@@ -252,6 +256,14 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
   rescue
     e ->
       Logger.warning("[SemanticProcessor] Embedding exception: #{inspect(e)}")
+  end
+
+  # The context struct carries its workspace, not its tenant.
+  defp tenant_id(%Context{id: id}) do
+    case OptimalEngine.Store.raw_query("SELECT tenant_id FROM contexts WHERE id = ?1", [id]) do
+      {:ok, [[tenant_id]]} when is_binary(tenant_id) -> tenant_id
+      _ -> nil
+    end
   end
 
   defp build_embed_input(%Context{title: title, l0_abstract: l0, content: content}) do

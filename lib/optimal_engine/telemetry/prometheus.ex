@@ -19,6 +19,7 @@ defmodule OptimalEngine.Telemetry.Prometheus do
   """
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.FileCache.LegacyPurgeRecord
   alias OptimalEngine.Telemetry
 
   @type render_opts :: []
@@ -56,7 +57,8 @@ defmodule OptimalEngine.Telemetry.Prometheus do
       render_histograms(snap.histograms),
       render_uptime(snap.uptime_ms),
       render_system_metrics(),
-      render_db_metrics()
+      render_db_metrics(),
+      render_recorded_gauges()
     ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
@@ -184,6 +186,18 @@ defmodule OptimalEngine.Telemetry.Prometheus do
       _ ->
         nil
     end
+  end
+
+  # ─── recorded gauges ──────────────────────────────────────────────────────────
+
+  # Gauges set from a record the Engine keeps (the one-time embedding cache purge); none
+  # until the record exists.
+  defp render_recorded_gauges do
+    LegacyPurgeRecord.gauges()
+    |> Enum.sort()
+    |> Enum.map_join("\n", fn {name, value} ->
+      render_metric(name, :gauge, LegacyPurgeRecord.help(name), value)
+    end)
   end
 
   # ─── rendering helpers ────────────────────────────────────────────────────────

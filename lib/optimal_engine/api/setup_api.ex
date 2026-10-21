@@ -15,8 +15,13 @@ defmodule OptimalEngine.API.SetupAPI do
 
   alias OptimalEngine.API.Actor
   alias OptimalEngine.{Presets, Sizing}
+  alias OptimalEngine.Store.FileCache.LegacyPurgeRecord
 
-  def usage(conn), do: json(conn, 200, Sizing.usage())
+  # `embed_cache_legacy_purge`: the one-time removal of the unpartitioned embedding cache,
+  # `{ran_at, files, bytes, engine_version}`, or null if it has never run on this Engine.
+  def usage(conn) do
+    json(conn, 200, Map.put(Sizing.usage(), :embed_cache_legacy_purge, LegacyPurgeRecord.read()))
+  end
 
   def profiles(conn),
     do: json(conn, 200, %{profiles: Sizing.profiles(), active: Sizing.profile().id})

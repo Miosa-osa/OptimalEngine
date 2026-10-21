@@ -149,12 +149,30 @@ embed_dimensions =
       end
   end
 
+# How long a cached embedding is kept, in days; 0 keeps it until its workspace is
+# purged. Unset keeps the configured value, or the default of 30.
+embed_cache_max_age_days =
+  case System.get_env("OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS") do
+    blank when blank in [nil, ""] ->
+      Keyword.get(text_embedding_config, :cache_max_age_days, 30)
+
+    value ->
+      case Integer.parse(String.trim(value)) do
+        {days, ""} when days >= 0 ->
+          days
+
+        _ ->
+          raise ArgumentError, "OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS must be a whole number of days"
+      end
+  end
+
 config :optimal_engine,
        :text_embedding,
        Keyword.merge(text_embedding_config,
          url: embed_url,
          dialect: embed_dialect,
          dimensions: embed_dimensions,
+         cache_max_age_days: embed_cache_max_age_days,
          api_key_file:
            System.get_env(
              "OPTIMAL_EMBED_API_KEY_FILE",

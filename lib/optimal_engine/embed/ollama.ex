@@ -96,6 +96,8 @@ defmodule OptimalEngine.Embed.Ollama do
 
   ## Options
   - `:model` - override the default embed model
+  - `:workspace_id`, `:tenant_id` - cache the vector under this workspace; without a
+    `:workspace_id` nothing is cached
   - `:cache` - `false` bypasses the filesystem embedding cache (default `true`)
   """
   @spec embed(String.t(), keyword()) :: {:ok, [float()]} | {:error, atom()}
@@ -106,7 +108,8 @@ defmodule OptimalEngine.Embed.Ollama do
   model. Default model: `nomic-embed-text` (configurable via
   `:optimal_engine, :ollama, :embed_model`).
 
-  The input is capped and cached as in `OptimalEngine.Embed.Text.embed/2`.
+  The input is capped and, when a workspace is named, cached as in
+  `OptimalEngine.Embed.Text.embed/2`.
   Returns `{:ok, [float()]}`, a single 768-dim vector, or `{:error, reason}`.
   """
   @spec embed_text(String.t(), keyword()) :: {:ok, [float()]} | {:error, atom()}

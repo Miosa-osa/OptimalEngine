@@ -196,7 +196,7 @@ A failed `create` removes every row it wrote and the workspace record, so it can
 Registry rows every Engine derives under the same id (principals, model call operations) are kept when the target already has them.
 Tenant and workspace ids are rewritten to the target; integer row ids are reassigned.
 `create` refuses an existing workspace; `merge` keeps existing rows.
-The source deletes nothing until `finalize-move` receives the same `bundle_sha256` the target reported, then removes the workspace's rows and files, archives the workspace, and records a redirect so `optimal://` citations keep resolving.
+The source deletes nothing until `finalize-move` receives the same `bundle_sha256` the target reported, then removes the workspace's rows, files and cached embeddings, archives the workspace, and records a redirect so `optimal://` citations keep resolving.
 
 Split moves a workspace out of an org Engine; merge is the same steps in the other direction; seeding a new Engine is an import of a bundle.
 

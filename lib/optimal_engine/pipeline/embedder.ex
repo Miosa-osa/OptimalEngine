@@ -46,6 +46,8 @@ defmodule OptimalEngine.Pipeline.Embedder do
   @doc "Embed a single chunk. Returns `{:ok, %Embedding{}}` or `{:error, reason}`."
   @spec embed(Chunk.t(), keyword()) :: {:ok, Embedding.t()} | {:error, term()}
   def embed(%Chunk{} = chunk, opts \\ []) do
+    opts = Keyword.put(opts, :embed_scope, {chunk.tenant_id, chunk.workspace_id})
+
     case dispatch(chunk, opts) do
       {:ok, vector, model, effective_modality} ->
         {:ok,
@@ -96,10 +98,20 @@ defmodule OptimalEngine.Pipeline.Embedder do
         |> Enum.reject(&is_nil/1)
         |> Enum.uniq()
 
-      vectors = texts |> Enum.zip(governed_embed_batch(texts, opts)) |> Map.new()
+      batch_opts = Keyword.put(opts, :embed_scope, tree_scope(chunks))
+      vectors = texts |> Enum.zip(governed_embed_batch(texts, batch_opts)) |> Map.new()
       Keyword.put(opts, :text_vectors, vectors)
     else
       opts
+    end
+  end
+
+  # The tenant and workspace a tree's batch is cached under: the one its chunks share. A
+  # tree has one source, so one workspace; chunks of several workspaces are not cached.
+  defp tree_scope(chunks) do
+    case chunks |> Enum.map(&{&1.tenant_id, &1.workspace_id}) |> Enum.uniq() do
+      [scope] -> scope
+      _empty_or_mixed -> nil
     end
   end
 
@@ -309,6 +321,18 @@ defmodule OptimalEngine.Pipeline.Embedder do
   # it lands a model_call_run with provenance (model id) + latency + status.
   # Fail-open: governance never alters or blocks the embedding result.
 
+  # What the text embedder is told. Where a vector is cached is decided by the chunk's own
+  # tenant and workspace (`:embed_scope`), never by the caller's options, so a chunk's text
+  # can only land in its own workspace's cache and is removed with it.
+  defp text_options(opts) do
+    base = Keyword.drop(opts, [:text_vectors, :embed_scope, :tenant_id, :workspace_id])
+
+    case Keyword.get(opts, :embed_scope) do
+      {tenant_id, workspace_id} -> [tenant_id: tenant_id, workspace_id: workspace_id] ++ base
+      nil -> base
+    end
+  end
+
   # A text embedded in the tree's batch was governed with the batch.
   defp governed_embed_text(text, opts) do
     case Map.fetch(Keyword.get(opts, :text_vectors, %{}), text) do
@@ -319,7 +343,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
         GovernedModel.call_model(
           "embedder.embed_text",
           %{"chars" => String.length(text)},
-          fn -> TextEmbedder.embed(text, Keyword.delete(opts, :text_vectors)) end,
+          fn -> TextEmbedder.embed(text, text_options(opts)) end,
           model_id: model_name(opts, :text),
           model_task_type: "embedding",
           provider: TextEmbedder.provider(),
@@ -336,7 +360,7 @@ defmodule OptimalEngine.Pipeline.Embedder do
     GovernedModel.call_model(
       "embedder.embed_text_batch",
       %{"inputs" => length(texts), "chars" => texts |> Enum.map(&String.length/1) |> Enum.sum()},
-      fn -> TextEmbedder.embed_many(texts, opts) end,
+      fn -> TextEmbedder.embed_many(texts, text_options(opts)) end,
       model_id: model_name(opts, :text),
       model_task_type: "embedding",
       provider: TextEmbedder.provider(),

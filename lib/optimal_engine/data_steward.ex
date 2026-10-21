@@ -21,6 +21,8 @@ defmodule OptimalEngine.DataSteward do
     Store
   }
 
+  alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
+
   require Logger
 
   @default_limit 100
@@ -395,6 +397,7 @@ defmodule OptimalEngine.DataSteward do
            }}
         end
       end)
+      |> purge_vacated_cache(source_workspace_id, :repair)
     end
   end
 
@@ -433,6 +436,7 @@ defmodule OptimalEngine.DataSteward do
           )
         end
       end)
+      |> purge_vacated_cache(source_workspace_id, :rename)
     end
   end
 
@@ -622,6 +626,16 @@ defmodule OptimalEngine.DataSteward do
         {:ok, key}
     end
   end
+
+  # The workspace id the rows moved away from no longer holds them, and whatever the
+  # filesystem cache holds under it can never be reached again, so it is removed. The
+  # target workspace builds its own entries as its text is embedded.
+  defp purge_vacated_cache({:ok, result}, source_workspace_id, reason) do
+    purged = Cache.summary(Cache.purge_workspace(source_workspace_id, reason))
+    {:ok, Map.put(result, :cache_purged, purged)}
+  end
+
+  defp purge_vacated_cache(other, _source_workspace_id, _reason), do: other
 
   # `{:ok, boolean}`, or the error: a question that cannot be answered is not
   # a "no".

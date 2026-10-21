@@ -20,6 +20,10 @@ defmodule OptimalEngine.Embed.TextTest do
   alias OptimalEngine.Store
   alias OptimalEngine.Store.{FileCache, Vectors}
 
+  # An embedding is cached only under a workspace; the tests that exercise the cache name one.
+  @scope [tenant_id: "default", workspace_id: "default:embed-text-test"]
+  @cache_scope {"default", "default:embed-text-test"}
+
   @key "embed-test-key-not-a-secret-0123"
   @auth "Bearer " <> @key
   @saved [:text_embedding, :ollama, :hybrid_search, :semantic_processing, :root_path, :embed]
@@ -210,8 +214,8 @@ defmodule OptimalEngine.Embed.TextTest do
     test "an identical model and input is served from the filesystem cache", %{tag: tag} do
       use_endpoint(start_stub(&openai_meaning/2))
 
-      assert {:ok, vector} = Text.embed("cached #{tag}")
-      assert {:ok, ^vector} = Text.embed("cached #{tag}")
+      assert {:ok, vector} = Text.embed("cached #{tag}", @scope)
+      assert {:ok, ^vector} = Text.embed("cached #{tag}", @scope)
       assert_received {:embed_request, _, _, _}
       refute_received {:embed_request, _, _, _}
     end
@@ -236,8 +240,8 @@ defmodule OptimalEngine.Embed.TextTest do
 
         log =
           capture_log(fn ->
-            assert {:error, {:embed_unauthorized, ^status}} = Text.embed("refused #{tag}")
-            assert {:error, {:embed_unauthorized, ^status}} = Text.embed("refused #{tag}")
+            assert {:error, {:embed_unauthorized, ^status}} = Text.embed("refused #{tag}", @scope)
+            assert {:error, {:embed_unauthorized, ^status}} = Text.embed("refused #{tag}", @scope)
           end)
 
         # Not cached: the second call went to the endpoint again.
@@ -304,7 +308,7 @@ defmodule OptimalEngine.Embed.TextTest do
     test "many texts go out in one request, in order, without the cached or blank ones",
          %{tag: tag} do
       use_endpoint(start_stub(&openai_meaning/2))
-      assert {:ok, cached} = Text.embed("cached plant #{tag}")
+      assert {:ok, cached} = Text.embed("cached plant #{tag}", @scope)
       assert_received {:embed_request, _, _, %{"input" => "cached plant " <> _}}
 
       texts = ["hiring a #{tag}", "cached plant #{tag}", "  ", "plant b #{tag}", "hiring a #{tag}"]
@@ -317,7 +321,7 @@ defmodule OptimalEngine.Embed.TextTest do
                {:error, :empty_input},
                {:ok, ^plant},
                {:ok, ^hiring}
-             ] = Text.embed_many(texts)
+             ] = Text.embed_many(texts, @scope)
 
       assert_received {:embed_request, "/v1/embeddings", _, %{"input" => sent}}
       assert sent == ["hiring a #{tag}", "plant b #{tag}"]
@@ -325,7 +329,7 @@ defmodule OptimalEngine.Embed.TextTest do
 
       # Now cached: no request at all.
       assert [{:ok, ^hiring}, {:ok, ^plant}] =
-               Text.embed_many(["hiring a #{tag}", "plant b #{tag}"])
+               Text.embed_many(["hiring a #{tag}", "plant b #{tag}"], @scope)
 
       refute_received {:embed_request, _, _, _}
       assert Text.embed_many([]) == []
@@ -450,17 +454,17 @@ defmodule OptimalEngine.Embed.TextTest do
         end)
 
       use_endpoint(url, dimensions: 4)
-      assert {:ok, [_, _, _, _]} = Text.embed("width #{tag}")
+      assert {:ok, [_, _, _, _]} = Text.embed("width #{tag}", @scope)
       assert_received {:embed_request, _, _, _}
-      assert [{:ok, [_, _, _, _]}] = Text.embed_many(["width #{tag}"])
+      assert [{:ok, [_, _, _, _]}] = Text.embed_many(["width #{tag}"], @scope)
       refute_received {:embed_request, _, _, _}
 
       # The width setting changes: the stored vector no longer fits, so it is fetched again.
       Agent.update(width, fn _ -> 2 end)
       use_endpoint(url, dimensions: 2)
-      assert [{:ok, [_, _]}] = Text.embed_many(["width #{tag}"])
+      assert [{:ok, [_, _]}] = Text.embed_many(["width #{tag}"], @scope)
       assert_received {:embed_request, _, _, %{"input" => ["width " <> _]}}
-      assert {:ok, [_, _]} = Text.embed("width #{tag}")
+      assert {:ok, [_, _]} = Text.embed("width #{tag}", @scope)
       refute_received {:embed_request, _, _, _}
     end
 
@@ -537,7 +541,7 @@ defmodule OptimalEngine.Embed.TextTest do
         end)
       )
 
-      assert {:ok, _vector} = Text.embed("cached #{tag}")
+      assert {:ok, _vector} = Text.embed("cached #{tag}", @scope)
       Agent.update(mode, fn _ -> :down end)
 
       capture_log(fn ->
@@ -546,9 +550,9 @@ defmodule OptimalEngine.Embed.TextTest do
 
       refute Text.healthy?()
       # Served from the cache: no request, so it says nothing about the endpoint.
-      assert {:ok, _vector} = Text.embed("cached #{tag}")
+      assert {:ok, _vector} = Text.embed("cached #{tag}", @scope)
       refute Text.healthy?()
-      assert [{:ok, _vector}] = Text.embed_many(["cached #{tag}"])
+      assert [{:ok, _vector}] = Text.embed_many(["cached #{tag}"], @scope)
       refute Text.healthy?()
 
       assert_received {:embed_request, _, _, %{"input" => "cached " <> _}}
@@ -612,21 +616,23 @@ defmodule OptimalEngine.Embed.TextTest do
 
       # Ollama first: today's key, and the endpoint still asks its own server.
       Application.delete_env(:optimal_engine, :text_embedding)
-      assert {:ok, ^from_ollama} = Text.embed("shared #{tag}")
+      assert {:ok, ^from_ollama} = Text.embed("shared #{tag}", @scope)
       assert_received {:embed_request, "/api/embed", _, _}
-      assert {:ok, ^from_ollama} = FileCache.get("embeddings", "nomic-embed-text\0shared #{tag}")
+
+      assert {:ok, ^from_ollama} =
+               FileCache.get(@cache_scope, "embeddings", "nomic-embed-text\0shared #{tag}")
 
       use_endpoint(endpoint_stub)
-      assert {:ok, ^from_endpoint} = Text.embed("shared #{tag}")
+      assert {:ok, ^from_endpoint} = Text.embed("shared #{tag}", @scope)
       assert_received {:embed_request, "/v1/embeddings", _, _}
-      assert {:ok, ^from_endpoint} = Text.embed("shared #{tag}")
+      assert {:ok, ^from_endpoint} = Text.embed("shared #{tag}", @scope)
       refute_received {:embed_request, _, _, _}
 
       # The endpoint first: Ollama still asks Ollama.
-      assert {:ok, ^from_endpoint} = Text.embed("endpoint first #{tag}")
+      assert {:ok, ^from_endpoint} = Text.embed("endpoint first #{tag}", @scope)
       assert_received {:embed_request, "/v1/embeddings", _, _}
       Application.delete_env(:optimal_engine, :text_embedding)
-      assert {:ok, ^from_ollama} = Text.embed("endpoint first #{tag}")
+      assert {:ok, ^from_ollama} = Text.embed("endpoint first #{tag}", @scope)
       assert_received {:embed_request, "/api/embed", _, _}
     end
 
@@ -635,8 +641,8 @@ defmodule OptimalEngine.Embed.TextTest do
 
       log =
         capture_log(fn ->
-          assert {:error, {:embed_dimension_mismatch, 4, 768}} = Text.embed("width #{tag}")
-          assert {:error, {:embed_dimension_mismatch, 4, 768}} = Text.embed("width #{tag}")
+          assert {:error, {:embed_dimension_mismatch, 4, 768}} = Text.embed("width #{tag}", @scope)
+          assert {:error, {:embed_dimension_mismatch, 4, 768}} = Text.embed("width #{tag}", @scope)
         end)
 
       assert_received {:embed_request, _, _, _}

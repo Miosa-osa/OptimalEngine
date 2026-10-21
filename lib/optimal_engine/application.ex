@@ -129,7 +129,10 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Backup.Schedule.Worker,
 
       # ── Reindex requests posted by writers after they change files ───────
-      OptimalEngine.Reindex.Worker
+      OptimalEngine.Reindex.Worker,
+
+      # ── Filesystem cache: legacy layout removed once, entries expire by age ─
+      OptimalEngine.Store.FileCache.Maintenance
     ]
   end
 
