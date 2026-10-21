@@ -28,8 +28,9 @@ A link in the stored text that points at another exported page or database (a re
 A link to a page the export does not hold is left as written and counted as unresolved.
 Images, attachments, and other web links are left alone.
 A re-import replaces the `child_of` and `links_to` edges of the contexts it writes, so a page that moved has one parent.
-The importer owns only `child_of` and `links_to` edges from one imported Notion context to another.
-Any other edge, such as a `links_to` edge from a Notion page to a context that did not come from Notion, or an edge with another relation, is never retracted.
+Every edge the importer writes records it as its asserter (`asserted_by` is `import.notion`), and a re-import retracts only edges that record it alone.
+An edge someone else asserted is never retracted, and neither is an edge the importer wrote that someone else then asserted too.
+Edges imported before an Engine recorded asserters are given to the importer by the upgrade when both ends are imported Notion contexts.
 
 A database CSV becomes a context with a Markdown table of its first 200 rows, each row linked to the row's own context.
 The CSV is read as a stream, and at most 10,000 rows of one CSV are imported; the rest are left out and reported as `csv_truncated`.
