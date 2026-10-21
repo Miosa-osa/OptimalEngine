@@ -310,6 +310,7 @@ Only sealed copies restore this way.
 
 `POST /api/storage/workspaces/:id/mutations` appends an entry to the workspace's replication ledger, and `GET` on the same path lists the workspace ledger after a sequence.
 An entry's entity type is free-form, but it may not name a table of the engine or an `authority_*` table (422 `entity_type_names_a_table`), and its idempotency key may not start with the engine's own replica id followed by `:`, with `mut_` and that id, or with `peer:` (422 `reserved_idempotency_key`).
+The Engine gives each entry its id, and the same key with the same change returns the entry already written, an entry written before these checks included.
 Replication never serves or pushes an entry: see "Storage mutation entries share the ledger" in `docs/guides/replication.md`.
 
 ## What Is Not Implemented
