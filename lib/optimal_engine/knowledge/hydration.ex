@@ -1,6 +1,6 @@
 defmodule OptimalEngine.Knowledge.Hydration do
   @moduledoc """
-  Rebuilds the triple store from the durable `edges` table.
+  Rebuilds the triple store from the durable `graph_edges` table.
 
   An in-memory backend (ETS, Mnesia RAM copies) starts empty, so every edge is
   loaded on every boot. A persistent backend (RocksDB) keeps what it already
@@ -66,7 +66,7 @@ defmodule OptimalEngine.Knowledge.Hydration do
   end
 
   defp newest_edge_id do
-    case Store.raw_query("SELECT COALESCE(MAX(id), 0) FROM edges", []) do
+    case Store.raw_query("SELECT COALESCE(MAX(id), 0) FROM graph_edges", []) do
       {:ok, [[newest]]} when is_integer(newest) -> {:ok, newest}
       {:ok, _other} -> {:ok, 0}
       {:error, _} = error -> error

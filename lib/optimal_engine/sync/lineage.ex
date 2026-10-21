@@ -262,6 +262,9 @@ defmodule OptimalEngine.Sync.Lineage do
     "wiki_pages" => {:derived, [], key: nil, special: [:wiki_page]},
     "edges" =>
       {:derived, [{:id, "source_id", "contexts"}, {:id, "target_id", "contexts"}], special: [:edge]},
+    # The graph edges table that superseded `edges`, classified the same way.
+    "graph_edges" =>
+      {:derived, [{:id, "source_id", "contexts"}, {:id, "target_id", "contexts"}], special: [:edge]},
     "entities" => {:derived, @context_parent},
     "decisions" => {:derived, @context_parent},
     "signal_events" => {:derived, @context_parent},

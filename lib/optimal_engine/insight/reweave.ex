@@ -134,10 +134,14 @@ defmodule OptimalEngine.Insight.Reweave do
 
     case Store.raw_query(sql, ["%#{topic}%", ws]) do
       {:ok, rows} ->
+        # The workspace's tenant is looked up once, not per entity.
+        {tenant_id, ws} = Graph.scope(workspace_id: ws)
+        scope = [direction: :out, relation: "mentioned_in", workspace_id: ws, tenant_id: tenant_id]
+
         rows
         |> List.flatten()
         |> Enum.flat_map(fn name ->
-          case Graph.edges_for(name, direction: :out, relation: "mentioned_in", workspace_id: ws) do
+          case Graph.edges_for(name, scope) do
             {:ok, edges} -> Enum.map(edges, & &1.target_id)
             _ -> []
           end

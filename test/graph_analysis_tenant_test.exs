@@ -1,10 +1,10 @@
 defmodule OptimalEngine.GraphAnalysisTenantTest do
   @moduledoc """
-  The graph analyses (hubs, triangles, clusters, reflect) read the edge table,
-  which carries no tenant of its own, so they answer only for a workspace that
-  is registered to the caller's tenant. A workspace id that nobody registered
-  can be written by two tenants at once, and its edges would be read by both:
-  every member list, hub name and context id would cross.
+  The graph analyses (hubs, triangles, clusters, reflect) answer only for a
+  workspace that is registered to the caller's tenant, and read its graph
+  edges in that tenant. A workspace id that nobody registered can be written
+  by two tenants at once: every member list, hub name and context id would
+  cross if it were read for either.
   """
 
   use ExUnit.Case, async: false
@@ -47,7 +47,7 @@ defmodule OptimalEngine.GraphAnalysisTenantTest do
         {workspace, where} <- [{shared, "s"}, {ops[tenant], "r"}] do
       hub = "hub-#{tag}-#{where}-#{n}"
 
-      for i <- 1..12, do: edge(hub, "leaf-#{tag}#{i}-#{where}-#{n}", workspace)
+      for i <- 1..12, do: edge(hub, "leaf-#{tag}#{i}-#{where}-#{n}", workspace, tenant)
 
       for i <- 1..2 do
         id = "ctx-#{tag}#{i}-#{where}-#{n}"
@@ -71,11 +71,11 @@ defmodule OptimalEngine.GraphAnalysisTenantTest do
     %{n: n, a: a, b: b, shared: shared, ops: ops}
   end
 
-  defp edge(source, target, workspace) do
+  defp edge(source, target, workspace, tenant) do
     {:ok, _} =
       Store.raw_query(
-        "INSERT INTO edges (source_id, target_id, relation, weight, workspace_id) VALUES (?1, ?2, 'related', 1.0, ?3)",
-        [source, target, workspace]
+        "INSERT INTO graph_edges (source_id, target_id, relation, weight, workspace_id, tenant_id) VALUES (?1, ?2, 'related', 1.0, ?3, ?4)",
+        [source, target, workspace, tenant]
       )
   end
 

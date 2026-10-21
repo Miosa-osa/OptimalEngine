@@ -209,7 +209,7 @@ defmodule StoreRealityProof do
     :ok = Graph.assert_edge(ana, ben, "knows", workspace_id: ws)
     :ok = Graph.assert_edge(ben, cal, "knows", workspace_id: ws)
     :ok = Graph.assert_edge(cal, dee, "knows", workspace_id: ws)
-    [[3]] = on_disk("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1", [ws])
+    [[3]] = on_disk("SELECT COUNT(*) FROM graph_edges WHERE workspace_id = ?1", [ws])
     expected = MapSet.new([ben, cal, dee])
 
     rocksdb =
