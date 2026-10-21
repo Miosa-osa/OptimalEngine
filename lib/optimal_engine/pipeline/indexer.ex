@@ -550,6 +550,7 @@ defmodule OptimalEngine.Pipeline.Indexer do
   #
   #   * `tenants/<tenant>/<slug>/...` is `<tenant>:<slug>` of that tenant (a tenant the
   #     Engine does not know is skipped: naming it would fail the batch it is in);
+  #   * any other file under `tenants` is in no workspace, and is skipped;
   #   * the root's own directories (`Filesystem.reserved_names/0`) and the files in the
   #     root are the default workspace;
   #   * any other top-level folder is `default:<folder>` (a bare id and `default:<id>` are
@@ -560,6 +561,10 @@ defmodule OptimalEngine.Pipeline.Indexer do
     case path |> Path.relative_to(root) |> Path.split() do
       ["tenants", tenant, slug, _file | _] ->
         if MapSet.member?(tenants, tenant), do: {tenant <> ":" <> slug, tenant}, else: :skip
+
+      # A file in the directory of a tenant, or in `tenants` itself, is in no workspace.
+      ["tenants" | _] ->
+        :skip
 
       [folder, _file | _] ->
         if folder in Filesystem.reserved_names(),

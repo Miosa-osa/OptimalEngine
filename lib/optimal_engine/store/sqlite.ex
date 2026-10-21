@@ -533,7 +533,14 @@ defmodule OptimalEngine.Store.SQLite do
 
   @impl true
   def handle_call({:insert_context, context}, _from, state) do
-    result = do_insert(state.db, context)
+    # In a transaction, so the rows a takeover relabels and the row itself are
+    # written together or not at all.
+    result =
+      case insert_in_transaction(state.db, [context]) do
+        {:ok, _count} -> :ok
+        not_written -> not_written
+      end
+
     {:reply, result, state}
   end
 
@@ -1503,18 +1510,20 @@ defmodule OptimalEngine.Store.SQLite do
     end
   end
 
-  # A context another tenant held is taken over by the owner of its workspace:
-  # the chunks and claims written for it go with it.
-  defp relabel_children(_db, _id, _tenant_id, nil), do: :ok
-  defp relabel_children(_db, _id, tenant_id, tenant_id), do: :ok
-
-  defp relabel_children(db, id, tenant_id, _previous) do
-    Enum.reduce_while(ContextTenant.relabel_sql(), :ok, fn sql, :ok ->
-      case exec_stmt(db, sql, [tenant_id, id]) do
-        :ok -> {:cont, :ok}
-        {:error, _reason} = err -> {:halt, err}
-      end
-    end)
+  # A context the default tenant held is taken over by the owner of its workspace:
+  # the chunks, chunk embeddings, claims and vectors written for it go with it. The
+  # callers run it in the transaction that writes the row.
+  defp relabel_children(db, id, tenant_id, previous) do
+    if ContextTenant.takeover?(previous, tenant_id) do
+      Enum.reduce_while(ContextTenant.relabel_sql(), :ok, fn sql, :ok ->
+        case exec_stmt(db, sql, [tenant_id, id]) do
+          :ok -> {:cont, :ok}
+          {:error, _reason} = err -> {:halt, err}
+        end
+      end)
+    else
+      :ok
+    end
   end
 
   defp context_tenant(db, %Context{} = ctx) do
