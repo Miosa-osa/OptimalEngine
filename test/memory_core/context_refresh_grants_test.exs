@@ -28,6 +28,11 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
   # The reader that built the packages in the tests that are not about owners.
   @builder "agent:builder"
 
+  # Two clauses: "launch note" matches the fixture rows, and the rest is a word
+  # that appears in none of them, so any copy of it in a response is the query.
+  @query "launch note, zxqvkj frobnicate"
+  @query_marker "zxqvkj"
+
   # One fact and one memory object per tier: {tag, security_labels, partition_ids}.
   @tiers [
     {"open", [], []},
@@ -110,11 +115,13 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       {token, principal} = mint_key!(["write"], %{})
       _packages = build_packages!(ctx.workspace_id, ctx.rows, principal)
 
-      body = Jason.decode!(refresh_stale(ctx.workspace_id, token).resp_body)
+      conn = refresh_stale(ctx.workspace_id, token)
+      body = Jason.decode!(conn.resp_body)
+      assert conn.resp_body =~ @query_marker
 
       for package <- body["refreshed_context_packages"] do
-        assert package["retrieval_plan"]["query"] == "launch"
-        assert package["metadata"]["query"] == "launch"
+        assert package["retrieval_plan"]["query"] == @query
+        assert package["metadata"]["query"] == @query
         assert package["metadata"]["refreshed_from_context_package_id"]
         refute Map.has_key?(package["metadata"], "refreshed_from_invalidation_reason")
       end
@@ -193,15 +200,16 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       assert_states([partitioned], "stale")
     end
 
-    test "a key that is not the requester is not handed the query or the invalidation reason",
-         ctx do
+    test "a key that did not ask the query is handed it nowhere in the response", ctx do
       _packages = build_packages!(ctx.workspace_id, ctx.rows, @builder)
 
       {token, _principal} =
         mint_key!(["write"], %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
 
-      body = Jason.decode!(refresh_stale(ctx.workspace_id, token).resp_body)
+      conn = refresh_stale(ctx.workspace_id, token)
+      body = Jason.decode!(conn.resp_body)
       assert body["refreshed_count"] == 2
+      refute conn.resp_body =~ @query_marker
 
       for package <- body["refreshed_context_packages"] do
         for key <- ~w(query evidence_plan evidence_obligations evidence_probes) do
@@ -212,6 +220,46 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
         refute Map.has_key?(package["metadata"], "refreshed_from_invalidation_reason")
         assert package["metadata"]["refreshed_from_context_package_id"]
       end
+    end
+
+    test "the query stays hidden from the reader that refreshed it, on the next refresh too",
+         ctx do
+      _packages = build_packages!(ctx.workspace_id, ctx.rows, @builder)
+
+      {token, principal} =
+        mint_key!(["write"], %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      first = refresh_stale(ctx.workspace_id, token)
+      assert Jason.decode!(first.resp_body)["refreshed_count"] == 2
+      refute first.resp_body =~ @query_marker
+
+      # The successors were requested by `principal`, who is not who asked the query.
+      make_stale!(ctx.workspace_id, ctx.rows)
+      second = refresh_stale(ctx.workspace_id, token)
+      assert Jason.decode!(second.resp_body)["refreshed_count"] >= 2
+      refute second.resp_body =~ @query_marker
+
+      assert {:ok, [[owners]]} =
+               Store.raw_query(
+                 "SELECT json_group_array(DISTINCT json_extract(metadata, '$.query_owner_actor_id')) FROM context_packages WHERE workspace_id = ?1 AND requesting_actor_id = ?2",
+                 [ctx.workspace_id, principal]
+               )
+
+      assert Jason.decode!(owners) == [@builder]
+
+      # The reader that asked it still sees it.
+      make_stale!(ctx.workspace_id, ctx.rows)
+      [stale_id | _] = stale_ids(ctx.workspace_id)
+
+      assert {:ok, refreshed} =
+               RetrievalCoordinator.refresh_context_package(stale_id,
+                 workspace_id: ctx.workspace_id,
+                 actor_id: @builder,
+                 allowed_partitions: ["*"],
+                 allowed_security_labels: ["*"]
+               )
+
+      assert refreshed.retrieval_plan.query == @query
     end
 
     test "the wildcard covers every package and returns every tier", ctx do
@@ -345,8 +393,9 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
                )
 
       assert returned_ids(refreshed) == ids_for(ctx.rows, ["open", "internal"])
-      assert refreshed.retrieval_plan.query == "launch"
-      assert refreshed.metadata.query == "launch"
+      assert refreshed.retrieval_plan.query == @query
+      assert refreshed.metadata.query == @query
+      assert refreshed.sections.summary =~ @query_marker
     end
 
     test "a grant the caller leaves out is read from the recorded envelope", ctx do
@@ -400,12 +449,42 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       refute Map.has_key?(refreshed.retrieval_plan, :query)
       refute Map.has_key?(refreshed.metadata, :query)
       refute Map.has_key?(refreshed.metadata, :refreshed_from_invalidation_reason)
+      refute refreshed.sections.summary =~ @query_marker
+      refute refreshed.metadata.sections.summary =~ @query_marker
 
       # The stored package keeps the query, so it can be refreshed again.
       assert {:ok, [[metadata]]} =
                Store.raw_query("SELECT metadata FROM context_packages WHERE id = ?1", [refreshed.id])
 
-      assert Jason.decode!(metadata)["query"] == "launch"
+      metadata = Jason.decode!(metadata)
+      assert metadata["query"] == @query
+      assert metadata["query_owner_actor_id"] == @builder
+      refute metadata["sections"]["summary"] =~ @query_marker
+    end
+
+    test "a package the caller does not cover answers not_found whether or not it is stale",
+         ctx do
+      stale = build_package!(ctx.workspace_id, ["public", "internal"], [])
+      make_stale!(ctx.workspace_id, ctx.rows)
+      fresh = build_package!(ctx.workspace_id, ["public", "internal"], [])
+
+      for package <- [stale, fresh] do
+        assert {:error, :not_found} =
+                 RetrievalCoordinator.refresh_context_package(package.id,
+                   workspace_id: ctx.workspace_id,
+                   actor_id: "agent:other",
+                   allowed_partitions: [],
+                   allowed_security_labels: ["public"]
+                 )
+      end
+
+      assert {:error, :context_package_not_stale} =
+               RetrievalCoordinator.refresh_context_package(fresh.id,
+                 workspace_id: ctx.workspace_id,
+                 actor_id: @builder,
+                 allowed_partitions: [],
+                 allowed_security_labels: ["public"]
+               )
     end
 
     test "grants that are not lists fail closed", ctx do
@@ -548,7 +627,7 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       memory =
         Map.merge(shared, %{
           id: ID.random_id("mem"),
-          summary: "Launch memory #{tag}-marker.",
+          summary: "Launch note memory #{tag}-marker.",
           lifecycle_state: "current"
         })
 
@@ -572,7 +651,7 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
 
   defp build_package!(workspace_id, labels, partitions, actor \\ @builder) do
     {:ok, package} =
-      RetrievalCoordinator.retrieve("launch",
+      RetrievalCoordinator.retrieve(@query,
         workspace_id: workspace_id,
         actor_id: actor,
         allowed_partitions: partitions,
@@ -590,6 +669,16 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
         workspace_id: workspace_id,
         reason: "refresh_grants_test"
       )
+  end
+
+  defp stale_ids(workspace_id) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT id FROM context_packages WHERE workspace_id = ?1 AND refresh_state = 'stale' ORDER BY id",
+        [workspace_id]
+      )
+
+    List.flatten(rows)
   end
 
   defp break_envelope!(package) do
