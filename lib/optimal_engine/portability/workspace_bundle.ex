@@ -83,6 +83,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       staging = staging_dir()
 
       try do
+        # The mark comes first: every captured change is sealed into the ledger,
+        # then its high-water mark is read, then the rows. Everything at or below
+        # the mark is therefore in the bundle, and a replica seeded from it pulls
+        # everything above. A write that lands while the rows are read can arrive
+        # both ways; a keyed row is then written again with the same content.
+        mark = ledger_mark(tenant_id, workspace_id)
         tables = export_tables(tenant_id, workspace_id, staging)
         files = export_files(workspace_id, staging)
 
@@ -104,7 +110,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
             },
             "tables" => tables,
             "files" => files,
-            "ledger_sequence" => ledger_sequence(tenant_id, workspace_id)
+            "ledger_sequence" => mark
           }
           |> then(&Map.put(&1, "bundle_sha256", CanonicalJSON.hash(&1)))
 
@@ -120,7 +126,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @doc """
   Imports a bundle into `tenant_id`. Options: `:workspace_id` (target id;
   default the source id with the target tenant), `:organization_id`,
-  `:mode` (`:create` or `:merge`). Returns a summary with the bundle hash.
+  `:mode` (`:create` or `:merge`), and `:consume` (delete the bundle file once
+  it is unpacked, for an upload nobody keeps, so a large import holds one copy
+  of the bundle on disk instead of two). Returns a summary with the bundle hash.
   """
   @spec import(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def import(path, tenant_id, opts \\ []) do
@@ -128,6 +136,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     try do
       with :ok <- unpack(path, staging),
+           :ok <- if(opts[:consume], do: File.rm(path), else: :ok),
            {:ok, manifest} <- read_manifest(staging),
            :ok <- permitted(manifest),
            :ok <- verify(manifest, staging),
@@ -1096,8 +1105,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp sha256(content), do: :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
 
   # The replication ledger's high-water mark when the bundle was taken: a
-  # replica seeded from this bundle pulls from here.
-  defp ledger_sequence(tenant_id, workspace_id) do
+  # replica seeded from this bundle pulls from here. Changes captured but not
+  # yet sealed are sealed first; left out, they would be sealed later above the
+  # mark and pulled again by a replica that already has them from the bundle.
+  defp ledger_mark(tenant_id, workspace_id) do
+    {:ok, _sealed} = Capture.seal()
+
     case Store.raw_query(
            "SELECT COALESCE(MAX(sequence), 0) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2",
            [tenant_id, workspace_id]
