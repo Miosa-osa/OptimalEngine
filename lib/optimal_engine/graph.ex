@@ -58,8 +58,10 @@ defmodule OptimalEngine.Graph do
   triple-store failures are logged and swallowed so they never block the caller.
 
   Options:
-  - `:workspace_id` - workspace to attribute the edge to (default: `"default"`);
-    the edge takes that workspace's tenant
+  - `:workspace_id` - workspace to attribute the edge to (default: `"default"`)
+  - `:tenant_id`    - the tenant the edge is written for; a bare workspace id can
+    be shared by two tenants, so a caller that acts for one names it (default:
+    the workspace's tenant)
   - `:weight`       - edge weight (default: `1.0`)
   - `:asserted_by`  - who asserts it, such as an importer's job kind (default:
     nobody in particular). An edge records one asserter: when a second one
@@ -75,7 +77,9 @@ defmodule OptimalEngine.Graph do
     asserted_by = Keyword.get(opts, :asserted_by)
     now = DateTime.to_iso8601(DateTime.utc_now())
 
-    insert_edge_via_store(source, target, predicate, weight, now, ws, asserted_by)
+    tenant = Keyword.get(opts, :tenant_id)
+
+    insert_edge_via_store(source, target, predicate, weight, now, ws, asserted_by, tenant)
     maybe_feed_triple_store(source, predicate, target, ws)
 
     :ok
@@ -233,7 +237,10 @@ defmodule OptimalEngine.Graph do
   """
   @spec create_edges_for_context(map() | struct()) :: :ok
   def create_edges_for_context(context) do
-    write_edges(structural_edges(context), context_workspace(context))
+    write_edges(structural_edges(context), context_workspace(context),
+      tenant: context_tenant(context)
+    )
+
     :ok
   end
 
@@ -250,8 +257,9 @@ defmodule OptimalEngine.Graph do
 
   @doc """
   The edges a context implies, as parameter lists for `edge_insert_sql/0`:
-  `[source, target, relation, weight, valid_from, workspace_id, asserted_by]`,
-  asserted by nobody in particular (`nil`).
+  `[source, target, relation, weight, valid_from, workspace_id, asserted_by, tenant_id]`,
+  asserted by nobody in particular (`nil`), for the tenant the context's writer
+  named (`nil` for the workspace's).
 
   Entities are `mentioned_in` the context and `co_occurs` with each other, the
   context `lives_in` its node, has a `cross_ref` to every other destination,
@@ -261,10 +269,11 @@ defmodule OptimalEngine.Graph do
   @spec context_edges(map() | struct()) :: [[term()]]
   def context_edges(context) do
     ws = context_workspace(context)
+    tenant = context_tenant(context)
     now = DateTime.to_iso8601(DateTime.utc_now())
 
     for {source, target, relation, weight} <- structural_edges(context),
-        do: [source, target, relation, weight, now, ws, nil]
+        do: [source, target, relation, weight, now, ws, nil, tenant]
   end
 
   # A context's structural edges, `{source, target, relation, weight}`:
@@ -612,14 +621,16 @@ defmodule OptimalEngine.Graph do
   Additive: failures are logged and swallowed, never raised.
 
   Options:
-  - `:workspace_id` - workspace to attribute the edges to (default: "default");
-    the edges take that workspace's tenant
+  - `:workspace_id` - workspace to attribute the edges to (default: "default")
+  - `:tenant_id` - the tenant the edges are written for (default: the workspace's
+    tenant)
   """
   @spec create_claim_edges(String.t(), [String.t()], keyword()) :: :ok
   def create_claim_edges(claim_id, entities, opts \\ [])
       when is_binary(claim_id) and is_list(entities) do
     write_edges(claim_edges(claim_id, entities), Keyword.get(opts, :workspace_id, "default"),
-      feed: false
+      feed: false,
+      tenant: Keyword.get(opts, :tenant_id)
     )
 
     :ok
@@ -641,7 +652,10 @@ defmodule OptimalEngine.Graph do
   """
   @spec create_semantic_edges_for_context(map() | struct()) :: :ok
   def create_semantic_edges_for_context(context) do
-    write_edges(semantic_edges(context), context_workspace(context))
+    write_edges(semantic_edges(context), context_workspace(context),
+      tenant: context_tenant(context)
+    )
+
     :ok
   end
 
@@ -669,13 +683,15 @@ defmodule OptimalEngine.Graph do
 
   # Writes edges through the Store, and unless `feed: false` into the default
   # triple store as well; returns how many Store writes failed. An edge that
-  # already exists is not a failure (the insert keeps it).
-  defp write_edges(edges, ws, opts \\ []) do
+  # already exists is not a failure (the insert keeps it). `tenant:` is the
+  # tenant the edges are written for (default: the workspace's).
+  defp write_edges(edges, ws, opts) do
     now = DateTime.to_iso8601(DateTime.utc_now())
     feed? = Keyword.get(opts, :feed, true)
+    tenant = Keyword.get(opts, :tenant)
 
     Enum.count(edges, fn {source, target, relation, weight} ->
-      result = insert_edge_via_store(source, target, relation, weight, now, ws)
+      result = insert_edge_via_store(source, target, relation, weight, now, ws, nil, tenant)
       if feed?, do: maybe_feed_triple_store(source, relation, target, ws)
       result != :ok
     end)
@@ -794,7 +810,7 @@ defmodule OptimalEngine.Graph do
   end
 
   defp backfill_select(:contexts, ws) do
-    {"SELECT id, node, entities, routed_to, supersedes, workspace_id FROM contexts" <>
+    {"SELECT id, node, entities, routed_to, supersedes, workspace_id, tenant_id FROM contexts" <>
        if(ws, do: " WHERE workspace_id = ?1", else: ""), List.wrap(ws)}
   end
 
@@ -802,7 +818,7 @@ defmodule OptimalEngine.Graph do
   # from that context.
   defp backfill_select(:claims, ws) do
     {"""
-     SELECT cl.id, c.entities, cl.workspace_id
+     SELECT cl.id, c.entities, cl.workspace_id, cl.tenant_id
      FROM claims cl
      JOIN contexts c ON c.id = cl.signal_id
      WHERE cl.signal_id IS NOT NULL
@@ -815,21 +831,27 @@ defmodule OptimalEngine.Graph do
   # OptimalEngine.Graph.Backfill, the paged backfill the maintenance jobs run,
   # writes through it too.
   @spec backfill_row(:contexts | :claims, list()) :: non_neg_integer()
-  def backfill_row(:contexts, [id, node, entities, routed_to, supersedes, ws]) do
+  def backfill_row(:contexts, [id, node, entities, routed_to, supersedes, ws, tenant]) do
     context = %{
       id: id,
       node: node,
       entities: decode_json_list(entities),
       routed_to: decode_json_list(routed_to),
       supersedes: supersedes,
-      workspace_id: ws || "default"
+      workspace_id: ws || "default",
+      tenant_id: tenant
     }
 
-    write_edges(structural_edges(context) ++ semantic_edges(context), context.workspace_id)
+    write_edges(structural_edges(context) ++ semantic_edges(context), context.workspace_id,
+      tenant: context_tenant(context)
+    )
   end
 
-  def backfill_row(:claims, [claim_id, entities, ws]) do
-    write_edges(claim_edges(claim_id, decode_json_list(entities)), ws || "default", feed: false)
+  def backfill_row(:claims, [claim_id, entities, ws, tenant]) do
+    write_edges(claim_edges(claim_id, decode_json_list(entities)), ws || "default",
+      feed: false,
+      tenant: tenant
+    )
   end
 
   @doc """
@@ -996,16 +1018,25 @@ defmodule OptimalEngine.Graph do
     {sql, params} =
       case ws do
         nil ->
-          {"SELECT id, node, entities, routed_to, supersedes, workspace_id FROM contexts", []}
+          {"SELECT id, node, entities, routed_to, supersedes, workspace_id, tenant_id FROM contexts",
+           []}
 
         ws ->
-          {"SELECT id, node, entities, routed_to, supersedes, workspace_id FROM contexts WHERE workspace_id = ?1",
+          {"SELECT id, node, entities, routed_to, supersedes, workspace_id, tenant_id FROM contexts WHERE workspace_id = ?1",
            [ws]}
       end
 
     case Store.raw_query(sql, params) do
       {:ok, rows} ->
-        Enum.each(rows, fn [id, node, entities_json, routed_to_json, supersedes, workspace_id] ->
+        Enum.each(rows, fn [
+                             id,
+                             node,
+                             entities_json,
+                             routed_to_json,
+                             supersedes,
+                             workspace_id,
+                             tenant
+                           ] ->
           entities = decode_json_list(entities_json)
           routed_to = decode_json_list(routed_to_json)
 
@@ -1015,7 +1046,8 @@ defmodule OptimalEngine.Graph do
             entities: entities,
             routed_to: routed_to,
             supersedes: supersedes,
-            workspace_id: workspace_id
+            workspace_id: workspace_id,
+            tenant_id: tenant
           }
 
           create_edges_for_context(context)
@@ -1051,7 +1083,8 @@ defmodule OptimalEngine.Graph do
   INSERT INTO graph_edges
     (source_id, target_id, relation, weight, valid_from, workspace_id, tenant_id, asserted_by)
   VALUES (?1, ?2, ?3, ?4, ?5, ?6,
-          COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?6),
+          COALESCE(?8,
+                   (SELECT w.tenant_id FROM workspaces w WHERE w.id = ?6),
                    (SELECT t.id FROM tenants t WHERE t.id = substr(?6, 1, instr(?6, ':') - 1)),
                    'default'),
           ?7)
@@ -1063,15 +1096,29 @@ defmodule OptimalEngine.Graph do
 
   @doc """
   The statement that writes one edge, with the parameters
-  `[source, target, relation, weight, valid_from, workspace_id, asserted_by]`:
+  `[source, target, relation, weight, valid_from, workspace_id, asserted_by, tenant_id]`:
   a duplicate keeps its row, and loses its asserter when another asserts it.
+  The tenant is the one the writer names (`nil`: the tenant of the workspace,
+  which for a workspace that is not registered is the one its `"<tenant>:"`
+  prefix names, else `"default"`).
   """
   @spec edge_insert_sql() :: String.t()
   def edge_insert_sql, do: @edge_insert_sql
 
   # Insert via Store GenServer (for use outside of Store callbacks)
-  defp insert_edge_via_store(source, target, relation, weight, now, ws, asserted_by \\ nil) do
-    case Store.raw_query(@edge_insert_sql, [source, target, relation, weight, now, ws, asserted_by]) do
+  defp insert_edge_via_store(
+         source,
+         target,
+         relation,
+         weight,
+         now,
+         ws,
+         asserted_by \\ nil,
+         tenant \\ nil
+       ) do
+    params = [source, target, relation, weight, now, ws, asserted_by, tenant]
+
+    case Store.raw_query(@edge_insert_sql, params) do
       {:ok, _} ->
         :ok
 
@@ -1096,6 +1143,14 @@ defmodule OptimalEngine.Graph do
       {:error, reason} ->
         Logger.debug("[Graph] Edge direct insert skipped: #{inspect(reason)}")
         :ok
+    end
+  end
+
+  # The tenant a context's writer named, if any.
+  defp context_tenant(context) do
+    case struct_or_map_get(context, :tenant_id) do
+      tenant when is_binary(tenant) and tenant != "" -> tenant
+      _ -> nil
     end
   end
 

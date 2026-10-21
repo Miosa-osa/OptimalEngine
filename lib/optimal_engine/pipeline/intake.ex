@@ -106,6 +106,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   alias OptimalEngine.Signal
   alias OptimalEngine.Signal.{ModeDetector, TextHead, TimeLimit}
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.ContextTenant
   alias OptimalEngine.Routing
   alias OptimalEngine.URI
 
@@ -286,6 +287,8 @@ defmodule OptimalEngine.Pipeline.Intake do
          {:ok, signal} <- TimeLimit.with_budget(fn -> classify_step(raw_text, scope, opts) end),
          {:ok, signal} <- quality_gate(signal, source_package, scope),
          {:ok, signal, routed_to} <- route_step(signal, opts),
+         # A row the writer will refuse is found before a file is written for it.
+         :ok <- ContextTenant.check(signal.id, scope.workspace_id, stated_tenant(scope)),
          {:ok, primary_path} <- write_step(signal, scope, opts),
          {:ok, cross_paths} <- cross_ref_step(signal, routed_to, primary_path, scope, opts),
          {:ok, context} <-
@@ -713,6 +716,10 @@ defmodule OptimalEngine.Pipeline.Intake do
       modified_at: signal.modified_at,
       routed_to: signal.routed_to || [],
       workspace_id: workspace_id,
+      # The tenant that ingests owns the row, also under a bare workspace id
+      # that another tenant may use too. A caller that names no tenant leaves
+      # it to the workspace.
+      tenant_id: stated_tenant(scope),
       # The document names its source package and carries its labels from the
       # first write: nothing else on the row says what class it is, and
       # replication reads it before any ledger entry exists. A repaired
@@ -760,6 +767,7 @@ defmodule OptimalEngine.Pipeline.Intake do
       if File.exists?(cross_path) do
         Indexer.index_file(cross_path,
           workspace_id: scope.workspace_id,
+          tenant_id: stated_tenant(scope),
           metadata: Address.copy_metadata(signal.id, metadata)
         )
       end
@@ -905,7 +913,10 @@ defmodule OptimalEngine.Pipeline.Intake do
     entities = signal.entities || []
 
     if entities != [] do
-      Graph.create_claim_edges(claim_id, entities, workspace_id: scope.workspace_id)
+      Graph.create_claim_edges(claim_id, entities,
+        workspace_id: scope.workspace_id,
+        tenant_id: stated_tenant(scope)
+      )
     end
 
     :ok
@@ -1079,6 +1090,10 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   defp write_files?(opts), do: Keyword.get(opts, :write_files, true) != false
 
+  # The tenant the caller named; the default the scope falls back to is not one.
+  defp stated_tenant(%ScopeEnvelope{unresolved: unresolved, tenant_id: tenant_id}),
+    do: if(:tenant_id in unresolved, do: nil, else: tenant_id)
+
   defp occurred_at(opts) do
     case Keyword.get(opts, :occurred_at) do
       %DateTime{} = at -> at
@@ -1172,7 +1187,8 @@ defmodule OptimalEngine.Pipeline.Intake do
     Graph.create_semantic_edges_for_context(%{
       id: context.id,
       entities: signal.entities || [],
-      workspace_id: scope.workspace_id
+      workspace_id: scope.workspace_id,
+      tenant_id: context.tenant_id
     })
   rescue
     error ->
