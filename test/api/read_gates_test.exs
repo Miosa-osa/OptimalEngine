@@ -181,12 +181,12 @@ defmodule OptimalEngine.API.ReadGatesTest do
   end
 
   describe "a list" do
-    test "a memory list shows what the grants cover and says what it left out", ctx do
+    test "a memory list shows what the grants cover and says nothing of the rest", ctx do
       bare = get_json("/api/memory?" <> ws(ctx) <> "&limit=100", mint(ctx, %{}))
 
       assert ids(bare["memories"]) == [ctx.plain.id]
-      assert bare["withheld"] == 4
-      assert bare["complete"] == false
+      refute Map.has_key?(bare, "withheld")
+      refute Map.has_key?(bare, "complete")
 
       restricted =
         get_json(
@@ -199,7 +199,7 @@ defmodule OptimalEngine.API.ReadGatesTest do
 
       operator = get_json("/api/memory?" <> ws(ctx) <> "&limit=100", nil)
       assert length(operator["memories"]) == 5
-      assert operator["withheld"] == 0 and operator["complete"] == true
+      refute Map.has_key?(operator, "withheld")
     end
 
     test "a key granted *, and one granted exactly the recommended default", ctx do
@@ -209,7 +209,7 @@ defmodule OptimalEngine.API.ReadGatesTest do
           mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
         )
 
-      assert length(root["memories"]) == 5 and root["complete"] == true
+      assert length(root["memories"]) == 5
 
       machine =
         mint(ctx, %{
@@ -240,7 +240,7 @@ defmodule OptimalEngine.API.ReadGatesTest do
 
       list = get_json("/api/memory?" <> ws(ctx) <> "&limit=100", machine)
       assert Enum.sort(ids(list["memories"])) == Enum.sort([ctx.confidential.id, ctx.plain.id])
-      assert list["withheld"] == 3 and list["complete"] == false
+      refute Map.has_key?(list, "withheld")
     end
   end
 
@@ -313,7 +313,8 @@ defmodule OptimalEngine.API.ReadGatesTest do
       bare = get_json(query, mint(ctx, %{}))
       refute ctx.secret_doc.id in ids(bare["results"])
       assert bare["results"] == []
-      assert bare["withheld"] >= 1 and bare["complete"] == false
+      refute Map.has_key?(bare, "withheld")
+      refute Map.has_key?(bare, "complete")
     end
 
     test "grep leaves out the chunks of what the key may not see", ctx do
@@ -324,7 +325,366 @@ defmodule OptimalEngine.API.ReadGatesTest do
 
       bare = get_json(query, mint(ctx, %{}))
       assert bare["results"] == []
-      assert bare["withheld"] >= 1 and bare["complete"] == false
+      refute Map.has_key?(bare, "withheld")
+      refute Map.has_key?(bare, "complete")
+    end
+  end
+
+  # A page of a list that is cut down by the key's grants is filled from what
+  # the key may see. Cutting a page that was read first leaves a short page,
+  # and one that is empty while more is there to read, whenever restricted rows
+  # come ahead of the visible ones.
+  describe "a page is filled from what the key may see" do
+    @hidden_notes [
+      "Board minute on the Zephyrcorp offer, first reading",
+      "Board minute on the Zephyrcorp offer, second reading",
+      "Counsel memo about the escrow terms",
+      "Diligence list for the target's customers",
+      "Financing term sheet from the lead bank",
+      "Retention plan for the target's founders",
+      "Integration budget for the first year",
+      "Fairness opinion draft from the advisers"
+    ]
+
+    test "a memory list does not stop at the restricted memories ahead of the visible ones",
+         ctx do
+      for note <- @hidden_notes, do: remember(ctx.ws, note, ["restricted"])
+      bare = mint(ctx, %{})
+
+      page = get_json("/api/memory?" <> ws(ctx) <> "&limit=1", bare)
+
+      assert ids(page["memories"]) == [ctx.plain.id]
+      assert page["pagination"]["has_more"] == false
+      # The total counts what the key may see, not the workspace.
+      assert page["pagination"]["total"] == 1
+    end
+
+    test "an offset counts the memories the key may see", ctx do
+      extra = remember(ctx.ws, "Standup is at nine on Monday", []).memory
+      for note <- @hidden_notes, do: remember(ctx.ws, note, ["restricted"])
+      bare = mint(ctx, %{})
+
+      first = get_json("/api/memory?" <> ws(ctx) <> "&limit=1&offset=0", bare)
+      second = get_json("/api/memory?" <> ws(ctx) <> "&limit=1&offset=1", bare)
+      beyond = get_json("/api/memory?" <> ws(ctx) <> "&limit=1&offset=2", bare)
+
+      assert length(first["memories"]) == 1 and first["pagination"]["has_more"] == true
+      assert length(second["memories"]) == 1 and second["pagination"]["has_more"] == false
+      assert beyond["memories"] == [] and beyond["pagination"]["has_more"] == false
+
+      assert Enum.sort(ids(first["memories"]) ++ ids(second["memories"])) ==
+               Enum.sort([ctx.plain.id, extra.id])
+    end
+
+    test "a key that reads everything is paged by the list, as before", ctx do
+      root = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      page = get_json("/api/memory?" <> ws(ctx) <> "&limit=2", root)
+
+      assert length(page["memories"]) == 2
+      assert page["pagination"]["total"] == 5
+      assert page["pagination"]["has_more"] == true
+    end
+
+    test "memory search does not stop at the restricted memories that rank first", ctx do
+      visible =
+        remember(
+          ctx.ws,
+          "Harborview parking is closed on Friday for repaving, and the shuttle runs from the " <>
+            "north entrance instead of the south entrance every thirty minutes until noon",
+          []
+        ).memory
+
+      hidden =
+        for text <- [
+              "Harborview Harborview Harborview escrow account, Harborview wire",
+              "Harborview Harborview Harborview closing statement, Harborview funds"
+            ],
+            do: remember(ctx.ws, text, ["restricted"]).memory
+
+      query =
+        "/api/search?" <>
+          URI.encode_query(%{
+            "q" => "Harborview",
+            "type" => "memory",
+            "workspace" => ctx.ws,
+            "limit" => "1"
+          })
+
+      page = get_json(query, mint(ctx, %{}))
+
+      assert [result] = page["results"]
+      assert result["id"] in [visible.id, ctx.plain.id]
+      refute result["id"] in [ctx.secret.id | Enum.map(hidden, & &1.id)]
+    end
+
+    test "grep does not stop at the restricted chunks that rank first", ctx do
+      for text <- [
+            "Zephyrcorp Zephyrcorp Zephyrcorp escrow terms, signed by the Zephyrcorp board",
+            "Zephyrcorp Zephyrcorp Zephyrcorp closing checklist, owned by the Zephyrcorp counsel"
+          ] do
+        {:ok, _} =
+          Intake.process(text,
+            workspace_id: ctx.ws,
+            node: "operator",
+            security_labels: ["restricted"],
+            write_files: false
+          )
+      end
+
+      {:ok, _} =
+        Intake.process(
+          "A neighbor, Zephyrcorp, rents the second floor; kitchen cleanup rotates weekly " <>
+            "between all tenants including engineering and facilities",
+          workspace_id: ctx.ws,
+          node: "operator",
+          write_files: false
+        )
+
+      query =
+        "/api/grep?" <>
+          URI.encode_query(%{"q" => "Zephyrcorp", "workspace" => ctx.ws, "limit" => "1"})
+
+      page = get_json(query, mint(ctx, %{}))
+      shown = Jason.encode!(page["results"])
+
+      assert length(page["results"]) == 1
+      assert shown =~ "neighbor"
+      refute shown =~ "escrow"
+      refute shown =~ "41 million"
+    end
+  end
+
+  # A signal the key may read still embeds the clusters it belongs to and the
+  # wiki pages that cite it, and those are rows of their own: a cluster is named
+  # for its members and a page is written from everything it cites, so either
+  # can carry a restricted document's theme or slug.
+  describe "what a signal embeds" do
+    test "a wiki page that cites it is listed only when the key may read the page", ctx do
+      doc_chunk = chunk(ctx.ws, "#{ctx.plain_doc.id}:doc", ctx.plain_doc.id, "Docs ship Friday")
+
+      wiki(ctx.ws, "pitch-#{ctx.n}", "Notes on the docs release", [doc_chunk])
+      # Cites the signal and a restricted chunk: the page is restricted.
+      wiki(ctx.ws, "offer-#{ctx.n}", "Offer notes", [doc_chunk, "chk-secret-#{ctx.n}"])
+
+      slugs = fn token ->
+        "/api/signals/#{ctx.plain_doc.id}?"
+        |> Kernel.<>(ws(ctx))
+        |> get_json(token)
+        |> Map.fetch!("citations")
+        |> Enum.map(& &1["wiki_slug"])
+        |> Enum.sort()
+      end
+
+      both = Enum.sort(["pitch-#{ctx.n}", "offer-#{ctx.n}"])
+
+      assert slugs.(mint(ctx, %{})) == ["pitch-#{ctx.n}"]
+      assert slugs.(mint(ctx, @machine)) == ["pitch-#{ctx.n}"]
+      assert slugs.(mint(ctx, %{"allowed_security_labels" => ["restricted"]})) == both
+      assert slugs.(nil) == both
+    end
+
+    test "a cluster is listed only when the key may read all of its members", ctx do
+      plain_chunk = chunk(ctx.ws, "#{ctx.plain_doc.id}:doc", ctx.plain_doc.id, "Docs ship Friday")
+
+      secret_chunk =
+        chunk(ctx.ws, "#{ctx.secret_doc.id}:doc", ctx.secret_doc.id, "Zephyrcorp offer")
+
+      open = cluster("cluster-open-#{ctx.n}", "Docs and changelog", [plain_chunk])
+
+      mixed =
+        cluster("cluster-mixed-#{ctx.n}", "Zephyrcorp offer timing", [plain_chunk, secret_chunk])
+
+      clusters = fn token ->
+        "/api/signals/#{ctx.plain_doc.id}?"
+        |> Kernel.<>(ws(ctx))
+        |> get_json(token)
+        |> Map.fetch!("clusters")
+        |> Enum.map(& &1["id"])
+        |> Enum.sort()
+      end
+
+      assert clusters.(mint(ctx, %{})) == [open]
+
+      assert clusters.(mint(ctx, %{"allowed_security_labels" => ["restricted"]})) ==
+               Enum.sort([open, mixed])
+
+      assert clusters.(nil) == Enum.sort([open, mixed])
+    end
+
+    test "the theme of a hidden cluster is not in the answer", ctx do
+      plain_chunk = chunk(ctx.ws, "#{ctx.plain_doc.id}:doc", ctx.plain_doc.id, "Docs ship Friday")
+
+      secret_chunk =
+        chunk(ctx.ws, "#{ctx.secret_doc.id}:doc", ctx.secret_doc.id, "Zephyrcorp offer")
+
+      cluster("cluster-mixed-#{ctx.n}", "Zephyrcorp offer timing", [plain_chunk, secret_chunk])
+
+      conn = get_as("/api/signals/#{ctx.plain_doc.id}?" <> ws(ctx), mint(ctx, %{}))
+
+      assert conn.status == 200
+      refute conn.resp_body =~ "Zephyrcorp"
+    end
+  end
+
+  # The node routes list the contexts of a node by title and path, and the
+  # graph edges that touch them: a restricted document's title is its content.
+  describe "the node routes" do
+    defp node_contexts(ctx), do: [ctx.plain_doc, ctx.confidential_doc, ctx.secret_doc]
+
+    defp in_node(ctx, listed),
+      do: Enum.filter(listed, &(&1 in Enum.map(node_contexts(ctx), fn c -> c.id end)))
+
+    test "a node lists only the contexts the key may read", ctx do
+      path = "/api/node/operator?" <> ws(ctx)
+
+      read = fn token ->
+        path
+        |> get_json(token)
+        |> Map.fetch!("contexts")
+        |> ids()
+        |> then(&in_node(ctx, &1))
+        |> Enum.sort()
+      end
+
+      assert read.(mint(ctx, %{})) == [ctx.plain_doc.id]
+      assert read.(mint(ctx, @machine)) == Enum.sort([ctx.plain_doc.id, ctx.confidential_doc.id])
+
+      assert read.(mint(ctx, %{"allowed_security_labels" => ["restricted", "confidential"]})) ==
+               Enum.sort(Enum.map(node_contexts(ctx), & &1.id))
+
+      assert read.(nil) == Enum.sort(Enum.map(node_contexts(ctx), & &1.id))
+    end
+
+    test "a node lists only the edges whose contexts the key may read", ctx do
+      open = edge(ctx, ctx.plain_doc, ctx.confidential_doc)
+      to_secret = edge(ctx, ctx.plain_doc, ctx.secret_doc)
+      inner = edge(ctx, ctx.confidential_doc, ctx.secret_doc)
+      path = "/api/node/operator?" <> ws(ctx)
+
+      # An entity is no labelled row: an edge from a context to the entity it
+      # names follows the context.
+      named = entity_edge(ctx, ctx.plain_doc, "Northwind account")
+      named_confidential = entity_edge(ctx, ctx.confidential_doc, "Brightwater contract")
+      named_secret = entity_edge(ctx, ctx.secret_doc, "Zephyrcorp board")
+      all = [open, to_secret, inner, named, named_confidential, named_secret]
+
+      read = fn token ->
+        path
+        |> get_json(token)
+        |> Map.fetch!("edges")
+        |> Enum.map(&{&1["source"], &1["target"]})
+        |> Enum.filter(&(&1 in all))
+        |> Enum.sort()
+      end
+
+      assert read.(mint(ctx, %{})) == [named]
+      assert read.(mint(ctx, @machine)) == Enum.sort([open, named, named_confidential])
+
+      assert read.(mint(ctx, %{"allowed_security_labels" => ["restricted", "confidential"]})) ==
+               Enum.sort(all)
+
+      assert read.(nil) == Enum.sort(all)
+    end
+
+    test "the file tree of a node lists only the contexts the key may read", ctx do
+      path = "/api/optimal/nodes/operator/files?" <> ws(ctx)
+      address = fn context -> context.uri || context.id end
+
+      read = fn token ->
+        path
+        |> get_json(token)
+        |> Map.fetch!("files")
+        |> Enum.map(& &1["path"])
+        |> Enum.filter(&(&1 in Enum.map(node_contexts(ctx), address)))
+        |> Enum.sort()
+      end
+
+      assert read.(mint(ctx, %{})) == [address.(ctx.plain_doc)]
+
+      assert read.(mint(ctx, @machine)) ==
+               Enum.sort([address.(ctx.plain_doc), address.(ctx.confidential_doc)])
+
+      assert read.(nil) == Enum.sort(Enum.map(node_contexts(ctx), address))
+    end
+
+    test "the title of a hidden context is not in the answer", ctx do
+      for path <- ["/api/node/operator?", "/api/optimal/nodes/operator/files?"] do
+        conn = get_as(path <> ws(ctx), mint(ctx, %{}))
+
+        assert conn.status == 200
+        refute conn.resp_body =~ "Zephyrcorp", path
+        refute conn.resp_body =~ "Brightwater", path
+      end
+    end
+  end
+
+  # A list that said how many rows it left out would tell a key without the
+  # label that a restricted row matches its query: a probe for a name, an
+  # amount or a project. These routes answer a probe for what the key may not
+  # see exactly as they answer one for nothing. (The exports, the conflict list
+  # and the ledger dump rows rather than answer a query, and keep their counts.)
+  describe "what a list says of what it leaves out" do
+    test "search answers a probe for a hidden document as it answers one for nothing", ctx do
+      bare = mint(ctx, %{})
+
+      for params <- [%{}, %{"type" => "memory"}] do
+        probe = fn q ->
+          get_json(
+            "/api/search?" <>
+              URI.encode_query(Map.merge(params, %{"q" => q, "workspace" => ctx.ws})),
+            bare
+          )
+        end
+
+        hidden = Map.delete(probe.(if params == %{}, do: "Zephyrcorp", else: "Harborview"), "query")
+        nothing = Map.delete(probe.("Quuxlesswordthatmatchesnothing"), "query")
+
+        assert hidden == nothing, inspect(params)
+      end
+    end
+
+    test "grep answers a probe for a hidden chunk as it answers one for nothing", ctx do
+      bare = mint(ctx, %{})
+
+      probe = fn q ->
+        get_json("/api/grep?" <> URI.encode_query(%{"q" => q, "workspace" => ctx.ws}), bare)
+      end
+
+      hidden = Map.delete(probe.("Zephyrcorp"), "query")
+      nothing = Map.delete(probe.("Quuxlesswordthatmatchesnothing"), "query")
+
+      assert hidden == nothing
+    end
+
+    test "a memory list with a query answers a probe for a hidden memory as one for nothing",
+         ctx do
+      bare = mint(ctx, %{})
+
+      probe = fn q ->
+        get_json("/api/memory?" <> URI.encode_query(%{"q" => q, "workspace" => ctx.ws}), bare)
+      end
+
+      hidden = Map.delete(probe.("Harborview"), "query")
+      nothing = Map.delete(probe.("Quuxlesswordthatmatchesnothing"), "query")
+
+      assert hidden == nothing
+      assert hidden["memories"] == []
+    end
+
+    test "the operator and a key granted * get the same shape, with nothing to say", ctx do
+      root = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      for token <- [nil, root],
+          path <- [
+            "/api/memory?" <> ws(ctx),
+            "/api/search?" <> URI.encode_query(%{"q" => "Zephyrcorp", "workspace" => ctx.ws}),
+            "/api/grep?" <> URI.encode_query(%{"q" => "Zephyrcorp", "workspace" => ctx.ws})
+          ] do
+        body = get_json(path, token)
+        refute Map.has_key?(body, "withheld"), path
+        refute Map.has_key?(body, "complete"), path
+      end
     end
   end
 
@@ -395,6 +755,44 @@ defmodule OptimalEngine.API.ReadGatesTest do
         "INSERT INTO chunks (id, tenant_id, signal_id, scale, text, workspace_id) VALUES (?1, 'default', ?2, 'document', ?3, ?4)",
         [id, context_id, text, ws]
       )
+
+    id
+  end
+
+  defp entity_edge(ctx, from, entity) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO graph_edges (tenant_id, workspace_id, source_id, target_id, relation, weight) VALUES ('default', ?1, ?2, ?3, 'mentions', 1.0)",
+        [ctx.ws, from.id, entity]
+      )
+
+    {from.id, entity}
+  end
+
+  defp edge(ctx, from, to) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO graph_edges (tenant_id, workspace_id, source_id, target_id, relation, weight) VALUES ('default', ?1, ?2, ?3, 'links_to', 1.0)",
+        [ctx.ws, from.id, to.id]
+      )
+
+    {from.id, to.id}
+  end
+
+  defp cluster(id, theme, chunk_ids) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO clusters (id, tenant_id, theme, intent_dominant, member_count) VALUES (?1, 'default', ?2, 'inform', ?3)",
+        [id, theme, length(chunk_ids)]
+      )
+
+    for chunk_id <- chunk_ids do
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO cluster_members (tenant_id, cluster_id, chunk_id, weight) VALUES ('default', ?1, ?2, 0.9)",
+          [id, chunk_id]
+        )
+    end
 
     id
   end

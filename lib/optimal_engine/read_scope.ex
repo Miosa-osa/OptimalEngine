@@ -56,6 +56,88 @@ defmodule OptimalEngine.ReadScope do
   def grants(%__MODULE__{labels: labels, partitions: partitions}),
     do: SecurityLabels.grants(labels, partitions)
 
+  # Rows a memory list reads in all to fill one page, and the batch it reads
+  # them in.
+  @scan_budget 10_000
+  @scan_batch 200
+
+  @doc """
+  True when the reader's grants cut something: a keyed reader without `"*"` for
+  both labels and partitions. The operator (no scope) and a key granted `"*"`
+  see every row the grants could hide, so a page of theirs needs no refilling.
+  """
+  @spec filtering?(t() | nil) :: boolean()
+  def filtering?(nil), do: false
+  def filtering?(%__MODULE__{} = scope), do: not unfiltered?(scope)
+
+  @doc """
+  The first `need` items of a list the reader may see, for a list that is read
+  a page at a time: cutting a page that was read first leaves it short, and
+  empty when restricted rows come ahead of the visible ones.
+
+  `read.(offset, count)` returns the raw items from `offset` in the order of the
+  list (fewer than `count` when the list ends), and `keep.(raw)` those of them
+  the reader may see. The list is read `:batch` items at a time (default 200)
+  until `need` are kept, the list ends, or `:budget` raw items (default 10,000)
+  have been read. The result is in the order of the list and may hold more than
+  `need`; the offset of a page counts these items, not the raw ones.
+  """
+  @spec scan(
+          non_neg_integer(),
+          (non_neg_integer(), pos_integer() -> [term()]),
+          ([term()] -> [term()]),
+          keyword()
+        ) :: [term()]
+  def scan(need, read, keep, opts \\ []) do
+    batch = Keyword.get(opts, :batch, @scan_batch)
+    budget = Keyword.get(opts, :budget, @scan_budget)
+    do_scan(need, read, keep, batch, budget, 0, [])
+  end
+
+  defp do_scan(need, read, keep, batch, budget, offset, kept) do
+    raw = read.(offset, batch)
+    kept = kept ++ keep.(raw)
+
+    cond do
+      length(kept) >= need -> kept
+      length(raw) < batch -> kept
+      offset + batch >= budget -> kept
+      true -> do_scan(need, read, keep, batch, budget, offset + batch, kept)
+    end
+  end
+
+  @doc """
+  Like `scan/4`, for a ranked result that can only be asked for from the top
+  (a search, a grep): `read.(window)` returns the first `window` results as
+  `{:ok, raw}` or `{:error, reason}`, and `keep.(raw)` those the reader may see.
+  The window starts at `first` (never below `need`) and doubles until `need`
+  results are kept, the source returns fewer than it was asked for, or the
+  window reaches `ceiling`. Returns `{:ok, kept}` or the source's error.
+  """
+  @spec widen(
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          (pos_integer() -> {:ok, [term()]} | {:error, term()}),
+          ([term()] -> [term()])
+        ) :: {:ok, [term()]} | {:error, term()}
+  def widen(need, first, ceiling, read, keep) do
+    do_widen(need, ceiling, read, keep, first |> max(need) |> min(ceiling))
+  end
+
+  defp do_widen(need, ceiling, read, keep, window) do
+    with {:ok, raw} <- read.(window) do
+      kept = keep.(raw)
+
+      cond do
+        length(kept) >= need -> {:ok, kept}
+        length(raw) < window -> {:ok, kept}
+        window >= ceiling -> {:ok, kept}
+        true -> do_widen(need, ceiling, read, keep, min(window * 2, ceiling))
+      end
+    end
+  end
+
   @doc """
   The items of `table` in `workspace_id` the reader may see, and how many it
   may not: those whose id (`id_of`) carries only what the grants cover, and

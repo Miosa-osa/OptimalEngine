@@ -25,6 +25,7 @@ defmodule OptimalEngine.API.SecurityFoundationsTest do
   alias OptimalEngine.Identity.{ACL, Principal}
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
+  alias OptimalEngine.TestSupport.KeyGrantsBackfill
 
   @opts Router.init([])
 
@@ -323,8 +324,13 @@ defmodule OptimalEngine.API.SecurityFoundationsTest do
       assert attrs.expires_at == parent.expires_at
 
       # Operation scopes and permissions are inherited when omitted; label and
-      # partition grants are not: a key minted without them holds none.
-      assert attrs.metadata == %{"permissions" => ["memory:read"]}
+      # partition grants are not: a key minted without them holds none, written
+      # as empty lists so that the key carries both fields.
+      assert attrs.metadata == %{
+               "permissions" => ["memory:read"],
+               "allowed_security_labels" => [],
+               "allowed_partitions" => []
+             }
 
       assert {:ok,
               %{metadata: %{"allowed_partitions" => ["team-a"], "allowed_security_labels" => []}}} =
@@ -356,6 +362,39 @@ defmodule OptimalEngine.API.SecurityFoundationsTest do
       end
     end
 
+    test "a key minted without grants holds explicit empty ones, so the backfill never touches it" do
+      none = %{"allowed_security_labels" => [], "allowed_partitions" => []}
+
+      assert {:ok, %{metadata: ^none}} =
+               KeyIssuance.attrs(nil, "default", %{"name" => "plain", "scopes" => ["read"]})
+
+      # One field asked for: the other is still written, empty.
+      assert {:ok,
+              %{metadata: %{"allowed_security_labels" => ["public"], "allowed_partitions" => []}}} =
+               KeyIssuance.attrs(nil, "default", %{
+                 "name" => "labelled",
+                 "scopes" => ["read"],
+                 "allowed_security_labels" => ["public"]
+               })
+
+      stored = Jason.encode!(none)
+      row = %{id: "plain", scopes: ~s(["read"]), revoked_at: nil, metadata: stored}
+      assert KeyGrantsBackfill.run([row]).metadata["plain"] == stored
+    end
+
+    test "a key minted over HTTP without grants holds explicit empty ones" do
+      {minter, _id} = mint!(%{name: "minter", scopes: ["*"], workspace_scope: ["*"]})
+
+      with_auth_required(fn ->
+        conn =
+          request(:post, "/api/auth/keys", minter, %{"name" => "plain", "scopes" => ["read"]})
+
+        assert conn.status == 201
+        assert {:ok, key} = ApiKey.verify(json_body(conn)["key"])
+        assert key.metadata == %{"allowed_security_labels" => [], "allowed_partitions" => []}
+      end)
+    end
+
     test "a key minted without label or partition grants never inherits the minter's wildcard",
          ctx do
       bootstrap = %ApiKey{
@@ -377,8 +416,8 @@ defmodule OptimalEngine.API.SecurityFoundationsTest do
                  "workspace_scope" => [ctx.alpha]
                })
 
-      refute Map.has_key?(attrs.metadata, "allowed_security_labels")
-      refute Map.has_key?(attrs.metadata, "allowed_partitions")
+      assert attrs.metadata["allowed_security_labels"] == []
+      assert attrs.metadata["allowed_partitions"] == []
 
       # The minter may give what it holds, a wildcard included, when it is asked to.
       assert {:ok, %{metadata: %{"allowed_security_labels" => ["*"]}}} =

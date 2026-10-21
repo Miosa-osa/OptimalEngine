@@ -231,9 +231,11 @@ A minter can only give grants it holds (a minter that holds `"*"` can give any).
 For any other key, give the labels it should read.
 The recommended default for a machine key is `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`: it reads rows labelled public, internal or confidential and rows with no label, and does not read restricted rows, rows with a label of their own (`private`, a team name) or partitioned rows.
 Migration 85 gives that default, once, to every live key minted before grants existed (a key whose metadata has neither field), and marks it `grants_backfilled`.
-It narrows those keys: until the read routes followed grants they read everything.
+It grants: a key without grants read only unlabelled rows on the routes that already followed grants (the exports, the conflict list, the ledger and governed recall), and now reads confidential rows there as well.
+On the routes that did not (memory by id and list, signal, wiki page, search, grep) such a key read everything, and now reads no restricted row, no row with a label of its own and no partitioned row.
 It leaves alone a key that has either field (an empty list included), a revoked key and the root bootstrap key, which holds `"*"`.
-A key minted after the upgrade is not covered: pass its grants when you mint it.
+To keep a key at unlabelled rows only, give it `allowed_security_labels` and `allowed_partitions` of `[]` before the upgrade: the migration cannot tell it from a key minted before grants existed.
+A key minted through the API writes both fields, empty when the request names none, so the migration never reaches it; pass the grants you mean.
 
 An answer says what was left out.
 Each of these routes returns `withheld` (how many items were not shown) and `complete` (false when any item was left out or, for conflicts, redacted); the export of a workspace counts its signals, memories and wiki pages together.
@@ -247,11 +249,29 @@ An anonymous local caller (no key, authentication not required) is the trusted o
 
 The same two rules apply to `GET /api/memory`, `GET /api/memory/:id`, `GET /api/signals/:id`, `GET /api/wiki/:slug`, `GET /api/search` and `GET /api/grep`.
 A record the key may not see is a `404`, the same answer as a record that is not there.
-A list, a search or a grep leaves out what the key may not see, says how many it left out in `withheld`, and sets `complete` to false when there were any.
+A list, a search or a grep leaves out what the key may not see and says nothing of it: there is no `withheld` and no `complete`, and `pagination` counts only what the key may see.
+This is deliberate.
+A count of what a route left out, on a route that answers a query, tells a key without the label that a row it may not see matches: `withheld` of 1 for `Zephyrcorp` is a probe for the name.
+These routes answer a probe for what the key may not see exactly as they answer one for nothing, as a record by id answers `404` as it does for a record that is not there.
+The exports, the conflict list and the ledger dump rows rather than answer a query, and a partial dump has to say it is partial, so they keep `withheld` and `complete`; the count names a volume, not a match.
+`GET /api/node/:node_id` and `GET /api/optimal/nodes/:slug/files` list a node's contexts by title and path, and `GET /api/node/:node_id` the edges that touch them: a key is shown the contexts it may read and the edges whose contexts it may read.
+An edge follows the contexts at its ends; an end that names no context is an entity, which is no labelled row, so an edge from a context to the entity it names is shown with the context.
+A signal the key may read embeds the clusters it belongs to and the wiki pages that cite it, which are rows of their own: a cluster is judged by its members and a page by what it cites, and one the key may not read is left out of `clusters` and `citations`.
 A search or grep decides for each hit from the row it came from (a document, a memory, a chunk), so a chunk of a restricted document is not found by a key without the label.
-`pagination.total` of the memory list counts the memories of the page query before the key's grants are applied; it names no content.
+A key whose grants cut a list is shown a full page of what it may see, and `offset` counts those items, not the rows behind them.
+The Engine reads on until the page and one more are found: a memory list reads up to 10,000 memories, and a search or a grep up to 1,000 hits (a ranked result is re-asked at twice the size).
+`has_more` is exact within what was read, and `pagination.total` is the number of items the key may see that were found, so it ends one past the page when there is more; it never counts a row the key may not see.
+A key granted `"*"` and the operator are paged by the list as before, and `total` of the memory list is the count of the workspace.
 
-**Not covered yet.** These routes also return row text, and a key with `read` still reaches them whatever its grants: the version and relation lists of a memory (`/api/memory/:id/versions`, `/relations`), the Memory Core reads (`/api/memory-core/claims`, `/claims/:id`, `/claim-review`, `/active-pools/:id`), the entity routes (`/api/entities/*`), the graph routes (`/api/graph*`, `/api/optimal/graph`), and the wiki list, contradictions and stale lists (`/api/wiki`, `/api/wiki/contradictions`, `/api/wiki/stale`).
+**Not covered yet.** Every route not named above as following the grants still answers by the access lists (or not at all), and a key with `read` reaches it whatever its grants. The ones that return row text or name rows:
+
+- the version and relation lists of a memory (`/api/memory/:id/versions`, `/relations`), the Memory Core reads (`/api/memory-core/claims`, `/claims/:id`, `/claim-review`, `/active-pools/:id`), the entity routes (`/api/entities/*`), the graph routes (`/api/graph*`, `/api/optimal/graph`), and the wiki list, contradictions and stale lists (`/api/wiki`, `/api/wiki/contradictions`, `/api/wiki/stale`);
+- retrieval through the plain pipeline: `POST /api/rag` without `context_package`, `GET /api/rag/stream`, `GET /api/recall/*` and `POST /api/render/context`; governed recall follows the grants (`POST /api/rag` with `context_package: true`, and `POST /api/assemble`);
+- `GET /api/l0`, the workspace brief, which summarises the workspace's current operating items;
+- `GET /api/optimal/nodes` and `GET /api/workspace`, which name the nodes of a workspace and count their signals;
+- `GET /api/stores/:id/records`, which lists operational records (jobs, metrics, backups, decomposition runs, training runs, and the entries of the replication ledger with the ids of what they changed) rather than document text.
+
+The list is not exhaustive: a route this guide does not name as following the grants does not follow them.
 Do not rely on a key's label grants as a boundary for a workspace until these follow.
 
 Limits worth knowing:
