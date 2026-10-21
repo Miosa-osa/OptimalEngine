@@ -37,7 +37,8 @@ defmodule OptimalEngine.Imports.Notion do
   alias OptimalEngine.Graph
   alias OptimalEngine.Imports.Notion.{Database, Links, Plan}
   alias OptimalEngine.Imports.Zip
-  alias OptimalEngine.Pipeline.{Classifier, Intake}
+  alias OptimalEngine.Pipeline.Intake
+  alias OptimalEngine.Signal.TimeLimit
   alias OptimalEngine.Store
 
   @child_of "child_of"
@@ -51,7 +52,6 @@ defmodule OptimalEngine.Imports.Notion do
   @store_wait_ms 30_000
   @batch 64
   @prefix_bytes 16
-  @classify_bytes 65_536
 
   @default_limits %{
     max_entries: 50_000,
@@ -642,22 +642,16 @@ defmodule OptimalEngine.Imports.Notion do
       else: classify(entry, scope)
   end
 
-  # A long page is classified by its head: genre, mode and summary come from
-  # its first @classify_bytes, and entities from the whole text. Mode
-  # detection is quadratic in the length of a line with no spaces, so a page
-  # built that way would otherwise hold a classifier for hours. The signal
-  # carries the whole text, so intake stores all of it.
+  # A page is classified as intake classifies any text (Intake.classify/2): a
+  # long page by its head, its mode and entities from the whole page, the
+  # entities within the classification limit (past it, from the head). Each
+  # page gets one classification budget, as an ingest does, so a crafted page
+  # costs the import a bounded time. The signal carries the whole text, so
+  # intake stores all of it.
   defp classify(entry, scope) do
-    known = scope.known_entities
-
-    if byte_size(entry.text) <= @classify_bytes do
-      Intake.classify(entry.text, title: entry.title, known_entities: known)
-    else
-      head = Database.clip(entry.text, @classify_bytes)
-      entities = Classifier.extract_entities(entry.text, known)
-      signal = Intake.classify(head, title: entry.title, known_entities: known, entities: entities)
-      %{signal | content: entry.text}
-    end
+    TimeLimit.with_budget(fn ->
+      Intake.classify(entry.text, title: entry.title, known_entities: scope.known_entities)
+    end)
   rescue
     _ -> nil
   end
