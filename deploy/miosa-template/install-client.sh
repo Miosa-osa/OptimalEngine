@@ -59,7 +59,7 @@
 set -eu
 umask 022
 
-DEFAULT_VERSION=0.3.3
+DEFAULT_VERSION=0.3.5
 RELEASES=https://github.com/Miosa-osa/OptimalEngine/releases/download
 SYSTEM_PREFIX=${OPTIMAL_CLIENT_SYSTEM_PREFIX:-/opt/optimal}
 # The first release whose CLI and MCP server read key_file= and report the Engine version.

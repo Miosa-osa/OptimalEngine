@@ -1,7 +1,7 @@
 defmodule OptimalEngine.MixProject do
   use Mix.Project
 
-  @version "0.3.3"
+  @version "0.3.5"
 
   # OPTIMAL_BUILD_FAILING_MIGRATION builds a test release of the upgrade
   # rollback drill whose last migration fails on purpose
