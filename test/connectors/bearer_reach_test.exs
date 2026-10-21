@@ -117,4 +117,65 @@ defmodule OptimalEngine.Connectors.BearerReachTest do
       assert BrokerStub.api_calls(stub) == []
     end
   end
+
+  describe "every authenticated adapter call" do
+    alias OptimalEngine.Connectors.Adapters.{
+      Beehiiv,
+      Confluence,
+      Fathom,
+      GitHub,
+      GoHighLevel,
+      Jira,
+      JotForm,
+      Linear,
+      Stripe
+    }
+
+    @keyed [
+      {Stripe, %{"resources" => ["charges"]}, %{"api_key" => "example-api-key"}},
+      {GitHub, %{"org_or_user" => "example", "repos" => ["one"]}, %{"pat" => "example-pat"}},
+      {Linear, %{"team_ids" => ["team-1"]}, %{"api_key" => "example-api-key"}},
+      {Fathom, %{}, %{"api_key" => "example-api-key"}},
+      {Beehiiv, %{"publication_id" => "pub-1"}, %{"api_key" => "example-api-key"}},
+      {JotForm, %{"form_ids" => ["1"]}, %{"api_key" => "example-api-key"}},
+      {GoHighLevel, %{"location_ids" => ["loc-1"]}, %{"api_token" => "example-token"}},
+      {Jira, %{"site_url" => "https://acme.atlassian.net", "projects" => ["P"]},
+       %{"email" => "ops@example.com", "api_token" => "example-token"}},
+      {Confluence, %{"site_url" => "https://acme.atlassian.net", "spaces" => ["S"]},
+       %{"email" => "ops@example.com", "api_token" => "example-token"}}
+    ]
+
+    test "follows no redirect, so a key sent to one host stays there" do
+      for {adapter, config, credentials} <- @keyed do
+        parent = self()
+
+        stub =
+          install(fn _url, opts ->
+            send(parent, {:request, adapter, opts})
+            {200, %{}}
+          end)
+
+        {:ok, state} = adapter.init(Map.put(config, "credentials", credentials))
+
+        try do
+          adapter.sync(state, nil)
+        rescue
+          _error -> :ok
+        end
+
+        BrokerStub.uninstall(stub)
+        calls = drain(adapter)
+        assert calls != [], "#{inspect(adapter)} made no request"
+        assert Enum.all?(calls, &(Keyword.get(&1, :follow_redirects) == false)), inspect(adapter)
+      end
+    end
+
+    defp drain(adapter, acc \\ []) do
+      receive do
+        {:request, ^adapter, opts} -> drain(adapter, [opts | acc])
+      after
+        0 -> acc
+      end
+    end
+  end
 end
