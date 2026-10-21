@@ -8,6 +8,7 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.DataSteward
+  alias OptimalEngine.Identity.ACL
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.URI, as: OptimalURI
@@ -138,6 +139,148 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
     assert id == "default:" <> ctx.new
   end
 
+  describe "what names the address of a moved file follows it" do
+    setup ctx do
+      workspace = mismatched!(ctx)
+      signal = file!(Path.join(ctx.root, ctx.old), "nodes/sales/signals/deal.md")
+      context!(ctx, "signal", workspace.id, signal)
+
+      %{
+        workspace: workspace,
+        old_uri: OptimalURI.from_path(signal),
+        new_uri: OptimalURI.from_path(Path.join(ctx.root, "#{ctx.new}/nodes/sales/signals/deal.md"))
+      }
+    end
+
+    test "a deny rule on the old address applies to the new one", ctx do
+      denied = "user:rename-denied-#{ctx.n}@test"
+      reader = "user:rename-reader-#{ctx.n}@test"
+      :ok = ACL.deny(%{resource_uri: ctx.old_uri, principal_id: denied})
+      :ok = ACL.grant(%{resource_uri: ctx.old_uri, principal_id: reader, permission: :read})
+
+      assert {:ok, _} = rename(ctx.workspace.id, "default:" <> ctx.new)
+
+      refute ctx.new_uri == ctx.old_uri
+      assert {:ok, [[uri]]} = uri_of(ctx)
+      assert uri == ctx.new_uri
+      # An absent rule would allow, which is what a rule that stayed behind would do.
+      refute ACL.can?(denied, ctx.new_uri, :read, absent: :allow)
+      assert ACL.can?(reader, ctx.new_uri, :read, absent: :deny)
+      assert ACL.list_for_resource("default", ctx.old_uri) == []
+    end
+
+    test "the memories, open loops and events that name the old address name the new", ctx do
+      ws = ctx.workspace.id
+
+      sql!(
+        "INSERT INTO memories (id, tenant_id, workspace_id, content, root_memory_id, citation_uri) VALUES (?1, 'default', ?2, 'cited', ?1, ?3)",
+        ["mem-#{ctx.n}", ws, ctx.old_uri]
+      )
+
+      sql!(
+        """
+        INSERT INTO open_loops (id, tenant_id, workspace_id, kind, title, fingerprint, source_uri, close_source_uri)
+        VALUES (?1, 'default', ?2, 'follow_up', 'follow up', ?1, ?3, ?3)
+        """,
+        ["loop-#{ctx.n}", ws, ctx.old_uri]
+      )
+
+      sql!(
+        "INSERT INTO events (tenant_id, principal, kind, target_uri) VALUES ('default', 'user:test', 'read', ?1)",
+        [ctx.old_uri]
+      )
+
+      # The same text in a record of another workspace is not this rename's.
+      sql!(
+        "INSERT INTO memories (id, tenant_id, workspace_id, content, root_memory_id, citation_uri) VALUES (?1, 'default', 'rename-elsewhere', 'cited', ?1, ?2)",
+        ["mem-other-#{ctx.n}", ctx.old_uri]
+      )
+
+      assert {:ok, _} = rename(ctx.workspace.id, "default:" <> ctx.new)
+
+      assert {:ok, [[new_uri]]} =
+               Store.raw_query("SELECT citation_uri FROM memories WHERE id = ?1", ["mem-#{ctx.n}"])
+
+      assert new_uri == ctx.new_uri
+
+      assert {:ok, [[source, closed]]} =
+               Store.raw_query(
+                 "SELECT source_uri, close_source_uri FROM open_loops WHERE id = ?1",
+                 ["loop-#{ctx.n}"]
+               )
+
+      assert {source, closed} == {ctx.new_uri, ctx.new_uri}
+
+      assert {:ok, [[1]]} =
+               Store.raw_query("SELECT COUNT(*) FROM events WHERE target_uri = ?1", [ctx.new_uri])
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM events WHERE target_uri = ?1", [ctx.old_uri])
+
+      assert {:ok, [[kept]]} =
+               Store.raw_query("SELECT citation_uri FROM memories WHERE id = ?1", [
+                 "mem-other-#{ctx.n}"
+               ])
+
+      assert kept == ctx.old_uri
+    end
+
+    test "an address another context also holds keeps its rules, and the moved one gets a copy",
+         ctx do
+      other = context!(ctx, "sharer", "default", file!(ctx.root, "sharer/signals/s.md"))
+
+      sql!("UPDATE contexts SET uri = ?1 WHERE id = ?2", [ctx.old_uri, other])
+      denied = "user:rename-shared-#{ctx.n}@test"
+      :ok = ACL.deny(%{resource_uri: ctx.old_uri, principal_id: denied})
+
+      assert {:ok, _} = rename(ctx.workspace.id, "default:" <> ctx.new)
+
+      refute ACL.can?(denied, ctx.new_uri, :read, absent: :allow)
+      refute ACL.can?(denied, ctx.old_uri, :read, absent: :allow)
+    end
+
+    test "a row of another workspace that names a path under the directory is not rewritten",
+         ctx do
+      under = Path.join(ctx.root, "#{ctx.old}/nodes/sales/signals/deal.md")
+      context!(ctx, "foreign", "default", under)
+
+      assert {:ok, _} = rename(ctx.workspace.id, "default:" <> ctx.new)
+
+      assert {:ok, [[^under]]} =
+               Store.raw_query("SELECT path FROM contexts WHERE id = ?1", ["ctx-foreign-#{ctx.n}"])
+    end
+  end
+
+  describe "with a root path that is relative" do
+    setup ctx do
+      relative = "steward-rename-relative-#{ctx.n}"
+      File.mkdir_p!(relative)
+      Application.put_env(:optimal_engine, :root_path, relative)
+      on_exit(fn -> File.rm_rf(relative) end)
+      %{relative: relative}
+    end
+
+    test "the paths and addresses follow the directory, and the answer says what moved", ctx do
+      workspace = mismatched!(ctx)
+      signal = file!(Path.join(ctx.relative, ctx.old), "nodes/sales/signals/deal.md")
+      context!(ctx, "signal", workspace.id, signal)
+
+      assert {:ok, %{directory_moved: true}} = rename(workspace.id, "default:" <> ctx.new)
+
+      moved = Path.join(ctx.relative, "#{ctx.new}/nodes/sales/signals/deal.md")
+      assert File.exists?(moved)
+
+      assert {:ok, [[path, uri]]} =
+               Store.raw_query("SELECT path, uri FROM contexts WHERE id = ?1", [
+                 "ctx-signal-#{ctx.n}"
+               ])
+
+      assert path == moved
+      assert uri == OptimalURI.from_path(moved)
+      refute uri == OptimalURI.from_path(signal)
+    end
+  end
+
   describe "a rename that cannot move the directory safely" do
     test "is refused when the target directory holds files, and changes nothing", ctx do
       workspace = mismatched!(ctx)
@@ -194,6 +337,14 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
       refute File.exists?(Path.join(ctx.root, ctx.new))
     end
   end
+
+  defp sql!(sql, params) do
+    {:ok, _} = Store.raw_query(sql, params)
+    :ok
+  end
+
+  defp uri_of(ctx),
+    do: Store.raw_query("SELECT uri FROM contexts WHERE id = ?1", ["ctx-signal-#{ctx.n}"])
 
   defp file!(dir, relative) do
     path = Path.join(dir, relative)
