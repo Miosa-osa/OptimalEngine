@@ -571,6 +571,44 @@ defmodule OptimalEngine.SyncGateTest do
              )
     end
 
+    test "storage entries that name a deleted row do not starve its history", ctx do
+      id = "fact-starved-#{ctx.n}"
+      fact(ctx, id, "Standup notes", ["internal"])
+      {:ok, _} = Capture.seal()
+      {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+      # More entries than the gate reads versions of a gone row, all newer than
+      # every change of it: read as its history, they would leave it unresolved.
+      name_in_storage(ctx, "facts", id, [], 1_050)
+
+      {_result, sent} = push(ctx)
+
+      assert Enum.any?(
+               sent,
+               &(&1["entity_type"] == "facts" and &1["operation"] == "delete" and
+                   &1["entity_id"] == id)
+             )
+    end
+
+    test "a deleted row is judged by its own changes, not by a storage entry that names it",
+         ctx do
+      id = "fact-claimed-#{ctx.n}"
+      fact(ctx, id, "Standup notes", ["internal"])
+      {:ok, _} = Capture.seal()
+      {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+      # An entry that names the row and claims a label it never had.
+      name_in_storage(ctx, "facts", id, ["restricted"], 1)
+
+      {_result, sent} = push(ctx)
+
+      assert Enum.any?(
+               sent,
+               &(&1["entity_type"] == "facts" and &1["operation"] == "delete" and
+                   &1["entity_id"] == id)
+             )
+    end
+
     test "serving changes applies the same gate", ctx do
       secret = remember(ctx, "Wire 4471 to Harborview", ["restricted"])
       open = remember(ctx, "Standup is at ten", ["internal"])
@@ -2794,6 +2832,31 @@ defmodule OptimalEngine.SyncGateTest do
         Store.raw_query(
           "INSERT INTO citations (tenant_id, workspace_id, wiki_slug, wiki_audience, chunk_id, claim_hash) VALUES (?1, ?2, ?3, 'default', ?4, 'h')",
           [ctx.tenant, ctx.ws, slug, chunk_id]
+        )
+    end
+  end
+
+  # `count` ledger entries as the storage route stored them before it refused
+  # table names: they name the row `id` of `table` with `labels`, newer than
+  # every change of it.
+  defp name_in_storage(ctx, table, id, labels, count) do
+    payload =
+      Jason.encode!(%{
+        "row" => %{"id" => id, "security_labels" => Jason.encode!(labels)},
+        "blobs" => %{}
+      })
+
+    for _ <- 1..count do
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO sync_mutations
+            (id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, payload,
+             payload_hash, idempotency_key, occurred_at)
+          VALUES (?1, ?2, ?3, 'app-device', ?4, ?5, 'update', ?6, 'h', ?1,
+                  '2026-10-14T12:00:00.000')
+          """,
+          [UUID.uuid4(), ctx.tenant, ctx.ws, table, id, payload]
         )
     end
   end
