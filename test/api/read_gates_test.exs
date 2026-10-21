@@ -556,28 +556,35 @@ defmodule OptimalEngine.API.ReadGatesTest do
       assert read.(nil) == Enum.sort(Enum.map(node_contexts(ctx), & &1.id))
     end
 
-    test "a node lists only the edges between contexts the key may read", ctx do
+    test "a node lists only the edges whose contexts the key may read", ctx do
       open = edge(ctx, ctx.plain_doc, ctx.confidential_doc)
       to_secret = edge(ctx, ctx.plain_doc, ctx.secret_doc)
       inner = edge(ctx, ctx.confidential_doc, ctx.secret_doc)
       path = "/api/node/operator?" <> ws(ctx)
+
+      # An entity is no labelled row: an edge from a context to the entity it
+      # names follows the context.
+      named = entity_edge(ctx, ctx.plain_doc, "Northwind account")
+      named_confidential = entity_edge(ctx, ctx.confidential_doc, "Brightwater contract")
+      named_secret = entity_edge(ctx, ctx.secret_doc, "Zephyrcorp board")
+      all = [open, to_secret, inner, named, named_confidential, named_secret]
 
       read = fn token ->
         path
         |> get_json(token)
         |> Map.fetch!("edges")
         |> Enum.map(&{&1["source"], &1["target"]})
-        |> Enum.filter(&(&1 in [open, to_secret, inner]))
+        |> Enum.filter(&(&1 in all))
         |> Enum.sort()
       end
 
-      assert read.(mint(ctx, %{})) == []
-      assert read.(mint(ctx, @machine)) == [open]
+      assert read.(mint(ctx, %{})) == [named]
+      assert read.(mint(ctx, @machine)) == Enum.sort([open, named, named_confidential])
 
       assert read.(mint(ctx, %{"allowed_security_labels" => ["restricted", "confidential"]})) ==
-               Enum.sort([open, to_secret, inner])
+               Enum.sort(all)
 
-      assert read.(nil) == Enum.sort([open, to_secret, inner])
+      assert read.(nil) == Enum.sort(all)
     end
 
     test "the file tree of a node lists only the contexts the key may read", ctx do
@@ -750,6 +757,16 @@ defmodule OptimalEngine.API.ReadGatesTest do
       )
 
     id
+  end
+
+  defp entity_edge(ctx, from, entity) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO graph_edges (tenant_id, workspace_id, source_id, target_id, relation, weight) VALUES ('default', ?1, ?2, ?3, 'mentions', 1.0)",
+        [ctx.ws, from.id, entity]
+      )
+
+    {from.id, entity}
   end
 
   defp edge(ctx, from, to) do
