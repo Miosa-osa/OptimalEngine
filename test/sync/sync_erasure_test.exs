@@ -131,6 +131,28 @@ defmodule OptimalEngine.SyncErasureTest do
       refute File.exists?(first.checkpoint)
     end
 
+    test "stay when a context created in the same batch refers to the package", ctx do
+      first = local_work!(ctx, "first-in-batch")
+      second = %{local_work!(ctx, "second-in-batch") | package: first.package}
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [create_context(ctx, first)])
+
+      # The package looks like the first context's alone until the batch has been applied.
+      batch = [create_context(ctx, second), delete_context(first.context)]
+      assert {:ok, %{applied: 2}} = Sync.apply_changes(ctx.tenant, ctx.ws, batch)
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM contexts WHERE id = ?1", [first.context])
+
+      assert {:ok, [[1]]} =
+               Store.raw_query("SELECT COUNT(*) FROM contexts WHERE id = ?1", [second.context])
+
+      assert File.exists?(first.checkpoint)
+      assert File.exists?(first.asset_file)
+      assert pointer(first.run) == first.checkpoint
+    end
+
     test "are not touched when the delete does not take the context", ctx do
       other = local_work!(ctx, "other-workspace")
 
