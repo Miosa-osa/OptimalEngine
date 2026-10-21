@@ -49,7 +49,7 @@ defmodule OptimalEngine.Store.SQLite do
       #=> {:ok, result} | {:error, reason}
 
   - The fun receives an opaque transaction handle and must run every statement
-    through `txn_query/3` / `txn_execute/3`. Calling any other
+    through `txn_query/4` / `txn_execute/4`. Calling any other
     `OptimalEngine.Store` function inside the fun deadlocks (the fun runs in
     the Store GenServer process).
   - Fun returns `{:ok, result}` → `COMMIT`, `transaction/2` returns
@@ -384,7 +384,7 @@ defmodule OptimalEngine.Store.SQLite do
   Store operation.
 
   `fun` receives an opaque transaction handle and must run every statement
-  through `txn_query/3` / `txn_execute/3` (calling other `OptimalEngine.Store`
+  through `txn_query/4` / `txn_execute/4` (calling other `OptimalEngine.Store`
   functions inside the fun would deadlock the GenServer). Return
   `{:ok, result}` to commit or `{:error, reason}` to roll back. If the fun
   raises (or throws/exits), the transaction is rolled back and the exception
@@ -402,10 +402,14 @@ defmodule OptimalEngine.Store.SQLite do
     end
   end
 
-  @doc "Executes a SELECT inside a `transaction/2` fun. Returns `{:ok, rows}`."
-  @spec txn_query(term(), String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
+  @doc """
+  Executes a SELECT inside a `transaction/2` fun. Returns `{:ok, rows}`. A
+  failed statement leaves a SQLite transaction open, so `:recoverable` is
+  accepted and changes nothing.
+  """
+  @spec txn_query(term(), String.t(), [term()], keyword()) :: {:ok, [[term()]]} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
-  def txn_query({:txn, db}, sql, params \\ []) do
+  def txn_query({:txn, db}, sql, params \\ [], _opts \\ []) do
     refuse_transaction_control!(sql, :inside)
 
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
@@ -421,10 +425,10 @@ defmodule OptimalEngine.Store.SQLite do
   `{:ok, changes}` with the number of rows affected, so callers can detect
   conditional updates that matched zero rows.
   """
-  @spec txn_execute(term(), String.t(), [term()]) ::
+  @spec txn_execute(term(), String.t(), [term()], keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
-  def txn_execute({:txn, db}, sql, params \\ []) do
+  def txn_execute({:txn, db}, sql, params \\ [], _opts \\ []) do
     refuse_transaction_control!(sql, :inside)
 
     with :ok <- exec_stmt(db, sql, params) do
@@ -1244,7 +1248,7 @@ defmodule OptimalEngine.Store.SQLite do
 
   # Runs a caller fun inside BEGIN IMMEDIATE .. COMMIT/ROLLBACK on the owned
   # connection. Executes in the GenServer process, so the fun must only use
-  # txn_query/3 and txn_execute/3 for database access. Exceptions raised by
+  # txn_query/4 and txn_execute/4 for database access. Exceptions raised by
   # the fun roll the transaction back and are returned as a `:__txn_raise__`
   # sentinel that `transaction/2` re-raises in the calling process — the
   # Store GenServer must survive caller bugs.
@@ -1278,7 +1282,23 @@ defmodule OptimalEngine.Store.SQLite do
       (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, COALESCE(?12, datetime('now')), ?13)
     """
 
-    params = [
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
+         :ok <- bind(db, stmt, chunk_params(chunk)),
+         :done <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      other -> {:error, other}
+    end
+  end
+
+  @doc false
+  # The parameters of one chunk row, shared with the PostgreSQL store so both
+  # write the same values.
+  @spec chunk_params(struct() | map()) :: [term()]
+  def chunk_params(chunk) do
+    [
       chunk_field(chunk, :id),
       chunk_field(chunk, :tenant_id) || "default",
       chunk_field(chunk, :signal_id),
@@ -1293,16 +1313,6 @@ defmodule OptimalEngine.Store.SQLite do
       chunk_field(chunk, :created_at),
       chunk_field(chunk, :workspace_id) || "default"
     ]
-
-    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
-         :ok <- bind(db, stmt, params),
-         :done <- Exqlite.Sqlite3.step(db, stmt),
-         :ok <- Exqlite.Sqlite3.release(db, stmt) do
-      :ok
-    else
-      {:error, reason} -> {:error, reason}
-      other -> {:error, other}
-    end
   end
 
   defp chunk_field(%{__struct__: _} = chunk, key), do: Map.get(chunk, key)
@@ -1318,6 +1328,16 @@ defmodule OptimalEngine.Store.SQLite do
     do: insert_rows(db, rows, &do_insert_classification(db, &1))
 
   defp do_insert_classification(db, row) do
+    {sql, params} = statement(:classification, row)
+    exec_stmt(db, sql, params)
+  end
+
+  @doc false
+  # The upsert statement and parameters for one pipeline row. The PostgreSQL
+  # store runs the same statement through the dialect, so both stores write the
+  # same rows.
+  @spec statement(atom(), struct() | map()) :: {String.t(), [term()]}
+  def statement(:classification, row) do
     sql = """
     INSERT INTO classifications
       (tenant_id, chunk_id, mode, genre, signal_type, format, structure,
@@ -1347,16 +1367,10 @@ defmodule OptimalEngine.Store.SQLite do
       chunk_field(row, :workspace_id) || "default"
     ]
 
-    exec_stmt(db, sql, params)
+    {sql, params}
   end
 
-  # ──────────────────────────────────────────────────────────────────────────
-  # Intents — Phase 4 IntentExtractor writes per-chunk intent rows.
-  # ──────────────────────────────────────────────────────────────────────────
-
-  defp insert_intents_in_transaction(db, rows), do: insert_rows(db, rows, &do_insert_intent(db, &1))
-
-  defp do_insert_intent(db, row) do
+  def statement(:intent, row) do
     sql = """
     INSERT INTO intents (tenant_id, chunk_id, intent, confidence, evidence, workspace_id)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -1376,22 +1390,10 @@ defmodule OptimalEngine.Store.SQLite do
       chunk_field(row, :workspace_id) || "default"
     ]
 
-    exec_stmt(db, sql, params)
+    {sql, params}
   end
 
-  defp atom_or_nil(nil), do: nil
-  defp atom_or_nil(a) when is_atom(a), do: Atom.to_string(a)
-  defp atom_or_nil(s) when is_binary(s), do: s
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Chunk embeddings — Phase 5 Embedder writes per-chunk aligned vectors.
-  # Vectors encode as little-endian float32 BLOBs, 4 bytes per component.
-  # ──────────────────────────────────────────────────────────────────────────
-
-  defp insert_embeddings_in_transaction(db, rows),
-    do: insert_rows(db, rows, &do_insert_embedding(db, &1))
-
-  defp do_insert_embedding(db, row) do
+  def statement(:embedding, row) do
     vector = chunk_field(row, :vector) || []
     blob = encode_vector(vector)
 
@@ -1414,27 +1416,16 @@ defmodule OptimalEngine.Store.SQLite do
       chunk_field(row, :model),
       atom_or_nil(chunk_field(row, :modality)) || "text",
       chunk_field(row, :dim) || length(vector),
-      # Force BLOB binding — exqlite otherwise treats a raw binary as TEXT,
+      # Force BLOB binding: exqlite otherwise treats a raw binary as TEXT,
       # and float32 bytes frequently contain 0x00 which SQLite TEXT truncates.
       {:blob, blob},
       chunk_field(row, :workspace_id) || "default"
     ]
 
-    exec_stmt(db, sql, params)
+    {sql, params}
   end
 
-  defp encode_vector(vector) when is_list(vector) do
-    for f <- vector, into: <<>>, do: <<f::little-float-size(32)>>
-  end
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Clusters — Phase 6 Clusterer writes cluster rows + membership edges.
-  # ──────────────────────────────────────────────────────────────────────────
-
-  defp insert_clusters_in_transaction(db, rows),
-    do: insert_rows(db, rows, &do_insert_cluster(db, &1))
-
-  defp do_insert_cluster(db, row) do
+  def statement(:cluster, row) do
     centroid = chunk_field(row, :centroid) || []
     blob = encode_vector(centroid)
 
@@ -1460,13 +1451,10 @@ defmodule OptimalEngine.Store.SQLite do
       chunk_field(row, :updated_at)
     ]
 
-    exec_stmt(db, sql, params)
+    {sql, params}
   end
 
-  defp insert_cluster_members_in_transaction(db, rows),
-    do: insert_rows(db, rows, &do_insert_cluster_member(db, &1))
-
-  defp do_insert_cluster_member(db, row) do
+  def statement(:cluster_member, row) do
     sql = """
     INSERT INTO cluster_members (tenant_id, cluster_id, chunk_id, weight)
     VALUES (?1, ?2, ?3, ?4)
@@ -1481,6 +1469,58 @@ defmodule OptimalEngine.Store.SQLite do
       chunk_field(row, :weight) || 1.0
     ]
 
+    {sql, params}
+  end
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Intents — Phase 4 IntentExtractor writes per-chunk intent rows.
+  # ──────────────────────────────────────────────────────────────────────────
+
+  defp insert_intents_in_transaction(db, rows), do: insert_rows(db, rows, &do_insert_intent(db, &1))
+
+  defp do_insert_intent(db, row) do
+    {sql, params} = statement(:intent, row)
+    exec_stmt(db, sql, params)
+  end
+
+  defp atom_or_nil(nil), do: nil
+  defp atom_or_nil(a) when is_atom(a), do: Atom.to_string(a)
+  defp atom_or_nil(s) when is_binary(s), do: s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Chunk embeddings — Phase 5 Embedder writes per-chunk aligned vectors.
+  # Vectors encode as little-endian float32 BLOBs, 4 bytes per component.
+  # ──────────────────────────────────────────────────────────────────────────
+
+  defp insert_embeddings_in_transaction(db, rows),
+    do: insert_rows(db, rows, &do_insert_embedding(db, &1))
+
+  defp do_insert_embedding(db, row) do
+    {sql, params} = statement(:embedding, row)
+    exec_stmt(db, sql, params)
+  end
+
+  defp encode_vector(vector) when is_list(vector) do
+    for f <- vector, into: <<>>, do: <<f::little-float-size(32)>>
+  end
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Clusters — Phase 6 Clusterer writes cluster rows + membership edges.
+  # ──────────────────────────────────────────────────────────────────────────
+
+  defp insert_clusters_in_transaction(db, rows),
+    do: insert_rows(db, rows, &do_insert_cluster(db, &1))
+
+  defp do_insert_cluster(db, row) do
+    {sql, params} = statement(:cluster, row)
+    exec_stmt(db, sql, params)
+  end
+
+  defp insert_cluster_members_in_transaction(db, rows),
+    do: insert_rows(db, rows, &do_insert_cluster_member(db, &1))
+
+  defp do_insert_cluster_member(db, row) do
+    {sql, params} = statement(:cluster_member, row)
     exec_stmt(db, sql, params)
   end
 
