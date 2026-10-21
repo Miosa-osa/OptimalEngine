@@ -33,6 +33,7 @@ defmodule OptimalEngine.Pipeline.Classifier do
   alias OptimalEngine.Signal.GenreDetector
   alias OptimalEngine.Signal.GenreRegistry
   alias OptimalEngine.Signal.ModeDetector
+  alias OptimalEngine.Signal.TimeLimit
   alias OptimalEngine.Pipeline.Classifier.Classification
   alias OptimalEngine.Pipeline.Decomposer.{Chunk, ChunkTree}
 
@@ -88,7 +89,10 @@ defmodule OptimalEngine.Pipeline.Classifier do
   4. Returns a fully populated Context (caller must set: id, uri, created_at, modified_at)
   """
   @spec classify_context(String.t(), keyword()) :: Context.t()
-  def classify_context(content, opts \\ []) when is_binary(content) do
+  def classify_context(content, opts \\ []) when is_binary(content),
+    do: TimeLimit.with_budget(fn -> classify_document(content, opts) end)
+
+  defp classify_document(content, opts) do
     path = Keyword.get(opts, :path, "")
     ctx_type = Keyword.get(opts, :type) || detect_type(content, opts)
     known_entities = Keyword.get(opts, :known_entities, [])
@@ -254,7 +258,13 @@ defmodule OptimalEngine.Pipeline.Classifier do
   @doc "Classify every chunk in a ChunkTree. Returns the list in tree order."
   @spec classify_tree(ChunkTree.t(), keyword()) :: {:ok, [Classification.t()]}
   def classify_tree(%ChunkTree{chunks: chunks}, opts \\ []) do
-    classifications = Enum.map(chunks, fn c -> elem(classify_chunk(c, opts), 1) end)
+    # One budget for the whole tree: past it, the remaining chunks take the
+    # detectors' fallbacks instead of each costing the per-detection limit.
+    classifications =
+      TimeLimit.with_budget(fn ->
+        Enum.map(chunks, fn c -> elem(classify_chunk(c, opts), 1) end)
+      end)
+
     {:ok, classifications}
   end
 

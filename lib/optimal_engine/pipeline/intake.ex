@@ -104,6 +104,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   alias OptimalEngine.Pipeline.SemanticProcessor, as: SemanticProcessor
   alias OptimalEngine.Signal
   alias OptimalEngine.Signal.ModeDetector
+  alias OptimalEngine.Signal.TimeLimit
   alias OptimalEngine.Store
   alias OptimalEngine.Routing
   alias OptimalEngine.URI
@@ -236,7 +237,10 @@ defmodule OptimalEngine.Pipeline.Intake do
     # Source-first: the Source Package is committed BEFORE any interpretation,
     # so reject/quarantine/failure paths can never lose the source evidence.
     with :ok <- persist_source_package(source_package),
-         {:ok, signal} <- classify_step(raw_text, scope, opts),
+         # Every detection while classifying shares one budget, so a crafted
+         # document holds the intake process (and everyone queued behind it)
+         # a bounded time; database work before it does not count.
+         {:ok, signal} <- TimeLimit.with_budget(fn -> classify_step(raw_text, scope, opts) end),
          {:ok, signal} <- quality_gate(signal, source_package, scope),
          {:ok, signal, routed_to} <- route_step(signal, opts),
          {:ok, primary_path} <- write_step(signal, scope, opts),
