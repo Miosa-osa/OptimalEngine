@@ -35,11 +35,17 @@ defmodule OptimalEngine.ReadScope do
   alias OptimalEngine.Store
   alias OptimalEngine.Sync.{Gate, Lineage}
 
-  defstruct [:tenant_id, :principal, labels: [], partitions: [], acl_absent: :allow]
+  defstruct [:tenant_id, :principal, :ceiling, labels: [], partitions: [], acl_absent: :allow]
 
+  @typedoc """
+  `ceiling` is the highest class rank the reader is shown (nil: no ceiling),
+  for the routes that dump rows. It does not apply to a key granted `"*"` for
+  labels.
+  """
   @type t :: %__MODULE__{
           tenant_id: String.t(),
           principal: String.t(),
+          ceiling: SecurityLabels.rank() | nil,
           labels: [String.t()],
           partitions: [String.t()],
           acl_absent: :allow | :deny
@@ -70,7 +76,7 @@ defmodule OptimalEngine.ReadScope do
       if unfiltered?(scope) do
         items
       else
-        Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), fn gate ->
+        Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling, fn gate ->
           allowed = Gate.readable_ids(gate, table, Enum.map(items, id_of))
           Enum.filter(items, &MapSet.member?(allowed, id_of.(&1)))
         end)
@@ -98,7 +104,7 @@ defmodule OptimalEngine.ReadScope do
       if unfiltered?(scope) do
         items
       else
-        Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), fn gate ->
+        Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling, fn gate ->
           Gate.prefetch_rows(gate, table, Enum.map(items, row_of))
           Enum.filter(items, &Gate.readable_row?(gate, table, row_of.(&1)))
         end)
@@ -137,7 +143,7 @@ defmodule OptimalEngine.ReadScope do
       if unfiltered?(scope) do
         Enum.map(visible, &Map.put(&1, :redacted, false))
       else
-        Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), fn gate ->
+        Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling, fn gate ->
           Enum.map(visible, &redact_conflict(gate, &1))
         end)
       end
@@ -185,7 +191,7 @@ defmodule OptimalEngine.ReadScope do
 
     if unfiltered?(scope),
       do: run.(nil),
-      else: Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), run)
+      else: Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling, run)
   end
 
   # What a change shows a reader: the row and its blobs, which are what was

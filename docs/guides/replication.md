@@ -110,6 +110,10 @@ An entry on the storage ledger of an entity type that is not a replicated table 
 A workspace export holds every wiki page of the workspace (they are read 500 at a time) and fails with `export_failed` when they cannot be read, instead of holding the first 50.
 A wiki page that names nothing, and any other aggregate, carries every label of its workspace and needs every partition of it.
 
+The exports and the conflict list are also held to the Engine's ceiling for what it hands out (`config :optimal_engine, :sync_serve_max_class`, default `confidential`), as a replication peer is: a key that is not granted `"*"` for labels is not shown a restricted row even when it is granted `restricted`, and `withheld` counts it.
+Raise the ceiling, or call with a `"*"` key such as the bootstrap key, for a full export.
+The ledger route has always been held to it, for every caller.
+
 A grant of `"*"` (in `allowed_security_labels`, `allowed_partitions`, or both) means every label or every partition, as it does when a key mints another (`Auth.KeyIssuance`).
 The bootstrap key (`OPTIMAL_BOOTSTRAP_KEY`) carries `"*"` in both when its scopes (`OPTIMAL_BOOTSTRAP_SCOPES`) include `*` or `admin`, since it is the operator's root and may mint anything anyway, so an exporter that calls with it keeps full exports.
 A bootstrap key with only `read,write` scopes, and any other key whose scopes are `["*"]` but that has no grants of its own, holds no `"*"`.

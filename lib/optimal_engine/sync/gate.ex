@@ -129,12 +129,13 @@ defmodule OptimalEngine.Sync.Gate do
   Opens a gate for a reader of a workspace. `allowed` is the reader's grants
   (`SecurityLabels.grants/2`).
   """
-  @spec open_reader(String.t(), String.t(), SecurityLabels.grants()) :: t()
-  def open_reader(tenant_id, workspace_id, %{labels: _, partitions: _} = allowed) do
+  @spec open_reader(String.t(), String.t(), SecurityLabels.grants(), SecurityLabels.rank() | nil) ::
+          t()
+  def open_reader(tenant_id, workspace_id, %{labels: _, partitions: _} = allowed, ceiling \\ nil) do
     %__MODULE__{
       tenant_id: tenant_id,
       workspace_id: workspace_id,
-      rank: 0,
+      rank: ceiling || @restricted,
       memo: :ets.new(:sync_gate, [:set, :private]),
       mode: :grants,
       allowed: allowed
@@ -155,11 +156,21 @@ defmodule OptimalEngine.Sync.Gate do
     run(open(tenant_id, workspace_id, max_class), fun)
   end
 
-  @doc "Runs `fun` with a reader's gate, closing it after."
-  @spec with_reader(String.t(), String.t(), SecurityLabels.grants(), (t() -> result)) :: result
+  @doc """
+  Runs `fun` with a reader's gate, closing it after. A `ceiling` (a class rank)
+  is the highest class the reader is shown, unless its grants include every
+  label.
+  """
+  @spec with_reader(
+          String.t(),
+          String.t(),
+          SecurityLabels.grants(),
+          SecurityLabels.rank() | nil,
+          (t() -> result)
+        ) :: result
         when result: var
-  def with_reader(tenant_id, workspace_id, allowed, fun) do
-    run(open_reader(tenant_id, workspace_id, allowed), fun)
+  def with_reader(tenant_id, workspace_id, allowed, ceiling \\ nil, fun) do
+    run(open_reader(tenant_id, workspace_id, allowed, ceiling), fun)
   end
 
   defp run(gate, fun) do
@@ -412,8 +423,11 @@ defmodule OptimalEngine.Sync.Gate do
     end)
   end
 
-  defp readable?(%__MODULE__{allowed: allowed}, tokens),
-    do: SecurityLabels.permits?(allowed, tokens)
+  defp readable?(%__MODULE__{allowed: allowed, rank: ceiling}, tokens) do
+    SecurityLabels.permits?(allowed, tokens) and
+      (allowed.all_labels? or ceiling >= @restricted or
+         SecurityLabels.token_rank(tokens) in [nil | Enum.to_list(0..ceiling)])
+  end
 
   # -- classifying a row --------------------------------------------------------
 
