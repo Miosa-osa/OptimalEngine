@@ -6,8 +6,13 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
     * `:portal_id`, `:objects` (list of HubSpot object API names)
 
   ## Credentials
-    * `:access_token` (private app) **or**
-    * `:client_id` + `:client_secret` + `:refresh_token` (OAuth app)
+    * `:access_token` (a private app token, or an OAuth token issued by the
+      credential broker for `credential_source: "broker"`) **or**
+    * `:client_id` + `:client_secret` + `:refresh_token` (OAuth app), exchanged
+      for an access token at the start of each sync
+
+  Calls go through `OptimalEngine.Connectors.AccessToken`, which renews a
+  brokered token before it expires and once after a `401`.
 
   ## Cursor shape
   Opaque string: `"<object_type>:<after_cursor>"`. Initial sync: `nil`.
@@ -20,9 +25,10 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
     required_keys: [:portal_id, :objects],
     credential_keys: []
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @base_url "https://api.hubapi.com"
+  @token_url "https://api.hubapi.com/oauth/v1/token"
   @page_size 100
 
   @impl true
@@ -37,10 +43,11 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
 
   @impl true
   def sync(state, cursor) do
-    token = pick(state, :access_token)
-    objects = pick(state, :objects, ["contacts"])
-    headers = [{"authorization", "Bearer #{token}"}]
+    AccessToken.session(state, &refresh_access_token/1, &sync_objects(state, cursor, &1))
+  end
 
+  defp sync_objects(state, cursor, token) do
+    objects = pick(state, :objects, ["contacts"])
     {resume_object, after_cursor} = parse_cursor(cursor)
 
     objects_to_sync =
@@ -56,7 +63,7 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
       Enum.reduce_while(objects_to_sync, {:ok, [], nil}, fn object_type, {:ok, acc, _} ->
         obj_after = if object_type == resume_object, do: after_cursor, else: nil
 
-        case fetch_objects(object_type, obj_after, headers) do
+        case fetch_objects(object_type, obj_after, token) do
           {:ok, items, next_after} ->
             new_signals =
               Enum.flat_map(items, fn item ->
@@ -110,13 +117,38 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
 
   # ---- private ----------------------------------------------------------------
 
-  defp fetch_objects(object_type, after_cursor, headers) do
+  # The OAuth app's refresh token, exchanged once per sync. A refresh token
+  # HubSpot no longer honours is answered with a 400.
+  defp refresh_access_token(state) do
+    body =
+      URI.encode_query(%{
+        grant_type: "refresh_token",
+        client_id: pick(state, :client_id),
+        client_secret: pick(state, :client_secret),
+        refresh_token: pick(state, :refresh_token)
+      })
+
+    case HTTP.request(@token_url,
+           method: :post,
+           body: body,
+           headers: [{"content-type", "application/x-www-form-urlencoded"}]
+         ) do
+      {:ok, %{status: 200, body: %{"access_token" => token}}} -> {:ok, token}
+      {:ok, %{status: status}} when status in [400, 401] -> {:error, :auth_expired}
+      {:ok, %{status: 429}} -> {:error, :rate_limited}
+      {:ok, %{status: status}} when status >= 500 -> {:error, :transient}
+      {:ok, %{status: status}} -> {:error, {:http, status}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_objects(object_type, after_cursor, token) do
     url =
       "#{@base_url}/crm/v3/objects/#{object_type}?limit=#{@page_size}" <>
         "&properties=dealname,firstname,lastname,company,subject,description,notes_last_contacted,hs_lastmodifieddate" <>
         if(after_cursor, do: "&after=#{after_cursor}", else: "")
 
-    case HTTP.get_json(url, headers: headers) do
+    case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: %{"results" => items} = body}} ->
         next_after = get_in(body, ["paging", "next", "after"])
         {:ok, items, next_after}
@@ -145,15 +177,13 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
   end
 
   defp require_hubspot_auth(config) do
-    token = Map.get(config, "access_token") || Map.get(config, :access_token)
-
     oauth? =
       Enum.all?([:client_id, :client_secret, :refresh_token], fn k ->
         Map.has_key?(config, k) or Map.has_key?(config, Atom.to_string(k))
       end)
 
     cond do
-      is_binary(token) and token != "" -> :ok
+      AccessToken.present?(config) -> :ok
       oauth? -> :ok
       true -> {:error, :missing_credentials}
     end

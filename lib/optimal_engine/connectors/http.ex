@@ -35,6 +35,8 @@ defmodule OptimalEngine.Connectors.HTTP do
     * `:headers`        — list of `{name, value}`
     * `:body`           — map (will be JSON-encoded) or raw binary
     * `:timeout`        — ms (default 10_000)
+    * `:follow_redirects` - follow a 3xx answer (default `true`); `false`
+      hands the redirect back as the response
     * `:ratelimit`      — `{bucket_key, rate, burst}` to wait on before firing
     * `:parse_json`     — try to decode response body (default `true`)
   """
@@ -89,7 +91,9 @@ defmodule OptimalEngine.Connectors.HTTP do
         _ -> {String.to_charlist(url), to_charlist_headers(headers), content_type, body_payload}
       end
 
-    http_opts = [{:timeout, timeout}, {:connect_timeout, timeout}]
+    http_opts =
+      [{:timeout, timeout}, {:connect_timeout, timeout}] ++
+        if Keyword.get(opts, :follow_redirects, true), do: [], else: [{:autoredirect, false}]
 
     :httpc.request(method, http_request, http_opts, body_format: :binary)
   end

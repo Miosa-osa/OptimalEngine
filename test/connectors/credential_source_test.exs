@@ -10,9 +10,9 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Connectors
-  alias OptimalEngine.Connectors.{CredentialSource, Runner}
+  alias OptimalEngine.Connectors.{AccessToken, CredentialSource, Runner}
   alias OptimalEngine.Store
-  alias OptimalEngine.Test.ConnectorFixtureStub
+  alias OptimalEngine.Test.{BrokerStub, ConnectorFixtureStub}
 
   @stored_config %{
     "user_email" => "jane@example.com",
@@ -117,11 +117,18 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
     end
 
     test "a broker that refuses is named as refusing" do
-      for status <- [401, 403, 404] do
+      for status <- [403, 404] do
         stub = ConnectorFixtureStub.install(:credential_broker, status: status)
         assert {:error, :broker_refused} = CredentialSource.hydrate(@broker_config, %{})
         ConnectorFixtureStub.uninstall(stub)
       end
+    end
+
+    test "a broker that does not accept the reference is named as unauthorized" do
+      stub = ConnectorFixtureStub.install(:credential_broker, status: 401)
+      on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
+
+      assert {:error, :broker_unauthorized} = CredentialSource.hydrate(@broker_config, %{})
     end
 
     test "a broker with no credentials in the answer is a refusal, not an empty login" do
@@ -160,6 +167,138 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
                  %{"credential_source" => "broker", "broker_reference" => "conn_0000000000"},
                  %{}
                )
+    end
+  end
+
+  describe "an OAuth connection" do
+    test "is answered under credentials with an issued access token and its expiry" do
+      stub = BrokerStub.install(nil, issue: [{"example-issued-token", 300}])
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      assert {:ok, config} = CredentialSource.hydrate(@broker_config, %{})
+
+      assert %AccessToken{source: :broker, expires_at: %DateTime{} = at} =
+               config["credentials"]["access_token"]
+
+      assert DateTime.diff(at, DateTime.utc_now()) in 290..300
+      refute inspect(config) =~ "example-issued-token"
+    end
+
+    test "accepts the token at the top level, and expires_in when there is no expires_at" do
+      body = %{"access_token" => "example-issued-token", "expires_in" => 120}
+      stub = ConnectorFixtureStub.install(:credential_broker, body: body)
+      on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
+
+      assert {:ok, config} = CredentialSource.hydrate(@broker_config, %{})
+      assert %AccessToken{expires_at: at} = config["credentials"]["access_token"]
+      assert DateTime.diff(at, DateTime.utc_now()) in 110..120
+      assert Map.keys(config["credentials"]) == ["access_token"]
+    end
+
+    test "the broker settings and the reference are not handed to the adapter" do
+      stub = BrokerStub.install(nil, issue: [{"example-issued-token", 300}])
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      assert {:ok, config} = CredentialSource.hydrate(@broker_config, %{})
+      refute Map.has_key?(config, "broker_reference")
+      refute Map.has_key?(config, "broker_reference_ciphertext")
+    end
+
+    test "the request carries no header of the Engine's own, a bounded timeout and no redirect" do
+      stub = BrokerStub.install(nil, issue: [{"example-issued-token", 300}])
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      config = Map.put(@broker_config, "broker_timeout_ms", 600_000)
+      assert {:ok, _config} = CredentialSource.hydrate(config, %{})
+
+      assert [call] = BrokerStub.broker_calls(stub)
+      assert call.headers == []
+      assert call.timeout == 30_000
+      assert call.follow_redirects == false
+    end
+  end
+
+  describe "the broker URL" do
+    test "must be https on an allowed host, or no call is made" do
+      stub = BrokerStub.install(nil, issue: [{"example-issued-token", 300}])
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      for url <- [
+            "http://connect.example.com/api/credentials",
+            "https://elsewhere.example.com/api/credentials",
+            "https://user:pass@connect.example.com/api/credentials",
+            "https://169.254.169.254/latest/meta-data",
+            "connect.example.com/api/credentials",
+            "file:///etc/passwd"
+          ] do
+        assert {:error, :broker_url_not_allowed} =
+                 CredentialSource.hydrate(Map.put(@broker_config, "broker_url", url), %{}),
+               url
+      end
+
+      assert BrokerStub.broker_calls(stub) == []
+    end
+
+    test "is checked against the configured hosts without regard to case" do
+      assert :ok = CredentialSource.check_url("https://CONNECT.example.com/api/credentials")
+    end
+
+    test "with no hosts configured, no broker is called" do
+      original = Application.get_env(:optimal_engine, :credential_broker_hosts)
+      Application.delete_env(:optimal_engine, :credential_broker_hosts)
+      on_exit(fn -> Application.put_env(:optimal_engine, :credential_broker_hosts, original) end)
+
+      assert {:error, :broker_url_not_allowed} = CredentialSource.hydrate(@broker_config, %{})
+    end
+
+    test "a disallowed URL is refused when the connector is written", %{id: id} do
+      config = Map.put(@broker_config, "broker_url", "https://elsewhere.example.com/x")
+
+      assert {:error, :broker_url_not_allowed} = CredentialSource.check_persistable(config)
+
+      assert {:error, :broker_url_not_allowed} =
+               Connectors.register(%{id: id, kind: :recording, config: config})
+    end
+  end
+
+  describe "the broker reference" do
+    test "is sealed with CONNECTOR_KEY, and opened only for the broker call" do
+      assert {:ok, sealed} = CredentialSource.seal_reference(@broker_config)
+      refute Map.has_key?(sealed, "broker_reference")
+      assert is_binary(sealed["broker_reference_ciphertext"])
+      refute sealed["broker_reference_ciphertext"] =~ "conn_0000000000"
+
+      stub = BrokerStub.install(nil, issue: [{"example-issued-token", 300}])
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      assert {:ok, _config} = CredentialSource.hydrate(sealed, %{})
+      assert [call] = BrokerStub.broker_calls(stub)
+      assert call.body["reference"] == "conn_0000000000"
+    end
+
+    test "a seal this key cannot open is named, not sent" do
+      {:ok, sealed} = CredentialSource.seal_reference(@broker_config)
+      System.put_env("CONNECTOR_KEY", Base.encode16(:crypto.strong_rand_bytes(32), case: :lower))
+
+      assert {:error, :broker_reference_unreadable} = CredentialSource.hydrate(sealed, %{})
+    end
+
+    test "without CONNECTOR_KEY the write is refused" do
+      System.delete_env("CONNECTOR_KEY")
+
+      assert {:error, :connector_key_missing} = CredentialSource.seal_reference(@broker_config)
+    end
+
+    test "a config without a reference is unchanged" do
+      assert {:ok, @stored_config} = CredentialSource.seal_reference(@stored_config)
+    end
+
+    test "is stored sealed when the connector is registered", %{id: id} do
+      {:ok, ^id} = Connectors.register(%{id: id, kind: :recording, config: @broker_config})
+
+      {:ok, [[stored]]} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [id])
+      refute stored =~ "conn_0000000000"
+      assert stored =~ "broker_reference_ciphertext"
     end
   end
 
@@ -228,7 +367,7 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
     end
 
     test "a refused broker fails the sync before the adapter is initialised", %{id: id} do
-      stub = ConnectorFixtureStub.install(:credential_broker, status: 401)
+      stub = ConnectorFixtureStub.install(:credential_broker, status: 403)
       on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
 
       {:ok, ^id} = Connectors.register(%{id: id, kind: :recording, config: @broker_config})
