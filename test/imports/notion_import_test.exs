@@ -357,6 +357,73 @@ defmodule OptimalEngine.Imports.NotionTest do
     assert contexts(ctx.workspace) == %{}
   end
 
+  test "two tenants that share a bare workspace id never retract each other's edges", ctx do
+    n = System.unique_integer([:positive])
+    other = "notion-other-#{n}"
+    {:ok, _} = Tenant.create(%{id: other, name: "Other #{n}"})
+
+    # A bare id names no workspace and no tenant, so both tenants' rows and
+    # edges land in it under the default tenant.
+    ws = "shared-#{n}"
+    i = Fixture.ids()
+
+    # The other tenant's export: the same pages under different Notion ids.
+    swap = Map.new(Map.values(i), &{&1, String.reverse(&1)})
+    assert MapSet.disjoint?(MapSet.new(Map.keys(swap)), MapSet.new(Map.values(swap)))
+
+    rename = fn text ->
+      Enum.reduce(swap, text, fn {from, to}, t -> String.replace(t, from, to) end)
+    end
+
+    theirs = Enum.map(Fixture.files(), fn {path, body} -> {rename.(path), rename.(body)} end)
+
+    ours_handbook = Notion.context_id(ws, i.handbook)
+    their_handbook = Notion.context_id(ws, swap[i.handbook])
+
+    links = fn handbook ->
+      {:ok, edges} = Graph.edges_for(handbook, relation: "links_to", workspace_id: ws)
+      edges |> Enum.map(& &1.target_id) |> Enum.sort()
+    end
+
+    parent = fn page ->
+      {:ok, edges} = Graph.edges_for(page, relation: "child_of", workspace_id: ws)
+      Enum.map(edges, & &1.target_id)
+    end
+
+    {:ok, _} = import!(ctx, Fixture.export(), workspace: ws)
+    {:ok, _} = import!(ctx, Fixture.zip(theirs), workspace: ws, tenant_id: other)
+
+    ours_before = links.(ours_handbook)
+    theirs_before = links.(their_handbook)
+    assert length(ours_before) == 2 and length(theirs_before) == 2
+
+    # Each re-imports an export whose handbook links to nothing: each loses
+    # only its own links, and every child_of edge of the other stays.
+    unlink = fn files, id ->
+      Enum.map(files, fn {path, body} ->
+        if String.ends_with?(path, "Team Handbook #{id}.md"),
+          do: {path, "# Team Handbook\n\nNo links now.\n"},
+          else: {path, body}
+      end)
+    end
+
+    {:ok, _} = import!(ctx, Fixture.zip(unlink.(Fixture.files(), i.handbook)), workspace: ws)
+    assert links.(ours_handbook) == []
+    assert links.(their_handbook) == theirs_before
+    assert parent.(Notion.context_id(ws, swap[i.onboarding])) == [their_handbook]
+
+    {:ok, _} =
+      import!(ctx, Fixture.zip(unlink.(theirs, swap[i.handbook])), workspace: ws, tenant_id: other)
+
+    assert links.(their_handbook) == []
+    assert parent.(Notion.context_id(ws, i.onboarding)) == [ours_handbook]
+
+    # Restoring our links touches nothing of theirs.
+    {:ok, _} = import!(ctx, Fixture.export(), workspace: ws)
+    assert links.(ours_handbook) == ours_before
+    assert links.(their_handbook) == []
+  end
+
   test "a re-import retracts only the edges the importer owns", ctx do
     i = Fixture.ids()
     ws = ctx.workspace
