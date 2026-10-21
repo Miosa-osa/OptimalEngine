@@ -63,6 +63,21 @@ defmodule OptimalEngine.Storage.AssetsTest do
     System.put_env("OPTIMAL_S3_REGION", stub.region)
   end
 
+  # Sends this test every fallback event's metadata.
+  defp watch_fallbacks do
+    handler = "asset-fallback-#{System.unique_integer([:positive])}"
+    test = self()
+
+    :telemetry.attach(
+      handler,
+      [:optimal_engine, :storage, :asset_fallback],
+      fn _event, _measurements, metadata, _config -> send(test, {:asset_fallback, metadata}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
   # The snapshot call is ordered after this process's telemetry events.
   defp fallback_count do
     OptimalEngine.Telemetry.snapshot().counters[:"optimal_engine.storage.asset_fallback"] || 0
@@ -180,6 +195,7 @@ defmodule OptimalEngine.Storage.AssetsTest do
 
     {source, bytes} = write_source(tmp, "fallback.bin")
     fallbacks = fallback_count()
+    watch_fallbacks()
 
     log =
       capture_log(fn ->
@@ -197,6 +213,9 @@ defmodule OptimalEngine.Storage.AssetsTest do
     assert S3Stub.object_keys(stub.agent) == []
     # The alert is also a counter an operator can scrape and alert on.
     assert fallback_count() == fallbacks + 1
+    # The metric names the reason only, never the object key or the error.
+    assert_received {:asset_fallback, %{reason: :s3_upload_failed} = metadata}
+    assert map_size(metadata) == 1
   end
 
   test "an unconfigured object store falls back to the filesystem with an alert", %{
@@ -206,6 +225,7 @@ defmodule OptimalEngine.Storage.AssetsTest do
     System.put_env("OPTIMAL_ASSET_STORAGE", "s3")
     {source, bytes} = write_source(tmp, "unconfigured.bin")
     fallbacks = fallback_count()
+    watch_fallbacks()
 
     log =
       capture_log(fn ->
@@ -218,6 +238,8 @@ defmodule OptimalEngine.Storage.AssetsTest do
 
     assert log =~ "s3 is selected for assets but not configured"
     assert fallback_count() == fallbacks + 1
+    assert_received {:asset_fallback, %{reason: :s3_not_configured} = metadata}
+    assert map_size(metadata) == 1
   end
 
   test "an explicit option overrides the workspace policy", %{

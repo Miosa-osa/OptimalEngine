@@ -165,17 +165,18 @@ defmodule OptimalEngine.API.ScopeAPI do
     end
   end
 
-  # The raw file is streamed to `.upload-N.part` in the tenant's folder, a chunk
-  # at a time, hashed as it arrives, refused past the size limit and the upload
-  # deadline, so a bundle of any size is never held in memory. Complete and
-  # checked, it is renamed `.upload-N.tar.gz` and imported. The leading dot
-  # keeps it apart from every bundle name (WorkspaceBundle.bundle_path/2).
+  # The raw file is streamed to `bundle.part` in an owner-only folder of its
+  # own, `.upload-N` in the tenant's folder, a chunk at a time, hashed as it
+  # arrives, refused past the size limit and the upload deadline, so a bundle
+  # of any size is never held in memory. Complete and checked, it is renamed
+  # `bundle.tar.gz` and imported. The leading dot keeps the folder apart from
+  # every bundle name (WorkspaceBundle.bundle_path/2).
   #
   # The body is read under the HTTP server's own idle limits: a client that
   # goes silent is closed. Only the import that follows is kept open as long as
-  # it runs (allow_long_request/1). A process watching the request removes both
-  # files when it ends, also when the connection kills it, which runs no
-  # `after`; an Engine that stopped mid-upload removes them at its next boot
+  # it runs (allow_long_request/1). A process watching the request removes the
+  # folder when it ends, also when the connection kills it, which runs no
+  # `after`; an Engine that stopped mid-upload removes it at its next boot
   # (WorkspaceBundle.sweep_leftovers/0).
   defp import_upload(conn) do
     upload =
@@ -184,9 +185,11 @@ defmodule OptimalEngine.API.ScopeAPI do
         ".upload-#{System.unique_integer([:positive])}"
       )
 
-    part = upload <> ".part"
-    path = upload <> ".tar.gz"
-    remove_when_done([part, path])
+    File.mkdir_p!(upload)
+    File.chmod!(upload, 0o700)
+    part = Path.join(upload, "bundle.part")
+    path = Path.join(upload, "bundle.tar.gz")
+    remove_when_done(upload)
 
     try do
       with {:ok, expected} <- declared_sha256(conn),
@@ -207,6 +210,13 @@ defmodule OptimalEngine.API.ScopeAPI do
         {:error, :too_large, conn} ->
           error(conn, 413, "the bundle is larger than #{max_upload_bytes()} bytes")
 
+        {:error, :insufficient_storage} ->
+          insufficient_storage(conn)
+
+        # The disk filled while the bundle arrived.
+        {:error, :enospc, conn} ->
+          insufficient_storage(conn)
+
         {:error, {:sha256_mismatch, actual}} ->
           json(conn, 422, %{error: "bundle_sha256_mismatch", received_sha256: actual})
 
@@ -224,21 +234,28 @@ defmodule OptimalEngine.API.ScopeAPI do
           error(conn, 500, "upload failed: #{inspect(reason)}")
       end
     after
-      File.rm(part)
-      File.rm(path)
+      File.rm_rf(upload)
     end
   end
 
-  defp remove_when_done(paths) do
+  defp remove_when_done(folder) do
     owner = self()
 
     spawn(fn ->
       ref = Process.monitor(owner)
 
       receive do
-        {:DOWN, ^ref, :process, _pid, _reason} -> Enum.each(paths, &File.rm/1)
+        {:DOWN, ^ref, :process, _pid, _reason} -> File.rm_rf(folder)
       end
     end)
+  end
+
+  defp insufficient_storage(conn) do
+    error(
+      conn,
+      507,
+      "insufficient_storage: the disk cannot hold this bundle and what it unpacks to"
+    )
   end
 
   defp run_import(conn, path, params, extra) do
@@ -272,6 +289,12 @@ defmodule OptimalEngine.API.ScopeAPI do
             403,
             "bundle_from_another_tenant: only the Engine operator imports another tenant's bundle, with cross_tenant=true"
           )
+
+        {:error, :insufficient_storage} ->
+          insufficient_storage(conn)
+
+        {:error, :bundle_too_large} ->
+          error(conn, 413, "bundle_too_large: the bundle unpacks to more than this Engine accepts")
 
         {:error, reason} ->
           error(conn, 422, inspect(reason))
@@ -401,7 +424,9 @@ defmodule OptimalEngine.API.ScopeAPI do
     end
   end
 
-  # A Content-Length past the limit is refused before a byte is read.
+  # A Content-Length past the limit, or more than the disk has free, is
+  # refused before a byte is read. Whether the disk also holds what the
+  # bundle unpacks to is checked once it is here (WorkspaceBundle.import/3).
   defp declared_size_allowed(conn) do
     max = max_upload_bytes()
 
@@ -409,11 +434,19 @@ defmodule OptimalEngine.API.ScopeAPI do
       [value | _] ->
         case Integer.parse(value) do
           {declared, ""} when declared > max -> {:error, :too_large}
+          {declared, ""} -> room_for(WorkspaceBundle.bundle_dir(tenant(conn)), declared)
           _ -> :ok
         end
 
       [] ->
         :ok
+    end
+  end
+
+  defp room_for(dir, bytes) do
+    case WorkspaceBundle.free_bytes(dir) do
+      free when is_integer(free) and free < bytes -> {:error, :insufficient_storage}
+      _ -> :ok
     end
   end
 
@@ -435,7 +468,7 @@ defmodule OptimalEngine.API.ScopeAPI do
   # Each chunk is counted, hashed and written before the next is read, and
   # reported as [:optimal_engine, :bundle, :upload_chunk] with its byte size.
   defp copy_body(conn, file, received, hash, deadline) do
-    case read_body(conn, length: upload_chunk_bytes(), read_timeout: upload_read_timeout(deadline)) do
+    case read_body(conn, upload_read_opts(conn, deadline)) do
       {status, data, conn} when status in [:ok, :more] ->
         received = received + byte_size(data)
 
@@ -475,6 +508,18 @@ defmodule OptimalEngine.API.ScopeAPI do
         {:error, reason, conn}
     end
   end
+
+  # Under Cowboy, `length: 0` returns after the first read that brings data:
+  # a read takes at most a chunk and waits at most 15 s, never past the
+  # deadline. The deadline is therefore checked at least every 15 s, also
+  # against a client that sends a byte now and then (with a whole chunk as
+  # the length, Plug.Cowboy would keep reading such a client until the chunk
+  # filled). A client that sends nothing is closed by Cowboy's idle timeout.
+  # Plug.Test reads a chunk at a time.
+  defp upload_read_opts(%Plug.Conn{adapter: {Plug.Cowboy.Conn, _req}}, deadline),
+    do: [length: 0, read_length: upload_chunk_bytes(), read_timeout: upload_read_timeout(deadline)]
+
+  defp upload_read_opts(_conn, _deadline), do: [length: upload_chunk_bytes()]
 
   # One read waits at most 15 s for data, and never past the deadline.
   defp upload_read_timeout(deadline),

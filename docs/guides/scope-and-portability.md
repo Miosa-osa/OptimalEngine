@@ -219,6 +219,7 @@ A requested `workspace_id` must name the importing tenant (`<tenant>:<slug>`, or
 What a bundle can still do within those tables is add rows to the workspace it creates or merges into, and add principals to the importing tenant: every principals row is written with that tenant, and an id the Engine already has keeps its existing row.
 
 Each tenant has its own bundle folder, `<backup dir>/bundles/<tenant>/`, where `<backup dir>` is `OPTIMAL_BACKUP_DIR` (or `backups` beside the database).
+The folder, every upload in it and the staging folders are readable by the Engine's user only, and an export's file is written with mode 0600.
 An export is written there, a download and an import by name read only from there, and a raw upload is staged there.
 A control plane that copies a bundle onto the Engine's disk and imports it by name places it in that folder, for example `/data/.optimal/backups/bundles/default/<name>` for the `default` tenant with `OPTIMAL_BACKUP_DIR=/data/.optimal/backups`.
 A bundle whose manifest names another tenant is answered as not found by name or on download, and refused with 403 `bundle_from_another_tenant` as an upload.
@@ -226,11 +227,15 @@ Only the Engine operator (a `default`-tenant admin key whose workspace scope is 
 Bundles from before this release sit in `bundles/` itself; move one into its tenant's folder to use it.
 
 A raw upload is written to disk a chunk at a time and hashed as it arrives, so a bundle of any size is never held in memory.
-It is refused with 413 past `OPTIMAL_BUNDLE_MAX_BYTES` (5 GiB by default), before reading when `content-length` says so; with 422 `bundle_sha256_mismatch` when `x-bundle-sha256` names another SHA-256 of the file; and with 408 `upload_timeout` when it takes longer than an hour from first byte to last (`config :optimal_engine, :bundle_upload_deadline_ms`).
+It is refused with 413 past `OPTIMAL_BUNDLE_MAX_BYTES` (5 GiB by default), before reading when `content-length` says so; with 507 `insufficient_storage` before reading when `content-length` is more than the disk has free, or when the disk fills while it arrives; with 422 `bundle_sha256_mismatch` when `x-bundle-sha256` names another SHA-256 of the file; and with 408 `upload_timeout` when it takes longer than an hour from first byte to last (`config :optimal_engine, :bundle_upload_deadline_ms`).
+The deadline is checked after every read, and a read waits at most 15 seconds, so a client that sends a byte now and then is stopped at the deadline too.
 The body is read under the HTTP server's own idle limits, so a client that stops sending is closed.
-It is written to `.upload-<n>.part` and renamed `.upload-<n>.tar.gz` once complete and checked; both are removed when the request ends, also when the connection is cut, and an Engine that stopped mid-upload removes them at its next boot, with the export and import staging folders (`bundle-*`) not changed for two hours.
+Each upload has a folder of its own, `.upload-<n>/`, where it is written to `bundle.part` and renamed `bundle.tar.gz` once complete and checked.
+The folder is removed when the request ends, also when the connection is cut, and an Engine that stopped mid-upload removes it at its next boot, with the export and import staging folders (`bundle-*`) not changed for two hours.
 The leading dot keeps an upload apart from every bundle name, which must start with a letter or digit, so the boot sweep never takes a retained export for one.
 Exports and imports unpack in `<backup dir>/staging/`, on the data volume.
+Before unpacking, an import reads the bundle's table of contents: a bundle that unpacks to more than 50 GiB (`config :optimal_engine, :bundle_max_unpacked_bytes`) is refused with 413 `bundle_too_large`, and one that unpacks to more than the disk has free with 507 `insufficient_storage`.
+An upload's file is deleted once the import is verified and planned, before any row is written, so a large import does not hold two copies of the bundle while it writes; a bundle imported by name stays in the bundle folder.
 Export, import by name, download, and the import that follows a complete upload keep their connection open for as long as they run, so a large workspace is not cut off by the HTTP server's idle limits.
 
 The export seals every change the replication ledger has captured, then reads the ledger's high-water mark and every row in one read transaction on a connection of its own: a snapshot of the database.
@@ -240,9 +245,12 @@ The read runs beside the Engine's single writer, so requests and writes go on wh
 While it runs, the database's write-ahead log cannot be checkpointed past the export's snapshot, so the `-wal` file grows by the volume written during the export; the first checkpoint after the export ends moves those pages into the database.
 When the workspace has a captured change not yet sealed as the read begins, the export seals it and starts the read again; if writes keep arriving it answers 503 `writes_in_progress`, and the export can be retried or the writes paused.
 Import verifies the manifest, every table file, and every file checksum before writing anything.
+A manifest entry without a checksum, or a table or file it names that is not in the bundle, is refused.
 Rows are then written in short transactions of 1,000 rows, tables in foreign-key order and the rows of a self-referencing table (memories, nodes) parents first, with foreign keys checked at each commit.
 A large workspace therefore never holds the Engine's single writer long enough to stall other requests or time out.
-A failed `create` removes every row it wrote and the workspace record, so it can simply be retried; a failed `merge` can be run again, because it only adds missing rows.
+A failed `create` removes every row and file it wrote and the workspace record, so it can simply be retried; a failed `merge` can be run again, because it only adds missing rows.
+A `merge` into a workspace that does not exist yet creates it, and is removed the same way when it fails.
+A workspace an import was creating when the Engine stopped is removed at the next boot, before the API takes requests: the import marks it in `<backup dir>/importing/` before the record is made, and removes the mark once everything is written.
 Registry rows every Engine derives under the same id (principals, model call operations) are kept when the target already has them.
 Tenant and workspace ids are rewritten to the target; integer row ids are reassigned.
 `create` refuses an existing workspace; `merge` keeps existing rows.

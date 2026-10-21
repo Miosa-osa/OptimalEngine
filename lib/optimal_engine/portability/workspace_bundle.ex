@@ -86,9 +86,23 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       staging = staging_dir()
 
       try do
+        started = System.monotonic_time(:millisecond)
+
         with {:ok, {mark, tables}} <- snapshot_tables(tenant_id, workspace_id, staging) do
+          read = System.monotonic_time(:millisecond)
           files = export_files(workspace_id, staging)
-          write_bundle(tenant_id, workspace, mark, tables, files, staging, path)
+          copied = System.monotonic_time(:millisecond)
+          result = write_bundle(tenant_id, workspace, mark, tables, files, staging, path)
+          packed = System.monotonic_time(:millisecond)
+
+          # Where a large export spends its time: reading the rows, copying the
+          # files, compressing the archive.
+          Logger.info(
+            "[WorkspaceBundle] exported #{workspace_id}: rows #{read - started} ms, " <>
+              "files #{copied - read} ms, pack #{packed - copied} ms"
+          )
+
+          result
         end
       after
         File.rm_rf(staging)
@@ -173,9 +187,17 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   Imports a bundle into `tenant_id`. Options: `:workspace_id` (target id;
   default the source id with the target tenant), `:organization_id`,
   `:mode` (`:create` or `:merge`), `:consume` (delete the bundle file once
-  it is unpacked, for an upload nobody keeps, so a large import holds one copy
-  of the bundle on disk instead of two), and `:cross_tenant`. Returns a summary
-  with the bundle hash.
+  the import is verified and planned, for an upload nobody keeps, so a large
+  import holds one copy of the bundle on disk instead of two), and
+  `:cross_tenant`. Returns a summary with the bundle hash.
+
+  A workspace the import creates (`create`, or `merge` into a workspace that
+  does not exist yet) is removed again, rows, files and record, when the
+  import fails, and at the next boot when the Engine stopped during it
+  (`discard_unfinished_imports/1`). A bundle that unpacks to more than
+  `config :optimal_engine, :bundle_max_unpacked_bytes` (50 GiB) or more than
+  the disk holds is refused (`:bundle_too_large`, `:insufficient_storage`)
+  before anything is unpacked.
 
   A bundle exported by another tenant is refused with
   `{:error, :bundle_from_another_tenant}` before anything is written, unless
@@ -188,15 +210,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     try do
       with :ok <- unpack(path, staging),
-           :ok <- if(opts[:consume], do: File.rm(path), else: :ok),
            {:ok, manifest} <- read_manifest(staging),
            :ok <- permitted(manifest),
            :ok <- verify(manifest, staging),
            :ok <- same_tenant(manifest, tenant_id, opts),
-           {:ok, plan} <- plan(manifest, tenant_id, opts),
            :ok <- compatible(manifest, staging),
-           {:ok, counts} <- write_rows(manifest, staging, plan, opts),
-           {:ok, file_count} <- write_files(manifest, staging, plan) do
+           {:ok, plan} <- plan(manifest, tenant_id, opts),
+           :ok <- consume(path, opts),
+           {:ok, counts, file_count} <- write_planned(manifest, staging, plan, opts) do
         {:ok,
          %{
            workspace_id: plan.workspace_id,
@@ -217,8 +238,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   @doc """
   Removes what a run that never finished left behind: raw uploads still being
-  received (`.upload-*.part`) or received and not yet imported
-  (`.upload-*.tar.gz`) in the tenants' bundle folders, and the `bundle-*`
+  received or received and not yet imported (the `.upload-*` folders) in the
+  tenants' bundle folders, and the `bundle-*`
   staging folders of exports and imports last changed more than two hours
   ago. A run removes its own files whatever happens, so these are only left by
   an Engine that stopped mid-way. Nothing else is touched: an upload's name
@@ -228,10 +249,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   """
   @spec sweep_leftovers() :: non_neg_integer()
   def sweep_leftovers do
+    # An upload is a `.upload-<n>` folder (files of that name from an earlier
+    # release are removed the same way).
     uploads =
-      Path.wildcard(Path.join([backup_base(), "bundles", "*", ".upload-*.{part,tar.gz}"]),
-        match_dot: true
-      )
+      Path.wildcard(Path.join([backup_base(), "bundles", "*", ".upload-*"]), match_dot: true)
 
     cutoff = System.os_time(:second) - @stale_staging_seconds
 
@@ -243,8 +264,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         match?({:ok, %{mtime: mtime}} when mtime < cutoff, File.stat(path, time: :posix))
       end)
 
-    Enum.each(uploads, &File.rm/1)
-    Enum.each(staged, &File.rm_rf/1)
+    Enum.each(uploads ++ staged, &File.rm_rf/1)
     length(uploads) + length(staged)
   end
 
@@ -260,6 +280,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   def bundle_dir(tenant_id) when is_binary(tenant_id) do
     dir = Path.join([backup_base(), "bundles", tenant_folder(tenant_id)])
     File.mkdir_p!(dir)
+    File.chmod(dir, 0o700)
     dir
   end
 
@@ -535,7 +556,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     names = Enum.map(columns, &elem(&1, 0))
 
     {rows, hash} =
-      File.open!(file, [:write, :binary], fn io ->
+      File.open!(file, [:write, :binary, :raw, :delayed_write], fn io ->
         snap
         |> table_rows(table, where, params)
         |> Enum.reduce({0, :crypto.hash_init(:sha256)}, fn row, {count, hash} ->
@@ -597,10 +618,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         File.mkdir_p!(Path.dirname(destination))
         File.cp!(file, destination)
 
+        # The copy is what the bundle carries, so its size and hash are the
+        # copy's: a file that changes after it is copied still verifies.
         %{
           "path" => relative,
-          "bytes" => File.stat!(file).size,
-          "sha256" => file_sha256(file)
+          "bytes" => File.stat!(destination).size,
+          "sha256" => file_sha256(destination)
         }
       end)
       |> Enum.sort_by(& &1["path"])
@@ -660,14 +683,19 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     claimed = manifest["bundle_sha256"]
     recomputed = manifest |> Map.delete("bundle_sha256") |> CanonicalJSON.hash()
 
+    # A missing file hashes to nil, and so does a manifest entry without a
+    # checksum: both sides must be a checksum, and the same one.
     table_ok =
       Enum.all?(manifest["tables"], fn table ->
-        file_sha256(Path.join([staging, "tables", table["name"] <> ".jsonl"])) == table["sha256"]
+        same_sha256?(
+          file_sha256(Path.join([staging, "tables", table["name"] <> ".jsonl"])),
+          table["sha256"]
+        )
       end)
 
     files_ok =
       Enum.all?(manifest["files"], fn file ->
-        file_sha256(Path.join([staging, "files", file["path"]])) == file["sha256"]
+        same_sha256?(file_sha256(Path.join([staging, "files", file["path"]])), file["sha256"])
       end)
 
     cond do
@@ -677,6 +705,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       true -> :ok
     end
   end
+
+  defp same_sha256?(actual, expected),
+    do: is_binary(actual) and is_binary(expected) and actual == expected
 
   defp same_tenant(%{"tenant_id" => tenant_id}, tenant_id, _opts), do: :ok
 
@@ -731,7 +762,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
                mode: :merge,
                source: source,
                external_id: existing.external_id,
-               imported_external_id: nil
+               imported_external_id: nil,
+               created: false,
+               marker: nil
              }},
           else: {:error, :workspace_exists}
 
@@ -754,7 +787,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
             opts[:organization_id] || OptimalEngine.Organization.default_for(tenant_id)
         }
 
-        case create_keeping_external_id(attrs) do
+        # Marked before the record exists, so an Engine that stops at any
+        # point of the import leaves nothing that is not removed at boot.
+        marker = mark_importing(tenant_id, target_id)
+
+        case create_marked(attrs, marker) do
           {:ok, workspace, set_aside} ->
             {:ok,
              %{
@@ -763,13 +800,25 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
                mode: mode,
                source: source,
                external_id: workspace.external_id,
-               imported_external_id: set_aside
+               imported_external_id: set_aside,
+               created: true,
+               marker: marker
              }}
 
           error ->
+            File.rm(marker)
             error
         end
     end
+  end
+
+  # A create that raises was never this import's workspace either.
+  defp create_marked(attrs, marker) do
+    create_keeping_external_id(attrs)
+  rescue
+    error ->
+      File.rm(marker)
+      reraise error, __STACKTRACE__
   end
 
   # An external id names at most one active workspace of a tenant (an
@@ -839,6 +888,82 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       table["columns"] -- Enum.map(columns(target), &elem(&1, 0)) == []
   end
 
+  # Rows, then files. A workspace this import created stays marked as
+  # importing on disk (plan_target/3) until both are written: an import that
+  # fails removes what it wrote, and one cut off by a stopped Engine is
+  # removed at the next boot (discard_unfinished_imports/1).
+  defp write_planned(manifest, staging, plan, opts) do
+    try do
+      with {:ok, counts} <- write_rows(manifest, staging, plan, opts),
+           {:ok, file_count} <- write_files(manifest, staging, plan) do
+        {:ok, counts, file_count}
+      end
+    rescue
+      error ->
+        if plan.created, do: undo_create(plan)
+        reraise error, __STACKTRACE__
+    after
+      if plan.marker, do: File.rm(plan.marker)
+    end
+  end
+
+  # An upload nobody keeps is deleted once the import is planned, so a large
+  # import holds one copy of the bundle on disk; failing to delete it does not
+  # fail the import.
+  defp consume(path, opts) do
+    if opts[:consume], do: File.rm(path)
+    :ok
+  end
+
+  @doc """
+  The marks of the imports that were creating a workspace when the Engine
+  stopped (an import removes its mark once it has written everything, or
+  removed what it wrote).
+  """
+  @spec unfinished_imports() :: [String.t()]
+  def unfinished_imports, do: importing_root() |> Path.join("*.json") |> Path.wildcard()
+
+  @doc """
+  Removes the workspaces that the given marks name (`unfinished_imports/0`):
+  their rows, files and record, then the marks. The Engine that serves the
+  API lists the marks before it starts and calls this once the Store is up,
+  before it takes requests. Returns how many were removed.
+  """
+  @spec discard_unfinished_imports([String.t()]) :: non_neg_integer()
+  def discard_unfinished_imports(markers) do
+    Enum.count(markers, fn marker ->
+      removed =
+        with {:ok, json} <- File.read(marker),
+             {:ok, %{"tenant_id" => tenant_id, "workspace_id" => workspace_id}}
+             when is_binary(tenant_id) and is_binary(workspace_id) <- Jason.decode(json) do
+          undo_create(%{tenant_id: tenant_id, workspace_id: workspace_id})
+
+          Logger.warning(
+            "[WorkspaceBundle] removed #{workspace_id}, which an import was creating when the Engine stopped"
+          )
+
+          true
+        else
+          _ -> false
+        end
+
+      File.rm(marker)
+      removed
+    end)
+  end
+
+  # Each import has a mark of its own, so an import that loses a race to
+  # create the same workspace removes only its own.
+  defp mark_importing(tenant_id, workspace_id) do
+    File.mkdir_p!(importing_root())
+    name = :crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower)
+    marker = Path.join(importing_root(), name <> ".json")
+    File.write!(marker, Jason.encode!(%{tenant_id: tenant_id, workspace_id: workspace_id}))
+    marker
+  end
+
+  defp importing_root, do: Path.join(backup_base(), "importing")
+
   defp write_rows(manifest, staging, plan, opts) do
     insert = if plan.mode == :merge, do: "INSERT OR IGNORE", else: "INSERT"
     batch_rows = opts |> Keyword.get(:batch_rows, @batch_rows) |> max(1)
@@ -879,7 +1004,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       end
 
     with {:error, _} = error <- result do
-      if plan.mode == :create, do: undo_create(plan)
+      if plan.created, do: undo_create(plan)
       error
     end
   end
@@ -929,6 +1054,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp undo_create(plan) do
     delete_rows(plan.tenant_id, plan.workspace_id)
     Store.raw_query("DELETE FROM workspaces WHERE id = ?1", [plan.workspace_id])
+    files = Filesystem.path(root(), plan.workspace_id)
+
+    # The files an import copied, never the Engine root itself.
+    if Path.expand(files) != Path.expand(root()), do: File.rm_rf(files)
   rescue
     error ->
       Logger.error(
@@ -1232,7 +1361,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         {String.to_charlist(relative), String.to_charlist(Path.join(staging, relative))}
       end)
 
-    :erl_tar.create(String.to_charlist(path), entries, [:compressed])
+    with :ok <- :erl_tar.create(String.to_charlist(path), entries, [:compressed]) do
+      File.chmod(path, 0o600)
+    end
   end
 
   # The manifest of a bundle: the first entry when it is named manifest.json
@@ -1279,13 +1410,62 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   defp unpack(path, staging) do
-    case :erl_tar.extract(String.to_charlist(path), [
-           :compressed,
-           {:cwd, String.to_charlist(staging)}
-         ]) do
-      :ok -> if escaped?(staging), do: {:error, :unsafe_bundle}, else: :ok
-      {:error, reason} -> {:error, {:unreadable_bundle, reason}}
+    with :ok <- room_to_unpack(path) do
+      case :erl_tar.extract(String.to_charlist(path), [
+             :compressed,
+             {:cwd, String.to_charlist(staging)}
+           ]) do
+        :ok -> if escaped?(staging), do: {:error, :unsafe_bundle}, else: :ok
+        {:error, reason} -> {:error, {:unreadable_bundle, reason}}
+      end
     end
+  end
+
+  # The archive's table of contents is read before anything is written, so a
+  # bundle that unpacks to more than the limit
+  # (`config :optimal_engine, :bundle_max_unpacked_bytes`, 50 GiB) or more
+  # than the disk holds is refused instead of filling the data volume.
+  defp room_to_unpack(path) do
+    case :erl_tar.table(String.to_charlist(path), [:compressed, :verbose]) do
+      {:ok, entries} ->
+        unpacked = entries |> Enum.map(&elem(&1, 2)) |> Enum.sum()
+        free = free_bytes(staging_root())
+
+        cond do
+          unpacked > max_unpacked_bytes() -> {:error, :bundle_too_large}
+          is_integer(free) and free < unpacked -> {:error, :insufficient_storage}
+          true -> :ok
+        end
+
+      {:error, reason} ->
+        {:error, {:unreadable_bundle, reason}}
+    end
+  end
+
+  defp max_unpacked_bytes,
+    do: Application.get_env(:optimal_engine, :bundle_max_unpacked_bytes, 50 * 1024 * 1024 * 1024)
+
+  @doc false
+  # Bytes free on the filesystem holding `dir`, or nil when it cannot be read.
+  @spec free_bytes(String.t()) :: non_neg_integer() | nil
+  def free_bytes(dir) do
+    File.mkdir_p(dir)
+
+    case System.cmd("df", ["-Pk", dir], stderr_to_stdout: true) do
+      {out, 0} ->
+        with [_header, line | _] <- String.split(out, "\n", trim: true),
+             [_fs, _blocks, _used, available | _] <- String.split(line),
+             {kb, ""} <- Integer.parse(available) do
+          kb * 1_024
+        else
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
   end
 
   # erl_tar refuses absolute and parent-relative names; still confirm nothing
@@ -1308,6 +1488,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp staging_dir do
     dir = Path.join(staging_root(), "bundle-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
+    File.chmod!(dir, 0o700)
     dir
   end
 

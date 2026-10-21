@@ -137,16 +137,18 @@ defmodule OptimalEngine.Storage.Assets do
            }}
 
         {:error, reason} ->
-          alert("asset object upload failed, keeping the file on the local filesystem", %{
-            key: key,
-            reason: inspect(reason)
-          })
+          alert(
+            "asset object upload failed, keeping the file on the local filesystem",
+            :s3_upload_failed,
+            %{key: key, reason: inspect(reason)}
+          )
 
           store_on_filesystem(source_path, attrs, opts, "s3_upload_failed")
       end
     else
       alert(
         "s3 is selected for assets but not configured, keeping the file on the local filesystem",
+        :s3_not_configured,
         %{key: key}
       )
 
@@ -339,12 +341,16 @@ defmodule OptimalEngine.Storage.Assets do
   # so it is logged at error level, counted in the Engine's metrics
   # (`optimal_engine.storage.asset_fallback` in /api/metrics and Prometheus),
   # and never reported as a successful upload.
-  defp alert(message, fields) do
+  # The log line names the object key and the error; the metric carries only
+  # the fallback reason, so nothing about the object reaches a metrics sink.
+  defp alert(message, reason, fields) do
     Logger.error(fn ->
       "asset storage alert: #{message} " <>
         Enum.map_join(fields, " ", fn {key, value} -> "#{key}=#{value}" end)
     end)
 
-    :telemetry.execute([:optimal_engine, :storage, :asset_fallback], %{count: 1}, Map.new(fields))
+    :telemetry.execute([:optimal_engine, :storage, :asset_fallback], %{count: 1}, %{
+      reason: reason
+    })
   end
 end

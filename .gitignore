@@ -31,6 +31,9 @@ pnpm-debug.log*
 /tmp/
 /.optimal/
 
+# Credentials a proof run reads (scripts/proof-offsite-backup.sh)
+.gate-secrets/
+
 # Generated on crash by the VM
 erl_crash.dump
 

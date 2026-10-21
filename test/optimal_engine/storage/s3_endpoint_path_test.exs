@@ -12,7 +12,7 @@ defmodule OptimalEngine.Storage.S3EndpointPathTest do
 
   alias OptimalEngine.Storage.S3
 
-  defp config(path, bucket \\ "engwo-1019-backup") do
+  defp config(path, bucket \\ "proof-backup") do
     %{
       endpoint: %URI{scheme: "https", authority: "api.miosa.ai", host: "api.miosa.ai", path: path},
       bucket: bucket,
@@ -27,20 +27,20 @@ defmodule OptimalEngine.Storage.S3EndpointPathTest do
   end
 
   test "the signed path includes the endpoint path" do
-    assert S3.signed_path(config("/api/v1/storage/s3"), "engwo-1019/backups/snap.enc") ==
-             "/api/v1/storage/s3/engwo-1019-backup/engwo-1019/backups/snap.enc"
+    assert S3.signed_path(config("/api/v1/storage/s3"), "proof/backups/snap.enc") ==
+             "/api/v1/storage/s3/proof-backup/proof/backups/snap.enc"
   end
 
   test "an endpoint without a path signs the bucket at the root" do
     assert S3.signed_path(config(nil), "backups/snap.enc") ==
-             "/engwo-1019-backup/backups/snap.enc"
+             "/proof-backup/backups/snap.enc"
 
     assert S3.signed_path(config("/"), "backups/snap.enc") ==
-             "/engwo-1019-backup/backups/snap.enc"
+             "/proof-backup/backups/snap.enc"
   end
 
   test "a trailing slash on the endpoint does not double the separator" do
     assert S3.signed_path(config("/api/v1/storage/s3/"), "k") ==
-             "/api/v1/storage/s3/engwo-1019-backup/k"
+             "/api/v1/storage/s3/proof-backup/k"
   end
 end

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # WO-31: the offsite backup and restore drill on real object storage.
 #
-# Needs an S3 credential and bucket for this run, supplied at `.gate-secrets/engwo-s3.env`
-# (an overlay for the gate machine; never committed). The file exports
+# Needs an S3 credential and bucket for this run, supplied at `.gate-secrets/s3-proof.env`
+# or the file SECRETS names (an overlay for the gate machine; `.gate-secrets/` is
+# ignored by git). The file exports
 # S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY.
 #
 # Proves, in order: an online backup with PRAGMA integrity_check that ships an
@@ -23,7 +24,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-SECRETS="${SECRETS:-$ROOT/.gate-secrets/engwo-s3.env}"
+SECRETS="${SECRETS:-$ROOT/.gate-secrets/s3-proof.env}"
 [ -r "$SECRETS" ] || {
   echo "FAIL no S3 credentials at $SECRETS"
   exit 1
@@ -46,8 +47,11 @@ export OPTIMAL_S3_BUCKET="$S3_BUCKET"
 export OPTIMAL_S3_REGION="${S3_REGION:-us-east-1}"
 export OPTIMAL_S3_ACCESS_KEY_ID="$S3_ACCESS_KEY_ID"
 export OPTIMAL_S3_SECRET_ACCESS_KEY="$S3_SECRET_ACCESS_KEY"
-export OPTIMAL_S3_PREFIX="${S3_PREFIX:-engwo-1019/}"
-export OPTIMAL_S3_TRACE="${OPTIMAL_S3_TRACE:-1}"
+export OPTIMAL_S3_PREFIX="${S3_PREFIX:-offsite-proof/}"
+# A trace logs every signed request's endpoint, bucket, canonical request and
+# signature to the server log, which a failure tails; turn it on only to debug
+# a rejected signature.
+export OPTIMAL_S3_TRACE="${OPTIMAL_S3_TRACE:-0}"
 export OPTIMAL_BACKUP_KEY="${OPTIMAL_BACKUP_KEY:-$(openssl rand -hex 32)}"
 export CONNECTOR_KEY="${CONNECTOR_KEY:-$(openssl rand -hex 32)}"
 export OPTIMAL_AUTHORITY_KEY="${OPTIMAL_AUTHORITY_KEY:-$(openssl rand -hex 32)}"

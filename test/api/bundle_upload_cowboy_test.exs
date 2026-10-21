@@ -2,7 +2,8 @@ defmodule OptimalEngine.API.BundleUploadCowboyTest do
   @moduledoc """
   Raw bundle uploads through a real Cowboy listener with short limits (idle
   timeout 2 s, inactivity timeout 3 s). A client that goes silent mid-upload
-  is closed by the server, and an upload its client cuts off leaves no file.
+  is closed by the server, an upload its client cuts off leaves no file, and
+  a client that sends a byte now and then is stopped at the upload deadline.
   The long-request watcher ticks every 500 ms here, so an upload read under
   it would be kept open and the silent client would never be closed.
   """
@@ -14,6 +15,7 @@ defmodule OptimalEngine.API.BundleUploadCowboyTest do
 
   setup do
     previous = Application.fetch_env(:optimal_engine, :bundle_long_request_tick_ms)
+    previous_deadline = Application.fetch_env(:optimal_engine, :bundle_upload_deadline_ms)
     Application.put_env(:optimal_engine, :bundle_long_request_tick_ms, 500)
     ref = :"bundle_upload_cowboy_#{System.unique_integer([:positive])}"
 
@@ -28,14 +30,15 @@ defmodule OptimalEngine.API.BundleUploadCowboyTest do
     on_exit(fn ->
       Plug.Cowboy.shutdown(ref)
 
-      case previous do
-        {:ok, tick} -> Application.put_env(:optimal_engine, :bundle_long_request_tick_ms, tick)
-        :error -> Application.delete_env(:optimal_engine, :bundle_long_request_tick_ms)
-      end
+      restore(:bundle_long_request_tick_ms, previous)
+      restore(:bundle_upload_deadline_ms, previous_deadline)
     end)
 
     %{port: :ranch.get_port(ref), before: uploads()}
   end
+
+  defp restore(key, {:ok, value}), do: Application.put_env(:optimal_engine, key, value)
+  defp restore(key, :error), do: Application.delete_env(:optimal_engine, key)
 
   defp uploads,
     do:
@@ -65,6 +68,39 @@ defmodule OptimalEngine.API.BundleUploadCowboyTest do
         {:error, :closed} -> :closed
         {:error, :timeout} -> :open
       end
+    end
+  end
+
+  # What the server sends until `expected` arrives, the connection closes, or
+  # the deadline passes.
+  defp read_response(socket, expected, deadline, acc \\ "") do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    cond do
+      acc =~ expected ->
+        acc
+
+      remaining <= 0 ->
+        acc
+
+      true ->
+        case :gen_tcp.recv(socket, 0, remaining) do
+          {:ok, data} -> read_response(socket, expected, deadline, acc <> data)
+          {:error, _closed_or_timeout} -> acc
+        end
+    end
+  end
+
+  # Sends one byte every 250 ms, well inside the idle and inactivity
+  # timeouts, so only the upload deadline can stop the client.
+  defp trickle(socket, 0), do: socket
+
+  defp trickle(socket, left) do
+    Process.sleep(250)
+
+    case :gen_tcp.send(socket, "x") do
+      :ok -> trickle(socket, left - 1)
+      {:error, _} -> socket
     end
   end
 
@@ -98,6 +134,23 @@ defmodule OptimalEngine.API.BundleUploadCowboyTest do
     assert eventually(fn -> uploads() -- ctx.before != [] end)
 
     :ok = :gen_tcp.close(socket)
+    assert eventually(fn -> uploads() -- ctx.before == [] end)
+  end
+
+  test "a client that sends a byte now and then is stopped at the upload deadline", ctx do
+    # A 1.5 s deadline against a client that would take 40 bytes 10 s.
+    Application.put_env(:optimal_engine, :bundle_upload_deadline_ms, 1_500)
+    socket = start_upload(ctx.port, 1_000_000, 1)
+    sender = spawn(fn -> trickle(socket, 40) end)
+    started = System.monotonic_time(:millisecond)
+
+    response = read_response(socket, "upload_timeout", started + 9_000)
+    elapsed = System.monotonic_time(:millisecond) - started
+    Process.exit(sender, :kill)
+
+    assert response =~ "HTTP/1.1 408"
+    assert response =~ "upload_timeout"
+    assert elapsed < 6_000, "the upload was stopped after #{elapsed} ms"
     assert eventually(fn -> uploads() -- ctx.before == [] end)
   end
 end
