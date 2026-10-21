@@ -461,13 +461,13 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
       List.flatten(rows)
     end
 
-    defp create_target(ctx) do
+    defp create_target(ctx, slug \\ "copy") do
       {:ok, workspace} =
         Workspace.create(%{
           tenant_id: ctx.tenant,
           organization_id: "#{ctx.tenant}:org",
-          slug: "copy",
-          name: "Copy"
+          slug: slug,
+          name: slug
         })
 
       workspace.id
@@ -623,7 +623,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
 
     test "recovery skips a line the log lost to a full disk, and ends the job partial", ctx do
       {name, _manifest} = exported_and_moved(ctx)
-      target = "#{ctx.tenant}:copy"
+      target = create_target(ctx)
       row = "written-#{ctx.n}"
       context(ctx.tenant, target, row)
 
@@ -649,8 +649,8 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
 
     test "a job that cannot be taken back does not stop the recovery of the others", ctx do
       {name, _manifest} = exported_and_moved(ctx)
-      refused = "#{ctx.tenant}:refused"
-      other = "#{ctx.tenant}:other"
+      refused = create_target(ctx, "refused")
+      other = create_target(ctx, "other")
       row = "other-#{ctx.n}"
       context(ctx.tenant, other, row)
 
@@ -680,7 +680,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
 
     test "a log that cannot be read ends the job partial instead of crashing recovery", ctx do
       {name, _manifest} = exported_and_moved(ctx)
-      target = "#{ctx.tenant}:copy"
+      target = create_target(ctx)
       row = "unreadable-#{ctx.n}"
       context(ctx.tenant, target, row)
 
