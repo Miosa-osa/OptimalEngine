@@ -181,12 +181,12 @@ defmodule OptimalEngine.API.ReadGatesTest do
   end
 
   describe "a list" do
-    test "a memory list shows what the grants cover and says what it left out", ctx do
+    test "a memory list shows what the grants cover and says nothing of the rest", ctx do
       bare = get_json("/api/memory?" <> ws(ctx) <> "&limit=100", mint(ctx, %{}))
 
       assert ids(bare["memories"]) == [ctx.plain.id]
-      assert bare["withheld"] == 4
-      assert bare["complete"] == false
+      refute Map.has_key?(bare, "withheld")
+      refute Map.has_key?(bare, "complete")
 
       restricted =
         get_json(
@@ -199,7 +199,7 @@ defmodule OptimalEngine.API.ReadGatesTest do
 
       operator = get_json("/api/memory?" <> ws(ctx) <> "&limit=100", nil)
       assert length(operator["memories"]) == 5
-      assert operator["withheld"] == 0 and operator["complete"] == true
+      refute Map.has_key?(operator, "withheld")
     end
 
     test "a key granted *, and one granted exactly the recommended default", ctx do
@@ -209,7 +209,7 @@ defmodule OptimalEngine.API.ReadGatesTest do
           mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
         )
 
-      assert length(root["memories"]) == 5 and root["complete"] == true
+      assert length(root["memories"]) == 5
 
       machine =
         mint(ctx, %{
@@ -240,7 +240,7 @@ defmodule OptimalEngine.API.ReadGatesTest do
 
       list = get_json("/api/memory?" <> ws(ctx) <> "&limit=100", machine)
       assert Enum.sort(ids(list["memories"])) == Enum.sort([ctx.confidential.id, ctx.plain.id])
-      assert list["withheld"] == 3 and list["complete"] == false
+      refute Map.has_key?(list, "withheld")
     end
   end
 
@@ -313,7 +313,8 @@ defmodule OptimalEngine.API.ReadGatesTest do
       bare = get_json(query, mint(ctx, %{}))
       refute ctx.secret_doc.id in ids(bare["results"])
       assert bare["results"] == []
-      assert bare["withheld"] >= 1 and bare["complete"] == false
+      refute Map.has_key?(bare, "withheld")
+      refute Map.has_key?(bare, "complete")
     end
 
     test "grep leaves out the chunks of what the key may not see", ctx do
@@ -324,7 +325,77 @@ defmodule OptimalEngine.API.ReadGatesTest do
 
       bare = get_json(query, mint(ctx, %{}))
       assert bare["results"] == []
-      assert bare["withheld"] >= 1 and bare["complete"] == false
+      refute Map.has_key?(bare, "withheld")
+      refute Map.has_key?(bare, "complete")
+    end
+  end
+
+  # A list that said how many rows it left out would tell a key without the
+  # label that a restricted row matches its query: a probe for a name, an
+  # amount or a project. These routes answer a probe for what the key may not
+  # see exactly as they answer one for nothing. (The exports, the conflict list
+  # and the ledger dump rows rather than answer a query, and keep their counts.)
+  describe "what a list says of what it leaves out" do
+    test "search answers a probe for a hidden document as it answers one for nothing", ctx do
+      bare = mint(ctx, %{})
+
+      for params <- [%{}, %{"type" => "memory"}] do
+        probe = fn q ->
+          get_json(
+            "/api/search?" <>
+              URI.encode_query(Map.merge(params, %{"q" => q, "workspace" => ctx.ws})),
+            bare
+          )
+        end
+
+        hidden = Map.delete(probe.(if params == %{}, do: "Zephyrcorp", else: "Harborview"), "query")
+        nothing = Map.delete(probe.("Quuxlesswordthatmatchesnothing"), "query")
+
+        assert hidden == nothing, inspect(params)
+      end
+    end
+
+    test "grep answers a probe for a hidden chunk as it answers one for nothing", ctx do
+      bare = mint(ctx, %{})
+
+      probe = fn q ->
+        get_json("/api/grep?" <> URI.encode_query(%{"q" => q, "workspace" => ctx.ws}), bare)
+      end
+
+      hidden = Map.delete(probe.("Zephyrcorp"), "query")
+      nothing = Map.delete(probe.("Quuxlesswordthatmatchesnothing"), "query")
+
+      assert hidden == nothing
+    end
+
+    test "a memory list with a query answers a probe for a hidden memory as one for nothing",
+         ctx do
+      bare = mint(ctx, %{})
+
+      probe = fn q ->
+        get_json("/api/memory?" <> URI.encode_query(%{"q" => q, "workspace" => ctx.ws}), bare)
+      end
+
+      hidden = Map.delete(probe.("Harborview"), "query")
+      nothing = Map.delete(probe.("Quuxlesswordthatmatchesnothing"), "query")
+
+      assert hidden == nothing
+      assert hidden["memories"] == []
+    end
+
+    test "the operator and a key granted * get the same shape, with nothing to say", ctx do
+      root = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      for token <- [nil, root],
+          path <- [
+            "/api/memory?" <> ws(ctx),
+            "/api/search?" <> URI.encode_query(%{"q" => "Zephyrcorp", "workspace" => ctx.ws}),
+            "/api/grep?" <> URI.encode_query(%{"q" => "Zephyrcorp", "workspace" => ctx.ws})
+          ] do
+        body = get_json(path, token)
+        refute Map.has_key?(body, "withheld"), path
+        refute Map.has_key?(body, "complete"), path
+      end
     end
   end
 
