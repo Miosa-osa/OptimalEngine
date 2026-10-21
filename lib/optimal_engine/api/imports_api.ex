@@ -32,8 +32,6 @@ defmodule OptimalEngine.API.ImportsAPI do
   @read_chunk 8 * 1_048_576
   @page_id ~r/\A[A-Za-z0-9-]{1,128}\z/
   @idempotency_key ~r/\A[\x21-\x7E]{1,128}\z/
-  @control ~r/[\x00-\x1F\x7F]/
-  @max_url_bytes 8_192
 
   @doc "POST /api/import/notion"
   def notion(conn) do
@@ -43,7 +41,7 @@ defmodule OptimalEngine.API.ImportsAPI do
     with :ok <- active_workspace(conn, workspace),
          {:ok, key} <- idempotency_key(conn, body(conn)) do
       # A repeated key is answered before anything is read or staged.
-      case Imports.existing(workspace, key) do
+      case Imports.existing(workspace, key, tenant_id: tenant(conn)) do
         {:ok, job} ->
           conn |> put_resp_header("connection", "close") |> accepted(workspace, job, :duplicate)
 
@@ -101,7 +99,7 @@ defmodule OptimalEngine.API.ImportsAPI do
     if parent && not Regex.match?(@page_id, parent) do
       error(conn, 400, "invalid_parent")
     else
-      opts = [limit: int(q["limit"], 500), offset: int(q["offset"], 0)]
+      opts = [limit: int(q["limit"], 500), offset: int(q["offset"], 0), tenant_id: tenant(conn)]
 
       case Notion.tree(workspace(conn), parent, opts) do
         {:ok, tree} -> json(conn, 200, tree)
@@ -144,25 +142,18 @@ defmodule OptimalEngine.API.ImportsAPI do
   defp notion_url(conn, workspace, key) do
     case body(conn)["source_url"] do
       url when is_binary(url) and url != "" ->
-        with :ok <- plain_url(url),
-             :ok <- Fetch.check(url) do
-          source = %{"kind" => "url", "url" => url}
-          enqueue(conn, workspace, Imports.stage(), source, key)
-        else
-          {:error, reason} -> error(conn, 400, Atom.to_string(reason))
+        case Fetch.check(url) do
+          :ok ->
+            source = %{"kind" => "url", "url" => url}
+            enqueue(conn, workspace, Imports.stage(), source, key)
+
+          {:error, reason} ->
+            error(conn, 400, Atom.to_string(reason))
         end
 
       _ ->
         error(conn, 400, "source_required")
     end
-  end
-
-  # A presigned URL is long, but not this long, and never holds a control
-  # character (which could split a request line or a log line).
-  defp plain_url(url) do
-    if byte_size(url) <= @max_url_bytes and not Regex.match?(@control, url),
-      do: :ok,
-      else: {:error, :invalid_source_url}
   end
 
   defp enqueue(conn, workspace, staged, source, key) do
@@ -253,8 +244,10 @@ defmodule OptimalEngine.API.ImportsAPI do
 
   # ── request helpers ────────────────────────────────────────────────────
 
+  defp tenant(conn), do: conn.assigns[:current_tenant] || "default"
+
   defp active_workspace(conn, workspace) do
-    tenant = conn.assigns[:current_tenant] || "default"
+    tenant = tenant(conn)
 
     case Workspace.get(workspace) do
       {:ok, %{status: :active, tenant_id: ^tenant}} -> :ok

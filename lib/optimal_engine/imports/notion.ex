@@ -97,17 +97,22 @@ defmodule OptimalEngine.Imports.Notion do
   `parent` nil, the imported contexts that have no parent. Each carries its
   page id, URI, title and number of children.
 
-  Options: `:limit` (default 500, at most 1,000) and `:offset`. Returns
-  `{:error, :not_found}` when `parent` names nothing imported in the workspace.
+  Options: `:limit` (default 500, at most 1,000), `:offset`, and `:tenant_id`
+  (default: the workspace's tenant; a request passes the requester's, so
+  another tenant's rows read as nothing). Returns `{:error, :not_found}` when
+  `parent` names nothing imported in the workspace.
   """
   @spec tree(String.t(), String.t() | nil, keyword()) :: {:ok, map()} | {:error, term()}
   def tree(workspace_id, parent, opts \\ []) do
     limit = opts |> Keyword.get(:limit, 500) |> max(1) |> min(1_000)
     offset = opts |> Keyword.get(:offset, 0) |> max(0)
     prefix = uri(workspace_id, "")
+    scope = Graph.scope(workspace_id: workspace_id, tenant_id: Keyword.get(opts, :tenant_id))
+    {tenant_id, _workspace} = scope
 
-    with {:ok, contexts} <- notion_contexts(workspace_id),
-         {:ok, edges} <- Graph.edges_by_relation([@child_of], workspace_id: workspace_id) do
+    with {:ok, contexts} <- notion_contexts(scope),
+         {:ok, edges} <-
+           Graph.edges_by_relation([@child_of], workspace_id: workspace_id, tenant_id: tenant_id) do
       edges =
         Enum.filter(
           edges,
@@ -151,13 +156,14 @@ defmodule OptimalEngine.Imports.Notion do
     end
   end
 
-  # Every imported Notion context of a workspace: id => %{uri, title}.
-  defp notion_contexts(workspace_id) do
+  # Every imported Notion context of a workspace, within a tenant:
+  # id => %{uri, title}.
+  defp notion_contexts({tenant_id, workspace_id}) do
     prefix = uri(workspace_id, "")
 
     case Store.raw_query(
-           "SELECT id, uri, title FROM contexts WHERE workspace_id = ?1 AND substr(uri, 1, ?3) = ?2",
-           [workspace_id, prefix, String.length(prefix)]
+           "SELECT id, uri, title FROM contexts WHERE tenant_id = ?4 AND workspace_id = ?1 AND substr(uri, 1, ?3) = ?2",
+           [workspace_id, prefix, String.length(prefix), tenant_id]
          ) do
       {:ok, rows} ->
         {:ok, Map.new(rows, fn [id, uri, title] -> {id, %{uri: uri, title: title}} end)}
@@ -765,8 +771,11 @@ defmodule OptimalEngine.Imports.Notion do
   end
 
   defp importer_edges(ws, sources) do
-    with {:ok, notion} <- notion_contexts(ws),
-         {:ok, edges} <- Graph.edges_by_relation([@child_of, @links_to], workspace_id: ws) do
+    {tenant_id, _workspace} = scope = Graph.scope(workspace_id: ws)
+
+    with {:ok, notion} <- notion_contexts(scope),
+         {:ok, edges} <-
+           Graph.edges_by_relation([@child_of, @links_to], workspace_id: ws, tenant_id: tenant_id) do
       for %{source_id: source, target_id: target, relation: relation} <- edges,
           MapSet.member?(sources, source),
           Map.has_key?(notion, target),

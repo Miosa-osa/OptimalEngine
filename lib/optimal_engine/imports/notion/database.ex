@@ -4,8 +4,10 @@ defmodule OptimalEngine.Imports.Notion.Database do
 
   Notion exports a database as RFC 4180 CSV with a header row; the first
   column is the title property. The CSV is parsed as a stream and at most
-  `max_rows` rows are read, so a small zip holding a huge CSV cannot fill
-  memory or the workspace: the rest is reported as truncated. A byte order
+  `max_rows` rows are kept, so a small zip holding a huge CSV cannot fill
+  memory or the workspace: the rest is reported as truncated. Blank rows are
+  skipped but counted: at most `scan_limit/1` rows are parsed in all, so a
+  CSV of blank lines costs as little as one of real rows. A byte order
   mark is dropped, invalid UTF-8 is repaired, and a ragged row is padded or
   trimmed to the header's width.
 
@@ -42,9 +44,19 @@ defmodule OptimalEngine.Imports.Notion.Database do
     |> parse_lines(max_rows)
   end
 
+  @doc """
+  How many rows, blank ones included, are parsed for a table of at most
+  `max_rows` rows.
+  """
+  @spec scan_limit(pos_integer()) :: pos_integer()
+  def scan_limit(max_rows), do: 2 * max_rows + 1_000
+
   defp parse_lines(lines, max_rows) do
-    # The header, the rows kept, and one more that shows the CSV was cut.
-    parsed =
+    limit = scan_limit(max_rows)
+
+    # Keeps the header, the rows kept, and one more that shows the CSV was
+    # cut; stops early once that many are kept or `limit` rows were parsed.
+    {kept, count, scanned} =
       lines
       |> Stream.with_index()
       |> Stream.map(fn
@@ -52,17 +64,25 @@ defmodule OptimalEngine.Imports.Notion.Database do
         {line, _} -> repair(line)
       end)
       |> Parser.parse_stream(skip_headers: false)
-      |> Stream.reject(fn row -> Enum.all?(row, &(String.trim(&1) == "")) end)
-      |> Enum.take(max_rows + 2)
+      |> Enum.reduce_while({[], 0, 0}, fn row, {kept, count, scanned} ->
+        scanned = scanned + 1
 
-    case parsed do
+        cond do
+          scanned > limit -> {:halt, {kept, count, scanned}}
+          Enum.all?(row, &(String.trim(&1) == "")) -> {:cont, {kept, count, scanned}}
+          count + 1 >= max_rows + 2 -> {:halt, {[row | kept], count + 1, scanned}}
+          true -> {:cont, {[row | kept], count + 1, scanned}}
+        end
+      end)
+
+    case Enum.reverse(kept) do
       [] ->
-        {:ok, %{columns: [], rows: [], truncated: false}}
+        {:ok, %{columns: [], rows: [], truncated: scanned > limit}}
 
       [header | rows] ->
         columns = Enum.map(header, &String.trim/1)
         width = length(columns)
-        truncated = length(rows) > max_rows
+        truncated = count - 1 > max_rows or scanned > limit
         rows = rows |> Enum.take(max_rows) |> Enum.map(&fit(&1, width))
         {:ok, %{columns: columns, rows: rows, truncated: truncated}}
     end

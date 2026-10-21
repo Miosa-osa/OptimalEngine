@@ -180,6 +180,17 @@ defmodule OptimalEngine.Imports.Notion.PlanTest do
     assert text =~ "Notion database with the first 3 rows."
   end
 
+  test "blank rows count toward the scan limit, so a CSV of blank lines stops early" do
+    blank = String.duplicate(",\n", Database.scan_limit(10) + 5)
+    csv = "Name,Status\n" <> blank <> "Late row,Open\n"
+
+    assert {:ok, %{rows: [], truncated: true}} = Database.parse(csv, 10)
+
+    # Within the limit, blank rows are skipped and the real ones kept.
+    assert {:ok, %{rows: [["Row", "Open"]], truncated: false}} =
+             Database.parse("Name,Status\n,\n,\nRow,Open\n", 10)
+  end
+
   test "database and row texts are clipped to the page limit on a character boundary" do
     long = String.duplicate("\u00e9", 500)
     table = %{columns: ["Name", "Notes"], rows: [["Row", long]], truncated: false}
