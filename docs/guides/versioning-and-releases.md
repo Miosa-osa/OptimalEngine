@@ -129,6 +129,14 @@ After upgrading:
 9. Build the client CLI archives (`apps/cli/build.sh`) and the MCP server archive (`apps/mcp/build.sh`) from the tagged source on the release build host, run the installer tests against those files, and stage them with `SHA256SUMS`; both builds refuse a version that differs from `mix.exs`. CI builds and tests the same files on every run but publishes nothing.
    See [Client CLI and MCP server](cli.md) and [client install on MIOSA machines](../../deploy/miosa-template/CLIENT-INSTALL.md).
 
+10. From 0.3.9 on, the release also carries the server build itself, so staging a host is a copy plus a manifest and not a 30 to 60 minute rebuild.
+    On the same x86_64 build host, with the tag checked out, run `OPTIMAL_ENGINE_GIT_SHA=<tag sha> OPTIMAL_ENGINE_BUILD_TIMESTAMP=<release timestamp> OPTIMAL_RELEASE_CHANNEL=<channel> deploy/miosa-template/build-release.sh`.
+    It writes `optimal-engine-<version>-<sha>.tgz` and `SHA256SUMS` (the name `deploy/miosa-template/stage-release.sh` and the manifest use).
+    Attach both to the GitHub release next to the client archives, with the SHA and timestamp used in the release notes, and check that `GET /api/version` of an Engine booted from that file reports exactly those values.
+    The bytes that were gated and the bytes a host runs are then the same file; a rebuild from the commit is equal only if the toolchain and timestamp happen to match.
+    Hosts take their ext4 root from the `miosa-sandbox` template build (`create-template.sh`), not from a raw Ubuntu image; the release tarball is what is unpacked on top of it.
+    A managed host never downloads the tarball from GitHub at runtime: the release captain copies the attached files into the staging root by hand, and staging reads them from there.
+
 CI rejects a release tag that does not exactly match the application version.
 
 ## Migrations at boot
