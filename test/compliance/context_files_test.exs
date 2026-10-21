@@ -8,6 +8,8 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias OptimalEngine.Compliance.{ContextFiles, DerivedData, Erasure, Retention}
   alias OptimalEngine.Context
   alias OptimalEngine.Identity.Principal
@@ -307,6 +309,82 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       refute File.exists?(file)
       assert File.exists?(unrelated)
       assert count("wiki_pages", "slug", "page-#{ctx.n}") == 0
+    end
+
+    test "leaves the page file of another workspace that a forged chunk row names", ctx do
+      other = "default:cf-wiki-#{ctx.n}"
+      workspace!(other)
+      file = signal!(ctx, "project-platform-launch", "forged-chunk.md")
+      id = context!(ctx, "forged-chunk", file)
+      chunk = "#{id}:chk-0"
+
+      # A chunk of the context that says it is in another workspace.
+      :ok =
+        Store.insert_chunks([
+          Chunk.new(
+            id: chunk,
+            signal_id: id,
+            tenant_id: "default",
+            workspace_id: other,
+            text: "t"
+          )
+        ])
+
+      theirs = file!(ctx.root, "cf-wiki-#{ctx.n}/.wiki/theirs-#{ctx.n}.md")
+
+      sql!("INSERT INTO wiki_pages (tenant_id, slug, body) VALUES ('default', ?1, 'body')", [
+        "theirs-#{ctx.n}"
+      ])
+
+      sql!(
+        "INSERT INTO citations (tenant_id, wiki_slug, chunk_id, claim_hash) VALUES ('default', ?1, ?2, 'h')",
+        ["theirs-#{ctx.n}", chunk]
+      )
+
+      assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [id])
+
+      refute File.exists?(file)
+      assert File.exists?(theirs)
+    end
+
+    test "removes the name the Engine knows of a file that has another hard link", ctx do
+      file = signal!(ctx, "project-platform-launch", "linked.md")
+      id = context!(ctx, "linked", file)
+      other = Path.join(Path.dirname(ctx.root), "cf-hardlink-#{ctx.n}.md")
+      on_exit(fn -> File.rm(other) end)
+      :ok = File.ln(file, other)
+      text = File.read!(file)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [id])
+        end)
+
+      refute File.exists?(file)
+      assert File.read!(other) == text
+      assert log =~ "other hard links"
+      refute log =~ file
+    end
+
+    test "redacts in place through a new file, keeping the mode, and not the other name", ctx do
+      text = "Write to #{ctx.email} soon."
+      file = signal!(ctx, "project-platform-launch", "redacted-linked.md", text: text)
+      File.chmod!(file, 0o640)
+      other = Path.join(Path.dirname(ctx.root), "cf-redact-link-#{ctx.n}.md")
+      on_exit(fn -> File.rm(other) end)
+      :ok = File.ln(file, other)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, %{files: 1}} = ContextFiles.redact([file])
+        end)
+
+      assert File.read!(file) =~ "<REDACTED:email>"
+      refute File.read!(file) =~ ctx.email
+      assert File.read!(other) == text
+      assert Bitwise.band(File.stat!(file).mode, 0o777) == 0o640
+      assert File.ls!(Path.dirname(file)) == ["redacted-linked.md"]
+      assert log =~ "other hard links"
     end
 
     test "a wiki page's file is removed, not redacted, when its context is redacted", ctx do

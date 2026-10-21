@@ -160,9 +160,9 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     each(files, fn file ->
       with :ok <- real_parents(file) do
         case File.lstat(file) do
-          {:ok, %{type: :regular, size: size}} ->
+          {:ok, %{type: :regular, size: size, links: links}} ->
             case File.rm(file) do
-              :ok -> {:done, size}
+              :ok -> {:done, size, links}
               {:error, :enoent} -> :skipped
               {:error, posix} -> {:error, posix}
             end
@@ -197,21 +197,51 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   defp redact_each(files) do
     each(files, fn file ->
       with :ok <- real_parents(file),
-           {:ok, %{type: :regular, mode: mode}} <- File.lstat(file),
+           {:ok, %{type: :regular, mode: mode, links: links}} <- File.lstat(file),
            {:ok, text} <- File.read(file),
            redacted = Redact.redact!(text),
            true <- redacted != text,
-           tmp = file <> ".tmp-redact-#{System.unique_integer([:positive])}",
-           :ok <- File.write(tmp, redacted),
-           :ok <- File.chmod(tmp, Bitwise.band(mode, 0o777)),
-           :ok <- File.rename(tmp, file) do
-        {:done, byte_size(redacted)}
+           :ok <- replace(file, redacted, Bitwise.band(mode, 0o777)) do
+        {:done, byte_size(redacted), links}
       else
         {:error, :enoent} -> :skipped
         {:error, posix} when is_atom(posix) -> {:error, posix}
         _unchanged_or_not_a_file -> :skipped
       end
     end)
+  end
+
+  # The new text goes into a file created for it (exclusively, under a name nobody can
+  # guess, so no link left at that name is written through) and takes the place of `file`.
+  # The old inode is never written to, so another name for it keeps its content.
+  defp replace(file, text, mode) do
+    tmp = file <> ".tmp-redact-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    with :ok <- write_new(tmp, text, mode),
+         :ok <- File.rename(tmp, file) do
+      :ok
+    else
+      {:error, :eexist} ->
+        {:error, :eexist}
+
+      {:error, reason} ->
+        File.rm(tmp)
+        {:error, reason}
+    end
+  end
+
+  # A new file, private until the text is in it, then given the mode of the file it replaces.
+  defp write_new(path, text, mode) do
+    case :file.open(path, [:write, :exclusive, :binary]) do
+      {:ok, io} ->
+        written = with :ok <- File.chmod(path, 0o600), do: :file.write(io, text)
+        closed = :file.close(io)
+
+        with :ok <- written, :ok <- closed, do: File.chmod(path, mode)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   # ── what is planned ────────────────────────────────────────────────────────
@@ -324,7 +354,9 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   end
 
   # The page files of the wiki pages `DerivedData` deletes with these contexts: those with
-  # a citation to one of their chunks, in the workspace the chunk is in.
+  # a citation to one of their chunks, in the workspace the chunk is in. A chunk row names
+  # its workspace and a bundle import writes it verbatim, so the chunk counts only when its
+  # workspace is the context's own; a page file of another workspace stays.
   defp wiki_files(tenant_id, context_ids, root, workspace_dirs) do
     {sql, params} =
       if tenant_id,
@@ -332,14 +364,16 @@ defmodule OptimalEngine.Compliance.ContextFiles do
           {"""
            SELECT DISTINCT ch.workspace_id, ci.wiki_slug FROM citations ci
              JOIN chunks ch ON ch.id = ci.chunk_id
+             JOIN contexts c ON c.id = ch.signal_id AND c.workspace_id = ch.workspace_id
             WHERE ci.tenant_id = ?1
-              AND ch.signal_id IN (SELECT value FROM json_each(?2))
+              AND c.id IN (SELECT value FROM json_each(?2))
            """, [tenant_id, Jason.encode!(context_ids)]},
         else:
           {"""
            SELECT DISTINCT ch.workspace_id, ci.wiki_slug FROM citations ci
              JOIN chunks ch ON ch.id = ci.chunk_id
-            WHERE ch.signal_id IN (SELECT value FROM json_each(?1))
+             JOIN contexts c ON c.id = ch.signal_id AND c.workspace_id = ch.workspace_id
+            WHERE c.id IN (SELECT value FROM json_each(?1))
            """, [Jason.encode!(context_ids)]}
 
     case Store.raw_query(sql, params) do
@@ -517,13 +551,43 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   # ── helpers ────────────────────────────────────────────────────────────────
 
   defp each(files, fun) do
-    Enum.reduce_while(files, {:ok, %{files: 0, bytes: 0}}, fn file, {:ok, acc} ->
+    files
+    |> Enum.reduce_while({:ok, %{files: 0, bytes: 0, linked: 0}}, fn file, {:ok, acc} ->
       case fun.(file) do
-        :skipped -> {:cont, {:ok, acc}}
-        {:done, bytes} -> {:cont, {:ok, %{files: acc.files + 1, bytes: acc.bytes + bytes}}}
-        {:error, posix} -> {:halt, {:error, {:artifact_not_removed, :context_file, posix}}}
+        :skipped ->
+          {:cont, {:ok, acc}}
+
+        {:done, bytes, links} ->
+          done = %{
+            files: acc.files + 1,
+            bytes: acc.bytes + bytes,
+            linked: acc.linked + if(links > 1, do: 1, else: 0)
+          }
+
+          {:cont, {:ok, done}}
+
+        {:error, posix} ->
+          {:halt, {:error, {:artifact_not_removed, :context_file, posix}}}
       end
     end)
+    |> case do
+      {:ok, %{linked: linked} = done} ->
+        log_linked(linked)
+        {:ok, Map.delete(done, :linked)}
+
+      error ->
+        error
+    end
+  end
+
+  # A file with another name keeps its text under that name: the name the Engine knows is
+  # dealt with, the other is not ours to find. Counts only.
+  defp log_linked(0), do: :ok
+
+  defp log_linked(linked) do
+    Logger.warning(
+      "[ContextFiles] #{linked} file(s) have other hard links; the text stays under the other names"
+    )
   end
 
   defp root, do: Path.expand(Application.get_env(:optimal_engine, :root_path, File.cwd!()))
