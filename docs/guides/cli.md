@@ -171,16 +171,48 @@ An `optimal://` URI names one context in its workspace.
 A signal's address comes from its file, `{date}-{title}.md` with the title cut to 60 characters.
 When another context already holds that name in the folder, the new context takes the name with the first 8 characters of its id before `.md`, so an ingest never replaces another context's file and a URI never names two contexts.
 A document with no usable title (empty, only symbols, or `Untitled`) always carries the suffix, `2026-03-01-untitled-9f3c01ab.md`, so its address needs no lookup to be unique.
-Ingesting a context again (same id) keeps its address.
-Addresses written before this rule can still be shared by several contexts.
-`GET /api/maintenance/uris` plans the repair (`?workspace=` for one workspace) and `POST /api/maintenance/uris {"apply": true, "workspace"?, "limit"?}` runs it; both need `admin` and stay in the caller's tenant.
-`GET` lists every context it would give a new address (`changes`), 2,000 groups at most (`?limit=`).
-A run separates `limit` groups of contexts (default 50, at most 2,000) and reports `groups_remaining`; run it again until that is 0.
-Run it with ingest idle, and keep a copy of the signal folders first: it writes files.
-The earliest active context keeps the shared address and the others get the suffixed one; each repaired row records its `previous_uri` in `metadata.uri_repair`.
-Every context gets its own file again, written from its row (`contexts.content`) before the row changes, with its cross-reference copies; the file at the kept address is rewritten from the keeper's row when it holds another context's text.
-Archived contexts, rows that index the same file, rows with no file and rows whose URI is a caller's `source_uri` are left alone and counted (`skipped_*`).
-`files_regenerated` counts the files written; a second run finds nothing to do.
+Ingesting a context again (same id) keeps its address, and keeps `metadata.uri_repair` if the repair below touched it.
+
+### Contexts that already share an address
+
+Addresses written before this rule can be shared by several contexts, and the file behind such an address holds only the last writer's text.
+The text of every context is still in its row (`contexts.content`); the repair writes the files again from it.
+
+```
+optimal uris plan [ws|*] [--limit n] [--after cursor] [--out plan.json]
+optimal uris apply [ws|*] --apply [--limit n] [--after cursor] [--out run.json]
+```
+
+They call `GET` and `POST /api/maintenance/uris`; both need `admin` and stay in the caller's tenant.
+With a workspace the key must cover it; with `*` (the whole tenant) the key must cover every workspace.
+Run the repair through the running Engine like this, never with `mix optimal.repair_uris` beside it: two processes must not write one store.
+`mix optimal.repair_uris` is for a stopped Engine, and writes nothing without `--apply`.
+
+**Before the run.** Copy the signal folders, stop ingest, and read the whole plan.
+The plan writes nothing and lists, for the whole scope (`limit` pages it, `next_after` is the cursor of the next page):
+
+- per workspace: groups, contexts to repair, files to write, to replace and to leave alone, and the bytes to write;
+- per group: the keeper (id, title, path) and, for each context to repair, its old and new URI and path, the bytes of its new file, whether the target already exists, the cross-reference copies it will get, and the ACL rows that will be copied;
+- for the kept address's file, and for the keeper's cross-reference copies: `unchanged` (it holds the keeper's own text), `rewrite` (its body is exactly the text of another context, named), `create` (there is no file) or `left_alone` (its body is the text of no context of the group, so it may have been edited), each with the reason;
+- the records that name the shared URI: `acls`, `memories`, `open_loops`, `events` and `wiki_citations`;
+- the groups that are skipped because a context in them has no text (nothing to write for it), or because a path of the group (a row's path, or the folder of a copy) is not inside its workspace's folder (a bundle import copies paths as they are; nothing is read or written for such a group, and the plan lists the paths), and the counts of what is left alone: archived contexts, rows that index the same file, rows with no file, contexts that are not signals, and contexts whose stored URI is not the address of their path (`uri_differs_from_path`, repaired like the others).
+  A context that sits in another folder than the keeper gets its suffixed address in its own folder; the file it had there is not removed, since it is not the kept file, and the plan counts it (`old_files_left_in_place`) so it can be tidied by hand.
+
+**What a run does**, for each group, in this order:
+
+1. The earliest active context keeps the address.
+2. The others get the suffixed address, and their files are written from their rows, with their cross-reference copies.
+3. The kept address's file is replaced by the keeper's own text only if its body is, byte for byte, the body of another context of the group. The old bytes are copied into the run's backups first.
+4. In one transaction the rows move (`metadata.uri_repair` records the previous URI and path), the ACL rows of the shared URI are copied to each new URI, and the memories and open loops that name the context by id are moved to it.
+
+Every file is written through a temporary file, a flush and a rename, so a crash leaves a whole file or none; the rows move last, so a group that has been separated has all its files, and a run that stopped is resumed by running it again.
+A run writes `<root>/.system/uri-repair/<run id>/journal.jsonl` (an append-only line per step: the context, old and new URI and path, the SHA-256 of the old and the new text, the backup) and `backups/`, and logs each group.
+A run takes `limit` groups (default 50, at most 100,000) and reports `groups_remaining`; run it again until that is 0.
+
+**Records that name an address.**
+The ACL rows, memories and open loops that carry a context id follow the context to its new URI.
+`events.target_uri`, the closing source of an open loop and `{{cite: uri}}` in wiki pages carry no context id: after the repair they resolve to the context that keeps the address, and the plan counts them.
+The old address is not redirected: it keeps resolving, to the context that keeps it.
 
 ## The operating loop
 

@@ -50,6 +50,7 @@ defmodule OptimalEngine.Pipeline.Intake.Address do
 
   require Logger
 
+  alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Signal
   alias OptimalEngine.Store
   alias OptimalEngine.URI
@@ -65,14 +66,15 @@ defmodule OptimalEngine.Pipeline.Intake.Address do
   `"default"`) and `:always_suffix`, true for an untitled document, which never
   takes the plain name.
   """
-  @spec resolve(Signal.t(), String.t(), String.t(), binary(), keyword()) :: String.t()
+  @spec resolve(Signal.t(), String.t(), String.t(), binary(), keyword()) ::
+          {:ok, String.t()} | {:error, :no_free_name}
   def resolve(%Signal{} = signal, signals_dir, base_name, content, opts \\ []) do
     workspace_id = workspace_id(opts)
     id = signal.id || digest(content)
 
     case kept_name(id, signals_dir, workspace_id) do
       {:ok, name} ->
-        name
+        {:ok, name}
 
       :none ->
         choose(
@@ -89,20 +91,43 @@ defmodule OptimalEngine.Pipeline.Intake.Address do
   `base_name` with a suffix of the id before the extension. With
   `always_suffix: true` the plain `base_name` is not a candidate.
 
+  `{:error, :no_free_name}` when every candidate is taken: a name another
+  context holds is never returned, because the caller would overwrite its file.
+  The last candidate carries the SHA-256 of the id, so this means another
+  context already holds that exact name.
+
   Pure: the answer depends on the name, the id and what `taken?` says, and on
   nothing else, so two stores holding the same names answer the same.
   """
-  @spec choose(String.t(), String.t(), (String.t() -> boolean()), keyword()) :: String.t()
+  @spec choose(String.t(), String.t(), (String.t() -> boolean()), keyword()) ::
+          {:ok, String.t()} | {:error, :no_free_name}
   def choose(base_name, id, taken?, opts \\ [])
       when is_binary(base_name) and is_function(taken?, 1) do
-    suffixed_names = Enum.map(suffixes(id), &suffixed(base_name, &1))
+    suffixed_names = Enum.map(candidate_suffixes(id), &suffixed(base_name, &1))
 
     candidates =
       if Keyword.get(opts, :always_suffix, false),
         do: suffixed_names,
         else: [base_name | suffixed_names]
 
-    Enum.find(candidates, &(not taken?.(&1))) || List.last(candidates)
+    case Enum.find(candidates, &(not taken?.(&1))) do
+      nil -> {:error, :no_free_name}
+      name -> {:ok, name}
+    end
+  end
+
+  @doc """
+  The suffixes `id` can take, shortest first: 8, 16 and 32 characters of the id
+  (letters and digits only), then the SHA-256 of the id.
+  """
+  @spec candidate_suffixes(String.t()) :: [String.t()]
+  def candidate_suffixes(id) do
+    id = to_string(id)
+    clean = id |> String.downcase() |> String.replace(~r/[^a-z0-9]/, "")
+    digest = digest(id)
+    seed = if clean == "", do: digest, else: clean
+
+    (Enum.map(@suffix_lengths, &String.slice(seed, 0, &1)) ++ [digest]) |> Enum.uniq()
   end
 
   @doc "`base_name` with `suffix` before its extension: `a-b.md` and `9f3c01ab` give `a-b-9f3c01ab.md`."
@@ -116,6 +141,19 @@ defmodule OptimalEngine.Pipeline.Intake.Address do
       |> String.trim_trailing("-")
 
     stem <> "-" <> suffix <> extension
+  end
+
+  @doc """
+  The metadata a cross-reference copy of a context carries: whose copy it is,
+  and the source package and security labels of that context, so a copy of a
+  labelled document is as labelled as the document (sync keeps both at home).
+  """
+  @spec copy_metadata(String.t(), term()) :: map()
+  def copy_metadata(parent_id, parent_metadata) when is_binary(parent_id) do
+    parent_metadata
+    |> SecurityLabels.metadata_map()
+    |> Map.take(["source_package_id", "security_labels"])
+    |> Map.put("cross_ref_of", parent_id)
   end
 
   @doc """
@@ -216,15 +254,6 @@ defmodule OptimalEngine.Pipeline.Intake.Address do
       {:ok, _other} -> true
       {:error, _} -> false
     end
-  end
-
-  defp suffixes(id) do
-    id = to_string(id)
-    clean = id |> String.downcase() |> String.replace(~r/[^a-z0-9]/, "")
-    digest = digest(id)
-    seed = if clean == "", do: digest, else: clean
-
-    (Enum.map(@suffix_lengths, &String.slice(seed, 0, &1)) ++ [digest]) |> Enum.uniq()
   end
 
   defp digest(text), do: :crypto.hash(:sha256, text) |> Base.encode16(case: :lower)

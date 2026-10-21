@@ -519,7 +519,8 @@ defmodule OptimalEngine.Retrieval.RAG do
 
   defp wiki_resolver(_, _opts), do: {:error, :unresolved}
 
-  defp fetch_context_body(uri) when is_binary(uri) do
+  @doc false
+  def fetch_context_body(uri) when is_binary(uri) do
     case Store.raw_query(
            "SELECT content FROM contexts WHERE uri = ?1 ORDER BY (archived_at IS NOT NULL), (created_at IS NULL), created_at, id LIMIT 1",
            [uri]
