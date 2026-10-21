@@ -8,7 +8,9 @@ defmodule OptimalEngine.API.Endpoint do
 
   Bind to `0.0.0.0` only when a reverse proxy is in front. The engine
   assumes localhost + same-host clients in dev; cross-host traffic
-  should be authenticated + TLS-terminated by the upstream.
+  should be authenticated + TLS-terminated by the upstream. An API on a
+  network interface with authentication off is reported loudly, or refused
+  with `OPTIMAL_REFUSE_OPEN_NETWORK=1` (`OptimalEngine.API.Exposure`).
 
   See `OptimalEngine.API.Router` for the endpoint list.
   """
@@ -42,9 +44,25 @@ defmodule OptimalEngine.API.Endpoint do
            ip: parse_ip(interface),
            protocol_options: [idle_timeout: 180_000]
          ]}
-      ]
+      ] ++ exposure_children()
     else
       []
+    end
+  end
+
+  # Authentication off on a network interface (OptimalEngine.API.Exposure): an
+  # error now and every 10 minutes, or no start at all when the refusal is on.
+  defp exposure_children do
+    case OptimalEngine.API.Exposure.boot_check() do
+      :ok ->
+        []
+
+      {:warn, interface} ->
+        Logger.error(OptimalEngine.API.Exposure.message(interface))
+        [{OptimalEngine.API.ExposureMonitor, interface: interface}]
+
+      {:refuse, message} ->
+        raise ArgumentError, message
     end
   end
 

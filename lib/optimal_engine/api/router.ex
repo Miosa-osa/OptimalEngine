@@ -794,6 +794,7 @@ defmodule OptimalEngine.API.Router do
           ok?: report.ok?,
           release: OptimalEngine.Version.info(),
           degraded: report.degraded,
+          warnings: Health.warnings(report),
           checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)
         })
     end
@@ -814,6 +815,7 @@ defmodule OptimalEngine.API.Router do
       ok?: report.ok?,
       checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end),
       degraded: report.degraded,
+      warnings: Health.warnings(report),
       api_version: "v1",
       release: OptimalEngine.Version.info()
     })
