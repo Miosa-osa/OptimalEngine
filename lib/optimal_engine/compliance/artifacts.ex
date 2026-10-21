@@ -83,7 +83,9 @@ defmodule OptimalEngine.Compliance.Artifacts do
   @typedoc """
   What `remove/1` left alone, by kind of artifact and reason: `:not_ours` (the row names
   something that is not the file this Engine writes for it, in the place it writes it, for the
-  workspace) and `:link` (a link is in the way, or is the file).
+  workspace), `:link` (a link is in the way, or is the file) and, for an object, `:not_configured`
+  (the Engine has no object store), `:other_bucket` (the row names a bucket other than the
+  configured one) and `:outside_prefix` (the key is not under the erased workspace's prefix).
   """
   @type skipped :: %{atom() => %{atom() => pos_integer()}}
 
@@ -234,19 +236,53 @@ defmodule OptimalEngine.Compliance.Artifacts do
   # An object of the object store this Engine is configured for: in its bucket, and under
   # the prefix this workspace's assets are written to (`Storage.Assets.object_key/1`),
   # never outside it. With no object store configured there is nothing this Engine can
-  # delete, and the object is left alone. An object is never deleted by a workspace move:
-  # the workspace's assets still point at it on the Engine the workspace moved to.
+  # delete, and the object is left alone (counted as `not_configured`); a store that is
+  # configured but whose settings cannot be read is an error, so the rows stay and the
+  # objects are not orphaned. An object is never deleted by a workspace move: the
+  # workspace's assets still point at it on the Engine the workspace moved to.
   defp remove_one({:asset_object, storage_path, tenant_id, workspace_id}) do
-    with true <- is_binary(storage_path) and is_binary(tenant_id) and is_binary(workspace_id),
-         {:ok, bucket, key} <- S3.parse_uri(storage_path),
-         {:ok, %{bucket: ^bucket}} <- S3.config(),
-         true <- object_of?(key, tenant_id, workspace_id) do
-      case S3.delete_object(key) do
-        :ok -> {:ok, %{files: 1, bytes: 0}}
-        {:error, reason} -> {:error, object_error(reason)}
-      end
-    else
-      _ -> {:skip, :not_ours}
+    with {:ok, bucket, key} <- object_address(storage_path, tenant_id, workspace_id),
+         :ok <- object_store(bucket),
+         :ok <- object_in_prefix(key, tenant_id, workspace_id) do
+      delete_object(key)
+    end
+  end
+
+  defp object_address(storage_path, tenant_id, workspace_id)
+       when is_binary(storage_path) and is_binary(tenant_id) and is_binary(workspace_id) do
+    case S3.parse_uri(storage_path) do
+      {:ok, bucket, key} -> {:ok, bucket, key}
+      {:error, _invalid} -> {:skip, :not_ours}
+    end
+  end
+
+  defp object_address(_storage_path, _tenant_id, _workspace_id), do: {:skip, :not_ours}
+
+  defp object_store(bucket) do
+    case S3.config() do
+      {:ok, %{bucket: ^bucket}} -> :ok
+      {:ok, _another_bucket} -> {:skip, :other_bucket}
+      {:error, :not_configured} -> {:skip, :not_configured}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp object_in_prefix(key, tenant_id, workspace_id) do
+    if object_of?(key, tenant_id, workspace_id), do: :ok, else: {:skip, :outside_prefix}
+  end
+
+  defp delete_object(key) do
+    case S3.delete_object(key) do
+      :ok ->
+        {:ok, %{files: 1, bytes: 0}}
+
+      # A store that answers 404 to a delete of a key or bucket it does not have: the object
+      # is gone, and an error here would stop every later run on the same rows.
+      {:error, :not_found} ->
+        {:ok, none()}
+
+      {:error, reason} ->
+        {:error, object_error(reason)}
     end
   end
 
@@ -263,7 +299,6 @@ defmodule OptimalEngine.Compliance.Artifacts do
 
   # What the store said, without its URL, its detail or anything signed.
   defp object_error(:access_denied), do: :access_denied
-  defp object_error(:not_found), do: :not_found
   defp object_error({:http_error, status, _detail}), do: {:http, status}
   defp object_error({:transport, _reason}), do: :transport
   defp object_error(reason) when is_atom(reason), do: reason
