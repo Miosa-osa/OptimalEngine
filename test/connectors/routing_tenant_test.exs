@@ -12,8 +12,10 @@ defmodule OptimalEngine.Connectors.RoutingTenantTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias OptimalEngine.Connectors
-  alias OptimalEngine.Connectors.{PullScheduler, Runner}
+  alias OptimalEngine.Connectors.{PullScheduler, Rows, Runner}
   alias OptimalEngine.{Organization, Store, Workspace}
   alias OptimalEngine.Routing.RuleStore
   alias OptimalEngine.Tenancy.Tenant
@@ -193,6 +195,105 @@ defmodule OptimalEngine.Connectors.RoutingTenantTest do
 
       assert contexts_in(ctx, ctx.foreign) == 0
       assert contexts_in(ctx, ctx.home) >= 1
+    end
+  end
+
+  describe "a workspace nobody registered" do
+    test "is the default tenant's to use, not another tenant's", ctx do
+      bare = "bare-#{ctx.n}"
+
+      assert Rows.routable_workspace?("default", bare)
+      refute Rows.routable_workspace?(ctx.tenant, bare)
+
+      assert {:error, :invalid_review_workspace} =
+               register(ctx, %{"review_workspace_id" => bare})
+    end
+
+    test "a bare id does not carry another tenant's Signal to the default tenant's folder",
+         ctx do
+      bare = "bare-route-#{ctx.n}"
+      {:ok, _} = register(ctx, %{"signals" => signals(ctx)})
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE connectors SET config = json_set(config, '$.review_workspace_id', ?2) WHERE id = ?1",
+          [ctx.connector_id, bare]
+        )
+
+      rule(ctx, ctx.review, 1)
+      run(ctx)
+
+      assert contexts_in(ctx, bare) == 0
+      assert contexts_in(ctx, ctx.home) >= 1
+    end
+  end
+
+  describe "changing a connector whose review workspace is no longer the tenant's" do
+    setup ctx do
+      id = "conn-patch-#{ctx.n}"
+
+      {:ok, ^id} =
+        Connectors.register(%{
+          id: id,
+          kind: :sources_folder,
+          tenant_id: ctx.tenant,
+          workspace_id: ctx.home,
+          config: %{}
+        })
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE connectors SET config = json_set(config, '$.review_workspace_id', ?2) WHERE id = ?1",
+          [id, ctx.foreign]
+        )
+
+      %{patched: id}
+    end
+
+    test "it can still be disabled, and changed in what it does not touch", ctx do
+      assert {:ok, %{enabled: false}} = Rows.update(ctx.tenant, ctx.patched, %{"enabled" => false})
+
+      assert {:ok, _} =
+               Rows.update(ctx.tenant, ctx.patched, %{"config" => %{"marker" => "still works"}})
+    end
+
+    test "a change that disables it is accepted whatever else it carries", ctx do
+      assert {:ok, %{enabled: false}} =
+               Rows.update(ctx.tenant, ctx.patched, %{
+                 "enabled" => false,
+                 "config" => %{"review_workspace_id" => ctx.foreign}
+               })
+    end
+
+    test "the review workspace itself is checked when the change touches it", ctx do
+      assert {:error, :invalid_review_workspace} =
+               Rows.update(ctx.tenant, ctx.patched, %{
+                 "config" => %{"review_workspace_id" => ctx.foreign}
+               })
+
+      assert {:ok, _} =
+               Rows.update(ctx.tenant, ctx.patched, %{
+                 "config" => %{"review_workspace_id" => ctx.review}
+               })
+    end
+  end
+
+  describe "a route that is not taken" do
+    test "is logged with the connector and the workspace", ctx do
+      {:ok, _} = register(ctx, %{"signals" => signals(ctx)})
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE connectors SET config = json_set(config, '$.review_workspace_id', ?2) WHERE id = ?1",
+          [ctx.connector_id, ctx.foreign]
+        )
+
+      rule(ctx, ctx.review, 1)
+      log = capture_log(fn -> run(ctx) end)
+
+      assert log =~ ctx.connector_id
+      assert log =~ ctx.foreign
+      assert log =~ ctx.home
     end
   end
 

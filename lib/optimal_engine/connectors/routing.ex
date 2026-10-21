@@ -44,9 +44,10 @@ defmodule OptimalEngine.Connectors.Routing do
       "outward_topic":            "customers"              (optional)
 
   `review_workspace_id` must be a workspace the connector's tenant may place a
-  Signal in: one of its active workspaces, or an id nobody registered that is
-  not named for another tenant. A route that names a workspace of another
-  tenant, whether by this key or by a routing rule, is not taken.
+  Signal in: one of its active workspaces or, for the default tenant only, an
+  id nobody registered that is not named for another tenant. A route that
+  names a workspace of another tenant, whether by this key or by a routing
+  rule, is not taken, and the Engine logs it.
 
   `outward_topic` must be one of `OptimalEngine.Viability.SignalEvents.outward_topics/0`.
   When it is set, every Signal this connector produces is recorded as an
@@ -88,19 +89,23 @@ defmodule OptimalEngine.Connectors.Routing do
   @doc """
   `validate_config/1`, and the review workspace the config names must be a
   workspace the tenant may place a Signal in (`Rows.routable_workspace?/2`):
-  `{:error, :invalid_review_workspace}` otherwise.
+  `{:error, :invalid_review_workspace}` otherwise. With `review_workspace:
+  false` the review workspace is not checked, for a change that does not touch
+  it: a connector registered before the check can still be disabled or
+  retuned.
   """
-  @spec validate_config(map(), String.t()) :: :ok | {:error, atom()}
-  def validate_config(config, tenant_id) when is_map(config) do
+  @spec validate_config(map(), String.t(), keyword()) :: :ok | {:error, atom()}
+  def validate_config(config, tenant_id, opts \\ []) when is_map(config) do
     with :ok <- validate_config(config) do
       case value(config, "review_workspace_id") do
-        nil ->
+        workspace_id when is_nil(workspace_id) or workspace_id == "" ->
           :ok
 
         workspace_id ->
-          if Rows.routable_workspace?(tenant_id, workspace_id),
-            do: :ok,
-            else: {:error, :invalid_review_workspace}
+          if Keyword.get(opts, :review_workspace, true) == false or
+               Rows.routable_workspace?(tenant_id, workspace_id),
+             do: :ok,
+             else: {:error, :invalid_review_workspace}
       end
     end
   end
@@ -117,22 +122,30 @@ defmodule OptimalEngine.Connectors.Routing do
   def workspace_for(tenant_id, %Signal{} = signal, config, default_workspace) do
     decision = RuleStore.classify(tenant_id, material(signal, config))
 
-    workspace_id =
+    proposed =
       cond do
         decision.confidence == :high and claims?(tenant_id, config, decision) ->
-          own_workspace(tenant_id, decision.workspace_id)
+          decision.workspace_id
 
         decision.confidence == :review ->
-          own_workspace(tenant_id, present(value(config, "review_workspace_id")))
+          present(value(config, "review_workspace_id"))
 
         true ->
-          default_workspace
+          nil
+      end
+
+    {workspace_id, refused} =
+      cond do
+        is_nil(proposed) -> {default_workspace, nil}
+        Rows.routable_workspace?(tenant_id, proposed) -> {proposed, nil}
+        true -> {default_workspace, proposed}
       end
 
     %{
       workspace_id: workspace_id || default_workspace,
       decision: decision,
-      default_workspace_id: default_workspace
+      default_workspace_id: default_workspace,
+      refused_workspace_id: refused
     }
   end
 
@@ -167,6 +180,7 @@ defmodule OptimalEngine.Connectors.Routing do
     config = Map.get(scope, :config, %{})
     default_workspace = Map.get(scope, :workspace_id, "default")
     placed = workspace_for(tenant_id, signal, config, default_workspace)
+    warn_refused(tenant_id, placed, Map.get(scope, :connector_id))
 
     # A pulled item is stored in the database only, once per source item, and
     # dated when it happened. A connector that wants markdown files on disk
@@ -211,6 +225,14 @@ defmodule OptimalEngine.Connectors.Routing do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp warn_refused(_tenant_id, %{refused_workspace_id: nil}, _connector_id), do: :ok
+
+  defp warn_refused(tenant_id, placed, connector_id) do
+    Logger.warning(
+      "[Connectors.Routing] connector #{inspect(connector_id)}: the route to #{inspect(placed.refused_workspace_id)} was not taken, it is not a workspace tenant #{inspect(tenant_id)} may place a Signal in; the Signal stays in #{inspect(placed.workspace_id)}"
+    )
   end
 
   @doc """
@@ -306,10 +328,6 @@ defmodule OptimalEngine.Connectors.Routing do
   end
 
   # ─── private ─────────────────────────────────────────────────────────────
-
-  defp own_workspace(tenant_id, workspace_id) do
-    if Rows.routable_workspace?(tenant_id, workspace_id), do: workspace_id
-  end
 
   # A walled or private workspace is only claimed by an explicit identity
   # mapping. A keyword rule can only ever propose it for review.

@@ -718,7 +718,10 @@ defmodule OptimalEngine.Connectors.Runner do
   end
 
   defp validate_and_seal(config, attrs) do
-    with :ok <- Routing.validate_config(config, Map.get(attrs, :tenant_id, Tenant.default_id())),
+    with :ok <-
+           Routing.validate_config(config, Map.get(attrs, :tenant_id, Tenant.default_id()),
+             review_workspace: Map.get(attrs, :check_review_workspace, true)
+           ),
          :ok <- Cadence.validate(config) do
       encrypt_credentials(config)
     end

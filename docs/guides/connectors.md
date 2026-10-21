@@ -128,7 +128,9 @@ A connector's Signals are routed to a workspace, in this order.
    A rule matches a Signal's sender, domain, label, channel or keywords.
    A high-confidence route wins, so a person or company the operator has already mapped claims their mail wherever it arrives.
    A low-confidence route goes to `review_workspace_id` when the connector names one, and otherwise stays put.
-   A route, whether from a rule or from `review_workspace_id`, that names a workspace of another tenant (or an archived one) is not taken: the Signal stays in the connector's own workspace.
+   A route, whether from a rule or from `review_workspace_id`, that names a workspace of another tenant (or an archived one) is not taken, and the Engine logs it: the Signal stays in the connector's own workspace.
+   A workspace nobody registered is routable by the default tenant only.
+   A connector registered before this check can still be disabled or changed in what it does not touch.
 3. Walled workspaces.
    A workspace named in `routing_walled_workspaces` is only reached by an identity rule, on sender, domain, label or channel.
    A keyword is a guess, and a guess never opens a private view.
