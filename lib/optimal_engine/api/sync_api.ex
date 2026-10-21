@@ -85,8 +85,10 @@ defmodule OptimalEngine.API.SyncAPI do
     workspace_id = body["workspace"] || body["workspace_id"]
 
     if is_binary(workspace_id) do
-      {:ok, result} = Sync.enable(tenant(conn), workspace_id, Actor.of(conn, body))
-      json(conn, 200, result)
+      case Sync.enable(tenant(conn), workspace_id, Actor.of(conn, body)) do
+        {:ok, result} -> json(conn, 200, result)
+        {:error, {:unsupported, message}} -> error(conn, 501, message)
+      end
     else
       error(conn, 400, "workspace is required")
     end
@@ -98,6 +100,7 @@ defmodule OptimalEngine.API.SyncAPI do
 
     case Sync.add_peer(tenant(conn), attrs, Actor.of(conn, body)) do
       {:ok, peer} -> json(conn, 201, peer)
+      {:error, {:unsupported, message}} -> error(conn, 501, message)
       {:error, reason} -> error(conn, 422, reason)
     end
   end

@@ -11,12 +11,18 @@ defmodule OptimalEngine.Storage.Providers do
   and the `adapter_missing` lifecycle state, regardless of configuration or a
   reachable endpoint: a healthy remote service the engine cannot talk to is
   not available storage.
+
+  The canonical store providers (`sqlite`, `postgres`) also report `selected`:
+  whether this build's `OptimalEngine.Store` uses that implementation. The
+  choice is made when the engine is compiled, so an available PostgreSQL
+  provider in a build that selected SQLite holds none of the engine's data.
   """
 
   @providers [
     %{
       id: "sqlite",
       adapter: OptimalEngine.Store,
+      store: OptimalEngine.Store.SQLite,
       name: "SQLite",
       kind: "embedded",
       role: "canonical",
@@ -88,7 +94,8 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "postgres",
-      adapter: nil,
+      adapter: OptimalEngine.Store.Postgres,
+      store: OptimalEngine.Store.Postgres,
       name: "PostgreSQL",
       kind: "service",
       role: "canonical",
@@ -231,6 +238,24 @@ defmodule OptimalEngine.Storage.Providers do
     end
   end
 
+  # The PostgreSQL proof writes a row to a temporary table on a connection of
+  # its own and reads it back, then reports whether this build stores its data
+  # there.
+  defp proof_for(%{id: "postgres"} = provider, _opts) do
+    if Enum.all?(provider.required_env, &present_env?/1) do
+      case OptimalEngine.Storage.Postgres.round_trip() do
+        {:ok, evidence} ->
+          evidence = Map.put(evidence, :selected, OptimalEngine.Store.selected?(provider.store))
+          %{provider: "postgres", status: "pass", evidence: evidence}
+
+        {:error, reason} ->
+          %{provider: "postgres", status: "fail", evidence: %{error: inspect(reason)}}
+      end
+    else
+      %{provider: "postgres", status: "skipped", reason: "not configured"}
+    end
+  end
+
   defp proof_for(provider, _opts) do
     %{
       provider: provider.id,
@@ -256,7 +281,8 @@ defmodule OptimalEngine.Storage.Providers do
     lifecycle_state = lifecycle_state(provider, adapter_implemented, configured, health)
 
     provider
-    |> Map.drop([:adapter, :probe, :required_env, :optional_env])
+    |> Map.drop([:adapter, :store, :probe, :required_env, :optional_env])
+    |> put_selected(provider)
     |> Map.put(:adapter_implemented, adapter_implemented)
     |> Map.put(:adapter_module, adapter_name(provider.adapter, adapter_implemented))
     |> Map.put(:configured, configured)
@@ -266,6 +292,17 @@ defmodule OptimalEngine.Storage.Providers do
     |> Map.put(:optional_environment, provider.optional_env)
     |> Map.put(:missing_environment, missing)
   end
+
+  defp put_selected(inspected, %{id: "postgres", store: store}) do
+    inspected
+    |> Map.put(:selected, OptimalEngine.Store.selected?(store))
+    |> Map.put(:unavailable, OptimalEngine.Storage.Postgres.unavailable())
+  end
+
+  defp put_selected(inspected, %{store: store}),
+    do: Map.put(inspected, :selected, OptimalEngine.Store.selected?(store))
+
+  defp put_selected(inspected, _provider), do: inspected
 
   # A missing adapter outranks every configuration or probe result.
   defp lifecycle_state(_provider, false, _configured, _health), do: "adapter_missing"

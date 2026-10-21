@@ -9,6 +9,19 @@ config :optimal_engine,
   topology_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY", ".optimal/config.yaml"),
   topology_full_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY_FULL", "topology.yaml")
 
+# The canonical store this build runs (OptimalEngine.Store), fixed when the
+# engine is compiled. SQLite is the default. OPTIMAL_STORE=postgres at compile
+# time selects the PostgreSQL store, which then reads OPTIMAL_POSTGRES_URL when
+# it starts (docs/guides/postgres-provider.md).
+store_adapter =
+  case System.get_env("OPTIMAL_STORE", "sqlite") do
+    "sqlite" -> OptimalEngine.Store.SQLite
+    "postgres" -> OptimalEngine.Store.Postgres
+    other -> raise "OPTIMAL_STORE must be sqlite or postgres, got #{inspect(other)}"
+  end
+
+config :optimal_engine, :store_adapter, store_adapter
+
 # API key authentication.
 # Set auth_required: true in production (or via OPTIMAL_AUTH_REQUIRED env var in runtime.exs).
 # In dev and test, auth_required defaults to false so the API is open without a key.

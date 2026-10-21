@@ -109,6 +109,20 @@ defmodule OptimalEngine.Retrieval.Search do
     search(query, Keyword.put(opts, :node, node))
   end
 
+  @doc """
+  True when this build's store has full-text search. The PostgreSQL store does
+  not until a tsvector slice (`OptimalEngine.Storage.Postgres.unavailable/0`);
+  search, context assembly and asking refuse with `unavailable/0` there rather
+  than answer as if nothing matched.
+  """
+  @spec available?() :: boolean()
+  def available?, do: Store.selected?(OptimalEngine.Store.SQLite)
+
+  @doc "The refusal a search returns where full-text search is not available."
+  @spec unavailable() :: {:error, {:unsupported, String.t()}}
+  def unavailable,
+    do: {:error, {:unsupported, "full-text search is not available on the PostgreSQL store"}}
+
   # ---------------------------------------------------------------------------
   # GenServer Callbacks
   # ---------------------------------------------------------------------------
@@ -150,17 +164,22 @@ defmodule OptimalEngine.Retrieval.Search do
     memory_only = Keyword.get(opts, :type) == :memory
 
     raw_result =
-      if memory_only do
-        {:ok, []}
-      else
-        if vector_allowed and hybrid_enabled?() and TextEmbedder.healthy?() do
-          case do_hybrid_search(query, opts, state.topology) do
-            {:ok, _} = ok -> ok
-            {:error, _} -> do_search(query, opts, state.topology)
+      cond do
+        not available?() ->
+          unavailable()
+
+        memory_only ->
+          {:ok, []}
+
+        true ->
+          if vector_allowed and hybrid_enabled?() and TextEmbedder.healthy?() do
+            case do_hybrid_search(query, opts, state.topology) do
+              {:ok, _} = ok -> ok
+              {:error, _} -> do_search(query, opts, state.topology)
+            end
+          else
+            do_search(query, opts, state.topology)
           end
-        else
-          do_search(query, opts, state.topology)
-        end
       end
 
     # Durable memories are stored in their own versioned table and FTS index.
