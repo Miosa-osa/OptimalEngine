@@ -1259,9 +1259,11 @@ defmodule OptimalEngine.Sync do
   # A delete of a context that a peer made (an erasure, a retention delete, a move)
   # removed its rows here, and the derived rows that went with it arrive as deletes of
   # their own. What this Engine keeps outside the database does not: the embeddings
-  # it cached from that text, and the files it made from the context's source package (its
-  # decomposition checkpoints and assets, which are not replicated). They go once the batch
-  # has committed. A failure is logged and never fails an apply that has already committed.
+  # it cached from that text, and what it made from the context's source package (its
+  # decomposition runs, checkpoints and assets, which are not replicated). The origin deletes
+  # those with the package, so they go once the batch has committed and the package row is
+  # gone (`DerivedData.remove_planned_files/1`). A failure is logged and never fails an apply
+  # that has already committed.
   defp note_erased(acc, "contexts", %{"operation" => "delete"}), do: %{acc | erased?: true}
   defp note_erased(acc, "source_packages", %{"operation" => "delete"}), do: %{acc | erased?: true}
   defp note_erased(acc, _table, _mutation), do: acc
