@@ -5,7 +5,9 @@ defmodule OptimalEngine.Health do
   Liveness is a boolean: "is the supervision tree up?". Readiness is
   richer: "can the engine actually serve traffic right now?" — SQLite
   writable, embedder reachable, credential key present if connectors
-  are configured, migration state current.
+  are configured, migration state current, and the API not open to the
+  network without authentication (`network_auth`, which warns
+  `auth_open_on_network`; see `OptimalEngine.API.Exposure`).
 
   ## Usage
 
@@ -19,6 +21,7 @@ defmodule OptimalEngine.Health do
           store: :ok,
           migrations: :ok,
           credential_key: :ok,
+          network_auth: :ok,
           embedder: :ok
         },
         degraded: []
@@ -26,7 +29,8 @@ defmodule OptimalEngine.Health do
 
   Each check returns `:ok | {:warn, reason} | {:error, reason}`.
   `ok?` is `true` when no check returned `:error`. Warnings indicate
-  degraded mode — the engine still serves, but operators should know.
+  degraded mode: the engine still serves, but operators should know;
+  `warnings/1` names them.
   """
 
   alias OptimalEngine.Connectors.Credential
@@ -60,7 +64,7 @@ defmodule OptimalEngine.Health do
     skip = Keyword.get(opts, :skip, [])
 
     checks =
-      [:store, :migrations, :credential_key, :embedder]
+      [:store, :migrations, :credential_key, :network_auth, :embedder]
       |> Enum.reject(&(&1 in skip))
       |> Enum.map(fn name -> {name, run_check(name)} end)
       |> Enum.into(%{})
@@ -91,7 +95,31 @@ defmodule OptimalEngine.Health do
   def status_of(%{ok?: true}), do: :degraded
   def status_of(_), do: :down
 
+  @doc """
+  The warning codes in a readiness report, such as `"auth_open_on_network"`:
+  the first element of each `{:warn, reason}` (or the reason itself).
+  """
+  @spec warnings(readiness()) :: [String.t()]
+  def warnings(%{checks: checks}) do
+    checks
+    |> Enum.flat_map(fn
+      {_name, {:warn, reason}} when is_tuple(reason) -> [reason |> elem(0) |> to_string()]
+      {_name, {:warn, reason}} -> [to_string(reason)]
+      _ -> []
+    end)
+    |> Enum.sort()
+  end
+
   # ─── checks ──────────────────────────────────────────────────────────────
+
+  # An API with authentication off on a network interface still serves, but
+  # anyone who can reach it acts as the local operator (OptimalEngine.API.Exposure).
+  defp run_check(:network_auth) do
+    case OptimalEngine.API.Exposure.open_interface() do
+      nil -> :ok
+      interface -> {:warn, {:auth_open_on_network, interface}}
+    end
+  end
 
   defp run_check(:store) do
     case Store.raw_query("SELECT 1", []) do

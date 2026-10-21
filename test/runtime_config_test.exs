@@ -87,6 +87,32 @@ defmodule OptimalEngine.RuntimeConfigTest do
     assert get_in(config, [:optimal_engine, :auth, :auth_required]) == true
   end
 
+  test "the open-network refusal is read from the environment and rejects other values" do
+    original = System.get_env("OPTIMAL_REFUSE_OPEN_NETWORK")
+
+    on_exit(fn ->
+      if original,
+        do: System.put_env("OPTIMAL_REFUSE_OPEN_NETWORK", original),
+        else: System.delete_env("OPTIMAL_REFUSE_OPEN_NETWORK")
+    end)
+
+    for {value, expected} <- [{"1", true}, {"true", true}, {"0", false}, {"false", false}] do
+      System.put_env("OPTIMAL_REFUSE_OPEN_NETWORK", value)
+      config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+      assert get_in(config, [:optimal_engine, :refuse_open_network]) == expected
+    end
+
+    System.delete_env("OPTIMAL_REFUSE_OPEN_NETWORK")
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    refute Keyword.has_key?(Keyword.fetch!(config, :optimal_engine), :refuse_open_network)
+
+    System.put_env("OPTIMAL_REFUSE_OPEN_NETWORK", "yes")
+
+    assert_raise ArgumentError, ~r/OPTIMAL_REFUSE_OPEN_NETWORK must be 1 or 0/, fn ->
+      Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    end
+  end
+
   test "invalid authentication flags fail configuration rather than disabling protection" do
     for value <- ["", "TRUE", "1", "false ", "yes"] do
       System.put_env("OPTIMAL_AUTH_REQUIRED", value)

@@ -356,6 +356,17 @@ if max_ttl = System.get_env("OPTIMAL_AUTHORITY_MAX_TTL_SECONDS") do
   config :optimal_engine, :authority_max_ttl_seconds, String.to_integer(max_ttl)
 end
 
+# An API listening beyond loopback with authentication off is logged as an
+# error at boot and every 10 minutes, and warned in /api/health
+# (OptimalEngine.API.Exposure). OPTIMAL_REFUSE_OPEN_NETWORK=1 refuses to start
+# instead; it is off by default in this release and the default in the next.
+case System.get_env("OPTIMAL_REFUSE_OPEN_NETWORK") do
+  nil -> :ok
+  value when value in ["1", "true"] -> config :optimal_engine, :refuse_open_network, true
+  value when value in ["0", "false", ""] -> config :optimal_engine, :refuse_open_network, false
+  _ -> raise ArgumentError, "OPTIMAL_REFUSE_OPEN_NETWORK must be 1 or 0"
+end
+
 # Local HTTP API - enabled on demand (the bundled engine turns it on; other
 # contexts leave it off). Port is env-driven so it can dodge a busy :4200.
 if System.get_env("OPTIMAL_API_ENABLED") == "true" do

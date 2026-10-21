@@ -214,6 +214,10 @@ The environment override accepts only literal `true` or `false`; invalid values 
 Selecting `MIX_ENV=prod` alone does not enable authentication.
 Verify that a protected request without credentials returns 401 and that the intended scoped credential succeeds.
 Unauthenticated local mode is privileged development access, and direct CLI or database access is outside HTTP authorization.
+An Engine whose API listens on any interface but loopback (`OPTIMAL_API_INTERFACE=0.0.0.0`, a LAN address) with authentication off is open to everyone who can reach it.
+It logs `API is open: auth is off on <interface>; set OPTIMAL_AUTH_REQUIRED=true` at boot and every 10 minutes, and `/api/health` and `/api/status` report the warning `auth_open_on_network` (check `network_auth`, status `degraded`).
+`OPTIMAL_REFUSE_OPEN_NETWORK=1` makes such an Engine refuse to start instead; the refusal is off by default in this release and becomes the default in the next.
+An Engine on `127.0.0.1` with authentication off is unaffected.
 
 The `read` and `write` grants do not authorize Claim review, topology changes, or key administration.
 Add `claims:review`, `topology:write`, or `admin` only for the operations the client needs.
@@ -235,6 +239,7 @@ OPTIMAL_ENGINE_TOPOLOGY      local workspace config path
 OPTIMAL_ENGINE_TOPOLOGY_FULL root topology config path
 OPTIMAL_ENGINE_API_KEY       API key used by external clients/agents
 OPTIMAL_AUTH_REQUIRED        true/false override for HTTP authentication
+OPTIMAL_REFUSE_OPEN_NETWORK  1 refuses to start with auth off beyond loopback
 OLLAMA_HOST                  local model server URL
 OPTIMAL_VLM_MODEL            local visual model name for configured adapters
 ```
