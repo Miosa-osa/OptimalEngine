@@ -245,14 +245,17 @@ defmodule OptimalEngine.AtomGuardTest do
             {"defdelegate go(m, f, a), to: :erlang, as: :spawn", :apply_dynamic},
             {"defdelegate go(m, f, a), to: Task, as: :async", :apply_dynamic},
             {"defdelegate cap(m, f, a), to: Function, as: :capture", :apply_dynamic},
-            {"defdelegate to_term(bin), to: :erlang, as: :binary_to_term", :binary_to_term},
-            {"defdelegate [to_atom(x), length(y)], to: String", :string_to_atom},
-            {"defdelegate [eval_string(x), eval_file(y)], to: Code", :code_eval}
+            {"defdelegate to_term(bin), to: :erlang, as: :binary_to_term", :binary_to_term}
           ] do
-        assert [%{kind: ^kind} | _] = scan(source), source
+        assert [%{kind: ^kind}] = scan(source), source
       end
 
-      assert [_one, _two] = scan("defdelegate [eval_string(x), eval_file(y)], to: Code")
+      # The list form defines several functions; each head is read.
+      assert [%{kind: :string_to_atom}] =
+               scan("defdelegate [to_atom(x), length(y)], to: String")
+
+      assert [%{kind: :code_eval}, %{kind: :code_eval}] =
+               scan("defdelegate [eval_string(x), eval_file(y)], to: Code")
 
       alias_source = "alias String, as: S\ndefdelegate to_atom(text), to: S"
       assert [%{kind: :string_to_atom}] = scan(alias_source)
@@ -340,6 +343,107 @@ defmodule OptimalEngine.AtomGuardTest do
           ] do
         assert [] = scan("def f(x), do: #{source}"), source
       end
+    end
+
+    test ":rpc.multicall/4 is read as both of its forms" do
+      for {source, kind} <- [
+            # (Module, Function, Args, Timeout)
+            {":rpc.multicall(mod, :run, [x], 1000)", :apply_dynamic},
+            {":rpc.multicall(mod, fun, [x], :infinity)", :apply_dynamic},
+            {":rpc.multicall(String, :to_atom, [x], 5000)", :apply_atom_module},
+            # (Nodes, Module, Function, Args)
+            {":rpc.multicall(nodes, mod, fun, [x])", :apply_dynamic},
+            {":rpc.multicall([node()], Code, :eval_string, [x])", :apply_atom_module},
+            # nothing tells them apart: either position counts
+            {":rpc.multicall(a, b, c, d)", :apply_dynamic}
+          ] do
+        assert [%{kind: ^kind}] = scan("def f(x), do: #{source}"), source
+      end
+
+      for source <- [
+            ":rpc.multicall(MyApp.Worker, :run, [x], 1000)",
+            ":rpc.multicall(nodes, MyApp.Worker, :run, [x])",
+            ":rpc.multicall([node()], MyApp.Worker, :run, [x])",
+            ":rpc.multicall(MyApp.Worker, :run, [x])"
+          ] do
+        assert [] = scan("def f(x), do: #{source}"), source
+      end
+    end
+
+    test ":erlang.hibernate/3, :proc_lib.hibernate/3 and :timer.tc with a module, function, arguments" do
+      for {source, kind} <- [
+            {":erlang.hibernate(mod, fun, [x])", :apply_dynamic},
+            {":erlang.hibernate(Code, :eval_string, [x])", :apply_atom_module},
+            {":proc_lib.hibernate(mod, fun, [x])", :apply_dynamic},
+            {":timer.tc(mod, fun, [x])", :apply_dynamic},
+            {":timer.tc(mod, :run, args)", :apply_dynamic},
+            {":timer.tc(String, :to_atom, [x])", :apply_atom_module},
+            {":timer.tc(mod, fun, [x], :millisecond)", :apply_dynamic}
+          ] do
+        assert [%{kind: ^kind}] = scan("def f(x), do: #{source}"), source
+      end
+
+      for source <- [
+            ":erlang.hibernate(MyApp.Worker, :loop, [x])",
+            ":timer.tc(MyApp.Worker, :run, [x])",
+            # (Fun, Args, TimeUnit) runs no named function
+            ":timer.tc(fun, args, :millisecond)",
+            ":timer.tc(fn -> x end, [], :second)",
+            ":timer.tc(fun, args, unit)",
+            ":timer.tc(fun, args)"
+          ] do
+        assert [] = scan("def f(x), do: #{source}"), source
+      end
+    end
+
+    test "a child spec's {module, function, args} start tuple is read like apply/3" do
+      for {source, kind} <- [
+            {"%{id: 1, start: {mod, :start_link, [x]}}", :apply_dynamic},
+            {"[start: {mod, fun, args}]", :apply_dynamic},
+            {"%{start: {String, :to_atom, [x]}}", :apply_atom_module}
+          ] do
+        assert [%{kind: ^kind}] = scan("def f(x), do: #{source}"), source
+      end
+
+      for source <- [
+            "%{id: 1, start: {MyApp.Worker, :start_link, [x]}}",
+            "%{start: {__MODULE__, :start_link, [x]}}",
+            "%{start: start}",
+            "%{stop: {mod, :stop, []}}",
+            "{mod, :start_link, [x]}"
+          ] do
+        assert [] = scan("def f(x), do: #{source}"), source
+      end
+    end
+
+    test "a plain alias, a grouped alias and an alias with options name their modules" do
+      call = "def f(x), do: Supervisor.async(sup, mod, fun, [x])"
+
+      for header <- [
+            "alias Task.Supervisor",
+            "alias Task.{Supervisor, Other}",
+            "alias Task.Supervisor, warn: false"
+          ] do
+        assert [%{kind: :apply_dynamic}] = scan(header <> "\n" <> call), header
+      end
+
+      # Without the alias, Supervisor is Elixir's and has no such call.
+      assert [] = scan(call)
+
+      assert [] =
+               scan("alias Task.Supervisor\ndef f(x), do: Supervisor.async(sup, fn -> x end)")
+    end
+
+    test "an alias cannot hide a standard library module the file also uses" do
+      source = "alias MyApp.String\ndef f(x), do: String.to_atom(x)"
+      assert [%{kind: :string_to_atom}] = scan(source)
+
+      source = "alias MyApp.{Code, List}\ndef f(x), do: [Code.eval_string(x), List.to_atom(x)]"
+      assert [:code_eval, :list_to_atom] = source |> scan() |> Enum.map(& &1.kind) |> Enum.sort()
+
+      # Naming the module itself is harmless.
+      assert [%{kind: :string_to_atom}] =
+               scan("alias String\ndef f(x), do: String.to_atom(x)")
     end
 
     test "a to_atom-like function called on a module held in a variable" do
