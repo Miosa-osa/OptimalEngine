@@ -17,6 +17,9 @@ defmodule OptimalEngine.Compliance.DerivedData do
       and OCR spans, and the files those rows point at
     * `wiki_pages` that cite one of the context's chunks, and their citations
     * `episodes`, `processor_runs`, `decisions` and `graph_edges` that name the context
+    * the context's signal file, its summary sidecars and the cross-reference copies
+      intake wrote to the other nodes, with the contexts that index them
+      (`Compliance.ContextFiles`)
 
   A source package is removed only if no context that stays refers to it: the
   same text ingested twice in a workspace is one package. A wiki page is removed
@@ -33,7 +36,8 @@ defmodule OptimalEngine.Compliance.DerivedData do
   the Store), with the same effect when one cannot be deleted.
 
   `delete_derived/1` removes the same rows and files but keeps the contexts, for a
-  context whose text was redacted in place. `preview/2` counts what
+  context whose text was redacted in place; the context's own signal file and its
+  sidecars are rewritten through `Compliance.Redact` instead of removed. `preview/2` counts what
   `erase_contexts/2` would remove, and removes nothing.
 
   Not touched: shared canonical entities and aliases, which are not specific to a
@@ -43,7 +47,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
 
   require Logger
 
-  alias OptimalEngine.Compliance.Artifacts
+  alias OptimalEngine.Compliance.{Artifacts, ContextFiles}
   alias OptimalEngine.Storage.S3
   alias OptimalEngine.Store
 
@@ -64,7 +68,10 @@ defmodule OptimalEngine.Compliance.DerivedData do
   @spec erase_contexts(String.t(), [String.t()]) :: {:ok, removed()} | {:error, term()}
   def erase_contexts(tenant_id, context_ids) when is_binary(tenant_id) and is_list(context_ids) do
     in_batches(context_ids, fn batch ->
-      with :ok <- remove_objects(tenant_id, batch) do
+      with {:ok, plan} <- ContextFiles.plan(tenant_id, batch),
+           batch = Enum.uniq(batch ++ plan.copy_ids),
+           :ok <- remove_objects(tenant_id, batch),
+           {:ok, _removed} <- ContextFiles.remove(plan.files) do
         Store.transaction(&erase_batch(&1, tenant_id, batch, true), @timeout)
       end
     end)
@@ -77,6 +84,12 @@ defmodule OptimalEngine.Compliance.DerivedData do
   @spec preview(String.t(), [String.t()]) :: {:ok, removed()} | {:error, term()}
   def preview(tenant_id, context_ids) when is_binary(tenant_id) and is_list(context_ids) do
     in_batches(context_ids, fn batch ->
+      files =
+        case ContextFiles.plan(tenant_id, batch) do
+          {:ok, plan} -> length(plan.files)
+          {:error, _} -> 0
+        end
+
       result =
         Store.transaction(
           fn txn ->
@@ -89,7 +102,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
         )
 
       case result do
-        {:error, {:preview, removed}} -> {:ok, removed}
+        {:error, {:preview, removed}} -> {:ok, Map.put(removed, :context_files, files)}
         other -> other
       end
     end)
@@ -104,7 +117,9 @@ defmodule OptimalEngine.Compliance.DerivedData do
   def delete_derived(context_ids) when is_list(context_ids) do
     ids = Enum.uniq(context_ids)
 
-    with :ok <- remove_objects(nil, ids) do
+    with {:ok, plan} <- ContextFiles.plan(nil, ids, copies: false),
+         :ok <- remove_objects(nil, ids),
+         {:ok, _redacted} <- ContextFiles.redact(plan.files) do
       Store.transaction(&delete_in(&1, ids, true), @timeout)
     end
   end
