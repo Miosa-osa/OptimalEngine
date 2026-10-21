@@ -386,7 +386,10 @@ defmodule OptimalEngine.API.WorkspaceExternalIdTest do
       Workspace.create(%{id: "legacy-#{n}", slug: slug, name: "Legacy", external_id: external})
 
     assert {:ok, _} =
-             DataSteward.rename_workspace("legacy-#{n}", "default:#{slug}", actor_id: "test")
+             DataSteward.rename_workspace("legacy-#{n}", "default:#{slug}",
+               tenant_id: "default",
+               actor_id: "test"
+             )
 
     assert {:ok, %{id: id, external_id: ^external}} =
              Workspace.get_by_external_id(external, "default")
@@ -539,12 +542,22 @@ defmodule OptimalEngine.API.WorkspaceExternalIdTest do
                external_id: external
              })
 
+    # The steward acts inside its caller's tenant: the key belongs to this one.
+    {:ok, %{key: steward}} =
+      OptimalEngine.Auth.ApiKey.mint(%{
+        tenant_id: tenant,
+        name: "steward",
+        scopes: ["topology:write"],
+        workspace_scope: ["*"]
+      })
+
     assert {200, %{"target_workspace_id" => ^canonical}} =
-             request(:post, "/api/data-steward/workspaces/rename", %{
-               source_workspace_id: legacy,
-               target_workspace_id: canonical,
-               actor_id: "user:test"
-             })
+             request(
+               :post,
+               "/api/data-steward/workspaces/rename",
+               %{source_workspace_id: legacy, target_workspace_id: canonical},
+               steward
+             )
 
     assert {:error, :not_found} = Workspace.get(legacy)
     assert {:ok, %{external_id: ^external}} = Workspace.get(canonical)

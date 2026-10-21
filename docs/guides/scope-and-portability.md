@@ -72,14 +72,29 @@ Portable topology documents name workspaces by slug (and by id for a renamed one
 ## Repairing a workspace id
 
 A rename keeps the id. An operator can also make the id match the slug, or attach rows written to an unregistered id, with `POST /api/data-steward/workspaces/rename {source_workspace_id, target_workspace_id}` and `POST /api/data-steward/workspaces/repair {source_workspace_id, target_workspace_id}` (`topology:write`).
-Both move every row that names the workspace to the new id in one transaction, and the answer lists the tables (`tables`, `updated_records` for a repair, `handles_moved` for a rename).
+Both move every row of the caller's tenant that names the workspace to the new id in one transaction, and the answer lists the tables (`tables`, `updated_records` for a repair, `handles_moved` for a rename).
 A rename also moves the slugs the workspace holds, and a repair moves rows only (the target must already be a registered workspace).
 A rename is refused (`target_workspace_has_rows`, nothing moves) when the new id already holds rows in any workspace table: that is other data written under the id, and a rename is the same workspace under a new id. Merge those rows into the workspace first with `workspaces/repair`, which records the move as a merge, then rename.
+
+Both act inside the caller's tenant.
+The route authorizes `source_workspace_id` and `target_workspace_id` like any workspace a request names, so a key restricted to some workspaces must hold both, and a workspace of another tenant answers `404` as if it were absent.
+The source of a rename must be a workspace of the tenant.
+The target of a repair must be an active workspace of the tenant, and its source must not be registered: a workspace of another tenant, in any state, or an active workspace of this tenant, is refused (`source_workspace_is_registered`); an archived workspace of this tenant can still be repaired from.
+Every move is bound to the tenant (`AND tenant_id = ?`), so rows another tenant wrote under an id both use stay where they are.
+A table with no tenant column (the entity resolution tables, for example) is moved wholesale by a rename, whose source is registered to one tenant.
+A repair, whose source belongs to nobody, traces each row of such a table to a tenant through the rows it points at, and moves it when they are the caller's and in the workspace being repaired: aliases, identifiers and lineage through their canonical entity, a mention through its context or source package, a resolution decision through its mention, reconstruction paths and outcomes through their run, a consolidation proposal through the runs behind its paths.
+The tables move first, before the rows they point at, so a row is traced from where its parent still is.
+A row that cannot be traced stays under the old id. So do the tables nothing can be traced from, `memory_path_feedback` and `sync_capture` (a captured change names the old id inside the change itself, and the rows that moved are captured again under the new one): they are listed in `unscoped_tables` with the rows they hold, once the repair has moved something of the caller's.
+Rows hanging off the caller's rows do not make a repair: it needs at least one row of a table with a `tenant_id` column to move, or it answers `nothing_to_repair`.
+A mention is written with its context and source package: `POST /api/entity-mentions` refuses (`context_not_found`, `source_package_not_found`) one that names a context or package that is not the key's tenant's, in the mention's workspace, and a decision is made only by the tenant the mention belongs to (`mention_not_found` otherwise), so another tenant cannot plant a row that a repair would take.
+Every check (the target, the source, the id a rename gives up and takes) and the move run in one transaction, and a check that cannot be answered stops the repair.
+A rename is refused when another tenant has rows under the source id (`workspace_id_shared`), because it could not take them along: rows of a table with a different `tenant_id`, or rows of a table with no tenant column that hang off another tenant's rows.
+To clear it, find the rows (`SELECT COUNT(*) FROM <table> WHERE workspace_id = '<id>' AND tenant_id <> '<tenant>'` for each table with a `tenant_id` column) and, if they are the tenant's rows with a stray `tenant_id`, correct them (`UPDATE <table> SET tenant_id = '<tenant>' WHERE workspace_id = '<id>' AND tenant_id = '<stray>'`), or if they belong to the other tenant, move them to that tenant's workspace (`UPDATE <table> SET workspace_id = '<their workspace>' WHERE workspace_id = '<id>' AND tenant_id = '<stray>'`). Then rename again.
+A repair with nothing of the caller's to move answers `nothing_to_repair`, and says nothing about what other tenants hold under the id.
 
 Signed evidence is not rewritten, because each entry is hashed and signed over the workspace id it names.
 `authority_evidence` is left alone, and the repair is appended to it as a signed `workspace.rekeyed` entry (from, to, who, mode) in the same transaction, which the answer reports as `rekey_recorded: true`.
 The mode is `rename` for `workspaces/rename` (the same workspace under a new id) and `merge` for `workspaces/repair` (rows of an unregistered id moved into a workspace that already existed).
-A repair that moves no rows records nothing (`false`).
 An agent action chain recorded under the old id still verifies, and is found under the new id, because a step is checked against the id inside its signed entry followed through the re-keys recorded after it, whatever the mode.
 A re-key counts only when it is a signed entry of the tenant's chain, from a key that is not revoked, with a link to the entry before it; a row written into the table by hand explains nothing.
 Deleting a re-key does not make anything verify: the steps it explained stop verifying, and the gap shows in `Evidence.verify/1` and the integrity scan.

@@ -81,7 +81,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
   defp repair_id(tenant, from_id, new_slug) do
     {:ok, _} = Workspace.update(from_id, %{slug: new_slug})
     target = "#{tenant}:#{new_slug}"
-    {:ok, result} = DataSteward.rename_workspace(from_id, target, actor_id: "user:steward")
+
+    {:ok, result} =
+      DataSteward.rename_workspace(from_id, target, tenant_id: tenant, actor_id: "user:steward")
+
     {target, result}
   end
 
@@ -286,7 +289,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       first = chain(tenant, orphan)
 
       assert {:ok, %{rekey_recorded: true}} =
-               DataSteward.repair_orphan_scope(orphan, registered, actor_id: "user:steward")
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       second = chain(tenant, orphan)
 
@@ -309,7 +315,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       assert trace!(tenant, correlation).workspace_id == orphan
 
       assert {:ok, result} =
-               DataSteward.repair_orphan_scope(orphan, registered, actor_id: "user:steward")
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert result.rekey_recorded
 
@@ -320,15 +329,14 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       assert {:ok, _} = Evidence.verify(tenant)
     end
 
-    test "an orphan repair that moves no rows records nothing",
+    test "an orphan repair that moves no rows is refused and records nothing",
          %{tenant: tenant, workspace: registered, n: n} do
-      assert {:ok, result} =
+      assert {:error, :nothing_to_repair} =
                DataSteward.repair_orphan_scope("#{tenant}:empty-#{n}", registered,
+                 tenant_id: tenant,
                  actor_id: "user:steward"
                )
 
-      assert result.updated_records == 0
-      refute result.rekey_recorded
       assert rekeys(tenant) == []
     end
   end
@@ -578,7 +586,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       without_authority_key()
 
       assert {:error, :evidence_key_unavailable} =
-               DataSteward.rename_workspace(old, "#{tenant}:ops-nokey", actor_id: "user:steward")
+               DataSteward.rename_workspace(old, "#{tenant}:ops-nokey",
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert {:ok, %{id: ^old}} = Workspace.get(old)
       assert {:error, :not_found} = Workspace.get("#{tenant}:ops-nokey")
@@ -599,7 +610,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       without_authority_key()
 
       assert {:error, :evidence_key_unavailable} =
-               DataSteward.repair_orphan_scope(orphan, registered, actor_id: "user:steward")
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert {:ok, [[4]]} =
                Store.raw_query(
@@ -617,6 +631,7 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
         capture_log(fn ->
           assert {:ok, result} =
                    DataSteward.rename_workspace(old, "#{tenant}:ops-quiet",
+                     tenant_id: tenant,
                      actor_id: "user:steward"
                    )
 
@@ -626,6 +641,35 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       assert log =~ "will not be recorded as evidence"
       assert {:ok, %{id: target}} = Workspace.get("#{tenant}:ops-quiet")
       assert target == "#{tenant}:ops-quiet"
+    end
+
+    test "a repair stops when it cannot tell whether the workspace has action steps",
+         %{tenant: tenant, workspace: old} do
+      {:ok, _} = Workspace.update(old, %{slug: "ops-unknown"})
+      without_authority_key()
+
+      :ok =
+        Store.raw_execute(
+          "ALTER TABLE authority_action_steps RENAME TO authority_action_steps_hidden",
+          []
+        )
+
+      on_exit(fn ->
+        Store.raw_execute(
+          "ALTER TABLE authority_action_steps_hidden RENAME TO authority_action_steps",
+          []
+        )
+      end)
+
+      # Not "no steps, so go ahead": the question could not be answered.
+      assert {:error, reason} =
+               DataSteward.rename_workspace(old, "#{tenant}:ops-unknown",
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
+
+      refute reason == :evidence_key_unavailable
+      assert {:ok, %{id: ^old}} = Workspace.get(old)
     end
 
     test "a step is not recorded at all, rather than recorded without evidence",
@@ -671,7 +715,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       refuse_evidence("workspace.rekeyed")
 
       assert_raise MatchError, fn ->
-        DataSteward.rename_workspace(old, "#{tenant}:ops-atomic", actor_id: "user:steward")
+        DataSteward.rename_workspace(old, "#{tenant}:ops-atomic",
+          tenant_id: tenant,
+          actor_id: "user:steward"
+        )
       end
 
       assert {:ok, %{id: ^old}} = Workspace.get(old)
@@ -725,7 +772,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
         )
 
       assert {:error, :target_workspace_has_rows} =
-               DataSteward.rename_workspace(old, target, actor_id: "user:steward")
+               DataSteward.rename_workspace(old, target,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert {:ok, %{id: ^old}} = Workspace.get(old)
       assert {:error, :not_found} = Workspace.get(target)
@@ -741,7 +791,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       assert updated >= 1
 
       assert {:ok, %{rekey_recorded: true}} =
-               DataSteward.rename_workspace(old, target, actor_id: "user:steward")
+               DataSteward.rename_workspace(old, target,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert {:ok, [[^target]]} =
                Store.raw_query("SELECT workspace_id FROM contexts WHERE id = ?1", ["held-#{n}"])
@@ -962,7 +1015,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       chain(tenant, orphan)
 
       assert {:ok, %{rekey_recorded: true}} =
-               DataSteward.repair_orphan_scope(orphan, registered, actor_id: "user:steward")
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       # Issued after the repair, under the orphan id: the repair does not
       # make that id mean the registered workspace.
@@ -1178,6 +1234,7 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
 
       assert {:ok, _} =
                DataSteward.rename_workspace(second.id, "#{tenant}:second-new",
+                 tenant_id: tenant,
                  actor_id: "user:steward"
                )
 
@@ -1185,6 +1242,7 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
 
       assert {:ok, _} =
                DataSteward.rename_workspace(first_target, "#{tenant}:first-newer",
+                 tenant_id: tenant,
                  actor_id: "user:steward"
                )
 

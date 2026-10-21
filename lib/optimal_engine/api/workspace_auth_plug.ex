@@ -11,7 +11,8 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
   1. Resolves EVERY workspace id the request names — the `:id` path segment
      on `/api/workspaces/:id*` and `/api/storage/workspaces/:id*`, and the
-     `"workspace"` and `"workspace_id"` body fields and query parameters. Authorizing all of them (not just the one
+     `"workspace"`, `"workspace_id"`, `"source_workspace_id"` and
+     `"target_workspace_id"` body fields and query parameters. Authorizing all of them (not just the one
      a given handler happens to read) means a body/query mismatch can never
      smuggle a second, unauthorized workspace past the check. Every `/api`
      route is workspace-scoped except the global families in
@@ -81,7 +82,11 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
         halt_json(conn, 400, "workspace_required")
 
       true ->
-        authorize_all(conn, if(requested == [], do: ["default"], else: requested))
+        authorize_all(
+          conn,
+          if(requested == [], do: ["default"], else: requested),
+          target_workspaces(conn)
+        )
     end
   end
 
@@ -99,12 +104,35 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
   defp valid_workspace_id?(_id), do: false
 
-  @workspace_fields ~w(workspace workspace_id)
+  # `source_workspace_id` and `target_workspace_id` are the two workspaces a
+  # steward id repair names (`/api/data-steward/workspaces/{rename,repair}`);
+  # each is authorized like any other workspace the request names. The target
+  # of a rename is, by definition, the "<tenant>:<slug>" name of the source's
+  # current slug and not yet an id, so it is checked for its tenant and the
+  # key's scope but is not refused as a slug named where an id belongs.
+  @workspace_fields ~w(workspace workspace_id source_workspace_id)
+  @target_field "target_workspace_id"
 
-  defp requested_workspaces(conn) do
+  defp requested_workspaces(conn), do: strict_workspaces(conn) ++ target_workspaces(conn)
+
+  # Every workspace named as an id.
+  defp strict_workspaces(conn) do
     [path_workspace(conn) | body_workspaces(conn) ++ query_workspaces(conn)]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.uniq()
+  end
+
+  defp target_workspaces(conn) do
+    named =
+      case conn.body_params do
+        params when is_map(params) and not is_struct(params) -> [Map.get(params, @target_field)]
+        _ -> []
+      end
+
+    (named ++ [Map.get(conn.query_params, @target_field)])
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> Kernel.--(strict_workspaces(conn))
   end
 
   # /api/workspaces/:id, /api/workspaces/:id/config, /api/workspaces/:id/archive…
@@ -183,13 +211,13 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # Authorization
   # ---------------------------------------------------------------------------
 
-  defp authorize_all(conn, [primary | _] = workspace_ids) do
+  defp authorize_all(conn, [primary | _] = workspace_ids, targets) do
     tenant_id = conn.assigns[:current_tenant] || "default"
     api_key = conn.assigns[:current_api_key]
     conn = assign(conn, :workspace_id, primary)
 
     Enum.reduce_while(workspace_ids, conn, fn workspace_id, conn ->
-      case authorize(workspace_id, tenant_id, api_key) do
+      case authorize(workspace_id, tenant_id, api_key, workspace_id in targets) do
         :ok ->
           {:cont, conn}
 
@@ -209,9 +237,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # indistinguishable from a workspace that does not exist — regardless of the
   # key's workspace_scope. Scope mismatches inside the caller's own tenant
   # are 403.
-  defp authorize(workspace_id, tenant_id, api_key) do
+  defp authorize(workspace_id, tenant_id, api_key, slug_named?) do
     with :ok <- check_engine_scope(workspace_id),
-         :ok <- check_tenant_ownership(workspace_id, tenant_id) do
+         :ok <- check_tenant_ownership(workspace_id, tenant_id, slug_named?) do
       check_key_scope(workspace_id, api_key)
     else
       # The id is named only to a caller whose key may use that workspace.
@@ -229,7 +257,7 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
     if OptimalEngine.Scope.serves?(workspace_id), do: :ok, else: {:error, :foreign_tenant}
   end
 
-  defp check_tenant_ownership(workspace_id, tenant_id) do
+  defp check_tenant_ownership(workspace_id, tenant_id, slug_named?) do
     case Workspace.get(workspace_id) do
       {:ok, workspace} ->
         if workspace.tenant_id == tenant_id, do: :ok, else: {:error, :foreign_tenant}
@@ -241,6 +269,7 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
         # compatibility (handlers still workspace-filter every row).
         case String.split(workspace_id, ":", parts: 2) do
           [prefix, _slug] when prefix != tenant_id -> {:error, :foreign_tenant}
+          [_prefix, _slug] when slug_named? -> :ok
           [_prefix, slug] -> renamed(slug, tenant_id)
           _ -> :ok
         end

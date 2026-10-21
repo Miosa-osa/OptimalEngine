@@ -41,7 +41,10 @@ defmodule OptimalEngine.DataStewardTest do
     target = "default:" <> new
 
     assert {:ok, result} =
-             DataSteward.rename_workspace(workspace.id, target, actor_id: "user:test")
+             DataSteward.rename_workspace(workspace.id, target,
+               tenant_id: "default",
+               actor_id: "user:test"
+             )
 
     assert result.handles_moved == 2
     assert Enum.sort(Workspace.handles(target)) == Enum.sort([old, new])
@@ -62,6 +65,7 @@ defmodule OptimalEngine.DataStewardTest do
 
     assert {:ok, result} =
              DataSteward.rename_workspace(workspace.id, "default:steward-ev-new-#{n}",
+               tenant_id: "default",
                actor_id: "user:test"
              )
 
