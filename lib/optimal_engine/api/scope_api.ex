@@ -13,8 +13,9 @@ defmodule OptimalEngine.API.ScopeAPI do
 
   import Plug.Conn
 
-  alias OptimalEngine.API.Actor
-  alias OptimalEngine.API.IntParam
+  require Logger
+
+  alias OptimalEngine.API.{Actor, IntParam, WorkspaceAuthPlug}
   alias OptimalEngine.{Federation, Scope}
   alias OptimalEngine.Portability.WorkspaceBundle
 
@@ -78,8 +79,10 @@ defmodule OptimalEngine.API.ScopeAPI do
     workspace_id = URI.decode(workspace_id)
     body = body(conn)
 
-    name =
-      "#{String.replace(workspace_id, ~r/[^A-Za-z0-9_-]+/, "-")}-#{System.os_time(:second)}.tar.gz"
+    # The name is not the only wall around a bundle (a download checks the key's
+    # workspace scope), but it is not guessable either: a random part follows the
+    # workspace and the time.
+    name = bundle_name(workspace_id)
 
     path = Path.join(WorkspaceBundle.bundle_dir(tenant(conn)), name)
 
@@ -113,8 +116,34 @@ defmodule OptimalEngine.API.ScopeAPI do
           "writes_in_progress: the workspace kept receiving writes while the export started; retry, or pause them"
         )
 
+      {:error, :insufficient_storage} ->
+        conn
+        |> put_resp_header("retry-after", "60")
+        |> error(
+          507,
+          "insufficient_storage: the disk cannot hold this export and its working files; free space and retry"
+        )
+
       {:error, reason} ->
         error(conn, 422, inspect(reason))
+    end
+  end
+
+  defp bundle_name(workspace_id) do
+    safe = workspace_id |> String.replace(~r/[^A-Za-z0-9_-]+/, "-") |> String.slice(0, 80)
+    random = 8 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+    "#{safe}-#{System.os_time(:second)}-#{random}.tar.gz"
+  end
+
+  # A bundle holds one workspace's data, so a key reaches it only when its
+  # workspace scope covers the workspace the bundle was exported from. A bundle
+  # it may not reach is not found, as one that is not there.
+  defp in_workspace_scope(conn, path) do
+    with {:ok, workspace_id} <- WorkspaceBundle.source_workspace(path),
+         true <- WorkspaceAuthPlug.key_holds?(conn.assigns[:current_api_key], workspace_id) do
+      :ok
+    else
+      _ -> {:error, :not_found}
     end
   end
 
@@ -125,7 +154,8 @@ defmodule OptimalEngine.API.ScopeAPI do
     with {:ok, path} <- WorkspaceBundle.bundle_path(tenant, name),
          true <- File.regular?(path) || {:error, :not_found},
          {:ok, cross_tenant} <- cross_tenant(conn, conn.query_params),
-         :ok <- from_tenant(path, tenant, cross_tenant) do
+         :ok <- from_tenant(path, tenant, cross_tenant),
+         :ok <- in_workspace_scope(conn, path) do
       conn
       |> put_resp_content_type("application/gzip")
       |> put_resp_header("content-disposition", ~s(attachment; filename="#{name}"))
@@ -133,6 +163,39 @@ defmodule OptimalEngine.API.ScopeAPI do
     else
       {:error, :operator_only} -> operator_only(conn)
       _ -> error(conn, 404, "bundle not found")
+    end
+  end
+
+  # Removes a stored bundle. The same walls as the download: the tenant's folder,
+  # a manifest of the tenant, and a workspace scope that covers its workspace;
+  # a bundle the key may not reach is not found, so there is no deleting another
+  # workspace's file by name.
+  def delete_bundle(conn, name) do
+    tenant = tenant(conn)
+
+    with {:ok, path} <- WorkspaceBundle.bundle_path(tenant, name),
+         true <- File.regular?(path) || {:error, :not_found},
+         :ok <- from_tenant(path, tenant, false),
+         :ok <- in_workspace_scope(conn, path),
+         :ok <- remove_bundle(path) do
+      send_resp(conn, 204, "")
+    else
+      {:error, :delete_failed} -> error(conn, 500, "bundle could not be deleted")
+      _ -> error(conn, 404, "bundle not found")
+    end
+  end
+
+  defp remove_bundle(path) do
+    case File.rm(path) do
+      :ok ->
+        :ok
+
+      {:error, :enoent} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        Logger.error("[ScopeAPI] could not delete #{path}: #{inspect(reason)}")
+        {:error, :delete_failed}
     end
   end
 
@@ -155,7 +218,8 @@ defmodule OptimalEngine.API.ScopeAPI do
     body = body(conn)
 
     with {:ok, path} <- WorkspaceBundle.bundle_path(tenant(conn), body["bundle"]),
-         true <- File.regular?(path) do
+         true <- File.regular?(path),
+         :ok <- in_workspace_scope(conn, path) do
       run_import(conn, path, body, consume: false, foreign: :not_found)
     else
       _ -> error(conn, 404, "bundle not found")

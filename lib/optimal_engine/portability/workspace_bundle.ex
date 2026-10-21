@@ -84,13 +84,21 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   `{:rows, table, n}` after each page, and returns `:ok` to go on or
   `:cancel` to stop, which answers `{:error, :cancelled}` and writes nothing
   to `path`.
+
+  An export first checks that the disk holds what it will write (see
+  `export_bytes/2`, twice over for the staged files and the archive, and a
+  margin of `config :optimal_engine, :bundle_export_margin_bytes`, 256 MiB by
+  default, for what the database writes while the export holds its snapshot)
+  and answers `{:error, :insufficient_storage}` otherwise, before it stages
+  anything.
   """
   @spec export(String.t(), String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def export(tenant_id, workspace_id, path, opts \\ []) do
     observe = Keyword.get(opts, :observe, fn _event -> :ok end)
 
     with {:ok, workspace} <- Workspace.get(workspace_id),
-         true <- workspace.tenant_id == tenant_id || {:error, :not_found} do
+         true <- workspace.tenant_id == tenant_id || {:error, :not_found},
+         :ok <- room_to_export(tenant_id, workspace_id) do
       staging = staging_dir()
 
       try do
@@ -213,6 +221,13 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   `cross_tenant: true` says the move between tenants is intended (the Engine
   operator seeding a tenant, or one database standing in for two Engines).
 
+  `:written_log` is a file the import appends to, after each batch it commits,
+  naming the rows that batch inserted (by primary key, or by the range the
+  table's key took). `discard_written/4` takes those rows out again and no
+  others, so a failed or cancelled import can be undone without touching what
+  another writer put in the workspace meanwhile. The default is a file in the
+  import's staging folder.
+
   `:observe` is told how the import goes, as for `export/4`: `{:phase, phase}`
   (`:verifying`, `:planning`, `:writing`, `:files`), `{:total, rows, files}`
   from the manifest, and `{:rows, table, n}` after each batch. It may stop
@@ -240,7 +255,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
            :ok <- compatible(manifest, staging),
            :ok <- notify(observe, {:phase, :writing}),
            {:ok, counts} <-
-             write_rows(manifest, staging, plan, Keyword.put(opts, :observe, observe)),
+             write_rows(
+               manifest,
+               staging,
+               plan,
+               opts
+               |> Keyword.put(:observe, observe)
+               |> Keyword.put_new(:written_log, Path.join(staging, "written.jsonl"))
+             ),
            :ok <- notify(observe, {:phase, :files}),
            {:ok, file_count} <- write_files(manifest, staging, plan) do
         {:ok,
@@ -275,16 +297,26 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   def backup_dir, do: backup_base()
 
   @doc """
-  Removes every row of a workspace from the workspace tables, and with
-  `record: true` the workspace record too. For an import that did not finish
-  into a target that held nothing before it: a create it made, or a merge
-  into an empty workspace.
+  Removes the rows an import wrote, as its `:written_log` names them, and no
+  others: a row another writer put in the workspace while the import ran stays.
+  With `record: true` the workspace record goes too, when nothing is left in
+  the workspace. For an import that did not finish into a target that held
+  nothing before it: a create it made, or a merge into an empty workspace.
   """
-  @spec discard_workspace(String.t(), String.t(), keyword()) :: :ok
-  def discard_workspace(tenant_id, workspace_id, opts \\ []) do
-    delete_rows(tenant_id, workspace_id)
+  @spec discard_written(String.t(), String.t(), String.t(), keyword()) :: :ok
+  def discard_written(log_path, tenant_id, workspace_id, opts \\ []) do
+    if File.regular?(log_path) do
+      tables =
+        log_path
+        |> File.stream!()
+        |> Stream.map(&(&1 |> Jason.decode!() |> Map.fetch!("table")))
+        |> Enum.uniq()
 
-    if opts[:record] == true,
+      # Children are written after their parents, so they go first.
+      Enum.each(Enum.reverse(tables), &discard_table(&1, log_path, tenant_id, workspace_id))
+    end
+
+    if opts[:record] == true and workspace_empty?(tenant_id, workspace_id),
       do:
         Store.raw_query("DELETE FROM workspaces WHERE id = ?1 AND tenant_id = ?2", [
           workspace_id,
@@ -293,6 +325,87 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     :ok
   end
+
+  defp discard_table(table, log_path, tenant_id, workspace_id) do
+    columns = columns(table)
+
+    # A table with a workspace column is also bound to the workspace, whatever
+    # the log says.
+    scope =
+      if Enum.any?(columns, &(elem(&1, 0) == "workspace_id")),
+        do: scope_clause(table, columns, tenant_id, workspace_id),
+        else: {nil, []}
+
+    log_path
+    |> File.stream!()
+    |> Stream.map(&Jason.decode!/1)
+    |> Stream.filter(&(&1["table"] == table))
+    |> Enum.each(fn entry ->
+      for {sql, params} <- discard_statements(table, entry, scope) do
+        {:ok, _} =
+          Store.transaction(fn txn ->
+            {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+            Store.txn_execute(txn, sql, params)
+          end)
+      end
+    end)
+  end
+
+  # The DELETE statements for one batch of the log: rows by key, in chunks, or
+  # the range a table's key took.
+  defp discard_statements(table, %{"columns" => cols, "keys" => keys}, {scope_where, scope_params}) do
+    chunk = max(1, div(500, length(cols)))
+    offset = length(scope_params)
+
+    for keys <- Enum.chunk_every(keys, chunk) do
+      {condition, params} =
+        case cols do
+          [col] ->
+            marks = Enum.map_join(1..length(keys), ", ", &"?#{offset + &1}")
+            {"#{quote_name(col)} IN (#{marks})", Enum.map(keys, &decode_value(hd(&1)))}
+
+          _ ->
+            width = length(cols)
+
+            groups =
+              keys
+              |> Enum.with_index()
+              |> Enum.map_join(" OR ", fn {_key, row} ->
+                cols
+                |> Enum.with_index(1)
+                |> Enum.map_join(" AND ", fn {col, i} ->
+                  "#{quote_name(col)} = ?#{offset + row * width + i}"
+                end)
+                |> then(&"(#{&1})")
+              end)
+
+            {"(#{groups})", Enum.flat_map(keys, fn key -> Enum.map(key, &decode_value/1) end)}
+        end
+
+      {delete_sql(table, scope_where, condition), scope_params ++ params}
+    end
+  end
+
+  defp discard_statements(
+         table,
+         %{"column" => col, "range" => [low, high]},
+         {scope_where, scope_params}
+       ) do
+    offset = length(scope_params)
+    column = key_column(col)
+    condition = "#{column} >= ?#{offset + 1} AND #{column} <= ?#{offset + 2}"
+    [{delete_sql(table, scope_where, condition), scope_params ++ [low, high]}]
+  end
+
+  defp delete_sql(table, nil, condition),
+    do: "DELETE FROM #{quote_name(table)} WHERE #{condition}"
+
+  defp delete_sql(table, scope_where, condition),
+    do: "DELETE FROM #{quote_name(table)} WHERE (#{scope_where}) AND #{condition}"
+
+  # `rowid` is not a declared column, so it is not quoted as one.
+  defp key_column("rowid"), do: "rowid"
+  defp key_column(name), do: quote_name(name)
 
   @doc "True when no workspace table holds a row of the workspace."
   @spec workspace_empty?(String.t(), String.t()) :: boolean()
@@ -379,6 +492,22 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
          {:ok, %{"format" => @format, "tenant_id" => tenant_id}} when is_binary(tenant_id) <-
            Jason.decode(json) do
       {:ok, tenant_id}
+    else
+      {:error, {:unreadable_bundle, _}} = error -> error
+      _ -> {:error, :not_a_workspace_bundle}
+    end
+  end
+
+  @doc """
+  The workspace a bundle was exported from, read from its manifest the way
+  `source_tenant/1` reads the tenant.
+  """
+  @spec source_workspace(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def source_workspace(path) do
+    with {:ok, json} <- manifest_json(path),
+         {:ok, %{"format" => @format, "workspace" => %{"id" => workspace_id}}}
+         when is_binary(workspace_id) <- Jason.decode(json) do
+      {:ok, workspace_id}
     else
       {:error, {:unreadable_bundle, _}} = error -> error
       _ -> {:error, :not_a_workspace_bundle}
@@ -566,12 +695,25 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp export_tables(snap, tenant_id, workspace_id, staging, observe) do
     File.mkdir_p!(Path.join(staging, "tables"))
 
+    tenant_id
+    |> export_sources(workspace_id)
+    |> Enum.map(fn {table, columns, where, params} ->
+      write_table({snap, observe}, staging, table, columns, where, params)
+    end)
+    |> Enum.reject(&(&1["rows"] == 0))
+  end
+
+  # Every read an export makes, as `{table, columns, where, params}` in the
+  # order it writes them: the workspace's own tables, the child tables read
+  # through a parent, the principals of its members and its operating
+  # documents. The size estimate reads the same sources.
+  defp export_sources(tenant_id, workspace_id) do
     scoped =
       for table <- workspace_tables() -- Map.keys(Migrations.superseded_tables()) do
         columns = columns(table)
         {where, params} = scope_clause(table, columns, tenant_id, workspace_id)
 
-        write_table({snap, observe}, staging, table, columns, where, params)
+        {table, columns, where, params}
       end
 
     children =
@@ -580,42 +722,24 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         parent_columns = columns(parent)
         {where, params} = scope_clause(parent, parent_columns, tenant_id, workspace_id)
 
-        write_table(
-          {snap, observe},
-          staging,
-          table,
-          columns,
-          "#{quote_name(fk)} IN (SELECT id FROM #{quote_name(parent)} WHERE #{where})",
-          params
-        )
+        {table, columns,
+         "#{quote_name(fk)} IN (SELECT id FROM #{quote_name(parent)} WHERE #{where})", params}
       end
 
     principals =
-      write_table(
-        {snap, observe},
-        staging,
-        @principals,
-        columns(@principals),
-        """
-        id IN (
-          SELECT principal_id FROM workspace_members WHERE workspace_id = ?1
-          UNION SELECT principal_id FROM node_members WHERE workspace_id = ?1
-        )
-        """,
-        [workspace_id]
-      )
+      {@principals, columns(@principals),
+       """
+       id IN (
+         SELECT principal_id FROM workspace_members WHERE workspace_id = ?1
+         UNION SELECT principal_id FROM node_members WHERE workspace_id = ?1
+       )
+       """, [workspace_id]}
 
     documents =
-      write_table(
-        {snap, observe},
-        staging,
-        @documents,
-        columns(@documents),
-        "tenant_id = ?1 AND scope_type = 'workspace' AND scope_id = ?2",
-        [tenant_id, workspace_id]
-      )
+      {@documents, columns(@documents),
+       "tenant_id = ?1 AND scope_type = 'workspace' AND scope_id = ?2", [tenant_id, workspace_id]}
 
-    Enum.reject(scoped ++ children ++ [principals, documents], &(&1["rows"] == 0))
+    scoped ++ children ++ [principals, documents]
   end
 
   # Writes the rows of `table` that match `where` as JSON lines. The table is
@@ -631,12 +755,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         reader
         |> table_rows(table, where, params)
         |> Enum.reduce({0, :crypto.hash_init(:sha256)}, fn row, {count, hash} ->
-          line =
-            names
-            |> Enum.zip(row)
-            |> Map.new(fn {name, value} -> {name, encode_value(value)} end)
-            |> Jason.encode!()
-            |> Kernel.<>("\n")
+          line = json_line(names, row)
 
           IO.binwrite(io, line)
           {count + 1, :crypto.hash_update(hash, line)}
@@ -649,6 +768,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       "columns" => names,
       "sha256" => hash |> :crypto.hash_final() |> Base.encode16(case: :lower)
     }
+  end
+
+  defp json_line(names, row) do
+    names
+    |> Enum.zip(row)
+    |> Map.new(fn {name, value} -> {name, encode_value(value)} end)
+    |> Jason.encode!()
+    |> Kernel.<>("\n")
   end
 
   # Streams the rows of a table that match `where` from the snapshot, one page
@@ -678,30 +805,106 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     do: :telemetry.execute([:optimal_engine, :bundle, :export_page], %{rows: rows}, %{table: table})
 
   defp export_files(workspace_id, staging) do
-    source = Filesystem.path(root(), workspace_id)
     target = Path.join(staging, "files")
+    {source, files} = workspace_files(workspace_id)
 
-    if File.dir?(source) and workspace_id != "default" do
-      source
-      |> Path.join("**")
-      |> Path.wildcard(match_dot: true)
-      |> Enum.filter(&File.regular?/1)
-      |> Enum.map(fn file ->
-        relative = Path.relative_to(file, source)
-        destination = Path.join(target, relative)
-        File.mkdir_p!(Path.dirname(destination))
-        File.cp!(file, destination)
+    files
+    |> Enum.map(fn file ->
+      relative = Path.relative_to(file, source)
+      destination = Path.join(target, relative)
+      File.mkdir_p!(Path.dirname(destination))
+      File.cp!(file, destination)
 
-        %{
-          "path" => relative,
-          "bytes" => File.stat!(file).size,
-          "sha256" => file_sha256(file)
-        }
-      end)
-      |> Enum.sort_by(& &1["path"])
+      %{
+        "path" => relative,
+        "bytes" => File.stat!(file).size,
+        "sha256" => file_sha256(file)
+      }
+    end)
+    |> Enum.sort_by(& &1["path"])
+  end
+
+  # The workspace's folder and the regular files in it. The default
+  # workspace's folder is the Engine's own root, so it has none.
+  defp workspace_files(workspace_id) do
+    source = Filesystem.path(root(), workspace_id)
+
+    files =
+      if File.dir?(source) and workspace_id != "default" do
+        source |> Path.join("**") |> Path.wildcard(match_dot: true) |> Enum.filter(&File.regular?/1)
+      else
+        []
+      end
+
+    {source, files}
+  end
+
+  # What the disk must hold for an export: the rows and files staged, the
+  # archive made of them (never more than the staged bytes), and a margin. The
+  # export's snapshot holds back the database's checkpoints, so what the Engine
+  # writes meanwhile grows its WAL. An estimate that cannot be made, or a
+  # free-space reading that cannot be had, lets the export go on.
+  defp room_to_export(tenant_id, workspace_id) do
+    margin = export_margin_bytes()
+
+    with free when is_integer(free) <- free_bytes(staging_root()),
+         true <- free >= margin || {:error, :insufficient_storage},
+         bytes when is_integer(bytes) <- export_bytes(tenant_id, workspace_id) do
+      if free < 2 * bytes + margin, do: {:error, :insufficient_storage}, else: :ok
     else
-      []
+      {:error, :insufficient_storage} = error -> error
+      _unknown -> :ok
     end
+  end
+
+  defp export_margin_bytes,
+    do: Application.get_env(:optimal_engine, :bundle_export_margin_bytes, 256 * 1024 * 1024)
+
+  @sample_rows 50
+
+  @doc """
+  About how many bytes an export of the workspace stages before it packs: its
+  rows as JSON lines and its files. A table's share is its row count times the
+  average size of a sample of its first rows, encoded as the export encodes
+  them, so a workspace is never read whole. Read from the live database, it is
+  an estimate: `nil` when it cannot be made.
+  """
+  @spec export_bytes(String.t(), String.t()) :: non_neg_integer() | nil
+  def export_bytes(tenant_id, workspace_id) do
+    sources = export_sources(tenant_id, workspace_id)
+
+    rows =
+      ReadSnapshot.run(fn snap ->
+        Enum.reduce_while(sources, 0, fn source, total ->
+          case source_bytes(snap, source) do
+            {:ok, bytes} -> {:cont, total + bytes}
+            :error -> {:halt, :error}
+          end
+        end)
+      end)
+
+    if is_integer(rows), do: rows + file_bytes(workspace_id)
+  end
+
+  defp source_bytes(snap, {table, columns, where, params}) do
+    names = Enum.map(columns, &elem(&1, 0))
+    from = "FROM #{quote_name(table)} WHERE #{where}"
+
+    with {:ok, [[count]]} <- ReadSnapshot.query(snap, "SELECT COUNT(*) " <> from, params),
+         true <- count > 0 || {:empty, 0},
+         {:ok, [_ | _] = sample} <-
+           ReadSnapshot.query(snap, "SELECT * " <> from <> " LIMIT #{@sample_rows}", params) do
+      bytes = sample |> Enum.map(&byte_size(json_line(names, &1))) |> Enum.sum()
+      {:ok, div(bytes * count, length(sample))}
+    else
+      {:empty, 0} -> {:ok, 0}
+      _failed -> :error
+    end
+  end
+
+  defp file_bytes(workspace_id) do
+    {_source, files} = workspace_files(workspace_id)
+    Enum.sum(for file <- files, {:ok, %{size: size}} <- [File.stat(file)], do: size)
   end
 
   # ---------------------------------------------------------------------------
@@ -824,6 +1027,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
                workspace_id: target_id,
                tenant_id: tenant_id,
                mode: :merge,
+               created: false,
                source: source,
                external_id: existing.external_id,
                imported_external_id: nil
@@ -856,6 +1060,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
                workspace_id: target_id,
                tenant_id: tenant_id,
                mode: mode,
+               created: true,
                source: source,
                external_id: workspace.external_id,
                imported_external_id: set_aside
@@ -947,6 +1152,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     column_names =
       Map.new(names, &{&1, MapSet.new(columns(target_table(&1)), fn {column, _, _} -> column end)})
 
+    # What each table's rows are known by, for the log of what this run wrote.
+    trackers = Map.new(names, &{&1, tracker(&1, columns(target_table(&1)))})
+    record = recorder(opts[:written_log])
+
     # Every table is checked before any is written, so a refused bundle leaves
     # nothing behind.
     result =
@@ -966,7 +1175,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
             |> Stream.map(&(&1 |> rewrite(name, plan, column_names[name]) |> Map.drop(drops[name])))
             |> self_parents_first(Enum.filter(keys[name], &(&1.table == name)))
 
-          case write_batches(target, rows, verb, batch_rows, opts[:observe]) do
+          case write_batches(target, rows, verb, batch_rows, opts[:observe], trackers[name], record) do
             {:ok, written} -> {:cont, {:ok, Map.put(counts, name, written)}}
             {:error, :cancelled} -> {:halt, {:error, :cancelled}}
             {:error, reason} -> {:halt, {:error, {:import_failed, name, reason}}}
@@ -975,18 +1184,19 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       end
 
     with {:error, _} = error <- result do
-      if plan.mode == :create, do: undo_create(plan)
+      if plan.mode == :create, do: undo_import(plan, opts[:written_log])
       error
     end
   end
 
   # Each batch is its own transaction with foreign keys checked at its commit;
   # parents are always written in an earlier batch than their children.
-  defp write_batches(name, rows, verb, batch_rows, observe) do
+  defp write_batches(name, rows, verb, batch_rows, observe, tracker, record) do
     rows
     |> Stream.chunk_every(batch_rows)
     |> Enum.reduce_while({:ok, 0}, fn batch, {:ok, total} ->
-      with {:ok, written} <- write_batch(name, batch, verb),
+      with {:ok, written, entry} <- write_batch(name, batch, verb, tracker),
+           :ok <- record.(name, entry),
            :ok <- import_batch(name, length(batch)),
            :ok <- batch_written(observe, name, length(batch)) do
         {:cont, {:ok, total + written}}
@@ -1013,38 +1223,109 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     end
   end
 
-  defp write_batch(name, batch, verb) do
-    Store.transaction(fn txn ->
-      {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+  # A batch is one transaction, and the Store runs it alone, so what it
+  # inserted is told by the keys of its rows, or by how far a table's key
+  # moved. Returns the number written and the log entry for the batch.
+  defp write_batch(name, batch, verb, tracker) do
+    result =
+      Store.transaction(fn txn ->
+        {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+        before = high_water(txn, name, tracker)
 
-      written =
-        Enum.reduce(batch, 0, fn row, count ->
-          names = Map.keys(row)
+        {written, keys} =
+          Enum.reduce(batch, {0, []}, fn row, {count, keys} ->
+            names = Map.keys(row)
 
-          placeholders =
-            names |> Enum.with_index(1) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
+            placeholders =
+              names |> Enum.with_index(1) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
 
-          {:ok, changed} =
-            Store.txn_execute(
-              txn,
-              "#{verb} INTO #{quote_name(name)} (#{Enum.map_join(names, ", ", &quote_name/1)}) VALUES (#{placeholders})",
-              Enum.map(names, &decode_value(row[&1]))
-            )
+            {:ok, changed} =
+              Store.txn_execute(
+                txn,
+                "#{verb} INTO #{quote_name(name)} (#{Enum.map_join(names, ", ", &quote_name/1)}) VALUES (#{placeholders})",
+                Enum.map(names, &decode_value(row[&1]))
+              )
 
-          count + changed
-        end)
+            {count + changed, if(changed > 0, do: key_of(tracker, row, keys), else: keys)}
+          end)
 
-      {:ok, written}
-    end)
+        {:ok, {written, entry(txn, name, tracker, before, Enum.reverse(keys))}}
+      end)
+
+    with {:ok, {written, entry}} <- result, do: {:ok, written, entry}
   rescue
     error -> {:error, Exception.message(error)}
   end
 
-  # A failed create import leaves nothing behind: its rows, then the
-  # workspace record it made.
-  defp undo_create(plan) do
-    delete_rows(plan.tenant_id, plan.workspace_id)
-    Store.raw_query("DELETE FROM workspaces WHERE id = ?1", [plan.workspace_id])
+  # A table with a single INTEGER key lets the target assign it, and a table
+  # with no key has only its rowid: both are told by how far the key moved.
+  # Otherwise the rows are told by their keys. The principals and operation
+  # definitions a bundle brings are shared by the tenant, not the workspace's.
+  defp tracker(name, _columns) when name in @keep_existing, do: nil
+
+  defp tracker(_name, columns) do
+    case autoincrement_key(columns) do
+      [column] ->
+        {:range, column}
+
+      [] ->
+        case columns |> Enum.filter(&(elem(&1, 2) > 0)) |> Enum.sort_by(&elem(&1, 2)) do
+          [] -> {:range, "rowid"}
+          keyed -> {:keys, Enum.map(keyed, &elem(&1, 0))}
+        end
+    end
+  end
+
+  defp high_water(_txn, _name, {:keys, _}), do: nil
+  defp high_water(_txn, _name, nil), do: nil
+
+  defp high_water(txn, name, {:range, column}) do
+    {:ok, [[mark]]} =
+      Store.txn_query(
+        txn,
+        "SELECT COALESCE(MAX(#{key_column(column)}), 0) FROM #{quote_name(name)}",
+        []
+      )
+
+    mark
+  end
+
+  defp key_of({:keys, columns}, row, keys), do: [Enum.map(columns, &Map.get(row, &1)) | keys]
+  defp key_of(_tracker, _row, keys), do: keys
+
+  defp entry(_txn, _name, nil, _before, _keys), do: nil
+  defp entry(_txn, _name, {:keys, _}, _before, []), do: nil
+
+  defp entry(_txn, _name, {:keys, columns}, _before, keys),
+    do: %{"columns" => columns, "keys" => keys}
+
+  defp entry(txn, name, {:range, column} = tracker, before, _keys) do
+    after_mark = high_water(txn, name, tracker)
+
+    if after_mark > before,
+      do: %{"column" => column, "range" => [before + 1, after_mark]},
+      else: nil
+  end
+
+  # Appends one line per batch to the log, after the batch is committed: a crash
+  # between the two leaves rows unlogged, never a row logged that was not written.
+  defp recorder(nil), do: fn _name, _entry -> :ok end
+
+  defp recorder(path) do
+    fn
+      _name, nil ->
+        :ok
+
+      name, entry ->
+        line = Jason.encode!(Map.put(entry, "table", name)) <> "\n"
+        File.write(path, line, [:append])
+    end
+  end
+
+  # A failed create import leaves nothing behind: the rows it wrote, then the
+  # workspace record it made, if nothing else is in the workspace.
+  defp undo_import(plan, log_path) do
+    discard_written(log_path, plan.tenant_id, plan.workspace_id, record: plan[:created] == true)
   rescue
     error ->
       Logger.error(
@@ -1402,6 +1683,29 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       :ok -> if escaped?(staging), do: {:error, :unsafe_bundle}, else: :ok
       {:error, reason} -> {:error, {:unreadable_bundle, reason}}
     end
+  end
+
+  @doc false
+  # Bytes free on the filesystem holding `dir`, or nil when it cannot be read.
+  @spec free_bytes(String.t()) :: non_neg_integer() | nil
+  def free_bytes(dir) do
+    File.mkdir_p(dir)
+
+    case System.cmd("df", ["-Pk", dir], stderr_to_stdout: true) do
+      {out, 0} ->
+        with [_header, line | _] <- String.split(out, "\n", trim: true),
+             [_fs, _blocks, _used, available | _] <- String.split(line),
+             {kb, ""} <- Integer.parse(available) do
+          kb * 1_024
+        else
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
   end
 
   # erl_tar refuses absolute and parent-relative names; still confirm nothing

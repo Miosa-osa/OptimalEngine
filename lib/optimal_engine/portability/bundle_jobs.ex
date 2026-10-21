@@ -296,14 +296,21 @@ defmodule OptimalEngine.Portability.BundleJobs do
         job.id
       end
 
+    # The cutoff is worked out here and bound in the form the column keeps
+    # (`YYYY-MM-DD HH:MM:SS`, UTC), so the statement holds no date function.
+    record_cutoff =
+      DateTime.utc_now()
+      |> DateTime.add(-@record_days * 86_400, :second)
+      |> Calendar.strftime("%Y-%m-%d %H:%M:%S")
+
     {:ok, rows} =
       Store.raw_query(
         """
         SELECT id FROM jobs
         WHERE kind IN (SELECT value FROM json_each(?1)) AND status IN ('completed', 'dead')
-          AND updated_at < datetime('now', ?2)
+          AND updated_at < ?2
         """,
-        [Jason.encode!(@kinds), "-#{@record_days} days"]
+        [Jason.encode!(@kinds), record_cutoff]
       )
 
     old = Enum.map(rows, fn [id] -> id end)
@@ -355,8 +362,16 @@ defmodule OptimalEngine.Portability.BundleJobs do
   end
 
   defp finish(job, owner, {:error, :cancelled}) do
-    clean_up(job, read_report(job.id))
-    finish_report(job.id, %{"status" => "cancelled", "phase" => "done"})
+    report = read_report(job.id)
+    clean_up(job, report)
+
+    # A merge into a workspace that held rows is not rolled back: it says so.
+    finish_report(job.id, %{
+      "status" => "cancelled",
+      "phase" => "done",
+      "partial" => partial?(job, report)
+    })
+
     remove_private(job.id)
     {:ok, _} = Jobs.complete(job.id, owner)
     fetched_view(job.id)
@@ -375,7 +390,13 @@ defmodule OptimalEngine.Portability.BundleJobs do
       update_report(job.id, %{"status" => "retrying", "phase" => "queued", "error" => error})
       Jobs.fail(job.id, owner, code, retry_in: @retry_in_seconds)
     else
-      finish_report(job.id, %{"status" => "failed", "phase" => "done", "error" => error})
+      finish_report(job.id, %{
+        "status" => "failed",
+        "phase" => "done",
+        "error" => error,
+        "partial" => partial?(job, report)
+      })
+
       remove_private(job.id)
       Jobs.fail(job.id, owner, code, permanent: true)
     end
@@ -435,14 +456,20 @@ defmodule OptimalEngine.Portability.BundleJobs do
       {:error, :writes_in_progress} ->
         {:error, :store_busy, "the workspace kept receiving writes while the export started"}
 
+      {:error, :insufficient_storage} ->
+        {:error, :insufficient_storage, "the disk cannot hold this export and its working files"}
+
       {:error, reason} ->
         {:error, :internal_error, inspect(reason)}
     end
   end
 
+  # The workspace, the time and 8 random bytes: a counter would let a name be
+  # guessed from the one before it.
   defp bundle_name(workspace_id) do
-    "#{String.replace(workspace_id, ~r/[^A-Za-z0-9_-]+/, "-")}-#{System.os_time(:second)}-" <>
-      "#{System.unique_integer([:positive])}.tar.gz"
+    safe = workspace_id |> String.replace(~r/[^A-Za-z0-9_-]+/, "-") |> String.slice(0, 80)
+    random = 8 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+    "#{safe}-#{System.os_time(:second)}-#{random}.tar.gz"
   end
 
   # ── import ──────────────────────────────────────────────────────────────
@@ -459,7 +486,11 @@ defmodule OptimalEngine.Portability.BundleJobs do
         :merge -> WorkspaceBundle.workspace_empty?(job.tenant_id, job.workspace_id)
       end
 
-    update_report(job.id, %{"target_was_empty" => empty, "mode" => request["mode"]})
+    update_report(job.id, %{
+      "target_was_empty" => empty,
+      "record_existed" => match?({:ok, _}, Workspace.get(job.workspace_id)),
+      "mode" => request["mode"]
+    })
 
     with {:ok, path, consume} <- import_source(job, request["source"]) do
       opts =
@@ -469,7 +500,8 @@ defmodule OptimalEngine.Portability.BundleJobs do
           organization_id: request["organization_id"],
           cross_tenant: request["cross_tenant"] == true,
           consume: consume,
-          observe: observer(job)
+          observe: observer(job),
+          written_log: written_log(job.id)
         ]
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
@@ -580,12 +612,16 @@ defmodule OptimalEngine.Portability.BundleJobs do
   defp clean_up(%{kind: @import} = job, report) do
     File.rm(Path.join(job_dir(job.id), "source.tar.gz"))
 
+    # Only the rows the job wrote go (the import logged them as it wrote), so a
+    # row another writer put in the target meanwhile stays, and so does the
+    # workspace record if that leaves the workspace holding anything.
     if report["target_was_empty"] == true do
-      WorkspaceBundle.discard_workspace(job.tenant_id, job.workspace_id,
-        record: report["mode"] != "merge"
+      WorkspaceBundle.discard_written(written_log(job.id), job.tenant_id, job.workspace_id,
+        record: report["record_existed"] == false
       )
     end
 
+    File.rm(written_log(job.id))
     :ok
   end
 
@@ -689,6 +725,7 @@ defmodule OptimalEngine.Portability.BundleJobs do
       started_at: report["started_at"],
       updated_at: report["updated_at"] || job.updated_at,
       finished_at: report["finished_at"],
+      partial: status in ["failed", "cancelled"] and report["partial"] == true,
       error: view_error(status, job, report),
       result: if(status == "succeeded", do: report["result"])
     }
@@ -850,7 +887,7 @@ defmodule OptimalEngine.Portability.BundleJobs do
   # The bundle, its unpacked tables and the rows they become: about three
   # times its size beyond the file itself.
   defp space_for(size) do
-    case free_bytes(WorkspaceBundle.backup_dir()) do
+    case WorkspaceBundle.free_bytes(WorkspaceBundle.backup_dir()) do
       free when is_integer(free) and free < size * 3 ->
         {:error, :insufficient_storage,
          "#{free} bytes are free and the import needs about #{size * 3} beyond the bundle"}
@@ -860,30 +897,12 @@ defmodule OptimalEngine.Portability.BundleJobs do
     end
   end
 
-  defp free_bytes(dir) do
-    File.mkdir_p(dir)
-
-    case System.cmd("df", ["-Pk", dir], stderr_to_stdout: true) do
-      {out, 0} ->
-        with [_header, line | _] <- String.split(out, "\n", trim: true),
-             [_fs, _blocks, _used, available | _] <- String.split(line),
-             {kb, ""} <- Integer.parse(available) do
-          kb * 1_024
-        else
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end
-  rescue
-    _ -> nil
-  end
-
   # ── storage of a job's own files ────────────────────────────────────────
 
   defp job_dir(job_id), do: Path.join([WorkspaceBundle.backup_dir(), "bundle-jobs", job_id])
   defp cancel_mark(job_id), do: Path.join(job_dir(job_id), "cancel")
+  # What an import wrote, batch by batch, so that only that can be taken back.
+  defp written_log(job_id), do: Path.join(job_dir(job_id), "written.jsonl")
   defp report_path(job_id), do: Path.join(job_dir(job_id), "report.json")
 
   defp read_report(job_id) do
@@ -922,6 +941,7 @@ defmodule OptimalEngine.Portability.BundleJobs do
   end
 
   defp remove_private(job_id) do
+    File.rm(written_log(job_id))
     File.rm(Path.join(job_dir(job_id), "source_url"))
     File.rm(Path.join(job_dir(job_id), "source.tar.gz"))
     :ok

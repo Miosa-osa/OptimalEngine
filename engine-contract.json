@@ -11,6 +11,7 @@
     "chat_session_commit",
     "org_policy_flow_down",
     "connector_registry_api",
-    "boot_generate_option"
+    "boot_generate_option",
+    "bundle_jobs_v1"
   ]
 }
