@@ -62,10 +62,15 @@ defmodule OptimalEngine.API.AuthorityPlug do
       workspace_id: workspace_id,
       subject: Actor.of(conn),
       action: action(conn.method, route),
-      resource: "optimal://#{workspace_id || "engine"}/#{Enum.join(route, "/")}",
+      resource: "optimal://#{workspace_id || "engine"}/#{resource_path(route)}",
       data_class: data_class(workspace_id)
     }
   end
+
+  # A "/" inside a segment is written %2F, so one segment never reads as two
+  # and a rule such as `rhythm/notes/*/*` keeps matching the same routes.
+  defp resource_path(route),
+    do: Enum.map_join(route, "/", &String.replace(&1, "/", "%2F"))
 
   defp govern(conn, tenant_id, mode) do
     request = describe(conn, tenant_id)

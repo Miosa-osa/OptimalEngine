@@ -39,16 +39,20 @@ defmodule OptimalEngine.API.PathPlug do
 
   @impl true
   def call(conn, _opts) do
-    decoded = Enum.map(conn.path_info, &decode/1)
-
-    if Enum.all?(conn.path_info, &acceptable?/1) and Enum.all?(decoded, &plain_text?/1) do
+    with true <- Enum.all?(conn.path_info, &acceptable?/1),
+         decoded = Enum.map(conn.path_info, &decode/1),
+         true <- Enum.all?(decoded, &plain_text?/1) do
       %{conn | path_info: decoded}
     else
-      conn
-      |> put_resp_content_type("application/json")
-      |> send_resp(400, Jason.encode!(%{error: "invalid_path"}))
-      |> halt()
+      false -> refuse(conn)
     end
+  end
+
+  defp refuse(conn) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(400, Jason.encode!(%{error: "invalid_path"}))
+    |> halt()
   end
 
   @doc "True when a raw path segment holds only escapes of reserved characters."
@@ -60,13 +64,12 @@ defmodule OptimalEngine.API.PathPlug do
       |> Enum.all?(fn [hex] -> reserved?(String.to_integer(hex, 16)) end)
   end
 
-  # Decodes every escape but `%2F`, which stays as `%2F`.
+  # Decodes every escape but `%2F`, which stays as `%2F`. Only a segment that
+  # `acceptable?/1` passed gets here, so every `%` starts a two-digit escape.
   defp decode(segment) do
     segment
     |> String.split(~r/%2F/i)
     |> Enum.map_join("%2F", &URI.decode/1)
-  rescue
-    ArgumentError -> segment
   end
 
   # Valid UTF-8 with no control byte.
