@@ -281,6 +281,86 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
     end
   end
 
+  describe "a crash between the move and the commit" do
+    test "a rename that committed leaves no note", ctx do
+      workspace = mismatched!(ctx)
+      file!(Path.join(ctx.root, ctx.old), "nodes/a.md")
+
+      assert {:ok, %{directory_moved: true}} = rename(workspace.id, "default:" <> ctx.new)
+
+      assert notes(ctx) == []
+    end
+
+    test "puts the directory back when the rename did not commit", ctx do
+      workspace = crashed!(ctx)
+
+      assert {:ok, [%{source: source, action: :moved_back}]} =
+               DataSteward.recover_interrupted_renames()
+
+      assert source == workspace.id
+      assert File.exists?(Path.join(ctx.root, "#{ctx.old}/nodes/sales/signals/deal.md"))
+      refute File.exists?(Path.join(ctx.root, ctx.new))
+      assert notes(ctx) == []
+    end
+
+    test "leaves the directory where it is when the rename committed", ctx do
+      workspace = mismatched!(ctx)
+      file!(Path.join(ctx.root, ctx.old), "nodes/a.md")
+      assert {:ok, _} = rename(workspace.id, "default:" <> ctx.new)
+      note!(ctx, workspace.id, "default:" <> ctx.new)
+
+      assert {:ok, [%{action: :committed}]} = DataSteward.recover_interrupted_renames()
+
+      assert File.exists?(Path.join(ctx.root, "#{ctx.new}/nodes/a.md"))
+      assert notes(ctx) == []
+    end
+
+    test "does not guess when both directories exist, and keeps the note", ctx do
+      workspace = crashed!(ctx)
+      file!(Path.join(ctx.root, ctx.old), "nodes/other.md")
+
+      assert {:ok, [%{source: source, action: :needs_attention}]} =
+               DataSteward.recover_interrupted_renames()
+
+      assert source == workspace.id
+      assert File.exists?(Path.join(ctx.root, "#{ctx.new}/nodes/sales/signals/deal.md"))
+      assert File.exists?(Path.join(ctx.root, "#{ctx.old}/nodes/other.md"))
+      assert length(notes(ctx)) == 1
+    end
+
+    test "takes the directories from the ids, never from the note", ctx do
+      victim = file!(ctx.root, "victim/important.md")
+      dir = Path.join(ctx.root, ".optimal-rename")
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, "planted-#{ctx.n}.json"),
+        Jason.encode!(%{
+          tenant_id: "default",
+          source: "default:rename-nowhere-#{ctx.n}",
+          target: "default:rename-victim-#{ctx.n}",
+          old: Path.join(ctx.root, "elsewhere"),
+          new: Path.dirname(victim)
+        })
+      )
+
+      assert {:ok, [%{action: action}]} = DataSteward.recover_interrupted_renames()
+
+      assert action in [:nothing_moved, :needs_attention]
+      assert File.exists?(victim)
+    end
+
+    test "a rename recovers an earlier one before it looks at the directory", ctx do
+      workspace = crashed!(ctx)
+
+      assert {:ok, %{directory_moved: true}} = rename(workspace.id, "default:" <> ctx.new)
+
+      assert File.exists?(Path.join(ctx.root, "#{ctx.new}/nodes/sales/signals/deal.md"))
+      refute File.exists?(Path.join(ctx.root, ctx.old))
+      assert notes(ctx) == []
+    end
+  end
+
   describe "a rename that cannot move the directory safely" do
     test "is refused when the target directory holds files, and changes nothing", ctx do
       workspace = mismatched!(ctx)
@@ -335,6 +415,33 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
 
       assert File.exists?(mine)
       refute File.exists?(Path.join(ctx.root, ctx.new))
+    end
+  end
+
+  # What a process that stopped there leaves: the directory under the target's id, the
+  # rows under the source's, and the note the rename wrote before it moved.
+  defp crashed!(ctx) do
+    workspace = mismatched!(ctx)
+    file!(Path.join(ctx.root, ctx.old), "nodes/sales/signals/deal.md")
+    File.rename!(Path.join(ctx.root, ctx.old), Path.join(ctx.root, ctx.new))
+    note!(ctx, workspace.id, "default:" <> ctx.new)
+    workspace
+  end
+
+  defp note!(ctx, source, target) do
+    dir = Path.join(ctx.root, ".optimal-rename")
+    File.mkdir_p!(dir)
+
+    File.write!(
+      Path.join(dir, "note-#{ctx.n}.json"),
+      Jason.encode!(%{tenant_id: "default", source: source, target: target})
+    )
+  end
+
+  defp notes(ctx) do
+    case File.ls(Path.join(ctx.root, ".optimal-rename")) do
+      {:ok, names} -> names
+      {:error, :enoent} -> []
     end
   end
 
