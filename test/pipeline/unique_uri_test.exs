@@ -222,6 +222,33 @@ defmodule OptimalEngine.Pipeline.UniqueUriTest do
       assert length(copies) == 2
     end
 
+    test "a cross-reference copy of a labelled document carries its labels and source package",
+         ctx do
+      {:ok, labelled} =
+        Intake.process("Invoice 78. Amount: $5,000. Payment due: 2026-04-01. Restricted.",
+          workspace_id: ctx.ws,
+          node: "team",
+          genre: "invoice",
+          title: "Invoice 78",
+          occurred_at: @occurred,
+          source_id: "inv:labelled",
+          security_labels: ["restricted"]
+        )
+
+      assert [copy] =
+               Enum.filter(labelled.cross_references, &String.contains?(&1, "operation-revenue"))
+
+      {:ok, [[metadata]]} =
+        Store.raw_query("SELECT metadata FROM contexts WHERE path = ?1", [
+          Path.join(ctx.root, copy)
+        ])
+
+      copy_metadata = Jason.decode!(metadata)
+      assert copy_metadata["cross_ref_of"] == labelled.signal.id
+      assert copy_metadata["security_labels"] == ["restricted"]
+      assert copy_metadata["source_package_id"] == labelled.source_package.id
+    end
+
     test "untitled documents never take the plain name", ctx do
       untitled = fn title, key, body ->
         {:ok, result} = ingest(ctx.ws, title, body, source_id: key)
@@ -245,6 +272,50 @@ defmodule OptimalEngine.Pipeline.UniqueUriTest do
       assert again.uri == first.uri
       assert File.read!(Path.join(ctx.root, hd(again.files_written))) =~ "edited"
       assert length(team_files(ctx.root, ctx.ws)) == 3
+    end
+
+    test "a title with no ASCII letters is untitled, not a shared file name", ctx do
+      {:ok, a} =
+        ingest(ctx.ws, "日本語のタイトル", "Team sync notes: kickoff, first meeting", source_id: "j:1")
+
+      {:ok, b} =
+        ingest(ctx.ws, "日本語のタイトル", "Team sync notes: kickoff, second meeting", source_id: "j:2")
+
+      refute a.uri == b.uri
+
+      for result <- [a, b] do
+        assert Path.basename(result.uri) =~ ~r/^2026-03-01-untitled-[0-9a-f]{8}\.md$/
+      end
+    end
+
+    test "writing a repaired context again keeps its record of the repair", ctx do
+      {:ok, first} =
+        ingest(ctx.ws, "Roadmap", "Team sync notes: roadmap, version one", source_id: "r:1")
+
+      repair = %{"previous_uri" => "optimal://old", "kept_by" => "someone", "repaired_at" => "now"}
+
+      :ok =
+        Store.raw_execute("UPDATE contexts SET metadata = ?1 WHERE id = ?2", [
+          Jason.encode!(%{"uri_repair" => repair, "other" => "dropped"}),
+          first.signal.id
+        ])
+
+      Store.evict_cached([first.signal.id])
+
+      {:ok, again} =
+        ingest(ctx.ws, "Roadmap", "Team sync notes: roadmap, version two", source_id: "r:1")
+
+      assert again.uri == first.uri
+
+      {:ok, [[metadata]]} =
+        Store.raw_query("SELECT metadata FROM contexts WHERE id = ?1", [first.signal.id])
+
+      # The write replaces the metadata (the stray key is gone), keeps the record
+      # of the repair, and names the source package of this write.
+      assert Jason.decode!(metadata) == %{
+               "uri_repair" => repair,
+               "source_package_id" => again.source_package.id
+             }
     end
 
     test "the same sequence gives the same URIs in a fresh workspace store", ctx do
@@ -295,6 +366,21 @@ defmodule OptimalEngine.Pipeline.UniqueUriTest do
       assert File.read!(path_b) =~ "Raw content cccc3333dddd4444"
     end
 
+    test "the body of a file is what the writer rendered after the frontmatter", ctx do
+      s = signal("abab1212abab1212", "Quarterly review")
+
+      assert {:ok, path} = Writer.write_signal(s, workspace_id: ctx.ws)
+      text = File.read!(path)
+
+      assert Writer.body_of_file(text) == {:ok, Writer.body(s)}
+      assert String.ends_with?(text, Writer.body(s))
+      assert Writer.body_of_file("no frontmatter here") == :no_frontmatter
+      assert Writer.body_of_file("---\nnever closed\n") == :no_frontmatter
+
+      # A write leaves no temporary file behind.
+      assert path |> Path.dirname() |> File.ls!() |> Enum.sort() == [Path.basename(path)]
+    end
+
     test "writing the same signal twice is one file", ctx do
       s = signal("eeee5555ffff6666", "Quarterly review")
 
@@ -322,27 +408,27 @@ defmodule OptimalEngine.Pipeline.UniqueUriTest do
   describe "Address.choose/3" do
     test "the plain name when nothing holds it" do
       assert Address.choose("2026-03-01-notes.md", "0123456789abcdef", fn _ -> false end) ==
-               "2026-03-01-notes.md"
+               {:ok, "2026-03-01-notes.md"}
     end
 
     test "a suffix from the id when the plain name is taken" do
       taken = MapSet.new(["2026-03-01-notes.md"])
 
       assert Address.choose("2026-03-01-notes.md", "0123456789abcdef", &MapSet.member?(taken, &1)) ==
-               "2026-03-01-notes-01234567.md"
+               {:ok, "2026-03-01-notes-01234567.md"}
     end
 
     test "a longer suffix when the short one is taken too" do
       taken = MapSet.new(["2026-03-01-notes.md", "2026-03-01-notes-01234567.md"])
 
       assert Address.choose("2026-03-01-notes.md", "0123456789abcdef", &MapSet.member?(taken, &1)) ==
-               "2026-03-01-notes-0123456789abcdef.md"
+               {:ok, "2026-03-01-notes-0123456789abcdef.md"}
     end
 
     test "an untitled document never takes the plain name, even when it is free" do
       assert Address.choose("2026-03-01-untitled.md", "0123456789abcdef", fn _ -> false end,
                always_suffix: true
-             ) == "2026-03-01-untitled-01234567.md"
+             ) == {:ok, "2026-03-01-untitled-01234567.md"}
 
       taken = MapSet.new(["2026-03-01-untitled-01234567.md"])
 
@@ -351,14 +437,37 @@ defmodule OptimalEngine.Pipeline.UniqueUriTest do
                "0123456789abcdef",
                &MapSet.member?(taken, &1),
                always_suffix: true
-             ) == "2026-03-01-untitled-0123456789abcdef.md"
+             ) == {:ok, "2026-03-01-untitled-0123456789abcdef.md"}
+    end
+
+    test "an error, never a name another context holds, when every candidate is taken" do
+      assert Address.choose("2026-03-01-notes.md", "0123456789abcdef", fn _ -> true end) ==
+               {:error, :no_free_name}
+
+      assert Address.choose("2026-03-01-notes.md", "0123456789abcdef", fn _ -> true end,
+               always_suffix: true
+             ) == {:error, :no_free_name}
+    end
+
+    test "the candidates are 8, 16 and 32 characters of the id, then its SHA-256" do
+      id = "0123456789abcdef0123456789abcdef0123"
+
+      assert [short, medium, long, digest] = Address.candidate_suffixes(id)
+      assert short == "01234567"
+      assert medium == "0123456789abcdef"
+      assert long == "0123456789abcdef0123456789abcdef"
+      assert digest == :crypto.hash(:sha256, id) |> Base.encode16(case: :lower)
+
+      # An id with no letters or digits falls back to the digest.
+      assert [first | _] = Address.candidate_suffixes("---")
+      assert byte_size(first) == 8
     end
 
     test "no double dash when the slug ended on a dash" do
       taken = MapSet.new(["2026-03-01-.md"])
 
       assert Address.choose("2026-03-01-.md", "0123456789abcdef", &MapSet.member?(taken, &1)) ==
-               "2026-03-01-01234567.md"
+               {:ok, "2026-03-01-01234567.md"}
     end
 
     test "the answer depends on the name, the id and what is taken, not on the store" do
@@ -371,7 +480,7 @@ defmodule OptimalEngine.Pipeline.UniqueUriTest do
 
       play = fn ->
         Enum.reduce(sequence, {MapSet.new(), []}, fn {name, id}, {taken, out} ->
-          chosen = Address.choose(name, id, &MapSet.member?(taken, &1))
+          {:ok, chosen} = Address.choose(name, id, &MapSet.member?(taken, &1))
           {MapSet.put(taken, chosen), [chosen | out]}
         end)
         |> elem(1)
