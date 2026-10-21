@@ -147,7 +147,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_asset_foreign_key_indexes(),
       migration_derived_rows_tenant(),
       migration_planted_ledger_keys(),
-      migration_moved_ledger_ids()
+      migration_moved_ledger_ids(),
+      migration_graph_edge_asserted_by()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -213,6 +214,11 @@ defmodule OptimalEngine.Store.Migrations do
   # The number lives here and in the pins listed in
   # docs/guides/versioning-and-releases.md.
   @graph_edges_version 76
+
+  # Provisional until it merges, like every migration number: the change that
+  # merges next takes the highest number on main plus one. The number lives
+  # here and in the pins listed in docs/guides/versioning-and-releases.md.
+  @graph_edge_asserted_by_version 83
 
   # The tenant a workspace id names: its workspace row's, else the tenant its
   # "<tenant>:" prefix names when that tenant exists, else the default.
@@ -440,6 +446,46 @@ defmodule OptimalEngine.Store.Migrations do
         "UPDATE OR IGNORE sync_mutations SET id = 'moved:' || id WHERE #{@moved_keys} AND #{@change_shape}"},
        {"data: delete a change of a row that could not be re-id'd",
         "DELETE FROM sync_mutations WHERE (#{@renamed_ids} OR #{@moved_keys}) AND #{@change_shape}"}
+     ]}
+  end
+
+  # A graph edge records who asserted it (`asserted_by`, Graph.assert_edge/4),
+  # so an importer retracts only the edges it wrote and none another writer
+  # also holds. Edges written before this have no asserter; the Notion
+  # importer's (child_of and links_to between two imported Notion contexts,
+  # the only edges it wrote) are given its kind, so a re-import still
+  # retracts the ones that no longer hold. Both ends must be contexts of the
+  # edge's own tenant and workspace whose URI starts exactly with that
+  # workspace's `optimal://<workspace>/notion/` prefix, the URI the importer
+  # gives them. The backfill reads every child_of and links_to edge once, at
+  # the first boot (docs/guides/versioning-and-releases.md, Upgrade notes).
+  # Additive (a nullable column and a backfill), with change capture off for
+  # the backfill like the graph edges copy: every Engine runs it. The column
+  # add is tolerated as a duplicate and the backfill only fills edges that
+  # have no asserter.
+  defp migration_graph_edge_asserted_by do
+    {@graph_edge_asserted_by_version, "graph edges record who asserted them",
+     [
+       {"graph_edges_asserted_by", "ALTER TABLE graph_edges ADD COLUMN asserted_by TEXT"},
+       {"graph_edges_asserted_by_applying", "UPDATE sync_identity SET applying = 1 WHERE id = 1"},
+       {"backfill_notion_import_edges",
+        """
+        UPDATE graph_edges SET asserted_by = 'import.notion'
+        WHERE asserted_by IS NULL AND relation IN ('child_of', 'links_to')
+          AND EXISTS (SELECT 1 FROM contexts c
+                      WHERE c.id = graph_edges.source_id
+                        AND c.tenant_id = graph_edges.tenant_id
+                        AND c.workspace_id = graph_edges.workspace_id
+                        AND substr(c.uri, 1, length('optimal://' || graph_edges.workspace_id || '/notion/')) =
+                              'optimal://' || graph_edges.workspace_id || '/notion/')
+          AND EXISTS (SELECT 1 FROM contexts c
+                      WHERE c.id = graph_edges.target_id
+                        AND c.tenant_id = graph_edges.tenant_id
+                        AND c.workspace_id = graph_edges.workspace_id
+                        AND substr(c.uri, 1, length('optimal://' || graph_edges.workspace_id || '/notion/')) =
+                              'optimal://' || graph_edges.workspace_id || '/notion/')
+        """},
+       {"graph_edges_asserted_by_done", "UPDATE sync_identity SET applying = 0 WHERE id = 1"}
      ]}
   end
 

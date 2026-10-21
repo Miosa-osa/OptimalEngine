@@ -16,9 +16,10 @@ defmodule OptimalEngine.Imports.Notion do
       every exported page or database it links to; links in the stored text
       point at the target's URI (`OptimalEngine.Imports.Notion.Links`)
 
-  A re-import replaces the `child_of` and `links_to` edges between imported
-  Notion contexts, the edges this importer writes, so a page that moved has
-  one parent, not two. Any other edge is left alone.
+  Every edge is asserted as `import.notion` (`Graph.assert_edge/4`
+  `:asserted_by`). A re-import retracts the ones that no longer hold, so a
+  page that moved has one parent, not two, and only those: an edge another
+  writer asserted, the same edge included, is left alone.
 
   The archive is read by `OptimalEngine.Imports.Zip` under hard limits; a
   Notion export split into part zips at the archive root is read one level
@@ -40,6 +41,7 @@ defmodule OptimalEngine.Imports.Notion do
   alias OptimalEngine.Store
 
   @child_of "child_of"
+  @asserted_by "import.notion"
   @links_to "links_to"
   @max_errors 200
   @max_roots 50
@@ -725,10 +727,9 @@ defmodule OptimalEngine.Imports.Notion do
   defp put_links(state, _id, []), do: state
   defp put_links(state, id, targets), do: %{state | links: Map.put(state.links, id, targets)}
 
-  # The edges the import implies, for the contexts it stored. An existing
-  # child_of or links_to edge between two imported Notion contexts, starting
-  # at one this import stored, that no longer holds is retracted: those are
-  # the edges this importer writes. Every edge goes through Graph.
+  # The edges the import implies, for the contexts it stored. An edge this
+  # importer asserted alone, starting at one this import stored, that no
+  # longer holds is retracted. Every edge goes through Graph.
   defp write_edges(state, ctx) do
     ws = ctx.workspace_id
     ctx_id = &context_id(ws, &1)
@@ -756,13 +757,13 @@ defmodule OptimalEngine.Imports.Notion do
     desired
     |> MapSet.difference(existing)
     |> Enum.each(fn {source, target, relation} ->
-      Graph.assert_edge(source, target, relation, workspace_id: ws)
+      Graph.assert_edge(source, target, relation, workspace_id: ws, asserted_by: @asserted_by)
     end)
 
     existing
     |> MapSet.difference(desired)
     |> Enum.each(fn {source, target, relation} ->
-      Graph.retract_edge(source, target, relation, workspace_id: ws)
+      Graph.retract_edge(source, target, relation, workspace_id: ws, asserted_by: @asserted_by)
     end)
 
     state
@@ -771,17 +772,15 @@ defmodule OptimalEngine.Imports.Notion do
   end
 
   defp importer_edges(ws, sources) do
-    {tenant_id, _workspace} = scope = Graph.scope(workspace_id: ws)
+    opts = [workspace_id: ws, asserted_by: @asserted_by]
 
-    with {:ok, notion} <- notion_contexts(scope),
-         {:ok, edges} <-
-           Graph.edges_by_relation([@child_of, @links_to], workspace_id: ws, tenant_id: tenant_id) do
-      for %{source_id: source, target_id: target, relation: relation} <- edges,
-          MapSet.member?(sources, source),
-          Map.has_key?(notion, target),
-          into: MapSet.new(),
-          do: {source, target, relation}
-    else
+    case Graph.edges_by_relation([@child_of, @links_to], opts) do
+      {:ok, edges} ->
+        for %{source_id: source, target_id: target, relation: relation} <- edges,
+            MapSet.member?(sources, source),
+            into: MapSet.new(),
+            do: {source, target, relation}
+
       {:error, reason} ->
         Logger.warning("[Imports.Notion] could not read existing edges: #{reason_code(reason)}")
         MapSet.new()
