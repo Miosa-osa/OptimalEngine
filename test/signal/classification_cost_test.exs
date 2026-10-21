@@ -17,7 +17,7 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Pipeline.{Classifier, Intake}
-  alias OptimalEngine.Signal.{GenreDetector, ModeDetector, PreSend}
+  alias OptimalEngine.Signal.{GenreDetector, ModeDetector, PreSend, TimeLimit}
 
   @mib 1_048_576
   @limits [:classification_timeout_ms, :classification_budget_ms]
@@ -213,11 +213,19 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
     absent = for a <- ?a..?z, b <- ?a..?z, do: "Plannx" <> <<a, b>>
     names = ["Contoso", "Northwind" | absent]
 
+    IO.puts(
+      "EVIDENCE otp #{System.otp_release()} erts #{:erlang.system_info(:version)} " <>
+        "kill_safe? #{TimeLimit.kill_safe?()} text #{byte_size(text)} bytes"
+    )
+
+    assert TimeLimit.kill_safe?()
+
     {signal, stopped} = timeouts(fn -> Intake.classify(text, known_entities: names) end)
 
     assert "entity extraction" in stopped
     assert "Contoso" in signal.entities
     refute "Northwind" in signal.entities
+    IO.puts("EVIDENCE killed mid match and passed, stopped #{inspect(stopped)}")
   end
 
   test "a long text's entities come from its body, as a short text's do" do
