@@ -16,13 +16,17 @@ From 0.3.3 that copy comes from the CLI archive, so an upgrade refreshes it; for
 | `<prefix>/bin/install-client.sh` | The installer, mode 0755, for the machine-start commands. |
 | `<prefix>/mcp/` | The MCP server with its production dependencies. |
 | `<prefix>/VERSION` | The installed release. |
-| `/usr/local/bin/{optimal,oe,optimal-engine-mcp}` | Links to the three programs. Root creates `/usr/local/bin` when it is missing; another user who cannot write it gets the links in `~/.local/bin`. `OPTIMAL_CLIENT_BIN_DIR` sets the directory, `none` links nothing. |
+| `/usr/local/bin/{optimal,oe,optimal-engine-mcp}` | Links to the three programs. Root creates `/usr/local/bin` when it is missing; another user who cannot write it gets the links in `~/.local/bin`. `OPTIMAL_CLIENT_BIN_DIR` sets the directory, `none` links nothing. An entry is written only where none exists, where a link is dangling, or where a link into an Optimal prefix is (see below); anything else there, such as another program called `oe`, is left as it is with a warning, and when nothing could be linked the output says so. |
 
 The prefix is `OPTIMAL_CLIENT_PREFIX` when set.
 Otherwise it is the prefix the running copy is installed in (`<prefix>/bin/install-client.sh`).
 Otherwise root uses `/opt/optimal`, which `install` creates; root never installs into its own home.
 Another user uses `/opt/optimal` for `install` when it can be written, and for the other commands when it holds an install (`/opt/optimal/VERSION`).
 Otherwise it is `~/.local/share/optimal`.
+
+A link into an Optimal prefix is a symbolic link whose target, absolute or relative to the link's directory, is a regular file `<root>/bin/<name>`, where `<root>/VERSION` holds a version like `0.3.3` and `<root>/bin/optimal` is the client CLI (it has an `OPTIMAL_CLI_VERSION=` line).
+A link is dangling only when its target is known to be missing: a target behind a directory that cannot be searched is left alone.
+Such a link, from this install or an older one, is replaced by removing it and linking again; a link to a directory, or to a root that fails either check, is left alone.
 
 ## Release files
 
@@ -33,25 +37,27 @@ Otherwise it is `~/.local/share/optimal`.
 | `SHA256SUMS` | both builds |
 
 CI builds and tests them on every run; release files are built on the release build host from the tagged source, not published from CI.
-A MIOSA image does not download from GitHub: the Engine release staging directory on the build host holds the same files, and its manifest records their sha256.
+A MIOSA image installs from the Engine release staging directory on the build host, which holds these files, and its manifest records their sha256.
 The script also accepts a flat MCP archive (`dist/`, `node_modules/`, `package.json` at its root), the layout staged for 0.3.2.
 
 ## Inputs
 
 | Variable | Needed | Meaning |
 | --- | --- | --- |
-| `OPTIMAL_CLIENT_SOURCE` | yes, for an image | Absolute directory or `https` base URL holding the release files. An `http://` URL is accepted only with both sha256 pins. Default: the GitHub release. |
+| `OPTIMAL_CLIENT_SOURCE` | yes, for `install` | Absolute directory or `https` base URL holding the release files, such as the Engine release staging directory. There is no default: `install` without it exits 64. An `http://` URL is accepted only with both sha256 pins. |
 | `OPTIMAL_CLIENT_VERSION` | no | Release to install; default is the version the script ships with. The other commands default to the installed `<prefix>/VERSION`. Digits and dots only (`0.3.3`). |
 | `OPTIMAL_CLI_SHA256` | yes, for an image | sha256 of `optimal-<version>-linux-<arch>.tar.gz`, from the release manifest. |
 | `OPTIMAL_MCP_SHA256` | yes, for an image | sha256 of `optimal-engine-mcp-<version>.tar.gz`, from the release manifest. |
 | `OPTIMAL_CLIENT_PREFIX` | no | Install root, for example a platform tools directory. |
 | `OPTIMAL_CLIENT_BIN_DIR` | no | Where the programs are linked; `none` links nothing. |
-| `OPTIMAL_CLIENT_SKIP_MCP` | no | `1` installs only the CLI, and removes an MCP server already in the prefix. |
+| `OPTIMAL_CLIENT_SKIP_MCP` | no | `1` installs only the CLI, and removes an MCP server this installer put in the prefix (anything else there: exit 73). |
 | `OPTIMAL_CLIENT_REGISTER_MCP` | no | `0` skips harness registration. |
 | `OPTIMAL_ENGINE_URL` | at machine start | The workspace's Engine. Unset at image build: no profile is written and the Engine checks are skipped. |
 | `OPTIMAL_ENGINE_API_KEY_FILE` or `OPTIMAL_ENGINE_API_KEY` | at machine start | The workspace-scoped key; a key file must be an absolute path to a readable file. |
 | `OPTIMAL_WORKSPACE` | at machine start | The workspace id, for keys limited to named workspaces. |
 | `OPTIMAL_MCP_NODE` | no | Read by the installed launcher when the MCP server starts: the `node` program to run. |
+| `OPTIMAL_CLIENT_LOCK_WAIT` | no | Seconds `install` waits for another install's lock (default 60) before exiting 75. |
+| `OPTIMAL_CLIENT_BREAK_LOCK` | no | `1` takes the lock over whoever holds it. |
 
 The two sha256 pins are what make the install trustworthy: they come from the manifest, not from the place that serves the archives.
 Without them the script takes the sha256 from `SHA256SUMS` in the same source, which catches a corrupt download but not a source that was changed, archives and `SHA256SUMS` together.
@@ -66,6 +72,27 @@ Both archives are fetched, checked and unpacked in a scratch directory first, so
 Then every file is copied into the prefix beside the installed one, under a temporary name: this is the step that needs disk space.
 Only when every copy succeeded are they renamed into place, the MCP server first and `VERSION` last.
 A full disk or a missing permission during the copies exits 73 with the temporary files removed and the installed client unchanged.
+One install runs at a time in a prefix.
+The lock, `<prefix>/.install.lock`, is a symbolic link whose target names its holder (pid, host, boot id, pid namespace, and the time it was taken), so it is created and read with its owner in one step.
+Another install waits for it up to `OPTIMAL_CLIENT_LOCK_WAIT` seconds (default 60), then exits 75.
+A stale lock is taken over with a warning: one older than 15 minutes, whoever holds it; one whose holder ran on this host before the last boot; and one whose holder is on this host, boot and pid namespace and is provably not running.
+A holder on another host or in another pid namespace, or one whose owner cannot be read, counts as alive until the 15 minutes pass; `OPTIMAL_CLIENT_BREAK_LOCK=1` takes over any lock.
+A lock is removed, by a takeover or by its holder on the way out, only under a short second lock, `<prefix>/.install.lock.takeover`.
+Under it the lock is read again and removed only while it is still the one judged, so a takeover never removes a lock another install has just taken, and two installs never hold the prefix at once.
+A second lock older than 30 seconds was left by an install killed while holding it, and is cleared.
+A signal (TERM, INT or HUP) between the MCP server's two renames puts the installed server back on the way out.
+A run killed outright (SIGKILL, a power cut) can leave its temporary copies, or the MCP server moved aside.
+Under the lock, the next `install` removes what runs that are provably no longer alive left, under this installer's own names only, and puts such a server back when the prefix has none; a server it cannot put back is kept, with a warning.
+A process counts as alive unless `/proc` or `ps` shows it is gone, so another user's live process is never taken for a dead one.
+If the old MCP server cannot be removed after the renames, the install still finishes and warns, and the next `install` removes it.
+Read-only directories, which published packages in `node_modules` may have, are made writable before anything is removed.
+
+`<prefix>/mcp/` and the launcher are replaced, or removed by `OPTIMAL_CLIENT_SKIP_MCP=1`, only when they carry this installer's marks.
+The launcher's first comment line must be `# The Optimal Engine MCP server over stdio, installed by install-client.sh (<version>).`
+`mcp/` must hold the file `.install-client`, or sit beside such a launcher (an install from before that file has only the launcher's line).
+Each mark is written before its rename, so a prefix an interrupted install left is still its own and the next `install` finishes it.
+Anything else makes `install` exit 73, naming the path, before anything is fetched or changed.
+A CLI-only install removes `mcp/` before the launcher, so a removal that fails partway is finished by the next `install`.
 
 ## The one command
 
@@ -115,7 +142,7 @@ install-client: verified optimal-engine-mcp-0.3.5.tar.gz (<sha256>)
 install-client: installed optimal 0.3.5 (alias oe) in /opt/optimal/bin
 install-client: installed optimal-engine-mcp 0.3.5 in /opt/optimal/mcp
 install-client: installed /opt/optimal/bin/install-client.sh for configure, register and verify
-install-client: linked the programs into /usr/local/bin
+install-client: linked optimal oe optimal-engine-mcp into /usr/local/bin
 install-client: wrote /root/.config/optimal/profile (mode 0600)
 install-client: registered optimal-engine with Claude Code (user scope)
 install-client: registered optimal-engine with Codex (/root/.codex/config.toml)
@@ -135,12 +162,13 @@ The key is never printed and never passed as a program argument.
 | Code | Meaning |
 | --- | --- |
 | 0 | Every requested command succeeded. |
-| 64 | Usage or input error: an unknown command, a bad `OPTIMAL_CLIENT_VERSION`, prefix, source, sha256 pin, key file path, or `OPTIMAL_ENGINE_URL`; an `http://` source without both pins. |
+| 64 | Usage or input error: an unknown command, a missing or bad `OPTIMAL_CLIENT_SOURCE`, a bad `OPTIMAL_CLIENT_VERSION`, prefix, sha256 pin, key file path, or `OPTIMAL_ENGINE_URL`; an `http://` source without both pins. |
 | 65 | An archive was refused: no expected sha256, a mismatch, or wrong contents or version inside. Nothing is replaced. |
 | 66 | `OPTIMAL_ENGINE_API_KEY_FILE` is not a readable file. |
 | 69 | Something is unavailable: the source does not answer, answers 404 for an archive, or answers another error; `curl`, a sha256 tool, Node.js 20 or newer, or the platform is missing. |
 | 70 | No client is installed in the prefix, `<prefix>/VERSION` does not hold a version (the error names the file), the installed CLI reports another version, or the MCP server did not answer `initialize` as the installed version. |
-| 73 | Something could not be written: the prefix (nothing is replaced), a program link, `claude mcp add`, or the Codex config, including one this user cannot read and write. The Codex config is then unchanged. |
+| 73 | Something could not be written or is not this installer's: the prefix (nothing is replaced), an MCP server or launcher without this installer's marks, a program link, `claude mcp add`, the profile or the Codex config, including a Codex config this user cannot read and write, and, as root, a directory that fails the root rule below. The Codex config is then unchanged. |
+| 75 | Another install kept `<prefix>/.install.lock` past `OPTIMAL_CLIENT_LOCK_WAIT`. |
 
 The Engine checks in `verify` exit with the CLI's own code: 77 the key was refused, 69 the Engine is unreachable, 64 the key is limited to named workspaces and `OPTIMAL_WORKSPACE` is unset, 78 bad client configuration, 1 any other HTTP error.
 From 0.3.3 the MCP server is versioned with the Engine and a different version is refused; for 0.3.2 and earlier a different MCP server version is only a warning.
@@ -157,8 +185,14 @@ From 0.3.3 the MCP server is versioned with the Engine and a different version i
   Codex gives a stdio server only a fixed environment (`HOME`, `PATH` and a few more) plus the names in `env_vars`, so this list is what lets the server see the injected Engine settings; with only `HOME` it still finds the default profile.
   `env_vars` needs Codex 0.47.0 or newer: an older Codex gets the table without it, with a warning, and when the version is unknown (`codex` not on `PATH`, or no version in its `--version`) the table has it and the script warns.
   Any earlier `optimal-engine` table and its sub-tables are replaced, however their headers are spaced or quoted; every other setting is kept.
-  The file is rewritten atomically with mode 0600, through a symlink when `config.toml` is one, so the link stays; a `~/.codex` the script creates is mode 0700.
+  The file is rewritten atomically with mode 0600, through a symlink when `config.toml` is one, so the link stays (not as root, see below); a `~/.codex` the script creates is mode 0700.
   A config this user cannot read and write (for example one owned by root in the agent's home) is left alone and the script exits 73.
+
+As root, `configure` and `register` write only into a directory (the profile's configuration directory and its parent, Claude Code's `CLAUDE_CONFIG_DIR` or `HOME`, and `CODEX_HOME`) that, if it exists, is not a symlink, is owned by root and cannot be written by group or others, and whose parent root owns and others cannot write, unless the parent is sticky (as `/tmp` is) and the directory already exists.
+A trailing slash is ignored, so `/var/` is checked as `/var`.
+`register` also never writes through a symlinked Codex `config.toml`.
+Anything else another user could swap or point at another file while root writes, so the script exits 73.
+Only those directories and their parents are checked, not every ancestor: the reliable way to register for an agent user is to run `configure` and `register` as that user.
 
 No key is written into a harness configuration.
 
