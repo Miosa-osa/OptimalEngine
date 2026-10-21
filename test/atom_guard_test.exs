@@ -239,16 +239,107 @@ defmodule OptimalEngine.AtomGuardTest do
             {"defdelegate binary_to_atom(text, enc), to: :erlang", :binary_to_atom},
             {"defdelegate concat(a, b), to: Module", :module_concat},
             {"defdelegate eval_string(text), to: Code", :code_eval},
-            {"defdelegate to_atom(text), to: @target", :dynamic_call}
+            {"defdelegate to_atom(text), to: @target", :dynamic_call},
+            {"defdelegate run(m, f, a), to: :erlang, as: :apply", :apply_dynamic},
+            {"defdelegate run(m, f, a), to: Kernel, as: :apply", :apply_dynamic},
+            {"defdelegate go(m, f, a), to: :erlang, as: :spawn", :apply_dynamic},
+            {"defdelegate go(m, f, a), to: Task, as: :async", :apply_dynamic},
+            {"defdelegate cap(m, f, a), to: Function, as: :capture", :apply_dynamic},
+            {"defdelegate to_term(bin), to: :erlang, as: :binary_to_term", :binary_to_term},
+            {"defdelegate [to_atom(x), length(y)], to: String", :string_to_atom},
+            {"defdelegate [eval_string(x), eval_file(y)], to: Code", :code_eval}
           ] do
-        assert [%{kind: ^kind}] = scan(source), source
+        assert [%{kind: ^kind} | _] = scan(source), source
       end
+
+      assert [_one, _two] = scan("defdelegate [eval_string(x), eval_file(y)], to: Code")
 
       alias_source = "alias String, as: S\ndefdelegate to_atom(text), to: S"
       assert [%{kind: :string_to_atom}] = scan(alias_source)
 
       assert [] = scan("defdelegate length(text), to: String")
+      assert [] = scan("defdelegate [length(x), upcase(y)], to: String")
+      assert [] = scan("defdelegate go(f), to: :erlang, as: :spawn")
+      assert [] = scan("defdelegate run(a, b), to: :erlang, as: :apply")
+      assert [] = scan("defdelegate go(m, f, a), to: MyApp.Runner, as: :spawn")
       assert [] = scan("defdelegate start(opts), to: MyApp.Worker, as: :to_atom")
+    end
+
+    test "a piped call is read with the piped value as its first argument" do
+      for {source, kind} <- [
+            {"opts |> Keyword.put(:keys, :atoms)", :atom_keys},
+            {"opts |> Keyword.put_new(:keys, :atoms)", :atom_keys},
+            {"opts |> Map.put(:atoms, true)", :atom_keys},
+            {"x |> String.to_atom()", :string_to_atom},
+            {"x |> String.trim() |> String.to_atom()", :string_to_atom},
+            {"x |> Code.eval_string()", :code_eval},
+            {"String |> apply(:to_atom, [x])", :apply_atom_module},
+            {"mod |> apply(fun, [x])", :apply_dynamic},
+            {"mod |> Kernel.apply(fun, [x])", :apply_dynamic},
+            {"mod |> spawn(fun, [x])", :apply_dynamic}
+          ] do
+        assert [%{kind: ^kind}] = scan("def f(x), do: #{source}"), source
+      end
+
+      for source <- [
+            "opts |> Keyword.put(:keys, :atoms!)",
+            "opts |> Map.put(:other, true)",
+            "x |> String.trim() |> String.length()",
+            "x |> Enum.map(fn y -> y end)",
+            "MyApp.Worker |> apply(:run, [x])"
+          ] do
+        assert [] = scan("def f(x), do: #{source}"), source
+      end
+    end
+
+    test "the module, function, arguments calls of Task, Node, :erpc, :rpc, :proc_lib and :timer" do
+      for {source, kind} <- [
+            {"Task.async(String, :to_atom, [x])", :apply_atom_module},
+            {"Task.start(mod, fun, [x])", :apply_dynamic},
+            {"Task.start_link(mod, fun, [x])", :apply_dynamic},
+            {"Task.async_stream(xs, mod, fun, [x])", :apply_dynamic},
+            {"Task.Supervisor.async(sup, mod, fun, [x])", :apply_dynamic},
+            {"Task.Supervisor.async_nolink(sup, Code, :eval_string, [x])", :apply_atom_module},
+            {"Task.Supervisor.start_child(sup, mod, fun, [x])", :apply_dynamic},
+            {"Task.Supervisor.async_stream(sup, xs, mod, fun, [x])", :apply_dynamic},
+            {"Node.spawn(node, mod, fun, [x])", :apply_dynamic},
+            {"Node.spawn_link(node, String, :to_atom, [x])", :apply_atom_module},
+            {":erpc.call(node, mod, fun, [x])", :apply_dynamic},
+            {":erpc.cast(node, String, :to_atom, [x])", :apply_atom_module},
+            {":rpc.call(node, mod, fun, [x])", :apply_dynamic},
+            {":rpc.call(node, mod, fun, [x], 1000)", :apply_dynamic},
+            {":rpc.multicall(nodes, mod, fun, [x])", :apply_dynamic},
+            {":rpc.multicall(mod, fun, [x])", :apply_dynamic},
+            {":proc_lib.spawn(mod, fun, [x])", :apply_dynamic},
+            {":proc_lib.start_link(mod, fun, [x])", :apply_dynamic},
+            {":proc_lib.spawn_opt(mod, fun, [x], [])", :apply_dynamic},
+            {":timer.apply_after(1000, mod, fun, [x])", :apply_dynamic},
+            {":erlang.spawn_request(mod, fun, [x], [])", :apply_dynamic}
+          ] do
+        assert [%{kind: ^kind}] = scan("def f(x), do: #{source}"), source
+      end
+
+      assert [%{kind: :apply_dynamic}] =
+               scan("alias Task.Supervisor, as: TS\ndef f(x), do: TS.async(sup, mod, fun, [x])")
+    end
+
+    test "those calls with a literal module that is safe, or with a function, are not flagged" do
+      for source <- [
+            "Task.async(MyApp.Worker, :run, [x])",
+            "Task.async(fn -> x end)",
+            "Task.async_stream(xs, fn y -> y end, [])",
+            "Task.Supervisor.async(sup, fn -> x end)",
+            "Task.Supervisor.start_child(sup, MyApp.Worker, :run, [x])",
+            "Node.spawn(node, fn -> x end)",
+            ":erpc.call(node, MyApp.Worker, :run, [x])",
+            ":rpc.call(node, MyApp.Worker, :run, [x])",
+            ":proc_lib.spawn(MyApp.Worker, :run, [x])",
+            ":timer.apply_after(1000, MyApp.Worker, :run, [x])",
+            ":timer.tc(fun, args, :millisecond)",
+            ":erlang.spawn_request(fun, opts)"
+          ] do
+        assert [] = scan("def f(x), do: #{source}"), source
+      end
     end
 
     test "a to_atom-like function called on a module held in a variable" do

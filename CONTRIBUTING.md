@@ -59,7 +59,8 @@ The BEAM atom table is finite and is never garbage collected.
 Text from a request, a stored row, a file, a peer or a model must not become an atom.
 That rules out `String.to_atom/1`, interpolated atoms such as `:"prefix_#{text}"`, `keys: :atoms` and `Module.concat/1` on such text.
 Look the text up in an explicit list with `OptimalEngine.SafeAtom`, keep it as text, or reject it.
-`test/atom_guard_test.exs` reads `lib/`, `config/` and `mix.exs` and fails on a new call, including `apply/3`, `spawn` with a module, function and arguments, `defdelegate` to `String`, `List`, `Module` or `Code`, and `import` of those modules, and code evaluation such as `Code.eval_string`.
+`test/atom_guard_test.exs` reads `lib/`, `config/` and `mix.exs` and fails on a new call, including `apply/3` and the other module, function, arguments calls (`spawn`, `Task`, `Node`, `:erpc`, `:rpc`, `:proc_lib`, `:timer`), piped calls, `defdelegate` to those modules, and `import` of them, and code evaluation such as `Code.eval_string`.
+The scanner reads one file at a time; the module doc of `test/support/atom_scanner.ex` lists what it cannot see, such as a macro that expands to one of these calls in another file.
 A compile-time literal or a boot setting goes in its reviewed list with a one-line reason.
 
 **TypeScript (SDK / MCP / site)**
