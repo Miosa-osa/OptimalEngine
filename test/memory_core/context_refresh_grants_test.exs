@@ -610,6 +610,68 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       assert third.id != first.id
     end
 
+    test "a second reader with the same grants is answered with a package of its own", ctx do
+      package = build_package!(ctx.workspace_id, ["public"], [])
+      make_stale!(ctx.workspace_id, ctx.rows)
+
+      cover = fn actor ->
+        RetrievalCoordinator.refresh_context_package(package.id,
+          workspace_id: ctx.workspace_id,
+          actor_id: actor,
+          allowed_partitions: [],
+          allowed_security_labels: ["public"]
+        )
+      end
+
+      assert {:ok, one} = cover.("agent:one")
+      assert {:ok, two} = cover.("agent:two")
+
+      assert two.id != one.id
+      assert one.requesting_actor_id == "agent:one"
+      assert two.requesting_actor_id == "agent:two"
+      assert returned_ids(two) == returned_ids(one)
+
+      # Each is answered with the package it stored, and with no one else's.
+      assert {:ok, one_again} = cover.("agent:one")
+      assert {:ok, two_again} = cover.("agent:two")
+      assert one_again.id == one.id
+      assert two_again.id == two.id
+      assert rows_requested_by(ctx.workspace_id, "agent:one") == 1
+      assert rows_requested_by(ctx.workspace_id, "agent:two") == 1
+    end
+
+    test "a reader whose grants narrowed stores a new package without the wider content", ctx do
+      package = build_package!(ctx.workspace_id, ["public"], [])
+      make_stale!(ctx.workspace_id, ctx.rows)
+
+      cover = fn labels ->
+        RetrievalCoordinator.refresh_context_package(package.id,
+          workspace_id: ctx.workspace_id,
+          actor_id: "agent:other",
+          allowed_partitions: [],
+          allowed_security_labels: labels
+        )
+      end
+
+      assert {:ok, wide} = cover.(["public", "internal"])
+      assert returned_ids(wide) == ids_for(ctx.rows, ["open", "public", "internal"])
+      assert dump(wide) =~ "internal-marker"
+
+      assert {:ok, narrow} = cover.(["public"])
+      assert narrow.id != wide.id
+      assert returned_ids(narrow) == ids_for(ctx.rows, ["open", "public"])
+      refute dump(narrow) =~ "internal-marker"
+      assert rows_requested_by(ctx.workspace_id, "agent:other") == 2
+
+      # Each grant set keeps its own package from then on.
+      assert {:ok, narrow_again} = cover.(["public"])
+      assert {:ok, wide_again} = cover.(["public", "internal"])
+      assert narrow_again.id == narrow.id
+      assert wide_again.id == wide.id
+      refute dump(narrow_again) =~ "internal-marker"
+      assert rows_requested_by(ctx.workspace_id, "agent:other") == 2
+    end
+
     test "a reader that only covers a package does not replace it; its requester does", ctx do
       package = build_package!(ctx.workspace_id, ["public"], [])
       make_stale!(ctx.workspace_id, ctx.rows)
@@ -870,6 +932,9 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
         reason: "refresh_grants_test"
       )
   end
+
+  # The whole package as text, to look for a tier's marker anywhere in it.
+  defp dump(package), do: inspect(package, limit: :infinity, printable_limit: :infinity)
 
   defp rows_requested_by(workspace_id, actor) do
     assert {:ok, [[count]]} =

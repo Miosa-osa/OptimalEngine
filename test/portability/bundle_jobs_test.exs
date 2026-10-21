@@ -374,6 +374,147 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
     end
   end
 
+  describe "an import that does not finish takes back only what it wrote" do
+    # A second writer puts a row into the target while the import runs, after
+    # the contexts batch is committed. Returns the id of that row.
+    defp foreign_write_after_contexts(ctx, target, fun) do
+      foreign = "foreign-#{ctx.n}"
+
+      on_event([:optimal_engine, :bundle, :import_batch], fn
+        %{table: "contexts"} ->
+          unless Process.get(:foreign_written) do
+            Process.put(:foreign_written, true)
+            context(ctx.tenant, target, foreign)
+          end
+
+          fun.()
+
+        _other ->
+          :ok
+      end)
+
+      foreign
+    end
+
+    defp context_ids(workspace) do
+      {:ok, rows} =
+        Store.raw_query("SELECT id FROM contexts WHERE workspace_id = ?1 ORDER BY id", [workspace])
+
+      List.flatten(rows)
+    end
+
+    defp create_target(ctx) do
+      {:ok, workspace} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "copy",
+          name: "Copy"
+        })
+
+      workspace.id
+    end
+
+    test "a cancelled create keeps another writer's row, and the workspace it is in", ctx do
+      {name, _manifest} = exported_and_moved(ctx)
+      target = "#{ctx.tenant}:copy"
+
+      {:ok, view, :queued} =
+        BundleJobs.submit_import(ctx.tenant, %{"workspace_id" => target, "bundle" => name})
+
+      foreign =
+        foreign_write_after_contexts(ctx, target, fn ->
+          BundleJobs.cancel(ctx.tenant, view.job_id)
+        end)
+
+      {:ok, done} = BundleJobs.drain()
+
+      assert done.status == "cancelled"
+      assert context_ids(target) == [foreign]
+      assert {:ok, _workspace} = Workspace.get(target)
+      refute done.partial
+    end
+
+    test "a cancelled merge into an empty workspace keeps another writer's row", ctx do
+      {name, _manifest} = exported_and_moved(ctx)
+      target = create_target(ctx)
+
+      {:ok, view, :queued} =
+        BundleJobs.submit_import(ctx.tenant, %{
+          "workspace_id" => target,
+          "bundle" => name,
+          "mode" => "merge"
+        })
+
+      foreign =
+        foreign_write_after_contexts(ctx, target, fn ->
+          BundleJobs.cancel(ctx.tenant, view.job_id)
+        end)
+
+      {:ok, done} = BundleJobs.drain()
+
+      assert done.status == "cancelled"
+      assert context_ids(target) == [foreign]
+      assert {:ok, _workspace} = Workspace.get(target)
+      refute done.partial
+    end
+
+    test "a cancelled merge into a workspace that held rows is partial", ctx do
+      {name, _manifest} = exported_and_moved(ctx)
+      target = create_target(ctx)
+      context(ctx.tenant, target, "held-#{ctx.n}")
+
+      {:ok, view, :queued} =
+        BundleJobs.submit_import(ctx.tenant, %{
+          "workspace_id" => target,
+          "bundle" => name,
+          "mode" => "merge"
+        })
+
+      on_event([:optimal_engine, :bundle, :import_batch], fn
+        %{table: "contexts"} -> BundleJobs.cancel(ctx.tenant, view.job_id)
+        _other -> :ok
+      end)
+
+      {:ok, done} = BundleJobs.drain()
+
+      assert done.status == "cancelled"
+      assert done.partial
+      assert length(context_ids(target)) == 4
+    end
+
+    test "an import cut off by a restart is undone by its log, and only its rows", ctx do
+      {name, _manifest} = exported_and_moved(ctx)
+      target = create_target(ctx)
+
+      {:ok, view, :queued} =
+        BundleJobs.submit_import(ctx.tenant, %{
+          "workspace_id" => target,
+          "bundle" => name,
+          "mode" => "merge"
+        })
+
+      foreign =
+        foreign_write_after_contexts(ctx, target, fn ->
+          if Process.get(:stop_engine), do: Process.exit(self(), :kill)
+        end)
+
+      {pid, ref} =
+        spawn_monitor(fn ->
+          Process.put(:stop_engine, true)
+          BundleJobs.drain()
+        end)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 10_000
+      assert status!(ctx.tenant, view.job_id).status == "running"
+      assert length(context_ids(target)) == 4
+
+      assert BundleJobs.recover() == 1
+      assert context_ids(target) == [foreign]
+      assert {:ok, _workspace} = Workspace.get(target)
+    end
+  end
+
   describe "failures and restarts" do
     test "an import that fails leaves no partial workspace", ctx do
       # The source still holds its rows, so the copy clashes on their ids.
@@ -457,7 +598,53 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
     end
   end
 
+  describe "the name of an export's bundle" do
+    test "holds a random part, so it cannot be guessed from the workspace and the time", ctx do
+      names =
+        for _ <- 1..2 do
+          {:ok, _view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
+          {:ok, done} = BundleJobs.drain()
+          done.result["bundle"]
+        end
+
+      assert length(Enum.uniq(names)) == 2
+
+      for name <- names do
+        assert name =~ ~r/\A[a-z0-9-]+-\d{10}-[0-9a-f]{16}\.tar\.gz\z/
+      end
+    end
+  end
+
   describe "retention" do
+    test "job records go after thirty days, counted on the clock the column keeps", ctx do
+      ids =
+        for _ <- 1..3 do
+          {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
+          {:ok, _done} = BundleJobs.drain()
+          view.job_id
+        end
+
+      [past, edge, recent] = ids
+
+      # Ages in seconds; the edge is one hour inside the thirty days, which can
+      # fall on the same date as the cutoff.
+      for {id, age} <- [{past, 31 * 86_400}, {edge, 30 * 86_400 - 3_600}, {recent, 86_400}] do
+        stamp =
+          DateTime.utc_now()
+          |> DateTime.add(-age, :second)
+          |> Calendar.strftime("%Y-%m-%d %H:%M:%S")
+
+        {:ok, _} = Store.raw_query("UPDATE jobs SET updated_at = ?2 WHERE id = ?1", [id, stamp])
+      end
+
+      {_expired, old} = BundleJobs.sweep()
+
+      assert old >= 1
+      assert {:error, _} = Jobs.fetch(past)
+      assert {:ok, _} = Jobs.fetch(edge)
+      assert {:ok, _} = Jobs.fetch(recent)
+    end
+
     test "an export's bundle is removed once it expires", ctx do
       {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
       {:ok, done} = BundleJobs.drain()
