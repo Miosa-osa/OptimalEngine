@@ -153,6 +153,60 @@ defmodule OptimalEngine.SyncErasureTest do
       assert pointer(first.run) == first.checkpoint
     end
 
+    test "come with the rows this Engine made from the package, and the text in them", ctx do
+      gone = local_work!(ctx, "rows-gone")
+      kept = local_work!(ctx, "rows-kept")
+      create = [create_context(ctx, gone), create_context(ctx, kept)]
+      assert {:ok, %{applied: 2}} = Sync.apply_changes(ctx.tenant, ctx.ws, create)
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [delete_context(gone.context)])
+
+      for {table, id} <- [
+            {"decomposition_runs", gone.run},
+            {"assets", gone.asset},
+            {"asset_extractions", gone.extraction}
+          ] do
+        assert rows(table, id) == 0, "#{table} still holds the deleted context's row"
+      end
+
+      for {table, id} <- [
+            {"decomposition_runs", kept.run},
+            {"assets", kept.asset},
+            {"asset_extractions", kept.extraction}
+          ] do
+        assert rows(table, id) == 1, "#{table} lost another context's row"
+      end
+    end
+
+    test "are swept when only the source package is deleted", ctx do
+      work = local_work!(ctx, "package-only")
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [delete_package(work.package)])
+
+      assert rows("source_packages", work.package) == 0
+      refute File.exists?(work.checkpoint)
+      refute File.exists?(work.asset_file)
+      assert rows("decomposition_runs", work.run) == 0
+      assert rows("assets", work.asset) == 0
+      assert rows("asset_extractions", work.extraction) == 0
+    end
+
+    test "stay when a context here still refers to the package that was deleted", ctx do
+      work = local_work!(ctx, "package-held")
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [create_context(ctx, work)])
+
+      Sync.apply_changes(ctx.tenant, ctx.ws, [delete_package(work.package)])
+
+      assert File.exists?(work.checkpoint)
+      assert File.exists?(work.asset_file)
+      assert rows("decomposition_runs", work.run) == 1
+      assert rows("asset_extractions", work.extraction) == 1
+    end
+
     test "are not touched when the delete does not take the context", ctx do
       other = local_work!(ctx, "other-workspace")
 
@@ -205,8 +259,8 @@ defmodule OptimalEngine.SyncErasureTest do
 
     {:ok, _} =
       Store.raw_query(
-        "INSERT INTO source_packages (id, content_hash, raw_text) VALUES (?1, ?2, 'raw')",
-        [package, "hash-#{id}"]
+        "INSERT INTO source_packages (id, tenant_id, workspace_id, content_hash, raw_text) VALUES (?1, ?2, ?3, ?4, 'raw')",
+        [package, ctx.tenant, ctx.ws, "hash-#{id}"]
       )
 
     {:ok, _} =
@@ -227,10 +281,37 @@ defmodule OptimalEngine.SyncErasureTest do
         ["asset-#{id}", ctx.tenant, asset_file, ctx.ws, package]
       )
 
+    {:ok, _} =
+      Store.raw_query(
+        """
+        INSERT INTO asset_adapter_runs (id, tenant_id, workspace_id, asset_id, adapter_id, adapter_role, modality, status, started_at)
+        VALUES (?1, ?2, ?3, ?4, 'test', 'ocr', 'text', 'ok', datetime('now'))
+        """,
+        ["adapter-#{id}", ctx.tenant, ctx.ws, "asset-#{id}"]
+      )
+
+    {:ok, _} =
+      Store.raw_query(
+        """
+        INSERT INTO asset_extractions (id, tenant_id, workspace_id, asset_id, adapter_run_id, extraction_type, modality, content_text)
+        VALUES (?1, ?2, ?3, ?4, ?5, 'text', 'text', ?6)
+        """,
+        [
+          "extraction-#{id}",
+          ctx.tenant,
+          ctx.ws,
+          "asset-#{id}",
+          "adapter-#{id}",
+          "text read from #{id}"
+        ]
+      )
+
     %{
       context: "ctx-#{id}",
       package: package,
       run: run,
+      asset: "asset-#{id}",
+      extraction: "extraction-#{id}",
       checkpoint: checkpoint,
       asset_file: asset_file
     }
@@ -254,6 +335,21 @@ defmodule OptimalEngine.SyncErasureTest do
       "occurred_at" => "2026-10-14T12:05:00.000",
       "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
     })
+  end
+
+  defp delete_package(id) do
+    mutation(%{
+      "operation" => "delete",
+      "entity_type" => "source_packages",
+      "entity_id" => id,
+      "occurred_at" => "2026-10-14T12:06:00.000",
+      "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
+    })
+  end
+
+  defp rows(table, id) do
+    {:ok, [[n]]} = Store.raw_query("SELECT COUNT(*) FROM #{table} WHERE id = ?1", [id])
+    n
   end
 
   defp pointer(run) do
