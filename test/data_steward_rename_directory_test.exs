@@ -328,6 +328,28 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
       assert notes(ctx) == []
     end
 
+    test "a Store that does not answer in time leaves the note and the directory", ctx do
+      crashed!(ctx)
+      previous = Application.get_env(:optimal_engine, :store_call_timeout_ms)
+      Application.put_env(:optimal_engine, :store_call_timeout_ms, 300)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:optimal_engine, :store_call_timeout_ms, previous),
+          else: Application.delete_env(:optimal_engine, :store_call_timeout_ms)
+      end)
+
+      task = hold_store(1_500)
+
+      assert {:ok, [%{action: :needs_attention}]} = DataSteward.recover_interrupted_renames()
+
+      assert File.exists?(Path.join(ctx.root, "#{ctx.new}/nodes/sales/signals/deal.md"))
+      assert length(notes(ctx)) == 1
+
+      assert {:ok, :released} = Task.await(task, 10_000)
+      assert {:ok, [%{action: :moved_back}]} = DataSteward.recover_interrupted_renames()
+    end
+
     test "does not guess when both directories exist, and keeps the note", ctx do
       workspace = crashed!(ctx)
       file!(Path.join(ctx.root, ctx.old), "nodes/other.md")
@@ -509,6 +531,26 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
     File.rename!(Path.join(ctx.root, ctx.old), Path.join(ctx.root, ctx.new))
     note!(ctx, workspace.id, "default:" <> ctx.new)
     workspace
+  end
+
+  # Holds the single-writer Store for `ms` inside one transaction.
+  defp hold_store(ms) do
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        Store.transaction(
+          fn _txn ->
+            send(parent, :holding)
+            Process.sleep(ms)
+            {:ok, :released}
+          end,
+          ms + 5_000
+        )
+      end)
+
+    assert_receive :holding, 2_000
+    task
   end
 
   defp note!(ctx, source, target, tenant \\ "default") do
