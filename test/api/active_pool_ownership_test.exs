@@ -82,9 +82,11 @@ defmodule OptimalEngine.API.ActivePoolOwnershipTest do
       assert package["tenant_id"] == "default"
     end
 
-    test "a caller with no key is the default tenant's local operator", ctx do
-      assert call(:get, ctx.pool_a, "", nil, nil).status == 200
-      assert call(:get, ctx.pool_f, "", nil, nil).status == 404
+    test "a caller with no key is the default tenant's local operator on every route", ctx do
+      for {method, suffix, body} <- @routes do
+        conn = call(method, ctx.pool_a, suffix, nil, body)
+        assert conn.status == 200, "#{method} #{suffix} answered #{conn.status}"
+      end
     end
   end
 
@@ -101,21 +103,46 @@ defmodule OptimalEngine.API.ActivePoolOwnershipTest do
       assert_hidden(ctx.pool_a, ctx.key_f)
     end
 
-    test "a request that names another workspace than the pool's", ctx do
+    test "another tenant's pool, for a caller with no key", ctx do
+      assert_hidden(ctx.pool_f, nil)
+    end
+
+    test "a pool the key does not cover stays hidden whatever workspace the request names",
+         ctx do
       for {method, suffix, body} <- @routes do
+        {suffix, body} =
+          case method do
+            :get -> {"?workspace=#{ctx.ws_a}", nil}
+            :post -> {suffix, Map.put(body, "workspace", ctx.ws_a)}
+          end
+
+        conn = call(method, ctx.pool_b, suffix, ctx.key_a, body)
+        assert conn.status == 404, "#{method} #{suffix} answered #{conn.status}"
+      end
+
+      assert_untouched(ctx.pool_b, [ctx.ws_a, ctx.ws_b])
+    end
+  end
+
+  describe "a request that contradicts its own pool answers 400 workspace_mismatch" do
+    test "when it names another workspace than the pool's, on every route", ctx do
+      for token <- [ctx.key_all, nil], {method, suffix, body} <- @routes do
         {suffix, body} =
           case method do
             :get -> {"?workspace=#{ctx.ws_b}", nil}
             :post -> {suffix, Map.put(body, "workspace", ctx.ws_b)}
           end
 
-        conn = call(method, ctx.pool_a, suffix, ctx.key_all, body)
-        assert conn.status == 404, "#{method} #{suffix} answered #{conn.status}"
+        conn = call(method, ctx.pool_a, suffix, token, body)
+        assert conn.status == 400, "#{method} #{suffix} answered #{conn.status}"
+        assert Jason.decode!(conn.resp_body) == %{"error" => "workspace_mismatch"}
       end
 
-      assert_untouched(ctx.pool_a)
+      assert_untouched(ctx.pool_a, [ctx.ws_a, ctx.ws_b])
     end
+  end
 
+  describe "an id that is no pool" do
     test "an id that is no pool", ctx do
       for {method, suffix, body} <- @routes do
         conn = call(method, "amp_missing_#{ctx.suffix}", suffix, ctx.key_all, body)
@@ -136,13 +163,24 @@ defmodule OptimalEngine.API.ActivePoolOwnershipTest do
     assert_untouched(pool_id)
   end
 
-  defp assert_untouched(pool_id) do
+  # The pool is as it was opened, and nothing a route would write exists in the
+  # workspaces it could have written to: no claim, source package or context
+  # package (these workspaces are new to each test, so they start empty).
+  defp assert_untouched(pool_id, workspaces \\ nil) do
     assert {:ok, pool} = ActiveMemoryPool.get(pool_id)
     assert pool.lifecycle_state == "open"
     assert pool.archive_state == "active"
     assert pool.context_package_links == []
     assert pool.promotion_candidate_links == []
     assert pool.source_package_links == []
+
+    for workspace_id <- workspaces || [pool.workspace_id],
+        table <- ~w(claims source_packages context_packages) do
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM #{table} WHERE workspace_id = ?1", [
+                 workspace_id
+               ])
+    end
   end
 
   defp open_pool!(tenant_id, workspace_id, label) do

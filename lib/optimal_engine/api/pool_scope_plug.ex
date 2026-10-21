@@ -8,14 +8,14 @@ defmodule OptimalEngine.API.PoolScopePlug do
   its tenant and workspace, so this plug reads the row and lets the request
   through only when
 
-  * the pool belongs to the caller's tenant,
+  * the pool belongs to the caller's tenant, and
   * the Engine serves the pool's workspace and the key's `workspace_scope`
-    covers it, and
-  * the request, if it names a workspace at all, names the pool's own.
+    covers it.
 
-  A pool that fails any of these answers `404` exactly like one that does not
-  exist, so a pool of another tenant or workspace can be neither read nor
-  changed by guessing its id.
+  A pool that fails either answers `404` exactly like one that does not exist,
+  so a pool of another tenant or workspace can be neither read nor changed by
+  guessing its id. A caller that may use the pool but names a different
+  workspace than the pool's gets `400 workspace_mismatch`.
 
   A pool id is the only thing most pool routes name, so `WorkspaceAuthPlug`
   does not ask for the implicit `default` workspace there; this plug
@@ -46,12 +46,20 @@ defmodule OptimalEngine.API.PoolScopePlug do
   def call(%{path_info: ["api", "memory-core", "active-pools", id | _]} = conn, _opts) do
     case ActiveMemoryPool.get(URI.decode(id)) do
       {:ok, pool} ->
-        if visible?(conn, pool) do
-          conn
-          |> assign(:workspace_id, pool.workspace_id)
-          |> assign(:active_pool, pool)
-        else
-          not_found(conn)
+        case access(conn, pool) do
+          :ok ->
+            conn
+            |> assign(:workspace_id, pool.workspace_id)
+            |> assign(:active_pool, pool)
+
+          :hidden ->
+            not_found(conn)
+
+          :workspace_mismatch ->
+            conn
+            |> put_resp_content_type("application/json")
+            |> send_resp(400, Jason.encode!(%{error: "workspace_mismatch"}))
+            |> halt()
         end
 
       {:error, :not_found} ->
@@ -67,11 +75,22 @@ defmodule OptimalEngine.API.PoolScopePlug do
 
   def call(conn, _opts), do: conn
 
+  # A pool the caller may not use is hidden (404). One it may use, but that the
+  # request names a different workspace for, is a request that contradicts
+  # itself: the caller is told so (400), since it already knows the pool's
+  # workspace.
+  defp access(conn, pool) do
+    cond do
+      not visible?(conn, pool) -> :hidden
+      Enum.any?(named_workspaces(conn), &(&1 != pool.workspace_id)) -> :workspace_mismatch
+      true -> :ok
+    end
+  end
+
   defp visible?(conn, pool) do
     pool.tenant_id == (conn.assigns[:current_tenant] || "default") and
       Scope.serves?(pool.workspace_id) and
-      WorkspaceAuthPlug.key_holds?(conn.assigns[:current_api_key], pool.workspace_id) and
-      Enum.all?(named_workspaces(conn), &(&1 == pool.workspace_id))
+      WorkspaceAuthPlug.key_holds?(conn.assigns[:current_api_key], pool.workspace_id)
   end
 
   # Every workspace the request names, in the body or the query.

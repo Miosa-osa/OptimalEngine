@@ -167,8 +167,10 @@ A caller with no key is the `default` tenant, and `POST /api/memory-core/active-
 Continue supplying the intended workspace explicitly.
 
 An Active Memory Pool id names the pool's tenant and workspace.
-Every `/api/memory-core/active-pools/:id` route answers `404 active pool not found` for a pool of another tenant, for a pool in a workspace the key's `workspace_scope` does not cover, and for a request that names a workspace other than the pool's, exactly as for an id that is no pool.
+Every `/api/memory-core/active-pools/:id` route answers `404 active pool not found` for a pool of another tenant and for a pool in a workspace the key's `workspace_scope` does not cover, exactly as for an id that is no pool.
+A caller that may use the pool but names a different workspace than the pool's gets `400 workspace_mismatch`.
 A key scoped to the pool's workspace need not name it, and `retrieve` recalls in the pool's own tenant and workspace.
+When a tenant enforces Optimal Authority, these routes are governed against the pool's workspace, not against the `default` workspace.
 
 At the Claim review boundary, the server uses the key's registered principal as the reviewer, or `api_key:<key-id>` when no principal is attached.
 Clients should omit `actor_id` and `verifier_id` on review requests.
