@@ -32,7 +32,11 @@ defmodule OptimalEngine.Compliance.Artifacts do
       row is erased with (`Workspace.Filesystem.path/2`), never in another
       workspace's or any other file of the root;
     * an asset copy is under `<cache_path>/assets/<prefix>/<tenant>/<workspace>`,
-      the directory of the workspace the row is erased with.
+      the directory of the workspace the row is erased with;
+    * an asset object is in the configured bucket, under the prefix its workspace's
+      assets are written to, and is never a key with an empty, `.` or `..` segment.
+      With no object store configured nothing is deleted. A workspace move deletes
+      none, because the assets of the moved workspace still point at them.
 
   Only regular files are removed, and no directory on the way to one may be a link
   (every component below the Engine root, or the cache path, is looked at with
@@ -68,6 +72,8 @@ defmodule OptimalEngine.Compliance.Artifacts do
           {:checkpoint, run_id :: String.t(), uri :: String.t(), workspace_id :: String.t()}
           | {:asset_file, storage_path :: String.t(), workspace_id :: String.t()}
           | {:asset_copy, storage_path :: String.t(), tenant_id :: String.t(),
+             workspace_id :: String.t()}
+          | {:asset_object, storage_path :: String.t(), tenant_id :: String.t(),
              workspace_id :: String.t()}
 
   @type removed :: %{files: non_neg_integer(), bytes: non_neg_integer()}
@@ -148,6 +154,7 @@ defmodule OptimalEngine.Compliance.Artifacts do
   defp kind({:checkpoint, _, _, _}), do: :checkpoint
   defp kind({:asset_file, _, _}), do: :asset_file
   defp kind({:asset_copy, _, _, _}), do: :asset_copy
+  defp kind({:asset_object, _, _, _}), do: :asset_object
 
   # ── one file ───────────────────────────────────────────────────────────────
 
@@ -185,6 +192,44 @@ defmodule OptimalEngine.Compliance.Artifacts do
       _ -> {:ok, none()}
     end
   end
+
+  # An object of the object store this Engine is configured for: in its bucket, and under
+  # the prefix this workspace's assets are written to (`Storage.Assets.object_key/1`),
+  # never outside it. With no object store configured there is nothing this Engine can
+  # delete, and the object is left alone. An object is never deleted by a workspace move:
+  # the workspace's assets still point at it on the Engine the workspace moved to.
+  defp remove_one({:asset_object, storage_path, tenant_id, workspace_id}) do
+    with true <- is_binary(storage_path) and is_binary(tenant_id) and is_binary(workspace_id),
+         {:ok, bucket, key} <- S3.parse_uri(storage_path),
+         {:ok, %{bucket: ^bucket}} <- S3.config(),
+         true <- object_of?(key, tenant_id, workspace_id) do
+      case S3.delete_object(key) do
+        :ok -> {:ok, %{files: 1, bytes: 0}}
+        {:error, reason} -> {:error, object_error(reason)}
+      end
+    else
+      _ -> {:ok, none()}
+    end
+  end
+
+  defp object_of?(key, tenant_id, workspace_id) do
+    prefix = S3.object_key([tenant_id, workspace_id, "assets"]) <> "/"
+    rest = String.replace_prefix(key, prefix, "")
+
+    plain?(tenant_id) and plain?(workspace_id) and String.starts_with?(key, prefix) and
+      rest != "" and Enum.all?(String.split(rest, "/"), &plain?/1)
+  end
+
+  # A name that is one path segment and not a dot.
+  defp plain?(name), do: name not in ["", ".", ".."] and not String.contains?(name, "/")
+
+  # What the store said, without its URL, its detail or anything signed.
+  defp object_error(:access_denied), do: :access_denied
+  defp object_error(:not_found), do: :not_found
+  defp object_error({:http_error, status, _detail}), do: {:http, status}
+  defp object_error({:transport, _reason}), do: :transport
+  defp object_error(reason) when is_atom(reason), do: reason
+  defp object_error(_reason), do: :object_store_failed
 
   # The path this Engine builds for the run; the recorded one has to be it.
   defp checkpoint_path(run_id, uri) when is_binary(run_id) and is_binary(uri) do
