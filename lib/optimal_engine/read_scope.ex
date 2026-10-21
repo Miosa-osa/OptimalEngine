@@ -86,6 +86,87 @@ defmodule OptimalEngine.ReadScope do
   end
 
   @doc """
+  True when the reader may see the one row of `table` with this id, and its
+  principal may read `address`. For a route that returns a single record.
+  """
+  @spec visible?(t() | nil, String.t(), String.t(), String.t() | nil, String.t() | nil) ::
+          boolean()
+  def visible?(scope, workspace_id, table, id, address) do
+    {kept, _withheld} = filter(scope, workspace_id, table, [id], & &1, fn _ -> address end)
+    kept != []
+  end
+
+  @doc """
+  True when the reader may see this wiki page (a map or struct with its tenant,
+  workspace, slug, audience, version, frontmatter and body), and its principal
+  may read `wiki:<slug>:<audience>`.
+  """
+  @spec readable_page?(t() | nil, map()) :: boolean()
+  def readable_page?(scope, page) do
+    {kept, _withheld} =
+      filter_rows(
+        scope,
+        page.workspace_id,
+        "wiki_pages",
+        [page],
+        &wiki_row/1,
+        &"wiki:#{&1.slug}:#{&1.audience}"
+      )
+
+    kept != []
+  end
+
+  @doc "A wiki page as the columns the lineage reads it by."
+  @spec wiki_row(map()) :: map()
+  def wiki_row(page) do
+    %{
+      "tenant_id" => page.tenant_id,
+      "workspace_id" => page.workspace_id,
+      "slug" => page.slug,
+      "audience" => page.audience,
+      "version" => page.version,
+      "frontmatter" => page.frontmatter,
+      "body" => page.body
+    }
+  end
+
+  @doc """
+  `filter/6` for items whose table is not known (search results are documents
+  or memories, possibly from several workspaces): the table of each is found
+  from its id, and an id that is in none is read by no one.
+  """
+  @spec filter_any(
+          t() | nil,
+          [term()],
+          (term() -> String.t() | nil),
+          (term() -> String.t()),
+          (term() -> String.t() | nil)
+        ) :: {[term()], non_neg_integer()}
+  def filter_any(nil, items, _id_of, _workspace_of, _uri_of), do: {items, 0}
+
+  def filter_any(%__MODULE__{} = scope, items, id_of, workspace_of, uri_of) do
+    readable =
+      if unfiltered?(scope) do
+        items
+      else
+        allowed =
+          items
+          |> Enum.group_by(workspace_of)
+          |> Enum.flat_map(fn {workspace_id, group} ->
+            Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), fn gate ->
+              ids = Gate.readable_any_ids(gate, Enum.map(group, id_of))
+              for item <- group, MapSet.member?(ids, id_of.(item)), do: item
+            end)
+          end)
+          |> MapSet.new()
+
+        Enum.filter(items, &MapSet.member?(allowed, &1))
+      end
+
+    counted(items, readable_by_acl(readable, scope, uri_of))
+  end
+
+  @doc """
   `filter/6` for rows that are not looked up by id: `row_of` gives the columns
   of an item as a map with string keys.
   """

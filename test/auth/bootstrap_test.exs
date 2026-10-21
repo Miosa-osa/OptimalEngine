@@ -9,6 +9,7 @@ defmodule OptimalEngine.Auth.BootstrapTest do
   import ExUnit.CaptureLog
 
   alias OptimalEngine.Auth.{ApiKey, Bootstrap}
+  alias OptimalEngine.TestSupport.KeyGrantsBackfill
 
   @tenant "default"
 
@@ -94,6 +95,28 @@ defmodule OptimalEngine.Auth.BootstrapTest do
     # Marked, so the next boot is silent and changes nothing.
     assert capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(root) end) == ""
     assert {:ok, ^key} = ApiKey.verify(token)
+  end
+
+  test "the key grant backfill leaves a root key for the boot, which gives it the wildcard" do
+    token = token()
+    id = id_of(token)
+    root = env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"})
+    assert :ok = Bootstrap.run(root)
+
+    :ok =
+      sql!(
+        "UPDATE api_keys SET metadata = json_remove(metadata, '$.allowed_security_labels', '$.allowed_partitions', '$.grants_initialized') WHERE id = ?1",
+        [id]
+      )
+
+    # An upgrade runs the migrations when the Store opens, and the boot after.
+    :ok = KeyGrantsBackfill.apply_to_stored_key(id)
+    assert {:ok, untouched} = ApiKey.verify(token)
+    assert untouched.metadata == %{"source" => "bootstrap"}
+
+    assert :ok = Bootstrap.run(root)
+    assert {:ok, key} = ApiKey.verify(token)
+    assert key.metadata == @root_grants
   end
 
   test "grants the operator narrowed are left as they are, including none" do

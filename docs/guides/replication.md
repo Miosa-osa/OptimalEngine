@@ -228,6 +228,10 @@ A key minted without `allowed_security_labels` or `allowed_partitions` gets none
 A minter can only give grants it holds (a minter that holds `"*"` can give any).
 For any other key, give the labels it should read.
 The recommended default for a machine key is `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`: it reads rows labelled public, internal or confidential and rows with no label, and does not read restricted rows, rows with a label of their own (`private`, a team name) or partitioned rows.
+Migration 85 gives that default, once, to every live key minted before grants existed (a key whose metadata has neither field), and marks it `grants_backfilled`.
+It narrows those keys: until the read routes followed grants they read everything.
+It leaves alone a key that has either field (an empty list included), a revoked key and the root bootstrap key, which holds `"*"`.
+A key minted after the upgrade is not covered: pass its grants when you mint it.
 
 An answer says what was left out.
 Each of these routes returns `withheld` (how many items were not shown) and `complete` (false when any item was left out or, for conflicts, redacted); the export of a workspace counts its signals, memories and wiki pages together.
@@ -237,8 +241,16 @@ The ledger route skips what the data-class ceiling holds and what the key may no
 An export of a store that cannot be read is a `500`, and a read the gate could not make is a `503`, never a partial answer.
 An anonymous local caller (no key, authentication not required) is the trusted operator and sees everything.
 
-**Not covered yet.** These routes still answer by the access lists (or not at all) and not by the labels and partitions of a keyed caller: `GET /api/memory`, `GET /api/memory/:id`, `GET /api/signals/:id`, `GET /api/wiki/:slug`, and the labels on `GET /api/search` and `GET /api/grep` (which apply the access lists only).
-A key with `read` reaches them whatever its grants. Do not rely on a key's label grants as a boundary until they follow.
+### What a read key sees of single records, lists and searches
+
+The same two rules apply to `GET /api/memory`, `GET /api/memory/:id`, `GET /api/signals/:id`, `GET /api/wiki/:slug`, `GET /api/search` and `GET /api/grep`.
+A record the key may not see is a `404`, the same answer as a record that is not there.
+A list, a search or a grep leaves out what the key may not see, says how many it left out in `withheld`, and sets `complete` to false when there were any.
+A search or grep decides for each hit from the row it came from (a document, a memory, a chunk), so a chunk of a restricted document is not found by a key without the label.
+`pagination.total` of the memory list counts the memories of the page query before the key's grants are applied; it names no content.
+
+**Not covered yet.** These routes also return row text, and a key with `read` still reaches them whatever its grants: the version and relation lists of a memory (`/api/memory/:id/versions`, `/relations`), the Memory Core reads (`/api/memory-core/claims`, `/claims/:id`, `/claim-review`, `/active-pools/:id`), the entity routes (`/api/entities/*`), the graph routes (`/api/graph*`, `/api/optimal/graph`), and the wiki list, contradictions and stale lists (`/api/wiki`, `/api/wiki/contradictions`, `/api/wiki/stale`).
+Do not rely on a key's label grants as a boundary for a workspace until these follow.
 
 Limits worth knowing:
 

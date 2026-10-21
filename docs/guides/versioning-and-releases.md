@@ -21,7 +21,7 @@ retrieval and projection component versions
 Read it from `GET /api/version`.
 The lightweight `GET /api/health` and `GET /api/status` responses include the same identity.
 
-The current tracked contract is application `0.3.8`, API `v1`, contract schema `1`, expected migration `84`.
+The current tracked contract is application `0.3.8`, API `v1`, contract schema `1`, expected migration `85`.
 [engine-contract.json](../../engine-contract.json) supplies repository, schema, and capability metadata to [Version.info/0](../../lib/optimal_engine/version.ex) at compilation.
 [test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
 The runner applies every migration whose version is not yet recorded, but `expected_migration` and the replication gate compare the highest number, so two Engines that both report the same number must have applied the same set.
@@ -93,6 +93,7 @@ Some migrations need one operator step after the upgraded Engine has booted.
 | 82, the ledger rows migration 81 moved keep a colon in their id | No step. The boot log says how many ledger rows were re-id'd and deleted (`[Migrations] 082 data: ...`). |
 | 83, graph edges record who asserted them | No step. The first boot reads every `child_of` and `links_to` edge in `graph_edges` once, with a lookup of each end in `contexts`, to give the Notion importer the edges it wrote before asserters were recorded; on a store with many such edges the boot takes longer before `/api/health` answers, so time it on a copy of the store first. |
 | 84, indexes for the maintenance windows | No step. The first boot builds three indexes (`chunks`, `contexts` and `claims` by workspace and id) before `/api/health` answers; take a backup, time a boot on a copy of the store first, and allow for it in the health-check timeout. |
+| 85, default grants for the keys minted without any | No step. The first boot gives every live key whose metadata has neither `allowed_security_labels` nor `allowed_partitions` the grants `["public", "internal", "confidential"]` and no partition, and marks it `grants_backfilled`; the boot log says how many (`[Migrations] 085 data: ..., rows changed: <n>`) and names none. It only narrows: such a key read everything before the read routes followed grants, and now reads no restricted row, no row with a label of its own and no partitioned row, until its grants are edited. A key that has either field (an empty list included), a revoked key and the root bootstrap key (which holds `"*"`) are left as they are. A key minted after the upgrade still needs its grants in the request that mints it, so a platform that mints keys passes `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`. |
 
 ### Graph edges upgrade
 
@@ -145,7 +146,7 @@ CI rejects a release tag that does not exactly match the application version.
 
 The Store applies pending migrations when it opens, in order, before the API answers.
 Each migration runs in one transaction together with the `schema_migrations` row that records it.
-The failed migration leaves no trace: when a statement fails, everything that migration wrote is rolled back, its version stays unrecorded, and `migration <nnn> failed and was rolled back: <cause>` is raised with the number zero-padded, for example `migration 085` in a release whose last real migration is 084.
+The failed migration leaves no trace: when a statement fails, everything that migration wrote is rolled back, its version stays unrecorded, and `migration <nnn> failed and was rolled back: <cause>` is raised with the number zero-padded, for example `migration 086` in a release whose last real migration is 085.
 The Store then does not open and the release exits without answering.
 Migrations before the failed one in the same boot stay applied.
 A release that adds several migrations can therefore leave a store between releases, and the previous release is not guaranteed to read it.

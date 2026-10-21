@@ -261,7 +261,7 @@ defmodule OptimalEngine.Batch do
           workspace_id,
           "wiki_pages",
           pages,
-          &wiki_row/1,
+          &ReadScope.wiki_row/1,
           &"wiki:#{&1.slug}:#{&1.audience}"
         )
 
@@ -403,19 +403,6 @@ defmodule OptimalEngine.Batch do
       %ReadScope{tenant_id: tenant_id} -> {tenant_id, Keyword.get(opts, :workspace_id, "default")}
       nil -> Graph.scope(opts)
     end
-  end
-
-  # A wiki page as the columns the lineage reads it by.
-  defp wiki_row(page) do
-    %{
-      "tenant_id" => page.tenant_id,
-      "workspace_id" => page.workspace_id,
-      "slug" => page.slug,
-      "audience" => page.audience,
-      "version" => page.version,
-      "frontmatter" => page.frontmatter,
-      "body" => page.body
-    }
   end
 
   defp export_workspace_config(workspace_id) do

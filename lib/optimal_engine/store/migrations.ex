@@ -149,7 +149,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_planted_ledger_keys(),
       migration_moved_ledger_ids(),
       migration_graph_edge_asserted_by(),
-      migration_workspace_id_order_indexes()
+      migration_workspace_id_order_indexes(),
+      migration_key_grants_backfill()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -703,6 +704,60 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_contexts_workspace_id ON contexts(workspace_id, id)"},
        {"idx_claims_workspace_id",
         "CREATE INDEX IF NOT EXISTS idx_claims_workspace_id ON claims(workspace_id, id)"}
+     ]}
+  end
+
+  # A key minted before label and partition grants existed has none, and the
+  # read routes (retrieval, exports, conflicts, the ledger, memory, signal, wiki,
+  # search, grep) show a key only what its grants cover, so after an upgrade it
+  # reads only rows that carry no label and no partition. This gives each such
+  # key the grants a machine key should hold: `allowed_security_labels` of
+  # public, internal and confidential, no partition, and a `grants_backfilled`
+  # marker. It only narrows: those keys read everything until the routes follow
+  # grants, and with these they lose restricted rows, custom labels and
+  # partitions; widen a key by editing its grants, as before.
+  #
+  # Left as they are: a key that has either grant field (a list, `[]` for none,
+  # `"*"`, even null), a key already marked, a revoked key, the operator's root
+  # bootstrap key (source bootstrap with a `*` or `admin` scope), which holds
+  # `"*"` once the boot has registered it (Auth.Bootstrap), and a key whose
+  # metadata is not a JSON object, which no statement can add a field to. A key
+  # minted after this migration still needs its grants in the request that
+  # mints it.
+  #
+  # Safe to run again: a key it has changed carries the fields it looks for. The
+  # data step logs how many keys it changed and never which. api_keys is not a
+  # replicated table, and the statement is SQLite only (json_set, json_type,
+  # json_each); the PostgreSQL baseline is this migration while no PostgreSQL
+  # store is deployed, so it needs no step there. The version is provisional,
+  # like the ones above.
+  @key_grants_backfill_version 85
+
+  defp migration_key_grants_backfill do
+    {@key_grants_backfill_version, "api keys: the default grants for keys minted without any",
+     [
+       {"data: give the keys without grants the default label grants and no partition",
+        """
+        UPDATE api_keys
+        SET metadata = json_set(metadata,
+                                '$.allowed_security_labels', json('["public","internal","confidential"]'),
+                                '$.allowed_partitions', json('[]'),
+                                '$.grants_backfilled', json('true'))
+        WHERE revoked_at IS NULL
+          AND CASE
+                WHEN json_valid(metadata) IS NOT 1 THEN 0
+                WHEN json_type(metadata) != 'object' THEN 0
+                WHEN json_type(metadata, '$.allowed_security_labels') IS NOT NULL THEN 0
+                WHEN json_type(metadata, '$.allowed_partitions') IS NOT NULL THEN 0
+                WHEN json_type(metadata, '$.grants_backfilled') IS NOT NULL THEN 0
+                WHEN json_extract(metadata, '$.source') = 'bootstrap'
+                     AND EXISTS (SELECT 1
+                                 FROM json_each(CASE WHEN json_valid(api_keys.scopes)
+                                                     THEN api_keys.scopes ELSE '[]' END) scope
+                                 WHERE scope.value IN ('*', 'admin')) THEN 0
+                ELSE 1
+              END = 1
+        """}
      ]}
   end
 

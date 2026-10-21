@@ -19,6 +19,7 @@ defmodule OptimalEngine.Retrieval.Grep do
 
       %{
         uri:      "optimal://nodes/operation-weekly-review/pricing.md",
+        context_id: "ctx-...",   chunk_id: "chk-..." | nil,   # what matched
         slug:     "operation-weekly-review/pricing",  # context slug / node
         scale:    :section,              # document | section | paragraph | chunk
         intent:   :record_fact,          # one of the 10 canonical intent values
@@ -74,6 +75,8 @@ defmodule OptimalEngine.Retrieval.Grep do
 
   @type match :: %{
           uri: String.t() | nil,
+          context_id: String.t(),
+          chunk_id: String.t() | nil,
           slug: String.t(),
           scale: atom(),
           intent: atom() | nil,
@@ -194,6 +197,8 @@ defmodule OptimalEngine.Retrieval.Grep do
           [
             %{
               uri: uri,
+              context_id: ctx.id,
+              chunk_id: nil,
               slug: node,
               scale: :document,
               intent: nil,
@@ -219,6 +224,8 @@ defmodule OptimalEngine.Retrieval.Grep do
             [
               %{
                 uri: uri,
+                context_id: ctx.id,
+                chunk_id: chunk.id,
                 slug: node,
                 scale: atomize(Map.get(chunk, :scale), :chunk),
                 intent: atomize(Map.get(chunk, :intent), nil),
