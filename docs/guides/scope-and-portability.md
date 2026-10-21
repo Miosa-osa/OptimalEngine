@@ -127,11 +127,12 @@ bin/optimal rpc 'OptimalEngine.DataSteward.relabel_bare_scope("shared-notes", te
 A row moves when its provenance names the tenant, and only then:
 
 - a claim whose source package is the tenant's, in that workspace;
-- a context that intake derived from such a package (the `intake.process` entry of the derivation ledger names the package and the context);
-- the chunks, vectors and entities of those contexts;
-- the graph edges with one of those contexts or claims at an end (a `default` copy of an edge the tenant already has is dropped).
+- a context that intake derived from such a package (the `intake.process` entry of the derivation ledger names the package and the context), unless another tenant's intake entry names it too: the same connector item on a shared id is one row, and whose it is cannot be told;
+- the chunks, chunk embeddings, vectors, entities and decisions of those contexts;
+- the graph edges with one of those contexts or claims at an end, unless the other end is a context or a claim that stays (a `default` copy of an edge the tenant already has is dropped).
 
 A row with no source package (a batch import of signals, a file indexed on its own), a row a package of another tenant names, a row that is not `default`, and an edge between two entities stay as they are.
+The relabel is appended to the tenant's evidence chain as a signed `workspace.relabeled` entry (workspace, who, and what moved) in the same transaction.
 Run the graph backfill afterwards (`POST /api/maintenance/graph/backfill`) to write the entity edges for each context's tenant.
 The id must be bare and unregistered (a registered workspace's owner decides what its rows are), the tenant must exist and not be `default`, and the answer is `nothing_to_relabel` when the tenant has nothing under the id.
 The result counts each kind of row.
