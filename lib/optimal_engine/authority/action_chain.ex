@@ -457,10 +457,14 @@ defmodule OptimalEngine.Authority.ActionChain do
         %{}
 
       _ ->
-        marks = Enum.map_join(0..(length(ids) - 1), ", ", &"?#{&1 + 2}")
-
-        tenant_id
-        |> Evidence.where("id IN (#{marks})", ids)
+        # In groups, so a long chain stays well inside the number of values
+        # one statement may bind.
+        ids
+        |> Enum.chunk_every(500)
+        |> Enum.flat_map(fn group ->
+          marks = Enum.map_join(0..(length(group) - 1), ", ", &"?#{&1 + 2}")
+          Evidence.where(tenant_id, "id IN (#{marks})", group)
+        end)
         |> Map.new(&{&1["id"], &1})
     end
   end

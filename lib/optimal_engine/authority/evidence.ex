@@ -23,6 +23,7 @@ defmodule OptimalEngine.Authority.Evidence do
   alias OptimalEngine.Store
 
   @genesis String.duplicate("0", 64)
+  @where_page 1_000
 
   @kinds ~w(grant.issued grant.narrowed grant.admitted grant.denied grant.checkpoint
             grant.suspended grant.restored grant.revoked action.completed action.withheld
@@ -154,21 +155,35 @@ defmodule OptimalEngine.Authority.Evidence do
   end
 
   @doc """
-  Entries matching a SQL condition over the evidence columns (`kind`, `jti`,
-  `subject`, `workspace_id`, `detail`), oldest first. Parameters start at
-  `?2`; `?1` is the tenant. For internal callers only: the condition is code,
-  values are always bound.
+  Every entry matching a SQL condition over the evidence columns (`kind`,
+  `jti`, `subject`, `workspace_id`, `detail`), oldest first. Parameters start
+  at `?2`; `?1` is the tenant. For internal callers only: the condition is
+  code, values are always bound.
+
+  It reads in pages of #{@where_page} by sequence number and returns all of
+  them, so a caller asking for the entries of a long chain gets every one.
   """
   @spec where(String.t(), String.t(), [term()]) :: [map()]
-  def where(tenant_id, condition, params) do
+  def where(tenant_id, condition, params), do: where_page(tenant_id, condition, params, 0, [])
+
+  defp where_page(tenant_id, condition, params, after_seq, acc) do
     {:ok, rows} =
       Store.raw_query(
         select_sql() <>
-          " WHERE tenant_id = ?1 AND (" <> condition <> ") ORDER BY tenant_seq ASC LIMIT 1000",
-        [tenant_id | params]
+          " WHERE tenant_id = ?1 AND (" <>
+          condition <>
+          ") AND tenant_seq > ?#{length(params) + 2} ORDER BY tenant_seq ASC LIMIT #{@where_page}",
+        [tenant_id | params] ++ [after_seq]
       )
 
-    Enum.map(rows, &to_entry/1)
+    entries = Enum.map(rows, &to_entry/1)
+    acc = Enum.reverse(entries, acc)
+
+    if length(entries) < @where_page do
+      Enum.reverse(acc)
+    else
+      where_page(tenant_id, condition, params, List.last(entries)["seq"], acc)
+    end
   end
 
   @doc """
