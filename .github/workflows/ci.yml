@@ -97,7 +97,7 @@ jobs:
         run: mix run --no-start scripts/check_release_version.exs
 
       - name: Run tests
-        run: mix test
+        run: mix test --warnings-as-errors
         env:
           MIX_ENV: test
 
