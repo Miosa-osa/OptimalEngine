@@ -57,6 +57,18 @@ defmodule Mix.Tasks.Optimal.Context.Sweep do
               "#{verb} #{length(summary.offenders)}."
           )
 
+          if summary.skipped != [] do
+            Mix.shell().info(
+              "Skipped #{length(summary.skipped)} (nothing was changed for them; run again to retry):"
+            )
+
+            Enum.each(summary.skipped, fn entry ->
+              Mix.shell().info(
+                "  #{entry.id} (#{entry.tenant_id}/#{entry.workspace_id}): #{entry.reason}"
+              )
+            end)
+          end
+
           Enum.each(summary.offenders, fn offender ->
             Mix.shell().info(
               "  #{offender.id} (#{offender.tenant_id}/#{offender.workspace_id}): #{offender.reason}"

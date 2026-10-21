@@ -1375,14 +1375,20 @@ defmodule OptimalEngine.MemoryCore.Store do
   assembled sections) and sets its `refresh_state` to `:refresh_state` (default
   `"stale"`, so the next refresh rebuilds it under its recorded envelope). The
   query, plan and recorded envelope stay. `:reason` is kept in its metadata.
+
+  Only a package still in `:expect_state` is emptied, so one that was refreshed
+  or invalidated since the caller looked at it is left alone. Returns
+  `{:ok, changed}` with the number of packages emptied (0 or 1).
   """
-  @spec scrub_context_package_content(String.t(), keyword()) :: :ok | {:error, term()}
-  def scrub_context_package_content(context_package_id, opts \\ [])
+  @spec scrub_context_package_content(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def scrub_context_package_content(context_package_id, opts)
       when is_binary(context_package_id) and is_list(opts) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
     workspace_id = Keyword.get(opts, :workspace_id, "default")
     reason = to_string(Keyword.get(opts, :reason, "scrubbed"))
     refresh_state = to_string(Keyword.get(opts, :refresh_state, "stale"))
+    expect_state = to_string(Keyword.fetch!(opts, :expect_state))
 
     sql = """
     UPDATE context_packages
@@ -1402,7 +1408,7 @@ defmodule OptimalEngine.MemoryCore.Store do
         metadata =
           json_set(
             json_remove(
-              COALESCE(NULLIF(metadata, ''), '{}'),
+              CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
               '$.sections', '$.asset_extraction_links', '$.workflow_links',
               '$.skill_package_links'
             ),
@@ -1411,14 +1417,19 @@ defmodule OptimalEngine.MemoryCore.Store do
         refresh_state = ?5,
         invalidation_reason = CASE WHEN ?5 = 'stale' THEN ?4 ELSE invalidation_reason END,
         updated_at = datetime('now')
-    WHERE tenant_id = ?1 AND workspace_id = ?2 AND id = ?3
+    WHERE tenant_id = ?1 AND workspace_id = ?2 AND id = ?3 AND refresh_state = ?6
     """
 
-    case Store.raw_execute(sql, [tenant_id, workspace_id, context_package_id, reason, refresh_state]) do
-      {:ok, _count} -> :ok
-      :ok -> :ok
-      {:error, _} = error -> error
-    end
+    Store.transaction(fn txn ->
+      Store.txn_execute(txn, sql, [
+        tenant_id,
+        workspace_id,
+        context_package_id,
+        reason,
+        refresh_state,
+        expect_state
+      ])
+    end)
   end
 
   @spec insert_workflow_trace(map()) :: :ok | {:error, term()}

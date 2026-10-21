@@ -318,7 +318,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     sections =
       assemble_sections(
         retrieval_package,
-        Keyword.get(opts, :token_budget, @default_token_budget)
+        Keyword.get(opts, :token_budget, @default_token_budget),
+        Keyword.get(opts, :omit_query, false)
       )
 
     package =
@@ -434,8 +435,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     workspace_id = Keyword.get(opts, :workspace_id)
 
     with {:ok, stale_package} <- get_context_package(context_package_id, tenant_id, workspace_id),
-         :ok <- ensure_refreshable(stale_package, opts),
          :ok <- ensure_may_refresh(stale_package, opts),
+         :ok <- ensure_refreshable(stale_package, opts),
          {:ok, query} <- original_query(stale_package),
          {:ok, refresh_opts} <- refresh_opts_from_package(stale_package, opts),
          {:ok, refreshed_package} <- retrieve(query, refresh_opts),
@@ -625,9 +626,11 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
          allowed_security_labels: allowed_security_labels,
          limit:
            Keyword.get(opts, :limit) || map_get(package.retrieval_plan, :limit) || @default_limit,
+         omit_query: hide_query?(package, opts),
          metadata:
            Map.merge(Keyword.get(opts, :metadata, %{}), %{
-             refreshed_from_context_package_id: package.id
+             refreshed_from_context_package_id: package.id,
+             query_owner_actor_id: query_owner(package)
            })
        ]}
     end
@@ -686,9 +689,26 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
-  defp owner?(package, opts) do
-    actor = Keyword.get(opts, :actor_id) || Keyword.get(opts, :requesting_actor_id)
-    is_binary(actor) and actor != "" and actor == package.requesting_actor_id
+  # Whoever requested this package may refresh it.
+  defp owner?(package, opts), do: actor(opts) == package.requesting_actor_id and actor(opts) != nil
+
+  # Whoever first asked the query. A refresh makes a new package requested by
+  # whoever refreshed it, so the query's owner is carried in the metadata: a
+  # reader that merely covers the original does not become its owner.
+  defp query_owner(package),
+    do: map_get(package.metadata, :query_owner_actor_id) || package.requesting_actor_id
+
+  defp query_owner?(package, opts),
+    do: actor(opts) != nil and actor(opts) == query_owner(package)
+
+  # A receiver that did not ask the query is not shown it.
+  defp hide_query?(package, opts), do: receiver?(opts) and not query_owner?(package, opts)
+
+  defp actor(opts) do
+    case Keyword.get(opts, :actor_id) || Keyword.get(opts, :requesting_actor_id) do
+      actor when is_binary(actor) and actor != "" -> actor
+      _ -> nil
+    end
   end
 
   # Whether what the receiver reads includes everything the stale package's
@@ -738,11 +758,12 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
-  # What a receiver that is not the package's requesting actor is handed back:
-  # the plan keys that restate the original reader's query, and its stored
-  # copy, are left out. The stored package keeps them for the next refresh.
+  # What a receiver that did not ask the query is handed back: the plan keys
+  # that restate it, and its stored copy, are left out (the sections were
+  # built without it, see `:omit_query`). The stored package keeps the query
+  # for the next refresh.
   defp receiver_view(refreshed, stale, opts) do
-    if receiver?(opts) and not owner?(stale, opts) do
+    if hide_query?(stale, opts) do
       %{
         refreshed
         | retrieval_plan:
@@ -1747,8 +1768,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   # Private: section assembly (token-budget-aware tiering)
   # ---------------------------------------------------------------------------
 
-  defp assemble_sections(retrieval_package, token_budget) do
-    summary = summary_section(retrieval_package)
+  defp assemble_sections(retrieval_package, token_budget, omit_query?) do
+    summary = summary_section(retrieval_package, omit_query?)
     reconstruction = reconstruction_section(retrieval_package, div(token_budget * 3, 10))
     remaining = max(token_budget - estimate_tokens(summary) - estimate_tokens(reconstruction), 0)
     fact_budget = div(remaining * 6, 10)
@@ -1786,13 +1807,13 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
-  defp summary_section(retrieval_package) do
+  defp summary_section(retrieval_package, omit_query?) do
     filtered = retrieval_package.filtered_summary
+    query_line = if omit_query?, do: "", else: "Query: #{retrieval_package.query}\n"
 
     """
     # Context Package
-    Query: #{retrieval_package.query}
-    Workspace: #{retrieval_package.workspace_id}
+    #{query_line}Workspace: #{retrieval_package.workspace_id}
     Facts: #{filtered.returned_facts} returned of #{filtered.candidate_facts} candidates
     Memory objects: #{filtered.returned_memory_objects} returned of #{filtered.candidate_memory_objects} candidates
     Policy-excluded objects: #{filtered.redacted_or_filtered_objects}
