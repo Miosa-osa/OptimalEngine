@@ -222,16 +222,18 @@ defmodule OptimalEngine.Authority.Admission do
   defp bound_workspace(claims, optimal, request, "local") do
     as_written = {optimal["workspace"], optimal["resource"]}
 
+    ids =
+      Enum.reject(
+        [optimal["workspace"], WorkspaceRekeys.resource_workspace(optimal["resource"])],
+        &is_nil/1
+      )
+
+    # The issuance is looked up only when a repair could reach the grant's
+    # workspace at all, which is almost never.
     with true <- WorkspaceRekeys.any?(request.tenant_id),
+         [_ | _] = rekeys <- WorkspaceRekeys.list(request.tenant_id, near: ids),
          jti when is_binary(jti) <- claims["jti"],
-         seq when is_integer(seq) <- issued_seq(request.tenant_id, jti),
-         ids =
-           Enum.reject(
-             [optimal["workspace"], WorkspaceRekeys.resource_workspace(optimal["resource"])],
-             &is_nil/1
-           ),
-         [_ | _] = rekeys <-
-           WorkspaceRekeys.list(request.tenant_id, near: ids, after: seq) do
+         seq when is_integer(seq) <- issued_seq(request.tenant_id, jti) do
       renamed = {
         WorkspaceRekeys.current(rekeys, optimal["workspace"], seq, [:rename]),
         WorkspaceRekeys.current_resource(rekeys, optimal["resource"], seq, [:rename])

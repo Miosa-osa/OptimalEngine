@@ -167,7 +167,7 @@ defmodule OptimalEngine.Store.Migrations do
   # number on main plus one, because the schema gate (`expected_migration`,
   # and the replication gate) compares the highest number. Change it here and
   # in the pins listed in docs/guides/versioning-and-releases.md.
-  @authority_evidence_kind_index_version 76
+  @authority_evidence_kind_index_version 73
 
   # Readers that follow one kind of entry (the workspace id repairs an action
   # chain is verified against, `Evidence.list(kind: ...)`) read it by tenant

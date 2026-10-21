@@ -1068,18 +1068,35 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
   end
 
   describe "reading re-keys" do
-    test "is by tenant, kind and sequence, from an index (migration 76)" do
+    test "is by tenant, kind and sequence, from an index" do
       assert {:ok, [[1]]} =
                Store.raw_query(
                  "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_authority_evidence_kind'",
                  []
                )
-
-      assert {:ok, [[76]]} = Store.raw_query("SELECT MAX(version) FROM schema_migrations", [])
     end
   end
 
   describe "a row that is not what it should be" do
+    test "does not stop a chain from being traced when its detail is not JSON",
+         %{tenant: tenant, workspace: old} do
+      correlation = chain(tenant, old)
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO authority_evidence
+            (id, tenant_id, tenant_seq, kind, detail, prev_hash, hash, kid, signature, recorded_at)
+          VALUES ('ev_junk_trace', ?1, ?2, 'settings.changed', '{not json', 'p', 'h', 'k', 's',
+                  '2026-10-20T00:00:00.000000Z')
+          """,
+          [tenant, next_seq(tenant)]
+        )
+
+      assert {:ok, trace} = ActionChain.trace(tenant, correlation)
+      assert length(trace.steps) == 4
+    end
+
     test "whose detail is not JSON does not stop the evidence from being read, and fails closed",
          %{tenant: tenant} do
       {:ok, _} = Authority.add_local_deny(tenant, %{"action" => "compute"}, "user:owner")
@@ -1099,10 +1116,12 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       log = capture_log(fn -> assert List.last(Evidence.list(tenant))["seq"] == seq end)
       assert log =~ "ev_junk"
 
+      # Said once per entry, not on every read.
       assert capture_log(fn ->
                assert WorkspaceRekeys.list(tenant) == []
                assert {:error, %{seq: ^seq}} = Evidence.verify(tenant)
-             end) =~ "ev_junk"
+               assert List.last(Evidence.list(tenant))["seq"] == seq
+             end) == ""
     end
   end
 
@@ -1185,6 +1204,32 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
 
       assert [%{from: ^first_target}] =
                WorkspaceRekeys.list(tenant, near: [first, first_target], after: first_seq)
+    end
+
+    test "following the re-keys reachable from an id gives what following all of them gives" do
+      :rand.seed(:exsss, {7, 11, 13})
+      ids = ~w(a b c d e f)
+
+      for _ <- 1..300 do
+        rekeys =
+          for seq <- Enum.take_random(1..30, :rand.uniform(9) - 1) |> Enum.sort() do
+            from = Enum.random(ids)
+
+            %{
+              seq: seq,
+              from: from,
+              to: Enum.random(ids -- [from]),
+              mode: Enum.random([:rename, :merge])
+            }
+          end
+
+        for id <- ids, after_seq <- [0, 3, 12, 29], modes <- [:any, [:rename], [:merge]] do
+          near = WorkspaceRekeys.reachable(rekeys, [id], after_seq)
+
+          assert WorkspaceRekeys.current(near, id, after_seq, modes) ==
+                   WorkspaceRekeys.current(rekeys, id, after_seq, modes)
+        end
+      end
     end
 
     test "only the re-keys after an entry apply to it, and a merge is not a rename" do

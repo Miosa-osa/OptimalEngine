@@ -487,9 +487,10 @@ defmodule OptimalEngine.Authority.Evidence do
   end
 
   # A row whose detail is not JSON (written by hand, or damaged) reads as an
-  # empty detail and is logged. Its hash then no longer matches, so it fails
-  # verification like any other changed entry, instead of stopping every
-  # reader of the chain with an exception.
+  # empty detail and is logged, once per entry for the life of the node, not on
+  # every read. Its hash then no longer matches, so it fails verification like
+  # any other changed entry, instead of stopping every reader of the chain
+  # with an exception.
   defp decode_detail(nil, _tenant, _seq, _id), do: %{}
 
   defp decode_detail(detail, tenant, seq, id) do
@@ -498,11 +499,20 @@ defmodule OptimalEngine.Authority.Evidence do
         decoded
 
       {:error, _reason} ->
-        Logger.warning(
-          "[Evidence] entry #{id} (seq #{seq}) of #{tenant} has a detail that is not JSON; reading it as empty"
-        )
-
+        warn_once(tenant, seq, id)
         %{}
+    end
+  end
+
+  defp warn_once(tenant, seq, id) do
+    key = {__MODULE__, :unreadable_detail, tenant, id}
+
+    if :persistent_term.get(key, nil) == nil do
+      :persistent_term.put(key, true)
+
+      Logger.warning(
+        "[Evidence] entry #{id} (seq #{seq}) of #{tenant} has a detail that is not JSON; reading it as empty"
+      )
     end
   end
 

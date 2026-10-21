@@ -398,12 +398,17 @@ defmodule OptimalEngine.Authority.ActionChain do
     }
   end
 
+  # A field of the detail column in SQL, for a row whose detail is not JSON
+  # (written by hand): it reads as null instead of failing the whole query.
+  defp detail_field(name),
+    do: "CASE WHEN json_valid(detail) THEN json_extract(detail, '$.#{name}') END"
+
   # The correlation id of reported steps that name a request id or grant id.
   defp correlation_for(tenant_id, id) do
     case Store.raw_query(
            """
            SELECT correlation_id FROM authority_action_steps
-           WHERE tenant_id = ?1 AND (json_extract(detail, '$.jti') = ?2 OR json_extract(detail, '$.request_id') = ?2)
+           WHERE tenant_id = ?1 AND (#{detail_field("jti")} = ?2 OR #{detail_field("request_id")} = ?2)
            ORDER BY occurred_at LIMIT 1
            """,
            [tenant_id, id]
@@ -429,7 +434,7 @@ defmodule OptimalEngine.Authority.ActionChain do
     requests =
       Evidence.where(
         tenant_id,
-        "kind <> 'agent_action.step' AND (json_extract(detail, '$.request_id') IN (#{marks}) OR json_extract(detail, '$.approval') IN (#{marks}) OR jti IN (#{marks}))",
+        "kind <> 'agent_action.step' AND (#{detail_field("request_id")} IN (#{marks}) OR #{detail_field("approval")} IN (#{marks}) OR jti IN (#{marks}))",
         ids
       )
 

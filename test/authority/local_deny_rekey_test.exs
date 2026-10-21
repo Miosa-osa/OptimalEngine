@@ -216,6 +216,32 @@ defmodule OptimalEngine.Authority.LocalDenyRekeyTest do
       assert LocalDeny.active(tenant) == []
     end
 
+    test "whose detail is not JSON does not stop a decision, and the deny still follows a repair",
+         %{tenant: tenant, workspace: old} do
+      deny!(tenant, %{"workspace_id" => old, "resource" => "optimal://#{old}/**"})
+      target = repair_id(tenant, old, "ops-junk")
+
+      {:ok, [[seq]]} =
+        Store.raw_query(
+          "SELECT COALESCE(MAX(tenant_seq), 0) + 1 FROM authority_evidence WHERE tenant_id = ?1",
+          [tenant]
+        )
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO authority_evidence
+            (id, tenant_id, tenant_seq, kind, detail, prev_hash, hash, kid, signature, recorded_at)
+          VALUES ('ev_junk_deny', ?1, ?2, 'local_deny.added', '{not json', 'p', 'h', 'k', 's',
+                  '2026-10-20T00:00:00.000000Z')
+          """,
+          [tenant, seq]
+        )
+
+      assert denied?(tenant, target)
+      assert denied?(tenant, old)
+    end
+
     test "that a forged duplicate repeats at a later position does not stop repairs reaching the deny",
          %{tenant: tenant, workspace: old} do
       deny = deny!(tenant, %{"workspace_id" => old, "resource" => "optimal://#{old}/**"})

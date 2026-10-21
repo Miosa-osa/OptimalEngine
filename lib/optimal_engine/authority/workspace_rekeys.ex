@@ -132,7 +132,7 @@ defmodule OptimalEngine.Authority.WorkspaceRekeys do
       )
     end
 
-    shaped = for entry <- entries, %{} = rekey <- [shape(entry)], do: {entry, rekey}
+    shaped = for entry <- entries, %{} = rekey <- [shape(entry)], do: Map.put(rekey, :entry, entry)
 
     shaped =
       case Keyword.get(opts, :near) do
@@ -140,30 +140,32 @@ defmodule OptimalEngine.Authority.WorkspaceRekeys do
         ids -> reachable(shaped, ids, Keyword.get(opts, :after, 0))
       end
 
-    for {entry, rekey} <- shaped, reliable?(trust, tenant_id, entry, rekey), do: rekey
+    for rekey <- shaped, reliable?(trust, tenant_id, rekey.entry, rekey) do
+      Map.delete(rekey, :entry)
+    end
   end
 
-  # The re-keys after `after_seq` that start at one of `ids` or at where an
-  # earlier one of them ended, in the order they were recorded.
-  defp reachable(shaped, ids, after_seq) do
-    candidates = Enum.filter(shaped, fn {_entry, rekey} -> rekey.seq > after_seq end)
-
-    candidates
+  @doc """
+  The re-keys after `after_seq` that start at one of `ids` or at where an
+  earlier one of them ended (whatever their mode), in the order they were
+  recorded. `current/4` over this list gives what it gives over all of
+  `rekeys`, for those ids and that position.
+  """
+  @spec reachable([map()], [String.t()], non_neg_integer()) :: [map()]
+  def reachable(rekeys, ids, after_seq) do
+    rekeys
+    |> Enum.filter(&(&1.seq > after_seq))
     |> reach(MapSet.new(ids), [])
-    |> Enum.sort_by(fn {_entry, rekey} -> rekey.seq end)
+    |> Enum.sort_by(& &1.seq)
   end
 
   defp reach(candidates, ids, reached) do
-    case Enum.split_with(candidates, fn {_entry, rekey} -> rekey.from in ids end) do
+    case Enum.split_with(candidates, &(&1.from in ids)) do
       {[], _rest} ->
         reached
 
       {hit, rest} ->
-        reach(
-          rest,
-          Enum.reduce(hit, ids, fn {_e, r}, acc -> MapSet.put(acc, r.to) end),
-          hit ++ reached
-        )
+        reach(rest, Enum.reduce(hit, ids, &MapSet.put(&2, &1.to)), hit ++ reached)
     end
   end
 

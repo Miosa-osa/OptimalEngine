@@ -163,7 +163,7 @@ defmodule OptimalEngine.Authority.LocalDeny do
       Store.raw_query(
         """
         SELECT json_extract(detail, '$.deny_id'), MIN(tenant_seq) FROM authority_evidence
-        WHERE tenant_id = ?1 AND kind = 'local_deny.added'
+        WHERE tenant_id = ?1 AND kind = 'local_deny.added' AND json_valid(detail)
         GROUP BY json_extract(detail, '$.deny_id')
         """,
         [tenant_id]
