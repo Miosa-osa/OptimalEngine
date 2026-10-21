@@ -78,8 +78,10 @@ Another install waits for it up to `OPTIMAL_CLIENT_LOCK_WAIT` seconds (default 6
 A stale lock is taken over with a warning: one older than 15 minutes, whoever holds it; one whose holder ran on this host before the last boot; and one whose holder is on this host, boot and pid namespace and is provably not running.
 A holder on another host or in another pid namespace, or one whose owner cannot be read, counts as alive until the 15 minutes pass; `OPTIMAL_CLIENT_BREAK_LOCK=1` takes over any lock.
 A lock is removed, by a takeover or by its holder on the way out, only under a short second lock, `<prefix>/.install.lock.takeover`.
-Under it the lock is read again and removed only while it is still the one judged, so a takeover never removes a lock another install has just taken, and two installs never hold the prefix at once.
-A second lock older than 30 seconds was left by an install killed while holding it, and is cleared.
+Under it the lock is read again and removed only while it is still the one judged and the second lock is still the install's own, so a takeover never removes a lock another install has just taken, and two installs never hold the prefix at once.
+A second lock older than 30 seconds was left by an install killed while holding it.
+It is cleared by moving it aside and removing it only if what moved is the one judged old; a fresh one moved by mistake is put back.
+An install waits about three seconds for the second lock, and a wait for it does not count against the three takeover attempts.
 A signal (TERM, INT or HUP) between the MCP server's two renames puts the installed server back on the way out.
 A run killed outright (SIGKILL, a power cut) can leave its temporary copies, or the MCP server moved aside.
 Under the lock, the next `install` removes what runs that are provably no longer alive left, under this installer's own names only, and puts such a server back when the prefix has none; a server it cannot put back is kept, with a warning.

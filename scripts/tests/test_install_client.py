@@ -832,6 +832,50 @@ class LockTests(InstallClientTestCase):
         self.lock.unlink()
         self.assertEqual(self.leftovers(), [])
 
+    def test_clearing_a_stale_mutex_never_takes_a_fresh_one_from_its_holder(self):
+        # A stale lock and a stale mutex are both there. Right after this install reads the
+        # stale mutex, another install clears it and takes a fresh one. Clearing the stale
+        # mutex must not remove the fresh one: its holder keeps it, so this install cannot
+        # take the lock over meanwhile, and waits.
+        mutex = self.prefix / '.install.lock.takeover'
+        stale_lock = self.owner(pid=self.dead_pid())
+        stale_mutex = f'pid={self.dead_pid()} at={int(time.time()) - 120}'
+        fresh_mutex = f'pid={os.getpid()} at={int(time.time())}'
+        self.lock.symlink_to(stale_lock)
+        mutex.symlink_to(stale_mutex)
+        swapped = self.dir / 'swapped'
+        real_readlink = shutil.which('readlink')
+        self.fake('readlink', f'out=$("{real_readlink}" "$@") || exit $?\n'
+                              f'if [ "$out" = "{stale_mutex}" ] && [ ! -e "{swapped}" ]; then\n'
+                              f'  : >"{swapped}"; ln -s "{fresh_mutex}" "{mutex}.swap"; mv -f "{mutex}.swap" "{mutex}"\n'
+                              f'fi\nprintf "%s\\n" "$out"\n')
+        self.env['OPTIMAL_CLIENT_LOCK_WAIT'] = '2'
+        result = self.run_installer('install', check=False)
+        self.assertTrue(swapped.exists())
+        held_mutex = os.readlink(mutex) if mutex.is_symlink() else None
+        self.assertEqual(held_mutex, fresh_mutex, 'the fresh mutex was taken from its holder')
+        self.assertEqual(self.held(), stale_lock)
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        self.assertNotIn('took over', result.stderr)
+        mutex.unlink()
+        self.lock.unlink()
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_busy_mutex_does_not_use_up_the_takeover_attempts(self):
+        # A stale lock waits behind a mutex another install holds for a few seconds. Those
+        # waits are not takeover attempts: once the mutex is free, the lock is taken over.
+        mutex = self.prefix / '.install.lock.takeover'
+        self.lock.symlink_to(self.owner(pid=self.dead_pid()))
+        mutex.symlink_to(f'pid={os.getpid()} at={int(time.time())}')
+        release = threading.Timer(8, mutex.unlink)
+        release.start()
+        self.addCleanup(release.cancel)
+        self.env['OPTIMAL_CLIENT_LOCK_WAIT'] = '30'
+        result = self.run_installer('install')
+        self.assertIn(f'took over {self.lock}', result.stderr)
+        self.assertFalse(mutex.is_symlink())
+        self.assertEqual(self.leftovers(), [])
+
     def test_an_install_never_removes_a_lock_that_is_not_its_own(self):
         foreign = self.owner(pid=1, host='elsewhere')
         real_cp = shutil.which('cp')

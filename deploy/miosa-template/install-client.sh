@@ -503,15 +503,16 @@ lock_stale() {
 
 # A lock is removed, whether taken over or released, only under a second lock, the mutex
 # <prefix>/.install.lock.takeover, held for the few steps of one removal. Under it the lock
-# is read again and removed only while it is the one judged; a lock is never moved aside,
-# so there is no moment in which a fresh holder's lock is gone and another install takes
-# the prefix too. A mutex older than MUTEX_MAX_AGE seconds was left by an install killed
-# while it held it, and is cleared.
+# is read again and removed only while it is the one judged, and while the mutex is still
+# this install's; a lock is never moved aside, so there is no moment in which a fresh
+# holder's lock is gone and another install takes the prefix too. A mutex older than
+# MUTEX_MAX_AGE seconds was left by an install killed while it held it, and is cleared.
 MUTEX=$LOCK.takeover
 MUTEX_MAX_AGE=30
 MUTEX_OWNER=
 
-# mutex: takes the mutex, trying about fifty times; false when another install keeps it.
+# mutex: takes the mutex, trying for about three seconds; false when another install
+# keeps it.
 mutex() {
   MUTEX_OWNER="pid=$$ at=$(date +%s)"
   _tries=0
@@ -520,31 +521,59 @@ mutex() {
       return 0
     fi
     _tries=$((_tries + 1))
-    [ "$_tries" -lt 50 ] || return 1
-    _m=$(readlink "$MUTEX" 2>/dev/null) || continue
-    _mat=$(lock_field "$_m" at)
-    case $_mat in
-      '' | *[!0-9]*) [ -z "$(find "$MUTEX" -prune -mmin +1 2>/dev/null)" ] || rm -f "$MUTEX" ;;
-      *) [ $(($(date +%s) - _mat)) -le "$MUTEX_MAX_AGE" ] || rm -f "$MUTEX" ;;
-    esac
+    [ "$_tries" -lt 30 ] || return 1
+    if _m=$(readlink "$MUTEX" 2>/dev/null) && mutex_stale "$_m"; then
+      clear_mutex "$_m"
+    else
+      sleep 0.1 2>/dev/null || sleep 1
+    fi
   done
+}
+
+# mutex_stale OWNER: true when the mutex OWNER holds is older than MUTEX_MAX_AGE seconds.
+mutex_stale() {
+  _mat=$(lock_field "$1" at)
+  case $_mat in
+    '' | *[!0-9]*) [ -n "$(find "$MUTEX" -prune -mmin +1 2>/dev/null)" ] ;;
+    *) [ $(($(date +%s) - _mat)) -gt "$MUTEX_MAX_AGE" ] ;;
+  esac
+}
+
+# clear_mutex STALE: moves the mutex aside, under this install's own name, and removes it
+# only when what moved is STALE, the mutex judged stale. A mutex another install cleared
+# and took meanwhile is put back, so clearing a stale mutex never takes a fresh one from
+# its holder (who checks it still holds it before removing anything).
+clear_mutex() {
+  _aside=$MUTEX.stale.$$
+  mv "$MUTEX" "$_aside" 2>/dev/null || return 0
+  _moved=$(readlink "$_aside" 2>/dev/null) || _moved=
+  if [ -n "$_moved" ] && [ "$_moved" != "$1" ]; then
+    ln -sn "$_moved" "$MUTEX" 2>/dev/null || :
+  fi
+  rm -f "$_aside" || :
+}
+
+# own_mutex: true while the mutex is still this install's.
+own_mutex() {
+  [ -n "$MUTEX_OWNER" ] && [ "$(readlink "$MUTEX" 2>/dev/null)" = "$MUTEX_OWNER" ]
 }
 
 # release_mutex: removes the mutex while it is this install's own.
 release_mutex() {
-  [ -n "$MUTEX_OWNER" ] || return 0
-  [ "$(readlink "$MUTEX" 2>/dev/null)" != "$MUTEX_OWNER" ] || rm -f "$MUTEX" || :
+  if own_mutex; then rm -f "$MUTEX" || :; fi
   MUTEX_OWNER=
 }
 
 # take_over HELD [FORCE]: removes the lock judged stale, HELD being its owner, under the
-# mutex, while it is still HELD and still stale (with FORCE, while it is still HELD).
-# False when the lock changed meanwhile, or the mutex stayed held.
+# mutex, while it is still HELD and still stale (with FORCE, while it is still HELD), and
+# the mutex is still this install's. 1 when the lock changed meanwhile, 2 when the mutex
+# stayed held.
 take_over() {
-  mutex || return 1
+  mutex || return 2
   _now=$(readlink "$LOCK" 2>/dev/null) || _now=
   _taken=1
-  if [ "$_now" = "$1" ] && { [ -n "${2:-}" ] || lock_stale "$_now"; } && rm -f "$LOCK"; then
+  if [ "$_now" = "$1" ] && { [ -n "${2:-}" ] || lock_stale "$_now"; } && own_mutex &&
+    rm -f "$LOCK"; then
     _taken=0
   fi
   release_mutex
@@ -588,12 +617,19 @@ lock() {
       _why=$STALE_WHY
     fi
     if [ -n "$_why" ] && [ "$_takeovers" -lt 3 ]; then
-      _takeovers=$((_takeovers + 1))
-      if take_over "$_held" "$_force"; then
+      _tr=0
+      take_over "$_held" "$_force" || _tr=$?
+      if [ "$_tr" = 0 ]; then
         warn "took over $LOCK (${_held:-no owner recorded}): $_why"
         _break=0
+        continue
       fi
-      continue
+      # Only a takeover that found the lock changed counts against the cap; one that could
+      # not take the mutex waits its turn below.
+      if [ "$_tr" = 1 ]; then
+        _takeovers=$((_takeovers + 1))
+        continue
+      fi
     fi
     if [ "$_waited" -ge "$_wait" ]; then
       die $EX_TEMPFAIL "another install holds $LOCK (${_held:-no owner recorded}); run install again when it ends, or set OPTIMAL_CLIENT_BREAK_LOCK=1 if it is gone"
@@ -613,7 +649,9 @@ unlock() {
   LOCKED=
   [ "$(readlink "$LOCK" 2>/dev/null)" = "$LOCK_OWNER" ] || return 0
   mutex || return 0
-  [ "$(readlink "$LOCK" 2>/dev/null)" != "$LOCK_OWNER" ] || rm -f "$LOCK" || :
+  if [ "$(readlink "$LOCK" 2>/dev/null)" = "$LOCK_OWNER" ] && own_mutex; then
+    rm -f "$LOCK" || :
+  fi
   release_mutex
 }
 
@@ -624,7 +662,7 @@ unlock() {
 sweep() {
   for _left in "$PREFIX"/mcp.old.new.* "$PREFIX"/mcp.new.* "$PREFIX"/VERSION.new.* \
     "$PREFIX"/bin/optimal.new.* "$PREFIX"/bin/oe.new.* "$PREFIX"/bin/optimal-engine-mcp.new.* \
-    "$PREFIX"/bin/install-client.sh.new.*; do
+    "$PREFIX"/bin/install-client.sh.new.* "$MUTEX".stale.*; do
     [ -e "$_left" ] || [ -L "$_left" ] || continue
     _pid=${_left##*.}
     case $_pid in '' | *[!0-9]*) continue ;; esac
