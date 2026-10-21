@@ -14,20 +14,23 @@ defmodule OptimalEngine.Sync.GateCache do
   `:index` or `:holds_above`, `mode` is the gate of a peer or of a reader, `rank`
   is the class of the gate), so gates that select different sources never share
   one. It is valid while its stamp is unchanged. The stamp is the write
-  sequence of the change capture and of the ledger (`sync_capture` and
-  `sync_mutations` in `sqlite_sequence`; both are `AUTOINCREMENT`, so they
-  survive the deletes that sealing does). Every write to a replicated table of a
-  workspace that syncs moves one of them, and so does applying a change from a
-  peer, so a source labelled a moment ago is never missed. A workspace that does
-  not sync is captured by no one, so nothing tells when it changed: it is never
-  cached.
+  sequence of the change capture, of the ledger and of the local stamp
+  (`sync_capture`, `sync_mutations` and `sync_local_stamp` in `sqlite_sequence`;
+  all are `AUTOINCREMENT`, so they survive the deletes that sealing does and the
+  local stamp does). Every write to a replicated table of a workspace that syncs
+  moves one of the first two, and so does applying a change from a peer; a write
+  to a table the gate scans that stays on its Engine (assets, active pools,
+  context packages, model and tool runs, skill packages, tool definitions)
+  moves the third, through triggers that capture no row (see
+  `OptimalEngine.Sync.Capture`). So a source labelled a moment ago is never
+  missed. A workspace that does not sync is captured by no one, so nothing tells
+  when it changed: it is never cached.
 
   Entries also expire after `config :optimal_engine, :sync_gate_cache_ttl_ms`
   (default 30 seconds; `0` turns the cache off). That bounds how long a write
-  that capture does not see could go unnoticed. Every replicated table the gate
-  scans is captured (`test/sync/sync_gate_test.exs` pins that); a table that
-  stays on its Engine (assets, active pools, context packages, model and tool
-  runs, skill packages) is not, so for a write there the ttl is the bound.
+  that nothing sees could go unnoticed, such as a write to a scanned table before
+  the Engine installed its triggers. Every table the gate scans is captured or
+  stamped (`test/sync/sync_gate_test.exs` pins that).
   The cache is dropped after a change from a peer is applied and when sync is
   enabled or disabled for a workspace, so it does not rest on the sequences alone
   there.

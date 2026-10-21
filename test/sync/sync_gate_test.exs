@@ -1859,6 +1859,115 @@ defmodule OptimalEngine.SyncGateTest do
     end
   end
 
+  describe "a table the gate scans that stays on this Engine" do
+    setup ctx do
+      GateCache.clear()
+      on_exit(fn -> Application.delete_env(:optimal_engine, :sync_gate_cache_ttl_ms) end)
+      %{asset: "asset-#{ctx.n}", report: "rep-local-#{ctx.n}"}
+    end
+
+    test "an asset relabelled in place holds an aggregate within the ttl", ctx do
+      report(ctx, ctx.report)
+      asset(ctx, ctx.asset)
+
+      first = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      assert sent?(first["mutations"], "analysis_reports", ctx.report)
+
+      {:ok, _} =
+        Store.raw_query("UPDATE assets SET security_labels = '[\"restricted\"]' WHERE id = ?1", [
+          ctx.asset
+        ])
+
+      second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      refute sent?(second["mutations"], "analysis_reports", ctx.report)
+    end
+
+    test "an asset written already labelled holds an aggregate within the ttl", ctx do
+      report(ctx, ctx.report)
+
+      first = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      assert sent?(first["mutations"], "analysis_reports", ctx.report)
+
+      asset(ctx, ctx.asset, ~s(["restricted"]))
+
+      second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      refute sent?(second["mutations"], "analysis_reports", ctx.report)
+    end
+
+    test "deleting the asset that held an aggregate releases it within the ttl", ctx do
+      report(ctx, ctx.report)
+      asset(ctx, ctx.asset, ~s(["restricted"]))
+
+      first = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      refute sent?(first["mutations"], "analysis_reports", ctx.report)
+
+      {:ok, _} = Store.raw_query("DELETE FROM assets WHERE id = ?1", [ctx.asset])
+
+      second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      assert sent?(second["mutations"], "analysis_reports", ctx.report)
+    end
+
+    test "a write to a column the gate does not read leaves the scan cached", ctx do
+      report(ctx, ctx.report)
+      asset(ctx, ctx.asset)
+
+      {_, first} =
+        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+      assert :holds_above in first
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE assets SET size_bytes = 2, metadata = '{\"seen\":true}', trust_label = 'reviewed' WHERE id = ?1",
+          [ctx.asset]
+        )
+
+      {_, again} =
+        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+      assert again == []
+
+      {:ok, _} =
+        Store.raw_query("UPDATE assets SET security_labels = '[\"internal\"]' WHERE id = ?1", [
+          ctx.asset
+        ])
+
+      {_, relabelled} =
+        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+      assert :holds_above in relabelled
+    end
+
+    test "a write in a workspace that does not sync moves nothing", ctx do
+      {:ok, other} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "quiet-#{ctx.n}",
+          name: "Quiet"
+        })
+
+      before = local_stamp()
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path) VALUES (?1, ?2, ?3, 'text/plain', 1, 'x')",
+          ["asset-quiet-#{ctx.n}", ctx.tenant, other.id]
+        )
+
+      {:ok, _} =
+        Store.raw_query("UPDATE assets SET security_labels = '[\"restricted\"]' WHERE id = ?1", [
+          "asset-quiet-#{ctx.n}"
+        ])
+
+      {:ok, _} = Store.raw_query("DELETE FROM assets WHERE id = ?1", ["asset-quiet-#{ctx.n}"])
+      assert local_stamp() == before
+
+      asset(ctx, ctx.asset)
+      assert local_stamp() > before
+    end
+  end
+
   describe "the lineage map" do
     test "classifies every table the Engine replicates" do
       unclassified = replicated_tables() -- Lineage.tables()
@@ -1878,7 +1987,8 @@ defmodule OptimalEngine.SyncGateTest do
 
       # The gate cache stands on the write sequence of the capture, which only a
       # keyed table with an insert, update and delete trigger moves. A table that
-      # stays local is not captured; for it the cache's ttl is the bound.
+      # stays local is not captured; the triggers of the local stamp watch it
+      # (the test below).
       replicated = replicated_tables()
 
       for table <- Lineage.tables(),
@@ -1895,6 +2005,68 @@ defmodule OptimalEngine.SyncGateTest do
                  "#{table} has no #{operation} capture trigger"
         end
       end
+    end
+
+    test "every table the gate scans is captured or moves the local stamp" do
+      replicated = replicated_tables()
+      stamped = Capture.stamped_tables()
+
+      # A scanned table either replicates (the capture triggers watch it, the test
+      # above) or is stamped.
+      assert stamped == Lineage.scanned_tables() -- replicated
+      assert stamped != []
+
+      for table <- ~w(assets active_memory_pools context_packages model_call_runs tool_call_runs
+                      skill_packages mcp_tool_definitions),
+          do: assert(table in stamped, "#{table} is not watched")
+
+      {:ok, rows} =
+        Store.raw_query(
+          "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync_stamp_%'",
+          []
+        )
+
+      triggers = Map.new(rows, fn [name, sql] -> {name, sql} end)
+
+      for table <- stamped, operation <- ~w(ai au ad) do
+        sql = Map.get(triggers, "sync_stamp_#{operation}_#{table}")
+        assert sql, "#{table} has no #{operation} stamp trigger"
+        assert sql =~ "sync_local_stamp"
+      end
+
+      # Nor is one left on a table that is not stamped.
+      expected =
+        for table <- stamped, operation <- ~w(ai au ad), do: "sync_stamp_#{operation}_#{table}"
+
+      assert Enum.sort(Map.keys(triggers)) == Enum.sort(expected)
+
+      # The counter keeps no row, only its sequence.
+      assert {:ok, [[0]]} = Store.raw_query("SELECT COUNT(*) FROM sync_local_stamp", [])
+    end
+
+    test "installing again does no DDL" do
+      assert {:ok, _} = Capture.install()
+      {:ok, [[before]]} = Store.raw_query("PRAGMA schema_version", [])
+
+      assert {:ok, _} = Capture.install()
+      assert {:ok, [[^before]]} = Store.raw_query("PRAGMA schema_version", [])
+    end
+
+    test "a stamp trigger left on a table that is no longer scanned is dropped" do
+      {:ok, _} =
+        Store.raw_query(
+          "CREATE TRIGGER IF NOT EXISTS sync_stamp_ai_events AFTER INSERT ON events BEGIN SELECT 1; END",
+          []
+        )
+
+      refute "events" in Capture.stamped_tables()
+      assert {:ok, _} = Capture.install()
+
+      assert {:ok, [[0]]} =
+               Store.raw_query(
+                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'sync_stamp_ai_events'",
+                 []
+               )
     end
 
     test "names only tables and columns that exist" do
@@ -2437,6 +2609,25 @@ defmodule OptimalEngine.SyncGateTest do
         "INSERT INTO analysis_reports (id, tenant_id, workspace_id, kind, status, summary, report) VALUES (?1, ?2, ?3, 'promises', 'ok', 'two open promises', '{}')",
         [id, ctx.tenant, ctx.ws]
       )
+  end
+
+  defp asset(ctx, id, labels \\ "[]") do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path, security_labels) VALUES (?1, ?2, ?3, 'text/plain', 1, ?4, ?5)",
+        [id, ctx.tenant, ctx.ws, "assets/#{id}", labels]
+      )
+  end
+
+  # The sequence of the local stamp (0 before any write moved it).
+  defp local_stamp do
+    {:ok, rows} =
+      Store.raw_query("SELECT seq FROM sqlite_sequence WHERE name = 'sync_local_stamp'", [])
+
+    case rows do
+      [[seq]] -> seq
+      [] -> 0
+    end
   end
 
   # -- the relay -----------------------------------------------------------------------------

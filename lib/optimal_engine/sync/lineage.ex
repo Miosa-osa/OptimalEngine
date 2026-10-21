@@ -424,6 +424,19 @@ defmodule OptimalEngine.Sync.Lineage do
   @spec tables() :: [String.t()]
   def tables, do: @tables |> Map.keys() |> Enum.sort()
 
+  @doc """
+  The tables a gate reads for a class above its own: the ones whose rows carry
+  labels, a class, or labels in their metadata. A gate asks each of them
+  whether the workspace holds anything above a class.
+  """
+  @spec scanned_tables() :: [String.t()]
+  def scanned_tables do
+    Enum.filter(tables(), fn table ->
+      spec = spec(table)
+      spec.labels or is_binary(spec.meta) or is_binary(spec.class)
+    end)
+  end
+
   @doc "How a table's class is made up, or nil for a table the map does not know."
   @spec spec(String.t()) :: t() | nil
   def spec(table) do
