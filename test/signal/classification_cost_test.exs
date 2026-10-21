@@ -9,6 +9,9 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
   Each case runs in a task and must finish within its bound; the old patterns
   took seconds to hours on the same inputs. The module runs alone (not
   async), so the bounds measure this work and not the rest of the suite.
+  The classification time limit (`OptimalEngine.Signal.TimeLimit`), which
+  caps a slow detection, is lifted here, so the bounds measure the detectors
+  themselves.
   """
 
   use ExUnit.Case, async: false
@@ -17,6 +20,16 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
   alias OptimalEngine.Signal.{GenreDetector, ModeDetector, PreSend}
 
   @mib 1_048_576
+  @limits [:classification_timeout_ms, :classification_budget_ms]
+
+  setup do
+    previous = Map.new(@limits, &{&1, Application.fetch_env(:optimal_engine, &1)})
+    Enum.each(@limits, &Application.put_env(:optimal_engine, &1, 600_000))
+    on_exit(fn -> Enum.each(previous, &restore/1) end)
+  end
+
+  defp restore({key, {:ok, value}}), do: Application.put_env(:optimal_engine, key, value)
+  defp restore({key, :error}), do: Application.delete_env(:optimal_engine, key)
 
   # One-line shapes that each made a mode pattern backtrack quadratically.
   defp lines(n) do
