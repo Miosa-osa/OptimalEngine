@@ -24,7 +24,7 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
     credential_keys: [:client_id, :client_secret],
     access_token: true
 
-  alias OptimalEngine.Connectors.{AccessToken, HTTP}
+  alias OptimalEngine.Connectors.{AccessToken, TokenExchange}
 
   @base_url "https://api.zoom.us/v2"
   @page_size 30
@@ -33,7 +33,7 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
   def sync(state, cursor) do
     account_id = pick(state, :account_id)
 
-    AccessToken.session(state, &get_access_token(&1, account_id), fn token ->
+    session(state, &get_access_token(&1, account_id), fn token ->
       from_date = cursor || default_from()
 
       case fetch_recordings(from_date, token) do
@@ -84,29 +84,13 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
 
     credentials = Base.encode64("#{client_id}:#{client_secret}")
 
-    token_url =
-      "https://zoom.us/oauth/token?grant_type=account_credentials&account_id=#{account_id}"
+    # Zoom takes the grant in the query of the URL and authenticates the client
+    # with Basic, so the form it is sent is empty.
+    query = URI.encode_query(grant_type: "account_credentials", account_id: account_id)
 
-    case HTTP.request(token_url,
-           method: :post,
-           body: "",
-           headers: [
-             {"authorization", "Basic #{credentials}"},
-             {"content-type", "application/x-www-form-urlencoded"}
-           ]
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} ->
-        {:ok, token}
-
-      {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{status: status}} ->
-        {:error, {:http, status}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    TokenExchange.exchange("https://zoom.us/oauth/token?" <> query, [],
+      headers: [{"authorization", "Basic #{credentials}"}]
+    )
   end
 
   defp fetch_recordings(from_date, token) do

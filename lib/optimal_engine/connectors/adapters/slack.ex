@@ -69,7 +69,7 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
 
   @impl true
   def sync(state, cursor) do
-    AccessToken.session(state, &bot_token/1, fn token ->
+    session(state, &bot_token/1, fn token ->
       with {:ok, channel_ids} <- channel_ids(pick(state, :channels, []), token) do
         pull_channels(channel_ids, decode_cursor(cursor), max_pages(state), token)
       end

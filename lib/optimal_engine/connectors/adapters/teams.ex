@@ -24,7 +24,7 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
     credential_keys: [:client_id, :client_secret],
     access_token: true
 
-  alias OptimalEngine.Connectors.{AccessToken, HTTP}
+  alias OptimalEngine.Connectors.{AccessToken, TokenExchange}
 
   @graph_url "https://graph.microsoft.com/v1.0"
   @page_size 50
@@ -34,7 +34,7 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
     tenant_id = pick(state, :tenant_id_ms)
     team_ids = pick(state, :team_ids, [])
 
-    AccessToken.session(state, &get_access_token(&1, tenant_id), fn token ->
+    session(state, &get_access_token(&1, tenant_id), fn token ->
       since = cursor || default_since()
 
       result =
@@ -93,31 +93,12 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
     client_secret = pick(state, :client_secret)
     token_url = "https://login.microsoftonline.com/#{tenant_id}/oauth2/v2.0/token"
 
-    body =
-      URI.encode_query(%{
-        grant_type: "client_credentials",
-        client_id: client_id,
-        client_secret: client_secret,
-        scope: "https://graph.microsoft.com/.default"
-      })
-
-    case HTTP.request(token_url,
-           method: :post,
-           body: body,
-           headers: [{"content-type", "application/x-www-form-urlencoded"}]
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} ->
-        {:ok, token}
-
-      {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{status: status}} ->
-        {:error, {:http, status}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    TokenExchange.exchange(token_url,
+      grant_type: "client_credentials",
+      client_id: client_id,
+      client_secret: client_secret,
+      scope: "https://graph.microsoft.com/.default"
+    )
   end
 
   defp fetch_channel_messages(team_id, since, token) do

@@ -50,7 +50,7 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
 
   @impl true
   def sync(state, cursor) do
-    AccessToken.session(state, &refresh_access_token/1, fn token ->
+    session(state, &refresh_access_token/1, fn token ->
       case cursor do
         nil -> full_sync(state, token)
         history_id -> incremental_sync(history_id, state, token)
@@ -104,7 +104,7 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
       "client_secret" => pick(state, :client_secret)
     }
 
-    case HTTP.post_json(@token_url, body) do
+    case HTTP.post_json(@token_url, body, follow_redirects: false, verify_tls: true) do
       {:ok, %{status: 200, body: %{"access_token" => token}}} -> {:ok, token}
       {:ok, %{status: 401}} -> {:error, :auth_expired}
       # A revoked refresh token comes back as a 400 naming invalid_grant, which

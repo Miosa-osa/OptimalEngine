@@ -16,8 +16,11 @@ defmodule OptimalEngine.Connectors.TokenExchangeTest do
   # adapter => {config, credentials, a fragment of the token URL}
   @adapters [
     {HubSpot, %{"portal_id" => "1234", "objects" => ["contacts"]},
-     %{"client_id" => "example-client", "client_secret" => "example&secret=+/", "refresh_token" => "example-refresh"},
-     "api.hubapi.com/oauth/v1/token"},
+     %{
+       "client_id" => "example-client",
+       "client_secret" => "example&secret=+/",
+       "refresh_token" => "example-refresh"
+     }, "api.hubapi.com/oauth/v1/token"},
     {OneDrive, %{"tenant_id_ms" => "example-tenant", "drive_id" => "drive-1"},
      %{"client_id" => "example-client", "client_secret" => "example&secret=+/"},
      "login.microsoftonline.com/example-tenant/oauth2/v2.0/token"},
@@ -25,11 +28,17 @@ defmodule OptimalEngine.Connectors.TokenExchangeTest do
      %{"client_id" => "example-client", "client_secret" => "example&secret=+/"},
      "login.microsoftonline.com/example-tenant/oauth2/v2.0/token"},
     {Salesforce, %{"instance_url" => "https://example.my.salesforce.com", "objects" => ["Account"]},
-     %{"client_id" => "example-client", "client_secret" => "example&secret=+/", "refresh_token" => "example-refresh"},
-     "login.salesforce.com/services/oauth2/token"},
+     %{
+       "client_id" => "example-client",
+       "client_secret" => "example&secret=+/",
+       "refresh_token" => "example-refresh"
+     }, "login.salesforce.com/services/oauth2/token"},
     {Dropbox, %{"namespace" => "personal"},
-     %{"app_key" => "example-client", "app_secret" => "example&secret=+/", "refresh_token" => "example-refresh"},
-     "api.dropboxapi.com/oauth2/token"}
+     %{
+       "app_key" => "example-client",
+       "app_secret" => "example&secret=+/",
+       "refresh_token" => "example-refresh"
+     }, "api.dropboxapi.com/oauth2/token"}
   ]
 
   describe "the exchange" do
@@ -47,7 +56,14 @@ defmodule OptimalEngine.Connectors.TokenExchangeTest do
             send(parent, {:exchange, opts})
             {200, %{"access_token" => "example-exchanged-token", "expires_in" => 3_600}}
           else
-            {200, %{"value" => [], "results" => [], "records" => [], "entries" => [], "has_more" => false}}
+            {200,
+             %{
+               "value" => [],
+               "results" => [],
+               "records" => [],
+               "entries" => [],
+               "has_more" => false
+             }}
           end
         end
 
@@ -59,7 +75,10 @@ defmodule OptimalEngine.Connectors.TokenExchangeTest do
         assert Keyword.fetch!(opts, :method) == :post
 
         form = opts |> Keyword.fetch!(:body) |> URI.decode_query()
-        assert form["client_secret"] == "example&secret=+/" or form["app_secret"] == "example&secret=+/"
+
+        assert form["client_secret"] == "example&secret=+/" or
+                 form["app_secret"] == "example&secret=+/"
+
         assert (form["client_id"] || form["app_key"]) == "example-client"
       end
 
@@ -122,7 +141,12 @@ defmodule OptimalEngine.Connectors.TokenExchangeTest do
     end
 
     test "reads its failures like the others" do
-      for {status, expected} <- [{400, :auth_expired}, {401, :auth_expired}, {429, :rate_limited}, {503, :transient}] do
+      for {status, expected} <- [
+            {400, :auth_expired},
+            {401, :auth_expired},
+            {429, :rate_limited},
+            {503, :transient}
+          ] do
         install(fn _url, _opts -> {status, %{}} end)
         assert {:error, ^expected} = sync(Zoom, @zoom_config, @zoom_credentials), "status #{status}"
       end

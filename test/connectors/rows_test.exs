@@ -243,7 +243,12 @@ defmodule OptimalEngine.Connectors.RowsTest do
     test "a reference sealed before it was bound to its connector is bound on the next change",
          ctx do
       id = "#{ctx.tenant}-unbound"
-      {:ok, unbound} = OptimalEngine.Connectors.CredentialSource.seal_reference(%{"broker_reference" => "conn_0000000008"})
+
+      {:ok, unbound} =
+        OptimalEngine.Connectors.CredentialSource.seal_reference(%{
+          "broker_reference" => "conn_0000000008"
+        })
+
       insert_broker_row(ctx, id, unbound)
 
       assert {:ok, _view} = Rows.update(ctx.tenant, id, %{"enabled" => false})
@@ -261,7 +266,10 @@ defmodule OptimalEngine.Connectors.RowsTest do
       assert {:ok, _config} = OptimalEngine.Connectors.CredentialSource.hydrate(config, scope)
 
       assert {:error, :broker_reference_unreadable} =
-               OptimalEngine.Connectors.CredentialSource.hydrate(config, %{scope | id: "#{id}-other"})
+               OptimalEngine.Connectors.CredentialSource.hydrate(config, %{
+                 scope
+                 | id: "#{id}-other"
+               })
     end
 
     test "records the registration in the evidence chain", ctx do

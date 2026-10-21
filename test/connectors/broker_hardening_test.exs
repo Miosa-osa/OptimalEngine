@@ -12,7 +12,12 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
   alias OptimalEngine.Test.BrokerStub
 
   @miosa "https://api.miosa.ai/api/v1/connect/broker/credentials"
-  @scope %{id: "miosa:conn_1:gmail", kind: "gmail", tenant_id: "default", workspace_id: "default:ops"}
+  @scope %{
+    id: "miosa:conn_1:gmail",
+    kind: "gmail",
+    tenant_id: "default",
+    workspace_id: "default:ops"
+  }
   @config %{
     "credential_source" => "broker",
     "broker_url" => @miosa,
@@ -20,7 +25,10 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
   }
 
   setup do
-    saved = for key <- [:credential_broker_hosts, :credential_broker_paths], do: {key, Application.get_env(:optimal_engine, key)}
+    saved =
+      for key <- [:credential_broker_hosts, :credential_broker_paths],
+          do: {key, Application.get_env(:optimal_engine, key)}
+
     original_key = System.get_env("CONNECTOR_KEY")
 
     Application.put_env(:optimal_engine, :credential_broker_hosts, ["api.miosa.ai"])
@@ -51,8 +59,14 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
   describe "the broker URL is pinned to a host, a port and a path" do
     test "the MIOSA broker is accepted, and so is the explicit default port and any host case" do
       assert :ok = CredentialSource.check_url(@miosa)
-      assert :ok = CredentialSource.check_url("https://api.miosa.ai:443/api/v1/connect/broker/credentials")
-      assert :ok = CredentialSource.check_url("https://API.Miosa.AI/api/v1/connect/broker/credentials")
+
+      assert :ok =
+               CredentialSource.check_url(
+                 "https://api.miosa.ai:443/api/v1/connect/broker/credentials"
+               )
+
+      assert :ok =
+               CredentialSource.check_url("https://API.Miosa.AI/api/v1/connect/broker/credentials")
     end
 
     test "another port, a trailing dot, an uppercase scheme or an empty userinfo is refused" do
@@ -174,7 +188,10 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
 
     test "an absurd or negative expires_in cannot raise" do
       for seconds <- [1_000_000_000_000_000_000_000_000, -5, 0] do
-        broker([{:body, %{"credentials" => %{"access_token" => "example-token", "expires_in" => seconds}}}])
+        broker([
+          {:body, %{"credentials" => %{"access_token" => "example-token", "expires_in" => seconds}}}
+        ])
+
         assert {:ok, config} = CredentialSource.hydrate(@config, @scope), inspect(seconds)
         assert %AccessToken{expires_at: %DateTime{}} = config["credentials"]["access_token"]
       end

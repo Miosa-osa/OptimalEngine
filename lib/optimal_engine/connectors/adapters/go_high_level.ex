@@ -139,6 +139,8 @@ defmodule OptimalEngine.Connectors.Adapters.GoHighLevel do
     [:api_token, :agency_token]
     |> Enum.find_value(fn key ->
       case pick(flat, key) do
+        # A token the credential broker issued is held opaque and kept so.
+        %OptimalEngine.Connectors.AccessToken{} = token -> token
         token when is_binary(token) -> if String.trim(token) != "", do: String.trim(token)
         _ -> nil
       end
