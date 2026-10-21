@@ -4161,7 +4161,7 @@ defmodule OptimalEngine.SyncTest do
     defp edge(ctx, target) do
       {:ok, _} =
         Store.raw_query(
-          "INSERT INTO edges (source_id, target_id, relation, tenant_id, workspace_id) VALUES (?1, ?2, 'related', ?3, ?4)",
+          "INSERT INTO graph_edges (source_id, target_id, relation, tenant_id, workspace_id) VALUES (?1, ?2, 'related', ?3, ?4)",
           ["edge-source-#{ctx.n}", target, ctx.tenant, ctx.ws]
         )
     end
@@ -4224,11 +4224,11 @@ defmodule OptimalEngine.SyncTest do
       on_exit(fn -> File.rm(path) end)
 
       {:ok, manifest} =
-        export_while_writing("edges", fn -> edge(ctx, late) end, fn ->
+        export_while_writing("graph_edges", fn -> edge(ctx, late) end, fn ->
           WorkspaceBundle.export(ctx.tenant, ctx.ws, path)
         end)
 
-      exported = path |> bundle_rows("edges") |> Enum.map(& &1["target_id"])
+      exported = path |> bundle_rows("graph_edges") |> Enum.map(& &1["target_id"])
       assert Enum.sort(exported) == Enum.sort(targets)
       refute late in exported
 
@@ -4237,7 +4237,8 @@ defmodule OptimalEngine.SyncTest do
       after_mark = Sync.changes(ctx.tenant, ctx.ws, since: manifest["ledger_sequence"])
 
       pulled =
-        for %{"entity_type" => "edges", "payload" => %{"row" => row}} <- after_mark["mutations"],
+        for %{"entity_type" => "graph_edges", "payload" => %{"row" => row}} <-
+              after_mark["mutations"],
             do: row["target_id"]
 
       assert pulled == [late]
