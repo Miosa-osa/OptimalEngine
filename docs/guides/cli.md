@@ -244,10 +244,14 @@ They write the same records as the client and never name an actor.
 For chats: `session_commit`, `sessions_list`, `session_get`, and `org_policy` (`chat-memory.md`).
 The earlier tools remain: `ask`, `grep`, `profile`, `add_memory`, `forget_memory` (sends the workspace the memory belongs to), `recall`, `wiki_get`, `workspaces`, and `render_context`.
 
+It names itself to the Engine as `User-Agent: optimal-mcp/<version>`.
+When the Engine marks it as another minor release (`x-optimal-client-outdated`), it prints one warning line on stderr per process and carries on.
+When the Engine refuses it with 426, every tool fails with the upgrade hint, for example `the Engine (1.0.0) refuses MCP server 0.3.3; upgrade the MCP server to 1.0.0 (HTTP 426: client_incompatible)`.
+
 Register it with a harness as a stdio server running `node <path>/apps/mcp/dist/index.js` with those environment variables.
 From a release archive, `install-client.sh` installs a launcher, `optimal-engine-mcp`, and registers it as `optimal-engine` with Claude Code (user scope) and Codex 0.47.0 or newer (`[mcp_servers.optimal-engine]` in `$CODEX_HOME/config.toml`).
 Codex gives a stdio server only a fixed environment, so the Codex table lists the Engine settings in `env_vars`; Claude Code passes its own environment.
-`npm test` builds the server and checks tool listing, routes, bearer authentication, and that keys never appear in results.
+`npm test` builds the server and checks tool listing, routes, bearer authentication, that keys never appear in results, and the version warning and 426 refusal.
 
 ## Verification
 

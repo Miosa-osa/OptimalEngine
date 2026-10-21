@@ -3,10 +3,16 @@ defmodule OptimalEngine.MixProject do
 
   @version "0.3.3"
 
+  # OPTIMAL_BUILD_FAILING_MIGRATION=1 builds the test release of the upgrade
+  # rollback drill, whose last migration fails on purpose
+  # (OptimalEngine.Store.FailingMigration); its version says so. No other build
+  # sets it. See scripts/build-failing-migration-release.sh.
+  @failing_migration_build System.get_env("OPTIMAL_BUILD_FAILING_MIGRATION") == "1"
+
   def project do
     [
       app: :optimal_engine,
-      version: @version,
+      version: if(@failing_migration_build, do: @version <> "-failing-migration", else: @version),
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

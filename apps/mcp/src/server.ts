@@ -20,11 +20,12 @@ import { registerRecord } from "./tools/record.js";
 import { registerAuthority } from "./tools/authority.js";
 import { registerGovernance } from "./tools/governance.js";
 import { registerSessions } from "./tools/sessions.js";
+import { MCP_VERSION } from "./version.js";
 
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "optimal-engine",
-    version: "0.3.3",
+    version: MCP_VERSION,
   });
 
   registerAsk(server);

@@ -45,7 +45,7 @@ defmodule OptimalEngine.Store.Migrations do
   """
   @spec all() :: [migration()]
   def all do
-    [
+    migrations = [
       migration_001_schema_migrations_table(),
       migration_002_tenancy(),
       migration_003_identity(),
@@ -120,6 +120,10 @@ defmodule OptimalEngine.Store.Migrations do
       migration_072_workspace_external_id(),
       migration_authority_evidence_kind_index()
     ]
+
+    # A failing-migration test release appends one migration that fails on
+    # purpose (OptimalEngine.Store.FailingMigration); every other build adds none.
+    migrations ++ OptimalEngine.Store.FailingMigration.migrations(migrations)
   end
 
   # The id another system knows a workspace by becomes a column, held by one
@@ -1211,23 +1215,32 @@ defmodule OptimalEngine.Store.Migrations do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Applies every migration whose version is not yet in `schema_migrations`: a set check, so a version added behind a higher applied one still runs.
-  Records each successful migration in the `schema_migrations` table.
+  Applies, in order, every migration of `migrations` (default `all/0`) whose
+  version is not yet recorded in the `schema_migrations` table: a set check, so
+  a version added behind a higher applied one still runs.
+
+  Each migration runs in one transaction with the row that records it, so it
+  applies completely or leaves the store as it was: when a statement fails,
+  everything the migration wrote is rolled back, its version stays unrecorded,
+  and the error is raised. Migrations applied earlier in the same run stay.
   """
-  @spec run(any()) :: :ok
-  def run(db) do
+  @spec run(any(), [migration()]) :: :ok
+  def run(db, migrations \\ all()) do
     ensure_migrations_table!(db)
     applied = applied_versions(db)
 
     pending =
-      all()
+      migrations
       |> Enum.reject(fn {version, _desc, _stmts} -> MapSet.member?(applied, version) end)
 
     Enum.each(pending, fn {version, description, statements} ->
       Logger.info("[Migrations] Applying #{pad(version)} — #{description}")
-      Enum.each(statements, fn {label, sql} -> safe_execute(db, label, sql) end)
-      after_apply(db, version)
-      record_migration!(db, version, description)
+
+      in_transaction(db, version, fn ->
+        Enum.each(statements, fn {label, sql} -> safe_execute(db, label, sql) end)
+        after_apply(db, version)
+        record_migration!(db, version, description)
+      end)
     end)
 
     :ok
@@ -1236,6 +1249,35 @@ defmodule OptimalEngine.Store.Migrations do
   # Work a migration's statements cannot do, once they have run.
   defp after_apply(db, 71), do: report_skipped_handles(db)
   defp after_apply(_db, _version), do: :ok
+
+  defp in_transaction(db, version, fun) do
+    case Exqlite.Sqlite3.execute(db, "BEGIN IMMEDIATE") do
+      :ok -> :ok
+      {:error, reason} -> raise "migration #{pad(version)} could not begin: #{inspect(reason)}"
+    end
+
+    try do
+      fun.()
+
+      case Exqlite.Sqlite3.execute(db, "COMMIT") do
+        :ok -> :ok
+        {:error, reason} -> raise "migration #{pad(version)} could not commit: #{inspect(reason)}"
+      end
+    rescue
+      error ->
+        _ = Exqlite.Sqlite3.execute(db, "ROLLBACK")
+
+        # The message says what happened to the store, so a crash report or a
+        # boot log names the migration and the rollback as well as the cause.
+        reraise RuntimeError,
+                [
+                  message:
+                    "migration #{pad(version)} failed and was rolled back: " <>
+                      Exception.message(error)
+                ],
+                __STACKTRACE__
+    end
+  end
 
   @doc """
   Returns the set of applied migration versions.

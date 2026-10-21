@@ -77,6 +77,10 @@ COPY engine-contract.json ./engine-contract.json
 ARG OPTIMAL_ENGINE_GIT_SHA=unknown
 ENV OPTIMAL_ENGINE_GIT_SHA=${OPTIMAL_ENGINE_GIT_SHA}
 ARG OPTIMAL_RELEASE_CHANNEL=dev
+# Empty for every real release. Only scripts/build-failing-migration-release.sh
+# sets it to 1, to build the upgrade rollback drill's test release, whose last
+# migration fails on purpose and whose version ends in -failing-migration.
+ARG OPTIMAL_BUILD_FAILING_MIGRATION=
 
 # Build release — named `optimal` (matches releases() in mix.exs).
 # The empty build args are treated as absent by OptimalEngine.Version, so an
@@ -91,6 +95,7 @@ ARG OPTIMAL_RELEASE_CHANNEL=dev
 RUN export OPTIMAL_ENGINE_GIT_SHA="${OPTIMAL_ENGINE_GIT_SHA}" \
            OPTIMAL_ENGINE_BUILD_TIMESTAMP="${OPTIMAL_ENGINE_BUILD_TIMESTAMP}" \
            OPTIMAL_RELEASE_CHANNEL="${OPTIMAL_RELEASE_CHANNEL}" \
+           OPTIMAL_BUILD_FAILING_MIGRATION="${OPTIMAL_BUILD_FAILING_MIGRATION}" \
     && mix compile --force \
     && mix release optimal --overwrite
 
