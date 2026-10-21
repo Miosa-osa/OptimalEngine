@@ -308,8 +308,9 @@ end
 # Imports: how often queued import jobs are drained (0 disables), the largest
 # upload or download an import accepts, and where imports are staged
 # (default: an imports folder next to the database). OPTIMAL_IMPORT_URL_HOSTS
-# (comma-separated) lets imports fetch from named internal hosts; it is read
-# when a URL is checked.
+# (comma-separated) is the list of hosts a source URL may name, internal ones
+# included, and OPTIMAL_IMPORT_CA_FILE a PEM file of extra CAs to trust; both
+# are read when a URL is checked.
 if interval = System.get_env("OPTIMAL_IMPORTS_INTERVAL_MS") do
   config :optimal_engine, :imports_interval_ms, String.to_integer(interval)
 end

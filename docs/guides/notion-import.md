@@ -73,7 +73,7 @@ Both forms answer `202` with the job:
 
 The upload is written to disk as it arrives and is never held whole in memory.
 A repeated `Idempotency-Key` (or `idempotency_key` in the query or body) returns the first job with `"duplicate": true` and imports nothing twice.
-A source URL is never stored in the job row, so a presigned URL is not readable through `GET /api/jobs`.
+A presigned URL carries its signature in the query string, so the Engine never logs, stores or returns the full URL: the job row, the status, errors and logs show only `scheme://host/path`.
 
 ## Follow the job
 
@@ -93,7 +93,7 @@ The status needs the `read` scope and answers:
 | `errors` | the first 200 problems, each with `path`, `reason`, and `detail`; `errors_truncated` says whether there were more |
 | `root_uris` | the top-level pages |
 | `failure`, `last_error` | the code and detail of a failed attempt |
-| `source` | `upload` with its `bytes`, or `url` with its `host` |
+| `source` | `upload` with its `bytes`, or `url` with the URL as `scheme://host/path` |
 | `created_at`, `started_at`, `finished_at`, `completed_at` | timestamps |
 
 A queued import starts within about two seconds.
@@ -143,13 +143,14 @@ These answers come back from the request itself:
 | 400 | `source_required` | neither a zip body nor a `source_url` |
 | 400 | `empty_upload` | a zip body with no bytes |
 | 400 | `invalid_source_url` | not an absolute `https` URL (or `http` to an allowed host) |
-| 400 | `source_url_refused` | the host resolves to a loopback, private, link-local, or reserved address |
+| 400 | `invalid_source_url` | the URL carries a user name or password |
+| 400 | `source_url_refused` | the host is not on the allowed list (when one is set), does not resolve, or resolves to a loopback, private, link-local, or reserved address |
 | 413 | `import_too_large` | over the size limit, with `max_bytes` |
 | 403 | `permission_scope_denied`, `workspace_scope_denied` | the key lacks `write` or the workspace |
 | 404 | `workspace not found` | another tenant's workspace, or one that is not active |
 
 A job fails at once, without a retry, with one of these codes in `failure.code` and `last_error`:
-`invalid_zip`, `zip64_unsupported`, `unsafe_path` (an absolute path, a drive letter, a `..`, `.` or empty segment, a backslash, or a NUL in a name), `too_many_entries`, `archive_too_large`, `entry_size_mismatch` (an entry inflates past its declared size), `empty_export` (no Markdown or CSV), `invalid_source_url`, `source_url_refused`, `download_too_large`, and `source_missing`.
+`invalid_zip`, `zip64_unsupported`, `unsafe_path` (an absolute path, a drive letter, a `..`, `.` or empty segment, a backslash, or a NUL in a name), `too_many_entries`, `archive_too_large`, `entry_size_mismatch` (an entry inflates past its declared size), `empty_export` (no Markdown or CSV), `invalid_source_url`, `source_url_refused`, `redirect_refused` (a redirect to anything but an allowed `https` host), `too_many_redirects` (more than five), `download_too_large`, and `source_missing`.
 A download that fails (`download_failed`) or an attempt that crashes is retried with backoff.
 
 These are listed in `errors` while the import continues:
@@ -157,13 +158,24 @@ These are listed in `errors` while the import continues:
 
 ## Source URLs
 
-The Engine downloads a `source_url` inside the job, with the server certificate and host name verified, no redirects followed, and the transfer cancelled the moment it passes the size limit.
-A host that resolves to a non-public address is refused.
-Set `OPTIMAL_IMPORT_URL_HOSTS` (comma-separated) to allow named internal hosts, and plain `http` to them, when object storage sits on a private network.
+The Engine downloads a `source_url` inside the job and checks the URL before every request:
+
+- `https` only, with the server's certificate and host name verified; plain `http` only to an allowed host.
+- When allowed hosts are set, only those hosts are fetched.
+- The host must resolve only to public addresses; a loopback, private, link-local, shared, or reserved address is refused unless the host is allowed explicitly.
+- The connection goes to the address that was checked, so a second DNS answer cannot move it elsewhere.
+- A redirect is followed only to an allowed `https` host, checked the same way, at most five times.
+
+Allowed hosts come from `OPTIMAL_IMPORT_URL_HOSTS` (comma-separated); an entry is a host name or `*.` followed by a domain, such as `*.storage.example.com`.
+`OPTIMAL_IMPORT_CA_FILE` names a PEM file of extra certificate authorities to trust, for object storage behind a private CA.
+
+The body of a `200` answer is written to a file as it arrives, never held whole in memory, and the transfer stops the moment it passes the size limit; `Content-Length` only lets an oversized answer fail early.
+The body of any other answer is never read.
+The full URL is written only to the import's `source.url` file, readable by the Engine's user alone, and that file is deleted as soon as the download completes.
 
 ## Where imports are staged
 
 An import is staged in `imports/<import id>/` next to the Engine database, or in `OPTIMAL_IMPORTS_DIR`.
-The folder holds the source (`source.zip`, or `source.url`) and `report.json`, the counts and error report the status route serves.
+The folder holds the source (`source.zip`, and `source.url` until a URL source is downloaded) and `report.json`, the counts and error report the status route serves.
 The source is deleted when the job completes or fails for good; the report is kept.
 `OPTIMAL_IMPORTS_INTERVAL_MS` sets how often the worker looks for queued imports (default 2,000; 0 disables the worker).

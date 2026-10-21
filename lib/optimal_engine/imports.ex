@@ -11,10 +11,14 @@ defmodule OptimalEngine.Imports do
   `OptimalEngine.Imports.Notion`.
 
   The staged folder holds the source (`source.zip`, or `source.url` for a
-  URL, which never enters the job row, so a presigned URL is not readable
-  through the job list) and `report.json`, the import's counts and error
-  report, rewritten as it progresses. The source is deleted once the job
-  completes or fails for good; the report is kept.
+  URL) and `report.json`, the import's counts and error report, rewritten as
+  it progresses. The source is deleted once the job completes or fails for
+  good; the report is kept.
+
+  A source URL may be a presigned URL whose query string is a credential. It
+  is written only to `source.url` (owner-only permissions) and deleted as soon
+  as the download completes. The job row, the report, the status, errors and
+  logs carry only `OptimalEngine.Imports.Fetch.redact/1`, `scheme://host/path`.
 
   Imports are workspace-scoped: a job writes only into its own workspace.
   """
@@ -92,8 +96,16 @@ defmodule OptimalEngine.Imports do
           {:ok, Jobs.job(), :queued | :duplicate} | {:error, term()}
   def enqueue_notion(workspace_id, staged, source, opts \\ []) do
     {url, source} = Map.pop(source, "url")
-    source = if url, do: Map.put(source, "host", URI.parse(url).host), else: source
-    if url, do: File.write!(Path.join(staged.dir, "source.url"), url)
+
+    source =
+      if url do
+        path = Path.join(staged.dir, "source.url")
+        File.write!(path, url)
+        File.chmod!(path, 0o600)
+        Map.put(source, "url", Fetch.redact(url))
+      else
+        source
+      end
 
     payload = %{"import_id" => staged.id, "source" => source, "actor_id" => opts[:actor_id]}
 
@@ -232,35 +244,46 @@ defmodule OptimalEngine.Imports do
   # a download that broke off, a busy store) may succeed on another attempt.
   defp permanent?(reason) do
     Notion.fatal?(reason) or
-      reason in [:invalid_source_url, :source_url_refused, :download_too_large, :source_missing]
+      reason in [
+        :invalid_source_url,
+        :source_url_refused,
+        :redirect_refused,
+        :too_many_redirects,
+        :download_too_large,
+        :source_missing
+      ]
   end
 
+  # Every detail is scrubbed of URL query strings before it is logged or
+  # stored, whatever produced it.
   defp failure({code, detail}) when is_atom(code), do: {Atom.to_string(code), detail_text(detail)}
   defp failure(code) when is_atom(code), do: {Atom.to_string(code), nil}
-  defp failure(other), do: {"failed", inspect(other)}
+  defp failure(other), do: {"failed", detail_text(other)}
 
-  defp detail_text(detail) when is_binary(detail), do: detail
-  defp detail_text(detail), do: inspect(detail)
+  defp detail_text(detail) when is_binary(detail), do: Fetch.scrub(detail)
+  defp detail_text(detail), do: detail |> inspect() |> Fetch.scrub()
 
+  # A URL source is downloaded once: the URL file is deleted when the zip is
+  # complete, and a later attempt (the import itself failed) reuses the zip.
   defp source_file(%{payload: %{"source" => %{"kind" => "url"}}}, folder) do
     path = Path.join(folder, "source.zip")
+    url_file = Path.join(folder, "source.url")
 
-    with {:ok, url} <- read_source_url(folder),
-         {:ok, _bytes} <- Fetch.download(url, path, max_bytes()) do
-      {:ok, path}
+    case File.read(url_file) do
+      {:ok, url} ->
+        with {:ok, _bytes} <- Fetch.download(String.trim(url), path, max_bytes()) do
+          File.rm(url_file)
+          {:ok, path}
+        end
+
+      {:error, _} ->
+        if File.regular?(path), do: {:ok, path}, else: {:error, :source_missing}
     end
   end
 
   defp source_file(_job, folder) do
     path = Path.join(folder, "source.zip")
     if File.regular?(path), do: {:ok, path}, else: {:error, :source_missing}
-  end
-
-  defp read_source_url(folder) do
-    case File.read(Path.join(folder, "source.url")) do
-      {:ok, url} -> {:ok, String.trim(url)}
-      {:error, _} -> {:error, :source_missing}
-    end
   end
 
   defp clean_source(id) do
