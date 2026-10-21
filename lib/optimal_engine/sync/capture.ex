@@ -248,15 +248,15 @@ defmodule OptimalEngine.Sync.Capture do
   end
 
   @doc """
-  The columns of a stamped table the gate reads: the one it takes the class from
-  (`Lineage.class_column/1`, the column `Gate` builds its scan on) and the scope
-  of the row. An update that writes none of them cannot change what the gate
-  finds.
+  The columns of a stamped table the gate reads: the ones it takes the class
+  from (`Lineage.class_columns/1`, the columns `Gate` builds its scan on) and
+  the scope of the row. An update that writes none of them cannot change what
+  the gate finds.
   """
   @spec stamp_columns(String.t()) :: [String.t()]
   def stamp_columns(table) do
-    {_kind, column} = Lineage.class_column(Lineage.spec(table))
-    [column, "tenant_id", "workspace_id"]
+    classes = table |> Lineage.spec() |> Lineage.class_columns() |> Enum.map(&elem(&1, 1))
+    classes ++ ["tenant_id", "workspace_id"]
   end
 
   # The counter of `sync_local_stamp` moves (insert a row, delete it; the
@@ -274,7 +274,7 @@ defmodule OptimalEngine.Sync.Capture do
   # count as naming a class.
   defp stamp_statements(table, read) do
     t = quote_name(table)
-    class = Lineage.class_column(Lineage.spec(table))
+    classes = table |> Lineage.spec() |> Lineage.class_columns()
     updated = Enum.map_join(read, ", ", &quote_name/1)
     changed = Enum.map_join(read, " OR ", &"OLD.#{quote_name(&1)} IS NOT NEW.#{quote_name(&1)}")
 
@@ -282,7 +282,7 @@ defmodule OptimalEngine.Sync.Capture do
       "EXISTS (SELECT 1 FROM sync_workspaces WHERE workspace_id = #{row}.\"workspace_id\")"
     end
 
-    matters = &Lineage.may_name_class_sql(class, &1)
+    matters = fn row -> Enum.map_join(classes, " OR ", &Lineage.may_name_class_sql(&1, row)) end
     bump = "INSERT INTO #{@stamp_table} (seq) VALUES (NULL); DELETE FROM #{@stamp_table};"
 
     drops =
@@ -293,7 +293,7 @@ defmodule OptimalEngine.Sync.Capture do
       [
         """
         CREATE TRIGGER #{quote_name("sync_stamp_ai_#{table}")} AFTER INSERT ON #{t}
-        WHEN #{syncing.("NEW")} AND #{matters.("NEW")}
+        WHEN #{syncing.("NEW")} AND (#{matters.("NEW")})
         BEGIN
           #{bump}
         END
@@ -301,14 +301,14 @@ defmodule OptimalEngine.Sync.Capture do
         """
         CREATE TRIGGER #{quote_name("sync_stamp_au_#{table}")} AFTER UPDATE OF #{updated} ON #{t}
         WHEN (#{changed}) AND (#{syncing.("NEW")} OR #{syncing.("OLD")})
-          AND (#{matters.("NEW")} OR #{matters.("OLD")})
+          AND ((#{matters.("NEW")}) OR (#{matters.("OLD")}))
         BEGIN
           #{bump}
         END
         """,
         """
         CREATE TRIGGER #{quote_name("sync_stamp_ad_#{table}")} AFTER DELETE ON #{t}
-        WHEN #{syncing.("OLD")} AND #{matters.("OLD")}
+        WHEN #{syncing.("OLD")} AND (#{matters.("OLD")})
         BEGIN
           #{bump}
         END

@@ -951,14 +951,15 @@ defmodule OptimalEngine.Sync.Gate do
 
   # A metadata that may carry a label or a partition. Text that spells one of the
   # two keys is a candidate, and so is any text with a backslash in which a
-  # member is named by that key: `"security\u005flabels"` is the key
+  # member is named by one of them: `"security\u005flabels"` is the key
   # `security_labels` once decoded, and spelled so it does not contain it.
   # `metadata_labels_sql/1` then reads the decoded keys.
-  defp metadata_candidate(column) do
+  @doc false
+  def metadata_candidate(column) do
     quoted = quote_name(column)
 
     "(#{quoted} LIKE '%security_labels%' OR #{quoted} LIKE '%partition_ids%' OR " <>
-      "(instr(#{quoted}, char(92)) > 0 AND json_valid(#{quoted}) AND " <>
+      "(#{Lineage.backslash_sql(quoted)} AND json_valid(#{quoted}) AND " <>
       "EXISTS (SELECT 1 FROM json_each(#{quoted}) WHERE key IN ('security_labels', 'partition_ids'))))"
   end
 
@@ -986,7 +987,7 @@ defmodule OptimalEngine.Sync.Gate do
 
       index.contexts != %{} or index.memories != %{} or
         Enum.any?(Lineage.scanned_tables(), fn table ->
-          predicate = exact_predicate(Lineage.class_column(Lineage.spec(table)), gate.rank)
+          predicate = columns_above(Lineage.class_columns(Lineage.spec(table)), gate.rank)
 
           sql =
             "SELECT 1 FROM #{quote_name(table)} WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate} LIMIT 1"
@@ -996,59 +997,70 @@ defmodule OptimalEngine.Sync.Gate do
     end)
   end
 
-  # The characters of Unicode White_Space, which `String.trim/1` removes.
-  @white_space "(' ' || char(#{Enum.join(Enum.to_list(9..13) ++ [133, 160, 5760, 6158] ++ Enum.to_list(8192..8202) ++ [8232, 8233, 8239, 8287, 12288], ", ")}))"
+  # SQL for "some column of this table names a class above the gate".
+  defp columns_above(columns, rank),
+    do: "(" <> Enum.map_join(columns, " OR ", &exact_predicate(&1, rank)) <> ")"
 
-  # SQL for "this row names a class above the gate", by the way its table names a
-  # class (`Lineage.class_column/1`). It holds what `SecurityLabels.tokens/1`
-  # ranks above the gate, and what it cannot read: a label that is not a
-  # non-blank string, or a value that is not an array, is `unresolved` there
-  # (restricted), so it is held here too, and an aggregate never goes out around
-  # a row nobody could classify. Exposed for the test that compares the two.
+  # SQL for "this column names a class above the gate", by the way its table
+  # names a class (`Lineage.class_columns/1`). It holds what
+  # `SecurityLabels.tokens/1` and `Lineage.own_tokens/2` rank above the gate, and
+  # what they cannot read: a label that is not a non-blank string, a value that
+  # is not an array, partitions that cannot be read, a class name this Engine
+  # does not know. All of those are `restricted` for the row, so they are held
+  # here too, and an aggregate never goes out around a row nobody could
+  # classify. Exposed for the test that compares the two.
   @doc false
-  def exact_predicate({:labels, column}, rank) do
-    """
-    (CASE WHEN json_valid(#{column}) THEN
-       CASE json_type(#{column}) WHEN 'array' THEN #{labels_above(column, rank)} ELSE 1 END
-       ELSE 1 END)
-    """
-  end
+  def exact_predicate({:labels, column}, rank),
+    do: Lineage.unreadable_array_sql(column, labels_above(rank))
 
-  # A `security_labels` key that appears twice is above every class: SQLite reads
-  # the first of two and `SecurityLabels.metadata_map/1` marks the pair as
-  # unresolved, and the row must not pass as open because the first is.
+  # Partitions that can be read rank nothing; ones that cannot rank restricted.
+  def exact_predicate({:partitions, column}, _rank), do: Lineage.unreadable_array_sql(column)
+
+  # A `security_labels` or `partition_ids` key that appears twice is above every
+  # class: SQLite reads the first of two and `SecurityLabels.metadata_map/1` marks
+  # the pair as unresolved, and the row must not pass as open because the first is.
   # The value is read as `SecurityLabels.tokens/1` reads it: an array, or text
   # that holds the JSON of an array (empty text and `null` name nothing);
   # anything else cannot be read.
   def exact_predicate({:meta, meta}, rank) do
-    key = "'$.security_labels'"
-    text = "json_extract(#{meta}, #{key})"
-
     """
     (CASE WHEN json_valid(#{meta}) THEN
-       CASE WHEN (SELECT count(*) FROM json_each(#{meta}) WHERE key = 'security_labels') > 1 THEN 1
-       WHEN json_type(#{meta}, #{key}) IS NULL OR json_type(#{meta}, #{key}) = 'null' THEN 0
-       WHEN json_type(#{meta}, #{key}) = 'array' THEN #{labels_above("#{meta}, #{key}", rank)}
-       WHEN json_type(#{meta}, #{key}) = 'text' THEN
-         CASE WHEN #{text} = '' THEN 0
-              WHEN json_valid(#{text}) AND json_type(#{text}) = 'array' THEN #{labels_above(text, rank)}
-              ELSE 1 END
-       ELSE 1 END
+       (#{metadata_key(meta, "security_labels", labels_above(rank))})
+       OR (#{metadata_key(meta, "partition_ids", nil)})
        ELSE 0 END)
     """
   end
 
-  # `internal` is the default of a classification column and says nothing.
-  def exact_predicate({:class, class}, rank),
-    do: "lower(#{class}) IN (#{classes_above(max(rank, 1))})"
+  # `internal` is the default of a classification column and says nothing; a
+  # name this Engine does not know cannot be read (`Lineage.own_tokens/2`).
+  def exact_predicate({:class, class}, rank) do
+    name = "lower(#{Lineage.trimmed_sql(class)})"
+    known = Enum.map_join(SecurityLabels.classes(), ", ", &"'#{&1}'")
 
-  # Some element of the array `source` is above the gate, or is not a non-blank
-  # string (trimmed of the white space `String.trim/1` removes).
-  defp labels_above(source, rank) do
-    trimmed = "trim(j.value, #{@white_space})"
+    "(#{class} IS NOT NULL AND #{class} != '' AND " <>
+      "(#{name} NOT IN (#{known}) OR #{name} IN (#{classes_above(max(rank, 1))})))"
+  end
 
-    "EXISTS (SELECT 1 FROM json_each(#{source}) j WHERE j.type != 'text' OR #{trimmed} = '' " <>
-      "OR lower(#{trimmed}) IN (#{classes_above(rank)}))"
+  # An element of a label array that is a class above the gate.
+  defp labels_above(rank),
+    do: "lower(#{Lineage.trimmed_sql("j.value")}) IN (#{classes_above(rank)})"
+
+  defp metadata_key(meta, key, extra) do
+    path = "'$.#{key}'"
+    type = "json_type(#{meta}, #{path})"
+    text = "json_extract(#{meta}, #{path})"
+
+    """
+    CASE WHEN (SELECT count(*) FROM json_each(#{meta}) WHERE key = '#{key}') > 1 THEN 1
+    WHEN #{type} IS NULL OR #{type} = 'null' THEN 0
+    WHEN #{type} = 'array' THEN #{Lineage.unreadable_elements_sql("#{meta}, #{path}", extra)}
+    WHEN #{type} = 'text' THEN
+      CASE WHEN #{text} = '' THEN 0
+           WHEN json_valid(#{text}) AND json_type(#{text}) = 'array'
+             THEN #{Lineage.unreadable_elements_sql(text, extra)}
+           ELSE 1 END
+    ELSE 1 END
+    """
   end
 
   defp classes_above(rank) do
@@ -1178,27 +1190,35 @@ defmodule OptimalEngine.Sync.Gate do
 
   defp build_index(gate) do
     scope = [gate.tenant_id, gate.workspace_id]
-    predicate = source_predicate(gate, "security_labels", "partition_ids")
+    source_spec = Lineage.spec("source_packages")
+    claim_spec = Lineage.spec("claims")
 
+    # A source is as classified as everything it carries: its labels, its
+    # partitions and the labels and partitions in its metadata, as
+    # `Lineage.own_tokens/2` reads them.
     held_sources =
       """
       SELECT id, source_uri, metadata, security_labels, partition_ids FROM source_packages
-      WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate}
+      WHERE tenant_id = ?1 AND workspace_id = ?2
+        AND #{source_predicate(gate, Lineage.class_columns(source_spec))}
       """
       |> query!(scope)
       |> Enum.flat_map(fn [id, uri, metadata, labels, partitions] ->
-        selected(gate, carried(labels, partitions), {id, uri, metadata})
+        row = %{"security_labels" => labels, "partition_ids" => partitions, "metadata" => metadata}
+        selected(gate, own(source_spec, row), {id, uri, metadata})
       end)
 
     held_claims =
       """
       SELECT signal_id, metadata, subject_entity_id, object_entity_id, security_labels, partition_ids
       FROM claims
-      WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate}
+      WHERE tenant_id = ?1 AND workspace_id = ?2
+        AND #{source_predicate(gate, Lineage.class_columns(claim_spec))}
       """
       |> query!(scope)
       |> Enum.flat_map(fn [signal_id, metadata, subject, object, labels, partitions] ->
-        selected(gate, carried(labels, partitions), {signal_id, metadata, [subject, object]})
+        row = %{"security_labels" => labels, "partition_ids" => partitions, "metadata" => metadata}
+        selected(gate, own(claim_spec, row), {signal_id, metadata, [subject, object]})
       end)
 
     source_tokens = Map.new(held_sources, fn {tokens, {id, _uri, _metadata}} -> {id, tokens} end)
@@ -1257,6 +1277,9 @@ defmodule OptimalEngine.Sync.Gate do
     end
   end
 
+  # The tokens a row carries itself, in every column that can name a class.
+  defp own(spec, row), do: Lineage.own_tokens(spec, row) || MapSet.new()
+
   # The tokens a row carries in its labels and partitions columns.
   defp carried(labels, partitions) do
     MapSet.new(SecurityLabels.tokens(labels) ++ SecurityLabels.partition_tokens(partitions))
@@ -1274,15 +1297,22 @@ defmodule OptimalEngine.Sync.Gate do
   defp selected(%__MODULE__{mode: :grants}, tokens, payload),
     do: if(MapSet.size(tokens) > 0, do: [{tokens, payload}], else: [])
 
-  # SQL narrowing the rows an index is built from; `selected/3` then reads each
-  # row exactly.
-  defp source_predicate(%__MODULE__{mode: :class, rank: rank}, labels, _partitions),
-    do: above_predicate(labels, rank)
+  # SQL narrowing the rows an index is built from, over `columns` (as
+  # `Lineage.class_columns/1` lists them); `selected/3` then reads each row
+  # exactly. A replicating gate takes a row that names a class above its own or
+  # cannot be read, which is exactly what it selects; a reader's gate takes a row
+  # that carries anything. Neither looks for the text of a class name: a name
+  # can be spelled with an escape, and a label that is not a string has none.
+  defp source_predicate(%__MODULE__{mode: :class, rank: rank}, columns),
+    do: columns_above(columns, rank)
 
-  defp source_predicate(%__MODULE__{mode: :grants}, labels, partitions) do
-    "(#{labels} NOT IN ('[]', '') OR #{partitions} NOT IN ('[]', '') " <>
-      "OR NOT json_valid(#{labels}) OR NOT json_valid(#{partitions}))"
-  end
+  defp source_predicate(%__MODULE__{mode: :grants}, columns),
+    do: "(" <> Enum.map_join(columns, " OR ", &carries_anything/1) <> ")"
+
+  defp carries_anything({kind, column}) when kind in [:labels, :partitions],
+    do: "(#{column} NOT IN ('[]', '') OR NOT json_valid(#{column}))"
+
+  defp carries_anything({:meta, column}), do: metadata_candidate(column)
 
   # The ledger entries of a labelled source, found by their own labels or by
   # the held source packages they list, name every object derived from it.
@@ -1307,7 +1337,7 @@ defmodule OptimalEngine.Sync.Gate do
            security_labels, partition_ids
     FROM derivation_ledger l
     WHERE l.tenant_id = ?1 AND l.workspace_id = ?2
-      AND (#{source_predicate(gate, "l.security_labels", "l.partition_ids")}#{linked})
+      AND (#{source_predicate(gate, [{:labels, "l.security_labels"}, {:partitions, "l.partition_ids"}])}#{linked})
     """
 
     sql
@@ -1478,18 +1508,6 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   # -- reading the Store ----------------------------------------------------------
-
-  # SQL for "this column names a class above the gate, or cannot be read". It
-  # narrows the rows an index is built from; each row's class is then read
-  # exactly (`SecurityLabels.token_rank/1`).
-  defp above_predicate(column, rank) do
-    likes =
-      SecurityLabels.classes()
-      |> Enum.drop(rank + 1)
-      |> Enum.map_join(" OR ", &"lower(#{column}) LIKE '%#{&1}%'")
-
-    "(#{likes} OR NOT json_valid(#{column}))"
-  end
 
   # A row by its key, from what `prefetch/3` read or from the Store.
   defp load(gate, table, %{key: key} = spec, id) when is_binary(key) do
