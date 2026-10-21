@@ -115,6 +115,27 @@ That happens when two tenants ingest the same connector item into the same bare 
 Register the workspace for each tenant, or give each its own id, to keep both.
 A row left under `default` in a workspace that is registered afterwards is taken over by the owner the next time it is written, and the chunks, claims and vectors that name it go with it.
 
+### Rows written before 0.3.8
+
+Before 0.3.8 a context was filed under the tenant of its workspace row, so what a tenant's key wrote under a bare id was labelled `default` and its own reads do not see it.
+`DataSteward.relabel_bare_scope/2` gives the tenant those rows back, in one transaction:
+
+```
+bin/optimal rpc 'OptimalEngine.DataSteward.relabel_bare_scope("shared-notes", tenant_id: "acme", actor_id: "user:ops")'
+```
+
+A row moves when its provenance names the tenant, and only then:
+
+- a claim whose source package is the tenant's, in that workspace;
+- a context that intake derived from such a package (the `intake.process` entry of the derivation ledger names the package and the context);
+- the chunks, vectors and entities of those contexts;
+- the graph edges with one of those contexts or claims at an end (a `default` copy of an edge the tenant already has is dropped).
+
+A row with no source package (a batch import of signals, a file indexed on its own), a row a package of another tenant names, a row that is not `default`, and an edge between two entities stay as they are.
+Run the graph backfill afterwards (`POST /api/maintenance/graph/backfill`) to write the entity edges for each context's tenant.
+The id must be bare and unregistered (a registered workspace's owner decides what its rows are), the tenant must exist and not be `default`, and the answer is `nothing_to_relabel` when the tenant has nothing under the id.
+The result counts each kind of row.
+
 ## Graph reads
 
 Two tenants can share a bare workspace id (one nobody registered), so the graph routes are bound to the caller's tenant.
