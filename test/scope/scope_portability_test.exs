@@ -57,6 +57,46 @@ defmodule OptimalEngine.ScopePortabilityTest do
       )
   end
 
+  # Adds a table to an exported bundle and signs the manifest again, as anyone
+  # who can write a bundle can.
+  defp craft_bundle(ctx, table, rows) do
+    dir = Path.join(System.tmp_dir!(), "craft-#{ctx.n}-#{table}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    :ok =
+      :erl_tar.extract(String.to_charlist(ctx.path), [:compressed, {:cwd, String.to_charlist(dir)}])
+
+    {:ok, info} = Store.raw_query("PRAGMA table_info(#{table})", [])
+    content = Enum.map_join(rows, "", &(Jason.encode!(&1) <> "\n"))
+    File.write!(Path.join([dir, "tables", table <> ".jsonl"]), content)
+
+    entry = %{
+      "name" => table,
+      "rows" => length(rows),
+      "columns" => Enum.map(info, fn [_cid, name | _rest] -> name end),
+      "sha256" => :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+    }
+
+    manifest =
+      dir
+      |> Path.join("manifest.json")
+      |> File.read!()
+      |> Jason.decode!()
+      |> Map.delete("bundle_sha256")
+      |> Map.update!("tables", &(&1 ++ [entry]))
+
+    manifest = Map.put(manifest, "bundle_sha256", OptimalEngine.Authority.CanonicalJSON.hash(manifest))
+    File.write!(Path.join(dir, "manifest.json"), Jason.encode!(manifest, pretty: true))
+
+    files =
+      for f <- Path.wildcard(Path.join(dir, "**"), match_dot: true),
+          File.regular?(f),
+          do: {String.to_charlist(Path.relative_to(f, dir)), String.to_charlist(f)}
+
+    :ok = :erl_tar.create(String.to_charlist(ctx.path), files, [:compressed])
+  end
+
   defp call(method, path, token) do
     conn = conn(method, path)
     conn = if token, do: put_req_header(conn, "authorization", "Bearer " <> token), else: conn
@@ -731,6 +771,45 @@ defmodule OptimalEngine.ScopePortabilityTest do
       target = "tamper-target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "T"})
       assert {:error, :table_checksum_mismatch} = WorkspaceBundle.import(ctx.path, target)
+      assert {:error, :not_found} = Workspace.get("#{target}:open")
+    end
+
+    test "a crafted bundle cannot write a table the Engine keeps for itself", ctx do
+      {:ok, _manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+
+      target = "crafted-target-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "T"})
+      connector = "crafted-connector-#{ctx.n}"
+
+      craft_bundle(ctx, "connectors", [
+        %{
+          "id" => connector,
+          "tenant_id" => target,
+          "workspace_id" => "#{target}:open",
+          "kind" => "gmail",
+          "config" =>
+            ~s({"credential_source":"broker","broker_url":"https://api.miosa.ai/api/v1/connect/broker/credentials","broker_reference":"x"}),
+          "enabled" => 1
+        }
+      ])
+
+      assert {:error, {:table_not_allowed, ["connectors"]}} = WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM connectors WHERE id = ?1", [connector])
+
+      assert {:error, :not_found} = Workspace.get("#{target}:open")
+    end
+
+    test "nor a table that is not a workspace's data at all", ctx do
+      {:ok, _manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+
+      target = "crafted-tenants-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "T"})
+
+      craft_bundle(ctx, "tenants", [%{"id" => "crafted-tenant-#{ctx.n}", "name" => "Crafted"}])
+
+      assert {:error, {:table_not_allowed, ["tenants"]}} = WorkspaceBundle.import(ctx.path, target)
       assert {:error, :not_found} = Workspace.get("#{target}:open")
     end
 

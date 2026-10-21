@@ -10,7 +10,7 @@
       },
       "status": 200,
       "body": {
-        "access_token": "ya29.example-access-token",
+        "access_token": "example-drive-access-token",
         "expires_in": 3599,
         "token_type": "Bearer"
       }

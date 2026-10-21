@@ -217,6 +217,53 @@ defmodule OptimalEngine.Connectors.RowsTest do
       refute Jason.encode!(Rows.list(ctx.tenant)) =~ "conn_0000000006"
     end
 
+    test "a reference written before sealing is sealed on the connector's next change", ctx do
+      id = "#{ctx.tenant}-legacy-next"
+      insert_broker_row(ctx, id, %{"broker_reference" => "conn_0000000007.example-signature"})
+
+      assert {:ok, view} = Rows.update(ctx.tenant, id, %{"enabled" => false})
+      assert view.config["broker_reference"] == "[redacted]"
+
+      stored = stored_config(id)
+      refute Jason.encode!(stored) =~ "conn_0000000007"
+      refute Map.has_key?(stored, "broker_reference")
+      assert is_binary(stored["broker_reference_ciphertext"])
+
+      # Sealed for this connector in this workspace: it opens there.
+      stub = OptimalEngine.Test.BrokerStub.install(nil, issue: [{"example-issued-token", 300}])
+      on_exit(fn -> OptimalEngine.Test.BrokerStub.uninstall(stub) end)
+
+      scope = %{id: id, kind: "gmail", tenant_id: ctx.tenant, workspace_id: ctx.mail}
+      assert {:ok, _config} = OptimalEngine.Connectors.CredentialSource.hydrate(stored, scope)
+
+      assert [%{body: %{"reference" => "conn_0000000007.example-signature"}}] =
+               OptimalEngine.Test.BrokerStub.broker_calls(stub)
+    end
+
+    test "a reference sealed before it was bound to its connector is bound on the next change",
+         ctx do
+      id = "#{ctx.tenant}-unbound"
+      {:ok, unbound} = OptimalEngine.Connectors.CredentialSource.seal_reference(%{"broker_reference" => "conn_0000000008"})
+      insert_broker_row(ctx, id, unbound)
+
+      assert {:ok, _view} = Rows.update(ctx.tenant, id, %{"enabled" => false})
+
+      rebound = stored_config(id)["broker_reference_ciphertext"]
+      assert is_binary(rebound)
+      refute rebound == unbound["broker_reference_ciphertext"]
+
+      # Copied to a connector of another id, the bound seal no longer opens.
+      stub = OptimalEngine.Test.BrokerStub.install(nil, issue: [{"example-issued-token", 300}])
+      on_exit(fn -> OptimalEngine.Test.BrokerStub.uninstall(stub) end)
+
+      config = Map.put(stored_config(id), "broker_reference_ciphertext", rebound)
+      scope = %{id: id, kind: "gmail", tenant_id: ctx.tenant, workspace_id: ctx.mail}
+      assert {:ok, _config} = OptimalEngine.Connectors.CredentialSource.hydrate(config, scope)
+
+      assert {:error, :broker_reference_unreadable} =
+               OptimalEngine.Connectors.CredentialSource.hydrate(config, %{scope | id: "#{id}-other"})
+    end
+
     test "records the registration in the evidence chain", ctx do
       id = "#{ctx.tenant}-evidence"
 
@@ -424,6 +471,27 @@ defmodule OptimalEngine.Connectors.RowsTest do
       assert id == "#{ctx.tenant}-s"
       assert Rows.summary(ctx.tenant, workspace_ids: [ctx.files]).total == 0
     end
+  end
+
+  defp insert_broker_row(ctx, id, extra) do
+    config =
+      Map.merge(
+        %{
+          "user_email" => "ops@example.com",
+          "credential_source" => "broker",
+          "broker_url" => "https://connect.example.com/api/credentials"
+        },
+        extra
+      )
+
+    {:ok, _} =
+      Store.raw_query(
+        """
+        INSERT INTO connectors (id, tenant_id, workspace_id, kind, config, enabled)
+        VALUES (?1, ?2, ?3, 'gmail', ?4, 1)
+        """,
+        [id, ctx.tenant, ctx.mail, Jason.encode!(config)]
+      )
   end
 
   defp stored_config(id) do

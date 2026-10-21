@@ -50,7 +50,7 @@ defmodule OptimalEngine.Connectors.GmailTest do
       [message_call | _] = ConnectorFixtureStub.calls_matching(stub, "/messages/msg-0001")
 
       assert Enum.any?(message_call.headers, fn {k, v} ->
-               k == "authorization" and v == "Bearer ya29.example-access-token"
+               k == "authorization" and v == "Bearer example-gmail-access-token"
              end)
 
       # The initial pull is bounded by the lookback window, not by everything,
