@@ -36,5 +36,5 @@
   },
   "passed": false,
   "profile": "smoke",
-  "workspace": "default:miosa"
+  "workspace": "default:example"
 }

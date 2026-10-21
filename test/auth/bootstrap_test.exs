@@ -41,14 +41,14 @@ defmodule OptimalEngine.Auth.BootstrapTest do
              Bootstrap.run(
                env(token, %{
                  "OPTIMAL_BOOTSTRAP_SCOPES" => "read, write ,topology:write",
-                 "OPTIMAL_BOOTSTRAP_WORKSPACES" => "miosa,compute",
+                 "OPTIMAL_BOOTSTRAP_WORKSPACES" => "sales,support",
                  "OPTIMAL_BOOTSTRAP_TENANT" => @tenant
                })
              )
 
     assert {:ok, key} = ApiKey.verify(token)
     assert key.scopes == ["read", "write", "topology:write"]
-    assert key.workspace_scope == ["miosa", "compute"]
+    assert key.workspace_scope == ["sales", "support"]
   end
 
   test "a second boot with the same token changes nothing" do

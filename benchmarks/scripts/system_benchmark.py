@@ -187,7 +187,7 @@ def main() -> int:
     parser.add_argument("--profile", default="smoke")
     parser.add_argument("--profiles", default="benchmarks/configs/system_profiles.json")
     parser.add_argument("--engine-url", default="http://127.0.0.1:4200")
-    parser.add_argument("--workspace", default="default:miosa")
+    parser.add_argument("--workspace", default="default:example")
     parser.add_argument("--endpoints", default="search,rag,assemble,reconstruct")
     parser.add_argument("--requests", type=int)
     parser.add_argument("--concurrency", type=int)

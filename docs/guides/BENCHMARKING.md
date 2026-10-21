@@ -158,7 +158,7 @@ Run endpoint speed and reliability:
 ```bash
 python3 benchmarks/scripts/system_benchmark.py \
   --profile smoke \
-  --workspace default:miosa \
+  --workspace default:example \
   --out benchmarks/results/system-smoke.json
 ```
 
@@ -172,7 +172,7 @@ Measure cold-first-request behavior separately:
 python3 benchmarks/scripts/system_benchmark.py \
   --profile smoke \
   --warmup 0 \
-  --workspace default:miosa \
+  --workspace default:example \
   --out benchmarks/results/system-cold-smoke.json
 ```
 

@@ -5,7 +5,7 @@ defmodule OptimalEngine.DataStewardTest do
   alias OptimalEngine.{DataSteward, Workspace}
 
   test "dashboard exposes every governed remediation queue without mutation" do
-    workspace = "default:miosa"
+    workspace = "default:example"
 
     assert {:ok, dashboard} = DataSteward.dashboard(workspace)
     assert dashboard.workspace_id == workspace
@@ -19,7 +19,7 @@ defmodule OptimalEngine.DataStewardTest do
   test "empty bulk decisions are rejected by the interface" do
     assert_raise FunctionClauseError, fn ->
       DataSteward.decide_claims([], :accept,
-        workspace_id: "default:miosa",
+        workspace_id: "default:example",
         actor_id: "user:test"
       )
     end

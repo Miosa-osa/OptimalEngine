@@ -134,7 +134,7 @@ Measure endpoint tail latency, throughput, reliability, and declared SLOs:
 ```bash
 python3 benchmarks/scripts/system_benchmark.py \
   --profile smoke \
-  --workspace default:miosa \
+  --workspace default:example \
   --out benchmarks/results/system-smoke.json
 ```
 

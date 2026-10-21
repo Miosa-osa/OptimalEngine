@@ -56,7 +56,7 @@ This scaffolds the full on-disk structure:
 ```
 engineering/
 ├── nodes/
-│   ├── 01-team/
+│   ├── team/
 │   │   ├── context.md
 │   │   └── signals/
 │   └── product-customer-portal/
@@ -77,7 +77,7 @@ engineering/
 
 ```
 nodes/
-└── <slug>/             e.g. entity-company, product-customer-portal, 03-sales
+└── <slug>/             e.g. entity-company, product-customer-portal, sales
     ├── context.md      Persistent facts — edit in place as ground truth changes
     ├── signal.md       Rolling weekly status — overwritten each cycle
     └── signals/        Append-only dated signals
@@ -93,7 +93,7 @@ Every signal file has YAML frontmatter + body:
 title: Customer pricing call — Q4
 genre: transcript
 mode: linguistic
-node: 03-sales
+node: sales
 sn_ratio: 0.75
 entities:
   - { name: "Alice", type: person }
