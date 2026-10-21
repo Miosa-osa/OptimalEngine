@@ -268,18 +268,19 @@ defmodule OptimalEngine.Store.Postgres do
     end
   end
 
-  # A context another tenant held is taken over by the owner of its workspace:
-  # the chunks and claims written for it go with it.
-  defp relabel_children(_txn, _id, _tenant_id, nil), do: :ok
-  defp relabel_children(_txn, _id, tenant_id, tenant_id), do: :ok
-
-  defp relabel_children(txn, id, tenant_id, _previous) do
-    Enum.reduce_while(ContextTenant.relabel_sql(), :ok, fn sql, :ok ->
-      case Connection.txn_query(txn, sql, [tenant_id, id]) do
-        {:ok, _} -> {:cont, :ok}
-        {:error, _reason} = err -> {:halt, err}
-      end
-    end)
+  # A context the default tenant held is taken over by the owner of its workspace:
+  # the chunks, chunk embeddings, claims and vectors written for it go with it.
+  defp relabel_children(txn, id, tenant_id, previous) do
+    if ContextTenant.takeover?(previous, tenant_id) do
+      Enum.reduce_while(ContextTenant.relabel_sql(), :ok, fn sql, :ok ->
+        case Connection.txn_query(txn, sql, [tenant_id, id]) do
+          {:ok, _} -> {:cont, :ok}
+          {:error, _reason} = err -> {:halt, err}
+        end
+      end)
+    else
+      :ok
+    end
   end
 
   defp context_tenant(txn, %Context{} = context) do

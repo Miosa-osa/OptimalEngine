@@ -113,7 +113,7 @@ A context id is one row for the whole Engine, and the id of a connector item com
 So a write under a bare workspace id that would replace a row another tenant holds is refused (`context_id_in_use`) and leaves that row as it was.
 That happens when two tenants ingest the same connector item into the same bare workspace id: the first keeps the row.
 Register the workspace for each tenant, or give each its own id, to keep both.
-A row left under `default` in a workspace that is registered afterwards is taken over by the owner the next time it is written, and the chunks, claims and vectors that name it go with it.
+A row left under `default` in a workspace that is registered afterwards is taken over by the owner the next time it is written, and the chunks, chunk embeddings, claims and vectors that name it go with it (only the `default` ones: what another tenant wrote for a row it held stays its own).
 
 ## Graph reads
 
