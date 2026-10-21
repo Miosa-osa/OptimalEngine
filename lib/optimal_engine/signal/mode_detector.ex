@@ -18,13 +18,19 @@ defmodule OptimalEngine.Signal.ModeDetector do
     3. The dominant line kind decides; prose mixed with significant code,
        data or images is `:mixed`.
 
+  A long text is read by its head (`OptimalEngine.Signal.TextHead`, whole
+  lines up to 64 KiB), so detection takes bounded time whatever a
+  caller sends. JSON and JSON Lines are the exception: a cut record is not
+  JSON, so they are checked on the whole text, and both checks stop at the
+  first byte or line that does not fit.
+
   `detect/1` returns `{mode, confidence}`. Confidence is `:weak` when the text
   is too short or too structureless to decide on its own (a heading, a
   two-word reply). `resolve/2` lets a declared mode win, keeps strong content
   evidence, and falls back to the genre registry's mode for weak evidence.
   """
 
-  alias OptimalEngine.Signal.{GenreRegistry, TimeLimit}
+  alias OptimalEngine.Signal.{GenreRegistry, TextHead, TimeLimit}
 
   @type mode :: :linguistic | :visual | :code | :data | :mixed
   @type confidence :: :strong | :weak
@@ -38,6 +44,7 @@ defmodule OptimalEngine.Signal.ModeDetector do
 
   # Long documents are sampled from the top; the mode is settled long before.
   @max_lines 2_000
+  @sample_bytes 65_536
 
   @data_fence_langs ~w[json jsonl ndjson csv tsv yaml yml toml xml]
   @visual_fence_langs ~w[mermaid plantuml dot graphviz svg]
@@ -93,8 +100,12 @@ defmodule OptimalEngine.Signal.ModeDetector do
     ~r/^(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(TABLE|INDEX|UNIQUE|VIEW|SCHEMA|EXTENSION)|ALTER\s+TABLE|DROP\s+(TABLE|INDEX|VIEW)|WITH\s+\w+\s+AS|FROM|WHERE|INNER\s+JOIN|LEFT\s+JOIN|JOIN|GROUP\s+BY|ORDER\s+BY|VALUES|LIMIT|RETURNING|ON\s+CONFLICT)\b/,
     ~r/^\w+\s+(INTEGER|TEXT|VARCHAR(\(\d+\))?|BIGINT|BOOLEAN|SERIAL|BIGSERIAL|UUID|TIMESTAMP(TZ)?|INT|REAL|NUMERIC(\([\d, ]+\))?|DATE|JSONB?)\b/,
     ~r/^(FROM|RUN|COPY|ADD|WORKDIR|ENV|EXPOSE|CMD|ENTRYPOINT|ARG|USER|VOLUME|LABEL|HEALTHCHECK)\s+\S/,
-    ~r/^<\/?[a-zA-Z][\w-]*(\s+[\w:@-]+(=("[^"]*"|'[^']*'|[^\s>]+))?)*\s*\/?>/,
-    ~r/^[a-z-]+\s*:\s*[^;]+;\s*$/,
+    # A tag and its attributes. A value's first character picks its form
+    # (double-quoted, single-quoted or bare), so each attribute is read one
+    # way; overlapping forms under the repeat were exponential.
+    ~r/^<\/?[a-zA-Z][\w-]*+(\s++[\w:@-]++(=("[^"]*+"|'[^']*+'|[^\s>"'][^\s>]*+))?+)*+\s*+\/?>/,
+    # A CSS declaration. Its value takes the space after the colon too.
+    ~r/^[a-z-]++\s*+:[^;]++;\s*+$/,
     ~r/^[.#]?[a-zA-Z][\w\-.#:>, \[\]="]*+\s*+\{\s*+$/
   ]
 
@@ -176,18 +187,19 @@ defmodule OptimalEngine.Signal.ModeDetector do
 
   defp detect_text(text) do
     trimmed = String.trim(text)
+    sample = TextHead.take(trimmed, @sample_bytes)
 
     cond do
       trimmed == "" -> {:linguistic, :weak}
       json?(trimmed) -> {:data, :strong}
       json?(strip_json_comments(trimmed)) -> {:data, :strong}
       json_lines?(trimmed) -> {:data, :strong}
-      log_lines?(trimmed) -> {:data, :strong}
-      delimited_table?(trimmed) -> {:data, :strong}
-      key_value_document?(trimmed) -> {:data, :strong}
-      xml_document?(trimmed) -> {:data, :strong}
-      diagram?(trimmed) -> {:visual, :strong}
-      true -> trimmed |> tally_lines() |> decide()
+      log_lines?(sample) -> {:data, :strong}
+      delimited_table?(sample) -> {:data, :strong}
+      key_value_document?(sample) -> {:data, :strong}
+      xml_document?(sample) -> {:data, :strong}
+      diagram?(sample) -> {:visual, :strong}
+      true -> sample |> tally_lines() |> decide()
     end
   end
 
@@ -286,13 +298,21 @@ defmodule OptimalEngine.Signal.ModeDetector do
       (Regex.match?(~r/^[a-z_][\w.]*=/, line) and length(Regex.scan(@logfmt_pair, line)) >= 3)
   end
 
+  # Two or more lines, every non-blank one a JSON object. Lines are read one
+  # at a time, so a text whose first line is not one costs that line alone.
   defp json_lines?(text) do
-    lines = non_blank_lines(text)
-
-    length(lines) >= 2 and
-      Enum.all?(lines, fn line ->
-        String.starts_with?(line, "{") and match?({:ok, %{}}, Jason.decode(line))
+    objects =
+      text
+      |> String.splitter("\n")
+      |> Stream.map(&String.trim/1)
+      |> Stream.reject(&(&1 == ""))
+      |> Enum.reduce_while(0, fn line, n ->
+        if String.starts_with?(line, "{") and match?({:ok, %{}}, Jason.decode(line)),
+          do: {:cont, n + 1},
+          else: {:halt, 0}
       end)
+
+    objects >= 2
   end
 
   defp delimited_table?(text) do
