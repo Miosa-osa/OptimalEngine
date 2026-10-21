@@ -295,6 +295,31 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   @doc """
+  The ids among `ids` of rows the reader may see, when the table of each is
+  not known (a search result is a document or a memory). The tables are found
+  a chunk at a time; an id that is in none of them is read by no one.
+  """
+  @spec readable_any_ids(t(), [String.t() | nil]) :: MapSet.t(String.t())
+  def readable_any_ids(%__MODULE__{mode: :grants} = gate, ids) do
+    ids
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+    |> Enum.chunk_every(@chunk)
+    |> Enum.flat_map(fn chunk ->
+      tables = resolve_any(gate, chunk)
+
+      prefetch(
+        gate,
+        tables |> Enum.group_by(&elem(&1, 1), &elem(&1, 0)) |> Enum.to_list(),
+        0
+      )
+
+      for {id, table} <- tables, readable_id?(gate, table, id), do: id
+    end)
+    |> MapSet.new()
+  end
+
+  @doc """
   True when the row of `table` with this id is gone, or the reader may see it.
   A record of a change to a row that has since been deleted is judged by the
   record alone; one whose row is still there needs the row as well.

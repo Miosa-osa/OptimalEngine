@@ -38,6 +38,7 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Graph.Reflector, as: Reflector
   alias OptimalEngine.MemoryCore.ContextPackage
   alias OptimalEngine.Profile
+  alias OptimalEngine.ReadScope
   alias OptimalEngine.MemoryCore
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.AsOf
@@ -241,7 +242,7 @@ defmodule OptimalEngine.API.Router do
           :invalid_mode
 
         q == "" ->
-          {[], 0}
+          {[], 0, 0}
 
         true ->
           # Fetch up to max_limit to get the real total, then slice.
@@ -277,15 +278,24 @@ defmodule OptimalEngine.API.Router do
                   else: []
 
               # The exact score is for merging and does not leave the Engine.
-              all =
+              merged =
                 contexts
                 |> format_search_results(workspace)
                 |> Ranking.merge(inherited)
                 |> Enum.map(&Map.delete(&1, :rank_score))
 
+              {all, withheld} =
+                ReadScope.filter_any(
+                  Reader.scope(conn),
+                  merged,
+                  & &1.id,
+                  &(&1.source_workspace_id || workspace),
+                  & &1.uri
+                )
+
               total = length(all)
               page = all |> Enum.drop(offset) |> Enum.take(limit)
-              {page, total}
+              {page, total, withheld}
 
             # The Store did not answer in time: say so, rather than an empty
             # result list that reads as "nothing found".
@@ -302,7 +312,7 @@ defmodule OptimalEngine.API.Router do
               {:search_failed, ref}
 
             _ ->
-              {[], 0}
+              {[], 0, 0}
           end
       end
 
@@ -327,14 +337,16 @@ defmodule OptimalEngine.API.Router do
       {:search_failed, ref} ->
         search_failed_resp(conn, 500, ref)
 
-      {results, total} ->
+      {results, total, withheld} ->
         pagination = Pagination.wrap(results, total, offset, limit)
 
-        json(conn, %{
-          query: q,
-          results: results,
-          pagination: pagination.pagination
-        })
+        json(
+          conn,
+          withheld_note(
+            %{query: q, results: results, pagination: pagination.pagination},
+            withheld
+          )
+        )
     end
   end
 
@@ -383,7 +395,16 @@ defmodule OptimalEngine.API.Router do
         |> api_maybe_put(:as_of, as_of)
 
       case Grep.grep(q, grep_opts) do
-        {:ok, all_matches} ->
+        {:ok, found} ->
+          {all_matches, withheld} =
+            ReadScope.filter_any(
+              Reader.scope(conn),
+              found,
+              &(&1.chunk_id || &1.context_id),
+              fn _match -> workspace_id end,
+              fn _match -> nil end
+            )
+
           total = length(all_matches)
           matches = all_matches |> Enum.drop(offset) |> Enum.take(limit)
 
@@ -403,12 +424,18 @@ defmodule OptimalEngine.API.Router do
 
           pagination = Pagination.wrap(results, total, offset, limit)
 
-          json(conn, %{
-            query: q,
-            workspace_id: workspace_id,
-            results: results,
-            pagination: pagination.pagination
-          })
+          json(
+            conn,
+            withheld_note(
+              %{
+                query: q,
+                workspace_id: workspace_id,
+                results: results,
+                pagination: pagination.pagination
+              },
+              withheld
+            )
+          )
 
         {:error, {:invalid_as_of, _value}} ->
           send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
@@ -1742,21 +1769,27 @@ defmodule OptimalEngine.API.Router do
 
     case Wiki.latest(tenant, slug, audience, workspace) do
       {:ok, page} ->
-        resolver = fn _d, _opts -> {:ok, "", %{}} end
-        {rendered, warnings} = Wiki.render(page, resolver, format: format)
-
-        json(conn, %{
-          slug: page.slug,
-          audience: page.audience,
-          version: page.version,
-          workspace_id: page.workspace_id,
-          body: rendered,
-          warnings: warnings
-        })
+        if ReadScope.readable_page?(Reader.scope(conn), page),
+          do: render_wiki_page(conn, page, format),
+          else: send_resp(conn, 404, Jason.encode!(%{error: "page not found"}))
 
       _ ->
         send_resp(conn, 404, Jason.encode!(%{error: "page not found"}))
     end
+  end
+
+  defp render_wiki_page(conn, page, format) do
+    resolver = fn _d, _opts -> {:ok, "", %{}} end
+    {rendered, warnings} = Wiki.render(page, resolver, format: format)
+
+    json(conn, %{
+      slug: page.slug,
+      audience: page.audience,
+      version: page.version,
+      workspace_id: page.workspace_id,
+      body: rendered,
+      warnings: warnings
+    })
   end
 
   # ── Phase 12.5: endpoints the ported BusinessOS knowledge components call ─
@@ -1835,10 +1868,12 @@ defmodule OptimalEngine.API.Router do
   get "/api/signals/:id" do
     workspace = query_param(conn, "workspace", "default")
 
-    case signal_detail(id, workspace, conn.assigns[:current_tenant] || "default") do
-      nil -> send_resp(conn, 404, Jason.encode!(%{error: "signal not found"}))
-      detail -> json(conn, detail)
-    end
+    detail = signal_detail(id, workspace, conn.assigns[:current_tenant] || "default")
+
+    if detail &&
+         ReadScope.visible?(Reader.scope(conn), workspace, "contexts", id, detail.uri || id),
+       do: json(conn, detail),
+       else: send_resp(conn, 404, Jason.encode!(%{error: "signal not found"}))
   end
 
   # GET /api/activity — reverse-chron events (audit log). Params:
@@ -2585,17 +2620,28 @@ defmodule OptimalEngine.API.Router do
   # GET /api/memory/:id - fetch one memory by id. Org policy read from
   # another workspace of the tenant is labeled with its source.
   get "/api/memory/:id" do
-    with_memory(conn, id, :read_policy, fn
-      conn, mem, false ->
-        json(conn, memory_to_map(mem))
+    with_memory(conn, id, :read_policy, fn conn, mem, inherited? ->
+      cond do
+        not ReadScope.visible?(
+          Reader.scope(conn),
+          mem.workspace_id,
+          "memories",
+          mem.id,
+          "optimal://memory/#{mem.workspace_id}/#{mem.id}"
+        ) ->
+          memory_not_found(conn)
 
-      conn, mem, true ->
-        json(
-          conn,
-          mem
-          |> memory_to_map()
-          |> Map.merge(%{inherited: true, source_workspace_id: mem.workspace_id})
-        )
+        inherited? ->
+          json(
+            conn,
+            mem
+            |> memory_to_map()
+            |> Map.merge(%{inherited: true, source_workspace_id: mem.workspace_id})
+          )
+
+        true ->
+          json(conn, memory_to_map(mem))
+      end
     end)
   end
 
@@ -2640,16 +2686,29 @@ defmodule OptimalEngine.API.Router do
       |> Keyword.put(:offset, offset)
       |> api_maybe_put(:q, if(q == "", do: nil, else: q))
 
-    memories = OptimalEngine.Memory.list(list_opts)
+    {memories, withheld} =
+      ReadScope.filter(
+        Reader.scope(conn),
+        workspace_id,
+        "memories",
+        OptimalEngine.Memory.list(list_opts),
+        & &1.id,
+        &"optimal://memory/#{&1.workspace_id}/#{&1.id}"
+      )
+
     formatted = Enum.map(memories, &memory_to_map/1)
     pagination = Pagination.wrap(formatted, total, offset, limit)
 
-    response = %{
-      workspace_id: workspace_id,
-      count: length(memories),
-      memories: formatted,
-      pagination: pagination.pagination
-    }
+    response =
+      withheld_note(
+        %{
+          workspace_id: workspace_id,
+          count: length(memories),
+          memories: formatted,
+          pagination: pagination.pagination
+        },
+        withheld
+      )
 
     response = if q != "", do: Map.put(response, :query, q), else: response
     json(conn, response)
@@ -6126,6 +6185,15 @@ defmodule OptimalEngine.API.Router do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(400, Jason.encode!(%{error: "invalid_parameter", detail: message}))
+  end
+
+  # The gate that filters what a reader may see could not read the Store: the
+  # request is refused whole, never answered with what was read so far.
+  def handle_errors(conn, %{reason: %OptimalEngine.Sync.Gate.StoreError{}}) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> put_resp_header("retry-after", "1")
+    |> send_resp(503, Jason.encode!(%{error: "store_unavailable", detail: @busy_detail}))
   end
 
   def handle_errors(conn, %{reason: reason}) do
