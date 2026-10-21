@@ -52,7 +52,7 @@ defmodule OptimalEngine.Portability.BundleJobs do
   @idempotency_key ~r/\A[\x21-\x7E]{1,128}\z/
   @sha256 ~r/\A[0-9a-f]{64}\z/
 
-  @retryable ~w(fetch_failed insufficient_storage store_busy engine_restarted)
+  @retryable ~w(fetch_failed insufficient_storage store_busy engine_restarted import_in_progress)
 
   @type error :: {:error, atom(), String.t()} | {:error, atom(), Jobs.job()}
 
@@ -546,19 +546,10 @@ defmodule OptimalEngine.Portability.BundleJobs do
       case WorkspaceBundle.import(path, job.tenant_id, opts) do
         {:ok, summary} -> {:ok, import_result(summary)}
         {:error, :cancelled} -> {:error, :cancelled}
-        {:error, reason} -> import_error(note_unlogged(reason, job))
+        {:error, reason} -> import_error(reason)
       end
     end
   end
-
-  # A batch committed whose line the log could not take: the log is short of
-  # what was written, so the cleanup that follows cannot be complete.
-  defp note_unlogged({:import_failed, _table, {:written_log, _}} = reason, job) do
-    update_report(job.id, %{"unlogged" => true})
-    reason
-  end
-
-  defp note_unlogged(reason, _job), do: reason
 
   defp import_source(job, %{"kind" => "bundle", "name" => name}) do
     with {:ok, path} <- WorkspaceBundle.bundle_path(job.tenant_id, name),
@@ -634,6 +625,17 @@ defmodule OptimalEngine.Portability.BundleJobs do
   defp import_error(:workspace_exists),
     do: {:error, :workspace_exists, "the target workspace already exists"}
 
+  defp import_error(:import_in_progress),
+    do:
+      {:error, :import_in_progress,
+       "another import is creating the target workspace, or what a stopped one wrote is being taken back"}
+
+  defp import_error(:insufficient_storage),
+    do: {:error, :insufficient_storage, "the disk cannot hold the bundle and what it unpacks to"}
+
+  defp import_error(:bundle_too_large),
+    do: {:error, :bundle_too_large, "the bundle unpacks to more than this Engine accepts"}
+
   defp import_error(reason)
        when reason in [:table_checksum_mismatch, :file_checksum_mismatch, :invalid_bundle],
        do: {:error, :invalid_bundle, to_string(reason)}
@@ -700,7 +702,7 @@ defmodule OptimalEngine.Portability.BundleJobs do
   end
 
   defp partial?(%{kind: @import}, report, cleaned) do
-    cleaned == :incomplete or report["unlogged"] == true or
+    cleaned == :incomplete or
       (report["target_was_empty"] == false and report["phase"] in ["writing", "files"])
   end
 

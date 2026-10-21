@@ -56,6 +56,40 @@ defmodule OptimalEngine.Application do
     end
   end
 
+  # Workspaces a bundle import was creating when the Engine stopped. Their
+  # marks are listed as the child list is built, before any child starts, so
+  # an import this run begins is never among them; the child removes them
+  # right after the Store starts, before any worker or the API can write.
+  # Like the sweep, only the Engine that serves the API does this.
+  defp unfinished_imports_child do
+    marks =
+      if Keyword.get(Application.get_env(:optimal_engine, :api, []), :enabled, false),
+        do: OptimalEngine.Portability.WorkspaceBundle.unfinished_imports(),
+        else: []
+
+    %{
+      id: :unfinished_bundle_imports,
+      start: {__MODULE__, :discard_unfinished_imports, [marks]},
+      restart: :temporary
+    }
+  end
+
+  @doc false
+  # Runs as a supervisor child, so it returns :ignore and leaves no process,
+  # and never fails boot: a mark it could not act on stays for the next one.
+  def discard_unfinished_imports(marks) do
+    OptimalEngine.Portability.WorkspaceBundle.discard_unfinished_imports(marks)
+    :ignore
+  rescue
+    error ->
+      Logger.error("[OptimalEngine] unfinished bundle imports: #{Exception.message(error)}")
+      :ignore
+  catch
+    kind, reason ->
+      Logger.error("[OptimalEngine] unfinished bundle imports: #{kind} #{inspect(reason)}")
+      :ignore
+  end
+
   defp base_children do
     [
       # ── Recent log lines for GET /api/maintenance/log (first, so boot is kept) ─
@@ -66,6 +100,7 @@ defmodule OptimalEngine.Application do
 
       # ── Core engine (SQLite-backed, must start first) ─────────────────────
       OptimalEngine.Store,
+      unfinished_imports_child(),
       OptimalEngine.Pipeline.Router,
       OptimalEngine.Pipeline.Indexer,
       OptimalEngine.Retrieval.Search,
