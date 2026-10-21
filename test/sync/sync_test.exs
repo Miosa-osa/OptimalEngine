@@ -13,6 +13,7 @@ defmodule OptimalEngine.SyncTest do
   import ExUnit.CaptureLog
 
   alias OptimalEngine.{Store, Sync, Workspace}
+  alias OptimalEngine.Portability.WorkspaceBundle
   alias OptimalEngine.Sync.Capture
   alias OptimalEngine.Tenancy.Tenant
 
@@ -4082,5 +4083,165 @@ defmodule OptimalEngine.SyncTest do
     assert manifest["ledger_sequence"] > 0
     refute Enum.any?(manifest["tables"], &(&1["name"] in ["sync_mutations", "sync_capture"]))
     File.rm(path)
+  end
+
+  test "a bundle's mark covers changes captured but not yet sealed", ctx do
+    insert_context(ctx.tenant, ctx.ws, "sealed-#{ctx.n}", "Sealed")
+    {:ok, _} = Capture.seal()
+    insert_context(ctx.tenant, ctx.ws, "pending-#{ctx.n}", "Pending")
+
+    path = Path.join(System.tmp_dir!(), "mark-#{ctx.n}.tar.gz")
+    {:ok, manifest} = OptimalEngine.Portability.WorkspaceBundle.export(ctx.tenant, ctx.ws, path)
+    File.rm(path)
+
+    # Both rows are in the bundle, so a replica seeded from it must find neither
+    # above the mark; nothing written before the export is pulled again.
+    after_mark = Sync.changes(ctx.tenant, ctx.ws, since: manifest["ledger_sequence"])
+    assert after_mark["mutations"] == []
+
+    insert_context(ctx.tenant, ctx.ws, "later-#{ctx.n}", "Later")
+    later = Sync.changes(ctx.tenant, ctx.ws, since: manifest["ledger_sequence"])
+    ids = Enum.map(later["mutations"], & &1["entity_id"])
+    assert "later-#{ctx.n}" in ids
+    refute "pending-#{ctx.n}" in ids
+  end
+
+  describe "a bundle taken while its workspace is written" do
+    # The export reads one row per page here, and `write` runs once, right after
+    # the first page of `table` is read: a write that lands while it pages.
+    defp export_while_writing(table, write, export) do
+      previous = Application.fetch_env(:optimal_engine, :bundle_export_page_rows)
+      Application.put_env(:optimal_engine, :bundle_export_page_rows, 1)
+      handler = "between-pages-#{System.unique_integer([:positive])}"
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:optimal_engine, :bundle, :export_page],
+          &__MODULE__.between_pages/4,
+          %{table: table, write: write, ref: handler, test: self()}
+        )
+
+      try do
+        result = export.()
+        assert_received {^handler, :written}
+        result
+      after
+        :telemetry.detach(handler)
+
+        case previous do
+          {:ok, rows} -> Application.put_env(:optimal_engine, :bundle_export_page_rows, rows)
+          :error -> Application.delete_env(:optimal_engine, :bundle_export_page_rows)
+        end
+      end
+    end
+
+    @doc false
+    def between_pages(_event, _measurements, %{table: table}, %{table: table} = config) do
+      unless Process.get(config.ref) do
+        Process.put(config.ref, true)
+        config.write.()
+        send(config.test, {config.ref, :written})
+      end
+    end
+
+    def between_pages(_event, _measurements, _metadata, _config), do: :ok
+
+    defp bundle_rows(path, table) do
+      {:ok, [{_name, jsonl}]} =
+        :erl_tar.extract(String.to_charlist(path), [
+          :compressed,
+          :memory,
+          {:files, [String.to_charlist("tables/#{table}.jsonl")]}
+        ])
+
+      jsonl |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    end
+
+    defp edge(ctx, target) do
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO graph_edges (source_id, target_id, relation, tenant_id, workspace_id) VALUES (?1, ?2, 'related', ?3, ?4)",
+          ["edge-source-#{ctx.n}", target, ctx.tenant, ctx.ws]
+        )
+    end
+
+    test "a context re-written while the export pages is in the bundle once, and the bundle imports",
+         ctx do
+      for i <- 1..3, do: insert_context(ctx.tenant, ctx.ws, "paged-#{ctx.n}-#{i}", "Paged #{i}")
+      first = "paged-#{ctx.n}-1"
+      path = Path.join(System.tmp_dir!(), "rewritten-#{ctx.n}.tar.gz")
+      on_exit(fn -> File.rm(path) end)
+
+      {:ok, manifest} =
+        export_while_writing(
+          "contexts",
+          fn ->
+            # A re-ingest replaces the row, which gives it a new rowid after
+            # every row the export has read so far.
+            {:ok, _} =
+              Store.raw_query(
+                "INSERT OR REPLACE INTO contexts (id, tenant_id, workspace_id, title, content, created_at) VALUES (?1, ?2, ?3, 'Paged 1 again', 'body', '2026-10-14T10:00:00Z')",
+                [first, ctx.tenant, ctx.ws]
+              )
+          end,
+          fn -> WorkspaceBundle.export(ctx.tenant, ctx.ws, path) end
+        )
+
+      ids = path |> bundle_rows("contexts") |> Enum.map(& &1["id"])
+      assert Enum.sort(ids) == ids |> Enum.uniq() |> Enum.sort()
+      assert first in ids
+
+      # The re-write came after the snapshot, so a replica seeded from the
+      # bundle pulls it from above the mark.
+      after_mark = Sync.changes(ctx.tenant, ctx.ws, since: manifest["ledger_sequence"])
+      assert first in Enum.map(after_mark["mutations"], & &1["entity_id"])
+
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.ws, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.ws, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      target = "#{ctx.tenant}-copy"
+      {:ok, _} = Tenant.create(%{id: target, name: "Copy"})
+      assert {:ok, summary} = WorkspaceBundle.import(path, target, cross_tenant: true)
+      assert summary.rows["contexts"] == length(ids)
+    end
+
+    test "an append-only row written while the export pages is above the mark, not in the bundle",
+         ctx do
+      late = "edge-target-#{ctx.n}-late"
+      targets = for i <- 1..3, do: "edge-target-#{ctx.n}-#{i}"
+
+      # Edges between contexts the workspace holds, so replication sends them.
+      for id <- ["edge-source-#{ctx.n}", late | targets],
+          do: insert_context(ctx.tenant, ctx.ws, id, id)
+
+      Enum.each(targets, &edge(ctx, &1))
+      path = Path.join(System.tmp_dir!(), "appended-#{ctx.n}.tar.gz")
+      on_exit(fn -> File.rm(path) end)
+
+      {:ok, manifest} =
+        export_while_writing("graph_edges", fn -> edge(ctx, late) end, fn ->
+          WorkspaceBundle.export(ctx.tenant, ctx.ws, path)
+        end)
+
+      exported = path |> bundle_rows("graph_edges") |> Enum.map(& &1["target_id"])
+      assert Enum.sort(exported) == Enum.sort(targets)
+      refute late in exported
+
+      # Its insert is pulled exactly once, from above the mark: a replica that
+      # also had it from the bundle would hold the edge twice.
+      after_mark = Sync.changes(ctx.tenant, ctx.ws, since: manifest["ledger_sequence"])
+
+      pulled =
+        for %{"entity_type" => "graph_edges", "payload" => %{"row" => row}} <-
+              after_mark["mutations"],
+            do: row["target_id"]
+
+      assert pulled == [late]
+    end
   end
 end

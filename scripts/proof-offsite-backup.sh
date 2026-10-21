@@ -10,6 +10,13 @@
 # the bucket; a restore of that object into a second data directory; 20-query
 # parity between the source and the restored store; and the providers report.
 #
+# Then the fallback: the source Engine restarts with its S3 endpoint on a dead
+# port and assets set to S3. An asset written then lands on the local disk with
+# its fallback reason recorded and raises an alert (an error log line and the
+# `optimal_engine.storage.asset_fallback` counter), and a probed providers
+# report shows s3 unreachable. With the endpoint restored, s3 probes healthy
+# and the next asset lands in the bucket.
+#
 # Usage: scripts/proof-offsite-backup.sh
 set -euo pipefail
 
@@ -28,7 +35,8 @@ DATA="${DATA:-$(mktemp -d)}"
 SOURCE_PORT="${SOURCE_PORT:-4216}"
 RESTORED_PORT="${RESTORED_PORT:-4217}"
 export MIX_ENV=dev
-export OPTIMAL_API_ENABLED=true
+# The mix tasks run without the HTTP API; only start_engine serves one, on its own port.
+export OPTIMAL_API_ENABLED=false
 export OPTIMAL_AUTH_REQUIRED=true
 export OPTIMAL_ENGINE_ROOT="$DATA/root"
 export OPTIMAL_ENGINE_DB="$DATA/root/index.db"
@@ -50,13 +58,29 @@ fail() {
   echo "FAIL $1"
   if [ -f "$DATA/server.log" ]; then tail -30 "$DATA/server.log"; fi
   if [ -f "$DATA/restored.log" ]; then tail -20 "$DATA/restored.log"; fi
+  for log in outage.log recovered.log; do
+    if [ -f "$DATA/$log" ]; then tail -20 "$DATA/$log"; fi
+  done
   exit 1
+}
+
+# Stops an Engine and waits until it has exited and its port is closed.
+stop_engine() { # pid port
+  local pid=$1 port=$2
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 60); do
+    if ! kill -0 "$pid" 2>/dev/null && ! curl -s -o /dev/null "http://127.0.0.1:$port/api/health"; then
+      return 0
+    fi
+    sleep 1
+  done
+  kill -9 "$pid" 2>/dev/null || true
 }
 
 start_engine() { # port, log, root
   local port=$1 log=$2 root=${3:-$OPTIMAL_ENGINE_ROOT}
   OPTIMAL_ENGINE_ROOT="$root" OPTIMAL_ENGINE_DB="$root/index.db" \
-    OPTIMAL_ENGINE_CACHE="$root/cache" OPTIMAL_API_PORT="$port" \
+    OPTIMAL_ENGINE_CACHE="$root/cache" OPTIMAL_API_ENABLED=true OPTIMAL_API_PORT="$port" \
     mix run --no-halt >>"$log" 2>&1 &
   local pid=$!
   local healthy=0
@@ -118,7 +142,7 @@ sed -n '1,12p' "$DATA/backup.log"
 echo "== step 5: the object is listed back from the bucket"
 mix optimal.backup --list-offsite-objects >"$DATA/objects.log" 2>&1 ||
   { cat "$DATA/objects.log"; fail "listing the bucket failed"; }
-objects=$(grep -c "s3://\|engwo-1019/" "$DATA/objects.log" || true)
+objects=$(grep -cF "${OPTIMAL_S3_PREFIX}backups/" "$DATA/objects.log" || true)
 echo "BUCKET_OBJECT_LINES=$objects"
 [ "$objects" -ge 1 ] || { cat "$DATA/objects.log"; fail "the bucket lists no backup object"; }
 
@@ -188,4 +212,121 @@ if postgres.get("health") != "not_configured":
     sys.exit(1)
 PY
 
-echo "PASS offsite backup and restore drill"
+echo "== step 9: the S3 endpoint goes dead; the next asset falls back and raises an alert"
+stop_engine "$source_pid" "$SOURCE_PORT"
+dead_port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+echo "DEAD_ENDPOINT_PORT=$dead_port"
+real_endpoint="$OPTIMAL_S3_ENDPOINT"
+export OPTIMAL_ASSET_STORAGE=s3
+export OPTIMAL_S3_ENDPOINT="http://127.0.0.1:$dead_port"
+source_pid=$(start_engine "$SOURCE_PORT" "$DATA/outage.log" "$OPTIMAL_ENGINE_ROOT") ||
+  fail "the Engine did not start with the dead endpoint"
+
+python3 - "$source_url" "$key" "$DATA/outage-asset.json" <<'PY' || fail "the outage write did not fall back with an alert"
+import base64, hashlib, json, os, sys, urllib.request
+
+base, key, out = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def call(method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(base + path, data=data, method=method)
+    request.add_header("Authorization", "Bearer " + key)
+    request.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return response.status, json.loads(response.read())
+
+payload = b"asset written while the object store is unreachable\n" * 64
+digest = hashlib.sha256(payload).hexdigest()
+status, body = call("POST", "/api/assets", {
+    "filename": "outage.txt",
+    "content_base64": base64.b64encode(payload).decode(),
+    "workspace": "default",
+})
+asset = body["asset"]
+metadata = asset.get("metadata") or {}
+path = asset.get("storage_path") or ""
+on_disk = os.path.isfile(path) and hashlib.sha256(open(path, "rb").read()).hexdigest() == digest
+print("OUTAGE_WRITE_STATUS=%d STORAGE_BACKEND=%s FALLBACK_REASON=%s LOCAL_COPY_MATCHES=%s"
+      % (status, metadata.get("storage_backend"), metadata.get("storage_fallback_reason"), on_disk))
+
+_, metrics = call("GET", "/api/metrics")
+fallbacks = metrics.get("counters", {}).get("optimal_engine.storage.asset_fallback")
+print("ALERT_COUNTER=%s" % fallbacks)
+
+_, probed = call("GET", "/api/storage/providers?probe=1")
+s3 = {p["id"]: p for p in probed["providers"]}["s3"]
+_, listed = call("GET", "/api/storage/providers")
+unprobed = {p["id"]: p for p in listed["providers"]}["s3"]
+print("S3_PROBED_HEALTH=%s S3_PROBED_STATE=%s S3_UNPROBED_HEALTH=%s"
+      % (s3.get("health"), s3.get("lifecycle_state"), unprobed.get("health")))
+
+json.dump({"path": path, "sha256": digest}, open(out, "w"))
+checks = [
+    status == 201,
+    not path.startswith("s3://"),
+    on_disk,
+    metadata.get("storage_backend") == "filesystem",
+    metadata.get("storage_fallback_reason") == "s3_upload_failed",
+    fallbacks == 1,
+    s3.get("health") == "unreachable",
+]
+sys.exit(0 if all(checks) else 1)
+PY
+
+alerts=$(grep -c "asset storage alert" "$DATA/outage.log" || true)
+echo "ALERT_LOG_LINES=$alerts"
+[ "$alerts" -ge 1 ] || fail "no asset storage alert in the Engine log"
+grep -m1 "asset storage alert" "$DATA/outage.log" | sed 's/key=[^ ]*/key=<object key>/'
+
+echo "== step 10: the endpoint is back; s3 probes healthy and the next asset lands in the bucket"
+stop_engine "$source_pid" "$SOURCE_PORT"
+export OPTIMAL_S3_ENDPOINT="$real_endpoint"
+source_pid=$(start_engine "$SOURCE_PORT" "$DATA/recovered.log" "$OPTIMAL_ENGINE_ROOT") ||
+  fail "the Engine did not start with the endpoint restored"
+
+python3 - "$source_url" "$key" "$DATA/outage-asset.json" <<'PY' || fail "the Engine did not recover"
+import base64, hashlib, json, os, sys, urllib.request
+
+base, key, previous = sys.argv[1], sys.argv[2], json.load(open(sys.argv[3]))
+
+def call(method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(base + path, data=data, method=method)
+    request.add_header("Authorization", "Bearer " + key)
+    request.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return response.status, json.loads(response.read())
+
+_, probed = call("GET", "/api/storage/providers?probe=1")
+s3 = {p["id"]: p for p in probed["providers"]}["s3"]
+print("S3_PROBED_HEALTH=%s S3_PROBED_STATE=%s" % (s3.get("health"), s3.get("lifecycle_state")))
+
+payload = b"asset written after the object store came back\n" * 64
+status, body = call("POST", "/api/assets", {
+    "filename": "recovered.txt",
+    "content_base64": base64.b64encode(payload).decode(),
+    "workspace": "default",
+})
+asset = body["asset"]
+metadata = asset.get("metadata") or {}
+in_bucket = str(asset.get("storage_path", "")).startswith("s3://")
+checksum_matches = metadata.get("object_checksum_sha256") == hashlib.sha256(payload).hexdigest()
+kept = (os.path.isfile(previous["path"]) and
+        hashlib.sha256(open(previous["path"], "rb").read()).hexdigest() == previous["sha256"])
+print("RECOVERED_WRITE_STATUS=%d STORAGE_BACKEND=%s IN_BUCKET=%s OBJECT_CHECKSUM_MATCHES=%s FALLBACK_REASON=%s"
+      % (status, metadata.get("storage_backend"), in_bucket, checksum_matches,
+         metadata.get("storage_fallback_reason")))
+print("OUTAGE_ASSET_KEPT_LOCALLY=%s" % kept)
+checks = [
+    s3.get("health") == "healthy",
+    status == 201,
+    metadata.get("storage_backend") == "s3",
+    in_bucket,
+    checksum_matches,
+    "storage_fallback_reason" not in metadata,
+    kept,
+]
+sys.exit(0 if all(checks) else 1)
+PY
+
+echo "PASS offsite backup and restore drill, S3 fallback and recovery"

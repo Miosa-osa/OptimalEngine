@@ -57,16 +57,118 @@ defmodule OptimalEngine.ScopePortabilityTest do
       )
   end
 
-  # Exports the open workspace, has the source give it up (one database stands in
-  # for two Engines), and makes the tenant that will import it.
-  defp moved_target(ctx, label) do
-    {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+  defp with_auth(fun) do
+    original = Application.get_env(:optimal_engine, :auth, [])
+
+    Application.put_env(
+      :optimal_engine,
+      :auth,
+      Keyword.merge(original, auth_required: true, bcrypt_cost: 4)
+    )
+
+    try do
+      fun.()
+    after
+      Application.put_env(:optimal_engine, :auth, original)
+    end
+  end
+
+  defp admin_key(tenant) do
+    {:ok, %{key: key}} =
+      ApiKey.mint(%{tenant_id: tenant, name: "admin", scopes: ["*"], workspace_scope: ["*"]})
+
+    key
+  end
+
+  defp json_call(method, path, token, body) do
+    conn(method, path, Jason.encode!(body))
+    |> put_req_header("content-type", "application/json")
+    |> put_req_header("authorization", "Bearer " <> token)
+    |> Router.call(Router.init([]))
+  end
+
+  defp upload(token, bytes, headers \\ []) do
+    headers
+    |> Enum.reduce(conn(:post, "/api/bundles/import", bytes), fn {name, value}, conn ->
+      put_req_header(conn, name, value)
+    end)
+    |> put_req_header("content-type", "application/gzip")
+    |> put_req_header("authorization", "Bearer " <> token)
+    |> Router.call(Router.init([]))
+  end
+
+  defp uploads_left(tenant),
+    do: Path.wildcard(Path.join(WorkspaceBundle.bundle_dir(tenant), ".upload-*"), match_dot: true)
+
+  # Upload limits for one test, and the size of every chunk read while it runs.
+  defp with_upload_limits(limits, fun) do
+    keys = [
+      chunk_bytes: :bundle_upload_chunk_bytes,
+      max_bytes: :bundle_max_bytes,
+      deadline_ms: :bundle_upload_deadline_ms
+    ]
+
+    previous = Map.new(keys, fn {_, key} -> {key, Application.get_env(:optimal_engine, key)} end)
+
+    Enum.each(limits, fn {name, value} ->
+      Application.put_env(:optimal_engine, keys[name], value)
+    end)
+
+    handler = "bundle-upload-chunks-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:optimal_engine, :bundle, :upload_chunk],
+      &__MODULE__.report_chunk/4,
+      self()
+    )
+
+    try do
+      fun.()
+    after
+      :telemetry.detach(handler)
+
+      Enum.each(previous, fn
+        {key, nil} -> Application.delete_env(:optimal_engine, key)
+        {key, value} -> Application.put_env(:optimal_engine, key, value)
+      end)
+    end
+  end
+
+  @doc false
+  def report_chunk(_event, %{bytes: bytes}, _meta, test), do: send(test, {:upload_chunk, bytes})
+
+  defp chunks(acc \\ []) do
+    receive do
+      {:upload_chunk, bytes} -> chunks([bytes | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # Incompressible bytes in the workspace folder, so its bundle spans many chunks.
+  defp noise(ctx) do
+    dir = Filesystem.path(Application.get_env(:optimal_engine, :root_path), ctx.open)
+    File.mkdir_p!(Path.join(dir, "nodes/notes"))
+    File.write!(Path.join(dir, "nodes/notes/noise.bin"), :crypto.strong_rand_bytes(24_000))
+  end
+
+  # The source gives the workspace up, as a move does, so one test database can
+  # stand in for the Engine the bundle goes to.
+  defp give_up(ctx, manifest) do
     :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
 
     {:ok, _} =
       WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
         "target_url" => "https://other.example"
       })
+  end
+
+  # Exports the open workspace, has the source give it up (one database stands in
+  # for two Engines), and makes the tenant that will import it.
+  defp moved_target(ctx, label) do
+    {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+    give_up(ctx, manifest)
 
     target = "#{label}-#{ctx.n}"
     {:ok, _} = Tenant.create(%{id: target, name: "Target"})
@@ -382,7 +484,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       target = "target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
-      {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
       assert summary.workspace_id == "#{target}:open"
       assert summary.bundle_sha256 == manifest["bundle_sha256"]
 
@@ -411,8 +513,11 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       assert File.read!(target_file) == "# One\nquokkaterm file"
 
-      assert {:error, :workspace_exists} = WorkspaceBundle.import(ctx.path, target)
-      assert {:ok, merged} = WorkspaceBundle.import(ctx.path, target, mode: :merge)
+      assert {:error, :workspace_exists} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
+
+      assert {:ok, merged} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, mode: :merge)
 
       assert Enum.all?(
                Map.drop(merged.rows, ["decisions", "events", "observations"]),
@@ -452,7 +557,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       target = "target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
-      {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, rows} =
                Store.raw_query(
@@ -523,7 +628,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       target = "target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[^target]]} =
                Store.raw_query(
@@ -576,7 +681,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       target = "bundle-ext-target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
       assert summary.workspace_id == "#{target}:opened"
       assert summary.external_id == external
       assert summary.imported_external_id == nil
@@ -675,6 +780,288 @@ defmodule OptimalEngine.ScopePortabilityTest do
       assert Jason.decode!(previous) == ["open"]
     end
 
+    test "an export lands in its tenant's folder, out of another tenant's reach", ctx do
+      other = "other-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: other, name: "Other"})
+
+      with_auth(fn ->
+        conn =
+          json_call(
+            :post,
+            "/api/workspaces/#{URI.encode_www_form(ctx.open)}/bundle",
+            admin_key(ctx.tenant),
+            %{}
+          )
+
+        assert conn.status == 201
+        name = Jason.decode!(conn.resp_body)["bundle"]
+        exported = Path.join(WorkspaceBundle.bundle_dir(ctx.tenant), name)
+        assert File.regular?(exported)
+        assert {:ok, tenant} = WorkspaceBundle.source_tenant(exported)
+        assert tenant == ctx.tenant
+
+        intruder = admin_key(other)
+        assert call(:get, "/api/bundles/#{name}", intruder).status == 404
+        assert json_call(:post, "/api/bundles/import", intruder, %{"bundle" => name}).status == 404
+
+        # Copied into the other tenant's folder, it still names its own tenant.
+        File.cp!(exported, Path.join(WorkspaceBundle.bundle_dir(other), name))
+        assert call(:get, "/api/bundles/#{name}", intruder).status == 404
+        assert json_call(:post, "/api/bundles/import", intruder, %{"bundle" => name}).status == 404
+
+        refused =
+          json_call(:post, "/api/bundles/import", intruder, %{
+            "bundle" => name,
+            "cross_tenant" => true
+          })
+
+        assert refused.status == 403
+        assert Jason.decode!(refused.resp_body)["error"] =~ "operator_only"
+
+        upload = upload(intruder, File.read!(exported))
+        assert upload.status == 403
+        assert Jason.decode!(upload.resp_body)["error"] =~ "bundle_from_another_tenant"
+        assert uploads_left(other) == []
+        assert {:error, :not_found} = Workspace.get("#{other}:open")
+
+        # Its own tenant downloads it.
+        assert call(:get, "/api/bundles/#{name}", admin_key(ctx.tenant)).status == 200
+      end)
+    end
+
+    test "a bundle from another tenant is imported only when the move is meant", ctx do
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      give_up(ctx, manifest)
+
+      target = "refused-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Refused"})
+      assert {:error, :bundle_from_another_tenant} = WorkspaceBundle.import(ctx.path, target)
+      assert {:error, :not_found} = Workspace.get("#{target}:open")
+
+      # The Engine operator seeds the default tenant from it by name, and says so.
+      name = "seed-#{ctx.n}.tar.gz"
+      File.cp!(ctx.path, Path.join(WorkspaceBundle.bundle_dir("default"), name))
+      seeded = "default:seeded-#{ctx.n}"
+      operator = admin_key("default")
+
+      with_auth(fn ->
+        body = %{"bundle" => name, "workspace_id" => seeded}
+        assert json_call(:post, "/api/bundles/import", operator, body).status == 404
+
+        conn =
+          json_call(:post, "/api/bundles/import", operator, Map.put(body, "cross_tenant", true))
+
+        assert conn.status == 201
+        assert Jason.decode!(conn.resp_body)["workspace_id"] == seeded
+      end)
+    end
+
+    test "a raw upload streams in chunks, checks its sha256, and leaves no file behind", ctx do
+      noise(ctx)
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      give_up(ctx, manifest)
+      {:ok, _} = Store.raw_query("DELETE FROM uri_redirects WHERE workspace_id = ?1", [ctx.open])
+      {:ok, _} = Store.raw_query("DELETE FROM workspaces WHERE id = ?1", [ctx.open])
+
+      bytes = File.read!(ctx.path)
+      digest = :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+      chunk = 1_024
+      assert byte_size(bytes) > 8 * chunk
+
+      with_upload_limits([chunk_bytes: chunk], fn ->
+        with_auth(fn ->
+          admin = admin_key(ctx.tenant)
+
+          wrong = upload(admin, bytes, [{"x-bundle-sha256", String.duplicate("0", 64)}])
+          assert wrong.status == 422
+          assert Jason.decode!(wrong.resp_body)["received_sha256"] == digest
+          assert uploads_left(ctx.tenant) == []
+          assert {:error, :not_found} = Workspace.get(ctx.open)
+          _ = chunks()
+
+          conn = upload(admin, bytes, [{"x-bundle-sha256", digest}])
+          assert conn.status == 201
+          assert Jason.decode!(conn.resp_body)["workspace_id"] == ctx.open
+
+          # Read a chunk at a time, never more than one chunk in hand.
+          sizes = chunks()
+          assert Enum.sum(sizes) == byte_size(bytes)
+          assert Enum.all?(sizes, &(&1 <= chunk))
+          assert length(sizes) == div(byte_size(bytes) + chunk - 1, chunk)
+          assert uploads_left(ctx.tenant) == []
+        end)
+      end)
+    end
+
+    test "a raw upload past the size limit is refused with 413", ctx do
+      noise(ctx)
+      {:ok, _} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      bytes = File.read!(ctx.path)
+      assert byte_size(bytes) > 8_192
+
+      with_upload_limits([chunk_bytes: 1_024, max_bytes: 2_048], fn ->
+        with_auth(fn ->
+          admin = admin_key(ctx.tenant)
+
+          # A declared length past the limit is refused before a byte is read.
+          declared = upload(admin, bytes, [{"content-length", Integer.to_string(byte_size(bytes))}])
+          assert declared.status == 413
+          assert chunks() == []
+
+          # Without one, reading stops at the first chunk past the limit.
+          streamed = upload(admin, bytes)
+          assert streamed.status == 413
+          assert Enum.sum(chunks()) == 3_072
+          assert uploads_left(ctx.tenant) == []
+        end)
+      end)
+    end
+
+    test "a raw upload that outlasts its deadline is refused with 408 and leaves no file", ctx do
+      noise(ctx)
+      {:ok, _} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      bytes = File.read!(ctx.path)
+
+      with_upload_limits([chunk_bytes: 1_024, deadline_ms: 0], fn ->
+        with_auth(fn ->
+          late = upload(admin_key(ctx.tenant), bytes)
+          assert late.status == 408
+          assert late.resp_body =~ "upload_timeout"
+          assert Enum.sum(chunks()) == 1_024
+          assert uploads_left(ctx.tenant) == []
+        end)
+      end)
+    end
+
+    test "unfinished uploads and stale staging folders are swept, and nothing else", ctx do
+      dir = WorkspaceBundle.bundle_dir(ctx.tenant)
+      kept = Path.join(dir, "kept-#{ctx.n}.tar.gz")
+      left = for suffix <- [".part", ".tar.gz"], do: Path.join(dir, ".upload-#{ctx.n}#{suffix}")
+      Enum.each([kept | left], &File.write!(&1, "x"))
+
+      staging = Path.join([Path.dirname(dir), "..", "staging"]) |> Path.expand()
+      stale = Path.join(staging, "bundle-#{ctx.n}-stale")
+      fresh = Path.join(staging, "bundle-#{ctx.n}-fresh")
+      other = Path.join(staging, "other-#{ctx.n}")
+      three_hours_ago = System.os_time(:second) - 3 * 3_600
+
+      for folder <- [stale, fresh, other] do
+        File.mkdir_p!(folder)
+        File.write!(Path.join(folder, "manifest.json"), "{}")
+      end
+
+      File.touch!(stale, three_hours_ago)
+      File.touch!(other, three_hours_ago)
+
+      assert WorkspaceBundle.sweep_leftovers() >= 3
+      refute Enum.any?(left, &File.exists?/1)
+      refute File.exists?(stale)
+
+      # An export, a staging folder still in use, and anything not a bundle's
+      # stay where they are.
+      assert File.exists?(kept)
+      assert File.exists?(fresh)
+      assert File.exists?(other)
+      File.rm(kept)
+      Enum.each([fresh, other], &File.rm_rf/1)
+    end
+
+    test "a retained export of a tenant whose id starts with upload- survives the sweep", ctx do
+      tenant = "upload-x-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: tenant, name: "Upload X"})
+
+      {:ok, _} =
+        OptimalEngine.Organization.create(%{
+          id: "#{tenant}:org",
+          tenant_id: tenant,
+          slug: "org",
+          name: "Org"
+        })
+
+      {:ok, workspace} =
+        Workspace.create(%{
+          tenant_id: tenant,
+          organization_id: "#{tenant}:org",
+          slug: "open",
+          name: "Open"
+        })
+
+      context(tenant, workspace.id, "upload-x-#{ctx.n}", "Kept", "a retained export")
+
+      name = "#{tenant}-open-#{System.os_time(:second)}.tar.gz"
+      path = Path.join(WorkspaceBundle.bundle_dir(tenant), name)
+      {:ok, _} = WorkspaceBundle.export(tenant, workspace.id, path)
+      assert {:ok, ^path} = WorkspaceBundle.bundle_path(tenant, name)
+
+      WorkspaceBundle.sweep_leftovers()
+      assert File.exists?(path)
+      File.rm(path)
+    end
+
+    test "a table larger than one export page travels whole", ctx do
+      {:ok, :inserted} =
+        Store.transaction(fn txn ->
+          for i <- 1..2_500 do
+            {:ok, 1} =
+              Store.txn_execute(
+                txn,
+                "INSERT INTO contexts (id, tenant_id, workspace_id, title, content, created_at, uri) VALUES (?1, ?2, ?3, ?4, 'paged', '2026-10-14T10:00:00Z', ?5)",
+                [
+                  "paged-#{ctx.n}-#{i}",
+                  ctx.tenant,
+                  ctx.open,
+                  "Paged #{i}",
+                  "optimal://#{ctx.open}/contexts/paged-#{i}"
+                ]
+              )
+          end
+
+          {:ok, :inserted}
+        end)
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      exported = Enum.find(manifest["tables"], &(&1["name"] == "contexts"))
+      assert exported["rows"] >= 2_501
+
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      target = "paged-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Paged"})
+      {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
+      assert summary.rows["contexts"] == exported["rows"]
+
+      assert {:ok, [[count]]} =
+               Store.raw_query("SELECT COUNT(DISTINCT id) FROM contexts WHERE workspace_id = ?1", [
+                 summary.workspace_id
+               ])
+
+      assert count == exported["rows"]
+    end
+
+    test "an import told to consume its bundle deletes the file once it is unpacked", ctx do
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      target = "consume-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Consume"})
+
+      assert {:ok, %{bundle_sha256: sha256}} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, consume: true)
+
+      assert sha256 == manifest["bundle_sha256"]
+      refute File.exists?(ctx.path)
+    end
+
     test "a bundle imports in small batches, parents before children", ctx do
       # The older memory points at the newer one, so in export order the child
       # row comes before its parent.
@@ -701,7 +1088,9 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       target = "batch-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Batch target"})
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, batch_rows: 1)
+
+      assert {:ok, summary} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, batch_rows: 1)
 
       assert {:ok, [[parent_id]]} =
                Store.raw_query(
@@ -746,7 +1135,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       {:ok, _} = Tenant.create(%{id: target, name: "Failed target"})
 
       assert {:error, {:import_failed, _table, _reason}} =
-               WorkspaceBundle.import(ctx.path, target, batch_rows: 1)
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, batch_rows: 1)
 
       assert {:error, :not_found} = OptimalEngine.Workspace.get("#{target}:open")
 
@@ -876,7 +1265,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       target = "member-target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
 
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[1]]} =
                Store.raw_query(
@@ -907,7 +1296,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       ])
 
       assert {:error, {:import_failed, "routing_rules", :unknown_column}} =
-               WorkspaceBundle.import(ctx.path, target)
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[0]]} =
                Store.raw_query("SELECT COUNT(*) FROM routing_rules WHERE id = ?1", [
@@ -933,7 +1322,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       ])
 
       assert {:error, {:import_failed, "principals", :unknown_column}} =
-               WorkspaceBundle.import(ctx.path, target)
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, []} = Store.raw_query("SELECT tenant_id FROM principals WHERE id = ?1", [forged])
     end
@@ -953,7 +1342,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
         }
       ])
 
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[^target, workspace_id]]} =
                Store.raw_query(
@@ -978,7 +1367,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
         }
       ])
 
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[scope_type, scope_id, tenant]]} =
                Store.raw_query(
@@ -1013,7 +1402,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       ])
 
       assert {:error, {:import_failed, "workspace_members", :foreign_principal}} =
-               WorkspaceBundle.import(ctx.path, target)
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[0]]} =
                Store.raw_query("SELECT COUNT(*) FROM workspace_members WHERE principal_id = ?1", [
@@ -1027,15 +1416,18 @@ defmodule OptimalEngine.ScopePortabilityTest do
       target = moved_target(ctx, "name-target")
 
       assert {:error, :workspace_id_not_in_tenant} =
-               WorkspaceBundle.import(ctx.path, target, workspace_id: "beta-#{ctx.n}:review")
+               WorkspaceBundle.import(ctx.path, target,
+                 cross_tenant: true,
+                 workspace_id: "beta-#{ctx.n}:review"
+               )
 
       assert {:error, :invalid_workspace_id} =
-               WorkspaceBundle.import(ctx.path, target, workspace_id: "")
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, workspace_id: "")
 
       assert {:error, :not_found} = Workspace.get("beta-#{ctx.n}:review")
 
       assert {:ok, %{workspace_id: workspace_id}} =
-               WorkspaceBundle.import(ctx.path, target, workspace_id: "review")
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, workspace_id: "review")
 
       assert workspace_id == "#{target}:review"
     end
@@ -1066,7 +1458,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       # What a bundle may still do: add principals to the tenant that imports
       # it, under ids that tenant does not already have. It cannot name another
       # tenant's, and it cannot replace a principal that exists.
-      assert {:ok, _summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, _summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[^target]]} =
                Store.raw_query("SELECT tenant_id FROM principals WHERE id = ?1", [forged])

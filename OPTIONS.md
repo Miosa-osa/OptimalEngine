@@ -45,6 +45,7 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_ENGINE_DB` | `.optimal/index.db` | Local SQLite store path. |
 | `OPTIMAL_ENGINE_CACHE` | `.optimal/cache` | Local cache path. |
 | `OPTIMAL_BACKUP_DIR` | `backups/` beside the database | Only directory `POST /api/backup` may write into; restores verify the catalog checksum first. |
+| `OPTIMAL_BUNDLE_MAX_BYTES` | `5368709120` (5 GiB) | Largest raw bundle upload `POST /api/bundles/import` accepts; a larger one is refused with 413 before or while it is read. |
 | `OPTIMAL_BACKUP_KEY` | none | 64 hex characters; encrypts every offsite backup copy with AES-256-GCM. Offsite copies are refused without it. Losing it loses every copy sealed with it. |
 | `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS` | unset (off) | Interval for scheduled encrypted offsite backups; 0 or unset disables, otherwise at least 60000. |
 | `OPTIMAL_OFFSITE_BACKUP_KEEP` | `14` | Scheduled offsite copies kept; older ones are deleted from the bucket. |

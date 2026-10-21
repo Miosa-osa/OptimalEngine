@@ -669,7 +669,7 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
 
       target = "edges-target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [%{target_id: cy}]} = imported_edges(ctx, summary)
       assert cy == "Cy#{ctx.n}"
@@ -682,7 +682,7 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
 
       target = "edges-legacy-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Legacy target"})
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
       assert summary.rows["edges"] > 0
 
       assert {:ok, [%{target_id: cy}]} = imported_edges(ctx, summary)
@@ -690,7 +690,9 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
       assert scopes("bundle-#{ctx.n}") == [{target, summary.workspace_id}]
 
       # A merge keeps the edges already there.
-      assert {:ok, merged} = WorkspaceBundle.import(ctx.path, target, mode: :merge)
+      assert {:ok, merged} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, mode: :merge)
+
       assert merged.rows["edges"] == 0
     end
 

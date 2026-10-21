@@ -15,8 +15,10 @@ defmodule OptimalEngine.Storage.Assets do
     3. `OPTIMAL_ASSET_STORAGE` (engine-wide default)
 
   A selected S3 backend that is unconfigured or unreachable never loses the
-  file: the bytes are written to the local filesystem, and the fallback is
-  raised as an error alert rather than reported as a successful remote store.
+  file: the bytes are written to the local filesystem, the asset records
+  `storage_fallback_reason`, and the fallback is raised as an alert (an error
+  log line and the `optimal_engine.storage.asset_fallback` counter) rather than
+  reported as a successful remote store.
   """
 
   require Logger
@@ -334,11 +336,15 @@ defmodule OptimalEngine.Storage.Assets do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # An asset that did not reach its configured backend is an operator problem,
-  # so it is logged at error level and never reported as a successful upload.
+  # so it is logged at error level, counted in the Engine's metrics
+  # (`optimal_engine.storage.asset_fallback` in /api/metrics and Prometheus),
+  # and never reported as a successful upload.
   defp alert(message, fields) do
     Logger.error(fn ->
       "asset storage alert: #{message} " <>
         Enum.map_join(fields, " ", fn {key, value} -> "#{key}=#{value}" end)
     end)
+
+    :telemetry.execute([:optimal_engine, :storage, :asset_fallback], %{count: 1}, Map.new(fields))
   end
 end

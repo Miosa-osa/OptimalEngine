@@ -50,6 +50,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Store.Migrations
+  alias OptimalEngine.Store.ReadSnapshot
   alias OptimalEngine.Sync.Capture
   alias OptimalEngine.Workspace
   alias OptimalEngine.Workspace.Filesystem
@@ -72,6 +73,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @principals "principals"
   @documents "operating_documents"
   @batch_rows 1_000
+  @snapshot_attempts 20
+  @stale_staging_seconds 7_200
 
   @doc """
   Writes a bundle for `workspace_id` to `path`. Returns the manifest.
@@ -83,44 +86,101 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       staging = staging_dir()
 
       try do
-        tables = export_tables(tenant_id, workspace_id, staging)
-        files = export_files(workspace_id, staging)
-
-        manifest =
-          %{
-            "format" => @format,
-            "version" => @version,
-            "engine_version" => engine_version(),
-            "migration" => current_migration(),
-            "created_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-            "tenant_id" => tenant_id,
-            "workspace" => %{
-              "id" => workspace.id,
-              "slug" => workspace.slug,
-              "name" => workspace.name,
-              "description" => workspace.description,
-              "external_id" => workspace.external_id,
-              "metadata" => workspace.metadata
-            },
-            "tables" => tables,
-            "files" => files,
-            "ledger_sequence" => ledger_sequence(tenant_id, workspace_id)
-          }
-          |> then(&Map.put(&1, "bundle_sha256", CanonicalJSON.hash(&1)))
-
-        File.write!(Path.join(staging, "manifest.json"), Jason.encode!(manifest, pretty: true))
-        :ok = pack(staging, path)
-        {:ok, manifest}
+        with {:ok, {mark, tables}} <- snapshot_tables(tenant_id, workspace_id, staging) do
+          files = export_files(workspace_id, staging)
+          write_bundle(tenant_id, workspace, mark, tables, files, staging, path)
+        end
       after
         File.rm_rf(staging)
       end
     end
   end
 
+  defp write_bundle(tenant_id, workspace, mark, tables, files, staging, path) do
+    manifest =
+      %{
+        "format" => @format,
+        "version" => @version,
+        "engine_version" => engine_version(),
+        "migration" => current_migration(),
+        "created_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+        "tenant_id" => tenant_id,
+        "workspace" => %{
+          "id" => workspace.id,
+          "slug" => workspace.slug,
+          "name" => workspace.name,
+          "description" => workspace.description,
+          "external_id" => workspace.external_id,
+          "metadata" => workspace.metadata
+        },
+        "tables" => tables,
+        "files" => files,
+        "ledger_sequence" => mark
+      }
+      |> then(&Map.put(&1, "bundle_sha256", CanonicalJSON.hash(&1)))
+
+    File.write!(Path.join(staging, "manifest.json"), Jason.encode!(manifest, pretty: true))
+    :ok = pack(staging, path)
+    {:ok, manifest}
+  end
+
+  # The ledger mark and every row come from one read of the database, on a
+  # connection of its own (`OptimalEngine.Store.ReadSnapshot`). A write that
+  # lands while the export runs is in neither the bundle nor at or below the
+  # mark, so a replica seeded from the bundle pulls it exactly once, and a row
+  # re-written meanwhile is in the bundle once, as it was.
+  #
+  # Changes captured before the read are sealed into the ledger first. A
+  # change captured but not yet sealed when the read begins would be in the
+  # rows and sealed later above the mark, so the read is started again while
+  # the workspace has one, a bounded number of times.
+  defp snapshot_tables(tenant_id, workspace_id, staging, attempt \\ 1) do
+    with {:ok, _sealed} <- Capture.seal() do
+      result =
+        ReadSnapshot.run(fn snap ->
+          if pending_captures(snap, workspace_id) == 0 do
+            mark = ledger_mark(snap, tenant_id, workspace_id)
+            {:ok, {mark, export_tables(snap, tenant_id, workspace_id, staging)}}
+          else
+            :captures_pending
+          end
+        end)
+
+      case result do
+        :captures_pending when attempt < @snapshot_attempts ->
+          Process.sleep(min(10 * attempt, 200))
+          snapshot_tables(tenant_id, workspace_id, staging, attempt + 1)
+
+        :captures_pending ->
+          {:error, :writes_in_progress}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  defp pending_captures(snap, workspace_id) do
+    {:ok, [[n]]} =
+      ReadSnapshot.query(snap, "SELECT COUNT(*) FROM sync_capture WHERE workspace_id = ?1", [
+        workspace_id
+      ])
+
+    n
+  end
+
   @doc """
   Imports a bundle into `tenant_id`. Options: `:workspace_id` (target id;
   default the source id with the target tenant), `:organization_id`,
-  `:mode` (`:create` or `:merge`). Returns a summary with the bundle hash.
+  `:mode` (`:create` or `:merge`), `:consume` (delete the bundle file once
+  it is unpacked, for an upload nobody keeps, so a large import holds one copy
+  of the bundle on disk instead of two), and `:cross_tenant`. Returns a summary
+  with the bundle hash.
+
+  A bundle exported by another tenant is refused with
+  `{:error, :bundle_from_another_tenant}` before anything is written, unless
+  `cross_tenant: true` says the move between tenants is intended (the Engine
+  operator seeding a tenant, or one database standing in for two Engines).
   """
   @spec import(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def import(path, tenant_id, opts \\ []) do
@@ -128,9 +188,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     try do
       with :ok <- unpack(path, staging),
+           :ok <- if(opts[:consume], do: File.rm(path), else: :ok),
            {:ok, manifest} <- read_manifest(staging),
            :ok <- permitted(manifest),
            :ok <- verify(manifest, staging),
+           :ok <- same_tenant(manifest, tenant_id, opts),
            {:ok, plan} <- plan(manifest, tenant_id, opts),
            :ok <- compatible(manifest, staging),
            {:ok, counts} <- write_rows(manifest, staging, plan, opts),
@@ -150,6 +212,84 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       end
     after
       File.rm_rf(staging)
+    end
+  end
+
+  @doc """
+  Removes what a run that never finished left behind: raw uploads still being
+  received (`.upload-*.part`) or received and not yet imported
+  (`.upload-*.tar.gz`) in the tenants' bundle folders, and the `bundle-*`
+  staging folders of exports and imports last changed more than two hours
+  ago. A run removes its own files whatever happens, so these are only left by
+  an Engine that stopped mid-way. Nothing else is touched: an upload's name
+  starts with a dot, which no bundle name may (`bundle_path/2`), so a retained
+  export is never taken for one. The Engine that serves the API calls this at
+  boot, before it takes requests. Returns how many were removed.
+  """
+  @spec sweep_leftovers() :: non_neg_integer()
+  def sweep_leftovers do
+    uploads =
+      Path.wildcard(Path.join([backup_base(), "bundles", "*", ".upload-*.{part,tar.gz}"]),
+        match_dot: true
+      )
+
+    cutoff = System.os_time(:second) - @stale_staging_seconds
+
+    staged =
+      staging_root()
+      |> Path.join("bundle-*")
+      |> Path.wildcard()
+      |> Enum.filter(fn path ->
+        match?({:ok, %{mtime: mtime}} when mtime < cutoff, File.stat(path, time: :posix))
+      end)
+
+    Enum.each(uploads, &File.rm/1)
+    Enum.each(staged, &File.rm_rf/1)
+    length(uploads) + length(staged)
+  end
+
+  @doc """
+  The folder a tenant's bundles live in, `<backup dir>/bundles/<tenant>/`
+  (the backup dir is `OPTIMAL_BACKUP_DIR`, or `backups` next to the database).
+  Exports are written there, a download or an import by name reads only from
+  there, and a raw upload is staged there, so one tenant never reaches another
+  tenant's bundles. A tenant id that is not a plain file name gets a folder
+  named after its SHA-256.
+  """
+  @spec bundle_dir(String.t()) :: String.t()
+  def bundle_dir(tenant_id) when is_binary(tenant_id) do
+    dir = Path.join([backup_base(), "bundles", tenant_folder(tenant_id)])
+    File.mkdir_p!(dir)
+    dir
+  end
+
+  @doc """
+  The path of the bundle `name` in the tenant's folder. Only a plain bundle
+  file name is accepted, so a request can never name another path on the host.
+  """
+  @spec bundle_path(String.t(), term()) :: {:ok, String.t()} | {:error, :invalid_bundle_name}
+  def bundle_path(tenant_id, name) when is_binary(name) do
+    if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.tar\.gz\z/, name),
+      do: {:ok, Path.join(bundle_dir(tenant_id), name)},
+      else: {:error, :invalid_bundle_name}
+  end
+
+  def bundle_path(_tenant_id, _name), do: {:error, :invalid_bundle_name}
+
+  @doc """
+  The tenant a bundle was exported from, read from its manifest without
+  unpacking the rest. Bundles are packed with the manifest first, so for them
+  only the first entry is read; an older bundle is searched for its manifest.
+  """
+  @spec source_tenant(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def source_tenant(path) do
+    with {:ok, json} <- manifest_json(path),
+         {:ok, %{"format" => @format, "tenant_id" => tenant_id}} when is_binary(tenant_id) <-
+           Jason.decode(json) do
+      {:ok, tenant_id}
+    else
+      {:error, {:unreadable_bundle, _}} = error -> error
+      _ -> {:error, :not_a_workspace_bundle}
     end
   end
 
@@ -331,7 +471,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # ---------------------------------------------------------------------------
   # Export
 
-  defp export_tables(tenant_id, workspace_id, staging) do
+  defp export_tables(snap, tenant_id, workspace_id, staging) do
     File.mkdir_p!(Path.join(staging, "tables"))
 
     scoped =
@@ -339,13 +479,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         columns = columns(table)
         {where, params} = scope_clause(table, columns, tenant_id, workspace_id)
 
-        write_table(
-          staging,
-          table,
-          columns,
-          "SELECT * FROM #{quote_name(table)} WHERE #{where}",
-          params
-        )
+        write_table(snap, staging, table, columns, where, params)
       end
 
     children =
@@ -355,21 +489,23 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         {where, params} = scope_clause(parent, parent_columns, tenant_id, workspace_id)
 
         write_table(
+          snap,
           staging,
           table,
           columns,
-          "SELECT * FROM #{quote_name(table)} WHERE #{quote_name(fk)} IN (SELECT id FROM #{quote_name(parent)} WHERE #{where})",
+          "#{quote_name(fk)} IN (SELECT id FROM #{quote_name(parent)} WHERE #{where})",
           params
         )
       end
 
     principals =
       write_table(
+        snap,
         staging,
         @principals,
         columns(@principals),
         """
-        SELECT * FROM principals WHERE id IN (
+        id IN (
           SELECT principal_id FROM workspace_members WHERE workspace_id = ?1
           UNION SELECT principal_id FROM node_members WHERE workspace_id = ?1
         )
@@ -379,38 +515,72 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     documents =
       write_table(
+        snap,
         staging,
         @documents,
         columns(@documents),
-        "SELECT * FROM operating_documents WHERE tenant_id = ?1 AND scope_type = 'workspace' AND scope_id = ?2",
+        "tenant_id = ?1 AND scope_type = 'workspace' AND scope_id = ?2",
         [tenant_id, workspace_id]
       )
 
     Enum.reject(scoped ++ children ++ [principals, documents], &(&1["rows"] == 0))
   end
 
-  defp write_table(staging, table, columns, sql, params) do
-    {:ok, rows} = Store.raw_query(sql, params)
+  # Writes the rows of `table` that match `where` as JSON lines. The table is
+  # read from the snapshot a page at a time and each page is written and
+  # hashed before the next is read, so a large workspace is never held in
+  # memory.
+  defp write_table(snap, staging, table, columns, where, params) do
     file = Path.join([staging, "tables", table <> ".jsonl"])
+    names = Enum.map(columns, &elem(&1, 0))
 
-    content =
-      Enum.map_join(rows, "", fn row ->
-        row
-        |> Enum.zip(columns)
-        |> Map.new(fn {value, {name, _type, _pk}} -> {name, encode_value(value)} end)
-        |> Jason.encode!()
-        |> Kernel.<>("\n")
+    {rows, hash} =
+      File.open!(file, [:write, :binary], fn io ->
+        snap
+        |> table_rows(table, where, params)
+        |> Enum.reduce({0, :crypto.hash_init(:sha256)}, fn row, {count, hash} ->
+          line =
+            names
+            |> Enum.zip(row)
+            |> Map.new(fn {name, value} -> {name, encode_value(value)} end)
+            |> Jason.encode!()
+            |> Kernel.<>("\n")
+
+          IO.binwrite(io, line)
+          {count + 1, :crypto.hash_update(hash, line)}
+        end)
       end)
-
-    File.write!(file, content)
 
     %{
       "name" => table,
-      "rows" => length(rows),
-      "columns" => Enum.map(columns, &elem(&1, 0)),
-      "sha256" => sha256(content)
+      "rows" => rows,
+      "columns" => names,
+      "sha256" => hash |> :crypto.hash_final() |> Base.encode16(case: :lower)
     }
   end
+
+  # Streams the rows of a table that match `where` from the snapshot, one page
+  # of `:bundle_export_page_rows` rows at a time (default 1,000). The snapshot
+  # does not move, so one statement reads the table from start to end.
+  defp table_rows(snap, table, where, params) do
+    snap
+    |> ReadSnapshot.stream(
+      "SELECT * FROM #{quote_name(table)} WHERE #{where}",
+      params,
+      export_page_rows()
+    )
+    |> Stream.each(&page_read(table, length(&1)))
+    |> Stream.concat()
+  end
+
+  # Rows read per page of an export (`config :optimal_engine,
+  # :bundle_export_page_rows`, default 1,000).
+  defp export_page_rows, do: Application.get_env(:optimal_engine, :bundle_export_page_rows, 1_000)
+
+  # Each page read is a `[:optimal_engine, :bundle, :export_page]` event with
+  # the rows read and the table.
+  defp page_read(table, rows),
+    do: :telemetry.execute([:optimal_engine, :bundle, :export_page], %{rows: rows}, %{table: table})
 
   defp export_files(workspace_id, staging) do
     source = Filesystem.path(root(), workspace_id)
@@ -430,7 +600,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         %{
           "path" => relative,
           "bytes" => File.stat!(file).size,
-          "sha256" => sha256(File.read!(file))
+          "sha256" => file_sha256(file)
         }
       end)
       |> Enum.sort_by(& &1["path"])
@@ -492,18 +662,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     table_ok =
       Enum.all?(manifest["tables"], fn table ->
-        case File.read(Path.join([staging, "tables", table["name"] <> ".jsonl"])) do
-          {:ok, content} -> sha256(content) == table["sha256"]
-          _ -> false
-        end
+        file_sha256(Path.join([staging, "tables", table["name"] <> ".jsonl"])) == table["sha256"]
       end)
 
     files_ok =
       Enum.all?(manifest["files"], fn file ->
-        case File.read(Path.join([staging, "files", file["path"]])) do
-          {:ok, content} -> sha256(content) == file["sha256"]
-          _ -> false
-        end
+        file_sha256(Path.join([staging, "files", file["path"]])) == file["sha256"]
       end)
 
     cond do
@@ -512,6 +676,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       not files_ok -> {:error, :file_checksum_mismatch}
       true -> :ok
     end
+  end
+
+  defp same_tenant(%{"tenant_id" => tenant_id}, tenant_id, _opts), do: :ok
+
+  defp same_tenant(_manifest, _tenant_id, opts) do
+    if opts[:cross_tenant] == true, do: :ok, else: {:error, :bundle_from_another_tenant}
   end
 
   defp plan(manifest, tenant_id, opts) do
@@ -1049,16 +1219,63 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp pack(staging, path) do
     File.mkdir_p!(Path.dirname(path))
 
+    # The manifest goes first, so its tenant and checksums can be read
+    # without decompressing the rest (source_tenant/1).
     entries =
       staging
       |> Path.join("**")
       |> Path.wildcard(match_dot: true)
       |> Enum.filter(&File.regular?/1)
-      |> Enum.map(fn file ->
-        {String.to_charlist(Path.relative_to(file, staging)), String.to_charlist(file)}
+      |> Enum.map(&Path.relative_to(&1, staging))
+      |> Enum.sort_by(&(&1 != "manifest.json"))
+      |> Enum.map(fn relative ->
+        {String.to_charlist(relative), String.to_charlist(Path.join(staging, relative))}
       end)
 
     :erl_tar.create(String.to_charlist(path), entries, [:compressed])
+  end
+
+  # The manifest of a bundle: the first entry when it is named manifest.json
+  # (a ustar header of 512 bytes, then the file), otherwise found by erl_tar.
+  defp manifest_json(path) do
+    first =
+      case File.open(path, [:read, :binary, :compressed]) do
+        {:ok, io} ->
+          try do
+            with <<name::binary-size(100), _::binary-size(24), size::binary-size(12),
+                   _::binary-size(376)>> <- IO.binread(io, 512),
+                 "manifest.json" <- name |> :binary.split(<<0>>) |> hd(),
+                 {bytes, _} <-
+                   size |> :binary.split(<<0>>) |> hd() |> String.trim() |> Integer.parse(8),
+                 json when is_binary(json) and byte_size(json) == bytes <- IO.binread(io, bytes) do
+              {:ok, json}
+            else
+              _ -> :search
+            end
+          after
+            File.close(io)
+          end
+
+        {:error, reason} ->
+          {:error, {:unreadable_bundle, reason}}
+      end
+
+    case first do
+      :search -> search_manifest(path)
+      found -> found
+    end
+  end
+
+  defp search_manifest(path) do
+    case :erl_tar.extract(String.to_charlist(path), [
+           :compressed,
+           :memory,
+           {:files, [~c"manifest.json"]}
+         ]) do
+      {:ok, [{_name, json}]} -> {:ok, json}
+      {:ok, _} -> {:error, :not_a_workspace_bundle}
+      {:error, reason} -> {:error, {:unreadable_bundle, reason}}
+    end
   end
 
   defp unpack(path, staging) do
@@ -1085,20 +1302,54 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     end)
   end
 
+  # Exports and imports unpack in a folder of their own under the Engine's
+  # backup dir, on its data volume, rather than in the shared temp dir, so the
+  # Engine can clear what a stopped run left there without touching another's.
   defp staging_dir do
-    dir = Path.join(System.tmp_dir!(), "optimal-bundle-#{System.unique_integer([:positive])}")
+    dir = Path.join(staging_root(), "bundle-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     dir
   end
 
+  defp staging_root, do: Path.join(backup_base(), "staging")
+
   defp root, do: Application.get_env(:optimal_engine, :root_path, File.cwd!())
 
-  defp sha256(content), do: :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+  defp backup_base do
+    case Application.get_env(:optimal_engine, :backup_dir) do
+      dir when is_binary(dir) and dir != "" ->
+        Path.expand(dir)
 
-  # The replication ledger's high-water mark when the bundle was taken: a
-  # replica seeded from this bundle pulls from here.
-  defp ledger_sequence(tenant_id, workspace_id) do
-    case Store.raw_query(
+      _ ->
+        Application.get_env(:optimal_engine, :db_path, ".optimal/index.db")
+        |> Path.expand()
+        |> Path.dirname()
+        |> Path.join("backups")
+    end
+  end
+
+  defp tenant_folder(tenant_id) do
+    if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/, tenant_id),
+      do: tenant_id,
+      else: "tenant-" <> (:crypto.hash(:sha256, tenant_id) |> Base.encode16(case: :lower))
+  end
+
+  # Hashes a file a megabyte at a time; nil when it is missing or unreadable.
+  defp file_sha256(path) do
+    if File.regular?(path) do
+      path
+      |> File.stream!([], 1_048_576)
+      |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
+      |> :crypto.hash_final()
+      |> Base.encode16(case: :lower)
+    end
+  end
+
+  # The replication ledger's high-water mark in the snapshot: a replica
+  # seeded from this bundle pulls from here.
+  defp ledger_mark(snap, tenant_id, workspace_id) do
+    case ReadSnapshot.query(
+           snap,
            "SELECT COALESCE(MAX(sequence), 0) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2",
            [tenant_id, workspace_id]
          ) do
