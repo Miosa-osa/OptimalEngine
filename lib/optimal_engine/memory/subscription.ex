@@ -274,7 +274,7 @@ defmodule OptimalEngine.Memory.Subscription do
 
   defp decode_categories(json) do
     case Jason.decode(json) do
-      {:ok, list} when is_list(list) -> Enum.map(list, &String.to_atom/1)
+      {:ok, list} when is_list(list) -> Enum.flat_map(list, &known_atom(&1, @categories))
       _ -> []
     end
   end
@@ -297,14 +297,28 @@ defmodule OptimalEngine.Memory.Subscription do
       tenant_id: tenant_id,
       workspace_id: workspace_id,
       principal_id: principal_id,
-      scope: String.to_atom(scope),
+      scope: known_atom(scope, @allowed_scopes, :workspace),
       scope_value: scope_value,
       categories: decode_categories(cats),
       activity: activity,
-      status: String.to_atom(status),
+      status: known_atom(status, [:active, :paused], :paused),
       created_at: created_at,
       metadata: decode_json(meta)
     }
+  end
+
+  # A stored name becomes an atom only if it is one of the atoms the code knows;
+  # `String.to_atom/1` on stored text would let a row mint atoms without limit.
+  defp known_atom(name, known) when is_binary(name),
+    do: Enum.filter(known, &(Atom.to_string(&1) == name))
+
+  defp known_atom(_name, _known), do: []
+
+  defp known_atom(name, known, default) do
+    case known_atom(name, known) do
+      [atom] -> atom
+      [] -> default
+    end
   end
 
   defp decode_json(nil), do: %{}

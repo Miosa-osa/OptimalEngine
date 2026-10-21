@@ -494,17 +494,24 @@ defmodule OptimalEngine.ScopePortabilityTest do
       assert summary.rows["memories"] == 2
     end
 
-    test "connectors, their run log and queued jobs stay with the Engine that runs them", ctx do
+    test "connectors, their run log, queued jobs and dead letters stay with the Engine that runs them",
+         ctx do
       {:ok, _} =
         Store.raw_query(
           "INSERT INTO connectors (id, tenant_id, workspace_id, kind, config, enabled) VALUES (?1, ?2, ?3, 'gmail', '{}', 1)",
           ["bundle-conn-#{ctx.n}", ctx.tenant, ctx.open]
         )
 
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO dead_letter_jobs (id, original_job_id, tenant_id, workspace_id, kind, attempts, final_error) VALUES (?1, 'job', ?2, ?3, 'noop', 5, 'boom')",
+          ["bundle-dlj-#{ctx.n}", ctx.tenant, ctx.open]
+        )
+
       {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
       names = Enum.map(manifest["tables"], & &1["name"])
 
-      for operational <- ~w(connectors connector_runs jobs processor_runs) do
+      for operational <- ~w(connectors connector_runs jobs dead_letter_jobs processor_runs) do
         refute operational in names, "#{operational} travelled in the bundle"
       end
 

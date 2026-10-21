@@ -23,6 +23,13 @@ defmodule OptimalEngine.Sync do
     versions also become claims in the review queue. Nothing is dropped
     silently: refused, gated, and failed changes are counted and failures
     are recorded.
+  * What replicates: only the tables `Capture.replicated_tables/0` lists, an
+    explicit list of workspace knowledge. A peer cannot write any other table
+    (credentials, roles, API keys, tenants, members, tools, storage, the job
+    queue, connectors): such a mutation is skipped as local-only or refused,
+    never written, and the rest of its page still applies. Every applied row
+    is stamped with the target tenant and workspace, and a row whose key
+    already exists in another tenant or workspace is refused.
   * Version safety: a peer with a different schema migration pauses with a
     clear message until both run the same version.
   * Seeding: a new replica imports a workspace bundle exported after sync
@@ -33,8 +40,9 @@ defmodule OptimalEngine.Sync do
 
   alias OptimalEngine.Connectors.{Credential, HTTP}
   alias OptimalEngine.MemoryCore.SecurityLabels
+  alias OptimalEngine.Signal
   alias OptimalEngine.Store
-  alias OptimalEngine.Sync.{Capture, Gate}
+  alias OptimalEngine.Sync.{Capture, Gate, Lineage}
 
   @classes ~w(public internal confidential restricted)
   @page 500
@@ -158,7 +166,12 @@ defmodule OptimalEngine.Sync do
     cursor = if rows == [], do: since, else: rows |> List.last() |> hd()
 
     mutations =
-      for([_seq, _id, device | _] = row <- rows, device != requester, do: to_mutation(row))
+      for(
+        [_seq, _id, device, type | _] = row <- rows,
+        device != requester,
+        Capture.replicated?(type),
+        do: to_mutation(row)
+      )
       |> releasable(tenant_id, workspace_id, max_class)
 
     %{
@@ -185,10 +198,136 @@ defmodule OptimalEngine.Sync do
     if Gate.workspace_rank(workspace_id) > Gate.class_rank(max_class) do
       {:error, :workspace_class_above_gate}
     else
-      plans = Enum.map(mutations, &plan(&1, tenant_id, workspace_id, local, max_class, last_sync))
+      columns = batch_columns(mutations)
+
+      plans =
+        Enum.map(
+          mutations,
+          &plan(&1, tenant_id, workspace_id, local, max_class, last_sync, columns)
+        )
+
       execute(tenant_id, workspace_id, plans)
     end
   end
+
+  @doc """
+  The tables this Engine replicates and the ones it keeps local, with its schema
+  migration. A relay reads it instead of keeping a list of its own.
+  """
+  @spec tables() :: %{replicated: [String.t()], local_only: [String.t()], migration: integer()}
+  def tables do
+    {:ok, authority} =
+      Store.raw_query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 10) = 'authority_' ORDER BY name",
+        []
+      )
+
+    %{
+      replicated: Capture.replicated_tables(),
+      local_only: Enum.sort(Capture.local_tables() ++ List.flatten(authority)),
+      migration: engine_info()["migration"]
+    }
+  end
+
+  # Ledger rows are removed a batch at a time, so one DELETE never holds the Store
+  # for a whole ledger, and the Store is given back between batches.
+  @purge_batch 5_000
+  @purge_yield_ms 10
+
+  # Tables whose rows grant access or move Engine state: a peer that pushed one
+  # wrote it as the Engine's own (an API key, a principal, a role, a tenant, a
+  # migration, a workspace, a peer, an authority record). What each purged ledger
+  # row said is logged before it is removed, so the operator can check the table.
+  @evidence_tables ~w(api_keys principals roles tenants schema_migrations workspaces sync_peers)
+
+  @doc """
+  Removes the ledger rows of tables that do not replicate: an earlier version
+  captured every workspace table, and applied whatever a peer named. Returns the
+  rows removed per table. The rows those entries wrote into the tables
+  themselves are not touched; a table that is not on the list can hold a row no
+  one on this Engine wrote, and only its operator can tell.
+
+  Of the tables that grant access or hold Engine state (`api_keys`, `principals`,
+  `roles`, `tenants`, `schema_migrations`, `workspaces`, `sync_peers` and every
+  `authority_*` table) each row is logged first, with its mutation id, entity id,
+  device and time, never its payload.
+  """
+  @spec purge_unreplicated() :: {:ok, %{String.t() => non_neg_integer()}}
+  def purge_unreplicated do
+    names = Capture.replicated_tables()
+    marks = names |> Enum.with_index(1) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
+    purge_batches(names, marks, 0, %{})
+  end
+
+  defp purge_batches(names, marks, after_sequence, counts) do
+    n = length(names)
+
+    {:ok, rows} =
+      Store.raw_query(
+        """
+        SELECT sequence, id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, occurred_at
+        FROM sync_mutations
+        WHERE sequence > ?#{n + 1} AND entity_type NOT IN (#{marks})
+        ORDER BY sequence LIMIT ?#{n + 2}
+        """,
+        names ++ [after_sequence, @purge_batch]
+      )
+
+    if rows == [] do
+      {:ok, counts}
+    else
+      Enum.each(rows, &log_purged/1)
+      last = rows |> List.last() |> hd()
+
+      {:ok, _} =
+        Store.raw_query(
+          "DELETE FROM sync_mutations WHERE sequence > ?#{n + 1} AND sequence <= ?#{n + 2} AND entity_type NOT IN (#{marks})",
+          names ++ [after_sequence, last]
+        )
+
+      counts =
+        Enum.reduce(rows, counts, fn [_seq, _id, _tenant, _ws, _dev, type | _], acc ->
+          Map.update(acc, type, 1, &(&1 + 1))
+        end)
+
+      Process.sleep(@purge_yield_ms)
+      purge_batches(names, marks, last, counts)
+    end
+  end
+
+  defp log_purged([_seq, id, tenant, workspace, device, type, entity, operation, at]) do
+    if type in @evidence_tables or String.starts_with?(type, "authority_") do
+      Logger.warning(
+        "[Sync] purged ledger row #{id}: #{operation} #{type} #{entity} " <>
+          "(tenant #{tenant}, workspace #{workspace}, device #{device}, at #{at})"
+      )
+    end
+  end
+
+  @doc """
+  `purge_unreplicated/0`, once for each version of the replicated list: the
+  list's version is kept in the database file (`PRAGMA user_version`), so a later
+  boot does not scan the whole ledger again, and a change to the list (a table
+  demoted from it drops its unsent ledger rows) runs the purge once more.
+  """
+  @spec purge_unreplicated_once() :: {:ok, %{String.t() => non_neg_integer()}}
+  def purge_unreplicated_once do
+    version = list_version()
+
+    case Store.raw_query("PRAGMA user_version", []) do
+      {:ok, [[^version]]} ->
+        {:ok, %{}}
+
+      _ ->
+        with {:ok, purged} <- purge_unreplicated() do
+          {:ok, _} = Store.raw_query("PRAGMA user_version = #{version}", [])
+          {:ok, purged}
+        end
+    end
+  end
+
+  # A positive 31-bit number that changes with the replicated list.
+  defp list_version, do: :erlang.phash2(Capture.replicated_tables(), 2_000_000_000) + 1
 
   # -- peers -------------------------------------------------------------------
 
@@ -417,57 +556,265 @@ defmodule OptimalEngine.Sync do
   # ---------------------------------------------------------------------------
   # Applying
 
-  defp plan(mutation, tenant_id, workspace_id, local, gate, last_sync) do
+  # The columns of each replicated table a batch names, read once per batch.
+  defp batch_columns(mutations) do
+    for %{"entity_type" => table} <- mutations, Capture.replicated?(table), into: %{} do
+      {table, Capture.columns(table)}
+    end
+  end
+
+  defp plan(mutation, _tenant_id, _workspace_id, _local, _gate, _last_sync, _columns)
+       when not is_map(mutation),
+       do: {:skip, :invalid, %{}}
+
+  defp plan(mutation, tenant_id, workspace_id, local, gate, last_sync, columns) do
+    table = mutation["entity_type"]
+    invalid = invalid_reason(mutation)
+
     cond do
       mutation["device_id"] == local ->
         {:skip, :own, mutation}
 
+      invalid ->
+        {:fail, invalid, mutation}
+
       known?(mutation["id"]) ->
         {:skip, :duplicate, mutation}
+
+      # A table that stays on its Engine (members, tools, storage, connectors,
+      # the job queue, ...) is not applied from a peer, whatever the peer sent.
+      Capture.known_local?(table) ->
+        {:skip, :local_only, mutation}
+
+      # The peer names the table, so only the tables this Engine replicates
+      # are accepted: never credentials, roles, API keys, tenants or the like.
+      not Capture.replicated?(table) ->
+        {:fail, not_replicated_reason(table), mutation}
 
       Gate.held_on_receive?(mutation, gate) ->
         {:skip, :gated, mutation}
 
       true ->
-        table = mutation["entity_type"]
-        columns = Capture.columns(table)
-
-        cond do
-          columns == [] ->
-            {:fail, :unknown_table, mutation}
-
-          not Enum.all?(Map.keys(get_in(mutation, ["payload", "row"]) || %{}), fn name ->
-            Enum.any?(columns, &(&1.name == name))
-          end) ->
-            {:fail, :unknown_columns, mutation}
-
-          # An append-only row is named by its capture sequence on the Engine
-          # that wrote it, so a local row with the same name is a different
-          # row: it is always added, never a conflict.
-          Capture.rowid_key?(columns) ->
-            {:apply, %{mutation: mutation, columns: columns, conflict: nil}}
-
-          true ->
-            conflict =
-              tenant_id
-              |> local_conflict(workspace_id, table, mutation["entity_id"], local, last_sync)
-              |> unless_same_content(mutation)
-
-            {:apply, %{mutation: mutation, columns: columns, conflict: conflict}}
-        end
+        plan_row(
+          mutation,
+          tenant_id,
+          workspace_id,
+          local,
+          gate,
+          last_sync,
+          Map.get(columns, table, [])
+        )
     end
   end
 
-  defp execute(tenant_id, workspace_id, plans) do
+  defp plan_row(mutation, tenant_id, workspace_id, local, gate, last_sync, columns) do
+    table = mutation["entity_type"]
+    append_only = Capture.rowid_key?(columns)
+    payload = mutation["payload"]
+    names = Map.keys(payload["row"]) ++ Map.keys(payload["blobs"] || %{})
+
+    with :ok <- known_columns(columns, names),
+         :ok <- supported_operation(append_only, mutation["operation"]),
+         :ok <- known_signal_values(table, mutation),
+         {:ok, mutation} <- confine_paths(table, mutation) do
+      # An append-only row is named by its capture sequence on the Engine that
+      # wrote it, so a local row with the same name is a different row: it is
+      # always added, never a conflict.
+      conflict =
+        if append_only do
+          nil
+        else
+          tenant_id
+          |> local_conflict(workspace_id, table, mutation["entity_id"], local, last_sync)
+          |> unless_same_content(mutation)
+        end
+
+      {:apply, %{mutation: mutation, columns: columns, conflict: conflict, gate: gate}}
+    else
+      {:error, reason} -> {:fail, reason, mutation}
+    end
+  end
+
+  # A document's or chunk's mode, signal type and format are read back as atoms
+  # from fixed sets. A value in none of them is not a signal this Engine wrote,
+  # so it is refused rather than stored (reads fall back to a default anyway, and
+  # never mint an atom).
+  @signal_tables ~w(contexts classifications)
+
+  defp known_signal_values(table, mutation) when table in @signal_tables do
+    row = mutation["payload"]["row"]
+
+    ok? =
+      signal_value?(row["mode"], Signal.valid_modes()) and
+        signal_value?(row["signal_type"], Signal.valid_types()) and
+        signal_value?(row["format"], Signal.valid_formats())
+
+    if ok?, do: :ok, else: {:error, :invalid_signal_value}
+  end
+
+  defp known_signal_values(_table, _mutation), do: :ok
+
+  defp signal_value?(nil, _valid), do: true
+
+  defp signal_value?(value, valid) when is_binary(value),
+    do: value in Enum.map(valid, &Atom.to_string/1)
+
+  defp signal_value?(_value, _valid), do: false
+
+  # Every name the payload carries, a blob's as well as a row column's, must be
+  # a column of the table: a name is quoted into the statement that writes it.
+  defp known_columns([], _names), do: {:error, :unknown_table}
+
+  defp known_columns(columns, names) do
+    known = MapSet.new(columns, & &1.name)
+    if Enum.all?(names, &MapSet.member?(known, &1)), do: :ok, else: {:error, :unknown_columns}
+  end
+
+  # An append-only table is keyed by the capture sequence of the Engine that
+  # wrote the row, which says nothing about a row here: there is nothing to
+  # delete by that key, and deleting by it could remove an unrelated row.
+  defp supported_operation(true, "delete"), do: {:error, :operation_not_supported}
+  defp supported_operation(_append_only, _operation), do: :ok
+
+  # Columns that name a place on this Engine's disk. A peer's value is confined:
+  # relative to the workspace, no parent segment, no NUL. `contexts.path` is the
+  # exception that proves the rule: the indexer stores the absolute path of the
+  # file on the Engine that read it, which is no place on this one, so an
+  # absolute value is dropped (NULL) instead of refused, and the context
+  # replicates without it. The ledger keeps what was applied.
+  @confined_columns %{
+    "nodes" => ["slug", "path"],
+    "node_types" => ["slug"],
+    "wiki_pages" => ["slug"]
+  }
+
+  # A blob is written after the row's values are merged in, over any column of the
+  # same name, so a blob named for a confined column would bypass the check on the
+  # row: it is refused.
+  defp confine_paths(table, mutation) do
+    blob_names = Map.keys(mutation["payload"]["blobs"] || %{})
+
+    if Enum.any?(blob_names, &(&1 in confined_columns(table))),
+      do: {:error, :invalid_path},
+      else: confine_row_paths(table, mutation)
+  end
+
+  defp confined_columns("contexts"), do: ["path"]
+  defp confined_columns(table), do: Map.get(@confined_columns, table, [])
+
+  defp confine_row_paths("contexts", mutation) do
+    case get_in(mutation, ["payload", "row", "path"]) do
+      nil ->
+        {:ok, mutation}
+
+      path when is_binary(path) ->
+        cond do
+          not safe_segments?(path) -> {:error, :invalid_path}
+          Path.type(path) == :absolute or windows_path?(path) -> {:ok, drop_path(mutation, "path")}
+          true -> {:ok, mutation}
+        end
+
+      _other ->
+        {:error, :invalid_path}
+    end
+  end
+
+  defp confine_row_paths(table, mutation) do
+    columns = Map.get(@confined_columns, table, [])
+    row = mutation["payload"]["row"]
+
+    if Enum.all?(columns, &confined?(Map.get(row, &1))),
+      do: {:ok, mutation},
+      else: {:error, :invalid_path}
+  end
+
+  defp confined?(nil), do: true
+
+  defp confined?(path) when is_binary(path),
+    do: safe_segments?(path) and Path.type(path) == :relative and not windows_path?(path)
+
+  defp confined?(_other), do: false
+
+  defp safe_segments?(path) do
+    not String.contains?(path, <<0>>) and ".." not in String.split(path, ["/", "\\"])
+  end
+
+  defp windows_path?(path), do: Regex.match?(~r/\A[A-Za-z]:|\A\\\\/, path)
+
+  defp drop_path(mutation, column) do
+    mutation
+    |> put_in(["payload", "row", column], nil)
+    |> Map.delete("payload_hash")
+  end
+
+  defp not_replicated_reason(table) do
+    if Capture.columns(table) == [], do: :unknown_table, else: :table_not_replicated
+  end
+
+  @operations ~w(create update delete)
+
+  # What a well-formed mutation holds, checked before anything is read from it:
+  # a missing or mistyped field would otherwise fail a constraint (and the
+  # whole batch) instead of this one mutation.
+  defp invalid_reason(mutation) do
+    cond do
+      not Enum.all?(~w(id device_id entity_type entity_id), &text?(mutation[&1])) ->
+        :invalid_mutation
+
+      mutation["operation"] not in @operations ->
+        :invalid_mutation
+
+      not is_binary(mutation["occurred_at"]) ->
+        :invalid_occurred_at
+
+      not valid_payload?(mutation["payload"]) ->
+        :invalid_payload
+
+      true ->
+        nil
+    end
+  end
+
+  defp text?(value), do: is_binary(value) and value != ""
+
+  defp valid_payload?(%{"row" => row} = payload) when is_map(row) do
+    Enum.all?(row, fn {_name, value} -> scalar?(value) end) and
+      valid_blobs?(Map.get(payload, "blobs"))
+  end
+
+  defp valid_payload?(_payload), do: false
+
+  defp scalar?(value),
+    do: is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value)
+
+  defp valid_blobs?(nil), do: true
+
+  defp valid_blobs?(blobs) when is_map(blobs) do
+    Enum.all?(blobs, fn {_name, hex} ->
+      is_binary(hex) and match?({:ok, _}, Base.decode16(hex, case: :mixed))
+    end)
+  end
+
+  defp valid_blobs?(_blobs), do: false
+
+  # Foreign keys are checked at commit first, so a child that arrives before its
+  # parent in the same batch still lands. When that commit fails, the batch is
+  # run again with every foreign key checked as its row is written: the rows that
+  # name something this Engine lacks fail alone, and the rest of the page applies.
+  # A row refused for its foreign key in that run is tried once more after the
+  # rest of the page, so a child that came before its parent still lands.
+  defp execute(tenant_id, workspace_id, plans, foreign_keys \\ :deferred) do
     result =
       Store.transaction(fn txn ->
         {:ok, _} = Store.txn_execute(txn, "UPDATE sync_identity SET applying = 1 WHERE id = 1", [])
-        {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+
+        if foreign_keys == :deferred,
+          do: {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
 
         outcome =
           Enum.reduce(
             plans,
-            %{applied: 0, skipped: %{}, failed: [], conflicts: [], fact_conflicts: []},
+            %{applied: 0, skipped: %{}, failed: [], conflicts: [], fact_conflicts: [], retry: []},
             fn
               {:skip, reason, _mutation}, acc ->
                 update_in(acc, [:skipped, reason], &((&1 || 0) + 1))
@@ -482,9 +829,16 @@ defmodule OptimalEngine.Sync do
               {:apply, step}, acc ->
                 if txn_known?(txn, step.mutation["id"]),
                   do: update_in(acc, [:skipped, :duplicate], &((&1 || 0) + 1)),
-                  else: apply_step(txn, tenant_id, workspace_id, step, acc)
+                  else: apply_step(txn, tenant_id, workspace_id, step, acc, foreign_keys)
             end
           )
+
+        outcome =
+          outcome.retry
+          |> Enum.reverse()
+          |> Enum.reduce(%{outcome | retry: []}, fn step, acc ->
+            apply_step(txn, tenant_id, workspace_id, step, acc, :final)
+          end)
 
         {:ok, _} = Store.txn_execute(txn, "UPDATE sync_identity SET applying = 0 WHERE id = 1", [])
         {:ok, outcome}
@@ -502,17 +856,25 @@ defmodule OptimalEngine.Sync do
            conflicts: length(outcome.conflicts)
          }}
 
+      {:error, {:commit_failed, reason}} when foreign_keys == :deferred ->
+        if foreign_key_failure?(reason),
+          do: execute(tenant_id, workspace_id, plans, :immediate),
+          else: {:error, {:commit_failed, reason}}
+
       error ->
         error
     end
   end
 
+  defp foreign_key_failure?(reason), do: String.contains?(inspect(reason), "FOREIGN KEY")
+
   defp apply_step(
          txn,
          tenant_id,
          workspace_id,
-         %{mutation: mutation, columns: columns, conflict: conflict},
-         acc
+         %{mutation: mutation, columns: columns, conflict: conflict, gate: gate} = step,
+         acc,
+         foreign_keys
        ) do
     table = mutation["entity_type"]
     remote_at = mutation["occurred_at"]
@@ -531,7 +893,7 @@ defmodule OptimalEngine.Sync do
         savepoint = "sync_" <> Integer.to_string(System.unique_integer([:positive]))
         {:ok, _} = Store.txn_execute(txn, "SAVEPOINT #{savepoint}", [])
 
-        case write(txn, table, columns, mutation, workspace_id, tenant_id) do
+        case write(txn, table, columns, mutation, workspace_id, tenant_id, gate) do
           :ok ->
             {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
             record_ledger(txn, tenant_id, workspace_id, mutation)
@@ -560,66 +922,173 @@ defmodule OptimalEngine.Sync do
           {:error, reason} ->
             {:ok, _} = Store.txn_execute(txn, "ROLLBACK TO #{savepoint}", [])
             {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
-            record_failure(txn, tenant_id, workspace_id, mutation, reason)
-            %{acc | failed: [%{id: mutation["id"], reason: inspect(reason)} | acc.failed]}
+
+            cond do
+              # The row it would overwrite or delete is above the gate: it stays as it is.
+              reason == :gated ->
+                update_in(acc, [:skipped, :gated], &((&1 || 0) + 1))
+
+              # Its parent may come later in the page: once more after the rest.
+              foreign_keys == :immediate and foreign_key_failure?(reason) ->
+                %{acc | retry: [step | acc.retry]}
+
+              true ->
+                record_failure(txn, tenant_id, workspace_id, mutation, reason)
+                reason = if is_atom(reason), do: reason, else: inspect(reason)
+                %{acc | failed: [%{id: mutation["id"], reason: reason} | acc.failed]}
+            end
         end
     end
   end
 
-  defp write(txn, table, columns, mutation, workspace_id, tenant_id) do
-    payload = mutation["payload"] || %{}
-    blobs = payload["blobs"] || %{}
+  # The row is written into the target tenant and workspace whatever the peer
+  # claims: the scope columns are stamped over the payload's, and a row whose
+  # key already exists in another tenant or workspace is refused (a key is
+  # often just `id`, so an upsert or a delete on it would otherwise reach a
+  # row that is not this workspace's).
+  defp write(txn, table, columns, mutation, workspace_id, tenant_id, gate) do
+    payload = mutation["payload"]
+    keys = Capture.key_columns(columns)
+    append_only = Capture.rowid_key?(columns)
+    delete? = mutation["operation"] == "delete"
+    keyed? = keys != [] and (delete? or not append_only)
+
+    scope =
+      for {name, value} <- [{"tenant_id", tenant_id}, {"workspace_id", workspace_id}],
+          Enum.any?(columns, &(&1.name == name)),
+          do: {name, value}
+
+    # A workspace belongs to one tenant, so the workspace is what keeps a row in
+    # its place; the tenant guards a table that has no workspace column.
+    guard =
+      case List.keyfind(scope, "workspace_id", 0) do
+        nil -> scope
+        workspace -> [workspace]
+      end
 
     row =
       (payload["row"] || %{})
       |> Map.merge(
-        Map.new(blobs, fn {name, hex} -> {name, {:blob, Base.decode16!(hex, case: :mixed)}} end)
+        Map.new(payload["blobs"] || %{}, fn {name, hex} ->
+          {name, {:blob, Base.decode16!(hex, case: :mixed)}}
+        end)
       )
-      |> then(fn r ->
-        if Map.has_key?(r, "workspace_id"), do: Map.put(r, "workspace_id", workspace_id), else: r
-      end)
-      |> then(fn r ->
-        if Map.has_key?(r, "tenant_id"), do: Map.put(r, "tenant_id", tenant_id), else: r
-      end)
+      |> Map.merge(Map.new(scope))
 
-    keys = Capture.key_columns(columns)
-    append_only = Capture.rowid_key?(columns)
+    with :ok <- check_keys(keyed?, delete?, keys, row),
+         :ok <- check_scope(txn, table, keyed? and guard != [], keys, row, guard),
+         :ok <- check_existing_labels(txn, table, columns, keyed?, keys, row, guard, gate),
+         {sql, params} = statement(mutation["operation"], table, keys, append_only, guard, row),
+         {:ok, _} <- Store.txn_execute(txn, sql, params) do
+      :ok
+    end
+  end
+
+  # The gate also applies to the row a change would overwrite or delete: a delete
+  # carries no labels, and an overwrite may carry lower ones, so a peer limited
+  # to `confidential` could otherwise remove or downgrade a `restricted` row. The
+  # existing row is classified by what it carries itself, the way a received row
+  # is (`Gate.held_on_receive?/2`): its labels, partitions, metadata labels and
+  # classification level.
+  defp check_existing_labels(txn, table, columns, true, keys, row, guard, gate) do
+    with spec when not is_nil(spec) <- Lineage.spec(table),
+         [_ | _] = names <-
+           Enum.filter(Lineage.columns(spec), fn name -> Enum.any?(columns, &(&1.name == name)) end) do
+      key_sql =
+        (Enum.map(keys, &{&1, "="}) ++ Enum.map(guard, &{elem(&1, 0), "IS"}))
+        |> Enum.with_index(1)
+        |> Enum.map_join(" AND ", fn {{name, op}, i} -> "#{quote_name(name)} #{op} ?#{i}" end)
+
+      params = Enum.map(keys, &row[&1]) ++ Enum.map(guard, &elem(&1, 1))
+
+      case Store.txn_query(
+             txn,
+             "SELECT #{columns_sql(names)} FROM #{quote_name(table)} WHERE #{key_sql} LIMIT 1",
+             params
+           ) do
+        {:ok, [values]} ->
+          existing = names |> Enum.zip(values) |> Map.new()
+          rank = Lineage.own_rank(spec, existing)
+
+          if rank != nil and rank > Gate.class_rank(gate), do: {:error, :gated}, else: :ok
+
+        {:ok, _none} ->
+          :ok
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      _no_labels -> :ok
+    end
+  end
+
+  defp check_existing_labels(_txn, _table, _columns, false, _keys, _row, _guard, _gate), do: :ok
+
+  defp check_keys(true, _delete?, keys, row) do
+    if Enum.all?(keys, &(row[&1] != nil)), do: :ok, else: {:error, :missing_key}
+  end
+
+  defp check_keys(false, true, _keys, _row), do: {:error, :missing_key}
+  defp check_keys(false, false, _keys, _row), do: :ok
+
+  defp check_scope(_txn, _table, false, _keys, _row, _scope), do: :ok
+
+  defp check_scope(txn, table, true, keys, row, guard) do
+    key_sql =
+      keys
+      |> Enum.with_index(1)
+      |> Enum.map_join(" AND ", fn {k, i} -> "#{quote_name(k)} = ?#{i}" end)
+
+    guard_sql =
+      guard
+      |> Enum.with_index(length(keys) + 1)
+      |> Enum.map_join(" OR ", fn {{name, _value}, i} -> "#{quote_name(name)} IS NOT ?#{i}" end)
+
+    params = Enum.map(keys, &row[&1]) ++ Enum.map(guard, &elem(&1, 1))
+
+    case Store.txn_query(
+           txn,
+           "SELECT 1 FROM #{quote_name(table)} WHERE #{key_sql} AND (#{guard_sql}) LIMIT 1",
+           params
+         ) do
+      {:ok, []} -> :ok
+      {:ok, _} -> {:error, :cross_scope}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp statement("delete", table, keys, _append_only, guard, row) do
+    where =
+      (Enum.map(keys, &{&1, "="}) ++ Enum.map(guard, &{elem(&1, 0), "IS"}))
+      |> Enum.with_index(1)
+      |> Enum.map_join(" AND ", fn {{name, op}, i} -> "#{quote_name(name)} #{op} ?#{i}" end)
+
+    {"DELETE FROM #{quote_name(table)} WHERE #{where}",
+     Enum.map(keys, &row[&1]) ++ Enum.map(guard, &elem(&1, 1))}
+  end
+
+  defp statement(_operation, table, keys, append_only, _guard, row) do
     t = quote_name(table)
 
-    {sql, params} =
-      case {mutation["operation"], append_only} do
-        {"delete", _} ->
-          where =
-            keys
-            |> Enum.with_index(1)
-            |> Enum.map_join(" AND ", fn {k, i} -> "#{quote_name(k)} = ?#{i}" end)
+    if append_only or keys == [] do
+      row = Map.drop(row, if(append_only, do: keys, else: []))
+      names = Map.keys(row)
 
-          {"DELETE FROM #{t} WHERE #{where}", Enum.map(keys, &row[&1])}
+      {"INSERT OR IGNORE INTO #{t} (#{columns_sql(names)}) VALUES (#{placeholders(names)})",
+       Enum.map(names, &row[&1])}
+    else
+      names = Map.keys(row)
 
-        {_, append_only} when append_only or keys == [] ->
-          row = Map.drop(row, if(append_only, do: keys, else: []))
-          names = Map.keys(row)
+      updates =
+        names
+        |> Enum.reject(&(&1 in keys))
+        |> Enum.map_join(", ", &"#{quote_name(&1)} = excluded.#{quote_name(&1)}")
 
-          {"INSERT OR IGNORE INTO #{t} (#{columns_sql(names)}) VALUES (#{placeholders(names)})",
-           Enum.map(names, &row[&1])}
+      conflict = if updates == "", do: "DO NOTHING", else: "DO UPDATE SET #{updates}"
 
-        {_, false} ->
-          names = Map.keys(row)
-
-          updates =
-            names
-            |> Enum.reject(&(&1 in keys))
-            |> Enum.map_join(", ", &"#{quote_name(&1)} = excluded.#{quote_name(&1)}")
-
-          conflict = if updates == "", do: "DO NOTHING", else: "DO UPDATE SET #{updates}"
-
-          {"INSERT INTO #{t} (#{columns_sql(names)}) VALUES (#{placeholders(names)}) ON CONFLICT (#{columns_sql(keys)}) #{conflict}",
-           Enum.map(names, &row[&1])}
-      end
-
-    case Store.txn_execute(txn, sql, params) do
-      {:ok, _} -> :ok
-      {:error, reason} -> {:error, reason}
+      {"INSERT INTO #{t} (#{columns_sql(names)}) VALUES (#{placeholders(names)}) ON CONFLICT (#{columns_sql(keys)}) #{conflict}",
+       Enum.map(names, &row[&1])}
     end
   end
 
@@ -687,14 +1156,18 @@ defmodule OptimalEngine.Sync do
           "sc_" <> random_id(),
           tenant_id,
           workspace_id,
-          mutation["entity_type"] || "unknown",
-          mutation["entity_id"],
+          text_or(mutation["entity_type"], "unknown"),
+          text_or(mutation["entity_id"], nil),
           Jason.encode!(mutation["payload"]),
-          mutation["device_id"],
+          text_or(mutation["device_id"], nil),
           inspect(reason)
         ]
       )
   end
+
+  # A refused mutation may carry any JSON in a field; only text is recorded as such.
+  defp text_or(value, _default) when is_binary(value), do: value
+  defp text_or(_value, default), do: default
 
   # Both versions of a contested fact go to the review queue as claims.
   defp raise_fact_claims(tenant_id, workspace_id, {local, mutation}) do
@@ -991,7 +1464,11 @@ defmodule OptimalEngine.Sync do
     if rows == [] do
       {:ok, totals}
     else
-      mutations = rows |> Enum.map(&to_mutation/1) |> releasable(gate)
+      mutations =
+        rows
+        |> Enum.map(&to_mutation/1)
+        |> Enum.filter(&Capture.replicated?(&1["entity_type"]))
+        |> releasable(gate)
 
       case send_page(peer, key, mutations) do
         {:ok, remote} ->
@@ -1225,8 +1702,14 @@ defmodule OptimalEngine.Sync do
   end
 
   defp pending_push(tenant_id, workspace_id, peer, _local) do
+    replicated = Enum.map_join(Capture.replicated_tables(), ", ", &"'#{&1}'")
+
     case Store.raw_query(
-           "SELECT COUNT(*) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3 AND device_id != ?4",
+           """
+           SELECT COUNT(*) FROM sync_mutations
+           WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3 AND device_id != ?4
+             AND entity_type IN (#{replicated})
+           """,
            [tenant_id, workspace_id, peer.last_pushed_seq, peer.peer_replica_id || ""]
          ) do
       {:ok, [[n]]} -> n

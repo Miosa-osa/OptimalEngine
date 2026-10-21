@@ -3525,6 +3525,7 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.API.SyncAPI
 
   get("/api/sync/changes", do: SyncAPI.changes(conn))
+  get("/api/sync/tables", do: SyncAPI.tables(conn))
   post("/api/sync/changes", do: SyncAPI.apply(conn))
   post("/api/sync/enable", do: SyncAPI.enable(conn))
   post("/api/sync/peers", do: SyncAPI.add_peer(conn))

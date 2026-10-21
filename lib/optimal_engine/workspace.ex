@@ -69,6 +69,13 @@ defmodule OptimalEngine.Workspace do
   @identity_keys ~w(previous_slugs external_id)
   @allowed_roles [:owner, :member, :viewer]
 
+  # A stored role or status becomes an atom only if it is a known one, never by
+  # `String.to_atom/1` on stored text. Anything else gets the least access.
+  defp role_atom(role), do: Enum.find(@allowed_roles, :viewer, &(Atom.to_string(&1) == role))
+
+  defp status_atom(status),
+    do: Enum.find(@allowed_statuses, :archived, &(Atom.to_string(&1) == status))
+
   @type status :: :active | :archived
   @type role :: :owner | :member | :viewer
 
@@ -788,7 +795,7 @@ defmodule OptimalEngine.Workspace do
            [workspace_id]
          ) do
       {:ok, rows} ->
-        {:ok, Enum.map(rows, fn [pid, role] -> {pid, String.to_atom(role)} end)}
+        {:ok, Enum.map(rows, fn [pid, role] -> {pid, role_atom(role)} end)}
 
       other ->
         other
@@ -815,7 +822,7 @@ defmodule OptimalEngine.Workspace do
         {:ok,
          Enum.map(rows, fn row ->
            {ws_row, [role]} = Enum.split(row, 11)
-           {row_to_struct(ws_row), String.to_atom(role)}
+           {row_to_struct(ws_row), role_atom(role)}
          end)}
 
       other ->
@@ -891,7 +898,7 @@ defmodule OptimalEngine.Workspace do
       slug: slug,
       name: name,
       description: description,
-      status: String.to_atom(status),
+      status: status_atom(status),
       created_at: created_at,
       archived_at: archived_at,
       external_id: external_id,

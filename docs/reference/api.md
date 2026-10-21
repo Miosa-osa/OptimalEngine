@@ -11,8 +11,9 @@ Authentication, workspace scope, and operation grants are enforced by `OptimalEn
 Grant is the operation grant the key needs (alternatives joined by `or`), read from `OptimalEngine.API.PermissionPlug`.
 Workspace is `workspace` when the route is authorized for the workspaces it names (the implicit `default` when it names none), and `tenant` when it is tenant-wide; read from `OptimalEngine.API.WorkspaceAuthPlug`.
 A key whose metadata grants app data access (`/api/data/keys`) is confined to `/api/data` whatever its grant.
+`GET /api/sync/tables` returns `replicated`, `local_only` and `migration`; a relay treats every table that is not in `replicated` as local, and `local_only` is not exhaustive (a table another version adds is in neither list).
 
-Routes: 291
+Routes: 292
 
 | Method | Path | Router | Grant | Workspace |
 | --- | --- | --- | --- | --- |
@@ -243,6 +244,7 @@ Routes: 291
 | POST | `/api/sync/peers` | Router | admin | workspace |
 | POST | `/api/sync/run` | Router | admin | workspace |
 | GET | `/api/sync/status` | Router | read | workspace |
+| GET | `/api/sync/tables` | Router | sync | tenant |
 | GET | `/api/topology/export` | Router | admin | tenant |
 | POST | `/api/topology/import` | Router | admin | tenant |
 | GET | `/api/version` | Router | read | tenant |

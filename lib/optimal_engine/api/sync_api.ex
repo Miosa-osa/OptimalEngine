@@ -5,6 +5,7 @@ defmodule OptimalEngine.API.SyncAPI do
   | Route | Scope |
   | --- | --- |
   | `GET /api/sync/changes?workspace=&since=` | sync |
+  | `GET /api/sync/tables` (the replicated and local tables of this Engine) | sync |
   | `POST /api/sync/changes` (apply a batch from a peer) | sync |
   | `POST /api/sync/enable`, `POST /api/sync/peers`, `POST /api/sync/run`, `POST /api/sync/conflicts/:id/resolve` | admin |
   | `GET /api/sync/status?workspace=`, `GET /api/sync/conflicts?workspace=` | read |
@@ -62,8 +63,19 @@ defmodule OptimalEngine.API.SyncAPI do
 
       {:error, reason} ->
         error(conn, 422, reason)
+
+      # `mutations` was sent but is not a list.
+      _not_a_list ->
+        error(conn, 422, :mutations_required)
     end
   end
+
+  @doc """
+  `GET /api/sync/tables`: the tables this Engine replicates and the ones it
+  keeps local, with its schema migration. Static for a given build, so it
+  names no workspace.
+  """
+  def tables(conn), do: json(conn, 200, Sync.tables())
 
   def enable(conn) do
     body = body(conn)
@@ -151,7 +163,10 @@ defmodule OptimalEngine.API.SyncAPI do
   defp error(conn, status, reason) when is_atom(reason),
     do: error(conn, status, Atom.to_string(reason))
 
-  defp error(conn, status, reason), do: json(conn, status, %{error: reason})
+  defp error(conn, status, reason) when is_binary(reason), do: json(conn, status, %{error: reason})
+
+  # A reason that is a term, not a name (a failed commit): its text, never the term.
+  defp error(conn, status, reason), do: json(conn, status, %{error: inspect(reason)})
 
   defp json(conn, status, data) do
     conn
