@@ -32,6 +32,8 @@ defmodule OptimalEngine.Retrieval.BandwidthPlanner do
   real tokenizer before shipping to paid LLMs.
   """
 
+  alias OptimalEngine.Retrieval.Ranking
+
   @chars_per_token 4
   @reserve_overhead 64
 
@@ -54,13 +56,16 @@ defmodule OptimalEngine.Retrieval.BandwidthPlanner do
   @doc """
   Pack `items` greedily by descending score, honoring `budget`.
 
-  Items without an explicit `:score` are treated as 0 and ordered
+  Items are ordered by their exact score (`:rank_score` when an item carries
+  one, else `:score`), then by `:uri` and `:id`
+  (`OptimalEngine.Retrieval.Ranking`), so equal scores pack in the same order
+  every time. Items without an explicit `:score` are treated as 0 and ordered
   last. A per-item overhead of #{@reserve_overhead} tokens is reserved
   to cover the citation/source wrapper the Deliver layer adds.
   """
   @spec plan([item()], non_neg_integer()) :: plan()
   def plan(items, budget) when is_list(items) and is_integer(budget) and budget >= 0 do
-    sorted = Enum.sort_by(items, &Map.get(&1, :score, 0.0), :desc)
+    sorted = Ranking.sort(items)
 
     {kept_rev, dropped_rev, used} =
       Enum.reduce(sorted, {[], [], 0}, fn item, {kept, dropped, tokens} ->
@@ -109,7 +114,7 @@ defmodule OptimalEngine.Retrieval.BandwidthPlanner do
   """
   @spec plan_tiered([item()], non_neg_integer()) :: map()
   def plan_tiered(items, budget) when is_list(items) and is_integer(budget) and budget >= 0 do
-    sorted = Enum.sort_by(items, &Map.get(&1, :score, 0.0), :desc)
+    sorted = Ranking.sort(items)
 
     {kept_rev, dropped_rev, used, downgrades} =
       Enum.reduce(sorted, {[], [], 0, 0}, fn item, {kept, dropped, tokens, downs} ->

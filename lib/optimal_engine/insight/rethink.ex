@@ -107,7 +107,7 @@ defmodule OptimalEngine.Insight.Rethink do
     SELECT id, category, content, confidence, source, created_at
     FROM observations
     WHERE (category = ?1 OR content LIKE ?2) AND workspace_id = ?3
-    ORDER BY confidence DESC
+    ORDER BY confidence DESC, created_at, category, content, source
     """
 
     case Store.raw_query(sql, [topic, "%#{topic}%", ws]) do

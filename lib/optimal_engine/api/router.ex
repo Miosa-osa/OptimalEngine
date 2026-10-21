@@ -26,6 +26,7 @@ defmodule OptimalEngine.API.Router do
   require Logger
 
   @busy_detail "the Engine's store is busy; retry shortly"
+  @invalid_as_of "as_of must be an ISO 8601 timestamp between 1970 and a year from now"
 
   alias OptimalEngine.API.Actor
   alias OptimalEngine.API.IntParam
@@ -39,8 +40,10 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Profile
   alias OptimalEngine.MemoryCore
   alias OptimalEngine.Retrieval
+  alias OptimalEngine.Retrieval.AsOf
   alias OptimalEngine.Retrieval.Grep
   alias OptimalEngine.Retrieval.RagStream
+  alias OptimalEngine.Retrieval.Ranking
   alias OptimalEngine.Retrieval.Receiver
   alias OptimalEngine.SafeAtom
   alias OptimalEngine.Auth.ApiKey
@@ -202,6 +205,21 @@ defmodule OptimalEngine.API.Router do
   # of the tenant's org section is mixed in labeled `inherited: true`
   # (OptimalEngine.OrgPolicy.matching/4). A keyed caller's results honor ACL
   # rows (retrieval_scope/1).
+  #
+  # Results come back in a fixed order: exact score, then uri, then id
+  # (OptimalEngine.Retrieval.Ranking).
+  #
+  #   as_of=<ISO 8601>  the instant the time decay measures age against
+  #                     (default: now). A value that does not parse, or lies
+  #                     before 1970 or over a year ahead, is a 400.
+  #   mode=lexical|hybrid|auto
+  #                     the retrieval path. `lexical` is full text only,
+  #                     `hybrid` requires the vector hop (503 when the embedder
+  #                     cannot serve it), `auto` (default) takes the vector hop
+  #                     when the embedder answers and full text otherwise.
+  #
+  # Two Engines with the same data, asked with the same `as_of` and `mode`,
+  # return the same list.
   get "/api/search" do
     q = query_param(conn, "q", "")
     workspace = query_param(conn, "workspace", "default")
@@ -213,55 +231,79 @@ defmodule OptimalEngine.API.Router do
     memory_inference_embedding_model = query_param(conn, "memory_inference_embedding_model", nil)
     memory_query_prefix = query_param(conn, "memory_query_prefix", "")
     memory_search_mode = query_param(conn, "memory_search_mode", "hybrid")
+    as_of = query_param(conn, "as_of", nil)
+    mode = search_mode(query_param(conn, "mode", nil))
     {offset, limit} = Pagination.parse(conn, 10)
 
     found =
-      if q == "" do
-        {[], 0}
-      else
-        # Fetch up to max_limit to get the real total, then slice.
-        fetch_limit =
-          if type == :memory do
-            min(limit + offset, 200)
-          else
-            min(limit + offset + 200, 200)
+      cond do
+        mode == :invalid ->
+          :invalid_mode
+
+        q == "" ->
+          {[], 0}
+
+        true ->
+          # Fetch up to max_limit to get the real total, then slice.
+          fetch_limit =
+            if type == :memory do
+              min(limit + offset, 200)
+            else
+              min(limit + offset + 200, 200)
+            end
+
+          case OptimalEngine.search(
+                 q,
+                 [
+                   limit: fetch_limit,
+                   workspace_id: workspace,
+                   tenant_id: tenant,
+                   type: type,
+                   memory_search_mode: memory_search_mode,
+                   as_of: as_of,
+                   mode: mode,
+                   memory_embedding_provider_model:
+                     memory_embedding_provider_model || memory_embedding_model,
+                   memory_inference_embedding_model: memory_inference_embedding_model,
+                   memory_query_prefix: memory_query_prefix,
+                   memory_embedding_model:
+                     memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()
+                 ] ++ Keyword.take(scope, [:principal, :acl_absent])
+               ) do
+            {:ok, contexts} ->
+              inherited =
+                if type in [nil, :memory],
+                  do: inherited_policy_results(conn, tenant, workspace, q, as_of),
+                  else: []
+
+              # The exact score is for merging and does not leave the Engine.
+              all =
+                contexts
+                |> format_search_results(workspace)
+                |> Ranking.merge(inherited)
+                |> Enum.map(&Map.delete(&1, :rank_score))
+
+              total = length(all)
+              page = all |> Enum.drop(offset) |> Enum.take(limit)
+              {page, total}
+
+            # The Store did not answer in time: say so, rather than an empty
+            # result list that reads as "nothing found".
+            {:error, :busy} ->
+              :busy
+
+            {:error, {:invalid_as_of, _value}} ->
+              :invalid_as_of
+
+            {:error, :hybrid_unavailable} ->
+              :hybrid_unavailable
+
+            {:error, {:search_failed, ref}} ->
+              {:search_failed, ref}
+
+            _ ->
+              {[], 0}
           end
-
-        case OptimalEngine.search(
-               q,
-               [
-                 limit: fetch_limit,
-                 workspace_id: workspace,
-                 tenant_id: tenant,
-                 type: type,
-                 memory_search_mode: memory_search_mode,
-                 memory_embedding_provider_model:
-                   memory_embedding_provider_model || memory_embedding_model,
-                 memory_inference_embedding_model: memory_inference_embedding_model,
-                 memory_query_prefix: memory_query_prefix,
-                 memory_embedding_model:
-                   memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()
-               ] ++ Keyword.take(scope, [:principal, :acl_absent])
-             ) do
-          {:ok, contexts} ->
-            inherited =
-              if type in [nil, :memory],
-                do: inherited_policy_results(conn, tenant, workspace, q),
-                else: []
-
-            all = merge_by_score(format_search_results(contexts, workspace), inherited)
-            total = length(all)
-            page = all |> Enum.drop(offset) |> Enum.take(limit)
-            {page, total}
-
-          # The Store did not answer in time: say so, rather than an empty
-          # result list that reads as "nothing found".
-          {:error, :busy} ->
-            :busy
-
-          _ ->
-            {[], 0}
-        end
       end
 
     case found do
@@ -270,6 +312,20 @@ defmodule OptimalEngine.API.Router do
         |> put_resp_header("retry-after", "1")
         |> put_status(503)
         |> json(%{error: "busy", detail: @busy_detail})
+
+      :invalid_as_of ->
+        send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
+
+      :invalid_mode ->
+        send_resp(conn, 400, Jason.encode!(%{error: "mode must be lexical, hybrid or auto"}))
+
+      :hybrid_unavailable ->
+        conn
+        |> put_status(503)
+        |> json(%{error: "hybrid_unavailable", detail: "the vector hop is not available"})
+
+      {:search_failed, ref} ->
+        search_failed_resp(conn, 500, ref)
 
       {results, total} ->
         pagination = Pagination.wrap(results, total, offset, limit)
@@ -286,7 +342,7 @@ defmodule OptimalEngine.API.Router do
   #
   # Unlike /api/search (which returns context-level metadata), /api/grep
   # returns chunk-level matches with the full signal trace per match:
-  # slug, scale, intent, sn_ratio, modality, and a 200-char snippet.
+  # uri, slug, scale, intent, sn_ratio, modality, and a 200-char snippet.
   #
   # Params:
   #   q=<query>       search terms (required)
@@ -297,6 +353,8 @@ defmodule OptimalEngine.API.Router do
   #   limit=<n>       max results (default 25)
   #   literal=true    force literal FTS match — skip semantic/vector search
   #   path=<prefix>   restrict to node slug or slug prefix
+  #   as_of=<ISO 8601> instant the time decay measures age against (default:
+  #                   now); same as on /api/search
   get "/api/grep" do
     q = query_param(conn, "q", "")
     workspace_id = query_param(conn, "workspace", "default")
@@ -306,6 +364,7 @@ defmodule OptimalEngine.API.Router do
     {offset, limit} = Pagination.parse(conn, 25)
     literal? = conn |> query_param("literal", "false") |> parse_bool(false)
     path_prefix = query_param(conn, "path", "")
+    as_of = query_param(conn, "as_of", nil)
 
     if q == "" do
       send_resp(conn, 400, Jason.encode!(%{error: "q is required"}))
@@ -321,6 +380,7 @@ defmodule OptimalEngine.API.Router do
         |> api_maybe_put(:scale, parse_atom(scale, nil))
         |> api_maybe_put(:modality, parse_atom(modality, nil))
         |> api_maybe_put(:path_prefix, if(path_prefix == "", do: nil, else: path_prefix))
+        |> api_maybe_put(:as_of, as_of)
 
       case Grep.grep(q, grep_opts) do
         {:ok, all_matches} ->
@@ -330,6 +390,7 @@ defmodule OptimalEngine.API.Router do
           results =
             Enum.map(matches, fn m ->
               %{
+                uri: m.uri,
                 slug: m.slug,
                 scale: to_string(m.scale),
                 intent: if(m.intent, do: to_string(m.intent), else: nil),
@@ -349,8 +410,22 @@ defmodule OptimalEngine.API.Router do
             pagination: pagination.pagination
           })
 
-        {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        {:error, {:invalid_as_of, _value}} ->
+          send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
+
+        {:error, :busy} ->
+          conn
+          |> put_resp_header("retry-after", "1")
+          |> put_status(503)
+          |> json(%{error: "busy", detail: @busy_detail})
+
+        {:error, {:search_failed, ref}} ->
+          search_failed_resp(conn, 500, ref)
+
+        # Any other reason is not echoed: it can carry a process name or a term
+        # from the data.
+        {:error, _reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: "search failed"}))
       end
     end
   end
@@ -1151,6 +1226,8 @@ defmodule OptimalEngine.API.Router do
   # POST /api/rag — end-to-end retrieval for LLM consumption.
   # Body: {"query": "…", "format": "markdown", "audience": "default", "bandwidth": "medium", "workspace": "default"}
   # Optional benchmark/debug controls: skip_intent, skip_wiki, hybrid_limit, memory_limit.
+  # "as_of": an ISO 8601 instant the retrieval measures time against (default: now);
+  # one that does not parse is a 400.
   #
   # Governed recall (additive opt-in): pass "context_package": true to answer
   # through the Memory Core Retrieval Coordinator. The response then carries
@@ -1186,6 +1263,7 @@ defmodule OptimalEngine.API.Router do
           |> api_maybe_put(:hybrid_limit, parse_int(body["hybrid_limit"], nil))
           |> api_maybe_put(:memory_limit, parse_int(body["memory_limit"], nil))
           |> api_maybe_put(:strategy, retrieval_strategy(body["strategy"]))
+          |> api_maybe_put(:as_of, body["as_of"])
           |> api_maybe_put(
             :reconstruction_steps,
             parse_int(body["reconstruction_steps"], nil)
@@ -1199,6 +1277,12 @@ defmodule OptimalEngine.API.Router do
         case Retrieval.ask(q, rag_opts) do
           {:ok, result} ->
             json(conn, result |> render_rag_result() |> with_org_policy(conn, workspace_id))
+
+          {:error, {:invalid_as_of, _value}} ->
+            send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
+
+          {:error, {:search_failed, ref}} ->
+            search_failed_resp(conn, 502, ref)
 
           {:error, reason} ->
             send_resp(conn, 502, Jason.encode!(%{error: inspect(reason)}))
@@ -1219,38 +1303,47 @@ defmodule OptimalEngine.API.Router do
   #   audience=<tag>     wiki audience (default: "default")
   #   format=<atom>      response format: markdown | plain | claude | openai (default: markdown)
   #   bandwidth=<atom>   small | medium | large (default: medium)
+  #   as_of=<ISO 8601>   instant the retrieval measures time against (default: now)
   get "/api/rag/stream" do
     query = query_param(conn, "query", "")
+    as_of = query_param(conn, "as_of", nil)
 
-    if query == "" do
-      send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
-    else
-      receiver =
-        retrieval_receiver(conn, %{
-          format: rag_format(query_param(conn, "format", "markdown")),
-          bandwidth: rag_bandwidth(query_param(conn, "bandwidth", "medium")),
-          audience: query_param(conn, "audience", "default")
-        })
+    cond do
+      query == "" ->
+        send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
 
-      workspace_id = query_param(conn, "workspace", "default")
+      # Checked before the stream opens: once it has, the status is already 200.
+      match?({:error, _}, AsOf.put_if_given(as_of: as_of)) ->
+        send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
 
-      # skip_intent is a test-only shortcut that bypasses Ollama analysis.
-      # It is ignored in production (non-test) builds.
-      rag_opts =
-        [workspace_id: workspace_id]
-        |> Keyword.merge(Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent]))
-        |> then(fn opts ->
-          if Mix.env() == :test and query_param(conn, "skip_intent", "") == "true" do
-            Keyword.put(opts, :skip_intent, true)
-          else
-            opts
-          end
-        end)
+      true ->
+        receiver =
+          retrieval_receiver(conn, %{
+            format: rag_format(query_param(conn, "format", "markdown")),
+            bandwidth: rag_bandwidth(query_param(conn, "bandwidth", "medium")),
+            audience: query_param(conn, "audience", "default")
+          })
 
-      conn = stream_init(conn)
-      {:ok, _task} = RagStream.start_link(query, receiver, self(), rag_opts)
+        workspace_id = query_param(conn, "workspace", "default")
 
-      rag_stream_loop(conn)
+        # skip_intent is a test-only shortcut that bypasses Ollama analysis.
+        # It is ignored in production (non-test) builds.
+        rag_opts =
+          [workspace_id: workspace_id]
+          |> Keyword.merge(Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent]))
+          |> api_maybe_put(:as_of, as_of)
+          |> then(fn opts ->
+            if Mix.env() == :test and query_param(conn, "skip_intent", "") == "true" do
+              Keyword.put(opts, :skip_intent, true)
+            else
+              opts
+            end
+          end)
+
+        conn = stream_init(conn)
+        {:ok, _task} = RagStream.start_link(query, receiver, self(), rag_opts)
+
+        rag_stream_loop(conn)
     end
   end
 
@@ -1286,19 +1379,25 @@ defmodule OptimalEngine.API.Router do
           genre: spec.genre
         })
 
-      {:ok, rag_result} =
-        Retrieval.ask(
-          source,
-          [receiver: receiver, workspace_id: workspace_id] ++
-            Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent])
-        )
+      case Retrieval.ask(
+             source,
+             [receiver: receiver, workspace_id: workspace_id] ++
+               Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent])
+           ) do
+        {:ok, rag_result} ->
+          json(conn, %{
+            spec: OptimalEngine.Render.Spec.to_map(spec),
+            context: rag_result.envelope,
+            prompt_guidance: OptimalEngine.Render.Spec.prompt_guidance(spec),
+            trace: rag_result.trace
+          })
 
-      json(conn, %{
-        spec: OptimalEngine.Render.Spec.to_map(spec),
-        context: rag_result.envelope,
-        prompt_guidance: OptimalEngine.Render.Spec.prompt_guidance(spec),
-        trace: rag_result.trace
-      })
+        {:error, {:search_failed, ref}} ->
+          search_failed_resp(conn, 502, ref)
+
+        {:error, _reason} ->
+          send_resp(conn, 502, Jason.encode!(%{error: "retrieval failed"}))
+      end
     else
       nil ->
         send_resp(conn, 400, Jason.encode!(%{error: "source and spec are required"}))
@@ -1900,6 +1999,9 @@ defmodule OptimalEngine.API.Router do
   end
 
   # ── Cued recall (Engramme-flavored memory-failure flows) ────────────────
+  #
+  # Every recall endpoint also takes `as_of=<ISO 8601>`, the instant the retrieval
+  # measures time against (default: now); one that does not parse is a 400.
   #
   # Five typed endpoints, one per memory-failure pattern from Kreiman's
   # 2026 "Questions in the Wild" study. Each builds a shaped query string,
@@ -3317,7 +3419,7 @@ defmodule OptimalEngine.API.Router do
   # assembled tiers plus MCTS selection metadata (selected candidate ids, scores,
   # token budget used) so callers can inspect how the budget was spent.
   #
-  # Body: {"query": "...", "workspace"?: "default", "tier_budgets"?: {l0, l1, l2}}
+  # Body: {"query": "...", "workspace"?: "default", "tier_budgets"?: {l0, l1, l2}, "as_of"?: ISO 8601}
   # Returns: {l0, l1, l2, l3, total_tokens, sources, mcts_metadata, workspace_id}
   post "/api/nodes" do
     body = conn.body_params || %{}
@@ -3453,6 +3555,9 @@ defmodule OptimalEngine.API.Router do
               )
           })
 
+        {:error, {:invalid_as_of, _value}} ->
+          send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
+
         {:error, reason} ->
           send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
       end
@@ -3470,8 +3575,14 @@ defmodule OptimalEngine.API.Router do
       opts = governed_retrieval_opts(conn, body, workspace, :reconstructive)
 
       case OptimalEngine.MemoryCore.retrieve(query, opts) do
-        {:ok, result} -> json(conn, OptimalEngine.MemoryCore.ContextPackage.to_map(result))
-        {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+        {:ok, result} ->
+          json(conn, OptimalEngine.MemoryCore.ContextPackage.to_map(result))
+
+        {:error, {:invalid_as_of, _value}} ->
+          send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
+
+        {:error, reason} ->
+          send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
       end
     end
   end
@@ -3962,6 +4073,7 @@ defmodule OptimalEngine.API.Router do
       reconstruction_steps: parse_int(body["step_budget"] || body["reconstruction_steps"], 4),
       reconstruction_tokens: parse_int(body["token_budget"] || body["reconstruction_tokens"], 8_000)
     ]
+    |> api_maybe_put(:as_of, body["as_of"])
   end
 
   defp reconstruction_quality(workspace) do
@@ -4734,9 +4846,13 @@ defmodule OptimalEngine.API.Router do
 
   # Org policy of the tenant's org section matching a search, shaped like
   # the workspace's own results and labeled with its source.
-  defp inherited_policy_results(conn, tenant, workspace, q) do
+  defp inherited_policy_results(conn, tenant, workspace, q, as_of) do
     tenant
-    |> OptimalEngine.OrgPolicy.matching(workspace, q, actor: Actor.of(conn))
+    |> OptimalEngine.OrgPolicy.matching(
+      workspace,
+      q,
+      [actor: Actor.of(conn)] |> api_maybe_put(:as_of, as_of)
+    )
     |> Enum.map(fn memory ->
       %{
         id: memory.id,
@@ -4748,6 +4864,7 @@ defmodule OptimalEngine.API.Router do
         l0_abstract: memory.content,
         sn_ratio: nil,
         score: memory.score,
+        rank_score: Map.get(memory, :rank_score, memory.score),
         workspace_id: memory.source_workspace_id,
         metadata: memory.metadata,
         inherited: true,
@@ -4756,16 +4873,12 @@ defmodule OptimalEngine.API.Router do
     end)
   end
 
-  # Inserts `extra` (best first) into `results` by score, keeping the order
-  # of `results` as it is.
-  defp merge_by_score(results, []), do: results
-  defp merge_by_score([], extra), do: extra
-
-  defp merge_by_score([result | results], [hit | hits] = extra) do
-    if (hit.score || 0.0) > (result.score || 0.0),
-      do: [hit | merge_by_score([result | results], hits)],
-      else: [result | merge_by_score(results, extra)]
-  end
+  # The `mode` request parameter of GET /api/search: nil when absent, a mode, or
+  # :invalid.
+  defp search_mode(value) when value in [nil, "", "auto"], do: nil
+  defp search_mode("lexical"), do: :lexical
+  defp search_mode("hybrid"), do: :hybrid
+  defp search_mode(_value), do: :invalid
 
   # The actor recorded in the governed scope envelope is the authenticated
   # principal set by AuthPlug — never a body-asserted name.
@@ -4868,6 +4981,12 @@ defmodule OptimalEngine.API.Router do
 
   defp body_audience(conn), do: query_param(conn, "audience", "default")
 
+  # A search that raised: the caller gets the opaque id the log has the stack
+  # trace under, never the exception text.
+  defp search_failed_resp(conn, status, ref) do
+    send_resp(conn, status, Jason.encode!(%{error: "search failed", ref: ref}))
+  end
+
   defp do_recall(conn, q, audience, workspace) do
     if String.length(String.trim(q)) < 8 do
       send_resp(
@@ -4882,10 +5001,21 @@ defmodule OptimalEngine.API.Router do
       opts =
         [receiver: receiver, workspace_id: workspace]
         |> Keyword.merge(Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent]))
+        |> api_maybe_put(:as_of, query_param(conn, "as_of", nil))
 
-      {:ok, result} = Retrieval.ask(q, opts)
+      case Retrieval.ask(q, opts) do
+        {:ok, result} ->
+          json(conn, result |> Map.put(:recall_query, q) |> with_org_policy(conn, workspace))
 
-      json(conn, result |> Map.put(:recall_query, q) |> with_org_policy(conn, workspace))
+        {:error, {:invalid_as_of, _value}} ->
+          send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
+
+        {:error, {:search_failed, ref}} ->
+          search_failed_resp(conn, 502, ref)
+
+        {:error, reason} ->
+          send_resp(conn, 502, Jason.encode!(%{error: inspect(reason)}))
+      end
     end
   end
 
@@ -4984,6 +5114,9 @@ defmodule OptimalEngine.API.Router do
           source: final.source
         })
 
+      {:rag_stream_error, {:search_failed, ref}} ->
+        send_sse(conn, "error", %{error: "search failed", ref: ref})
+
       {:rag_stream_error, reason} ->
         send_sse(conn, "error", %{error: inspect(reason)})
 
@@ -5045,7 +5178,7 @@ defmodule OptimalEngine.API.Router do
            SELECT id, title, node, type, genre, sn_ratio, modified_at, l0_abstract, uri
            FROM contexts
            WHERE workspace_id = ?1 AND tenant_id = ?2
-           ORDER BY node, modified_at DESC
+           ORDER BY node, modified_at DESC, uri, id
            """,
            [workspace_id, tenant_id]
          ) do
@@ -5171,7 +5304,7 @@ defmodule OptimalEngine.API.Router do
            FROM entities e
            JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?1 AND c.tenant_id = ?2
            GROUP BY e.name, e.type
-           ORDER BY count DESC
+           ORDER BY count DESC, e.name, e.type
            LIMIT 200
            """,
            [workspace_id, tenant_id]
@@ -5211,7 +5344,7 @@ defmodule OptimalEngine.API.Router do
            SELECT id, title, type, genre, sn_ratio, modified_at
            FROM contexts
            WHERE node = ?1 AND workspace_id = ?2 AND tenant_id = ?3
-           ORDER BY modified_at DESC
+           ORDER BY modified_at DESC, uri, id
            LIMIT 50
            """,
            [node_id, workspace_id, tenant_id]
@@ -5260,7 +5393,7 @@ defmodule OptimalEngine.API.Router do
            JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?1 AND c.tenant_id = ?2
            WHERE e.name IS NOT NULL AND e.name <> ''
            GROUP BY e.name, e.type
-           ORDER BY connections DESC
+           ORDER BY connections DESC, e.name, e.type
            LIMIT 300
            """,
            [workspace_id, tenant_id]
@@ -5289,7 +5422,7 @@ defmodule OptimalEngine.API.Router do
     WHERE e1.name IS NOT NULL AND e2.name IS NOT NULL
     GROUP BY e1.name, e2.name
     HAVING shared >= 1
-    ORDER BY shared DESC
+    ORDER BY shared DESC, e1.name, e2.name
     LIMIT 800
     """
 
@@ -5354,7 +5487,7 @@ defmodule OptimalEngine.API.Router do
            SELECT id, title, uri, genre, modified_at, LENGTH(content) AS size
            FROM contexts
            WHERE node = ?1 AND workspace_id = ?2 AND tenant_id = ?3
-           ORDER BY modified_at DESC
+           ORDER BY modified_at DESC, uri, id
            LIMIT 200
            """,
            [slug, workspace_id, tenant_id]
@@ -5778,6 +5911,7 @@ defmodule OptimalEngine.API.Router do
         l0_abstract: Map.get(ctx, :l0_abstract),
         sn_ratio: Map.get(ctx, :sn_ratio),
         score: Map.get(ctx, :score),
+        rank_score: Map.get(ctx, :rank_score, Map.get(ctx, :score)),
         workspace_id: Map.get(ctx, :workspace_id),
         metadata: Map.get(ctx, :metadata),
         inherited: false,

@@ -83,9 +83,9 @@ const profile = await client.profile({ bandwidth: "full" });
 ### Retrieval
 
 ```typescript
-await client.ask(query, { workspace?, audience?, format?, bandwidth? })
-await client.search(query, { workspace?, limit?, offset?, type? })
-await client.grep(query, { workspace?, intent?, scale?, modality?, limit?, offset?, literal?, path? })
+await client.ask(query, { workspace?, audience?, format?, bandwidth?, asOf? })
+await client.search(query, { workspace?, limit?, offset?, type?, asOf?, mode? })
+await client.grep(query, { workspace?, intent?, scale?, modality?, limit?, offset?, literal?, path?, asOf? })
 await client.profile({ workspace?, audience?, bandwidth?, node? })
 ```
 
@@ -114,7 +114,7 @@ Every field except `id` and `inherited` can be `null`.
 `inherited: true` marks an org policy memory inherited from the tenant's org section.
 `source_workspace_id` names the workspace it came from.
 
-A `GrepHit` is one chunk: `slug` (the node it belongs to), `scale`, `intent`, `sn_ratio`, `modality`, `snippet`, and `score`.
+A `GrepHit` is one chunk: `slug` (the node it belongs to), `scale`, `intent`, `sn_ratio`, `modality`, `snippet`, `score`, and `uri` (the `optimal://` context it belongs to, or `null`).
 There is no `id` or `content` on a grep hit.
 
 `pagination` is `{ offset, limit, total, has_more }`.

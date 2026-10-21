@@ -36,6 +36,7 @@ const GREP_BODY = {
       modality: "text",
       snippet: "We decided to renew Acme for two years.",
       score: 0.91,
+      uri: "optimal://ws1/accounts/acme-renewal",
     },
     {
       slug: "notes/misc",
@@ -45,6 +46,7 @@ const GREP_BODY = {
       modality: null,
       snippet: "renewal mentioned in passing",
       score: 0.2,
+      uri: null,
     },
   ],
   pagination: { offset: 0, limit: 25, total: 2, has_more: false },
@@ -191,6 +193,7 @@ describe("grep response shape", () => {
     expect(hit?.sn_ratio).toBe(0.82);
     expect(hit?.modality).toBe("text");
     expect(hit?.score).toBe(0.91);
+    expect(hit?.uri).toBe("optimal://ws1/accounts/acme-renewal");
   });
 
   it("should keep null intent, sn_ratio and modality as null", async () => {
@@ -203,6 +206,7 @@ describe("grep response shape", () => {
     expect(hit?.intent).toBeNull();
     expect(hit?.sn_ratio).toBeNull();
     expect(hit?.modality).toBeNull();
+    expect(hit?.uri).toBeNull();
   });
 
   it("should expose query, workspace_id and pagination", async () => {
@@ -221,7 +225,7 @@ describe("grep response shape", () => {
     });
   });
 
-  it("should forward offset and path alongside the existing filters", async () => {
+  it("should forward offset, path and asOf alongside the existing filters", async () => {
     mockFetch(GREP_BODY);
     const client = new OptimalEngine();
 
@@ -234,6 +238,7 @@ describe("grep response shape", () => {
       offset: 50,
       literal: true,
       path: "accounts/",
+      asOf: "2026-10-20T12:00:00Z",
     });
 
     const { url } = lastCall();
@@ -243,6 +248,7 @@ describe("grep response shape", () => {
     expect(url.searchParams.get("path")).toBe("accounts/");
     expect(url.searchParams.get("limit")).toBe("25");
     expect(url.searchParams.get("literal")).toBe("true");
+    expect(url.searchParams.get("as_of")).toBe("2026-10-20T12:00:00Z");
   });
 
   it("should type scale as the four Engine scales and hits without id or content", () => {
@@ -257,6 +263,7 @@ describe("grep response shape", () => {
     expectTypeOf<GrepHit["intent"]>().toEqualTypeOf<string | null>();
     expectTypeOf<GrepHit["sn_ratio"]>().toEqualTypeOf<number | null>();
     expectTypeOf<GrepHit["score"]>().toEqualTypeOf<number>();
+    expectTypeOf<GrepHit["uri"]>().toEqualTypeOf<string | null>();
     expectTypeOf<GrepHit>().not.toHaveProperty("id");
     expectTypeOf<GrepHit>().not.toHaveProperty("content");
   });
@@ -310,7 +317,7 @@ describe("search response shape", () => {
     expect(result.pagination.total).toBe(31);
   });
 
-  it("should forward offset and type=memory", async () => {
+  it("should forward offset, type=memory, asOf and mode", async () => {
     mockFetch(SEARCH_BODY);
     const client = new OptimalEngine();
 
@@ -319,6 +326,8 @@ describe("search response shape", () => {
       limit: 10,
       offset: 20,
       type: "memory",
+      asOf: new Date("2026-10-20T12:00:00Z"),
+      mode: "lexical",
     });
 
     const { url } = lastCall();
@@ -326,9 +335,11 @@ describe("search response shape", () => {
     expect(url.searchParams.get("limit")).toBe("10");
     expect(url.searchParams.get("offset")).toBe("20");
     expect(url.searchParams.get("type")).toBe("memory");
+    expect(url.searchParams.get("as_of")).toBe("2026-10-20T12:00:00.000Z");
+    expect(url.searchParams.get("mode")).toBe("lexical");
   });
 
-  it("should not send offset or type when they are not given", async () => {
+  it("should not send offset, type, as_of or mode when they are not given", async () => {
     mockFetch(SEARCH_BODY);
     const client = new OptimalEngine();
 
@@ -337,6 +348,8 @@ describe("search response shape", () => {
     const { url } = lastCall();
     expect(url.searchParams.has("offset")).toBe(false);
     expect(url.searchParams.has("type")).toBe(false);
+    expect(url.searchParams.has("as_of")).toBe(false);
+    expect(url.searchParams.has("mode")).toBe(false);
   });
 
   it("should type hits with the real nullable fields and no audience", () => {

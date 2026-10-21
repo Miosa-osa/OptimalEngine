@@ -65,7 +65,7 @@ defmodule OptimalEngine.Graph.Reflector do
     JOIN contexts c ON c.id = e1.context_id AND c.workspace_id = ?3 AND c.tenant_id = ?4
     GROUP BY e1.name, e2.name
     HAVING COUNT(DISTINCT e1.context_id) >= ?1
-    ORDER BY cooccurrences DESC
+    ORDER BY cooccurrences DESC, entity_a, entity_b
     LIMIT ?2
     """
 

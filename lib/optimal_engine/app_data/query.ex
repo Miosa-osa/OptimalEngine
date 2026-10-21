@@ -28,6 +28,12 @@ defmodule OptimalEngine.AppData.Query do
   Pages are keyset pages: `next_cursor` encodes the last row's sort values,
   so pages stay stable while rows are written. A cursor is bound to the
   collection, sort, filter and search it was issued for.
+
+  Rows equal in every sort key keep the order they were inserted in: the last
+  sort key is the record's `_rowid`, a counter local to the Engine that stored
+  it. A copy of a collection made by inserting its records in another order
+  pages such rows in that order, so an order that must match across Engines
+  has to name a sort key that is unique, such as `id`.
   """
 
   alias OptimalEngine.AppData.{Collections, Records, Schema, Scope, Semantic, SQL}

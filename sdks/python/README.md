@@ -41,7 +41,7 @@ async with AsyncOptimalEngine() as client:
 
 ```python
 result   = client.ask("pricing decisions", audience="sales")
-results  = client.search("microvm", limit=10)
+results  = client.search("microvm", limit=10, as_of="2026-10-20T12:00:00Z")
 matches  = client.grep("pricing", intent="decision", scale="paragraph")
 profile  = client.profile(audience="default", bandwidth="l1")
 ```

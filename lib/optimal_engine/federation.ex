@@ -15,7 +15,10 @@ defmodule OptimalEngine.Federation do
   only queried.
   """
 
+  require Logger
+
   alias OptimalEngine.Connectors.{Credential, HTTP}
+  alias OptimalEngine.Retrieval.AsOf
   alias OptimalEngine.{Scope, Store}
 
   @timeout 4_000
@@ -77,10 +80,21 @@ defmodule OptimalEngine.Federation do
   Searches every sharing section the caller may see (`allowed`: list of
   workspace ids, nil for all) plus sharing peers. Returns results with
   `source_workspace_id` and `source_engine`, and per-source status.
+
+  `:as_of` (an ISO 8601 instant or `DateTime`, see `OptimalEngine.Retrieval.AsOf`)
+  is the instant every source measures freshness against, local and peer alike;
+  one that is not valid answers `{:error, {:invalid_as_of, value}}`.
   """
-  @spec search(String.t(), String.t(), keyword()) :: map()
+  @spec search(String.t(), String.t(), keyword()) :: map() | {:error, AsOf.error()}
   def search(tenant_id, query, opts \\ []) do
+    with {:ok, opts} <- AsOf.put_if_given(opts) do
+      do_search(tenant_id, query, opts)
+    end
+  end
+
+  defp do_search(tenant_id, query, opts) do
     allowed = opts[:allowed]
+    as_of = opts[:as_of]
     limit = opts |> Keyword.get(:limit, 10) |> max(1) |> min(50)
 
     local_sources = Scope.sharing_workspaces(tenant_id, allowed)
@@ -93,11 +107,13 @@ defmodule OptimalEngine.Federation do
     tasks =
       Enum.map(local_sources, fn workspace ->
         Task.async(fn ->
-          {workspace.id, "local", local_search(tenant_id, workspace.id, query, limit)}
+          {workspace.id, "local", local_search(tenant_id, workspace.id, query, limit, as_of)}
         end)
       end) ++
         Enum.map(remote_sources, fn peer ->
-          Task.async(fn -> {peer.workspace_id, peer.url, remote_search(peer, query, limit)} end)
+          Task.async(fn ->
+            {peer.workspace_id, peer.url, remote_search(peer, query, limit, as_of)}
+          end)
         end)
 
     # A slow source is reported as timed out instead of failing the search.
@@ -114,6 +130,14 @@ defmodule OptimalEngine.Federation do
           {workspace_id, engine, {:error, :timeout}}
       end)
 
+    # The reason a source did not answer is for the log; the reply carries a
+    # short label (`public_reason/1`).
+    for {workspace_id, engine, {:error, reason}} <- outcomes do
+      Logger.warning(
+        "[Federation] source #{workspace_id} at #{engine} unavailable: #{inspect(reason)}"
+      )
+    end
+
     results =
       outcomes
       |> Enum.flat_map(fn
@@ -126,7 +150,7 @@ defmodule OptimalEngine.Federation do
         _ ->
           []
       end)
-      |> Enum.sort_by(&(-(&1["score"] || 0)))
+      |> Enum.sort_by(&merge_key/1)
       |> Enum.take(limit)
 
     %{
@@ -142,7 +166,7 @@ defmodule OptimalEngine.Federation do
               workspace_id: workspace_id,
               engine: engine,
               status: "unavailable",
-              reason: inspect(reason)
+              reason: public_reason(reason)
             }
         end)
     }
@@ -150,8 +174,19 @@ defmodule OptimalEngine.Federation do
 
   # ---------------------------------------------------------------------------
 
-  defp local_search(tenant_id, workspace_id, query, limit) do
-    case OptimalEngine.search(query, limit: limit, workspace_id: workspace_id, tenant_id: tenant_id) do
+  # Best score first; a tie goes by uri, id, then the workspace it came from, so
+  # the merged list is the same on every call. Remote hits carry only the score
+  # rounded for display, which is the most a peer's API gives.
+  defp merge_key(hit) do
+    {0 - (hit["score"] || 0), hit["uri"] || "", hit["id"] || "", hit["source_workspace_id"] || ""}
+  end
+
+  defp local_search(tenant_id, workspace_id, query, limit, as_of) do
+    search_opts =
+      [limit: limit, workspace_id: workspace_id, tenant_id: tenant_id]
+      |> put_as_of(as_of)
+
+    case OptimalEngine.search(query, search_opts) do
       {:ok, hits} ->
         {:ok,
          Enum.map(hits, fn hit ->
@@ -164,17 +199,27 @@ defmodule OptimalEngine.Federation do
            }
          end)}
 
-      error ->
-        {:error, error}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp remote_search(peer, query, limit) do
+  # What a caller is told about a source that did not answer: a short label,
+  # never exception text or a term from the data. A search that raised carries
+  # the opaque id its log entry is under.
+  defp public_reason(:timeout), do: "timeout"
+  defp public_reason(:busy), do: "busy"
+  defp public_reason({:search_failed, ref}) when is_binary(ref), do: "search failed (ref #{ref})"
+  defp public_reason({:invalid_as_of, _value}), do: "invalid as_of"
+  defp public_reason({:http_status, status}) when is_integer(status), do: "http status #{status}"
+  defp public_reason(:peer_credential_unreadable), do: "peer credential unreadable"
+  defp public_reason(_other), do: "unavailable"
+
+  defp remote_search(peer, query, limit, as_of) do
     with {:ok, key} <- peer_key(peer) do
-      url =
-        peer.url <>
-          "/api/search?" <>
-          URI.encode_query(%{"q" => query, "workspace" => peer.workspace_id, "limit" => limit})
+      params = %{"q" => query, "workspace" => peer.workspace_id, "limit" => limit}
+      params = if as_of, do: Map.put(params, "as_of", DateTime.to_iso8601(as_of)), else: params
+      url = peer.url <> "/api/search?" <> URI.encode_query(params)
 
       case HTTP.get_json(url, headers: [{"authorization", "Bearer " <> key}], timeout: @timeout) do
         {:ok, %{status: 200, body: %{"results" => hits}}} when is_list(hits) ->
@@ -188,6 +233,9 @@ defmodule OptimalEngine.Federation do
       end
     end
   end
+
+  defp put_as_of(opts, nil), do: opts
+  defp put_as_of(opts, as_of), do: Keyword.put(opts, :as_of, as_of)
 
   defp sharing_peers(tenant_id, allowed) do
     {:ok, rows} =

@@ -8,6 +8,7 @@ parsing, exception mapping, and the SSE stream parser.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -127,7 +128,108 @@ def test_grep_passes_filters() -> None:
     request = route.calls.last.request
     assert "intent=decision" in str(request.url)
     assert "scale=paragraph" in str(request.url)
+    assert "as_of" not in request.url.params
     assert result.results[0].sn_ratio == 0.92
+
+
+@respx.mock
+def test_search_sends_as_of_and_mode() -> None:
+    """``search`` sends as_of and mode only when they are given."""
+    route = respx.get("http://localhost:4200/api/search").mock(
+        return_value=httpx.Response(200, json={"query": "microvm", "results": []})
+    )
+
+    with OptimalEngine(base_url="http://localhost:4200") as client:
+        client.search(
+            "microvm",
+            as_of="2026-10-20T12:00:00Z",
+            mode="hybrid",
+        )
+
+    params = route.calls.last.request.url.params
+    assert params["as_of"] == "2026-10-20T12:00:00Z"
+    assert params["mode"] == "hybrid"
+
+
+@respx.mock
+def test_search_serializes_datetime_as_of() -> None:
+    """A datetime as_of is sent as ISO 8601, with naive values treated as UTC."""
+    route = respx.get("http://localhost:4200/api/search").mock(
+        return_value=httpx.Response(200, json={"query": "microvm", "results": []})
+    )
+
+    with OptimalEngine(base_url="http://localhost:4200") as client:
+        client.search("microvm", as_of=datetime(2026, 10, 20, 12, 0, 0))
+        assert route.calls.last.request.url.params["as_of"] == (
+            "2026-10-20T12:00:00+00:00"
+        )
+        client.search(
+            "microvm",
+            as_of=datetime(2026, 10, 20, 12, 0, 0, tzinfo=timezone.utc),
+        )
+        assert route.calls.last.request.url.params["as_of"] == (
+            "2026-10-20T12:00:00+00:00"
+        )
+
+
+@respx.mock
+def test_ask_sends_as_of_when_given() -> None:
+    """``ask`` puts a given as_of in the body and omits it otherwise."""
+    route = respx.post("http://localhost:4200/api/rag").mock(
+        return_value=httpx.Response(200, json={"body": "ok", "citations": []})
+    )
+
+    with OptimalEngine(base_url="http://localhost:4200") as client:
+        client.ask("who owns pricing")
+        sent = json.loads(route.calls.last.request.content)
+        assert "as_of" not in sent
+
+        client.ask("who owns pricing", as_of="2026-10-20T12:00:00Z")
+        sent = json.loads(route.calls.last.request.content)
+        assert sent["as_of"] == "2026-10-20T12:00:00Z"
+
+
+@respx.mock
+def test_grep_parses_uri_and_sends_as_of() -> None:
+    """Grep rows carry the context URI and the request forwards as_of."""
+    route = respx.get("http://localhost:4200/api/grep").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "query": "pricing",
+                "workspace_id": "default",
+                "results": [
+                    {
+                        "slug": "pricing-doc",
+                        "scale": "paragraph",
+                        "intent": "decision",
+                        "sn_ratio": 0.92,
+                        "modality": "text",
+                        "snippet": "We picked $99",
+                        "score": 0.81,
+                        "uri": "optimal://default/pricing",
+                    },
+                    {
+                        "slug": "notes/misc",
+                        "scale": "chunk",
+                        "intent": None,
+                        "sn_ratio": None,
+                        "modality": None,
+                        "snippet": "pricing in passing",
+                        "score": 0.2,
+                        "uri": None,
+                    },
+                ],
+            },
+        )
+    )
+
+    with OptimalEngine(base_url="http://localhost:4200") as client:
+        result = client.grep("pricing", as_of="2026-10-20T12:00:00Z")
+
+    assert route.calls.last.request.url.params["as_of"] == "2026-10-20T12:00:00Z"
+    assert result.results[0].uri == "optimal://default/pricing"
+    assert result.results[1].uri is None
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +428,31 @@ async def test_async_ask_works() -> None:
         result = await client.ask("hello")
 
     assert result.body == "ok"
+
+
+@respx.mock
+async def test_async_retrieval_forwards_as_of_and_mode() -> None:
+    """The async client mirrors search and ask as_of/mode forwarding."""
+    search_route = respx.get("http://localhost:4200/api/search").mock(
+        return_value=httpx.Response(200, json={"query": "microvm", "results": []})
+    )
+    ask_route = respx.post("http://localhost:4200/api/rag").mock(
+        return_value=httpx.Response(200, json={"body": "ok", "citations": []})
+    )
+
+    async with AsyncOptimalEngine(base_url="http://localhost:4200") as client:
+        await client.search(
+            "microvm",
+            as_of="2026-10-20T12:00:00Z",
+            mode="lexical",
+        )
+        await client.ask("hello", as_of="2026-10-20T12:00:00Z")
+
+    params = search_route.calls.last.request.url.params
+    assert params["as_of"] == "2026-10-20T12:00:00Z"
+    assert params["mode"] == "lexical"
+    sent = json.loads(ask_route.calls.last.request.content)
+    assert sent["as_of"] == "2026-10-20T12:00:00Z"
 
 
 # ---------------------------------------------------------------------------

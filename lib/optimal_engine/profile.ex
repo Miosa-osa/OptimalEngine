@@ -205,7 +205,7 @@ defmodule OptimalEngine.Profile do
     SELECT id, signal_id, scale, text
     FROM chunks
     WHERE workspace_id = ?1 AND tenant_id = ?2
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC, id
     LIMIT ?3
     """
 
@@ -227,7 +227,7 @@ defmodule OptimalEngine.Profile do
     FROM entities
     WHERE workspace_id = ?1 AND tenant_id = ?2
     GROUP BY name, type
-    ORDER BY refs DESC
+    ORDER BY refs DESC, name, type
     LIMIT ?3
     """
 

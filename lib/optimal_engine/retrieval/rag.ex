@@ -48,9 +48,11 @@ defmodule OptimalEngine.Retrieval.RAG do
   """
 
   alias OptimalEngine.Retrieval.{
+    AsOf,
     BandwidthPlanner,
     Deliver,
     IntentAnalyzer,
+    Ranking,
     Receiver,
     Search,
     WikiFirst
@@ -102,6 +104,10 @@ defmodule OptimalEngine.Retrieval.RAG do
       retrieval reads only that tenant's contexts and memories
     * `:acl_absent` — `:allow | :deny` for resources with no ACL rows when the
       receiver has an `id` (its principal); defaults to the configured policy
+    * `:as_of` - the instant the search's time decay (and, on the governed
+      path, the validity windows) measures age against, a `DateTime` or ISO 8601
+      string (default: now); one that is not valid answers
+      `{:error, {:invalid_as_of, value}}` (see `OptimalEngine.Retrieval.AsOf`)
     * `:workspace_id` — scope retrieval to a workspace. Defaults to the
       tenant's own default workspace (`"default"` for the default tenant,
       `"<tenant_id>:default"` otherwise) — never to a workspace shared
@@ -118,13 +124,21 @@ defmodule OptimalEngine.Retrieval.RAG do
       opt see no behaviour change. The function is called synchronously in the
       ask process; keep it non-blocking (e.g. `send/2` to a listener PID).
       Events fired (in order): `:intent`, `:wiki_hit`, `:chunks`, `:composing`
+
+  A search that raised answers `{:error, {:search_failed, ref}}`, where `ref` is
+  an opaque id that is also in the log, not an envelope that reads as "no
+  results".
   """
   @spec ask(String.t(), keyword()) :: {:ok, ask_result()} | {:error, term()}
   def ask(query, opts \\ []) when is_binary(query) do
-    cond do
-      not Search.available?() -> Search.unavailable()
-      Keyword.get(opts, :context_package, false) -> ask_context_package(query, opts)
-      true -> ask_legacy(query, opts)
+    if Search.available?() do
+      with {:ok, opts} <- AsOf.put_if_given(opts) do
+        if Keyword.get(opts, :context_package, false),
+          do: ask_context_package(query, opts),
+          else: ask_legacy(query, opts)
+      end
+    else
+      Search.unavailable()
     end
   end
 
@@ -167,7 +181,7 @@ defmodule OptimalEngine.Retrieval.RAG do
         )
       end
 
-    {source, envelope, counts} =
+    delivery =
       case wiki_result do
         {:hit, page, _reason} ->
           on_event.(:wiki_hit, %{
@@ -190,21 +204,24 @@ defmodule OptimalEngine.Retrieval.RAG do
           )
       end
 
-    elapsed = System.monotonic_time(:millisecond) - started
+    # A search that failed is an error, not an answer of "no results".
+    with {source, envelope, counts} <- delivery do
+      elapsed = System.monotonic_time(:millisecond) - started
 
-    {:ok,
-     %{
-       source: source,
-       envelope: envelope,
-       trace: %{
-         intent: intent,
-         wiki_hit?: source == :wiki,
-         n_candidates: counts.candidates,
-         n_delivered: counts.delivered,
-         truncated?: counts.truncated?,
-         elapsed_ms: elapsed
-       }
-     }}
+      {:ok,
+       %{
+         source: source,
+         envelope: envelope,
+         trace: %{
+           intent: intent,
+           wiki_hit?: source == :wiki,
+           n_candidates: counts.candidates,
+           n_delivered: counts.delivered,
+           truncated?: counts.truncated?,
+           elapsed_ms: elapsed
+         }
+       }}
+    end
   end
 
   # ─── private ─────────────────────────────────────────────────────────────
@@ -232,6 +249,7 @@ defmodule OptimalEngine.Retrieval.RAG do
         token_budget: Keyword.get(opts, :token_budget, receiver.token_budget)
       ]
       |> maybe_put(:strategy, Keyword.get(opts, :strategy))
+      |> maybe_put(:as_of, Keyword.get(opts, :as_of))
       |> maybe_put(:reconstruction_steps, Keyword.get(opts, :reconstruction_steps))
       |> maybe_put(:reconstruction_tokens, Keyword.get(opts, :reconstruction_tokens))
 
@@ -349,13 +367,20 @@ defmodule OptimalEngine.Retrieval.RAG do
       [limit: limit, workspace_id: workspace_id, tenant_id: tenant_id(opts, receiver)]
       |> maybe_put(:principal, receiver.id)
       |> maybe_put(:acl_absent, Keyword.get(opts, :acl_absent))
+      |> maybe_put(:as_of, Keyword.get(opts, :as_of))
 
-    candidates = safe_search(expanded, search_opts)
+    with {:ok, candidates} <- safe_search(expanded, search_opts) do
+      deliver_candidates(candidates, query, receiver, on_event)
+    end
+  end
 
+  defp deliver_candidates(candidates, query, receiver, on_event) do
     items =
       Enum.map(candidates, fn c ->
         %{
           score: Map.get(c, :score, 0.0),
+          rank_score: Ranking.exact_score(c),
+          id: Map.get(c, :id),
           content: Map.get(c, :content) || Map.get(c, :l1_description) || "",
           title: Map.get(c, :title) || "Untitled",
           uri: Map.get(c, :uri)
@@ -414,10 +439,17 @@ defmodule OptimalEngine.Retrieval.RAG do
         end
       end)
 
+    # `Memory.list` returns the memories best first. Each carries the same
+    # displayed score, so the planner, which orders by exact score and then by
+    # uri, would pack them by memory id and drop by id under a tight budget.
+    # The exact score falls by position so their order is the list's order.
     items =
-      Enum.map(candidates, fn mem ->
+      candidates
+      |> Enum.with_index()
+      |> Enum.map(fn {mem, position} ->
         %{
           score: 1.0,
+          rank_score: 1.0 - position * 1.0e-6,
           content: mem.content || "",
           title: "Memory #{mem.id}",
           uri: "optimal://memory/#{mem.id}"
@@ -536,20 +568,24 @@ defmodule OptimalEngine.Retrieval.RAG do
   # Hybrid search can stall (Ollama timeout, vector-store cold cache). We
   # catch the GenServer :timeout exit so a flaky downstream dependency
   # returns an empty result set rather than blowing up the whole ask.
+  #
+  # A search that raised is not "no results": its `{:search_failed, ref}` goes
+  # back to the caller, so the ask is an error and not an empty envelope.
   defp safe_search(query, opts) do
     try do
       case Search.search(query, opts) do
-        {:ok, results} -> results
-        _ -> []
+        {:ok, results} -> {:ok, results}
+        {:error, {:search_failed, _ref}} = failed -> failed
+        _ -> {:ok, []}
       end
     catch
       :exit, {:timeout, _} ->
         Logger.warning("RAG: hybrid search timed out for query=#{inspect(query)}")
-        []
+        {:ok, []}
 
       :exit, reason ->
         Logger.warning("RAG: hybrid search crashed: #{inspect(reason)}")
-        []
+        {:ok, []}
     end
   end
 end

@@ -25,13 +25,27 @@ export function registerSearch(server: McpServer): void {
         .describe(
           "Maximum number of results to return. Default decided by engine.",
         ),
+      as_of: z
+        .string()
+        .optional()
+        .describe(
+          "ISO 8601 instant the time decay measures age against, for reproducible comparisons (e.g. 2026-10-20T12:00:00Z). Defaults to now.",
+        ),
+      mode: z
+        .enum(["lexical", "hybrid", "auto"])
+        .optional()
+        .describe(
+          "Retrieval mode. 'lexical' is full text only; 'hybrid' requires the vector hop and fails when the embedder cannot serve it; 'auto' takes the vector hop when the embedder answers and full text otherwise. Defaults to auto.",
+        ),
     },
-    async ({ q, workspace, limit }) => {
+    async ({ q, workspace, limit, as_of, mode }) => {
       try {
         const result = await engine.search({
           q,
           workspace: workspace ?? config.defaultWorkspace,
           limit,
+          as_of,
+          mode,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
