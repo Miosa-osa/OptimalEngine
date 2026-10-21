@@ -75,7 +75,7 @@ defmodule OptimalEngine.Connectors.Adapters.Stripe do
     credential_keys: [:api_key],
     token_key: :api_key
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @base_url "https://api.stripe.com/v1"
   @page_size 100
@@ -103,7 +103,7 @@ defmodule OptimalEngine.Connectors.Adapters.Stripe do
   @impl true
   def sync(state, cursor) do
     with {:ok, resources} <- resolve_resources(pick(state, :resources)) do
-      headers = [{"authorization", "Bearer #{pick(state, :api_key)}"}]
+      headers = [{"authorization", "Bearer #{AccessToken.reveal(pick(state, :api_key))}"}]
       walk(plan(resources, cursor), headers, @max_pages, [])
     end
   end

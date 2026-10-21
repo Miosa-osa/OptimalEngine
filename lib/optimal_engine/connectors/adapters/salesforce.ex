@@ -28,8 +28,13 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
 
   @page_size 200
   @token_url "https://login.salesforce.com/services/oauth2/token"
-  # The token is sent to the connector's instance_url, so it must be Salesforce's.
-  @domains ~w(salesforce.com force.com cloudforce.com salesforce-setup.com)
+  # The token is sent to the connector's instance_url, so it must be a
+  # Salesforce org's own API host: <org>.my.salesforce.com (with at most one
+  # sandbox, develop or scratch label before `my`) or a legacy pod such as
+  # na1.salesforce.com. Not the UI domains (force.com, cloudforce.com) and not
+  # the login hosts.
+  @org_host ~r/\A[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)?\.my\.salesforce\.com\z/
+  @pod_host ~r/\A[a-z]{2,4}[0-9]{1,3}\.salesforce\.com\z/
 
   @impl true
   def init(config) do
@@ -63,9 +68,7 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
 
   defp trusted_host?(host) do
     host = String.downcase(host, :ascii)
-
-    Regex.match?(~r/\A[a-z0-9.-]+\z/, host) and
-      Enum.any?(@domains, &(host == &1 or String.ends_with?(host, "." <> &1)))
+    Regex.match?(@org_host, host) or Regex.match?(@pod_host, host)
   end
 
   defp pull(state, cursor) do

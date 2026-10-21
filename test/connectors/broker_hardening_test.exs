@@ -264,6 +264,13 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
       assert [%{body: %{"workspace_id" => "default:renamed"}}] = BrokerStub.broker_calls(stub)
     end
 
+    test "a seal for a connector with no usable id is an error, not a crash" do
+      for id <- ["", nil, 7, :id] do
+        assert {:error, :invalid_config} = CredentialSource.seal_reference(@config, %{id: id}),
+               "sealed for #{inspect(id)}"
+      end
+    end
+
     test "a seal made without a connector is refused, and a plaintext reference is not read" do
       # Called through apply/3: a direct call with nil warns at compile time, and
       # the suite fails on warnings.

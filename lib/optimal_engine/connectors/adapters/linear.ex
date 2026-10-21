@@ -20,14 +20,14 @@ defmodule OptimalEngine.Connectors.Adapters.Linear do
     credential_keys: [:api_key],
     token_key: :api_key
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @graphql_url "https://api.linear.app/graphql"
   @page_size 50
 
   @impl true
   def sync(state, cursor) do
-    api_key = pick(state, :api_key)
+    api_key = AccessToken.reveal(pick(state, :api_key))
     team_ids = pick(state, :team_ids, [])
     headers = [{"authorization", api_key}, {"content-type", "application/json"}]
 

@@ -98,6 +98,25 @@ defmodule OptimalEngine.Connectors.HTTPTest do
     end
   end
 
+  describe "a 503 that names a Retry-After" do
+    # :httpc sends the request again after the delay such an answer names, until
+    # the call's timeout, on every OTP release before 28.4. A single attempt is
+    # made by the Engine's own client, which never does.
+    test "is answered once: a POST is not sent again, whatever the OTP release" do
+      origin =
+        serve(fn _path, _port ->
+          "HTTP/1.1 503 Service Unavailable\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        end)
+
+      assert {:ok, %{status: 503, headers: headers}} =
+               HTTP.post_json(origin.base <> "/", %{"a" => 1}, single_attempt: true, timeout: 3_000)
+
+      assert HTTP.retry_after(headers) == 1_000
+      assert_received {:requested, _, "POST", "/", _}
+      refute_receive {:requested, _, _, _, _}, 2_500
+    end
+  end
+
   describe "a request body" do
     test "keeps the content type the caller named for a binary body" do
       origin = serve(fn _path, _port -> json("{\"ok\":true}") end)

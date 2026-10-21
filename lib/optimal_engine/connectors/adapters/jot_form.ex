@@ -34,7 +34,7 @@ defmodule OptimalEngine.Connectors.Adapters.JotForm do
     credential_keys: [:api_key],
     token_key: :api_key
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @base_url "https://api.jotform.com"
   @page_size 100
@@ -42,7 +42,7 @@ defmodule OptimalEngine.Connectors.Adapters.JotForm do
 
   @impl true
   def sync(state, cursor) do
-    key = URI.encode_www_form(to_string(pick(state, :api_key)))
+    key = URI.encode_www_form(AccessToken.reveal(pick(state, :api_key)))
 
     with {:ok, form_ids} <- form_ids(state, key) do
       {forms, offset} = resume_position(form_ids, cursor)

@@ -60,7 +60,7 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
     credential_keys: [:oauth_refresh_token, :client_id, :client_secret],
     access_token: true
 
-  alias OptimalEngine.Connectors.{AccessToken, HTTP}
+  alias OptimalEngine.Connectors.{AccessToken, HTTP, TokenExchange}
 
   require Logger
 
@@ -90,8 +90,6 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
                        cannotDownloadFile downloadRestrictedForRevision)
 
   @rate_limit_reasons ~w(rateLimitExceeded userRateLimitExceeded)
-
-  @auth_errors ~w(invalid_grant invalid_client unauthorized_client)
 
   @impl true
   def init(config) do
@@ -182,27 +180,9 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
       "client_secret" => pick(state, :client_secret)
     }
 
-    case HTTP.post_json(@token_url, body, follow_redirects: false, verify_tls: true) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} ->
-        {:ok, token}
-
-      # Google answers a revoked or expired refresh token with a 400.
-      {:ok, %{status: status, body: %{"error" => error}}}
-      when status in [400, 401] and error in @auth_errors ->
-        {:error, :auth_expired}
-
-      {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{status: status} = response} when status == 429 or status >= 500 ->
-        {:error, error_reason(response)}
-
-      {:ok, %{body: body}} ->
-        {:error, {:token_error, body}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    @token_url
+    |> HTTP.post_json(body, follow_redirects: false, verify_tls: true, single_attempt: true)
+    |> TokenExchange.token()
   end
 
   # ---- initial sync -----------------------------------------------------------

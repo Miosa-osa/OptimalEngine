@@ -18,6 +18,7 @@ defmodule OptimalEngine.Connectors.HTTP do
   API is designed so callers won't change.
   """
 
+  alias OptimalEngine.Connectors.HTTP.SingleAttempt
   alias OptimalEngine.Connectors.RateLimit
 
   @default_timeout 10_000
@@ -42,8 +43,12 @@ defmodule OptimalEngine.Connectors.HTTP do
       the system's roots for an https URL (default `false`: Erlang's own default)
     * `:max_body_bytes` - fail with `{:error, :response_too_large}` when the
       answer is longer than this (default: no limit)
-    * `:single_attempt` - send `connection: close`, so the request is never
-      sent again on a kept-alive session the server closed (default `false`)
+    * `:single_attempt` - the request is sent once and no more (default
+      `false`), by `HTTP.SingleAttempt` instead of `:httpc`: one connection,
+      `connection: close`, no redirect, no retry whatever the answer says (a
+      `503` with a `Retry-After` is handed back, not sent again), TLS always
+      verified, and the answer read in full (`:max_body_bytes` defaults to 1 MiB
+      there). `:follow_redirects` and `:verify_tls` have no effect on it
     * `:ratelimit`      — `{bucket_key, rate, burst}` to wait on before firing
     * `:parse_json`     — try to decode response body (default `true`)
   """
@@ -136,6 +141,32 @@ defmodule OptimalEngine.Connectors.HTTP do
   end
 
   defp fire_httpc(url, opts) do
+    if Keyword.get(opts, :single_attempt, false),
+      do: fire_once(url, opts),
+      else: fire_pooled(url, opts)
+  end
+
+  defp fire_once(url, opts) do
+    method = Keyword.get(opts, :method, :get)
+    headers = build_headers(opts)
+
+    {headers, declared_type} =
+      if method in [:get, :delete], do: {headers, nil}, else: pop_content_type(headers)
+
+    {content_type, body_payload} = encode_body(Keyword.get(opts, :body), declared_type)
+
+    SingleAttempt.request(
+      method,
+      url,
+      headers |> Enum.map(fn {k, v} -> {k, header_value(v)} end),
+      List.to_string(content_type),
+      body_payload,
+      timeout: Keyword.get(opts, :timeout, @default_timeout),
+      max_body_bytes: Keyword.get(opts, :max_body_bytes, 1_048_576)
+    )
+  end
+
+  defp fire_pooled(url, opts) do
     method = Keyword.get(opts, :method, :get)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     headers = build_headers(opts)
@@ -144,11 +175,6 @@ defmodule OptimalEngine.Connectors.HTTP do
     # the one the caller named is lifted out of them and handed over there.
     {headers, declared_type} =
       if method in [:get, :delete], do: {headers, nil}, else: pop_content_type(headers)
-
-    headers =
-      if Keyword.get(opts, :single_attempt, false),
-        do: headers ++ [{"connection", "close"}],
-        else: headers
 
     {content_type, body_payload} = encode_body(Keyword.get(opts, :body), declared_type)
 

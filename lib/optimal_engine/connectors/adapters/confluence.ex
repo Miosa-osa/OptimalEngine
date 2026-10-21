@@ -20,18 +20,32 @@ defmodule OptimalEngine.Connectors.Adapters.Confluence do
     credential_keys: [:email, :api_token],
     token_key: :api_token
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP, SiteUrl}
 
   @page_size 50
 
   @impl true
+  def init(config) do
+    with {:ok, state} <- super(config),
+         :ok <- SiteUrl.check(pick(state, :site_url), pick(state, :api_token)) do
+      {:ok, state}
+    end
+  end
+
+  @impl true
   def sync(state, cursor) do
+    with :ok <- SiteUrl.check(pick(state, :site_url), pick(state, :api_token)) do
+      pull(state, cursor)
+    end
+  end
+
+  defp pull(state, cursor) do
     site_url = pick(state, :site_url)
     spaces = pick(state, :spaces, [])
     email = pick(state, :email)
     api_token = pick(state, :api_token)
 
-    credentials = Base.encode64("#{email}:#{api_token}")
+    credentials = Base.encode64("#{email}:#{AccessToken.reveal(api_token)}")
     headers = [{"authorization", "Basic #{credentials}"}]
 
     spaces_to_sync =
