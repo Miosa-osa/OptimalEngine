@@ -39,7 +39,9 @@ defmodule OptimalEngine.Signal.GenreDetector do
 
   # ── Conversational form ─────────────────────────────────────────────────
 
-  @speaker_turn ~r/^(?:>>\s*)?(?:[\[(]?\d{1,2}:\d{2}(?::\d{2})?[\])]?\s*[-–]?\s*)?(?<speaker>[A-Z][\w.'’-]*(?:\s[A-Z0-9][\w.'’-]*){0,2})(?:\s*\(\d{1,2}:\d{2}(?::\d{2})?\))?:\s+\S/u
+  # Possessive runs: the spaces around a timestamp's dash are read once, not
+  # split between two runs (quadratic on a long run of spaces).
+  @speaker_turn ~r/^(?:>>\s*+)?(?:[\[(]?\d{1,2}:\d{2}(?::\d{2})?[\])]?\s*+[-–]?\s*+)?(?<speaker>[A-Z][\w.'’-]*+(?:\s[A-Z0-9][\w.'’-]*+){0,2})(?:\s*+\(\d{1,2}:\d{2}(?::\d{2})?\))?:\s+\S/u
   @speaker_header ~r/^(?<speaker>[A-Z][\w.'’-]*(?:\s[A-Z][\w.'’-]*)?)\s+(?:\d{1,2}:)?\d{1,2}:\d{2}\s*$/u
   @subtitle_timing ~r/^\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{3}/
   @caption_turn ~r/^>>\s*\S/

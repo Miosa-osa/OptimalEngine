@@ -84,8 +84,10 @@ defmodule OptimalEngine.Signal.ModeDetector do
     ~r/^(if|for|while|switch|foreach)\s*\(.*\)\s*+(\{\s*+|:\s*+)?$/,
     # The loop target as words (an atomic token each) up to the first ` in `.
     ~r/^(?=.*:\s*$)for\s+(?>[\w,()]+)(?>[ ]+(?!in\s)[\w,()]+)*\s+in\s.+:\s*$/,
-    ~r/^(?=.*:\s*$)(if|elif|while)\s+.*(==|!=|<=|>=|<|>|\bis\b|\bnot\b|\bin\b|[().\[\]]).*:\s*$/,
-    ~r/^(?=.*:\s*$)with\s+.+\bas\s+\w+\s*:\s*$/,
+    # One whitespace after the keyword, then anything: the same lines as
+    # `\s+.*`, without a split of a long run of spaces to retry.
+    ~r/^(?=.*:\s*$)(if|elif|while)\s.*(==|!=|<=|>=|<|>|\bis\b|\bnot\b|\bin\b|[().\[\]]).*:\s*$/,
+    ~r/^(?=.*:\s*$)with\s.+\bas\s+\w+\s*:\s*$/,
     ~r/^except(\s+[A-Z][\w.]*(\s+as\s+\w+)?)?\s*:\s*$/,
     ~r/^\}?\s*catch\s*\(.*\)\s*+(\{\s*+)?$/,
     ~r/^return\b(\s*+;?\s*+$|\s+\S+\s*+;?\s*+$|.*[(){}\[\];=+*\/<>])/,
@@ -160,8 +162,10 @@ defmodule OptimalEngine.Signal.ModeDetector do
   @table_row ~r/^\|.*\|$/
   @table_rule ~r/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?$/
   # A word of letters, optionally wrapped in sentence punctuation: "Alice:",
-  # "(target", "done." but not "{draft}", "row[1]" or "@moduledoc".
-  @letters_word ~r/(?<!\S)[.,;:!?"'()\[\]*_~`“”‘’]*\p{L}[\p{L}'’-]*[.,;:!?"'()\[\]*_~`“”‘’]*(?!\S)/u
+  # "(target", "done." but not "{draft}", "row[1]" or "@moduledoc". Each run
+  # is possessive: the quotes a word ends with belong to its letters, so a long
+  # run of them is not split between the two classes again and again.
+  @letters_word ~r/(?<!\S)[.,;:!?"'()\[\]*_~`“”‘’]*+\p{L}[\p{L}'’-]*+[.,;:!?"'()\[\]*_~`“”‘’]*+(?!\S)/u
   @symbol_chars ~c"{}[]()<>=;|&$%^\\/~`"
 
   # ── Public API ──────────────────────────────────────────────────────────
