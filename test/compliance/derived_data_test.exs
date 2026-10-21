@@ -371,6 +371,18 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
       end
     end
 
+    test "keep the files and rows of a package that is still here", ctx do
+      {seeded, entry} = planned!(ctx, "plan-present", package: :stays)
+
+      assert {:ok, %{entries: 0, kept: 1, files: 0, rows: 0}} =
+               DerivedData.remove_planned_files([entry])
+
+      assert File.exists?(seeded.asset_file)
+      assert File.exists?(seeded.checkpoint_file)
+      assert count("assets", "id", seeded.asset) == 1
+      assert count("decomposition_runs", "id", seeded.run) == 1
+    end
+
     test "keep the files of a package a context created after the plan refers to", ctx do
       {seeded, entry} = planned!(ctx, "plan-context")
       context!("late-#{ctx.n}", "default", "default", "created after the plan")
@@ -466,13 +478,19 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
   end
 
   # The contexts of the plan go the way a replica's go: their rows are deleted by
-  # something else, and the files are removed afterwards.
-  defp planned!(ctx, label) do
+  # something else, and the files are removed afterwards. The package goes with them, as the
+  # origin deletes it with its last context, unless the test says `package: :stays`.
+  defp planned!(ctx, label, opts \\ []) do
     seeded = seed!("#{label}-#{ctx.n}", ctx)
     assert {:ok, [entry]} = DerivedData.file_plan("default", "default", [seeded.context])
     # A peer's erasure deletes the claims before the context, and so does the replica.
     {:ok, _} = Store.raw_query("DELETE FROM claims WHERE signal_id = ?1", [seeded.context])
     {:ok, _} = Store.raw_query("DELETE FROM contexts WHERE id = ?1", [seeded.context])
+
+    if Keyword.get(opts, :package) != :stays do
+      {:ok, _} = Store.raw_query("DELETE FROM source_packages WHERE id = ?1", [seeded.package])
+    end
+
     {seeded, entry}
   end
 

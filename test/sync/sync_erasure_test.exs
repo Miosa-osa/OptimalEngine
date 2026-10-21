@@ -101,8 +101,9 @@ defmodule OptimalEngine.SyncErasureTest do
       create = [create_context(ctx, gone), create_context(ctx, kept)]
       assert {:ok, %{applied: 2}} = Sync.apply_changes(ctx.tenant, ctx.ws, create)
 
-      assert {:ok, %{applied: 1}} =
-               Sync.apply_changes(ctx.tenant, ctx.ws, [delete_context(gone.context)])
+      # The origin deletes the context and, with it, the package nothing else refers to.
+      assert {:ok, %{applied: 2}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, erased(gone))
 
       refute File.exists?(gone.checkpoint)
       refute File.exists?(gone.asset_file)
@@ -125,8 +126,8 @@ defmodule OptimalEngine.SyncErasureTest do
 
       assert File.exists?(first.checkpoint)
 
-      assert {:ok, %{applied: 1}} =
-               Sync.apply_changes(ctx.tenant, ctx.ws, [delete_context(second.context)])
+      assert {:ok, %{applied: 2}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, erased(second))
 
       refute File.exists?(first.checkpoint)
     end
@@ -159,8 +160,8 @@ defmodule OptimalEngine.SyncErasureTest do
       create = [create_context(ctx, gone), create_context(ctx, kept)]
       assert {:ok, %{applied: 2}} = Sync.apply_changes(ctx.tenant, ctx.ws, create)
 
-      assert {:ok, %{applied: 1}} =
-               Sync.apply_changes(ctx.tenant, ctx.ws, [delete_context(gone.context)])
+      assert {:ok, %{applied: 2}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, erased(gone))
 
       for {table, id} <- [
             {"decomposition_runs", gone.run},
@@ -205,6 +206,33 @@ defmodule OptimalEngine.SyncErasureTest do
       assert File.exists?(work.asset_file)
       assert rows("decomposition_runs", work.run) == 1
       assert rows("asset_extractions", work.extraction) == 1
+    end
+
+    test "stay when only the context was deleted: the origin kept the package", ctx do
+      work = local_work!(ctx, "origin-kept")
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [create_context(ctx, work)])
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [delete_context(work.context)])
+
+      assert rows("source_packages", work.package) == 1
+      assert File.exists?(work.checkpoint)
+      assert File.exists?(work.asset_file)
+      assert rows("decomposition_runs", work.run) == 1
+      assert rows("assets", work.asset) == 1
+      assert rows("asset_extractions", work.extraction) == 1
+
+      # They go when the package does.
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [delete_package(work.package)])
+
+      refute File.exists?(work.checkpoint)
+      refute File.exists?(work.asset_file)
+      assert rows("decomposition_runs", work.run) == 0
+      assert rows("assets", work.asset) == 0
+      assert rows("asset_extractions", work.extraction) == 0
     end
 
     test "are not touched when the delete does not take the context", ctx do
@@ -336,6 +364,9 @@ defmodule OptimalEngine.SyncErasureTest do
       "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
     })
   end
+
+  # What the origin sends when it erases a context: the context and its package.
+  defp erased(work), do: [delete_context(work.context), delete_package(work.package)]
 
   defp delete_package(id) do
     mutation(%{
