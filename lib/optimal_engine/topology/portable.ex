@@ -52,6 +52,12 @@ defmodule OptimalEngine.Topology.Portable do
   @org_fields ~w(slug name status description workspaces)
   @person_fields ~w(id kind display_name external_id workspaces)
 
+  # The values a document may hold, each with the atom it reads as. Validation
+  # and import share these tables, so text from a document is never turned into
+  # an atom by anything but a lookup.
+  @org_statuses %{"active" => :active, "dormant" => :dormant, "archived" => :archived}
+  @person_kinds %{"user" => :user, "agent" => :agent, "service" => :service}
+
   @doc "Imports `document` into `tenant_id`. Returns a summary of changes."
   @spec import(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def import(tenant_id, %{} = document) do
@@ -222,7 +228,7 @@ defmodule OptimalEngine.Topology.Portable do
             not slug?(slug) ->
               ["organization #{slug}: slug must be lowercase letters, digits and dashes"]
 
-            (org["status"] || "active") not in ~w(active dormant archived) ->
+            not is_map_key(@org_statuses, org["status"] || "active") ->
               ["organization #{slug}: invalid status"]
 
             not Enum.all?(org["workspaces"] || [], &workspace_entry?/1) ->
@@ -236,7 +242,7 @@ defmodule OptimalEngine.Topology.Portable do
           ["organization entry needs slug and name: #{inspect(other)}"]
       end) ++
         Enum.flat_map(people, fn
-          %{"id" => id, "kind" => kind} when is_binary(id) and kind in ~w(user agent service) -> []
+          %{"id" => id, "kind" => kind} when is_binary(id) and is_map_key(@person_kinds, kind) -> []
           other -> ["person entry needs id and kind user|agent|service: #{inspect(other)}"]
         end)
 
@@ -280,7 +286,7 @@ defmodule OptimalEngine.Topology.Portable do
       |> Map.put("portable_order", position)
       |> Map.put("workspace_order", Enum.map(org["workspaces"] || [], &entry_slug/1))
 
-    status = String.to_existing_atom(org["status"] || "active")
+    status = Map.fetch!(@org_statuses, org["status"] || "active")
     id = organization_id(tenant_id, org["slug"])
     acc = Map.put(acc, :position, position + 1)
 
@@ -409,7 +415,7 @@ defmodule OptimalEngine.Topology.Portable do
   defp entry_external_id(_entry), do: nil
 
   defp upsert_person(tenant_id, person) do
-    kind = String.to_existing_atom(person["kind"])
+    kind = Map.fetch!(@person_kinds, person["kind"])
     metadata = person |> Map.drop(@person_fields) |> Map.put("portable", true)
 
     {:ok, _} =

@@ -84,6 +84,10 @@ defmodule OptimalEngine.Topology.Node do
   @allowed_styles [:internal, :external, :mixed]
   @allowed_statuses [:active, :archived, :draft]
 
+  @doc "The node kinds `upsert/1` accepts."
+  @spec kinds() :: [kind()]
+  def kinds, do: @allowed_kinds
+
   @doc """
   Upsert a node. `slug` + `workspace_id` is the natural key; `id` defaults to
   `"{tenant_id}:{workspace_id}:{slug}"` for a deterministic, readable identifier.

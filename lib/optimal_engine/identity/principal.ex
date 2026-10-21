@@ -22,7 +22,11 @@ defmodule OptimalEngine.Identity.Principal do
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
 
+  require Logger
+
   @type kind :: :user | :agent | :service
+
+  @kinds %{"user" => :user, "agent" => :agent, "service" => :service}
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -111,9 +115,19 @@ defmodule OptimalEngine.Identity.Principal do
            """,
            [id, tenant_id]
          ) do
-      {:ok, [row]} -> {:ok, row_to_struct(row)}
+      {:ok, [row]} -> row_or_not_found(row)
       {:ok, []} -> {:error, :not_found}
       other -> other
+    end
+  end
+
+  # A stored row whose kind is none of the three (written by something else) is
+  # not a principal the engine can act for: it reads as not found, and `list/2`
+  # leaves it out, with a warning that names it.
+  defp row_or_not_found(row) do
+    case row_to_struct(row) do
+      {:ok, principal} -> {:ok, principal}
+      :error -> {:error, :not_found}
     end
   end
 
@@ -135,7 +149,12 @@ defmodule OptimalEngine.Identity.Principal do
         params
       )
 
-    Enum.map(rows, &row_to_struct/1)
+    Enum.flat_map(rows, fn row ->
+      case row_to_struct(row) do
+        {:ok, principal} -> [principal]
+        :error -> []
+      end
+    end)
   end
 
   @doc "Returns every group id the principal belongs to."
@@ -171,15 +190,23 @@ defmodule OptimalEngine.Identity.Principal do
   end
 
   defp row_to_struct([id, tenant_id, kind, display_name, external_id, created_at, meta_json]) do
-    %__MODULE__{
-      id: id,
-      tenant_id: tenant_id,
-      kind: String.to_existing_atom(kind),
-      display_name: display_name,
-      external_id: external_id,
-      created_at: created_at,
-      metadata: decode_json(meta_json)
-    }
+    case Map.fetch(@kinds, kind) do
+      {:ok, kind} ->
+        {:ok,
+         %__MODULE__{
+           id: id,
+           tenant_id: tenant_id,
+           kind: kind,
+           display_name: display_name,
+           external_id: external_id,
+           created_at: created_at,
+           metadata: decode_json(meta_json)
+         }}
+
+      :error ->
+        Logger.warning("[Identity.Principal] #{id} has unknown kind #{inspect(kind)}; ignored")
+        :error
+    end
   end
 
   defp decode_json(nil), do: %{}
