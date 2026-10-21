@@ -172,7 +172,10 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
 
       assert {:error, :broker_not_configured} =
                CredentialSource.hydrate(
-                 sealed(%{"credential_source" => "broker", "broker_reference" => "conn_0000000000"}),
+                 sealed(%{
+                   "credential_source" => "broker",
+                   "broker_reference" => "conn_0000000000"
+                 }),
                  @scope
                )
     end

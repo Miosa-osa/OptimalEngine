@@ -57,6 +57,22 @@ defmodule OptimalEngine.ScopePortabilityTest do
       )
   end
 
+  # Exports the open workspace, has the source give it up (one database stands in
+  # for two Engines), and makes the tenant that will import it.
+  defp moved_target(ctx, label) do
+    {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+    :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+    {:ok, _} =
+      WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+        "target_url" => "https://other.example"
+      })
+
+    target = "#{label}-#{ctx.n}"
+    {:ok, _} = Tenant.create(%{id: target, name: "Target"})
+    target
+  end
+
   # Adds a table to an exported bundle and signs the manifest again, as anyone
   # who can write a bundle can.
   defp craft_bundle(ctx, table, rows) do
@@ -853,6 +869,10 @@ defmodule OptimalEngine.ScopePortabilityTest do
           "target_url" => "https://other.example"
         })
 
+      # One database stands in for two Engines: the target Engine has never seen
+      # the member, so the source's principal row is not in the way.
+      {:ok, _} = Store.raw_query("DELETE FROM principals WHERE id = ?1", [principal])
+
       target = "member-target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
 
@@ -871,6 +891,153 @@ defmodule OptimalEngine.ScopePortabilityTest do
                )
 
       assert content == "Bundle protocol #{ctx.n}"
+    end
+
+    test "a row key that only looks like a column is refused, whatever its case", ctx do
+      target = moved_target(ctx, "case-target")
+
+      craft_bundle(ctx, "routing_rules", [
+        %{
+          "id" => "rule-case-#{ctx.n}",
+          "tenant_id" => "ignored",
+          "Workspace_ID" => "some-other-tenant:review",
+          "field" => "sender",
+          "pattern" => "a@example.com"
+        }
+      ])
+
+      assert {:error, {:import_failed, "routing_rules", :unknown_column}} =
+               WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM routing_rules WHERE id = ?1", [
+                 "rule-case-#{ctx.n}"
+               ])
+
+      assert {:error, :not_found} = Workspace.get("#{target}:open")
+    end
+
+    test "a second spelling of tenant_id cannot take the first one's place in a principals row",
+         ctx do
+      target = moved_target(ctx, "twin-target")
+      forged = "twin-principal-#{ctx.n}"
+
+      craft_bundle(ctx, "principals", [
+        %{
+          "id" => forged,
+          "tenant_id" => target,
+          "TENANT_ID" => ctx.tenant,
+          "kind" => "user",
+          "display_name" => "Twin"
+        }
+      ])
+
+      assert {:error, {:import_failed, "principals", :unknown_column}} =
+               WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, []} = Store.raw_query("SELECT tenant_id FROM principals WHERE id = ?1", [forged])
+    end
+
+    test "a row that leaves out its tenant lands in the importing tenant, not the column's default",
+         ctx do
+      target = moved_target(ctx, "default-target")
+      id = "dq-omitted-#{ctx.n}"
+
+      craft_bundle(ctx, "data_quality_snapshots", [
+        %{
+          "id" => id,
+          "workspace_id" => "ignored",
+          "health_score" => 1,
+          "health_status" => "ok",
+          "dashboard" => "{}"
+        }
+      ])
+
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, [[^target, workspace_id]]} =
+               Store.raw_query(
+                 "SELECT tenant_id, workspace_id FROM data_quality_snapshots WHERE id = ?1",
+                 [id]
+               )
+
+      assert workspace_id == summary.workspace_id
+    end
+
+    test "an operating document is the workspace's, whatever scope it names", ctx do
+      target = moved_target(ctx, "scope-target")
+
+      craft_bundle(ctx, "operating_documents", [
+        %{
+          "tenant_id" => ctx.tenant,
+          "scope_type" => "tenant",
+          "scope_id" => ctx.tenant,
+          "kind" => "protocol",
+          "content" => "A tenant-wide protocol",
+          "hash" => "h"
+        }
+      ])
+
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, [[scope_type, scope_id, tenant]]} =
+               Store.raw_query(
+                 "SELECT scope_type, scope_id, tenant_id FROM operating_documents WHERE content = 'A tenant-wide protocol'",
+                 []
+               )
+
+      assert {scope_type, scope_id, tenant} == {"workspace", summary.workspace_id, target}
+    end
+
+    test "a member who is another tenant's principal is refused", ctx do
+      target = moved_target(ctx, "member-guard-target")
+      other = "other-tenant-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: other, name: "Other"})
+      foreign = "foreign-principal-#{ctx.n}"
+
+      {:ok, _} =
+        OptimalEngine.Identity.Principal.upsert(%{
+          id: foreign,
+          kind: :user,
+          display_name: "Foreign",
+          tenant_id: other
+        })
+
+      craft_bundle(ctx, "workspace_members", [
+        %{
+          "tenant_id" => ctx.tenant,
+          "workspace_id" => ctx.open,
+          "principal_id" => foreign,
+          "role" => "admin"
+        }
+      ])
+
+      assert {:error, {:import_failed, "workspace_members", :foreign_principal}} =
+               WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM workspace_members WHERE principal_id = ?1", [
+                 foreign
+               ])
+
+      assert {:error, :not_found} = Workspace.get("#{target}:open")
+    end
+
+    test "a create import may name only a workspace of the importing tenant", ctx do
+      target = moved_target(ctx, "name-target")
+
+      assert {:error, :workspace_id_not_in_tenant} =
+               WorkspaceBundle.import(ctx.path, target, workspace_id: "beta-#{ctx.n}:review")
+
+      assert {:error, :invalid_workspace_id} =
+               WorkspaceBundle.import(ctx.path, target, workspace_id: "")
+
+      assert {:error, :not_found} = Workspace.get("beta-#{ctx.n}:review")
+
+      assert {:ok, %{workspace_id: workspace_id}} =
+               WorkspaceBundle.import(ctx.path, target, workspace_id: "review")
+
+      assert workspace_id == "#{target}:review"
     end
 
     test "a crafted principals row is written into the importing tenant, whatever tenant it names",
