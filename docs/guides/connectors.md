@@ -62,7 +62,7 @@ Every adapter also reads an optional `"max_pages"` where its listing is paginate
 | `"credential_source"` | `"stored"` (default) or `"broker"` |
 | `"broker_url"`, `"broker_reference"`, `"broker_scopes"`, `"broker_timeout_ms"` | the outside broker that holds the account; the reference is sealed on write, see below |
 | `"routing_labels"`, `"routing_channel"` | what the routing rules match a Signal's `label` and `channel` against |
-| `"review_workspace_id"` | where a low-confidence route waits for a person; a workspace of the connector's tenant, else registering the connector answers `invalid_review_workspace` |
+| `"review_workspace_id"` | where a low-confidence route waits for a person; a workspace of the connector's tenant, else registering the connector answers `invalid_review_workspace`; a key restricted to named workspaces may name only one it holds, else `403 workspace_scope_denied` on registering or changing the connector |
 | `"routing_walled_workspaces"` | workspaces only an identity rule may open |
 | `"outward_topic"` | tags every Signal from this connector as outward evidence |
 | `"write_files"` | `true` also writes a markdown file per pulled item into the workspace folder; default `false` |
