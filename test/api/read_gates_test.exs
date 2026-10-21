@@ -19,9 +19,27 @@ defmodule OptimalEngine.API.ReadGatesTest do
   alias OptimalEngine.Memory
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.Store
+  alias OptimalEngine.TestSupport.KeyGrantsBackfill
   alias OptimalEngine.Workspace
 
   @opts Router.init([])
+
+  # What a machine key should hold, and what migration 85 gives a key without grants.
+  @machine %{
+    "allowed_security_labels" => ["public", "internal", "confidential"],
+    "allowed_partitions" => []
+  }
+
+  # What such a key reads, route by route: the confidential row, not the restricted one.
+  @reads_default %{
+    memory: {200, 404},
+    memory_list: {true, false},
+    signal: {200, 404},
+    wiki: {200, 404},
+    search_memory: {true, false},
+    search_document: {true, false},
+    grep: {true, false}
+  }
 
   setup do
     n = System.unique_integer([:positive])
@@ -49,6 +67,14 @@ defmodule OptimalEngine.API.ReadGatesTest do
         write_files: false
       )
 
+    {:ok, confidential_doc} =
+      Intake.process("Brightwater renewal: the contract renews at two million for three years",
+        workspace_id: ws,
+        node: "operator",
+        security_labels: ["confidential"],
+        write_files: false
+      )
+
     secret_chunk =
       chunk(ws, "chk-secret-#{n}", secret_doc.context.id, "Zephyrcorp offer of 41 million")
 
@@ -58,7 +84,22 @@ defmodule OptimalEngine.API.ReadGatesTest do
       secret_chunk
     ])
 
+    confidential_chunk =
+      chunk(
+        ws,
+        "chk-confidential-#{n}",
+        confidential_doc.context.id,
+        "Brightwater renewal at two million"
+      )
+
     wiki(ws, "docs-calendar-#{n}", "Release notes", [plain_chunk])
+
+    wiki(
+      ws,
+      "renewals-#{n}",
+      "Renewal notes {{cite: optimal://chunk/#{confidential_chunk}}}",
+      [confidential_chunk]
+    )
 
     %{
       n: n,
@@ -69,7 +110,8 @@ defmodule OptimalEngine.API.ReadGatesTest do
       team: team.memory,
       plain: plain.memory,
       secret_doc: secret_doc.context,
-      plain_doc: plain_doc.context
+      plain_doc: plain_doc.context,
+      confidential_doc: confidential_doc.context
     }
   end
 
@@ -184,6 +226,69 @@ defmodule OptimalEngine.API.ReadGatesTest do
     end
   end
 
+  describe "a key with the default grants (public, internal, confidential)" do
+    test "all six routes show the confidential rows and withhold the restricted ones", ctx do
+      assert reads(ctx, mint(ctx, @machine)) == @reads_default
+    end
+
+    test "a custom label and a partition are withheld as well", ctx do
+      machine = mint(ctx, @machine)
+
+      assert get_as("/api/memory/#{ctx.custom.id}?" <> ws(ctx), machine).status == 404
+      assert get_as("/api/memory/#{ctx.team.id}?" <> ws(ctx), machine).status == 404
+      assert get_as("/api/memory/#{ctx.plain.id}?" <> ws(ctx), machine).status == 200
+
+      list = get_json("/api/memory?" <> ws(ctx) <> "&limit=100", machine)
+      assert Enum.sort(ids(list["memories"])) == Enum.sort([ctx.confidential.id, ctx.plain.id])
+      assert list["withheld"] == 3 and list["complete"] == false
+    end
+  end
+
+  describe "a key minted before grants existed" do
+    test "reads what carries no label until migration 85 gives it the default grants", ctx do
+      legacy = mint(ctx, %{})
+      id = key_id(legacy)
+
+      # The routes alone: no grants, so only unlabelled rows.
+      assert get_as("/api/memory/#{ctx.confidential.id}?" <> ws(ctx), legacy).status == 404
+      assert get_as("/api/memory/#{ctx.plain.id}?" <> ws(ctx), legacy).status == 200
+
+      :ok = KeyGrantsBackfill.apply_to_stored_key(id)
+
+      assert {:ok, key} = ApiKey.verify(legacy)
+      assert key.metadata == Map.put(@machine, "grants_backfilled", true)
+
+      assert reads(ctx, legacy) == @reads_default
+      assert get_as("/api/memory/#{ctx.plain.id}?" <> ws(ctx), legacy).status == 200
+    end
+
+    test "a key with explicit grants reads as it did", ctx do
+      restricted = mint(ctx, %{"allowed_security_labels" => ["restricted"]})
+      none = mint(ctx, %{"allowed_security_labels" => [], "allowed_partitions" => []})
+
+      for token <- [restricted, none] do
+        before = reads(ctx, token)
+        :ok = KeyGrantsBackfill.apply_to_stored_key(key_id(token))
+        assert reads(ctx, token) == before
+      end
+
+      assert {:ok, key} = ApiKey.verify(restricted)
+      assert key.metadata == %{"allowed_security_labels" => ["restricted"]}
+
+      assert {:ok, key} = ApiKey.verify(none)
+      assert key.metadata == %{"allowed_security_labels" => [], "allowed_partitions" => []}
+    end
+
+    test "a key granted * reads everything, before and after", ctx do
+      root = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+      before = reads(ctx, root)
+      assert before.memory == {200, 200}
+
+      :ok = KeyGrantsBackfill.apply_to_stored_key(key_id(root))
+      assert reads(ctx, root) == before
+    end
+  end
+
   describe "search" do
     test "memory search leaves out what the key may not see", ctx do
       query =
@@ -224,6 +329,48 @@ defmodule OptimalEngine.API.ReadGatesTest do
   end
 
   # -- helpers ----------------------------------------------------------------------
+
+  # What a key reads of one confidential and one restricted row, route by route:
+  # {confidential, restricted}.
+  defp reads(ctx, token) do
+    search = fn params ->
+      get_json("/api/search?" <> URI.encode_query(Map.put(params, "workspace", ctx.ws)), token)
+    end
+
+    grep = fn q ->
+      Jason.encode!(
+        get_json("/api/grep?" <> URI.encode_query(%{"q" => q, "workspace" => ctx.ws}), token)[
+          "results"
+        ]
+      )
+    end
+
+    status = fn path -> get_as(path <> ws(ctx), token).status end
+    page = fn slug -> status.("/api/wiki/#{slug}-#{ctx.n}?tenant=default&") end
+
+    %{
+      memory:
+        {status.("/api/memory/#{ctx.confidential.id}?"), status.("/api/memory/#{ctx.secret.id}?")},
+      memory_list: {listed?(ctx, token, ctx.confidential), listed?(ctx, token, ctx.secret)},
+      signal:
+        {status.("/api/signals/#{ctx.confidential_doc.id}?"),
+         status.("/api/signals/#{ctx.secret_doc.id}?")},
+      wiki: {page.("renewals"), page.("deal-room")},
+      search_memory:
+        {ctx.confidential.id in ids(search.(%{"q" => "Northwind", "type" => "memory"})["results"]),
+         ctx.secret.id in ids(search.(%{"q" => "Harborview", "type" => "memory"})["results"])},
+      search_document:
+        {ctx.confidential_doc.id in ids(search.(%{"q" => "Brightwater"})["results"]),
+         ctx.secret_doc.id in ids(search.(%{"q" => "Zephyrcorp"})["results"])},
+      grep: {grep.("Brightwater") =~ "Brightwater", grep.("Zephyrcorp") =~ "Zephyrcorp"}
+    }
+  end
+
+  defp listed?(ctx, token, memory) do
+    memory.id in ids(get_json("/api/memory?" <> ws(ctx) <> "&limit=100", token)["memories"])
+  end
+
+  defp key_id("oe_" <> <<id::binary-size(24), "_", _secret::binary>>), do: id
 
   defp remember(ws, content, labels, partitions \\ []) do
     {:ok, result} =
