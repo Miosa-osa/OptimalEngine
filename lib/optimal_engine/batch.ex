@@ -118,7 +118,7 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:workspace_id` — source workspace (default: `"default"`)
-    - `:reader` — the `OptimalEngine.ReadScope` of a keyed caller: only the
+    - `:reader`: the `OptimalEngine.ReadScope` of a keyed caller: only the
       signals it may see are exported, in its tenant (nil exports all)
 
   A failing read of the Store is an error, never an empty export.
@@ -167,7 +167,7 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:workspace_id` — source workspace (default: `"default"`)
-    - `:reader` — the `OptimalEngine.ReadScope` of a keyed caller: only the
+    - `:reader`: the `OptimalEngine.ReadScope` of a keyed caller: only the
       memories it may see are exported, in its tenant (nil exports all)
 
   A failing read of the Store is an error, never an empty export.
@@ -218,7 +218,7 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:tenant_id` — tenant id (default: the platform default tenant)
-    - `:reader` — the `OptimalEngine.ReadScope` of a keyed caller: only the
+    - `:reader`: the `OptimalEngine.ReadScope` of a keyed caller: only the
       signals, memories and wiki pages it may see are exported, and the
       tenant is the reader's (nil exports all)
   """
