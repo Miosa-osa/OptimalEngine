@@ -37,6 +37,10 @@ defmodule OptimalEngine.Sync.Lineage do
   A link column:
 
     * `{:id, column, table}` the id of a row of `table`;
+    * `{:id_unless, column, table, other}` the same, but only while the row has
+      no value in `other` (a version names its parent and its root: the root
+      alone says what the whole chain is derived from, and following every
+      parent would make a long chain unreadable);
     * `{:typed, type_column, id_column}` an id and the type naming its table;
     * `{:links, column}` a JSON list of ids or `%{"type", "id"}` objects;
     * `{:json_ids, column, table}` a JSON list of ids of `table`;
@@ -47,6 +51,7 @@ defmodule OptimalEngine.Sync.Lineage do
   """
   @type ref_def ::
           {:id, String.t(), String.t()}
+          | {:id_unless, String.t(), String.t(), String.t()}
           | {:typed, String.t(), String.t()}
           | {:links, String.t()}
           | {:json_ids, String.t(), String.t()}
@@ -227,7 +232,7 @@ defmodule OptimalEngine.Sync.Lineage do
        [
          {:meta_id, "memory_core_source_package_id", "source_packages"},
          {:meta_id, "memory_core_pending_claim_id", "claims"},
-         {:id, "parent_memory_id", "memories"},
+         {:id_unless, "parent_memory_id", "memories", "root_memory_id"},
          {:id, "root_memory_id", "memories"},
          {:id, "source_chunk_id", "chunks"},
          {:uris, "citation_uri"}
@@ -351,7 +356,6 @@ defmodule OptimalEngine.Sync.Lineage do
     "surfacing_subscriptions" => {:structural, []},
     "topology_change_requests" => {:structural, []},
     "training_runs" => {:structural, []},
-    "workspace_handles" => {:structural, []},
     "workspace_members" => {:structural, []},
     "workspace_storage_policies" => {:structural, []}
   }
@@ -459,6 +463,7 @@ defmodule OptimalEngine.Sync.Lineage do
     ref_columns =
       Enum.flat_map(spec.refs, fn
         {:id, column, _table} -> [column]
+        {:id_unless, column, _table, other} -> [column, other]
         {:typed, type_column, id_column} -> [type_column, id_column]
         {:links, column} -> [column]
         {:json_ids, column, _table} -> [column]
@@ -541,6 +546,13 @@ defmodule OptimalEngine.Sync.Lineage do
   def id_refs(_id), do: []
 
   defp extract({:id, column, table}, row, _spec), do: scalar(row[column], table)
+
+  defp extract({:id_unless, column, table, other}, row, _spec) do
+    case row[other] do
+      id when is_binary(id) and id != "" -> []
+      _ -> scalar(row[column], table)
+    end
+  end
 
   defp extract({:typed, type_column, id_column}, row, _spec) do
     case {table_for_type(row[type_column]), row[id_column]} do

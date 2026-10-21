@@ -227,14 +227,19 @@ defmodule OptimalEngine.Sync.Gate do
 
   defp ref_rank(gate, {:row, table, id}, visiting, strict) do
     cond do
+      # A link back onto the path being read is not followed, and neither is
+      # one past the depth limit: what is read from here on depends on the
+      # path (see `settled/3`).
       MapSet.member?(visiting, {table, id}) ->
+        cut(gate)
         nil
 
       MapSet.size(visiting) >= @max_depth ->
+        cut(gate)
         unresolved(strict)
 
       true ->
-        memoized(gate, {strict, table, id}, fn -> row_ref(gate, table, id, visiting, strict) end)
+        settled(gate, {strict, table, id}, fn -> row_ref(gate, table, id, visiting, strict) end)
     end
   end
 
@@ -646,6 +651,31 @@ defmodule OptimalEngine.Sync.Gate do
     do: for([value] <- query!(sql, params), is_binary(value), do: value)
 
   # -- small things ---------------------------------------------------------------
+
+  # `memoized/3` for the class of a row reached through links. A result is kept
+  # only when reading it did not depend on the path that led to it. A link that
+  # points back onto the path is left out (or the path got too long), so a row
+  # read inside a loop, or deep down a path, may lack labels that another path
+  # to the same row finds: remembering it would hand that gap to every later
+  # row that links it. A cut is remembered in the gate until the rows above it
+  # have been read, so none of them is kept either.
+  defp settled(%__MODULE__{memo: memo} = gate, key, fun) do
+    case :ets.lookup(memo, key) do
+      [{^key, value}] ->
+        value
+
+      [] ->
+        outer = take_cut(gate)
+        value = fun.()
+        inner = take_cut(gate)
+        unless inner, do: :ets.insert(memo, {key, value})
+        if outer or inner, do: cut(gate)
+        value
+    end
+  end
+
+  defp cut(%__MODULE__{memo: memo}), do: :ets.insert(memo, {:cut, true})
+  defp take_cut(%__MODULE__{memo: memo}), do: :ets.take(memo, :cut) != []
 
   defp memoized(%__MODULE__{memo: memo}, key, fun) do
     case :ets.lookup(memo, key) do

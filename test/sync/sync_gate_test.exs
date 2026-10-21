@@ -851,6 +851,70 @@ defmodule OptimalEngine.SyncGateTest do
 
   # -- the map ----------------------------------------------------------------------------
 
+  describe "lineage that loops or runs deep" do
+    test "a package that names a restricted package's pool is held with it", ctx do
+      source = restricted_source(ctx, "Escrow terms 6612")
+      pool = "pool-#{ctx.n}"
+      first = "cp-first-#{ctx.n}"
+      second = "cp-second-#{ctx.n}"
+
+      # The pool lists the first package and the first package names the pool:
+      # a loop. The first package is restricted by the source it quotes, the
+      # second names the pool too.
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO active_memory_pools (id, tenant_id, workspace_id, context_package_links) VALUES (?1, ?2, ?3, ?4)",
+          [pool, ctx.tenant, ctx.ws, Jason.encode!([first])]
+        )
+
+      for {id, sources} <- [{first, [source.id]}, {second, []}] do
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO context_packages (id, tenant_id, workspace_id, active_memory_pool_id, source_package_links) VALUES (?1, ?2, ?3, ?4, ?5)",
+            [id, ctx.tenant, ctx.ws, pool, Jason.encode!(sources)]
+          )
+      end
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      refute sent?(sent, "context_packages", first)
+      refute sent?(sent, "active_memory_pools", pool)
+      refute sent?(sent, "context_packages", second)
+      refute carries?(sent, "Escrow terms 6612")
+    end
+
+    test "a memory with fifty versions replicates", ctx do
+      ids = version_chain(ctx, 50)
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      for id <- ids, do: assert(sent?(sent, "memories", id), "version #{id} was held")
+    end
+
+    test "the newest of fifty versions replicates when a pull starts at it", ctx do
+      newest = ctx |> version_chain(50) |> List.last()
+
+      assert sent?(page_from(ctx, newest), "memories", newest)
+    end
+
+    test "fifty versions are held with their root when it is labelled", ctx do
+      [root | versions] = version_chain(ctx, 50)
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json('[\"restricted\"]')) WHERE id = ?1",
+          [root]
+        )
+
+      newest = List.last(versions)
+
+      refute sent?(page_from(ctx, newest), "memories", newest)
+
+      {_result, sent} = push(ctx, max_class: "internal")
+      for id <- versions, do: refute(sent?(sent, "memories", id), "version #{id} was sent")
+    end
+  end
+
   describe "the lineage map" do
     test "classifies every table the Engine replicates" do
       replicated = replicated_tables()
@@ -939,6 +1003,7 @@ defmodule OptimalEngine.SyncGateTest do
   defp ref_targets(spec) do
     Enum.flat_map(spec.refs, fn
       {:id, _column, table} -> [table]
+      {:id_unless, _column, table, _other} -> [table]
       {:json_ids, _column, table} -> [table]
       {:meta_id, _key, table} -> [table]
       {:json_map, _column, mapping} -> Map.values(mapping)
@@ -1070,6 +1135,33 @@ defmodule OptimalEngine.SyncGateTest do
     after
       {:ok, _} = Store.raw_query("ALTER TABLE #{table} RENAME COLUMN #{renamed} TO #{column}", [])
     end
+  end
+
+  # What a puller that starts at the change which created `memory_id` is
+  # served: a gate that has not classified the versions before it.
+  defp page_from(ctx, memory_id) do
+    {:ok, _} = Capture.seal()
+
+    {:ok, [[sequence]]} =
+      Store.raw_query(
+        "SELECT MIN(sequence) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = 'memories' AND entity_id = ?3",
+        [ctx.tenant, ctx.ws, memory_id]
+      )
+
+    Sync.changes(ctx.tenant, ctx.ws, since: sequence - 1, limit: 2_000)["mutations"]
+  end
+
+  # A memory and `count - 1` newer versions of it, oldest first.
+  defp version_chain(ctx, count) do
+    {:ok, first} =
+      Versioned.create(%{content: "Version 1", workspace_id: ctx.ws, tenant_id: ctx.tenant})
+
+    2..count
+    |> Enum.reduce([first.id], fn number, [latest | _] = ids ->
+      {:ok, next} = Versioned.update(latest, %{content: "Version #{number}"})
+      [next.id | ids]
+    end)
+    |> Enum.reverse()
   end
 
   defp restricted_source(ctx, text, opts \\ []) do
