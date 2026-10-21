@@ -364,10 +364,14 @@ defmodule OptimalEngine.Compliance.Artifacts do
     end
   end
 
-  # Each directory on the way, looked at without following it.
-  defp real_directories(_parent, []), do: :ok
+  @doc false
+  # Each directory on the way, looked at without following it: `:ok` when `names`, one
+  # below the other under `parent`, are all real directories, `:skip` when one is a link,
+  # a file or missing. `parent` itself is trusted.
+  @spec real_directories(String.t(), [String.t()]) :: :ok | :skip | {:error, atom()}
+  def real_directories(_parent, []), do: :ok
 
-  defp real_directories(parent, [name | rest]) do
+  def real_directories(parent, [name | rest]) do
     directory = Path.join(parent, name)
 
     case File.lstat(directory) do
