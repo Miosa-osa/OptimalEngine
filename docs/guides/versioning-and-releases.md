@@ -21,7 +21,7 @@ retrieval and projection component versions
 Read it from `GET /api/version`.
 The lightweight `GET /api/health` and `GET /api/status` responses include the same identity.
 
-The current tracked contract is application `0.3.9`, API `v1`, contract schema `1`, expected migration `85`.
+The current tracked contract is application `0.3.10`, API `v1`, contract schema `1`, expected migration `85`.
 [engine-contract.json](../../engine-contract.json) supplies repository, schema, and capability metadata to [Version.info/0](../../lib/optimal_engine/version.ex) at compilation.
 [test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
 The runner applies every migration whose version is not yet recorded, but `expected_migration` and the replication gate compare the highest number, so two Engines that both report the same number must have applied the same set.
@@ -105,7 +105,7 @@ Before upgrading:
 2. Find the rows another tenant's key wrote under a workspace id that has no workspace row.
    Before this migration a context took the tenant of its workspace's row only, so a context of an unregistered id reads `default` whoever wrote it; its source package keeps the tenant of the key that wrote it, so the query reads `source_packages`.
    The migration relabels the contexts of an unregistered `<tenant>:<slug>` id with the tenant its prefix names, and leaves a bare id with the default tenant: after the upgrade the tenant's own key reads it as empty (`GET /api/graph` answers `context_count: 0`).
-   From 0.3.9 a write that names its tenant under a bare id lands in that tenant (see "Writes under a bare workspace id" in `scope-and-portability.md`), but a row written before stays with `default`, and the tenant that wrote it cannot rewrite it: the write is refused with `context_id_in_use`.
+   From 0.3.10 a write that names its tenant under a bare id lands in that tenant (see "Writes under a bare workspace id" in `scope-and-portability.md`), but a row written before stays with `default`, and the tenant that wrote it cannot rewrite it: the write is refused with `context_id_in_use`.
    `POST /api/workspaces` gives a workspace the id `<tenant>:<slug>`, so a bare id cannot be registered, and `POST /api/data-steward/workspaces/repair` moves only the rows of the caller's tenant: run as `default`, it moves these rows into a `default` workspace, not into the writing tenant's.
    No step moves such rows to the tenant that wrote them yet.
    The query tells you which ids and tenants are affected, and the tenant can send the documents again under a workspace of its own.
@@ -143,7 +143,7 @@ After upgrading:
 9. Build the client CLI archives (`apps/cli/build.sh`) and the MCP server archive (`apps/mcp/build.sh`) from the tagged source on the release build host, run the installer tests against those files, and stage them with `SHA256SUMS`; both builds refuse a version that differs from `mix.exs`. CI builds and tests the same files on every run but publishes nothing.
    See [Client CLI and MCP server](cli.md) and [client install on MIOSA machines](../../deploy/miosa-template/CLIENT-INSTALL.md).
 
-10. From 0.3.9 on, the release also carries the server build itself, so staging a host is a copy plus a manifest and not a 30 to 60 minute rebuild.
+10. From 0.3.10 on, the release also carries the server build itself, so staging a host is a copy plus a manifest and not a 30 to 60 minute rebuild.
     On the same x86_64 build host, with the tag checked out, run `OPTIMAL_ENGINE_GIT_SHA=<tag sha> OPTIMAL_ENGINE_BUILD_TIMESTAMP=<release timestamp> OPTIMAL_RELEASE_CHANNEL=<channel> deploy/miosa-template/build-release.sh`.
     It writes `optimal-engine-<version>-<sha>.tgz` and `SHA256SUMS` (the name `deploy/miosa-template/stage-release.sh` and the manifest use).
     Attach both to the GitHub release next to the client archives, with the SHA and timestamp used in the release notes, and check that `GET /api/version` of an Engine booted from that file reports exactly those values.

@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "repository": "Miosa-osa/OptimalEngine",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "api_version": "v1",
   "expected_migration": 85,
   "capabilities": [
