@@ -245,6 +245,13 @@ strip_controls() {
   LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "$_sc"
 }
 
+# The same characters, each replaced with ? rather than dropped, for lines a
+# reader should see were changed (log lines, error bodies).
+mark_controls() {
+  _mc="s/$(printf '\302')[$(printf '\200')-$(printf '\237')]/?/g;s/$(printf '\342\200')[$(printf '\250\251')]/?/g"
+  LC_ALL=C tr '\001-\010\013-\037\177' '?' | LC_ALL=C sed "$_mc"
+}
+
 # jobj key value [key value]...: a JSON object of the non-empty values.
 # Values are strings; a key written as @key takes a raw JSON value.
 jobj() {
@@ -650,7 +657,7 @@ call() {
   [ "$R_RC" = 0 ] || die "$EX_UNAVAILABLE" "incomplete response from $_cm $_cp: ${R_ERR:-curl exit $R_RC}"
   case $R_CODE in 2??) return 0 ;; esac
   # The error code is the Engine's text, printed in every message below: no control characters.
-  _ce=$(field_text "$R_BODY" error 2>/dev/null | LC_ALL=C tr -d '\000-\037\177') || _ce=
+  _ce=$(field_text "$R_BODY" error 2>/dev/null | LC_ALL=C tr -d '\000-\037\177' | strip_controls) || _ce=
   case $R_CODE in
     401)
       if [ -z "$CFG_KEY" ]; then
@@ -696,7 +703,7 @@ print_error_body() {
   [ -n "$R_BODY" ] || return 0
   _pe=$(printf '%s' "$R_BODY" | tr -d ' \n')
   [ "$_pe" = "$(printf '{"error":"%s"}' "$_ce" | tr -d ' \n')" ] && return 0
-  printf '%s\n' "$(redact "$R_BODY")" | LC_ALL=C tr '\001-\010\013-\037\177' '?' >&2
+  printf '%s\n' "$(redact "$R_BODY")" | mark_controls >&2
 }
 
 want_pretty() {
@@ -955,7 +962,7 @@ remote_op() {
       case $_rl in '"'*) ;; *) die "$EX_DATAERR" "the Engine's answer to GET /api/maintenance/log has no log text" ;; esac
       _rl=$(printf '%s' "$_rl" | jtext)
       # The lines are the Engine's text: control characters other than tab never reach the terminal.
-      [ -z "$_rl" ] || printf '%s\n' "$(redact "$_rl")" | LC_ALL=C tr '\001-\010\013-\037\177' '?'
+      [ -z "$_rl" ] || printf '%s\n' "$(redact "$_rl")" | mark_controls
       ;;
     index)
       too_many $# 0 index

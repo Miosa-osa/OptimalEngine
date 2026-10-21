@@ -211,7 +211,7 @@ The ones the Engine API can serve call its routes with the configured key; the m
 | `graph hubs\|clusters\|triangles [-w ws] [-n]` | `GET /api/graph/hubs`, `/api/graph/clusters`, `/api/graph/triangles` |
 
 The Engine keeps its log lines in memory (`OptimalEngine.LogBuffer`): the newest 1,000 at `info` and above, one line each with a UTC timestamp and the level, at most 4,096 bytes; a longer line is redacted first and then cut, ending in `...`.
-Control characters other than tab are replaced with `?`: the Engine replaces C0 and C1 controls, DEL, the Unicode line and paragraph separators, and the bidi and invisible format characters when it keeps a line, and the client replaces C0 controls and DEL again when it prints one.
+Control characters other than tab are replaced with `?`: the Engine replaces C0 and C1 controls, DEL, the Unicode line and paragraph separators, and the bidi and invisible format characters when it keeps a line, and the client replaces C0 controls, DEL, C1 controls and the line and paragraph separators again when it prints one.
 Before a line is kept, the Engine replaces these with `[redacted]`:
 
 - PEM private key blocks;
