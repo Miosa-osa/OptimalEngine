@@ -191,7 +191,7 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
 
     defp sf_state do
       base_state(%{
-        "instance_url" => "https://myorg.salesforce.com",
+        "instance_url" => "https://myorg.my.salesforce.com",
         "objects" => ["Account"],
         "client_id" => "sf_client",
         "client_secret" => "sf_secret",

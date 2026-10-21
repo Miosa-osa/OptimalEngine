@@ -98,6 +98,35 @@ defmodule OptimalEngine.Connectors.HTTPTest do
     end
   end
 
+  describe "a 503 that names a Retry-After" do
+    # httpc sends a request once more after the delay such an answer names. From
+    # OTP 28.4 it can be told not to. An earlier one cannot: it sends the
+    # request again until the call's timeout, so the timeout is what bounds it.
+    test "is answered once where httpc can be told so: a POST is not sent again" do
+      origin =
+        serve(fn _path, _port ->
+          "HTTP/1.1 503 Service Unavailable\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        end)
+
+      result =
+        HTTP.post_json(origin.base <> "/", %{"a" => 1}, single_attempt: true, timeout: 3_000)
+
+      assert_received {:requested, _, "POST", "/", _}
+
+      if HTTP.autoretry_supported?() do
+        assert {:ok, %{status: 503, headers: headers}} = result
+        assert HTTP.retry_after(headers) == 1_000
+        refute_receive {:requested, _, _, _, _}, 2_500
+      else
+        assert match?({:ok, %{status: 503}}, result) or result == {:error, :timeout}
+      end
+    end
+
+    test "the OTP version decides whether a single attempt can be enforced" do
+      assert is_boolean(HTTP.autoretry_supported?())
+    end
+  end
+
   describe "a request body" do
     test "keeps the content type the caller named for a binary body" do
       origin = serve(fn _path, _port -> json("{\"ok\":true}") end)
