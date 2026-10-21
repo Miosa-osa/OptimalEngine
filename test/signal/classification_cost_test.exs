@@ -95,6 +95,32 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
     ]
   end
 
+  # The result of `fun` and the labels of the steps the time limit stopped.
+  defp timeouts(fun) do
+    id = {__MODULE__, make_ref()}
+    event = [:optimal_engine, :signal, :classification_timeout]
+    :ok = :telemetry.attach(id, event, &__MODULE__.send_timeout/4, self())
+
+    try do
+      result = fun.()
+      {result, collect_timeouts([])}
+    after
+      :telemetry.detach(id)
+    end
+  end
+
+  @doc false
+  def send_timeout(_event, _measurements, %{label: label}, test),
+    do: send(test, {:stopped, label})
+
+  defp collect_timeouts(labels) do
+    receive do
+      {:stopped, label} -> collect_timeouts([label | labels])
+    after
+      0 -> labels
+    end
+  end
+
   defp within(ms, label, fun) do
     task = Task.async(fun)
 
@@ -179,14 +205,19 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
   test "past the classification limit, a long text's entities come from its head" do
     Application.put_env(:optimal_engine, :classification_timeout_ms, 1)
     head = "Contoso asked for the rollout plan.\n\n"
-    # Megabytes, so reading all of it takes well over the 1 ms limit.
-    filler = String.duplicate("The rollout continues as planned for the week. ", 100_000)
+    filler = String.duplicate("The rollout continues as planned for the week. ", 20_000)
     text = head <> filler <> "\nLater the Northwind account signed."
+    # 676 names the text never mentions, each starting like "planned", so no
+    # quick check rules one out: reading the whole body for them takes far
+    # longer than the 1 ms limit on any runner.
+    absent = for a <- ?a..?z, b <- ?a..?z, do: "Plannx" <> <<a, b>>
+    names = ["Contoso", "Northwind" | absent]
 
-    entities = Intake.classify(text, known_entities: ["Contoso", "Northwind"]).entities
+    {signal, stopped} = timeouts(fn -> Intake.classify(text, known_entities: names) end)
 
-    assert "Contoso" in entities
-    refute "Northwind" in entities
+    assert "entity extraction" in stopped
+    assert "Contoso" in signal.entities
+    refute "Northwind" in signal.entities
   end
 
   test "a long text's entities come from its body, as a short text's do" do
