@@ -91,6 +91,53 @@ defmodule OptimalEngine.Store.PostgresWritesTest do
       assert relations == ["co_occurs", "cross_ref", "lives_in", "mentioned_in", "supersedes"]
     end
 
+    test "a context written for a tenant under a bare workspace id is that tenant's", %{run: run} do
+      tenant = "#{run}-tn"
+      other = "#{run}-other"
+      workspace = "#{run}-bare"
+
+      for store <- [Store, PgStore], id <- [tenant, other] do
+        :ok = store.raw_execute("INSERT INTO tenants (id, name) VALUES (?1, ?2)", [id, id])
+      end
+
+      ctx =
+        %{
+          context("#{run}-bare-1", "#{run}-node", ["#{run}-alice", "#{run}-bob"],
+            workspace_id: workspace
+          )
+          | tenant_id: tenant
+        }
+
+      :ok = Store.insert_context(ctx)
+      :ok = PgStore.insert_context(ctx)
+
+      tenant_of = fn ->
+        assert_same("SELECT tenant_id FROM contexts WHERE id = ?1", [ctx.id])
+      end
+
+      assert [[^tenant]] = tenant_of.()
+
+      assert [[^tenant]] =
+               assert_same("SELECT DISTINCT tenant_id FROM entities WHERE context_id = ?1", [
+                 ctx.id
+               ])
+
+      assert [[^tenant]] =
+               assert_same(
+                 "SELECT DISTINCT tenant_id FROM graph_edges " <>
+                   "WHERE workspace_id = ?1 AND (source_id = ?2 OR target_id = ?2)",
+                 [workspace, ctx.id]
+               )
+
+      # Another tenant that names the same id under the bare workspace id does
+      # not replace the row.
+      theirs = %{ctx | tenant_id: other, content: "Theirs."}
+      id = ctx.id
+      assert {:error, {:context_id_in_use, ^id}} = Store.insert_context(theirs)
+      assert {:error, {:context_id_in_use, ^id}} = PgStore.insert_context(theirs)
+      assert [[^tenant]] = tenant_of.()
+    end
+
     test "an unregistered <tenant>:<slug> workspace gives its contexts and edges that tenant",
          %{run: run} do
       tenant = "#{run}-t"

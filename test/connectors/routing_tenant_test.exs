@@ -154,6 +154,27 @@ defmodule OptimalEngine.Connectors.RoutingTenantTest do
       )
   end
 
+  describe "a Signal intake refuses" do
+    test "is counted in the run, not only logged", ctx do
+      {:ok, _} = register(ctx, %{"signals" => signals(ctx)})
+
+      sink = fn _signals, _scope -> {:ok, 1} end
+
+      assert {:ok, result} =
+               Runner.run(ctx.connector_id, adapter: ScriptedAdapter, signal_sink: sink)
+
+      assert %{status: :success, signals: 1, refused: 1, errors: 1} = result
+
+      assert {:ok, [[1, 1, detail]]} =
+               Store.raw_query(
+                 "SELECT signals_ingested, errors_encountered, error_detail FROM connector_runs WHERE connector_id = ?1",
+                 [ctx.connector_id]
+               )
+
+      assert Jason.decode!(detail) == %{"refused" => 1}
+    end
+  end
+
   describe "the review workspace of a connector" do
     test "is a workspace of the connector's tenant", ctx do
       assert {:ok, _} = register(ctx, %{"review_workspace_id" => ctx.review})

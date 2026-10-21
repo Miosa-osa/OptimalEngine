@@ -366,8 +366,8 @@ defmodule OptimalEngine.Imports.NotionTest do
     other = "notion-other-#{n}"
     {:ok, _} = Tenant.create(%{id: other, name: "Other #{n}"})
 
-    # A bare id names no workspace and no tenant, so both tenants' rows and
-    # edges land in it under the default tenant.
+    # A bare id names no workspace and no tenant: each tenant's rows and edges
+    # in it are its own.
     ws = "shared-#{n}"
     i = Fixture.ids()
 
@@ -384,21 +384,25 @@ defmodule OptimalEngine.Imports.NotionTest do
     ours_handbook = Notion.context_id(ws, i.handbook)
     their_handbook = Notion.context_id(ws, swap[i.handbook])
 
-    links = fn handbook ->
-      {:ok, edges} = Graph.edges_for(handbook, relation: "links_to", workspace_id: ws)
+    links = fn handbook, tenant ->
+      {:ok, edges} =
+        Graph.edges_for(handbook, relation: "links_to", workspace_id: ws, tenant_id: tenant)
+
       edges |> Enum.map(& &1.target_id) |> Enum.sort()
     end
 
-    parent = fn page ->
-      {:ok, edges} = Graph.edges_for(page, relation: "child_of", workspace_id: ws)
+    parent = fn page, tenant ->
+      {:ok, edges} =
+        Graph.edges_for(page, relation: "child_of", workspace_id: ws, tenant_id: tenant)
+
       Enum.map(edges, & &1.target_id)
     end
 
     {:ok, _} = import!(ctx, Fixture.export(), workspace: ws)
     {:ok, _} = import!(ctx, Fixture.zip(theirs), workspace: ws, tenant_id: other)
 
-    ours_before = links.(ours_handbook)
-    theirs_before = links.(their_handbook)
+    ours_before = links.(ours_handbook, ctx.tenant)
+    theirs_before = links.(their_handbook, other)
     assert length(ours_before) == 2 and length(theirs_before) == 2
 
     # Each re-imports an export whose handbook links to nothing: each loses
@@ -412,20 +416,20 @@ defmodule OptimalEngine.Imports.NotionTest do
     end
 
     {:ok, _} = import!(ctx, Fixture.zip(unlink.(Fixture.files(), i.handbook)), workspace: ws)
-    assert links.(ours_handbook) == []
-    assert links.(their_handbook) == theirs_before
-    assert parent.(Notion.context_id(ws, swap[i.onboarding])) == [their_handbook]
+    assert links.(ours_handbook, ctx.tenant) == []
+    assert links.(their_handbook, other) == theirs_before
+    assert parent.(Notion.context_id(ws, swap[i.onboarding]), other) == [their_handbook]
 
     {:ok, _} =
       import!(ctx, Fixture.zip(unlink.(theirs, swap[i.handbook])), workspace: ws, tenant_id: other)
 
-    assert links.(their_handbook) == []
-    assert parent.(Notion.context_id(ws, i.onboarding)) == [ours_handbook]
+    assert links.(their_handbook, other) == []
+    assert parent.(Notion.context_id(ws, i.onboarding), ctx.tenant) == [ours_handbook]
 
     # Restoring our links touches nothing of theirs.
     {:ok, _} = import!(ctx, Fixture.export(), workspace: ws)
-    assert links.(ours_handbook) == ours_before
-    assert links.(their_handbook) == []
+    assert links.(ours_handbook, ctx.tenant) == ours_before
+    assert links.(their_handbook, other) == []
   end
 
   test "a re-import retracts only the edges the importer owns", ctx do
