@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CLI = ROOT / 'apps' / 'cli' / 'optimal'
 ALIAS = ROOT / 'apps' / 'cli' / 'oe'
 BUILD = ROOT / 'apps' / 'cli' / 'build.sh'
+MCP_BUILD = ROOT / 'apps' / 'mcp' / 'build.sh'
 KEY = 'fixture-key-7d1f0c9a5b'
 # Resolved to a path, so tests that narrow PATH still find the shell under test.
 SHELL = shutil.which(os.environ.get('OPTIMAL_CLI_TEST_SHELL', '/bin/sh')) or os.environ.get(
@@ -956,6 +957,32 @@ class BuildTests(unittest.TestCase):
             result = subprocess.run([str(bindir / 'bin' / 'oe'), '--version'], capture_output=True,
                                     text=True, timeout=30)
             self.assertEqual(result.stdout.strip(), f'oe {version}')
+
+    def rebuild_and_assert_identical(self, build, out_a, out_b):
+        """Two builds from this checkout produce the same sums and bytes."""
+        for out in (out_a, out_b):
+            subprocess.run(['sh', str(build), out], check=True, capture_output=True, text=True,
+                           timeout=600)
+        sums_a = (Path(out_a) / 'SHA256SUMS').read_text()
+        sums_b = (Path(out_b) / 'SHA256SUMS').read_text()
+        self.assertTrue(sums_a.strip(), 'SHA256SUMS is empty')
+        self.assertEqual(sums_a, sums_b, 'SHA256SUMS differ between two builds')
+        archives = sorted(Path(out_a).glob('*.tar.gz'))
+        self.assertEqual([p.name for p in archives], sorted(p.name for p in Path(out_b).glob('*.tar.gz')))
+        for archive in archives:
+            self.assertEqual(archive.read_bytes(), (Path(out_b) / archive.name).read_bytes(),
+                             f'{archive.name} differs between two builds')
+
+    def test_build_is_reproducible(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            self.rebuild_and_assert_identical(BUILD, first, second)
+
+    def test_mcp_build_is_reproducible(self):
+        for tool in ('npm', 'node'):
+            if not shutil.which(tool):
+                self.skipTest(f'{tool} is required for the MCP build')
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            self.rebuild_and_assert_identical(MCP_BUILD, first, second)
 
 
 if __name__ == '__main__':
