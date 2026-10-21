@@ -387,7 +387,7 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
   end
 
   describe "a connector's own workspace" do
-    test "a move re-seals the reference, and the next run asks with the new workspace", ctx do
+    test "a move keeps the sealed reference, and the next run asks with the new workspace", ctx do
       register(ctx)
       before = sealed_reference(ctx.id)
       moved = insert_workspace("#{ctx.tenant}:moved", ctx.tenant)
@@ -396,7 +396,7 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
                Rows.update(ctx.tenant, ctx.id, %{"workspace" => moved})
 
       assert view.config["broker_reference"] == "[redacted]"
-      refute sealed_reference(ctx.id) == before
+      assert sealed_reference(ctx.id) == before
 
       stub = install(issue: [{"example-broker-token-1", 3_600}])
       assert {:ok, %{status: :success}} = run(ctx)
@@ -430,6 +430,47 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
       assert [call] = BrokerStub.broker_calls(stub)
       assert call.body["workspace_id"] == ctx.workspace
       refute call.body["workspace_id"] == review
+    end
+
+    test "a workspace rename keeps the connector working", ctx do
+      legacy = insert_workspace("legacy-#{ctx.id}", ctx.tenant, "ops")
+      renamed = "#{ctx.tenant}:ops"
+
+      {:ok, _view} =
+        Rows.register(
+          %{
+            id: ctx.id,
+            kind: "gmail",
+            tenant_id: ctx.tenant,
+            workspace_id: legacy,
+            config: %{
+              "user_email" => "jane@example.com",
+              "labels" => ["INBOX"],
+              "credential_source" => "broker",
+              "broker_url" => BrokerStub.broker_url(),
+              "broker_reference" => @reference
+            }
+          },
+          actor: "operator:test"
+        )
+
+      before = sealed_reference(ctx.id)
+
+      assert {:ok, _moved} =
+               OptimalEngine.DataSteward.rename_workspace(legacy, renamed,
+                 actor_id: "operator:test",
+                 tenant_id: ctx.tenant
+               )
+
+      assert {:ok, %{workspace_id: ^renamed}} = Rows.get(ctx.tenant, ctx.id)
+      assert sealed_reference(ctx.id) == before
+
+      stub = install(issue: [{"example-broker-token-1", 3_600}])
+      assert {:ok, %{status: :success}} = run(ctx)
+
+      assert [call] = BrokerStub.broker_calls(stub)
+      assert call.body["workspace_id"] == renamed
+      assert call.body["reference"] == @reference
     end
 
     test "a sealed reference copied to another connector is not read", ctx do
@@ -473,7 +514,8 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
         adapter: adapter
       }
 
-      with {:ok, hydrated} <- CredentialSource.hydrate(config, scope),
+      with {:ok, sealed} <- CredentialSource.seal_reference(config, %{id: scope.id}),
+           {:ok, hydrated} <- CredentialSource.hydrate(sealed, scope),
            {:ok, state} <- adapter.init(hydrated) do
         result =
           try do
@@ -664,6 +706,19 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
       end
     end)
     |> Enum.join("\n")
+  end
+
+  defp insert_workspace(id, tenant, slug) do
+    {:ok, _} =
+      Store.raw_query(
+        """
+        INSERT INTO workspaces (id, tenant_id, slug, name, status, metadata)
+        VALUES (?1, ?2, ?3, ?4, 'active', '{}')
+        """,
+        [id, tenant, slug, "WS #{id}"]
+      )
+
+    id
   end
 
   defp insert_workspace(id, tenant) do
