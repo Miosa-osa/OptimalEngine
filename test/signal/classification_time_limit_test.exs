@@ -1,6 +1,9 @@
 defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
-  # A text built to make the detectors backtrack must cost its caller at most
-  # the classification limit, and intake must keep serving everyone else.
+  # A detection past the classification limit, or past what is left of a
+  # document's budget, costs its caller at most that and returns its fallback,
+  # and intake keeps serving everyone else. The detectors are linear now, so
+  # the tests that need the limit to fire set it to 1 ms on an ordinary text
+  # and count the time-limit events.
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Pipeline.{Classifier, Intake}
@@ -29,7 +32,43 @@ defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
   defp restore(key, :error), do: Application.delete_env(:optimal_engine, key)
 
   defp html_text(lines), do: Enum.map_join(1..lines, "\n", fn _ -> @html_line end)
-  defp css_text(spaces), do: "a:" <> String.duplicate(" ", spaces) <> "x"
+
+  # Ordinary code: no detector takes anywhere near a millisecond less than it
+  # needs for this much of it.
+  defp code_text(bytes) do
+    line = "def handle(event, state), do: {:noreply, Map.put(state, :last, event)}\n"
+    String.duplicate(line, div(bytes, byte_size(line)))
+  end
+
+  @limit_events [
+    [:optimal_engine, :signal, :classification_timeout],
+    [:optimal_engine, :signal, :classification_budget_spent]
+  ]
+
+  # The result of `fun` and the time-limit events it raised, counted by kind.
+  defp limit_events(fun) do
+    id = {__MODULE__, make_ref()}
+    :ok = :telemetry.attach_many(id, @limit_events, &__MODULE__.send_limit_event/4, self())
+
+    try do
+      result = fun.()
+      {result, collect_limit_events(%{})}
+    after
+      :telemetry.detach(id)
+    end
+  end
+
+  @doc false
+  def send_limit_event([_, _, kind], _measurements, _metadata, test),
+    do: send(test, {:limit_event, kind})
+
+  defp collect_limit_events(counts) do
+    receive do
+      {:limit_event, kind} -> collect_limit_events(Map.update(counts, kind, 1, &(&1 + 1)))
+    after
+      0 -> counts
+    end
+  end
 
   defp elapsed_ms(fun) do
     {microseconds, result} = :timer.tc(fun)
@@ -151,24 +190,17 @@ defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
   end
 
   describe "the detectors" do
-    test "a crafted HTML text costs at most the limit" do
-      text = html_text(300)
+    test "past the limit, each detector returns its fallback" do
+      Application.put_env(:optimal_engine, :classification_timeout_ms, 1)
 
-      {ms, mode} = elapsed_ms(fn -> ModeDetector.detect(text) end)
-      assert {_mode, _confidence} = mode
-      assert ms < @limit_ms + 700
+      for text <- [code_text(64 * 1024), html_text(300)] do
+        {{mode, genre}, events} =
+          limit_events(fn -> {ModeDetector.detect(text), GenreDetector.detect(text)} end)
 
-      {ms, genre} = elapsed_ms(fn -> GenreDetector.detect(text) end)
-      assert is_binary(genre)
-      assert ms < @limit_ms + 700
-    end
-
-    test "a crafted CSS-like line costs at most the limit" do
-      text = css_text(256 * 1024)
-
-      {ms, mode} = elapsed_ms(fn -> ModeDetector.detect(text) end)
-      assert {_mode, _confidence} = mode
-      assert ms < @limit_ms + 700
+        assert mode == {:linguistic, :weak}
+        assert genre == "note"
+        assert events == %{classification_timeout: 2}
+      end
     end
 
     test "an ordinary text is classified as before" do
@@ -180,17 +212,20 @@ defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
   end
 
   describe "callers" do
-    test "a document of many crafted chunks is classified within one budget" do
+    test "a document of many chunks is classified within one budget, the rest by fallback" do
+      Application.put_env(:optimal_engine, :classification_budget_ms, 200)
+
       chunks =
-        for i <- 1..40 do
-          %Chunk{id: "crafted-#{i}", text: html_text(40), modality: :text}
-        end
+        for i <- 1..30, do: %Chunk{id: "chunk-#{i}", text: code_text(64 * 1024), modality: :text}
 
-      {ms, {:ok, classifications}} =
-        elapsed_ms(fn -> Classifier.classify_tree(%ChunkTree{chunks: chunks}) end)
+      {{ms, {:ok, classifications}}, events} =
+        limit_events(fn ->
+          elapsed_ms(fn -> Classifier.classify_tree(%ChunkTree{chunks: chunks}) end)
+        end)
 
-      assert length(classifications) == 40
-      assert ms < @budget_ms + 2_000, "40 crafted chunks took #{ms} ms"
+      assert length(classifications) == 30
+      assert events[:classification_budget_spent] >= 1
+      assert ms < 200 + 2_000, "30 chunks took #{ms} ms"
     end
 
     test "a pre-send check of a crafted 8 MB draft returns within the bound" do
@@ -201,17 +236,34 @@ defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
       assert ms < 10_000, "pre-send check took #{ms} ms"
     end
 
-    test "a crafted ingest does not hold up the next ingest, whoever sends it" do
-      crafted = Task.async(fn -> Intake.process(html_text(300), genre: nil) end)
-      # Let the crafted ingest reach the intake process first.
-      Process.sleep(20)
+    test "past the limit, a pre-send check reports the detectors' fallbacks" do
+      Application.put_env(:optimal_engine, :classification_timeout_ms, 1)
 
-      {ms, result} =
-        elapsed_ms(fn -> Intake.process("A short note about the weekly plan.", []) end)
+      {report, events} = limit_events(fn -> PreSend.check(code_text(64 * 1024), %{}) end)
+
+      assert report.detected.mode == "linguistic"
+      assert events == %{classification_timeout: 2}
+    end
+
+    test "an ingest past the limit does not hold up the next ingest, whoever sends it" do
+      Application.put_env(:optimal_engine, :classification_timeout_ms, 1)
+
+      {{ms, result, crafted}, events} =
+        limit_events(fn ->
+          crafted = Task.async(fn -> Intake.process(code_text(64 * 1024), genre: nil) end)
+          # Let the crafted ingest reach the intake process first.
+          Process.sleep(20)
+
+          {ms, result} =
+            elapsed_ms(fn -> Intake.process("A short note about the weekly plan.", []) end)
+
+          {ms, result, Task.await(crafted, 30_000)}
+        end)
 
       assert {:ok, _} = result
+      assert {:ok, _} = crafted
       assert ms < 10_000, "an ordinary ingest waited #{ms} ms"
-      assert {:ok, _} = Task.await(crafted, 30_000)
+      assert events[:classification_timeout] >= 2
     end
   end
 end
