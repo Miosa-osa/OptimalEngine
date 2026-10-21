@@ -330,6 +330,131 @@ defmodule OptimalEngine.API.ReadGatesTest do
     end
   end
 
+  # A page of a list that is cut down by the key's grants is filled from what
+  # the key may see. Cutting a page that was read first leaves a short page,
+  # and one that is empty while more is there to read, whenever restricted rows
+  # come ahead of the visible ones.
+  describe "a page is filled from what the key may see" do
+    @hidden_notes [
+      "Board minute on the Zephyrcorp offer, first reading",
+      "Board minute on the Zephyrcorp offer, second reading",
+      "Counsel memo about the escrow terms",
+      "Diligence list for the target's customers",
+      "Financing term sheet from the lead bank",
+      "Retention plan for the target's founders",
+      "Integration budget for the first year",
+      "Fairness opinion draft from the advisers"
+    ]
+
+    test "a memory list does not stop at the restricted memories ahead of the visible ones",
+         ctx do
+      for note <- @hidden_notes, do: remember(ctx.ws, note, ["restricted"])
+      bare = mint(ctx, %{})
+
+      page = get_json("/api/memory?" <> ws(ctx) <> "&limit=1", bare)
+
+      assert ids(page["memories"]) == [ctx.plain.id]
+      assert page["pagination"]["has_more"] == false
+      # The total counts what the key may see, not the workspace.
+      assert page["pagination"]["total"] == 1
+    end
+
+    test "an offset counts the memories the key may see", ctx do
+      extra = remember(ctx.ws, "Standup is at nine on Monday", []).memory
+      for note <- @hidden_notes, do: remember(ctx.ws, note, ["restricted"])
+      bare = mint(ctx, %{})
+
+      first = get_json("/api/memory?" <> ws(ctx) <> "&limit=1&offset=0", bare)
+      second = get_json("/api/memory?" <> ws(ctx) <> "&limit=1&offset=1", bare)
+      beyond = get_json("/api/memory?" <> ws(ctx) <> "&limit=1&offset=2", bare)
+
+      assert length(first["memories"]) == 1 and first["pagination"]["has_more"] == true
+      assert length(second["memories"]) == 1 and second["pagination"]["has_more"] == false
+      assert beyond["memories"] == [] and beyond["pagination"]["has_more"] == false
+
+      assert Enum.sort(ids(first["memories"]) ++ ids(second["memories"])) ==
+               Enum.sort([ctx.plain.id, extra.id])
+    end
+
+    test "a key that reads everything is paged by the list, as before", ctx do
+      root = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      page = get_json("/api/memory?" <> ws(ctx) <> "&limit=2", root)
+
+      assert length(page["memories"]) == 2
+      assert page["pagination"]["total"] == 5
+      assert page["pagination"]["has_more"] == true
+    end
+
+    test "memory search does not stop at the restricted memories that rank first", ctx do
+      visible =
+        remember(
+          ctx.ws,
+          "Harborview parking is closed on Friday for repaving, and the shuttle runs from the " <>
+            "north entrance instead of the south entrance every thirty minutes until noon",
+          []
+        ).memory
+
+      hidden =
+        for text <- [
+              "Harborview Harborview Harborview escrow account, Harborview wire",
+              "Harborview Harborview Harborview closing statement, Harborview funds"
+            ],
+            do: remember(ctx.ws, text, ["restricted"]).memory
+
+      query =
+        "/api/search?" <>
+          URI.encode_query(%{
+            "q" => "Harborview",
+            "type" => "memory",
+            "workspace" => ctx.ws,
+            "limit" => "1"
+          })
+
+      page = get_json(query, mint(ctx, %{}))
+
+      assert [result] = page["results"]
+      assert result["id"] in [visible.id, ctx.plain.id]
+      refute result["id"] in [ctx.secret.id | Enum.map(hidden, & &1.id)]
+    end
+
+    test "grep does not stop at the restricted chunks that rank first", ctx do
+      for text <- [
+            "Zephyrcorp Zephyrcorp Zephyrcorp escrow terms, signed by the Zephyrcorp board",
+            "Zephyrcorp Zephyrcorp Zephyrcorp closing checklist, owned by the Zephyrcorp counsel"
+          ] do
+        {:ok, _} =
+          Intake.process(text,
+            workspace_id: ctx.ws,
+            node: "operator",
+            security_labels: ["restricted"],
+            write_files: false
+          )
+      end
+
+      {:ok, _} =
+        Intake.process(
+          "A neighbor, Zephyrcorp, rents the second floor; kitchen cleanup rotates weekly " <>
+            "between all tenants including engineering and facilities",
+          workspace_id: ctx.ws,
+          node: "operator",
+          write_files: false
+        )
+
+      query =
+        "/api/grep?" <>
+          URI.encode_query(%{"q" => "Zephyrcorp", "workspace" => ctx.ws, "limit" => "1"})
+
+      page = get_json(query, mint(ctx, %{}))
+      shown = Jason.encode!(page["results"])
+
+      assert length(page["results"]) == 1
+      assert shown =~ "neighbor"
+      refute shown =~ "escrow"
+      refute shown =~ "41 million"
+    end
+  end
+
   # A list that said how many rows it left out would tell a key without the
   # label that a restricted row matches its query: a probe for a name, an
   # amount or a project. These routes answer a probe for what the key may not
