@@ -468,6 +468,20 @@ defmodule OptimalEngine.LogBufferTest do
       assert line =~ "done"
     end
 
+    test "crafted lines for the new names and forms finish in bounded time" do
+      for crafted <- [
+            String.duplicate("x_", 7_000) <> "key",
+            String.duplicate("%22token", 2_000),
+            String.duplicate("%3D", 5_000),
+            "cookie=" <> String.duplicate("; ", 7_000),
+            "password:" <> String.duplicate(", ", 7_000),
+            String.duplicate(~s(<<"secret">>), 1_200)
+          ] do
+        {micros, _line} = :timer.tc(fn -> stored(crafted) end)
+        assert micros < 1_000_000, "#{byte_size(crafted)} bytes took #{micros} µs"
+      end
+    end
+
     test "a token the format window cuts does not show once redaction shortens the line" do
       tokens = String.duplicate("sk-" <> zq(1) <> " ", 400)
 

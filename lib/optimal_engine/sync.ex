@@ -46,6 +46,7 @@ defmodule OptimalEngine.Sync do
   require Logger
 
   alias OptimalEngine.Connectors.{Credential, HTTP}
+  alias OptimalEngine.LogUrl
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Signal
   alias OptimalEngine.Store
@@ -564,7 +565,10 @@ defmodule OptimalEngine.Sync do
       rescue
         # One peer's failure does not stop the others.
         error ->
-          Logger.error("[Sync] cycle for #{peer.url} failed: #{Exception.message(error)}")
+          Logger.error(
+            "[Sync] cycle for #{LogUrl.render(peer.url)} failed: #{Exception.message(error)}"
+          )
+
           update_peer_status(peer, {"error", Exception.message(error)})
 
           %{
@@ -2338,7 +2342,10 @@ defmodule OptimalEngine.Sync do
   rescue
     # A gate that cannot read what it classifies by sends nothing.
     error in [RuntimeError, ArgumentError, Gate.StoreError] ->
-      Logger.error("[Sync] push to #{peer.url} held back: #{Exception.message(error)}")
+      Logger.error(
+        "[Sync] push to #{LogUrl.render(peer.url)} held back: #{Exception.message(error)}"
+      )
+
       {:error, {:gate_unreadable, Exception.message(error)}}
   end
 

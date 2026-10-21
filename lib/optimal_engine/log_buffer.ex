@@ -15,8 +15,9 @@ defmodule OptimalEngine.LogBuffer do
   invisible format characters (U+061C, U+200B, U+200E, U+200F, U+202A to
   U+202E, U+2060, U+2066 to U+2069, U+FEFF). A longer line is redacted first
   and then cut at a character boundary, ending in `...`, so a cut never leaves
-  part of a secret. Before a line is stored, these are replaced with
-  `[redacted]`:
+  part of a secret; a line longer than 16,384 characters, which the formatter
+  cuts first, also loses its last, cut word. Before a line is stored, these
+  are replaced with `[redacted]`:
 
     * PEM private key blocks, to their END line or the end of the line;
     * Engine API keys, any `oe_` token (generated `oe_<id>_<secret>` keys and
@@ -27,27 +28,34 @@ defmodule OptimalEngine.LogBuffer do
     * the value after a credential-like name (`api_key`, `access_token`,
       `refresh_token`, `token`, `secret`, `password`, `passwd`, `passphrase`,
       `client_secret`, `secret_access_key`, `secret_key`, `private_key`,
-      `signature`, `authorization`, `x-optimal-grant`, `bot_token`), also at the
-      end of a longer name (`AWS_SECRET_ACCESS_KEY`, `db_password`,
-      `notion_token`), as the last word of a camelCase name (`apiKey`,
-      `accessToken`, `clientSecret`, `dbPassword`), and after an upper-case
-      environment name ending in `_KEY` (`CONNECTOR_KEY`). It counts in
-      `name=value`, `name: value`, `"name" => value`, `{"name", value}`,
-      `{:name, value}`, Erlang `{name,<<"value">>}` and escaped-JSON forms. A
+      `access_key_id`, `signature`, `authorization`, `x-optimal-grant`,
+      `bot_token`, `cookie`, `cookies`, `set-cookie`), also at the end of a
+      longer name (`AWS_SECRET_ACCESS_KEY`, `db_password`, `notion_token`), as
+      the last word of a camelCase name (`apiKey`, `accessToken`,
+      `clientSecret`, `dbPassword`, `accessKeyId`), and after any name ending
+      in `_key` or `-key`, in any case (`backup_key`, `encryption-key`,
+      `CONNECTOR_KEY`). It counts in `name=value`, `name: value`,
+      `"name" => value`, `{"name", value}`, `{:name, value}`, Erlang
+      `{name,<<"value">>}` and `{<<"name">>,<<"value">>}`, escaped-JSON and
+      URL-encoded (`token%3D...`, `%22password%22%3A%22...`) forms, also with
+      a line break after the separator (which a stored line shows as ", "). A
       quoted value (`"..."` with its escapes, `~c"..."`, `<<"...">>`, `'...'`,
       `` `...` ``) is redacted to its closing quote, or to the end of the line
       without one; an unquoted one to whitespace, a quote, or the `&` of the
-      next query parameter, an auth scheme word included (any word after
-      `authorization`; `Token`, `ApiKey`, `Digest`, `AWS4-HMAC-SHA256` and the
-      like after the other names). A bare name in prose ("the
-      password: was reset") loses the word after it: the rule fails closed;
+      next query parameter (a cookie's runs on over the `; ` between its
+      pairs), an auth scheme word included (any word after `authorization`;
+      `Token`, `ApiKey`, `Digest`, `AWS4-HMAC-SHA256` and the like after the
+      other names). A bare name in prose ("the password: was reset") loses the
+      word after it: the rule fails closed;
     * provider tokens with a known prefix (`sk-`, `sk-ant-`, `rk_`, `whsec_`,
       `msk_`, `mki_`, `xox?-`, `xapp-`, `gh?_`, `github_pat_`, `glpat-`,
       `ntn_`, `secret_`, `npm_`, `hf_`, `ya29.`, `AIza`), AWS access key ids
       (`AKIA...`, `ASIA...`) and JWTs.
 
   A secret in any other shape is not recognized, which is why the route is
-  limited to the Engine operator. Nothing is written to disk and the ring starts
+  limited to the Engine operator. Redaction covers only the lines this ring
+  keeps; the Engine's console output, and anything that captures its stdout,
+  gets each line as it was logged. Nothing is written to disk and the ring starts
   empty at boot.
   """
 
@@ -61,7 +69,8 @@ defmodule OptimalEngine.LogBuffer do
   @max_line 4_096
   # A line is formatted in a window four times as long, redacted, and only then
   # cut to @max_line bytes: a cut made before redaction can split a secret so
-  # that no rule recognizes the part that stays.
+  # that no rule recognizes the part that stays. A line the window itself cut
+  # loses its last word for the same reason (see drop_cut_word/1).
   @window 4 * @max_line
 
   @formatter %{
@@ -109,11 +118,15 @@ defmodule OptimalEngine.LogBuffer do
      "\\1[redacted]"},
     {~r/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*+:\/\/)[^\/\s?#]*@/i, "\\1[redacted]@"},
     # authorization: any scheme word may come before an unquoted credential.
-    {~r/(?<![A-Za-z0-9])(authorization)(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?|((?:~c|<<)?")(?:[^"\\]|\\.)*+\\?("(?:>>)?|\z)|(\\")[^"]*?(\\"|\z)|(')(?:[^'\\]|\\.)*+\\?('|\z)|(`)[^`]*+(`|\z)|()(?:[A-Za-z][\w-]*+\s+)?(?:[^\s"'`&]|&(?![\w.-]++=))+())/i,
+    {~r/(?:(?<![A-Za-z0-9])|(?<=%[0-9A-F]{2}))(authorization)((?:\\?"?\s*(?:=>|[:=]|\\?",)|">>\s*(?:=>|,)|(?:%22)?%3[AD](?:%22)?)\s*(?:,\s*)?)(?|((?:~c|<<)?")(?:[^"\\]|\\.)*+\\?("(?:>>)?|\z)|(\\")[^"]*?(\\"|\z)|(')(?:[^'\\]|\\.)*+\\?('|\z)|(`)[^`]*+(`|\z)|()(?:[A-Za-z][\w-]*+\s+)?(?:[^\s"'`&]|&(?![\w.-]++=))+())/i,
      :value},
-    {~r/(?|(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|refresh[_-]?token|token|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|secret|passw(?:or)?d|passphrase|signature|x-optimal-grant|bot_token)|(?<![A-Za-z0-9_])((?-i:(?:[A-Z][A-Z0-9]*+_)++KEY))|(?<=(?-i:[a-z]))((?-i:Token|Secret|Password|Key)))(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?|((?:~c|<<)?")(?:[^"\\]|\\.)*+\\?("(?:>>)?|\z)|(\\")[^"]*?(\\"|\z)|(')(?:[^'\\]|\\.)*+\\?('|\z)|(`)[^`]*+(`|\z)|()(?:(?:bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|hoba|mutual|oauth|dpop|aws4-hmac-sha256)\s+)?(?:[^\s"'`&]|&(?![\w.-]++=))+())/i,
+    {~r/(?|(?:(?<![A-Za-z0-9])|(?<=%[0-9A-F]{2}))(api[_-]?key|access[_-]?key[_-]?id|access[_-]?token|refresh[_-]?token|token|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|secret|passw(?:or)?d|passphrase|signature|x-optimal-grant|bot_token)|(?:(?<![A-Za-z0-9_])|(?<=%[0-9A-F]{2}))((?:[A-Za-z0-9]++[_-])++key)|(?<=(?-i:[a-z]))((?-i:Token|Secret|Password|KeyId|Key)))((?:\\?"?\s*(?:=>|[:=]|\\?",)|">>\s*(?:=>|,)|(?:%22)?%3[AD](?:%22)?)\s*(?:,\s*)?)(?|((?:~c|<<)?")(?:[^"\\]|\\.)*+\\?("(?:>>)?|\z)|(\\")[^"]*?(\\"|\z)|(')(?:[^'\\]|\\.)*+\\?('|\z)|(`)[^`]*+(`|\z)|()(?:(?:bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|hoba|mutual|oauth|dpop|aws4-hmac-sha256)\s+)?(?:[^\s"'`&]|&(?![\w.-]++=))+())/i,
      :value},
-    {~r/(\{:?(?:[a-z0-9_]*_)?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|secret|passw(?:or)?d|passphrase|signature|authorization|bot_token),\s*)(?:(?:~c|<<)?"(?:[^"\\]|\\.)*+\\?(?:"(?:>>)?|\z)|'(?:[^'\\]|\\.)*+\\?(?:'|\z)|[^\s,}]+)/i,
+    # cookie and set-cookie: an unquoted value is the whole list of name=value
+    # pairs that "; " separates.
+    {~r/(?:(?<![A-Za-z0-9])|(?<=%[0-9A-F]{2}))(set-cookie|cookies?)((?:\\?"?\s*(?:=>|[:=]|\\?",)|">>\s*(?:=>|,)|(?:%22)?%3[AD](?:%22)?)\s*(?:,\s*)?)(?|((?:~c|<<)?")(?:[^"\\]|\\.)*+\\?("(?:>>)?|\z)|(\\")[^"]*?(\\"|\z)|(')(?:[^'\\]|\\.)*+\\?('|\z)|(`)[^`]*+(`|\z)|()(?:[^\s"'`;]|;\s*+)++())/i,
+     :value},
+    {~r/(\{:?(?:[a-z0-9_]*_key|(?:[a-z0-9_]*_)?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|secret|passw(?:or)?d|passphrase|signature|authorization|bot_token|access[_-]?key[_-]?id|cookies?)),\s*)(?:(?:~c|<<)?"(?:[^"\\]|\\.)*+\\?(?:"(?:>>)?|\z)|'(?:[^'\\]|\\.)*+\\?(?:'|\z)|[^\s,}]+)/i,
      "\\1[redacted]"},
     {~r/(?<![A-Za-z0-9])(github_pat|ntn|ya29|whsec|rk|msk|mki|sk-ant|sk|xox[abpors]|xapp|glpat|gh[pousr])([_.-])[A-Za-z0-9_.-]{8,}/,
      "\\1\\2[redacted]"},
@@ -164,6 +177,7 @@ defmodule OptimalEngine.LogBuffer do
       event
       |> :logger_formatter.format(@formatter)
       |> IO.chardata_to_string()
+      |> drop_cut_word()
       |> redact()
       |> cap()
 
@@ -186,6 +200,13 @@ defmodule OptimalEngine.LogBuffer do
       {pattern, replacement}, acc -> Regex.replace(pattern, acc, replacement)
     end)
   end
+
+  # The formatter cuts a line longer than the window and marks it with "...".
+  # The cut can fall inside a secret and leave a start too short for any rule
+  # to recognize (`sk-Zq`), which redaction can then pull within @max_line by
+  # shortening the line before it, so the cut word goes.
+  defp drop_cut_word(line) when byte_size(line) < @window, do: line
+  defp drop_cut_word(line), do: String.replace(line, ~r/\S*+\z/, "...", global: false)
 
   # At most @max_line bytes, cut at a character boundary and marked with "...".
   defp cap(line) when byte_size(line) <= @max_line, do: line
