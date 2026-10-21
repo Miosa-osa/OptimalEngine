@@ -1,6 +1,7 @@
 defmodule OptimalEngine.Store.FileCacheTest do
   use ExUnit.Case, async: false
 
+  import Bitwise
   import ExUnit.CaptureLog
 
   alias OptimalEngine.Embed.Ollama
@@ -37,14 +38,117 @@ defmodule OptimalEngine.Store.FileCacheTest do
     assert {:ok, [1, 2, 3]} = Task.await(task)
   end
 
-  test "an entry is named by the digest of its key and holds nothing of the key", %{dir: dir} do
+  test "an entry is named by a keyed digest of its key and holds nothing of the key", %{dir: dir} do
     key = "plain text that must not be stored"
     :ok = FileCache.put(@scope, "tests", key, [0.5])
 
     assert [path] = Path.wildcard(Path.join(dir, "tenants/*/*/tests/*/*.bin"))
-    digest = :crypto.hash(:sha256, key) |> Base.encode16(case: :lower)
-    assert Path.basename(path) == digest <> ".bin"
+    name = Path.basename(path, ".bin")
+    assert name =~ ~r/\A[0-9a-f]{64}\z/
+
+    # A guess at the text cannot be confirmed from the file name: the name is not its hash.
+    refute name == :crypto.hash(:sha256, key) |> Base.encode16(case: :lower)
     assert :binary.match(File.read!(path), "plain text") == :nomatch
+    assert {:ok, ^path} = FileCache.entry_file(@scope, "tests", key)
+  end
+
+  describe "the install's key" do
+    setup %{dir: dir} do
+      saved = Application.get_env(:optimal_engine, :embed_cache_key_path)
+      key = Path.join(dir, "keys/embed_cache.key")
+      Application.put_env(:optimal_engine, :embed_cache_key_path, key)
+
+      on_exit(fn ->
+        if saved,
+          do: Application.put_env(:optimal_engine, :embed_cache_key_path, saved),
+          else: Application.delete_env(:optimal_engine, :embed_cache_key_path)
+      end)
+
+      %{key: key}
+    end
+
+    test "the same key is named differently under another install's secret", %{dir: dir} do
+      :ok = FileCache.put(@scope, "tests", "k", 1)
+      {:ok, here} = FileCache.entry_file(@scope, "tests", "k")
+
+      Application.put_env(:optimal_engine, :embed_cache_key_path, Path.join(dir, "keys/other.key"))
+      {:ok, there} = FileCache.entry_file(@scope, "tests", "k")
+
+      refute Path.basename(here) == Path.basename(there)
+
+      refute Path.relative_to(here, dir) |> Path.split() |> Enum.at(1) ==
+               Path.relative_to(there, dir) |> Path.split() |> Enum.at(1)
+    end
+
+    test "creating it removes entries nothing can attribute any more", %{dir: dir} do
+      # Entries an earlier digest scheme (or a lost key) left: no purge could find them.
+      stale = Path.join([dir, "tenants", String.duplicate("a", 64), String.duplicate("b", 64)])
+      File.mkdir_p!(Path.join(stale, "embeddings/ab"))
+      File.write!(Path.join(stale, "embeddings/ab/#{String.duplicate("c", 64)}.bin"), "old")
+
+      log = capture_log(fn -> assert :ok = FileCache.ensure_key() end)
+
+      assert log =~ "cannot be attributed to a workspace"
+      refute File.exists?(stale)
+      assert File.regular?(FileCache.key_path())
+    end
+
+    test "an existing key is kept, and so are the entries made under it", %{key: key} do
+      :ok = FileCache.put(@scope, "tests", "durable", [1])
+      before = File.read!(key)
+
+      assert :ok = FileCache.ensure_key()
+      :persistent_term.erase({FileCache, key})
+
+      assert File.read!(key) == before
+      assert {:ok, [1]} = FileCache.get(@scope, "tests", "durable")
+    end
+
+    test "a key file that is not a key is replaced, with the entries under it", %{key: key} do
+      :ok = FileCache.put(@scope, "tests", "orphaned", [1])
+      File.write!(key, "not a key")
+      :persistent_term.erase({FileCache, key})
+
+      capture_log(fn -> assert :ok = FileCache.ensure_key() end)
+
+      assert :miss = FileCache.get(@scope, "tests", "orphaned")
+    end
+
+    test "a key that cannot be created means nothing is cached, not a crash", %{dir: dir} do
+      File.mkdir_p!(dir)
+      blocker = Path.join(dir, "blocker")
+      File.write!(blocker, "a file where a directory has to be")
+
+      Application.put_env(
+        :optimal_engine,
+        :embed_cache_key_path,
+        Path.join(blocker, "embed_cache.key")
+      )
+
+      assert {:error, {:cache_key_unavailable, _}} = FileCache.put(@scope, "tests", "k", 1)
+      assert {:error, {:cache_key_unavailable, _}} = FileCache.get(@scope, "tests", "k")
+      assert {:error, {:cache_key_unavailable, _}} = FileCache.purge_workspace("default:ws")
+    end
+  end
+
+  test "files are readable by the Engine's user only", %{dir: dir} do
+    :ok = FileCache.put(@scope, "tests", "private", [0.5])
+
+    [path] = Path.wildcard(Path.join(dir, "tenants/*/*/tests/*/*.bin"))
+    assert mode(path) == 0o600
+
+    # Every directory the cache made on the way down.
+    dirs =
+      path
+      |> Path.relative_to(dir)
+      |> Path.split()
+      |> Enum.drop(-1)
+      |> Enum.scan(dir, &Path.join(&2, &1))
+
+    assert length(dirs) == 5
+    for directory <- dirs, do: assert(mode(directory) == 0o700, "#{directory} is not private")
+
+    assert mode(FileCache.key_path()) == 0o600
   end
 
   test "tenant and workspace reach the filesystem as digests, never as names", %{dir: dir} do
@@ -160,4 +264,6 @@ defmodule OptimalEngine.Store.FileCacheTest do
       assert {:error, :ollama_unavailable} = Ollama.embed_text("cached sentence", model: model)
     end)
   end
+
+  defp mode(path), do: File.stat!(path).mode &&& 0o777
 end

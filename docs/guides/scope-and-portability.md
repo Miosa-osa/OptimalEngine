@@ -247,7 +247,7 @@ Registry rows every Engine derives under the same id (principals, model call ope
 Tenant and workspace ids are rewritten to the target; integer row ids are reassigned.
 A stored file that the bundle carries is named by its new path: an asset's `storage_path` and its source package's `verbatim_archive_uri`, and the `local_path` and `storage_path` in their metadata, point at the copy under the target workspace's folder instead of the source Engine's disk; an object store URI is kept as it is.
 `create` refuses an existing workspace; `merge` keeps existing rows.
-The source deletes nothing until `finalize-move` receives the same `bundle_sha256` the target reported, then removes the workspace's rows, files and cached embeddings, archives the workspace, and records a redirect so `optimal://` citations keep resolving.
+The source deletes nothing until `finalize-move` receives the same `bundle_sha256` the target reported, then removes the workspace's rows, files, decomposition checkpoints and cached embeddings, archives the workspace, and records a redirect so `optimal://` citations keep resolving.
 
 Split moves a workspace out of an org Engine; merge is the same steps in the other direction; seeding a new Engine is an import of a bundle.
 

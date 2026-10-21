@@ -201,7 +201,12 @@ defmodule OptimalEngine.AppData.Records do
           "data" => Map.merge(existing["data"], decode_values(c, values))
       }
 
-      written(txn, scope, c, "update", record, ctx)
+      with {:ok, result, ctx} <- written(txn, scope, c, "update", record, ctx) do
+        # An update that rewrites the semantic text leaves the old text's cached
+        # embedding behind unless it is named here.
+        {:ok, result,
+         %{ctx | written: [{c, :forget, existing["id"], existing["data"]} | ctx.written]}}
+      end
     end
   end
 
@@ -271,7 +276,16 @@ defmodule OptimalEngine.AppData.Records do
              nil,
              ctx.txn_id
            ) do
-      {:ok, %{ctx | written: [{c, :deleted, existing["id"]} | ctx.written]}}
+      # The text is at hand now and gone after: the embedding cached from it goes with
+      # the record (`Semantic.index_written/1`).
+      {:ok,
+       %{
+         ctx
+         | written: [
+             {c, :deleted, existing["id"]},
+             {c, :forget, existing["id"], existing["data"]} | ctx.written
+           ]
+       }}
     else
       {:ok, 0} -> {:error, {:not_found, "record_not_found"}}
       {:error, {:foreign_key, _}} -> {:error, {:conflict, "reference_restrict", %{}}}

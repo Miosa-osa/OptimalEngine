@@ -68,6 +68,32 @@ defmodule OptimalEngine.Embed.Backfill do
     end
   end
 
+  @doc """
+  Embeds one document now and stores its vector, replacing any it has. For a
+  document whose text changed in place, where the old vector no longer
+  describes it. The query cache is bypassed, as in `run/1`.
+  """
+  @spec reembed(String.t()) :: :ok | {:error, term()}
+  def reembed(context_id) when is_binary(context_id) do
+    case Store.raw_query(
+           "SELECT workspace_id, title, l0_abstract, content FROM contexts WHERE id = ?1",
+           [context_id]
+         ) do
+      {:ok, [[workspace_id, title, l0, content]]} ->
+        case TextEmbedder.embed_many([input(title, l0, content)], cache: false) do
+          [{:ok, vector}] -> Vectors.store(context_id, vector, workspace_id: workspace_id)
+          [{:error, reason}] -> {:error, reason}
+          other -> {:error, {:embedder_returned, other}}
+        end
+
+      {:ok, []} ->
+        {:error, :not_found}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
   defp pages(_opts, _embed, _after_id, remaining, counts) when remaining <= 0, do: {:ok, counts}
 
   defp pages(opts, embed, after_id, remaining, counts) do

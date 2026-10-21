@@ -23,8 +23,11 @@ defmodule OptimalEngine.Store.FileCache.Maintenance do
 
       The default is 30; `0` or `nil` keeps entries until their workspace is
       purged. A cache hit does not extend an entry's life.
-    * `purge_workspace/2` is what workspace deletion, archiving and every
-      erasure path call to remove a workspace's entries.
+    * `purge_workspace/3` is what workspace deletion, archiving and every
+      erasure path call to remove a workspace's entries, and with them the
+      other files that cannot outlive the workspace's data: its decomposition
+      checkpoints and the local copies of its object-store assets
+      (`OptimalEngine.Compliance.Artifacts`).
 
   Failures are logged and never crash the supervision tree.
   """
@@ -34,6 +37,7 @@ defmodule OptimalEngine.Store.FileCache.Maintenance do
   require Logger
 
   alias OptimalEngine.Audit.Logger, as: Audit
+  alias OptimalEngine.Compliance.Artifacts
   alias OptimalEngine.Store.FileCache
   alias OptimalEngine.Store.FileCache.LegacyPurgeRecord
 
@@ -151,14 +155,33 @@ defmodule OptimalEngine.Store.FileCache.Maintenance do
   end
 
   @doc """
-  Remove everything the cache holds for `workspace_id`. `reason` names the
-  path that asked (`:archive`, `:erase`, `:retention`, `:move`, `:rename`,
-  `:repair`) and goes in the log line. A failure is logged as an error and
-  returned: the caller reports it rather than claim the workspace is clean.
+  Remove everything the cache holds for `workspace_id`: its embedding entries,
+  its decomposition checkpoints and the local copies of its object-store assets.
+  `reason` names the path that asked (`:archive`, `:erase`, `:retention`,
+  `:move`, `:rename`, `:repair`, `:sync`) and goes in the log line. A failure is
+  logged as an error and returned: the caller reports it rather than claim the
+  workspace is clean. Both removals are tried; the first failure is the result.
+
+  A caller that is about to delete the rows that point at the checkpoints (a
+  workspace move) passes `plan: Compliance.Artifacts.plan(workspace_id)` taken
+  before.
   """
-  @spec purge_workspace(String.t(), atom()) :: {:ok, FileCache.removed()} | {:error, term()}
-  def purge_workspace(workspace_id, reason) when is_binary(workspace_id) and is_atom(reason) do
-    case FileCache.purge_workspace(workspace_id) do
+  @spec purge_workspace(String.t(), atom(), keyword()) ::
+          {:ok, FileCache.removed()} | {:error, term()}
+  def purge_workspace(workspace_id, reason, opts \\ [])
+      when is_binary(workspace_id) and is_atom(reason) do
+    cache = FileCache.purge_workspace(workspace_id)
+    artifacts = Artifacts.purge_workspace(workspace_id, Keyword.get(opts, :plan))
+
+    log_purge(combine(cache, artifacts), workspace_id, reason)
+  end
+
+  defp combine({:ok, a}, {:ok, b}), do: {:ok, %{files: a.files + b.files, bytes: a.bytes + b.bytes}}
+  defp combine({:error, _} = error, _artifacts), do: error
+  defp combine(_cache, {:error, _} = error), do: error
+
+  defp log_purge(result, workspace_id, reason) do
+    case result do
       {:ok, %{files: 0}} = none ->
         none
 
@@ -207,17 +230,26 @@ defmodule OptimalEngine.Store.FileCache.Maintenance do
 
   @doc """
   The cause of a failed purge without the path it names, for an answer or a
-  report. The log line keeps the path.
+  report: an error code, or a kind of artifact and an error code. A shape this
+  function does not know is `:purge_failed`. The log line keeps the full cause.
   """
   @spec reason(term()) :: term()
   def reason({:purge_failed, posix, _path}), do: posix
   def reason({:legacy_purge_failed, posix, _path}), do: posix
-  def reason(other), do: other
+  def reason({:artifact_not_removed, kind, posix}), do: {kind, posix}
+  def reason({:cache_key_unavailable, posix}), do: {:cache_key_unavailable, posix}
+  def reason({:artifact_plan_unreadable, _cause}), do: :artifact_plan_unreadable
+  def reason({:checkpoint_pointers_not_cleared, _cause}), do: :checkpoint_pointers_not_cleared
+  def reason(posix) when is_atom(posix), do: posix
+  # Anything else may carry a path or a row: the log has it, a report does not.
+  def reason(_other), do: :purge_failed
 
   # The legacy purge runs here, not in `handle_continue/2`: this process starts before
   # the HTTP endpoint, so the record is there by the time the API answers.
   @impl true
   def init(opts) do
+    ensure_key()
+
     state = %{
       interval_ms: Keyword.get(opts, :interval_ms, @interval_ms),
       legacy_purged?: legacy_purged?(guarded(&purge_legacy/0))
@@ -237,12 +269,33 @@ defmodule OptimalEngine.Store.FileCache.Maintenance do
   # again on every tick until it has gone through.
   @impl true
   def handle_info(:sweep, state) do
+    ensure_key()
     legacy_purged? = state.legacy_purged? or legacy_purged?(guarded(&purge_legacy/0))
     guarded(&sweep/0)
     state = %{state | legacy_purged?: legacy_purged?}
     schedule(state)
     {:noreply, state}
   end
+
+  # The cache cannot read or write an entry without its key. Without one every lookup is a
+  # miss and every write fails quietly, so the operator is told here, once per tick.
+  defp ensure_key do
+    case guarded(&FileCache.ensure_key/0) do
+      :ok ->
+        :ok
+
+      other ->
+        Logger.error(
+          "[FileCache] the cache key is unavailable (#{inspect(reason(other_cause(other)))}); " <>
+            "embeddings are not cached until it can be created at #{FileCache.key_path()}"
+        )
+
+        :error
+    end
+  end
+
+  defp other_cause({:error, cause}), do: cause
+  defp other_cause(_), do: :cache_key_unavailable
 
   defp legacy_purged?({:ok, _removed}), do: true
   defp legacy_purged?(_failed), do: false
