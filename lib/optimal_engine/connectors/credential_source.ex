@@ -25,16 +25,18 @@ defmodule OptimalEngine.Connectors.CredentialSource do
       "broker_timeout_ms": 5000                 (optional, at most 30000)
 
   The reference is opaque to the Engine and may be signed by the broker, so
-  it is a secret: it is sealed with `CONNECTOR_KEY` into
-  `config.broker_reference_ciphertext` when the row is written
-  (`seal_reference/1`), opened only for the broker call, and every read API
-  shows it as `"[redacted]"`. A reference written before sealing existed is
-  read as it is and sealed on the connector's next change.
+  it is a secret: it is sealed with `CONNECTOR_KEY`, bound to the connector's
+  id and workspace, into `config.broker_reference_ciphertext` when the row is
+  written (`seal_reference/2`), opened only for the broker call, and every
+  read API shows it as `"[redacted]"`. A reference written before sealing
+  existed, or sealed before it was bound, is read as it is and sealed (bound)
+  on the connector's next change.
 
-  `broker_url` must be `https` and its host must be one of the hosts named in
-  `config :optimal_engine, :credential_broker_hosts` (the
-  `OPTIMAL_CREDENTIAL_BROKER_HOSTS` environment variable). With no hosts
-  named, no broker is called.
+  `broker_url` is checked as written (`check_url/1`): `https` on port 443, a
+  host named in `config :optimal_engine, :credential_broker_hosts` (the
+  `OPTIMAL_CREDENTIAL_BROKER_HOSTS` environment variable), and a path under
+  `:credential_broker_paths` (`OPTIMAL_CREDENTIAL_BROKER_PATHS`, default
+  `/api/v1/connect/broker/`). With no hosts named, no broker is called.
 
   ## Request
 
@@ -135,8 +137,23 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   @sealed_reference "broker_reference_ciphertext"
   @default_timeout_ms 5_000
   @max_timeout_ms 30_000
+  # The broker's answer is a few credentials; anything longer is not one.
+  @max_body_bytes 262_144
+  # An expiry further away than this is read as this far away, so no value the
+  # broker names can overflow a date.
+  @max_expires_in_s 315_360_000
+  @default_paths ["/api/v1/connect/broker/"]
+  @url ~r|\Ahttps://([A-Za-z0-9.-]+)(?::([0-9]{1,5}))?(/[A-Za-z0-9._~!$&'()*+,;=:@/-]*)\z|
   # What the broker says about a token rather than the token itself.
   @token_terms ~w(expires_at expires_in token_type)
+
+  defmodule Broker do
+    @moduledoc false
+    # Everything one fetch needs. The reference is the broker's proof of who is
+    # asking, so `inspect/1` leaves it out.
+    @derive {Inspect, except: [:reference]}
+    defstruct [:url, :reference, :scopes, :timeout_ms, :scope, :adapter]
+  end
 
   @type source :: :stored | :broker
   @type scope :: %{
@@ -212,23 +229,33 @@ defmodule OptimalEngine.Connectors.CredentialSource do
 
   @doc """
   Seals a plaintext `broker_reference` into `broker_reference_ciphertext`
-  with `CONNECTOR_KEY`, replacing any older seal. A config without one is
-  returned unchanged. Without a configured key the write is refused with
-  `{:error, :connector_key_missing}`, as for credentials.
+  with `CONNECTOR_KEY`, replacing any older seal. Without a configured key the
+  write is refused with `{:error, :connector_key_missing}`, as for credentials.
+
+  The seal is bound to the connector it belongs to: `binding` is
+  `%{id: connector_id, workspace_id: workspace_id}` and the seal opens only
+  for that connector in that workspace, so a copy of it placed on another row
+  is not read. A config with no plaintext reference but a seal is rebound when
+  the seal was made without a binding (the older form) or for the workspace
+  the connector has moved from (`:previous_workspace_id`); a seal that cannot
+  be opened is left as it is and reported when a run needs it, so the
+  connector can still be changed. Without a `binding` the seal is the older,
+  unbound form.
   """
-  @spec seal_reference(map()) :: {:ok, map()} | {:error, :connector_key_missing | :invalid_config}
-  def seal_reference(config) when is_map(config) do
+  @spec seal_reference(map(), map() | nil) ::
+          {:ok, map()} | {:error, :connector_key_missing | :invalid_config}
+  def seal_reference(config, binding \\ nil) when is_map(config) do
     {plain, config} = pop_reference(config)
 
     case plain do
       nil ->
-        {:ok, config}
+        {:ok, rebind(config, binding)}
 
       "" ->
         {:ok, Map.delete(config, @sealed_reference)}
 
       reference when is_binary(reference) ->
-        case Credential.encrypt(%{@reference => reference}) do
+        case Credential.encrypt(%{@reference => reference}, aad(binding)) do
           {:ok, envelope} ->
             {:ok, Map.put(config, @sealed_reference, envelope)}
 
@@ -242,6 +269,46 @@ defmodule OptimalEngine.Connectors.CredentialSource do
     end
   end
 
+  # The associated data a seal is bound to; none for the older, unbound form.
+  defp aad(%{id: id, workspace_id: workspace_id}) when is_binary(id) and is_binary(workspace_id),
+    do: "optimal.connector.broker_reference\0" <> id <> "\0" <> workspace_id
+
+  defp aad(_binding), do: ""
+
+  defp rebind(config, nil), do: config
+
+  defp rebind(config, binding) do
+    with envelope when is_binary(envelope) <- Map.get(config, @sealed_reference),
+         wanted = aad(binding),
+         {:error, _reason} <- Credential.decrypt(envelope, wanted),
+         {:ok, %{@reference => reference}} <- open_earlier(envelope, binding),
+         {:ok, rebound} <- Credential.encrypt(%{@reference => reference}, wanted) do
+      Map.put(config, @sealed_reference, rebound)
+    else
+      _unchanged -> config
+    end
+  end
+
+  # The forms a seal had before it was bound to this connector in this
+  # workspace: unbound, or bound to the workspace the connector came from.
+  defp open_earlier(envelope, binding) do
+    earlier =
+      case Map.get(binding, :previous_workspace_id) do
+        previous when is_binary(previous) and previous != binding.workspace_id ->
+          [aad(%{binding | workspace_id: previous}), ""]
+
+        _none ->
+          [""]
+      end
+
+    Enum.find_value(earlier, {:error, :unreadable}, fn aad ->
+      case Credential.decrypt(envelope, aad) do
+        {:ok, _reference} = opened -> opened
+        {:error, _reason} -> nil
+      end
+    end)
+  end
+
   @doc "Whether the config names a broker reference, sealed or not."
   @spec reference?(map()) :: boolean()
   def reference?(config) when is_map(config) do
@@ -249,23 +316,36 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   end
 
   @doc """
-  Whether `url` is a broker the Engine may call: `https`, no credentials in
-  the URL, and a host named in `:credential_broker_hosts`.
+  Whether `url` is a broker the Engine may call: exactly `https` on port 443 (or
+  none), a host named in `:credential_broker_hosts` (ASCII, compared without
+  case, no trailing dot), no user info, no query, no fragment, and a path under
+  one of `:credential_broker_paths` (default `/api/v1/connect/broker/`) with no
+  `.`, `..`, empty or encoded segment. Anything else is refused as written, not
+  as some parser might read it.
   """
   @spec check_url(term()) :: :ok | {:error, :broker_url_not_allowed}
   def check_url(url) when is_binary(url) do
-    case URI.parse(url) do
-      %URI{scheme: "https", host: host, userinfo: nil} when is_binary(host) and host != "" ->
-        if String.downcase(host) in allowed_hosts(),
-          do: :ok,
-          else: {:error, :broker_url_not_allowed}
-
-      _other ->
-        {:error, :broker_url_not_allowed}
+    with [_all, host, port, path] <- Regex.run(@url, url),
+         true <- port in ["", "443"],
+         true <- String.downcase(host, :ascii) in allowed_hosts(),
+         true <- clean_path?(path),
+         true <- Enum.any?(allowed_paths(), &under?(path, &1)) do
+      :ok
+    else
+      _refused -> {:error, :broker_url_not_allowed}
     end
   end
 
   def check_url(_url), do: {:error, :broker_url_not_allowed}
+
+  defp clean_path?(path) do
+    [_leading | segments] = String.split(path, "/")
+    {last, inner} = List.pop_at(segments, -1)
+    Enum.all?(inner, &(&1 not in ["", ".", ".."])) and last not in [".", ".."]
+  end
+
+  defp under?(path, prefix),
+    do: path == prefix or String.starts_with?(path, String.trim_trailing(prefix, "/") <> "/")
 
   # ─── broker fetch ────────────────────────────────────────────────────────
 
@@ -282,13 +362,13 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   defp broker(config, scope) do
     url = value(config, "broker_url")
 
-    with {:ok, reference} <- reference(config) do
+    with {:ok, reference} <- reference(config, scope) do
       if blank?(url) or blank?(reference) do
         {:error, :broker_not_configured}
       else
         with :ok <- check_url(url) do
           {:ok,
-           %{
+           %Broker{
              url: url,
              reference: reference,
              scopes: scope_scopes(config),
@@ -302,16 +382,27 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   end
 
   # The sealed reference wins; a plaintext one is a row written before sealing.
-  defp reference(config) do
+  # A seal opens for the connector and workspace it was bound to, or, if it was
+  # sealed before it was bound, without them.
+  defp reference(config, scope) do
     case Map.get(config, @sealed_reference) do
       envelope when is_binary(envelope) ->
-        case Credential.decrypt(envelope) do
-          {:ok, %{@reference => reference}} when is_binary(reference) -> {:ok, reference}
-          _unreadable -> {:error, :broker_reference_unreadable}
+        bound = aad(%{id: value(scope, :id), workspace_id: value(scope, :workspace_id)})
+
+        case Enum.find_value(Enum.uniq([bound, ""]), &open(envelope, &1)) do
+          nil -> {:error, :broker_reference_unreadable}
+          reference -> {:ok, reference}
         end
 
       _none ->
         {:ok, value(config, @reference)}
+    end
+  end
+
+  defp open(envelope, aad) do
+    case Credential.decrypt(envelope, aad) do
+      {:ok, %{@reference => reference}} when is_binary(reference) -> reference
+      _unreadable -> nil
     end
   end
 
@@ -333,7 +424,15 @@ defmodule OptimalEngine.Connectors.CredentialSource do
       "scopes" => broker.scopes
     }
 
-    case HTTP.post_json(broker.url, payload, timeout: broker.timeout_ms, follow_redirects: false) do
+    opts = [
+      timeout: broker.timeout_ms,
+      follow_redirects: false,
+      single_attempt: true,
+      verify_tls: true,
+      max_body_bytes: @max_body_bytes
+    ]
+
+    case HTTP.post_json(broker.url, payload, opts) do
       {:ok, %{status: 200, body: body}} -> {:ok, body}
       {:ok, %{status: 401}} -> {:error, :broker_unauthorized}
       {:ok, %{status: status}} when status in [403, 404] -> {:error, :broker_refused}
@@ -357,23 +456,34 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   #     secret lives under (`pat`, `api_key`, ...), as a plain string
   #   * an API key goes under that same key when the adapter's is not `api_key`
   defp credentials(body, broker) when is_map(body) do
+    top = stringify(body)
+
     map =
       case value(body, "credentials") || value(body, "data") do
         %{} = nested -> stringify(nested)
-        _flat -> stringify(body)
+        _flat -> top
       end
 
     expires_at = expires_at(map, body)
-    rest = map |> Map.drop(["access_token" | @token_terms]) |> native_api_key(broker.adapter)
 
-    case Map.get(map, "access_token") do
-      token when is_binary(token) and token != "" ->
-        {:ok, with_access_token(rest, token, expires_at, broker)}
+    rest =
+      map
+      |> Map.drop(["access_token" | @token_terms])
+      |> native_api_key(broker.adapter)
+      |> wrap_secrets(broker.adapter)
 
-      nil when map_size(rest) > 0 ->
+    cond do
+      # A 200 that carries an error is the broker saying no.
+      Map.get(top, "error") not in [nil, false] ->
+        {:error, :broker_refused}
+
+      is_binary(Map.get(map, "access_token")) and Map.get(map, "access_token") != "" ->
+        {:ok, with_access_token(rest, Map.get(map, "access_token"), expires_at, broker)}
+
+      Map.get(map, "access_token") == nil and map_size(rest) > 0 ->
         {:ok, rest}
 
-      _none ->
+      true ->
         {:error, :broker_refused}
     end
   end
@@ -387,10 +497,26 @@ defmodule OptimalEngine.Connectors.CredentialSource do
 
   defp with_access_token(rest, token, _expires_at, %{adapter: %{token_key: key}})
        when is_binary(key),
-       do: Map.put_new(rest, key, token)
+       do: Map.put_new(rest, key, AccessToken.secret(token))
 
   defp with_access_token(rest, token, _expires_at, _broker),
-    do: Map.put(rest, "access_token", token)
+    do: Map.put(rest, "access_token", AccessToken.secret(token))
+
+  # The secrets a broker issues are held opaque in the adapter's state, so a
+  # crash that prints the state prints none of them.
+  defp wrap_secrets(credentials, adapter) do
+    keys = Enum.reject(["api_key", adapter.token_key], &is_nil/1)
+
+    Enum.reduce(keys, credentials, fn key, acc ->
+      case Map.get(acc, key) do
+        secret when is_binary(secret) and secret != "" ->
+          Map.put(acc, key, AccessToken.secret(secret))
+
+        _other ->
+          acc
+      end
+    end)
+  end
 
   defp native_api_key(credentials, %{token_key: key}) when is_binary(key) and key != "api_key" do
     case Map.pop(credentials, "api_key") do
@@ -422,10 +548,12 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   # A renewal is an access token or nothing: a broker that answers a renewal
   # with something else has refused it.
   defp renew(broker) do
-    case fetch(broker) do
-      {:ok, %{"access_token" => %AccessToken{} = token}} -> {:ok, token}
-      {:ok, _other} -> {:error, :broker_refused}
-      {:error, reason} -> {:error, reason}
+    with :ok <- check_url(broker.url),
+         {:ok, credentials} <- fetch(broker) do
+      case credentials do
+        %{"access_token" => %AccessToken{} = token} -> {:ok, token}
+        _other -> {:error, :broker_refused}
+      end
     end
   end
 
@@ -434,9 +562,14 @@ defmodule OptimalEngine.Connectors.CredentialSource do
     seconds = Map.get(map, "expires_in") || value(body, "expires_in")
 
     case {parse_instant(at), parse_seconds(seconds)} do
-      {%DateTime{} = instant, _seconds} -> instant
-      {nil, n} when is_integer(n) -> DateTime.add(DateTime.utc_now(), n, :second)
-      _neither -> nil
+      {%DateTime{} = instant, _seconds} ->
+        instant
+
+      {nil, n} when is_integer(n) ->
+        DateTime.add(DateTime.utc_now(), n |> max(0) |> min(@max_expires_in_s), :second)
+
+      _neither ->
+        nil
     end
   end
 
@@ -468,7 +601,15 @@ defmodule OptimalEngine.Connectors.CredentialSource do
     end
   end
 
-  defp normalize_host(host), do: host |> to_string() |> String.trim() |> String.downcase()
+  defp normalize_host(host), do: host |> to_string() |> String.trim() |> String.downcase(:ascii)
+
+  defp allowed_paths do
+    case Application.get_env(:optimal_engine, :credential_broker_paths, @default_paths) do
+      paths when is_list(paths) -> Enum.map(paths, &(&1 |> to_string() |> String.trim()))
+      paths when is_binary(paths) -> paths |> String.split(",") |> Enum.map(&String.trim/1)
+      _other -> @default_paths
+    end
+  end
 
   defp scope_scopes(config) do
     case value(config, "broker_scopes") do

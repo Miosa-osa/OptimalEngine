@@ -104,7 +104,7 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
       scope = %{id: "c-1", kind: "gmail", tenant_id: "default", workspace_id: "hq"}
       assert {:ok, config} = CredentialSource.hydrate(@broker_config, scope)
 
-      assert config["credentials"]["api_key"] == "example-broker-issued-key"
+      assert to_string(config["credentials"]["api_key"]) == "example-broker-issued-key"
 
       # The request named the reference, the connector and the scopes, and sent
       # no secret of the Engine's own.
@@ -234,6 +234,10 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
       Stripe
     }
 
+    # The secrets a broker issues are held opaque; this is what they stand for.
+    defp revealed(credentials),
+      do: Map.new(credentials, fn {key, value} -> {key, to_string(value)} end)
+
     defp hydrate_for(adapter, body) do
       stub = BrokerStub.install(nil, issue: [{:body, body}])
       on_exit(fn -> BrokerStub.uninstall(stub) end)
@@ -270,7 +274,7 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
             {Confluence, "api_token"}
           ] do
         assert {:ok, config} = hydrate_for(adapter, @access_token)
-        assert config["credentials"] == %{key => "example-secret"}
+        assert revealed(config["credentials"]) == %{key => "example-secret"}
       end
     end
 
@@ -283,14 +287,14 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
             {Jira, "api_token"}
           ] do
         assert {:ok, config} = hydrate_for(adapter, @api_key)
-        assert config["credentials"] == %{key => "example-secret"}
+        assert revealed(config["credentials"]) == %{key => "example-secret"}
       end
     end
 
     test "an API key stays api_key for an adapter that reads api_key" do
       for adapter <- [Stripe, Fathom, Linear, JotForm, Beehiiv, nil] do
         assert {:ok, config} = hydrate_for(adapter, @api_key)
-        assert config["credentials"] == %{"api_key" => "example-secret"}
+        assert revealed(config["credentials"]) == %{"api_key" => "example-secret"}
       end
     end
 
@@ -298,7 +302,7 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
       body = %{"credentials" => %{"bot_token" => "example-own", "api_key" => "example-secret"}}
 
       assert {:ok, config} = hydrate_for(Slack, body)
-      assert config["credentials"] == %{"bot_token" => "example-own"}
+      assert revealed(config["credentials"]) == %{"bot_token" => "example-own"}
     end
 
     test "expires_at beside credentials is read, and is not handed to the adapter" do
@@ -320,7 +324,7 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
                  "expires_at" => "2999-01-01T00:00:00Z"
                })
 
-      assert config["credentials"] == %{"api_key" => "k"}
+      assert revealed(config["credentials"]) == %{"api_key" => "k"}
     end
 
     test "every adapter says where its secret lives" do
@@ -497,7 +501,7 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
       assert result.status == :success
 
       assert_received {:initialised_with, config}
-      assert config["credentials"]["api_key"] == "example-broker-issued-key"
+      assert to_string(config["credentials"]["api_key"]) == "example-broker-issued-key"
 
       # The credential the broker issued never reaches the database.
       {:ok, [[stored]]} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [id])

@@ -465,7 +465,13 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
     @access_token "example-secret-access-token"
 
     defp crash_text(adapter, config) do
-      scope = %{id: "c-1", kind: "x", tenant_id: "default", workspace_id: "default", adapter: adapter}
+      scope = %{
+        id: "c-1",
+        kind: "x",
+        tenant_id: "default",
+        workspace_id: "default",
+        adapter: adapter
+      }
 
       with {:ok, hydrated} <- CredentialSource.hydrate(config, scope),
            {:ok, state} <- adapter.init(hydrated) do
@@ -477,8 +483,11 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
           end
 
         case result do
-          {:crashed, text} -> text
-          {:returned, other} -> flunk("the adapter was meant to crash, it returned #{inspect(other)}")
+          {:crashed, text} ->
+            text
+
+          {:returned, other} ->
+            flunk("the adapter was meant to crash, it returned #{inspect(other)}")
         end
       end
     end
@@ -626,7 +635,9 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
   # ─── helpers ──────────────────────────────────────────────────────────────
 
   defp sealed_reference(connector_id) do
-    {:ok, [[config]]} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [connector_id])
+    {:ok, [[config]]} =
+      Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [connector_id])
+
     Jason.decode!(config)["broker_reference_ciphertext"]
   end
 

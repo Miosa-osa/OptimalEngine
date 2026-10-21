@@ -26,7 +26,7 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
     credential_keys: [],
     access_token: true
 
-  alias OptimalEngine.Connectors.{AccessToken, HTTP}
+  alias OptimalEngine.Connectors.{AccessToken, TokenExchange}
 
   @base_url "https://api.hubapi.com"
   @token_url "https://api.hubapi.com/oauth/v1/token"
@@ -38,13 +38,17 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
 
     with :ok <- require_keys(flat, required_config_keys()),
          :ok <- require_hubspot_auth(flat) do
-      {:ok, flat}
+      {:ok, conceal(flat)}
     end
   end
 
+  # HubSpot's OAuth app: the keys that make its grant complete, as against a
+  # private app's access token.
+  def grant_keys, do: [:client_id, :client_secret, :refresh_token]
+
   @impl true
   def sync(state, cursor) do
-    AccessToken.session(state, &refresh_access_token/1, &sync_objects(state, cursor, &1))
+    session(state, &refresh_access_token/1, &sync_objects(state, cursor, &1))
   end
 
   defp sync_objects(state, cursor, token) do
@@ -121,26 +125,12 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
   # The OAuth app's refresh token, exchanged once per sync. A refresh token
   # HubSpot no longer honours is answered with a 400.
   defp refresh_access_token(state) do
-    body =
-      URI.encode_query(%{
-        grant_type: "refresh_token",
-        client_id: pick(state, :client_id),
-        client_secret: pick(state, :client_secret),
-        refresh_token: pick(state, :refresh_token)
-      })
-
-    case HTTP.request(@token_url,
-           method: :post,
-           body: body,
-           headers: [{"content-type", "application/x-www-form-urlencoded"}]
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} -> {:ok, token}
-      {:ok, %{status: status}} when status in [400, 401] -> {:error, :auth_expired}
-      {:ok, %{status: 429}} -> {:error, :rate_limited}
-      {:ok, %{status: status}} when status >= 500 -> {:error, :transient}
-      {:ok, %{status: status}} -> {:error, {:http, status}}
-      {:error, reason} -> {:error, reason}
-    end
+    TokenExchange.exchange(@token_url,
+      grant_type: "refresh_token",
+      client_id: pick(state, :client_id),
+      client_secret: pick(state, :client_secret),
+      refresh_token: pick(state, :refresh_token)
+    )
   end
 
   defp fetch_objects(object_type, after_cursor, token) do

@@ -104,6 +104,7 @@ defmodule OptimalEngine.Connectors.Adapters.GitHub do
 
     cond do
       is_binary(pat) and pat != "" -> :ok
+      match?(%OptimalEngine.Connectors.AccessToken{}, pat) -> :ok
       app? -> :ok
       true -> {:error, :missing_credentials}
     end

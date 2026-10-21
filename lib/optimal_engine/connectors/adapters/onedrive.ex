@@ -24,14 +24,14 @@ defmodule OptimalEngine.Connectors.Adapters.OneDrive do
     credential_keys: [:client_id, :client_secret],
     access_token: true
 
-  alias OptimalEngine.Connectors.{AccessToken, HTTP}
+  alias OptimalEngine.Connectors.{AccessToken, TokenExchange}
 
   @graph_base "https://graph.microsoft.com/v1.0"
   @page_size 100
 
   @impl true
   def sync(state, cursor) do
-    AccessToken.session(state, &acquire_token/1, fn token ->
+    session(state, &acquire_token/1, fn token ->
       case cursor do
         nil -> full_sync(state, token)
         delta_link -> delta_sync(delta_link, token)
@@ -60,30 +60,12 @@ defmodule OptimalEngine.Connectors.Adapters.OneDrive do
     tenant_id = pick(state, :tenant_id_ms)
     url = "https://login.microsoftonline.com/#{tenant_id}/oauth2/v2.0/token"
 
-    body =
-      "grant_type=client_credentials" <>
-        "&client_id=#{pick(state, :client_id)}" <>
-        "&client_secret=#{pick(state, :client_secret)}" <>
-        "&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default"
-
-    case HTTP.request(url,
-           method: :post,
-           headers: [{"content-type", "application/x-www-form-urlencoded"}],
-           body: body,
-           parse_json: true
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} ->
-        {:ok, token}
-
-      {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{body: body}} ->
-        {:error, {:token_error, body}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    TokenExchange.exchange(url,
+      grant_type: "client_credentials",
+      client_id: pick(state, :client_id),
+      client_secret: pick(state, :client_secret),
+      scope: "https://graph.microsoft.com/.default"
+    )
   end
 
   defp full_sync(state, token) do
@@ -96,7 +78,29 @@ defmodule OptimalEngine.Connectors.Adapters.OneDrive do
     fetch_delta_page(delta_link, [], token)
   end
 
+  # The token is sent to every link Graph hands back, so each must be Graph's.
+  @graph_hosts ~w(graph.microsoft.com graph.microsoft.us dod-graph.microsoft.us
+                  graph.microsoft.de microsoftgraph.chinacloudapi.cn)
+
   defp fetch_delta_page(url, acc, token) do
+    if trusted_link?(url),
+      do: pull_delta_page(url, acc, token),
+      else: {:error, :untrusted_url}
+  end
+
+  defp trusted_link?("https://" <> _rest = url) do
+    case URI.parse(url) do
+      %URI{host: host, port: 443, userinfo: nil} when is_binary(host) ->
+        String.downcase(host, :ascii) in @graph_hosts
+
+      _other ->
+        false
+    end
+  end
+
+  defp trusted_link?(_url), do: false
+
+  defp pull_delta_page(url, acc, token) do
     case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: body}} ->
         items =

@@ -34,15 +34,19 @@ defmodule OptimalEngine.Connectors.Credential do
   @doc """
   Encrypt a credentials map. Returns a Base64-encoded envelope or
   `{:error, :key_missing}` when the master key isn't configured.
+
+  `aad` is associated data the envelope is bound to: it is not stored, and the
+  envelope opens only when the same data is given to `decrypt/2`. Binding it to
+  the row it belongs to keeps a copy of the envelope from opening elsewhere.
   """
-  @spec encrypt(plaintext()) :: {:ok, envelope()} | {:error, :key_missing}
-  def encrypt(creds) when is_map(creds) do
+  @spec encrypt(plaintext(), binary()) :: {:ok, envelope()} | {:error, :key_missing}
+  def encrypt(creds, aad \\ "") when is_map(creds) and is_binary(aad) do
     with {:ok, key} <- master_key() do
       iv = :crypto.strong_rand_bytes(@iv_size)
       plaintext = Jason.encode!(creds)
 
       {ciphertext, tag} =
-        :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", true)
+        :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, aad, true)
 
       payload = <<@version::8, iv::binary, tag::binary, ciphertext::binary>>
       {:ok, Base.encode64(payload)}
@@ -53,14 +57,14 @@ defmodule OptimalEngine.Connectors.Credential do
   Decrypt an envelope. Returns the original credentials map or an
   error atom describing what went wrong.
   """
-  @spec decrypt(envelope()) ::
+  @spec decrypt(envelope(), binary()) ::
           {:ok, plaintext()}
           | {:error, :key_missing | :bad_envelope | :unsupported_version | :auth_failed}
-  def decrypt(envelope) when is_binary(envelope) do
+  def decrypt(envelope, aad \\ "") when is_binary(envelope) and is_binary(aad) do
     with {:ok, key} <- master_key(),
          {:ok, raw} <- Base.decode64(envelope) |> wrap_bad(),
          {:ok, iv, tag, ciphertext} <- split_envelope(raw),
-         {:ok, plaintext} <- aead_decrypt(key, iv, tag, ciphertext),
+         {:ok, plaintext} <- aead_decrypt(key, iv, tag, ciphertext, aad),
          {:ok, map} <- Jason.decode(plaintext) do
       {:ok, map}
     end
@@ -105,8 +109,8 @@ defmodule OptimalEngine.Connectors.Credential do
   defp split_envelope(<<v::8, _::binary>>) when v != @version, do: {:error, :unsupported_version}
   defp split_envelope(_), do: {:error, :bad_envelope}
 
-  defp aead_decrypt(key, iv, tag, ciphertext) do
-    case :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, ciphertext, "", tag, false) do
+  defp aead_decrypt(key, iv, tag, ciphertext, aad) do
+    case :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, ciphertext, aad, tag, false) do
       plaintext when is_binary(plaintext) -> {:ok, plaintext}
       _ -> {:error, :auth_failed}
     end

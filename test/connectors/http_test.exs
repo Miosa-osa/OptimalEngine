@@ -21,10 +21,11 @@ defmodule OptimalEngine.Connectors.HTTPTest do
 
   describe "a redirect" do
     test "is followed by default" do
-      origin = serve(fn
-        "/", port -> redirect(302, "http://127.0.0.1:#{port}/elsewhere")
-        _other, _port -> json("{\"ok\":true}")
-      end)
+      origin =
+        serve(fn
+          "/", port -> redirect(302, "http://127.0.0.1:#{port}/elsewhere")
+          _other, _port -> json("{\"ok\":true}")
+        end)
 
       assert {:ok, %{status: 200}} = HTTP.get_json(origin.base <> "/")
 
@@ -33,10 +34,11 @@ defmodule OptimalEngine.Connectors.HTTPTest do
     end
 
     test "is handed back as the answer when told not to follow it" do
-      origin = serve(fn
-        "/", port -> redirect(302, "http://127.0.0.1:#{port}/elsewhere")
-        _other, _port -> json("{\"ok\":true}")
-      end)
+      origin =
+        serve(fn
+          "/", port -> redirect(302, "http://127.0.0.1:#{port}/elsewhere")
+          _other, _port -> json("{\"ok\":true}")
+        end)
 
       assert {:ok, %{status: 302, headers: headers}} =
                HTTP.get_json(origin.base <> "/", follow_redirects: false)
@@ -68,7 +70,9 @@ defmodule OptimalEngine.Connectors.HTTPTest do
       origin = serve(fn _path, _port -> redirect(303, other.base <> "/landed") end)
 
       assert {:ok, %{status: 303}} =
-               HTTP.post_json(origin.base <> "/", %{"reference" => "example"}, follow_redirects: false)
+               HTTP.post_json(origin.base <> "/", %{"reference" => "example"},
+                 follow_redirects: false
+               )
 
       refute_received {:requested, _, _, "/landed", _}
     end
@@ -119,7 +123,9 @@ defmodule OptimalEngine.Connectors.HTTPTest do
     test "is read in full when the caller sets no limit" do
       origin = serve(fn _path, _port -> json(String.duplicate("a", 10_000)) end)
 
-      assert {:ok, %{status: 200, body: body}} = HTTP.get_json(origin.base <> "/", parse_json: false)
+      assert {:ok, %{status: 200, body: body}} =
+               HTTP.get_json(origin.base <> "/", parse_json: false)
+
       assert byte_size(body) == 10_000
     end
   end
@@ -153,7 +159,10 @@ defmodule OptimalEngine.Connectors.HTTPTest do
 
   defp serve(handler) do
     parent = self()
-    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
     {:ok, port} = :inet.port(listener)
     pid = spawn_link(fn -> accept(listener, parent, port, handler) end)
 
