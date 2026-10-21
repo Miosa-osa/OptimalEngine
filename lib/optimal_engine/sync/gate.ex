@@ -458,7 +458,10 @@ defmodule OptimalEngine.Sync.Gate do
   # A change in the ledger is a snapshot of the row as it was written, and the
   # row may carry labels it did not have then (labelled afterwards, or a
   # version that arrived unlabelled). The change carries the tokens of the
-  # snapshot and of the row as it is stored now, when the row is still there.
+  # snapshot and of the row as it is stored now. A row that is gone is read as
+  # the ledger last recorded it (every version it has there), so a version
+  # written before the row was labelled and then deleted stays home with the
+  # versions that were labelled.
   defp change_tokens(gate, table, spec, row) do
     union(top_tokens(gate, table, spec, row, true), current_tokens(gate, table, spec, row))
   end
@@ -470,8 +473,14 @@ defmodule OptimalEngine.Sync.Gate do
       id when is_binary(id) ->
         memoized(gate, {:current, table, id}, fn ->
           case load(gate, table, spec, id) do
-            nil -> nil
-            current -> row_tokens(gate, spec, current, MapSet.new([{table, id}]), true)
+            nil ->
+              case ledger_tokens(gate, table, spec, id) do
+                :none -> nil
+                tokens -> tokens
+              end
+
+            current ->
+              row_tokens(gate, spec, current, MapSet.new([{table, id}]), true)
           end
         end)
 
@@ -959,14 +968,16 @@ defmodule OptimalEngine.Sync.Gate do
     do: memoized(gate, :index, fn -> shared(gate, :index, fn -> build_index(gate) end) end)
 
   # What a scan of the workspace gave, kept for the next gate while nothing
-  # was written (see `OptimalEngine.Sync.GateCache`). The stamp is read before
-  # the first scan of a gate, so a write that lands during the scan makes the
-  # entry stale, never the reverse. A replicating gate and a reader's gate
-  # select different sources, so the mode is part of the key.
+  # was written (see `OptimalEngine.Sync.GateCache`). The stamp is read just
+  # before each scan (not once per gate: a long push cycle may need a scan
+  # late, after a write that an earlier scan did not see), so a write that
+  # lands during a scan makes the entry stale, never the reverse. A replicating
+  # gate and a reader's gate select different sources, so the mode is part of
+  # the key.
   defp shared(gate, what, build) do
     key = {what, gate.tenant_id, gate.workspace_id, gate.mode, gate.rank}
 
-    GateCache.fetch(key, memoized(gate, :stamp, fn -> stamp(gate) end), fn ->
+    GateCache.fetch(key, stamp(gate), fn ->
       :telemetry.execute([:optimal_engine, :sync, :gate_build], %{count: 1}, %{
         what: what,
         workspace_id: gate.workspace_id

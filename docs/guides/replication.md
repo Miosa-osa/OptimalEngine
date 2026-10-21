@@ -62,6 +62,7 @@ The push cycle ends in an error with nothing sent and its cursor where it was, s
 - An aggregate (`analysis_reports`, `data_quality_snapshots`, `rhythm_notes`, `sessions`, a wiki page or cluster that names nothing, an edge between entity names) has no row to point at, so it stays home while the workspace holds anything above the peer's class.
 - A change is held at the higher of the row as the ledger recorded it and the row as it is stored now.
 An older version of a row that has labels today (it was labelled afterwards, or a version arrived from another Engine without them) stays home with the row.
+When the row is gone, it is read as the ledger last recorded it (every version it has there, newest 20), so a version written before the row was labelled and then deleted stays home with the labelled versions.
 - A delete carries only the row's key.
 It stays home when the row's earlier changes in the local ledger were held, so a peer that never had the row is not told of it.
 
@@ -72,6 +73,10 @@ Labels only grow when a change is applied.
 A row this Engine already holds keeps the `security_labels`, the `partition_ids`, the `metadata.security_labels` and `metadata.partition_ids`, and the `classification_level` (above `internal`) it has, whatever the sender wrote and however old its change is: the two sets of labels are joined, and a higher level wins.
 Labels held here that cannot be read count as `restricted`.
 A change that carries everything the row holds is written as sent.
+A delete from a peer is not applied to a row this Engine holds above the class that peer is cleared for (the peer was never sent it): the change is skipped as `gated` and the row stays.
+The link columns of a row (`source_package_id`, `signal_id`, the `memory_core_source_package_id` in a memory's metadata, and the like) are not kept: a change from a peer may repoint them, as an ordinary edit does.
+A row that carries labels of its own keeps them whatever its links say; a legacy row that is classified only through the rows it links to is classified through the links it has after the change.
+Labels never shrink on a replica through sync, so lowering a label (declassifying) has to be done on each replica.
 The ledger keeps the change as it was received, so another peer that is pulled from the ledger gets the sender's labels, and a cleared peer behind this one learns of the extra labels only from the sender.
 
 A versioned memory has no label column, so `security_labels` given when a memory is remembered or created are kept in its `metadata`, and its versions and children carry them.
@@ -86,10 +91,12 @@ A row held then is not sent later because its source package arrived after it, o
 So label before writing, and write the source before what derives from it.
 
 A gate reads the workspace once for what it needs to classify many rows: the index of the documents and memories derived from labelled sources, and whether the workspace holds anything above the peer's class.
-That scan is kept between gates (a pull of many pages, the next push cycle) while nothing was written: the key is the workspace and the class, and the stamp is the write sequence of the change capture and the ledger, which every write to a replicated table of a syncing workspace moves.
-An entry also expires after `config :optimal_engine, :sync_gate_cache_ttl_ms` (default `30000`; `0` turns the cache off), which bounds how long a write that capture does not see, such as an in-place update of a table without a key, can go unnoticed.
+That scan is kept between gates (a pull of many pages, the next push cycle) while nothing was written: the key is the scan, the tenant, the workspace, the kind of gate (a peer's or a reader's) and the class, and the stamp is the write sequence of the change capture and the ledger (`sync_capture` and `sync_mutations` in `sqlite_sequence`), which every write to a replicated table of a syncing workspace moves.
+The stamp is read just before each scan, not once per gate, so a long push cycle that needs a scan late does not use an older stamp.
+An entry also expires after `config :optimal_engine, :sync_gate_cache_ttl_ms` (default `30000`; `0` turns the cache off), which is a backstop for a write that capture does not see; every table the gate scans is captured, and a test pins that.
+The cache is dropped after a change from a peer is applied and when sync is enabled or disabled for a workspace.
 A workspace that does not sync is not captured, so it is never cached.
-The scans emit `[:optimal_engine, :sync, :gate_build]` telemetry with `what: :index | :holds_above`.
+The scans emit `[:optimal_engine, :sync, :gate_build]` telemetry with `what: :index | :holds_above` and the `workspace_id`.
 
 ### What a read key sees of exports, conflicts and the ledger
 

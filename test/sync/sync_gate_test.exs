@@ -25,7 +25,7 @@ defmodule OptimalEngine.SyncGateTest do
   alias OptimalEngine.MemoryCore.Store, as: CoreStore
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.Storage.PolicyStore
-  alias OptimalEngine.Sync.{Capture, Gate, Lineage}
+  alias OptimalEngine.Sync.{Capture, Gate, GateCache, Lineage}
   alias OptimalEngine.Tenancy.Tenant
 
   @relay "relay+https://api.example/api/v1/engines/e1/sync"
@@ -900,6 +900,38 @@ defmodule OptimalEngine.SyncGateTest do
       refute carries?(sent, "Gone and secret 5503")
     end
 
+    test "a row labelled and then deleted holds every version it had", ctx do
+      id = "fact-declass-#{ctx.n}"
+      fact(ctx, id, "Declassified secret 5510", [])
+      {:ok, _} = Capture.seal()
+
+      {:ok, _} =
+        Store.raw_query("UPDATE facts SET security_labels = '[\"restricted\"]' WHERE id = ?1", [id])
+
+      {:ok, _} = Capture.seal()
+      {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      refute sent?(sent, "facts", id)
+      refute carries?(sent, "Declassified secret 5510")
+    end
+
+    test "a version a peer sent without the labels does not release the row's other versions",
+         ctx do
+      id = "fact-peer-#{ctx.n}"
+      fact(ctx, id, "Peer secret 5511", ["restricted"])
+      {:ok, _} = Capture.seal()
+
+      remote_change(ctx, "facts", id, %{"fact_text" => "Peer edit 5512", "security_labels" => "[]"})
+      {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      refute carries?(sent, "Peer secret 5511")
+      refute carries?(sent, "Peer edit 5512")
+    end
+
     test "a change to a row that stays unlabelled is still sent", ctx do
       id = "fact-open-#{ctx.n}"
       fact(ctx, id, "Open fact 5504", [])
@@ -1018,6 +1050,159 @@ defmodule OptimalEngine.SyncGateTest do
       assert stored("chunks", "chk-up-#{ctx.n}", "classification_level") == "confidential"
     end
 
+    test "a peer that is not cleared for a row cannot delete it, and a create after it keeps the labels",
+         ctx do
+      id = "fact-del-#{ctx.n}"
+      fact(ctx, id, "Original 7711", ["restricted"])
+
+      assert {:ok, %{applied: 0, skipped: %{gated: 1}}} =
+               remote_delete(ctx, "facts", id, max_class: "internal")
+
+      assert stored("facts", id, "fact_text") == "Original 7711"
+
+      remote_change(ctx, "facts", id, %{"fact_text" => "Rewritten 7711", "security_labels" => "[]"},
+        max_class: "internal",
+        operation: "create"
+      )
+
+      assert stored("facts", id, "fact_text") == "Rewritten 7711"
+      assert label_list("facts", id) == ["restricted"]
+    end
+
+    test "a delete of a row within the class the peer is cleared for is applied", ctx do
+      open = "fact-del-open-#{ctx.n}"
+      confidential = "fact-del-conf-#{ctx.n}"
+      fact(ctx, open, "Open 7712", [])
+      fact(ctx, confidential, "Confidential 7713", ["confidential"])
+
+      assert {:ok, %{applied: 1}} = remote_delete(ctx, "facts", open, max_class: "internal")
+
+      assert {:ok, %{applied: 1}} =
+               remote_delete(ctx, "facts", confidential, max_class: "confidential")
+
+      assert {:ok, []} =
+               Store.raw_query("SELECT 1 FROM facts WHERE id IN (?1, ?2)", [open, confidential])
+    end
+
+    test "a create over a row this Engine holds keeps its labels", ctx do
+      id = "fact-create-#{ctx.n}"
+      fact(ctx, id, "Original 7714", ["restricted"])
+
+      remote_change(ctx, "facts", id, %{"fact_text" => "Created 7714", "security_labels" => "[]"},
+        operation: "create"
+      )
+
+      assert stored("facts", id, "fact_text") == "Created 7714"
+      assert label_list("facts", id) == ["restricted"]
+    end
+
+    test "labels the sender wrote as a BLOB cannot lower the row either", ctx do
+      id = "fact-blob-#{ctx.n}"
+      fact(ctx, id, "Original 7715", ["restricted"])
+
+      remote_change(ctx, "facts", id, %{"fact_text" => "Edited 7715"},
+        blobs: %{"security_labels" => "[]"}
+      )
+
+      assert stored("facts", id, "fact_text") == "Edited 7715"
+      assert label_list("facts", id) == ["restricted"]
+    end
+
+    test "metadata the sender wrote that is not an object keeps the labels held here", ctx do
+      %{memory: memory} = remember(ctx, "Secret 7716", ["restricted"])
+
+      for sent <- ["[1, 2]", "not json", "\"text\""] do
+        remote_change(ctx, "memories", memory.id, %{"metadata" => sent})
+
+        assert Jason.decode!(stored("memories", memory.id, "metadata"))["security_labels"] ==
+                 ["restricted"],
+               "sender metadata #{sent}"
+      end
+    end
+
+    test "metadata held here that cannot be read as an object holds no labels to keep", ctx do
+      %{memory: memory} = remember(ctx, "Odd 7717", ["restricted"])
+
+      {:ok, _} =
+        Store.raw_query("UPDATE memories SET metadata = 'not json' WHERE id = ?1", [memory.id])
+
+      remote_change(ctx, "memories", memory.id, %{"metadata" => ~s({"security_labels":["private"]})})
+
+      assert Jason.decode!(stored("memories", memory.id, "metadata"))["security_labels"] ==
+               ["private"]
+    end
+
+    test "a source package keeps its labels and its metadata labels", ctx do
+      source = restricted_source(ctx, "Escrow terms 7718")
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE source_packages SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json('[\"confidential\"]')) WHERE id = ?1",
+          [source.id]
+        )
+
+      remote_change(ctx, "source_packages", source.id, %{
+        "security_labels" => "[]",
+        "metadata" => ~s({"origin":"phone"})
+      })
+
+      assert label_list("source_packages", source.id) == ["restricted"]
+      metadata = Jason.decode!(stored("source_packages", source.id, "metadata"))
+      assert metadata["security_labels"] == ["confidential"]
+      assert metadata["origin"] == "phone"
+    end
+
+    test "a row that is held here keeps its labels when its links are repointed", ctx do
+      insert_context(ctx, "doc-links-#{ctx.n}", "Doc")
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE contexts SET metadata = ?2 WHERE id = ?1",
+          ["doc-links-#{ctx.n}", ~s({"security_labels":["restricted"],"source_package_id":"sp-a"})]
+        )
+
+      remote_change(ctx, "contexts", "doc-links-#{ctx.n}", %{
+        "metadata" => ~s({"source_package_id":"sp-b"})
+      })
+
+      metadata = Jason.decode!(stored("contexts", "doc-links-#{ctx.n}", "metadata"))
+      assert metadata["security_labels"] == ["restricted"]
+      # The link is the sender's: an edit may repoint it.
+      assert metadata["source_package_id"] == "sp-b"
+    end
+
+    test "a value that cannot be stored is a failed change, not an error for the batch", ctx do
+      id = "fact-unbindable-#{ctx.n}"
+      fact(ctx, id, "Original 7719", ["private"])
+
+      mutation = fn suffix, value ->
+        %{
+          "id" => "mut_remote_unbindable_#{ctx.n}_#{suffix}",
+          "device_id" => "rep_remote",
+          "entity_type" => "facts",
+          "entity_id" => id,
+          "operation" => "update",
+          "occurred_at" => "2099-01-01T00:00:00.000",
+          "payload" => %{
+            "row" => Map.merge(row_of("facts", id), %{"fact_text" => value}),
+            "blobs" => %{}
+          }
+        }
+      end
+
+      assert {:ok, %{applied: 1, failed: [%{id: failed, reason: :unsupported_value}]}} =
+               Sync.apply_changes(
+                 ctx.tenant,
+                 ctx.ws,
+                 [mutation.("object", %{"not" => "text"}), mutation.("text", "Edited 7719")],
+                 since: "2099-12-31T00:00:00"
+               )
+
+      assert failed == "mut_remote_unbindable_#{ctx.n}_object"
+      assert stored("facts", id, "fact_text") == "Edited 7719"
+      assert label_list("facts", id) == ["private"]
+    end
+
     test "a change that does not lower anything is stored as the sender wrote it", ctx do
       id = "fact-same-#{ctx.n}"
       fact(ctx, id, "Original 7708", ["private"])
@@ -1046,12 +1231,232 @@ defmodule OptimalEngine.SyncGateTest do
           })
       end
 
-      on_exit(fn -> Application.delete_env(:optimal_engine, :sync_gate_cache_ttl_ms) end)
+      serve_max_class = Application.get_env(:optimal_engine, :sync_serve_max_class)
+
+      on_exit(fn ->
+        Application.delete_env(:optimal_engine, :sync_gate_cache_ttl_ms)
+
+        if serve_max_class,
+          do: Application.put_env(:optimal_engine, :sync_serve_max_class, serve_max_class),
+          else: Application.delete_env(:optimal_engine, :sync_serve_max_class)
+      end)
+
       :ok
     end
 
+    test "a cached source relabelled in place hides what is derived from it", ctx do
+      source = plain_source(ctx, "Board minutes 8811")
+
+      {:ok, memory} =
+        Versioned.create(%{
+          content: "Board minutes 8811 summary",
+          workspace_id: ctx.ws,
+          tenant_id: ctx.tenant,
+          metadata: %{"memory_core_source_package_id" => source.id}
+        })
+
+      first = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      assert sent?(first["mutations"], "memories", memory.id)
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE source_packages SET security_labels = '[\"restricted\"]' WHERE id = ?1",
+          [source.id]
+        )
+
+      second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+
+      refute sent?(second["mutations"], "memories", memory.id)
+      refute carries?(second["mutations"], "Board minutes 8811 summary")
+    end
+
+    test "an aggregate is held after a memory was labelled by its metadata alone", ctx do
+      report(ctx, "rep-late-#{ctx.n}")
+
+      first = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      assert sent?(first["mutations"], "analysis_reports", "rep-late-#{ctx.n}")
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json('[\"restricted\"]')) WHERE id = (SELECT id FROM memories WHERE workspace_id = ?1 LIMIT 1)",
+          [ctx.ws]
+        )
+
+      second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+
+      refute sent?(second["mutations"], "analysis_reports", "rep-late-#{ctx.n}")
+    end
+
+    test "a change applied from a peer that raises the labels of a source is honoured", ctx do
+      Application.put_env(:optimal_engine, :sync_serve_max_class, "internal")
+      source = plain_source(ctx, "Escrow terms 8812")
+
+      {:ok, memory} =
+        Versioned.create(%{
+          content: "Escrow terms 8812 summary",
+          workspace_id: ctx.ws,
+          tenant_id: ctx.tenant,
+          metadata: %{"memory_core_source_package_id" => source.id}
+        })
+
+      first = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      assert sent?(first["mutations"], "memories", memory.id)
+
+      remote_change(ctx, "source_packages", source.id, %{"security_labels" => ~s(["confidential"])})
+
+      second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+
+      refute sent?(second["mutations"], "memories", memory.id)
+      refute carries?(second["mutations"], "Escrow terms 8812 summary")
+    end
+
+    test "gates of two classes on one workspace do not share a scan", ctx do
+      source = plain_source(ctx, "Offer letter 8813", ["confidential"])
+
+      {:ok, memory} =
+        Versioned.create(%{
+          content: "Offer letter 8813 summary",
+          workspace_id: ctx.ws,
+          tenant_id: ctx.tenant,
+          metadata: %{"memory_core_source_package_id" => source.id}
+        })
+
+      change = memory_change(memory.id)
+      hold = fn class -> Gate.with_gate(ctx.tenant, ctx.ws, class, &Gate.hold?(&1, change)) end
+
+      assert hold.("internal")
+      refute hold.("confidential")
+
+      GateCache.clear()
+
+      refute hold.("confidential")
+      assert hold.("internal")
+    end
+
+    test "workspaces of two tenants do not share a scan", ctx do
+      other_tenant = "gate-other-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: other_tenant, name: "Other #{ctx.n}"})
+
+      {:ok, _} =
+        OptimalEngine.Organization.create(%{
+          id: "#{other_tenant}:org",
+          tenant_id: other_tenant,
+          slug: "org",
+          name: "Org"
+        })
+
+      other_ws = create_workspace(other_tenant, "notes", %{})
+
+      {:ok, plain} =
+        Versioned.create(%{
+          content: "Other tenant note",
+          workspace_id: other_ws,
+          tenant_id: other_tenant
+        })
+
+      source = plain_source(ctx, "Offer letter 8814", ["restricted"])
+
+      {:ok, memory} =
+        Versioned.create(%{
+          content: "Offer letter 8814 summary",
+          workspace_id: ctx.ws,
+          tenant_id: ctx.tenant,
+          metadata: %{"memory_core_source_package_id" => source.id}
+        })
+
+      refute Gate.with_gate(
+               other_tenant,
+               other_ws,
+               "internal",
+               &Gate.hold?(&1, memory_change(plain.id))
+             )
+
+      assert Gate.with_gate(
+               ctx.tenant,
+               ctx.ws,
+               "internal",
+               &Gate.hold?(&1, memory_change(memory.id))
+             )
+    end
+
+    test "an entry expires after the ttl", ctx do
+      Application.put_env(:optimal_engine, :sync_gate_cache_ttl_ms, 400)
+
+      {_, first} = counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+      assert :index in first
+
+      {_, again} = counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+      assert again == []
+
+      Process.sleep(450)
+
+      {_, expired} =
+        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+      assert :index in expired
+    end
+
+    test "a ttl that is not a number turns nothing off and breaks nothing", ctx do
+      Application.put_env(:optimal_engine, :sync_gate_cache_ttl_ms, "soon")
+
+      {_, builds} =
+        counting_builds(ctx.ws, fn ->
+          Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+          Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+        end)
+
+      assert Enum.count(builds, &(&1 == :index)) == 1
+    end
+
+    test "gates build when the cache table is gone", ctx do
+      owner = Process.whereis(GateCache)
+      true = :ets.delete(:optimal_sync_gate_cache)
+
+      on_exit(fn ->
+        Process.exit(owner, :kill)
+        wait_for_new_owner(owner)
+      end)
+
+      {pages, builds} = counting_builds(ctx.ws, fn -> pull_all(ctx, 2) end)
+
+      assert pages >= 3
+      assert Enum.count(builds, &(&1 == :index)) > 1
+      assert :ok = GateCache.clear()
+    end
+
+    test "a scan needed late in a pass is stamped when it is needed", ctx do
+      {:ok, plain} =
+        Versioned.create(%{content: "Mid-pass note", workspace_id: ctx.ws, tenant_id: ctx.tenant})
+
+      report(ctx, "rep-mid-#{ctx.n}")
+
+      aggregate = %{
+        "entity_type" => "analysis_reports",
+        "entity_id" => "rep-mid-#{ctx.n}",
+        "operation" => "update",
+        "payload" => %{"row" => row_of("analysis_reports", "rep-mid-#{ctx.n}"), "blobs" => %{}}
+      }
+
+      # An earlier gate caches "nothing above internal" for the stamp as it is.
+      refute Gate.with_gate(ctx.tenant, ctx.ws, "internal", &Gate.hold?(&1, aggregate))
+
+      gate = Gate.open(ctx.tenant, ctx.ws, "internal")
+
+      try do
+        # The first scan of this gate (the index) reads the stamp.
+        refute Gate.hold?(gate, memory_change(plain.id))
+
+        # A restricted write lands in the middle of the pass.
+        fact(ctx, "fact-mid-#{ctx.n}", "Mid-pass 8815", ["restricted"])
+
+        assert Gate.hold?(gate, aggregate)
+      after
+        Gate.close(gate)
+      end
+    end
+
     test "a pull of many pages scans the workspace once", ctx do
-      {pages, builds} = counting_builds(fn -> pull_all(ctx, 2) end)
+      {pages, builds} = counting_builds(ctx.ws, fn -> pull_all(ctx, 2) end)
 
       assert pages >= 3
       assert Enum.count(builds, &(&1 == :index)) == 1
@@ -1061,7 +1466,7 @@ defmodule OptimalEngine.SyncGateTest do
     test "without the cache every page scans it again", ctx do
       Application.put_env(:optimal_engine, :sync_gate_cache_ttl_ms, 0)
 
-      {pages, builds} = counting_builds(fn -> pull_all(ctx, 2) end)
+      {pages, builds} = counting_builds(ctx.ws, fn -> pull_all(ctx, 2) end)
 
       assert pages >= 3
       assert Enum.count(builds, &(&1 == :index)) > 1
@@ -1070,7 +1475,7 @@ defmodule OptimalEngine.SyncGateTest do
     test "a second pull with nothing written in between scans nothing", ctx do
       pull_all(ctx, 2)
 
-      {_pages, builds} = counting_builds(fn -> pull_all(ctx, 2) end)
+      {_pages, builds} = counting_builds(ctx.ws, fn -> pull_all(ctx, 2) end)
 
       assert builds == []
     end
@@ -1108,7 +1513,7 @@ defmodule OptimalEngine.SyncGateTest do
       }
 
       {_, builds} =
-        counting_builds(fn ->
+        counting_builds(workspace.id, fn ->
           for _ <- 1..2 do
             Gate.with_gate(ctx.tenant, workspace.id, "internal", &Gate.hold?(&1, memory))
           end
@@ -1455,6 +1860,32 @@ defmodule OptimalEngine.SyncGateTest do
              "classify #{inspect(unclassified)} in OptimalEngine.Sync.Lineage before they replicate"
     end
 
+    test "every table the gate classifies by has a text key and capture triggers" do
+      {:ok, rows} =
+        Store.raw_query(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync_capture_%'",
+          []
+        )
+
+      triggers = MapSet.new(List.flatten(rows))
+
+      # The gate cache stands on the write sequence of the capture, which only a
+      # keyed table with an insert, update and delete trigger moves.
+      for table <- Lineage.tables(),
+          spec = Lineage.spec(table),
+          spec.labels or is_binary(spec.meta) or is_binary(spec.class) do
+        columns = Capture.columns(table)
+
+        assert Capture.key_columns(columns) != [], "#{table} has no primary key"
+        refute Capture.rowid_key?(columns), "#{table} is keyed by a rowid"
+
+        for operation <- ~w(ai au ad) do
+          assert "sync_capture_#{operation}_#{table}" in triggers,
+                 "#{table} has no #{operation} capture trigger"
+        end
+      end
+    end
+
     test "names only tables and columns that exist" do
       for table <- Lineage.tables() do
         spec = Lineage.spec(table)
@@ -1734,7 +2165,38 @@ defmodule OptimalEngine.SyncGateTest do
 
   # A change to the row `id` of `table` as the other Engine would send it: the
   # row as stored here with `changes`, written after anything done here.
-  defp remote_change(ctx, table, id, changes) do
+  defp remote_change(ctx, table, id, changes, opts \\ []) do
+    blobs = Keyword.get(opts, :blobs, %{})
+
+    row =
+      table
+      |> row_of(id)
+      |> Map.merge(changes)
+      |> Map.drop(Map.keys(blobs))
+
+    mutation = %{
+      "id" => "mut_remote_#{table}_#{System.unique_integer([:positive])}",
+      "device_id" => "rep_remote",
+      "entity_type" => table,
+      "entity_id" => id,
+      "operation" => Keyword.get(opts, :operation, "update"),
+      "occurred_at" => "2099-01-01T00:00:00.000",
+      "payload" => %{
+        "row" => row,
+        "blobs" =>
+          Map.new(blobs, fn {name, bytes} -> {name, Base.encode16(bytes, case: :lower)} end)
+      }
+    }
+
+    assert {:ok, %{applied: 1}} =
+             Sync.apply_changes(ctx.tenant, ctx.ws, [mutation],
+               since: "2099-12-31T00:00:00",
+               max_class: Keyword.get(opts, :max_class, "confidential")
+             )
+  end
+
+  # The row `id` of `table` as a map with string keys, the way a change carries it.
+  defp row_of(table, id) do
     names = table |> Capture.columns() |> Enum.map(& &1.name)
 
     {:ok, [values]} =
@@ -1743,21 +2205,35 @@ defmodule OptimalEngine.SyncGateTest do
         [id]
       )
 
+    names |> Enum.zip(values) |> Map.new()
+  end
+
+  # A change that carries the memory as it is stored, as the ledger holds it.
+  defp memory_change(memory_id) do
+    %{
+      "entity_type" => "memories",
+      "entity_id" => memory_id,
+      "operation" => "update",
+      "payload" => %{"row" => row_of("memories", memory_id), "blobs" => %{}}
+    }
+  end
+
+  # A delete from the other Engine: the key only.
+  defp remote_delete(ctx, table, id, opts \\ []) do
     mutation = %{
-      "id" => "mut_remote_#{table}_#{System.unique_integer([:positive])}",
+      "id" => "mut_remote_del_#{table}_#{System.unique_integer([:positive])}",
       "device_id" => "rep_remote",
       "entity_type" => table,
       "entity_id" => id,
-      "operation" => "update",
+      "operation" => "delete",
       "occurred_at" => "2099-01-01T00:00:00.000",
-      "payload" => %{
-        "row" => names |> Enum.zip(values) |> Map.new() |> Map.merge(changes),
-        "blobs" => %{}
-      }
+      "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
     }
 
-    assert {:ok, %{applied: 1}} =
-             Sync.apply_changes(ctx.tenant, ctx.ws, [mutation], since: "2099-12-31T00:00:00")
+    Sync.apply_changes(ctx.tenant, ctx.ws, [mutation],
+      since: "2099-12-31T00:00:00",
+      max_class: Keyword.get(opts, :max_class, "confidential")
+    )
   end
 
   defp stored(table, id, column) do
@@ -1778,8 +2254,8 @@ defmodule OptimalEngine.SyncGateTest do
   end
 
   # Runs `fun`, returning its result and what the gate scanned the workspace
-  # for while it ran (`:index`, `:holds_above`).
-  defp counting_builds(fun) do
+  # `workspace_id` for while it ran (`:index`, `:holds_above`).
+  defp counting_builds(workspace_id, fun) do
     id = {:gate_builds, System.unique_integer([:positive])}
     parent = self()
 
@@ -1787,7 +2263,9 @@ defmodule OptimalEngine.SyncGateTest do
       :telemetry.attach(
         id,
         [:optimal_engine, :sync, :gate_build],
-        fn _event, _measurements, %{what: what}, _config -> send(parent, {:gate_build, what}) end,
+        fn _event, _measurements, %{what: what, workspace_id: scanned}, _config ->
+          if scanned == workspace_id, do: send(parent, {:gate_build, what})
+        end,
         nil
       )
 
@@ -1806,6 +2284,34 @@ defmodule OptimalEngine.SyncGateTest do
       {:gate_build, what} -> drain_builds([what | acc])
     after
       0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp plain_source(ctx, text, labels \\ []) do
+    source =
+      SourcePackage.from_text(text,
+        tenant_id: ctx.tenant,
+        workspace_id: ctx.ws,
+        source_type: "note",
+        security_labels: labels
+      )
+
+    :ok = CoreStore.insert_source_package(source)
+    source
+  end
+
+  # Waits for the supervisor to start a new owner of the gate cache.
+  defp wait_for_new_owner(old, attempts \\ 50) do
+    case Process.whereis(GateCache) do
+      pid when is_pid(pid) and pid != old ->
+        :ok
+
+      _ when attempts > 0 ->
+        Process.sleep(20)
+        wait_for_new_owner(old, attempts - 1)
+
+      _ ->
+        :timeout
     end
   end
 
