@@ -361,6 +361,7 @@ A merge into a workspace that already held rows is not rolled back: the job's `p
 A cancel takes a queued job out at once, and stops a running one at its next page or batch.
 A job running when the Engine stops is not resumed: at the next boot its partial output is removed and it runs again from the start, and after its third attempt it fails with `engine_restarted`.
 A job whose rows cannot all be taken back at that boot ends `failed` with `cleanup_incomplete` and `partial: true` instead, since running it again would meet what is left.
+If that job had created the workspace, its record keeps the import's token, so further imports into the workspace are refused with `import_in_progress` until the operator deals with the workspace, for example by removing it.
 Recovery never stops the Engine: it skips a torn line of the log, reports the job, and goes on to the next.
 An export reads one snapshot of the database, and a resumed export would join two, so its ledger mark would no longer describe its rows.
 
