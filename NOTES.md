@@ -58,3 +58,4 @@ A 404 for other tenants' keys on bare ids was tried in #65 and dropped: the stew
 A full run records a row with no workspace; a workspace run records that workspace.
 `OptimalEngine.Release.graph_backfill/1` is the entry point on a release build, which has no mix.
 An unregistered `<tenant>:<slug>` id now gives its contexts and edges the tenant its prefix names, when that tenant exists, instead of `default`.
+- 2026-10-20: Intake classification costs about 100 ms for a 24 KB page and `Intake.process/2` runs one call at a time, so a bulk importer classifies ahead in parallel with `Intake.classify/2` and `Intake.known_entities/0` and passes `:classified`; the Notion importer measured 104.5 MB of Markdown and CSV (5,400 contexts) searchable in 280 s on an 8-core gate this way, against 695 s classifying inside intake.

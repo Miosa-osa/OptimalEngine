@@ -305,6 +305,23 @@ if paths = System.get_env("OPTIMAL_CREDENTIAL_BROKER_PATHS") do
   config :optimal_engine, :credential_broker_paths, paths
 end
 
+# Imports: how often queued import jobs are drained (0 disables), the largest
+# upload or download an import accepts, and where imports are staged
+# (default: an imports folder next to the database). OPTIMAL_IMPORT_URL_HOSTS
+# (comma-separated) lets imports fetch from named internal hosts; it is read
+# when a URL is checked.
+if interval = System.get_env("OPTIMAL_IMPORTS_INTERVAL_MS") do
+  config :optimal_engine, :imports_interval_ms, String.to_integer(interval)
+end
+
+if max_bytes = System.get_env("OPTIMAL_IMPORT_MAX_BYTES") do
+  config :optimal_engine, :import_max_bytes, String.to_integer(max_bytes)
+end
+
+if imports_dir = System.get_env("OPTIMAL_IMPORTS_DIR") do
+  config :optimal_engine, :imports_dir, imports_dir
+end
+
 # Analyses: how often the day's analysis jobs are scheduled and drained.
 if interval = System.get_env("OPTIMAL_ANALYSES_INTERVAL_MS") do
   config :optimal_engine, :analyses_interval_ms, String.to_integer(interval)

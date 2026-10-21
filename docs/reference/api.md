@@ -130,6 +130,9 @@ Routes: 292
 | GET | `/api/grep` | Router | read | workspace |
 | GET | `/api/health` | Router | read | tenant |
 | GET | `/api/hierarchy/audit` | Router | read | workspace |
+| POST | `/api/import/notion` | Router | write | workspace |
+| GET | `/api/import/notion/:job_id` | Router | read | workspace |
+| GET | `/api/import/notion/tree` | Router | read | workspace |
 | POST | `/api/ingest` | Router | write | workspace |
 | POST | `/api/init` | Router | admin | tenant |
 | GET | `/api/init/presets` | Router | read | tenant |

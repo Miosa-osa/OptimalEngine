@@ -540,6 +540,17 @@
       "owns": []
     },
     {
+      "id": "docs-guides-notion-import",
+      "path": "docs/guides/notion-import.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-10-20",
+      "owns": []
+    },
+    {
       "id": "docs-guides-interfaces-and-publishing",
       "path": "docs/guides/interfaces-and-publishing.md",
       "kind": "reference",

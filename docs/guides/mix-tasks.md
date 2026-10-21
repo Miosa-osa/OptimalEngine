@@ -32,6 +32,7 @@ mix optimal.topology approve <request-id> --workspace default:regulated-workspac
 | `mix optimal.ingest` | Classify, route, write projection files, and index a single text/file Signal. |
 | `mix optimal.intake` | Interactive multi-line intake from stdin. |
 | `mix optimal.ingest_workspace` | Ingest a workspace directory. |
+| `mix optimal.import_notion` | Import a Notion export zip (Markdown and CSV) into a workspace as a durable job; see [Notion import](notion-import.md). |
 | `mix optimal.index` | Reindex markdown/files under the root. |
 | `mix optimal.classify` | Classify content without necessarily writing final state. |
 | `mix optimal.parse` | Parse supported file/content inputs. |
