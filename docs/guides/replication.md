@@ -136,6 +136,8 @@ A dense mesh of links that cycles back on itself (every row naming every other) 
 The push cycle ends in an error with nothing sent and its cursor where it was, so the next cycle classifies the same rows again; a workspace that cannot be read is not assumed to be open.
 - A value SQLite holds as a BLOB travels in `payload.blobs`; a label stored that way is read like any other, on send and on receive.
 - An aggregate (`analysis_reports`, `data_quality_snapshots`, `rhythm_notes`, `sessions`, a wiki page or cluster that names nothing, an edge between entity names) has no row to point at, so it stays home while the workspace holds anything above the peer's class.
+That includes a row whose labels cannot be read, which counts as `restricted` there as it does for the row itself: a label that is a number, an object or a blank string, an array with such an element, text that is not an array, and a metadata that repeats `security_labels`.
+A row nobody could classify never lets an aggregate out.
 - A change is held at the higher of the row as the ledger recorded it and the row as it is stored now.
 An older version of a row that has labels today (it was labelled afterwards, or a version arrived from another Engine without them) stays home with the row.
 When the row is gone, it is read as the ledger last recorded it: every version it has there, newest first, read 50 at a time and stopping as soon as one is above the peer's class.
