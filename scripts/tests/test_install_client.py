@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
@@ -772,10 +773,15 @@ class LockTests(InstallClientTestCase):
             with self.subTest(round=round_):
                 log.unlink(missing_ok=True)
                 runs = [subprocess.Popen([INSTALL_SHELL, str(INSTALLER), 'install'], env=self.env, text=True,
-                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                         preexec_fn=default_signals)
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, preexec_fn=default_signals)
                         for _ in range(6)]
-                outputs = [run.communicate(timeout=150) for run in runs]
+                for run in runs:
+                    self.addCleanup(run.kill)
+                # Each install is waited for on its own thread, so one that ends is reaped at once
+                # and never lingers as a process a waiter would take for a live holder.
+                with ThreadPoolExecutor(len(runs)) as pool:
+                    outputs = list(pool.map(lambda run: run.communicate(timeout=150), runs))
                 for run, (out, err) in zip(runs, outputs):
                     self.assertEqual(run.returncode, 0, out + err)
                     self.assertNotIn('took over', err)
