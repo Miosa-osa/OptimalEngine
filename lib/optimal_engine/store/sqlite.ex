@@ -62,6 +62,17 @@ defmodule OptimalEngine.Store.SQLite do
     itself stays alive).
   - Any other return value → `ROLLBACK` (fail closed),
     `{:error, {:invalid_transaction_return, other}}`.
+  - Transaction control sent as a raw statement is refused with
+    `ArgumentError`: BEGIN, COMMIT, END, ROLLBACK, SAVEPOINT and RELEASE
+    through `raw_query/2` or `raw_execute/2`, and BEGIN, COMMIT, END and a
+    plain ROLLBACK through `txn_query/3` or `txn_execute/3` (savepoints stay
+    available inside a transaction). A transaction opened by one raw call
+    would stay open across every other caller's statements.
+
+  The Store's own multi-row inserts run through the same
+  `OptimalEngine.Store.SQLiteTransaction`, which checks the COMMIT: a COMMIT
+  that fails is rolled back, so the connection is never left inside a
+  transaction.
   """
 
   @behaviour OptimalEngine.Store.Adapter
@@ -70,6 +81,7 @@ defmodule OptimalEngine.Store.SQLite do
   require Logger
 
   alias OptimalEngine.{Context, Graph, Signal}
+  alias OptimalEngine.Store.SQLiteTransaction
 
   @ets_table :optimal_engine_store_cache
 
@@ -340,17 +352,26 @@ defmodule OptimalEngine.Store.SQLite do
     Enum.each(ids, &:ets.delete(@ets_table, &1))
   end
 
-  @doc "Executes a raw SELECT query. Returns list of rows."
+  @doc """
+  Executes a raw SELECT query. Returns list of rows.
+
+  Raises `ArgumentError` for transaction control (BEGIN, COMMIT, END, ROLLBACK,
+  SAVEPOINT, RELEASE): every call is its own Store call, so a transaction
+  opened here would stay open across other callers' statements. Use
+  `transaction/2`.
+  """
   @spec raw_query(String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def raw_query(sql, params \\ []) do
+    refuse_transaction_control!(sql, :outside)
     GenServer.call(__MODULE__, {:raw_query, sql, params}, OptimalEngine.Store.call_timeout())
   end
 
-  @doc "Executes a raw non-SELECT statement with bound parameters."
+  @doc "Executes a raw non-SELECT statement with bound parameters. Refuses transaction control, as `raw_query/2` does."
   @spec raw_execute(String.t(), [term()]) :: :ok | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def raw_execute(sql, params \\ []) do
+    refuse_transaction_control!(sql, :outside)
     GenServer.call(__MODULE__, {:raw_execute, sql, params}, OptimalEngine.Store.call_timeout())
   end
 
@@ -383,6 +404,8 @@ defmodule OptimalEngine.Store.SQLite do
   @spec txn_query(term(), String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def txn_query({:txn, db}, sql, params \\ []) do
+    refuse_transaction_control!(sql, :inside)
+
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
          :ok <- Exqlite.Sqlite3.bind(stmt, params) do
       result = collect_rows_raw(db, stmt, [])
@@ -400,6 +423,8 @@ defmodule OptimalEngine.Store.SQLite do
           {:ok, non_neg_integer()} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def txn_execute({:txn, db}, sql, params \\ []) do
+    refuse_transaction_control!(sql, :inside)
+
     with :ok <- exec_stmt(db, sql, params) do
       Exqlite.Sqlite3.changes(db)
     end
@@ -1111,9 +1136,73 @@ defmodule OptimalEngine.Store.SQLite do
   # ---------------------------------------------------------------------------
 
   defp insert_in_transaction(db, contexts) do
-    case Exqlite.Sqlite3.execute(db, "BEGIN") do
-      :ok -> commit_or_rollback(db, contexts)
-      err -> err
+    SQLiteTransaction.run(db, fn ->
+      with :ok <- each_row(contexts, &do_insert(db, &1)), do: {:ok, length(contexts)}
+    end)
+  end
+
+  # Every row in one transaction, stopping at the first failure. The
+  # transaction is opened, committed and rolled back by SQLiteTransaction, so a
+  # failed COMMIT never leaves the connection inside a transaction.
+  defp insert_rows(_db, [], _insert), do: :ok
+
+  defp insert_rows(db, rows, insert),
+    do: SQLiteTransaction.run(db, fn -> each_row(rows, insert) end)
+
+  defp each_row(rows, insert) do
+    Enum.reduce_while(rows, :ok, fn row, :ok ->
+      case insert.(row) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  # The Store owns every transaction on its connection. A raw statement is its
+  # own Store call, so a BEGIN sent that way would stay open across the
+  # statements of every other caller until a later COMMIT arrived, and their
+  # own transactions would fail with "cannot start a transaction within a
+  # transaction". Inside transaction/2 the transaction is already open: only
+  # savepoints (SAVEPOINT, RELEASE, ROLLBACK TO) may be used there.
+  @transaction_control ~w(BEGIN COMMIT END ROLLBACK SAVEPOINT RELEASE)
+
+  defp refuse_transaction_control!(sql, where) when is_binary(sql) do
+    words = sql |> strip_leading_comments() |> String.split(~r/[\s;(]+/, parts: 4, trim: true)
+
+    keyword = words |> List.first("") |> String.upcase()
+
+    refused? =
+      case {where, keyword} do
+        {_where, keyword} when keyword not in @transaction_control -> false
+        {:outside, _keyword} -> true
+        # ROLLBACK TO <savepoint> (or ROLLBACK TRANSACTION TO) stays in the transaction.
+        {:inside, "ROLLBACK"} -> not Enum.any?(Enum.take(words, 3), &(String.upcase(&1) == "TO"))
+        {:inside, keyword} -> keyword in ~w(BEGIN COMMIT END)
+      end
+
+    if refused? do
+      raise ArgumentError,
+            "#{keyword} is transaction control; run the statements in " <>
+              "OptimalEngine.Store.transaction/2 instead of sending #{keyword} as a raw statement"
+    end
+
+    :ok
+  end
+
+  defp refuse_transaction_control!(_sql, _where), do: :ok
+
+  defp strip_leading_comments(sql) do
+    trimmed = String.trim_leading(sql)
+
+    cond do
+      String.starts_with?(trimmed, "--") ->
+        trimmed |> String.split("\n", parts: 2) |> Enum.at(1, "") |> strip_leading_comments()
+
+      String.starts_with?(trimmed, "/*") ->
+        trimmed |> String.split("*/", parts: 2) |> Enum.at(1, "") |> strip_leading_comments()
+
+      true ->
+        trimmed
     end
   end
 
@@ -1124,71 +1213,22 @@ defmodule OptimalEngine.Store.SQLite do
   # sentinel that `transaction/2` re-raises in the calling process — the
   # Store GenServer must survive caller bugs.
   defp run_transaction(db, fun) do
-    case Exqlite.Sqlite3.execute(db, "BEGIN IMMEDIATE") do
-      :ok ->
-        try do
-          case fun.({:txn, db}) do
-            {:ok, result} ->
-              case Exqlite.Sqlite3.execute(db, "COMMIT") do
-                :ok ->
-                  {:ok, result}
-
-                {:error, reason} ->
-                  Exqlite.Sqlite3.execute(db, "ROLLBACK")
-                  {:error, {:commit_failed, reason}}
-              end
-
-            {:error, _} = err ->
-              Exqlite.Sqlite3.execute(db, "ROLLBACK")
-              err
-
-            other ->
-              Exqlite.Sqlite3.execute(db, "ROLLBACK")
-              {:error, {:invalid_transaction_return, other}}
-          end
-        catch
-          kind, reason ->
-            stacktrace = __STACKTRACE__
-            Exqlite.Sqlite3.execute(db, "ROLLBACK")
-            {:__txn_raise__, kind, reason, stacktrace}
-        end
-
-      {:error, reason} ->
-        {:error, {:begin_failed, reason}}
-    end
+    SQLiteTransaction.run(db, "BEGIN IMMEDIATE", fn ->
+      case fun.({:txn, db}) do
+        {:ok, _} = ok -> ok
+        {:error, _} = err -> err
+        other -> {:error, {:invalid_transaction_return, other}}
+      end
+    end)
+  catch
+    kind, reason -> {:__txn_raise__, kind, reason, __STACKTRACE__}
   end
 
   # ──────────────────────────────────────────────────────────────────────────
   # Chunk inserts — Phase 1 `chunks` table; Phase 3 Decomposer writes here.
   # ──────────────────────────────────────────────────────────────────────────
 
-  defp insert_chunks_in_transaction(_db, []), do: :ok
-
-  defp insert_chunks_in_transaction(db, chunks) do
-    case Exqlite.Sqlite3.execute(db, "BEGIN") do
-      :ok ->
-        result =
-          Enum.reduce_while(chunks, :ok, fn chunk, _acc ->
-            case do_insert_chunk(db, chunk) do
-              :ok -> {:cont, :ok}
-              {:error, _} = err -> {:halt, err}
-            end
-          end)
-
-        case result do
-          :ok ->
-            Exqlite.Sqlite3.execute(db, "COMMIT")
-            :ok
-
-          {:error, _} = err ->
-            Exqlite.Sqlite3.execute(db, "ROLLBACK")
-            err
-        end
-
-      err ->
-        err
-    end
-  end
+  defp insert_chunks_in_transaction(db, rows), do: insert_rows(db, rows, &do_insert_chunk(db, &1))
 
   defp do_insert_chunk(db, chunk) do
     sql = """
@@ -1235,33 +1275,8 @@ defmodule OptimalEngine.Store.SQLite do
   # Classifications — Phase 4 Classifier writes per-chunk classification rows.
   # ──────────────────────────────────────────────────────────────────────────
 
-  defp insert_classifications_in_transaction(_db, []), do: :ok
-
-  defp insert_classifications_in_transaction(db, rows) do
-    case Exqlite.Sqlite3.execute(db, "BEGIN") do
-      :ok ->
-        result =
-          Enum.reduce_while(rows, :ok, fn row, _acc ->
-            case do_insert_classification(db, row) do
-              :ok -> {:cont, :ok}
-              {:error, _} = err -> {:halt, err}
-            end
-          end)
-
-        case result do
-          :ok ->
-            Exqlite.Sqlite3.execute(db, "COMMIT")
-            :ok
-
-          {:error, _} = err ->
-            Exqlite.Sqlite3.execute(db, "ROLLBACK")
-            err
-        end
-
-      err ->
-        err
-    end
-  end
+  defp insert_classifications_in_transaction(db, rows),
+    do: insert_rows(db, rows, &do_insert_classification(db, &1))
 
   defp do_insert_classification(db, row) do
     sql = """
@@ -1300,33 +1315,7 @@ defmodule OptimalEngine.Store.SQLite do
   # Intents — Phase 4 IntentExtractor writes per-chunk intent rows.
   # ──────────────────────────────────────────────────────────────────────────
 
-  defp insert_intents_in_transaction(_db, []), do: :ok
-
-  defp insert_intents_in_transaction(db, rows) do
-    case Exqlite.Sqlite3.execute(db, "BEGIN") do
-      :ok ->
-        result =
-          Enum.reduce_while(rows, :ok, fn row, _acc ->
-            case do_insert_intent(db, row) do
-              :ok -> {:cont, :ok}
-              {:error, _} = err -> {:halt, err}
-            end
-          end)
-
-        case result do
-          :ok ->
-            Exqlite.Sqlite3.execute(db, "COMMIT")
-            :ok
-
-          {:error, _} = err ->
-            Exqlite.Sqlite3.execute(db, "ROLLBACK")
-            err
-        end
-
-      err ->
-        err
-    end
-  end
+  defp insert_intents_in_transaction(db, rows), do: insert_rows(db, rows, &do_insert_intent(db, &1))
 
   defp do_insert_intent(db, row) do
     sql = """
@@ -1360,33 +1349,8 @@ defmodule OptimalEngine.Store.SQLite do
   # Vectors encode as little-endian float32 BLOBs, 4 bytes per component.
   # ──────────────────────────────────────────────────────────────────────────
 
-  defp insert_embeddings_in_transaction(_db, []), do: :ok
-
-  defp insert_embeddings_in_transaction(db, rows) do
-    case Exqlite.Sqlite3.execute(db, "BEGIN") do
-      :ok ->
-        result =
-          Enum.reduce_while(rows, :ok, fn row, _acc ->
-            case do_insert_embedding(db, row) do
-              :ok -> {:cont, :ok}
-              {:error, _} = err -> {:halt, err}
-            end
-          end)
-
-        case result do
-          :ok ->
-            Exqlite.Sqlite3.execute(db, "COMMIT")
-            :ok
-
-          {:error, _} = err ->
-            Exqlite.Sqlite3.execute(db, "ROLLBACK")
-            err
-        end
-
-      err ->
-        err
-    end
-  end
+  defp insert_embeddings_in_transaction(db, rows),
+    do: insert_rows(db, rows, &do_insert_embedding(db, &1))
 
   defp do_insert_embedding(db, row) do
     vector = chunk_field(row, :vector) || []
@@ -1428,33 +1392,8 @@ defmodule OptimalEngine.Store.SQLite do
   # Clusters — Phase 6 Clusterer writes cluster rows + membership edges.
   # ──────────────────────────────────────────────────────────────────────────
 
-  defp insert_clusters_in_transaction(_db, []), do: :ok
-
-  defp insert_clusters_in_transaction(db, rows) do
-    case Exqlite.Sqlite3.execute(db, "BEGIN") do
-      :ok ->
-        result =
-          Enum.reduce_while(rows, :ok, fn row, _acc ->
-            case do_insert_cluster(db, row) do
-              :ok -> {:cont, :ok}
-              {:error, _} = err -> {:halt, err}
-            end
-          end)
-
-        case result do
-          :ok ->
-            Exqlite.Sqlite3.execute(db, "COMMIT")
-            :ok
-
-          {:error, _} = err ->
-            Exqlite.Sqlite3.execute(db, "ROLLBACK")
-            err
-        end
-
-      err ->
-        err
-    end
-  end
+  defp insert_clusters_in_transaction(db, rows),
+    do: insert_rows(db, rows, &do_insert_cluster(db, &1))
 
   defp do_insert_cluster(db, row) do
     centroid = chunk_field(row, :centroid) || []
@@ -1485,33 +1424,8 @@ defmodule OptimalEngine.Store.SQLite do
     exec_stmt(db, sql, params)
   end
 
-  defp insert_cluster_members_in_transaction(_db, []), do: :ok
-
-  defp insert_cluster_members_in_transaction(db, rows) do
-    case Exqlite.Sqlite3.execute(db, "BEGIN") do
-      :ok ->
-        result =
-          Enum.reduce_while(rows, :ok, fn row, _acc ->
-            case do_insert_cluster_member(db, row) do
-              :ok -> {:cont, :ok}
-              {:error, _} = err -> {:halt, err}
-            end
-          end)
-
-        case result do
-          :ok ->
-            Exqlite.Sqlite3.execute(db, "COMMIT")
-            :ok
-
-          {:error, _} = err ->
-            Exqlite.Sqlite3.execute(db, "ROLLBACK")
-            err
-        end
-
-      err ->
-        err
-    end
-  end
+  defp insert_cluster_members_in_transaction(db, rows),
+    do: insert_rows(db, rows, &do_insert_cluster_member(db, &1))
 
   defp do_insert_cluster_member(db, row) do
     sql = """
@@ -1553,26 +1467,6 @@ defmodule OptimalEngine.Store.SQLite do
     else
       {:error, reason} -> {:error, reason}
       other -> {:error, other}
-    end
-  end
-
-  defp commit_or_rollback(db, contexts) do
-    count =
-      Enum.reduce_while(contexts, 0, fn ctx, acc ->
-        case do_insert(db, ctx) do
-          :ok -> {:cont, acc + 1}
-          {:error, _} = err -> {:halt, err}
-        end
-      end)
-
-    case count do
-      {:error, _} = err ->
-        Exqlite.Sqlite3.execute(db, "ROLLBACK")
-        err
-
-      n ->
-        Exqlite.Sqlite3.execute(db, "COMMIT")
-        {:ok, n}
     end
   end
 
