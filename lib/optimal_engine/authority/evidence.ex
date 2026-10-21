@@ -25,6 +25,8 @@ defmodule OptimalEngine.Authority.Evidence do
   require Logger
 
   @genesis String.duplicate("0", 64)
+  # Reads walk the chain in pages of this many entries, by tenant_seq, so none holds a
+  # whole chain of any length at once.
   @where_page 1_000
 
   @kinds ~w(grant.issued grant.narrowed grant.admitted grant.denied grant.checkpoint
@@ -200,28 +202,55 @@ defmodule OptimalEngine.Authority.Evidence do
 
   It reads in pages of #{@where_page} by sequence number and returns all of
   them, so a caller asking for the entries of a long chain gets every one.
+  `stream/3` reads the same entries lazily, for a caller that does not need them
+  all at once.
   """
   @spec where(String.t(), String.t(), [term()]) :: [map()]
-  def where(tenant_id, condition, params), do: where_page(tenant_id, condition, params, 0, [])
+  def where(tenant_id, condition, params) do
+    tenant_id |> stream(condition, params) |> Enum.to_list()
+  end
 
-  defp where_page(tenant_id, condition, params, after_seq, acc) do
-    {:ok, rows} =
+  @doc "How many entries `where/3` would return for the same condition, counted by the database."
+  @spec count(String.t(), String.t(), [term()]) :: non_neg_integer()
+  def count(tenant_id, condition, params) do
+    {:ok, [[n]]} =
       Store.raw_query(
-        select_sql() <>
-          " WHERE tenant_id = ?1 AND (" <>
-          condition <>
-          ") AND tenant_seq > ?#{length(params) + 2} ORDER BY tenant_seq ASC LIMIT #{@where_page}",
-        [tenant_id | params] ++ [after_seq]
+        "SELECT COUNT(*) FROM authority_evidence WHERE tenant_id = ?1 AND (" <> condition <> ")",
+        [tenant_id | params]
       )
 
-    entries = Enum.map(rows, &to_entry/1)
-    acc = Enum.reverse(entries, acc)
+    n
+  end
 
-    if length(entries) < @where_page do
-      Enum.reverse(acc)
-    else
-      where_page(tenant_id, condition, params, List.last(entries)["seq"], acc)
-    end
+  @doc """
+  The entries `where/3` returns, oldest first, as a stream that reads them in
+  pages of #{@where_page} by `tenant_seq` (keyset, not offset), each page when the
+  one before it is used up. A chain of any length is walked in bounded memory.
+  The condition defaults to every entry of the tenant.
+  """
+  @spec stream(String.t(), String.t(), [term()]) :: Enumerable.t()
+  def stream(tenant_id, condition \\ "1 = 1", params \\ []) do
+    sql =
+      select_sql() <>
+        " WHERE tenant_id = ?1 AND (" <>
+        condition <>
+        ") AND tenant_seq > ?#{length(params) + 2} ORDER BY tenant_seq ASC LIMIT #{@where_page}"
+
+    0
+    |> Stream.unfold(fn
+      nil ->
+        nil
+
+      after_seq ->
+        {:ok, rows} = Store.raw_query(sql, [tenant_id | params] ++ [after_seq])
+
+        case Enum.map(rows, &to_entry/1) do
+          [] -> nil
+          page when length(page) < @where_page -> {page, nil}
+          page -> {page, List.last(page)["seq"]}
+        end
+    end)
+    |> Stream.flat_map(& &1)
   end
 
   @doc """
@@ -251,22 +280,17 @@ defmodule OptimalEngine.Authority.Evidence do
   """
   @spec verify(String.t()) :: {:ok, map()} | {:error, map()}
   def verify(tenant_id) do
-    {:ok, rows} =
-      Store.raw_query(select_sql() <> " WHERE tenant_id = ?1 ORDER BY tenant_seq ASC", [tenant_id])
+    checkpoints = checkpoints(tenant_id)
+    checkpointed = MapSet.new(checkpoints, & &1["seq"])
 
-    entries = Enum.map(rows, &to_entry/1)
-
+    # The chain is read a page at a time; only the hashes at checkpointed seqs are kept.
     result =
-      Enum.reduce_while(entries, {:ok, 0, @genesis}, fn entry,
-                                                        {:ok, expected_prev_seq, prev_hash} ->
-        case verify_entry(tenant_id, entry, expected_prev_seq + 1, prev_hash) do
-          :ok -> {:cont, {:ok, entry["seq"], entry["hash"]}}
-          {:error, reason} -> {:halt, {:error, %{seq: entry["seq"], reason: reason}}}
-        end
-      end)
+      tenant_id
+      |> stream()
+      |> Enum.reduce_while({:ok, 0, @genesis, %{}}, &verify_step(tenant_id, checkpointed, &1, &2))
 
-    with {:ok, count, head} <- result,
-         :ok <- verify_checkpoints(tenant_id, entries) do
+    with {:ok, count, head, by_seq} <- result,
+         :ok <- verify_checkpoints(tenant_id, checkpoints, by_seq) do
       {:ok, %{entries: count, head: head}}
     else
       {:error, %{} = failure} -> {:error, failure}
@@ -313,28 +337,103 @@ defmodule OptimalEngine.Authority.Evidence do
     end
   end
 
-  @doc "Entries after `after_seq` with the public keys needed to verify them."
-  @spec export(String.t(), non_neg_integer()) :: map()
-  def export(tenant_id, after_seq \\ 0) do
+  @doc """
+  At most `limit` entries after `after_seq` (default and most 10,000), with the
+  public keys and checkpoints needed to verify them, and how complete the export is:
+
+    * `"head"` - the chain's head when the export was read, `{"seq", "hash"}`,
+      signed like a checkpoint (`"kid"`, `"signature"`), so a verifier can tell an
+      export cut short from a whole one; see `head/1`;
+    * `"total"` - how many entries the chain holds after `after_seq`, up to that head;
+    * `"complete"` - true only when the last entry exported is the head (or, with no
+      entry left to export, `after_seq` already is);
+    * `"next_after"` - the `after_seq` of the next page, `nil` when complete.
+
+  A longer chain is exported page by page, never cut short in silence; entries
+  appended after the head was read wait for the next export.
+  """
+  @spec export(String.t(), non_neg_integer(), pos_integer()) :: map()
+  def export(tenant_id, after_seq \\ 0, limit \\ 10_000) do
+    limit = limit |> max(1) |> min(10_000)
+    head = head(tenant_id)
+
+    entries =
+      tenant_id
+      |> stream("tenant_seq > ?2 AND tenant_seq <= ?3", [after_seq, head["seq"]])
+      |> Enum.take(limit)
+
+    last = if entries == [], do: after_seq, else: List.last(entries)["seq"]
+    complete = last >= head["seq"]
+
     %{
       "tenant_id" => tenant_id,
-      "entries" => list(tenant_id, after: after_seq, limit: 10_000),
+      "entries" => entries,
+      "complete" => complete,
+      "total" => count_between(tenant_id, after_seq, head["seq"]),
+      "head" => head,
+      "next_after" => if(complete, do: nil, else: last),
       "keys" => Keys.jwks(tenant_id),
       "checkpoints" => checkpoints(tenant_id)
     }
   end
 
-  @doc "Verifies an exported bundle without the Engine's database."
+  @doc """
+  The chain's head now: `"seq"` and `"hash"` of its last entry (`0` and the genesis
+  hash for an empty chain), signed with the tenant's evidence key over the statement
+  a checkpoint signs (`"kid"`, `"signature"`).
+  """
+  @spec head(String.t()) :: map()
+  def head(tenant_id) do
+    {seq, hash} =
+      case Store.raw_query(
+             "SELECT tenant_seq, hash FROM authority_evidence WHERE tenant_id = ?1 ORDER BY tenant_seq DESC LIMIT 1",
+             [tenant_id]
+           ) do
+        {:ok, [[seq, hash]]} -> {seq, hash}
+        {:ok, []} -> {0, @genesis}
+      end
+
+    head = %{"seq" => seq, "hash" => hash}
+
+    case Keys.active(tenant_id, "evidence") do
+      {:ok, key} ->
+        statement = head_statement(tenant_id, head)
+
+        Map.merge(head, %{
+          "kid" => key.kid,
+          "signature" => key |> Keys.sign(statement) |> JWS.encode64()
+        })
+
+      {:error, _reason} ->
+        head
+    end
+  end
+
+  @doc """
+  Verifies an exported bundle without the Engine's database: every entry's link,
+  hash and signature, and how complete the bundle is.
+
+  `"head"` must be signed by one of the bundle's keys. A bundle that says it is
+  `"complete"` must hold `"total"` entries and end at that head, so a bundle cut
+  short is caught; one that says it is not complete is `{:error, %{reason:
+  :partial}}`, with how far its entries verified, never valid on its own.
+  """
   @spec verify_export(map()) :: {:ok, map()} | {:error, map()}
-  def verify_export(%{"entries" => entries, "keys" => %{"keys" => keys}}) do
+  def verify_export(%{"entries" => entries, "keys" => %{"keys" => keys}} = bundle) do
     public_keys =
       for %{"kid" => kid} = jwk <- keys,
           {:ok, key} <- [Keys.from_jwk(jwk)],
           into: %{},
           do: {kid, key}
 
-    entries
-    |> Enum.reduce_while({:ok, nil, nil}, fn entry, {:ok, prev_seq, prev_hash} ->
+    with {:ok, last_seq, last_hash} <- verify_run(entries, public_keys),
+         :ok <- verify_completeness(bundle, public_keys, length(entries), last_seq, last_hash) do
+      {:ok, %{entries: length(entries), head: last_hash}}
+    end
+  end
+
+  defp verify_run(entries, public_keys) do
+    Enum.reduce_while(entries, {:ok, nil, nil}, fn entry, {:ok, prev_seq, prev_hash} ->
       expected_seq = if prev_seq, do: prev_seq + 1, else: entry["seq"]
       expected_prev = prev_hash || entry["prev_hash"]
 
@@ -355,13 +454,81 @@ defmodule OptimalEngine.Authority.Evidence do
           {:cont, {:ok, entry["seq"], entry["hash"]}}
       end
     end)
-    |> case do
-      {:ok, _seq, head} -> {:ok, %{entries: length(entries), head: head}}
-      error -> error
+  end
+
+  defp verify_completeness(bundle, public_keys, count, last_seq, last_hash) do
+    head = bundle["head"]
+
+    cond do
+      not (is_map(head) and is_integer(head["seq"]) and is_binary(head["hash"])) ->
+        {:error, %{reason: :missing_head}}
+
+      not head_signed?(bundle["tenant_id"], head, public_keys) ->
+        {:error, %{seq: head["seq"], reason: :bad_head_signature}}
+
+      bundle["complete"] == false ->
+        {:error,
+         %{
+           reason: :partial,
+           entries: count,
+           verified_through: last_seq,
+           next_after: bundle["next_after"]
+         }}
+
+      bundle["complete"] != true ->
+        {:error, %{reason: :missing_completeness}}
+
+      count != bundle["total"] ->
+        {:error, %{reason: :count_mismatch, entries: count, total: bundle["total"]}}
+
+      count > 0 and (last_seq != head["seq"] or last_hash != head["hash"]) ->
+        {:error, %{seq: last_seq, reason: :head_mismatch}}
+
+      true ->
+        :ok
     end
   end
 
+  defp head_signed?(tenant_id, head, public_keys) do
+    with key when not is_nil(key) <- public_keys[head["kid"]],
+         {:ok, signature} <- JWS.decode64(head["signature"] || "") do
+      :crypto.verify(:eddsa, :none, head_statement(tenant_id, head), signature, [key, :ed25519])
+    else
+      _ -> false
+    end
+  end
+
+  # What a checkpoint, and an export's head, sign.
+  defp head_statement(tenant_id, head) do
+    CanonicalJSON.encode(%{"tenant_id" => tenant_id, "seq" => head["seq"], "hash" => head["hash"]})
+  end
+
+  defp count_between(tenant_id, after_seq, through_seq) do
+    {:ok, [[n]]} =
+      Store.raw_query(
+        "SELECT COUNT(*) FROM authority_evidence WHERE tenant_id = ?1 AND tenant_seq > ?2 AND tenant_seq <= ?3",
+        [tenant_id, after_seq, through_seq]
+      )
+
+    n
+  end
+
   # ---------------------------------------------------------------------------
+
+  defp verify_step(tenant_id, checkpointed, entry, {:ok, prev_seq, prev_hash, seen}) do
+    case verify_entry(tenant_id, entry, prev_seq + 1, prev_hash) do
+      :ok ->
+        seen =
+          if MapSet.member?(checkpointed, entry["seq"]),
+            do: Map.put(seen, entry["seq"], entry["hash"]),
+            else: seen
+
+        {:cont, {:ok, entry["seq"], entry["hash"], seen}}
+
+      {:error, reason} ->
+        {:halt, {:error, %{seq: entry["seq"], reason: reason}}}
+    end
+  end
 
   defp verify_entry(tenant_id, entry, expected_seq, prev_hash) do
     cond do
@@ -385,10 +552,9 @@ defmodule OptimalEngine.Authority.Evidence do
     end
   end
 
-  defp verify_checkpoints(tenant_id, entries) do
-    by_seq = Map.new(entries, &{&1["seq"], &1["hash"]})
-
-    Enum.reduce_while(checkpoints(tenant_id), :ok, fn checkpoint, :ok ->
+  # `by_seq` holds the chain's hash at each checkpointed seq the chain still has.
+  defp verify_checkpoints(tenant_id, checkpoints, by_seq) do
+    Enum.reduce_while(checkpoints, :ok, fn checkpoint, :ok ->
       statement =
         CanonicalJSON.encode(%{
           "tenant_id" => tenant_id,
@@ -407,7 +573,9 @@ defmodule OptimalEngine.Authority.Evidence do
     end)
   end
 
-  defp checkpoints(tenant_id) do
+  @doc "The tenant's signed checkpoints, oldest first."
+  @spec checkpoints(String.t()) :: [map()]
+  def checkpoints(tenant_id) do
     {:ok, rows} =
       Store.raw_query(
         "SELECT tenant_seq, hash, kid, signature, anchor, created_at FROM authority_checkpoints WHERE tenant_id = ?1 ORDER BY tenant_seq",

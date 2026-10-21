@@ -147,17 +147,39 @@ defmodule Mix.Tasks.Optimal.Authority do
     end
   end
 
+  # The bundle is written as the entries are read, a page at a time, so a chain of any
+  # length is exported whole in bounded memory: the object `Evidence.export/3` returns,
+  # with every entry up to the head read at the start, and so complete.
   defp export(tenant, opts) do
-    bundle = Evidence.export(tenant)
-    json = Jason.encode!(bundle, pretty: true)
+    head = Evidence.head(tenant)
+    device = if opts[:out], do: File.open!(opts[:out], [:write]), else: :stdio
+    IO.binwrite(device, [~s({"tenant_id":), Jason.encode!(tenant), ~s(,"entries":[\n)])
 
-    case opts[:out] do
-      nil ->
-        Mix.shell().info(json)
+    {count, last} =
+      tenant
+      |> Evidence.stream("tenant_seq <= ?2", [head["seq"]])
+      |> Enum.reduce({0, 0}, fn entry, {written, _last} ->
+        IO.binwrite(device, [if(written > 0, do: ",\n", else: ""), Jason.encode!(entry)])
+        {written + 1, entry["seq"]}
+      end)
 
-      path ->
-        File.write!(path, json) &&
-          Mix.shell().info("Wrote #{length(bundle["entries"])} entries to #{path}")
+    IO.binwrite(device, [
+      ~s(\n],"complete":),
+      Jason.encode!(last == head["seq"]),
+      ~s(,"total":),
+      Jason.encode!(count),
+      ~s(,"head":),
+      Jason.encode!(head),
+      ~s(,"next_after":null,"keys":),
+      Jason.encode!(Keys.jwks(tenant)),
+      ~s(,"checkpoints":),
+      Jason.encode!(Evidence.checkpoints(tenant)),
+      "}\n"
+    ])
+
+    if opts[:out] do
+      File.close(device)
+      Mix.shell().info("Wrote #{count} entries to #{opts[:out]}")
     end
   end
 

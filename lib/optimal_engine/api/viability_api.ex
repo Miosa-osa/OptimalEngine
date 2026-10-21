@@ -270,11 +270,10 @@ defmodule OptimalEngine.API.ViabilityAPI do
   def actions_trace(conn, id) do
     conn = fetch_query_params(conn)
 
-    case ActionChain.trace(tenant(conn), id) do
-      {:ok, %{workspace_id: workspace_id} = chain} ->
-        if workspace_id == workspace(conn),
-          do: json(conn, 200, chain),
-          else: error(conn, 404, "action chain not found")
+    # The workspace is checked before any step is verified.
+    case ActionChain.trace(tenant(conn), id, workspace_id: workspace(conn)) do
+      {:ok, chain} ->
+        json(conn, 200, chain)
 
       {:error, :not_found} ->
         error(conn, 404, "action chain not found")

@@ -27,10 +27,16 @@ defmodule OptimalEngine.Authority.Integrity do
   alias OptimalEngine.Authority.{CanonicalJSON, Evidence, Policy}
   alias OptimalEngine.Store
 
+  # The evidence kinds the scan compares with the authority tables.
+  @scanned_kinds ~w(policy.published grant.issued grant.narrowed grant.revoked grant.suspended
+                    grant.restored local_deny.added local_deny.lifted key.minted)
+
   @doc "Scans the tenant. Options: `record: true` appends each finding as evidence."
   @spec scan(String.t(), keyword()) :: %{findings: [map()], checked: map()}
   def scan(tenant_id, opts \\ []) do
-    evidence = Evidence.list(tenant_id, limit: 10_000)
+    # Every entry of those kinds, however long the chain; the rest is never loaded.
+    marks = Enum.map_join(2..(length(@scanned_kinds) + 1), ", ", &"?#{&1}")
+    evidence = Evidence.where(tenant_id, "kind IN (#{marks})", @scanned_kinds)
 
     chain =
       case Evidence.verify(tenant_id) do
@@ -56,7 +62,7 @@ defmodule OptimalEngine.Authority.Integrity do
     %{
       findings: findings,
       checked: %{
-        evidence_entries: length(evidence),
+        evidence_entries: count(tenant_id, "authority_evidence"),
         policies: length(Policy.list(tenant_id, active_only: true)),
         grants: count(tenant_id, "authority_grants"),
         local_denies: count(tenant_id, "authority_local_denies"),

@@ -371,7 +371,13 @@ defmodule OptimalEngine.API.AuthorityRouter do
 
   get "/evidence/export" do
     conn = fetch_query_params(conn)
-    json(conn, 200, Evidence.export(tenant(conn), parse_int(conn.query_params["after"], 0)))
+    q = conn.query_params
+
+    json(
+      conn,
+      200,
+      Evidence.export(tenant(conn), parse_int(q["after"], 0), parse_int(q["limit"], 10_000))
+    )
   end
 
   post "/evidence/checkpoint" do
