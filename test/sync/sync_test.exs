@@ -1385,7 +1385,9 @@ defmodule OptimalEngine.SyncTest do
     end
 
     test "the boot purge removes the ledger rows of tables that do not replicate", ctx do
-      for {type, i} <- Enum.with_index(["api_keys", "workspace_members", "principals", "contexts"]) do
+      types = ["api_keys", "workspace_members", "principals", "contexts", "authority_grants"]
+
+      for {type, i} <- Enum.with_index(types) do
         {:ok, _} =
           Store.raw_query(
             """
@@ -1405,16 +1407,31 @@ defmodule OptimalEngine.SyncTest do
           )
       end
 
+      # The storage replication ledger shares the table; its entity types are
+      # free-form and name no table, so its entries are not the purge's.
+      assert {:ok, _} =
+               OptimalEngine.Storage.PolicyStore.append_mutation(%{
+                 workspace_id: ctx.ws,
+                 device_id: "device-a",
+                 entity_type: "memory_object",
+                 entity_id: "entity-#{ctx.n}",
+                 operation: :update,
+                 payload: %{"field" => "value"}
+               })
+
       assert {:ok, purged} = Sync.purge_unreplicated()
       assert purged["api_keys"] >= 1 and purged["workspace_members"] >= 1
-      assert purged["principals"] >= 1
+      assert purged["principals"] >= 1 and purged["authority_grants"] >= 1
       refute Map.has_key?(purged, "contexts")
+      refute Map.has_key?(purged, "memory_object")
 
-      assert {:ok, [["contexts"]]} =
+      assert {:ok, rows} =
                Store.raw_query(
-                 "SELECT entity_type FROM sync_mutations WHERE workspace_id = ?1",
+                 "SELECT entity_type FROM sync_mutations WHERE workspace_id = ?1 ORDER BY entity_type",
                  [ctx.ws]
                )
+
+      assert rows == [["contexts"], ["memory_object"]]
 
       assert {:ok, again} = Sync.purge_unreplicated()
       assert again == %{}

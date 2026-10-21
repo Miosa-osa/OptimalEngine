@@ -13,6 +13,8 @@ defmodule OptimalEngine.API.SyncAPI do
 
   import Plug.Conn
 
+  require Logger
+
   alias OptimalEngine.API.Actor
   alias OptimalEngine.Sync
 
@@ -165,8 +167,12 @@ defmodule OptimalEngine.API.SyncAPI do
 
   defp error(conn, status, reason) when is_binary(reason), do: json(conn, status, %{error: reason})
 
-  # A reason that is a term, not a name (a failed commit): its text, never the term.
-  defp error(conn, status, reason), do: json(conn, status, %{error: inspect(reason)})
+  # A reason that is a term, not a name (a failed commit) can quote stored values,
+  # so the response says only that the batch was not applied; the term is logged.
+  defp error(conn, status, reason) do
+    Logger.warning("[SyncAPI] batch not applied: #{inspect(reason)}")
+    json(conn, status, %{error: "batch_not_applied"})
+  end
 
   defp json(conn, status, data) do
     conn

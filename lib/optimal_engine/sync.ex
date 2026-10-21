@@ -238,7 +238,17 @@ defmodule OptimalEngine.Sync do
   # wrote it as the Engine's own (an API key, a principal, a role, a tenant, a
   # migration, a workspace, a peer, an authority record). What each purged ledger
   # row said is logged before it is removed, so the operator can check the table.
-  @evidence_tables ~w(api_keys principals roles tenants schema_migrations workspaces sync_peers)
+  @evidence_tables ~w(api_keys principals roles role_grants tenants schema_migrations workspaces
+                       workspace_members node_members principal_skills mcp_tool_definitions
+                       skill_packages routing_rules storage_provider_configs data_collections
+                       sync_peers)
+
+  # Only a ledger row that names a table of this Engine (or an `authority_*`
+  # table) is removed. The ledger also holds the storage replication entries
+  # `OptimalEngine.Storage.PolicyStore.append_mutation/1` writes, whose entity
+  # types are free-form and name no table: those stay.
+  @purge_scope "(entity_type IN (SELECT name FROM sqlite_master WHERE type = 'table') OR " <>
+                 "entity_type LIKE 'authority\\_%' ESCAPE '\\')"
 
   @doc """
   Removes the ledger rows of tables that do not replicate: an earlier version
@@ -247,10 +257,15 @@ defmodule OptimalEngine.Sync do
   themselves are not touched; a table that is not on the list can hold a row no
   one on this Engine wrote, and only its operator can tell.
 
-  Of the tables that grant access or hold Engine state (`api_keys`, `principals`,
-  `roles`, `tenants`, `schema_migrations`, `workspaces`, `sync_peers` and every
-  `authority_*` table) each row is logged first, with its mutation id, entity id,
-  device and time, never its payload.
+  A ledger row is removed only when it names a table of this Engine or an
+  `authority_*` table: the storage replication entries, whose entity types name
+  no table, stay.
+
+  Of the tables that grant access or hold Engine state (keys, principals, roles
+  and grants, tenants, migrations, workspaces and their members, skills, tools,
+  routing, storage providers, collections, peers and every `authority_*` table)
+  each row is logged first, with its mutation id, entity id, device and time,
+  never its payload.
   """
   @spec purge_unreplicated() :: {:ok, %{String.t() => non_neg_integer()}}
   def purge_unreplicated do
@@ -267,7 +282,7 @@ defmodule OptimalEngine.Sync do
         """
         SELECT sequence, id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, occurred_at
         FROM sync_mutations
-        WHERE sequence > ?#{n + 1} AND entity_type NOT IN (#{marks})
+        WHERE sequence > ?#{n + 1} AND entity_type NOT IN (#{marks}) AND #{@purge_scope}
         ORDER BY sequence LIMIT ?#{n + 2}
         """,
         names ++ [after_sequence, @purge_batch]
@@ -281,7 +296,8 @@ defmodule OptimalEngine.Sync do
 
       {:ok, _} =
         Store.raw_query(
-          "DELETE FROM sync_mutations WHERE sequence > ?#{n + 1} AND sequence <= ?#{n + 2} AND entity_type NOT IN (#{marks})",
+          "DELETE FROM sync_mutations WHERE sequence > ?#{n + 1} AND sequence <= ?#{n + 2} " <>
+            "AND entity_type NOT IN (#{marks}) AND #{@purge_scope}",
           names ++ [after_sequence, last]
         )
 
