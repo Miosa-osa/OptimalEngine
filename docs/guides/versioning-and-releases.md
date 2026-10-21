@@ -21,7 +21,7 @@ retrieval and projection component versions
 Read it from `GET /api/version`.
 The lightweight `GET /api/health` and `GET /api/status` responses include the same identity.
 
-The current tracked contract is application `0.3.5`, API `v1`, contract schema `1`, expected migration `77`.
+The current tracked contract is application `0.3.5`, API `v1`, contract schema `1`, expected migration `78`.
 [engine-contract.json](../../engine-contract.json) supplies repository, schema, and capability metadata to [Version.info/0](../../lib/optimal_engine/version.ex) at compilation.
 [test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
 The runner applies every migration whose version is not yet recorded, but `expected_migration` and the replication gate compare the highest number, so two Engines that both report the same number must have applied the same set.
@@ -87,6 +87,7 @@ Some migrations need one operator step after the upgraded Engine has booted.
 | Migration | After upgrading |
 | --- | --- |
 | 76, graph edges keyed by tenant and workspace | Run one graph backfill over every workspace, see [Graph edges upgrade](#graph-edges-upgrade). |
+| 78, indexes for the erasure and retention deletes | No step. The first boot builds 16 indexes before `/api/health` answers, so it takes longer on a large store; time a boot on a copy of the store first, and allow for it in the health-check timeout. |
 
 ### Graph edges upgrade
 
@@ -130,7 +131,7 @@ CI rejects a release tag that does not exactly match the application version.
 
 The Store applies pending migrations when it opens, in order, before the API answers.
 Each migration runs in one transaction together with the `schema_migrations` row that records it.
-The failed migration leaves no trace: when a statement fails, everything that migration wrote is rolled back, its version stays unrecorded, and `migration <nnn> failed and was rolled back: <cause>` is raised with the number zero-padded, for example `migration 078` in a release whose last real migration is 077.
+The failed migration leaves no trace: when a statement fails, everything that migration wrote is rolled back, its version stays unrecorded, and `migration <nnn> failed and was rolled back: <cause>` is raised with the number zero-padded, for example `migration 079` in a release whose last real migration is 078.
 The Store then does not open and the release exits without answering.
 Migrations before the failed one in the same boot stay applied.
 A release that adds several migrations can therefore leave a store between releases, and the previous release is not guaranteed to read it.

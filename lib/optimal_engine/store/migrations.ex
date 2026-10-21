@@ -142,7 +142,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_entity_mention_tenant(),
       migration_sync_pull_floor(),
       migration_graph_edges(),
-      migration_077_context_address_indexes()
+      migration_077_context_address_indexes(),
+      migration_derived_data_delete_indexes()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -397,6 +398,56 @@ defmodule OptimalEngine.Store.Migrations do
         """},
        {"backfill_entity_mentions_tenant_id_done",
         "UPDATE sync_identity SET applying = 0 WHERE id = 1"}
+     ]}
+  end
+
+  # The version of the derived data delete index migration. Provisional like the ones
+  # above: the assigned number is the highest on main plus one at merge, changed here
+  # and in the pins listed in docs/guides/versioning-and-releases.md.
+  @derived_data_delete_indexes_version 78
+
+  # Erasure and retention delete remove a context and what is derived from it, selecting
+  # by the column that names the context, the package or the asset. Without an index that
+  # leads with that column each delete scans its table, and the foreign-key cascades from
+  # a chunk (`cluster_members`, `citations`) or from a context (`decisions`) scan it once
+  # per row deleted. Indexes only: no table changes, so an Engine rolled back to an
+  # earlier release reads and writes the store as before, and every statement is safe to
+  # run again.
+  defp migration_derived_data_delete_indexes do
+    {@derived_data_delete_indexes_version, "derived data: indexes the delete paths read by",
+     [
+       {"idx_chunks_signal_id",
+        "CREATE INDEX IF NOT EXISTS idx_chunks_signal_id ON chunks(signal_id)"},
+       {"idx_cluster_members_chunk_id",
+        "CREATE INDEX IF NOT EXISTS idx_cluster_members_chunk_id ON cluster_members(chunk_id)"},
+       {"idx_citations_chunk_id",
+        "CREATE INDEX IF NOT EXISTS idx_citations_chunk_id ON citations(chunk_id)"},
+       {"idx_decisions_context_id",
+        "CREATE INDEX IF NOT EXISTS idx_decisions_context_id ON decisions(context_id)"},
+       {"idx_claims_signal_id",
+        "CREATE INDEX IF NOT EXISTS idx_claims_signal_id ON claims(signal_id)"},
+       {"idx_entity_mentions_context_id",
+        "CREATE INDEX IF NOT EXISTS idx_entity_mentions_context_id ON entity_mentions(context_id)"},
+       {"idx_entity_mentions_source_package_id",
+        "CREATE INDEX IF NOT EXISTS idx_entity_mentions_source_package_id ON entity_mentions(source_package_id)"},
+       {"idx_resolution_decisions_mention_id",
+        "CREATE INDEX IF NOT EXISTS idx_resolution_decisions_mention_id ON resolution_decisions(mention_id)"},
+       {"idx_decomposition_runs_source_package_id",
+        "CREATE INDEX IF NOT EXISTS idx_decomposition_runs_source_package_id ON decomposition_runs(source_package_id)"},
+       {"idx_assets_storage_path",
+        "CREATE INDEX IF NOT EXISTS idx_assets_storage_path ON assets(storage_path)"},
+       {"idx_asset_adapter_runs_asset_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_adapter_runs_asset_id ON asset_adapter_runs(asset_id)"},
+       {"idx_asset_extractions_asset_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_extractions_asset_id ON asset_extractions(asset_id)"},
+       {"idx_asset_transcripts_asset_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_transcripts_asset_id ON asset_transcripts(asset_id)"},
+       {"idx_asset_ocr_spans_asset_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_ocr_spans_asset_id ON asset_ocr_spans(asset_id)"},
+       {"idx_asset_visual_observations_asset_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_visual_observations_asset_id ON asset_visual_observations(asset_id)"},
+       {"idx_asset_embedding_refs_asset_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_embedding_refs_asset_id ON asset_embedding_refs(asset_id)"}
      ]}
   end
 
