@@ -42,6 +42,9 @@ defmodule OptimalEngine.Auth.KeyIssuance do
 
   @grant_fields ~w(allowed_partitions allowed_security_labels permissions)
 
+  # What a mint that names no label or partition grants writes: none, explicitly.
+  @no_grants %{"allowed_partitions" => [], "allowed_security_labels" => []}
+
   @doc "The governed grant fields a key may carry in its metadata."
   @spec grant_fields() :: [String.t()]
   def grant_fields, do: @grant_fields
@@ -187,9 +190,6 @@ defmodule OptimalEngine.Auth.KeyIssuance do
   end
 
   @inherited_grants ~w(permissions)
-
-  # What a mint that names no label or partition grants writes: none, explicitly.
-  @no_grants %{"allowed_partitions" => [], "allowed_security_labels" => []}
 
   # A root minter issues any operation scope and any `permissions`, but label
   # and partition grants only as far as it holds them: a "*" scope is not a
