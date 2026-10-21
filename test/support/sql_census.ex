@@ -64,9 +64,13 @@ defmodule OptimalEngine.Test.SqlCensus do
   def start do
     :ets.new(@table, [:named_table, :public, :set])
     tracer = spawn(&trace_loop/0)
-    store = Process.whereis(OptimalEngine.Store.SQLite)
 
-    :erlang.trace(store, true, [:call, {:tracer, tracer}])
+    # Every process, not the Store's pid: a test that crashes the Store (one
+    # does, on purpose) has it restarted as a new process, and its statements
+    # would go unrecorded after that, so a run's census would depend on the
+    # order the tests ran in. The patterns below limit tracing to the three
+    # Store functions.
+    :erlang.trace(:all, true, [:call, {:tracer, tracer}])
     :persistent_term.put({__MODULE__, :tracer}, tracer)
 
     for {function, arity} <- [handle_call: 3, txn_query: 4, txn_execute: 4] do
@@ -102,9 +106,7 @@ defmodule OptimalEngine.Test.SqlCensus do
   defp drain_tracer do
     tracer = :persistent_term.get({__MODULE__, :tracer}, nil)
 
-    if store = Process.whereis(OptimalEngine.Store.SQLite) do
-      :erlang.trace(store, false, [:call])
-    end
+    :erlang.trace(:all, false, [:call])
 
     ref = :erlang.trace_delivered(:all)
 
