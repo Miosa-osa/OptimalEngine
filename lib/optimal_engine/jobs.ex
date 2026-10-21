@@ -160,7 +160,8 @@ defmodule OptimalEngine.Jobs do
   @doc """
   Record a failed attempt. With attempts left the job returns to `available`
   after a backoff (`:retry_in` seconds, default exponential, capped at one
-  hour); otherwise it is dead-lettered.
+  hour); otherwise it is dead-lettered. `permanent: true` dead-letters it at
+  once: the failure is one another attempt cannot fix (a refused input).
   """
   @spec fail(String.t(), String.t(), term(), keyword()) ::
           {:ok, %{job: job(), outcome: :retry | :dead}} | {:error, term()}
@@ -171,7 +172,7 @@ defmodule OptimalEngine.Jobs do
     Store.transaction(fn txn ->
       with {:ok, job} <- txn_get(txn, job_id),
            :ok <- owns_lease(job, lease_owner) do
-        if job.attempts >= job.max_attempts do
+        if job.attempts >= job.max_attempts or Keyword.get(opts, :permanent, false) do
           dead_letter(txn, job, message)
         else
           retry_in = Keyword.get_lazy(opts, :retry_in, fn -> backoff(job.attempts) end)
@@ -179,6 +180,39 @@ defmodule OptimalEngine.Jobs do
         end
       end
     end)
+  end
+
+  @doc """
+  Extend the lease of a running job by `seconds` from now. A long job calls
+  this as it makes progress, so its lease never lapses while it is alive and
+  a job whose worker died is still reclaimed promptly. Fails with
+  `:lease_lost` for a non-owner.
+  """
+  @spec extend_lease(String.t(), String.t(), pos_integer()) :: :ok | {:error, term()}
+  def extend_lease(job_id, lease_owner, seconds)
+      when is_binary(job_id) and is_binary(lease_owner) and is_integer(seconds) and seconds > 0 do
+    result =
+      Store.transaction(fn txn ->
+        txn
+        |> Store.txn_execute(
+          """
+          UPDATE jobs SET lease_expires_at = datetime('now', '+' || ?3 || ' seconds'),
+            updated_at = datetime('now')
+          WHERE id = ?1 AND status = 'running' AND lease_owner = ?2
+          """,
+          [job_id, lease_owner, seconds]
+        )
+        |> case do
+          {:ok, 1} -> {:ok, :extended}
+          {:ok, _} -> {:error, :lease_lost}
+          {:error, reason} -> {:error, reason}
+        end
+      end)
+
+    case result do
+      {:ok, :extended} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @doc """

@@ -53,10 +53,17 @@ defmodule OptimalEngine.API.Router do
   plug(:cors)
   plug(:match)
 
+  # A zip body (a Notion export) passes unread: OptimalEngine.API.ImportsAPI
+  # streams it to disk.
   plug(Plug.Parsers,
     parsers: [:json],
     json_decoder: Jason,
-    pass: ["application/json", "application/gzip"]
+    pass: [
+      "application/json",
+      "application/gzip",
+      "application/zip",
+      "application/x-zip-compressed"
+    ]
   )
 
   plug(OptimalEngine.API.AuthPlug)
@@ -3725,6 +3732,13 @@ defmodule OptimalEngine.API.Router do
   get("/api/jobs", do: AnalysesAPI.jobs(conn))
   get("/api/jobs/dead", do: AnalysesAPI.dead(conn))
   post("/api/jobs/dead/:id/replay", do: AnalysesAPI.replay(conn, id))
+
+  # ── Imports (OptimalEngine.API.ImportsAPI) ───────────────────────────────
+  alias OptimalEngine.API.ImportsAPI
+
+  post("/api/import/notion", do: ImportsAPI.notion(conn))
+  get("/api/import/notion/tree", do: ImportsAPI.notion_tree(conn))
+  get("/api/import/notion/:job_id", do: ImportsAPI.notion_status(conn, job_id))
 
   # ── Chat sessions (OptimalEngine.API.SessionAPI) ─────────────────────────
   alias OptimalEngine.API.SessionAPI
