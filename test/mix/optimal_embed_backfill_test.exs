@@ -63,8 +63,16 @@ defmodule Mix.Tasks.Optimal.EmbedBackfillTest do
 
   defp run_task(args) do
     # The task module is already loaded; invoke run/1 directly so we don't
-    # re-run app.start (already started by the test supervisor).
-    capture(fn -> Mix.Tasks.Optimal.EmbedBackfill.run(args) end)
+    # re-run app.start (already started by the test supervisor). Without an
+    # embedder the task stops and says so, which this test accepts.
+    capture(fn ->
+      try do
+        Mix.Tasks.Optimal.EmbedBackfill.run(args)
+      rescue
+        error in Mix.Error ->
+          assert Exception.message(error) =~ "the embedder is unavailable"
+      end
+    end)
   end
 
   defp embedded_count(chunk_ids) do

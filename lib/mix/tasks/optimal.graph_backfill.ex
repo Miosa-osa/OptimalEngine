@@ -61,31 +61,40 @@ defmodule Mix.Tasks.Optimal.GraphBackfill do
   def run(args) do
     Mix.Task.run("app.start")
 
+    case main(args) do
+      :ok -> :ok
+      {:error, message} -> Mix.raise(message)
+    end
+  end
+
+  # The task without Mix: `bin/optimal maintenance` runs it in a release
+  # (OptimalEngine.Release.Maintenance), with the Engine already started.
+  @doc false
+  def main(args) do
     {opts, _, _} =
       OptionParser.parse(args,
         strict: [batch: :integer, workspace: :string, claims: :boolean]
       )
 
-    shell = Mix.shell()
-
     backfill_opts = [
       workspace_id: Keyword.get(opts, :workspace),
       page: Keyword.get(opts, :batch, @default_batch),
       claims: Keyword.get(opts, :claims, true),
-      on_page: fn {phase, n} -> shell.info("  #{phase}: #{n}") end
+      on_page: fn {phase, n} -> IO.puts("  #{phase}: #{n}") end
     ]
 
     case Backfill.run(backfill_opts) do
       {:ok, result} ->
-        shell.info("")
-        shell.info("Done. Edges: #{result.edges_before} -> #{result.edges_after}")
-        shell.info("Contexts: #{result.contexts}  Claims: #{result.claims}")
+        IO.puts("")
+        IO.puts("Done. Edges: #{result.edges_before} -> #{result.edges_after}")
+        IO.puts("Contexts: #{result.contexts}  Claims: #{result.claims}")
 
         if result.failed_edges > 0,
-          do: Mix.raise("#{result.failed_edges} edge writes failed; run the backfill again")
+          do: {:error, "#{result.failed_edges} edge writes failed; run the backfill again"},
+          else: :ok
 
       {:error, reason} ->
-        Mix.raise("graph backfill failed: #{inspect(reason)}")
+        {:error, "graph backfill failed: #{inspect(reason)}"}
     end
   end
 end

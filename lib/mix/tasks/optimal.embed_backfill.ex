@@ -44,6 +44,16 @@ defmodule Mix.Tasks.Optimal.EmbedBackfill do
   def run(args) do
     Mix.Task.run("app.start")
 
+    case main(args) do
+      :ok -> :ok
+      {:error, message} -> Mix.raise(message)
+    end
+  end
+
+  # The task without Mix: `bin/optimal maintenance` runs it in a release
+  # (OptimalEngine.Release.Maintenance), with the Engine already started.
+  @doc false
+  def main(args) do
     {opts, _, _} =
       OptionParser.parse(args,
         strict: [batch: :integer, limit: :integer, workspace: :string, dry_run: :boolean]
@@ -54,8 +64,6 @@ defmodule Mix.Tasks.Optimal.EmbedBackfill do
     dry_run = Keyword.get(opts, :dry_run, false)
     scope = if workspace = opts[:workspace], do: [workspace_id: workspace], else: []
 
-    shell = Mix.shell()
-
     pending =
       case ChunkBackfill.status(scope) do
         {:ok, %{missing: missing}} -> missing
@@ -64,28 +72,25 @@ defmodule Mix.Tasks.Optimal.EmbedBackfill do
 
     target = if limit, do: min(limit, pending), else: pending
 
-    shell.info("Chunks missing embeddings: #{pending}")
-
-    shell.info(
-      "Backfilling: #{target} (batch=#{batch_size}#{if dry_run, do: ", dry-run", else: ""})"
-    )
+    IO.puts("Chunks missing embeddings: #{pending}")
+    IO.puts("Backfilling: #{target} (batch=#{batch_size}#{if dry_run, do: ", dry-run", else: ""})")
 
     cond do
       target == 0 ->
-        shell.info("Nothing to do: embedding coverage already complete.")
+        IO.puts("Nothing to do: embedding coverage already complete.")
 
       dry_run ->
-        shell.info("")
-        shell.info("Done. Embedded: 0  Skipped: #{target}")
+        IO.puts("")
+        IO.puts("Done. Embedded: 0  Skipped: #{target}")
 
       true ->
-        backfill(scope, batch_size, target, shell)
+        backfill(scope, batch_size, target)
     end
   end
 
-  defp backfill(scope, batch_size, target, shell) do
+  defp backfill(scope, batch_size, target) do
     on_page = fn page, total ->
-      shell.info(
+      IO.puts(
         "  …#{total.embedded + total.failed}/#{target}  " <>
           "(+#{page.embedded} embedded, +#{page.failed} skipped)"
       )
@@ -93,17 +98,15 @@ defmodule Mix.Tasks.Optimal.EmbedBackfill do
 
     case ChunkBackfill.run(scope ++ [limit: target, page: batch_size, on_page: on_page]) do
       {:ok, totals} ->
-        shell.info("")
-        shell.info("Done. Embedded: #{totals.embedded}  Skipped: #{totals.failed}")
+        IO.puts("")
+        IO.puts("Done. Embedded: #{totals.embedded}  Skipped: #{totals.failed}")
 
       {:error, {:embedder_unavailable, reason}} ->
-        shell.error(
-          "Stopped: the embedder is unavailable (#{inspect(reason)}); " <>
-            "run again once it answers"
-        )
+        {:error,
+         "stopped: the embedder is unavailable (#{inspect(reason)}); run again once it answers"}
 
       {:error, reason} ->
-        shell.error("Stopped: #{inspect(reason)}")
+        {:error, "stopped: #{inspect(reason)}"}
     end
   end
 end
