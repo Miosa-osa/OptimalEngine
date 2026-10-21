@@ -139,7 +139,8 @@ A dense mesh of links that cycles back on itself (every row naming every other) 
 The push cycle ends in an error with nothing sent and its cursor where it was, so the next cycle classifies the same rows again; a workspace that cannot be read is not assumed to be open.
 - A value SQLite holds as a BLOB travels in `payload.blobs`; a label stored that way is read like any other, on send and on receive.
 - An aggregate (`analysis_reports`, `data_quality_snapshots`, `rhythm_notes`, `sessions`, a wiki page or cluster that names nothing, an edge between entity names) has no row to point at, so it stays home while the workspace holds anything above the peer's class.
-That includes a row whose labels cannot be read, which counts as `restricted` there as it does for the row itself: a label that is a number, an object or a blank string, an array with such an element, text that is not an array, and a metadata that repeats `security_labels`.
+That includes a row whose labels cannot be read, which counts as `restricted` there as it does for the row itself: a label that is a number, an object or a blank string, an array with such an element, text that is not an array, partitions that cannot be read the same way (partitions that can be read rank nothing), a metadata that repeats `security_labels` or `partition_ids` or holds either unreadable, and a classification level this Engine does not know.
+Every column of a table that can name a class is read, not the first: a source package or a claim labelled only by its metadata holds the workspace's aggregates, and what is derived from it, as one labelled in its column does.
 A row nobody could classify never lets an aggregate out.
 - A change is held at the higher of the row as the ledger recorded it and the row as it is stored now.
 An older version of a row that has labels today (it was labelled afterwards, or a version arrived from another Engine without them) stays home with the row.
@@ -175,6 +176,7 @@ A row held then is not sent later because its source package arrived after it, o
 So label before writing, and write the source before what derives from it.
 
 A gate reads the workspace once for what it needs to classify many rows: the index of the documents and memories derived from labelled sources, and whether the workspace holds anything above the peer's class.
+The index takes every source package and claim that carries a label, a partition or a class in any of its columns (its labels, its partitions, the labels and partitions in its metadata) and reads each exactly; it does not look for the text of a class name, because a name can be spelled with an escape and a label that is not a string has none.
 That scan is kept between gates (a pull of many pages, the next push cycle) while nothing was written: the key is the scan, the tenant, the workspace, the kind of gate (a peer's or a reader's) and the class, and the stamp is the write sequence of the change capture and the ledger (`sync_capture` and `sync_mutations` in `sqlite_sequence`), which every write to a replicated table of a syncing workspace moves.
 The stamp is read just before each scan, not once per gate, so a long push cycle that needs a scan late does not use an older stamp.
 A push cycle classifies one page at a time, as it sends it, so a label written while an earlier page is on the wire holds back the pages after it.

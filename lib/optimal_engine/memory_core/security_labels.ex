@@ -329,7 +329,7 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
     }
 
     case :json.decode(json, :ok, decoders) do
-      {map, :ok, rest} when is_map(map) -> if String.trim(rest) == "", do: {:ok, map}, else: :error
+      {map, :ok, ""} when is_map(map) -> {:ok, map}
       _other -> :error
     end
   catch
