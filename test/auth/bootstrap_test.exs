@@ -31,7 +31,42 @@ defmodule OptimalEngine.Auth.BootstrapTest do
     assert key.scopes == ["read", "write"]
     assert key.workspace_scope == ["*"]
     assert key.tenant_id == @tenant
-    assert key.metadata == %{"source" => "bootstrap"}
+
+    assert key.metadata == %{
+             "source" => "bootstrap",
+             "allowed_security_labels" => ["*"],
+             "allowed_partitions" => ["*"]
+           }
+  end
+
+  test "a key registered before the grants existed is given them, once" do
+    token = token()
+    id = token |> String.split("_") |> Enum.at(1)
+    assert :ok = Bootstrap.run(env(token))
+
+    {:ok, _} =
+      OptimalEngine.Store.raw_query(
+        "UPDATE api_keys SET metadata = json_remove(metadata, '$.allowed_security_labels', '$.allowed_partitions') WHERE id = ?1",
+        [id]
+      )
+
+    assert {:ok, bare} = ApiKey.verify(token)
+    assert bare.metadata == %{"source" => "bootstrap"}
+
+    assert :ok = Bootstrap.run(env(token))
+    assert {:ok, key} = ApiKey.verify(token)
+    assert key.metadata["allowed_security_labels"] == ["*"]
+
+    # Grants the operator narrowed are left as they are.
+    {:ok, _} =
+      OptimalEngine.Store.raw_query(
+        "UPDATE api_keys SET metadata = json_set(metadata, '$.allowed_security_labels', json('[\"internal\"]')) WHERE id = ?1",
+        [id]
+      )
+
+    assert :ok = Bootstrap.run(env(token))
+    assert {:ok, narrowed} = ApiKey.verify(token)
+    assert narrowed.metadata["allowed_security_labels"] == ["internal"]
   end
 
   test "scopes, tenant and workspaces come from the environment" do

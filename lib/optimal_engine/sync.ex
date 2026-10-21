@@ -1003,7 +1003,7 @@ defmodule OptimalEngine.Sync do
     end)
   rescue
     # A gate that cannot read what it classifies by sends nothing.
-    error in [RuntimeError, ArgumentError] ->
+    error in [RuntimeError, ArgumentError, Gate.StoreError] ->
       Logger.error("[Sync] push to #{peer.url} held back: #{Exception.message(error)}")
       {:error, {:gate_unreadable, Exception.message(error)}}
   end

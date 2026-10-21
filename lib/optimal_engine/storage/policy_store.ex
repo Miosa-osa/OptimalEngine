@@ -7,6 +7,7 @@ defmodule OptimalEngine.Storage.PolicyStore do
   name. Sync mutations are append-only, idempotent, and explicitly scoped.
   """
 
+  alias OptimalEngine.ReadScope
   alias OptimalEngine.Storage.{Planner, Providers}
   alias OptimalEngine.Store
   alias OptimalEngine.Sync.Gate
@@ -186,33 +187,62 @@ defmodule OptimalEngine.Storage.PolicyStore do
           String.t() | nil
         ) :: {:ok, [map()], non_neg_integer()} | {:error, term()}
   def releasable_mutations_after(workspace_id, sequence, limit \\ 100, max_class \\ nil) do
+    with {:ok, mutations, last, _withheld} <-
+           read_mutations_after(workspace_id, sequence, limit, max_class: max_class),
+         do: {:ok, mutations, last}
+  end
+
+  @doc """
+  `releasable_mutations_after/4` for a keyed reader (`OptimalEngine.ReadScope`,
+  option `:reader`; nil is the trusted local operator): besides the data-class
+  gate, the changes must be ones the reader's label and partition grants and
+  the access lists allow. Returns the changes, where to continue from, and how
+  many changes it looked at and left out.
+  """
+  @spec read_mutations_after(String.t(), non_neg_integer(), pos_integer(), keyword()) ::
+          {:ok, [map()], non_neg_integer(), non_neg_integer()} | {:error, term()}
+  def read_mutations_after(workspace_id, sequence, limit \\ 100, opts \\ []) do
     limit = limit |> max(1) |> min(1_000)
-    max_class = max_class || OptimalEngine.Sync.serve_max_class()
+    max_class = opts[:max_class] || OptimalEngine.Sync.serve_max_class()
 
     case workspace_scope(workspace_id) do
       {:ok, tenant_id, _organization_id} ->
-        Gate.with_gate(tenant_id, workspace_id, max_class, fn gate ->
-          releasable_pages(gate, workspace_id, sequence, limit, [], 20)
+        ReadScope.with_mutation_filter(opts[:reader], workspace_id, fn read_filter ->
+          Gate.with_gate(tenant_id, workspace_id, max_class, fn gate ->
+            releasable_pages(gate, read_filter, workspace_id, sequence, limit, {[], 0}, 20)
+          end)
         end)
 
       {:error, :workspace_not_found} ->
-        {:ok, [], sequence}
+        {:ok, [], sequence, 0}
 
       {:error, _reason} = error ->
         error
     end
   end
 
-  defp releasable_pages(gate, workspace_id, after_sequence, limit, kept, rounds) do
+  defp releasable_pages(
+         gate,
+         read_filter,
+         workspace_id,
+         after_sequence,
+         limit,
+         {kept, held},
+         rounds
+       ) do
     want = limit - length(kept)
 
     with {:ok, page} <- mutations_after(workspace_id, after_sequence, want) do
       last = if page == [], do: after_sequence, else: List.last(page).sequence
-      kept = kept ++ releasable(gate, page)
+      released = releasable(gate, page)
+      {readable, hidden} = read_filter.(released)
+      kept = kept ++ readable
+      held = held + length(page) - length(released) + hidden
 
       if length(page) < want or length(kept) >= limit or rounds <= 1,
-        do: {:ok, kept, last},
-        else: releasable_pages(gate, workspace_id, last, limit, kept, rounds - 1)
+        do: {:ok, kept, last, held},
+        else:
+          releasable_pages(gate, read_filter, workspace_id, last, limit, {kept, held}, rounds - 1)
     end
   end
 

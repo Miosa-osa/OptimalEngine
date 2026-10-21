@@ -110,6 +110,12 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
       assert ctx.team.id in ids(export(ctx, with_partition, "memories")["memories"])
     end
 
+    test "a key with partitions granted does not read what has none, as in retrieval", ctx do
+      only_a = mint(ctx, %{"allowed_partitions" => ["team-a"]})
+
+      assert ids(export(ctx, only_a, "memories")["memories"]) == [ctx.team.id]
+    end
+
     test "a key granted every label reads everything, and so does the trusted local operator",
          ctx do
       keyed = mint(ctx, %{"allowed_security_labels" => ["restricted", "internal"]})
@@ -173,10 +179,25 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
     end
 
     test "grants are labels and partitions, and nothing is read from an empty set", ctx do
-      assert SecurityLabels.grants(["a"], ["p"]) == MapSet.new(["a", "partition:p"])
-      assert SecurityLabels.grants(nil, nil) == MapSet.new()
+      assert SecurityLabels.grants(["a", " Restricted "], ["p"]) == %{
+               labels: MapSet.new(["a", "restricted"]),
+               partitions: MapSet.new(["p"]),
+               all_labels?: false,
+               all_partitions?: false
+             }
 
-      Gate.with_reader("default", ctx.ws, MapSet.new(), fn gate ->
+      assert SecurityLabels.grants(["*"], nil) == %{
+               labels: MapSet.new(),
+               partitions: MapSet.new(),
+               all_labels?: true,
+               all_partitions?: false
+             }
+
+      # A label named like the old internal tokens is just a label.
+      assert SecurityLabels.grants(["@unresolved", "partition:p"], []).labels ==
+               MapSet.new(["@unresolved", "partition:p"])
+
+      Gate.with_reader("default", ctx.ws, SecurityLabels.grants(nil, nil), fn gate ->
         assert Gate.readable_id?(gate, "memories", ctx.plain.id)
         refute Gate.readable_id?(gate, "memories", ctx.secret.id)
         refute Gate.readable_id?(gate, "memories", ctx.team.id)
@@ -288,6 +309,460 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
     end
   end
 
+  describe "partitions follow retrieval" do
+    test "a row in two partitions is read by a key that holds either", ctx do
+      both = remember(ctx.ws, "Joint roadmap draft", [], ["team-a", "team-b"]).memory
+      read = fn partitions -> ids(export(ctx, mint(ctx, partitions), "memories")["memories"]) end
+
+      assert both.id in read.(%{"allowed_partitions" => ["team-b"]})
+      assert both.id in read.(%{"allowed_partitions" => ["team-a", "team-c"]})
+      refute both.id in read.(%{"allowed_partitions" => ["team-c"]})
+      refute both.id in read.(%{})
+    end
+
+    test "a partition does not stand in for a label", ctx do
+      held = remember(ctx.ws, "Atlas escrow terms", ["restricted"], ["team-a"]).memory
+
+      refute held.id in ids(
+               export(ctx, mint(ctx, %{"allowed_partitions" => ["team-a"]}), "memories")["memories"]
+             )
+
+      both =
+        mint(ctx, %{"allowed_partitions" => ["team-a"], "allowed_security_labels" => ["restricted"]})
+
+      assert held.id in ids(export(ctx, both, "memories")["memories"])
+    end
+
+    test "signals and wiki pages follow the partitions of their sources", ctx do
+      {:ok, atlas} =
+        Intake.process("Atlas staffing plan: two engineers join in March",
+          workspace_id: ctx.ws,
+          node: "operator",
+          write_files: false
+        )
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE contexts SET metadata = json_set(COALESCE(metadata, '{}'), '$.partition_ids', json('[\"team-a\"]')) WHERE id = ?1",
+          [atlas.context.id]
+        )
+
+      atlas_chunk = chunk(ctx.ws, "chk-atlas-#{ctx.n}", atlas.context.id, "Atlas staffing plan")
+      wiki(ctx.ws, "atlas-#{ctx.n}", "Staffing", [atlas_chunk])
+
+      only_a = mint(ctx, %{"allowed_partitions" => ["team-a"]})
+      bare = mint(ctx, %{})
+
+      assert ids(export(ctx, only_a, "signals")["signals"]) == [atlas.context.id]
+      assert atlas.context.id not in ids(export(ctx, bare, "signals")["signals"])
+
+      assert slugs(export(ctx, only_a, "workspace")) == ["atlas-#{ctx.n}"]
+      refute "atlas-#{ctx.n}" in slugs(export(ctx, bare, "workspace"))
+    end
+  end
+
+  describe "what a row derives from" do
+    test "a memory staged from a restricted source is not exported without the label", ctx do
+      {:ok, staged} =
+        Versioned.create(%{
+          content: "Escrow summary",
+          workspace_id: ctx.ws,
+          metadata: %{
+            "memory_core_source_package_id" => ctx.secret.metadata["memory_core_source_package_id"]
+          }
+        })
+
+      refute staged.id in ids(
+               export(ctx, mint(ctx, %{"allowed_security_labels" => ["internal"]}), "memories")[
+                 "memories"
+               ]
+             )
+
+      assert staged.id in ids(
+               export(ctx, mint(ctx, %{"allowed_security_labels" => ["restricted"]}), "memories")[
+                 "memories"
+               ]
+             )
+    end
+
+    test "a key granted restricted sees the page citing a restricted document", ctx do
+      token = mint(ctx, %{"allowed_security_labels" => ["restricted", "internal"]})
+
+      assert "deal-room-#{ctx.n}" in slugs(export(ctx, token, "workspace"))
+      assert "docs-calendar-#{ctx.n}" in slugs(export(ctx, token, "workspace"))
+
+      refute "deal-room-#{ctx.n}" in slugs(export(ctx, mint(ctx, %{}), "workspace"))
+    end
+
+    test "a label that is not a string hides the row", ctx do
+      for {name, labels} <- [
+            number: "[1]",
+            null: "[null]",
+            object: ~s([{"a":1}]),
+            blank: ~s(["  "])
+          ] do
+        memory = remember(ctx.ws, "Odd labels #{name}", []).memory
+        set_labels(memory.id, labels)
+
+        everything =
+          mint(ctx, %{
+            "allowed_security_labels" => ["restricted", "internal", "confidential", "1", "a"]
+          })
+
+        refute memory.id in ids(export(ctx, everything, "memories")["memories"]),
+               "#{name} was shown"
+
+        assert memory.id in ids(
+                 export(
+                   ctx,
+                   mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]}),
+                   "memories"
+                 )["memories"]
+               )
+      end
+    end
+
+    test "class names are not case sensitive and labels are trimmed", ctx do
+      memory = remember(ctx.ws, "Casing check", []).memory
+      restricted = mint(ctx, %{"allowed_security_labels" => ["restricted"]})
+      internal = mint(ctx, %{"allowed_security_labels" => ["internal"]})
+
+      for variant <- [~s([" Restricted "]), ~s(["RESTRICTED"]), ~s(["restricted"])] do
+        set_labels(memory.id, variant)
+
+        refute memory.id in ids(export(ctx, internal, "memories")["memories"]),
+               "#{variant} was shown"
+
+        assert memory.id in ids(export(ctx, restricted, "memories")["memories"]),
+               "#{variant} was hidden"
+      end
+    end
+
+    test "a link to a chunk nobody wrote hides the row", ctx do
+      {:ok, ghost} =
+        Versioned.create(%{
+          content: "Cites a chunk that is gone",
+          workspace_id: ctx.ws,
+          source_chunk_id: "chk-ghost-#{ctx.n}"
+        })
+
+      refute ghost.id in ids(export(ctx, mint(ctx, %{}), "memories")["memories"])
+      assert ghost.id in ids(export(ctx, nil, "memories")["memories"])
+    end
+
+    test "an unknown classification level is read by no one", ctx do
+      Gate.with_reader(
+        "default",
+        ctx.ws,
+        SecurityLabels.grants(["restricted", "internal", "confidential"], []),
+        fn gate ->
+          for {level, readable?} <- [
+                {"internal", true},
+                {"public", true},
+                {"restricted", true},
+                {"mystery", false},
+                {"RESTRICTED", true}
+              ] do
+            id = "chk-level-#{level}-#{ctx.n}"
+            chunk(ctx.ws, id, ctx.plain_doc.id, "Level #{level}")
+
+            {:ok, _} =
+              Store.raw_query("UPDATE chunks SET classification_level = ?2 WHERE id = ?1", [
+                id,
+                level
+              ])
+
+            assert Gate.readable_id?(gate, "chunks", id) == readable?, "level #{level}"
+          end
+        end
+      )
+    end
+
+    test "a memory with fifty versions is read when its root may be", ctx do
+      [root | _] = chain = version_chain(ctx.ws, 50)
+      newest = List.last(chain)
+      bare = SecurityLabels.grants([], [])
+
+      # A gate that starts at the newest version has read none of the others.
+      Gate.with_reader("default", ctx.ws, bare, fn gate ->
+        assert Gate.readable_id?(gate, "memories", newest)
+      end)
+
+      set_labels(root, ~s(["restricted"]))
+
+      Gate.with_reader("default", ctx.ws, bare, fn gate ->
+        refute Gate.readable_id?(gate, "memories", newest)
+      end)
+
+      Gate.with_reader("default", ctx.ws, SecurityLabels.grants(["restricted"], []), fn gate ->
+        assert Gate.readable_id?(gate, "memories", newest)
+      end)
+    end
+
+    test "rows that link each other in a loop are read together", ctx do
+      source = ctx.secret.metadata["memory_core_source_package_id"]
+      pool = "pool-#{ctx.n}"
+      first = "cp-first-#{ctx.n}"
+      second = "cp-second-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO active_memory_pools (id, tenant_id, workspace_id, context_package_links) VALUES (?1, 'default', ?2, ?3)",
+          [pool, ctx.ws, Jason.encode!([first])]
+        )
+
+      for {id, sources} <- [{first, [source]}, {second, []}] do
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO context_packages (id, tenant_id, workspace_id, active_memory_pool_id, source_package_links) VALUES (?1, 'default', ?2, ?3, ?4)",
+            [id, ctx.ws, pool, Jason.encode!(sources)]
+          )
+      end
+
+      Gate.with_reader("default", ctx.ws, SecurityLabels.grants([], []), fn gate ->
+        allowed = Gate.readable_ids(gate, "context_packages", [first, second])
+
+        refute first in allowed
+        refute second in allowed
+        refute Gate.readable_id?(gate, "active_memory_pools", pool)
+      end)
+    end
+  end
+
+  describe "an answer says what it leaves out" do
+    test "withheld and complete", ctx do
+      bare = export(ctx, mint(ctx, %{}), "memories")
+
+      assert bare["withheld"] >= 3
+      assert bare["complete"] == false
+
+      everything = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      for kind <- ["memories", "signals", "workspace"] do
+        operator = export(ctx, nil, kind)
+        assert operator["withheld"] == 0 and operator["complete"] == true
+
+        root = export(ctx, everything, kind)
+        assert root["withheld"] == 0 and root["complete"] == true
+      end
+
+      assert export(ctx, mint(ctx, %{}), "signals")["complete"] == false
+      assert export(ctx, mint(ctx, %{}), "workspace")["withheld"] >= 5
+    end
+
+    test "a key granted * reads everything", ctx do
+      root = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      read = ids(export(ctx, root, "memories")["memories"])
+      for memory <- [ctx.secret, ctx.internal, ctx.team, ctx.plain], do: assert(memory.id in read)
+
+      assert "deal-room-#{ctx.n}" in slugs(export(ctx, root, "workspace"))
+      assert ctx.secret_doc.id in ids(export(ctx, root, "signals")["signals"])
+    end
+
+    test "a key granted * for labels only still needs the partitions", ctx do
+      labels_only = mint(ctx, %{"allowed_security_labels" => ["*"]})
+
+      read = ids(export(ctx, labels_only, "memories")["memories"])
+      assert ctx.secret.id in read
+      refute ctx.team.id in read
+    end
+
+    test "the recommended machine default reads up to confidential, not restricted or custom labels",
+         ctx do
+      confidential = remember(ctx.ws, "Q3 pricing sheet", ["confidential"]).memory
+      custom = remember(ctx.ws, "Vendor shortlist", ["private"]).memory
+
+      key =
+        mint(ctx, %{
+          "allowed_security_labels" => ["public", "internal", "confidential"],
+          "allowed_partitions" => []
+        })
+
+      read = ids(export(ctx, key, "memories")["memories"])
+
+      for memory <- [ctx.plain, ctx.internal, confidential], do: assert(memory.id in read)
+      for memory <- [ctx.secret, custom, ctx.team], do: refute(memory.id in read)
+    end
+
+    test "a keyed export is of the reader's tenant, whatever tenant is asked for", ctx do
+      reader = %OptimalEngine.ReadScope{
+        tenant_id: "default",
+        principal: "user:reader",
+        labels: ["*"],
+        partitions: ["*"]
+      }
+
+      assert {:ok, snapshot, 0} =
+               OptimalEngine.Batch.read_workspace(ctx.ws, tenant_id: "other", reader: reader)
+
+      assert snapshot.tenant_id == "default"
+
+      assert {:ok, %{tenant_id: "other"}, 0} =
+               OptimalEngine.Batch.read_workspace(ctx.ws, tenant_id: "other")
+    end
+  end
+
+  describe "when the Store cannot be read" do
+    test "the gate's failure is a 503 with no partial body", ctx do
+      token = mint(ctx, %{})
+
+      conn =
+        with_renamed_column("contexts", "metadata", "metadata_x", fn ->
+          get_as(export_path(ctx, "signals"), token)
+        end)
+
+      assert conn.status == 503
+      assert Jason.decode!(conn.resp_body) |> Map.keys() |> Enum.sort() == ["detail", "error"]
+      refute conn.resp_body =~ "signals"
+    end
+
+    test "a failing export read is a 500, never an empty export", ctx do
+      for token <- [mint(ctx, %{}), nil] do
+        conn =
+          with_renamed_column("contexts", "l1_overview", "l1_overview_x", fn ->
+            get_as(export_path(ctx, "signals"), token)
+          end)
+
+        assert conn.status == 500
+        assert Jason.decode!(conn.resp_body) == %{"error" => "export_failed"}
+      end
+    end
+  end
+
+  describe "the storage ledger" do
+    test "a keyed reader is shown the changes its grants cover", ctx do
+      {:ok, _} = OptimalEngine.Sync.enable("default", ctx.ws, "user:owner")
+      path = "/api/storage/workspaces/#{ctx.ws}/mutations?limit=500"
+
+      remember(ctx.ws, "Ledger secret 7731", ["confidential"])
+      remember(ctx.ws, "Ledger open 7732", [])
+      remember(ctx.ws, "Ledger restricted 7733", ["restricted"])
+      {:ok, _} = OptimalEngine.Sync.Capture.seal()
+
+      bare = Jason.decode!(get_as(path, mint(ctx, %{})).resp_body)
+
+      confidential =
+        Jason.decode!(
+          get_as(path, mint(ctx, %{"allowed_security_labels" => ["confidential"]})).resp_body
+        )
+
+      operator = Jason.decode!(get_as(path, nil).resp_body)
+
+      refute Jason.encode!(bare["mutations"]) =~ "Ledger secret 7731"
+      assert Jason.encode!(bare["mutations"]) =~ "Ledger open 7732"
+      assert bare["withheld"] >= 2 and bare["complete"] == false
+
+      assert Jason.encode!(confidential["mutations"]) =~ "Ledger secret 7731"
+
+      # The data-class ceiling applies to everyone, the operator included.
+      for answer <- [bare, confidential, operator],
+          do: refute(Jason.encode!(answer["mutations"]) =~ "Ledger restricted 7733")
+
+      assert Jason.encode!(operator["mutations"]) =~ "Ledger secret 7731"
+      assert operator["withheld"] >= 1
+    end
+  end
+
+  describe "conflicts of a reader" do
+    test "a conflict about a resource the principal may not read is left out and counted", ctx do
+      principal = "user:denied-conflict-#{ctx.n}"
+      token = mint(ctx, %{"allowed_security_labels" => ["restricted", "internal"]}, principal)
+
+      conflict(ctx, "acl", "memories", %{
+        "id" => ctx.internal.id,
+        "content" => "The Northwind offsite is Thursday"
+      })
+
+      conflict(ctx, "open", "memories", %{"id" => ctx.plain.id, "content" => "Lunch is at one"})
+
+      :ok =
+        ACL.deny(%{
+          resource_uri: "optimal://memory/#{ctx.ws}/#{ctx.internal.id}",
+          principal_id: principal,
+          tenant_id: "default"
+        })
+
+      answer = conflicts_answer(ctx, token)
+
+      assert Enum.map(answer["conflicts"], & &1["id"]) == [cid(ctx, "open")]
+      assert answer["withheld"] == 1
+      assert answer["complete"] == false
+
+      assert length(conflicts_answer(ctx, nil)["conflicts"]) == 2
+    end
+
+    test "a payload that holds no row is redacted for every key but *", ctx do
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO sync_conflicts (id, tenant_id, workspace_id, table_name, entity_key, kind, resolution, local_payload, remote_payload, remote_device)
+          VALUES (?1, 'default', ?2, 'memories', ?3, 'concurrent_change', 'kept_local_newer', ?4, ?4, 'rep_remote')
+          """,
+          [cid(ctx, "rowless"), ctx.ws, ctx.plain.id, Jason.encode!(%{"note" => "no row here"})]
+        )
+
+      everything =
+        mint(ctx, %{"allowed_security_labels" => ["restricted", "internal", "confidential"]})
+
+      root = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      assert conflicts(ctx, everything)[cid(ctx, "rowless")]["redacted"]
+      refute conflicts(ctx, root)[cid(ctx, "rowless")]["redacted"]
+      refute conflicts(ctx, nil)[cid(ctx, "rowless")]["redacted"]
+    end
+
+    test "a version is redacted when the row has been labelled since", ctx do
+      conflict(ctx, "late", "memories", %{"id" => ctx.plain.id, "content" => "Lunch is at one"})
+      refute conflicts(ctx, mint(ctx, %{}))[cid(ctx, "late")]["redacted"]
+
+      set_labels(ctx.plain.id, ~s(["restricted"]))
+
+      shown = conflicts(ctx, mint(ctx, %{}))[cid(ctx, "late")]
+      assert shown["redacted"]
+      refute Jason.encode!(shown) =~ "Lunch is at one"
+    end
+
+    test "the key of a conflict that names a page is hashed when it is redacted", ctx do
+      key = Jason.encode!(["default", "deal-room-#{ctx.n}", "default", 1])
+
+      row = %{
+        "tenant_id" => "default",
+        "slug" => "deal-room-#{ctx.n}",
+        "audience" => "default",
+        "version" => 1,
+        "body" => "Offer notes {{cite: optimal://chunk/chk-secret-#{ctx.n}}}"
+      }
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO sync_conflicts (id, tenant_id, workspace_id, table_name, entity_key, kind, resolution, local_payload, remote_payload, remote_device)
+          VALUES (?1, 'default', ?2, 'wiki_pages', ?3, 'concurrent_change', 'kept_local_newer', ?4, ?4, 'rep_remote')
+          """,
+          [cid(ctx, "page"), ctx.ws, key, Jason.encode!(%{"row" => row, "blobs" => %{}})]
+        )
+
+      bare = body_of_conflicts(ctx, mint(ctx, %{}))
+      refute bare =~ "deal-room"
+      refute bare =~ "Offer notes"
+
+      shown = conflicts(ctx, mint(ctx, %{}))[cid(ctx, "page")]
+      assert shown["redacted"] and shown["key_hidden"]
+      assert String.starts_with?(shown["entity_key"], "sha256:")
+
+      operator = conflicts(ctx, nil)[cid(ctx, "page")]
+      assert operator["entity_key"] == key
+      refute operator["redacted"]
+    end
+
+    test "a conflict carries the redacted flag for the operator too", ctx do
+      conflict(ctx, "plain", "memories", %{"id" => ctx.plain.id, "content" => "Lunch is at one"})
+
+      assert conflicts(ctx, nil)[cid(ctx, "plain")]["redacted"] == false
+    end
+  end
+
   # -- helpers ----------------------------------------------------------------------
 
   defp remember(ws, content, labels, partitions \\ []) do
@@ -331,6 +806,47 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
           [ws, slug, chunk_id]
         )
     end
+  end
+
+  defp slugs(snapshot), do: Enum.map(snapshot["wiki"], & &1["slug"])
+
+  defp set_labels(memory_id, json) do
+    {:ok, _} =
+      Store.raw_query(
+        "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json(?2)) WHERE id = ?1",
+        [memory_id, json]
+      )
+  end
+
+  # A memory and `count - 1` newer versions of it, oldest first.
+  defp version_chain(ws, count) do
+    {:ok, first} = Versioned.create(%{content: "Version 1", workspace_id: ws})
+
+    2..count
+    |> Enum.reduce([first.id], fn number, [latest | _] = acc ->
+      {:ok, next} = Versioned.update(latest, %{content: "Version #{number}"})
+      [next.id | acc]
+    end)
+    |> Enum.reverse()
+  end
+
+  # Runs `fun` while `column` of `table` has another name: every read of it
+  # fails, as a read of the Store does when it errors.
+  defp with_renamed_column(table, column, renamed, fun) do
+    {:ok, _} = Store.raw_query("ALTER TABLE #{table} RENAME COLUMN #{column} TO #{renamed}", [])
+
+    try do
+      fun.()
+    after
+      {:ok, _} = Store.raw_query("ALTER TABLE #{table} RENAME COLUMN #{renamed} TO #{column}", [])
+    end
+  end
+
+  defp conflicts_answer(ctx, token) do
+    path = "/api/sync/conflicts?" <> URI.encode_query(%{"workspace" => ctx.ws})
+    conn = get_as(path, token)
+    assert conn.status == 200, "conflicts: #{conn.status} #{conn.resp_body}"
+    Jason.decode!(conn.resp_body)
   end
 
   defp mint(ctx, metadata, principal \\ nil) do

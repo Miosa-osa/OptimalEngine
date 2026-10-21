@@ -1,3 +1,12 @@
+defmodule OptimalEngine.Sync.Gate.StoreError do
+  @moduledoc """
+  The gate could not read the Store while classifying. It is raised, never
+  turned into an answer: a push sends nothing, and a request that filters by
+  the gate is refused with 503 (`plug_status`).
+  """
+  defexception [:message, plug_status: 503]
+end
+
 defmodule OptimalEngine.Sync.Gate do
   @moduledoc """
   What leaves this Engine, and what a reader may see, when the row it comes
@@ -47,12 +56,18 @@ defmodule OptimalEngine.Sync.Gate do
 
   ## Reading (`open_reader/3`)
 
-  A reader holds a set of grants: the labels it may see and the partitions
-  it may see (`SecurityLabels.grants/2`). It sees a row when every token the
-  row carries is among them, which is the rule governed retrieval applies to
-  Memory Core objects: with no grants, only what carries nothing. A row that
-  cannot be resolved carries the `unresolved` token, which no grant names, so
-  it is read by no one. An aggregate carries every token in its workspace.
+  A reader holds grants: the labels it may see and the partitions it may see
+  (`SecurityLabels.grants/2`). It sees a row by the rule governed retrieval
+  applies to Memory Core objects (`SecurityLabels.permits?/2`): every label the
+  row carries must be granted, so with no grants only what carries nothing is
+  seen; with partitions granted only rows that share one are seen, and rows
+  with none are not. A row that cannot be resolved carries the `unresolved`
+  token, which no grant names, so it is read by no one; a grant of `"*"` is
+  the exception. An aggregate carries every label in its workspace and needs
+  every partition of it.
+
+  The rows a reader asks about are read a chunk of 500 at a time
+  (`readable_ids/3`), with the rows they link to, instead of one by one.
 
   A gate is opened for one pass (one push cycle, one served page, one
   export) and closed: it caches what it reads from the Store for the pass
@@ -69,6 +84,7 @@ defmodule OptimalEngine.Sync.Gate do
   @internal 1
   @restricted 3
   @max_depth 40
+  @chunk 500
 
   defstruct [:tenant_id, :workspace_id, :rank, :memo, :mode, :allowed]
 
@@ -78,10 +94,10 @@ defmodule OptimalEngine.Sync.Gate do
           rank: non_neg_integer(),
           memo: :ets.tid(),
           mode: :class | :grants,
-          allowed: MapSet.t(String.t()) | nil
+          allowed: SecurityLabels.grants() | nil
         }
 
-  @typep tokens :: MapSet.t(String.t()) | nil
+  @typep tokens :: MapSet.t(SecurityLabels.token()) | nil
 
   # -- opening ------------------------------------------------------------------
 
@@ -101,8 +117,8 @@ defmodule OptimalEngine.Sync.Gate do
   Opens a gate for a reader of a workspace. `allowed` is the reader's grants
   (`SecurityLabels.grants/2`).
   """
-  @spec open_reader(String.t(), String.t(), MapSet.t(String.t())) :: t()
-  def open_reader(tenant_id, workspace_id, %MapSet{} = allowed) do
+  @spec open_reader(String.t(), String.t(), SecurityLabels.grants()) :: t()
+  def open_reader(tenant_id, workspace_id, %{labels: _, partitions: _} = allowed) do
     %__MODULE__{
       tenant_id: tenant_id,
       workspace_id: workspace_id,
@@ -128,7 +144,7 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   @doc "Runs `fun` with a reader's gate, closing it after."
-  @spec with_reader(String.t(), String.t(), MapSet.t(String.t()), (t() -> result)) :: result
+  @spec with_reader(String.t(), String.t(), SecurityLabels.grants(), (t() -> result)) :: result
         when result: var
   def with_reader(tenant_id, workspace_id, allowed, fun) do
     run(open_reader(tenant_id, workspace_id, allowed), fun)
@@ -166,7 +182,8 @@ defmodule OptimalEngine.Sync.Gate do
         @internal
 
       other ->
-        raise "the sync gate could not read the workspace: #{inspect(other)}"
+        raise OptimalEngine.Sync.Gate.StoreError,
+          message: "the sync gate could not read the workspace: #{inspect(other)}"
     end
   end
 
@@ -240,9 +257,45 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   @doc "True when the reader may see the row of `table` with this id."
-  @spec readable_id?(t(), String.t(), String.t()) :: boolean()
+  @spec readable_id?(t(), String.t(), String.t() | nil) :: boolean()
+  def readable_id?(%__MODULE__{mode: :grants}, _table, nil), do: false
+
   def readable_id?(%__MODULE__{mode: :grants} = gate, table, id) do
     readable?(gate, ref_tokens(gate, {:row, table, id}, MapSet.new(), true))
+  end
+
+  @doc """
+  True when the row of `table` with this id is gone, or the reader may see it.
+  A record of a change to a row that has since been deleted is judged by the
+  record alone; one whose row is still there needs the row as well.
+  """
+  @spec readable_or_gone?(t(), String.t(), String.t() | nil) :: boolean()
+  def readable_or_gone?(%__MODULE__{mode: :grants} = gate, table, id) do
+    case Lineage.spec(table) do
+      %{key: key} = spec when is_binary(key) and is_binary(id) ->
+        load(gate, table, spec, id) == nil or readable_id?(gate, table, id)
+
+      _ ->
+        readable_id?(gate, table, id)
+    end
+  end
+
+  @doc """
+  The ids among `ids` of rows of `table` the reader may see. The rows, and
+  every row they link to, are read a chunk of 500 at a time (`WHERE key IN`)
+  before they are classified, instead of one query per row.
+  """
+  @spec readable_ids(t(), String.t(), [String.t() | nil]) :: MapSet.t(String.t())
+  def readable_ids(%__MODULE__{mode: :grants} = gate, table, ids) do
+    ids
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+    |> Enum.chunk_every(@chunk)
+    |> Enum.flat_map(fn chunk ->
+      prefetch(gate, [{table, chunk}], 0)
+      Enum.filter(chunk, &readable_id?(gate, table, &1))
+    end)
+    |> MapSet.new()
   end
 
   @doc """
@@ -253,8 +306,16 @@ defmodule OptimalEngine.Sync.Gate do
   def readable_mutation?(%__MODULE__{mode: :grants} = gate, mutation),
     do: readable?(gate, mutation_tokens(gate, mutation))
 
+  @doc """
+  `readable_mutation?/2` for a ledger that callers may also append to: a change
+  of an entity type that is not a replicated table is not governed by labels.
+  """
+  @spec readable_known?(t(), map()) :: boolean()
+  def readable_known?(%__MODULE__{mode: :grants} = gate, mutation),
+    do: Lineage.spec(mutation["entity_type"]) == nil or readable_mutation?(gate, mutation)
+
   defp readable?(%__MODULE__{allowed: allowed}, tokens),
-    do: tokens == nil or MapSet.subset?(tokens, allowed)
+    do: SecurityLabels.permits?(allowed, tokens)
 
   # -- classifying a row --------------------------------------------------------
 
@@ -268,9 +329,17 @@ defmodule OptimalEngine.Sync.Gate do
         unresolved()
 
       spec ->
-        if mutation["operation"] == "delete",
-          do: history_tokens(gate, table, spec, mutation),
-          else: top_tokens(gate, table, spec, mutation_row(mutation), true)
+        cond do
+          mutation["operation"] == "delete" ->
+            history_tokens(gate, table, spec, mutation)
+
+          # A reader is not shown what cannot be read as a row.
+          gate.mode == :grants and not match?(%{"payload" => %{"row" => %{}}}, mutation) ->
+            unresolved()
+
+          true ->
+            top_tokens(gate, table, spec, mutation_row(mutation), true)
+        end
     end
   end
 
@@ -341,13 +410,22 @@ defmodule OptimalEngine.Sync.Gate do
         unresolved()
 
       spec ->
-        case load(table, spec, id) do
+        case load(gate, table, spec, id) do
           nil ->
             cond do
-              Lineage.anchor?(table) -> unresolved(strict)
-              # A document or chunk that is gone is still in the ledger as it was.
-              strict -> ledger_tokens(gate, table, spec, id)
-              true -> nil
+              Lineage.anchor?(table) ->
+                unresolved(strict)
+
+              # A document or chunk that is gone is still in the ledger as it was;
+              # one the ledger never saw cannot be vouched for.
+              strict ->
+                case ledger_tokens(gate, table, spec, id) do
+                  :none -> unresolved()
+                  tokens -> tokens
+                end
+
+              true ->
+                nil
             end
 
           row ->
@@ -507,15 +585,24 @@ defmodule OptimalEngine.Sync.Gate do
   defp workspace_tokens(%__MODULE__{mode: :class} = gate),
     do: if(holds_above?(gate), do: unresolved(), else: nil)
 
+  # An aggregate is written from every row of the workspace, so a reader must
+  # hold every partition of it, not just share one.
   defp workspace_tokens(%__MODULE__{mode: :grants} = gate) do
-    Enum.reduce(Lineage.tables(), nil, fn table, acc ->
-      spec = Lineage.spec(table)
+    tokens =
+      Enum.reduce(Lineage.tables(), nil, fn table, acc ->
+        spec = Lineage.spec(table)
 
-      case carrying_rows(gate, table, spec) do
-        [] -> acc
-        rows -> Enum.reduce(rows, acc, &union(&2, Lineage.own_tokens(spec, &1)))
-      end
-    end)
+        case carrying_rows(gate, table, spec) do
+          [] -> acc
+          rows -> Enum.reduce(rows, acc, &union(&2, Lineage.own_tokens(spec, &1)))
+        end
+      end)
+
+    tokens &&
+      MapSet.new(tokens, fn
+        {:partition, id} -> {:partition_all, id}
+        other -> other
+      end)
   end
 
   # The distinct values of the columns of `table` that carry a class, label or
@@ -612,8 +699,10 @@ defmodule OptimalEngine.Sync.Gate do
   # -- history of a deleted row -------------------------------------------------
 
   defp history_tokens(gate, table, spec, mutation) do
-    case mutation["entity_id"] do
-      id when is_binary(id) -> ledger_tokens(gate, table, spec, id)
+    with id when is_binary(id) <- mutation["entity_id"],
+         tokens when tokens != :none <- ledger_tokens(gate, table, spec, id) do
+      tokens
+    else
       _ -> nil
     end
   end
@@ -632,10 +721,14 @@ defmodule OptimalEngine.Sync.Gate do
         [gate.tenant_id, gate.workspace_id, table, id]
       )
 
-    for [payload] <- rows, reduce: nil do
-      acc ->
-        row = mutation_row(%{"payload" => decode_payload(payload)})
-        union(acc, top_tokens(gate, table, spec, row, false))
+    if rows == [] do
+      :none
+    else
+      for [payload] <- rows, reduce: nil do
+        acc ->
+          row = mutation_row(%{"payload" => decode_payload(payload)})
+          union(acc, top_tokens(gate, table, spec, row, false))
+      end
     end
   end
 
@@ -843,6 +936,112 @@ defmodule OptimalEngine.Sync.Gate do
   defp put_union(map, nil, _tokens), do: map
   defp put_union(map, key, tokens), do: Map.update(map, key, tokens, &MapSet.union(&1, tokens))
 
+  # -- reading many rows at once --------------------------------------------------
+
+  # Reads `{table, ids}` rows into the gate's row cache, then the rows they
+  # link to, and so on level by level, so that classifying them afterwards
+  # finds each row in the cache.
+  defp prefetch(_gate, [], _depth), do: :ok
+  defp prefetch(_gate, _wanted, depth) when depth >= @max_depth, do: :ok
+
+  defp prefetch(gate, wanted, depth) do
+    refs =
+      wanted
+      |> Enum.flat_map(fn {table, ids} -> load_many(gate, table, ids) end)
+      |> Enum.flat_map(fn {spec, row} -> Lineage.refs(spec, row) end)
+
+    typed =
+      for {:row, table, id} <- refs, do: {table, id}
+
+    untyped =
+      gate
+      |> resolve_any(for({:any, id} <- refs, do: id))
+      |> Enum.map(fn {id, table} -> {table, id} end)
+
+    next =
+      (typed ++ untyped)
+      |> Enum.uniq()
+      |> Enum.reject(fn {table, id} -> :ets.member(gate.memo, {:row, table, id}) end)
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      |> Enum.to_list()
+
+    prefetch(gate, next, depth + 1)
+  end
+
+  # The rows of `table` with these keys that are not cached yet, read a chunk
+  # at a time. A key with no row is cached as missing.
+  defp load_many(gate, table, ids) do
+    with %{key: key} = spec when is_binary(key) <- Lineage.spec(table) do
+      columns = Lineage.columns(spec)
+
+      ids
+      |> Enum.reject(&:ets.member(gate.memo, {:row, table, &1}))
+      |> Enum.chunk_every(@chunk)
+      |> Enum.flat_map(fn chunk ->
+        sql =
+          "SELECT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} " <>
+            "WHERE #{quote_name(key)} IN (#{Enum.map_join(1..length(chunk), ", ", &"?#{&1}")})"
+
+        rows =
+          for values <- query!(sql, chunk),
+              row = columns |> Enum.zip(values) |> Map.new(),
+              do: {row[key], row}
+
+        found = Map.new(rows)
+
+        for id <- chunk do
+          row = Map.get(found, id)
+          :ets.insert(gate.memo, {{:row, table, id}, row})
+          if row, do: {spec, row}
+        end
+        |> Enum.reject(&is_nil/1)
+      end)
+    else
+      _ -> []
+    end
+  end
+
+  # The tables that hold links of no stated type, found a chunk at a time: the
+  # first table of `Lineage.any_tables/0` with the id, as `find_table/2`
+  # would. Ids that are in none are cached as such.
+  defp resolve_any(gate, ids) do
+    unknown =
+      ids
+      |> Enum.uniq()
+      |> Enum.reject(&:ets.member(gate.memo, {:table_of, &1}))
+
+    found =
+      unknown
+      |> Enum.chunk_every(@chunk)
+      |> Enum.reduce(%{}, fn chunk, found ->
+        Enum.reduce_while(Lineage.any_tables(), {found, chunk}, fn table, {found, remaining} ->
+          key = Lineage.spec(table).key
+
+          sql =
+            "SELECT #{quote_name(key)} FROM #{quote_name(table)} " <>
+              "WHERE #{quote_name(key)} IN (#{Enum.map_join(1..length(remaining), ", ", &"?#{&1}")})"
+
+          hits = for [id] <- query!(sql, remaining), do: id
+          found = Enum.reduce(hits, found, &Map.put_new(&2, &1, table))
+
+          case remaining -- hits do
+            [] -> {:halt, {found, []}}
+            rest -> {:cont, {found, rest}}
+          end
+        end)
+        |> elem(0)
+      end)
+
+    for id <- unknown do
+      :ets.insert(gate.memo, {{:table_of, id}, Map.get(found, id)})
+    end
+
+    for id <- Enum.uniq(ids),
+        table = :ets.lookup_element(gate.memo, {:table_of, id}, 2),
+        table != nil,
+        do: {id, table}
+  end
+
   # -- reading the Store ----------------------------------------------------------
 
   # SQL for "this column names a class above the gate, or cannot be read". It
@@ -857,19 +1056,22 @@ defmodule OptimalEngine.Sync.Gate do
     "(#{likes} OR NOT json_valid(#{column}))"
   end
 
-  defp load(table, %{key: key} = spec, id) when is_binary(key) do
-    columns = Lineage.columns(spec)
+  # A row by its key, from what `prefetch/3` read or from the Store.
+  defp load(gate, table, %{key: key} = spec, id) when is_binary(key) do
+    memoized(gate, {:row, table, id}, fn ->
+      columns = Lineage.columns(spec)
 
-    sql =
-      "SELECT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} WHERE #{quote_name(key)} = ?1 LIMIT 1"
+      sql =
+        "SELECT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} WHERE #{quote_name(key)} = ?1 LIMIT 1"
 
-    case query!(sql, [id]) do
-      [values | _] -> columns |> Enum.zip(values) |> Map.new()
-      [] -> nil
-    end
+      case query!(sql, [id]) do
+        [values | _] -> columns |> Enum.zip(values) |> Map.new()
+        [] -> nil
+      end
+    end)
   end
 
-  defp load(_table, _spec, _id), do: nil
+  defp load(_gate, _table, _spec, _id), do: nil
 
   defp find_table(id) do
     Enum.find(Lineage.any_tables(), fn table ->
@@ -889,9 +1091,15 @@ defmodule OptimalEngine.Sync.Gate do
 
   # A query the gate decides by: if the Store cannot answer, nothing is sent.
   defp query!(sql, params) do
+    :telemetry.execute([:optimal_engine, :sync, :gate_query], %{count: 1}, %{})
+
     case Store.raw_query(sql, params) do
-      {:ok, rows} -> rows
-      {:error, reason} -> raise "the sync gate could not read the Store: #{inspect(reason)}"
+      {:ok, rows} ->
+        rows
+
+      {:error, reason} ->
+        raise OptimalEngine.Sync.Gate.StoreError,
+          message: "the sync gate could not read the Store: #{inspect(reason)}"
     end
   end
 

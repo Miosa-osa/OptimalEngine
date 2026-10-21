@@ -496,7 +496,7 @@ defmodule OptimalEngine.Sync.Lineage do
   classification level. Nil when it carries none. A value that cannot be read
   is the `unresolved` token.
   """
-  @spec own_tokens(t(), map()) :: MapSet.t(String.t()) | nil
+  @spec own_tokens(t(), map()) :: MapSet.t(SecurityLabels.token()) | nil
   def own_tokens(spec, row) do
     tokens =
       Enum.flat_map(
@@ -526,7 +526,7 @@ defmodule OptimalEngine.Sync.Lineage do
   defp class_tokens(value) do
     case SecurityLabels.class_rank(value) do
       nil -> [SecurityLabels.unresolved()]
-      rank when rank > 1 -> [value |> to_string() |> String.trim()]
+      rank when rank > 1 -> [{:label, value |> to_string() |> String.trim() |> String.downcase()}]
       _internal_or_lower -> []
     end
   end
