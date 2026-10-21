@@ -28,6 +28,9 @@ defmodule OptimalEngine.Authority.Evidence do
   # Reads walk the chain in pages of this many entries, by tenant_seq, so none holds a
   # whole chain of any length at once.
   @where_page 1_000
+  # The integers SQLite stores and Exqlite binds; a bind outside them raises in the Store.
+  @max_int64 9_223_372_036_854_775_807
+  @int64 -9_223_372_036_854_775_808..9_223_372_036_854_775_807
 
   @kinds ~w(grant.issued grant.narrowed grant.admitted grant.denied grant.checkpoint
             grant.suspended grant.restored grant.revoked action.completed action.withheld
@@ -356,9 +359,11 @@ defmodule OptimalEngine.Authority.Evidence do
     * `"next_after"` - the `:after` of the next page, `nil` on the last.
 
   `{:error, :until_out_of_range}` when `:until` names no entry of the chain, or one
-  below `:after`.
+  below `:after`; `{:error, :after_out_of_range}` when `:after` is not a signed 64-bit
+  integer.
   """
-  @spec export(String.t(), keyword()) :: {:ok, map()} | {:error, :until_out_of_range}
+  @spec export(String.t(), keyword()) ::
+          {:ok, map()} | {:error, :until_out_of_range | :after_out_of_range}
   def export(tenant_id, opts \\ []) do
     after_seq = Keyword.get(opts, :after, 0)
     limit = opts |> Keyword.get(:limit, 10_000) |> max(1) |> min(10_000)
@@ -389,10 +394,16 @@ defmodule OptimalEngine.Authority.Evidence do
     end
   end
 
+  # NDJSON lines escape every character outside ASCII (U+2028 and U+2029 among them),
+  # so a line is ASCII and only its LF ends it.
+  @ndjson [escape: :unicode_safe]
+
   @doc """
   A page as NDJSON: one line per entry (`ndjson_entry/1`), then one `export_end` line
-  (`ndjson_end/1`). There are no key or checkpoint lines: a verifier reads each
-  evidence key by `kid` from `GET /api/authority/evidence/keys/:kid`.
+  (`ndjson_end/1`), each ending in LF (0x0A). Every character outside ASCII is written as
+  a `\\u` escape, so a line holds no other line break. There are no key or checkpoint
+  lines: a verifier reads each evidence key by `kid` from
+  `GET /api/authority/evidence/keys/:kid`.
   """
   @spec to_ndjson(map()) :: iodata()
   def to_ndjson(%{"entries" => entries} = page),
@@ -403,7 +414,8 @@ defmodule OptimalEngine.Authority.Evidence do
   with `"type": "entry"` added.
   """
   @spec ndjson_entry(map()) :: iodata()
-  def ndjson_entry(entry), do: [entry |> Map.put("type", "entry") |> Jason.encode_to_iodata!(), ?\n]
+  def ndjson_entry(entry),
+    do: [entry |> Map.put("type", "entry") |> Jason.encode_to_iodata!(@ndjson), ?\n]
 
   @doc """
   The `export_end` line of an NDJSON export of `page`, with its newline:
@@ -421,23 +433,29 @@ defmodule OptimalEngine.Authority.Evidence do
         {"next_after", page["next_after"]}
       ])
 
-    [Jason.encode_to_iodata!(line), ?\n]
+    [Jason.encode_to_iodata!(line, @ndjson), ?\n]
   end
 
   @doc """
   An export's head: `{"seq", "hash"}` of the chain's last entry, or with `until:` of
   the entry at that seq; `nil` for an empty chain. `{:error, :until_out_of_range}`
-  when `until:` names no entry, or one below `after:` (default 0).
+  when `until:` names no entry, or one below `after:` (default 0);
+  `{:error, :after_out_of_range}` when `after:` is not a signed 64-bit integer, the
+  largest the Store binds.
   """
-  @spec head(String.t(), keyword()) :: {:ok, map() | nil} | {:error, :until_out_of_range}
+  @spec head(String.t(), keyword()) ::
+          {:ok, map() | nil} | {:error, :until_out_of_range | :after_out_of_range}
   def head(tenant_id, opts \\ []) do
     after_seq = Keyword.get(opts, :after, 0)
 
     case Keyword.get(opts, :until) do
+      _until when after_seq not in @int64 ->
+        {:error, :after_out_of_range}
+
       nil ->
         {:ok, head_row(tenant_id, "1 = 1", [])}
 
-      until when is_integer(until) and until >= 1 and until >= after_seq ->
+      until when until in 1..@max_int64 and until >= after_seq ->
         case head_row(tenant_id, "tenant_seq = ?2", [until]) do
           nil -> {:error, :until_out_of_range}
           head -> {:ok, head}

@@ -331,7 +331,10 @@ class RouteMappingTests(CliTestCase):
         self.check(args, 'GET', '/api/authority/evidence/export',
                    {'after': '40', 'until': '41', 'limit': '30', 'format': 'ndjson'})
         self.assertEqual(self.ok(*args).stdout, page.decode())
-        for bad in [['--after', 'x'], ['--until', '4.5'], ['--format', 'xml']]:
+        self.check(['authority', 'export', '--until', '9223372036854775807'], 'GET',
+                   '/api/authority/evidence/export', {'until': '9223372036854775807'})
+        for bad in [['--after', 'x'], ['--until', '4.5'], ['--format', 'xml'], ['--until', '1' * 20],
+                    ['--after', '-1']]:
             with self.subTest(bad=bad):
                 self.assertEqual(self.run_cli('authority', 'export', *bad).returncode, 64)
 
