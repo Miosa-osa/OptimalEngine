@@ -40,8 +40,24 @@ defmodule OptimalEngine.Storage.Postgres do
       capabilities: ~w(relational temporal document geospatial time_series),
       stage: 1,
       adapter_registered: false,
-      env: @env
+      env: @env,
+      unavailable: unavailable()
     }
+  end
+
+  @doc """
+  What the PostgreSQL store does not do yet. Each one is refused by name at
+  runtime, never answered as if it worked.
+  """
+  @spec unavailable() :: [%{feature: String.t(), reason: String.t()}]
+  def unavailable do
+    [
+      %{
+        feature: "full_text_search",
+        reason:
+          "FTS5 tables are not created on PostgreSQL and MATCH is refused, until a tsvector slice"
+      }
+    ]
   end
 
   @doc """
@@ -114,6 +130,7 @@ defmodule OptimalEngine.Storage.Postgres do
          username: username,
          password: uri_password(uri),
          ssl: ssl_enabled?(uri),
+         sslmode: sslmode(uri),
          application_name: @application_name
        }}
     end
@@ -152,13 +169,15 @@ defmodule OptimalEngine.Storage.Postgres do
 
   defp uri_password(_uri), do: nil
 
-  defp ssl_enabled?(%URI{query: nil}), do: false
+  defp ssl_enabled?(uri), do: sslmode(uri) in ["require", "verify-ca", "verify-full"]
 
-  defp ssl_enabled?(%URI{query: query}) do
+  defp sslmode(%URI{query: nil}), do: nil
+
+  defp sslmode(%URI{query: query}) do
     query
     |> URI.query_decoder()
-    |> Enum.find_value(false, fn
-      {"sslmode", mode} -> mode in ["require", "verify-ca", "verify-full"]
+    |> Enum.find_value(fn
+      {"sslmode", mode} -> mode
       _ -> nil
     end)
   end
@@ -196,6 +215,7 @@ defmodule OptimalEngine.Storage.Postgres do
   defp connect_and_query(config, timeout) do
     options =
       config
+      |> Map.delete(:sslmode)
       |> Map.put(:timeout, timeout)
       |> Map.put(:connect_timeout, timeout)
       |> Map.put(:pool_size, 1)
