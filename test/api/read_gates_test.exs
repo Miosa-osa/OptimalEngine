@@ -455,6 +455,78 @@ defmodule OptimalEngine.API.ReadGatesTest do
     end
   end
 
+  # A signal the key may read still embeds the clusters it belongs to and the
+  # wiki pages that cite it, and those are rows of their own: a cluster is named
+  # for its members and a page is written from everything it cites, so either
+  # can carry a restricted document's theme or slug.
+  describe "what a signal embeds" do
+    test "a wiki page that cites it is listed only when the key may read the page", ctx do
+      doc_chunk = chunk(ctx.ws, "#{ctx.plain_doc.id}:doc", ctx.plain_doc.id, "Docs ship Friday")
+
+      wiki(ctx.ws, "pitch-#{ctx.n}", "Notes on the docs release", [doc_chunk])
+      # Cites the signal and a restricted chunk: the page is restricted.
+      wiki(ctx.ws, "offer-#{ctx.n}", "Offer notes", [doc_chunk, "chk-secret-#{ctx.n}"])
+
+      slugs = fn token ->
+        "/api/signals/#{ctx.plain_doc.id}?"
+        |> Kernel.<>(ws(ctx))
+        |> get_json(token)
+        |> Map.fetch!("citations")
+        |> Enum.map(& &1["wiki_slug"])
+        |> Enum.sort()
+      end
+
+      both = Enum.sort(["pitch-#{ctx.n}", "offer-#{ctx.n}"])
+
+      assert slugs.(mint(ctx, %{})) == ["pitch-#{ctx.n}"]
+      assert slugs.(mint(ctx, @machine)) == ["pitch-#{ctx.n}"]
+      assert slugs.(mint(ctx, %{"allowed_security_labels" => ["restricted"]})) == both
+      assert slugs.(nil) == both
+    end
+
+    test "a cluster is listed only when the key may read all of its members", ctx do
+      plain_chunk = chunk(ctx.ws, "#{ctx.plain_doc.id}:doc", ctx.plain_doc.id, "Docs ship Friday")
+
+      secret_chunk =
+        chunk(ctx.ws, "#{ctx.secret_doc.id}:doc", ctx.secret_doc.id, "Zephyrcorp offer")
+
+      open = cluster("cluster-open-#{ctx.n}", "Docs and changelog", [plain_chunk])
+
+      mixed =
+        cluster("cluster-mixed-#{ctx.n}", "Zephyrcorp offer timing", [plain_chunk, secret_chunk])
+
+      clusters = fn token ->
+        "/api/signals/#{ctx.plain_doc.id}?"
+        |> Kernel.<>(ws(ctx))
+        |> get_json(token)
+        |> Map.fetch!("clusters")
+        |> Enum.map(& &1["id"])
+        |> Enum.sort()
+      end
+
+      assert clusters.(mint(ctx, %{})) == [open]
+
+      assert clusters.(mint(ctx, %{"allowed_security_labels" => ["restricted"]})) ==
+               Enum.sort([open, mixed])
+
+      assert clusters.(nil) == Enum.sort([open, mixed])
+    end
+
+    test "the theme of a hidden cluster is not in the answer", ctx do
+      plain_chunk = chunk(ctx.ws, "#{ctx.plain_doc.id}:doc", ctx.plain_doc.id, "Docs ship Friday")
+
+      secret_chunk =
+        chunk(ctx.ws, "#{ctx.secret_doc.id}:doc", ctx.secret_doc.id, "Zephyrcorp offer")
+
+      cluster("cluster-mixed-#{ctx.n}", "Zephyrcorp offer timing", [plain_chunk, secret_chunk])
+
+      conn = get_as("/api/signals/#{ctx.plain_doc.id}?" <> ws(ctx), mint(ctx, %{}))
+
+      assert conn.status == 200
+      refute conn.resp_body =~ "Zephyrcorp"
+    end
+  end
+
   # A list that said how many rows it left out would tell a key without the
   # label that a restricted row matches its query: a probe for a name, an
   # amount or a project. These routes answer a probe for what the key may not
@@ -591,6 +663,24 @@ defmodule OptimalEngine.API.ReadGatesTest do
         "INSERT INTO chunks (id, tenant_id, signal_id, scale, text, workspace_id) VALUES (?1, 'default', ?2, 'document', ?3, ?4)",
         [id, context_id, text, ws]
       )
+
+    id
+  end
+
+  defp cluster(id, theme, chunk_ids) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO clusters (id, tenant_id, theme, intent_dominant, member_count) VALUES (?1, 'default', ?2, 'inform', ?3)",
+        [id, theme, length(chunk_ids)]
+      )
+
+    for chunk_id <- chunk_ids do
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO cluster_members (tenant_id, cluster_id, chunk_id, weight) VALUES ('default', ?1, ?2, 0.9)",
+          [id, chunk_id]
+        )
+    end
 
     id
   end
