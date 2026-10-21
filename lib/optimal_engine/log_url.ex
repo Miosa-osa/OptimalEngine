@@ -4,11 +4,13 @@ defmodule OptimalEngine.LogUrl do
 
   The path, query, fragment and user info of a webhook or sync peer URL can
   hold its secret (Slack and Discord webhook URLs carry it in the path), so a
-  log line never shows them. The host must be a DNS name or IPv4 address
-  (letters, digits, dots and hyphens) or a bracketed IPv6 address, followed by
-  an optional port and then the end of the URL or a `/`, `?` or `#`. Anything
-  else, a malformed authority such as `https://user:p/ss@host/x` (where `user`
-  would read as the host) or a control character included, is named
+  log line never shows them. Everything before the last `@` ahead of the
+  query is read as user info, so a password holding a `/`
+  (`https://admin:12345/x@host`) never shows as a host or a port; a path that
+  holds an `@` names what follows it. The host must be a DNS name or IPv4
+  address (letters, digits, dots and hyphens) or a bracketed IPv6 address,
+  followed by an optional port and then the end of the URL or a `/`, `?` or
+  `#`. Anything else, a control character included, is named
   "an unparsable URL".
   """
 
@@ -21,7 +23,7 @@ defmodule OptimalEngine.LogUrl do
   @spec render(term()) :: String.t()
   def render(url) when is_binary(url) do
     case Regex.run(
-           ~r/\A([A-Za-z][A-Za-z0-9+.-]*):\/\/(?:[^\/?#\s]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::([0-9]{1,5}))?(?:[\/?#]|\z)/,
+           ~r/\A([A-Za-z][A-Za-z0-9+.-]*):\/\/(?>(?:[^?#\s]*@)?)(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::([0-9]{1,5}))?(?:[\/?#]|\z)/,
            url
          ) do
       [_whole, scheme, host | port] ->
