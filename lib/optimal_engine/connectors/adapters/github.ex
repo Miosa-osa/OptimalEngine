@@ -21,7 +21,7 @@ defmodule OptimalEngine.Connectors.Adapters.GitHub do
     credential_keys: [],
     token_key: :pat
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @base_url "https://api.github.com"
   @page_size 100
@@ -111,7 +111,7 @@ defmodule OptimalEngine.Connectors.Adapters.GitHub do
   end
 
   defp auth_headers(nil), do: []
-  defp auth_headers(token), do: [{"authorization", "token #{token}"}]
+  defp auth_headers(token), do: [{"authorization", "token #{AccessToken.reveal(token)}"}]
 
   defp fetch_repos(org, headers) do
     url = "#{@base_url}/orgs/#{org}/repos?per_page=#{@page_size}"

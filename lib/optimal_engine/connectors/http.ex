@@ -42,8 +42,11 @@ defmodule OptimalEngine.Connectors.HTTP do
       the system's roots for an https URL (default `false`: Erlang's own default)
     * `:max_body_bytes` - fail with `{:error, :response_too_large}` when the
       answer is longer than this (default: no limit)
-    * `:single_attempt` - send `connection: close`, so the request is never
-      sent again on a kept-alive session the server closed (default `false`)
+    * `:single_attempt` - the request is sent once and no more (default
+      `false`): `connection: close`, so it is never sent again on a kept-alive
+      session the server closed, and `autoretry: 0`, so httpc does not send it a
+      second time after an answer that names a `Retry-After` (see
+      `autoretry_supported?/0`)
     * `:ratelimit`      — `{bucket_key, rate, burst}` to wait on before firing
     * `:parse_json`     — try to decode response body (default `true`)
   """
@@ -162,11 +165,47 @@ defmodule OptimalEngine.Connectors.HTTP do
     http_opts =
       [{:timeout, timeout}, {:connect_timeout, timeout}] ++
         if(Keyword.get(opts, :follow_redirects, false), do: [], else: [{:autoredirect, false}]) ++
+        retry_opts(opts) ++
         tls_opts(url, opts)
 
     case Keyword.get(opts, :max_body_bytes) do
       nil -> :httpc.request(method, http_request, http_opts, body_format: :binary)
       cap -> fire_capped(method, http_request, http_opts, cap, timeout)
+    end
+  end
+
+  defp retry_opts(opts) do
+    if Keyword.get(opts, :single_attempt, false) and autoretry_supported?(),
+      do: [{:autoretry, 0}],
+      else: []
+  end
+
+  @doc """
+  Whether this Erlang/OTP's httpc takes `autoretry` (OTP 28.4 and later). An
+  earlier httpc sends a request once more, after the delay, when the answer
+  names a `Retry-After`, and has no option to stop it; it refuses an option it
+  does not know, so `autoretry` is passed only where it is known.
+  """
+  @spec autoretry_supported?() :: boolean()
+  def autoretry_supported? do
+    otp = :erlang.system_info(:otp_release) |> to_string()
+    file = Path.join([to_string(:code.root_dir()), "releases", otp, "OTP_VERSION"])
+
+    with {:ok, text} <- File.read(file),
+         [major | rest] <- text |> String.trim() |> String.split("."),
+         {major, _} <- Integer.parse(major) do
+      case rest do
+        [minor | _] ->
+          case Integer.parse(minor) do
+            {minor, _} -> major > 28 or (major == 28 and minor >= 4)
+            :error -> false
+          end
+
+        [] ->
+          major > 28
+      end
+    else
+      _unknown -> false
     end
   end
 

@@ -45,7 +45,7 @@ defmodule OptimalEngine.Connectors.Adapters.Fathom do
     credential_keys: [:api_key],
     token_key: :api_key
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @base_url "https://api.fathom.ai/external/v1"
   @page_size 100
@@ -55,7 +55,7 @@ defmodule OptimalEngine.Connectors.Adapters.Fathom do
 
   @impl true
   def sync(state, cursor) do
-    headers = [{"X-Api-Key", pick(state, :api_key)}]
+    headers = [{"X-Api-Key", AccessToken.reveal(pick(state, :api_key))}]
     started = DateTime.utc_now() |> DateTime.truncate(:second)
     {since, created_after, page_cursor} = resume_point(state, cursor, started)
 

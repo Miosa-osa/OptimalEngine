@@ -128,7 +128,8 @@ At the start of each sync the Engine `POST`s to `broker_url`:
 MIOSA Connect issues it as `<connection_id>.<base64url hmac>`, and that signature is what the broker authenticates the call by; the Engine never parses it.
 `connector.id` is the connector's own id, and `workspace_id` is the connector's own workspace, never one its signals are routed to: the signature covers the workspace, so any other value is answered with a `401`.
 The Engine sends no secret and no header of its own beyond `accept` and `content-type`, and never holds the platform's internal secret.
-The call does not follow redirects, verifies the broker's certificate and host name, is made once on a connection of its own (no kept-alive session to be sent again on), reads at most 256 KiB of the answer, and gives up after `broker_timeout_ms`.
+The call does not follow redirects, verifies the broker's certificate and host name, is made once on a connection of its own (no kept-alive session to be sent again on, and `autoretry: 0` so that an answer naming a `Retry-After` does not send it again), reads at most 256 KiB of the answer, and gives up after `broker_timeout_ms`.
+`autoretry` is an Erlang/OTP 28.4 option: on an earlier OTP, `:httpc` sends a request again after a `Retry-After` until the call's timeout, so the timeout (5 seconds by default for the broker) is what bounds it. Run a managed Engine on OTP 28.4 or later.
 The route is whatever `broker_url` names, per connector, so a broker can move its route without an Engine change.
 
 `broker_url` is checked as written, not as a parser might read it.
@@ -161,7 +162,8 @@ The adapter calls its API with that token through `OptimalEngine.Connectors.Acce
 - **The token goes only where the adapter sent it.**
   Calls are https only, verify TLS, and follow no redirect by themselves: a redirect comes back as the answer it was.
   Drive's file downloads follow up to two redirects that stay on the same origin; no other redirect is followed with a token.
-  Salesforce's `instance_url` must be an https URL on Salesforce's own domains, and OneDrive follows only links on Microsoft Graph's hosts.
+  Salesforce's `instance_url` must be an org's own API host (`<org>.my.salesforce.com`, with at most one sandbox or develop label before `my`, or a legacy pod such as `na1.salesforce.com`) and OneDrive follows only links on Microsoft Graph's hosts.
+  Jira's and Confluence's `site_url` must be https, and when the broker issued the key it must be `<site>.atlassian.net`; a connector with its own credentials may name a self-hosted site.
   Apart from Drive's same-origin downloads, no adapter follows a redirect with a credential: `Connectors.HTTP` hands a redirect back unless the caller asks for it.
 
 A stored API key is answered the same way, and the credential map reaches the adapter exactly as if it had been decrypted from the Engine's store:
@@ -185,6 +187,7 @@ A key the broker names itself (for example `bot_token`) is passed on as it is an
 
 Fetched tokens and credentials are held in memory for one sync cycle: they are never written to the connectors table, a run record, the evidence chain, a log, or an error message.
 The secrets a broker issues (the access token, an API key, the key an adapter names for its secret) and an `access_token` given directly are held in the adapter's state as opaque values, so `inspect/1` of the state, a token or an error, and a crash report that prints the state, show only where a token came from and when it expires.
+A held secret has no text conversion: `"#{secret}"` and `to_string/1` raise, and an adapter reveals one by name (`AccessToken.reveal/1`) where it builds a header.
 Other credentials in the state, such as the client secret and refresh token of a connector on the Engine's own store, are plain strings for the length of a sync.
 
 ### A token given directly
@@ -193,7 +196,8 @@ An OAuth adapter also accepts an `access_token` in its credentials, for tests an
 It is sent as it is and never renewed: a refusal is reported as the adapter always reports one, usually `auth_expired`.
 The refresh-token flow is unchanged: given `oauth_refresh_token`, `client_id` and `client_secret` (or the adapter's own equivalents), the adapter exchanges them for a token once per sync, as before.
 A connector that carries a complete set of those (every key of the adapter's own grant) uses the grant, and an `access_token` left beside it is ignored; a broker-issued token comes before both.
-The exchanges post a form (`application/x-www-form-urlencoded`) and read a refused one (`400` or `401`) as `auth_expired`, a throttled one as `rate_limited` and a failing one as `transient`.
+The exchanges post a form (`application/x-www-form-urlencoded`), once, on a connection of their own with TLS verified and no redirect.
+A `401`, or a `400` naming `invalid_grant`, `invalid_client` or `unauthorized_client`, is `auth_expired`; any other `400` is `{:token_error, error_code}`, carrying only the provider's `error` field; a `429` is `rate_limited`, with the `Retry-After` the provider named (at most 30 s) for the Runner to wait; a `5xx` is `transient`.
 
 ### Errors
 
