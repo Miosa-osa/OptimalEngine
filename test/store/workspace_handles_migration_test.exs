@@ -157,7 +157,9 @@ defmodule OptimalEngine.Store.WorkspaceHandlesMigrationTest do
       workspace(db, "t:a", "alpha", "2026-01-01T00:00:00Z", ["old-a"])
       backfill(db)
 
-      assert capture_log(fn -> assert Migrations.report_skipped_handles(db) == [] end) == ""
+      # The report warns; an info line another process logs meanwhile is not the report's.
+      report = fn -> assert Migrations.report_skipped_handles(db) == [] end
+      assert capture_log([level: :warning], report) == ""
     end
   end
 end

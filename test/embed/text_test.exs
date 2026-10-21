@@ -793,7 +793,9 @@ defmodule OptimalEngine.Embed.TextTest do
         end)
 
       assert length(String.split(log, "over plain http")) == 2
-      assert capture_log(fn -> Endpoint.warn_plain_http(url <> "-nokey", false) end) == ""
+      # Only a warning is the endpoint's; an info line another process logs meanwhile is not.
+      unkeyed = fn -> Endpoint.warn_plain_http(url <> "-nokey", false) end
+      assert capture_log([level: :warning], unkeyed) == ""
     end
 
     test "the key never enters the application environment or a logged URL" do
