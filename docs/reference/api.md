@@ -81,7 +81,7 @@ Routes: 304
 | POST | `/api/batch/import/signals` | Router | write | workspace |
 | GET | `/api/boot` | Router | read | workspace |
 | GET | `/api/brief` | Router | read | workspace |
-| GET | `/api/bundles/:name` | Router | admin | tenant |
+| GET, DELETE | `/api/bundles/:name` | Router | admin | tenant |
 | POST | `/api/bundles/import` | Router | admin | tenant |
 | GET | `/api/bundles/jobs` | Router | admin | tenant |
 | GET | `/api/bundles/jobs/:id` | Router | admin | tenant |

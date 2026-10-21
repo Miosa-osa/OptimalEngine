@@ -4109,6 +4109,7 @@ defmodule OptimalEngine.API.Router do
   get("/api/bundles/jobs/:id", do: OptimalEngine.API.BundleJobsAPI.status(conn, id))
   post("/api/bundles/jobs/:id/cancel", do: OptimalEngine.API.BundleJobsAPI.cancel(conn, id))
   get("/api/bundles/:name", do: ScopeAPI.download_bundle(conn, name))
+  delete("/api/bundles/:name", do: ScopeAPI.delete_bundle(conn, name))
   post("/api/bundles/import", do: ScopeAPI.import_bundle(conn))
   get("/api/resolve", do: ScopeAPI.resolve(conn))
 
