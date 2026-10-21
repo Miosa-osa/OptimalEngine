@@ -6,7 +6,7 @@
 # a synthetic workspace (documents, chunks, vectors, edges, files) written while
 # sync is enabled, so its whole history is in the ledger. A exports a bundle,
 # which records `ledger_sequence` and `bundle_sha256`, and Engine B imports it
-# through the raw upload route. B then registers A as a pull peer starting from
+# by name from its bundle folder. B then registers A as a pull peer starting from
 # that sequence, A writes more changes, and B catches up.
 #
 # Proves: the bundle's mark covers every change written before the export,
@@ -19,6 +19,9 @@
 # 2 GB run. CHANGES (default 25) is the number of writes after the snapshot and
 # LATE (default 10) the number written just before the export. The run exits 77
 # (skipped) when the data directory's disk has less free space than it needs.
+# IMPORT_VIA=name (default) places the downloaded file in Engine B's bundle
+# folder and imports it by name, as a control plane does; IMPORT_VIA=upload sends
+# it as the raw request body with its SHA-256 in x-bundle-sha256.
 # Both Engines and every file live under DATA (a new temporary directory unless
 # given), which is removed at the end unless KEEP_DATA=1.
 #
@@ -31,6 +34,7 @@ cd "$ROOT"
 SEED_MB="${SEED_MB:-50}"
 CHANGES="${CHANGES:-25}"
 LATE="${LATE:-10}"
+IMPORT_VIA="${IMPORT_VIA:-name}"
 A_PORT="${A_PORT:-4231}"
 B_PORT="${B_PORT:-4232}"
 # A data directory this run creates is removed at the end (KEEP_DATA=1 keeps it).
@@ -289,30 +293,51 @@ echo "ENGINE_A_PEAK_RSS_MB=$(peak_mb "$DATA/rss-a.log")"
 bundle=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["bundle"]["bundle"])' "$DATA/export.json")
 mark=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["bundle"]["ledger_sequence"])' "$DATA/export.json")
 
-echo "== step 6: download the bundle and import it on Engine B"
+echo "== step 6: download the bundle and import it on Engine B ($IMPORT_VIA)"
+# By name is how a control plane seeds a managed Engine: it copies the file into
+# the Engine's bundle folder for the tenant, checks its SHA-256, and imports it
+# by name with the admin key. IMPORT_VIA=upload sends the raw file instead.
+if [ "$IMPORT_VIA" = upload ]; then
+  local_bundle="$DATA/bundle.tar.gz"
+else
+  mkdir -p "$DATA/b/backups/bundles/default"
+  local_bundle="$DATA/b/backups/bundles/default/$bundle"
+fi
 t0=$(date +%s.%N)
-code=$(curl -sS -o "$DATA/bundle.tar.gz" -w '%{http_code}' -H "Authorization: Bearer $a_key" \
+code=$(curl -sS -o "$local_bundle" -w '%{http_code}' -H "Authorization: Bearer $a_key" \
   "$A_URL/api/bundles/$bundle") || fail "downloading the bundle"
 [ "$code" = 200 ] || fail "downloading the bundle returned $code"
 t1=$(date +%s.%N)
-bundle_bytes=$(wc -c <"$DATA/bundle.tar.gz" | tr -d ' ')
-echo "BUNDLE_BYTES=$bundle_bytes"
+bundle_bytes=$(wc -c <"$local_bundle" | tr -d ' ')
+file_sha256=$(python3 -c 'import hashlib, sys
+h = hashlib.sha256()
+with open(sys.argv[1], "rb") as f:
+    for block in iter(lambda: f.read(1 << 20), b""):
+        h.update(block)
+print(h.hexdigest())' "$local_bundle")
+echo "BUNDLE_BYTES=$bundle_bytes BUNDLE_FILE_SHA256=$file_sha256"
 # The source's copy is not needed again; removing it keeps the run's disk use down.
-rm -f "$DATA/a/backups/bundles/$bundle"
+rm -f "$DATA/a/backups/bundles/default/$bundle"
 python3 -c 'import sys; print("DOWNLOAD_SECONDS=%.1f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$t0" "$t1"
 
 b_pid=$(start_engine b "$B_PORT" "$b_key") || fail "Engine B did not answer /api/health"
 sample_rss "$b_pid" "$DATA/rss-b.log" &
 t0=$(date +%s.%N)
-code=$(curl -sS -X POST -T "$DATA/bundle.tar.gz" -H "Content-Type: application/gzip" -H "Expect:" \
-  -H "Authorization: Bearer $b_key" -o "$DATA/import.json" -w '%{http_code}' \
-  "$B_URL/api/bundles/import") || fail "uploading the bundle to Engine B"
+if [ "$IMPORT_VIA" = upload ]; then
+  code=$(curl -sS -X POST -T "$local_bundle" -H "Content-Type: application/gzip" -H "Expect:" \
+    -H "x-bundle-sha256: $file_sha256" -H "Authorization: Bearer $b_key" -o "$DATA/import.json" \
+    -w '%{http_code}' "$B_URL/api/bundles/import") || fail "uploading the bundle to Engine B"
+else
+  code=$(curl -sS -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $b_key" \
+    --data "{\"bundle\":\"$bundle\",\"mode\":\"create\"}" -o "$DATA/import.json" \
+    -w '%{http_code}' "$B_URL/api/bundles/import") || fail "importing the bundle by name on Engine B"
+fi
 t1=$(date +%s.%N)
 [ "$code" = 201 ] || { head -c 600 "$DATA/import.json"; fail "the import returned $code"; }
 python3 -c 'import sys; print("IMPORT_SECONDS=%.1f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$t0" "$t1"
 echo "ENGINE_B_PEAK_RSS_MB=$(peak_mb "$DATA/rss-b.log")"
 echo "B_DB_BYTES_AFTER_IMPORT=$(db_bytes b)"
-rm -f "$DATA/bundle.tar.gz"
+rm -f "$local_bundle"
 
 python3 - "$DATA" "$B_URL" "$b_key" <<'PY' || fail "the import does not match the export"
 import json, sys
