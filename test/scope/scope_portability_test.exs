@@ -1265,7 +1265,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       target = "member-target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
 
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[1]]} =
                Store.raw_query(
@@ -1296,7 +1296,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       ])
 
       assert {:error, {:import_failed, "routing_rules", :unknown_column}} =
-               WorkspaceBundle.import(ctx.path, target)
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[0]]} =
                Store.raw_query("SELECT COUNT(*) FROM routing_rules WHERE id = ?1", [
@@ -1322,7 +1322,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       ])
 
       assert {:error, {:import_failed, "principals", :unknown_column}} =
-               WorkspaceBundle.import(ctx.path, target)
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, []} = Store.raw_query("SELECT tenant_id FROM principals WHERE id = ?1", [forged])
     end
@@ -1342,7 +1342,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
         }
       ])
 
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[^target, workspace_id]]} =
                Store.raw_query(
@@ -1367,7 +1367,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
         }
       ])
 
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[scope_type, scope_id, tenant]]} =
                Store.raw_query(
@@ -1402,7 +1402,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       ])
 
       assert {:error, {:import_failed, "workspace_members", :foreign_principal}} =
-               WorkspaceBundle.import(ctx.path, target)
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[0]]} =
                Store.raw_query("SELECT COUNT(*) FROM workspace_members WHERE principal_id = ?1", [
@@ -1416,15 +1416,18 @@ defmodule OptimalEngine.ScopePortabilityTest do
       target = moved_target(ctx, "name-target")
 
       assert {:error, :workspace_id_not_in_tenant} =
-               WorkspaceBundle.import(ctx.path, target, workspace_id: "beta-#{ctx.n}:review")
+               WorkspaceBundle.import(ctx.path, target,
+                 cross_tenant: true,
+                 workspace_id: "beta-#{ctx.n}:review"
+               )
 
       assert {:error, :invalid_workspace_id} =
-               WorkspaceBundle.import(ctx.path, target, workspace_id: "")
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, workspace_id: "")
 
       assert {:error, :not_found} = Workspace.get("beta-#{ctx.n}:review")
 
       assert {:ok, %{workspace_id: workspace_id}} =
-               WorkspaceBundle.import(ctx.path, target, workspace_id: "review")
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, workspace_id: "review")
 
       assert workspace_id == "#{target}:review"
     end
@@ -1455,7 +1458,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       # What a bundle may still do: add principals to the tenant that imports
       # it, under ids that tenant does not already have. It cannot name another
       # tenant's, and it cannot replace a principal that exists.
-      assert {:ok, _summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, _summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[^target]]} =
                Store.raw_query("SELECT tenant_id FROM principals WHERE id = ?1", [forged])
