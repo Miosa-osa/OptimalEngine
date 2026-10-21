@@ -5645,26 +5645,46 @@ defmodule OptimalEngine.API.Router do
     kept
   end
 
-  # An edge is judged as the replication gate judges one (`Sync.Lineage`): by the
-  # contexts at its ends.
-  defp readable_node_edges(reader, workspace_id, tenant_id, edges) do
-    {kept, _withheld} =
-      ReadScope.filter_rows(
-        reader,
-        workspace_id,
-        "graph_edges",
-        edges,
-        &%{
-          "tenant_id" => tenant_id,
-          "workspace_id" => workspace_id,
-          "source_id" => &1.source_id,
-          "target_id" => &1.target_id,
-          "relation" => &1.relation
-        },
-        fn _edge -> nil end
-      )
+  # An edge follows the contexts at its ends: it is shown when the key may read
+  # each end that is a context. An end that names no context is an entity, which
+  # is no labelled row, and is not judged (the replication gate reads such an end
+  # as a link to nothing and holds the edge, which would leave a gated key none
+  # of its own node's entity edges).
+  defp readable_node_edges(reader, workspace_id, _tenant_id, edges) do
+    contexts =
+      edges |> Enum.flat_map(&[&1.source_id, &1.target_id]) |> Enum.uniq() |> context_addresses()
 
-    kept
+    {readable, _withheld} =
+      ReadScope.filter(reader, workspace_id, "contexts", contexts, & &1.id, &(&1.uri || &1.id))
+
+    known = MapSet.new(contexts, & &1.id)
+    allowed = MapSet.new(readable, & &1.id)
+
+    Enum.filter(edges, fn edge ->
+      Enum.all?(
+        [edge.source_id, edge.target_id],
+        &(not MapSet.member?(known, &1) or MapSet.member?(allowed, &1))
+      )
+    end)
+  end
+
+  # The id and address of those of `ids` that are contexts. A Store that does
+  # not answer fails the request: an edge is not shown on a guess.
+  defp context_addresses(ids) do
+    ids
+    |> Enum.chunk_every(500)
+    |> Enum.flat_map(fn chunk ->
+      marks = Enum.map_join(1..length(chunk), ", ", &"?#{&1}")
+
+      case Store.raw_query("SELECT id, uri FROM contexts WHERE id IN (#{marks})", chunk) do
+        {:ok, rows} ->
+          Enum.map(rows, fn [id, uri] -> %{id: id, uri: uri} end)
+
+        {:error, reason} ->
+          raise OptimalEngine.Sync.Gate.StoreError,
+            message: "the node's edges could not be read: #{inspect(reason)}"
+      end
+    end)
   end
 
   defp fetch_node_contexts(node_id, workspace_id, tenant_id, offset, count) do
