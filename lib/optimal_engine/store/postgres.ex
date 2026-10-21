@@ -1,13 +1,14 @@
 defmodule OptimalEngine.Store.Postgres do
   @moduledoc """
-  The PostgreSQL implementation of the canonical store, for engines that share
-  one database (`docs/guides/postgres-provider.md`).
+  The PostgreSQL implementation of `OptimalEngine.Store.Adapter`, for engines
+  that share one database (`docs/guides/postgres-provider.md`).
 
   The process owns a connection pool (`OptimalEngine.Store.Postgres.Connection`)
   and, when it starts, brings the database schema in line with this build's
   migrations (`OptimalEngine.Store.Postgres.Schema`). Every operation runs in
   the calling process on a pooled connection; nothing is serialized through
-  this process.
+  this process, so writers in one engine and in other engines proceed in
+  parallel.
 
   ## Configuration
 
@@ -18,6 +19,18 @@ defmodule OptimalEngine.Store.Postgres do
   The connection URL is `OPTIMAL_POSTGRES_URL`, read when the store starts and
   never stored.
 
+  ## Writes
+
+  A context write replaces the stored row the way SQLite's `INSERT OR REPLACE`
+  does: the old row is deleted, with every `ON DELETE` action of the keys that
+  point at it, and the new row inserted, in one transaction. Its entities and
+  edges follow in the same transaction, and a duplicate entity or edge is
+  ignored, as on SQLite. Chunks are written the same way.
+
+  Every transaction runs at `SERIALIZABLE`; see
+  `OptimalEngine.Store.Postgres.Connection` for how a transaction that
+  PostgreSQL aborts is run again.
+
   ## Differences from the SQLite store
 
   - There is no hot cache: a per-process cache cannot see another engine's
@@ -26,16 +39,19 @@ defmodule OptimalEngine.Store.Postgres do
   - Full-text search is unavailable on PostgreSQL until a slice ports it to
     `tsvector`: the FTS5 tables are not derived, and a statement that uses
     `MATCH` is refused by the dialect with `{:error, {:unsupported, "FTS5 MATCH"}}`.
-
-  This module implements the read side of `OptimalEngine.Store.Adapter`;
-  the writes and `transaction/2` land in the next stage 3 slice, together with
-  `@behaviour`.
+  - A failed statement inside a transaction ends it, unless the statement
+    passes `recoverable: true` (`OptimalEngine.Store.Adapter`). No call site
+    goes on after a failed statement today except through a savepoint of its
+    own, which works as on SQLite.
   """
+
+  @behaviour OptimalEngine.Store.Adapter
 
   use GenServer
 
-  alias OptimalEngine.{Context, Signal, Store}
+  alias OptimalEngine.{Context, Graph, Signal, Store}
   alias OptimalEngine.Store.Postgres.{Connection, Schema}
+  alias OptimalEngine.Store.SQLite
 
   @pool __MODULE__.Pool
 
@@ -51,6 +67,27 @@ defmodule OptimalEngine.Store.Postgres do
 
   @select_context "SELECT #{@context_columns} FROM contexts"
 
+  @insert_context """
+  INSERT INTO contexts (#{@context_columns}, tenant_id)
+  VALUES (#{Enum.map_join(1..24, ", ", &"$#{&1}")},
+    COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = $24), 'default'))
+  """
+
+  # SQLite's chunk statement without OR REPLACE: the old chunk is deleted first.
+  @insert_chunk """
+  INSERT INTO chunks
+    (id, tenant_id, signal_id, parent_id, scale, offset_bytes, length_bytes,
+     text, modality, asset_ref, classification_level, created_at, workspace_id)
+  VALUES
+    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, COALESCE(?12, datetime('now')), ?13)
+  """
+
+  @insert_entity """
+  INSERT INTO entities (context_id, name, type, workspace_id)
+  VALUES ($1, $2, 'person', $3)
+  ON CONFLICT DO NOTHING
+  """
+
   # ---------------------------------------------------------------------------
   # Process
   # ---------------------------------------------------------------------------
@@ -62,6 +99,7 @@ defmodule OptimalEngine.Store.Postgres do
   `:schema`, `:pool_size`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
+  @impl OptimalEngine.Store.Adapter
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -118,11 +156,89 @@ defmodule OptimalEngine.Store.Postgres do
   end
 
   # ---------------------------------------------------------------------------
-  # Reads
+  # Contexts and signals
   # ---------------------------------------------------------------------------
+
+  @doc "Writes one context, its entities and its edges."
+  @spec insert_context(Context.t()) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_context(%Context{} = context) do
+    result = Connection.transaction(@pool, &write_context(&1, context), 10_000)
+
+    :telemetry.execute(
+      [:optimal_engine, :store, :insert],
+      %{count: 1},
+      %{node: context.node, type: context.type}
+    )
+
+    case result do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Writes contexts in one transaction and returns how many were written."
+  @spec insert_contexts([Context.t()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_contexts(contexts) when is_list(contexts) do
+    Connection.transaction(
+      @pool,
+      fn txn ->
+        Enum.reduce_while(contexts, {:ok, 0}, fn context, {:ok, count} ->
+          case write_context(txn, context) do
+            {:ok, _} -> {:cont, {:ok, count + 1}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+      end,
+      60_000
+    )
+  end
+
+  @doc "Writes one signal as a context of type `:signal`."
+  @spec insert_signal(Signal.t()) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_signal(%Signal{} = signal), do: insert_context(Context.from_signal(signal))
+
+  @doc "Writes signals in one transaction."
+  @spec insert_signals([Signal.t()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_signals(signals) when is_list(signals),
+    do: signals |> Enum.map(&Context.from_signal/1) |> insert_contexts()
+
+  # Delete then insert, as SQLite's INSERT OR REPLACE does: the old row's
+  # entities go with it through their ON DELETE CASCADE key. Entities and
+  # edges are best effort on SQLite, so a failed one does not fail the write.
+  defp write_context(txn, %Context{} = context) do
+    row = Context.to_row(context)
+    params = Enum.map(@context_fields, &Map.fetch!(row, &1))
+
+    with {:ok, _} <- txn_native(txn, "DELETE FROM contexts WHERE id = $1", [row.id]),
+         {:ok, _} <- txn_native(txn, @insert_context, params) do
+      write_entities(txn, context)
+
+      for edge <- Graph.context_edges(context) do
+        Connection.txn_query(txn, Graph.edge_insert_sql(), edge)
+      end
+
+      {:ok, context.id}
+    end
+  end
+
+  defp write_entities(txn, %Context{id: id, entities: entities} = context)
+       when is_list(entities) do
+    workspace_id = context.workspace_id || "default"
+
+    for entity <- entities do
+      txn_native(txn, @insert_entity, [id, entity, workspace_id])
+    end
+  end
+
+  defp write_entities(_txn, _context), do: []
 
   @doc "Reads one context by id."
   @spec get_context(String.t()) :: {:ok, Context.t()} | {:error, :not_found}
+  @impl OptimalEngine.Store.Adapter
   def get_context(id) when is_binary(id) do
     :telemetry.execute([:optimal_engine, :store, :cache_miss], %{count: 1}, %{})
 
@@ -135,6 +251,7 @@ defmodule OptimalEngine.Store.Postgres do
 
   @doc "Reads one signal by id."
   @spec get_signal(String.t()) :: {:ok, Signal.t()} | {:error, :not_found}
+  @impl OptimalEngine.Store.Adapter
   def get_signal(id) when is_binary(id) do
     with {:ok, context} <- get_context(id), do: {:ok, Context.to_signal(context)}
   end
@@ -145,6 +262,7 @@ defmodule OptimalEngine.Store.Postgres do
   A context without a modification time sorts last, as on SQLite.
   """
   @spec get_by_node(String.t(), keyword()) :: {:ok, [Context.t()]} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def get_by_node(node, opts \\ []) when is_binary(node) do
     {filter, params} =
       case Keyword.get(opts, :type) do
@@ -174,6 +292,7 @@ defmodule OptimalEngine.Store.Postgres do
 
   @doc "Row counts, as the SQLite store reports them; `cache_size` is always 0."
   @spec stats() :: {:ok, map()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def stats do
     Enum.reduce_while(@stats, {:ok, %{"cache_size" => 0}}, fn {key, sql}, {:ok, acc} ->
       case native(sql, []) do
@@ -183,21 +302,161 @@ defmodule OptimalEngine.Store.Postgres do
     end)
   end
 
+  @doc "Deletes one context; rows that point at it follow their `ON DELETE` actions."
+  @spec delete_context(String.t()) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def delete_context(id) when is_binary(id) do
+    with {:ok, _} <- native("DELETE FROM contexts WHERE id = $1", [id]), do: :ok
+  end
+
+  @doc "Deletes one signal."
+  @spec delete_signal(String.t()) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def delete_signal(id), do: delete_context(id)
+
   @doc "There is no hot cache to drop entries from."
   @spec evict_cached([String.t()]) :: :ok
+  @impl OptimalEngine.Store.Adapter
   def evict_cached(ids) when is_list(ids), do: :ok
 
   # ---------------------------------------------------------------------------
-  # Statements
+  # Statements and transactions
   # ---------------------------------------------------------------------------
 
   @doc "Runs one statement written for SQLite and returns its rows."
   @spec raw_query(String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
   def raw_query(sql, params \\ []) do
     with {:ok, %{rows: rows}} <-
            Connection.query(@pool, sql, params, timeout: Store.call_timeout()) do
       {:ok, rows}
     end
+  end
+
+  @doc "Runs one statement written for SQLite that returns no rows."
+  @spec raw_execute(String.t(), [term()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def raw_execute(sql, params \\ []) do
+    with {:ok, _} <- Connection.query(@pool, sql, params, timeout: Store.call_timeout()) do
+      :ok
+    end
+  end
+
+  @doc """
+  Runs `fun` in one transaction, with the contract of
+  `OptimalEngine.Store.Adapter`.
+
+  The fun runs in the calling process. When PostgreSQL aborts the transaction
+  to keep it serializable, it is rolled back and the fun runs again, so the fun
+  must only change the database.
+  """
+  @spec transaction((term() -> {:ok, term()} | {:error, term()}), timeout()) ::
+          {:ok, term()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def transaction(fun, timeout \\ 30_000) when is_function(fun, 1) do
+    Connection.transaction(@pool, fun, timeout)
+  end
+
+  @doc """
+  Runs a statement written for SQLite inside a transaction and returns its
+  rows. A failed statement ends the transaction unless it passes
+  `recoverable: true`, which runs it in a savepoint.
+  """
+  @spec txn_query(term(), String.t(), [term()], keyword()) :: {:ok, [[term()]]} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def txn_query(txn, sql, params \\ [], opts \\ []) do
+    with {:ok, %{rows: rows}} <- Connection.txn_query(txn, sql, params, recoverable(opts)),
+         do: {:ok, rows}
+  end
+
+  @doc """
+  Runs a statement written for SQLite inside a transaction and returns how many
+  rows it changed. Options as for `txn_query/4`.
+  """
+  @spec txn_execute(term(), String.t(), [term()], keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def txn_execute(txn, sql, params \\ [], opts \\ []) do
+    with {:ok, %{num_rows: count}} <- Connection.txn_query(txn, sql, params, recoverable(opts)),
+         do: {:ok, count}
+  end
+
+  defp recoverable(opts), do: Keyword.take(opts, [:recoverable])
+
+  # ---------------------------------------------------------------------------
+  # Pipeline rows
+  # ---------------------------------------------------------------------------
+
+  @doc "Writes chunks in one transaction, replacing a chunk with the same id."
+  @spec insert_chunks([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_chunks(chunks) when is_list(chunks) do
+    write_all(chunks, fn txn, chunk ->
+      [id | _] = params = SQLite.chunk_params(chunk)
+
+      with {:ok, _} <- txn_native(txn, "DELETE FROM chunks WHERE id = $1", [id]) do
+        Connection.txn_query(txn, @insert_chunk, params)
+      end
+    end)
+  end
+
+  @doc "Upserts chunk classifications in one transaction."
+  @spec insert_classifications([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_classifications(rows) when is_list(rows),
+    do: write_statements(rows, &SQLite.statement(:classification, &1))
+
+  @doc "Upserts chunk intents in one transaction."
+  @spec insert_intents([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_intents(rows) when is_list(rows),
+    do: write_statements(rows, &SQLite.statement(:intent, &1))
+
+  @doc "Upserts chunk embeddings in one transaction."
+  @spec insert_embeddings([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_embeddings(rows) when is_list(rows),
+    do: write_statements(rows, &SQLite.statement(:embedding, &1))
+
+  @doc "Upserts clusters in one transaction."
+  @spec insert_clusters([struct() | map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_clusters(rows) when is_list(rows),
+    do: write_statements(rows, &SQLite.statement(:cluster, &1))
+
+  @doc "Upserts cluster memberships in one transaction."
+  @spec insert_cluster_members([map()]) :: :ok | {:error, term()}
+  @impl OptimalEngine.Store.Adapter
+  def insert_cluster_members(rows) when is_list(rows),
+    do: write_statements(rows, &SQLite.statement(:cluster_member, &1))
+
+  # The SQLite store's own statements, through the dialect, so both stores
+  # write the same rows.
+  defp write_statements(rows, statement) do
+    write_all(rows, fn txn, row ->
+      {sql, params} = statement.(row)
+      Connection.txn_query(txn, sql, params)
+    end)
+  end
+
+  defp write_all([], _write), do: :ok
+
+  defp write_all(rows, write) do
+    result =
+      Connection.transaction(
+        @pool,
+        fn txn ->
+          Enum.reduce_while(rows, {:ok, :written}, fn row, ok ->
+            case write.(txn, row) do
+              {:ok, _} -> {:cont, ok}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
+          end)
+        end,
+        60_000
+      )
+
+    with {:ok, _} <- result, do: :ok
   end
 
   # The store's own statements are written for PostgreSQL.
@@ -207,4 +466,7 @@ defmodule OptimalEngine.Store.Postgres do
       {:ok, rows}
     end
   end
+
+  defp txn_native(txn, sql, params),
+    do: Connection.txn_query(txn, sql, params, dialect: :postgres)
 end

@@ -40,7 +40,7 @@ defmodule OptimalEngine.AppData.Files do
          {:ok, filename} <- filename(attrs["filename"]),
          {:ok, bytes} <- decode(attrs["content_base64"]),
          {:ok, metadata} <- metadata(attrs["metadata"]),
-         :ok <- below_file_limit(c, record_id),
+         :ok <- below_file_limit(:store, c, record_id),
          {:ok, tmp} <- write_tmp(bytes, filename) do
       try do
         content_type = attrs["content_type"] || "application/octet-stream"
@@ -78,11 +78,14 @@ defmodule OptimalEngine.AppData.Files do
     end
   end
 
-  # The record may have been deleted while the bytes were stored; link only
-  # if it still exists, in one transaction.
+  # The record may have been deleted, or have gained files, while the bytes
+  # were stored; link only if it still exists and is under the limit, in one
+  # transaction. The check before storing only spares storing bytes that
+  # would be refused.
   defp link(scope, c, file) do
     Store.transaction(fn txn ->
       with {:ok, _} <- Records.fetch_visible(txn, scope, c, file["record_id"]),
+           :ok <- below_file_limit(txn, c, file["record_id"]),
            {:ok, 1} <-
              SQL.exec(
                txn,
@@ -178,9 +181,9 @@ defmodule OptimalEngine.AppData.Files do
     end
   end
 
-  defp below_file_limit(c, record_id) do
+  defp below_file_limit(conn, c, record_id) do
     case SQL.scalar(
-           :store,
+           conn,
            "SELECT COUNT(*) FROM data_files WHERE collection_id = ? AND record_id = ?",
            [c.id, record_id]
          ) do
