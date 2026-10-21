@@ -19,11 +19,9 @@ defmodule OptimalEngine.LogUrlTest do
           {"https://host.example", "https://host.example/..."},
           {"https://host.example?query=x", "https://host.example/..."},
           {"relay+https://api.example/api/v1/engines/e1/sync", "relay+https://api.example/..."},
-          # Everything before the last @ ahead of the query is user info, so a
-          # password holding a / never reads as a host or a port.
-          {"https://admin:12345/x@host.example/y", "https://host.example/..."},
-          {"https://user:p/ss@host/x", "https://host/..."},
-          {"https://u:p@h1.example/a@h2.example:8443?x=1", "https://h2.example:8443/..."}
+          {"https://ops:pw@host.example/path", "https://host.example/..."},
+          # An @ in the query is not user info.
+          {"https://host.example/x?email=a@b.example", "https://host.example/..."}
         ] do
       assert LogUrl.render(url) == logged, url
     end
@@ -32,6 +30,14 @@ defmodule OptimalEngine.LogUrlTest do
   test "names a URL it cannot read, user info and control characters included, unparsable" do
     for url <- [
           "https://user:pass@ho st/x",
+          # An @ after a /: a password holding a / or a path holding an @.
+          # Either reading could show a secret as the host.
+          "https://admin:12345/x@host.example/y",
+          "https://user:p/ss@host/x",
+          "https://u:p@h1.example/a@h2.example:8443?x=1",
+          "https://api.example/v1/@Zq-token/hook",
+          "https://outlook.example/webhook/a1b2c3d4-0000-4000-8000-00000000000a@" <>
+            "e5f6a7b8-0000-4000-8000-00000000000b/IncomingWebhook/c9d0/f1e2",
           "https://ho\e[31mst/x",
           "https://host\u0085name/x",
           "https:///no-host",
@@ -48,6 +54,9 @@ defmodule OptimalEngine.LogUrlTest do
 
   @levels [:debug, :info, :notice, :warning, :warn, :error, :critical, :alert, :emergency, :log]
 
+  # A guard against the plain mistake, not a proof: a URL can reach a log line
+  # under another name, inside an inspected term or through a message built
+  # elsewhere. LogBuffer's redaction is the backstop for what this misses.
   test "no log message under lib/ interpolates a URL as it is" do
     sample = ~S|Logger.warning("[Sync] peer #{peer.url} and #{LogUrl.render(peer.url)}")|
     assert raw_url_interpolations(Code.string_to_quoted!(sample)) == ["peer.url"]
