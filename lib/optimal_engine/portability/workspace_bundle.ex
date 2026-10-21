@@ -72,6 +72,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @principals "principals"
   @documents "operating_documents"
   @batch_rows 1_000
+  @export_page_rows 1_000
 
   @doc """
   Writes a bundle for `workspace_id` to `path`. Returns the manifest.
@@ -348,13 +349,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         columns = columns(table)
         {where, params} = scope_clause(table, columns, tenant_id, workspace_id)
 
-        write_table(
-          staging,
-          table,
-          columns,
-          "SELECT * FROM #{quote_name(table)} WHERE #{where}",
-          params
-        )
+        write_table(staging, table, columns, where, params)
       end
 
     children =
@@ -367,7 +362,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           staging,
           table,
           columns,
-          "SELECT * FROM #{quote_name(table)} WHERE #{quote_name(fk)} IN (SELECT id FROM #{quote_name(parent)} WHERE #{where})",
+          "#{quote_name(fk)} IN (SELECT id FROM #{quote_name(parent)} WHERE #{where})",
           params
         )
       end
@@ -378,7 +373,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         @principals,
         columns(@principals),
         """
-        SELECT * FROM principals WHERE id IN (
+        id IN (
           SELECT principal_id FROM workspace_members WHERE workspace_id = ?1
           UNION SELECT principal_id FROM node_members WHERE workspace_id = ?1
         )
@@ -391,34 +386,83 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         staging,
         @documents,
         columns(@documents),
-        "SELECT * FROM operating_documents WHERE tenant_id = ?1 AND scope_type = 'workspace' AND scope_id = ?2",
+        "tenant_id = ?1 AND scope_type = 'workspace' AND scope_id = ?2",
         [tenant_id, workspace_id]
       )
 
     Enum.reject(scoped ++ children ++ [principals, documents], &(&1["rows"] == 0))
   end
 
-  defp write_table(staging, table, columns, sql, params) do
-    {:ok, rows} = Store.raw_query(sql, params)
+  # Writes the rows of `table` that match `where` as JSON lines. The table is
+  # read a page at a time and each page is written and hashed before the next
+  # is read, so a large workspace is never held in memory and no single Store
+  # call runs long enough to time out.
+  defp write_table(staging, table, columns, where, params) do
     file = Path.join([staging, "tables", table <> ".jsonl"])
+    names = Enum.map(columns, &elem(&1, 0))
 
-    content =
-      Enum.map_join(rows, "", fn row ->
-        row
-        |> Enum.zip(columns)
-        |> Map.new(fn {value, {name, _type, _pk}} -> {name, encode_value(value)} end)
-        |> Jason.encode!()
-        |> Kernel.<>("\n")
+    {rows, hash} =
+      File.open!(file, [:write, :binary], fn io ->
+        table
+        |> table_rows(where, params)
+        |> Enum.reduce({0, :crypto.hash_init(:sha256)}, fn row, {count, hash} ->
+          line =
+            names
+            |> Enum.zip(row)
+            |> Map.new(fn {name, value} -> {name, encode_value(value)} end)
+            |> Jason.encode!()
+            |> Kernel.<>("\n")
+
+          IO.binwrite(io, line)
+          {count + 1, :crypto.hash_update(hash, line)}
+        end)
       end)
-
-    File.write!(file, content)
 
     %{
       "name" => table,
-      "rows" => length(rows),
-      "columns" => Enum.map(columns, &elem(&1, 0)),
-      "sha256" => sha256(content)
+      "rows" => rows,
+      "columns" => names,
+      "sha256" => hash |> :crypto.hash_final() |> Base.encode16(case: :lower)
     }
+  end
+
+  # Pages through a table in rowid order, after the last rowid of the previous
+  # page. A table without a rowid is read in one query.
+  defp table_rows(table, where, params) do
+    if without_rowid?(table) do
+      {:ok, rows} = Store.raw_query("SELECT * FROM #{quote_name(table)} WHERE #{where}", params)
+      rows
+    else
+      n = length(params)
+
+      sql =
+        "SELECT rowid, * FROM #{quote_name(table)} WHERE (#{where}) AND rowid > ?#{n + 1} " <>
+          "ORDER BY rowid LIMIT ?#{n + 2}"
+
+      Stream.unfold(0, fn
+        :done ->
+          nil
+
+        after_rowid ->
+          {:ok, page} = Store.raw_query(sql, params ++ [after_rowid, @export_page_rows])
+
+          case page do
+            [] -> nil
+            _ -> {Enum.map(page, &tl/1), next_page(page)}
+          end
+      end)
+      |> Stream.concat()
+    end
+  end
+
+  defp next_page(page) when length(page) < @export_page_rows, do: :done
+  defp next_page(page), do: page |> List.last() |> hd()
+
+  defp without_rowid?(table) do
+    case Store.raw_query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1", [table]) do
+      {:ok, [[sql]]} when is_binary(sql) -> Regex.match?(~r/\bWITHOUT\s+ROWID\b/i, sql)
+      _ -> false
+    end
   end
 
   defp export_files(workspace_id, staging) do
@@ -439,7 +483,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         %{
           "path" => relative,
           "bytes" => File.stat!(file).size,
-          "sha256" => sha256(File.read!(file))
+          "sha256" => file_sha256(file)
         }
       end)
       |> Enum.sort_by(& &1["path"])
@@ -501,18 +545,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     table_ok =
       Enum.all?(manifest["tables"], fn table ->
-        case File.read(Path.join([staging, "tables", table["name"] <> ".jsonl"])) do
-          {:ok, content} -> sha256(content) == table["sha256"]
-          _ -> false
-        end
+        file_sha256(Path.join([staging, "tables", table["name"] <> ".jsonl"])) == table["sha256"]
       end)
 
     files_ok =
       Enum.all?(manifest["files"], fn file ->
-        case File.read(Path.join([staging, "files", file["path"]])) do
-          {:ok, content} -> sha256(content) == file["sha256"]
-          _ -> false
-        end
+        file_sha256(Path.join([staging, "files", file["path"]])) == file["sha256"]
       end)
 
     cond do
@@ -1102,7 +1140,16 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   defp root, do: Application.get_env(:optimal_engine, :root_path, File.cwd!())
 
-  defp sha256(content), do: :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+  # Hashes a file a megabyte at a time; nil when it is missing or unreadable.
+  defp file_sha256(path) do
+    if File.regular?(path) do
+      path
+      |> File.stream!([], 1_048_576)
+      |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
+      |> :crypto.hash_final()
+      |> Base.encode16(case: :lower)
+    end
+  end
 
   # The replication ledger's high-water mark when the bundle was taken: a
   # replica seeded from this bundle pulls from here. Changes captured but not

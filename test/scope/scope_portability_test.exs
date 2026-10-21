@@ -715,6 +715,51 @@ defmodule OptimalEngine.ScopePortabilityTest do
       end
     end
 
+    test "a table larger than one export page travels whole", ctx do
+      {:ok, :inserted} =
+        Store.transaction(fn txn ->
+          for i <- 1..2_500 do
+            {:ok, 1} =
+              Store.txn_execute(
+                txn,
+                "INSERT INTO contexts (id, tenant_id, workspace_id, title, content, created_at, uri) VALUES (?1, ?2, ?3, ?4, 'paged', '2026-10-14T10:00:00Z', ?5)",
+                [
+                  "paged-#{ctx.n}-#{i}",
+                  ctx.tenant,
+                  ctx.open,
+                  "Paged #{i}",
+                  "optimal://#{ctx.open}/contexts/paged-#{i}"
+                ]
+              )
+          end
+
+          {:ok, :inserted}
+        end)
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      exported = Enum.find(manifest["tables"], &(&1["name"] == "contexts"))
+      assert exported["rows"] >= 2_501
+
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      target = "paged-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Paged"})
+      {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert summary.rows["contexts"] == exported["rows"]
+
+      assert {:ok, [[count]]} =
+               Store.raw_query("SELECT COUNT(DISTINCT id) FROM contexts WHERE workspace_id = ?1", [
+                 summary.workspace_id
+               ])
+
+      assert count == exported["rows"]
+    end
+
     test "an import told to consume its bundle deletes the file once it is unpacked", ctx do
       {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
       :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
