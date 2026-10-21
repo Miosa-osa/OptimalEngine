@@ -98,7 +98,23 @@ defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
       assert result == :fallback
       assert ms < 1_000
       assert_received {:worker, worker}
-      refute Process.alive?(worker)
+
+      if TimeLimit.kill_safe?() do
+        refute Process.alive?(worker)
+      else
+        # OTP 28.0 to 28.2: the worker is left to finish, unlinked (see
+        # TimeLimit). This one never would, and it holds no regex match.
+        refute worker in elem(Process.info(self(), :links), 1)
+        Process.exit(worker, :kill)
+      end
+    end
+
+    test "a worker is killed past the limit except on OTP 28.0 to 28.2" do
+      for version <- ["16.0", "16.0.3", "16.1.1", "16.1.2"],
+          do: refute(TimeLimit.kill_safe?(version))
+
+      for version <- [~c"16.2", "16.3.1", "15.2.7", "17.0"],
+          do: assert(TimeLimit.kill_safe?(version))
     end
 
     test "inside a budget, detections share it and the rest get the fallback" do
