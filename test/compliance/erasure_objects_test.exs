@@ -8,6 +8,8 @@ defmodule OptimalEngine.Compliance.ErasureObjectsTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias OptimalEngine.Compliance.{Artifacts, DerivedData, Erasure, Retention}
   alias OptimalEngine.Identity.Principal
   alias OptimalEngine.Storage.S3
@@ -17,7 +19,7 @@ defmodule OptimalEngine.Compliance.ErasureObjectsTest do
 
   @s3_env ~w(OPTIMAL_S3_ENDPOINT OPTIMAL_S3_BUCKET OPTIMAL_S3_REGION OPTIMAL_S3_ACCESS_KEY_ID
              OPTIMAL_S3_SECRET_ACCESS_KEY OPTIMAL_S3_PREFIX OPTIMAL_S3_PATH_STYLE
-             OPTIMAL_S3_MAX_RETRIES)
+             OPTIMAL_S3_MAX_RETRIES OPTIMAL_S3_CREDENTIALS_FILE)
 
   setup do
     previous = Map.new(@s3_env, &{&1, System.get_env(&1)})
@@ -155,6 +157,86 @@ defmodule OptimalEngine.Compliance.ErasureObjectsTest do
 
     assert seeded.key in keys(ctx)
     assert count("contexts", "id", seeded.context) == 0
+  end
+
+  test "a store whose settings cannot be read is an error and the rows stay", ctx do
+    seeded = seed!(ctx, "unreadable")
+    System.delete_env("OPTIMAL_S3_ACCESS_KEY_ID")
+    System.delete_env("OPTIMAL_S3_SECRET_ACCESS_KEY")
+    System.put_env("OPTIMAL_S3_CREDENTIALS_FILE", "/nonexistent/credentials-#{ctx.n}")
+
+    # Not "no store configured": the Engine has one it cannot use, and deleting the rows
+    # would leave the object with nothing that points at it.
+    assert {:error, {:artifact_not_removed, :asset_object, :credentials_file_unreadable}} =
+             DerivedData.erase_contexts("default", [seeded.context])
+
+    assert seeded.key in keys(ctx)
+    assert count("contexts", "id", seeded.context) == 1
+    assert count("assets", "id", seeded.asset) == 1
+
+    System.delete_env("OPTIMAL_S3_CREDENTIALS_FILE")
+    point_at(ctx.stub)
+    assert {:ok, _} = DerivedData.erase_contexts("default", [seeded.context])
+    refute seeded.key in keys(ctx)
+  end
+
+  test "an object the store no longer has is gone, not an error that stops every run", ctx do
+    seeded = seed!(ctx, "missing")
+
+    # A bucket the store does not have answers a delete with 404.
+    System.put_env("OPTIMAL_S3_BUCKET", "bucket-that-is-gone")
+
+    {:ok, _} =
+      Store.raw_query("UPDATE assets SET storage_path = ?1 WHERE id = ?2", [
+        "s3://bucket-that-is-gone/" <> seeded.key,
+        seeded.asset
+      ])
+
+    assert {:ok, %{assets: 1}} = DerivedData.erase_contexts("default", [seeded.context])
+
+    assert count("contexts", "id", seeded.context) == 0
+    assert count("assets", "id", seeded.asset) == 0
+  end
+
+  describe "an object the store is not asked to delete" do
+    test "is counted by reason and logged, without a key", ctx do
+      seeded = seed!(ctx, "counted")
+      elsewhere = S3.object_key(["another-tenant", "default", "assets", "ab", "x-#{ctx.n}.bin"])
+
+      log =
+        capture_log(fn ->
+          send(
+            self(),
+            {:result,
+             Artifacts.remove([
+               {:asset_object, "s3://another-bucket/" <> seeded.key, "default", "default"},
+               {:asset_object, S3.uri(elsewhere), "default", "default"},
+               {:asset_object, "not an address", "default", "default"}
+             ])}
+          )
+        end)
+
+      assert_received {:result, {:ok, result}}
+      assert result.files == 0
+
+      assert result.skipped == %{
+               asset_object: %{other_bucket: 1, outside_prefix: 1, not_ours: 1}
+             }
+
+      assert log =~ "left alone"
+      refute log =~ seeded.key
+      assert deletes(ctx) == []
+    end
+
+    test "is counted as not configured when the Engine has no store", ctx do
+      seeded = seed!(ctx, "not-configured")
+      Enum.each(@s3_env, &System.delete_env/1)
+
+      assert {:ok, %{skipped: %{asset_object: %{not_configured: 1}}}} =
+               Artifacts.remove([{:asset_object, seeded.uri, "default", "default"}])
+
+      assert seeded.key in keys(ctx)
+    end
   end
 
   test "an object that cannot be deleted leaves the rows, and the next run finishes", ctx do
