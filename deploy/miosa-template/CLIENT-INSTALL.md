@@ -25,6 +25,7 @@ Another user uses `/opt/optimal` for `install` when it can be written, and for t
 Otherwise it is `~/.local/share/optimal`.
 
 A link into an Optimal prefix is a symbolic link whose target, absolute or relative to the link's directory, is a regular file `<root>/bin/<name>`, where `<root>/VERSION` holds a version like `0.3.3` and `<root>/bin/optimal` is the client CLI (it has an `OPTIMAL_CLI_VERSION=` line).
+A link is dangling only when its target is known to be missing: a target behind a directory that cannot be searched is left alone.
 Such a link, from this install or an older one, is replaced by removing it and linking again; a link to a directory, or to a root that fails either check, is left alone.
 
 ## Release files
@@ -55,6 +56,8 @@ The script also accepts a flat MCP archive (`dist/`, `node_modules/`, `package.j
 | `OPTIMAL_ENGINE_API_KEY_FILE` or `OPTIMAL_ENGINE_API_KEY` | at machine start | The workspace-scoped key; a key file must be an absolute path to a readable file. |
 | `OPTIMAL_WORKSPACE` | at machine start | The workspace id, for keys limited to named workspaces. |
 | `OPTIMAL_MCP_NODE` | no | Read by the installed launcher when the MCP server starts: the `node` program to run. |
+| `OPTIMAL_CLIENT_LOCK_WAIT` | no | Seconds `install` waits for another install's lock (default 60) before exiting 75. |
+| `OPTIMAL_CLIENT_BREAK_LOCK` | no | `1` takes the lock over whoever holds it. |
 
 The two sha256 pins are what make the install trustworthy: they come from the manifest, not from the place that serves the archives.
 Without them the script takes the sha256 from `SHA256SUMS` in the same source, which catches a corrupt download but not a source that was changed, archives and `SHA256SUMS` together.
@@ -69,8 +72,12 @@ Both archives are fetched, checked and unpacked in a scratch directory first, so
 Then every file is copied into the prefix beside the installed one, under a temporary name: this is the step that needs disk space.
 Only when every copy succeeded are they renamed into place, the MCP server first and `VERSION` last.
 A full disk or a missing permission during the copies exits 73 with the temporary files removed and the installed client unchanged.
-One install runs at a time in a prefix: `<prefix>/.install.lock` holds the pid and host of the install that holds it.
-Another install exits 75; a lock whose holder ran on this machine and is provably gone is taken over, and any other has to be removed by hand once its install is gone.
+One install runs at a time in a prefix.
+The lock, `<prefix>/.install.lock`, is a symbolic link whose target names its holder (pid, host, boot id, pid namespace, and the time it was taken), so it is created and read with its owner in one step.
+Another install waits for it up to `OPTIMAL_CLIENT_LOCK_WAIT` seconds (default 60), then exits 75.
+A stale lock is taken over with a warning: one older than 15 minutes, whoever holds it; one whose holder ran on this host before the last boot; and one whose holder is on this host, boot and pid namespace and is provably not running.
+A holder on another host or in another pid namespace, or one whose owner cannot be read, counts as alive until the 15 minutes pass; `OPTIMAL_CLIENT_BREAK_LOCK=1` takes over any lock.
+A takeover moves the lock aside in one step and checks it moved the lock it judged stale, so two installs never both take it, and an install removes the lock on its way out only while the lock is still its own.
 A signal (TERM, INT or HUP) between the MCP server's two renames puts the installed server back on the way out.
 A run killed outright (SIGKILL, a power cut) can leave its temporary copies, or the MCP server moved aside.
 Under the lock, the next `install` removes what runs that are provably no longer alive left, under this installer's own names only, and puts such a server back when the prefix has none; a server it cannot put back is kept, with a warning.
@@ -159,7 +166,7 @@ The key is never printed and never passed as a program argument.
 | 69 | Something is unavailable: the source does not answer, answers 404 for an archive, or answers another error; `curl`, a sha256 tool, Node.js 20 or newer, or the platform is missing. |
 | 70 | No client is installed in the prefix, `<prefix>/VERSION` does not hold a version (the error names the file), the installed CLI reports another version, or the MCP server did not answer `initialize` as the installed version. |
 | 73 | Something could not be written or is not this installer's: the prefix (nothing is replaced), an MCP server or launcher without this installer's marks, a program link, `claude mcp add`, the profile or the Codex config, including a Codex config this user cannot read and write, and, as root, a directory that fails the root rule below. The Codex config is then unchanged. |
-| 75 | Another install holds `<prefix>/.install.lock`. |
+| 75 | Another install kept `<prefix>/.install.lock` past `OPTIMAL_CLIENT_LOCK_WAIT`. |
 
 The Engine checks in `verify` exit with the CLI's own code: 77 the key was refused, 69 the Engine is unreachable, 64 the key is limited to named workspaces and `OPTIMAL_WORKSPACE` is unset, 78 bad client configuration, 1 any other HTTP error.
 From 0.3.3 the MCP server is versioned with the Engine and a different version is refused; for 0.3.2 and earlier a different MCP server version is only a warning.
@@ -179,7 +186,8 @@ From 0.3.3 the MCP server is versioned with the Engine and a different version i
   The file is rewritten atomically with mode 0600, through a symlink when `config.toml` is one, so the link stays (not as root, see below); a `~/.codex` the script creates is mode 0700.
   A config this user cannot read and write (for example one owned by root in the agent's home) is left alone and the script exits 73.
 
-As root, `configure` and `register` write only into a directory (the profile's configuration directory and its parent, Claude Code's `CLAUDE_CONFIG_DIR` or `HOME`, and `CODEX_HOME`) that, if it exists, is not a symlink, is owned by root and cannot be written by group or others, and whose parent root owns.
+As root, `configure` and `register` write only into a directory (the profile's configuration directory and its parent, Claude Code's `CLAUDE_CONFIG_DIR` or `HOME`, and `CODEX_HOME`) that, if it exists, is not a symlink, is owned by root and cannot be written by group or others, and whose parent root owns and others cannot write, unless the parent is sticky (as `/tmp` is) and the directory already exists.
+A trailing slash is ignored, so `/var/` is checked as `/var`.
 `register` also never writes through a symlinked Codex `config.toml`.
 Anything else another user could swap or point at another file while root writes, so the script exits 73.
 Only those directories and their parents are checked, not every ancestor: the reliable way to register for an agent user is to run `configure` and `register` as that user.

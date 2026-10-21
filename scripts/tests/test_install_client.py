@@ -14,10 +14,12 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +45,21 @@ def node_ok():
 
 
 NODE = node_ok()
+
+
+def default_signals():
+    """In the installer's process: HUP, INT and TERM at their defaults. A shell cannot
+    trap a signal that was ignored when it started, as INT is under some runners."""
+    for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(number, signal.SIG_DFL)
+
+
+def boot_id():
+    try:
+        return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    except OSError:
+        out = subprocess.run(['sysctl', '-n', 'kern.bootsessionuuid'], capture_output=True, text=True)
+        return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else 'unknown'
 # The shell that runs the installer: OPTIMAL_CLIENT_TEST_SHELL=dash (or bash) runs every case
 # under that shell instead of sh.
 INSTALL_SHELL = shutil.which(os.environ.get('OPTIMAL_CLIENT_TEST_SHELL', 'sh')) or 'sh'
@@ -181,7 +198,7 @@ class InstallClientTestCase(unittest.TestCase):
 
     def run_installer(self, *args, check=True, script=INSTALLER):
         result = subprocess.run([INSTALL_SHELL, str(script), *args], env=self.env, capture_output=True,
-                                text=True, timeout=120)
+                                text=True, timeout=120, preexec_fn=default_signals)
         if check:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
@@ -231,13 +248,15 @@ class InstallClientTestCase(unittest.TestCase):
         return {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths}
 
     def fake_root_ls(self):
-        """ls reports root ownership, with FAKE_LS_MODE (default drwx------), for any path."""
-        self.fake('ls', 'mode=${FAKE_LS_MODE:-drwx------}\nfor last; do :; done\n'
+        """ls reports root ownership for any path, with FAKE_LS_MODE (default drwx------)
+        for a directory and FAKE_LS_PARENT_MODE (default drwxr-xr-x) for its parent."""
+        self.fake('ls', 'if [ "$1" = -ndL ]; then mode=${FAKE_LS_PARENT_MODE:-drwxr-xr-x}; '
+                        'else mode=${FAKE_LS_MODE:-drwx------}; fi\nfor last; do :; done\n'
                         'printf "%s 2 0 0 64 Jan  1 00:00 %s\\n" "$mode" "$last"\n')
 
     def leftovers(self):
         return sorted(p.name for d in [self.prefix, self.prefix / 'bin'] if d.is_dir() for p in d.iterdir()
-                      if '.new.' in p.name or '.old.' in p.name or p.name == '.install.lock')
+                      if '.new.' in p.name or '.old.' in p.name or p.name.startswith('.install.lock'))
 
     def dead_pid(self):
         process = subprocess.Popen(['true'])
@@ -613,27 +632,144 @@ class RecoveryTests(InstallClientTestCase):
         self.assertFalse((self.prefix / 'mcp').exists())
         self.assertFalse((self.prefix / 'bin' / 'optimal-engine-mcp').exists())
 
-    def test_one_install_at_a_time(self):
-        self.run_installer('install')
+
+
+class LockTests(InstallClientTestCase):
+    """One install at a time in a prefix: a symbolic link whose target is its holder."""
+
+    def setUp(self):
+        super().setUp()
         command = ['hostname'] if shutil.which('hostname') else ['uname', '-n']
-        hostname = subprocess.run(command, capture_output=True, text=True).stdout.strip()
-        lock = self.prefix / '.install.lock'
-        for holder, code in [(f'{os.getpid()} {hostname}', 75), (f'{self.dead_pid()} other-host', 75)]:
-            with self.subTest(holder=holder):
-                lock.mkdir()
-                (lock / 'owner').write_text(holder + '\n')
+        self.host = subprocess.run(command, capture_output=True, text=True).stdout.strip()
+        self.boot = boot_id()
+        self.ns = os.readlink('/proc/self/ns/pid') if os.path.exists('/proc/self/ns/pid') else 'unknown'
+        self.lock = self.prefix / '.install.lock'
+        self.run_installer('install')
+
+    def owner(self, pid=None, host=None, boot=None, ns=None, at=None):
+        return (f'pid={pid or os.getpid()} host={host or self.host} boot={boot or self.boot} '
+                f'ns={ns or self.ns} at={int(time.time() if at is None else at)}')
+
+    def held(self):
+        return os.readlink(self.lock) if self.lock.is_symlink() else None
+
+    def test_a_live_holder_is_waited_for_and_otherwise_exits_75(self):
+        live = self.owner()
+        self.lock.symlink_to(live)
+        self.env['OPTIMAL_CLIENT_LOCK_WAIT'] = '0'
+        result = self.run_installer('install', check=False)
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        self.assertIn(f'another install holds {self.lock} ({live})', result.stderr)
+        self.assertEqual(self.held(), live)
+
+        # Released while waiting: install goes ahead.
+        self.env['OPTIMAL_CLIENT_LOCK_WAIT'] = '20'
+        release = threading.Timer(1.5, self.lock.unlink)
+        release.start()
+        self.addCleanup(release.cancel)
+        result = self.run_installer('install')
+        self.assertIn('waiting up to 20s', result.stdout)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_stale_locks_are_taken_over_and_unknown_ones_are_not(self):
+        self.env['OPTIMAL_CLIENT_LOCK_WAIT'] = '0'
+        old = time.time() - 1_200
+        cases = [
+            ('a dead holder on this host', self.owner(pid=self.dead_pid()), 'is no longer running'),
+            ('a holder from before the last boot', self.owner(boot='an-earlier-boot'),
+             'before this machine last started'),
+            ('a holder older than 15 minutes', self.owner(host='elsewhere', at=old),
+             'older than 15 minutes'),
+            ('a malformed owner, old', 'garbage', 'older than 15 minutes'),
+            ('no owner, old', None, 'older than 15 minutes'),
+        ]
+        if self.boot == 'unknown':
+            cases = [c for c in cases if 'boot' not in c[0]]
+        for name, owner, why in cases:
+            with self.subTest(name):
+                if owner is None:
+                    self.lock.write_text('')
+                    os.utime(self.lock, (old, old))
+                else:
+                    self.lock.symlink_to(owner)
+                    if owner == 'garbage':
+                        os.utime(self.lock, (old, old), follow_symlinks=False)
+                result = self.run_installer('install')
+                self.assertIn(f'took over {self.lock}', result.stderr)
+                self.assertIn(why, result.stderr)
+                self.assertEqual(self.leftovers(), [])
+
+        kept = [
+            ('a live holder on another host', self.owner(host='elsewhere')),
+            ('a holder in another pid namespace', self.owner(pid=self.dead_pid(), ns='pid:[1]')),
+            ('a pid that is not a number', self.owner(pid='abc')),
+            ('a malformed owner', 'garbage'),
+            ('no owner', None),
+        ]
+        for name, owner in kept:
+            with self.subTest(name):
+                if owner is None:
+                    self.lock.write_text('')
+                else:
+                    self.lock.symlink_to(owner)
+                result = self.run_installer('install', check=False)
+                self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+                self.assertTrue(os.path.lexists(self.lock))
+                self.lock.unlink()
+
+        # OPTIMAL_CLIENT_BREAK_LOCK=1 takes over even a live holder.
+        self.lock.symlink_to(self.owner())
+        self.env['OPTIMAL_CLIENT_BREAK_LOCK'] = '1'
+        result = self.run_installer('install')
+        self.assertIn('OPTIMAL_CLIENT_BREAK_LOCK=1', result.stderr)
+        self.assertEqual(self.leftovers(), [])
+
+    def concurrent_installs(self):
+        """Two installs at once; the cp of each copy into the prefix is logged and slowed."""
+        log = self.dir / 'copies'
+        real_cp = shutil.which('cp')
+        self.fake('cp', f'case "$*" in *".new."*) echo "$PPID" >>"{log}"; sleep 0.2 ;; esac\n'
+                        f'exec "{real_cp}" "$@"\n')
+        runs = [subprocess.Popen([INSTALL_SHELL, str(INSTALLER), 'install'], env=self.env, text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=default_signals)
+                for _ in range(2)]
+        outputs = [run.communicate(timeout=120) for run in runs]
+        for run, (out, err) in zip(runs, outputs):
+            self.assertEqual(run.returncode, 0, out + err)
+        writers = log.read_text().split()
+        # Each install's copies run under the lock, so the log changes hands once.
+        changes = sum(1 for a, b in zip(writers, writers[1:]) if a != b)
+        self.assertEqual(changes, 1, writers)
+        self.assertEqual(sorted(set(writers)), sorted(str(run.pid) for run in runs))
+        self.assertEqual(self.leftovers(), [])
+        (self.fakes / 'cp').unlink()
+        log.unlink()
+        return outputs
+
+    def test_two_installs_at_once_take_turns(self):
+        self.concurrent_installs()
+
+    def test_two_installs_facing_one_stale_lock_take_it_over_once(self):
+        self.lock.symlink_to(self.owner(pid=self.dead_pid()))
+        outputs = self.concurrent_installs()
+        took = [err for _out, err in outputs if 'took over' in err]
+        self.assertEqual(len(took), 1, outputs)
+
+    def test_an_install_never_removes_a_lock_that_is_not_its_own(self):
+        foreign = self.owner(pid=1, host='elsewhere')
+        real_cp = shutil.which('cp')
+        for code in [73, 0]:
+            with self.subTest(exit=code):
+                # While this install holds the lock, another takes it (as a break would).
+                fail = 'exit 1' if code else ':'
+                self.fake('cp', f'case "$*" in *".new."*) rm -f "{self.lock}"; '
+                                f'ln -s "{foreign}" "{self.lock}"; {fail} ;; esac\n'
+                                f'exec "{real_cp}" "$@"\n')
                 result = self.run_installer('install', check=False)
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
-                self.assertIn(f'another install holds {lock}', result.stderr)
-                self.assertTrue(lock.is_dir())
-                shutil.rmtree(lock)
-
-        # A holder on this machine that is gone is taken over.
-        lock.mkdir()
-        (lock / 'owner').write_text(f'{self.dead_pid()} {hostname}\n')
-        result = self.run_installer('install')
-        self.assertIn('taking over', result.stderr)
-        self.assertFalse(lock.exists())
+                self.assertEqual(self.held(), foreign)
+                self.lock.unlink()
+        (self.fakes / 'cp').unlink()
 
 
 class OwnershipTests(InstallClientTestCase):
@@ -726,6 +862,17 @@ class OwnershipTests(InstallClientTestCase):
         other.write_text('#!/bin/sh\necho another oe\n')
         self.run_installer('install')
         self.assertEqual(other.read_text(), '#!/bin/sh\necho another oe\n')
+
+        # Behind a directory that cannot be searched, a target is unknown, not dangling.
+        if os.geteuid() != 0:
+            hidden = self.optimal_root('hidden')
+            other.unlink()
+            other.symlink_to(hidden / 'bin' / 'oe')
+            hidden.chmod(0)
+            self.addCleanup(hidden.chmod, 0o755)
+            result = self.run_installer('install')
+            self.assertEqual(os.readlink(other), str(hidden / 'bin' / 'oe'))
+            self.assertIn(f'{other} exists and is not a link into an Optimal prefix', result.stderr)
 
 
 class PrefixTests(InstallClientTestCase):
@@ -1140,14 +1287,38 @@ class RegisterTests(InstallClientTestCase):
         self.assertEqual(result.returncode, 73)
         self.assertIn(f'does not write through the symlink {linked}', result.stderr)
 
+        # A trailing slash does not hide the symlink.
+        self.env['CODEX_HOME'] = f'{linked}/'
+        result = self.run_installer('register', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'does not write through the symlink {linked}', result.stderr)
+
         self.env.update(CODEX_HOME=str(codex_home), FAKE_LS_MODE='drwxrwxrwt')
         result = self.run_installer('register', check=False)
         self.assertEqual(result.returncode, 73)
         self.assertIn(f'into {codex_home}, which group or others can write', result.stderr)
         self.assertEqual(list(codex_home.iterdir()), [])
+        del self.env['FAKE_LS_MODE']
+
+        # A parent others can write: refused, unless it is sticky and CODEX_HOME exists.
+        self.env['FAKE_LS_PARENT_MODE'] = 'drwxrwxrwx'
+        result = self.run_installer('register', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'under {self.dir}, which group or others can write', result.stderr)
+        self.env['FAKE_LS_PARENT_MODE'] = 'drwxrwxrwt'
+        missing = self.dir / 'not-yet'
+        self.env['CODEX_HOME'] = str(missing)
+        result = self.run_installer('register', check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertIn(f'does not create {missing} under {self.dir}, which others can write', result.stderr)
+        self.assertFalse(missing.exists())
+        self.env['CODEX_HOME'] = str(codex_home)
+        self.run_installer('register')
+        self.assertIn(f'command = "{self.launcher}"', (codex_home / 'config.toml').read_text())
+        (codex_home / 'config.toml').unlink()
+        del self.env['FAKE_LS_PARENT_MODE']
 
         # A CODEX_HOME root owns, or creates, is written.
-        del self.env['FAKE_LS_MODE']
         self.run_installer('register')
         self.assertIn(f'command = "{self.launcher}"', (codex_home / 'config.toml').read_text())
         fresh = self.dir / 'root-codex'
