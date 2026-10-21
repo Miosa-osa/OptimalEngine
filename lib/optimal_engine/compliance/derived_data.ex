@@ -109,6 +109,96 @@ defmodule OptimalEngine.Compliance.DerivedData do
     end
   end
 
+  @typedoc "The files that go with the contexts that refer to one source package."
+  @type file_entry :: %{contexts: [String.t()], artifacts: [Artifacts.artifact()]}
+
+  @doc """
+  The files `erase_contexts/2` would remove with these contexts of a workspace, read now
+  and removed by no one: for a caller whose rows go some other way, a replica applying a
+  peer's delete, where the derived rows arrive as deletes of their own and what this Engine
+  made itself (its decomposition checkpoints, its assets) stays.
+
+  One entry per source package that no context outside `context_ids` refers to, with the
+  contexts of `context_ids` that refer to it and the files of its runs and assets, by the
+  same rules as a delete (`Compliance.Artifacts`). Remove an entry's files only once every
+  one of its contexts is gone: a delete that was not applied (held, or kept for a newer local
+  change) leaves its context, and its files must stay.
+  """
+  @spec file_plan(String.t(), String.t(), [String.t()]) ::
+          {:ok, [file_entry()]} | {:error, term()}
+  def file_plan(tenant_id, workspace_id, context_ids)
+      when is_binary(tenant_id) and is_binary(workspace_id) and is_list(context_ids) do
+    Store.transaction(
+      &plan_files(&1, tenant_id, workspace_id, Enum.uniq(context_ids)),
+      @timeout
+    )
+  end
+
+  defp plan_files(_txn, _tenant_id, _workspace_id, []), do: {:ok, []}
+
+  defp plan_files(txn, tenant_id, workspace_id, ids) do
+    with {:ok, found} <-
+           column(
+             txn,
+             "SELECT id FROM contexts WHERE tenant_id = ?1 AND workspace_id = ?2 AND id IN #{set(3)}",
+             [tenant_id, workspace_id, json(ids)]
+           ),
+         {:ok, entries} <- plan_found(txn, found) do
+      {:ok, entries}
+    end
+  end
+
+  defp plan_found(_txn, []), do: {:ok, []}
+
+  defp plan_found(txn, found) do
+    ctx = json(found)
+
+    with {:ok, scope} <- erased_scope(txn, ctx),
+         {:ok, packages} <- exclusive_packages(txn, ctx),
+         pkgs = json(packages),
+         {:ok, owners} <-
+           rows(
+             txn,
+             """
+             SELECT DISTINCT id, p FROM (
+               SELECT c.id AS id, CASE WHEN json_valid(c.metadata) THEN json_extract(c.metadata, '$.source_package_id') END AS p
+                 FROM contexts c WHERE c.id IN #{set(1)}
+               UNION
+               SELECT signal_id AS id, source_package_id AS p FROM claims WHERE signal_id IN #{set(1)}
+             ) WHERE p IN #{set(2)}
+             """,
+             [ctx, pkgs]
+           ),
+         {:ok, assets} <-
+           rows(
+             txn,
+             "SELECT id, storage_path, workspace_id, source_package_id FROM assets WHERE source_package_id IN #{set(1)}",
+             [pkgs]
+           ),
+         {:ok, runs} <-
+           rows(
+             txn,
+             "SELECT id, checkpoint_uri, workspace_id, source_package_id FROM decomposition_runs " <>
+               "WHERE source_package_id IN #{set(1)} AND checkpoint_uri IS NOT NULL",
+             [pkgs]
+           ),
+         {:ok, shared} <- shared_paths(txn, Enum.map(assets, &Enum.take(&1, 3)), scope) do
+      entries =
+        for package <- packages,
+            package_assets = for([id, path, ws, ^package] <- assets, do: [id, path, ws]),
+            package_runs = for([id, uri, ws, ^package] <- runs, do: [id, uri, ws]),
+            artifacts = file_artifacts(package_assets, package_runs, shared, scope),
+            artifacts != [] do
+          %{
+            contexts: for([id, ^package] <- owners, do: id),
+            artifacts: artifacts
+          }
+        end
+
+      {:ok, entries}
+    end
+  end
+
   defp in_batches(context_ids, fun) do
     context_ids
     |> Enum.uniq()
@@ -361,22 +451,28 @@ defmodule OptimalEngine.Compliance.DerivedData do
 
   defp remove_files(txn, assets, runs, scope, true) do
     with {:ok, shared} <- shared_paths(txn, assets, scope) do
-      files =
-        for [_id, path, workspace_id] <- assets,
-            Map.has_key?(scope, workspace_id),
-            not shared?(shared, path),
-            do: asset_artifact(path, scope, workspace_id)
-
-      checkpoints =
-        for [run_id, uri, workspace_id] <- runs,
-            Map.has_key?(scope, workspace_id),
-            do: {:checkpoint, run_id, uri, workspace_id}
-
-      case Artifacts.remove(files ++ checkpoints) do
+      case Artifacts.remove(file_artifacts(assets, runs, shared, scope)) do
         {:ok, _removed} -> :ok
         {:error, _} = error -> error
       end
     end
+  end
+
+  # The files of these asset rows (id, path, workspace) and run rows (id, checkpoint,
+  # workspace): not one shared with an asset that stays, and only for a workspace in `scope`.
+  defp file_artifacts(assets, runs, shared, scope) do
+    files =
+      for [_id, path, workspace_id] <- assets,
+          Map.has_key?(scope, workspace_id),
+          not shared?(shared, path),
+          do: asset_artifact(path, scope, workspace_id)
+
+    checkpoints =
+      for [run_id, uri, workspace_id] <- runs,
+          Map.has_key?(scope, workspace_id),
+          do: {:checkpoint, run_id, uri, workspace_id}
+
+    files ++ checkpoints
   end
 
   defp asset_artifact(path, scope, workspace_id) do

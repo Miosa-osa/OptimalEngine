@@ -45,6 +45,7 @@ defmodule OptimalEngine.Sync do
 
   require Logger
 
+  alias OptimalEngine.Compliance.{Artifacts, DerivedData}
   alias OptimalEngine.Connectors.{Credential, HTTP}
   alias OptimalEngine.LogUrl
   alias OptimalEngine.MemoryCore.SecurityLabels
@@ -1111,6 +1112,9 @@ defmodule OptimalEngine.Sync do
   # A row refused for its foreign key in that run is tried once more after the
   # rest of the page, so a child that came before its parent still lands.
   defp execute(tenant_id, workspace_id, plans, foreign_keys \\ :deferred) do
+    erasing = erased_context_ids(plans)
+    file_plan = plan_erased_files(tenant_id, workspace_id, erasing)
+
     result =
       Store.transaction(fn txn ->
         {:ok, _} = Store.txn_execute(txn, "UPDATE sync_identity SET applying = 1 WHERE id = 1", [])
@@ -1182,7 +1186,7 @@ defmodule OptimalEngine.Sync do
         if outcome.applied > 0 or outcome.conflicts != [], do: GateCache.clear()
         log_held(outcome.held)
         Enum.each(outcome.fact_conflicts, &raise_fact_claims(tenant_id, workspace_id, &1))
-        if outcome.erased?, do: purge_erased(workspace_id)
+        if outcome.erased?, do: purge_erased(tenant_id, workspace_id, erasing, file_plan)
 
         {:ok,
          %{
@@ -1255,20 +1259,118 @@ defmodule OptimalEngine.Sync do
   # A delete of a context that a peer made (an erasure, a retention delete, a move)
   # removed its rows here, and the derived rows that went with it arrive as deletes of
   # their own. What this Engine keeps outside the database does not: the embeddings
-  # it cached from that text, and the files of the workspace. They go once the batch
-  # has committed. A failure is logged by the purge and never fails an apply that has
-  # already committed.
+  # it cached from that text, and the files it made from the context's source package (its
+  # decomposition checkpoints and assets, which are not replicated). They go once the batch
+  # has committed. A failure is logged and never fails an apply that has already committed.
   defp note_erased(acc, "contexts", %{"operation" => "delete"}), do: %{acc | erased?: true}
   defp note_erased(acc, _table, _mutation), do: acc
 
-  defp purge_erased(workspace_id) do
-    Cache.purge_workspace(workspace_id, :sync)
+  # The contexts the batch asks to delete.
+  defp erased_context_ids(plans) do
+    for {:apply, %{mutation: %{"operation" => "delete"} = mutation}} <- plans,
+        target_table(mutation["entity_type"]) == "contexts",
+        id = get_in(mutation, ["payload", "row", "id"]) || mutation["entity_id"],
+        is_binary(id),
+        uniq: true,
+        do: id
+  end
+
+  # Read before the batch, because the rows the files are found by go with it. A plan that
+  # cannot be read is logged, and the batch goes on: the files stay, and the log says so.
+  defp plan_erased_files(_tenant_id, _workspace_id, []), do: []
+
+  defp plan_erased_files(tenant_id, workspace_id, context_ids) do
+    case DerivedData.file_plan(tenant_id, workspace_id, context_ids) do
+      {:ok, entries} ->
+        entries
+
+      {:error, reason} ->
+        Logger.error(
+          "[Sync] could not read which files belong to the #{length(context_ids)} context(s) " <>
+            "a peer deleted in #{workspace_id}; they stay: #{inspect(reason)}"
+        )
+
+        []
+    end
+  end
+
+  defp purge_erased(tenant_id, workspace_id, context_ids, file_plan) do
+    # The embedding entries cannot be told apart per context; the files can, below.
+    Cache.purge_workspace(workspace_id, :sync, artifacts: false)
+    remove_erased_files(tenant_id, workspace_id, context_ids, file_plan)
     :ok
   rescue
     error ->
       Logger.error(
-        "[Sync] could not purge the cache of #{workspace_id}: #{Exception.message(error)}"
+        "[Sync] could not purge what #{workspace_id} kept of a deleted context: " <>
+          Exception.message(error)
       )
+  end
+
+  # The files of the contexts that are gone. A delete that was not applied (held, or kept
+  # for a newer local change) leaves its context, and the files of a source package stay
+  # until every context that refers to it is gone.
+  defp remove_erased_files(_tenant_id, _workspace_id, _context_ids, []), do: :ok
+
+  defp remove_erased_files(tenant_id, workspace_id, context_ids, file_plan) do
+    case Store.raw_query(
+           """
+           SELECT id FROM contexts
+            WHERE tenant_id = ?1 AND workspace_id = ?2 AND id IN (SELECT value FROM json_each(?3))
+           """,
+           [tenant_id, workspace_id, Jason.encode!(context_ids)]
+         ) do
+      {:ok, rows} ->
+        remaining = rows |> List.flatten() |> MapSet.new()
+
+        {kept, gone} =
+          Enum.split_with(file_plan, &Enum.any?(&1.contexts, fn id -> id in remaining end))
+
+        if kept != [], do: log_kept(kept)
+        Enum.each(gone, &remove_entry/1)
+
+      {:error, reason} ->
+        Logger.error(
+          "[Sync] could not tell which deleted contexts of #{workspace_id} are gone; " <>
+            "their files stay: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp log_kept(kept) do
+    Logger.info(
+      "[Sync] #{length(kept)} source package(s) keep their files: a context that refers " <>
+        "to them is still here"
+    )
+  end
+
+  defp remove_entry(%{artifacts: artifacts}) do
+    case Artifacts.remove(artifacts) do
+      {:ok, _removed} ->
+        forget_checkpoints(artifacts)
+
+      {:error, reason} ->
+        Logger.error("[Sync] could not remove the files of a deleted context: #{inspect(reason)}")
+    end
+  end
+
+  # The files are gone; a pointer to one would only mislead. A file that was left alone keeps
+  # its pointer.
+  defp forget_checkpoints(artifacts) do
+    runs =
+      for {:checkpoint, run_id, uri, _workspace_id} <- artifacts,
+          is_binary(uri),
+          match?({:error, :enoent}, File.lstat(uri)),
+          do: run_id
+
+    if runs != [] do
+      Store.raw_query(
+        "UPDATE decomposition_runs SET checkpoint_uri = NULL WHERE id IN (SELECT value FROM json_each(?1))",
+        [Jason.encode!(runs)]
+      )
+    end
+
+    :ok
   end
 
   defp apply_step(

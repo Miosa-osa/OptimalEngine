@@ -50,6 +50,8 @@ defmodule OptimalEngine.Compliance.Artifacts do
   the cause, never the path.
   """
 
+  require Logger
+
   alias OptimalEngine.Pipeline.DecompositionRuns
   alias OptimalEngine.Storage.{Assets, S3}
   alias OptimalEngine.Store
@@ -77,6 +79,13 @@ defmodule OptimalEngine.Compliance.Artifacts do
              workspace_id :: String.t()}
 
   @type removed :: %{files: non_neg_integer(), bytes: non_neg_integer()}
+
+  @typedoc """
+  What `remove/1` left alone, by kind of artifact and reason: `:not_ours` (the row names
+  something that is not the file this Engine writes for it, in the place it writes it, for the
+  workspace) and `:link` (a link is in the way, or is the file).
+  """
+  @type skipped :: %{atom() => %{atom() => pos_integer()}}
 
   @type plan :: %{artifacts: [artifact()], copy_dirs: [String.t()]}
 
@@ -140,16 +149,45 @@ defmodule OptimalEngine.Compliance.Artifacts do
   Remove the files of `artifacts`. Stops at the first one that cannot be removed
   and returns `{:error, {:artifact_not_removed, kind, posix}}`; a file that is
   already gone counts as removed.
+
+  A row that names something other than the file this Engine writes for it is left alone,
+  and that is counted, not silent: the result carries `skipped` (`t:skipped/0`) when
+  anything was left, and a warning with the counts (never a path) is logged, so a run that
+  removed less than it was asked to can be seen.
   """
-  @spec remove([artifact()]) :: {:ok, removed()} | {:error, term()}
+  @spec remove([artifact()]) :: {:ok, removed() | map()} | {:error, term()}
   def remove(artifacts) when is_list(artifacts) do
-    Enum.reduce_while(artifacts, {:ok, %{files: 0, bytes: 0}}, fn artifact, {:ok, acc} ->
+    artifacts
+    |> Enum.reduce_while({:ok, none(), %{}}, fn artifact, {:ok, acc, skipped} ->
       case remove_one(artifact) do
-        {:ok, removed} -> {:cont, {:ok, add(acc, removed)}}
-        {:error, posix} -> {:halt, {:error, {:artifact_not_removed, kind(artifact), posix}}}
+        {:ok, removed} ->
+          {:cont, {:ok, add(acc, removed), skipped}}
+
+        {:skip, reason} ->
+          {:cont, {:ok, acc, count_skip(skipped, kind(artifact), reason)}}
+
+        {:error, posix} ->
+          {:halt, {:error, {:artifact_not_removed, kind(artifact), posix}}}
       end
     end)
+    |> finish()
   end
+
+  defp finish({:ok, removed, skipped}) when skipped == %{}, do: {:ok, removed}
+
+  defp finish({:ok, removed, skipped}) do
+    Logger.warning(
+      "[Artifacts] left alone #{skipped |> Map.values() |> Enum.flat_map(&Map.values/1) |> Enum.sum()} " <>
+        "file(s) a row named that are not the Engine's to remove: #{inspect(skipped)}"
+    )
+
+    {:ok, Map.put(removed, :skipped, skipped)}
+  end
+
+  defp finish({:error, _} = error), do: error
+
+  defp count_skip(skipped, kind, reason),
+    do: Map.update(skipped, kind, %{reason => 1}, &Map.update(&1, reason, 1, fn n -> n + 1 end))
 
   defp kind({:checkpoint, _, _, _}), do: :checkpoint
   defp kind({:asset_file, _, _}), do: :asset_file
@@ -164,7 +202,7 @@ defmodule OptimalEngine.Compliance.Artifacts do
         remove_below(cache_root(), path, &checkpoint_of?(&1, &2, run_id, workspace_id))
 
       :error ->
-        {:ok, none()}
+        {:skip, :not_ours}
     end
   end
 
@@ -174,10 +212,10 @@ defmodule OptimalEngine.Compliance.Artifacts do
       under(storage_path, [assets_dir], fn relative, path ->
         if Regex.match?(@asset_name, relative),
           do: remove_below(root_dir(), path),
-          else: {:ok, none()}
+          else: {:skip, :not_ours}
       end)
     else
-      _ -> {:ok, none()}
+      _ -> {:skip, :not_ours}
     end
   end
 
@@ -189,7 +227,7 @@ defmodule OptimalEngine.Compliance.Artifacts do
         remove_below(Path.dirname(Assets.cache_dir()), path)
       end)
     else
-      _ -> {:ok, none()}
+      _ -> {:skip, :not_ours}
     end
   end
 
@@ -291,10 +329,10 @@ defmodule OptimalEngine.Compliance.Artifacts do
           if String.starts_with?(expanded, root <> "/"), do: Path.relative_to(expanded, root)
         end)
 
-    if found, do: fun.(found, expanded), else: {:ok, none()}
+    if found, do: fun.(found, expanded), else: {:skip, :not_ours}
   end
 
-  defp under(_path, _roots, _fun), do: {:ok, none()}
+  defp under(_path, _roots, _fun), do: {:skip, :not_ours}
 
   # Removes the regular file at `path`, which is under `trusted`, if no directory between
   # them is a link. `trusted` itself may be (a temporary directory often is). `verify` gets
@@ -307,11 +345,22 @@ defmodule OptimalEngine.Compliance.Artifacts do
 
       case real_directories(trusted, directories) do
         :ok -> remove_file(path, verify)
-        :skip -> {:ok, none()}
+        :skip -> blocked(path)
         {:error, posix} -> {:error, posix}
       end
     else
-      {:ok, none()}
+      {:skip, :not_ours}
+    end
+  end
+
+  # A directory on the way is missing (the file is not there: nothing to remove), a link
+  # (left alone) or not a directory (not ours).
+  defp blocked(path) do
+    case File.lstat(path) do
+      {:error, :enoent} -> {:ok, none()}
+      {:error, :enotdir} -> {:skip, :not_ours}
+      {:error, posix} -> {:error, posix}
+      {:ok, _reached_through_a_link} -> {:skip, :link}
     end
   end
 
@@ -334,12 +383,15 @@ defmodule OptimalEngine.Compliance.Artifacts do
       {:ok, %{type: :regular, size: size}} ->
         case verify.(path, size) do
           true -> rm(path, size)
-          false -> {:ok, none()}
+          false -> {:skip, :not_ours}
           {:error, posix} -> {:error, posix}
         end
 
+      {:ok, %{type: :symlink}} ->
+        {:skip, :link}
+
       {:ok, _other} ->
-        {:ok, none()}
+        {:skip, :not_ours}
 
       {:error, :enoent} ->
         {:ok, none()}
