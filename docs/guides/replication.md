@@ -255,7 +255,10 @@ A count of what a route left out, on a route that answers a query, tells a key w
 These routes answer a probe for what the key may not see exactly as they answer one for nothing, as a record by id answers `404` as it does for a record that is not there.
 The exports, the conflict list and the ledger dump rows rather than answer a query, and a partial dump has to say it is partial, so they keep `withheld` and `complete`; the count names a volume, not a match.
 A search or grep decides for each hit from the row it came from (a document, a memory, a chunk), so a chunk of a restricted document is not found by a key without the label.
-`pagination.total` of the memory list counts the memories of the page query before the key's grants are applied; it names no content.
+A key whose grants cut a list is shown a full page of what it may see, and `offset` counts those items, not the rows behind them.
+The Engine reads on until the page and one more are found: a memory list reads up to 10,000 memories, and a search or a grep up to 1,000 hits (a ranked result is re-asked at twice the size).
+`has_more` is exact within what was read, and `pagination.total` is the number of items the key may see that were found, so it ends one past the page when there is more; it never counts a row the key may not see.
+A key granted `"*"` and the operator are paged by the list as before, and `total` of the memory list is the count of the workspace.
 
 **Not covered yet.** These routes also return row text, and a key with `read` still reaches them whatever its grants: the version and relation lists of a memory (`/api/memory/:id/versions`, `/relations`), the Memory Core reads (`/api/memory-core/claims`, `/claims/:id`, `/claim-review`, `/active-pools/:id`), the entity routes (`/api/entities/*`), the graph routes (`/api/graph*`, `/api/optimal/graph`), and the wiki list, contradictions and stale lists (`/api/wiki`, `/api/wiki/contradictions`, `/api/wiki/stale`).
 Do not rely on a key's label grants as a boundary for a workspace until these follow.

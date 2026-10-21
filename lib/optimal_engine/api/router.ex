@@ -26,6 +26,10 @@ defmodule OptimalEngine.API.Router do
   require Logger
 
   @busy_detail "the Engine's store is busy; retry shortly"
+
+  # The most hits a search or a grep reads to fill a page for a key whose grants
+  # cut them (`ReadScope.widen/5`).
+  @gated_window 1_000
   @invalid_as_of "as_of must be an ISO 8601 timestamp between 1970 and a year from now"
 
   alias OptimalEngine.API.Actor
@@ -253,48 +257,68 @@ defmodule OptimalEngine.API.Router do
               min(limit + offset + 200, 200)
             end
 
-          case OptimalEngine.search(
-                 q,
-                 [
-                   limit: fetch_limit,
-                   workspace_id: workspace,
-                   tenant_id: tenant,
-                   type: type,
-                   memory_search_mode: memory_search_mode,
-                   as_of: as_of,
-                   mode: mode,
-                   memory_embedding_provider_model:
-                     memory_embedding_provider_model || memory_embedding_model,
-                   memory_inference_embedding_model: memory_inference_embedding_model,
-                   memory_query_prefix: memory_query_prefix,
-                   memory_embedding_model:
-                     memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()
-                 ] ++ Keyword.take(scope, [:principal, :acl_absent])
-               ) do
-            {:ok, contexts} ->
-              inherited =
-                if type in [nil, :memory],
-                  do: inherited_policy_results(conn, tenant, workspace, q, as_of),
-                  else: []
+          search = fn count ->
+            OptimalEngine.search(
+              q,
+              [
+                limit: count,
+                workspace_id: workspace,
+                tenant_id: tenant,
+                type: type,
+                memory_search_mode: memory_search_mode,
+                as_of: as_of,
+                mode: mode,
+                memory_embedding_provider_model:
+                  memory_embedding_provider_model || memory_embedding_model,
+                memory_inference_embedding_model: memory_inference_embedding_model,
+                memory_query_prefix: memory_query_prefix,
+                memory_embedding_model:
+                  memory_embedding_model || OptimalEngine.Memory.Versioned.Embeddings.model()
+              ] ++ Keyword.take(scope, [:principal, :acl_absent])
+            )
+          end
 
-              # The exact score is for merging and does not leave the Engine.
-              merged =
-                contexts
-                |> format_search_results(workspace)
-                |> Ranking.merge(inherited)
-                |> Enum.map(&Map.delete(&1, :rank_score))
+          # What the key may see of the hits. What it may not see is left out and
+          # not counted: a count on a route that answers a query tells a key
+          # which hidden rows match.
+          reader = Reader.scope(conn)
 
-              # What the key may not see is left out and not counted: a count on a
-              # route that answers a query tells a key which hidden rows match.
-              {all, _withheld} =
-                ReadScope.filter_any(
-                  Reader.scope(conn),
-                  merged,
-                  & &1.id,
-                  &(&1.source_workspace_id || workspace),
-                  & &1.uri
-                )
+          visible = fn contexts ->
+            inherited =
+              if type in [nil, :memory],
+                do: inherited_policy_results(conn, tenant, workspace, q, as_of),
+                else: []
 
+            # The exact score is for merging and does not leave the Engine.
+            merged =
+              contexts
+              |> format_search_results(workspace)
+              |> Ranking.merge(inherited)
+              |> Enum.map(&Map.delete(&1, :rank_score))
+
+            {kept, _withheld} =
+              ReadScope.filter_any(
+                reader,
+                merged,
+                & &1.id,
+                &(&1.source_workspace_id || workspace),
+                & &1.uri
+              )
+
+            kept
+          end
+
+          # A key whose grants cut the hits is shown a full page of what it may
+          # see, so the window grows until the page and one more are found.
+          result =
+            if ReadScope.filtering?(reader) do
+              ReadScope.widen(offset + limit + 1, fetch_limit, @gated_window, search, visible)
+            else
+              with {:ok, contexts} <- search.(fetch_limit), do: {:ok, visible.(contexts)}
+            end
+
+          case result do
+            {:ok, all} ->
               total = length(all)
               page = all |> Enum.drop(offset) |> Enum.take(limit)
               {page, total}
@@ -390,17 +414,35 @@ defmodule OptimalEngine.API.Router do
         |> api_maybe_put(:path_prefix, if(path_prefix == "", do: nil, else: path_prefix))
         |> api_maybe_put(:as_of, as_of)
 
-      case Grep.grep(q, grep_opts) do
-        {:ok, found} ->
-          {all_matches, _withheld} =
-            ReadScope.filter_any(
-              Reader.scope(conn),
-              found,
-              &(&1.chunk_id || &1.context_id),
-              fn _match -> workspace_id end,
-              fn _match -> nil end
-            )
+      grep = fn count -> Grep.grep(q, Keyword.put(grep_opts, :limit, count)) end
+      reader = Reader.scope(conn)
 
+      # What the key may see of the matches; the rest is left out and not
+      # counted (a count tells a key which hidden chunks match).
+      visible = fn found ->
+        {kept, _withheld} =
+          ReadScope.filter_any(
+            reader,
+            found,
+            &(&1.chunk_id || &1.context_id),
+            fn _match -> workspace_id end,
+            fn _match -> nil end
+          )
+
+        kept
+      end
+
+      # A key whose grants cut the matches is shown a full page of what it may
+      # see, so the search reads on until the page and one more are found.
+      result =
+        if ReadScope.filtering?(reader) do
+          ReadScope.widen(offset + limit + 1, limit + offset, @gated_window, grep, visible)
+        else
+          with {:ok, found} <- grep.(limit + offset), do: {:ok, visible.(found)}
+        end
+
+      case result do
+        {:ok, all_matches} ->
           total = length(all_matches)
           matches = all_matches |> Enum.drop(offset) |> Enum.take(limit)
 
@@ -2670,27 +2712,50 @@ defmodule OptimalEngine.API.Router do
       ]
       |> api_maybe_put(:audience, if(audience == "", do: nil, else: audience))
 
-    total =
-      case OptimalEngine.Memory.count(filter_opts) do
-        {:ok, n} -> n
-        _ -> 0
-      end
+    reader = Reader.scope(conn)
 
-    list_opts =
+    read = fn raw_offset, count ->
       filter_opts
-      |> Keyword.put(:limit, limit)
-      |> Keyword.put(:offset, offset)
+      |> Keyword.put(:limit, count)
+      |> Keyword.put(:offset, raw_offset)
       |> api_maybe_put(:q, if(q == "", do: nil, else: q))
+      |> OptimalEngine.Memory.list()
+    end
 
-    {memories, _withheld} =
-      ReadScope.filter(
-        Reader.scope(conn),
-        workspace_id,
-        "memories",
-        OptimalEngine.Memory.list(list_opts),
-        & &1.id,
-        &"optimal://memory/#{&1.workspace_id}/#{&1.id}"
-      )
+    # What the key may see of the memories read. What it may not see is left out
+    # and not counted: a count on a route that takes a query tells a key which
+    # hidden memories match.
+    visible = fn memories ->
+      {kept, _withheld} =
+        ReadScope.filter(
+          reader,
+          workspace_id,
+          "memories",
+          memories,
+          & &1.id,
+          &"optimal://memory/#{&1.workspace_id}/#{&1.id}"
+        )
+
+      kept
+    end
+
+    {memories, total} =
+      if ReadScope.filtering?(reader) do
+        # A key whose grants cut the list is shown a full page of what it may
+        # see, and `offset` counts those: the list is read on until the page
+        # and one more are found, and the total is what was found, which names
+        # no hidden memory.
+        found = ReadScope.scan(offset + limit + 1, read, visible)
+        {found |> Enum.drop(offset) |> Enum.take(limit), length(found)}
+      else
+        total =
+          case OptimalEngine.Memory.count(filter_opts) do
+            {:ok, n} -> n
+            _ -> 0
+          end
+
+        {visible.(read.(offset, limit)), total}
+      end
 
     formatted = Enum.map(memories, &memory_to_map/1)
     pagination = Pagination.wrap(formatted, total, offset, limit)
