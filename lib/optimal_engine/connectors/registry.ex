@@ -49,6 +49,28 @@ defmodule OptimalEngine.Connectors.Registry do
     end
   end
 
+  @doc """
+  Look up an adapter module by the name of its kind (a string, as stored in
+  the `connectors.kind` column and sent over HTTP).
+
+  This does not go through `String.to_existing_atom/1`: an adapter module
+  creates the atom its `kind/0` returns only once it is loaded, which in a
+  node that loads modules on demand (development, tests) is not yet the case
+  for an adapter nobody has used, so that lookup refuses a kind the Engine
+  supports. A name that is not a kind makes no atom.
+  """
+  @spec fetch_by_name(term(), [module()]) :: {:ok, module()} | {:error, :unknown_kind}
+  def fetch_by_name(name, adapters \\ @adapters)
+
+  def fetch_by_name(name, adapters) when is_binary(name) do
+    case Enum.find(adapters, fn mod -> Atom.to_string(mod.kind()) == name end) do
+      nil -> {:error, :unknown_kind}
+      mod -> {:ok, mod}
+    end
+  end
+
+  def fetch_by_name(_name, _adapters), do: {:error, :unknown_kind}
+
   @doc "Returns `[{kind, display_name, auth_scheme}]` — useful for listing in CLIs."
   @spec summary() :: [{atom(), String.t(), atom()}]
   def summary do

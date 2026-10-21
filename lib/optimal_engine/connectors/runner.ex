@@ -372,10 +372,12 @@ defmodule OptimalEngine.Connectors.Runner do
   defp ensure_enabled(%{enabled: true}), do: :ok
   defp ensure_enabled(%{enabled: false}), do: {:error, :disabled}
 
-  # `String.to_existing_atom/1` (not `to_atom/1`): `kind_str` comes from the
-  # `connectors.kind` column — operator-writable data. `to_atom/1` would
-  # create a new atom on every junk value and eventually exhaust the atom
-  # table. Every legitimate adapter atom is already loaded via the Registry.
+  # `kind_str` comes from the `connectors.kind` column, which is operator-
+  # writable data, so it is looked up by name in the Registry
+  # (`Registry.fetch_by_name/1`) instead of being turned into an atom: a junk
+  # value would otherwise create a new atom each time and eventually exhaust
+  # the atom table, and `String.to_existing_atom/1` refuses an adapter that
+  # has not been loaded yet.
   defp lookup_adapter(kind_str, opts) when is_binary(kind_str) do
     cond do
       mod = Keyword.get(opts, :adapter) ->
@@ -385,7 +387,7 @@ defmodule OptimalEngine.Connectors.Runner do
         resolver.(kind_str)
 
       true ->
-        Registry.fetch(String.to_existing_atom(kind_str))
+        Registry.fetch_by_name(kind_str)
     end
   rescue
     ArgumentError -> {:error, :unknown_kind}
