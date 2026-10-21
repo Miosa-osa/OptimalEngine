@@ -465,7 +465,7 @@ defmodule OptimalEngine.AtomHardeningTest do
 
   describe "connectors" do
     test "the registry finds an adapter by the text of its kind" do
-      assert {:ok, module} = ConnectorRegistry.fetch("slack")
+      assert {:ok, module} = ConnectorRegistry.fetch_by_name("slack")
       assert module == OptimalEngine.Connectors.Adapters.Slack
       assert {:ok, ^module} = ConnectorRegistry.fetch(:slack)
     end
@@ -473,7 +473,7 @@ defmodule OptimalEngine.AtomHardeningTest do
     test "the registry rejects an unknown kind without creating it" do
       kind = never_seen("zz_kind")
 
-      assert {:error, :unknown_kind} = ConnectorRegistry.fetch(kind)
+      assert {:error, :unknown_kind} = ConnectorRegistry.fetch_by_name(kind)
       refute_atom(kind)
     end
 
