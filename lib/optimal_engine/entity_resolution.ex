@@ -25,6 +25,11 @@ defmodule OptimalEngine.EntityResolution do
    OR EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id AND s.tenant_id = ?3 AND s.workspace_id = ?2))
   """
 
+  @doc false
+  # The condition that a row of `entity_mentions` (unaliased) is the tenant's
+  # (`?3`) in workspace `?2`, for the queries that list mentions.
+  def owned_mention_sql, do: @owned_mention
+
   @doc """
   Records a mention. Options: `:tenant_id` (default `"default"`): the
   `context_id` and `source_package_id` a mention names must be that tenant's,
@@ -50,7 +55,8 @@ defmodule OptimalEngine.EntityResolution do
              value(attrs, :source_package_id),
              :source_package_not_found
            ),
-         {:ok, candidates} <- candidates(workspace, normalized, value(attrs, :proposed_kind)),
+         {:ok, candidates} <-
+           candidates(tenant, workspace, normalized, value(attrs, :proposed_kind)),
          {:ok, mention} <- persist_mention(attrs, normalized, candidates) do
       {:ok, Map.put(mention, :candidates, candidates)}
     end
@@ -74,6 +80,7 @@ defmodule OptimalEngine.EntityResolution do
                  [mention_id, workspace, tenant]
                ),
              :ok <- ensure_unresolved(state),
+             :ok <- link_target(tx, decision, Keyword.get(opts, :entity_id), tenant, workspace),
              {:ok, selected_id, next_state} <-
                selected_entity(decision, surface, proposed_kind, workspace, actor, opts),
              {:ok, 1} <-
@@ -114,13 +121,18 @@ defmodule OptimalEngine.EntityResolution do
     end
   end
 
+  @doc """
+  The mentions awaiting a decision in a workspace. Options: `:limit`,
+  `:tenant_id` (default `"default"`): only that tenant's mentions are listed.
+  """
   def queue(workspace_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
+    tenant = Keyword.get(opts, :tenant_id, "default")
 
     with {:ok, rows} <-
            Store.raw_query(
-             "SELECT id, surface_text, proposed_kind, resolution_state, confidence, source_package_id, context_id, created_at FROM entity_mentions WHERE workspace_id=?1 AND resolution_state IN ('unresolved','ambiguous') ORDER BY created_at LIMIT ?2",
-             [workspace_id, limit]
+             "SELECT id, surface_text, proposed_kind, resolution_state, confidence, source_package_id, context_id, created_at FROM entity_mentions WHERE workspace_id=?2 AND resolution_state IN ('unresolved','ambiguous') AND #{@owned_mention} ORDER BY created_at LIMIT ?1",
+             [limit, workspace_id, tenant]
            ) do
       {:ok,
        Enum.map(rows, fn [id, surface, kind, state, confidence, source_id, context_id, created_at] ->
@@ -138,9 +150,13 @@ defmodule OptimalEngine.EntityResolution do
     end
   end
 
-  defp candidates(workspace, normalized, kind) do
-    kind_clause = if kind in [nil, ""], do: "", else: "AND e.entity_kind = ?3"
-    params = if kind in [nil, ""], do: [workspace, normalized], else: [workspace, normalized, kind]
+  defp candidates(tenant, workspace, normalized, kind) do
+    kind_clause = if kind in [nil, ""], do: "", else: "AND e.entity_kind = ?4"
+
+    params =
+      if kind in [nil, ""],
+        do: [workspace, normalized, tenant],
+        else: [workspace, normalized, tenant, kind]
 
     with {:ok, rows} <-
            Store.raw_query(
@@ -149,7 +165,7 @@ defmodule OptimalEngine.EntityResolution do
                CASE WHEN e.normalized_name = ?2 THEN 1.0 ELSE MAX(a.confidence) END AS score
              FROM canonical_entities e
              LEFT JOIN entity_aliases a ON a.entity_id=e.id AND a.workspace_id=e.workspace_id AND a.lifecycle_state='active'
-             WHERE e.workspace_id=?1 AND e.lifecycle_state='active'
+             WHERE e.workspace_id=?1 AND e.tenant_id=?3 AND e.lifecycle_state='active'
                AND (e.normalized_name=?2 OR a.normalized_alias=?2) #{kind_clause}
              GROUP BY e.id, e.canonical_name, e.entity_kind, e.normalized_name
              ORDER BY score DESC
@@ -242,6 +258,21 @@ defmodule OptimalEngine.EntityResolution do
       error -> error
     end
   end
+
+  # A mention is linked to an entity of its own tenant and workspace.
+  defp link_target(tx, :link, entity_id, tenant, workspace) when is_binary(entity_id) do
+    case Store.txn_query(
+           tx,
+           "SELECT 1 FROM canonical_entities WHERE id=?1 AND tenant_id=?2 AND workspace_id=?3",
+           [entity_id, tenant, workspace]
+         ) do
+      {:ok, [_]} -> :ok
+      {:ok, []} -> {:error, :entity_not_found}
+      error -> error
+    end
+  end
+
+  defp link_target(_tx, _decision, _entity_id, _tenant, _workspace), do: :ok
 
   # An empty id names nothing; it is stored as none.
   defp present(""), do: nil
