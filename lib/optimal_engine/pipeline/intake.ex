@@ -116,6 +116,9 @@ defmodule OptimalEngine.Pipeline.Intake do
   # Policy applied by the quality gate; recorded on reject/quarantine ledger entries.
   @quality_gate_policy "intake_quality_gate_v1"
 
+  # Classification reads at most this much of a text (`classify/2`).
+  @classify_bytes 65_536
+
   # Result type for process/2
   @type result :: %{
           signal: Signal.t(),
@@ -175,9 +178,29 @@ defmodule OptimalEngine.Pipeline.Intake do
   Accepts the classification options of `process/2` (`:genre`, `:title`,
   `:node`, `:entities`, `:type`) plus `:known_entities` (default `[]`).
   The returned signal has no id or timestamps yet.
+
+  A text longer than #{@classify_bytes} bytes is classified by its head: mode,
+  genre, type, title and summaries come from its first #{@classify_bytes}
+  bytes, entities from the whole text, and the signal carries the whole text,
+  so nothing is lost when it is stored. The time classification takes is
+  bounded whatever the caller sends.
   """
   @spec classify(String.t(), keyword()) :: Signal.t()
-  def classify(raw_text, opts \\ []) when is_binary(raw_text) do
+  def classify(raw_text, opts \\ [])
+
+  def classify(raw_text, opts)
+      when is_binary(raw_text) and byte_size(raw_text) > @classify_bytes do
+    known = Keyword.get(opts, :known_entities, [])
+    named = Keyword.get(opts, :entities, [])
+    entities = Enum.uniq(named ++ Classifier.extract_entities(raw_text, Enum.uniq(known ++ named)))
+
+    raw_text
+    |> head(@classify_bytes)
+    |> classify(Keyword.put(opts, :entities, entities))
+    |> then(&%{&1 | content: raw_text})
+  end
+
+  def classify(raw_text, opts) when is_binary(raw_text) do
     # Merge explicit entities into known entities for extraction
     extra_entities = Keyword.get(opts, :entities, [])
     all_known = Enum.uniq(Keyword.get(opts, :known_entities, []) ++ extra_entities)
@@ -1020,6 +1043,16 @@ defmodule OptimalEngine.Pipeline.Intake do
   defp maybe_merge_entities(signal, extra) do
     merged = Enum.uniq((signal.entities || []) ++ extra)
     %{signal | entities: merged}
+  end
+
+  # The first `bytes` bytes of `text`, cut at a character boundary.
+  defp head(text, bytes) do
+    prefix = binary_part(text, 0, bytes)
+
+    case :unicode.characters_to_binary(prefix) do
+      {:incomplete, whole, _split_character} -> whole
+      _valid_or_not -> prefix
+    end
   end
 
   defp regenerate_summaries(%Signal{} = signal) do
