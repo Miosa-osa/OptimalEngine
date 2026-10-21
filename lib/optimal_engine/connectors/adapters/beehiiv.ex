@@ -33,7 +33,7 @@ defmodule OptimalEngine.Connectors.Adapters.Beehiiv do
     credential_keys: [:api_key],
     token_key: :api_key
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @base_url "https://api.beehiiv.com/v2/publications"
   @page_size 100
@@ -50,7 +50,7 @@ defmodule OptimalEngine.Connectors.Adapters.Beehiiv do
     with {:ok, families} <- families(state) do
       ctx = %{
         base: "#{@base_url}/#{publication}",
-        headers: [{"authorization", "Bearer #{pick(state, :api_key)}"}],
+        headers: [{"authorization", "Bearer #{AccessToken.reveal(pick(state, :api_key))}"}],
         families: families
       }
 

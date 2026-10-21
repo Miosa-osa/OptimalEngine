@@ -182,7 +182,11 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
       "client_secret" => pick(state, :client_secret)
     }
 
-    case HTTP.post_json(@token_url, body, follow_redirects: false, verify_tls: true) do
+    case HTTP.post_json(@token_url, body,
+           follow_redirects: false,
+           verify_tls: true,
+           single_attempt: true
+         ) do
       {:ok, %{status: 200, body: %{"access_token" => token}}} ->
         {:ok, token}
 

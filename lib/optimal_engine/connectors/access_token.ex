@@ -65,8 +65,9 @@ defmodule OptimalEngine.Connectors.AccessToken do
   `conceal/1`): the value sits in a closure, so `inspect/1` of a token, a
   session, an adapter state or an error shows the source and the expiry and
   never the value, and a crash that prints the state prints no secret. The
-  value comes out only by `to_string/1` (so `"Bearer \#{token}"` works) or
-  `reveal/1`. A token lives in memory for one run. It is never written to the
+  value comes out only by `reveal/1`, which is called by name where a header is
+  built (a held secret does not convert to text by itself). A token lives in
+  memory for one run. It is never written to the
   store, a log, an error, a connector run record or evidence.
 
   A session belongs to the process that opened it: every call of one sync is
@@ -123,10 +124,16 @@ defmodule OptimalEngine.Connectors.AccessToken do
   @spec secret(String.t()) :: t()
   def secret(value) when is_binary(value) and value != "", do: held(:secret, value)
 
-  @doc "The value of a token (or of a plain string, which is its own value)."
-  @spec reveal(t() | String.t()) :: String.t()
+  @doc """
+  The value of a token (or of a plain string, which is its own value, and of
+  nothing, which is the empty string). This is the one way out: a held secret
+  has no `String.Chars`, so `"\#{secret}"` and `to_string/1` raise instead of
+  leaking it, and the places that build a header call `reveal/1` by name.
+  """
+  @spec reveal(t() | String.t() | nil) :: String.t()
   def reveal(%__MODULE__{value: value}), do: value.()
   def reveal(value) when is_binary(value), do: value
+  def reveal(nil), do: ""
 
   @doc """
   The state with a token given directly (`access_token` as a string, at the top
@@ -474,8 +481,4 @@ defimpl Inspect, for: OptimalEngine.Connectors.AccessToken do
 
     "#OptimalEngine.Connectors.AccessToken<#{source}#{expiry}>"
   end
-end
-
-defimpl String.Chars, for: OptimalEngine.Connectors.AccessToken do
-  def to_string(%{value: value}), do: value.()
 end

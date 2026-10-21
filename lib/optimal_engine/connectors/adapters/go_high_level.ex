@@ -75,7 +75,7 @@ defmodule OptimalEngine.Connectors.Adapters.GoHighLevel do
     credential_keys: [],
     token_key: :api_token
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @base_url "https://services.leadconnectorhq.com"
   @api_version "2021-07-28"
@@ -322,7 +322,10 @@ defmodule OptimalEngine.Connectors.Adapters.GoHighLevel do
   # ---- http -------------------------------------------------------------------
 
   defp get(url, state) do
-    headers = [{"authorization", "Bearer #{state.token}"}, {"version", @api_version}]
+    headers = [
+      {"authorization", "Bearer #{AccessToken.reveal(state.token)}"},
+      {"version", @api_version}
+    ]
 
     case HTTP.get_json(url, headers: headers) do
       {:ok, %{status: 200, body: body}} when is_map(body) -> {:ok, body}
