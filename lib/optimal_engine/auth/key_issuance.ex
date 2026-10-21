@@ -7,8 +7,9 @@ defmodule OptimalEngine.Auth.KeyIssuance do
   lacks; a field the request omits is inherited from the minter instead of
   falling back to the unrestricted default (except label and partition grants,
   below, where omitted means none). A minter whose scopes include
-  `"*"` is the tenant's root authority and may issue any scopes and grants,
-  but never a workspace or lifetime outside its own.
+  `"*"` is the tenant's root authority and may issue any scopes and
+  `permissions`, but never a workspace or lifetime outside its own, and never
+  a label or partition grant it does not hold itself.
 
   Operation scopes are never unrestricted by omission: when a request leaves
   out `scopes` and the minter is root or there is no minter, the request is
@@ -181,6 +182,11 @@ defmodule OptimalEngine.Auth.KeyIssuance do
 
   @inherited_grants ~w(permissions)
 
+  # A root minter issues any operation scope and any `permissions`, but label
+  # and partition grants only as far as it holds them: a "*" scope is not a
+  # "*" grant, so a root-scoped key minted without grants cannot mint one.
+  @held_grants ~w(allowed_partitions allowed_security_labels)
+
   defp grant(parent, body, field) do
     held = parent_grant(parent, field)
     default = if field in @inherited_grants, do: held
@@ -188,7 +194,8 @@ defmodule OptimalEngine.Auth.KeyIssuance do
     with {:ok, requested} <- string_list(body, field, default) do
       cond do
         is_nil(requested) -> {:ok, nil}
-        is_nil(parent) or root?(parent) -> {:ok, requested}
+        is_nil(parent) -> {:ok, requested}
+        root?(parent) and field not in @held_grants -> {:ok, requested}
         subset?(requested, held || []) -> {:ok, requested}
         true -> {:error, "#{field}_exceeds_minter"}
       end
