@@ -180,24 +180,36 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   A text longer than #{@classify_bytes} bytes is classified by its head
   (`OptimalEngine.Signal.TextHead`, whole lines up to #{@classify_bytes}
-  bytes): genre, type, title and summaries come from the head; mode and
-  entities from the whole text, since a data document cut short no longer
-  reads as data (the mode detector bounds what it reads itself); and the
-  signal carries the whole text, so nothing is lost when it is stored. The
-  time classification takes is bounded whatever the caller sends.
+  bytes): genre, type, title and summaries come from the head; mode from the
+  whole text, since a data document cut short no longer reads as data (the
+  mode detector bounds what it reads itself); entities from the whole body
+  after the frontmatter, as for a short text, within the classification time
+  limit (past it, from the head); and the signal carries the whole text, so
+  nothing is lost when it is stored. The time classification takes is
+  bounded whatever the caller sends.
   """
   @spec classify(String.t(), keyword()) :: Signal.t()
   def classify(raw_text, opts \\ [])
 
   def classify(raw_text, opts)
       when is_binary(raw_text) and byte_size(raw_text) > @classify_bytes do
-    known = Keyword.get(opts, :known_entities, [])
+    head = TextHead.take(raw_text, @classify_bytes)
     named = Keyword.get(opts, :entities, [])
-    entities = Enum.uniq(named ++ Classifier.extract_entities(raw_text, Enum.uniq(known ++ named)))
+    names = Enum.uniq(Keyword.get(opts, :known_entities, []) ++ named)
 
-    raw_text
-    |> TextHead.take(@classify_bytes)
-    |> classify_text(raw_text, Keyword.put(opts, :entities, entities))
+    # The names the whole body mentions, after the frontmatter the head opens
+    # with, as the classifier reads them from a short text's body. Bounded like
+    # detection: past the classification limit only the head's names count,
+    # which the classifier finds itself.
+    {_frontmatter, head_body} = Classifier.parse_frontmatter(head)
+    body = Classifier.mode_body(head, head_body, whole_text: raw_text)
+
+    found =
+      TimeLimit.run(fn -> Classifier.extract_entities(body, names) end, [],
+        label: "entity extraction"
+      )
+
+    classify_text(head, raw_text, Keyword.put(opts, :entities, Enum.uniq(named ++ found)))
   end
 
   def classify(raw_text, opts) when is_binary(raw_text), do: classify_text(raw_text, raw_text, opts)
