@@ -353,10 +353,10 @@ defmodule OptimalEngine.SyncErasureTest do
   end
 
   defp pointer(run) do
-    {:ok, [[uri]]} =
-      Store.raw_query("SELECT checkpoint_uri FROM decomposition_runs WHERE id = ?1", [run])
-
-    uri
+    case Store.raw_query("SELECT checkpoint_uri FROM decomposition_runs WHERE id = ?1", [run]) do
+      {:ok, [[uri]]} -> uri
+      {:ok, []} -> nil
+    end
   end
 
   defp mutation(attrs) do
