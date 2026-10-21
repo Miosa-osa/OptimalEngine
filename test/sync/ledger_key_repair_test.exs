@@ -238,6 +238,94 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
     for {id, key} <- planted, do: refute(log =~ id or log =~ key)
   end
 
+  describe "the rows the repair moved" do
+    test "a row re-id'd into the shape of an applied change is re-id'd under moved:", ctx do
+      next = next_capture_sequence()
+      local = ctx.local
+
+      # A peer's change an earlier Engine stored under an id of this Engine's own
+      # space, keyed with the applied key of the id the repair renames it to.
+      shaped = plant(ctx, "mut_#{local}_#{next}", "peer:peer_mut_#{local}_#{next}")
+      plain = plant(ctx, "mut_#{local}_#{next + 1}", "sent-#{ctx.n}")
+
+      repair()
+      moved_ids()
+
+      assert key_of("moved:" <> shaped) == "peer:peer_mut_#{local}_#{next}"
+      assert key_of("moved:" <> plain) == "sent-#{ctx.n}"
+      assert key_of("peer_" <> shaped) == nil
+      assert key_of("peer_" <> plain) == nil
+
+      for id <- ["moved:" <> shaped, "moved:" <> plain] do
+        refute Sync.change_row?(id, "rep_remote", key_of(id))
+        refute id in served(ctx)
+      end
+
+      assert_local_changes_seal(ctx, 3)
+    end
+
+    test "a row re-keyed into the shape of a capture is re-id'd under moved:", ctx do
+      local = ctx.local
+
+      # A device named `moved` makes `moved:<key>` the capture key of
+      # `mut_moved_<key>`, the key the repair gives a row keyed `<key>`.
+      shaped =
+        plant(
+          ctx,
+          "mut_moved_mut_#{local}_#{ctx.n}",
+          "mut_#{local}_#{ctx.n}",
+          "planted",
+          "moved"
+        )
+
+      repair()
+      moved_ids()
+
+      moved = "moved:" <> shaped
+      assert key_of(shaped) == nil
+      assert key_of(moved) == "moved:mut_#{local}_#{ctx.n}"
+      refute Sync.change_row?(moved, "moved", key_of(moved))
+      refute moved in served(ctx)
+    end
+
+    test "a storage entry keyed under moved: by its caller, and every change of a row, is left as it was",
+         ctx do
+      {:ok, entry} =
+        PolicyStore.append_mutation(%{
+          workspace_id: ctx.ws,
+          device_id: "moved",
+          entity_type: "memory_object",
+          entity_id: "obj-#{ctx.n}",
+          operation: :create,
+          payload: %{"text" => "App entry"},
+          idempotency_key: "moved:app-#{ctx.n}"
+        })
+
+      insert_context(ctx, "mine-#{ctx.n}")
+      {:ok, _} = Capture.seal()
+
+      {:ok, [[own]]} =
+        Store.raw_query(
+          "SELECT id FROM sync_mutations WHERE entity_type = 'contexts' AND entity_id = ?1",
+          ["mine-#{ctx.n}"]
+        )
+
+      peer = "rep_remote_#{ctx.n}"
+      applied = "mut_#{peer}_1"
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [peer_change(ctx, applied, peer)])
+
+      ids = [entry.id, own, applied]
+      before = Enum.map(ids, &row_of/1)
+
+      repair()
+      moved_ids()
+
+      assert Enum.map(ids, &row_of/1) == before
+    end
+  end
+
   test "a peer's row with a colon in its id is reported without its payload, and never served",
        ctx do
     # Shaped as the other Engine's own change in every way but the colon.
@@ -275,6 +363,22 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
       description =~ "planted ledger"
     end)
   end
+
+  # The migration after the repair that gives the rows it moved a colon in
+  # their id; an Engine without it has none.
+  defp moved_ids do
+    {_version, _description, statements} =
+      Enum.find(Migrations.all(), {0, "", []}, fn {_v, description, _s} ->
+        description =~ "keep a colon"
+      end)
+
+    for {label, sql} <- statements do
+      assert {:ok, _} = Store.raw_query(sql, []), "#{label} failed"
+    end
+  end
+
+  defp served(ctx),
+    do: Enum.map(Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)["mutations"], & &1["id"])
 
   defp repair do
     {_version, _description, statements} = repair_migration()
