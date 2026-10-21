@@ -206,18 +206,38 @@ defmodule OptimalEngine.API.ScopeAPI do
   # ---------------------------------------------------------------------------
 
   # Exporting, importing, or downloading a large workspace keeps one request
-  # busy for minutes while nothing arrives from the client, and Cowboy closes a
-  # connection that receives nothing for its idle timeout (180 s, see
-  # OptimalEngine.API.Endpoint), which would cut the request off midway. These
-  # routes raise the timeout for their own request only.
-  @long_request_ms :timer.hours(1)
+  # busy for minutes while nothing arrives from the client. Cowboy closes such a
+  # connection twice over: after its idle timeout with no data received (180 s,
+  # OptimalEngine.API.Endpoint) and after its inactivity timeout with no message
+  # at all reaching the connection process (300 s). For these routes a watcher
+  # raises the idle timeout for this request and messages the connection every
+  # minute until the request process ends, so neither cuts the request off.
+  @long_request_idle_ms :timer.minutes(10)
+  @long_request_tick_ms :timer.minutes(1)
 
   defp allow_long_request(%Plug.Conn{adapter: {Plug.Cowboy.Conn, req}} = conn) do
-    :cowboy_req.cast({:set_options, %{idle_timeout: @long_request_ms}}, req)
+    owner = self()
+    :cowboy_req.cast({:set_options, %{idle_timeout: @long_request_idle_ms}}, req)
+
+    spawn(fn ->
+      ref = Process.monitor(owner)
+      keep_connection_open(req, ref)
+    end)
+
     conn
   end
 
   defp allow_long_request(conn), do: conn
+
+  defp keep_connection_open(req, ref) do
+    receive do
+      {:DOWN, ^ref, :process, _pid, _reason} -> :ok
+    after
+      @long_request_tick_ms ->
+        :cowboy_req.cast({:set_options, %{idle_timeout: @long_request_idle_ms}}, req)
+        keep_connection_open(req, ref)
+    end
+  end
 
   # A raw upload is written to disk as it arrives, so a bundle of any size is
   # never held in memory.
