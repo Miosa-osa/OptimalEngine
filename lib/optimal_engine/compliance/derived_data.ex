@@ -28,7 +28,9 @@ defmodule OptimalEngine.Compliance.DerivedData do
   batch one transaction: a batch either goes whole or not at all, a failure stops
   the run with the earlier batches done, and running it again finishes the rest.
   Files go first, inside the transaction, so a file that cannot be removed leaves
-  the rows (and the pointer to the file) in place.
+  the rows (and the pointer to the file) in place. The objects of the deleted assets
+  in the object store go before the transaction (a request to a bucket must not hold
+  the Store), with the same effect when one cannot be deleted.
 
   `delete_derived/1` removes the same rows and files but keeps the contexts, for a
   context whose text was redacted in place. `preview/2` counts what
@@ -62,7 +64,9 @@ defmodule OptimalEngine.Compliance.DerivedData do
   @spec erase_contexts(String.t(), [String.t()]) :: {:ok, removed()} | {:error, term()}
   def erase_contexts(tenant_id, context_ids) when is_binary(tenant_id) and is_list(context_ids) do
     in_batches(context_ids, fn batch ->
-      Store.transaction(&erase_batch(&1, tenant_id, batch, true), @timeout)
+      with :ok <- remove_objects(tenant_id, batch) do
+        Store.transaction(&erase_batch(&1, tenant_id, batch, true), @timeout)
+      end
     end)
   end
 
@@ -98,7 +102,11 @@ defmodule OptimalEngine.Compliance.DerivedData do
   """
   @spec delete_derived([String.t()]) :: {:ok, removed()} | {:error, term()}
   def delete_derived(context_ids) when is_list(context_ids) do
-    Store.transaction(&delete_in(&1, Enum.uniq(context_ids), true), @timeout)
+    ids = Enum.uniq(context_ids)
+
+    with :ok <- remove_objects(nil, ids) do
+      Store.transaction(&delete_in(&1, ids, true), @timeout)
+    end
   end
 
   defp in_batches(context_ids, fun) do
@@ -184,10 +192,10 @@ defmodule OptimalEngine.Compliance.DerivedData do
   # The workspaces these contexts are in, each with its tenant: the only workspaces whose
   # files this delete may remove. A row of a bundle can name any workspace, so a file is
   # removed for a row only when the row's workspace is one of these.
-  defp erased_scope(txn, ctx) do
+  defp erased_scope(reader, ctx) do
     with {:ok, found} <-
            rows(
-             txn,
+             reader,
              "SELECT DISTINCT workspace_id, tenant_id FROM contexts WHERE id IN #{set(1)}",
              [ctx]
            ) do
@@ -197,9 +205,9 @@ defmodule OptimalEngine.Compliance.DerivedData do
 
   # The packages of these contexts that no remaining context refers to, by the
   # package id in a context's metadata or in a claim's signal.
-  defp exclusive_packages(txn, ctx) do
+  defp exclusive_packages(reader, ctx) do
     column(
-      txn,
+      reader,
       """
       SELECT DISTINCT p FROM (
         SELECT CASE WHEN json_valid(c.metadata) THEN json_extract(c.metadata, '$.source_package_id') END AS p
@@ -380,23 +388,23 @@ defmodule OptimalEngine.Compliance.DerivedData do
   # The paths a row that stays also names: the same string (an index lookup), or the
   # same file spelled another way (`a/./b`, `a/c/../b`) by a remaining asset of one of
   # the workspaces, which is looked at only when a local file is about to go.
-  defp shared_paths(txn, assets, scope) do
+  defp shared_paths(reader, assets, scope) do
     ids = assets |> Enum.map(&hd/1) |> json()
     paths = assets |> Enum.map(&Enum.at(&1, 1)) |> Enum.uniq() |> json()
 
     with {:ok, same} <-
            column(
-             txn,
+             reader,
              "SELECT DISTINCT storage_path FROM assets " <>
                "WHERE storage_path IN #{set(2)} AND id NOT IN #{set(1)}",
              [ids, paths]
            ),
-         {:ok, spelled} <- spelled_differently(txn, ids, assets, scope) do
+         {:ok, spelled} <- spelled_differently(reader, ids, assets, scope) do
       {:ok, %{same: MapSet.new(same), expanded: spelled}}
     end
   end
 
-  defp spelled_differently(txn, ids, assets, scope) do
+  defp spelled_differently(reader, ids, assets, scope) do
     wanted =
       for [_id, path, workspace_id] <- assets,
           Map.has_key?(scope, workspace_id),
@@ -410,7 +418,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
     else
       with {:ok, remaining} <-
              column(
-               txn,
+               reader,
                "SELECT storage_path FROM assets WHERE id NOT IN #{set(1)} " <>
                  "AND workspace_id IN #{set(2)} AND storage_path NOT LIKE 's3://%'",
                [ids, json(Map.keys(scope))]
@@ -436,6 +444,42 @@ defmodule OptimalEngine.Compliance.DerivedData do
          MapSet.member?(shared.expanded, Path.expand(path)))
   end
 
+  # ── objects ────────────────────────────────────────────────────────────────
+
+  # The objects of the assets that go with these contexts, in the object store the
+  # Engine is configured for. They go before the transaction, not in it: a request to a
+  # bucket must not hold the Store, and an object that cannot be deleted leaves the rows
+  # (and the pointer to it) in place for the next run. An object another asset still uses,
+  # one in another bucket, one outside the erased workspace's own prefix, one of an asset
+  # whose row names a workspace the contexts are not in, and every object when no object
+  # store is configured are left alone (`Compliance.Artifacts`).
+  # `tenant_id` limits the contexts to a tenant's; nil means the ids are already known to be.
+  defp remove_objects(tenant_id, context_ids) do
+    with {:ok, ids} <- in_tenant(tenant_id, context_ids),
+         ctx = json(ids),
+         {:ok, scope} <- erased_scope(:store, ctx),
+         {:ok, packages} <- exclusive_packages(:store, ctx),
+         {:ok, assets} <-
+           rows(
+             :store,
+             "SELECT id, storage_path, workspace_id FROM assets " <>
+               "WHERE source_package_id IN #{set(1)} AND storage_path LIKE 's3://%'",
+             [json(packages)]
+           ),
+         {:ok, shared} <- shared_paths(:store, assets, scope) do
+      objects =
+        for [_id, path, workspace_id] <- assets,
+            Map.has_key?(scope, workspace_id),
+            not shared?(shared, path),
+            do: {:asset_object, path, Map.fetch!(scope, workspace_id), workspace_id}
+
+      case Artifacts.remove(objects) do
+        {:ok, _removed} -> :ok
+        {:error, _} = error -> error
+      end
+    end
+  end
+
   # ── helpers ────────────────────────────────────────────────────────────────
 
   defp set(n), do: "(SELECT value FROM json_each(?#{n}))"
@@ -446,11 +490,20 @@ defmodule OptimalEngine.Compliance.DerivedData do
     with {:ok, found} <- rows(txn, sql, params), do: {:ok, List.flatten(found)}
   end
 
-  defp rows(txn, sql, params) do
-    case Store.txn_query(txn, sql, params) do
-      {:ok, found} -> {:ok, found}
-      {:error, reason} -> {:error, {:derived_select_failed, reason}}
-    end
+  # `:store` reads outside any transaction; a transaction handle reads inside it.
+  defp rows(:store, sql, params), do: selected(Store.raw_query(sql, params))
+  defp rows(txn, sql, params), do: selected(Store.txn_query(txn, sql, params))
+
+  defp selected({:ok, found}), do: {:ok, found}
+  defp selected({:error, reason}), do: {:error, {:derived_select_failed, reason}}
+
+  defp in_tenant(nil, ids), do: {:ok, ids}
+
+  defp in_tenant(tenant_id, ids) do
+    column(:store, "SELECT id FROM contexts WHERE tenant_id = ?1 AND id IN #{set(2)}", [
+      tenant_id,
+      json(ids)
+    ])
   end
 
   defp merge(left, right), do: Map.merge(left, right, fn _key, a, b -> a + b end)
