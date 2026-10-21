@@ -18,7 +18,7 @@ defmodule OptimalEngine.Viability.Audit do
   confirmed or dismissed.
   """
 
-  alias OptimalEngine.Signal.{GenreDetector, GenreRegistry, ModeDetector}
+  alias OptimalEngine.Signal.{GenreDetector, GenreRegistry, ModeDetector, TimeLimit}
   alias OptimalEngine.Store
 
   @weights %{formal: 0.40, semantic: 0.35, information: 0.25}
@@ -126,7 +126,9 @@ defmodule OptimalEngine.Viability.Audit do
   `sn_ratio`) against prior texts.
   """
   @spec score(map(), [String.t()]) :: map()
-  def score(signal, priors) do
+  def score(signal, priors), do: TimeLimit.with_budget(fn -> score_signal(signal, priors) end)
+
+  defp score_signal(signal, priors) do
     content = signal.content || ""
     words = word_count(content)
     {formal, formal_findings} = formal(signal, content, words)

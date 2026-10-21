@@ -24,7 +24,7 @@ defmodule OptimalEngine.Signal.ModeDetector do
   evidence, and falls back to the genre registry's mode for weak evidence.
   """
 
-  alias OptimalEngine.Signal.GenreRegistry
+  alias OptimalEngine.Signal.{GenreRegistry, TimeLimit}
 
   @type mode :: :linguistic | :visual | :code | :data | :mixed
   @type confidence :: :strong | :weak
@@ -154,6 +154,12 @@ defmodule OptimalEngine.Signal.ModeDetector do
   def detect(nil), do: {:linguistic, :weak}
 
   def detect(text) when is_binary(text) do
+    # Bounded: a crafted text must not hold the caller (intake, for one) for
+    # longer than the classification limit; past it the text counts as weak.
+    TimeLimit.run(fn -> detect_text(text) end, {:linguistic, :weak}, label: "mode detection")
+  end
+
+  defp detect_text(text) do
     trimmed = String.trim(text)
 
     cond do

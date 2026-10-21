@@ -30,7 +30,7 @@ defmodule OptimalEngine.Signal.PreSend do
   mismatch) that the genre recognition rate reads.
   """
 
-  alias OptimalEngine.Signal.{GenreDetector, GenreRegistry, ModeDetector}
+  alias OptimalEngine.Signal.{GenreDetector, GenreRegistry, ModeDetector, TimeLimit}
   alias OptimalEngine.Viability.SignalEvents
 
   @channels %{
@@ -58,7 +58,10 @@ defmodule OptimalEngine.Signal.PreSend do
   `:workspace_id` to record the check, `:actor`.
   """
   @spec check(String.t(), map(), keyword()) :: map()
-  def check(draft, receiver, opts \\ []) when is_binary(draft) do
+  def check(draft, receiver, opts \\ []) when is_binary(draft),
+    do: TimeLimit.with_budget(fn -> check_draft(draft, receiver, opts) end)
+
+  defp check_draft(draft, receiver, opts) do
     receiver = Map.new(receiver || %{}, fn {key, value} -> {to_string(key), value} end)
     profile = profile(receiver)
     words = word_count(draft)

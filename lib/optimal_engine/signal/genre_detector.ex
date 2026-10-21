@@ -22,7 +22,7 @@ defmodule OptimalEngine.Signal.GenreDetector do
        (a single common word such as "review" or "plan" is not enough).
   """
 
-  alias OptimalEngine.Signal.GenreRegistry
+  alias OptimalEngine.Signal.{GenreRegistry, TimeLimit}
 
   @default_genre "note"
 
@@ -158,6 +158,14 @@ defmodule OptimalEngine.Signal.GenreDetector do
   @doc "Detects the genre of `text`. Returns a registry genre name."
   @spec detect(String.t() | nil) :: String.t()
   def detect(text) when is_binary(text) do
+    # Bounded like mode detection: past the classification limit the text
+    # gets the default genre.
+    TimeLimit.run(fn -> detect_text(text) end, @default_genre, label: "genre detection")
+  end
+
+  def detect(_), do: @default_genre
+
+  defp detect_text(text) do
     lines = non_blank_lines(text)
 
     form_genre(text, lines) ||
@@ -169,8 +177,6 @@ defmodule OptimalEngine.Signal.GenreDetector do
       registry_genre(text) ||
       @default_genre
   end
-
-  def detect(_), do: @default_genre
 
   # ── Form ────────────────────────────────────────────────────────────────
 
