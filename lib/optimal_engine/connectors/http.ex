@@ -18,6 +18,7 @@ defmodule OptimalEngine.Connectors.HTTP do
   API is designed so callers won't change.
   """
 
+  alias OptimalEngine.Connectors.HTTP.SingleAttempt
   alias OptimalEngine.Connectors.RateLimit
 
   @default_timeout 10_000
@@ -43,10 +44,11 @@ defmodule OptimalEngine.Connectors.HTTP do
     * `:max_body_bytes` - fail with `{:error, :response_too_large}` when the
       answer is longer than this (default: no limit)
     * `:single_attempt` - the request is sent once and no more (default
-      `false`): `connection: close`, so it is never sent again on a kept-alive
-      session the server closed, and `autoretry: 0`, so httpc does not send it a
-      second time after an answer that names a `Retry-After` (see
-      `autoretry_supported?/0`)
+      `false`), by `HTTP.SingleAttempt` instead of `:httpc`: one connection,
+      `connection: close`, no redirect, no retry whatever the answer says (a
+      `503` with a `Retry-After` is handed back, not sent again), TLS always
+      verified, and the answer read in full (`:max_body_bytes` defaults to 1 MiB
+      there). `:follow_redirects` and `:verify_tls` have no effect on it
     * `:ratelimit`      — `{bucket_key, rate, burst}` to wait on before firing
     * `:parse_json`     — try to decode response body (default `true`)
   """
@@ -139,6 +141,32 @@ defmodule OptimalEngine.Connectors.HTTP do
   end
 
   defp fire_httpc(url, opts) do
+    if Keyword.get(opts, :single_attempt, false),
+      do: fire_once(url, opts),
+      else: fire_pooled(url, opts)
+  end
+
+  defp fire_once(url, opts) do
+    method = Keyword.get(opts, :method, :get)
+    headers = build_headers(opts)
+
+    {headers, declared_type} =
+      if method in [:get, :delete], do: {headers, nil}, else: pop_content_type(headers)
+
+    {content_type, body_payload} = encode_body(Keyword.get(opts, :body), declared_type)
+
+    SingleAttempt.request(
+      method,
+      url,
+      headers |> Enum.map(fn {k, v} -> {k, header_value(v)} end),
+      List.to_string(content_type),
+      body_payload,
+      timeout: Keyword.get(opts, :timeout, @default_timeout),
+      max_body_bytes: Keyword.get(opts, :max_body_bytes, 1_048_576)
+    )
+  end
+
+  defp fire_pooled(url, opts) do
     method = Keyword.get(opts, :method, :get)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     headers = build_headers(opts)
@@ -147,11 +175,6 @@ defmodule OptimalEngine.Connectors.HTTP do
     # the one the caller named is lifted out of them and handed over there.
     {headers, declared_type} =
       if method in [:get, :delete], do: {headers, nil}, else: pop_content_type(headers)
-
-    headers =
-      if Keyword.get(opts, :single_attempt, false),
-        do: headers ++ [{"connection", "close"}],
-        else: headers
 
     {content_type, body_payload} = encode_body(Keyword.get(opts, :body), declared_type)
 
@@ -165,47 +188,11 @@ defmodule OptimalEngine.Connectors.HTTP do
     http_opts =
       [{:timeout, timeout}, {:connect_timeout, timeout}] ++
         if(Keyword.get(opts, :follow_redirects, false), do: [], else: [{:autoredirect, false}]) ++
-        retry_opts(opts) ++
         tls_opts(url, opts)
 
     case Keyword.get(opts, :max_body_bytes) do
       nil -> :httpc.request(method, http_request, http_opts, body_format: :binary)
       cap -> fire_capped(method, http_request, http_opts, cap, timeout)
-    end
-  end
-
-  defp retry_opts(opts) do
-    if Keyword.get(opts, :single_attempt, false) and autoretry_supported?(),
-      do: [{:autoretry, 0}],
-      else: []
-  end
-
-  @doc """
-  Whether this Erlang/OTP's httpc takes `autoretry` (OTP 28.4 and later). An
-  earlier httpc sends a request once more, after the delay, when the answer
-  names a `Retry-After`, and has no option to stop it; it refuses an option it
-  does not know, so `autoretry` is passed only where it is known.
-  """
-  @spec autoretry_supported?() :: boolean()
-  def autoretry_supported? do
-    otp = :erlang.system_info(:otp_release) |> to_string()
-    file = Path.join([to_string(:code.root_dir()), "releases", otp, "OTP_VERSION"])
-
-    with {:ok, text} <- File.read(file),
-         [major | rest] <- text |> String.trim() |> String.split("."),
-         {major, _} <- Integer.parse(major) do
-      case rest do
-        [minor | _] ->
-          case Integer.parse(minor) do
-            {minor, _} -> major > 28 or (major == 28 and minor >= 4)
-            :error -> false
-          end
-
-        [] ->
-          major > 28
-      end
-    else
-      _unknown -> false
     end
   end
 

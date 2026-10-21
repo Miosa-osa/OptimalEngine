@@ -128,8 +128,9 @@ At the start of each sync the Engine `POST`s to `broker_url`:
 MIOSA Connect issues it as `<connection_id>.<base64url hmac>`, and that signature is what the broker authenticates the call by; the Engine never parses it.
 `connector.id` is the connector's own id, and `workspace_id` is the connector's own workspace, never one its signals are routed to: the signature covers the workspace, so any other value is answered with a `401`.
 The Engine sends no secret and no header of its own beyond `accept` and `content-type`, and never holds the platform's internal secret.
-The call does not follow redirects, verifies the broker's certificate and host name, is made once on a connection of its own (no kept-alive session to be sent again on, and `autoretry: 0` so that an answer naming a `Retry-After` does not send it again), reads at most 256 KiB of the answer, and gives up after `broker_timeout_ms`.
-`autoretry` is an Erlang/OTP 28.4 option: on an earlier OTP, `:httpc` sends a request again after a `Retry-After` until the call's timeout, so the timeout (5 seconds by default for the broker) is what bounds it. Run a managed Engine on OTP 28.4 or later.
+The call does not follow redirects, verifies the broker's certificate and host name, is made once on a connection of its own, reads at most 256 KiB of the answer, and gives up after `broker_timeout_ms`.
+"Once" is the Engine's own guarantee, whatever the Erlang/OTP release: the call is made by `Connectors.HTTP.SingleAttempt`, not by `:httpc`, which before OTP 28.4 sends a request again after an answer that names a `Retry-After`, until its timeout.
+A `503` with a `Retry-After` from the broker is read as `broker_unreachable` and is not sent again within the call.
 The route is whatever `broker_url` names, per connector, so a broker can move its route without an Engine change.
 
 `broker_url` is checked as written, not as a parser might read it.
@@ -196,8 +197,9 @@ An OAuth adapter also accepts an `access_token` in its credentials, for tests an
 It is sent as it is and never renewed: a refusal is reported as the adapter always reports one, usually `auth_expired`.
 The refresh-token flow is unchanged: given `oauth_refresh_token`, `client_id` and `client_secret` (or the adapter's own equivalents), the adapter exchanges them for a token once per sync, as before.
 A connector that carries a complete set of those (every key of the adapter's own grant) uses the grant, and an `access_token` left beside it is ignored; a broker-issued token comes before both.
-The exchanges post a form (`application/x-www-form-urlencoded`), once, on a connection of their own with TLS verified and no redirect.
-A `401`, or a `400` naming `invalid_grant`, `invalid_client` or `unauthorized_client`, is `auth_expired`; any other `400` is `{:token_error, error_code}`, carrying only the provider's `error` field; a `429` is `rate_limited`, with the `Retry-After` the provider named (at most 30 s) for the Runner to wait; a `5xx` is `transient`.
+The exchanges post a form (`application/x-www-form-urlencoded`), once (by `Connectors.HTTP.SingleAttempt`), on a connection of their own with TLS verified and no redirect.
+Gmail's and Drive's refresh posts JSON, as before, and reads the answer the same way.
+A `401`, or a `400` naming `invalid_grant`, `invalid_client` or `unauthorized_client`, is `auth_expired`; any other `400` is `{:token_error, error_code}`, carrying only the provider's `error` field and only when it is 1 to 64 lower-case letters and underscores (else `"unknown"`); a `429` is `rate_limited`, with the `Retry-After` the provider named (at most 30 s) for the Runner to wait; a `5xx` is `transient`.
 
 ### Errors
 

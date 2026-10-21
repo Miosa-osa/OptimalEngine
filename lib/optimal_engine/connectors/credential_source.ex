@@ -235,7 +235,9 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   `%{id: connector_id}` and the seal opens only for that connector, so a copy
   of it placed on another row is not read. It is not bound to the workspace,
   which a rename or a move changes while the connector stays the same. A config
-  with no plaintext reference is returned as it is, seal and all.
+  with no plaintext reference is returned as it is, seal and all. A connector
+  with no id (blank or not a string) cannot be bound to, and is
+  `{:error, :invalid_config}`.
   """
   @spec seal_reference(map(), %{required(:id) => String.t()}) ::
           {:ok, map()} | {:error, :connector_key_missing | :invalid_config}
@@ -264,6 +266,8 @@ defmodule OptimalEngine.Connectors.CredentialSource do
         {:error, :invalid_config}
     end
   end
+
+  def seal_reference(config, %{id: _id}) when is_map(config), do: {:error, :invalid_config}
 
   # The associated data a seal is bound to.
   defp aad(%{id: id}), do: "optimal.connector.broker_reference\0" <> id

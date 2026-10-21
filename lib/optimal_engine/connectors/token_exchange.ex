@@ -12,7 +12,7 @@ defmodule OptimalEngine.Connectors.TokenExchange do
   | --- | --- |
   | `200` with an `access_token` | `{:ok, token}` |
   | `400` naming `invalid_grant`, `invalid_client` or `unauthorized_client`; `401` | `{:error, :auth_expired}` |
-  | any other `400` | `{:error, {:token_error, error_code}}`, the `error` field only |
+  | any other `400` | `{:error, {:token_error, error_code}}`, the `error` field only, and only if it is 1 to 64 lower-case letters and underscores (else `"unknown"`) |
   | `429` | `{:error, {:rate_limited, ms}}` from `Retry-After` (at most 30 s), else `{:error, :rate_limited}` |
   | `5xx` | `{:error, :transient}` |
   | anything else | `{:error, {:http, status}}` |
@@ -28,6 +28,7 @@ defmodule OptimalEngine.Connectors.TokenExchange do
   @form "application/x-www-form-urlencoded"
   @grant_errors ~w(invalid_grant invalid_client unauthorized_client)
   @max_retry_after_ms 30_000
+  @error_code ~r/\A[a-z_]{1,64}\z/
 
   @doc """
   Posts `params` to `url` as a form and reads the answer as a token. Options:
@@ -75,6 +76,11 @@ defmodule OptimalEngine.Connectors.TokenExchange do
   def token({:ok, %{status: status}}), do: {:error, {:http, status}}
   def token({:error, reason}), do: {:error, reason}
 
-  defp error_code(%{"error" => code}) when is_binary(code), do: code
+  # A provider's `error` is a short code (`invalid_request`). Anything else in
+  # that field could be an echo of what was sent, so it is not kept.
+  defp error_code(%{"error" => code}) when is_binary(code) do
+    if Regex.match?(@error_code, code), do: code, else: "unknown"
+  end
+
   defp error_code(_body), do: "unknown"
 end
