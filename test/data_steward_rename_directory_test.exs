@@ -315,6 +315,41 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
       assert notes(ctx) == []
     end
 
+    test "a note that names another tenant does not undo a rename that committed", ctx do
+      workspace = mismatched!(ctx)
+      file!(Path.join(ctx.root, ctx.old), "nodes/a.md")
+      assert {:ok, _} = rename(workspace.id, "default:" <> ctx.new)
+      note!(ctx, workspace.id, "default:" <> ctx.new, "forged-#{ctx.n}")
+
+      assert {:ok, [%{action: :committed}]} = DataSteward.recover_interrupted_renames()
+
+      assert File.exists?(Path.join(ctx.root, "#{ctx.new}/nodes/a.md"))
+      refute File.exists?(Path.join(ctx.root, ctx.old))
+      assert notes(ctx) == []
+    end
+
+    test "a Store that does not answer in time leaves the note and the directory", ctx do
+      crashed!(ctx)
+      previous = Application.get_env(:optimal_engine, :store_call_timeout_ms)
+      Application.put_env(:optimal_engine, :store_call_timeout_ms, 300)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:optimal_engine, :store_call_timeout_ms, previous),
+          else: Application.delete_env(:optimal_engine, :store_call_timeout_ms)
+      end)
+
+      task = hold_store(1_500)
+
+      assert {:ok, [%{action: :needs_attention}]} = DataSteward.recover_interrupted_renames()
+
+      assert File.exists?(Path.join(ctx.root, "#{ctx.new}/nodes/sales/signals/deal.md"))
+      assert length(notes(ctx)) == 1
+
+      assert {:ok, :released} = Task.await(task, 10_000)
+      assert {:ok, [%{action: :moved_back}]} = DataSteward.recover_interrupted_renames()
+    end
+
     test "does not guess when both directories exist, and keeps the note", ctx do
       workspace = crashed!(ctx)
       file!(Path.join(ctx.root, ctx.old), "nodes/other.md")
@@ -358,6 +393,76 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
       assert File.exists?(Path.join(ctx.root, "#{ctx.new}/nodes/sales/signals/deal.md"))
       refute File.exists?(Path.join(ctx.root, ctx.old))
       assert notes(ctx) == []
+    end
+  end
+
+  describe "a rename that did not commit" do
+    # The move a rename planned, with the note it wrote before it moved the directory.
+    defp planned!(ctx, old \\ nil) do
+      move = %{
+        root: ctx.root,
+        old: old || Path.join(ctx.root, ctx.old),
+        new: Path.join(ctx.root, ctx.new)
+      }
+
+      marker = DataSteward.marker_path(move)
+      File.mkdir_p!(Path.dirname(marker))
+      File.write!(marker, "{}")
+      {move, marker}
+    end
+
+    test "puts the directory back and clears the note", ctx do
+      {move, marker} = planned!(ctx)
+      file!(move.new, "nodes/a.md")
+
+      assert {:error, :boom} = DataSteward.settle_move({:error, :boom}, move)
+
+      assert File.exists?(Path.join(move.old, "nodes/a.md"))
+      refute File.exists?(move.new)
+      refute File.exists?(marker)
+    end
+
+    test "keeps the note when the directory cannot be put back", ctx do
+      # The place the rows say the directory is no longer reachable.
+      {move, marker} = planned!(ctx, Path.join(ctx.root, "missing-parent-#{ctx.n}/#{ctx.old}"))
+      file!(move.new, "nodes/a.md")
+
+      assert {:error, :boom} = DataSteward.settle_move({:error, :boom}, move)
+
+      assert File.exists?(Path.join(move.new, "nodes/a.md"))
+      assert File.exists?(marker)
+    end
+
+    test "clears the note when the directory never moved", ctx do
+      {move, marker} = planned!(ctx)
+      file!(move.old, "nodes/a.md")
+
+      assert {:error, :boom} = DataSteward.settle_move({:error, :boom}, move)
+
+      assert File.exists?(Path.join(move.old, "nodes/a.md"))
+      refute File.exists?(marker)
+    end
+
+    test "keeps the note when both directories exist", ctx do
+      {move, marker} = planned!(ctx)
+      file!(move.old, "nodes/a.md")
+      file!(move.new, "nodes/b.md")
+
+      assert {:error, :boom} = DataSteward.settle_move({:error, :boom}, move)
+
+      assert File.exists?(Path.join(move.old, "nodes/a.md"))
+      assert File.exists?(Path.join(move.new, "nodes/b.md"))
+      assert File.exists?(marker)
+    end
+
+    test "clears the note when it committed", ctx do
+      {move, marker} = planned!(ctx)
+      file!(move.new, "nodes/a.md")
+
+      assert {:ok, :renamed} = DataSteward.settle_move({:ok, :renamed}, move)
+
+      assert File.exists?(Path.join(move.new, "nodes/a.md"))
+      refute File.exists?(marker)
     end
   end
 
@@ -428,13 +533,33 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
     workspace
   end
 
-  defp note!(ctx, source, target) do
+  # Holds the single-writer Store for `ms` inside one transaction.
+  defp hold_store(ms) do
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        Store.transaction(
+          fn _txn ->
+            send(parent, :holding)
+            Process.sleep(ms)
+            {:ok, :released}
+          end,
+          ms + 5_000
+        )
+      end)
+
+    assert_receive :holding, 2_000
+    task
+  end
+
+  defp note!(ctx, source, target, tenant \\ "default") do
     dir = Path.join(ctx.root, ".optimal-rename")
     File.mkdir_p!(dir)
 
     File.write!(
       Path.join(dir, "note-#{ctx.n}.json"),
-      Jason.encode!(%{tenant_id: "default", source: source, target: target})
+      Jason.encode!(%{tenant_id: tenant, source: source, target: target})
     )
   end
 
