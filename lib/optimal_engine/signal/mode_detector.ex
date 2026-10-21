@@ -47,6 +47,12 @@ defmodule OptimalEngine.Signal.ModeDetector do
   # Strong patterns are anchored at the start of the (left-trimmed) line and
   # case-sensitive: one hit marks the line as code. Each pattern encodes the
   # syntax that follows the keyword, so the bare English word does not match.
+  #
+  # Every pattern here and below is linear in the length of the line: a
+  # pattern that needs the line to end a certain way checks that first (a
+  # lookahead), so a long line that does not end that way fails in one pass
+  # instead of retrying each split of its middle. Caller text reaches these
+  # patterns through POST /api/ingest.
   @strong_patterns [
     ~r/^(def|defp|defmodule|defmacro|defmacrop|defstruct|defimpl|defprotocol|defdelegate|defguard)\b/,
     ~r/^(fn|func)(\s+[\w(]|\()/,
@@ -69,8 +75,8 @@ defmodule OptimalEngine.Signal.ModeDetector do
     ~r/^(const|let|var|val|auto)\s+(mut\s+)?[A-Za-z_$][\w$]*\s*(=|;|:\s*[\w<>\[\]|, ]+\s*(=|;|$))/,
     ~r/^(int|long|float|double|char|bool|boolean|void|size_t|u?int\d+_t)\s+\**[A-Za-z_]\w*\s*(=|;|\[|\([^)]*\)\s*[{;]?\s*$)/,
     ~r/^(if|for|while|switch|foreach)\s*\(.*\)\s*(\{|:)?\s*$/,
-    ~r/^for\s+[\w, ()]+\s+in\s+.+:\s*$/,
-    ~r/^(if|elif|while)\s+.*(==|!=|<=|>=|<|>|\bis\b|\bnot\b|\bin\b|[().\[\]]).*:\s*$/,
+    ~r/^(?=.*:\s*$)for\s+[\w, ()]+\s+in\s+.+:\s*$/,
+    ~r/^(?=.*:\s*$)(if|elif|while)\s+.*(==|!=|<=|>=|<|>|\bis\b|\bnot\b|\bin\b|[().\[\]]).*:\s*$/,
     ~r/^with\s+.+\bas\s+\w+\s*:\s*$/,
     ~r/^except(\s+[A-Z][\w.]*(\s+as\s+\w+)?)?\s*:\s*$/,
     ~r/^\}?\s*catch\s*\(.*\)\s*\{?\s*$/,
@@ -80,7 +86,8 @@ defmodule OptimalEngine.Signal.ModeDetector do
     ~r/^(print|puts|println|printf|console\.\w+|IO\.(puts|inspect)|fmt\.\w+|System\.out\.\w+)\s*[("']/,
     ~r/^\|>\s*\S/,
     ~r/^\.[A-Za-z_]\w*\(/,
-    ~r/^%?\{.*[,:=].*\}[,;)]*$/,
+    # The first `,`, `:` or `=` after the brace, then the last `}`: one pass.
+    ~r/^%?\{[^,:=]*+[,:=].*\}[,;)]*$/,
     ~r/^\$\s+[a-z]/,
     ~r/^(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(TABLE|INDEX|UNIQUE|VIEW|SCHEMA|EXTENSION)|ALTER\s+TABLE|DROP\s+(TABLE|INDEX|VIEW)|WITH\s+\w+\s+AS|FROM|WHERE|INNER\s+JOIN|LEFT\s+JOIN|JOIN|GROUP\s+BY|ORDER\s+BY|VALUES|LIMIT|RETURNING|ON\s+CONFLICT)\b/,
     ~r/^\w+\s+(INTEGER|TEXT|VARCHAR(\(\d+\))?|BIGINT|BOOLEAN|SERIAL|BIGSERIAL|UUID|TIMESTAMP(TZ)?|INT|REAL|NUMERIC(\([\d, ]+\))?|DATE|JSONB?)\b/,
@@ -104,7 +111,10 @@ defmodule OptimalEngine.Signal.ModeDetector do
     ~r/&&|\|\|/,
     ~r/[+\-*\/]=/,
     ~r/#\{|%\{|\$\{|&\(|&\d/,
-    ~r/[A-Za-z_]\w*(\.[A-Za-z_]\w*)*\((?!s\)|es\))/,
+    # A call: a word with a letter or `_` in it, right before `(`. Read from the
+    # start of the word only, so a long word is scanned once rather than once
+    # per letter. (A dotted name such as `foo.bar(` matches at its last word.)
+    ~r/(?<!\w)[0-9]*+[A-Za-z_]\w*+\((?!s\)|es\))/,
     ~r/;\s*$/,
     ~r/[{(\[]\s*$/,
     ~r/^[A-Za-z_][\w.\[\]'"]*\s*(=|\+=|-=)\s*[^=\s>]/,
@@ -130,7 +140,11 @@ defmodule OptimalEngine.Signal.ModeDetector do
   @comment ~r/^(\/\/|\/\*|\*\/|--\s|;;|<!--|#(?!!|include))/
   @fence ~r/^(```|~~~)\s*([\w+#.-]*)/
   @list_marker ~r/^([-*+]|\d+[.)])\s+(\[[ xX]\]\s+)?/
-  @image ~r/!\[[^\]]*\]\([^)]*\)|<img\b|<svg\b|<figure\b/i
+  # A markdown image `![alt](target)`. After an alt text, the next try starts
+  # at its `]` (*SKIP), since an opener inside it would reach the same `]`;
+  # with no `)` left in the line, no later image can close (*COMMIT).
+  @markdown_image ~r/!\[[^\]]*+(*SKIP)\]\((?:[^)]*+\)|(*COMMIT)(*FAIL))/
+  @image_tag ~r/<img\b|<svg\b|<figure\b/i
   @table_row ~r/^\|.*\|$/
   @table_rule ~r/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?$/
   # A word of letters, optionally wrapped in sentence punctuation: "Alice:",
@@ -462,7 +476,7 @@ defmodule OptimalEngine.Signal.ModeDetector do
   # Returns {kind, prose_words}.
   defp classify_line(line) do
     cond do
-      Regex.match?(@image, line) -> {:visual, 0}
+      image?(line) -> {:visual, 0}
       Regex.match?(@table_row, line) or Regex.match?(@table_rule, line) -> {:data, 0}
       Regex.match?(@heading, line) or Regex.match?(@rule, line) -> {:neutral, 0}
       Regex.match?(@subtitle_timing, line) -> {:neutral, 0}
@@ -493,6 +507,8 @@ defmodule OptimalEngine.Signal.ModeDetector do
   end
 
   defp strong_code?(line), do: Regex.match?(@strong_code, line)
+
+  defp image?(line), do: Regex.match?(@markdown_image, line) or Regex.match?(@image_tag, line)
 
   # A single cue decides only when almost nothing around it reads as words.
   defp lone_cue_code?(_line, 0), do: true

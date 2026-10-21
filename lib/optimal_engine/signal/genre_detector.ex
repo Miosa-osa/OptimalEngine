@@ -116,10 +116,15 @@ defmodule OptimalEngine.Signal.GenreDetector do
   #
   # `(#+\s*)?` lets plain-text documents use the same headings as markdown;
   # every pattern matches a whole line, so a sentence never qualifies.
+  #
+  # The ADR pair (a Status heading, then a Context heading) is checked once
+  # from the start of the text: the first Status heading is taken (an atomic
+  # group), since a Context heading after any Status heading is after the
+  # first. Retrying from every Status heading was quadratic.
 
   @heading_patterns [
     {"adr",
-     ~r/Architecture Decision Record|\bADR[- ]\d+|^(#+\s*)?Status\s*$.*^(#+\s*)?Context\s*$/ims},
+     ~r/\A(?=(?>.*?^(#+\s*)?Status\s*$).*?^(#+\s*)?Context\s*$)|Architecture Decision Record|\bADR[- ]\d+/ims},
     {"changelog", ~r/^#+\s*CHANGELOG\b|^[#]{2,4}\s*(Added|Changed|Fixed|Removed|Deprecated)\s*$/im},
     {"postmortem", ~r/^(#+\s*)?Root Cause( Analysis)?\s*$/im},
     {"runbook", ~r/^(#+\s*)?(Steps|Procedure|Rollback)\s*$/im},
@@ -138,7 +143,10 @@ defmodule OptimalEngine.Signal.GenreDetector do
 
   @message_max_lines 4
   @message_max_chars 600
-  @fenced_block ~r/^\s*(```|~~~).*?^\s*(```|~~~)\s*$/ms
+  # A fence opener up to its closing fence line. With no closing fence left
+  # in the text, no later opener has one either (*COMMIT): retrying from each
+  # opener was quadratic.
+  @fenced_block ~r/^\s*(```|~~~)(?:.*?^\s*(```|~~~)\s*$|(*COMMIT)(*FAIL))/ms
   @addressed ~r/(^|\s)@\w|\b(you|your|you're|youre|y'all|thanks|thank you|thx|ty|lgtm|sgtm|lol|pls|plz|please|btw|fyi|np|imo|anyone|someone|anybody|somebody|im|gonna|omw|brb)\b|^(hey|hi|hello|yo)\b|^\+1\b|:[a-z0-9_+-]+:|[\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}]/iu
 
   # ── Topic keywords ──────────────────────────────────────────────────────
