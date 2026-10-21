@@ -72,6 +72,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @member_tables ~w(workspace_members node_members)
   @principals "principals"
   @documents "operating_documents"
+  # Columns, and keys of a row's metadata, that hold where a stored file is
+  # (relocate_files/3).
+  @file_columns %{"assets" => ["storage_path"], "source_packages" => ["verbatim_archive_uri"]}
+  @file_metadata_keys ["local_path", "storage_path"]
   @batch_rows 1_000
   @snapshot_attempts 20
   @stale_staging_seconds 7_200
@@ -947,6 +951,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     column_names =
       Map.new(names, &{&1, MapSet.new(columns(target_table(&1)), fn {column, _, _} -> column end)})
 
+    files =
+      {Filesystem.path(root(), plan.workspace_id), MapSet.new(manifest["files"], & &1["path"])}
+
     # Every table is checked before any is written, so a refused bundle leaves
     # nothing behind.
     result =
@@ -963,7 +970,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
             Path.join([staging, "tables", name <> ".jsonl"])
             |> File.stream!()
             |> Stream.map(&Jason.decode!/1)
-            |> Stream.map(&(&1 |> rewrite(name, plan, column_names[name]) |> Map.drop(drops[name])))
+            |> Stream.map(fn row ->
+              row
+              |> rewrite(name, plan, column_names[name])
+              |> relocate_files(name, files)
+              |> Map.drop(drops[name])
+            end)
             |> self_parents_first(Enum.filter(keys[name], &(&1.table == name)))
 
           case write_batches(target, rows, verb, batch_rows, opts[:observe]) do
@@ -1143,6 +1155,67 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     do: row |> Map.put("scope_type", "workspace") |> Map.put("scope_id", plan.workspace_id)
 
   defp document_scope(row, _name, _plan), do: row
+
+  # A stored file's row names it by its path on the source Engine's disk. The
+  # import copied the file under the target workspace's folder, so a local path
+  # that ends in one of the bundle's files is pointed at that copy; an object
+  # store URI, and a path to a file the bundle does not carry, stay as they are.
+  defp relocate_files(row, name, {folder, bundled}) do
+    case Map.fetch(@file_columns, name) do
+      {:ok, columns} ->
+        row
+        |> Map.new(fn
+          {column, value} when is_binary(value) ->
+            cond do
+              column in columns -> {column, relocated(value, folder, bundled)}
+              column == "metadata" -> {column, relocated_metadata(value, folder, bundled)}
+              true -> {column, value}
+            end
+
+          pair ->
+            pair
+        end)
+
+      :error ->
+        row
+    end
+  end
+
+  defp relocated_metadata(json, folder, bundled) do
+    case Jason.decode(json) do
+      {:ok, metadata} when is_map(metadata) ->
+        moved =
+          Map.new(metadata, fn
+            {key, value} when key in @file_metadata_keys and is_binary(value) ->
+              {key, relocated(value, folder, bundled)}
+
+            pair ->
+              pair
+          end)
+
+        if moved == metadata, do: json, else: Jason.encode!(moved)
+
+      _ ->
+        json
+    end
+  end
+
+  # The longest tail of the path that is one of the bundle's files.
+  defp relocated(path, folder, bundled) do
+    if Path.type(path) == :absolute do
+      segments = Path.split(path)
+
+      found =
+        Enum.find_value(1..(length(segments) - 1)//1, fn drop ->
+          tail = segments |> Enum.drop(drop) |> Path.join()
+          if MapSet.member?(bundled, tail), do: tail
+        end)
+
+      if found, do: Path.join(folder, found), else: path
+    else
+      path
+    end
+  end
 
   # What a table's rows may be, checked before any of them is written. Every key
   # must be a column of the table, spelled as the table spells it: SQLite matches
