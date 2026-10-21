@@ -6,9 +6,9 @@ defmodule OptimalEngine.Portability.WorkspaceIdValidationTest do
   another tenant, or a directory the Engine root uses for itself, would write
   into files that are not the workspace's.
 
-  The check holds wherever an id enters: `Workspace.create/1`, a workspace
-  entry of a topology document, and a workspace bundle (the id the manifest
-  carries and the id the importer asks for). A bundle also never writes a file
+  The check holds where the Engine makes or takes a workspace id: `Workspace.create/1`,
+  a workspace entry of a topology document, and a workspace bundle (the id the
+  manifest carries and the id the importer asks for). A bundle also never writes a file
   outside the workspace's own directory, and never exports or removes a
   directory that holds more than the workspace.
   """
@@ -38,6 +38,18 @@ defmodule OptimalEngine.Portability.WorkspaceIdValidationTest do
         attrs
       )
     )
+  end
+
+  # A tenant row from before tenant ids were checked, which `Tenant.create/1`
+  # no longer makes.
+  defp legacy_tenant(id) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO tenants (id, name, plan, metadata) VALUES (?1, ?1, 'default', '{}')",
+        [id]
+      )
+
+    on_exit(fn -> Store.raw_query("DELETE FROM tenants WHERE id = ?1", [id]) end)
   end
 
   describe "Workspace.check_id/2" do
@@ -125,7 +137,7 @@ defmodule OptimalEngine.Portability.WorkspaceIdValidationTest do
 
     test "a tenant whose id holds a colon cannot derive an id", %{n: n} do
       tenant = "col:on-#{n}"
-      {:ok, _} = Tenant.create(%{id: tenant, name: "Colon"})
+      legacy_tenant(tenant)
 
       assert {:error, :invalid_workspace_id} = create(tenant, %{slug: "derived"})
     end
@@ -317,7 +329,7 @@ defmodule OptimalEngine.Portability.WorkspaceIdValidationTest do
 
       # A tenant whose id is a hidden name: its directory is not its own.
       hidden = ".hid-#{n}"
-      {:ok, _} = Tenant.create(%{id: hidden, name: "Hidden"})
+      legacy_tenant(hidden)
 
       assert {:error, :workspace_directory_shared} =
                WorkspaceBundle.import(ctx.path, hidden, cross_tenant: true)

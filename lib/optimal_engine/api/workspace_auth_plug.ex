@@ -321,6 +321,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
         {:error, {:not_a_workspace_id, id}} ->
           {:halt, halt_json(conn, 409, %{error: "not_a_workspace_id", workspace_id: id})}
+
+        {:error, :invalid_workspace_directory} ->
+          {:halt, halt_json(conn, 400, "invalid workspace")}
       end
     end)
   end
@@ -358,17 +361,36 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
         # Unregistered id. The "<tenant>:<slug>" id convention
         # (Workspace.derive_id) still names an owner — fail closed on a
         # foreign prefix. Bare unregistered ids pass for single-tenant
-        # compatibility (handlers still workspace-filter every row).
+        # compatibility (handlers still workspace-filter every row), but not
+        # one whose directory is not its own (`own_directory/1`).
         case String.split(workspace_id, ":", parts: 2) do
-          [prefix, _slug] when prefix != tenant_id -> {:error, :foreign_tenant}
-          [_prefix, _slug] when slug_named? -> :ok
-          [_prefix, slug] -> renamed(slug, tenant_id)
-          _ -> :ok
+          [prefix, _slug] when prefix != tenant_id ->
+            {:error, :foreign_tenant}
+
+          [_prefix, _slug] when slug_named? ->
+            own_directory(workspace_id)
+
+          [_prefix, slug] ->
+            with :ok <- own_directory(workspace_id), do: renamed(slug, tenant_id)
+
+          _ ->
+            own_directory(workspace_id)
         end
 
       _other ->
         # Store unavailable — fail closed.
         {:error, :foreign_tenant}
+    end
+  end
+
+  # An unregistered id still names a directory (`Filesystem.path/2`), and what is
+  # written under it goes there: a bare `tenants`, `nodes` or `cache`, or
+  # `default:tenants`, is one the Engine root uses for itself, so a request that
+  # names it is refused as it would write into them.
+  defp own_directory(workspace_id) do
+    case OptimalEngine.Portability.WorkspaceBundle.movable(workspace_id) do
+      :ok -> :ok
+      {:error, :workspace_directory_shared} -> {:error, :invalid_workspace_directory}
     end
   end
 

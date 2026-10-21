@@ -2058,8 +2058,8 @@ defmodule OptimalEngine.API.Router do
             |> put_resp_content_type("application/json")
             |> send_resp(201, Jason.encode!(workspace_to_map(ws)))
 
-          {:error, :invalid_slug} ->
-            send_resp(conn, 400, Jason.encode!(%{error: "invalid_slug"}))
+          {:error, reason} when reason in [:invalid_slug, :invalid_workspace_id] ->
+            send_resp(conn, 400, Jason.encode!(%{error: Atom.to_string(reason)}))
 
           {:error, reason} when reason in [:slug_taken, :slug_reserved, :external_id_taken] ->
             send_resp(conn, 409, Jason.encode!(%{error: Atom.to_string(reason)}))

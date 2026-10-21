@@ -632,6 +632,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     try do
       with :ok <- unpack(path, staging),
            {:ok, manifest} <- read_manifest(staging),
+           :ok <- files_inside(manifest),
            :ok <- verify(manifest, staging) do
         {:ok, manifest}
       end
