@@ -33,6 +33,7 @@ SECRET_ENV = ("MIOSA_API_KEY", "CLOUD_ENGINE_KEY", "LAPTOP_KEY", "CONNECTOR_KEY"
 FORWARDED_HEADERS = ("authorization", "content-type", "accept", "x-optimal-replica")
 LAG_LIMIT = 60
 OFFLINE_WRITES = 100
+PING_PONG_ROUNDS = 3
 
 
 # -- HTTP ---------------------------------------------------------------------
@@ -293,6 +294,7 @@ class StandIn:
             extra = {k: query[k] for k in ("since", "limit") if query.get(k)}
             status, result = self.engine.request("GET", "/api/sync/changes", workspace=workspace, **extra)
         else:
+            # Forwarded unchanged (base_seq included); only the workspace is the query's.
             sent = dict(body) if isinstance(body, dict) else {}
             sent["workspace"] = workspace
             status, result = self.engine.request("POST", "/api/sync/changes", sent)
@@ -366,6 +368,8 @@ class Proof:
             return self.summary()
         self.register()
         self.lag_both_ways()
+        self.sequential_edit()
+        self.ping_pong()
         self.offline_exactly_once_and_conflict()
         self.policy_none()
         self.version_pause()
@@ -384,6 +388,7 @@ class Proof:
         self.cloud_migration = cloud.get("migration")
         self.cloud_version = cloud.get("version", "")
         self.cloud_start = cloud.get("ledger_sequence", 0)
+        self.cloud_conflicts_start = cloud.get("conflicts_by_table")
         self.local_migration = local
         self.info(
             "relay status: workspace %s on the cloud Engine, replica %s, version %s, enabled %s, ledger %s, %d peer(s)"
@@ -457,6 +462,62 @@ class Proof:
             bool(found) and seconds <= LAG_LIMIT and (laptop, cloud) == (1, 1),
             "cloud capture %s %s in laptop search after %.0f s (limit %d s); cloud holds %d, laptop holds %d (written %s)"
             % (memory_id, "found" if found else "NOT found", seconds, LAG_LIMIT, cloud, laptop, written),
+        )
+
+    def sequential_edit(self):
+        """A note the cloud wrote and the laptop then edited after pulling it:
+        one edit after the other, so neither side records a conflict. The push
+        carries base_seq; without it the cloud took its own earlier write for a
+        concurrent edit."""
+        if not self.cloud:
+            self.info("sequential edit not checked: it needs the cloud Engine's own write (CLOUD_ENGINE_URL)")
+            return
+        period = "relay-sequential-" + self.run
+        first, second = "Agenda written on the cloud " + self.run, "Agenda edited on the laptop " + self.run
+        status, _ = self.cloud.request("PUT", "/api/rhythm/notes/daily/" + period, {"workspace": self.workspace, "content": first})
+        pulled, pulled_after = wait_for(lambda: self.note_content(self.laptop, period) == first, LAG_LIMIT + 30)
+        self.laptop.request("PUT", "/api/rhythm/notes/daily/" + period, {"workspace": self.workspace, "content": second})
+        pushed, pushed_after = wait_for(lambda: self.note_content(self.cloud, period) == second, LAG_LIMIT + 30)
+        on_laptop, on_cloud = (self.note_conflicts(engine, period) for engine in (self.laptop, self.cloud))
+        self.check(
+            "sequential edit is no conflict",
+            status == 200 and pulled and pushed and not on_laptop and not on_cloud,
+            "daily note %s written on the cloud (HTTP %s), on the laptop after %.0f s, edited there and back on the cloud after %.0f s; open conflicts for it: laptop %d, cloud %d"
+            % (period, status, pulled_after, pushed_after, len(on_laptop), len(on_cloud)),
+        )
+
+    def ping_pong(self):
+        """One note edited by each side in turn, every edit made after the other
+        side's arrived: after each hand-off both Engines hold that edit, and
+        neither records a conflict. An edit that loses to an older one, a hand-off
+        that does not settle, or a conflict between edits made one after the
+        other shows here."""
+        if not self.cloud:
+            self.info("ping-pong not checked: it needs the cloud Engine's own write (CLOUD_ENGINE_URL)")
+            return
+        period = "relay-pingpong-" + self.run
+        sides = [("cloud", self.cloud), ("laptop", self.laptop)]
+        handoffs, waited, stuck = 0, 0.0, None
+        for round_number in range(1, PING_PONG_ROUNDS + 1):
+            for index, (name, writer) in enumerate(sides):
+                other_name, other = sides[1 - index]
+                text = "Round %d written on the %s %s" % (round_number, name, self.run)
+                status, _ = writer.request("PUT", "/api/rhythm/notes/daily/" + period, {"workspace": self.workspace, "content": text})
+                arrived, after = wait_for(lambda: self.note_content(other, period) == text, LAG_LIMIT + 30)
+                waited += after
+                if status != 200 or not arrived:
+                    stuck = "round %d: the %s's edit (HTTP %s) did not reach the %s within %.0f s" % (round_number, name, status, other_name, after)
+                    break
+                handoffs += 1
+            if stuck:
+                break
+        finals = [self.note_content(engine, period) for engine in (self.laptop, self.cloud)]
+        conflicts = [self.note_conflicts(engine, period) for engine in (self.laptop, self.cloud)]
+        self.check(
+            "ping-pong converges",
+            not stuck and handoffs == 2 * PING_PONG_ROUNDS and finals[0] == finals[1] and finals[0] is not None and not conflicts[0] and not conflicts[1],
+            "daily note %s passed back and forth %d times (%.0f s waiting in all); laptop reads %r, cloud reads %r; open conflicts for it: laptop %d, cloud %d%s"
+            % (period, handoffs, waited, finals[0], finals[1], len(conflicts[0]), len(conflicts[1]), "; " + stuck if stuck else ""),
         )
 
     def offline_exactly_once_and_conflict(self):
@@ -542,46 +603,37 @@ class Proof:
             % (sent, totals["applied"], totals["duplicate"], totals["conflicts"], totals["failed"], totals["refused"]),
         )
 
-        def note_conflicts():
-            _, body = self.laptop.request("GET", "/api/sync/conflicts", workspace=self.workspace)
-            found = [c for c in (body or {}).get("conflicts", []) if c.get("table") == "rhythm_notes" and c.get("kind") == "concurrent_change"]
-            return found
-
-        conflicts, _ = wait_for(note_conflicts, 2 * self.interval + 10)
+        conflicts, _ = wait_for(lambda: self.note_conflicts(self.laptop, self.period, "concurrent_edit"), 2 * self.interval + 10)
         resolutions = ", ".join(sorted({c.get("resolution") for c in conflicts or []}))
+        tables = self.conflict_tables()
         if not self.cloud:
             self.check(
                 "conflict queue",
-                bool(conflicts),
-                "the daily note %s edited on both sides: %d open conflict(s) on the laptop (%s)" % (self.period, len(conflicts or []), resolutions),
+                bool(conflicts) and tables[0] == {"rhythm_notes": 1} and tables[1] == {},
+                "the daily note %s edited on both sides: %d open conflict(s) on the laptop (%s); new open conflicts by table: laptop %s, cloud %s"
+                % (self.period, len(conflicts or []), resolutions, tables[0], tables[1]),
             )
-            self.info("the cloud's conflict queue and the note's final text are not readable through the relay; set CLOUD_ENGINE_URL to check them")
+            self.info("the cloud's conflict list and the note's final text are not readable through the relay; set CLOUD_ENGINE_URL to check them")
             return
-
-        def cloud_conflicts():
-            _, body = self.cloud.request("GET", "/api/sync/conflicts", workspace=self.workspace)
-            return [c for c in (body or {}).get("conflicts", []) if c.get("table") == "rhythm_notes" and c.get("kind") == "concurrent_change"]
 
         def converged():
             notes = [self.note_content(engine) for engine in (self.laptop, self.cloud)]
             return notes if notes[0] is not None and notes[0] == notes[1] else None
 
-        on_cloud, _ = wait_for(cloud_conflicts, 2 * self.interval + 10)
         notes, _ = wait_for(converged, 2 * self.interval + 10)
         final = notes or [self.note_content(engine) for engine in (self.laptop, self.cloud)]
+        on_cloud = self.note_conflicts(self.cloud, self.period)
+        tables = self.conflict_tables()
+        # The note is the only row both sides changed while apart. The laptop
+        # pulled the cloud's edit before it pushed its own, so the laptop records
+        # the conflict and its push carries a base_seq that covers the cloud's
+        # edit: the cloud keeps the newer version without a second record.
+        # Nothing else is in either queue.
         self.check(
             "conflict queue",
-            bool(conflicts) and bool(on_cloud) and bool(notes),
-            "the daily note %s edited on both sides: %d open conflict(s) on the laptop (%s), %d on the cloud (%s); laptop reads %r, cloud reads %r"
-            % (
-                self.period,
-                len(conflicts or []),
-                resolutions,
-                len(on_cloud or []),
-                ", ".join(sorted({c.get("resolution") for c in on_cloud or []})),
-                final[0],
-                final[1],
-            ),
+            bool(conflicts) and not on_cloud and bool(notes) and tables == ({"rhythm_notes": 1}, {}),
+            "the daily note %s edited on both sides: %d open conflict(s) on the laptop (%s), %d on the cloud; laptop reads %r, cloud reads %r; new open conflicts by table: laptop %s, cloud %s"
+            % (self.period, len(conflicts or []), resolutions, len(on_cloud), final[0], final[1], tables[0], tables[1]),
         )
 
     def policy_none(self):
@@ -695,10 +747,33 @@ class Proof:
         status, result = self.push_as_agent([mutation])
         return "by device %s through the relay (HTTP %s, applied %s)" % (self.agent, status, (result or {}).get("applied") if isinstance(result, dict) else result)
 
-    def note_content(self, engine):
+    def note_content(self, engine, period=None):
         _, body = engine.request("GET", "/api/rhythm/notes", workspace=self.workspace, cadence="daily", limit=100)
-        notes = [n for n in (body or {}).get("notes", []) if n.get("period") == self.period]
+        notes = [n for n in (body or {}).get("notes", []) if n.get("period") == (period or self.period)]
         return notes[0].get("content") if notes else None
+
+    def note_conflicts(self, engine, period, kind=None):
+        """Open conflicts on a daily note (its key ends with the period)."""
+        _, body = engine.request("GET", "/api/sync/conflicts", workspace=self.workspace)
+        rows = (body or {}).get("conflicts", []) if isinstance(body, dict) else []
+        return [c for c in rows if c.get("table") == "rhythm_notes" and period in str(c.get("entity_key")) and (kind is None or c.get("kind") == kind)]
+
+    def conflict_tables(self):
+        """Open conflicts per table added during this run: (laptop, cloud).
+        The laptop starts empty; the cloud's are counted from its status at
+        preflight, read through the relay."""
+        _, laptop = self.laptop.request("GET", "/api/sync/status", workspace=self.workspace)
+        _, cloud = self.relay.request("GET", "status")
+        before = self.cloud_conflicts_start or {}
+
+        def by_table(status):
+            return status.get("conflicts_by_table") if isinstance(status, dict) else None
+
+        laptop_tables, cloud_tables = by_table(laptop), by_table(cloud)
+        if not isinstance(cloud_tables, dict) or not isinstance(self.cloud_conflicts_start, dict):
+            return laptop_tables, "unreported (an Engine without conflicts_by_table)"
+        added = {t: n - before.get(t, 0) for t, n in cloud_tables.items() if n - before.get(t, 0) != 0}
+        return laptop_tables, added
 
     def synthetic_mutation(self, table, operation, row, entity_id=None):
         self.agent_seq += 1
@@ -719,7 +794,9 @@ class Proof:
 
     def push_as_agent(self, mutations):
         engine = {"replica_id": self.agent, "migration": self.cloud_migration, "version": self.cloud_version}
-        return self.relay.request("POST", "push", {"workspace": self.workspace, "replica_id": self.agent, "engine": engine, "mutations": mutations})
+        # The agent pulls nothing from the cloud, so it has seen none of its ledger.
+        body = {"workspace": self.workspace, "replica_id": self.agent, "engine": engine, "base_seq": 0, "mutations": mutations}
+        return self.relay.request("POST", "push", body)
 
 
 # -- secrets ------------------------------------------------------------------

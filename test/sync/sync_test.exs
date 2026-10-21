@@ -49,6 +49,22 @@ defmodule OptimalEngine.SyncTest do
       )
   end
 
+  # The sequence of this Engine's latest change to a row, after sealing.
+  defp local_seq(ctx, table, id) do
+    {:ok, _} = Capture.seal()
+
+    {:ok, [[sequence]]} =
+      Store.raw_query(
+        """
+        SELECT MAX(sequence) FROM sync_mutations
+        WHERE workspace_id = ?1 AND entity_type = ?2 AND entity_id = ?3 AND device_id = ?4
+        """,
+        [ctx.ws, table, id, Sync.replica_id()]
+      )
+
+    sequence
+  end
+
   defp title(id) do
     {:ok, [[title]]} = Store.raw_query("SELECT title FROM contexts WHERE id = ?1", [id])
     title
@@ -137,6 +153,56 @@ defmodule OptimalEngine.SyncTest do
 
       later = Sync.changes(ctx.tenant, ctx.ws, since: page["cursor"])
       assert later["mutations"] == []
+    end
+
+    test "the job queue stays on its Engine: not captured, not applied, old triggers dropped",
+         ctx do
+      # An Engine before the queue was excluded had capture triggers on it.
+      :ok =
+        Store.raw_execute(
+          "CREATE TRIGGER IF NOT EXISTS sync_capture_jobs_legacy AFTER INSERT ON jobs BEGIN SELECT 1; END",
+          []
+        )
+
+      {:ok, _} = Capture.install()
+
+      assert {:ok, []} =
+               Store.raw_query(
+                 "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'jobs' AND name LIKE 'sync_capture_%'",
+                 []
+               )
+
+      # Both Engines enqueue the same daily job under the same key, each with
+      # its own id.
+      key = "analysis:daily:#{ctx.n}"
+      {:ok, _job} = OptimalEngine.Jobs.enqueue(ctx.ws, "sync.test", %{}, idempotency_key: key)
+
+      refute Enum.any?(
+               Sync.changes(ctx.tenant, ctx.ws)["mutations"],
+               &(&1["entity_type"] in ["jobs", "dead_letter_jobs"])
+             )
+
+      remote =
+        mutation(ctx, %{
+          "entity_type" => "jobs",
+          "entity_id" => "job_remote_#{ctx.n}",
+          "payload" => %{
+            "row" => %{
+              "id" => "job_remote_#{ctx.n}",
+              "kind" => "sync.test",
+              "idempotency_key" => key,
+              "workspace_id" => ctx.ws,
+              "tenant_id" => ctx.tenant
+            },
+            "blobs" => %{}
+          }
+        })
+
+      assert {:ok, %{applied: 0, failed: [], skipped: %{local_only: 1}}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [remote])
+
+      assert {:ok, []} = Store.raw_query("SELECT 1 FROM jobs WHERE id = ?1", [remote["entity_id"]])
+      assert Sync.conflicts(ctx.tenant, ctx.ws) == []
     end
   end
 
@@ -248,14 +314,17 @@ defmodule OptimalEngine.SyncTest do
           }
         })
 
+      # The sender had pulled nothing from this Engine (base 0).
       assert {:ok, %{conflicts: 1, applied: 0}} =
-               Sync.apply_changes(ctx.tenant, ctx.ws, [older_remote])
+               Sync.apply_changes(ctx.tenant, ctx.ws, [older_remote], base_seq: 0)
 
       assert {:ok, [["Launch is on Tuesday"]]} =
                Store.raw_query("SELECT fact_text FROM facts WHERE id = ?1", [fact_id])
 
-      assert [%{resolution: "kept_local_newer", table: "facts"} = conflict] =
-               Sync.conflicts(ctx.tenant, ctx.ws)
+      assert [
+               %{resolution: "kept_local_newer", table: "facts", kind: "fact_divergence"} =
+                 conflict
+             ] = Sync.conflicts(ctx.tenant, ctx.ws)
 
       {:ok, claims} =
         Store.raw_query(
@@ -403,6 +472,232 @@ defmodule OptimalEngine.SyncTest do
                  "SELECT COUNT(*) FROM decisions WHERE workspace_id = ?1 AND title = ?2",
                  [ctx.ws, title]
                )
+    end
+
+    test "the receiver's own earlier change is no conflict when the sender's base covers it",
+         ctx do
+      id = "seen-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Written here before the sender pulled")
+      seen = local_seq(ctx, "contexts", id)
+
+      edit =
+        mutation(ctx, %{
+          "operation" => "update",
+          "occurred_at" => "2999-01-01T00:00:00.000",
+          "payload" => context_row(id, "Edited after pulling it", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 1, conflicts: 0, base: "seq"}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [edit],
+                 base_seq: seen,
+                 base_replica_id: Sync.replica_id()
+               )
+
+      assert title(id) == "Edited after pulling it"
+      assert Sync.conflicts(ctx.tenant, ctx.ws) == []
+    end
+
+    test "a change made here after the sender's base still conflicts, and the conflict says why",
+         ctx do
+      id = "concurrent-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Before the sender pulled")
+      seen = local_seq(ctx, "contexts", id)
+
+      {:ok, _} =
+        Store.raw_query("UPDATE contexts SET title = 'Changed here after' WHERE id = ?1", [id])
+
+      after_base = local_seq(ctx, "contexts", id)
+      assert after_base > seen
+
+      edit =
+        mutation(ctx, %{
+          "operation" => "update",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => context_row(id, "Changed on the sender", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 0, conflicts: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [edit],
+                 base_seq: seen,
+                 base_replica_id: Sync.replica_id()
+               )
+
+      assert title(id) == "Changed here after"
+
+      assert [%{kind: "concurrent_edit", resolution: "kept_local_newer", detail: detail}] =
+               Sync.conflicts(ctx.tenant, ctx.ws)
+
+      assert %{
+               "local_seq" => ^after_base,
+               "base_seq" => ^seen,
+               "local_floor" => nil,
+               "remote_occurred_at" => "2000-01-01T00:00:00.000",
+               "resolution" => "kept_local_newer"
+             } = detail
+
+      assert is_binary(detail["local_occurred_at"])
+    end
+
+    test "an edit made after seeing the change here wins even when its clock is older", ctx do
+      id = "causal-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Written here, clock ahead")
+      seen = local_seq(ctx, "contexts", id)
+
+      # The sender pulled that change, then edited it; its clock is far behind.
+      later_in_cause =
+        mutation(ctx, %{
+          "operation" => "update",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => context_row(id, "Edited after reading it", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 1, conflicts: 0, base: "seq"}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [later_in_cause],
+                 base_seq: seen,
+                 base_replica_id: Sync.replica_id()
+               )
+
+      assert title(id) == "Edited after reading it"
+      assert Sync.conflicts(ctx.tenant, ctx.ws) == []
+    end
+
+    test "a push without a base keeps the conservative check and records unknown_base", ctx do
+      id = "unknown-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Written here")
+      local = local_seq(ctx, "contexts", id)
+
+      edit =
+        mutation(ctx, %{
+          "operation" => "update",
+          "occurred_at" => "2999-01-01T00:00:00.000",
+          "payload" => context_row(id, "From an older client", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 1, conflicts: 1}} = Sync.apply_changes(ctx.tenant, ctx.ws, [edit])
+      assert title(id) == "From an older client"
+
+      assert [
+               %{
+                 kind: "unknown_base",
+                 resolution: "applied_remote_newer",
+                 detail: %{"local_seq" => ^local, "base_seq" => nil, "local_floor" => nil}
+               }
+             ] = Sync.conflicts(ctx.tenant, ctx.ws)
+    end
+
+    test "POST /api/sync/changes judges conflicts against the body's base, and says which it used",
+         ctx do
+      id = "routed-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Written here before the sender pulled")
+      seen = local_seq(ctx, "contexts", id)
+      here = Sync.replica_id()
+
+      push = fn extra ->
+        edit =
+          mutation(ctx, %{
+            "operation" => "update",
+            "occurred_at" => "2999-01-01T00:00:00.000",
+            "payload" => context_row(id, "Pushed", ctx.ws, ctx.tenant)
+          })
+
+        body =
+          Map.merge(
+            %{"workspace" => ctx.ws, "engine" => Sync.engine_info(), "mutations" => [edit]},
+            extra
+          )
+
+        conn =
+          Plug.Test.conn(:post, "/api/sync/changes", body)
+          |> Plug.Conn.assign(:current_tenant, ctx.tenant)
+          |> OptimalEngine.API.SyncAPI.apply()
+
+        {conn.status, Jason.decode!(conn.resp_body)}
+      end
+
+      assert {200, %{"applied" => 1, "conflicts" => 0, "base" => "seq"} = ok} =
+               push.(%{"base_seq" => seen, "base_replica_id" => here, "replica_id" => "rep_remote"})
+
+      refute Map.has_key?(ok, "base_rejected")
+
+      # Not a base: refused, and nothing is applied.
+      for bad <- ["seen", -1, 5.0, 3.5, true, %{}, []] do
+        assert {422, %{"error" => "invalid_base_seq"}} = push.(%{"base_seq" => bad})
+      end
+
+      assert {422, %{"error" => "invalid_base_replica_id"}} =
+               push.(%{"base_seq" => seen, "base_replica_id" => 7})
+
+      assert {422, %{"error" => "invalid_replica_id"}} = push.(%{"replica_id" => 7})
+
+      # No base at all (absent or null): the conservative check.
+      assert {200, %{"base" => "unknown"} = none} = push.(%{})
+      refute Map.has_key?(none, "base_rejected")
+      assert {200, %{"base" => "unknown"}} = push.(%{"base_seq" => nil})
+
+      # A base that cannot be this ledger's is no base: past its head, from another replica, or unsigned.
+      head = Sync.status(ctx.tenant, ctx.ws).ledger_sequence
+
+      assert {200, %{"base" => "unknown", "base_rejected" => "above_head"}} =
+               push.(%{"base_seq" => head + 1000, "base_replica_id" => here})
+
+      assert {200, %{"base" => "unknown", "base_rejected" => "replica_mismatch"}} =
+               push.(%{"base_seq" => seen, "base_replica_id" => "rep_someone_else"})
+
+      assert {200, %{"base" => "unknown", "base_rejected" => "replica_mismatch"}} =
+               push.(%{"base_seq" => seen})
+
+      # Zero claims nothing seen, so it needs no replica to vouch for it.
+      assert {200, %{"base" => "seq"}} = push.(%{"base_seq" => 0})
+    end
+
+    test "status counts open conflicts per table", ctx do
+      insert_context(ctx.tenant, ctx.ws, "counted-#{ctx.n}", "Written here")
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO facts (id, tenant_id, workspace_id, fact_text) VALUES (?1, ?2, ?3, 'Opens at nine')",
+          ["counted-fact-#{ctx.n}", ctx.tenant, ctx.ws]
+        )
+
+      {:ok, _} = Capture.seal()
+
+      changes = [
+        mutation(ctx, %{
+          "operation" => "update",
+          "occurred_at" => "2999-01-01T00:00:00.000",
+          "payload" => context_row("counted-#{ctx.n}", "Remote", ctx.ws, ctx.tenant)
+        }),
+        mutation(ctx, %{
+          "entity_type" => "facts",
+          "operation" => "update",
+          "occurred_at" => "2999-01-01T00:00:00.000",
+          "payload" => %{
+            "row" => %{
+              "id" => "counted-fact-#{ctx.n}",
+              "fact_text" => "Opens at ten",
+              "workspace_id" => ctx.ws,
+              "tenant_id" => ctx.tenant
+            },
+            "blobs" => %{}
+          }
+        }),
+        mutation(ctx, %{
+          "entity_type" => "no_such_table",
+          "entity_id" => "x",
+          "payload" => %{"row" => %{"id" => "x"}}
+        })
+      ]
+
+      assert {:ok, %{conflicts: 2}} = Sync.apply_changes(ctx.tenant, ctx.ws, changes, base_seq: 0)
+
+      status = Sync.status(ctx.tenant, ctx.ws)
+      assert status.conflicts_by_table == %{"contexts" => 1, "facts" => 1, "no_such_table" => 1}
+      assert status.open_conflicts == 3
+
+      [first | _] = Sync.conflicts(ctx.tenant, ctx.ws)
+      :ok = Sync.resolve_conflict(ctx.tenant, first.id, "user:owner")
+      assert Sync.status(ctx.tenant, ctx.ws).open_conflicts == 2
+      refute Map.has_key?(Sync.status(ctx.tenant, ctx.ws).conflicts_by_table, first.table)
     end
 
     test "a workspace above the peer's gate is refused whole", ctx do
@@ -719,10 +1014,12 @@ defmodule OptimalEngine.SyncTest do
       insert_context(ctx.tenant, other.id, "victim-#{ctx.n}", "Not yours")
       insert_context(ctx.tenant, ctx.ws, "mine-#{ctx.n}", "Yours")
 
+      # Newer than anything written here: a delete is judged by its time like any change.
       delete = fn id, extra ->
         mutation(ctx, %{
           "operation" => "delete",
           "entity_id" => id,
+          "occurred_at" => "2999-01-01T00:00:00.000",
           "payload" => %{"row" => Map.merge(%{"id" => id}, extra), "blobs" => %{}}
         })
       end
@@ -1637,6 +1934,511 @@ defmodule OptimalEngine.SyncTest do
     end
   end
 
+  describe "causality: what the sender had seen decides, the clock only breaks a tie" do
+    defp ledger_seq(id) do
+      {:ok, [[sequence]]} =
+        Store.raw_query("SELECT sequence FROM sync_mutations WHERE id = ?1", [id])
+
+      sequence
+    end
+
+    defp pushed_from(ctx, device, attrs) do
+      mutation(ctx, Map.merge(%{"device_id" => device}, attrs))
+    end
+
+    test "equal times are broken by device id, the same way on both Engines", ctx do
+      local = Sync.replica_id()
+
+      for {label, device, remote_wins} <- [
+            {"greater", "rep_~~~~", true},
+            {"smaller", "rep_!", false}
+          ] do
+        id = "tie-#{label}-#{ctx.n}"
+        insert_context(ctx.tenant, ctx.ws, id, "Written here")
+        _ = local_seq(ctx, "contexts", id)
+
+        {:ok, [[at]]} =
+          Store.raw_query(
+            "SELECT occurred_at FROM sync_mutations WHERE entity_id = ?1 AND device_id = ?2",
+            [id, local]
+          )
+
+        edit =
+          pushed_from(ctx, device, %{
+            "operation" => "update",
+            "occurred_at" => at,
+            "payload" => context_row(id, "Same instant from #{label}", ctx.ws, ctx.tenant)
+          })
+
+        assert {:ok, %{conflicts: 1} = result} =
+                 Sync.apply_changes(ctx.tenant, ctx.ws, [edit], base_seq: 0)
+
+        assert result.applied == if(remote_wins, do: 1, else: 0)
+        assert title(id) == if(remote_wins, do: "Same instant from #{label}", else: "Written here")
+      end
+    end
+
+    test "a delete says nothing of the row: an older delete does not beat a newer update here",
+         ctx do
+      id = "del-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Written here")
+      {:ok, _} = Store.raw_query("UPDATE contexts SET title = 'Updated here' WHERE id = ?1", [id])
+      _ = local_seq(ctx, "contexts", id)
+
+      older_delete =
+        mutation(ctx, %{
+          "operation" => "delete",
+          "entity_id" => id,
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
+        })
+
+      assert {:ok, %{applied: 0, conflicts: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [older_delete], base_seq: 0)
+
+      assert title(id) == "Updated here"
+
+      assert [%{kind: "concurrent_edit", resolution: "kept_local_newer"}] =
+               Sync.conflicts(ctx.tenant, ctx.ws)
+    end
+
+    test "a delete is the same change only as another delete", ctx do
+      gone = "del-gone-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, gone, "Written here")
+      {:ok, _} = Store.raw_query("DELETE FROM contexts WHERE id = ?1", [gone])
+      _ = local_seq(ctx, "contexts", gone)
+
+      delete = fn id ->
+        mutation(ctx, %{
+          "operation" => "delete",
+          "entity_id" => id,
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
+        })
+      end
+
+      assert {:ok, %{applied: 1, conflicts: 0}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [delete.(gone)], base_seq: 0)
+
+      # An older update over a newer delete here is a conflict, and the delete stands.
+      deleted = "del-kept-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, deleted, "Written here")
+      {:ok, _} = Store.raw_query("DELETE FROM contexts WHERE id = ?1", [deleted])
+      _ = local_seq(ctx, "contexts", deleted)
+
+      update =
+        mutation(ctx, %{
+          "operation" => "update",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => context_row(deleted, "Back from the dead", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 0, conflicts: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [update], base_seq: 0)
+
+      assert {:ok, []} = Store.raw_query("SELECT 1 FROM contexts WHERE id = ?1", [deleted])
+    end
+
+    test "a change from a third replica counts, the sender's own earlier changes do not", ctx do
+      id = "three-#{ctx.n}"
+
+      from_c =
+        pushed_from(ctx, "rep_c", %{
+          "occurred_at" => "2026-10-14T12:00:00.000",
+          "payload" => context_row(id, "C's version", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [from_c], sender: "rep_c")
+
+      c_seq = ledger_seq(from_c["id"])
+      here = Sync.replica_id()
+
+      older_from_a =
+        pushed_from(ctx, "rep_a", %{
+          "operation" => "update",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => context_row(id, "A's older version", ctx.ws, ctx.tenant)
+        })
+
+      # A had pulled up to just before C's change: concurrent, C's is newer, A's is not taken.
+      push = fn mutation, base ->
+        Sync.apply_changes(ctx.tenant, ctx.ws, [mutation],
+          sender: "rep_a",
+          base_seq: base,
+          base_replica_id: here
+        )
+      end
+
+      assert {:ok, %{applied: 0, conflicts: 1}} = push.(older_from_a, c_seq - 1)
+      assert title(id) == "C's version"
+
+      assert [%{kind: "concurrent_edit", resolution: "kept_local_newer", detail: detail}] =
+               Sync.conflicts(ctx.tenant, ctx.ws)
+
+      assert %{"local_device" => "rep_c", "local_seq" => ^c_seq} = detail
+
+      # Not taken, so not in the ledger: a hub does not forward it, and a repeat
+      # is judged again but recorded once.
+      refute older_from_a["id"] in Enum.map(
+               Sync.changes(ctx.tenant, ctx.ws)["mutations"],
+               & &1["id"]
+             )
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM sync_mutations WHERE id = ?1", [
+                 older_from_a["id"]
+               ])
+
+      assert {:ok, %{applied: 0, conflicts: 1}} = push.(older_from_a, c_seq - 1)
+      assert length(Sync.conflicts(ctx.tenant, ctx.ws)) == 1
+
+      # A had seen C's change: its edit follows C's whatever its clock says.
+      seen = push.(older_from_a, c_seq)
+      assert {:ok, %{applied: 1, conflicts: 0}} = seen
+      assert title(id) == "A's older version"
+
+      # The sender's own earlier change is ordered by its ledger, never a conflict.
+      own = "own-#{ctx.n}"
+
+      first =
+        pushed_from(ctx, "rep_a", %{
+          "occurred_at" => "2026-10-14T12:00:00.000",
+          "payload" => context_row(own, "A, first", ctx.ws, ctx.tenant)
+        })
+
+      second =
+        pushed_from(ctx, "rep_a", %{
+          "operation" => "update",
+          "occurred_at" => "1999-01-01T00:00:00.000",
+          "payload" => context_row(own, "A, once more", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 1, conflicts: 0}} = push.(first, 0)
+      assert {:ok, %{applied: 1, conflicts: 0}} = push.(second, 0)
+      assert title(own) == "A, once more"
+    end
+
+    test "a base from another ledger is no base", ctx do
+      id = "foreign-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Written here")
+      seen = local_seq(ctx, "contexts", id)
+      here = Sync.replica_id()
+
+      edit = fn ->
+        mutation(ctx, %{
+          "operation" => "update",
+          "occurred_at" => "2999-01-01T00:00:00.000",
+          "payload" => context_row(id, "Pushed", ctx.ws, ctx.tenant)
+        })
+      end
+
+      head = Sync.status(ctx.tenant, ctx.ws).ledger_sequence
+
+      for {opts, rejected} <- [
+            {[base_seq: head + 1, base_replica_id: here], "above_head"},
+            {[base_seq: seen, base_replica_id: "rep_other"], "replica_mismatch"},
+            {[base_seq: seen], "replica_mismatch"}
+          ] do
+        assert {:ok, %{base: "unknown", base_rejected: ^rejected, conflicts: 1}} =
+                 Sync.apply_changes(ctx.tenant, ctx.ws, [edit.()], opts)
+      end
+
+      assert {:ok, %{base: "floor"}} = Sync.apply_changes(ctx.tenant, ctx.ws, [], local_floor: 0)
+
+      assert {:ok, %{base: "unknown"} = bare} = Sync.apply_changes(ctx.tenant, ctx.ws, [])
+      refute Map.has_key?(bare, :base_rejected)
+    end
+
+    test "seal works through a backlog larger than one batch", ctx do
+      {:ok, _} = Capture.seal()
+
+      # More rows than one batch (5000), written by one statement.
+      {:ok, _} =
+        Store.raw_query(
+          """
+          WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5100)
+          INSERT INTO contexts (id, tenant_id, workspace_id, title, content, created_at)
+          SELECT ?1 || i, ?2, ?3, 'Bulk', 'body', '2026-10-14T10:00:00Z' FROM n
+          """,
+          ["bulk-#{ctx.n}-", ctx.tenant, ctx.ws]
+        )
+
+      assert probe_count("SELECT COUNT(*) FROM sync_capture WHERE workspace_id = ?1", [ctx.ws]) ==
+               5100
+
+      assert {:ok, sealed} = Capture.seal()
+      assert sealed >= 5100
+      assert probe_count("SELECT COUNT(*) FROM sync_capture WHERE workspace_id = ?1", [ctx.ws]) == 0
+
+      assert probe_count(
+               "SELECT COUNT(*) FROM sync_mutations WHERE workspace_id = ?1 AND entity_type = 'contexts'",
+               [ctx.ws]
+             ) == 5100
+    end
+  end
+
+  describe "what a sender names is checked against the row and the scope" do
+    defp other_workspace(ctx, slug) do
+      {:ok, other} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: slug,
+          name: slug
+        })
+
+      {:ok, _} = Sync.enable(ctx.tenant, other.id, "user:owner")
+      other.id
+    end
+
+    test "a mutation id another workspace used is refused, and a repeat in its own is skipped",
+         ctx do
+      other = other_workspace(ctx, "other")
+      shared = "mut_shared_#{ctx.n}"
+
+      first =
+        mutation(ctx, %{
+          "id" => shared,
+          "payload" => context_row("in-a-#{ctx.n}", "In A", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 1}} = Sync.apply_changes(ctx.tenant, ctx.ws, [first])
+
+      assert {:ok, %{applied: 0, skipped: %{duplicate: 1}}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [first])
+
+      second =
+        mutation(ctx, %{
+          "id" => shared,
+          "payload" => context_row("in-b-#{ctx.n}", "In B", other, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 0, skipped: skipped, failed: [failure]}} =
+               Sync.apply_changes(ctx.tenant, other, [second])
+
+      assert skipped == %{}
+      assert failure == %{id: shared, reason: :mutation_id_in_use}
+      assert probe_count("SELECT COUNT(*) FROM contexts WHERE id = ?1", ["in-b-#{ctx.n}"]) == 0
+    end
+
+    test "a conflict is recorded in each workspace when the same mutation id is judged in both",
+         ctx do
+      other = other_workspace(ctx, "another")
+      shared = "mut_conflicting_#{ctx.n}"
+
+      for {ws, id} <- [{ctx.ws, "row-a-#{ctx.n}"}, {other, "row-b-#{ctx.n}"}] do
+        insert_context(ctx.tenant, ws, id, "Written here")
+
+        old =
+          mutation(ctx, %{
+            "id" => shared,
+            "operation" => "update",
+            "occurred_at" => "2000-01-01T00:00:00.000",
+            "payload" => context_row(id, "Old", ws, ctx.tenant)
+          })
+
+        # Not taken, so not in the ledger: only the conflict row could be lost.
+        assert {:ok, %{applied: 0, conflicts: 1}} = Sync.apply_changes(ctx.tenant, ws, [old])
+      end
+
+      assert [%{entity_key: "row-a-" <> _}] = Sync.conflicts(ctx.tenant, ctx.ws)
+      assert [%{entity_key: "row-b-" <> _}] = Sync.conflicts(ctx.tenant, other)
+    end
+
+    test "the row's key comes from its payload, not from the entity_id the sender names", ctx do
+      id = "keyed-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Written here")
+
+      named = fn at ->
+        mutation(ctx, %{
+          "entity_id" => "something-else",
+          "operation" => "update",
+          "occurred_at" => at,
+          "payload" => context_row(id, "Pushed", ctx.ws, ctx.tenant)
+        })
+      end
+
+      # Named after another row, it would escape the check on this one.
+      assert {:ok, %{applied: 0, conflicts: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [named.("2000-01-01T00:00:00.000")])
+
+      assert title(id) == "Written here"
+
+      newer = named.("2999-01-01T00:00:00.000")
+      assert {:ok, %{applied: 1, conflicts: 1}} = Sync.apply_changes(ctx.tenant, ctx.ws, [newer])
+      assert title(id) == "Pushed"
+
+      assert {:ok, [[^id]]} =
+               Store.raw_query("SELECT entity_id FROM sync_mutations WHERE id = ?1", [newer["id"]])
+    end
+
+    test "a sender that names this Engine does not take its changes out of the check", ctx do
+      id = "own-sender-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Written here")
+
+      old =
+        mutation(ctx, %{
+          "operation" => "update",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => context_row(id, "Pushed", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 0, conflicts: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [old], sender: Sync.replica_id())
+
+      assert title(id) == "Written here"
+    end
+
+    test "changes at or below the floor were seen by the peer, the clock does not decide", ctx do
+      seen = "floor-seen-#{ctx.n}"
+      unseen = "floor-unseen-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, seen, "Written here")
+      floor = local_seq(ctx, "contexts", seen)
+      insert_context(ctx.tenant, ctx.ws, unseen, "Written here")
+
+      # The peer's clock is far behind ours, as under skew.
+      pulled = fn id ->
+        mutation(ctx, %{
+          "device_id" => "rep_remote",
+          "operation" => "update",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => context_row(id, "Peer's", ctx.ws, ctx.tenant)
+        })
+      end
+
+      assert {:ok, %{applied: 1, conflicts: 1, base: "floor"}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [pulled.(seen), pulled.(unseen)],
+                 local_floor: floor,
+                 direction: :pull
+               )
+
+      assert title(seen) == "Peer's"
+      assert title(unseen) == "Written here"
+
+      assert [%{entity_key: ^unseen, detail: %{"local_floor" => ^floor}}] =
+               Sync.conflicts(ctx.tenant, ctx.ws)
+    end
+
+    test "an id from this Engine's own id space is refused, and its next local change still seals",
+         ctx do
+      local = Sync.replica_id()
+
+      {:ok, [[next]]} =
+        Store.raw_query(
+          "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'sync_capture'), 0) + 1",
+          []
+        )
+
+      # What a peer would send to take the ids of the changes this Engine makes next.
+      spoofs =
+        for seq <- next..(next + 5) do
+          mutation(ctx, %{
+            "id" => "mut_#{local}_#{seq}",
+            "payload" => context_row("spoof-#{seq}-#{ctx.n}", "Spoofed", ctx.ws, ctx.tenant)
+          })
+        end
+
+      assert {:ok, %{applied: 0, failed: failed}} = Sync.apply_changes(ctx.tenant, ctx.ws, spoofs)
+      assert Enum.map(failed, & &1.reason) == List.duplicate(:mutation_id_in_use, 6)
+
+      insert_context(ctx.tenant, ctx.ws, "mine-#{ctx.n}", "Mine")
+      {:ok, _} = Capture.seal()
+
+      assert {:ok, [[^local]]} =
+               Store.raw_query(
+                 "SELECT device_id FROM sync_mutations WHERE entity_type = 'contexts' AND entity_id = ?1",
+                 ["mine-#{ctx.n}"]
+               )
+
+      keyed =
+        mutation(ctx, %{
+          "idempotency_key" => "#{local}:99",
+          "payload" => context_row("keyed-#{ctx.n}", "Keyed", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 0, failed: [%{reason: :mutation_id_in_use}]}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [keyed])
+    end
+
+    test "the key and the hash of a change in the ledger are this Engine's, not the sender's",
+         ctx do
+      lie = fn id, key ->
+        mutation(ctx, %{
+          "payload_hash" => "not-the-hash",
+          "idempotency_key" => key,
+          "payload" => context_row(id, "Claimed", ctx.ws, ctx.tenant)
+        })
+      end
+
+      first = lie.("lie-a-#{ctx.n}", "claimed-key-#{ctx.n}")
+      second = lie.("lie-b-#{ctx.n}", "claimed-key-#{ctx.n}")
+
+      # The same key claimed twice: not a duplicate, because the key is not stored.
+      assert {:ok, %{applied: 2, failed: []}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [first, second])
+
+      assert {:ok, [[hash, key, payload]]} =
+               Store.raw_query(
+                 "SELECT payload_hash, idempotency_key, payload FROM sync_mutations WHERE id = ?1",
+                 [first["id"]]
+               )
+
+      assert key == first["id"]
+      assert hash == :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
+
+      numeric =
+        mutation(ctx, %{
+          "idempotency_key" => 5,
+          "payload" => context_row("num-#{ctx.n}", "x", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 0, failed: [%{reason: :invalid_mutation}]}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [numeric])
+    end
+
+    test "the key capture gives a row is the key computed from its values, for every replicated table" do
+      sample = fn
+        %{type: "INTEGER"}, i -> 40 + i
+        %{type: "REAL"}, i -> 1.5 + i
+        %{name: name}, i -> "k#{i}/ü \"q\" \\ \t #{name}"
+      end
+
+      for table <- Capture.replicated_tables() do
+        columns = Capture.columns(table)
+        keys = Capture.key_columns(columns)
+
+        unless keys == [] or Capture.rowid_key?(columns) do
+          key_columns = for name <- keys, do: Enum.find(columns, &(&1.name == name))
+
+          values =
+            key_columns |> Enum.with_index(1) |> Enum.map(fn {column, i} -> sample.(column, i) end)
+
+          selected =
+            key_columns
+            |> Enum.with_index(1)
+            |> Enum.map_join(", ", fn {column, i} -> ~s(?#{i} AS "#{column.name}") end)
+
+          {:ok, [[sqlite_key]]} =
+            Store.raw_query(
+              "SELECT #{Capture.key_expr(keys, "r", false)} FROM (SELECT #{selected}) r",
+              values
+            )
+
+          row = keys |> Enum.zip(values) |> Map.new()
+
+          assert Sync.entity_key(keys, row) == sqlite_key,
+                 "#{table}: capture writes #{inspect(sqlite_key)}, the payload gives #{inspect(Sync.entity_key(keys, row))}"
+        end
+      end
+    end
+
+    test "the schema version a pushed page reports is the highest migration, whatever order they are listed in" do
+      highest = OptimalEngine.Store.Migrations.all() |> Enum.map(&elem(&1, 0)) |> Enum.max()
+      assert Sync.engine_info()["migration"] == highest
+    end
+  end
+
   describe "tables that belong to one Engine" do
     test "writes to them are not captured, and a trigger an earlier version left is removed",
          ctx do
@@ -1860,6 +2662,610 @@ defmodule OptimalEngine.SyncTest do
       assert [%{pending_push: 0}] = Sync.status(ctx.tenant, ctx.ws).peers
     end
 
+    test "a change this Engine lost to the peer's is not pushed, one it won is", ctx do
+      sent = :ets.new(:sent, [:public, :ordered_set])
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, opts ->
+        :ets.insert(sent, {System.unique_integer([:monotonic]), opts[:body]})
+        respond(200, %{"applied" => length(opts[:body]["mutations"])})
+      end)
+
+      {:ok, _} =
+        Sync.add_peer(
+          ctx.tenant,
+          %{
+            "workspace_id" => ctx.ws,
+            "url" => "https://cloud.example",
+            "api_key" => "replica-key",
+            "policy" => "push"
+          },
+          "u"
+        )
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE sync_peers SET peer_replica_id = 'rep_cloud' WHERE workspace_id = ?1",
+          [ctx.ws]
+        )
+
+      lost = "lost-#{ctx.n}"
+      won = "won-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, lost, "Written here")
+      insert_context(ctx.tenant, ctx.ws, won, "Written here")
+      _ = local_seq(ctx, "contexts", won)
+
+      # The peer changed both while apart: its change to one is newer than ours, to the other older.
+      newer =
+        mutation(ctx, %{
+          "device_id" => "rep_cloud",
+          "operation" => "update",
+          "occurred_at" => "2999-01-01T00:00:00.000",
+          "payload" => context_row(lost, "Peer's, newer", ctx.ws, ctx.tenant)
+        })
+
+      older =
+        mutation(ctx, %{
+          "device_id" => "rep_cloud",
+          "operation" => "update",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => context_row(won, "Peer's, older", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 1, conflicts: 2}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [newer, older],
+                 local_floor: 0,
+                 direction: :pull
+               )
+
+      assert title(lost) == "Peer's, newer"
+      assert title(won) == "Written here"
+
+      # What the peer holds already wins for the first; the second is ours to send.
+      assert [%{pending_push: 1}] = Sync.status(ctx.tenant, ctx.ws).peers
+
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert {:ok, %{sent: 1, superseded: 1}} = result.push
+
+      [{_, body}] = :ets.tab2list(sent)
+      assert Enum.map(body["mutations"], & &1["entity_id"]) == [won]
+      assert [%{pending_push: 0}] = Sync.status(ctx.tenant, ctx.ws).peers
+
+      # The change that was not sent leaves a record that it lost, once, and it is
+      # not an open conflict.
+      assert [
+               %{resolution: "not_sent_peer_has_newer", state: "resolved", entity_key: ^lost} =
+                 record
+             ] =
+               ctx.tenant
+               |> Sync.conflicts(ctx.ws, "all")
+               |> Enum.filter(&(&1.kind == "superseded"))
+
+      assert %{"later_device" => "rep_cloud"} = record.detail
+    end
+
+    test "last_sync_at moves only when a pull reached the end of the peer's ledger", ctx do
+      engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
+      state = :ets.new(:pull_state, [:public])
+      :ets.insert(state, {:more, true})
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, _opts ->
+        [{:more, more}] = :ets.lookup(state, :more)
+
+        respond(200, %{
+          "mutations" => [],
+          "cursor" => if(more, do: 10, else: 11),
+          "more" => more,
+          "engine" => engine
+        })
+      end)
+
+      {:ok, _} =
+        Sync.add_peer(
+          ctx.tenant,
+          %{
+            "workspace_id" => ctx.ws,
+            "url" => "https://cloud.example",
+            "api_key" => "replica-key",
+            "policy" => "pull"
+          },
+          "u"
+        )
+
+      last_sync = fn ->
+        {:ok, [[at]]} =
+          Store.raw_query("SELECT last_sync_at FROM sync_peers WHERE workspace_id = ?1", [ctx.ws])
+
+        at
+      end
+
+      # The page budget is spent after one page that says there is more.
+      Application.put_env(:optimal_engine, :sync_cycle_budget_ms, 0)
+      [first] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert first.status == "active"
+      assert {:ok, %{more: true, cursor: 10}} = first.pull
+      assert last_sync.() == nil
+
+      Application.delete_env(:optimal_engine, :sync_cycle_budget_ms)
+      :ets.insert(state, {:more, false})
+      [second] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert {:ok, %{more: false, cursor: 11}} = second.pull
+      assert is_binary(last_sync.())
+    end
+
+    test "a peer that answers as another replica gets both cursors reset and is pulled from the start",
+         ctx do
+      requests = :ets.new(:requests, [:public, :ordered_set])
+      state = :ets.new(:replica_state, [:public])
+      :ets.insert(state, {:replica, "rep_one"})
+
+      Application.put_env(:optimal_engine, :http_mock, fn url, _opts ->
+        since = url |> URI.parse() |> Map.get(:query) |> URI.decode_query() |> Map.get("since")
+        :ets.insert(requests, {System.unique_integer([:monotonic]), since})
+        [{:replica, replica}] = :ets.lookup(state, :replica)
+        engine = Sync.engine_info() |> Map.put("replica_id", replica)
+
+        respond(200, %{
+          "mutations" => [],
+          "cursor" => if(since == "0", do: 5, else: 50),
+          "more" => false,
+          "engine" => engine
+        })
+      end)
+
+      {:ok, _} =
+        Sync.add_peer(
+          ctx.tenant,
+          %{
+            "workspace_id" => ctx.ws,
+            "url" => "https://cloud.example",
+            "api_key" => "replica-key",
+            "policy" => "pull",
+            "since" => 41
+          },
+          "u"
+        )
+
+      peer = fn -> hd(Sync.peers(ctx.tenant, ctx.ws)) end
+      Sync.run_all()
+      assert %{peer_replica_id: "rep_one", last_pulled_seq: 50} = peer.()
+
+      {:ok, _} =
+        Store.raw_query("UPDATE sync_peers SET last_pushed_seq = 77 WHERE workspace_id = ?1", [
+          ctx.ws
+        ])
+
+      # The Engine behind the URL was replaced: its sequences are another ledger's.
+      :ets.insert(state, {:replica, "rep_two"})
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert result.status == "active"
+      assert %{peer_replica_id: "rep_two", last_pulled_seq: 5, last_pushed_seq: 0} = peer.()
+
+      assert for({_, since} <- :ets.tab2list(requests), do: since) == ["41", "50", "0"]
+
+      assert [
+               %{
+                 kind: "peer_replaced",
+                 resolution: "cursors_reset",
+                 state: "resolved",
+                 remote_device: "rep_two",
+                 detail: %{
+                   "previous_replica_id" => "rep_one",
+                   "previous_pulled_seq" => 50,
+                   "previous_pushed_seq" => 77
+                 }
+               }
+             ] = Sync.conflicts(ctx.tenant, ctx.ws, "all")
+
+      # It is not an open conflict.
+      assert Sync.status(ctx.tenant, ctx.ws).open_conflicts == 0
+    end
+
+    test "a peer whose replica id keeps changing is reset once in a run, then reported", ctx do
+      requests = :ets.new(:requests, [:public, :ordered_set])
+      turn = :ets.new(:turn, [:public])
+      :ets.insert(turn, {:n, 0})
+
+      # Two Engines behind one URL: every answer names the other one.
+      Application.put_env(:optimal_engine, :http_mock, fn url, _opts ->
+        since = url |> URI.parse() |> Map.get(:query) |> URI.decode_query() |> Map.get("since")
+        :ets.insert(requests, {System.unique_integer([:monotonic]), since})
+        replica = if rem(:ets.update_counter(turn, :n, 1), 2) == 1, do: "rep_b", else: "rep_a"
+        engine = Sync.engine_info() |> Map.put("replica_id", replica)
+        respond(200, %{"mutations" => [], "cursor" => 5, "more" => false, "engine" => engine})
+      end)
+
+      add_pull_peer(ctx, since: 9, replica: "rep_a")
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+
+      # The first change of identity resets the cursors; the second, in the same
+      # run, is not followed: two requests and an error, not a loop.
+      assert result.status == "error"
+      assert {:error, :peer_identity_unstable} = result.pull
+      assert for({_, since} <- :ets.tab2list(requests), do: since) == ["9", "0"]
+      assert [%{kind: "peer_replaced"}] = Sync.conflicts(ctx.tenant, ctx.ws, "all")
+
+      assert %{status: "error", message: message, last_pulled_seq: 0} =
+               hd(Sync.peers(ctx.tenant, ctx.ws))
+
+      assert message =~ "more than one replica id"
+    end
+
+    test "a reset is not repeated within the window, however many cycles ask for one", ctx do
+      turn = :ets.new(:turn, [:public])
+      :ets.insert(turn, {:n, 0})
+
+      # Every answer is a replica this Engine has not seen.
+      Application.put_env(:optimal_engine, :http_mock, fn _url, _opts ->
+        n = :ets.update_counter(turn, :n, 1)
+        engine = Sync.engine_info() |> Map.put("replica_id", "rep_new_#{n}")
+        respond(200, %{"mutations" => [], "cursor" => 3, "more" => false, "engine" => engine})
+      end)
+
+      add_pull_peer(ctx, since: 9, replica: "rep_start")
+      for _cycle <- 1..3, do: Sync.run_all()
+
+      # The first cycle resets once and meets a second identity (two requests);
+      # the next two meet a new identity each and reset nothing.
+      assert [{:n, 4}] = :ets.lookup(turn, :n)
+      assert [%{kind: "peer_replaced"}] = Sync.conflicts(ctx.tenant, ctx.ws, "all")
+
+      # After the window, the next change of identity is followed once more.
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE sync_conflicts SET created_at = '2000-01-01T00:00:00Z' WHERE workspace_id = ?1 AND kind = 'peer_replaced'",
+          [ctx.ws]
+        )
+
+      Sync.run_all()
+      assert length(Sync.conflicts(ctx.tenant, ctx.ws, "all")) == 2
+    end
+
+    test "a change page that does not say which replica sent it is refused, the known id stays",
+         ctx do
+      Application.put_env(:optimal_engine, :http_mock, fn _url, _opts ->
+        engine = Sync.engine_info() |> Map.delete("replica_id")
+        respond(200, %{"mutations" => [], "cursor" => 20, "more" => false, "engine" => engine})
+      end)
+
+      add_pull_peer(ctx, since: 9, replica: "rep_one")
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+
+      assert result.status == "error"
+      assert {:error, :peer_replica_unreported} = result.pull
+
+      assert %{peer_replica_id: "rep_one", last_pulled_seq: 9, message: message} =
+               hd(Sync.peers(ctx.tenant, ctx.ws))
+
+      assert message =~ "does not say which replica"
+    end
+
+    test "a peer whose ledger ends before the cursor is reset once and pulled from the start",
+         ctx do
+      requests = :ets.new(:requests, [:public, :ordered_set])
+
+      # The same Engine restored from an older copy: its ledger holds four changes.
+      Application.put_env(:optimal_engine, :http_mock, fn url, _opts ->
+        since = url |> URI.parse() |> Map.get(:query) |> URI.decode_query() |> Map.get("since")
+        :ets.insert(requests, {System.unique_integer([:monotonic]), since})
+        engine = Sync.engine_info() |> Map.put("replica_id", "rep_one")
+
+        respond(200, %{
+          "mutations" => [],
+          "cursor" => if(since == "0", do: 4, else: String.to_integer(since)),
+          "more" => false,
+          "head" => 4,
+          "engine" => engine
+        })
+      end)
+
+      add_pull_peer(ctx, since: 50, replica: "rep_one")
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+
+      assert result.status == "active"
+      assert {:ok, %{cursor: 4}} = result.pull
+      assert for({_, since} <- :ets.tab2list(requests), do: since) == ["50", "0"]
+
+      assert [
+               %{
+                 kind: "peer_replaced",
+                 state: "resolved",
+                 detail: %{"reason" => "ledger_behind", "peer_head" => 4, "cursor" => 50}
+               }
+             ] = Sync.conflicts(ctx.tenant, ctx.ws, "all")
+    end
+
+    test "the pull floor moves to the ledger head only after a cycle that pulled and pushed everything",
+         ctx do
+      state = :ets.new(:floor_state, [:public])
+      :ets.insert(state, more: true, push: :too_large)
+      engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, opts ->
+        [{:more, more}] = :ets.lookup(state, :more)
+        [{:push, push}] = :ets.lookup(state, :push)
+
+        case opts[:method] do
+          :get ->
+            respond(200, %{
+              "mutations" => [],
+              "cursor" => 3,
+              "more" => more,
+              "head" => 3,
+              "engine" => engine
+            })
+
+          :post ->
+            sent = length(opts[:body]["mutations"])
+
+            if push == :too_large and sent > 1,
+              do: respond(413, %{"error" => "too large"}),
+              else: respond(200, %{"applied" => sent})
+        end
+      end)
+
+      add_pull_peer(ctx, policy: "both", replica: "rep_cloud")
+      for n <- 1..25, do: insert_context(ctx.tenant, ctx.ws, "floor-#{n}-#{ctx.n}", "Written here")
+      floor = fn -> hd(Sync.peers(ctx.tenant, ctx.ws)).pulled_local_seq end
+      assert floor.() == 0
+
+      # The cycle's time is spent after a page each way, with pages to come on
+      # both sides: nothing is taken as seen.
+      Application.put_env(:optimal_engine, :sync_cycle_budget_ms, 0)
+      [first] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert {:ok, %{more: true}} = first.pull
+      assert {:ok, %{more: true}} = first.push
+      assert floor.() == 0
+
+      # The pull is complete, the push stops with rows left (a peer that takes one
+      # change at a time and a cycle of twenty pages).
+      Application.delete_env(:optimal_engine, :sync_cycle_budget_ms)
+      :ets.insert(state, more: false, push: :too_large)
+      [second] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert {:ok, %{sent: 20, more: true}} = second.push
+      assert second.status == "active"
+      assert floor.() == 0
+
+      # Both reached the end: the floor is the head the cycle started from.
+      :ets.insert(state, more: false, push: :ack)
+      [third] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert {:ok, %{more: false}} = third.push
+      head = Sync.status(ctx.tenant, ctx.ws).ledger_sequence
+      assert head > 0
+      assert floor.() == head
+      assert is_binary(hd(Sync.peers(ctx.tenant, ctx.ws)).last_sync_at)
+    end
+
+    test "after a complete cycle, only changes made since it are concurrent with what a pull brings",
+         ctx do
+      engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
+      state = :ets.new(:floor_pull, [:public])
+      :ets.insert(state, mutations: [])
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, opts ->
+        case opts[:method] do
+          :get ->
+            [{:mutations, mutations}] = :ets.lookup(state, :mutations)
+
+            respond(200, %{
+              "mutations" => mutations,
+              "cursor" => 3,
+              "more" => false,
+              "head" => 3,
+              "engine" => engine
+            })
+
+          :post ->
+            respond(200, %{"applied" => length(opts[:body]["mutations"])})
+        end
+      end)
+
+      add_pull_peer(ctx, policy: "both", replica: "rep_cloud")
+      before = "before-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, before, "Written before the cycle")
+      [cycle] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+      assert {:ok, %{more: false}} = cycle.push
+      assert hd(Sync.peers(ctx.tenant, ctx.ws)).pulled_local_seq > 0
+
+      # A change after the cycle, and then the peer's edits to both rows. Its clock
+      # is far behind ours, as under skew, so the clock alone would keep ours.
+      later = "later-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, later, "Written after the cycle")
+
+      peer_edit = fn id ->
+        mutation(ctx, %{
+          "device_id" => "rep_cloud",
+          "operation" => "update",
+          "occurred_at" => "2000-01-01T00:00:00.000",
+          "payload" => context_row(id, "Peer's edit", ctx.ws, ctx.tenant)
+        })
+      end
+
+      :ets.insert(state, mutations: [peer_edit.(before), peer_edit.(later)])
+      [next] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+
+      # The first row was pushed in the cycle: the peer saw it before it edited it,
+      # so its edit stands. The second was not: concurrent, and the clock decides.
+      assert {:ok, %{applied: 1, conflicts: 1}} = next.pull
+      assert title(before) == "Peer's edit"
+      assert title(later) == "Written after the cycle"
+      assert [%{table: "contexts", entity_key: ^later}] = Sync.conflicts(ctx.tenant, ctx.ws)
+    end
+
+    test "a push reply that did not trust the base is shown in the peer's message", ctx do
+      engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, opts ->
+        case opts[:method] do
+          :get ->
+            respond(200, %{"mutations" => [], "cursor" => 3, "more" => false, "engine" => engine})
+
+          :post ->
+            respond(200, %{
+              "applied" => 1,
+              "base" => "unknown",
+              "base_rejected" => "replica_mismatch"
+            })
+        end
+      end)
+
+      add_pull_peer(ctx, policy: "both", replica: "rep_cloud")
+      insert_context(ctx.tenant, ctx.ws, "rejected-#{ctx.n}", "Written here")
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+
+      assert result.status == "active"
+      assert %{status: "active", message: message} = hd(Sync.peers(ctx.tenant, ctx.ws))
+      assert message =~ "did not accept the base"
+      assert message =~ "replica_mismatch"
+    end
+
+    test "no push follows a pull that could not settle the peer's identity", ctx do
+      posts = :ets.new(:posts, [:public, :ordered_set])
+      turn = :ets.new(:turn, [:public])
+      :ets.insert(turn, {:n, 0})
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, opts ->
+        case opts[:method] do
+          :get ->
+            replica = if rem(:ets.update_counter(turn, :n, 1), 2) == 1, do: "rep_b", else: "rep_a"
+            engine = Sync.engine_info() |> Map.put("replica_id", replica)
+            respond(200, %{"mutations" => [], "cursor" => 5, "more" => false, "engine" => engine})
+
+          :post ->
+            :ets.insert(posts, {System.unique_integer([:monotonic]), opts[:body]})
+            respond(200, %{"applied" => length(opts[:body]["mutations"])})
+        end
+      end)
+
+      add_pull_peer(ctx, policy: "both", since: 9, replica: "rep_a")
+      insert_context(ctx.tenant, ctx.ws, "held-#{ctx.n}", "Not sent")
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+
+      assert {:error, :peer_identity_unstable} = result.pull
+      assert {:ok, %{skipped: :identity}} = result.push
+      assert :ets.tab2list(posts) == []
+      assert hd(Sync.peers(ctx.tenant, ctx.ws)).last_pushed_seq == 0
+    end
+
+    test "a push reply from another replica than the peer's does not move the push cursor",
+         ctx do
+      engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, opts ->
+        case opts[:method] do
+          :get ->
+            respond(200, %{"mutations" => [], "cursor" => 3, "more" => false, "engine" => engine})
+
+          :post ->
+            other = Map.put(engine, "replica_id", "rep_other")
+            respond(200, %{"applied" => length(opts[:body]["mutations"]), "engine" => other})
+        end
+      end)
+
+      add_pull_peer(ctx, policy: "both", replica: "rep_cloud")
+      insert_context(ctx.tenant, ctx.ws, "elsewhere-#{ctx.n}", "Sent to another Engine")
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+
+      assert result.status == "error"
+      assert {:error, :peer_identity_unstable} = result.push
+
+      assert %{last_pushed_seq: 0, pending_push: pending} =
+               hd(Sync.status(ctx.tenant, ctx.ws).peers)
+
+      assert pending >= 1
+    end
+
+    test "a third change of identity in a day halts the peer until it is added again", ctx do
+      turn = :ets.new(:turn, [:public])
+      :ets.insert(turn, {:n, 0})
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, _opts ->
+        n = :ets.update_counter(turn, :n, 1)
+        engine = Sync.engine_info() |> Map.put("replica_id", "rep_new_#{n}")
+        respond(200, %{"mutations" => [], "cursor" => 3, "more" => false, "engine" => engine})
+      end)
+
+      add_pull_peer(ctx, since: 9, replica: "rep_start")
+      run = fn -> Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws)) end
+
+      age = fn ->
+        {:ok, _} =
+          Store.raw_query(
+            "UPDATE sync_conflicts SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour') WHERE workspace_id = ?1 AND kind = 'peer_replaced'",
+            [ctx.ws]
+          )
+      end
+
+      # Two resets, an hour apart, each followed by another new identity in the run.
+      [first] = run.()
+      assert first.status == "error"
+      age.()
+      [second] = run.()
+      assert second.status == "error"
+      age.()
+      assert [{:n, 4}] = :ets.tab2list(turn)
+
+      # The third is not followed: the peer is halted and no longer run.
+      [third] = run.()
+      assert third.status == "halted"
+      assert {:error, :peer_halted} = third.pull
+      assert %{status: "halted", message: message} = hd(Sync.peers(ctx.tenant, ctx.ws))
+      assert message =~ "added again"
+      assert run.() == []
+      assert [{:n, 5}] = :ets.tab2list(turn)
+      assert length(Sync.conflicts(ctx.tenant, ctx.ws, "all")) == 2
+
+      # Adding it again is the operator's word that it is settled.
+      add_pull_peer(ctx, since: 9)
+      assert hd(Sync.peers(ctx.tenant, ctx.ws)).status == "active"
+      [again] = run.()
+      assert again.status == "error"
+      assert length(Sync.conflicts(ctx.tenant, ctx.ws, "all")) == 3
+    end
+
+    test "a peer this Engine only pulls from keeps the pull floor at zero", ctx do
+      engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, _opts ->
+        respond(200, %{"mutations" => [], "cursor" => 3, "more" => false, "engine" => engine})
+      end)
+
+      add_pull_peer(ctx, policy: "pull", replica: "rep_cloud")
+      insert_context(ctx.tenant, ctx.ws, "never-sent-#{ctx.n}", "Stays here")
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+
+      # The cycle is complete, and none of this Engine's changes reached the peer.
+      assert result.status == "active"
+      assert %{pulled_local_seq: 0, last_sync_at: at} = hd(Sync.peers(ctx.tenant, ctx.ws))
+      assert is_binary(at)
+    end
+
+    test "a peer is run by one process at a time", ctx do
+      gets = :ets.new(:gets, [:public])
+      inner = :ets.new(:inner, [:public])
+      :ets.insert(gets, {:n, 0})
+      engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, _opts ->
+        :ets.update_counter(gets, :n, 1)
+
+        # The scheduler's tick and `POST /api/sync/run`: a second run while one is in progress.
+        second = Task.async(fn -> Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws)) end)
+        :ets.insert(inner, {:result, Task.await(second, 30_000)})
+
+        respond(200, %{"mutations" => [], "cursor" => 3, "more" => false, "engine" => engine})
+      end)
+
+      add_pull_peer(ctx, policy: "pull", replica: "rep_cloud")
+      [result] = Sync.run_all() |> Enum.filter(&(&1.workspace_id == ctx.ws))
+
+      assert result.status == "active"
+
+      assert [{:result, [%{status: "busy", reason: :already_running}]}] =
+               :ets.lookup(inner, :result)
+
+      assert [{:n, 1}] = :ets.lookup(gets, :n)
+    end
+
     test "a relay peer enables sync first, pages the pull, pushes to ?workspace= with its engine envelope, and a repeat cycle sends nothing",
          ctx do
       relay = fake_relay(ctx, cloud: cloud_ledger(ctx, 5))
@@ -1885,6 +3291,11 @@ defmodule OptimalEngine.SyncTest do
 
       assert for({:get, "pull", query} <- calls(relay), do: query["since"]) == ["0", "2", "4"]
 
+      # The push names how much of the cloud's ledger the laptop had pulled, and
+      # whose ledger that is.
+      assert bases(relay) == [5]
+      assert base_replicas(relay) == ["rep_cloud"]
+
       # Exactly once on each side: two changes delivered once each, five applied.
       assert relay |> received() |> Map.values() == [1, 1]
       assert relayed(ctx) == 5
@@ -1902,6 +3313,32 @@ defmodule OptimalEngine.SyncTest do
       assert peer.peer_replica_id == "rep_cloud"
       assert peer.last_pulled_seq == 7
       assert peer.pending_push == 0
+    end
+
+    test "a relay that reports another replica gets both cursors reset and is pulled from the start",
+         ctx do
+      relay = fake_relay(ctx, cloud: cloud_ledger(ctx, 3))
+      {:ok, _} = add_relay_peer(ctx, "relay-key", "both")
+
+      [first] = run_peers(ctx)
+      assert {:ok, %{applied: 3, cursor: 3}} = first.pull
+
+      assert %{peer_replica_id: "rep_cloud", last_pulled_seq: 3} =
+               hd(Sync.peers(ctx.tenant, ctx.ws))
+
+      # The managed Engine was restored under another identity: its ledger starts again.
+      :ets.insert(relay, replica: "rep_restored")
+      [second] = run_peers(ctx)
+      assert second.status == "active"
+      assert {:ok, %{applied: 0, skipped: %{duplicate: 3}}} = second.pull
+
+      assert %{peer_replica_id: "rep_restored", last_pulled_seq: 3} =
+               hd(Sync.peers(ctx.tenant, ctx.ws))
+
+      assert for({:get, "pull", query} <- calls(relay), do: query["since"]) == ["0", "2", "0", "2"]
+
+      assert [%{kind: "peer_replaced", state: "resolved", remote_device: "rep_restored"}] =
+               Sync.conflicts(ctx.tenant, ctx.ws, "all")
     end
 
     test "a relay on another schema version pauses the peer before anything moves", ctx do
@@ -2055,8 +3492,9 @@ defmodule OptimalEngine.SyncTest do
                {:post, "push"}
              ]
 
-      # Delivered three times, held once.
+      # Delivered three times, held once; a push-only peer has pulled nothing.
       assert relay |> received() |> Map.values() == [3, 3]
+      assert bases(relay) == [0, 0, 0]
       local = Sync.replica_id()
       held = for %{"device_id" => ^local} = m <- cloud(relay), do: m["idempotency_key"]
       assert length(held) == 2
@@ -2167,6 +3605,7 @@ defmodule OptimalEngine.SyncTest do
         "workspace" => ctx.ws,
         "replica_id" => Sync.replica_id(),
         "engine" => Sync.engine_info(),
+        "base_seq" => 3,
         "mutations" => [change]
       }
 
@@ -2188,6 +3627,7 @@ defmodule OptimalEngine.SyncTest do
                relay_call(ctx, :post, "push", push)
 
       assert received(relay) == %{"key-#{ctx.n}" => 2}
+      assert bases(relay) == [3, 3]
     end
 
     test "a relay url must still be http(s)", ctx do
@@ -2238,7 +3678,8 @@ defmodule OptimalEngine.SyncTest do
   # another migration, a push only from this Engine (the body's workspace is
   # the query's, `replica_id` and `engine.replica_id` are this Engine's) with no
   # cursor, a non-empty mutation list in the full ledger shape, idempotency by
-  # idempotency_key (every delivery is counted), and no x-optimal-replica
+  # idempotency_key (every delivery is counted), `base_seq` forwarded to the
+  # cloud unchanged (recorded per delivery), and no x-optimal-replica
   # forwarding (pushed changes come back on the next pull). Pages are capped at
   # two rows whatever limit the client asks for, so a client that ignores
   # `more` falls behind.
@@ -2265,7 +3706,10 @@ defmodule OptimalEngine.SyncTest do
       received: %{},
       cloud: opts[:cloud] || [],
       lost_acks: opts[:lost_acks] || [],
-      failed_pulls: opts[:failed_pulls] || []
+      failed_pulls: opts[:failed_pulls] || [],
+      bases: [],
+      base_replicas: [],
+      replica: "rep_cloud"
     )
 
     config = %{
@@ -2311,7 +3755,7 @@ defmodule OptimalEngine.SyncTest do
     data = %{
       "workspace_id" => ctx.ws,
       "enabled" => lookup(state, :enabled),
-      "replica_id" => "rep_cloud",
+      "replica_id" => lookup(state, :replica),
       "ledger_sequence" => length(lookup(state, :cloud)),
       "open_conflicts" => 0,
       "append_only_tables" => [],
@@ -2366,7 +3810,7 @@ defmodule OptimalEngine.SyncTest do
           "mutations" => page,
           "cursor" => cursor,
           "more" => length(after_since) > length(page),
-          "engine" => config.engine
+          "engine" => Map.put(config.engine, "replica_id", lookup(state, :replica))
         })
     end
   end
@@ -2408,6 +3852,8 @@ defmodule OptimalEngine.SyncTest do
         refuse(413, "PAYLOAD_TOO_LARGE", "at most #{config.max_batch} mutations a push")
 
       true ->
+        update(state, :bases, &(&1 ++ [body["base_seq"]]))
+        update(state, :base_replicas, &(&1 ++ [body["base_replica_id"]]))
         deliver(state, mutations, config)
     end
   end
@@ -2437,7 +3883,7 @@ defmodule OptimalEngine.SyncTest do
       "conflicts" => 0,
       "failed" => [],
       "skipped" => %{"duplicate" => length(duplicates)},
-      "engine" => config.engine
+      "engine" => Map.put(config.engine, "replica_id", lookup(state, :replica))
     }
 
     case {lookup(state, :lost_acks), config.push_answer} do
@@ -2474,6 +3920,8 @@ defmodule OptimalEngine.SyncTest do
   defp routes(state), do: Enum.map(calls(state), fn {method, route, _query} -> {method, route} end)
   defp received(state), do: lookup(state, :received)
   defp cloud(state), do: lookup(state, :cloud)
+  defp bases(state), do: lookup(state, :bases)
+  defp base_replicas(state), do: lookup(state, :base_replicas)
 
   # Calls the fake relay as a client would, past the Engine's client.
   defp relay_call(ctx, method, route, body) do
@@ -2504,6 +3952,29 @@ defmodule OptimalEngine.SyncTest do
       Store.raw_query("SELECT count(*) FROM contexts WHERE id LIKE ?1", ["relayed-#{ctx.n}-%"])
 
     count
+  end
+
+  # A peer on the test mock, with the replica id its cursors were kept for.
+  defp add_pull_peer(ctx, opts) do
+    attrs = %{
+      "workspace_id" => ctx.ws,
+      "url" => "https://cloud.example",
+      "api_key" => "replica-key",
+      "policy" => Keyword.get(opts, :policy, "pull")
+    }
+
+    attrs = if opts[:since], do: Map.put(attrs, "since", opts[:since]), else: attrs
+    {:ok, _} = Sync.add_peer(ctx.tenant, attrs, "u")
+
+    if opts[:replica] do
+      {:ok, _} =
+        Store.raw_query("UPDATE sync_peers SET peer_replica_id = ?2 WHERE workspace_id = ?1", [
+          ctx.ws,
+          opts[:replica]
+        ])
+    end
+
+    :ok
   end
 
   defp add_relay_peer(ctx, key, policy) do
