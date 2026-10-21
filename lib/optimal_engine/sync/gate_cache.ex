@@ -24,8 +24,10 @@ defmodule OptimalEngine.Sync.GateCache do
 
   Entries also expire after `config :optimal_engine, :sync_gate_cache_ttl_ms`
   (default 30 seconds; `0` turns the cache off). That bounds how long a write
-  that capture does not see could go unnoticed; every table the gate scans is
-  captured today (`test/sync/sync_gate_test.exs` pins that), so it is a backstop.
+  that capture does not see could go unnoticed. Every replicated table the gate
+  scans is captured (`test/sync/sync_gate_test.exs` pins that); a table that
+  stays on its Engine (assets, active pools, context packages, model and tool
+  runs, skill packages) is not, so for a write there the ttl is the bound.
   The cache is dropped after a change from a peer is applied and when sync is
   enabled or disabled for a workspace, so it does not rest on the sequences alone
   there.

@@ -92,55 +92,20 @@ defmodule OptimalEngine.AtomGuardTest do
       call: "apply(mod, fun, [signal | args])",
       count: 1,
       reason: "invokes a handler that a caller registered in code as {module, function, args}"
-    }
-  ]
-
-  # Known unsafe, owned by another change. The change that fixes a call deletes
-  # its entry.
-  @pending [
-    %{
-      file: "lib/optimal_engine/context.ex",
-      kind: :string_to_atom,
-      call: "String.to_atom(str)",
-      count: 1,
-      owner: "PR #66: stored context text (mode, genre, type) read back as atoms"
-    },
-    %{
-      file: "lib/optimal_engine/signal.ex",
-      kind: :string_to_atom,
-      call: "String.to_atom(str)",
-      count: 1,
-      owner: "PR #66: stored signal text read back as atoms"
-    },
-    %{
-      file: "lib/optimal_engine/workspace.ex",
-      kind: :string_to_atom,
-      call: "String.to_atom(role)",
-      count: 2,
-      owner: "PR #66: stored member role text"
-    },
-    %{
-      file: "lib/optimal_engine/workspace.ex",
-      kind: :string_to_atom,
-      call: "String.to_atom(status)",
-      count: 1,
-      owner: "PR #66: stored workspace status text"
-    },
-    %{
-      file: "lib/optimal_engine/memory/subscription.ex",
-      kind: :string_to_atom,
-      call: "String.to_atom",
-      count: 3,
-      owner: "PR #66: stored subscription category, scope and status text"
     },
     %{
       file: "lib/optimal_engine/memory/versioned.ex",
       kind: :string_to_atom,
       call: "String.to_atom(str)",
       count: 1,
-      owner: "PR #66: stored relation text"
+      reason:
+        "stored relation text, turned into an atom only when it is one of the fixed relation names"
     }
   ]
+
+  # Known unsafe, owned by another change. The change that fixes a call deletes
+  # its entry.
+  @pending []
 
   describe "the repository" do
     test "creates no atom from text outside the reviewed list" do

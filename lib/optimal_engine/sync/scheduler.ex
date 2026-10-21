@@ -38,6 +38,7 @@ defmodule OptimalEngine.Sync.Scheduler do
     case safely(&Capture.install/0) do
       {:ok, %{tables: n}} ->
         Logger.debug("[Sync] capture triggers on #{n} tables")
+        purge_ledger()
 
       other ->
         retry = Application.get_env(:optimal_engine, :sync_install_retry_ms, @install_retry)
@@ -57,6 +58,26 @@ defmodule OptimalEngine.Sync.Scheduler do
 
   @impl true
   def handle_call(:tick, _from, state), do: {:reply, run_cycle(), state}
+
+  # Ledger rows of tables that do not replicate (an earlier version captured and
+  # applied every workspace table) are removed once the triggers are in place.
+  defp purge_ledger do
+    case safely(&Sync.purge_unreplicated_once/0) do
+      {:ok, purged} when purged == %{} ->
+        :ok
+
+      {:ok, purged} ->
+        Logger.warning(
+          "[Sync] removed #{Enum.sum(Map.values(purged))} ledger rows of tables that do not replicate: " <>
+            inspect(purged) <>
+            "; rows of api_keys, principals, roles or tenants among them were written by a peer, " <>
+            "check those tables (each such row is logged above with its entity id, device and time)"
+        )
+
+      other ->
+        Logger.warning("[Sync] could not purge the ledger: #{inspect(other)}")
+    end
+  end
 
   defp run_cycle do
     _ = safely(&Capture.seal/0)

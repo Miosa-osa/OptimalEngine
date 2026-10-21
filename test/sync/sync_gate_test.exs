@@ -1050,18 +1050,28 @@ defmodule OptimalEngine.SyncGateTest do
       assert stored("chunks", "chk-up-#{ctx.n}", "classification_level") == "confidential"
     end
 
-    test "a peer that is not cleared for a row cannot delete it, and a create after it keeps the labels",
-         ctx do
+    test "a peer that is not cleared for a row can neither delete nor rewrite it", ctx do
       id = "fact-del-#{ctx.n}"
       fact(ctx, id, "Original 7711", ["restricted"])
 
       assert {:ok, %{applied: 0, skipped: %{gated: 1}}} =
                remote_delete(ctx, "facts", id, max_class: "internal")
 
-      assert stored("facts", id, "fact_text") == "Original 7711"
+      assert {:ok, %{applied: 0, skipped: %{gated: 1}}} =
+               remote_apply(
+                 ctx,
+                 "facts",
+                 id,
+                 %{"fact_text" => "Rewritten 7711", "security_labels" => "[]"},
+                 max_class: "internal",
+                 operation: "create"
+               )
 
+      assert stored("facts", id, "fact_text") == "Original 7711"
+      assert label_list("facts", id) == ["restricted"]
+
+      # A peer cleared for the row may rewrite it; the labels stay.
       remote_change(ctx, "facts", id, %{"fact_text" => "Rewritten 7711", "security_labels" => "[]"},
-        max_class: "internal",
         operation: "create"
       )
 
@@ -1860,7 +1870,7 @@ defmodule OptimalEngine.SyncGateTest do
              "classify #{inspect(unclassified)} in OptimalEngine.Sync.Lineage before they replicate"
     end
 
-    test "every table the gate classifies by has a text key and capture triggers" do
+    test "every replicated table the gate classifies by has a text key and capture triggers" do
       {:ok, rows} =
         Store.raw_query(
           "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync_capture_%'",
@@ -1870,8 +1880,12 @@ defmodule OptimalEngine.SyncGateTest do
       triggers = MapSet.new(List.flatten(rows))
 
       # The gate cache stands on the write sequence of the capture, which only a
-      # keyed table with an insert, update and delete trigger moves.
+      # keyed table with an insert, update and delete trigger moves. A table that
+      # stays local is not captured; for it the cache's ttl is the bound.
+      replicated = replicated_tables()
+
       for table <- Lineage.tables(),
+          table in replicated,
           spec = Lineage.spec(table),
           spec.labels or is_binary(spec.meta) or is_binary(spec.class) do
         columns = Capture.columns(table)
@@ -2164,8 +2178,14 @@ defmodule OptimalEngine.SyncGateTest do
   end
 
   # A change to the row `id` of `table` as the other Engine would send it: the
-  # row as stored here with `changes`, written after anything done here.
+  # row as stored here with `changes`, written after anything done here. The
+  # peer is cleared for every class unless `:max_class` says otherwise, so what
+  # is exercised is how the labels are joined, not the gate.
   defp remote_change(ctx, table, id, changes, opts \\ []) do
+    assert {:ok, %{applied: 1}} = remote_apply(ctx, table, id, changes, opts)
+  end
+
+  defp remote_apply(ctx, table, id, changes, opts) do
     blobs = Keyword.get(opts, :blobs, %{})
 
     row =
@@ -2188,11 +2208,10 @@ defmodule OptimalEngine.SyncGateTest do
       }
     }
 
-    assert {:ok, %{applied: 1}} =
-             Sync.apply_changes(ctx.tenant, ctx.ws, [mutation],
-               since: "2099-12-31T00:00:00",
-               max_class: Keyword.get(opts, :max_class, "confidential")
-             )
+    Sync.apply_changes(ctx.tenant, ctx.ws, [mutation],
+      since: "2099-12-31T00:00:00",
+      max_class: Keyword.get(opts, :max_class, "restricted")
+    )
   end
 
   # The row `id` of `table` as a map with string keys, the way a change carries it.
