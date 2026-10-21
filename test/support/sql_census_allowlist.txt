@@ -1,10 +1,13 @@
+refused	DELETE FROM facts WHERE EXISTS ( SELECT N FROM json_each(CASE WHEN json_valid(facts.accepted_claim_ids) THEN facts.accepted_claim_ids ELSE '…' END) j WHERE j.value IN (SELECT value FROM json_each(?)))
 refused	DELETE FROM jobs WHERE kind IN (?) AND status = '…' AND completed_at < datetime('…' || ? || '…')
 refused	DELETE FROM metric_samples WHERE recorded_at < datetime('…' || ? || '…')
+refused	DELETE FROM source_packages_fts WHERE rowid IN (SELECT rowid FROM source_packages WHERE id IN (SELECT value FROM json_each(?)))
 refused	DELETE FROM sync_mutations WHERE ((id >= '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…' AND id < '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…') OR ((idempotency_key >= (SELECT replica_id FROM sync_identity WHERE id = N) || '…' AND idempotency_key < (SELECT replica_id FROM sync_identity WHERE id = N) || '…') OR (idempotency_key >= '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…' AND idempotency_key < '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…') OR (idempotency_key >= '…' AND idempotency_key < '…'))) AND NOT (instr(id, '…') = N AND (idempotency_key = '…' || id OR (substr(idempotency_key, N, length(device_id) + N) = device_id || '…' AND id = '…' || device_id || '…' || substr(idempotency_key, length(device_id) + N))))
 refused	DELETE FROM sync_mutations WHERE ((id >= '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…' AND id < '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…') OR (idempotency_key >= '…' AND idempotency_key < '…')) AND (instr(id, '…') = N AND (idempotency_key = '…' || id OR (substr(idempotency_key, N, length(device_id) + N) = device_id || '…' AND id = '…' || device_id || '…' || substr(idempotency_key, length(device_id) + N))))
 refused	DELETE FROM sync_mutations WHERE sequence > ? AND sequence <= ? AND entity_type NOT IN (?) AND (entity_type IN (SELECT name FROM sqlite_master WHERE type = '…') OR entity_type LIKE '…' ESCAPE '…')
 refused	INSERT INTO connector_runs (tenant_id, workspace_id, connector_id, started_at, completed_at, status) VALUES (?, datetime('…', ?), datetime('…', ?), '…')
 refused	INSERT INTO jobs ( id, tenant_id, workspace_id, kind, payload, priority, max_attempts, run_at, idempotency_key ) VALUES (?, datetime('…' || ? || '…'), ?) ON CONFLICT(tenant_id, workspace_id, idempotency_key) DO NOTHING
+refused	INSERT INTO source_packages_fts(rowid, id, raw_text) SELECT rowid, id, raw_text FROM source_packages WHERE id = ?
 refused	INSERT OR IGNORE INTO workspace_handles (tenant_id, slug, workspace_id) SELECT w.tenant_id, held.value, w.id FROM workspaces w, json_each(CASE WHEN json_valid(w.metadata) THEN json_extract(w.metadata, '…') END) held WHERE held.type = '…' ORDER BY w.created_at, w.id, held.key
 refused	INSERT OR REPLACE INTO authority_checkpoints (tenant_id, tenant_seq, hash, kid, signature, anchor) VALUES (?)
 refused	INSERT OR REPLACE INTO contexts (id, tenant_id, workspace_id, title, content, created_at) VALUES (?, '…')
@@ -81,6 +84,7 @@ refused	SELECT LOWER(e.name) as lname, COUNT(*) as cnt, GROUP_CONCAT(DISTINCT e.
 refused	SELECT N FROM "…" WHERE tenant_id = ? AND workspace_id = ? AND (CASE WHEN json_valid(metadata) THEN CASE json_type(metadata, '…') WHEN '…' THEN EXISTS (SELECT N FROM json_each(metadata, '…') j WHERE lower(j.value) IN ('…')) WHEN '…' THEN lower(json_extract(metadata, '…')) IN ('…') ELSE N END ELSE N END) LIMIT N
 refused	SELECT N FROM "…" WHERE tenant_id = ? AND workspace_id = ? AND (CASE WHEN json_valid(security_labels) THEN EXISTS (SELECT N FROM json_each(security_labels) j WHERE lower(j.value) IN ('…')) ELSE N END) LIMIT N
 refused	SELECT N FROM api_keys WHERE id = ? AND json_extract(metadata, '…') = ? AND json_extract(metadata, '…') IS NULL AND json_extract(metadata, '…') IS NULL AND json_extract(metadata, '…') IS NULL AND EXISTS (SELECT N FROM json_each(api_keys.scopes) WHERE value IN ('…'))
+refused	SELECT N FROM sqlite_master WHERE type = '…' AND name = '…'
 refused	SELECT N FROM sqlite_master WHERE type = '…' AND name = ?
 refused	SELECT N FROM sqlite_master WHERE type = '…' AND name = ? COLLATE NOCASE
 refused	SELECT c.id, c.uri, c.type, c.path, c.title, c.l0_abstract, c.l1_overview, c.content, c.mode, c.genre, c.signal_type, c.format, c.structure, c.node, c.sn_ratio, c.entities, c.created_at, c.modified_at, c.valid_from, c.valid_until, c.supersedes, c.routed_to, c.metadata, c.workspace_id, -bm25(contexts_fts) as bm25_rank FROM contexts_fts JOIN contexts c ON c.id = contexts_fts.id WHERE contexts_fts MATCH ? AND c.archived_at IS NULL AND c.workspace_id = ? AND c.node = ? ORDER BY bm25_rank DESC, c.uri, c.id LIMIT ? OFFSET ?
@@ -222,6 +226,8 @@ refused	UPDATE context_packages SET authorization_envelope = ?, refresh_state = 
 refused	UPDATE context_packages SET memory_links = '…', fact_links = '…', workflow_links = '…', skill_package_links = '…', source_package_links = '…', evidence_links = '…', returned_object_links = '…', redacted_object_links = '…', package_confidence_summary = '…', package_precision_summary = '…', filtered_object_summary = '…', security_labels = '…', partition_ids = '…', metadata = json_set( json_remove( CASE WHEN json_valid(metadata) THEN metadata ELSE '…' END, '…' ), '…', ? ), refresh_state = ?, invalidation_reason = CASE WHEN ? = '…' THEN ? ELSE invalidation_reason END, updated_at = datetime('…') WHERE tenant_id = ? AND workspace_id = ? AND id = ? AND refresh_state = ?
 refused	UPDATE context_packages SET refresh_state = '…', metadata = json_set(COALESCE(NULLIF(metadata, '…'), '…'), '…', ?), updated_at = datetime('…') WHERE tenant_id = ? AND workspace_id = ? AND id = ? AND refresh_state = '…'
 refused	UPDATE contexts SET archived_at = datetime('…'), metadata = json_set(COALESCE(metadata, '…'), '…') WHERE id IN (?)
+refused	UPDATE contexts SET content = ?, l0_abstract = ?, l1_overview = ?, metadata = CASE WHEN json_valid(metadata) THEN json_remove(metadata, '…') ELSE metadata END WHERE id = ? AND tenant_id = ?
+refused	UPDATE contexts SET metadata = json_object('…', ?) WHERE id = ?
 refused	UPDATE contexts SET metadata = json_set( COALESCE(metadata, '…'), '…', datetime('…'), '…', ? ) WHERE id = ? AND tenant_id = ?
 refused	UPDATE contexts SET metadata = json_set( COALESCE(metadata, '…'), '…', datetime('…'), '…', ? ) WHERE id = ? AND tenant_id = ? AND workspace_id = ? AND archived_at IS NULL
 refused	UPDATE contexts SET metadata = json_set(CASE WHEN json_valid(metadata) THEN metadata ELSE '…' END, '…', ?) WHERE id = ?
@@ -230,6 +236,7 @@ refused	UPDATE contexts SET metadata = json_set(COALESCE(metadata, '…'), '…'
 refused	UPDATE contexts SET metadata = json_set(COALESCE(metadata, '…'), '…', json(?)) WHERE id = ? AND tenant_id = ?
 refused	UPDATE contexts SET metadata = json_set(COALESCE(metadata, '…'), '…', json(?)) WHERE id = ? AND tenant_id = ? AND workspace_id = ? AND archived_at IS NULL AND (json_extract(metadata, '…') IS NOT ? OR json_extract(metadata, '…') IS NOT ?)
 refused	UPDATE contexts SET metadata = json_set(COALESCE(metadata, '…'), '…', json(?)) WHERE id = ? AND workspace_id = ? AND archived_at IS NULL AND (json_extract(metadata, '…') IS NOT ? OR json_extract(metadata, '…') IS NOT ?)
+refused	UPDATE contexts SET metadata = json_set(metadata, '…', ?) WHERE id = ?
 refused	UPDATE contexts SET title = title WHERE rowid = ?
 refused	UPDATE jobs SET status = '…', attempts = CASE WHEN attempts > N THEN attempts - N ELSE N END, last_error = ?, payload = ?, run_at = datetime('…' || ? || '…'), lease_owner = NULL, lease_expires_at = NULL, updated_at = datetime('…') WHERE id = ?
 refused	UPDATE jobs SET status = '…', attempts = attempts + N, lease_owner = ?, lease_expires_at = datetime('…' || ? || '…'), updated_at = datetime('…') WHERE id = ?
@@ -331,6 +338,7 @@ rejected	SELECT COUNT(*) FROM "…" t WHERE (t."…" = ?)
 rejected	SELECT COUNT(*) FROM "…" t WHERE (t."…" = ?) AND (t."…" = ?)
 rejected	SELECT COUNT(*) FROM "…" t WHERE N
 rejected	SELECT COUNT(*) FROM contexts_fts WHERE id = ?
+rejected	SELECT COUNT(*) FROM source_packages_fts WHERE id = ?
 rejected	SELECT COUNT(*) FROM steward_tenantless_test WHERE workspace_id = ?
 rejected	SELECT COUNT(*) FROM sync_conflicts WHERE tenant_id = ? AND workspace_id = ? AND table_name = '…' AND entity_key = ? AND kind = '…' AND resolved_by = '…' AND created_at > strftime('…', ?)
 rejected	SELECT COUNT(*) FROM sync_local_stamp
