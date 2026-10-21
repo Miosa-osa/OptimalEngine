@@ -53,11 +53,16 @@ defmodule OptimalEngine.Memory.Session do
     - `session_id` - the session identifier
     - `role` - one of `:system`, `:user`, `:assistant`, `:tool`
     - `content` - the message content string
+
+  Returns `{:error, :invalid_role}` for any other role, so a message the session
+  file could not read back is never stored.
   """
-  @spec add_message(session_id(), role(), String.t()) :: :ok
-  def add_message(session_id, role, content) do
+  @spec add_message(session_id(), role(), String.t()) :: :ok | {:error, :invalid_role}
+  def add_message(session_id, role, content) when role in @roles do
     GenServer.call(via(session_id), {:add_message, role, content})
   end
+
+  def add_message(_session_id, _role, _content), do: {:error, :invalid_role}
 
   @doc """
   Get all messages in the session.

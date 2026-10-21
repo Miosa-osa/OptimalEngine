@@ -196,8 +196,14 @@ defmodule OptimalEngine.Knowledge.Backend.Mnesia do
   defp check_store_id(_store_id), do: {:error, :invalid_store_id}
 
   # The ids this node has opened, kept for the life of the VM because the table
-  # atoms of a closed store stay in the atom table.
+  # atoms of a closed store stay in the atom table. The check and the update run
+  # under one lock, so concurrent `init/2` calls cannot pass the cap together or
+  # lose an id.
   defp admit_store(id) do
+    :global.trans({{__MODULE__, :admit_store}, self()}, fn -> admit_locked(id) end, [node()])
+  end
+
+  defp admit_locked(id) do
     known = :persistent_term.get({__MODULE__, :stores}, MapSet.new())
     max = Application.get_env(:optimal_engine, :mnesia_max_stores, @default_max_stores)
 

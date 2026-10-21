@@ -13,7 +13,8 @@ defmodule OptimalEngine.AtomGuardTest do
   `Module.concat`, decoder options that turn keys into atoms, `~w(...)a` with
   an interpolation, `:erlang.binary_to_term` without `:safe`, the `Code`, `EEx`,
   `:erl_scan`, `:erl_parse`, `:file.consult` and `:io.fread` families that parse
-  text, and `apply/3` or an `import` that reaches any of them.
+  text, and `apply/3`, `spawn` with a module, function and arguments, a
+  `defdelegate` or an `import` that reaches any of them.
 
   What to do about a failure:
 
@@ -190,10 +191,64 @@ defmodule OptimalEngine.AtomGuardTest do
             {"apply(Code, :eval_string, [x])", :apply_atom_module},
             {"apply(mod, fun, [x])", :apply_dynamic},
             {"Kernel.apply(@handler, fun, [x])", :apply_dynamic},
-            {"Function.capture(mod, fun, 1)", :apply_dynamic}
+            {"Function.capture(mod, fun, 1)", :apply_dynamic},
+            {"spawn(String, :to_atom, [x])", :apply_atom_module},
+            {"spawn_link(mod, fun, [x])", :apply_dynamic},
+            {"spawn_monitor(mod, fun, [x])", :apply_dynamic},
+            {"Kernel.spawn(node, mod, fun, [x])", :apply_dynamic},
+            {":erlang.spawn(Code, :eval_string, [x])", :apply_atom_module},
+            {":erlang.spawn_opt(mod, fun, [x], [])", :apply_dynamic},
+            {":erlang.spawn_opt(node, List, :to_atom, [x], [])", :apply_atom_module}
           ] do
         assert [%{kind: ^kind}] = scan("def f(x), do: #{source}"), source
       end
+    end
+
+    test "spawn with a module that is a literal and safe, or with a function, is not flagged" do
+      assert [] = scan("def f(x), do: spawn(MyApp.Worker, :run, [x])")
+      assert [] = scan("def f(x), do: spawn(fn -> x end)")
+      assert [] = scan("def f(x), do: spawn_link(fn -> x end)")
+      assert [] = scan("def f(x), do: :erlang.spawn(node, MyApp.Worker, :run, [x])")
+    end
+
+    test "an atom-creating option put into a keyword list or a map" do
+      for source <- [
+            "Keyword.put(opts, :keys, :atoms)",
+            "Keyword.put_new(opts, :keys, :atoms)",
+            "Keyword.replace!(opts, :atoms, true)",
+            "Map.put(opts, :keys, :atoms)"
+          ] do
+        assert [%{kind: :atom_keys}] = scan("def f(opts), do: #{source}"), source
+      end
+
+      for source <- [
+            "Keyword.put(opts, :keys, :atoms!)",
+            "Keyword.put(opts, :keys, :strings)",
+            "Keyword.put(opts, :atoms, false)",
+            "Map.put(opts, :other, :atoms)"
+          ] do
+        assert [] = scan("def f(opts), do: #{source}"), source
+      end
+    end
+
+    test "a delegate to a function that creates an atom or runs code" do
+      for {source, kind} <- [
+            {"defdelegate to_atom(text), to: String", :string_to_atom},
+            {"defdelegate make(text), to: String, as: :to_atom", :string_to_atom},
+            {"defdelegate to_atom(list), to: List", :list_to_atom},
+            {"defdelegate binary_to_atom(text, enc), to: :erlang", :binary_to_atom},
+            {"defdelegate concat(a, b), to: Module", :module_concat},
+            {"defdelegate eval_string(text), to: Code", :code_eval},
+            {"defdelegate to_atom(text), to: @target", :dynamic_call}
+          ] do
+        assert [%{kind: ^kind}] = scan(source), source
+      end
+
+      alias_source = "alias String, as: S\ndefdelegate to_atom(text), to: S"
+      assert [%{kind: :string_to_atom}] = scan(alias_source)
+
+      assert [] = scan("defdelegate length(text), to: String")
+      assert [] = scan("defdelegate start(opts), to: MyApp.Worker, as: :to_atom")
     end
 
     test "a to_atom-like function called on a module held in a variable" do

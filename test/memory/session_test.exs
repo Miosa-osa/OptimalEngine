@@ -45,6 +45,18 @@ defmodule OptimalEngine.Memory.SessionTest do
       assert hd(msgs).content == "Hello"
     end
 
+    test "refuses a role that is not one of the known roles and stores nothing", %{
+      session_id: id
+    } do
+      assert {:error, :invalid_role} = Session.add_message(id, "admin", "Hello")
+      assert {:error, :invalid_role} = Session.add_message(id, :operator, "Hello")
+      assert {:error, :invalid_role} = Session.add_message(id, nil, "Hello")
+      assert Session.messages(id) == []
+
+      assert :ok = Session.add_message(id, :tool, "result")
+      assert [%{role: :tool, content: "result"}] = Session.messages(id)
+    end
+
     test "preserves message order", %{session_id: id} do
       for i <- 1..5 do
         Session.add_message(id, :user, "msg #{i}")
