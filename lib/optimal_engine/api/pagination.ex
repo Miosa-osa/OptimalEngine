@@ -57,16 +57,20 @@ defmodule OptimalEngine.API.Pagination do
     - `limit`    — maximum page size requested
     - `total`    — total number of matching records (from COUNT query)
     - `has_more` — true when items beyond this page exist
+
+  `has_more` is `offset + length(items) < total` unless `:has_more` is given: a
+  list read around what its reader may not see knows whether another item
+  follows, whatever the total says.
   """
-  @spec wrap([term()], non_neg_integer(), non_neg_integer(), pos_integer()) :: map()
-  def wrap(items, total, offset, limit) do
+  @spec wrap([term()], non_neg_integer(), non_neg_integer(), pos_integer(), keyword()) :: map()
+  def wrap(items, total, offset, limit, opts \\ []) do
     %{
       data: items,
       pagination: %{
         offset: offset,
         limit: limit,
         total: total,
-        has_more: offset + length(items) < total
+        has_more: Keyword.get(opts, :has_more, offset + length(items) < total)
       }
     }
   end
