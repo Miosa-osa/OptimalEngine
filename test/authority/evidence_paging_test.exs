@@ -2,16 +2,24 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
   @moduledoc """
   The evidence chain read past any page: `Evidence.stream/3` at exact page
   multiples and with a remainder, streamed verification, export pages that say
-  how complete they are, the CLI export and the integrity scan past 10,000
-  entries, and an agent action trace whose native steps are capped.
+  how complete they are and share a head pinned by `until`, the CLI export and
+  the integrity scan past 10,000 entries, and an agent action trace whose native
+  steps are capped.
   """
 
   use ExUnit.Case, async: false
 
+  import Plug.Conn
+  import Plug.Test
+
+  alias OptimalEngine.API.Router
+  alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Authority
   alias OptimalEngine.Authority.{ActionChain, Evidence, Integrity, Keys}
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
+
+  @opts Router.init([])
 
   setup do
     n = System.unique_integer([:positive])
@@ -117,28 +125,122 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
                   2_000 -> [1_000, 1_000]
                 end)
 
+      # Every page names the same head and counts the whole chain through it.
+      for page <- pages do
+        assert %{"total" => ^total, "head" => %{"seq" => ^total, "hash" => ^head_hash}} = page
+      end
+
       {partial, [last]} = Enum.split(pages, -1)
 
       for page <- partial do
-        assert %{"complete" => false, "total" => ^total} = page
+        assert %{"complete" => false} = page
         assert page["next_after"] == List.last(page["entries"])["seq"]
         assert {:error, %{reason: :partial}} = Evidence.verify_export(page)
       end
 
-      assert %{"complete" => true, "next_after" => nil, "head" => %{"seq" => ^total}} = last
-      assert last["total"] == total - (length(pages) - 1) * 1_000
+      assert %{"complete" => true, "next_after" => nil} = last
       assert List.last(last["entries"])["hash"] == head_hash
-      assert {:ok, %{head: ^head_hash}} = Evidence.verify_export(last)
+      assert {:ok, %{entries: ^total, head: ^head_hash}} = Evidence.verify_export(join(pages))
+
+      # The last page alone is not the whole chain.
+      if partial != [] do
+        assert {:error, %{reason: :partial, verified_from: 1_001}} = Evidence.verify_export(last)
+      end
     end
 
-    whole = Evidence.export(ctx.tenant)
+    {:ok, whole} = Evidence.export(ctx.tenant)
     assert whole["complete"] and length(whole["entries"]) == whole["total"]
     assert {:ok, _} = Evidence.verify_export(whole)
   end
 
+  test "pages read with one until share its head while the chain grows", ctx do
+    chain_of(ctx.tenant, 2_500)
+    {:ok, first} = Evidence.export(ctx.tenant, limit: 1_000)
+    head = first["head"]
+    assert head["seq"] == 2_500
+
+    # Entries are appended between pages; pages pinned at the head never reach them.
+    append_many(ctx.tenant, 300)
+
+    {:ok, second} =
+      Evidence.export(ctx.tenant, after: first["next_after"], limit: 1_000, until: 2_500)
+
+    append_many(ctx.tenant, 300)
+
+    {:ok, third} =
+      Evidence.export(ctx.tenant, after: second["next_after"], limit: 1_000, until: 2_500)
+
+    pages = [first, second, third]
+
+    assert Enum.map(pages, &length(&1["entries"])) == [1_000, 1_000, 500]
+    assert Enum.map(pages, & &1["head"]) == [head, head, head]
+    assert Enum.map(pages, & &1["head_signature"]) |> Enum.uniq() |> length() == 1
+    assert Enum.map(pages, & &1["total"]) == [2_500, 2_500, 2_500]
+    assert Enum.map(pages, & &1["complete"]) == [false, false, true]
+    assert third["next_after"] == nil
+
+    entries = Enum.flat_map(pages, & &1["entries"])
+    assert length(entries) == third["total"]
+    assert Map.take(List.last(entries), ["seq", "hash"]) == head
+    assert {:ok, %{entries: 2_500}} = Evidence.verify_export(join(pages))
+
+    # Read without until, the head has moved on.
+    {:ok, now} = Evidence.export(ctx.tenant, after: 2_500, limit: 1_000)
+    assert %{"head" => %{"seq" => 3_100}, "total" => 3_100, "complete" => true} = now
+  end
+
+  test "an until beyond the head, below after, or not a seq answers 400", ctx do
+    chain_of(ctx.tenant, 120)
+
+    beyond = fn -> "until=#{chain_length(ctx.tenant) + 1}" end
+
+    for query <- [beyond, "after=60&until=59", "until=0", "until=-3", "until=abc"] do
+      query = if is_function(query), do: query.(), else: query
+      conn = get_export(ctx.tenant, query)
+      assert conn.status == 400, query
+      assert Jason.decode!(conn.resp_body) == %{"error" => "until_out_of_range"}
+    end
+
+    assert {:error, :until_out_of_range} =
+             Evidence.export(ctx.tenant, until: chain_length(ctx.tenant) + 1)
+
+    assert {:error, :until_out_of_range} = Evidence.export(ctx.tenant, after: 60, until: 59)
+
+    conn = get_export(ctx.tenant, "limit=40&until=100")
+    assert conn.status == 200
+    page = Jason.decode!(conn.resp_body)
+    assert %{"total" => 100, "complete" => false, "next_after" => 40} = page
+    assert page["head"]["seq"] == 100 and length(page["entries"]) == 40
+
+    conn = get_export(ctx.tenant, "after=40&until=100")
+
+    assert %{"complete" => true, "next_after" => nil, "total" => 100} =
+             Jason.decode!(conn.resp_body)
+  end
+
+  test "an empty chain exports no head, a total of 0, and is complete", ctx do
+    empty = "#{ctx.tenant}-empty"
+
+    assert {:ok,
+            %{
+              "entries" => [],
+              "head" => nil,
+              "head_signature" => nil,
+              "total" => 0,
+              "complete" => true,
+              "next_after" => nil
+            } = bundle} = Evidence.export(empty)
+
+    assert {:ok, %{entries: 0}} =
+             bundle |> Jason.encode!() |> Jason.decode!() |> Evidence.verify_export()
+
+    assert {:error, :until_out_of_range} = Evidence.export(empty, until: 1)
+  end
+
   test "a bundle that is cut short, or whose head is tampered with, does not verify", ctx do
     chain_of(ctx.tenant, 1_200)
-    whole = ctx.tenant |> Evidence.export() |> Jason.encode!() |> Jason.decode!()
+    {:ok, exported} = Evidence.export(ctx.tenant)
+    whole = exported |> Jason.encode!() |> Jason.decode!()
     assert {:ok, %{entries: 1_200}} = Evidence.verify_export(whole)
 
     # Entries dropped from the end, the bundle still saying it is complete.
@@ -149,21 +251,22 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
 
     # A head moved to match the cut: its signature no longer holds.
     last = List.last(cut["entries"])
-
-    moved =
-      update_in(cut, ["head"], &Map.merge(&1, %{"seq" => last["seq"], "hash" => last["hash"]}))
-
+    moved = Map.put(cut, "head", Map.take(last, ["seq", "hash"]))
     assert {:error, %{reason: :bad_head_signature}} = Evidence.verify_export(moved)
 
     tampered = put_in(whole, ["head", "hash"], String.duplicate("e", 64))
     assert {:error, %{reason: :bad_head_signature}} = Evidence.verify_export(tampered)
-    assert {:error, %{reason: :missing_head}} = Evidence.verify_export(Map.delete(whole, "head"))
+    unsigned = Map.put(whole, "head_signature", nil)
+    assert {:error, %{reason: :bad_head_signature}} = Evidence.verify_export(unsigned)
+
+    # Only an empty chain has no head.
+    assert {:error, %{reason: :missing_head}} = Evidence.verify_export(Map.put(whole, "head", nil))
 
     assert {:error, %{reason: :missing_completeness}} =
              Evidence.verify_export(Map.delete(whole, "complete"))
 
     # A page that is not the end is partial, never valid, even when its entries are.
-    page = Evidence.export(ctx.tenant, 0, 500)
+    {:ok, page} = Evidence.export(ctx.tenant, limit: 500)
     assert {:error, %{reason: :partial, entries: 500}} = Evidence.verify_export(page)
     forged = Map.put(page, "complete", true)
     assert {:error, %{reason: :count_mismatch}} = Evidence.verify_export(forged)
@@ -190,7 +293,7 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     assert scan.checked.evidence_entries == total
 
     # The API's first page stops at 10,000 and says so.
-    first = Evidence.export(ctx.tenant)
+    {:ok, first} = Evidence.export(ctx.tenant)
     assert %{"complete" => false, "next_after" => 10_000, "total" => ^total} = first
     assert length(first["entries"]) == 10_000
 
@@ -205,8 +308,23 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     assert %{"complete" => true, "total" => ^total, "next_after" => nil} = bundle
     assert length(bundle["entries"]) == total
     {:ok, %{head: head}} = Evidence.verify(ctx.tenant)
-    assert bundle["head"]["hash"] == head
+    assert bundle["head"] == %{"seq" => total, "hash" => head}
     assert {:ok, %{entries: ^total, head: ^head}} = Evidence.verify_export(bundle)
+
+    # Pinned with --until, the file ends complete at that entry.
+    Mix.Tasks.Optimal.Authority.run([
+      "export",
+      "--tenant",
+      ctx.tenant,
+      "--until",
+      "10001",
+      "--out",
+      out
+    ])
+
+    pinned = out |> File.read!() |> Jason.decode!()
+    assert %{"complete" => true, "total" => 10_001, "head" => %{"seq" => 10_001}} = pinned
+    assert {:ok, %{entries: 10_001}} = Evidence.verify_export(pinned)
     expected = "Wrote #{total} entries to #{out}"
     assert_received {:mix_shell, :info, [^expected]}
   end
@@ -238,11 +356,40 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
   end
 
   defp export_pages(tenant, limit, after_seq \\ 0) do
-    page = Evidence.export(tenant, after_seq, limit)
+    {:ok, page} = Evidence.export(tenant, after: after_seq, limit: limit)
 
     case page["next_after"] do
       nil -> [page]
       next -> [page | export_pages(tenant, limit, next)]
+    end
+  end
+
+  # Pages joined into one bundle, as a verifier would: every entry, the last page's rest.
+  defp join(pages), do: Map.put(List.last(pages), "entries", Enum.flat_map(pages, & &1["entries"]))
+
+  defp get_export(tenant, query) do
+    original = Application.get_env(:optimal_engine, :auth, [])
+
+    Application.put_env(
+      :optimal_engine,
+      :auth,
+      Keyword.merge(original, auth_required: true, bcrypt_cost: 4)
+    )
+
+    try do
+      {:ok, %{key: key}} =
+        ApiKey.mint(%{
+          tenant_id: tenant,
+          name: "evidence-paging-#{System.unique_integer([:positive])}",
+          scopes: ["*"],
+          workspace_scope: ["*"]
+        })
+
+      conn(:get, "/api/authority/evidence/export?" <> query)
+      |> put_req_header("authorization", "Bearer " <> key)
+      |> Router.call(@opts)
+    after
+      Application.put_env(:optimal_engine, :auth, original)
     end
   end
 end

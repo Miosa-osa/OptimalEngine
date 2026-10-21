@@ -369,15 +369,21 @@ defmodule OptimalEngine.API.AuthorityRouter do
     end
   end
 
+  # ?after=&limit=&until=: a page of the chain; pages read with one until share its head.
   get "/evidence/export" do
     conn = fetch_query_params(conn)
     q = conn.query_params
 
-    json(
-      conn,
-      200,
-      Evidence.export(tenant(conn), parse_int(q["after"], 0), parse_int(q["limit"], 10_000))
-    )
+    opts = [after: parse_int(q["after"], 0), limit: parse_int(q["limit"], 10_000)]
+    until = if q["until"] in [nil, ""], do: nil, else: parse_int(q["until"], :invalid)
+
+    case Evidence.export(tenant(conn), Keyword.put(opts, :until, until)) do
+      {:ok, bundle} ->
+        json(conn, 200, bundle)
+
+      {:error, :until_out_of_range} ->
+        error(conn, 400, "until_out_of_range")
+    end
   end
 
   post "/evidence/checkpoint" do
