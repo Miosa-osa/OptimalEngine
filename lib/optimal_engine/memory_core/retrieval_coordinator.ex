@@ -389,11 +389,77 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
         sections: sections
       })
 
-    with :ok <- Store.insert_context_package(package),
-         :ok <- record_assembly(retrieval_package, package, opts) do
-      {:ok, package}
+    case reusable_successor(package, opts) do
+      {:ok, existing} ->
+        {:ok,
+         %{
+           package
+           | id: existing.id,
+             transaction_time_start: existing.transaction_time_start,
+             refresh_time: existing.refresh_time
+         }}
+
+      :none ->
+        with :ok <- Store.insert_context_package(package),
+             :ok <- record_assembly(retrieval_package, package, opts) do
+          {:ok, package}
+        end
     end
   end
+
+  # A reader that merely covers a stale package gets a package of its own and
+  # leaves the original stale, so the same refresh would store a new package
+  # each time it ran. With `:reuse_successor_of` (the stale package's id) it
+  # answers with the package it stored the last time instead, while that one is
+  # still fresh and holds exactly what this refresh found, for the same reader
+  # and grants: the returned package is the one just assembled, under the
+  # stored package's id.
+  defp reusable_successor(package, opts) do
+    with stale_id when is_binary(stale_id) <- Keyword.get(opts, :reuse_successor_of),
+         actor when is_binary(actor) <- package.requesting_actor_id,
+         {:ok, rows} <-
+           BaseStore.raw_query(
+             """
+             #{context_package_select_sql()}
+             WHERE tenant_id = ?1 AND workspace_id = ?2 AND requesting_actor_id = ?3
+               AND refresh_state = 'fresh' AND metadata LIKE ?4
+             ORDER BY created_at DESC, id
+             LIMIT 10
+             """,
+             [
+               package.tenant_id,
+               package.workspace_id,
+               actor,
+               ~s(%"refreshed_from_context_package_id":"#{stale_id}"%)
+             ]
+           ),
+         existing when not is_nil(existing) <-
+           rows
+           |> Enum.map(&context_package_from_row/1)
+           |> Enum.find(&same_successor?(&1, package, stale_id)) do
+      {:ok, existing}
+    else
+      _ -> :none
+    end
+  end
+
+  defp same_successor?(existing, package, stale_id) do
+    map_get(existing.metadata, :refreshed_from_context_package_id) == stale_id and
+      existing.active_memory_pool_id == package.active_memory_pool_id and
+      envelope_grants(existing) == envelope_grants(package) and
+      link_ids(existing.returned_object_links) == link_ids(package.returned_object_links)
+  end
+
+  defp envelope_grants(package) do
+    for key <- [:allowed_partitions, :allowed_security_labels] do
+      case recorded_grants(package.authorization_envelope, key) do
+        {:ok, grants} -> Enum.sort(grants)
+        :error -> :unreadable
+      end
+    end
+  end
+
+  defp link_ids(links), do: links |> Enum.map(&link_id/1) |> Enum.sort()
 
   @doc """
   Refresh a stale Context Package by re-running its original query.
@@ -653,6 +719,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
          limit:
            Keyword.get(opts, :limit) || map_get(package.retrieval_plan, :limit) || @default_limit,
          omit_query: hide_query?(package, opts),
+         reuse_successor_of: reuse_successor_of(package, opts),
          metadata:
            Map.merge(Keyword.get(opts, :metadata, %{}), %{
              refreshed_from_context_package_id: package.id,
@@ -721,6 +788,21 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   defp inherited(package, opts, value) do
     if not receiver?(opts) or owner?(package, opts), do: value, else: nil
   end
+
+  # A reader that only covers a stale package may be answered with the package
+  # it already stored from it (see `reusable_successor/2`). Not for a
+  # reconstructive refresh, which records a run for each package it assembles.
+  defp reuse_successor_of(package, opts) do
+    tiered? = strategy(strategy_opt(package, opts)) == :tiered
+
+    if receiver?(opts) and not owner?(package, opts) and tiered?, do: package.id
+  end
+
+  defp strategy_opt(package, opts),
+    do: [
+      strategy:
+        Keyword.get(opts, :strategy) || map_get(package.retrieval_plan, :strategy) || :tiered
+    ]
 
   # Whoever requested this package may refresh it.
   defp owner?(package, opts), do: actor(opts) == package.requesting_actor_id and actor(opts) != nil

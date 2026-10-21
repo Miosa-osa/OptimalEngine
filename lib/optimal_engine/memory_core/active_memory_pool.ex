@@ -232,8 +232,16 @@ defmodule OptimalEngine.MemoryCore.ActiveMemoryPool do
 
     case RetrievalCoordinator.refresh_context_package(package_id, refresh_opts) do
       {:ok, refreshed_package} ->
-        with {:ok, _pool} <- load_context_package(pool_id, refreshed_package) do
-          {:ok, refreshed_package}
+        with {:ok, pool} <- get(pool_id) do
+          # A reader that only covers the package is answered with the package it
+          # stored last time: when the pool already holds it, there is nothing new.
+          if Enum.any?(pool.context_package_links, &(link_id(&1) == refreshed_package.id)) do
+            {:ok, :skipped, package_id}
+          else
+            with {:ok, _pool} <- load_context_package(pool_id, refreshed_package) do
+              {:ok, refreshed_package}
+            end
+          end
         end
 
       {:error, :context_package_not_stale} ->

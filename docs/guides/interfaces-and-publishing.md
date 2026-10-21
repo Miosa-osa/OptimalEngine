@@ -186,6 +186,7 @@ A caller refreshes only the stale packages it requested (its principal is the pa
 A caller that did not ask the query is not handed it, in the plan, the metadata or the assembled sections, nor the invalidation reason, who asked it, the request id and pool of the stale package, or the counts and ids of the objects its grants exclude (they say what the query matched).
 A package it refreshes keeps that: the package records who asked the query (`metadata.query_owner_actor_id`), so a reader that only covers the original never becomes its owner by refreshing it.
 A reader that only covers a package gets a new package of its own, and the original stays stale for its requester.
+Refreshing again answers with that package while it is fresh and the grants and the objects found are the same, so repeating the call stores nothing new; in a pool the second refresh finds it already loaded and reports the package as skipped.
 A refresh looks at the 1,000 most recently updated stale packages of a workspace at most.
 A stale package whose recorded envelope cannot be read is marked `failed` and leaves the stale list.
 After upgrading from a version that refreshed with the filter off, run `mix optimal.context.sweep` once (`--dry-run` first) to empty the refreshed packages that hold objects their envelope does not admit; the next refresh rebuilds them.
