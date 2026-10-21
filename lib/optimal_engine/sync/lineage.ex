@@ -430,11 +430,48 @@ defmodule OptimalEngine.Sync.Lineage do
   whether the workspace holds anything above a class.
   """
   @spec scanned_tables() :: [String.t()]
-  def scanned_tables do
-    Enum.filter(tables(), fn table ->
-      spec = spec(table)
-      spec.labels or is_binary(spec.meta) or is_binary(spec.class)
-    end)
+  def scanned_tables, do: Enum.filter(tables(), &(class_column(spec(&1)) != nil))
+
+  @typedoc "What a table's class is read from: a label array, labels in metadata, or a class name."
+  @type class_kind :: :labels | :meta | :class
+
+  @doc """
+  The one column a gate reads to tell whether a row names a class above its own,
+  with how it is read; nil for a table that names none. A table that has several
+  is read by the first, in this order: its `security_labels`, the labels in its
+  metadata column, its classification column.
+
+  `OptimalEngine.Sync.Gate` builds its scan from this, and so does the trigger
+  that tells the gate cache a scanned table that stays local was written
+  (`OptimalEngine.Sync.Capture`), so the two cannot read different columns.
+  """
+  @spec class_column(t()) :: {class_kind(), String.t()} | nil
+  def class_column(%{labels: true}), do: {:labels, "security_labels"}
+  def class_column(%{meta: meta}) when is_binary(meta), do: {:meta, meta}
+  def class_column(%{class: class}) when is_binary(class), do: {:class, class}
+  def class_column(_spec), do: nil
+
+  @doc """
+  SQL that is true when the row `row` (`NEW`, `OLD`, or a table alias) may name
+  a class above some gate in its `class_column/1`: a superset of what the gate
+  holds at any rank, cheap enough for a trigger. A row that cannot be above any
+  gate (no labels, no class) cannot change the answer to "does the workspace
+  hold anything above this class".
+
+  A label array other than `'[]'` counts, `NULL` and text that is not JSON
+  included. Metadata counts when it spells the key or holds a backslash (a key
+  can be spelled with an escape). A class column counts unless it is empty, null,
+  `internal` or `public`.
+  """
+  @spec may_name_class_sql({class_kind(), String.t()}, String.t()) :: String.t()
+  def may_name_class_sql({:labels, column}, row), do: "#{row}.\"#{column}\" IS NOT '[]'"
+
+  def may_name_class_sql({:meta, column}, row) do
+    "(#{row}.\"#{column}\" LIKE '%security_labels%' OR instr(#{row}.\"#{column}\", char(92)) > 0)"
+  end
+
+  def may_name_class_sql({:class, column}, row) do
+    "(#{row}.\"#{column}\" IS NOT NULL AND lower(#{row}.\"#{column}\") NOT IN ('', 'internal', 'public'))"
   end
 
   @doc "How a table's class is made up, or nil for a table the map does not know."
