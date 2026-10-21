@@ -553,7 +553,7 @@ defmodule OptimalEngine.Store.SQLite do
 
     result =
       with {:ok, stmt} <- Exqlite.Sqlite3.prepare(state.db, sql),
-           :ok <- Exqlite.Sqlite3.bind(stmt, [id]),
+           :ok <- bind(state.db, stmt, [id]),
            {:row, row} <- Exqlite.Sqlite3.step(state.db, stmt),
            :ok <- Exqlite.Sqlite3.release(state.db, stmt) do
         ctx = Context.from_row(row)
@@ -585,7 +585,7 @@ defmodule OptimalEngine.Store.SQLite do
 
     result =
       with {:ok, stmt} <- Exqlite.Sqlite3.prepare(state.db, sql),
-           :ok <- Exqlite.Sqlite3.bind(stmt, params) do
+           :ok <- bind(state.db, stmt, params) do
         contexts = collect_context_rows(state.db, stmt, [])
         Exqlite.Sqlite3.release(state.db, stmt)
         contexts
@@ -639,7 +639,7 @@ defmodule OptimalEngine.Store.SQLite do
   def handle_call({:raw_query, sql, params}, _from, state) do
     result =
       with {:ok, stmt} <- Exqlite.Sqlite3.prepare(state.db, sql),
-           :ok <- Exqlite.Sqlite3.bind(stmt, params) do
+           :ok <- bind(state.db, stmt, params) do
         rows = collect_rows_raw(state.db, stmt, [])
         Exqlite.Sqlite3.release(state.db, stmt)
         rows
@@ -1216,7 +1216,7 @@ defmodule OptimalEngine.Store.SQLite do
     ]
 
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
-         :ok <- Exqlite.Sqlite3.bind(stmt, params),
+         :ok <- bind(db, stmt, params),
          :done <- Exqlite.Sqlite3.step(db, stmt),
          :ok <- Exqlite.Sqlite3.release(db, stmt) do
       :ok
@@ -1531,9 +1531,22 @@ defmodule OptimalEngine.Store.SQLite do
     exec_stmt(db, sql, params)
   end
 
+  # Binds a statement's parameters. Exqlite raises on a value SQLite cannot
+  # hold (an integer past 64 bits, a map, the wrong number of parameters).
+  # Raised in the Store process, that would stop the Store and fail every call
+  # waiting on it, so it is answered as an error and the statement released.
+  # The error does not carry the value, which may be anything a request sent.
+  defp bind(db, stmt, params) do
+    Exqlite.Sqlite3.bind(stmt, params)
+  rescue
+    ArgumentError ->
+      Exqlite.Sqlite3.release(db, stmt)
+      {:error, :invalid_parameter}
+  end
+
   defp exec_stmt(db, sql, params) do
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
-         :ok <- Exqlite.Sqlite3.bind(stmt, params),
+         :ok <- bind(db, stmt, params),
          :done <- Exqlite.Sqlite3.step(db, stmt),
          :ok <- Exqlite.Sqlite3.release(db, stmt) do
       :ok
@@ -1616,7 +1629,7 @@ defmodule OptimalEngine.Store.SQLite do
 
     result =
       with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
-           :ok <- Exqlite.Sqlite3.bind(stmt, params),
+           :ok <- bind(db, stmt, params),
            :done <- Exqlite.Sqlite3.step(db, stmt),
            :ok <- Exqlite.Sqlite3.release(db, stmt) do
         insert_entities(db, ctx)
