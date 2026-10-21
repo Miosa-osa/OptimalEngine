@@ -411,8 +411,18 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       (the scheduler, `mix optimal.context.refresh_stale`) rebuilds the
       package for the reader it was built for and cannot widen it. A recorded
       envelope that cannot be read fails with
-      `{:error, :authorization_envelope_unreadable}` and the package stays
-      stale.
+      `{:error, :authorization_envelope_unreadable}` and the package leaves
+      the stale list (`refresh_state` `"failed"`), since no later run can read
+      it either.
+
+  A receiver refreshes only a package it owns or covers: the package's
+  requesting actor is the receiver's `:actor_id`, or the receiver's grants
+  admit at least everything the recorded envelope admits (`"*"` covers all).
+  Any other package answers `{:error, :not_found}`, as one that does not exist.
+  A refreshed package returned to a receiver that is not its package's
+  requesting actor carries neither the original reader's query nor the
+  stale package's invalidation reason (either can name what the receiver may
+  not read); the stored package keeps the query so it can be refreshed again.
 
   Other options: `:tenant_id`, `:workspace_id`, `:actor_id`, `:force`,
   `:limit`, `:metadata`.
@@ -425,6 +435,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
     with {:ok, stale_package} <- get_context_package(context_package_id, tenant_id, workspace_id),
          :ok <- ensure_refreshable(stale_package, opts),
+         :ok <- ensure_may_refresh(stale_package, opts),
          {:ok, query} <- original_query(stale_package),
          {:ok, refresh_opts} <- refresh_opts_from_package(stale_package, opts),
          {:ok, refreshed_package} <- retrieve(query, refresh_opts),
@@ -433,7 +444,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
              tenant_id: stale_package.tenant_id,
              workspace_id: stale_package.workspace_id
            ) do
-      {:ok, refreshed_package}
+      {:ok, receiver_view(refreshed_package, stale_package, opts)}
     end
   end
 
@@ -441,10 +452,11 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   Refresh the stale Context Packages of a workspace, up to `:batch_limit`.
 
   Each package is refreshed with `refresh_context_package/2` and the same
-  grant rules: the receiver's `:allowed_partitions` / `:allowed_security_labels`
-  apply to every package, and a refresh with none keeps each package inside its
-  own recorded envelope. A package that fails is reported in `:errors` (or
-  halts the batch with `continue_on_error: false`).
+  rules: the receiver's `:allowed_partitions` / `:allowed_security_labels`
+  apply to every package, a refresh with none keeps each package inside its
+  own recorded envelope, and a receiver is offered (and told the ids of) only
+  the packages it owns or covers. A package that fails is reported in
+  `:errors` (or halts the batch with `continue_on_error: false`).
   """
   @spec refresh_stale_context_packages(keyword()) :: {:ok, map()} | {:error, term()}
   def refresh_stale_context_packages(opts \\ []) when is_list(opts) do
@@ -485,11 +497,47 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
+  @stale_page 100
+
+  # A maintenance run takes the first `batch_limit` stale packages. A receiver
+  # is offered only the stale packages it may refresh, so the filter runs
+  # before the limit: another reader's packages never crowd out its own.
   defp list_stale_context_packages(opts) do
     tenant_id = string_opt(opts, :tenant_id, "default")
     workspace_id = Keyword.get(opts, :workspace_id)
     batch_limit = Keyword.get(opts, :batch_limit, 50)
 
+    if receiver?(opts) do
+      collect_stale(tenant_id, workspace_id, opts, batch_limit, 0, [])
+    else
+      stale_page(tenant_id, workspace_id, batch_limit, 0)
+    end
+  end
+
+  defp collect_stale(_tenant_id, _workspace_id, _opts, batch_limit, _offset, found)
+       when length(found) >= batch_limit,
+       do: {:ok, Enum.take(found, batch_limit)}
+
+  defp collect_stale(tenant_id, workspace_id, opts, batch_limit, offset, found) do
+    with {:ok, page} <- stale_page(tenant_id, workspace_id, @stale_page, offset) do
+      visible = Enum.filter(page, &(ensure_may_refresh(&1, opts) == :ok))
+
+      if length(page) < @stale_page do
+        {:ok, Enum.take(found ++ visible, batch_limit)}
+      else
+        collect_stale(
+          tenant_id,
+          workspace_id,
+          opts,
+          batch_limit,
+          offset + @stale_page,
+          found ++ visible
+        )
+      end
+    end
+  end
+
+  defp stale_page(tenant_id, workspace_id, limit, offset) do
     {workspace_clause, params} =
       case workspace_id do
         nil -> {"", [tenant_id]}
@@ -501,11 +549,11 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     WHERE tenant_id = ?1
       AND refresh_state = 'stale'
       #{workspace_clause}
-    ORDER BY updated_at DESC
-    LIMIT ?#{length(params) + 1}
+    ORDER BY updated_at DESC, id
+    LIMIT ?#{length(params) + 1} OFFSET ?#{length(params) + 2}
     """
 
-    case BaseStore.raw_query(sql, params ++ [batch_limit]) do
+    case BaseStore.raw_query(sql, params ++ [limit, offset]) do
       {:ok, rows} -> {:ok, Enum.map(rows, &context_package_from_row/1)}
       other -> other
     end
@@ -579,8 +627,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
            Keyword.get(opts, :limit) || map_get(package.retrieval_plan, :limit) || @default_limit,
          metadata:
            Map.merge(Keyword.get(opts, :metadata, %{}), %{
-             refreshed_from_context_package_id: package.id,
-             refreshed_from_invalidation_reason: package.invalidation_reason
+             refreshed_from_context_package_id: package.id
            })
        ]}
     end
@@ -589,19 +636,127 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   # The grant a refresh reads under: the caller's when it passes one, else the
   # one recorded on the stale package. Never the package's own object labels
   # (they would admit exactly what the package already holds) and never an
-  # unfiltered read; anything unreadable fails closed.
+  # unfiltered read; anything unreadable fails closed. A recorded envelope that
+  # cannot be read takes the package out of the stale list: no later run can
+  # read it either.
   defp refresh_grant(package, opts, key) do
     case Keyword.get(opts, key) do
-      nil -> recorded_grant(package.authorization_envelope, key)
+      nil -> recorded_grant(package, key)
       grants when is_list(grants) -> {:ok, string_list_opt(opts, key)}
       _ -> {:error, :invalid_refresh_grants}
     end
   end
 
-  defp recorded_grant(envelope, key) do
+  defp recorded_grant(package, key) do
+    case recorded_grants(package.authorization_envelope, key) do
+      {:ok, grants} ->
+        {:ok, grants}
+
+      :error ->
+        Store.mark_context_package_refresh_failed(package.id,
+          tenant_id: package.tenant_id,
+          workspace_id: package.workspace_id,
+          reason: "authorization_envelope_unreadable"
+        )
+
+        {:error, :authorization_envelope_unreadable}
+    end
+  end
+
+  defp recorded_grants(envelope, key) do
     case map_get(envelope, key) do
       grants when is_list(grants) -> {:ok, Enum.map(grants, &to_string/1)}
-      _ -> {:error, :authorization_envelope_unreadable}
+      _ -> :error
+    end
+  end
+
+  # A receiver is a caller that names the grants it reads under; a maintenance
+  # refresh names none and reads inside each package's recorded envelope.
+  defp receiver?(opts),
+    do:
+      Keyword.has_key?(opts, :allowed_partitions) or
+        Keyword.has_key?(opts, :allowed_security_labels)
+
+  defp ensure_may_refresh(package, opts) do
+    cond do
+      not receiver?(opts) -> :ok
+      owner?(package, opts) -> :ok
+      covers_recorded?(package, opts) -> :ok
+      true -> {:error, :not_found}
+    end
+  end
+
+  defp owner?(package, opts) do
+    actor = Keyword.get(opts, :actor_id) || Keyword.get(opts, :requesting_actor_id)
+    is_binary(actor) and actor != "" and actor == package.requesting_actor_id
+  end
+
+  # Whether what the receiver reads includes everything the stale package's
+  # recorded envelope reads. A grant the receiver leaves out is the recorded
+  # one. An envelope or a grant that cannot be read covers nothing.
+  defp covers_recorded?(package, opts) do
+    with {:ok, recorded_labels} <-
+           recorded_grants(package.authorization_envelope, :allowed_security_labels),
+         {:ok, recorded_partitions} <-
+           recorded_grants(package.authorization_envelope, :allowed_partitions),
+         {:ok, held_labels} <- held_grant(opts, :allowed_security_labels, recorded_labels),
+         {:ok, held_partitions} <- held_grant(opts, :allowed_partitions, recorded_partitions) do
+      labels_cover?(held_labels, recorded_labels) and
+        partitions_cover?(held_partitions, recorded_partitions)
+    else
+      _unreadable -> false
+    end
+  end
+
+  defp held_grant(opts, key, recorded) do
+    case Keyword.get(opts, key) do
+      nil -> {:ok, recorded}
+      grants when is_list(grants) -> {:ok, string_list_opt(opts, key)}
+      _ -> :error
+    end
+  end
+
+  # A row is read when every label it carries is granted, so a reader covers
+  # another when it holds each of that reader's labels.
+  defp labels_cover?(held, recorded) do
+    cond do
+      SecurityLabels.wildcard?(held) -> true
+      SecurityLabels.wildcard?(recorded) -> false
+      true -> MapSet.subset?(MapSet.new(recorded), MapSet.new(held))
+    end
+  end
+
+  # A reader with no partition grant reads only unpartitioned rows; one with
+  # some reads only rows that share one of them. So no grant covers only no
+  # grant, and a set is covered only by one that holds all of it.
+  defp partitions_cover?(held, recorded) do
+    cond do
+      SecurityLabels.wildcard?(held) -> true
+      SecurityLabels.wildcard?(recorded) -> false
+      recorded == [] -> held == []
+      true -> MapSet.subset?(MapSet.new(recorded), MapSet.new(held))
+    end
+  end
+
+  # What a receiver that is not the package's requesting actor is handed back:
+  # the plan keys that restate the original reader's query, and its stored
+  # copy, are left out. The stored package keeps them for the next refresh.
+  defp receiver_view(refreshed, stale, opts) do
+    if receiver?(opts) and not owner?(stale, opts) do
+      %{
+        refreshed
+        | retrieval_plan:
+            Map.drop(refreshed.retrieval_plan, [
+              :query,
+              :evidence_plan,
+              :evidence_obligations,
+              :evidence_probes,
+              :reconstruction
+            ]),
+          metadata: Map.drop(refreshed.metadata, [:query, "query"])
+      }
+    else
+      refreshed
     end
   end
 
@@ -1849,6 +2004,24 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
+
+  @doc """
+  Whether governed recall under `envelope` (a map with `:allowed_partitions`
+  and `:allowed_security_labels`) admits `object` (a map with
+  `:security_labels` and `:partition_ids`): the rule the candidate SQL applies,
+  for callers that check a stored row against an envelope.
+  """
+  @spec admits?(map(), map()) :: boolean()
+  def admits?(envelope, object) do
+    authorized_projection_scoped?(object, %{
+      allowed_partitions: grant_strings(Map.get(envelope, :allowed_partitions)),
+      allowed_security_labels: grant_strings(Map.get(envelope, :allowed_security_labels))
+    })
+  end
+
+  # A grant that is not a list admits only rows that carry nothing.
+  defp grant_strings(grants) when is_list(grants), do: Enum.map(grants, &to_string/1)
+  defp grant_strings(_grants), do: []
 
   defp authorized_projection?(object, authorization) do
     if Map.get(authorization, :allow_all?, false) do
