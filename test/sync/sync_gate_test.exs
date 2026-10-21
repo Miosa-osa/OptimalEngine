@@ -958,6 +958,45 @@ defmodule OptimalEngine.SyncGateTest do
       assert sent?(sent, "memories", id.(1))
     end
 
+    test "a parent loop is held whole, whichever version is read first", ctx do
+      id = fn n -> "loop-v#{n}-#{ctx.n}" end
+      # v1 -> v3 -> v2 -> v1, with only v1 labelled and no roots recorded:
+      # every version of the loop has v1 behind it, so none may be sent, even
+      # when an earlier version's walk stopped at the loop.
+      parents = %{1 => 3, 2 => 1, 3 => 2}
+
+      {:ok, :written} =
+        Store.transaction(fn txn ->
+          {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+
+          for n <- 1..3 do
+            labels = if n == 1, do: ~s({"security_labels":["restricted"]}), else: "{}"
+
+            {:ok, _} =
+              Store.txn_execute(
+                txn,
+                "INSERT INTO memories (id, tenant_id, workspace_id, content, parent_memory_id, root_memory_id, version, metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                [
+                  id.(n),
+                  ctx.tenant,
+                  ctx.ws,
+                  "Loop version #{n}",
+                  id.(parents[n]),
+                  nil,
+                  n,
+                  labels
+                ]
+              )
+          end
+
+          {:ok, :written}
+        end)
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      for n <- 1..3, do: refute(sent?(sent, "memories", id.(n)), "#{id.(n)} was sent")
+    end
+
     test "a source package that already holds a conflict is given its labels and the fact", ctx do
       fact_id = fact_conflict(ctx, ["confidential"], nil)
 
