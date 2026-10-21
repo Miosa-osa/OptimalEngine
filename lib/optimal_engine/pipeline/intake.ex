@@ -98,6 +98,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   alias OptimalEngine.MemoryCore.SourcePackageService
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
   alias OptimalEngine.Pipeline.Indexer, as: Indexer
+  alias OptimalEngine.Pipeline.Intake.Address
   alias OptimalEngine.Pipeline.Intake.Writer, as: Writer
   alias OptimalEngine.Pipeline.Intake.Skeleton, as: Skeleton
   alias OptimalEngine.Pipeline.Router, as: Router
@@ -672,17 +673,18 @@ defmodule OptimalEngine.Pipeline.Intake do
       workspace_id: workspace_id,
       # The document names its source package and carries its labels from the
       # first write: nothing else on the row says what class it is, and
-      # replication reads it before any ledger entry exists.
+      # replication reads it before any ledger entry exists. A repaired
+      # context keeps the record of the repair.
       metadata:
         SecurityLabels.put(
-          %{"source_package_id" => source_package.id},
+          Map.put(preserved_metadata(signal.id), "source_package_id", source_package.id),
           source_package.security_labels
         )
     }
 
     case Store.insert_context(context) do
       :ok ->
-        if primary_path, do: index_cross_refs(signal, cross_paths, scope)
+        if primary_path, do: index_cross_refs(signal, cross_paths, scope, context.metadata)
         {:ok, context}
 
       {:error, _} = err ->
@@ -690,10 +692,25 @@ defmodule OptimalEngine.Pipeline.Intake do
     end
   end
 
+  # A context repaired by `OptimalEngine.UriRepair` records where it was in
+  # `metadata.uri_repair`; writing it again must not erase that record.
+  defp preserved_metadata(id) do
+    case Store.raw_query("SELECT metadata FROM contexts WHERE id = ?1", [id]) do
+      {:ok, [[json]]} when is_binary(json) ->
+        case Jason.decode(json) do
+          {:ok, %{"uri_repair" => repair}} -> %{"uri_repair" => repair}
+          _ -> %{}
+        end
+
+      _ ->
+        %{}
+    end
+  end
+
   # The copies are indexed from the paths they were written to. Each row is
   # marked as a copy of this signal, so writing the signal again recognises its
   # own copies and updates them in place instead of adding new ones.
-  defp index_cross_refs(%Signal{} = signal, cross_paths, %ScopeEnvelope{} = scope) do
+  defp index_cross_refs(%Signal{} = signal, cross_paths, %ScopeEnvelope{} = scope, metadata) do
     Enum.each(cross_paths, fn cross_path ->
       # Cross-ref Context rows must carry the intake's workspace scope.
       # Indexing without it stamps the struct default ("default"),
@@ -701,7 +718,7 @@ defmodule OptimalEngine.Pipeline.Intake do
       if File.exists?(cross_path) do
         Indexer.index_file(cross_path,
           workspace_id: scope.workspace_id,
-          metadata: %{"cross_ref_of" => signal.id}
+          metadata: Address.copy_metadata(signal.id, metadata)
         )
       end
     end)

@@ -53,6 +53,7 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
 
   require Logger
 
+  alias OptimalEngine.AtomicFile
   alias OptimalEngine.Pipeline.Intake.Address
   alias OptimalEngine.Pipeline.Intake.Skeleton
   alias OptimalEngine.Signal
@@ -156,7 +157,7 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   @spec relative_path(Signal.t(), keyword()) :: String.t()
   def relative_path(%Signal{} = signal, opts \\ []) do
     node_folder = node_to_folder(signal.node, opts)
-    {_signals_dir, filename, _content} = target(signal, node_folder, opts)
+    {_signals_dir, filename, _content} = target!(signal, node_folder, opts)
     Path.join([node_folder, "signals", filename])
   end
 
@@ -166,7 +167,7 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   @spec signal_uri(Signal.t(), keyword()) :: String.t()
   def signal_uri(%Signal{} = signal, opts \\ []) do
     node_folder = node_to_folder(signal.node, opts)
-    {signals_dir, filename, _content} = target(signal, node_folder, opts)
+    {signals_dir, filename, _content} = target!(signal, node_folder, opts)
     URI.from_path(Path.join(signals_dir, filename))
   end
 
@@ -177,6 +178,21 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   """
   @spec render(Signal.t(), keyword()) :: String.t()
   def render(%Signal{} = signal, opts \\ []), do: build_file_content(signal, opts)
+
+  @doc """
+  The body of a written file: what follows its frontmatter (the title line and
+  the genre skeleton around the content), byte for byte. `:no_frontmatter` for a
+  text that does not start with the frontmatter this module writes.
+  """
+  @spec body_of_file(String.t()) :: {:ok, String.t()} | :no_frontmatter
+  def body_of_file("---\n" <> rest) do
+    case :binary.split(rest, "\n---\n\n") do
+      [_frontmatter, body] -> {:ok, body}
+      _ -> :no_frontmatter
+    end
+  end
+
+  def body_of_file(_text), do: :no_frontmatter
 
   @doc """
   The part of a written file after its frontmatter: the title line and the
@@ -196,11 +212,9 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   end
 
   defp write_to_folder(%Signal{} = signal, node_folder, opts) do
-    {signals_dir, filename, content} = target(signal, node_folder, opts)
-    path = Path.join(signals_dir, filename)
-
-    with :ok <- File.mkdir_p(signals_dir),
-         :ok <- File.write(path, content) do
+    with {:ok, {signals_dir, filename, content}} <- target(signal, node_folder, opts),
+         path = Path.join(signals_dir, filename),
+         :ok <- AtomicFile.write(path, content) do
       Logger.debug("[Writer] Wrote signal: #{path}")
       {:ok, path}
     end
@@ -220,16 +234,27 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
         _ -> {build_filename(signal), untitled?(signal)}
       end
 
-    name =
-      Address.resolve(
-        signal,
-        signals_dir,
-        base_name,
-        content,
-        Keyword.put(opts, :always_suffix, always_suffix)
-      )
+    with {:ok, name} <-
+           Address.resolve(
+             signal,
+             signals_dir,
+             base_name,
+             content,
+             Keyword.put(opts, :always_suffix, always_suffix)
+           ) do
+      {:ok, {signals_dir, name, content}}
+    end
+  end
 
-    {signals_dir, name, content}
+  defp target!(%Signal{} = signal, node_folder, opts) do
+    case target(signal, node_folder, opts) do
+      {:ok, result} ->
+        result
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "no free file name for signal #{inspect(signal.id)}: #{inspect(reason)}"
+    end
   end
 
   defp build_filename(%Signal{} = signal) do
