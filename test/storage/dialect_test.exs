@@ -91,6 +91,22 @@ defmodule OptimalEngine.Store.DialectTest do
                  "SELECT IFNULL(a, 0), json_valid(meta), CAST(n AS INTEGER), CAST(s AS REAL) FROM t"
                )
     end
+
+    test "a list bound as one JSON array parameter, and json_each anywhere else refused" do
+      assert {:ok,
+              "SELECT id FROM t WHERE a IN (SELECT value FROM jsonb_array_elements_text(CAST($2 AS text)::jsonb)) AND tenant_id = $1"} =
+               Dialect.to_postgres(
+                 "SELECT id FROM t WHERE a IN (SELECT value FROM json_each(?2)) AND tenant_id = ?1"
+               )
+
+      assert {:error, {:unsupported, "json_each"}} =
+               Dialect.to_postgres("SELECT key FROM t, json_each(t.meta)")
+
+      assert {:error, {:unsupported, "json_each"}} =
+               Dialect.to_postgres(
+                 "SELECT id FROM t WHERE a IN (SELECT value FROM json_each(t.meta))"
+               )
+    end
   end
 
   describe "ORDER BY" do

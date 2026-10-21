@@ -23,6 +23,7 @@ defmodule OptimalEngine.Store.Dialect do
   | `IFNULL(a, b)` | `COALESCE(a, b)` |
   | `CAST(x AS INTEGER)`, `CAST(x AS REAL)` | `CAST(x AS BIGINT)`, `CAST(x AS DOUBLE PRECISION)` |
   | `json_valid(col)` | `(col IS JSON)` |
+  | `x IN (SELECT value FROM json_each(?2))` | `x IN (SELECT value FROM jsonb_array_elements_text(CAST($2 AS text)::jsonb))` |
   | `ORDER BY a, b DESC` | `ORDER BY a NULLS FIRST, b DESC NULLS LAST` |
   | `PRAGMA defer_foreign_keys = ON` | `SET CONSTRAINTS ALL DEFERRED` |
   | `json_extract(col, '$.a.b')` | by context, below |
@@ -280,8 +281,29 @@ defmodule OptimalEngine.Store.Dialect do
   # ---------------------------------------------------------------------------
 
   defp rewrite_functions(sql) do
-    with {:ok, rewritten} <- replace_datetime(sql) do
-      replace_strftime(rewritten)
+    with {:ok, rewritten} <- replace_datetime(sql),
+         {:ok, rewritten} <- replace_strftime(rewritten) do
+      replace_json_each_list(rewritten)
+    end
+  end
+
+  # `x IN (SELECT value FROM json_each(?2))` binds a list of values as one JSON
+  # array parameter, so a list of any length is one statement. The parameter
+  # is bound as text and read as jsonb, and jsonb_array_elements_text gives each
+  # element as text, as SQLite gives the strings of an array of strings (the
+  # ids the engine binds this way). A parameter that is not an array fails on
+  # PostgreSQL instead of being walked as an object. json_each anywhere else is
+  # still refused.
+  defp replace_json_each_list(sql) do
+    with {:ok, masked, literals} <- masked_sql(sql) do
+      replaced =
+        Regex.replace(
+          ~r/\(\s*SELECT\s+value\s+FROM\s+json_each\s*\(\s*(\?\d*)\s*\)\s*\)/i,
+          masked,
+          "(SELECT value FROM jsonb_array_elements_text(CAST(\\1 AS text)::jsonb))"
+        )
+
+      {:ok, unmask(replaced, literals)}
     end
   end
 
