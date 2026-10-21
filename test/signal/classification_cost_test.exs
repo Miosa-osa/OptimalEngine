@@ -53,7 +53,12 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
       end_with_spaces: "end" <> spaces <> "!",
       selector_with_spaces: "a" <> spaces <> "(",
       css_declaration_with_spaces: "a:" <> spaces <> "x",
-      json_comment_openers: "[" <> String.duplicate("/*", div(n, 2))
+      json_comment_openers: "[" <> String.duplicate("/*", div(n, 2)),
+      if_with_spaces_then_colon: "if" <> spaces <> ":",
+      while_with_spaces_then_colon: "while" <> spaces <> ":",
+      with_with_spaces_then_colon: "with" <> spaces <> ":",
+      quotes_after_a_letter: "a" <> String.duplicate("'", n) <> "1",
+      timestamp_with_spaces: "[00:00]" <> spaces <> "x"
     ]
   end
 
@@ -88,6 +93,32 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
       {"ModeDetector.detect", &ModeDetector.detect/1},
       {"GenreDetector.detect", &GenreDetector.detect/1}
     ]
+  end
+
+  # The result of `fun` and the labels of the steps the time limit stopped.
+  defp timeouts(fun) do
+    id = {__MODULE__, make_ref()}
+    event = [:optimal_engine, :signal, :classification_timeout]
+    :ok = :telemetry.attach(id, event, &__MODULE__.send_timeout/4, self())
+
+    try do
+      result = fun.()
+      {result, collect_timeouts([])}
+    after
+      :telemetry.detach(id)
+    end
+  end
+
+  @doc false
+  def send_timeout(_event, _measurements, %{label: label}, test),
+    do: send(test, {:stopped, label})
+
+  defp collect_timeouts(labels) do
+    receive do
+      {:stopped, label} -> collect_timeouts([label | labels])
+    after
+      0 -> labels
+    end
   end
 
   defp within(ms, label, fun) do
@@ -169,6 +200,33 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
     signal = Intake.classify(text)
     assert signal.content == text
     assert String.valid?(signal.l1_description)
+  end
+
+  test "past the classification limit, a long text's entities come from its head" do
+    Application.put_env(:optimal_engine, :classification_timeout_ms, 1)
+    head = "Contoso asked for the rollout plan.\n\n"
+    filler = String.duplicate("The rollout continues as planned for the week. ", 20_000)
+    text = head <> filler <> "\nLater the Northwind account signed."
+    # 676 names the text never mentions, each starting like "planned", so no
+    # quick check rules one out: reading the whole body for them takes far
+    # longer than the 1 ms limit on any runner.
+    absent = for a <- ?a..?z, b <- ?a..?z, do: "Plannx" <> <<a, b>>
+    names = ["Contoso", "Northwind" | absent]
+
+    {signal, stopped} = timeouts(fn -> Intake.classify(text, known_entities: names) end)
+
+    assert "entity extraction" in stopped
+    assert "Contoso" in signal.entities
+    refute "Northwind" in signal.entities
+  end
+
+  test "a long text's entities come from its body, as a short text's do" do
+    frontmatter = "---\ntitle: Contoso review\n---\n"
+    body = "The rollout continues as planned for the week. "
+
+    for text <- [frontmatter <> body, frontmatter <> String.duplicate(body, 2_000)] do
+      refute "Contoso" in Intake.classify(text, known_entities: ["Contoso"]).entities
+    end
   end
 
   test "the classifier's entity extraction reads the whole text" do
