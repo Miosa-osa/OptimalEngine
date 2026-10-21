@@ -16,18 +16,20 @@ defmodule Mix.Tasks.Optimal.ConformanceTest do
         workspace_scope: ["*"]
       })
 
-    port = free_port()
+    # Port 0: the listener takes a free port itself, so none can be taken
+    # between choosing it and binding it.
+    ref = ref()
 
     start_supervised!(
       {Plug.Cowboy,
        scheme: :http,
        plug: OptimalEngine.API.Router,
-       options: [port: port, ip: {127, 0, 0, 1}, ref: ref()]}
+       options: [port: 0, ip: {127, 0, 0, 1}, ref: ref]}
     )
 
-    on_exit(fn -> :ranch.stop_listener(ref()) end)
+    on_exit(fn -> :ranch.stop_listener(ref) end)
 
-    {:ok, key: key, url: "http://127.0.0.1:#{port}"}
+    {:ok, key: key, url: "http://127.0.0.1:#{:ranch.get_port(ref)}"}
   end
 
   test "passes against a live Engine over HTTP", %{key: key, url: url} do
@@ -112,13 +114,4 @@ defmodule Mix.Tasks.Optimal.ConformanceTest do
   end
 
   defp ref, do: :"optimal_conformance_task_#{System.unique_integer([:positive])}"
-
-  # A free port on the loopback interface; the window between closing this
-  # socket and the listener binding is small and the tests are not parallel.
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
 end
