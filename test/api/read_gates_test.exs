@@ -529,10 +529,12 @@ defmodule OptimalEngine.API.ReadGatesTest do
         |> Enum.sort()
       end
 
-      both = Enum.sort(["pitch-#{ctx.n}", "offer-#{ctx.n}"])
+      # Every chunk of the signal counts: the page of the setup cites its other chunk.
+      open = Enum.sort(["docs-calendar-#{ctx.n}", "pitch-#{ctx.n}"])
+      both = Enum.sort(["offer-#{ctx.n}" | open])
 
-      assert slugs.(mint(ctx, %{})) == ["pitch-#{ctx.n}"]
-      assert slugs.(mint(ctx, @machine)) == ["pitch-#{ctx.n}"]
+      assert slugs.(mint(ctx, %{})) == open
+      assert slugs.(mint(ctx, @machine)) == open
       assert slugs.(mint(ctx, %{"allowed_security_labels" => ["restricted"]})) == both
       assert slugs.(nil) == both
     end

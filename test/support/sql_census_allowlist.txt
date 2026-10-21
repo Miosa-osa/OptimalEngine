@@ -473,5 +473,3 @@ unordered	SELECT id, tenant_id, workspace_id, request_id, request_intent, reques
 unordered	SELECT id, uri, title, genre, mode, signal_type, format, structure, node, sn_ratio, content, l0_abstract, l1_overview, modified_at, architecture_id FROM contexts WHERE id = ? AND workspace_id = ? AND tenant_id = ? LIMIT N
 unordered	SELECT id, uri, title, node, genre, signal_type, sn_ratio, modified_at, l0_abstract, l1_overview, content FROM contexts WHERE id = ? AND workspace_id = ? LIMIT N
 unordered	SELECT id, uri, title, node, genre, signal_type, sn_ratio, modified_at, l0_abstract, l1_overview, content FROM contexts WHERE uri = ? AND workspace_id = ? LIMIT N
-unordered	SELECT intent, confidence FROM intents WHERE chunk_id = ? LIMIT N
-unordered	SELECT mode, genre, signal_type, format, structure, sn_ratio, confidence FROM classifications WHERE chunk_id = ? LIMIT N

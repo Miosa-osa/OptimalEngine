@@ -35,17 +35,27 @@ defmodule OptimalEngine.ReadScope do
   alias OptimalEngine.Store
   alias OptimalEngine.Sync.{Gate, Lineage}
 
-  defstruct [:tenant_id, :principal, :ceiling, labels: [], partitions: [], acl_absent: :allow]
+  defstruct [
+    :tenant_id,
+    :principal,
+    :ceiling,
+    :gate,
+    labels: [],
+    partitions: [],
+    acl_absent: :allow
+  ]
 
   @typedoc """
   `ceiling` is the highest class rank the reader is shown (nil: no ceiling),
   for the routes that dump rows. It does not apply to a key granted `"*"` for
-  labels.
+  labels. `gate` is the gate `shared/3` opened for a request, which the filters
+  use instead of opening their own.
   """
   @type t :: %__MODULE__{
           tenant_id: String.t(),
           principal: String.t(),
           ceiling: SecurityLabels.rank() | nil,
+          gate: Gate.t() | nil,
           labels: [String.t()],
           partitions: [String.t()],
           acl_absent: :allow | :deny
@@ -62,13 +72,74 @@ defmodule OptimalEngine.ReadScope do
   @scan_batch 200
 
   @doc """
-  True when the reader's grants cut something: a keyed reader without `"*"` for
-  both labels and partitions. The operator (no scope) and a key granted `"*"`
-  see every row the grants could hide, so a page of theirs needs no refilling.
+  True when a list of the reader's has to be filled around what it may not see:
+  its grants cut something (`grants_cut?/1`), or its access lists can (the
+  tenant has any access list row, or a resource with none is denied). The
+  operator (no scope), and a key granted `"*"` in a tenant that has no access
+  list rows, see every row, so a page of theirs needs no refilling.
   """
   @spec filtering?(t() | nil) :: boolean()
   def filtering?(nil), do: false
-  def filtering?(%__MODULE__{} = scope), do: not unfiltered?(scope)
+
+  def filtering?(%__MODULE__{} = scope), do: grants_cut?(scope) or acl_cuts?(scope)
+
+  @doc """
+  True when the reader's label and partition grants cut something: a keyed
+  reader without `"*"` for both. What it may see is then a subset the Engine
+  cannot count without reading it, so a total it reports is only what it found.
+  """
+  @spec grants_cut?(t() | nil) :: boolean()
+  def grants_cut?(nil), do: false
+  def grants_cut?(%__MODULE__{} = scope), do: not unfiltered?(scope)
+
+  # An access list row on any resource can hide it from any principal, so a
+  # tenant that has none cannot cut. A Store that does not answer is taken to.
+  defp acl_cuts?(%__MODULE__{acl_absent: :deny}), do: true
+
+  defp acl_cuts?(%__MODULE__{tenant_id: tenant_id}) do
+    case Store.raw_query("SELECT 1 FROM acls WHERE tenant_id = ?1 LIMIT 1", [tenant_id]) do
+      {:ok, []} -> false
+      _ -> true
+    end
+  end
+
+  @doc """
+  Runs `fun` with `scope` carrying one gate for `workspace_id` that its filters
+  share, closed after. Without it each call of a filter opens a gate, and a gate
+  reads the workspace to build its index; a scan or a widening that filters a
+  batch at a time would read the workspace once per batch. The operator and a key
+  granted `"*"` have no gate to open.
+  """
+  @spec shared(t() | nil, String.t(), (t() | nil -> result)) :: result when result: var
+  def shared(nil, _workspace_id, fun), do: fun.(nil)
+
+  def shared(%__MODULE__{} = scope, workspace_id, fun) do
+    if unfiltered?(scope) do
+      fun.(scope)
+    else
+      gate = Gate.open_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling)
+
+      try do
+        fun.(%{scope | gate: gate})
+      after
+        Gate.close(gate)
+      end
+    end
+  end
+
+  # The gate for `workspace_id`: the one `shared/3` opened, when it is for that
+  # workspace and was opened with the ceiling this call wants, else a gate of its
+  # own for the call.
+  defp with_gate(
+         %__MODULE__{gate: %Gate{workspace_id: workspace_id} = gate, ceiling: ceiling},
+         workspace_id,
+         ceiling,
+         fun
+       ),
+       do: fun.(gate)
+
+  defp with_gate(scope, workspace_id, ceiling, fun),
+    do: Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), ceiling, fun)
 
   @doc """
   The first `need` items of a list the reader may see, for a list that is read
@@ -158,7 +229,7 @@ defmodule OptimalEngine.ReadScope do
       if unfiltered?(scope) do
         items
       else
-        Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling, fn gate ->
+        with_gate(scope, workspace_id, scope.ceiling, fn gate ->
           allowed = Gate.readable_ids(gate, table, Enum.map(items, id_of))
           Enum.filter(items, &MapSet.member?(allowed, id_of.(&1)))
         end)
@@ -235,7 +306,7 @@ defmodule OptimalEngine.ReadScope do
           items
           |> Enum.group_by(workspace_of)
           |> Enum.flat_map(fn {workspace_id, group} ->
-            Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), fn gate ->
+            with_gate(scope, workspace_id, nil, fn gate ->
               ids = Gate.readable_any_ids(gate, Enum.map(group, id_of))
               for item <- group, MapSet.member?(ids, id_of.(item)), do: item
             end)
@@ -267,7 +338,7 @@ defmodule OptimalEngine.ReadScope do
       if unfiltered?(scope) do
         items
       else
-        Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling, fn gate ->
+        with_gate(scope, workspace_id, scope.ceiling, fn gate ->
           Gate.prefetch_rows(gate, table, Enum.map(items, row_of))
           Enum.filter(items, &Gate.readable_row?(gate, table, row_of.(&1)))
         end)
@@ -313,7 +384,7 @@ defmodule OptimalEngine.ReadScope do
           })
         end)
       else
-        Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling, fn gate ->
+        with_gate(scope, workspace_id, scope.ceiling, fn gate ->
           Enum.map(visible, &redact_conflict(gate, &1))
         end)
       end
@@ -361,7 +432,7 @@ defmodule OptimalEngine.ReadScope do
 
     if unfiltered?(scope),
       do: run.(nil),
-      else: Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling, run)
+      else: with_gate(scope, workspace_id, scope.ceiling, run)
   end
 
   # What a change shows a reader: the row and its blobs, which are what was
