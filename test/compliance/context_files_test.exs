@@ -10,6 +10,7 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
 
   alias OptimalEngine.Compliance.{ContextFiles, DerivedData, Erasure, Retention}
   alias OptimalEngine.Identity.Principal
+  alias OptimalEngine.Pipeline.Decomposer.Chunk
   alias OptimalEngine.Store
 
   setup do
@@ -157,6 +158,75 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
         assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [id])
         refute File.exists?(file)
       end
+    end
+
+    test "removes the markdown file of a wiki page that cites the context, and no other", ctx do
+      file = signal!(ctx, "project-platform-launch", "cited.md")
+      id = context!(ctx, "cited", file)
+      chunk = "#{id}:chk-0"
+
+      :ok =
+        Store.insert_chunks([
+          Chunk.new(
+            id: chunk,
+            signal_id: id,
+            tenant_id: "default",
+            workspace_id: "default",
+            text: "text of cited"
+          )
+        ])
+
+      page = file!(ctx.root, ".wiki/page-#{ctx.n}.md")
+      unrelated = file!(ctx.root, ".wiki/unrelated-#{ctx.n}.md")
+
+      sql!("INSERT INTO wiki_pages (tenant_id, slug, body) VALUES ('default', ?1, 'body')", [
+        "page-#{ctx.n}"
+      ])
+
+      sql!(
+        "INSERT INTO citations (tenant_id, wiki_slug, chunk_id, claim_hash) VALUES ('default', ?1, ?2, 'h')",
+        ["page-#{ctx.n}", chunk]
+      )
+
+      assert {:ok, %{wiki_pages: 1}} = DerivedData.erase_contexts("default", [id])
+
+      refute File.exists?(page)
+      refute File.exists?(file)
+      assert File.exists?(unrelated)
+      assert count("wiki_pages", "slug", "page-#{ctx.n}") == 0
+    end
+
+    test "a wiki page's file is removed, not redacted, when its context is redacted", ctx do
+      file = signal!(ctx, "project-platform-launch", "redacted-cited.md")
+      id = context!(ctx, "redacted-cited", file)
+      chunk = "#{id}:chk-0"
+
+      :ok =
+        Store.insert_chunks([
+          Chunk.new(
+            id: chunk,
+            signal_id: id,
+            tenant_id: "default",
+            workspace_id: "default",
+            text: "t"
+          )
+        ])
+
+      page = file!(ctx.root, ".wiki/redacted-page-#{ctx.n}.md")
+
+      sql!("INSERT INTO wiki_pages (tenant_id, slug, body) VALUES ('default', ?1, 'body')", [
+        "redacted-page-#{ctx.n}"
+      ])
+
+      sql!(
+        "INSERT INTO citations (tenant_id, wiki_slug, chunk_id, claim_hash) VALUES ('default', ?1, ?2, 'h')",
+        ["redacted-page-#{ctx.n}", chunk]
+      )
+
+      assert {:ok, %{wiki_pages: 1}} = DerivedData.delete_derived([id])
+
+      refute File.exists?(page)
+      assert File.exists?(file)
     end
 
     test "the dry run counts the files and removes none", ctx do
@@ -345,6 +415,11 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       )
 
     id
+  end
+
+  defp sql!(sql, params) do
+    {:ok, _} = Store.raw_query(sql, params)
+    :ok
   end
 
   defp count(table, column, value) do

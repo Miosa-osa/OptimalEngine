@@ -71,7 +71,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
       with {:ok, plan} <- ContextFiles.plan(tenant_id, batch),
            batch = Enum.uniq(batch ++ plan.copy_ids),
            :ok <- remove_objects(tenant_id, batch),
-           {:ok, _removed} <- ContextFiles.remove(plan.files) do
+           {:ok, _removed} <- ContextFiles.remove(plan.files ++ plan.wiki_files) do
         Store.transaction(&erase_batch(&1, tenant_id, batch, true), @timeout)
       end
     end)
@@ -86,7 +86,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
     in_batches(context_ids, fn batch ->
       files =
         case ContextFiles.plan(tenant_id, batch) do
-          {:ok, plan} -> length(plan.files)
+          {:ok, plan} -> length(plan.files) + length(plan.wiki_files)
           {:error, _} -> 0
         end
 
@@ -119,7 +119,8 @@ defmodule OptimalEngine.Compliance.DerivedData do
 
     with {:ok, plan} <- ContextFiles.plan(nil, ids, copies: false),
          :ok <- remove_objects(nil, ids),
-         {:ok, _redacted} <- ContextFiles.redact(plan.files) do
+         {:ok, _redacted} <- ContextFiles.redact(plan.files),
+         {:ok, _removed} <- ContextFiles.remove(plan.wiki_files) do
       Store.transaction(&delete_in(&1, ids, true), @timeout)
     end
   end
