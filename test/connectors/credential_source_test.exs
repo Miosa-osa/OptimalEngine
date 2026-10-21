@@ -10,7 +10,7 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Connectors
-  alias OptimalEngine.Connectors.{AccessToken, CredentialSource, Runner}
+  alias OptimalEngine.Connectors.{AccessToken, CredentialSource, Registry, Runner}
   alias OptimalEngine.Store
   alias OptimalEngine.Test.{BrokerStub, ConnectorFixtureStub}
 
@@ -215,6 +215,144 @@ defmodule OptimalEngine.Connectors.CredentialSourceTest do
       assert call.headers == []
       assert call.timeout == 30_000
       assert call.follow_redirects == false
+    end
+  end
+
+  describe "where the broker's secret lands" do
+    alias OptimalEngine.Connectors.Adapters.{
+      Beehiiv,
+      Confluence,
+      Fathom,
+      GitHub,
+      GoHighLevel,
+      Gmail,
+      Jira,
+      JotForm,
+      Linear,
+      Notion,
+      Slack,
+      Stripe
+    }
+
+    defp hydrate_for(adapter, body) do
+      stub = BrokerStub.install(nil, issue: [{:body, body}])
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      scope = %{id: "c-1", kind: "x", tenant_id: "default", workspace_id: "hq", adapter: adapter}
+      CredentialSource.hydrate(@broker_config, scope)
+    end
+
+    @access_token %{
+      "credentials" => %{"access_token" => "example-secret", "expires_at" => "2999-01-01T00:00:00Z"}
+    }
+    @api_key %{
+      "credentials" => %{"api_key" => "example-secret", "expires_at" => "2999-01-01T00:00:00Z"}
+    }
+
+    test "an access token stays renewable under access_token for an adapter that calls through AccessToken" do
+      for adapter <- [Gmail, Notion, Slack] do
+        assert {:ok, config} = hydrate_for(adapter, @access_token)
+        assert %AccessToken{source: :broker} = config["credentials"]["access_token"]
+        assert Map.keys(config["credentials"]) == ["access_token"]
+      end
+    end
+
+    test "an access token becomes the key of an adapter that does not call through AccessToken" do
+      for {adapter, key} <- [
+            {Stripe, "api_key"},
+            {Fathom, "api_key"},
+            {Linear, "api_key"},
+            {JotForm, "api_key"},
+            {Beehiiv, "api_key"},
+            {GitHub, "pat"},
+            {GoHighLevel, "api_token"},
+            {Jira, "api_token"},
+            {Confluence, "api_token"}
+          ] do
+        assert {:ok, config} = hydrate_for(adapter, @access_token)
+        assert config["credentials"] == %{key => "example-secret"}
+      end
+    end
+
+    test "an API key becomes the key of an adapter whose own is not api_key" do
+      for {adapter, key} <- [
+            {Notion, "integration_token"},
+            {Slack, "bot_token"},
+            {GitHub, "pat"},
+            {GoHighLevel, "api_token"},
+            {Jira, "api_token"}
+          ] do
+        assert {:ok, config} = hydrate_for(adapter, @api_key)
+        assert config["credentials"] == %{key => "example-secret"}
+      end
+    end
+
+    test "an API key stays api_key for an adapter that reads api_key" do
+      for adapter <- [Stripe, Fathom, Linear, JotForm, Beehiiv, nil] do
+        assert {:ok, config} = hydrate_for(adapter, @api_key)
+        assert config["credentials"] == %{"api_key" => "example-secret"}
+      end
+    end
+
+    test "a key the broker names itself is passed on and wins" do
+      body = %{"credentials" => %{"bot_token" => "example-own", "api_key" => "example-secret"}}
+
+      assert {:ok, config} = hydrate_for(Slack, body)
+      assert config["credentials"] == %{"bot_token" => "example-own"}
+    end
+
+    test "expires_at beside credentials is read, and is not handed to the adapter" do
+      body = %{
+        "credentials" => %{"access_token" => "example-secret"},
+        "expires_at" => "2999-01-01T00:00:00Z"
+      }
+
+      assert {:ok, config} = hydrate_for(Gmail, body)
+
+      assert %AccessToken{expires_at: ~U[2999-01-01 00:00:00Z]} =
+               config["credentials"]["access_token"]
+
+      assert Map.keys(config["credentials"]) == ["access_token"]
+
+      assert {:ok, config} =
+               hydrate_for(Stripe, %{
+                 "credentials" => %{"api_key" => "k"},
+                 "expires_at" => "2999-01-01T00:00:00Z"
+               })
+
+      assert config["credentials"] == %{"api_key" => "k"}
+    end
+
+    test "every adapter says where its secret lives" do
+      oauth = ~w(drive dropbox gmail hubspot notion onedrive salesforce slack teams zoom)a
+
+      for mod <- Registry.all() do
+        kind = mod.kind()
+
+        assert mod.broker_access_token?() == kind in oauth,
+               "#{kind}: calls through AccessToken exactly when it is one of #{inspect(oauth)}"
+
+        assert mod.broker_access_token?() or mod.broker_token_key() != nil or
+                 kind == :sources_folder,
+               "#{kind} names neither an access token nor a key for the broker's secret"
+      end
+    end
+
+    test "each adapter initialises on what it is given" do
+      for {adapter, config} <- [
+            {Stripe, %{"resources" => ["charges"]}},
+            {GitHub, %{"org_or_user" => "example", "repos" => ["one"]}},
+            {Notion, %{"workspace_name" => "Example", "database_ids" => []}},
+            {Slack, %{"workspace_id" => "T0EXAMPLE1", "channels" => []}}
+          ] do
+        {:ok, hydrated} = hydrate_for(adapter, @api_key)
+        assert {:ok, _state} = adapter.init(Map.merge(hydrated, config))
+      end
+
+      {:ok, hydrated} = hydrate_for(GitHub, @access_token)
+
+      assert {:ok, _state} =
+               GitHub.init(Map.merge(hydrated, %{"org_or_user" => "example", "repos" => ["one"]}))
     end
   end
 

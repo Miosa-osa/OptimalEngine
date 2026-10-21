@@ -48,7 +48,8 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
     auth_scheme: :oauth2,
     required_keys: [:workspace_id, :channels],
     credential_keys: [:bot_token],
-    access_token: true
+    access_token: true,
+    token_key: :bot_token
 
   require Logger
 

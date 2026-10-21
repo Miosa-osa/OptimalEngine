@@ -18,7 +18,8 @@ defmodule OptimalEngine.Connectors.Adapters.GitHub do
     display_name: "GitHub",
     auth_scheme: :token,
     required_keys: [:org_or_user, :repos],
-    credential_keys: []
+    credential_keys: [],
+    token_key: :pat
 
   alias OptimalEngine.Connectors.HTTP
 

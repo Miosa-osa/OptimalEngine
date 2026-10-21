@@ -95,8 +95,8 @@ A connector on the broker names the broker and its reference to the connection, 
 {
   "user_email": "ops@example.com",
   "credential_source": "broker",
-  "broker_url": "https://connect.example.com/api/credentials",
-  "broker_reference": "conn_0000000000",
+  "broker_url": "https://api.miosa.ai/api/v1/connect/broker/credentials",
+  "broker_reference": "conn_0000000000.<hmac>",
   "broker_scopes": ["mail.read"],
   "broker_timeout_ms": 5000
 }
@@ -114,8 +114,8 @@ At the start of each sync the Engine `POST`s to `broker_url`:
 
 ```json
 {
-  "reference": "conn_0000000000",
-  "connector": {"id": "gmail-ops", "kind": "gmail"},
+  "reference": "conn_0000000000.<hmac>",
+  "connector": {"id": "miosa:conn_0000000000:gmail", "kind": "gmail"},
   "tenant_id": "default",
   "workspace_id": "default:ops",
   "scopes": ["mail.read"]
@@ -123,12 +123,14 @@ At the start of each sync the Engine `POST`s to `broker_url`:
 ```
 
 `reference` is the configured `broker_reference`, sent verbatim.
-MIOSA Connect issues it as `<connection_id>.<hmac>`, and that signature is what the broker authenticates the call by; the Engine never parses it.
+MIOSA Connect issues it as `<connection_id>.<base64url hmac>`, and that signature is what the broker authenticates the call by; the Engine never parses it.
+`connector.id` is the connector's own id, and `workspace_id` is the connector's own workspace, never one its signals are routed to: the signature covers the workspace, so any other value is answered with a `401`.
 The Engine sends no secret and no header of its own beyond `accept` and `content-type`, and never holds the platform's internal secret.
 The call does not follow redirects and gives up after `broker_timeout_ms`.
 The route is whatever `broker_url` names, per connector, so a broker can move its route without an Engine change.
 
 `broker_url` must be `https`, carry no user or password, and name a host listed in `OPTIMAL_CREDENTIAL_BROKER_HOSTS` (comma-separated; `config :optimal_engine, :credential_broker_hosts` in code).
+A managed Engine on MIOSA sets it to `api.miosa.ai`, and the MIOSA platform puts `https://api.miosa.ai/api/v1/connect/broker/credentials` in each connector's `broker_url` when it registers the connector.
 With no hosts listed, no broker is called and the run fails with `broker_url_not_allowed`, so a connector config can never point the Engine at an address of its choosing.
 A URL outside the list is also refused when the connector is registered or changed.
 
@@ -140,7 +142,7 @@ An OAuth connection (Gmail, Drive, Notion, Slack and the other OAuth adapters) i
 {"credentials": {"access_token": "...", "expires_at": "2026-10-18T12:05:00Z"}}
 ```
 
-The same fields at the top level are accepted as a fallback, and `"expires_in"` (seconds) is read when `"expires_at"` is absent.
+`expires_at` may also sit beside `credentials` instead of inside it, the same fields at the top level are accepted as a fallback, and `"expires_in"` (seconds) is read when `"expires_at"` is absent.
 The adapter calls its API with that token through `OptimalEngine.Connectors.AccessToken`, the one helper every OAuth adapter shares:
 
 - **Early renewal.**
@@ -151,11 +153,24 @@ The adapter calls its API with that token through `OptimalEngine.Connectors.Acce
   A second refusal anywhere in the same sync fails the run with `broker_token_rejected`, and a broker that cannot answer the re-fetch fails it with `broker_unreachable`, `broker_unauthorized` or `broker_refused`.
   After a failure the sync makes no further calls, the run is recorded as failed, the cursor stays where it was, and the connector stays enabled for its next run.
 
-Any other connection is answered with its credential map, which the adapter receives exactly as if it had been decrypted from the Engine's store:
+A stored API key is answered the same way, and the credential map reaches the adapter exactly as if it had been decrypted from the Engine's store:
 
 ```json
 {"credentials": {"api_key": "..."}, "expires_at": "2026-10-18T12:05:00Z"}
 ```
+
+Each adapter has one key its secret lives under, and the broker's secret is put there:
+
+| Adapter | Access token from the broker | API key from the broker |
+| --- | --- | --- |
+| Gmail, Drive, Dropbox, OneDrive, Salesforce, Teams, Zoom, HubSpot | `access_token`, renewable | kept as sent |
+| Notion | `access_token`, renewable | `integration_token` |
+| Slack | `access_token`, renewable | `bot_token` |
+| Stripe, Fathom, Linear, JotForm, beehiiv | `api_key` | `api_key` |
+| GitHub | `pat` | `pat` |
+| GoHighLevel, Jira, Confluence | `api_token` | `api_token` |
+
+A key the broker names itself (for example `bot_token`) is passed on as it is and wins.
 
 Fetched tokens and credentials are held in memory for one sync cycle: they are never written to the connectors table, a run record, the evidence chain, a log, or an error message, and `inspect/1` of a token shows only where it came from and when it expires.
 
@@ -251,10 +266,11 @@ Over HTTP:
 curl http://localhost:4200/api/connectors \
   -H "Authorization: Bearer $OPTIMAL_ENGINE_KEY" \
   -H 'Content-Type: application/json' \
-  --data '{"id":"gmail-ops","kind":"gmail","workspace":"default:ops",
+  --data '{"id":"miosa:conn_0000000000:gmail","kind":"gmail","workspace":"default:ops",
            "config":{"user_email":"ops@example.com","credential_source":"broker",
-                     "broker_url":"https://connect.example.com/api/credentials",
-                     "broker_reference":"conn_0000000000"}}'
+                     "broker_url":"https://api.miosa.ai/api/v1/connect/broker/credentials",
+                     "broker_reference":"conn_0000000000.<hmac>",
+                     "broker_scopes":["gmail.readonly"],"interval_ms":900000}}'
 ```
 
 Credentials are write-only.
