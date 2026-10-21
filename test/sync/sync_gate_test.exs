@@ -19,6 +19,7 @@ defmodule OptimalEngine.SyncGateTest do
     AssociativeProjection,
     DerivationLedgerEntry,
     ScopeEnvelope,
+    SecurityLabels,
     SourcePackage
   }
 
@@ -1554,19 +1555,66 @@ defmodule OptimalEngine.SyncGateTest do
       ]
 
       for {name, {metadata, expected}} <- cases do
-        ws = create_workspace(ctx.tenant, "rk-" <> String.replace("#{name}", "_", "-"), %{})
+        actual = aggregate_after_memory(ctx, "rk-#{name}", metadata)
+        assert actual == expected, "#{name}: the aggregate was #{actual}, not #{expected}"
+      end
+    end
 
-        {:ok, memory} =
-          Versioned.create(%{content: "Note #{name}", workspace_id: ws, tenant_id: ctx.tenant})
+    test "an aggregate is held around a memory whose labels cannot be read", ctx do
+      cases = [
+        number: {~s({"security_labels":5}), :held},
+        object: {~s({"security_labels":{"a":1}}), :held},
+        boolean: {~s({"security_labels":true}), :held},
+        plain_text: {~s({"security_labels":"internal"}), :held},
+        number_element: {~s({"security_labels":[1]}), :held},
+        null_element: {~s({"security_labels":[null]}), :held},
+        object_element: {~s({"security_labels":[{"a":1}]}), :held},
+        blank_element: {~s({"security_labels":[""]}), :held},
+        space_element: {~s({"security_labels":["   "]}), :held},
+        open_and_number: {~s({"security_labels":["public",5]}), :held},
+        array_as_text: {~s({"security_labels":"[\\"restricted\\"]"}), :held},
+        text_not_json: {~s({"security_labels":"[oops"}), :held},
+        padded_class: {~s({"security_labels":[" Restricted "]}), :held},
+        # Controls: labels that can be read, and say nothing above the gate.
+        absent: {~s({"note":"a"}), :sent},
+        null: {~s({"security_labels":null}), :sent},
+        empty: {~s({"security_labels":[]}), :sent},
+        empty_text: {~s({"security_labels":""}), :sent},
+        empty_array_text: {~s({"security_labels":"[]"}), :sent},
+        open_array_text: {~s({"security_labels":"[\\"public\\"]"}), :sent},
+        other_label: {~s({"security_labels":["team-a","public"]}), :sent}
+      ]
 
-        {:ok, _} =
-          Store.raw_query("UPDATE memories SET metadata = ?2 WHERE id = ?1", [memory.id, metadata])
+      for {name, {metadata, expected}} <- cases do
+        actual = aggregate_after_memory(ctx, "ul-#{name}", metadata)
+        assert actual == expected, "#{name}: the aggregate was #{actual}, not #{expected}"
+      end
+    end
 
-        report(%{ctx | ws: ws}, "rep-rk-#{name}-#{ctx.n}")
+    test "an aggregate is held around an asset whose labels cannot be read", ctx do
+      cases = [
+        number_element: {"[5]", :held},
+        null_element: {"[null]", :held},
+        blank_element: {~s([""]), :held},
+        padded_class: {~s([" restricted\u00a0"]), :held},
+        not_json: {"oops", :held},
+        text: {~s("restricted"), :held},
+        object: {"{}", :held},
+        # Controls.
+        empty: {"[]", :sent},
+        other_label: {~s(["team-a"]), :sent},
+        internal: {~s(["internal"]), :sent}
+      ]
+
+      for {name, {labels, expected}} <- cases do
+        ws = create_workspace(ctx.tenant, "ua-" <> String.replace("#{name}", "_", "-"), %{})
+        scoped = %{ctx | ws: ws}
+        asset(scoped, "asset-ua-#{name}-#{ctx.n}", labels)
+        report(scoped, "rep-ua-#{name}-#{ctx.n}")
         pulled = Sync.changes(ctx.tenant, ws, limit: 2_000)
 
         actual =
-          if sent?(pulled["mutations"], "analysis_reports", "rep-rk-#{name}-#{ctx.n}"),
+          if sent?(pulled["mutations"], "analysis_reports", "rep-ua-#{name}-#{ctx.n}"),
             do: :sent,
             else: :held
 
@@ -2535,6 +2583,94 @@ defmodule OptimalEngine.SyncGateTest do
           do: assert(may?.(:class, "classification_level", value), inspect(value))
     end
 
+    test "the SQL predicates hold what the Elixir tokens rank above the gate, and no less" do
+      values = [
+        [],
+        ["restricted"],
+        ["Restricted"],
+        [" restricted "],
+        ["\trestricted\n"],
+        ["restricted\u00a0"],
+        ["\u2003internal"],
+        ["public"],
+        ["internal"],
+        ["INTERNAL"],
+        ["confidential"],
+        ["team-a"],
+        ["restricted-x"],
+        ["public", "team-a"],
+        ["internal", 5],
+        [1],
+        [nil],
+        [true],
+        [%{"a" => 1}],
+        [["restricted"]],
+        [""],
+        ["  "],
+        "restricted",
+        "internal",
+        "",
+        " ",
+        "[]",
+        "null",
+        ~s(["restricted"]),
+        ~s(["public"]),
+        "[oops",
+        5,
+        nil,
+        true,
+        %{},
+        %{"a" => 1}
+      ]
+
+      held = fn pred, column, text ->
+        {:ok, [[result]]} =
+          Store.raw_query("SELECT #{pred} FROM (SELECT ?1 AS \"#{column}\")", [text])
+
+        result == 1
+      end
+
+      above? = fn tokens, rank ->
+        case SecurityLabels.token_rank(MapSet.new(tokens)) do
+          nil -> false
+          ranked -> ranked > rank
+        end
+      end
+
+      for rank <- 0..2, value <- values do
+        labels = Jason.encode!(value)
+        pred = Gate.exact_predicate({:labels, "security_labels"}, rank)
+
+        assert held.(pred, "security_labels", labels) ==
+                 above?.(SecurityLabels.tokens(labels), rank),
+               "labels #{labels} at rank #{rank}"
+
+        metadata = Jason.encode!(%{"security_labels" => value})
+        pred = Gate.exact_predicate({:meta, "metadata"}, rank)
+
+        assert held.(pred, "metadata", metadata) ==
+                 above?.(SecurityLabels.metadata_tokens(metadata), rank),
+               "metadata #{metadata} at rank #{rank}"
+      end
+
+      # Text that is not JSON, and a repeated key.
+      for rank <- 0..2 do
+        labels = Gate.exact_predicate({:labels, "security_labels"}, rank)
+        meta = Gate.exact_predicate({:meta, "metadata"}, rank)
+
+        assert held.(labels, "security_labels", "not json")
+        assert held.(meta, "metadata", ~s({"security_labels":["public"],"security_labels":[]}))
+        refute held.(meta, "metadata", "not json")
+        refute held.(meta, "metadata", ~s({"note":"a"}))
+        refute held.(meta, "metadata", ~s(["security_labels"]))
+      end
+
+      # A label column that is empty or NULL names nothing for Elixir and is held
+      # here (the column defaults to an empty array, so neither is written).
+      assert held.(Gate.exact_predicate({:labels, "security_labels"}, 1), "security_labels", nil)
+      assert held.(Gate.exact_predicate({:labels, "security_labels"}, 1), "security_labels", "")
+    end
+
     test "installing again does no DDL" do
       assert {:ok, _} = Capture.install()
       {:ok, [[before]]} = Store.raw_query("PRAGMA schema_version", [])
@@ -3092,6 +3228,26 @@ defmodule OptimalEngine.SyncGateTest do
         "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, security_labels) VALUES (?1, ?2, ?3, ?4, ?5)",
         [id, ctx.tenant, ctx.ws, text, Jason.encode!(labels)]
       )
+  end
+
+  # A workspace of its own with a memory whose metadata is the text `metadata` and
+  # an aggregate, pulled at the default class: whether the aggregate was sent or
+  # held at home.
+  defp aggregate_after_memory(ctx, name, metadata) do
+    ws = create_workspace(ctx.tenant, String.replace(name, "_", "-"), %{})
+
+    {:ok, memory} =
+      Versioned.create(%{content: "Note #{name}", workspace_id: ws, tenant_id: ctx.tenant})
+
+    {:ok, _} =
+      Store.raw_query("UPDATE memories SET metadata = ?2 WHERE id = ?1", [memory.id, metadata])
+
+    report(%{ctx | ws: ws}, "rep-#{name}-#{ctx.n}")
+    pulled = Sync.changes(ctx.tenant, ws, limit: 2_000)
+
+    if sent?(pulled["mutations"], "analysis_reports", "rep-#{name}-#{ctx.n}"),
+      do: :sent,
+      else: :held
   end
 
   # `count` more versions of the fact `id`, copies of its newest in the ledger,
