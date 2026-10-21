@@ -17,6 +17,12 @@ defmodule OptimalEngine.Tenancy.Tenant do
 
   @default_id "default"
 
+  # What a tenant id is: it prefixes the ids of the tenant's workspaces
+  # (`<tenant_id>:<slug>`) and names a directory (`<root>/tenants/<tenant_id>`),
+  # so it holds no colon or slash, starts with a letter or digit, and is no
+  # relative path segment.
+  @id_format ~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
+
   @type t :: %__MODULE__{
           id: String.t(),
           name: String.t(),
@@ -63,25 +69,47 @@ defmodule OptimalEngine.Tenancy.Tenant do
     end
   end
 
-  @doc "Creates a new tenant. Returns `{:ok, tenant}` or `{:error, reason}`."
+  @doc """
+  Checks a tenant id: letters, digits, dots, dashes and underscores, starting
+  with a letter or digit, at most 128 characters and no `..`
+  (`{:error, :invalid_tenant_id}` otherwise). A tenant whose id holds a colon
+  would have no workspace ids, because the id of a workspace is the tenant's id,
+  a colon and a slug.
+  """
+  @spec check_id(term()) :: :ok | {:error, :invalid_tenant_id}
+  def check_id(id) when is_binary(id) do
+    if Regex.match?(@id_format, id) and not String.contains?(id, ".."),
+      do: :ok,
+      else: {:error, :invalid_tenant_id}
+  end
+
+  def check_id(_id), do: {:error, :invalid_tenant_id}
+
+  @doc """
+  Creates a new tenant. Returns `{:ok, tenant}` or `{:error, reason}`
+  (`:invalid_tenant_id` for an id `check_id/1` refuses). A tenant row from
+  before ids were checked keeps working.
+  """
   @spec create(map()) :: {:ok, t()} | {:error, term()}
   def create(%{id: id, name: name} = attrs) when is_binary(id) and is_binary(name) do
     plan = Map.get(attrs, :plan, "default")
     region = Map.get(attrs, :region)
     metadata = Map.get(attrs, :metadata, %{})
 
-    case Store.raw_query(
-           """
-           INSERT INTO tenants (id, name, plan, region, metadata)
-           VALUES (?1, ?2, ?3, ?4, ?5)
-           """,
-           [id, name, plan, region, Jason.encode!(metadata)]
-         ) do
-      {:ok, _} ->
-        {:ok, %__MODULE__{id: id, name: name, plan: plan, region: region, metadata: metadata}}
+    with :ok <- check_id(id) do
+      case Store.raw_query(
+             """
+             INSERT INTO tenants (id, name, plan, region, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             """,
+             [id, name, plan, region, Jason.encode!(metadata)]
+           ) do
+        {:ok, _} ->
+          {:ok, %__MODULE__{id: id, name: name, plan: plan, region: region, metadata: metadata}}
 
-      other ->
-        other
+        other ->
+          other
+      end
     end
   end
 

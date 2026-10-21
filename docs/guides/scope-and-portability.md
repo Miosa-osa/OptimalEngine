@@ -49,8 +49,10 @@ Nothing is copied: a workspace Engine's data is only queried.
 
 A workspace id is `default` (the default tenant's default workspace, which lives in the Engine root), or `<tenant_id>:<suffix>` where the suffix is a slug (`Workspace.check_slug/1`: lowercase letters, digits and dashes, not the name of a directory of the root).
 The prefix is the workspace's own tenant: a tenant cannot take `default:foo` or another tenant's name, and `default:default`, which would map to the root, is not an id.
-The id decides the directory the workspace owns (`default:foo` is `<root>/foo`, `acme:foo` is `<root>/tenants/acme/foo`), which is why every place an id enters checks it: `Workspace.create/1` (`invalid_workspace_id`), a workspace entry of a topology document (an id that is not the importing tenant's is ignored and the workspace takes the id its slug derives), and a workspace bundle.
-A tenant whose id holds a colon has no prefix, so `Workspace.create/1` refuses to give its workspaces an id.
+The id decides the directory the workspace owns (`default:foo` is `<root>/foo`, `acme:foo` is `<root>/tenants/acme/foo`), which is why the places that make or take an id check it: `Workspace.create/1` (`invalid_workspace_id`; `POST /api/workspaces` answers 400), a rename (`DataSteward.rename_workspace/3`), a workspace entry of a topology document (an id that is not the importing tenant's is ignored and the workspace takes the id its slug derives), and a workspace bundle.
+A tenant id is letters, digits, dots, dashes and underscores, starts with a letter or digit, is at most 128 characters and holds no `..` (`Tenant.create/1` answers `invalid_tenant_id` otherwise), because it is the prefix of its workspaces' ids and names a directory.
+A tenant row from before this check whose id holds a colon has no prefix, so `Workspace.create/1` refuses to give its workspaces an id.
+An id that names no workspace is not checked as a whole, but the API refuses one whose directory is not its own (a bare `tenants`, `nodes`, `cache`, `assets` or `architectures`, or `default:tenants`) with 400 `invalid workspace`, since ingest and asset storage would write into the root's own directories under it.
 A workspace row from before this check keeps working, but when its directory holds more than the workspace (the root, a directory the root uses, a hidden one) its bundle carries no files, and nothing is written into that directory.
 
 ## Renaming a workspace
