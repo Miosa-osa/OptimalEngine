@@ -157,12 +157,11 @@ defmodule OptimalEngine.Storage.Postgres do
       %{
         feature: "runtime_schema_and_transactions",
         reason:
-          "the schema comes from the migrations and transactions from the store, so a " <>
-            "schema change, a transaction statement sent as a statement, and SQLite-only " <>
-            "table options are refused",
+          "the schema comes from the migrations, so a schema change and SQLite-only " <>
+            "table options are refused; a transaction statement sent as a statement " <>
+            "raises on both stores",
         refused_as: [
           "schema change outside the migrations",
-          "transaction statement outside the store's transaction",
           "AUTOINCREMENT",
           "WITHOUT ROWID"
         ]
