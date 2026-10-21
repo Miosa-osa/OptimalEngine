@@ -220,7 +220,7 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     conn = get_export(ctx.tenant, "after=40&until=100&format=ndjson")
     assert conn.status == 200
     assert ["application/x-ndjson" <> _] = get_resp_header(conn, "content-type")
-    assert from_ndjson(conn.resp_body) == last
+    assert from_ndjson(conn.resp_body) == ndjson_fields(last)
 
     assert get_export(ctx.tenant, "format=xml").status == 400
   end
@@ -345,7 +345,12 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
       out
     ])
 
-    assert out |> File.read!() |> from_ndjson() == pinned
+    streamed = out |> File.read!() |> from_ndjson()
+    assert streamed == ndjson_fields(pinned)
+
+    # A verifier knows the tenant and reads the keys by kid; with them the stream verifies.
+    keyed = Map.merge(streamed, %{"tenant_id" => ctx.tenant, "keys" => Keys.jwks(ctx.tenant)})
+    assert {:ok, %{entries: 10_001}} = Evidence.verify_export(keyed)
     expected = "Wrote #{total} entries to #{out}"
     assert_received {:mix_shell, :info, [^expected]}
   end
@@ -385,13 +390,21 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     end
   end
 
-  # An NDJSON export read back: the entries, and the fields of its export_end line.
+  # An NDJSON export read back: its entries, and the fields of its export_end line.
   defp from_ndjson(text) do
     lines = text |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
     {entries, [ending]} = Enum.split(lines, -1)
+    assert Enum.all?(entries, &(&1["type"] == "entry"))
     assert ending["type"] == "export_end"
+    assert Enum.sort(Map.keys(ending)) == ~w(complete head head_signature next_after total type)
+
+    entries = Enum.map(entries, &Map.delete(&1, "type"))
     ending |> Map.delete("type") |> Map.put("entries", entries)
   end
+
+  # What an NDJSON export carries of a JSON page.
+  defp ndjson_fields(page),
+    do: Map.take(page, ~w(entries head head_signature total complete next_after))
 
   # Pages joined into one bundle, as a verifier would: every entry, the last page's rest.
   defp join(pages), do: Map.put(List.last(pages), "entries", Enum.flat_map(pages, & &1["entries"]))

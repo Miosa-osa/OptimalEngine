@@ -390,19 +390,38 @@ defmodule OptimalEngine.Authority.Evidence do
   end
 
   @doc """
-  A page as NDJSON: each entry on its own line, unchanged, then one `export_end` line
-  with `"type" => "export_end"` and the page's other fields (`head`, `head_signature`,
-  `total`, `complete`, `next_after`, `keys`, `checkpoints`, `tenant_id`).
+  A page as NDJSON: one line per entry (`ndjson_entry/1`), then one `export_end` line
+  (`ndjson_end/1`). There are no key or checkpoint lines: a verifier reads the
+  evidence keys by `kid` from `GET /api/authority/keys`.
   """
   @spec to_ndjson(map()) :: iodata()
-  def to_ndjson(%{"entries" => entries} = page) do
-    [Enum.map(entries, &[Jason.encode_to_iodata!(&1), ?\n]), export_end(page), ?\n]
-  end
+  def to_ndjson(%{"entries" => entries} = page),
+    do: [Enum.map(entries, &ndjson_entry/1), ndjson_end(page)]
 
-  @doc "The `export_end` line of an NDJSON export of `page`, without its newline."
-  @spec export_end(map()) :: iodata()
-  def export_end(page) do
-    page |> Map.delete("entries") |> Map.put("type", "export_end") |> Jason.encode_to_iodata!()
+  @doc """
+  An entry's NDJSON line, with its newline: the entry object as `export/2` returns it,
+  with `"type": "entry"` added.
+  """
+  @spec ndjson_entry(map()) :: iodata()
+  def ndjson_entry(entry), do: [entry |> Map.put("type", "entry") |> Jason.encode_to_iodata!(), ?\n]
+
+  @doc """
+  The `export_end` line of an NDJSON export of `page`, with its newline:
+  `{"type":"export_end","head":...,"head_signature":...,"total":N,"complete":...,"next_after":...}`.
+  """
+  @spec ndjson_end(map()) :: iodata()
+  def ndjson_end(page) do
+    line =
+      Jason.OrderedObject.new([
+        {"type", "export_end"},
+        {"head", page["head"]},
+        {"head_signature", page["head_signature"]},
+        {"total", page["total"]},
+        {"complete", page["complete"]},
+        {"next_after", page["next_after"]}
+      ])
+
+    [Jason.encode_to_iodata!(line), ?\n]
   end
 
   @doc """
