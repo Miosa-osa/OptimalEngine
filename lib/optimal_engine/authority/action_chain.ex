@@ -176,7 +176,10 @@ defmodule OptimalEngine.Authority.ActionChain do
   The Engine's own steps (native, read from the evidence chain) are capped at
   #{@native_cap}, the oldest first, since a grant admitted many times can link
   far more: `truncated` says whether some were left out, and `total` counts
-  every step, reported and native.
+  every step, reported and native. Stage coverage, `complete` and the stage
+  findings are judged over every linked entry, listed or not; `verified` is true
+  only when every step was listed and verified, so a truncated trace is never
+  `verified`, and a finding says how many were left out.
 
   With `workspace_id:`, a chain of another workspace is `{:error, :not_found}`,
   known before any step is verified.
@@ -190,7 +193,7 @@ defmodule OptimalEngine.Authority.ActionChain do
       end
 
     linked = linked_ids(steps, id)
-    {native, native_total} = native_entries(tenant_id, linked)
+    {native, native_total, native_kinds} = native_entries(tenant_id, linked)
     rekeys = WorkspaceRekeys.list(tenant_id)
     workspace_id = chain_workspace(steps, native, rekeys)
 
@@ -198,6 +201,7 @@ defmodule OptimalEngine.Authority.ActionChain do
       steps: steps,
       native: native,
       native_total: native_total,
+      native_kinds: native_kinds,
       rekeys: rekeys,
       workspace_id: workspace_id
     }
@@ -228,6 +232,7 @@ defmodule OptimalEngine.Authority.ActionChain do
 
   defp verified_trace(tenant_id, id, chain) do
     %{steps: steps, native: native, native_total: native_total, rekeys: rekeys} = chain
+    truncated = native_total > length(native)
     step_entries = step_evidence(tenant_id, steps)
 
     reported =
@@ -245,7 +250,19 @@ defmodule OptimalEngine.Authority.ActionChain do
       |> Enum.reject(&is_nil/1)
 
     ordered = Enum.sort_by(reported ++ native_steps, & &1["occurred_at"])
-    stages = MapSet.new(ordered, & &1["stage"])
+
+    # The stages of every linked entry, including those past the cap.
+    stages =
+      ordered
+      |> MapSet.new(& &1["stage"])
+      |> MapSet.union(MapSet.new(chain.native_kinds, &Map.fetch!(native_stages(), &1)))
+
+    left_out =
+      if truncated do
+        ["Only the first #{length(native)} of #{native_total} native steps are verified."]
+      else
+        []
+      end
 
     %{
       id: id,
@@ -253,10 +270,10 @@ defmodule OptimalEngine.Authority.ActionChain do
       workspace_id: chain.workspace_id,
       stages: Map.new(@stages, &{&1, MapSet.member?(stages, &1)}),
       complete: complete?(stages),
-      verified: Enum.all?(ordered, &(&1["verified"] == true)),
-      findings: findings(ordered, stages),
+      verified: not truncated and Enum.all?(ordered, &(&1["verified"] == true)),
+      findings: findings(ordered, stages) ++ left_out,
       steps: ordered,
-      truncated: native_total > length(native),
+      truncated: truncated,
       total: length(steps) + native_total
     }
   end
@@ -469,11 +486,11 @@ defmodule OptimalEngine.Authority.ActionChain do
     [id | from_steps] |> Enum.reject(&is_nil/1) |> Enum.uniq()
   end
 
-  # The native entries a trace links (oldest first, at most @native_cap) and how many
-  # there are: those naming one of `ids` as request, approval or grant, and those of
-  # the grants issued for them. Each id list is one JSON array bound as one parameter
-  # (`json_each`), so a chain of any length is one exact query, never batches.
-  defp native_entries(_tenant_id, []), do: {[], 0}
+  # The native entries a trace links (oldest first, at most @native_cap), how many there
+  # are, and their kinds: those naming one of `ids` as request, approval or grant, and
+  # those of the grants issued for them. Each id list is one JSON array bound as one
+  # parameter (`json_each`), so a chain of any length is one exact query, never batches.
+  defp native_entries(_tenant_id, []), do: {[], 0, []}
 
   defp native_entries(tenant_id, ids) do
     linked =
@@ -496,12 +513,12 @@ defmodule OptimalEngine.Authority.ActionChain do
 
     entries = tenant_id |> Evidence.stream(condition, params) |> Enum.take(@native_cap)
 
-    total =
-      if length(entries) < @native_cap,
-        do: length(entries),
-        else: Evidence.count(tenant_id, condition, params)
-
-    {entries, total}
+    if length(entries) < @native_cap do
+      {entries, length(entries), entries |> Enum.map(& &1["kind"]) |> Enum.uniq()}
+    else
+      total = Evidence.count(tenant_id, condition, params)
+      {entries, total, Evidence.kinds_where(tenant_id, condition, params)}
+    end
   end
 
   @native_stages %{

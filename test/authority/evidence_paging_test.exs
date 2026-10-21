@@ -299,6 +299,15 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
              bundle |> Jason.encode!() |> Jason.decode!() |> Evidence.verify_export()
 
     assert {:error, :until_out_of_range} = Evidence.export(empty, until: 1)
+
+    out = Path.join(System.tmp_dir!(), "evidence-empty-#{System.unique_integer([:positive])}.json")
+    on_exit(fn -> File.rm(out) end)
+    Mix.shell(Mix.Shell.Process)
+    on_exit(fn -> Mix.shell(Mix.Shell.IO) end)
+    Mix.Tasks.Optimal.Authority.run(["export", "--tenant", empty, "--out", out])
+
+    assert %{"entries" => [], "head" => nil, "total" => 0, "complete" => true} =
+             out |> File.read!() |> Jason.decode!()
   end
 
   test "a bundle that is cut short, or whose head is tampered with, does not verify", ctx do
@@ -317,6 +326,11 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     last = List.last(cut["entries"])
     moved = Map.put(cut, "head", Map.take(last, ["seq", "hash"]))
     assert {:error, %{reason: :bad_head_signature}} = Evidence.verify_export(moved)
+
+    # Only evidence keys verify: the same keys labelled as grant keys verify nothing.
+    as_grant = fn keys -> Enum.map(keys, &Map.put(&1, "optimal_purpose", "grant")) end
+    relabelled = update_in(whole, ["keys", "keys"], as_grant)
+    assert {:error, %{seq: 1, reason: :bad_signature}} = Evidence.verify_export(relabelled)
 
     tampered = put_in(whole, ["head", "hash"], String.duplicate("e", 64))
     assert {:error, %{reason: :bad_head_signature}} = Evidence.verify_export(tampered)
@@ -368,7 +382,12 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
 
     Mix.Tasks.Optimal.Authority.run(["export", "--tenant", ctx.tenant, "--out", out])
 
-    bundle = out |> File.read!() |> Jason.decode!()
+    text = File.read!(out)
+    bundle = Jason.decode!(text)
+
+    # Pretty-printed, as the other subcommands print, while it streams.
+    assert String.starts_with?(text, ~s({\n  "tenant_id": ))
+    assert text =~ ~s(\n  "entries": [\n    {\n      "action": )
     assert %{"complete" => true, "total" => ^total, "next_after" => nil} = bundle
     assert length(bundle["entries"]) == total
     {:ok, %{head: head}} = Evidence.verify(ctx.tenant)
@@ -412,19 +431,29 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     assert_received {:mix_shell, :info, [^expected]}
   end
 
-  test "a trace caps native steps, says so, and checks the workspace first", ctx do
+  test "a trace caps native steps, judges its stages over all of them, and checks the workspace",
+       ctx do
     jti = "grt_paging_#{System.unique_integer([:positive])}"
     attrs = %{jti: jti, workspace_id: ctx.workspace, subject: "agent:batch", action: "read"}
+    append_many(ctx.tenant, 1, "approval.requested", attrs)
     append_many(ctx.tenant, 1, "grant.issued", attrs)
     append_many(ctx.tenant, 2_050, "grant.admitted", attrs)
+    # The result sits past the cap.
+    append_many(ctx.tenant, 1, "action.completed", attrs)
 
     {:ok, trace} = ActionChain.trace(ctx.tenant, jti)
     assert length(trace.steps) == 2_000
     assert trace.truncated
-    assert trace.total == 2_051
-    assert hd(trace.steps)["evidence_kind"] == "grant.issued"
+    assert trace.total == 2_053
+    assert hd(trace.steps)["evidence_kind"] == "approval.requested"
     assert Enum.all?(trace.steps, &(&1["verified"] == true))
+    refute Enum.any?(trace.steps, &(&1["evidence_kind"] == "action.completed"))
     assert trace.workspace_id == ctx.workspace
+
+    # The stages count the result past the cap; the trace as a whole is not verified.
+    assert trace.stages["result"] and trace.complete
+    refute trace.verified
+    assert trace.findings == ["Only the first 2000 of 2053 native steps are verified."]
 
     # Another workspace is not found, before any step is verified.
     assert {:error, :not_found} = ActionChain.trace(ctx.tenant, jti, workspace_id: "other:ws")
@@ -436,6 +465,7 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     append_many(ctx.tenant, 3, "grant.admitted", %{attrs | jti: small})
     {:ok, whole} = ActionChain.trace(ctx.tenant, small)
     assert length(whole.steps) == 3 and whole.total == 3 and not whole.truncated
+    assert whole.verified
   end
 
   defp export_pages(tenant, limit, after_seq \\ 0) do

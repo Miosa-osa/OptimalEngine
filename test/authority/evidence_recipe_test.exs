@@ -61,7 +61,7 @@ defmodule OptimalEngine.Authority.EvidenceRecipeTest do
       assert String.contains?(guide, value), "the guide shows #{value}"
     end
 
-    jwk = public |> Keys.jwk() |> Map.put("kid", @kid)
+    jwk = public |> Keys.jwk() |> Map.merge(%{"kid" => @kid, "optimal_purpose" => "evidence"})
     entry = Map.merge(@example, %{"hash" => @hash, "kid" => @kid, "signature" => @signature})
 
     bundle = %{

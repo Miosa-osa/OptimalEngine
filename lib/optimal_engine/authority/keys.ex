@@ -53,7 +53,8 @@ defmodule OptimalEngine.Authority.Keys do
       {:ok, _} =
         Store.raw_query(
           """
-          UPDATE authority_keys SET status = 'retired', retired_at = datetime('now')
+          UPDATE authority_keys SET status = 'retired',
+            retired_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
           WHERE tenant_id = ?1 AND purpose = ?2 AND status = 'active'
           """,
           [tenant_id, purpose]
@@ -163,7 +164,8 @@ defmodule OptimalEngine.Authority.Keys do
     end
   end
 
-  # SQLite's datetime('now') is UTC without a zone ("2026-10-21 07:00:00").
+  # Keys rotate out at UTC with milliseconds ("2026-10-21T07:00:00.123Z"); a key retired
+  # before that was stored by the second, without a zone ("2026-10-21 07:00:00").
   defp utc_iso8601(text) do
     case NaiveDateTime.from_iso8601(text || "") do
       {:ok, naive} -> naive |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_iso8601()

@@ -152,8 +152,9 @@ defmodule Mix.Tasks.Optimal.Authority do
   # The bundle is written as the entries are read, a page at a time, so a chain of any
   # length is exported whole in bounded memory: one bundle `Evidence.export/2` would
   # return with every entry through the head (the chain's last entry when the export
-  # starts, or the one at --until), and so complete. --format ndjson writes the lines
-  # `Evidence.to_ndjson/1` writes for a page.
+  # starts, or the one at --until), and so complete. JSON is pretty-printed, as the other
+  # subcommands print; --format ndjson writes the lines `Evidence.to_ndjson/1` writes for
+  # a page, one record a line.
   defp export(tenant, opts) do
     ndjson? =
       case opts[:format] || "json" do
@@ -171,8 +172,9 @@ defmodule Mix.Tasks.Optimal.Authority do
     through = if head, do: head["seq"], else: 0
     device = if opts[:out], do: File.open!(opts[:out], [:write]), else: :stdio
 
-    unless ndjson?,
-      do: IO.binwrite(device, [~s({"tenant_id":), Jason.encode!(tenant), ~s(,"entries":[\n)])
+    unless ndjson? do
+      IO.binwrite(device, [~s({\n  "tenant_id": ), Jason.encode!(tenant), ~s(,\n  "entries": [)])
+    end
 
     {count, last} =
       tenant
@@ -181,8 +183,8 @@ defmodule Mix.Tasks.Optimal.Authority do
         line =
           cond do
             ndjson? -> Evidence.ndjson_entry(entry)
-            written > 0 -> [",\n", Jason.encode!(entry)]
-            true -> Jason.encode!(entry)
+            written > 0 -> [",\n    ", pretty(entry, "    ")]
+            true -> ["\n    ", pretty(entry, "    ")]
           end
 
         IO.binwrite(device, line)
@@ -203,8 +205,9 @@ defmodule Mix.Tasks.Optimal.Authority do
     if ndjson? do
       IO.binwrite(device, Evidence.ndjson_end(rest))
     else
-      "{" <> fields = rest |> Map.delete("tenant_id") |> Jason.encode!()
-      IO.binwrite(device, ["\n],", fields, "\n"])
+      # The rest of the object, its closing brace included.
+      "{\n" <> fields = rest |> Map.delete("tenant_id") |> Jason.encode!(pretty: true)
+      IO.binwrite(device, [if(count > 0, do: "\n  ]", else: "]"), ",\n", fields, "\n"])
     end
 
     if opts[:out] do
@@ -212,6 +215,10 @@ defmodule Mix.Tasks.Optimal.Authority do
       Mix.shell().info("Wrote #{count} entries to #{opts[:out]}")
     end
   end
+
+  # `value` as pretty JSON, every line after the first indented by `indent`.
+  defp pretty(value, indent),
+    do: value |> Jason.encode!(pretty: true) |> String.replace("\n", "\n" <> indent)
 
   defp request(tenant, opts) do
     %{

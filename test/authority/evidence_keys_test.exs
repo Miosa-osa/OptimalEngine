@@ -59,7 +59,8 @@ defmodule OptimalEngine.Authority.EvidenceKeysTest do
     jwk = Jason.decode!(conn.resp_body)
     assert %{"kid" => kid, "optimal_purpose" => "evidence", "alg" => "EdDSA"} = jwk
     assert kid == ctx.kid
-    assert jwk["retired_at"] =~ ~r/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$/
+    # Retired to the millisecond, so a verifier can place it against an entry's recorded_at.
+    assert jwk["retired_at"] =~ ~r/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/
     assert {:ok, _at, 0} = DateTime.from_iso8601(jwk["retired_at"])
 
     {:ok, active} = Keys.active(ctx.tenant, "evidence")
