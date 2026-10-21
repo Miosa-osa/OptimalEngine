@@ -38,6 +38,8 @@ config :optimal_engine, bundle_jobs_interval_ms: 0, bundle_job_start_delay_s: 0
 config :optimal_engine, :analyses_interval_ms, 0
 config :optimal_engine, :reindex_interval_ms, 0
 config :optimal_engine, :imports_interval_ms, 0
+config :optimal_engine, :maintenance_interval_ms, 0
+config :optimal_engine, :embedding_sweep_interval_ms, 0
 
 config :optimal_engine, :metric_history, enabled: false
 config :optimal_engine, :session, llm_summary: false, llm_extraction: false

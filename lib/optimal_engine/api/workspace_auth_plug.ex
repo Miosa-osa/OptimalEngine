@@ -278,13 +278,14 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   def workspace_scoped?(["api", "workspaces"]), do: false
   # The Engine's table classification names no workspace and serves no workspace data.
   def workspace_scoped?(["api", "sync", "tables"]), do: false
-  # Maintenance is a global family, but these two act on one workspace, so the
+  # Maintenance is a global family, but these act on one workspace, so the
   # implicit default is authorized like any other workspace.
   def workspace_scoped?(["api", "maintenance", route]) when route in ~w(index graph), do: true
   # The steward's node type and hierarchy repairs act on the whole tenant, not
   # on a workspace (a key needs the whole tenant: `@tenant_wide`).
   def workspace_scoped?(["api", "data-steward", "nodes", "repair-types"]), do: false
   def workspace_scoped?(["api", "data-steward", "hierarchy", "repair-deterministic"]), do: false
+  def workspace_scoped?(["api", "maintenance", "graph", "backfill"]), do: true
   def workspace_scoped?(["api", root | _]), do: root not in @global_roots
   def workspace_scoped?(_path_info), do: false
 
