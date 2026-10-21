@@ -146,7 +146,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_derived_data_delete_indexes(),
       migration_asset_foreign_key_indexes(),
       migration_derived_rows_tenant(),
-      migration_planted_ledger_keys()
+      migration_planted_ledger_keys(),
+      migration_moved_ledger_ids()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -383,9 +384,10 @@ defmodule OptimalEngine.Store.Migrations do
   # 81: the next number on main when this was merged.
   @planted_ledger_keys_version 81
   @this_replica "(SELECT replica_id FROM sync_identity WHERE id = 1)"
-  @no_change "NOT (instr(id, ':') = 0 AND (idempotency_key = 'peer:' || id OR " <>
-               "(substr(idempotency_key, 1, length(device_id) + 1) = device_id || ':' AND " <>
-               "id = 'mut_' || device_id || '_' || substr(idempotency_key, length(device_id) + 2))))"
+  @change_shape "(instr(id, ':') = 0 AND (idempotency_key = 'peer:' || id OR " <>
+                  "(substr(idempotency_key, 1, length(device_id) + 1) = device_id || ':' AND " <>
+                  "id = 'mut_' || device_id || '_' || substr(idempotency_key, length(device_id) + 2))))"
+  @no_change "NOT " <> @change_shape
   @own_id_space "(id >= 'mut_' || #{@this_replica} || '_' AND id < 'mut_' || #{@this_replica} || '`')"
   @reserved_keys "((idempotency_key >= #{@this_replica} || ':' AND " <>
                    "idempotency_key < #{@this_replica} || ';') OR " <>
@@ -403,6 +405,41 @@ defmodule OptimalEngine.Store.Migrations do
           "WHERE #{@reserved_keys} AND #{@no_change}"},
        {"data: delete rows that are no change and could not move",
         "DELETE FROM sync_mutations WHERE (#{@own_id_space} OR #{@reserved_keys}) AND #{@no_change}"}
+     ]}
+  end
+
+  # The repair before this one renamed a row it moved out of this Engine's own
+  # id space `peer_mut_<replica>_<n>`, and keyed a row it moved out of the
+  # reserved keys `moved:` and the old key. Either can take the shape of a change
+  # of a row: a row keyed `peer:peer_mut_<replica>_<n>` becomes an applied change
+  # once renamed, and one of a device named `moved` with the id
+  # `mut_moved_<old key>` becomes that device's capture once re-keyed. A mutation
+  # id never has a colon (a peer's is refused, and `OptimalEngine.Sync.change_row?/3`
+  # takes no row with one for a change), so a row it moved gets `moved:` and its
+  # original id, and keeps no change whatever its key.
+  #
+  # Data steps only. Every `peer_mut_<replica>_<n>` row is re-id'd (no honest
+  # peer sends an id that starts with `peer_`); a change of a row keyed under
+  # `moved:` is re-id'd (only a device named `moved` makes one); a change of a
+  # row still in either range (the new id is held) is deleted. Each step reads a
+  # range of a unique column, logs how many rows it changed, and is safe to run
+  # again. No other row is touched: a storage entry a caller keyed under
+  # `moved:` is no change, and stays as it was.
+  #
+  # 82: the next number on main when this was merged.
+  @moved_ledger_ids_version 82
+  @renamed_ids "(id >= 'peer_mut_' || #{@this_replica} || '_' AND id < 'peer_mut_' || #{@this_replica} || '`')"
+  @moved_keys "(idempotency_key >= 'moved:' AND idempotency_key < 'moved;')"
+  defp migration_moved_ledger_ids do
+    {@moved_ledger_ids_version,
+     "sync ledger: the rows the ledger repair moved keep a colon in their id, so they stay no change",
+     [
+       {"data: re-id the rows the repair renamed peer_mut_ under moved:",
+        "UPDATE OR IGNORE sync_mutations SET id = 'moved:' || substr(id, 6) WHERE #{@renamed_ids}"},
+       {"data: re-id a change of a row whose key starts moved:",
+        "UPDATE OR IGNORE sync_mutations SET id = 'moved:' || id WHERE #{@moved_keys} AND #{@change_shape}"},
+       {"data: delete a change of a row that could not be re-id'd",
+        "DELETE FROM sync_mutations WHERE (#{@renamed_ids} OR #{@moved_keys}) AND #{@change_shape}"}
      ]}
   end
 

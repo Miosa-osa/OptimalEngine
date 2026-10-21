@@ -328,6 +328,7 @@ A row that is no change of a row (see "Storage mutation entries share the ledger
 The rows stay what they were, no change of a row, so they are never served or pushed, and the local changes and applied changes they would have shadowed are recorded; a local change already lost before the upgrade is not recovered.
 Every other row is left as it was: this Engine's own changes, the changes it applied, and a storage entry keyed by its own id (what the route gives an entry written without a key).
 The boot log says how many rows each step re-id'd, re-keyed and deleted, never which.
+Migration 82 then gives a row the repair renamed, and a change of a row keyed under `moved:` (a device named `moved` makes `moved:<key>` its capture key), the id `moved:` and its original id: no mutation id has a colon, so the row stays no change whatever its key, and one that cannot be renamed while it is a change is removed.
 A row whose id has a colon is no change of a row either, so it is never served, pushed or counted, and each one is logged once at boot after the upgrade, with its sequence, id, device, table, entity id and time, never its payload.
 The row a change belongs to is named by its payload's key columns, not by the `entity_id` the sender sends: the conflict check and the ledger use the key the payload gives.
 A delete carries only the row's key: it is the same change as another delete and as nothing else, so an older delete does not beat a newer update here.
