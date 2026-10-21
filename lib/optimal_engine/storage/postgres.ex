@@ -143,12 +143,14 @@ defmodule OptimalEngine.Storage.Postgres do
       %{
         feature: "replace_writes",
         reason:
-          "SQLite's delete-and-insert writes (INSERT OR REPLACE, REPLACE INTO) and an " <>
-            "INSERT OR IGNORE with its own ON CONFLICT are refused at their call sites; the " <>
+          "SQLite's delete-and-insert writes (INSERT OR REPLACE, REPLACE INTO), an UPDATE " <>
+            "with a conflict clause (UPDATE OR REPLACE) and an INSERT OR IGNORE with its own " <>
+            "ON CONFLICT are refused at their call sites; the " <>
             "store's context and chunk writes replace rows as SQLite does",
         refused_as: [
           "INSERT OR REPLACE",
           "REPLACE INTO",
+          "UPDATE with a conflict clause",
           "INSERT OR IGNORE with an explicit ON CONFLICT clause"
         ]
       },

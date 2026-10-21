@@ -573,6 +573,22 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
     end
   end
 
+  describe "the session check" do
+    test "a database that is not UTF8 is refused: its text functions count bytes" do
+      assert :ok = Connection.session_problem(["serializable", "s1", "UTF8"], "s1")
+
+      assert {:error, message} =
+               Connection.session_problem(["serializable", "s1", "SQL_ASCII"], "s1")
+
+      assert message =~ "needs a UTF8 database"
+
+      assert {:error, message} =
+               Connection.session_problem(["read committed", "s1", "UTF8"], "s1")
+
+      assert message =~ "expected serializable with s1"
+    end
+  end
+
   describe "parity with SQLite" do
     setup do
       {:ok, db} = Exqlite.Sqlite3.open(":memory:")
@@ -628,6 +644,13 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["default"]},
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", [":ops"]},
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["a:b:c"]},
+        # NULL in gives NULL out, on both; the empty string gives ''.
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", [nil]},
+        {"SELECT substr(?1, 1, instr(?1, ?2) - 1)", ["a:b", nil]},
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", [""]},
+        # Characters, not bytes, in a UTF8 database as in SQLite.
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["école:ops"]},
+        {"SELECT substr(?1, 1, instr(?1, '・') - 1)", ["日本・東京"]},
         {"SELECT name FROM items WHERE name IN (?1, ?2) ORDER BY name", ["alpha", "beta"]},
         {"SELECT name FROM items ORDER BY name LIMIT ?1 OFFSET ?2", [2, 1]},
         {"SELECT n IS NULL, n > 3 FROM items ORDER BY name", []},
