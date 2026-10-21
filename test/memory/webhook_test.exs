@@ -2,9 +2,9 @@ defmodule OptimalEngine.Memory.WebhookTest do
   @moduledoc """
   Tests for OptimalEngine.Memory.Webhook.
 
-  HTTP server tests spin up a raw :gen_tcp listener on a random port for each
-  test that needs to capture outbound POST requests. This avoids external deps
-  and proves the full `:httpc` delivery path.
+  HTTP server tests spin up a raw :gen_tcp listener on a port the operating
+  system assigns for each test that needs to capture outbound POST requests.
+  This avoids external deps and proves the full `:httpc` delivery path.
   """
 
   use ExUnit.Case, async: false
@@ -16,20 +16,23 @@ defmodule OptimalEngine.Memory.WebhookTest do
   # Unique workspace per test to avoid cross-test pollution in the shared DB.
   defp ws, do: "wh-test-ws-#{:erlang.unique_integer([:positive])}"
 
-  # Spin up a minimal :gen_tcp HTTP server on a random port.
+  # Spin up a minimal :gen_tcp HTTP server on a port the operating system picks
+  # (port 0), so two tests, or a test and another process, never collide.
   # Captures the first POST it receives and sends it to `parent`.
   # Answers with `status`. Returns {"http://127.0.0.1:<port>", ref}.
   defp start_test_server(parent \\ self(), status \\ 200) do
-    port = Enum.random(30_000..39_999)
     ref = make_ref()
 
     {:ok, listen_sock} =
-      :gen_tcp.listen(port, [
+      :gen_tcp.listen(0, [
         :binary,
         packet: :raw,
         active: false,
-        reuseaddr: true
+        reuseaddr: true,
+        ip: {127, 0, 0, 1}
       ])
+
+    {:ok, port} = :inet.port(listen_sock)
 
     Task.start(fn ->
       case :gen_tcp.accept(listen_sock, 15_000) do
