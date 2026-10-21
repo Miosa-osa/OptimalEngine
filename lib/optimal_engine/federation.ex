@@ -15,6 +15,8 @@ defmodule OptimalEngine.Federation do
   only queried.
   """
 
+  require Logger
+
   alias OptimalEngine.Connectors.{Credential, HTTP}
   alias OptimalEngine.Retrieval.AsOf
   alias OptimalEngine.{Scope, Store}
@@ -128,6 +130,14 @@ defmodule OptimalEngine.Federation do
           {workspace_id, engine, {:error, :timeout}}
       end)
 
+    # The reason a source did not answer is for the log; the reply carries a
+    # short label (`public_reason/1`).
+    for {workspace_id, engine, {:error, reason}} <- outcomes do
+      Logger.warning(
+        "[Federation] source #{workspace_id} at #{engine} unavailable: #{inspect(reason)}"
+      )
+    end
+
     results =
       outcomes
       |> Enum.flat_map(fn
@@ -156,7 +166,7 @@ defmodule OptimalEngine.Federation do
               workspace_id: workspace_id,
               engine: engine,
               status: "unavailable",
-              reason: inspect(reason)
+              reason: public_reason(reason)
             }
         end)
     }
@@ -189,10 +199,21 @@ defmodule OptimalEngine.Federation do
            }
          end)}
 
-      error ->
-        {:error, error}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
+
+  # What a caller is told about a source that did not answer: a short label,
+  # never exception text or a term from the data. A search that raised carries
+  # the opaque id its log entry is under.
+  defp public_reason(:timeout), do: "timeout"
+  defp public_reason(:busy), do: "busy"
+  defp public_reason({:search_failed, ref}) when is_binary(ref), do: "search failed (ref #{ref})"
+  defp public_reason({:invalid_as_of, _value}), do: "invalid as_of"
+  defp public_reason({:http_status, status}) when is_integer(status), do: "http status #{status}"
+  defp public_reason(:peer_credential_unreadable), do: "peer credential unreadable"
+  defp public_reason(_other), do: "unavailable"
 
   defp remote_search(peer, query, limit, as_of) do
     with {:ok, key} <- peer_key(peer) do

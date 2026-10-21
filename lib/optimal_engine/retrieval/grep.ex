@@ -59,6 +59,7 @@ defmodule OptimalEngine.Retrieval.Grep do
 
   alias OptimalEngine.Retrieval.Ranking
   alias OptimalEngine.Retrieval.Search, as: SearchEngine
+  alias OptimalEngine.Retrieval.SearchFailure
   alias OptimalEngine.Store
 
   @default_limit 25
@@ -125,9 +126,16 @@ defmodule OptimalEngine.Retrieval.Grep do
           Logger.warning("Grep search timed out for query=#{inspect(query)}")
           {:ok, []}
 
+        # The exit reason can carry a process name or a term from the data: it
+        # goes to the log, and the caller gets an opaque id for it.
         :exit, reason ->
-          Logger.warning("Grep search exited for query=#{inspect(query)} reason=#{inspect(reason)}")
-          {:error, reason}
+          ref =
+            SearchFailure.record("search exited: " <> inspect(reason), %{
+              workspace_id: workspace_id,
+              query_length: byte_size(query)
+            })
+
+          {:error, {:search_failed, ref}}
       end
 
     case raw_result do

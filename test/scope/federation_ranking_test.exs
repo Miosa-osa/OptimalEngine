@@ -7,6 +7,9 @@ defmodule OptimalEngine.FederationRankingTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+  import OptimalEngine.TestSupport.RetrievalFixtures, only: [break_search: 0]
+
   alias OptimalEngine.{Federation, Store, Workspace}
   alias OptimalEngine.Tenancy.Tenant
 
@@ -79,6 +82,22 @@ defmodule OptimalEngine.FederationRankingTest do
 
     assert Enum.map(result.results, &{&1["id"], &1["source_workspace_id"]}) ==
              [{"#{ctx.token}-n", north}, {"#{ctx.token}-s", south}]
+  end
+
+  test "a source whose search raised is reported by a short label, not its exception", ctx do
+    [north, _south] = ctx.workspaces
+    context(ctx.tenant, north, "#{ctx.token}-n", "optimal://nodes/fed/#{ctx.token}/a", ctx.token)
+    break_search()
+
+    capture_log(fn ->
+      send(self(), {:result, Federation.search(ctx.tenant, ctx.token, as_of: @as_of)})
+    end)
+
+    assert_received {:result, result}
+    assert [failed] = Enum.filter(result.sources, &(&1.status == "unavailable"))
+    assert failed.workspace_id == north
+    assert failed.reason =~ ~r/\Asearch failed \(ref [0-9a-f]{12}\)\z/
+    refute inspect(result) =~ "Arithmetic"
   end
 
   test "an as_of that is not valid is an error", ctx do

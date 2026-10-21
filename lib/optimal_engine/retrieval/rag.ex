@@ -124,6 +124,10 @@ defmodule OptimalEngine.Retrieval.RAG do
       opt see no behaviour change. The function is called synchronously in the
       ask process; keep it non-blocking (e.g. `send/2` to a listener PID).
       Events fired (in order): `:intent`, `:wiki_hit`, `:chunks`, `:composing`
+
+  A search that raised answers `{:error, {:search_failed, ref}}`, where `ref` is
+  an opaque id that is also in the log, not an envelope that reads as "no
+  results".
   """
   @spec ask(String.t(), keyword()) :: {:ok, ask_result()} | {:error, term()}
   def ask(query, opts \\ []) when is_binary(query) do
@@ -177,7 +181,7 @@ defmodule OptimalEngine.Retrieval.RAG do
         )
       end
 
-    {source, envelope, counts} =
+    delivery =
       case wiki_result do
         {:hit, page, _reason} ->
           on_event.(:wiki_hit, %{
@@ -200,21 +204,24 @@ defmodule OptimalEngine.Retrieval.RAG do
           )
       end
 
-    elapsed = System.monotonic_time(:millisecond) - started
+    # A search that failed is an error, not an answer of "no results".
+    with {source, envelope, counts} <- delivery do
+      elapsed = System.monotonic_time(:millisecond) - started
 
-    {:ok,
-     %{
-       source: source,
-       envelope: envelope,
-       trace: %{
-         intent: intent,
-         wiki_hit?: source == :wiki,
-         n_candidates: counts.candidates,
-         n_delivered: counts.delivered,
-         truncated?: counts.truncated?,
-         elapsed_ms: elapsed
-       }
-     }}
+      {:ok,
+       %{
+         source: source,
+         envelope: envelope,
+         trace: %{
+           intent: intent,
+           wiki_hit?: source == :wiki,
+           n_candidates: counts.candidates,
+           n_delivered: counts.delivered,
+           truncated?: counts.truncated?,
+           elapsed_ms: elapsed
+         }
+       }}
+    end
   end
 
   # ─── private ─────────────────────────────────────────────────────────────
@@ -362,8 +369,12 @@ defmodule OptimalEngine.Retrieval.RAG do
       |> maybe_put(:acl_absent, Keyword.get(opts, :acl_absent))
       |> maybe_put(:as_of, Keyword.get(opts, :as_of))
 
-    candidates = safe_search(expanded, search_opts)
+    with {:ok, candidates} <- safe_search(expanded, search_opts) do
+      deliver_candidates(candidates, query, receiver, on_event)
+    end
+  end
 
+  defp deliver_candidates(candidates, query, receiver, on_event) do
     items =
       Enum.map(candidates, fn c ->
         %{
@@ -557,20 +568,24 @@ defmodule OptimalEngine.Retrieval.RAG do
   # Hybrid search can stall (Ollama timeout, vector-store cold cache). We
   # catch the GenServer :timeout exit so a flaky downstream dependency
   # returns an empty result set rather than blowing up the whole ask.
+  #
+  # A search that raised is not "no results": its `{:search_failed, ref}` goes
+  # back to the caller, so the ask is an error and not an empty envelope.
   defp safe_search(query, opts) do
     try do
       case Search.search(query, opts) do
-        {:ok, results} -> results
-        _ -> []
+        {:ok, results} -> {:ok, results}
+        {:error, {:search_failed, _ref}} = failed -> failed
+        _ -> {:ok, []}
       end
     catch
       :exit, {:timeout, _} ->
         Logger.warning("RAG: hybrid search timed out for query=#{inspect(query)}")
-        []
+        {:ok, []}
 
       :exit, reason ->
         Logger.warning("RAG: hybrid search crashed: #{inspect(reason)}")
-        []
+        {:ok, []}
     end
   end
 end

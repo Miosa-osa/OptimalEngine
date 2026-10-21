@@ -39,7 +39,10 @@ defmodule OptimalEngine.Retrieval.Search do
     vector hop when the embedder answers and full text otherwise, so two Engines
     can differ by whether an embedder is healthy. `:lexical` is full text only.
     `:hybrid` requires the vector hop and answers `{:error, :hybrid_unavailable}`
-    when it cannot have it, instead of quietly falling back to full text.
+    when it cannot have it, instead of quietly falling back to full text. A
+    search for `type: :memory` ignores `:mode`: durable memories take their own
+    path (`:memory_search_mode`), so `mode: :hybrid` there never needs the
+    embedder and never answers `:hybrid_unavailable`.
 
   ## Ordering
 
@@ -51,8 +54,21 @@ defmodule OptimalEngine.Retrieval.Search do
   contexts are considered. Two Engines with the same data, queried with the
   same `:as_of` and `:mode`, return the same list.
 
-  The graph boost runs after the cut and changes the scores shown, not the
-  order: a boosted list is in the order of the scores before the boost.
+  The graph boost runs after the cut and multiplies the exact score of the
+  contexts it connects. It does not sort. A search for one context type
+  (`type: :signal`, `:resource`, ...) returns the boosted list in the order it
+  had before the boost, so its scores are not necessarily descending. The
+  default search (no `:type`, or `type: :memory`) then merges the contexts with
+  the durable memories and orders the merged list by the boosted scores, so
+  there a boost can move a context up within the window the cut kept.
+
+  ## Failures
+
+  A request that raises fails that request, not the search process: the answer
+  is `{:error, {:search_failed, ref}}`. `ref` is an opaque id; the exception
+  and its stack trace are in the log under that id (with the workspace and the
+  length of the query), and a `[:optimal_engine, :search, :failed]` telemetry
+  event counts it. The exception text is never part of the answer.
 
   ## Backward compatibility
 
@@ -78,6 +94,7 @@ defmodule OptimalEngine.Retrieval.Search do
   alias OptimalEngine.Retrieval.CandidatePortfolio
   alias OptimalEngine.Retrieval.ProfileRouter
   alias OptimalEngine.Retrieval.Ranking
+  alias OptimalEngine.Retrieval.SearchFailure
 
   @default_limit 10
   @default_half_life 720
@@ -174,14 +191,26 @@ defmodule OptimalEngine.Retrieval.Search do
   rescue
     # This process serves every tenant: one request that raises fails that
     # request, not the process (and, past the restart intensity, the Engine).
+    #
+    # The caller is told an opaque id, never the exception text (it can carry
+    # SQL or values from the data); the log has the stack trace under that id.
     error ->
-      Logger.error("[SearchEngine] search failed: " <> Exception.message(error))
-      {:reply, {:error, {:search_failed, Exception.message(error)}}, state}
+      ref =
+        SearchFailure.record(Exception.format(:error, error, __STACKTRACE__), %{
+          workspace_id: workspace_of(opts),
+          query_length: byte_size(query)
+        })
+
+      {:reply, {:error, {:search_failed, ref}}, state}
   catch
     # A Store that does not answer in time (a long write, or the Engine
     # warming up after boot) fails this search, not the search process.
     :exit, {:timeout, _} -> {:reply, {:error, :busy}, state}
   end
+
+  # Read by the failure report, which must not raise on options it did not expect.
+  defp workspace_of(opts) when is_list(opts), do: Keyword.get(opts, :workspace_id, "default")
+  defp workspace_of(_opts), do: "default"
 
   defp run_search(query, opts, state) do
     with {:ok, opts} <- AsOf.put_resolved(opts) do
@@ -819,8 +848,10 @@ defmodule OptimalEngine.Retrieval.Search do
   rescue
     e ->
       if mode(opts) == :hybrid do
-        Logger.warning("[SearchEngine] Hybrid search failed: #{inspect(e)}")
-        {:error, :hybrid_unavailable}
+        # A pinned hybrid request has no fallback. A bug here is a failed
+        # request (the search process records it), not an embedder that is
+        # unavailable.
+        reraise e, __STACKTRACE__
       else
         Logger.warning("[SearchEngine] Hybrid search failed: #{inspect(e)}, falling back to FTS")
         do_search(query, opts, topology)

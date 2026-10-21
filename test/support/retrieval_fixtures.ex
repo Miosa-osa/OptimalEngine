@@ -66,7 +66,30 @@ defmodule OptimalEngine.TestSupport.RetrievalFixtures do
       Store.raw_query("DELETE FROM memory_embeddings WHERE workspace_id = ?1", [workspace])
       Store.raw_query("DELETE FROM memories WHERE workspace_id = ?1", [workspace])
       Store.raw_query("DELETE FROM graph_edges WHERE workspace_id = ?1", [workspace])
+      Store.raw_query("DELETE FROM decisions WHERE workspace_id = ?1", [workspace])
     end
+
+    :ok
+  end
+
+  @doc """
+  Makes every search that scores a context raise, for the test that calls it.
+
+  The search process is given a topology whose half-life is zero, so the
+  freshness decay divides by zero. That is a request that fails inside the
+  process every tenant shares, the case the failure report exists for. The
+  process is restored when the test ends.
+  """
+  def break_search do
+    original = :sys.get_state(OptimalEngine.Retrieval.Search)
+
+    :sys.replace_state(OptimalEngine.Retrieval.Search, fn state ->
+      %{state | topology: %{half_lives: %{"default" => 0}}}
+    end)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      :sys.replace_state(OptimalEngine.Retrieval.Search, fn _state -> original end)
+    end)
 
     :ok
   end

@@ -12,6 +12,7 @@ defmodule OptimalEngine.Retrieval.HybridDeterminismTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
   import OptimalEngine.TestSupport.RetrievalFixtures
 
   alias OptimalEngine.Retrieval.Search
@@ -140,6 +141,54 @@ defmodule OptimalEngine.Retrieval.HybridDeterminismTest do
 
     refute Enum.any?(lexical, &String.ends_with?(&1.uri, "/zz"))
     assert Enum.any?(hybrid, &String.ends_with?(&1.uri, "/zz"))
+  end
+
+  describe "a bug in the hybrid path" do
+    setup ctx do
+      store_twice(ctx.token, ctx.ws_a, ctx.ws_b, 3)
+
+      # A weight that is not a number makes the fusion raise after the vector
+      # hop has answered. `use_embedder` restores the whole setting afterwards.
+      hybrid = Application.get_env(:optimal_engine, :hybrid_search, [])
+
+      Application.put_env(
+        :optimal_engine,
+        :hybrid_search,
+        Keyword.put(hybrid, :alpha, "not a number")
+      )
+
+      :ok
+    end
+
+    test "a pinned hybrid request is a failed search, not an unavailable embedder", ctx do
+      capture_log(fn ->
+        send(self(), {:result, Search.search(ctx.token, workspace_id: ctx.ws_a, mode: :hybrid)})
+      end)
+
+      assert_received {:result, {:error, {:search_failed, ref}}}
+      assert ref =~ ~r/\A[0-9a-f]{12}\z/
+    end
+
+    test "GET /api/search answers 500 for it, not 503", ctx do
+      capture_log(fn ->
+        send(
+          self(),
+          {:conn, get("/api/search?q=#{ctx.token}&workspace=#{ctx.ws_a}&mode=hybrid")}
+        )
+      end)
+
+      assert_received {:conn, conn}
+      assert conn.status == 500
+      assert %{"error" => "search failed", "ref" => _ref} = Jason.decode!(conn.resp_body)
+    end
+
+    test "an unpinned request still falls back to full text", ctx do
+      capture_log(fn ->
+        send(self(), {:result, Search.search(ctx.token, workspace_id: ctx.ws_a, mode: :auto)})
+      end)
+
+      assert_received {:result, {:ok, [_ | _]}}
+    end
   end
 
   describe "Store.Vectors" do

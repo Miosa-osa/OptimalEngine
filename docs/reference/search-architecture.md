@@ -69,8 +69,10 @@ Every SQL `ORDER BY` that feeds a ranked list ends in a unique column, so a tie 
 This covers the context search, durable memory search and its embeddings, the vector store, and the governed recall queries of the Retrieval Coordinator.
 Budget-aware selection (`Retrieval.MCTS`) is reproducible for the same candidates in the same order, and returns its selection best first.
 
-The graph boost runs after the cut and changes the scores shown, not the order.
-A boosted list is in the order of the scores before the boost.
+The graph boost runs after the cut and multiplies the exact score of the contexts it connects.
+It does not sort.
+A search for one context type (`type=signal`, `type=resource`, ...) returns the boosted list in the order it had before the boost, so its scores are not necessarily descending.
+The default search (no `type`, or `type=memory`) then merges the contexts with the durable memories and orders the merged list by the boosted scores, so there a boost can move a context up within the window the cut kept.
 
 ### Time
 
@@ -103,6 +105,14 @@ mix optimal.search "renewal" --workspace sales --as-of 2026-10-20T12:00:00Z --mo
 | `auto` (default) | The vector hop when the embedder answers, full text otherwise. |
 
 Without a pin, two Engines differ whenever only one of them has a healthy embedder at that moment.
+A search for `type=memory` ignores `mode`: durable memories take their own path, so `mode=hybrid` there never needs the embedder and never answers 503.
+
+### Failures
+
+A request that raises fails that request, not the search process every tenant shares.
+The caller gets an opaque `ref`, never the exception text: `GET /api/search` and `GET /api/grep` answer 500 `{"error": "search failed", "ref": "..."}`, `POST /api/rag` and `GET /api/recall/*` answer 502 with the same body, and `GET /api/rag/stream` sends an `error` event with the same two fields.
+The log has the exception and its stack trace under that `ref`, with the workspace and the length of the query, and the telemetry counter `optimal_engine.search.failed` counts it.
+In Elixir the answer is `{:error, {:search_failed, ref}}`, and `RAG.ask/2`, `ContextAssembler.assemble/2`, `l1/2` and `fused_search/2` pass it on instead of returning an empty result.
 
 ### Comparing two Engines
 

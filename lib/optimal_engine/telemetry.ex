@@ -15,6 +15,7 @@ defmodule OptimalEngine.Telemetry do
     * `[:optimal_engine, :intake, :ingested]`
     * `[:optimal_engine, :intake, :rejected]`
     * `[:optimal_engine, :search, :query]`
+    * `[:optimal_engine, :search, :failed]` - a search that raised (metadata: `ref`, `workspace_id`, `query_length`)
     * `[:optimal_engine, :retrieval, :rag]`
     * `[:optimal_engine, :connector, :run]`
     * `[:optimal_engine, :storage, :asset_fallback]` (an asset that did not
@@ -42,6 +43,7 @@ defmodule OptimalEngine.Telemetry do
     {[:optimal_engine, :intake, :ingested], :"optimal_engine.intake.ingested"},
     {[:optimal_engine, :intake, :rejected], :"optimal_engine.intake.rejected"},
     {[:optimal_engine, :search, :query], :"optimal_engine.search.query"},
+    {[:optimal_engine, :search, :failed], :"optimal_engine.search.failed"},
     {[:optimal_engine, :retrieval, :rag], :"optimal_engine.retrieval.rag"},
     {[:optimal_engine, :connector, :run], :"optimal_engine.connector.run"},
     {[:optimal_engine, :storage, :asset_fallback], :"optimal_engine.storage.asset_fallback"}
