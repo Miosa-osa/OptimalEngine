@@ -35,6 +35,7 @@ defmodule OptimalEngine.Memory do
     ClaimExtractor,
     DerivationLedgerEntry,
     ScoringPolicy,
+    SecurityLabels,
     SourcePackage,
     Store
   }
@@ -74,6 +75,19 @@ defmodule OptimalEngine.Memory do
 
   defp maybe_create_pending_claim(%{content: content} = attrs, mem, operation)
        when is_binary(content) and content != "" do
+    # The memory carries its labels in its metadata (new versions inherit the
+    # labels of the one they replace); the source package staged for it says
+    # the same.
+    attrs =
+      Map.put(
+        attrs,
+        :security_labels,
+        SecurityLabels.merge(
+          Map.get(attrs, :security_labels),
+          mem.metadata |> SecurityLabels.metadata_map() |> Map.get("security_labels")
+        )
+      )
+
     gate = %EncodingGate{
       should_encode: true,
       score: 1.0,

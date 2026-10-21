@@ -93,6 +93,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   alias OptimalEngine.MemoryCore.DerivationLedgerEntry
   alias OptimalEngine.MemoryCore.Episode
   alias OptimalEngine.MemoryCore.ScopeEnvelope
+  alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.MemoryCore.SourcePackage
   alias OptimalEngine.MemoryCore.SourcePackageService
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
@@ -240,7 +241,7 @@ defmodule OptimalEngine.Pipeline.Intake do
          {:ok, signal, routed_to} <- route_step(signal, opts),
          {:ok, primary_path} <- write_step(signal, scope, opts),
          {:ok, cross_paths} <- cross_ref_step(signal, routed_to, scope, opts),
-         {:ok, context} <- index_step(signal, primary_path, scope, opts),
+         {:ok, context} <- index_step(signal, primary_path, scope, source_package, opts),
          {:ok, pending_claim} <-
            extract_claims_step(source_package, signal, scope, opts) do
       # Persist detail objects for each extracted entity as a step record
@@ -616,7 +617,13 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   # Step 5: Index — write the primary file to SQLite via Indexer. Without a
   # file the row is the only copy: its uri is the source's, and it has no path.
-  defp index_step(%Signal{} = signal, primary_path, %ScopeEnvelope{} = scope, opts) do
+  defp index_step(
+         %Signal{} = signal,
+         primary_path,
+         %ScopeEnvelope{} = scope,
+         %SourcePackage{} = source_package,
+         opts
+       ) do
     # Build a complete context for storage
     uri =
       if primary_path,
@@ -643,7 +650,14 @@ defmodule OptimalEngine.Pipeline.Intake do
       modified_at: signal.modified_at,
       routed_to: signal.routed_to || [],
       workspace_id: workspace_id,
-      metadata: %{}
+      # The document names its source package and carries its labels from the
+      # first write: nothing else on the row says what class it is, and
+      # replication reads it before any ledger entry exists.
+      metadata:
+        SecurityLabels.put(
+          %{"source_package_id" => source_package.id},
+          source_package.security_labels
+        )
     }
 
     case Store.insert_context(context) do
@@ -1037,10 +1051,19 @@ defmodule OptimalEngine.Pipeline.Intake do
         modality: :text
       )
 
-    opts = [
-      tenant_id: scope.tenant_id,
-      workspace_id: scope.workspace_id
-    ]
+    # Chunks are slices of the document and carry its class.
+    class =
+      context.metadata
+      |> SecurityLabels.metadata_map()
+      |> Map.get("security_labels", [])
+      |> SecurityLabels.highest_class()
+
+    opts =
+      [
+        tenant_id: scope.tenant_id,
+        workspace_id: scope.workspace_id
+      ]
+      |> Keyword.merge(if class, do: [classification_level: class], else: [])
 
     case Decomposer.decompose_and_store(doc, opts) do
       {:ok, tree} ->

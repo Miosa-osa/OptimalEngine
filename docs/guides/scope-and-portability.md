@@ -128,3 +128,8 @@ Tenant and workspace ids are rewritten to the target; integer row ids are reassi
 The source deletes nothing until `finalize-move` receives the same `bundle_sha256` the target reported, then removes the workspace's rows and files, archives the workspace, and records a redirect so `optimal://` citations keep resolving.
 
 Split moves a workspace out of an org Engine; merge is the same steps in the other direction; seeding a new Engine is an import of a bundle.
+
+A bundle does not follow the data-class gate of replication (`replication.md`).
+It is a whole-workspace move for an admin: it carries every row and file, including those labelled `restricted`, because a move that left them behind would lose them when `finalize-move` deletes the source.
+Seeding a replica that is cleared for less than the workspace holds from a bundle therefore copies that data across.
+Seed such a replica only from a workspace whose data class it is cleared for.

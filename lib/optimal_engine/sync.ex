@@ -14,7 +14,10 @@ defmodule OptimalEngine.Sync do
     re-captured.
   * Peers (`add_peer/3`, `run_peer/1`): pull from and push to another
     Engine with a replica key, per-workspace policy (`push`, `pull`, `both`,
-    `none`) and a data-class gate on both send and receive.
+    `none`) and a data-class gate on both send and receive
+    (`OptimalEngine.Sync.Gate`): a row stays home when its own labels, or
+    those of any row it was copied or derived from, are above the peer's
+    class.
   * Conflicts: when both sides changed the same row since the last sync,
     the newer change wins and the conflict is recorded; for facts, both
     versions also become claims in the review queue. Nothing is dropped
@@ -29,8 +32,9 @@ defmodule OptimalEngine.Sync do
   require Logger
 
   alias OptimalEngine.Connectors.{Credential, HTTP}
+  alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Store
-  alias OptimalEngine.Sync.Capture
+  alias OptimalEngine.Sync.{Capture, Gate}
 
   @classes ~w(public internal confidential restricted)
   @page 500
@@ -98,6 +102,20 @@ defmodule OptimalEngine.Sync do
     end
   end
 
+  @doc """
+  The highest data class this Engine hands to a peer that pulls from it
+  (`changes/3`, and the storage ledger reader). A peer that pulls does not
+  say what it is cleared for, so this is the Engine's own ceiling:
+  `config :optimal_engine, :sync_serve_max_class`, default `confidential`.
+  """
+  @spec serve_max_class() :: String.t()
+  def serve_max_class do
+    case Application.get_env(:optimal_engine, :sync_serve_max_class, "confidential") do
+      class when class in @classes -> class
+      _unknown -> "confidential"
+    end
+  end
+
   @doc "Identity and schema version, sent with every change page."
   @spec engine_info() :: map()
   def engine_info do
@@ -112,8 +130,10 @@ defmodule OptimalEngine.Sync do
 
   @doc """
   Mutations for `workspace_id` after `since`, oldest first, excluding those
-  that originated on `requester` (so nothing echoes back). Returns the page,
-  the cursor to continue from, and engine info.
+  that originated on `requester` (so nothing echoes back) and those the
+  data-class gate keeps home (`:max_class`, default `serve_max_class/0`; the
+  cursor moves past them). Returns the page, the cursor to continue from, and
+  engine info.
   """
   @spec changes(String.t(), String.t(), keyword()) :: map()
   def changes(tenant_id, workspace_id, opts \\ []) do
@@ -121,6 +141,7 @@ defmodule OptimalEngine.Sync do
     since = Keyword.get(opts, :since, 0)
     limit = opts |> Keyword.get(:limit, @page) |> max(1) |> min(2_000)
     requester = opts[:requester] || ""
+    max_class = opts[:max_class] || serve_max_class()
 
     {:ok, rows} =
       Store.raw_query(
@@ -135,7 +156,10 @@ defmodule OptimalEngine.Sync do
       )
 
     cursor = if rows == [], do: since, else: rows |> List.last() |> hd()
-    mutations = for [_seq, _id, device | _] = row <- rows, device != requester, do: to_mutation(row)
+
+    mutations =
+      for([_seq, _id, device | _] = row <- rows, device != requester, do: to_mutation(row))
+      |> releasable(tenant_id, workspace_id, max_class)
 
     %{
       "workspace_id" => workspace_id,
@@ -155,13 +179,13 @@ defmodule OptimalEngine.Sync do
   def apply_changes(tenant_id, workspace_id, mutations, opts \\ []) do
     {:ok, _} = Capture.seal()
     local = replica_id()
-    gate = Keyword.get(opts, :max_class, "confidential")
+    max_class = Keyword.get(opts, :max_class, "confidential")
     last_sync = opts[:since] || "1970-01-01T00:00:00"
 
-    if workspace_class(workspace_id) |> above?(gate) do
+    if Gate.workspace_rank(workspace_id) > Gate.class_rank(max_class) do
       {:error, :workspace_class_above_gate}
     else
-      plans = Enum.map(mutations, &plan(&1, tenant_id, workspace_id, local, gate, last_sync))
+      plans = Enum.map(mutations, &plan(&1, tenant_id, workspace_id, local, max_class, last_sync))
       execute(tenant_id, workspace_id, plans)
     end
   end
@@ -219,7 +243,25 @@ defmodule OptimalEngine.Sync do
     {:ok, rows} =
       Store.raw_query(peer_sql() <> "WHERE status != 'disabled' AND policy != 'none'", [])
 
-    Enum.map(rows, &(&1 |> to_peer() |> run_peer()))
+    Enum.map(rows, fn row ->
+      peer = to_peer(row)
+
+      try do
+        run_peer(peer)
+      rescue
+        # One peer's failure does not stop the others.
+        error ->
+          Logger.error("[Sync] cycle for #{peer.url} failed: #{Exception.message(error)}")
+          update_peer_status(peer, {"error", Exception.message(error)})
+
+          %{
+            workspace_id: peer.workspace_id,
+            url: peer.url,
+            status: "error",
+            reason: Exception.message(error)
+          }
+      end
+    end)
   end
 
   @doc """
@@ -383,7 +425,7 @@ defmodule OptimalEngine.Sync do
       known?(mutation["id"]) ->
         {:skip, :duplicate, mutation}
 
-      restricted_row?(mutation, gate) ->
+      Gate.held_on_receive?(mutation, gate) ->
         {:skip, :gated, mutation}
 
       true ->
@@ -659,8 +701,10 @@ defmodule OptimalEngine.Sync do
     alias OptimalEngine.MemoryCore.SourcePackage
     alias OptimalEngine.MemoryCore.Store, as: CoreStore
 
-    local_text = get_in(decode(local.payload), ["row", "fact_text"])
-    remote_text = get_in(mutation, ["payload", "row", "fact_text"])
+    local_row = Gate.mutation_row(%{"payload" => decode(local.payload)})
+    remote_row = Gate.mutation_row(mutation)
+    local_text = local_row["fact_text"]
+    remote_text = remote_row["fact_text"]
 
     texts =
       Enum.reject([{"local", local_text}, {"remote", remote_text}], fn {_, text} -> is_nil(text) end)
@@ -668,15 +712,24 @@ defmodule OptimalEngine.Sync do
     if texts != [] do
       raw = Enum.map_join(texts, "\n", fn {side, text} -> "#{side}: #{text}" end)
 
+      # The claims quote the fact, so they carry its labels: those of both
+      # versions and of the fact now. `fact_id` lets the gate follow a later
+      # relabel of the fact.
+      labels =
+        conflict_labels(tenant_id, workspace_id, mutation["entity_id"], [local_row, remote_row])
+
       source =
         SourcePackage.from_text("Replication conflict on fact #{mutation["entity_id"]}\n" <> raw,
           tenant_id: tenant_id,
           workspace_id: workspace_id,
           source_type: "sync_conflict",
-          source_system: "optimal-sync"
+          source_system: "optimal-sync",
+          security_labels: labels,
+          metadata: %{"sync_conflict" => true, "fact_id" => mutation["entity_id"]}
         )
 
       _ = CoreStore.insert_source_package(source)
+      raise_source_labels(source.id, labels, mutation["entity_id"])
 
       Enum.each(texts, fn {side, text} ->
         CoreStore.insert_claim(%{
@@ -685,6 +738,7 @@ defmodule OptimalEngine.Sync do
           workspace_id: workspace_id,
           source_package_id: source.id,
           claim_text: text,
+          security_labels: labels,
           lifecycle_state: "pending",
           review_status: "unreviewed",
           metadata: %{"sync_conflict" => true, "side" => side, "fact_id" => mutation["entity_id"]}
@@ -694,6 +748,57 @@ defmodule OptimalEngine.Sync do
   rescue
     error ->
       Logger.warning("[Sync] could not raise fact conflict claims: #{Exception.message(error)}")
+  end
+
+  # The labels of a contested fact: both versions' and the stored fact's. A
+  # value that cannot be read counts as `restricted`; a Store error raises,
+  # and the conflict is then not turned into claims at all.
+  defp conflict_labels(tenant_id, workspace_id, fact_id, rows) do
+    stored =
+      case Store.raw_query(
+             "SELECT security_labels FROM facts WHERE id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
+             [fact_id, tenant_id, workspace_id]
+           ) do
+        {:ok, [[value]]} -> [value]
+        {:ok, []} -> []
+        {:error, reason} -> raise "could not read fact #{fact_id}: #{inspect(reason)}"
+      end
+
+    Enum.reduce(Enum.map(rows, & &1["security_labels"]) ++ stored, [], fn value, labels ->
+      case SecurityLabels.decode(value) do
+        {:ok, _} -> SecurityLabels.merge(labels, value)
+        :invalid -> SecurityLabels.merge(labels, ["restricted"])
+      end
+    end)
+  end
+
+  # `insert_source_package` keeps the package that is already there when the
+  # same conflict text is raised again, with the labels and the metadata it had.
+  # Its labels only ever grow, and it names the fact either way. A Store error
+  # raises, so no claims are raised beside a package whose labels were not set.
+  defp raise_source_labels(source_id, labels, fact_id) do
+    with {:ok, [[stored]]} <-
+           Store.raw_query("SELECT security_labels FROM source_packages WHERE id = ?1", [source_id]),
+         merged =
+           (case SecurityLabels.decode(stored) do
+              {:ok, _} -> SecurityLabels.merge(stored, labels)
+              :invalid -> SecurityLabels.merge(["restricted"], labels)
+            end),
+         {:ok, _} <-
+           Store.raw_query(
+             """
+             UPDATE source_packages
+             SET security_labels = ?2,
+                 metadata = json_set(COALESCE(metadata, '{}'), '$.sync_conflict', json('true'), '$.fact_id', ?3)
+             WHERE id = ?1
+             """,
+             [source_id, Jason.encode!(merged), fact_id]
+           ) do
+      :ok
+    else
+      {:ok, []} -> :ok
+      {:error, reason} -> raise "could not label conflict source #{source_id}: #{inspect(reason)}"
+    end
   end
 
   defp local_conflict(tenant_id, workspace_id, table, entity_id, local, last_sync) do
@@ -746,37 +851,6 @@ defmodule OptimalEngine.Sync do
   defp txn_known?(txn, id) do
     sql = "SELECT 1 FROM sync_mutations WHERE id = ?1"
     match?({:ok, [_ | _]}, Store.txn_query(txn, sql, [id]))
-  end
-
-  defp restricted_row?(mutation, gate) do
-    labels = get_in(mutation, ["payload", "row", "security_labels"])
-
-    labels =
-      case labels do
-        json when is_binary(json) ->
-          case Jason.decode(json) do
-            {:ok, list} when is_list(list) -> list
-            _ -> []
-          end
-
-        list when is_list(list) ->
-          list
-
-        _ ->
-          []
-      end
-
-    Enum.any?(labels, &(to_string(&1) in @classes and above?(to_string(&1), gate)))
-  end
-
-  defp above?(class, gate), do: rank(class) > rank(gate)
-  defp rank(class), do: Enum.find_index(@classes, &(&1 == class)) || 1
-
-  defp workspace_class(workspace_id) do
-    case OptimalEngine.Workspace.get(workspace_id) do
-      {:ok, %{metadata: %{"data_class" => class}}} when class in @classes -> class
-      _ -> "internal"
-    end
   end
 
   # ---------------------------------------------------------------------------
@@ -891,10 +965,18 @@ defmodule OptimalEngine.Sync do
   defp push(peer, key, deadline) do
     {:ok, _} = Capture.seal()
     totals = %{sent: 0, gated: 0, applied: 0, pages: 0}
-    push_pages(peer, key, peer.last_pushed_seq, totals, @cycle_pages, @page, deadline)
+
+    Gate.with_gate(peer.tenant_id, peer.workspace_id, peer.max_class, fn gate ->
+      push_pages(peer, key, gate, peer.last_pushed_seq, totals, @cycle_pages, @page, deadline)
+    end)
+  rescue
+    # A gate that cannot read what it classifies by sends nothing.
+    error in [RuntimeError, ArgumentError] ->
+      Logger.error("[Sync] push to #{peer.url} held back: #{Exception.message(error)}")
+      {:error, {:gate_unreadable, Exception.message(error)}}
   end
 
-  defp push_pages(peer, key, since, totals, pages_left, page, deadline) do
+  defp push_pages(peer, key, gate, since, totals, pages_left, page, deadline) do
     {:ok, rows} =
       Store.raw_query(
         """
@@ -909,8 +991,7 @@ defmodule OptimalEngine.Sync do
     if rows == [] do
       {:ok, totals}
     else
-      mutations =
-        rows |> Enum.map(&to_mutation/1) |> Enum.reject(&restricted_row?(&1, peer.max_class))
+      mutations = rows |> Enum.map(&to_mutation/1) |> releasable(gate)
 
       case send_page(peer, key, mutations) do
         {:ok, remote} ->
@@ -933,17 +1014,32 @@ defmodule OptimalEngine.Sync do
           totals = if remote, do: Map.put(totals, :remote, remote), else: totals
 
           if length(rows) == page and pages_left > 1 and in_budget?(deadline),
-            do: push_pages(peer, key, cursor, totals, pages_left - 1, page, deadline),
+            do: push_pages(peer, key, gate, cursor, totals, pages_left - 1, page, deadline),
             else: {:ok, totals}
 
         {:error, {:http_status, 413, _body}} when length(rows) > 1 ->
           half = max(div(length(rows), 2), 1)
-          push_pages(peer, key, since, totals, pages_left, half, deadline)
+          push_pages(peer, key, gate, since, totals, pages_left, half, deadline)
 
         {:error, _} = error ->
           error
       end
     end
+  end
+
+  # What the data-class gate lets leave this Engine: nothing from a workspace
+  # classed above the peer, otherwise the rows not held by their own class or
+  # the class of what they derive from.
+  defp releasable([], _tenant_id, _workspace_id, _max_class), do: []
+
+  defp releasable(mutations, tenant_id, workspace_id, max_class) do
+    Gate.with_gate(tenant_id, workspace_id, max_class, &releasable(mutations, &1))
+  end
+
+  defp releasable(mutations, gate) do
+    if Gate.workspace_above?(gate),
+      do: [],
+      else: Enum.reject(mutations, &Gate.hold?(gate, &1))
   end
 
   # A page whose rows all stay home (the data-class gate) is not sent: an empty
