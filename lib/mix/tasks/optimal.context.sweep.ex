@@ -37,7 +37,12 @@ defmodule Mix.Tasks.Optimal.Context.Sweep do
   def exit_status(%{skipped: [_ | _]}), do: 1
 
   @impl Mix.Task
-  def run(args) do
+  def run(args), do: run(args, [])
+
+  @doc false
+  # `sweep_opts` go to `ContextPackageSweep.run/1` after the command line's own
+  # (a test passes `:object_query` to make a lookup fail).
+  def run(args, sweep_opts) do
     Mix.Task.run("app.start")
 
     {parsed, _rest, _invalid} =
@@ -54,7 +59,7 @@ defmodule Mix.Tasks.Optimal.Context.Sweep do
       ]
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
-    case ContextPackageSweep.run(opts) do
+    case ContextPackageSweep.run(opts ++ sweep_opts) do
       {:ok, summary} ->
         if Keyword.get(parsed, :json, false) do
           Mix.shell().info(Jason.encode!(summary))
