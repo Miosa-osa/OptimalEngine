@@ -2417,7 +2417,8 @@ defmodule OptimalEngine.API.Router do
   #        continue_on_error?, allowed_partitions?, allowed_security_labels?}
   #
   # The refreshed packages are returned to the caller, so they are read under
-  # the caller's grants (see put_refresh_grants/3).
+  # the caller's grants (see put_refresh_grants/3), and only packages the caller
+  # requested or whose recorded envelope its grants cover are offered.
   post "/api/memory-core/context-packages/refresh-stale" do
     body = conn.body_params || %{}
     workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
@@ -2556,7 +2557,8 @@ defmodule OptimalEngine.API.Router do
   # POST /api/memory-core/active-pools/:id/refresh-context — refresh stale
   # Context Packages already loaded into the pool. The refreshed packages are
   # returned to the caller, so they are read under the caller's grants (see
-  # put_refresh_grants/3).
+  # put_refresh_grants/3); a loaded package the caller neither requested nor
+  # covers is reported in errors as not_found.
   post "/api/memory-core/active-pools/:id/refresh-context" do
     body = conn.body_params || %{}
 
