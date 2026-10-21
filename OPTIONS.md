@@ -47,6 +47,8 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_ENGINE_CACHE` | `.optimal/cache` | Local cache path. |
 | `OPTIMAL_BACKUP_DIR` | `backups/` beside the database | Only directory `POST /api/backup` may write into; restores verify the catalog checksum first. |
 | `OPTIMAL_BUNDLE_MAX_BYTES` | `5368709120` (5 GiB) | Largest raw bundle upload `POST /api/bundles/import` accepts; a larger one is refused with 413 before or while it is read. |
+| `OPTIMAL_BUNDLE_URL_HOSTS` | none | Comma-separated hosts a bundle import job may download its bundle from (`source_url`); with none, `source_url` is refused. A `*.` entry covers a domain's hosts. |
+| `OPTIMAL_BUNDLE_RETENTION_HOURS` | `168` | How long a finished bundle export job's bundle is kept before it is removed. |
 | `OPTIMAL_BACKUP_KEY` | none | 64 hex characters; encrypts every offsite backup copy with AES-256-GCM. Offsite copies are refused without it. Losing it loses every copy sealed with it. |
 | `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS` | unset (off) | Interval for scheduled encrypted offsite backups; 0 or unset disables, otherwise at least 60000. |
 | `OPTIMAL_OFFSITE_BACKUP_KEEP` | `14` | Scheduled offsite copies kept; older ones are deleted from the bucket. |

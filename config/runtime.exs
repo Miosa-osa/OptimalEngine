@@ -283,6 +283,25 @@ if max_bytes = System.get_env("OPTIMAL_BUNDLE_MAX_BYTES") do
   end
 end
 
+# Bundle jobs (/api/bundles/jobs): the hosts an import may fetch its bundle
+# from (comma-separated; none means source_url is refused), and how long a
+# finished export's bundle is kept.
+if hosts = System.get_env("OPTIMAL_BUNDLE_URL_HOSTS") do
+  config :optimal_engine,
+         :bundle_url_hosts,
+         hosts
+         |> String.split(",", trim: true)
+         |> Enum.map(&String.trim/1)
+         |> Enum.reject(&(&1 == ""))
+end
+
+if hours = System.get_env("OPTIMAL_BUNDLE_RETENTION_HOURS") do
+  case Integer.parse(String.trim(hours)) do
+    {n, ""} when n > 0 -> config :optimal_engine, :bundle_retention_hours, n
+    _ -> raise ArgumentError, "OPTIMAL_BUNDLE_RETENTION_HOURS must be a positive number of hours"
+  end
+end
+
 # Replication: how long one peer's cycle keeps paging before it stops and
 # resumes on the next cycle.
 if budget = System.get_env("OPTIMAL_SYNC_CYCLE_BUDGET_MS") do

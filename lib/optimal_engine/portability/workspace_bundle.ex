@@ -78,22 +78,52 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   @doc """
   Writes a bundle for `workspace_id` to `path`. Returns the manifest.
+
+  `:observe` is told how the export goes and may stop it: it is called with
+  `{:phase, phase}` (`:sealing`, `:reading`, `:files`, `:packing`) and with
+  `{:rows, table, n}` after each page, and returns `:ok` to go on or
+  `:cancel` to stop, which answers `{:error, :cancelled}` and writes nothing
+  to `path`.
   """
-  @spec export(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
-  def export(tenant_id, workspace_id, path) do
+  @spec export(String.t(), String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def export(tenant_id, workspace_id, path, opts \\ []) do
+    observe = Keyword.get(opts, :observe, fn _event -> :ok end)
+
     with {:ok, workspace} <- Workspace.get(workspace_id),
          true <- workspace.tenant_id == tenant_id || {:error, :not_found} do
       staging = staging_dir()
 
       try do
-        with {:ok, {mark, tables}} <- snapshot_tables(tenant_id, workspace_id, staging) do
+        observed(observe, {:phase, :sealing})
+
+        with {:ok, {mark, tables}} <- snapshot_tables(tenant_id, workspace_id, staging, observe) do
+          observed(observe, {:phase, :files})
           files = export_files(workspace_id, staging)
+          observed(observe, {:phase, :packing})
           write_bundle(tenant_id, workspace, mark, tables, files, staging, path)
         end
+      catch
+        :bundle_cancelled -> {:error, :cancelled}
       after
         File.rm_rf(staging)
       end
     end
+  end
+
+  # Reports an event to the caller's observer, and stops the run when it asks.
+  # Only where nothing is written yet: once an import has planned its target,
+  # it stops between batches instead (batch_written/3), which undoes a create.
+  defp observed(observe, event) do
+    case observe.(event) do
+      :cancel -> throw(:bundle_cancelled)
+      _ -> :ok
+    end
+  end
+
+  # Reports an event without offering to stop.
+  defp notify(observe, event) do
+    observe.(event)
+    :ok
   end
 
   defp write_bundle(tenant_id, workspace, mark, tables, files, staging, path) do
@@ -134,13 +164,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # change captured but not yet sealed when the read begins would be in the
   # rows and sealed later above the mark, so the read is started again while
   # the workspace has one, a bounded number of times.
-  defp snapshot_tables(tenant_id, workspace_id, staging, attempt \\ 1) do
+  defp snapshot_tables(tenant_id, workspace_id, staging, observe, attempt \\ 1) do
     with {:ok, _sealed} <- Capture.seal() do
       result =
         ReadSnapshot.run(fn snap ->
           if pending_captures(snap, workspace_id) == 0 do
+            observed(observe, {:phase, :reading})
             mark = ledger_mark(snap, tenant_id, workspace_id)
-            {:ok, {mark, export_tables(snap, tenant_id, workspace_id, staging)}}
+            {:ok, {mark, export_tables(snap, tenant_id, workspace_id, staging, observe)}}
           else
             :captures_pending
           end
@@ -149,7 +180,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       case result do
         :captures_pending when attempt < @snapshot_attempts ->
           Process.sleep(min(10 * attempt, 200))
-          snapshot_tables(tenant_id, workspace_id, staging, attempt + 1)
+          snapshot_tables(tenant_id, workspace_id, staging, observe, attempt + 1)
 
         :captures_pending ->
           {:error, :writes_in_progress}
@@ -181,21 +212,36 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   `{:error, :bundle_from_another_tenant}` before anything is written, unless
   `cross_tenant: true` says the move between tenants is intended (the Engine
   operator seeding a tenant, or one database standing in for two Engines).
+
+  `:observe` is told how the import goes, as for `export/4`: `{:phase, phase}`
+  (`:verifying`, `:planning`, `:writing`, `:files`), `{:total, rows, files}`
+  from the manifest, and `{:rows, table, n}` after each batch. It may stop
+  the import with `:cancel` until the target is planned, and between batches
+  after that; a stopped create removes what it wrote. The answer is then
+  `{:error, :cancelled}`.
   """
   @spec import(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def import(path, tenant_id, opts \\ []) do
     staging = staging_dir()
+    observe = Keyword.get(opts, :observe, fn _event -> :ok end)
 
     try do
       with :ok <- unpack(path, staging),
            :ok <- if(opts[:consume], do: File.rm(path), else: :ok),
            {:ok, manifest} <- read_manifest(staging),
            :ok <- permitted(manifest),
+           :ok <- observed(observe, {:phase, :verifying}),
+           :ok <-
+             observed(observe, {:total, manifest_rows(manifest), length(manifest["files"] || [])}),
            :ok <- verify(manifest, staging),
            :ok <- same_tenant(manifest, tenant_id, opts),
+           :ok <- observed(observe, {:phase, :planning}),
            {:ok, plan} <- plan(manifest, tenant_id, opts),
            :ok <- compatible(manifest, staging),
-           {:ok, counts} <- write_rows(manifest, staging, plan, opts),
+           :ok <- notify(observe, {:phase, :writing}),
+           {:ok, counts} <-
+             write_rows(manifest, staging, plan, Keyword.put(opts, :observe, observe)),
+           :ok <- notify(observe, {:phase, :files}),
            {:ok, file_count} <- write_files(manifest, staging, plan) do
         {:ok,
          %{
@@ -205,14 +251,60 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
            rows: counts,
            files: file_count,
            bundle_sha256: manifest["bundle_sha256"],
+           ledger_sequence: manifest["ledger_sequence"],
            source_workspace_id: manifest["workspace"]["id"],
            external_id: plan.external_id,
            imported_external_id: plan.imported_external_id
          }}
       end
+    catch
+      :bundle_cancelled -> {:error, :cancelled}
     after
       File.rm_rf(staging)
     end
+  end
+
+  defp manifest_rows(manifest),
+    do: manifest |> Map.get("tables", []) |> Enum.map(&(&1["rows"] || 0)) |> Enum.sum()
+
+  @doc """
+  The Engine's backup dir (`OPTIMAL_BACKUP_DIR`, or `backups` next to the
+  database), which holds the tenants' bundle folders and the bundle staging.
+  """
+  @spec backup_dir() :: String.t()
+  def backup_dir, do: backup_base()
+
+  @doc """
+  Removes every row of a workspace from the workspace tables, and with
+  `record: true` the workspace record too. For an import that did not finish
+  into a target that held nothing before it: a create it made, or a merge
+  into an empty workspace.
+  """
+  @spec discard_workspace(String.t(), String.t(), keyword()) :: :ok
+  def discard_workspace(tenant_id, workspace_id, opts \\ []) do
+    delete_rows(tenant_id, workspace_id)
+
+    if opts[:record] == true,
+      do:
+        Store.raw_query("DELETE FROM workspaces WHERE id = ?1 AND tenant_id = ?2", [
+          workspace_id,
+          tenant_id
+        ])
+
+    :ok
+  end
+
+  @doc "True when no workspace table holds a row of the workspace."
+  @spec workspace_empty?(String.t(), String.t()) :: boolean()
+  def workspace_empty?(tenant_id, workspace_id) do
+    Enum.all?(workspace_tables(), fn table ->
+      {where, params} = scope_clause(table, columns(table), tenant_id, workspace_id)
+
+      match?(
+        {:ok, []},
+        Store.raw_query("SELECT 1 FROM #{quote_name(table)} WHERE #{where} LIMIT 1", params)
+      )
+    end)
   end
 
   @doc """
@@ -471,7 +563,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # ---------------------------------------------------------------------------
   # Export
 
-  defp export_tables(snap, tenant_id, workspace_id, staging) do
+  defp export_tables(snap, tenant_id, workspace_id, staging, observe) do
     File.mkdir_p!(Path.join(staging, "tables"))
 
     scoped =
@@ -479,7 +571,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         columns = columns(table)
         {where, params} = scope_clause(table, columns, tenant_id, workspace_id)
 
-        write_table(snap, staging, table, columns, where, params)
+        write_table({snap, observe}, staging, table, columns, where, params)
       end
 
     children =
@@ -489,7 +581,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         {where, params} = scope_clause(parent, parent_columns, tenant_id, workspace_id)
 
         write_table(
-          snap,
+          {snap, observe},
           staging,
           table,
           columns,
@@ -500,7 +592,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     principals =
       write_table(
-        snap,
+        {snap, observe},
         staging,
         @principals,
         columns(@principals),
@@ -515,7 +607,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     documents =
       write_table(
-        snap,
+        {snap, observe},
         staging,
         @documents,
         columns(@documents),
@@ -530,13 +622,13 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # read from the snapshot a page at a time and each page is written and
   # hashed before the next is read, so a large workspace is never held in
   # memory.
-  defp write_table(snap, staging, table, columns, where, params) do
+  defp write_table(reader, staging, table, columns, where, params) do
     file = Path.join([staging, "tables", table <> ".jsonl"])
     names = Enum.map(columns, &elem(&1, 0))
 
     {rows, hash} =
       File.open!(file, [:write, :binary], fn io ->
-        snap
+        reader
         |> table_rows(table, where, params)
         |> Enum.reduce({0, :crypto.hash_init(:sha256)}, fn row, {count, hash} ->
           line =
@@ -562,14 +654,17 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # Streams the rows of a table that match `where` from the snapshot, one page
   # of `:bundle_export_page_rows` rows at a time (default 1,000). The snapshot
   # does not move, so one statement reads the table from start to end.
-  defp table_rows(snap, table, where, params) do
+  defp table_rows({snap, observe}, table, where, params) do
     snap
     |> ReadSnapshot.stream(
       "SELECT * FROM #{quote_name(table)} WHERE #{where}",
       params,
       export_page_rows()
     )
-    |> Stream.each(&page_read(table, length(&1)))
+    |> Stream.each(fn page ->
+      page_read(table, length(page))
+      observed(observe, {:rows, table, length(page)})
+    end)
     |> Stream.concat()
   end
 
@@ -871,8 +966,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
             |> Stream.map(&(&1 |> rewrite(name, plan, column_names[name]) |> Map.drop(drops[name])))
             |> self_parents_first(Enum.filter(keys[name], &(&1.table == name)))
 
-          case write_batches(target, rows, verb, batch_rows) do
+          case write_batches(target, rows, verb, batch_rows, opts[:observe]) do
             {:ok, written} -> {:cont, {:ok, Map.put(counts, name, written)}}
+            {:error, :cancelled} -> {:halt, {:error, :cancelled}}
             {:error, reason} -> {:halt, {:error, {:import_failed, name, reason}}}
           end
         end)
@@ -886,15 +982,35 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   # Each batch is its own transaction with foreign keys checked at its commit;
   # parents are always written in an earlier batch than their children.
-  defp write_batches(name, rows, verb, batch_rows) do
+  defp write_batches(name, rows, verb, batch_rows, observe) do
     rows
     |> Stream.chunk_every(batch_rows)
     |> Enum.reduce_while({:ok, 0}, fn batch, {:ok, total} ->
-      case write_batch(name, batch, verb) do
-        {:ok, written} -> {:cont, {:ok, total + written}}
+      with {:ok, written} <- write_batch(name, batch, verb),
+           :ok <- import_batch(name, length(batch)),
+           :ok <- batch_written(observe, name, length(batch)) do
+        {:cont, {:ok, total + written}}
+      else
         {:error, _} = error -> {:halt, error}
       end
     end)
+  end
+
+  # Each batch written is a `[:optimal_engine, :bundle, :import_batch]` event
+  # with the rows and the table.
+  defp import_batch(table, rows) do
+    :telemetry.execute([:optimal_engine, :bundle, :import_batch], %{rows: rows}, %{table: table})
+  end
+
+  # A batch is the point where an observed import reports its rows and may
+  # be stopped; a stopped create removes what it wrote, like a failed one.
+  defp batch_written(nil, _name, _rows), do: :ok
+
+  defp batch_written(observe, name, rows) do
+    case observe.({:rows, name, rows}) do
+      :cancel -> {:error, :cancelled}
+      _ -> :ok
+    end
   end
 
   defp write_batch(name, batch, verb) do
