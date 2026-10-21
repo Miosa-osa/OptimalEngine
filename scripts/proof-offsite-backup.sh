@@ -142,7 +142,7 @@ sed -n '1,12p' "$DATA/backup.log"
 echo "== step 5: the object is listed back from the bucket"
 mix optimal.backup --list-offsite-objects >"$DATA/objects.log" 2>&1 ||
   { cat "$DATA/objects.log"; fail "listing the bucket failed"; }
-objects=$(grep -c "s3://\|engwo-1019/" "$DATA/objects.log" || true)
+objects=$(grep -cF "${OPTIMAL_S3_PREFIX}backups/" "$DATA/objects.log" || true)
 echo "BUCKET_OBJECT_LINES=$objects"
 [ "$objects" -ge 1 ] || { cat "$DATA/objects.log"; fail "the bucket lists no backup object"; }
 

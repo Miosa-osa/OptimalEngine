@@ -1133,9 +1133,11 @@ defmodule OptimalEngine.Storage.S3 do
   end
 
   # A caller-supplied prefix is relative to the engine prefix, except when it
-  # already is an absolute key or URI.
-  defp list_prefix(nil, _opts), do: prefix_value()
-  defp list_prefix("", _opts), do: prefix_value()
+  # already is an absolute key or URI. Without one, the listing is of the keys
+  # under the engine prefix, "<prefix>/": a credential scoped to that folder
+  # may list it, and another engine's "<prefix>-other/" keys are not included.
+  defp list_prefix(nil, _opts), do: folder(prefix_value())
+  defp list_prefix("", _opts), do: folder(prefix_value())
 
   defp list_prefix(prefix, _opts) do
     with {:ok, _config} <- config() do
@@ -1155,6 +1157,9 @@ defmodule OptimalEngine.Storage.S3 do
       _ -> ""
     end
   end
+
+  defp folder(""), do: ""
+  defp folder(prefix), do: prefix <> "/"
 
   # ─── response helpers ──────────────────────────────────────────────────────
 
