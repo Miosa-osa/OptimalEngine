@@ -387,13 +387,28 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp settle(_plan), do: :ok
 
   # A finished import, of either mode, leaves the workspace without an import
-  # token, so nothing takes it for an unfinished one.
+  # token, so nothing takes it for an unfinished one. The metadata is read and
+  # written in one transaction, so no other metadata write is lost, and with
+  # plain SQL every store runs (SQLite's json_remove has no PostgreSQL match).
   defp clear_import_token(workspace_id) do
     {:ok, _} =
-      Store.raw_query(
-        "UPDATE workspaces SET metadata = json_remove(metadata, '$.#{@import_token}') WHERE id = ?1 AND json_extract(metadata, '$.#{@import_token}') IS NOT NULL",
-        [workspace_id]
-      )
+      Store.transaction(fn txn ->
+        with {:ok, [[json]]} when is_binary(json) <-
+               Store.txn_query(txn, "SELECT metadata FROM workspaces WHERE id = ?1", [
+                 workspace_id
+               ]),
+             {:ok, %{@import_token => _} = metadata} <- Jason.decode(json) do
+          Store.txn_execute(txn, "UPDATE workspaces SET metadata = ?2 WHERE id = ?1", [
+            workspace_id,
+            Jason.encode!(Map.delete(metadata, @import_token))
+          ])
+        else
+          # Metadata that is not JSON holds no token either.
+          {:error, %Jason.DecodeError{}} -> {:ok, 0}
+          {:error, _} = error -> error
+          _no_token -> {:ok, 0}
+        end
+      end)
 
     :ok
   end
