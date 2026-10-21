@@ -140,7 +140,10 @@ Engine code keeps writing SQLite statements.
 - `json_extract` compared to a value compares JSON values, so a JSON number never equals text; its placeholder must be bound to text.
   Selected, it is the value as text, so a JSON number comes back as its text; an ordered comparison or an `ORDER BY` on it is refused.
 - An `INSERT` that writes an identity column explicitly moves the column's sequence past the largest id, as SQLite's rowid does.
-- A construct the dialect refuses, a schema change outside the migrations, and a transaction statement return `{:error, {:unsupported, name}}` and never reach the database.
+- A construct the dialect refuses and a schema change outside the migrations return `{:error, {:unsupported, name}}` and never reach the database.
+- A transaction statement sent as a statement (`BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, and PostgreSQL's `START` and `ABORT`) raises `ArgumentError` before it reaches the database, as it does on SQLite (`OptimalEngine.Store.TransactionControl`).
+  Leading whitespace, comments and empty statements are skipped first, so `/* x */ COMMIT` is refused too.
+  Inside a transaction, `SAVEPOINT`, `RELEASE` and `ROLLBACK TO` work as on SQLite.
 
 ### What Does Not Work On PostgreSQL
 
@@ -158,7 +161,7 @@ These features are not on the PostgreSQL store yet.
 | `rowid` | A statement that orders or filters by `rowid`, or reads `last_insert_rowid()`, is refused (backup schedules, the storage audit, graph edge listings, model call history, a workspace slug change). |
 | Other SQLite functions | `group_concat`, `typeof`, `instr`, `printf` and the rest, `GLOB`, SQLite's collations and a `LIKE` with a computed pattern are refused (action chain lists, clusters, insight health). |
 | Replace writes | `INSERT OR REPLACE`, `REPLACE INTO`, an `UPDATE` with a conflict clause (`UPDATE OR REPLACE` and the like) and an `INSERT OR IGNORE` with its own `ON CONFLICT` are refused at their call sites; the store's context and chunk writes replace rows as SQLite does. |
-| Schema and transaction statements | The schema comes from the migrations and transactions from the store, so a schema change, a transaction statement sent as a statement, and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) are refused. |
+| Schema and transaction statements | The schema comes from the migrations, so a schema change and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) are refused. A transaction statement sent as a statement raises `ArgumentError` on both stores. |
 
 `OptimalEngine.Store.Dialect.refusals/0` lists every refused construct with its reason, and `test/store/postgres/unavailable_test.exs` checks both ways: every refusal of the dialect is under a feature here, and every name a feature lists is one the dialect or the store refuses with.
 

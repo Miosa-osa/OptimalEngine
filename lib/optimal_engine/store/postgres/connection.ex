@@ -7,11 +7,13 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   with `OptimalEngine.Store.Dialect`, binds the parameters with SQLite's type
   affinity (`OptimalEngine.Store.Postgres.Types`), and returns rows and errors
   in the shape SQLite returns them. A construct the dialect refuses comes back
-  as `{:error, {:unsupported, name}}` and never reaches the database, and so do
-  a schema change (the schema comes from the migrations) and a transaction
-  statement (transactions go through `transaction/3`; inside one, `SAVEPOINT`,
-  `RELEASE` and `ROLLBACK TO` work as on SQLite). A statement already written
-  for PostgreSQL passes `dialect: :postgres`.
+  as `{:error, {:unsupported, name}}` and never reaches the database, and so
+  does a schema change (the schema comes from the migrations). A transaction
+  statement raises `ArgumentError` before it reaches the database, as on
+  SQLite (`OptimalEngine.Store.TransactionControl`): transactions go through
+  `transaction/3`, and inside one `SAVEPOINT`, `RELEASE` and `ROLLBACK TO` work
+  as on SQLite. A statement already written for PostgreSQL passes
+  `dialect: :postgres`.
 
   ## Sessions
 
@@ -66,7 +68,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   require Logger
 
   alias OptimalEngine.Storage.Postgres, as: Provider
-  alias OptimalEngine.Store.Dialect
+  alias OptimalEngine.Store.{Dialect, TransactionControl}
   alias OptimalEngine.Store.Postgres.{Affinity, Errors, Schema}
 
   @default_timeout 15_000
@@ -84,8 +86,6 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   ]
 
   @schema_change ~r/\A(CREATE|ALTER|DROP|REINDEX|VACUUM|ANALYZE|ATTACH|DETACH)\b/i
-  @transaction_control ~r/\A(BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b/i
-  @savepoint ~r/\A(SAVEPOINT\b|RELEASE\b|ROLLBACK\s+TO\b)/i
   @insert ~r/\A\s*INSERT\s+INTO\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_]*)\s*(\(([^)]*)\))?/i
 
   @typedoc "Columns, rows as SQLite returns them, and the affected or returned row count."
@@ -249,7 +249,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   def query(pool, sql, params \\ [], opts \\ []) do
     timeout = timeout!(Keyword.get(opts, :timeout, @default_timeout))
 
-    with {:ok, statement, bound, identity} <- prepare(sql, params, opts, :query) do
+    with {:ok, statement, bound, identity} <- prepare(sql, params, opts, :outside) do
       if identity do
         transaction(pool, &txn_query(&1, sql, params, opts), timeout)
       else
@@ -289,7 +289,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     remaining = min(Keyword.get(opts, :timeout, remaining(deadline)), remaining(deadline))
     mode = if Keyword.get(opts, :recoverable, false), do: [mode: :savepoint], else: []
 
-    with {:ok, statement, bound, identity} <- prepare(sql, params, opts, :transaction) do
+    with {:ok, statement, bound, identity} <- prepare(sql, params, opts, :inside) do
       case execute(conn, statement, bound, [timeout: max(remaining, @min_attempt)] ++ mode) do
         {:ok, result} ->
           with :ok <- advance_identity(txn, identity, max(remaining(deadline), @min_attempt)) do
@@ -307,13 +307,16 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   # Statements
   # ---------------------------------------------------------------------------
 
-  defp prepare(sql, params, opts, scope) do
+  # `where` is `:outside` a transaction or `:inside` one.
+  defp prepare(sql, params, opts, where) do
+    TransactionControl.refuse!(sql, where)
+
     case Keyword.get(opts, :dialect, :sqlite) do
       :postgres ->
         {:ok, sql, params, nil}
 
       :sqlite ->
-        with :ok <- refuse_control(sql, scope),
+        with :ok <- refuse_schema_change(sql),
              {:ok, statement, requirements} <- Dialect.translate(sql),
              bound = bound(params, requirements.params),
              :ok <- check_text_params(requirements.text_params, bound) do
@@ -322,25 +325,12 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     end
   end
 
-  # The schema comes from the migrations, and transactions from
-  # `transaction/3`; either one written as a statement is refused. Inside a
-  # transaction a savepoint of the caller's own works as on SQLite.
-  defp refuse_control(sql, scope) do
-    statement = sql |> String.replace(~r/\A(\s|--[^\n]*\n)*/, "")
-
-    cond do
-      Regex.match?(@schema_change, statement) ->
-        {:error, {:unsupported, "schema change outside the migrations"}}
-
-      scope == :transaction and Regex.match?(@savepoint, statement) ->
-        :ok
-
-      Regex.match?(@transaction_control, statement) ->
-        {:error, {:unsupported, "transaction statement outside the store's transaction"}}
-
-      true ->
-        :ok
-    end
+  # The schema comes from the migrations; a schema change written as a
+  # statement is refused, whatever comments come first.
+  defp refuse_schema_change(sql) do
+    if Regex.match?(@schema_change, TransactionControl.statement(sql)),
+      do: {:error, {:unsupported, "schema change outside the migrations"}},
+      else: :ok
   end
 
   # The parameters the translated statement names, in its numbering.

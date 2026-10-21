@@ -63,9 +63,10 @@ defmodule OptimalEngine.Store.SQLite do
   - Any other return value → `ROLLBACK` (fail closed),
     `{:error, {:invalid_transaction_return, other}}`.
   - Transaction control sent as a raw statement is refused with
-    `ArgumentError`: BEGIN, COMMIT, END, ROLLBACK, SAVEPOINT and RELEASE
-    through `raw_query/2` or `raw_execute/2`, and BEGIN, COMMIT, END and a
-    plain ROLLBACK through `txn_query/3` or `txn_execute/3` (savepoints stay
+    `ArgumentError`, as on PostgreSQL (`OptimalEngine.Store.TransactionControl`):
+    BEGIN, COMMIT, END, ROLLBACK, SAVEPOINT, RELEASE, START and ABORT through
+    `raw_query/2` or `raw_execute/2`, and BEGIN, COMMIT, END, START, ABORT and
+    a plain ROLLBACK through `txn_query/3` or `txn_execute/3` (savepoints stay
     available inside a transaction). A transaction opened by one raw call
     would stay open across every other caller's statements.
 
@@ -83,7 +84,7 @@ defmodule OptimalEngine.Store.SQLite do
   require Logger
 
   alias OptimalEngine.{Context, Graph, Signal}
-  alias OptimalEngine.Store.SQLiteTransaction
+  alias OptimalEngine.Store.{SQLiteTransaction, TransactionControl}
 
   @ets_table :optimal_engine_store_cache
 
@@ -357,15 +358,15 @@ defmodule OptimalEngine.Store.SQLite do
   @doc """
   Executes a raw SELECT query. Returns list of rows.
 
-  Raises `ArgumentError` for transaction control (BEGIN, COMMIT, END, ROLLBACK,
-  SAVEPOINT, RELEASE): every call is its own Store call, so a transaction
-  opened here would stay open across other callers' statements. Use
-  `transaction/2`.
+  Raises `ArgumentError` for transaction control
+  (`OptimalEngine.Store.TransactionControl`): every call is its own Store
+  call, so a transaction opened here would stay open across other callers'
+  statements. Use `transaction/2`.
   """
   @spec raw_query(String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def raw_query(sql, params \\ []) do
-    refuse_transaction_control!(sql, :outside)
+    TransactionControl.refuse!(sql, :outside)
     GenServer.call(__MODULE__, {:raw_query, sql, params}, OptimalEngine.Store.call_timeout())
   end
 
@@ -373,7 +374,7 @@ defmodule OptimalEngine.Store.SQLite do
   @spec raw_execute(String.t(), [term()]) :: :ok | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def raw_execute(sql, params \\ []) do
-    refuse_transaction_control!(sql, :outside)
+    TransactionControl.refuse!(sql, :outside)
     GenServer.call(__MODULE__, {:raw_execute, sql, params}, OptimalEngine.Store.call_timeout())
   end
 
@@ -410,7 +411,7 @@ defmodule OptimalEngine.Store.SQLite do
   @spec txn_query(term(), String.t(), [term()], keyword()) :: {:ok, [[term()]]} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def txn_query({:txn, db}, sql, params \\ [], _opts \\ []) do
-    refuse_transaction_control!(sql, :inside)
+    TransactionControl.refuse!(sql, :inside)
 
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
          :ok <- Exqlite.Sqlite3.bind(stmt, params) do
@@ -429,7 +430,7 @@ defmodule OptimalEngine.Store.SQLite do
           {:ok, non_neg_integer()} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def txn_execute({:txn, db}, sql, params \\ [], _opts \\ []) do
-    refuse_transaction_control!(sql, :inside)
+    TransactionControl.refuse!(sql, :inside)
 
     with :ok <- exec_stmt(db, sql, params) do
       Exqlite.Sqlite3.changes(db)
@@ -1184,66 +1185,6 @@ defmodule OptimalEngine.Store.SQLite do
         {:error, _} = err -> {:halt, err}
       end
     end)
-  end
-
-  # The Store owns every transaction on its connection. A raw statement is its
-  # own Store call, so a BEGIN sent that way would stay open across the
-  # statements of every other caller until a later COMMIT arrived, and their
-  # own transactions would fail with "cannot start a transaction within a
-  # transaction". Inside transaction/2 the transaction is already open: only
-  # savepoints (SAVEPOINT, RELEASE, ROLLBACK TO) may be used there.
-  @transaction_control ~w(BEGIN COMMIT END ROLLBACK SAVEPOINT RELEASE)
-
-  #
-  # The keyword is read as SQLite's tokenizer reads it: after any leading
-  # whitespace, comments and empty statements, the letters up to the first
-  # character that is not one, so `COMMIT--x` and `BEGIN/**/IMMEDIATE` are
-  # COMMIT and BEGIN.
-  defp refuse_transaction_control!(sql, where) when is_binary(sql) do
-    text = strip_leading_comments(sql)
-
-    keyword =
-      case Regex.run(~r/\A[A-Za-z]+/, text) do
-        [word] -> String.upcase(word)
-        nil -> ""
-      end
-
-    refused? =
-      case {where, keyword} do
-        {_where, keyword} when keyword not in @transaction_control -> false
-        {:outside, _keyword} -> true
-        # ROLLBACK TO <savepoint> (or ROLLBACK TRANSACTION TO) stays in the transaction.
-        {:inside, "ROLLBACK"} -> not Regex.match?(~r/\AROLLBACK(\s+TRANSACTION)?\s+TO\b/i, text)
-        {:inside, keyword} -> keyword in ~w(BEGIN COMMIT END)
-      end
-
-    if refused? do
-      raise ArgumentError,
-            "#{keyword} is transaction control; run the statements in " <>
-              "OptimalEngine.Store.transaction/2 instead of sending #{keyword} as a raw statement"
-    end
-
-    :ok
-  end
-
-  defp refuse_transaction_control!(_sql, _where), do: :ok
-
-  # A block comment ends at the first `*/` after its opening `/*`, so `/*/`
-  # does not close it.
-  defp strip_leading_comments(sql) do
-    case String.trim_leading(sql) do
-      "--" <> rest ->
-        rest |> String.split("\n", parts: 2) |> Enum.at(1, "") |> strip_leading_comments()
-
-      "/*" <> rest ->
-        rest |> String.split("*/", parts: 2) |> Enum.at(1, "") |> strip_leading_comments()
-
-      ";" <> rest ->
-        strip_leading_comments(rest)
-
-      trimmed ->
-        trimmed
-    end
   end
 
   # Runs a caller fun inside BEGIN IMMEDIATE .. COMMIT/ROLLBACK on the owned
