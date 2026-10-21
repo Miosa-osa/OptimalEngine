@@ -3784,6 +3784,12 @@ defmodule OptimalEngine.API.Router do
   delete("/api/federation/peers/:workspace_id", do: ScopeAPI.remove_peer(conn, workspace_id))
   post("/api/workspaces/:id/bundle", do: ScopeAPI.export_bundle(conn, id))
   post("/api/workspaces/:id/finalize-move", do: ScopeAPI.finalize_move(conn, id))
+  # Bundle jobs come before /api/bundles/:name, which would take "jobs" as a name.
+  post("/api/bundles/jobs/export", do: OptimalEngine.API.BundleJobsAPI.export(conn))
+  post("/api/bundles/jobs/import", do: OptimalEngine.API.BundleJobsAPI.import(conn))
+  get("/api/bundles/jobs", do: OptimalEngine.API.BundleJobsAPI.list(conn))
+  get("/api/bundles/jobs/:id", do: OptimalEngine.API.BundleJobsAPI.status(conn, id))
+  post("/api/bundles/jobs/:id/cancel", do: OptimalEngine.API.BundleJobsAPI.cancel(conn, id))
   get("/api/bundles/:name", do: ScopeAPI.download_bundle(conn, name))
   post("/api/bundles/import", do: ScopeAPI.import_bundle(conn))
   get("/api/resolve", do: ScopeAPI.resolve(conn))
