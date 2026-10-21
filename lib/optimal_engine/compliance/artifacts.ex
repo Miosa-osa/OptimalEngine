@@ -114,6 +114,8 @@ defmodule OptimalEngine.Compliance.Artifacts do
   """
   @spec purge_workspace(String.t(), plan() | nil) :: {:ok, removed()} | {:error, term()}
   def purge_workspace(workspace_id, taken \\ nil)
+
+  def purge_workspace(workspace_id, taken)
       when is_binary(workspace_id) and workspace_id != "" do
     with {:ok, plan} <- taken_or_read(taken, workspace_id),
          {:ok, removed} <- remove(plan.artifacts),
