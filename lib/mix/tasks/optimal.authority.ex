@@ -16,7 +16,7 @@ defmodule Mix.Tasks.Optimal.Authority do
       mix optimal.authority effective <subject> [--workspace ws]
       mix optimal.authority verify
       mix optimal.authority checkpoint [--anchor text]
-      mix optimal.authority export [--until <seq>] [--out evidence.json]
+      mix optimal.authority export [--until <seq>] [--format json|ndjson] [--out evidence.json]
       mix optimal.authority integrity [--record]
       mix optimal.authority keys
 
@@ -51,6 +51,7 @@ defmodule Mix.Tasks.Optimal.Authority do
           anchor: :string,
           out: :string,
           until: :integer,
+          format: :string,
           record: :boolean
         ],
         aliases: [t: :tenant, w: :workspace]
@@ -151,8 +152,16 @@ defmodule Mix.Tasks.Optimal.Authority do
   # The bundle is written as the entries are read, a page at a time, so a chain of any
   # length is exported whole in bounded memory: one bundle `Evidence.export/2` would
   # return with every entry through the head (the chain's last entry when the export
-  # starts, or the one at --until), and so complete.
+  # starts, or the one at --until), and so complete. --format ndjson writes each entry
+  # on a line, then the export_end line.
   defp export(tenant, opts) do
+    ndjson? =
+      case opts[:format] || "json" do
+        "json" -> false
+        "ndjson" -> true
+        _other -> Mix.raise("--format must be json or ndjson")
+      end
+
     head =
       case Evidence.head(tenant, until: opts[:until]) do
         {:ok, head} -> head
@@ -161,31 +170,42 @@ defmodule Mix.Tasks.Optimal.Authority do
 
     through = if head, do: head["seq"], else: 0
     device = if opts[:out], do: File.open!(opts[:out], [:write]), else: :stdio
-    IO.binwrite(device, [~s({"tenant_id":), Jason.encode!(tenant), ~s(,"entries":[\n)])
+
+    unless ndjson?,
+      do: IO.binwrite(device, [~s({"tenant_id":), Jason.encode!(tenant), ~s(,"entries":[\n)])
 
     {count, last} =
       tenant
       |> Evidence.stream("tenant_seq <= ?2", [through])
       |> Enum.reduce({0, 0}, fn entry, {written, _last} ->
-        IO.binwrite(device, [if(written > 0, do: ",\n", else: ""), Jason.encode!(entry)])
+        line =
+          cond do
+            ndjson? -> [Jason.encode!(entry), "\n"]
+            written > 0 -> [",\n", Jason.encode!(entry)]
+            true -> Jason.encode!(entry)
+          end
+
+        IO.binwrite(device, line)
         {written + 1, entry["seq"]}
       end)
 
-    IO.binwrite(device, [
-      ~s(\n],"complete":),
-      Jason.encode!(last == through),
-      ~s(,"total":),
-      Jason.encode!(count),
-      ~s(,"head":),
-      Jason.encode!(head),
-      ~s(,"head_signature":),
-      Jason.encode!(Evidence.head_signature(tenant, head)),
-      ~s(,"next_after":null,"keys":),
-      Jason.encode!(Keys.jwks(tenant)),
-      ~s(,"checkpoints":),
-      Jason.encode!(Evidence.checkpoints(tenant)),
-      "}\n"
-    ])
+    rest = %{
+      "tenant_id" => tenant,
+      "complete" => last == through,
+      "total" => count,
+      "head" => head,
+      "head_signature" => Evidence.head_signature(tenant, head),
+      "next_after" => nil,
+      "keys" => Keys.jwks(tenant),
+      "checkpoints" => Evidence.checkpoints(tenant)
+    }
+
+    if ndjson? do
+      IO.binwrite(device, [Evidence.export_end(rest), "\n"])
+    else
+      "{" <> fields = rest |> Map.delete("tenant_id") |> Jason.encode!()
+      IO.binwrite(device, ["\n],", fields, "\n"])
+    end
 
     if opts[:out] do
       File.close(device)

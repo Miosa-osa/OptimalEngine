@@ -369,7 +369,8 @@ defmodule OptimalEngine.API.AuthorityRouter do
     end
   end
 
-  # ?after=&limit=&until=: a page of the chain; pages read with one until share its head.
+  # ?after=&limit=&until=&format=json|ndjson: a page of the chain; pages read with one
+  # until share its head. NDJSON is each entry on a line, then an export_end line.
   get "/evidence/export" do
     conn = fetch_query_params(conn)
     q = conn.query_params
@@ -377,12 +378,23 @@ defmodule OptimalEngine.API.AuthorityRouter do
     opts = [after: parse_int(q["after"], 0), limit: parse_int(q["limit"], 10_000)]
     until = if q["until"] in [nil, ""], do: nil, else: parse_int(q["until"], :invalid)
 
-    case Evidence.export(tenant(conn), Keyword.put(opts, :until, until)) do
-      {:ok, bundle} ->
-        json(conn, 200, bundle)
+    format = q["format"] || "json"
 
-      {:error, :until_out_of_range} ->
-        error(conn, 400, "until_out_of_range")
+    if format in ["json", "ndjson"] do
+      case Evidence.export(tenant(conn), Keyword.put(opts, :until, until)) do
+        {:ok, page} when format == "ndjson" ->
+          conn
+          |> put_resp_content_type("application/x-ndjson")
+          |> send_resp(200, Evidence.to_ndjson(page))
+
+        {:ok, page} ->
+          json(conn, 200, page)
+
+        {:error, :until_out_of_range} ->
+          error(conn, 400, "until_out_of_range")
+      end
+    else
+      error(conn, 400, "format must be json or ndjson")
     end
   end
 

@@ -390,6 +390,22 @@ defmodule OptimalEngine.Authority.Evidence do
   end
 
   @doc """
+  A page as NDJSON: each entry on its own line, unchanged, then one `export_end` line
+  with `"type" => "export_end"` and the page's other fields (`head`, `head_signature`,
+  `total`, `complete`, `next_after`, `keys`, `checkpoints`, `tenant_id`).
+  """
+  @spec to_ndjson(map()) :: iodata()
+  def to_ndjson(%{"entries" => entries} = page) do
+    [Enum.map(entries, &[Jason.encode_to_iodata!(&1), ?\n]), export_end(page), ?\n]
+  end
+
+  @doc "The `export_end` line of an NDJSON export of `page`, without its newline."
+  @spec export_end(map()) :: iodata()
+  def export_end(page) do
+    page |> Map.delete("entries") |> Map.put("type", "export_end") |> Jason.encode_to_iodata!()
+  end
+
+  @doc """
   An export's head: `{"seq", "hash"}` of the chain's last entry, or with `until:` of
   the entry at that seq; `nil` for an empty chain. `{:error, :until_out_of_range}`
   when `until:` names no entry, or one below `after:` (default 0).
