@@ -367,6 +367,80 @@ defmodule OptimalEngine.Connectors.RunnerTest do
              )
   end
 
+  test "a run whose run row cannot be completed keeps its cursor and records the failure",
+       %{id: id} do
+    register_cursor_connector(id)
+
+    # The run row's completion (the transaction's second statement) fails, so
+    # the cursor advance in the same transaction is rolled back too.
+    trigger = "runner_fail_#{System.unique_integer([:positive])}"
+
+    :ok =
+      Store.raw_execute("""
+      CREATE TRIGGER #{trigger} BEFORE UPDATE ON connector_runs
+      WHEN NEW.connector_id = '#{id}' AND NEW.status = 'success'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced failure');
+      END
+      """)
+
+    on_exit(fn -> Store.raw_execute("DROP TRIGGER IF EXISTS #{trigger}") end)
+
+    assert {:ok, %{status: :error, reason: :persist_failed, cursor_after: nil}} =
+             capture_runner_log(fn ->
+               Runner.run(id, governed: false, adapter_resolver: adapter(CursorAdapter))
+             end)
+
+    assert_persist_failed(id)
+  end
+
+  test "a run whose transaction raises keeps its cursor and records the failure", %{id: id} do
+    register_cursor_connector(id)
+
+    # A cursor the store cannot bind raises inside the transaction.
+    assert {:ok, %{status: :error, reason: :persist_failed, cursor_after: nil}} =
+             capture_runner_log(fn ->
+               Runner.run(id, governed: false, adapter_resolver: adapter(MapCursorAdapter))
+             end)
+
+    assert_persist_failed(id)
+  end
+
+  defp register_cursor_connector(id) do
+    {:ok, ^id} =
+      Connectors.register(%{
+        id: id,
+        kind: :slack,
+        config: %{
+          "workspace_id" => "T01",
+          "channels" => ["C01"],
+          "credentials" => %{"bot_token" => "xoxb-test"}
+        }
+      })
+  end
+
+  defp adapter(name) do
+    mod = Module.concat(__MODULE__, name)
+    fn "slack" -> {:ok, mod} end
+  end
+
+  defp capture_runner_log(fun) do
+    parent = self()
+    ExUnit.CaptureLog.capture_log(fn -> send(parent, {:run, fun.()}) end)
+    assert_received {:run, result}
+    result
+  end
+
+  defp assert_persist_failed(id) do
+    assert {:ok, [[nil]]} = Store.raw_query("SELECT cursor FROM connectors WHERE id = ?1", [id])
+
+    assert {:ok, [["error", "persist_failed", nil]]} =
+             Store.raw_query(
+               "SELECT status, error_detail, cursor_after FROM connector_runs WHERE connector_id = ?1",
+               [id]
+             )
+  end
+
   describe "Transform helpers" do
     test "signal_id/2 is deterministic" do
       a = Transform.signal_id(:slack, "abc")
@@ -471,6 +545,33 @@ defmodule OptimalEngine.Connectors.RunnerTest.CursorAdapter do
 
     {:ok, [], "cursor-#{n}"}
   end
+
+  @impl true
+  def transform(_payload), do: {:error, :not_used}
+end
+
+defmodule OptimalEngine.Connectors.RunnerTest.MapCursorAdapter do
+  @moduledoc false
+  @behaviour OptimalEngine.Connectors.Behaviour
+
+  @impl true
+  def kind, do: :slack
+
+  @impl true
+  def display_name, do: "Map Cursor Test"
+
+  @impl true
+  def auth_scheme, do: :token
+
+  @impl true
+  def required_config_keys, do: []
+
+  @impl true
+  def init(config), do: {:ok, config}
+
+  # A cursor is text; a map is a cursor the store cannot write.
+  @impl true
+  def sync(_state, _cursor), do: {:ok, [], %{"page" => 2}}
 
   @impl true
   def transform(_payload), do: {:error, :not_used}

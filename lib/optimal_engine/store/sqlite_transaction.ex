@@ -8,11 +8,22 @@ defmodule OptimalEngine.Store.SQLiteTransaction do
   on the connection would then fail with "cannot start a transaction within a
   transaction". So a failed COMMIT is rolled back and reported as
   `{:error, {:commit_failed, reason}}`, and the connection is always left
-  outside a transaction.
+  outside a transaction. A connection that a ROLLBACK cannot take out of its
+  transaction raises `StillOpenError`.
 
   `OptimalEngine.Store.SQLite` runs every transaction through `run/3`, inside
   its own process. Callers outside the Store use `OptimalEngine.Store.transaction/2`.
   """
+
+  defmodule StillOpenError do
+    @moduledoc """
+    The connection is still inside a transaction after its ROLLBACK. Every
+    later BEGIN on it would fail, so its owner must stop using it.
+    """
+    defexception message:
+                   "the connection is still inside a transaction after ROLLBACK; " <>
+                     "it must be replaced"
+  end
 
   @doc """
   Runs `fun` in a transaction opened with `begin_sql` (`"BEGIN"` by default).
@@ -58,9 +69,22 @@ defmodule OptimalEngine.Store.SQLiteTransaction do
   end
 
   # SQLite may already have ended the transaction (some errors roll back on
-  # their own), so a failed ROLLBACK means there was nothing left to end.
+  # their own), so a failed ROLLBACK is fine when nothing is left to end.
   defp rollback(db) do
     _ = Exqlite.Sqlite3.execute(db, "ROLLBACK")
-    :ok
+    ensure_ended!(db)
+  end
+
+  @doc """
+  Returns `:ok` when the connection is outside a transaction, and raises
+  `StillOpenError` when it is not: every later BEGIN on it would fail, so the
+  owner must replace the connection. Runs after every ROLLBACK.
+  """
+  @spec ensure_ended!(reference()) :: :ok
+  def ensure_ended!(db) do
+    case Exqlite.Sqlite3.transaction_status(db) do
+      {:ok, :transaction} -> raise StillOpenError
+      {:ok, :idle} -> :ok
+    end
   end
 end

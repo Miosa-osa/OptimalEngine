@@ -631,7 +631,8 @@ defmodule OptimalEngine.Connectors.Runner do
   # other caller's statement can land between them. A BEGIN sent as its own
   # Store call would stay open across the calls that follow, and every other
   # caller's own transaction would fail with "cannot start a transaction
-  # within a transaction" until the COMMIT arrived.
+  # within a transaction" until the COMMIT arrived. A transaction that raises
+  # or exits is a failed persist too, so the run row is never left 'running'.
   defp persist_success(row, run_id, signals, errors, next_cursor, err_detail) do
     params =
       complete_run_params(run_id, :success, signals, errors, row.cursor, next_cursor, err_detail)
@@ -656,6 +657,14 @@ defmodule OptimalEngine.Connectors.Runner do
         Logger.error("[Runner] transaction aborted: #{inspect(reason)}")
         :error
     end
+  rescue
+    error ->
+      Logger.error("[Runner] transaction raised: #{Exception.message(error)}")
+      :error
+  catch
+    :exit, reason ->
+      Logger.error("[Runner] transaction exited: #{inspect(reason)}")
+      :error
   end
 
   defp disable_connector(connector_id) do

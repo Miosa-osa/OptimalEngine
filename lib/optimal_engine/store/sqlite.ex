@@ -72,7 +72,9 @@ defmodule OptimalEngine.Store.SQLite do
   The Store's own multi-row inserts run through the same
   `OptimalEngine.Store.SQLiteTransaction`, which checks the COMMIT: a COMMIT
   that fails is rolled back, so the connection is never left inside a
-  transaction.
+  transaction. If a ROLLBACK cannot end the transaction either, the Store
+  stops (`OptimalEngine.Store.SQLiteTransaction.StillOpenError`) and its
+  supervisor starts it again on a new connection.
   """
 
   @behaviour OptimalEngine.Store.Adapter
@@ -1135,10 +1137,20 @@ defmodule OptimalEngine.Store.SQLite do
   # Private: Insert
   # ---------------------------------------------------------------------------
 
+  # Each context is cached as it is written, before the COMMIT, so a batch
+  # that does not commit is dropped from the cache again.
   defp insert_in_transaction(db, contexts) do
-    SQLiteTransaction.run(db, fn ->
-      with :ok <- each_row(contexts, &do_insert(db, &1)), do: {:ok, length(contexts)}
-    end)
+    result =
+      SQLiteTransaction.run(db, fn ->
+        with :ok <- each_row(contexts, &do_insert(db, &1)), do: {:ok, length(contexts)}
+      end)
+
+    case result do
+      {:ok, _count} -> :ok
+      _not_committed -> Enum.each(contexts, &:ets.delete(@ets_table, &1.id))
+    end
+
+    result
   end
 
   # Every row in one transaction, stopping at the first failure. The
@@ -1166,17 +1178,26 @@ defmodule OptimalEngine.Store.SQLite do
   # savepoints (SAVEPOINT, RELEASE, ROLLBACK TO) may be used there.
   @transaction_control ~w(BEGIN COMMIT END ROLLBACK SAVEPOINT RELEASE)
 
+  #
+  # The keyword is read as SQLite's tokenizer reads it: after any leading
+  # whitespace, comments and empty statements, the letters up to the first
+  # character that is not one, so `COMMIT--x` and `BEGIN/**/IMMEDIATE` are
+  # COMMIT and BEGIN.
   defp refuse_transaction_control!(sql, where) when is_binary(sql) do
-    words = sql |> strip_leading_comments() |> String.split(~r/[\s;(]+/, parts: 4, trim: true)
+    text = strip_leading_comments(sql)
 
-    keyword = words |> List.first("") |> String.upcase()
+    keyword =
+      case Regex.run(~r/\A[A-Za-z]+/, text) do
+        [word] -> String.upcase(word)
+        nil -> ""
+      end
 
     refused? =
       case {where, keyword} do
         {_where, keyword} when keyword not in @transaction_control -> false
         {:outside, _keyword} -> true
         # ROLLBACK TO <savepoint> (or ROLLBACK TRANSACTION TO) stays in the transaction.
-        {:inside, "ROLLBACK"} -> not Enum.any?(Enum.take(words, 3), &(String.upcase(&1) == "TO"))
+        {:inside, "ROLLBACK"} -> not Regex.match?(~r/\AROLLBACK(\s+TRANSACTION)?\s+TO\b/i, text)
         {:inside, keyword} -> keyword in ~w(BEGIN COMMIT END)
       end
 
@@ -1191,17 +1212,20 @@ defmodule OptimalEngine.Store.SQLite do
 
   defp refuse_transaction_control!(_sql, _where), do: :ok
 
+  # A block comment ends at the first `*/` after its opening `/*`, so `/*/`
+  # does not close it.
   defp strip_leading_comments(sql) do
-    trimmed = String.trim_leading(sql)
+    case String.trim_leading(sql) do
+      "--" <> rest ->
+        rest |> String.split("\n", parts: 2) |> Enum.at(1, "") |> strip_leading_comments()
 
-    cond do
-      String.starts_with?(trimmed, "--") ->
-        trimmed |> String.split("\n", parts: 2) |> Enum.at(1, "") |> strip_leading_comments()
+      "/*" <> rest ->
+        rest |> String.split("*/", parts: 2) |> Enum.at(1, "") |> strip_leading_comments()
 
-      String.starts_with?(trimmed, "/*") ->
-        trimmed |> String.split("*/", parts: 2) |> Enum.at(1, "") |> strip_leading_comments()
+      ";" <> rest ->
+        strip_leading_comments(rest)
 
-      true ->
+      trimmed ->
         trimmed
     end
   end
@@ -1221,6 +1245,9 @@ defmodule OptimalEngine.Store.SQLite do
       end
     end)
   catch
+    # The connection is still inside a transaction it could not end. The Store
+    # stops, and its supervisor starts it again on a new connection.
+    :error, %SQLiteTransaction.StillOpenError{} = error -> reraise error, __STACKTRACE__
     kind, reason -> {:__txn_raise__, kind, reason, __STACKTRACE__}
   end
 
