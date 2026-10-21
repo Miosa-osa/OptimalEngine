@@ -194,6 +194,60 @@ defmodule OptimalEngine.Store.CacheErasureTest do
       assert count("principals", "id", principal) == 0
     end
 
+    test "removes the checkpoints of the contexts it erases and no other run's", ctx do
+      {:ok, home} = Workspace.create(%{slug: "cache-runs-#{ctx.n}", name: "Runs"})
+      principal = "user:cache-runs-#{ctx.n}@test"
+      bystander = "user:cache-runs-other-#{ctx.n}@test"
+      {:ok, _} = Principal.upsert(%{id: principal, kind: :user, display_name: "Subject"})
+      {:ok, _} = Principal.upsert(%{id: bystander, kind: :user, display_name: "Other"})
+
+      context!("runs-gone-#{ctx.n}", "default", home.id, principal, "the subject's text")
+      context!("runs-kept-#{ctx.n}", "default", home.id, bystander, "another person's text")
+      gone_run = checkpoint!(ctx, home.id, "run-gone-#{ctx.n}", ctx.doomed)
+      kept_run = checkpoint!(ctx, home.id, "run-kept-#{ctx.n}", ctx.kept)
+      link_package!("runs-gone-#{ctx.n}", "pkg-run-gone-#{ctx.n}")
+      link_package!("runs-kept-#{ctx.n}", "pkg-run-kept-#{ctx.n}")
+
+      assert {:ok, _report} = Erasure.erase(principal)
+
+      refute File.exists?(gone_run)
+      # A decomposition in flight, or one of a context that stays, keeps its checkpoint.
+      assert File.exists?(kept_run)
+      assert pointer("run-kept-#{ctx.n}") == kept_run
+    end
+
+    test "purges the cache of the principal's workspaces when a batch fails", ctx do
+      {:ok, home} = Workspace.create(%{slug: "cache-failing-#{ctx.n}", name: "Failing"})
+      principal = "user:cache-failing-#{ctx.n}@test"
+      {:ok, _} = Principal.upsert(%{id: principal, kind: :user, display_name: "Subject"})
+
+      count = OptimalEngine.Compliance.DerivedData.batch_size() + 5
+
+      for i <- 1..count,
+          do: context!("failing-#{ctx.n}-#{i}", "default", home.id, principal, "text #{i}")
+
+      embed!("default", home.id, "#{ctx.doomed} embedded before the erasure")
+      assert marker_in_cache?(ctx.dir, ctx.doomed)
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          CREATE TRIGGER IF NOT EXISTS cache_erasure_test_poison BEFORE DELETE ON contexts
+          WHEN old.id = 'failing-#{ctx.n}-#{count}'
+          BEGIN SELECT RAISE(ABORT, 'refused'); END
+          """,
+          []
+        )
+
+      on_exit(fn -> Store.raw_query("DROP TRIGGER IF EXISTS cache_erasure_test_poison", []) end)
+
+      assert {:error, _} = Erasure.erase(principal)
+
+      # Some contexts went before the batch that failed; what the cache holds for the
+      # workspace must not outlive them.
+      refute marker_in_cache?(ctx.dir, ctx.doomed)
+    end
+
     test "the dry run also counts the claims, packages and pages it would delete", ctx do
       {:ok, home} = Workspace.create(%{slug: "cache-dry-#{ctx.n}", name: "Dry"})
       principal = "user:cache-dry-#{ctx.n}@test"
@@ -269,6 +323,30 @@ defmodule OptimalEngine.Store.CacheErasureTest do
 
       assert length(cache_files(ctx.dir)) == 1
       refute marker_in_cache?(ctx.dir, ctx.doomed)
+    end
+
+    test "that deletes removes the deleted context's checkpoint and no other run's", ctx do
+      {:ok, _} =
+        Retention.add_policy(
+          tenant_id: ctx.tenant,
+          scope_type: "tenant",
+          ttl_days: 1,
+          action: "delete"
+        )
+
+      old_context!("ret-run-old-#{ctx.n}", ctx.tenant, ctx.workspace, "an expired record")
+      context!("ret-run-new-#{ctx.n}", ctx.tenant, ctx.workspace, "user:test", "a current record")
+      gone_run = checkpoint!(ctx, ctx.workspace, "run-ret-gone-#{ctx.n}", ctx.doomed)
+      kept_run = checkpoint!(ctx, ctx.workspace, "run-ret-kept-#{ctx.n}", ctx.kept)
+      link_package!("ret-run-old-#{ctx.n}", "pkg-run-ret-gone-#{ctx.n}")
+      link_package!("ret-run-new-#{ctx.n}", "pkg-run-ret-kept-#{ctx.n}")
+
+      assert {:ok, %{actions_taken: 1, errors: 0}} = Retention.sweep(tenant_id: ctx.tenant)
+
+      assert count("contexts", "id", "ret-run-old-#{ctx.n}") == 0
+      assert count("contexts", "id", "ret-run-new-#{ctx.n}") == 1
+      refute File.exists?(gone_run)
+      assert File.exists?(kept_run)
     end
 
     test "that only archives leaves the cache alone", ctx do
@@ -371,7 +449,7 @@ defmodule OptimalEngine.Store.CacheErasureTest do
         })
 
       run = checkpoint!(ctx, workspace.id, "run-move-#{ctx.n}", ctx.doomed)
-      copy = asset_copy!(ctx, workspace.id, "move-#{ctx.n}", ctx.doomed)
+      copy = asset_copy!(ctx, workspace.id, "move-#{ctx.n}", ctx.doomed, tenant)
 
       path = Path.join(System.tmp_dir!(), "files-move-#{ctx.n}.tar.gz")
       on_exit(fn -> File.rm(path) end)
@@ -432,7 +510,15 @@ defmodule OptimalEngine.Store.CacheErasureTest do
   defp checkpoint!(ctx, workspace_id, run_id, text) do
     path = Path.join([ctx.dir, "decomposition", "#{run_id}.json"])
     File.mkdir_p!(Path.dirname(path))
-    File.write!(path, Jason.encode!(%{run_id: run_id, output: %{chunks: [%{text: text}]}}))
+
+    File.write!(
+      path,
+      Jason.encode!(%{
+        run_id: run_id,
+        workspace_id: workspace_id,
+        output: %{chunks: [%{text: text}]}
+      })
+    )
 
     {:ok, _} =
       Store.raw_query(
@@ -447,8 +533,8 @@ defmodule OptimalEngine.Store.CacheErasureTest do
   end
 
   # An asset stored in an object store, and the local copy made for a parser.
-  defp asset_copy!(ctx, workspace_id, name, text) do
-    key = "default/#{workspace_id}/assets/ab/#{name}.bin"
+  defp asset_copy!(ctx, workspace_id, name, text, tenant \\ "default") do
+    key = "#{tenant}/#{workspace_id}/assets/ab/#{name}.bin"
     copy = Path.join([ctx.dir, "assets", key])
     File.mkdir_p!(Path.dirname(copy))
     File.write!(copy, text)
@@ -457,12 +543,22 @@ defmodule OptimalEngine.Store.CacheErasureTest do
       Store.raw_query(
         """
         INSERT INTO assets (id, tenant_id, content_type, size_bytes, storage_path, workspace_id)
-        VALUES (?1, 'default', 'text/plain', ?2, ?3, ?4)
+        VALUES (?1, ?5, 'text/plain', ?2, ?3, ?4)
         """,
-        ["asset-#{name}", byte_size(text), "s3://bucket/#{key}", workspace_id]
+        ["asset-#{name}", byte_size(text), "s3://bucket/#{key}", workspace_id, tenant]
       )
 
     copy
+  end
+
+  # The context was made from this source package, which is how the rows of a package
+  # (its decomposition runs among them) are found when the context is deleted.
+  defp link_package!(context_id, package_id) do
+    {:ok, _} =
+      Store.raw_query(
+        "UPDATE contexts SET metadata = json_object('source_package_id', ?1) WHERE id = ?2",
+        [package_id, context_id]
+      )
   end
 
   defp pointer(run_id) do

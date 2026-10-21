@@ -363,53 +363,109 @@ defmodule OptimalEngine.Store.FileCache do
   end
 
   defp read_or_create_secret(path) do
-    case File.read(path) do
-      {:ok, body} ->
-        case Base.decode16(String.trim(body), case: :mixed) do
-          {:ok, secret} when byte_size(secret) == 32 -> {:ok, secret}
-          _unreadable -> create_secret(path)
-        end
+    case read_secret(path) do
+      {:ok, secret} ->
+        {:ok, secret}
 
-      {:error, :enoent} ->
+      :missing ->
         create_secret(path)
+
+      # Something is there that is not a key: it goes, with the entries made under whatever
+      # it was.
+      :unreadable ->
+        case File.rm(path) do
+          result when result in [:ok, {:error, :enoent}] -> create_secret(path)
+          {:error, reason} -> {:error, {:cache_key_unavailable, reason}}
+        end
 
       {:error, reason} ->
         {:error, {:cache_key_unavailable, reason}}
     end
   end
 
+  defp read_secret(path) do
+    case File.read(path) do
+      {:ok, body} ->
+        case Base.decode16(String.trim(body), case: :mixed) do
+          {:ok, secret} when byte_size(secret) == 32 -> {:ok, secret}
+          _unreadable -> :unreadable
+        end
+
+      {:error, :enoent} ->
+        :missing
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   # Entries under another secret can never be found again by a purge, so they go before
   # the new secret is written: a crash in between repeats the removal at the next boot.
+  # The key is published only if no key is there (a link of the finished file: complete or
+  # absent, never half written), so two callers starting together end up with one key, the
+  # first one's, and the second removes only entries that cannot be found by a purge either.
   defp create_secret(path) do
     secret = :crypto.strong_rand_bytes(32)
+    body = Base.encode16(secret, case: :lower)
     tmp = path <> ".tmp-#{System.unique_integer([:positive])}"
-    tenants = Path.join(root(), @tenants)
-    {files, bytes} = measure(tenants)
 
-    with :ok <- remove_unattributable(tenants),
+    with {:ok, removed} <- remove_all_entries(),
          :ok <- mkdir_private(Path.dirname(path)),
-         :ok <- write_private(tmp, Base.encode16(secret, case: :lower)),
-         :ok <- File.rename(tmp, path) do
-      if files > 0 do
-        Logger.warning(
-          "[FileCache] created the cache key; #{files} cache entries (#{bytes} bytes) written under " <>
-            "another key cannot be attributed to a workspace and were removed"
-        )
-      end
-
+         :ok <- write_private(tmp, body),
+         :ok <- publish_key(tmp, path, body) do
+      File.rm(tmp)
+      log_unattributable(removed)
       {:ok, secret}
     else
+      {:error, :eexist} ->
+        File.rm(tmp)
+        # Another caller published first: its key is the install's.
+        case read_secret(path) do
+          {:ok, existing} -> {:ok, existing}
+          _not_a_key -> {:error, {:cache_key_unavailable, :eexist}}
+        end
+
       {:error, reason} ->
         File.rm(tmp)
         {:error, {:cache_key_unavailable, reason}}
     end
   end
 
-  defp remove_unattributable(tenants) do
-    case remove_tree(tenants) do
+  # A link of the finished file; a file system that cannot link gets the file created
+  # exclusively, which is the same guarantee that nothing is replaced.
+  defp publish_key(tmp, path, body) do
+    case :file.make_link(tmp, path) do
       :ok -> :ok
-      {:error, reason, _path} -> {:error, reason}
+      {:error, :eexist} -> {:error, :eexist}
+      {:error, _cannot_link} -> write_private(path, body)
     end
+  end
+
+  defp log_unattributable(%{files: 0}), do: :ok
+
+  defp log_unattributable(%{files: files, bytes: bytes}) do
+    Logger.warning(
+      "[FileCache] created the cache key; #{files} cache entries (#{bytes} bytes) written under " <>
+        "another key cannot be attributed to a workspace and were removed"
+    )
+  end
+
+  # Every entry of the cache's shape, whatever secret named it, and nothing else:
+  # `<cache_path>/tenants` can hold other things (a cache path that is also an Engine root
+  # has its tenants' workspaces there), so a directory is removed only once it is empty.
+  defp remove_all_entries do
+    tenants = Path.join(root(), @tenants)
+
+    removed =
+      sweep_dir(
+        tenants,
+        [&hex64?/1, &hex64?/1, &namespace?/1, &shard?/1],
+        System.os_time(:second) + 1,
+        %{files: 0, bytes: 0}
+      )
+
+    File.rmdir(tenants)
+    {:ok, removed}
   end
 
   # ── private files and directories ──────────────────────────────────────────

@@ -109,7 +109,7 @@ The contexts go in batches of 200, each batch one transaction together with the 
 A source package shared with a context that stays is kept, and so is an asset file shared with an asset that stays.
 A retention sweep that deletes a context removes the same derived material and purges its workspace's cache as well.
 A retention `redact` that changes a context's text rewrites its abstract and overview too, removes everything derived from the original text (chunks, vectors, claims, the source package), and builds the chunks and the document vector again from the redacted text; text that redaction leaves unchanged is not touched.
-The same purge removes the workspace's decomposition checkpoints (`<cache path>/decomposition/<run>.json`, which carry chunk text, named by `decomposition_runs.checkpoint_uri`) and the local copies of its object-store assets (`<cache path>/assets/...`).
+Archiving or moving a workspace also removes its decomposition checkpoints (`<cache path>/decomposition/<run>.json`, which carry chunk text, named by `decomposition_runs.checkpoint_uri`) and the local copies of its object-store assets (`<cache path>/assets/...`); an erasure or a retention delete removes those of the rows it deletes. A file is removed only if it is the one the Engine writes for the row, see [Erasure And Retention](docs/guides/erasure-and-retention.md).
 A replica that applies a peer's delete of a context purges its workspace's cache once the batch has committed.
 Entries also expire by age: a sweep at boot and every six hours removes entries last written more than `cache_max_age_days` (30) ago.
 A cache hit does not extend an entry's life.

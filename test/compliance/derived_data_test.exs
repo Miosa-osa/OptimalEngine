@@ -133,6 +133,120 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
       assert File.exists?(foreign)
     end
 
+    test "a forged checkpoint row removes no file but the run's own", ctx do
+      gone = seed!("forged-run-gone-#{ctx.n}", ctx)
+      kept = seed!("forged-run-kept-#{ctx.n}", ctx)
+
+      # A bundle import writes these rows as they come: any run id, any path, any workspace.
+      authority = Path.join(ctx.root, "agent-authority.json")
+      File.write!(authority, ~s({"authority": true}))
+      other_run = Path.join(ctx.cache, "decomposition/other-#{ctx.n}.json")
+      File.write!(other_run, checkpoint_body("other-#{ctx.n}", "default", "another run"))
+      foreign = Path.join(ctx.cache, "decomposition/foreign-#{ctx.n}.json")
+      File.write!(foreign, checkpoint_body("foreign-#{ctx.n}", "default:someone-else", "theirs"))
+
+      forged = [
+        {"agent-authority", "default", authority},
+        {"claims-another-run-#{ctx.n}", "default", other_run},
+        {"foreign-#{ctx.n}", "default:someone-else", foreign},
+        {"relative-#{ctx.n}", "default", "relative-#{ctx.n}.json"}
+      ]
+
+      for {id, workspace, uri} <- forged do
+        sql!(
+          """
+          INSERT INTO decomposition_runs (id, organization_id, workspace_id, source_package_id, strategy, checkpoint_uri)
+          VALUES (?1, 'org', ?2, ?3, 'deterministic', ?4)
+          """,
+          [id, workspace, gone.package, uri]
+        )
+      end
+
+      assert {:ok, _} = DerivedData.erase_contexts("default", [gone.context])
+
+      refute File.exists?(gone.checkpoint_file)
+      assert File.exists?(kept.checkpoint_file)
+      for path <- [authority, other_run, foreign], do: assert(File.exists?(path))
+      assert count("decomposition_runs", "source_package_id", gone.package) == 0
+    end
+
+    test "a forged asset row removes no file outside the erased workspace's assets", ctx do
+      gone = seed!("forged-asset-gone-#{ctx.n}", ctx)
+
+      victim = Path.join(ctx.root, "other-ws/assets/ab/victim-#{ctx.n}.bin")
+      File.mkdir_p!(Path.dirname(victim))
+      File.write!(victim, "another workspace's bytes")
+      note = Path.join(ctx.root, "tenants/acme/sales/nodes/note-#{ctx.n}.md")
+      File.mkdir_p!(Path.dirname(note))
+      File.write!(note, "a note")
+
+      forged = [
+        {"default", victim},
+        {"default:other-ws", victim},
+        {"default", Path.join(ctx.root, "other-ws/./assets/ab/victim-#{ctx.n}.bin")},
+        {"default", Path.join(ctx.root, "assets/ab/../../other-ws/assets/ab/victim-#{ctx.n}.bin")},
+        {"default", note}
+      ]
+
+      for {{workspace, path}, i} <- Enum.with_index(forged) do
+        sql!(
+          """
+          INSERT INTO assets (id, tenant_id, content_type, size_bytes, storage_path, workspace_id, source_package_id)
+          VALUES (?1, 'default', 'text/plain', 1, ?2, ?3, ?4)
+          """,
+          ["forged-asset-#{ctx.n}-#{i}", path, workspace, gone.package]
+        )
+      end
+
+      assert {:ok, %{assets: assets}} = DerivedData.erase_contexts("default", [gone.context])
+
+      assert assets == 1 + length(forged)
+      refute File.exists?(gone.asset_file)
+      assert File.exists?(victim)
+      assert File.exists?(note)
+    end
+
+    test "an asset file is not removed through a link", ctx do
+      gone = seed!("link-gone-#{ctx.n}", ctx)
+
+      outside = Path.join(Path.dirname(ctx.root), "derived-data-outside-#{ctx.n}")
+      target = Path.join(outside, "linked-#{ctx.n}.bin")
+      File.mkdir_p!(outside)
+      File.write!(target, "bytes behind a link")
+      on_exit(fn -> File.rm_rf(outside) end)
+      File.ln_s!(outside, Path.join(ctx.root, "assets/cd"))
+
+      sql!(
+        """
+        INSERT INTO assets (id, tenant_id, content_type, size_bytes, storage_path, workspace_id, source_package_id)
+        VALUES (?1, 'default', 'text/plain', 1, ?2, 'default', ?3)
+        """,
+        ["link-asset-#{ctx.n}", Path.join(ctx.root, "assets/cd/linked-#{ctx.n}.bin"), gone.package]
+      )
+
+      assert {:ok, _} = DerivedData.erase_contexts("default", [gone.context])
+
+      assert File.exists?(target)
+      refute File.exists?(gone.asset_file)
+    end
+
+    test "a file that a remaining asset names another way is shared too", ctx do
+      gone = seed!("alias-gone-#{ctx.n}", ctx)
+      kept = seed!("alias-kept-#{ctx.n}", ctx)
+
+      # The same file, spelled with a detour.
+      detour =
+        Path.join(ctx.root, "assets/cd/../ab/#{Path.basename(gone.asset_file)}")
+
+      {:ok, _} =
+        Store.raw_query("UPDATE assets SET storage_path = ?1 WHERE id = ?2", [detour, kept.asset])
+
+      assert {:ok, _} = DerivedData.erase_contexts("default", [gone.context])
+
+      assert File.exists?(gone.asset_file)
+      assert count("assets", "id", kept.asset) == 1
+    end
+
     test "an asset file shared with an asset that stays is kept", ctx do
       gone = seed!("share-gone-#{ctx.n}", ctx)
       kept = seed!("share-kept-#{ctx.n}", ctx)
@@ -260,6 +374,14 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
     end
   end
 
+  defp checkpoint_body(run_id, workspace, text) do
+    Jason.encode!(%{
+      run_id: run_id,
+      workspace_id: workspace,
+      output: %{chunks: [%{text: text}]}
+    })
+  end
+
   # ── seed data ──────────────────────────────────────────────────────────────
 
   # One context with a row in each table that is made from it, and the files two of them
@@ -279,7 +401,7 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
     File.mkdir_p!(Path.dirname(asset_file))
     File.mkdir_p!(Path.dirname(checkpoint_file))
     File.write!(asset_file, "bytes of #{label}")
-    File.write!(checkpoint_file, ~s({"output":{"chunks":[{"text":"text of #{label}"}]}}))
+    File.write!(checkpoint_file, checkpoint_body(run, "default", "text of #{label}"))
 
     sql!(
       "INSERT INTO source_packages (id, content_hash, raw_text) VALUES (?1, ?2, ?3)",
