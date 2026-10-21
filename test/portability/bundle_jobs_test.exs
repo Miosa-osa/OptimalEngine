@@ -773,6 +773,37 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
                ])
     end
 
+    test "a job whose target another import still holds is retried, not failed", ctx do
+      {name, _manifest} = exported_and_moved(ctx)
+
+      # Another import is still creating the target: its record carries that
+      # import's token.
+      {:ok, held} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "held",
+          name: "held",
+          metadata: %{"import_token" => "another-import-#{ctx.n}"}
+        })
+
+      {:ok, _view, :queued} =
+        BundleJobs.submit_import(ctx.tenant, %{
+          "workspace_id" => held.id,
+          "bundle" => name,
+          "mode" => "merge"
+        })
+
+      {:ok, done} = BundleJobs.drain()
+      assert done.status == "retrying"
+      assert done.error["code"] == "import_in_progress"
+      assert done.error["retryable"] == true
+      refute done.error["partial"]
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM contexts WHERE workspace_id = ?1", [held.id])
+    end
+
     test "after its last attempt a job cut off by restarts fails with engine_restarted", ctx do
       {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
 

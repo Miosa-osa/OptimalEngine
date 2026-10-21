@@ -262,6 +262,7 @@ A file of the bundle is named by a path under the workspace's directory. A path 
 What a bundle can still do within those tables is add rows to the workspace it creates or merges into, and add principals to the importing tenant: every principals row is written with that tenant, and an id the Engine already has keeps its existing row.
 
 Each tenant has its own bundle folder, `<backup dir>/bundles/<tenant>/`, where `<backup dir>` is `OPTIMAL_BACKUP_DIR` (or `backups` beside the database).
+The folder, every upload in it and the staging folders are readable by the Engine's user only, and an export's file is written with mode 0600.
 An export is written there, a download and an import by name read only from there, and a raw upload is staged there.
 A control plane that copies a bundle onto the Engine's disk and imports it by name places it in that folder, for example `/data/.optimal/backups/bundles/default/<name>` for the `default` tenant with `OPTIMAL_BACKUP_DIR=/data/.optimal/backups`.
 A bundle whose manifest names another tenant is answered as not found by name or on download, and refused with 403 `bundle_from_another_tenant` as an upload.
@@ -272,11 +273,15 @@ Only the Engine operator (a `default`-tenant admin key whose workspace scope is 
 Bundles from before this release sit in `bundles/` itself; move one into its tenant's folder to use it.
 
 A raw upload is written to disk a chunk at a time and hashed as it arrives, so a bundle of any size is never held in memory.
-It is refused with 413 past `OPTIMAL_BUNDLE_MAX_BYTES` (5 GiB by default), before reading when `content-length` says so; with 422 `bundle_sha256_mismatch` when `x-bundle-sha256` names another SHA-256 of the file; and with 408 `upload_timeout` when it takes longer than an hour from first byte to last (`config :optimal_engine, :bundle_upload_deadline_ms`).
+It is refused with 413 past `OPTIMAL_BUNDLE_MAX_BYTES` (5 GiB by default), before reading when `content-length` says so; with 507 `insufficient_storage` before reading when `content-length` is more than the disk has free, or when the disk fills while it arrives; with 422 `bundle_sha256_mismatch` when `x-bundle-sha256` names another SHA-256 of the file; and with 408 `upload_timeout` when it takes longer than an hour from first byte to last (`config :optimal_engine, :bundle_upload_deadline_ms`).
+The deadline is checked after every read, and a read waits at most 15 seconds, so a client that sends a byte now and then is stopped at the deadline too.
 The body is read under the HTTP server's own idle limits, so a client that stops sending is closed.
-It is written to `.upload-<n>.part` and renamed `.upload-<n>.tar.gz` once complete and checked; both are removed when the request ends, also when the connection is cut, and an Engine that stopped mid-upload removes them at its next boot, with the export and import staging folders (`bundle-*`) not changed for two hours.
+Each upload has a folder of its own, `.upload-<n>/`, where it is written to `bundle.part` and renamed `bundle.tar.gz` once complete and checked.
+The folder is removed when the request ends, also when the connection is cut, and an Engine that stopped mid-upload removes it at its next boot, with the export and import staging folders (`bundle-*`) not changed for two hours.
 The leading dot keeps an upload apart from every bundle name, which must start with a letter or digit, so the boot sweep never takes a retained export for one.
 Exports and imports unpack in `<backup dir>/staging/`, on the data volume.
+Before unpacking, an import reads the bundle's table of contents: a bundle that unpacks to more than 50 GiB (`config :optimal_engine, :bundle_max_unpacked_bytes`) is refused with 413 `bundle_too_large`, and one that unpacks to more than the disk has free with 507 `insufficient_storage`.
+An upload's file is deleted once the import is verified and planned, before any row is written, so a large import does not hold two copies of the bundle while it writes; a bundle imported by name stays in the bundle folder.
 Export, import by name, download, and the import that follows a complete upload keep their connection open for as long as they run, so a large workspace is not cut off by the HTTP server's idle limits.
 
 The export seals every change the replication ledger has captured, then reads the ledger's high-water mark and every row in one read transaction on a connection of its own: a snapshot of the database.
@@ -288,9 +293,18 @@ When the workspace has a captured change not yet sealed as the read begins, the 
 Before it stages anything, an export checks the free space of the backup folder's disk: it needs twice the workspace's size (its rows as JSON lines, estimated from each table's row count and a sample of its rows, plus its files; the rows and files are staged, then packed) and a margin of 256 MiB for the database's growing log (`config :optimal_engine, :bundle_export_margin_bytes`).
 A disk that cannot hold that answers 507 `insufficient_storage` with `Retry-After: 60`, writes nothing and reserves no move; as a job it fails `retryable` and is tried again after a minute, like an import that finds no room.
 Import verifies the manifest, every table file, and every file checksum before writing anything.
+A manifest entry without a checksum, or a table or file it names that is not in the bundle, is refused.
 Rows are then written in short transactions of 1,000 rows, tables in foreign-key order and the rows of a self-referencing table (memories, nodes) parents first, with foreign keys checked at each commit.
 A large workspace therefore never holds the Engine's single writer long enough to stall other requests or time out.
-A failed `create` removes every row it wrote and the workspace record, so it can simply be retried; a failed `merge` can be run again, because it only adds missing rows.
+A failed `create` takes back the rows it wrote, and the workspace record when that leaves the workspace empty, so it can simply be retried; a failed `merge` can be run again, because it only adds missing rows.
+The workspace's folder and the files the import copied stay in place; a retry writes them again.
+An import that creates a workspace and keeps no written log of its own (a bundle job keeps its own and takes the job back itself) writes a mark in `<backup dir>/importing/`, with its log beside it, before it makes the workspace record, and puts the mark's token on the record; once everything is written it clears the token and removes both.
+If it fails, raises or is cancelled, it takes back what it wrote at once.
+When the importing process dies without finishing (Cowboy stops a request that runs past its timeout without running its cleanup), a watcher process takes it back at once.
+When the Engine itself stops, the next boot takes it back right after the database opens, before anything else writes.
+Either way only the rows the log names go, and only while the record still carries the mark's token, so a mark left behind never touches a workspace that a later import finished or made again.
+While a workspace carries an import's token, another import into it, `create` or `merge`, is refused with 409 `import_in_progress` and `retryable: true`, so a retry cannot write into it, or clear the token, while it is still being created or taken back.
+A mark whose import could not be taken back now (the Store did not answer within `config :optimal_engine, :bundle_mark_timeout_ms`, 30 s, or a delete was refused) is kept for the next try, and boot goes on.
 Registry rows every Engine derives under the same id (principals, model call operations) are kept when the target already has them.
 Tenant and workspace ids are rewritten to the target; integer row ids are reassigned.
 A stored file that the bundle carries is named by its new path: an asset's `storage_path` and its source package's `verbatim_archive_uri`, and the `local_path` and `storage_path` in their metadata, point at the copy under the target workspace's folder instead of the source Engine's disk; an object store URI is kept as it is.
@@ -338,7 +352,7 @@ The status carries `status` (`queued`, `running`, `retrying`, `succeeded`, `fail
 An export's result names the `bundle`, its `file_sha256` (the value to pass as `sha256` to an import), `bundle_sha256` (for `finalize-move`), `size_bytes`, the counts, `ledger_sequence`, and `expires_at`.
 An import's result names the target `workspace_id`, the rows per table, the files, and the bundle's `ledger_sequence`.
 
-A failure the Engine can retry (`fetch_failed`, `insufficient_storage`, `store_busy`, `engine_restarted`) is tried again after a minute, up to three attempts; any other ends the job `failed` at once, and `retryable: false` means the request must change.
+A failure the Engine can retry (`fetch_failed`, `insufficient_storage`, `store_busy`, `engine_restarted`, `import_in_progress`) is tried again after a minute, up to three attempts; any other ends the job `failed` at once, and `retryable: false` means the request must change.
 A failed or cancelled job leaves nothing behind: no partial export file, no download, and none of the rows it wrote into an import target that held nothing when the job started (a `create`, or a `merge` into an empty workspace).
 An import logs each batch as it writes it (`bundle-jobs/<id>/written.jsonl` in the backup folder, readable by the Engine's user only, and counted in the free-space check an import makes), and a failed or cancelled one takes back exactly what that log lists, last batch first so that a row's dependants go before it, and no other: a row another writer put into the target meanwhile stays, and so does the workspace record when the workspace then holds anything.
 Whether the target was empty, and whether the import made its workspace record, are what the import itself found when it planned the target, not what the job read before a download.
@@ -347,6 +361,7 @@ A merge into a workspace that already held rows is not rolled back: the job's `p
 A cancel takes a queued job out at once, and stops a running one at its next page or batch.
 A job running when the Engine stops is not resumed: at the next boot its partial output is removed and it runs again from the start, and after its third attempt it fails with `engine_restarted`.
 A job whose rows cannot all be taken back at that boot ends `failed` with `cleanup_incomplete` and `partial: true` instead, since running it again would meet what is left.
+If that job had created the workspace, its record keeps the import's token, so further imports into the workspace are refused with `import_in_progress` until the operator deals with the workspace, for example by removing it.
 Recovery never stops the Engine: it skips a torn line of the log, reports the job, and goes on to the next.
 An export reads one snapshot of the database, and a resumed export would join two, so its ledger mark would no longer describe its rows.
 

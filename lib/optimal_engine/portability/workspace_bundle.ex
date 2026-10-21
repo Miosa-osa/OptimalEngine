@@ -77,6 +77,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # (relocate_files/3).
   @file_columns %{"assets" => ["storage_path"], "source_packages" => ["verbatim_archive_uri"]}
   @file_metadata_keys ["local_path", "storage_path"]
+  # The metadata key a workspace an import is creating carries; its mark, if
+  # the import has one, names the same token.
+  @import_token "import_token"
   @batch_rows 1_000
   @snapshot_attempts 20
   @stale_staging_seconds 7_200
@@ -108,12 +111,25 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
       try do
         observed(observe, {:phase, :sealing})
+        started = System.monotonic_time(:millisecond)
 
         with {:ok, {mark, tables}} <- snapshot_tables(tenant_id, workspace_id, staging, observe) do
+          read = System.monotonic_time(:millisecond)
           observed(observe, {:phase, :files})
           files = export_files(workspace_id, staging)
+          copied = System.monotonic_time(:millisecond)
           observed(observe, {:phase, :packing})
-          write_bundle(tenant_id, workspace, mark, tables, files, staging, path)
+          result = write_bundle(tenant_id, workspace, mark, tables, files, staging, path)
+          packed = System.monotonic_time(:millisecond)
+
+          # Where a large export spends its time: reading the rows, copying the
+          # files, compressing the archive.
+          Logger.info(
+            "[WorkspaceBundle] exported #{workspace_id}: rows #{read - started} ms, " <>
+              "files #{copied - read} ms, pack #{packed - copied} ms"
+          )
+
+          result
         end
       catch
         :bundle_cancelled -> {:error, :cancelled}
@@ -217,9 +233,16 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   Imports a bundle into `tenant_id`. Options: `:workspace_id` (target id;
   default the source id with the target tenant), `:organization_id`,
   `:mode` (`:create` or `:merge`), `:consume` (delete the bundle file once
-  it is unpacked, for an upload nobody keeps, so a large import holds one copy
-  of the bundle on disk instead of two), and `:cross_tenant`. Returns a summary
-  with the bundle hash.
+  the import is verified and planned, for an upload nobody keeps, so a large
+  import holds one copy of the bundle on disk instead of two), and
+  `:cross_tenant`. Returns a summary with the bundle hash.
+
+  A bundle that unpacks to more than
+  `config :optimal_engine, :bundle_max_unpacked_bytes` (50 GiB) or more than
+  the disk holds is refused (`:bundle_too_large`, `:insufficient_storage`)
+  before anything is unpacked. An import into a workspace that another import
+  is still creating, or whose cut-off import is still being taken back, is
+  refused with `{:error, :import_in_progress}`, which the caller may retry.
 
   A bundle exported by another tenant is refused with
   `{:error, :bundle_from_another_tenant}` before anything is written, unless
@@ -230,8 +253,18 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   naming the rows that batch inserted (by primary key, or by the range the
   table's key took). `discard_written/4` takes those rows out again and no
   others, so a failed or cancelled import can be undone without touching what
-  another writer put in the workspace meanwhile. The default is a file in the
-  import's staging folder.
+  another writer put in the workspace meanwhile. A caller that passes it (a
+  bundle job) keeps the log and undoes the import itself when it does not
+  finish.
+
+  Without one, an import that creates a workspace undoes itself: it writes a
+  mark of its own in `<backup dir>/importing/` and the log beside it before
+  the workspace record exists, and puts the mark's token on the record. A
+  failure, a raise or a cancel takes back what it wrote at once; a watcher
+  process does when the importing process dies without finishing (a request
+  Cowboy kills runs no `after`); and the next boot does when the Engine
+  stopped during it (`discard_unfinished_imports/1`). A finished import clears
+  the token and removes the mark.
 
   `:observe` is told how the import goes, as for `export/4`: `{:phase, phase}`
   (`:verifying`, `:planning`, `:writing`, `:files`), `{:total, rows, files}`
@@ -249,7 +282,6 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     try do
       with :ok <- unpack(path, staging),
-           :ok <- if(opts[:consume], do: File.rm(path), else: :ok),
            {:ok, manifest} <- read_manifest(staging),
            :ok <- permitted(manifest),
            :ok <- files_inside(manifest),
@@ -258,22 +290,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
              observed(observe, {:total, manifest_rows(manifest), length(manifest["files"] || [])}),
            :ok <- verify(manifest, staging),
            :ok <- same_tenant(manifest, tenant_id, opts),
+           :ok <- compatible(manifest, staging),
            :ok <- observed(observe, {:phase, :planning}),
            {:ok, plan} <- plan(manifest, tenant_id, opts),
-           :ok <- announce_target(observe, plan),
-           :ok <- compatible(manifest, staging),
-           :ok <- notify(observe, {:phase, :writing}),
-           {:ok, counts} <-
-             write_rows(
-               manifest,
-               staging,
-               plan,
-               opts
-               |> Keyword.put(:observe, observe)
-               |> Keyword.put_new(:written_log, Path.join(staging, "written.jsonl"))
-             ),
-           :ok <- notify(observe, {:phase, :files}),
-           {:ok, file_count} <- write_files(manifest, staging, plan) do
+           :ok <- consume(path, opts),
+           {:ok, counts, file_count} <- write_planned(manifest, staging, plan, observe, opts) do
         {:ok,
          %{
            workspace_id: plan.workspace_id,
@@ -303,6 +324,256 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     notify(observe, {:target, %{created: plan.created, empty: empty}})
   end
 
+  # An upload nobody keeps is deleted once the import is verified and
+  # planned, so a refused import leaves the caller its bundle and a large
+  # import holds one copy of the bundle on disk; failing to delete it does not
+  # fail the import.
+  defp consume(path, opts) do
+    if opts[:consume], do: File.rm(path)
+    :ok
+  end
+
+  # Rows, then files. A finished import clears the workspace's import token
+  # and removes its mark. One that fails, raises, exits or is cancelled is
+  # settled: an import with a mark takes back what it wrote through it
+  # (settle/1); one without keeps main's in-process undo of a failed create
+  # (write_rows/4) and leaves the rest to its caller, who holds the log.
+  defp write_planned(manifest, staging, plan, observe, opts) do
+    log = written_log(plan, staging, opts)
+
+    with :ok <- announce_target(observe, plan),
+         :ok <- notify(observe, {:phase, :writing}),
+         {:ok, counts} <-
+           write_rows(
+             manifest,
+             staging,
+             plan,
+             opts |> Keyword.put(:observe, observe) |> Keyword.put(:written_log, log)
+           ),
+         :ok <- notify(observe, {:phase, :files}),
+         {:ok, file_count} <- write_files(manifest, staging, plan) do
+      clear_import_token(plan.workspace_id)
+      if plan.mark, do: end_mark(plan.mark)
+      {:ok, counts, file_count}
+    else
+      error ->
+        settle(plan)
+        error
+    end
+  rescue
+    error ->
+      settle(plan)
+      reraise error, __STACKTRACE__
+  catch
+    kind, reason ->
+      settle(plan)
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
+
+  defp written_log(%{mark: %{log: log}}, _staging, _opts), do: log
+
+  defp written_log(_plan, staging, opts),
+    do: Keyword.get(opts, :written_log, Path.join(staging, "written.jsonl"))
+
+  # A marked import that did not finish is taken back now; a mark it could not
+  # act on stays for its watcher and the next boot.
+  defp settle(%{mark: %{path: path} = mark}) do
+    case discard_mark(path) do
+      :kept -> :ok
+      _settled -> stop_watcher(mark)
+    end
+  end
+
+  defp settle(_plan), do: :ok
+
+  # A finished import, of either mode, leaves the workspace without an import
+  # token, so nothing takes it for an unfinished one. The metadata is read and
+  # written in one transaction, so no other metadata write is lost, and with
+  # plain SQL every store runs (SQLite's json_remove has no PostgreSQL match).
+  defp clear_import_token(workspace_id) do
+    {:ok, _} =
+      Store.transaction(fn txn ->
+        with {:ok, [[json]]} when is_binary(json) <-
+               Store.txn_query(txn, "SELECT metadata FROM workspaces WHERE id = ?1", [
+                 workspace_id
+               ]),
+             {:ok, %{@import_token => _} = metadata} <- Jason.decode(json) do
+          Store.txn_execute(txn, "UPDATE workspaces SET metadata = ?2 WHERE id = ?1", [
+            workspace_id,
+            Jason.encode!(Map.delete(metadata, @import_token))
+          ])
+        else
+          # Metadata that is not JSON holds no token either.
+          {:error, %Jason.DecodeError{}} -> {:ok, 0}
+          {:error, _} = error -> error
+          _no_token -> {:ok, 0}
+        end
+      end)
+
+    :ok
+  end
+
+  @doc """
+  The marks of the imports that were creating a workspace and did not finish
+  (an import removes its mark once it has written everything, or taken back
+  what it wrote).
+  """
+  @spec unfinished_imports() :: [String.t()]
+  def unfinished_imports, do: importing_root() |> Path.join("*.json") |> Path.wildcard()
+
+  @doc """
+  Takes back the imports the given marks name (`unfinished_imports/0`): the
+  rows each wrote, as its log names them (`discard_written/4`), and the
+  workspace record when that leaves the workspace holding nothing, then the
+  mark and its log. An import is taken back only while the workspace's record
+  still carries the mark's token: a finished import cleared it, and a
+  workspace made again since carries another, so a mark left behind never
+  touches a good workspace. A mark that could not be acted on now (the Store
+  did not answer in time, a delete was refused) is kept for the next try;
+  this never raises or exits. The Engine that serves the API lists the marks
+  before it starts and calls this right after the Store starts, before
+  anything else writes; an import's watcher calls it when the importing
+  process dies. Returns how many imports were taken back.
+  """
+  @spec discard_unfinished_imports([String.t()]) :: non_neg_integer()
+  def discard_unfinished_imports(marks),
+    do: Enum.count(marks, &(discard_mark(&1) == :removed))
+
+  # :removed (taken back), :stale (not this mark's to take back any more), or
+  # :kept (try again later).
+  defp discard_mark(path) do
+    with {:ok, json} <- File.read(path),
+         {:ok, %{"tenant_id" => tenant_id, "workspace_id" => workspace_id, "token" => token} = mark}
+         when is_binary(tenant_id) and is_binary(workspace_id) and is_binary(token) <-
+           Jason.decode(json) do
+      log = mark["written_log"]
+
+      case still_importing(workspace_id, token) do
+        {:ok, true} -> take_back(path, log, tenant_id, workspace_id)
+        {:ok, false} -> drop_mark(path, log, :stale)
+        :error -> :kept
+      end
+    else
+      # Unreadable, malformed, or already gone: nothing to take back by it.
+      _ -> drop_mark(path, nil, :stale)
+    end
+  end
+
+  defp take_back(path, log, tenant_id, workspace_id) do
+    case discard_written(log || "", tenant_id, workspace_id, record: true) do
+      :ok ->
+        Logger.warning("[WorkspaceBundle] took back the unfinished import of #{workspace_id}")
+
+        drop_mark(path, log, :removed)
+
+      {:incomplete, why} ->
+        Logger.error(
+          "[WorkspaceBundle] could not take back all of the unfinished import of #{workspace_id}, kept for the next try: #{inspect(why)}"
+        )
+
+        :kept
+    end
+  rescue
+    error ->
+      Logger.error(
+        "[WorkspaceBundle] could not take back the unfinished import of #{workspace_id}: #{Exception.message(error)}"
+      )
+
+      :kept
+  catch
+    kind, reason ->
+      Logger.error(
+        "[WorkspaceBundle] could not take back the unfinished import of #{workspace_id}: #{kind} #{inspect(reason)}"
+      )
+
+      :kept
+  end
+
+  defp drop_mark(path, log, result) do
+    File.rm(path)
+    if is_binary(log), do: File.rm(log)
+    result
+  end
+
+  # Whether the workspace's record still carries the import's token, asked
+  # within `:bundle_mark_timeout_ms` (30 s) so a Store that does not answer is
+  # an :error, not an exit.
+  defp still_importing(workspace_id, token) do
+    {:ok, rows} =
+      Store.transaction(
+        fn txn ->
+          Store.txn_query(
+            txn,
+            "SELECT json_extract(metadata, '$.#{@import_token}') FROM workspaces WHERE id = ?1",
+            [workspace_id]
+          )
+        end,
+        Application.get_env(:optimal_engine, :bundle_mark_timeout_ms, 30_000)
+      )
+
+    {:ok, rows == [[token]]}
+  rescue
+    error ->
+      Logger.error(
+        "[WorkspaceBundle] could not check the unfinished import of #{workspace_id}: #{Exception.message(error)}"
+      )
+
+      :error
+  catch
+    :exit, reason ->
+      Logger.error(
+        "[WorkspaceBundle] could not check the unfinished import of #{workspace_id}: #{inspect(reason)}"
+      )
+
+      :error
+  end
+
+  # Each import has a mark of its own, so an import that loses a race to
+  # create the same workspace removes only its own; its watcher takes back
+  # what it wrote if the importing process dies before the import ends.
+  defp mark_importing(tenant_id, workspace_id, token) do
+    File.mkdir_p!(importing_root())
+    File.chmod(importing_root(), 0o700)
+    name = :crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower)
+    path = Path.join(importing_root(), name <> ".json")
+    log = Path.join(importing_root(), name <> ".written.jsonl")
+
+    File.write!(
+      path,
+      Jason.encode!(%{
+        tenant_id: tenant_id,
+        workspace_id: workspace_id,
+        token: token,
+        written_log: log
+      })
+    )
+
+    %{path: path, log: log, watcher: watch_import(path)}
+  end
+
+  defp watch_import(path) do
+    importer = self()
+
+    spawn(fn ->
+      ref = Process.monitor(importer)
+
+      receive do
+        {:import_ended, ^path} -> :ok
+        {:DOWN, ^ref, :process, _pid, _reason} -> discard_unfinished_imports([path])
+      end
+    end)
+  end
+
+  # The import finished: its mark and log go, and its watcher stops.
+  defp end_mark(%{path: path, log: log} = mark) do
+    drop_mark(path, log, :removed)
+    stop_watcher(mark)
+  end
+
+  defp stop_watcher(%{path: path, watcher: watcher}), do: send(watcher, {:import_ended, path})
+
+  defp importing_root, do: Path.join(backup_base(), "importing")
+
   defp manifest_rows(manifest),
     do: manifest |> Map.get("tables", []) |> Enum.map(&(&1["rows"] || 0)) |> Enum.sum()
 
@@ -317,8 +588,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   Removes the rows an import wrote, as its `:written_log` names them, and no
   others: a row another writer put in the workspace while the import ran stays.
   With `record: true` the workspace record goes too, when nothing is left in
-  the workspace. For an import that did not finish into a target that held
-  nothing before it: a create it made, or a merge into an empty workspace.
+  the workspace; when rows another writer put there keep it, and everything
+  the log names is gone, its import token is cleared, so further imports into
+  it are no longer refused as `:import_in_progress`. For an import that did
+  not finish into a target that held nothing before it: a create it made, or
+  a merge into an empty workspace.
 
   The batches go last written first, so a row's dependants (a memory that
   points at it, a table that references it) are gone before it is, with foreign
@@ -333,12 +607,22 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     {batches, damaged} = log_batches(log_path)
     refused = discard_batches(batches, log_path, tenant_id, workspace_id)
 
-    if opts[:record] == true and workspace_empty?(tenant_id, workspace_id),
-      do:
+    cond do
+      opts[:record] != true ->
+        :ok
+
+      workspace_empty?(tenant_id, workspace_id) ->
         Store.raw_query("DELETE FROM workspaces WHERE id = ?1 AND tenant_id = ?2", [
           workspace_id,
           tenant_id
         ])
+
+      damaged + refused == 0 ->
+        clear_import_token(workspace_id)
+
+      true ->
+        :ok
+    end
 
     if damaged + refused == 0,
       do: :ok,
@@ -532,8 +816,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   @doc """
   Removes what a run that never finished left behind: raw uploads still being
-  received (`.upload-*.part`) or received and not yet imported
-  (`.upload-*.tar.gz`) in the tenants' bundle folders, and the `bundle-*`
+  received or received and not yet imported (the `.upload-*` folders) in the
+  tenants' bundle folders, and the `bundle-*`
   staging folders of exports and imports last changed more than two hours
   ago. A run removes its own files whatever happens, so these are only left by
   an Engine that stopped mid-way. Nothing else is touched: an upload's name
@@ -543,10 +827,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   """
   @spec sweep_leftovers() :: non_neg_integer()
   def sweep_leftovers do
+    # An upload is a `.upload-<n>` folder (files of that name from an earlier
+    # release are removed the same way).
     uploads =
-      Path.wildcard(Path.join([backup_base(), "bundles", "*", ".upload-*.{part,tar.gz}"]),
-        match_dot: true
-      )
+      Path.wildcard(Path.join([backup_base(), "bundles", "*", ".upload-*"]), match_dot: true)
 
     cutoff = System.os_time(:second) - @stale_staging_seconds
 
@@ -558,8 +842,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         match?({:ok, %{mtime: mtime}} when mtime < cutoff, File.stat(path, time: :posix))
       end)
 
-    Enum.each(uploads, &File.rm/1)
-    Enum.each(staged, &File.rm_rf/1)
+    Enum.each(uploads ++ staged, &File.rm_rf/1)
     length(uploads) + length(staged)
   end
 
@@ -575,6 +858,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   def bundle_dir(tenant_id) when is_binary(tenant_id) do
     dir = Path.join([backup_base(), "bundles", tenant_folder(tenant_id)])
     File.mkdir_p!(dir)
+    File.chmod(dir, 0o700)
     dir
   end
 
@@ -890,7 +1174,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     names = Enum.map(columns, &elem(&1, 0))
 
     {rows, hash} =
-      File.open!(file, [:write, :binary], fn io ->
+      File.open!(file, [:write, :binary, :raw, :delayed_write], fn io ->
         reader
         |> table_rows(table, where, params)
         |> Enum.reduce({0, :crypto.hash_init(:sha256)}, fn row, {count, hash} ->
@@ -954,10 +1238,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       File.mkdir_p!(Path.dirname(destination))
       File.cp!(file, destination)
 
+      # The copy is what the bundle carries, so its size and hash are the
+      # copy's: a file that changes after it is copied still verifies.
       %{
         "path" => relative,
-        "bytes" => File.stat!(file).size,
-        "sha256" => file_sha256(file)
+        "bytes" => File.stat!(destination).size,
+        "sha256" => file_sha256(destination)
       }
     end)
     |> Enum.sort_by(& &1["path"])
@@ -1097,14 +1383,19 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     claimed = manifest["bundle_sha256"]
     recomputed = manifest |> Map.delete("bundle_sha256") |> CanonicalJSON.hash()
 
+    # A missing file hashes to nil, and so does a manifest entry without a
+    # checksum: both sides must be a checksum, and the same one.
     table_ok =
       Enum.all?(manifest["tables"], fn table ->
-        file_sha256(Path.join([staging, "tables", table["name"] <> ".jsonl"])) == table["sha256"]
+        same_sha256?(
+          file_sha256(Path.join([staging, "tables", table["name"] <> ".jsonl"])),
+          table["sha256"]
+        )
       end)
 
     files_ok =
       Enum.all?(manifest["files"], fn file ->
-        file_sha256(Path.join([staging, "files", file["path"]])) == file["sha256"]
+        same_sha256?(file_sha256(Path.join([staging, "files", file["path"]])), file["sha256"])
       end)
 
     cond do
@@ -1114,6 +1405,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       true -> :ok
     end
   end
+
+  defp same_sha256?(actual, expected),
+    do: is_binary(actual) and is_binary(expected) and actual == expected
 
   defp same_tenant(%{"tenant_id" => tenant_id}, tenant_id, _opts), do: :ok
 
@@ -1171,6 +1465,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     mode = Keyword.get(opts, :mode, :create)
 
     case {Workspace.get(target_id), mode} do
+      # Another import is creating it, or a cut-off one is being taken back:
+      # nothing may write into it, nor clear its token, until that is done.
+      {{:ok, %{metadata: %{@import_token => token}}}, _mode} when is_binary(token) ->
+        {:error, :import_in_progress}
+
       {{:ok, _existing}, :create} ->
         {:error, :workspace_exists}
 
@@ -1185,12 +1484,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
                created: false,
                source: source,
                external_id: existing.external_id,
-               imported_external_id: nil
+               imported_external_id: nil,
+               mark: nil
              }},
           else: {:error, :workspace_exists}
 
       {{:error, :not_found}, _mode} ->
         metadata = source["metadata"] || %{}
+        token = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
 
         attrs = %{
           id: target_id,
@@ -1202,13 +1503,21 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           # Slugs the source held are reserved on the source Engine only.
           metadata:
             metadata
-            |> Map.drop(["previous_slugs", "external_id"])
-            |> Map.put("imported_from", source["id"]),
+            |> Map.drop(["previous_slugs", "external_id", @import_token])
+            |> Map.put("imported_from", source["id"])
+            |> Map.put(@import_token, token),
           organization_id:
             opts[:organization_id] || OptimalEngine.Organization.default_for(tenant_id)
         }
 
-        case create_keeping_external_id(attrs) do
+        # An import whose caller keeps no log of its own is marked before the
+        # record exists, so whatever cuts it off, what it wrote is taken back.
+        mark =
+          if Keyword.has_key?(opts, :written_log),
+            do: nil,
+            else: mark_importing(tenant_id, target_id, token)
+
+        case create_marked(attrs, mark) do
           {:ok, workspace, set_aside} ->
             {:ok,
              %{
@@ -1218,13 +1527,24 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
                created: true,
                source: source,
                external_id: workspace.external_id,
-               imported_external_id: set_aside
+               imported_external_id: set_aside,
+               mark: mark
              }}
 
           error ->
+            if mark, do: end_mark(mark)
             error
         end
     end
+  end
+
+  # A create that raises was never this import's workspace either.
+  defp create_marked(attrs, mark) do
+    create_keeping_external_id(attrs)
+  rescue
+    error ->
+      if mark, do: end_mark(mark)
+      reraise error, __STACKTRACE__
   end
 
   # An external id names at most one active workspace of a tenant (an
@@ -1349,8 +1669,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         end)
       end
 
+    # A marked import is taken back through its mark (settle/1).
     with {:error, _} = error <- result do
-      if plan.mode == :create, do: undo_import(plan, opts[:written_log])
+      if plan.mode == :create and is_nil(plan[:mark]), do: undo_import(plan, opts[:written_log])
       error
     end
   end
@@ -1361,8 +1682,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     rows
     |> Stream.chunk_every(batch_rows)
     |> Enum.reduce_while({:ok, 0}, fn batch, {:ok, total} ->
-      with {:ok, written, entry} <- write_batch(name, batch, verb, tracker),
-           :ok <- record.(name, entry),
+      with {:ok, written} <- write_batch(name, batch, verb, tracker, record),
            :ok <- import_batch(name, length(batch)),
            :ok <- batch_written(observe, name, length(batch)) do
         {:cont, {:ok, total + written}}
@@ -1391,8 +1711,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   # A batch is one transaction, and the Store runs it alone, so what it
   # inserted is told by the keys of its rows, or by how far a table's key
-  # moved. Returns the number written and the log entry for the batch.
-  defp write_batch(name, batch, verb, tracker) do
+  # moved. The batch's line is appended to the written log inside the
+  # transaction, before it commits: an importing process killed while it
+  # waits on the Store (a request Cowboy stops) still leaves a log that names
+  # every committed row, and a line the log cannot take rolls the batch back.
+  # Returns the number written.
+  defp write_batch(name, batch, verb, tracker, record) do
     result =
       Store.transaction(fn txn ->
         {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
@@ -1415,10 +1739,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
             {count + changed, if(changed > 0, do: key_of(tracker, row, keys), else: keys)}
           end)
 
-        {:ok, {written, entry(txn, name, tracker, before, Enum.reverse(keys))}}
+        with :ok <- record.(name, entry(txn, name, tracker, before, Enum.reverse(keys))),
+             do: {:ok, written}
       end)
 
-    with {:ok, {written, entry}} <- result, do: {:ok, written, entry}
+    result
   rescue
     error -> {:error, Exception.message(error)}
   end
@@ -1900,7 +2225,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         {String.to_charlist(relative), String.to_charlist(Path.join(staging, relative))}
       end)
 
-    :erl_tar.create(String.to_charlist(path), entries, [:compressed])
+    with :ok <- :erl_tar.create(String.to_charlist(path), entries, [:compressed]) do
+      File.chmod(path, 0o600)
+    end
   end
 
   # The manifest of a bundle: the first entry when it is named manifest.json
@@ -1947,14 +2274,40 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   defp unpack(path, staging) do
-    case :erl_tar.extract(String.to_charlist(path), [
-           :compressed,
-           {:cwd, String.to_charlist(staging)}
-         ]) do
-      :ok -> if escaped?(staging), do: {:error, :unsafe_bundle}, else: :ok
-      {:error, reason} -> {:error, {:unreadable_bundle, reason}}
+    with :ok <- room_to_unpack(path) do
+      case :erl_tar.extract(String.to_charlist(path), [
+             :compressed,
+             {:cwd, String.to_charlist(staging)}
+           ]) do
+        :ok -> if escaped?(staging), do: {:error, :unsafe_bundle}, else: :ok
+        {:error, reason} -> {:error, {:unreadable_bundle, reason}}
+      end
     end
   end
+
+  # The archive's table of contents is read before anything is written, so a
+  # bundle that unpacks to more than the limit
+  # (`config :optimal_engine, :bundle_max_unpacked_bytes`, 50 GiB) or more
+  # than the disk holds is refused instead of filling the data volume.
+  defp room_to_unpack(path) do
+    case :erl_tar.table(String.to_charlist(path), [:compressed, :verbose]) do
+      {:ok, entries} ->
+        unpacked = entries |> Enum.map(&elem(&1, 2)) |> Enum.sum()
+        free = free_bytes(staging_root())
+
+        cond do
+          unpacked > max_unpacked_bytes() -> {:error, :bundle_too_large}
+          is_integer(free) and free < unpacked -> {:error, :insufficient_storage}
+          true -> :ok
+        end
+
+      {:error, reason} ->
+        {:error, {:unreadable_bundle, reason}}
+    end
+  end
+
+  defp max_unpacked_bytes,
+    do: Application.get_env(:optimal_engine, :bundle_max_unpacked_bytes, 50 * 1024 * 1024 * 1024)
 
   @doc false
   # Bytes free on the filesystem holding `dir`, or nil when it cannot be read.
@@ -1999,6 +2352,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp staging_dir do
     dir = Path.join(staging_root(), "bundle-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
+    File.chmod!(dir, 0o700)
     dir
   end
 

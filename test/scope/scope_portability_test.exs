@@ -217,6 +217,161 @@ defmodule OptimalEngine.ScopePortabilityTest do
     :ok = :erl_tar.create(String.to_charlist(ctx.path), files, [:compressed])
   end
 
+  # Unpacks the exported bundle, lets `edit` change its files and return its
+  # manifest, signs the manifest again and packs it, as anyone who can write
+  # a bundle can.
+  defp resign_bundle(ctx, edit) do
+    dir = Path.join(System.tmp_dir!(), "resign-#{ctx.n}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    :ok =
+      :erl_tar.extract(String.to_charlist(ctx.path), [:compressed, {:cwd, String.to_charlist(dir)}])
+
+    manifest =
+      dir
+      |> Path.join("manifest.json")
+      |> File.read!()
+      |> Jason.decode!()
+      |> Map.delete("bundle_sha256")
+
+    manifest = edit.(dir, manifest)
+
+    manifest =
+      Map.put(manifest, "bundle_sha256", OptimalEngine.Authority.CanonicalJSON.hash(manifest))
+
+    File.write!(Path.join(dir, "manifest.json"), Jason.encode!(manifest, pretty: true))
+
+    files =
+      for f <- Path.wildcard(Path.join(dir, "**"), match_dot: true),
+          File.regular?(f),
+          do: {String.to_charlist(Path.relative_to(f, dir)), String.to_charlist(f)}
+
+    :ok = :erl_tar.create(String.to_charlist(ctx.path), files, [:compressed])
+  end
+
+  defp row_count(table, workspace_id) do
+    {:ok, [[n]]} =
+      Store.raw_query("SELECT COUNT(*) FROM #{table} WHERE workspace_id = ?1", [workspace_id])
+
+    n
+  end
+
+  # The import marks that name `workspace_id`.
+  defp import_marks(workspace_id) do
+    Enum.filter(WorkspaceBundle.unfinished_imports(), fn mark ->
+      case File.read(mark) do
+        {:ok, json} -> match?({:ok, %{"workspace_id" => ^workspace_id}}, Jason.decode(json))
+        {:error, _gone} -> false
+      end
+    end)
+  end
+
+  # What an import leaves in `<backup dir>/importing/` while it creates a
+  # workspace: the workspace, its tenant, and the token the import put on it.
+  # What an import leaves in `<backup dir>/importing/` while it creates a
+  # workspace: the workspace, its tenant, the token it put on the record, and
+  # the log of the rows it wrote (here, the given context ids).
+  defp write_mark(tenant, workspace_id, token, context_ids) do
+    dir =
+      WorkspaceBundle.bundle_dir("default")
+      |> Path.join("../../importing")
+      |> Path.expand()
+
+    File.mkdir_p!(dir)
+    name = "test-#{System.unique_integer([:positive])}"
+    mark = Path.join(dir, name <> ".json")
+    log = Path.join(dir, name <> ".written.jsonl")
+
+    File.write!(
+      log,
+      Jason.encode!(%{table: "contexts", columns: ["id"], keys: Enum.map(context_ids, &[&1])}) <>
+        "\n"
+    )
+
+    File.write!(
+      mark,
+      Jason.encode!(%{
+        tenant_id: tenant,
+        workspace_id: workspace_id,
+        token: token,
+        written_log: log
+      })
+    )
+
+    on_exit(fn ->
+      File.rm(mark)
+      File.rm(log)
+    end)
+
+    mark
+  end
+
+  # A workspace an import was creating: the record carries the import's token,
+  # and it holds the one context the import wrote, whose id is returned.
+  defp partial_workspace(ctx, slug, token) do
+    {:ok, workspace} =
+      Workspace.create(%{
+        tenant_id: ctx.tenant,
+        organization_id: "#{ctx.tenant}:org",
+        slug: slug,
+        name: slug,
+        metadata: %{"import_token" => token}
+      })
+
+    id = "#{slug}-#{ctx.n}"
+    context(ctx.tenant, workspace.id, id, "Partial", "half written")
+    {workspace, id}
+  end
+
+  defp eventually(fun, timeout_ms),
+    do: eventually_until(fun, System.monotonic_time(:millisecond) + timeout_ms)
+
+  defp eventually_until(fun, deadline) do
+    cond do
+      fun.() ->
+        true
+
+      System.monotonic_time(:millisecond) > deadline ->
+        false
+
+      true ->
+        Process.sleep(50)
+        eventually_until(fun, deadline)
+    end
+  end
+
+  # Polls until the workspace holds at least one context row.
+  defp written_some?(workspace_id, deadline) do
+    cond do
+      row_count("contexts", workspace_id) > 0 -> true
+      System.monotonic_time(:millisecond) > deadline -> false
+      true -> written_some?(workspace_id, deadline)
+    end
+  end
+
+  defp staging_folders do
+    WorkspaceBundle.bundle_dir("default")
+    |> Path.join("../../staging")
+    |> Path.expand()
+    |> Path.join("bundle-*")
+    |> Path.wildcard()
+  end
+
+  defp with_env(key, value, fun) do
+    previous = Application.fetch_env(:optimal_engine, key)
+    Application.put_env(:optimal_engine, key, value)
+
+    try do
+      fun.()
+    after
+      case previous do
+        {:ok, old} -> Application.put_env(:optimal_engine, key, old)
+        :error -> Application.delete_env(:optimal_engine, key)
+      end
+    end
+  end
+
   defp call(method, path, token) do
     conn = conn(method, path)
     conn = if token, do: put_req_header(conn, "authorization", "Bearer " <> token), else: conn
@@ -985,6 +1140,10 @@ defmodule OptimalEngine.ScopePortabilityTest do
       kept = Path.join(dir, "kept-#{ctx.n}.tar.gz")
       left = for suffix <- [".part", ".tar.gz"], do: Path.join(dir, ".upload-#{ctx.n}#{suffix}")
       Enum.each([kept | left], &File.write!(&1, "x"))
+      # An upload is a folder of its own; files of that name are an earlier release's.
+      folder = Path.join(dir, ".upload-#{ctx.n}")
+      File.mkdir_p!(folder)
+      File.write!(Path.join(folder, "bundle.part"), "x")
 
       staging = Path.join([Path.dirname(dir), "..", "staging"]) |> Path.expand()
       stale = Path.join(staging, "bundle-#{ctx.n}-stale")
@@ -1000,8 +1159,8 @@ defmodule OptimalEngine.ScopePortabilityTest do
       File.touch!(stale, three_hours_ago)
       File.touch!(other, three_hours_ago)
 
-      assert WorkspaceBundle.sweep_leftovers() >= 3
-      refute Enum.any?(left, &File.exists?/1)
+      assert WorkspaceBundle.sweep_leftovers() >= 4
+      refute Enum.any?([folder | left], &File.exists?/1)
       refute File.exists?(stale)
 
       # An export, a staging folder still in use, and anything not a bundle's
@@ -1090,7 +1249,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       assert count == exported["rows"]
     end
 
-    test "an import told to consume its bundle deletes the file once it is unpacked", ctx do
+    test "an import told to consume its bundle deletes the file once it is planned", ctx do
       {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
       :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
 
@@ -1102,11 +1261,34 @@ defmodule OptimalEngine.ScopePortabilityTest do
       target = "consume-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Consume"})
 
+      # A target that is refused leaves the bundle where it is, so it can be
+      # imported again.
+      {:ok, _} =
+        Workspace.create(%{
+          tenant_id: target,
+          organization_id: OptimalEngine.Organization.default_for(target),
+          slug: "taken",
+          name: "Taken"
+        })
+
+      assert {:error, :workspace_exists} =
+               WorkspaceBundle.import(ctx.path, target,
+                 cross_tenant: true,
+                 consume: true,
+                 workspace_id: "#{target}:taken"
+               )
+
+      assert File.exists?(ctx.path)
+
       assert {:ok, %{bundle_sha256: sha256}} =
                WorkspaceBundle.import(ctx.path, target, cross_tenant: true, consume: true)
 
       assert sha256 == manifest["bundle_sha256"]
       refute File.exists?(ctx.path)
+
+      # A finished import leaves no import token on the workspace.
+      {:ok, imported} = Workspace.get("#{target}:open")
+      refute Map.has_key?(imported.metadata, "import_token")
     end
 
     test "a bundle imports in small batches, parents before children", ctx do
@@ -1185,6 +1367,8 @@ defmodule OptimalEngine.ScopePortabilityTest do
                WorkspaceBundle.import(ctx.path, target, cross_tenant: true, batch_rows: 1)
 
       assert {:error, :not_found} = OptimalEngine.Workspace.get("#{target}:open")
+      # Nor a mark for a watcher or the next boot.
+      assert import_marks("#{target}:open") == []
 
       for table <- ~w(contexts memories memory_embeddings open_loops) do
         assert {:ok, [[0]]} =
@@ -1226,6 +1410,340 @@ defmodule OptimalEngine.ScopePortabilityTest do
       {:ok, _} = Tenant.create(%{id: target, name: "T"})
       assert {:error, :table_checksum_mismatch} = WorkspaceBundle.import(ctx.path, target)
       assert {:error, :not_found} = Workspace.get("#{target}:open")
+    end
+
+    test "an import whose files cannot be written removes the workspace it created", ctx do
+      target = moved_target(ctx, "no-files")
+      workspace_id = "#{target}:open"
+
+      # A file where the workspace's folder goes.
+      blocker = Filesystem.path(Application.get_env(:optimal_engine, :root_path), workspace_id)
+      File.mkdir_p!(Path.dirname(blocker))
+      File.write!(blocker, "in the way")
+      on_exit(fn -> File.rm_rf(blocker) end)
+
+      assert_raise File.Error, fn ->
+        WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
+      end
+
+      assert {:error, :not_found} = Workspace.get(workspace_id)
+      assert row_count("contexts", workspace_id) == 0
+      assert import_marks(workspace_id) == []
+    end
+
+    test "an import whose process is killed part way is removed at once", ctx do
+      # Enough rows, one per batch, that the import is still writing when it is stopped.
+      {:ok, _} =
+        Store.raw_query(
+          """
+          WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 2000)
+          INSERT INTO contexts (id, tenant_id, workspace_id, title, content, created_at, uri)
+          SELECT 'many-' || ?1 || '-' || i, ?2, ?3, 'Row ' || i, 'row ' || i,
+                 '2026-10-14T10:00:00Z', 'optimal://' || ?3 || '/contexts/many-' || ?1 || '-' || i
+          FROM seq
+          """,
+          [ctx.n, ctx.tenant, ctx.open]
+        )
+
+      target = moved_target(ctx, "stopped")
+      workspace_id = "#{target}:open"
+      staged = staging_folders()
+
+      importer =
+        spawn(fn ->
+          WorkspaceBundle.import(ctx.path, target, cross_tenant: true, batch_rows: 1)
+        end)
+
+      # Killed part way through its rows, as Cowboy kills a request that timed
+      # out: no `after` runs in the importing process.
+      assert written_some?(workspace_id, System.monotonic_time(:millisecond) + 30_000)
+      Process.exit(importer, :kill)
+      on_exit(fn -> Enum.each(staging_folders() -- staged, &File.rm_rf/1) end)
+
+      assert eventually(fn -> Workspace.get(workspace_id) == {:error, :not_found} end, 30_000),
+             "the killed import's workspace is still there"
+
+      for table <- ~w(contexts memories open_loops) do
+        assert row_count(table, workspace_id) == 0, table
+      end
+
+      assert eventually(fn -> import_marks(workspace_id) == [] end, 5_000)
+    end
+
+    test "an import retried while a killed one is still being removed is refused until it is gone",
+         ctx do
+      {:ok, _} =
+        Store.raw_query(
+          """
+          WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 2000)
+          INSERT INTO contexts (id, tenant_id, workspace_id, title, content, created_at, uri)
+          SELECT 'retry-' || ?1 || '-' || i, ?2, ?3, 'Row ' || i, 'row ' || i,
+                 '2026-10-14T10:00:00Z', 'optimal://' || ?3 || '/contexts/retry-' || ?1 || '-' || i
+          FROM seq
+          """,
+          [ctx.n, ctx.tenant, ctx.open]
+        )
+
+      # Into the default tenant, so the Engine operator can retry it over the API.
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      give_up(ctx, manifest)
+      workspace_id = "default:retried-#{ctx.n}"
+      opts = [cross_tenant: true, workspace_id: workspace_id]
+      staged = staging_folders()
+      on_exit(fn -> Enum.each(staging_folders() -- staged, &File.rm_rf/1) end)
+
+      importer =
+        spawn(fn -> WorkspaceBundle.import(ctx.path, "default", [batch_rows: 1] ++ opts) end)
+
+      assert written_some?(workspace_id, System.monotonic_time(:millisecond) + 30_000)
+
+      # The import's watcher is held while the retries run, so they land while
+      # it is still removing what the killed import wrote.
+      {:monitored_by, monitors} = Process.info(importer, :monitored_by)
+      # The list also holds the references of calls the importer has open.
+      watchers = Enum.filter(monitors, &is_pid/1)
+      assert watchers != []
+      Enum.each(watchers, &:erlang.suspend_process/1)
+      Process.exit(importer, :kill)
+
+      try do
+        for mode <- [:merge, :create] do
+          assert {:error, :import_in_progress} =
+                   WorkspaceBundle.import(ctx.path, "default", [mode: mode] ++ opts)
+        end
+
+        # Over the API it is a 409 the caller may retry.
+        name = "retried-#{ctx.n}.tar.gz"
+        File.cp!(ctx.path, Path.join(WorkspaceBundle.bundle_dir("default"), name))
+        on_exit(fn -> File.rm(Path.join(WorkspaceBundle.bundle_dir("default"), name)) end)
+
+        with_auth(fn ->
+          conn =
+            json_call(:post, "/api/bundles/import", admin_key("default"), %{
+              "bundle" => name,
+              "workspace_id" => workspace_id,
+              "mode" => "merge",
+              "cross_tenant" => true
+            })
+
+          assert conn.status == 409
+
+          assert %{"error" => "import_in_progress", "retryable" => true} =
+                   Jason.decode!(conn.resp_body)
+        end)
+
+        # Its token is still the killed import's.
+        {:ok, held} = Workspace.get(workspace_id)
+        assert is_binary(held.metadata["import_token"])
+      after
+        Enum.each(watchers, &:erlang.resume_process/1)
+      end
+
+      assert eventually(fn -> Workspace.get(workspace_id) == {:error, :not_found} end, 60_000)
+
+      # Once it is gone the retry goes through, whole.
+      assert {:ok, %{rows: rows}} =
+               WorkspaceBundle.import(ctx.path, "default", [mode: :merge] ++ opts)
+
+      assert rows["contexts"] == 2_001
+      assert row_count("contexts", workspace_id) == 2_001
+      {:ok, imported} = Workspace.get(workspace_id)
+      refute Map.has_key?(imported.metadata, "import_token")
+    end
+
+    test "at boot, a mark removes only a workspace that still carries its token", ctx do
+      # What a stopped Engine leaves: a record carrying the import's token, some
+      # rows, and the import's mark.
+      {partial, written} = partial_workspace(ctx, "partial", "token-#{ctx.n}")
+      partial_mark = write_mark(ctx.tenant, partial.id, "token-#{ctx.n}", [written])
+
+      # A stale mark: the import that wrote it is long gone, and the workspace
+      # of that name is a good one now, holding the row the mark's log names.
+      stale_mark = write_mark(ctx.tenant, ctx.open, "token-of-a-dead-import", ["ctx-a-#{ctx.n}"])
+
+      assert WorkspaceBundle.discard_unfinished_imports([partial_mark, stale_mark]) == 1
+
+      assert {:error, :not_found} = Workspace.get(partial.id)
+      assert row_count("contexts", partial.id) == 0
+      assert {:ok, _} = Workspace.get(ctx.open)
+
+      assert {:ok, [_]} =
+               Store.raw_query("SELECT 1 FROM contexts WHERE id = ?1", ["ctx-a-#{ctx.n}"])
+
+      refute File.exists?(partial_mark)
+      refute File.exists?(stale_mark)
+    end
+
+    test "a mark whose workspace cannot be removed now is kept, and boot goes on", ctx do
+      {partial, written} = partial_workspace(ctx, "unremovable", "token-#{ctx.n}")
+      mark = write_mark(ctx.tenant, partial.id, "token-#{ctx.n}", [written])
+      store = Process.whereis(OptimalEngine.Store.SQLite)
+
+      # The Store does not answer in time.
+      with_env(:bundle_mark_timeout_ms, 300, fn ->
+        :sys.suspend(store)
+
+        try do
+          task = Task.async(fn -> OptimalEngine.Application.discard_unfinished_imports([mark]) end)
+          assert {:ok, :ignore} = Task.yield(task, 10_000) || Task.shutdown(task, :brutal_kill)
+        after
+          :sys.resume(store)
+        end
+      end)
+
+      assert File.exists?(mark)
+      assert {:ok, _} = Workspace.get(partial.id)
+
+      # The next boot, with a Store that answers, removes it.
+      assert WorkspaceBundle.discard_unfinished_imports([mark]) == 1
+      assert {:error, :not_found} = Workspace.get(partial.id)
+      refute File.exists?(mark)
+    end
+
+    test "a failed import leaves a folder that was there before it as it was", ctx do
+      {:ok, _manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      target = "kept-folder-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Kept folder"})
+
+      folder = Filesystem.path(Application.get_env(:optimal_engine, :root_path), "#{target}:open")
+      File.mkdir_p!(folder)
+      File.write!(Path.join(folder, "keep.md"), "mine")
+      on_exit(fn -> File.rm_rf(folder) end)
+
+      # The source still holds its rows, so writing them collides part way.
+      assert {:error, {:import_failed, _table, _reason}} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, batch_rows: 1)
+
+      assert {:error, :not_found} = Workspace.get("#{target}:open")
+      assert File.read!(Path.join(folder, "keep.md")) == "mine"
+    end
+
+    test "a failed import's rows are taken back newest batch first, children before parents",
+         ctx do
+      # A memory chain: the child names its parent, which the schema does not
+      # let go first.
+      {:ok, parent} =
+        OptimalEngine.Memory.create(%{
+          content: "Parent memory for the batched removal",
+          workspace_id: ctx.open,
+          tenant_id: ctx.tenant
+        })
+
+      {:ok, _} =
+        Store.raw_query("UPDATE memories SET parent_memory_id = ?1 WHERE id = ?2", [
+          parent.id,
+          ctx.memory_id
+        ])
+
+      target = moved_target(ctx, "batched")
+      workspace_id = "#{target}:open"
+
+      # Every row is written, one per batch; copying the files fails, and the
+      # import takes back what it wrote, newest batch first.
+      blocker = Filesystem.path(Application.get_env(:optimal_engine, :root_path), workspace_id)
+      File.mkdir_p!(Path.dirname(blocker))
+      File.write!(blocker, "in the way")
+      on_exit(fn -> File.rm_rf(blocker) end)
+
+      assert_raise File.Error, fn ->
+        WorkspaceBundle.import(ctx.path, target, cross_tenant: true, batch_rows: 1)
+      end
+
+      assert {:error, :not_found} = Workspace.get(workspace_id)
+
+      for table <- ~w(contexts memories memory_embeddings open_loops) do
+        assert row_count(table, workspace_id) == 0, table
+      end
+    end
+
+    test "a manifest entry without a checksum does not pass for a missing table", ctx do
+      target = moved_target(ctx, "no-sum")
+
+      resign_bundle(ctx, fn dir, manifest ->
+        File.rm!(Path.join(dir, "tables/contexts.jsonl"))
+
+        Map.update!(manifest, "tables", fn tables ->
+          Enum.map(tables, fn
+            %{"name" => "contexts"} = table -> Map.put(table, "sha256", nil)
+            table -> table
+          end)
+        end)
+      end)
+
+      assert {:error, :table_checksum_mismatch} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
+
+      assert {:error, :not_found} = Workspace.get("#{target}:open")
+    end
+
+    test "nor for a missing file", ctx do
+      target = moved_target(ctx, "no-file-sum")
+
+      resign_bundle(ctx, fn dir, manifest ->
+        File.rm!(Path.join(dir, "files/nodes/notes/one.md"))
+
+        Map.update!(manifest, "files", fn files ->
+          Enum.map(files, fn
+            %{"path" => "nodes/notes/one.md"} = file -> Map.put(file, "sha256", nil)
+            file -> file
+          end)
+        end)
+      end)
+
+      assert {:error, :file_checksum_mismatch} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
+
+      assert {:error, :not_found} = Workspace.get("#{target}:open")
+    end
+
+    test "a bundle that unpacks past the limit is refused before it is unpacked", ctx do
+      {:ok, _} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      staged = staging_folders()
+      name = "unpack-#{ctx.n}.tar.gz"
+      File.cp!(ctx.path, Path.join(WorkspaceBundle.bundle_dir("default"), name))
+
+      with_env(:bundle_max_unpacked_bytes, 100, fn ->
+        assert {:error, :bundle_too_large} =
+                 WorkspaceBundle.import(ctx.path, "default",
+                   cross_tenant: true,
+                   workspace_id: "default:unpack-#{ctx.n}"
+                 )
+
+        # Over the API it is a 413.
+        with_auth(fn ->
+          conn =
+            json_call(:post, "/api/bundles/import", admin_key("default"), %{
+              "bundle" => name,
+              "workspace_id" => "default:unpack-#{ctx.n}",
+              "cross_tenant" => true
+            })
+
+          assert conn.status == 413
+          assert conn.resp_body =~ "bundle_too_large"
+        end)
+      end)
+
+      assert {:error, :not_found} = Workspace.get("default:unpack-#{ctx.n}")
+      assert staging_folders() -- staged == []
+      File.rm(Path.join(WorkspaceBundle.bundle_dir("default"), name))
+    end
+
+    test "an upload larger than the free disk is refused with 507 before a byte is read", ctx do
+      declared = 40_000_000_000_000_000
+
+      with_upload_limits([max_bytes: declared * 2], fn ->
+        with_auth(fn ->
+          conn =
+            upload(admin_key(ctx.tenant), "x", [
+              {"content-length", Integer.to_string(declared)}
+            ])
+
+          assert conn.status == 507
+          assert conn.resp_body =~ "insufficient_storage"
+          assert chunks() == []
+          assert uploads_left(ctx.tenant) == []
+        end)
+      end)
     end
 
     test "a workspace is moved off only when its directory holds it alone" do
