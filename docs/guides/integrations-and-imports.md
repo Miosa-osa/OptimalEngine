@@ -216,3 +216,9 @@ A connector is the running form of a connection: the adapter list, the config
 fields, the two credential sources (the Engine's encrypted store, or an outside
 broker such as MIOSA Connect), and what happens to a Signal after a connector
 emits it are in [Connectors](connectors.md).
+
+## Notion exports
+
+A Notion workspace export (Markdown and CSV) is imported by `POST /api/import/notion` or `mix optimal.import_notion` as a durable job.
+Every page becomes a context at `optimal://<workspace>/notion/<id>`, with its hierarchy and links as `child_of` and `links_to` edges.
+The request, the status report, the limits, and the error codes are in [Notion import](notion-import.md).

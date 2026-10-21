@@ -1,6 +1,8 @@
 # Skip RocksDB backend tests unless the NIF is loadable
 exclude = if Code.ensure_loaded?(:rocksdb), do: [], else: [:rocksdb]
-ExUnit.configure(exclude: exclude)
+
+# The 100 MB Notion import timing runs only when asked for (--only notion_scale).
+ExUnit.configure(exclude: [:notion_scale | exclude])
 
 # Authority keys are wrapped in tests exactly as in production.
 if is_nil(System.get_env("OPTIMAL_AUTHORITY_KEY")) do

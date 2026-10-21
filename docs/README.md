@@ -74,6 +74,8 @@ Read these in order:
 14. [Integrations and imports](guides/integrations-and-imports.md)
    How to inventory existing systems, connect common communication channels,
    import old context, and define recurring package types.
+   A Notion export imports in one request with the
+   [Notion import](guides/notion-import.md).
 
 15. [Agent and CLI SOP](guides/agent-cli-sop.md)
    How a human, Codex, Claude Code, an MCP client, a script, or an app should

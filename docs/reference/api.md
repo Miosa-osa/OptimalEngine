@@ -21,7 +21,7 @@ A key without a `"*"` label grant is also not shown rows above the Engine's ceil
 The recommended grants for a machine key are `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`.
 `docs/guides/replication.md` has the rule and the routes it does not cover yet.
 
-Routes: 292
+Routes: 295
 
 | Method | Path | Router | Grant | Workspace |
 | --- | --- | --- | --- | --- |
@@ -130,6 +130,9 @@ Routes: 292
 | GET | `/api/grep` | Router | read | workspace |
 | GET | `/api/health` | Router | read | tenant |
 | GET | `/api/hierarchy/audit` | Router | read | workspace |
+| POST | `/api/import/notion` | Router | write | workspace |
+| GET | `/api/import/notion/:job_id` | Router | read | workspace |
+| GET | `/api/import/notion/tree` | Router | read | workspace |
 | POST | `/api/ingest` | Router | write | workspace |
 | POST | `/api/init` | Router | admin | tenant |
 | GET | `/api/init/presets` | Router | read | tenant |

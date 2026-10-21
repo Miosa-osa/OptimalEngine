@@ -75,6 +75,34 @@ defmodule OptimalEngine.Graph do
   end
 
   @doc """
+  Retracts an edge asserted with `assert_edge/4`: removes the workspace's
+  `graph_edges` row and the matching triple. An importer uses it when a
+  re-import shows that a relation no longer holds (a page moved to another
+  parent).
+
+  Options: `:workspace_id` (default `"default"`) and `:tenant_id` (default:
+  the workspace's tenant, as `scope/1` describes). Returns `:ok`; a missing
+  edge is not an error.
+  """
+  @spec retract_edge(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def retract_edge(source, target, predicate, opts \\ [])
+      when is_binary(source) and is_binary(target) and is_binary(predicate) do
+    {tenant_id, ws} = scope(opts)
+
+    case Store.raw_query(
+           "DELETE FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND source_id = ?3 AND target_id = ?4 AND relation = ?5",
+           [tenant_id, ws, source, target, predicate]
+         ) do
+      {:error, reason} ->
+        {:error, reason}
+
+      _ ->
+        maybe_retract_triple(source, predicate, target, ws)
+        :ok
+    end
+  end
+
+  @doc """
   Hydrates a `Knowledge.Store` from all rows in the SQLite `graph_edges` table.
 
   Called on application start (and optionally per-workspace) so the in-memory
@@ -353,6 +381,39 @@ defmodule OptimalEngine.Graph do
 
       err ->
         err
+    end
+  end
+
+  @doc """
+  Returns every edge of the given relations in a workspace, as maps with
+  `:source_id`, `:target_id` and `:relation`. Importers use it to compare the
+  edges they mean to hold with the edges already there.
+
+  Options: `:workspace_id` (default: `"default"`) and `:tenant_id` (default:
+  the workspace's tenant, as `scope/1` describes).
+  """
+  @spec edges_by_relation([String.t()], keyword()) :: {:ok, [map()]} | {:error, term()}
+  def edges_by_relation(relations, opts \\ []) when is_list(relations) do
+    {tenant_id, ws} = scope(opts)
+
+    if relations == [] do
+      {:ok, []}
+    else
+      placeholders = Enum.map_join(1..length(relations), ", ", &"?#{&1 + 2}")
+
+      case Store.raw_query(
+             "SELECT source_id, target_id, relation FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND relation IN (#{placeholders})",
+             [tenant_id, ws | relations]
+           ) do
+        {:ok, rows} ->
+          {:ok,
+           Enum.map(rows, fn [source, target, relation] ->
+             %{source_id: source, target_id: target, relation: relation}
+           end)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -1033,6 +1094,20 @@ defmodule OptimalEngine.Graph do
     case Registry.lookup(OptimalEngine.Knowledge.Registry, @default_triple_store) do
       [{_pid, _value}] ->
         OptimalEngine.Knowledge.Store.assert(store_name, workspace, source, predicate, target)
+
+      [] ->
+        :noop
+    end
+  rescue
+    _ -> :noop
+  end
+
+  defp maybe_retract_triple(source, predicate, target, workspace) do
+    store_name = {:via, Registry, {OptimalEngine.Knowledge.Registry, @default_triple_store}}
+
+    case Registry.lookup(OptimalEngine.Knowledge.Registry, @default_triple_store) do
+      [{_pid, _value}] ->
+        OptimalEngine.Knowledge.Store.retract(store_name, workspace, source, predicate, target)
 
       [] ->
         :noop

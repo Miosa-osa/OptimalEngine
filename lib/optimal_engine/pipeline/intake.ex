@@ -154,6 +154,11 @@ defmodule OptimalEngine.Pipeline.Intake do
   - `:source_uri` — the row's uri when no file is written
   - `:occurred_at` — when the item happened (a `DateTime`); dates the signal
     instead of the time of intake
+  - `:classified`: the `%Signal{}` that `classify/2` returned for this exact
+    text, with `known_entities: known_entities()` and the same classification
+    options; it is stored instead of classifying again. Calls to this function
+    run one at a time, so a caller ingesting many texts classifies them in
+    parallel first. A signal whose content is not this text is ignored.
   """
   @spec process(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def process(raw_text, opts \\ []) when is_binary(raw_text) do
@@ -547,27 +552,33 @@ defmodule OptimalEngine.Pipeline.Intake do
     _ -> :ok
   end
 
+  @doc """
+  The entity names classification matches against: the names in the legacy
+  topology.yaml endpoints and in the canonical Topology.Node table (the
+  source of truth), the gazetteer that drives entity extraction and semantic
+  graph edges. `process/2` reads them on every call; a caller that classifies
+  many texts with `classify/2` reads them once and passes them as
+  `:known_entities`.
+  """
+  @spec known_entities() :: [String.t()]
+  def known_entities, do: Enum.uniq(topology_entities(load_topology()) ++ db_entity_names())
+
   # Step 1: Classify
   defp classify_step(raw_text, scope, opts) do
-    topology = load_topology()
-
-    # Known entities come from (1) the legacy topology.yaml endpoints and
-    # (2) the canonical Topology.Node table (the source of truth). The DB nodes
-    # are the gazetteer that drives entity extraction + semantic graph edges.
-    known_entities = Enum.uniq(topology_entities(topology) ++ db_entity_names())
-
     now = DateTime.utc_now()
     occurred_at = occurred_at(opts) || now
     id = source_context_id(scope.workspace_id, opts) || generate_id(raw_text, now)
 
     signal =
-      raw_text
-      |> classify(Keyword.put(opts, :known_entities, known_entities))
-      |> then(fn s ->
-        %{s | id: id, created_at: occurred_at, modified_at: occurred_at}
-      end)
+      case Keyword.get(opts, :classified) do
+        %Signal{content: ^raw_text} = classified ->
+          classified
 
-    {:ok, signal}
+        _ ->
+          classify(raw_text, Keyword.put(opts, :known_entities, known_entities()))
+      end
+
+    {:ok, %{signal | id: id, created_at: occurred_at, modified_at: occurred_at}}
   end
 
   # Step 2: Route
@@ -1015,14 +1026,24 @@ defmodule OptimalEngine.Pipeline.Intake do
     end
   end
 
-  # Stable per workspace: the same source item in one workspace is one row,
-  # and the same item pulled into two workspaces is two.
+  @doc """
+  The context id `process/2` gives an item ingested with `:source_id` into
+  `workspace_id`. Stable per workspace: the same source item in one workspace
+  is one row, and the same item pulled into two workspaces is two. Importers
+  use it to link items to each other before every item is stored.
+  """
+  @spec context_id_for_source(String.t(), String.t()) :: String.t()
+  def context_id_for_source(workspace_id, source_id)
+      when is_binary(workspace_id) and is_binary(source_id) and source_id != "" do
+    :crypto.hash(:sha256, "#{workspace_id}\0#{source_id}")
+    |> Base.encode16(case: :lower)
+    |> String.slice(0, 32)
+  end
+
   defp source_context_id(workspace_id, opts) do
     case Keyword.get(opts, :source_id) do
       source_id when is_binary(source_id) and source_id != "" ->
-        :crypto.hash(:sha256, "#{workspace_id}\0#{source_id}")
-        |> Base.encode16(case: :lower)
-        |> String.slice(0, 32)
+        context_id_for_source(workspace_id, source_id)
 
       _none ->
         nil

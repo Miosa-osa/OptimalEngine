@@ -132,7 +132,9 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Reindex.Worker,
 
       # ── Filesystem cache: legacy layout removed once, entries expire by age ─
-      OptimalEngine.Store.FileCache.Maintenance
+      OptimalEngine.Store.FileCache.Maintenance,
+      # ── Import jobs (Notion exports posted to /api/import/notion) ────────
+      OptimalEngine.Imports.Worker
     ]
   end
 
