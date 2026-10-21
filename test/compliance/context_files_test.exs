@@ -154,6 +154,37 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       assert count("contexts", "id", stays) == 1
     end
 
+    test "leaves a person's file under the name of a copy", ctx do
+      primary = signal!(ctx, "project-platform-launch", "pricing.md")
+
+      id =
+        context!(ctx, "primary", primary, routed: ["project-platform-launch", "operation-revenue"])
+
+      persons = signal!(ctx, "operation-revenue", "pricing.md", text: "written by hand")
+
+      assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [id])
+
+      refute File.exists?(primary)
+      assert File.read!(persons) == "written by hand"
+    end
+
+    test "leaves a copy that a context of another tenant indexes", ctx do
+      primary = signal!(ctx, "project-platform-launch", "pricing.md")
+
+      id =
+        context!(ctx, "primary", primary, routed: ["project-platform-launch", "operation-revenue"])
+
+      copy = signal!(ctx, "operation-revenue", "pricing.md")
+      File.write!(copy, File.read!(primary))
+      theirs = context!(ctx, "theirs", copy, tenant: "cf-other-#{ctx.n}", render: false)
+
+      assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [id])
+
+      refute File.exists?(primary)
+      assert File.exists?(copy)
+      assert count("contexts", "id", theirs) == 1
+    end
+
     test "leaves a file that is not markdown", ctx do
       text = signal!(ctx, "project-platform-launch", "notes.txt")
       id = context!(ctx, "plain-text", text)
@@ -198,7 +229,11 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       kept = file!(outside, "signals/deal.md", "text outside the root")
       on_exit(fn -> File.rm_rf(outside) end)
       File.ln_s!(outside, Path.join(ctx.root, "project-linked"))
-      id = context!(ctx, "linked-dir", Path.join(ctx.root, "project-linked/signals/deal.md"))
+
+      id =
+        context!(ctx, "linked-dir", Path.join(ctx.root, "project-linked/signals/deal.md"),
+          render: false
+        )
 
       assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [id])
 
@@ -420,7 +455,7 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
   end
 
   describe "plan/3" do
-    test "names the files and the copy contexts, and reads no file", ctx do
+    test "names the files and the copy contexts", ctx do
       primary = signal!(ctx, "project-platform-launch", "plan.md")
       copy = signal!(ctx, "operation-revenue", "plan.md")
       id = context!(ctx, "plan", primary, routed: ["project-platform-launch", "operation-revenue"])
