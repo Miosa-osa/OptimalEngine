@@ -302,7 +302,7 @@ defmodule OptimalEngine.MemoryCore.ClaimReviewTest do
            ]
 
     assert refreshed_package.metadata.refreshed_from_context_package_id == package.id
-    assert refreshed_package.metadata.refreshed_from_invalidation_reason == invalidation_reason
+    refute Map.has_key?(refreshed_package.metadata, :refreshed_from_invalidation_reason)
 
     assert {:ok, [["refreshed"]]} =
              Store.raw_query(
