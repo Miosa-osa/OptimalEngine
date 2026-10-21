@@ -56,13 +56,30 @@ started=$(date +%s)
 
 fail() {
   echo "FAIL $1"
+  for name in a b; do
+    if [ -s "$DATA/rss-$name.log" ]; then echo "ENGINE_${name}_PEAK_RSS_MB=$(peak_mb "$DATA/rss-$name.log")"; fi
+  done
+  free -m 2>/dev/null | head -2 || true
   for log in a.log b.log; do
     if [ -f "$DATA/$log" ]; then
       echo "-- $log"
-      tail -30 "$DATA/$log"
+      tail -40 "$DATA/$log"
     fi
   done
   exit 1
+}
+
+# Samples an Engine's resident memory every 2 s into a file until it stops
+# (run in the background); peak_mb prints the largest sample in MiB.
+sample_rss() { # pid file
+  while kill -0 "$1" 2>/dev/null; do
+    ps -o rss= -p "$1" >>"$2" 2>/dev/null || true
+    sleep 2
+  done
+}
+
+peak_mb() { # file
+  sort -n "$1" | tail -1 | awk '{printf "%d", $1 / 1024}'
 }
 
 # Runs a command with the environment of Engine a or b.
@@ -230,6 +247,7 @@ echo "A_DB_BYTES=$(db_bytes a)"
 
 echo "== step 5: Engine A again; changes just before the export; the export"
 a_pid=$(start_engine a "$A_PORT" "$a_key") || fail "Engine A did not answer /api/health after the seed"
+sample_rss "$a_pid" "$DATA/rss-a.log" &
 python3 - "$DATA" "$A_URL" "$a_key" "$workspace" "$LATE" <<'PY' || fail "exporting the bundle"
 import json, sys, time, urllib.parse
 sys.path.insert(0, sys.argv[1])
@@ -246,8 +264,11 @@ for i in range(late):
     late_ids.append(memory["id"])
 
 started = time.time()
-bundle = ok(call(base, key, "POST", "/api/workspaces/%s/bundle" % urllib.parse.quote(workspace, safe=""), {}),
-            "POST /api/workspaces/:id/bundle")
+try:
+    bundle = ok(call(base, key, "POST", "/api/workspaces/%s/bundle" % urllib.parse.quote(workspace, safe=""), {}),
+                "POST /api/workspaces/:id/bundle")
+except OSError as error:
+    raise SystemExit("the export failed after %.0f s: %r" % (time.time() - started, error))
 seconds = time.time() - started
 mark = bundle["ledger_sequence"]
 print("EXPORT_SECONDS=%.1f" % seconds)
@@ -264,6 +285,7 @@ json.dump({"bundle": bundle, "late_ids": late_ids}, open(data + "/export.json", 
 if late_after:
     raise SystemExit("the bundle's mark misses %d ledger entries written before the export" % len(late_after))
 PY
+echo "ENGINE_A_PEAK_RSS_MB=$(peak_mb "$DATA/rss-a.log")"
 bundle=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["bundle"]["bundle"])' "$DATA/export.json")
 mark=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["bundle"]["ledger_sequence"])' "$DATA/export.json")
 
@@ -280,6 +302,7 @@ rm -f "$DATA/a/backups/bundles/$bundle"
 python3 -c 'import sys; print("DOWNLOAD_SECONDS=%.1f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$t0" "$t1"
 
 b_pid=$(start_engine b "$B_PORT" "$b_key") || fail "Engine B did not answer /api/health"
+sample_rss "$b_pid" "$DATA/rss-b.log" &
 t0=$(date +%s.%N)
 code=$(curl -sS -X POST -T "$DATA/bundle.tar.gz" -H "Content-Type: application/gzip" -H "Expect:" \
   -H "Authorization: Bearer $b_key" -o "$DATA/import.json" -w '%{http_code}' \
@@ -287,6 +310,7 @@ code=$(curl -sS -X POST -T "$DATA/bundle.tar.gz" -H "Content-Type: application/g
 t1=$(date +%s.%N)
 [ "$code" = 201 ] || { head -c 600 "$DATA/import.json"; fail "the import returned $code"; }
 python3 -c 'import sys; print("IMPORT_SECONDS=%.1f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$t0" "$t1"
+echo "ENGINE_B_PEAK_RSS_MB=$(peak_mb "$DATA/rss-b.log")"
 echo "B_DB_BYTES_AFTER_IMPORT=$(db_bytes b)"
 rm -f "$DATA/bundle.tar.gz"
 
