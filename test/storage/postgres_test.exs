@@ -81,6 +81,7 @@ defmodule OptimalEngine.Storage.PostgresTest do
     refute provider.adapter_implemented
     assert provider.lifecycle_state == "adapter_missing"
     assert Postgres.describe().adapter_registered == false
+    assert [%{feature: "full_text_search"} | _] = Postgres.describe().unavailable
   end
 
   if System.get_env("OPTIMAL_POSTGRES_TEST_URL") do
