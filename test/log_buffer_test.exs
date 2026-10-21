@@ -8,6 +8,8 @@ defmodule OptimalEngine.LogBufferTest do
 
   alias OptimalEngine.LogBuffer
 
+  require Logger
+
   defp ring(capacity) do
     table = :ets.new(:log_buffer_test, [:public, :set])
     :ets.insert(table, [{:seq, 0}, {:capacity, capacity}])
@@ -102,6 +104,13 @@ defmodule OptimalEngine.LogBufferTest do
       refute line =~ "hunter2"
     end
 
+    test "URL userinfo of any length" do
+      long = "Zq" <> String.duplicate("p", 600)
+      line = stored("fetching https://user:#{long}@objects.example.com/bucket done")
+      assert line =~ "https://[redacted]@objects.example.com/bucket done"
+      refute line =~ "Zq"
+    end
+
     test "URL userinfo without a password, and a password holding an @" do
       line =
         stored("https://tok3n-only@a.example/x and https://user:p@ss-w0rd@b.example/y?q=1")
@@ -131,8 +140,8 @@ defmodule OptimalEngine.LogBufferTest do
 
       assert line =~ "eu-west-1"
       assert line =~ ~s(secret_access_key: "[redacted]")
-      # An unquoted value is redacted to the next whitespace, the rest of a query included.
-      assert line =~ "token=[redacted] x-optimal-grant"
+      # An unquoted value ends at whitespace or at the next query parameter.
+      assert line =~ "token=[redacted]&next=2 x-optimal-grant"
     end
 
     test "credential names at the end of longer names" do
@@ -167,11 +176,21 @@ defmodule OptimalEngine.LogBufferTest do
       end
     end
 
+    # The token fixtures are assembled here, so none in the repository is key-shaped.
     test "provider tokens with a known prefix" do
       line =
         stored(
-          "sk-ant-api03-AbCdEfGh12345678 sk_live_AbCdEfGh1234 ghp_AbCdEfGh12345678 " <>
-            "xoxb-1234567890-abcdefgh msk_AbCdEfGh1234 mki-AbCdEfGh1234"
+          Enum.join(
+            [
+              "sk" <> "-ant-api03-AbCdEfGh12345678",
+              "sk" <> "_live_AbCdEfGh1234",
+              "gh" <> "p_AbCdEfGh12345678",
+              "xo" <> "xb-1234567890-abcdefgh",
+              "ms" <> "k_AbCdEfGh1234",
+              "mk" <> "i-AbCdEfGh1234"
+            ],
+            " "
+          )
         )
 
       for secret <- ~w(AbCdEfGh12345678 AbCdEfGh1234 1234567890-abcdefgh) do
@@ -182,8 +201,17 @@ defmodule OptimalEngine.LogBufferTest do
     test "more provider prefixes" do
       line =
         stored(
-          "github_pat_11ABCDEFG0abcdefghijkl ntn_1234567890abcdefgh secret_AbCdEfGhIjKlMnOp " <>
-            "ya29.a0AfH6SMBxyzxyzxyz rk_live_1234567890abcd whsec_1234567890abcdef"
+          Enum.join(
+            [
+              "github" <> "_pat_11ABCDEFG0abcdefghijkl",
+              "nt" <> "n_1234567890abcdefgh",
+              "secret" <> "_AbCdEfGhIjKlMnOp",
+              "ya" <> "29.a0AfH6SMBxyzxyzxyz",
+              "rk" <> "_live_1234567890abcd",
+              "wh" <> "sec_1234567890abcdef"
+            ],
+            " "
+          )
         )
 
       for secret <-
@@ -195,15 +223,222 @@ defmodule OptimalEngine.LogBufferTest do
     test "cloud access key ids and JWTs" do
       # Assembled here so the public audit never sees a key-shaped literal.
       access_key_id = "AKIA" <> String.duplicate("Q7", 8)
-      line = stored("#{access_key_id} eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl-x_y")
+
+      jwt =
+        Enum.join(["ey" <> "JhbGciOiJIUzI1NiJ9", "ey" <> "JzdWIiOiIxIn0", "c2lnbmF0dXJl-x_y"], ".")
+
+      line = stored("#{access_key_id} #{jwt}")
 
       refute line =~ access_key_id
-      refute line =~ "eyJhbGciOiJIUzI1NiJ9"
+      refute line =~ "hbGciOiJIUzI1NiJ9"
     end
 
     test "ordinary text is kept" do
       line = stored("token count 512, tokens: 3, risk-assessment-v2, task_runner_12345678")
       refute line =~ "[redacted]"
+    end
+  end
+
+  # Every secret of the later tests starts with "Zq", which nothing else in
+  # their lines holds.
+  defp zq(n), do: "Zq" <> String.duplicate("w8", 6) <> "n#{n}"
+
+  defp marker, do: "drill-#{System.unique_integer([:positive])}"
+
+  # A PEM boundary line, assembled so no fixture in the repository is one.
+  defp pem(edge, kind), do: "-----" <> edge <> " " <> kind <> "PRIVATE" <> " KEY-----"
+
+  defp ring_lines_with(marker) do
+    %{lines: lines} = LogBuffer.recent(1_000)
+    Enum.filter(lines, &String.contains?(&1, marker))
+  end
+
+  defmodule Holder do
+    @moduledoc false
+    use GenServer
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_cast(:crash, state), do: raise("crash for the log drill #{state.marker}")
+  end
+
+  describe "the second redaction pass" do
+    test "authorization with a scheme word no list names" do
+      line =
+        stored(
+          "Authorization: Custom #{zq(1)} authorization: Bot #{zq(2)} " <>
+            "authorization=Hawk #{zq(3)} then"
+        )
+
+      refute line =~ "Zq", line
+      assert line =~ "then"
+    end
+
+    test "authorization values in every form, scheme words included" do
+      line =
+        stored(
+          inspect([{"authorization", String.to_charlist("Token #{zq(1)}")}]) <>
+            " authorization: ApiKey #{zq(2)} " <>
+            inspect({"authorization", ~s(Digest username="bob", response="#{zq(3)}")}) <>
+            " Authorization: AWS4-HMAC-SHA256 Credential=#{zq(4)}/20261020/us-east-1/s3/aws4_request," <>
+            " SignedHeaders=host, Signature=#{zq(5)}"
+        )
+
+      refute line =~ "Zq", line
+      assert line =~ "SignedHeaders=host"
+    end
+
+    test "quoted values with escaped quotes, single quotes and backticks" do
+      line =
+        stored(
+          inspect(%{password: ~s(a"#{zq(1)}"b)}) <>
+            " secret: 'it\\'s #{zq(2)}' password=`#{zq(3)} x` done"
+        )
+
+      refute line =~ "Zq", line
+      assert line =~ "done"
+    end
+
+    test "a query value stops at the next parameter" do
+      line = stored("GET /cb?token=#{zq(1)}&next=2&state=ok")
+      assert line =~ "token=[redacted]&next=2&state=ok"
+      refute line =~ "Zq"
+    end
+
+    test "Erlang binaries and atom-named tuples" do
+      line =
+        stored(
+          "#" <>
+            "{password => <<\"#{zq(1)}\">>} {password,<<\"#{zq(2)}\">>} " <>
+            inspect({:password, zq(3)}) <>
+            " " <>
+            inspect({:db_password, String.to_charlist(zq(4) <> " x")}) <>
+            " {:api_key, #{zq(5)}}"
+        )
+
+      refute line =~ "Zq", line
+    end
+
+    test "short Basic credentials and a lowercase scheme" do
+      line = stored("sent Basic YTpi and basic #{Base.encode64("u:" <> zq(1))}")
+      refute line =~ "YTpi"
+      refute line =~ Base.encode64("u:" <> zq(1))
+      assert line =~ "Basic [redacted]"
+    end
+
+    test "more credential names, camelCase names and env-style keys" do
+      line =
+        stored(
+          "private_key=#{zq(1)} secret-key: #{zq(2)} passwd=#{zq(3)} passphrase: #{zq(4)} " <>
+            "signature=#{zq(5)} CONNECTOR_KEY=#{zq(6)} OPTIMAL_AUTHORITY_KEY=#{zq(7)} " <>
+            ~s(apiKey: "#{zq(8)}" accessToken=#{zq(9)} clientSecret: #{zq(10)} dbPassword=#{zq(11)})
+        )
+
+      refute line =~ "Zq", line
+      assert line =~ "apiKey: \"[redacted]\""
+    end
+
+    test "PEM private key blocks, closed or cut" do
+      body = zq(1) <> String.duplicate("AB", 20)
+
+      line =
+        stored(
+          "key #{pem("BEGIN", "RSA ")} #{body} #{pem("END", "RSA ")} then " <>
+            "#{pem("BEGIN", "")} #{zq(2)}"
+        )
+
+      refute line =~ "Zq", line
+      assert line =~ "key [redacted private key] then"
+    end
+
+    test "more provider prefixes, built here so no fixture is key-shaped" do
+      keys = [
+        "AI" <> "za" <> zq(1) <> String.duplicate("x9", 10) <> "y",
+        "xa" <> "pp-1-" <> zq(2),
+        "gl" <> "pat-" <> zq(3) <> "abcdef",
+        "np" <> "m_" <> zq(4) <> String.duplicate("q1", 10),
+        "h" <> "f_" <> "Zq" <> String.duplicate("abc", 11)
+      ]
+
+      for key <- keys do
+        assert byte_size(key) > 20
+        line = stored("using #{key} now")
+        refute line =~ "Zq", line
+        assert line =~ "now"
+      end
+
+      temporary_key_id = "AS" <> "IA" <> String.duplicate("R4", 8)
+      refute stored("id #{temporary_key_id}") =~ temporary_key_id
+    end
+
+    test "bidi and invisible controls are replaced" do
+      codes = [0x202E, 0x202A, 0x2066, 0x2069, 0x200B, 0x200F, 0xFEFF, 0x2060, 0x061C]
+      chars = Enum.map(codes, &<<&1::utf8>>)
+      line = stored("a" <> Enum.join(chars, "b") <> "c")
+      for char <- chars, do: refute(line =~ char)
+      assert line =~ "a?b?b?b?b?b?b?b?b?c"
+    end
+
+    test "crafted lines finish in bounded time" do
+      for crafted <- [
+            String.duplicate("eyJ", 5_000),
+            String.duplicate("a", 15_000) <> ":",
+            String.duplicate("a://", 3_500),
+            String.duplicate("aKey", 3_500),
+            String.duplicate("A_", 7_000),
+            "password=\"" <> String.duplicate("\\\\", 7_000)
+          ] do
+        {micros, _line} = :timer.tc(fn -> stored(crafted) end)
+        assert micros < 1_000_000, "#{byte_size(crafted)} bytes took #{micros} µs"
+      end
+    end
+
+    test "redacting a redacted line changes nothing" do
+      for message <- [
+            "key oe_#{zq(1)} Bearer #{zq(2)} Basic YTpi https://u:#{zq(3)}@h.example/p",
+            "token=#{zq(4)}&next=2 " <> inspect(%{"api_key" => zq(6), password: zq(5)}),
+            "{:password, #{zq(7)}} #{pem("BEGIN", "")} #{zq(8)} #{pem("END", "")}",
+            "sk-" <> zq(9) <> " AK" <> "IA" <> String.duplicate("Q7", 8)
+          ] do
+        once = LogBuffer.redact(message)
+        assert LogBuffer.redact(once) == once
+        refute once =~ "Zq", once
+      end
+    end
+  end
+
+  # These go through :logger and the handler the application installed, so
+  # each event shape reaches the ring as it would in production.
+  describe "secrets logged through the running Engine's logger" do
+    test "Logger.error, a format with arguments, and a report" do
+      m = marker()
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        Logger.error("#{m} elixir password=#{zq(1)}")
+        :logger.error(~c"~s erlang password=~s", [m, zq(2)])
+        :logger.error(%{drill: m, password: zq(3), api_key: zq(4)})
+      end)
+
+      lines = ring_lines_with(m)
+      assert length(lines) == 3, inspect(lines)
+      for line <- lines, do: refute(line =~ "Zq", line)
+    end
+
+    test "a crashed GenServer with a secret in its state" do
+      m = marker()
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, pid} = GenServer.start(__MODULE__.Holder, %{marker: m, password: zq(5)})
+        ref = Process.monitor(pid)
+        GenServer.cast(pid, :crash)
+        assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+      end)
+
+      lines = ring_lines_with(m)
+      assert lines != []
+      for line <- lines, do: refute(line =~ "Zq", line)
     end
   end
 

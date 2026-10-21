@@ -65,12 +65,16 @@ class FakeEngine:
                     'auth': self.headers.get('Authorization'),
                     'body': body,
                 })
-                # A route is (status, payload) or (status, payload, response headers).
+                # A route is (status, payload) or (status, payload, response headers);
+                # a bytes payload is sent as it is.
                 status, payload, *extra = engine.routes.get((self.command, split.path),
                                                             (200, {'ok': True, 'path': split.path}))
                 if require_key and self.headers.get('Authorization') != f'Bearer {require_key}':
                     status, payload = 401, {'error': 'missing_api_key'}
-                out = json.dumps(payload).encode() if payload is not None else b''
+                if isinstance(payload, bytes):
+                    out = payload
+                else:
+                    out = json.dumps(payload).encode() if payload is not None else b''
                 self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(out)))
@@ -413,7 +417,27 @@ class JsonTests(CliTestCase):
             'protocol': {'content': 'a\x1b[2Jb\x07c\u009b31md\u2028e\u2029f\x7fg\u0085h\tkept\nline café'},
         })
         content = self.ok('boot', '--field', 'protocol.content').stdout
-        self.assertEqual(content, 'a[2Jbc31mdefgh\tkept\nline café\n')
+        self.assertEqual(content, 'a?[2Jb?c?31md?e?f?g?h\tkept\nline café\n')
+
+    def run_cli_bytes(self, *args):
+        return subprocess.run([SHELL, str(CLI), *args], env=self.env, capture_output=True, timeout=30)
+
+    def test_no_control_is_reassembled_from_invalid_utf8(self):
+        # Raw bytes: deleting the inner C2 9B or E2 80 A8 would leave a C1 CSI or a U+2028.
+        reassembling = b'a\xc2\xc2\x9b\x9bb \xe2\xe2\x80\xa8\x80\xa8c'
+        self.fake.routes[('GET', '/api/boot')] = (
+            200, b'{"protocol": {"content": "' + reassembling + b'"}}')
+        out = self.run_cli_bytes('boot', '--field', 'protocol.content')
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn(b'\xc2\x9b', out.stdout)
+        self.assertNotIn(b'\xe2\x80\xa8', out.stdout)
+        self.fake.routes[('GET', '/api/boot')] = (
+            426, b'{"error": "client_incompatible' + reassembling + b'", "engine": "9.0.0"}')
+        out = self.run_cli_bytes('boot')
+        self.assertEqual(out.returncode, 78, out.stderr)
+        self.assertNotIn(b'\xc2\x9b', out.stderr)
+        self.assertNotIn(b'\xe2\x80\xa8', out.stderr)
+        self.assertIn(b'client_incompatible', out.stderr)
 
 
 class ConfigTests(CliTestCase):
@@ -548,6 +572,18 @@ class AuthAndSecrecyTests(CliTestCase):
         self.assertIn('"effect": "deny"', result.stderr)
         self.assertIn('HTTP 403: denied', result.stderr)
 
+    def test_an_error_body_prints_no_terminal_controls(self):
+        self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
+        # Raw UTF-8, not JSON escapes: the bytes reach the client as they are.
+        # (json.dumps still escapes C0 controls; C1 and the separators stay raw.)
+        body = json.dumps({'error': 'denied', 'detail': 'a\u009bb\u2028c\u0085d\u2029e'}, ensure_ascii=False)
+        self.fake.routes[('GET', '/api/search')] = (403, body.encode())
+        result = self.run_cli('search', 'x')
+        self.assertEqual(result.returncode, 77, result.stderr)
+        for char in ['\x9b', '\u2028', '\x85', '\u2029']:
+            self.assertNotIn(char, result.stderr)
+        self.assertIn('a?b?c?d?e', result.stderr)
+
     def test_workspace_required(self):
         self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
         self.fake.routes[('GET', '/api/memory')] = (400, {'error': 'workspace_required'})
@@ -665,12 +701,12 @@ class CompatibilityEdgeTests(CliTestCase):
         self.assertIn(f'upgrade the client to {engine}', result.stderr)
 
     def test_the_426_message_carries_no_control_characters(self):
-        self.fake.routes[('GET', '/api/boot')] = (426, {'error': 'client_incompatible\x1b[2J',
+        self.fake.routes[('GET', '/api/boot')] = (426, {'error': 'client_incompatible\x1b[2J\u009b2J\u2028',
                                                         'engine': '9.0.0\x1b]0;title\x07'})
         result = self.run_cli('boot')
         self.assertEqual(result.returncode, 78, result.stderr)
-        self.assertNotIn('\x1b', result.stderr)
-        self.assertNotIn('\x07', result.stderr)
+        for char in ['\x1b', '\x07', '\x9b', '\u2028']:
+            self.assertNotIn(char, result.stderr)
         self.assertIn('the Engine (9.0.0', result.stderr)
         self.assertIn('client_incompatible', result.stderr)
 
@@ -812,8 +848,9 @@ class OperatorTests(CliTestCase):
     def test_remote_log_replaces_control_characters(self):
         engine = self.remote_engine()
         self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
-        engine.routes[('GET', '/api/maintenance/log')] = (200, {'text': '\x1b[31mred\x1b[0m\ttab\x07'})
-        self.assertEqual(self.ok('log').stdout, '?[31mred?[0m\ttab?\n')
+        engine.routes[('GET', '/api/maintenance/log')] = (
+            200, {'text': '\x1b[31mred\x1b[0m\ttab\x07 \u009b31m \u2028x \u0085y \u2029z'})
+        self.assertEqual(self.ok('log').stdout, '?[31mred?[0m\ttab? ?31m ?x ?y ?z\n')
 
     def test_remote_operator_usage_errors(self):
         self.remote_engine()
