@@ -12,7 +12,8 @@ Its URI is `optimal://<workspace>/notion/<id>`, where `<id>` is the 32 hex id No
 Search results and RAG citations carry that URI, and `GET /api/read?uri=<uri>&workspace=<workspace>&tier=full` serves the page.
 A file without a Notion id gets a stable id derived from its path (`path-<hex>`).
 
-A page longer than 64 KiB is classified (genre, mode, and summary) from its first 64 KiB and its entities from the whole text, so a page of any shape costs a bounded time to classify; all of its text is stored and searchable.
+A page is classified as an ingest is: a page longer than 64 KiB takes its genre and summary from its first 64 KiB of whole lines, its mode from the whole page, and its entities from the whole page within the classification time limit (past it, from the first 64 KiB).
+Each page gets one classification budget, so a page of any shape costs a bounded time to classify; all of its text is stored and searchable.
 
 The context id is derived from the workspace and the Notion id, so importing the same export again updates each context in place.
 A page whose title and text are unchanged is skipped, not ingested again, and is counted as `unchanged`.
