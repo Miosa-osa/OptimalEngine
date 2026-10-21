@@ -130,15 +130,13 @@ defmodule OptimalEngine.Compliance.DerivedData do
   What goes with one source package on a replica, as rows: the runs `[id, checkpoint,
   workspace]` and assets `[id, path, workspace]` this Engine made from it, the contexts of the
   plan that refer to it, and the workspaces the deleted contexts were in with their tenants.
-  `package_delete` is true for an entry planned from the delete of the package itself.
   """
   @type file_entry :: %{
           package: String.t(),
           contexts: [String.t()],
           assets: [[term()]],
           runs: [[term()]],
-          scope: %{String.t() => String.t()},
-          package_delete: boolean()
+          scope: %{String.t() => String.t()}
         }
 
   @doc """
@@ -173,10 +171,14 @@ defmodule OptimalEngine.Compliance.DerivedData do
   Each entry is checked against what is committed now, in the same Store transaction as the
   removal, so no write can come between the check and the removal: an entry is kept (its
   files and rows stay) when any context's `source_package_id` or any claim's names its
-  package, and, for a package that was to be deleted, while the package row is still there. An
-  asset file is kept when an asset outside the entry names the same path, spelled the same way
-  or another. A delete that was not applied, a context created in the same batch on the
-  package, and a write that came after the plan are all caught here.
+  package, and while the package row is still there. The origin removes these rows and files
+  only together with the package row (`delete_in/3` deletes the packages that no remaining
+  context or claim refers to, with their runs, assets and files, in one transaction), so a
+  package that is still here is one the origin kept, or one whose delete has not been applied
+  yet: the delete of the package sweeps it when it arrives. An asset file is kept when an
+  asset outside the entry names the same path, spelled the same way or another. A delete that
+  was not applied, a context created in the same batch on the package, and a write that came
+  after the plan are all caught here.
 
   Answers how many entries were removed and kept, and how many files and rows went.
   """
@@ -218,7 +220,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
       {going, kept} =
         Enum.split_with(entries, fn entry ->
           not MapSet.member?(referenced, entry.package) and
-            not (entry.package_delete and MapSet.member?(present, entry.package))
+            not MapSet.member?(present, entry.package)
         end)
 
       going
@@ -307,7 +309,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
              """,
              [ctx, json(packages)]
            ) do
-      package_entries(txn, packages, scope, owners, false)
+      package_entries(txn, packages, scope, owners)
     end
   end
 
@@ -316,9 +318,9 @@ defmodule OptimalEngine.Compliance.DerivedData do
   defp plan_packages(_txn, _tenant_id, _workspace_id, []), do: {:ok, []}
 
   defp plan_packages(txn, tenant_id, workspace_id, packages),
-    do: package_entries(txn, packages, %{workspace_id => tenant_id}, [], true)
+    do: package_entries(txn, packages, %{workspace_id => tenant_id}, [])
 
-  defp package_entries(txn, packages, scope, owners, package_delete) do
+  defp package_entries(txn, packages, scope, owners) do
     pkgs = json(packages)
 
     with {:ok, assets} <-
@@ -346,8 +348,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
             contexts: for([id, ^package] <- owners, do: id),
             assets: package_assets,
             runs: package_runs,
-            scope: scope,
-            package_delete: package_delete
+            scope: scope
           }
         end
 
