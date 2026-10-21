@@ -228,6 +228,10 @@ A key minted without `allowed_security_labels` or `allowed_partitions` gets none
 A minter can only give grants it holds (a minter that holds `"*"` can give any).
 For any other key, give the labels it should read.
 The recommended default for a machine key is `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`: it reads rows labelled public, internal or confidential and rows with no label, and does not read restricted rows, rows with a label of their own (`private`, a team name) or partitioned rows.
+Migration 85 gives that default, once, to every live key minted before grants existed (a key whose metadata has neither field), and marks it `grants_backfilled`.
+It narrows those keys: until the read routes followed grants they read everything.
+It leaves alone a key that has either field (an empty list included), a revoked key and the root bootstrap key, which holds `"*"`.
+A key minted after the upgrade is not covered: pass its grants when you mint it.
 
 An answer says what was left out.
 Each of these routes returns `withheld` (how many items were not shown) and `complete` (false when any item was left out or, for conflicts, redacted); the export of a workspace counts its signals, memories and wiki pages together.
