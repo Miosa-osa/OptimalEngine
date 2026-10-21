@@ -621,7 +621,9 @@ defmodule OptimalEngine.Pipeline.Classifier do
     end
   end
 
-  defp extract_entities(body, known_entities) when is_list(known_entities) do
+  @doc "The names in `known_entities` (longer than two characters) that `body` mentions as words."
+  @spec extract_entities(String.t(), [String.t()]) :: [String.t()]
+  def extract_entities(body, known_entities) when is_list(known_entities) do
     known_entities
     |> Enum.filter(fn name ->
       String.length(name) > 2 && Regex.match?(~r/\b#{Regex.escape(name)}\b/i, body)

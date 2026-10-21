@@ -3,7 +3,9 @@ defmodule OptimalEngine.API.NotionImportAPITest do
   `POST /api/import/notion`, `GET /api/import/notion/:job_id` and
   `GET /api/import/notion/tree` end to end: upload or URL, the durable job,
   the status report, search and read with citations, the hierarchy, scopes,
-  limits and refusals. Each test runs in its own tenant.
+  limits and refusals, idempotency answered before the body is read, the
+  outstanding cap, and a presigned URL whose signature appears nowhere, on
+  success or on failure. Each test runs in its own tenant.
   """
 
   use ExUnit.Case, async: false
@@ -202,6 +204,154 @@ defmodule OptimalEngine.API.NotionImportAPITest do
     assert length(Enum.filter(jobs, &(&1.kind == "import.notion"))) == 1
   end
 
+  test "a repeated key is answered before the body is read, even past the size limit or the cap",
+       ctx do
+    headers = [{"idempotency-key", "export-again"}]
+    first = body(upload(ctx.workspace, Fixture.export(), ctx.writer, headers))
+    before = File.ls!(Imports.dir())
+
+    # The repeat is over the size limit and the workspace is full, yet it is
+    # the same import, so it gets the first job and nothing is staged.
+    put_env(:import_max_bytes, 10)
+    put_env(:import_max_outstanding, 1)
+    again = upload(ctx.workspace, Fixture.export(), ctx.writer, headers)
+
+    assert again.status == 202
+    assert %{"job_id" => same, "duplicate" => true, "status" => "queued"} = body(again)
+    assert same == first["job_id"]
+    assert Enum.sort(File.ls!(Imports.dir())) == Enum.sort(before)
+
+    json_again =
+      post_json(
+        %{
+          workspace: ctx.workspace,
+          idempotency_key: "export-again",
+          source_url: "https://93.184.216.34/x.zip"
+        },
+        ctx.writer
+      )
+
+    assert %{"job_id" => ^same, "duplicate" => true} = body(json_again)
+  end
+
+  test "an idempotency key is at most 128 printable characters", ctx do
+    for key <- [String.duplicate("k", 129), "has space", "tab\tkey"] do
+      conn = upload(ctx.workspace, Fixture.export(), ctx.writer, [{"idempotency-key", key}])
+      assert {conn.status, body(conn)} == {400, %{"error" => "invalid_idempotency_key"}}, key
+    end
+
+    conn =
+      upload(ctx.workspace, Fixture.export(), ctx.writer, [
+        {"idempotency-key", String.duplicate("k", 128)}
+      ])
+
+    assert conn.status == 202
+  end
+
+  test "a workspace holds at most two outstanding imports; a third waits for one to end", ctx do
+    assert upload(ctx.workspace, Fixture.export(), ctx.writer).status == 202
+    assert upload(ctx.workspace, Fixture.export(), ctx.writer).status == 202
+    before = File.ls!(Imports.dir())
+
+    third = upload(ctx.workspace, Fixture.export(), ctx.writer)
+
+    assert {third.status, body(third)} ==
+             {429, %{"error" => "too_many_imports", "max_outstanding" => 2}}
+
+    url =
+      post_json(%{workspace: ctx.workspace, source_url: "https://93.184.216.34/x.zip"}, ctx.writer)
+
+    assert url.status == 429
+    assert Enum.sort(File.ls!(Imports.dir())) == Enum.sort(before)
+
+    # Another workspace has its own count.
+    other = upload(ctx.other, Fixture.export(), ctx.root)
+    assert other.status == 202
+
+    {:ok, %{status: "completed"}} = drain(ctx.workspace)
+    assert upload(ctx.workspace, Fixture.export(), ctx.writer).status == 202
+  end
+
+  test "the staging folder is owner-only and so is every file in it", ctx do
+    %{"job_id" => upload_id} = body(upload(ctx.workspace, Fixture.export(), ctx.writer))
+
+    put_env(:import_url_hosts, ["127.0.0.1"])
+
+    %{"job_id" => url_id} =
+      body(
+        post_json(
+          %{workspace: ctx.workspace, source_url: "http://127.0.0.1:9/export.zip?sig=1"},
+          ctx.writer
+        )
+      )
+
+    mode = fn path -> Bitwise.band(File.stat!(path).mode, 0o777) end
+
+    for {job_id, file} <- [{upload_id, "source.zip"}, {url_id, "source.url"}] do
+      {:ok, job} = OptimalEngine.Jobs.get(job_id, ctx.workspace)
+      folder = Path.join(Imports.dir(), job.payload["import_id"])
+      assert mode.(folder) == 0o700
+      assert mode.(Path.join(folder, file)) == 0o600
+    end
+  end
+
+  test "a long or control-laden source URL is refused before a job exists", ctx do
+    long = "https://93.184.216.34/" <> String.duplicate("a", 8_200)
+
+    for url <- [
+          long,
+          "https://93.184.216.34/export.zip\r\nX-Evil: 1",
+          "https://93.184.216.34/a\u0000b"
+        ] do
+      conn = post_json(%{workspace: ctx.workspace, source_url: url}, ctx.writer)
+      assert {conn.status, body(conn)} == {400, %{"error" => "invalid_source_url"}}
+    end
+
+    {:ok, jobs} = OptimalEngine.Jobs.list(ctx.workspace)
+    assert jobs == []
+  end
+
+  test "a failed download of a signed URL leaves its signature nowhere", ctx do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(listen)
+    :gen_tcp.close(listen)
+    put_env(:import_url_hosts, ["127.0.0.1"])
+
+    secret = "s3cr3t#{System.unique_integer([:positive])}"
+    url = "http://127.0.0.1:#{port}/export.zip?X-Signature=#{secret}&X-Expires=3600"
+
+    {job_id, log} =
+      with_log(fn ->
+        conn = post_json(%{workspace: ctx.workspace, source_url: url}, ctx.writer)
+        assert conn.status == 202
+        refute conn.resp_body =~ secret
+        %{"job_id" => job_id} = body(conn)
+        {:ok, _} = drain(ctx.workspace)
+        job_id
+      end)
+
+    status = get("/api/import/notion/#{job_id}", %{workspace: ctx.workspace}, ctx.reader)
+    assert body(status)["status"] == "retrying"
+    assert body(status)["last_error"] == "download_failed: connect_failed"
+    assert body(status)["failure"] == %{"code" => "download_failed", "detail" => "connect_failed"}
+
+    {:ok, job} = OptimalEngine.Jobs.get(job_id, ctx.workspace)
+    report = File.read!(Path.join([Imports.dir(), job.payload["import_id"], "report.json"]))
+    jobs = get("/api/jobs", %{workspace: ctx.workspace}, ctx.reader).resp_body
+
+    for {where, text} <- [
+          log: log,
+          job_row: inspect(job),
+          last_error: job.last_error,
+          job_list: jobs,
+          status: status.resp_body,
+          report: report
+        ] do
+      refute text =~ secret, "the signature appears in #{where}"
+      refute text =~ "X-Signature", "the query string appears in #{where}"
+    end
+  end
+
   test "a refused archive fails at once with its code", ctx do
     slip =
       Fixture.raw_zip([
@@ -271,7 +421,7 @@ defmodule OptimalEngine.API.NotionImportAPITest do
 
     retry = get("/api/import/notion/#{retry_id}", %{workspace: ctx.workspace}, ctx.reader)
     assert body(retry)["status"] == "retrying"
-    assert body(retry)["last_error"] == "download_failed: http 404"
+    assert body(retry)["last_error"] == "download_failed: http_404"
 
     {:ok, job} = OptimalEngine.Jobs.get(job_id, ctx.workspace)
     {:ok, retry_job} = OptimalEngine.Jobs.get(retry_id, ctx.workspace)

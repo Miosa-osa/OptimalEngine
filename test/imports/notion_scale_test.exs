@@ -213,13 +213,8 @@ defmodule OptimalEngine.Imports.NotionScaleTest do
     do: list |> Enum.take_every(max(div(length(list), @samples), 1)) |> Enum.take(@samples)
 
   defp edge_count(workspace, relation) do
-    {:ok, [[count]]} =
-      Store.raw_query("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1 AND relation = ?2", [
-        workspace,
-        relation
-      ])
-
-    count
+    {:ok, edges} = Graph.edges_by_relation([relation], workspace_id: workspace)
+    length(edges)
   end
 
   defp targets(ctx_id, relation, workspace) do

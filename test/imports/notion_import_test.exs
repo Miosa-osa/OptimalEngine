@@ -2,8 +2,9 @@ defmodule OptimalEngine.Imports.NotionTest do
   @moduledoc """
   `OptimalEngine.Imports.Notion.import_file/3` against the real store: one
   context per page, database and pageless row, stable `optimal://` URIs,
-  `child_of` and `links_to` edges, in-place re-imports, and refused archives
-  that write nothing. Each test runs in its own tenant and workspace.
+  `child_of` and `links_to` edges, in-place re-imports that leave other edges
+  alone, the row and context limits, part zips, and refused archives that
+  write nothing. Each test runs in its own tenant and workspace.
   """
 
   use ExUnit.Case, async: false
@@ -67,6 +68,14 @@ defmodule OptimalEngine.Imports.NotionTest do
   end
 
   defp uri(ctx, id), do: Notion.uri(ctx.workspace, id)
+
+  defp reasons(report), do: report["errors"] |> Enum.map(& &1["reason"]) |> Enum.sort()
+
+  defp csv_export(rows) do
+    db = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    csv = "Name,Notes\n" <> Enum.map_join(1..rows, "", &"Row #{&1},note #{&1}\n")
+    Fixture.zip([{"Ledger #{db}.csv", csv}])
+  end
 
   test "imports every page, database and pageless row with its hierarchy and links", ctx do
     i = Fixture.ids()
@@ -212,11 +221,171 @@ defmodule OptimalEngine.Imports.NotionTest do
         {"Export-Part-2.zip", Fixture.zip(second)}
       ])
 
-    assert {:ok, report} = import!(ctx, outer)
+    me = self()
+    assert {:ok, report} = import!(ctx, outer, heartbeat: fn -> send(me, :heartbeat) end)
+    assert_received :heartbeat
     assert report["counts"]["parts"] == 2
     assert report["counts"]["pages"] == 5
     assert report["counts"]["contexts"] == 7
     assert report["counts"]["edges_child_of"] == 5
+  end
+
+  test "a CSV of N + 1 rows imports N rows and reports the cut", ctx do
+    assert {:ok, report} = import!(ctx, csv_export(4), limits: %{max_rows_per_csv: 3})
+
+    assert report["counts"]["rows"] == 3
+    assert report["counts"]["contexts"] == 4
+    assert reasons(report) == ["csv_truncated"]
+
+    stored = contexts(ctx.workspace)
+    assert map_size(stored) == 4
+    assert stored[uri(ctx, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")].content =~ "the first 3 rows"
+    refute Enum.any?(stored, fn {_uri, c} -> c.title == "Row 4" end)
+  end
+
+  test "an import past the context limit is refused", ctx do
+    # The plan alone (5 pages and a database) is over the limit: nothing is
+    # read or written.
+    assert {:error, {:too_many_contexts, _}} =
+             import!(ctx, Fixture.export(), limits: %{max_contexts: 5})
+
+    # The rows of a database take it over the limit.
+    assert {:error, {:too_many_contexts, _}} =
+             import!(ctx, csv_export(5), limits: %{max_contexts: 4})
+
+    assert contexts(ctx.workspace) == %{}
+    assert Notion.fatal?({:too_many_contexts, "x"})
+  end
+
+  test "row and database texts are held to the page limit", ctx do
+    db = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    long = String.duplicate("long note ", 100)
+    zip = Fixture.zip([{"Ledger #{db}.csv", "Name,Notes\nRow 1,#{long}\n"}])
+
+    assert {:ok, _report} = import!(ctx, zip, limits: %{max_page_bytes: 300})
+
+    for {_uri, context} <- contexts(ctx.workspace) do
+      assert byte_size(context.content) <= 300
+    end
+  end
+
+  test "a 2 MiB line with an unterminated link is imported and never stops the import", ctx do
+    line = "[a link that never closes](" <> String.duplicate("x", 2 * 1024 * 1024)
+
+    zip =
+      Fixture.zip([
+        {"Huge aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md", "# Huge\n\n" <> line},
+        {"Small bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.md", "# Small\n\nFine."}
+      ])
+
+    # The link pattern is bounded, so the line costs a bounded scan; a page
+    # that failed anyway would be reported as page_unreadable, not crash.
+    assert {:ok, report} = import!(ctx, zip)
+    assert reasons(report) == ["page_truncated"]
+    assert report["counts"]["contexts"] == 2
+
+    stored = contexts(ctx.workspace)
+
+    assert byte_size(stored[uri(ctx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")].content) <=
+             2 * 1024 * 1024
+
+    assert stored[uri(ctx, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")].content =~ "Fine."
+  end
+
+  test "two entries with the same name import once and the second is reported", ctx do
+    zip =
+      Fixture.raw_zip([
+        %{name: "Page aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md", data: "# Page\n\nfirst copy"},
+        %{name: "Page aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md", data: "# Page\n\nsecond copy"}
+      ])
+
+    assert {:ok, report} = import!(ctx, zip)
+    assert report["counts"]["contexts"] == 1
+    assert reasons(report) == ["duplicate_page"]
+    assert map_size(contexts(ctx.workspace)) == 1
+  end
+
+  test "a zip at the root that is not an archive is one reported error", ctx do
+    {first, second} = Enum.split(Fixture.files(), 4)
+
+    outer =
+      Fixture.zip([
+        {"Export-Part-1.zip", Fixture.zip(first)},
+        {"Broken.zip", "this is not a zip archive at all"}
+        | second
+      ])
+
+    assert {:ok, report} = import!(ctx, outer)
+    assert report["counts"]["parts"] == 1
+    assert report["counts"]["contexts"] == 7
+    assert [%{"path" => "Broken.zip", "reason" => "part_unreadable"}] = report["errors"]
+  end
+
+  test "a part zip's own bytes count against the total", ctx do
+    {first, _second} = Enum.split(Fixture.files(), 4)
+    part = Fixture.zip(first)
+    inner = first |> Enum.map(fn {_path, content} -> byte_size(content) end) |> Enum.sum()
+    outer = Fixture.zip([{"Export-Part-1.zip", part}])
+
+    assert {:error, :archive_too_large} =
+             import!(ctx, outer, limits: %{max_total_bytes: byte_size(part) + inner - 1})
+
+    assert {:ok, _report} = import!(ctx, outer, limits: %{max_total_bytes: byte_size(part) + inner})
+  end
+
+  test "a traversal or a bomb inside a part zip refuses the whole import", ctx do
+    slip = Fixture.raw_zip([%{name: "../../evil.md", data: "x"}])
+
+    assert {:error, {:unsafe_path, "../../evil.md"}} =
+             import!(ctx, Fixture.zip([{"Part-1.zip", slip}]))
+
+    nul = Fixture.raw_zip([%{name: <<"evil", 0, ".md">>, data: "x"}])
+    assert {:error, {:unsafe_path, _}} = import!(ctx, Fixture.zip([{"Part-1.zip", nul}]))
+
+    bomb =
+      Fixture.raw_zip([
+        %{
+          name: "Page aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md",
+          data: String.duplicate("0", 3_000_000),
+          declared_size: 100
+        }
+      ])
+
+    assert {:error, {:entry_size_mismatch, "Page " <> _}} =
+             import!(ctx, Fixture.zip([{"Part-1.zip", bomb}]))
+
+    assert contexts(ctx.workspace) == %{}
+  end
+
+  test "a re-import retracts only the edges the importer owns", ctx do
+    i = Fixture.ids()
+    ws = ctx.workspace
+    {:ok, _} = import!(ctx, Fixture.export())
+
+    handbook = Notion.context_id(ws, i.handbook)
+    onboarding = Notion.context_id(ws, i.onboarding)
+
+    # A user's edges: a link from a Notion page to a context that did not come
+    # from Notion, and another relation between two Notion pages.
+    :ok = Graph.assert_edge(handbook, "ctx-written-by-hand", "links_to", workspace_id: ws)
+    :ok = Graph.assert_edge(handbook, onboarding, "related", workspace_id: ws)
+
+    # The handbook no longer links to anything.
+    handbook_path = "Team Handbook #{i.handbook}.md"
+
+    files =
+      Enum.map(Fixture.files(), fn
+        {^handbook_path, _} -> {handbook_path, "# Team Handbook\n\nNo links now.\n"}
+        other -> other
+      end)
+
+    assert {:ok, _} = import!(ctx, Fixture.zip(files))
+
+    {:ok, links} = Graph.edges_for(handbook, relation: "links_to", workspace_id: ws)
+    assert Enum.map(links, & &1.target_id) == ["ctx-written-by-hand"]
+
+    {:ok, related} = Graph.edges_for(handbook, relation: "related", workspace_id: ws)
+    assert Enum.map(related, & &1.target_id) == [onboarding]
   end
 
   test "page problems are reported and the import continues", ctx do
@@ -272,6 +441,6 @@ defmodule OptimalEngine.Imports.NotionTest do
 
     assert contexts(ctx.workspace) == %{}
     assert Notion.fatal?({:unsafe_path, "x"})
-    refute Notion.fatal?({:download_failed, "http 500"})
+    refute Notion.fatal?({:download_failed, "http_500"})
   end
 end

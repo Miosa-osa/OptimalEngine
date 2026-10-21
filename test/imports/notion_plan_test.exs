@@ -119,19 +119,77 @@ defmodule OptimalEngine.Imports.Notion.PlanTest do
     assert table.rows == [["Write guide", "Done"], ["Quoted, name", "Two\nlines"]]
 
     text =
-      Database.text("Tasks", table, fn
-        0 -> "optimal://ws/notion/row0"
-        _ -> nil
-      end)
+      Database.text(
+        "Tasks",
+        table,
+        fn
+          0 -> "optimal://ws/notion/row0"
+          _ -> nil
+        end,
+        100_000
+      )
 
     assert text =~ "# Tasks"
     assert text =~ "Notion database with 2 rows. Columns: Name, Status."
     assert text =~ "| [Write guide](optimal://ws/notion/row0) | Done |"
     assert text =~ "| Quoted, name | Two lines |"
 
-    row = Database.row_text(table.columns, ["Review guide", "Open"], "Tasks")
+    row = Database.row_text(table.columns, ["Review guide", "Open"], "Tasks", 100_000)
     assert row == "# Review guide\n\nRow of the Notion database Tasks.\n\nStatus: Open"
 
     assert {:error, :csv_unreadable} = Database.parse("Name\n\"never closed\n")
+  end
+
+  test "link matching stays linear on lines built to make a regex backtrack" do
+    plan = plan()
+    uri = &"optimal://ws/notion/#{&1}"
+    mib = 1024 * 1024
+
+    lines = [
+      # Many unclosed brackets, then a long run with nothing to close them.
+      String.duplicate("[", mib) <> String.duplicate("a", mib),
+      # One link whose target never closes.
+      "[a link that never closes](" <> String.duplicate("x", 2 * mib),
+      # Nested pairs that never close the outer bracket.
+      "[" <> String.duplicate("[a]", div(2 * mib, 3)),
+      # A long label, then a real link at the end.
+      String.duplicate("word ", div(mib, 5)) <> "[Tasks](Tasks%20#{Fixture.ids().tasks}.csv)"
+    ]
+
+    for line <- lines do
+      task = Task.async(fn -> Links.rewrite(line, "page.md", plan, uri) end)
+      assert {:ok, result} = Task.yield(task, 10_000) || Task.shutdown(task), "line did not finish"
+      assert byte_size(result.text) > 0
+    end
+
+    [last] = Enum.take(lines, -1)
+    assert Links.rewrite(last, "page.md", plan, uri).targets == [Fixture.ids().tasks]
+  end
+
+  test "a CSV of N + 1 rows is read as N rows and marked as cut" do
+    csv = "Name,Status\n" <> Enum.map_join(1..4, "", &"Row #{&1},Open\n")
+
+    assert {:ok, %{rows: rows, truncated: true}} = Database.parse(csv, 3)
+    assert Enum.map(rows, &hd/1) == ["Row 1", "Row 2", "Row 3"]
+
+    assert {:ok, %{rows: all, truncated: false}} = Database.parse(csv, 4)
+    assert length(all) == 4
+
+    table = %{columns: ["Name", "Status"], rows: rows, truncated: true}
+    text = Database.text("Big", table, fn _ -> nil end, 100_000)
+    assert text =~ "Notion database with the first 3 rows."
+  end
+
+  test "database and row texts are clipped to the page limit on a character boundary" do
+    long = String.duplicate("\u00e9", 500)
+    table = %{columns: ["Name", "Notes"], rows: [["Row", long]], truncated: false}
+
+    row = Database.row_text(table.columns, ["Row", long], "Tasks", 101)
+    assert byte_size(row) <= 101
+    assert String.valid?(row)
+
+    text = Database.text("Tasks", table, fn _ -> nil end, 64)
+    assert byte_size(text) <= 64
+    assert String.valid?(text)
   end
 end

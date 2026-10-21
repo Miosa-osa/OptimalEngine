@@ -6,7 +6,8 @@ defmodule OptimalEngine.Imports.Worker do
   :imports_interval_ms`, env `OPTIMAL_IMPORTS_INTERVAL_MS`; 0 disables), so
   an import starts promptly after it is posted. Imports run one at a time:
   each is a long write into one workspace, and the job is durable, so a
-  stopped worker only delays it.
+  stopped worker only delays it. When it starts it sweeps the staging folders
+  of imports that ended over a day ago (`OptimalEngine.Imports.sweep/1`).
   """
 
   use GenServer
@@ -26,11 +27,26 @@ defmodule OptimalEngine.Imports.Worker do
   @impl true
   def init(_opts) do
     interval = Application.get_env(:optimal_engine, :imports_interval_ms, @default_interval)
-    if interval > 0, do: Process.send_after(self(), :tick, min(@boot_delay, interval))
+
+    if interval > 0 do
+      Process.send_after(self(), :sweep, @boot_delay)
+      Process.send_after(self(), :tick, min(@boot_delay, interval))
+    end
+
     {:ok, %{interval: interval, owner: owner()}}
   end
 
   @impl true
+  def handle_info(:sweep, state) do
+    swept = Imports.sweep()
+    if swept > 0, do: Logger.info("[Imports] swept #{swept} old staging folders")
+    {:noreply, state}
+  rescue
+    error ->
+      Logger.warning("[Imports] sweep failed: #{inspect(error.__struct__)}")
+      {:noreply, state}
+  end
+
   def handle_info(:tick, state) do
     run(state)
     if state.interval > 0, do: Process.send_after(self(), :tick, state.interval)
@@ -56,7 +72,7 @@ defmodule OptimalEngine.Imports.Worker do
     end)
   rescue
     error ->
-      Logger.warning("[Imports] pass failed: #{Exception.message(error)}")
+      Logger.warning("[Imports] pass failed: #{inspect(error.__struct__)}")
       0
   end
 

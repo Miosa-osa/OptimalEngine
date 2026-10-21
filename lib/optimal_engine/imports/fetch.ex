@@ -24,15 +24,22 @@ defmodule OptimalEngine.Imports.Fetch do
   storage) come from `config :optimal_engine, :import_url_cacerts` (DER
   certificates) or `OPTIMAL_IMPORT_CA_FILE` (a PEM file).
 
-  The body of a `200` answer is written to the file as it arrives, never held
-  whole in memory, and the transfer stops the moment it passes the cap:
-  `Content-Length` only lets an oversized answer fail early, it is not trusted.
-  The body of any other answer is never read.
+  The body of a `200` answer is written to an owner-only file as it arrives,
+  never held whole in memory, and the transfer stops the moment it passes the
+  cap: `Content-Length` only lets an oversized answer fail early, it is not
+  trusted. The body of any other answer is never read. A download that runs
+  past 30 minutes, or averages under 16 KiB/s after its first minute, is cut
+  off (`config :optimal_engine, :import_fetch_deadline_ms`,
+  `:import_min_bytes_per_second`, `:import_min_rate_after_ms`).
 
-  A URL is never logged, stored or returned by this module: errors carry
-  codes and statuses, and `redact/1` gives the `scheme://host/path` form that
-  may be shown. A presigned URL's signature lives in its query string, which
-  `redact/1` drops.
+  A URL is never logged, stored or returned by this module, and neither is any
+  term derived from the request: a failure is `{:download_failed, code}` with
+  a code from a fixed list (`connect_failed`, `tls_failed`, `timeout`,
+  `too_slow`, `send_failed`, `receive_failed`, `connection_closed`,
+  `malformed_response`, `body_incomplete`, `redirect_without_location`,
+  `unresolvable`, `http_<status>`). `redact/1` gives the `scheme://host/path`
+  form that may be shown; a presigned URL's signature lives in its query
+  string, which it drops.
   """
 
   import Bitwise
@@ -40,7 +47,10 @@ defmodule OptimalEngine.Imports.Fetch do
   @max_redirects 5
   @connect_timeout_ms 15_000
   @recv_timeout_ms 60_000
-  @deadline_ms 1_800_000
+  @default_deadline_ms 1_800_000
+  @default_min_bytes_per_second 16_384
+  @default_min_rate_after_ms 60_000
+  @progress_ms 5_000
   @max_head_bytes 65_536
   @max_headers 100
   @max_chunk_line 1_024
@@ -75,16 +85,29 @@ defmodule OptimalEngine.Imports.Fetch do
   Downloads `url` to `dest`, refusing more than `max_bytes`. Returns
   `{:ok, bytes}` or `{:error, reason}` (see `t:reason/0`); on an error the
   file is removed.
+
+  Options: `:progress`, a function called with the bytes written so far, at
+  most every five seconds while the body arrives (a job extends its lease
+  with it; `config :optimal_engine, :import_fetch_progress_ms`).
   """
-  @spec download(String.t(), Path.t(), pos_integer()) ::
+  @spec download(String.t(), Path.t(), pos_integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, reason()}
-  def download(url, dest, max_bytes) do
-    deadline = System.monotonic_time(:millisecond) + @deadline_ms
+  def download(url, dest, max_bytes, opts \\ []) do
+    now = System.monotonic_time(:millisecond)
+
+    clock = %{
+      started: now,
+      deadline: now + setting(:import_fetch_deadline_ms, @default_deadline_ms),
+      min_rate: setting(:import_min_bytes_per_second, @default_min_bytes_per_second),
+      grace_ms: setting(:import_min_rate_after_ms, @default_min_rate_after_ms),
+      progress: Keyword.get(opts, :progress, fn _bytes -> :ok end),
+      progress_ms: setting(:import_fetch_progress_ms, @progress_ms)
+    }
 
     result =
       with {:ok, _} <- Application.ensure_all_started(:ssl),
            {:ok, target} <- target(url, :initial) do
-        follow(target, dest, max_bytes, deadline, @max_redirects)
+        follow(target, dest, max_bytes, clock, @max_redirects)
       end
 
     case result do
@@ -93,7 +116,7 @@ defmodule OptimalEngine.Imports.Fetch do
 
       {:error, :unresolvable} ->
         File.rm(dest)
-        {:error, {:download_failed, "host did not resolve"}}
+        {:error, {:download_failed, "unresolvable"}}
 
       {:error, reason} ->
         File.rm(dest)
@@ -153,10 +176,23 @@ defmodule OptimalEngine.Imports.Fetch do
   def public?({0, 0, 0, 0, 0, 0xFFFF, hi, lo}),
     do: public?({hi >>> 8, hi &&& 0xFF, lo >>> 8, lo &&& 0xFF})
 
-  def public?({first, _, _, _, _, _, _, _} = ip) do
-    not (ip == {0, 0, 0, 0, 0, 0, 0, 0} or ip == {0, 0, 0, 0, 0, 0, 0, 1} or
-           (first &&& 0xFE00) == 0xFC00 or (first &&& 0xFFC0) == 0xFE80 or
-           (first &&& 0xFF00) == 0xFF00 or (first == 0x2001 and elem(ip, 1) == 0x0DB8))
+  # IPv6: unspecified, loopback and IPv4-compatible (::/96), IPv4-translated
+  # (::ffff:0:0:0/96), NAT64 (64:ff9b::/96, 64:ff9b:1::/48), discard
+  # (100::/64), Teredo (2001::/32),
+  # documentation (2001:db8::/32), 6to4 (2002::/16), unique local (fc00::/7),
+  # link-local (fe80::/10), site-local (fec0::/10) and multicast (ff00::/8)
+  # embed or reach addresses that are not public.
+  def public?({first, second, third, fourth, _, _, _, _} = ip) do
+    not (match?({0, 0, 0, 0, 0, 0, _, _}, ip) or
+           match?({0, 0, 0, 0, 0xFFFF, 0, _, _}, ip) or
+           (first == 0x64 and second == 0xFF9B and (third == 0 or third == 1)) or
+           (first == 0x100 and second == 0 and third == 0 and fourth == 0) or
+           (first == 0x2001 and (second == 0 or second == 0x0DB8)) or
+           first == 0x2002 or
+           (first &&& 0xFE00) == 0xFC00 or
+           (first &&& 0xFFC0) == 0xFE80 or
+           (first &&& 0xFFC0) == 0xFEC0 or
+           (first &&& 0xFF00) == 0xFF00)
   end
 
   # ── checking a URL ─────────────────────────────────────────────────────
@@ -208,6 +244,8 @@ defmodule OptimalEngine.Imports.Fetch do
     end
   end
 
+  # A test can stand in for DNS with `config :optimal_engine,
+  # :import_url_resolver, fn host -> [ip] end`.
   defp addresses(host) do
     charlist = String.to_charlist(host)
 
@@ -216,10 +254,23 @@ defmodule OptimalEngine.Imports.Fetch do
         [ip]
 
       {:error, _} ->
-        for family <- [:inet, :inet6],
-            {:ok, ips} <- [:inet.getaddrs(charlist, family)],
-            ip <- ips,
-            do: ip
+        case Application.get_env(:optimal_engine, :import_url_resolver) do
+          resolve when is_function(resolve, 1) ->
+            resolve.(host)
+
+          _ ->
+            for family <- [:inet, :inet6],
+                {:ok, ips} <- [:inet.getaddrs(charlist, family)],
+                ip <- ips,
+                do: ip
+        end
+    end
+  end
+
+  defp setting(key, default) do
+    case Application.get_env(:optimal_engine, key) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> default
     end
   end
 
@@ -238,8 +289,8 @@ defmodule OptimalEngine.Imports.Fetch do
 
   # ── fetching ───────────────────────────────────────────────────────────
 
-  defp follow(target, dest, max_bytes, deadline, hops) do
-    case get(target, dest, max_bytes, deadline) do
+  defp follow(target, dest, max_bytes, clock, hops) do
+    case get(target, dest, max_bytes, clock) do
       {:redirect, _location} when hops == 0 ->
         {:error, :too_many_redirects}
 
@@ -253,7 +304,7 @@ defmodule OptimalEngine.Imports.Fetch do
 
         with next when is_binary(next) <- next || {:error, :redirect_refused},
              {:ok, next_target} <- target(next, :redirect) do
-          follow(next_target, dest, max_bytes, deadline, hops - 1)
+          follow(next_target, dest, max_bytes, clock, hops - 1)
         end
 
       other ->
@@ -261,9 +312,9 @@ defmodule OptimalEngine.Imports.Fetch do
     end
   end
 
-  defp get(target, dest, max_bytes, deadline) do
+  defp get(target, dest, max_bytes, clock) do
     with {:ok, socket} <- connect(target) do
-      conn = %{socket: socket, scheme: target.scheme, deadline: deadline}
+      conn = Map.merge(clock, %{socket: socket, scheme: target.scheme})
 
       try do
         with :ok <- send_data(conn, request(target)),
@@ -278,6 +329,8 @@ defmodule OptimalEngine.Imports.Fetch do
 
   defp respond(conn, 200, headers, rest, dest, max_bytes) do
     {:ok, out} = File.open(dest, [:write, :binary, :raw])
+    :ok = File.chmod(dest, 0o600)
+    Process.put(:import_fetch_progress_at, System.monotonic_time(:millisecond))
 
     try do
       body(conn, headers, rest, out, max_bytes)
@@ -289,13 +342,13 @@ defmodule OptimalEngine.Imports.Fetch do
   defp respond(_conn, status, headers, _rest, _dest, _max)
        when status in [301, 302, 303, 307, 308] do
     case header(headers, "location") do
-      nil -> {:error, {:download_failed, "http #{status} without a location"}}
+      nil -> {:error, {:download_failed, "redirect_without_location"}}
       location -> {:redirect, location}
     end
   end
 
   defp respond(_conn, status, _headers, _rest, _dest, _max),
-    do: {:error, {:download_failed, "http #{status}"}}
+    do: {:error, {:download_failed, "http_#{status}"}}
 
   defp request(target) do
     path = if target.uri.path in [nil, ""], do: "/", else: target.uri.path
@@ -319,17 +372,22 @@ defmodule OptimalEngine.Imports.Fetch do
   # The next address is tried only when this one could not be reached; a
   # server that answered and failed the TLS handshake fails the download.
   defp connect(target) do
-    Enum.reduce_while(target.ips, {:error, {:download_failed, "no address"}}, fn ip, _acc ->
+    Enum.reduce_while(target.ips, {:error, {:download_failed, "connect_failed"}}, fn ip, _acc ->
       case open(target, ip) do
         {:ok, socket} ->
           {:halt, {:ok, socket}}
 
         {:error, reason} ->
-          error = {:error, {:download_failed, "connect: #{describe(reason)}"}}
+          error = {:error, {:download_failed, connect_code(reason)}}
           if unreachable?(reason), do: {:cont, error}, else: {:halt, error}
       end
     end)
   end
+
+  defp connect_code(reason) when reason in [:timeout, :etimedout], do: "timeout"
+  defp connect_code({:tls_alert, _}), do: "tls_failed"
+  defp connect_code({:options, _}), do: "tls_failed"
+  defp connect_code(_reason), do: "connect_failed"
 
   defp unreachable?(reason),
     do: reason in [:econnrefused, :ehostunreach, :enetunreach, :etimedout, :timeout, :eaddrnotavail]
@@ -381,14 +439,14 @@ defmodule OptimalEngine.Imports.Fetch do
   defp send_data(%{scheme: "https", socket: socket}, data) do
     case :ssl.send(socket, data) do
       :ok -> :ok
-      {:error, reason} -> {:error, {:download_failed, "send: #{describe(reason)}"}}
+      {:error, _reason} -> {:error, {:download_failed, "send_failed"}}
     end
   end
 
   defp send_data(%{socket: socket}, data) do
     case :gen_tcp.send(socket, data) do
       :ok -> :ok
-      {:error, reason} -> {:error, {:download_failed, "send: #{describe(reason)}"}}
+      {:error, _reason} -> {:error, {:download_failed, "send_failed"}}
     end
   end
 
@@ -408,7 +466,7 @@ defmodule OptimalEngine.Imports.Fetch do
         {:ok, data} -> {:ok, data}
         {:error, :closed} -> :closed
         {:error, :timeout} -> {:error, {:download_failed, "timeout"}}
-        {:error, reason} -> {:error, {:download_failed, "receive: #{describe(reason)}"}}
+        {:error, _reason} -> {:error, {:download_failed, "receive_failed"}}
       end
     end
   end
@@ -427,12 +485,12 @@ defmodule OptimalEngine.Imports.Fetch do
         more(conn, buffer, byte_size(buffer), &read_head(conn, &1))
 
       _ ->
-        {:error, {:download_failed, "malformed response"}}
+        {:error, {:download_failed, "malformed_response"}}
     end
   end
 
   defp read_headers(_conn, _buffer, _status, headers, _used) when length(headers) > @max_headers,
-    do: {:error, {:download_failed, "too many headers"}}
+    do: {:error, {:download_failed, "malformed_response"}}
 
   defp read_headers(conn, buffer, status, headers, used) do
     case :erlang.decode_packet(:httph_bin, buffer, []) do
@@ -448,17 +506,17 @@ defmodule OptimalEngine.Imports.Fetch do
         more(conn, buffer, used + byte_size(buffer), &read_headers(conn, &1, status, headers, used))
 
       _ ->
-        {:error, {:download_failed, "malformed response"}}
+        {:error, {:download_failed, "malformed_response"}}
     end
   end
 
   defp more(conn, buffer, size, continue) do
     if size > @max_head_bytes do
-      {:error, {:download_failed, "response head too large"}}
+      {:error, {:download_failed, "malformed_response"}}
     else
       case recv(conn) do
         {:ok, data} -> continue.(buffer <> data)
-        :closed -> {:error, {:download_failed, "connection closed"}}
+        :closed -> {:error, {:download_failed, "connection_closed"}}
         error -> error
       end
     end
@@ -482,7 +540,7 @@ defmodule OptimalEngine.Imports.Fetch do
         case Integer.parse(String.trim(length)) do
           {n, ""} when n > max_bytes -> {:error, :download_too_large}
           {n, ""} when n >= 0 -> sized(conn, rest, out, n, 0)
-          _ -> {:error, {:download_failed, "bad content-length"}}
+          _ -> {:error, {:download_failed, "malformed_response"}}
         end
 
       true ->
@@ -496,13 +554,15 @@ defmodule OptimalEngine.Imports.Fetch do
     :ok = IO.binwrite(out, binary_part(data, 0, take))
     written = written + take
 
-    if written == length do
-      {:ok, written}
-    else
-      case recv(conn) do
-        {:ok, data} -> sized(conn, data, out, length, written)
-        :closed -> {:error, {:download_failed, "connection closed before the body ended"}}
-        error -> error
+    with :ok <- track(conn, written) do
+      if written == length do
+        {:ok, written}
+      else
+        case recv(conn) do
+          {:ok, data} -> sized(conn, data, out, length, written)
+          :closed -> {:error, {:download_failed, "body_incomplete"}}
+          error -> error
+        end
       end
     end
   end
@@ -515,10 +575,12 @@ defmodule OptimalEngine.Imports.Fetch do
     else
       :ok = IO.binwrite(out, data)
 
-      case recv(conn) do
-        {:ok, data} -> until_close(conn, data, out, written, max_bytes)
-        :closed -> {:ok, written}
-        error -> error
+      with :ok <- track(conn, written) do
+        case recv(conn) do
+          {:ok, data} -> until_close(conn, data, out, written, max_bytes)
+          :closed -> {:ok, written}
+          error -> error
+        end
       end
     end
   end
@@ -528,7 +590,7 @@ defmodule OptimalEngine.Imports.Fetch do
   defp chunked(conn, buffer, out, written, max_bytes) do
     case :binary.match(buffer, "\r\n") do
       :nomatch when byte_size(buffer) > @max_chunk_line ->
-        {:error, {:download_failed, "bad chunk"}}
+        {:error, {:download_failed, "malformed_response"}}
 
       :nomatch ->
         with {:ok, data} <- recv_or_fail(conn) do
@@ -543,7 +605,7 @@ defmodule OptimalEngine.Imports.Fetch do
           {0, ""} -> {:ok, written}
           {n, ""} when written + n > max_bytes -> {:error, :download_too_large}
           {n, ""} when n > 0 -> chunk_data(conn, rest, out, n, written, max_bytes)
-          _ -> {:error, {:download_failed, "bad chunk"}}
+          _ -> {:error, {:download_failed, "malformed_response"}}
         end
     end
   end
@@ -553,9 +615,11 @@ defmodule OptimalEngine.Imports.Fetch do
       byte_size(buffer) >= left + 2 ->
         :ok = IO.binwrite(out, binary_part(buffer, 0, left))
 
-        case binary_part(buffer, left, byte_size(buffer) - left) do
-          "\r\n" <> rest -> chunked(conn, rest, out, written + left, max_bytes)
-          _ -> {:error, {:download_failed, "bad chunk"}}
+        with :ok <- track(conn, written + left) do
+          case binary_part(buffer, left, byte_size(buffer) - left) do
+            "\r\n" <> rest -> chunked(conn, rest, out, written + left, max_bytes)
+            _ -> {:error, {:download_failed, "malformed_response"}}
+          end
         end
 
       byte_size(buffer) > left ->
@@ -566,7 +630,8 @@ defmodule OptimalEngine.Imports.Fetch do
       true ->
         :ok = IO.binwrite(out, buffer)
 
-        with {:ok, data} <- recv_or_fail(conn) do
+        with :ok <- track(conn, written + byte_size(buffer)),
+             {:ok, data} <- recv_or_fail(conn) do
           chunk_data(
             conn,
             data,
@@ -582,11 +647,26 @@ defmodule OptimalEngine.Imports.Fetch do
   defp recv_or_fail(conn) do
     case recv(conn) do
       {:ok, data} -> {:ok, data}
-      :closed -> {:error, {:download_failed, "connection closed before the body ended"}}
+      :closed -> {:error, {:download_failed, "body_incomplete"}}
       error -> error
     end
   end
 
-  defp describe(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp describe(reason), do: reason |> inspect(limit: 5, printable_limit: 120) |> scrub()
+  # After every write: the throughput floor (once the grace period is over)
+  # and the progress callback (at most every five seconds).
+  defp track(conn, written) do
+    now = System.monotonic_time(:millisecond)
+    elapsed = now - conn.started
+
+    if conn.min_rate > 0 and elapsed > conn.grace_ms and written * 1000 < conn.min_rate * elapsed do
+      {:error, {:download_failed, "too_slow"}}
+    else
+      if now - (Process.get(:import_fetch_progress_at) || 0) >= conn.progress_ms do
+        Process.put(:import_fetch_progress_at, now)
+        conn.progress.(written)
+      end
+
+      :ok
+    end
+  end
 end

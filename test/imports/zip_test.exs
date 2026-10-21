@@ -17,6 +17,14 @@ defmodule OptimalEngine.Imports.ZipTest do
 
   defp entry(archive, name), do: Enum.find(archive.entries, &(&1.name == name))
 
+  defp delivered_bytes(total \\ 0) do
+    receive do
+      {:piece, n} -> delivered_bytes(total + n)
+    after
+      0 -> total
+    end
+  end
+
   test "reads every entry of a zip written by :zip, deflated and checked", ctx do
     path =
       write(ctx, Fixture.zip([{"a.md", "alpha"}, {"dir/b.md", String.duplicate("beta ", 2_000)}]))
@@ -47,11 +55,44 @@ defmodule OptimalEngine.Imports.ZipTest do
           "C:/x.md",
           "a\\b.md",
           "a//b.md",
-          "./a.md"
+          "./a.md",
+          <<"a", 0, ".md">>,
+          <<"ok.md", 0, "/../../escape.md">>,
+          "a/..",
+          "a/b/../..",
+          "..",
+          "a/../"
         ] do
       path = write(ctx, Fixture.raw_zip([%{name: "ok.md", data: "x"}, %{name: name, data: "y"}]))
-      assert {:error, {:unsafe_path, ^name}} = Zip.open(path), "accepted #{inspect(name)}"
+      assert {:error, {:unsafe_path, _}} = Zip.open(path), "accepted #{inspect(name)}"
     end
+  end
+
+  test "two entries with the same name are both listed, and each reads its own bytes", ctx do
+    path =
+      write(
+        ctx,
+        Fixture.raw_zip([%{name: "same.md", data: "first"}, %{name: "same.md", data: "second"}])
+      )
+
+    assert {:ok, %{entries: [one, two]} = archive} = Zip.open(path)
+    assert one.name == "same.md" and two.name == "same.md"
+    assert {:ok, "first"} = Zip.read(archive, one, 100)
+    assert {:ok, "second"} = Zip.read(archive, two, 100)
+  end
+
+  test "a central directory over its limit is refused before it is read", ctx do
+    path = write(ctx, Fixture.zip([{"a.md", "alpha"}, {"b.md", "beta"}]))
+    assert {:error, :archive_too_large} = Zip.open(path, %{max_directory_bytes: 40})
+    assert {:ok, _archive} = Zip.open(path, %{max_directory_bytes: 4_096})
+
+    # An end record that claims a 100 MiB directory in a file of a few bytes
+    # is refused for its size, not read.
+    huge =
+      <<0x50, 0x4B, 0x05, 0x06, 0::little-16, 0::little-16, 1::little-16, 1::little-16,
+        100 * 1024 * 1024::little-32, 0::little-32, 0::little-16>>
+
+    assert {:error, :archive_too_large} = Zip.open(write(ctx, huge))
   end
 
   test "entry count and declared total size are limited before anything is inflated", ctx do
@@ -70,6 +111,38 @@ defmodule OptimalEngine.Imports.ZipTest do
 
     assert {:error, {:entry_size_mismatch, "bomb.md"}} =
              Zip.read(archive, entry(archive, "bomb.md"), 10_000)
+  end
+
+  test "a bomb stops inflating at its declared size: no byte past it is passed on", ctx do
+    bomb = String.duplicate("0", 20_000_000)
+    path = write(ctx, Fixture.raw_zip([%{name: "bomb.md", data: bomb, declared_size: 1_000}]))
+    {:ok, archive} = Zip.open(path)
+    me = self()
+
+    assert {:error, {:entry_size_mismatch, "bomb.md"}} =
+             Zip.fold(archive, entry(archive, "bomb.md"), 10_000, 0, fn piece, n ->
+               send(me, {:piece, byte_size(piece)})
+               n + byte_size(piece)
+             end)
+
+    assert delivered_bytes() <= 1_000
+
+    # The same holds for a file: the bomb leaves nothing behind.
+    dest = Path.join(ctx.tmp_dir, "bomb.out")
+
+    assert {:error, {:entry_size_mismatch, _}} =
+             Zip.extract(archive, entry(archive, "bomb.md"), dest, 10_000)
+
+    refute File.exists?(dest)
+  end
+
+  test "an extracted file is readable by its owner alone", ctx do
+    path = write(ctx, Fixture.zip([{"a.md", "alpha"}]))
+    {:ok, archive} = Zip.open(path)
+    dest = Path.join(ctx.tmp_dir, "a.out")
+
+    assert :ok = Zip.extract(archive, entry(archive, "a.md"), dest, 100)
+    assert Bitwise.band(File.stat!(dest).mode, 0o777) == 0o600
   end
 
   test "a declared size over the caller's cap is refused without inflating", ctx do
