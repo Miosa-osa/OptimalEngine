@@ -35,7 +35,10 @@ defmodule OptimalEngine.Store.Vectors do
 
   The vector takes the tenant and workspace of its context, so bundles, sync
   and erasure that select by scope find it. A vector stored before its
-  context row exists takes `:workspace_id` and that workspace's tenant.
+  context row exists takes `:workspace_id` and the tenant that owns that
+  workspace (its registered tenant, else the tenant its `"<tenant>:"` prefix
+  names); a bare workspace id has no owner, so the vector takes the
+  `:tenant_id` its writer names, else `default`.
 
   Returns `:ok` or `{:error, reason}`; an empty or non-numeric embedding is
   rejected with `{:error, :invalid_embedding}`.
@@ -44,11 +47,17 @@ defmodule OptimalEngine.Store.Vectors do
   def store(context_id, embedding, opts \\ [])
       when is_binary(context_id) and is_list(embedding) do
     if valid_embedding?(embedding),
-      do: do_store(context_id, embedding, Keyword.get(opts, :workspace_id)),
+      do:
+        do_store(
+          context_id,
+          embedding,
+          Keyword.get(opts, :workspace_id),
+          Keyword.get(opts, :tenant_id)
+        ),
       else: {:error, :invalid_embedding}
   end
 
-  defp do_store(context_id, embedding, workspace_id) do
+  defp do_store(context_id, embedding, workspace_id, tenant_id) do
     blob = encode_embedding(embedding)
     dims = length(embedding)
 
@@ -56,14 +65,16 @@ defmodule OptimalEngine.Store.Vectors do
     INSERT OR REPLACE INTO vectors (context_id, embedding, dimensions, tenant_id, workspace_id)
     VALUES (?1, ?2, ?3,
       COALESCE((SELECT tenant_id FROM contexts WHERE id = ?1),
-               (SELECT tenant_id FROM workspaces WHERE id = ?4), 'default'),
+               (SELECT tenant_id FROM workspaces WHERE id = ?4),
+               (SELECT t.id FROM tenants t WHERE t.id = substr(?4, 1, instr(?4, ':') - 1)),
+               ?5, 'default'),
       COALESCE((SELECT workspace_id FROM contexts WHERE id = ?1), ?4, 'default'))
     """
 
     # `{:blob, _}` forces exqlite to bind as BLOB. Raw binary otherwise
     # binds as TEXT and gets truncated at the first null byte — which is
     # catastrophic for float32 data.
-    case Store.raw_query(sql, [context_id, {:blob, blob}, dims, workspace_id]) do
+    case Store.raw_query(sql, [context_id, {:blob, blob}, dims, workspace_id, tenant_id]) do
       {:ok, _} ->
         Logger.debug("[VectorStore] Stored embedding for #{context_id} (#{dims} dims)")
         :ok

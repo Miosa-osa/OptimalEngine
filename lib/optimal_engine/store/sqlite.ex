@@ -84,7 +84,7 @@ defmodule OptimalEngine.Store.SQLite do
   require Logger
 
   alias OptimalEngine.{Context, Graph, Signal}
-  alias OptimalEngine.Store.{SQLiteTransaction, TransactionControl}
+  alias OptimalEngine.Store.{ContextTenant, SQLiteTransaction, TransactionControl}
 
   @ets_table :optimal_engine_store_cache
 
@@ -1492,9 +1492,39 @@ defmodule OptimalEngine.Store.SQLite do
     end
   end
 
-  # A context belongs to its workspace's tenant; for an unregistered workspace,
-  # the tenant its "<tenant>:" prefix names, else the default tenant.
+  # A context is written under the tenant its writer names. The workspace row
+  # cannot say whose a write is: a bare, unregistered workspace id can be
+  # shared by two tenants. `ContextTenant` decides from the named tenant, the
+  # workspace's owner and the row being replaced, and may refuse the write.
   defp do_insert(db, %Context{} = ctx) do
+    case context_tenant(db, ctx) do
+      {:ok, tenant_id} -> insert_context_row(db, %{ctx | tenant_id: tenant_id})
+      {:error, _reason} = err -> err
+    end
+  end
+
+  defp context_tenant(db, %Context{} = ctx) do
+    ContextTenant.for_context(ctx, fn
+      :owner, params -> first_row(db, ContextTenant.owner_sql(), params)
+      :existing, params -> first_row(db, ContextTenant.existing_sql(), params)
+    end)
+  end
+
+  defp first_row(db, sql, params) do
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
+         :ok <- bind(db, stmt, params),
+         step <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step do
+        {:row, row} -> {:ok, row}
+        :done -> {:ok, nil}
+        {:error, _reason} = err -> err
+        other -> {:error, {:unexpected_result, other}}
+      end
+    end
+  end
+
+  defp insert_context_row(db, %Context{tenant_id: tenant_id} = ctx) do
     row = Context.to_row(ctx)
 
     sql = """
@@ -1511,10 +1541,7 @@ defmodule OptimalEngine.Store.SQLite do
       ?9, ?10, ?11, ?12, ?13,
       ?14, ?15, ?16,
       ?17, ?18, ?19, ?20, ?21,
-      ?22, ?23, ?24,
-      COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?24),
-               (SELECT t.id FROM tenants t WHERE t.id = substr(?24, 1, instr(?24, ':') - 1)),
-               'default')
+      ?22, ?23, ?24, ?25
     )
     """
 
@@ -1542,7 +1569,8 @@ defmodule OptimalEngine.Store.SQLite do
       row.supersedes,
       row.routed_to,
       row.metadata,
-      row.workspace_id
+      row.workspace_id,
+      tenant_id
     ]
 
     result =
@@ -1552,7 +1580,8 @@ defmodule OptimalEngine.Store.SQLite do
            :ok <- Exqlite.Sqlite3.release(db, stmt) do
         insert_entities(db, ctx)
         Graph.create_edges_for_context_db(db, ctx)
-        cache_put(ctx.id, ctx)
+        # A read gives the row back without a tenant, so the cache does too.
+        cache_put(ctx.id, %{ctx | tenant_id: nil})
         :ok
       else
         {:error, reason} -> {:error, reason}
@@ -1568,12 +1597,13 @@ defmodule OptimalEngine.Store.SQLite do
     result
   end
 
-  defp insert_entities(db, %Context{id: id, entities: entities} = ctx) when is_list(entities) do
+  defp insert_entities(db, %Context{id: id, entities: entities, tenant_id: tenant_id} = ctx)
+       when is_list(entities) do
     workspace_id = ctx.workspace_id || "default"
 
     Enum.each(entities, fn entity ->
       sql =
-        "INSERT OR IGNORE INTO entities (context_id, name, type, workspace_id) VALUES ('#{escape(id)}', '#{escape(entity)}', 'person', '#{escape(workspace_id)}')"
+        "INSERT OR IGNORE INTO entities (context_id, name, type, workspace_id, tenant_id) VALUES ('#{escape(id)}', '#{escape(entity)}', 'person', '#{escape(workspace_id)}', '#{escape(tenant_id)}')"
 
       Exqlite.Sqlite3.execute(db, sql)
     end)

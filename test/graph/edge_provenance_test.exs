@@ -90,7 +90,7 @@ defmodule OptimalEngine.Graph.EdgeProvenanceTest do
     end
 
     assert_edge = fn by ->
-      :done = run.(Graph.edge_insert_sql(), ["a", "b", "links_to", 1.0, "t", "ws", by])
+      :done = run.(Graph.edge_insert_sql(), ["a", "b", "links_to", 1.0, "t", "ws", by, nil])
     end
 
     updates = fn ->

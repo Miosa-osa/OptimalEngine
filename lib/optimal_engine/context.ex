@@ -26,6 +26,16 @@ defmodule OptimalEngine.Context do
       optimal://sessions/{id}/{path}      — conversation history
       optimal://inbox/{path}              — unrouted content
 
+  ## Tenant
+
+  `tenant_id` is the tenant the row is written for. Two tenants can share a
+  bare, unregistered workspace id, so the workspace row cannot say whose a
+  write is: a writer that knows its tenant sets it, and the store keeps the
+  row under that tenant (`OptimalEngine.Store.ContextTenant`). `nil` names
+  none: the row goes to the tenant that owns the registered workspace, else
+  stays with the tenant of the row it replaces, else to `default`. Rows read
+  back carry `nil`, so a context read and written again keeps its tenant.
+
   ## Tiered summaries
 
   Every context has three content tiers:
@@ -64,6 +74,9 @@ defmodule OptimalEngine.Context do
           routed_to: [String.t()],
           # Workspace scoping (soft scope within a tenant)
           workspace_id: String.t(),
+          # The tenant the row is written for; nil names none (see `tenant_id`
+          # under "Tenant" in the moduledoc)
+          tenant_id: String.t() | nil,
           # Extra
           metadata: map(),
           # Search score (transient — not persisted)
@@ -95,6 +108,7 @@ defmodule OptimalEngine.Context do
     entities: [],
     routed_to: [],
     workspace_id: "default",
+    tenant_id: nil,
     metadata: %{}
   ]
 

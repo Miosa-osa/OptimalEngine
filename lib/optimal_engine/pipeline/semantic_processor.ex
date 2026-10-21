@@ -240,7 +240,10 @@ defmodule OptimalEngine.Pipeline.SemanticProcessor do
 
     case TextEmbedder.embed(embed_input, scope) do
       {:ok, vector} ->
-        case VectorStore.store(id, vector, workspace_id: context.workspace_id) do
+        case VectorStore.store(id, vector,
+               workspace_id: context.workspace_id,
+               tenant_id: context.tenant_id
+             ) do
           :ok ->
             Logger.debug("[SemanticProcessor] Stored embedding for context #{id}")
 

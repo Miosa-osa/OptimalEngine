@@ -87,6 +87,10 @@ defmodule OptimalEngine.Pipeline.Indexer do
     * `:metadata`: a map merged into the Context's metadata. Intake marks the
       rows of a signal's cross-reference copies (`"cross_ref_of"`) so writing
       the signal again updates its copies instead of adding new ones.
+    * `:tenant_id` — the tenant the row is written for. A bare, unregistered
+      workspace id can be shared by two tenants, so a caller that indexes on
+      behalf of a tenant MUST pass this; without it the row stays with the
+      owner of the registered workspace, else with `default`.
   """
   @spec index_file(String.t(), keyword()) :: {:ok, Context.t()} | {:error, term()}
   def index_file(path, opts \\ []) when is_binary(path) and is_list(opts) do
@@ -247,14 +251,21 @@ defmodule OptimalEngine.Pipeline.Indexer do
 
   # Stamps caller-provided workspace scope on the Context. Without this the
   # struct default ("default") wins and workspace content leaks into the
-  # default workspace.
+  # default workspace. A tenant the caller names is stamped too: a bare
+  # workspace id says nothing about whose the row is.
   defp stamp_scope(%Context{} = ctx, opts) do
-    case Keyword.get(opts, :workspace_id) do
-      workspace_id when is_binary(workspace_id) and workspace_id != "" ->
-        %{ctx | workspace_id: workspace_id}
+    ctx =
+      case Keyword.get(opts, :workspace_id) do
+        workspace_id when is_binary(workspace_id) and workspace_id != "" ->
+          %{ctx | workspace_id: workspace_id}
 
-      _ ->
-        ctx
+        _ ->
+          ctx
+      end
+
+    case Keyword.get(opts, :tenant_id) do
+      tenant_id when is_binary(tenant_id) and tenant_id != "" -> %{ctx | tenant_id: tenant_id}
+      _ -> ctx
     end
   end
 

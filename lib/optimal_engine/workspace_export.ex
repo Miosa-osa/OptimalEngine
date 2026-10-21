@@ -515,6 +515,7 @@ defmodule OptimalEngine.WorkspaceExport do
   defp intake_opts(export, attrs) do
     [
       workspace_id: export.workspace_id,
+      tenant_id: export.tenant_id,
       node: Map.get(attrs, :node) || Map.get(attrs, :node_slug) || "inbox",
       title: Map.get(attrs, :title, "Workspace edit"),
       genre: Map.get(attrs, :genre, "workspace-edit"),

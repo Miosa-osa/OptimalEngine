@@ -98,6 +98,21 @@ A rename keeps it, and so does a metadata replacement.
 A workspace bundle carries it; an import into a tenant where an active workspace holds it creates the copy without it, keeps it as `metadata.imported_external_id`, and reports it as `imported_external_id` in the import summary.
 Portable topology documents name workspaces by slug (and by id for a renamed one), so they do not carry it.
 
+## Writes under a bare workspace id
+
+A bare workspace id (one nobody registered, with no `<tenant>:` prefix) is accepted for single-tenant use, and two tenants can share it.
+The workspace row cannot say whose a write is, so a write is stored under the tenant that makes it, never under the tenant the workspace row would suggest.
+`POST /api/ingest`, `POST /api/batch/import/signals`, a connector run, a committed chat session and a workspace export edit name their tenant (`Indexer.index_file/2` takes a `:tenant_id` option), so a document written by a tenant under a bare id is that tenant's, and so are its graph edges, its entities and the vector stored with it.
+A workspace id has an owner when it is registered, or when its `<tenant>:` prefix names an existing tenant.
+A write that names no tenant keeps the earlier rule: the owner of the workspace id, else the tenant of the row it replaces, else `default`.
+The default tenant, which is also what a local caller without a key uses, writes into an owned workspace as its owner.
+A tenant that is not the owner of the workspace it names is refused (`workspace_tenant_mismatch`).
+A context id is one row for the whole Engine, and the id of a connector item comes from the workspace id and the item's `source_id`.
+So a write under a bare workspace id that would replace a row another tenant holds is refused (`context_id_in_use`) and leaves that row as it was.
+That happens when two tenants ingest the same connector item into the same bare workspace id: the first keeps the row.
+Register the workspace for each tenant, or give each its own id, to keep both.
+A row left under `default` in a workspace that is registered afterwards is taken over by the owner the next time it is written.
+
 ## Graph reads
 
 Two tenants can share a bare workspace id (one nobody registered), so the graph routes are bound to the caller's tenant.
