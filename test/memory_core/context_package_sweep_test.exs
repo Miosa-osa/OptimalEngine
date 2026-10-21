@@ -201,6 +201,14 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweepTest do
              Store.raw_query("SELECT fact_links FROM context_packages WHERE id = ?1", [broken.id])
   end
 
+  test "the Mix task exits non-zero only when something was skipped" do
+    assert Mix.Tasks.Optimal.Context.Sweep.exit_status(%{skipped: []}) == 0
+
+    assert Mix.Tasks.Optimal.Context.Sweep.exit_status(%{
+             skipped: [%{id: "p", tenant_id: "t", workspace_id: "w", reason: "state_changed"}]
+           }) == 1
+  end
+
   test "the Mix task prints the summary and honours --dry-run", ctx do
     output =
       capture_io(fn ->

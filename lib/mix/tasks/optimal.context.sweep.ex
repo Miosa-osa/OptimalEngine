@@ -21,11 +21,20 @@ defmodule Mix.Tasks.Optimal.Context.Sweep do
     * `--workspace` / `-w` - only this workspace (default: all)
     * `--dry-run` - report the packages without changing them
     * `--json` - print the summary as JSON
+
+  Exits 1 when any package was skipped (its objects could not be looked up, or
+  it changed while the sweep ran): nothing was changed for it, and running the
+  task again retries it.
   """
 
   use Mix.Task
 
   alias OptimalEngine.MemoryCore.ContextPackageSweep
+
+  @doc false
+  @spec exit_status(map()) :: 0 | 1
+  def exit_status(%{skipped: []}), do: 0
+  def exit_status(%{skipped: [_ | _]}), do: 1
 
   @impl Mix.Task
   def run(args) do
@@ -75,6 +84,9 @@ defmodule Mix.Tasks.Optimal.Context.Sweep do
             )
           end)
         end
+
+        # A deploy script must not take a sweep that left packages unjudged for done.
+        if exit_status(summary) != 0, do: exit({:shutdown, exit_status(summary)})
 
       {:error, reason} ->
         Mix.shell().error("Context package sweep failed: #{inspect(reason)}")
