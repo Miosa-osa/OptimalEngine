@@ -42,7 +42,9 @@ defmodule OptimalEngine.Graph.Reflector do
 
   - `:min_cooccurrences` — minimum shared contexts to qualify (default: 2)
   - `:limit` — max suggestions to return (default: 20)
-  - `:workspace_id` — workspace to scope to (default: "default")
+  - `:workspace_id` — workspace to scope to (default: "default"). The edges
+    that rule a pair out are read by workspace only (the edge table has no
+    tenant), so a caller that serves a tenant passes a workspace registered to it.
   - `:tenant_id`: tenant whose contexts count (default: "default")
 
   Returns `{:ok, [map()]}`. Never raises — logs and returns `{:ok, []}` on failure.

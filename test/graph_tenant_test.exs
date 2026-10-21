@@ -138,10 +138,59 @@ defmodule OptimalEngine.GraphTenantTest do
     end
   end
 
+  describe "the node lists" do
+    setup %{a: a, b: b, ws: ws, n: n} do
+      # Nodes are unique per workspace and slug, so the two tenants name theirs
+      # differently; the contexts of both tenants sit in the node `notes`.
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO contexts (id, tenant_id, workspace_id, node, uri, title, content, created_at, metadata) VALUES (?1, ?2, ?3, 'notes-b', ?4, 'Extra', 'Body.', '2026-10-20T09:00:00Z', '{}')",
+          ["g-b3-#{n}", b, ws, "optimal://notes-b/g-b3-#{n}.md"]
+        )
+
+      for {tenant, slug} <- [{a, "notes"}, {b, "notes-b"}] do
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO nodes (id, tenant_id, workspace_id, slug, name, kind) VALUES (?1, ?2, ?3, ?4, ?5, 'project')",
+            ["node-#{tenant}", tenant, ws, slug, "Node #{slug}"]
+          )
+      end
+
+      :ok
+    end
+
+    test "GET /api/optimal/nodes shows the key's tenant's nodes, counting its contexts only",
+         %{a: a, b: b, ws: ws} do
+      assert {200, %{"nodes" => [%{"slug" => "notes", "signal_count" => 2}]}} =
+               get("/api/optimal/nodes?workspace=#{ws}", key(a))
+
+      assert {200, %{"nodes" => [%{"slug" => "notes-b", "signal_count" => 1}]}} =
+               get("/api/optimal/nodes?workspace=#{ws}", key(b))
+    end
+
+    test "GET /api/workspace shows the key's tenant's nodes, counting its contexts only",
+         %{a: a, b: b, ws: ws} do
+      assert {200, %{"nodes" => [%{"slug" => "notes", "signal_count" => 2}]}} =
+               get("/api/workspace?workspace=#{ws}", key(a))
+
+      assert {200, %{"nodes" => [%{"slug" => "notes-b", "signal_count" => 1}]}} =
+               get("/api/workspace?workspace=#{ws}", key(b))
+    end
+  end
+
   describe "the reflection of entity gaps" do
-    test "counts the key's tenant's contexts only", %{a: a, ws: ws} do
-      assert {200, %{"gaps" => gaps}} = get("/api/graph/reflect?workspace=#{ws}&min=2", key(a))
-      assert [%{"cooccurrences" => 2}] = Enum.filter(gaps, &(&1["source"] == "Acme"))
+    test "counts the key's tenant's contexts only", %{a: a, b: b, ws: ws} do
+      for tenant <- [a, b] do
+        assert {:ok, gaps} =
+                 OptimalEngine.Graph.Reflector.reflect(
+                   min_cooccurrences: 2,
+                   workspace_id: ws,
+                   tenant_id: tenant,
+                   skip_llm: true
+                 )
+
+        assert [%{cooccurrences: 2}] = Enum.filter(gaps, &(&1.source == "Acme"))
+      end
     end
   end
 end

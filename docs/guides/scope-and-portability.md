@@ -69,6 +69,13 @@ A rename keeps it, and so does a metadata replacement.
 A workspace bundle carries it; an import into a tenant where an active workspace holds it creates the copy without it, keeps it as `metadata.imported_external_id`, and reports it as `imported_external_id` in the import summary.
 Portable topology documents name workspaces by slug (and by id for a renamed one), so they do not carry it.
 
+## Graph reads
+
+Two tenants can share a bare workspace id (one nobody registered), so the graph routes are bound to the caller's tenant.
+`GET /api/graph`, the node routes and the optimal graph routes show the tenant's contexts only.
+The graph analyses (`GET /api/graph/hubs`, `/triangles`, `/clusters` and `/reflect`) read the edge table, which has no tenant of its own, so they answer only for a workspace registered to the caller's tenant: a workspace of another tenant, one that does not exist and an id nobody registered all answer `404 workspace not found`.
+`/api/graph/triangles` returns at most 100 triangles per request, whatever its `limit`.
+
 ## Repairing a workspace id
 
 A rename keeps the id. An operator can also make the id match the slug, or attach rows written to an unregistered id, with `POST /api/data-steward/workspaces/rename {source_workspace_id, target_workspace_id}` and `POST /api/data-steward/workspaces/repair {source_workspace_id, target_workspace_id}` (`topology:write`).
