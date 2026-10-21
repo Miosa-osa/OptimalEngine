@@ -72,7 +72,6 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @principals "principals"
   @documents "operating_documents"
   @batch_rows 1_000
-  @export_page_rows 1_000
 
   @doc """
   Writes a bundle for `workspace_id` to `path`. Returns the manifest.
@@ -491,24 +490,36 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         "SELECT rowid, * FROM #{quote_name(table)} WHERE (#{where}) AND rowid > ?#{n + 1} " <>
           "ORDER BY rowid LIMIT ?#{n + 2}"
 
+      page_rows = export_page_rows()
+
       Stream.unfold(0, fn
         :done ->
           nil
 
         after_rowid ->
-          {:ok, page} = Store.raw_query(sql, params ++ [after_rowid, @export_page_rows])
+          {:ok, page} = Store.raw_query(sql, params ++ [after_rowid, page_rows])
+          page_read(table, length(page))
 
           case page do
             [] -> nil
-            _ -> {Enum.map(page, &tl/1), next_page(page)}
+            _ -> {Enum.map(page, &tl/1), next_page(page, page_rows)}
           end
       end)
       |> Stream.concat()
     end
   end
 
-  defp next_page(page) when length(page) < @export_page_rows, do: :done
-  defp next_page(page), do: page |> List.last() |> hd()
+  defp next_page(page, page_rows) when length(page) < page_rows, do: :done
+  defp next_page(page, _page_rows), do: page |> List.last() |> hd()
+
+  # Rows read per page of an export (`config :optimal_engine,
+  # :bundle_export_page_rows`, default 1,000).
+  defp export_page_rows, do: Application.get_env(:optimal_engine, :bundle_export_page_rows, 1_000)
+
+  # Each page read is a `[:optimal_engine, :bundle, :export_page]` event with
+  # the rows read and the table.
+  defp page_read(table, rows),
+    do: :telemetry.execute([:optimal_engine, :bundle, :export_page], %{rows: rows}, %{table: table})
 
   defp without_rowid?(table) do
     case Store.raw_query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1", [table]) do
