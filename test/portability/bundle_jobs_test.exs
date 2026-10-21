@@ -120,6 +120,64 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
     {name, manifest}
   end
 
+  # A chain of `n` memories in the workspace, each pointing at the one before,
+  # moved out into a bundle.
+  defp exported_with_memory_chain(ctx, n) do
+    for i <- 1..n do
+      parent = if i > 1, do: "chain-#{ctx.n}-#{i - 1}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO memories (id, tenant_id, workspace_id, content, root_memory_id, parent_memory_id) VALUES (?1, ?2, ?3, 'chain', ?1, ?4)",
+          ["chain-#{ctx.n}-#{i}", ctx.tenant, ctx.ws, parent]
+        )
+    end
+
+    exported_and_moved(ctx)
+  end
+
+  defp memory_ids(workspace) do
+    {:ok, rows} =
+      Store.raw_query("SELECT id FROM memories WHERE workspace_id = ?1 ORDER BY id", [workspace])
+
+    List.flatten(rows)
+  end
+
+  # An import the Engine stopped under: claimed, so it is marked running, with
+  # the report and the log of rows written that it had left behind.
+  defp cut_off_import(ctx, bundle, target, log) do
+    {:ok, view, :queued} =
+      BundleJobs.submit_import(ctx.tenant, %{
+        "workspace_id" => target,
+        "bundle" => bundle,
+        "mode" => "merge"
+      })
+
+    assert {:ok, %{id: id}} =
+             Jobs.claim(kinds: BundleJobs.kinds(), lease_owner: "gone-#{ctx.n}-#{view.job_id}")
+
+    assert id == view.job_id
+
+    dir = Path.join([WorkspaceBundle.backup_dir(), "bundle-jobs", id])
+    report_path = Path.join(dir, "report.json")
+    report = report_path |> File.read!() |> Jason.decode!()
+
+    File.write!(
+      report_path,
+      Jason.encode!(
+        Map.merge(report, %{
+          "status" => "running",
+          "phase" => "writing",
+          "target_was_empty" => true,
+          "record_created" => false
+        })
+      )
+    )
+
+    File.write!(Path.join(dir, "written.jsonl"), log)
+    id
+  end
+
   defp on_event(event, fun) do
     handler = "bundle-jobs-#{System.unique_integer([:positive])}"
     :ok = :telemetry.attach(handler, event, &__MODULE__.handle_event/4, fun)
@@ -512,6 +570,140 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
       assert BundleJobs.recover() == 1
       assert context_ids(target) == [foreign]
       assert {:ok, _workspace} = Workspace.get(target)
+    end
+  end
+
+  describe "taking an import back" do
+    test "a cancelled create of memories linked across batches is taken back whole", ctx do
+      {name, _manifest} = exported_with_memory_chain(ctx, 6)
+      path = Path.join(WorkspaceBundle.bundle_dir(ctx.tenant), name)
+      target = "#{ctx.tenant}:copy"
+
+      # Two rows a batch: each batch's parents were written by an earlier one.
+      observe = fn
+        {:rows, "memories", _n} ->
+          batches = Process.get(:memory_batches, 0) + 1
+          Process.put(:memory_batches, batches)
+          if batches == 3, do: :cancel, else: :ok
+
+        _event ->
+          :ok
+      end
+
+      assert {:error, :cancelled} =
+               WorkspaceBundle.import(path, ctx.tenant,
+                 workspace_id: target,
+                 batch_rows: 2,
+                 observe: observe
+               )
+
+      assert Process.get(:memory_batches) == 3
+      assert memory_ids(target) == []
+      assert context_ids(target) == []
+      assert Workspace.get(target) == {:error, :not_found}
+    end
+
+    test "a batch too large for one delete statement is taken back whole", ctx do
+      # 520 memories in one batch of 1,000; a delete statement takes 500 keys.
+      {name, _manifest} = exported_with_memory_chain(ctx, 520)
+      path = Path.join(WorkspaceBundle.bundle_dir(ctx.tenant), name)
+      target = "#{ctx.tenant}:copy"
+
+      observe = fn
+        {:rows, "memories", _n} -> :cancel
+        _event -> :ok
+      end
+
+      assert {:error, :cancelled} =
+               WorkspaceBundle.import(path, ctx.tenant, workspace_id: target, observe: observe)
+
+      assert memory_ids(target) == []
+      assert Workspace.get(target) == {:error, :not_found}
+    end
+
+    test "recovery skips a line the log lost to a full disk, and ends the job partial", ctx do
+      {name, _manifest} = exported_and_moved(ctx)
+      target = "#{ctx.tenant}:copy"
+      row = "written-#{ctx.n}"
+      context(ctx.tenant, target, row)
+
+      good = Jason.encode!(%{"table" => "contexts", "columns" => ["id"], "keys" => [[row]]})
+      torn = ~s({"table":"contexts","columns":["id"],"keys":[["lost)
+      job_id = cut_off_import(ctx, name, target, good <> "\n" <> torn)
+
+      assert BundleJobs.recover() == 1
+
+      # What the log names is gone; what was cut off with the log is not known.
+      assert context_ids(target) == []
+      failed = status!(ctx.tenant, job_id)
+      assert failed.status == "failed"
+      assert failed.partial
+      assert failed.error["code"] == "cleanup_incomplete"
+      assert failed.error["retryable"] == false
+      assert failed.error["partial"] == true
+
+      # It is not run again, and the next boot does not meet it.
+      assert {:ok, :idle} = BundleJobs.drain()
+      assert BundleJobs.recover() == 0
+    end
+
+    test "a job that cannot be taken back does not stop the recovery of the others", ctx do
+      {name, _manifest} = exported_and_moved(ctx)
+      refused = "#{ctx.tenant}:refused"
+      other = "#{ctx.tenant}:other"
+      row = "other-#{ctx.n}"
+      context(ctx.tenant, other, row)
+
+      # The log names a table the Engine does not have: its delete is refused.
+      missing =
+        Jason.encode!(%{
+          "table" => "no_such_table_#{ctx.n}",
+          "columns" => ["id"],
+          "keys" => [["x"]]
+        })
+
+      names_row = Jason.encode!(%{"table" => "contexts", "columns" => ["id"], "keys" => [[row]]})
+
+      first = cut_off_import(ctx, name, refused, missing <> "\n")
+      second = cut_off_import(ctx, name, other, names_row <> "\n")
+
+      assert BundleJobs.recover() == 2
+
+      assert status!(ctx.tenant, first).status == "failed"
+      assert status!(ctx.tenant, first).partial
+
+      # The other is released to run again from the start, and its rows are gone.
+      assert status!(ctx.tenant, second).status == "running"
+      refute status!(ctx.tenant, second).partial
+      assert context_ids(other) == []
+    end
+
+    test "a log that cannot be read ends the job partial instead of crashing recovery", ctx do
+      {name, _manifest} = exported_and_moved(ctx)
+      target = "#{ctx.tenant}:copy"
+      row = "unreadable-#{ctx.n}"
+      context(ctx.tenant, target, row)
+
+      names_row = Jason.encode!(%{"table" => "contexts", "columns" => ["id"], "keys" => [[row]]})
+      job_id = cut_off_import(ctx, name, target, names_row <> "\n")
+      log = Path.join([WorkspaceBundle.backup_dir(), "bundle-jobs", job_id, "written.jsonl"])
+      File.chmod!(log, 0o000)
+      on_exit(fn -> File.chmod(log, 0o600) end)
+
+      # A reader that ignores file modes (root) reads it, and recovery is normal.
+      readable? = match?({:ok, _}, File.read(log))
+
+      assert BundleJobs.recover() == 1
+
+      if readable? do
+        assert context_ids(target) == []
+      else
+        assert context_ids(target) == [row]
+        failed = status!(ctx.tenant, job_id)
+        assert failed.status == "failed"
+        assert failed.partial
+        assert failed.error["code"] == "cleanup_incomplete"
+      end
     end
   end
 
