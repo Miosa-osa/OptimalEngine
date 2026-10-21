@@ -297,6 +297,12 @@ mix optimal.restore --from-offsite-key backups/default/scheduled-20261019T000012
 Every chunk is authenticated and the plaintext must match the checksum sealed into the object before the usual restore checks run.
 Only sealed copies restore this way.
 
+## Storage Mutations
+
+`POST /api/storage/workspaces/:id/mutations` appends an entry to the workspace's replication ledger, and `GET` on the same path lists the workspace ledger after a sequence.
+An entry's entity type is free-form, but it may not name a table of the engine or an `authority_*` table (422 `entity_type_names_a_table`), and its idempotency key may not start with the engine's own replica id followed by `:`, with `mut_` and that id, or with `peer:` (422 `reserved_idempotency_key`).
+Replication never serves or pushes an entry: see "Storage mutation entries share the ledger" in `docs/guides/replication.md`.
+
 ## What Is Not Implemented
 
 The engine still has no adapter for Postgres, NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, or Fractal, and the provider inventory says so.
