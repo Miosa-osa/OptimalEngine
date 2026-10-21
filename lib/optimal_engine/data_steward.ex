@@ -18,14 +18,20 @@ defmodule OptimalEngine.DataSteward do
     HierarchyAudit,
     MemoryCore,
     ReviewQueue,
-    Store
+    Store,
+    URI
   }
 
+  alias OptimalEngine.Portability.WorkspaceBundle
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
+  alias OptimalEngine.Workspace.Filesystem
 
   require Logger
 
   @default_limit 100
+
+  # A rename that moves a workspace's directory rewrites the path of every file in it.
+  @rename_timeout 300_000
 
   # A batch of route decisions is one request; more than this is several.
   @max_route_items 500
@@ -411,6 +417,19 @@ defmodule OptimalEngine.DataSteward do
   source id must not hold rows of another tenant (`workspace_id_shared`),
   which a rename could not take with it. The source is read again inside the
   transaction that moves it, so a change made meanwhile is not lost.
+
+  A workspace's directory is keyed by its id (`Workspace.Filesystem.path/2`), so the
+  rename moves it: the files, `contexts.path` and `contexts.uri` of the files, and
+  `assets.storage_path` of local assets all follow the id, in the same transaction.
+  The move is the last step, so a rename that fails earlier leaves the directory where
+  it was, and a commit that fails after it moves the directory back. It is refused,
+  with nothing changed, when the directory cannot be moved safely: the same test as a
+  move to another Engine (`WorkspaceBundle.movable/1`, so never the Engine root, a
+  directory the root uses for itself or one that holds more than the workspace), a
+  target directory that already holds files (`workspace_directory_exists`), or an
+  entry at the source that is not a directory (`workspace_directory_unusual`). A
+  workspace that has no directory yet is renamed with nothing to move. Text that
+  quotes an `optimal://` address of a moved file is not rewritten.
   """
   def rename_workspace(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
@@ -418,27 +437,169 @@ defmodule OptimalEngine.DataSteward do
 
     with :ok <- source_registered(tenant, source_workspace_id),
          {:ok, tables} <- workspace_tables(),
-         {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
-      Store.transaction(fn txn ->
-        with {:ok, workspace} <- read_source(txn, tenant, source_workspace_id),
-             :ok <- check_rename_target(txn, workspace, tenant, target_workspace_id),
-             :ok <- target_free_of_rows(txn, tables, target_workspace_id),
-             :ok <- check_id_not_shared(txn, tables, source_workspace_id, tenant) do
-          rename_in(
-            txn,
-            workspace,
-            tables,
-            evidence_key,
-            tenant,
-            source_workspace_id,
-            target_workspace_id,
-            actor_id
-          )
-        end
-      end)
+         {:ok, evidence_key} <- recording_key(tenant, source_workspace_id),
+         {:ok, move} <- plan_directory_move(source_workspace_id, target_workspace_id) do
+      Store.transaction(
+        fn txn ->
+          with {:ok, workspace} <- read_source(txn, tenant, source_workspace_id),
+               :ok <- check_rename_target(txn, workspace, tenant, target_workspace_id),
+               :ok <- target_free_of_rows(txn, tables, target_workspace_id),
+               :ok <- check_id_not_shared(txn, tables, source_workspace_id, tenant),
+               {:ok, renamed} <-
+                 rename_in(
+                   txn,
+                   workspace,
+                   tables,
+                   evidence_key,
+                   tenant,
+                   source_workspace_id,
+                   target_workspace_id,
+                   actor_id
+                 ),
+               :ok <- move_directory(txn, move) do
+            {:ok, Map.put(renamed, :directory_moved, move != nil)}
+          end
+        end,
+        @rename_timeout
+      )
+      |> undo_move_if_not_committed(move)
       |> purge_vacated_cache(source_workspace_id, :rename)
     end
   end
+
+  # ── the directory goes with the id ─────────────────────────────────────────
+
+  # Decided before the transaction opens, so a refusal changes nothing.
+  defp plan_directory_move(source, target) do
+    root = Path.expand(Application.get_env(:optimal_engine, :root_path, File.cwd!()))
+    old = Path.expand(Filesystem.path(root, source))
+    new = Path.expand(Filesystem.path(root, target))
+
+    if old == new do
+      {:ok, nil}
+    else
+      case File.lstat(old) do
+        {:error, :enoent} ->
+          {:ok, nil}
+
+        {:ok, %{type: :directory}} ->
+          with :ok <- WorkspaceBundle.movable(source),
+               :ok <- WorkspaceBundle.movable(target),
+               :ok <- target_directory_free(new) do
+            {:ok, %{old: old, new: new}}
+          end
+
+        _link_file_or_unreadable ->
+          {:error, :workspace_directory_unusual}
+      end
+    end
+  end
+
+  # The target may hold directories nothing was ever written to (a workspace is
+  # provisioned with an empty tree); any file or link in it is somebody's.
+  defp target_directory_free(path) do
+    case File.lstat(path) do
+      {:error, :enoent} -> :ok
+      {:ok, %{type: :directory}} -> if only_empty_directories?(path), do: :ok, else: exists()
+      _other -> exists()
+    end
+  end
+
+  defp exists, do: {:error, :workspace_directory_exists}
+
+  defp only_empty_directories?(dir) do
+    case File.ls(dir) do
+      {:ok, names} ->
+        Enum.all?(names, fn name ->
+          child = Path.join(dir, name)
+          match?({:ok, %{type: :directory}}, File.lstat(child)) and only_empty_directories?(child)
+        end)
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp move_directory(_txn, nil), do: :ok
+
+  defp move_directory(txn, %{old: old, new: new}) do
+    with :ok <- rewrite_paths(txn, old, new),
+         :ok <- remove_empty_tree(new),
+         :ok <- File.mkdir_p(Path.dirname(new)),
+         :ok <- File.rename(old, new) do
+      :ok
+    else
+      {:error, reason} when is_atom(reason) -> {:error, {:workspace_directory_not_moved, reason}}
+      {:error, _} = error -> error
+    end
+  end
+
+  # The rows that name a file under the old directory: where it is, and the address
+  # derived from where it is.
+  defp rewrite_paths(txn, old, new) do
+    with {:ok, rows} <-
+           Store.txn_query(
+             txn,
+             "SELECT id, path FROM contexts WHERE substr(path, 1, length(?1) + 1) = ?1 || '/'",
+             [old]
+           ),
+         :ok <- each_ok(rows, fn [id, path] -> move_context(txn, id, path, old, new) end),
+         {:ok, _} <-
+           Store.txn_execute(
+             txn,
+             """
+             UPDATE assets SET storage_path = ?2 || substr(storage_path, length(?1) + 1)
+              WHERE substr(storage_path, 1, length(?1) + 1) = ?1 || '/'
+             """,
+             [old, new]
+           ) do
+      :ok
+    end
+  end
+
+  defp move_context(txn, id, path, old, new) do
+    moved = new <> String.replace_prefix(path, old, "")
+
+    case Store.txn_execute(txn, "UPDATE contexts SET path = ?2, uri = ?3 WHERE id = ?1", [
+           id,
+           moved,
+           URI.from_path(moved)
+         ]) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp each_ok(list, fun) do
+    Enum.reduce_while(list, :ok, fn item, :ok ->
+      case fun.(item) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # Deepest first: `rmdir` refuses a directory that still has an entry.
+  defp remove_empty_tree(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :directory}} ->
+        {:ok, names} = File.ls(path)
+        Enum.each(names, &remove_empty_tree(Path.join(path, &1)))
+        File.rmdir(path)
+
+      _gone ->
+        :ok
+    end
+  end
+
+  # A transaction that did not commit after the directory had moved: the rows are as
+  # they were, so the directory goes back to where they say it is.
+  defp undo_move_if_not_committed({:error, _} = error, %{old: old, new: new}) do
+    if File.dir?(new) and not File.exists?(old), do: File.rename(new, old)
+    error
+  end
+
+  defp undo_move_if_not_committed(result, _move), do: result
 
   defp rename_in(txn, workspace, tables, evidence_key, tenant, source, target, actor_id) do
     temporary_slug =
