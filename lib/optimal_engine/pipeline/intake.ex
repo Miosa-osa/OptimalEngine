@@ -239,7 +239,8 @@ defmodule OptimalEngine.Pipeline.Intake do
     with :ok <- persist_source_package(source_package),
          # Every detection while classifying shares one budget, so a crafted
          # document holds the intake process (and everyone queued behind it)
-         # a bounded time; database work before it does not count.
+         # a bounded time. The source package written before it does not
+         # count; the topology and entity names classification reads do.
          {:ok, signal} <- TimeLimit.with_budget(fn -> classify_step(raw_text, scope, opts) end),
          {:ok, signal} <- quality_gate(signal, source_package, scope),
          {:ok, signal, routed_to} <- route_step(signal, opts),
