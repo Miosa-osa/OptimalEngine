@@ -4212,8 +4212,14 @@ defmodule OptimalEngine.SyncTest do
 
     test "an append-only row written while the export pages is above the mark, not in the bundle",
          ctx do
-      for i <- 1..3, do: edge(ctx, "edge-target-#{ctx.n}-#{i}")
       late = "edge-target-#{ctx.n}-late"
+      targets = for i <- 1..3, do: "edge-target-#{ctx.n}-#{i}"
+
+      # Edges between contexts the workspace holds, so replication sends them.
+      for id <- ["edge-source-#{ctx.n}", late | targets],
+          do: insert_context(ctx.tenant, ctx.ws, id, id)
+
+      Enum.each(targets, &edge(ctx, &1))
       path = Path.join(System.tmp_dir!(), "appended-#{ctx.n}.tar.gz")
       on_exit(fn -> File.rm(path) end)
 
@@ -4222,9 +4228,9 @@ defmodule OptimalEngine.SyncTest do
           WorkspaceBundle.export(ctx.tenant, ctx.ws, path)
         end)
 
-      targets = path |> bundle_rows("edges") |> Enum.map(& &1["target_id"])
-      assert length(targets) == 3
-      refute late in targets
+      exported = path |> bundle_rows("edges") |> Enum.map(& &1["target_id"])
+      assert Enum.sort(exported) == Enum.sort(targets)
+      refute late in exported
 
       # Its insert is pulled exactly once, from above the mark: a replica that
       # also had it from the bundle would hold the edge twice.

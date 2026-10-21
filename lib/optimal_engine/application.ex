@@ -18,6 +18,7 @@ defmodule OptimalEngine.Application do
   @impl true
   def start(_type, _args) do
     OptimalEngine.Sizing.boot_started()
+    sweep_bundle_leftovers()
 
     children =
       base_children() ++ OptimalEngine.API.Endpoint.children()
@@ -37,6 +38,21 @@ defmodule OptimalEngine.Application do
       {:error, reason} = err ->
         Logger.error("[OptimalEngine] Failed to start: #{inspect(reason)}")
         err
+    end
+  end
+
+  # Uploads and staging folders a stopped run left behind. Only the Engine that
+  # serves the API sweeps them: a mix task or maintenance command started beside
+  # a running Engine must not remove that Engine's uploads in progress.
+  defp sweep_bundle_leftovers do
+    if Keyword.get(Application.get_env(:optimal_engine, :api, []), :enabled, false) do
+      case OptimalEngine.Portability.WorkspaceBundle.sweep_leftovers() do
+        0 ->
+          :ok
+
+        n ->
+          Logger.info("[OptimalEngine] removed #{n} unfinished bundle uploads and staging folders")
+      end
     end
   end
 

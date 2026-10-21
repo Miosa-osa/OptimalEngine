@@ -102,7 +102,12 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
   # Upload limits for one test, and the size of every chunk read while it runs.
   defp with_upload_limits(limits, fun) do
-    keys = [chunk_bytes: :bundle_upload_chunk_bytes, max_bytes: :bundle_max_bytes]
+    keys = [
+      chunk_bytes: :bundle_upload_chunk_bytes,
+      max_bytes: :bundle_max_bytes,
+      deadline_ms: :bundle_upload_deadline_ms
+    ]
+
     previous = Map.new(keys, fn {_, key} -> {key, Application.get_env(:optimal_engine, key)} end)
 
     Enum.each(limits, fn {name, value} ->
@@ -552,7 +557,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       target = "target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
-      {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, rows} =
                Store.raw_query(
@@ -623,7 +628,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
 
       target = "target-#{ctx.n}"
       {:ok, _} = Tenant.create(%{id: target, name: "Target"})
-      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
 
       assert {:ok, [[^target]]} =
                Store.raw_query(
@@ -910,6 +915,39 @@ defmodule OptimalEngine.ScopePortabilityTest do
           assert uploads_left(ctx.tenant) == []
         end)
       end)
+    end
+
+    test "a raw upload that outlasts its deadline is refused with 408 and leaves no file", ctx do
+      noise(ctx)
+      {:ok, _} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      bytes = File.read!(ctx.path)
+
+      with_upload_limits([chunk_bytes: 1_024, deadline_ms: 0], fn ->
+        with_auth(fn ->
+          late = upload(admin_key(ctx.tenant), bytes)
+          assert late.status == 408
+          assert late.resp_body =~ "upload_timeout"
+          assert Enum.sum(chunks()) == 1_024
+          assert uploads_left(ctx.tenant) == []
+        end)
+      end)
+    end
+
+    test "unfinished uploads and staging folders are swept, and nothing else", ctx do
+      dir = WorkspaceBundle.bundle_dir(ctx.tenant)
+      kept = Path.join(dir, "kept-#{ctx.n}.tar.gz")
+      left = for suffix <- [".part", ".tar.gz"], do: Path.join(dir, "upload-#{ctx.n}#{suffix}")
+      Enum.each([kept | left], &File.write!(&1, "x"))
+
+      staged = Path.join([Path.dirname(dir), "..", "staging", "bundle-#{ctx.n}"]) |> Path.expand()
+      File.mkdir_p!(staged)
+      File.write!(Path.join(staged, "manifest.json"), "{}")
+
+      assert WorkspaceBundle.sweep_leftovers() >= 3
+      refute Enum.any?(left, &File.exists?/1)
+      refute File.exists?(staged)
+      assert File.exists?(kept)
+      File.rm(kept)
     end
 
     test "a table larger than one export page travels whole", ctx do
