@@ -245,6 +245,20 @@ defmodule OptimalEngine.Storage.S3Test do
       assert proof.key =~ "health/"
       assert length(S3Stub.object_keys(stub.agent)) == before
     end
+
+    test "a bare listing and the health probe stay inside the engine prefix's folder", %{
+      stub: stub
+    } do
+      configure(stub, OPTIMAL_S3_PREFIX: "engine-a")
+      assert {:ok, _} = S3.put_object(S3.object_key(["notes", "mine.txt"]), "mine")
+      assert {:ok, _} = S3.put_object("engine-ab/notes/other.txt", "another engine's")
+
+      # A credential scoped to "engine-a/" may list "engine-a/" but not the
+      # bare "engine-a", and the bare prefix would also match "engine-ab/".
+      assert {:ok, listed} = S3.list_objects(nil)
+      assert listed.keys == ["engine-a/notes/mine.txt"]
+      assert OptimalEngine.Storage.S3.Adapter.health() == :healthy
+    end
   end
 
   describe "URI handling" do
