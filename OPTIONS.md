@@ -41,7 +41,8 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_API_ENABLED` | disabled outside development startup | Literal `true` enables the configured API listener; development launcher/config also enables it. |
 | `OPTIMAL_API_PORT` | `4200` | Port for an environment-enabled HTTP listener. |
 | `OPTIMAL_API_INTERFACE` | `127.0.0.1` | Bind address for an environment-enabled listener. Any address but loopback with authentication off logs `API is open: auth is off on <interface>; set OPTIMAL_AUTH_REQUIRED=true` at boot and every 10 minutes, and `/api/health` warns `auth_open_on_network`. |
-| `OPTIMAL_REFUSE_OPEN_NETWORK` | `0` | `1` refuses to start an Engine whose API listens beyond loopback with authentication off. Off by default in this release; the next release makes the refusal the default. Other values fail startup configuration. |
+| `OPTIMAL_REFUSE_OPEN_NETWORK` | unset (`0`) | `1` (or `true`) refuses to start an Engine whose API listens beyond loopback with authentication off. Off by default in this release; the next release makes the refusal the default, and `0` (or `false`) keeps this release's behaviour, the error. Empty is unset; other values fail startup configuration. |
+| `OPTIMAL_OPEN_NETWORK_ACKNOWLEDGED` | unset (`0`) | `1` (or `true`) says the API is open beyond loopback on purpose, with every request authenticated by a proxy in front: the Engine logs one line at boot and is neither warned about, degraded in `/api/health`, nor refused. Empty is unset; other values fail startup configuration. |
 | `OPTIMAL_ENGINE_DB` | `.optimal/index.db` | Local SQLite store path. |
 | `OPTIMAL_ENGINE_CACHE` | `.optimal/cache` | Local cache path. |
 | `OPTIMAL_BACKUP_DIR` | `backups/` beside the database | Only directory `POST /api/backup` may write into; restores verify the catalog checksum first. |
@@ -183,6 +184,8 @@ Prefer repo-relative defaults.
 Prefer environment-driven config.
 Require credentials explicitly for untrusted HTTP access with `OPTIMAL_AUTH_REQUIRED=true`.
 An Engine that listens beyond loopback without them is reported as open, and refused with `OPTIMAL_REFUSE_OPEN_NETWORK=1` (the default from the next release).
+Only the interface the Engine binds is checked: a loopback Engine that a proxy, tunnel or port map publishes to the network is not detected, and needs `OPTIMAL_AUTH_REQUIRED=true` as well.
+The container image and the compose files listen on all the container's interfaces and set `OPTIMAL_AUTH_REQUIRED=true`.
 The default local mode is trusted and permits anonymous requests; HTTP grants do not sandbox local CLI or SQL access.
 Applications must supply intended scope, while legacy API defaults remain documented compatibility behavior.
 Never silently share memory across tenants, organizations, or workspaces.

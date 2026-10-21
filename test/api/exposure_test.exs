@@ -18,16 +18,19 @@ defmodule OptimalEngine.API.ExposureTest do
   setup do
     api = Application.get_env(:optimal_engine, :api, [])
     auth = Application.get_env(:optimal_engine, :auth, [])
-    refuse = Application.fetch_env(:optimal_engine, :refuse_open_network)
+
+    flags =
+      for key <- [:refuse_open_network, :open_network_acknowledged],
+          do: {key, Application.fetch_env(:optimal_engine, key)}
 
     on_exit(fn ->
       Application.put_env(:optimal_engine, :api, api)
       Application.put_env(:optimal_engine, :auth, auth)
 
-      case refuse do
-        {:ok, value} -> Application.put_env(:optimal_engine, :refuse_open_network, value)
-        :error -> Application.delete_env(:optimal_engine, :refuse_open_network)
-      end
+      Enum.each(flags, fn
+        {key, {:ok, value}} -> Application.put_env(:optimal_engine, key, value)
+        {key, :error} -> Application.delete_env(:optimal_engine, key)
+      end)
     end)
 
     %{auth: auth}
@@ -63,17 +66,54 @@ defmodule OptimalEngine.API.ExposureTest do
              "0.0.0.0"
 
     assert Exposure.open_interface([enabled: true, interface: "10.1.2.3"], []) == "10.1.2.3"
+
+    # Every IPv6 interface is open; an address the Endpoint cannot parse,
+    # empty included, is bound as 127.0.0.1.
+    assert Exposure.open_interface([enabled: true, interface: "::"], auth_required: false) == "::"
+
+    for interface <- ["", "not-an-address"] do
+      assert Exposure.open_interface([enabled: true, interface: interface], auth_required: false) ==
+               nil
+    end
   end
 
-  test "an open API logs the error at boot and is watched", ctx do
+  test "an open API is watched, and the watcher logs the error as it starts", ctx do
     listen(ctx, "0.0.0.0")
+    assert {ExposureMonitor, interface: "0.0.0.0"} in Endpoint.children()
 
+    # Logged by the watcher, which starts after the recent log does, so the
+    # boot line also reaches GET /api/maintenance/log.
     log =
       capture_log(fn ->
-        assert {ExposureMonitor, interface: "0.0.0.0"} in Endpoint.children()
+        {:ok, pid} = ExposureMonitor.start_link(interface: "0.0.0.0", name: nil)
+        GenServer.stop(pid)
       end)
 
     assert log =~ "API is open: auth is off on 0.0.0.0; set OPTIMAL_AUTH_REQUIRED=true"
+  end
+
+  test "an API opened on purpose logs one line and is neither watched, warned nor refused", ctx do
+    Application.put_env(:optimal_engine, :open_network_acknowledged, true)
+    Application.put_env(:optimal_engine, :refuse_open_network, true)
+    listen(ctx, "0.0.0.0")
+
+    log = capture_log(fn -> assert [_cowboy] = Endpoint.children() end)
+    assert log =~ "acknowledged by OPTIMAL_OPEN_NETWORK_ACKNOWLEDGED"
+    refute log =~ "API is open"
+
+    report = Health.ready(skip: [:embedder, :credential_key])
+    refute :network_auth in report.degraded
+    refute "auth_open_on_network" in health()["warnings"]
+  end
+
+  test "with the refusal on, an Engine beyond loopback with authentication starts", ctx do
+    # The shape of a managed Engine: a private network address, authentication on.
+    Application.put_env(:optimal_engine, :refuse_open_network, true)
+    Application.put_env(:optimal_engine, :api, enabled: true, port: 4999, interface: "10.20.30.40")
+    Application.put_env(:optimal_engine, :auth, Keyword.put(ctx.auth, :auth_required, true))
+
+    assert Exposure.boot_check() == :ok
+    assert [_cowboy] = Endpoint.children()
   end
 
   test "the error repeats on the watcher's interval" do

@@ -115,7 +115,7 @@ defmodule OptimalEngine.Health do
   # An API with authentication off on a network interface still serves, but
   # anyone who can reach it acts as the local operator (OptimalEngine.API.Exposure).
   defp run_check(:network_auth) do
-    case OptimalEngine.API.Exposure.open_interface() do
+    case OptimalEngine.API.Exposure.unacknowledged_interface() do
       nil -> :ok
       interface -> {:warn, {:auth_open_on_network, interface}}
     end

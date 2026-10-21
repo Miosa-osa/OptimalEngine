@@ -176,7 +176,8 @@ EXPOSE 4200
 #   OPTIMAL_ENGINE_CACHE — cache dir under the volume
 #   OLLAMA_HOST          — optional, for embeddings
 # API must be enabled + bound to 0.0.0.0 inside the container so the
-# compose network can reach it; TLS termination is handled by the Caddy
+# compose network can reach it, so authentication is required by default
+# (OPTIMAL_AUTH_REQUIRED=true); TLS termination is handled by the Caddy
 # reverse proxy in production.
 # ERL_CRASH_DUMP_SECONDS=0 writes no crash dump: one holds ETS tables and
 # process heaps, which is customer data, in the working directory.
@@ -189,6 +190,7 @@ ENV OPTIMAL_ENGINE_ROOT=/data \
     OPTIMAL_API_ENABLED=true \
     OPTIMAL_API_PORT=4200 \
     OPTIMAL_API_INTERFACE=0.0.0.0 \
+    OPTIMAL_AUTH_REQUIRED=true \
     OPTIMAL_RELEASE_CHANNEL=dev \
     ERL_CRASH_DUMP_SECONDS=0
 

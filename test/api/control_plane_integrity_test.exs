@@ -2,7 +2,8 @@ defmodule OptimalEngine.API.ControlPlaneIntegrityTest do
   use ExUnit.Case, async: false
   import Plug.Test
   import Plug.Conn
-  alias OptimalEngine.{Memory, MemoryCore, Store}
+  alias OptimalEngine.{Memory, MemoryCore, Organization, Store, Workspace}
+  alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.API.Router
 
@@ -264,6 +265,72 @@ defmodule OptimalEngine.API.ControlPlaneIntegrityTest do
 
     assert {:ok, [[0]]} =
              Store.raw_query("SELECT COUNT(*) FROM memories WHERE content = ?1", [content])
+  end
+
+  test "a key of one tenant that names another tenant's workspace reads nothing of it" do
+    n = System.unique_integer([:positive])
+    {tenant_a, tenant_b} = {"cp-a-#{n}", "cp-b-#{n}"}
+
+    [workspace_a, workspace_b] =
+      for tenant <- [tenant_a, tenant_b] do
+        {:ok, _} = Tenant.create(%{id: tenant, name: tenant})
+
+        {:ok, _} =
+          Organization.create(%{id: "#{tenant}:org", tenant_id: tenant, slug: "org", name: "Org"})
+
+        {:ok, workspace} =
+          Workspace.create(%{
+            tenant_id: tenant,
+            organization_id: "#{tenant}:org",
+            slug: "main",
+            name: "Main"
+          })
+
+        workspace.id
+      end
+
+    secret = "only-in-tenant-b-#{n}"
+
+    {:ok, _} =
+      Memory.create(%{
+        content: "#{secret} is tenant B's",
+        workspace_id: workspace_b,
+        tenant_id: tenant_b
+      })
+
+    assert {:ok, [[1]]} =
+             Store.raw_query("SELECT COUNT(*) FROM memories WHERE content LIKE ?1", [
+               "#{secret}%"
+             ])
+
+    # The strongest key tenant A holds: every scope and every workspace.
+    {:ok, %{key: token}} =
+      ApiKey.mint(%{tenant_id: tenant_a, name: "a-admin", scopes: ["*"], workspace_scope: ["*"]})
+
+    get = fn path ->
+      conn(:get, path)
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> Router.call(Router.init([]))
+    end
+
+    responses = [
+      get.("/api/search?" <> URI.encode_query(%{"q" => secret, "workspace" => workspace_b})),
+      request(
+        "/api/rag",
+        %{workspace: workspace_b, query: secret, skip_intent: true, skip_wiki: true},
+        token
+      ),
+      get.("/api/batch/export/memories?" <> URI.encode_query(%{"workspace" => workspace_b}))
+    ]
+
+    for response <- responses do
+      assert response.status in [403, 404]
+      refute response.resp_body =~ secret
+    end
+
+    # The same key reads its own tenant's workspace.
+    assert get.("/api/batch/export/memories?" <> URI.encode_query(%{"workspace" => workspace_a})).status ==
+             200
   end
 
   test "omitted tenant resolves to the authenticated tenant instead of default" do
