@@ -38,7 +38,7 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
     credential_keys: [:oauth_refresh_token, :client_id, :client_secret],
     access_token: true
 
-  alias OptimalEngine.Connectors.{AccessToken, HTTP}
+  alias OptimalEngine.Connectors.{AccessToken, HTTP, TokenExchange}
 
   @token_url "https://oauth2.googleapis.com/token"
   @base_url "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -104,27 +104,9 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
       "client_secret" => pick(state, :client_secret)
     }
 
-    case HTTP.post_json(@token_url, body,
-           follow_redirects: false,
-           verify_tls: true,
-           single_attempt: true
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} -> {:ok, token}
-      {:ok, %{status: 401}} -> {:error, :auth_expired}
-      # A revoked refresh token comes back as a 400 naming invalid_grant, which
-      # is an auth failure rather than a malformed request.
-      {:ok, %{status: 400, body: body}} -> revoked_or(body)
-      {:ok, %{status: 429}} -> {:error, :rate_limited}
-      {:ok, %{status: status}} when status >= 500 -> {:error, :transient}
-      {:ok, %{body: body}} -> {:error, {:token_error, body}}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp revoked_or(body) do
-    if body |> inspect() |> String.contains?("invalid_grant"),
-      do: {:error, :auth_expired},
-      else: {:error, {:token_error, body}}
+    @token_url
+    |> HTTP.post_json(body, follow_redirects: false, verify_tls: true, single_attempt: true)
+    |> TokenExchange.token()
   end
 
   # The initial pull walks every page of the message list, then parks the
