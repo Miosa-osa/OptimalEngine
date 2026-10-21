@@ -16,26 +16,26 @@ defmodule OptimalEngine.Store.BindGuardTest do
 
   defp store_pid, do: Process.whereis(OptimalEngine.Store.SQLite)
 
-  # The router answers a server error with 500 and raises it again, so a
-  # failed request is either.
-  defp request_fails?(conn) do
-    Router.call(conn, Router.init([])).status >= 400
+  # How a request ended: its status, or :raised when the router answered 500
+  # and raised the error again, as it does for a server error.
+  defp outcome(conn) do
+    Router.call(conn, Router.init([])).status
   rescue
-    _error -> true
+    _error -> :raised
   catch
-    :exit, _reason -> true
+    :exit, _reason -> :exit
   end
 
   test "a parameter SQLite cannot hold is an error, and the Store keeps running" do
     store = store_pid()
     assert is_pid(store)
 
-    assert {:error, {:invalid_parameter, _}} = Store.raw_query("SELECT ?1", [@past_int64])
-    assert {:error, {:invalid_parameter, _}} = Store.raw_query("SELECT ?1", [-@past_int64 - 1])
-    assert {:error, {:invalid_parameter, _}} = Store.raw_query("SELECT ?1", [%{"a" => 1}])
-    assert {:error, {:invalid_parameter, _}} = Store.raw_query("SELECT ?1, ?2", [1])
+    assert {:error, :invalid_parameter} = Store.raw_query("SELECT ?1", [@past_int64])
+    assert {:error, :invalid_parameter} = Store.raw_query("SELECT ?1", [-@past_int64 - 1])
+    assert {:error, :invalid_parameter} = Store.raw_query("SELECT ?1", [%{"a" => 1}])
+    assert {:error, :invalid_parameter} = Store.raw_query("SELECT ?1, ?2", [1])
 
-    assert {:error, {:invalid_parameter, _}} =
+    assert {:error, :invalid_parameter} =
              Store.raw_execute(
                "UPDATE schema_migrations SET version = version WHERE version = ?1",
                [@past_int64]
@@ -67,10 +67,14 @@ defmodule OptimalEngine.Store.BindGuardTest do
             "/api/authority/evidence?after=#{@past_int64}",
             "/api/authority/evidence/export?after=#{@past_int64}"
           ] do
-        assert conn(:get, path)
-               |> put_req_header("authorization", "Bearer " <> key)
-               |> request_fails?(),
-               path
+        result =
+          conn(:get, path)
+          |> put_req_header("authorization", "Bearer " <> key)
+          |> outcome()
+
+        # The key is valid, so the request reaches the Store: refused as a bad
+        # request, or a server error for this request alone, never an exit.
+        assert result in [400, 500, :raised], "#{path}: #{inspect(result)}"
       end
     after
       Application.put_env(:optimal_engine, :auth, original)
