@@ -15,15 +15,25 @@ defmodule OptimalEngine.AtomScanner do
   | `:sigil_atoms` | `~w(...)a` with an interpolation |
   | `:binary_to_term` | `:erlang.binary_to_term` without `:safe` |
   | `:code_eval` | `Code.eval_*`, `Code.string_to_quoted*`, `Code.format_string!`, `Code.compile_*`, `Code.require_file`, `Code.load_file`, `EEx.eval_*` and `EEx.compile_*`, `:erl_scan`, `:erl_parse`, `:file.consult` and `:file.script`, `:io.fread` and `:io_lib.fread` with `~a` |
-  | `:apply_atom_module`, `:apply_dynamic` | `apply/3`, `Kernel.apply/3`, `:erlang.apply/3`, `Function.capture/3` and the module, function, arguments forms of `spawn`, `spawn_link`, `spawn_monitor` and `spawn_opt` (also `Kernel.` and `:erlang.`) whose module is one of the modules above, or is not a literal |
+  | `:apply_atom_module`, `:apply_dynamic` | `apply/3`, `Kernel.apply/3`, `:erlang.apply/3`, `Function.capture/3` and the module, function, arguments forms of `spawn*`, `Task`, `Task.Supervisor`, `Node`, `:erpc`, `:rpc`, `:proc_lib` and `:timer` (the table `@mfa_calls`) whose module is one of the modules above, or is not a literal |
   | `:dynamic_call` | `x.to_atom(...)`, `x.binary_to_atom(...)` or `x.list_to_atom(...)` on a receiver that is not a literal module |
   | `:import_atom_module` | `import` of one of the modules above that brings an atom-creating function in |
 
+  A piped call is read with the piped value as its first argument, so
+  `opts |> Keyword.put(:keys, :atoms)` is `Keyword.put(opts, :keys, :atoms)`.
+
   `defdelegate to_atom(text), to: String` is read as a call of `String.to_atom/1`,
   and the same holds for any delegate whose target function, `as:` included, is
-  one of the calls above.
+  one of the calls above, in the one-function and the list form. The parameters
+  of a delegate are not literals, so a delegate to `apply`, `spawn` or another
+  module, function, arguments call is flagged as a dynamic module.
 
   Aliases of those modules (`alias String, as: S`) are followed within a file.
+
+  What it does not see: a macro that expands to one of these calls in another
+  file, a function value passed in from another module (`apply(fun, args)`
+  needs no atom), and a module name that is read from data and held in a
+  variable the scanner cannot connect to the call.
   """
 
   # A module is `{:ex, [:String]}` for an Elixir alias and `{:erl, :erlang}` for
@@ -50,20 +60,37 @@ defmodule OptimalEngine.AtomScanner do
   @file_eval [:consult, :script, :path_consult, :path_script]
   @atom_functions [:to_atom, :binary_to_atom, :list_to_atom]
 
-  # `spawn(module, function, args)` runs `module.function(...)` as `apply/3`
-  # does. Each entry is `{name, arity, index of the module argument}`; the forms
-  # with a node first have the module second.
-  @spawn_forms [
-    {:spawn, 3, 0},
-    {:spawn, 4, 1},
-    {:spawn_link, 3, 0},
-    {:spawn_link, 4, 1},
-    {:spawn_monitor, 3, 0},
-    {:spawn_monitor, 4, 1},
-    {:spawn_opt, 4, 0},
-    {:spawn_opt, 5, 1}
+  # Calls that run `module.function(...)` from a module, function, arguments
+  # triple, as `apply/3` does. Each entry is `{module, names, forms}`; a form is
+  # `{arity, index of the module argument}`, and the forms that take a node (or
+  # a supervisor) first have the module after it.
+  @mfa_calls [
+    {{:ex, [:Kernel]}, [:spawn, :spawn_link, :spawn_monitor], [{3, 0}, {4, 1}]},
+    {{:erl, :erlang}, [:spawn, :spawn_link, :spawn_monitor], [{3, 0}, {4, 1}]},
+    {{:erl, :erlang}, [:spawn_opt, :spawn_request], [{4, 0}, {5, 1}]},
+    {{:ex, [:Task]}, [:async, :start, :start_link], [{3, 0}]},
+    {{:ex, [:Task]}, [:async_stream], [{4, 1}, {5, 1}]},
+    {{:ex, [:Task, :Supervisor]}, [:async, :async_nolink, :start_child], [{4, 1}, {5, 1}]},
+    {{:ex, [:Task, :Supervisor]}, [:async_stream, :async_stream_nolink], [{5, 2}, {6, 2}]},
+    {{:ex, [:Node]}, [:spawn, :spawn_link], [{4, 1}, {5, 1}]},
+    {{:erl, :erpc}, [:call, :cast, :send_request, :multicall], [{4, 1}, {5, 1}]},
+    {{:erl, :rpc}, [:call, :cast, :async_call, :block_call], [{4, 1}, {5, 1}]},
+    {{:erl, :rpc}, [:multicall], [{3, 0}, {4, 1}, {5, 1}]},
+    {{:erl, :proc_lib}, [:spawn, :spawn_link], [{3, 0}, {4, 1}]},
+    {{:erl, :proc_lib}, [:spawn_opt], [{4, 0}, {5, 1}]},
+    {{:erl, :proc_lib}, [:start, :start_link, :start_monitor], [{3, 0}, {4, 0}, {5, 0}]},
+    {{:erl, :timer}, [:apply_after, :apply_interval, :apply_repeatedly], [{4, 1}]}
   ]
-  @spawn_names @spawn_forms |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+
+  @mfa_index Map.new(
+               for {ref, names, forms} <- @mfa_calls,
+                   name <- names,
+                   {arity, index} <- forms,
+                   do: {{ref, name, arity}, index}
+             )
+
+  # `Kernel` functions that can be called without a module.
+  @kernel_mfa [:spawn, :spawn_link, :spawn_monitor]
 
   # Functions that put an option into a keyword list or a map.
   @option_puts [:put, :put_new, :replace, :replace!]
@@ -100,10 +127,11 @@ defmodule OptimalEngine.AtomScanner do
     {_ast, {_line, found}} =
       Macro.prewalk(ast, {1, []}, fn node, {line, acc} ->
         line = node_line(node) || line
+        {node, piped} = expand_pipe(node)
         delegated = classify_delegate(node, aliases)
         node = skip_declarations(node)
-        new = Enum.map(delegated ++ classify(node, aliases), &{&1, line})
-        {node, {line, new ++ acc}}
+        findings = delegated ++ Enum.flat_map([node | piped], &classify(&1, aliases))
+        {node, {line, Enum.map(findings, &{&1, line}) ++ acc}}
       end)
 
     found
@@ -140,7 +168,17 @@ defmodule OptimalEngine.AtomScanner do
 
   defp rename_head({:when, meta, [head | guards]}), do: {:when, meta, [rename_head(head) | guards]}
   defp rename_head({name, meta, args}) when is_atom(name), do: {:"$head", meta, args}
+  defp rename_head(heads) when is_list(heads), do: Enum.map(heads, &rename_head/1)
   defp rename_head(other), do: other
+
+  # `left |> call(args)` is classified as `call(left, args)`. The call node is
+  # replaced by a placeholder with the same arguments, so it is not classified
+  # a second time without its first argument, and its arguments are still walked.
+  defp expand_pipe({:|>, meta, [left, {callee, call_meta, args}]}) when is_list(args) do
+    {{:|>, meta, [left, {:"$piped", call_meta, args}]}, [{callee, call_meta, [left | args]}]}
+  end
+
+  defp expand_pipe(node), do: {node, []}
 
   defp collect_aliases(ast) do
     {_ast, aliases} =
@@ -184,8 +222,8 @@ defmodule OptimalEngine.AtomScanner do
   defp classify({:apply, _, [_module, _fun, _args] = args} = node, aliases),
     do: apply_call(args, aliases, node)
 
-  defp classify({name, _, args} = node, aliases) when name in @spawn_names and is_list(args),
-    do: spawn_call(name, args, aliases, node)
+  defp classify({name, _, args} = node, aliases) when name in @kernel_mfa and is_list(args),
+    do: mfa_call({:ex, [:Kernel]}, name, args, aliases, node)
 
   defp classify({:import, _, [module | opts]} = node, aliases) do
     ref = module_ref(module, aliases)
@@ -239,19 +277,13 @@ defmodule OptimalEngine.AtomScanner do
   defp remote({:ex, [:Kernel]}, :apply, args, node, aliases), do: apply_call(args, aliases, node)
   defp remote({:erl, :erlang}, :apply, args, node, aliases), do: apply_call(args, aliases, node)
 
-  defp remote({:ex, [:Kernel]}, fun, args, node, aliases) when fun in @spawn_names,
-    do: spawn_call(fun, args, aliases, node)
-
-  defp remote({:erl, :erlang}, fun, args, node, aliases) when fun in @spawn_names,
-    do: spawn_call(fun, args, aliases, node)
-
   defp remote({:ex, [:Function]}, :capture, args, node, aliases),
     do: apply_call(args, aliases, node)
 
   defp remote(:dynamic, fun, _args, node, _aliases) when fun in @atom_functions,
     do: [{:dynamic_call, call(node)}]
 
-  defp remote(_module, _fun, _args, _node, _aliases), do: []
+  defp remote(ref, fun, args, node, aliases), do: mfa_call(ref, fun, args, aliases, node)
 
   defp apply_call([module, _fun, _args_or_arity], aliases, node) do
     case module_ref(module, aliases) do
@@ -262,12 +294,10 @@ defmodule OptimalEngine.AtomScanner do
 
   defp apply_call(_args, _aliases, _node), do: []
 
-  defp spawn_call(name, args, aliases, node) do
-    case Enum.find(@spawn_forms, fn {form, arity, _index} ->
-           form == name and arity == length(args)
-         end) do
-      {_form, _arity, index} -> apply_call([Enum.at(args, index), nil, nil], aliases, node)
-      nil -> []
+  defp mfa_call(ref, name, args, aliases, node) do
+    case Map.fetch(@mfa_index, {ref, name, length(args)}) do
+      {:ok, index} -> apply_call([Enum.at(args, index), nil, nil], aliases, node)
+      :error -> []
     end
   end
 
@@ -283,22 +313,46 @@ defmodule OptimalEngine.AtomScanner do
   defp option_put(_ref, _fun, _args, _node), do: []
 
   # `defdelegate to_atom(text), to: String` defines a function that calls
-  # `String.to_atom/1`; `as:` names the target function when it differs.
-  defp classify_delegate({:defdelegate, _, [head, opts]} = node, aliases) when is_list(opts) do
-    with {:ok, target} <- Keyword.fetch(opts, :to),
-         fun when is_atom(fun) <- delegate_function(head, Keyword.get(opts, :as)) do
-      target |> module_ref(aliases) |> remote(fun, [], node, aliases)
-    else
-      _ -> []
+  # `String.to_atom/1`; `as:` names the target function when it differs, and
+  # the list form `defdelegate [a(x), b(y)], to: M` defines several. The
+  # parameters are not literals, so each stands for a dynamic argument.
+  defp classify_delegate({:defdelegate, _, [heads, opts]} = node, aliases) when is_list(opts) do
+    case Keyword.fetch(opts, :to) do
+      {:ok, target} ->
+        ref = module_ref(target, aliases)
+        as = Keyword.get(opts, :as)
+
+        heads
+        |> List.wrap()
+        |> Enum.flat_map(&delegate_calls(&1, as, ref, node, aliases))
+
+      :error ->
+        []
     end
   end
 
   defp classify_delegate(_node, _aliases), do: []
 
-  defp delegate_function(_head, as) when is_atom(as) and not is_nil(as), do: as
-  defp delegate_function({:when, _, [head | _guards]}, nil), do: delegate_function(head, nil)
-  defp delegate_function({name, _, args}, nil) when is_atom(name) and is_list(args), do: name
-  defp delegate_function(_head, _as), do: nil
+  defp delegate_calls(head, as, ref, node, aliases) do
+    case delegate_signature(head, as) do
+      {fun, arity} -> remote(ref, fun, List.duplicate({:param, [], nil}, arity), node, aliases)
+      nil -> []
+    end
+  end
+
+  defp delegate_signature(head, as) when is_atom(as) and not is_nil(as) do
+    case delegate_signature(head, nil) do
+      {_name, arity} -> {as, arity}
+      nil -> nil
+    end
+  end
+
+  defp delegate_signature({:when, _, [head | _guards]}, nil), do: delegate_signature(head, nil)
+
+  defp delegate_signature({name, _, args}, nil) when is_atom(name) and is_list(args),
+    do: {name, length(args)}
+
+  defp delegate_signature(_head, _as), do: nil
 
   defp safe_term_options?([_binary, options]) when is_list(options), do: :safe in options
   defp safe_term_options?(_args), do: false
