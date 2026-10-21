@@ -10,6 +10,7 @@ defmodule OptimalEngine.Release do
       bin/optimal eval 'OptimalEngine.Release.migrate()'
       bin/optimal eval 'OptimalEngine.Release.preflight()'
       bin/optimal eval 'OptimalEngine.Release.backup("/backups/$(date +%F).db")'
+      bin/optimal eval 'OptimalEngine.Release.graph_backfill()'
 
   Every function here must:
     * start only the apps it actually needs (not the full supervision tree)
@@ -19,7 +20,7 @@ defmodule OptimalEngine.Release do
 
   require Logger
 
-  alias OptimalEngine.{Backup, Health, Store}
+  alias OptimalEngine.{Backup, Graph, Health, Store}
 
   @app :optimal_engine
 
@@ -82,6 +83,34 @@ defmodule OptimalEngine.Release do
 
       {:error, reason} ->
         Logger.error("[Release] backup failed: #{inspect(reason)}")
+        System.halt(1)
+    end
+  end
+
+  @doc """
+  Write the graph edges of every indexed context and claim
+  (`OptimalEngine.Graph.backfill/1`), the one run the upgrade that created
+  `graph_edges` needs; afterwards `GET /api/maintenance/graph` reads
+  `"backfill_needed": false`. Safe to run again: it adds only missing edges.
+  Takes `Graph.backfill/1`'s options (`workspace_id:` limits it to one
+  workspace).
+  """
+  @spec graph_backfill(keyword()) :: :ok | no_return()
+  def graph_backfill(opts \\ []) do
+    load_app()
+    {:ok, _} = Application.ensure_all_started(@app)
+
+    case Graph.backfill(opts) do
+      {:ok, result} ->
+        Logger.info(
+          "[Release] graph backfill OK: #{result.contexts} contexts, #{result.claims} claims, " <>
+            "edges #{result.edges_before} -> #{result.edges_after}"
+        )
+
+        :ok
+
+      {:error, reason} ->
+        Logger.error("[Release] graph backfill failed: #{inspect(reason)}")
         System.halt(1)
     end
   end

@@ -41,7 +41,7 @@ defmodule OptimalEngine.Sync.Capture do
   @replicated ~w(analysis_reports canonical_entities chunk_embeddings chunks citations claims
                  classifications cluster_members clusters contexts data_quality_snapshots decisions
                  derivation_ledger edges entities entity_aliases entity_identifiers entity_lineage
-                 entity_mentions episodes facts generalized_workflows intents memories
+                 entity_mentions episodes facts generalized_workflows graph_edges intents memories
                  memory_association_paths memory_associations memory_consolidation_proposals
                  memory_detail_objects memory_embeddings memory_objects memory_path_feedback
                  memory_path_priors memory_reconstruction_outcomes memory_reconstruction_runs memory_relations
@@ -56,7 +56,8 @@ defmodule OptimalEngine.Sync.Capture do
   # Engine's workspaces; the rest is sync bookkeeping and run logs.
   @engine_state ~w(sync_capture sync_mutations sync_cursors sync_workspaces sync_peers sync_conflicts
                    metric_samples uri_redirects federation_peers connectors connector_runs
-                   processor_runs jobs dead_letter_jobs workspaces workspace_handles)
+                   processor_runs jobs dead_letter_jobs workspaces workspace_handles
+                   graph_backfills)
 
   # Per-Engine as well, but a workspace bundle carries them (a move takes the
   # workspace's whole state). Each is here for a reason:

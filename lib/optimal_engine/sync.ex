@@ -49,6 +49,7 @@ defmodule OptimalEngine.Sync do
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Signal
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Migrations
   alias OptimalEngine.Sync.{Capture, Gate, GateCache, Lineage}
 
   @classes ~w(public internal confidential restricted)
@@ -724,7 +725,7 @@ defmodule OptimalEngine.Sync do
   # The columns of each replicated table a batch names, read once per batch.
   defp batch_columns(mutations) do
     for %{"entity_type" => table} <- mutations, Capture.replicated?(table), into: %{} do
-      {table, Capture.columns(table)}
+      {table, Capture.columns(target_table(table))}
     end
   end
 
@@ -804,7 +805,7 @@ defmodule OptimalEngine.Sync do
   end
 
   defp plan_row(mutation, tenant_id, workspace_id, local, gate, base, columns) do
-    table = mutation["entity_type"]
+    table = target_table(mutation["entity_type"])
     append_only = Capture.rowid_key?(columns)
     payload = mutation["payload"]
     names = Map.keys(payload["row"]) ++ Map.keys(payload["blobs"] || %{})
@@ -1120,7 +1121,7 @@ defmodule OptimalEngine.Sync do
          acc,
          foreign_keys
        ) do
-    table = mutation["entity_type"]
+    table = target_table(mutation["entity_type"])
 
     if conflict && local_wins?(conflict, mutation) do
       # The change here is newer: the incoming one is not applied, and it is
@@ -1191,6 +1192,10 @@ defmodule OptimalEngine.Sync do
     do:
       {local_change.occurred_at, local_change.device} >
         {mutation["occurred_at"], mutation["device_id"]}
+
+  # A change to a superseded table (one sealed before this Engine's upgrade,
+  # Store.Migrations.superseded_tables/0) is applied to its successor.
+  defp target_table(table), do: Map.get(Migrations.superseded_tables(), table, table)
 
   # The row is written into the target tenant and workspace whatever the peer
   # claims: the scope columns are stamped over the payload's, and a row whose

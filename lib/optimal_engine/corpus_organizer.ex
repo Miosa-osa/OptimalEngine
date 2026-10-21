@@ -88,11 +88,17 @@ defmodule OptimalEngine.CorpusOrganizer do
   end
 
   # The tenant an intake workspace belongs to: the one it is registered to,
-  # else the default tenant, which is the tenant a context in an unregistered
-  # workspace is stored under. Reads the Store, so it is never called inside
-  # `Store.transaction/2`.
+  # else the tenant a context in an unregistered workspace is stored under
+  # (the tenant its "<tenant>:" prefix names, else the default tenant). Reads
+  # the Store, so it is never called inside `Store.transaction/2`.
   defp intake_tenant(workspace_id) do
-    case Store.raw_query("SELECT tenant_id FROM workspaces WHERE id = ?1", [workspace_id]) do
+    sql = """
+    SELECT COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?1),
+                    (SELECT t.id FROM tenants t WHERE t.id = substr(?1, 1, instr(?1, ':') - 1)),
+                    'default')
+    """
+
+    case Store.raw_query(sql, [workspace_id]) do
       {:ok, [[tenant_id]]} -> tenant_id
       _ -> Tenant.default_id()
     end
@@ -867,7 +873,7 @@ defmodule OptimalEngine.CorpusOrganizer do
              update(txn, "vectors", "context_id", context_id, target_workspace_id, tenant_id),
            {:ok, _} <-
              update(txn, "entities", "context_id", context_id, target_workspace_id, tenant_id),
-           {:ok, _} <- update_edges(txn, context_id, target_workspace_id, tenant_id),
+           {:ok, _} <- update_edges(txn, context_id, source, target_workspace_id, tenant_id),
            {:ok, _} <-
              update(txn, "claims", "signal_id", context_id, target_workspace_id, tenant_id),
            {:ok, _} <- update_source_packages(txn, context_id, target_workspace_id, tenant_id),
@@ -973,21 +979,23 @@ defmodule OptimalEngine.CorpusOrganizer do
     )
   end
 
-  # An edge joins two records. One that reaches a record of another tenant is
-  # not moved.
-  defp update_edges(txn, context_id, workspace_id, tenant_id) do
+  # An edge joins two records. The context's edges in its source workspace move
+  # with it; one that reaches a record of another tenant is not moved. Edges are
+  # unique per tenant and workspace, so a moved edge replaces the copy the
+  # target workspace already holds.
+  defp update_edges(txn, context_id, source_workspace_id, workspace_id, tenant_id) do
     Store.txn_execute(
       txn,
       """
-      UPDATE edges SET workspace_id = ?1, tenant_id = ?3
-      WHERE (source_id = ?2 OR target_id = ?2) AND tenant_id IN (?3, ?4)
+      UPDATE OR REPLACE graph_edges SET workspace_id = ?1, tenant_id = ?3
+      WHERE (source_id = ?2 OR target_id = ?2) AND workspace_id = ?5 AND tenant_id IN (?3, ?4)
         AND NOT EXISTS (
           SELECT 1 FROM contexts other
-          WHERE other.id IN (edges.source_id, edges.target_id)
+          WHERE other.id IN (graph_edges.source_id, graph_edges.target_id)
             AND other.id <> ?2 AND other.tenant_id <> ?3
         )
       """,
-      [workspace_id, context_id, tenant_id, Tenant.default_id()]
+      [workspace_id, context_id, tenant_id, Tenant.default_id(), source_workspace_id]
     )
   end
 

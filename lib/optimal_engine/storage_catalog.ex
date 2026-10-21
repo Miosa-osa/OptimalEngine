@@ -33,7 +33,7 @@ defmodule OptimalEngine.StorageCatalog do
       id: "graph",
       purpose: "Relationship traversal and multi-hop reasoning",
       technology: "RocksDB projection with SQLite lineage",
-      tables: ~w(edges relationship_edges node_relationships)
+      tables: ~w(graph_edges relationship_edges node_relationships)
     },
     %{
       id: "assets",

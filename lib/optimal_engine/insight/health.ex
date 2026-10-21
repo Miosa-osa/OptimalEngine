@@ -20,6 +20,7 @@ defmodule OptimalEngine.Insight.Health do
   - `:critical` — serious integrity problem requiring immediate attention
   """
 
+  alias OptimalEngine.Graph
   alias OptimalEngine.Store
   require Logger
 
@@ -84,13 +85,22 @@ defmodule OptimalEngine.Insight.Health do
 
   @spec check_orphaned_contexts(String.t()) :: map()
   def check_orphaned_contexts(ws \\ "default") do
+    {tenant_id, ws} = Graph.scope(workspace_id: ws)
+
     sql = """
     SELECT c.id, c.title FROM contexts c
-    LEFT JOIN edges e ON e.source_id = c.id OR e.target_id = c.id
-    WHERE e.id IS NULL AND c.workspace_id = ?1
+    WHERE c.workspace_id = ?1
+      AND NOT EXISTS (
+        SELECT 1 FROM graph_edges e
+        WHERE e.tenant_id = ?2 AND e.workspace_id = ?1 AND e.source_id = c.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM graph_edges e
+        WHERE e.tenant_id = ?2 AND e.workspace_id = ?1 AND e.target_id = c.id
+      )
     """
 
-    case Store.raw_query(sql, [ws]) do
+    case Store.raw_query(sql, [ws, tenant_id]) do
       {:ok, rows} ->
         items = Enum.map(rows, fn [id, title] -> %{id: id, title: title} end)
         count = length(items)
@@ -169,12 +179,14 @@ defmodule OptimalEngine.Insight.Health do
     """
 
     edge_sql = """
-    SELECT source_id, target_id FROM edges
-    WHERE relation = 'cross_ref' AND workspace_id = ?1
+    SELECT source_id, target_id FROM graph_edges
+    WHERE tenant_id = ?1 AND workspace_id = ?2 AND relation = 'cross_ref'
     """
 
+    {tenant_id, _ws} = Graph.scope(workspace_id: ws)
+
     with {:ok, ctx_rows} <- Store.raw_query(ctx_sql, [ws]),
-         {:ok, edge_rows} <- Store.raw_query(edge_sql, [ws]) do
+         {:ok, edge_rows} <- Store.raw_query(edge_sql, [tenant_id, ws]) do
       existing_pairs =
         MapSet.new(edge_rows, fn [src, tgt] -> {src, tgt} end)
 

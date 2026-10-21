@@ -149,7 +149,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
       end
 
     # Graph 1-hop list: reorder the union by graph adjacency to the query.
-    graph_results = safe_graph_boost(fts_results ++ vector_results, query)
+    graph_results = safe_graph_boost(fts_results ++ vector_results, query, opts)
 
     # Temporal list: freshness-first ordering of everything seen.
     temporal_results = temporal_ranked(fts_results ++ vector_results ++ graph_results)
@@ -217,8 +217,10 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
     Map.get(result, :modified_at) || Map.get(result, :created_at) || ~U[1970-01-01 00:00:00Z]
   end
 
-  defp safe_graph_boost(results, query) do
-    Knowledge.graph_boost(results, query)
+  # The workspace's graph, read in the workspace's own tenant (see
+  # SearchEngine's try_graph_boost).
+  defp safe_graph_boost(results, query, opts) do
+    Knowledge.graph_boost(results, query, Keyword.take(opts, [:workspace_id]))
   rescue
     _ -> results
   catch

@@ -102,12 +102,12 @@ defmodule OptimalEngine.Graph.PopulationTest do
     run.()
 
     {:ok, [[after_first]]} =
-      Store.raw_query("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1", [c.ws])
+      Store.raw_query("SELECT COUNT(*) FROM graph_edges WHERE workspace_id = ?1", [c.ws])
 
     run.()
 
     {:ok, [[after_second]]} =
-      Store.raw_query("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1", [c.ws])
+      Store.raw_query("SELECT COUNT(*) FROM graph_edges WHERE workspace_id = ?1", [c.ws])
 
     assert after_first == after_second
     assert after_first > 0

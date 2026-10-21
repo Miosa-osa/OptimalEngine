@@ -10,16 +10,15 @@ defmodule OptimalEngine.Graph.Analyzer do
   All functions return `{:ok, result}` and never raise. LLM enhancement via
   Ollama is applied when available; the module degrades gracefully without it.
 
-  All analyses are workspace-scoped: pass `:workspace_id` (default "default").
-  No cross-workspace leakage by default — see `OptimalEngine.Workspace`.
-
-  The edge table has no tenant of its own, so a caller that serves a tenant
-  passes a workspace registered to it (the HTTP routes answer `404` for any
-  other): an id nobody registered can hold the edges of two tenants.
+  All analyses are scoped to one tenant and workspace: pass `:workspace_id`
+  (default "default") and `:tenant_id` (default: the workspace's tenant), as
+  `OptimalEngine.Graph.scope/1` describes. No cross-workspace or cross-tenant
+  leakage by default.
   """
 
   require Logger
   alias OptimalEngine.Embed.Ollama, as: Ollama
+  alias OptimalEngine.Graph
   alias OptimalEngine.Store
 
   # ---------------------------------------------------------------------------
@@ -38,27 +37,30 @@ defmodule OptimalEngine.Graph.Analyzer do
   @spec triangles(keyword()) :: {:ok, [map()]}
   def triangles(opts \\ []) do
     limit = Keyword.get(opts, :limit, 20)
-    ws = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, ws} = Graph.scope(opts)
     skip_llm = Keyword.get(opts, :skip_llm, false)
 
     sql = """
     SELECT DISTINCT e1.source_id, e1.target_id, e2.target_id
-    FROM edges e1
-    JOIN edges e2
+    FROM graph_edges e1
+    JOIN graph_edges e2
       ON e1.source_id = e2.source_id
      AND e1.target_id != e2.target_id
-     AND e2.workspace_id = ?2
-    WHERE e1.workspace_id = ?2
+     AND e2.tenant_id = ?2
+     AND e2.workspace_id = ?3
+    WHERE e1.tenant_id = ?2
+      AND e1.workspace_id = ?3
       AND NOT EXISTS (
-        SELECT 1 FROM edges e3
-        WHERE e3.source_id = e1.target_id
+        SELECT 1 FROM graph_edges e3
+        WHERE e3.tenant_id = ?2
+          AND e3.workspace_id = ?3
+          AND e3.source_id = e1.target_id
           AND e3.target_id = e2.target_id
-          AND e3.workspace_id = ?2
       )
     LIMIT ?1
     """
 
-    case Store.raw_query(sql, [limit, ws]) do
+    case Store.raw_query(sql, [limit, tenant_id, ws]) do
       {:ok, rows} ->
         results = Enum.map(rows, fn [a, b, c] -> build_triangle(a, b, c, skip_llm) end)
         {:ok, results}
@@ -84,10 +86,12 @@ defmodule OptimalEngine.Graph.Analyzer do
   """
   @spec clusters(keyword()) :: {:ok, [MapSet.t()]}
   def clusters(opts \\ []) do
-    ws = Keyword.get(opts, :workspace_id, "default")
-    sql = "SELECT DISTINCT source_id, target_id FROM edges WHERE workspace_id = ?1"
+    {tenant_id, ws} = Graph.scope(opts)
 
-    case Store.raw_query(sql, [ws]) do
+    sql =
+      "SELECT DISTINCT source_id, target_id FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2"
+
+    case Store.raw_query(sql, [tenant_id, ws]) do
       {:ok, rows} ->
         adjacency = build_adjacency(rows)
         components = find_components(adjacency)
@@ -115,17 +119,17 @@ defmodule OptimalEngine.Graph.Analyzer do
   """
   @spec hubs(keyword()) :: {:ok, [map()]}
   def hubs(opts \\ []) do
-    ws = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, ws} = Graph.scope(opts)
 
     sql = """
     SELECT id, COUNT(*) as degree FROM (
-      SELECT source_id as id FROM edges WHERE workspace_id = ?1
+      SELECT source_id as id FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2
       UNION ALL
-      SELECT target_id as id FROM edges WHERE workspace_id = ?1
+      SELECT target_id as id FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2
     ) GROUP BY id
     """
 
-    case Store.raw_query(sql, [ws]) do
+    case Store.raw_query(sql, [tenant_id, ws]) do
       {:ok, []} ->
         {:ok, []}
 

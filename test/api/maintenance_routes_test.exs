@@ -16,7 +16,7 @@ defmodule OptimalEngine.API.MaintenanceRoutesTest do
 
   alias OptimalEngine.API.Router
   alias OptimalEngine.Auth.ApiKey
-  alias OptimalEngine.{Graph, Organization, Workspace}
+  alias OptimalEngine.{Graph, Organization, Store, Workspace}
   alias OptimalEngine.Tenancy.Tenant
 
   setup do
@@ -203,6 +203,8 @@ defmodule OptimalEngine.API.MaintenanceRoutesTest do
       assert [%{"source_id" => "Entity" <> _, "relation" => "mentioned_in"}] =
                body["sample_edges"]
 
+      assert body["graph_edges"] == %{"backfill_needed" => false, "legacy_edges" => 0, "edges" => 1}
+
       # Another tenant's workspace, or the implicit default one, is not found.
       assert call(:get, "/api/maintenance/graph?workspace=default", ctx.admin).status == 404
       assert call(:get, "/api/maintenance/graph", ctx.admin).status == 404
@@ -211,6 +213,29 @@ defmodule OptimalEngine.API.MaintenanceRoutesTest do
       scoped = call(:get, "/api/maintenance/graph", ctx.scoped_admin)
       assert scoped.status == 400
       assert scoped.resp_body =~ "workspace_required"
+    end
+
+    test "says whether the workspace still needs the graph backfill of its upgrade", ctx do
+      graph_edges = fn ->
+        resp = call(:get, "/api/maintenance/graph?workspace=#{ctx.ws}", ctx.admin)
+        assert resp.status == 200
+        Jason.decode!(resp.resp_body)["graph_edges"]
+      end
+
+      # A workspace that never had legacy edges needs none.
+      assert graph_edges.() == %{"backfill_needed" => false, "legacy_edges" => 0, "edges" => 0}
+
+      # An upgrade left legacy rows of the workspace: needed until a backfill runs.
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO edges (source_id, target_id, relation, workspace_id) VALUES (?1, ?2, 'knows', ?3)",
+          ["Legacy#{ctx.n}", "Other#{ctx.n}", ctx.ws]
+        )
+
+      assert %{"backfill_needed" => true, "legacy_edges" => 1} = graph_edges.()
+
+      assert {:ok, %{contexts: 0}} = Graph.backfill(workspace_id: ctx.ws)
+      assert %{"backfill_needed" => false, "legacy_edges" => 1} = graph_edges.()
     end
   end
 end

@@ -92,8 +92,9 @@ defmodule OptimalEngine.StewardReviewTenantTest do
   end
 
   # A chunk, a source package, a claim, an entity and an edge the record owns.
-  # The writers of entities and edges do not label their tenant, so those two
-  # carry the unscoped default, as they do in a store.
+  # The writer of entities does not label its tenant, so an entity carries the
+  # unscoped default, as it does in a store; a graph edge carries the tenant of
+  # its workspace.
   defp derived(tenant, workspace, id) do
     {:ok, _} =
       Store.raw_query(
@@ -135,8 +136,8 @@ defmodule OptimalEngine.StewardReviewTenantTest do
 
     {:ok, _} =
       Store.raw_query(
-        "INSERT INTO edges (source_id, target_id, relation, weight, workspace_id) VALUES (?1, ?2, 'related', 1.0, ?3)",
-        [id, id <> "-peer", workspace]
+        "INSERT INTO graph_edges (source_id, target_id, relation, weight, workspace_id, tenant_id) VALUES (?1, ?2, 'related', 1.0, ?3, ?4)",
+        [id, id <> "-peer", workspace, tenant]
       )
   end
 
@@ -148,7 +149,7 @@ defmodule OptimalEngine.StewardReviewTenantTest do
           {"vectors", "context_id", id},
           {"chunk_embeddings", "chunk_id", id <> "-chunk"},
           {"entities", "context_id", id},
-          {"edges", "source_id", id}
+          {"graph_edges", "source_id", id}
         ] do
       {:ok, rows} =
         Store.raw_query(
@@ -409,8 +410,8 @@ defmodule OptimalEngine.StewardReviewTenantTest do
 
       {:ok, _} =
         Store.raw_query(
-          "INSERT INTO edges (source_id, target_id, relation, weight, workspace_id) VALUES (?1, ?2, 'related', 1.0, ?3)",
-          [id, foreign, ctx.a_intake]
+          "INSERT INTO graph_edges (source_id, target_id, relation, weight, workspace_id, tenant_id) VALUES (?1, ?2, 'related', 1.0, ?3, ?4)",
+          [id, foreign, ctx.a_intake, ctx.a]
         )
 
       assert {200, _} =
@@ -421,7 +422,7 @@ defmodule OptimalEngine.StewardReviewTenantTest do
                )
 
       {:ok, rows} =
-        Store.raw_query("SELECT target_id, workspace_id FROM edges WHERE source_id = ?1", [id])
+        Store.raw_query("SELECT target_id, workspace_id FROM graph_edges WHERE source_id = ?1", [id])
 
       assert Enum.sort(rows) == Enum.sort([[id <> "-peer", ctx.a_ws], [foreign, ctx.a_intake]])
     end

@@ -173,7 +173,7 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
       assert {:ok, edges} = Graph.edges_for(ana, workspace_id: ws)
       assert [%{target_id: ^ben}] = Enum.map(edges, &Map.take(&1, [:target_id]))
 
-      assert [[3]] = on_disk("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1", [ws])
+      assert [[3]] = on_disk("SELECT COUNT(*) FROM graph_edges WHERE workspace_id = ?1", [ws])
 
       {:ok, store} = Knowledge.open("reality-ets-#{ws}", backend: Backend.ETS)
       assert {:ok, 3} = Graph.hydrate_triple_store(store, workspace_id: ws)
