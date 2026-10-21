@@ -12,7 +12,8 @@ defmodule OptimalEngine.API.SyncAPI do
 
   import Plug.Conn
 
-  alias OptimalEngine.API.Actor
+  alias OptimalEngine.API.{Actor, Reader}
+  alias OptimalEngine.ReadScope
   alias OptimalEngine.Sync
 
   def changes(conn) do
@@ -106,10 +107,26 @@ defmodule OptimalEngine.API.SyncAPI do
         error(conn, 400, "workspace is required")
 
       workspace_id ->
-        json(conn, 200, %{
-          conflicts:
-            Sync.conflicts(tenant(conn), workspace_id, conn.query_params["state"] || "open")
-        })
+        # A conflict holds both versions of a row. A keyed reader sees the
+        # versions its label and partition grants cover (see ReadScope).
+        try do
+          {conflicts, note} =
+            tenant(conn)
+            |> Sync.conflicts(workspace_id, conn.query_params["state"] || "open")
+            |> then(&ReadScope.redact_conflicts(Reader.scope(conn), workspace_id, &1))
+
+          json(conn, 200, %{
+            conflicts: conflicts,
+            withheld: note.withheld,
+            complete: note.withheld == 0 and note.redacted == 0
+          })
+        rescue
+          # The gate could not read the Store: refused whole, never part of it.
+          Sync.Gate.StoreError ->
+            conn
+            |> put_resp_header("retry-after", "1")
+            |> error(503, "store_unavailable")
+        end
     end
   end
 

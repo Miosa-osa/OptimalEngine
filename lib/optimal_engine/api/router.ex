@@ -27,6 +27,7 @@ defmodule OptimalEngine.API.Router do
 
   alias OptimalEngine.API.Actor
   alias OptimalEngine.API.Pagination
+  alias OptimalEngine.API.Reader
   alias OptimalEngine.Graph.Analyzer, as: GraphAnalyzer
   alias OptimalEngine.Health
   alias OptimalEngine.Insight.Health, as: HealthDiagnostics
@@ -892,19 +893,29 @@ defmodule OptimalEngine.API.Router do
     limit = parse_int(conn.query_params["limit"], 100)
 
     # The ledger holds the text of every replicated row, so a reader sees what
-    # a replication peer cleared for `confidential` would (see Sync.Gate);
-    # `next_after` is where to continue when changes were skipped.
-    case OptimalEngine.Storage.PolicyStore.releasable_mutations_after(
-           workspace_id,
-           after_sequence,
-           limit
-         ) do
-      {:ok, mutations, next_after} ->
-        json(conn, %{mutations: mutations, count: length(mutations), next_after: next_after})
+    # a replication peer cleared for `confidential` would (see Sync.Gate), and
+    # a keyed reader only what its grants and the access lists allow
+    # (ReadScope); `next_after` is where to continue when changes were skipped.
+    guarded_read(conn, fn ->
+      case OptimalEngine.Storage.PolicyStore.read_mutations_after(
+             workspace_id,
+             after_sequence,
+             limit,
+             reader: Reader.scope(conn)
+           ) do
+        {:ok, mutations, next_after, withheld} ->
+          json(
+            conn,
+            withheld_note(
+              %{mutations: mutations, count: length(mutations), next_after: next_after},
+              withheld
+            )
+          )
 
-      {:error, reason} ->
-        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-    end
+        {:error, reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
+    end)
   end
 
   post "/api/storage/workspaces/:workspace_id/mutations" do
@@ -2962,9 +2973,18 @@ defmodule OptimalEngine.API.Router do
   get "/api/batch/export/signals" do
     workspace_id = query_param(conn, "workspace", "default")
 
-    case OptimalEngine.Batch.export_signals(workspace_id: workspace_id) do
-      {:ok, signals} -> json(conn, %{workspace_id: workspace_id, signals: signals})
-    end
+    guarded_read(conn, fn ->
+      case OptimalEngine.Batch.read_signals(
+             workspace_id: workspace_id,
+             reader: Reader.scope(conn)
+           ) do
+        {:ok, signals, withheld} ->
+          json(conn, withheld_note(%{workspace_id: workspace_id, signals: signals}, withheld))
+
+        {:error, _reason} ->
+          export_failed(conn)
+      end
+    end)
   end
 
   # GET /api/batch/export/memories?workspace=default
@@ -2972,9 +2992,18 @@ defmodule OptimalEngine.API.Router do
   get "/api/batch/export/memories" do
     workspace_id = query_param(conn, "workspace", "default")
 
-    case OptimalEngine.Batch.export_memories(workspace_id: workspace_id) do
-      {:ok, memories} -> json(conn, %{workspace_id: workspace_id, memories: memories})
-    end
+    guarded_read(conn, fn ->
+      case OptimalEngine.Batch.read_memories(
+             workspace_id: workspace_id,
+             reader: Reader.scope(conn)
+           ) do
+        {:ok, memories, withheld} ->
+          json(conn, withheld_note(%{workspace_id: workspace_id, memories: memories}, withheld))
+
+        {:error, _reason} ->
+          export_failed(conn)
+      end
+    end)
   end
 
   # GET /api/batch/export/workspace?workspace=default
@@ -2983,9 +3012,15 @@ defmodule OptimalEngine.API.Router do
     workspace_id = query_param(conn, "workspace", "default")
     tenant_id = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
 
-    case OptimalEngine.Batch.export_workspace(workspace_id, tenant_id: tenant_id) do
-      {:ok, snapshot} -> json(conn, snapshot)
-    end
+    guarded_read(conn, fn ->
+      case OptimalEngine.Batch.read_workspace(workspace_id,
+             tenant_id: tenant_id,
+             reader: Reader.scope(conn)
+           ) do
+        {:ok, snapshot, withheld} -> json(conn, withheld_note(snapshot, withheld))
+        {:error, _reason} -> export_failed(conn)
+      end
+    end)
   end
 
   # POST /api/backup — run an online SQLite backup and return the file info.
@@ -5477,6 +5512,31 @@ defmodule OptimalEngine.API.Router do
   end
 
   defp format_health(_), do: []
+
+  # What a keyed reader was not shown is said, so an answer is never taken for
+  # the whole: `withheld` counts the items left out, `complete` is false when
+  # there were any.
+  defp withheld_note(body, withheld) do
+    Map.merge(body, %{withheld: withheld, complete: withheld == 0})
+  end
+
+  # A read that filters by what the caller may see: if the gate cannot read
+  # the Store the request is refused whole, never answered with part of it.
+  defp guarded_read(conn, fun) do
+    fun.()
+  rescue
+    OptimalEngine.Sync.Gate.StoreError ->
+      conn
+      |> put_resp_header("retry-after", "1")
+      |> put_status(503)
+      |> json(%{error: "store_unavailable", detail: @busy_detail})
+  end
+
+  defp export_failed(conn) do
+    conn
+    |> put_status(500)
+    |> json(%{error: "export_failed"})
+  end
 
   # An exception in a plug or route still gets a JSON answer with the status
   # the exception carries: a malformed body is the caller's 400, not an empty

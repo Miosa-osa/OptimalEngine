@@ -32,6 +32,7 @@ defmodule OptimalEngine.Batch do
 
   alias OptimalEngine.Memory
   alias OptimalEngine.Pipeline.Intake
+  alias OptimalEngine.ReadScope
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Wiki
@@ -117,27 +118,47 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:workspace_id` — source workspace (default: `"default"`)
+    - `:reader`: the `OptimalEngine.ReadScope` of a keyed caller: only the
+      signals it may see are exported, in its tenant (nil exports all)
+
+  A failing read of the Store is an error, never an empty export.
   """
-  @spec export_signals(keyword()) :: {:ok, list(map())}
+  @spec export_signals(keyword()) :: {:ok, list(map())} | {:error, term()}
   def export_signals(opts \\ []) do
+    with {:ok, signals, _withheld} <- read_signals(opts), do: {:ok, signals}
+  end
+
+  @doc """
+  `export_signals/1` that also says how many signals the reader was not
+  allowed to see: `{:ok, signals, withheld}`.
+  """
+  @spec read_signals(keyword()) :: {:ok, list(map()), non_neg_integer()} | {:error, term()}
+  def read_signals(opts \\ []) do
     workspace_id = Keyword.get(opts, :workspace_id, "default")
+    reader = Keyword.get(opts, :reader)
 
     sql = """
     SELECT id, uri, title, genre, mode, signal_type, format, structure,
            node, sn_ratio, content, l0_abstract, l1_overview,
            modified_at, created_at, workspace_id
     FROM contexts
-    WHERE workspace_id = ?1 AND type = 'signal'
+    WHERE workspace_id = ?1 AND type = 'signal' #{tenant_clause(reader)}
     ORDER BY created_at ASC
     """
 
-    signals =
-      case Store.raw_query(sql, [workspace_id]) do
-        {:ok, rows} -> Enum.map(rows, &signal_row_to_map/1)
-        _ -> []
-      end
+    with {:ok, rows} <- Store.raw_query(sql, [workspace_id | tenant_param(reader)]) do
+      {signals, withheld} =
+        ReadScope.filter(
+          reader,
+          workspace_id,
+          "contexts",
+          Enum.map(rows, &signal_row_to_map/1),
+          & &1.id,
+          &(&1.uri || &1.id)
+        )
 
-    {:ok, signals}
+      {:ok, signals, withheld}
+    end
   end
 
   @doc """
@@ -146,10 +167,24 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:workspace_id` — source workspace (default: `"default"`)
+    - `:reader`: the `OptimalEngine.ReadScope` of a keyed caller: only the
+      memories it may see are exported, in its tenant (nil exports all)
+
+  A failing read of the Store is an error, never an empty export.
   """
-  @spec export_memories(keyword()) :: {:ok, list(map())}
+  @spec export_memories(keyword()) :: {:ok, list(map())} | {:error, term()}
   def export_memories(opts \\ []) do
+    with {:ok, memories, _withheld} <- read_memories(opts), do: {:ok, memories}
+  end
+
+  @doc """
+  `export_memories/1` that also says how many memories the reader was not
+  allowed to see: `{:ok, memories, withheld}`.
+  """
+  @spec read_memories(keyword()) :: {:ok, list(map()), non_neg_integer()} | {:error, term()}
+  def read_memories(opts \\ []) do
     workspace_id = Keyword.get(opts, :workspace_id, "default")
+    reader = Keyword.get(opts, :reader)
 
     sql = """
     SELECT id, tenant_id, workspace_id, content, content_hash,
@@ -158,17 +193,23 @@ defmodule OptimalEngine.Batch do
            citation_uri, source_chunk_id, audience, metadata,
            created_at, updated_at
     FROM memories
-    WHERE workspace_id = ?1 AND is_latest = 1 AND is_forgotten = 0
+    WHERE workspace_id = ?1 AND is_latest = 1 AND is_forgotten = 0 #{tenant_clause(reader)}
     ORDER BY created_at ASC
     """
 
-    memories =
-      case Store.raw_query(sql, [workspace_id]) do
-        {:ok, rows} -> Enum.map(rows, &memory_row_to_map/1)
-        _ -> []
-      end
+    with {:ok, rows} <- Store.raw_query(sql, [workspace_id | tenant_param(reader)]) do
+      {memories, withheld} =
+        ReadScope.filter(
+          reader,
+          workspace_id,
+          "memories",
+          Enum.map(rows, &memory_row_to_map/1),
+          & &1.id,
+          &"optimal://memory/#{&1.workspace_id}/#{&1.id}"
+        )
 
-    {:ok, memories}
+      {:ok, memories, withheld}
+    end
   end
 
   @doc """
@@ -177,27 +218,52 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:tenant_id` — tenant id (default: the platform default tenant)
+    - `:reader`: the `OptimalEngine.ReadScope` of a keyed caller: only the
+      signals, memories and wiki pages it may see are exported, and the
+      tenant is the reader's (nil exports all)
   """
-  @spec export_workspace(String.t(), keyword()) :: {:ok, map()}
+  @spec export_workspace(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def export_workspace(workspace_id, opts \\ []) when is_binary(workspace_id) do
-    tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
+    with {:ok, snapshot, _withheld} <- read_workspace(workspace_id, opts), do: {:ok, snapshot}
+  end
 
-    {:ok, signals} = export_signals(workspace_id: workspace_id)
-    {:ok, memories} = export_memories(workspace_id: workspace_id)
-    wiki_pages = export_wiki_pages(workspace_id, tenant_id)
-    config = export_workspace_config(workspace_id)
+  @doc """
+  `export_workspace/2` that also says how many signals, memories and wiki
+  pages the reader was not allowed to see: `{:ok, snapshot, withheld}`.
+  """
+  @spec read_workspace(String.t(), keyword()) ::
+          {:ok, map(), non_neg_integer()} | {:error, term()}
+  def read_workspace(workspace_id, opts \\ []) when is_binary(workspace_id) do
+    reader = Keyword.get(opts, :reader)
+    tenant_id = (reader && reader.tenant_id) || Keyword.get(opts, :tenant_id, Tenant.default_id())
 
-    snapshot = %{
-      workspace_id: workspace_id,
-      tenant_id: tenant_id,
-      exported_at: DateTime.utc_now() |> DateTime.to_iso8601(),
-      signals: signals,
-      memories: memories,
-      wiki: wiki_pages,
-      config: config
-    }
+    with {:ok, signals, hidden_signals} <-
+           read_signals(workspace_id: workspace_id, reader: reader),
+         {:ok, memories, hidden_memories} <-
+           read_memories(workspace_id: workspace_id, reader: reader),
+         {:ok, pages} <- export_wiki_pages(workspace_id, tenant_id) do
+      {wiki_pages, hidden_pages} =
+        ReadScope.filter_rows(
+          reader,
+          workspace_id,
+          "wiki_pages",
+          pages,
+          &wiki_row/1,
+          &"wiki:#{&1.slug}:#{&1.audience}"
+        )
 
-    {:ok, snapshot}
+      snapshot = %{
+        workspace_id: workspace_id,
+        tenant_id: tenant_id,
+        exported_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+        signals: signals,
+        memories: memories,
+        wiki: wiki_pages,
+        config: export_workspace_config(workspace_id)
+      }
+
+      {:ok, snapshot, hidden_signals + hidden_memories + hidden_pages}
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -277,26 +343,63 @@ defmodule OptimalEngine.Batch do
   # Private: export helpers
   # ---------------------------------------------------------------------------
 
-  defp export_wiki_pages(workspace_id, tenant_id) do
-    case Wiki.list(tenant_id, workspace_id) do
-      {:ok, pages} ->
-        Enum.map(pages, fn p ->
-          %{
-            slug: p.slug,
-            audience: p.audience,
-            version: p.version,
-            body: p.body,
-            last_curated: p.last_curated,
-            curated_by: p.curated_by,
-            frontmatter: p.frontmatter,
-            workspace_id: p.workspace_id,
-            tenant_id: p.tenant_id
-          }
-        end)
+  # Every page of the workspace, a page of rows at a time (`Wiki.list/3` stops
+  # at 50 unless it is asked for more). A Store that cannot be read is an
+  # error, never a shorter list.
+  @wiki_page_size 500
 
-      _ ->
-        []
+  defp export_wiki_pages(workspace_id, tenant_id), do: wiki_pages(workspace_id, tenant_id, 0, [])
+
+  defp wiki_pages(workspace_id, tenant_id, offset, acc) do
+    case Wiki.list(tenant_id, workspace_id, limit: @wiki_page_size, offset: offset) do
+      {:ok, pages} ->
+        acc = [Enum.map(pages, &wiki_export/1) | acc]
+
+        if length(pages) < @wiki_page_size,
+          do: {:ok, acc |> Enum.reverse() |> Enum.concat()},
+          else: wiki_pages(workspace_id, tenant_id, offset + @wiki_page_size, acc)
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, other}
     end
+  end
+
+  defp wiki_export(p) do
+    %{
+      slug: p.slug,
+      audience: p.audience,
+      version: p.version,
+      body: p.body,
+      last_curated: p.last_curated,
+      curated_by: p.curated_by,
+      frontmatter: p.frontmatter,
+      workspace_id: p.workspace_id,
+      tenant_id: p.tenant_id
+    }
+  end
+
+  # A reader sees its own tenant only; the trusted operator (no reader) is not
+  # narrowed, as before.
+  defp tenant_clause(nil), do: ""
+  defp tenant_clause(_reader), do: "AND tenant_id = ?2"
+
+  defp tenant_param(nil), do: []
+  defp tenant_param(reader), do: [reader.tenant_id]
+
+  # A wiki page as the columns the lineage reads it by.
+  defp wiki_row(page) do
+    %{
+      "tenant_id" => page.tenant_id,
+      "workspace_id" => page.workspace_id,
+      "slug" => page.slug,
+      "audience" => page.audience,
+      "version" => page.version,
+      "frontmatter" => page.frontmatter,
+      "body" => page.body
+    }
   end
 
   defp export_workspace_config(workspace_id) do

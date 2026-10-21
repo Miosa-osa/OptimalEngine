@@ -59,6 +59,7 @@ defmodule OptimalEngine.Sync.Lineage do
           key: String.t() | nil,
           table: String.t(),
           labels: boolean(),
+          partitions: boolean(),
           meta: String.t() | nil,
           class: String.t() | nil,
           refs: [ref_def()],
@@ -210,7 +211,7 @@ defmodule OptimalEngine.Sync.Lineage do
          {:links, "source_package_links"},
          {:links, "observation_links"}
        ]},
-    "canonical_entities" => {:labelled, [], special: [:entity_sources]},
+    "canonical_entities" => {:labelled, [], partitions: false, special: [:entity_sources]},
     "assets" => {:labelled, [{:id, "source_package_id", "source_packages"}]},
     "asset_adapter_runs" => {:labelled, @asset_parents},
     "asset_extractions" =>
@@ -433,6 +434,7 @@ defmodule OptimalEngine.Sync.Lineage do
           table: table,
           key: Keyword.get(opts, :key, if(kind == :structural, do: nil, else: "id")),
           labels: kind == :labelled,
+          partitions: Keyword.get(opts, :partitions, kind == :labelled),
           meta: Keyword.get(opts, :meta),
           class: Keyword.get(opts, :class),
           refs: refs,
@@ -475,8 +477,12 @@ defmodule OptimalEngine.Sync.Lineage do
       end)
 
     ([spec.key] ++
-       [if(spec.labels, do: "security_labels"), spec.meta, spec.class] ++
-       spec.extra ++ ref_columns)
+       [
+         if(spec.labels, do: "security_labels"),
+         if(spec.partitions, do: "partition_ids"),
+         spec.meta,
+         spec.class
+       ] ++ spec.extra ++ ref_columns)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
   end
@@ -484,30 +490,44 @@ defmodule OptimalEngine.Sync.Lineage do
   # -- reading a row ----------------------------------------------------------------
 
   @doc """
-  The class a row carries itself: the highest rank among its labels column,
-  the labels in its metadata and its classification level. Nil when it names
-  none. An unreadable value ranks restricted.
+  What a row carries itself, as the tokens a reader's grants are compared
+  with (`OptimalEngine.MemoryCore.SecurityLabels`): its labels column, its
+  partitions, the labels and partitions in its metadata and its
+  classification level. Nil when it carries none. A value that cannot be read
+  is the `unresolved` token.
   """
-  @spec own_rank(t(), map()) :: SecurityLabels.rank() | nil
-  def own_rank(spec, row) do
-    [
-      if(spec.labels, do: SecurityLabels.rank(row["security_labels"])),
-      if(spec.meta, do: SecurityLabels.metadata_rank(row[spec.meta])),
-      if(spec.class, do: class_value_rank(row[spec.class]))
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.max(fn -> nil end)
+  @spec own_tokens(t(), map()) :: MapSet.t(SecurityLabels.token()) | nil
+  def own_tokens(spec, row) do
+    tokens =
+      Enum.flat_map(
+        [
+          spec.labels && SecurityLabels.tokens(row["security_labels"]),
+          spec.partitions && SecurityLabels.partition_tokens(row["partition_ids"]),
+          spec.meta && SecurityLabels.metadata_tokens(row[spec.meta]),
+          spec.class && class_tokens(row[spec.class])
+        ],
+        &(&1 || [])
+      )
+
+    if tokens == [], do: nil, else: MapSet.new(tokens)
   end
 
-  # A classification level: `internal` is the column's default and says
-  # nothing; a level this Engine does not know ranks restricted.
-  defp class_value_rank(value) when value in [nil, ""], do: nil
+  @doc """
+  The class a row carries itself: the highest class among `own_tokens/2`. Nil
+  when it names none. An unreadable value ranks restricted.
+  """
+  @spec own_rank(t(), map()) :: SecurityLabels.rank() | nil
+  def own_rank(spec, row), do: spec |> own_tokens(row) |> SecurityLabels.token_rank()
 
-  defp class_value_rank(value) do
+  # A classification level: `internal` is the column's default and says
+  # nothing; a level this Engine does not know cannot be read.
+  defp class_tokens(value) when value in [nil, ""], do: []
+
+  defp class_tokens(value) do
     case SecurityLabels.class_rank(value) do
-      nil -> 3
-      rank when rank > 1 -> rank
-      _internal_or_lower -> nil
+      nil -> [SecurityLabels.unresolved()]
+      rank when rank > 1 -> [{:label, value |> to_string() |> String.trim() |> String.downcase()}]
+      _internal_or_lower -> []
     end
   end
 

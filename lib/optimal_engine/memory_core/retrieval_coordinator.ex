@@ -28,6 +28,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     Reconstruction,
     RetrievalPackage,
     ScopeEnvelope,
+    SecurityLabels,
     Store
   }
 
@@ -916,7 +917,10 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
   defp authorization_clauses_scoped(table, authorization, param_offset) do
     {partition_clause, partition_params} =
-      case authorization.allowed_partitions do
+      case grants_or_all(authorization.allowed_partitions) do
+        :all ->
+          {"1 = 1", []}
+
         [] ->
           {"NOT EXISTS (SELECT 1 FROM json_each(COALESCE(NULLIF(#{table}.partition_ids, ''), '[]')))",
            []}
@@ -931,7 +935,10 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     security_offset = param_offset + length(partition_params)
 
     {security_clause, security_params} =
-      case authorization.allowed_security_labels do
+      case grants_or_all(authorization.allowed_security_labels) do
+        :all ->
+          {"1 = 1", []}
+
         [] ->
           {"NOT EXISTS (SELECT 1 FROM json_each(COALESCE(NULLIF(#{table}.security_labels, ''), '[]')))",
            []}
@@ -1447,19 +1454,33 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
   # Mirrors the fail-closed SQL predicates: an empty envelope only allows
   # objects with no partitions / no labels.
-  defp partition_allowed?(object, []), do: object.partition_ids == []
-
   defp partition_allowed?(object, allowed_partitions) do
-    MapSet.intersection(MapSet.new(object.partition_ids), MapSet.new(allowed_partitions))
-    |> MapSet.size()
-    |> Kernel.>(0)
-  end
+    case grants_or_all(allowed_partitions) do
+      :all ->
+        true
 
-  defp security_allowed?(object, []), do: object.security_labels == []
+      [] ->
+        object.partition_ids == []
+
+      allowed ->
+        MapSet.intersection(MapSet.new(object.partition_ids), MapSet.new(allowed))
+        |> MapSet.size()
+        |> Kernel.>(0)
+    end
+  end
 
   defp security_allowed?(object, allowed_security_labels) do
-    MapSet.subset?(MapSet.new(object.security_labels), MapSet.new(allowed_security_labels))
+    case grants_or_all(allowed_security_labels) do
+      :all -> true
+      [] -> object.security_labels == []
+      allowed -> MapSet.subset?(MapSet.new(object.security_labels), MapSet.new(allowed))
+    end
   end
+
+  # A grant of "*" is every label, or every partition, as `Auth.KeyIssuance`
+  # reads it; a key holds it only when it may mint any grant.
+  defp grants_or_all(grants),
+    do: if(SecurityLabels.wildcard?(grants), do: :all, else: grants)
 
   defp reason_class_counts(redacted_links) do
     redacted_links
@@ -1739,7 +1760,10 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
   defp authorized_projection_scoped?(object, authorization) do
     partition_allowed? =
-      case authorization.allowed_partitions do
+      case grants_or_all(authorization.allowed_partitions) do
+        :all ->
+          true
+
         [] ->
           Map.get(object, :partition_ids, []) == []
 
@@ -1753,7 +1777,10 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       end
 
     security_allowed? =
-      case authorization.allowed_security_labels do
+      case grants_or_all(authorization.allowed_security_labels) do
+        :all ->
+          true
+
         [] ->
           Map.get(object, :security_labels, []) == []
 

@@ -92,6 +92,13 @@ defmodule OptimalEngine.API.Reference do
     Workspace is `workspace` when the route is authorized for the workspaces it names (the implicit `default` when it names none), and `tenant` when it is tenant-wide; read from `OptimalEngine.API.WorkspaceAuthPlug`.
     A key whose metadata grants app data access (`/api/data/keys`) is confined to `/api/data` whatever its grant.
 
+    A key's metadata may carry `allowed_security_labels` and `allowed_partitions`, the labels and partitions it may read.
+    The routes that return row text in bulk (`/api/batch/export/*`, `/api/sync/conflicts`, `/api/storage/workspaces/:workspace_id/mutations`) show a key only the rows its grants cover, by the rule of governed retrieval, and say what they left out in `withheld` and `complete`.
+    A grant of `"*"` means all of its kind.
+    The bootstrap key holds it when its scopes include `*` or `admin`; a key minted without grants holds none.
+    The recommended grants for a machine key are `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`.
+    `docs/guides/replication.md` has the rule and the routes it does not cover yet.
+
     Routes: #{length(routes)}
 
     | Method | Path | Router | Grant | Workspace |

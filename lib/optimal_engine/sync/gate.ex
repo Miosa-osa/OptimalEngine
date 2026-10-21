@@ -1,16 +1,31 @@
+defmodule OptimalEngine.Sync.Gate.StoreError do
+  @moduledoc """
+  The gate could not read the Store while classifying. It is raised, never
+  turned into an answer: a push sends nothing, and a request that filters by
+  the gate is refused with 503 (`plug_status`).
+  """
+  defexception [:message, plug_status: 503]
+end
+
 defmodule OptimalEngine.Sync.Gate do
   @moduledoc """
-  The data-class gate of replication: which changes stay on this Engine.
+  What leaves this Engine, and what a reader may see, when the row it comes
+  from is classified by more than its own columns.
+
+  Classification is not only a row's own `security_labels`: a row copied or
+  derived from a labelled row carries its source's labels (see
+  `OptimalEngine.Sync.Lineage`), so a versioned memory staged from a
+  restricted source package, the chunks and vectors of a restricted
+  document, and a wiki page citing either are as classified as the source.
+  The gate walks that lineage and collects every label and partition a row
+  carries, itself or through its sources, as a set of tokens. Two decisions
+  are made from the tokens.
+
+  ## Replication (`open/3`)
 
   A peer is cleared up to a `max_class` (`public`, `internal`,
-  `confidential`, `restricted`). A change whose row is classified above it is
-  not sent. Classification is not only the row's own `security_labels`: a
-  row copied or derived from a labelled row is as classified as its source
-  (see `OptimalEngine.Sync.Lineage`), so a versioned memory staged from a
-  restricted source package, the chunks and vectors of a restricted
-  document, and a wiki page citing either stay home with it.
-
-  Sending is fail-closed. A row stays home when
+  `confidential`, `restricted`). A change whose tokens name a class above it
+  is not sent. Sending is fail-closed. A row stays home when
 
     * its own labels, or those of any row it derives from, are above the
       peer's class;
@@ -39,9 +54,32 @@ defmodule OptimalEngine.Sync.Gate do
   key, so it is held only when the row's earlier changes in the local ledger
   were classified above the class (the peer never had it).
 
-  A gate is opened for one pass (one push cycle, one served page) and closed:
-  it caches what it reads from the Store for the pass and builds, on first
-  use, an index of the documents and memories derived from labelled sources.
+  ## Reading (`open_reader/3`)
+
+  A reader holds grants: the labels it may see and the partitions it may see
+  (`SecurityLabels.grants/2`). It sees a row by the rule governed retrieval
+  applies to Memory Core objects (`SecurityLabels.permits?/2`): every label the
+  row carries must be granted, so with no grants only what carries nothing is
+  seen; with partitions granted only rows that share one are seen, and rows
+  with none are not. A row drawn from other rows must share a partition with
+  each of them that has any, not just with one of them. A row that cannot be resolved carries the `unresolved`
+  token, which no grant names, so it is read by no one; a grant of `"*"` is
+  the exception. An aggregate carries every label in its workspace and needs
+  every partition of it.
+
+  The rows a reader asks about are read a chunk of 500 at a time
+  (`readable_ids/3`), with the rows they link to, instead of one by one.
+
+  Reading what a row derives from has a budget: a row that reaches more than
+  10,000 rows that the gate has not read before (a dense mesh of links that
+  cycles back on itself, where the result of a row cannot be kept because it
+  depends on the path that led to it) is `unresolved`, so it is held from a
+  peer and read by no one, instead of being walked path by path.
+
+  A gate is opened for one pass (one push cycle, one served page, one
+  export) and closed: it caches what it reads from the Store for the pass
+  and builds, on first use, an index of the documents, memories and entities
+  derived from labelled sources.
   """
 
   require Logger
@@ -53,15 +91,21 @@ defmodule OptimalEngine.Sync.Gate do
   @internal 1
   @restricted 3
   @max_depth 40
+  @chunk 500
+  @node_budget 10_000
 
-  defstruct [:tenant_id, :workspace_id, :rank, :memo]
+  defstruct [:tenant_id, :workspace_id, :rank, :memo, :mode, :allowed]
 
   @type t :: %__MODULE__{
           tenant_id: String.t(),
           workspace_id: String.t(),
           rank: non_neg_integer(),
-          memo: :ets.tid()
+          memo: :ets.tid(),
+          mode: :class | :grants,
+          allowed: SecurityLabels.grants() | nil
         }
+
+  @typep tokens :: MapSet.t(SecurityLabels.token()) | nil
 
   # -- opening ------------------------------------------------------------------
 
@@ -72,7 +116,24 @@ defmodule OptimalEngine.Sync.Gate do
       tenant_id: tenant_id,
       workspace_id: workspace_id,
       rank: class_rank(max_class),
-      memo: :ets.new(:sync_gate, [:set, :private])
+      memo: :ets.new(:sync_gate, [:set, :private]),
+      mode: :class
+    }
+  end
+
+  @doc """
+  Opens a gate for a reader of a workspace. `allowed` is the reader's grants
+  (`SecurityLabels.grants/2`).
+  """
+  @spec open_reader(String.t(), String.t(), SecurityLabels.grants()) :: t()
+  def open_reader(tenant_id, workspace_id, %{labels: _, partitions: _} = allowed) do
+    %__MODULE__{
+      tenant_id: tenant_id,
+      workspace_id: workspace_id,
+      rank: 0,
+      memo: :ets.new(:sync_gate, [:set, :private]),
+      mode: :grants,
+      allowed: allowed
     }
   end
 
@@ -87,13 +148,20 @@ defmodule OptimalEngine.Sync.Gate do
   @spec with_gate(String.t(), String.t(), String.t(), (t() -> result)) :: result
         when result: var
   def with_gate(tenant_id, workspace_id, max_class, fun) do
-    gate = open(tenant_id, workspace_id, max_class)
+    run(open(tenant_id, workspace_id, max_class), fun)
+  end
 
-    try do
-      fun.(gate)
-    after
-      close(gate)
-    end
+  @doc "Runs `fun` with a reader's gate, closing it after."
+  @spec with_reader(String.t(), String.t(), SecurityLabels.grants(), (t() -> result)) :: result
+        when result: var
+  def with_reader(tenant_id, workspace_id, allowed, fun) do
+    run(open_reader(tenant_id, workspace_id, allowed), fun)
+  end
+
+  defp run(gate, fun) do
+    fun.(gate)
+  after
+    close(gate)
   end
 
   @doc "The rank of a class name; a name that is no class ranks as `internal`."
@@ -122,7 +190,8 @@ defmodule OptimalEngine.Sync.Gate do
         @internal
 
       other ->
-        raise "the sync gate could not read the workspace: #{inspect(other)}"
+        raise OptimalEngine.Sync.Gate.StoreError,
+          message: "the sync gate could not read the workspace: #{inspect(other)}"
     end
   end
 
@@ -135,9 +204,9 @@ defmodule OptimalEngine.Sync.Gate do
 
   @doc "True when the mutation must stay on this Engine."
   @spec hold?(t(), map()) :: boolean()
-  def hold?(%__MODULE__{rank: rank}, _mutation) when rank >= @restricted, do: false
+  def hold?(%__MODULE__{mode: :class, rank: rank}, _mutation) when rank >= @restricted, do: false
 
-  def hold?(%__MODULE__{rank: gate_rank} = gate, mutation) do
+  def hold?(%__MODULE__{mode: :class, rank: gate_rank} = gate, mutation) do
     case mutation_rank(gate, mutation) do
       nil -> false
       rank -> rank > gate_rank
@@ -147,31 +216,25 @@ defmodule OptimalEngine.Sync.Gate do
   @doc """
   `hold?/2` for a ledger that callers may also append to
   (`OptimalEngine.Storage.PolicyStore`): a mutation of an entity type that
-  is not a replicated table is not held, since no row of ours is behind it.
+  is not a replicated table has no lineage (no row of ours is behind it), so
+  it is held only by the labels of the row it carries itself, if it carries
+  one.
   """
   @spec hold_known?(t(), map()) :: boolean()
-  def hold_known?(%__MODULE__{} = gate, mutation),
-    do: Lineage.spec(mutation["entity_type"]) != nil and hold?(gate, mutation)
+  def hold_known?(%__MODULE__{} = gate, mutation) do
+    case Lineage.spec(mutation["entity_type"]) do
+      nil -> unknown_held?(gate, mutation)
+      _spec -> hold?(gate, mutation)
+    end
+  end
 
   @doc """
   The class rank a mutation is held at: nil when nothing classifies it,
   otherwise 0..3. For tests and audits; `hold?/2` is the gate.
   """
   @spec mutation_rank(t(), map()) :: SecurityLabels.rank() | nil
-  def mutation_rank(%__MODULE__{} = gate, mutation) do
-    table = mutation["entity_type"]
-
-    case Lineage.spec(table) do
-      nil ->
-        unclassified(gate, table)
-        @restricted
-
-      spec ->
-        if mutation["operation"] == "delete",
-          do: history_rank(gate, table, spec, mutation),
-          else: top_rank(gate, table, spec, mutation_row(mutation), true)
-    end
-  end
+  def mutation_rank(%__MODULE__{} = gate, mutation),
+    do: gate |> mutation_tokens(mutation) |> SecurityLabels.token_rank()
 
   # -- receiving ----------------------------------------------------------------
 
@@ -193,43 +256,229 @@ defmodule OptimalEngine.Sync.Gate do
     rank != nil and rank > class_rank(max_class)
   end
 
+  # -- reading ------------------------------------------------------------------
+
+  @doc """
+  True when the reader may see a row of `table` given as a map with string
+  keys (the columns of the row, as a replicated change carries them).
+  """
+  @spec readable_row?(t(), String.t(), map()) :: boolean()
+  def readable_row?(%__MODULE__{mode: :grants} = gate, table, row) do
+    case Lineage.spec(table) do
+      nil -> false
+      spec -> readable?(gate, top_tokens(gate, table, spec, row, true))
+    end
+  end
+
+  @doc "True when the reader may see the row of `table` with this id."
+  @spec readable_id?(t(), String.t(), String.t() | nil) :: boolean()
+  def readable_id?(%__MODULE__{mode: :grants}, _table, nil), do: false
+
+  def readable_id?(%__MODULE__{mode: :grants} = gate, table, id) do
+    reset_budget(gate)
+    readable?(gate, ref_tokens(gate, {:row, table, id}, MapSet.new(), true))
+  end
+
+  @doc """
+  True when the row of `table` with this id is gone, or the reader may see it.
+  A record of a change to a row that has since been deleted is judged by the
+  record alone; one whose row is still there needs the row as well.
+  """
+  @spec readable_or_gone?(t(), String.t(), String.t() | nil) :: boolean()
+  def readable_or_gone?(%__MODULE__{mode: :grants} = gate, table, id) do
+    case Lineage.spec(table) do
+      %{key: key} = spec when is_binary(key) and is_binary(id) ->
+        load(gate, table, spec, id) == nil or readable_id?(gate, table, id)
+
+      _ ->
+        readable_id?(gate, table, id)
+    end
+  end
+
+  @doc """
+  The ids among `ids` of rows of `table` the reader may see. The rows, and
+  every row they link to, are read a chunk of 500 at a time (`WHERE key IN`)
+  before they are classified, instead of one query per row.
+  """
+  @spec readable_ids(t(), String.t(), [String.t() | nil]) :: MapSet.t(String.t())
+  def readable_ids(%__MODULE__{mode: :grants} = gate, table, ids) do
+    ids
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+    |> Enum.chunk_every(@chunk)
+    |> Enum.flat_map(fn chunk ->
+      prefetch(gate, [{table, chunk}], 0)
+      Enum.filter(chunk, &readable_id?(gate, table, &1))
+    end)
+    |> MapSet.new()
+  end
+
+  @doc """
+  True when the reader may see what a change carries: a row as a replicated
+  change holds it (`entity_type`, `entity_id`, `operation`, `payload`).
+  """
+  @spec readable_mutation?(t(), map()) :: boolean()
+  def readable_mutation?(%__MODULE__{mode: :grants} = gate, mutation),
+    do: readable?(gate, mutation_tokens(gate, mutation))
+
+  @doc """
+  `readable_mutation?/2` for a ledger that callers may also append to: a change
+  of an entity type that is not a replicated table is not governed by lineage
+  (no row of ours is behind it), but a row it carries names its own labels and
+  partitions, and those are judged.
+  """
+  @spec readable_known?(t(), map()) :: boolean()
+  def readable_known?(%__MODULE__{mode: :grants} = gate, mutation) do
+    case Lineage.spec(mutation["entity_type"]) do
+      nil ->
+        case unknown_tokens(mutation) do
+          [] -> true
+          tokens -> readable?(gate, MapSet.new(tokens))
+        end
+
+      _spec ->
+        readable_mutation?(gate, mutation)
+    end
+  end
+
+  # The labels and partitions of the row an entry of an unknown entity type
+  # carries, in its own columns or its metadata; none for an entry that carries
+  # no row.
+  defp unknown_tokens(%{"payload" => %{"row" => %{} = row}}) do
+    [
+      Map.has_key?(row, "security_labels") && SecurityLabels.tokens(row["security_labels"]),
+      Map.has_key?(row, "partition_ids") && SecurityLabels.partition_tokens(row["partition_ids"]),
+      Map.has_key?(row, "metadata") && SecurityLabels.metadata_tokens(row["metadata"])
+    ]
+    |> Enum.flat_map(&(&1 || []))
+  end
+
+  defp unknown_tokens(_mutation), do: []
+
+  defp unknown_held?(%__MODULE__{mode: :class, rank: rank}, _mutation) when rank >= @restricted,
+    do: false
+
+  defp unknown_held?(%__MODULE__{rank: gate_rank}, mutation) do
+    case mutation |> unknown_tokens() |> MapSet.new() |> SecurityLabels.token_rank() do
+      nil -> false
+      rank -> rank > gate_rank
+    end
+  end
+
+  @doc """
+  Reads what these rows of `table` (maps with string keys, the columns of the
+  row) link to, a chunk of 500 at a time, so that classifying them one by one
+  finds each of those rows in the gate's cache instead of reading it with a
+  query of its own. A wiki page also has its citations read for a chunk of
+  pages at once.
+  """
+  @spec prefetch_rows(t(), String.t(), [map()]) :: :ok
+  def prefetch_rows(%__MODULE__{mode: :grants} = gate, table, rows) do
+    case Lineage.spec(table) do
+      nil ->
+        :ok
+
+      spec ->
+        rows
+        |> Enum.chunk_every(@chunk)
+        |> Enum.each(fn chunk ->
+          if :wiki_page in spec.special, do: load_citations(gate, chunk)
+
+          chunk
+          |> Enum.flat_map(fn row ->
+            Lineage.refs(spec, row) ++
+              if(:wiki_page in spec.special, do: wiki_refs(gate, row), else: [])
+          end)
+          |> prefetch_refs(gate, 0)
+        end)
+    end
+  end
+
+  @doc """
+  `prefetch_rows/3` for the changes of a ledger (`entity_type`, `operation`,
+  `payload`): the rows they carry, by table.
+  """
+  @spec prefetch_mutations(t(), [map()]) :: :ok
+  def prefetch_mutations(%__MODULE__{mode: :grants} = gate, mutations) do
+    mutations
+    |> Enum.filter(&(&1["operation"] != "delete"))
+    |> Enum.group_by(& &1["entity_type"], &mutation_row/1)
+    |> Enum.each(fn {table, rows} ->
+      if is_binary(table), do: prefetch_rows(gate, table, Enum.reject(rows, &(&1 == %{})))
+    end)
+  end
+
+  defp readable?(%__MODULE__{allowed: allowed}, tokens),
+    do: SecurityLabels.permits?(allowed, tokens)
+
   # -- classifying a row --------------------------------------------------------
+
+  @spec mutation_tokens(t(), map()) :: tokens()
+  defp mutation_tokens(gate, mutation) do
+    table = mutation["entity_type"]
+
+    case Lineage.spec(table) do
+      nil ->
+        unclassified(gate, table)
+        unresolved()
+
+      spec ->
+        cond do
+          mutation["operation"] == "delete" ->
+            history_tokens(gate, table, spec, mutation)
+
+          # A reader is not shown what cannot be read as a row.
+          gate.mode == :grants and not match?(%{"payload" => %{"row" => %{}}}, mutation) ->
+            unresolved()
+
+          true ->
+            top_tokens(gate, table, spec, mutation_row(mutation), true)
+        end
+    end
+  end
 
   # The row being classified is on the path from the start, so a link back to
   # itself (the root of a version chain is the row itself) is not followed.
-  defp top_rank(gate, table, spec, row, strict) do
+  defp top_tokens(gate, table, spec, row, strict) do
+    reset_budget(gate)
+
     visiting =
       case row[spec.key] do
         id when is_binary(id) -> MapSet.new([{table, id}])
         _ -> MapSet.new()
       end
 
-    row_rank(gate, spec, row, visiting, strict)
+    row_tokens(gate, spec, row, visiting, strict)
   end
 
   # `strict` is false only while reading the earlier changes of a deleted row:
   # a link to a row that is gone is then not doubt, the row is being removed.
-  defp row_rank(gate, spec, row, visiting, strict, skip \\ []) do
-    start = Lineage.own_rank(spec, row)
+  defp row_tokens(gate, spec, row, visiting, strict, skip \\ []) do
+    start = Lineage.own_tokens(spec, row)
     self = {:row, spec.table, row[spec.key]}
 
     # A link to the row itself adds nothing (its own labels are counted) and
     # is no cut: the row does not depend on the path that led to it.
-    ranked =
+    carried =
       spec
       |> Lineage.refs(row)
       |> Enum.reject(&(&1 == self))
-      |> fold_max(start, &ref_rank(gate, &1, visiting, strict))
+      |> fold_union(gate, start, &ref_tokens(gate, &1, visiting, strict))
 
-    ranked =
+    carried =
       if spec.kind == :aggregate,
-        do: max_rank(ranked, aggregate_rank(gate)),
-        else: ranked
+        do: union(carried, aggregate_tokens(gate)),
+        else: carried
 
-    fold_max(spec.special -- skip, ranked, &special_rank(gate, &1, row, visiting, strict))
+    fold_union(
+      spec.special -- skip,
+      gate,
+      carried,
+      &special_tokens(gate, &1, row, visiting, strict)
+    )
   end
 
-  defp ref_rank(gate, {:row, table, id}, visiting, strict) do
+  defp ref_tokens(gate, {:row, table, id}, visiting, strict) do
     cond do
       # A link back onto the path being read is not followed, and neither is
       # one past the depth limit: what is read from here on depends on the
@@ -243,70 +492,87 @@ defmodule OptimalEngine.Sync.Gate do
         unresolved(strict)
 
       true ->
-        settled(gate, {strict, table, id}, fn -> row_ref(gate, table, id, visiting, strict) end)
+        settled(gate, {strict, table, id}, fn ->
+          if spend(gate) do
+            row_ref(gate, table, id, visiting, strict)
+          else
+            cut(gate)
+            unresolved(strict)
+          end
+        end)
     end
   end
 
   # More references than can be followed: not trusted.
-  defp ref_rank(_gate, :overflow, _visiting, strict), do: unresolved(strict)
+  defp ref_tokens(_gate, :overflow, _visiting, strict), do: unresolved(strict)
 
-  defp ref_rank(gate, {:any, id}, visiting, strict) do
+  defp ref_tokens(gate, {:any, id}, visiting, strict) do
     table = memoized(gate, {:table_of, id}, fn -> find_table(id) end)
-    if is_binary(table), do: ref_rank(gate, {:row, table, id}, visiting, strict), else: nil
+    if is_binary(table), do: ref_tokens(gate, {:row, table, id}, visiting, strict), else: nil
   end
 
   defp row_ref(gate, table, id, visiting, strict) do
     case Lineage.spec(table) do
       nil ->
         unclassified(gate, table)
-        @restricted
+        unresolved()
 
       spec ->
-        case load(table, spec, id) do
+        case load(gate, table, spec, id) do
           nil ->
             cond do
-              Lineage.anchor?(table) -> unresolved(strict)
-              # A document or chunk that is gone is still in the ledger as it was.
-              strict -> ledger_rank(gate, table, spec, id)
-              true -> nil
+              Lineage.anchor?(table) ->
+                unresolved(strict)
+
+              # A document or chunk that is gone is still in the ledger as it was;
+              # one the ledger never saw cannot be vouched for.
+              strict ->
+                case ledger_tokens(gate, table, spec, id) do
+                  :none -> unresolved()
+                  tokens -> tokens
+                end
+
+              true ->
+                nil
             end
 
           row ->
-            row_rank(gate, spec, row, MapSet.put(visiting, {table, id}), strict)
+            row_tokens(gate, spec, row, MapSet.put(visiting, {table, id}), strict)
         end
     end
   end
 
-  # The rank of version `id` and of every version behind it. The chain is
-  # walked up to a version already known (or the first), then ranked from the
+  # The tokens of version `id` and of every version behind it. The chain is
+  # walked up to a version already known (or the first), then read from the
   # oldest down, so each version is read once per gate.
-  defp chain_rank(gate, id, visiting, strict) do
+  defp chain_tokens(gate, id, visiting, strict) do
     spec = Lineage.spec("memories")
     outer = take_cut(gate)
     {versions, below} = chain_up(gate, spec, id, strict, [], MapSet.new())
 
-    {rank, ranks} =
-      Enum.reduce(versions, {below, []}, fn {version_id, row}, {below, ranks} ->
+    {tokens, remembered} =
+      Enum.reduce(versions, {below, []}, fn {version_id, row}, {below, remembered} ->
         flat =
-          row_rank(gate, spec, row, MapSet.put(visiting, {"memories", version_id}), strict, [
+          row_tokens(gate, spec, row, MapSet.put(visiting, {"memories", version_id}), strict, [
             :memory_chain
           ])
 
-        rank = max_rank(below, flat)
-        {rank, [{version_id, rank} | ranks]}
+        tokens = union(below, flat)
+        {tokens, [{version_id, tokens} | remembered]}
       end)
 
     inner = take_cut(gate)
 
     unless inner,
-      do: Enum.each(ranks, &:ets.insert(gate.memo, {{:chain, strict, elem(&1, 0)}, elem(&1, 1)}))
+      do:
+        Enum.each(remembered, &:ets.insert(gate.memo, {{:chain, strict, elem(&1, 0)}, elem(&1, 1)}))
 
     if outer or inner, do: cut(gate)
-    rank
+    tokens
   end
 
   # The versions from `id` up that are not known yet, oldest first, and the
-  # rank of what is behind them. A parent that is gone cannot be vouched for.
+  # tokens of what is behind them. A parent that is gone cannot be vouched for.
   defp chain_up(gate, spec, id, strict, versions, seen) do
     known = :ets.lookup(gate.memo, {:chain, strict, id})
 
@@ -321,7 +587,7 @@ defmodule OptimalEngine.Sync.Gate do
         {versions, known |> hd() |> elem(1)}
 
       true ->
-        case load("memories", spec, id) do
+        case load(gate, "memories", spec, id) do
           nil ->
             {versions, unresolved(strict)}
 
@@ -340,15 +606,16 @@ defmodule OptimalEngine.Sync.Gate do
     end
   end
 
-  defp unresolved(true), do: @restricted
+  defp unresolved(strict \\ true)
+  defp unresolved(true), do: MapSet.new([SecurityLabels.unresolved()])
   defp unresolved(false), do: nil
 
   # -- rows that are pointed at, not pointing -----------------------------------
 
-  defp special_rank(gate, :memory_sources, row, _visiting, _strict),
+  defp special_tokens(gate, :memory_sources, row, _visiting, _strict),
     do: Map.get(index(gate).memories, row["id"])
 
-  defp special_rank(gate, :context_sources, row, _visiting, _strict),
+  defp special_tokens(gate, :context_sources, row, _visiting, _strict),
     do: Map.get(index(gate).contexts, row["id"])
 
   # The versions a memory was made from, parent after parent up to the first
@@ -357,50 +624,98 @@ defmodule OptimalEngine.Sync.Gate do
   # ancestors, so a long chain costs one read per version, once, and a label
   # that came to an old version by its source package or its pointers (not by
   # value) reaches every later one.
-  defp special_rank(gate, :memory_chain, row, visiting, strict) do
+  defp special_tokens(gate, :memory_chain, row, visiting, strict) do
     [row["parent_memory_id"], row["root_memory_id"]]
     |> Enum.filter(&(is_binary(&1) and &1 != "" and &1 != row["id"]))
     |> Enum.uniq()
-    |> fold_max(nil, &chain_rank(gate, &1, visiting, strict))
+    |> fold_union(gate, nil, &chain_tokens(gate, &1, visiting, strict))
   end
 
   # An entity is named in the sources it was resolved from.
-  defp special_rank(gate, :entity_sources, row, _visiting, _strict),
+  defp special_tokens(gate, :entity_sources, row, _visiting, _strict),
     do: Map.get(index(gate).entities, row["id"])
 
   # A cluster is named for its members; one with none yet (they are written
   # after it) has no lineage to read.
-  defp special_rank(gate, :cluster_members, row, visiting, strict) do
+  defp special_tokens(gate, :cluster_members, row, visiting, strict) do
     case query_column("SELECT chunk_id FROM cluster_members WHERE cluster_id = ?1", [row["id"]]) do
-      [] -> aggregate_rank(gate)
-      ids -> fold_max(ids, nil, &ref_rank(gate, {:row, "chunks", &1}, visiting, strict))
+      [] -> aggregate_tokens(gate)
+      ids -> fold_union(ids, gate, nil, &ref_tokens(gate, {:row, "chunks", &1}, visiting, strict))
     end
   end
 
   # A graph edge between two documents follows them; an edge between entity
   # names (co-occurrence) is derived from every document that names them.
-  defp special_rank(gate, :edge, row, _visiting, _strict) do
+  defp special_tokens(gate, :edge, row, _visiting, _strict) do
     if Enum.any?([row["source_id"], row["target_id"]], &context?(gate, &1)),
       do: nil,
-      else: aggregate_rank(gate)
+      else: aggregate_tokens(gate)
   end
 
   # A wiki page is written from what it cites: its citations, the object it
   # was projected from, and the `optimal://` addresses in its body. A page
   # that names nothing (or whose citations are not written yet) has no
   # lineage to read.
-  defp special_rank(gate, :wiki_page, row, visiting, strict) do
-    cited =
+  defp special_tokens(gate, :wiki_page, row, visiting, strict) do
+    case wiki_refs(gate, row) do
+      [] -> aggregate_tokens(gate)
+      refs -> fold_union(refs, gate, nil, &ref_tokens(gate, &1, visiting, strict))
+    end
+  end
+
+  defp wiki_refs(gate, row) do
+    Enum.map(wiki_citations(gate, row), &{:row, "chunks", &1}) ++
+      wiki_source(row["frontmatter"]) ++ Lineage.uri_refs(row["body"])
+  end
+
+  defp wiki_citations(gate, row) do
+    memoized(gate, wiki_key(row), fn ->
       query_column(
         "SELECT chunk_id FROM citations WHERE tenant_id = ?1 AND wiki_slug = ?2 AND wiki_audience = ?3",
         [row["tenant_id"], row["slug"], row["audience"]]
       )
+    end)
+  end
 
-    case Enum.map(cited, &{:row, "chunks", &1}) ++
-           wiki_source(row["frontmatter"]) ++ Lineage.uri_refs(row["body"]) do
-      [] -> aggregate_rank(gate)
-      refs -> fold_max(refs, nil, &ref_rank(gate, &1, visiting, strict))
-    end
+  defp wiki_key(row), do: {:wiki_citations, row["tenant_id"], row["slug"], row["audience"]}
+
+  # The citations of a chunk of pages, one query for up to 500 slugs.
+  defp load_citations(gate, pages) do
+    pages
+    |> Enum.filter(&(is_binary(&1["tenant_id"]) and is_binary(&1["slug"])))
+    |> Enum.reject(&:ets.member(gate.memo, wiki_key(&1)))
+    |> Enum.group_by(& &1["tenant_id"])
+    |> Enum.each(fn {tenant, in_tenant} ->
+      in_tenant
+      |> Enum.map(& &1["slug"])
+      |> Enum.uniq()
+      |> Enum.chunk_every(@chunk)
+      |> Enum.each(fn slugs ->
+        marks = Enum.map_join(2..(length(slugs) + 1), ", ", &"?#{&1}")
+
+        sql =
+          "SELECT wiki_slug, wiki_audience, chunk_id FROM citations " <>
+            "WHERE tenant_id = ?1 AND wiki_slug IN (#{marks})"
+
+        found =
+          sql
+          |> query!([tenant | slugs])
+          |> Enum.reduce(%{}, fn
+            [slug, audience, chunk], acc when is_binary(chunk) ->
+              Map.update(acc, {slug, audience}, [chunk], &[chunk | &1])
+
+            _row, acc ->
+              acc
+          end)
+
+        for page <- in_tenant, page["slug"] in slugs do
+          :ets.insert(
+            gate.memo,
+            {wiki_key(page), Map.get(found, {page["slug"], page["audience"]}, [])}
+          )
+        end
+      end)
+    end)
   end
 
   defp wiki_source(frontmatter) do
@@ -415,11 +730,80 @@ defmodule OptimalEngine.Sync.Gate do
 
   # -- the aggregate rule -------------------------------------------------------
 
-  # Held while the workspace holds anything above the gate: there is no row to
-  # point at, so there is no proof the aggregate is free of it.
-  defp aggregate_rank(gate) do
-    memoized(gate, :aggregate, fn -> if holds_above?(gate), do: @restricted, else: nil end)
+  # A replicating gate holds an aggregate while the workspace holds anything
+  # above the gate; a reader's gate gives it every token in the workspace.
+  # There is no row to point at, so there is no proof the aggregate is free of
+  # any of it.
+  defp aggregate_tokens(gate) do
+    memoized(gate, :aggregate, fn -> workspace_tokens(gate) end)
   end
+
+  defp workspace_tokens(%__MODULE__{mode: :class} = gate),
+    do: if(holds_above?(gate), do: unresolved(), else: nil)
+
+  # An aggregate is written from every row of the workspace, so a reader must
+  # hold every partition of it, not just share one.
+  defp workspace_tokens(%__MODULE__{mode: :grants} = gate) do
+    tokens =
+      Enum.reduce(Lineage.tables(), nil, fn table, acc ->
+        spec = Lineage.spec(table)
+
+        case carrying_rows(gate, table, spec) do
+          [] -> acc
+          rows -> Enum.reduce(rows, acc, &union(&2, Lineage.own_tokens(spec, &1)))
+        end
+      end)
+
+    tokens &&
+      MapSet.new(
+        Enum.flat_map(tokens, fn
+          {:partition_set, ids} -> Enum.map(ids, &{:partition_all, &1})
+          other -> [other]
+        end)
+      )
+  end
+
+  # The distinct values of the columns of `table` that carry a class, label or
+  # partition, for the rows that carry any.
+  defp carrying_rows(gate, table, spec) do
+    columns =
+      Enum.reject(
+        [
+          spec.labels && "security_labels",
+          spec.partitions && "partition_ids",
+          spec.meta,
+          spec.class
+        ],
+        &(&1 in [nil, false])
+      )
+
+    filters =
+      Enum.reject(
+        [
+          spec.labels && non_empty_json("security_labels"),
+          spec.partitions && non_empty_json("partition_ids"),
+          spec.meta &&
+            "(#{spec.meta} LIKE '%security_labels%' OR #{spec.meta} LIKE '%partition_ids%')",
+          spec.class &&
+            "(#{spec.class} IS NOT NULL AND lower(#{spec.class}) NOT IN ('', 'internal', 'public'))"
+        ],
+        &(&1 in [nil, false])
+      )
+
+    if columns == [] do
+      []
+    else
+      sql =
+        "SELECT DISTINCT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} " <>
+          "WHERE tenant_id = ?1 AND workspace_id = ?2 AND (#{Enum.join(filters, " OR ")})"
+
+      for values <- query!(sql, [gate.tenant_id, gate.workspace_id]) do
+        columns |> Enum.zip(values) |> Map.new()
+      end
+    end
+  end
+
+  defp non_empty_json(column), do: "(#{column} NOT IN ('[]', '') OR NOT json_valid(#{column}))"
 
   defp holds_above?(gate) do
     index = index(gate)
@@ -472,16 +856,20 @@ defmodule OptimalEngine.Sync.Gate do
 
   # -- history of a deleted row -------------------------------------------------
 
-  defp history_rank(gate, table, spec, mutation) do
-    case mutation["entity_id"] do
-      id when is_binary(id) -> ledger_rank(gate, table, spec, id)
+  defp history_tokens(gate, table, spec, mutation) do
+    reset_budget(gate)
+
+    with id when is_binary(id) <- mutation["entity_id"],
+         tokens when tokens != :none <- ledger_tokens(gate, table, spec, id) do
+      tokens
+    else
       _ -> nil
     end
   end
 
-  # The class of a row as the local ledger last recorded it, for a row that is
+  # What a row carried, as the local ledger last recorded it, for a row that is
   # gone. Its sources are read as they are now; one that is gone too is ignored.
-  defp ledger_rank(gate, table, spec, id) do
+  defp ledger_tokens(gate, table, spec, id) do
     rows =
       query!(
         """
@@ -493,10 +881,14 @@ defmodule OptimalEngine.Sync.Gate do
         [gate.tenant_id, gate.workspace_id, table, id]
       )
 
-    for [payload] <- rows, reduce: nil do
-      acc ->
-        row = mutation_row(%{"payload" => decode_payload(payload)})
-        max_rank(acc, top_rank(gate, table, spec, row, false))
+    if rows == [] do
+      :none
+    else
+      for [payload] <- rows, reduce: nil do
+        acc ->
+          row = mutation_row(%{"payload" => decode_payload(payload)})
+          union(acc, top_tokens(gate, table, spec, row, false))
+      end
     end
   end
 
@@ -510,73 +902,77 @@ defmodule OptimalEngine.Sync.Gate do
   defp decode_payload(%{} = payload), do: payload
   defp decode_payload(_payload), do: %{}
 
-  # -- the index of derived documents and memories -------------------------------
+  # -- the index of derived documents, memories and entities ----------------------
 
   # `contexts`: ids of documents (and everything the ledger names) derived from
-  # a source above the gate. `memories`: ids of versioned memories whose source
-  # package or claim is above the gate. Built once per gate, from the Store.
+  # a selected source. `memories`: ids of versioned memories whose source
+  # package or claim is selected. `entities`: ids of entities named in a
+  # selected source. A source is selected when a replicating gate would hold
+  # it (its class is above the peer's) or, for a reader, when it carries any
+  # label or partition. Built once per gate, from the Store.
   defp index(gate), do: memoized(gate, :index, fn -> build_index(gate) end)
 
   defp build_index(gate) do
     scope = [gate.tenant_id, gate.workspace_id]
-    predicate = above_predicate("security_labels", gate.rank)
+    predicate = source_predicate(gate, "security_labels", "partition_ids")
 
     held_sources =
       """
-      SELECT id, source_uri, metadata, security_labels FROM source_packages
+      SELECT id, source_uri, metadata, security_labels, partition_ids FROM source_packages
       WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate}
       """
       |> query!(scope)
-      |> Enum.flat_map(fn [id, uri, metadata, labels] ->
-        above(gate, SecurityLabels.rank(labels), {id, uri, metadata})
+      |> Enum.flat_map(fn [id, uri, metadata, labels, partitions] ->
+        selected(gate, carried(labels, partitions), {id, uri, metadata})
       end)
 
     held_claims =
       """
-      SELECT signal_id, metadata, subject_entity_id, object_entity_id, security_labels FROM claims
+      SELECT signal_id, metadata, subject_entity_id, object_entity_id, security_labels, partition_ids
+      FROM claims
       WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate}
       """
       |> query!(scope)
-      |> Enum.flat_map(fn [signal_id, metadata, subject, object, labels] ->
-        above(gate, SecurityLabels.rank(labels), {signal_id, metadata, [subject, object]})
+      |> Enum.flat_map(fn [signal_id, metadata, subject, object, labels, partitions] ->
+        selected(gate, carried(labels, partitions), {signal_id, metadata, [subject, object]})
       end)
 
-    source_ranks = Map.new(held_sources, fn {rank, {id, _uri, _metadata}} -> {id, rank} end)
+    source_tokens = Map.new(held_sources, fn {tokens, {id, _uri, _metadata}} -> {id, tokens} end)
 
     memories =
       held_sources
-      |> Enum.reduce(%{}, fn {rank, {_id, uri, metadata}}, acc ->
-        acc |> put_max(memory_of(uri), rank) |> put_max(versioned_memory(metadata), rank)
+      |> Enum.reduce(%{}, fn {tokens, {_id, uri, metadata}}, acc ->
+        acc |> put_union(memory_of(uri), tokens) |> put_union(versioned_memory(metadata), tokens)
       end)
       |> then(fn memories ->
-        Enum.reduce(held_claims, memories, fn {rank, {_signal, metadata, _entities}}, acc ->
-          put_max(acc, versioned_memory(metadata), rank)
+        Enum.reduce(held_claims, memories, fn {tokens, {_signal, metadata, _entities}}, acc ->
+          put_union(acc, versioned_memory(metadata), tokens)
         end)
       end)
 
     contexts =
       held_claims
-      |> Enum.reduce(%{}, fn {rank, {signal_id, _metadata, _entities}}, acc ->
-        put_max(acc, signal_id, rank)
+      |> Enum.reduce(%{}, fn {tokens, {signal_id, _metadata, _entities}}, acc ->
+        put_union(acc, signal_id, tokens)
       end)
-      |> then(&ledger_contexts(gate, scope, source_ranks, &1))
+      |> then(&ledger_contexts(gate, scope, source_tokens, &1))
 
     %{
       contexts: contexts,
       memories: memories,
-      entities: entity_ranks(gate, source_ranks, contexts, held_claims)
+      entities: entity_tokens(gate, source_tokens, contexts, held_claims)
     }
   end
 
   # Entities named by a held claim, or resolved from a mention in a held
   # source package or document.
-  defp entity_ranks(gate, source_ranks, contexts, held_claims) do
+  defp entity_tokens(gate, source_tokens, contexts, held_claims) do
     named =
-      Enum.reduce(held_claims, %{}, fn {rank, {_signal, _metadata, entities}}, acc ->
-        entities |> Enum.filter(&is_binary/1) |> Enum.reduce(acc, &put_max(&2, &1, rank))
+      Enum.reduce(held_claims, %{}, fn {tokens, {_signal, _metadata, entities}}, acc ->
+        entities |> Enum.filter(&is_binary/1) |> Enum.reduce(acc, &put_union(&2, &1, tokens))
       end)
 
-    if source_ranks == %{} and contexts == %{} do
+    if source_tokens == %{} and contexts == %{} do
       named
     else
       """
@@ -587,26 +983,47 @@ defmodule OptimalEngine.Sync.Gate do
       """
       |> query!([
         gate.workspace_id,
-        Jason.encode!(Map.keys(source_ranks)),
+        Jason.encode!(Map.keys(source_tokens)),
         Jason.encode!(Map.keys(contexts))
       ])
       |> Enum.reduce(named, fn [entity, source, context], acc ->
-        rank = max_rank(Map.get(source_ranks, source), Map.get(contexts, context))
-        if rank, do: put_max(acc, entity, rank), else: acc
+        tokens = union(Map.get(source_tokens, source), Map.get(contexts, context))
+        if tokens, do: put_union(acc, entity, tokens), else: acc
       end)
     end
   end
 
-  defp above(%__MODULE__{rank: gate_rank}, rank, payload)
-       when is_integer(rank) and rank > gate_rank,
-       do: [{rank, payload}]
+  # The tokens a row carries in its labels and partitions columns.
+  defp carried(labels, partitions) do
+    MapSet.new(SecurityLabels.tokens(labels) ++ SecurityLabels.partition_tokens(partitions))
+  end
 
-  defp above(_gate, _rank, _payload), do: []
+  # A source the index is built from: a replicating gate indexes what it
+  # would hold; a reader's gate indexes whatever carries a label or partition.
+  defp selected(%__MODULE__{mode: :class, rank: rank}, tokens, payload) do
+    case SecurityLabels.token_rank(tokens) do
+      class when is_integer(class) and class > rank -> [{tokens, payload}]
+      _ -> []
+    end
+  end
+
+  defp selected(%__MODULE__{mode: :grants}, tokens, payload),
+    do: if(MapSet.size(tokens) > 0, do: [{tokens, payload}], else: [])
+
+  # SQL narrowing the rows an index is built from; `selected/3` then reads each
+  # row exactly.
+  defp source_predicate(%__MODULE__{mode: :class, rank: rank}, labels, _partitions),
+    do: above_predicate(labels, rank)
+
+  defp source_predicate(%__MODULE__{mode: :grants}, labels, partitions) do
+    "(#{labels} NOT IN ('[]', '') OR #{partitions} NOT IN ('[]', '') " <>
+      "OR NOT json_valid(#{labels}) OR NOT json_valid(#{partitions}))"
+  end
 
   # The ledger entries of a labelled source, found by their own labels or by
   # the held source packages they list, name every object derived from it.
-  defp ledger_contexts(gate, scope, source_ranks, contexts) do
-    held? = source_ranks != %{}
+  defp ledger_contexts(gate, scope, source_tokens, contexts) do
+    held? = source_tokens != %{}
 
     linked =
       if held?,
@@ -619,32 +1036,36 @@ defmodule OptimalEngine.Sync.Gate do
             ),
         else: ""
 
-    params = if held?, do: scope ++ [Jason.encode!(Map.keys(source_ranks))], else: scope
+    params = if held?, do: scope ++ [Jason.encode!(Map.keys(source_tokens))], else: scope
 
     sql = """
-    SELECT input_object_links, output_object_links, source_package_links, evidence_links, security_labels
+    SELECT input_object_links, output_object_links, source_package_links, evidence_links,
+           security_labels, partition_ids
     FROM derivation_ledger l
     WHERE l.tenant_id = ?1 AND l.workspace_id = ?2
-      AND (#{above_predicate("l.security_labels", gate.rank)}#{linked})
+      AND (#{source_predicate(gate, "l.security_labels", "l.partition_ids")}#{linked})
     """
 
     sql
     |> query!(params)
-    |> Enum.reduce(contexts, fn [input, output, sources, evidence, labels], acc ->
-      linked_rank =
+    |> Enum.reduce(contexts, fn [input, output, sources, evidence, labels, partitions], acc ->
+      linked_tokens =
         [input, sources, evidence]
         |> Enum.flat_map(&Lineage.link_refs/1)
-        |> Enum.map(&Map.get(source_ranks, ref_id(&1)))
-        |> Enum.reject(&is_nil/1)
-        |> Enum.max(fn -> nil end)
+        |> Enum.map(&Map.get(source_tokens, ref_id(&1)))
+        |> Enum.reduce(nil, &union(&2, &1))
 
-      rank = max_rank(SecurityLabels.rank(labels), linked_rank)
+      tokens = union(carried(labels, partitions), linked_tokens)
 
       # What an entry produced is derived from what it was given; what it was
       # given (a public document a restricted answer was assembled from) is not.
-      if is_integer(rank) and rank > gate.rank,
-        do: output |> Lineage.link_refs() |> Enum.reduce(acc, &put_max(&2, ref_id(&1), rank)),
-        else: acc
+      case selected(gate, tokens, nil) do
+        [] ->
+          acc
+
+        [_] ->
+          output |> Lineage.link_refs() |> Enum.reduce(acc, &put_union(&2, ref_id(&1), tokens))
+      end
     end)
   end
 
@@ -672,36 +1093,147 @@ defmodule OptimalEngine.Sync.Gate do
     end
   end
 
-  defp put_max(map, nil, _rank), do: map
-  defp put_max(map, key, rank), do: Map.update(map, key, rank, &max(&1, rank))
+  defp put_union(map, nil, _tokens), do: map
+  defp put_union(map, key, tokens), do: Map.update(map, key, tokens, &MapSet.union(&1, tokens))
+
+  # -- reading many rows at once --------------------------------------------------
+
+  # Reads `{table, ids}` rows into the gate's row cache, then the rows they
+  # link to, and so on level by level, so that classifying them afterwards
+  # finds each row in the cache.
+  defp prefetch(_gate, [], _depth), do: :ok
+  defp prefetch(_gate, _wanted, depth) when depth >= @max_depth, do: :ok
+
+  defp prefetch(gate, wanted, depth) do
+    wanted
+    |> Enum.flat_map(fn {table, ids} -> load_many(gate, table, ids) end)
+    |> Enum.flat_map(fn {spec, row} -> Lineage.refs(spec, row) end)
+    |> prefetch_refs(gate, depth)
+  end
+
+  defp prefetch_refs(refs, gate, depth) do
+    typed =
+      for {:row, table, id} <- refs, do: {table, id}
+
+    untyped =
+      gate
+      |> resolve_any(for({:any, id} <- refs, do: id))
+      |> Enum.map(fn {id, table} -> {table, id} end)
+
+    next =
+      (typed ++ untyped)
+      |> Enum.uniq()
+      |> Enum.reject(fn {table, id} -> :ets.member(gate.memo, {:row, table, id}) end)
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      |> Enum.to_list()
+
+    prefetch(gate, next, depth + 1)
+  end
+
+  # The rows of `table` with these keys that are not cached yet, read a chunk
+  # at a time. A key with no row is cached as missing.
+  defp load_many(gate, table, ids) do
+    with %{key: key} = spec when is_binary(key) <- Lineage.spec(table) do
+      columns = Lineage.columns(spec)
+
+      ids
+      |> Enum.reject(&:ets.member(gate.memo, {:row, table, &1}))
+      |> Enum.chunk_every(@chunk)
+      |> Enum.flat_map(fn chunk ->
+        sql =
+          "SELECT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} " <>
+            "WHERE #{quote_name(key)} IN (#{Enum.map_join(1..length(chunk), ", ", &"?#{&1}")})"
+
+        rows =
+          for values <- query!(sql, chunk),
+              row = columns |> Enum.zip(values) |> Map.new(),
+              do: {row[key], row}
+
+        found = Map.new(rows)
+
+        for id <- chunk do
+          row = Map.get(found, id)
+          :ets.insert(gate.memo, {{:row, table, id}, row})
+          if row, do: {spec, row}
+        end
+        |> Enum.reject(&is_nil/1)
+      end)
+    else
+      _ -> []
+    end
+  end
+
+  # The tables that hold links of no stated type, found a chunk at a time: the
+  # first table of `Lineage.any_tables/0` with the id, as `find_table/2`
+  # would. Ids that are in none are cached as such.
+  defp resolve_any(gate, ids) do
+    unknown =
+      ids
+      |> Enum.uniq()
+      |> Enum.reject(&:ets.member(gate.memo, {:table_of, &1}))
+
+    found =
+      unknown
+      |> Enum.chunk_every(@chunk)
+      |> Enum.reduce(%{}, fn chunk, found ->
+        Enum.reduce_while(Lineage.any_tables(), {found, chunk}, fn table, {found, remaining} ->
+          key = Lineage.spec(table).key
+
+          sql =
+            "SELECT #{quote_name(key)} FROM #{quote_name(table)} " <>
+              "WHERE #{quote_name(key)} IN (#{Enum.map_join(1..length(remaining), ", ", &"?#{&1}")})"
+
+          hits = for [id] <- query!(sql, remaining), do: id
+          found = Enum.reduce(hits, found, &Map.put_new(&2, &1, table))
+
+          case remaining -- hits do
+            [] -> {:halt, {found, []}}
+            rest -> {:cont, {found, rest}}
+          end
+        end)
+        |> elem(0)
+      end)
+
+    for id <- unknown do
+      :ets.insert(gate.memo, {{:table_of, id}, Map.get(found, id)})
+    end
+
+    for id <- Enum.uniq(ids),
+        table = :ets.lookup_element(gate.memo, {:table_of, id}, 2),
+        table != nil,
+        do: {id, table}
+  end
 
   # -- reading the Store ----------------------------------------------------------
 
   # SQL for "this column names a class above the gate, or cannot be read". It
   # narrows the rows an index is built from; each row's class is then read
-  # exactly (`SecurityLabels.rank/1`).
-  defp above_predicate(column, rank, unreadable? \\ true) do
+  # exactly (`SecurityLabels.token_rank/1`).
+  defp above_predicate(column, rank) do
     likes =
       SecurityLabels.classes()
       |> Enum.drop(rank + 1)
       |> Enum.map_join(" OR ", &"lower(#{column}) LIKE '%#{&1}%'")
 
-    if unreadable?, do: "(#{likes} OR NOT json_valid(#{column}))", else: "(#{likes})"
+    "(#{likes} OR NOT json_valid(#{column}))"
   end
 
-  defp load(table, %{key: key} = spec, id) when is_binary(key) do
-    columns = Lineage.columns(spec)
+  # A row by its key, from what `prefetch/3` read or from the Store.
+  defp load(gate, table, %{key: key} = spec, id) when is_binary(key) do
+    memoized(gate, {:row, table, id}, fn ->
+      columns = Lineage.columns(spec)
 
-    sql =
-      "SELECT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} WHERE #{quote_name(key)} = ?1 LIMIT 1"
+      sql =
+        "SELECT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} WHERE #{quote_name(key)} = ?1 LIMIT 1"
 
-    case query!(sql, [id]) do
-      [values | _] -> columns |> Enum.zip(values) |> Map.new()
-      [] -> nil
-    end
+      case query!(sql, [id]) do
+        [values | _] -> columns |> Enum.zip(values) |> Map.new()
+        [] -> nil
+      end
+    end)
   end
 
-  defp load(_table, _spec, _id), do: nil
+  defp load(_gate, _table, _spec, _id), do: nil
 
   defp find_table(id) do
     Enum.find(Lineage.any_tables(), fn table ->
@@ -721,9 +1253,15 @@ defmodule OptimalEngine.Sync.Gate do
 
   # A query the gate decides by: if the Store cannot answer, nothing is sent.
   defp query!(sql, params) do
+    :telemetry.execute([:optimal_engine, :sync, :gate_query], %{count: 1}, %{})
+
     case Store.raw_query(sql, params) do
-      {:ok, rows} -> rows
-      {:error, reason} -> raise "the sync gate could not read the Store: #{inspect(reason)}"
+      {:ok, rows} ->
+        rows
+
+      {:error, reason} ->
+        raise OptimalEngine.Sync.Gate.StoreError,
+          message: "the sync gate could not read the Store: #{inspect(reason)}"
     end
   end
 
@@ -754,6 +1292,14 @@ defmodule OptimalEngine.Sync.Gate do
     end
   end
 
+  # The rows one top-level classification may read for the first time (see the
+  # moduledoc). Each call to `reset_budget/1` starts a new count; what an
+  # earlier call settled stays in the cache and costs nothing.
+  defp reset_budget(%__MODULE__{memo: memo}), do: :ets.insert(memo, {:budget, @node_budget})
+
+  defp spend(%__MODULE__{memo: memo}),
+    do: :ets.update_counter(memo, :budget, {2, -1}, {:budget, @node_budget}) >= 0
+
   defp cut(%__MODULE__{memo: memo}), do: :ets.insert(memo, {:cut, true})
   defp take_cut(%__MODULE__{memo: memo}), do: :ets.take(memo, :cut) != []
 
@@ -769,18 +1315,27 @@ defmodule OptimalEngine.Sync.Gate do
     end
   end
 
-  defp fold_max(_items, @restricted, _fun), do: @restricted
-
-  defp fold_max(items, start, fun) do
-    Enum.reduce_while(items, start, fn item, acc ->
-      acc = max_rank(acc, fun.(item))
-      if acc == @restricted, do: {:halt, acc}, else: {:cont, acc}
-    end)
+  # A replicating gate stops as soon as a row is known to be restricted; a
+  # reader's gate collects every token, since any one may be missing.
+  defp fold_union(items, gate, start, fun) do
+    if done?(gate, start) do
+      start
+    else
+      Enum.reduce_while(items, start, fn item, acc ->
+        acc = union(acc, fun.(item))
+        if done?(gate, acc), do: {:halt, acc}, else: {:cont, acc}
+      end)
+    end
   end
 
-  defp max_rank(nil, other), do: other
-  defp max_rank(rank, nil), do: rank
-  defp max_rank(left, right), do: max(left, right)
+  defp done?(%__MODULE__{mode: :class}, tokens),
+    do: SecurityLabels.token_rank(tokens) == @restricted
+
+  defp done?(%__MODULE__{}, _tokens), do: false
+
+  defp union(nil, other), do: other
+  defp union(tokens, nil), do: tokens
+  defp union(left, right), do: MapSet.union(left, right)
 
   @doc """
   The row a mutation carries, with its BLOB columns put back. A value SQLite
