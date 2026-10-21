@@ -10,6 +10,8 @@ Every create, update, and delete of that workspace's rows is appended to `sync_c
 The Engine seals captured changes into the ordered `sync_mutations` ledger with a SHA-256 of the payload, an idempotency key, and its replica id.
 BLOB values (embeddings) travel as hex, so vectors are copied, not recomputed.
 Tables keyed by a single integer row id are derivations whose ids differ per Engine; they replicate inserts only (`GET /api/sync/status` lists them).
+Tables that hold one Engine's own state are never captured (see What replicates).
+Capture seals the whole backlog before anything reads the ledger, a batch of 5000 rows at a time, so a read never misses a change that was already captured.
 
 ## What replicates, and what a peer can write
 
@@ -70,12 +72,12 @@ A blob named for a confined column (`nodes.path`, `contexts.path`, ...) is refus
 
 | Route | Scope | Purpose |
 | --- | --- | --- |
-| `GET /api/sync/changes?workspace=&since=` | `sync` | Ledger page after a sequence, never the requester's own changes (header `x-optimal-replica`) |
+| `GET /api/sync/changes?workspace=&since=` | `sync` | Ledger page after a sequence, never the requester's own changes (header `x-optimal-replica`); the page says `cursor`, `more`, `head` (the highest sequence of this workspace's ledger) and the `engine` envelope with the replica id |
 | `GET /api/sync/tables` | `sync` | The tables this Engine replicates and the ones it keeps local, with its schema migration |
-| `POST /api/sync/changes {workspace, engine, mutations}` | `sync` | Apply a peer's batch |
+| `POST /api/sync/changes {workspace, engine, replica_id, base_seq, base_replica_id, mutations}` | `sync` | Apply a peer's batch; `base_seq` is this Engine's ledger sequence the sender had pulled, `base_replica_id` the replica it believed that ledger was, `replica_id` the sender (see Conflicts); the reply says which base it used (`base`) |
 | `POST /api/sync/peers {workspace, url, api_key, policy, max_class, since?}` | admin | Register a peer; its key is encrypted with `CONNECTOR_KEY` |
 | `POST /api/sync/run` | admin | Run one pull and push cycle now |
-| `GET /api/sync/status?workspace=` | read | Ledger sequence, peers (status, cursors, pending changes), open conflicts |
+| `GET /api/sync/status?workspace=` | read | Ledger sequence, peers (status, cursors, `pulled_local_seq` (the pull floor), pending changes), open conflicts in total (`open_conflicts`) and per table (`conflicts_by_table`) |
 | `GET /api/sync/conflicts?workspace=`, `POST /api/sync/conflicts/:id/resolve` | read, admin | Conflicts and their resolution |
 
 A scheduler seals changes and runs every active peer every 20 seconds (`OPTIMAL_SYNC_INTERVAL_MS`), so a change reaches the other replica within a minute when both are online.
@@ -231,10 +233,18 @@ Each cycle the local Engine calls the relay with `Authorization: Bearer <relay k
 | Status | `GET <base>/status` | Learns the other Engine's replica id and migration; pauses when the migration differs or status does not report one |
 | Enable | `POST <base>/enable` with `{}` | Only when status says `enabled: false`; idempotent |
 | Pull | `GET <base>/pull?since=&limit=` | Applies each page and keeps its `cursor`, then pulls again from it while `more` is true |
-| Push | `POST <base>/push` with `{workspace, replica_id, engine, mutations}` | Sends the local ledger a page at a time, with the sender's `engine` envelope and no cursor; moves its push cursor only after a 2xx answer that reports `applied` |
+| Push | `POST <base>/push` with `{workspace, replica_id, engine, base_seq, base_replica_id, mutations}` | Sends the local ledger a page at a time, with the sender's `engine` envelope, its pull cursor as `base_seq` and the peer's replica id as `base_replica_id`, and no cursor of its own; moves its push cursor only after a 2xx answer that reports `applied` |
 
 The relay wraps answers in `{"data": ...}` and refusals in `{"error": {"code", "message"}}`; the client reads both, and a direct peer's unwrapped answers too.
 Pushed mutations carry the full ledger shape, `sequence` included, exactly as `GET /api/sync/changes` returns them.
+The relay must forward the push body unchanged: `base_seq` as a JSON integer, and `base_replica_id` and `replica_id` as they are.
+`base_seq` is a sequence of the managed Engine's `sync_mutations`, the numbering its pull pages use for `cursor`, so what the laptop sends back is what the managed Engine gave it.
+The managed Engine's refusals pass through unchanged, including `422` with `invalid_base_seq` (not a non-negative integer: a float, a negative, text), `invalid_base_replica_id` and `invalid_replica_id`; the client reports them as the peer's error.
+The reply to a push says which base was used: `base` is `"seq"` or `"unknown"` (`"floor"` is a pull's), and `base_rejected` (`above_head`, `replica_mismatch`) says why a base that was sent was not trusted.
+When a reply carries `base_rejected`, the peer's `message` says so (the status stays `active`): it means the relay does not report the managed Engine's own replica id, so every concurrent change was judged conservatively.
+Both Engines must run the same schema migration, and the pull floor adds one (`sync_peers.pulled_local_seq`), so a laptop that has this change and a managed Engine that does not pause each other (`status: paused_version`, see Version safety): the two upgrade together.
+Roll it out in this order: update the managed Engine first, then the laptops. A laptop that runs ahead keeps working on its own and pauses its peer; it resumes by itself in the first cycle after the managed Engine runs the same migration, with nothing lost, because nothing was pulled or pushed while it was paused. A managed Engine that is updated first is paused from the laptops' side the same way, until each laptop is updated.
+A managed Engine on the same migration that predates `base_seq` and `base_replica_id` ignores them and applies the push with the conservative check, which records every conflict as `unknown_base`.
 A page whose rows all stay home under the data-class gate is not sent, and the push cursor still moves past it.
 A page the relay refuses as too large (`413`) is sent again as pages half its size.
 When an answer is lost after the other side applied a page (a timeout or a `502`), the cursor stays, the next cycle sends the page again, and the other side applies none of it twice.
@@ -243,6 +253,12 @@ A `409` with code `version_mismatch` pauses the peer (`status: paused_version`) 
 Any other refusal (`403` without `engine:sync`, `404` not this tenant's Engine or workspace, `409 engine_not_running`) leaves the peer in `status: error` with the code and message, and the next cycle tries again.
 The message never carries the peer key or anything shaped like a key (a bearer token, a prefixed key, a long opaque token), even when the relay echoes one back.
 The local Engine is always the initiator, no peer Engine address is stored, and the same idempotency keys make a repeated cycle change nothing.
+If the peer answers as another replica id than the one its cursors were kept for (the Engine behind the URL was replaced, or restored under a new identity), its ledger sequences mean nothing to them: both cursors and the pull floor go back to zero, everything is pulled and pushed again (the mutation ids make that idempotent), and the change is kept as a resolved conflict of kind `peer_replaced` (`detail` has the reason, the old and new replica ids and the cursors it replaced).
+The same reset follows a peer whose change page reports a `head` below this Engine's pull cursor: the same Engine restored from an older copy, whose ledger ends before the cursor.
+A reset happens once in a run and not again for ten minutes: a peer that keeps changing its answer (a relay in front of two Engines, or a status that names another replica than the change pages) is reported as `peer_identity_unstable` in the peer's `message` (`status: error`), its cursors stay where the one reset left them, and nothing is pulled or pushed again from zero each cycle.
+After such a pull nothing is pushed in the run, and a push whose reply names another replica than the peer's (`engine.replica_id`) is an error that leaves the push cursor where it was: the page went to another Engine.
+A peer reset twice in a day and meeting a third change of identity is `halted` (`status: halted`, `peer_halted`): it is no longer run, and adding it again (`POST /api/sync/peers`) is the operator's word that the Engine behind the URL is settled, which clears the count.
+A change page that does not say which replica sent it (`engine.replica_id`) is refused (`peer_replica_unreported`), and a peer's known replica id is never overwritten by a missing one.
 
 `scripts/proof-relay-client.sh` proves the relay client end to end against a managed Engine (`RELAY_BASE`, `MIOSA_API_KEY_FILE`, `WORKSPACE`), and `--stand-in` runs the same checks against a second local Engine behind a relay stand-in.
 Run it on a disposable machine, never on one that holds a live store; it removes its temporary data, keys included, when it exits (`KEEP_DATA=1` keeps it).
@@ -250,15 +266,71 @@ Its conflict check edits a daily note on both sides; that a contested fact becom
 
 ## Conflicts
 
-When both sides changed the same row since the last sync, the newer change wins by its time and the conflict is recorded with both versions.
+Concurrency is ledger order; the winner is the clock.
+Two changes of a row are concurrent when the Engine that made the later-arriving one had not seen the other.
+What the sender had seen is decided at apply time:
+
+- A push carries `base_seq`, the receiver's ledger sequence the sender had pulled, `base_replica_id`, the replica the sender believed that ledger belonged to, and `replica_id`, the sender.
+  The receiver takes its latest change to the row by any device other than the sender and the change's origin (their order is the sender's ledger's).
+  If that change comes after `base_seq` in its ledger, the edit is concurrent.
+  If it comes at or before `base_seq`, the sender had seen it: there is no conflict and no clock check, and the incoming change is applied.
+- A pull is judged against a floor, `pulled_local_seq`, a sequence of this Engine's own ledger, and only against this Engine's own changes.
+  The floor is this Engine's ledger head at the start of the last cycle with that peer in which the pull reached the end of the peer's ledger and the push sent everything.
+  Its own changes at or below the floor were pushed in a complete cycle and count as seen by the peer; the ones after it are concurrent.
+  The floor moves forward only after such a cycle: if the pull stopped with `more`, or the push stopped at its page or time budget with rows left, it stays, so a change that may not have reached the peer is never taken as seen.
+  Until the first complete cycle there is no floor (it is zero): every change of this Engine's own counts as concurrent, and the conflicts are recorded as `unknown_base`.
+  `last_sync_at` is the start of that last complete cycle, for display; it decides nothing.
+  The floor is a sequence of this ledger, so the two Engines' clocks do not enter into which changes were seen.
+  A peer this Engine only pulls from (`policy: pull`) never receives its changes, so none counts as seen: its floor stays at zero and the clock decides each.
+  It is an approximation: a change the peer received in the same cycle that it edited the row in is below the floor, so the peer's edit is taken as made after seeing it; an edit the peer made before that change reached it, while this Engine's pull was already past, is decided by the clock.
+- A base that cannot be trusted counts as none, and its conflicts are `unknown_base`: no `base_seq` (absent or `null`), a `base_seq` above the head of this workspace's ledger, or a `base_replica_id` that is not this Engine's (the sequence is another ledger's).
+  Zero claims nothing seen and needs no replica to vouch for it.
+
+Skipping the clock check for what the sender had seen is sound because a sender pushes only what stands after what it took from the peer.
+A change of its own that the peer's change came after in the sender's ledger was overwritten there, so the peer already holds the winner: it is not sent (`superseded` in the push result, and it no longer counts as pending).
+What is sent is a change made after the sender pulled, or one that won against the peer's.
+So a causally later edit wins even when its clock is behind.
+
+Of two concurrent changes the newer wins by its time, the greater device id on a tie, so both Engines keep the same version.
+The times are the two Engines' own clocks: an Engine whose clock runs behind loses concurrent edits it made later, by as much as it runs behind, and a change that is not concurrent (the sender had seen the other) never goes by the clock at all.
+The conflict is recorded with both versions.
+A change this Engine did not take (the local one was newer) is not put in its ledger, so a hub never forwards it; the conflict is recorded once, however many times the change is delivered.
+A mutation id is global in the ledger and a sender chooses it, so a conflict's id comes from the tenant, the workspace, the mutation id and the resolution, and a mutation id that another workspace or tenant already used is refused (`mutation_id_in_use`), not skipped as a repeat.
+The ids this Engine gives its own changes (`mut_<replica id>_<n>`, and idempotency keys `<replica id>:<n>`) are its own: a change from another device that carries one is refused with `mutation_id_in_use`, because the ledger keeps the first row with an id and the Engine's own change would never be sealed. The `payload_hash` and the `idempotency_key` in the ledger are set here, from the payload and the mutation id; what the sender claims for them is not stored, and an `idempotency_key` that is not text is `invalid_mutation`.
+The row a change belongs to is named by its payload's key columns, not by the `entity_id` the sender sends: the conflict check and the ledger use the key the payload gives.
+A delete carries only the row's key: it is the same change as another delete and as nothing else, so an older delete does not beat a newer update here.
+A concurrent edit is recorded where it is seen: an initiator pulls before it pushes, so it records the conflict when the other Engine's change arrives, and its push then carries a `base_seq` that covers that change; the other Engine keeps the newer version without a second record, and records a conflict itself only when its own change came after the initiator's last pull.
 For facts, both versions also become claims in the review queue, so a contested fact is decided by a person.
 The claims quote the fact, so they carry the labels of both versions and of the fact as it is stored, and they name the fact (`metadata.fact_id`, on the claims and on the source package that holds the conflict text): they stay home as long as the fact does, including when it is labelled higher later.
 Changes that cannot be applied (a table that does not replicate, an unknown table or column, a key in another workspace, a constraint failure) are recorded as `apply_failed` conflicts; nothing is dropped silently.
 
+Every conflict says why (`GET /api/sync/conflicts`):
+
+| `kind` | Meaning |
+| --- | --- |
+| `concurrent_edit` | Both Engines changed the row since the base (a push's `base_seq`, or a pull's floor) |
+| `fact_divergence` | A concurrent edit of a fact; both versions also become claims |
+| `unknown_base` | There was no base to judge against (none sent, one that could not be trusted, or a first pull), so any change of the row counted as concurrent |
+| `apply_failed` | The change could not be applied; `detail` is the reason |
+| `peer_replaced` | The peer answered as another replica, or its ledger ended before the cursor; its cursors were reset (resolved at once) |
+| `superseded` | A change of this Engine's that was not pushed because the peer's change to the row came after it in this ledger, so the peer already holds the winner (resolved at once; `detail` has the later change's device and sequence) |
+| `concurrent_change` | The kind rows recorded before kinds existed keep; they mean `concurrent_edit` |
+
+For the first three, `detail` holds `mutation_id`, `local_seq` and `local_device` (the local change's ledger sequence and origin), `base_seq` (on a push), `local_floor` (on a pull), `local_occurred_at`, `remote_occurred_at`, and `resolution` (`kept_local_newer` or `applied_remote_newer`).
+`GET /api/sync/status` counts open conflicts in total (`open_conflicts`) and per table (`conflicts_by_table`).
+
+Scope.
+Replication is built for two Engines, a laptop and a cloud Engine.
+A cloud Engine that several laptops sync with follows the same rules: it judges each laptop's push against every other device's changes in its ledger, a third replica's included, and it forwards only changes it applied.
+Engines that sync with each other and with a hub as well, so that one change can reach an Engine by two paths, are not covered.
+
+A replica key is trusted to report what its holder saw: a `base_seq` that passes the checks above (this Engine's replica id, not past the workspace's head) is believed, and a `replica_id` that names this Engine itself is ignored.
+A key that can push can already write every replicated table of the workspace, so a forged base lets it choose which of its own changes are called concurrent, not reach anything else.
+
 ## Version safety
 
-Every page carries the sender's replica id, Engine version, and schema migration.
-A peer on a different migration pauses with `status: paused_version` and a message until both run the same Engine version.
+Every page carries the sender's replica id, Engine version, and schema migration (the highest migration this Engine has).
+A peer on a different migration pauses with `status: paused_version` and a message until both run the same Engine version, so two Engines that sync are upgraded together: the pause costs nothing but time, and both resume in the first cycle after they match.
 
 ## Seeding a replica
 
