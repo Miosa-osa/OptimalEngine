@@ -12,6 +12,7 @@
     "org_policy_flow_down",
     "connector_registry_api",
     "boot_generate_option",
-    "bundle_jobs_v1"
+    "bundle_jobs_v1",
+    "maintenance_jobs_v1"
   ]
 }

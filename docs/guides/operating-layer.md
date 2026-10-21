@@ -178,6 +178,7 @@ With no `workspace` the request means the `default` workspace: a key limited to 
 While a workspace has a job of the kind queued or running, another request returns that job with `status: "already_running"` and its `job_status`.
 `POST` with `kind=chunks` answers 503 while the embedder does not answer, and queues nothing.
 The client CLI's `optimal graph backfill [-w ws]` calls the graph route against a remote Engine ([CLI](cli.md)).
+An Engine that has these two job routes (`POST /api/maintenance/graph/backfill` and `POST /api/maintenance/embeddings` with `kind=chunks`) lists the `maintenance_jobs_v1` capability in `GET /api/version`, so a client can tell it from one that runs the backfills only through Mix.
 
 One run handles at most 500 chunks, or 1,000 contexts and claims, and never counts the whole scope.
 When more is left, the job completes and queues its continuation in the same transaction; the continuation resumes after the last row it reached.
