@@ -622,6 +622,12 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
         {"SELECT name, json_extract(meta, '$.kind') FROM items ORDER BY name", []},
         {"SELECT name FROM items WHERE json_extract(meta, '$.tags.a') = ?1", ["1"]},
         {"SELECT COALESCE(n, -1) FROM items ORDER BY name", []},
+        # The part of a value before a separator, empty when it is absent.
+        {"SELECT name, substr(name, 1, instr(name, 'a') - 1) FROM items ORDER BY name", []},
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["acme:ops"]},
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["default"]},
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", [":ops"]},
+        {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["a:b:c"]},
         {"SELECT name FROM items WHERE name IN (?1, ?2) ORDER BY name", ["alpha", "beta"]},
         {"SELECT name FROM items ORDER BY name LIMIT ?1 OFFSET ?2", [2, 1]},
         {"SELECT n IS NULL, n > 3 FROM items ORDER BY name", []},
