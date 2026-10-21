@@ -56,7 +56,7 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
     %{stub: stub, tmp: tmp, backing: backing}
   end
 
-  defp take_backup(backing, name, opts \\ []) do
+  defp take_backup(_backing, name, opts \\ []) do
     assert {:ok, target} = Backup.resolve_target(name)
     assert {:ok, info} = Backup.create(target, opts)
     info
@@ -189,7 +189,6 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
   end
 
   test "an offsite copy that does not match the catalog checksum is refused", %{
-    stub: stub,
     backing: backing,
     tmp: tmp
   } do
@@ -292,7 +291,7 @@ defmodule OptimalEngine.Storage.BackupOffsiteTest do
     assert S3Stub.object_body(stub.agent, key) != nil
   end
 
-  test "a backup that is not in the catalog is never shipped", %{backing: backing} do
+  test "a backup that is not in the catalog is never shipped" do
     assert {:error, {:backup_not_cataloged, _}} =
              Backup.ship_offsite("backup_not_a_real_id")
   end

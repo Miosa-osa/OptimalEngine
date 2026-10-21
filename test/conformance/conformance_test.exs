@@ -253,15 +253,6 @@ defmodule OptimalEngine.ConformanceTest do
     end
   end
 
-  defp write_script(contents) do
-    path =
-      Path.join(System.tmp_dir!(), "conformance-proof-#{System.unique_integer([:positive])}.exs")
-
-    File.write!(path, contents)
-    on_exit(fn -> File.rm(path) end)
-    path
-  end
-
   defp write_extra(contents) do
     path =
       Path.join(System.tmp_dir!(), "conformance-extra-#{System.unique_integer([:positive])}.exs")
