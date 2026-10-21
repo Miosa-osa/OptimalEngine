@@ -156,13 +156,118 @@ defmodule OptimalEngine.Auth.BootstrapTest do
           [id]
         )
 
-      log = capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(env(token)) end)
+      demoted = env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "read,write"})
+      log = capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(demoted) end)
 
       assert log =~ "no longer root"
       assert {:ok, key} = ApiKey.verify(token)
       assert key.scopes == ["read", "write"]
       assert key.metadata["allowed_security_labels"] == ["internal"]
-      assert key.metadata["allowed_partitions"] == []
+      # A list that held nothing but "*" is removed, not left as an empty list.
+      refute Map.has_key?(key.metadata, "allowed_partitions")
+    end
+
+    test "a root key demoted and made root again is given the grants again" do
+      token = token()
+      root = env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"})
+      assert :ok = Bootstrap.run(root)
+
+      assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "read,write"}))
+      assert {:ok, demoted} = ApiKey.verify(token)
+      assert demoted.metadata == %{"source" => "bootstrap"}
+
+      log = capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(root) end)
+      assert log =~ "registered before label and partition grants existed"
+      assert {:ok, again} = ApiKey.verify(token)
+      assert again.scopes == ["*"]
+      assert again.metadata == @root_grants
+    end
+
+    test "grants an operator set survive a demotion and a promotion untouched" do
+      token = token()
+      id = id_of(token)
+      root = env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"})
+      assert :ok = Bootstrap.run(root)
+
+      :ok =
+        sql!(
+          "UPDATE api_keys SET metadata = json_set(metadata, '$.allowed_security_labels', json('[]')) WHERE id = ?1",
+          [id]
+        )
+
+      assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "read"}))
+      assert {:ok, demoted} = ApiKey.verify(token)
+      assert demoted.metadata["allowed_security_labels"] == []
+      refute Map.has_key?(demoted.metadata, "allowed_partitions")
+
+      assert :ok = Bootstrap.run(root)
+      assert {:ok, again} = ApiKey.verify(token)
+      assert again.metadata["allowed_security_labels"] == []
+      refute Map.has_key?(again.metadata, "allowed_partitions")
+    end
+
+    test "a variable that is not set, blank or empty leaves the key as it is" do
+      token = token()
+
+      first =
+        env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*", "OPTIMAL_BOOTSTRAP_WORKSPACES" => "acme"})
+
+      assert :ok = Bootstrap.run(first)
+      assert {:ok, before} = ApiKey.verify(token)
+      assert before.scopes == ["*"]
+      assert before.workspace_scope == ["acme"]
+
+      for later <- [
+            env(token),
+            env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "", "OPTIMAL_BOOTSTRAP_WORKSPACES" => "  "}),
+            env(token, %{
+              "OPTIMAL_BOOTSTRAP_SCOPES" => " , ,",
+              "OPTIMAL_BOOTSTRAP_WORKSPACES" => ","
+            })
+          ] do
+        assert capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(later) end) == ""
+        assert {:ok, ^before} = ApiKey.verify(token)
+      end
+
+      # One variable set changes that attribute only.
+      assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_WORKSPACES" => "beta"}))
+      assert {:ok, key} = ApiKey.verify(token)
+      assert key.scopes == ["*"]
+      assert key.workspace_scope == ["beta"]
+      assert key.metadata == @root_grants
+    end
+
+    test "a scope this API does not know fails the boot and registers nothing" do
+      {:ok, count} = ApiKey.count(@tenant)
+
+      assert {:error, {:bootstrap_key, {:unknown_scopes, ["amdin"]}}} =
+               Bootstrap.run(env(token(), %{"OPTIMAL_BOOTSTRAP_SCOPES" => "read,amdin"}))
+
+      assert {:ok, ^count} = ApiKey.count(@tenant)
+
+      # And a key that exists is not changed by it.
+      token = token()
+      assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
+      assert {:ok, before} = ApiKey.verify(token)
+
+      assert {:error, {:bootstrap_key, {:unknown_scopes, ["admn"]}}} =
+               Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "admn"}))
+
+      assert {:ok, ^before} = ApiKey.verify(token)
+    end
+
+    test "every scope a route requires is one the bootstrap key accepts" do
+      known = OptimalEngine.API.PermissionPlug.known_scopes()
+
+      for %{method: method, path: path} <- OptimalEngine.API.Reference.routes(File.cwd!()),
+          path_info = String.split(path, "/", trim: true),
+          body <- [%{}, %{"stage" => "approval"}],
+          scope <-
+            List.wrap(OptimalEngine.API.PermissionPlug.required_grant(method, path_info, body)) do
+        assert scope in known, "#{method} #{path} requires #{scope}, which is not a known scope"
+      end
+
+      assert "*" in known
     end
 
     test "a key that becomes root is given the grants once, like one that predates them" do

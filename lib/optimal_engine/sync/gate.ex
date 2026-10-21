@@ -711,7 +711,12 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   defp unresolved(strict \\ true)
-  defp unresolved(true), do: MapSet.new([SecurityLabels.unresolved()])
+  # Something that cannot be found has no labels and no partitions we can read:
+  # unresolved on both axes, so a reader of every label but some partitions does
+  # not see it either.
+  defp unresolved(true),
+    do: MapSet.new([SecurityLabels.unresolved(), SecurityLabels.unresolved_partition()])
+
   defp unresolved(false), do: nil
 
   # -- rows that are pointed at, not pointing -----------------------------------
@@ -921,11 +926,19 @@ defmodule OptimalEngine.Sync.Gate do
   # The labels and partitions of a metadata column as a small JSON object, which
   # `SecurityLabels.metadata_tokens/1` reads like the whole column. Metadata that
   # is not JSON names nothing, as there.
+  # A key that appears twice is read as `0`, which is not a list and so is
+  # unresolved: SQLite reads the first of two, `Jason` the last, and a row must
+  # not pass as unlabelled because the two disagree.
   defp metadata_labels_sql(column) do
     quoted = quote_name(column)
 
-    "CASE WHEN json_valid(#{quoted}) THEN json_object('security_labels', json_extract(#{quoted}, '$.security_labels'), " <>
-      "'partition_ids', json_extract(#{quoted}, '$.partition_ids')) END"
+    field = fn key ->
+      "CASE WHEN (SELECT count(*) FROM json_each(#{quoted}) WHERE key = '#{key}') > 1 THEN 0 " <>
+        "ELSE json_extract(#{quoted}, '$.#{key}') END"
+    end
+
+    "CASE WHEN json_valid(#{quoted}) THEN json_object('security_labels', #{field.("security_labels")}, " <>
+      "'partition_ids', #{field.("partition_ids")}) END"
   end
 
   defp holds_above?(gate) do

@@ -107,7 +107,7 @@ Sending is fail-closed:
 - A chunk or document link whose row is gone, and which the local ledger never recorded, stays home: the gate cannot say what the row was.
 A row whose document was deleted after the ledger recorded it is judged by what the ledger recorded.
 So is a link that names no table (an id in a `citation_uri` or in the body of a wiki page) when the row it names was deleted: the ledger recorded which table it was in.
-An id the ledger never saw is only text that looks like an id and names nothing.
+An id the ledger never saw is only text that looks like an id and names nothing; a workspace that does not sync has no ledger, so a link in it to a row that was deleted is not caught.
 A memory with a dangling `source_chunk_id`, in a workspace where sync was turned on after the memory was written, no longer replicates until the link is repaired.
 - A `security_labels` list with an element that is blank or not a string (`["internal", ""]`, `["internal", 7]`) holds the row: the gate cannot say what the element meant.
 Class names are not case sensitive.
@@ -168,8 +168,10 @@ A row drawn from other rows must share a partition with each row it was drawn fr
 The four class names are not case sensitive (`Restricted` is `restricted`); any other label is compared exactly.
 - **The access lists** (`OptimalEngine.Identity.ACL`), for the address of the row: `optimal://memory/<workspace>/<id>` for a memory, the address of a document, `wiki:<slug>:<audience>` for a wiki page.
 
-A row carries the labels and partitions of the rows it was copied or derived from, and a row whose source cannot be found, or a label that cannot be read (not a string, not JSON), is seen by no one, a key granted every label included.
-Partitions that cannot be read are the same on their own axis: only a key granted every partition (`"*"`) sees past them, so granting every label does not.
+A row carries the labels and partitions of the rows it was copied or derived from.
+A row whose source cannot be found, or whose partitions cannot be read, is seen only by a key granted every label and every partition (`"*"` for both); a key granted every label and only some partitions does not see it.
+A label that cannot be read (not a string, not JSON) is seen by no key but one granted every label.
+A metadata that repeats `security_labels` or `partition_ids` is read as unresolved, because two readers of the same text would disagree on which of the two counts.
 So a memory staged from a restricted source package is not exported to a key that lacks `restricted`.
 A conflict version and a ledger entry show a reader the `row` and `blobs` they were judged by and nothing else; any other key in the payload is not served.
 An entry on the storage ledger of an entity type that is not a replicated table is judged by the labels and partitions of the row it carries, if it carries one.
@@ -185,7 +187,10 @@ The bootstrap key (`OPTIMAL_BOOTSTRAP_KEY`) carries `"*"` in both when its scope
 A bootstrap key with only `read,write` scopes, and any other key whose scopes are `["*"]` but that has no grants of its own, holds no `"*"`.
 A bootstrap key registered before the grants existed is given `"*"` once, at the next boot, when its scopes include `*` or `admin`; the boot logs a warning and sets `grants_initialized` in the key's metadata.
 Narrow it afterwards by replacing the lists (`[]` for none) and the next boot leaves it as it is.
-The scopes and workspaces of the environment are applied to an existing bootstrap key at every boot, with a warning in the log when they differ from what it holds: a key that stops being root loses its `"*"` grants (any others stay), and a key that becomes root is given them once, as above.
+`OPTIMAL_BOOTSTRAP_SCOPES` and `OPTIMAL_BOOTSTRAP_WORKSPACES` are applied to an existing bootstrap key at every boot when they are set, with a warning in the log when they differ from what it holds; when one is not set, or is blank, the key keeps what it holds (the defaults, `read,write` and `*`, are those of a key that is being created).
+A scope this API does not know (`admin` misspelled, say) fails the boot like a malformed token.
+A key that stops being root loses its `"*"` grants (a list that held only `"*"` is removed, a list the operator set is left as it is), and a key that becomes root is given them once, as above, so a key made root, demoted and made root again holds them again.
+A narrowing of the scopes or the workspaces made in the database is undone at the next boot when the variable is set.
 Rotating the token (a new `OPTIMAL_BOOTSTRAP_KEY`) registers a new key with the defaults for its scopes and revokes the old one; grants narrowed on the old key are not carried over.
 A key minted without `allowed_security_labels` or `allowed_partitions` gets none, never its minter's, whatever the minter holds, so pass the grants you mean.
 A minter can only give grants it holds (a minter that holds `"*"` can give any).

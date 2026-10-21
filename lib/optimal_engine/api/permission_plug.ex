@@ -19,6 +19,16 @@ defmodule OptimalEngine.API.PermissionPlug do
   @behaviour Plug
   import Plug.Conn
 
+  # Every scope a route can require (`required_grant/3`), and the unrestricted
+  # `*`. A test walks every route of the API reference against this list.
+  @known_scopes ~w(* read write admin sync claims:review topology:write connectors:write
+                   data:admin authority:read authority:enforce authority:approve
+                   authority:issue authority:admin)
+
+  @doc "The operation scopes a key can hold that this API knows, `*` included."
+  @spec known_scopes() :: [String.t()]
+  def known_scopes, do: @known_scopes
+
   def init(opts), do: opts
 
   def call(%{method: "OPTIONS"} = conn, _opts), do: conn

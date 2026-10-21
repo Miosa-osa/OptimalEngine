@@ -219,6 +219,37 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
       assert readable?.(["restricted", "internal"], ["team-a"])
     end
 
+    test "metadata that repeats a key is unresolved for the aggregate rule, as it is for a row",
+         ctx do
+      for {name, metadata} <- [
+            labels: ~s({"security_labels":[],"security_labels":["restricted"]}),
+            partitions: ~s({"partition_ids":[],"partition_ids":["team-a"]})
+          ] do
+        {:ok, workspace} = Workspace.create(%{slug: "dup-#{name}-#{ctx.n}", name: "Dup #{name}"})
+
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO memories (id, tenant_id, workspace_id, content, metadata) VALUES (?1, 'default', ?2, 'Repeated key', ?3)",
+            ["mem-dup-#{name}-#{ctx.n}", workspace.id, metadata]
+          )
+
+        report = %{"id" => "report-dup-#{name}-#{ctx.n}", "kind" => "promises"}
+
+        readable? = fn labels, partitions ->
+          Gate.with_reader(
+            "default",
+            workspace.id,
+            SecurityLabels.grants(labels, partitions),
+            &Gate.readable_row?(&1, "analysis_reports", report)
+          )
+        end
+
+        # An empty workspace would let this aggregate through.
+        refute readable?.(["internal"], []), "#{name}: read past a repeated key"
+        assert readable?.(["*"], ["*"]), "#{name}: a key of everything is not turned away"
+      end
+    end
+
     test "a row whose source cannot be found is read by no one", ctx do
       {:ok, orphan} =
         Versioned.create(%{
@@ -758,6 +789,30 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
 
       refute ghost.id in ids(export(ctx, mint(ctx, %{}), "memories")["memories"])
       assert ghost.id in ids(export(ctx, nil, "memories")["memories"])
+    end
+
+    test "a row with a missing source is not read by a key of every label and some partitions",
+         ctx do
+      {:ok, ghost} =
+        Versioned.create(%{
+          content: "Partitioned, and cites a chunk that is gone",
+          workspace_id: ctx.ws,
+          source_chunk_id: "chk-ghost-part-#{ctx.n}",
+          metadata: %{"partition_ids" => ["team-a"]}
+        })
+
+      every_label = mint(ctx, %{"allowed_security_labels" => ["*"]})
+
+      every_label_some_partitions =
+        mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["team-a"]})
+
+      everything = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      for token <- [every_label, every_label_some_partitions] do
+        refute ghost.id in ids(export(ctx, token, "memories")["memories"])
+      end
+
+      assert ghost.id in ids(export(ctx, everything, "memories")["memories"])
     end
 
     test "an unknown classification level is read by no one", ctx do

@@ -128,6 +128,14 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
   def unresolved, do: :unresolved
 
   @doc """
+  The token for partitions that could not be read, or whose rows could not be
+  found. A reader of every label does not see past it: only one of every
+  partition does.
+  """
+  @spec unresolved_partition() :: :unresolved_partition
+  def unresolved_partition, do: :unresolved_partition
+
+  @doc """
   The labels of a stored `security_labels` value as tokens. A value that
   cannot be read, and an element that is not a non-blank string, are
   `unresolved`: they are never taken for no label.
