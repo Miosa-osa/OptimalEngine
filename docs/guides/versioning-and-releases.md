@@ -21,7 +21,7 @@ retrieval and projection component versions
 Read it from `GET /api/version`.
 The lightweight `GET /api/health` and `GET /api/status` responses include the same identity.
 
-The current tracked contract is application `0.3.8`, API `v1`, contract schema `1`, expected migration `82`.
+The current tracked contract is application `0.3.8`, API `v1`, contract schema `1`, expected migration `83`.
 [engine-contract.json](../../engine-contract.json) supplies repository, schema, and capability metadata to [Version.info/0](../../lib/optimal_engine/version.ex) at compilation.
 [test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
 The runner applies every migration whose version is not yet recorded, but `expected_migration` and the replication gate compare the highest number, so two Engines that both report the same number must have applied the same set.
@@ -91,6 +91,7 @@ Some migrations need one operator step after the upgraded Engine has booted.
 | 79, indexes on the asset tables' foreign keys | No step. The first boot builds 13 more indexes before `/api/health` answers: about 0.7 s on a 1.75 GiB store, where the 16 of migration 78 took about 5 s. |
 | 81, ledger rows that hold the ids and keys of this Engine's changes | No step. The boot log says how many ledger rows were re-id'd, re-keyed and deleted (`[Migrations] 081 data: ...`), and names each ledger row whose mutation id has a colon, never its payload; such a row came from a peer before the id check, so check which peer sent it. |
 | 82, the ledger rows migration 81 moved keep a colon in their id | No step. The boot log says how many ledger rows were re-id'd and deleted (`[Migrations] 082 data: ...`). |
+| 83, graph edges record who asserted them | No step. The first boot reads every `child_of` and `links_to` edge in `graph_edges` once, with a lookup of each end in `contexts`, to give the Notion importer the edges it wrote before asserters were recorded; on a store with many such edges the boot takes longer before `/api/health` answers, so time it on a copy of the store first. |
 
 ### Graph edges upgrade
 
@@ -135,7 +136,7 @@ CI rejects a release tag that does not exactly match the application version.
 
 The Store applies pending migrations when it opens, in order, before the API answers.
 Each migration runs in one transaction together with the `schema_migrations` row that records it.
-The failed migration leaves no trace: when a statement fails, everything that migration wrote is rolled back, its version stays unrecorded, and `migration <nnn> failed and was rolled back: <cause>` is raised with the number zero-padded, for example `migration 083` in a release whose last real migration is 082.
+The failed migration leaves no trace: when a statement fails, everything that migration wrote is rolled back, its version stays unrecorded, and `migration <nnn> failed and was rolled back: <cause>` is raised with the number zero-padded, for example `migration 084` in a release whose last real migration is 083.
 The Store then does not open and the release exits without answering.
 Migrations before the failed one in the same boot stay applied.
 A release that adds several migrations can therefore leave a store between releases, and the previous release is not guaranteed to read it.

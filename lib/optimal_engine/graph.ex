@@ -61,15 +61,21 @@ defmodule OptimalEngine.Graph do
   - `:workspace_id` - workspace to attribute the edge to (default: `"default"`);
     the edge takes that workspace's tenant
   - `:weight`       - edge weight (default: `1.0`)
+  - `:asserted_by`  - who asserts it, such as an importer's job kind (default:
+    nobody in particular). An edge records one asserter: when a second one
+    asserts the same edge, the edge is recorded as asserted by nobody in
+    particular, so no single asserter retracts it as its own
+    (`retract_edge/4` with `:asserted_by`).
   """
   @spec assert_edge(String.t(), String.t(), String.t(), keyword()) :: :ok
   def assert_edge(source, target, predicate, opts \\ [])
       when is_binary(source) and is_binary(target) and is_binary(predicate) do
     ws = Keyword.get(opts, :workspace_id, "default")
     weight = Keyword.get(opts, :weight, 1.0)
+    asserted_by = Keyword.get(opts, :asserted_by)
     now = DateTime.to_iso8601(DateTime.utc_now())
 
-    insert_edge_via_store(source, target, predicate, weight, now, ws)
+    insert_edge_via_store(source, target, predicate, weight, now, ws, asserted_by)
     maybe_feed_triple_store(source, predicate, target, ws)
 
     :ok
@@ -81,25 +87,47 @@ defmodule OptimalEngine.Graph do
   re-import shows that a relation no longer holds (a page moved to another
   parent).
 
-  Options: `:workspace_id` (default `"default"`) and `:tenant_id` (default:
-  the workspace's tenant, as `scope/1` describes). Returns `:ok`; a missing
-  edge is not an error.
+  Options: `:workspace_id` (default `"default"`), `:tenant_id` (default: the
+  workspace's tenant, as `scope/1` describes), and `:asserted_by`: retract the
+  edge only while it is recorded as asserted by that asserter alone. Returns
+  `:ok`; a missing edge is not an error.
   """
   @spec retract_edge(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def retract_edge(source, target, predicate, opts \\ [])
       when is_binary(source) and is_binary(target) and is_binary(predicate) do
     {tenant_id, ws} = scope(opts)
+    params = [tenant_id, ws, source, target, predicate]
+
+    {sql, params} =
+      case Keyword.get(opts, :asserted_by) do
+        nil -> {"", params}
+        asserted_by -> {" AND asserted_by = ?6", params ++ [asserted_by]}
+      end
 
     case Store.raw_query(
-           "DELETE FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND source_id = ?3 AND target_id = ?4 AND relation = ?5",
-           [tenant_id, ws, source, target, predicate]
+           "DELETE FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND source_id = ?3 AND target_id = ?4 AND relation = ?5" <>
+             sql,
+           params
          ) do
       {:error, reason} ->
         {:error, reason}
 
       _ ->
-        maybe_retract_triple(source, predicate, target, ws)
+        # The triple goes with the row; a row another asserter holds stays.
+        unless edge_exists?(tenant_id, ws, source, target, predicate),
+          do: maybe_retract_triple(source, predicate, target, ws)
+
         :ok
+    end
+  end
+
+  defp edge_exists?(tenant_id, ws, source, target, predicate) do
+    case Store.raw_query(
+           "SELECT 1 FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND source_id = ?3 AND target_id = ?4 AND relation = ?5",
+           [tenant_id, ws, source, target, predicate]
+         ) do
+      {:ok, [_ | _]} -> true
+      _ -> false
     end
   end
 
@@ -222,7 +250,8 @@ defmodule OptimalEngine.Graph do
 
   @doc """
   The edges a context implies, as parameter lists for `edge_insert_sql/0`:
-  `[source, target, relation, weight, valid_from, workspace_id]`.
+  `[source, target, relation, weight, valid_from, workspace_id, asserted_by]`,
+  asserted by nobody in particular (`nil`).
 
   Entities are `mentioned_in` the context and `co_occurs` with each other, the
   context `lives_in` its node, has a `cross_ref` to every other destination,
@@ -235,7 +264,7 @@ defmodule OptimalEngine.Graph do
     now = DateTime.to_iso8601(DateTime.utc_now())
 
     for {source, target, relation, weight} <- structural_edges(context),
-        do: [source, target, relation, weight, now, ws]
+        do: [source, target, relation, weight, now, ws, nil]
   end
 
   # A context's structural edges, `{source, target, relation, weight}`:
@@ -357,29 +386,36 @@ defmodule OptimalEngine.Graph do
 
   @doc """
   Returns every edge of the given relations in a workspace, as maps with
-  `:source_id`, `:target_id` and `:relation`. Importers use it to compare the
-  edges they mean to hold with the edges already there.
+  `:source_id`, `:target_id`, `:relation` and `:asserted_by`. Importers use it
+  to compare the edges they mean to hold with the edges already there.
 
-  Options: `:workspace_id` (default: `"default"`) and `:tenant_id` (default:
-  the workspace's tenant, as `scope/1` describes).
+  Options: `:workspace_id` (default: `"default"`), `:tenant_id` (default: the
+  workspace's tenant, as `scope/1` describes), and `:asserted_by`, only the
+  edges recorded as asserted by that asserter alone.
   """
   @spec edges_by_relation([String.t()], keyword()) :: {:ok, [map()]} | {:error, term()}
   def edges_by_relation(relations, opts \\ []) when is_list(relations) do
     {tenant_id, ws} = scope(opts)
+    asserted_by = Keyword.get(opts, :asserted_by)
 
     if relations == [] do
       {:ok, []}
     else
-      placeholders = Enum.map_join(1..length(relations), ", ", &"?#{&1 + 2}")
+      n = length(relations)
+      placeholders = Enum.map_join(1..n, ", ", &"?#{&1 + 2}")
+
+      {by_sql, by_params} =
+        if asserted_by, do: {" AND asserted_by = ?#{n + 3}", [asserted_by]}, else: {"", []}
 
       case Store.raw_query(
-             "SELECT source_id, target_id, relation FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND relation IN (#{placeholders})",
-             [tenant_id, ws | relations]
+             "SELECT source_id, target_id, relation, asserted_by FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND relation IN (#{placeholders})" <>
+               by_sql,
+             [tenant_id, ws | relations] ++ by_params
            ) do
         {:ok, rows} ->
           {:ok,
-           Enum.map(rows, fn [source, target, relation] ->
-             %{source_id: source, target_id: target, relation: relation}
+           Enum.map(rows, fn [source, target, relation, by] ->
+             %{source_id: source, target_id: target, relation: relation, asserted_by: by}
            end)}
 
         {:error, reason} ->
@@ -633,7 +669,7 @@ defmodule OptimalEngine.Graph do
 
   # Writes edges through the Store, and unless `feed: false` into the default
   # triple store as well; returns how many Store writes failed. An edge that
-  # already exists is not a failure (INSERT OR IGNORE).
+  # already exists is not a failure (the insert keeps it).
   defp write_edges(edges, ws, opts \\ []) do
     now = DateTime.to_iso8601(DateTime.utc_now())
     feed? = Keyword.get(opts, :feed, true)
@@ -998,22 +1034,37 @@ defmodule OptimalEngine.Graph do
   # An edge takes the tenant of its workspace, as a context does
   # (`Store.insert_context`): for a workspace that is not registered, the
   # tenant its "<tenant>:" prefix names, else `"default"`.
+  # An edge already there keeps its row. Its asserter is kept when the same
+  # asserter asserts it again, and is cleared (nobody in particular) when
+  # another one does, so no single asserter retracts an edge someone else
+  # holds as well. The update runs only when a recorded asserter differs: a
+  # repeat assertion, and any assertion of an edge that is already nobody's,
+  # writes nothing and captures no sync change.
   @edge_insert_sql """
-  INSERT OR IGNORE INTO graph_edges
-    (source_id, target_id, relation, weight, valid_from, workspace_id, tenant_id)
+  INSERT INTO graph_edges
+    (source_id, target_id, relation, weight, valid_from, workspace_id, tenant_id, asserted_by)
   VALUES (?1, ?2, ?3, ?4, ?5, ?6,
           COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?6),
                    (SELECT t.id FROM tenants t WHERE t.id = substr(?6, 1, instr(?6, ':') - 1)),
-                   'default'))
+                   'default'),
+          ?7)
+  ON CONFLICT(tenant_id, workspace_id, source_id, target_id, relation)
+  DO UPDATE SET asserted_by = NULL
+  WHERE graph_edges.asserted_by IS NOT NULL
+    AND graph_edges.asserted_by IS DISTINCT FROM excluded.asserted_by
   """
 
-  @doc "The statement that writes one edge and ignores a duplicate."
+  @doc """
+  The statement that writes one edge, with the parameters
+  `[source, target, relation, weight, valid_from, workspace_id, asserted_by]`:
+  a duplicate keeps its row, and loses its asserter when another asserts it.
+  """
   @spec edge_insert_sql() :: String.t()
   def edge_insert_sql, do: @edge_insert_sql
 
   # Insert via Store GenServer (for use outside of Store callbacks)
-  defp insert_edge_via_store(source, target, relation, weight, now, ws) do
-    case Store.raw_query(@edge_insert_sql, [source, target, relation, weight, now, ws]) do
+  defp insert_edge_via_store(source, target, relation, weight, now, ws, asserted_by \\ nil) do
+    case Store.raw_query(@edge_insert_sql, [source, target, relation, weight, now, ws, asserted_by]) do
       {:ok, _} ->
         :ok
 

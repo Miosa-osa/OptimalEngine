@@ -436,10 +436,14 @@ defmodule OptimalEngine.Imports.NotionTest do
     handbook = Notion.context_id(ws, i.handbook)
     onboarding = Notion.context_id(ws, i.onboarding)
 
+    tasks = Notion.context_id(ws, i.tasks)
+
     # A user's edges: a link from a Notion page to a context that did not come
-    # from Notion, and another relation between two Notion pages.
+    # from Notion, another relation between two Notion pages, and the very
+    # link the importer wrote from the handbook to onboarding.
     :ok = Graph.assert_edge(handbook, "ctx-written-by-hand", "links_to", workspace_id: ws)
     :ok = Graph.assert_edge(handbook, onboarding, "related", workspace_id: ws)
+    :ok = Graph.assert_edge(handbook, onboarding, "links_to", workspace_id: ws)
 
     # The handbook no longer links to anything.
     handbook_path = "Team Handbook #{i.handbook}.md"
@@ -452,11 +456,71 @@ defmodule OptimalEngine.Imports.NotionTest do
 
     assert {:ok, _} = import!(ctx, Fixture.zip(files))
 
+    # The importer's own link to Tasks goes; the one the user also asserted
+    # stays, with the user's.
     {:ok, links} = Graph.edges_for(handbook, relation: "links_to", workspace_id: ws)
-    assert Enum.map(links, & &1.target_id) == ["ctx-written-by-hand"]
+
+    assert links |> Enum.map(& &1.target_id) |> Enum.sort() ==
+             Enum.sort(["ctx-written-by-hand", onboarding])
+
+    refute tasks in Enum.map(links, & &1.target_id)
 
     {:ok, related} = Graph.edges_for(handbook, relation: "related", workspace_id: ws)
     assert Enum.map(related, & &1.target_id) == [onboarding]
+  end
+
+  test "the upgrade gives edges written before provenance to the importer that wrote them", ctx do
+    i = Fixture.ids()
+    ws = ctx.workspace
+    {:ok, _} = import!(ctx, Fixture.export())
+    handbook = Notion.context_id(ws, i.handbook)
+
+    # As an Engine before the migration left them: no asserter on any edge.
+    {:ok, _} =
+      Store.raw_query("UPDATE graph_edges SET asserted_by = NULL WHERE workspace_id = ?1", [ws])
+
+    :ok = Graph.assert_edge(handbook, "ctx-written-by-hand", "links_to", workspace_id: ws)
+
+    # Near misses the backfill must not take: a context whose URI has the
+    # notion segment one level too deep, and one of another tenant.
+    first_week = Notion.context_id(ws, i.first_week)
+    write_guide = Notion.context_id(ws, i.write_guide)
+
+    {:ok, _} =
+      Store.raw_query("UPDATE contexts SET uri = ?2 WHERE id = ?1", [
+        first_week,
+        "optimal://#{ws}/elsewhere/notion/#{i.first_week}"
+      ])
+
+    other = "notion-near-#{System.unique_integer([:positive])}"
+    {:ok, _} = Tenant.create(%{id: other, name: "Near miss"})
+
+    {:ok, _} =
+      Store.raw_query("UPDATE contexts SET tenant_id = ?2 WHERE id = ?1", [write_guide, other])
+
+    {_version, _description, statements} =
+      Enum.find(OptimalEngine.Store.Migrations.all(), fn {_v, description, _s} ->
+        description == "graph edges record who asserted them"
+      end)
+
+    for {label, sql} <- statements, label != "graph_edges_asserted_by" do
+      {:ok, _} = Store.raw_query(sql, [])
+    end
+
+    {:ok, owned} =
+      Graph.edges_by_relation(["child_of", "links_to"],
+        workspace_id: ws,
+        asserted_by: "import.notion"
+      )
+
+    # 5 child_of and 3 links_to, less the child_of edges of the two near misses.
+    assert length(owned) == 5 + 3 - 2
+    refute Enum.any?(owned, &(&1.source_id in [first_week, write_guide]))
+
+    {:ok, all} = Graph.edges_by_relation(["child_of", "links_to"], workspace_id: ws)
+    assert %{asserted_by: nil} = Enum.find(all, &(&1.target_id == "ctx-written-by-hand"))
+    assert %{asserted_by: nil} = Enum.find(all, &(&1.source_id == first_week))
+    assert %{asserted_by: nil} = Enum.find(all, &(&1.source_id == write_guide))
   end
 
   test "page problems are reported and the import continues", ctx do
