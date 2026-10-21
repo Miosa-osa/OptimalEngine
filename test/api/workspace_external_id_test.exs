@@ -382,8 +382,7 @@ defmodule OptimalEngine.API.WorkspaceExternalIdTest do
   } do
     slug = "ext-legacy-#{n}"
 
-    {:ok, _} =
-      Workspace.create(%{id: "legacy-#{n}", slug: slug, name: "Legacy", external_id: external})
+    legacy_workspace("default", "legacy-#{n}", slug, external)
 
     assert {:ok, _} =
              DataSteward.rename_workspace("legacy-#{n}", "default:#{slug}",
@@ -532,15 +531,7 @@ defmodule OptimalEngine.API.WorkspaceExternalIdTest do
     legacy = tenant <> "-legacy"
     canonical = tenant <> ":legacy"
 
-    assert {:ok, _} =
-             Workspace.create(%{
-               id: legacy,
-               tenant_id: tenant,
-               organization_id: OptimalEngine.Organization.default_for(tenant),
-               slug: "legacy",
-               name: "Legacy",
-               external_id: external
-             })
+    legacy_workspace(tenant, legacy, "legacy", external)
 
     # The steward acts inside its caller's tenant: the key belongs to this one.
     {:ok, %{key: steward}} =
@@ -567,5 +558,21 @@ defmodule OptimalEngine.API.WorkspaceExternalIdTest do
   defp request_raw(method, path) do
     response = Router.call(conn(method, path), Router.init([]))
     {response.status, response.resp_body}
+  end
+
+  # A workspace row from before ids were checked: its id is not one
+  # `Workspace.create/1` takes any more, so the row is written as it was.
+  defp legacy_workspace(tenant, id, slug, external_id) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO workspaces (id, tenant_id, organization_id, slug, name, status, metadata, external_id) VALUES (?1, ?2, ?3, ?4, 'Legacy', 'active', '{}', ?5)",
+        [id, tenant, OptimalEngine.Organization.default_for(tenant), slug, external_id]
+      )
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO workspace_handles (tenant_id, slug, workspace_id) VALUES (?1, ?2, ?3)",
+        [tenant, slug, id]
+      )
   end
 end

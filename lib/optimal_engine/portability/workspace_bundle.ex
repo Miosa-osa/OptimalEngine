@@ -235,6 +235,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
            :ok <- if(opts[:consume], do: File.rm(path), else: :ok),
            {:ok, manifest} <- read_manifest(staging),
            :ok <- permitted(manifest),
+           :ok <- files_inside(manifest),
            :ok <- observed(observe, {:phase, :verifying}),
            :ok <-
              observed(observe, {:total, manifest_rows(manifest), length(manifest["files"] || [])}),
@@ -428,7 +429,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       # what the purge has to remove is read first.
       plan = artifact_plan(workspace_id)
       deleted = delete_rows(tenant_id, workspace_id)
-      File.rm_rf(Filesystem.path(root(), workspace_id))
+      :ok = remove_files(workspace_id)
 
       cache_purged =
         Cache.summary(Cache.purge_workspace(workspace_id, :move, plan_option(plan)))
@@ -534,6 +535,19 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   # `_` is where a blank or dot segment lands, so several ids can share it.
   defp own_name?(name), do: name not in ["", "_"] and not String.starts_with?(name, ".")
+
+  @doc """
+  Removes the directory a workspace owns, and only that: `:ok` after removing
+  it (or finding it gone), `{:error, :workspace_directory_shared}` when the
+  directory holds more than the workspace (`movable/1`) and is left alone.
+  """
+  @spec remove_files(String.t()) :: :ok | {:error, :workspace_directory_shared}
+  def remove_files(workspace_id) do
+    with :ok <- movable(workspace_id) do
+      File.rm_rf(Filesystem.path(root(), workspace_id))
+      :ok
+    end
+  end
 
   @doc """
   Resolves an `optimal://<workspace>/...` address: `{:local, uri}` when this
@@ -701,7 +715,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     source = Filesystem.path(root(), workspace_id)
     target = Path.join(staging, "files")
 
-    if File.dir?(source) and workspace_id != "default" do
+    if File.dir?(source) and movable(workspace_id) == :ok do
       source
       |> Path.join("**")
       |> Path.wildcard(match_dot: true)
@@ -807,18 +821,21 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   # A workspace id names its tenant (`<tenant>:<slug>`), so a caller that asks
   # for one may not take another tenant's name; a bare slug gets this tenant's.
+  # Either way the id is one `Workspace.check_id/2` accepts for the tenant.
   defp requested_workspace_id(nil, _tenant_id), do: {:ok, nil}
 
   defp requested_workspace_id(id, tenant_id) when is_binary(id) do
     case String.split(id, ":", parts: 2) do
-      [^tenant_id, slug] when slug != "" -> {:ok, id}
+      [^tenant_id, slug] when slug != "" -> checked_id(id, tenant_id)
       [_other_tenant, _slug] -> {:error, :workspace_id_not_in_tenant}
-      [slug] when slug != "" -> {:ok, tenant_id <> ":" <> slug}
+      [slug] when slug != "" -> checked_id(tenant_id <> ":" <> slug, tenant_id)
       _blank -> {:error, :invalid_workspace_id}
     end
   end
 
   defp requested_workspace_id(_id, _tenant_id), do: {:error, :invalid_workspace_id}
+
+  defp checked_id(id, tenant_id), do: with(:ok <- Workspace.check_id(id, tenant_id), do: {:ok, id})
 
   defp plan_target(manifest, tenant_id, opts) do
     source = manifest["workspace"]
@@ -831,6 +848,19 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       if target_id == source["id"],
         do: source["slug"],
         else: target_id |> String.split(":", parts: 2) |> List.last()
+
+    # The target is a workspace id of the tenant, and a bundle that carries
+    # files lands in a directory that holds that workspace alone: both are
+    # known before the first row is written.
+    with :ok <- Workspace.check_id(target_id, tenant_id),
+         :ok <- own_directory_for_files(manifest, target_id) do
+      plan_workspace(manifest, tenant_id, opts, target_id, target_slug)
+    end
+  end
+
+  defp plan_workspace(manifest, tenant_id, opts, target_id, target_slug) do
+    source = manifest["workspace"]
+    mode = Keyword.get(opts, :mode, :create)
 
     case {Workspace.get(target_id), mode} do
       {{:ok, _existing}, :create} ->
@@ -926,7 +956,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     id = source["id"]
 
-    same_tenant? = is_binary(id) and match?([^tenant_id, _slug], String.split(id, ":", parts: 2))
+    # The manifest is data a bundle's writer supplies: its id is used only
+    # when it is an id the importing tenant could have (`Workspace.check_id/2`),
+    # else the id derives from the slug like any other target's.
+    same_tenant? = is_binary(id) and Workspace.check_id(id, tenant_id) == :ok
 
     cond do
       not same_tenant? -> derived
@@ -1290,19 +1323,48 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     rows != []
   end
 
+  # The plan has already refused a bundle with a file outside the workspace or
+  # a directory that is not the workspace's own; both are checked again here,
+  # because this is the function that writes.
   defp write_files(manifest, staging, plan) do
-    target = Filesystem.path(root(), plan.workspace_id)
+    with :ok <- own_directory_for_files(manifest, plan.workspace_id),
+         :ok <- files_inside(manifest) do
+      target = Filesystem.path(root(), plan.workspace_id)
 
-    Enum.each(manifest["files"], fn file ->
-      destination = Path.join(target, file["path"])
-
-      if String.starts_with?(Path.expand(destination), Path.expand(target) <> "/") do
+      Enum.each(manifest["files"] || [], fn file ->
+        destination = Path.join(target, file["path"])
         File.mkdir_p!(Path.dirname(destination))
         File.cp!(Path.join([staging, "files", file["path"]]), destination)
-      end
-    end)
+      end)
 
-    {:ok, length(manifest["files"])}
+      {:ok, length(manifest["files"] || [])}
+    end
+  end
+
+  # A bundle's files are named by relative paths under the workspace's
+  # directory. One that is absolute, empty, climbs out of it (`../x`) or holds
+  # a NUL byte refuses the bundle: the importer never skips such a file and
+  # carries on, and never reads one while verifying.
+  defp files_inside(manifest) do
+    inside? = fn
+      %{"path" => path} when is_binary(path) ->
+        not String.contains?(path, <<0>>) and
+          match?({:ok, safe} when safe != "", Path.safe_relative(path))
+
+      _entry ->
+        false
+    end
+
+    if Enum.all?(manifest["files"] || [], inside?),
+      do: :ok,
+      else: {:error, :file_path_outside_workspace}
+  end
+
+  # A bundle that carries files needs a directory that holds its workspace
+  # alone (`movable/1`): never the Engine root, a directory the root uses, or
+  # a hidden one.
+  defp own_directory_for_files(manifest, workspace_id) do
+    if (manifest["files"] || []) == [], do: :ok, else: movable(workspace_id)
   end
 
   defp delete_rows(tenant_id, workspace_id) do
