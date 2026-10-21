@@ -127,11 +127,28 @@ defmodule OptimalEngine.API.EncodedPathTest do
       assert request(:get, encoded.(ctx.b), ctx.reader_a).status == 403
     end
 
-    test "the plug hands on the decoded segments" do
-      conn = PathPlug.call(conn(:get, "/api/workspaces/t%3Aa/files/x%2Fy"), [])
+    test "the plug hands on the decoded segments, with an escaped slash kept escaped" do
+      conn = PathPlug.call(conn(:get, "/api/workspaces/t%3Aa/files/x%2fy%2Fz"), [])
 
       refute conn.halted
-      assert conn.path_info == ["api", "workspaces", "t:a", "files", "x/y"]
+      assert conn.path_info == ["api", "workspaces", "t:a", "files", "x%2Fy%2Fz"]
+    end
+
+    test "an escaped slash cannot lower the grant a route needs", ctx do
+      # Joined after decoding, `a/b` would no longer match the one-segment id
+      # of the review route, and the change would be graded as a plain write.
+      path =
+        "/api/memory-core/claims/a%2Fb/promote?" <> URI.encode_query(%{workspace: ctx.a})
+
+      conn = request(:post, path, ctx.writer, %{})
+      assert conn.status == 403, "answered #{conn.status}: #{conn.resp_body}"
+      assert Jason.decode!(conn.resp_body)["error"] == "permission_scope_denied"
+    end
+
+    test "a control byte or text that is not UTF-8 is refused", ctx do
+      for path <- ["/api/search%00", "/api/wiki/a%0Ab", "/api/wiki/%C0%AF", "/api/wiki/%FF"] do
+        assert refused?(request(:get, path, ctx.writer)), path
+      end
     end
   end
 
