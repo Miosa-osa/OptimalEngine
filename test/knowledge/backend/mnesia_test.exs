@@ -1,6 +1,8 @@
 defmodule OptimalEngine.Knowledge.Backend.MnesiaTest do
   use ExUnit.Case, async: false
 
+  import OptimalEngine.AtomProbe
+
   alias OptimalEngine.Knowledge.Backend.Mnesia
 
   setup do
@@ -98,5 +100,46 @@ defmodule OptimalEngine.Knowledge.Backend.MnesiaTest do
 
   test "sparql returns not supported", %{state: state} do
     assert {:error, :sparql_not_supported} = Mnesia.sparql(state, "SELECT ?s WHERE { ?s ?p ?o }")
+  end
+
+  describe "store ids" do
+    test "an id that is not short plain lowercase text is refused and makes no atom" do
+      bad = never_seen("zz_store") <> "-Upper"
+
+      assert {:error, :invalid_store_id} = Mnesia.init(bad, [])
+      refute_atom("mk_#{bad}_spo")
+
+      for id <- ["", "Upper", "1abc", "has space", "a-b", String.duplicate("a", 33), nil, 12] do
+        assert {:error, :invalid_store_id} = Mnesia.init(id, []), inspect(id)
+      end
+    end
+
+    test "an id of 32 characters is accepted" do
+      id = "a" <> String.duplicate("b", 31)
+
+      assert {:ok, state} = Mnesia.init(id, copies: :ram_copies)
+      on_exit(fn -> Mnesia.terminate(state) end)
+    end
+
+    test "a new id is refused once the node has opened as many as the cap allows", %{
+      state: state
+    } do
+      original = Application.get_env(:optimal_engine, :mnesia_max_stores)
+      Application.put_env(:optimal_engine, :mnesia_max_stores, 0)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:optimal_engine, :mnesia_max_stores, original),
+          else: Application.delete_env(:optimal_engine, :mnesia_max_stores)
+      end)
+
+      id = never_seen("zz_store")
+
+      assert {:error, :too_many_stores} = Mnesia.init(id, [])
+      refute_atom("mk_#{id}_spo")
+
+      # An id the node already opened can be opened again.
+      assert {:ok, _state} = Mnesia.init(state.store_id, [])
+    end
   end
 end

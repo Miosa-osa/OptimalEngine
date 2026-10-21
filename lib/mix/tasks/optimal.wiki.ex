@@ -27,9 +27,12 @@ defmodule Mix.Tasks.Optimal.Wiki do
 
   use Mix.Task
 
+  alias OptimalEngine.SafeAtom
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Wiki
   alias OptimalEngine.Wiki.Service, as: WikiService
+
+  @formats [:plain, :markdown, :claude, :openai]
 
   @impl Mix.Task
   def run(args) do
@@ -49,17 +52,27 @@ defmodule Mix.Tasks.Optimal.Wiki do
     tenant_id = Keyword.get(opts, :tenant, Tenant.default_id())
     workspace_id = Keyword.get(opts, :workspace, "default")
     audience = Keyword.get(opts, :audience, "default")
-    format = Keyword.get(opts, :format, "markdown") |> String.to_atom()
 
     case positional do
       ["list" | _] -> list(tenant_id, workspace_id)
-      ["view", slug | _] -> view(tenant_id, workspace_id, slug, audience, format)
+      ["view", slug | _] -> view(tenant_id, workspace_id, slug, audience, parse_format(opts))
       ["verify", slug | _] -> verify(tenant_id, workspace_id, slug, audience)
       ["verify-all" | _] -> verify_all(tenant_id, workspace_id)
       ["render-node", node | _] -> render_node(node, tenant_id, workspace_id, audience, opts)
       ["render-tree" | _] -> render_tree(tenant_id, workspace_id, audience, opts)
       ["check", slug | _] -> check(slug, tenant_id, workspace_id, audience)
       _ -> Mix.shell().info(@moduledoc)
+    end
+  end
+
+  # The format is a CLI argument: it is looked up among the known formats and
+  # never becomes an atom.
+  defp parse_format(opts) do
+    format = Keyword.get(opts, :format, "markdown")
+
+    case SafeAtom.fetch(format, @formats) do
+      {:ok, atom} -> atom
+      :error -> Mix.raise("Unknown format '#{format}'. Use: plain, markdown, claude, openai")
     end
   end
 

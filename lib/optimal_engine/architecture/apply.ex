@@ -47,13 +47,13 @@ defmodule OptimalEngine.Architecture.Apply do
   Validate a data point against an architecture spec. Returns `:ok`
   or `{:error, [{field, reason}]}` listing every mismatch.
   """
-  @spec validate(Architecture.t(), data_point()) :: :ok | {:error, [{atom(), atom()}]}
+  @spec validate(Architecture.t(), data_point()) :: :ok | {:error, [{Field.name(), atom()}]}
   def validate(%Architecture{} = arch, data) when is_map(data) do
-    data = normalize_keys(data)
+    data = index_by_name(data)
 
     problems =
       Enum.flat_map(arch.fields, fn field ->
-        value = Map.get(data, field.name)
+        value = Map.get(data, to_string(field.name))
 
         cond do
           field.required and is_nil(value) -> [{field.name, :missing_required}]
@@ -70,9 +70,9 @@ defmodule OptimalEngine.Architecture.Apply do
   `{:ok, %{field => output}}` or `{:error, reason}`.
   """
   @spec run(Architecture.t(), data_point(), run_opts()) ::
-          {:ok, %{atom() => field_output()}} | {:error, term()}
+          {:ok, %{Field.name() => field_output()}} | {:error, term()}
   def run(%Architecture{} = arch, data, opts \\ []) do
-    data = normalize_keys(data)
+    data = index_by_name(data)
     context_id = Keyword.get(opts, :context_id)
     tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
     skip_persist? = Keyword.get(opts, :skip_persist, false)
@@ -84,7 +84,7 @@ defmodule OptimalEngine.Architecture.Apply do
         |> Enum.reduce(%{}, fn field, acc ->
           case run_field(
                  field,
-                 Map.get(data, field.name),
+                 Map.get(data, to_string(field.name)),
                  arch,
                  context_id,
                  tenant_id,
@@ -142,18 +142,19 @@ defmodule OptimalEngine.Architecture.Apply do
         context_id,
         architecture_id,
         Atom.to_string(processor),
-        Atom.to_string(field),
+        to_string(field),
         Jason.encode!(%{kind: output.kind, metadata: output[:metadata] || %{}})
       ]
     )
   end
 
-  defp normalize_keys(map) when is_map(map) do
-    Map.new(map, fn
-      {k, v} when is_binary(k) -> {String.to_atom(k), v}
-      {k, v} when is_atom(k) -> {k, v}
-    end)
-  rescue
-    ArgumentError -> map
+  # A data point arrives with atom keys (code) or string keys (a request), and
+  # a field name is an atom (built-in architectures) or text (stored ones). Both
+  # are compared as text, so that no atom is created from a key: the data point
+  # is indexed by key text and each field reads its value by its name's text.
+  defp index_by_name(map) when is_map(map) do
+    for {key, value} <- map, is_atom(key) or is_binary(key), into: %{} do
+      {to_string(key), value}
+    end
   end
 end

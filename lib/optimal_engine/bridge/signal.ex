@@ -14,6 +14,7 @@ defmodule OptimalEngine.Bridge.Signal do
   - `wrap/1` — Wraps an Optimal signal into a CloudEvents v1.0.2 envelope
   """
 
+  alias OptimalEngine.SafeAtom
   alias OptimalEngine.Signal, as: OptSignal
   alias OptimalEngine.Signal.Classifier.Analyzer
   alias OptimalEngine.Signal.Envelope
@@ -97,13 +98,24 @@ defmodule OptimalEngine.Bridge.Signal do
       signal_genre: normalize_genre(signal.genre),
       signal_type: normalize_type(signal.type),
       signal_format: normalize_format(signal.format),
-      signal_structure:
-        if(is_binary(signal.structure) and signal.structure != "",
-          do: String.to_atom(signal.structure),
-          else: nil
-        ),
+      signal_structure: structure_atom(signal.structure),
       signal_sn_ratio: signal.sn_ratio
     )
+  end
+
+  # A signal's structure is the text of a `structure:` frontmatter line, so it
+  # is data a file supplies and never becomes an atom. It is looked up among the
+  # structure templates the analyzer knows; any other text reads as `:default`,
+  # the analyzer's own fallback, and not as unresolved (`nil` lowers the S/N
+  # score and reports a structure failure for a signal that did name one).
+  defp structure_atom(structure) when is_binary(structure) and structure != "",
+    do: SafeAtom.cast(structure, known_structures(), :default)
+
+  defp structure_atom(_structure), do: nil
+
+  defp known_structures do
+    templates = Analyzer.type_genre_map() |> Map.values() |> Enum.map(&elem(&1, 1))
+    Enum.uniq([:default | templates])
   end
 
   defp normalize_genre(nil), do: nil

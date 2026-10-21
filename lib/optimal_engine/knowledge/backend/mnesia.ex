@@ -15,6 +15,17 @@ defmodule OptimalEngine.Knowledge.Backend.Mnesia do
   - `:copies` — `:ram_copies` (default) or `:disc_copies`
   - `:nodes` — List of nodes to replicate to (default: [node()])
 
+  ## Store ids
+
+  Mnesia names its tables with atoms, and an atom is never garbage collected.
+  A store id therefore has to be short and plain: a lowercase letter followed
+  by up to 31 lowercase letters, digits and underscores. `init/2` answers
+  `{:error, :invalid_store_id}` for any other id, and
+  `{:error, :too_many_stores}` once this node has opened as many distinct ids
+  as the cap allows (256 by default; `config :optimal_engine,
+  :mnesia_max_stores`). An id already opened can be opened again. At most
+  three atoms are created per id, so the table atoms are bounded.
+
   ## Setup
 
   For disc_copies, initialize Mnesia schema first:
@@ -27,28 +38,33 @@ defmodule OptimalEngine.Knowledge.Backend.Mnesia do
 
   defstruct [:store_id, :spo_table, :pos_table, :osp_table]
 
+  @default_max_stores 256
+
   @impl true
   def init(store_id, opts) do
-    copies = Keyword.get(opts, :copies, :ram_copies)
-    nodes = Keyword.get(opts, :nodes, [node()])
+    with {:ok, id} <- check_store_id(store_id),
+         :ok <- admit_store(id) do
+      copies = Keyword.get(opts, :copies, :ram_copies)
+      nodes = Keyword.get(opts, :nodes, [node()])
 
-    ensure_mnesia_started()
+      ensure_mnesia_started()
 
-    spo_table = table_name(store_id, "spo")
-    pos_table = table_name(store_id, "pos")
-    osp_table = table_name(store_id, "osp")
+      spo_table = table_name(id, "spo")
+      pos_table = table_name(id, "pos")
+      osp_table = table_name(id, "osp")
 
-    create_table(spo_table, copies, nodes)
-    create_table(pos_table, copies, nodes)
-    create_table(osp_table, copies, nodes)
+      create_table(spo_table, copies, nodes)
+      create_table(pos_table, copies, nodes)
+      create_table(osp_table, copies, nodes)
 
-    {:ok,
-     %__MODULE__{
-       store_id: store_id,
-       spo_table: spo_table,
-       pos_table: pos_table,
-       osp_table: osp_table
-     }}
+      {:ok,
+       %__MODULE__{
+         store_id: store_id,
+         spo_table: spo_table,
+         pos_table: pos_table,
+         osp_table: osp_table
+       }}
+    end
   end
 
   @impl true
@@ -166,6 +182,36 @@ defmodule OptimalEngine.Knowledge.Backend.Mnesia do
 
   defp table_name(store_id, suffix) do
     :"mk_#{store_id}_#{suffix}"
+  end
+
+  defp check_store_id(store_id) when is_atom(store_id) and not is_nil(store_id),
+    do: check_store_id(Atom.to_string(store_id))
+
+  defp check_store_id(store_id) when is_binary(store_id) do
+    if Regex.match?(~r/\A[a-z][a-z0-9_]{0,31}\z/, store_id),
+      do: {:ok, store_id},
+      else: {:error, :invalid_store_id}
+  end
+
+  defp check_store_id(_store_id), do: {:error, :invalid_store_id}
+
+  # The ids this node has opened, kept for the life of the VM because the table
+  # atoms of a closed store stay in the atom table.
+  defp admit_store(id) do
+    known = :persistent_term.get({__MODULE__, :stores}, MapSet.new())
+    max = Application.get_env(:optimal_engine, :mnesia_max_stores, @default_max_stores)
+
+    cond do
+      MapSet.member?(known, id) ->
+        :ok
+
+      MapSet.size(known) >= max ->
+        {:error, :too_many_stores}
+
+      true ->
+        :persistent_term.put({__MODULE__, :stores}, MapSet.put(known, id))
+        :ok
+    end
   end
 
   defp ensure_mnesia_started do

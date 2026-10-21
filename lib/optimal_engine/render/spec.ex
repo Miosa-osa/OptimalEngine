@@ -20,6 +20,10 @@ defmodule OptimalEngine.Render.Spec do
                      (`[:text, :image, :video, :audio]`)
   """
 
+  alias OptimalEngine.SafeAtom
+
+  @modalities [:text, :image, :video, :audio]
+
   @type t :: %__MODULE__{
           name: String.t(),
           title: String.t(),
@@ -122,13 +126,16 @@ defmodule OptimalEngine.Render.Spec do
 
   defp parse_modalities(nil), do: [:text]
 
+  # A spec file names modalities as text. Only the known ones are kept, and
+  # no atom is created from the others.
   defp parse_modalities(list) when is_list(list) do
     list
-    |> Enum.map(fn
-      m when is_binary(m) -> String.to_atom(m)
-      m when is_atom(m) -> m
+    |> Enum.flat_map(fn m ->
+      case SafeAtom.fetch(m, @modalities) do
+        {:ok, atom} -> [atom]
+        :error -> []
+      end
     end)
-    |> Enum.filter(&(&1 in [:text, :image, :video, :audio]))
     |> case do
       [] -> [:text]
       mods -> mods

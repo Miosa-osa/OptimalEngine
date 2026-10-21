@@ -303,6 +303,20 @@ defmodule OptimalEngine.AuthorityTest do
       assert decision.effect == :deny
       assert decision.local_deny_id == deny.id
     end
+
+    test "a local deny reads its fields from atom keys as well as string keys", ctx do
+      {:ok, deny} =
+        Authority.add_local_deny(
+          ctx.tenant,
+          %{subject: "agent:*", action: "read", reason: "freeze"},
+          "user:owner"
+        )
+
+      assert deny.subject == "agent:*"
+      assert deny.action == "read"
+      assert deny.reason == "freeze"
+      assert deny.resource == "**"
+    end
   end
 
   describe "grant issuance and lifecycle" do
@@ -452,6 +466,37 @@ defmodule OptimalEngine.AuthorityTest do
       assert {parent_jti, child_jti} == {parent.jti, child.jti}
       assert {:ok, %{status: "revoked"}} = Grants.fetch(ctx.tenant, child.jti)
       assert {:error, :invalid_state} = Grants.restore(ctx.tenant, parent.jti)
+    end
+
+    test "a parent that is not active is named by its state", ctx do
+      narrow = fn parent ->
+        Authority.narrow_grant(
+          ctx.tenant,
+          parent.jti,
+          %{"subject" => "agent:helper"},
+          "agent:analyst"
+        )
+      end
+
+      suspended = grant!(ctx, %{"delegable" => true})
+      {:ok, _} = Authority.suspend_grant(ctx.tenant, suspended.jti, "user:owner")
+      assert {:error, :parent_suspended, _} = narrow.(suspended)
+
+      revoked = grant!(ctx, %{"delegable" => true})
+      {:ok, _} = Authority.revoke_grant(ctx.tenant, revoked.jti, "user:owner")
+      assert {:error, :parent_revoked, _} = narrow.(revoked)
+
+      for {state, reason} <- [consumed: :parent_consumed, expired: :parent_expired] do
+        other = grant!(ctx, %{"delegable" => true})
+
+        {:ok, _} =
+          Store.raw_query(
+            "UPDATE authority_grants SET status = ?3 WHERE tenant_id = ?1 AND jti = ?2",
+            [ctx.tenant, other.jti, Atom.to_string(state)]
+          )
+
+        assert {:error, ^reason, _} = narrow.(other)
+      end
     end
   end
 

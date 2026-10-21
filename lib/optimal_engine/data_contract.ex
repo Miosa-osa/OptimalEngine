@@ -2,10 +2,10 @@ defmodule OptimalEngine.DataContract do
   @moduledoc "Validates governed write contracts before data reaches canonical modules."
 
   @contracts %{
-    entity: %{required: ~w(workspace_id entity_kind canonical_name), version: 1},
-    mention: %{required: ~w(workspace_id surface_text), version: 1},
+    entity: %{required: ~w(workspace_id entity_kind canonical_name)a, version: 1},
+    mention: %{required: ~w(workspace_id surface_text)a, version: 1},
     relationship: %{
-      required: ~w(workspace_id from_entity_id to_entity_id relationship_type actor_id),
+      required: ~w(workspace_id from_entity_id to_entity_id relationship_type actor_id)a,
       version: 1
     }
   }
@@ -14,10 +14,9 @@ defmodule OptimalEngine.DataContract do
     case Map.fetch(@contracts, type) do
       {:ok, contract} ->
         missing =
-          Enum.filter(
-            contract.required,
-            &blank?(Map.get(attrs, &1) || Map.get(attrs, String.to_atom(&1)))
-          )
+          contract.required
+          |> Enum.filter(&blank?(Map.get(attrs, Atom.to_string(&1)) || Map.get(attrs, &1)))
+          |> Enum.map(&Atom.to_string/1)
 
         if missing == [] do
           {:ok, %{type: type, schema_version: contract.version, attrs: attrs}}

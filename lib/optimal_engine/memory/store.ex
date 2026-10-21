@@ -40,6 +40,63 @@ defmodule OptimalEngine.Memory.Store do
   @doc "List all collection names."
   @callback collections() :: {:ok, [collection()]}
 
+  # The metadata keys an entry has, as the entry type names them.
+  @metadata_keys %{
+    "created_at" => :created_at,
+    "updated_at" => :updated_at,
+    "access_count" => :access_count,
+    "tags" => :tags
+  }
+
+  # The keys of the maps the engine itself stores (episodes and events), as atoms.
+  @value_keys %{
+    "type" => :type,
+    "description" => :description,
+    "context" => :context,
+    "outcome" => :outcome,
+    "tags" => :tags,
+    "created_at" => :created_at,
+    "data" => :data,
+    "session_id" => :session_id
+  }
+
+  @doc """
+  Decodes one entry of an exported collection.
+
+  `raw` is the JSON object an export wrote, decoded with string keys. A file is
+  data, so no atom is created from it: the keys of the entry and of its
+  metadata, and the top-level keys of a map `value` that the engine's own
+  writers use, are looked up in fixed tables and read as atoms. Every other key
+  stays a string. Values are JSON data: an atom value, a `DateTime` or a tuple
+  that was exported comes back as the string or list it was written as.
+
+  Raises when `raw` is not an entry or a timestamp is not ISO 8601.
+  """
+  @spec decode_entry(map()) :: entry()
+  def decode_entry(%{"key" => key, "value" => value, "metadata" => %{} = raw_metadata}) do
+    metadata =
+      raw_metadata
+      |> Map.new(fn {name, item} -> {Map.get(@metadata_keys, name, name), item} end)
+      |> Map.update!(:created_at, &parse_datetime!/1)
+      |> Map.update!(:updated_at, &parse_datetime!/1)
+      |> Map.put_new(:access_count, 0)
+      |> Map.put_new(:tags, [])
+
+    %{key: key, value: decode_value(value), metadata: metadata}
+  end
+
+  defp decode_value(%{} = value),
+    do: Map.new(value, fn {name, item} -> {Map.get(@value_keys, name, name), item} end)
+
+  defp decode_value(value), do: value
+
+  defp parse_datetime!(dt) when is_binary(dt) do
+    {:ok, parsed, _offset} = DateTime.from_iso8601(dt)
+    parsed
+  end
+
+  defp parse_datetime!(%DateTime{} = dt), do: dt
+
   @doc """
   Returns the configured store backend.
 

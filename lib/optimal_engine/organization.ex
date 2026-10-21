@@ -7,6 +7,7 @@ defmodule OptimalEngine.Organization do
   entities, ventures, and personal operating scopes.
   """
 
+  alias OptimalEngine.SafeAtom
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
 
@@ -137,6 +138,9 @@ defmodule OptimalEngine.Organization do
   defp derive_id("default", slug), do: slug
   defp derive_id(tenant_id, slug), do: "#{tenant_id}:#{slug}"
 
+  # `status` is stored text. A value outside `@allowed_statuses` (a row written
+  # by something else) reads as `:dormant`: neither active nor archived, and no
+  # atom is created from it.
   defp row_to_struct([
          id,
          tenant_id,
@@ -154,7 +158,7 @@ defmodule OptimalEngine.Organization do
       slug: slug,
       name: name,
       description: description,
-      status: String.to_atom(status),
+      status: SafeAtom.cast(status, @allowed_statuses, :dormant),
       created_at: created_at,
       archived_at: archived_at,
       metadata: decode_json(metadata)

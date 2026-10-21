@@ -22,6 +22,9 @@ defmodule Mix.Tasks.Optimal.Search do
 
   use Mix.Task
 
+  # Context types a CLI argument may name, so that no atom is made from the text.
+  @types %{"signal" => :signal, "resource" => :resource, "memory" => :memory, "skill" => :skill}
+
   @impl Mix.Task
   def run(args) do
     Mix.Task.run("app.start")
@@ -90,7 +93,7 @@ defmodule Mix.Tasks.Optimal.Search do
   defp add_type_filter(opts, type_str) do
     case type_str do
       t when t in ~w[signal resource memory skill] ->
-        Keyword.put(opts, :type, String.to_atom(t))
+        Keyword.put(opts, :type, Map.fetch!(@types, t))
 
       other ->
         IO.puts("[optimal.search] Warning: unknown type '#{other}' — ignoring")

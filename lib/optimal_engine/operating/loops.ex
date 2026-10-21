@@ -39,8 +39,8 @@ defmodule OptimalEngine.Operating.Loops do
     attrs = stringify(attrs)
     kind = attrs["kind"] || "commitment"
 
-    with :ok <- require_text(attrs, "workspace_id"),
-         :ok <- require_text(attrs, "title"),
+    with :ok <- require_text(attrs, "workspace_id", :workspace_id_required),
+         :ok <- require_text(attrs, "title", :title_required),
          :ok <- valid_kind(kind),
          {:ok, due_at} <- normalize_due(attrs["due_at"]) do
       id = "loop_" <> (:crypto.strong_rand_bytes(10) |> Base.url_encode64(padding: false))
@@ -468,10 +468,10 @@ defmodule OptimalEngine.Operating.Loops do
 
   defp normalize_due(_value), do: {:error, :invalid_due_at}
 
-  defp require_text(attrs, field) do
+  defp require_text(attrs, field, error) do
     if is_binary(attrs[field]) and String.trim(attrs[field]) != "",
       do: :ok,
-      else: {:error, String.to_atom(field <> "_required")}
+      else: {:error, error}
   end
 
   defp valid_kind(kind) when kind in @kinds, do: :ok

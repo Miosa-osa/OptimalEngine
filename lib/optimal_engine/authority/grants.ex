@@ -371,11 +371,20 @@ defmodule OptimalEngine.Authority.Grants do
 
   defp usable_parent(parent) do
     cond do
-      parent.status != "active" -> {:error, String.to_atom("parent_" <> parent.status)}
+      parent.status != "active" -> {:error, parent_status_error(parent.status)}
       expired?(parent) -> {:error, :parent_expired}
       true -> :ok
     end
   end
+
+  # `status` is stored text; each state a grant can be in names its error, and
+  # no atom is created from the text. The table allows only these states, so
+  # the last clause is for a schema that grows one.
+  defp parent_status_error("suspended"), do: :parent_suspended
+  defp parent_status_error("revoked"), do: :parent_revoked
+  defp parent_status_error("consumed"), do: :parent_consumed
+  defp parent_status_error("expired"), do: :parent_expired
+  defp parent_status_error(_other), do: :parent_inactive
 
   defp inherit(parent, attrs) do
     optimal = parent.claims["optimal"]

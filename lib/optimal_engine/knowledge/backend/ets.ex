@@ -23,10 +23,13 @@ defmodule OptimalEngine.Knowledge.Backend.ETS do
 
   @impl true
   def init(store_id, _opts) do
-    gspo = :ets.new(:"mk_gspo_#{store_id}", [:ordered_set, :public])
-    gpos = :ets.new(:"mk_gpos_#{store_id}", [:ordered_set, :public])
-    gosp = :ets.new(:"mk_gosp_#{store_id}", [:ordered_set, :public])
-    posg = :ets.new(:"mk_posg_#{store_id}", [:ordered_set, :public])
+    # The tables are unnamed (referenced by the returned table ids), so the
+    # name atom is only a label. It does not carry the store id: a store id is
+    # text a caller chooses, and no atom is created from it.
+    gspo = :ets.new(:mk_gspo, [:ordered_set, :public])
+    gpos = :ets.new(:mk_gpos, [:ordered_set, :public])
+    gosp = :ets.new(:mk_gosp, [:ordered_set, :public])
+    posg = :ets.new(:mk_posg, [:ordered_set, :public])
 
     {:ok, %__MODULE__{gspo: gspo, gpos: gpos, gosp: gosp, posg: posg, store_id: store_id}}
   end

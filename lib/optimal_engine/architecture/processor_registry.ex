@@ -33,6 +33,10 @@ defmodule OptimalEngine.Architecture.ProcessorRegistry do
   @spec all() :: [module()]
   def all, do: @processors
 
+  @doc "The `id/0` of every registered processor."
+  @spec ids() :: [atom()]
+  def ids, do: Enum.map(@processors, & &1.id())
+
   @doc "Look up a processor module by its `id/0` atom."
   @spec fetch(atom()) :: {:ok, module()} | {:error, :unknown_processor}
   def fetch(id) when is_atom(id) do

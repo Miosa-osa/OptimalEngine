@@ -57,11 +57,11 @@ defmodule OptimalEngine.Authority.LocalDeny do
     row = [
       id,
       tenant_id,
-      field(attrs, "workspace_id"),
-      field(attrs, "subject") || "**",
-      field(attrs, "action") || "**",
-      field(attrs, "resource") || "**",
-      field(attrs, "reason"),
+      field(attrs, :workspace_id),
+      field(attrs, :subject) || "**",
+      field(attrs, :action) || "**",
+      field(attrs, :resource) || "**",
+      field(attrs, :reason),
       created_by
     ]
 
@@ -181,8 +181,8 @@ defmodule OptimalEngine.Authority.LocalDeny do
     end
   end
 
-  defp field(attrs, name) do
-    case Map.get(attrs, name) || Map.get(attrs, String.to_atom(name)) do
+  defp field(attrs, name) when is_atom(name) do
+    case Map.get(attrs, Atom.to_string(name)) || Map.get(attrs, name) do
       value when is_binary(value) and value != "" -> value
       _ -> nil
     end

@@ -48,7 +48,9 @@ defmodule Mix.Tasks.Optimal.Pull do
   defp maybe_connectors(opts, parsed) do
     case Keyword.get_values(parsed, :connector) do
       [] -> opts
-      kinds -> Keyword.put(opts, :connectors, Enum.map(kinds, &String.to_atom/1))
+      # The kinds stay text; the scheduler resolves them against its registry
+      # and reports an unknown one, so no atom is created from a CLI argument.
+      kinds -> Keyword.put(opts, :connectors, Enum.map(kinds, &%{"kind" => &1}))
     end
   end
 

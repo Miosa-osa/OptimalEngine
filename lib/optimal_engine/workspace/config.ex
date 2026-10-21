@@ -25,9 +25,13 @@ defmodule OptimalEngine.Workspace.Config do
   types that appear in this config schema (nested atom-key maps, string lists,
   integers, booleans, nil). Atom keys are written as their string equivalents
   so the file is clean YAML; on read `YamlElixir` returns string keys, which
-  `get/2` atomises one level deep (section keys only) before returning.
+  `get/2` turns into the atoms `defaults/0` names, at every depth. A key the
+  schema does not name stays a string (the file and a PATCH body are data, so no
+  atom is created from them), is merged beside the defaults, and is written
+  back unchanged.
   """
 
+  alias OptimalEngine.SafeAtom
   alias OptimalEngine.Workspace.Filesystem
 
   @config_rel_path Path.join([".optimal", "config.yaml"])
@@ -101,7 +105,7 @@ defmodule OptimalEngine.Workspace.Config do
         {:ok, defaults()}
 
       {:ok, disk_map} when is_map(disk_map) ->
-        merged = deep_merge(defaults(), atomise_keys(disk_map))
+        merged = deep_merge(defaults(), atomise_keys(disk_map, defaults()))
         {:ok, merged}
 
       {:ok, _unexpected} ->
@@ -129,7 +133,7 @@ defmodule OptimalEngine.Workspace.Config do
     config_path = config_path(workspace_slug, root)
 
     with {:ok, current} <- get(workspace_slug, root),
-         merged = deep_merge(current, atomise_keys(config_map)),
+         merged = deep_merge(current, atomise_keys(config_map, defaults())),
          :ok <- File.mkdir_p(Path.dirname(config_path)),
          :ok <- File.write(config_path, to_yaml(merged)) do
       :ok
@@ -180,27 +184,41 @@ defmodule OptimalEngine.Workspace.Config do
   end
 
   # Deep-merge `right` into `left` (right wins on scalar conflicts).
-  # Both maps must have atom keys (call `atomise_keys/1` first when needed).
+  # Both maps must have atom keys for the schema's names (call `atomise_keys/2`
+  # first when needed).
   defp deep_merge(left, right) when is_map(left) and is_map(right) do
     Map.merge(left, right, fn _key, l, r ->
       if is_map(l) and is_map(r), do: deep_merge(l, r), else: r
     end)
   end
 
-  # Convert all string keys in a (possibly nested) map to atoms. Unknown atom
-  # keys coming from user-supplied YAML are safe here: they're section names
-  # from a controlled schema. We use `String.to_atom/1` (not
-  # `to_existing_atom`) intentionally — workspace config keys are not the same
-  # threat surface as arbitrary user-controlled atom creation in a server
-  # request path.
-  defp atomise_keys(map) when is_map(map) do
+  # Convert the string keys of a (possibly nested) map to the atoms `schema`
+  # (the shape of `defaults/0`) names. The map is a config.yaml or a PATCH body,
+  # so a key the schema does not name stays text: no atom is created from it,
+  # and it still round-trips through `to_yaml/1`.
+  defp atomise_keys(map, schema) when is_map(map) do
     Map.new(map, fn
-      {k, v} when is_binary(k) -> {String.to_atom(k), atomise_keys(v)}
-      {k, v} when is_atom(k) -> {k, atomise_keys(v)}
+      {k, v} when is_binary(k) ->
+        case SafeAtom.fetch(k, schema_keys(schema)) do
+          {:ok, key} -> {key, atomise_keys(v, child_schema(schema, key))}
+          :error -> {k, v}
+        end
+
+      {k, v} when is_atom(k) ->
+        {k, atomise_keys(v, child_schema(schema, k))}
     end)
   end
 
-  defp atomise_keys(other), do: other
+  defp atomise_keys(other, _schema), do: other
+
+  defp schema_keys(schema), do: schema |> Map.keys() |> Enum.filter(&is_atom/1)
+
+  defp child_schema(schema, key) do
+    case Map.get(schema, key) do
+      child when is_map(child) -> child
+      _ -> %{}
+    end
+  end
 
   # ── YAML Serialiser ─────────────────────────────────────────────────────────
   #

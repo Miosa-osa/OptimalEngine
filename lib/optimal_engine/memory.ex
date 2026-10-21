@@ -481,15 +481,11 @@ defmodule OptimalEngine.Memory do
   def import_collection(collection, path) do
     case File.read(path) do
       {:ok, content} ->
-        entries = Jason.decode!(content, keys: :atoms)
-
-        Enum.each(entries, fn entry ->
-          metadata =
-            entry.metadata
-            |> Map.update!(:created_at, &parse_dt/1)
-            |> Map.update!(:updated_at, &parse_dt/1)
-
-          backend().put(collection, entry.key, entry.value, metadata)
+        content
+        |> Jason.decode!()
+        |> Enum.each(fn raw ->
+          entry = OptimalEngine.Memory.Store.decode_entry(raw)
+          backend().put(collection, entry.key, entry.value, entry.metadata)
         end)
 
         :ok
@@ -498,13 +494,6 @@ defmodule OptimalEngine.Memory do
         {:error, reason}
     end
   end
-
-  defp parse_dt(dt) when is_binary(dt) do
-    {:ok, parsed, _} = DateTime.from_iso8601(dt)
-    parsed
-  end
-
-  defp parse_dt(%DateTime{} = dt), do: dt
 
   defp memory_source_package(content, attrs, opts, gate, encode?, overrides \\ []) do
     override_metadata = Keyword.get(overrides, :metadata, %{})

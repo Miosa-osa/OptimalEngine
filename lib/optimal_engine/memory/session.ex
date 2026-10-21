@@ -14,6 +14,10 @@ defmodule OptimalEngine.Memory.Session do
 
   use GenServer
 
+  alias OptimalEngine.SafeAtom
+
+  @roles [:system, :user, :assistant, :tool]
+
   @type session_id :: String.t()
   @type role :: :system | :user | :assistant | :tool
   @type message :: %{
@@ -259,12 +263,12 @@ defmodule OptimalEngine.Memory.Session do
           content
           |> String.split("\n", trim: true)
           |> Enum.map(fn line ->
-            data = Jason.decode!(line, keys: :atoms)
-            {:ok, ts, _} = DateTime.from_iso8601(data.timestamp)
+            data = Jason.decode!(line)
+            {:ok, ts, _} = DateTime.from_iso8601(data["timestamp"])
 
             %{
-              role: String.to_existing_atom(to_string(data.role)),
-              content: data.content,
+              role: role_atom(data["role"]),
+              content: data["content"],
               timestamp: ts
             }
           end)
@@ -273,6 +277,15 @@ defmodule OptimalEngine.Memory.Session do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # The file is data, so the role is looked up among the known roles instead
+  # of becoming an atom. An unknown role raises, as a bad line always has.
+  defp role_atom(role) do
+    case SafeAtom.fetch(role, @roles) do
+      {:ok, atom} -> atom
+      :error -> raise ArgumentError, "unknown message role: #{inspect(role)}"
     end
   end
 
