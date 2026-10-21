@@ -837,6 +837,14 @@ defmodule OptimalEngine.DataSteward do
     end
   end
 
+  defp directory_home?(old, new) do
+    cond do
+      File.dir?(new) and not File.exists?(old) -> File.rename(new, old) == :ok
+      File.dir?(old) and not File.exists?(new) -> true
+      true -> false
+    end
+  end
+
   defp clear_intent(nil), do: :ok
   defp clear_intent(move), do: File.rm(marker_path(move))
 
@@ -847,11 +855,12 @@ defmodule OptimalEngine.DataSteward do
   end
 
   # The transaction is settled. When it did not commit after the directory moved, the rows
-  # are as they were, so the directory goes back to where they say it is.
+  # are as they were, so the directory goes back to where they say it is. The note stays
+  # unless the directory is back or never left: a note that outlives a stranded directory
+  # is what `recover_interrupted_renames/0` reads.
   @doc false
   def settle_move({:error, _} = error, %{old: old, new: new} = move) do
-    if File.dir?(new) and not File.exists?(old), do: File.rename(new, old)
-    clear_intent(move)
+    if directory_home?(old, new), do: clear_intent(move)
     error
   end
 
@@ -892,14 +901,14 @@ defmodule OptimalEngine.DataSteward do
 
   defp recover_one(root, marker) do
     with {:ok, body} <- File.read(marker),
-         {:ok, %{"tenant_id" => tenant, "source" => source, "target" => target}}
-         when is_binary(tenant) and is_binary(source) and is_binary(target) <- Jason.decode(body),
+         {:ok, %{"source" => source, "target" => target}}
+         when is_binary(source) and is_binary(target) <- Jason.decode(body),
          :ok <- WorkspaceBundle.movable(source),
          :ok <- WorkspaceBundle.movable(target) do
       # The directories are the ones the ids name, never paths read from the note.
       old = Path.expand(Filesystem.path(root, source))
       new = Path.expand(Filesystem.path(root, target))
-      action = recovery_action(tenant, target, old, new)
+      action = recovery_action(target, old, new)
       if action != :needs_attention, do: File.rm(marker)
       %{source: source, target: target, action: action}
     else
@@ -907,11 +916,10 @@ defmodule OptimalEngine.DataSteward do
     end
   end
 
-  defp recovery_action(tenant, target, old, new) do
-    case Store.raw_query("SELECT 1 FROM workspaces WHERE tenant_id = ?1 AND id = ?2", [
-           tenant,
-           target
-         ]) do
+  # Workspace ids are unique across tenants, so the id says whether the rename committed;
+  # the tenant the note names is for the operator and decides nothing.
+  defp recovery_action(target, old, new) do
+    case Store.raw_query("SELECT 1 FROM workspaces WHERE id = ?1", [target]) do
       {:ok, [_ | _]} ->
         :committed
 
