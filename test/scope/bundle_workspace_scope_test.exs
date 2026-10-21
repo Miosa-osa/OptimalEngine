@@ -104,6 +104,29 @@ defmodule OptimalEngine.BundleWorkspaceScopeTest do
     end
   end
 
+  describe "importing a stored bundle by name, as a job" do
+    test "needs a workspace scope that covers the workspace it came from", ctx do
+      body = %{"workspace_id" => ctx.copy, "organization_id" => "#{ctx.tenant}:org"}
+
+      refused = import_job(ctx.open_and_copy, Map.put(body, "bundle", ctx.private_bundle))
+
+      assert refused.status == 404
+      assert Jason.decode!(refused.resp_body)["error"] == "bundle_not_found"
+      assert {:error, :not_found} = Workspace.get(ctx.copy)
+
+      # The target is covered but the bundle's workspace is not: nothing is queued.
+      listed = call(:get, "/api/bundles/jobs", ctx.all, nil)
+      assert Jason.decode!(listed.resp_body)["count"] == 0
+
+      accepted = import_job(ctx.open_and_copy, Map.put(body, "bundle", ctx.open_bundle))
+      assert accepted.status == 202
+
+      # Nothing runs it here; leave the workspace free for the next test.
+      job_id = Jason.decode!(accepted.resp_body)["job_id"]
+      assert call(:post, "/api/bundles/jobs/#{job_id}/cancel", ctx.all, nil).status == 200
+    end
+  end
+
   describe "deleting a stored bundle" do
     test "needs the workspace scope that covers its workspace, and removes the file", ctx do
       private_path = stored(ctx, ctx.private_bundle)
@@ -187,6 +210,8 @@ defmodule OptimalEngine.BundleWorkspaceScopeTest do
   defp download(key, name), do: call(:get, "/api/bundles/#{name}", key, nil)
 
   defp import_by_name(key, body), do: call(:post, "/api/bundles/import", key, body)
+
+  defp import_job(key, body), do: call(:post, "/api/bundles/jobs/import", key, body)
 
   defp call(method, path, key, body) do
     conn =
