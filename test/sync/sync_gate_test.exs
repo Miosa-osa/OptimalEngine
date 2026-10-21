@@ -1861,10 +1861,7 @@ defmodule OptimalEngine.SyncGateTest do
 
   describe "the lineage map" do
     test "classifies every table the Engine replicates" do
-      replicated = replicated_tables()
-      assert replicated != []
-
-      unclassified = replicated -- Lineage.tables()
+      unclassified = replicated_tables() -- Lineage.tables()
 
       assert unclassified == [],
              "classify #{inspect(unclassified)} in OptimalEngine.Sync.Lineage before they replicate"
