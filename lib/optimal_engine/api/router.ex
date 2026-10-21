@@ -949,7 +949,14 @@ defmodule OptimalEngine.API.Router do
       snap
       |> Map.put(:sizing, OptimalEngine.Sizing.usage())
       |> Map.put(:connectors, OptimalEngine.API.ConnectorsAPI.metrics(conn))
-      |> Map.put(:gauges, OptimalEngine.Store.FileCache.LegacyPurgeRecord.gauges())
+      |> Map.put(
+        :gauges,
+        Map.put(
+          OptimalEngine.Store.FileCache.LegacyPurgeRecord.gauges(),
+          "optimal_engine.storage.assets_pending_placement",
+          OptimalEngine.Storage.AssetReconcile.pending_count()
+        )
+      )
     )
   end
 

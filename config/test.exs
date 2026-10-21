@@ -32,6 +32,9 @@ config :optimal_engine, :api_rate_limit,
 
 # Viability passes and analyses run on demand in tests.
 config :optimal_engine, :viability_interval_ms, 0
+
+# Asset placement after an outage is run by the tests themselves.
+config :optimal_engine, :asset_reconcile_interval_ms, 0
 config :optimal_engine, :analyses_interval_ms, 0
 config :optimal_engine, :reindex_interval_ms, 0
 config :optimal_engine, :imports_interval_ms, 0

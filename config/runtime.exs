@@ -267,6 +267,19 @@ if max_bytes = System.get_env("OPTIMAL_BUNDLE_MAX_BYTES") do
   end
 end
 
+# How often assets kept on the local disk during an object store outage are
+# put in the bucket (OptimalEngine.Storage.AssetReconcile); 0 turns it off.
+if interval = System.get_env("OPTIMAL_ASSET_RECONCILE_INTERVAL_MS") do
+  case Integer.parse(String.trim(interval)) do
+    {ms, ""} when ms >= 0 ->
+      config :optimal_engine, :asset_reconcile_interval_ms, ms
+
+    _ ->
+      raise ArgumentError,
+            "OPTIMAL_ASSET_RECONCILE_INTERVAL_MS must be 0 or a number of milliseconds"
+  end
+end
+
 # Replication: how long one peer's cycle keeps paging before it stops and
 # resumes on the next cycle.
 if budget = System.get_env("OPTIMAL_SYNC_CYCLE_BUDGET_MS") do
