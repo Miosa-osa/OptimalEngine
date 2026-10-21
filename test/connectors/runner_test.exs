@@ -3,6 +3,7 @@ defmodule OptimalEngine.Connectors.RunnerTest do
 
   alias OptimalEngine.Connectors
   alias OptimalEngine.Connectors.{Runner, Transform}
+  alias OptimalEngine.Pipeline.Decomposer.Chunk
   alias OptimalEngine.Store
   alias OptimalEngine.Test.ConnectorFixtureStub
 
@@ -305,6 +306,67 @@ defmodule OptimalEngine.Connectors.RunnerTest do
     assert tool_runs == 1
   end
 
+  test "a run's cursor and audit row commit without holding a transaction open across Store calls",
+       %{id: id} do
+    {:ok, ^id} =
+      Connectors.register(%{
+        id: id,
+        kind: :slack,
+        config: %{
+          "workspace_id" => "T01",
+          "channels" => ["C01"],
+          "credentials" => %{"bot_token" => "xoxb-test"}
+        }
+      })
+
+    # Another caller keeps opening its own Store transactions while the runs
+    # finish. A BEGIN left open between Store calls would make some of them
+    # fail with "cannot start a transaction within a transaction".
+    parent = self()
+    signal = "runner-txn-#{System.unique_integer([:positive])}"
+    chunk = Chunk.new(id: "#{signal}:chk", signal_id: signal, scale: :chunk, text: "chunk")
+    on_exit(fn -> Store.raw_query("DELETE FROM chunks WHERE signal_id = ?1", [signal]) end)
+
+    writer =
+      spawn_link(fn ->
+        Stream.repeatedly(fn -> Store.insert_chunks([chunk]) end)
+        |> Enum.reduce_while([], fn result, errors ->
+          errors = if result == :ok, do: errors, else: [result | errors]
+
+          receive do
+            :stop -> {:halt, send(parent, {:writer_errors, errors})}
+          after
+            0 -> {:cont, errors}
+          end
+        end)
+      end)
+
+    for n <- 1..30 do
+      assert {:ok, %{status: :success, cursor_after: cursor}} =
+               Runner.run(id,
+                 governed: false,
+                 adapter_resolver: fn "slack" ->
+                   {:ok, OptimalEngine.Connectors.RunnerTest.CursorAdapter}
+                 end
+               )
+
+      assert cursor == "cursor-#{n}"
+    end
+
+    send(writer, :stop)
+    assert_receive {:writer_errors, errors}, 5_000
+    assert errors == []
+
+    assert {:ok, [["cursor-30"]]} =
+             Store.raw_query("SELECT cursor FROM connectors WHERE id = ?1", [id])
+
+    assert {:ok, [[30]]} =
+             Store.raw_query(
+               "SELECT COUNT(*) FROM connector_runs WHERE connector_id = ?1 AND status = 'success'",
+               [id]
+             )
+  end
+
   describe "Transform helpers" do
     test "signal_id/2 is deterministic" do
       a = Transform.signal_id(:slack, "abc")
@@ -373,6 +435,41 @@ defmodule OptimalEngine.Connectors.RunnerTest.SyncAssetAdapter do
     }
 
     {:ok, %{signals: [signal], cursor: "cursor-next", payloads: [payload]}}
+  end
+
+  @impl true
+  def transform(_payload), do: {:error, :not_used}
+end
+
+defmodule OptimalEngine.Connectors.RunnerTest.CursorAdapter do
+  @moduledoc false
+  @behaviour OptimalEngine.Connectors.Behaviour
+
+  @impl true
+  def kind, do: :slack
+
+  @impl true
+  def display_name, do: "Cursor Test"
+
+  @impl true
+  def auth_scheme, do: :token
+
+  @impl true
+  def required_config_keys, do: []
+
+  @impl true
+  def init(config), do: {:ok, config}
+
+  # Each run moves the cursor one step: nil -> cursor-1 -> cursor-2 ...
+  @impl true
+  def sync(_state, cursor) do
+    n =
+      case cursor do
+        "cursor-" <> n -> String.to_integer(n) + 1
+        _ -> 1
+      end
+
+    {:ok, [], "cursor-#{n}"}
   end
 
   @impl true

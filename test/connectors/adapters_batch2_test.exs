@@ -41,7 +41,7 @@ defmodule OptimalEngine.Connectors.AdaptersBatch2Test do
     {:ok, {{~c"HTTP/1.1", status, ~c"Error"}, [], ""}}
   end
 
-  defp base_state(extra \\ %{}) do
+  defp base_state(extra) do
     Map.merge(%{"_state_version" => 1}, extra)
   end
 
