@@ -44,7 +44,9 @@ defmodule OptimalEngine.API.PoolScopePlug do
   def call(%{method: "OPTIONS"} = conn, _opts), do: conn
 
   def call(%{path_info: ["api", "memory-core", "active-pools", id | _]} = conn, _opts) do
-    case ActiveMemoryPool.get(id) do
+    # PathPlug leaves an escaped slash in the segment; the router decodes it into
+    # the id the handler gets, so the plug looks the pool up by that same id.
+    case ActiveMemoryPool.get(URI.decode(id)) do
       {:ok, pool} ->
         case access(conn, pool) do
           :ok ->
