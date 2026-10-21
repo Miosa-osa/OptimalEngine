@@ -56,6 +56,17 @@ defmodule OptimalEngine.MemoryCore.SecurityLabelsPermitsTest do
       assert SecurityLabels.metadata_map(nil) == %{}
     end
 
+    test "ignores trailing white space only where JSON does" do
+      assert SecurityLabels.metadata_map(~s({"a":1} \t\r\n)) == %{"a" => 1}
+
+      # SQLite's json_valid refuses these, so a metadata that has them names nothing
+      # in both places.
+      for tail <- ["\u00a0", "\u2003", "\u3000", "\u0085", "x"] do
+        text = ~s({"security_labels":["restricted"]}) <> tail
+        assert SecurityLabels.metadata_map(text) == %{}, inspect(tail)
+      end
+    end
+
     test "reads a repeated security_labels or partition_ids as 0, which is unresolved" do
       map = SecurityLabels.metadata_map(~s({"security_labels":["a"],"security_labels":[],"n":1}))
       assert map == %{"security_labels" => 0, "n" => 1}

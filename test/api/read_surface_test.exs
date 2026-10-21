@@ -20,6 +20,8 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
   alias OptimalEngine.Memory.Versioned
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.MemoryCore.SecurityLabels
+  alias OptimalEngine.MemoryCore.SourcePackage
+  alias OptimalEngine.MemoryCore.Store, as: CoreStore
   alias OptimalEngine.Store
   alias OptimalEngine.Sync.Gate
   alias OptimalEngine.Workspace
@@ -800,6 +802,41 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
 
         assert seen.(id, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]}),
                "#{name} was hidden from a reader of every partition"
+      end
+    end
+
+    test "a memory is read as its source is when the source is labelled by its metadata alone",
+         ctx do
+      # The bridge `Memory` writes: a source package that names the memory by
+      # `source_uri` and `versioned_memory_id`, and a memory that names nothing.
+      for {name, metadata, visible_to_bare?} <- [
+            {"labels", %{"security_labels" => ["restricted"]}, false},
+            {"number", %{"security_labels" => 5}, false},
+            {"partitions", %{"partition_ids" => 5}, false},
+            {"open", %{"security_labels" => []}, true}
+          ] do
+        {:ok, memory} =
+          Versioned.create(%{content: "Bridged note #{name} 6643", workspace_id: ctx.ws})
+
+        source =
+          SourcePackage.from_text("Bridged note #{name} source 6643",
+            tenant_id: "default",
+            workspace_id: ctx.ws,
+            source_type: "versioned_memory",
+            source_uri: "memory://#{memory.id}",
+            metadata: Map.put(metadata, "versioned_memory_id", memory.id)
+          )
+
+        :ok = CoreStore.insert_source_package(source)
+
+        listed = fn grants ->
+          memory.id in ids(export(ctx, mint(ctx, grants), "memories")["memories"])
+        end
+
+        assert listed.(%{}) == visible_to_bare?, "#{name}: a key with no grants"
+
+        assert listed.(%{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]}),
+               "#{name}: a key of everything"
       end
     end
 
