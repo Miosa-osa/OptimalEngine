@@ -1,6 +1,19 @@
 # Skip RocksDB backend tests unless the NIF is loadable
 exclude = if Code.ensure_loaded?(:rocksdb), do: [], else: [:rocksdb]
 
+# PostgreSQL store tests run against OPTIMAL_TEST_POSTGRES_URL and are skipped
+# without it (test/support/postgres_store.ex).
+exclude =
+  if OptimalEngine.Test.PostgresStore.available?() do
+    exclude
+  else
+    IO.puts(
+      "PostgreSQL store tests skipped: set #{OptimalEngine.Test.PostgresStore.env_name()} to run them."
+    )
+
+    [:postgres | exclude]
+  end
+
 # The 100 MB Notion import timing runs only when asked for (--only notion_scale).
 ExUnit.configure(exclude: [:notion_scale | exclude])
 

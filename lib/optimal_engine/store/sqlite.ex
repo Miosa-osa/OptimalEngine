@@ -705,7 +705,20 @@ defmodule OptimalEngine.Store.SQLite do
     File.mkdir_p!(Path.dirname(db_path))
 
     with {:ok, db} <- Exqlite.Sqlite3.open(db_path),
-         :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA journal_mode=WAL"),
+         :ok <- migrate(db, migrations) do
+      {:ok, db}
+    end
+  end
+
+  @doc false
+  # The whole schema on an open connection: the baseline tables, then
+  # `migrations` (every one by default). The PostgreSQL store derives its
+  # schema by running this against an in-memory database
+  # (OptimalEngine.Store.Postgres.Schema).
+  @spec migrate(Exqlite.Sqlite3.db(), [OptimalEngine.Store.Migrations.migration()]) ::
+          :ok | {:error, term()}
+  def migrate(db, migrations \\ OptimalEngine.Store.Migrations.all()) do
+    with :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA journal_mode=WAL"),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA foreign_keys=ON"),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA recursive_triggers=ON"),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA synchronous=NORMAL"),
@@ -727,9 +740,8 @@ defmodule OptimalEngine.Store.SQLite do
          :ok <- Exqlite.Sqlite3.execute(db, @ddl_vectors),
          :ok <- Exqlite.Sqlite3.execute(db, @ddl_observations),
          :ok <- run_index_migrations(db),
-         :ok <- run_probability_column_migrations(db),
-         :ok <- OptimalEngine.Store.Migrations.run(db, migrations) do
-      {:ok, db}
+         :ok <- run_probability_column_migrations(db) do
+      OptimalEngine.Store.Migrations.run(db, migrations)
     end
   end
 
