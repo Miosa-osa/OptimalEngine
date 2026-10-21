@@ -8,7 +8,7 @@ defmodule OptimalEngine.DataSteward do
 
   alias OptimalEngine.Authority.{Evidence, WorkspaceRekeys}
 
-  alias OptimalEngine.DataSteward.HierarchyRepair
+  alias OptimalEngine.DataSteward.{BareRelabel, HierarchyRepair}
 
   alias OptimalEngine.{
     ContextHealth,
@@ -1062,6 +1062,14 @@ defmodule OptimalEngine.DataSteward do
   See `OptimalEngine.DataSteward.HierarchyRepair` for the mapping.
   """
   defdelegate repair_deterministic_hierarchy(opts), to: HierarchyRepair, as: :run
+
+  @doc """
+  Gives a tenant back the `default` rows it wrote under a bare workspace id before the
+  rows named their tenant, when its own source packages vouch for them. Options:
+  `:tenant_id` and `:actor_id` (both required). See
+  `OptimalEngine.DataSteward.BareRelabel` for what moves and what stays.
+  """
+  defdelegate relabel_bare_scope(workspace_id, opts), to: BareRelabel, as: :run
 
   def recheck(workspace_id, opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
