@@ -212,10 +212,12 @@ if [ "$avail_mb" -lt "$need_mb" ]; then
   exit 77
 fi
 
-echo "== step 2: keys"
-a_key=$(mint_root_key a)
+echo "== step 2: dependencies and keys"
+# A machine that has not built this checkout yet has no dependencies.
+mix deps.get >/dev/null || fail "fetching the dependencies"
+a_key=$(mint_root_key a || true)
 [ -n "$a_key" ] || fail "minting a key on Engine A printed no key"
-b_key=$(mint_root_key b)
+b_key=$(mint_root_key b || true)
 [ -n "$b_key" ] || fail "minting a key on Engine B printed no key"
 
 echo "== step 3: Engine A, the workspace, sync enabled, a replica key"
