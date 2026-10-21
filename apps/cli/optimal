@@ -259,6 +259,21 @@ mark_controls() {
   LC_ALL=C tr '\001-\010\013-\037\177' '?' | LC_ALL=C sed "$_mc"
 }
 
+# JSON from the Engine, before it reaches a terminal: a C1 control or a line or
+# paragraph separator becomes its \u escape, the same text inside a JSON string,
+# and a C0 control but tab and newline, or DEL, which valid JSON never carries
+# raw, becomes ?. Escaping, like marking, cannot reassemble a control from
+# invalid UTF-8.
+json_controls() {
+  _jc="s/$(printf '\342\200\250')/\\\\u2028/g;s/$(printf '\342\200\251')/\\\\u2029/g"
+  _jn=128
+  while [ "$_jn" -le 159 ]; do
+    _jc="$_jc;s/$(printf "\\302\\$(printf '%o' "$_jn")")/\\\\u00$(printf '%02x' "$_jn")/g"
+    _jn=$((_jn + 1))
+  done
+  LC_ALL=C tr '\001-\010\013-\037\177' '?' | LC_ALL=C sed "$_jc"
+}
+
 # jobj key value [key value]...: a JSON object of the non-empty values.
 # Values are strings; a key written as @key takes a raw JSON value.
 jobj() {
@@ -737,12 +752,12 @@ emit() {
   esac
   if want_pretty; then
     if command -v jq >/dev/null 2>&1; then
-      printf '%s\n' "$_eo" | jq . 2>/dev/null && return 0
+      _ep=$(printf '%s\n' "$_eo" | jq . 2>/dev/null) && _eo=$_ep
     elif command -v python3 >/dev/null 2>&1; then
-      printf '%s\n' "$_eo" | python3 -m json.tool 2>/dev/null && return 0
+      _ep=$(printf '%s\n' "$_eo" | python3 -m json.tool 2>/dev/null) && _eo=$_ep
     fi
   fi
-  printf '%s\n' "$_eo"
+  printf '%s\n' "$_eo" | json_controls
 }
 
 get() {
