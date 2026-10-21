@@ -569,6 +569,38 @@ defmodule OptimalEngine.SyncGateTest do
              )
     end
 
+    test "a deleted restricted row stays held though storage entries name it", ctx do
+      id = "fact-named-#{ctx.n}"
+      fact(ctx, id, "Bank detail", ["restricted"])
+      {:ok, _} = Capture.seal()
+      {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+      # Entries the storage route stored before it refused table names: they name
+      # the row, carry no label, and are newer than every change of it.
+      unlabelled =
+        Jason.encode!(%{
+          "row" => %{"id" => id, "fact_text" => "Bank detail", "security_labels" => "[]"},
+          "blobs" => %{}
+        })
+
+      for _ <- 1..25 do
+        {:ok, _} =
+          Store.raw_query(
+            """
+            INSERT INTO sync_mutations
+              (id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, payload,
+               payload_hash, idempotency_key, occurred_at)
+            VALUES (?1, ?2, ?3, 'app-device', 'facts', ?4, 'update', ?5, 'h', ?1,
+                    '2026-10-14T12:00:00.000')
+            """,
+            [UUID.uuid4(), ctx.tenant, ctx.ws, id, unlabelled]
+          )
+      end
+
+      {_result, sent} = push(ctx)
+      refute sent?(sent, "facts", id)
+    end
+
     test "serving changes applies the same gate", ctx do
       secret = remember(ctx, "Wire 4471 to Harborview", ["restricted"])
       open = remember(ctx, "Standup is at ten", ["internal"])

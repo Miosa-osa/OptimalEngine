@@ -14,6 +14,7 @@ defmodule OptimalEngine.Storage.StorageLedgerScopeTest do
   alias OptimalEngine.API.Router
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.{Store, Sync}
+  alias OptimalEngine.Storage.PolicyStore
 
   @opts Router.init([])
 
@@ -156,6 +157,199 @@ defmodule OptimalEngine.Storage.StorageLedgerScopeTest do
       assert {:ok, [["Edited by the peer"]]} =
                Store.raw_query("SELECT title FROM contexts WHERE id = ?1", [id])
     end
+
+    test "replays by its key, though it names a table", ctx do
+      body = %{
+        "entity_type" => "contexts",
+        "entity_id" => "ctx-old-#{ctx.n}",
+        "operation" => "update",
+        "payload" => %{"row" => %{"id" => "ctx-old-#{ctx.n}", "title" => "Kept 4410"}},
+        "idempotency_key" => "old-#{ctx.n}"
+      }
+
+      stored = plant(ctx, Map.put(body, "device_id", "app-device-#{ctx.n}"))
+
+      replay = append(ctx, body)
+      assert replay.status == 201, replay.resp_body
+      assert Jason.decode!(replay.resp_body)["id"] == stored
+
+      changed = append(ctx, put_in(body, ["payload", "row", "title"], "Changed"))
+      assert changed.status == 409, changed.resp_body
+      assert ledger_count(ctx) == 1
+    end
+
+    test "a replay by key never answers with a replicated change", ctx do
+      peer = "rep_peer_#{ctx.n}"
+
+      body = %{
+        "entity_type" => "contexts",
+        "entity_id" => "ctx-peer-#{ctx.n}",
+        "operation" => "update",
+        "payload" => %{"row" => %{"id" => "ctx-peer-#{ctx.n}", "title" => "Peer's 5521"}},
+        "idempotency_key" => "#{peer}:3"
+      }
+
+      # A change a peer sent before the ledger key change, under the key it sent.
+      plant(ctx, body |> Map.put("device_id", peer) |> Map.put("id", "mut_#{peer}_3"))
+
+      conn = append(ctx, body)
+      assert conn.status in [409, 422], conn.resp_body
+      refute conn.resp_body =~ "mut_#{peer}_3"
+    end
+  end
+
+  describe "PolicyStore.append_mutation/1" do
+    test "gives an entry its own id, never the caller's", ctx do
+      wanted = "mut_#{ctx.local}_#{900_000_000 + ctx.n}"
+
+      assert {:ok, entry} =
+               PolicyStore.append_mutation(%{
+                 id: wanted,
+                 workspace_id: ctx.ws,
+                 device_id: "app-device-#{ctx.n}",
+                 entity_type: "memory_object",
+                 entity_id: "obj-#{ctx.n}",
+                 operation: :create,
+                 payload: %{"text" => "App entry"}
+               })
+
+      assert entry.id != wanted
+      assert {:ok, []} = Store.raw_query("SELECT 1 FROM sync_mutations WHERE id = ?1", [wanted])
+    end
+  end
+
+  describe "change rows" do
+    test "change_row?/3 and the ledger query agree", ctx do
+      local = ctx.local
+      peer = "rep_peer_#{ctx.n}"
+      under = "rep_x_#{ctx.n}"
+      accented = "rép-#{ctx.n}"
+      odd = "rep%_#{ctx.n}"
+      big = 900_000_000 + ctx.n
+
+      rows = [
+        # {id, device, key, a change row?}
+        {"mut_#{local}_#{big}", local, "#{local}:#{big}", true},
+        {"mut_#{peer}_7", peer, "#{peer}:7", true},
+        {"applied-#{ctx.n}", peer, "peer:applied-#{ctx.n}", true},
+        {"mut_#{under}_1", under, "#{under}:1", true},
+        {"mut_#{accented}_2", accented, "#{accented}:2", true},
+        {"mut_#{odd}_3", odd, "#{odd}:3", true},
+        {"mut_#{peer}_", peer, "#{peer}:", true},
+        {UUID.uuid4(), local, "entry-#{ctx.n}", false},
+        {UUID.uuid4(), local, "#{local}:#{big + 1}", false},
+        {"mut_#{local}_#{big + 2}", peer, "#{peer}:#{big + 2}", false},
+        {"elsewhere-#{ctx.n}", peer, "peer:other-#{ctx.n}", false},
+        {"mut_#{under}_4", "rep_x", "#{under}:4", false},
+        {"mut_Rep-#{ctx.n}_5", "Rep-#{ctx.n}", "rep-#{ctx.n}:5", false},
+        {"mut_#{peer}_8", peer, "#{peer}:9", false}
+      ]
+
+      for {id, device, key, _} <- rows do
+        {:ok, _} =
+          Store.raw_query(
+            """
+            INSERT INTO sync_mutations
+              (id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, payload,
+               payload_hash, idempotency_key, occurred_at)
+            VALUES (?1, 'default', ?2, ?3, 'contexts', 'c1', 'update', '{"row":{},"blobs":{}}', 'h', ?4,
+                    '2026-10-14T12:00:00.000')
+            """,
+            [id, ctx.ws, device, key]
+          )
+      end
+
+      planted = MapSet.new(rows, &elem(&1, 0))
+
+      {:ok, matched} =
+        Store.raw_query(
+          "SELECT id FROM sync_mutations WHERE workspace_id = ?1 AND #{Sync.change_row_sql()}",
+          [ctx.ws]
+        )
+
+      by_sql = matched |> List.flatten() |> Enum.filter(&(&1 in planted)) |> Enum.sort()
+      by_elixir = for {id, device, key, _} <- rows, Sync.change_row?(id, device, key), do: id
+      expected = for {id, _, _, true} <- rows, do: id
+
+      assert by_sql == Enum.sort(by_elixir)
+      assert Enum.sort(by_elixir) == Enum.sort(expected)
+    end
+
+    test "a peer's change is served onward, applied now or keyed by its sender before", ctx do
+      peer = "rep_peer_#{ctx.n}"
+
+      row = fn id ->
+        %{
+          "row" => %{
+            "id" => id,
+            "title" => "From the peer",
+            "content" => "remote body",
+            "workspace_id" => ctx.ws,
+            "tenant_id" => "default"
+          },
+          "blobs" => %{}
+        }
+      end
+
+      now = %{
+        "id" => "mut_#{peer}_1",
+        "device_id" => peer,
+        "entity_type" => "contexts",
+        "entity_id" => "ctx-now-#{ctx.n}",
+        "operation" => "create",
+        "occurred_at" => "2026-10-14T12:00:00.000",
+        "idempotency_key" => "#{peer}:1",
+        "payload" => row.("ctx-now-#{ctx.n}")
+      }
+
+      assert {:ok, %{applied: 1}} = Sync.apply_changes("default", ctx.ws, [now])
+
+      assert {:ok, [["peer:mut_" <> _]]} =
+               Store.raw_query("SELECT idempotency_key FROM sync_mutations WHERE id = ?1", [
+                 now["id"]
+               ])
+
+      # A change applied before the ledger key change kept the key its sender gave.
+      insert_context(ctx, "ctx-before-#{ctx.n}", "From the peer")
+
+      before =
+        plant(ctx, %{
+          "id" => "mut_#{peer}_2",
+          "device_id" => peer,
+          "entity_type" => "contexts",
+          "entity_id" => "ctx-before-#{ctx.n}",
+          "operation" => "create",
+          "payload" => row.("ctx-before-#{ctx.n}"),
+          "idempotency_key" => "#{peer}:2"
+        })
+
+      served =
+        Sync.changes("default", ctx.ws, requester: "rep_cloud_#{ctx.n}", limit: 2_000)["mutations"]
+        |> Enum.map(& &1["id"])
+
+      assert now["id"] in served
+      assert before in served
+    end
+
+    test "a planted entry is not counted as pending for a peer", ctx do
+      {:ok, _} =
+        Sync.add_peer(
+          "default",
+          %{
+            "workspace_id" => ctx.ws,
+            "url" => "https://cloud-#{ctx.n}.example",
+            "api_key" => "k",
+            "policy" => "push"
+          },
+          "u"
+        )
+
+      insert_context(ctx, "ctx-pending-#{ctx.n}", "Pending")
+      plant_entry(ctx, "ctx-pending-#{ctx.n}", "Planted")
+      plant_entry(ctx, "ctx-other-#{ctx.n}", "Planted elsewhere")
+
+      assert [%{pending_push: 1}] = Sync.status("default", ctx.ws).peers
+    end
   end
 
   # -- helpers ------------------------------------------------------------------
@@ -225,6 +419,36 @@ defmodule OptimalEngine.Storage.StorageLedgerScopeTest do
     {:ok, _} = OptimalEngine.Sync.Capture.seal()
   end
 
+  # A ledger row as an earlier version stored it, with the payload hash the
+  # storage route gives a payload.
+  defp plant(ctx, row) do
+    id = Map.get(row, "id", UUID.uuid4())
+    payload = Jason.encode!(row["payload"])
+
+    {:ok, _} =
+      Store.raw_query(
+        """
+        INSERT INTO sync_mutations
+          (id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, payload,
+           payload_hash, idempotency_key, occurred_at)
+        VALUES (?1, 'default', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '2026-10-14T12:00:00.000')
+        """,
+        [
+          id,
+          ctx.ws,
+          row["device_id"],
+          row["entity_type"],
+          row["entity_id"],
+          row["operation"],
+          payload,
+          :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower),
+          row["idempotency_key"]
+        ]
+      )
+
+    id
+  end
+
   defp plant_entry(ctx, entity_id, title) do
     id = UUID.uuid4()
 
@@ -243,7 +467,7 @@ defmodule OptimalEngine.Storage.StorageLedgerScopeTest do
         VALUES (?1, 'default', ?2, ?3, 'contexts', ?4, 'update', ?5, 'h', ?6,
                 '2999-01-01T00:00:00.000')
         """,
-        [id, ctx.ws, ctx.local, entity_id, payload, "app-key-#{ctx.n}"]
+        [id, ctx.ws, ctx.local, entity_id, payload, "app-key-#{entity_id}"]
       )
 
     id
