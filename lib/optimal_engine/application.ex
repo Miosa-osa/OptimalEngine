@@ -21,8 +21,7 @@ defmodule OptimalEngine.Application do
     sweep_bundle_leftovers()
 
     children =
-      base_children() ++
-        unfinished_import_children() ++ OptimalEngine.API.Endpoint.children()
+      base_children() ++ OptimalEngine.API.Endpoint.children()
 
     opts = [strategy: :one_for_one, name: OptimalEngine.Supervisor]
 
@@ -57,30 +56,28 @@ defmodule OptimalEngine.Application do
     end
   end
 
-  # Workspaces a bundle import created and was still writing when the Engine
-  # stopped. They are listed before any child starts, so an import this run
-  # begins is never among them, and removed once the Store is up and before
-  # the API takes requests. Like the sweep, only the Engine that serves the
-  # API does this.
-  defp unfinished_import_children do
-    with true <- Keyword.get(Application.get_env(:optimal_engine, :api, []), :enabled, false),
-         [_ | _] = markers <- OptimalEngine.Portability.WorkspaceBundle.unfinished_imports() do
-      [
-        %{
-          id: :unfinished_bundle_imports,
-          start: {__MODULE__, :discard_unfinished_imports, [markers]},
-          restart: :temporary
-        }
-      ]
-    else
-      _ -> []
-    end
+  # Workspaces a bundle import was creating when the Engine stopped. Their
+  # marks are listed as the child list is built, before any child starts, so
+  # an import this run begins is never among them; the child removes them
+  # right after the Store starts, before any worker or the API can write.
+  # Like the sweep, only the Engine that serves the API does this.
+  defp unfinished_imports_child do
+    marks =
+      if Keyword.get(Application.get_env(:optimal_engine, :api, []), :enabled, false),
+        do: OptimalEngine.Portability.WorkspaceBundle.unfinished_imports(),
+        else: []
+
+    %{
+      id: :unfinished_bundle_imports,
+      start: {__MODULE__, :discard_unfinished_imports, [marks]},
+      restart: :temporary
+    }
   end
 
   @doc false
   # Runs as a supervisor child, so it returns :ignore and leaves no process.
-  def discard_unfinished_imports(markers) do
-    OptimalEngine.Portability.WorkspaceBundle.discard_unfinished_imports(markers)
+  def discard_unfinished_imports(marks) do
+    OptimalEngine.Portability.WorkspaceBundle.discard_unfinished_imports(marks)
     :ignore
   end
 
@@ -94,6 +91,7 @@ defmodule OptimalEngine.Application do
 
       # ── Core engine (SQLite-backed, must start first) ─────────────────────
       OptimalEngine.Store,
+      unfinished_imports_child(),
       OptimalEngine.Pipeline.Router,
       OptimalEngine.Pipeline.Indexer,
       OptimalEngine.Retrieval.Search,

@@ -925,30 +925,34 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   @doc """
   Removes the workspaces that the given marks name (`unfinished_imports/0`):
-  their rows, files and record, then the marks. The Engine that serves the
-  API lists the marks before it starts and calls this once the Store is up,
-  before it takes requests. Returns how many were removed.
+  their rows, files and record, then the marks. A mark whose workspace could
+  not be removed is kept for the next boot. The Engine that serves the API
+  lists the marks before it starts and calls this right after the Store
+  starts, before anything else writes. Returns how many were removed.
   """
   @spec discard_unfinished_imports([String.t()]) :: non_neg_integer()
-  def discard_unfinished_imports(markers) do
-    Enum.count(markers, fn marker ->
-      removed =
-        with {:ok, json} <- File.read(marker),
-             {:ok, %{"tenant_id" => tenant_id, "workspace_id" => workspace_id}}
-             when is_binary(tenant_id) and is_binary(workspace_id) <- Jason.decode(json) do
-          undo_create(%{tenant_id: tenant_id, workspace_id: workspace_id})
+  def discard_unfinished_imports(marks) do
+    Enum.count(marks, fn mark ->
+      with {:ok, json} <- File.read(mark),
+           {:ok, %{"tenant_id" => tenant_id, "workspace_id" => workspace_id}}
+           when is_binary(tenant_id) and is_binary(workspace_id) <- Jason.decode(json),
+           :ok <- undo_create(%{tenant_id: tenant_id, workspace_id: workspace_id}) do
+        Logger.warning(
+          "[WorkspaceBundle] removed #{workspace_id}, which an import was creating when the Engine stopped"
+        )
 
-          Logger.warning(
-            "[WorkspaceBundle] removed #{workspace_id}, which an import was creating when the Engine stopped"
-          )
+        File.rm(mark)
+        true
+      else
+        # The workspace is still there: the next boot tries again.
+        :error ->
+          false
 
-          true
-        else
-          _ -> false
-        end
-
-      File.rm(marker)
-      removed
+        # Unreadable or malformed: nothing to remove by it.
+        _ ->
+          File.rm(mark)
+          false
+      end
     end)
   end
 
@@ -1049,20 +1053,23 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     error -> {:error, Exception.message(error)}
   end
 
-  # A failed create import leaves nothing behind: its rows, then the
-  # workspace record it made.
+  # A failed create import leaves nothing behind: its rows, the workspace
+  # record it made, then its files. Returns :error when it could not.
   defp undo_create(plan) do
     delete_rows(plan.tenant_id, plan.workspace_id)
-    Store.raw_query("DELETE FROM workspaces WHERE id = ?1", [plan.workspace_id])
+    {:ok, _} = Store.raw_query("DELETE FROM workspaces WHERE id = ?1", [plan.workspace_id])
     files = Filesystem.path(root(), plan.workspace_id)
 
     # The files an import copied, never the Engine root itself.
     if Path.expand(files) != Path.expand(root()), do: File.rm_rf(files)
+    :ok
   rescue
     error ->
       Logger.error(
         "[WorkspaceBundle] could not remove the failed import of #{plan.workspace_id}: #{Exception.message(error)}"
       )
+
+      :error
   end
 
   # Tables a table points at come first; tables outside the bundle and
