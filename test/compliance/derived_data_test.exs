@@ -399,7 +399,9 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
     end
 
     test "keep the files of a package a claim refers to", ctx do
-      {seeded, entry} = planned!(ctx, "plan-claim")
+      # A claim cannot outlive its package (it is deleted with it), so it names a package
+      # that is still here.
+      {seeded, entry} = planned!(ctx, "plan-claim", package: :stays)
 
       sql!(
         "INSERT INTO claims (id, source_package_id, claim_text) VALUES (?1, ?2, 'a claim')",
