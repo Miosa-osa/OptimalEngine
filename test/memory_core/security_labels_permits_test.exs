@@ -38,7 +38,18 @@ defmodule OptimalEngine.MemoryCore.SecurityLabelsPermitsTest do
     end
 
     test "is empty for text that is not an object" do
-      for text <- ["not json", "[1,2]", ~s("text"), "7", "", ~s({"a":1} trailing), ~s({"a":)] do
+      for text <- [
+            "not json",
+            "[1,2]",
+            ~s("text"),
+            "7",
+            "",
+            ~s({"a":1} trailing),
+            ~s({"a":),
+            # A lone surrogate escape, and a byte that is not UTF-8.
+            ~S({"a":"\ud800"}),
+            <<?{, ?", 0xFF, ?", ?:, ?1, ?}>>
+          ] do
         assert SecurityLabels.metadata_map(text) == %{}, inspect(text)
       end
 

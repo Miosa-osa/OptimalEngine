@@ -219,6 +219,59 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
       assert readable?.(["restricted", "internal"], ["team-a"])
     end
 
+    test "metadata that spells a label key with an escape is read as that key by the aggregate rule",
+         ctx do
+      # `security\u005flabels` is the key `security_labels` once decoded, and spelled
+      # so it does not contain the text the scan looks for.
+      for {name, metadata} <- [
+            labels: ~S({"security\u005flabels":["restricted"]}),
+            partitions: ~S({"partition\u005fids":["team-a"]}),
+            both_escaped: ~S({"\u0073ecurity_labels":["restricted"],"note":"a \"quoted\" word"})
+          ] do
+        {:ok, workspace} =
+          Workspace.create(%{slug: "esc-#{slug(name)}-#{ctx.n}", name: "Esc #{name}"})
+
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO memories (id, tenant_id, workspace_id, content, metadata) VALUES (?1, 'default', ?2, 'Escaped key', ?3)",
+            ["mem-esc-#{name}-#{ctx.n}", workspace.id, metadata]
+          )
+
+        report = %{"id" => "report-esc-#{name}-#{ctx.n}", "kind" => "promises"}
+
+        readable? = fn labels, partitions ->
+          Gate.with_reader(
+            "default",
+            workspace.id,
+            SecurityLabels.grants(labels, partitions),
+            &Gate.readable_row?(&1, "analysis_reports", report)
+          )
+        end
+
+        refute readable?.(["internal"], []), "#{name}: read past an escaped key"
+        assert readable?.(["*"], ["*"]), "#{name}: a key of everything is not turned away"
+      end
+
+      # Metadata with escapes and neither key is no reason to hold an aggregate.
+      {:ok, plain} = Workspace.create(%{slug: "esc-plain-#{ctx.n}", name: "Esc plain"})
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO memories (id, tenant_id, workspace_id, content, metadata) VALUES (?1, 'default', ?2, 'Plain', ?3)",
+          ["mem-esc-plain-#{ctx.n}", plain.id, ~S({"note":"line\nbreak and \"quotes\""})]
+        )
+
+      assert Gate.with_reader(
+               "default",
+               plain.id,
+               SecurityLabels.grants(["internal"], []),
+               &Gate.readable_row?(&1, "analysis_reports", %{
+                 "id" => "report-esc-plain-#{ctx.n}",
+                 "kind" => "promises"
+               })
+             )
+    end
+
     test "metadata that repeats a key is unresolved for the aggregate rule, as it is for a row",
          ctx do
       for {name, metadata} <- [
@@ -1456,6 +1509,8 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
   end
 
   defp ids(items), do: Enum.map(items, & &1["id"])
+
+  defp slug(name), do: name |> to_string() |> String.replace("_", "-")
 
   defp cid(ctx, name), do: "c-#{name}-#{ctx.n}"
 

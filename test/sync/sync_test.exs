@@ -1099,6 +1099,24 @@ defmodule OptimalEngine.SyncTest do
       too_small = %{"row" => %{"id" => "x", "mode" => -9_223_372_036_854_775_809}, "blobs" => %{}}
       bad_hex = %{"row" => %{"id" => "x"}, "blobs" => %{"embedding" => "zz"}}
 
+      # The widest integers that fit 64 bits are bound, not refused.
+      edge = fn id, value ->
+        mutation(ctx, %{
+          "payload" => %{
+            "row" => %{
+              "id" => id,
+              "title" => value,
+              "workspace_id" => ctx.ws,
+              "tenant_id" => ctx.tenant
+            },
+            "blobs" => %{}
+          }
+        })
+      end
+
+      widest = edge.("widest-#{ctx.n}", 9_223_372_036_854_775_807)
+      narrowest = edge.("narrowest-#{ctx.n}", -9_223_372_036_854_775_808)
+
       # Built by hand: the helper reads the payload, which is what is wrong here.
       raw = fn attrs ->
         Map.merge(
@@ -1132,14 +1150,16 @@ defmodule OptimalEngine.SyncTest do
         {:invalid_payload, raw.(%{"payload" => bad_hex})}
       ]
 
-      batch = [good, "garbage", 42, nil | Enum.map(bad, &elem(&1, 1))]
+      batch = [good, widest, narrowest, "garbage", 42, nil | Enum.map(bad, &elem(&1, 1))]
 
       assert {:ok, result} = Sync.apply_changes(ctx.tenant, ctx.ws, batch)
-      assert result.applied == 1
+      assert result.applied == 3
       assert result.skipped == %{invalid: 3}
       assert Enum.map(result.failed, & &1.reason) == Enum.map(bad, &elem(&1, 0))
       assert probe_count("SELECT COUNT(*) FROM contexts WHERE id = ?1", ["bad-#{ctx.n}"]) == 0
       assert probe_count("SELECT COUNT(*) FROM contexts WHERE id = ?1", ["good-#{ctx.n}"]) == 1
+      assert title("widest-#{ctx.n}") == "9223372036854775807"
+      assert title("narrowest-#{ctx.n}") == "-9223372036854775808"
     end
   end
 
