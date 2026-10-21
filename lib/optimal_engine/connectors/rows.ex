@@ -291,6 +291,35 @@ defmodule OptimalEngine.Connectors.Rows do
   def check_workspace(_tenant_id, _workspace_id), do: {:error, :workspace_not_found}
 
   @doc """
+  Whether a Signal may be placed in `workspace_id` on behalf of the tenant: a
+  workspace registered to the tenant and active, or one that is not
+  registered at all and is not named for another tenant (`"<other>:slug"`),
+  which is how a single-tenant deployment names workspaces it never
+  registered. A workspace of another tenant, and an archived one, are not.
+  """
+  @spec routable_workspace?(String.t(), term()) :: boolean()
+  def routable_workspace?(tenant_id, workspace_id) when is_binary(workspace_id) do
+    case Workspace.get(workspace_id) do
+      {:ok, %{tenant_id: ^tenant_id, status: :active}} ->
+        true
+
+      {:ok, _other_tenant_or_archived} ->
+        false
+
+      {:error, :not_found} ->
+        case String.split(workspace_id, ":", parts: 2) do
+          [prefix, _slug] -> prefix == tenant_id
+          _bare -> true
+        end
+
+      _unavailable ->
+        false
+    end
+  end
+
+  def routable_workspace?(_tenant_id, _workspace_id), do: false
+
+  @doc """
   Where a connector registered without a workspace lands: the first active
   workspace the tenant owns among the candidates. The candidates are the
   Engine's own workspace when it is workspace-scoped, then the tenant's intake

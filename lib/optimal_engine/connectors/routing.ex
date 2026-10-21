@@ -39,9 +39,14 @@ defmodule OptimalEngine.Connectors.Routing do
 
       "routing_labels":           ["invoices", "clients"]  (optional)
       "routing_channel":          "#clients"               (optional)
-      "review_workspace_id":      "knowledge-intake"       (optional)
+      "review_workspace_id":      "acme:review"            (optional)
       "routing_walled_workspaces": ["hq", "legal"]         (optional)
       "outward_topic":            "customers"              (optional)
+
+  `review_workspace_id` must be a workspace the connector's tenant may place a
+  Signal in: one of its active workspaces, or an id nobody registered that is
+  not named for another tenant. A route that names a workspace of another
+  tenant, whether by this key or by a routing rule, is not taken.
 
   `outward_topic` must be one of `OptimalEngine.Viability.SignalEvents.outward_topics/0`.
   When it is set, every Signal this connector produces is recorded as an
@@ -51,6 +56,7 @@ defmodule OptimalEngine.Connectors.Routing do
 
   require Logger
 
+  alias OptimalEngine.Connectors.Rows
   alias OptimalEngine.Operating.Loops
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.Routing.RuleStore
@@ -80,8 +86,32 @@ defmodule OptimalEngine.Connectors.Routing do
   end
 
   @doc """
+  `validate_config/1`, and the review workspace the config names must be a
+  workspace the tenant may place a Signal in (`Rows.routable_workspace?/2`):
+  `{:error, :invalid_review_workspace}` otherwise.
+  """
+  @spec validate_config(map(), String.t()) :: :ok | {:error, atom()}
+  def validate_config(config, tenant_id) when is_map(config) do
+    with :ok <- validate_config(config) do
+      case value(config, "review_workspace_id") do
+        nil ->
+          :ok
+
+        workspace_id ->
+          if Rows.routable_workspace?(tenant_id, workspace_id),
+            do: :ok,
+            else: {:error, :invalid_review_workspace}
+      end
+    end
+  end
+
+  @doc """
   The workspace a connector Signal belongs to, with the decision that produced
   it. `default_workspace` is the connector's own workspace.
+
+  A route names a workspace of the tenant or it is not taken: a rule, or a
+  connector row written before the review workspace was checked, that names a
+  workspace of another tenant leaves the Signal in `default_workspace`.
   """
   @spec workspace_for(String.t(), Signal.t(), map(), String.t()) :: map()
   def workspace_for(tenant_id, %Signal{} = signal, config, default_workspace) do
@@ -90,10 +120,10 @@ defmodule OptimalEngine.Connectors.Routing do
     workspace_id =
       cond do
         decision.confidence == :high and claims?(tenant_id, config, decision) ->
-          decision.workspace_id
+          own_workspace(tenant_id, decision.workspace_id)
 
         decision.confidence == :review ->
-          present(value(config, "review_workspace_id")) || default_workspace
+          own_workspace(tenant_id, present(value(config, "review_workspace_id")))
 
         true ->
           default_workspace
@@ -276,6 +306,10 @@ defmodule OptimalEngine.Connectors.Routing do
   end
 
   # ─── private ─────────────────────────────────────────────────────────────
+
+  defp own_workspace(tenant_id, workspace_id) do
+    if Rows.routable_workspace?(tenant_id, workspace_id), do: workspace_id
+  end
 
   # A walled or private workspace is only claimed by an explicit identity
   # mapping. A keyword rule can only ever propose it for review.

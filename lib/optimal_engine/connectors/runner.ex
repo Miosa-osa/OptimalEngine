@@ -697,7 +697,7 @@ defmodule OptimalEngine.Connectors.Runner do
   @spec upsert_row(map()) :: {:ok, String.t()} | {:error, term()}
   def upsert_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
-    with {:ok, sanitized} <- validate_and_seal(config),
+    with {:ok, sanitized} <- validate_and_seal(config, attrs),
          {:ok, workspace_id} <- row_workspace(id, attrs) do
       write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :update)
     end
@@ -711,14 +711,14 @@ defmodule OptimalEngine.Connectors.Runner do
   @spec provision_row(map()) :: {:ok, :created | :exists} | {:error, term()}
   def provision_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
-    with {:ok, sanitized} <- validate_and_seal(config),
+    with {:ok, sanitized} <- validate_and_seal(config, attrs),
          {:ok, workspace_id} <- row_workspace(id, attrs) do
       write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :keep)
     end
   end
 
-  defp validate_and_seal(config) do
-    with :ok <- Routing.validate_config(config),
+  defp validate_and_seal(config, attrs) do
+    with :ok <- Routing.validate_config(config, Map.get(attrs, :tenant_id, Tenant.default_id())),
          :ok <- Cadence.validate(config) do
       encrypt_credentials(config)
     end
