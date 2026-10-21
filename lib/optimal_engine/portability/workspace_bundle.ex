@@ -167,6 +167,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       when is_binary(bundle_sha256) and is_binary(target_url) do
     with {:ok, workspace} <- Workspace.get(workspace_id),
          true <- workspace.tenant_id == tenant_id || {:error, :not_found},
+         :ok <- movable(workspace_id),
          {:ok, [[expected]]} <-
            Store.raw_query(
              "SELECT bundle_sha256 FROM uri_redirects WHERE tenant_id = ?1 AND workspace_id = ?2 AND state = 'pending'",
@@ -212,20 +213,55 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   Records that `workspace_id` was exported for a move, with the bundle hash
   the target must report back before `finalize_move/4` deletes anything.
   """
-  @spec prepare_move(String.t(), String.t(), String.t()) :: :ok
+  @spec prepare_move(String.t(), String.t(), String.t()) ::
+          :ok | {:error, :workspace_directory_shared}
   def prepare_move(tenant_id, workspace_id, bundle_sha256) do
-    {:ok, _} =
-      Store.raw_query(
-        """
-        INSERT INTO uri_redirects (tenant_id, workspace_id, bundle_sha256, state)
-        VALUES (?1, ?2, ?3, 'pending')
-        ON CONFLICT(tenant_id, workspace_id) DO UPDATE SET bundle_sha256 = excluded.bundle_sha256, state = 'pending'
-        """,
-        [tenant_id, workspace_id, bundle_sha256]
-      )
+    with :ok <- movable(workspace_id) do
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO uri_redirects (tenant_id, workspace_id, bundle_sha256, state)
+          VALUES (?1, ?2, ?3, 'pending')
+          ON CONFLICT(tenant_id, workspace_id) DO UPDATE SET bundle_sha256 = excluded.bundle_sha256, state = 'pending'
+          """,
+          [tenant_id, workspace_id, bundle_sha256]
+        )
 
-    :ok
+      :ok
+    end
   end
+
+  @doc """
+  `:ok` when a move may take the workspace off this Engine, which removes the
+  workspace's directory. Only a directory that holds that workspace alone may
+  go: a direct child of the Engine root that the root does not use for itself
+  (`Filesystem.reserved_names/0`, any hidden name), or `tenants/<tenant>/<slug>`.
+  Anything else (the root itself, which is the default workspace's directory,
+  a directory the root uses, a hidden one) holds more than the workspace, so the
+  move is refused with `:workspace_directory_shared`.
+  """
+  @spec movable(String.t()) :: :ok | {:error, :workspace_directory_shared}
+  def movable(workspace_id) do
+    root = Path.expand(root())
+
+    segments =
+      root
+      |> Filesystem.path(workspace_id)
+      |> Path.expand()
+      |> Path.relative_to(root)
+      |> Path.split()
+
+    if own_directory?(segments), do: :ok, else: {:error, :workspace_directory_shared}
+  end
+
+  defp own_directory?([name]),
+    do: own_name?(name) and String.downcase(name) not in Filesystem.reserved_names()
+
+  defp own_directory?(["tenants", tenant, slug]), do: own_name?(tenant) and own_name?(slug)
+  defp own_directory?(_segments), do: false
+
+  # `_` is where a blank or dot segment lands, so several ids can share it.
+  defp own_name?(name), do: name not in ["", "_"] and not String.starts_with?(name, ".")
 
   @doc """
   Resolves an `optimal://<workspace>/...` address: `{:local, uri}` when this

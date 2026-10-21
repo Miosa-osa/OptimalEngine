@@ -82,21 +82,24 @@ defmodule OptimalEngine.API.ScopeAPI do
 
     path = Path.join(bundle_dir(), name)
 
-    case WorkspaceBundle.export(tenant(conn), workspace_id, path) do
-      {:ok, manifest} ->
-        if body["for_move"] == true,
-          do: WorkspaceBundle.prepare_move(tenant(conn), workspace_id, manifest["bundle_sha256"])
+    with :ok <- if(body["for_move"] == true, do: WorkspaceBundle.movable(workspace_id), else: :ok),
+         {:ok, manifest} <- WorkspaceBundle.export(tenant(conn), workspace_id, path) do
+      if body["for_move"] == true,
+        do: WorkspaceBundle.prepare_move(tenant(conn), workspace_id, manifest["bundle_sha256"])
 
-        json(conn, 201, %{
-          bundle: name,
-          bundle_sha256: manifest["bundle_sha256"],
-          tables: length(manifest["tables"]),
-          rows: Enum.sum(Enum.map(manifest["tables"], & &1["rows"])),
-          files: length(manifest["files"]),
-          for_move: body["for_move"] == true,
-          # A replica seeded from this bundle pulls from this ledger mark.
-          ledger_sequence: manifest["ledger_sequence"]
-        })
+      json(conn, 201, %{
+        bundle: name,
+        bundle_sha256: manifest["bundle_sha256"],
+        tables: length(manifest["tables"]),
+        rows: Enum.sum(Enum.map(manifest["tables"], & &1["rows"])),
+        files: length(manifest["files"]),
+        for_move: body["for_move"] == true,
+        # A replica seeded from this bundle pulls from this ledger mark.
+        ledger_sequence: manifest["ledger_sequence"]
+      })
+    else
+      {:error, :workspace_directory_shared} ->
+        error(conn, 409, :workspace_directory_shared)
 
       {:error, :not_found} ->
         error(conn, 404, "workspace not found")
@@ -174,6 +177,7 @@ defmodule OptimalEngine.API.ScopeAPI do
            body
          ) do
       {:ok, result} -> json(conn, 200, result)
+      {:error, :workspace_directory_shared} -> error(conn, 409, :workspace_directory_shared)
       {:error, reason} -> error(conn, 409, inspect(reason))
     end
   end
