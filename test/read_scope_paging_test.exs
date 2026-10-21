@@ -8,6 +8,7 @@ defmodule OptimalEngine.ReadScopePagingTest do
 
   use ExUnit.Case, async: true
 
+  alias OptimalEngine.Identity.ACL
   alias OptimalEngine.ReadScope
 
   # The list is the integers 1..size; the reader may see the multiples of `step`.
@@ -28,15 +29,47 @@ defmodule OptimalEngine.ReadScopePagingTest do
     end
   end
 
-  describe "filtering?/1" do
-    test "only a scope whose grants cut something filters" do
-      refute ReadScope.filtering?(nil)
+  describe "filtering?/1 and grants_cut?/1" do
+    # A tenant of its own, so no other test's access lists are in the way.
+    defp scope(labels, partitions) do
+      %ReadScope{
+        tenant_id: "paging-#{System.unique_integer([:positive])}",
+        principal: "agent:paging",
+        labels: labels,
+        partitions: partitions
+      }
+    end
 
-      all = %ReadScope{tenant_id: "default", principal: "p", labels: ["*"], partitions: ["*"]}
+    test "the operator is not filtered" do
+      refute ReadScope.filtering?(nil)
+      refute ReadScope.grants_cut?(nil)
+    end
+
+    test "a key whose grants cut something filters" do
+      for scope <- [scope([], []), scope(["*"], []), scope(["*"], ["team-a"])] do
+        assert ReadScope.filtering?(scope)
+        assert ReadScope.grants_cut?(scope)
+      end
+    end
+
+    test "a key granted * is filtered only when the access lists can cut" do
+      all = scope(["*"], ["*"])
+      refute ReadScope.grants_cut?(all)
       refute ReadScope.filtering?(all)
 
-      assert ReadScope.filtering?(%{all | labels: []})
-      assert ReadScope.filtering?(%{all | partitions: ["team-a"]})
+      # A resource with an access list row can hide from any principal.
+      :ok =
+        ACL.deny(%{
+          resource_uri: "optimal://memory/paging/hidden",
+          principal_id: "agent:somebody-else",
+          tenant_id: all.tenant_id
+        })
+
+      assert ReadScope.filtering?(all)
+      refute ReadScope.grants_cut?(all)
+
+      # And a policy that denies what no row governs cuts everything.
+      assert ReadScope.filtering?(%{scope(["*"], ["*"]) | acl_absent: :deny})
     end
   end
 
