@@ -13,7 +13,8 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
   alias OptimalEngine.API.Router
   alias OptimalEngine.API.RateLimiter
   alias OptimalEngine.Context
-  alias OptimalEngine.Store
+  alias OptimalEngine.Graph
+  alias OptimalEngine.{Organization, Store, Workspace}
 
   @opts Router.init([])
 
@@ -242,17 +243,58 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
   end
 
   describe "GET /api/graph analysis endpoints" do
+    # The analyses read the edge table, which has no tenant, so they answer
+    # only for a workspace registered to the caller's tenant.
+    defp registered_workspace(slug) do
+      {:ok, workspace} =
+        Workspace.create(%{
+          tenant_id: "default",
+          organization_id: Organization.default_for("default"),
+          slug: slug,
+          name: slug
+        })
+
+      workspace.id
+    end
+
     test "hubs/triangles/clusters/reflect accept workspace and stay scoped", ctx do
+      ws_a = registered_workspace("iso-an-a-#{ctx.suffix}")
+      ws_b = registered_workspace("iso-an-b-#{ctx.suffix}")
+      node = "iso-an-node-#{ctx.suffix}"
+
+      for {id, ws, entity} <- [
+            {"isoana1#{ctx.suffix}", ws_a, "AnEntityA#{ctx.suffix}"},
+            {"isoana2#{ctx.suffix}", ws_a, "AnEntityA#{ctx.suffix}"},
+            {"isoanb1#{ctx.suffix}", ws_b, "AnEntityB#{ctx.suffix}"},
+            {"isoanb2#{ctx.suffix}", ws_b, "AnEntityB#{ctx.suffix}"}
+          ] do
+        context = insert_context(id, ws, %{title: id, node: node, entities: [entity]})
+        :ok = Graph.create_edges_for_context(context)
+      end
+
+      for path <- [
+            "/api/graph/hubs?workspace=#{ws_a}",
+            "/api/graph/triangles?workspace=#{ws_a}&limit=5",
+            "/api/graph/clusters?workspace=#{ws_a}",
+            "/api/graph/reflect?workspace=#{ws_a}&min=1"
+          ] do
+        conn = request(:get, path)
+        assert conn.status == 200, "#{path} returned #{conn.status}"
+        refute conn.resp_body =~ "AnEntityB#{ctx.suffix}"
+        refute conn.resp_body =~ "isoanb"
+      end
+
+      assert request(:get, "/api/graph/clusters?workspace=#{ws_a}").resp_body =~ "isoana1"
+    end
+
+    test "a workspace nobody registered answers none of them", ctx do
       for path <- [
             "/api/graph/hubs?workspace=#{ctx.ws_a}",
             "/api/graph/triangles?workspace=#{ctx.ws_a}&limit=5",
             "/api/graph/clusters?workspace=#{ctx.ws_a}",
             "/api/graph/reflect?workspace=#{ctx.ws_a}&min=1"
           ] do
-        conn = request(:get, path)
-        assert conn.status == 200, "#{path} returned #{conn.status}"
-        refute conn.resp_body =~ "EntityB#{ctx.suffix}"
-        refute conn.resp_body =~ ctx.b1.id
+        assert request(:get, path).status == 404, path
       end
     end
   end

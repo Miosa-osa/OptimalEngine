@@ -6,14 +6,14 @@ defmodule OptimalEngine.Graph.WorkspaceScopingTest do
       @edge_insert_sql omitted it, backfilling every edge to 'default')
     * reads (edges_for / stats / subgraph / related_contexts) are scoped
     * per-workspace rebuild only touches that workspace's edges
-    * Analyzer hubs/clusters never cross workspaces
+    * Analyzer hubs/clusters/triangles and Reflector gaps never cross workspaces
   """
 
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Context
   alias OptimalEngine.Graph
-  alias OptimalEngine.Graph.Analyzer
+  alias OptimalEngine.Graph.{Analyzer, Reflector}
   alias OptimalEngine.Store
 
   defp insert_context(id, workspace_id, node, entities) do
@@ -129,5 +129,32 @@ defmodule OptimalEngine.Graph.WorkspaceScopingTest do
     all_members = Enum.flat_map(clusters, &MapSet.to_list/1)
     assert ctx.a.id in all_members
     refute ctx.b.id in all_members
+  end
+
+  test "Analyzer triangles and Reflector gaps never include another workspace's ids", ctx do
+    s = ctx.suffix
+
+    for {id, ws, entities} <- [
+          {"graphtri-a1#{s}", ctx.ws_a, ["TriHubA#{s}", "SharedA#{s}"]},
+          {"graphtri-a2#{s}", ctx.ws_a, ["TriHubA#{s}", "SharedA#{s}"]},
+          {"graphtri-b1#{s}", ctx.ws_b, ["TriHubB#{s}", "SharedB#{s}"]},
+          {"graphtri-b2#{s}", ctx.ws_b, ["TriHubB#{s}", "SharedB#{s}"]}
+        ] do
+      ctx = insert_context(id, ws, ctx.node, entities)
+      :ok = Graph.create_edges_for_context(ctx)
+    end
+
+    {:ok, triangles} = Analyzer.triangles(workspace_id: ctx.ws_a, limit: 100, skip_llm: true)
+    members = Enum.flat_map(triangles, &[&1.a, &1.b, &1.c])
+
+    assert "graphtri-a1#{s}" in members
+    refute Enum.any?(members, &String.contains?(&1, ["graphtri-b", "TriHubB", "SharedB"]))
+
+    {:ok, gaps} =
+      Reflector.reflect(workspace_id: ctx.ws_a, min_cooccurrences: 2, skip_llm: true)
+
+    names = Enum.flat_map(gaps, &[&1.source, &1.target])
+    assert "TriHubA#{s}" in names and "SharedA#{s}" in names
+    refute Enum.any?(names, &String.contains?(&1, ["TriHubB", "SharedB"]))
   end
 end
