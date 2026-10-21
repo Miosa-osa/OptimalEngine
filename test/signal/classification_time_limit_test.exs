@@ -224,7 +224,7 @@ defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
         end)
 
       assert length(classifications) == 30
-      assert events[:classification_budget_spent] >= 1
+      assert Map.get(events, :classification_budget_spent, 0) >= 1
       assert ms < 200 + 2_000, "30 chunks took #{ms} ms"
     end
 
@@ -263,7 +263,7 @@ defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
       assert {:ok, _} = result
       assert {:ok, _} = crafted
       assert ms < 10_000, "an ordinary ingest waited #{ms} ms"
-      assert events[:classification_timeout] >= 2
+      assert Map.get(events, :classification_timeout, 0) >= 2
     end
   end
 end
