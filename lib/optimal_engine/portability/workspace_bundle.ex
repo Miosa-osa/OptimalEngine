@@ -60,6 +60,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # that already holds one keeps it.
   @keep_existing ~w(principals model_call_operations)
   @children %{"memory_reconstruction_steps" => {"run_id", "memory_reconstruction_runs"}}
+  # Registry tables an export reads by membership and scope, not by a
+  # workspace_id column.
+  @member_tables ~w(workspace_members node_members)
+  @principals "principals"
+  @documents "operating_documents"
   @batch_rows 1_000
 
   @doc """
@@ -118,6 +123,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     try do
       with :ok <- unpack(path, staging),
            {:ok, manifest} <- read_manifest(staging),
+           :ok <- permitted(manifest),
            :ok <- verify(manifest, staging),
            {:ok, plan} <- plan(manifest, tenant_id, opts),
            :ok <- compatible(manifest, staging),
@@ -354,8 +360,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     principals =
       write_table(
         staging,
-        "principals",
-        columns("principals"),
+        @principals,
+        columns(@principals),
         """
         SELECT * FROM principals WHERE id IN (
           SELECT principal_id FROM workspace_members WHERE workspace_id = ?1
@@ -368,8 +374,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     documents =
       write_table(
         staging,
-        "operating_documents",
-        columns("operating_documents"),
+        @documents,
+        columns(@documents),
         "SELECT * FROM operating_documents WHERE tenant_id = ?1 AND scope_type = 'workspace' AND scope_id = ?2",
         [tenant_id, workspace_id]
       )
@@ -440,6 +446,40 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     end
   end
 
+  @doc """
+  Exactly the tables an export can write, and so the only ones an import
+  accepts: the workspace's own tables, the child tables read through a parent,
+  and the registry tables an export selects by membership or scope (the
+  principals of the workspace's members, its operating documents).
+  """
+  @spec exportable_tables() :: [String.t()]
+  def exportable_tables do
+    Enum.uniq(workspace_tables() ++ Map.keys(@children) ++ [@principals, @documents])
+  end
+
+  # A bundle carries a workspace's data, and only that. Anyone can write one
+  # and sign its manifest, so the tables it names are checked against the ones
+  # this Engine exports: never a table it keeps for itself (connectors and their
+  # credentials, jobs, sync state) and never one the manifest invents.
+  #
+  # What a bundle may still do within those tables: add rows to the workspace it
+  # creates or merges into, and add principals to the importing tenant (every
+  # principals row is written with that tenant, and an id the Engine already has
+  # keeps its existing row).
+  defp permitted(%{"tables" => tables}) when is_list(tables) do
+    allowed = exportable_tables()
+
+    refused =
+      for table <- tables, name = table_name(table), name not in allowed, do: name
+
+    if refused == [], do: :ok, else: {:error, {:table_not_allowed, Enum.sort(refused)}}
+  end
+
+  defp permitted(_manifest), do: {:error, :manifest_unreadable}
+
+  defp table_name(%{"name" => name}) when is_binary(name), do: name
+  defp table_name(_table), do: "(unnamed)"
+
   defp verify(manifest, staging) do
     claimed = manifest["bundle_sha256"]
     recomputed = manifest |> Map.delete("bundle_sha256") |> CanonicalJSON.hash()
@@ -469,6 +509,27 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   defp plan(manifest, tenant_id, opts) do
+    with {:ok, requested} <- requested_workspace_id(opts[:workspace_id], tenant_id) do
+      plan_target(manifest, tenant_id, Keyword.put(opts, :workspace_id, requested))
+    end
+  end
+
+  # A workspace id names its tenant (`<tenant>:<slug>`), so a caller that asks
+  # for one may not take another tenant's name; a bare slug gets this tenant's.
+  defp requested_workspace_id(nil, _tenant_id), do: {:ok, nil}
+
+  defp requested_workspace_id(id, tenant_id) when is_binary(id) do
+    case String.split(id, ":", parts: 2) do
+      [^tenant_id, slug] when slug != "" -> {:ok, id}
+      [_other_tenant, _slug] -> {:error, :workspace_id_not_in_tenant}
+      [slug] when slug != "" -> {:ok, tenant_id <> ":" <> slug}
+      _blank -> {:error, :invalid_workspace_id}
+    end
+  end
+
+  defp requested_workspace_id(_id, _tenant_id), do: {:error, :invalid_workspace_id}
+
+  defp plan_target(manifest, tenant_id, opts) do
     source = manifest["workspace"]
     mode = Keyword.get(opts, :mode, :create)
     target_id = opts[:workspace_id] || target_id(source, tenant_id, mode)
@@ -606,25 +667,30 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     # transaction (which runs inside that process).
     drops = Map.new(names, &{&1, autoincrement_key(columns(&1))})
     keys = Map.new(names, &{&1, foreign_keys(&1)})
+    column_names = Map.new(names, &{&1, MapSet.new(columns(&1), fn {column, _, _} -> column end)})
 
+    # Every table is checked before any is written, so a refused bundle leaves
+    # nothing behind.
     result =
-      names
-      |> parents_first(keys)
-      |> Enum.reduce_while({:ok, %{}}, fn name, {:ok, counts} ->
-        verb = if name in @keep_existing, do: "INSERT OR IGNORE", else: insert
+      with :ok <- check_tables(names, staging, column_names, plan) do
+        names
+        |> parents_first(keys)
+        |> Enum.reduce_while({:ok, %{}}, fn name, {:ok, counts} ->
+          verb = if name in @keep_existing, do: "INSERT OR IGNORE", else: insert
 
-        rows =
-          Path.join([staging, "tables", name <> ".jsonl"])
-          |> File.stream!()
-          |> Stream.map(&Jason.decode!/1)
-          |> Stream.map(&(&1 |> rewrite(name, plan) |> Map.drop(drops[name])))
-          |> self_parents_first(Enum.filter(keys[name], &(&1.table == name)))
+          rows =
+            Path.join([staging, "tables", name <> ".jsonl"])
+            |> File.stream!()
+            |> Stream.map(&Jason.decode!/1)
+            |> Stream.map(&(&1 |> rewrite(name, plan, column_names[name]) |> Map.drop(drops[name])))
+            |> self_parents_first(Enum.filter(keys[name], &(&1.table == name)))
 
-        case write_batches(name, rows, verb, batch_rows) do
-          {:ok, written} -> {:cont, {:ok, Map.put(counts, name, written)}}
-          {:error, reason} -> {:halt, {:error, {:import_failed, name, reason}}}
-        end
-      end)
+          case write_batches(name, rows, verb, batch_rows) do
+            {:ok, written} -> {:cont, {:ok, Map.put(counts, name, written)}}
+            {:error, reason} -> {:halt, {:error, {:import_failed, name, reason}}}
+          end
+        end)
+      end
 
     with {:error, _} = error <- result do
       if plan.mode == :create, do: undo_create(plan)
@@ -756,26 +822,81 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     end
   end
 
-  defp rewrite(row, "principals", plan), do: Map.put(row, "tenant_id", plan.tenant_id)
-
-  defp rewrite(row, "operating_documents", plan),
-    do: row |> Map.put("tenant_id", plan.tenant_id) |> Map.put("scope_id", plan.workspace_id)
-
-  # A bundle exported before mentions recorded a tenant has no `tenant_id` on
-  # them; the import records the target tenant either way.
-  defp rewrite(row, "entity_mentions", plan),
-    do: row |> Map.put("tenant_id", plan.tenant_id) |> rewrite_scope(plan)
-
-  defp rewrite(row, _table, plan), do: rewrite_scope(row, plan)
-
-  defp rewrite_scope(row, plan) do
+  # Every row is written into the importing tenant and the workspace it makes,
+  # whatever the bundle says, and whether or not it says anything: a column the
+  # table has is always set, so a missing key cannot fall to the column's
+  # default. An operating document is always the workspace's, never the tenant's.
+  defp rewrite(row, name, plan, columns) do
     row
-    |> then(fn r ->
-      if Map.has_key?(r, "tenant_id"), do: Map.put(r, "tenant_id", plan.tenant_id), else: r
+    |> scope_column(columns, "tenant_id", plan.tenant_id)
+    |> scope_column(columns, "workspace_id", plan.workspace_id)
+    |> document_scope(name, plan)
+  end
+
+  defp scope_column(row, columns, column, value) do
+    if MapSet.member?(columns, column), do: Map.put(row, column, value), else: row
+  end
+
+  defp document_scope(row, "operating_documents", plan),
+    do: row |> Map.put("scope_type", "workspace") |> Map.put("scope_id", plan.workspace_id)
+
+  defp document_scope(row, _name, _plan), do: row
+
+  # What a table's rows may be, checked before any of them is written. Every key
+  # must be a column of the table, spelled as the table spells it: SQLite matches
+  # column names without regard to case and takes the first of two that match, so
+  # a key that only looks like a column could carry a value past `rewrite/4`.
+  # And a member of the workspace must be a principal of the importing tenant.
+  defp check_tables(names, staging, column_names, plan) do
+    Enum.find_value(names, :ok, fn name ->
+      path = Path.join([staging, "tables", name <> ".jsonl"])
+
+      with :ok <- check_columns(path, column_names[name]),
+           :ok <- if(name in @member_tables, do: check_members(path, plan.tenant_id), else: :ok) do
+        nil
+      else
+        {:error, reason} -> {:error, {:import_failed, name, reason}}
+      end
     end)
-    |> then(fn r ->
-      if Map.has_key?(r, "workspace_id"), do: Map.put(r, "workspace_id", plan.workspace_id), else: r
-    end)
+  end
+
+  defp check_columns(path, columns) do
+    known? =
+      path
+      |> File.stream!()
+      |> Enum.all?(fn line ->
+        case Jason.decode(line) do
+          {:ok, row} when is_map(row) -> Enum.all?(Map.keys(row), &MapSet.member?(columns, &1))
+          _not_a_row -> false
+        end
+      end)
+
+    if known?, do: :ok, else: {:error, :unknown_column}
+  end
+
+  defp check_members(path, tenant_id) do
+    foreign? =
+      path
+      |> File.stream!()
+      |> Stream.map(&(&1 |> Jason.decode!() |> Map.get("principal_id")))
+      |> Stream.reject(&is_nil/1)
+      |> Stream.uniq()
+      |> Stream.chunk_every(200)
+      |> Enum.any?(&principals_of_another_tenant?(&1, tenant_id))
+
+    if foreign?, do: {:error, :foreign_principal}, else: :ok
+  end
+
+  defp principals_of_another_tenant?(ids, tenant_id) do
+    marks = Enum.map_join(1..length(ids), ", ", &"?#{&1}")
+
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT 1 FROM principals WHERE id IN (#{marks}) AND tenant_id != ?#{length(ids) + 1} LIMIT 1",
+        ids ++ [tenant_id]
+      )
+
+    rows != []
   end
 
   defp write_files(manifest, staging, plan) do

@@ -17,7 +17,8 @@ defmodule OptimalEngine.Connectors.Adapters.Jira do
     display_name: "Jira",
     auth_scheme: :basic,
     required_keys: [:site_url, :projects],
-    credential_keys: [:email, :api_token]
+    credential_keys: [:email, :api_token],
+    token_key: :api_token
 
   alias OptimalEngine.Connectors.HTTP
 

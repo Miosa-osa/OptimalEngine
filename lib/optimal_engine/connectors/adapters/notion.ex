@@ -6,7 +6,11 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
     * `:workspace_name`, `:database_ids` (list; empty = all accessible)
 
   ## Credentials
-    * `:integration_token` -- `secret_...`
+    * `:integration_token` -- `secret_...`, or
+    * an `:access_token` -- a public integration's OAuth token, given directly
+      or issued by the credential broker (`credential_source: "broker"`).
+      Every Notion call goes through `OptimalEngine.Connectors.AccessToken`,
+      which renews a brokered token before it expires and once after a `401`.
 
   ## Content
   One database page becomes one Signal. The title is the page's title
@@ -39,29 +43,28 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
     display_name: "Notion",
     auth_scheme: :token,
     required_keys: [:workspace_name, :database_ids],
-    credential_keys: [:integration_token]
+    credential_keys: [:integration_token],
+    access_token: true,
+    token_key: :integration_token
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   require Logger
 
   @base_url "https://api.notion.com/v1"
-  @notion_version "2022-06-28"
+  @version [{"notion-version", "2022-06-28"}]
   @page_size 100
   @max_pages 20
   @max_block_pages 10
 
   @impl true
   def sync(state, cursor) do
-    headers = [
-      {"authorization", "Bearer #{pick(state, :integration_token)}"},
-      {"notion-version", @notion_version}
-    ]
-
-    with {:ok, databases} <- database_ids(state, headers),
-         {:ok, signals, marks} <- sync_databases(databases, parse_cursor(cursor), headers) do
-      {:ok, %{signals: signals, cursor: encode_cursor(marks)}}
-    end
+    session(state, &integration_token/1, fn token ->
+      with {:ok, databases} <- database_ids(state, token),
+           {:ok, signals, marks} <- sync_databases(databases, parse_cursor(cursor), token) do
+        {:ok, %{signals: signals, cursor: encode_cursor(marks)}}
+      end
+    end)
   end
 
   @impl true
@@ -85,20 +88,22 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
 
   def transform(_raw), do: {:error, :invalid_payload}
 
+  defp integration_token(state), do: {:ok, pick(state, :integration_token)}
+
   # ---- databases ----------------------------------------------------------------
 
-  defp database_ids(state, headers) do
+  defp database_ids(state, token) do
     case pick(state, :database_ids, []) do
       [_ | _] = ids -> {:ok, Enum.uniq(ids)}
-      _ -> search_databases(nil, headers, [], 0)
+      _ -> search_databases(nil, token, [], 0)
     end
   end
 
   # Every database the integration can see. `/search` pages like every other
   # list, so a workspace with more than one page of databases needs the cursor.
-  defp search_databases(_cursor, _headers, ids, page) when page >= @max_pages, do: {:ok, ids}
+  defp search_databases(_cursor, _token, ids, page) when page >= @max_pages, do: {:ok, ids}
 
-  defp search_databases(start_cursor, headers, ids, page) do
+  defp search_databases(start_cursor, token, ids, page) do
     body =
       %{
         "filter" => %{"value" => "database", "property" => "object"},
@@ -106,13 +111,13 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
       }
       |> put_start_cursor(start_cursor)
 
-    case HTTP.post_json("#{@base_url}/search", body, headers: headers) do
+    case AccessToken.post_json(token, "#{@base_url}/search", body, headers: @version) do
       {:ok, %{status: 200, body: %{"results" => results} = resp}} ->
         ids = ids ++ Enum.flat_map(results, &List.wrap(&1["id"]))
 
         case next_cursor(resp) do
           nil -> {:ok, ids}
-          next -> search_databases(next, headers, ids, page + 1)
+          next -> search_databases(next, token, ids, page + 1)
         end
 
       other ->
@@ -123,14 +128,14 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
   # Walks the databases one by one, each from its own watermark. A failure the
   # Runner can act on (auth, rate limit, server, transport) ends the walk; a
   # failure particular to one database skips it and keeps its watermark.
-  defp sync_databases(databases, marks, headers) do
+  defp sync_databases(databases, marks, token) do
     start = %{chunks: [], marks: marks, synced: 0, failed: []}
 
     outcome =
       Enum.reduce_while(databases, start, fn db_id, acc ->
         since = watermark(acc.marks, db_id)
 
-        case sync_database(db_id, since, headers) do
+        case sync_database(db_id, since, token) do
           {:ok, signals, mark} ->
             {:cont,
              %{
@@ -158,24 +163,25 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
     end
   end
 
-  defp sync_database(db_id, since, headers) do
-    with {:ok, pages} <- query_pages(db_id, since, nil, headers, []),
-         {:ok, pages} <- attach_blocks(pages, headers) do
+  defp sync_database(db_id, since, token) do
+    with {:ok, pages} <- query_pages(db_id, since, nil, token, []),
+         {:ok, pages} <- attach_blocks(pages, token) do
       {:ok, to_signals(pages), latest_edit(pages, since)}
     end
   end
 
   # Pages edited after `since`, oldest edit first, every page of the answer.
-  defp query_pages(db_id, since, start_cursor, headers, acc) do
+  defp query_pages(db_id, since, start_cursor, token, acc) do
     body = query_body(since, start_cursor)
+    url = "#{@base_url}/databases/#{db_id}/query"
 
-    case HTTP.post_json("#{@base_url}/databases/#{db_id}/query", body, headers: headers) do
+    case AccessToken.post_json(token, url, body, headers: @version) do
       {:ok, %{status: 200, body: %{"results" => results} = resp}} ->
         acc = acc ++ results
 
         case next_cursor(resp) do
           nil -> {:ok, acc}
-          next -> query_pages(db_id, since, next, headers, acc)
+          next -> query_pages(db_id, since, next, token, acc)
         end
 
       other ->
@@ -207,10 +213,10 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
   # A database query returns pages with their properties only. The body of a
   # page is its block children, one request per page, so they are fetched here
   # and carried on the page as `"blocks"` for `transform/1`.
-  defp attach_blocks(pages, headers) do
+  defp attach_blocks(pages, token) do
     pages
     |> Enum.reduce_while({:ok, []}, fn page, {:ok, acc} ->
-      case fetch_blocks(page["id"], nil, headers, [], 0) do
+      case fetch_blocks(page["id"], nil, token, [], 0) do
         {:ok, blocks} ->
           {:cont, {:ok, [Map.put(page, "blocks", blocks) | acc]}}
 
@@ -231,21 +237,21 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
     end
   end
 
-  defp fetch_blocks(_page_id, _cursor, _headers, blocks, count) when count >= @max_block_pages,
+  defp fetch_blocks(_page_id, _cursor, _token, blocks, count) when count >= @max_block_pages,
     do: {:ok, blocks}
 
-  defp fetch_blocks(page_id, start_cursor, headers, blocks, count) do
+  defp fetch_blocks(page_id, start_cursor, token, blocks, count) do
     url =
       "#{@base_url}/blocks/#{page_id}/children?page_size=#{@page_size}" <>
         if(start_cursor, do: "&start_cursor=#{URI.encode_www_form(start_cursor)}", else: "")
 
-    case HTTP.get_json(url, headers: headers) do
+    case AccessToken.get_json(token, url, headers: @version) do
       {:ok, %{status: 200, body: %{"results" => results} = resp}} ->
         blocks = blocks ++ results
 
         case next_cursor(resp) do
           nil -> {:ok, blocks}
-          next -> fetch_blocks(page_id, next, headers, blocks, count + 1)
+          next -> fetch_blocks(page_id, next, token, blocks, count + 1)
         end
 
       other ->

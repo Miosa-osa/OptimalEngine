@@ -26,6 +26,7 @@ defmodule OptimalEngine.Connectors.Runner do
   """
 
   alias OptimalEngine.Connectors.{
+    AccessToken,
     AssetIngest,
     Cadence,
     Credential,
@@ -196,9 +197,11 @@ defmodule OptimalEngine.Connectors.Runner do
 
   # ─── sync loop with retry ───────────────────────────────────────────────
 
+  # The attempts share one run's broker tokens: a token renewed on the first
+  # attempt, and the re-fetch it cost, are still there for the second.
   defp do_sync_with_retries(row, mod, state, opts) do
     max_retries = Keyword.get(opts, :max_retries, @default_max_retries)
-    do_sync_attempt(row, mod, state, 0, max_retries)
+    AccessToken.run(fn -> do_sync_attempt(row, mod, state, 0, max_retries) end)
   end
 
   defp do_sync_attempt(row, mod, state, attempt, max_retries) do
@@ -390,14 +393,15 @@ defmodule OptimalEngine.Connectors.Runner do
 
   # Credentials are resolved here, just before the adapter is initialised, and
   # only for the length of this sync cycle: from the encrypted envelope for a
-  # self-hosted connector, or from the outside broker for a managed one. A
-  # broker that refuses or is unreachable fails the sync before any adapter
-  # code runs, so the operator sees the broker's reason rather than a
-  # confusing "missing credentials" from the adapter.
+  # self-hosted connector, or from the outside broker for a managed one (its
+  # sealed reference is opened for that call only). A broker that refuses or
+  # is unreachable fails the sync before any adapter code runs, so the
+  # operator sees the broker's reason rather than a confusing "missing
+  # credentials" from the adapter.
   defp init_adapter(mod, row) do
     config = maybe_decrypt_credentials(row.config)
 
-    with {:ok, config} <- CredentialSource.hydrate(config, credential_scope(row)) do
+    with {:ok, config} <- CredentialSource.hydrate(config, credential_scope(row, mod)) do
       case mod.init(config) do
         {:ok, state} -> {:ok, state}
         {:error, _} = err -> err
@@ -406,12 +410,13 @@ defmodule OptimalEngine.Connectors.Runner do
     end
   end
 
-  defp credential_scope(row) do
+  defp credential_scope(row, mod) do
     %{
       id: row.id,
       kind: row.kind,
       tenant_id: row.tenant_id,
-      workspace_id: row.workspace_id
+      workspace_id: row.workspace_id,
+      adapter: mod
     }
   end
 
@@ -708,16 +713,19 @@ defmodule OptimalEngine.Connectors.Runner do
   active one.
 
   Credentials under `"credentials"` or `:credentials` are stored only as an
-  encrypted `credentials_ciphertext` envelope. Without a configured
+  encrypted `credentials_ciphertext` envelope, and a `broker_reference` only
+  as a `broker_reference_ciphertext` envelope. Without a configured
   `CONNECTOR_KEY` the write is refused with `{:error, :connector_key_missing}`.
+  A broker URL the Engine may not call is refused with
+  `{:error, :broker_url_not_allowed}`.
   A cadence the scheduler could not honour is refused with
   `{:error, :invalid_cadence}`.
   """
   @spec upsert_row(map()) :: {:ok, String.t()} | {:error, term()}
   def upsert_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
-    with {:ok, sanitized} <- validate_and_seal(config, attrs),
-         {:ok, workspace_id} <- row_workspace(id, attrs) do
+    with {:ok, workspace_id} <- row_workspace(id, attrs),
+         {:ok, sanitized} <- validate_and_seal(id, config, attrs) do
       write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :update)
     end
   end
@@ -730,19 +738,22 @@ defmodule OptimalEngine.Connectors.Runner do
   @spec provision_row(map()) :: {:ok, :created | :exists} | {:error, term()}
   def provision_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
-    with {:ok, sanitized} <- validate_and_seal(config, attrs),
-         {:ok, workspace_id} <- row_workspace(id, attrs) do
+    with {:ok, workspace_id} <- row_workspace(id, attrs),
+         {:ok, sanitized} <- validate_and_seal(id, config, attrs) do
       write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :keep)
     end
   end
 
-  defp validate_and_seal(config, attrs) do
+  # The broker reference is sealed for the connector, not for its workspace,
+  # which a move or a rename changes while the connector stays the same.
+  defp validate_and_seal(id, config, attrs) do
     with :ok <-
            Routing.validate_config(config, Map.get(attrs, :tenant_id, Tenant.default_id()),
              review_workspace: Map.get(attrs, :check_review_workspace, true)
            ),
-         :ok <- Cadence.validate(config) do
-      encrypt_credentials(config)
+         :ok <- Cadence.validate(config),
+         {:ok, config} <- encrypt_credentials(config) do
+      CredentialSource.seal_reference(config, %{id: id})
     end
   end
 

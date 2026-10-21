@@ -72,7 +72,8 @@ defmodule OptimalEngine.Connectors.Adapters.GoHighLevel do
     display_name: "GoHighLevel",
     auth_scheme: :token,
     required_keys: [:location_ids],
-    credential_keys: []
+    credential_keys: [],
+    token_key: :api_token
 
   alias OptimalEngine.Connectors.HTTP
 
@@ -138,6 +139,8 @@ defmodule OptimalEngine.Connectors.Adapters.GoHighLevel do
     [:api_token, :agency_token]
     |> Enum.find_value(fn key ->
       case pick(flat, key) do
+        # A token the credential broker issued is held opaque and kept so.
+        %OptimalEngine.Connectors.AccessToken{} = token -> token
         token when is_binary(token) -> if String.trim(token) != "", do: String.trim(token)
         _ -> nil
       end

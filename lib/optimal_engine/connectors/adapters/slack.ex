@@ -11,7 +11,11 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
       (default 10). A channel with more history is finished by the next run.
 
   ## Credentials
-    * `:bot_token` -- starts with `xoxb-...`
+    * `:bot_token` -- starts with `xoxb-...`, or
+    * an `:access_token` -- given directly or issued by the credential broker
+      (`credential_source: "broker"`). Every Slack call goes through
+      `OptimalEngine.Connectors.AccessToken`, which renews a brokered token
+      before it expires and once after Slack refuses it.
 
   ## What is read
   The top-level messages of each channel (`conversations.history`). Thread
@@ -43,11 +47,13 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
     display_name: "Slack",
     auth_scheme: :oauth2,
     required_keys: [:workspace_id, :channels],
-    credential_keys: [:bot_token]
+    credential_keys: [:bot_token],
+    access_token: true,
+    token_key: :bot_token
 
   require Logger
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @base_url "https://slack.com/api"
   @page_size 200
@@ -63,11 +69,11 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
 
   @impl true
   def sync(state, cursor) do
-    headers = [{"authorization", "Bearer #{pick(state, :bot_token)}"}]
-
-    with {:ok, channel_ids} <- channel_ids(pick(state, :channels, []), headers) do
-      pull_channels(channel_ids, decode_cursor(cursor), max_pages(state), headers)
-    end
+    session(state, &bot_token/1, fn token ->
+      with {:ok, channel_ids} <- channel_ids(pick(state, :channels, []), token) do
+        pull_channels(channel_ids, decode_cursor(cursor), max_pages(state), token)
+      end
+    end)
   end
 
   @impl true
@@ -88,22 +94,24 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
      })}
   end
 
+  defp bot_token(state), do: {:ok, pick(state, :bot_token)}
+
   # ---- channels ---------------------------------------------------------------
 
-  defp channel_ids([], headers), do: list_channels(nil, headers, [], 1)
+  defp channel_ids([], token), do: list_channels(nil, token, [], 1)
 
-  defp channel_ids(ids, _headers) when is_list(ids),
+  defp channel_ids(ids, _token) when is_list(ids),
     do: {:ok, ids |> Enum.map(&to_string/1) |> Enum.uniq()}
 
-  defp channel_ids(_other, _headers), do: {:error, {:invalid_config, :channels}}
+  defp channel_ids(_other, _token), do: {:error, {:invalid_config, :channels}}
 
   # Follows `response_metadata.next_cursor` until Slack returns an empty one.
-  defp list_channels(cursor, headers, acc, page) do
+  defp list_channels(cursor, token, acc, page) do
     url =
       "#{@base_url}/conversations.list?types=public_channel,private_channel&limit=#{@page_size}" <>
         param("cursor", cursor)
 
-    case call(url, headers) do
+    case call(url, token) do
       {:ok, body} ->
         ids = Enum.uniq(acc ++ Enum.map(body["channels"] || [], & &1["id"]))
 
@@ -116,7 +124,7 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
             {:ok, ids}
 
           next ->
-            list_channels(next, headers, ids, page + 1)
+            list_channels(next, token, ids, page + 1)
         end
 
       {:error, failure} ->
@@ -137,11 +145,11 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
 
   # Reads the channels in order. The accumulator is the signals so far (in
   # reverse) and the cursor positions.
-  defp pull_channels(channel_ids, positions, max_pages, headers) do
+  defp pull_channels(channel_ids, positions, max_pages, token) do
     channel_ids
     |> Enum.reduce_while({:ok, {[], positions}}, fn ch_id, {:ok, {signals, acc_positions}} ->
       {messages, position, outcome} =
-        pull_channel(ch_id, Map.get(positions, ch_id, %{}), max_pages, headers)
+        pull_channel(ch_id, Map.get(positions, ch_id, %{}), max_pages, token)
 
       progress = {
         Enum.reduce(to_signals(messages), signals, &[&1 | &2]),
@@ -186,24 +194,24 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
   end
 
   # One channel: the messages read (oldest first), the position to save, and how it ended.
-  defp pull_channel(ch_id, position, max_pages, headers) do
+  defp pull_channel(ch_id, position, max_pages, token) do
     {messages, outcome} =
-      fetch_pages(ch_id, position["oldest"], position["latest"], max_pages, headers, [])
+      fetch_pages(ch_id, position["oldest"], position["latest"], max_pages, token, [])
 
     {Enum.reverse(messages), next_position(position, messages, outcome), outcome}
   end
 
   # Pages backwards from `latest` (or from now) down to `oldest`. `latest` is
   # the page-back bound: `oldest` only ever marks where to stop.
-  defp fetch_pages(ch_id, oldest, latest, pages_left, headers, acc) do
-    case history_page(ch_id, oldest, latest, headers) do
+  defp fetch_pages(ch_id, oldest, latest, pages_left, token, acc) do
+    case history_page(ch_id, oldest, latest, token) do
       {:ok, page, has_more?} ->
         acc = acc ++ page
 
         cond do
           not has_more? or page == [] -> {acc, :done}
           pages_left <= 1 -> {acc, :more}
-          true -> fetch_pages(ch_id, oldest, oldest_ts(page), pages_left - 1, headers, acc)
+          true -> fetch_pages(ch_id, oldest, oldest_ts(page), pages_left - 1, token, acc)
         end
 
       {:error, failure} ->
@@ -211,12 +219,12 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
     end
   end
 
-  defp history_page(ch_id, oldest, latest, headers) do
+  defp history_page(ch_id, oldest, latest, token) do
     url =
       "#{@base_url}/conversations.history?channel=#{URI.encode_www_form(ch_id)}&limit=#{@page_size}" <>
         param("oldest", oldest) <> param("latest", latest)
 
-    with {:ok, body} <- call(url, headers) do
+    with {:ok, body} <- call(url, token) do
       {:ok, body["messages"] || [], body["has_more"] == true}
     end
   end
@@ -244,8 +252,8 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
   # `{:ok, body}`, or `{:error, failure}` where failure says what the run should do:
   # `{:skip, code}` (this channel only), `{:retry, reason}` (stop, keep progress,
   # the Runner may back off), `{:abort, reason}` (fail the run).
-  defp call(url, headers) do
-    case HTTP.get_json(url, headers: headers) do
+  defp call(url, token) do
+    case AccessToken.get_json(token, url, rejected?: &refused?/1) do
       {:ok, %{status: 200, body: %{"ok" => true} = body}} ->
         {:ok, body}
 
@@ -268,6 +276,15 @@ defmodule OptimalEngine.Connectors.Adapters.Slack do
         {:error, {:retry, :transient}}
     end
   end
+
+  # Slack refuses a token with a 200 that names the reason, not with a 401, so
+  # a brokered token is renewed on either.
+  defp refused?({:ok, %{status: 401}}), do: true
+
+  defp refused?({:ok, %{status: 200, body: %{"ok" => false, "error" => code}}}),
+    do: code in @auth_errors
+
+  defp refused?(_response), do: false
 
   defp classify("ratelimited"), do: {:retry, :rate_limited}
   defp classify(code) when code in @auth_errors, do: {:abort, :auth_expired}

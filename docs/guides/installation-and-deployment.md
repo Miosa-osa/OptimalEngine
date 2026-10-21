@@ -268,6 +268,16 @@ OPTIMAL_OFFSITE_BACKUP_KEEP          scheduled offsite copies kept; default 14
 OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL    scheduled local files kept; default 3
 ```
 
+A managed Engine whose connectors take short-lived credentials from a broker
+(`credential_source: "broker"`, see [Connectors](connectors.md)) names the
+brokers it may call; with none named, no broker is called:
+
+```text
+OPTIMAL_CREDENTIAL_BROKER_HOSTS   comma-separated https hosts; api.miosa.ai on MIOSA
+OPTIMAL_CREDENTIAL_BROKER_PATHS   comma-separated path prefixes; default /api/v1/connect/broker/
+CONNECTOR_KEY                     also seals each connector's broker reference
+```
+
 A workspace can select the bucket for its assets through its storage policy
 instead of the engine-wide setting. Read
 [Storage providers](storage-providers.md) for the provider inventory, the health

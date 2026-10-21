@@ -129,6 +129,94 @@ defmodule OptimalEngine.Connectors.RowsTest do
                )
     end
 
+    test "the broker reference is sealed, shown only as redacted, and removed with its seal",
+         ctx do
+      id = "#{ctx.tenant}-sealed"
+
+      {:ok, view} =
+        Rows.register(%{
+          id: id,
+          kind: "gmail",
+          tenant_id: ctx.tenant,
+          workspace_id: ctx.mail,
+          config: %{
+            "user_email" => "ops@example.com",
+            "credential_source" => "broker",
+            "broker_url" => "https://connect.example.com/api/credentials",
+            "broker_reference" => "conn_0000000003.example-signature"
+          }
+        })
+
+      assert view.config["broker_reference"] == "[redacted]"
+      refute Jason.encode!(view) =~ "conn_0000000003"
+      refute Map.has_key?(view.config, "broker_reference_ciphertext")
+
+      first = stored_config(id)
+      refute Jason.encode!(first) =~ "conn_0000000003"
+      assert first["broker_reference_ciphertext"]
+
+      # Only the Engine writes the seal.
+      assert {:error, :credentials_outside_envelope} =
+               Rows.update(ctx.tenant, id, %{
+                 "config" => %{"broker_reference_ciphertext" => "forged"}
+               })
+
+      # A new reference is sealed in place of the old one.
+      {:ok, _view} =
+        Rows.update(ctx.tenant, id, %{
+          "config" => %{"broker_reference" => "conn_0000000004.example-signature"}
+        })
+
+      second = stored_config(id)
+      refute Jason.encode!(second) =~ "conn_0000000004"
+      refute second["broker_reference_ciphertext"] == first["broker_reference_ciphertext"]
+
+      # Removing the reference removes its seal.
+      {:ok, view} = Rows.update(ctx.tenant, id, %{"config" => %{"broker_reference" => nil}})
+      refute Map.has_key?(view.config, "broker_reference")
+      refute Map.has_key?(stored_config(id), "broker_reference_ciphertext")
+    end
+
+    test "a broker URL the Engine may not call is refused", ctx do
+      assert {:error, :broker_url_not_allowed} =
+               Rows.register(%{
+                 id: "#{ctx.tenant}-elsewhere",
+                 kind: "gmail",
+                 tenant_id: ctx.tenant,
+                 workspace_id: ctx.mail,
+                 config: %{
+                   "user_email" => "ops@example.com",
+                   "credential_source" => "broker",
+                   "broker_url" => "http://connect.example.com/api/credentials",
+                   "broker_reference" => "conn_0000000005"
+                 }
+               })
+    end
+
+    test "a stray plaintext reference in a row is still never shown", ctx do
+      id = "#{ctx.tenant}-legacy"
+
+      config = %{
+        "user_email" => "ops@example.com",
+        "credential_source" => "broker",
+        "broker_url" => "https://connect.example.com/api/credentials",
+        "broker_reference" => "conn_0000000006"
+      }
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO connectors (id, tenant_id, workspace_id, kind, config, enabled)
+          VALUES (?1, ?2, ?3, 'gmail', ?4, 1)
+          """,
+          [id, ctx.tenant, ctx.mail, Jason.encode!(config)]
+        )
+
+      {:ok, view} = Rows.get(ctx.tenant, id)
+      assert view.config["broker_reference"] == "[redacted]"
+      refute Jason.encode!(Rows.list(ctx.tenant)) =~ "conn_0000000006"
+    end
+
     test "records the registration in the evidence chain", ctx do
       id = "#{ctx.tenant}-evidence"
 
@@ -336,6 +424,11 @@ defmodule OptimalEngine.Connectors.RowsTest do
       assert id == "#{ctx.tenant}-s"
       assert Rows.summary(ctx.tenant, workspace_ids: [ctx.files]).total == 0
     end
+  end
+
+  defp stored_config(id) do
+    {:ok, [[config]]} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [id])
+    Jason.decode!(config)
   end
 
   defp insert_workspace(id, tenant, status) do

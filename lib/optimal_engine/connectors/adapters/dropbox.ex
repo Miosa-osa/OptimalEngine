@@ -6,7 +6,11 @@ defmodule OptimalEngine.Connectors.Adapters.Dropbox do
     * `:namespace` -- `:personal | :team`
 
   ## Credentials
-    * `:refresh_token`, `:app_key`, `:app_secret`
+    * `:refresh_token`, `:app_key`, `:app_secret`, or
+    * an `:access_token`, given directly or issued by the credential broker
+    (`credential_source: "broker"`); calls go through
+    `OptimalEngine.Connectors.AccessToken`, which renews a brokered token
+    before it expires and once after a `401`
 
   ## Cursor shape
   Opaque: Dropbox list_folder cursor string. Initial sync: `nil`.
@@ -17,23 +21,22 @@ defmodule OptimalEngine.Connectors.Adapters.Dropbox do
     display_name: "Dropbox",
     auth_scheme: :oauth2,
     required_keys: [:namespace],
-    credential_keys: [:refresh_token, :app_key, :app_secret]
+    credential_keys: [:refresh_token, :app_key, :app_secret],
+    access_token: true
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, TokenExchange}
 
   @token_url "https://api.dropboxapi.com/oauth2/token"
   @content_url "https://api.dropboxapi.com/2"
 
   @impl true
   def sync(state, cursor) do
-    with {:ok, access_token} <- refresh_access_token(state) do
-      headers = [{"authorization", "Bearer #{access_token}"}]
-
+    session(state, &refresh_access_token/1, fn token ->
       case cursor do
-        nil -> full_sync(state, headers)
-        dbx_cursor -> incremental_sync(dbx_cursor, headers)
+        nil -> full_sync(state, token)
+        dbx_cursor -> incremental_sync(dbx_cursor, token)
       end
-    end
+    end)
   end
 
   @impl true
@@ -54,33 +57,15 @@ defmodule OptimalEngine.Connectors.Adapters.Dropbox do
   # ---- private ----------------------------------------------------------------
 
   defp refresh_access_token(state) do
-    body =
-      "grant_type=refresh_token" <>
-        "&refresh_token=#{pick(state, :refresh_token)}" <>
-        "&client_id=#{pick(state, :app_key)}" <>
-        "&client_secret=#{pick(state, :app_secret)}"
-
-    case HTTP.request(@token_url,
-           method: :post,
-           headers: [{"content-type", "application/x-www-form-urlencoded"}],
-           body: body,
-           parse_json: true
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} ->
-        {:ok, token}
-
-      {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{body: body}} ->
-        {:error, {:token_error, body}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    TokenExchange.exchange(@token_url,
+      grant_type: "refresh_token",
+      refresh_token: pick(state, :refresh_token),
+      client_id: pick(state, :app_key),
+      client_secret: pick(state, :app_secret)
+    )
   end
 
-  defp full_sync(state, headers) do
+  defp full_sync(state, token) do
     path =
       case pick(state, :namespace) do
         "team" -> ""
@@ -89,9 +74,9 @@ defmodule OptimalEngine.Connectors.Adapters.Dropbox do
 
     body = %{"path" => path, "recursive" => true, "limit" => 500}
 
-    case HTTP.post_json("#{@content_url}/files/list_folder", body, headers: headers) do
+    case AccessToken.post_json(token, "#{@content_url}/files/list_folder", body) do
       {:ok, %{status: 200, body: resp}} ->
-        process_list_folder_response(resp, headers)
+        process_list_folder_response(resp, token)
 
       {:ok, %{status: 401}} ->
         {:error, :auth_expired}
@@ -107,12 +92,12 @@ defmodule OptimalEngine.Connectors.Adapters.Dropbox do
     end
   end
 
-  defp incremental_sync(cursor, headers) do
+  defp incremental_sync(cursor, token) do
     body = %{"cursor" => cursor}
 
-    case HTTP.post_json("#{@content_url}/files/list_folder/continue", body, headers: headers) do
+    case AccessToken.post_json(token, "#{@content_url}/files/list_folder/continue", body) do
       {:ok, %{status: 200, body: resp}} ->
-        process_list_folder_response(resp, headers)
+        process_list_folder_response(resp, token)
 
       {:ok, %{status: 401}} ->
         {:error, :auth_expired}
@@ -128,7 +113,7 @@ defmodule OptimalEngine.Connectors.Adapters.Dropbox do
     end
   end
 
-  defp process_list_folder_response(resp, headers) do
+  defp process_list_folder_response(resp, token) do
     entries = resp["entries"] || []
 
     files =
@@ -147,7 +132,7 @@ defmodule OptimalEngine.Connectors.Adapters.Dropbox do
     if resp["has_more"] do
       next_cursor = resp["cursor"]
 
-      case incremental_sync(next_cursor, headers) do
+      case incremental_sync(next_cursor, token) do
         {:ok, %{signals: more, cursor: final_cursor}} ->
           {:ok, %{signals: signals ++ more, cursor: final_cursor}}
 

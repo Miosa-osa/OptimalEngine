@@ -257,6 +257,16 @@ defmodule OptimalEngine.Connectors.ConnectorRoutingTest do
 
   describe "the whole path on the real adapter" do
     test "a broker-issued credential pulls a meeting, which routes, loops and tags", ctx do
+      # The broker reference is sealed with CONNECTOR_KEY when the row is written.
+      original_key = System.get_env("CONNECTOR_KEY")
+      System.put_env("CONNECTOR_KEY", Base.encode16(:crypto.strong_rand_bytes(32), case: :lower))
+
+      on_exit(fn ->
+        if original_key,
+          do: System.put_env("CONNECTOR_KEY", original_key),
+          else: System.delete_env("CONNECTOR_KEY")
+      end)
+
       stub = ConnectorFixtureStub.install(:fathom_e2e)
       on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
 
@@ -300,6 +310,7 @@ defmodule OptimalEngine.Connectors.ConnectorRoutingTest do
         Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [ctx.connector_id])
 
       refute stored_config =~ "example-broker-issued-key"
+      refute stored_config =~ "conn_0000000000"
 
       # The meeting routed to the workspace its invitee is mapped to, not to the
       # connector's own workspace.

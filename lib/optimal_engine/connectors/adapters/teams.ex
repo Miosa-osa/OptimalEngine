@@ -6,7 +6,11 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
     * `:tenant_id_ms` (Azure AD tenant), `:team_ids` (list of team IDs)
 
   ## Credentials
-    * `:client_id`, `:client_secret` (Azure AD app; uses client_credentials grant)
+    * `:client_id`, `:client_secret` (Azure AD app; uses client_credentials grant), or
+    * an `:access_token`, given directly or issued by the credential broker
+    (`credential_source: "broker"`); calls go through
+    `OptimalEngine.Connectors.AccessToken`, which renews a brokered token
+    before it expires and once after a `401`
 
   ## Cursor shape
   ISO-8601 timestamp (`lastModifiedDateTime > cursor` filter). Initial sync: `nil`.
@@ -17,9 +21,10 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
     display_name: "Microsoft Teams",
     auth_scheme: :oauth2,
     required_keys: [:tenant_id_ms, :team_ids],
-    credential_keys: [:client_id, :client_secret]
+    credential_keys: [:client_id, :client_secret],
+    access_token: true
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, TokenExchange}
 
   @graph_url "https://graph.microsoft.com/v1.0"
   @page_size 50
@@ -29,13 +34,12 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
     tenant_id = pick(state, :tenant_id_ms)
     team_ids = pick(state, :team_ids, [])
 
-    with {:ok, access_token} <- get_access_token(state, tenant_id) do
-      headers = [{"authorization", "Bearer #{access_token}"}]
+    session(state, &get_access_token(&1, tenant_id), fn token ->
       since = cursor || default_since()
 
       result =
         Enum.reduce_while(team_ids, {:ok, [], since}, fn team_id, {:ok, acc, last_ts} ->
-          case fetch_channel_messages(team_id, since, headers) do
+          case fetch_channel_messages(team_id, since, token) do
             {:ok, messages, new_ts} ->
               new_signals =
                 Enum.flat_map(messages, fn msg ->
@@ -62,7 +66,7 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
         {:ok, signals, next_cursor} -> {:ok, %{signals: signals, cursor: next_cursor}}
         {:error, _} = err -> err
       end
-    end
+    end)
   end
 
   @impl true
@@ -89,43 +93,24 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
     client_secret = pick(state, :client_secret)
     token_url = "https://login.microsoftonline.com/#{tenant_id}/oauth2/v2.0/token"
 
-    body =
-      URI.encode_query(%{
-        grant_type: "client_credentials",
-        client_id: client_id,
-        client_secret: client_secret,
-        scope: "https://graph.microsoft.com/.default"
-      })
-
-    case HTTP.request(token_url,
-           method: :post,
-           body: body,
-           headers: [{"content-type", "application/x-www-form-urlencoded"}]
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} ->
-        {:ok, token}
-
-      {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{status: status}} ->
-        {:error, {:http, status}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    TokenExchange.exchange(token_url,
+      grant_type: "client_credentials",
+      client_id: client_id,
+      client_secret: client_secret,
+      scope: "https://graph.microsoft.com/.default"
+    )
   end
 
-  defp fetch_channel_messages(team_id, since, headers) do
+  defp fetch_channel_messages(team_id, since, token) do
     # Fetch all channels for the team, then messages per channel
-    with {:ok, channel_ids} <- list_channels(team_id, headers) do
+    with {:ok, channel_ids} <- list_channels(team_id, token) do
       {all_messages, new_ts} =
         Enum.reduce(channel_ids, {[], nil}, fn channel_id, {msgs, last_ts} ->
           url =
             "#{@graph_url}/teams/#{team_id}/channels/#{channel_id}/messages" <>
               "?$top=#{@page_size}&$filter=lastModifiedDateTime gt #{since}"
 
-          case HTTP.get_json(url, headers: headers) do
+          case AccessToken.get_json(token, url) do
             {:ok, %{status: 200, body: %{"value" => messages}}} ->
               message_ts =
                 messages
@@ -149,10 +134,10 @@ defmodule OptimalEngine.Connectors.Adapters.Teams do
     end
   end
 
-  defp list_channels(team_id, headers) do
+  defp list_channels(team_id, token) do
     url = "#{@graph_url}/teams/#{team_id}/channels"
 
-    case HTTP.get_json(url, headers: headers) do
+    case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: %{"value" => channels}}} ->
         {:ok, Enum.map(channels, & &1["id"])}
 

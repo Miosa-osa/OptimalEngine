@@ -35,11 +35,22 @@ defmodule OptimalEngine.Connectors.HTTP do
     * `:headers`        — list of `{name, value}`
     * `:body`           — map (will be JSON-encoded) or raw binary
     * `:timeout`        — ms (default 10_000)
+    * `:follow_redirects` - follow a 3xx answer (default `false`: the redirect
+      is handed back as the response, so a credential sent to one host is not
+      sent on to another)
+    * `:verify_tls`     - verify the server's certificate and host name against
+      the system's roots for an https URL (default `false`: Erlang's own default)
+    * `:max_body_bytes` - fail with `{:error, :response_too_large}` when the
+      answer is longer than this (default: no limit)
+    * `:single_attempt` - send `connection: close`, so the request is never
+      sent again on a kept-alive session the server closed (default `false`)
     * `:ratelimit`      — `{bucket_key, rate, burst}` to wait on before firing
     * `:parse_json`     — try to decode response body (default `true`)
   """
   @spec request(String.t(), request_opts()) :: {:ok, response()} | {:error, term()}
   def request(url, opts \\ []) when is_binary(url) do
+    opts = opts |> header_strings() |> Keyword.put_new(:follow_redirects, false)
+
     with :ok <- maybe_wait_for_quota(opts),
          {:ok, raw} <- fire(url, opts) do
       {:ok, normalize(raw, opts)}
@@ -59,7 +70,56 @@ defmodule OptimalEngine.Connectors.HTTP do
     request(url, opts)
   end
 
+  @doc """
+  The TLS options that make a request verify the server: its certificate
+  against the system's roots, and its host name. Empty for a URL that is not
+  https.
+  """
+  @spec ssl_options(String.t()) :: keyword()
+  def ssl_options(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: "https"} ->
+        [
+          verify: :verify_peer,
+          depth: 3,
+          customize_hostname_check: [
+            match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+          ]
+        ] ++ cacerts()
+
+      _other ->
+        []
+    end
+  end
+
+  defp cacerts do
+    [cacerts: :public_key.cacerts_get()]
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
   # ─── private ─────────────────────────────────────────────────────────────
+
+  # A header value may be a held secret (`AccessToken`); it goes out, and into
+  # a test's mock, as the string it stands for.
+  defp header_strings(opts) do
+    case Keyword.fetch(opts, :headers) do
+      {:ok, headers} ->
+        Keyword.put(opts, :headers, Enum.map(headers, fn {k, v} -> {k, header_value(v)} end))
+
+      :error ->
+        opts
+    end
+  end
+
+  defp header_value(value) when is_binary(value), do: value
+
+  defp header_value(%{__struct__: _} = secret),
+    do: OptimalEngine.Connectors.AccessToken.reveal(secret)
+
+  defp header_value(value), do: to_string(value)
 
   defp maybe_wait_for_quota(opts) do
     case Keyword.get(opts, :ratelimit) do
@@ -77,10 +137,20 @@ defmodule OptimalEngine.Connectors.HTTP do
 
   defp fire_httpc(url, opts) do
     method = Keyword.get(opts, :method, :get)
-    headers = build_headers(opts)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
+    headers = build_headers(opts)
 
-    {content_type, body_payload} = encode_body(Keyword.get(opts, :body), method)
+    # httpc takes the content type of a body apart from the other headers, so
+    # the one the caller named is lifted out of them and handed over there.
+    {headers, declared_type} =
+      if method in [:get, :delete], do: {headers, nil}, else: pop_content_type(headers)
+
+    headers =
+      if Keyword.get(opts, :single_attempt, false),
+        do: headers ++ [{"connection", "close"}],
+        else: headers
+
+    {content_type, body_payload} = encode_body(Keyword.get(opts, :body), declared_type)
 
     http_request =
       case method do
@@ -89,9 +159,92 @@ defmodule OptimalEngine.Connectors.HTTP do
         _ -> {String.to_charlist(url), to_charlist_headers(headers), content_type, body_payload}
       end
 
-    http_opts = [{:timeout, timeout}, {:connect_timeout, timeout}]
+    http_opts =
+      [{:timeout, timeout}, {:connect_timeout, timeout}] ++
+        if(Keyword.get(opts, :follow_redirects, false), do: [], else: [{:autoredirect, false}]) ++
+        tls_opts(url, opts)
 
-    :httpc.request(method, http_request, http_opts, body_format: :binary)
+    case Keyword.get(opts, :max_body_bytes) do
+      nil -> :httpc.request(method, http_request, http_opts, body_format: :binary)
+      cap -> fire_capped(method, http_request, http_opts, cap, timeout)
+    end
+  end
+
+  defp tls_opts(url, opts) do
+    if Keyword.get(opts, :verify_tls, false) do
+      _ = Application.ensure_all_started(:ssl)
+
+      case ssl_options(url) do
+        [] -> []
+        ssl -> [{:ssl, ssl}]
+      end
+    else
+      []
+    end
+  end
+
+  # Reads the answer as it arrives and stops at `cap` bytes. httpc streams only
+  # a 200 or 206; any other answer arrives whole and is measured when it does.
+  defp fire_capped(method, http_request, http_opts, cap, timeout) do
+    request_opts = [body_format: :binary, sync: false, stream: :self]
+
+    case :httpc.request(method, http_request, http_opts, request_opts) do
+      {:ok, id} -> await(id, cap, timeout)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp await(id, cap, timeout) do
+    receive do
+      {:http, {^id, :stream_start, headers}} ->
+        stream(id, cap, timeout, headers, [], 0)
+
+      {:http, {^id, {{_vsn, _status, _reason}, _headers, body} = raw}} ->
+        if byte_size(body) > cap, do: {:error, :response_too_large}, else: {:ok, raw}
+
+      {:http, {^id, {:error, reason}}} ->
+        {:error, reason}
+    after
+      timeout ->
+        :httpc.cancel_request(id)
+        {:error, :timeout}
+    end
+  end
+
+  defp stream(id, cap, timeout, headers, chunks, size) do
+    receive do
+      {:http, {^id, :stream, chunk}} ->
+        size = size + byte_size(chunk)
+
+        if size > cap do
+          :httpc.cancel_request(id)
+          flush(id)
+          {:error, :response_too_large}
+        else
+          stream(id, cap, timeout, headers, [chunk | chunks], size)
+        end
+
+      {:http, {^id, :stream_end, trailers}} ->
+        body = chunks |> Enum.reverse() |> IO.iodata_to_binary()
+        {:ok, {{~c"HTTP/1.1", 200, ~c"OK"}, headers ++ trailers, body}}
+
+      {:http, {^id, {:error, reason}}} ->
+        {:error, reason}
+    after
+      timeout ->
+        :httpc.cancel_request(id)
+        flush(id)
+        {:error, :timeout}
+    end
+  end
+
+  defp flush(id) do
+    receive do
+      {:http, {^id, _message}} -> flush(id)
+      {:http, {^id, _kind, _message}} -> flush(id)
+    after
+      0 -> :ok
+    end
   end
 
   defp build_headers(opts) do
@@ -99,15 +252,29 @@ defmodule OptimalEngine.Connectors.HTTP do
     |> Enum.uniq_by(fn {k, _} -> String.downcase(k) end)
   end
 
-  defp encode_body(nil, _), do: {~c"application/json", ""}
-  defp encode_body(bin, _) when is_binary(bin), do: {~c"application/octet-stream", bin}
-
-  defp encode_body(map, _) when is_map(map) do
-    {~c"application/json", Jason.encode!(map)}
+  defp pop_content_type(headers) do
+    case Enum.split_with(headers, fn {k, _} -> String.downcase(k) == "content-type" end) do
+      {[{_name, type} | _], rest} -> {rest, to_string(type)}
+      {[], rest} -> {rest, nil}
+    end
   end
 
+  defp encode_body(nil, type), do: {content_type(type, "application/json"), ""}
+
+  defp encode_body(bin, type) when is_binary(bin),
+    do: {content_type(type, "application/octet-stream"), bin}
+
+  defp encode_body(map, type) when is_map(map) do
+    {content_type(type, "application/json"), Jason.encode!(map)}
+  end
+
+  defp content_type(nil, default), do: String.to_charlist(default)
+  defp content_type(type, _default), do: String.to_charlist(type)
+
   defp to_charlist_headers(headers) do
-    Enum.map(headers, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+    Enum.map(headers, fn {k, v} ->
+      {String.to_charlist(k), v |> header_value() |> String.to_charlist()}
+    end)
   end
 
   # :httpc returns {:ok, {{vsn, status, reason}, headers, body}}.

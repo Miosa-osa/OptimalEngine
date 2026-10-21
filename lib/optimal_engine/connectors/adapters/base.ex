@@ -6,6 +6,14 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
     * imports `Transform` + `Signal` aliases
     * provides `require_keys/2`, `require_credentials/2`, `string_or_atom/2`
 
+  Options: `:kind`, `:display_name`, `:auth_scheme`, `:required_keys`,
+  `:credential_keys`, and `access_token: true` for an adapter that calls its
+  API through `OptimalEngine.Connectors.AccessToken`: an `access_token`
+  credential, given directly or issued by the credential broker, then stands
+  in for its `:credential_keys`. `:token_key` names the key the adapter's
+  single secret lives under (`:api_key`, `:pat`, `:integration_token`), which
+  is where the credential broker puts the secret it issues for the adapter.
+
   An adapter then writes only the parts that distinguish it:
 
       defmodule ... do
@@ -25,13 +33,17 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
     auth_scheme = Keyword.fetch!(opts, :auth_scheme)
     required_keys = Keyword.get(opts, :required_keys, [])
     credential_keys = Keyword.get(opts, :credential_keys, [])
+    access_token = Keyword.get(opts, :access_token, false)
+    token_key = Keyword.get(opts, :token_key)
 
     quote bind_quoted: [
             kind: kind,
             display_name: display_name,
             auth_scheme: auth_scheme,
             required_keys: required_keys,
-            credential_keys: credential_keys
+            credential_keys: credential_keys,
+            access_token: access_token,
+            token_key: token_key
           ] do
       @behaviour OptimalEngine.Connectors.Behaviour
 
@@ -50,14 +62,40 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
       @impl true
       def required_config_keys, do: unquote(required_keys)
 
+      # What the credential broker needs to know of this adapter: the key its
+      # single secret lives under (`token_key`, nil when it has none), and
+      # whether it calls through `AccessToken`, which takes a brokered access
+      # token under `access_token` and renews it.
+      @doc false
+      def broker_token_key, do: unquote(token_key)
+
+      @doc false
+      def broker_access_token?, do: unquote(access_token)
+
       @impl true
       def init(config) do
         flat = flatten_credentials(config)
 
         with :ok <- require_keys(flat, unquote(required_keys)),
              :ok <- require_credentials(flat, unquote(credential_keys)) do
-          {:ok, hydrate_state(flat)}
+          {:ok, conceal(hydrate_state(flat))}
         end
+      end
+
+      # An adapter that calls through AccessToken keeps a token given directly
+      # opaque in its state, and opens its token sessions with the keys of its
+      # own grant, so a complete grant is used before a stale access token.
+      if access_token do
+        @doc false
+        def grant_keys, do: unquote(credential_keys)
+
+        defp conceal(state), do: OptimalEngine.Connectors.AccessToken.conceal(state)
+
+        defp session(state, grant, fun) do
+          OptimalEngine.Connectors.AccessToken.session(state, grant, fun, grant_keys: grant_keys())
+        end
+      else
+        defp conceal(state), do: state
       end
 
       # Adapters override to shape the runtime state they want. Default is
@@ -70,7 +108,11 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
       # Adapters with either-or credential schemes (e.g. GitHub pat vs. App,
       # HubSpot token vs. OAuth) declare `credential_keys: []` and override
       # `init/1` to enforce their own credential gate.
-      defoverridable init: 1, hydrate_state: 1
+      if access_token do
+        defoverridable init: 1, hydrate_state: 1, grant_keys: 0
+      else
+        defoverridable init: 1, hydrate_state: 1
+      end
 
       # ── shared helpers ───────────────────────────────────────────────────
 
@@ -83,7 +125,19 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
         if missing == [], do: :ok, else: {:error, {:missing_config, missing}}
       end
 
-      defp require_credentials(config, keys) do
+      # An adapter that calls through AccessToken also takes an access token
+      # in place of its credential keys.
+      if access_token do
+        defp require_credentials(config, keys) do
+          if OptimalEngine.Connectors.AccessToken.present?(config),
+            do: :ok,
+            else: require_credential_keys(config, keys)
+        end
+      else
+        defp require_credentials(config, keys), do: require_credential_keys(config, keys)
+      end
+
+      defp require_credential_keys(config, keys) do
         missing =
           Enum.reject(keys, fn k ->
             has_credential_key?(config, k)

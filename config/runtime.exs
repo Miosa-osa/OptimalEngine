@@ -279,6 +279,32 @@ if roots = System.get_env("OPTIMAL_ASSET_IMPORT_ROOTS") do
   config :optimal_engine, :asset_import_roots, String.split(roots, ":", trim: true)
 end
 
+# The credential brokers connectors may ask for short-lived credentials
+# (`credential_source: "broker"`): https hosts, separated by ','. With none
+# named, no broker is called.
+if hosts = System.get_env("OPTIMAL_CREDENTIAL_BROKER_HOSTS") do
+  hosts = hosts |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+  config :optimal_engine, :credential_broker_hosts, hosts
+end
+
+# The paths a broker URL may sit under, separated by ','. The default is
+# /api/v1/connect/broker/.
+if paths = System.get_env("OPTIMAL_CREDENTIAL_BROKER_PATHS") do
+  paths = paths |> String.split(",") |> Enum.map(&String.trim/1)
+
+  # An empty entry, `/` (everything), a `;` or a `..` would widen the allowlist
+  # past what was meant, so a bad list stops the Engine instead.
+  Enum.each(paths, fn path ->
+    unless Regex.match?(~r|\A/[A-Za-z0-9._~!$&'()*+,=:@/-]+\z|, path) and
+             not String.contains?(path, ["..", "//"]) do
+      raise ArgumentError,
+            "OPTIMAL_CREDENTIAL_BROKER_PATHS must list path prefixes like /api/v1/connect/broker/, got: #{inspect(path)}"
+    end
+  end)
+
+  config :optimal_engine, :credential_broker_paths, paths
+end
+
 # Analyses: how often the day's analysis jobs are scheduled and drained.
 if interval = System.get_env("OPTIMAL_ANALYSES_INTERVAL_MS") do
   config :optimal_engine, :analyses_interval_ms, String.to_integer(interval)

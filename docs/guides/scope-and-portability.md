@@ -189,6 +189,13 @@ Connectors (their credentials are sealed with the source Engine's `CONNECTOR_KEY
 | Finalize on the source | `POST /api/workspaces/:id/finalize-move {"bundle_sha256", "target_url", "target_workspace_id"}` |
 | Resolve a citation | `GET /api/resolve?uri=optimal://<workspace>/...` returns `local` or `moved` with the new location |
 
+Import accepts exactly the tables an export writes (`WorkspaceBundle.exportable_tables/0`): the workspace's tables, its child tables, the principals of its members and its operating documents.
+A manifest that names any other table, such as `connectors` or one it invents, is refused as `table_not_allowed` before anything is read or written, since anyone can write a bundle and sign its manifest.
+Every key of a row must be a column of its table, spelled as the table spells it, or the import is refused (`unknown_column`) before anything is written: SQLite matches column names without regard to case, so a key that only looks like a column could carry a value past the rewrite.
+The tenant and workspace columns are set on every row, whether or not the bundle names them, and an operating document is always the workspace's.
+A member of the workspace must be a principal of the importing tenant (`foreign_principal`).
+A requested `workspace_id` must name the importing tenant (`<tenant>:<slug>`, or a bare slug that gets the prefix), so one tenant cannot take another's names (`workspace_id_not_in_tenant`).
+What a bundle can still do within those tables is add rows to the workspace it creates or merges into, and add principals to the importing tenant: every principals row is written with that tenant, and an id the Engine already has keeps its existing row.
 Import verifies the manifest, every table file, and every file checksum before writing anything.
 Rows are then written in short transactions of 1,000 rows, tables in foreign-key order and the rows of a self-referencing table (memories, nodes) parents first, with foreign keys checked at each commit.
 A large workspace therefore never holds the Engine's single writer long enough to stall other requests or time out.

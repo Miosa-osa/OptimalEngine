@@ -60,7 +60,7 @@ Every adapter also reads an optional `"max_pages"` where its listing is paginate
 | Field | Meaning |
 | --- | --- |
 | `"credential_source"` | `"stored"` (default) or `"broker"` |
-| `"broker_url"`, `"broker_reference"`, `"broker_scopes"`, `"broker_timeout_ms"` | the outside broker that holds the account, see below |
+| `"broker_url"`, `"broker_reference"`, `"broker_scopes"`, `"broker_timeout_ms"` | the outside broker that holds the account; the reference is sealed on write, see below |
 | `"routing_labels"`, `"routing_channel"` | what the routing rules match a Signal's `label` and `channel` against |
 | `"review_workspace_id"` | where a low-confidence route waits for a person; a workspace of the connector's tenant, else registering the connector answers `invalid_review_workspace` |
 | `"routing_walled_workspaces"` | workspaces only an identity rule may open |
@@ -87,35 +87,130 @@ One connection, one place: the account is connected once and the Engine asks for
 | `"stored"` (the default) | a self-hosted Engine outside MIOSA | the Engine, envelope-encrypted with `CONNECTOR_KEY` in `config.credentials_ciphertext` |
 | `"broker"` | a managed Engine on MIOSA | the outside broker (MIOSA Connect), fetched at sync time |
 
-With `credential_source: "broker"` the Engine `POST`s to `broker_url`:
+### The broker credential shape
+
+A connector on the broker names the broker and its reference to the connection, and carries no credentials:
 
 ```json
 {
-  "reference": "conn_0000000000",
-  "connector": {"id": "pull:default:gmail", "kind": "gmail"},
+  "user_email": "ops@example.com",
+  "credential_source": "broker",
+  "broker_url": "https://api.miosa.ai/api/v1/connect/broker/credentials",
+  "broker_reference": "conn_0000000000.<hmac>",
+  "broker_scopes": ["mail.read"],
+  "broker_timeout_ms": 5000
+}
+```
+
+`broker_scopes` and `broker_timeout_ms` are optional; the timeout is 5 seconds by default and at most 30.
+The reference is opaque to the Engine, and a broker may sign it, so it is treated as a secret: the Engine seals it with `CONNECTOR_KEY` into `config.broker_reference_ciphertext` when the row is written, opens it only for the broker call, and every read API shows it as `"[redacted]"`.
+Writing a broker connector therefore needs `CONNECTOR_KEY`, exactly as stored credentials do.
+The seal is bound to the connector's id, so a copy of it on another row does not open.
+It is not bound to the workspace, which a move or a rename changes while the connector stays the same.
+The reference is read from its seal alone: a plaintext `broker_reference` in a stored row is not read (no released Engine stored one), and a seal made without a connector id does not exist.
+A connector on the broker source that also carries credentials is refused at registration, so a second copy of the account can never be stored.
+
+### The request
+
+At the start of each sync the Engine `POST`s to `broker_url`:
+
+```json
+{
+  "reference": "conn_0000000000.<hmac>",
+  "connector": {"id": "miosa:conn_0000000000:gmail", "kind": "gmail"},
   "tenant_id": "default",
-  "workspace_id": "default",
+  "workspace_id": "default:ops",
   "scopes": ["mail.read"]
 }
 ```
 
-The broker answers with the credential map, which the adapter receives exactly as if it had been decrypted from the Engine's store:
+`reference` is the configured `broker_reference`, sent verbatim.
+MIOSA Connect issues it as `<connection_id>.<base64url hmac>`, and that signature is what the broker authenticates the call by; the Engine never parses it.
+`connector.id` is the connector's own id, and `workspace_id` is the connector's own workspace, never one its signals are routed to: the signature covers the workspace, so any other value is answered with a `401`.
+The Engine sends no secret and no header of its own beyond `accept` and `content-type`, and never holds the platform's internal secret.
+The call does not follow redirects, verifies the broker's certificate and host name, is made once on a connection of its own (no kept-alive session to be sent again on), reads at most 256 KiB of the answer, and gives up after `broker_timeout_ms`.
+The route is whatever `broker_url` names, per connector, so a broker can move its route without an Engine change.
+
+`broker_url` is checked as written, not as a parser might read it.
+It must be `https://` in lower case, on port 443 (or none), with an ASCII host listed in `OPTIMAL_CREDENTIAL_BROKER_HOSTS` (comma-separated, compared without case, no trailing dot; `config :optimal_engine, :credential_broker_hosts` in code), no user or password, no query or fragment, and a path under one of `OPTIMAL_CREDENTIAL_BROKER_PATHS` (comma-separated; default `/api/v1/connect/broker/`) with no `.`, `..`, empty, `;` or percent-encoded segment.
+An empty or blank entry in `OPTIMAL_CREDENTIAL_BROKER_PATHS`, a bare `/`, a `;` or a `..` stops the Engine at boot, since each would allow more than was meant.
+A managed Engine on MIOSA sets it to `api.miosa.ai`, and the MIOSA platform puts `https://api.miosa.ai/api/v1/connect/broker/credentials` in each connector's `broker_url` when it registers the connector.
+With no hosts listed, no broker is called and the run fails with `broker_url_not_allowed`, so a connector config can never point the Engine at an address of its choosing.
+A URL outside the list is also refused when the connector is registered or changed.
+
+### The response
+
+An OAuth connection (Gmail, Drive, Notion, Slack and the other OAuth adapters) is answered with a short-lived access token:
 
 ```json
-{"credentials": {"oauth_refresh_token": "..."}, "expires_at": "2026-10-18T12:05:00Z"}
+{"credentials": {"access_token": "...", "expires_at": "2026-10-18T12:05:00Z"}}
 ```
 
-The Engine presents no Engine-side secret in that call: the broker authenticates the Engine out of band, with a broker-issued Engine token, mTLS, or a private network.
-Fetched credentials are held in memory for one sync cycle and are never written to the connectors table, the run log, or an error message.
-A connector on the broker source that also carries credentials is refused at registration, so a second copy of the account can never be stored.
+`expires_at` may also sit beside `credentials` instead of inside it, the same fields at the top level are accepted as a fallback, and `"expires_in"` (seconds) is read when `"expires_at"` is absent.
+The adapter calls its API with that token through `OptimalEngine.Connectors.AccessToken`, the one helper every OAuth adapter shares:
 
-Three failures are possible, and each names the broker rather than the adapter:
+- **Early renewal.**
+  Before a call, a token that expires within 60 seconds is replaced by asking the broker again.
+- **One re-fetch on refusal.**
+  When the API refuses the token (a `401`, or Slack's `invalid_auth`, `token_expired` and the like), the Engine asks the broker once for a new token and retries that call.
+- **Never a loop.**
+  A second refusal anywhere in the same sync fails the run with `broker_token_rejected`, and a broker that cannot answer the re-fetch fails it with `broker_unreachable`, `broker_unauthorized` or `broker_refused`.
+  After a failure the sync makes no further calls, the run is recorded as failed, the cursor stays where it was, and the connector stays enabled for its next run.
+- **One budget per run.**
+  The Runner may attempt a sync again (after a throttled or transient answer); the renewed token and the spent re-fetch carry over, so a run asks the broker for a new token once however many attempts it takes.
+- **The token goes only where the adapter sent it.**
+  Calls are https only, verify TLS, and follow no redirect by themselves: a redirect comes back as the answer it was.
+  Drive's file downloads follow up to two redirects that stay on the same origin; no other redirect is followed with a token.
+  Salesforce's `instance_url` must be an https URL on Salesforce's own domains, and OneDrive follows only links on Microsoft Graph's hosts.
+  Apart from Drive's same-origin downloads, no adapter follows a redirect with a credential: `Connectors.HTTP` hands a redirect back unless the caller asks for it.
+
+A stored API key is answered the same way, and the credential map reaches the adapter exactly as if it had been decrypted from the Engine's store:
+
+```json
+{"credentials": {"api_key": "..."}, "expires_at": "2026-10-18T12:05:00Z"}
+```
+
+Each adapter has one key its secret lives under, and the broker's secret is put there:
+
+| Adapter | Access token from the broker | API key from the broker |
+| --- | --- | --- |
+| Gmail, Drive, Dropbox, OneDrive, Salesforce, Teams, Zoom, HubSpot | `access_token`, renewable | kept as sent |
+| Notion | `access_token`, renewable | `integration_token` |
+| Slack | `access_token`, renewable | `bot_token` |
+| Stripe, Fathom, Linear, JotForm, beehiiv | `api_key` | `api_key` |
+| GitHub | `pat` | `pat` |
+| GoHighLevel, Jira, Confluence | `api_token` | `api_token` |
+
+A key the broker names itself (for example `bot_token`) is passed on as it is and wins.
+
+Fetched tokens and credentials are held in memory for one sync cycle: they are never written to the connectors table, a run record, the evidence chain, a log, or an error message.
+The secrets a broker issues (the access token, an API key, the key an adapter names for its secret) and an `access_token` given directly are held in the adapter's state as opaque values, so `inspect/1` of the state, a token or an error, and a crash report that prints the state, show only where a token came from and when it expires.
+Other credentials in the state, such as the client secret and refresh token of a connector on the Engine's own store, are plain strings for the length of a sync.
+
+### A token given directly
+
+An OAuth adapter also accepts an `access_token` in its credentials, for tests and simple setups.
+It is sent as it is and never renewed: a refusal is reported as the adapter always reports one, usually `auth_expired`.
+The refresh-token flow is unchanged: given `oauth_refresh_token`, `client_id` and `client_secret` (or the adapter's own equivalents), the adapter exchanges them for a token once per sync, as before.
+A connector that carries a complete set of those (every key of the adapter's own grant) uses the grant, and an `access_token` left beside it is ignored; a broker-issued token comes before both.
+The exchanges post a form (`application/x-www-form-urlencoded`) and read a refused one (`400` or `401`) as `auth_expired`, a throttled one as `rate_limited` and a failing one as `transient`.
+
+### Errors
+
+Each failure names the broker rather than the adapter:
 
 | Error | When |
 | --- | --- |
-| `:broker_not_configured` | the source is `"broker"` but the URL or the reference is missing, or the source name is not one of the two known values |
-| `:broker_refused` | the broker answered without usable credentials: 401, 403, 404, an error body, or an empty credential map |
-| `:broker_unreachable` | no usable answer: a network error, a timeout, or a 5xx |
+| `broker_not_configured` | the source is `"broker"` but the URL or the reference is missing |
+| `broker_url_not_allowed` | the URL is not `https`, carries credentials, or its host is not in `OPTIMAL_CREDENTIAL_BROKER_HOSTS` |
+| `broker_reference_unreadable` | the sealed reference cannot be opened with this Engine's `CONNECTOR_KEY` |
+| `broker_unauthorized` | the broker answered 401: it did not accept the reference as proof |
+| `broker_refused` | the broker answered without usable credentials: 403, 404, an error body, an empty credential map, or a renewal without an access token |
+| `broker_unreachable` | no usable answer: a network error, a timeout, or a 5xx |
+| `broker_token_rejected` | the API refused a brokered token again after one re-fetch |
+| `invalid_credential_source` | the source is not `"stored"` or `"broker"` |
+
+A failure to fetch fails the run before the adapter is initialised; the run row names the reason, and the connector is not disabled.
 
 ## Routing
 
@@ -186,16 +281,17 @@ Over HTTP:
 curl http://localhost:4200/api/connectors \
   -H "Authorization: Bearer $OPTIMAL_ENGINE_KEY" \
   -H 'Content-Type: application/json' \
-  --data '{"id":"gmail-ops","kind":"gmail","workspace":"default:ops",
+  --data '{"id":"miosa:conn_0000000000:gmail","kind":"gmail","workspace":"default:ops",
            "config":{"user_email":"ops@example.com","credential_source":"broker",
-                     "broker_url":"https://connect.example.com/api/credentials",
-                     "broker_reference":"conn_0000000000"}}'
+                     "broker_url":"https://api.miosa.ai/api/v1/connect/broker/credentials",
+                     "broker_reference":"conn_0000000000.<hmac>",
+                     "broker_scopes":["gmail.readonly"],"interval_ms":900000}}'
 ```
 
 Credentials are write-only.
 They arrive only under `credentials`, which the Engine seals with `CONNECTOR_KEY`, or from the broker with `credential_source: "broker"`.
 A secret-shaped key anywhere else in `config` (a token, secret, password or API key) is refused with `credentials_outside_envelope`.
-No response, list or log ever carries credentials or their ciphertext: a connector reports only `"credentials": "stored"`, `"broker"` or `"none"`.
+No response, list or log ever carries credentials or their ciphertext: a connector reports only `"credentials": "stored"`, `"broker"` or `"none"`, and a broker reference only as `"[redacted]"`.
 `PATCH` with `credentials` replaces them, and `"credentials": null` removes them; switching a connector to the broker requires removing stored credentials in the same change.
 
 A key restricted to named workspaces lists only its workspaces' connectors, and every `:id` route answers `404` for a connector outside them, exactly as for one that does not exist.

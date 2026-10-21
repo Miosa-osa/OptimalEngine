@@ -13,7 +13,11 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
   files. Trashed files are never read.
 
   ## Credentials
-    * `:oauth_refresh_token`, `:client_id`, `:client_secret`
+    * `:oauth_refresh_token`, `:client_id`, `:client_secret`, or
+    * an `:access_token`, given directly or issued by the credential broker
+      (`credential_source: "broker"`). Every Drive call goes through
+      `OptimalEngine.Connectors.AccessToken`, which renews a brokered token
+      before it expires and once after a `401`.
 
   ## Content
   Drive's file listing carries metadata only, so each file's text is fetched
@@ -53,9 +57,10 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
     display_name: "Google Drive",
     auth_scheme: :oauth2,
     required_keys: [:scope],
-    credential_keys: [:oauth_refresh_token, :client_id, :client_secret]
+    credential_keys: [:oauth_refresh_token, :client_id, :client_secret],
+    access_token: true
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   require Logger
 
@@ -98,9 +103,9 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
 
   @impl true
   def sync(state, cursor) do
-    with {:ok, access_token} <- refresh_access_token(state) do
+    session(state, &refresh_access_token/1, fn token ->
       ctx = %{
-        headers: [{"authorization", "Bearer #{access_token}"}],
+        token: token,
         scope: scope(state),
         drive_id: present(pick(state, :drive_id)),
         max_pages: max_pages(state)
@@ -110,7 +115,7 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
         nil -> bootstrap_sync(ctx)
         page_token -> incremental_sync(page_token, ctx)
       end
-    end
+    end)
   end
 
   @impl true
@@ -177,7 +182,7 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
       "client_secret" => pick(state, :client_secret)
     }
 
-    case HTTP.post_json(@token_url, body) do
+    case HTTP.post_json(@token_url, body, follow_redirects: false, verify_tls: true) do
       {:ok, %{status: 200, body: %{"access_token" => token}}} ->
         {:ok, token}
 
@@ -215,7 +220,7 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
   defp start_page_token(ctx) do
     url = "#{@base_url}/changes/startPageToken" <> query_string(drive_params(ctx))
 
-    case HTTP.get_json(url, headers: ctx.headers) do
+    case AccessToken.get_json(ctx.token, url) do
       {:ok, %{status: 200, body: %{"startPageToken" => token}}} when is_binary(token) ->
         {:ok, token}
 
@@ -234,7 +239,7 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
   # reached. Drive returns only the fields named in `fields`, so the list asks
   # for `nextPageToken` explicitly: without it every page looks like the last.
   defp list_pages(ctx, page_token, acc, page) do
-    case HTTP.get_json(list_url(ctx, page_token), headers: ctx.headers) do
+    case AccessToken.get_json(ctx.token, list_url(ctx, page_token)) do
       {:ok, %{status: 200, body: %{} = body}} ->
         acc = [List.wrap(body["files"]) | acc]
 
@@ -295,7 +300,7 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
   end
 
   defp change_pages(ctx, page_token, acc, page) do
-    case HTTP.get_json(changes_url(ctx, page_token), headers: ctx.headers) do
+    case AccessToken.get_json(ctx.token, changes_url(ctx, page_token)) do
       {:ok, %{status: 200, body: %{} = body}} ->
         acc = [changed_files(body) | acc]
 
@@ -443,7 +448,11 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
 
   # The body is asked for raw: a JSON file would otherwise be decoded into a map.
   defp fetch_text(url, file, ctx) do
-    case HTTP.get_json(url, headers: ctx.headers, parse_json: false, timeout: @text_timeout_ms) do
+    case AccessToken.get_json(ctx.token, url,
+           parse_json: false,
+           timeout: @text_timeout_ms,
+           follow_same_origin: 2
+         ) do
       {:ok, %{status: 200, body: body}} when is_binary(body) ->
         {:ok, body}
 

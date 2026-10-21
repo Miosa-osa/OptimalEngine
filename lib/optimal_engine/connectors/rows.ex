@@ -13,6 +13,8 @@ defmodule OptimalEngine.Connectors.Rows do
       `CONNECTOR_KEY`, and are never read back. A view reports only whether
       they are `"stored"`, come from the `"broker"`, or are `"none"`.
       Secret-shaped keys anywhere else in `config` are refused.
+    * A `broker_reference` is sealed with `CONNECTOR_KEY` too, and a view
+      shows it only as `"[redacted]"`.
     * Every registration, change and deletion is appended to the tenant's
       authority evidence chain (`connector.registered`, `connector.changed`,
       `connector.deleted`); a run asked for by hand is `connector.run`.
@@ -32,6 +34,8 @@ defmodule OptimalEngine.Connectors.Rows do
   @id ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
   @secret_key ~r/(secret|password|passwd|token|api_?key|private_?key|bearer|\Apat\z)/i
   @sealed ~w(credentials credentials_ciphertext)
+  @reference "broker_reference"
+  @sealed_reference "broker_reference_ciphertext"
   @redacted "[redacted]"
 
   @type view :: map()
@@ -424,10 +428,17 @@ defmodule OptimalEngine.Connectors.Rows do
     if secret_keys(config) == [], do: :ok, else: {:error, :credentials_outside_envelope}
   end
 
+  # The sealed reference is the Engine's own ciphertext: a caller names the
+  # reference in plaintext and the Engine seals it.
   defp secret_keys(map) when is_map(map) do
     Enum.flat_map(map, fn {key, value} ->
       key = to_string(key)
-      own = if key in @sealed or Regex.match?(@secret_key, key), do: [key], else: []
+
+      own =
+        if key in [@sealed_reference | @sealed] or Regex.match?(@secret_key, key),
+          do: [key],
+          else: []
+
       own ++ secret_keys(value)
     end)
   end
@@ -491,8 +502,10 @@ defmodule OptimalEngine.Connectors.Rows do
     end
   end
 
+  # Removing the reference removes its seal with it.
   defp apply_config(config, changes) do
     Enum.reduce(changes, config, fn
+      {@reference, nil}, acc -> Map.drop(acc, [@reference, @sealed_reference])
       {key, nil}, acc -> Map.delete(acc, key)
       {key, value}, acc -> Map.put(acc, key, value)
     end)
@@ -606,7 +619,7 @@ defmodule OptimalEngine.Connectors.Rows do
       credential_source: credential_source(row.config),
       credentials: credential_state(row.config),
       cadence: cadence,
-      config: redact(row.config),
+      config: view_config(row.config),
       running: running,
       last_run: last_run,
       last_error: status |> Map.get(:last_error) |> error_view(),
@@ -721,6 +734,16 @@ defmodule OptimalEngine.Connectors.Rows do
       Enum.any?(@sealed, &Map.has_key?(config, &1)) -> "stored"
       true -> "none"
     end
+  end
+
+  # A broker reference, sealed or written before sealing, is shown only as
+  # redacted, and its ciphertext not at all.
+  defp view_config(config) do
+    redacted = config |> Map.drop([@reference, @sealed_reference]) |> redact()
+
+    if CredentialSource.reference?(config),
+      do: Map.put(redacted, @reference, @redacted),
+      else: redacted
   end
 
   # Sealed credentials are dropped; any other secret-shaped key (a row

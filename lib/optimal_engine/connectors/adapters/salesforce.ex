@@ -6,7 +6,11 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     * `:instance_url`, `:objects` (list of SObject API names)
 
   ## Credentials
-    * `:client_id`, `:client_secret`, `:refresh_token`
+    * `:client_id`, `:client_secret`, `:refresh_token`, or
+    * an `:access_token`, given directly or issued by the credential broker
+    (`credential_source: "broker"`); calls go through
+    `OptimalEngine.Connectors.AccessToken`, which renews a brokered token
+    before it expires and once after a `401`
 
   ## Cursor shape
   ISO-8601 timestamp (`LastModifiedDate >` filter). Initial sync: `nil` (last 30 days).
@@ -17,25 +21,63 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     display_name: "Salesforce",
     auth_scheme: :oauth2,
     required_keys: [:instance_url, :objects],
-    credential_keys: [:client_id, :client_secret, :refresh_token]
+    credential_keys: [:client_id, :client_secret, :refresh_token],
+    access_token: true
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, TokenExchange}
 
   @page_size 200
   @token_url "https://login.salesforce.com/services/oauth2/token"
+  # The token is sent to the connector's instance_url, so it must be Salesforce's.
+  @domains ~w(salesforce.com force.com cloudforce.com salesforce-setup.com)
+
+  @impl true
+  def init(config) do
+    with {:ok, state} <- super(config),
+         :ok <- check_instance_url(pick(state, :instance_url)) do
+      {:ok, state}
+    end
+  end
 
   @impl true
   def sync(state, cursor) do
+    case check_instance_url(pick(state, :instance_url)) do
+      :ok -> pull(state, cursor)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp check_instance_url(url) when is_binary(url) do
+    case {url, URI.parse(url)} do
+      {"https://" <> _rest,
+       %URI{host: host, port: 443, userinfo: nil, query: nil, fragment: nil, path: path}}
+      when is_binary(host) and path in [nil, "", "/"] ->
+        if trusted_host?(host), do: :ok, else: {:error, {:invalid_config, :instance_url}}
+
+      _other ->
+        {:error, {:invalid_config, :instance_url}}
+    end
+  end
+
+  defp check_instance_url(_url), do: {:error, {:invalid_config, :instance_url}}
+
+  defp trusted_host?(host) do
+    host = String.downcase(host, :ascii)
+
+    Regex.match?(~r/\A[a-z0-9.-]+\z/, host) and
+      Enum.any?(@domains, &(host == &1 or String.ends_with?(host, "." <> &1)))
+  end
+
+  defp pull(state, cursor) do
     instance_url = pick(state, :instance_url)
     objects = pick(state, :objects, ["Account"])
 
-    with {:ok, access_token} <- get_access_token(state) do
-      headers = [{"authorization", "Bearer #{access_token}"}]
+    session(state, &get_access_token/1, fn token ->
       since = cursor || default_since()
 
       result =
         Enum.reduce_while(objects, {:ok, [], since}, fn sobject, {:ok, acc, last_ts} ->
-          case fetch_sobject(instance_url, sobject, since, headers) do
+          case fetch_sobject(instance_url, sobject, since, token) do
             {:ok, records, new_ts} ->
               new_signals =
                 Enum.flat_map(records, fn r ->
@@ -62,7 +104,7 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
         {:ok, signals, next_cursor} -> {:ok, %{signals: signals, cursor: next_cursor}}
         {:error, _} = err -> err
       end
-    end
+    end)
   end
 
   @impl true
@@ -88,34 +130,15 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     client_secret = pick(state, :client_secret)
     refresh_token = pick(state, :refresh_token)
 
-    body =
-      URI.encode_query(%{
-        grant_type: "refresh_token",
-        client_id: client_id,
-        client_secret: client_secret,
-        refresh_token: refresh_token
-      })
-
-    case HTTP.request(@token_url,
-           method: :post,
-           body: body,
-           headers: [{"content-type", "application/x-www-form-urlencoded"}]
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} ->
-        {:ok, token}
-
-      {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{status: status}} ->
-        {:error, {:http, status}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    TokenExchange.exchange(@token_url,
+      grant_type: "refresh_token",
+      client_id: client_id,
+      client_secret: client_secret,
+      refresh_token: refresh_token
+    )
   end
 
-  defp fetch_sobject(instance_url, sobject, since, headers) do
+  defp fetch_sobject(instance_url, sobject, since, token) do
     fields = sobject_fields(sobject)
 
     soql =
@@ -124,7 +147,7 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     encoded = URI.encode_query(%{"q" => soql})
     url = "#{instance_url}/services/data/v59.0/query?#{encoded}"
 
-    case HTTP.get_json(url, headers: headers) do
+    case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: %{"records" => records}}} ->
         new_ts =
           records
