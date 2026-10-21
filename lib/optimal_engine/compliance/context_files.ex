@@ -24,7 +24,9 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   A path in a row is data, and a bundle import writes these rows too, so a file is
   planned only if it is the workspace's own:
 
-    * a regular file, never a link or a directory;
+    * a regular file, never a link or a directory, and no directory between the Engine
+      root and it is a link (every component is looked at without being followed, again
+      when the file is removed or rewritten);
     * strictly inside the directory of the context's workspace
       (`Workspace.Filesystem.path/2`) and so inside the Engine root, never the root or
       the workspace directory itself;
@@ -35,7 +37,7 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   Errors name the kind of file and the cause, never the path.
   """
 
-  alias OptimalEngine.Compliance.Redact
+  alias OptimalEngine.Compliance.{Artifacts, Redact}
   alias OptimalEngine.Pipeline.Intake.Writer
   alias OptimalEngine.Store
   alias OptimalEngine.Workspace.Filesystem
@@ -106,22 +108,24 @@ defmodule OptimalEngine.Compliance.ContextFiles do
           {:ok, %{files: non_neg_integer(), bytes: non_neg_integer()}} | {:error, term()}
   def remove(files) when is_list(files) do
     each(files, fn file ->
-      case File.lstat(file) do
-        {:ok, %{type: :regular, size: size}} ->
-          case File.rm(file) do
-            :ok -> {:done, size}
-            {:error, :enoent} -> :skipped
-            {:error, posix} -> {:error, posix}
-          end
+      with :ok <- real_parents(file) do
+        case File.lstat(file) do
+          {:ok, %{type: :regular, size: size}} ->
+            case File.rm(file) do
+              :ok -> {:done, size}
+              {:error, :enoent} -> :skipped
+              {:error, posix} -> {:error, posix}
+            end
 
-        {:ok, _other} ->
-          :skipped
+          {:ok, _other} ->
+            :skipped
 
-        {:error, :enoent} ->
-          :skipped
+          {:error, :enoent} ->
+            :skipped
 
-        {:error, posix} ->
-          {:error, posix}
+          {:error, posix} ->
+            {:error, posix}
+        end
       end
     end)
   end
@@ -136,7 +140,8 @@ defmodule OptimalEngine.Compliance.ContextFiles do
           {:ok, %{files: non_neg_integer(), bytes: non_neg_integer()}} | {:error, term()}
   def redact(files) when is_list(files) do
     each(files, fn file ->
-      with {:ok, %{type: :regular, mode: mode}} <- File.lstat(file),
+      with :ok <- real_parents(file),
+           {:ok, %{type: :regular, mode: mode}} <- File.lstat(file),
            {:ok, text} <- File.read(file),
            redacted = Redact.redact!(text),
            true <- redacted != text,
@@ -331,7 +336,28 @@ defmodule OptimalEngine.Compliance.ContextFiles do
 
   defp inside?(path, dir), do: String.starts_with?(path, dir <> "/")
 
-  defp regular?(path), do: match?({:ok, %{type: :regular}}, File.lstat(path))
+  defp regular?(path),
+    do: match?({:ok, %{type: :regular}}, File.lstat(path)) and real_parents?(path)
+
+  defp real_parents?(path), do: real_parents(path) == :ok
+
+  # Every directory between the root and `path` is a real directory; `:skipped` otherwise,
+  # which `each/2` counts as nothing to do. `path` is expanded and inside the root.
+  defp real_parents(path) do
+    root = root()
+
+    if inside?(path, root) do
+      {directories, _name} = path |> Path.relative_to(root) |> Path.split() |> Enum.split(-1)
+
+      case Artifacts.real_directories(root, directories) do
+        :ok -> :ok
+        :skip -> :skipped
+        {:error, _} = error -> error
+      end
+    else
+      :skipped
+    end
+  end
 
   # ── helpers ────────────────────────────────────────────────────────────────
 
