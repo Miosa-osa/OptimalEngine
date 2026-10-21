@@ -25,7 +25,8 @@ defmodule ProofSeedGenerate do
   @documents_per_batch 250
   @file_bytes 1_048_576
   @relations {"related", "cites", "follows", "supports"}
-  @words List.to_tuple(~w(account action agenda answer archive audit backlog balance batch brief budget
+  @words List.to_tuple(
+           ~w(account action agenda answer archive audit backlog balance batch brief budget
             calendar campaign capacity channel checklist client cluster commit context
             contract cost customer cycle dashboard deadline decision delivery demand
             design draft estimate evidence feedback filing forecast goal handoff hiring
@@ -35,7 +36,8 @@ defmodule ProofSeedGenerate do
             quarter question record release report request review revenue risk roadmap
             rollout schedule scope segment service signal source sprint status strategy
             summary supplier support survey system target task team template ticket
-            timeline topic trend update vendor version volume window workflow workshop))
+            timeline topic trend update vendor version volume window workflow workshop)
+         )
 
   def run do
     workspace_id = System.fetch_env!("SEED_WORKSPACE")

@@ -50,6 +50,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Store.Migrations
+  alias OptimalEngine.Store.ReadSnapshot
   alias OptimalEngine.Sync.Capture
   alias OptimalEngine.Workspace
   alias OptimalEngine.Workspace.Filesystem
@@ -72,6 +73,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @principals "principals"
   @documents "operating_documents"
   @batch_rows 1_000
+  @snapshot_attempts 20
 
   @doc """
   Writes a bundle for `workspace_id` to `path`. Returns the manifest.
@@ -83,44 +85,87 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       staging = staging_dir()
 
       try do
-        # The mark comes first: every captured change is sealed into the ledger,
-        # then its high-water mark is read, then the rows. Everything at or below
-        # the mark is therefore in the bundle, and a replica seeded from it pulls
-        # everything above. A write that lands while the rows are read can arrive
-        # both ways; a keyed row is then written again with the same content.
-        mark = ledger_mark(tenant_id, workspace_id)
-        tables = export_tables(tenant_id, workspace_id, staging)
-        files = export_files(workspace_id, staging)
-
-        manifest =
-          %{
-            "format" => @format,
-            "version" => @version,
-            "engine_version" => engine_version(),
-            "migration" => current_migration(),
-            "created_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-            "tenant_id" => tenant_id,
-            "workspace" => %{
-              "id" => workspace.id,
-              "slug" => workspace.slug,
-              "name" => workspace.name,
-              "description" => workspace.description,
-              "external_id" => workspace.external_id,
-              "metadata" => workspace.metadata
-            },
-            "tables" => tables,
-            "files" => files,
-            "ledger_sequence" => mark
-          }
-          |> then(&Map.put(&1, "bundle_sha256", CanonicalJSON.hash(&1)))
-
-        File.write!(Path.join(staging, "manifest.json"), Jason.encode!(manifest, pretty: true))
-        :ok = pack(staging, path)
-        {:ok, manifest}
+        with {:ok, {mark, tables}} <- snapshot_tables(tenant_id, workspace_id, staging) do
+          files = export_files(workspace_id, staging)
+          write_bundle(tenant_id, workspace, mark, tables, files, staging, path)
+        end
       after
         File.rm_rf(staging)
       end
     end
+  end
+
+  defp write_bundle(tenant_id, workspace, mark, tables, files, staging, path) do
+    manifest =
+      %{
+        "format" => @format,
+        "version" => @version,
+        "engine_version" => engine_version(),
+        "migration" => current_migration(),
+        "created_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+        "tenant_id" => tenant_id,
+        "workspace" => %{
+          "id" => workspace.id,
+          "slug" => workspace.slug,
+          "name" => workspace.name,
+          "description" => workspace.description,
+          "external_id" => workspace.external_id,
+          "metadata" => workspace.metadata
+        },
+        "tables" => tables,
+        "files" => files,
+        "ledger_sequence" => mark
+      }
+      |> then(&Map.put(&1, "bundle_sha256", CanonicalJSON.hash(&1)))
+
+    File.write!(Path.join(staging, "manifest.json"), Jason.encode!(manifest, pretty: true))
+    :ok = pack(staging, path)
+    {:ok, manifest}
+  end
+
+  # The ledger mark and every row come from one read of the database, on a
+  # connection of its own (`OptimalEngine.Store.ReadSnapshot`). A write that
+  # lands while the export runs is in neither the bundle nor at or below the
+  # mark, so a replica seeded from the bundle pulls it exactly once, and a row
+  # re-written meanwhile is in the bundle once, as it was.
+  #
+  # Changes captured before the read are sealed into the ledger first. A
+  # change captured but not yet sealed when the read begins would be in the
+  # rows and sealed later above the mark, so the read is started again while
+  # the workspace has one, a bounded number of times.
+  defp snapshot_tables(tenant_id, workspace_id, staging, attempt \\ 1) do
+    with {:ok, _sealed} <- Capture.seal() do
+      result =
+        ReadSnapshot.run(fn snap ->
+          if pending_captures(snap, workspace_id) == 0 do
+            mark = ledger_mark(snap, tenant_id, workspace_id)
+            {:ok, {mark, export_tables(snap, tenant_id, workspace_id, staging)}}
+          else
+            :captures_pending
+          end
+        end)
+
+      case result do
+        :captures_pending when attempt < @snapshot_attempts ->
+          Process.sleep(min(10 * attempt, 200))
+          snapshot_tables(tenant_id, workspace_id, staging, attempt + 1)
+
+        :captures_pending ->
+          {:error, :writes_in_progress}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  defp pending_captures(snap, workspace_id) do
+    {:ok, [[n]]} =
+      ReadSnapshot.query(snap, "SELECT COUNT(*) FROM sync_capture WHERE workspace_id = ?1", [
+        workspace_id
+      ])
+
+    n
   end
 
   @doc """
@@ -167,6 +212,25 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     after
       File.rm_rf(staging)
     end
+  end
+
+  @doc """
+  Removes what a run that never finished left behind: raw uploads still being
+  received (`upload-*.part`) or received and not yet imported
+  (`upload-*.tar.gz`) in the tenants' bundle folders, and the staging folders
+  of exports and imports. A run removes its own files whatever happens, so
+  these are only left by an Engine that stopped mid-way. The Engine that
+  serves the API calls this at boot, before it takes requests. Returns how
+  many were removed.
+  """
+  @spec sweep_leftovers() :: non_neg_integer()
+  def sweep_leftovers do
+    uploads = Path.wildcard(Path.join([backup_base(), "bundles", "*", "upload-*.{part,tar.gz}"]))
+    staged = Path.wildcard(Path.join(staging_root(), "*"))
+
+    Enum.each(uploads, &File.rm/1)
+    Enum.each(staged, &File.rm_rf/1)
+    length(uploads) + length(staged)
   end
 
   @doc """
@@ -392,7 +456,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # ---------------------------------------------------------------------------
   # Export
 
-  defp export_tables(tenant_id, workspace_id, staging) do
+  defp export_tables(snap, tenant_id, workspace_id, staging) do
     File.mkdir_p!(Path.join(staging, "tables"))
 
     scoped =
@@ -400,7 +464,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         columns = columns(table)
         {where, params} = scope_clause(table, columns, tenant_id, workspace_id)
 
-        write_table(staging, table, columns, where, params)
+        write_table(snap, staging, table, columns, where, params)
       end
 
     children =
@@ -410,6 +474,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         {where, params} = scope_clause(parent, parent_columns, tenant_id, workspace_id)
 
         write_table(
+          snap,
           staging,
           table,
           columns,
@@ -420,6 +485,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     principals =
       write_table(
+        snap,
         staging,
         @principals,
         columns(@principals),
@@ -434,6 +500,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     documents =
       write_table(
+        snap,
         staging,
         @documents,
         columns(@documents),
@@ -445,17 +512,17 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   # Writes the rows of `table` that match `where` as JSON lines. The table is
-  # read a page at a time and each page is written and hashed before the next
-  # is read, so a large workspace is never held in memory and no single Store
-  # call runs long enough to time out.
-  defp write_table(staging, table, columns, where, params) do
+  # read from the snapshot a page at a time and each page is written and
+  # hashed before the next is read, so a large workspace is never held in
+  # memory.
+  defp write_table(snap, staging, table, columns, where, params) do
     file = Path.join([staging, "tables", table <> ".jsonl"])
     names = Enum.map(columns, &elem(&1, 0))
 
     {rows, hash} =
       File.open!(file, [:write, :binary], fn io ->
-        table
-        |> table_rows(where, params)
+        snap
+        |> table_rows(table, where, params)
         |> Enum.reduce({0, :crypto.hash_init(:sha256)}, fn row, {count, hash} ->
           line =
             names
@@ -477,40 +544,19 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     }
   end
 
-  # Pages through a table in rowid order, after the last rowid of the previous
-  # page. A table without a rowid is read in one query.
-  defp table_rows(table, where, params) do
-    if without_rowid?(table) do
-      {:ok, rows} = Store.raw_query("SELECT * FROM #{quote_name(table)} WHERE #{where}", params)
-      rows
-    else
-      n = length(params)
-
-      sql =
-        "SELECT rowid, * FROM #{quote_name(table)} WHERE (#{where}) AND rowid > ?#{n + 1} " <>
-          "ORDER BY rowid LIMIT ?#{n + 2}"
-
-      page_rows = export_page_rows()
-
-      Stream.unfold(0, fn
-        :done ->
-          nil
-
-        after_rowid ->
-          {:ok, page} = Store.raw_query(sql, params ++ [after_rowid, page_rows])
-          page_read(table, length(page))
-
-          case page do
-            [] -> nil
-            _ -> {Enum.map(page, &tl/1), next_page(page, page_rows)}
-          end
-      end)
-      |> Stream.concat()
-    end
+  # Streams the rows of a table that match `where` from the snapshot, one page
+  # of `:bundle_export_page_rows` rows at a time (default 1,000). The snapshot
+  # does not move, so one statement reads the table from start to end.
+  defp table_rows(snap, table, where, params) do
+    snap
+    |> ReadSnapshot.stream(
+      "SELECT * FROM #{quote_name(table)} WHERE #{where}",
+      params,
+      export_page_rows()
+    )
+    |> Stream.each(&page_read(table, length(&1)))
+    |> Stream.concat()
   end
-
-  defp next_page(page, page_rows) when length(page) < page_rows, do: :done
-  defp next_page(page, _page_rows), do: page |> List.last() |> hd()
 
   # Rows read per page of an export (`config :optimal_engine,
   # :bundle_export_page_rows`, default 1,000).
@@ -520,13 +566,6 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # the rows read and the table.
   defp page_read(table, rows),
     do: :telemetry.execute([:optimal_engine, :bundle, :export_page], %{rows: rows}, %{table: table})
-
-  defp without_rowid?(table) do
-    case Store.raw_query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1", [table]) do
-      {:ok, [[sql]]} when is_binary(sql) -> Regex.match?(~r/\bWITHOUT\s+ROWID\b/i, sql)
-      _ -> false
-    end
-  end
 
   defp export_files(workspace_id, staging) do
     source = Filesystem.path(root(), workspace_id)
@@ -1248,11 +1287,16 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     end)
   end
 
+  # Exports and imports unpack in a folder of their own under the Engine's
+  # backup dir, on its data volume, rather than in the shared temp dir, so the
+  # Engine can clear what a stopped run left there without touching another's.
   defp staging_dir do
-    dir = Path.join(System.tmp_dir!(), "optimal-bundle-#{System.unique_integer([:positive])}")
+    dir = Path.join(staging_root(), "bundle-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     dir
   end
+
+  defp staging_root, do: Path.join(backup_base(), "staging")
 
   defp root, do: Application.get_env(:optimal_engine, :root_path, File.cwd!())
 
@@ -1286,14 +1330,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     end
   end
 
-  # The replication ledger's high-water mark when the bundle was taken: a
-  # replica seeded from this bundle pulls from here. Changes captured but not
-  # yet sealed are sealed first; left out, they would be sealed later above the
-  # mark and pulled again by a replica that already has them from the bundle.
-  defp ledger_mark(tenant_id, workspace_id) do
-    {:ok, _sealed} = Capture.seal()
-
-    case Store.raw_query(
+  # The replication ledger's high-water mark in the snapshot: a replica
+  # seeded from this bundle pulls from here.
+  defp ledger_mark(snap, tenant_id, workspace_id) do
+    case ReadSnapshot.query(
+           snap,
            "SELECT COALESCE(MAX(sequence), 0) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2",
            [tenant_id, workspace_id]
          ) do

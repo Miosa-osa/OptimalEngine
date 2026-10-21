@@ -108,6 +108,14 @@ defmodule OptimalEngine.API.ScopeAPI do
       {:error, :not_found} ->
         error(conn, 404, "workspace not found")
 
+      {:error, :writes_in_progress} ->
+        conn
+        |> put_resp_header("retry-after", "5")
+        |> error(
+          503,
+          "writes_in_progress: the workspace kept receiving writes while the export started; retry, or pause them"
+        )
+
       {:error, reason} ->
         error(conn, 422, inspect(reason))
     end
@@ -136,11 +144,11 @@ defmodule OptimalEngine.API.ScopeAPI do
   # (content-type application/gzip) with the same options as query parameters
   # and an optional x-bundle-sha256 header.
   def import_bundle(conn) do
-    conn = conn |> allow_long_request() |> fetch_query_params()
+    conn = fetch_query_params(conn)
 
     case get_req_header(conn, "content-type") do
       ["application/gzip" <> _ | _] -> import_upload(conn)
-      _ -> import_by_name(conn)
+      _ -> conn |> allow_long_request() |> import_by_name()
     end
   end
 
@@ -157,23 +165,37 @@ defmodule OptimalEngine.API.ScopeAPI do
     end
   end
 
-  # The raw file is streamed to a temporary file in the tenant's folder, a chunk
-  # at a time, hashed as it arrives and refused past the size limit, so a bundle
-  # of any size is never held in memory. The temporary file is removed on every
-  # path out, whatever happens.
+  # The raw file is streamed to `upload-N.part` in the tenant's folder, a chunk
+  # at a time, hashed as it arrives, refused past the size limit and the upload
+  # deadline, so a bundle of any size is never held in memory. Complete and
+  # checked, it is renamed `upload-N.tar.gz` and imported.
+  #
+  # The body is read under the HTTP server's own idle limits: a client that
+  # goes silent is closed. Only the import that follows is kept open as long as
+  # it runs (allow_long_request/1). A process watching the request removes both
+  # files when it ends, also when the connection kills it, which runs no
+  # `after`; an Engine that stopped mid-upload removes them at its next boot
+  # (WorkspaceBundle.sweep_leftovers/0).
   defp import_upload(conn) do
-    path =
+    upload =
       Path.join(
         WorkspaceBundle.bundle_dir(tenant(conn)),
-        "upload-#{System.unique_integer([:positive])}.tar.gz"
+        "upload-#{System.unique_integer([:positive])}"
       )
+
+    part = upload <> ".part"
+    path = upload <> ".tar.gz"
+    remove_when_done([part, path])
 
     try do
       with {:ok, expected} <- declared_sha256(conn),
            :ok <- declared_size_allowed(conn),
-           {:ok, conn, digest} <- receive_upload(conn, path),
-           :ok <- digest_matches(digest, expected) do
-        run_import(conn, path, conn.query_params, consume: true, foreign: :refused)
+           {:ok, conn, digest} <- receive_upload(conn, part),
+           :ok <- digest_matches(digest, expected),
+           :ok <- File.rename(part, path) do
+        conn
+        |> allow_long_request()
+        |> run_import(path, conn.query_params, consume: true, foreign: :refused)
       else
         {:error, :invalid_sha256} ->
           error(conn, 400, "x-bundle-sha256 must be 64 hexadecimal characters")
@@ -187,12 +209,35 @@ defmodule OptimalEngine.API.ScopeAPI do
         {:error, {:sha256_mismatch, actual}} ->
           json(conn, 422, %{error: "bundle_sha256_mismatch", received_sha256: actual})
 
+        {:error, :upload_timeout, conn} ->
+          error(
+            conn,
+            408,
+            "upload_timeout: the bundle did not arrive within #{div(upload_deadline_ms(), 1_000)} s"
+          )
+
         {:error, reason, conn} ->
           error(conn, 400, "upload failed: #{inspect(reason)}")
+
+        {:error, reason} ->
+          error(conn, 500, "upload failed: #{inspect(reason)}")
       end
     after
+      File.rm(part)
       File.rm(path)
     end
+  end
+
+  defp remove_when_done(paths) do
+    owner = self()
+
+    spawn(fn ->
+      ref = Process.monitor(owner)
+
+      receive do
+        {:DOWN, ^ref, :process, _pid, _reason} -> Enum.each(paths, &File.rm/1)
+      end
+    end)
   end
 
   defp run_import(conn, path, params, extra) do
@@ -294,7 +339,6 @@ defmodule OptimalEngine.API.ScopeAPI do
   # raises the idle timeout for this request and messages the connection every
   # minute until the request process ends, so neither cuts the request off.
   @long_request_idle_ms :timer.minutes(10)
-  @long_request_tick_ms :timer.minutes(1)
 
   defp allow_long_request(%Plug.Conn{adapter: {Plug.Cowboy.Conn, req}} = conn) do
     owner = self()
@@ -314,11 +358,16 @@ defmodule OptimalEngine.API.ScopeAPI do
     receive do
       {:DOWN, ^ref, :process, _pid, _reason} -> :ok
     after
-      @long_request_tick_ms ->
+      long_request_tick_ms() ->
         :cowboy_req.cast({:set_options, %{idle_timeout: @long_request_idle_ms}}, req)
         keep_connection_open(req, ref)
     end
   end
+
+  # How often the watcher messages the connection (`config :optimal_engine,
+  # :bundle_long_request_tick_ms`, a minute by default).
+  defp long_request_tick_ms,
+    do: Application.get_env(:optimal_engine, :bundle_long_request_tick_ms, :timer.minutes(1))
 
   @default_max_upload_bytes 5 * 1024 * 1024 * 1024
   @default_upload_chunk_bytes 8 * 1024 * 1024
@@ -330,6 +379,12 @@ defmodule OptimalEngine.API.ScopeAPI do
   defp upload_chunk_bytes,
     do:
       Application.get_env(:optimal_engine, :bundle_upload_chunk_bytes, @default_upload_chunk_bytes)
+
+  # How long a raw upload may take from its first byte to its last
+  # (`config :optimal_engine, :bundle_upload_deadline_ms`, one hour by default),
+  # so a client that trickles bytes cannot hold the request forever.
+  defp upload_deadline_ms,
+    do: Application.get_env(:optimal_engine, :bundle_upload_deadline_ms, :timer.hours(1))
 
   defp declared_sha256(conn) do
     case get_req_header(conn, "x-bundle-sha256") do
@@ -365,7 +420,8 @@ defmodule OptimalEngine.API.ScopeAPI do
     case File.open(path, [:write, :binary, :raw]) do
       {:ok, file} ->
         try do
-          copy_body(conn, file, 0, :crypto.hash_init(:sha256))
+          deadline = System.monotonic_time(:millisecond) + upload_deadline_ms()
+          copy_body(conn, file, 0, :crypto.hash_init(:sha256), deadline)
         after
           File.close(file)
         end
@@ -377,8 +433,8 @@ defmodule OptimalEngine.API.ScopeAPI do
 
   # Each chunk is counted, hashed and written before the next is read, and
   # reported as [:optimal_engine, :bundle, :upload_chunk] with its byte size.
-  defp copy_body(conn, file, received, hash) do
-    case read_body(conn, length: upload_chunk_bytes()) do
+  defp copy_body(conn, file, received, hash, deadline) do
+    case read_body(conn, length: upload_chunk_bytes(), read_timeout: upload_read_timeout(deadline)) do
       {status, data, conn} when status in [:ok, :more] ->
         received = received + byte_size(data)
 
@@ -388,27 +444,40 @@ defmodule OptimalEngine.API.ScopeAPI do
           %{}
         )
 
-        if received > max_upload_bytes() do
-          {:error, :too_large, conn}
-        else
-          hash = :crypto.hash_update(hash, data)
+        cond do
+          received > max_upload_bytes() ->
+            {:error, :too_large, conn}
 
-          case :file.write(file, data) do
-            :ok when status == :ok ->
-              {:ok, conn, hash |> :crypto.hash_final() |> Base.encode16(case: :lower)}
+          status == :more and System.monotonic_time(:millisecond) >= deadline ->
+            {:error, :upload_timeout, conn}
 
-            :ok ->
-              copy_body(conn, file, received, hash)
-
-            {:error, reason} ->
-              {:error, reason, conn}
-          end
+          true ->
+            write_chunk(conn, file, data, status, received, hash, deadline)
         end
 
       {:error, reason} ->
         {:error, reason, conn}
     end
   end
+
+  defp write_chunk(conn, file, data, status, received, hash, deadline) do
+    hash = :crypto.hash_update(hash, data)
+
+    case :file.write(file, data) do
+      :ok when status == :ok ->
+        {:ok, conn, hash |> :crypto.hash_final() |> Base.encode16(case: :lower)}
+
+      :ok ->
+        copy_body(conn, file, received, hash, deadline)
+
+      {:error, reason} ->
+        {:error, reason, conn}
+    end
+  end
+
+  # One read waits at most 15 s for data, and never past the deadline.
+  defp upload_read_timeout(deadline),
+    do: deadline |> Kernel.-(System.monotonic_time(:millisecond)) |> max(1) |> min(15_000)
 
   defp digest_matches(_digest, nil), do: :ok
   defp digest_matches(digest, digest), do: :ok
