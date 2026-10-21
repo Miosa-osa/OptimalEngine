@@ -25,7 +25,10 @@ defmodule OptimalEngine.Workspace.Config do
   types that appear in this config schema (nested atom-key maps, string lists,
   integers, booleans, nil). Atom keys are written as their string equivalents
   so the file is clean YAML; on read `YamlElixir` returns string keys, which
-  `get/2` atomises one level deep (section keys only) before returning.
+  `get/2` turns into the atoms `defaults/0` names, at every depth. A key the
+  schema does not name stays a string (the file and a PATCH body are data, so no
+  atom is created from them), is merged beside the defaults, and is written
+  back unchanged.
   """
 
   alias OptimalEngine.SafeAtom

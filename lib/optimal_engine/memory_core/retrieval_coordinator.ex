@@ -36,8 +36,48 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
 
   @default_limit 10
   @default_token_budget 2_000
+
+  @option_keys [
+    :workspace_id,
+    :tenant_id,
+    :actor_id,
+    :requesting_actor_id,
+    :allowed_partitions,
+    :allowed_security_labels,
+    :limit,
+    :time_mode,
+    :detail_depth,
+    :request_id,
+    :request_intent,
+    :active_memory_pool_id,
+    :token_budget,
+    :metadata,
+    :strategy,
+    :include_draft_skills,
+    :reconstruction_steps,
+    :reconstruction_tokens,
+    :association_limit,
+    :subject_anchor,
+    :action_class,
+    :object_anchor,
+    :modality,
+    :extraction_type,
+    :workflow_family,
+    :task_family,
+    :skill_package_name
+  ]
   @max_redacted_links 25
   @policy_version "governed_recall_v1"
+
+  @doc """
+  The options `retrieve/2` reads that may be set from data, such as a dataset
+  file or a request body.
+
+  It leaves out `:scope`, which is a struct, and `:internal_refresh_allow_all`,
+  which only the engine's own refresh sets: text from data never reaches it.
+  """
+  @spec option_keys() :: [atom()]
+  def option_keys, do: @option_keys
 
   @doc """
   Retrieve governed context for `query`.

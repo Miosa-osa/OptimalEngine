@@ -11,8 +11,38 @@ defmodule OptimalEngine.Evaluation do
 
   alias OptimalEngine.MemoryCore.{ID, JSON}
   alias OptimalEngine.MemoryCore
+  alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.SafeAtom
   alias OptimalEngine.Store
+
+  # The options a benchmark takes. An options map decoded from text (a dataset,
+  # a request) is read through this list, so text never becomes any other atom.
+  @option_keys [
+    :id,
+    :benchmark_name,
+    :dataset_name,
+    :dataset_version,
+    :dataset_size,
+    :question_count,
+    :answer_model,
+    :judge_model,
+    :judge_strategy,
+    :retrieval_top_k,
+    :run_config,
+    :retrieval_config,
+    :judge_config,
+    :created_by,
+    :metadata,
+    :actor_id,
+    :tenant_id,
+    :workspace_id,
+    :limit,
+    :format,
+    :retriever,
+    :answerer,
+    :judge,
+    :retrieval_opts
+  ]
 
   @type run :: map()
   @type evaluation_case :: map()
@@ -659,12 +689,12 @@ defmodule OptimalEngine.Evaluation do
     base =
       opts
       |> Keyword.get(:retrieval_opts, [])
-      |> opts_to_keyword()
+      |> retrieval_opts_to_keyword()
 
     case_specific =
       case_attrs
       |> map_get(:retrieval_opts)
-      |> opts_to_keyword()
+      |> retrieval_opts_to_keyword()
 
     Keyword.merge(
       [
@@ -775,19 +805,32 @@ defmodule OptimalEngine.Evaluation do
   defp opts_to_keyword(nil), do: []
   defp opts_to_keyword(value) when is_list(value), do: value
 
-  # A case or a dataset file supplies string keys. A key that names no existing
-  # atom cannot be read by any option consumer, so it is dropped instead of
-  # creating an atom for it.
-  defp opts_to_keyword(value) when is_map(value) do
-    Enum.flat_map(value, fn {key, option_value} ->
-      case SafeAtom.existing(key) do
-        {:ok, atom} -> [{atom, option_value}]
-        :error -> []
-      end
+  defp opts_to_keyword(value) when is_map(value), do: known_options(value, @option_keys)
+  defp opts_to_keyword(_), do: []
+
+  # The retrieval options of a case. A dataset file supplies them as text, and
+  # only the options `RetrievalCoordinator.retrieve/2` takes from data are read.
+  defp retrieval_opts_to_keyword(value) when is_map(value),
+    do: known_options(value, RetrievalCoordinator.option_keys())
+
+  defp retrieval_opts_to_keyword(value), do: opts_to_keyword(value)
+
+  # Text keys are looked up in `allowed` and any other text key is dropped, so
+  # no atom is created from the text (and an option that only the engine sets,
+  # such as `:internal_refresh_allow_all`, cannot be set from a file). Atom keys
+  # come from code and are kept as they are.
+  defp known_options(map, allowed) do
+    Enum.flat_map(map, fn
+      {key, value} when is_atom(key) ->
+        [{key, value}]
+
+      {key, value} ->
+        case SafeAtom.fetch(key, allowed) do
+          {:ok, atom} -> [{atom, value}]
+          :error -> []
+        end
     end)
   end
-
-  defp opts_to_keyword(_), do: []
 
   defp map_get(map, key) when is_map(map) do
     Map.get(map, key) || Map.get(map, to_string(key))

@@ -3192,46 +3192,47 @@ defmodule OptimalEngine.API.Router do
     name = Map.get(body, "name", "")
     kind = Map.get(body, "kind", "")
 
-    cond do
-      not (is_binary(name) and String.trim(name) != "") ->
+    # The kind is request text: it is looked up among the node kinds and never
+    # becomes an atom.
+    with {:name, true} <- {:name, is_binary(name) and String.trim(name) != ""},
+         {:kind, true} <- {:kind, is_binary(kind) and kind != ""},
+         {:ok, kind_atom} <- SafeAtom.fetch(kind, OptimalEngine.Topology.Node.kinds()) do
+      slug =
+        Map.get(body, "slug") ||
+          name
+          |> String.downcase()
+          |> String.replace(~r/[^a-z0-9]+/, "-")
+          |> String.trim("-")
+
+      attrs = %{
+        slug: slug,
+        name: name,
+        kind: kind_atom,
+        workspace_id: Map.get(body, "workspace", "default"),
+        description: Map.get(body, "description")
+      }
+
+      case OptimalEngine.Topology.Node.upsert(attrs) do
+        {:ok, node} ->
+          send_resp(
+            conn,
+            200,
+            Jason.encode!(%{ok: true, id: node.id, slug: node.slug, kind: kind})
+          )
+
+        {:error, reason} ->
+          send_resp(conn, 422, Jason.encode!(%{ok: false, error: inspect(reason)}))
+      end
+    else
+      {:name, false} ->
         send_resp(conn, 400, Jason.encode!(%{error: "name is required"}))
 
-      not (is_binary(kind) and kind != "") ->
+      {:kind, false} ->
         send_resp(conn, 400, Jason.encode!(%{error: "kind is required"}))
 
-      SafeAtom.fetch(kind, OptimalEngine.Topology.Node.kinds()) == :error ->
+      :error ->
         kinds = Enum.map_join(OptimalEngine.Topology.Node.kinds(), ", ", &Atom.to_string/1)
         send_resp(conn, 400, Jason.encode!(%{error: "kind must be one of: #{kinds}"}))
-
-      true ->
-        slug =
-          Map.get(body, "slug") ||
-            name
-            |> String.downcase()
-            |> String.replace(~r/[^a-z0-9]+/, "-")
-            |> String.trim("-")
-
-        {:ok, kind_atom} = SafeAtom.fetch(kind, OptimalEngine.Topology.Node.kinds())
-
-        attrs = %{
-          slug: slug,
-          name: name,
-          kind: kind_atom,
-          workspace_id: Map.get(body, "workspace", "default"),
-          description: Map.get(body, "description")
-        }
-
-        case OptimalEngine.Topology.Node.upsert(attrs) do
-          {:ok, node} ->
-            send_resp(
-              conn,
-              200,
-              Jason.encode!(%{ok: true, id: node.id, slug: node.slug, kind: kind})
-            )
-
-          {:error, reason} ->
-            send_resp(conn, 422, Jason.encode!(%{ok: false, error: inspect(reason)}))
-        end
     end
   end
 

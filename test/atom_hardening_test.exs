@@ -34,7 +34,6 @@ defmodule OptimalEngine.AtomHardeningTest do
   alias OptimalEngine.Render.Spec
   alias OptimalEngine.Store
   alias OptimalEngine.Telemetry
-  alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Wiki.{Directives, Integrity, Page}
   alias OptimalEngine.Workspace.Config
 
@@ -150,18 +149,15 @@ defmodule OptimalEngine.AtomHardeningTest do
   describe "exported memory files" do
     @describetag :tmp_dir
 
-    test "an entry is read by its fixed shape, whatever keys the file holds", %{tmp_dir: dir} do
-      nested = never_seen("zz_nested")
-      extra_metadata = never_seen("zz_meta")
-      extra_entry = never_seen("zz_entry")
-      path = Path.join(dir, "export.json")
+    defp entry_file(dir, name, nested, extra_metadata, extra_entry) do
+      path = Path.join(dir, name)
 
       File.write!(
         path,
         Jason.encode!([
           %{
             "key" => "k1",
-            "value" => %{nested => 1},
+            "value" => %{nested => 1, "description" => "d"},
             "metadata" => %{
               "created_at" => "2026-01-01T00:00:00Z",
               "updated_at" => "2026-01-02T00:00:00Z",
@@ -173,14 +169,25 @@ defmodule OptimalEngine.AtomHardeningTest do
         ])
       )
 
+      path
+    end
+
+    test "an entry is read by fixed tables, whatever keys the file holds", %{tmp_dir: dir} do
+      nested = never_seen("zz_nested")
+      extra_metadata = never_seen("zz_meta")
+      extra_entry = never_seen("zz_entry")
+      path = entry_file(dir, "export.json", nested, extra_metadata, extra_entry)
+
       collection = "atoms_import_#{System.unique_integer([:positive])}"
       assert :ok = Memory.import_collection(collection, path)
 
       assert {:ok, entry} = Memory.recall(collection, "k1")
-      assert entry.value == %{nested => 1}
+      # Keys the engine's writers use are atoms; every other key stays text.
+      assert entry.value == %{nested => 1, description: "d"}
       assert entry.metadata.tags == ["a"]
       assert entry.metadata.created_at == ~U[2026-01-01 00:00:00Z]
-      assert Enum.sort(Map.keys(entry.metadata)) == [:access_count, :created_at, :tags, :updated_at]
+      assert entry.metadata[extra_metadata] == true
+      assert is_integer(entry.metadata.access_count)
 
       for text <- [nested, extra_metadata, extra_entry], do: refute_atom(text)
     end
@@ -189,6 +196,65 @@ defmodule OptimalEngine.AtomHardeningTest do
       assert_raise FunctionClauseError, fn ->
         Memory.Store.decode_entry(%{"nothing" => "here"})
       end
+    end
+
+    test "a collection keeps its shape through an export and an import", %{tmp_dir: dir} do
+      collection = "atoms_roundtrip_#{System.unique_integer([:positive])}"
+      imported = collection <> "_copy"
+      path = Path.join(dir, "roundtrip.json")
+
+      :ok =
+        Memory.store(
+          collection,
+          "episode",
+          %{description: "d", outcome: "o", tags: ["x"], custom: 1, nested: %{inner: 2}},
+          tags: ["t"]
+        )
+
+      assert :ok = Memory.export(collection, path)
+      assert :ok = Memory.import_collection(imported, path)
+      assert {:ok, original} = Memory.recall(collection, "episode")
+      assert {:ok, copy} = Memory.recall(imported, "episode")
+
+      # The writers' own keys return as atoms; other keys return as text, and
+      # their nested maps are plain JSON.
+      assert copy.value == %{
+               "custom" => 1,
+               "nested" => %{"inner" => 2},
+               description: "d",
+               outcome: "o",
+               tags: ["x"]
+             }
+
+      assert copy.metadata.tags == original.metadata.tags
+      assert copy.metadata.created_at == original.metadata.created_at
+    end
+
+    test "a persisted collection loads at start without making atoms", %{tmp_dir: dir} do
+      nested = never_seen("zz_nested")
+      extra_metadata = never_seen("zz_meta")
+      collection = "atoms_persisted_#{System.unique_integer([:positive])}"
+      entry_file(dir, collection <> ".json", nested, extra_metadata, "ignored")
+
+      original = Application.get_env(:optimal_engine, Memory.Store.ETS)
+      Application.put_env(:optimal_engine, Memory.Store.ETS, persist: true, persist_path: dir)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:optimal_engine, Memory.Store.ETS, original),
+          else: Application.delete_env(:optimal_engine, Memory.Store.ETS)
+
+        :ets.match_delete(:optimal_engine_memory_store, {{collection, :_}, :_})
+        :ets.delete(:optimal_engine_memory_collections, collection)
+      end)
+
+      assert {:ok, _state} = Memory.Store.ETS.init([])
+
+      assert {:ok, entry} = Memory.Store.ETS.get(collection, "k1")
+      assert entry.value == %{nested => 1, description: "d"}
+      assert entry.metadata[extra_metadata] == true
+      refute_atom(nested)
+      refute_atom(extra_metadata)
     end
   end
 
@@ -413,12 +479,11 @@ defmodule OptimalEngine.AtomHardeningTest do
 
     test "the pull scheduler reports a spec with an unknown kind and creates no atom" do
       kind = never_seen("zz_kind")
-      tenant = "atoms-#{System.unique_integer([:positive])}"
-      {:ok, _} = Tenant.create(%{id: tenant, name: "Atoms #{tenant}"})
 
+      # The spec is refused before anything is written, so it needs no tenant of its own.
       assert {:ok, summary} =
                PullScheduler.run_once(
-                 tenant_id: tenant,
+                 tenant_id: "default",
                  defaults: [],
                  connectors: [%{"kind" => kind}]
                )
@@ -569,7 +634,7 @@ defmodule OptimalEngine.AtomHardeningTest do
   end
 
   describe "evaluation cases" do
-    test "retrieval options a dataset names are read as existing atoms only" do
+    test "retrieval options a dataset names are looked up in the options retrieval takes" do
       workspace_id = "atoms-eval-#{System.unique_integer([:positive])}"
       key = never_seen("zz_option")
       test_pid = self()
@@ -590,7 +655,11 @@ defmodule OptimalEngine.AtomHardeningTest do
                      case_id: "atoms-1",
                      question: "q",
                      expected_answer: "a",
-                     retrieval_opts: %{key => 1, "limit" => 3}
+                     retrieval_opts: %{
+                       key => 1,
+                       "limit" => 3,
+                       "internal_refresh_allow_all" => true
+                     }
                    }
                  ],
                  workspace_id: workspace_id,
@@ -603,6 +672,7 @@ defmodule OptimalEngine.AtomHardeningTest do
       assert_received {:retrieval_opts, opts}
       assert opts[:limit] == 3
       refute Enum.any?(opts, fn {name, _} -> to_string(name) == key end)
+      refute Keyword.has_key?(opts, :internal_refresh_allow_all)
       refute_atom(key)
     end
   end
