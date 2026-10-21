@@ -99,7 +99,7 @@ defmodule OptimalEngine.Imports.NotionScaleTest do
     # The Engine's worker is off in tests; this task stands in for it while
     # the test polls the status route like a client would.
     worker = Task.async(fn -> Imports.drain(workspace_id: workspace) end)
-    status = poll(job_id, workspace, token)
+    status = poll(job_id, workspace, token, started)
     {:ok, _} = Task.await(worker, :infinity)
     imported = System.monotonic_time(:millisecond)
     assert status["status"] == "completed", inspect(status)
@@ -184,7 +184,10 @@ defmodule OptimalEngine.Imports.NotionScaleTest do
     |> Router.call(Router.init([]))
   end
 
-  defp poll(job_id, workspace, token) do
+  # Polls until the job ends. The only drain is the test's own, so a failed
+  # attempt ("retrying") ends the poll too, and so does three times the
+  # budget; the progress shows once a minute.
+  defp poll(job_id, workspace, token, started, last_shown \\ 0) do
     status =
       conn(:get, "/api/import/notion/#{job_id}?" <> URI.encode_query(%{workspace: workspace}))
       |> put_req_header("authorization", "Bearer " <> token)
@@ -192,11 +195,27 @@ defmodule OptimalEngine.Imports.NotionScaleTest do
       |> Map.get(:resp_body)
       |> Jason.decode!()
 
-    if status["status"] in ["completed", "failed"] do
-      status
-    else
-      Process.sleep(1_000)
-      poll(job_id, workspace, token)
+    elapsed = System.monotonic_time(:millisecond) - started
+    where = "#{status["status"]} #{inspect(status["progress"])} after #{secs(elapsed)} s"
+
+    cond do
+      status["status"] in ["completed", "failed", "retrying"] ->
+        status
+
+      elapsed > 3 * @budget_ms ->
+        flunk("the import is still " <> where)
+
+      true ->
+        shown =
+          if elapsed - last_shown >= 60_000 do
+            IO.puts("notion scale: " <> where)
+            elapsed
+          else
+            last_shown
+          end
+
+        Process.sleep(1_000)
+        poll(job_id, workspace, token, started, shown)
     end
   end
 

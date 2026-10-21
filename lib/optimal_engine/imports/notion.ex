@@ -590,10 +590,15 @@ defmodule OptimalEngine.Imports.Notion do
   # parallel, a few texts ahead of the one intake is storing, and intake
   # stores each classification as it is. An unchanged context is skipped. A
   # text that cannot be classified is reported, never handed to intake to
-  # classify again inside its single process.
+  # classify again inside its single process. Each task gets only the two
+  # values it reads: the import context holds the plan's items and through
+  # them the archive's whole entry list, and a closure over it would copy
+  # all of that into every task.
   defp store_all(state, entries, plan, ctx) do
+    scope = %{workspace_id: ctx.workspace_id, known_entities: ctx.known_entities}
+
     entries
-    |> Task.async_stream(&{&1, classification(&1, ctx)},
+    |> Task.async_stream(&{&1, classification(&1, scope)},
       max_concurrency: concurrency(),
       ordered: true,
       timeout: :infinity
@@ -621,12 +626,12 @@ defmodule OptimalEngine.Imports.Notion do
     end
   end
 
-  defp classification(entry, ctx) do
-    context_id = context_id(ctx.workspace_id, entry.id)
+  defp classification(entry, scope) do
+    context_id = context_id(scope.workspace_id, entry.id)
 
-    if unchanged?(context_id, ctx.workspace_id, entry.title, entry.text),
+    if unchanged?(context_id, scope.workspace_id, entry.title, entry.text),
       do: :unchanged,
-      else: classify(entry, ctx)
+      else: classify(entry, scope)
   end
 
   # A long page is classified by its head: genre, mode and summary come from
@@ -634,8 +639,8 @@ defmodule OptimalEngine.Imports.Notion do
   # detection is quadratic in the length of a line with no spaces, so a page
   # built that way would otherwise hold a classifier for hours. The signal
   # carries the whole text, so intake stores all of it.
-  defp classify(entry, ctx) do
-    known = ctx.known_entities
+  defp classify(entry, scope) do
+    known = scope.known_entities
 
     if byte_size(entry.text) <= @classify_bytes do
       Intake.classify(entry.text, title: entry.title, known_entities: known)
