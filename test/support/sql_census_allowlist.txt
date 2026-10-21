@@ -256,11 +256,24 @@ rejected	BEGIN/**/IMMEDIATE
 rejected	DELETE FROM "…" WHERE "…" = ?
 rejected	DELETE FROM data_embeddings WHERE collection_id = ? AND (model != ? OR record_id NOT IN (SELECT "…" FROM "…"))
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_adapter_runs WHERE asset_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_embedding_refs WHERE adapter_run_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_embedding_refs WHERE asset_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_embedding_refs WHERE extraction_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_embedding_refs WHERE source_package_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_extractions WHERE asset_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_extractions WHERE source_package_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_ocr_spans WHERE adapter_run_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_ocr_spans WHERE asset_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_ocr_spans WHERE extraction_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_ocr_spans WHERE source_package_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_transcripts WHERE adapter_run_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_transcripts WHERE asset_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_transcripts WHERE extraction_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_transcripts WHERE source_package_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_visual_observations WHERE adapter_run_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_visual_observations WHERE asset_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_visual_observations WHERE extraction_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_visual_observations WHERE source_package_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM assets WHERE storage_path = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM chunks WHERE signal_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM citations WHERE chunk_id = ?
