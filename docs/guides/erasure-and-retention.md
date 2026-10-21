@@ -46,8 +46,10 @@ Scheduled backups are off unless `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS` is set.
 A restore from a backup brings back what the backup held, so run the erasure again after one.
 An operator who has to shorten the window removes the manual copies, the bundles and the pre-restore copies by hand, and lowers `OPTIMAL_OFFSITE_BACKUP_KEEP` and `OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL`.
 
-On a replica the rows of `decomposition_runs`, `assets` and the asset extractions are this Engine's own and are not replicated, so a peer's delete does not delete them; their files are removed as above and the checkpoint pointers cleared, and the rows stay until an erasure or a retention delete is run on this Engine for the contexts.
-A delete the replica did not apply (held for its label, or kept because a newer local change won) leaves the context and its files; the files of a source package also stay while another context refers to it.
+On a replica the rows of `decomposition_runs`, `assets` and the asset extractions, transcripts and OCR spans are this Engine's own and are not replicated, so a peer's delete does not delete them.
+Their files go and the checkpoint pointers are cleared, but the rows stay, with the extraction, transcript and OCR text in them, and a later erasure or retention delete on this Engine cannot reach them, because the contexts they were made for are gone.
+What the replica removes it decides when the batch has committed, against what is committed then, in one transaction with the removal: a delete that was not applied (held for its label, or kept because a newer local change won) leaves the context and its files, and so does a context or a claim that refers to the source package, whether it was written by the same batch or after the plan was read.
+An asset file that an asset outside the plan names, spelled the same way or another, stays.
 
 ## Files are removed only when they are the Engine's
 
