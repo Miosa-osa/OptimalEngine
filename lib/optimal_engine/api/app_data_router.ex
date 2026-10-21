@@ -21,6 +21,7 @@ defmodule OptimalEngine.API.AppDataRouter do
   use Plug.Router
 
   alias OptimalEngine.API.Actor
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.AppData
   alias OptimalEngine.AppData.{Changes, Keys, Scope}
 
@@ -421,9 +422,9 @@ defmodule OptimalEngine.API.AppDataRouter do
   defp int_param(nil), do: {:ok, nil}
 
   defp int_param(value) do
-    case Integer.parse(value) do
-      {n, ""} -> {:ok, n}
-      _ -> {:error, {:validation, ["limit must be an integer"]}}
+    case IntParam.parse(value, :invalid) do
+      :invalid -> {:error, {:validation, ["limit must be an integer"]}}
+      n -> {:ok, n}
     end
   end
 
@@ -455,15 +456,7 @@ defmodule OptimalEngine.API.AppDataRouter do
   defp put_version(map, nil), do: map
   defp put_version(map, version), do: Map.put(map, "version", version)
 
-  defp parse_int(nil, default), do: default
-  defp parse_int(value, _default) when is_integer(value), do: value
-
-  defp parse_int(value, default) do
-    case Integer.parse(to_string(value)) do
-      {n, ""} -> n
-      _ -> default
-    end
-  end
+  defp parse_int(value, default), do: IntParam.parse(value, default)
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

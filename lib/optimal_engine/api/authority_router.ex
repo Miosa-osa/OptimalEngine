@@ -20,6 +20,7 @@ defmodule OptimalEngine.API.AuthorityRouter do
   use Plug.Router
 
   alias OptimalEngine.API.Actor
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.Authority
 
   alias OptimalEngine.Authority.{
@@ -510,15 +511,7 @@ defmodule OptimalEngine.API.AuthorityRouter do
     end
   end
 
-  # A query integer, or `default` when it is absent or not one (`?x[]=` gives a list or map).
-  defp parse_int(value, default) when is_binary(value) do
-    case Integer.parse(value) do
-      {int, ""} -> int
-      _ -> default
-    end
-  end
-
-  defp parse_int(_value, default), do: default
+  defp parse_int(value, default), do: IntParam.parse(value, default)
 
   # A query integer the Store can bind: nil when absent, :invalid when it is not one signed
   # 64-bit integer. Exqlite's bind raises above that range, which would take the Store

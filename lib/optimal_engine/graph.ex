@@ -1030,7 +1030,7 @@ defmodule OptimalEngine.Graph do
   # avoids a deadlock)
   defp insert_edge_direct(db, params) do
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, @edge_insert_sql),
-         :ok <- Exqlite.Sqlite3.bind(stmt, params),
+         :ok <- Store.SQLite.bind(db, stmt, params),
          _ <- Exqlite.Sqlite3.step(db, stmt),
          :ok <- Exqlite.Sqlite3.release(db, stmt) do
       :ok

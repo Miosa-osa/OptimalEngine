@@ -13,6 +13,7 @@ defmodule OptimalEngine.API.AnalysesAPI do
 
   import Plug.Conn
 
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.{Analyses, Jobs}
 
   def reports(conn) do
@@ -89,14 +90,7 @@ defmodule OptimalEngine.API.AnalysesAPI do
     end
   end
 
-  defp int(nil, default), do: default
-
-  defp int(value, default) do
-    case Integer.parse(to_string(value)) do
-      {n, ""} -> n
-      _ -> default
-    end
-  end
+  defp int(value, default), do: IntParam.parse(value, default)
 
   defp json(conn, status, data) do
     conn
