@@ -114,6 +114,93 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweepTest do
     assert again.scrubbed == 0
   end
 
+  test "a package whose objects cannot be looked up is skipped and reported, never emptied",
+       ctx do
+    before = snapshot(ctx.packages)
+
+    failing = fn _sql, _params -> {:error, :database_busy} end
+
+    assert {:ok, summary} =
+             ContextPackageSweep.run(workspace_id: ctx.workspace_id, object_query: failing)
+
+    # Only the packages that need no object lookup are judged: the one whose
+    # envelope cannot be read.
+    assert offender_ids(summary) == ids(ctx.packages, [:unreadable])
+    assert summary.scrubbed == 1
+
+    assert Enum.sort(Enum.map(summary.skipped, & &1.id)) ==
+             ids(ctx.packages, [:over_wide, :clean, :replaced])
+
+    assert Enum.all?(summary.skipped, &(&1.reason =~ "lookup_failed"))
+
+    after_sweep = snapshot(ctx.packages)
+
+    for key <- [:over_wide, :clean, :replaced, :not_a_refresh] do
+      assert after_sweep[key] == before[key]
+    end
+  end
+
+  test "a package that changed state since it was read is skipped, not emptied", ctx do
+    over_wide_id = ctx.packages.over_wide.id
+
+    refreshed_meanwhile = fn sql, params ->
+      :ok =
+        Store.raw_execute("UPDATE context_packages SET refresh_state = 'refreshed' WHERE id = ?1", [
+          over_wide_id
+        ])
+
+      Store.raw_query(sql, params)
+    end
+
+    assert {:ok, summary} =
+             ContextPackageSweep.run(
+               workspace_id: ctx.workspace_id,
+               object_query: refreshed_meanwhile
+             )
+
+    assert %{reason: "state_changed"} = Enum.find(summary.skipped, &(&1.id == over_wide_id))
+    refute over_wide_id in offender_ids(summary)
+    assert snapshot(ctx.packages).over_wide.fact_links != "[]"
+  end
+
+  test "the store empties a package only in the state the caller saw", ctx do
+    id = ctx.packages.over_wide.id
+
+    assert {:ok, 0} =
+             MemoryCoreStore.scrub_context_package_content(id,
+               workspace_id: ctx.workspace_id,
+               expect_state: "stale"
+             )
+
+    assert snapshot(ctx.packages).over_wide.fact_links != "[]"
+
+    assert {:ok, 1} =
+             MemoryCoreStore.scrub_context_package_content(id,
+               workspace_id: ctx.workspace_id,
+               expect_state: "fresh"
+             )
+
+    assert snapshot(ctx.packages).over_wide.fact_links == "[]"
+  end
+
+  test "a package with unreadable metadata does not stop the sweep", ctx do
+    broken = build!(ctx.workspace_id, ["public", "restricted"])
+
+    assert :ok =
+             Store.raw_execute(
+               "UPDATE context_packages SET authorization_envelope = ?2, metadata = 'refreshed_from_context_package_id (not json' WHERE id = ?1",
+               [broken.id, @narrow]
+             )
+
+    assert {:ok, summary} = ContextPackageSweep.run(workspace_id: ctx.workspace_id)
+
+    assert broken.id in offender_ids(summary)
+    assert summary.skipped == []
+
+    assert {:ok, [["[]"]]} =
+             Store.raw_query("SELECT fact_links FROM context_packages WHERE id = ?1", [broken.id])
+  end
+
   test "the Mix task prints the summary and honours --dry-run", ctx do
     output =
       capture_io(fn ->
