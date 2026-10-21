@@ -35,8 +35,9 @@ defmodule OptimalEngine.Connectors.HTTP do
     * `:headers`        — list of `{name, value}`
     * `:body`           — map (will be JSON-encoded) or raw binary
     * `:timeout`        — ms (default 10_000)
-    * `:follow_redirects` - follow a 3xx answer (default `true`); `false`
-      hands the redirect back as the response
+    * `:follow_redirects` - follow a 3xx answer (default `false`: the redirect
+      is handed back as the response, so a credential sent to one host is not
+      sent on to another)
     * `:verify_tls`     - verify the server's certificate and host name against
       the system's roots for an https URL (default `false`: Erlang's own default)
     * `:max_body_bytes` - fail with `{:error, :response_too_large}` when the
@@ -48,7 +49,7 @@ defmodule OptimalEngine.Connectors.HTTP do
   """
   @spec request(String.t(), request_opts()) :: {:ok, response()} | {:error, term()}
   def request(url, opts \\ []) when is_binary(url) do
-    opts = header_strings(opts)
+    opts = opts |> header_strings() |> Keyword.put_new(:follow_redirects, false)
 
     with :ok <- maybe_wait_for_quota(opts),
          {:ok, raw} <- fire(url, opts) do
@@ -106,12 +107,19 @@ defmodule OptimalEngine.Connectors.HTTP do
   defp header_strings(opts) do
     case Keyword.fetch(opts, :headers) do
       {:ok, headers} ->
-        Keyword.put(opts, :headers, Enum.map(headers, fn {k, v} -> {k, to_string(v)} end))
+        Keyword.put(opts, :headers, Enum.map(headers, fn {k, v} -> {k, header_value(v)} end))
 
       :error ->
         opts
     end
   end
+
+  defp header_value(value) when is_binary(value), do: value
+
+  defp header_value(%{__struct__: _} = secret),
+    do: OptimalEngine.Connectors.AccessToken.reveal(secret)
+
+  defp header_value(value), do: to_string(value)
 
   defp maybe_wait_for_quota(opts) do
     case Keyword.get(opts, :ratelimit) do
@@ -153,7 +161,7 @@ defmodule OptimalEngine.Connectors.HTTP do
 
     http_opts =
       [{:timeout, timeout}, {:connect_timeout, timeout}] ++
-        if(Keyword.get(opts, :follow_redirects, true), do: [], else: [{:autoredirect, false}]) ++
+        if(Keyword.get(opts, :follow_redirects, false), do: [], else: [{:autoredirect, false}]) ++
         tls_opts(url, opts)
 
     case Keyword.get(opts, :max_body_bytes) do
@@ -265,7 +273,7 @@ defmodule OptimalEngine.Connectors.HTTP do
 
   defp to_charlist_headers(headers) do
     Enum.map(headers, fn {k, v} ->
-      {String.to_charlist(k), v |> to_string() |> String.to_charlist()}
+      {String.to_charlist(k), v |> header_value() |> String.to_charlist()}
     end)
   end
 
