@@ -164,6 +164,8 @@ A data key (minted through `POST /api/data/keys`) holds only `read` and `write`,
 For authenticated calls, omitted `tenant` or `tenant_id` resolves to the key's tenant.
 A different tenant in either body or query is rejected with `403 tenant_scope_denied`.
 A caller with no key is the `default` tenant, and `POST /api/memory-core/active-pools` refuses a body or query that names another tenant in the same way: the pool is opened in the caller's tenant, never in one the request names.
+Opening a pool is stricter for a caller with no key than the routes around it, which still take a tenant from the body: the pool routes treat that caller as the `default` tenant, so a pool opened in another tenant would be out of its reach.
+A blank `workspace` names none and opens the pool in the `default` workspace, as it does for every route.
 Continue supplying the intended workspace explicitly.
 
 An Active Memory Pool id names the pool's tenant and workspace.

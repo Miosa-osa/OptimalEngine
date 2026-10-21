@@ -44,7 +44,7 @@ defmodule OptimalEngine.API.PoolScopePlug do
   def call(%{method: "OPTIONS"} = conn, _opts), do: conn
 
   def call(%{path_info: ["api", "memory-core", "active-pools", id | _]} = conn, _opts) do
-    case ActiveMemoryPool.get(URI.decode(id)) do
+    case ActiveMemoryPool.get(id) do
       {:ok, pool} ->
         case access(conn, pool) do
           :ok ->

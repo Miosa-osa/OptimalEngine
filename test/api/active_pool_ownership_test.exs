@@ -142,6 +142,34 @@ defmodule OptimalEngine.API.ActivePoolOwnershipTest do
     end
   end
 
+  describe "a pool route spelled with escapes" do
+    # PathPlug refuses an escaped unreserved character before any pool check, so a
+    # route cannot be reached under a spelling the plugs do not recognise.
+    test "answers 400 invalid_path on every route and touches nothing", ctx do
+      <<first::binary-size(1), rest::binary>> = ctx.pool_a
+
+      spellings = [
+        fn suffix -> "/api/memory-core/active%2Dpools/#{ctx.pool_a}#{suffix}" end,
+        fn suffix -> "/%61pi/memory-core/active-pools/#{ctx.pool_a}#{suffix}" end,
+        fn suffix -> "/api/memory-core/active-pools/%61#{rest}#{suffix}" end,
+        fn suffix -> "/api/memory%2Dcore/active-pools/#{ctx.pool_a}#{suffix}" end
+      ]
+
+      assert first == "a"
+
+      for token <- [ctx.key_a, ctx.key_all, nil],
+          spelling <- spellings,
+          {method, suffix, body} <- @routes do
+        conn = call_path(method, spelling.(suffix), token, body)
+
+        assert conn.status == 400, "#{method} #{spelling.(suffix)} answered #{conn.status}"
+        assert Jason.decode!(conn.resp_body) == %{"error" => "invalid_path"}
+      end
+
+      assert_untouched(ctx.pool_a, [ctx.ws_a])
+    end
+  end
+
   describe "an id that is no pool" do
     test "an id that is no pool", ctx do
       for {method, suffix, body} <- @routes do
@@ -219,9 +247,10 @@ defmodule OptimalEngine.API.ActivePoolOwnershipTest do
     token
   end
 
-  defp call(method, pool_id, suffix, token, body) do
-    path = "/api/memory-core/active-pools/#{pool_id}#{suffix}"
+  defp call(method, pool_id, suffix, token, body),
+    do: call_path(method, "/api/memory-core/active-pools/#{pool_id}#{suffix}", token, body)
 
+  defp call_path(method, path, token, body) do
     conn =
       case body do
         nil ->

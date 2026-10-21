@@ -2570,11 +2570,21 @@ defmodule OptimalEngine.API.Router do
     tenant_id = conn.assigns[:current_tenant] || "default"
 
     if names_other_tenant?(conn, tenant_id) do
-      send_resp(conn, 403, Jason.encode!(%{error: "tenant_scope_denied"}))
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(403, Jason.encode!(%{error: "tenant_scope_denied"}))
     else
+      # A blank workspace names none, as WorkspaceAuthPlug reads it: the default.
+      workspace_id =
+        Enum.find_value(
+          [body["workspace"], body["workspace_id"]],
+          "default",
+          &(is_binary(&1) and &1 != "" and &1)
+        )
+
       opts =
         [
-          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+          workspace_id: workspace_id,
           tenant_id: tenant_id,
           task_type: Map.get(body, "task_type"),
           subject_anchor: Map.get(body, "subject_anchor"),
