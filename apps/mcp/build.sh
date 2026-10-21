@@ -8,10 +8,12 @@
 # The build runs in a scratch copy, so the checkout's node_modules and dist are untouched.
 # Usage: apps/mcp/build.sh [out-dir]   (default: dist/cli, beside the CLI archives)
 set -eu
+umask 022
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 out=${1:-$root/dist/cli}
+. "$root/scripts/reproducible-archive.sh"
 
 version=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$root/mix.exs")
 [ -n "$version" ] || { echo "build: cannot read @version from mix.exs" >&2; exit 1; }
@@ -23,6 +25,8 @@ if [ "$package_version" != "$version" ] || [ "$server_version" != "$version" ]; 
 fi
 
 command -v npm >/dev/null 2>&1 || { echo "build: npm is required" >&2; exit 1; }
+
+epoch=$(reproducible_epoch "$root" "$version")
 
 if command -v sha256sum >/dev/null 2>&1; then
   sum() { sha256sum "$@"; }
@@ -54,7 +58,7 @@ mkdir -p "$stage/$name"
 cp -R "$work/dist" "$work/node_modules" "$work/package.json" "$stage/$name/"
 cp "$root/LICENSE" "$stage/$name/LICENSE"
 printf '%s\n' "$version" >"$stage/$name/VERSION"
-tar -C "$stage" -czf "$out/$name.tar.gz" "$name"
+reproducible_tar "$stage" "$name" "$out/$name.tar.gz" "$epoch"
 
 (
   cd "$out"

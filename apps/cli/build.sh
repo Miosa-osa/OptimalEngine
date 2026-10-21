@@ -9,10 +9,12 @@
 # machine and refreshes itself from the archive on an upgrade.
 # Usage: apps/cli/build.sh [out-dir]   (default: dist/cli)
 set -eu
+umask 022
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 out=${1:-$root/dist/cli}
+. "$root/scripts/reproducible-archive.sh"
 
 installer=$root/deploy/miosa-template/install-client.sh
 version=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$root/mix.exs")
@@ -27,6 +29,8 @@ if [ "$version" != "$installer_version" ]; then
   echo "build: install-client.sh says DEFAULT_VERSION=$installer_version but mix.exs says $version" >&2
   exit 1
 fi
+
+epoch=$(reproducible_epoch "$root" "$version")
 
 for shell in sh dash bash; do
   if command -v "$shell" >/dev/null 2>&1; then
@@ -57,7 +61,7 @@ for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
   chmod 0755 "$stage/$name/optimal" "$stage/$name/install.sh" "$stage/$name/install-client.sh"
   ln -s optimal "$stage/$name/oe"
   printf '%s\n' "$version" >"$stage/$name/VERSION"
-  tar -C "$stage" -czf "$out/$name.tar.gz" "$name"
+  reproducible_tar "$stage" "$name" "$out/$name.tar.gz" "$epoch"
 done
 
 (
