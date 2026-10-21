@@ -13,10 +13,19 @@ defmodule OptimalEngine.API.PathPlug do
       not start a two-digit hex escape is refused with `400 invalid_path`. No
       client needs one: an encoder escapes only reserved characters, and the
       first two are how a route's literal can be hidden from a plug;
-    * otherwise `path_info` is replaced by its decoded segments. Decoding them
-      again, as the router does, changes nothing, so every plug and the route
-      see the same segments. An id that escapes a reserved character (`%3A`
-      for `:`, `%2F` for `/`) stays usable.
+    * a segment that decodes to a control byte or to text that is not UTF-8
+      (`%00`, `%C0%AF`) is refused the same way;
+    * otherwise `path_info` is replaced by its decoded segments, except that an
+      escaped `/` (`%2F`) stays escaped: decoded, it would turn one segment into
+      two wherever a plug joins the segments into a path or a resource string.
+      With `%25` refused, decoding the segments again, as the router does,
+      only turns `%2F` into `/` inside a segment, which cannot spell any
+      route's literal, so every plug sees the route that is dispatched. An id
+      that escapes a reserved character (`%3A` for `:`, as `encodeURIComponent`
+      does) stays usable.
+
+  `conn.request_path` stays as it was sent; the plugs that read it compare it
+  with fixed paths, which an escape can only fail to match.
   """
 
   @behaviour Plug
@@ -30,8 +39,10 @@ defmodule OptimalEngine.API.PathPlug do
 
   @impl true
   def call(conn, _opts) do
-    if Enum.all?(conn.path_info, &acceptable?/1) do
-      %{conn | path_info: Enum.map(conn.path_info, &URI.decode/1)}
+    decoded = Enum.map(conn.path_info, &decode/1)
+
+    if Enum.all?(conn.path_info, &acceptable?/1) and Enum.all?(decoded, &plain_text?/1) do
+      %{conn | path_info: decoded}
     else
       conn
       |> put_resp_content_type("application/json")
@@ -48,6 +59,19 @@ defmodule OptimalEngine.API.PathPlug do
       |> Regex.scan(segment, capture: :all_but_first)
       |> Enum.all?(fn [hex] -> reserved?(String.to_integer(hex, 16)) end)
   end
+
+  # Decodes every escape but `%2F`, which stays as `%2F`.
+  defp decode(segment) do
+    segment
+    |> String.split(~r/%2F/i)
+    |> Enum.map_join("%2F", &URI.decode/1)
+  rescue
+    ArgumentError -> segment
+  end
+
+  # Valid UTF-8 with no control byte.
+  defp plain_text?(segment),
+    do: String.valid?(segment) and not String.match?(segment, ~r/[\x00-\x1F\x7F]/)
 
   # Every `%` starts a two-digit hex escape.
   defp well_formed?(segment) do
