@@ -98,7 +98,8 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
         authorize_all(
           conn,
           if(requested == [], do: ["default"], else: requested),
-          target_workspaces(conn)
+          target_workspaces(conn),
+          repair_sources(conn)
         )
     end
   end
@@ -217,6 +218,17 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
   defp item_targets(_params), do: []
 
+  # The id a repair moves rows from (`/api/data-steward/workspaces/repair`): an
+  # unregistered one, by definition, and the rows are all it touches.
+  defp repair_sources(%{
+         path_info: ["api", "data-steward", "workspaces", "repair"],
+         body_params: %{"source_workspace_id" => source}
+       })
+       when is_binary(source),
+       do: [source]
+
+  defp repair_sources(_conn), do: []
+
   # /api/workspaces/:id, /api/workspaces/:id/config, /api/workspaces/:id/archive…
   defp path_workspace(%{path_info: ["api", "workspaces", id | _]}), do: URI.decode(id)
 
@@ -303,13 +315,20 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # Authorization
   # ---------------------------------------------------------------------------
 
-  defp authorize_all(conn, [primary | _] = workspace_ids, targets) do
+  defp authorize_all(conn, [primary | _] = workspace_ids, targets, sources) do
     tenant_id = conn.assigns[:current_tenant] || "default"
     api_key = conn.assigns[:current_api_key]
     conn = assign(conn, :workspace_id, primary)
 
     Enum.reduce_while(workspace_ids, conn, fn workspace_id, conn ->
-      case authorize(workspace_id, tenant_id, api_key, workspace_id in targets) do
+      role =
+        cond do
+          workspace_id in targets -> :target
+          workspace_id in sources -> :repair_source
+          true -> :id
+        end
+
+      case authorize(workspace_id, tenant_id, api_key, role) do
         :ok ->
           {:cont, conn}
 
@@ -332,9 +351,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # indistinguishable from a workspace that does not exist — regardless of the
   # key's workspace_scope. Scope mismatches inside the caller's own tenant
   # are 403.
-  defp authorize(workspace_id, tenant_id, api_key, slug_named?) do
+  defp authorize(workspace_id, tenant_id, api_key, role) do
     with :ok <- check_engine_scope(workspace_id),
-         :ok <- check_tenant_ownership(workspace_id, tenant_id, slug_named?) do
+         :ok <- check_tenant_ownership(workspace_id, tenant_id, role) do
       check_key_scope(workspace_id, api_key)
     else
       # The id is named only to a caller whose key may use that workspace.
@@ -352,7 +371,7 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
     if OptimalEngine.Scope.serves?(workspace_id), do: :ok, else: {:error, :foreign_tenant}
   end
 
-  defp check_tenant_ownership(workspace_id, tenant_id, slug_named?) do
+  defp check_tenant_ownership(workspace_id, tenant_id, role) do
     case Workspace.get(workspace_id) do
       {:ok, workspace} ->
         if workspace.tenant_id == tenant_id, do: :ok, else: {:error, :foreign_tenant}
@@ -362,19 +381,19 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
         # (Workspace.derive_id) still names an owner — fail closed on a
         # foreign prefix. Bare unregistered ids pass for single-tenant
         # compatibility (handlers still workspace-filter every row), but not
-        # one whose directory is not its own (`own_directory/1`).
+        # one whose directory is not its own (`own_directory/2`).
         case String.split(workspace_id, ":", parts: 2) do
           [prefix, _slug] when prefix != tenant_id ->
             {:error, :foreign_tenant}
 
-          [_prefix, _slug] when slug_named? ->
-            own_directory(workspace_id)
+          [_prefix, _slug] when role == :target ->
+            own_directory(workspace_id, role)
 
           [_prefix, slug] ->
-            with :ok <- own_directory(workspace_id), do: renamed(slug, tenant_id)
+            with :ok <- own_directory(workspace_id, role), do: renamed(slug, tenant_id)
 
           _ ->
-            own_directory(workspace_id)
+            own_directory(workspace_id, role)
         end
 
       _other ->
@@ -386,8 +405,11 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # An unregistered id still names a directory (`Filesystem.path/2`), and what is
   # written under it goes there: a bare `tenants`, `nodes` or `cache`, or
   # `default:tenants`, is one the Engine root uses for itself, so a request that
-  # names it is refused as it would write into them.
-  defp own_directory(workspace_id) do
+  # names it is refused as it would write into them. The steward's repair names
+  # the id its rows were written under, and writes no file.
+  defp own_directory(_workspace_id, :repair_source), do: :ok
+
+  defp own_directory(workspace_id, _role) do
     case OptimalEngine.Portability.WorkspaceBundle.movable(workspace_id) do
       :ok -> :ok
       {:error, :workspace_directory_shared} -> {:error, :invalid_workspace_directory}

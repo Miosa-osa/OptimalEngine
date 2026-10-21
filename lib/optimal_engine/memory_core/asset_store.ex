@@ -19,8 +19,10 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
   }
 
   alias OptimalEngine.Pipeline.MultimodalToolRegistry
+  alias OptimalEngine.Portability.WorkspaceBundle
   alias OptimalEngine.Storage.{AssetReconcile, Assets}
   alias OptimalEngine.Pipeline.Parser.Asset
+  alias OptimalEngine.Workspace.Filesystem
 
   @spec store_file(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def store_file(path, opts \\ []) when is_binary(path) do
@@ -1075,8 +1077,19 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
         %{key: workspace.id, slug: workspace.slug || workspace.id, tenant_id: workspace.tenant_id}
 
       _ ->
-        %{key: workspace_id, slug: workspace_id, tenant_id: "default"}
+        %{key: unregistered_key(workspace_id), slug: workspace_id, tenant_id: "default"}
     end
+  end
+
+  # An unregistered id is its own directory key, unless that is the root or a
+  # directory the root uses for itself (`tenants`, `default:nodes`): then the
+  # id's hashed key. `default` is the root by design.
+  defp unregistered_key("default"), do: "default"
+
+  defp unregistered_key(workspace_id) do
+    if WorkspaceBundle.movable(workspace_id) == :ok,
+      do: workspace_id,
+      else: Filesystem.hashed_key(workspace_id)
   end
 
   defp row_to_asset([
