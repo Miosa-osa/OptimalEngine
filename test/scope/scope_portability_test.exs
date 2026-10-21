@@ -675,6 +675,65 @@ defmodule OptimalEngine.ScopePortabilityTest do
       assert Jason.decode!(previous) == ["open"]
     end
 
+    test "the raw upload route writes the bundle to disk as it arrives and imports it", ctx do
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      target = "upload-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Upload"})
+
+      {:ok, %{key: admin}} =
+        ApiKey.mint(%{tenant_id: target, name: "admin", scopes: ["*"], workspace_scope: ["*"]})
+
+      original = Application.get_env(:optimal_engine, :auth, [])
+
+      Application.put_env(
+        :optimal_engine,
+        :auth,
+        Keyword.merge(original, auth_required: true, bcrypt_cost: 4)
+      )
+
+      try do
+        conn =
+          conn(:post, "/api/bundles/import", File.read!(ctx.path))
+          |> put_req_header("content-type", "application/gzip")
+          |> put_req_header("authorization", "Bearer " <> admin)
+          |> Router.call(Router.init([]))
+
+        assert conn.status == 201
+        summary = Jason.decode!(conn.resp_body)
+        assert summary["workspace_id"] == "#{target}:open"
+        assert summary["bundle_sha256"] == manifest["bundle_sha256"]
+        assert {:ok, %{tenant_id: ^target}} = Workspace.get("#{target}:open")
+      after
+        Application.put_env(:optimal_engine, :auth, original)
+      end
+    end
+
+    test "an import told to consume its bundle deletes the file once it is unpacked", ctx do
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      target = "consume-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Consume"})
+
+      assert {:ok, %{bundle_sha256: sha256}} =
+               WorkspaceBundle.import(ctx.path, target, consume: true)
+
+      assert sha256 == manifest["bundle_sha256"]
+      refute File.exists?(ctx.path)
+    end
+
     test "a bundle imports in small batches, parents before children", ctx do
       # The older memory points at the newer one, so in export order the child
       # row comes before its parent.

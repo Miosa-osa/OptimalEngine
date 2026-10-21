@@ -74,6 +74,7 @@ defmodule OptimalEngine.API.ScopeAPI do
   end
 
   def export_bundle(conn, workspace_id) do
+    conn = allow_long_request(conn)
     workspace_id = URI.decode(workspace_id)
     body = body(conn)
 
@@ -110,6 +111,8 @@ defmodule OptimalEngine.API.ScopeAPI do
   end
 
   def download_bundle(conn, name) do
+    conn = allow_long_request(conn)
+
     with {:ok, path} <- bundle_path(name),
          true <- File.regular?(path) do
       conn
@@ -124,15 +127,21 @@ defmodule OptimalEngine.API.ScopeAPI do
   # Body: {"bundle": "<name in the bundles folder>"} or a raw gzip body
   # (content-type application/gzip) with ?mode=&workspace_id=.
   def import_bundle(conn) do
-    conn = fetch_query_params(conn)
+    conn = conn |> allow_long_request() |> fetch_query_params()
 
     {source, params, conn} =
       case get_req_header(conn, "content-type") do
         ["application/gzip" <> _ | _] ->
-          {:ok, data, conn} = read_full_body(conn, "")
           path = Path.join(bundle_dir(), "upload-#{System.unique_integer([:positive])}.tar.gz")
-          File.write!(path, data)
-          {{:ok, path, :temporary}, conn.query_params, conn}
+
+          case write_body(conn, path) do
+            {:ok, conn} ->
+              {{:ok, path, :temporary}, conn.query_params, conn}
+
+            {:error, reason, conn} ->
+              File.rm(path)
+              {{:error, {:upload_failed, reason}}, conn.query_params, conn}
+          end
 
         _ ->
           body = body(conn)
@@ -149,7 +158,8 @@ defmodule OptimalEngine.API.ScopeAPI do
       opts = [
         mode: mode,
         workspace_id: params["workspace_id"],
-        organization_id: params["organization_id"]
+        organization_id: params["organization_id"],
+        consume: lifetime == :temporary
       ]
 
       opts = Enum.reject(opts, fn {_key, value} -> is_nil(value) end)
@@ -163,6 +173,7 @@ defmodule OptimalEngine.API.ScopeAPI do
         if lifetime == :temporary, do: File.rm(path)
       end
     else
+      {:error, {:upload_failed, reason}} -> error(conn, 400, "upload failed: #{inspect(reason)}")
       _ -> error(conn, 404, "bundle not found")
     end
   end
@@ -194,11 +205,47 @@ defmodule OptimalEngine.API.ScopeAPI do
 
   # ---------------------------------------------------------------------------
 
-  defp read_full_body(conn, acc) do
-    case read_body(conn, length: 64 * 1024 * 1024) do
-      {:ok, data, conn} -> {:ok, acc <> data, conn}
-      {:more, data, conn} -> read_full_body(conn, acc <> data)
-      {:error, reason} -> {:error, reason}
+  # Exporting, importing, or downloading a large workspace keeps one request
+  # busy for minutes while nothing arrives from the client, and Cowboy closes a
+  # connection that receives nothing for its idle timeout (180 s, see
+  # OptimalEngine.API.Endpoint), which would cut the request off midway. These
+  # routes raise the timeout for their own request only.
+  @long_request_ms :timer.hours(1)
+
+  defp allow_long_request(%Plug.Conn{adapter: {Plug.Cowboy.Conn, req}} = conn) do
+    :cowboy_req.cast({:set_options, %{idle_timeout: @long_request_ms}}, req)
+    conn
+  end
+
+  defp allow_long_request(conn), do: conn
+
+  # A raw upload is written to disk as it arrives, so a bundle of any size is
+  # never held in memory.
+  defp write_body(conn, path) do
+    case File.open(path, [:write, :binary, :raw]) do
+      {:ok, file} ->
+        try do
+          copy_body(conn, file)
+        after
+          File.close(file)
+        end
+
+      {:error, reason} ->
+        {:error, reason, conn}
+    end
+  end
+
+  defp copy_body(conn, file) do
+    case read_body(conn, length: 8 * 1024 * 1024) do
+      {status, data, conn} when status in [:ok, :more] ->
+        case :file.write(file, data) do
+          :ok when status == :ok -> {:ok, conn}
+          :ok -> copy_body(conn, file)
+          {:error, reason} -> {:error, reason, conn}
+        end
+
+      {:error, reason} ->
+        {:error, reason, conn}
     end
   end
 

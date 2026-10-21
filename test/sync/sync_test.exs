@@ -4083,4 +4083,25 @@ defmodule OptimalEngine.SyncTest do
     refute Enum.any?(manifest["tables"], &(&1["name"] in ["sync_mutations", "sync_capture"]))
     File.rm(path)
   end
+
+  test "a bundle's mark covers changes captured but not yet sealed", ctx do
+    insert_context(ctx.tenant, ctx.ws, "sealed-#{ctx.n}", "Sealed")
+    {:ok, _} = Capture.seal()
+    insert_context(ctx.tenant, ctx.ws, "pending-#{ctx.n}", "Pending")
+
+    path = Path.join(System.tmp_dir!(), "mark-#{ctx.n}.tar.gz")
+    {:ok, manifest} = OptimalEngine.Portability.WorkspaceBundle.export(ctx.tenant, ctx.ws, path)
+    File.rm(path)
+
+    # Both rows are in the bundle, so a replica seeded from it must find neither
+    # above the mark; nothing written before the export is pulled again.
+    after_mark = Sync.changes(ctx.tenant, ctx.ws, since: manifest["ledger_sequence"])
+    assert after_mark["mutations"] == []
+
+    insert_context(ctx.tenant, ctx.ws, "later-#{ctx.n}", "Later")
+    later = Sync.changes(ctx.tenant, ctx.ws, since: manifest["ledger_sequence"])
+    ids = Enum.map(later["mutations"], & &1["entity_id"])
+    assert "later-#{ctx.n}" in ids
+    refute "pending-#{ctx.n}" in ids
+  end
 end
