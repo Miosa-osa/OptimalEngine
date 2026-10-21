@@ -833,7 +833,7 @@ class CompatibilityEdgeTests(CliTestCase):
 class OperatorTests(CliTestCase):
     OPERATOR = [['start'], ['stop'], ['restart'], ['log'], ['index'], ['graph', 'backfill'],
                 ['graph'], ['reality-check', '--disposable']]
-    NO_ROUTE = [['start'], ['stop'], ['restart'], ['graph', 'backfill'], ['reality-check', '--disposable']]
+    NO_ROUTE = [['start'], ['stop'], ['restart'], ['reality-check', '--disposable']]
 
     def setUp(self):
         super().setUp()
@@ -892,6 +892,8 @@ class OperatorTests(CliTestCase):
             (['graph', 'hubs', '-w', ws], 'GET', '/api/graph/hubs', {'workspace': ws}, None),
             (['graph', 'clusters'], 'GET', '/api/graph/clusters', {}, None),
             (['graph', 'triangles', '-n', '5'], 'GET', '/api/graph/triangles', {'limit': '5'}, None),
+            (['graph', 'backfill', '-w', ws], 'POST', '/api/maintenance/graph/backfill', {}, {'workspace': ws}),
+            (['graph', 'backfill'], 'POST', '/api/maintenance/graph/backfill', {}, {}),
         ]
         for args, method, path, query, body in cases:
             with self.subTest(args=args):

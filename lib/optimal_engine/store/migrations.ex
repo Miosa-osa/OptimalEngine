@@ -147,7 +147,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_asset_foreign_key_indexes(),
       migration_derived_rows_tenant(),
       migration_planted_ledger_keys(),
-      migration_moved_ledger_ids()
+      migration_moved_ledger_ids(),
+      migration_workspace_id_order_indexes()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -636,6 +637,26 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_asset_embedding_refs_source_package_id ON asset_embedding_refs(source_package_id)"},
        {"idx_asset_extractions_source_package_id",
         "CREATE INDEX IF NOT EXISTS idx_asset_extractions_source_package_id ON asset_extractions(source_package_id)"}
+     ]}
+  end
+
+  # Maintenance reads a workspace's chunks, contexts and claims in id order a
+  # window at a time (OptimalEngine.Embed.ChunkBackfill,
+  # OptimalEngine.Graph.Backfill). An index on (workspace_id, id) lets each
+  # window seek inside the workspace instead of scanning it. Additive and safe
+  # to run again. The version is provisional, like the ones above.
+  @workspace_id_order_indexes_version 84
+
+  defp migration_workspace_id_order_indexes do
+    {@workspace_id_order_indexes_version,
+     "workspace id-order indexes for chunks, contexts and claims",
+     [
+       {"idx_chunks_workspace_id",
+        "CREATE INDEX IF NOT EXISTS idx_chunks_workspace_id ON chunks(workspace_id, id)"},
+       {"idx_contexts_workspace_id",
+        "CREATE INDEX IF NOT EXISTS idx_contexts_workspace_id ON contexts(workspace_id, id)"},
+       {"idx_claims_workspace_id",
+        "CREATE INDEX IF NOT EXISTS idx_claims_workspace_id ON claims(workspace_id, id)"}
      ]}
   end
 

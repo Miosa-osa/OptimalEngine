@@ -218,7 +218,7 @@ class TrueMemoryCompatTest(unittest.TestCase):
         }
         release = {
             "version": "0.3.0", "git_sha": "a" * 40,
-            "expected_migration": 82,
+            "expected_migration": 84,
             "components": {"candidate_portfolio": "candidate-portfolio-v1"},
         }
         with tempfile.TemporaryDirectory() as directory:

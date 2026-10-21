@@ -5,8 +5,9 @@ defmodule Mix.Tasks.Optimal.GraphBackfill do
   Builds the relationship-edge graph from the already-indexed contexts and the
   extracted claims, attributing every edge to the SIGNAL's real workspace.
 
-  Runs `OptimalEngine.Graph.backfill/1`. For each context this writes (all
-  idempotent via `INSERT OR IGNORE`):
+  The work is `OptimalEngine.Graph.Backfill`; an Engine without Mix runs the
+  same backfill as a job through `POST /api/maintenance/graph/backfill`. For
+  each context this writes (all idempotent via `INSERT OR IGNORE`):
 
     * `entity --mentioned_in--> context`
     * `entity --co_occurs--> entity`  (both directions, for each shared pair)
@@ -38,9 +39,9 @@ defmodule Mix.Tasks.Optimal.GraphBackfill do
 
   ## Options
 
-    * `--batch N`     — contexts per batch (default 200)
-    * `--workspace W` — only backfill edges for contexts in workspace W
-    * `--no-claims`   — skip the claim->about->entity pass
+    * `--batch N`     contexts per batch (default 200)
+    * `--workspace W` only backfill edges for contexts in workspace W
+    * `--no-claims`   skip the claim->about->entity pass
 
   One run without `--workspace` covers every workspace, and is the one an
   upgrade that created `graph_edges` needs: when every edge write succeeded
@@ -52,7 +53,7 @@ defmodule Mix.Tasks.Optimal.GraphBackfill do
 
   use Mix.Task
 
-  alias OptimalEngine.Graph
+  alias OptimalEngine.Graph.Backfill
 
   @default_batch 200
 
@@ -69,12 +70,12 @@ defmodule Mix.Tasks.Optimal.GraphBackfill do
 
     backfill_opts = [
       workspace_id: Keyword.get(opts, :workspace),
-      batch: Keyword.get(opts, :batch, @default_batch),
+      page: Keyword.get(opts, :batch, @default_batch),
       claims: Keyword.get(opts, :claims, true),
-      on_progress: fn {phase, n} -> shell.info("  #{phase}: #{n}") end
+      on_page: fn {phase, n} -> shell.info("  #{phase}: #{n}") end
     ]
 
-    case Graph.backfill(backfill_opts) do
+    case Backfill.run(backfill_opts) do
       {:ok, result} ->
         shell.info("")
         shell.info("Done. Edges: #{result.edges_before} -> #{result.edges_after}")

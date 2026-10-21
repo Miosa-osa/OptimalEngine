@@ -611,35 +611,177 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # Documents with no document vector (OptimalEngine.Embed.Backfill), in the
-  # caller's tenant or one of its workspaces (`workspace`).
-  get "/api/maintenance/embeddings" do
-    with {:ok, scope} <- embedding_scope(conn, query_param(conn, "workspace", nil)),
-         {:ok, status} <- OptimalEngine.Embed.Backfill.status(scope) do
-      json(conn, Map.put(status, :scope, Map.new(scope)))
+  # Maintenance that runs as durable jobs (OptimalEngine.Maintenance) in one
+  # workspace of the caller's tenant: the one named (`workspace`), or the
+  # implicit "default" by WorkspaceAuthPlug's rules. A request while the
+  # workspace has a job of the kind queued or running returns that job.
+
+  # Queues the relationship-edge backfill of the workspace's contexts and
+  # claims (`claims: false` skips the claims). The workspace comes from the
+  # body or the query. Returns 202 with the job.
+  post "/api/maintenance/graph/backfill" do
+    body = conn.body_params || %{}
+    payload = if body["claims"] == false, do: %{"claims" => false}, else: %{}
+    enqueue_maintenance(conn, :graph_backfill, maintenance_workspace_param(conn, body), payload)
+  end
+
+  defp maintenance_workspace_param(conn, body),
+    do: body["workspace"] || query_param(conn, "workspace", nil)
+
+  defp chunk_embedding_status(conn, workspace) do
+    with {:ok, workspace_id} <- maintenance_workspace(conn, workspace),
+         {:ok, status} <- OptimalEngine.Embed.ChunkBackfill.status(workspace_id: workspace_id),
+         {:ok, job} <- OptimalEngine.Maintenance.active(:chunk_embeddings, workspace_id) do
+      json(
+        conn,
+        Map.merge(status, %{
+          kind: "chunks",
+          scope: %{workspace_id: workspace_id},
+          job: job && Map.take(job, [:id, :kind, :status, :run_at, :attempts, :last_error])
+        })
+      )
     else
-      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "workspace not found"})
-      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+      error -> maintenance_error(conn, error)
     end
   end
 
-  # Embeds up to `limit` (default 100, at most 1,000) of those documents.
+  defp enqueue_maintenance(conn, kind, workspace, payload, ready \\ fn -> :ok end) do
+    with {:ok, workspace_id} <- maintenance_workspace(conn, workspace),
+         :ok <- ready.(),
+         {:ok, job, state} <- OptimalEngine.Maintenance.enqueue(kind, workspace_id, payload) do
+      conn
+      |> put_status(202)
+      |> json(%{
+        status: if(state == :queued, do: "queued", else: "already_running"),
+        job_id: job.id,
+        job_status: job.status,
+        kind: job.kind,
+        workspace_id: workspace_id
+      })
+    else
+      error -> maintenance_error(conn, error)
+    end
+  end
+
+  # The workspace a maintenance job runs in. One named was authorized by
+  # WorkspaceAuthPlug and must be registered and active in the caller's
+  # tenant. With none named it is the implicit "default": a key limited to
+  # named workspaces must name one (400), and another tenant does not own it
+  # (404).
+  defp maintenance_workspace(conn, workspace) when workspace in [nil, ""] do
+    if key_covers_workspace?(conn.assigns[:current_api_key], "default"),
+      do: maintenance_workspace(conn, "default"),
+      else: {:error, :workspace_required}
+  end
+
+  defp maintenance_workspace(conn, workspace) when is_binary(workspace) do
+    tenant_id = conn.assigns[:current_tenant] || "default"
+
+    with true <- OptimalEngine.Scope.serves?(workspace),
+         {:ok, %{id: id, tenant_id: ^tenant_id, status: :active}} <-
+           OptimalEngine.Workspace.get(workspace) do
+      {:ok, id}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp maintenance_workspace(_conn, _workspace), do: {:error, :not_found}
+
+  # The search path's short probe keeps the request quick; the job itself
+  # waits longer for a model that is still loading.
+  defp chunk_embedder_ready do
+    probe =
+      Application.get_env(
+        :optimal_engine,
+        :maintenance_embedder_probe,
+        &OptimalEngine.Embed.Text.healthy?/0
+      )
+
+    if probe.(), do: :ok, else: {:error, :embedder_unavailable}
+  end
+
+  defp maintenance_error(conn, {:error, :embedder_unavailable}),
+    do: conn |> put_status(503) |> json(%{error: "embedder unavailable"})
+
+  defp maintenance_error(conn, {:error, :workspace_required}),
+    do: conn |> put_status(400) |> json(%{error: "workspace_required"})
+
+  defp maintenance_error(conn, {:error, reason})
+       when reason in [:not_found, :workspace_not_found],
+       do: conn |> put_status(404) |> json(%{error: "workspace not found"})
+
+  defp maintenance_error(conn, {:error, reason}),
+    do: conn |> put_status(500) |> json(%{error: inspect(reason)})
+
+  # GET reports what is missing; POST backfills it. `kind` picks the vectors:
+  # `documents` (the default), document vectors (OptimalEngine.Embed.Backfill)
+  # in the caller's tenant or one of its workspaces (`workspace`); `chunks`,
+  # chunk embeddings (OptimalEngine.Embed.ChunkBackfill) in one workspace, with
+  # the chunk job queued or running there.
+  get "/api/maintenance/embeddings" do
+    case query_param(conn, "kind", "documents") do
+      "chunks" ->
+        chunk_embedding_status(conn, query_param(conn, "workspace", nil))
+
+      "documents" ->
+        with {:ok, scope} <- embedding_scope(conn, query_param(conn, "workspace", nil)),
+             {:ok, status} <- OptimalEngine.Embed.Backfill.status(scope) do
+          json(conn, Map.put(status, :scope, Map.new(scope)))
+        else
+          {:error, :not_found} ->
+            conn |> put_status(404) |> json(%{error: "workspace not found"})
+
+          {:error, reason} ->
+            conn |> put_status(500) |> json(%{error: inspect(reason)})
+        end
+
+      _ ->
+        conn |> put_status(422) |> json(%{error: "kind must be documents or chunks"})
+    end
+  end
+
+  # Documents: embeds up to `limit` (default 100, at most 1,000) of them now.
+  # Chunks: queues the chunk job in the workspace of the body or the query,
+  # which embeds up to `limit` (default all), and returns 202 with the job, or
+  # 503 while the embedder does not answer.
   post "/api/maintenance/embeddings" do
     body = conn.body_params || %{}
-    limit = if is_integer(body["limit"]), do: body["limit"] |> max(1) |> min(1_000), else: 100
 
-    with {:ok, scope} <- embedding_scope(conn, body["workspace"]),
-         {:ok, result} <- OptimalEngine.Embed.Backfill.run([limit: limit] ++ scope) do
-      json(conn, Map.put(result, :scope, Map.new(scope)))
-    else
-      {:error, :not_found} ->
-        conn |> put_status(404) |> json(%{error: "workspace not found"})
+    case body["kind"] || query_param(conn, "kind", "documents") do
+      "chunks" ->
+        payload = if is_integer(body["limit"]), do: %{"limit" => max(body["limit"], 1)}, else: %{}
 
-      {:error, {:embedder_unavailable, reason}} ->
-        conn |> put_status(503) |> json(%{error: "embedder unavailable", reason: inspect(reason)})
+        enqueue_maintenance(
+          conn,
+          :chunk_embeddings,
+          maintenance_workspace_param(conn, body),
+          payload,
+          &chunk_embedder_ready/0
+        )
 
-      {:error, reason} ->
-        conn |> put_status(500) |> json(%{error: inspect(reason)})
+      "documents" ->
+        limit =
+          if is_integer(body["limit"]), do: body["limit"] |> max(1) |> min(1_000), else: 100
+
+        with {:ok, scope} <- embedding_scope(conn, body["workspace"]),
+             {:ok, result} <- OptimalEngine.Embed.Backfill.run([limit: limit] ++ scope) do
+          json(conn, Map.put(result, :scope, Map.new(scope)))
+        else
+          {:error, :not_found} ->
+            conn |> put_status(404) |> json(%{error: "workspace not found"})
+
+          {:error, {:embedder_unavailable, reason}} ->
+            conn
+            |> put_status(503)
+            |> json(%{error: "embedder unavailable", reason: inspect(reason)})
+
+          {:error, reason} ->
+            conn |> put_status(500) |> json(%{error: inspect(reason)})
+        end
+
+      _ ->
+        conn |> put_status(422) |> json(%{error: "kind must be documents or chunks"})
     end
   end
 

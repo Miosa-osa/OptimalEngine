@@ -773,7 +773,13 @@ defmodule OptimalEngine.Graph do
      """ <> if(ws, do: " AND cl.workspace_id = ?1", else: ""), List.wrap(ws)}
   end
 
-  defp backfill_row(:contexts, [id, node, entities, routed_to, supersedes, ws]) do
+  @doc false
+  # Writes the edges of one row a backfill reads: a context's structural and
+  # semantic edges, or a claim's about edges. Returns how many writes failed.
+  # OptimalEngine.Graph.Backfill, the paged backfill the maintenance jobs run,
+  # writes through it too.
+  @spec backfill_row(:contexts | :claims, list()) :: non_neg_integer()
+  def backfill_row(:contexts, [id, node, entities, routed_to, supersedes, ws]) do
     context = %{
       id: id,
       node: node,
@@ -786,7 +792,7 @@ defmodule OptimalEngine.Graph do
     write_edges(structural_edges(context) ++ semantic_edges(context), context.workspace_id)
   end
 
-  defp backfill_row(:claims, [claim_id, entities, ws]) do
+  def backfill_row(:claims, [claim_id, entities, ws]) do
     write_edges(claim_edges(claim_id, decode_json_list(entities)), ws || "default", feed: false)
   end
 

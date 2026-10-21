@@ -157,6 +157,43 @@ GET  /api/jobs/dead?workspace=<id>
 POST /api/jobs/dead/<id>/replay {"workspace": "<id>"}     (admin)
 ```
 
+## Maintenance jobs
+
+Two maintenance backfills run as durable jobs, so an Engine without Mix, such as a release, runs them through the API.
+
+| Kind | Work | Mix task (same work) |
+| --- | --- | --- |
+| `maintenance.chunk_embeddings` | embeds the workspace's chunks that have no chunk embedding | `mix optimal.embed_backfill` |
+| `maintenance.graph_backfill` | writes the relationship edges of the workspace's contexts and claims | `mix optimal.graph_backfill` |
+
+```
+GET  /api/maintenance/embeddings?kind=chunks&workspace=<id>                     (admin; missing count and the active job)
+POST /api/maintenance/embeddings {"kind": "chunks", "workspace": "<id>", "limit"?: n}   (admin; 202 with the job)
+POST /api/maintenance/graph/backfill {"workspace": "<id>", "claims"?: false}     (admin; 202 with the job)
+```
+
+`kind` defaults to `documents`, the document vectors described under placement by meaning, which still run in the request.
+A job belongs to one workspace of the caller's tenant, named in the body or the query.
+With no `workspace` the request means the `default` workspace: a key limited to named workspaces gets 400 `workspace_required`, and a tenant that does not own `default` gets 404.
+While a workspace has a job of the kind queued or running, another request returns that job with `status: "already_running"` and its `job_status`.
+`POST` with `kind=chunks` answers 503 while the embedder does not answer, and queues nothing.
+The client CLI's `optimal graph backfill [-w ws]` calls the graph route against a remote Engine ([CLI](cli.md)).
+
+One run handles at most 500 chunks, or 1,000 contexts and claims, and never counts the whole scope.
+When more is left, the job completes and queues its continuation in the same transaction; the continuation resumes after the last row it reached.
+The work reads one workspace through its `(workspace_id, id)` indexes a page at a time and pauses between pages, so the single-writer Store stays free for requests.
+A failed run retries with backoff and then dead-letters, like the analyses.
+An unavailable embedder is not a failure: the chunk job goes back in the queue after one minute, doubling up to an hour, without spending an attempt (`last_error` "deferred: embedder unavailable"), and marks nothing failed.
+After 24 deferrals in a row it fails like any other attempt, so an embedder that never comes back ends in a dead letter that says so.
+Completed maintenance jobs older than seven days are pruned hourly.
+
+The chunk embeddings heal by themselves.
+A sweep checks the embedder first and, only while it answers, queues a low-priority chunk job for each workspace this Engine serves with chunks that have no embedding.
+The maintenance probe gives a model that is still loading 15 seconds and a second try five seconds later.
+It runs two minutes after boot and then every 30 minutes (`OPTIMAL_EMBEDDING_SWEEP_INTERVAL_MS`, 0 disables); queued maintenance jobs are drained every ten seconds (`OPTIMAL_MAINTENANCE_INTERVAL_MS`, 0 disables).
+When it queues work it logs the workspaces it queued (it counts no chunks, since a count reads the whole workspace), and it logs once each workspace it cannot queue because its chunks name a workspace that is not registered and active.
+On the first boot of a large Engine that predates the sweep, set `OPTIMAL_EMBEDDING_SWEEP_INTERVAL_MS=0`, read the backlog with `GET /api/maintenance/embeddings?kind=chunks&workspace=<id>`, and turn the sweep on when the embedder can take it.
+
 ## Reindex Requests
 
 A writer that changes files in the engine root asks for a crawl instead of running one inline.

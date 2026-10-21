@@ -257,6 +257,7 @@ The ones the Engine API can serve call its routes with the configured key; the m
 | `log [-n lines]` | `GET /api/maintenance/log?lines=<n>` (default 200): the Engine's newest log lines, printed as text; Engine operator only |
 | `graph [-w ws]` | `GET /api/maintenance/graph`: one workspace's edge counts by relation, most connected entities, and newest edges |
 | `graph hubs\|clusters\|triangles [-w ws] [-n]` | `GET /api/graph/hubs`, `/api/graph/clusters`, `/api/graph/triangles` |
+| `graph backfill [-w ws]` | `POST /api/maintenance/graph/backfill`: queues the workspace's graph backfill job (coalesced per workspace) and prints it |
 
 The Engine keeps its log lines in memory (`OptimalEngine.LogBuffer`): the newest 1,000 at `info` and above, one line each with a UTC timestamp and the level, at most 4,096 bytes; a longer line is redacted first and then cut, ending in `...`.
 Control characters other than tab are replaced with `?`: the Engine replaces C0 and C1 controls, DEL, the Unicode line and paragraph separators, and the bidi and invisible format characters when it keeps a line, and the client replaces C0 controls, DEL, C1 controls and the line and paragraph separators again when it prints one.
@@ -275,9 +276,9 @@ The log covers every tenant on the Engine, so only the Engine operator reads it:
 Any other key, including another tenant's admin key or a default-tenant admin key limited to some workspaces, gets 403 `operator_only` (exit 77).
 The buffer starts empty when the Engine starts; the `:optimal_engine` settings `:log_buffer_capacity` and `:log_buffer_level` change its size and level.
 
-`start`, `stop`, `restart`, `graph backfill` and `reality-check` exit 78 with one line that names the reason, and change nothing.
+`start`, `stop`, `restart` and `reality-check` exit 78 with one line that names the reason, and change nothing.
 The Engine's process belongs to the platform that runs it, so starting, stopping and restarting it happen there.
-A backfill has no maintenance route, and `reality-check` writes fixtures that belong only in a disposable local store.
+`reality-check` writes fixtures that belong only in a disposable local store.
 An Engine older than the maintenance routes answers 404, which the client reports as exit 78 with a hint to upgrade the Engine.
 
 `backup [--name file]` calls `POST /api/backup` against any Engine, local or remote: it writes inside the Engine's own backup directory and needs the `admin` scope.

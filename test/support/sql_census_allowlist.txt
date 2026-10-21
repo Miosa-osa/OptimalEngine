@@ -1,3 +1,4 @@
+refused	DELETE FROM jobs WHERE kind IN (?) AND status = '…' AND completed_at < datetime('…' || ? || '…')
 refused	DELETE FROM metric_samples WHERE recorded_at < datetime('…' || ? || '…')
 refused	DELETE FROM sync_mutations WHERE ((id >= '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…' AND id < '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…') OR ((idempotency_key >= (SELECT replica_id FROM sync_identity WHERE id = N) || '…' AND idempotency_key < (SELECT replica_id FROM sync_identity WHERE id = N) || '…') OR (idempotency_key >= '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…' AND idempotency_key < '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…') OR (idempotency_key >= '…' AND idempotency_key < '…'))) AND NOT (instr(id, '…') = N AND (idempotency_key = '…' || id OR (substr(idempotency_key, N, length(device_id) + N) = device_id || '…' AND id = '…' || device_id || '…' || substr(idempotency_key, length(device_id) + N))))
 refused	DELETE FROM sync_mutations WHERE ((id >= '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…' AND id < '…' || (SELECT replica_id FROM sync_identity WHERE id = N) || '…') OR (idempotency_key >= '…' AND idempotency_key < '…')) AND (instr(id, '…') = N AND (idempotency_key = '…' || id OR (substr(idempotency_key, N, length(device_id) + N) = device_id || '…' AND id = '…' || device_id || '…' || substr(idempotency_key, length(device_id) + N))))
@@ -230,6 +231,7 @@ refused	UPDATE contexts SET metadata = json_set(COALESCE(metadata, '…'), '…'
 refused	UPDATE contexts SET metadata = json_set(COALESCE(metadata, '…'), '…', json(?)) WHERE id = ? AND tenant_id = ? AND workspace_id = ? AND archived_at IS NULL AND (json_extract(metadata, '…') IS NOT ? OR json_extract(metadata, '…') IS NOT ?)
 refused	UPDATE contexts SET metadata = json_set(COALESCE(metadata, '…'), '…', json(?)) WHERE id = ? AND workspace_id = ? AND archived_at IS NULL AND (json_extract(metadata, '…') IS NOT ? OR json_extract(metadata, '…') IS NOT ?)
 refused	UPDATE contexts SET title = title WHERE rowid = ?
+refused	UPDATE jobs SET status = '…', attempts = CASE WHEN attempts > N THEN attempts - N ELSE N END, last_error = ?, payload = ?, run_at = datetime('…' || ? || '…'), lease_owner = NULL, lease_expires_at = NULL, updated_at = datetime('…') WHERE id = ?
 refused	UPDATE jobs SET status = '…', attempts = attempts + N, lease_owner = ?, lease_expires_at = datetime('…' || ? || '…'), updated_at = datetime('…') WHERE id = ?
 refused	UPDATE jobs SET status = '…', last_error = ?, run_at = datetime('…' || ? || '…'), lease_owner = NULL, lease_expires_at = NULL, updated_at = datetime('…') WHERE id = ?
 refused	UPDATE memories SET metadata = json_set(COALESCE(metadata, '…'), '…', ?) WHERE id = ?
@@ -268,6 +270,7 @@ rejected	BEGIN IMMEDIATE
 rejected	BEGIN/**/IMMEDIATE
 rejected	DELETE FROM "…" WHERE "…" = ?
 rejected	DELETE FROM data_embeddings WHERE collection_id = ? AND (model != ? OR record_id NOT IN (SELECT "…" FROM "…"))
+rejected	EXPLAIN QUERY PLAN SELECT MAX(w.id) FROM ( SELECT id FROM chunks WHERE workspace_id = ? AND id > ? ORDER BY id LIMIT ? ) AS w
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_adapter_runs WHERE asset_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_embedding_refs WHERE adapter_run_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_embedding_refs WHERE asset_id = ?
@@ -297,6 +300,9 @@ rejected	EXPLAIN QUERY PLAN SELECT N FROM decomposition_runs WHERE source_packag
 rejected	EXPLAIN QUERY PLAN SELECT N FROM entity_mentions WHERE context_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM entity_mentions WHERE source_package_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM resolution_decisions WHERE mention_id = ?
+rejected	EXPLAIN QUERY PLAN SELECT c.id, c.node, c.entities, c.routed_to, c.supersedes, c.workspace_id FROM contexts c WHERE c.id > ? AND c.workspace_id = ? ORDER BY c.id LIMIT ?
+rejected	EXPLAIN QUERY PLAN SELECT c.id, c.tenant_id, c.workspace_id, c.signal_id, c.text, c.modality, c.asset_ref FROM chunks c WHERE c.workspace_id = ? AND c.id > ? AND c.id <= ? AND c.text <> '…' AND NOT EXISTS (SELECT N FROM chunk_embeddings e WHERE e.chunk_id = c.id) ORDER BY c.id LIMIT ?
+rejected	EXPLAIN QUERY PLAN SELECT cl.id, c.entities, cl.workspace_id FROM claims cl JOIN contexts c ON c.id = cl.signal_id WHERE cl.signal_id IS NOT NULL AND cl.id > ? AND cl.workspace_id = ? ORDER BY cl.id LIMIT ?
 rejected	INSERT INTO "…" ("…", "…", "…", "…", "…", "…", "…") VALUES (?, N, ?)
 rejected	INSERT INTO "…" ("…", "…", "…", "…", "…", "…", "…", "…") VALUES (?, N, ?)
 rejected	INSERT INTO "…" ("…", "…", "…", "…", "…", "…", "…", "…", "…") VALUES (?, N, ?)
