@@ -345,6 +345,81 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
     end
   end
 
+  describe "file_plan/3 and remove_planned_files/1" do
+    test "remove the files of the package and clear the pointer of the checkpoint", ctx do
+      {seeded, entry} = planned!(ctx, "plan-gone")
+
+      assert entry.package == seeded.package
+      assert entry.contexts == [seeded.context]
+
+      assert {:ok, %{entries: 1, kept: 0, files: 2}} = DerivedData.remove_planned_files([entry])
+
+      refute File.exists?(seeded.asset_file)
+      refute File.exists?(seeded.checkpoint_file)
+
+      assert {:ok, [[nil]]} =
+               Store.raw_query("SELECT checkpoint_uri FROM decomposition_runs WHERE id = ?1", [
+                 seeded.run
+               ])
+    end
+
+    test "keep the files of a package a context created after the plan refers to", ctx do
+      {seeded, entry} = planned!(ctx, "plan-context")
+      context!("late-#{ctx.n}", "default", "default", "created after the plan")
+
+      sql!("UPDATE contexts SET metadata = ?1 WHERE id = ?2", [
+        Jason.encode!(%{"source_package_id" => seeded.package}),
+        "late-#{ctx.n}"
+      ])
+
+      assert {:ok, %{entries: 0, kept: 1, files: 0}} = DerivedData.remove_planned_files([entry])
+
+      assert File.exists?(seeded.asset_file)
+      assert File.exists?(seeded.checkpoint_file)
+    end
+
+    test "keep the files of a package a claim refers to", ctx do
+      {seeded, entry} = planned!(ctx, "plan-claim")
+
+      sql!(
+        "INSERT INTO claims (id, source_package_id, claim_text) VALUES (?1, ?2, 'a claim')",
+        ["late-claim-#{ctx.n}", seeded.package]
+      )
+
+      assert {:ok, %{entries: 0, kept: 1}} = DerivedData.remove_planned_files([entry])
+
+      assert File.exists?(seeded.asset_file)
+      assert File.exists?(seeded.checkpoint_file)
+    end
+
+    test "keep an asset file that an asset outside the entry names, spelled either way", ctx do
+      {seeded, entry} = planned!(ctx, "plan-shared")
+
+      for {id, path} <- [
+            {"same-#{ctx.n}", seeded.asset_file},
+            {"detour-#{ctx.n}",
+             Path.join(Path.dirname(seeded.asset_file), "../ab/#{Path.basename(seeded.asset_file)}")}
+          ] do
+        sql!(
+          """
+          INSERT INTO assets (id, tenant_id, content_type, size_bytes, storage_path, workspace_id)
+          VALUES (?1, 'default', 'application/octet-stream', 1, ?2, 'default')
+          """,
+          [id, path]
+        )
+      end
+
+      assert {:ok, %{entries: 1, kept: 0, files: 1}} = DerivedData.remove_planned_files([entry])
+
+      assert File.exists?(seeded.asset_file)
+      refute File.exists?(seeded.checkpoint_file)
+    end
+
+    test "a plan with nothing to remove answers zeros" do
+      assert {:ok, %{entries: 0, kept: 0, files: 0}} = DerivedData.remove_planned_files([])
+    end
+  end
+
   describe "preview/2" do
     test "counts what erase_contexts/2 would remove and removes nothing", ctx do
       seeded = seed!("preview-#{ctx.n}", ctx)
@@ -380,6 +455,17 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
       workspace_id: workspace,
       output: %{chunks: [%{text: text}]}
     })
+  end
+
+  # The contexts of the plan go the way a replica's go: their rows are deleted by
+  # something else, and the files are removed afterwards.
+  defp planned!(ctx, label) do
+    seeded = seed!("#{label}-#{ctx.n}", ctx)
+    assert {:ok, [entry]} = DerivedData.file_plan("default", "default", [seeded.context])
+    # A peer's erasure deletes the claims before the context, and so does the replica.
+    {:ok, _} = Store.raw_query("DELETE FROM claims WHERE signal_id = ?1", [seeded.context])
+    {:ok, _} = Store.raw_query("DELETE FROM contexts WHERE id = ?1", [seeded.context])
+    {seeded, entry}
   end
 
   # ── seed data ──────────────────────────────────────────────────────────────

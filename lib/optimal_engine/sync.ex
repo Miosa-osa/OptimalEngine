@@ -45,7 +45,7 @@ defmodule OptimalEngine.Sync do
 
   require Logger
 
-  alias OptimalEngine.Compliance.{Artifacts, DerivedData}
+  alias OptimalEngine.Compliance.DerivedData
   alias OptimalEngine.Connectors.{Credential, HTTP}
   alias OptimalEngine.LogUrl
   alias OptimalEngine.MemoryCore.SecurityLabels
@@ -1186,7 +1186,7 @@ defmodule OptimalEngine.Sync do
         if outcome.applied > 0 or outcome.conflicts != [], do: GateCache.clear()
         log_held(outcome.held)
         Enum.each(outcome.fact_conflicts, &raise_fact_claims(tenant_id, workspace_id, &1))
-        if outcome.erased?, do: purge_erased(tenant_id, workspace_id, erasing, file_plan)
+        if outcome.erased?, do: purge_erased(workspace_id, file_plan)
 
         {:ok,
          %{
@@ -1294,10 +1294,10 @@ defmodule OptimalEngine.Sync do
     end
   end
 
-  defp purge_erased(tenant_id, workspace_id, context_ids, file_plan) do
+  defp purge_erased(workspace_id, file_plan) do
     # The embedding entries cannot be told apart per context; the files can, below.
     Cache.purge_workspace(workspace_id, :sync, artifacts: false)
-    remove_erased_files(tenant_id, workspace_id, context_ids, file_plan)
+    remove_planned_files(workspace_id, file_plan)
     :ok
   rescue
     error ->
@@ -1307,70 +1307,29 @@ defmodule OptimalEngine.Sync do
       )
   end
 
-  # The files of the contexts that are gone. A delete that was not applied (held, or kept
-  # for a newer local change) leaves its context, and the files of a source package stay
-  # until every context that refers to it is gone.
-  defp remove_erased_files(_tenant_id, _workspace_id, _context_ids, []), do: :ok
+  # What was planned before the batch is asked again against what is committed now
+  # (`DerivedData.remove_planned_files/1`): a delete that was not applied (held, or kept for a
+  # newer local change), a context created in the same batch on the same package and a
+  # write that came after the plan all keep the files.
+  defp remove_planned_files(_workspace_id, []), do: :ok
 
-  defp remove_erased_files(tenant_id, workspace_id, context_ids, file_plan) do
-    case Store.raw_query(
-           """
-           SELECT id FROM contexts
-            WHERE tenant_id = ?1 AND workspace_id = ?2 AND id IN (SELECT value FROM json_each(?3))
-           """,
-           [tenant_id, workspace_id, Jason.encode!(context_ids)]
-         ) do
-      {:ok, rows} ->
-        remaining = rows |> List.flatten() |> MapSet.new()
+  defp remove_planned_files(workspace_id, file_plan) do
+    case DerivedData.remove_planned_files(file_plan) do
+      {:ok, %{kept: kept}} when kept > 0 ->
+        Logger.info(
+          "[Sync] #{kept} source package(s) of #{workspace_id} keep their files: a context " <>
+            "or a claim still refers to them"
+        )
 
-        {kept, gone} =
-          Enum.split_with(file_plan, &Enum.any?(&1.contexts, fn id -> id in remaining end))
-
-        if kept != [], do: log_kept(kept)
-        Enum.each(gone, &remove_entry/1)
+      {:ok, _removed} ->
+        :ok
 
       {:error, reason} ->
         Logger.error(
-          "[Sync] could not tell which deleted contexts of #{workspace_id} are gone; " <>
-            "their files stay: #{inspect(reason)}"
+          "[Sync] could not remove the files of the contexts a peer deleted in #{workspace_id}: " <>
+            inspect(reason)
         )
     end
-  end
-
-  defp log_kept(kept) do
-    Logger.info(
-      "[Sync] #{length(kept)} source package(s) keep their files: a context that refers " <>
-        "to them is still here"
-    )
-  end
-
-  defp remove_entry(%{artifacts: artifacts}) do
-    case Artifacts.remove(artifacts) do
-      {:ok, _removed} ->
-        forget_checkpoints(artifacts)
-
-      {:error, reason} ->
-        Logger.error("[Sync] could not remove the files of a deleted context: #{inspect(reason)}")
-    end
-  end
-
-  # The files are gone; a pointer to one would only mislead. A file that was left alone keeps
-  # its pointer.
-  defp forget_checkpoints(artifacts) do
-    runs =
-      for {:checkpoint, run_id, uri, _workspace_id} <- artifacts,
-          is_binary(uri),
-          match?({:error, :enoent}, File.lstat(uri)),
-          do: run_id
-
-    if runs != [] do
-      Store.raw_query(
-        "UPDATE decomposition_runs SET checkpoint_uri = NULL WHERE id IN (SELECT value FROM json_each(?1))",
-        [Jason.encode!(runs)]
-      )
-    end
-
-    :ok
   end
 
   defp apply_step(

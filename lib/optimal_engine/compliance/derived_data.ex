@@ -109,8 +109,18 @@ defmodule OptimalEngine.Compliance.DerivedData do
     end
   end
 
-  @typedoc "The files that go with the contexts that refer to one source package."
-  @type file_entry :: %{contexts: [String.t()], artifacts: [Artifacts.artifact()]}
+  @typedoc """
+  The files that go with the contexts that refer to one source package, as rows: the runs
+  `[id, checkpoint, workspace]` and assets `[id, path, workspace]` of the package, and the
+  workspaces the deleted contexts were in with their tenants.
+  """
+  @type file_entry :: %{
+          package: String.t(),
+          contexts: [String.t()],
+          assets: [[term()]],
+          runs: [[term()]],
+          scope: %{String.t() => String.t()}
+        }
 
   @doc """
   The files `erase_contexts/2` would remove with these contexts of a workspace, read now
@@ -119,10 +129,10 @@ defmodule OptimalEngine.Compliance.DerivedData do
   made itself (its decomposition checkpoints, its assets) stays.
 
   One entry per source package that no context outside `context_ids` refers to, with the
-  contexts of `context_ids` that refer to it and the files of its runs and assets, by the
-  same rules as a delete (`Compliance.Artifacts`). Remove an entry's files only once every
-  one of its contexts is gone: a delete that was not applied (held, or kept for a newer local
-  change) leaves its context, and its files must stay.
+  contexts of `context_ids` that refer to it and the rows of its runs and assets. Nothing is
+  removed: hand the entries to `remove_planned_files/1` once the contexts are gone. What the
+  plan says is true when it is read, not when the files go, so `remove_planned_files/1`
+  asks again.
   """
   @spec file_plan(String.t(), String.t(), [String.t()]) ::
           {:ok, [file_entry()]} | {:error, term()}
@@ -132,6 +142,90 @@ defmodule OptimalEngine.Compliance.DerivedData do
       &plan_files(&1, tenant_id, workspace_id, Enum.uniq(context_ids)),
       @timeout
     )
+  end
+
+  @doc """
+  Removes the files of `file_plan/3` entries, after the contexts they were planned for went.
+
+  Each entry is checked against what is committed now, in the same Store transaction as the
+  removal, so no write can come between the check and the removal: an entry is kept (its
+  files stay) when any context's `source_package_id` or any claim's names its package, and
+  an asset file is kept when an asset outside the entry names the same path, spelled the same
+  way or another. A delete that was not applied, a context created in the same batch on the
+  package, and a write that came after the plan are all caught here. The checkpoint
+  pointers of the files that are gone are cleared.
+
+  Answers how many entries were removed and kept, and how many files went.
+  """
+  @spec remove_planned_files([file_entry()]) ::
+          {:ok, %{entries: non_neg_integer(), kept: non_neg_integer(), files: non_neg_integer()}}
+          | {:error, term()}
+  def remove_planned_files([]), do: {:ok, %{entries: 0, kept: 0, files: 0}}
+
+  def remove_planned_files(entries) when is_list(entries),
+    do: Store.transaction(&remove_entries(&1, entries), @timeout)
+
+  defp remove_entries(txn, entries) do
+    with {:ok, referenced} <-
+           column(
+             txn,
+             """
+             SELECT DISTINCT p FROM (
+               SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.source_package_id') END AS p
+                 FROM contexts
+               UNION
+               SELECT source_package_id AS p FROM claims
+             ) WHERE p IN #{set(1)}
+             """,
+             [entries |> Enum.map(& &1.package) |> json()]
+           ) do
+      referenced = MapSet.new(referenced)
+      {kept, going} = Enum.split_with(entries, &MapSet.member?(referenced, &1.package))
+
+      going
+      |> Enum.reduce_while({:ok, 0}, fn entry, {:ok, files} ->
+        case remove_entry_files(txn, entry) do
+          {:ok, count} -> {:cont, {:ok, files + count}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, files} -> {:ok, %{entries: length(going), kept: length(kept), files: files}}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  defp remove_entry_files(txn, entry) do
+    with {:ok, shared} <- shared_paths(txn, entry.assets, entry.scope),
+         artifacts = file_artifacts(entry.assets, entry.runs, shared, entry.scope),
+         {:ok, removed} <- Artifacts.remove(artifacts),
+         :ok <- forget_checkpoints(txn, artifacts) do
+      {:ok, removed.files}
+    end
+  end
+
+  # The files are gone; a pointer to one would only mislead. A file that was left alone
+  # keeps its pointer.
+  defp forget_checkpoints(txn, artifacts) do
+    runs =
+      for {:checkpoint, run_id, uri, _workspace_id} <- artifacts,
+          is_binary(uri),
+          match?({:error, :enoent}, File.lstat(uri)),
+          do: run_id
+
+    if runs == [] do
+      :ok
+    else
+      case Store.txn_execute(
+             txn,
+             "UPDATE decomposition_runs SET checkpoint_uri = NULL WHERE id IN #{set(1)}",
+             [json(runs)]
+           ) do
+        {:ok, _} -> :ok
+        {:error, _} = error -> error
+      end
+    end
   end
 
   defp plan_files(_txn, _tenant_id, _workspace_id, []), do: {:ok, []}
@@ -187,11 +281,13 @@ defmodule OptimalEngine.Compliance.DerivedData do
         for package <- packages,
             package_assets = for([id, path, ws, ^package] <- assets, do: [id, path, ws]),
             package_runs = for([id, uri, ws, ^package] <- runs, do: [id, uri, ws]),
-            artifacts = file_artifacts(package_assets, package_runs, shared, scope),
-            artifacts != [] do
+            file_artifacts(package_assets, package_runs, shared, scope) != [] do
           %{
+            package: package,
             contexts: for([id, ^package] <- owners, do: id),
-            artifacts: artifacts
+            assets: package_assets,
+            runs: package_runs,
+            scope: scope
           }
         end
 
