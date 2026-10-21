@@ -26,15 +26,23 @@ defmodule OptimalEngine.Batch do
 
   The `:workspace_id` option is threaded into every downstream call so
   imported data lands in the correct workspace. Defaults to `"default"`.
+
+  ## Tenant
+
+  Memories carry the tenant they are imported under, and exports read only
+  one tenant's rows: a keyed caller's (`:reader`), otherwise `:tenant_id`,
+  defaulting to the workspace's own tenant (`OptimalEngine.Graph.scope/1`).
+  The HTTP routes pass the caller's tenant, so two tenants that name the same
+  workspace id never read each other's signals or memories.
   """
 
   require Logger
 
+  alias OptimalEngine.Graph
   alias OptimalEngine.Memory
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.ReadScope
   alias OptimalEngine.Store
-  alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Wiki
   alias OptimalEngine.Workspace
 
@@ -89,16 +97,17 @@ defmodule OptimalEngine.Batch do
   is counted as `:skipped`.
 
   Options:
-    - `:workspace_id` — target workspace (default: `"default"`)
+    - `:workspace_id` - target workspace (default: `"default"`)
+    - `:tenant_id` - tenant the memories belong to (default: the workspace's tenant)
   """
   @spec import_memories(list(map()), keyword()) ::
           {:ok, import_summary()} | {:error, term()}
   def import_memories(items, opts \\ []) when is_list(items) do
-    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    scope = Graph.scope(opts)
 
     summary =
       Enum.reduce(items, %{imported: 0, skipped: 0, errors: 0}, fn item, acc ->
-        case process_memory_item(item, workspace_id) do
+        case process_memory_item(item, scope) do
           :imported -> Map.update!(acc, :imported, &(&1 + 1))
           :skipped -> Map.update!(acc, :skipped, &(&1 + 1))
           :error -> Map.update!(acc, :errors, &(&1 + 1))
@@ -118,8 +127,10 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:workspace_id` — source workspace (default: `"default"`)
+    - `:tenant_id`: tenant to read (default: the workspace's tenant)
     - `:reader`: the `OptimalEngine.ReadScope` of a keyed caller: only the
-      signals it may see are exported, in its tenant (nil exports all)
+      signals it may see are exported, in its tenant (nil exports all of
+      `:tenant_id`'s)
 
   A failing read of the Store is an error, never an empty export.
   """
@@ -134,7 +145,7 @@ defmodule OptimalEngine.Batch do
   """
   @spec read_signals(keyword()) :: {:ok, list(map()), non_neg_integer()} | {:error, term()}
   def read_signals(opts \\ []) do
-    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, workspace_id} = read_scope(opts)
     reader = Keyword.get(opts, :reader)
 
     sql = """
@@ -142,11 +153,11 @@ defmodule OptimalEngine.Batch do
            node, sn_ratio, content, l0_abstract, l1_overview,
            modified_at, created_at, workspace_id
     FROM contexts
-    WHERE workspace_id = ?1 AND type = 'signal' #{tenant_clause(reader)}
+    WHERE tenant_id = ?2 AND workspace_id = ?1 AND type = 'signal'
     ORDER BY created_at ASC
     """
 
-    with {:ok, rows} <- Store.raw_query(sql, [workspace_id | tenant_param(reader)]) do
+    with {:ok, rows} <- Store.raw_query(sql, [workspace_id, tenant_id]) do
       {signals, withheld} =
         ReadScope.filter(
           reader,
@@ -167,8 +178,10 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:workspace_id` — source workspace (default: `"default"`)
+    - `:tenant_id`: tenant to read (default: the workspace's tenant)
     - `:reader`: the `OptimalEngine.ReadScope` of a keyed caller: only the
-      memories it may see are exported, in its tenant (nil exports all)
+      memories it may see are exported, in its tenant (nil exports all of
+      `:tenant_id`'s)
 
   A failing read of the Store is an error, never an empty export.
   """
@@ -183,7 +196,7 @@ defmodule OptimalEngine.Batch do
   """
   @spec read_memories(keyword()) :: {:ok, list(map()), non_neg_integer()} | {:error, term()}
   def read_memories(opts \\ []) do
-    workspace_id = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, workspace_id} = read_scope(opts)
     reader = Keyword.get(opts, :reader)
 
     sql = """
@@ -193,11 +206,11 @@ defmodule OptimalEngine.Batch do
            citation_uri, source_chunk_id, audience, metadata,
            created_at, updated_at
     FROM memories
-    WHERE workspace_id = ?1 AND is_latest = 1 AND is_forgotten = 0 #{tenant_clause(reader)}
+    WHERE tenant_id = ?2 AND workspace_id = ?1 AND is_latest = 1 AND is_forgotten = 0
     ORDER BY created_at ASC
     """
 
-    with {:ok, rows} <- Store.raw_query(sql, [workspace_id | tenant_param(reader)]) do
+    with {:ok, rows} <- Store.raw_query(sql, [workspace_id, tenant_id]) do
       {memories, withheld} =
         ReadScope.filter(
           reader,
@@ -217,10 +230,10 @@ defmodule OptimalEngine.Batch do
   and workspace config into a single JSON-serializable map.
 
   Options:
-    - `:tenant_id` — tenant id (default: the platform default tenant)
+    - `:tenant_id`: tenant id (default: the workspace's tenant)
     - `:reader`: the `OptimalEngine.ReadScope` of a keyed caller: only the
       signals, memories and wiki pages it may see are exported, and the
-      tenant is the reader's (nil exports all)
+      tenant is the reader's (nil exports all of `:tenant_id`'s)
   """
   @spec export_workspace(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def export_workspace(workspace_id, opts \\ []) when is_binary(workspace_id) do
@@ -235,12 +248,12 @@ defmodule OptimalEngine.Batch do
           {:ok, map(), non_neg_integer()} | {:error, term()}
   def read_workspace(workspace_id, opts \\ []) when is_binary(workspace_id) do
     reader = Keyword.get(opts, :reader)
-    tenant_id = (reader && reader.tenant_id) || Keyword.get(opts, :tenant_id, Tenant.default_id())
+    {tenant_id, workspace_id} = read_scope(Keyword.put(opts, :workspace_id, workspace_id))
 
     with {:ok, signals, hidden_signals} <-
-           read_signals(workspace_id: workspace_id, reader: reader),
+           read_signals(workspace_id: workspace_id, tenant_id: tenant_id, reader: reader),
          {:ok, memories, hidden_memories} <-
-           read_memories(workspace_id: workspace_id, reader: reader),
+           read_memories(workspace_id: workspace_id, tenant_id: tenant_id, reader: reader),
          {:ok, pages} <- export_wiki_pages(workspace_id, tenant_id) do
       {wiki_pages, hidden_pages} =
         ReadScope.filter_rows(
@@ -304,7 +317,7 @@ defmodule OptimalEngine.Batch do
 
   defp process_signal_item(_item, _workspace_id), do: :error
 
-  defp process_memory_item(item, workspace_id) when is_map(item) do
+  defp process_memory_item(item, {tenant_id, workspace_id}) when is_map(item) do
     content = Map.get(item, "content") || Map.get(item, :content)
 
     if not (is_binary(content) and content != "") do
@@ -312,7 +325,7 @@ defmodule OptimalEngine.Batch do
       :error
     else
       attrs =
-        %{content: content, workspace_id: workspace_id}
+        %{content: content, workspace_id: workspace_id, tenant_id: tenant_id}
         |> maybe_map_put(:is_static, item["is_static"] || item[:is_static])
         |> maybe_map_put(:audience, item["audience"] || item[:audience])
         |> maybe_map_put(:citation_uri, item["citation_uri"] || item[:citation_uri])
@@ -337,7 +350,7 @@ defmodule OptimalEngine.Batch do
       :error
   end
 
-  defp process_memory_item(_item, _workspace_id), do: :error
+  defp process_memory_item(_item, _scope), do: :error
 
   # ---------------------------------------------------------------------------
   # Private: export helpers
@@ -383,11 +396,14 @@ defmodule OptimalEngine.Batch do
 
   # A reader sees its own tenant only; the trusted operator (no reader) is not
   # narrowed, as before.
-  defp tenant_clause(nil), do: ""
-  defp tenant_clause(_reader), do: "AND tenant_id = ?2"
-
-  defp tenant_param(nil), do: []
-  defp tenant_param(reader), do: [reader.tenant_id]
+  # A keyed caller reads its own tenant; anyone else `:tenant_id`, defaulting to
+  # the workspace's own tenant (OptimalEngine.Graph.scope/1).
+  defp read_scope(opts) do
+    case Keyword.get(opts, :reader) do
+      %ReadScope{tenant_id: tenant_id} -> {tenant_id, Keyword.get(opts, :workspace_id, "default")}
+      nil -> Graph.scope(opts)
+    end
+  end
 
   # A wiki page as the columns the lineage reads it by.
   defp wiki_row(page) do

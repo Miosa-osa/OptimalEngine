@@ -139,12 +139,148 @@ defmodule OptimalEngine.Store.Migrations do
       migration_071_workspace_handles(),
       migration_072_workspace_external_id(),
       migration_authority_evidence_kind_index(),
-      migration_entity_mention_tenant()
+      migration_entity_mention_tenant(),
+      migration_graph_edges()
     ]
 
     # A failing-migration test release appends one migration that fails on
     # purpose (OptimalEngine.Store.FailingMigration); every other build adds none.
     migrations ++ OptimalEngine.Store.FailingMigration.migrations(migrations)
+  end
+
+  @doc """
+  Tables replaced by a successor table, `%{legacy => successor}`. A legacy
+  table stays in the store for one release so an older Engine still boots
+  on it, but nothing reads it: rows that arrive for it from an older Engine
+  (a workspace bundle, a replicated change) are written to its successor.
+  """
+  @spec superseded_tables() :: %{String.t() => String.t()}
+  def superseded_tables, do: %{"edges" => "graph_edges"}
+
+  @doc """
+  How many rows of a workspace a superseded table still holds, 0 when the
+  table is absent. Nothing reads those rows; the count tells whether an
+  upgrade copied any (`OptimalEngine.Graph.backfill_status/1`).
+  """
+  @spec superseded_row_count(String.t(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def superseded_row_count(table, workspace_id) when is_binary(workspace_id) do
+    unless Map.has_key?(superseded_tables(), table),
+      do: raise(ArgumentError, "not a superseded table: #{inspect(table)}")
+
+    case OptimalEngine.Store.raw_query(
+           "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+           [table]
+         ) do
+      {:ok, []} ->
+        {:ok, 0}
+
+      {:ok, _exists} ->
+        case OptimalEngine.Store.raw_query(
+               "SELECT COUNT(*) FROM \"#{table}\" WHERE workspace_id = ?1",
+               [workspace_id]
+             ) do
+          {:ok, [[count]]} -> {:ok, count}
+          other -> other
+        end
+
+      other ->
+        other
+    end
+  end
+
+  # The number lives here and in the pins listed in
+  # docs/guides/versioning-and-releases.md.
+  @graph_edges_version 76
+
+  # The tenant a workspace id names: its workspace row's, else the tenant its
+  # "<tenant>:" prefix names when that tenant exists, else the default.
+  @workspace_tenant_sql """
+  COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = $ws),
+           (SELECT t.id FROM tenants t WHERE t.id = substr($ws, 1, instr($ws, ':') - 1)),
+           'default')
+  """
+
+  # The baseline `edges` table is UNIQUE(source_id, target_id, relation), so
+  # an entity pair two workspaces share kept only the first workspace's edge,
+  # and its tenant_id column was never written. SQLite cannot widen a table's
+  # UNIQUE constraint in place, so graph edges move to a table keyed by
+  # tenant and workspace, each edge taking its workspace's tenant. Edge ids
+  # are kept, so a persistent triple store's hydration mark stays valid.
+  # `edges` itself is left as it is.
+  #
+  # `graph_backfills` records each completed graph backfill (tenant and
+  # workspace NULL for one over every workspace), so an Engine can say whether the one the
+  # upgrade needs has run (Graph.backfill_status/1, GET /api/maintenance/graph).
+  #
+  # Contexts and entities written before writes took their workspace's tenant
+  # still carry "default" in another tenant's workspace, where tenant-filtered
+  # reads miss them: they take that tenant. A row of another tenant is left.
+  #
+  # Every statement is safe to run again, and the copy and the repairs run
+  # with change capture off (`sync_identity.applying`): every Engine runs them.
+  defp migration_graph_edges do
+    ws_tenant = fn column -> String.replace(@workspace_tenant_sql, "$ws", column) end
+
+    {@graph_edges_version, "graph edges keyed by tenant and workspace",
+     [
+       {"graph_edges_applying", "UPDATE sync_identity SET applying = 1 WHERE id = 1"},
+       {"graph_edges",
+        """
+        CREATE TABLE IF NOT EXISTS graph_edges (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          source_id TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          relation TEXT NOT NULL DEFAULT 'related',
+          weight REAL NOT NULL DEFAULT 1.0,
+          probability REAL NOT NULL DEFAULT 0.8,
+          valid_from TEXT,
+          valid_until TEXT,
+          UNIQUE(tenant_id, workspace_id, source_id, target_id, relation)
+        )
+        """},
+       {"backfill_graph_edges",
+        """
+        INSERT OR IGNORE INTO graph_edges
+          (id, tenant_id, workspace_id, source_id, target_id, relation, weight, probability,
+           valid_from, valid_until)
+        SELECT e.id, #{ws_tenant.("e.workspace_id")},
+               e.workspace_id, e.source_id, e.target_id, e.relation, e.weight, e.probability,
+               e.valid_from, e.valid_until
+        FROM edges e
+        """},
+       # Secondary indexes after the backfill, so the copy does not maintain them row by row.
+       {"idx_graph_edges_target",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(tenant_id, workspace_id, target_id)"},
+       {"idx_graph_edges_relation",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation ON graph_edges(tenant_id, workspace_id, relation)"},
+       {"graph_backfills",
+        """
+        CREATE TABLE IF NOT EXISTS graph_backfills (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id TEXT,
+          workspace_id TEXT,
+          completed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          contexts INTEGER NOT NULL DEFAULT 0,
+          claims INTEGER NOT NULL DEFAULT 0,
+          edges_before INTEGER,
+          edges_after INTEGER
+        )
+        """},
+       {"repair_contexts_tenant",
+        """
+        UPDATE contexts SET tenant_id = #{ws_tenant.("contexts.workspace_id")}
+        WHERE tenant_id = 'default' AND #{ws_tenant.("contexts.workspace_id")} <> 'default'
+        """},
+       {"repair_entities_tenant",
+        """
+        UPDATE entities SET tenant_id = #{ws_tenant.("entities.workspace_id")}
+        WHERE tenant_id = 'default' AND #{ws_tenant.("entities.workspace_id")} <> 'default'
+        """},
+       {"graph_edges_done", "UPDATE sync_identity SET applying = 0 WHERE id = 1"}
+     ]}
   end
 
   # The id another system knows a workspace by becomes a column, held by one

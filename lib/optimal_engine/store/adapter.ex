@@ -11,7 +11,7 @@ defmodule OptimalEngine.Store.Adapter do
 
   The contract covers the canonical relational store only. Vectors, assets,
   graph, cache and jobs keep their own providers; the store's own tables
-  (`contexts`, `entities`, `edges`, `decisions`, `sessions`, and the ledger)
+  (`contexts`, `entities`, `graph_edges`, `decisions`, `sessions`, and the ledger)
   are what this behaviour governs.
 
   ## Transaction semantics

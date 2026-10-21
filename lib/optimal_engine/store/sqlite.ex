@@ -606,7 +606,7 @@ defmodule OptimalEngine.Store.SQLite do
       {"total_skills",
        "SELECT COUNT(*) FROM contexts WHERE type = 'skill' AND archived_at IS NULL"},
       {"total_entities", "SELECT COUNT(*) FROM entities"},
-      {"total_edges", "SELECT COUNT(*) FROM edges"},
+      {"total_edges", "SELECT COUNT(*) FROM graph_edges"},
       {"total_decisions", "SELECT COUNT(*) FROM decisions"}
     ]
 
@@ -1563,8 +1563,8 @@ defmodule OptimalEngine.Store.SQLite do
     end
   end
 
-  # A context belongs to its workspace's tenant; an unregistered workspace
-  # stays in the default tenant.
+  # A context belongs to its workspace's tenant; for an unregistered workspace,
+  # the tenant its "<tenant>:" prefix names, else the default tenant.
   defp do_insert(db, %Context{} = ctx) do
     row = Context.to_row(ctx)
 
@@ -1583,7 +1583,9 @@ defmodule OptimalEngine.Store.SQLite do
       ?14, ?15, ?16,
       ?17, ?18, ?19, ?20, ?21,
       ?22, ?23, ?24,
-      COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?24), 'default')
+      COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?24),
+               (SELECT t.id FROM tenants t WHERE t.id = substr(?24, 1, instr(?24, ':') - 1)),
+               'default')
     )
     """
 

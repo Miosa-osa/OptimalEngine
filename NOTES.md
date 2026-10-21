@@ -49,3 +49,12 @@ Cross-repo execution compatibility and governed API authorization require runtim
 
 - 2026-09-08: Real fresh-agent missing-authority reviews correctly stopped with validator exit 1, but the initial evaluator rejected Codex's terminal `status=failed` event.
 The exact event and causal lesson are retained under scripts/fixtures/fresh-agent, and a regression now verifies expected nonzero tool execution without changing the required permission or authority decisions.
+- 2026-10-20: Graph edges moved to `graph_edges` (a new migration), unique per tenant and workspace; the baseline `edges` table kept one edge per endpoint pair and relation across all workspaces and never wrote `tenant_id`.
+SQLite cannot widen a UNIQUE constraint in place and migrations must stay additive, so `edges` stays in the store unread for one release (`Store.Migrations.superseded_tables/0`); bundles and replicated changes that still name it are written to `graph_edges`.
+An edge's tenant is its workspace's tenant, derived in the insert itself as `Store.insert_context` does for contexts; reads take the requester's tenant (API routes) or the workspace's own (`Graph.scope/1`).
+- 2026-10-20: Rows written under a bare unregistered workspace id take tenant `default` (contexts and graph edges), so another tenant writing there lands in the default tenant's rows.
+A 404 for other tenants' keys on bare ids was tried in #65 and dropped: the steward, entity, relationship and graph routes (#79, #92, #97, #99) let tenants share a bare id and filter each row by tenant, so the fix belongs at the writers.
+- 2026-10-21: The upgrade's graph backfill state is a row per completed run in `graph_backfills` (engine state, never replicated), read per workspace by `Graph.backfill_status/1` and `GET /api/maintenance/graph`, because migration numbers float until merge and an automation cannot key on "after migration N".
+A full run records a row with no workspace; a workspace run records that workspace.
+`OptimalEngine.Release.graph_backfill/1` is the entry point on a release build, which has no mix.
+An unregistered `<tenant>:<slug>` id now gives its contexts and edges the tenant its prefix names, when that tenant exists, instead of `default`.

@@ -27,6 +27,7 @@ defmodule OptimalEngine.Graph.Reflector do
 
   require Logger
   alias OptimalEngine.Embed.Ollama, as: Ollama
+  alias OptimalEngine.Graph
   alias OptimalEngine.Store
 
   @valid_relations ~w(works_with reports_to related_to depends_on)
@@ -42,19 +43,16 @@ defmodule OptimalEngine.Graph.Reflector do
 
   - `:min_cooccurrences` — minimum shared contexts to qualify (default: 2)
   - `:limit` — max suggestions to return (default: 20)
-  - `:workspace_id` — workspace to scope to (default: "default"). The edges
-    that rule a pair out are read by workspace only (the edge table has no
-    tenant), so a caller that serves a tenant passes a workspace registered to it.
-  - `:tenant_id`: tenant whose contexts count (default: "default")
+  - `:workspace_id` - workspace to scope to (default: "default")
+  - `:tenant_id` - tenant to scope to (default: the workspace's tenant)
 
-  Returns `{:ok, [map()]}`. Never raises — logs and returns `{:ok, []}` on failure.
+  Returns `{:ok, [map()]}`. Never raises: logs and returns `{:ok, []}` on failure.
   """
   @spec reflect(keyword()) :: {:ok, [map()]}
   def reflect(opts \\ []) do
     min_cooccurrences = Keyword.get(opts, :min_cooccurrences, 2)
     limit = Keyword.get(opts, :limit, 20)
-    ws = Keyword.get(opts, :workspace_id, "default")
-    tenant = Keyword.get(opts, :tenant_id, "default")
+    {tenant_id, ws} = scope = Graph.scope(opts)
     skip_llm = Keyword.get(opts, :skip_llm, false)
 
     # Scope co-occurrence through the contexts table (source of truth for
@@ -71,11 +69,11 @@ defmodule OptimalEngine.Graph.Reflector do
     LIMIT ?2
     """
 
-    with {:ok, rows} <- Store.raw_query(sql, [min_cooccurrences, limit * 3, ws, tenant]) do
+    with {:ok, rows} <- Store.raw_query(sql, [min_cooccurrences, limit * 3, ws, tenant_id]) do
       suggestions =
         rows
         |> Enum.map(fn [a, b, count] -> {a, b, count} end)
-        |> Enum.reject(fn {a, b, _} -> edge_exists?(a, b, ws) end)
+        |> Enum.reject(fn {a, b, _} -> edge_exists?(a, b, scope) end)
         |> Enum.take(limit)
         |> Enum.map(&build_suggestion(&1, skip_llm))
 
@@ -93,13 +91,12 @@ defmodule OptimalEngine.Graph.Reflector do
   Useful for understanding why the Reflector flagged a pair.
 
   Options:
-  - `:workspace_id` — workspace to scope to (default: "default")
-  - `:tenant_id`: tenant whose contexts count (default: "default")
+  - `:workspace_id` - workspace to scope to (default: "default")
+  - `:tenant_id` - tenant to scope to (default: the workspace's tenant)
   """
   @spec shared_contexts(String.t(), String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def shared_contexts(entity_a, entity_b, opts \\ []) do
-    ws = Keyword.get(opts, :workspace_id, "default")
-    tenant = Keyword.get(opts, :tenant_id, "default")
+    {tenant_id, ws} = Graph.scope(opts)
 
     sql = """
     SELECT DISTINCT c.id, c.title, c.node
@@ -109,7 +106,7 @@ defmodule OptimalEngine.Graph.Reflector do
     WHERE c.workspace_id = ?3 AND c.tenant_id = ?4
     """
 
-    case Store.raw_query(sql, [entity_a, entity_b, ws, tenant]) do
+    case Store.raw_query(sql, [entity_a, entity_b, ws, tenant_id]) do
       {:ok, rows} ->
         contexts = Enum.map(rows, fn [id, title, node] -> %{id: id, title: title, node: node} end)
         {:ok, contexts}
@@ -153,15 +150,15 @@ defmodule OptimalEngine.Graph.Reflector do
   # here. This keeps the Reflector suggesting real relationships (works_with,
   # reports_to, ...) even though every co-occurring pair now carries a
   # co_occurs edge used by graph candidate generation.
-  defp edge_exists?(a, b, ws) do
+  defp edge_exists?(a, b, {tenant_id, ws}) do
     sql = """
-    SELECT COUNT(*) FROM edges
-    WHERE ((source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1))
+    SELECT COUNT(*) FROM graph_edges
+    WHERE tenant_id = ?3 AND workspace_id = ?4
+      AND ((source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1))
       AND relation != 'co_occurs'
-      AND workspace_id = ?3
     """
 
-    case Store.raw_query(sql, [a, b, ws]) do
+    case Store.raw_query(sql, [a, b, tenant_id, ws]) do
       {:ok, [[count]]} -> count > 0
       _ -> false
     end

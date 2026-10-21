@@ -18,27 +18,35 @@ defmodule OptimalEngine.Graph do
   NOT context IDs. Entity names like "Alice" are also bare strings. Only
   context-to-context edges use real context IDs as both source and target.
 
-  The edges table has no FK constraints (migrated from the original FK schema) so
+  Edges live in the `graph_edges` table, which has no FK constraints so
   that entity, node, and context IDs can all coexist as edge endpoints.
 
-  ## Workspace scoping
+  ## Tenant and workspace scoping
 
   Every edge row carries the `workspace_id` of the context it was derived from
-  (no cross-workspace leakage by default — see `OptimalEngine.Workspace`).
-  Read functions accept a `:workspace_id` option (default: `"default"`).
-  `rebuild/1` re-attributes every edge to its context's workspace, which also
-  serves as the backfill for rows written before edges carried workspace_id.
+  and that workspace's `tenant_id` (`"default"` for a workspace that is not
+  registered), and an edge is unique within its tenant and workspace: the same
+  entity pair in two workspaces is two edges. Read functions accept a
+  `:workspace_id` option (default: `"default"`) and a `:tenant_id` option,
+  which defaults to the workspace's own tenant; a caller that knows whose
+  request it serves passes it, so a workspace of another tenant reads as
+  empty (see `scope/1`). `rebuild/1` re-attributes every edge to its
+  context's workspace and tenant.
+
+  The baseline `edges` table, keyed by endpoints and relation only, is no
+  longer read or written (the migration that created `graph_edges` copied it there).
   """
 
   require Logger
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Migrations
 
-  # Name of the default Knowledge.Store that mirrors the SQLite edges table.
+  # Name of the default Knowledge.Store that mirrors the SQLite graph_edges table.
   @default_triple_store "default"
 
   @doc """
-  Asserts a semantic edge — writes to both the SQLite `edges` table and the
+  Asserts a semantic edge: writes to both the SQLite `graph_edges` table and the
   default in-memory triple store (`Knowledge.Store`).
 
   This is the primary public API for adding domain predicates (e.g.
@@ -49,8 +57,9 @@ defmodule OptimalEngine.Graph do
   triple-store failures are logged and swallowed so they never block the caller.
 
   Options:
-  - `:workspace_id` — workspace to attribute the edge to (default: `"default"`)
-  - `:weight`       — edge weight (default: `1.0`)
+  - `:workspace_id` - workspace to attribute the edge to (default: `"default"`);
+    the edge takes that workspace's tenant
+  - `:weight`       - edge weight (default: `1.0`)
   """
   @spec assert_edge(String.t(), String.t(), String.t(), keyword()) :: :ok
   def assert_edge(source, target, predicate, opts \\ [])
@@ -66,7 +75,7 @@ defmodule OptimalEngine.Graph do
   end
 
   @doc """
-  Hydrates a `Knowledge.Store` from all rows in the SQLite `edges` table.
+  Hydrates a `Knowledge.Store` from all rows in the SQLite `graph_edges` table.
 
   Called on application start (and optionally per-workspace) so the in-memory
   triple store reflects durable edge data after a restart. Each edge row is
@@ -75,24 +84,25 @@ defmodule OptimalEngine.Graph do
   `store` must be a running `Knowledge.Store` GenServer (pid or via-name).
 
   Options:
-  - `:workspace_id` — only hydrate edges from this workspace (default: all)
-  - `:after_id`     — only edges with a larger id (default: 0, every edge)
-  - `:limit`        — max rows to load (default: `:all`; a cap leaves the
+  - `:workspace_id` - only hydrate edges from this workspace (default: all),
+    within `:tenant_id` (default: the workspace's tenant)
+  - `:after_id`     - only edges with a larger id (default: 0, every edge)
+  - `:limit`        - max rows to load (default: `:all`; a cap leaves the
     newest edges out of the store)
-  - `:batch_size`   — rows fetched per Store call (default: 1_000)
+  - `:batch_size`   - rows fetched per Store call (default: 1_000)
 
   Returns `{:ok, count}` or `{:error, reason}`.
   """
   @spec hydrate_triple_store(GenServer.server(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def hydrate_triple_store(store, opts \\ []) do
-    ws = Keyword.get(opts, :workspace_id)
+    scope = if Keyword.get(opts, :workspace_id), do: scope(opts)
     limit = Keyword.get(opts, :limit, :all)
     after_id = Keyword.get(opts, :after_id, 0)
     batch_size = Keyword.get(opts, :batch_size, 1_000) |> max(1)
     batch_size = if is_integer(limit), do: batch_size |> min(limit) |> max(1), else: batch_size
 
-    case hydrate_triple_store_pages(store, ws, limit, batch_size, after_id, 0) do
+    case hydrate_triple_store_pages(store, scope, limit, batch_size, after_id, 0) do
       {:ok, count} = result ->
         Logger.info("[Graph] Hydrated #{count} triples into Knowledge.Store from SQLite edges")
         result
@@ -107,22 +117,22 @@ defmodule OptimalEngine.Graph do
       {:error, error}
   end
 
-  defp hydrate_triple_store_pages(_store, _ws, limit, _batch_size, _last_id, count)
+  defp hydrate_triple_store_pages(_store, _scope, limit, _batch_size, _last_id, count)
        when is_integer(limit) and count >= limit,
        do: {:ok, count}
 
-  defp hydrate_triple_store_pages(store, ws, limit, batch_size, last_id, count) do
+  defp hydrate_triple_store_pages(store, scope, limit, batch_size, last_id, count) do
     page_size = if limit == :all, do: batch_size, else: min(batch_size, limit - count)
 
     {sql, params} =
-      case ws do
+      case scope do
         nil ->
-          {"SELECT id, source_id, relation, target_id, workspace_id FROM edges WHERE id > ?1 ORDER BY id LIMIT ?2",
+          {"SELECT id, source_id, relation, target_id, workspace_id FROM graph_edges WHERE id > ?1 ORDER BY id LIMIT ?2",
            [last_id, page_size]}
 
-        workspace_id ->
-          {"SELECT id, source_id, relation, target_id, workspace_id FROM edges WHERE workspace_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
-           [workspace_id, last_id, page_size]}
+        {tenant_id, workspace_id} ->
+          {"SELECT id, source_id, relation, target_id, workspace_id FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND id > ?3 ORDER BY id LIMIT ?4",
+           [tenant_id, workspace_id, last_id, page_size]}
       end
 
     case Store.raw_query(sql, params) do
@@ -139,7 +149,7 @@ defmodule OptimalEngine.Graph do
 
         hydrate_triple_store_pages(
           store,
-          ws,
+          scope,
           limit,
           batch_size,
           next_id,
@@ -267,7 +277,7 @@ defmodule OptimalEngine.Graph do
   These encode which people work on which nodes. Idempotent (INSERT OR IGNORE).
 
   Options:
-  - `:workspace_id` — workspace to attribute the edges to (default: "default";
+  - `:workspace_id` - workspace to attribute the edges to (default: "default";
     the static mapping below is legacy single-workspace data)
   """
   @spec seed_from_topology(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
@@ -291,15 +301,15 @@ defmodule OptimalEngine.Graph do
 
   @doc """
   Rebuilds edges from scratch:
-  1. Clears the edges table (one workspace, or all)
+  1. Clears the graph edges (one workspace, or all)
   2. Iterates contexts and creates their edges, attributed to each context's
-     own `workspace_id`
+     own `workspace_id` and that workspace's tenant
   3. Seeds topology works_on edges (into the "default" workspace)
 
   Options:
-  - `:workspace_id` — rebuild only this workspace's edges. When omitted, ALL
+  - `:workspace_id` - rebuild only this workspace's edges. When omitted, ALL
     edges are rebuilt; because attribution is taken per-context, a full
-    rebuild also backfills workspace_id on edges written before scoping.
+    rebuild also repairs the workspace and tenant of every edge.
   """
   @spec rebuild(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def rebuild(opts \\ []) do
@@ -319,23 +329,24 @@ defmodule OptimalEngine.Graph do
   Returns all edges for a given source or target ID.
 
   Options:
-  - `:direction`    — `:out` (default), `:in`, or `:both`
-  - `:relation`     — filter by relation type
-  - `:workspace_id` — workspace to scope to (default: "default")
+  - `:direction`    - `:out` (default), `:in`, or `:both`
+  - `:relation`     - filter by relation type
+  - `:workspace_id` - workspace to scope to (default: "default")
+  - `:tenant_id`    - tenant to scope to (default: the workspace's tenant)
   """
   @spec edges_for(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def edges_for(id, opts \\ []) when is_binary(id) do
     direction = Keyword.get(opts, :direction, :out)
     relation = Keyword.get(opts, :relation)
-    ws = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, ws} = scope(opts)
 
     {where_clause, params} = build_edges_where(id, direction, relation)
-    ws_param = length(params) + 1
-    where_clause = "(#{where_clause}) AND workspace_id = ?#{ws_param}"
+    n = length(params)
+    where_clause = "(#{where_clause}) AND tenant_id = ?#{n + 1} AND workspace_id = ?#{n + 2}"
 
-    sql = "SELECT source_id, target_id, relation, weight FROM edges WHERE #{where_clause}"
+    sql = "SELECT source_id, target_id, relation, weight FROM graph_edges WHERE #{where_clause}"
 
-    case Store.raw_query(sql, params ++ [ws]) do
+    case Store.raw_query(sql, params ++ [tenant_id, ws]) do
       {:ok, rows} ->
         edges = Enum.map(rows, &row_to_edge/1)
         {:ok, edges}
@@ -349,18 +360,19 @@ defmodule OptimalEngine.Graph do
   Returns all contexts that mention a given entity (traverse mentioned_in edges).
 
   Options:
-  - `:workspace_id` — workspace to scope to (default: "default")
+  - `:workspace_id` - workspace to scope to (default: "default")
+  - `:tenant_id`    - tenant to scope to (default: the workspace's tenant)
   """
   @spec related_contexts(String.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def related_contexts(entity_name, opts \\ []) when is_binary(entity_name) do
-    ws = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, ws} = scope(opts)
 
     sql = """
-    SELECT target_id FROM edges
-    WHERE source_id = ?1 AND relation = 'mentioned_in' AND workspace_id = ?2
+    SELECT target_id FROM graph_edges
+    WHERE tenant_id = ?2 AND workspace_id = ?3 AND source_id = ?1 AND relation = 'mentioned_in'
     """
 
-    case Store.raw_query(sql, [entity_name, ws]) do
+    case Store.raw_query(sql, [entity_name, tenant_id, ws]) do
       {:ok, rows} -> {:ok, Enum.map(rows, fn [id] -> id end)}
       err -> err
     end
@@ -371,18 +383,19 @@ defmodule OptimalEngine.Graph do
   Returns all edges where source_id OR target_id equals the context_id.
 
   Options:
-  - `:workspace_id` — workspace to scope to (default: "default")
+  - `:workspace_id` - workspace to scope to (default: "default")
+  - `:tenant_id`    - tenant to scope to (default: the workspace's tenant)
   """
   @spec subgraph(String.t(), pos_integer(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def subgraph(context_id, _depth \\ 1, opts \\ []) when is_binary(context_id) do
-    ws = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, ws} = scope(opts)
 
     sql = """
-    SELECT source_id, target_id, relation, weight FROM edges
-    WHERE (source_id = ?1 OR target_id = ?1) AND workspace_id = ?2
+    SELECT source_id, target_id, relation, weight FROM graph_edges
+    WHERE tenant_id = ?2 AND workspace_id = ?3 AND (source_id = ?1 OR target_id = ?1)
     """
 
-    case Store.raw_query(sql, [context_id, ws]) do
+    case Store.raw_query(sql, [context_id, tenant_id, ws]) do
       {:ok, rows} ->
         edges = Enum.map(rows, &row_to_edge/1)
         {:ok, edges}
@@ -396,27 +409,26 @@ defmodule OptimalEngine.Graph do
   Returns aggregate stats about the graph.
 
   Options:
-  - `:workspace_id` — workspace to scope to (default: "default")
+  - `:workspace_id` - workspace to scope to (default: "default")
+  - `:tenant_id`    - tenant to scope to (default: the workspace's tenant)
   """
   @spec stats(keyword()) :: {:ok, map()} | {:error, term()}
   def stats(opts \\ []) do
-    ws = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, ws} = scope(opts)
+    scoped = "FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2"
 
     queries = [
-      {"total_edges", "SELECT COUNT(*) FROM edges WHERE workspace_id = ?1"},
-      {"mentioned_in",
-       "SELECT COUNT(*) FROM edges WHERE relation = 'mentioned_in' AND workspace_id = ?1"},
-      {"lives_in", "SELECT COUNT(*) FROM edges WHERE relation = 'lives_in' AND workspace_id = ?1"},
-      {"works_on", "SELECT COUNT(*) FROM edges WHERE relation = 'works_on' AND workspace_id = ?1"},
-      {"cross_ref",
-       "SELECT COUNT(*) FROM edges WHERE relation = 'cross_ref' AND workspace_id = ?1"},
-      {"supersedes",
-       "SELECT COUNT(*) FROM edges WHERE relation = 'supersedes' AND workspace_id = ?1"}
+      {"total_edges", "SELECT COUNT(*) #{scoped}"},
+      {"mentioned_in", "SELECT COUNT(*) #{scoped} AND relation = 'mentioned_in'"},
+      {"lives_in", "SELECT COUNT(*) #{scoped} AND relation = 'lives_in'"},
+      {"works_on", "SELECT COUNT(*) #{scoped} AND relation = 'works_on'"},
+      {"cross_ref", "SELECT COUNT(*) #{scoped} AND relation = 'cross_ref'"},
+      {"supersedes", "SELECT COUNT(*) #{scoped} AND relation = 'supersedes'"}
     ]
 
     result =
       Enum.reduce_while(queries, %{}, fn {key, sql}, acc ->
-        case Store.raw_query(sql, [ws]) do
+        case Store.raw_query(sql, [tenant_id, ws]) do
           {:ok, [[val]]} -> {:cont, Map.put(acc, key, val)}
           {:ok, []} -> {:cont, Map.put(acc, key, 0)}
           {:error, _} = err -> {:halt, err}
@@ -433,23 +445,24 @@ defmodule OptimalEngine.Graph do
   Returns the top N most connected entities by edge count.
 
   Options:
-  - `:workspace_id` — workspace to scope to (default: "default")
+  - `:workspace_id` - workspace to scope to (default: "default")
+  - `:tenant_id`    - tenant to scope to (default: the workspace's tenant)
   """
   @spec top_entities(pos_integer(), keyword()) ::
           {:ok, [{String.t(), non_neg_integer()}]} | {:error, term()}
   def top_entities(limit \\ 10, opts \\ []) do
-    ws = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, ws} = scope(opts)
 
     sql = """
     SELECT source_id, COUNT(*) as cnt
-    FROM edges
-    WHERE relation IN ('mentioned_in', 'works_on') AND workspace_id = ?2
+    FROM graph_edges
+    WHERE tenant_id = ?2 AND workspace_id = ?3 AND relation IN ('mentioned_in', 'works_on')
     GROUP BY source_id
     ORDER BY cnt DESC
     LIMIT ?1
     """
 
-    case Store.raw_query(sql, [limit, ws]) do
+    case Store.raw_query(sql, [limit, tenant_id, ws]) do
       {:ok, rows} -> {:ok, Enum.map(rows, fn [id, cnt] -> {id, cnt} end)}
       err -> err
     end
@@ -459,23 +472,81 @@ defmodule OptimalEngine.Graph do
   Returns sample edges for display.
 
   Options:
-  - `:workspace_id` — workspace to scope to (default: "default")
+  - `:workspace_id` - workspace to scope to (default: "default")
+  - `:tenant_id`    - tenant to scope to (default: the workspace's tenant)
   """
   @spec sample_edges(pos_integer(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def sample_edges(limit \\ 10, opts \\ []) do
-    ws = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, ws} = scope(opts)
 
     sql = """
     SELECT source_id, target_id, relation, weight
-    FROM edges
-    WHERE workspace_id = ?2
+    FROM graph_edges
+    WHERE tenant_id = ?2 AND workspace_id = ?3
     ORDER BY ROWID DESC
     LIMIT ?1
     """
 
-    case Store.raw_query(sql, [limit, ws]) do
+    case Store.raw_query(sql, [limit, tenant_id, ws]) do
       {:ok, rows} -> {:ok, Enum.map(rows, &row_to_edge/1)}
       err -> err
+    end
+  end
+
+  @doc """
+  The `{tenant_id, workspace_id}` an edge read covers.
+
+  `:workspace_id` defaults to `"default"`. `:tenant_id` defaults to the
+  workspace's own tenant, the tenant its edges were written with: for a
+  workspace that is not registered, the tenant its `"<tenant>:"` prefix
+  names, else `"default"`. A caller serving a request passes
+  the requester's tenant, so another tenant's workspace reads as empty.
+  """
+  @spec scope(keyword()) :: {String.t(), String.t()}
+  def scope(opts) do
+    ws = Keyword.get(opts, :workspace_id) || "default"
+    {Keyword.get(opts, :tenant_id) || workspace_tenant(ws), ws}
+  end
+
+  @doc """
+  Counts edges: every edge, one tenant's (`:tenant_id` alone), or one
+  workspace's (`:workspace_id`, scoped as `scope/1` describes).
+  """
+  @spec count(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def count(opts \\ []) do
+    {sql, params} =
+      cond do
+        Keyword.get(opts, :workspace_id) ->
+          {tenant_id, ws} = scope(opts)
+
+          {"SELECT COUNT(*) FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2",
+           [tenant_id, ws]}
+
+        tenant_id = Keyword.get(opts, :tenant_id) ->
+          {"SELECT COUNT(*) FROM graph_edges WHERE tenant_id = ?1", [tenant_id]}
+
+        true ->
+          {"SELECT COUNT(*) FROM graph_edges", []}
+      end
+
+    case Store.raw_query(sql, params) do
+      {:ok, [[count]]} -> {:ok, count}
+      {:ok, []} -> {:ok, 0}
+      err -> err
+    end
+  end
+
+  # The tenant edges are written with (@edge_insert_sql).
+  defp workspace_tenant(ws) do
+    sql = """
+    SELECT COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?1),
+                    (SELECT t.id FROM tenants t WHERE t.id = substr(?1, 1, instr(?1, ':') - 1)),
+                    'default')
+    """
+
+    case Store.raw_query(sql, [ws]) do
+      {:ok, [[tenant_id]]} when is_binary(tenant_id) -> tenant_id
+      _ -> "default"
     end
   end
 
@@ -487,7 +558,8 @@ defmodule OptimalEngine.Graph do
   Additive: failures are logged and swallowed, never raised.
 
   Options:
-  - `:workspace_id` — workspace to attribute the edges to (default: "default")
+  - `:workspace_id` - workspace to attribute the edges to (default: "default");
+    the edges take that workspace's tenant
   """
   @spec create_claim_edges(String.t(), [String.t()], keyword()) :: :ok
   def create_claim_edges(claim_id, entities, opts \\ [])
@@ -506,6 +578,167 @@ defmodule OptimalEngine.Graph do
   end
 
   @doc """
+  Writes a context's semantic edges: `context --mentions--> entity` for each
+  of its entities, and `entity --co_occurs_with--> entity` in both directions
+  for each pair of them (`assert_edge/4`). Intake writes them when it files a
+  signal, beside the structural edges of `create_edges_for_context/1`, and
+  `backfill/1` writes them again for indexed contexts.
+  """
+  @spec create_semantic_edges_for_context(map() | struct()) :: :ok
+  def create_semantic_edges_for_context(context) do
+    id = struct_or_map_get(context, :id)
+    entities = struct_or_map_get(context, :entities) || []
+    opts = [workspace_id: context_workspace(context)]
+
+    if is_binary(id) do
+      entities
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.uniq()
+      |> Enum.each(&assert_edge(id, &1, "mentions", opts))
+
+      Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
+        assert_edge(a, b, "co_occurs_with", opts)
+        assert_edge(b, a, "co_occurs_with", opts)
+      end)
+    end
+
+    :ok
+  end
+
+  @doc """
+  Writes the edges of the contexts and claims already indexed, as ingest
+  writes them: each context's structural edges (`create_edges_for_context/1`)
+  and semantic edges (`create_semantic_edges_for_context/1`), then
+  `claim --about--> entity` for each claim with a source context
+  (`create_claim_edges/3`). Every insert is `INSERT OR IGNORE`, so a run adds
+  only what is missing and is safe to repeat.
+
+  A completed run is recorded in `graph_backfills` (for its workspace, or for
+  every workspace when none is given), which `backfill_status/1` reads.
+
+  Options:
+  - `:workspace_id` - only that workspace's contexts and claims (default: every
+    workspace)
+  - `:claims`       - false skips the claim pass (default: true)
+  - `:batch`        - rows per progress report (default: 200)
+  - `:on_progress`  - called with `{:contexts | :claims, rows_so_far}` after
+    each batch
+
+  Returns `{:ok, %{contexts:, claims:, edges_before:, edges_after:}}`, the
+  edge counts taken over the run's scope.
+  """
+  @spec backfill(keyword()) :: {:ok, map()} | {:error, term()}
+  def backfill(opts \\ []) do
+    ws = Keyword.get(opts, :workspace_id)
+    pass = {ws, max(Keyword.get(opts, :batch, 200), 1), Keyword.get(opts, :on_progress)}
+    count_opts = if ws, do: [workspace_id: ws], else: []
+    tenant_id = if ws, do: elem(scope(count_opts), 0)
+
+    with {:ok, before} <- count(count_opts),
+         {:ok, contexts} <- backfill_pass(:contexts, pass),
+         {:ok, claims} <-
+           if(Keyword.get(opts, :claims, true), do: backfill_pass(:claims, pass), else: {:ok, 0}),
+         {:ok, after_count} <- count(count_opts),
+         result = %{
+           contexts: contexts,
+           claims: claims,
+           edges_before: before,
+           edges_after: after_count
+         },
+         {:ok, _} <-
+           Store.raw_query(
+             """
+             INSERT INTO graph_backfills
+               (tenant_id, workspace_id, contexts, claims, edges_before, edges_after)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             """,
+             [tenant_id, ws, contexts, claims, before, after_count]
+           ) do
+      {:ok, result}
+    end
+  end
+
+  @doc """
+  Whether a workspace still needs the graph backfill its upgrade calls for.
+
+  The migration that created `graph_edges` copied the legacy `edges` table,
+  whose key had dropped every edge a second workspace shared with a first;
+  `backfill/1` writes them again. `backfill_needed` is true while the legacy
+  table holds rows of the workspace and no backfill has completed for it or
+  for every workspace since; an Engine that never had legacy edges reads
+  false. `legacy_edges` counts the workspace's rows in the legacy table (0
+  when the table is absent).
+  """
+  @spec backfill_status(String.t()) ::
+          {:ok, %{backfill_needed: boolean(), legacy_edges: non_neg_integer()}}
+          | {:error, term()}
+  def backfill_status(workspace_id) when is_binary(workspace_id) do
+    with {:ok, legacy} <- Migrations.superseded_row_count("edges", workspace_id),
+         {:ok, [[runs]]} <-
+           Store.raw_query(
+             "SELECT COUNT(*) FROM graph_backfills WHERE workspace_id IS NULL OR workspace_id = ?1",
+             [workspace_id]
+           ) do
+      {:ok, %{backfill_needed: legacy > 0 and runs == 0, legacy_edges: legacy}}
+    end
+  end
+
+  defp backfill_pass(phase, {ws, batch, on_progress}) do
+    {sql, params} = backfill_select(phase, ws)
+
+    with {:ok, rows} <- Store.raw_query(sql, params) do
+      total =
+        rows
+        |> Enum.chunk_every(batch)
+        |> Enum.reduce(0, fn chunk, done ->
+          Enum.each(chunk, &backfill_row(phase, &1))
+          done = done + length(chunk)
+          if on_progress, do: on_progress.({phase, done})
+          done
+        end)
+
+      {:ok, total}
+    end
+  end
+
+  defp backfill_select(:contexts, ws) do
+    {"SELECT id, node, entities, routed_to, supersedes, workspace_id FROM contexts" <>
+       if(ws, do: " WHERE workspace_id = ?1", else: ""), List.wrap(ws)}
+  end
+
+  # Claims link to their source context through signal_id; the entities come
+  # from that context.
+  defp backfill_select(:claims, ws) do
+    {"""
+     SELECT cl.id, c.entities, cl.workspace_id
+     FROM claims cl
+     JOIN contexts c ON c.id = cl.signal_id
+     WHERE cl.signal_id IS NOT NULL
+     """ <> if(ws, do: " AND cl.workspace_id = ?1", else: ""), List.wrap(ws)}
+  end
+
+  defp backfill_row(:contexts, [id, node, entities, routed_to, supersedes, ws]) do
+    context = %{
+      id: id,
+      node: node,
+      entities: decode_json_list(entities),
+      routed_to: decode_json_list(routed_to),
+      supersedes: supersedes,
+      workspace_id: ws || "default"
+    }
+
+    create_edges_for_context(context)
+    create_semantic_edges_for_context(context)
+  end
+
+  defp backfill_row(:claims, [claim_id, entities, ws]) do
+    case decode_json_list(entities) do
+      [] -> :ok
+      list -> create_claim_edges(claim_id, list, workspace_id: ws || "default")
+    end
+  end
+
+  @doc """
   Returns candidate context IDs reachable from a set of query entities by
   traversing the graph up to `hops` hops.
 
@@ -518,14 +751,15 @@ defmodule OptimalEngine.Graph do
   mention each context (descending), so densely-connected contexts surface first.
 
   Options:
-  - `:workspace_id` — workspace to scope to (default: "default")
-  - `:limit`        — max context IDs to return (default: 20)
+  - `:workspace_id` - workspace to scope to (default: "default")
+  - `:tenant_id`    - tenant to scope to (default: the workspace's tenant)
+  - `:limit`        - max context IDs to return (default: 20)
   """
   @spec graph_candidates([String.t()], pos_integer(), keyword()) ::
           {:ok, [String.t()]} | {:error, term()}
   def graph_candidates(query_entities, hops \\ 1, opts \\ [])
       when is_list(query_entities) and is_integer(hops) and hops >= 1 do
-    ws = Keyword.get(opts, :workspace_id, "default")
+    scope = scope(opts)
     limit = Keyword.get(opts, :limit, 20)
 
     seed =
@@ -533,7 +767,7 @@ defmodule OptimalEngine.Graph do
       |> Enum.filter(&(is_binary(&1) and &1 != ""))
       |> MapSet.new()
 
-    {entities, context_scores} = expand_frontier(seed, hops, ws)
+    {entities, context_scores} = expand_frontier(seed, hops, scope)
     _ = entities
 
     ranked =
@@ -549,15 +783,15 @@ defmodule OptimalEngine.Graph do
 
   # Breadth-first expansion: accumulate mentioned_in contexts (scored by mention
   # count) and grow the entity frontier via co_occurs for each remaining hop.
-  defp expand_frontier(seed_entities, hops, ws) do
+  defp expand_frontier(seed_entities, hops, scope) do
     Enum.reduce(1..hops, {seed_entities, MapSet.new(), %{}}, fn _hop, {frontier, visited, scores} ->
       to_visit = MapSet.difference(frontier, visited)
 
       {next_frontier, new_scores} =
         Enum.reduce(to_visit, {MapSet.new(), scores}, fn entity, {nf, sc} ->
-          ctx_ids = entity_contexts(entity, ws)
+          ctx_ids = entity_contexts(entity, scope)
           sc = Enum.reduce(ctx_ids, sc, fn cid, acc -> Map.update(acc, cid, 1, &(&1 + 1)) end)
-          neighbors = co_occurring_entities(entity, ws)
+          neighbors = co_occurring_entities(entity, scope)
           {MapSet.union(nf, MapSet.new(neighbors)), sc}
         end)
 
@@ -566,21 +800,21 @@ defmodule OptimalEngine.Graph do
     |> then(fn {_frontier, _visited, scores} -> {MapSet.new(), scores} end)
   end
 
-  defp entity_contexts(entity, ws) do
+  defp entity_contexts(entity, {tenant_id, ws}) do
     sql =
-      "SELECT target_id FROM edges WHERE source_id = ?1 AND relation = 'mentioned_in' AND workspace_id = ?2"
+      "SELECT target_id FROM graph_edges WHERE tenant_id = ?2 AND workspace_id = ?3 AND source_id = ?1 AND relation = 'mentioned_in'"
 
-    case Store.raw_query(sql, [entity, ws]) do
+    case Store.raw_query(sql, [entity, tenant_id, ws]) do
       {:ok, rows} -> Enum.map(rows, fn [id] -> id end)
       _ -> []
     end
   end
 
-  defp co_occurring_entities(entity, ws) do
+  defp co_occurring_entities(entity, {tenant_id, ws}) do
     sql =
-      "SELECT target_id FROM edges WHERE source_id = ?1 AND relation = 'co_occurs' AND workspace_id = ?2"
+      "SELECT target_id FROM graph_edges WHERE tenant_id = ?2 AND workspace_id = ?3 AND source_id = ?1 AND relation = 'co_occurs'"
 
-    case Store.raw_query(sql, [entity, ws]) do
+    case Store.raw_query(sql, [entity, tenant_id, ws]) do
       {:ok, rows} -> Enum.map(rows, fn [id] -> id end)
       _ -> []
     end
@@ -644,9 +878,11 @@ defmodule OptimalEngine.Graph do
   # Private: rebuild helpers
   # ---------------------------------------------------------------------------
 
-  # nil workspace = full rebuild across all workspaces
+  # nil workspace = full rebuild across all workspaces. A workspace's rebuild
+  # clears every edge filed under it, whatever tenant it was written with, so
+  # the rebuilt edges are attributed afresh.
   defp clear_edges(nil) do
-    case Store.raw_query("DELETE FROM edges", []) do
+    case Store.raw_query("DELETE FROM graph_edges", []) do
       {:ok, _} -> :ok
       :ok -> :ok
       err -> err
@@ -654,7 +890,7 @@ defmodule OptimalEngine.Graph do
   end
 
   defp clear_edges(ws) when is_binary(ws) do
-    case Store.raw_query("DELETE FROM edges WHERE workspace_id = ?1", [ws]) do
+    case Store.raw_query("DELETE FROM graph_edges WHERE workspace_id = ?1", [ws]) do
       {:ok, _} -> :ok
       :ok -> :ok
       err -> err
@@ -691,17 +927,7 @@ defmodule OptimalEngine.Graph do
         end)
 
         # Return actual count from the table after insertion
-        count_result =
-          case ws do
-            nil -> Store.raw_query("SELECT COUNT(*) FROM edges", [])
-            ws -> Store.raw_query("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1", [ws])
-          end
-
-        case count_result do
-          {:ok, [[count]]} -> {:ok, count}
-          {:ok, []} -> {:ok, 0}
-          err -> err
-        end
+        if ws, do: count(workspace_id: ws), else: count()
 
       err ->
         err
@@ -717,9 +943,16 @@ defmodule OptimalEngine.Graph do
   # Private: SQL helpers
   # ---------------------------------------------------------------------------
 
+  # An edge takes the tenant of its workspace, as a context does
+  # (`Store.insert_context`): for a workspace that is not registered, the
+  # tenant its "<tenant>:" prefix names, else `"default"`.
   @edge_insert_sql """
-  INSERT OR IGNORE INTO edges (source_id, target_id, relation, weight, valid_from, workspace_id)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+  INSERT OR IGNORE INTO graph_edges
+    (source_id, target_id, relation, weight, valid_from, workspace_id, tenant_id)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+          COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?6),
+                   (SELECT t.id FROM tenants t WHERE t.id = substr(?6, 1, instr(?6, ':') - 1)),
+                   'default'))
   """
 
   # Insert via Store GenServer (for use outside of Store callbacks)

@@ -50,14 +50,14 @@ defmodule OptimalEngine.GraphTenantTest do
 
       {:ok, _} =
         Store.raw_query(
-          "INSERT INTO edges (source_id, target_id, relation, weight, workspace_id) VALUES (?1, ?2, 'related', 1.0, ?3)",
-          [first, second, ws]
+          "INSERT INTO graph_edges (tenant_id, source_id, target_id, relation, weight, workspace_id) VALUES (?1, ?2, ?3, 'related', 1.0, ?4)",
+          [tenant, first, second, ws]
         )
 
       {:ok, _} =
         Store.raw_query(
-          "INSERT INTO edges (source_id, target_id, relation, weight, workspace_id) VALUES (?1, 'notes', 'cross_ref', 1.0, ?2)",
-          [first, ws]
+          "INSERT INTO graph_edges (tenant_id, source_id, target_id, relation, weight, workspace_id) VALUES (?1, ?2, 'notes', 'cross_ref', 1.0, ?3)",
+          [tenant, first, ws]
         )
     end
 

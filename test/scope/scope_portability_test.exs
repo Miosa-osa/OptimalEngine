@@ -357,7 +357,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       assert {:ok, merged} = WorkspaceBundle.import(ctx.path, target, mode: :merge)
 
       assert Enum.all?(
-               Map.drop(merged.rows, ["decisions", "events", "edges", "observations"]),
+               Map.drop(merged.rows, ["decisions", "events", "observations"]),
                fn {_table, n} -> n == 0 end
              )
     end

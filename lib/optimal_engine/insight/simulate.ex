@@ -23,6 +23,7 @@ defmodule OptimalEngine.Insight.Simulate do
   require Logger
 
   alias OptimalEngine.Embed.Ollama, as: Ollama
+  alias OptimalEngine.Graph
   alias OptimalEngine.Store
 
   # Edge weights for scoring: works_on > cross_ref > mentioned_in > lives_in
@@ -141,15 +142,17 @@ defmodule OptimalEngine.Insight.Simulate do
   def handle_call({:simulate, scenario, opts}, _from, state) do
     max_depth = Keyword.get(opts, :max_depth, @default_max_depth)
     ws = Keyword.get(opts, :workspace_id, "default")
+    # Graph edges are read within the workspace's tenant (Graph.scope/1).
+    scope = Graph.scope(opts)
 
     result =
       with {:ok, mutation} <- parse_scenario(scenario),
            {:ok, seed_ids} <- gather_seed_contexts(mutation, ws),
-           {:ok, traversal} <- traverse_graph(seed_ids, max_depth, ws),
+           {:ok, traversal} <- traverse_graph(seed_ids, max_depth, scope),
            {:ok, node_totals} <- get_or_fetch_node_totals(state.node_totals, ws),
            {:ok, scored_nodes} <- score_nodes(traversal, node_totals),
            {:ok, critical_deps} <-
-             find_critical_dependencies(mutation, traversal, node_totals, ws),
+             find_critical_dependencies(mutation, traversal, node_totals, scope),
            {:ok, risk} <- assess_risk(scored_nodes, critical_deps, traversal),
            {:ok, recs} <- generate_recommendations(mutation, scored_nodes, critical_deps) do
         report = %{
@@ -447,7 +450,7 @@ defmodule OptimalEngine.Insight.Simulate do
   # ---------------------------------------------------------------------------
 
   # traversal entry: %{context_id, depth, relation, weight}
-  defp traverse_graph(seed_ids, max_depth, ws) do
+  defp traverse_graph(seed_ids, max_depth, scope) do
     # seed_ids are direct (depth 1)
     initial =
       Enum.map(seed_ids, fn id ->
@@ -455,14 +458,14 @@ defmodule OptimalEngine.Insight.Simulate do
       end)
 
     visited = MapSet.new(seed_ids)
-    traversal = bfs(initial, visited, max_depth, initial, ws)
+    traversal = bfs(initial, visited, max_depth, initial, scope)
     {:ok, traversal}
   end
 
   # Returns the accumulated list of traversal entries (plain list, not {:ok, ...})
-  defp bfs([], _visited, _max_depth, acc, _ws), do: acc
+  defp bfs([], _visited, _max_depth, acc, _scope), do: acc
 
-  defp bfs(frontier, visited, max_depth, acc, ws) do
+  defp bfs(frontier, visited, max_depth, acc, scope) do
     # Only expand nodes that haven't hit max depth
     expandable = Enum.filter(frontier, fn e -> e.depth < max_depth end)
 
@@ -471,7 +474,7 @@ defmodule OptimalEngine.Insight.Simulate do
     else
       {next_frontier, next_visited, new_entries} =
         Enum.reduce(expandable, {[], visited, []}, fn entry, {frontier_acc, vis_acc, new_acc} ->
-          case fetch_neighbors(entry.context_id, ws) do
+          case fetch_neighbors(entry.context_id, scope) do
             {:ok, neighbors} ->
               unvisited =
                 Enum.reject(neighbors, fn n -> MapSet.member?(vis_acc, n.neighbor_id) end)
@@ -496,18 +499,18 @@ defmodule OptimalEngine.Insight.Simulate do
           end
         end)
 
-      bfs(next_frontier, next_visited, max_depth, acc ++ new_entries, ws)
+      bfs(next_frontier, next_visited, max_depth, acc ++ new_entries, scope)
     end
   end
 
-  defp fetch_neighbors(context_id, ws) do
+  defp fetch_neighbors(context_id, {tenant_id, ws}) do
     sql = """
     SELECT source_id, target_id, relation, weight
-    FROM edges
-    WHERE (source_id = ?1 OR target_id = ?1) AND workspace_id = ?2
+    FROM graph_edges
+    WHERE tenant_id = ?2 AND workspace_id = ?3 AND (source_id = ?1 OR target_id = ?1)
     """
 
-    case Store.raw_query(sql, [context_id, ws]) do
+    case Store.raw_query(sql, [context_id, tenant_id, ws]) do
       {:ok, rows} ->
         neighbors =
           rows
@@ -641,7 +644,7 @@ defmodule OptimalEngine.Insight.Simulate do
   # Private: Critical Dependencies
   # ---------------------------------------------------------------------------
 
-  defp find_critical_dependencies(%{entity: entity}, traversal, node_totals, ws)
+  defp find_critical_dependencies(%{entity: entity}, traversal, node_totals, {_tenant_id, ws})
        when is_binary(entity) do
     # A critical dependency exists when the entity appears in >50% of a node's contexts
     sql = """
@@ -683,17 +686,18 @@ defmodule OptimalEngine.Insight.Simulate do
     end
   end
 
-  defp find_critical_dependencies(%{node: node}, _traversal, node_totals, ws)
+  defp find_critical_dependencies(%{node: node}, _traversal, node_totals, {tenant_id, ws})
        when is_binary(node) do
     # For a node, critical deps are cross_ref edges pointing to other nodes
     sql = """
     SELECT DISTINCT c.node as src_node, e.target_id as target
-    FROM edges e
+    FROM graph_edges e
     JOIN contexts c ON c.id = e.source_id
     WHERE c.node = ?1 AND e.relation = 'cross_ref' AND c.workspace_id = ?2
+      AND e.tenant_id = ?3 AND e.workspace_id = ?2
     """
 
-    case Store.raw_query(sql, [node, ws]) do
+    case Store.raw_query(sql, [node, ws, tenant_id]) do
       {:ok, rows} ->
         deps =
           Enum.map(rows, fn [src_node, target] ->
@@ -714,7 +718,7 @@ defmodule OptimalEngine.Insight.Simulate do
     end
   end
 
-  defp find_critical_dependencies(_mutation, _traversal, _node_totals, _ws), do: {:ok, []}
+  defp find_critical_dependencies(_mutation, _traversal, _node_totals, _scope), do: {:ok, []}
 
   defp find_bridge_dependencies(entity, traversal) do
     # Contexts that appear in 2+ different nodes via this entity's traversal

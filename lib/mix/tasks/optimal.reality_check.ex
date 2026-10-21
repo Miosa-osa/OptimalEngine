@@ -214,7 +214,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     tables = [
       "contexts",
       "entities",
-      "edges",
+      "graph_edges",
       "chunks",
       "classifications",
       "intents",

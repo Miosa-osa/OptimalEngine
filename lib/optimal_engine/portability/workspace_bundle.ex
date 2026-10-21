@@ -37,12 +37,18 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   a failed merge can be run again (it only adds missing rows). `finalize_move/4` then removes the
   workspace from the source Engine and records a redirect, so `optimal://`
   citations keep resolving (`resolve/2`).
+
+  A table replaced by a successor (`Store.Migrations.superseded_tables/0`,
+  such as `edges` by `graph_edges`) is not exported, and the rows an older
+  Engine's bundle carries for it are imported into its successor, keeping
+  rows the target already holds.
   """
 
   require Logger
 
   alias OptimalEngine.Authority.CanonicalJSON
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Migrations
   alias OptimalEngine.Sync.Capture
   alias OptimalEngine.Workspace
   alias OptimalEngine.Workspace.Filesystem
@@ -279,7 +285,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     File.mkdir_p!(Path.join(staging, "tables"))
 
     scoped =
-      for table <- workspace_tables() do
+      for table <- workspace_tables() -- Map.keys(Migrations.superseded_tables()) do
         columns = columns(table)
         {where, params} = scope_clause(table, columns, tenant_id, workspace_id)
 
@@ -544,13 +550,18 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # Every column a bundle carries must exist in the target Engine.
   defp compatible(manifest, _staging) do
     missing =
-      for table <- manifest["tables"],
-          not table_exists?(table["name"]) or
-            table["columns"] -- Enum.map(columns(table["name"]), &elem(&1, 0)) != [] do
+      for table <- manifest["tables"], not fits?(table) do
         table["name"]
       end
 
     if missing == [], do: :ok, else: {:error, {:incompatible_tables, missing}}
+  end
+
+  defp fits?(table) do
+    target = target_table(table["name"])
+
+    table_exists?(target) and
+      table["columns"] -- Enum.map(columns(target), &elem(&1, 0)) == []
   end
 
   defp write_rows(manifest, staging, plan, opts) do
@@ -560,14 +571,17 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     # Schema reads go through the Store process, so they happen before any
     # transaction (which runs inside that process).
-    drops = Map.new(names, &{&1, autoincrement_key(columns(&1))})
-    keys = Map.new(names, &{&1, foreign_keys(&1)})
+    drops = Map.new(names, &{&1, autoincrement_key(columns(target_table(&1)))})
+    keys = Map.new(names, &{&1, foreign_keys(target_table(&1))})
 
     result =
       names
       |> parents_first(keys)
       |> Enum.reduce_while({:ok, %{}}, fn name, {:ok, counts} ->
-        verb = if name in @keep_existing, do: "INSERT OR IGNORE", else: insert
+        target = target_table(name)
+
+        verb =
+          if name in @keep_existing or target != name, do: "INSERT OR IGNORE", else: insert
 
         rows =
           Path.join([staging, "tables", name <> ".jsonl"])
@@ -576,7 +590,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           |> Stream.map(&(&1 |> rewrite(name, plan) |> Map.drop(drops[name])))
           |> self_parents_first(Enum.filter(keys[name], &(&1.table == name)))
 
-        case write_batches(name, rows, verb, batch_rows) do
+        case write_batches(target, rows, verb, batch_rows) do
           {:ok, written} -> {:cont, {:ok, Map.put(counts, name, written)}}
           {:error, reason} -> {:halt, {:error, {:import_failed, name, reason}}}
         end
@@ -808,6 +822,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     Enum.map(rows, fn [name, type, pk] -> {name, String.upcase(type || ""), pk} end)
   end
 
+  # Rows a bundle carries for a superseded table go to its successor.
+  defp target_table(name), do: Map.get(Migrations.superseded_tables(), name, name)
+
   defp table_exists?(table) do
     match?(
       {:ok, [_]},
@@ -829,6 +846,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp scope_clause(table, columns, tenant_id, workspace_id) do
     cond do
       not Enum.any?(columns, &(elem(&1, 0) == "tenant_id")) ->
+        {"workspace_id = ?1", [workspace_id]}
+
+      # A superseded table's tenant_id was never written, so its rows are found
+      # by workspace alone (workspace ids are unique across tenants).
+      Map.has_key?(Migrations.superseded_tables(), table) ->
         {"workspace_id = ?1", [workspace_id]}
 
       table == "entity_mentions" ->

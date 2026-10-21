@@ -117,15 +117,14 @@ defmodule OptimalEngine.API.Router do
     })
   end
 
-  # The analyses below read the edge table, which carries no tenant of its own,
-  # so each answers only for a workspace registered to the caller's tenant
-  # (`404` otherwise, as for a workspace that does not exist): an id nobody
-  # registered can hold the edges of two tenants at once.
+  # The analyses below answer only for a workspace registered to the caller's
+  # tenant (`404` otherwise, as for a workspace that does not exist), and read
+  # its graph edges in that tenant.
   get "/api/graph/hubs" do
     workspace = query_param(conn, "workspace", "default")
 
     with_registered_workspace(conn, workspace, fn ->
-      {:ok, hubs} = GraphAnalyzer.hubs(workspace_id: workspace)
+      {:ok, hubs} = GraphAnalyzer.hubs(request_scope(conn, workspace))
       json(conn, %{hubs: format_hubs(hubs)})
     end)
   end
@@ -139,7 +138,9 @@ defmodule OptimalEngine.API.Router do
 
     with_registered_workspace(conn, workspace, fn ->
       {:ok, triangles} =
-        GraphAnalyzer.triangles(limit: limit, workspace_id: workspace, skip_llm: skip_llm)
+        GraphAnalyzer.triangles(
+          [limit: limit, skip_llm: skip_llm] ++ request_scope(conn, workspace)
+        )
 
       json(conn, %{triangles: format_triangles(triangles)})
     end)
@@ -149,7 +150,7 @@ defmodule OptimalEngine.API.Router do
     workspace = query_param(conn, "workspace", "default")
 
     with_registered_workspace(conn, workspace, fn ->
-      {:ok, clusters} = GraphAnalyzer.clusters(workspace_id: workspace)
+      {:ok, clusters} = GraphAnalyzer.clusters(request_scope(conn, workspace))
       json(conn, %{clusters: format_clusters(clusters)})
     end)
   end
@@ -696,20 +697,27 @@ defmodule OptimalEngine.API.Router do
   # Graph statistics for one workspace in the caller's tenant: the one named,
   # or the implicit default (WorkspaceAuthPlug authorizes either), the report
   # `mix optimal.graph` prints: edge counts by relation, the most connected
-  # entities, and the newest edges.
+  # entities, and the newest edges. `graph_edges` says whether the workspace
+  # still needs the graph backfill of its upgrade (Graph.backfill_status/1):
+  # `backfill_needed`, `legacy_edges` (its rows in the legacy edges table) and
+  # `edges` (its graph edges in the tenant).
   get "/api/maintenance/graph" do
     tenant_id = conn.assigns[:current_tenant] || "default"
     workspace = conn.assigns[:workspace_id] || "default"
 
     with {:ok, %{id: ws, tenant_id: ^tenant_id}} <- OptimalEngine.Workspace.get(workspace),
-         {:ok, edges} <- OptimalEngine.Graph.stats(workspace_id: ws),
-         {:ok, top} <- OptimalEngine.Graph.top_entities(10, workspace_id: ws),
-         {:ok, samples} <- OptimalEngine.Graph.sample_edges(8, workspace_id: ws) do
+         scope = [workspace_id: ws, tenant_id: tenant_id],
+         {:ok, edges} <- OptimalEngine.Graph.stats(scope),
+         {:ok, top} <- OptimalEngine.Graph.top_entities(10, scope),
+         {:ok, samples} <- OptimalEngine.Graph.sample_edges(8, scope),
+         {:ok, backfill} <- OptimalEngine.Graph.backfill_status(ws),
+         {:ok, count} <- OptimalEngine.Graph.count(scope) do
       json(conn, %{
         workspace_id: ws,
         edges: edges,
         top_entities: Enum.map(top, fn {id, count} -> %{id: id, connections: count} end),
-        sample_edges: samples
+        sample_edges: samples,
+        graph_edges: Map.put(backfill, :edges, count)
       })
     else
       {:error, reason} when reason != :not_found ->
@@ -3032,7 +3040,7 @@ defmodule OptimalEngine.API.Router do
     if not is_list(items) do
       send_resp(conn, 400, Jason.encode!(%{error: "memories must be a list"}))
     else
-      case OptimalEngine.Batch.import_memories(items, workspace_id: workspace_id) do
+      case OptimalEngine.Batch.import_memories(items, request_scope(conn, workspace_id)) do
         {:ok, summary} -> json(conn, summary)
       end
     end
@@ -3045,8 +3053,7 @@ defmodule OptimalEngine.API.Router do
 
     guarded_read(conn, fn ->
       case OptimalEngine.Batch.read_signals(
-             workspace_id: workspace_id,
-             reader: Reader.scope(conn, ceiling: true)
+             [reader: Reader.scope(conn, ceiling: true)] ++ request_scope(conn, workspace_id)
            ) do
         {:ok, signals, withheld} ->
           json(conn, withheld_note(%{workspace_id: workspace_id, signals: signals}, withheld))
@@ -3064,8 +3071,7 @@ defmodule OptimalEngine.API.Router do
 
     guarded_read(conn, fn ->
       case OptimalEngine.Batch.read_memories(
-             workspace_id: workspace_id,
-             reader: Reader.scope(conn, ceiling: true)
+             [reader: Reader.scope(conn, ceiling: true)] ++ request_scope(conn, workspace_id)
            ) do
         {:ok, memories, withheld} ->
           json(conn, withheld_note(%{workspace_id: workspace_id, memories: memories}, withheld))
@@ -3080,12 +3086,11 @@ defmodule OptimalEngine.API.Router do
   # Returns full snapshot: {workspace_id, signals, memories, wiki, config}
   get "/api/batch/export/workspace" do
     workspace_id = query_param(conn, "workspace", "default")
-    tenant_id = query_param(conn, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
 
     guarded_read(conn, fn ->
-      case OptimalEngine.Batch.read_workspace(workspace_id,
-             tenant_id: tenant_id,
-             reader: Reader.scope(conn, ceiling: true)
+      case OptimalEngine.Batch.read_workspace(
+             workspace_id,
+             [reader: Reader.scope(conn, ceiling: true)] ++ request_scope(conn, workspace_id)
            ) do
         {:ok, snapshot, withheld} -> json(conn, withheld_note(snapshot, withheld))
         {:error, _reason} -> export_failed(conn)
@@ -4882,6 +4887,13 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # The graph analyzer and batch routes read and write in the requester's
+  # tenant as well as the requested workspace (OptimalEngine.Graph.scope/1), so
+  # rows another tenant keeps under the same workspace id read as absent even
+  # if the request got past WorkspaceAuthPlug.
+  defp request_scope(conn, workspace),
+    do: [workspace_id: workspace, tenant_id: conn.assigns[:current_tenant] || "default"]
+
   # ---------------------------------------------------------------------------
   # Helpers: data fetching (raw SQL via Store.raw_query/2)
   # ---------------------------------------------------------------------------
@@ -4981,9 +4993,10 @@ defmodule OptimalEngine.API.Router do
     # endpoints to live in the requested workspace.
     sql = """
     SELECT e.source_id AS source, c.id AS target
-    FROM edges e
+    FROM graph_edges e
     JOIN contexts c ON c.node = e.target_id AND c.workspace_id = ?1 AND c.tenant_id = ?2
-    WHERE e.relation = 'cross_ref'
+    WHERE e.tenant_id = ?2 AND e.workspace_id = ?1
+      AND e.relation = 'cross_ref'
       AND EXISTS (
         SELECT 1 FROM contexts WHERE id = e.source_id AND workspace_id = ?1 AND tenant_id = ?2
       )
@@ -5080,9 +5093,10 @@ defmodule OptimalEngine.API.Router do
     case Store.raw_query(
            """
            SELECT DISTINCT e.source_id, e.target_id, e.relation, e.weight
-           FROM edges e
+           FROM graph_edges e
            JOIN contexts c ON (c.id = e.source_id OR c.id = e.target_id)
            WHERE c.node = ?1 AND c.workspace_id = ?2 AND c.tenant_id = ?3
+             AND e.tenant_id = ?3 AND e.workspace_id = ?2
            LIMIT 200
            """,
            [node_id, workspace_id, tenant_id]

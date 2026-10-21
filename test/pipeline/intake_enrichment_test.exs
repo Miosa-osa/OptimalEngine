@@ -53,7 +53,7 @@ defmodule OptimalEngine.Pipeline.IntakeEnrichmentTest do
 
   defp non_lives_in_edges_for(workspace_id) do
     case Store.raw_query(
-           "SELECT relation FROM edges WHERE workspace_id = ?1 AND relation <> 'lives_in'",
+           "SELECT relation FROM graph_edges WHERE workspace_id = ?1 AND relation <> 'lives_in'",
            [workspace_id]
          ) do
       {:ok, rows} -> rows

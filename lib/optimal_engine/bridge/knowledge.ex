@@ -4,23 +4,29 @@ defmodule OptimalEngine.Bridge.Knowledge do
 
   ## Design
 
-  Graph queries (`graph_boost/2`, `context_for/1`) query SQLite edges directly —
-  no GenServer hop, no ETS copy. Fast and simple.
+  Graph queries (`graph_boost/3`, `context_for/2`) query SQLite graph edges
+  directly: no GenServer hop, no ETS copy. Fast and simple.
 
-  OWL reasoning (`materialize/0`) is on-demand only: lazily opens a OptimalEngine.Knowledge
+  OWL reasoning (`materialize/1`) is on-demand only: lazily opens a OptimalEngine.Knowledge
   store, syncs edges, runs the reasoner, then returns. This is the ONE time we
-  duplicate data into ETS — because OWL 2 RL needs a triple store to reason over.
+  duplicate data into ETS, because OWL 2 RL needs a triple store to reason over.
+
+  Every query reads one tenant's workspace (`:workspace_id`, default
+  `"default"`, and `:tenant_id`, default the workspace's tenant; see
+  `OptimalEngine.Graph.scope/1`), so another workspace's or tenant's edges
+  never boost, describe, or feed reasoning about this one.
 
   ## Integration points
 
-  - `graph_boost/2` — Boosts search results by graph connectivity (queries SQLite directly)
-  - `context_for/1` — Builds markdown context for a topic (queries SQLite directly)
-  - `materialize/0` — Syncs edges to OptimalEngine.Knowledge, runs OWL 2 RL, returns inferred count
-  - `sync_and_materialize/0` — Same as materialize, explicit name for indexer use
+  - `graph_boost/3` - Boosts search results by graph connectivity (queries SQLite directly)
+  - `context_for/2` - Builds markdown context for a topic (queries SQLite directly)
+  - `materialize/1` - Syncs edges to OptimalEngine.Knowledge, runs OWL 2 RL, returns inferred count
+  - `sync_and_materialize/1` - Same as materialize, explicit name for indexer use
   """
 
   require Logger
 
+  alias OptimalEngine.Graph
   alias OptimalEngine.Store
 
   @store_name :optimal_knowledge
@@ -32,15 +38,16 @@ defmodule OptimalEngine.Bridge.Knowledge do
   @doc """
   Boosts search results that are connected in the knowledge graph.
 
-  Queries SQLite `edges` table directly — no GenServer, no ETS copy.
-  For each result, checks if its entities appear connected to the query terms.
+  Queries the SQLite `graph_edges` table directly: no GenServer, no ETS copy.
+  For each result, checks if its entities appear connected to the query terms
+  in the results' workspace (`opts` as the moduledoc describes).
   Connected results get a score boost.
   """
-  @spec graph_boost([map()], String.t()) :: [map()]
-  def graph_boost(results, query) when is_list(results) and is_binary(query) do
+  @spec graph_boost([map()], String.t(), keyword()) :: [map()]
+  def graph_boost(results, query, opts \\ []) when is_list(results) and is_binary(query) do
     terms = query |> String.downcase() |> String.split(~r/\s+/, trim: true)
 
-    connected_entities = find_connected_entities(terms)
+    connected_entities = find_connected_entities(terms, Graph.scope(opts))
 
     if MapSet.size(connected_entities) == 0 do
       results
@@ -71,17 +78,21 @@ defmodule OptimalEngine.Bridge.Knowledge do
   Builds a structured context snapshot for a given entity/topic.
   Returns a markdown-formatted string ready for LLM injection.
 
-  Queries SQLite edges directly for relationships, then formats as markdown.
+  Queries SQLite graph edges of one workspace directly for relationships
+  (`opts` as the moduledoc describes), then formats as markdown.
   """
-  @spec context_for(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def context_for(entity) when is_binary(entity) do
-    # Find all edges where entity is source or target
-    outgoing_sql = "SELECT source_id, relation, target_id FROM edges WHERE source_id LIKE ?1"
-    incoming_sql = "SELECT source_id, relation, target_id FROM edges WHERE target_id LIKE ?1"
-    pattern = "%#{entity}%"
+  @spec context_for(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def context_for(entity, opts \\ []) when is_binary(entity) do
+    {tenant_id, ws} = Graph.scope(opts)
+    scoped = "FROM graph_edges WHERE tenant_id = ?2 AND workspace_id = ?3"
 
-    with {:ok, out_rows} <- Store.raw_query(outgoing_sql, [pattern]),
-         {:ok, in_rows} <- Store.raw_query(incoming_sql, [pattern]) do
+    # Find all edges where entity is source or target
+    outgoing_sql = "SELECT source_id, relation, target_id #{scoped} AND source_id LIKE ?1"
+    incoming_sql = "SELECT source_id, relation, target_id #{scoped} AND target_id LIKE ?1"
+    params = ["%#{entity}%", tenant_id, ws]
+
+    with {:ok, out_rows} <- Store.raw_query(outgoing_sql, params),
+         {:ok, in_rows} <- Store.raw_query(incoming_sql, params) do
       all_edges = out_rows ++ in_rows
 
       if all_edges == [] do
@@ -101,26 +112,65 @@ defmodule OptimalEngine.Bridge.Knowledge do
 
   @doc """
   Syncs SQLite edges into a temporary OptimalEngine.Knowledge store and runs OWL 2 RL
-  materialization. This is the ONE time we sync — after full reindex.
+  materialization. This is the ONE time we sync, after full reindex.
 
   Returns `{:ok, inferred_count}` or `{:error, reason}`.
   """
-  @spec materialize() :: {:ok, non_neg_integer()} | {:error, term()}
-  def materialize do
-    sync_and_materialize()
+  @spec materialize(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def materialize(opts \\ []) do
+    sync_and_materialize(opts)
   end
 
   @doc """
   Syncs edges from SQLite to OptimalEngine.Knowledge ETS store, then runs OWL reasoning.
   Called after full index to make the knowledge graph smarter.
+
+  With `:workspace_id` it reasons over that workspace (`opts` as the
+  moduledoc describes). Without it, every tenant's workspace is reasoned
+  over in a store of its own, so no inference joins two workspaces' edges;
+  the inferred counts are summed.
   """
-  @spec sync_and_materialize() :: {:ok, non_neg_integer()} | {:error, term()}
-  def sync_and_materialize do
+  @spec sync_and_materialize(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def sync_and_materialize(opts \\ []) do
     Logger.info("[Bridge.Knowledge] Starting on-demand OWL materialization...")
 
+    scopes =
+      if Keyword.get(opts, :workspace_id),
+        do: {:ok, [Graph.scope(opts)]},
+        else: edge_scopes()
+
+    with {:ok, scopes} <- scopes do
+      Enum.reduce_while(scopes, {:ok, 0}, fn scope, {:ok, total} ->
+        case materialize_scope(scope) do
+          {:ok, inferred} -> {:cont, {:ok, total + inferred}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    end
+  rescue
+    e ->
+      Logger.error("[Bridge.Knowledge] Materialization failed: #{inspect(e)}")
+      {:error, e}
+  end
+
+  @doc """
+  Returns the triple count by counting graph edges in SQLite: every edge, or
+  those `OptimalEngine.Graph.count/1` selects with `opts`.
+  """
+  @spec count(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def count(opts \\ []), do: Graph.count(opts)
+
+  defp edge_scopes do
+    case Store.raw_query("SELECT DISTINCT tenant_id, workspace_id FROM graph_edges", []) do
+      {:ok, rows} -> {:ok, Enum.map(rows, fn [tenant_id, ws] -> {tenant_id, ws} end)}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp materialize_scope(scope) do
     with {:ok, store} <- open_knowledge_store() do
       try do
-        with {:ok, synced} <- sync_edges_to_store(store) do
+        with {:ok, synced} <- sync_edges_to_store(store, scope) do
           result = run_materialization(store)
           Logger.info("[Bridge.Knowledge] Materialized #{synced} edges: #{inspect(result)}")
           result
@@ -129,35 +179,24 @@ defmodule OptimalEngine.Bridge.Knowledge do
         OptimalEngine.Knowledge.close(store)
       end
     end
-  rescue
-    e ->
-      Logger.error("[Bridge.Knowledge] Materialization failed: #{inspect(e)}")
-      {:error, e}
-  end
-
-  @doc "Returns the triple count by counting edges in SQLite."
-  @spec count() :: {:ok, non_neg_integer()} | {:error, term()}
-  def count do
-    case Store.raw_query("SELECT COUNT(*) FROM edges", []) do
-      {:ok, [[count]]} -> {:ok, count}
-      {:error, _} = err -> err
-    end
   end
 
   # ---------------------------------------------------------------------------
   # Private: SQLite-based graph queries
   # ---------------------------------------------------------------------------
 
-  defp find_connected_entities(terms) do
+  defp find_connected_entities(terms, {tenant_id, ws}) do
+    scoped = "FROM graph_edges WHERE tenant_id = ?2 AND workspace_id = ?3"
+
     terms
     |> Enum.flat_map(fn term ->
-      pattern = "%#{term}%"
+      params = ["%#{term}%", tenant_id, ws]
 
       # Find entities connected as objects (term is subject)
       objects =
         case Store.raw_query(
-               "SELECT DISTINCT target_id FROM edges WHERE LOWER(source_id) LIKE ?1",
-               [pattern]
+               "SELECT DISTINCT target_id #{scoped} AND LOWER(source_id) LIKE ?1",
+               params
              ) do
           {:ok, rows} -> Enum.map(rows, fn [target] -> target end)
           _ -> []
@@ -166,8 +205,8 @@ defmodule OptimalEngine.Bridge.Knowledge do
       # Find entities connected as subjects (term is object)
       subjects =
         case Store.raw_query(
-               "SELECT DISTINCT source_id FROM edges WHERE LOWER(target_id) LIKE ?1",
-               [pattern]
+               "SELECT DISTINCT source_id #{scoped} AND LOWER(target_id) LIKE ?1",
+               params
              ) do
           {:ok, rows} -> Enum.map(rows, fn [source] -> source end)
           _ -> []
@@ -210,8 +249,11 @@ defmodule OptimalEngine.Bridge.Knowledge do
     )
   end
 
-  defp sync_edges_to_store(store) do
-    case Store.raw_query("SELECT source_id, relation, target_id FROM edges", []) do
+  defp sync_edges_to_store(store, {tenant_id, ws}) do
+    case Store.raw_query(
+           "SELECT source_id, relation, target_id FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2",
+           [tenant_id, ws]
+         ) do
       {:ok, rows} ->
         triples =
           Enum.map(rows, fn [source, relation, target] ->
