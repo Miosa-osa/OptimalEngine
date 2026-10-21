@@ -181,9 +181,10 @@ defmodule OptimalEngine.Sync do
 
     mutations =
       for(
-        [_seq, _id, device, type | _] = row <- rows,
+        [_seq, id, device, type, _entity, _op, _payload, _hash, key, _at] = row <- rows,
         device != requester,
         Capture.replicated?(type),
+        change_row?(id, device, key),
         do: to_mutation(row)
       )
       |> releasable(tenant_id, workspace_id, max_class)
@@ -1519,6 +1520,36 @@ defmodule OptimalEngine.Sync do
   # The ledger key of a change this Engine applied from a peer.
   def applied_key(id), do: "peer:" <> id
 
+  @doc """
+  Whether a ledger row is a change of a row: written by change capture
+  (`mut_<device>_<n>`, keyed `<device>:<n>`) or by a sync apply (keyed
+  `peer:<id>`). Storage mutation entries share the ledger and are neither, so
+  only these rows are served, pushed, counted as pending, or taken for this
+  Engine's own change of a row, whatever entity type an entry names.
+  """
+  @spec change_row?(term(), term(), term()) :: boolean()
+  def change_row?(id, device, key) when is_binary(id) and is_binary(device) and is_binary(key) do
+    prefix = device <> ":"
+
+    key == applied_key(id) or
+      (String.starts_with?(key, prefix) and
+         id == "mut_" <> device <> "_" <> String.replace_prefix(key, prefix, ""))
+  end
+
+  def change_row?(_id, _device, _key), do: false
+
+  # `change_row?/3` as a condition on `sync_mutations`, or on the alias of it a
+  # join names.
+  defp change_row_sql(table \\ nil) do
+    [key, id, device] =
+      for column <- ["idempotency_key", "id", "device_id"],
+          do: if(table, do: "#{table}.#{column}", else: column)
+
+    "(#{key} = 'peer:' || #{id} OR " <>
+      "(substr(#{key}, 1, length(#{device}) + 1) = #{device} || ':' AND " <>
+      "#{id} = 'mut_' || #{device} || '_' || substr(#{key}, length(#{device}) + 2)))"
+  end
+
   # Every conflict says why: its kind (`concurrent_edit`, `fact_divergence`,
   # `unknown_base`) and, in `detail`, the local change's sequence and device, the
   # base it was judged against, the time of each side's change, and the
@@ -1762,7 +1793,7 @@ defmodule OptimalEngine.Sync do
              """
              SELECT sequence, occurred_at, payload, device_id, operation FROM sync_mutations
              WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = ?3 AND entity_id = ?4
-               AND sequence > ?5 AND #{device_sql}
+               AND sequence > ?5 AND #{device_sql} AND #{change_row_sql()}
              ORDER BY sequence DESC LIMIT 1
              """,
              [tenant_id, workspace_id, table, mutation["entity_id"], floor | devices]
@@ -2192,14 +2223,20 @@ defmodule OptimalEngine.Sync do
     if rows == [] do
       {:ok, totals}
     else
+      # Only rows that change capture or a sync apply wrote are sent; a storage
+      # mutation entry shares the ledger and never leaves as a change.
+      changes =
+        rows
+        |> Enum.map(&to_mutation/1)
+        |> Enum.filter(&change_row?(&1["id"], &1["device_id"], &1["idempotency_key"]))
+
       # A change of this Engine's that a change from elsewhere came after (the
       # peer's, or one it forwarded) was overwritten here by it: the other
       # Engine already has the winner, so it is not sent. What is sent stands
       # after everything this Engine took from the peer, or won against it.
       lost = lost_sequences(peer, rows)
 
-      {superseded, rest} =
-        rows |> Enum.map(&to_mutation/1) |> Enum.split_with(&Map.has_key?(lost, &1["sequence"]))
+      {superseded, rest} = Enum.split_with(changes, &Map.has_key?(lost, &1["sequence"]))
 
       Enum.each(superseded, &record_superseded(peer, &1, Map.fetch!(lost, &1["sequence"])))
 
@@ -2294,11 +2331,12 @@ defmodule OptimalEngine.Sync do
            AND r.device_id != m.device_id AND r.sequence > m.sequence
           WHERE m.tenant_id = ?1 AND m.workspace_id = ?2 AND m.device_id = ?3
             AND m.sequence BETWEEN ?4 AND ?5
+            AND #{change_row_sql("m")} AND #{change_row_sql("r")}
             AND r.sequence = (
               SELECT MAX(l.sequence) FROM sync_mutations l
               WHERE l.tenant_id = m.tenant_id AND l.workspace_id = m.workspace_id
                 AND l.entity_type = m.entity_type AND l.entity_id = m.entity_id
-                AND l.device_id != m.device_id)
+                AND l.device_id != m.device_id AND #{change_row_sql("l")})
           """,
           [
             peer.tenant_id,
@@ -2615,12 +2653,13 @@ defmodule OptimalEngine.Sync do
            """
            SELECT COUNT(*) FROM sync_mutations m
            WHERE m.tenant_id = ?1 AND m.workspace_id = ?2 AND m.sequence > ?3 AND m.device_id != ?4
-             AND m.entity_type IN (#{replicated})
+             AND m.entity_type IN (#{replicated}) AND #{change_row_sql("m")}
              AND NOT (m.device_id = ?5 AND EXISTS (
                SELECT 1 FROM sync_mutations r
                WHERE r.tenant_id = m.tenant_id AND r.workspace_id = m.workspace_id
                  AND r.entity_type = m.entity_type AND r.entity_id = m.entity_id
-                 AND r.device_id != m.device_id AND r.sequence > m.sequence))
+                 AND r.device_id != m.device_id AND r.sequence > m.sequence
+                 AND #{change_row_sql("r")}))
            """,
            [tenant_id, workspace_id, peer.last_pushed_seq, peer.peer_replica_id || "", replica_id()]
          ) do

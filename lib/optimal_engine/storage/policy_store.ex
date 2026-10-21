@@ -5,6 +5,13 @@ defmodule OptimalEngine.Storage.PolicyStore do
   Policies contain use-case choices and provider identifiers only. Credentials
   stay in environment variables or a secret manager and are referenced by
   name. Sync mutations are append-only, idempotent, and explicitly scoped.
+
+  A storage mutation shares the replication ledger with change capture and sync
+  applies, so it may not take their place: its entity type may not name a table
+  of this Engine (nor an `authority_*` table), and its idempotency key may not
+  be one of this Engine's capture keys (`<replica>:<n>`, `mut_<replica>_<n>`) or
+  an applied change's (`peer:<id>`). Replication never serves or pushes a
+  storage mutation, whatever it names (`OptimalEngine.Sync.change_row?/3`).
   """
 
   alias OptimalEngine.ReadScope
@@ -71,6 +78,8 @@ defmodule OptimalEngine.Storage.PolicyStore do
 
     with :ok <- require_fields(attrs, required),
          :ok <- validate_operation(attrs.operation),
+         :ok <- validate_entity_type(attrs.entity_type),
+         :ok <- validate_idempotency_key(Map.get(attrs, :idempotency_key)),
          {:ok, tenant_id, organization_id} <- workspace_scope(attrs.workspace_id) do
       payload = Map.get(attrs, :payload)
       payload_json = if is_nil(payload), do: nil, else: Jason.encode!(payload)
@@ -323,6 +332,36 @@ defmodule OptimalEngine.Storage.PolicyStore do
   defp validate_operation(operation) when operation in [:create, :update, :delete], do: :ok
   defp validate_operation(operation) when operation in ["create", "update", "delete"], do: :ok
   defp validate_operation(_), do: {:error, :invalid_operation}
+
+  # A table name is what replication and the gate read rows by; SQLite matches
+  # table names without regard to case.
+  defp validate_entity_type(type) when is_binary(type) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
+        [type]
+      )
+
+    if rows != [] or String.starts_with?(String.downcase(type), "authority_"),
+      do: {:error, :entity_type_names_a_table},
+      else: :ok
+  end
+
+  defp validate_entity_type(_type), do: {:error, :invalid_entity_type}
+
+  defp validate_idempotency_key(nil), do: :ok
+
+  defp validate_idempotency_key(key) when is_binary(key) do
+    replica = OptimalEngine.Sync.replica_id()
+
+    reserved? =
+      String.starts_with?(key, replica <> ":") or
+        String.starts_with?(key, "mut_" <> replica <> "_") or String.starts_with?(key, "peer:")
+
+    if reserved?, do: {:error, :reserved_idempotency_key}, else: :ok
+  end
+
+  defp validate_idempotency_key(_key), do: {:error, :invalid_idempotency_key}
 
   defp policy_from_row([
          workspace_id,
