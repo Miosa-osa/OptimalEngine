@@ -10,87 +10,41 @@ defmodule OptimalEngine.Retrieval.SearchDeterminismTest do
 
   use ExUnit.Case, async: false
 
-  import Plug.Test
+  import OptimalEngine.TestSupport.RetrievalFixtures
 
-  alias OptimalEngine.API.Router
-  alias OptimalEngine.Context
   alias OptimalEngine.Retrieval.{ContextAssembler, Grep, Search}
-  alias OptimalEngine.Store
 
   @as_of ~U[2026-10-20 12:00:00Z]
-  @stored_at ~U[2026-10-10 12:00:00Z]
+  @stored_at stored_at()
 
   setup do
-    token = "determinism#{System.unique_integer([:positive])}"
+    token = token()
     workspaces = ["#{token}-a", "#{token}-b"]
-
-    on_exit(fn ->
-      Store.raw_query("DELETE FROM contexts WHERE workspace_id IN (?1, ?2)", workspaces)
-    end)
-
+    on_exit(fn -> delete_workspaces(workspaces) end)
     {:ok, token: token, ws_a: Enum.at(workspaces, 0), ws_b: Enum.at(workspaces, 1)}
-  end
-
-  # One context. Title and content carry the token, so every context of a test
-  # matches with the same BM25 score; `node` is not indexed, so it tells two
-  # such contexts apart in a grep match.
-  defp insert(workspace, id, uri, token, opts \\ []) do
-    at = Keyword.get(opts, :modified_at, @stored_at)
-
-    :ok =
-      Store.insert_context(%Context{
-        id: id,
-        uri: uri,
-        type: :resource,
-        path: "#{id}.md",
-        title: "Determinism #{token}",
-        content: "#{token} shows how ties between equal contexts are broken",
-        l0_abstract: "abstract",
-        l1_overview: "overview",
-        node: Keyword.get(opts, :node, "determinism"),
-        created_at: at,
-        modified_at: at,
-        workspace_id: workspace
-      })
-  end
-
-  defp doc_uris(token, count) do
-    for n <- 1..count do
-      "optimal://nodes/determinism/#{token}/doc-#{n |> Integer.to_string() |> String.pad_leading(2, "0")}"
-    end
   end
 
   # The same contexts in two workspaces: `a` in uri order, `b` in the reverse.
   defp store_twice(token, ws_a, ws_b, count) do
-    uris = doc_uris(token, count)
+    uris = uris(token, count)
 
-    for {uri, n} <- Enum.with_index(uris, 1), do: insert(ws_a, "#{token}-a-#{n}", uri, token)
+    for {uri, n} <- Enum.with_index(uris, 1) do
+      insert_context(ws_a, "#{token}-a-#{n}", uri, token)
+    end
 
     for {uri, n} <- uris |> Enum.with_index(1) |> Enum.reverse() do
-      insert(ws_b, "#{token}-b-#{n}", uri, token)
+      insert_context(ws_b, "#{token}-b-#{n}", uri, token)
     end
 
     uris
   end
 
-  defp uris(results), do: Enum.map(results, & &1.uri)
+  defp uris_of(results), do: Enum.map(results, & &1.uri)
 
   defp exact(result), do: Map.get(result, :rank_score, result.score)
 
   defp scores(results) do
     Enum.map(results, &{&1.uri, &1.score, Map.get(&1, :rank_score)})
-  end
-
-  defp get(path) do
-    conn(:get, path)
-    |> put_peer_data(%{address: unique_loopback_address(), port: 0, ssl_cert: nil})
-    |> Router.call(Router.init([]))
-  end
-
-  # The API rate-limits per address; each request comes from its own.
-  defp unique_loopback_address do
-    n = System.unique_integer([:positive])
-    {127, rem(div(n, 65_536), 256), rem(div(n, 256), 256), rem(n, 254) + 1}
   end
 
   describe "contexts with identical text and timestamps" do
@@ -99,7 +53,7 @@ defmodule OptimalEngine.Retrieval.SearchDeterminismTest do
 
       for workspace <- [ctx.ws_a, ctx.ws_b], _run <- 1..3 do
         assert {:ok, results} = Search.search(ctx.token, workspace_id: workspace, limit: 20)
-        assert uris(results) == uris
+        assert uris_of(results) == uris
       end
     end
 
@@ -110,7 +64,7 @@ defmodule OptimalEngine.Retrieval.SearchDeterminismTest do
 
       for workspace <- [ctx.ws_a, ctx.ws_b] do
         assert {:ok, results} = Search.search(ctx.token, workspace_id: workspace, limit: 3)
-        assert uris(results) == Enum.take(uris, 3)
+        assert uris_of(results) == Enum.take(uris, 3)
       end
     end
 
@@ -145,7 +99,7 @@ defmodule OptimalEngine.Retrieval.SearchDeterminismTest do
                    as_of: @as_of
                  )
 
-        assert uris(results) == uris
+        assert uris_of(results) == uris
       end
     end
   end
@@ -158,19 +112,19 @@ defmodule OptimalEngine.Retrieval.SearchDeterminismTest do
     setup ctx do
       older = DateTime.add(@stored_at, -1, :second)
 
-      insert(
+      insert_context(
         ctx.ws_a,
         "#{ctx.token}-old",
-        "optimal://nodes/determinism/#{ctx.token}/a-old",
+        "optimal://nodes/ranking/#{ctx.token}/a-old",
         ctx.token,
         modified_at: older,
         node: "tb-old"
       )
 
-      insert(
+      insert_context(
         ctx.ws_a,
         "#{ctx.token}-new",
-        "optimal://nodes/determinism/#{ctx.token}/b-new",
+        "optimal://nodes/ranking/#{ctx.token}/b-new",
         ctx.token,
         modified_at: @stored_at,
         node: "tb-new"
@@ -195,9 +149,9 @@ defmodule OptimalEngine.Retrieval.SearchDeterminismTest do
     test "orders by the true score", ctx do
       assert {:ok, results} = Search.search(ctx.token, workspace_id: ctx.ws_a, as_of: ctx.as_of)
 
-      assert uris(results) == [
-               "optimal://nodes/determinism/#{ctx.token}/b-new",
-               "optimal://nodes/determinism/#{ctx.token}/a-old"
+      assert uris_of(results) == [
+               "optimal://nodes/ranking/#{ctx.token}/b-new",
+               "optimal://nodes/ranking/#{ctx.token}/a-old"
              ]
     end
 
@@ -211,11 +165,21 @@ defmodule OptimalEngine.Retrieval.SearchDeterminismTest do
     setup ctx do
       older = DateTime.add(@stored_at, -3 * 86_400, :second)
 
-      insert(ctx.ws_a, "#{ctx.token}-1", "optimal://nodes/determinism/#{ctx.token}/one", ctx.token,
+      insert_context(
+        ctx.ws_a,
+        "#{ctx.token}-1",
+        "optimal://nodes/ranking/#{ctx.token}/one",
+        ctx.token,
         modified_at: older
       )
 
-      insert(ctx.ws_a, "#{ctx.token}-2", "optimal://nodes/determinism/#{ctx.token}/two", ctx.token)
+      insert_context(
+        ctx.ws_a,
+        "#{ctx.token}-2",
+        "optimal://nodes/ranking/#{ctx.token}/two",
+        ctx.token
+      )
+
       :ok
     end
 
@@ -280,7 +244,12 @@ defmodule OptimalEngine.Retrieval.SearchDeterminismTest do
     end
 
     test "answers 400 when as_of is not a timestamp", ctx do
-      insert(ctx.ws_a, "#{ctx.token}-1", "optimal://nodes/determinism/#{ctx.token}/one", ctx.token)
+      insert_context(
+        ctx.ws_a,
+        "#{ctx.token}-1",
+        "optimal://nodes/ranking/#{ctx.token}/one",
+        ctx.token
+      )
 
       conn = get("/api/search?q=#{ctx.token}&workspace=#{ctx.ws_a}&as_of=yesterday")
       assert conn.status == 400
@@ -291,7 +260,12 @@ defmodule OptimalEngine.Retrieval.SearchDeterminismTest do
 
   describe "GET /api/grep" do
     test "answers 400 when as_of is not a timestamp", ctx do
-      insert(ctx.ws_a, "#{ctx.token}-1", "optimal://nodes/determinism/#{ctx.token}/one", ctx.token)
+      insert_context(
+        ctx.ws_a,
+        "#{ctx.token}-1",
+        "optimal://nodes/ranking/#{ctx.token}/one",
+        ctx.token
+      )
 
       conn = get("/api/grep?q=#{ctx.token}&workspace=#{ctx.ws_a}&as_of=yesterday")
       assert conn.status == 400

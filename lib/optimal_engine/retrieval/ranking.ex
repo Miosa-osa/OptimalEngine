@@ -84,6 +84,21 @@ defmodule OptimalEngine.Retrieval.Ranking do
   @spec sort([result()]) :: [result()]
   def sort(results) when is_list(results), do: Enum.sort_by(results, &key/1)
 
+  @doc """
+  Merges two lists that are each already best first into one, by the rule of
+  this module. A tie between an item of each goes by `uri`, then `id`, so the
+  merged list is the same whichever list an item came from.
+  """
+  @spec merge([result()], [result()]) :: [result()]
+  def merge(first, []), do: first
+  def merge([], second), do: second
+
+  def merge([a | rest_a] = first, [b | rest_b] = second) do
+    if before?(b, a),
+      do: [b | merge(first, rest_b)],
+      else: [a | merge(rest_a, second)]
+  end
+
   @doc "True when `a` ranks strictly ahead of `b`."
   @spec before?(result(), result()) :: boolean()
   def before?(a, b), do: key(a) < key(b)

@@ -8,6 +8,7 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
   """
 
   alias OptimalEngine.MemoryCore.{ID, JSON, ScopeEnvelope, SecurityLabels}
+  alias OptimalEngine.Retrieval.AsOf
   alias OptimalEngine.Store
 
   @version "associative-v2"
@@ -70,7 +71,7 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
         if time_mode == "all_valid",
           do: "",
           else:
-            " AND (valid_time_end IS NULL OR valid_time_end > datetime('now')) AND transaction_time_end IS NULL"
+            " AND (valid_time_end IS NULL OR valid_time_end > #{now_sql(opts)}) AND transaction_time_end IS NULL"
 
       sql = """
       SELECT id, cue, tag, from_object_type, from_object_id, to_object_type,
@@ -114,6 +115,15 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
         {:ok, rows} -> {:ok, Enum.map(rows, &from_row/1)}
         error -> error
       end
+    end
+  end
+
+  # The instant "current" is measured against: the request's `:as_of` if it
+  # fixed one, else the database clock.
+  defp now_sql(opts) do
+    case Keyword.get(opts, :as_of) do
+      %DateTime{} = as_of -> "datetime('#{AsOf.sql_literal(as_of)}')"
+      _ -> "datetime('now')"
     end
   end
 

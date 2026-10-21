@@ -48,6 +48,7 @@ defmodule OptimalEngine.Retrieval.RAG do
   """
 
   alias OptimalEngine.Retrieval.{
+    AsOf,
     BandwidthPlanner,
     Deliver,
     IntentAnalyzer,
@@ -103,9 +104,10 @@ defmodule OptimalEngine.Retrieval.RAG do
       retrieval reads only that tenant's contexts and memories
     * `:acl_absent` — `:allow | :deny` for resources with no ACL rows when the
       receiver has an `id` (its principal); defaults to the configured policy
-    * `:as_of` - the instant the search's time decay measures age against, a
-      `DateTime` or ISO 8601 string (default: now); see
-      `OptimalEngine.Retrieval.Search`
+    * `:as_of` - the instant the search's time decay (and, on the governed
+      path, the validity windows) measures age against, a `DateTime` or ISO 8601
+      string (default: now); one that is not valid answers
+      `{:error, {:invalid_as_of, value}}` (see `OptimalEngine.Retrieval.AsOf`)
     * `:workspace_id` — scope retrieval to a workspace. Defaults to the
       tenant's own default workspace (`"default"` for the default tenant,
       `"<tenant_id>:default"` otherwise) — never to a workspace shared
@@ -125,10 +127,14 @@ defmodule OptimalEngine.Retrieval.RAG do
   """
   @spec ask(String.t(), keyword()) :: {:ok, ask_result()} | {:error, term()}
   def ask(query, opts \\ []) when is_binary(query) do
-    cond do
-      not Search.available?() -> Search.unavailable()
-      Keyword.get(opts, :context_package, false) -> ask_context_package(query, opts)
-      true -> ask_legacy(query, opts)
+    if Search.available?() do
+      with {:ok, opts} <- AsOf.put_if_given(opts) do
+        if Keyword.get(opts, :context_package, false),
+          do: ask_context_package(query, opts),
+          else: ask_legacy(query, opts)
+      end
+    else
+      Search.unavailable()
     end
   end
 
@@ -236,6 +242,7 @@ defmodule OptimalEngine.Retrieval.RAG do
         token_budget: Keyword.get(opts, :token_budget, receiver.token_budget)
       ]
       |> maybe_put(:strategy, Keyword.get(opts, :strategy))
+      |> maybe_put(:as_of, Keyword.get(opts, :as_of))
       |> maybe_put(:reconstruction_steps, Keyword.get(opts, :reconstruction_steps))
       |> maybe_put(:reconstruction_tokens, Keyword.get(opts, :reconstruction_tokens))
 
@@ -421,10 +428,17 @@ defmodule OptimalEngine.Retrieval.RAG do
         end
       end)
 
+    # `Memory.list` returns the memories best first. Each carries the same
+    # displayed score, so the planner, which orders by exact score and then by
+    # uri, would pack them by memory id and drop by id under a tight budget.
+    # The exact score falls by position so their order is the list's order.
     items =
-      Enum.map(candidates, fn mem ->
+      candidates
+      |> Enum.with_index()
+      |> Enum.map(fn {mem, position} ->
         %{
           score: 1.0,
+          rank_score: 1.0 - position * 1.0e-6,
           content: mem.content || "",
           title: "Memory #{mem.id}",
           uri: "optimal://memory/#{mem.id}"

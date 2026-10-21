@@ -101,6 +101,46 @@ defmodule OptimalEngine.Retrieval.RankingTest do
     end
   end
 
+  describe "merge/2" do
+    test "interleaves two best-first lists by exact score" do
+      first = [hit("a", "u/a", 9.0), hit("c", "u/c", 5.0), hit("e", "u/e", 1.0)]
+      second = [hit("b", "u/b", 7.0), hit("d", "u/d", 3.0)]
+
+      assert first |> Ranking.merge(second) |> Enum.map(& &1.id) == ~w(a b c d e)
+    end
+
+    test "returns the other list when one is empty" do
+      list = [hit("a", "u/a", 1.0)]
+      assert Ranking.merge(list, []) == list
+      assert Ranking.merge([], list) == list
+      assert Ranking.merge([], []) == []
+    end
+
+    test "breaks a tie between the two lists by uri, whichever list an item is in" do
+      early = hit("2", "u/early", 1.0)
+      late = hit("1", "u/late", 1.0)
+
+      assert Enum.map(Ranking.merge([late], [early]), & &1.uri) == ["u/early", "u/late"]
+      assert Enum.map(Ranking.merge([early], [late]), & &1.uri) == ["u/early", "u/late"]
+    end
+
+    test "compares exact scores that print the same" do
+      lower = Ranking.put_score(hit("lower", "u/a", nil), 5.80518, 4)
+      higher = Ranking.put_score(hit("higher", "u/z", nil), 5.80524, 4)
+
+      assert lower.score == higher.score
+      assert Enum.map(Ranking.merge([lower], [higher]), & &1.id) == ["higher", "lower"]
+      assert Enum.map(Ranking.merge([higher], [lower]), & &1.id) == ["higher", "lower"]
+    end
+
+    test "keeps the order within each list" do
+      first = [hit("a1", "u/1", 2.0), hit("a2", "u/2", 2.0)]
+      second = [hit("b1", "u/3", 2.0), hit("b2", "u/4", 2.0)]
+
+      assert first |> Ranking.merge(second) |> Enum.map(& &1.id) == ~w(a1 a2 b1 b2)
+    end
+  end
+
   describe "before?/2" do
     test "is true only for a strictly better rank" do
       assert Ranking.before?(hit("a", "u/a", 2.0), hit("b", "u/b", 1.0))

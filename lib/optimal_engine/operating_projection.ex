@@ -75,7 +75,7 @@ defmodule OptimalEngine.OperatingProjection do
            SELECT id, content, metadata, created_at, updated_at
            FROM memories
            WHERE workspace_id = ?1 AND is_latest = 1 AND is_forgotten = 0
-           ORDER BY COALESCE(updated_at, created_at) DESC
+           ORDER BY COALESCE(updated_at, created_at) DESC, id
            LIMIT ?2
            """,
            [workspace_id, limit]

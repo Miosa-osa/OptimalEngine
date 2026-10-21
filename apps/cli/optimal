@@ -297,7 +297,7 @@ value_opt() {
       timezone | type | intent | scale | modality | path | action | resource | data-class | subject | \
       ttl | sender | domain | label | channel | text | since | name | workspaces | date | query | \
       audience | justification | for | slug | days | bandwidth | correlation-id | summary | out | \
-      after | until | format) return 0 ;;
+      after | until | format | as-of | mode) return 0 ;;
   esac
   return 1
 }
@@ -1065,8 +1065,9 @@ Loops
   loops extract [ws] [--since]
 
 Retrieve
-  search "query" [ws] [--limit] [--offset] [--type memory]   (alias: find)
-  grep "query" [ws] [--intent] [--scale] [--modality] [--literal] [--path]
+  search "query" [ws] [--limit] [--offset] [--type memory] [--as-of iso8601] [--mode lexical|hybrid|auto]
+                                                                        (alias: find)
+  grep "query" [ws] [--intent] [--scale] [--modality] [--literal] [--path] [--as-of iso8601]
   assemble "topic" [ws]            tiered context package with sources
   read <optimal://uri|id> [ws] [--tier l0|l1|full]
   ask "question" [ws]              answer across retrieved context (alias: rag)
@@ -1135,6 +1136,8 @@ Options
   -w, --workspace <id> workspace id (env OPTIMAL_WORKSPACE)
   --profile <name|path>  profile file (default ~/.config/optimal/profile; env OPTIMAL_PROFILE)
   -n, --limit <n>      result limit
+  --as-of <iso8601>    measure time decay against this instant (search, grep)
+  --mode <mode>        search retrieval mode: lexical, hybrid or auto (default auto)
   --field <a.b>        print one field of the JSON response (strings print as text)
   --pretty | --raw     force or disable pretty JSON (default: pretty on a terminal)
   --timeout <s>        request timeout in seconds (default 120)
@@ -1253,7 +1256,8 @@ case $CMD in
     too_many $# 2 "$CMD"
     _q=$(need_text "${1:-}" "search query") || exit
     use_ws "${2:-}"
-    get /api/search "" q "$_q" workspace "$WS" limit "${O_limit:-}" offset "${O_offset:-}" type "${O_type:-}"
+    get /api/search "" q "$_q" workspace "$WS" limit "${O_limit:-}" offset "${O_offset:-}" type "${O_type:-}" \
+      as_of "${O_as_of:-}" mode "${O_mode:-}"
     ;;
   grep)
     too_many $# 2 grep
@@ -1261,7 +1265,7 @@ case $CMD in
     use_ws "${2:-}"
     get /api/grep "" q "$_q" workspace "$WS" limit "${O_limit:-}" offset "${O_offset:-}" \
       intent "${O_intent:-}" scale "${O_scale:-}" modality "${O_modality:-}" \
-      literal "${O_literal:+true}" path "${O_path:-}"
+      literal "${O_literal:+true}" path "${O_path:-}" as_of "${O_as_of:-}"
     ;;
   assemble)
     too_many $# 2 assemble

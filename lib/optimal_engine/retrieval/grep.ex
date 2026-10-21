@@ -18,6 +18,7 @@ defmodule OptimalEngine.Retrieval.Grep do
   ## Match shape
 
       %{
+        uri:      "optimal://nodes/operation-weekly-review/pricing.md",
         slug:     "operation-weekly-review/pricing",  # context slug / node
         scale:    :section,              # document | section | paragraph | chunk
         intent:   :record_fact,          # one of the 10 canonical intent values
@@ -48,8 +49,10 @@ defmodule OptimalEngine.Retrieval.Grep do
   Matches are ordered by their exact chunk score, best first (`score` is that
   value rounded for display). Equal scores keep the order of the search hits
   they come from, which `OptimalEngine.Retrieval.Ranking` makes total, then
-  the order of the chunks within a hit (section, paragraph, chunk, by id). A
-  match has no `uri` of its own, so the rank of its hit is its tie-break.
+  the order of the chunks within a hit (section, paragraph, chunk, then by
+  position in the document, then id). The rank of the hit is the tie-break
+  between matches of different contexts; a match carries the `uri` of its
+  context so a caller can compare two lists.
   """
 
   require Logger
@@ -69,6 +72,7 @@ defmodule OptimalEngine.Retrieval.Grep do
   @valid_scales ~w(document section paragraph chunk)a
 
   @type match :: %{
+          uri: String.t() | nil,
           slug: String.t(),
           scale: atom(),
           intent: atom() | nil,
@@ -164,6 +168,7 @@ defmodule OptimalEngine.Retrieval.Grep do
   # to a document-level pseudo-chunk using the context's own content.
   defp explode_to_chunks(ctx, query, intent_filter, scale_filter, modality_filter, snippet_len) do
     node = Map.get(ctx, :node) || ""
+    uri = Map.get(ctx, :uri)
     sn = Map.get(ctx, :sn_ratio)
     base_score = Ranking.exact_score(ctx)
 
@@ -180,6 +185,7 @@ defmodule OptimalEngine.Retrieval.Grep do
         snippet ->
           [
             %{
+              uri: uri,
               slug: node,
               scale: :document,
               intent: nil,
@@ -204,6 +210,7 @@ defmodule OptimalEngine.Retrieval.Grep do
           snippet ->
             [
               %{
+                uri: uri,
                 slug: node,
                 scale: atomize(Map.get(chunk, :scale), :chunk),
                 intent: atomize(Map.get(chunk, :intent), nil),
@@ -254,7 +261,7 @@ defmodule OptimalEngine.Retrieval.Grep do
       WHEN 'paragraph' THEN 2
       WHEN 'chunk'     THEN 3
       ELSE 4
-    END, ch.id
+    END, ch.offset_bytes, ch.id
     LIMIT 50
     """
 

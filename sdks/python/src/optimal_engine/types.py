@@ -102,6 +102,7 @@ class GrepMatch(_Base):
     modality: str | None = None
     snippet: str | None = None
     score: float | None = None
+    uri: str | None = None
 
 
 class GrepResponse(_Base):

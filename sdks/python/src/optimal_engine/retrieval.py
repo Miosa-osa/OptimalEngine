@@ -9,7 +9,8 @@ question shape (Engramme-style cued recall).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Literal
 
 from .types import (
     AskResult,
@@ -24,6 +25,18 @@ from .types import (
 if TYPE_CHECKING:
     from ._async_client import AsyncOptimalEngine
     from ._client import OptimalEngine
+
+SearchMode = Literal["lexical", "hybrid", "auto"]
+"""Retrieval mode for ``search``: full text, required vector hop, or either."""
+
+
+def _as_of(value: str | datetime | None) -> str | None:
+    """Serialize an ``as_of`` instant as ISO 8601; a naive datetime is UTC."""
+    if value is None or isinstance(value, str):
+        return value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -50,19 +63,22 @@ class RetrievalMixin:
         audience: str = "default",
         format: ResponseFormat = "markdown",
         bandwidth: Bandwidth = "medium",
+        as_of: str | datetime | None = None,
     ) -> AskResult:
         """Ask the second brain. Wiki-first, hybrid-fallback, hot-cited envelope.
 
         Sends ``POST /api/rag``. Returns the rendered answer plus the
         citations the engine used to ground each claim.
         """
-        body = {
+        body: dict[str, Any] = {
             "query": query,
             "workspace": workspace or self.workspace,
             "audience": audience,
             "format": format,
             "bandwidth": bandwidth,
         }
+        if as_of is not None:
+            body["as_of"] = _as_of(as_of)
         data = self.post("/api/rag", json_body=body)
         return AskResult.model_validate(data)
 
@@ -72,6 +88,8 @@ class RetrievalMixin:
         *,
         workspace: str | None = None,
         limit: int = 10,
+        as_of: str | datetime | None = None,
+        mode: SearchMode | None = None,
     ) -> SearchResponse:
         """Full-text search across context-level metadata.
 
@@ -82,6 +100,8 @@ class RetrievalMixin:
             "q": query,
             "workspace": workspace or self.workspace,
             "limit": limit,
+            "as_of": _as_of(as_of),
+            "mode": mode,
         }
         data = self.get("/api/search", params=params)
         return SearchResponse.model_validate(data)
@@ -97,6 +117,7 @@ class RetrievalMixin:
         limit: int = 25,
         literal: bool = False,
         path: str | None = None,
+        as_of: str | datetime | None = None,
     ) -> GrepResponse:
         """Hybrid semantic + literal grep with the full signal trace.
 
@@ -112,6 +133,7 @@ class RetrievalMixin:
             "limit": limit,
             "literal": "true" if literal else "false",
             "path": path,
+            "as_of": _as_of(as_of),
         }
         data = self.get("/api/grep", params=params)
         return GrepResponse.model_validate(data)
@@ -257,15 +279,18 @@ class AsyncRetrievalMixin:
         audience: str = "default",
         format: ResponseFormat = "markdown",
         bandwidth: Bandwidth = "medium",
+        as_of: str | datetime | None = None,
     ) -> AskResult:
         """Ask the second brain. Wiki-first, hybrid-fallback, hot-cited envelope."""
-        body = {
+        body: dict[str, Any] = {
             "query": query,
             "workspace": workspace or self.workspace,
             "audience": audience,
             "format": format,
             "bandwidth": bandwidth,
         }
+        if as_of is not None:
+            body["as_of"] = _as_of(as_of)
         data = await self.post("/api/rag", json_body=body)
         return AskResult.model_validate(data)
 
@@ -275,12 +300,16 @@ class AsyncRetrievalMixin:
         *,
         workspace: str | None = None,
         limit: int = 10,
+        as_of: str | datetime | None = None,
+        mode: SearchMode | None = None,
     ) -> SearchResponse:
         """Full-text search across context-level metadata."""
         params = {
             "q": query,
             "workspace": workspace or self.workspace,
             "limit": limit,
+            "as_of": _as_of(as_of),
+            "mode": mode,
         }
         data = await self.get("/api/search", params=params)
         return SearchResponse.model_validate(data)
@@ -296,6 +325,7 @@ class AsyncRetrievalMixin:
         limit: int = 25,
         literal: bool = False,
         path: str | None = None,
+        as_of: str | datetime | None = None,
     ) -> GrepResponse:
         """Hybrid semantic + literal grep with the full signal trace."""
         params: dict[str, Any] = {
@@ -307,6 +337,7 @@ class AsyncRetrievalMixin:
             "limit": limit,
             "literal": "true" if literal else "false",
             "path": path,
+            "as_of": _as_of(as_of),
         }
         data = await self.get("/api/grep", params=params)
         return GrepResponse.model_validate(data)

@@ -35,7 +35,7 @@ defmodule OptimalEngine.OrgPolicy do
   alias OptimalEngine.API.{Actor, AuthorityPlug}
   alias OptimalEngine.Authority.{Decision, Evidence, LocalDeny, Settings}
   alias OptimalEngine.Memory.Versioned
-  alias OptimalEngine.Retrieval.Search
+  alias OptimalEngine.Retrieval.{Ranking, Search}
   alias OptimalEngine.{Scope, Workspace}
   alias OptimalEngine.Tenancy.Tenant
 
@@ -170,9 +170,10 @@ defmodule OptimalEngine.OrgPolicy do
   The org policy `workspace_id` reads that matches `query`: memory search hits
   in the org section that are live policy admitted by the same deny-wins rules
   as `for_workspace/3`, best match first. Each is labeled inherited
-  (`label/2`) and carries the search `score` and `title`. Empty for the org
-  section itself, whose policy its own search already finds. Options:
-  `:actor` (as in `for_workspace/3`), `:limit` (default 10).
+  (`label/2`) and carries the search `score`, its exact value `rank_score`, and
+  `title`. Empty for the org section itself, whose policy its own search already
+  finds. Options: `:actor` (as in `for_workspace/3`), `:limit` (default 10),
+  `:as_of` (passed to the search).
   """
   @spec matching(String.t(), String.t(), String.t(), keyword()) :: [map()]
   def matching(tenant_id, workspace_id, query, opts \\ []) do
@@ -180,12 +181,15 @@ defmodule OptimalEngine.OrgPolicy do
       %{inherited: true, org_workspace_id: org, memories: [_ | _] = memories} ->
         admitted = Map.new(memories, &{&1.id, &1})
 
-        case Search.search(query,
-               workspace_id: org,
-               tenant_id: tenant_id,
-               type: :memory,
-               memory_search_mode: :lexical,
-               limit: @max_memories
+        case Search.search(
+               query,
+               [
+                 workspace_id: org,
+                 tenant_id: tenant_id,
+                 type: :memory,
+                 memory_search_mode: :lexical,
+                 limit: @max_memories
+               ] ++ Keyword.take(opts, [:as_of])
              ) do
           {:ok, hits} ->
             hits
@@ -194,7 +198,11 @@ defmodule OptimalEngine.OrgPolicy do
             |> Enum.map(fn hit ->
               admitted
               |> Map.fetch!(hit.id)
-              |> Map.merge(%{score: hit.score, title: hit.title})
+              |> Map.merge(%{
+                score: hit.score,
+                rank_score: Ranking.exact_score(hit),
+                title: hit.title
+              })
             end)
 
           _ ->

@@ -258,6 +258,7 @@ export const engine = {
     query: string;
     workspace: string;
     audience?: string;
+    as_of?: string;
   }): Promise<RagResponse> {
     return request<RagResponse>("/api/rag", { method: "POST", body });
   },
@@ -266,6 +267,8 @@ export const engine = {
     q: string;
     workspace: string;
     limit?: number;
+    as_of?: string;
+    mode?: "lexical" | "hybrid" | "auto";
   }): Promise<SearchResult> {
     return request<SearchResult>("/api/search", { params });
   },
@@ -275,6 +278,7 @@ export const engine = {
     workspace: string;
     intent?: string;
     scale?: string;
+    as_of?: string;
   }): Promise<GrepResult> {
     return request<GrepResult>("/api/grep", { params });
   },
@@ -316,6 +320,7 @@ export const engine = {
       event?: string;
       thing?: string;
       actor?: string;
+      as_of?: string;
     },
   ): Promise<RecallResponse> {
     return request<RecallResponse>(`/api/recall/${action}`, { params });

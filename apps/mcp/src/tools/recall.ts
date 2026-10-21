@@ -59,8 +59,14 @@ export function registerRecall(server: McpServer): void {
         .describe(
           "Person or team whose open commitments to look up (used by 'owns').",
         ),
+      as_of: z
+        .string()
+        .optional()
+        .describe(
+          "ISO 8601 instant the time decay measures age against, for reproducible comparisons (e.g. 2026-10-20T12:00:00Z). Defaults to now.",
+        ),
     },
-    async ({ action, workspace, topic, event, thing, actor }) => {
+    async ({ action, workspace, topic, event, thing, actor, as_of }) => {
       // Validate that the right param is present for the chosen action
       if (action === "when" && !event && !topic) {
         throw new McpError(
@@ -88,6 +94,7 @@ export function registerRecall(server: McpServer): void {
           event,
           thing,
           actor,
+          as_of,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

@@ -30,10 +30,16 @@ defmodule OptimalEngine.Retrieval.Search do
   - `:acl_absent` — `:allow | :deny` for resources with no ACL rows (default
     `config :optimal_engine, :acl_absent`)
   - `:as_of` - the instant the time decay measures age against, a `DateTime`
-    or an ISO 8601 string (default: now; blank counts as absent). The clock is
-    read once per request. Pass it to repeat a query at the same instant, or
-    to compare two Engines holding the same data. A string that does not parse
-    answers `{:error, {:invalid_as_of, value}}`.
+    or an ISO 8601 string (default: now; a blank string counts as absent). The
+    clock is read once per request. Pass it to repeat a query at the same
+    instant, or to compare two Engines holding the same data. A value that does
+    not parse, or lies before 1970 or more than a year ahead, answers
+    `{:error, {:invalid_as_of, value}}` (`OptimalEngine.Retrieval.AsOf`).
+  - `:mode` - `:auto` (default), `:lexical` or `:hybrid`. `:auto` takes the
+    vector hop when the embedder answers and full text otherwise, so two Engines
+    can differ by whether an embedder is healthy. `:lexical` is full text only.
+    `:hybrid` requires the vector hop and answers `{:error, :hybrid_unavailable}`
+    when it cannot have it, instead of quietly falling back to full text.
 
   ## Ordering
 
@@ -43,7 +49,10 @@ defmodule OptimalEngine.Retrieval.Search do
   database queries behind the search end their `ORDER BY` in a unique column
   too, so a tie at the edge of the candidate window cannot change which
   contexts are considered. Two Engines with the same data, queried with the
-  same `:as_of`, return the same list.
+  same `:as_of` and `:mode`, return the same list.
+
+  The graph boost runs after the cut and changes the scores shown, not the
+  order: a boosted list is in the order of the scores before the boost.
 
   ## Backward compatibility
 
@@ -65,12 +74,17 @@ defmodule OptimalEngine.Retrieval.Search do
   alias OptimalEngine.Bridge.Knowledge, as: BridgeKnowledge
   alias OptimalEngine.Bridge.Memory, as: BridgeMemory
   alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
-  alias OptimalEngine.Retrieval.ProfileRouter
+  alias OptimalEngine.Retrieval.AsOf
   alias OptimalEngine.Retrieval.CandidatePortfolio
+  alias OptimalEngine.Retrieval.ProfileRouter
   alias OptimalEngine.Retrieval.Ranking
 
   @default_limit 10
   @default_half_life 720
+  # e^50 is about 5e21: far past any meaningful boost, far short of overflow.
+  # e^-700 is about 1e-304, still a number a score can be multiplied by.
+  @max_decay_exponent 50.0
+  @min_decay_exponent -700.0
   @memory_fts_stopwords MapSet.new(~w[
     a an and are as at be by do does for from how i in is it of on or that
     the this to was what when where which who why with
@@ -157,6 +171,12 @@ defmodule OptimalEngine.Retrieval.Search do
   @impl true
   def handle_call({:search, query, opts}, _from, state) do
     {:reply, run_search(query, opts, state), state}
+  rescue
+    # This process serves every tenant: one request that raises fails that
+    # request, not the process (and, past the restart intensity, the Engine).
+    error ->
+      Logger.error("[SearchEngine] search failed: " <> Exception.message(error))
+      {:reply, {:error, {:search_failed, Exception.message(error)}}, state}
   catch
     # A Store that does not answer in time (a long write, or the Engine
     # warming up after boot) fails this search, not the search process.
@@ -164,10 +184,10 @@ defmodule OptimalEngine.Retrieval.Search do
   end
 
   defp run_search(query, opts, state) do
-    with {:ok, as_of} <- resolve_as_of(Keyword.get(opts, :as_of)) do
+    with {:ok, opts} <- AsOf.put_resolved(opts) do
       # One instant for the whole request: the FTS stage, the hybrid stage and
       # a fallback between them all measure age against the same `as_of`.
-      do_run_search(query, Keyword.put(opts, :as_of, as_of), state)
+      do_run_search(query, opts, state)
     end
   end
 
@@ -195,15 +215,25 @@ defmodule OptimalEngine.Retrieval.Search do
         memory_only ->
           {:ok, []}
 
-        true ->
-          if vector_allowed and hybrid_enabled?() and TextEmbedder.healthy?() do
-            case do_hybrid_search(query, opts, state.topology) do
-              {:ok, _} = ok -> ok
-              {:error, _} -> do_search(query, opts, state.topology)
-            end
-          else
-            do_search(query, opts, state.topology)
+        # Pinned lexical: full text only, whatever the embedder is doing.
+        mode(opts) == :lexical ->
+          do_search(query, opts, state.topology)
+
+        # Pinned hybrid: no quiet fall back to full text. A request that asked
+        # for the vector hop and cannot have it is told so.
+        mode(opts) == :hybrid ->
+          if hybrid_enabled?() and TextEmbedder.healthy?(),
+            do: do_hybrid_search(query, opts, state.topology),
+            else: {:error, :hybrid_unavailable}
+
+        vector_allowed and hybrid_enabled?() and TextEmbedder.healthy?() ->
+          case do_hybrid_search(query, opts, state.topology) do
+            {:ok, _} = ok -> ok
+            {:error, _} -> do_search(query, opts, state.topology)
           end
+
+        true ->
+          do_search(query, opts, state.topology)
       end
 
     # Durable memories are stored in their own versioned table and FTS index.
@@ -228,31 +258,17 @@ defmodule OptimalEngine.Retrieval.Search do
     result
   end
 
-  # The instant a request measures age against. Reading the clock here, once,
-  # keeps a request internally consistent; a caller-supplied `:as_of` makes it
-  # repeatable.
-  defp resolve_as_of(nil), do: {:ok, DateTime.utc_now()}
-  defp resolve_as_of(""), do: {:ok, DateTime.utc_now()}
-  defp resolve_as_of(%DateTime{} = as_of), do: {:ok, as_of}
-
-  defp resolve_as_of(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, as_of, _offset} ->
-        {:ok, as_of}
-
-      {:error, :missing_offset} ->
-        # A timestamp without an offset is read as UTC, like stored times.
-        case DateTime.from_iso8601(value <> "Z") do
-          {:ok, as_of, _offset} -> {:ok, as_of}
-          {:error, _} -> {:error, {:invalid_as_of, value}}
-        end
-
-      {:error, _} ->
-        {:error, {:invalid_as_of, value}}
+  # Which retrieval path a request takes. `:auto` (the default) uses the vector
+  # hop when the embedder answers and full text otherwise; `:lexical` and
+  # `:hybrid` pin it, so a comparison between two Engines does not depend on
+  # which of them has a healthy embedder at that moment.
+  defp mode(opts) do
+    case Keyword.get(opts, :mode) do
+      value when value in [:lexical, "lexical"] -> :lexical
+      value when value in [:hybrid, "hybrid"] -> :hybrid
+      _ -> :auto
     end
   end
-
-  defp resolve_as_of(value), do: {:error, {:invalid_as_of, value}}
 
   # ---------------------------------------------------------------------------
   # Private: principal-scoped ACL filter
@@ -301,7 +317,7 @@ defmodule OptimalEngine.Retrieval.Search do
 
       merged =
         if type_filter == :memory do
-          Enum.take(memory_hits, limit)
+          memory_hits |> Ranking.sort() |> Enum.take(limit)
         else
           (context_hits ++ memory_hits)
           |> Enum.uniq_by(& &1.id)
@@ -343,11 +359,13 @@ defmodule OptimalEngine.Retrieval.Search do
       |> filter_memory_candidates(opts)
 
     case Keyword.get(opts, :memory_search_mode, :hybrid) do
+      # The exact-phrase bonus is part of the score, so the order is the
+      # score's order and not the order the SQL happened to return.
       value when value in [:lexical, "lexical"] ->
-        Enum.take(lexical_hits, limit)
+        lexical_hits |> Ranking.sort() |> Enum.take(limit)
 
       value when value in [:semantic, "semantic"] ->
-        Enum.take(semantic_memory_hits(query, opts, limit), limit)
+        query |> semantic_memory_hits(opts, limit) |> Ranking.sort() |> Enum.take(limit)
 
       value when value in [:portfolio, "portfolio"] ->
         semantic_rankings = semantic_memory_rankings(query, opts, limit, :all)
@@ -729,7 +747,8 @@ defmodule OptimalEngine.Retrieval.Search do
           {context_pairs, chunk_pairs}
 
         _ ->
-          {[], []}
+          # Pinned hybrid has no full-text fallback to hide behind.
+          if mode(opts) == :hybrid, do: throw(:hybrid_unavailable), else: {[], []}
       end
 
     # Step 4: Merge results
@@ -799,8 +818,15 @@ defmodule OptimalEngine.Retrieval.Search do
     {:ok, final_results}
   rescue
     e ->
-      Logger.warning("[SearchEngine] Hybrid search failed: #{inspect(e)}, falling back to FTS")
-      do_search(query, opts, topology)
+      if mode(opts) == :hybrid do
+        Logger.warning("[SearchEngine] Hybrid search failed: #{inspect(e)}")
+        {:error, :hybrid_unavailable}
+      else
+        Logger.warning("[SearchEngine] Hybrid search failed: #{inspect(e)}, falling back to FTS")
+        do_search(query, opts, topology)
+      end
+  catch
+    :throw, :hybrid_unavailable -> {:error, :hybrid_unavailable}
   end
 
   # The first `limit` of `scored` (best first), plus every later entry that
@@ -893,7 +919,7 @@ defmodule OptimalEngine.Retrieval.Search do
       results =
         rows
         |> Enum.map(&build_result(&1, now, topology))
-        |> Enum.filter(&(&1.score >= min_score))
+        |> Enum.filter(&(Ranking.exact_score(&1) >= min_score))
         |> Ranking.sort()
         |> Enum.take(limit)
 
@@ -1017,7 +1043,13 @@ defmodule OptimalEngine.Retrieval.Search do
     hours_old = DateTime.diff(now, modified_at, :second) / 3600.0
     half_life = Routing.half_life_for(topology, genre)
     decay_constant = :math.log(2) / half_life
-    :math.exp(-decay_constant * hours_old)
+
+    # Age is negative for a context dated after the instant being measured
+    # (clock skew, a far-off `:as_of`, a context stamped in the far future), and
+    # `exp` raises past about 709. The exponent is held to a range whose result is
+    # finite and whose product with a score cannot overflow.
+    exponent = -decay_constant * hours_old
+    :math.exp(exponent |> min(@max_decay_exponent) |> max(@min_decay_exponent))
   end
 
   # Stopwords are dropped unless they are the whole query. A query with no

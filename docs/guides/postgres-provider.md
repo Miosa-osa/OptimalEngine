@@ -72,6 +72,10 @@ Add a dialect module that rewrites the constructs above and a parity suite that 
 No call site changes in this stage.
 A construct is only accepted when the parity test covers it, including ordering and null handling.
 
+Ranked lists break score ties with `ORDER BY ... uri, id` (see "Ordering And Reproducibility" in the search architecture reference).
+SQLite compares text byte for byte, so the dialect module must give `uri`, `id` and every other text tie-break column `COLLATE "C"` on PostgreSQL, or a database created with the `C` collation.
+With a locale collation the two stores break ties in a different order, and the 20-query parity check misses on exactly the ties it exists to catch.
+
 Acceptance: every construct in the table above has a parity test, and `mix test` is unchanged on the SQLite path.
 
 ## Stage 3: Store Behaviour

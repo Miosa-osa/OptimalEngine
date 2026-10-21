@@ -490,7 +490,7 @@ defmodule OptimalEngine.Graph do
     FROM graph_edges
     WHERE tenant_id = ?2 AND workspace_id = ?3 AND relation IN ('mentioned_in', 'works_on')
     GROUP BY source_id
-    ORDER BY cnt DESC
+    ORDER BY cnt DESC, source_id
     LIMIT ?1
     """
 
@@ -515,7 +515,7 @@ defmodule OptimalEngine.Graph do
     SELECT source_id, target_id, relation, weight
     FROM graph_edges
     WHERE tenant_id = ?2 AND workspace_id = ?3
-    ORDER BY ROWID DESC
+    ORDER BY valid_from DESC, source_id, target_id, relation
     LIMIT ?1
     """
 

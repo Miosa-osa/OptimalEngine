@@ -32,6 +32,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     Store
   }
 
+  alias OptimalEngine.Retrieval.AsOf
   alias OptimalEngine.Store, as: BaseStore
 
   @default_limit 10
@@ -164,6 +165,14 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     do: retrieve_package(query, scope: scope)
 
   def retrieve_package(query, opts) when is_binary(query) and is_list(opts) do
+    # A request reads the clock once, and `:as_of` (a DateTime or ISO 8601
+    # string) fixes that instant: the validity windows below are measured
+    # against it, so the same data answers the same way. One that is not valid
+    # is `{:error, {:invalid_as_of, value}}`.
+    with {:ok, opts} <- AsOf.put_if_given(opts), do: build_retrieval_package(query, opts)
+  end
+
+  defp build_retrieval_package(query, opts) do
     scope = resolve_scope(opts)
     limit = Keyword.get(opts, :limit, @default_limit)
     time_mode = string_opt(opts, :time_mode, "current_valid")
@@ -178,7 +187,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       allow_all?: false
     }
 
-    retrieval_plan = build_retrieval_plan(query, scope, authorization, opts)
+    retrieval_plan = query |> build_retrieval_plan(scope, authorization, opts) |> put_as_of(opts)
 
     with {:ok, facts, fact_accounting} <-
            fetch_candidates(:facts, scope, query, limit, authorization, retrieval_plan),
@@ -981,7 +990,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       Map.get(filters, :object_anchor)
     ]
 
-    where = base_where(parts)
+    where = base_where(parts, now_sql(retrieval_plan))
 
     {auth_clauses, auth_params} = authorization_clauses(parts.table, authorization, 7)
     limit_placeholder = "?#{8 + length(auth_params)}"
@@ -1192,8 +1201,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
       AND lifecycle_state IN ('candidate', 'current', 'approved')
       AND validation_status != 'rejected'
       AND supersession_status = 'none'
-      AND (valid_time_end IS NULL OR datetime(valid_time_end) >= datetime('now'))
-      AND (stale_after IS NULL OR datetime(stale_after) >= datetime('now'))
+      AND (valid_time_end IS NULL OR datetime(valid_time_end) >= #{now_sql(retrieval_plan)})
+      AND (stale_after IS NULL OR datetime(stale_after) >= #{now_sql(retrieval_plan)})
       AND (
         workflow_family LIKE ?3 OR outcome_class LIKE ?3 OR metadata LIKE ?3
         OR ?4 = ''
@@ -1257,8 +1266,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     WHERE tenant_id = ?1
       AND workspace_id = ?2
       #{eligibility_sql}
-      AND (valid_time_end IS NULL OR datetime(valid_time_end) >= datetime('now'))
-      AND (stale_after IS NULL OR datetime(stale_after) >= datetime('now'))
+      AND (valid_time_end IS NULL OR datetime(valid_time_end) >= #{now_sql(retrieval_plan)})
+      AND (stale_after IS NULL OR datetime(stale_after) >= #{now_sql(retrieval_plan)})
       AND (
         skill_package_name LIKE ?3 OR task_family LIKE ?3 OR metadata LIKE ?3
         OR ?4 = ''
@@ -1288,18 +1297,31 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   # Tenant + workspace predicates together form the scope key: rows from
   # another tenant that share a workspace id (e.g. the literal "default")
   # never enter the candidate set.
-  defp base_where(parts) do
+  defp base_where(parts, now_sql) do
     """
     WHERE tenant_id = ?1
       AND workspace_id = ?2
-    #{parts.lifecycle_filter}  AND (valid_time_end IS NULL OR datetime(valid_time_end) >= datetime('now'))
-      AND (stale_after IS NULL OR datetime(stale_after) >= datetime('now'))
+    #{parts.lifecycle_filter}  AND (valid_time_end IS NULL OR datetime(valid_time_end) >= #{now_sql})
+      AND (stale_after IS NULL OR datetime(stale_after) >= #{now_sql})
     #{parts.match_filter}
     #{parts.structured_filter}
     """
   end
 
   defp and_all(clauses), do: Enum.map_join(clauses, fn clause -> "  AND #{clause}\n" end)
+
+  # The retrieval plan records the instant of a request that fixed one; without
+  # it validity is measured against the database clock, as before. The literal
+  # is built from a DateTime by `AsOf.sql_literal/1`, so it is safe in SQL text.
+  defp put_as_of(plan, opts) do
+    case Keyword.get(opts, :as_of) do
+      %DateTime{} = as_of -> Map.put(plan, :as_of, AsOf.sql_literal(as_of))
+      _ -> plan
+    end
+  end
+
+  defp now_sql(%{as_of: literal}) when is_binary(literal), do: "datetime('#{literal}')"
+  defp now_sql(_plan), do: "datetime('now')"
 
   # Partition access requires intersection with the allowed partitions;
   # security access requires the object's labels to be a subset of the allowed

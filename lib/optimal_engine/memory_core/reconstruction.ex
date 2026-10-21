@@ -131,6 +131,7 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
     expansion_opts = [
       limit: Keyword.get(opts, :association_limit, 60),
       time_mode: package.time_mode,
+      as_of: Keyword.get(opts, :as_of),
       allowed_security_labels: Map.get(package.scope, :allowed_security_labels, []),
       allowed_partitions: Map.get(package.scope, :allowed_partitions, [])
     ]

@@ -22,13 +22,20 @@ export function registerAsk(server: McpServer): void {
         .describe(
           "Audience lens that shapes the response (e.g. engineering, sales, legal, exec). Omit for default.",
         ),
+      as_of: z
+        .string()
+        .optional()
+        .describe(
+          "ISO 8601 instant the time decay measures age against, for reproducible comparisons (e.g. 2026-10-20T12:00:00Z). Defaults to now.",
+        ),
     },
-    async ({ query, workspace, audience }) => {
+    async ({ query, workspace, audience, as_of }) => {
       try {
         const result = await engine.ask({
           query,
           workspace: workspace ?? config.defaultWorkspace,
           audience,
+          as_of,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

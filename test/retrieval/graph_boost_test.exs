@@ -16,11 +16,11 @@ defmodule OptimalEngine.Retrieval.GraphBoostTest do
 
     {:ok, _} =
       Store.raw_query(
-        "INSERT INTO edges (source_id, target_id, relation) VALUES (?1, ?2, 'related')",
+        "INSERT INTO graph_edges (tenant_id, workspace_id, source_id, target_id, relation) VALUES ('default', 'default', ?1, ?2, 'related')",
         [token, entity]
       )
 
-    on_exit(fn -> Store.raw_query("DELETE FROM edges WHERE source_id = ?1", [token]) end)
+    on_exit(fn -> Store.raw_query("DELETE FROM graph_edges WHERE source_id = ?1", [token]) end)
 
     {:ok, token: token, entity: entity}
   end

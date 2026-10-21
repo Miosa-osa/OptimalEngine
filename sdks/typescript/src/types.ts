@@ -80,6 +80,8 @@ export interface AskOptions {
   audience?: Audience;
   format?: RagFormat;
   bandwidth?: RagBandwidth;
+  /** ISO 8601 instant the time decay measures age against (a Date is sent as ISO 8601). */
+  asOf?: string | Date;
 }
 
 /** Where the answer context came from. */
@@ -154,6 +156,13 @@ export interface SearchOptions {
   offset?: number;
   /** `"memory"` restricts results to durable memories. */
   type?: "memory";
+  /** ISO 8601 instant the time decay measures age against (a Date is sent as ISO 8601). */
+  asOf?: string | Date;
+  /**
+   * Retrieval mode. `"lexical"` is full text only; `"hybrid"` requires the
+   * vector hop; `"auto"` uses it when the embedder answers. Default: auto.
+   */
+  mode?: "lexical" | "hybrid" | "auto";
 }
 
 export interface SearchResult {
@@ -201,6 +210,8 @@ export interface GrepOptions {
   literal?: boolean;
   /** Restrict to a node slug or slug prefix. */
   path?: string;
+  /** ISO 8601 instant the time decay measures age against (a Date is sent as ISO 8601). */
+  asOf?: string | Date;
 }
 
 export interface GrepResult {
@@ -220,6 +231,8 @@ export interface GrepHit {
   modality: string | null;
   snippet: string;
   score: number;
+  /** `optimal://` URI of the context the matching chunk belongs to. */
+  uri: string | null;
 }
 
 // ---------------------------------------------------------------------------
