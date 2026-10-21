@@ -369,6 +369,14 @@ defmodule OptimalEngine.API.AuthorityRouter do
     end
   end
 
+  # One evidence key by kid, active or retired, for a verifier holding an export.
+  get "/evidence/keys/:kid" do
+    case Keys.evidence_jwk(tenant(conn), kid) do
+      {:ok, jwk} -> json(conn, 200, jwk)
+      {:error, :not_found} -> error(conn, 404, "evidence key not found")
+    end
+  end
+
   # ?after=&limit=&until=&format=json|ndjson: a page of the chain; pages read with one
   # until share its head. NDJSON is each entry on a line, then an export_end line.
   get "/evidence/export" do

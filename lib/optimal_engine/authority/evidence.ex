@@ -391,8 +391,8 @@ defmodule OptimalEngine.Authority.Evidence do
 
   @doc """
   A page as NDJSON: one line per entry (`ndjson_entry/1`), then one `export_end` line
-  (`ndjson_end/1`). There are no key or checkpoint lines: a verifier reads the
-  evidence keys by `kid` from `GET /api/authority/keys`.
+  (`ndjson_end/1`). There are no key or checkpoint lines: a verifier reads each
+  evidence key by `kid` from `GET /api/authority/evidence/keys/:kid`.
   """
   @spec to_ndjson(map()) :: iodata()
   def to_ndjson(%{"entries" => entries} = page),

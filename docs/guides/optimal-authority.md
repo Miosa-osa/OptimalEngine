@@ -136,7 +136,7 @@ With `format=ndjson` a page is one line per entry, the entry object with `"type"
  "total": N, "complete": true | false, "next_after": seq | null}
 ```
 
-The stream has no key or checkpoint lines: a verifier reads each evidence key by `kid` from `GET /api/authority/keys`.
+The stream has no key or checkpoint lines: a verifier reads each evidence key by its `kid` from `GET /api/authority/evidence/keys/:kid`.
 
 To export a chain of any length, read the first page, then the next ones with `after` set to `next_after` and `until` set to the first page's `head.seq`, until a page is complete.
 `Evidence.verify_export/1` checks the head's signature and that a bundle is the whole chain: it starts at seq 1, holds `total` entries, ends at the head, and says it is complete.
@@ -165,7 +165,10 @@ So the members come in this order: `action`, `detail`, `id`, `jti`, `kind`, `pre
 `hash`, `kid` and `signature` are not part of it.
 
 `signature` is the Ed25519 (RFC 8032) signature by the tenant's evidence key over the 64 ASCII characters of `hash`, in base64url without padding.
-`kid` is that key's RFC 7638 thumbprint: its public key is the JWK with that `kid` in `GET /api/authority/keys` (`optimal_purpose` `evidence`, active or retired).
+`kid` is that key's RFC 7638 thumbprint.
+`GET /api/authority/evidence/keys/:kid` returns that key as a public JWK, `{"kty": "OKP", "crv": "Ed25519", "kid": K, "x": X, "alg": "EdDSA", "optimal_purpose": "evidence"}`, with `"retired_at"` (ISO 8601, UTC) when it has been rotated out; old entries keep verifying with a retired key.
+A kid that is unknown, a grant key's, or a revoked key's answers 404: what a revoked key signed no longer verifies.
+The route needs the `authority:read` grant, like the export; `GET /api/authority/keys` lists every active and retired key of the tenant.
 `head_signature` is the same key's signature over the canonical JSON of `{"hash": H, "seq": S, "tenant_id": T}` for the head, the statement a checkpoint signs.
 
 A worked example, signed with the RFC 8032 test key whose secret is `9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60` (a published test key, never a real one).
