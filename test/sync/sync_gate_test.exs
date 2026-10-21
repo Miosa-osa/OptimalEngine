@@ -777,14 +777,20 @@ defmodule OptimalEngine.SyncGateTest do
       {:ok, plain} =
         Versioned.create(%{content: "A plain note", workspace_id: ctx.ws, tenant_id: ctx.tenant})
 
-      {failed, sent} =
-        with_renamed_column("workspaces", "description", "description_x", fn ->
-          cycle(ctx, [])
+      {{failed, sent}, log} =
+        ExUnit.CaptureLog.with_log(fn ->
+          with_renamed_column("workspaces", "description", "description_x", fn ->
+            cycle(ctx, [])
+          end)
         end)
 
       assert failed.status == "error"
       assert {:error, {:gate_unreadable, _}} = failed.push
       assert sent == []
+
+      # The log names the relay by scheme and host only: a peer URL's path can hold its secret.
+      assert log =~ "[Sync] push to relay+https://api.example/... held back"
+      refute log =~ "engines/e1"
 
       {_result, later} = push(ctx)
       assert sent?(later, "memories", plain.id)
