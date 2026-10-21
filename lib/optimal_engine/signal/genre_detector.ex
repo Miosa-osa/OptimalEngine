@@ -20,11 +20,16 @@ defmodule OptimalEngine.Signal.GenreDetector do
        "amount due".
     6. Registry keyword scoring, accepted only with corroborating evidence
        (a single common word such as "review" or "plan" is not enough).
+
+  A long text is read by its head (`OptimalEngine.Signal.TextHead`, whole
+  lines up to 64 KiB), so detection takes bounded time whatever a caller
+  sends; a genre is a form, and its form shows at the top.
   """
 
-  alias OptimalEngine.Signal.{GenreRegistry, TimeLimit}
+  alias OptimalEngine.Signal.{GenreRegistry, TextHead, TimeLimit}
 
   @default_genre "note"
+  @sample_bytes 65_536
 
   # Registry keyword scoring must reach this to count. A genre-name hit is
   # worth 3 and a section-word hit 1, so it takes both name words ("privacy
@@ -181,6 +186,7 @@ defmodule OptimalEngine.Signal.GenreDetector do
   def detect(_), do: @default_genre
 
   defp detect_text(text) do
+    text = TextHead.take(text, @sample_bytes)
     lines = non_blank_lines(text)
 
     form_genre(text, lines) ||

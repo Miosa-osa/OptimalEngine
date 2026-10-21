@@ -166,6 +166,8 @@ defmodule OptimalEngine.Pipeline.Classifier do
     * `:known_entities` - names to extract as entities
     * `:genre` - a genre already known to the caller; it replaces detection
       and informs Mode when the content alone is too weak to decide
+    * `:whole_text` - the text `content` is the head of; Mode is read from
+      it (see `mode_body/3`)
   """
   @spec classify(String.t(), keyword()) :: Signal.t()
   def classify(content, opts \\ []) when is_binary(content) do
@@ -173,7 +175,7 @@ defmodule OptimalEngine.Pipeline.Classifier do
     known_entities = Keyword.get(opts, :known_entities, [])
 
     genre = genre_hint(opts) || extract_genre(frontmatter, body)
-    mode = extract_mode(frontmatter, body, genre)
+    mode = extract_mode(frontmatter, mode_body(content, body, opts), genre)
     type = extract_type(frontmatter, body)
     format = extract_format(frontmatter)
     structure = extract_structure(frontmatter)
@@ -339,6 +341,25 @@ defmodule OptimalEngine.Pipeline.Classifier do
 
       _ ->
         {%{}, content}
+    end
+  end
+
+  @doc """
+  The body Mode is read from: `body`, or with `:whole_text` in `opts` (the
+  text `content` is the head of), that whole text after the frontmatter
+  `content` opens with. A data document cut short (a JSON record, a line of
+  JSON Lines) no longer reads as data, so Mode needs all of it; the mode
+  detector bounds what it reads itself.
+  """
+  @spec mode_body(String.t(), String.t(), keyword()) :: String.t()
+  def mode_body(content, body, opts) do
+    case Keyword.get(opts, :whole_text) do
+      whole when is_binary(whole) and byte_size(whole) >= byte_size(content) ->
+        skip = byte_size(content) - byte_size(body)
+        binary_part(whole, skip, byte_size(whole) - skip)
+
+      _ ->
+        body
     end
   end
 
