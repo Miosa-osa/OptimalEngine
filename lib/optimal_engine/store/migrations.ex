@@ -145,7 +145,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_077_context_address_indexes(),
       migration_derived_data_delete_indexes(),
       migration_asset_foreign_key_indexes(),
-      migration_derived_rows_tenant()
+      migration_derived_rows_tenant(),
+      migration_planted_ledger_keys()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -353,6 +354,55 @@ defmodule OptimalEngine.Store.Migrations do
                       WHERE c.id = entity_mentions.context_id AND c.tenant_id <> 'default')
         """},
        {"derived_rows_tenant_done", "UPDATE sync_identity SET applying = 0 WHERE id = 1"}
+     ]}
+  end
+
+  # An Engine before the ledger key change stored a peer's change under the key
+  # the sender sent (its id when it sent none), and took an id in this Engine's
+  # own id space as it came; the storage mutation route
+  # (`POST /api/storage/workspaces/:id/mutations`) stored the caller's key the
+  # same way, under any device id. Such a row holds the id or the key a local
+  # change is sealed under (`mut_<replica>_<n>`, `<replica>:<n>`), or the key a
+  # change applied from a peer is recorded under (`peer:<id>`), and the ledger
+  # keeps the first row with either, so that change would never be recorded.
+  #
+  # Data steps only, no schema change. A row that is no change of a row (as
+  # `OptimalEngine.Sync.change_row?/3` says now, written out here so the step
+  # stays as it ran) is moved out of those spaces and stays no change: an id of
+  # this Engine's own space gets `peer_` in front, and a key the storage route
+  # now refuses (`<replica>:`, `mut_<replica>_`, `peer:`) gets `moved:` in front.
+  # A row a move cannot take out (the new id or key is held) is removed. This
+  # Engine's own changes and the changes it applied are not touched, and neither
+  # is any other row (a storage entry keyed by its own id, as the route keys one
+  # given no key). Each step reads a range of a unique column, logs how many rows
+  # it changed (`run/2`), and is safe to run again: a moved row is out of the
+  # range. A local change already lost to such a row is not recovered here, and
+  # a row with a colon in its id is reported at boot
+  # (`OptimalEngine.Sync.report_colon_ids/0`).
+  #
+  # 81: the next number on main when this was merged.
+  @planted_ledger_keys_version 81
+  @this_replica "(SELECT replica_id FROM sync_identity WHERE id = 1)"
+  @no_change "NOT (instr(id, ':') = 0 AND (idempotency_key = 'peer:' || id OR " <>
+               "(substr(idempotency_key, 1, length(device_id) + 1) = device_id || ':' AND " <>
+               "id = 'mut_' || device_id || '_' || substr(idempotency_key, length(device_id) + 2))))"
+  @own_id_space "(id >= 'mut_' || #{@this_replica} || '_' AND id < 'mut_' || #{@this_replica} || '`')"
+  @reserved_keys "((idempotency_key >= #{@this_replica} || ':' AND " <>
+                   "idempotency_key < #{@this_replica} || ';') OR " <>
+                   "(idempotency_key >= 'mut_' || #{@this_replica} || '_' AND " <>
+                   "idempotency_key < 'mut_' || #{@this_replica} || '`') OR " <>
+                   "(idempotency_key >= 'peer:' AND idempotency_key < 'peer;'))"
+  defp migration_planted_ledger_keys do
+    {@planted_ledger_keys_version,
+     "sync ledger: planted ledger rows give up the ids and keys of this Engine's changes",
+     [
+       {"data: re-id rows that are no change out of this Engine's own id space",
+        "UPDATE OR IGNORE sync_mutations SET id = 'peer_' || id WHERE #{@own_id_space} AND #{@no_change}"},
+       {"data: re-key rows that are no change out of the reserved keys",
+        "UPDATE OR IGNORE sync_mutations SET idempotency_key = 'moved:' || idempotency_key " <>
+          "WHERE #{@reserved_keys} AND #{@no_change}"},
+       {"data: delete rows that are no change and could not move",
+        "DELETE FROM sync_mutations WHERE (#{@own_id_space} OR #{@reserved_keys}) AND #{@no_change}"}
      ]}
   end
 
@@ -1598,7 +1648,8 @@ defmodule OptimalEngine.Store.Migrations do
   @doc """
   Applies, in order, every migration of `migrations` (default `all/0`) whose
   version is not yet recorded in the `schema_migrations` table, and logs how
-  long each one took. It is a set check, so a version added behind a higher
+  long each one took and how many rows each data step (a statement labelled
+  `data: ...`) changed. It is a set check, so a version added behind a higher
   applied one still runs.
 
   Each migration runs in one transaction with the row that records it, so the
@@ -1624,7 +1675,7 @@ defmodule OptimalEngine.Store.Migrations do
 
       outcome =
         in_transaction(db, version, fn ->
-          Enum.each(statements, fn {label, sql} -> safe_execute(db, label, sql) end)
+          Enum.each(statements, fn {label, sql} -> execute_step(db, version, label, sql) end)
           after_apply(db, version)
           record_migration!(db, version, description)
         end)
@@ -1641,6 +1692,29 @@ defmodule OptimalEngine.Store.Migrations do
     end)
 
     :ok
+  end
+
+  # A data step (a statement whose label starts with `data:`) logs how many rows
+  # it changed, never which, so the boot log says what a repair did.
+  defp execute_step(db, version, "data:" <> _ = label, sql) do
+    safe_execute(db, label, sql)
+    count = changes(db)
+    level = if count > 0, do: :warning, else: :info
+    Logger.log(level, "[Migrations] #{pad(version)} #{label}, rows changed: #{count}")
+  end
+
+  defp execute_step(db, _version, label, sql), do: safe_execute(db, label, sql)
+
+  # The rows the last INSERT, UPDATE or DELETE on `db` changed.
+  defp changes(db) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(db, "SELECT changes()")
+
+    try do
+      {:row, [count]} = Exqlite.Sqlite3.step(db, stmt)
+      count
+    after
+      Exqlite.Sqlite3.release(db, stmt)
+    end
   end
 
   # Work a migration's statements cannot do, once they have run.
