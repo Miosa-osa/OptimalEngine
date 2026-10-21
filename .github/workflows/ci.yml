@@ -112,11 +112,19 @@ jobs:
       - name: Verify release version
         run: mix run --no-start scripts/check_release_version.exs
 
+      # The SQL census fails the run when the suite runs a statement shape the
+      # PostgreSQL store refuses, rejects or leaves unordered that is not on
+      # test/support/sql_census_allowlist.txt (test/support/sql_census.ex).
       - name: Run tests
         run: mix test --warnings-as-errors
         env:
           MIX_ENV: test
           OPTIMAL_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/optimal_test
+          OPTIMAL_SQL_CENSUS: /tmp/sql-census.txt
+
+      - name: SQL census report
+        if: always()
+        run: cat /tmp/sql-census.txt || true
 
   mcp:
     name: mcp server (build and test)

@@ -6,7 +6,8 @@ defmodule OptimalEngine.Storage.Planner do
   an explicit, reviewed deployment decision because canonical-store changes and
   cross-workspace routing have a large blast radius. A plan that selects a
   provider without an engine adapter lists it under `adapter_missing` and is
-  never `ready`.
+  never `ready`, and neither is a plan with a canonical store the build does
+  not run on (`selected: false`), however healthy its service is.
   """
 
   alias OptimalEngine.Storage.Providers
@@ -109,5 +110,11 @@ defmodule OptimalEngine.Storage.Planner do
     end
   end
 
-  defp ready?(%{lifecycle_state: state}), do: state in ["active", "available"]
+  @doc false
+  # A provider serves a plan when it is up and, for a canonical store, when
+  # this build runs on it: a healthy PostgreSQL in a SQLite build holds none of
+  # the engine's data.
+  @spec ready?(map()) :: boolean()
+  def ready?(%{selected: false}), do: false
+  def ready?(%{lifecycle_state: state}), do: state in ["active", "available"]
 end
