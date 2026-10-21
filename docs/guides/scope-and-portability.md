@@ -245,6 +245,9 @@ Each tenant has its own bundle folder, `<backup dir>/bundles/<tenant>/`, where `
 An export is written there, a download and an import by name read only from there, and a raw upload is staged there.
 A control plane that copies a bundle onto the Engine's disk and imports it by name places it in that folder, for example `/data/.optimal/backups/bundles/default/<name>` for the `default` tenant with `OPTIMAL_BACKUP_DIR=/data/.optimal/backups`.
 A bundle whose manifest names another tenant is answered as not found by name or on download, and refused with 403 `bundle_from_another_tenant` as an upload.
+A stored bundle is reached, to download or to import by name, only by a key whose workspace scope covers the workspace the bundle was exported from; to any other key it is not found.
+`DELETE /api/bundles/:name` removes a stored bundle on the same terms (the admin grant, the caller's tenant and a covering workspace scope) and answers 204, or 404 for a bundle the key may not reach; it never touches another workspace's file.
+An export is named `<workspace>-<epoch seconds>-<16 hex characters>.tar.gz`, and the random part keeps the name from being guessed from the workspace and the time.
 Only the Engine operator (a `default`-tenant admin key whose workspace scope is `*`) imports or downloads one, by adding `"cross_tenant": true` (`?cross_tenant=true` on a download); anyone else asking for it gets 403 `operator_only`.
 Bundles from before this release sit in `bundles/` itself; move one into its tenant's folder to use it.
 
@@ -262,6 +265,8 @@ A write that lands while the export runs comes after the snapshot: it is not in 
 The read runs beside the Engine's single writer, so requests and writes go on while a large workspace is exported.
 While it runs, the database's write-ahead log cannot be checkpointed past the export's snapshot, so the `-wal` file grows by the volume written during the export; the first checkpoint after the export ends moves those pages into the database.
 When the workspace has a captured change not yet sealed as the read begins, the export seals it and starts the read again; if writes keep arriving it answers 503 `writes_in_progress`, and the export can be retried or the writes paused.
+Before it stages anything, an export checks the free space of the backup folder's disk: it needs twice the workspace's size (its rows as JSON lines, estimated from each table's row count and a sample of its rows, plus its files; the rows and files are staged, then packed) and a margin of 256 MiB for the database's growing log (`config :optimal_engine, :bundle_export_margin_bytes`).
+A disk that cannot hold that answers 507 `insufficient_storage` with `Retry-After: 60`, writes nothing and reserves no move; as a job it fails `retryable` and is tried again after a minute, like an import that finds no room.
 Import verifies the manifest, every table file, and every file checksum before writing anything.
 Rows are then written in short transactions of 1,000 rows, tables in foreign-key order and the rows of a self-referencing table (memories, nodes) parents first, with foreign keys checked at each commit.
 A large workspace therefore never holds the Engine's single writer long enough to stall other requests or time out.
@@ -291,10 +296,13 @@ A large workspace takes minutes to export or import, so the same work also runs 
 | List | `GET /api/bundles/jobs?workspace_id=&status=&kind=&limit=` |
 | Cancel | `POST /api/bundles/jobs/:id/cancel` |
 | Download an export | `GET /api/bundles/<result.bundle>` |
+| Delete a stored bundle | `DELETE /api/bundles/<result.bundle>` |
 
 Every route needs the admin grant, and a job belongs to the tenant that started it: another tenant's job is not found.
 The key's workspace scope must cover the job's workspace (the export's source, the import's target), or the answer is 403 `workspace_scope_denied`.
+An import of a stored `bundle` also needs a scope that covers the workspace the bundle was exported from, as the download does: otherwise the answer is 404 `bundle_not_found`, as for a bundle that is not there.
 A start answers 202 with the job and its status URL in `Location`.
+An Engine that serves these routes lists `bundle_jobs_v1` in the `capabilities` of `GET /api/version` (`engine-contract.json`), so a control plane can cut over to them one Engine at a time.
 
 An import names its target `workspace_id` and exactly one source.
 `bundle` is a file in the caller's bundle folder, such as a finished export.
@@ -306,15 +314,20 @@ The same request again answers 200 with that job and `"duplicate": true`, whatev
 A workspace has at most one bundle job queued or running, export and import together; another start answers 409 `bundle_job_active` with that job's id.
 The Engine runs one bundle job at a time; the others wait in order.
 
-The status carries `status` (`queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled`), `phase`, `progress` (`rows_done`, `rows_total`, `bytes_done`, `bytes_total`, `tables_done`, `tables_total`, `files_done`, `files_total`; a total is null until known), `attempt` and `max_attempts`, the times (`created_at`, `started_at`, `updated_at`, `finished_at`), `error` (`code`, `message`, `retryable`), and `result`.
+The status carries `status` (`queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled`), `phase`, `progress` (`rows_done`, `rows_total`, `bytes_done`, `bytes_total`, `tables_done`, `tables_total`, `files_done`, `files_total`; a total is null until known), `attempt` and `max_attempts`, the times (`created_at`, `started_at`, `updated_at`, `finished_at`), `partial`, `error` (`code`, `message`, `retryable`), and `result`.
 An export's result names the `bundle`, its `file_sha256` (the value to pass as `sha256` to an import), `bundle_sha256` (for `finalize-move`), `size_bytes`, the counts, `ledger_sequence`, and `expires_at`.
 An import's result names the target `workspace_id`, the rows per table, the files, and the bundle's `ledger_sequence`.
 
 A failure the Engine can retry (`fetch_failed`, `insufficient_storage`, `store_busy`, `engine_restarted`) is tried again after a minute, up to three attempts; any other ends the job `failed` at once, and `retryable: false` means the request must change.
-A failed or cancelled job leaves nothing behind: no partial export file, no download, and no rows in an import target that held nothing when the job started (a `create`, or a `merge` into an empty workspace).
-A merge into a workspace that already held rows is not rolled back; its error says `"partial": true`, and running it again converges.
+A failed or cancelled job leaves nothing behind: no partial export file, no download, and none of the rows it wrote into an import target that held nothing when the job started (a `create`, or a `merge` into an empty workspace).
+An import logs each batch as it writes it (`bundle-jobs/<id>/written.jsonl` in the backup folder, readable by the Engine's user only, and counted in the free-space check an import makes), and a failed or cancelled one takes back exactly what that log lists, last batch first so that a row's dependants go before it, and no other: a row another writer put into the target meanwhile stays, and so does the workspace record when the workspace then holds anything.
+Whether the target was empty, and whether the import made its workspace record, are what the import itself found when it planned the target, not what the job read before a download.
+A merge into a workspace that already held rows is not rolled back: the job's `partial` is `true` (and a failure's `error` says `"partial": true`) whether it failed or was cancelled, and running it again converges.
+`partial` is also `true` when some of what an import wrote could not be taken back (a line of the log lost to a full disk, or a delete refused), and such a failure is not retried; the log stays in the job's folder until the job record is removed.
 A cancel takes a queued job out at once, and stops a running one at its next page or batch.
 A job running when the Engine stops is not resumed: at the next boot its partial output is removed and it runs again from the start, and after its third attempt it fails with `engine_restarted`.
+A job whose rows cannot all be taken back at that boot ends `failed` with `cleanup_incomplete` and `partial: true` instead, since running it again would meet what is left.
+Recovery never stops the Engine: it skips a torn line of the log, reports the job, and goes on to the next.
 An export reads one snapshot of the database, and a resumed export would join two, so its ledger mark would no longer describe its rows.
 
 An export job's bundle is kept for `OPTIMAL_BUNDLE_RETENTION_HOURS` (168, seven days) after it finishes, then removed; job records are kept 30 days.

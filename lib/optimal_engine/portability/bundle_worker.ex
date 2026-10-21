@@ -35,14 +35,23 @@ defmodule OptimalEngine.Portability.BundleWorker do
 
   @impl true
   def handle_info(:recover, state) do
-    case BundleJobs.recover() do
-      0 ->
-        :ok
+    # A job that cannot be recovered is released again at every boot, so a
+    # raise here would crash this worker at every boot and take the supervisor
+    # down with it: recovery logs what it cannot do and goes on.
+    try do
+      case BundleJobs.recover() do
+        0 ->
+          :ok
 
-      n ->
-        Logger.warning(
-          "[BundleWorker] #{n} bundle jobs were cut off when the Engine stopped; they run again from the start"
-        )
+        n ->
+          Logger.warning(
+            "[BundleWorker] #{n} bundle jobs were cut off when the Engine stopped; they run again from the start"
+          )
+      end
+    rescue
+      error -> Logger.error("[BundleWorker] recovery failed: #{Exception.message(error)}")
+    catch
+      kind, reason -> Logger.error("[BundleWorker] recovery failed: #{kind} #{inspect(reason)}")
     end
 
     schedule(state.interval)
