@@ -262,13 +262,28 @@ defmodule OptimalEngine.Store.Postgres do
   # entities go with it through their ON DELETE CASCADE key. Entities and
   # edges are best effort on SQLite, so a failed one does not fail the write.
   defp write_context(txn, %Context{} = context) do
-    with {:ok, tenant_id} <- context_tenant(txn, context) do
+    with {:ok, tenant_id, previous} <- context_tenant(txn, context),
+         :ok <- relabel_children(txn, context.id, tenant_id, previous) do
       write_context_row(txn, %{context | tenant_id: tenant_id})
     end
   end
 
+  # A context another tenant held is taken over by the owner of its workspace:
+  # the chunks and claims written for it go with it.
+  defp relabel_children(_txn, _id, _tenant_id, nil), do: :ok
+  defp relabel_children(_txn, _id, tenant_id, tenant_id), do: :ok
+
+  defp relabel_children(txn, id, tenant_id, _previous) do
+    Enum.reduce_while(ContextTenant.relabel_sql(), :ok, fn sql, :ok ->
+      case Connection.txn_query(txn, sql, [tenant_id, id]) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _reason} = err -> {:halt, err}
+      end
+    end)
+  end
+
   defp context_tenant(txn, %Context{} = context) do
-    ContextTenant.for_context(context, fn
+    ContextTenant.decide(context, fn
       :owner, params -> first_row(txn, @workspace_owner, params)
       :existing, params -> first_row(txn, @existing_context, params)
     end)

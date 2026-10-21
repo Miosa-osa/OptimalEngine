@@ -180,7 +180,7 @@ defmodule OptimalEngine.Portability.WorkspaceIdFollowupsTest do
 
       assert {:error, :not_found} = Tenant.get("a:b-#{n}")
 
-      for id <- ["acme-#{n}", "Acme_Co.#{n}", "9-#{n}"] do
+      for id <- ["acme-#{n}", "acme_co.#{n}", "9-#{n}"] do
         assert {:ok, %{id: ^id}} = Tenant.create(%{id: id, name: "ok"}), id
       end
     end

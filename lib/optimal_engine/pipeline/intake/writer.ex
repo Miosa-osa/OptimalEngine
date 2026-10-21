@@ -56,6 +56,7 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
   alias OptimalEngine.AtomicFile
   alias OptimalEngine.Pipeline.Intake.Address
   alias OptimalEngine.Pipeline.Intake.Skeleton
+  alias OptimalEngine.Portability.WorkspaceBundle
   alias OptimalEngine.Signal
   alias OptimalEngine.Topology.Node, as: TopologyNode
   alias OptimalEngine.URI
@@ -517,12 +518,11 @@ defmodule OptimalEngine.Pipeline.Intake.Writer do
       |> String.replace(~r/-{2,}/, "-")
       |> String.trim("-")
 
-    if sanitized == "" do
-      "ws-" <>
-        Base.encode16(binary_part(:crypto.hash(:sha256, workspace_id), 0, 6), case: :lower)
-    else
-      sanitized
-    end
+    # What sanitizes to a directory of the root (`nodes!` to `nodes`, `Default`
+    # to the root itself) would put the signals in the root's own tree.
+    if sanitized != "" and WorkspaceBundle.movable(sanitized) == :ok,
+      do: sanitized,
+      else: WorkspaceFilesystem.hashed_key(workspace_id)
   end
 
   defp humanize_node(node) do

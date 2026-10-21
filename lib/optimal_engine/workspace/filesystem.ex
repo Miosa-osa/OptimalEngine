@@ -61,6 +61,16 @@ defmodule OptimalEngine.Workspace.Filesystem do
   def reserved_names, do: ~w(nodes assets architectures tenants cache)
 
   @doc """
+  The directory key of an id that names no workspace and whose own name cannot
+  be its directory (it sanitizes to a name the root uses, or to nothing):
+  `ws-` and twelve hex digits of the id's hash. The same id always gets the
+  same key, and ids that sanitize alike get different ones.
+  """
+  @spec hashed_key(String.t()) :: String.t()
+  def hashed_key(id) when is_binary(id),
+    do: "ws-" <> Base.encode16(binary_part(:crypto.hash(:sha256, id), 0, 6), case: :lower)
+
+  @doc """
   Provisions the directory tree for a workspace. Returns `{:ok, path}` with
   the absolute workspace path on success; `{:error, reason}` on failure.
 

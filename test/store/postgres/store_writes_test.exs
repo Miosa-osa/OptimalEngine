@@ -169,6 +169,52 @@ defmodule OptimalEngine.Store.PostgresWritesTest do
                )
     end
 
+    test "a tenant that takes a context over takes its chunks and claims too", %{run: run} do
+      tenant = "#{run}-late"
+      workspace = "#{tenant}:ops"
+      ctx = context("#{run}-late-1", "#{run}-node", [], workspace_id: workspace)
+
+      # Written before the tenant exists, the prefix names nobody: the id is
+      # bare and the row is the default tenant's.
+      for store <- [Store, PgStore] do
+        :ok = store.insert_context(ctx)
+
+        :ok =
+          store.raw_execute(
+            "INSERT INTO chunks (id, tenant_id, signal_id, scale, text, workspace_id) VALUES (?1, 'default', ?2, 'document', 'Body', ?3)",
+            ["#{ctx.id}-chunk", ctx.id, workspace]
+          )
+
+        :ok =
+          store.raw_execute(
+            "INSERT INTO source_packages (id, tenant_id, workspace_id, content_hash) VALUES (?1, 'default', ?2, ?3)",
+            ["#{ctx.id}-package", workspace, "#{ctx.id}-hash"]
+          )
+
+        :ok =
+          store.raw_execute(
+            "INSERT INTO claims (id, tenant_id, workspace_id, source_package_id, signal_id, claim_text) VALUES (?1, 'default', ?2, ?3, ?4, 'A claim')",
+            ["#{ctx.id}-claim", workspace, "#{ctx.id}-package", ctx.id]
+          )
+      end
+
+      assert [["default"]] = assert_same("SELECT tenant_id FROM contexts WHERE id = ?1", [ctx.id])
+
+      for store <- [Store, PgStore] do
+        :ok = store.raw_execute("INSERT INTO tenants (id, name) VALUES (?1, ?2)", [tenant, tenant])
+        :ok = store.insert_context(ctx)
+      end
+
+      assert [[^tenant]] = assert_same("SELECT tenant_id FROM contexts WHERE id = ?1", [ctx.id])
+
+      for table <- ~w(chunks claims) do
+        assert [[^tenant]] =
+                 assert_same("SELECT DISTINCT tenant_id FROM #{table} WHERE signal_id = ?1", [
+                   ctx.id
+                 ])
+      end
+    end
+
     test "writing a context again replaces it the way INSERT OR REPLACE does", %{run: run} do
       first = context("#{run}-1", "#{run}-node", ["alice", "bob"], title: "first")
       second = %{first | title: "second", entities: ["bob", "dave"]}

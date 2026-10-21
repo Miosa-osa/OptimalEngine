@@ -20,8 +20,9 @@ defmodule OptimalEngine.Tenancy.Tenant do
   # What a tenant id is: it prefixes the ids of the tenant's workspaces
   # (`<tenant_id>:<slug>`) and names a directory (`<root>/tenants/<tenant_id>`),
   # so it holds no colon or slash, starts with a letter or digit, and is no
-  # relative path segment.
-  @id_format ~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
+  # relative path segment. It is lowercase because `Acme` and `acme` are one
+  # directory on a case insensitive file system.
+  @id_format ~r/\A[a-z0-9][a-z0-9._-]{0,127}\z/
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -70,8 +71,8 @@ defmodule OptimalEngine.Tenancy.Tenant do
   end
 
   @doc """
-  Checks a tenant id: letters, digits, dots, dashes and underscores, starting
-  with a letter or digit, at most 128 characters and no `..`
+  Checks a tenant id: lowercase letters, digits, dots, dashes and underscores,
+  starting with a letter or digit, at most 128 characters and no `..`
   (`{:error, :invalid_tenant_id}` otherwise). A tenant whose id holds a colon
   would have no workspace ids, because the id of a workspace is the tenant's id,
   a colon and a slug.
@@ -87,7 +88,8 @@ defmodule OptimalEngine.Tenancy.Tenant do
 
   @doc """
   Creates a new tenant. Returns `{:ok, tenant}` or `{:error, reason}`
-  (`:invalid_tenant_id` for an id `check_id/1` refuses). A tenant row from
+  (`:invalid_tenant_id` for an id `check_id/1` refuses, `:tenant_id_taken` for
+  one that differs from another tenant's only in case). A tenant row from
   before ids were checked keeps working.
   """
   @spec create(map()) :: {:ok, t()} | {:error, term()}
@@ -96,7 +98,8 @@ defmodule OptimalEngine.Tenancy.Tenant do
     region = Map.get(attrs, :region)
     metadata = Map.get(attrs, :metadata, %{})
 
-    with :ok <- check_id(id) do
+    with :ok <- check_id(id),
+         :ok <- check_case_free(id) do
       case Store.raw_query(
              """
              INSERT INTO tenants (id, name, plan, region, metadata)
@@ -110,6 +113,15 @@ defmodule OptimalEngine.Tenancy.Tenant do
         other ->
           other
       end
+    end
+  end
+
+  # A tenant row from before ids were lowercase may still hold capitals; its
+  # directory is the one a new tenant of the same letters would get.
+  defp check_case_free(id) do
+    case Store.raw_query("SELECT 1 FROM tenants WHERE lower(id) = ?1 AND id != ?1 LIMIT 1", [id]) do
+      {:ok, [_ | _]} -> {:error, :tenant_id_taken}
+      _ -> :ok
     end
   end
 

@@ -52,6 +52,13 @@ defmodule OptimalEngine.Store.ContextTenant do
 
   @existing_sql "SELECT tenant_id, workspace_id FROM contexts WHERE id = ?1"
 
+  # The rows that name a context and carry a tenant of their own.
+  @relabel_sql [
+    "UPDATE chunks SET tenant_id = ?1 WHERE signal_id = ?2 AND tenant_id != ?1",
+    "UPDATE claims SET tenant_id = ?1 WHERE signal_id = ?2 AND tenant_id != ?1",
+    "UPDATE vectors SET tenant_id = ?1 WHERE context_id = ?2 AND tenant_id != ?1"
+  ]
+
   @typedoc """
   What a store gives `for_context/2` to read the two facts about the database:
   `:owner` is asked with `[workspace_id]` and answers a row holding the
@@ -71,6 +78,15 @@ defmodule OptimalEngine.Store.ContextTenant do
   @doc "The statement `lookup/2` answers `:existing` with, for a store on SQLite's dialect."
   @spec existing_sql() :: String.t()
   def existing_sql, do: @existing_sql
+
+  @doc """
+  The statements that give a context's chunks, claims and vectors the tenant
+  that took the context over (`?1` the tenant, `?2` the context id), in SQLite's dialect.
+  A store runs them when the row it replaces had another tenant: they were
+  written under it, and a workspace's owner reads them as its own.
+  """
+  @spec relabel_sql() :: [String.t()]
+  def relabel_sql, do: @relabel_sql
 
   @doc """
   Whether a write of context `id` into `workspace_id` for `tenant_id` (`nil`
@@ -104,18 +120,31 @@ defmodule OptimalEngine.Store.ContextTenant do
   in the transaction of the write, so no other write comes between.
   """
   @spec for_context(Context.t(), lookup()) :: {:ok, String.t()} | {:error, term()}
-  def for_context(%Context{id: id} = context, lookup) when is_function(lookup, 2) do
+  def for_context(%Context{} = context, lookup) do
+    with {:ok, tenant, _previous} <- decide(context, lookup), do: {:ok, tenant}
+  end
+
+  @doc """
+  `for_context/2`, and the tenant of the row the write replaces (`nil` when it
+  replaces none): a store that finds it is not the tenant written gives the
+  rows that hang off the context to the new one (`relabel_sql/0`).
+  """
+  @spec decide(Context.t(), lookup()) ::
+          {:ok, String.t(), String.t() | nil} | {:error, term()}
+  def decide(%Context{id: id} = context, lookup) when is_function(lookup, 2) do
     workspace_id = context.workspace_id || "default"
 
     with {:ok, owner} <- lookup.(:owner, [workspace_id]),
-         {:ok, existing} <- lookup.(:existing, [id]) do
-      resolve(%{
-        id: id,
-        workspace_id: workspace_id,
-        stated: context.tenant_id,
-        owner: owner && hd(owner),
-        existing: existing && List.to_tuple(existing)
-      })
+         {:ok, existing} <- lookup.(:existing, [id]),
+         {:ok, tenant} <-
+           resolve(%{
+             id: id,
+             workspace_id: workspace_id,
+             stated: context.tenant_id,
+             owner: owner && hd(owner),
+             existing: existing && List.to_tuple(existing)
+           }) do
+      {:ok, tenant, existing && hd(existing)}
     end
   end
 
