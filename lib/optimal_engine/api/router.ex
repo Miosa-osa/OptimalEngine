@@ -459,7 +459,9 @@ defmodule OptimalEngine.API.Router do
   post "/api/entity-mentions" do
     body = conn.body_params || %{}
 
-    case OptimalEngine.EntityResolution.resolve(body) do
+    case OptimalEngine.EntityResolution.resolve(body,
+           tenant_id: conn.assigns[:current_tenant] || "default"
+         ) do
       {:ok, result} -> conn |> put_status(201) |> json(result)
       {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
     end
@@ -484,7 +486,8 @@ defmodule OptimalEngine.API.Router do
         actor_id: Actor.of(conn, body),
         entity_id: body["entity_id"],
         confidence: body["confidence"] || 1.0,
-        reason: body["reason"]
+        reason: body["reason"],
+        tenant_id: conn.assigns[:current_tenant] || "default"
       ]
 
       case OptimalEngine.EntityResolution.decide(id, decision, opts) do

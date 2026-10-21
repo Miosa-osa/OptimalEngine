@@ -18,7 +18,8 @@ defmodule OptimalEngine.DataStewardTenantTest do
 
   alias OptimalEngine.API.Router
   alias OptimalEngine.Auth.ApiKey
-  alias OptimalEngine.{DataSteward, Memory, Organization, Store, Workspace}
+  alias OptimalEngine.Authority.Evidence
+  alias OptimalEngine.{DataSteward, EntityResolution, Memory, Organization, Store, Workspace}
   alias OptimalEngine.Tenancy.Tenant
 
   setup do
@@ -65,8 +66,7 @@ defmodule OptimalEngine.DataStewardTenantTest do
   # The tables a repair traces to a tenant through a parent row.
   defp traced_tables do
     ~w(entity_aliases entity_identifiers entity_lineage entity_mentions resolution_decisions
-       memory_association_paths memory_reconstruction_outcomes memory_consolidation_proposals
-       sync_capture)
+       memory_association_paths memory_reconstruction_outcomes memory_consolidation_proposals)
   end
 
   # A source package of the tenant, made by a memory written to `workspace`.
@@ -196,7 +196,7 @@ defmodule OptimalEngine.DataStewardTenantTest do
 
         "entity_mentions" ->
           {"id",
-           if(String.starts_with?(tag, "free-") or String.starts_with?(tag, "pkg-"),
+           if(String.starts_with?(tag, ["free-", "pkg-", "planted", "foreign-"]),
              do: tag,
              else: "mention-#{tag}"
            )}
@@ -258,6 +258,38 @@ defmodule OptimalEngine.DataStewardTenantTest do
       assert {:error, :not_found} = Workspace.get(target)
       assert holder("a-row-#{n}") == {a, a_ws}
       assert holder("stray-row-#{n}") == {b, a_ws}
+    end
+
+    test "is refused when another tenant's rows are only in tables with no tenant column",
+         %{a: a, b_ws: b_ws, a_ws: a_ws, b: b, n: n} do
+      context(b, b_ws, "ctx-b-foreign-#{n}")
+      mention("foreign-#{n}", a_ws, "ctx-b-foreign-#{n}", nil)
+
+      {:ok, _} = Workspace.update(a_ws, %{slug: "ops-foreign"})
+
+      assert {:error, :workspace_id_shared} =
+               DataSteward.rename_workspace(a_ws, "#{a}:ops-foreign", steward(a))
+
+      assert {:ok, %{id: ^a_ws}} = Workspace.get(a_ws)
+      assert unscoped_workspace("entity_mentions", "foreign-#{n}") == a_ws
+    end
+
+    test "refuses to go on when it cannot tell whether the id holds rows",
+         %{a_ws: a_ws, a: a} do
+      broken = [%{name: "no_such_table_in_the_schema", tenant_scoped?: true}]
+
+      assert {:ok, {:error, reason1}} =
+               Store.transaction(fn txn ->
+                 {:ok, DataSteward.target_free_of_rows(txn, broken, a_ws)}
+               end)
+
+      assert {:ok, {:error, reason2}} =
+               Store.transaction(fn txn ->
+                 {:ok, DataSteward.check_id_not_shared(txn, broken, a_ws, a)}
+               end)
+
+      refute reason1 in [:target_workspace_has_rows, :workspace_id_shared]
+      refute reason2 in [:target_workspace_has_rows, :workspace_id_shared]
     end
 
     test "checks the shape of the target before looking for it", %{a: a, a_ws: a_ws, b_ws: b_ws} do
@@ -356,6 +388,112 @@ defmodule OptimalEngine.DataStewardTenantTest do
     end
   end
 
+  describe "writing a mention" do
+    test "needs its context and source package to be the tenant's, in the mention's workspace",
+         %{a: a, b: b, a_ws: a_ws, n: n} do
+      orphan = "mention-orphan-#{n}"
+      context(a, orphan, "ctx-a-#{n}")
+      context(a, a_ws, "ctx-a-elsewhere-#{n}")
+      package_a = package(a, orphan, "Package of a #{n}")
+      base = %{workspace_id: orphan, surface_text: "Name #{n}"}
+
+      for tenant <- [b, a] do
+        expected = if tenant == a, do: :ok, else: :error
+
+        assert {^expected, _} =
+                 EntityResolution.resolve(Map.put(base, :context_id, "ctx-a-#{n}"),
+                   tenant_id: tenant
+                 )
+
+        assert {^expected, _} =
+                 EntityResolution.resolve(Map.put(base, :source_package_id, package_a),
+                   tenant_id: tenant
+                 )
+      end
+
+      assert {:error, :context_not_found} =
+               EntityResolution.resolve(Map.put(base, :context_id, "ctx-a-#{n}"), tenant_id: b)
+
+      assert {:error, :source_package_not_found} =
+               EntityResolution.resolve(Map.put(base, :source_package_id, package_a),
+                 tenant_id: b
+               )
+
+      # The tenant's own context in another workspace is not the mention's.
+      assert {:error, :context_not_found} =
+               EntityResolution.resolve(Map.put(base, :context_id, "ctx-a-elsewhere-#{n}"),
+                 tenant_id: a
+               )
+    end
+
+    test "is refused over HTTP when it points at another tenant's context or package",
+         %{a: a, b: b, n: n} do
+      orphan = "mention-http-#{n}"
+      context(a, orphan, "ctx-a-#{n}")
+      context(b, orphan, "ctx-b-#{n}")
+      package_a = package(a, orphan, "Package of a #{n}")
+      token = key(b, ["*"])
+      body = %{workspace_id: orphan, surface_text: "Name"}
+
+      assert {422, %{"error" => context_error}} =
+               post("/api/entity-mentions", Map.put(body, :context_id, "ctx-a-#{n}"), token)
+
+      assert context_error =~ "context_not_found"
+
+      assert {422, %{"error" => package_error}} =
+               post("/api/entity-mentions", Map.put(body, :source_package_id, package_a), token)
+
+      assert package_error =~ "source_package_not_found"
+
+      assert {201, %{"id" => _}} =
+               post("/api/entity-mentions", Map.put(body, :context_id, "ctx-b-#{n}"), token)
+    end
+
+    test "is decided by the tenant it belongs to, not by another tenant sharing the workspace id",
+         %{a: a, b: b, n: n} do
+      orphan = "mention-decide-#{n}"
+      context(a, orphan, "ctx-a-#{n}")
+
+      assert {:ok, %{id: mention_id}} =
+               EntityResolution.resolve(
+                 %{workspace_id: orphan, surface_text: "Name", context_id: "ctx-a-#{n}"},
+                 tenant_id: a
+               )
+
+      decide = fn tenant ->
+        EntityResolution.decide(mention_id, :reject,
+          workspace_id: orphan,
+          actor_id: "user:steward",
+          tenant_id: tenant
+        )
+      end
+
+      assert {:error, :mention_not_found} = decide.(b)
+      assert {:ok, %{decision: :reject}} = decide.(a)
+    end
+
+    test "that makes a new entity makes it the tenant's", %{a: a, n: n} do
+      orphan = "mention-entity-#{n}"
+      context(a, orphan, "ctx-a-#{n}")
+
+      assert {:ok, %{id: mention_id}} =
+               EntityResolution.resolve(
+                 %{workspace_id: orphan, surface_text: "Northwind #{n}", context_id: "ctx-a-#{n}"},
+                 tenant_id: a
+               )
+
+      assert {:ok, %{entity_id: entity_id}} =
+               EntityResolution.decide(mention_id, :new_entity,
+                 workspace_id: orphan,
+                 actor_id: "user:steward",
+                 tenant_id: a
+               )
+
+      assert {:ok, [[^a]]} =
+               Store.raw_query("SELECT tenant_id FROM canonical_entities WHERE id = ?1", [entity_id])
+    end
+  end
+
   describe "decide_claims" do
     test "a claim of another tenant is not found, whichever workspace the caller names",
          %{a: a, b: b, a_ws: a_ws, b_ws: b_ws, n: n} do
@@ -437,14 +575,19 @@ defmodule OptimalEngine.DataStewardTenantTest do
         assert unscoped_workspace(table, "b#{n}") == orphan, "#{table}: another tenant's row"
       end
 
-      # What cannot be traced to a tenant stays, and is reported.
+      # What cannot be traced to a tenant stays, and is reported. Captured sync
+      # changes are left too: they carry the old id inside the change itself,
+      # and the moved rows are captured afresh under the new one.
       assert unscoped_workspace("entity_mentions", "free-a#{n}") == orphan
       assert unscoped_workspace("memory_path_feedback", "a#{n}") == orphan
+      assert unscoped_workspace("sync_capture", "a#{n}") == orphan
+      assert unscoped_workspace("sync_capture", "b#{n}") == orphan
 
-      assert %{table: "memory_path_feedback", rows: rows} =
-               Enum.find(result.unscoped_tables, &(&1.table == "memory_path_feedback"))
+      for table <- ["memory_path_feedback", "sync_capture"] do
+        assert %{rows: rows} = Enum.find(result.unscoped_tables, &(&1.table == table))
+        assert rows >= 2
+      end
 
-      assert rows >= 2
       refute Enum.any?(result.unscoped_tables, &(&1.table in traced_tables()))
     end
 
@@ -460,6 +603,31 @@ defmodule OptimalEngine.DataStewardTenantTest do
 
       assert unscoped_workspace("entity_mentions", "pkg-a#{n}") == a_ws
       assert unscoped_workspace("entity_mentions", "pkg-b#{n}") == orphan
+    end
+
+    test "a mention of another tenant that points at the caller's row in another workspace stays",
+         %{a: a, a_ws: a_ws, n: n} do
+      orphan = "planted-orphan-#{n}"
+      context(a, orphan, "ctx-a-own-#{n}")
+      context(a, a_ws, "ctx-a-elsewhere-#{n}")
+      mention("planted-#{n}", orphan, "ctx-a-elsewhere-#{n}", nil)
+
+      assert {:ok, _} = DataSteward.repair_orphan_scope(orphan, a_ws, steward(a))
+
+      assert unscoped_workspace("entity_mentions", "planted-#{n}") == orphan
+    end
+
+    test "a repair that would move only rows hanging off the caller's rows elsewhere moves and signs nothing",
+         %{a: a, a_ws: a_ws, n: n} do
+      orphan = "planted-only-#{n}"
+      context(a, a_ws, "ctx-a-elsewhere-#{n}")
+      mention("planted-only-#{n}", orphan, "ctx-a-elsewhere-#{n}", nil)
+
+      assert {:error, :nothing_to_repair} =
+               DataSteward.repair_orphan_scope(orphan, a_ws, steward(a))
+
+      assert unscoped_workspace("entity_mentions", "planted-only-#{n}") == orphan
+      assert Evidence.list(a, kind: "workspace.rekeyed") == []
     end
 
     test "every such table in the schema is either traced or reported" do

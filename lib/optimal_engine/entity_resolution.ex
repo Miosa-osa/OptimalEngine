@@ -1,33 +1,71 @@
 defmodule OptimalEngine.EntityResolution do
-  @moduledoc "Creates immutable mentions and records explicit, auditable identity decisions."
+  @moduledoc """
+  Creates immutable mentions and records explicit, auditable identity decisions.
+
+  A mention has no tenant of its own: it belongs to the tenant of the context
+  or source package it was found in. So a mention may only point at a context
+  or source package of the writing tenant in its own workspace
+  (`resolve/2`), and a decision is made by the tenant the mention belongs to
+  (`decide/3`); a mention that points at neither belongs to its workspace.
+  """
 
   alias OptimalEngine.{DataContract, EntityRegistry, Store}
 
-  def resolve(attrs) when is_map(attrs) do
+  # A mention is the tenant's (`?3`) when it hangs off a context or source
+  # package of the tenant in the mention's workspace (`?2`), or off none.
+  @owned_mention """
+  ((entity_mentions.context_id IS NULL AND entity_mentions.source_package_id IS NULL)
+   OR EXISTS (SELECT 1 FROM contexts c WHERE c.id = entity_mentions.context_id AND c.tenant_id = ?3 AND c.workspace_id = ?2)
+   OR EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id AND s.tenant_id = ?3 AND s.workspace_id = ?2))
+  """
+
+  @doc """
+  Records a mention. Options: `:tenant_id` (default `"default"`): the
+  `context_id` and `source_package_id` a mention names must be that tenant's,
+  in the mention's workspace (`{:error, :context_not_found}`,
+  `{:error, :source_package_not_found}`).
+  """
+  def resolve(attrs, opts \\ []) when is_map(attrs) do
     workspace = value(attrs, :workspace_id)
     surface = value(attrs, :surface_text)
     normalized = EntityRegistry.normalize(surface || "")
+    tenant = Keyword.get(opts, :tenant_id, "default")
 
     with {:ok, _contract} <- DataContract.validate(:mention, attrs),
          :ok <- required(workspace, :workspace_id),
          :ok <- required(surface, :surface_text),
+         :ok <-
+           parent(tenant, workspace, "contexts", value(attrs, :context_id), :context_not_found),
+         :ok <-
+           parent(
+             tenant,
+             workspace,
+             "source_packages",
+             value(attrs, :source_package_id),
+             :source_package_not_found
+           ),
          {:ok, candidates} <- candidates(workspace, normalized, value(attrs, :proposed_kind)),
          {:ok, mention} <- persist_mention(attrs, normalized, candidates) do
       {:ok, Map.put(mention, :candidates, candidates)}
     end
   end
 
+  @doc """
+  Decides a mention. Options include `:tenant_id` (default `"default"`): a
+  mention of another tenant is not found.
+  """
   def decide(mention_id, decision, opts) when decision in [:link, :new_entity, :reject] do
     workspace = Keyword.fetch!(opts, :workspace_id)
     actor = Keyword.fetch!(opts, :actor_id)
+    tenant = Keyword.get(opts, :tenant_id, "default")
 
-    with {:ok, opts} <- prepare_entity(mention_id, decision, workspace, actor, opts) do
+    with {:ok, opts} <- prepare_entity(mention_id, decision, workspace, actor, tenant, opts) do
       Store.transaction(fn tx ->
         with {:ok, [[surface, proposed_kind, state]]} <-
                Store.txn_query(
                  tx,
-                 "SELECT surface_text, proposed_kind, resolution_state FROM entity_mentions WHERE id=?1 AND workspace_id=?2",
-                 [mention_id, workspace]
+                 "SELECT surface_text, proposed_kind, resolution_state FROM entity_mentions WHERE id=?1 AND workspace_id=?2 AND #{@owned_mention}",
+                 [mention_id, workspace, tenant]
                ),
              :ok <- ensure_unresolved(state),
              {:ok, selected_id, next_state} <-
@@ -158,19 +196,20 @@ defmodule OptimalEngine.EntityResolution do
   defp selected_entity(:reject, _surface, _kind, _workspace, _actor, _opts),
     do: {:ok, nil, "rejected"}
 
-  defp prepare_entity(_mention_id, decision, _workspace, _actor, opts)
+  defp prepare_entity(_mention_id, decision, _workspace, _actor, _tenant, opts)
        when decision != :new_entity,
        do: {:ok, opts}
 
-  defp prepare_entity(mention_id, :new_entity, workspace, actor, opts) do
+  defp prepare_entity(mention_id, :new_entity, workspace, actor, tenant, opts) do
     with {:ok, [[surface, kind, state]]} <-
            Store.raw_query(
-             "SELECT surface_text, proposed_kind, resolution_state FROM entity_mentions WHERE id=?1 AND workspace_id=?2",
-             [mention_id, workspace]
+             "SELECT surface_text, proposed_kind, resolution_state FROM entity_mentions WHERE id=?1 AND workspace_id=?2 AND #{@owned_mention}",
+             [mention_id, workspace, tenant]
            ),
          :ok <- ensure_unresolved(state),
          {:ok, entity} <-
            EntityRegistry.register(%{
+             tenant_id: tenant,
              workspace_id: workspace,
              canonical_name: surface,
              entity_kind: kind || "person",
@@ -180,6 +219,20 @@ defmodule OptimalEngine.EntityResolution do
       {:ok, Keyword.put(opts, :entity_id, entity.id)}
     else
       {:ok, []} -> {:error, :mention_not_found}
+      error -> error
+    end
+  end
+
+  # The row a mention names must be the tenant's, in the mention's workspace.
+  defp parent(_tenant, _workspace, _table, value, _reason) when value in [nil, ""], do: :ok
+
+  defp parent(tenant, workspace, table, id, reason) do
+    case Store.raw_query(
+           "SELECT 1 FROM #{table} WHERE id=?1 AND tenant_id=?2 AND workspace_id=?3",
+           [id, tenant, workspace]
+         ) do
+      {:ok, [_]} -> :ok
+      {:ok, []} -> {:error, reason}
       error -> error
     end
   end
