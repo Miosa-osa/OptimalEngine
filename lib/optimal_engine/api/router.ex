@@ -75,6 +75,10 @@ defmodule OptimalEngine.API.Router do
   plug(OptimalEngine.API.AuthorityPlug)
   plug(:dispatch)
 
+  # The most open triangles one request returns: the query joins the edge
+  # table with itself, so its cost grows with the limit.
+  @max_triangles 100
+
   # ---------------------------------------------------------------------------
   # CORS preflight
   # ---------------------------------------------------------------------------
@@ -112,29 +116,41 @@ defmodule OptimalEngine.API.Router do
     })
   end
 
+  # The analyses below read the edge table, which carries no tenant of its own,
+  # so each answers only for a workspace registered to the caller's tenant
+  # (`404` otherwise, as for a workspace that does not exist): an id nobody
+  # registered can hold the edges of two tenants at once.
   get "/api/graph/hubs" do
     workspace = query_param(conn, "workspace", "default")
-    {:ok, hubs} = GraphAnalyzer.hubs(workspace_id: workspace)
-    json(conn, %{hubs: format_hubs(hubs)})
+
+    with_registered_workspace(conn, workspace, fn ->
+      {:ok, hubs} = GraphAnalyzer.hubs(workspace_id: workspace)
+      json(conn, %{hubs: format_hubs(hubs)})
+    end)
   end
 
   get "/api/graph/triangles" do
     workspace = query_param(conn, "workspace", "default")
-    limit = conn |> query_param("limit", "20") |> parse_int(20)
+    limit = conn |> query_param("limit", "20") |> parse_int(20) |> min(@max_triangles)
     # LLM classification is intentionally opt-in; default is low-latency
     # candidate-only triangles. Use `?classify=true` to enable enrichment.
     skip_llm = not (conn |> query_param("classify", "false") |> parse_bool(false))
 
-    {:ok, triangles} =
-      GraphAnalyzer.triangles(limit: limit, workspace_id: workspace, skip_llm: skip_llm)
+    with_registered_workspace(conn, workspace, fn ->
+      {:ok, triangles} =
+        GraphAnalyzer.triangles(limit: limit, workspace_id: workspace, skip_llm: skip_llm)
 
-    json(conn, %{triangles: format_triangles(triangles)})
+      json(conn, %{triangles: format_triangles(triangles)})
+    end)
   end
 
   get "/api/graph/clusters" do
     workspace = query_param(conn, "workspace", "default")
-    {:ok, clusters} = GraphAnalyzer.clusters(workspace_id: workspace)
-    json(conn, %{clusters: format_clusters(clusters)})
+
+    with_registered_workspace(conn, workspace, fn ->
+      {:ok, clusters} = GraphAnalyzer.clusters(workspace_id: workspace)
+      json(conn, %{clusters: format_clusters(clusters)})
+    end)
   end
 
   get "/api/graph/reflect" do
@@ -144,15 +160,17 @@ defmodule OptimalEngine.API.Router do
     # low-latency candidate gaps only. Use `?classify=true` to enable.
     skip_llm = not (conn |> query_param("classify", "false") |> parse_bool(false))
 
-    {:ok, gaps} =
-      Reflector.reflect(
-        min_cooccurrences: min,
-        workspace_id: workspace,
-        tenant_id: conn.assigns[:current_tenant] || "default",
-        skip_llm: skip_llm
-      )
+    with_registered_workspace(conn, workspace, fn ->
+      {:ok, gaps} =
+        Reflector.reflect(
+          min_cooccurrences: min,
+          workspace_id: workspace,
+          tenant_id: conn.assigns[:current_tenant] || "default",
+          skip_llm: skip_llm
+        )
 
-    json(conn, %{gaps: format_gaps(gaps)})
+      json(conn, %{gaps: format_gaps(gaps)})
+    end)
   end
 
   get "/api/node/:node_id" do
@@ -4819,6 +4837,23 @@ defmodule OptimalEngine.API.Router do
     end
   rescue
     _ -> default
+  end
+
+  # Runs `fun` when `workspace` is registered to the caller's tenant; a
+  # workspace of another tenant and one that does not exist answer alike.
+  defp with_registered_workspace(conn, workspace, fun) do
+    tenant = conn.assigns[:current_tenant] || "default"
+
+    case OptimalEngine.Workspace.get(workspace) do
+      {:ok, %{tenant_id: ^tenant}} ->
+        fun.()
+
+      {:error, reason} when reason != :not_found ->
+        conn |> put_status(500) |> json(%{error: inspect(reason)})
+
+      _not_in_tenant ->
+        conn |> put_status(404) |> json(%{error: "workspace not found"})
+    end
   end
 
   defp query_param(conn, key, default) do

@@ -12,6 +12,10 @@ defmodule OptimalEngine.Graph.Analyzer do
 
   All analyses are workspace-scoped: pass `:workspace_id` (default "default").
   No cross-workspace leakage by default — see `OptimalEngine.Workspace`.
+
+  The edge table has no tenant of its own, so a caller that serves a tenant
+  passes a workspace registered to it (the HTTP routes answer `404` for any
+  other): an id nobody registered can hold the edges of two tenants.
   """
 
   require Logger
