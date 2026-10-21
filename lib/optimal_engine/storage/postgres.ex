@@ -2,17 +2,12 @@ defmodule OptimalEngine.Storage.Postgres do
   @moduledoc """
   Connection, configuration, and health for the PostgreSQL storage provider.
 
-  This module is the first stage of the provider described in
-  `docs/guides/postgres-provider.md`. It is deliberately not registered as a
-  provider adapter: the engine cannot yet read or write relational data through
-  PostgreSQL, so `OptimalEngine.Storage.Providers` must keep reporting
-  `adapter_missing` for `postgres`. Registering this module there would claim a
-  capability the engine does not have.
-
-  What it does provide is a truthful health signal. `OPTIMAL_POSTGRES_URL` is
-  parsed into connection options and the probe runs a real `SELECT 1`, so a
-  configured but wrong host, database, or credential reports `unreachable`
-  instead of a bare TCP success.
+  The canonical store on PostgreSQL is `OptimalEngine.Store.Postgres`
+  (`docs/guides/postgres-provider.md`); this module is the operator's view of
+  the connection. `OPTIMAL_POSTGRES_URL` is parsed into connection options and
+  the probe runs a real `SELECT 1`, so a configured but wrong host, database,
+  or credential reports `unreachable` instead of a bare TCP success.
+  `round_trip/1` writes a row and reads it back.
 
   The URL is never returned by this module's public functions, logged, or
   written to disk; `safe_config/1` carries only non-secret fields.
@@ -38,26 +33,143 @@ defmodule OptimalEngine.Storage.Postgres do
       kind: "service",
       role: "canonical",
       capabilities: ~w(relational temporal document geospatial time_series),
-      stage: 1,
-      adapter_registered: false,
+      stage: 3,
+      adapter_registered: true,
+      adapter: "OptimalEngine.Store.Postgres",
+      selected: OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
       env: @env,
       unavailable: unavailable()
     }
   end
 
   @doc """
-  What the PostgreSQL store does not do yet. Each one is refused by name at
-  runtime, never answered as if it worked.
+  What the PostgreSQL store does not do yet. Each feature is refused by name
+  when it is used, never answered as if it worked; `refused_as` are the
+  reasons it is refused with, and every reason the dialect refuses a statement
+  with is under one of them. A store that finds one of the first two in use in
+  its database does not start (`OptimalEngine.Store.Postgres`).
   """
-  @spec unavailable() :: [%{feature: String.t(), reason: String.t()}]
+  @spec unavailable() :: [%{feature: String.t(), reason: String.t(), refused_as: [String.t()]}]
   def unavailable do
     [
       %{
+        feature: "replication",
+        reason:
+          "change capture is SQLite triggers and applying reads SQLite's catalog; " <>
+            "enabling, serving and applying sync are refused",
+        refused_as: ["replication is not available on the PostgreSQL store"]
+      },
+      %{
+        feature: "app_data_collections",
+        reason:
+          "a collection creates a table, a full-text index and triggers at runtime; " <>
+            "creating one is refused",
+        refused_as: [
+          "app data collections are not available on the PostgreSQL store",
+          "schema change outside the migrations"
+        ]
+      },
+      %{
         feature: "full_text_search",
         reason:
-          "FTS5 tables are not created on PostgreSQL and MATCH is refused, until a tsvector slice"
+          "FTS5 tables are not created on PostgreSQL; search and MATCH are refused " <>
+            "until a tsvector slice",
+        refused_as: ["full-text search is not available on the PostgreSQL store", "FTS5 MATCH"]
+      },
+      %{
+        feature: "sqlite_json_functions",
+        reason:
+          "json_set, json_each, json(), json_array_length and SQLite's other JSON functions, " <>
+            "and the json_extract forms PostgreSQL cannot compare as SQLite does (an ordered " <>
+            "comparison, ORDER BY on it, a comparison to an expression or a non-text value), " <>
+            "are refused at their call sites (routing placement, memory partition and " <>
+            "security label filters, reconstruction learning)",
+        refused_as:
+          refused_by("a SQLite JSON function with no translation") ++
+            [
+              "json_extract form",
+              "json_extract path",
+              "json_extract on the right of a comparison",
+              "json_extract ordered comparison",
+              "json_extract compared to an expression",
+              "json_extract compared to a non-text value",
+              "json_extract in ORDER BY",
+              "json_extract IN with an expression",
+              "json_extract IN with a subquery",
+              "json_valid of an expression"
+            ]
+      },
+      %{
+        feature: "date_time_arithmetic",
+        reason:
+          "datetime and strftime with a computed modifier or another format, julianday, " <>
+            "unixepoch, date() and time() are refused (viability metrics, retention windows)",
+        refused_as: [
+          "unmapped date/time function",
+          "datetime() modifier",
+          "strftime call",
+          "strftime format",
+          "julianday",
+          "unixepoch",
+          "date",
+          "time"
+        ]
+      },
+      %{
+        feature: "sqlite_catalog",
+        reason:
+          "PRAGMA, sqlite_master and the pragma_* functions are refused (workspace bundles, " <>
+            "the data steward's table list, a workspace slug change, replication)",
+        refused_as: ["PRAGMA", "sqlite_master", "SQLite catalog function"]
+      },
+      %{
+        feature: "rowid",
+        reason:
+          "a statement that orders or filters by rowid, or reads last_insert_rowid(), is " <>
+            "refused (backup schedules, the storage audit, graph edge listings, model call " <>
+            "history, a workspace slug change)",
+        refused_as: ["rowid", "last_insert_rowid"]
+      },
+      %{
+        feature: "sqlite_functions",
+        reason:
+          "group_concat, typeof, instr, printf and SQLite's other functions without a " <>
+            "translation, GLOB, SQLite's collations and a LIKE with a computed pattern are " <>
+            "refused at their call sites (action chain lists, clusters, insight health)",
+        refused_as:
+          refused_by("a SQLite function with no translation") ++
+            ["GLOB", "SQLite collation", "LIKE with a computed pattern"]
+      },
+      %{
+        feature: "replace_writes",
+        reason:
+          "SQLite's delete-and-insert writes (INSERT OR REPLACE, REPLACE INTO) and an " <>
+            "INSERT OR IGNORE with its own ON CONFLICT are refused at their call sites; the " <>
+            "store's context and chunk writes replace rows as SQLite does",
+        refused_as: [
+          "INSERT OR REPLACE",
+          "REPLACE INTO",
+          "INSERT OR IGNORE with an explicit ON CONFLICT clause"
+        ]
+      },
+      %{
+        feature: "runtime_schema_and_transactions",
+        reason:
+          "the schema comes from the migrations and transactions from the store, so a " <>
+            "schema change, a transaction statement sent as a statement, and SQLite-only " <>
+            "table options are refused",
+        refused_as: [
+          "schema change outside the migrations",
+          "transaction statement outside the store's transaction",
+          "AUTOINCREMENT",
+          "WITHOUT ROWID"
+        ]
       }
     ]
+  end
+
+  defp refused_by(reason) do
+    for {name, ^reason} <- OptimalEngine.Store.Dialect.refusals(), do: name
   end
 
   @doc """
@@ -110,6 +222,42 @@ defmodule OptimalEngine.Storage.Postgres do
   @doc "True only when the database answered a real query."
   @spec healthy?(keyword()) :: boolean()
   def healthy?(opts \\ []), do: health(opts) == :healthy
+
+  @doc """
+  Writes one row to a temporary table and reads it back, on a connection of
+  its own that is closed afterwards. The table disappears with the
+  transaction, so nothing is left in the database.
+  """
+  @spec round_trip(keyword()) :: {:ok, map()} | {:error, term()}
+  def round_trip(opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
+
+    with {:ok, config} <- config(opts) do
+      run_isolated(fn -> write_and_read(config, timeout) end, timeout, {:error, :unreachable})
+    end
+  end
+
+  defp write_and_read(config, timeout) do
+    {:ok, conn} = Postgrex.start_link(connect_options(config, timeout))
+    value = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    try do
+      Postgrex.transaction(conn, fn conn ->
+        Postgrex.query!(conn, "CREATE TEMP TABLE optimal_proof (value TEXT) ON COMMIT DROP", [])
+        Postgrex.query!(conn, "INSERT INTO optimal_proof (value) VALUES ($1)", [value])
+        %{rows: [[read]]} = Postgrex.query!(conn, "SELECT value FROM optimal_proof", [])
+        read
+      end)
+      |> case do
+        {:ok, ^value} -> {:ok, %{wrote: 1, read_back: true}}
+        other -> {:error, {:round_trip_mismatch, other}}
+      end
+    after
+      GenServer.stop(conn, :normal, timeout)
+    end
+  catch
+    _kind, _reason -> {:error, :unreachable}
+  end
 
   # ---------------------------------------------------------------------------
   # URL parsing
@@ -190,13 +338,14 @@ defmodule OptimalEngine.Storage.Postgres do
   # connect must not outlive the probe. The connection is opened in a spawned,
   # unlinked process that is monitored and hard-stopped at the deadline.
   defp run_probe(config, timeout) do
+    run_isolated(fn -> connect_and_query(config, timeout) end, timeout, :unreachable)
+  end
+
+  defp run_isolated(fun, timeout, unreachable) do
     parent = self()
     tag = make_ref()
 
-    {pid, monitor} =
-      spawn_monitor(fn ->
-        send(parent, {tag, connect_and_query(config, timeout)})
-      end)
+    {pid, monitor} = spawn_monitor(fn -> send(parent, {tag, fun.()}) end)
 
     receive do
       {^tag, result} ->
@@ -204,25 +353,26 @@ defmodule OptimalEngine.Storage.Postgres do
         result
 
       {:DOWN, ^monitor, :process, ^pid, _reason} ->
-        :unreachable
+        unreachable
     after
       timeout + 1_000 ->
         Process.exit(pid, :kill)
-        :unreachable
+        unreachable
     end
   end
 
-  defp connect_and_query(config, timeout) do
-    options =
-      config
-      |> Map.delete(:sslmode)
-      |> Map.put(:timeout, timeout)
-      |> Map.put(:connect_timeout, timeout)
-      |> Map.put(:pool_size, 1)
-      |> Map.put(:backoff_type, :stop)
-      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  defp connect_options(config, timeout) do
+    config
+    |> Map.delete(:sslmode)
+    |> Map.put(:timeout, timeout)
+    |> Map.put(:connect_timeout, timeout)
+    |> Map.put(:pool_size, 1)
+    |> Map.put(:backoff_type, :stop)
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
 
-    case Postgrex.start_link(options) do
+  defp connect_and_query(config, timeout) do
+    case Postgrex.start_link(connect_options(config, timeout)) do
       {:ok, conn} ->
         try do
           case Postgrex.query(conn, "SELECT 1", [], timeout: timeout) do

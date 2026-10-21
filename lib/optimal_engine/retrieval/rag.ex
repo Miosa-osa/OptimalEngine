@@ -121,10 +121,10 @@ defmodule OptimalEngine.Retrieval.RAG do
   """
   @spec ask(String.t(), keyword()) :: {:ok, ask_result()} | {:error, term()}
   def ask(query, opts \\ []) when is_binary(query) do
-    if Keyword.get(opts, :context_package, false) do
-      ask_context_package(query, opts)
-    else
-      ask_legacy(query, opts)
+    cond do
+      not Search.available?() -> Search.unavailable()
+      Keyword.get(opts, :context_package, false) -> ask_context_package(query, opts)
+      true -> ask_legacy(query, opts)
     end
   end
 

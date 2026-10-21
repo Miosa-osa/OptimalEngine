@@ -107,10 +107,6 @@ defmodule OptimalEngine.Storage.S3AdapterTest do
   end
 
   test "an unimplemented provider stays adapter_missing even when its probe would pass" do
-    assert {:ok, postgres} = Providers.get("postgres")
-    refute postgres.adapter_implemented
-    assert postgres.lifecycle_state == "adapter_missing"
-
     assert {:ok, qdrant} = Providers.get("qdrant")
     refute qdrant.adapter_implemented
     assert qdrant.lifecycle_state == "adapter_missing"
