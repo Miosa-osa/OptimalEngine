@@ -413,7 +413,7 @@ defmodule OptimalEngine.Store.SQLite do
     refuse_transaction_control!(sql, :inside)
 
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
-         :ok <- Exqlite.Sqlite3.bind(stmt, params) do
+         :ok <- bind(db, stmt, params) do
       result = collect_rows_raw(db, stmt, [])
       Exqlite.Sqlite3.release(db, stmt)
       result
@@ -1529,7 +1529,9 @@ defmodule OptimalEngine.Store.SQLite do
   # Raised in the Store process, that would stop the Store and fail every call
   # waiting on it, so it is answered as an error and the statement released.
   # The error does not carry the value, which may be anything a request sent.
-  defp bind(db, stmt, params) do
+  @doc false
+  @spec bind(term(), term(), [term()]) :: :ok | {:error, term()}
+  def bind(db, stmt, params) do
     Exqlite.Sqlite3.bind(stmt, params)
   rescue
     ArgumentError ->

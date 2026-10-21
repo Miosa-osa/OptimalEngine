@@ -15,6 +15,7 @@ defmodule OptimalEngine.API.SyncAPI do
 
   require Logger
 
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.API.{Actor, Reader}
   alias OptimalEngine.ReadScope
   alias OptimalEngine.Sync
@@ -199,14 +200,7 @@ defmodule OptimalEngine.API.SyncAPI do
   defp text_opt(_text, :base_replica_id), do: {:error, :invalid_base_replica_id}
   defp text_opt(_text, :sender), do: {:error, :invalid_replica_id}
 
-  defp int(nil, default), do: default
-
-  defp int(value, default) do
-    case Integer.parse(to_string(value)) do
-      {n, ""} -> n
-      _ -> default
-    end
-  end
+  defp int(value, default), do: IntParam.parse(value, default)
 
   defp error(conn, status, reason) when is_atom(reason),
     do: error(conn, status, Atom.to_string(reason))

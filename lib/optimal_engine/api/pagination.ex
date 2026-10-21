@@ -8,7 +8,11 @@ defmodule OptimalEngine.API.Pagination do
   Limits:
     - `offset` is clamped to >= 0 (negative values treated as 0)
     - `limit`  is clamped to 1..200 (0 or negative → 1; >200 → 200)
+    - a value outside the signed 64-bit range is refused with `400`
+      (`OptimalEngine.API.IntParam`), not clamped
   """
+
+  alias OptimalEngine.API.IntParam
 
   @max_limit 200
   @default_limit 50
@@ -76,15 +80,7 @@ defmodule OptimalEngine.API.Pagination do
     Map.get(conn.query_params, key, default)
   end
 
-  defp parse_int(str, default) when is_binary(str) do
-    case Integer.parse(str) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp parse_int(other, _default) when is_integer(other), do: other
-  defp parse_int(_, default), do: default
+  defp parse_int(value, default), do: IntParam.parse(value, default, partial: true)
 
   defp clamp_limit(n) when n < 1, do: 1
   defp clamp_limit(n) when n > @max_limit, do: @max_limit

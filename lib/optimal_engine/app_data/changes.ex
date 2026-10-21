@@ -13,6 +13,7 @@ defmodule OptimalEngine.AppData.Changes do
   commit and they read the feed from their last `seq`.
   """
 
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.AppData.{Collections, Scope, SQL}
 
   @registry OptimalEngine.AppData.Registry
@@ -86,10 +87,12 @@ defmodule OptimalEngine.AppData.Changes do
   defp since("latest", latest), do: {:ok, latest}
   defp since(n, _latest) when is_integer(n) and n >= 0, do: {:ok, n}
 
+  # A number outside 64 bits raises `IntParam.OutOfRange`, which the router
+  # answers as 400; SQLite binds 64 bits.
   defp since(value, latest) when is_binary(value) do
-    case Integer.parse(value) do
-      {n, ""} -> since(n, latest)
-      _ -> {:error, {:validation, ["since must be a sequence number or latest"]}}
+    case IntParam.parse(value, :invalid) do
+      :invalid -> {:error, {:validation, ["since must be a sequence number or latest"]}}
+      n -> since(n, latest)
     end
   end
 
@@ -100,9 +103,9 @@ defmodule OptimalEngine.AppData.Changes do
   defp limit(n) when is_integer(n) and n > 0 and n <= @max_limit, do: {:ok, n}
 
   defp limit(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {n, ""} -> limit(n)
-      _ -> limit(:invalid)
+    case IntParam.parse(value, :invalid) do
+      :invalid -> limit(:invalid)
+      n -> limit(n)
     end
   end
 

@@ -429,6 +429,60 @@ class RouteMappingTests(CliTestCase):
         self.assertTrue(all('actor' not in json.dumps(r['query']) for r in self.fake.requests))
 
 
+class IntegerOptionTests(CliTestCase):
+    """A whole-number option is checked against the 64 bits the Engine accepts."""
+    INT64_MAX = '9223372036854775807'
+    TOO_BIG = '9223372036854775808'
+
+    def setUp(self):
+        super().setUp()
+        self.fake = self.engine()
+        self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
+
+    check = RouteMappingTests.check
+
+    def test_a_number_that_fits_in_64_bits_is_sent(self):
+        ws = 'default:sales'
+        for value in [self.INT64_MAX, '0', '0009223372036854775807', '123456789012345678']:
+            request = self.check(['memory', ws, '--limit', value], 'GET', '/api/memory', {'limit': value})
+            self.assertEqual(request['query'].get('workspace'), ws)
+        self.check(['search', 'x', ws, '--offset', self.INT64_MAX], 'GET', '/api/search',
+                   {'offset': self.INT64_MAX})
+
+    def test_a_number_beyond_64_bits_is_a_usage_error_and_nothing_is_sent(self):
+        ws = 'default:sales'
+        beyond = [self.TOO_BIG, '9999999999999999999', '10000000000000000000',
+                  '0009223372036854775808', '99999999999999999999999999']
+        for flag in ['--limit', '--offset', '--timeout']:
+            for value in beyond:
+                self.fake.requests.clear()
+                result = self.run_cli('memory', ws, flag, value)
+                self.assertEqual(result.returncode, 64, (flag, value, result.stderr))
+                self.assertIn('whole number', result.stderr)
+                self.assertIn(self.INT64_MAX, result.stderr)
+                self.assertEqual(self.fake.requests, [], (flag, value))
+
+    def test_text_that_is_not_a_whole_number_is_still_refused(self):
+        ws = 'default:sales'
+        for value in ['abc', '1.5', '12a']:
+            result = self.run_cli('memory', ws, '--limit', value)
+            self.assertEqual(result.returncode, 64, (value, result.stderr))
+            self.assertIn('whole number', result.stderr)
+
+    def test_days_and_ttl_use_the_same_bound(self):
+        ws = 'default:sales'
+        self.check(['viability', 'history', ws, '--days', self.INT64_MAX], 'GET',
+                   '/api/viability/history', {'days': self.INT64_MAX})
+        result = self.run_cli('viability', 'history', ws, '--days', self.TOO_BIG)
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn('--days takes a whole number', result.stderr)
+
+        result = self.run_cli('authority', 'request', ws, '--action', 'read', '--resource',
+                              'optimal://x/y', '--ttl', self.TOO_BIG)
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn('--ttl takes seconds', result.stderr)
+
+
 class JsonTests(CliTestCase):
     def setUp(self):
         super().setUp()
