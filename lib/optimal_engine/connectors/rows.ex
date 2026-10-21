@@ -293,15 +293,15 @@ defmodule OptimalEngine.Connectors.Rows do
   @doc """
   Where a connector registered without a workspace lands: the first active
   workspace the tenant owns among the candidates. The candidates are the
-  Engine's own workspace when it is workspace-scoped, then the intake
-  workspace (`OptimalEngine.CorpusOrganizer.source_workspace/0`), then the
+  Engine's own workspace when it is workspace-scoped, then the tenant's intake
+  workspace (`OptimalEngine.CorpusOrganizer.source_workspace/1`), then the
   legacy `"default"` workspace. An archived candidate is skipped, so a
   connector is never parked in a workspace that was retired.
   """
   @spec default_workspace(String.t(), [String.t()] | nil) ::
           {:ok, String.t()} | {:error, :no_intake_workspace}
   def default_workspace(tenant_id, candidates \\ nil) do
-    candidates = candidates || default_candidates()
+    candidates = candidates || default_candidates(tenant_id)
 
     case Enum.find(candidates, &(check_workspace(tenant_id, &1) == :ok)) do
       nil -> {:error, :no_intake_workspace}
@@ -309,14 +309,14 @@ defmodule OptimalEngine.Connectors.Rows do
     end
   end
 
-  defp default_candidates do
+  defp default_candidates(tenant_id) do
     scoped =
       case Scope.engine_scope() do
         %{mode: "workspace", workspace_id: workspace_id} -> [workspace_id]
         _org -> []
       end
 
-    scoped ++ [CorpusOrganizer.source_workspace(), Workspace.default_id()]
+    scoped ++ [CorpusOrganizer.source_workspace(tenant_id), Workspace.default_id()]
   end
 
   defp spec_workspace(tenant_id, workspace_id) when workspace_id in [nil, ""],
