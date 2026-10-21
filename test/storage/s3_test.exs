@@ -137,7 +137,7 @@ defmodule OptimalEngine.Storage.S3Test do
       assert {:ok, %{body: "bytes"}} = S3.get_object(key)
     end
 
-    test "put_file stores a file and get_object_to_file restores the same bytes", %{stub: stub} do
+    test "put_file stores a file and get_object_to_file restores the same bytes" do
       tmp = Path.join(System.tmp_dir!(), "s3-client-#{System.unique_integer([:positive])}")
       File.mkdir_p!(tmp)
       source = Path.join(tmp, "evidence.bin")

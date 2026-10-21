@@ -206,8 +206,6 @@ defmodule OptimalEngine.API.RateLimitTest do
         metadata: %{"rate_limit_per_minute" => 2}
       }
 
-      conn = new_conn() |> assign(:current_api_key, api_key)
-
       # With capacity=200 and tiny per_minute, burst fills quickly but let's
       # use a tiny override capacity by also having a small burst default.
       opts_tight = [default_capacity: 2, default_per_minute: 100]

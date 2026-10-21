@@ -4,7 +4,7 @@ defmodule OptimalEngine.Pipeline.Classifier.ClassificationTest do
   alias OptimalEngine.Pipeline.Classifier
   alias OptimalEngine.Pipeline.Classifier.Classification
   alias OptimalEngine.Pipeline.Decomposer
-  alias OptimalEngine.Pipeline.Decomposer.{Chunk, ChunkTree}
+  alias OptimalEngine.Pipeline.Decomposer.Chunk
   alias OptimalEngine.Pipeline.Parser.ParsedDoc
 
   describe "classify_chunk/2" do

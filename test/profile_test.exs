@@ -2,7 +2,6 @@ defmodule OptimalEngine.ProfileTest do
   use ExUnit.Case, async: false
 
   import Plug.Test
-  import Plug.Conn
 
   alias OptimalEngine.API.Router
   alias OptimalEngine.Profile
