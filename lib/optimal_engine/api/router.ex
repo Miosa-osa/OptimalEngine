@@ -5755,6 +5755,11 @@ defmodule OptimalEngine.API.Router do
   defp fetch_node_edges(node_id, workspace_id, tenant_id, offset, count) do
     # Return edges where at least one endpoint lives in this node.
     # We join via the contexts table to resolve node membership.
+    #
+    # The order is total: (source, target, relation) is the table's unique key
+    # within a tenant and workspace, and DISTINCT collapses an edge both of whose
+    # ends are in the node. A batch boundary of a read around hidden edges cannot
+    # split a tie, so the weight (not a key) needs no tiebreak.
     case Store.raw_query(
            """
            SELECT DISTINCT e.source_id, e.target_id, e.relation, e.weight
