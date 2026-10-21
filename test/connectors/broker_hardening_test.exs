@@ -265,7 +265,11 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
     end
 
     test "a seal made without a connector is refused, and a plaintext reference is not read" do
-      assert_raise FunctionClauseError, fn -> CredentialSource.seal_reference(@config, nil) end
+      # Called through apply/3: a direct call with nil warns at compile time, and
+      # the suite fails on warnings.
+      assert_raise FunctionClauseError, fn ->
+        apply(CredentialSource, :seal_reference, [@config, nil])
+      end
 
       stub = broker([{"example-issued-token-1", 3_600}])
       assert {:error, :broker_not_configured} = CredentialSource.hydrate(@config, @scope)
