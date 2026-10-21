@@ -52,11 +52,12 @@ defmodule OptimalEngine.Store.ContextTenant do
 
   @existing_sql "SELECT tenant_id, workspace_id FROM contexts WHERE id = ?1"
 
-  # The rows that name a context and carry a tenant of their own.
+  # The `default` rows that name a context and carry a tenant of their own.
   @relabel_sql [
-    "UPDATE chunks SET tenant_id = ?1 WHERE signal_id = ?2 AND tenant_id != ?1",
-    "UPDATE claims SET tenant_id = ?1 WHERE signal_id = ?2 AND tenant_id != ?1",
-    "UPDATE vectors SET tenant_id = ?1 WHERE context_id = ?2 AND tenant_id != ?1"
+    "UPDATE chunk_embeddings SET tenant_id = ?1 WHERE tenant_id = 'default' AND chunk_id IN (SELECT id FROM chunks WHERE signal_id = ?2)",
+    "UPDATE chunks SET tenant_id = ?1 WHERE tenant_id = 'default' AND signal_id = ?2",
+    "UPDATE claims SET tenant_id = ?1 WHERE tenant_id = 'default' AND signal_id = ?2",
+    "UPDATE vectors SET tenant_id = ?1 WHERE tenant_id = 'default' AND context_id = ?2"
   ]
 
   @typedoc """
@@ -80,13 +81,23 @@ defmodule OptimalEngine.Store.ContextTenant do
   def existing_sql, do: @existing_sql
 
   @doc """
-  The statements that give a context's chunks, claims and vectors the tenant
-  that took the context over (`?1` the tenant, `?2` the context id), in SQLite's dialect.
-  A store runs them when the row it replaces had another tenant: they were
-  written under it, and a workspace's owner reads them as its own.
+  The statements that give a context's chunks, chunk embeddings, claims and vectors
+  the tenant that took the context over (`?1` the tenant, `?2` the context id), in
+  SQLite's dialect. They move `default` rows only, and a store runs them when
+  `takeover?/2` says the write took a `default` row over: those rows were written
+  under it, before the workspace had an owner, and the owner reads them as its own.
   """
   @spec relabel_sql() :: [String.t()]
   def relabel_sql, do: @relabel_sql
+
+  @doc """
+  Whether a write for `tenant` over a row held by `previous` (`nil` for none) takes
+  a `default` row over. A row another tenant held is replaced, and what hangs off it
+  stays that tenant's.
+  """
+  @spec takeover?(String.t() | nil, String.t()) :: boolean()
+  def takeover?("default", tenant), do: tenant != "default"
+  def takeover?(_previous, _tenant), do: false
 
   @doc """
   Whether a write of context `id` into `workspace_id` for `tenant_id` (`nil`
@@ -126,8 +137,8 @@ defmodule OptimalEngine.Store.ContextTenant do
 
   @doc """
   `for_context/2`, and the tenant of the row the write replaces (`nil` when it
-  replaces none): a store that finds it is not the tenant written gives the
-  rows that hang off the context to the new one (`relabel_sql/0`).
+  replaces none): a store that finds `takeover?/2` gives the `default` rows that
+  hang off the context to the new tenant (`relabel_sql/0`).
   """
   @spec decide(Context.t(), lookup()) ::
           {:ok, String.t(), String.t() | nil} | {:error, term()}
