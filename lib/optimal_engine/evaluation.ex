@@ -816,9 +816,8 @@ defmodule OptimalEngine.Evaluation do
   defp retrieval_opts_to_keyword(value), do: opts_to_keyword(value)
 
   # Text keys are looked up in `allowed` and any other text key is dropped, so
-  # no atom is created from the text (and an option that only the engine sets,
-  # such as `:internal_refresh_allow_all`, cannot be set from a file). Atom keys
-  # come from code and are kept as they are.
+  # no atom is created from the text. Atom keys come from code and are kept as
+  # they are.
   defp known_options(map, allowed) do
     Enum.flat_map(map, fn
       {key, value} when is_atom(key) ->

@@ -29,6 +29,7 @@ defmodule OptimalEngine.AtomHardeningTest do
   alias OptimalEngine.Knowledge.SPARQL.Parser, as: SparqlParser
   alias OptimalEngine.Memory
   alias OptimalEngine.Memory.Session
+  alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.Operating.Loops
   alias OptimalEngine.Organization
   alias OptimalEngine.Render.Spec
@@ -655,11 +656,7 @@ defmodule OptimalEngine.AtomHardeningTest do
                      case_id: "atoms-1",
                      question: "q",
                      expected_answer: "a",
-                     retrieval_opts: %{
-                       key => 1,
-                       "limit" => 3,
-                       "internal_refresh_allow_all" => true
-                     }
+                     retrieval_opts: %{key => 1, "limit" => 3, "scope" => "not a struct"}
                    }
                  ],
                  workspace_id: workspace_id,
@@ -672,8 +669,49 @@ defmodule OptimalEngine.AtomHardeningTest do
       assert_received {:retrieval_opts, opts}
       assert opts[:limit] == 3
       refute Enum.any?(opts, fn {name, _} -> to_string(name) == key end)
-      refute Keyword.has_key?(opts, :internal_refresh_allow_all)
+      refute Keyword.has_key?(opts, :scope)
       refute_atom(key)
+    end
+
+    test "every option retrieval takes from data survives a dataset file's string keys" do
+      workspace_id = "atoms-eval-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      on_exit(fn ->
+        Store.raw_execute("DELETE FROM evaluation_runs WHERE workspace_id = ?1", [workspace_id])
+      end)
+
+      retriever = fn _question, opts ->
+        send(test_pid, {:retrieval_opts, opts})
+        {:ok, %{id: nil, returned_object_links: []}}
+      end
+
+      expected = Enum.map(RetrievalCoordinator.option_keys(), &{&1, "value-of-#{&1}"})
+      from_file = Map.new(expected, fn {key, value} -> {Atom.to_string(key), value} end)
+
+      assert {:ok, _result} =
+               Evaluation.run_benchmark(
+                 [
+                   %{
+                     case_id: "atoms-roundtrip",
+                     question: "q",
+                     expected_answer: "a",
+                     retrieval_opts: from_file
+                   }
+                 ],
+                 workspace_id: workspace_id,
+                 benchmark_name: "atoms",
+                 dataset_name: "atoms",
+                 retriever: retriever
+               )
+
+      assert_received {:retrieval_opts, opts}
+      assert Enum.sort(opts) == Enum.sort(expected)
+    end
+
+    test "the scope keys a dataset used to set are among the options" do
+      scope_keys = ~w(actor actor_id created_by operation_class node node_hints permissions)a
+      assert scope_keys -- RetrievalCoordinator.option_keys() == []
     end
   end
 

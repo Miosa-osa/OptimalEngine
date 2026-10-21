@@ -37,11 +37,20 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   @default_limit 10
   @default_token_budget 2_000
 
+  # The scope keys (`:actor`, `:actor_id`, `:created_by`, `:operation_class`,
+  # `:node`, `:node_hints`, `:permissions`) are the ones `ScopeEnvelope.resolve/2`
+  # reads from these options.
   @option_keys [
     :workspace_id,
     :tenant_id,
+    :actor,
     :actor_id,
+    :created_by,
     :requesting_actor_id,
+    :operation_class,
+    :node,
+    :node_hints,
+    :permissions,
     :allowed_partitions,
     :allowed_security_labels,
     :limit,
@@ -73,8 +82,9 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   The options `retrieve/2` reads that may be set from data, such as a dataset
   file or a request body.
 
-  It leaves out `:scope`, which is a struct, and `:internal_refresh_allow_all`,
-  which only the engine's own refresh sets: text from data never reaches it.
+  It leaves out `:scope`, which is a struct that code builds and data cannot
+  express. Every other key `retrieve/2` reads is listed, the scope keys
+  `ScopeEnvelope.resolve/2` takes included.
   """
   @spec option_keys() :: [atom()]
   def option_keys, do: @option_keys
