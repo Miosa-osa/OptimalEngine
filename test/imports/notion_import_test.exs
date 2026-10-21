@@ -560,7 +560,7 @@ defmodule OptimalEngine.Imports.NotionTest do
   test "a long page's entities are read within the classification limit, and the import finishes",
        ctx do
     # 676 known names the page never mentions, each starting like "planned",
-    # so no quick check rules one out: reading the whole 1.9 MB page for them
+    # so no quick check rules one out: reading the whole 1.88 MB page for them
     # takes seconds, far past a 200 ms limit, while mode and genre, read from
     # the page's first 64 KiB, take a small part of it. The limit, not the
     # order in which a page's detections spend its budget, stops the read.
@@ -602,8 +602,8 @@ defmodule OptimalEngine.Imports.NotionTest do
     assert "entity extraction" in stopped
     assert ms < 10_000, "the import took #{ms} ms"
 
-    assert byte_size(contexts(ctx.workspace)[uri(ctx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")].content) >
-             1_900_000
+    # Stored whole: the page is under the 2 MiB page limit, so nothing is clipped.
+    assert contexts(ctx.workspace)[uri(ctx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")].content == page
   end
 
   defp elapsed_ms(fun) do
