@@ -13,7 +13,7 @@ defmodule OptimalEngine.SizingPresetsTest do
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Authority.Settings
   alias OptimalEngine.Operating.Protocol
-  alias OptimalEngine.{Presets, Sizing}
+  alias OptimalEngine.{Memory, MemoryCore, Presets, Sizing}
   alias OptimalEngine.Storage.PolicyStore
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
@@ -58,6 +58,7 @@ defmodule OptimalEngine.SizingPresetsTest do
       measures = %{
         vectors: 10_000,
         memories: 75_000,
+        memory_candidates: 0,
         contexts: 100,
         disk_bytes: 0,
         memory_bytes: 0,
@@ -80,9 +81,114 @@ defmodule OptimalEngine.SizingPresetsTest do
     test "usage measures the live Engine" do
       usage = Sizing.usage()
       names = Enum.map(usage.gauges, & &1.name)
-      assert names == ~w(vectors memories contexts disk_bytes memory_bytes writes_per_minute)
+
+      assert names ==
+               ~w(vectors memories memory_candidates contexts disk_bytes memory_bytes writes_per_minute)
+
       assert Enum.find(usage.gauges, &(&1.name == "memory_bytes")).used > 0
       assert is_integer(usage.boot_ms)
+    end
+  end
+
+  describe "the memory_candidates gauge" do
+    # The count is kept for a short while; a test that wrote a claim reads it
+    # afresh.
+    defp candidates_gauge do
+      :persistent_term.erase({Sizing, :memory_candidates})
+      Enum.find(Sizing.usage().gauges, &(&1.name == "memory_candidates"))
+    end
+
+    defp memories_used do
+      Enum.find(Sizing.usage().gauges, &(&1.name == "memories")).used
+    end
+
+    defp remembered(n, label) do
+      %{
+        content: "Decision: Finance lead owns the #{label} renewal for Q4 at $2000 (#{n}).",
+        workspace_id: "sizing-cand-#{n}"
+      }
+    end
+
+    test "every profile limits it, a tenth of its memories" do
+      for profile <- Sizing.profiles() do
+        assert profile.limits.memory_candidates == div(profile.limits.memories, 10), profile.id
+      end
+    end
+
+    test "is gauged against the active profile like the others" do
+      {:ok, agent} = Sizing.fetch("agent")
+
+      measures = %{
+        vectors: 0,
+        memories: 0,
+        memory_candidates: 8_000,
+        contexts: 0,
+        disk_bytes: 0,
+        memory_bytes: 0,
+        writes_per_minute: 0.0
+      }
+
+      result = Sizing.evaluate(agent, measures)
+
+      assert %{used: 8_000, limit: 10_000, percent: 80.0, status: "watch"} =
+               Enum.find(result.gauges, &(&1.name == "memory_candidates"))
+
+      assert result.worst == %{name: "memory_candidates", percent: 80.0}
+      assert %{action: "resize", to: "workspace"} = result.recommendation
+    end
+
+    test "counts the pending memory-candidate claims a remembered fact writes", %{n: n} do
+      before_candidates = candidates_gauge().used
+      before_memories = memories_used()
+
+      assert {:ok, %{action: :pending_claim, pending_claim: claim}} =
+               Memory.remember(remembered(n, "pricing"))
+
+      assert candidates_gauge().used == before_candidates + 1
+      # The library intake writes the claim and no memory row.
+      assert memories_used() == before_memories
+
+      # A claim that is no longer pending is not a candidate waiting for review.
+      assert :ok =
+               MemoryCore.Store.update_claim_review(claim.id,
+                 workspace_id: claim.workspace_id,
+                 lifecycle_state: "rejected"
+               )
+
+      assert candidates_gauge().used == before_candidates
+    end
+
+    test "counts a fact the intake also stages as a memory in both gauges", %{n: n} do
+      before_candidates = candidates_gauge().used
+      before_memories = memories_used()
+
+      assert {:ok, %{action: :add}} =
+               Memory.remember(remembered(n, "support"), versioned_projection: true)
+
+      assert candidates_gauge().used == before_candidates + 1
+      assert memories_used() == before_memories + 1
+    end
+
+    test "does not count a fact the intake rejected", %{n: n} do
+      before_candidates = candidates_gauge().used
+
+      assert {:ok, %{action: :rejected}} =
+               Memory.remember(%{content: "ok", workspace_id: "sizing-cand-#{n}"})
+
+      assert candidates_gauge().used == before_candidates
+    end
+
+    test "the storage endpoint reports it", %{tenant: tenant} do
+      reader = key(tenant, ["read"], ["*"])
+
+      gauge =
+        call(:get, "/api/storage", reader).resp_body
+        |> Jason.decode!()
+        |> Map.fetch!("gauges")
+        |> Enum.find(&(&1["name"] == "memory_candidates"))
+
+      assert %{"used" => used, "limit" => 200_000, "percent" => _, "status" => _} = gauge
+      assert is_integer(used)
     end
   end
 
@@ -174,7 +280,8 @@ defmodule OptimalEngine.SizingPresetsTest do
       assert storage.status == 200
       body = Jason.decode!(storage.resp_body)
       assert body["profile"]["id"] == "business"
-      assert length(body["gauges"]) == 6
+      assert length(body["gauges"]) == 7
+      assert "memory_candidates" in Enum.map(body["gauges"], & &1["name"])
 
       assert %{"profiles" => [_, _, _, _, _], "active" => "business"} =
                call(:get, "/api/storage/profiles", reader).resp_body |> Jason.decode!()
