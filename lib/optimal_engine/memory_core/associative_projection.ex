@@ -7,7 +7,7 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
   metadata, and is filtered during candidate expansion.
   """
 
-  alias OptimalEngine.MemoryCore.{ID, JSON, ScopeEnvelope}
+  alias OptimalEngine.MemoryCore.{ID, JSON, ScopeEnvelope, SecurityLabels}
   alias OptimalEngine.Store
 
   @version "associative-v2"
@@ -81,14 +81,14 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
       WHERE tenant_id = ?#{length(cue_params) + 1}
         AND workspace_id = ?#{length(cue_params) + 2}
         AND (#{matches})
-        AND NOT EXISTS (
+        AND (?#{base + 3} = 1 OR NOT EXISTS (
           SELECT 1 FROM json_each(a.security_labels) required
           WHERE required.value NOT IN (SELECT value FROM json_each(?#{base}))
-        )
-        AND NOT EXISTS (
+        ))
+        AND (?#{base + 4} = 1 OR NOT EXISTS (
           SELECT 1 FROM json_each(a.partition_ids) required
           WHERE required.value NOT IN (SELECT value FROM json_each(?#{base + 1}))
-        )
+        ))
         #{temporal}
       ORDER BY confidence DESC, precision_score DESC, updated_at DESC
       LIMIT ?#{base + 2}
@@ -101,7 +101,9 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
             scope.workspace_id,
             JSON.list(allowed_labels),
             JSON.list(allowed_partitions),
-            limit
+            limit,
+            if(SecurityLabels.wildcard?(allowed_labels), do: 1, else: 0),
+            if(SecurityLabels.wildcard?(allowed_partitions), do: 1, else: 0)
           ]
 
       case Store.raw_query(sql, params) do

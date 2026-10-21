@@ -1038,6 +1038,143 @@ defmodule OptimalEngine.SyncGateTest do
     end
   end
 
+  # What the gate holds that it once let through, because it cannot vouch for
+  # it: a link it cannot follow and a label it cannot read. Both fail closed,
+  # for a peer and for a reader.
+  describe "what the gate cannot vouch for" do
+    test "a labels list with a blank or non-string element holds the row", ctx do
+      gate = Gate.open(ctx.tenant, ctx.ws, "internal")
+
+      try do
+        package = fn labels ->
+          %{
+            "entity_type" => "source_packages",
+            "operation" => "create",
+            "payload" => %{
+              "row" => %{
+                "id" => "sp-labels-#{ctx.n}",
+                "tenant_id" => ctx.tenant,
+                "workspace_id" => ctx.ws,
+                "security_labels" => Jason.encode!(labels)
+              }
+            }
+          }
+        end
+
+        refute Gate.hold?(gate, package.([]))
+        refute Gate.hold?(gate, package.(["internal"]))
+        refute Gate.hold?(gate, package.(["Internal"]))
+        assert Gate.hold?(gate, package.(["internal", ""]))
+        assert Gate.hold?(gate, package.(["internal", 7]))
+        assert Gate.hold?(gate, package.(["internal", nil]))
+        assert Gate.hold?(gate, package.([["internal"]]))
+      after
+        Gate.close(gate)
+      end
+    end
+
+    test "a chunk of a document the ledger never saw is held; one of a deleted document is judged by the ledger",
+         ctx do
+      {:ok, plain} =
+        Intake.process("Docs ship Friday and the changelog goes out Monday",
+          workspace_id: ctx.ws,
+          tenant_id: ctx.tenant,
+          node: "operator",
+          write_files: false
+        )
+
+      insert_chunk(ctx, "chk-gone-#{ctx.n}", "ctx-never-seen-#{ctx.n}", "Dangling chunk 8841")
+      insert_chunk(ctx, "chk-deleted-#{ctx.n}", plain.context.id, "Deleted document chunk 8842")
+
+      {:ok, _} = Capture.seal()
+
+      {:ok, _} =
+        Store.raw_query("DELETE FROM contexts WHERE id = ?1", [plain.context.id])
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      refute sent?(sent, "chunks", "chk-gone-#{ctx.n}")
+      refute carries?(sent, "Dangling chunk 8841")
+      assert sent?(sent, "chunks", "chk-deleted-#{ctx.n}")
+    end
+  end
+
+  # A mesh of rows that link to each other has no result that can be kept (each
+  # depends on the path that led to it), so reading it path by path is
+  # exponential in the number of rows. The gate reads a bounded number of rows
+  # for each classification and calls the rest unresolved.
+  describe "a dense mesh of links" do
+    @describetag timeout: 60_000
+
+    setup ctx do
+      ids = for i <- 1..12, do: "wt-mesh-#{ctx.n}-#{i}"
+
+      for id <- ids do
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO workflow_traces (id, tenant_id, workspace_id, step_links) VALUES (?1, ?2, ?3, ?4)",
+            [id, ctx.tenant, ctx.ws, Jason.encode!(ids -- [id])]
+          )
+      end
+
+      %{ids: ids}
+    end
+
+    test "is held from a peer instead of being walked path by path", ctx do
+      gate = Gate.open(ctx.tenant, ctx.ws, "internal")
+
+      try do
+        mutation = %{
+          "entity_type" => "workflow_traces",
+          "operation" => "update",
+          "payload" => %{
+            "row" => %{
+              "id" => hd(ctx.ids),
+              "tenant_id" => ctx.tenant,
+              "workspace_id" => ctx.ws,
+              "step_links" => Jason.encode!(tl(ctx.ids))
+            }
+          }
+        }
+
+        {microseconds, held?} = :timer.tc(fn -> Gate.hold?(gate, mutation) end)
+
+        assert held?
+        assert microseconds < 20_000_000
+      after
+        Gate.close(gate)
+      end
+    end
+
+    test "is read by no one, quickly", ctx do
+      grants = OptimalEngine.MemoryCore.SecurityLabels.grants(["internal"], [])
+
+      {microseconds, readable?} =
+        :timer.tc(fn ->
+          Gate.with_reader(ctx.tenant, ctx.ws, grants, fn gate ->
+            Gate.readable_id?(gate, "workflow_traces", hd(ctx.ids))
+          end)
+        end)
+
+      refute readable?
+      assert microseconds < 20_000_000
+    end
+
+    test "does not stop a row that is not part of it", ctx do
+      {:ok, plain} =
+        Versioned.create(%{
+          content: "A note outside the mesh",
+          workspace_id: ctx.ws,
+          tenant_id: ctx.tenant
+        })
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      assert sent?(sent, "memories", plain.id)
+      refute sent?(sent, "workflow_traces", hd(ctx.ids))
+    end
+  end
+
   describe "the lineage map" do
     test "classifies every table the Engine replicates" do
       replicated = replicated_tables()
@@ -1080,6 +1217,46 @@ defmodule OptimalEngine.SyncGateTest do
         assert Gate.hold?(gate, other)
       after
         Gate.close(gate)
+      end
+    end
+
+    test "an entry of an unknown entity type is held by the labels of the row it carries", ctx do
+      entry = fn row ->
+        %{"entity_type" => "app_note", "operation" => "create", "payload" => %{"row" => row}}
+      end
+
+      gate = Gate.open(ctx.tenant, ctx.ws, "internal")
+
+      try do
+        refute Gate.hold_known?(gate, entry.(%{"id" => "n1", "text" => "open"}))
+        refute Gate.hold_known?(gate, entry.(%{"id" => "n1", "security_labels" => ["internal"]}))
+        refute Gate.hold_known?(gate, %{entry.(%{}) | "payload" => %{"title" => "no row"}})
+
+        assert Gate.hold_known?(
+                 gate,
+                 entry.(%{"id" => "n1", "security_labels" => ["confidential"]})
+               )
+
+        assert Gate.hold_known?(
+                 gate,
+                 entry.(%{"id" => "n1", "metadata" => ~s({"security_labels":["restricted"]})})
+               )
+
+        assert Gate.hold_known?(gate, entry.(%{"id" => "n1", "security_labels" => "{not json"}))
+      after
+        Gate.close(gate)
+      end
+
+      # A peer cleared for restricted is sent everything.
+      restricted = Gate.open(ctx.tenant, ctx.ws, "restricted")
+
+      try do
+        refute Gate.hold_known?(
+                 restricted,
+                 entry.(%{"id" => "n1", "security_labels" => ["restricted"]})
+               )
+      after
+        Gate.close(restricted)
       end
     end
 

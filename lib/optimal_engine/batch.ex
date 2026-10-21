@@ -240,13 +240,14 @@ defmodule OptimalEngine.Batch do
     with {:ok, signals, hidden_signals} <-
            read_signals(workspace_id: workspace_id, reader: reader),
          {:ok, memories, hidden_memories} <-
-           read_memories(workspace_id: workspace_id, reader: reader) do
+           read_memories(workspace_id: workspace_id, reader: reader),
+         {:ok, pages} <- export_wiki_pages(workspace_id, tenant_id) do
       {wiki_pages, hidden_pages} =
         ReadScope.filter_rows(
           reader,
           workspace_id,
           "wiki_pages",
-          export_wiki_pages(workspace_id, tenant_id),
+          pages,
           &wiki_row/1,
           &"wiki:#{&1.slug}:#{&1.audience}"
         )
@@ -342,26 +343,42 @@ defmodule OptimalEngine.Batch do
   # Private: export helpers
   # ---------------------------------------------------------------------------
 
-  defp export_wiki_pages(workspace_id, tenant_id) do
-    case Wiki.list(tenant_id, workspace_id) do
-      {:ok, pages} ->
-        Enum.map(pages, fn p ->
-          %{
-            slug: p.slug,
-            audience: p.audience,
-            version: p.version,
-            body: p.body,
-            last_curated: p.last_curated,
-            curated_by: p.curated_by,
-            frontmatter: p.frontmatter,
-            workspace_id: p.workspace_id,
-            tenant_id: p.tenant_id
-          }
-        end)
+  # Every page of the workspace, a page of rows at a time (`Wiki.list/3` stops
+  # at 50 unless it is asked for more). A Store that cannot be read is an
+  # error, never a shorter list.
+  @wiki_page_size 500
 
-      _ ->
-        []
+  defp export_wiki_pages(workspace_id, tenant_id), do: wiki_pages(workspace_id, tenant_id, 0, [])
+
+  defp wiki_pages(workspace_id, tenant_id, offset, acc) do
+    case Wiki.list(tenant_id, workspace_id, limit: @wiki_page_size, offset: offset) do
+      {:ok, pages} ->
+        acc = [Enum.map(pages, &wiki_export/1) | acc]
+
+        if length(pages) < @wiki_page_size,
+          do: {:ok, acc |> Enum.reverse() |> Enum.concat()},
+          else: wiki_pages(workspace_id, tenant_id, offset + @wiki_page_size, acc)
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, other}
     end
+  end
+
+  defp wiki_export(p) do
+    %{
+      slug: p.slug,
+      audience: p.audience,
+      version: p.version,
+      body: p.body,
+      last_curated: p.last_curated,
+      curated_by: p.curated_by,
+      frontmatter: p.frontmatter,
+      workspace_id: p.workspace_id,
+      tenant_id: p.tenant_id
+    }
   end
 
   # A reader sees its own tenant only; the trusted operator (no reader) is not

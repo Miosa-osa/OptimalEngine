@@ -48,6 +48,13 @@ Sending is fail-closed:
 - A row is as classified as anything reachable through its links, loops included: a context package and its pool that name each other are held together when either is.
 - A version of a memory is as classified as every version behind it, up to the first, each read for its own labels, its source package and claim, and the documents that name it. The chain is walked a version at a time, not recursed into, so a memory with many versions is not held for its depth, and a label that came to an old version by its source (not by value) reaches the later ones.
 - A change to a table the lineage map does not know stays home, and `test/sync/sync_gate_test.exs` fails until the table is classified.
+- A chunk or document link whose row is gone, and which the local ledger never recorded, stays home: the gate cannot say what the row was.
+A row whose document was deleted after the ledger recorded it is judged by what the ledger recorded.
+A memory with a dangling `source_chunk_id`, in a workspace where sync was turned on after the memory was written, no longer replicates until the link is repaired.
+- A `security_labels` list with an element that is blank or not a string (`["internal", ""]`, `["internal", 7]`) holds the row: the gate cannot say what the element meant.
+Class names are not case sensitive.
+- Reading what a row derives from has a budget of 10,000 rows not read before for each row classified.
+A dense mesh of links that cycles back on itself (every row naming every other) has no result that can be kept per row, so past the budget the row is `unresolved` and stays home instead of being walked path by path.
 - A workspace whose `data_class` is not one of the four classes is treated as `restricted`; a workspace with no `data_class` (or not found) is `internal`.
 - A Store error while classifying is not an answer.
 The push cycle ends in an error with nothing sent and its cursor where it was, so the next cycle classifies the same rows again; a workspace that cannot be read is not assumed to be open.
@@ -64,6 +71,8 @@ A document that Intake writes names its source package and carries its labels in
 Rows written before this carry no such mark and are found through the derivation ledger and the claims of their source package instead.
 
 A pulling peer does not say what it is cleared for, so what this Engine hands out (`GET /api/sync/changes` and `GET /api/storage/workspaces/:id/mutations`) is capped by the Engine's own ceiling, `config :optimal_engine, :sync_serve_max_class`, default `confidential`.
+An entry that callers appended to the ledger for an entity type that is not a replicated table has no lineage.
+It is held by the labels of the row it carries itself (`security_labels`, `partition_ids`, or the labels in `metadata`), and an entry with no row is not held.
 The cursor moves past what the gate holds, and the class is read when the row is sent.
 A row held then is not sent later because its source package arrived after it, or because a label on its source was lowered; only a new change to the row, or to a row it derives from, is classified again.
 So label before writing, and write the source before what derives from it.
@@ -76,15 +85,24 @@ A keyed caller sees a row only by the two rules retrieval applies:
 - **Labels and partitions**, from the `allowed_security_labels` and `allowed_partitions` in the key's metadata.
 Every label the row carries must be granted, so a key with no labels sees only rows with none.
 With no partition granted a key sees only rows that have none; with partitions granted it sees the rows that share at least one, and not the rows that have none.
+A row drawn from other rows must share a partition with each row it was drawn from that has any, not only with their union: a memory in `team-a` staged from a source package in `team-b` is read only by a key that holds both.
 The four class names are not case sensitive (`Restricted` is `restricted`); any other label is compared exactly.
 - **The access lists** (`OptimalEngine.Identity.ACL`), for the address of the row: `optimal://memory/<workspace>/<id>` for a memory, the address of a document, `wiki:<slug>:<audience>` for a wiki page.
 
 A row carries the labels and partitions of the rows it was copied or derived from, and a row whose source cannot be found, or a label that cannot be read (not a string, not JSON), is seen by no one.
 So a memory staged from a restricted source package is not exported to a key that lacks `restricted`.
+A conflict version and a ledger entry show a reader the `row` and `blobs` they were judged by and nothing else; any other key in the payload is not served.
+An entry on the storage ledger of an entity type that is not a replicated table is judged by the labels and partitions of the row it carries, if it carries one.
+A workspace export holds every wiki page of the workspace (they are read 500 at a time) and fails with `export_failed` when they cannot be read, instead of holding the first 50.
 A wiki page that names nothing, and any other aggregate, carries every label of its workspace and needs every partition of it.
 
 A grant of `"*"` (in `allowed_security_labels`, `allowed_partitions`, or both) means every label or every partition, as it does when a key mints another (`Auth.KeyIssuance`).
-The bootstrap key (`OPTIMAL_BOOTSTRAP_KEY`) carries `"*"` in both, since it may mint anything anyway, so an exporter that calls with it keeps full exports.
+The bootstrap key (`OPTIMAL_BOOTSTRAP_KEY`) carries `"*"` in both when its scopes (`OPTIMAL_BOOTSTRAP_SCOPES`) include `*` or `admin`, since it is the operator's root and may mint anything anyway, so an exporter that calls with it keeps full exports.
+A bootstrap key with only `read,write` scopes, and any other key whose scopes are `["*"]` but that has no grants of its own, holds no `"*"`.
+A bootstrap key registered before the grants existed is given `"*"` once, at the next boot, when its scopes include `*` or `admin`; the boot logs a warning and sets `grants_initialized` in the key's metadata.
+Narrow it afterwards by replacing the lists (`[]` for none) and the next boot leaves it as it is.
+A key minted without `allowed_security_labels` or `allowed_partitions` gets none, never its minter's, whatever the minter holds, so pass the grants you mean.
+A minter can only give grants it holds (a minter that holds `"*"` can give any).
 For any other key, give the labels it should read.
 The recommended default for a machine key is `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`: it reads rows labelled public, internal or confidential and rows with no label, and does not read restricted rows, rows with a label of their own (`private`, a team name) or partitioned rows.
 
@@ -101,6 +119,8 @@ A key with `read` reaches them whatever its grants. Do not rely on a key's label
 
 Limits worth knowing:
 
+- Reading what a row derives from is bounded to 10,000 rows not read before for each row classified.
+A dense mesh of links that cycles back on itself is `unresolved`: held from a peer and read by no one.
 - A row names another row's id in free-form metadata in places (the encoding gate records the memory a new one is most like).
 That is an opaque id, not the row, and the gate does not scrub it.
 - Rows that already reached a peer before a label or lineage existed stay there.

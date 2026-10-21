@@ -102,6 +102,15 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
       refute body_of(ctx, token) =~ "Harborview"
     end
 
+    test "a grant that is not a string grants nothing and does not fail the read", ctx do
+      token =
+        mint(ctx, %{"allowed_security_labels" => ["internal", %{"x" => 1}, 7, ["restricted"]]})
+
+      memories = ids(export(ctx, token, "memories")["memories"])
+      assert ctx.internal.id in memories
+      refute ctx.secret.id in memories
+    end
+
     test "a key granted a partition reads what is partitioned to it", ctx do
       without = mint(ctx, %{"allowed_security_labels" => ["internal"]})
       with_partition = mint(ctx, %{"allowed_partitions" => ["team-a"]})
@@ -144,6 +153,42 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
       read = ids(export(ctx, token, "memories")["memories"])
       refute ctx.internal.id in read
       assert ctx.secret.id in read
+    end
+  end
+
+  describe "a key minted from the bootstrap key" do
+    setup do
+      token = bootstrap_token()
+      %{boot: token}
+    end
+
+    test "the root bootstrap key reads in full", ctx do
+      memories = ids(export(ctx, ctx.boot, "memories")["memories"])
+
+      for memory <- [ctx.secret, ctx.internal, ctx.team, ctx.plain],
+          do: assert(memory.id in memories)
+    end
+
+    test "minted without grants it reads no labelled row, whatever the minter holds", ctx do
+      child = mint_from(ctx, ctx.boot, %{})
+
+      assert ids(export(ctx, child, "memories")["memories"]) == [ctx.plain.id]
+      assert ids(export(ctx, child, "signals")["signals"]) == [ctx.plain_doc.id]
+      refute body_of(ctx, child) =~ "Harborview"
+      refute body_of(ctx, child) =~ "Zephyrcorp"
+    end
+
+    test "minted with the recommended default grants it reads internal, never restricted", ctx do
+      child =
+        mint_from(ctx, ctx.boot, %{
+          "allowed_security_labels" => ["public", "internal", "confidential"],
+          "allowed_partitions" => []
+        })
+
+      assert Enum.sort(ids(export(ctx, child, "memories")["memories"])) ==
+               Enum.sort([ctx.plain.id, ctx.internal.id])
+
+      refute body_of(ctx, child) =~ "Harborview"
     end
   end
 
@@ -251,6 +296,79 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
     end
   end
 
+  describe "what a payload carries besides its row" do
+    test "a conflict shows a reader the row and blobs it was judged by, nothing else", ctx do
+      conflict(
+        ctx,
+        "extra",
+        "memories",
+        %{"id" => ctx.plain.id, "content" => "Lunch is at one"},
+        %{"note" => "SIDE CHANNEL 6612: wire to Harborview"}
+      )
+
+      token = mint(ctx, %{})
+      shown = conflicts(ctx, token)
+
+      assert shown[cid(ctx, "extra")]["local"]["row"]["content"] == "Lunch is at one"
+      assert shown[cid(ctx, "extra")]["local"] |> Map.keys() |> Enum.sort() == ["blobs", "row"]
+      refute body_of_conflicts(ctx, token) =~ "SIDE CHANNEL"
+
+      # The trusted operator is shown the record as it was written.
+      assert conflicts(ctx, nil)[cid(ctx, "extra")]["local"]["note"] =~ "SIDE CHANNEL"
+    end
+
+    test "a ledger entry shows a reader the row and blobs, nothing else", ctx do
+      {:ok, _} = OptimalEngine.Sync.enable("default", ctx.ws, "user:owner")
+
+      append(ctx, "memories", "mem-extra-#{ctx.n}", %{
+        "row" => %{"id" => "mem-extra-#{ctx.n}", "content" => "Appended note 7741"},
+        "blobs" => %{},
+        "note" => "SIDE CHANNEL 6613"
+      })
+
+      answer = ledger(ctx, mint(ctx, %{}))
+      body = Jason.encode!(answer["mutations"])
+
+      assert body =~ "Appended note 7741"
+      refute body =~ "SIDE CHANNEL"
+    end
+
+    test "an entry of an unknown entity type is judged by the labels of the row it carries", ctx do
+      {:ok, _} = OptimalEngine.Sync.enable("default", ctx.ws, "user:owner")
+
+      append(ctx, "app_note", "note-conf-#{ctx.n}", %{
+        "row" => %{"id" => "n1", "text" => "Board note 5521", "security_labels" => ["confidential"]}
+      })
+
+      append(ctx, "app_note", "note-part-#{ctx.n}", %{
+        "row" => %{"id" => "n2", "text" => "Atlas note 5522", "partition_ids" => ["team-a"]}
+      })
+
+      append(ctx, "app_note", "note-bad-#{ctx.n}", %{
+        "row" => %{"id" => "n3", "text" => "Garbled note 5523", "security_labels" => "{not json"}
+      })
+
+      append(ctx, "app_note", "note-open-#{ctx.n}", %{
+        "row" => %{"id" => "n4", "text" => "Open note 5524"}
+      })
+
+      append(ctx, "app_note", "note-bare-#{ctx.n}", %{"title" => "No row 5525"})
+
+      seen = fn metadata -> Jason.encode!(ledger(ctx, mint(ctx, metadata))["mutations"]) end
+
+      bare = seen.(%{})
+      refute bare =~ "Board note 5521"
+      refute bare =~ "Atlas note 5522"
+      refute bare =~ "Garbled note 5523"
+      assert bare =~ "Open note 5524"
+      assert bare =~ "No row 5525"
+
+      assert seen.(%{"allowed_security_labels" => ["confidential"]}) =~ "Board note 5521"
+      assert seen.(%{"allowed_partitions" => ["team-a"]}) =~ "Atlas note 5522"
+      refute seen.(%{"allowed_security_labels" => ["confidential"]}) =~ "Garbled note 5523"
+    end
+  end
+
   describe "claims raised from a fact conflict" do
     test "carry the partitions of the fact, so a key without them does not read them", ctx do
       {:ok, _} = OptimalEngine.Sync.enable("default", ctx.ws, "user:owner")
@@ -318,6 +436,39 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
       assert both.id in read.(%{"allowed_partitions" => ["team-a", "team-c"]})
       refute both.id in read.(%{"allowed_partitions" => ["team-c"]})
       refute both.id in read.(%{})
+    end
+
+    test "a row drawn from a row in another partition needs a partition of each", ctx do
+      # In team-a, staged from a source package that is in team-b.
+      source = remember(ctx.ws, "Atlas vendor quotes", [], ["team-b"]).memory
+      package = source.metadata["memory_core_source_package_id"]
+
+      {:ok, [[stored]]} =
+        Store.raw_query("SELECT partition_ids FROM source_packages WHERE id = ?1", [package])
+
+      assert stored =~ "team-b"
+
+      {:ok, staged} =
+        Versioned.create(%{
+          content: "Joint vendor summary",
+          workspace_id: ctx.ws,
+          metadata: %{
+            "memory_core_source_package_id" => package,
+            "partition_ids" => ["team-a"]
+          }
+        })
+
+      read = fn partitions ->
+        ids(export(ctx, mint(ctx, %{"allowed_partitions" => partitions}), "memories")["memories"])
+      end
+
+      # Sharing one partition of the union is not enough: the memory's own
+      # (team-a) and its source's (team-b) are each judged.
+      refute staged.id in read.(["team-a"])
+      refute staged.id in read.(["team-b"])
+      assert staged.id in read.(["team-a", "team-b"])
+      assert staged.id in read.(["team-a", "team-b", "team-c"])
+      assert source.id in read.(["team-b"])
     end
 
     test "a partition does not stand in for a label", ctx do
@@ -603,6 +754,75 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
     end
   end
 
+  describe "wiki pages of a large workspace" do
+    setup ctx do
+      # 300 pages; every third cites the restricted chunk, the rest the plain one.
+      {:ok, _} =
+        Store.raw_query(
+          """
+          WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300)
+          INSERT INTO wiki_pages (tenant_id, workspace_id, slug, audience, version, frontmatter, body)
+          SELECT 'default', ?1, 'bulk-' || ?2 || '-' || i, 'default', 1, '{}', 'Page ' || i FROM n
+          """,
+          [ctx.ws, ctx.n]
+        )
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300)
+          INSERT INTO citations (tenant_id, workspace_id, wiki_slug, wiki_audience, chunk_id, claim_hash)
+          SELECT 'default', ?1, 'bulk-' || ?2 || '-' || i, 'default',
+                 CASE WHEN i % 3 = 0 THEN 'chk-secret-' || ?2 ELSE 'chk-plain-' || ?2 END, 'h'
+          FROM n
+          """,
+          [ctx.ws, ctx.n]
+        )
+
+      :ok
+    end
+
+    test "the export holds every page, not the first fifty", ctx do
+      slugs = slugs(export(ctx, nil, "workspace"))
+      assert length(slugs) == 302
+      assert "bulk-#{ctx.n}-300" in slugs and "bulk-#{ctx.n}-1" in slugs
+    end
+
+    test "a keyed export holds the pages it may see among all of them", ctx do
+      token = mint(ctx, %{"allowed_security_labels" => ["internal"]})
+      snapshot = export(ctx, token, "workspace")
+
+      shown = slugs(snapshot)
+      assert length(shown) == 201
+      assert "bulk-#{ctx.n}-299" in shown
+      refute "bulk-#{ctx.n}-3" in shown
+      refute "bulk-#{ctx.n}-300" in shown
+      refute "deal-room-#{ctx.n}" in shown
+    end
+
+    test "the gate reads a number of times that follows the chunks, not the pages", ctx do
+      token = mint(ctx, %{"allowed_security_labels" => ["internal"]})
+
+      {snapshot, reads} = counting_reads(fn -> export(ctx, token, "workspace") end)
+
+      assert length(slugs(snapshot)) == 201
+      # One query per page would be more than 300 for the citations alone.
+      assert reads < 60, "the gate made #{reads} reads"
+    end
+
+    test "a wiki list that cannot be read is an export_failed, never a shorter export", ctx do
+      for token <- [mint(ctx, %{}), nil] do
+        conn =
+          with_renamed_column("wiki_pages", "curated_by", "curated_by_x", fn ->
+            get_as(export_path(ctx, "workspace"), token)
+          end)
+
+        assert conn.status == 500
+        assert Jason.decode!(conn.resp_body) == %{"error" => "export_failed"}
+      end
+    end
+  end
+
   describe "when the Store cannot be read" do
     test "the gate's failure is a 503 with no partial body", ctx do
       token = mint(ctx, %{})
@@ -832,6 +1052,36 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
 
   # Runs `fun` while `column` of `table` has another name: every read of it
   # fails, as a read of the Store does when it errors.
+  defp counting_reads(fun) do
+    id = {:gate_reads, System.unique_integer([:positive])}
+    parent = self()
+
+    :ok =
+      :telemetry.attach(
+        id,
+        [:optimal_engine, :sync, :gate_query],
+        fn _event, _measurements, _meta, _config -> send(parent, :gate_read) end,
+        nil
+      )
+
+    result =
+      try do
+        fun.()
+      after
+        :telemetry.detach(id)
+      end
+
+    {result, drain_reads(0)}
+  end
+
+  defp drain_reads(count) do
+    receive do
+      :gate_read -> drain_reads(count + 1)
+    after
+      0 -> count
+    end
+  end
+
   defp with_renamed_column(table, column, renamed, fun) do
     {:ok, _} = Store.raw_query("ALTER TABLE #{table} RENAME COLUMN #{column} TO #{renamed}", [])
 
@@ -873,6 +1123,52 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
     token
   end
 
+  defp bootstrap_token do
+    id = :crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower)
+    token = "oe_#{id}_" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+
+    :ok =
+      OptimalEngine.Auth.Bootstrap.run(%{
+        "OPTIMAL_BOOTSTRAP_KEY" => token,
+        "OPTIMAL_BOOTSTRAP_SCOPES" => "*"
+      })
+
+    token
+  end
+
+  # POST /api/auth/keys as `parent`, the way an operator or a control plane mints.
+  defp mint_from(ctx, parent, grants) do
+    principal = "user:minted-#{System.unique_integer([:positive])}"
+
+    {:ok, _} =
+      Principal.upsert(%{
+        id: principal,
+        tenant_id: "default",
+        kind: :agent,
+        display_name: principal
+      })
+
+    body =
+      Map.merge(
+        %{
+          "name" => "minted #{System.unique_integer([:positive])}",
+          "scopes" => ["read"],
+          "workspace_scope" => [ctx.ws],
+          "principal_id" => principal
+        },
+        grants
+      )
+
+    conn =
+      conn(:post, "/api/auth/keys", Jason.encode!(body))
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer " <> parent)
+      |> Router.call(@opts)
+
+    assert conn.status == 201, "mint: #{conn.status} #{conn.resp_body}"
+    Jason.decode!(conn.resp_body)["key"]
+  end
+
   defp get_as(path, token) do
     conn = conn(:get, path)
     conn = if token, do: put_req_header(conn, "authorization", "Bearer " <> token), else: conn
@@ -898,9 +1194,9 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
 
   defp cid(ctx, name), do: "c-#{name}-#{ctx.n}"
 
-  defp conflict(ctx, name, table, row) do
+  defp conflict(ctx, name, table, row, extra \\ %{}) do
     id = cid(ctx, name)
-    payload = Jason.encode!(%{"row" => row, "blobs" => %{}})
+    payload = Jason.encode!(Map.merge(%{"row" => row, "blobs" => %{}}, extra))
 
     {:ok, _} =
       Store.raw_query(
@@ -911,6 +1207,24 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
         """,
         [id, ctx.ws, table, row["id"], payload]
       )
+  end
+
+  defp append(ctx, entity_type, entity_id, payload) do
+    {:ok, _} =
+      OptimalEngine.Storage.PolicyStore.append_mutation(%{
+        workspace_id: ctx.ws,
+        device_id: "dev-#{ctx.n}",
+        entity_type: entity_type,
+        entity_id: entity_id,
+        operation: "create",
+        payload: payload
+      })
+  end
+
+  defp ledger(ctx, token) do
+    conn = get_as("/api/storage/workspaces/#{ctx.ws}/mutations?limit=500", token)
+    assert conn.status == 200, "ledger: #{conn.status} #{conn.resp_body}"
+    Jason.decode!(conn.resp_body)
   end
 
   defp conflicts(ctx, token) do

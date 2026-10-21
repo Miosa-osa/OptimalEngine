@@ -310,14 +310,29 @@ defmodule OptimalEngine.API.SecurityFoundationsTest do
         scopes: ["read", "write", "admin"],
         workspace_scope: [ctx.alpha, ctx.beta],
         expires_at: "2099-01-01T00:00:00Z",
-        metadata: %{"allowed_partitions" => ["team-a", "team-b"]}
+        metadata: %{
+          "allowed_partitions" => ["team-a", "team-b"],
+          "allowed_security_labels" => ["internal"],
+          "permissions" => ["memory:read"]
+        }
       }
 
       assert {:ok, attrs} = KeyIssuance.attrs(parent, "default", %{"name" => "child"})
       assert attrs.scopes == parent.scopes
       assert attrs.workspace_scope == parent.workspace_scope
       assert attrs.expires_at == parent.expires_at
-      assert attrs.metadata == %{"allowed_partitions" => ["team-a", "team-b"]}
+
+      # Operation scopes and permissions are inherited when omitted; label and
+      # partition grants are not: a key minted without them holds none.
+      assert attrs.metadata == %{"permissions" => ["memory:read"]}
+
+      assert {:ok,
+              %{metadata: %{"allowed_partitions" => ["team-a"], "allowed_security_labels" => []}}} =
+               KeyIssuance.attrs(parent, "default", %{
+                 "name" => "granted",
+                 "allowed_partitions" => ["team-a"],
+                 "allowed_security_labels" => []
+               })
 
       assert {:ok, %{scopes: ["read"], workspace_scope: [_]}} =
                KeyIssuance.attrs(parent, "default", %{
@@ -339,6 +354,52 @@ defmodule OptimalEngine.API.SecurityFoundationsTest do
                  KeyIssuance.attrs(parent, "default", %{"name" => "wide", field => value}),
                "#{field} #{inspect(value)}"
       end
+    end
+
+    test "a key minted without label or partition grants never inherits the minter's wildcard",
+         ctx do
+      bootstrap = %ApiKey{
+        id: "bootstrap",
+        tenant_id: "default",
+        scopes: ["*"],
+        workspace_scope: ["*"],
+        metadata: %{
+          "source" => "bootstrap",
+          "allowed_security_labels" => ["*"],
+          "allowed_partitions" => ["*"]
+        }
+      }
+
+      assert {:ok, attrs} =
+               KeyIssuance.attrs(bootstrap, "default", %{
+                 "name" => "child",
+                 "scopes" => ["read"],
+                 "workspace_scope" => [ctx.alpha]
+               })
+
+      refute Map.has_key?(attrs.metadata, "allowed_security_labels")
+      refute Map.has_key?(attrs.metadata, "allowed_partitions")
+
+      # The minter may give what it holds, a wildcard included, when it is asked to.
+      assert {:ok, %{metadata: %{"allowed_security_labels" => ["*"]}}} =
+               KeyIssuance.attrs(bootstrap, "default", %{
+                 "name" => "wide",
+                 "scopes" => ["read"],
+                 "allowed_security_labels" => ["*"]
+               })
+
+      # A minter without a wildcard cannot give one.
+      holder = %{
+        bootstrap
+        | scopes: ["read"],
+          metadata: %{"allowed_security_labels" => ["internal"]}
+      }
+
+      assert {:error, "allowed_security_labels_exceeds_minter"} =
+               KeyIssuance.attrs(holder, "default", %{
+                 "name" => "wider",
+                 "allowed_security_labels" => ["*"]
+               })
     end
 
     test "a root key issues any scopes but never a wider workspace", ctx do

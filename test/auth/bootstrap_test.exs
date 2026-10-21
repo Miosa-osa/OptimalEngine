@@ -6,6 +6,8 @@ defmodule OptimalEngine.Auth.BootstrapTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias OptimalEngine.Auth.{ApiKey, Bootstrap}
 
   @tenant "default"
@@ -23,6 +25,20 @@ defmodule OptimalEngine.Auth.BootstrapTest do
     assert :ok = Bootstrap.run(%{"OPTIMAL_BOOTSTRAP_KEY" => "  "})
   end
 
+  @root_grants %{
+    "source" => "bootstrap",
+    "allowed_security_labels" => ["*"],
+    "allowed_partitions" => ["*"],
+    "grants_initialized" => true
+  }
+
+  defp id_of(token), do: token |> String.split("_") |> Enum.at(1)
+
+  defp sql!(statement, params) do
+    {:ok, _} = OptimalEngine.Store.raw_query(statement, params)
+    :ok
+  end
+
   test "registers a key that verifies, with explicit read and write scopes by default" do
     token = token()
     assert :ok = Bootstrap.run(env(token))
@@ -31,42 +47,80 @@ defmodule OptimalEngine.Auth.BootstrapTest do
     assert key.scopes == ["read", "write"]
     assert key.workspace_scope == ["*"]
     assert key.tenant_id == @tenant
-
-    assert key.metadata == %{
-             "source" => "bootstrap",
-             "allowed_security_labels" => ["*"],
-             "allowed_partitions" => ["*"]
-           }
   end
 
-  test "a key registered before the grants existed is given them, once" do
+  test "a read,write bootstrap key gets no label or partition grants, now or at a later boot" do
     token = token()
-    id = token |> String.split("_") |> Enum.at(1)
     assert :ok = Bootstrap.run(env(token))
+    assert {:ok, key} = ApiKey.verify(token)
+    assert key.metadata == %{"source" => "bootstrap"}
 
-    {:ok, _} =
-      OptimalEngine.Store.raw_query(
-        "UPDATE api_keys SET metadata = json_remove(metadata, '$.allowed_security_labels', '$.allowed_partitions') WHERE id = ?1",
+    assert capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(env(token)) end) == ""
+    assert {:ok, again} = ApiKey.verify(token)
+    assert again.metadata == %{"source" => "bootstrap"}
+  end
+
+  test "a bootstrap key with * or admin scope holds every label and partition, marked" do
+    for scopes <- ["*", "read,write,admin"] do
+      token = token()
+      assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => scopes}))
+      assert {:ok, key} = ApiKey.verify(token)
+      assert key.metadata == @root_grants, scopes
+    end
+  end
+
+  test "a root key registered before the grants existed is given them once, with a warning" do
+    token = token()
+    id = id_of(token)
+    assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
+
+    :ok =
+      sql!(
+        "UPDATE api_keys SET metadata = json_remove(metadata, '$.allowed_security_labels', '$.allowed_partitions', '$.grants_initialized') WHERE id = ?1",
         [id]
       )
 
     assert {:ok, bare} = ApiKey.verify(token)
     assert bare.metadata == %{"source" => "bootstrap"}
 
-    assert :ok = Bootstrap.run(env(token))
-    assert {:ok, key} = ApiKey.verify(token)
-    assert key.metadata["allowed_security_labels"] == ["*"]
+    log = capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(env(token)) end)
+    assert log =~ "registered before label and partition grants existed"
+    assert log =~ id
 
-    # Grants the operator narrowed are left as they are.
-    {:ok, _} =
-      OptimalEngine.Store.raw_query(
-        "UPDATE api_keys SET metadata = json_set(metadata, '$.allowed_security_labels', json('[\"internal\"]')) WHERE id = ?1",
+    assert {:ok, key} = ApiKey.verify(token)
+    assert key.metadata == @root_grants
+
+    # Marked, so the next boot is silent and changes nothing.
+    assert capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(env(token)) end) == ""
+    assert {:ok, ^key} = ApiKey.verify(token)
+  end
+
+  test "grants the operator narrowed are left as they are, including none" do
+    token = token()
+    id = id_of(token)
+    assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
+
+    :ok =
+      sql!(
+        "UPDATE api_keys SET metadata = json_set(metadata, '$.allowed_security_labels', json('[\"internal\"]'), '$.allowed_partitions', json('[]')) WHERE id = ?1",
         [id]
       )
 
-    assert :ok = Bootstrap.run(env(token))
+    assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
     assert {:ok, narrowed} = ApiKey.verify(token)
     assert narrowed.metadata["allowed_security_labels"] == ["internal"]
+    assert narrowed.metadata["allowed_partitions"] == []
+
+    # Even with the fields gone (nothing granted), the marker keeps a boot from widening them.
+    :ok =
+      sql!(
+        "UPDATE api_keys SET metadata = json_remove(metadata, '$.allowed_security_labels', '$.allowed_partitions') WHERE id = ?1",
+        [id]
+      )
+
+    assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
+    assert {:ok, none} = ApiKey.verify(token)
+    assert none.metadata == %{"source" => "bootstrap", "grants_initialized" => true}
   end
 
   test "scopes, tenant and workspaces come from the environment" do
