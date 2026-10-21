@@ -11,7 +11,11 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     * the cross-reference copies intake writes to the other nodes the signal was routed
       to (`routed_to`), each indexed as a context of its own. They are the same text,
       so erasing a context erases them, and their rows with it;
-    * nothing else: not the node's `context.md`, not an asset, not a wiki page.
+    * the markdown file of each wiki page that cites one of the contexts' chunks
+      (`<workspace>/.wiki/<slug>.md`), because the page row goes with them
+      (`Compliance.DerivedData`) and the page is written again from what is left;
+    * nothing else: not the node's `context.md`, which collects facts from many
+      signals and cannot be attributed to one, and not an asset (`Compliance.Artifacts`).
 
   `plan/3` reads what a set of contexts owns; `remove/1` deletes those files and
   `redact/1` rewrites them through `Compliance.Redact`, for a context whose text is
@@ -36,7 +40,7 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   alias OptimalEngine.Store
   alias OptimalEngine.Workspace.Filesystem
 
-  @type plan :: %{files: [String.t()], copy_ids: [String.t()]}
+  @type plan :: %{files: [String.t()], wiki_files: [String.t()], copy_ids: [String.t()]}
 
   @sidecars [".abstract.md", ".overview.md"]
   @not_signal_dirs ["assets", "architectures", "tenants"]
@@ -85,8 +89,10 @@ defmodule OptimalEngine.Compliance.ContextFiles do
         |> Enum.map(fn {_workspace_id, file} -> Path.expand(file) end)
         |> Enum.uniq()
 
-      with {:ok, copy_ids} <- copy_context_ids(tenant_id, copies, workspace_dirs, root) do
-        {:ok, %{files: files, copy_ids: copy_ids}}
+      with {:ok, copy_ids} <- copy_context_ids(tenant_id, copies, workspace_dirs, root),
+           {:ok, wiki_files} <-
+             wiki_files(tenant_id, Enum.uniq(context_ids ++ copy_ids), root, workspace_dirs) do
+        {:ok, %{files: files, wiki_files: wiki_files, copy_ids: copy_ids}}
       end
     end
   end
@@ -240,6 +246,52 @@ defmodule OptimalEngine.Compliance.ContextFiles do
       {:error, reason} ->
         {:error, {:context_files_unreadable, reason}}
     end
+  end
+
+  # The page files of the wiki pages `DerivedData` deletes with these contexts: those with
+  # a citation to one of their chunks, in the workspace the chunk is in.
+  defp wiki_files(tenant_id, context_ids, root, workspace_dirs) do
+    {sql, params} =
+      if tenant_id,
+        do:
+          {"""
+           SELECT DISTINCT ch.workspace_id, ci.wiki_slug FROM citations ci
+             JOIN chunks ch ON ch.id = ci.chunk_id
+            WHERE ci.tenant_id = ?1
+              AND ch.signal_id IN (SELECT value FROM json_each(?2))
+           """, [tenant_id, Jason.encode!(context_ids)]},
+        else:
+          {"""
+           SELECT DISTINCT ch.workspace_id, ci.wiki_slug FROM citations ci
+             JOIN chunks ch ON ch.id = ci.chunk_id
+            WHERE ch.signal_id IN (SELECT value FROM json_each(?1))
+           """, [Jason.encode!(context_ids)]}
+
+    case Store.raw_query(sql, params) do
+      {:ok, rows} ->
+        files =
+          for [workspace_id, slug] <- rows,
+              is_binary(workspace_id),
+              is_binary(slug),
+              plain_name?(slug),
+              dir = Path.expand(Filesystem.path(root, workspace_id)),
+              file = Path.join([dir, ".wiki", slug <> ".md"]),
+              wiki_file?(file, dir, workspace_dirs),
+              do: file
+
+        {:ok, Enum.uniq(files)}
+
+      {:error, reason} ->
+        {:error, {:context_files_unreadable, reason}}
+    end
+  end
+
+  defp plain_name?(name),
+    do: name not in ["", ".", ".."] and not String.contains?(name, ["/", <<0>>])
+
+  defp wiki_file?(file, dir, workspace_dirs) do
+    (dir == root() or inside?(dir, root())) and regular?(file) and
+      not in_another_workspace?(file, dir, workspace_dirs)
   end
 
   # ── whose a file is ────────────────────────────────────────────────────────
