@@ -13,6 +13,10 @@ defmodule OptimalEngine.Auth.Bootstrap do
       OPTIMAL_BOOTSTRAP_WORKSPACES  comma list of slugs  (default "*")
 
   The scopes are explicit on purpose: an omitted list on a key means `*`.
+  The key is the operator's own, so it holds every label and partition grant
+  (`allowed_security_labels` and `allowed_partitions` of `["*"]`) and reads what
+  the exports and conflict records show in full; a key minted from it can be
+  given fewer.
   Boot is idempotent. Changing the token (rotation) registers the new key and
   revokes the previous bootstrap key. A malformed token fails the boot; it is
   never ignored, because the instance would then be unreachable.
@@ -21,6 +25,7 @@ defmodule OptimalEngine.Auth.Bootstrap do
   require Logger
 
   alias OptimalEngine.Auth.ApiKey
+  alias OptimalEngine.Store
 
   @source "bootstrap"
 
@@ -40,11 +45,16 @@ defmodule OptimalEngine.Auth.Bootstrap do
       name: "bootstrap",
       scopes: list(env["OPTIMAL_BOOTSTRAP_SCOPES"], ["read", "write"]),
       workspace_scope: list(env["OPTIMAL_BOOTSTRAP_WORKSPACES"], ["*"]),
-      metadata: %{"source" => @source}
+      metadata: %{
+        "source" => @source,
+        "allowed_security_labels" => ["*"],
+        "allowed_partitions" => ["*"]
+      }
     }
 
     with {:ok, outcome} <- ApiKey.ensure(token, attrs),
          {:ok, id} <- id_of(token),
+         :ok <- grant_reads(id),
          :ok <- ApiKey.revoke_source(tenant, @source, id) do
       Logger.info("[Bootstrap] bootstrap key #{outcome} (id #{id})")
       :ok
@@ -52,6 +62,25 @@ defmodule OptimalEngine.Auth.Bootstrap do
       {:error, reason} ->
         Logger.error("[Bootstrap] bootstrap key rejected: #{inspect(reason)}")
         {:error, {:bootstrap_key, reason}}
+    end
+  end
+
+  # A key registered before the grants existed gets them once; one that has
+  # grants of its own keeps them.
+  defp grant_reads(id) do
+    sql = """
+    UPDATE api_keys
+    SET metadata = json_set(COALESCE(metadata, '{}'),
+                            '$.allowed_security_labels', json('["*"]'),
+                            '$.allowed_partitions', json('["*"]'))
+    WHERE id = ?1 AND json_extract(metadata, '$.source') = ?2
+      AND json_extract(metadata, '$.allowed_security_labels') IS NULL
+      AND json_extract(metadata, '$.allowed_partitions') IS NULL
+    """
+
+    case Store.raw_query(sql, [id, @source]) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 

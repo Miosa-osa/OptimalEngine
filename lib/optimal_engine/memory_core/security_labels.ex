@@ -15,7 +15,6 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
   """
 
   @classes ~w(public internal confidential restricted)
-  @unresolved "@unresolved"
 
   @typedoc "Position in `classes/0`: 0 is `public`, 3 is `restricted`."
   @type rank :: 0..3
@@ -90,36 +89,64 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
     end
   end
 
+  @typedoc """
+  What a thing carries that a reader's grants are compared with:
+
+    * `{:label, name}` a label; the four class names are lowercased, other
+      labels are compared exactly;
+    * `{:partition, id}` a partition;
+    * `{:partition_all, id}` a partition the reader must hold in full (see
+      `permits?/2`);
+    * `:unresolved` something that could not be read or found.
+  """
+  @type token ::
+          {:label, String.t()}
+          | {:partition, String.t()}
+          | {:partition_all, String.t()}
+          | :unresolved
+
+  @typedoc """
+  A reader's grants: the labels and partitions it may see, and whether it may
+  see any (`"*"`, which a key holds only when it may mint any).
+  """
+  @type grants :: %{
+          labels: MapSet.t(String.t()),
+          partitions: MapSet.t(String.t()),
+          all_labels?: boolean(),
+          all_partitions?: boolean()
+        }
+
   @doc """
   The token for something that could not be read or found. It is never in a
   reader's grants, so whatever carries it is read by no one.
   """
-  @spec unresolved() :: String.t()
-  def unresolved, do: @unresolved
+  @spec unresolved() :: :unresolved
+  def unresolved, do: :unresolved
 
   @doc """
-  The labels of a stored `security_labels` value, as the strings a reader's
-  grants are compared with; the `unresolved/0` token when it cannot be read.
+  The labels of a stored `security_labels` value as tokens. A value that
+  cannot be read, and an element that is not a non-blank string, are
+  `unresolved`: they are never taken for no label.
   """
-  @spec tokens(term()) :: [String.t()]
+  @spec tokens(term()) :: [token()]
   def tokens(value) do
     case decode(value) do
-      {:ok, labels} -> label_strings(labels)
-      :invalid -> [@unresolved]
+      {:ok, labels} -> Enum.map(labels, &label_token(&1, :label))
+      :invalid -> [:unresolved]
     end
   end
 
-  @doc "The partitions of a stored `partition_ids` value, as `partition:<id>` tokens."
-  @spec partition_tokens(term()) :: [String.t()]
+  @doc "The partitions of a stored `partition_ids` value as tokens."
+  @spec partition_tokens(term()) :: [token()]
   def partition_tokens(value) do
     case decode(value) do
-      {:ok, ids} -> for id <- label_strings(ids), do: "partition:" <> id
-      :invalid -> [@unresolved]
+      {:ok, ids} -> Enum.map(ids, &label_token(&1, :partition))
+      :invalid -> [:unresolved]
     end
   end
 
   @doc "The label and partition tokens in the `metadata` of a row."
-  @spec metadata_tokens(term()) :: [String.t()]
+  @spec metadata_tokens(term()) :: [token()]
   def metadata_tokens(metadata) do
     metadata = metadata_map(metadata)
 
@@ -139,24 +166,76 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
   end
 
   @doc """
-  The tokens a reader may see: its allowed labels, and its allowed
-  partitions as `partition:<id>`. Retrieval's rule is that everything a thing
-  carries must be among them, so an empty set reads only what is unlabelled.
+  The grants of a reader from the labels and partitions its key is allowed.
+  Blank entries are dropped, class names are lowercased, and `"*"` grants all
+  of its kind.
   """
-  @spec grants(term(), term()) :: MapSet.t(String.t())
+  @spec grants(term(), term()) :: grants()
   def grants(labels, partitions) do
-    MapSet.new(strings(labels) ++ Enum.map(strings(partitions), &("partition:" <> &1)))
+    labels = strings(labels)
+    partitions = strings(partitions)
+
+    %{
+      labels: grant_set(labels, :label),
+      partitions: grant_set(partitions, :partition),
+      all_labels?: "*" in labels,
+      all_partitions?: "*" in partitions
+    }
+  end
+
+  @doc """
+  Whether a reader with `grants` may see a thing that carries `tokens` (nil
+  for a thing that carries none). This is the rule of governed retrieval:
+
+    * labels: every label the thing carries is among the reader's labels, so
+      a reader with none sees only what has none;
+    * partitions: with no partition granted only what has none is seen; with
+      some granted, what shares at least one is seen and what has none is
+      not;
+    * `{:partition_all, id}` tokens (an aggregate, which is written from
+      every partition of its workspace) must all be granted;
+    * `unresolved` is never granted, except to a reader that may see all
+      labels.
+  """
+  @spec permits?(grants(), MapSet.t(token()) | nil) :: boolean()
+  def permits?(grants, nil), do: permits?(grants, MapSet.new())
+
+  def permits?(grants, tokens) do
+    labels = for {:label, name} <- tokens, do: name
+    partitions = for {:partition, id} <- tokens, do: id
+    required = for {:partition_all, id} <- tokens, do: id
+
+    labels_ok? =
+      grants.all_labels? or
+        (not MapSet.member?(tokens, :unresolved) and subset?(labels, grants.labels))
+
+    partitions_ok? =
+      grants.all_partitions? or
+        (shares_partition?(grants.partitions, partitions ++ required) and
+           subset?(required, grants.partitions))
+
+    labels_ok? and partitions_ok?
+  end
+
+  defp subset?(names, granted), do: Enum.all?(names, &MapSet.member?(granted, &1))
+
+  defp shares_partition?(granted, carried) do
+    if MapSet.size(granted) == 0,
+      do: carried == [],
+      else: Enum.any?(carried, &MapSet.member?(granted, &1))
   end
 
   @doc """
   The class rank of a set of tokens: the highest class named, restricted for
-  the `unresolved/0` token, nil for none.
+  an `unresolved` one, nil for none.
   """
-  @spec token_rank(MapSet.t(String.t()) | nil) :: rank() | nil
+  @spec token_rank(MapSet.t(token()) | nil) :: rank() | nil
   def token_rank(nil), do: nil
 
   def token_rank(tokens) do
-    if MapSet.member?(tokens, @unresolved), do: 3, else: highest_rank(MapSet.to_list(tokens))
+    if MapSet.member?(tokens, :unresolved),
+      do: 3,
+      else: highest_rank(for({:label, name} <- tokens, do: name))
   end
 
   @doc "A `metadata` value as a map with string keys (empty when unreadable)."
@@ -193,12 +272,34 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
     end
   end
 
-  defp label_strings(labels) do
-    for label <- labels,
-        is_binary(label) or (is_atom(label) and not is_nil(label)),
-        text = label |> to_string() |> String.trim(),
-        text != "",
-        do: text
+  defp label_token(label, kind) when is_binary(label) do
+    case String.trim(label) do
+      "" -> :unresolved
+      text -> {kind, canonical(text, kind)}
+    end
+  end
+
+  defp label_token(label, kind) when is_atom(label) and label not in [nil, true, false],
+    do: label_token(Atom.to_string(label), kind)
+
+  defp label_token(_other, _kind), do: :unresolved
+
+  # The four class names are not case sensitive; any other label is exact.
+  defp canonical(text, :label) do
+    lowered = String.downcase(text)
+    if lowered in @classes, do: lowered, else: text
+  end
+
+  defp canonical(text, :partition), do: text
+
+  defp grant_set(values, kind) do
+    for value <- values,
+        value != "*",
+        trimmed = String.trim(value),
+        trimmed != "",
+        into: MapSet.new() do
+      canonical(trimmed, kind)
+    end
   end
 
   defp strings(value) do

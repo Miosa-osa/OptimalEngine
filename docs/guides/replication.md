@@ -68,19 +68,38 @@ The cursor moves past what the gate holds, and the class is read when the row is
 A row held then is not sent later because its source package arrived after it, or because a label on its source was lowered; only a new change to the row, or to a row it derives from, is classified again.
 So label before writing, and write the source before what derives from it.
 
-### What a read key sees of exports and conflicts
+### What a read key sees of exports, conflicts and the ledger
 
-`GET /api/batch/export/{memories,signals,workspace}` and `GET /api/sync/conflicts` return row text, so they filter by the caller the way governed retrieval does.
-A keyed caller sees a row only when every label and partition the row carries is among the `allowed_security_labels` and `allowed_partitions` in its key's metadata, and its principal may read the row by the access lists (`OptimalEngine.Identity.ACL`).
-A row carries the labels of the rows it was copied or derived from, and a row whose source cannot be found is seen by no one, so a memory staged from a restricted source package is not exported to a key that lacks `restricted`.
-A key with no grants sees only rows that carry no label and no partition; give an export key the labels it should read.
-An export leaves out what a key may not see.
-A conflict keeps its table, key, kind and state, and a version of the row the key may not see is replaced by `{"redacted": "security_labels"}` with `redacted: true` on the conflict.
+`GET /api/batch/export/{memories,signals,workspace}`, `GET /api/sync/conflicts` and `GET /api/storage/workspaces/:id/mutations` return row text, so they filter by the caller the way governed retrieval does.
+A keyed caller sees a row only by the two rules retrieval applies:
+
+- **Labels and partitions**, from the `allowed_security_labels` and `allowed_partitions` in the key's metadata.
+Every label the row carries must be granted, so a key with no labels sees only rows with none.
+With no partition granted a key sees only rows that have none; with partitions granted it sees the rows that share at least one, and not the rows that have none.
+The four class names are not case sensitive (`Restricted` is `restricted`); any other label is compared exactly.
+- **The access lists** (`OptimalEngine.Identity.ACL`), for the address of the row: `optimal://memory/<workspace>/<id>` for a memory, the address of a document, `wiki:<slug>:<audience>` for a wiki page.
+
+A row carries the labels and partitions of the rows it was copied or derived from, and a row whose source cannot be found, or a label that cannot be read (not a string, not JSON), is seen by no one.
+So a memory staged from a restricted source package is not exported to a key that lacks `restricted`.
+A wiki page that names nothing, and any other aggregate, carries every label of its workspace and needs every partition of it.
+
+A grant of `"*"` (in `allowed_security_labels`, `allowed_partitions`, or both) means every label or every partition, as it does when a key mints another (`Auth.KeyIssuance`).
+The bootstrap key (`OPTIMAL_BOOTSTRAP_KEY`) carries `"*"` in both, since it may mint anything anyway, so an exporter that calls with it keeps full exports.
+For any other key, give the labels it should read.
+The recommended default for a machine key is `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`: it reads rows labelled public, internal or confidential and rows with no label, and does not read restricted rows, rows with a label of their own (`private`, a team name) or partitioned rows.
+
+An answer says what was left out.
+Each of these routes returns `withheld` (how many items were not shown) and `complete` (false when any item was left out or, for conflicts, redacted); the export of a workspace counts its signals, memories and wiki pages together.
+A conflict keeps its table, kind and state.
+A version of the row the key may not see (as it was recorded, or the row as it is now) is replaced by `{"redacted": "security_labels"}` with `redacted: true` on the conflict, and a key that is a name rather than an id (a wiki page) is replaced by a hash; a conflict about a resource the principal may not read by the access lists is left out and counted.
+The ledger route skips what the data-class ceiling holds and what the key may not see, and `withheld` counts both.
+An export of a store that cannot be read is a `500`, and a read the gate could not make is a `503`, never a partial answer.
 An anonymous local caller (no key, authentication not required) is the trusted operator and sees everything.
-A wiki page that names nothing, and any other aggregate, carries every label in its workspace.
+
+**Not covered yet.** These routes still answer by the access lists (or not at all) and not by the labels and partitions of a keyed caller: `GET /api/memory`, `GET /api/memory/:id`, `GET /api/signals/:id`, `GET /api/wiki/:slug`, and the labels on `GET /api/search` and `GET /api/grep` (which apply the access lists only).
+A key with `read` reaches them whatever its grants. Do not rely on a key's label grants as a boundary until they follow.
 
 Limits worth knowing:
-
 
 - A row names another row's id in free-form metadata in places (the encoding gate records the memory a new one is most like).
 That is an opaque id, not the row, and the gate does not scrub it.
