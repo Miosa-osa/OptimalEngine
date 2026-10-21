@@ -143,7 +143,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_sync_pull_floor(),
       migration_graph_edges(),
       migration_077_context_address_indexes(),
-      migration_derived_data_delete_indexes()
+      migration_derived_data_delete_indexes(),
+      migration_asset_foreign_key_indexes()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -448,6 +449,51 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_asset_visual_observations_asset_id ON asset_visual_observations(asset_id)"},
        {"idx_asset_embedding_refs_asset_id",
         "CREATE INDEX IF NOT EXISTS idx_asset_embedding_refs_asset_id ON asset_embedding_refs(asset_id)"}
+     ]}
+  end
+
+  # The version of the asset foreign key index migration. Provisional like the ones
+  # above: the assigned number is the highest on main plus one at merge, changed here
+  # and in the pins listed in docs/guides/versioning-and-releases.md.
+  @asset_foreign_key_indexes_version 79
+
+  # The asset tables point at each other and at source packages with foreign keys that
+  # cascade or clear on delete: an extraction deletes its transcripts, OCR spans, visual
+  # observations and embedding references, an adapter run deletes its extractions and
+  # theirs, and a source package clears `source_package_id` on every row that names it.
+  # SQLite looks those rows up by the child column, and none of these columns led an
+  # index, so deleting one extraction, one run or one package scanned each child table.
+  # Indexes only, and every statement is safe to run again.
+  defp migration_asset_foreign_key_indexes do
+    {@asset_foreign_key_indexes_version,
+     "asset tables: indexes on the foreign keys they cascade by",
+     [
+       {"idx_asset_transcripts_extraction_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_transcripts_extraction_id ON asset_transcripts(extraction_id)"},
+       {"idx_asset_transcripts_adapter_run_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_transcripts_adapter_run_id ON asset_transcripts(adapter_run_id)"},
+       {"idx_asset_transcripts_source_package_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_transcripts_source_package_id ON asset_transcripts(source_package_id)"},
+       {"idx_asset_ocr_spans_extraction_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_ocr_spans_extraction_id ON asset_ocr_spans(extraction_id)"},
+       {"idx_asset_ocr_spans_adapter_run_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_ocr_spans_adapter_run_id ON asset_ocr_spans(adapter_run_id)"},
+       {"idx_asset_ocr_spans_source_package_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_ocr_spans_source_package_id ON asset_ocr_spans(source_package_id)"},
+       {"idx_asset_visual_observations_extraction_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_visual_observations_extraction_id ON asset_visual_observations(extraction_id)"},
+       {"idx_asset_visual_observations_adapter_run_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_visual_observations_adapter_run_id ON asset_visual_observations(adapter_run_id)"},
+       {"idx_asset_visual_observations_source_package_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_visual_observations_source_package_id ON asset_visual_observations(source_package_id)"},
+       {"idx_asset_embedding_refs_extraction_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_embedding_refs_extraction_id ON asset_embedding_refs(extraction_id)"},
+       {"idx_asset_embedding_refs_adapter_run_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_embedding_refs_adapter_run_id ON asset_embedding_refs(adapter_run_id)"},
+       {"idx_asset_embedding_refs_source_package_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_embedding_refs_source_package_id ON asset_embedding_refs(source_package_id)"},
+       {"idx_asset_extractions_source_package_id",
+        "CREATE INDEX IF NOT EXISTS idx_asset_extractions_source_package_id ON asset_extractions(source_package_id)"}
      ]}
   end
 
