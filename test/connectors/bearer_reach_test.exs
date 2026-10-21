@@ -26,8 +26,12 @@ defmodule OptimalEngine.Connectors.BearerReachTest do
       for url <- [
             "https://example.my.salesforce.com",
             "https://example.my.salesforce.com/",
-            "https://example.lightning.force.com",
-            "https://na1.salesforce.com"
+            "https://example.sandbox.my.salesforce.com",
+            "https://example--dev.sandbox.my.salesforce.com",
+            "https://example.develop.my.salesforce.com",
+            "https://na1.salesforce.com",
+            "https://cs12.salesforce.com",
+            "https://eu15.salesforce.com"
           ] do
         assert {:ok, state} = Salesforce.init(Map.put(@config, "instance_url", url)), url
         assert {:ok, %{signals: [], cursor: _}} = Salesforce.sync(state, nil), url
@@ -41,6 +45,15 @@ defmodule OptimalEngine.Connectors.BearerReachTest do
 
       for url <- [
             "https://evil.example.com",
+            "https://example.lightning.force.com",
+            "https://example.force.com",
+            "https://example.cloudforce.com",
+            "https://example.salesforce-setup.com",
+            "https://login.salesforce.com",
+            "https://test.salesforce.com",
+            "https://www.salesforce.com",
+            "https://salesforce.com",
+            "https://a.b.c.my.salesforce.com",
             "http://example.my.salesforce.com",
             "https://salesforce.com.evil.example",
             "https://evilsalesforce.com",
@@ -112,6 +125,85 @@ defmodule OptimalEngine.Connectors.BearerReachTest do
 
       for cursor <- ["https://evil.example.net/delta", "http://graph.microsoft.com/v1.0/delta"] do
         assert {:error, :untrusted_url} = OneDrive.sync(onedrive_state(), cursor), cursor
+      end
+
+      assert BrokerStub.api_calls(stub) == []
+    end
+  end
+
+  describe "Jira's and Confluence's site_url" do
+    alias OptimalEngine.Connectors.AccessToken
+    alias OptimalEngine.Connectors.Adapters.{Confluence, Jira}
+
+    @atlassian [
+      {Jira, %{"projects" => ["PROJ"]}},
+      {Confluence, %{"spaces" => ["ENG"]}}
+    ]
+
+    defp atlassian_state(adapter, extra, site_url, api_token) do
+      adapter.init(
+        Map.merge(extra, %{
+          "site_url" => site_url,
+          "credentials" => %{"email" => "ops@example.com", "api_token" => api_token}
+        })
+      )
+    end
+
+    test "must be https, whoever holds the token" do
+      for {adapter, extra} <- @atlassian,
+          url <- [
+            "http://example.atlassian.net",
+            "ftp://example.atlassian.net",
+            "example.atlassian.net",
+            "https://user@example.atlassian.net"
+          ] do
+        assert {:error, {:invalid_config, :site_url}} =
+                 atlassian_state(adapter, extra, url, "example-stored-token"),
+               "#{inspect(adapter)} #{url}"
+      end
+    end
+
+    test "is pinned to atlassian.net when the broker issued the token" do
+      issued = AccessToken.secret("example-broker-token")
+
+      for {adapter, extra} <- @atlassian do
+        assert {:ok, _state} = atlassian_state(adapter, extra, "https://acme.atlassian.net", issued)
+
+        for url <- [
+              "https://jira.example.com",
+              "https://atlassian.net.evil.example",
+              "https://evilatlassian.net",
+              "https://acme.atlassian.net.evil.example",
+              "https://acme.atlassian.net:8443"
+            ] do
+          assert {:error, {:invalid_config, :site_url}} =
+                   atlassian_state(adapter, extra, url, issued),
+                 "#{inspect(adapter)} #{url}"
+        end
+      end
+    end
+
+    test "may be a self-hosted site when the credentials are the connector's own" do
+      for {adapter, extra} <- @atlassian do
+        for url <- ["https://jira.example.com", "https://jira.example.com:8443/jira"] do
+          assert {:ok, _state} = atlassian_state(adapter, extra, url, "example-stored-token")
+        end
+      end
+    end
+
+    test "is checked again by the sync, which sends nothing to a refused site" do
+      stub = install(fn _url, _opts -> {200, %{}} end)
+      issued = AccessToken.secret("example-broker-token")
+
+      for {adapter, extra} <- @atlassian do
+        state =
+          Map.merge(extra, %{
+            "site_url" => "https://jira.example.com",
+            "email" => "ops@example.com",
+            "api_token" => issued
+          })
+
+        assert {:error, {:invalid_config, :site_url}} = adapter.sync(state, nil)
       end
 
       assert BrokerStub.api_calls(stub) == []

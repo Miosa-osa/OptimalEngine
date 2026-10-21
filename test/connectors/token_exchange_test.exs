@@ -89,6 +89,34 @@ defmodule OptimalEngine.Connectors.TokenExchangeTest do
         end
       end
 
+      test "#{inspect(mod)} reads a grant that is not valid as expired, and any other 400 by its error code only" do
+        for code <- ~w(invalid_grant invalid_client unauthorized_client) do
+          install(fn _url, _opts -> {400, %{"error" => code}} end)
+          assert {:error, :auth_expired} = sync(@mod, @config, @credentials), code
+        end
+
+        install(fn _url, _opts ->
+          {400,
+           %{"error" => "invalid_request", "error_description" => "client_secret=leaked-detail"}}
+        end)
+
+        assert {:error, {:token_error, "invalid_request"}} = sync(@mod, @config, @credentials)
+
+        install(fn _url, _opts -> {400, %{"message" => "no error field"}} end)
+        assert {:error, {:token_error, "unknown"}} = sync(@mod, @config, @credentials)
+      end
+
+      test "#{inspect(mod)} passes a Retry-After on to the Runner, capped" do
+        install(fn _url, _opts -> {429, %{}, [{"retry-after", "2"}]} end)
+        assert {:error, {:rate_limited, 2_000}} = sync(@mod, @config, @credentials)
+
+        install(fn _url, _opts -> {429, %{}, [{"retry-after", "86400"}]} end)
+        assert {:error, {:rate_limited, 30_000}} = sync(@mod, @config, @credentials)
+
+        install(fn _url, _opts -> {429, %{}, [{"retry-after", "soon"}]} end)
+        assert {:error, :rate_limited} = sync(@mod, @config, @credentials)
+      end
+
       test "#{inspect(mod)} reads a throttled exchange as rate limited and a failing one as transient" do
         install(fn _url, _opts -> {429, %{}} end)
         assert {:error, :rate_limited} = sync(@mod, @config, @credentials)
@@ -147,7 +175,7 @@ defmodule OptimalEngine.Connectors.TokenExchangeTest do
             {429, :rate_limited},
             {503, :transient}
           ] do
-        install(fn _url, _opts -> {status, %{}} end)
+        install(fn _url, _opts -> {status, %{"error" => "invalid_grant"}} end)
         assert {:error, ^expected} = sync(Zoom, @zoom_config, @zoom_credentials), "status #{status}"
       end
     end

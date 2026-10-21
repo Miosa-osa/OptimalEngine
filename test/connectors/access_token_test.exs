@@ -483,6 +483,23 @@ defmodule OptimalEngine.Connectors.AccessTokenTest do
       assert inspect(token) =~ "expires_at"
     end
 
+    test "a held secret does not turn into text by interpolation or to_string", %{
+      renewals: renewals
+    } do
+      token = issued("issued-secret-value", 3_600, [], renewals)
+      secret = AccessToken.secret("api-key-secret-value")
+
+      for held <- [token, secret] do
+        assert_raise Protocol.UndefinedError, fn -> "#{held}" end
+        assert_raise Protocol.UndefinedError, fn -> to_string(held) end
+      end
+
+      assert AccessToken.reveal(token) == "issued-secret-value"
+      assert AccessToken.reveal(secret) == "api-key-secret-value"
+      assert AccessToken.reveal("plain") == "plain"
+      assert AccessToken.reveal(nil) == ""
+    end
+
     test "a session leaves nothing behind in the process, even when the sync raises" do
       before = MapSet.new(Process.get_keys())
 
