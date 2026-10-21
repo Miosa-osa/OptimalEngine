@@ -62,7 +62,7 @@ Every adapter also reads an optional `"max_pages"` where its listing is paginate
 | `"credential_source"` | `"stored"` (default) or `"broker"` |
 | `"broker_url"`, `"broker_reference"`, `"broker_scopes"`, `"broker_timeout_ms"` | the outside broker that holds the account, see below |
 | `"routing_labels"`, `"routing_channel"` | what the routing rules match a Signal's `label` and `channel` against |
-| `"review_workspace_id"` | where a low-confidence route waits for a person |
+| `"review_workspace_id"` | where a low-confidence route waits for a person; a workspace of the connector's tenant, else registering the connector answers `invalid_review_workspace` |
 | `"routing_walled_workspaces"` | workspaces only an identity rule may open |
 | `"outward_topic"` | tags every Signal from this connector as outward evidence |
 | `"write_files"` | `true` also writes a markdown file per pulled item into the workspace folder; default `false` |
@@ -128,6 +128,9 @@ A connector's Signals are routed to a workspace, in this order.
    A rule matches a Signal's sender, domain, label, channel or keywords.
    A high-confidence route wins, so a person or company the operator has already mapped claims their mail wherever it arrives.
    A low-confidence route goes to `review_workspace_id` when the connector names one, and otherwise stays put.
+   A route, whether from a rule or from `review_workspace_id`, that names a workspace of another tenant (or an archived one) is not taken, and the Engine logs it: the Signal stays in the connector's own workspace.
+   A workspace nobody registered is routable by the default tenant only.
+   A connector registered before this check can still be disabled or changed in what it does not touch.
 3. Walled workspaces.
    A workspace named in `routing_walled_workspaces` is only reached by an identity rule, on sender, domain, label or channel.
    A keyword is a guess, and a guess never opens a private view.

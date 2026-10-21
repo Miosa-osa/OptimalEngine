@@ -228,7 +228,8 @@ defmodule OptimalEngine.Connectors.Rows do
              tenant_id: tenant_id,
              workspace_id: plan.workspace_id,
              config: plan.config,
-             enabled: plan.enabled
+             enabled: plan.enabled,
+             check_review_workspace: plan.check_review_workspace
            }) do
       record(tenant_id, "connector.changed", id, kind, plan.workspace_id, opts, %{
         "fields" => plan.fields,
@@ -289,6 +290,38 @@ defmodule OptimalEngine.Connectors.Rows do
   end
 
   def check_workspace(_tenant_id, _workspace_id), do: {:error, :workspace_not_found}
+
+  @doc """
+  Whether a Signal may be placed in `workspace_id` on behalf of the tenant: a
+  workspace registered to the tenant and active, or, for the default tenant
+  only, one that is not registered at all and is not named for another tenant
+  (`"<other>:slug"`), which is how a single-tenant deployment names
+  workspaces it never registered. A bare id nobody registered names a folder
+  of the default tenant's (the file writer and the full index map it to
+  `default:<dir>`), so no other tenant may route to it. A workspace of
+  another tenant, and an archived one, are not routable.
+  """
+  @spec routable_workspace?(String.t(), term()) :: boolean()
+  def routable_workspace?(tenant_id, workspace_id) when is_binary(workspace_id) do
+    case Workspace.get(workspace_id) do
+      {:ok, %{tenant_id: ^tenant_id, status: :active}} ->
+        true
+
+      {:ok, _other_tenant_or_archived} ->
+        false
+
+      {:error, :not_found} ->
+        case String.split(workspace_id, ":", parts: 2) do
+          [prefix, _slug] -> prefix == tenant_id
+          _bare -> tenant_id == Tenant.default_id()
+        end
+
+      _unavailable ->
+        false
+    end
+  end
+
+  def routable_workspace?(_tenant_id, _workspace_id), do: false
 
   @doc """
   Where a connector registered without a workspace lands: the first active
@@ -422,7 +455,10 @@ defmodule OptimalEngine.Connectors.Rows do
          config_keys: config_changes |> Map.keys() |> Enum.sort(),
          enabled: enabled,
          workspace_id: workspace_id,
-         config: config
+         config: config,
+         # A change that disables the connector is always accepted; one that
+         # leaves it enabled is checked when it touches the review workspace.
+         check_review_workspace: enabled and Map.has_key?(config_changes, "review_workspace_id")
        }}
     end
   end

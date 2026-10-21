@@ -53,6 +53,7 @@ defmodule OptimalEngine.API.ConnectorsAPI do
     invalid_cadence: 422,
     invalid_outward_topic: 422,
     invalid_walled_workspaces: 422,
+    invalid_review_workspace: 422,
     no_intake_workspace: 422,
     connector_key_missing: 503,
     scheduler_unavailable: 503
