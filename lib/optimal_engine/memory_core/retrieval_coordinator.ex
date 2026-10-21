@@ -440,12 +440,22 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
          {:ok, query} <- original_query(stale_package),
          {:ok, refresh_opts} <- refresh_opts_from_package(stale_package, opts),
          {:ok, refreshed_package} <- retrieve(query, refresh_opts),
-         :ok <-
-           Store.mark_context_package_refreshed(stale_package.id,
-             tenant_id: stale_package.tenant_id,
-             workspace_id: stale_package.workspace_id
-           ) do
+         :ok <- replace_stale(stale_package, opts) do
       {:ok, receiver_view(refreshed_package, stale_package, opts)}
+    end
+  end
+
+  # The new package replaces the stale one only for the reader that requested
+  # it, or in a refresh with no receiver. A reader that merely covers it gets a
+  # package of its own and leaves the owner's stale for the owner.
+  defp replace_stale(stale_package, opts) do
+    if not receiver?(opts) or owner?(stale_package, opts) do
+      Store.mark_context_package_refreshed(stale_package.id,
+        tenant_id: stale_package.tenant_id,
+        workspace_id: stale_package.workspace_id
+      )
+    else
+      :ok
     end
   end
 
@@ -499,6 +509,7 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   end
 
   @stale_page 100
+  @stale_scan_limit 1_000
 
   # A maintenance run takes the first `batch_limit` stale packages. A receiver
   # is offered only the stale packages it may refresh, so the filter runs
@@ -509,21 +520,31 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     batch_limit = Keyword.get(opts, :batch_limit, 50)
 
     if receiver?(opts) do
-      collect_stale(tenant_id, workspace_id, opts, batch_limit, 0, [])
+      scan_limit = Keyword.get(opts, :scan_limit, @stale_scan_limit)
+      collect_stale(tenant_id, workspace_id, opts, batch_limit, scan_limit, 0, [])
     else
       stale_page(tenant_id, workspace_id, batch_limit, 0)
     end
   end
 
-  defp collect_stale(_tenant_id, _workspace_id, _opts, batch_limit, _offset, found)
+  # Looks at no more than `scan_limit` stale packages, newest first: a receiver
+  # is offered what it may refresh among those, so a workspace with a great many
+  # stale packages of other readers costs a bounded read, not a full scan.
+  defp collect_stale(_tenant_id, _workspace_id, _opts, batch_limit, _scan_limit, _offset, found)
        when length(found) >= batch_limit,
        do: {:ok, Enum.take(found, batch_limit)}
 
-  defp collect_stale(tenant_id, workspace_id, opts, batch_limit, offset, found) do
-    with {:ok, page} <- stale_page(tenant_id, workspace_id, @stale_page, offset) do
+  defp collect_stale(_tenant_id, _workspace_id, _opts, batch_limit, scan_limit, offset, found)
+       when offset >= scan_limit,
+       do: {:ok, Enum.take(found, batch_limit)}
+
+  defp collect_stale(tenant_id, workspace_id, opts, batch_limit, scan_limit, offset, found) do
+    size = min(@stale_page, scan_limit - offset)
+
+    with {:ok, page} <- stale_page(tenant_id, workspace_id, size, offset) do
       visible = Enum.filter(page, &(ensure_may_refresh(&1, opts) == :ok))
 
-      if length(page) < @stale_page do
+      if length(page) < size do
         {:ok, Enum.take(found ++ visible, batch_limit)}
       else
         collect_stale(
@@ -531,7 +552,8 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
           workspace_id,
           opts,
           batch_limit,
-          offset + @stale_page,
+          scan_limit,
+          offset + size,
           found ++ visible
         )
       end
@@ -608,14 +630,18 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
        [
          tenant_id: Keyword.get(opts, :tenant_id, package.tenant_id),
          workspace_id: Keyword.get(opts, :workspace_id, package.workspace_id),
-         request_id: Keyword.get(opts, :request_id, package.request_id),
+         request_id: Keyword.get(opts, :request_id, inherited(package, opts, package.request_id)),
          request_intent: Keyword.get(opts, :request_intent, package.request_intent),
          actor_id:
            Keyword.get(opts, :actor_id) ||
              Keyword.get(opts, :requesting_actor_id) ||
              package.requesting_actor_id,
          active_memory_pool_id:
-           Keyword.get(opts, :active_memory_pool_id, package.active_memory_pool_id),
+           Keyword.get(
+             opts,
+             :active_memory_pool_id,
+             inherited(package, opts, package.active_memory_pool_id)
+           ),
          time_mode: Keyword.get(opts, :time_mode, package.time_mode),
          detail_depth: Keyword.get(opts, :detail_depth, package.detail_depth),
          strategy:
@@ -689,6 +715,13 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
+  # What belongs to the request that made the stale package (its request id and
+  # pool) carries over only to the reader that made it, or to a refresh with no
+  # receiver; another reader's refresh starts from its own request.
+  defp inherited(package, opts, value) do
+    if not receiver?(opts) or owner?(package, opts), do: value, else: nil
+  end
+
   # Whoever requested this package may refresh it.
   defp owner?(package, opts), do: actor(opts) == package.requesting_actor_id and actor(opts) != nil
 
@@ -759,9 +792,10 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
   end
 
   # What a receiver that did not ask the query is handed back: the plan keys
-  # that restate it, and its stored copy, are left out (the sections were
-  # built without it, see `:omit_query`). The stored package keeps the query
-  # for the next refresh.
+  # that restate it, its stored copy, who asked it, and the counts and ids of
+  # the objects its grants exclude (they say what the query matched) are left
+  # out; the sections were built without them (see `:omit_query`). The stored
+  # package keeps them for the next refresh.
   defp receiver_view(refreshed, stale, opts) do
     if hide_query?(stale, opts) do
       %{
@@ -774,7 +808,15 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
               :evidence_probes,
               :reconstruction
             ]),
-          metadata: Map.drop(refreshed.metadata, [:query, "query"])
+          metadata:
+            Map.drop(refreshed.metadata, [
+              :query,
+              "query",
+              :query_owner_actor_id,
+              "query_owner_actor_id"
+            ]),
+          redacted_object_links: [],
+          filtered_object_summary: %{}
       }
     else
       refreshed
@@ -1807,17 +1849,31 @@ defmodule OptimalEngine.MemoryCore.RetrievalCoordinator do
     end
   end
 
+  # With `omit_query?` the summary leaves out what restates the query: the query
+  # itself, and how many objects matched it and how many were excluded.
   defp summary_section(retrieval_package, omit_query?) do
     filtered = retrieval_package.filtered_summary
+
+    counts =
+      if omit_query? do
+        """
+        Facts: #{filtered.returned_facts} returned
+        Memory objects: #{filtered.returned_memory_objects} returned
+        """
+      else
+        """
+        Facts: #{filtered.returned_facts} returned of #{filtered.candidate_facts} candidates
+        Memory objects: #{filtered.returned_memory_objects} returned of #{filtered.candidate_memory_objects} candidates
+        Policy-excluded objects: #{filtered.redacted_or_filtered_objects}
+        """
+      end
+
     query_line = if omit_query?, do: "", else: "Query: #{retrieval_package.query}\n"
 
     """
     # Context Package
     #{query_line}Workspace: #{retrieval_package.workspace_id}
-    Facts: #{filtered.returned_facts} returned of #{filtered.candidate_facts} candidates
-    Memory objects: #{filtered.returned_memory_objects} returned of #{filtered.candidate_memory_objects} candidates
-    Policy-excluded objects: #{filtered.redacted_or_filtered_objects}
-    Freshness: #{retrieval_package.time_mode} as of #{retrieval_package.retrieved_at}
+    #{counts}Freshness: #{retrieval_package.time_mode} as of #{retrieval_package.retrieved_at}
     Actor: #{Map.get(retrieval_package.scope, :actor_id) || "unscoped"}
     """
   end

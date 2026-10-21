@@ -118,6 +118,7 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       conn = refresh_stale(ctx.workspace_id, token)
       body = Jason.decode!(conn.resp_body)
       assert conn.resp_body =~ @query_marker
+      assert conn.resp_body =~ "candidates"
 
       for package <- body["refreshed_context_packages"] do
         assert package["retrieval_plan"]["query"] == @query
@@ -196,8 +197,8 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
         1
       )
 
-      assert_states([labelled], "refreshed")
-      assert_states([partitioned], "stale")
+      # The reader got a package of its own; the owner's is left for the owner.
+      assert_states([labelled, partitioned], "stale")
     end
 
     test "a key that did not ask the query is handed it nowhere in the response", ctx do
@@ -210,6 +211,9 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       body = Jason.decode!(conn.resp_body)
       assert body["refreshed_count"] == 2
       refute conn.resp_body =~ @query_marker
+      refute conn.resp_body =~ "req-#{@builder}"
+      refute conn.resp_body =~ "candidates"
+      refute conn.resp_body =~ "Policy-excluded"
 
       for package <- body["refreshed_context_packages"] do
         for key <- ~w(query evidence_plan evidence_obligations evidence_probes) do
@@ -217,8 +221,13 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
         end
 
         refute Map.has_key?(package["metadata"], "query")
+        refute Map.has_key?(package["metadata"], "query_owner_actor_id")
         refute Map.has_key?(package["metadata"], "refreshed_from_invalidation_reason")
         assert package["metadata"]["refreshed_from_context_package_id"]
+        assert package["request_id"] == nil
+        assert package["active_memory_pool_id"] == nil
+        assert package["redacted_object_links"] == []
+        assert package["filtered_object_summary"] == %{}
       end
     end
 
@@ -448,9 +457,14 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
 
       refute Map.has_key?(refreshed.retrieval_plan, :query)
       refute Map.has_key?(refreshed.metadata, :query)
+      refute Map.has_key?(refreshed.metadata, :query_owner_actor_id)
       refute Map.has_key?(refreshed.metadata, :refreshed_from_invalidation_reason)
       refute refreshed.sections.summary =~ @query_marker
       refute refreshed.metadata.sections.summary =~ @query_marker
+      refute refreshed.sections.summary =~ "candidates"
+      assert refreshed.redacted_object_links == []
+      assert refreshed.filtered_object_summary == %{}
+      assert refreshed.request_id == nil
 
       # The stored package keeps the query, so it can be refreshed again.
       assert {:ok, [[metadata]]} =
@@ -460,6 +474,81 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
       assert metadata["query"] == @query
       assert metadata["query_owner_actor_id"] == @builder
       refute metadata["sections"]["summary"] =~ @query_marker
+    end
+
+    test "the request and pool of the stale package carry over only to its requester", ctx do
+      {:ok, pool} =
+        MemoryCore.open_active_pool(
+          tenant_id: "default",
+          workspace_id: ctx.workspace_id,
+          task_type: "refresh_carry_#{System.unique_integer([:positive])}"
+        )
+
+      for {actor, inherits?} <- [{@builder, true}, {"agent:other", false}] do
+        package =
+          build_package!(ctx.workspace_id, ["public"], [], @builder, active_memory_pool_id: pool.id)
+
+        make_stale!(ctx.workspace_id, ctx.rows)
+
+        assert {:ok, refreshed} =
+                 RetrievalCoordinator.refresh_context_package(package.id,
+                   workspace_id: ctx.workspace_id,
+                   actor_id: actor,
+                   allowed_partitions: [],
+                   allowed_security_labels: ["public"]
+                 )
+
+        assert refreshed.request_id == if(inherits?, do: "req-#{@builder}")
+        assert refreshed.active_memory_pool_id == if(inherits?, do: pool.id)
+      end
+    end
+
+    test "a reader that only covers a package does not replace it; its requester does", ctx do
+      package = build_package!(ctx.workspace_id, ["public"], [])
+      make_stale!(ctx.workspace_id, ctx.rows)
+
+      assert {:ok, _own} =
+               RetrievalCoordinator.refresh_context_package(package.id,
+                 workspace_id: ctx.workspace_id,
+                 actor_id: "agent:other",
+                 allowed_partitions: [],
+                 allowed_security_labels: ["public"]
+               )
+
+      assert_states([package], "stale")
+
+      assert {:ok, _own} =
+               RetrievalCoordinator.refresh_context_package(package.id,
+                 workspace_id: ctx.workspace_id,
+                 actor_id: @builder,
+                 allowed_partitions: [],
+                 allowed_security_labels: ["public"]
+               )
+
+      assert_states([package], "refreshed")
+    end
+
+    test "a receiver looks at no more stale packages than the scan limit", ctx do
+      for _ <- 1..4, do: build_package!(ctx.workspace_id, ["public"], [])
+      make_stale!(ctx.workspace_id, ctx.rows)
+
+      receiver = [
+        workspace_id: ctx.workspace_id,
+        actor_id: "agent:other",
+        allowed_partitions: [],
+        allowed_security_labels: ["public"],
+        batch_limit: 10
+      ]
+
+      assert {:ok, all} = RetrievalCoordinator.refresh_stale_context_packages(receiver)
+      assert length(all.stale_context_package_ids) == 4
+
+      make_stale!(ctx.workspace_id, ctx.rows)
+
+      assert {:ok, bounded} =
+               RetrievalCoordinator.refresh_stale_context_packages([scan_limit: 2] ++ receiver)
+
+      assert length(bounded.stale_context_package_ids) == 2
     end
 
     test "a package the caller does not cover answers not_found whether or not it is stale",
@@ -649,13 +738,17 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshGrantsTest do
     packages
   end
 
-  defp build_package!(workspace_id, labels, partitions, actor \\ @builder) do
+  defp build_package!(workspace_id, labels, partitions, actor \\ @builder, extra \\ []) do
     {:ok, package} =
-      RetrievalCoordinator.retrieve(@query,
-        workspace_id: workspace_id,
-        actor_id: actor,
-        allowed_partitions: partitions,
-        allowed_security_labels: labels
+      RetrievalCoordinator.retrieve(
+        @query,
+        [
+          workspace_id: workspace_id,
+          actor_id: actor,
+          request_id: "req-#{actor}",
+          allowed_partitions: partitions,
+          allowed_security_labels: labels
+        ] ++ extra
       )
 
     package
