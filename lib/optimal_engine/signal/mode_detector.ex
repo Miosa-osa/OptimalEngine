@@ -56,33 +56,34 @@ defmodule OptimalEngine.Signal.ModeDetector do
   @strong_patterns [
     ~r/^(def|defp|defmodule|defmacro|defmacrop|defstruct|defimpl|defprotocol|defdelegate|defguard)\b/,
     ~r/^(fn|func)(\s+[\w(]|\()/,
-    ~r/^(async\s+)?function\b\*?\s*[\w$]*\s*\(/,
+    ~r/^(async\s+)?function\b\*?\s*+[\w$]*+\s*+\(/,
     ~r/^(pub(\([\w ]+\))?\s+)?fn\s+[A-Za-z_]\w*\s*[<(]/,
     ~r/^(pub(\([\w ]+\))?\s+)?(struct|enum|trait|union)\s+[A-Z]\w*/,
     ~r/^impl(<[^>]*>)?\s+[A-Z]\w*/,
     ~r/^(pub\s+)?mod\s+[a-z_]\w*\s*[;{]/,
     ~r/^(class|interface|module|namespace|record|object)\s+[A-Z][\w.:<>]*/,
-    ~r/^package\s+[a-z][\w.]*\s*;?\s*$/,
+    ~r/^package\s+[a-z][\w.]*\s*+;?\s*+$/,
     ~r/^(public|private|protected|internal|static|final|abstract|export|override)\s+(static\s+|final\s+|async\s+|default\s+|abstract\s+)*(class|interface|enum|void|int|long|double|float|boolean|bool|char|byte|fn|function|def|const|let|var|struct|record|[A-Z]\w*(<[^>]*>)?(\[\])?\s+\w+\s*[(=;])/,
-    ~r/^import\s+(\{|\*|['"]|[A-Z][\w.]*\s*(,.*)?$|[\w.{}, ]+\s+from\s+['"]|[\w.]+\s*;?\s*$|[\w.]+\s+as\s+\w+\s*$|static\s)/,
+    ~r/^import\s++(\{|\*|['"]|[A-Z][\w.]*\s*+(,.*)?$|[\w.{}, ]*?[\w.{},]\s+from\s+['"]|[\w.]+\s*+;?\s*+$|[\w.]+\s+as\s+\w+\s*$|static\s)/,
     ~r/^from\s+[\w.]+\s+import\s+[\w*(]/,
     ~r/^(require|require_relative)\s*(\(|['"]|[A-Z][\w.]*\s*$)/,
-    ~r/^(use|alias)\s+[A-Z]\w*(\.[A-Z]\w*)*\s*(,.*)?$/,
-    ~r/^use\s+[a-z_]\w*(::[\w{}*, ]+)+\s*;$/,
+    ~r/^(use|alias)\s+[A-Z]\w*+(\.[A-Z]\w*+)*+\s*+(,.*)?$/,
+    ~r/^use\s+[a-z_]\w*(::[\w{}*, ]++)++\s*+;$/,
     ~r/^#include\s*[<"]/,
     ~r/^#!\//,
     ~r/^using\s+[A-Z][\w.]*\s*;$/,
-    ~r/^(const|let|var|val|auto)\s+(mut\s+)?[A-Za-z_$][\w$]*\s*(=|;|:\s*[\w<>\[\]|, ]+\s*(=|;|$))/,
-    ~r/^(int|long|float|double|char|bool|boolean|void|size_t|u?int\d+_t)\s+\**[A-Za-z_]\w*\s*(=|;|\[|\([^)]*\)\s*[{;]?\s*$)/,
-    ~r/^(if|for|while|switch|foreach)\s*\(.*\)\s*(\{|:)?\s*$/,
-    ~r/^(?=.*:\s*$)for\s+[\w, ()]+\s+in\s+.+:\s*$/,
+    ~r/^(const|let|var|val|auto)\s+(mut\s+)?[A-Za-z_$][\w$]*+\s*+(=|;|:(?>\s*[\w<>\[\]|, ]+)\s*(=|;|$))/,
+    ~r/^(int|long|float|double|char|bool|boolean|void|size_t|u?int\d+_t)\s+\**[A-Za-z_]\w*+\s*+(=|;|\[|\([^)]*+\)\s*+[{;]?\s*+$)/,
+    ~r/^(if|for|while|switch|foreach)\s*\(.*\)\s*+(\{\s*+|:\s*+)?$/,
+    # The loop target as words (an atomic token each) up to the first ` in `.
+    ~r/^(?=.*:\s*$)for\s+(?>[\w,()]+)(?>[ ]+(?!in\s)[\w,()]+)*\s+in\s.+:\s*$/,
     ~r/^(?=.*:\s*$)(if|elif|while)\s+.*(==|!=|<=|>=|<|>|\bis\b|\bnot\b|\bin\b|[().\[\]]).*:\s*$/,
-    ~r/^with\s+.+\bas\s+\w+\s*:\s*$/,
+    ~r/^(?=.*:\s*$)with\s+.+\bas\s+\w+\s*:\s*$/,
     ~r/^except(\s+[A-Z][\w.]*(\s+as\s+\w+)?)?\s*:\s*$/,
-    ~r/^\}?\s*catch\s*\(.*\)\s*\{?\s*$/,
-    ~r/^return\b(\s*;?\s*$|\s+\S+\s*;?\s*$|.*[(){}\[\];=+*\/<>])/,
+    ~r/^\}?\s*catch\s*\(.*\)\s*+(\{\s*+)?$/,
+    ~r/^return\b(\s*+;?\s*+$|\s+\S+\s*+;?\s*+$|.*[(){}\[\];=+*\/<>])/,
     ~r/^(raise|throw)\s+(new\s+)?[A-Z][\w.]*(Error|Exception)\b|^(raise|throw)\s+(new\s+)?[A-Z][\w.]*\s*[(,]/,
-    ~r/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*!?\((?!s\)|es\))/,
+    ~r/^[A-Za-z_]\w*+(\.[A-Za-z_]\w*+)*+!?\((?!s\)|es\))/,
     ~r/^(print|puts|println|printf|console\.\w+|IO\.(puts|inspect)|fmt\.\w+|System\.out\.\w+)\s*[("']/,
     ~r/^\|>\s*\S/,
     ~r/^\.[A-Za-z_]\w*\(/,
@@ -94,7 +95,7 @@ defmodule OptimalEngine.Signal.ModeDetector do
     ~r/^(FROM|RUN|COPY|ADD|WORKDIR|ENV|EXPOSE|CMD|ENTRYPOINT|ARG|USER|VOLUME|LABEL|HEALTHCHECK)\s+\S/,
     ~r/^<\/?[a-zA-Z][\w-]*(\s+[\w:@-]+(=("[^"]*"|'[^']*'|[^\s>]+))?)*\s*\/?>/,
     ~r/^[a-z-]+\s*:\s*[^;]+;\s*$/,
-    ~r/^[.#]?[a-zA-Z][\w\-.#:>, \[\]="]*\s*\{\s*$/
+    ~r/^[.#]?[a-zA-Z][\w\-.#:>, \[\]="]*+\s*+\{\s*+$/
   ]
 
   # One alternation, so a line costs a single regex pass.
@@ -132,7 +133,7 @@ defmodule OptimalEngine.Signal.ModeDetector do
 
   # Lines that carry block structure only. They count toward code when the
   # text already has code, otherwise they are neutral ("done" as a chat reply).
-  @structure_line ~r/^(end|else|elif|fi|done|esac|then|do|begin|pass|break|continue|try|finally|ensure|rescue)\s*[:;{]?\s*$|^[{}\[\]()<>;,.:\s]+$/
+  @structure_line ~r/^(end|else|elif|fi|done|esac|then|do|begin|pass|break|continue|try|finally|ensure|rescue)\s*+[:;{]?\s*+$|^[{}\[\]()<>;,.:\s]+$/
 
   @heading ~r/^[#]{1,6}\s/
   @subtitle_timing ~r/^\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{3}/
@@ -250,11 +251,13 @@ defmodule OptimalEngine.Signal.ModeDetector do
 
   # JSON with comments (editor and tool settings): drop whole-line `//`
   # comments and `/* */` blocks, never `//` inside a string such as a URL.
+  # A run of blank space is read once (*SKIP), not again from each line start
+  # in it; with no `*/` left, no later `/*` can close (*COMMIT).
   defp strip_json_comments(text) do
     if String.starts_with?(text, ["{", "["]) do
       text
-      |> String.replace(~r{/\*.*?\*/}s, "")
-      |> String.replace(~r{^\s*//[^\n]*$}m, "")
+      |> String.replace(~r{/\*(?:.*?\*/|(*COMMIT)(*FAIL))}s, "")
+      |> String.replace(~r{^\s*+(?://[^\n]*$|(*SKIP)(*FAIL))}m, "")
     else
       text
     end
