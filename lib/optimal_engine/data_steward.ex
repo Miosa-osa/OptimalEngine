@@ -839,20 +839,22 @@ defmodule OptimalEngine.DataSteward do
   defp clear_intent(nil), do: :ok
   defp clear_intent(move), do: File.rm(marker_path(move))
 
-  defp marker_path(%{root: root, old: old, new: new}) do
+  @doc false
+  def marker_path(%{root: root, old: old, new: new}) do
     name = Base.url_encode64(:crypto.hash(:sha256, [old, 0, new]), padding: false)
     Path.join([root, @rename_marker_dir, name <> ".json"])
   end
 
   # The transaction is settled. When it did not commit after the directory moved, the rows
   # are as they were, so the directory goes back to where they say it is.
-  defp settle_move({:error, _} = error, %{old: old, new: new} = move) do
+  @doc false
+  def settle_move({:error, _} = error, %{old: old, new: new} = move) do
     if File.dir?(new) and not File.exists?(old), do: File.rename(new, old)
     clear_intent(move)
     error
   end
 
-  defp settle_move(result, move) do
+  def settle_move(result, move) do
     clear_intent(move)
     result
   end
