@@ -37,7 +37,9 @@ defmodule OptimalEngine.API.BundleUploadCowboyTest do
     %{port: :ranch.get_port(ref), before: uploads()}
   end
 
-  defp uploads, do: Path.wildcard(Path.join(WorkspaceBundle.bundle_dir("default"), "upload-*"))
+  defp uploads,
+    do:
+      Path.wildcard(Path.join(WorkspaceBundle.bundle_dir("default"), ".upload-*"), match_dot: true)
 
   # Starts a raw upload that declares `declared` bytes and sends `sent` of them.
   defp start_upload(port, declared, sent) do
