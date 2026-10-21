@@ -9,10 +9,10 @@
 #              the prefix beside the installed files, then rename them all into place; the
 #              installer itself goes to <prefix>/bin/install-client.sh (from 0.3.3 the copy
 #              in the CLI archive, so an upgrade refreshes it). One install runs at a time
-#              in a prefix (<prefix>/.install.lock). The MCP server and its launcher are
-#              replaced or removed only when they carry this installer's marks, and a
-#              program link only where none exists, a link is dangling, or a link points
-#              into an Optimal prefix.
+#              in a prefix (<prefix>/.install.lock, waited for, taken over once stale).
+#              The MCP server and its launcher are replaced or removed only when they
+#              carry this installer's marks, and a program link only where none exists,
+#              a link is dangling, or a link points into an Optimal prefix.
 #   configure  write the client profile from OPTIMAL_ENGINE_URL, OPTIMAL_ENGINE_API_KEY_FILE
 #              (or OPTIMAL_ENGINE_API_KEY) and OPTIMAL_WORKSPACE; nothing when the URL is unset
 #   register   register the MCP server with Claude Code and Codex when they are installed
@@ -45,6 +45,9 @@
 #                                   this installer put in the prefix is removed
 #   OPTIMAL_CLIENT_REGISTER_MCP=0   do not register the MCP server with any harness
 #   OPTIMAL_CLIENT_VERIFY_QUERY     the search verify runs (default "optimal")
+#   OPTIMAL_CLIENT_LOCK_WAIT        seconds install waits for another install's lock
+#                                   (default 60), then exits 75
+#   OPTIMAL_CLIENT_BREAK_LOCK=1     take the lock over whoever holds it
 #   OPTIMAL_MCP_NODE         read by the installed launcher: the node that runs the MCP
 #                            server (default: the node found at install, else node on PATH)
 #
@@ -61,7 +64,8 @@
 # Node.js 20+); 70 nothing installed, <prefix>/VERSION unreadable, or the installed client
 # or MCP server failed its check; 73 the prefix, a program link or a harness registration
 # could not be written, or a path is not this installer's to replace (the earlier install
-# and harness settings stay as they were); 75 another install holds the prefix's lock.
+# and harness settings stay as they were); 75 another install kept the prefix's lock
+# past OPTIMAL_CLIENT_LOCK_WAIT.
 # The Engine checks in verify exit with the CLI's code: 77 key refused, 69 Engine
 # unreachable, 64 workspace required, 78 bad configuration, 1 other.
 set -eu
@@ -189,6 +193,7 @@ MCP_MARK='optimal-engine-mcp, installed by install-client.sh'
 # done, an exit removes the copies and puts back an MCP server it had moved aside.
 NEW=.new.$$
 LOCK=$PREFIX/.install.lock
+LOCK_OWNER=
 LOCKED=
 STAGING=
 CODEX_TMP=
@@ -219,7 +224,7 @@ cleanup() {
     fi
     unstage
   fi
-  [ -z "$LOCKED" ] || rm -rf "$LOCK" || :
+  unlock || :
   [ -z "$CODEX_TMP" ] || rm -f "$CODEX_TMP" || :
   remove "$WORK" || :
 }
@@ -449,33 +454,125 @@ pid_dead() {
   fi
 }
 
-# lock: one install at a time in a prefix. The lock names its holder (pid and host); a
-# holder on this machine that is provably gone is taken over, anything else waits.
-lock() {
-  mkdir -p "$PREFIX" || cant_write "$PREFIX"
-  _host=$(hostname 2>/dev/null || uname -n)
-  _lpid='' _lhost=''
-  for _try in 1 2; do
-    if mkdir "$LOCK" 2>/dev/null; then
-      LOCKED=1
-      printf '%s %s\n' $$ "$_host" >"$LOCK/owner" || :
-      return 0
-    fi
-    [ -d "$LOCK" ] || cant_write "$LOCK"
-    read -r _lpid _lhost 2>/dev/null <"$LOCK/owner" || :
-    if [ "$_try" = 1 ] && [ -n "$_lpid" ] && [ "$_lhost" = "$_host" ] && pid_dead "$_lpid"; then
-      warn "taking over $LOCK from install $_lpid, which is no longer running"
-      rm -rf "$LOCK" || cant_write "$LOCK"
-    else
-      break
-    fi
-  done
-  die $EX_TEMPFAIL "another install holds $LOCK (pid ${_lpid:-unknown} on ${_lhost:-an unknown host}); run install again when it ends, or remove $LOCK if it is gone"
+# The lock is a symbolic link, <prefix>/.install.lock, whose target is its holder:
+# "pid=<pid> host=<host> boot=<boot id> ns=<pid namespace> at=<epoch seconds>". ln -s
+# creates it with its owner in one step, or fails because another install holds it, and
+# readlink reads the owner in one step; no install ever sees a lock without its owner.
+LOCK_MAX_AGE=900
+
+# lock_field OWNER NAME: the value of NAME= in an owner string, or nothing.
+lock_field() {
+  printf ' %s\n' "$1" | sed -n "s/.* $2=\([^ ]*\).*/\1/p"
 }
 
+boot_id() {
+  if [ -r /proc/sys/kernel/random/boot_id ]; then
+    cat /proc/sys/kernel/random/boot_id
+  else
+    sysctl -n kern.bootsessionuuid 2>/dev/null || echo unknown
+  fi
+}
+
+# lock_stale OWNER: true when a lock held by OWNER may be taken over, with the reason in
+# STALE_WHY: it is older than 15 minutes, whoever holds it; or its holder ran on this
+# host before the last boot; or its holder is on this host, boot and pid namespace and
+# provably not running. Anything else (another host, another namespace, an owner that
+# cannot be read, a pid that is not a number) counts as alive.
+lock_stale() {
+  _at=$(lock_field "$1" at)
+  case $_at in
+    '' | *[!0-9]*) _old=$(find "$LOCK" -prune -mmin +$((LOCK_MAX_AGE / 60)) 2>/dev/null) ;;
+    *) _old=$([ $(($(date +%s) - _at)) -le "$LOCK_MAX_AGE" ] || echo old) ;;
+  esac
+  if [ -n "$_old" ]; then
+    STALE_WHY="it is older than $((LOCK_MAX_AGE / 60)) minutes"
+    return 0
+  fi
+  [ "$(lock_field "$1" host)" = "$HOST" ] || return 1
+  _boot=$(lock_field "$1" boot)
+  if [ -n "$_boot" ] && [ "$_boot" != unknown ] && [ "$BOOT" != unknown ] && [ "$_boot" != "$BOOT" ]; then
+    STALE_WHY="its install ran before this machine last started"
+    return 0
+  fi
+  [ "$(lock_field "$1" ns)" = "$PIDNS" ] || return 1
+  _pid=$(lock_field "$1" pid)
+  case $_pid in '' | *[!0-9]*) return 1 ;; esac
+  pid_dead "$_pid" || return 1
+  STALE_WHY="install $_pid is no longer running"
+}
+
+# take_over HELD: moves the lock aside in one step and removes it, but only when what was
+# moved is still the lock judged stale (HELD is its owner). A fresh lock another install
+# took meanwhile is put back, and nothing is taken.
+take_over() {
+  _aside=$LOCK.stale.$$
+  mv "$LOCK" "$_aside" 2>/dev/null || return 1
+  _moved=$(readlink "$_aside" 2>/dev/null) || _moved=
+  if [ "$_moved" != "$1" ]; then
+    [ -z "$_moved" ] || ln -sn "$_moved" "$LOCK" 2>/dev/null || :
+    rm -f "$_aside" || :
+    return 1
+  fi
+  rm -rf "$_aside" || :
+}
+
+# lock: one install at a time in a prefix. A held lock is waited for, up to
+# OPTIMAL_CLIENT_LOCK_WAIT seconds (default 60), then install exits 75. A stale one
+# (lock_stale) is taken over with a warning; OPTIMAL_CLIENT_BREAK_LOCK=1 takes over any.
+lock() {
+  mkdir -p "$PREFIX" || cant_write "$PREFIX"
+  HOST=$(hostname 2>/dev/null || uname -n)
+  BOOT=$(boot_id)
+  PIDNS=$(readlink "/proc/$$/ns/pid" 2>/dev/null) || PIDNS=unknown
+  LOCK_OWNER="pid=$$ host=$HOST boot=$BOOT ns=$PIDNS at=$(date +%s)"
+  _wait=${OPTIMAL_CLIENT_LOCK_WAIT:-60}
+  case $_wait in '' | *[!0-9]*) die $EX_USAGE "OPTIMAL_CLIENT_LOCK_WAIT must be a whole number of seconds" ;; esac
+  _break=${OPTIMAL_CLIENT_BREAK_LOCK:-0}
+  _waited=0 _takeovers=0
+  while :; do
+    # ln -s into an existing directory would create a link inside it.
+    if { [ ! -d "$LOCK" ] || [ -L "$LOCK" ]; } && ln -sn "$LOCK_OWNER" "$LOCK" 2>/dev/null; then
+      LOCKED=1
+      return 0
+    fi
+    [ -e "$LOCK" ] || [ -L "$LOCK" ] || cant_write "$LOCK"
+    _held=$(readlink "$LOCK" 2>/dev/null) || _held=
+    _why=
+    if [ "$_break" = 1 ]; then
+      _why="OPTIMAL_CLIENT_BREAK_LOCK=1"
+    elif lock_stale "$_held"; then
+      _why=$STALE_WHY
+    fi
+    if [ -n "$_why" ] && [ "$_takeovers" -lt 3 ]; then
+      _takeovers=$((_takeovers + 1))
+      if take_over "$_held"; then
+        warn "took over $LOCK (${_held:-no owner recorded}): $_why"
+        _break=0
+      fi
+      continue
+    fi
+    if [ "$_waited" -ge "$_wait" ]; then
+      die $EX_TEMPFAIL "another install holds $LOCK (${_held:-no owner recorded}); run install again when it ends, or set OPTIMAL_CLIENT_BREAK_LOCK=1 if it is gone"
+    fi
+    [ "$_waited" -gt 0 ] || say "waiting up to ${_wait}s for the install holding $LOCK"
+    sleep 1
+    _waited=$((_waited + 1))
+  done
+}
+
+# unlock: removes the lock only while it is this install's own: it is moved aside in one
+# step, and a lock found there that is not this install's is put back.
 unlock() {
-  [ -z "$LOCKED" ] || rm -rf "$LOCK" || :
+  [ -n "$LOCKED" ] || return 0
   LOCKED=
+  [ "$(readlink "$LOCK" 2>/dev/null)" = "$LOCK_OWNER" ] || return 0
+  _aside=$LOCK.release.$$
+  mv "$LOCK" "$_aside" 2>/dev/null || return 0
+  _moved=$(readlink "$_aside" 2>/dev/null) || _moved=
+  if [ "$_moved" != "$LOCK_OWNER" ] && [ -n "$_moved" ]; then
+    ln -sn "$_moved" "$LOCK" 2>/dev/null || :
+  fi
+  rm -f "$_aside" || :
 }
 
 # sweep: a run killed outright (SIGKILL, a power cut) leaves its copies behind, or the MCP
@@ -485,7 +582,7 @@ unlock() {
 sweep() {
   for _left in "$PREFIX"/mcp.old.new.* "$PREFIX"/mcp.new.* "$PREFIX"/VERSION.new.* \
     "$PREFIX"/bin/optimal.new.* "$PREFIX"/bin/oe.new.* "$PREFIX"/bin/optimal-engine-mcp.new.* \
-    "$PREFIX"/bin/install-client.sh.new.*; do
+    "$PREFIX"/bin/install-client.sh.new.* "$LOCK".stale.* "$LOCK".release.*; do
     [ -e "$_left" ] || [ -L "$_left" ] || continue
     _pid=${_left##*.}
     case $_pid in '' | *[!0-9]*) continue ;; esac
@@ -520,7 +617,7 @@ copy_in() {
     cant_write "$OPTIMAL"
   ln -s optimal "$PREFIX/bin/oe$NEW" || cant_write "$PREFIX/bin/oe"
   if [ -n "$MCP_DIR" ]; then
-    cp -R "$MCP_DIR" "$PREFIX/mcp$NEW" &&
+    cp -R "$MCP_DIR" "$PREFIX/mcp$NEW" && chmod u+w "$PREFIX/mcp$NEW" &&
       printf '%s\n%s\n' "$MCP_MARK" "$VERSION" >"$PREFIX/mcp$NEW/$MCP_MARK_FILE" ||
       cant_write "$PREFIX/mcp"
     launcher >"$LAUNCHER$NEW" && chmod 0755 "$LAUNCHER$NEW" || cant_write "$LAUNCHER"
@@ -584,7 +681,14 @@ replaceable_link() {
     /*) ;;
     *) _target=$(dirname "$1")/$_target ;;
   esac
-  [ -e "$_target" ] || return 0
+  if [ ! -e "$_target" ]; then
+    # Dangling only when that is known: the nearest directory above the target that
+    # exists can be searched. Behind one that cannot, the target may well exist.
+    _up=$(dirname "$_target")
+    while [ ! -e "$_up" ] && [ "$_up" != / ] && [ "$_up" != . ]; do _up=$(dirname "$_up"); done
+    [ -d "$_up" ] && [ -x "$_up" ]
+    return
+  fi
   [ -f "$_target" ] || return 1
   case $_target in
     */bin/"$2") _root=${_target%/bin/"$2"} ;;
@@ -699,10 +803,26 @@ root_guard() {
   shift
   for _d in "$@"; do
     [ -n "$_d" ] || continue
+    # /var/ is /var: a trailing slash would make [ -L ] and ls look through a symlink.
+    while [ "${_d%/}" != "$_d" ] && [ "$_d" != / ]; do _d=${_d%/}; done
     _parent=$(dirname "$_d")
-    _owner=$(ls -ndL "$_parent" 2>/dev/null | awk '{ print $3 }')
-    [ -z "$_owner" ] || [ "$_owner" = 0 ] ||
-      die $EX_CANTCREAT "as root, $_what does not write under $_parent, which uid $_owner owns; run $_what as that user"
+    _pinfo=$(ls -ndL "$_parent" 2>/dev/null) || _pinfo=
+    if [ -n "$_pinfo" ]; then
+      _owner=$(printf '%s\n' "$_pinfo" | awk '{ print $3 }')
+      [ "$_owner" = 0 ] ||
+        die $EX_CANTCREAT "as root, $_what does not write under $_parent, which uid $_owner owns; run $_what as that user"
+      # Others who can write the parent can swap DIR, unless the parent is sticky
+      # (as /tmp is) and DIR already exists.
+      case ${_pinfo%% *} in
+        ?????w* | ????????w*)
+          case ${_pinfo%% *} in
+            ?????????[tT]*) [ -e "$_d" ] || [ -L "$_d" ] ||
+              die $EX_CANTCREAT "as root, $_what does not create $_d under $_parent, which others can write" ;;
+            *) die $EX_CANTCREAT "as root, $_what does not write under $_parent, which group or others can write" ;;
+          esac
+          ;;
+      esac
+    fi
     [ -e "$_d" ] || [ -L "$_d" ] || continue
     [ ! -L "$_d" ] ||
       die $EX_CANTCREAT "as root, $_what does not write through the symlink $_d; run $_what as the user it belongs to"
