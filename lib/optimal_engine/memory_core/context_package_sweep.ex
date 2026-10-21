@@ -16,8 +16,13 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweep do
   its envelope; one that was already replaced stays replaced; one whose
   envelope cannot be read leaves the stale list as failed.
 
+  The sweep destroys content, so it empties a package only on evidence. A
+  package whose objects could not be looked up is skipped and reported, never
+  taken for an offender, and a package that changed state since it was read
+  (refreshed, invalidated) is skipped too. Run it again to retry the skipped.
+
   Run once after upgrading, with `mix optimal.context.sweep`. It is safe to
-  repeat: a package that passes is left alone.
+  repeat: a package that passes, or was already emptied, is left alone.
   """
 
   alias OptimalEngine.MemoryCore.{RetrievalCoordinator, SecurityLabels, Store}
@@ -42,41 +47,53 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweep do
           objects_outside: non_neg_integer()
         }
 
+  @type skipped :: %{
+          id: String.t(),
+          tenant_id: String.t(),
+          workspace_id: String.t(),
+          reason: String.t()
+        }
+
   @type summary :: %{
           scanned: non_neg_integer(),
           offenders: [offender()],
+          skipped: [skipped()],
           scrubbed: non_neg_integer()
         }
 
   @doc """
   Sweeps the packages of `:tenant_id` and `:workspace_id` (all when omitted).
-  With `dry_run: true` nothing is written.
+  With `dry_run: true` nothing is written. `:object_query` is the function that
+  looks up the returned objects (`fn sql, params -> {:ok, rows} | {:error, _} end`,
+  the Store's `raw_query/2` by default), so a test can make a lookup fail.
   """
   @spec run(keyword()) :: {:ok, summary()} | {:error, term()}
   def run(opts \\ []) do
-    with {:ok, scanned, offenders} <- scan(opts, "", 0, []) do
+    with {:ok, scanned, offenders, skipped} <- scan(opts, "", 0, [], []) do
       if Keyword.get(opts, :dry_run, false) do
-        {:ok, %{scanned: scanned, offenders: public(offenders), scrubbed: 0}}
+        {:ok, %{scanned: scanned, offenders: public(offenders), skipped: skipped, scrubbed: 0}}
       else
-        scrub(scanned, offenders)
+        scrub(scanned, offenders, skipped)
       end
     end
   end
 
-  defp scan(opts, after_id, scanned, offenders) do
+  defp scan(opts, after_id, scanned, offenders, skipped) do
     with {:ok, rows} <- suspects(opts, after_id) do
-      found = rows |> Enum.map(&examine/1) |> Enum.reject(&is_nil/1)
+      verdicts = Enum.map(rows, &examine(&1, opts))
       scanned = scanned + length(rows)
-      offenders = offenders ++ found
+      offenders = offenders ++ for({:offender, offender} <- verdicts, do: offender)
+      skipped = skipped ++ for({:skipped, entry} <- verdicts, do: entry)
 
       case List.last(rows) do
-        nil -> {:ok, scanned, offenders}
-        [last_id | _] when length(rows) == @page -> scan(opts, last_id, scanned, offenders)
-        _ -> {:ok, scanned, offenders}
+        [last_id | _] when length(rows) == @page -> scan(opts, last_id, scanned, offenders, skipped)
+        _ -> {:ok, scanned, offenders, skipped}
       end
     end
   end
 
+  # A package a refresh made and that was not emptied already. `json_valid`
+  # keeps one unreadable metadata value from failing the whole query.
   defp suspects(opts, after_id) do
     {clauses, params} =
       [tenant_id: Keyword.get(opts, :tenant_id), workspace_id: Keyword.get(opts, :workspace_id)]
@@ -91,7 +108,7 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweep do
     FROM context_packages
     WHERE id > ?1
       AND metadata LIKE '%refreshed_from_context_package_id%'
-      AND metadata NOT LIKE '%"scrubbed"%'
+      AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.scrubbed') IS NULL ELSE 1 END
       #{Enum.join(clauses, "\n  ")}
     ORDER BY id
     LIMIT #{@page}
@@ -100,21 +117,42 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweep do
     BaseStore.raw_query(sql, [after_id | params])
   end
 
-  defp examine([id, tenant_id, workspace_id, refresh_state, envelope, links]) do
-    base = %{id: id, tenant_id: tenant_id, workspace_id: workspace_id, refresh_state: refresh_state}
+  # nil (inside its envelope), {:offender, offender} or {:skipped, entry}.
+  defp examine([id, tenant_id, workspace_id, refresh_state, envelope, links], opts) do
+    base = %{id: id, tenant_id: tenant_id, workspace_id: workspace_id}
 
     with {:ok, envelope} <- read_envelope(envelope),
-         {:ok, objects} <- read_links(links) do
-      case outside(objects, envelope) do
-        [] -> nil
-        outside -> Map.merge(base, %{reason: "outside_envelope", objects_outside: length(outside)})
+         {:ok, objects} <- read_links(links),
+         {:ok, outside} <- outside(objects, envelope, lookup(opts)) do
+      if outside == [] do
+        nil
+      else
+        {:offender,
+         Map.merge(base, %{
+           reason: "outside_envelope",
+           objects_outside: length(outside),
+           refresh_state: refresh_state
+         })}
       end
     else
       :unreadable_envelope ->
-        Map.merge(base, %{reason: "authorization_envelope_unreadable", objects_outside: 0})
+        {:offender,
+         Map.merge(base, %{
+           reason: "authorization_envelope_unreadable",
+           objects_outside: 0,
+           refresh_state: refresh_state
+         })}
 
       :unreadable_links ->
-        Map.merge(base, %{reason: "returned_objects_unreadable", objects_outside: 0})
+        {:offender,
+         Map.merge(base, %{
+           reason: "returned_objects_unreadable",
+           objects_outside: 0,
+           refresh_state: refresh_state
+         })}
+
+      {:error, reason} ->
+        {:skipped, Map.put(base, :reason, "lookup_failed: " <> inspect(reason))}
     end
   end
 
@@ -143,26 +181,31 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweep do
     end
   end
 
-  # The returned objects the envelope does not admit (or that cannot be read).
-  defp outside(objects, envelope) do
+  # The returned objects the envelope does not admit (or that cannot be read),
+  # or the error of a lookup that failed: with no answer there is no evidence.
+  defp outside(objects, envelope, lookup) do
     objects
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-    |> Enum.flat_map(fn {table, ids} -> outside_in(table, ids, envelope) end)
+    |> Enum.reduce_while({:ok, []}, fn {table, ids}, {:ok, found} ->
+      case outside_in(table, ids, envelope, lookup) do
+        {:ok, outside} -> {:cont, {:ok, found ++ outside}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
   end
 
-  defp outside_in(table, ids, envelope) do
+  defp lookup(opts), do: Keyword.get(opts, :object_query, &BaseStore.raw_query/2)
+
+  defp outside_in(table, ids, envelope, lookup) do
     marks = Enum.map_join(1..length(ids), ", ", &"?#{&1}")
 
-    case BaseStore.raw_query(
-           "SELECT id, security_labels, partition_ids FROM #{table} WHERE id IN (#{marks})",
-           ids
-         ) do
-      {:ok, rows} ->
-        for [id, labels, partitions] <- rows, not admitted?(envelope, labels, partitions), do: id
-
-      # An object that cannot be looked up cannot be shown to be admitted.
-      _error ->
-        ids
+    with {:ok, rows} <-
+           lookup.(
+             "SELECT id, security_labels, partition_ids FROM #{table} WHERE id IN (#{marks})",
+             ids
+           ) do
+      {:ok,
+       for([id, labels, partitions] <- rows, not admitted?(envelope, labels, partitions), do: id)}
     end
   end
 
@@ -175,21 +218,41 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweep do
     end
   end
 
-  defp scrub(scanned, offenders) do
-    results =
+  defp scrub(scanned, offenders, skipped) do
+    outcomes =
       Enum.map(offenders, fn offender ->
-        Store.scrub_context_package_content(offender.id,
-          tenant_id: offender.tenant_id,
-          workspace_id: offender.workspace_id,
-          reason: "swept:" <> offender.reason,
-          refresh_state: next_state(offender)
-        )
+        result =
+          Store.scrub_context_package_content(offender.id,
+            tenant_id: offender.tenant_id,
+            workspace_id: offender.workspace_id,
+            reason: "swept:" <> offender.reason,
+            refresh_state: next_state(offender),
+            expect_state: offender.refresh_state
+          )
+
+        {offender, result}
       end)
 
-    case Enum.find(results, &match?({:error, _}, &1)) do
-      nil -> {:ok, %{scanned: scanned, offenders: public(offenders), scrubbed: length(results)}}
-      error -> error
-    end
+    scrubbed = for {offender, {:ok, 1}} <- outcomes, do: offender
+
+    not_scrubbed =
+      for {offender, result} <- outcomes, result != {:ok, 1} do
+        reason =
+          case result do
+            {:ok, 0} -> "state_changed"
+            {:error, reason} -> "scrub_failed: " <> inspect(reason)
+          end
+
+        offender |> Map.take([:id, :tenant_id, :workspace_id]) |> Map.put(:reason, reason)
+      end
+
+    {:ok,
+     %{
+       scanned: scanned,
+       offenders: public(scrubbed),
+       skipped: skipped ++ not_scrubbed,
+       scrubbed: length(scrubbed)
+     }}
   end
 
   defp next_state(%{reason: "authorization_envelope_unreadable"}), do: "failed"

@@ -175,9 +175,10 @@ The two refresh routes, `POST /api/memory-core/context-packages/refresh-stale` a
 For a keyed caller `allowed_partitions` and `allowed_security_labels` come from the key's metadata (`"*"` is every label or partition); the same fields in the request body are ignored, and a grant the key does not hold admits only rows with no label and no partition.
 A caller without a key is the trusted local operator and states its grants in the body.
 A caller refreshes only the stale packages it requested (its principal is the package's requesting actor) or whose recorded envelope its grants cover; any other package is not listed and, by id, answers as if it did not exist.
-The package returned to a caller that did not request it leaves out the original query and the invalidation reason.
+A caller that did not ask the query is not handed it, in the plan, the metadata or the assembled sections, nor the invalidation reason, and a package it refreshes keeps that: the package records who asked the query (`metadata.query_owner_actor_id`), so a reader that only covers the original never becomes its owner by refreshing it.
 A stale package whose recorded envelope cannot be read is marked `failed` and leaves the stale list.
 After upgrading from a version that refreshed with the filter off, run `mix optimal.context.sweep` once (`--dry-run` first) to empty the refreshed packages that hold objects their envelope does not admit; the next refresh rebuilds them.
+The sweep empties a package only on evidence: one whose objects could not be looked up, or that changed state while it ran, is skipped and listed, and running it again retries it.
 
 ### Migrating existing API clients
 
