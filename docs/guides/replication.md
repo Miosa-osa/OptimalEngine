@@ -11,11 +11,67 @@ The Engine seals captured changes into the ordered `sync_mutations` ledger with 
 BLOB values (embeddings) travel as hex, so vectors are copied, not recomputed.
 Tables keyed by a single integer row id are derivations whose ids differ per Engine; they replicate inserts only (`GET /api/sync/status` lists them).
 
+## What replicates, and what a peer can write
+
+What replicates is an explicit list of workspace knowledge (`Capture.replicated_tables/0`): contexts, chunks and their embeddings, memories and their associations, claims, facts, decisions, episodes, entities and their aliases, mentions and lineage, citations, classifications, intents, clusters, rhythm notes, open loops, observations, source packages, signal events, edges, nodes and node relationships and types, wiki pages, sessions, workflows and their traces, procedural memory, training examples, derivation records and analysis reports.
+Every other table is local: it is not captured, not served, not pushed, and a change for it that a peer sends is skipped.
+A table nobody has classified is local too, so a new table stays on its Engine until someone adds it to the list, and `test/sync/sync_test.exs` fails until every table with a `workspace_id` is on the list or classified local.
+`GET /api/sync/tables` (scope `sync`) returns `{replicated, local_only, migration}` from the same lists, so a relay reads it from each Engine instead of keeping a list of its own.
+
+A table is on the list only if nothing in it grants a capability, reaches outside the database, or names a row that exists on one Engine only.
+These stay local, and the reason is the whole decision:
+
+| Tables | Why they stay on their Engine |
+| --- | --- |
+| `workspace_members`, `node_members`, `principal_skills` | Membership and roles: a peer must never grant access. The rows also name a principal, which exists only on the Engine that created it, so a copy breaks its foreign key at commit |
+| `mcp_tool_definitions`, `skill_packages`, `skills`, `routing_rules` | Tools and skills an agent runs, and the rules that steer where intake files documents: a peer must never register or steer them |
+| `storage_provider_configs`, `workspace_storage_policies` | How this Engine stores data: a peer must never repoint storage |
+| `model_call_operations`, `model_adapters` | Which models this Engine runs; an adapter's artifact is a file on the Engine that trained it |
+| `data_collections`, `data_changes`, `data_files`, `data_schema_migrations` | A collection's `table_name` is interpolated into the SQL that serves it |
+| `assets` and every `asset_*` table | `storage_path` names a file on the Engine's disk or a bucket, and asset files do not sync |
+| `surfacing_subscriptions` | Decoded into atoms |
+| `model_call_runs`, `tool_call_runs`, `decomposition_runs`, `training_runs`, `evaluation_runs`, `evaluation_cases`, `context_packages`, `active_memory_pools`, `export_records`, `projection_revisions`, `link_health_records` | What this Engine executed or wrote out, and what is derived from it: destinations are paths on it, and both Engines would write the same object to the same destination |
+| `events`, `surfacing_events`, `audit_samples` | Telemetry whose ids differ per Engine |
+| `architectures`, `rhythm_templates`, `topology_change_requests`, `resolution_decisions`, `data_quality_snapshots` | Configuration or review state kept per Engine |
+| `connectors`, `connector_runs` | Credentials sealed with this Engine's `CONNECTOR_KEY`, per-Engine cursors and run logs |
+| `jobs`, `dead_letter_jobs` | Each Engine enqueues and runs its own jobs; a row from another Engine would collide on the idempotency key or run twice |
+| `sync_*` bookkeeping, `workspaces`, `workspace_handles`, `processor_runs`, `metric_samples`, `uri_redirects`, `federation_peers`, every `authority_*` table | This Engine's own state |
+
+A workspace bundle (a move or a copy of a whole workspace) still carries every local table except the Engine state and authority state in the last three rows: it takes the workspace's state.
+Any of these can be reopened later with a reviewed design.
+`memory_reconstruction_runs` looks like a run log and replicates, because association paths and outcomes point at it; a replicated table's foreign keys must point at replicated tables (or `workspaces`, `tenants`, `organizations`), and a test checks that.
+
+A trigger an older version left on a table that does not replicate is dropped when the Engine starts, and what it captured but had not sealed is discarded.
+The ledger rows an older version wrote for such a table are removed at the same time, a batch of 5000 at a time (the log says how many, per table), and are in any case never served or pushed.
+Of the tables that grant access or hold Engine state (`api_keys`, `principals`, `roles`, `tenants`, `schema_migrations`, `workspaces`, `sync_peers` and every `authority_*` table) each ledger row is logged before it is removed, with its mutation id, entity id, device and time, never its payload.
+The purge runs once for each version of the replicated list (the list's version is kept in the database file), so a later boot does not scan the ledger; taking a table off the list drops its unsent ledger rows at the next boot.
+Rows those entries wrote into the tables themselves are not touched: a table that is not on the list can hold a row no one on this Engine wrote (an `api_keys` or `principals` row a peer pushed before this change), and only its operator can tell, so check them.
+
+The sender names the table of each change it applies, so applying is an allow-list.
+A change for a table that is local by name is skipped and counted under `skipped.local_only`; a change for any other table (API keys, principals, roles, tenants, schema migrations, ...) is refused with `table_not_replicated`, recorded as an `apply_failed` conflict, and never written.
+A key holding only the `sync` scope can therefore write replicated workspace knowledge and nothing else.
+That is still all of it: such a key speaks for the workspace's knowledge, its review state and its labels, so issue a sync key only to Engines you control.
+A page that mixes allowed, skipped and refused changes applies the allowed ones and answers `200` with the counts, so the sender's push cursor moves; one disallowed row never refuses the page.
+Every batch that reaches apply answers `200` with counts (`applied`, `skipped`, `failed`, `conflicts`).
+The refusals before it are the 4xx answers: `422 workspace_class_above_gate` (the workspace is classed above the receiving peer's `max_class`), `422` with the reason for a commit that failed for a cause other than a foreign key, `422 mutations_required` when `mutations` is missing or not a list, `409 version_mismatch` and `409 sync_not_enabled`.
+The data-class gate applies to the row a change would replace as well as to the change: a delete carries no labels, so a peer limited to `confidential` that deletes, or overwrites with lower labels, a row labelled `restricted` is skipped under `gated` and the row stays as it is.
+`GET /api/sync/changes` serves a page by the `max_class` of the Engine that pulls, not by the label grants of the key that asks, so a key-level enforcement of labels on the pull route is a later change.
+
+Every applied row is written into the tenant and workspace of the apply, whatever the payload claims.
+A change whose key already exists in another tenant or workspace (a key is often just `id`) is refused with `cross_scope`, so an upsert or a delete cannot reach a row of another workspace.
+A change that lacks its key is refused with `missing_key`, a delete on a table keyed by a row id with `operation_not_supported`, and a payload name (a row column or a blob) that is not a column of the table with `unknown_columns`.
+Columns that name a place on this Engine's disk are confined: `nodes.slug`, `nodes.path`, `node_types.slug` and `wiki_pages.slug` must be relative, without a parent segment or a NUL, or the change is refused with `invalid_path`; `contexts.path` is the absolute path of the file on the Engine that indexed it, so an absolute value is stored as NULL and the rest of the context replicates.
+A change that is malformed (a missing field, an `occurred_at` that is not text, an unknown operation, a payload that is not a row, a value that is not a scalar, a blob that is not hex) fails alone with `invalid_mutation`, `invalid_occurred_at` or `invalid_payload`; the rest of the batch applies.
+Foreign keys are checked at commit so that a child may arrive before its parent in one batch; when that commit fails, the batch runs again with every key checked as its row is written, a row refused for its key is tried once more after the rest of the page (so a child that came before its parent still lands), and the rows that name something this Engine lacks fail alone.
+A `contexts` or `classifications` row whose `mode`, `signal_type` or `format` is not one of the values this Engine writes is refused with `invalid_signal_value`; stored values are read back as atoms from those fixed sets only, so a peer cannot grow the atom table.
+A blob named for a confined column (`nodes.path`, `contexts.path`, ...) is refused with `invalid_path`: it would be written over the checked value.
+
 ## How changes move
 
 | Route | Scope | Purpose |
 | --- | --- | --- |
 | `GET /api/sync/changes?workspace=&since=` | `sync` | Ledger page after a sequence, never the requester's own changes (header `x-optimal-replica`) |
+| `GET /api/sync/tables` | `sync` | The tables this Engine replicates and the ones it keeps local, with its schema migration |
 | `POST /api/sync/changes {workspace, engine, mutations}` | `sync` | Apply a peer's batch |
 | `POST /api/sync/peers {workspace, url, api_key, policy, max_class, since?}` | admin | Register a peer; its key is encrypted with `CONNECTOR_KEY` |
 | `POST /api/sync/run` | admin | Run one pull and push cycle now |
@@ -162,7 +218,7 @@ Its conflict check edits a daily note on both sides; that a contested fact becom
 When both sides changed the same row since the last sync, the newer change wins by its time and the conflict is recorded with both versions.
 For facts, both versions also become claims in the review queue, so a contested fact is decided by a person.
 The claims quote the fact, so they carry the labels of both versions and of the fact as it is stored, and they name the fact (`metadata.fact_id`, on the claims and on the source package that holds the conflict text): they stay home as long as the fact does, including when it is labelled higher later.
-Changes that cannot be applied (an unknown table or column, a constraint failure) are recorded as `apply_failed` conflicts; nothing is dropped silently.
+Changes that cannot be applied (a table that does not replicate, an unknown table or column, a key in another workspace, a constraint failure) are recorded as `apply_failed` conflicts; nothing is dropped silently.
 
 ## Version safety
 

@@ -567,8 +567,7 @@ defmodule OptimalEngine.Memory.Versioned do
   end
 
   defp safe_atom(str, valid) when is_binary(str) do
-    atom = String.to_atom(str)
-    if Atom.to_string(atom) in valid, do: atom, else: :unknown
+    if str in valid, do: String.to_atom(str), else: :unknown
   end
 
   defp safe_atom(_, _), do: :unknown
