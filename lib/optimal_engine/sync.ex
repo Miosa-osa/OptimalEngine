@@ -45,6 +45,7 @@ defmodule OptimalEngine.Sync do
 
   require Logger
 
+  alias OptimalEngine.Compliance.DerivedData
   alias OptimalEngine.Connectors.{Credential, HTTP}
   alias OptimalEngine.LogUrl
   alias OptimalEngine.MemoryCore.SecurityLabels
@@ -1111,6 +1112,9 @@ defmodule OptimalEngine.Sync do
   # A row refused for its foreign key in that run is tried once more after the
   # rest of the page, so a child that came before its parent still lands.
   defp execute(tenant_id, workspace_id, plans, foreign_keys \\ :deferred) do
+    erasing = erased_context_ids(plans)
+    file_plan = plan_erased_files(tenant_id, workspace_id, erasing)
+
     result =
       Store.transaction(fn txn ->
         {:ok, _} = Store.txn_execute(txn, "UPDATE sync_identity SET applying = 1 WHERE id = 1", [])
@@ -1182,7 +1186,7 @@ defmodule OptimalEngine.Sync do
         if outcome.applied > 0 or outcome.conflicts != [], do: GateCache.clear()
         log_held(outcome.held)
         Enum.each(outcome.fact_conflicts, &raise_fact_claims(tenant_id, workspace_id, &1))
-        if outcome.erased?, do: purge_erased(workspace_id)
+        if outcome.erased?, do: purge_erased(workspace_id, file_plan)
 
         {:ok,
          %{
@@ -1255,20 +1259,77 @@ defmodule OptimalEngine.Sync do
   # A delete of a context that a peer made (an erasure, a retention delete, a move)
   # removed its rows here, and the derived rows that went with it arrive as deletes of
   # their own. What this Engine keeps outside the database does not: the embeddings
-  # it cached from that text, and the files of the workspace. They go once the batch
-  # has committed. A failure is logged by the purge and never fails an apply that has
-  # already committed.
+  # it cached from that text, and the files it made from the context's source package (its
+  # decomposition checkpoints and assets, which are not replicated). They go once the batch
+  # has committed. A failure is logged and never fails an apply that has already committed.
   defp note_erased(acc, "contexts", %{"operation" => "delete"}), do: %{acc | erased?: true}
   defp note_erased(acc, _table, _mutation), do: acc
 
-  defp purge_erased(workspace_id) do
-    Cache.purge_workspace(workspace_id, :sync)
+  # The contexts the batch asks to delete.
+  defp erased_context_ids(plans) do
+    for {:apply, %{mutation: %{"operation" => "delete"} = mutation}} <- plans,
+        target_table(mutation["entity_type"]) == "contexts",
+        id = get_in(mutation, ["payload", "row", "id"]) || mutation["entity_id"],
+        is_binary(id),
+        uniq: true,
+        do: id
+  end
+
+  # Read before the batch, because the rows the files are found by go with it. A plan that
+  # cannot be read is logged, and the batch goes on: the files stay, and the log says so.
+  defp plan_erased_files(_tenant_id, _workspace_id, []), do: []
+
+  defp plan_erased_files(tenant_id, workspace_id, context_ids) do
+    case DerivedData.file_plan(tenant_id, workspace_id, context_ids) do
+      {:ok, entries} ->
+        entries
+
+      {:error, reason} ->
+        Logger.error(
+          "[Sync] could not read which files belong to the #{length(context_ids)} context(s) " <>
+            "a peer deleted in #{workspace_id}; they stay: #{inspect(reason)}"
+        )
+
+        []
+    end
+  end
+
+  defp purge_erased(workspace_id, file_plan) do
+    # The embedding entries cannot be told apart per context; the files can, below.
+    Cache.purge_workspace(workspace_id, :sync, artifacts: false)
+    remove_planned_files(workspace_id, file_plan)
     :ok
   rescue
     error ->
       Logger.error(
-        "[Sync] could not purge the cache of #{workspace_id}: #{Exception.message(error)}"
+        "[Sync] could not purge what #{workspace_id} kept of a deleted context: " <>
+          Exception.message(error)
       )
+  end
+
+  # What was planned before the batch is asked again against what is committed now
+  # (`DerivedData.remove_planned_files/1`): a delete that was not applied (held, or kept for a
+  # newer local change), a context created in the same batch on the same package and a
+  # write that came after the plan all keep the files.
+  defp remove_planned_files(_workspace_id, []), do: :ok
+
+  defp remove_planned_files(workspace_id, file_plan) do
+    case DerivedData.remove_planned_files(file_plan) do
+      {:ok, %{kept: kept}} when kept > 0 ->
+        Logger.info(
+          "[Sync] #{kept} source package(s) of #{workspace_id} keep their files: a context " <>
+            "or a claim still refers to them"
+        )
+
+      {:ok, _removed} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "[Sync] could not remove the files of the contexts a peer deleted in #{workspace_id}: " <>
+            inspect(reason)
+        )
+    end
   end
 
   defp apply_step(
