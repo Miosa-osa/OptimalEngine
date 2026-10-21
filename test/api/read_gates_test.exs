@@ -18,6 +18,7 @@ defmodule OptimalEngine.API.ReadGatesTest do
   alias OptimalEngine.Identity.{ACL, Principal}
   alias OptimalEngine.Memory
   alias OptimalEngine.Pipeline.Intake
+  alias OptimalEngine.ReadScope
   alias OptimalEngine.Store
   alias OptimalEngine.TestSupport.KeyGrantsBackfill
   alias OptimalEngine.Workspace
@@ -386,6 +387,58 @@ defmodule OptimalEngine.API.ReadGatesTest do
       assert page["pagination"]["has_more"] == true
     end
 
+    test "a key granted * is paged around the memories its access lists deny", ctx do
+      principal = "user:acl-paged-#{ctx.n}"
+
+      root =
+        mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]}, principal)
+
+      for memory <- [ctx.secret, ctx.confidential, ctx.custom, ctx.team] do
+        :ok =
+          ACL.deny(%{
+            resource_uri: "optimal://memory/#{ctx.ws}/#{memory.id}",
+            principal_id: principal,
+            tenant_id: "default"
+          })
+      end
+
+      page = get_json("/api/memory?" <> ws(ctx) <> "&limit=1", root)
+
+      assert ids(page["memories"]) == [ctx.plain.id]
+      assert page["pagination"]["has_more"] == false
+    end
+
+    test "a scan reads the workspace once for all its batches", ctx do
+      scope = %ReadScope{
+        tenant_id: "default",
+        principal: "user:shared-#{ctx.n}",
+        labels: [],
+        partitions: []
+      }
+
+      {found, builds} =
+        counting_index_builds(ctx.ws, fn ->
+          ReadScope.shared(scope, ctx.ws, fn shared ->
+            read = fn offset, count ->
+              Memory.list(workspace_id: ctx.ws, tenant_id: "default", limit: count, offset: offset)
+            end
+
+            keep = fn raw ->
+              {kept, _withheld} =
+                ReadScope.filter(shared, ctx.ws, "memories", raw, & &1.id, fn _memory -> nil end)
+
+              kept
+            end
+
+            # Five memories, two at a time: three batches.
+            ReadScope.scan(99, read, keep, batch: 2)
+          end)
+        end)
+
+      assert Enum.map(found, & &1.id) == [ctx.plain.id]
+      assert builds == [:index]
+    end
+
     test "memory search does not stop at the restricted memories that rank first", ctx do
       visible =
         remember(
@@ -510,6 +563,50 @@ defmodule OptimalEngine.API.ReadGatesTest do
                Enum.sort([open, mixed])
 
       assert clusters.(nil) == Enum.sort([open, mixed])
+    end
+
+    test "a signal is found by the chunks that name it, whatever their ids", ctx do
+      id = "sig-arbitrary-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO contexts (id, tenant_id, workspace_id, type, title, content, node, entities,
+                                created_at, modified_at)
+          VALUES (?1, 'default', ?2, 'signal', ?1, 'Quarterly planning notes', 'operator', '[]',
+                  '2026-10-20T10:00:00Z', '2026-10-20T10:00:00Z')
+          """,
+          [id, ctx.ws]
+        )
+
+      # The pipeline writes "<id>:doc-0" and the like, never "<id>:doc".
+      chunk_id = chunk(ctx.ws, "#{id}:doc-0", id, "Quarterly planning notes")
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO classifications (tenant_id, chunk_id, mode, genre, signal_type, format,
+                                       structure, sn_ratio, confidence, workspace_id)
+          VALUES ('default', ?1, 'linguistic', 'note', 'inform', 'markdown', 'list', 0.7, 0.9, ?2)
+          """,
+          [chunk_id, ctx.ws]
+        )
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO intents (tenant_id, chunk_id, intent, confidence, workspace_id) VALUES ('default', ?1, 'record_fact', 0.8, ?2)",
+          [chunk_id, ctx.ws]
+        )
+
+      wiki(ctx.ws, "planning-#{ctx.n}", "Planning notes", [chunk_id])
+      cluster("cluster-planning-#{ctx.n}", "Planning", [chunk_id])
+
+      body = get_json("/api/signals/#{id}?" <> ws(ctx), mint(ctx, %{}))
+
+      assert body["classification"]["genre"] == "note"
+      assert body["intent"]["intent"] == "record_fact"
+      assert Enum.map(body["clusters"], & &1["id"]) == ["cluster-planning-#{ctx.n}"]
+      assert Enum.map(body["citations"], & &1["wiki_slug"]) == ["planning-#{ctx.n}"]
     end
 
     test "the theme of a hidden cluster is not in the answer", ctx do
@@ -757,6 +854,41 @@ defmodule OptimalEngine.API.ReadGatesTest do
       )
 
     id
+  end
+
+  # Runs `fun`, returning its result and the index builds the gate made for
+  # `workspace_id` while it ran.
+  defp counting_index_builds(workspace_id, fun) do
+    id = {:index_builds, System.unique_integer([:positive])}
+    parent = self()
+
+    :ok =
+      :telemetry.attach(
+        id,
+        [:optimal_engine, :sync, :gate_build],
+        fn _event, _measurements, %{what: what, workspace_id: scanned}, _config ->
+          if scanned == workspace_id, do: send(parent, {:gate_build, what})
+        end,
+        nil
+      )
+
+    result =
+      try do
+        fun.()
+      after
+        :telemetry.detach(id)
+      end
+
+    {result, drain_index_builds([])}
+  end
+
+  defp drain_index_builds(acc) do
+    receive do
+      {:gate_build, :index} -> drain_index_builds([:index | acc])
+      {:gate_build, _other} -> drain_index_builds(acc)
+    after
+      0 -> acc
+    end
   end
 
   defp entity_edge(ctx, from, entity) do
