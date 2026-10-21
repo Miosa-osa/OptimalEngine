@@ -242,6 +242,20 @@ defmodule OptimalEngine.Store.Postgres.JsonExtractParityTest do
          "signature" => "s",
          "recorded_at" => "2026-10-03T10:00:00Z"
        }},
+      {"authority_evidence",
+       %{
+         "id" => "ev3",
+         "tenant_id" => "default",
+         "tenant_seq" => 3,
+         "kind" => "grant.admitted",
+         "jti" => "grant-3",
+         "detail" => Jason.encode!(%{"request_id" => "req-3"}),
+         "prev_hash" => "b",
+         "hash" => "c",
+         "kid" => "k",
+         "signature" => "s",
+         "recorded_at" => "2026-10-04T10:00:00Z"
+       }},
       {"open_loops",
        %{
          "id" => "l1",
@@ -264,6 +278,40 @@ defmodule OptimalEngine.Store.Postgres.JsonExtractParityTest do
        }}
     ]
   end
+
+  # The evidence a trace links (ActionChain.native_entries/2): each id list is
+  # one JSON array parameter, read through Evidence.stream/3 (a keyset page)
+  # and Evidence.count/3. Every statement runs with no id, one id and many.
+  @linked "CASE WHEN json_valid(detail) THEN json_extract(detail, '$.request_id') END IN (SELECT value FROM json_each(?2)) OR " <>
+            "CASE WHEN json_valid(detail) THEN json_extract(detail, '$.approval') END IN (SELECT value FROM json_each(?2)) OR " <>
+            "jti IN (SELECT value FROM json_each(?2))"
+
+  @native "kind IN ('request.created', 'grant.issued', 'grant.admitted') AND (#{@linked} OR jti IN (SELECT value FROM json_each(?3)))"
+
+  defp native_entries_cases do
+    site = "lib/optimal_engine/authority/action_chain.ex"
+    id_lists = [[], ["req-2"], ["req-2", "req-3", "grant-9", "nope"]]
+
+    for ids <- id_lists, jtis <- [[], ["grant-3"]] do
+      [
+        {site, ~S|"jti IN (SELECT value FROM json_each(?2))"|,
+         "SELECT id, kind, jti FROM authority_evidence WHERE tenant_id = ?1 AND " <>
+           "(kind IN ('grant.issued', 'grant.narrowed') AND (#{@linked})) " <>
+           "AND tenant_seq > ?3 ORDER BY tenant_seq ASC LIMIT 500",
+         ["default", Jason.encode!(ids), 0], :ordered},
+        {site, ~S|OR jti IN (SELECT value FROM json_each(?3)))|,
+         "SELECT id, kind, jti FROM authority_evidence WHERE tenant_id = ?1 AND (#{@native}) " <>
+           "AND tenant_seq > ?4 ORDER BY tenant_seq ASC LIMIT 500",
+         ["default", Jason.encode!(ids), Jason.encode!(jtis), 0], :ordered},
+        {site, ~S|OR jti IN (SELECT value FROM json_each(?3)))|,
+         "SELECT COUNT(*) FROM authority_evidence WHERE tenant_id = ?1 AND (#{@native})",
+         ["default", Jason.encode!(ids), Jason.encode!(jtis)], :ordered}
+      ]
+    end
+    |> List.flatten()
+  end
+
+  defp all_cases, do: cases() ++ native_entries_cases()
 
   # {call site, fragment of its statement, statement, parameters, expectation}
   defp cases do
@@ -427,13 +475,6 @@ defmodule OptimalEngine.Store.Postgres.JsonExtractParityTest do
        WHERE tenant_id = ?1 AND (CASE WHEN json_valid(detail) THEN json_extract(detail, '$.jti') END = ?2 OR CASE WHEN json_valid(detail) THEN json_extract(detail, '$.request_id') END = ?2)
        ORDER BY occurred_at LIMIT 1
        """, ["default", "req-2"], :ordered},
-      {"lib/optimal_engine/authority/action_chain.ex",
-       ~S|(#{detail_field("request_id")} IN (#{marks}) OR #{detail_field("approval")} IN (#{marks}) OR jti IN (#{marks}))|,
-       """
-       SELECT id, kind FROM authority_evidence
-       WHERE tenant_id = ?1 AND (kind <> 'agent_action.step' AND (CASE WHEN json_valid(detail) THEN json_extract(detail, '$.request_id') END IN (?2, ?3) OR CASE WHEN json_valid(detail) THEN json_extract(detail, '$.approval') END IN (?2, ?3) OR jti IN (?2, ?3)))
-       ORDER BY tenant_seq ASC LIMIT 1000
-       """, ["default", "req-2", "grant-1"], :ordered},
       {"lib/optimal_engine/operating/loops.ex",
        "AND json_extract(c.metadata, '$.thread_ref') = l.thread_ref",
        """
@@ -459,7 +500,7 @@ defmodule OptimalEngine.Store.Postgres.JsonExtractParityTest do
   end
 
   test "every call site's statement is still at its call site" do
-    for {site, fragment, _sql, _params, _expect} <- cases() do
+    for {site, fragment, _sql, _params, _expect} <- all_cases() do
       assert String.contains?(squash(File.read!(site)), squash(fragment)),
              "#{site} no longer has: #{fragment}"
     end
@@ -467,7 +508,7 @@ defmodule OptimalEngine.Store.Postgres.JsonExtractParityTest do
 
   test "every call site answers on PostgreSQL as on SQLite, or is refused by name",
        %{db: db, pool: pool} do
-    for {site, _fragment, sql, params, expect} <- cases() do
+    for {site, _fragment, sql, params, expect} <- all_cases() do
       case expect do
         {:refused, name} ->
           assert {:error, {:unsupported, ^name}} = Connection.query(pool, sql, params), site
@@ -485,6 +526,16 @@ defmodule OptimalEngine.Store.Postgres.JsonExtractParityTest do
                  site
       end
     end
+  end
+
+  test "the linked-evidence cases find no entry for no id, and entries for one id and many",
+       %{db: db} do
+    counts =
+      for {_site, _fragment, "SELECT COUNT(*)" <> _ = sql, params, _expect} <-
+            native_entries_cases(),
+          do: sqlite_rows(db, sql, params)
+
+    assert counts == [[[0]], [[1]], [[2]], [[3]], [[3]], [[3]]]
   end
 
   test "the fixtures exercise every answered case", %{db: db} do
