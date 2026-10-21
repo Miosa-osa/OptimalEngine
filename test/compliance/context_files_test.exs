@@ -140,6 +140,31 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
       assert File.exists?(outside)
     end
 
+    test "does not follow a link in a directory above the file", ctx do
+      outside = Path.join(Path.dirname(ctx.root), "cf-linked-#{ctx.n}")
+      kept = file!(outside, "signals/deal.md", "text outside the root")
+      on_exit(fn -> File.rm_rf(outside) end)
+      File.ln_s!(outside, Path.join(ctx.root, "project-linked"))
+      id = context!(ctx, "linked-dir", Path.join(ctx.root, "project-linked/signals/deal.md"))
+
+      assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [id])
+
+      assert File.read!(kept) == "text outside the root"
+    end
+
+    test "rewrites nothing through a link in a directory above the file", ctx do
+      outside = Path.join(Path.dirname(ctx.root), "cf-linked-redact-#{ctx.n}")
+      text = "Write to #{ctx.email} soon."
+      kept = file!(outside, "signals/deal.md", text)
+      on_exit(fn -> File.rm_rf(outside) end)
+      File.ln_s!(outside, Path.join(ctx.root, "project-linked"))
+
+      assert {:ok, %{files: 0}} =
+               ContextFiles.redact([Path.join(ctx.root, "project-linked/signals/deal.md")])
+
+      assert File.read!(kept) == text
+    end
+
     test "a file that cannot be removed leaves the rows", ctx do
       file = signal!(ctx, "project-platform-launch", "stuck.md")
       id = context!(ctx, "stuck", file)
