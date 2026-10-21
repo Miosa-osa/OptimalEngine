@@ -417,7 +417,27 @@ class JsonTests(CliTestCase):
             'protocol': {'content': 'a\x1b[2Jb\x07c\u009b31md\u2028e\u2029f\x7fg\u0085h\tkept\nline café'},
         })
         content = self.ok('boot', '--field', 'protocol.content').stdout
-        self.assertEqual(content, 'a[2Jbc31mdefgh\tkept\nline café\n')
+        self.assertEqual(content, 'a?[2Jb?c?31md?e?f?g?h\tkept\nline café\n')
+
+    def run_cli_bytes(self, *args):
+        return subprocess.run([SHELL, str(CLI), *args], env=self.env, capture_output=True, timeout=30)
+
+    def test_no_control_is_reassembled_from_invalid_utf8(self):
+        # Raw bytes: deleting the inner C2 9B or E2 80 A8 would leave a C1 CSI or a U+2028.
+        reassembling = b'a\xc2\xc2\x9b\x9bb \xe2\xe2\x80\xa8\x80\xa8c'
+        self.fake.routes[('GET', '/api/boot')] = (
+            200, b'{"protocol": {"content": "' + reassembling + b'"}}')
+        out = self.run_cli_bytes('boot', '--field', 'protocol.content')
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn(b'\xc2\x9b', out.stdout)
+        self.assertNotIn(b'\xe2\x80\xa8', out.stdout)
+        self.fake.routes[('GET', '/api/boot')] = (
+            426, b'{"error": "client_incompatible' + reassembling + b'", "engine": "9.0.0"}')
+        out = self.run_cli_bytes('boot')
+        self.assertEqual(out.returncode, 78, out.stderr)
+        self.assertNotIn(b'\xc2\x9b', out.stderr)
+        self.assertNotIn(b'\xe2\x80\xa8', out.stderr)
+        self.assertIn(b'client_incompatible', out.stderr)
 
 
 class ConfigTests(CliTestCase):

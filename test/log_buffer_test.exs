@@ -104,6 +104,13 @@ defmodule OptimalEngine.LogBufferTest do
       refute line =~ "hunter2"
     end
 
+    test "URL userinfo of any length" do
+      long = "Zq" <> String.duplicate("p", 600)
+      line = stored("fetching https://user:#{long}@objects.example.com/bucket done")
+      assert line =~ "https://[redacted]@objects.example.com/bucket done"
+      refute line =~ "Zq"
+    end
+
     test "URL userinfo without a password, and a password holding an @" do
       line =
         stored("https://tok3n-only@a.example/x and https://user:p@ss-w0rd@b.example/y?q=1")
@@ -258,6 +265,17 @@ defmodule OptimalEngine.LogBufferTest do
   end
 
   describe "the second redaction pass" do
+    test "authorization with a scheme word no list names" do
+      line =
+        stored(
+          "Authorization: Custom #{zq(1)} authorization: Bot #{zq(2)} " <>
+            "authorization=Hawk #{zq(3)} then"
+        )
+
+      refute line =~ "Zq", line
+      assert line =~ "then"
+    end
+
     test "authorization values in every form, scheme words included" do
       line =
         stored(
