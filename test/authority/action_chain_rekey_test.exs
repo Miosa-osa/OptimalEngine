@@ -329,16 +329,14 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       assert {:ok, _} = Evidence.verify(tenant)
     end
 
-    test "an orphan repair that moves no rows records nothing",
+    test "an orphan repair that moves no rows is refused and records nothing",
          %{tenant: tenant, workspace: registered, n: n} do
-      assert {:ok, result} =
+      assert {:error, :nothing_to_repair} =
                DataSteward.repair_orphan_scope("#{tenant}:empty-#{n}", registered,
                  tenant_id: tenant,
                  actor_id: "user:steward"
                )
 
-      assert result.updated_records == 0
-      refute result.rekey_recorded
       assert rekeys(tenant) == []
     end
   end
@@ -745,7 +743,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
         )
 
       assert {:error, :target_workspace_has_rows} =
-               DataSteward.rename_workspace(old, target, actor_id: "user:steward")
+               DataSteward.rename_workspace(old, target,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert {:ok, %{id: ^old}} = Workspace.get(old)
       assert {:error, :not_found} = Workspace.get(target)
@@ -761,7 +762,10 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       assert updated >= 1
 
       assert {:ok, %{rekey_recorded: true}} =
-               DataSteward.rename_workspace(old, target, actor_id: "user:steward")
+               DataSteward.rename_workspace(old, target,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
 
       assert {:ok, [[^target]]} =
                Store.raw_query("SELECT workspace_id FROM contexts WHERE id = ?1", ["held-#{n}"])
@@ -1201,6 +1205,7 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
 
       assert {:ok, _} =
                DataSteward.rename_workspace(second.id, "#{tenant}:second-new",
+                 tenant_id: tenant,
                  actor_id: "user:steward"
                )
 
@@ -1208,6 +1213,7 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
 
       assert {:ok, _} =
                DataSteward.rename_workspace(first_target, "#{tenant}:first-newer",
+                 tenant_id: tenant,
                  actor_id: "user:steward"
                )
 

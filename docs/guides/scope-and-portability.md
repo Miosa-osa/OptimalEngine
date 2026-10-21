@@ -81,7 +81,12 @@ The route authorizes `source_workspace_id` and `target_workspace_id` like any wo
 The source of a rename must be a workspace of the tenant.
 The target of a repair must be an active workspace of the tenant, and its source must not be registered: a workspace of another tenant, in any state, or an active workspace of this tenant, is refused (`source_workspace_is_registered`); an archived workspace of this tenant can still be repaired from.
 Every move is bound to the tenant (`AND tenant_id = ?`), so rows another tenant wrote under an id both use stay where they are.
-A table with no tenant column (the entity resolution tables, for example) is moved by a rename, whose source is registered to one tenant, but not by a repair, whose source belongs to nobody: the answer lists it under `unscoped_tables` with the rows it holds, and they are left as they are.
+A table with no tenant column (the entity resolution tables, for example) is moved wholesale by a rename, whose source is registered to one tenant.
+A repair, whose source belongs to nobody, traces each row of such a table to a tenant through a row it points at and moves it when that row is the caller's: aliases, identifiers and lineage through their canonical entity, a mention through its context or source package, a resolution decision through its mention, reconstruction paths and outcomes through their run, a consolidation proposal through the runs behind its paths, and a captured sync change through the `tenant_id` in its row.
+A row that cannot be traced stays under the old id; a table nothing points from (`memory_path_feedback`) is listed in `unscoped_tables` with the rows it holds, once the repair has moved something of the caller's.
+Every check (the target, the source, the id a rename gives up and takes) and the move run in one transaction.
+A rename is refused when another tenant wrote rows under the source id (`workspace_id_shared`), because it could not take them along.
+A repair with nothing of the caller's to move answers `nothing_to_repair`, and says nothing about what other tenants hold under the id.
 
 Signed evidence is not rewritten, because each entry is hashed and signed over the workspace id it names.
 `authority_evidence` is left alone, and the repair is appended to it as a signed `workspace.rekeyed` entry (from, to, who, mode) in the same transaction, which the answer reports as `rekey_recorded: true`.
