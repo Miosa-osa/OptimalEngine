@@ -8,6 +8,7 @@ defmodule OptimalEngine.API.NotionImportAPITest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
   import Plug.Test
   import Plug.Conn
 
@@ -219,7 +220,8 @@ defmodule OptimalEngine.API.NotionImportAPITest do
     assert status["failure"] == %{"code" => "unsafe_path", "detail" => "../evil.md"}
   end
 
-  test "a source URL is checked, downloaded by the job, and never stored in the job row", ctx do
+  test "a presigned source URL is downloaded by the job and its signature is never logged, stored or returned",
+       ctx do
     i = Fixture.ids()
     ref = :"notion_export_#{System.unique_integer([:positive])}"
     {:ok, _} = Plug.Cowboy.http(Server, [body: Fixture.export()], port: 0, ref: ref)
@@ -227,19 +229,71 @@ defmodule OptimalEngine.API.NotionImportAPITest do
     port = :ranch.get_port(ref)
     put_env(:import_url_hosts, ["127.0.0.1"])
 
-    url = "http://127.0.0.1:#{port}/export.zip?token=presigned-secret"
-    conn = post_json(%{workspace: ctx.workspace, source_url: url}, ctx.writer)
-    assert conn.status == 202
-    %{"job_id" => job_id} = body(conn)
+    signature = "sig#{System.unique_integer([:positive])}deadbeef"
+    query = "X-Amz-Credential=key%2F20261020&X-Amz-Signature=#{signature}"
+    url = "http://127.0.0.1:#{port}/export.zip?#{query}"
+    missing = "http://127.0.0.1:#{port}/gone.zip?#{query}"
 
-    {:ok, _} = drain(ctx.workspace)
-    status = body(get("/api/import/notion/#{job_id}", %{workspace: ctx.workspace}, ctx.reader))
-    assert status["status"] == "completed"
-    assert status["source"] == %{"kind" => "url", "host" => "127.0.0.1"}
-    assert status["counts"]["contexts"] == 7
+    {{job_id, retry_id}, log} =
+      with_log(fn ->
+        conn =
+          conn(
+            :post,
+            "/api/import/notion",
+            Jason.encode!(%{workspace: ctx.workspace, source_url: url})
+          )
+          |> put_req_header("content-type", "application/json")
+          |> put_req_header("idempotency-key", "notion-#{System.unique_integer([:positive])}")
+          |> put_req_header("authorization", "Bearer " <> ctx.writer)
+          |> Router.call(Router.init([]))
 
+        assert conn.status == 202
+        %{"job_id" => job_id} = body(conn)
+        {:ok, _} = drain(ctx.workspace)
+
+        # A URL that answers 404 is a failed attempt that will be retried.
+        %{"job_id" => retry_id} =
+          body(post_json(%{workspace: ctx.workspace, source_url: missing}, ctx.writer))
+
+        {:ok, _} = drain(ctx.workspace)
+        {job_id, retry_id}
+      end)
+
+    status = get("/api/import/notion/#{job_id}", %{workspace: ctx.workspace}, ctx.reader)
+    assert body(status)["status"] == "completed"
+
+    assert body(status)["source"] == %{
+             "kind" => "url",
+             "url" => "http://127.0.0.1:#{port}/export.zip"
+           }
+
+    assert body(status)["counts"]["contexts"] == 7
+
+    retry = get("/api/import/notion/#{retry_id}", %{workspace: ctx.workspace}, ctx.reader)
+    assert body(retry)["status"] == "retrying"
+    assert body(retry)["last_error"] == "download_failed: http 404"
+
+    {:ok, job} = OptimalEngine.Jobs.get(job_id, ctx.workspace)
+    {:ok, retry_job} = OptimalEngine.Jobs.get(retry_id, ctx.workspace)
     jobs = get("/api/jobs", %{workspace: ctx.workspace}, ctx.reader).resp_body
-    refute jobs =~ "presigned-secret"
+    report = File.read!(Path.join([Imports.dir(), job.payload["import_id"], "report.json"]))
+
+    for {where, text} <- [
+          log: log,
+          job_row: inspect(job),
+          retry_row: inspect(retry_job),
+          job_list: jobs,
+          status: status.resp_body,
+          retry_status: retry.resp_body,
+          report: report
+        ] do
+      refute text =~ signature, "the signature appears in #{where}"
+      refute text =~ "X-Amz-Credential", "the query string appears in #{where}"
+    end
+
+    # The URL file goes once the zip is down; the retrying job still has its own.
+    refute File.exists?(Path.join([Imports.dir(), job.payload["import_id"], "source.url"]))
+    assert File.exists?(Path.join([Imports.dir(), retry_job.payload["import_id"], "source.url"]))
 
     read =
       get(
@@ -249,17 +303,6 @@ defmodule OptimalEngine.API.NotionImportAPITest do
       )
 
     assert read.status == 200
-
-    # A URL that answers 404 is a failed attempt that will be retried.
-    missing = "http://127.0.0.1:#{port}/gone.zip"
-
-    %{"job_id" => retry_id} =
-      body(post_json(%{workspace: ctx.workspace, source_url: missing}, ctx.writer))
-
-    {:ok, _} = drain(ctx.workspace)
-    retry = body(get("/api/import/notion/#{retry_id}", %{workspace: ctx.workspace}, ctx.reader))
-    assert retry["status"] == "retrying"
-    assert retry["last_error"] == "download_failed: http 404"
   end
 
   test "source URLs that are not public https are refused before a job exists", ctx do
@@ -268,11 +311,24 @@ defmodule OptimalEngine.API.NotionImportAPITest do
           {"https://10.1.2.3/export.zip", "source_url_refused"},
           {"http://example.com/export.zip", "invalid_source_url"},
           {"ftp://example.com/export.zip", "invalid_source_url"},
+          {"https://169.254.169.254/latest/meta-data", "source_url_refused"},
+          {"https://user:secret@example.com/export.zip", "invalid_source_url"},
           {"/local/export.zip", "invalid_source_url"}
         ] do
       conn = post_json(%{workspace: ctx.workspace, source_url: url}, ctx.writer)
       assert {conn.status, body(conn)} == {400, %{"error" => code}}, url
     end
+
+    # With allowed hosts configured, no other host is fetched.
+    put_env(:import_url_hosts, ["storage.internal"])
+
+    conn =
+      post_json(
+        %{workspace: ctx.workspace, source_url: "https://93.184.216.34/export.zip"},
+        ctx.writer
+      )
+
+    assert {conn.status, body(conn)} == {400, %{"error" => "source_url_refused"}}
 
     assert body(post_json(%{workspace: ctx.workspace}, ctx.writer)) == %{
              "error" => "source_required"
