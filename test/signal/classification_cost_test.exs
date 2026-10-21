@@ -1,9 +1,10 @@
 defmodule OptimalEngine.Signal.ClassificationCostTest do
   @moduledoc """
-  Classifying caller text costs time in proportion to its length, whatever its
-  shape. `POST /api/ingest` classifies the text it is given, so a pattern that
-  backtracks quadratically on one crafted line would hold a worker for
-  minutes: a 1 MiB line with no spaces took about ten minutes.
+  Classifying caller text costs bounded time, whatever its shape and length.
+  `POST /api/ingest` classifies the text it is given and the pre-send check
+  reads a whole draft, so a pattern that backtracks quadratically on one
+  crafted line would hold a worker for minutes: a 1 MiB line with no spaces
+  took about ten minutes.
 
   Each case runs in a task and must finish within its bound; the old patterns
   took seconds to hours on the same inputs. The module runs alone (not
@@ -13,7 +14,7 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Pipeline.{Classifier, Intake}
-  alias OptimalEngine.Signal.{GenreDetector, ModeDetector}
+  alias OptimalEngine.Signal.{GenreDetector, ModeDetector, PreSend}
 
   @mib 1_048_576
 
@@ -38,13 +39,17 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
       if_paren_with_spaces: "if (a)" <> spaces <> "!",
       end_with_spaces: "end" <> spaces <> "!",
       selector_with_spaces: "a" <> spaces <> "(",
+      css_declaration_with_spaces: "a:" <> spaces <> "x",
       json_comment_openers: "[" <> String.duplicate("/*", div(n, 2))
     ]
   end
 
-  # Multi-line shapes that each made a pattern backtrack quadratically.
+  # Multi-line shapes that each made a pattern backtrack quadratically, or
+  # (HTML attributes) exponentially on every line.
   defp documents(n) do
     blank_lines = String.duplicate(" \n", div(n, 2))
+    html_line = "<a " <> String.duplicate(~s(x="a=b c=d" ), 20) <> "!>\n"
+    css_line = "a:" <> String.duplicate(" ", 60_000) <> "x\n"
 
     [
       unclosed_fences: String.duplicate("```a\n", div(n, 5)),
@@ -52,8 +57,17 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
       standup_spaces: "notes. " <> String.duplicate(" ", n) <> "x",
       blank_lines: "a" <> blank_lines <> "a",
       fence_then_blank_lines: "```a" <> blank_lines <> "a",
-      json_then_blank_lines: "{" <> blank_lines <> "x"
+      json_then_blank_lines: "{" <> blank_lines <> "x",
+      html_attribute_lines: String.duplicate(html_line, div(n, byte_size(html_line))),
+      css_declaration_lines: String.duplicate(css_line, div(n, byte_size(css_line)))
     ]
+  end
+
+  # A JSON object with one to five tags, so its lines do not line up as the
+  # rows of a comma-separated table.
+  defp record(n) do
+    tags = Enum.take(~w(alpha beta gamma delta epsilon), rem(n, 5) + 1)
+    Jason.encode!(%{"id" => n, "note" => "what happened to record #{n}", "tags" => tags})
   end
 
   defp detectors do
@@ -84,16 +98,34 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
     end
   end
 
-  test "mode and genre detection are linear on a long line without the intake cap" do
-    for {shape, text} <- lines(div(@mib, 4)), {name, detect} <- detectors() do
-      within(2_000, "#{name} on 256 KiB of #{shape}", fn -> detect.(text) end)
+  test "mode and genre detection of a 1 MiB crafted text take well under two seconds" do
+    for {shape, text} <- lines(@mib) ++ documents(@mib), {name, detect} <- detectors() do
+      within(2_000, "#{name} on 1 MiB of #{shape}", fn -> detect.(text) end)
     end
   end
 
-  test "mode and genre detection are linear on a long document without the intake cap" do
-    for {shape, text} <- documents(div(@mib, 8)), {name, detect} <- detectors() do
-      within(2_000, "#{name} on 128 KiB of #{shape}", fn -> detect.(text) end)
+  test "a pre-send check of a 1 MiB crafted draft takes well under two seconds" do
+    for {shape, text} <- lines(@mib) ++ documents(@mib) do
+      within(2_000, "PreSend.check on 1 MiB of #{shape}", fn ->
+        PreSend.check(text, %{"channel" => "email"})
+      end)
     end
+  end
+
+  test "a JSON Lines document longer than the head is data" do
+    text = Enum.map_join(1..1_500, "\n", &record/1)
+
+    assert byte_size(text) > 65_536
+    assert ModeDetector.detect(text) == {:data, :strong}
+    assert Intake.classify(text).mode == :data
+  end
+
+  test "a JSON array longer than the head is data" do
+    text = "[\n" <> Enum.map_join(1..1_500, ",\n", &record/1) <> "\n]"
+
+    assert byte_size(text) > 65_536
+    assert ModeDetector.detect(text) == {:data, :strong}
+    assert Intake.classify(text).mode == :data
   end
 
   test "a long text is classified by its head, with entities and content from all of it" do
