@@ -211,13 +211,16 @@ The ones the Engine API can serve call its routes with the configured key; the m
 | `graph hubs\|clusters\|triangles [-w ws] [-n]` | `GET /api/graph/hubs`, `/api/graph/clusters`, `/api/graph/triangles` |
 
 The Engine keeps its log lines in memory (`OptimalEngine.LogBuffer`): the newest 1,000 at `info` and above, one line each with a UTC timestamp and the level, at most 4,096 bytes; a longer line is redacted first and then cut, ending in `...`.
-Control characters other than tab are replaced with `?`: the Engine replaces C0 and C1 controls, DEL, and the Unicode line and paragraph separators when it keeps a line, and the client replaces C0 controls and DEL again when it prints one.
+Control characters other than tab are replaced with `?`: the Engine replaces C0 and C1 controls, DEL, the Unicode line and paragraph separators, and the bidi and invisible format characters when it keeps a line, and the client replaces C0 controls and DEL again when it prints one.
 Before a line is kept, the Engine replaces these with `[redacted]`:
 
+- PEM private key blocks;
 - Engine API keys: any `oe_` token, generated or chosen by the operator, plain or URL-encoded;
-- `Bearer` credentials, `Basic` credentials (only `Basic` followed by a credential, so "basic mode" stays), and the userinfo of a URL, with or without a password, including a password that holds `@`;
-- the value after a credential-like name (`api_key`, `access_token`, `refresh_token`, `token`, `secret`, `password`, `client_secret`, `secret_access_key`, `authorization`, `x-optimal-grant`, `bot_token`), also at the end of a longer name such as `AWS_SECRET_ACCESS_KEY`, `db_password` or `notion_token`, in `name=value`, `name: value`, map, keyword, header-tuple and escaped-JSON forms; a quoted or charlist value is redacted to its closing quote (to the end of the line without one), an unquoted one to the next whitespace, and `authorization` takes an auth scheme word before its credential;
-- provider tokens with a known prefix (`sk-`, `sk-ant-`, `rk_`, `whsec_`, `msk_`, `mki_`, `xox?-`, `gh?_`, `github_pat_`, `ntn_`, `secret_`, `ya29.`), AWS access key ids, and JWTs.
+- `Bearer` credentials, `Basic` credentials (any case, only followed by a credential, so "basic mode" stays), and the userinfo of a URL, with or without a password, including a password that holds `@`;
+- the value after a credential-like name (`api_key`, `access_token`, `refresh_token`, `token`, `secret`, `password`, `passwd`, `passphrase`, `client_secret`, `secret_access_key`, `secret_key`, `private_key`, `signature`, `authorization`, `x-optimal-grant`, `bot_token`), also at the end of a longer name such as `AWS_SECRET_ACCESS_KEY`, `db_password` or `notion_token`, as the last word of a camelCase name such as `apiKey` or `accessToken`, and after an upper-case environment name ending in `_KEY`, in `name=value`, `name: value`, map, keyword, header-tuple, atom-tuple, Erlang binary and escaped-JSON forms;
+- a quoted value (double-quoted with its escapes, a charlist, an Erlang binary, single-quoted or backtick-quoted) is redacted to its closing quote, or to the end of the line without one, and an unquoted one to whitespace, a quote, or the `&` of the next query parameter, an auth scheme word such as `Token`, `ApiKey`, `Digest` or `AWS4-HMAC-SHA256` included;
+- a bare name in prose ("the password: was reset") loses the word after it, so the rule fails closed;
+- provider tokens with a known prefix (`sk-`, `sk-ant-`, `rk_`, `whsec_`, `msk_`, `mki_`, `xox?-`, `xapp-`, `gh?_`, `github_pat_`, `glpat-`, `ntn_`, `secret_`, `npm_`, `hf_`, `ya29.`, `AIza`), AWS access key ids (`AKIA` and `ASIA`), and JWTs.
 
 A secret in any other shape is kept as logged.
 The log covers every tenant on the Engine, so only the Engine operator reads it: an admin key of the default tenant whose workspace scope is `*`.
