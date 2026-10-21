@@ -410,10 +410,11 @@ defmodule OptimalEngine.Sync do
   end
 
   @doc """
-  `purge_unreplicated/0`, once for each version of the replicated list: the
-  list's version is kept in the database file (`PRAGMA user_version`), so a later
-  boot does not scan the whole ledger again, and a change to the list (a table
-  demoted from it drops its unsent ledger rows) runs the purge once more.
+  `purge_unreplicated/0` and `report_colon_ids/0`, once for each version of the
+  replicated list and of the boot checks of the ledger: the version is kept in the
+  database file (`PRAGMA user_version`), so a later boot does not scan the whole
+  ledger again, and a change to the list (a table demoted from it drops its
+  unsent ledger rows) or a new check runs them once more.
   """
   @spec purge_unreplicated_once() :: {:ok, %{String.t() => non_neg_integer()}}
   def purge_unreplicated_once do
@@ -424,15 +425,65 @@ defmodule OptimalEngine.Sync do
         {:ok, %{}}
 
       _ ->
-        with {:ok, purged} <- purge_unreplicated() do
+        with {:ok, purged} <- purge_unreplicated(),
+             {:ok, _reported} <- report_colon_ids() do
           {:ok, _} = Store.raw_query("PRAGMA user_version = #{version}", [])
           {:ok, purged}
         end
     end
   end
 
-  # A positive 31-bit number that changes with the replicated list.
-  defp list_version, do: :erlang.phash2(Capture.replicated_tables(), 2_000_000_000) + 1
+  # Raised when a boot check of the ledger is added, so it runs once on an
+  # Engine that already ran the others. 1: `report_colon_ids/0`.
+  @ledger_checks 1
+
+  # A positive 31-bit number that changes with the replicated list and the checks.
+  defp list_version,
+    do: :erlang.phash2({Capture.replicated_tables(), @ledger_checks}, 2_000_000_000) + 1
+
+  @doc """
+  Logs every ledger row whose mutation id has a colon, the shape of a capture
+  key (`<replica>:<n>`), which no mutation id has: an Engine before the id check
+  stored such a change from a peer as it came. Each row is logged with its
+  sequence, id, scope, device, table, entity id and time, never its payload. It
+  is no change of a row (`change_row?/3`), so it is not served, pushed or
+  counted. Returns how many were found.
+  """
+  @spec report_colon_ids() :: {:ok, non_neg_integer()}
+  def report_colon_ids, do: report_colon_ids(0, 0)
+
+  defp report_colon_ids(after_sequence, found) do
+    {:ok, rows} =
+      Store.raw_query(
+        """
+        SELECT sequence, id, tenant_id, workspace_id, device_id, entity_type, entity_id, occurred_at
+        FROM sync_mutations
+        WHERE sequence > ?1 AND instr(id, ':') > 0
+        ORDER BY sequence LIMIT ?2
+        """,
+        [after_sequence, @purge_batch]
+      )
+
+    Enum.each(rows, fn [sequence, id, tenant, workspace, device, type, entity, at] ->
+      Logger.warning(
+        "[Sync] ledger row #{sequence} has a colon in its mutation id #{id}, so it is not " <>
+          "served or pushed: #{type} #{entity} (tenant #{tenant}, workspace #{workspace}, " <>
+          "device #{device}, at #{at})"
+      )
+    end)
+
+    case rows do
+      [] ->
+        {:ok, found}
+
+      _ ->
+        Process.sleep(@purge_yield_ms)
+        report_colon_ids(rows |> List.last() |> hd(), found + length(rows))
+    end
+  end
+
+  # A mutation id never has a colon (`change_row?/3`).
+  defp colon_id?(id), do: String.contains?(id, ":")
 
   # -- peers -------------------------------------------------------------------
 
@@ -1573,15 +1624,19 @@ defmodule OptimalEngine.Sync do
   (`mut_<device>_<n>`, keyed `<device>:<n>`) or by a sync apply (keyed
   `peer:<id>`). Storage mutation entries share the ledger and are neither, so
   only these rows are served, pushed, counted as pending, or taken for this
-  Engine's own change of a row, whatever entity type an entry names.
+  Engine's own change of a row, whatever entity type an entry names. A row
+  whose id has a colon (the shape of a capture key, which no mutation id has)
+  is none either: an Engine before the id check stored such a change from a
+  peer as it came, and it is reported at boot instead (`report_colon_ids/0`).
   """
   @spec change_row?(term(), term(), term()) :: boolean()
   def change_row?(id, device, key) when is_binary(id) and is_binary(device) and is_binary(key) do
     prefix = device <> ":"
 
-    key == applied_key(id) or
-      (String.starts_with?(key, prefix) and
-         id == "mut_" <> device <> "_" <> String.replace_prefix(key, prefix, ""))
+    not colon_id?(id) and
+      (key == applied_key(id) or
+         (String.starts_with?(key, prefix) and
+            id == "mut_" <> device <> "_" <> String.replace_prefix(key, prefix, "")))
   end
 
   def change_row?(_id, _device, _key), do: false
@@ -1593,9 +1648,9 @@ defmodule OptimalEngine.Sync do
       for column <- ["idempotency_key", "id", "device_id"],
           do: if(table, do: "#{table}.#{column}", else: column)
 
-    "(#{key} = 'peer:' || #{id} OR " <>
+    "(instr(#{id}, ':') = 0 AND (#{key} = 'peer:' || #{id} OR " <>
       "(substr(#{key}, 1, length(#{device}) + 1) = #{device} || ':' AND " <>
-      "#{id} = 'mut_' || #{device} || '_' || substr(#{key}, length(#{device}) + 2)))"
+      "#{id} = 'mut_' || #{device} || '_' || substr(#{key}, length(#{device}) + 2))))"
   end
 
   # Every conflict says why: its kind (`concurrent_edit`, `fact_divergence`,

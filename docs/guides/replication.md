@@ -17,6 +17,7 @@ Capture seals the whole backlog before anything reads the ledger, a batch of 500
 
 The storage mutation route (`POST /api/storage/workspaces/:id/mutations`, scope `write`) appends its entries to the same `sync_mutations` ledger, with a device id, an entity type and an idempotency key the caller chooses.
 Only a row that change capture or a sync apply wrote is a change of a row: capture writes `mut_<replica>_<n>` keyed `<replica>:<n>` under its own replica id, and an apply keys the change it takes `peer:<mutation id>` (the key the sender claims is not stored).
+A row whose mutation id has a colon is none, since no mutation id has one (see Conflicts).
 Only those rows are served (`GET /api/sync/changes`), pushed, counted as pending, or taken for this Engine's own change of a row when a peer's change is judged; a storage entry is none of these, whatever entity type it names, so one written before the checks below is inert.
 So that an entry cannot pass for a change or hold a key a change is sealed under, the route refuses with 422:
 
@@ -322,6 +323,12 @@ The ids this Engine gives its own changes (`mut_<replica id>_<n>`, and idempoten
 A mutation id with a colon (the shape of a capture key) is refused with `invalid_mutation_id`.
 The `payload_hash` and the `idempotency_key` in the ledger are set here, from the payload and the mutation id; what the sender claims for them is not stored, and an `idempotency_key` that is not text is `invalid_mutation`.
 The key of a change applied from a peer is `peer:<mutation id>`, apart from the keys capture gives, so no applied change can hold one.
+An Engine before these checks could store a peer's change under an id or a key of this Engine's own space, and the storage mutation route could store an entry under any key; migration 81 repairs such rows once.
+A row that is no change of a row (see "Storage mutation entries share the ledger") and has an id `mut_<this replica>_<n>` is renamed `peer_mut_<this replica>_<n>`, and one with a key the route now refuses (`<this replica>:`, `mut_<this replica>_`, `peer:`) keeps it under `moved:`; a row that cannot move (the new id or key is held) is removed.
+The rows stay what they were, no change of a row, so they are never served or pushed, and the local changes and applied changes they would have shadowed are recorded; a local change already lost before the upgrade is not recovered.
+Every other row is left as it was: this Engine's own changes, the changes it applied, and a storage entry keyed by its own id (what the route gives an entry written without a key).
+The boot log says how many rows each step re-id'd, re-keyed and deleted, never which.
+A row whose id has a colon is no change of a row either, so it is never served, pushed or counted, and each one is logged once at boot after the upgrade, with its sequence, id, device, table, entity id and time, never its payload.
 The row a change belongs to is named by its payload's key columns, not by the `entity_id` the sender sends: the conflict check and the ledger use the key the payload gives.
 A delete carries only the row's key: it is the same change as another delete and as nothing else, so an older delete does not beat a newer update here.
 A concurrent edit is recorded where it is seen: an initiator pulls before it pushes, so it records the conflict when the other Engine's change arrives, and its push then carries a `base_seq` that covers that change; the other Engine keeps the newer version without a second record, and records a conflict itself only when its own change came after the initiator's last pull.
