@@ -122,6 +122,7 @@ Each step is a row numbered within its correlation id and pointing at the step b
 Recording `approval` or `denial` needs the `authority:enforce` scope; other stages need `write`.
 The trace also follows the Engine's own flow (approval request, approval, grant, admission, release) by request or grant id, reports whether the chain is complete, verifies every step against the evidence, and names gaps such as an action without an approval.
 It returns at most 2,000 of the Engine's own steps, the oldest first, since a grant admitted many times links far more; `truncated` says whether some were left out and `total` counts every step.
+`stages`, `complete` and the stage findings are judged over every linked entry, listed or not; a trace with steps left out is never `verified`, and a finding says how many were verified.
 A chain of another workspace answers 404 before any step is verified.
 
 A step is verified against the workspace id inside its signed evidence entry, not only the workspace column of its row.

@@ -213,6 +213,18 @@ defmodule OptimalEngine.Authority.Evidence do
     tenant_id |> stream(condition, params) |> Enum.to_list()
   end
 
+  @doc "The distinct kinds of the entries `where/3` would return, read by the database."
+  @spec kinds_where(String.t(), String.t(), list()) :: [String.t()]
+  def kinds_where(tenant_id, condition, params) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT DISTINCT kind FROM authority_evidence WHERE tenant_id = ?1 AND (#{condition})",
+        [tenant_id | params]
+      )
+
+    Enum.map(rows, fn [kind] -> kind end)
+  end
+
   @doc "How many entries `where/3` would return for the same condition, counted by the database."
   @spec count(String.t(), String.t(), [term()]) :: non_neg_integer()
   def count(tenant_id, condition, params) do
@@ -498,9 +510,10 @@ defmodule OptimalEngine.Authority.Evidence do
 
   @doc """
   Verifies an exported bundle without the Engine's database: every entry's link,
-  hash and signature, and that the bundle is the whole chain through its head.
+  hash and signature, and that the bundle is the whole chain through its head. Only
+  the bundle's evidence keys (`"optimal_purpose": "evidence"`) count.
 
-  The head must be signed by one of the bundle's keys (`"head_signature"`). A
+  The head must be signed by one of them (`"head_signature"`). A
   bundle that is the whole chain starts at seq 1, holds `"total"` entries, ends at
   the head and says it is `"complete"`; one cut short is caught. A page that is not
   the whole chain (it says it is not complete, or it starts after seq 1) is
@@ -509,8 +522,9 @@ defmodule OptimalEngine.Authority.Evidence do
   """
   @spec verify_export(map()) :: {:ok, map()} | {:error, map()}
   def verify_export(%{"entries" => entries, "keys" => %{"keys" => keys}} = bundle) do
+    # Only evidence keys sign entries and heads; a grant key in the bundle verifies neither.
     public_keys =
-      for %{"kid" => kid} = jwk <- keys,
+      for %{"kid" => kid, "optimal_purpose" => "evidence"} = jwk <- keys,
           {:ok, key} <- [Keys.from_jwk(jwk)],
           into: %{},
           do: {kid, key}
