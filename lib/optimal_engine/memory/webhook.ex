@@ -9,7 +9,8 @@ defmodule OptimalEngine.Memory.Webhook do
   Retry strategy: 3 attempts with exponential backoff — 1s, 4s, 16s.
   Each attempt times out after 10 seconds. Failures are logged at warning level
   but never propagate exceptions — the Surfacer must never crash due to a webhook
-  failure.
+  failure. A log line names only the URL's scheme, host and port (`log_url/1`):
+  Slack and Discord webhook URLs carry their secret in the path.
 
   Usage:
 
@@ -37,8 +38,8 @@ defmodule OptimalEngine.Memory.Webhook do
   Returns `{:ok, status}` on a 2xx response, `{:error, term()}` after all retries
   are exhausted. Always returns — never raises.
   """
-  @spec deliver(map(), map()) :: {:ok, integer()} | {:error, term()}
-  def deliver(payload, opts) when is_map(opts) do
+  @spec deliver(map(), map(), keyword()) :: {:ok, integer()} | {:error, term()}
+  def deliver(payload, opts, delivery \\ []) when is_map(opts) do
     url = Map.get(opts, "webhook_url")
 
     if is_nil(url) or url == "" do
@@ -48,9 +49,28 @@ defmodule OptimalEngine.Memory.Webhook do
       secret = Map.get(opts, "webhook_secret")
       extra_headers = Map.get(opts, "webhook_headers", %{})
       headers = build_headers(body, secret, extra_headers)
-      attempt_with_retries(url, headers, body, @backoffs)
+      attempt_with_retries(url, headers, body, Keyword.get(delivery, :backoffs, @backoffs))
     end
   end
+
+  @doc """
+  The webhook URL as a log line may name it: scheme, host and port only. The
+  path, query and user info can hold the endpoint's secret.
+  """
+  @spec log_url(term()) :: String.t()
+  def log_url(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host, port: port}
+      when is_binary(scheme) and is_binary(host) and host != "" ->
+        port = if port == URI.default_port(scheme), do: "", else: ":#{port}"
+        "#{scheme}://#{host}#{port}/..."
+
+      _other ->
+        "an unparsable URL"
+    end
+  end
+
+  def log_url(_url), do: "an unparsable URL"
 
   @doc """
   Compute an HMAC-SHA256 signature over `body` using `secret`.
@@ -77,7 +97,7 @@ defmodule OptimalEngine.Memory.Webhook do
         {:ok, status}
 
       {:ok, status} ->
-        Logger.warning("[Webhook] Non-2xx response #{status} from #{url}")
+        Logger.warning("[Webhook] Non-2xx response #{status} from #{log_url(url)}")
 
         retry_after_failure(
           url,
@@ -88,7 +108,7 @@ defmodule OptimalEngine.Memory.Webhook do
         )
 
       {:error, reason} ->
-        Logger.warning("[Webhook] Delivery failed for #{url}: #{inspect(reason)}")
+        Logger.warning("[Webhook] Delivery failed for #{log_url(url)}: #{inspect(reason)}")
         retry_after_failure(url, headers, body, remaining_backoffs, {:error, reason})
     end
   end
