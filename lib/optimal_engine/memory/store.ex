@@ -40,6 +40,38 @@ defmodule OptimalEngine.Memory.Store do
   @doc "List all collection names."
   @callback collections() :: {:ok, [collection()]}
 
+  @metadata_keys [:created_at, :updated_at, :access_count, :tags]
+
+  @doc """
+  Decodes one entry of an exported collection.
+
+  `raw` is the JSON object an export wrote, decoded with string keys. The
+  entry shape and its metadata keys are fixed, so they are read by name and no
+  atom is created from the file. `value` keeps the keys it was decoded with
+  (strings): it is user data, not part of the shape.
+
+  Raises when `raw` is not an entry or a timestamp is not ISO 8601.
+  """
+  @spec decode_entry(map()) :: entry()
+  def decode_entry(%{"key" => key, "value" => value, "metadata" => %{} = raw_metadata}) do
+    metadata =
+      @metadata_keys
+      |> Map.new(fn name -> {name, Map.get(raw_metadata, Atom.to_string(name))} end)
+      |> Map.update!(:created_at, &parse_datetime!/1)
+      |> Map.update!(:updated_at, &parse_datetime!/1)
+      |> Map.update!(:access_count, &(&1 || 0))
+      |> Map.update!(:tags, &(&1 || []))
+
+    %{key: key, value: value, metadata: metadata}
+  end
+
+  defp parse_datetime!(dt) when is_binary(dt) do
+    {:ok, parsed, _offset} = DateTime.from_iso8601(dt)
+    parsed
+  end
+
+  defp parse_datetime!(%DateTime{} = dt), do: dt
+
   @doc """
   Returns the configured store backend.
 

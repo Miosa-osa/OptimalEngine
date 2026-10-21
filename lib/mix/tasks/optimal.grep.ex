@@ -150,9 +150,9 @@ defmodule Mix.Tasks.Optimal.Grep do
           limit: limit,
           literal: literal?
         ]
-        |> maybe_put(:intent, intent && String.to_atom(intent))
-        |> maybe_put(:scale, scale && String.to_atom(scale))
-        |> maybe_put(:modality, modality && safe_atom(modality))
+        |> maybe_put(:intent, intent)
+        |> maybe_put(:scale, scale)
+        |> maybe_put(:modality, modality)
         |> maybe_put(:path_prefix, path_prefix)
 
       unless json?, do: print_header(query, workspace_slug, opts)
@@ -343,12 +343,4 @@ defmodule Mix.Tasks.Optimal.Grep do
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, val), do: Keyword.put(opts, key, val)
-
-  defp safe_atom(str) when is_binary(str) do
-    try do
-      String.to_existing_atom(str)
-    rescue
-      ArgumentError -> String.to_atom(str)
-    end
-  end
 end

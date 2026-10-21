@@ -29,16 +29,25 @@ defmodule OptimalEngine.Wiki.Directives do
   - `:openai`  — JSON message array `[%{role, content}]`
   """
 
+  alias OptimalEngine.SafeAtom
+
   @directive_re ~r/\{\{\s*([a-z_]+)\s*:\s*([^}]*?)\s*\}\}/
   @wikilink_re ~r/\[\[([^\]]+)\]\]/
 
   @whitelist ~w(cite include expand search table trace recent)a
+
+  # The verbs the lexer turns into atoms. A page body is user and replicated
+  # data, so any other verb stays text and no atom is created from it.
+  @lexed_verbs [:wikilink | @whitelist]
 
   defmodule Directive do
     @moduledoc false
     @enforce_keys [:verb, :argument]
     defstruct [:verb, :argument, options: %{}, raw: nil, offset: 0, length: 0]
   end
+
+  @typedoc "A whitelisted verb, or the verb text of a directive that is not whitelisted."
+  @type verb :: atom() | String.t()
 
   @type resolver :: (Directive.t(), keyword() -> {:ok, String.t(), map()} | {:error, term()})
 
@@ -58,7 +67,7 @@ defmodule OptimalEngine.Wiki.Directives do
         {verb, options} = parse_argument(arg_str)
 
         %Directive{
-          verb: String.to_atom(verb_str),
+          verb: SafeAtom.cast_or_string(verb_str, @lexed_verbs),
           argument: verb,
           options: options,
           raw: raw,

@@ -30,6 +30,9 @@ defmodule Mix.Tasks.Optimal.Ingest do
 
   use Mix.Task
 
+  # Context types a CLI argument may name, so that no atom is made from the text.
+  @types %{"signal" => :signal, "resource" => :resource, "memory" => :memory, "skill" => :skill}
+
   @impl Mix.Task
   def run(args) do
     Mix.Task.run("app.start")
@@ -91,7 +94,7 @@ defmodule Mix.Tasks.Optimal.Ingest do
   defp maybe_put_type(acc, nil), do: acc
 
   defp maybe_put_type(acc, t) when t in ~w[signal resource memory skill],
-    do: Keyword.put(acc, :type, String.to_atom(t))
+    do: Keyword.put(acc, :type, Map.fetch!(@types, t))
 
   defp maybe_put_type(_, other),
     do: Mix.raise("Unknown type '#{other}'. Use: signal, resource, memory, skill")

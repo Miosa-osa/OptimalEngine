@@ -13,6 +13,9 @@ defmodule OptimalEngine.Architecture.Registry do
 
   alias OptimalEngine.Architecture.Architecture
   alias OptimalEngine.Architecture.Architectures
+  alias OptimalEngine.Architecture.Field
+  alias OptimalEngine.Architecture.ProcessorRegistry
+  alias OptimalEngine.SafeAtom
 
   alias OptimalEngine.Store
 
@@ -124,7 +127,7 @@ defmodule OptimalEngine.Architecture.Registry do
     """
 
     case Store.raw_query(sql, [tenant_id, id_or_name]) do
-      {:ok, [row]} -> {:ok, row_to_architecture(row)}
+      {:ok, [row]} -> {:ok, row_to_architecture(row, vocabulary())}
       {:ok, []} -> {:error, :not_found}
       _ -> {:error, :not_found}
     end
@@ -139,23 +142,54 @@ defmodule OptimalEngine.Architecture.Registry do
     """
 
     case Store.raw_query(sql, [tenant_id]) do
-      {:ok, rows} -> Enum.map(rows, &row_to_architecture/1)
-      _ -> []
+      {:ok, rows} ->
+        vocab = vocabulary()
+        Enum.map(rows, &row_to_architecture(&1, vocab))
+
+      _ ->
+        []
     end
   end
 
-  defp row_to_architecture([id, name, version, description, modality_primary, spec_json]) do
+  # The atoms a stored architecture's text may name: the modalities and
+  # processors the engine implements, and the granularity and retention values
+  # the built-in architectures use.
+  defp vocabulary do
+    built_ins = built_ins()
+
+    %{
+      modalities: Field.modalities(),
+      processors: ProcessorRegistry.ids(),
+      granularity: built_ins |> Enum.flat_map(& &1.granularity) |> Enum.uniq(),
+      retention: built_ins |> Enum.map(& &1.retention) |> Enum.uniq()
+    }
+  end
+
+  # A row is stored data (it can arrive from a peer or a bundle), so none of
+  # its text becomes an atom unless it names something in `vocabulary`:
+  #
+  #   * a modality outside the known ones reads as `:binary`, the opaque
+  #     fallback;
+  #   * a processor outside the registered ones reads as no processor hint;
+  #   * a field name, and a granularity or retention value the built-ins do
+  #     not use, stay text.
+  defp row_to_architecture(
+         [id, name, version, description, modality_primary, spec_json],
+         vocab
+       ) do
     spec = decode_spec(spec_json)
 
     fields =
-      (spec["fields"] || [])
+      spec
+      |> Map.get("fields")
+      |> List.wrap()
       |> Enum.map(fn f ->
-        %OptimalEngine.Architecture.Field{
-          name: String.to_atom(f["name"]),
-          modality: String.to_existing_atom(f["modality"]),
+        %Field{
+          name: to_string(f["name"]),
+          modality: SafeAtom.cast(f["modality"], vocab.modalities, :binary),
           dims: Enum.map(f["dims"] || [], &parse_dim/1),
           required: f["required"] || false,
-          processor: f["processor"] && String.to_existing_atom(f["processor"]),
+          processor: SafeAtom.cast(f["processor"], vocab.processors, nil),
           description: f["description"]
         }
       end)
@@ -165,12 +199,13 @@ defmodule OptimalEngine.Architecture.Registry do
       name: name,
       version: version,
       description: description,
-      modality_primary: String.to_existing_atom(modality_primary),
+      modality_primary: SafeAtom.cast(modality_primary, vocab.modalities, :binary),
       fields: fields,
       granularity:
         (spec["granularity"] || ["document"])
-        |> Enum.map(&String.to_atom/1),
-      retention: String.to_atom(spec["retention"] || "default"),
+        |> List.wrap()
+        |> Enum.map(&SafeAtom.cast_or_string(&1, vocab.granularity)),
+      retention: SafeAtom.cast_or_string(spec["retention"] || "default", vocab.retention),
       metadata: spec["metadata"] || %{}
     }
   end

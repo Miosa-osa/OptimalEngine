@@ -39,7 +39,13 @@ defmodule OptimalEngine.Architecture.Architecture do
 
   alias OptimalEngine.Architecture.Field
 
-  @type granularity :: atom()
+  @typedoc """
+  A granularity or retention value: an atom when it is one the built-in
+  architectures use, text otherwise (a stored architecture may name its own).
+  """
+  @type vocabulary :: atom() | String.t()
+
+  @type granularity :: vocabulary()
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -49,7 +55,7 @@ defmodule OptimalEngine.Architecture.Architecture do
           modality_primary: Field.modality(),
           fields: [Field.t()],
           granularity: [granularity()],
-          retention: atom(),
+          retention: vocabulary(),
           metadata: map()
         }
 
@@ -75,14 +81,14 @@ defmodule OptimalEngine.Architecture.Architecture do
     struct!(__MODULE__, Map.merge(%{id: id, version: version}, attrs))
   end
 
-  @doc "Look up a field by its atom name."
-  @spec field(t(), atom()) :: Field.t() | nil
-  def field(%__MODULE__{fields: fields}, name) when is_atom(name) do
-    Enum.find(fields, fn f -> f.name == name end)
+  @doc "Look up a field by name, given as an atom or as text."
+  @spec field(t(), Field.name()) :: Field.t() | nil
+  def field(%__MODULE__{fields: fields}, name) when is_atom(name) or is_binary(name) do
+    Enum.find(fields, fn f -> to_string(f.name) == to_string(name) end)
   end
 
   @doc "Required field names."
-  @spec required_fields(t()) :: [atom()]
+  @spec required_fields(t()) :: [Field.name()]
   def required_fields(%__MODULE__{fields: fields}) do
     fields |> Enum.filter(& &1.required) |> Enum.map(& &1.name)
   end
@@ -96,12 +102,12 @@ defmodule OptimalEngine.Architecture.Architecture do
       "version" => arch.version,
       "description" => arch.description,
       "modality_primary" => Atom.to_string(arch.modality_primary),
-      "granularity" => Enum.map(arch.granularity, &Atom.to_string/1),
-      "retention" => Atom.to_string(arch.retention),
+      "granularity" => Enum.map(arch.granularity, &to_string/1),
+      "retention" => to_string(arch.retention),
       "fields" =>
         Enum.map(arch.fields, fn f ->
           %{
-            "name" => Atom.to_string(f.name),
+            "name" => to_string(f.name),
             "modality" => Atom.to_string(f.modality),
             "dims" => Enum.map(f.dims, &format_dim/1),
             "required" => f.required,

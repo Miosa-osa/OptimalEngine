@@ -30,7 +30,7 @@ defmodule OptimalEngine.URI do
   require Logger
 
   @type parsed :: %{
-          namespace: atom(),
+          namespace: atom() | String.t(),
           segments: [String.t()],
           raw: String.t()
         }
@@ -139,7 +139,7 @@ defmodule OptimalEngine.URI do
   end
 
   @doc "Returns the namespace atom from a parsed or raw URI."
-  @spec namespace(String.t() | parsed()) :: atom() | nil
+  @spec namespace(String.t() | parsed()) :: atom() | String.t() | nil
   def namespace(%{namespace: ns}), do: ns
 
   def namespace(uri) when is_binary(uri) do
@@ -263,7 +263,9 @@ defmodule OptimalEngine.URI do
   defp namespace_atom("nodes"), do: :nodes
   defp namespace_atom("sessions"), do: :sessions
   defp namespace_atom("inbox"), do: :inbox
-  defp namespace_atom(other), do: String.to_atom(other)
+  # A namespace outside the table above stays text: it comes from a URI a
+  # caller or a stored row supplies, and no atom is created from it.
+  defp namespace_atom(other), do: other
 
   defp namespace_to_path(:resources, segments, root) do
     Path.join([root, "docs"] ++ segments)

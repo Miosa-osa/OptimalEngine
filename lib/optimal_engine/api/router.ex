@@ -39,6 +39,7 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Retrieval.Grep
   alias OptimalEngine.Retrieval.RagStream
   alias OptimalEngine.Retrieval.Receiver
+  alias OptimalEngine.SafeAtom
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Store
   alias OptimalEngine.Telemetry
@@ -3198,6 +3199,10 @@ defmodule OptimalEngine.API.Router do
       not (is_binary(kind) and kind != "") ->
         send_resp(conn, 400, Jason.encode!(%{error: "kind is required"}))
 
+      SafeAtom.fetch(kind, OptimalEngine.Topology.Node.kinds()) == :error ->
+        kinds = Enum.map_join(OptimalEngine.Topology.Node.kinds(), ", ", &Atom.to_string/1)
+        send_resp(conn, 400, Jason.encode!(%{error: "kind must be one of: #{kinds}"}))
+
       true ->
         slug =
           Map.get(body, "slug") ||
@@ -3206,10 +3211,12 @@ defmodule OptimalEngine.API.Router do
             |> String.replace(~r/[^a-z0-9]+/, "-")
             |> String.trim("-")
 
+        {:ok, kind_atom} = SafeAtom.fetch(kind, OptimalEngine.Topology.Node.kinds())
+
         attrs = %{
           slug: slug,
           name: name,
-          kind: String.to_atom(kind),
+          kind: kind_atom,
           workspace_id: Map.get(body, "workspace", "default"),
           description: Map.get(body, "description")
         }

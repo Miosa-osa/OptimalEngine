@@ -239,7 +239,9 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   end
 
   defp ensure_known(kind) do
-    case Registry.fetch(kind) do
+    lookup = if is_binary(kind), do: Registry.fetch_by_name(kind), else: Registry.fetch(kind)
+
+    case lookup do
       {:ok, module} -> {:ok, module}
       {:error, _} -> {:error, {:unknown_connector, kind}}
     end
@@ -397,7 +399,9 @@ defmodule OptimalEngine.Connectors.PullScheduler do
 
   defp normalize_spec(kind) when is_atom(kind), do: %{kind: kind}
   defp normalize_spec(%{kind: kind} = spec) when is_atom(kind), do: spec
-  defp normalize_spec(%{"kind" => kind} = spec), do: Map.put(spec, :kind, String.to_atom(kind))
+  # A kind that is not a registered adapter stays text, and `provision/3`
+  # reports it as an unknown connector. No atom is created from it.
+  defp normalize_spec(%{"kind" => kind} = spec), do: Map.put(spec, :kind, kind_atom(kind))
 
   defp connector_id(kind, tenant_id), do: "pull:#{tenant_id}:#{kind}"
 

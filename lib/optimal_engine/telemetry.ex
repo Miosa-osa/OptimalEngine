@@ -35,19 +35,24 @@ defmodule OptimalEngine.Telemetry do
 
   use GenServer
 
-  @counters ~w(
-    optimal_engine.intake.ingested
-    optimal_engine.intake.rejected
-    optimal_engine.search.query
-    optimal_engine.retrieval.rag
-    optimal_engine.connector.run
-  )a
+  # Event path -> metric name, written out so that no atom is built from text.
+  @counter_events [
+    {[:optimal_engine, :intake, :ingested], :"optimal_engine.intake.ingested"},
+    {[:optimal_engine, :intake, :rejected], :"optimal_engine.intake.rejected"},
+    {[:optimal_engine, :search, :query], :"optimal_engine.search.query"},
+    {[:optimal_engine, :retrieval, :rag], :"optimal_engine.retrieval.rag"},
+    {[:optimal_engine, :connector, :run], :"optimal_engine.connector.run"}
+  ]
 
-  @histograms ~w(
-    optimal_engine.search.latency_ms
-    optimal_engine.retrieval.latency_ms
-    optimal_engine.connector.latency_ms
-  )a
+  @histogram_events [
+    {[:optimal_engine, :search, :latency_ms], :"optimal_engine.search.latency_ms"},
+    {[:optimal_engine, :retrieval, :latency_ms], :"optimal_engine.retrieval.latency_ms"},
+    {[:optimal_engine, :connector, :latency_ms], :"optimal_engine.connector.latency_ms"}
+  ]
+
+  @counters Enum.map(@counter_events, &elem(&1, 1))
+  @histograms Enum.map(@histogram_events, &elem(&1, 1))
+  @metric_by_event Map.new(@counter_events ++ @histogram_events)
 
   @histogram_window 1_000
 
@@ -173,10 +178,7 @@ defmodule OptimalEngine.Telemetry do
   # Forward :telemetry events to the GenServer as messages. We don't
   # call from inside the handler to avoid blocking emitters.
   defp attach_handlers do
-    events =
-      Enum.map(@counters ++ @histograms, fn name ->
-        name |> Atom.to_string() |> String.split(".") |> Enum.map(&String.to_atom/1)
-      end)
+    events = Enum.map(@counter_events ++ @histogram_events, &elem(&1, 0))
 
     case :telemetry.attach_many(
            "optimal-engine-telemetry",
@@ -199,18 +201,13 @@ defmodule OptimalEngine.Telemetry do
   end
 
   @doc false
-  # `String.to_existing_atom/1`: we only attach to declared events, but a
-  # future third-party library emitting under the `[:optimal_engine, …]`
-  # prefix could otherwise create new atoms on every call. Declared
-  # counter/histogram atoms are already loaded at init time.
+  # Only declared events are attached, but the lookup keeps a stray event
+  # from reaching the aggregator.
   def handle_event(event, measurements, _metadata, _config) do
-    metric_str = Enum.map_join(event, ".", &Atom.to_string/1)
-
-    try do
-      metric = String.to_existing_atom(metric_str)
+    with {:ok, metric} <- Map.fetch(@metric_by_event, event) do
       send(__MODULE__, {:telemetry_event, metric, measurements})
-    rescue
-      ArgumentError -> :ok
     end
+
+    :ok
   end
 end

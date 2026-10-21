@@ -29,7 +29,37 @@ defmodule OptimalEngine.Knowledge.SPARQL.Parser do
                PREFIX INSERT DELETE DATA DISTINCT UNION BIND AS HAVING GROUP
                COUNT SUM AVG MIN MAX GRAPH)
 
-  @comparison_ops ~w(= != < > <= >=)
+  @comparison_ops %{
+    "=" => :=,
+    "!=" => :!=,
+    "<" => :<,
+    ">" => :>,
+    "<=" => :<=,
+    ">=" => :>=
+  }
+
+  # Each spelling of a filter function the parser accepts, to the atom the
+  # executor matches on. A query is request input: no atom is made from it.
+  @filter_function_spellings [
+    {~w(CONTAINS contains), :CONTAINS},
+    {~w(REGEX regex), :REGEX},
+    {~w(BOUND bound), :BOUND},
+    {~w(STRSTARTS strstarts), :STRSTARTS},
+    {~w(STRENDS strends), :STRENDS},
+    {~w(LANG lang), :LANG},
+    {~w(LANGMATCHES langmatches), :LANGMATCHES},
+    {~w(isIRI isiri), :ISIRI},
+    {~w(isURI isuri), :ISURI},
+    {~w(isLiteral isliteral), :ISLITERAL},
+    {~w(isBlank isblank), :ISBLANK},
+    {~w(STR str), :STR}
+  ]
+
+  @filter_functions Map.new(
+                      for({spellings, atom} <- @filter_function_spellings, name <- spellings) do
+                        {name, atom}
+                      end
+                    )
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -476,9 +506,9 @@ defmodule OptimalEngine.Knowledge.SPARQL.Parser do
     parse_filter_rest(left, rest)
   end
 
-  defp parse_filter_rest(left, [{:symbol, op} | rest]) when op in @comparison_ops do
+  defp parse_filter_rest(left, [{:symbol, op} | rest]) when is_map_key(@comparison_ops, op) do
     {right, rest} = parse_filter_primary(rest)
-    expr = {String.to_atom(op), left, right}
+    expr = {Map.fetch!(@comparison_ops, op), left, right}
     parse_filter_rest(expr, rest)
   end
 
@@ -507,33 +537,8 @@ defmodule OptimalEngine.Knowledge.SPARQL.Parser do
   end
 
   defp parse_filter_primary([{:name, func_name}, {:symbol, "("} | rest])
-       when func_name in [
-              "CONTAINS",
-              "contains",
-              "REGEX",
-              "regex",
-              "BOUND",
-              "bound",
-              "STRSTARTS",
-              "strstarts",
-              "STRENDS",
-              "strends",
-              "LANG",
-              "lang",
-              "LANGMATCHES",
-              "langmatches",
-              "isIRI",
-              "isiri",
-              "isURI",
-              "isuri",
-              "isLiteral",
-              "isliteral",
-              "isBlank",
-              "isblank",
-              "STR",
-              "str"
-            ] do
-    func = String.upcase(func_name) |> String.to_atom()
+       when is_map_key(@filter_functions, func_name) do
+    func = Map.fetch!(@filter_functions, func_name)
     {args, rest} = parse_function_args(rest, [])
     {{func, args}, rest}
   end

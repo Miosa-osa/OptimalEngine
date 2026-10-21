@@ -58,8 +58,14 @@ defmodule OptimalEngine.Architecture.Field do
 
   @type dim :: non_neg_integer() | :any
 
+  @typedoc """
+  A field's name: an atom for the built-in architectures, text for one read
+  back from a stored architecture, so that no atom is created from stored text.
+  """
+  @type name :: atom() | String.t()
+
   @type t :: %__MODULE__{
-          name: atom(),
+          name: name(),
           modality: modality(),
           dims: [dim()],
           required: boolean(),

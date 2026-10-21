@@ -22,13 +22,14 @@ defmodule OptimalEngine.Insight.MemoryExtractor do
 
   alias OptimalEngine.Embed.Ollama, as: Ollama
   alias OptimalEngine.Routing
+  alias OptimalEngine.SafeAtom
   require Logger
 
   @confidence_threshold 0.7
   @max_memories 20
   @max_prompt_chars 3_000
 
-  @valid_categories ~w(fact preference decision relationship skill context)
+  @valid_categories [:fact, :preference, :decision, :relationship, :skill, :context]
 
   @stopwords ~w(
     The A An And But Or For Nor So Yet Both Either Neither Not Only Such
@@ -257,7 +258,10 @@ defmodule OptimalEngine.Insight.MemoryExtractor do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  defp parse_memories(json_string) do
+  # Public so the model's answer can be parsed without a model; not API.
+  @doc false
+  @spec parse_memories(String.t()) :: [map()]
+  def parse_memories(json_string) do
     # Strip markdown code fences if present
     cleaned =
       json_string
@@ -322,14 +326,10 @@ defmodule OptimalEngine.Insight.MemoryExtractor do
     []
   end
 
+  # The category is model output. It is looked up among the known categories
+  # and never becomes an atom; anything else is `:context`.
   defp category_to_atom(str) when is_binary(str) do
-    normalized = String.downcase(String.trim(str))
-
-    if normalized in @valid_categories do
-      String.to_atom(normalized)
-    else
-      :context
-    end
+    str |> String.trim() |> String.downcase() |> SafeAtom.cast(@valid_categories, :context)
   end
 
   defp extract_sentences(text) do

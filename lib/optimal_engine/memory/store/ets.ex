@@ -196,28 +196,16 @@ defmodule OptimalEngine.Memory.Store.ETS do
         collection = String.trim_trailing(file, ".json")
 
         path = Path.join(dir, file)
-        data = path |> File.read!() |> Jason.decode!(keys: :atoms)
+        data = path |> File.read!() |> Jason.decode!()
 
-        Enum.each(data, fn entry ->
-          metadata =
-            entry.metadata
-            |> Map.update!(:created_at, &parse_datetime!/1)
-            |> Map.update!(:updated_at, &parse_datetime!/1)
-
-          restored = %{key: entry.key, value: entry.value, metadata: metadata}
-          :ets.insert(@table, {{collection, entry.key}, restored})
+        Enum.each(data, fn raw ->
+          restored = OptimalEngine.Memory.Store.decode_entry(raw)
+          :ets.insert(@table, {{collection, restored.key}, restored})
           :ets.insert(@collections_table, {collection, true})
         end)
       end)
     end
   end
-
-  defp parse_datetime!(dt) when is_binary(dt) do
-    {:ok, parsed, _} = DateTime.from_iso8601(dt)
-    parsed
-  end
-
-  defp parse_datetime!(%DateTime{} = dt), do: dt
 
   defp to_searchable(val) when is_binary(val), do: val
   defp to_searchable(val) when is_atom(val), do: Atom.to_string(val)

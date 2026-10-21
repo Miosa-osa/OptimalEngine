@@ -11,6 +11,7 @@ defmodule OptimalEngine.Evaluation do
 
   alias OptimalEngine.MemoryCore.{ID, JSON}
   alias OptimalEngine.MemoryCore
+  alias OptimalEngine.SafeAtom
   alias OptimalEngine.Store
 
   @type run :: map()
@@ -774,15 +775,19 @@ defmodule OptimalEngine.Evaluation do
   defp opts_to_keyword(nil), do: []
   defp opts_to_keyword(value) when is_list(value), do: value
 
+  # A case or a dataset file supplies string keys. A key that names no existing
+  # atom cannot be read by any option consumer, so it is dropped instead of
+  # creating an atom for it.
   defp opts_to_keyword(value) when is_map(value) do
-    Enum.map(value, fn {key, option_value} -> {option_key(key), option_value} end)
+    Enum.flat_map(value, fn {key, option_value} ->
+      case SafeAtom.existing(key) do
+        {:ok, atom} -> [{atom, option_value}]
+        :error -> []
+      end
+    end)
   end
 
   defp opts_to_keyword(_), do: []
-
-  defp option_key(key) when is_atom(key), do: key
-  defp option_key(key) when is_binary(key), do: String.to_atom(key)
-  defp option_key(key), do: key
 
   defp map_get(map, key) when is_map(map) do
     Map.get(map, key) || Map.get(map, to_string(key))
