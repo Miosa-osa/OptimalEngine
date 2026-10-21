@@ -346,21 +346,41 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
   end
 
   describe "file_plan/3 and remove_planned_files/1" do
-    test "remove the files of the package and clear the pointer of the checkpoint", ctx do
+    test "remove the files of the package and the rows this Engine made from it", ctx do
       {seeded, entry} = planned!(ctx, "plan-gone")
 
       assert entry.package == seeded.package
       assert entry.contexts == [seeded.context]
 
-      assert {:ok, %{entries: 1, kept: 0, files: 2}} = DerivedData.remove_planned_files([entry])
+      assert {:ok, %{entries: 1, kept: 0, files: 2, rows: rows}} =
+               DerivedData.remove_planned_files([entry])
+
+      assert rows >= 4
 
       refute File.exists?(seeded.asset_file)
       refute File.exists?(seeded.checkpoint_file)
 
-      assert {:ok, [[nil]]} =
-               Store.raw_query("SELECT checkpoint_uri FROM decomposition_runs WHERE id = ?1", [
-                 seeded.run
-               ])
+      for {table, id} <- [
+            {"decomposition_runs", seeded.run},
+            {"assets", seeded.asset},
+            {"asset_extractions", seeded.extraction},
+            {"asset_transcripts", seeded.transcript},
+            {"asset_ocr_spans", seeded.span}
+          ] do
+        assert count(table, "id", id) == 0, "#{table} still holds the package's row"
+      end
+    end
+
+    test "keep the files and rows of a package that is still here", ctx do
+      {seeded, entry} = planned!(ctx, "plan-present", package: :stays)
+
+      assert {:ok, %{entries: 0, kept: 1, files: 0, rows: 0}} =
+               DerivedData.remove_planned_files([entry])
+
+      assert File.exists?(seeded.asset_file)
+      assert File.exists?(seeded.checkpoint_file)
+      assert count("assets", "id", seeded.asset) == 1
+      assert count("decomposition_runs", "id", seeded.run) == 1
     end
 
     test "keep the files of a package a context created after the plan refers to", ctx do
@@ -379,7 +399,9 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
     end
 
     test "keep the files of a package a claim refers to", ctx do
-      {seeded, entry} = planned!(ctx, "plan-claim")
+      # A claim cannot outlive its package (it is deleted with it), so it names a package
+      # that is still here.
+      {seeded, entry} = planned!(ctx, "plan-claim", package: :stays)
 
       sql!(
         "INSERT INTO claims (id, source_package_id, claim_text) VALUES (?1, ?2, 'a claim')",
@@ -458,13 +480,19 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
   end
 
   # The contexts of the plan go the way a replica's go: their rows are deleted by
-  # something else, and the files are removed afterwards.
-  defp planned!(ctx, label) do
+  # something else, and the files are removed afterwards. The package goes with them, as the
+  # origin deletes it with its last context, unless the test says `package: :stays`.
+  defp planned!(ctx, label, opts \\ []) do
     seeded = seed!("#{label}-#{ctx.n}", ctx)
     assert {:ok, [entry]} = DerivedData.file_plan("default", "default", [seeded.context])
     # A peer's erasure deletes the claims before the context, and so does the replica.
     {:ok, _} = Store.raw_query("DELETE FROM claims WHERE signal_id = ?1", [seeded.context])
     {:ok, _} = Store.raw_query("DELETE FROM contexts WHERE id = ?1", [seeded.context])
+
+    if Keyword.get(opts, :package) != :stays do
+      {:ok, _} = Store.raw_query("DELETE FROM source_packages WHERE id = ?1", [seeded.package])
+    end
+
     {seeded, entry}
   end
 

@@ -1113,7 +1113,7 @@ defmodule OptimalEngine.Sync do
   # rest of the page, so a child that came before its parent still lands.
   defp execute(tenant_id, workspace_id, plans, foreign_keys \\ :deferred) do
     erasing = erased_context_ids(plans)
-    file_plan = plan_erased_files(tenant_id, workspace_id, erasing)
+    file_plan = plan_erased_files(tenant_id, workspace_id, erasing, erased_package_ids(plans))
 
     result =
       Store.transaction(fn txn ->
@@ -1259,10 +1259,13 @@ defmodule OptimalEngine.Sync do
   # A delete of a context that a peer made (an erasure, a retention delete, a move)
   # removed its rows here, and the derived rows that went with it arrive as deletes of
   # their own. What this Engine keeps outside the database does not: the embeddings
-  # it cached from that text, and the files it made from the context's source package (its
-  # decomposition checkpoints and assets, which are not replicated). They go once the batch
-  # has committed. A failure is logged and never fails an apply that has already committed.
+  # it cached from that text, and what it made from the context's source package (its
+  # decomposition runs, checkpoints and assets, which are not replicated). The origin deletes
+  # those with the package, so they go once the batch has committed and the package row is
+  # gone (`DerivedData.remove_planned_files/1`). A failure is logged and never fails an apply
+  # that has already committed.
   defp note_erased(acc, "contexts", %{"operation" => "delete"}), do: %{acc | erased?: true}
+  defp note_erased(acc, "source_packages", %{"operation" => "delete"}), do: %{acc | erased?: true}
   defp note_erased(acc, _table, _mutation), do: acc
 
   # The contexts the batch asks to delete.
@@ -1275,19 +1278,33 @@ defmodule OptimalEngine.Sync do
         do: id
   end
 
-  # Read before the batch, because the rows the files are found by go with it. A plan that
-  # cannot be read is logged, and the batch goes on: the files stay, and the log says so.
-  defp plan_erased_files(_tenant_id, _workspace_id, []), do: []
+  # The source packages the batch asks to delete: this Engine's own rows made from one (its
+  # decomposition runs, its assets) are not replicated and are found by it.
+  defp erased_package_ids(plans) do
+    for {:apply, %{mutation: %{"operation" => "delete"} = mutation}} <- plans,
+        target_table(mutation["entity_type"]) == "source_packages",
+        id = get_in(mutation, ["payload", "row", "id"]) || mutation["entity_id"],
+        is_binary(id),
+        uniq: true,
+        do: id
+  end
 
-  defp plan_erased_files(tenant_id, workspace_id, context_ids) do
-    case DerivedData.file_plan(tenant_id, workspace_id, context_ids) do
+  # Read before the batch, because the rows the files and rows are found by go with it
+  # (the package an asset names is cleared when the package is deleted). A plan that cannot be
+  # read is logged, and the batch goes on: what it would have removed stays, and the log
+  # says so.
+  defp plan_erased_files(_tenant_id, _workspace_id, [], []), do: []
+
+  defp plan_erased_files(tenant_id, workspace_id, context_ids, package_ids) do
+    case DerivedData.file_plan(tenant_id, workspace_id, context_ids, package_ids) do
       {:ok, entries} ->
         entries
 
       {:error, reason} ->
         Logger.error(
-          "[Sync] could not read which files belong to the #{length(context_ids)} context(s) " <>
-            "a peer deleted in #{workspace_id}; they stay: #{inspect(reason)}"
+          "[Sync] could not read what this Engine made from the #{length(context_ids)} " <>
+            "context(s) and #{length(package_ids)} source package(s) a peer deleted in " <>
+            "#{workspace_id}; it stays: #{inspect(reason)}"
         )
 
         []
@@ -1317,8 +1334,8 @@ defmodule OptimalEngine.Sync do
     case DerivedData.remove_planned_files(file_plan) do
       {:ok, %{kept: kept}} when kept > 0 ->
         Logger.info(
-          "[Sync] #{kept} source package(s) of #{workspace_id} keep their files: a context " <>
-            "or a claim still refers to them"
+          "[Sync] #{kept} source package(s) of #{workspace_id} keep their files and rows: a " <>
+            "context or a claim still refers to them, or the package is still here"
         )
 
       {:ok, _removed} ->
