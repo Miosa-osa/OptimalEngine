@@ -203,7 +203,7 @@ defmodule OptimalEngine.Storage.AssetReconcileTest do
       conn(:get, "/api/metrics") |> OptimalEngine.API.Router.call(OptimalEngine.API.Router.init([]))
 
     assert Jason.decode!(metrics.resp_body)["gauges"][
-             "optimal_engine.storage.assets_pending_placement"
+             "optimal_engine_storage_assets_pending_placement"
            ] == pending
 
     assert OptimalEngine.Telemetry.Prometheus.render() =~

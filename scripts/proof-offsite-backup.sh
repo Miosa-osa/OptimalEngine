@@ -253,7 +253,7 @@ print("OUTAGE_WRITE_STATUS=%d STORAGE_BACKEND=%s FALLBACK_REASON=%s LOCAL_COPY_M
 
 _, metrics = call("GET", "/api/metrics")
 fallbacks = metrics.get("counters", {}).get("optimal_engine.storage.asset_fallback")
-pending = metrics.get("gauges", {}).get("optimal_engine.storage.assets_pending_placement")
+pending = metrics.get("gauges", {}).get("optimal_engine_storage_assets_pending_placement")
 print("ALERT_COUNTER=%s PENDING_PLACEMENT=%s" % (fallbacks, pending))
 
 _, probed = call("GET", "/api/storage/providers?probe=1")
@@ -343,7 +343,7 @@ def pending():
     request = urllib.request.Request(base + "/api/metrics")
     request.add_header("Authorization", "Bearer " + key)
     with urllib.request.urlopen(request, timeout=60) as response:
-        return json.loads(response.read()).get("gauges", {}).get("optimal_engine.storage.assets_pending_placement")
+        return json.loads(response.read()).get("gauges", {}).get("optimal_engine_storage_assets_pending_placement")
 
 started = time.time()
 left = pending()

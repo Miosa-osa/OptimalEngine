@@ -1168,7 +1168,7 @@ defmodule OptimalEngine.API.Router do
         :gauges,
         Map.put(
           OptimalEngine.Store.FileCache.LegacyPurgeRecord.gauges(),
-          "optimal_engine.storage.assets_pending_placement",
+          "optimal_engine_storage_assets_pending_placement",
           OptimalEngine.Storage.AssetReconcile.pending_count()
         )
       )

@@ -23,10 +23,10 @@ defmodule OptimalEngine.Storage.AssetReconcile do
   filesystem is resolved without an upload (`storage_fallback_resolved`
   records `backend_now_filesystem`).
 
-  `pending_count/0` is the gauge `optimal_engine.storage.assets_pending_placement`
-  in `GET /api/metrics` (`optimal_engine_storage_assets_pending_placement` in
-  Prometheus). `OptimalEngine.Storage.AssetReconcile.Worker` runs a pass every
-  ten minutes while any are pending and S3 is configured.
+  `pending_count/0` is the gauge `optimal_engine_storage_assets_pending_placement`
+  in `GET /api/metrics` (`gauges`) and in Prometheus.
+  `OptimalEngine.Storage.AssetReconcile.Worker` runs a pass every ten minutes
+  while any are pending and S3 is configured.
   """
 
   require Logger

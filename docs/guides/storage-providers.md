@@ -133,7 +133,7 @@ Each one is uploaded under the key a direct write would have used, read back, an
 The local copy stays on disk.
 An asset whose local copy no longer matches its hash, or whose object does not read back the same, stays pending; the first transport error ends a pass, so a store still down is not asked once per asset.
 An asset whose workspace now keeps assets on the local filesystem is resolved without an upload (`backend_now_filesystem`).
-The assets still waiting are the gauge `optimal_engine.storage.assets_pending_placement` in `GET /api/metrics` (`gauges`) and `optimal_engine_storage_assets_pending_placement` in Prometheus.
+The assets still waiting are the gauge `optimal_engine_storage_assets_pending_placement`, in `GET /api/metrics` (`gauges`) and in Prometheus.
 `GET /api/storage/providers?probe=1` makes an authenticated request to the bucket and reports `s3` as `unreachable` while the object store is down; without `probe` it reports configuration only.
 `scripts/proof-offsite-backup.sh` proves the outage, the recovery and the placement of the outage asset end to end against a real bucket.
 
