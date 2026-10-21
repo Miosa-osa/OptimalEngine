@@ -32,14 +32,21 @@ export function registerGrep(server: McpServer): void {
         .enum(["document", "section", "paragraph", "chunk"])
         .optional()
         .describe("Chunk granularity level to match against."),
+      as_of: z
+        .string()
+        .optional()
+        .describe(
+          "ISO 8601 instant the time decay measures age against, for reproducible comparisons (e.g. 2026-10-20T12:00:00Z). Defaults to now.",
+        ),
     },
-    async ({ q, workspace, intent, scale }) => {
+    async ({ q, workspace, intent, scale, as_of }) => {
       try {
         const result = await engine.grep({
           q,
           workspace: workspace ?? config.defaultWorkspace,
           intent,
           scale,
+          as_of,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

@@ -128,7 +128,7 @@ defmodule OptimalEngine.DataSteward do
              SELECT id, claim_type, claim_text, source_package_id, created_at
              FROM claims
              WHERE tenant_id=?1 AND workspace_id=?2 AND lifecycle_state='pending'
-             ORDER BY created_at DESC LIMIT ?3
+             ORDER BY created_at DESC, id LIMIT ?3
              """,
              [tenant_id, workspace_id, limit]
            ) do
@@ -167,7 +167,7 @@ defmodule OptimalEngine.DataSteward do
              FROM contexts
              WHERE tenant_id=?1 AND workspace_id=?2 AND archived_at IS NULL
                AND json_extract(metadata, '$.routing_review.state') IN ('review','unresolved')
-             ORDER BY modified_at DESC LIMIT ?3
+             ORDER BY modified_at DESC, uri, id LIMIT ?3
              """,
              [tenant_id, CorpusOrganizer.source_workspace(tenant_id), limit]
            ) do
@@ -198,7 +198,7 @@ defmodule OptimalEngine.DataSteward do
              FROM entity_mentions
              WHERE workspace_id=?2 AND resolution_state IN ('unresolved','ambiguous')
                AND #{EntityResolution.owned_mention_sql()}
-             ORDER BY normalized_text, confidence DESC LIMIT ?1
+             ORDER BY normalized_text, confidence DESC, id LIMIT ?1
              """,
              [limit, workspace_id, tenant_id]
            ) do
@@ -308,7 +308,7 @@ defmodule OptimalEngine.DataSteward do
              ) owned
              LEFT JOIN workspaces registered ON registered.id=owned.workspace_id
              WHERE registered.id IS NULL
-             ORDER BY owned.record_count DESC
+             ORDER BY owned.record_count DESC, owned.workspace_id
              """,
              [tenant_id]
            ) do

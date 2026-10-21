@@ -20,12 +20,17 @@ defmodule Mix.Tasks.Optimal.Search do
     --limit      Max results (default 10)
     --as-of      ISO 8601 instant the time decay measures age against
                  (default: now); repeat it to get the same scores again
+    --mode       lexical (full text only), hybrid (requires the vector hop) or
+                 auto (default)
   """
 
   use Mix.Task
 
   # Context types a CLI argument may name, so that no atom is made from the text.
   @types %{"signal" => :signal, "resource" => :resource, "memory" => :memory, "skill" => :skill}
+
+  # Retrieval modes a CLI argument may name, for the same reason.
+  @modes %{"lexical" => :lexical, "hybrid" => :hybrid, "auto" => :auto}
 
   @impl Mix.Task
   def run(args) do
@@ -40,7 +45,8 @@ defmodule Mix.Tasks.Optimal.Search do
           genre: :string,
           uri: :string,
           limit: :integer,
-          as_of: :string
+          as_of: :string,
+          mode: :string
         ],
         aliases: [w: :workspace, n: :node, t: :type, g: :genre, l: :limit]
       )
@@ -57,6 +63,7 @@ defmodule Mix.Tasks.Optimal.Search do
       |> Keyword.put_new(:limit, 10)
       |> maybe_put_workspace(Keyword.get(opts, :workspace))
       |> add_type_filter(Keyword.get(opts, :type))
+      |> add_mode(Keyword.get(opts, :mode))
 
     IO.puts("\n[optimal.search] Query: \"#{query}\"")
 
@@ -102,6 +109,16 @@ defmodule Mix.Tasks.Optimal.Search do
         IO.puts("[optimal.search] Warning: unknown type '#{other}' — ignoring")
         opts
     end
+  end
+
+  defp add_mode(opts, nil), do: opts
+
+  defp add_mode(opts, mode) when is_map_key(@modes, mode),
+    do: Keyword.put(opts, :mode, Map.fetch!(@modes, mode))
+
+  defp add_mode(opts, other) do
+    IO.puts("[optimal.search] Warning: unknown mode '#{other}' - ignoring")
+    opts
   end
 
   defp maybe_put_workspace(opts, nil), do: opts

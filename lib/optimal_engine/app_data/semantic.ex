@@ -16,6 +16,10 @@ defmodule OptimalEngine.AppData.Semantic do
   matching records by cosine similarity in-process. When no embedder is
   reachable the query fails with `semantic_unavailable`; it never falls
   back silently to another kind of search.
+
+  Records of equal similarity are ordered by `_rowid`, a counter local to the
+  Engine that stored them (see `OptimalEngine.AppData.Query`), so that order
+  is not portable across Engines.
   """
 
   require Logger

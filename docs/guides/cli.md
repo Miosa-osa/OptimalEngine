@@ -127,8 +127,8 @@ Text arguments may be `-` to read standard input.
 | `loops add "title" [ws] [--kind --owner --counterparty --due --source-uri]` | `POST /api/loops` |
 | `loops close\|drop\|reopen <id> [--reason --source-uri]` | `POST /api/loops/:id/:action` |
 | `loops extract [ws] [--since]` | `POST /api/loops/extract` |
-| `search "q" [ws] [--limit --offset --type memory]` (alias `find`) | `GET /api/search` |
-| `grep "q" [ws] [--intent --scale --modality --literal --path]` | `GET /api/grep` |
+| `search "q" [ws] [--limit --offset --type memory --as-of --mode lexical\|hybrid\|auto]` (alias `find`) | `GET /api/search` |
+| `grep "q" [ws] [--intent --scale --modality --literal --path --as-of]` | `GET /api/grep` |
 | `assemble "topic" [ws]` | `POST /api/assemble` |
 | `read <optimal://uri or id> [ws] [--tier l0\|l1\|full]` | `GET /api/read` |
 | `ask "q" [ws]` (alias `rag`) | `POST /api/rag` |

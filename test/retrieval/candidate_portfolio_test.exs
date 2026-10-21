@@ -51,6 +51,26 @@ defmodule OptimalEngine.Retrieval.CandidatePortfolioTest do
     assert selected.score == Float.round(2 / 61, 6)
   end
 
+  test "fills the slots the quotas leave by fused score, and a tie goes by uri, then id" do
+    # Three rankings of four. At limit 10 and equal weights each reserves its
+    # first three (nine in all); the tenth place goes to the best fused
+    # candidate left. The fourth of each ranking fuses to the same score, so
+    # only the tie-break chooses, and it must choose by uri, not by id.
+    ranking = fn label, uri ->
+      for rank <- 1..4 do
+        %{id: "#{label}#{rank}", uri: if(rank == 4, do: uri, else: "u/#{label}#{rank}"), score: 1.0}
+      end
+    end
+
+    rankings = [ranking.("a", "u/z"), ranking.("b", "u/y"), ranking.("c", "u/x")]
+
+    for ordering <- [rankings, Enum.reverse(rankings)] do
+      selected = CandidatePortfolio.select(ordering, 10, weights: [1, 1, 1])
+      assert length(selected) == 10
+      assert List.last(selected).uri == "u/x"
+    end
+  end
+
   test "handles empty and invalid budgets" do
     assert CandidatePortfolio.select([], 10) == []
     assert CandidatePortfolio.select([[hit("a")]], 0) == []

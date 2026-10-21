@@ -103,7 +103,19 @@ describe("OptimalEngine", () => {
       expect(init.method).toBe("POST");
       const body = JSON.parse(init.body as string);
       expect(body.query).toBe("What is the meaning of life?");
+      expect(body.as_of).toBeUndefined();
       expect(result.envelope.body).toBe("42");
+    });
+
+    it("should send asOf as as_of in the body", async () => {
+      mockFetch(200, RAG_RESPONSE);
+      const client = new OptimalEngine();
+
+      await client.ask("q", { asOf: "2026-10-20T12:00:00Z" });
+
+      const { init } = lastFetchCall();
+      const body = JSON.parse(init.body as string);
+      expect(body.as_of).toBe("2026-10-20T12:00:00Z");
     });
 
     it("should forward workspace, audience, format, bandwidth", async () => {
@@ -158,6 +170,41 @@ describe("OptimalEngine", () => {
       expect(url).toContain("limit=10");
       expect(init.method).toBe("GET");
     });
+
+    it("should forward asOf as as_of (Date as ISO 8601) and mode", async () => {
+      mockFetch(200, {
+        query: "typescript",
+        results: [],
+        pagination: PAGINATION,
+      });
+      const client = new OptimalEngine();
+
+      await client.search("typescript", {
+        asOf: new Date("2026-10-20T12:00:00Z"),
+        mode: "hybrid",
+      });
+
+      const { url } = lastFetchCall();
+      const params = new URL(url).searchParams;
+      expect(params.get("as_of")).toBe("2026-10-20T12:00:00.000Z");
+      expect(params.get("mode")).toBe("hybrid");
+    });
+
+    it("should omit as_of and mode when they are not given", async () => {
+      mockFetch(200, {
+        query: "typescript",
+        results: [],
+        pagination: PAGINATION,
+      });
+      const client = new OptimalEngine();
+
+      await client.search("typescript");
+
+      const { url } = lastFetchCall();
+      const params = new URL(url).searchParams;
+      expect(params.has("as_of")).toBe(false);
+      expect(params.has("mode")).toBe(false);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -181,12 +228,16 @@ describe("OptimalEngine", () => {
         modality: "text",
         limit: 5,
         literal: true,
+        asOf: "2026-10-20T12:00:00Z",
       });
 
       const { url } = lastFetchCall();
       expect(url).toContain("q=pattern");
       expect(url).toContain("intent=decision");
       expect(url).toContain("literal=true");
+      expect(new URL(url).searchParams.get("as_of")).toBe(
+        "2026-10-20T12:00:00Z",
+      );
     });
   });
 

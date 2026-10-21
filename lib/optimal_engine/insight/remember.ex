@@ -148,7 +148,7 @@ defmodule OptimalEngine.Insight.Remember do
     sql = """
     SELECT id, title, content FROM contexts
     WHERE type = 'signal' AND content != '' AND workspace_id = ?2
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC, id
     LIMIT ?1
     """
 
@@ -196,7 +196,7 @@ defmodule OptimalEngine.Insight.Remember do
     sessions_sql = """
     SELECT id, content FROM sessions
     WHERE content IS NOT NULL AND content != '' AND summary != '' AND workspace_id = ?2
-    ORDER BY started_at DESC
+    ORDER BY started_at DESC, id
     LIMIT ?1
     """
 
@@ -207,7 +207,7 @@ defmodule OptimalEngine.Insight.Remember do
 
         _ ->
           contexts_sql =
-            "SELECT id, content FROM contexts WHERE content != '' AND workspace_id = ?2 ORDER BY created_at DESC LIMIT ?1"
+            "SELECT id, content FROM contexts WHERE content != '' AND workspace_id = ?2 ORDER BY created_at DESC, id LIMIT ?1"
 
           case Store.raw_query(contexts_sql, [limit, ws]) do
             {:ok, r} -> r
@@ -269,12 +269,12 @@ defmodule OptimalEngine.Insight.Remember do
     {sql, params} =
       if category do
         {
-          "SELECT id, category, content, confidence, source, created_at FROM observations WHERE category = ?1 AND workspace_id = ?3 ORDER BY created_at DESC LIMIT ?2",
+          "SELECT id, category, content, confidence, source, created_at FROM observations WHERE category = ?1 AND workspace_id = ?3 ORDER BY created_at DESC, category, content LIMIT ?2",
           [category, limit, ws]
         }
       else
         {
-          "SELECT id, category, content, confidence, source, created_at FROM observations WHERE workspace_id = ?2 ORDER BY created_at DESC LIMIT ?1",
+          "SELECT id, category, content, confidence, source, created_at FROM observations WHERE workspace_id = ?2 ORDER BY created_at DESC, category, content LIMIT ?1",
           [limit, ws]
         }
       end
@@ -316,7 +316,7 @@ defmodule OptimalEngine.Insight.Remember do
     WHERE workspace_id = ?1
     GROUP BY category
     HAVING COUNT(*) >= 3
-    ORDER BY total_confidence DESC
+    ORDER BY total_confidence DESC, category
     """
 
     case Store.raw_query(sql, [ws]) do

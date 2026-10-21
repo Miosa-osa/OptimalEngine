@@ -31,6 +31,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
 
   require Logger
 
+  alias OptimalEngine.Retrieval.AsOf
   alias OptimalEngine.Retrieval.L0Cache, as: L0Cache
   alias OptimalEngine.Retrieval.Ranking
   alias OptimalEngine.Retrieval.Search, as: SearchEngine
@@ -66,6 +67,10 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   precursor surface — not the governed
   `OptimalEngine.MemoryCore.ContextPackage`; for that, use
   `OptimalEngine.MemoryCore.RetrievalCoordinator.retrieve/2`.
+
+  `:as_of` fixes the instant the freshness decay measures age against (see
+  `OptimalEngine.Retrieval.AsOf`); one that is not valid answers
+  `{:error, {:invalid_as_of, value}}`.
   """
   @spec assemble(String.t(), keyword()) :: {:ok, assembled()} | {:error, term()}
   def assemble(query, opts \\ []) do
@@ -73,29 +78,31 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   end
 
   defp do_assemble(query, opts) do
-    budgets = Keyword.get(opts, :tier_budgets, @default_budgets)
+    with {:ok, opts} <- AsOf.put_resolved(opts) do
+      budgets = Keyword.get(opts, :tier_budgets, @default_budgets)
 
-    # L0 — structural inventory (always loaded, query-independent)
-    l0 = build_l0(budgets.l0)
+      # L0 — structural inventory (always loaded, query-independent)
+      l0 = build_l0(budgets.l0)
 
-    # L1 — per-file summaries for matching files (query-driven)
-    {l1, search_scores} = build_l1(query, budgets.l1, opts)
+      # L1 — per-file summaries for matching files (query-driven)
+      {l1, search_scores} = build_l1(query, budgets.l1, opts)
 
-    # L2 — full content for top results (deep retrieval)
-    l2 = build_l2(query, search_scores, budgets.l2, opts)
+      # L2 — full content for top results (deep retrieval)
+      l2 = build_l2(query, search_scores, budgets.l2, opts)
 
-    total_tokens = estimate_tokens(l0) + estimate_tokens(l1) + estimate_tokens(l2)
-    sources = extract_sources(search_scores)
+      total_tokens = estimate_tokens(l0) + estimate_tokens(l1) + estimate_tokens(l2)
+      sources = extract_sources(search_scores)
 
-    {:ok,
-     %{
-       l0: l0,
-       l1: l1,
-       l2: l2,
-       total_tokens: total_tokens,
-       sources: sources,
-       search_scores: search_scores
-     }}
+      {:ok,
+       %{
+         l0: l0,
+         l1: l1,
+         l2: l2,
+         total_tokens: total_tokens,
+         sources: sources,
+         search_scores: search_scores
+       }}
+    end
   end
 
   @doc "Returns L0 — the structural inventory of the library."
@@ -109,9 +116,11 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   @spec l1(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def l1(query, opts \\ []) do
     if SearchEngine.available?() do
-      budget = Keyword.get(opts, :budget, @default_budgets.l1)
-      {content, _scores} = build_l1(query, budget, opts)
-      {:ok, content}
+      with {:ok, opts} <- AsOf.put_resolved(opts) do
+        budget = Keyword.get(opts, :budget, @default_budgets.l1)
+        {content, _scores} = build_l1(query, budget, opts)
+        {:ok, content}
+      end
     else
       SearchEngine.unavailable()
     end
@@ -139,49 +148,52 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   end
 
   defp do_fused_search(query, opts) do
-    limit = Keyword.get(opts, :limit, 20)
-    recall = limit * 3
+    # Both searches below measure age against one instant, so the lists agree on
+    # how old everything is and a request is repeatable with `:as_of`. An
+    # explicit nil or blank `:as_of` counts as absent.
+    with {:ok, opts} <- AsOf.put_resolved(opts) do
+      limit = Keyword.get(opts, :limit, 20)
+      recall = limit * 3
 
-    # FTS-only list: force vectors off so this list is a genuinely
-    # independent lexical ranking, not the already-fused hybrid output.
-    # Both searches measure age against one instant, so the lists agree on how
-    # old everything is and a request is repeatable with `:as_of`.
-    scoped_opts =
-      opts
-      |> Keyword.put(:limit, recall)
-      |> Keyword.put_new_lazy(:as_of, &DateTime.utc_now/0)
+      # FTS-only list: force vectors off so this list is a genuinely
+      # independent lexical ranking, not the already-fused hybrid output.
+      scoped_opts = Keyword.put(opts, :limit, recall)
 
-    fts_results =
-      case SearchEngine.search(query, Keyword.put(scoped_opts, :vector_enabled, false)) do
-        {:ok, results} -> results
-        _ -> []
-      end
+      fts_results =
+        case SearchEngine.search(
+               query,
+               Keyword.merge(scoped_opts, vector_enabled: false, mode: :lexical)
+             ) do
+          {:ok, results} -> results
+          _ -> []
+        end
 
-    # Semantic list: the hybrid path. When embeddings are absent this
-    # returns the FTS ranking, which is fine — RRF tolerates correlated
-    # lists, and the dedicated FTS list above keeps lexical signal intact.
-    vector_results =
-      case SearchEngine.search(query, scoped_opts) do
-        {:ok, results} -> results
-        _ -> []
-      end
+      # Semantic list: the hybrid path. When embeddings are absent this
+      # returns the FTS ranking, which is fine — RRF tolerates correlated
+      # lists, and the dedicated FTS list above keeps lexical signal intact.
+      vector_results =
+        case SearchEngine.search(query, scoped_opts) do
+          {:ok, results} -> results
+          _ -> []
+        end
 
-    # Graph 1-hop list: reorder the union by graph adjacency to the query.
-    graph_results = safe_graph_boost(fts_results ++ vector_results, query, opts)
+      # Graph 1-hop list: reorder the union by graph adjacency to the query.
+      graph_results = safe_graph_boost(fts_results ++ vector_results, query, opts)
 
-    # Temporal list: freshness-first ordering of everything seen.
-    temporal_results = temporal_ranked(fts_results ++ vector_results ++ graph_results)
+      # Temporal list: freshness-first ordering of everything seen.
+      temporal_results = temporal_ranked(fts_results ++ vector_results ++ graph_results)
 
-    fused =
-      reciprocal_rank_fusion([
-        fts_results,
-        vector_results,
-        graph_results,
-        temporal_results
-      ])
-      |> focus_exact_query(query)
+      fused =
+        reciprocal_rank_fusion([
+          fts_results,
+          vector_results,
+          graph_results,
+          temporal_results
+        ])
+        |> focus_exact_query(query)
 
-    {:ok, Enum.take(fused, limit)}
+      {:ok, Enum.take(fused, limit)}
+    end
   end
 
   # When an exact phrase is present, broad semantic recall should not spend
@@ -491,7 +503,7 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
       SELECT topic, decision, rationale, decided_at
       FROM decisions
       WHERE context_id IN (#{placeholders})
-      ORDER BY decided_at DESC
+      ORDER BY decided_at DESC, context_id, topic
       LIMIT 5
       """
 

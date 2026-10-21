@@ -53,7 +53,22 @@ defmodule OptimalEngine.API.ScopeAPI do
 
       limit = IntParam.parse(conn.query_params["limit"], 10)
 
-      json(conn, 200, Federation.search(tenant(conn), query, allowed: allowed, limit: limit))
+      search_opts =
+        [allowed: allowed, limit: limit]
+        |> then(fn opts ->
+          case conn.query_params["as_of"] do
+            nil -> opts
+            as_of -> Keyword.put(opts, :as_of, as_of)
+          end
+        end)
+
+      case Federation.search(tenant(conn), query, search_opts) do
+        {:error, {:invalid_as_of, _value}} ->
+          error(conn, 400, "as_of must be an ISO 8601 timestamp between 1970 and a year from now")
+
+        result ->
+          json(conn, 200, result)
+      end
     end
   end
 

@@ -90,6 +90,28 @@ test("sends the key as a bearer token and the default workspace", async () => {
   assert.equal(requests[0].query.workspace, "default:sales");
 });
 
+test("forwards as_of and mode when given and omits them otherwise", async () => {
+  await call("search", { q: "renewal" });
+  assert.equal("as_of" in requests[0].query, false);
+  assert.equal("mode" in requests[0].query, false);
+
+  await call("search", { q: "renewal", as_of: "2026-10-20T12:00:00Z", mode: "hybrid" });
+  assert.equal(requests[0].query.as_of, "2026-10-20T12:00:00Z");
+  assert.equal(requests[0].query.mode, "hybrid");
+
+  await call("grep", { q: "renewal", as_of: "2026-10-20T12:00:00Z" });
+  assert.equal(requests[0].path, "/api/grep");
+  assert.equal(requests[0].query.as_of, "2026-10-20T12:00:00Z");
+
+  await call("ask", { query: "renewal terms", as_of: "2026-10-20T12:00:00Z" });
+  assert.equal(requests[0].path, "/api/rag");
+  assert.equal(requests[0].body.as_of, "2026-10-20T12:00:00Z");
+
+  await call("recall", { action: "actions", topic: "renewal", as_of: "2026-10-20T12:00:00Z" });
+  assert.equal(requests[0].path, "/api/recall/actions");
+  assert.equal(requests[0].query.as_of, "2026-10-20T12:00:00Z");
+});
+
 test("maps each tool to its route", async () => {
   const cases = [
     ["boot", {}, "GET", "/api/boot"],
