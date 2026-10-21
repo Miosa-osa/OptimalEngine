@@ -501,19 +501,54 @@ lock_stale() {
   STALE_WHY="install $_pid is no longer running"
 }
 
-# take_over HELD: moves the lock aside in one step and removes it, but only when what was
-# moved is still the lock judged stale (HELD is its owner). A fresh lock another install
-# took meanwhile is put back, and nothing is taken.
+# A lock is removed, whether taken over or released, only under a second lock, the mutex
+# <prefix>/.install.lock.takeover, held for the few steps of one removal. Under it the lock
+# is read again and removed only while it is the one judged; a lock is never moved aside,
+# so there is no moment in which a fresh holder's lock is gone and another install takes
+# the prefix too. A mutex older than MUTEX_MAX_AGE seconds was left by an install killed
+# while it held it, and is cleared.
+MUTEX=$LOCK.takeover
+MUTEX_MAX_AGE=30
+MUTEX_OWNER=
+
+# mutex: takes the mutex, trying about fifty times; false when another install keeps it.
+mutex() {
+  MUTEX_OWNER="pid=$$ at=$(date +%s)"
+  _tries=0
+  while :; do
+    if { [ ! -d "$MUTEX" ] || [ -L "$MUTEX" ]; } && ln -sn "$MUTEX_OWNER" "$MUTEX" 2>/dev/null; then
+      return 0
+    fi
+    _tries=$((_tries + 1))
+    [ "$_tries" -lt 50 ] || return 1
+    _m=$(readlink "$MUTEX" 2>/dev/null) || continue
+    _mat=$(lock_field "$_m" at)
+    case $_mat in
+      '' | *[!0-9]*) [ -z "$(find "$MUTEX" -prune -mmin +1 2>/dev/null)" ] || rm -f "$MUTEX" ;;
+      *) [ $(($(date +%s) - _mat)) -le "$MUTEX_MAX_AGE" ] || rm -f "$MUTEX" ;;
+    esac
+  done
+}
+
+# release_mutex: removes the mutex while it is this install's own.
+release_mutex() {
+  [ -n "$MUTEX_OWNER" ] || return 0
+  [ "$(readlink "$MUTEX" 2>/dev/null)" != "$MUTEX_OWNER" ] || rm -f "$MUTEX" || :
+  MUTEX_OWNER=
+}
+
+# take_over HELD [FORCE]: removes the lock judged stale, HELD being its owner, under the
+# mutex, while it is still HELD and still stale (with FORCE, while it is still HELD).
+# False when the lock changed meanwhile, or the mutex stayed held.
 take_over() {
-  _aside=$LOCK.stale.$$
-  mv "$LOCK" "$_aside" 2>/dev/null || return 1
-  _moved=$(readlink "$_aside" 2>/dev/null) || _moved=
-  if [ "$_moved" != "$1" ]; then
-    [ -z "$_moved" ] || ln -sn "$_moved" "$LOCK" 2>/dev/null || :
-    rm -f "$_aside" || :
-    return 1
+  mutex || return 1
+  _now=$(readlink "$LOCK" 2>/dev/null) || _now=
+  _taken=1
+  if [ "$_now" = "$1" ] && { [ -n "${2:-}" ] || lock_stale "$_now"; } && rm -f "$LOCK"; then
+    _taken=0
   fi
-  rm -rf "$_aside" || :
+  release_mutex
+  return $_taken
 }
 
 # lock: one install at a time in a prefix. A held lock is waited for, up to
@@ -528,24 +563,33 @@ lock() {
   _wait=${OPTIMAL_CLIENT_LOCK_WAIT:-60}
   case $_wait in '' | *[!0-9]*) die $EX_USAGE "OPTIMAL_CLIENT_LOCK_WAIT must be a whole number of seconds" ;; esac
   _break=${OPTIMAL_CLIENT_BREAK_LOCK:-0}
-  _waited=0 _takeovers=0
+  _waited=0 _takeovers=0 _gone=0
+  # Set first, so that an exit at any point releases a lock this install took (unlock
+  # removes only its own).
+  LOCKED=1
   while :; do
     # ln -s into an existing directory would create a link inside it.
     if { [ ! -d "$LOCK" ] || [ -L "$LOCK" ]; } && ln -sn "$LOCK_OWNER" "$LOCK" 2>/dev/null; then
-      LOCKED=1
       return 0
     fi
-    [ -e "$LOCK" ] || [ -L "$LOCK" ] || cant_write "$LOCK"
+    if [ ! -e "$LOCK" ] && [ ! -L "$LOCK" ]; then
+      # Released since ln failed, so ln is tried again; a lock that is never there means
+      # ln cannot write here.
+      _gone=$((_gone + 1))
+      [ "$_gone" -lt 5 ] || cant_write "$LOCK"
+      continue
+    fi
+    _gone=0
     _held=$(readlink "$LOCK" 2>/dev/null) || _held=
-    _why=
+    _why='' _force=''
     if [ "$_break" = 1 ]; then
-      _why="OPTIMAL_CLIENT_BREAK_LOCK=1"
+      _why="OPTIMAL_CLIENT_BREAK_LOCK=1" _force=1
     elif lock_stale "$_held"; then
       _why=$STALE_WHY
     fi
     if [ -n "$_why" ] && [ "$_takeovers" -lt 3 ]; then
       _takeovers=$((_takeovers + 1))
-      if take_over "$_held"; then
+      if take_over "$_held" "$_force"; then
         warn "took over $LOCK (${_held:-no owner recorded}): $_why"
         _break=0
       fi
@@ -560,19 +604,17 @@ lock() {
   done
 }
 
-# unlock: removes the lock only while it is this install's own: it is moved aside in one
-# step, and a lock found there that is not this install's is put back.
+# unlock: removes the lock while it is this install's own, under the mutex, so that a lock
+# another install took meanwhile is never removed. When the mutex stays held, the lock is
+# left for the next install to take over as stale once this one has exited.
 unlock() {
+  release_mutex
   [ -n "$LOCKED" ] || return 0
   LOCKED=
   [ "$(readlink "$LOCK" 2>/dev/null)" = "$LOCK_OWNER" ] || return 0
-  _aside=$LOCK.release.$$
-  mv "$LOCK" "$_aside" 2>/dev/null || return 0
-  _moved=$(readlink "$_aside" 2>/dev/null) || _moved=
-  if [ "$_moved" != "$LOCK_OWNER" ] && [ -n "$_moved" ]; then
-    ln -sn "$_moved" "$LOCK" 2>/dev/null || :
-  fi
-  rm -f "$_aside" || :
+  mutex || return 0
+  [ "$(readlink "$LOCK" 2>/dev/null)" != "$LOCK_OWNER" ] || rm -f "$LOCK" || :
+  release_mutex
 }
 
 # sweep: a run killed outright (SIGKILL, a power cut) leaves its copies behind, or the MCP
@@ -582,7 +624,7 @@ unlock() {
 sweep() {
   for _left in "$PREFIX"/mcp.old.new.* "$PREFIX"/mcp.new.* "$PREFIX"/VERSION.new.* \
     "$PREFIX"/bin/optimal.new.* "$PREFIX"/bin/oe.new.* "$PREFIX"/bin/optimal-engine-mcp.new.* \
-    "$PREFIX"/bin/install-client.sh.new.* "$LOCK".stale.* "$LOCK".release.*; do
+    "$PREFIX"/bin/install-client.sh.new.*; do
     [ -e "$_left" ] || [ -L "$_left" ] || continue
     _pid=${_left##*.}
     case $_pid in '' | *[!0-9]*) continue ;; esac

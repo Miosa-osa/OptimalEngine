@@ -755,6 +755,37 @@ class LockTests(InstallClientTestCase):
         took = [err for _out, err in outputs if 'took over' in err]
         self.assertEqual(len(took), 1, outputs)
 
+    def test_many_installs_at_once_never_hold_the_lock_together(self):
+        # Each copy into the prefix makes a witness directory that only one install can
+        # hold. Holders exit while others wait, so a waiter that read a holder's lock
+        # finds that holder gone as the next takes the prefix; a slowed readlink and date
+        # widen the window between reading a lock and acting on it.
+        log, overlaps, witness = self.dir / 'copies', self.dir / 'overlaps', self.dir / 'witness'
+        real = {name: shutil.which(name) for name in ['cp', 'readlink', 'date']}
+        self.fake('cp', f'case "$*" in *".new."*) mkdir "{witness}" 2>/dev/null || echo "$PPID" >>"{overlaps}"\n'
+                        f'  echo "$PPID" >>"{log}"; sleep 0.05; rmdir "{witness}" 2>/dev/null ;; esac\n'
+                        f'exec "{real["cp"]}" "$@"\n')
+        self.fake('readlink', f'sleep 0.05\nexec "{real["readlink"]}" "$@"\n')
+        self.fake('date', f'[ "$*" != +%s ] || sleep 0.05\nexec "{real["date"]}" "$@"\n')
+        self.env['OPTIMAL_CLIENT_LOCK_WAIT'] = '100'
+        for round_ in range(int(os.environ.get('OPTIMAL_CLIENT_TEST_LOCK_ROUNDS', '3'))):
+            with self.subTest(round=round_):
+                log.unlink(missing_ok=True)
+                runs = [subprocess.Popen([INSTALL_SHELL, str(INSTALLER), 'install'], env=self.env, text=True,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         preexec_fn=default_signals)
+                        for _ in range(6)]
+                outputs = [run.communicate(timeout=150) for run in runs]
+                for run, (out, err) in zip(runs, outputs):
+                    self.assertEqual(run.returncode, 0, out + err)
+                    self.assertNotIn('took over', err)
+                self.assertFalse(overlaps.exists(), overlaps.read_text() if overlaps.exists() else '')
+                writers = log.read_text().split()
+                # Each install's copies run under the lock, so the log changes hands five times.
+                self.assertEqual(sum(1 for a, b in zip(writers, writers[1:]) if a != b), 5, writers)
+                self.assertEqual(sorted(set(writers)), sorted(str(run.pid) for run in runs))
+                self.assertEqual(self.leftovers(), [])
+
     def test_an_install_never_removes_a_lock_that_is_not_its_own(self):
         foreign = self.owner(pid=1, host='elsewhere')
         real_cp = shutil.which('cp')
