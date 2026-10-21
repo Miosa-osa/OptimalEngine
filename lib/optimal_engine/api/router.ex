@@ -1164,7 +1164,13 @@ defmodule OptimalEngine.API.Router do
       snap
       |> Map.put(:sizing, OptimalEngine.Sizing.usage())
       |> Map.put(:connectors, OptimalEngine.API.ConnectorsAPI.metrics(conn))
-      |> Map.put(:gauges, OptimalEngine.Store.FileCache.LegacyPurgeRecord.gauges())
+      |> Map.put(
+        :gauges,
+        Map.merge(
+          OptimalEngine.Store.FileCache.LegacyPurgeRecord.gauges(),
+          OptimalEngine.Storage.AssetReconcile.gauges()
+        )
+      )
     )
   end
 

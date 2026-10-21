@@ -40,26 +40,52 @@ defmodule OptimalEngine.Storage.Assets do
 
   @doc """
   The backend selected for a workspace, without proving it is usable.
-  Use `store/3` to write, which applies the fallback rule.
+  Use `store/3` to write, which applies the fallback rule. A workspace policy
+  that cannot be read counts as no policy here; `resolve_backend/1` reports it.
   """
   @spec selected_backend(keyword()) :: backend()
   def selected_backend(opts \\ []) do
-    case Keyword.get(opts, :storage_backend) do
-      backend when backend in [:s3, "s3"] -> :s3
-      backend when backend in [:filesystem, "filesystem"] -> :filesystem
-      _ -> policy_backend(opts)
+    case resolve_backend(opts) do
+      {:ok, backend} -> backend
+      {:error, _reason} -> backend_for(%{})
     end
   end
 
-  defp policy_backend(opts) do
-    workspace_id = Keyword.get(opts, :workspace_id)
+  @doc """
+  The backend selected for a workspace, as `selected_backend/1`, except that a
+  workspace policy which cannot be read (a database error, not an absent
+  policy) is `{:error, reason}`. A caller that records a lasting decision from
+  the answer must not take the Engine default for a policy it never saw.
+  """
+  @spec resolve_backend(keyword()) :: {:ok, backend()} | {:error, term()}
+  def resolve_backend(opts \\ []) do
+    case Keyword.get(opts, :storage_backend) do
+      backend when backend in [:s3, "s3"] ->
+        {:ok, :s3}
 
-    overrides =
-      case workspace_id && PolicyStore.get_policy(workspace_id) do
-        {:ok, policy} -> policy.provider_overrides
-        _ -> %{}
-      end
+      backend when backend in [:filesystem, "filesystem"] ->
+        {:ok, :filesystem}
 
+      _ ->
+        with {:ok, overrides} <- policy_overrides(opts), do: {:ok, backend_for(overrides)}
+    end
+  end
+
+  defp policy_overrides(opts) do
+    case Keyword.get(opts, :workspace_id) do
+      nil ->
+        {:ok, %{}}
+
+      workspace_id ->
+        case PolicyStore.get_policy(workspace_id) do
+          {:ok, policy} -> {:ok, policy.provider_overrides}
+          {:error, :not_found} -> {:ok, %{}}
+          {:error, reason} -> {:error, {:storage_policy_unreadable, reason}}
+        end
+    end
+  end
+
+  defp backend_for(overrides) do
     cond do
       s3_override_for_assets?(overrides) -> :s3
       configured_default() == :s3 -> :s3
@@ -239,12 +265,83 @@ defmodule OptimalEngine.Storage.Assets do
   # as well as from an upload: a local asset is read only from under this
   # Engine's root, never from wherever the row says.
   defp confine(storage_path) do
-    root = Path.expand(Application.get_env(:optimal_engine, :root_path, File.cwd!()))
+    root = root_path()
     path = Path.expand(storage_path)
 
     if not String.contains?(storage_path, <<0>>) and String.starts_with?(path, root <> "/"),
       do: :ok,
       else: {:error, {:asset_outside_root, storage_path}}
+  end
+
+  defp root_path, do: Path.expand(Application.get_env(:optimal_engine, :root_path, File.cwd!()))
+
+  @max_symlink_hops 40
+
+  @doc """
+  The file a stored local asset path names, for code that opens the path
+  itself.
+
+  The path must lie under this Engine's root, the check `read/2` and
+  `materialize/2` apply; it must still lie there once every symlink on it is
+  followed; and it must be a regular file. A FIFO blocks a reader until a writer
+  appears and a device such as `/dev/zero` never ends, so those, and
+  directories, are refused. Nothing is opened, so checking a path never blocks.
+
+  Returns `{:ok, path}` with the symlinks followed, or an error:
+
+    * `{:error, {:asset_outside_root, stored_path}}`
+    * `{:error, {:asset_not_a_file, type}}` for a directory, FIFO, device or socket
+    * `{:error, {:asset_unreadable, stored_path, reason}}` when the path cannot
+      be examined, for example `:enoent` for a missing file or `:eloop` for a
+      symlink loop
+  """
+  @spec confine_local(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def confine_local(storage_path) when is_binary(storage_path) do
+    with :ok <- confine(storage_path),
+         {:ok, resolved} <- follow_symlinks(storage_path, storage_path),
+         {:ok, root} <- follow_symlinks(root_path(), storage_path),
+         :ok <- inside_root(resolved, root, storage_path) do
+      regular_file(resolved, storage_path)
+    end
+  end
+
+  defp inside_root(resolved, root, storage_path) do
+    if String.starts_with?(resolved, root <> "/"),
+      do: :ok,
+      else: {:error, {:asset_outside_root, storage_path}}
+  end
+
+  defp regular_file(path, storage_path) do
+    case File.stat(path) do
+      {:ok, %{type: :regular}} -> {:ok, path}
+      {:ok, %{type: type}} -> {:error, {:asset_not_a_file, type}}
+      {:error, reason} -> {:error, {:asset_unreadable, storage_path, reason}}
+    end
+  end
+
+  # The path with every symlink on it followed, read link by link so that
+  # nothing is opened.
+  defp follow_symlinks(path, storage_path) do
+    case follow(Path.split(Path.expand(path)), "/", 0) do
+      {:ok, resolved} -> {:ok, resolved}
+      {:error, reason} -> {:error, {:asset_unreadable, storage_path, reason}}
+    end
+  end
+
+  defp follow([], resolved, _hops), do: {:ok, resolved}
+  defp follow(_parts, _resolved, hops) when hops > @max_symlink_hops, do: {:error, :eloop}
+  defp follow(["/" | rest], _resolved, hops), do: follow(rest, "/", hops)
+
+  defp follow([part | rest], resolved, hops) do
+    candidate = Path.join(resolved, part)
+
+    case File.read_link(candidate) do
+      {:ok, target} ->
+        follow(Path.split(Path.expand(target, resolved)) ++ rest, "/", hops + 1)
+
+      {:error, _not_a_link} ->
+        follow(rest, candidate, hops)
+    end
   end
 
   @doc """

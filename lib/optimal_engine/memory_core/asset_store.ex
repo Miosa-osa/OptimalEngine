@@ -19,7 +19,7 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
   }
 
   alias OptimalEngine.Pipeline.MultimodalToolRegistry
-  alias OptimalEngine.Storage.Assets
+  alias OptimalEngine.Storage.{AssetReconcile, Assets}
   alias OptimalEngine.Pipeline.Parser.Asset
 
   @spec store_file(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -46,6 +46,7 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
              source_package,
              Keyword.put(opts, :metadata, stored.metadata)
            ),
+         :ok <- count_kept_on_disk(stored),
          :ok <- record_derivation(asset_id, asset, source_package, opts),
          {:ok, stored_asset} <- get(asset_id, opts) do
       {:ok, %{asset: stored_asset, source_package: source_package, storage_backend: stored.backend}}
@@ -906,6 +907,13 @@ defmodule OptimalEngine.MemoryCore.AssetStore do
       [ledger_id, run_id]
     )
   end
+
+  # An asset kept on disk during an object store outage changes the pending
+  # placement gauge, so the count the metrics cache is dropped.
+  defp count_kept_on_disk(%{metadata: %{"storage_fallback_reason" => _reason}}),
+    do: AssetReconcile.invalidate_counts()
+
+  defp count_kept_on_disk(_stored), do: :ok
 
   defp copy_asset(%Asset{} = asset, opts) do
     workspace_id = Keyword.get(opts, :workspace_id, "default")

@@ -72,14 +72,15 @@ defmodule OptimalEngine.API.EmbedCacheLegacyPurgeApiTest do
 
   describe "GET /api/metrics" do
     test "has no purge gauges until the purge is recorded" do
-      assert get_json("/api/metrics")["gauges"] == %{}
+      assert Map.take(get_json("/api/metrics")["gauges"], [@files, @bytes]) == %{}
       refute prometheus() =~ @files
     end
 
     test "sets the two gauges from the record" do
       {:ok, _} = LegacyPurgeRecord.write(7, 4096)
 
-      assert get_json("/api/metrics")["gauges"] == %{@files => 7, @bytes => 4096}
+      assert Map.take(get_json("/api/metrics")["gauges"], [@files, @bytes]) ==
+               %{@files => 7, @bytes => 4096}
 
       body = prometheus()
       assert body =~ "# TYPE #{@files} gauge"
