@@ -493,7 +493,12 @@ defmodule OptimalEngine.Sync.Gate do
   # itself (the root of a version chain is the row itself) is not followed.
   defp top_tokens(gate, table, spec, row, strict) do
     reset_budget(gate)
+    classify(gate, table, spec, row, strict)
+  end
 
+  # `top_tokens/5` without a new budget: a row read from the ledger in the
+  # middle of a classification spends the budget of that classification.
+  defp classify(gate, table, spec, row, strict) do
     visiting =
       case row[spec.key] do
         id when is_binary(id) -> MapSet.new([{table, id}])
@@ -560,8 +565,55 @@ defmodule OptimalEngine.Sync.Gate do
 
   defp ref_tokens(gate, {:any, id}, visiting, strict) do
     table = memoized(gate, {:table_of, id}, fn -> find_table(id) end)
-    if is_binary(table), do: ref_tokens(gate, {:row, table, id}, visiting, strict), else: nil
+
+    cond do
+      is_binary(table) -> ref_tokens(gate, {:row, table, id}, visiting, strict)
+      strict -> gone_tokens(gate, id)
+      true -> nil
+    end
   end
+
+  # An untyped link to an id that is in no table. It may be a row that was
+  # deleted (a link outlives the row it names), and the ledger remembers what
+  # that row carried; an id the ledger never saw is only text that looks like
+  # an id, and names nothing.
+  defp gone_tokens(gate, id) do
+    settled(gate, {:gone, id}, fn ->
+      gate
+      |> gone_types(id)
+      |> Enum.reduce(nil, fn type, acc ->
+        case ledger_tokens(gate, type, Lineage.spec(type), id) do
+          :none -> acc
+          tokens -> union(acc, tokens)
+        end
+      end)
+    end)
+  end
+
+  # The tables the ledger recorded `id` in (among those a link of no stated
+  # type can name), read a chunk of ids at a time by `resolve_any/2`.
+  defp gone_types(gate, id) do
+    memoized(gate, {:gone_types, id}, fn ->
+      gone_types_of(gate, [id]) |> Map.get(id, [])
+    end)
+  end
+
+  defp gone_types_of(gate, ids) do
+    types = Lineage.any_tables()
+
+    sql =
+      "SELECT entity_id, entity_type FROM sync_mutations " <>
+        "WHERE tenant_id = ?1 AND workspace_id = ?2 AND operation != 'delete' " <>
+        "AND entity_type IN (#{marks(3, length(types))}) " <>
+        "AND entity_id IN (#{marks(3 + length(types), length(ids))}) " <>
+        "GROUP BY entity_id, entity_type"
+
+    sql
+    |> query!([gate.tenant_id, gate.workspace_id] ++ types ++ ids)
+    |> Enum.group_by(&hd/1, &List.last/1)
+  end
+
+  defp marks(first, count), do: Enum.map_join(first..(first + count - 1), ", ", &"?#{&1}")
 
   defp row_ref(gate, table, id, visiting, strict) do
     case Lineage.spec(table) do
@@ -659,7 +711,12 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   defp unresolved(strict \\ true)
-  defp unresolved(true), do: MapSet.new([SecurityLabels.unresolved()])
+  # Something that cannot be found has no labels and no partitions we can read:
+  # unresolved on both axes, so a reader of every label but some partitions does
+  # not see it either.
+  defp unresolved(true),
+    do: MapSet.new([SecurityLabels.unresolved(), SecurityLabels.unresolved_partition()])
+
   defp unresolved(false), do: nil
 
   # -- rows that are pointed at, not pointing -----------------------------------
@@ -816,7 +873,10 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   # The distinct values of the columns of `table` that carry a class, label or
-  # partition, for the rows that carry any.
+  # partition, for the rows that carry any. A metadata column is read for its
+  # labels and partitions only (`metadata_labels_sql/1`), so a workspace in
+  # which every memory is labelled returns a few distinct values and not every
+  # memory's whole metadata.
   defp carrying_rows(gate, table, spec) do
     columns =
       Enum.reject(
@@ -845,8 +905,14 @@ defmodule OptimalEngine.Sync.Gate do
     if columns == [] do
       []
     else
+      selects =
+        Enum.map_join(columns, ", ", fn
+          column when column == spec.meta -> metadata_labels_sql(column)
+          column -> quote_name(column)
+        end)
+
       sql =
-        "SELECT DISTINCT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} " <>
+        "SELECT DISTINCT #{selects} FROM #{quote_name(table)} " <>
           "WHERE tenant_id = ?1 AND workspace_id = ?2 AND (#{Enum.join(filters, " OR ")})"
 
       for values <- query!(sql, [gate.tenant_id, gate.workspace_id]) do
@@ -856,6 +922,24 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   defp non_empty_json(column), do: "(#{column} NOT IN ('[]', '') OR NOT json_valid(#{column}))"
+
+  # The labels and partitions of a metadata column as a small JSON object, which
+  # `SecurityLabels.metadata_tokens/1` reads like the whole column. Metadata that
+  # is not JSON names nothing, as there.
+  # A key that appears twice is read as `0`, which is not a list and so is
+  # unresolved: SQLite reads the first of two, `Jason` the last, and a row must
+  # not pass as unlabelled because the two disagree.
+  defp metadata_labels_sql(column) do
+    quoted = quote_name(column)
+
+    field = fn key ->
+      "CASE WHEN (SELECT count(*) FROM json_each(#{quoted}) WHERE key = '#{key}') > 1 THEN 0 " <>
+        "ELSE json_extract(#{quoted}, '$.#{key}') END"
+    end
+
+    "CASE WHEN json_valid(#{quoted}) THEN json_object('security_labels', #{field.("security_labels")}, " <>
+      "'partition_ids', #{field.("partition_ids")}) END"
+  end
 
   defp holds_above?(gate) do
     shared(gate, :holds_above, fn ->
@@ -941,7 +1025,7 @@ defmodule OptimalEngine.Sync.Gate do
       for [payload] <- rows, reduce: nil do
         acc ->
           row = mutation_row(%{"payload" => decode_payload(payload)})
-          union(acc, top_tokens(gate, table, spec, row, false))
+          union(acc, classify(gate, table, spec, row, false))
       end
     end
   end
@@ -1287,6 +1371,15 @@ defmodule OptimalEngine.Sync.Gate do
     for id <- unknown do
       :ets.insert(gate.memo, {{:table_of, id}, Map.get(found, id)})
     end
+
+    unknown
+    |> Enum.reject(&Map.has_key?(found, &1))
+    |> Enum.reject(&:ets.member(gate.memo, {:gone_types, &1}))
+    |> Enum.chunk_every(@chunk)
+    |> Enum.each(fn chunk ->
+      types = gone_types_of(gate, chunk)
+      for id <- chunk, do: :ets.insert(gate.memo, {{:gone_types, id}, Map.get(types, id, [])})
+    end)
 
     for id <- Enum.uniq(ids),
         table = :ets.lookup_element(gate.memo, {:table_of, id}, 2),

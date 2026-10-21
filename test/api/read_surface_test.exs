@@ -219,6 +219,37 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
       assert readable?.(["restricted", "internal"], ["team-a"])
     end
 
+    test "metadata that repeats a key is unresolved for the aggregate rule, as it is for a row",
+         ctx do
+      for {name, metadata} <- [
+            labels: ~s({"security_labels":[],"security_labels":["restricted"]}),
+            partitions: ~s({"partition_ids":[],"partition_ids":["team-a"]})
+          ] do
+        {:ok, workspace} = Workspace.create(%{slug: "dup-#{name}-#{ctx.n}", name: "Dup #{name}"})
+
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO memories (id, tenant_id, workspace_id, content, metadata) VALUES (?1, 'default', ?2, 'Repeated key', ?3)",
+            ["mem-dup-#{name}-#{ctx.n}", workspace.id, metadata]
+          )
+
+        report = %{"id" => "report-dup-#{name}-#{ctx.n}", "kind" => "promises"}
+
+        readable? = fn labels, partitions ->
+          Gate.with_reader(
+            "default",
+            workspace.id,
+            SecurityLabels.grants(labels, partitions),
+            &Gate.readable_row?(&1, "analysis_reports", report)
+          )
+        end
+
+        # An empty workspace would let this aggregate through.
+        refute readable?.(["internal"], []), "#{name}: read past a repeated key"
+        assert readable?.(["*"], ["*"]), "#{name}: a key of everything is not turned away"
+      end
+    end
+
     test "a row whose source cannot be found is read by no one", ctx do
       {:ok, orphan} =
         Versioned.create(%{
@@ -308,6 +339,49 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
     end
   end
 
+  describe "a link to a row that was deleted" do
+    setup ctx do
+      {:ok, _} = OptimalEngine.Sync.enable("default", ctx.ws, "user:owner")
+      fact_id = "fact-gone-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, security_labels) VALUES (?1, 'default', ?2, 'Wire 5521', '[\"restricted\"]')",
+          [fact_id, ctx.ws]
+        )
+
+      {:ok, _} = OptimalEngine.Sync.Capture.seal()
+      {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [fact_id])
+      %{fact_id: fact_id}
+    end
+
+    test "is judged by what the ledger recorded for it, when the link names no type", ctx do
+      cite = fn name, uri ->
+        id = "mem-#{name}-#{ctx.n}"
+
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO memories (id, tenant_id, workspace_id, content, citation_uri) VALUES (?1, 'default', ?2, ?3, ?4)",
+            [id, ctx.ws, "Summary #{name}", uri]
+          )
+
+        id
+      end
+
+      deleted = cite.("deleted", "optimal://fact/#{ctx.fact_id}")
+      never = cite.("never", "optimal://fact/fact-never-seen-#{ctx.n}")
+
+      bare = ids(export(ctx, mint(ctx, %{}), "memories")["memories"])
+      refute deleted in bare
+      # An id the ledger never saw is text that looks like an id, and names nothing.
+      assert never in bare
+
+      granted = mint(ctx, %{"allowed_security_labels" => ["restricted"]})
+      assert deleted in ids(export(ctx, granted, "memories")["memories"])
+      assert deleted in ids(export(ctx, nil, "memories")["memories"])
+    end
+  end
+
   describe "what a payload carries besides its row" do
     test "a conflict shows a reader the row and blobs it was judged by, nothing else", ctx do
       conflict(
@@ -327,6 +401,24 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
 
       # The trusted operator is shown the record as it was written.
       assert conflicts(ctx, nil)[cid(ctx, "extra")]["local"]["note"] =~ "SIDE CHANNEL"
+    end
+
+    test "a key granted everything is shown the row and blobs of a conflict version too", ctx do
+      conflict(
+        ctx,
+        "extra-all",
+        "memories",
+        %{"id" => ctx.plain.id, "content" => "Lunch is at one"},
+        %{"note" => "SIDE CHANNEL 6614"}
+      )
+
+      everything = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+      shown = conflicts(ctx, everything)
+
+      assert shown[cid(ctx, "extra-all")]["local"]["row"]["content"] == "Lunch is at one"
+      assert shown[cid(ctx, "extra-all")]["local"] |> Map.keys() |> Enum.sort() == ["blobs", "row"]
+      assert shown[cid(ctx, "extra-all")]["remote"] |> Map.keys() |> Enum.sort() == ["blobs", "row"]
+      refute body_of_conflicts(ctx, everything) =~ "SIDE CHANNEL"
     end
 
     test "a ledger entry shows a reader the row and blobs, nothing else", ctx do
@@ -636,6 +728,41 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
       end
     end
 
+    test "partitions that cannot be read hide the row from a reader of every label", ctx do
+      for {name, partitions} <- [
+            text: ~s("not a list"),
+            number: "[1]",
+            null: "[null]",
+            object: ~s([{"a":1}])
+          ] do
+        memory = remember(ctx.ws, "Odd partitions #{name}", []).memory
+
+        {:ok, _} =
+          Store.raw_query(
+            "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.partition_ids', json(?2)) WHERE id = ?1",
+            [memory.id, partitions]
+          )
+
+        every_label = mint(ctx, %{"allowed_security_labels" => ["*"]})
+
+        with_partitions =
+          mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["team-a"]})
+
+        every_partition = mint(ctx, %{"allowed_partitions" => ["*"]})
+        everything = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+        for token <- [every_label, with_partitions] do
+          refute memory.id in ids(export(ctx, token, "memories")["memories"]),
+                 "#{name} was shown to a reader of every label"
+        end
+
+        for token <- [every_partition, everything] do
+          assert memory.id in ids(export(ctx, token, "memories")["memories"]),
+                 "#{name} was hidden from a reader of every partition"
+        end
+      end
+    end
+
     test "class names are not case sensitive and labels are trimmed", ctx do
       memory = remember(ctx.ws, "Casing check", []).memory
       restricted = mint(ctx, %{"allowed_security_labels" => ["restricted"]})
@@ -662,6 +789,30 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
 
       refute ghost.id in ids(export(ctx, mint(ctx, %{}), "memories")["memories"])
       assert ghost.id in ids(export(ctx, nil, "memories")["memories"])
+    end
+
+    test "a row with a missing source is not read by a key of every label and some partitions",
+         ctx do
+      {:ok, ghost} =
+        Versioned.create(%{
+          content: "Partitioned, and cites a chunk that is gone",
+          workspace_id: ctx.ws,
+          source_chunk_id: "chk-ghost-part-#{ctx.n}",
+          metadata: %{"partition_ids" => ["team-a"]}
+        })
+
+      every_label = mint(ctx, %{"allowed_security_labels" => ["*"]})
+
+      every_label_some_partitions =
+        mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["team-a"]})
+
+      everything = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+
+      for token <- [every_label, every_label_some_partitions] do
+        refute ghost.id in ids(export(ctx, token, "memories")["memories"])
+      end
+
+      assert ghost.id in ids(export(ctx, everything, "memories")["memories"])
     end
 
     test "an unknown classification level is read by no one", ctx do

@@ -13,6 +13,10 @@ defmodule OptimalEngine.Auth.Bootstrap do
       OPTIMAL_BOOTSTRAP_WORKSPACES  comma list of slugs  (default "*")
 
   The scopes are explicit on purpose: an omitted list on a key means `*`.
+  The defaults are those of a key that is being created. A scope name this API
+  does not know (`OptimalEngine.API.PermissionPlug.known_scopes/0`) fails the
+  boot like a malformed token, because a key with a mistyped scope is denied
+  everywhere.
 
   A bootstrap key whose scopes include `*` or `admin` is the operator's own
   root, which may mint any grant, so it also holds every label and partition
@@ -25,18 +29,35 @@ defmodule OptimalEngine.Auth.Bootstrap do
   A bootstrap key registered before the grants existed is given them once,
   with a warning in the log, and marked `grants_initialized`, so that narrowing
   them later (to a list, or `[]` for none) is never undone at the next boot.
-  Boot is idempotent. Changing the token (rotation) registers the new key and
-  revokes the previous bootstrap key. A malformed token fails the boot; it is
-  never ignored, because the instance would then be unreachable.
+
+  A variable that is set is the key's at every boot: when it differs from what
+  the key holds (the operator changed the list and kept the token), the key is
+  brought to it, with a warning in the log. A variable that is not set, or is
+  blank, leaves what the key holds as it is: a platform that sets the scopes
+  only at the first boot does not demote its key at the next restart. A key
+  that stops being root loses its `"*"` grants (a field that held nothing else
+  is removed, so that the key can be given them again if it becomes root once
+  more; grants an operator set to a list, or to `[]`, are never touched). A key
+  that becomes root is given them once, like a key that predates the grants. A
+  narrowing of the scopes or the workspaces made in the database is undone at
+  the next boot when the environment sets them. Boot is idempotent. Changing the token (rotation) registers a new key with
+  the defaults for its scopes and revokes the previous bootstrap key: grants an
+  operator narrowed on the old key are not carried over, so set them again on
+  the new one. A malformed token fails the boot; it is never ignored, because
+  the instance would then be unreachable.
   """
 
   require Logger
 
+  alias OptimalEngine.API.PermissionPlug
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Store
 
   @source "bootstrap"
   @root_scopes ["*", "admin"]
+  @default_scopes ["read", "write"]
+  @default_workspaces ["*"]
+  @grant_fields ["allowed_security_labels", "allowed_partitions"]
 
   @spec run(%{optional(String.t()) => String.t()}) :: :ok | {:error, term()}
   def run(env \\ System.get_env()) do
@@ -49,23 +70,15 @@ defmodule OptimalEngine.Auth.Bootstrap do
   defp register(token, env) do
     tenant = blank(env["OPTIMAL_BOOTSTRAP_TENANT"]) || "default"
 
-    scopes = list(env["OPTIMAL_BOOTSTRAP_SCOPES"], ["read", "write"])
+    # Unset, blank or only commas is `nil`: keep what an existing key holds, and
+    # take the defaults only for a key that is being created.
+    scopes = list(env["OPTIMAL_BOOTSTRAP_SCOPES"])
+    workspaces = list(env["OPTIMAL_BOOTSTRAP_WORKSPACES"])
 
-    metadata =
-      if root?(scopes),
-        do: Map.put(all_grants(), "source", @source),
-        else: %{"source" => @source}
-
-    attrs = %{
-      tenant_id: tenant,
-      name: "bootstrap",
-      scopes: scopes,
-      workspace_scope: list(env["OPTIMAL_BOOTSTRAP_WORKSPACES"], ["*"]),
-      metadata: metadata
-    }
-
-    with {:ok, outcome} <- ApiKey.ensure(token, attrs),
+    with :ok <- known_scopes(scopes),
+         {:ok, outcome} <- ApiKey.ensure(token, create_attrs(tenant, scopes, workspaces)),
          {:ok, id} <- id_of(token),
+         :ok <- reconcile(id, scopes, workspaces),
          :ok <- grant_reads(id),
          :ok <- ApiKey.revoke_source(tenant, @source, id) do
       Logger.info("[Bootstrap] bootstrap key #{outcome} (id #{id})")
@@ -77,7 +90,131 @@ defmodule OptimalEngine.Auth.Bootstrap do
     end
   end
 
+  defp create_attrs(tenant, scopes, workspaces) do
+    scopes = scopes || @default_scopes
+
+    metadata =
+      if root?(scopes),
+        do: Map.put(all_grants(), "source", @source),
+        else: %{"source" => @source}
+
+    %{
+      tenant_id: tenant,
+      name: "bootstrap",
+      scopes: scopes,
+      workspace_scope: workspaces || @default_workspaces,
+      metadata: metadata
+    }
+  end
+
+  defp known_scopes(nil), do: :ok
+
+  defp known_scopes(scopes) do
+    case Enum.reject(scopes, &(&1 in PermissionPlug.known_scopes())) do
+      [] -> :ok
+      unknown -> {:error, {:unknown_scopes, unknown}}
+    end
+  end
+
   defp root?(scopes), do: Enum.any?(scopes, &(&1 in @root_scopes))
+
+  # `ApiKey.ensure/2` leaves a key that exists as it is. A variable the operator
+  # set is their statement of what the key may do, so a key that holds something
+  # else (the list was edited and the token kept) is brought to it; one they did
+  # not set leaves the key as it is. The scopes, the workspaces and, when the key
+  # stops being root, the removal of its wildcard grants are written in one
+  # statement, so a failure between them cannot leave a key that is not root
+  # holding `"*"`.
+  defp reconcile(_id, nil, nil), do: :ok
+
+  defp reconcile(id, scopes, workspaces) do
+    with {:ok, [[held_scopes, held_workspaces, metadata]]} <-
+           Store.raw_query(
+             "SELECT scopes, workspace_scope, metadata FROM api_keys WHERE id = ?1 AND json_extract(metadata, '$.source') = ?2",
+             [id, @source]
+           ) do
+      held_scopes = decode_list(held_scopes)
+      held_workspaces = decode_list(held_workspaces)
+      new_scopes = scopes || held_scopes
+      new_workspaces = workspaces || held_workspaces
+
+      if new_scopes == held_scopes and new_workspaces == held_workspaces do
+        :ok
+      else
+        Logger.warning(
+          "[Bootstrap] the bootstrap key (id #{id}) held scopes #{inspect(held_scopes)} and workspaces " <>
+            "#{inspect(held_workspaces)}; it now holds scopes #{inspect(new_scopes)} and " <>
+            "workspaces #{inspect(new_workspaces)}, as the environment says."
+        )
+
+        metadata =
+          if root?(held_scopes) and not root?(new_scopes),
+            do: drop_wildcards(id, decode_map(metadata)),
+            else: decode_map(metadata)
+
+        case Store.raw_query(
+               "UPDATE api_keys SET scopes = ?2, workspace_scope = ?3, metadata = ?4 WHERE id = ?1",
+               [
+                 id,
+                 Jason.encode!(new_scopes),
+                 Jason.encode!(new_workspaces),
+                 Jason.encode!(metadata)
+               ]
+             ) do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+      end
+    else
+      {:ok, []} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The metadata of a key that is no longer root. A grant list loses its `"*"`;
+  # one that held nothing else is removed (not left as `[]`, which would read as
+  # an operator's choice of none and keep the key from being given the grants
+  # again when it becomes root once more), and when both are gone the marker
+  # goes too. A list the operator set has no `"*"` in it and is never touched.
+  defp drop_wildcards(id, metadata) do
+    dropped =
+      for field <- @grant_fields, is_list(metadata[field]) and "*" in metadata[field], do: field
+
+    if dropped == [] do
+      metadata
+    else
+      Logger.warning(
+        "[Bootstrap] the bootstrap key (id #{id}) is no longer root, so it no longer holds the " <>
+          "wildcard grant of #{Enum.join(dropped, " and ")}."
+      )
+
+      metadata =
+        Enum.reduce(dropped, metadata, fn field, acc ->
+          case Enum.reject(acc[field], &(&1 == "*")) do
+            [] -> Map.delete(acc, field)
+            kept -> Map.put(acc, field, kept)
+          end
+        end)
+
+      if Enum.any?(@grant_fields, &Map.has_key?(metadata, &1)),
+        do: metadata,
+        else: Map.delete(metadata, "grants_initialized")
+    end
+  end
+
+  defp decode_list(json) do
+    case Jason.decode(json || "") do
+      {:ok, list} when is_list(list) -> list
+      _ -> []
+    end
+  end
+
+  defp decode_map(json) do
+    case Jason.decode(json || "") do
+      {:ok, map} when is_map(map) -> map
+      _ -> %{}
+    end
+  end
 
   defp all_grants do
     %{
@@ -128,14 +265,15 @@ defmodule OptimalEngine.Auth.Bootstrap do
   defp id_of("oe_" <> <<id::binary-size(24), "_", _::binary>>), do: {:ok, id}
   defp id_of(_), do: {:error, :invalid_token}
 
-  defp list(nil, default), do: default
+  # A comma list, or `nil` when the variable is not set or holds no item.
+  defp list(nil), do: nil
 
-  defp list(value, default) do
+  defp list(value) do
     case value
          |> String.split(",", trim: true)
          |> Enum.map(&String.trim/1)
          |> Enum.reject(&(&1 == "")) do
-      [] -> default
+      [] -> nil
       items -> items
     end
   end

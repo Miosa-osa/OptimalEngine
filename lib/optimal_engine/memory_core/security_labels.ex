@@ -98,13 +98,16 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
       must share at least one of them for each such row (see `permits?/2`);
     * `{:partition_all, id}` a partition the reader must hold in full (see
       `permits?/2`);
-    * `:unresolved` something that could not be read or found.
+    * `:unresolved` something that could not be read or found;
+    * `:unresolved_partition` partitions that could not be read: the same, on
+      the partition axis (a reader that may see every label does not see past it).
   """
   @type token ::
           {:label, String.t()}
           | {:partition_set, [String.t()]}
           | {:partition_all, String.t()}
           | :unresolved
+          | :unresolved_partition
 
   @typedoc """
   A reader's grants: the labels and partitions it may see, and whether it may
@@ -125,6 +128,14 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
   def unresolved, do: :unresolved
 
   @doc """
+  The token for partitions that could not be read, or whose rows could not be
+  found. A reader of every label does not see past it: only one of every
+  partition does.
+  """
+  @spec unresolved_partition() :: :unresolved_partition
+  def unresolved_partition, do: :unresolved_partition
+
+  @doc """
   The labels of a stored `security_labels` value as tokens. A value that
   cannot be read, and an element that is not a non-blank string, are
   `unresolved`: they are never taken for no label.
@@ -140,7 +151,7 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
   @doc """
   The partitions of a stored `partition_ids` value as tokens: one
   `{:partition_set, ids}` for the row (none when it has none), and
-  `unresolved` when the value or an element cannot be read.
+  `unresolved_partition` when the value or an element cannot be read.
   """
   @spec partition_tokens(term()) :: [token()]
   def partition_tokens(value) do
@@ -148,14 +159,14 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
       {:ok, ids} ->
         tokens = Enum.map(ids, &label_token(&1, :partition))
         names = for {:partition, id} <- tokens, do: id
-        unreadable = if :unresolved in tokens, do: [:unresolved], else: []
+        unreadable = if :unresolved in tokens, do: [:unresolved_partition], else: []
 
         if names == [],
           do: unreadable,
           else: [{:partition_set, names |> Enum.uniq() |> Enum.sort()} | unreadable]
 
       :invalid ->
-        [:unresolved]
+        [:unresolved_partition]
     end
   end
 
@@ -223,7 +234,9 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
     * `{:partition_all, id}` tokens (an aggregate, which is written from
       every partition of its workspace) must all be granted;
     * `unresolved` is never granted, except to a reader that may see all
-      labels.
+      labels; `unresolved_partition` (partitions that could not be read) is
+      never granted, except to a reader that may see all partitions: a reader
+      of every label does not see past a partition it cannot read.
   """
   @spec permits?(grants(), MapSet.t(token()) | nil) :: boolean()
   def permits?(grants, nil), do: permits?(grants, MapSet.new())
@@ -238,7 +251,9 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
         (not MapSet.member?(tokens, :unresolved) and subset?(labels, grants.labels))
 
     partitions_ok? =
-      grants.all_partitions? or partitions_ok?(grants.partitions, sets, required)
+      grants.all_partitions? or
+        (not MapSet.member?(tokens, :unresolved_partition) and
+           partitions_ok?(grants.partitions, sets, required))
 
     labels_ok? and partitions_ok?
   end
@@ -260,13 +275,13 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
 
   @doc """
   The class rank of a set of tokens: the highest class named, restricted for
-  an `unresolved` one, nil for none.
+  an `unresolved` one (of either axis), nil for none.
   """
   @spec token_rank(MapSet.t(token()) | nil) :: rank() | nil
   def token_rank(nil), do: nil
 
   def token_rank(tokens) do
-    if MapSet.member?(tokens, :unresolved),
+    if MapSet.member?(tokens, :unresolved) or MapSet.member?(tokens, :unresolved_partition),
       do: 3,
       else: highest_rank(for({:label, name} <- tokens, do: name))
   end

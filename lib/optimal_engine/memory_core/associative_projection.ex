@@ -85,10 +85,14 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
           SELECT 1 FROM json_each(a.security_labels) required
           WHERE required.value NOT IN (SELECT value FROM json_each(?#{base}))
         ))
-        AND (?#{base + 4} = 1 OR NOT EXISTS (
-          SELECT 1 FROM json_each(a.partition_ids) required
-          WHERE required.value NOT IN (SELECT value FROM json_each(?#{base + 1}))
-        ))
+        AND (?#{base + 4} = 1 OR CASE
+          WHEN json_array_length(?#{base + 1}) = 0
+            THEN NOT EXISTS (SELECT 1 FROM json_each(COALESCE(NULLIF(a.partition_ids, ''), '[]')))
+          ELSE EXISTS (
+            SELECT 1 FROM json_each(COALESCE(NULLIF(a.partition_ids, ''), '[]')) carried
+            WHERE carried.value IN (SELECT value FROM json_each(?#{base + 1}))
+          )
+        END)
         #{temporal}
       ORDER BY confidence DESC, precision_score DESC, updated_at DESC
       LIMIT ?#{base + 2}

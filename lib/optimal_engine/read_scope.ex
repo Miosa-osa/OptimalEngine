@@ -141,7 +141,14 @@ defmodule OptimalEngine.ReadScope do
 
     shown =
       if unfiltered?(scope) do
-        Enum.map(visible, &Map.put(&1, :redacted, false))
+        Enum.map(visible, fn conflict ->
+          conflict
+          |> Map.merge(%{
+            local: served_version(conflict.local),
+            remote: served_version(conflict.remote),
+            redacted: false
+          })
+        end)
       else
         Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), scope.ceiling, fn gate ->
           Enum.map(visible, &redact_conflict(gate, &1))
