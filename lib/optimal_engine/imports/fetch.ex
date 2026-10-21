@@ -4,8 +4,10 @@ defmodule OptimalEngine.Imports.Fetch do
   without trusting the URL or the server.
 
   The Engine fetches the URL itself, so every URL is checked before it is
-  requested:
+  requested, the first one and every redirect alike:
 
+    * at most 8 KiB, with no control character (one could split a request or
+      a log line)
     * `https`, with the server's certificate and host name verified; plain
       `http` only to an allowed host
     * when allowed hosts are configured, only those hosts; an entry is a host
@@ -14,7 +16,8 @@ defmodule OptimalEngine.Imports.Fetch do
       link-local, shared, multicast and reserved ranges are refused) unless
       it is an allowed host
     * the connection goes to the address that was checked, so a second DNS
-      answer cannot move it
+      answer cannot move it; at most four addresses are tried, each
+      within what is left of the download's deadline
     * a redirect is followed only to an allowed `https` host, checked the same
       way, at most five times
 
@@ -46,6 +49,9 @@ defmodule OptimalEngine.Imports.Fetch do
 
   @max_redirects 5
   @connect_timeout_ms 15_000
+  @max_addresses 4
+  @max_url_bytes 8_192
+  @control ~r/[\x00-\x1F\x7F]/
   @recv_timeout_ms 60_000
   @default_deadline_ms 1_800_000
   @default_min_bytes_per_second 16_384
@@ -198,6 +204,20 @@ defmodule OptimalEngine.Imports.Fetch do
   # ── checking a URL ─────────────────────────────────────────────────────
 
   defp target(url, kind) do
+    if plain_url?(url), do: checked_target(url, kind), else: refused(kind)
+  end
+
+  defp refused(:redirect), do: {:error, :redirect_refused}
+  defp refused(_kind), do: {:error, :invalid_source_url}
+
+  @doc "True for a URL of at most 8 KiB with no control character."
+  @spec plain_url?(String.t()) :: boolean()
+  def plain_url?(url) when is_binary(url),
+    do: byte_size(url) <= @max_url_bytes and not Regex.match?(@control, url)
+
+  def plain_url?(_url), do: false
+
+  defp checked_target(url, kind) do
     uri = URI.parse(url)
     host = if is_binary(uri.host), do: String.downcase(uri.host), else: ""
     allowed = host != "" and allowed_host?(host)
@@ -294,6 +314,9 @@ defmodule OptimalEngine.Imports.Fetch do
       {:redirect, _location} when hops == 0 ->
         {:error, :too_many_redirects}
 
+      {:redirect, location} when not is_binary(location) ->
+        {:error, :redirect_refused}
+
       {:redirect, location} ->
         next =
           try do
@@ -302,7 +325,8 @@ defmodule OptimalEngine.Imports.Fetch do
             _ -> nil
           end
 
-        with next when is_binary(next) <- next || {:error, :redirect_refused},
+        with true <- plain_url?(location) || {:error, :redirect_refused},
+             next when is_binary(next) <- next || {:error, :redirect_refused},
              {:ok, next_target} <- target(next, :redirect) do
           follow(next_target, dest, max_bytes, clock, hops - 1)
         end
@@ -313,7 +337,7 @@ defmodule OptimalEngine.Imports.Fetch do
   end
 
   defp get(target, dest, max_bytes, clock) do
-    with {:ok, socket} <- connect(target) do
+    with {:ok, socket} <- connect(target, clock) do
       conn = Map.merge(clock, %{socket: socket, scheme: target.scheme})
 
       try do
@@ -371,17 +395,29 @@ defmodule OptimalEngine.Imports.Fetch do
 
   # The next address is tried only when this one could not be reached; a
   # server that answered and failed the TLS handshake fails the download.
-  defp connect(target) do
-    Enum.reduce_while(target.ips, {:error, {:download_failed, "connect_failed"}}, fn ip, _acc ->
-      case open(target, ip) do
-        {:ok, socket} ->
-          {:halt, {:ok, socket}}
+  defp connect(target, clock) do
+    target.ips
+    |> Enum.take(@max_addresses)
+    |> Enum.reduce_while({:error, {:download_failed, "connect_failed"}}, fn ip, _acc ->
+      left = clock.deadline - System.monotonic_time(:millisecond)
 
-        {:error, reason} ->
-          error = {:error, {:download_failed, connect_code(reason)}}
-          if unreachable?(reason), do: {:cont, error}, else: {:halt, error}
+      if left <= 0 do
+        {:halt, {:error, {:download_failed, "timeout"}}}
+      else
+        connect_to(target, ip, min(@connect_timeout_ms, left))
       end
     end)
+  end
+
+  defp connect_to(target, ip, timeout) do
+    case open(target, ip, timeout) do
+      {:ok, socket} ->
+        {:halt, {:ok, socket}}
+
+      {:error, reason} ->
+        error = {:error, {:download_failed, connect_code(reason)}}
+        if unreachable?(reason), do: {:cont, error}, else: {:halt, error}
+    end
   end
 
   defp connect_code(reason) when reason in [:timeout, :etimedout], do: "timeout"
@@ -392,12 +428,12 @@ defmodule OptimalEngine.Imports.Fetch do
   defp unreachable?(reason),
     do: reason in [:econnrefused, :ehostunreach, :enetunreach, :etimedout, :timeout, :eaddrnotavail]
 
-  defp open(%{scheme: "https"} = target, ip) do
-    :ssl.connect(ip, target.port, ssl_opts(target), @connect_timeout_ms)
+  defp open(%{scheme: "https"} = target, ip, timeout) do
+    :ssl.connect(ip, target.port, ssl_opts(target), timeout)
   end
 
-  defp open(target, ip) do
-    :gen_tcp.connect(ip, target.port, [:binary, active: false, packet: :raw], @connect_timeout_ms)
+  defp open(target, ip, timeout) do
+    :gen_tcp.connect(ip, target.port, [:binary, active: false, packet: :raw], timeout)
   end
 
   defp ssl_opts(target) do

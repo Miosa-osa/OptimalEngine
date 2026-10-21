@@ -26,7 +26,7 @@ defmodule OptimalEngine.ImportsTest do
         [workspace, tenant]
       )
 
-    %{workspace: workspace}
+    %{workspace: workspace, tenant: tenant}
   end
 
   defp enqueue(workspace) do
@@ -104,5 +104,40 @@ defmodule OptimalEngine.ImportsTest do
     assert File.exists?(queued_staged.source)
     assert File.dir?(young)
     assert File.dir?(stranger)
+  end
+
+  test "the sweep reads every job, so a job past the first page keeps its report", ctx do
+    staged =
+      for _ <- 1..3 do
+        {staged, {:ok, job, :queued}} = enqueue(ctx.workspace)
+
+        {:ok, _} =
+          Store.raw_query("UPDATE jobs SET status = 'completed' WHERE id = ?1", [job.id])
+
+        File.write!(Path.join(staged.dir, "report.json"), "{}")
+        age!(staged.dir)
+        staged
+      end
+
+    # A page of one job: the old single read saw only the newest job and took
+    # the other two folders for orphans, reports and all.
+    Imports.sweep(86_400, page: 1)
+
+    for %{dir: dir} <- staged, do: assert(File.ls!(dir) == ["report.json"])
+  end
+
+  test "an idempotency key is looked up within a tenant", ctx do
+    staged = Imports.stage()
+    File.write!(staged.source, Fixture.export())
+    source = %{"kind" => "upload", "bytes" => 1}
+
+    {:ok, job, :queued} =
+      Imports.enqueue_notion(ctx.workspace, staged, source, idempotency_key: "k-1")
+
+    assert {:ok, %{id: id}} = Imports.existing(ctx.workspace, "k-1")
+    assert id == job.id
+    assert {:ok, %{id: ^id}} = Imports.existing(ctx.workspace, "k-1", tenant_id: ctx.tenant)
+    assert :none = Imports.existing(ctx.workspace, "k-1", tenant_id: "someone-else")
+    assert {:error, :not_found} = Jobs.find_by_idempotency_key("no-such:ws", "import.notion:k-1")
   end
 end

@@ -151,6 +151,10 @@ defmodule OptimalEngine.Imports.NotionTest do
     assert Enum.map(children.pages, &{&1.title, &1.children}) == [{"Onboarding", 1}, {"Tasks", 2}]
 
     assert {:error, :not_found} = Notion.tree(ctx.workspace, "ffffffffffffffffffffffffffffffff")
+
+    # Another tenant reads nothing here.
+    assert {:ok, %{pages: []}} = Notion.tree(ctx.workspace, nil, tenant_id: "someone-else")
+    assert {:ok, %{pages: [_, _]}} = Notion.tree(ctx.workspace, nil, tenant_id: ctx.tenant)
   end
 
   test "a re-import updates in place: unchanged pages are skipped and a moved page has one parent",

@@ -45,6 +45,7 @@ defmodule OptimalEngine.Imports do
   @default_max_bytes 1024 * 1024 * 1024
   @default_max_outstanding 2
   @sweep_age_seconds 86_400
+  @sweep_page 5_000
   @import_id ~r/\Aimp_[0-9a-f]{24}\z/
 
   @type staged :: %{id: String.t(), dir: Path.t(), source: Path.t()}
@@ -80,13 +81,16 @@ defmodule OptimalEngine.Imports do
 
   @doc """
   The import a workspace already started with `idempotency_key`, if any, so
-  a repeated request is answered before its body is read.
+  a repeated request is answered before its body is read. Options:
+  `:tenant_id`, the requester's tenant (default: the workspace's own).
   """
-  @spec existing(String.t(), String.t() | nil) :: {:ok, Jobs.job()} | :none
-  def existing(_workspace_id, key) when key in [nil, ""], do: :none
+  @spec existing(String.t(), String.t() | nil, keyword()) :: {:ok, Jobs.job()} | :none
+  def existing(workspace_id, key, opts \\ [])
 
-  def existing(workspace_id, key) do
-    case Jobs.find_by_idempotency_key(workspace_id, @notion <> ":" <> key) do
+  def existing(_workspace_id, key, _opts) when key in [nil, ""], do: :none
+
+  def existing(workspace_id, key, opts) do
+    case Jobs.find_by_idempotency_key(workspace_id, @notion <> ":" <> key, opts) do
       {:ok, %{kind: @notion} = job} -> {:ok, job}
       _ -> :none
     end
@@ -135,19 +139,14 @@ defmodule OptimalEngine.Imports do
   queued or running and are older than `max_age_seconds` (default one day),
   however they ended, including jobs dead-lettered when a lease ran out, and
   staging folders no job refers to. Reports are kept. Returns how many folders
-  were cleaned.
+  were cleaned. Jobs are read `:page` at a time (default 5,000), all of them.
   """
-  @spec sweep(non_neg_integer()) :: non_neg_integer()
-  def sweep(max_age_seconds \\ @sweep_age_seconds) do
-    with {:ok, jobs} <- Jobs.list_kind(@notion),
-         {:ok, names} <- File.ls(dir()) do
-      active =
-        for %{status: status, payload: %{"import_id" => id}} <- jobs,
-            status in ["available", "running"],
-            into: MapSet.new(),
-            do: id
+  @spec sweep(non_neg_integer(), keyword()) :: non_neg_integer()
+  def sweep(max_age_seconds \\ @sweep_age_seconds, opts \\ []) do
+    page = Keyword.get(opts, :page, @sweep_page)
 
-      known = MapSet.new(jobs, & &1.payload["import_id"])
+    with {:ok, names} <- File.ls(dir()),
+         {:ok, known, active} <- import_ids(page) do
       cutoff = System.os_time(:second) - max_age_seconds
 
       Enum.count(names, fn name ->
@@ -162,6 +161,29 @@ defmodule OptimalEngine.Imports do
       end)
     else
       _ -> 0
+    end
+  end
+
+  # Every import job's folder, and those still queued or running, read a page
+  # at a time, so a folder is never taken for an orphan because its job sat
+  # past the first page.
+  defp import_ids(page, offset \\ 0, known \\ MapSet.new(), active \\ MapSet.new()) do
+    case Jobs.list_kind(@notion, limit: page, offset: offset) do
+      {:ok, jobs} ->
+        known = Enum.reduce(jobs, known, &MapSet.put(&2, &1.payload["import_id"]))
+
+        active =
+          for %{status: status, payload: %{"import_id" => id}} <- jobs,
+              status in ["available", "running"],
+              into: active,
+              do: id
+
+        if length(jobs) < page,
+          do: {:ok, known, active},
+          else: import_ids(page, offset + page, known, active)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

@@ -382,6 +382,52 @@ defmodule OptimalEngine.Imports.FetchTest do
     assert {:error, :source_url_refused} = Fetch.check("https://localhost/export.zip")
   end
 
+  test "a URL or a redirect Location over 8 KiB or with a control character is refused", ctx do
+    long = "https://93.184.216.34/" <> String.duplicate("a", 8_200)
+    assert {:error, :invalid_source_url} = Fetch.check(long)
+    assert {:error, :invalid_source_url} = Fetch.check("https://93.184.216.34/a\u0000b")
+    assert {:error, :invalid_source_url} = Fetch.check("https://93.184.216.34/a\tb")
+    refute Fetch.plain_url?(long)
+    assert Fetch.plain_url?("https://93.184.216.34/export.zip?X-Signature=abc")
+
+    for location <- ["https://localhost/a\tb", "https://localhost/" <> String.duplicate("a", 8_200)] do
+      url =
+        raw_server(fn socket ->
+          :gen_tcp.send(socket, "HTTP/1.1 302 Found\r\nLocation: #{location}\r\n\r\n")
+        end)
+
+      assert {:error, :redirect_refused} =
+               Fetch.download(url <> "/export.zip", dest(ctx), 1_000_000)
+    end
+  end
+
+  test "at most four addresses are tried, each within the deadline", ctx do
+    # The fifth address answers, the first four refuse: with the cap the
+    # download never reaches it. 127.0.0.0/8 is all loopback on Linux; a
+    # host without the extra loopback addresses skips the check.
+    case :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 6}]) do
+      {:ok, listen} ->
+        {:ok, port} = :inet.port(listen)
+        on_exit(fn -> :gen_tcp.close(listen) end)
+
+        put_env(:import_url_hosts, ["many.example.test"])
+        put_env(:import_url_resolver, fn _ -> for n <- 2..6, do: {127, 0, 0, n} end)
+
+        assert {:error, {:download_failed, "connect_failed"}} =
+                 Fetch.download("http://many.example.test:#{port}/export.zip", dest(ctx), 1_000)
+
+      {:error, _} ->
+        :ok
+    end
+
+    # No time left: nothing is connected to.
+    put_env(:import_url_hosts, ["127.0.0.1"])
+    put_env(:import_fetch_deadline_ms, 0)
+
+    assert {:error, {:download_failed, "timeout"}} =
+             Fetch.download(ctx.http <> "/export.zip", dest(ctx), 1_000_000)
+  end
+
   test "a redirect to an internal address is refused", ctx do
     to = fn target -> ctx.http <> "/redirect?" <> URI.encode_query(%{to: target}) end
 

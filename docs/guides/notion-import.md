@@ -33,6 +33,7 @@ Any other edge, such as a `links_to` edge from a Notion page to a context that d
 
 A database CSV becomes a context with a Markdown table of its first 200 rows, each row linked to the row's own context.
 The CSV is read as a stream, and at most 10,000 rows of one CSV are imported; the rest are left out and reported as `csv_truncated`.
+Blank rows are skipped but counted: at most twice the row limit plus 1,000 rows are parsed, so a CSV of blank lines is cut as early as one of real rows.
 When Notion exported both `Tasks <id>.csv` and `Tasks <id>_all.csv`, the `_all` view (every property) is read.
 A row whose page Notion exported (`Tasks <id>/Row <id>.md`) is that page; a row without one becomes a context of its own with its properties as text.
 
@@ -120,6 +121,7 @@ curl "http://localhost:4200/api/import/notion/tree?workspace=default:docs&parent
 ```
 
 Without `parent` the answer lists the imported pages that have no parent; with it, the pages under that page.
+The tree reads only the requesting key's tenant, and so does the idempotency check of `POST /api/import/notion`.
 Each entry carries `page_id`, `uri`, `title`, and `children`, the number of pages under it.
 `limit` (default 500, at most 1,000) and `offset` page through a long level.
 
@@ -196,7 +198,9 @@ The Engine downloads a `source_url` inside the job and checks the URL before eve
 - `https` only, with the server's certificate and host name verified; plain `http` only to an allowed host.
 - When allowed hosts are set, only those hosts are fetched.
 - The host must resolve only to public addresses; a loopback, private, link-local, shared, or reserved address is refused unless the host is allowed explicitly.
+- The URL and every redirect `Location` are at most 8 KiB with no control character.
 - The host is resolved once, and every address it resolves to must be public, so an answer that mixes a public and a private address is refused.
+- At most four of its addresses are tried, each within what is left of the download's deadline.
 - The connection goes to the address that was checked, with the host name sent as `Host` and as the TLS server name and checked against the certificate, so a second DNS answer cannot move it elsewhere.
 - A redirect is followed only to an allowed `https` host, checked the same way, at most five times.
 
