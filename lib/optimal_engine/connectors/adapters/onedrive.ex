@@ -6,7 +6,11 @@ defmodule OptimalEngine.Connectors.Adapters.OneDrive do
     * `:tenant_id_ms`, `:drive_id`
 
   ## Credentials
-    * `:client_id`, `:client_secret` (Azure AD app)
+    * `:client_id`, `:client_secret` (Azure AD app), or
+    * an `:access_token`, given directly or issued by the credential broker
+    (`credential_source: "broker"`); calls go through
+    `OptimalEngine.Connectors.AccessToken`, which renews a brokered token
+    before it expires and once after a `401`
 
   ## Cursor shape
   Microsoft Graph delta link (URL string). Initial sync: `nil`.
@@ -17,23 +21,22 @@ defmodule OptimalEngine.Connectors.Adapters.OneDrive do
     display_name: "OneDrive",
     auth_scheme: :oauth2,
     required_keys: [:tenant_id_ms, :drive_id],
-    credential_keys: [:client_id, :client_secret]
+    credential_keys: [:client_id, :client_secret],
+    access_token: true
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @graph_base "https://graph.microsoft.com/v1.0"
   @page_size 100
 
   @impl true
   def sync(state, cursor) do
-    with {:ok, access_token} <- acquire_token(state) do
-      headers = [{"authorization", "Bearer #{access_token}"}]
-
+    AccessToken.session(state, &acquire_token/1, fn token ->
       case cursor do
-        nil -> full_sync(state, headers)
-        delta_link -> delta_sync(delta_link, headers)
+        nil -> full_sync(state, token)
+        delta_link -> delta_sync(delta_link, token)
       end
-    end
+    end)
   end
 
   @impl true
@@ -83,18 +86,18 @@ defmodule OptimalEngine.Connectors.Adapters.OneDrive do
     end
   end
 
-  defp full_sync(state, headers) do
+  defp full_sync(state, token) do
     drive_id = pick(state, :drive_id)
     url = "#{@graph_base}/drives/#{drive_id}/root/delta?$top=#{@page_size}"
-    fetch_delta_page(url, [], headers)
+    fetch_delta_page(url, [], token)
   end
 
-  defp delta_sync(delta_link, headers) do
-    fetch_delta_page(delta_link, [], headers)
+  defp delta_sync(delta_link, token) do
+    fetch_delta_page(delta_link, [], token)
   end
 
-  defp fetch_delta_page(url, acc, headers) do
-    case HTTP.get_json(url, headers: headers) do
+  defp fetch_delta_page(url, acc, token) do
+    case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: body}} ->
         items =
           (body["value"] || [])
@@ -112,7 +115,7 @@ defmodule OptimalEngine.Connectors.Adapters.OneDrive do
 
         cond do
           body["@odata.nextLink"] ->
-            fetch_delta_page(body["@odata.nextLink"], all_signals, headers)
+            fetch_delta_page(body["@odata.nextLink"], all_signals, token)
 
           body["@odata.deltaLink"] ->
             {:ok, %{signals: all_signals, cursor: body["@odata.deltaLink"]}}

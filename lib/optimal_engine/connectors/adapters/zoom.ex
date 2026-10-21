@@ -6,7 +6,11 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
     * `:account_id`
 
   ## Credentials
-    * `:client_id`, `:client_secret` (server-to-server OAuth)
+    * `:client_id`, `:client_secret` (server-to-server OAuth), or
+    * an `:access_token`, given directly or issued by the credential broker
+    (`credential_source: "broker"`); calls go through
+    `OptimalEngine.Connectors.AccessToken`, which renews a brokered token
+    before it expires and once after a `401`
 
   ## Cursor shape
   ISO-8601 date string used as `from` query parameter. Initial sync: `nil` (last 30 days).
@@ -17,9 +21,10 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
     display_name: "Zoom",
     auth_scheme: :oauth2,
     required_keys: [:account_id],
-    credential_keys: [:client_id, :client_secret]
+    credential_keys: [:client_id, :client_secret],
+    access_token: true
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @base_url "https://api.zoom.us/v2"
   @page_size 30
@@ -28,11 +33,10 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
   def sync(state, cursor) do
     account_id = pick(state, :account_id)
 
-    with {:ok, access_token} <- get_access_token(state, account_id) do
-      headers = [{"authorization", "Bearer #{access_token}"}]
+    AccessToken.session(state, &get_access_token(&1, account_id), fn token ->
       from_date = cursor || default_from()
 
-      case fetch_recordings(from_date, headers) do
+      case fetch_recordings(from_date, token) do
         {:ok, meetings, next_cursor} ->
           signals =
             Enum.flat_map(meetings, fn meeting ->
@@ -53,7 +57,7 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
         {:error, reason} ->
           {:error, reason}
       end
-    end
+    end)
   end
 
   @impl true
@@ -105,7 +109,7 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
     end
   end
 
-  defp fetch_recordings(from_date, headers) do
+  defp fetch_recordings(from_date, token) do
     # Zoom's /users/me/recordings uses `from` + `to` date range (max 1 month)
     to_date =
       from_date
@@ -116,7 +120,7 @@ defmodule OptimalEngine.Connectors.Adapters.Zoom do
     url =
       "#{@base_url}/users/me/recordings?from=#{from_date}&to=#{to_date}&page_size=#{@page_size}"
 
-    case HTTP.get_json(url, headers: headers) do
+    case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: %{"meetings" => meetings} = body}} ->
         # next_page_token for further pagination within the window
         next_token = body["next_page_token"]

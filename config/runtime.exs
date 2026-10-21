@@ -261,6 +261,14 @@ if roots = System.get_env("OPTIMAL_ASSET_IMPORT_ROOTS") do
   config :optimal_engine, :asset_import_roots, String.split(roots, ":", trim: true)
 end
 
+# The credential brokers connectors may ask for short-lived credentials
+# (`credential_source: "broker"`): https hosts, separated by ','. With none
+# named, no broker is called.
+if hosts = System.get_env("OPTIMAL_CREDENTIAL_BROKER_HOSTS") do
+  hosts = hosts |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+  config :optimal_engine, :credential_broker_hosts, hosts
+end
+
 # Analyses: how often the day's analysis jobs are scheduled and drained.
 if interval = System.get_env("OPTIMAL_ANALYSES_INTERVAL_MS") do
   config :optimal_engine, :analyses_interval_ms, String.to_integer(interval)

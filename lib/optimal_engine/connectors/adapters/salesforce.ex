@@ -6,7 +6,11 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     * `:instance_url`, `:objects` (list of SObject API names)
 
   ## Credentials
-    * `:client_id`, `:client_secret`, `:refresh_token`
+    * `:client_id`, `:client_secret`, `:refresh_token`, or
+    * an `:access_token`, given directly or issued by the credential broker
+    (`credential_source: "broker"`); calls go through
+    `OptimalEngine.Connectors.AccessToken`, which renews a brokered token
+    before it expires and once after a `401`
 
   ## Cursor shape
   ISO-8601 timestamp (`LastModifiedDate >` filter). Initial sync: `nil` (last 30 days).
@@ -17,9 +21,10 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     display_name: "Salesforce",
     auth_scheme: :oauth2,
     required_keys: [:instance_url, :objects],
-    credential_keys: [:client_id, :client_secret, :refresh_token]
+    credential_keys: [:client_id, :client_secret, :refresh_token],
+    access_token: true
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @page_size 200
   @token_url "https://login.salesforce.com/services/oauth2/token"
@@ -29,13 +34,12 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     instance_url = pick(state, :instance_url)
     objects = pick(state, :objects, ["Account"])
 
-    with {:ok, access_token} <- get_access_token(state) do
-      headers = [{"authorization", "Bearer #{access_token}"}]
+    AccessToken.session(state, &get_access_token/1, fn token ->
       since = cursor || default_since()
 
       result =
         Enum.reduce_while(objects, {:ok, [], since}, fn sobject, {:ok, acc, last_ts} ->
-          case fetch_sobject(instance_url, sobject, since, headers) do
+          case fetch_sobject(instance_url, sobject, since, token) do
             {:ok, records, new_ts} ->
               new_signals =
                 Enum.flat_map(records, fn r ->
@@ -62,7 +66,7 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
         {:ok, signals, next_cursor} -> {:ok, %{signals: signals, cursor: next_cursor}}
         {:error, _} = err -> err
       end
-    end
+    end)
   end
 
   @impl true
@@ -115,7 +119,7 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     end
   end
 
-  defp fetch_sobject(instance_url, sobject, since, headers) do
+  defp fetch_sobject(instance_url, sobject, since, token) do
     fields = sobject_fields(sobject)
 
     soql =
@@ -124,7 +128,7 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     encoded = URI.encode_query(%{"q" => soql})
     url = "#{instance_url}/services/data/v59.0/query?#{encoded}"
 
-    case HTTP.get_json(url, headers: headers) do
+    case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: %{"records" => records}}} ->
         new_ts =
           records
