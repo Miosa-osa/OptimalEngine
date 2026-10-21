@@ -522,7 +522,7 @@ digests = {
     "chunks": "SELECT id, text FROM chunks WHERE workspace_id = ? ORDER BY id",
     "chunk_embeddings": "SELECT chunk_id, vector FROM chunk_embeddings WHERE workspace_id = ? ORDER BY chunk_id",
     "vectors": "SELECT context_id, embedding FROM vectors WHERE workspace_id = ? ORDER BY context_id",
-    "edges": "SELECT source_id, target_id, relation, weight FROM edges WHERE workspace_id = ? ORDER BY source_id, target_id, relation",
+    "graph_edges": "SELECT source_id, target_id, relation, weight FROM graph_edges WHERE workspace_id = ? ORDER BY source_id, target_id, relation",
     "memories": "SELECT id, content FROM memories WHERE workspace_id = ? ORDER BY id",
 }
 for table, sql in digests.items():

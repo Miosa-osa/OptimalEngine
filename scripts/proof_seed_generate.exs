@@ -191,7 +191,7 @@ defmodule ProofSeedGenerate do
           {:ok, n} =
             Store.txn_execute(
               txn,
-              "INSERT OR IGNORE INTO edges (source_id, target_id, relation, weight, tenant_id, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+              "INSERT OR IGNORE INTO graph_edges (source_id, target_id, relation, weight, tenant_id, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
               [
                 doc.id,
                 "seed-doc-" <> String.pad_leading(Integer.to_string(target), 7, "0"),
