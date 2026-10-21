@@ -30,7 +30,9 @@ defmodule OptimalEngine.Telemetry.Prometheus do
     :"optimal_engine.intake.rejected" => "Total contexts rejected at intake",
     :"optimal_engine.search.query" => "Total search queries executed",
     :"optimal_engine.retrieval.rag" => "Total RAG retrieval requests",
-    :"optimal_engine.connector.run" => "Total connector runs"
+    :"optimal_engine.connector.run" => "Total connector runs",
+    :"optimal_engine.storage.asset_fallback" =>
+      "Assets kept on the local disk because their object store was unconfigured or unreachable"
   }
 
   # Human-readable descriptions for known histograms.
