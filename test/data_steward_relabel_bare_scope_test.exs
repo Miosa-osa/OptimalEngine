@@ -196,12 +196,12 @@ defmodule OptimalEngine.DataStewardRelabelBareScopeTest do
     # Of the edges that start at the context, the ones to an entity and to the
     # tenant's other context moved; the ones to a context and a claim that stay did not.
     assert tenants(
-             "SELECT tenant_id FROM graph_edges WHERE workspace_id = ?1 AND source_id = ?2 AND target_id IN ('Acme Corp', ?3)",
+             "SELECT DISTINCT tenant_id FROM graph_edges WHERE workspace_id = ?1 AND source_id = ?2 AND target_id IN ('Acme Corp', ?3)",
              [ws, ids.mine, ids.mine2]
            ) == [t]
 
     assert tenants(
-             "SELECT tenant_id FROM graph_edges WHERE workspace_id = ?1 AND source_id = ?2 AND target_id IN (?3, ?4)",
+             "SELECT DISTINCT tenant_id FROM graph_edges WHERE workspace_id = ?1 AND source_id = ?2 AND target_id IN (?3, ?4)",
              [ws, ids.mine, ids.unvouched, "claim-theirs-#{n}"]
            ) == ["default"]
   end
