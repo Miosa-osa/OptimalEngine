@@ -33,6 +33,22 @@ jobs:
     # 12 minutes on the 1.19 / OTP 28 job before the tests start.
     timeout-minutes: 25
 
+    # The PostgreSQL store tests (tagged :postgres) run against this
+    # throwaway database; every test module works in a schema of its own.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: optimal_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
     strategy:
       fail-fast: true
       matrix:
@@ -100,6 +116,7 @@ jobs:
         run: mix test
         env:
           MIX_ENV: test
+          OPTIMAL_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/optimal_test
 
   mcp:
     name: mcp server (build and test)
