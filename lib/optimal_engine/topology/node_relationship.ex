@@ -71,6 +71,10 @@ defmodule OptimalEngine.Topology.NodeRelationship do
             created_at: nil,
             updated_at: nil
 
+  @doc "The relationship types `upsert/1` accepts."
+  @spec types() :: [relationship_type()]
+  def types, do: @allowed_relationships
+
   @spec upsert(map()) :: {:ok, t()} | {:error, term()}
   def upsert(
         %{

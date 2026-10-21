@@ -47,6 +47,17 @@ defmodule Mix.Tasks.Optimal.Rag do
   alias OptimalEngine.Retrieval
   alias OptimalEngine.Retrieval.Receiver
 
+  # The values the options accept, each with the atom it reads as. `text` is an
+  # alias of `plain` so old shell scripts keep working.
+  @formats %{
+    "plain" => :plain,
+    "markdown" => :markdown,
+    "claude" => :claude,
+    "openai" => :openai,
+    "text" => :plain
+  }
+  @bandwidths %{"small" => :small, "medium" => :medium, "large" => :large}
+
   @impl Mix.Task
   def run(args) do
     Mix.Task.run("app.start")
@@ -100,8 +111,8 @@ defmodule Mix.Tasks.Optimal.Rag do
     overrides =
       parsed
       |> Enum.reduce(%{}, fn
-        {:format, v}, acc -> Map.put(acc, :format, parse_format(v))
-        {:bandwidth, v}, acc -> Map.put(acc, :bandwidth, String.to_existing_atom(v))
+        {:format, v}, acc -> Map.put(acc, :format, choose(@formats, "format", v))
+        {:bandwidth, v}, acc -> Map.put(acc, :bandwidth, choose(@bandwidths, "bandwidth", v))
         {:audience, v}, acc -> Map.put(acc, :audience, v)
         {:tenant, v}, acc -> Map.put(acc, :tenant_id, v)
         _, acc -> acc
@@ -131,7 +142,17 @@ defmodule Mix.Tasks.Optimal.Rag do
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
-  # `text` is accepted as an alias for `plain` so old shell scripts keep working.
-  defp parse_format("text"), do: :plain
-  defp parse_format(v), do: String.to_existing_atom(v)
+  # An option's text is looked up in its table; anything else is refused with
+  # the accepted values.
+  defp choose(table, name, value) do
+    case Map.fetch(table, value) do
+      {:ok, atom} ->
+        atom
+
+      :error ->
+        Mix.raise(
+          "Unknown #{name} '#{value}'. Use: #{table |> Map.keys() |> Enum.sort() |> Enum.join(", ")}"
+        )
+    end
+  end
 end

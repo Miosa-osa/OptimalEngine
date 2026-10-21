@@ -26,7 +26,19 @@ defmodule OptimalEngine.MemoryCore.ScopeEnvelope do
   @default_workspace_id "default"
   @default_operation_class "intake.process"
 
-  @scope_keys ~w[actor actor_id created_by tenant_id workspace_id operation_class node node_hints permissions]
+  # The scope keys a map may carry as text, each with the atom it reads as.
+  # Any other text key is ignored.
+  @scope_keys %{
+    "actor" => :actor,
+    "actor_id" => :actor_id,
+    "created_by" => :created_by,
+    "tenant_id" => :tenant_id,
+    "workspace_id" => :workspace_id,
+    "operation_class" => :operation_class,
+    "node" => :node,
+    "node_hints" => :node_hints,
+    "permissions" => :permissions
+  }
 
   @type t :: %__MODULE__{
           actor: String.t() | nil,
@@ -164,13 +176,16 @@ defmodule OptimalEngine.MemoryCore.ScopeEnvelope do
 
   defp normalize(%{} = attrs) do
     Enum.flat_map(attrs, fn
-      {key, value} when is_atom(key) -> [{key, value}]
-      {key, value} when is_binary(key) and key in @scope_keys -> [{atom_key(key), value}]
-      {_key, _value} -> []
+      {key, value} when is_atom(key) ->
+        [{key, value}]
+
+      {key, value} when is_binary(key) and is_map_key(@scope_keys, key) ->
+        [{Map.fetch!(@scope_keys, key), value}]
+
+      {_key, _value} ->
+        []
     end)
   end
-
-  defp atom_key(key), do: String.to_existing_atom(key)
 
   defp first_present(attrs, keys) do
     Enum.find_value(keys, fn key ->

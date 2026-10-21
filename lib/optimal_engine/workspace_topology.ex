@@ -373,32 +373,34 @@ defmodule OptimalEngine.WorkspaceTopology do
   defp maybe_apply_change(%{request_type: "create_node"} = request, :approve, true) do
     payload = request.proposed_payload
 
-    attrs =
-      %{
+    with {:ok, kind} <- parse_kind(Map.get(payload, "kind", "project")) do
+      create_node(%{
         tenant_id: request.tenant_id,
         workspace_id: request.workspace_id,
         slug: fetch_payload!(payload, "slug"),
         name: fetch_payload!(payload, "name"),
-        kind: parse_kind(Map.get(payload, "kind", "project")),
+        kind: kind,
         parent_id: Map.get(payload, "parent_id"),
         description: Map.get(payload, "description"),
         metadata: Map.get(payload, "metadata", %{})
-      }
-
-    create_node(attrs)
+      })
+    end
   end
 
   defp maybe_apply_change(%{request_type: "link_nodes"} = request, :approve, true) do
     payload = request.proposed_payload
 
-    link_nodes(
-      fetch_payload!(payload, "source_node_id"),
-      fetch_payload!(payload, "target_node_id"),
-      parse_relationship_type(Map.get(payload, "relationship_type", "references")),
-      tenant_id: request.tenant_id,
-      workspace_id: request.workspace_id,
-      metadata: Map.get(payload, "metadata", %{})
-    )
+    with {:ok, relationship_type} <-
+           parse_relationship_type(Map.get(payload, "relationship_type", "references")) do
+      link_nodes(
+        fetch_payload!(payload, "source_node_id"),
+        fetch_payload!(payload, "target_node_id"),
+        relationship_type,
+        tenant_id: request.tenant_id,
+        workspace_id: request.workspace_id,
+        metadata: Map.get(payload, "metadata", %{})
+      )
+    end
   end
 
   defp maybe_apply_change(%{request_type: request_type} = request, :approve, true)
@@ -407,19 +409,21 @@ defmodule OptimalEngine.WorkspaceTopology do
     node_id = Map.get(payload, "node_id") || request.target_object_id
     principal_id = Map.get(payload, "principal_id") || Map.get(payload, "owner_id")
 
-    membership =
+    parsed =
       if request_type == "change_node_owner",
-        do: :owner,
+        do: {:ok, :owner},
         else: parse_membership(Map.get(payload, "membership", "internal"))
 
-    case add_node_member(node_id, principal_id,
-           tenant_id: request.tenant_id,
-           workspace_id: request.workspace_id,
-           membership: membership,
-           role: Map.get(payload, "role")
-         ) do
-      :ok -> {:ok, %{node_id: node_id, principal_id: principal_id, membership: membership}}
-      other -> other
+    with {:ok, membership} <- parsed do
+      case add_node_member(node_id, principal_id,
+             tenant_id: request.tenant_id,
+             workspace_id: request.workspace_id,
+             membership: membership,
+             role: Map.get(payload, "role")
+           ) do
+        :ok -> {:ok, %{node_id: node_id, principal_id: principal_id, membership: membership}}
+        other -> other
+      end
     end
   end
 
@@ -441,51 +445,58 @@ defmodule OptimalEngine.WorkspaceTopology do
   end
 
   defp maybe_create_setup_nodes(workspace, attrs, create_starter_nodes?) do
-    custom_nodes =
-      attrs
-      |> Map.get(:nodes, [])
-      |> normalize_setup_node_specs()
+    with {:ok, custom_nodes} <- normalize_setup_node_specs(Map.get(attrs, :nodes, [])) do
+      starter_nodes =
+        if create_starter_nodes? do
+          starter_nodes()
+        else
+          []
+        end
 
-    starter_nodes =
-      if create_starter_nodes? do
-        starter_nodes()
-      else
-        []
+      node_specs =
+        (starter_nodes ++ custom_nodes)
+        |> unique_by_slug()
+
+      Enum.reduce_while(node_specs, {:ok, []}, fn spec, {:ok, acc} ->
+        node_attrs =
+          spec
+          |> Map.put(:tenant_id, workspace.tenant_id)
+          |> Map.put(:workspace_id, workspace.id)
+          |> Map.put_new(:path, "nodes/#{spec.slug}")
+
+        case create_node(node_attrs) do
+          {:ok, node} -> {:cont, {:ok, [node | acc]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, nodes} -> {:ok, Enum.reverse(nodes)}
+        other -> other
       end
-
-    node_specs =
-      (starter_nodes ++ custom_nodes)
-      |> unique_by_slug()
-
-    Enum.reduce_while(node_specs, {:ok, []}, fn spec, {:ok, acc} ->
-      node_attrs =
-        spec
-        |> Map.put(:tenant_id, workspace.tenant_id)
-        |> Map.put(:workspace_id, workspace.id)
-        |> Map.put_new(:path, "nodes/#{spec.slug}")
-
-      case create_node(node_attrs) do
-        {:ok, node} -> {:cont, {:ok, [node | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:ok, nodes} -> {:ok, Enum.reverse(nodes)}
-      other -> other
     end
   end
 
   defp normalize_setup_node_specs(specs) when is_list(specs) do
-    Enum.map(specs, fn spec ->
-      spec
-      |> normalize_keys()
-      |> Map.put_new(:kind, :project)
-      |> Map.update!(:kind, &parse_kind/1)
-      |> Map.put_new(:description, "Custom setup Node.")
+    specs
+    |> Enum.reduce_while({:ok, []}, fn spec, {:ok, acc} ->
+      spec =
+        spec
+        |> normalize_keys()
+        |> Map.put_new(:kind, :project)
+        |> Map.put_new(:description, "Custom setup Node.")
+
+      case parse_kind(spec.kind) do
+        {:ok, kind} -> {:cont, {:ok, [%{spec | kind: kind} | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
     end)
+    |> case do
+      {:ok, specs} -> {:ok, Enum.reverse(specs)}
+      error -> error
+    end
   end
 
-  defp normalize_setup_node_specs(_), do: []
+  defp normalize_setup_node_specs(_), do: {:ok, []}
 
   defp normalize_keys(map) when is_map(map) do
     map
@@ -553,15 +564,19 @@ defmodule OptimalEngine.WorkspaceTopology do
     end
   end
 
-  defp normalize_relationship_spec({source, target, type, metadata}),
-    do: {:ok, source, target, type, metadata}
+  defp normalize_relationship_spec({source, target, type, metadata}) do
+    with {:ok, type} <- parse_relationship_type(type) do
+      {:ok, source, target, type, metadata}
+    end
+  end
 
   defp normalize_relationship_spec(%{} = spec) do
     spec = normalize_keys(spec)
 
-    {:ok, Map.fetch!(spec, :source), Map.fetch!(spec, :target),
-     parse_relationship_type(Map.get(spec, :relationship_type, :references)),
-     Map.get(spec, :metadata, %{})}
+    with {:ok, type} <- parse_relationship_type(Map.get(spec, :relationship_type, :references)) do
+      {:ok, Map.fetch!(spec, :source), Map.fetch!(spec, :target), type,
+       Map.get(spec, :metadata, %{})}
+    end
   end
 
   defp fetch_setup_node(node_by_slug, slug) do
@@ -875,14 +890,23 @@ defmodule OptimalEngine.WorkspaceTopology do
     end
   end
 
-  defp parse_kind(value) when is_atom(value), do: value
-  defp parse_kind(value) when is_binary(value), do: String.to_existing_atom(value)
+  # A payload or a spec is data (an agent's proposal, a setup document). Its
+  # text becomes a Node kind, a relationship type or a membership only by a
+  # lookup in the list the owning module accepts; anything else is a validation
+  # error and never an exception or a new atom.
+  defp parse_kind(value), do: lookup(value, Node.kinds(), :invalid_kind)
 
-  defp parse_relationship_type(value) when is_atom(value), do: value
-  defp parse_relationship_type(value) when is_binary(value), do: String.to_existing_atom(value)
+  defp parse_relationship_type(value),
+    do: lookup(value, NodeRelationship.types(), :invalid_relationship_type)
 
-  defp parse_membership(value) when is_atom(value), do: value
-  defp parse_membership(value) when is_binary(value), do: String.to_existing_atom(value)
+  defp parse_membership(value), do: lookup(value, NodeMember.memberships(), :invalid_membership)
+
+  defp lookup(value, allowed, error) do
+    case Enum.find(allowed, &(&1 == value or Atom.to_string(&1) == value)) do
+      nil -> {:error, {error, value}}
+      atom -> {:ok, atom}
+    end
+  end
 
   defp deterministic_id(prefix, parts) do
     hash =

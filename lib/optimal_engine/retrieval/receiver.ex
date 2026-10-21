@@ -67,6 +67,10 @@ defmodule OptimalEngine.Retrieval.Receiver do
 
   @budgets %{small: 1_500, medium: 6_000, large: 24_000}
 
+  @bandwidths [:small, :medium, :large]
+  @formats [:plain, :markdown, :claude, :openai]
+  @modes [:linguistic, :code, :visual]
+
   @doc """
   Build a receiver from a map of overrides. Any omitted key falls back
   to the struct default. The `token_budget` is auto-derived from
@@ -115,14 +119,22 @@ defmodule OptimalEngine.Retrieval.Receiver do
   @doc """
   Build a receiver directly from a `Principal` struct (skipping the DB
   lookup). Handy in tests and hot paths.
+
+  `bandwidth`, `format` and `mode` come from the overrides, then from the
+  principal's metadata (stored text), then from the default for the principal's
+  kind. A value that is not one of the known ones is skipped, so metadata that
+  names an unknown bandwidth, format or mode reads as the next source and never
+  raises.
   """
   @spec from_principal_struct(Principal.t(), map()) :: t()
   def from_principal_struct(%Principal{} = p, overrides \\ %{}) do
     meta = p.metadata || %{}
 
-    bandwidth = atom_value(overrides[:bandwidth] || meta["bandwidth"] || default_bandwidth(p.kind))
-    format = atom_value(overrides[:format] || meta["format"] || default_format(p.kind))
-    mode = atom_value(overrides[:mode] || meta["mode"] || :linguistic)
+    bandwidth =
+      known([overrides[:bandwidth], meta["bandwidth"]], @bandwidths, default_bandwidth(p.kind))
+
+    format = known([overrides[:format], meta["format"]], @formats, default_format(p.kind))
+    mode = known([overrides[:mode], meta["mode"]], @modes, :linguistic)
 
     %__MODULE__{
       id: p.id,
@@ -163,6 +175,10 @@ defmodule OptimalEngine.Retrieval.Receiver do
   defp default_genre(:service), do: "note"
   defp default_genre(_), do: "note"
 
-  defp atom_value(v) when is_atom(v), do: v
-  defp atom_value(v) when is_binary(v), do: String.to_existing_atom(v)
+  # The first candidate (an atom or the text of one) that names an allowed atom.
+  defp known(candidates, allowed, default) do
+    Enum.find_value(candidates, default, fn candidate ->
+      Enum.find(allowed, &(&1 == candidate or Atom.to_string(&1) == candidate))
+    end)
+  end
 end

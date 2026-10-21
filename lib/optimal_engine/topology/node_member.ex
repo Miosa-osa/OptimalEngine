@@ -22,6 +22,10 @@ defmodule OptimalEngine.Topology.NodeMember do
 
   @allowed_memberships [:owner, :internal, :external, :observer]
 
+  @doc "The membership kinds `add/3` accepts."
+  @spec memberships() :: [membership()]
+  def memberships, do: @allowed_memberships
+
   @doc """
   Add a principal to a node with a membership kind. Idempotent on
   `(node_id, principal_id, membership)`.
