@@ -13,7 +13,7 @@ All application callers use the same Retrieval Coordinator Interface:
 ```elixir
 OptimalEngine.MemoryCore.retrieve(query,
   tenant_id: "default",
-  workspace_id: "default:miosa",
+  workspace_id: "default:example",
   actor_id: "user:example",
   allowed_security_labels: [],
   allowed_partitions: [],

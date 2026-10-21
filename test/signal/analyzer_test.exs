@@ -126,7 +126,7 @@ defmodule OptimalEngine.Signal.Classifier.AnalyzerTest do
     end
 
     test "defaults to :chat for single segment type" do
-      s = signal("miosa")
+      s = signal("example")
       assert Analyzer.infer_genre(s) == :chat
     end
   end
@@ -379,7 +379,7 @@ defmodule OptimalEngine.Signal.Classifier.AnalyzerTest do
     end
 
     test "returns 0.4 for single segment" do
-      s = signal("miosa")
+      s = signal("example")
       assert Analyzer.type_score(s) == 0.4
     end
   end

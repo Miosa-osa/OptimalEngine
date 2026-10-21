@@ -34,6 +34,8 @@ defmodule OptimalEngine.Store.WorkspaceIsolationMigrationTest do
     # The one-time rename migration is scoped to workspace 'default'. A
     # context using a legacy node name in another workspace must keep it —
     # the old Store-init rewrite would have renamed it globally.
+    # "01-inbox" stays: it is the legacy name migration 035 renames (in
+    # 'default' only), and only that name can show another workspace keeping it.
     suffix = System.unique_integer([:positive])
     ws = "rename-ws-#{suffix}"
     now = DateTime.utc_now() |> DateTime.truncate(:second)

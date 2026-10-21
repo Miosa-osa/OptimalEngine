@@ -25,9 +25,9 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     Application.put_env(:optimal_engine, :write_cross_ref_files, false)
 
     for folder <- ~w[
-          entity-company product-customer-portal operation-delivery operation-weekly-review 05-operations
-          project-platform-launch 07-community learning-research-library
-          09-inbox team 11-finance 12-program
+          entity-company product-customer-portal operation-delivery operation-weekly-review operations
+          project-platform-launch community learning-research-library
+          triage team finance program
         ] do
       File.mkdir_p!(Path.join([tmp_dir, folder, "signals"]))
     end

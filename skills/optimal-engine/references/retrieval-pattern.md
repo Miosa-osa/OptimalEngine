@@ -87,7 +87,7 @@ curl 'http://localhost:4200/api/search?q=pricing+negotiation&workspace=sales&lim
 #   "query": "pricing negotiation",
 #   "results": [
 #     { "id": "ctx:abc", "title": "Customer pricing call Q4", "slug": "sales/2026-04-28-pricing-call",
-#       "score": 0.91, "snippet": "Alice confirmed $2K/seat...", "node": "03-sales" }
+#       "score": 0.91, "snippet": "Alice confirmed $2K/seat...", "node": "sales" }
 #   ]
 # }
 ```
@@ -112,7 +112,7 @@ curl 'http://localhost:4200/api/grep?q=pricing&workspace=sales&intent=record_fac
 curl 'http://localhost:4200/api/grep?q="$2000 per seat"&workspace=sales&literal=true'
 
 # Restrict to a specific node
-curl 'http://localhost:4200/api/grep?q=pricing&workspace=sales&path=03-sales'
+curl 'http://localhost:4200/api/grep?q=pricing&workspace=sales&path=sales'
 
 # Response shape per result:
 # { "slug": "sales/signals/2026-04-28-call", "scale": "paragraph",
