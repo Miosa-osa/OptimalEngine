@@ -402,9 +402,10 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   defp connector_id(kind, tenant_id), do: "pull:#{tenant_id}:#{kind}"
 
   defp kind_atom(kind) when is_binary(kind) do
-    String.to_existing_atom(kind)
-  rescue
-    ArgumentError -> kind
+    case Registry.fetch_by_name(kind) do
+      {:ok, module} -> module.kind()
+      {:error, _} -> kind
+    end
   end
 
   defp kind_atom(kind), do: kind

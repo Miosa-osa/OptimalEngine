@@ -334,9 +334,10 @@ defmodule OptimalEngine.Connectors.Rows do
   end
 
   defp known_kind(kind) when is_binary(kind) do
-    known_kind(String.to_existing_atom(kind))
-  rescue
-    ArgumentError -> {:error, :unknown_kind}
+    case Registry.fetch_by_name(kind) do
+      {:ok, module} -> {:ok, module.kind()}
+      {:error, _} -> {:error, :unknown_kind}
+    end
   end
 
   defp known_kind(_kind), do: {:error, :unknown_kind}
