@@ -62,6 +62,9 @@ OPTIMAL_S3_TRACE              "1" logs the canonical request when diagnosing a r
 OPTIMAL_S3_CREDENTIALS_FILE   optional file holding the access key id and secret
 ```
 
+The bucket and the prefix belong to one Engine: an erasure or a retention delete deletes the objects of the assets it removes, by key, and it cannot see another Engine's rows.
+Give each Engine its own `OPTIMAL_S3_PREFIX` (or bucket) and write nothing else under it; see [Erasure And Retention](erasure-and-retention.md).
+
 Path-style addressing is the default because it works against every S3-compatible endpoint.
 Hosted AWS prefers virtual-hosted addressing, which a deployment opts into with `OPTIMAL_S3_PATH_STYLE=false`.
 
