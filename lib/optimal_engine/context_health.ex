@@ -1,17 +1,23 @@
 defmodule OptimalEngine.ContextHealth do
   @moduledoc "Read-only health audit for retrieval, routing, freshness, and memory projections."
 
-  alias OptimalEngine.Store
+  alias OptimalEngine.{CorpusOrganizer, Store}
+  alias OptimalEngine.Tenancy.Tenant
 
+  @doc """
+  Options: `:workspace_id` (default `"default"`) and `:tenant_id` (default
+  tenant), whose records the routing check counts.
+  """
   def run(opts \\ []) do
     workspace_id = Keyword.get(opts, :workspace_id, "default")
+    tenant_id = Keyword.get(opts, :tenant_id, Tenant.default_id())
 
     checks = [
       check("memory_projection", fn -> memory_projection(workspace_id) end),
-      check("routing_concentration", &routing_concentration/0),
+      check("routing_concentration", fn -> routing_concentration(tenant_id) end),
       check("pending_claims", fn -> pending_claims(workspace_id) end),
       check("workspace_integrity", fn -> workspace_integrity(workspace_id) end),
-      check("fixture_visibility", &fixture_visibility/0),
+      check("fixture_visibility", fn -> fixture_visibility(tenant_id) end),
       check("freshness", fn -> freshness(workspace_id) end)
     ]
 
@@ -56,20 +62,25 @@ defmodule OptimalEngine.ContextHealth do
     {ok, if(ok, do: 100, else: 35), %{durable_memories: durable, searchable_memories: searchable}}
   end
 
-  defp routing_concentration do
+  defp routing_concentration(tenant_id) do
+    intake = CorpusOrganizer.source_workspace(tenant_id)
+
     {:ok, [[total]]} =
-      Store.raw_query("SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL", [])
+      Store.raw_query(
+        "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND tenant_id = ?1",
+        [tenant_id]
+      )
 
     {:ok, [[generic]]} =
       Store.raw_query(
-        "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND workspace_id = 'default:knowledge-intake'",
-        []
+        "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND tenant_id = ?1 AND workspace_id = ?2",
+        [tenant_id, intake]
       )
 
     {:ok, [[queued]]} =
       Store.raw_query(
-        "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND workspace_id = 'default:knowledge-intake' AND json_extract(metadata, '$.routing_review.state') IN ('review', 'unresolved')",
-        []
+        "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND tenant_id = ?1 AND workspace_id = ?2 AND json_extract(metadata, '$.routing_review.state') IN ('review', 'unresolved')",
+        [tenant_id, intake]
       )
 
     ratio = if total == 0, do: 0.0, else: generic / total
@@ -132,11 +143,11 @@ defmodule OptimalEngine.ContextHealth do
     {count == 0, if(count == 0, do: 100, else: 0), %{orphan_workspace_scopes: count}}
   end
 
-  defp fixture_visibility do
+  defp fixture_visibility(tenant_id) do
     {:ok, [[count]]} =
       Store.raw_query(
-        "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND (path LIKE '/var/folders/%/optimal_%test_%' OR path LIKE '/tmp/optimal_%test_%' OR node = 'test' OR node LIKE 'node-a-%' OR node LIKE 'node-b-%' OR title LIKE 'Backfill %' OR title LIKE 'bf task %')",
-        []
+        "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND tenant_id = ?1 AND (path LIKE '/var/folders/%/optimal_%test_%' OR path LIKE '/tmp/optimal_%test_%' OR node = 'test' OR node LIKE 'node-a-%' OR node LIKE 'node-b-%' OR title LIKE 'Backfill %' OR title LIKE 'bf task %')",
+        [tenant_id]
       )
 
     {count == 0, if(count == 0, do: 100, else: 0), %{visible: count}}

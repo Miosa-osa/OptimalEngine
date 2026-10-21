@@ -38,12 +38,21 @@ defmodule OptimalEngine.Organization do
   def default_id, do: @default_id
 
   @doc """
+  The id of the default organization of `tenant_id`, whether or not it exists
+  yet: `default` for the default tenant, `<tenant>:default` for any other.
+  """
+  @spec default_id_for(String.t()) :: String.t()
+  def default_id_for(tenant_id) do
+    if tenant_id == Tenant.default_id(), do: @default_id, else: "#{tenant_id}:default"
+  end
+
+  @doc """
   The default organization of `tenant_id`, created on first use: `default`
   for the default tenant, `<tenant>:default` for any other.
   """
   @spec default_for(String.t()) :: String.t()
   def default_for(tenant_id) do
-    id = if tenant_id == Tenant.default_id(), do: @default_id, else: "#{tenant_id}:default"
+    id = default_id_for(tenant_id)
 
     case get(id) do
       {:ok, _organization} ->

@@ -5,12 +5,12 @@ defmodule OptimalEngine.HierarchyAudit do
 
   def run(tenant_id \\ "default") do
     checks = [
-      check("workspace_organization", &workspace_organization/0),
+      check("workspace_organization", fn -> workspace_organization(tenant_id) end),
       check("workspace_identifiers", fn -> workspace_identifiers(tenant_id) end),
-      check("node_parents", &node_parents/0),
-      check("node_workspace_scope", &node_workspace_scope/0),
-      check("node_types", &node_types/0),
-      check("relationship_scope", &relationship_scope/0)
+      check("node_parents", fn -> node_parents(tenant_id) end),
+      check("node_workspace_scope", fn -> node_workspace_scope(tenant_id) end),
+      check("node_types", fn -> node_types(tenant_id) end),
+      check("relationship_scope", fn -> relationship_scope(tenant_id) end)
     ]
 
     {:ok,
@@ -22,17 +22,20 @@ defmodule OptimalEngine.HierarchyAudit do
      }}
   end
 
-  defp workspace_organization do
-    query_issues("""
-    SELECT w.id, w.organization_id, 'missing_or_wrong_tenant_organization'
-    FROM workspaces w
-    LEFT JOIN organizations o ON o.id=w.organization_id AND o.tenant_id=w.tenant_id
-    WHERE w.status='active' AND (o.id IS NULL OR o.status='archived')
-    UNION ALL
-    SELECT w.id, w.organization_id, 'active_compatibility_owner'
-    FROM workspaces w
-    WHERE w.status='active' AND w.organization_id='default'
-    """)
+  defp workspace_organization(tenant_id) do
+    query_issues(
+      """
+      SELECT w.id, w.organization_id, 'missing_or_wrong_tenant_organization'
+      FROM workspaces w
+      LEFT JOIN organizations o ON o.id=w.organization_id AND o.tenant_id=w.tenant_id
+      WHERE w.tenant_id=?1 AND w.status='active' AND (o.id IS NULL OR o.status='archived')
+      UNION ALL
+      SELECT w.id, w.organization_id, 'active_compatibility_owner'
+      FROM workspaces w
+      WHERE w.tenant_id=?1 AND w.status='active' AND w.organization_id='default'
+      """,
+      [tenant_id]
+    )
   end
 
   # A renamed workspace keeps its id (OptimalEngine.Workspace.update/2), so
@@ -51,53 +54,65 @@ defmodule OptimalEngine.HierarchyAudit do
     )
   end
 
-  defp node_parents do
-    query_issues("""
-    SELECT n.id, n.parent_id, 'missing_parent'
-    FROM nodes n JOIN workspaces w ON w.id=n.workspace_id AND w.status='active'
-    LEFT JOIN nodes p ON p.id=n.parent_id
-    WHERE n.lifecycle_state='active' AND n.parent_id IS NOT NULL AND p.id IS NULL
-    UNION ALL
-    SELECT n.id, n.parent_id, 'self_parent'
-    FROM nodes n JOIN workspaces w ON w.id=n.workspace_id AND w.status='active'
-    WHERE n.lifecycle_state='active' AND n.id=n.parent_id
-    """)
+  defp node_parents(tenant_id) do
+    query_issues(
+      """
+      SELECT n.id, n.parent_id, 'missing_parent'
+      FROM nodes n JOIN workspaces w ON w.id=n.workspace_id AND w.status='active'
+      LEFT JOIN nodes p ON p.id=n.parent_id
+      WHERE n.tenant_id=?1 AND n.lifecycle_state='active' AND n.parent_id IS NOT NULL AND p.id IS NULL
+      UNION ALL
+      SELECT n.id, n.parent_id, 'self_parent'
+      FROM nodes n JOIN workspaces w ON w.id=n.workspace_id AND w.status='active'
+      WHERE n.tenant_id=?1 AND n.lifecycle_state='active' AND n.id=n.parent_id
+      """,
+      [tenant_id]
+    )
   end
 
-  defp node_workspace_scope do
-    query_issues("""
-    SELECT n.id, n.workspace_id, 'missing_workspace'
-    FROM nodes n LEFT JOIN workspaces w ON w.id=n.workspace_id
-    WHERE n.lifecycle_state='active' AND w.id IS NULL
-    UNION ALL
-    SELECT n.id, n.parent_id, 'cross_workspace_parent'
-    FROM nodes n JOIN nodes p ON p.id=n.parent_id
-    WHERE n.lifecycle_state='active' AND p.workspace_id != n.workspace_id
-    """)
+  defp node_workspace_scope(tenant_id) do
+    query_issues(
+      """
+      SELECT n.id, n.workspace_id, 'missing_workspace'
+      FROM nodes n LEFT JOIN workspaces w ON w.id=n.workspace_id
+      WHERE n.tenant_id=?1 AND n.lifecycle_state='active' AND w.id IS NULL
+      UNION ALL
+      SELECT n.id, n.parent_id, 'cross_workspace_parent'
+      FROM nodes n JOIN nodes p ON p.id=n.parent_id
+      WHERE n.tenant_id=?1 AND n.lifecycle_state='active' AND p.workspace_id != n.workspace_id
+      """,
+      [tenant_id]
+    )
   end
 
-  defp node_types do
-    query_issues("""
-    SELECT n.id, COALESCE(n.node_type_id, n.kind), 'missing_or_cross_workspace_node_type'
-    FROM nodes n JOIN workspaces w ON w.id=n.workspace_id AND w.status='active'
-    LEFT JOIN node_types t ON t.id=n.node_type_id
-    WHERE n.lifecycle_state='active'
-      AND (t.id IS NULL OR t.workspace_id != n.workspace_id OR t.lifecycle_state != 'active')
-    """)
+  defp node_types(tenant_id) do
+    query_issues(
+      """
+      SELECT n.id, COALESCE(n.node_type_id, n.kind), 'missing_or_cross_workspace_node_type'
+      FROM nodes n JOIN workspaces w ON w.id=n.workspace_id AND w.status='active'
+      LEFT JOIN node_types t ON t.id=n.node_type_id
+      WHERE n.tenant_id=?1 AND n.lifecycle_state='active'
+        AND (t.id IS NULL OR t.workspace_id != n.workspace_id OR t.lifecycle_state != 'active')
+      """,
+      [tenant_id]
+    )
   end
 
-  defp relationship_scope do
-    query_issues("""
-    SELECT r.id, r.workspace_id, 'relationship_endpoint_scope_mismatch'
-    FROM node_relationships r
-    JOIN nodes s ON s.id=r.source_node_id
-    JOIN nodes t ON t.id=r.target_node_id
-    WHERE r.lifecycle_state='active'
-      AND (s.workspace_id != r.workspace_id OR t.workspace_id != r.workspace_id)
-    """)
+  defp relationship_scope(tenant_id) do
+    query_issues(
+      """
+      SELECT r.id, r.workspace_id, 'relationship_endpoint_scope_mismatch'
+      FROM node_relationships r
+      JOIN nodes s ON s.id=r.source_node_id
+      JOIN nodes t ON t.id=r.target_node_id
+      WHERE r.tenant_id=?1 AND r.lifecycle_state='active'
+        AND (s.workspace_id != r.workspace_id OR t.workspace_id != r.workspace_id)
+      """,
+      [tenant_id]
+    )
   end
 
-  defp query_issues(sql, params \\ []) do
+  defp query_issues(sql, params) do
     case Store.raw_query(sql, params) do
       {:ok, rows} ->
         {:ok,

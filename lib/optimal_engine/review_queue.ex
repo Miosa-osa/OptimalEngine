@@ -20,7 +20,13 @@ defmodule OptimalEngine.ReviewQueue do
     end
   end
 
-  def routing(opts \\ []) do
+  @doc """
+  Records in the routing review queue of a tenant's intake workspace, with
+  the state `:state` (default `"review"`), newest first. Options: `:tenant_id`
+  (required), `:state`, `:limit`.
+  """
+  def routing(opts) do
+    tenant_id = Keyword.fetch!(opts, :tenant_id)
     limit = Keyword.get(opts, :limit, 25)
     state = Keyword.get(opts, :state, "review")
 
@@ -28,11 +34,11 @@ defmodule OptimalEngine.ReviewQueue do
            """
            SELECT id, title, l0_abstract, json_extract(metadata, '$.routing_review')
            FROM contexts
-           WHERE workspace_id = 'default:knowledge-intake' AND archived_at IS NULL
-             AND json_extract(metadata, '$.routing_review.state') = ?1
-           ORDER BY modified_at DESC LIMIT ?2
+           WHERE tenant_id = ?1 AND workspace_id = ?2 AND archived_at IS NULL
+             AND json_extract(metadata, '$.routing_review.state') = ?3
+           ORDER BY modified_at DESC LIMIT ?4
            """,
-           [state, limit]
+           [tenant_id, CorpusOrganizer.source_workspace(tenant_id), state, limit]
          ) do
       {:ok, rows} ->
         {:ok,
@@ -45,40 +51,50 @@ defmodule OptimalEngine.ReviewQueue do
     end
   end
 
-  def decide_route(id, decision, target_workspace_id, opts \\ [])
+  @doc """
+  Accepts a routing review entry, filing the record into
+  `target_workspace_id`, or rejects it. Options: `:tenant_id` (required),
+  `:actor_id`.
+
+  Only a record of the tenant, in the tenant's intake workspace, can be
+  decided (`{:error, :not_found_or_not_in_intake}`), and the target must be
+  an active workspace of the tenant (`{:error, :target_workspace_not_registered}`).
+  """
+  def decide_route(id, decision, target_workspace_id, opts)
 
   def decide_route(id, :accept, target_workspace_id, opts) do
-    actor_id = Keyword.get(opts, :actor_id, "unknown")
-
-    with {:ok, moved} <- CorpusOrganizer.move_context(id, target_workspace_id) do
-      Store.raw_query(
-        """
-        UPDATE contexts SET metadata = json_set(
-          COALESCE(metadata, '{}'), '$.routing_review.state', 'accepted',
-          '$.routing_review.reviewed_at', datetime('now'),
-          '$.routing_review.reviewed_by', ?2
-        ) WHERE id = ?1
-        """,
-        [id, actor_id]
-      )
-
-      {:ok, moved}
-    end
+    CorpusOrganizer.move_context(id, target_workspace_id,
+      tenant_id: Keyword.fetch!(opts, :tenant_id),
+      reviewed_by: Keyword.get(opts, :actor_id, "unknown")
+    )
   end
 
   def decide_route(id, :reject, _target_workspace_id, opts) do
+    tenant_id = Keyword.fetch!(opts, :tenant_id)
     actor_id = Keyword.get(opts, :actor_id, "unknown")
+    intake = CorpusOrganizer.source_workspace(tenant_id)
 
-    Store.raw_query(
-      """
-      UPDATE contexts SET metadata = json_set(
-        COALESCE(metadata, '{}'), '$.routing_review.state', 'rejected',
-        '$.routing_review.reviewed_at', datetime('now')
-        ,'$.routing_review.reviewed_by', ?2
-      ) WHERE id = ?1 AND workspace_id = 'default:knowledge-intake' AND archived_at IS NULL
-      """,
-      [id, actor_id]
-    )
+    Store.transaction(fn txn ->
+      case Store.txn_execute(
+             txn,
+             """
+             UPDATE contexts SET metadata = json_set(
+               COALESCE(metadata, '{}'), '$.routing_review.state', 'rejected',
+               '$.routing_review.reviewed_at', datetime('now'),
+               '$.routing_review.reviewed_by', ?2
+             ) WHERE id = ?1 AND tenant_id = ?3 AND workspace_id = ?4 AND archived_at IS NULL
+             """,
+             [id, actor_id, tenant_id, intake]
+           ) do
+        {:ok, 0} -> {:error, :not_found_or_not_in_intake}
+        {:ok, _changed} -> {:ok, %{id: id, state: "rejected"}}
+        {:error, _} = error -> error
+      end
+    end)
+    |> tap(fn result ->
+      # The read cache holds the record as it was before the decision.
+      if match?({:ok, _}, result), do: Store.evict_cached([id])
+    end)
   end
 
   @doc "Flagged System 3* audit samples in `workspace_ids`."

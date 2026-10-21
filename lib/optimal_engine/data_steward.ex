@@ -8,8 +8,11 @@ defmodule OptimalEngine.DataSteward do
 
   alias OptimalEngine.Authority.{Evidence, WorkspaceRekeys}
 
+  alias OptimalEngine.DataSteward.HierarchyRepair
+
   alias OptimalEngine.{
     ContextHealth,
+    CorpusOrganizer,
     EntityQuality,
     EntityResolution,
     HierarchyAudit,
@@ -21,6 +24,9 @@ defmodule OptimalEngine.DataSteward do
   require Logger
 
   @default_limit 100
+
+  # A batch of route decisions is one request; more than this is several.
+  @max_route_items 500
 
   # Tables a change of workspace id does not re-key. `workspaces` is the
   # record being replaced, and the handles move by their own step.
@@ -73,20 +79,29 @@ defmodule OptimalEngine.DataSteward do
   @spec not_rekeyed_tables() :: [String.t()]
   def not_rekeyed_tables, do: @not_rekeyed
 
+  @doc """
+  The steward's overview of a tenant. Options: `:tenant_id` (default
+  tenant), and `intake: false` for a caller that may not see the tenant's
+  intake workspace, whose `route_clusters` are then empty.
+  """
   def dashboard(workspace_id, opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
     with {:ok, entity_quality} <- EntityQuality.run(workspace_id),
          {:ok, orphan_scopes} <- orphan_scopes(tenant_id),
          {:ok, claims} <- claim_clusters(workspace_id, tenant_id, @default_limit),
-         {:ok, routes} <- route_clusters(@default_limit),
+         {:ok, routes} <-
+           if(Keyword.get(opts, :intake, true),
+             do: route_clusters(tenant_id, @default_limit),
+             else: {:ok, []}
+           ),
          {:ok, entities} <- entity_clusters(workspace_id, tenant_id, @default_limit),
          {:ok, hierarchy} <- HierarchyAudit.run(tenant_id) do
       {:ok,
        %{
          workspace_id: workspace_id,
          tenant_id: tenant_id,
-         context_health: ContextHealth.run(workspace_id: workspace_id),
+         context_health: ContextHealth.run(workspace_id: workspace_id, tenant_id: tenant_id),
          entity_quality: entity_quality,
          orphan_scopes: orphan_scopes,
          claim_clusters: claims,
@@ -136,18 +151,22 @@ defmodule OptimalEngine.DataSteward do
     end
   end
 
-  def route_clusters(limit \\ @default_limit) do
+  @doc """
+  Records of the tenant's intake workspace waiting in the routing review
+  queue, grouped by state and proposed workspace.
+  """
+  def route_clusters(tenant_id, limit \\ @default_limit) when is_binary(tenant_id) do
     with {:ok, rows} <-
            Store.raw_query(
              """
              SELECT id, title, json_extract(metadata, '$.routing_review.state'),
                     json_extract(metadata, '$.routing_review.proposed_workspace_id')
              FROM contexts
-             WHERE workspace_id='default:knowledge-intake' AND archived_at IS NULL
+             WHERE tenant_id=?1 AND workspace_id=?2 AND archived_at IS NULL
                AND json_extract(metadata, '$.routing_review.state') IN ('review','unresolved')
-             ORDER BY modified_at DESC LIMIT ?1
+             ORDER BY modified_at DESC LIMIT ?3
              """,
-             [limit]
+             [tenant_id, CorpusOrganizer.source_workspace(tenant_id), limit]
            ) do
       {:ok,
        rows
@@ -220,24 +239,51 @@ defmodule OptimalEngine.DataSteward do
     end)
   end
 
+  @doc """
+  Accepts or rejects routing review entries of the tenant's intake workspace,
+  each item `%{id: ..., target_workspace_id: ...}` (the target is needed to
+  accept). Options: `:actor_id`, `:tenant_id` (both required).
+
+  An item is decided on its own: a record that is not the tenant's, or not in
+  its intake, or a target that is not an active workspace of the tenant,
+  fails that item and nothing else. A batch holds at most 500 items
+  (`{:error, {:too_many_items, 500}}`).
+  """
   def decide_routes(items, decision, opts)
       when is_list(items) and items != [] and decision in [:accept, :reject] do
     actor_id = Keyword.fetch!(opts, :actor_id)
+    tenant_id = Keyword.fetch!(opts, :tenant_id)
 
+    if length(items) > @max_route_items,
+      do: {:error, {:too_many_items, @max_route_items}},
+      else: {:ok, decide_each(items, decision, actor_id, tenant_id)}
+  end
+
+  defp decide_each(items, decision, actor_id, tenant_id) do
     results =
       Enum.map(items, fn item ->
         id = item_id(item)
         target = item_target(item)
 
         result =
-          if decision == :accept and is_nil(target),
-            do: {:error, :target_workspace_required},
-            else: ReviewQueue.decide_route(id, decision, target, actor_id: actor_id)
+          cond do
+            not is_binary(id) ->
+              {:error, :id_required}
+
+            decision == :accept and is_nil(target) ->
+              {:error, :target_workspace_required}
+
+            true ->
+              ReviewQueue.decide_route(id, decision, target,
+                actor_id: actor_id,
+                tenant_id: tenant_id
+              )
+          end
 
         %{id: id, target_workspace_id: target, result: normalize_result(result)}
       end)
 
-    {:ok, summarize(results)}
+    summarize(results)
   end
 
   @doc """
@@ -433,27 +479,34 @@ defmodule OptimalEngine.DataSteward do
     end
   end
 
+  @doc """
+  Gives the nodes of the tenant's active workspaces the node type their kind
+  names, where they have none or a type that is not an active one of their own
+  workspace. Options: `:actor_id`, `:tenant_id` (both required). Only the
+  tenant's nodes change. Returns `{:ok, updated_nodes}`.
+  """
   def repair_node_types(opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
+    tenant_id = Keyword.fetch!(opts, :tenant_id)
 
-    with {:ok, _workspaces} <-
-           Store.raw_query("SELECT id,tenant_id FROM workspaces WHERE status='active'", []) do
-      Store.raw_query(
+    Store.transaction(fn txn ->
+      Store.txn_execute(
+        txn,
         """
         UPDATE nodes
         SET node_type_id = (
               SELECT t.id FROM node_types t
-              WHERE t.workspace_id=nodes.workspace_id
+              WHERE t.workspace_id=nodes.workspace_id AND t.tenant_id=?2
                 AND t.slug=CASE nodes.kind WHEN 'org' THEN 'entity' WHEN 'unit' THEN 'department' ELSE nodes.kind END
                 AND t.lifecycle_state='active' LIMIT 1
             ),
             updated_at = datetime('now'),
             metadata = json_set(COALESCE(metadata,'{}'), '$.hierarchy_repaired_by', ?1)
-        WHERE lifecycle_state='active'
-          AND workspace_id IN (SELECT id FROM workspaces WHERE status='active')
+        WHERE tenant_id=?2 AND lifecycle_state='active'
+          AND workspace_id IN (SELECT id FROM workspaces WHERE tenant_id=?2 AND status='active')
           AND EXISTS (
             SELECT 1 FROM node_types t
-            WHERE t.workspace_id=nodes.workspace_id
+            WHERE t.workspace_id=nodes.workspace_id AND t.tenant_id=?2
               AND t.slug=CASE nodes.kind WHEN 'org' THEN 'entity' WHEN 'unit' THEN 'department' ELSE nodes.kind END
               AND t.lifecycle_state='active'
           )
@@ -463,50 +516,17 @@ defmodule OptimalEngine.DataSteward do
               AND current.lifecycle_state='active'
           ))
         """,
-        [actor_id]
+        [actor_id, tenant_id]
       )
-    end
-  end
-
-  def repair_deterministic_hierarchy(opts) do
-    actor_id = Keyword.fetch!(opts, :actor_id)
-
-    Store.transaction(fn txn ->
-      with {:ok, owner_count} <-
-             Store.txn_execute(
-               txn,
-               "UPDATE workspaces SET organization_id='miosa', metadata=json_set(COALESCE(metadata,'{}'),'$.hierarchy_repaired_by',?1) WHERE status='active' AND organization_id='default' AND (name LIKE '%BusinessOS%' OR description LIKE '%BusinessOS%')",
-               [actor_id]
-             ),
-           {:ok, node_count} <-
-             Store.txn_execute(
-               txn,
-               """
-               UPDATE nodes
-               SET kind=CASE
-                     WHEN slug='18-clients' THEN 'customer'
-                     WHEN slug='17-team' THEN 'team'
-                     WHEN slug='11-tasks' THEN 'operation'
-                     WHEN slug='12-projects' THEN 'project'
-                   END,
-                   node_type_id=workspace_id || ':' || CASE
-                     WHEN slug='18-clients' THEN 'customer'
-                     WHEN slug='17-team' THEN 'team'
-                     WHEN slug='11-tasks' THEN 'operation'
-                     WHEN slug='12-projects' THEN 'project'
-                   END,
-                   updated_at=datetime('now'),
-                   metadata=json_set(COALESCE(metadata,'{}'),'$.hierarchy_repaired_by',?1)
-               WHERE workspace_id='default:businessos' AND kind='workspace'
-                 AND slug IN ('18-clients','17-team','11-tasks','12-projects')
-               """,
-               [actor_id]
-             ) do
-        {:ok,
-         %{workspace_owners_updated: owner_count, nodes_retyped: node_count, actor_id: actor_id}}
-      end
     end)
   end
+
+  @doc """
+  Repairs a tenant's workspace owners and node kinds as a mapping the caller
+  supplies. Options: `:actor_id`, `:tenant_id`, `:mapping` (all required).
+  See `OptimalEngine.DataSteward.HierarchyRepair` for the mapping.
+  """
+  defdelegate repair_deterministic_hierarchy(opts), to: HierarchyRepair, as: :run
 
   def recheck(workspace_id, opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
@@ -547,6 +567,7 @@ defmodule OptimalEngine.DataSteward do
 
   defp item_id(%{"id" => id}), do: id
   defp item_id(%{id: id}), do: id
+  defp item_id(_), do: nil
   defp item_target(%{"target_workspace_id" => target}), do: target
   defp item_target(%{target_workspace_id: target}), do: target
   defp item_target(_), do: nil

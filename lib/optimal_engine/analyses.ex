@@ -204,19 +204,19 @@ defmodule OptimalEngine.Analyses do
   end
 
   defp analyze("workspace_population", tenant_id, workspace_id, payload) do
-    if workspace_id != CorpusOrganizer.source_workspace() do
+    if workspace_id != CorpusOrganizer.source_workspace(tenant_id) do
       {:ok, "Not the intake workspace; nothing to place.", %{"moved" => 0, "queued" => 0}}
     else
       embedding = embed_for_placement(tenant_id, payload)
-      {:ok, preview} = CorpusOrganizer.preview()
+      {:ok, preview} = CorpusOrganizer.preview(tenant_id: tenant_id)
 
       moved =
-        case CorpusOrganizer.apply_high_confidence(preview: preview) do
+        case CorpusOrganizer.apply_high_confidence(preview: preview, tenant_id: tenant_id) do
           {:ok, %{moved: moved}} -> moved
           {:error, %{moved: moved}} -> moved
         end
 
-      {:ok, queued} = CorpusOrganizer.queue_remaining(preview: preview)
+      {:ok, queued} = CorpusOrganizer.queue_remaining(preview: preview, tenant_id: tenant_id)
       by_meaning = Map.get(preview.by_method, :semantic, 0)
 
       {:ok,
@@ -304,10 +304,8 @@ defmodule OptimalEngine.Analyses do
         home -> Enum.map(@tenant_kinds, &{home, &1})
       end
 
-    population =
-      if CorpusOrganizer.source_workspace() in ids,
-        do: [{CorpusOrganizer.source_workspace(), "workspace_population"}],
-        else: []
+    intake = CorpusOrganizer.source_workspace(tenant_id)
+    population = if intake in ids, do: [{intake, "workspace_population"}], else: []
 
     meetings = for id <- ids, meeting_connectors(tenant_id, id) != [], do: {id, "meeting_archive"}
 

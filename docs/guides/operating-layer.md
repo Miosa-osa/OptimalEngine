@@ -62,6 +62,28 @@ Fields: `sender`, `domain` (also matches subdomains), `label`, `channel`, `keywo
 Feedback moves a rule's effective weight: `weight * (1 + accepted) / (1 + rejected)`.
 `POST /api/routing/seed` loads the keyword rules of the deployment's routing rules file (`OPTIMAL_CORPUS_RULES`).
 
+## The intake workspace and the review queue
+
+Every tenant has its own intake workspace, named `<tenant>:knowledge-intake`.
+It is an ordinary workspace: create it with `POST /api/workspaces` (slug `knowledge-intake`) and ingest into it.
+`config :optimal_engine, :corpus_intake_slug` changes the slug, and `config :optimal_engine, :corpus_source_workspace` names the intake of the tenant that owns that workspace.
+The organizer (`/api/maintenance/corpus-organization`), the routing review queue (`GET /api/review/routing`, `POST /api/review/routing/:id`), the steward's batch decisions (`POST /api/data-steward/routes/decide`) and the `route_clusters` of the steward dashboard read and write the caller's intake and the caller's records in it, and no other tenant's.
+Without a tenant, the organizer works on the deployment's intake: the configured one, else the default tenant's.
+A tenant other than the default names one of its workspaces on the review and batch calls (`?workspace=<id>`, or `workspace` in the body), as on any workspace-scoped route.
+
+A decision on a record that is not the caller's, or is not in the caller's intake, fails with `not_found_or_not_in_intake`, whether it is an acceptance, a rejection or a move.
+The target of an acceptance must be an active workspace of the caller's tenant (`target_workspace_not_registered`).
+A key restricted to some workspaces needs the target in its scope: the route authorizes `workspace`, and for a batch the `target_workspace_id` of every item, so a workspace of another tenant answers `404` and one outside the key's scope answers `403 workspace_scope_denied`.
+Such a key also needs the intake in its scope on the review and batch routes, and the organizer needs a key that holds the whole tenant (`workspace_scope` `["*"]`).
+That includes running the organizer as an analysis (`POST /api/analyses/run` with kind `workspace_population`).
+The `route_clusters` of the steward dashboard are empty for a key that does not hold the intake.
+A decision other than `accept` or `reject` is `400`, not a rejection.
+A batch holds at most 500 items, decides them one by one, and the answer lists the result of each.
+A move is one transaction.
+It changes the workspace of the record and of the rows derived from it (chunks, vectors, entities, edges, claims, source packages, chunk embeddings), which take the record's tenant; a row labelled with another tenant is not the record's and stays.
+The exact-duplicate sweep (`deduplicate_exact`) works on the tenant's intake workspace only, and archives all but the newest of the records with the same content; `all_tenants` in a request does not widen it.
+The routing rules file names workspaces for the whole deployment, and the organizer applies only the rules that name an active workspace of the tenant whose intake it works on.
+
 ## Placement by meaning
 
 The intake organizer (`OptimalEngine.CorpusOrganizer`) places intake records by name markers, and by meaning when the `semantic` section of the routing rules file (or `config :optimal_engine, :corpus_semantic_placement`) enables it:

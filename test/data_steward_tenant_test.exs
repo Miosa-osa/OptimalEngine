@@ -597,7 +597,8 @@ defmodule OptimalEngine.DataStewardTenantTest do
           name: "Move target"
         })
 
-      assert {:ok, _} = CorpusOrganizer.move_context("mv-ctx-#{n}", target.id)
+      assert {:ok, _} =
+               CorpusOrganizer.move_context("mv-ctx-#{n}", target.id, tenant_id: "default")
 
       assert unscoped_workspace("entity_mentions", "mv-context-#{n}") == target.id
       assert unscoped_workspace("entity_mentions", "mv-package-#{n}") == target.id

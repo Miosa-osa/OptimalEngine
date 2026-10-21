@@ -85,8 +85,8 @@ Routes: 291
 | GET | `/api/context-health` | Router | read | workspace |
 | POST | `/api/data-steward/claims/decide` | Router | claims:review | workspace |
 | GET | `/api/data-steward/dashboard` | Router | read | workspace |
-| POST | `/api/data-steward/hierarchy/repair-deterministic` | Router | topology:write | workspace |
-| POST | `/api/data-steward/nodes/repair-types` | Router | topology:write | workspace |
+| POST | `/api/data-steward/hierarchy/repair-deterministic` | Router | topology:write | tenant |
+| POST | `/api/data-steward/nodes/repair-types` | Router | topology:write | tenant |
 | POST | `/api/data-steward/recheck` | Router | topology:write | workspace |
 | POST | `/api/data-steward/routes/decide` | Router | topology:write | workspace |
 | POST | `/api/data-steward/workspaces/rename` | Router | topology:write | workspace |
