@@ -4,10 +4,9 @@ defmodule Mix.Tasks.Optimal.Postgres.Check do
   Reports how the PostgreSQL provider is configured and whether it answers a
   real query.
 
-  This is the operator check for stage 1 of
-  `docs/guides/postgres-provider.md`. The engine does not yet store relational
-  data in PostgreSQL, so a healthy probe means the connection works, not that
-  the provider is usable.
+  This is the operator check of `docs/guides/postgres-provider.md`. A healthy
+  probe means the connection works; `selected` says whether this build's
+  canonical store is PostgreSQL, which is fixed when the engine is compiled.
 
   Usage:
 
@@ -45,9 +44,17 @@ defmodule Mix.Tasks.Optimal.Postgres.Check do
   end
 
   defp print_text(health, timeout) do
-    Mix.shell().info("postgres provider (stage 1: connection probe only)")
+    description = Postgres.describe()
+
+    Mix.shell().info("postgres provider (stage #{description.stage})")
     Mix.shell().info("  health: #{health}")
-    Mix.shell().info("  adapter_registered: false")
+    Mix.shell().info("  adapter: #{description.adapter}")
+    Mix.shell().info("  selected: #{description.selected}")
+    Mix.shell().info("  not on PostgreSQL yet:")
+
+    for %{feature: feature, reason: reason} <- description.unavailable do
+      Mix.shell().info("    #{feature}: #{reason}")
+    end
 
     case Postgres.safe_config() do
       {:ok, config} ->
@@ -67,13 +74,17 @@ defmodule Mix.Tasks.Optimal.Postgres.Check do
   end
 
   defp print_json(health, timeout) do
+    description = Postgres.describe()
+
     payload =
       case Postgres.safe_config() do
         {:ok, config} ->
           %{
             provider: "postgres",
-            stage: 1,
-            adapter_registered: false,
+            stage: description.stage,
+            adapter_registered: description.adapter_registered,
+            selected: description.selected,
+            unavailable: Enum.map(description.unavailable, & &1.feature),
             health: Atom.to_string(health),
             configured: true,
             timeout_ms: timeout,
@@ -89,8 +100,10 @@ defmodule Mix.Tasks.Optimal.Postgres.Check do
         {:error, reason} ->
           %{
             provider: "postgres",
-            stage: 1,
-            adapter_registered: false,
+            stage: description.stage,
+            adapter_registered: description.adapter_registered,
+            selected: description.selected,
+            unavailable: Enum.map(description.unavailable, & &1.feature),
             health: Atom.to_string(health),
             configured: false,
             timeout_ms: timeout,

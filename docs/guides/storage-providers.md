@@ -35,8 +35,13 @@ Without `probe=true` a configured service provider reports `configured_unverifie
 
 Provider status never returns credentials, connection strings, or secret values; only the names of the environment variables a provider reads.
 
-Today `s3` is the service provider with an adapter.
-`postgres`, `nats_jetstream`, `valkey`, `qdrant`, `duckdb`, `openbao`, and `fractal` are declared, and they report `adapter_missing` until an adapter ships for each.
+Today `s3` and `postgres` are the service providers with an adapter.
+`nats_jetstream`, `valkey`, `qdrant`, `duckdb`, `openbao`, and `fractal` are declared, and they report `adapter_missing` until an adapter ships for each.
+
+`sqlite` and `postgres` are canonical stores, and an engine runs exactly one of them.
+The choice is made when the engine is compiled, so both report `selected`: `true` for the store this build runs and `false` for the other.
+A healthy `postgres` provider in a build that selected SQLite holds none of the engine's data.
+See [PostgreSQL Provider](postgres-provider.md) for what is and is not on PostgreSQL.
 
 ## S3-Compatible Object Storage
 
@@ -305,7 +310,8 @@ Replication never serves or pushes an entry: see "Storage mutation entries share
 
 ## What Is Not Implemented
 
-The engine still has no adapter for Postgres, NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, or Fractal, and the provider inventory says so.
+The engine still has no adapter for NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, or Fractal, and the provider inventory says so.
+PostgreSQL holds the canonical relational store but not full-text search, and moving an existing engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.
 
 ## Related
