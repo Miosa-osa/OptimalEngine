@@ -59,7 +59,7 @@ The BEAM atom table is finite and is never garbage collected.
 Text from a request, a stored row, a file, a peer or a model must not become an atom.
 That rules out `String.to_atom/1`, interpolated atoms such as `:"prefix_#{text}"`, `keys: :atoms` and `Module.concat/1` on such text.
 Look the text up in an explicit list with `OptimalEngine.SafeAtom`, keep it as text, or reject it.
-`test/atom_guard_test.exs` fails on a new call.
+`test/atom_guard_test.exs` reads `lib/`, `config/` and `mix.exs` and fails on a new call, including `apply/3` and `import` of `String`, `List`, `Module` and `Code`, and code evaluation such as `Code.eval_string`.
 A compile-time literal or a boot setting goes in its reviewed list with a one-line reason.
 
 **TypeScript (SDK / MCP / site)**
