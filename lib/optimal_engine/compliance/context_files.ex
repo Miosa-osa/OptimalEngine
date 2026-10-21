@@ -32,9 +32,12 @@ defmodule OptimalEngine.Compliance.ContextFiles do
       context's id (the suffix intake gives a name another context held). A file a person
       wrote or edited under the plain name, or one that holds another context's text, is
       theirs;
-    * for a cross-reference copy, a markdown file that holds the same text as the file it was
-      copied from, or is the file of a context that indexes it, not a file of the same name
-      that somebody else put there;
+    * for a cross-reference copy, a markdown file at a name intake gives a copy (the
+      primary's name, or that name with the suffix of the context's id when another context
+      already held it in the node) that holds the text of the context it was copied from. A
+      file of another context or of a person at the same name is not a copy, and a context
+      goes with a copy only if it says it is the copy of this one (`metadata.cross_ref_of`),
+      never because its row names the same path;
     * a file no other context holds: a row of the same workspace with the same path
       that is not one of the contexts being erased or the copies of their files names it
       too (the index of `path` is not unique, so a legacy or forged row can). The file
@@ -90,20 +93,20 @@ defmodule OptimalEngine.Compliance.ContextFiles do
         for [id, workspace_id, path, routed_to] <- rows,
             is_binary(path),
             owned?(path, workspace_id, root, workspace_dirs),
-            do: {id, workspace_id, path, routed_to}
+            do: {id, workspace_id, path, routed_to, context_body(id)}
 
       {mine, foreign} =
-        Enum.split_with(placed, fn {id, _workspace_id, path, _routed} ->
-          this_contexts_file?(id, path)
+        Enum.split_with(placed, fn {id, _workspace_id, path, _routed, body} ->
+          this_contexts_file?(id, path, body)
         end)
 
       copies =
         if copies?,
           do:
             for(
-              {_id, workspace_id, path, routed_to} <- mine,
-              copy <- copy_paths(tenant_id, workspace_id, path, routed_to),
-              do: {workspace_id, copy, file_body(path)}
+              {id, workspace_id, path, routed_to, body} <- mine,
+              copy <- copy_paths(tenant_id, workspace_id, id, path, routed_to),
+              do: {id, workspace_id, copy, body}
             ),
           else: []
 
@@ -113,8 +116,8 @@ defmodule OptimalEngine.Compliance.ContextFiles do
         located =
           for {workspace_id, path} <-
                 Enum.uniq(
-                  for({_id, ws, path, _routed} <- mine, do: {ws, path}) ++
-                    for({ws, path, _body} <- copies, do: {ws, path})
+                  for({_id, ws, path, _routed, _body} <- mine, do: {ws, path}) ++
+                    for({_id, ws, path} <- copies, do: {ws, path})
                 ),
               file <- [path | sidecars(path)],
               owned?(file, workspace_id, root, workspace_dirs),
@@ -197,8 +200,8 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   defp redact_each(files) do
     each(files, fn file ->
       with :ok <- real_parents(file),
-           {:ok, %{type: :regular, mode: mode, links: links}} <- File.lstat(file),
-           {:ok, text} <- File.read(file),
+           {:ok, %{type: :regular, mode: mode, links: links} = seen} <- File.lstat(file),
+           {:ok, text} <- read_same(file, seen),
            redacted = Redact.redact!(text),
            true <- redacted != text,
            :ok <- replace(file, redacted, Bitwise.band(mode, 0o777)) do
@@ -209,6 +212,52 @@ defmodule OptimalEngine.Compliance.ContextFiles do
         _unchanged_or_not_a_file -> :skipped
       end
     end)
+  end
+
+  # The text of the file, read through one handle and only if that handle is the regular file
+  # `lstat` saw (same device and inode): a link put in its place since is not read.
+  defp read_same(file, seen) do
+    case File.open(file, [:read, :binary, :raw]) do
+      {:ok, fd} ->
+        try do
+          with {:ok, stat} <- fstat(fd, file),
+               true <-
+                 stat.type == :regular and stat.inode == seen.inode and
+                   stat.major_device == seen.major_device do
+            read_all(fd, stat.size)
+          else
+            false -> :changed
+            {:error, _} = error -> error
+          end
+        after
+          :file.close(fd)
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # The handle's own file information; where the runtime has no call for it, the path's.
+  defp fstat(fd, file) do
+    if function_exported?(:prim_file, :read_handle_info, 1) do
+      case apply(:prim_file, :read_handle_info, [fd]) do
+        {:ok, info} -> {:ok, File.Stat.from_record(info)}
+        {:error, _} = error -> error
+      end
+    else
+      File.lstat(file)
+    end
+  end
+
+  defp read_all(_fd, 0), do: {:ok, ""}
+
+  defp read_all(fd, size) do
+    case :file.read(fd, size) do
+      {:ok, data} -> {:ok, data}
+      :eof -> {:ok, ""}
+      {:error, _} = error -> error
+    end
   end
 
   # The new text goes into a file created for it (exclusively, under a name nobody can
@@ -275,20 +324,26 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     end
   end
 
-  # The file intake writes to each node a signal was routed to: the same name in that
-  # node's signals directory.
-  defp copy_paths(tenant_id, workspace_id, path, routed_to) do
+  # The files intake may have written to each node a signal was routed to. A copy is named
+  # after the primary file, and takes the primary's name with the suffix of the signal's id
+  # when another context already holds that name in the node (`Address.resolve/5`), so the
+  # candidates are those names. Which of them is a copy is decided by what the file holds.
+  defp copy_paths(tenant_id, workspace_id, id, path, routed_to) do
     primary_folder = Path.expand(Path.dirname(Path.dirname(path)))
+    base = Path.basename(path)
 
     scope =
       [tenant_id: tenant_id, workspace_id: workspace_id]
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
+    names = [base | Enum.map(Address.candidate_suffixes(id), &Address.suffixed(base, &1))]
+
     for dest <- decode_list(routed_to),
         is_binary(dest),
         folder = Path.expand(Path.join(root(), Writer.node_to_folder(dest, scope))),
         folder != primary_folder,
-        do: Path.join([folder, "signals", Path.basename(path)])
+        name <- names,
+        do: Path.join([folder, "signals", name])
   end
 
   defp decode_list(json) when is_binary(json) do
@@ -306,43 +361,42 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     Enum.map(@sidecars, &(base <> &1))
   end
 
-  # The copies that are the file's copies and the contexts that index them (same
-  # workspace, and a path that passes the same test as the file itself). A file at a copy's
-  # name is a copy when it is markdown and holds the same text as the file it was copied
-  # from, or is the file of a context that indexes it; anything else is somebody's own.
+  # The copies that are the context's copies, and the contexts that index them. A file at a
+  # name intake may have given a copy is one only when it is markdown and holds the text of
+  # the context it was copied from, byte for byte after the frontmatter; a file of another
+  # context under the plain name (when the copy took a suffixed one), or of a person, is not,
+  # and neither is any context that merely names it. The contexts that go with a copy are the
+  # rows at its path that say they are the copy of this context (`metadata.cross_ref_of`).
   defp verified_copies(_tenant_id, [], _dirs, _root), do: {:ok, [], []}
 
   defp verified_copies(tenant_id, copies, dirs, root) do
-    paths = copies |> Enum.map(fn {_ws, path, _body} -> path end) |> Enum.uniq()
+    verified =
+      copies
+      |> Enum.filter(fn {_id, workspace_id, path, body} ->
+        is_binary(body) and Path.extname(path) == ".md" and
+          owned?(path, workspace_id, root, dirs) and file_body(path) == body
+      end)
+      |> Enum.map(fn {id, workspace_id, path, _body} -> {id, workspace_id, path} end)
+      |> Enum.uniq()
+
+    paths = verified |> Enum.map(fn {_id, _ws, path} -> path end) |> Enum.uniq()
 
     {sql, params} =
       if tenant_id,
         do:
-          {"SELECT id, workspace_id, path FROM contexts WHERE tenant_id = ?1 AND path IN (SELECT value FROM json_each(?2))",
+          {"SELECT id, workspace_id, path, CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.cross_ref_of') END FROM contexts WHERE tenant_id = ?1 AND path IN (SELECT value FROM json_each(?2))",
            [tenant_id, Jason.encode!(paths)]},
         else:
-          {"SELECT id, workspace_id, path FROM contexts WHERE path IN (SELECT value FROM json_each(?1))",
+          {"SELECT id, workspace_id, path, CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.cross_ref_of') END FROM contexts WHERE path IN (SELECT value FROM json_each(?1))",
            [Jason.encode!(paths)]}
 
-    case Store.raw_query(sql, params) do
+    case if(paths == [], do: {:ok, []}, else: Store.raw_query(sql, params)) do
       {:ok, rows} ->
-        indexed = Enum.group_by(rows, fn [_id, ws, path] -> {ws, path} end, fn [id | _] -> id end)
-
-        verified =
-          copies
-          |> Enum.filter(fn {workspace_id, path, body} ->
-            owned?(path, workspace_id, root, dirs) and Path.extname(path) == ".md" and
-              ((is_binary(body) and file_body(path) == body) or
-                 Enum.any?(
-                   Map.get(indexed, {workspace_id, path}, []),
-                   &this_contexts_file?(&1, path)
-                 ))
-          end)
-          |> Enum.uniq_by(fn {workspace_id, path, _body} -> {workspace_id, path} end)
+        wanted = MapSet.new(verified)
 
         ids =
-          for {workspace_id, path, _body} <- verified,
-              id <- Map.get(indexed, {workspace_id, path}, []),
+          for [id, workspace_id, path, parent] <- rows,
+              MapSet.member?(wanted, {parent, workspace_id, path}),
               uniq: true,
               do: id
 
@@ -468,8 +522,9 @@ defmodule OptimalEngine.Compliance.ContextFiles do
   # A markdown file that holds the text intake wrote for the context, or whose name carries
   # the suffix of the context's id. The frontmatter has no id, so the text is the proof;
   # the body (title, genre and content) is what identifies it, not the summaries around it.
-  defp this_contexts_file?(id, path) do
-    Path.extname(path) == ".md" and (named_for?(id, path) or holds_text_of?(id, path))
+  defp this_contexts_file?(id, path, body) do
+    Path.extname(path) == ".md" and
+      (named_for?(id, path) or (is_binary(body) and file_body(path) == body))
   end
 
   defp named_for?(id, path) do
@@ -477,16 +532,15 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     Enum.any?(Address.candidate_suffixes(id), &String.ends_with?(name, "-" <> &1 <> ".md"))
   end
 
-  # The row is read from the database, not from the read cache: a rewrite of the row by
-  # raw SQL (retention) leaves the cached copy with the old text.
-  defp holds_text_of?(id, path) do
-    with body when is_binary(body) <- file_body(path),
-         :ok <- Store.evict_cached([id]),
+  # The body intake writes for the context, from the row as the database holds it, not from
+  # the read cache: a rewrite of the row by raw SQL (retention) leaves the cached copy with
+  # the old text. nil when the row cannot be read.
+  defp context_body(id) do
+    with :ok <- Store.evict_cached([id]),
          {:ok, %Context{} = context} <- Store.get_context(id) do
-      signal = Context.to_signal(context)
-      body == Writer.body(signal)
+      context |> Context.to_signal() |> Writer.body()
     else
-      _ -> false
+      _ -> nil
     end
   end
 
@@ -500,24 +554,35 @@ defmodule OptimalEngine.Compliance.ContextFiles do
     end
   end
 
-  # The `{workspace, file}` pairs that a context outside `allowed` also names.
+  # The `{workspace, file}` pairs that a context outside `allowed` also names, whatever way
+  # its row spells the path: the rows whose path ends in the name of a file are fetched and
+  # compared expanded, so `a/./b` and `a/c/../b` are the same file.
   defp held_elsewhere([], _allowed), do: {:ok, MapSet.new()}
 
   defp held_elsewhere(located, allowed) do
     workspaces = located |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
-    paths = Enum.map(located, &elem(&1, 1))
+    names = located |> Enum.map(fn {_ws, file} -> Path.basename(file) end) |> Enum.uniq()
+    wanted = MapSet.new(located)
 
     case Store.raw_query(
            """
            SELECT workspace_id, path FROM contexts
             WHERE workspace_id IN (SELECT value FROM json_each(?1))
-              AND path IN (SELECT value FROM json_each(?2))
+              AND EXISTS (SELECT 1 FROM json_each(?2) n WHERE contexts.path LIKE '%' || n.value)
               AND id NOT IN (SELECT value FROM json_each(?3))
            """,
-           [Jason.encode!(workspaces), Jason.encode!(paths), Jason.encode!(allowed)]
+           [Jason.encode!(workspaces), Jason.encode!(names), Jason.encode!(allowed)]
          ) do
       {:ok, rows} ->
-        {:ok, rows |> Enum.map(fn [workspace_id, path] -> {workspace_id, path} end) |> MapSet.new()}
+        {:ok,
+         for(
+           [workspace_id, path] <- rows,
+           is_binary(path),
+           key = {workspace_id, Path.expand(path)},
+           MapSet.member?(wanted, key),
+           into: MapSet.new(),
+           do: key
+         )}
 
       {:error, reason} ->
         {:error, {:context_files_unreadable, reason}}
