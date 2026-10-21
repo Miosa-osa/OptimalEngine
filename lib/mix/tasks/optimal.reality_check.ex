@@ -1583,7 +1583,8 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
     ]
     |> Enum.each(fn {sql, params} -> Store.raw_execute(sql, params) end)
 
-    File.rm_rf(workspace_id)
+    # The probe workspace's own directory, under the root this run uses.
+    OptimalEngine.Portability.WorkspaceBundle.remove_files(workspace_id)
   end
 
   defp evaluation_probes(state) do

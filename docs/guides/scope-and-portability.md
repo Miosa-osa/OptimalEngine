@@ -45,6 +45,14 @@ Results carry `source_workspace_id` and `source_engine`; `sources` reports each 
 Peers are registered with `POST /api/federation/peers {"workspace_id", "url", "api_key", "share_up"}` (admin); the key is encrypted with `CONNECTOR_KEY` and never returned.
 Nothing is copied: a workspace Engine's data is only queried.
 
+## Workspace ids
+
+A workspace id is `default` (the default tenant's default workspace, which lives in the Engine root), or `<tenant_id>:<suffix>` where the suffix is a slug (`Workspace.check_slug/1`: lowercase letters, digits and dashes, not the name of a directory of the root).
+The prefix is the workspace's own tenant: a tenant cannot take `default:foo` or another tenant's name, and `default:default`, which would map to the root, is not an id.
+The id decides the directory the workspace owns (`default:foo` is `<root>/foo`, `acme:foo` is `<root>/tenants/acme/foo`), which is why every place an id enters checks it: `Workspace.create/1` (`invalid_workspace_id`), a workspace entry of a topology document (an id that is not the importing tenant's is ignored and the workspace takes the id its slug derives), and a workspace bundle.
+A tenant whose id holds a colon has no prefix, so `Workspace.create/1` refuses to give its workspaces an id.
+A workspace row from before this check keeps working, but when its directory holds more than the workspace (the root, a directory the root uses, a hidden one) its bundle carries no files, and nothing is written into that directory.
+
 ## Renaming a workspace
 
 `PATCH /api/workspaces/:id {"slug": "<new slug>", "name": "<new name>"}` (`topology:write`) renames a workspace without moving it.
@@ -215,7 +223,9 @@ A manifest that names any other table, such as `connectors` or one it invents, i
 Every key of a row must be a column of its table, spelled as the table spells it, or the import is refused (`unknown_column`) before anything is written: SQLite matches column names without regard to case, so a key that only looks like a column could carry a value past the rewrite.
 The tenant and workspace columns are set on every row, whether or not the bundle names them, and an operating document is always the workspace's.
 A member of the workspace must be a principal of the importing tenant (`foreign_principal`).
-A requested `workspace_id` must name the importing tenant (`<tenant>:<slug>`, or a bare slug that gets the prefix), so one tenant cannot take another's names (`workspace_id_not_in_tenant`).
+A requested `workspace_id` must name the importing tenant (`<tenant>:<slug>`, or a bare slug that gets the prefix), so one tenant cannot take another's names (`workspace_id_not_in_tenant`), and it must be a workspace id (see "Workspace ids" below; `invalid_workspace_id`).
+The id in the manifest is used only when it is such an id for the importing tenant; any other id, which only a hand-written bundle carries, is ignored and the id derives from the slug.
+A file of the bundle is named by a path under the workspace's directory. A path that is absolute, empty, climbs out of the directory (`../x`) or holds a NUL byte refuses the bundle (`file_path_outside_workspace`) before anything is read or written, and a bundle that carries files is refused (`workspace_directory_shared`) when the target's directory holds more than the workspace (see `movable/1` below).
 What a bundle can still do within those tables is add rows to the workspace it creates or merges into, and add principals to the importing tenant: every principals row is written with that tenant, and an id the Engine already has keeps its existing row.
 
 Each tenant has its own bundle folder, `<backup dir>/bundles/<tenant>/`, where `<backup dir>` is `OPTIMAL_BACKUP_DIR` (or `backups` beside the database).
