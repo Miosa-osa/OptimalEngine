@@ -45,6 +45,9 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Telemetry
   alias OptimalEngine.Wiki
 
+  # First: every plug below reads the decoded segments the router matches, and
+  # a path that hides a route's literal behind escapes is refused.
+  plug(OptimalEngine.API.PathPlug)
   plug(OptimalEngine.API.VersionPlug)
   plug(OptimalEngine.API.ClientCompatibilityPlug)
   plug(:cors)
