@@ -204,7 +204,8 @@ Connectors (their credentials are sealed with the source Engine's `CONNECTOR_KEY
 | --- | --- |
 | Export, optionally reserving a move | `POST /api/workspaces/:id/bundle {"for_move": true}` returns the bundle name, `bundle_sha256`, and `ledger_sequence` (the mark a seeded replica pulls from) |
 | Download | `GET /api/bundles/:name` |
-| Import on the target | `POST /api/bundles/import {"bundle": "<name>", "mode": "create|merge", "workspace_id"?, "organization_id"?}`, or the raw file with `content-type: application/gzip` (the same options as query parameters), written to disk as it arrives and deleted once unpacked |
+| Import on the target by name | `POST /api/bundles/import {"bundle": "<name>", "mode": "create|merge", "workspace_id"?, "organization_id"?, "cross_tenant"?}` for a file in the caller's bundle folder |
+| Import on the target from the file | the same route with the raw file as the body, `content-type: application/gzip`, the options as query parameters, and an optional `x-bundle-sha256` header |
 | Finalize on the source | `POST /api/workspaces/:id/finalize-move {"bundle_sha256", "target_url", "target_workspace_id"}` |
 | Resolve a citation | `GET /api/resolve?uri=optimal://<workspace>/...` returns `local` or `moved` with the new location |
 
@@ -215,6 +216,17 @@ The tenant and workspace columns are set on every row, whether or not the bundle
 A member of the workspace must be a principal of the importing tenant (`foreign_principal`).
 A requested `workspace_id` must name the importing tenant (`<tenant>:<slug>`, or a bare slug that gets the prefix), so one tenant cannot take another's names (`workspace_id_not_in_tenant`).
 What a bundle can still do within those tables is add rows to the workspace it creates or merges into, and add principals to the importing tenant: every principals row is written with that tenant, and an id the Engine already has keeps its existing row.
+
+Each tenant has its own bundle folder, `<backup dir>/bundles/<tenant>/`, where `<backup dir>` is `OPTIMAL_BACKUP_DIR` (or `backups` beside the database).
+An export is written there, a download and an import by name read only from there, and a raw upload is staged there.
+A control plane that copies a bundle onto the Engine's disk and imports it by name places it in that folder, for example `/data/.optimal/backups/bundles/default/<name>` for the `default` tenant with `OPTIMAL_BACKUP_DIR=/data/.optimal/backups`.
+A bundle whose manifest names another tenant is answered as not found by name or on download, and refused with 403 `bundle_from_another_tenant` as an upload.
+Only the Engine operator (a `default`-tenant admin key whose workspace scope is `*`) imports or downloads one, by adding `"cross_tenant": true` (`?cross_tenant=true` on a download); anyone else asking for it gets 403 `operator_only`.
+Bundles from before this release sit in `bundles/` itself; move one into its tenant's folder to use it.
+
+A raw upload is written to disk a chunk at a time and hashed as it arrives, so a bundle of any size is never held in memory.
+It is refused with 413 past `OPTIMAL_BUNDLE_MAX_BYTES` (5 GiB by default), before reading when `content-length` says so; with 422 `bundle_sha256_mismatch` when `x-bundle-sha256` names another SHA-256 of the file; and the temporary file is removed whatever happens.
+Export, import, and download keep their connection open for as long as they run, so a large workspace is not cut off by the HTTP server's idle limits.
 
 The export seals every change the replication ledger has captured, reads the ledger's high-water mark, and only then reads the rows.
 Everything at or below `ledger_sequence` is therefore in the bundle, and a replica seeded from it pulls only what comes after.
