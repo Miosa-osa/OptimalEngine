@@ -2361,6 +2361,57 @@ defmodule OptimalEngine.SyncTest do
                Sync.apply_changes(ctx.tenant, ctx.ws, [keyed])
     end
 
+    test "an id shaped like this Engine's next capture key is refused, and the local change it would shadow still seals",
+         ctx do
+      local = Sync.replica_id()
+
+      {:ok, [[next]]} =
+        Store.raw_query(
+          "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'sync_capture'), 0) + 1",
+          []
+        )
+
+      # `<replica>:<capture sequence>` is the key `Capture.seal/0` gives this
+      # Engine's next changes; as an id, the ledger would have stored it as the key.
+      spoofs =
+        for seq <- next..(next + 5) do
+          mutation(ctx, %{
+            "id" => "#{local}:#{seq}",
+            "idempotency_key" => "harmless-#{seq}-#{ctx.n}",
+            "payload" => context_row("shadow-#{seq}-#{ctx.n}", "Shadow", ctx.ws, ctx.tenant)
+          })
+        end
+
+      assert {:ok, %{applied: 0, failed: failed}} = Sync.apply_changes(ctx.tenant, ctx.ws, spoofs)
+      assert Enum.map(failed, & &1.reason) == List.duplicate(:mutation_id_in_use, 6)
+
+      insert_context(ctx.tenant, ctx.ws, "unshadowed-#{ctx.n}", "Mine")
+      {:ok, _} = Capture.seal()
+
+      assert {:ok, [[^local, key]]} =
+               Store.raw_query(
+                 "SELECT device_id, idempotency_key FROM sync_mutations WHERE entity_type = 'contexts' AND entity_id = ?1",
+                 ["unshadowed-#{ctx.n}"]
+               )
+
+      assert String.starts_with?(key, local <> ":")
+
+      assert "unshadowed-#{ctx.n}" in Enum.map(
+               Sync.changes(ctx.tenant, ctx.ws)["mutations"],
+               & &1["entity_id"]
+             )
+
+      # Any id with a colon is in the shape of some replica's capture keys.
+      other =
+        mutation(ctx, %{
+          "id" => "rep_other:#{ctx.n}",
+          "payload" => context_row("colon-#{ctx.n}", "x", ctx.ws, ctx.tenant)
+        })
+
+      assert {:ok, %{applied: 0, failed: [%{reason: :invalid_mutation_id}]}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [other])
+    end
+
     test "the key and the hash of a change in the ledger are this Engine's, not the sender's",
          ctx do
       lie = fn id, key ->
@@ -2384,7 +2435,7 @@ defmodule OptimalEngine.SyncTest do
                  [first["id"]]
                )
 
-      assert key == first["id"]
+      assert key == "peer:" <> first["id"]
       assert hash == :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
 
       numeric =
