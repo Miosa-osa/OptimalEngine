@@ -527,6 +527,91 @@ defmodule OptimalEngine.API.ReadGatesTest do
     end
   end
 
+  # The node routes list the contexts of a node by title and path, and the
+  # graph edges that touch them: a restricted document's title is its content.
+  describe "the node routes" do
+    defp node_contexts(ctx), do: [ctx.plain_doc, ctx.confidential_doc, ctx.secret_doc]
+
+    defp in_node(ctx, listed),
+      do: Enum.filter(listed, &(&1 in Enum.map(node_contexts(ctx), fn c -> c.id end)))
+
+    test "a node lists only the contexts the key may read", ctx do
+      path = "/api/node/operator?" <> ws(ctx)
+
+      read = fn token ->
+        path
+        |> get_json(token)
+        |> Map.fetch!("contexts")
+        |> ids()
+        |> then(&in_node(ctx, &1))
+        |> Enum.sort()
+      end
+
+      assert read.(mint(ctx, %{})) == [ctx.plain_doc.id]
+      assert read.(mint(ctx, @machine)) == Enum.sort([ctx.plain_doc.id, ctx.confidential_doc.id])
+
+      assert read.(mint(ctx, %{"allowed_security_labels" => ["restricted", "confidential"]})) ==
+               Enum.sort(Enum.map(node_contexts(ctx), & &1.id))
+
+      assert read.(nil) == Enum.sort(Enum.map(node_contexts(ctx), & &1.id))
+    end
+
+    test "a node lists only the edges between contexts the key may read", ctx do
+      open = edge(ctx, ctx.plain_doc, ctx.confidential_doc)
+      to_secret = edge(ctx, ctx.plain_doc, ctx.secret_doc)
+      inner = edge(ctx, ctx.confidential_doc, ctx.secret_doc)
+      path = "/api/node/operator?" <> ws(ctx)
+
+      read = fn token ->
+        path
+        |> get_json(token)
+        |> Map.fetch!("edges")
+        |> Enum.map(&{&1["source"], &1["target"]})
+        |> Enum.filter(&(&1 in [open, to_secret, inner]))
+        |> Enum.sort()
+      end
+
+      assert read.(mint(ctx, %{})) == []
+      assert read.(mint(ctx, @machine)) == [open]
+
+      assert read.(mint(ctx, %{"allowed_security_labels" => ["restricted", "confidential"]})) ==
+               Enum.sort([open, to_secret, inner])
+
+      assert read.(nil) == Enum.sort([open, to_secret, inner])
+    end
+
+    test "the file tree of a node lists only the contexts the key may read", ctx do
+      path = "/api/optimal/nodes/operator/files?" <> ws(ctx)
+      address = fn context -> context.uri || context.id end
+
+      read = fn token ->
+        path
+        |> get_json(token)
+        |> Map.fetch!("files")
+        |> Enum.map(& &1["path"])
+        |> Enum.filter(&(&1 in Enum.map(node_contexts(ctx), address)))
+        |> Enum.sort()
+      end
+
+      assert read.(mint(ctx, %{})) == [address.(ctx.plain_doc)]
+
+      assert read.(mint(ctx, @machine)) ==
+               Enum.sort([address.(ctx.plain_doc), address.(ctx.confidential_doc)])
+
+      assert read.(nil) == Enum.sort(Enum.map(node_contexts(ctx), address))
+    end
+
+    test "the title of a hidden context is not in the answer", ctx do
+      for path <- ["/api/node/operator?", "/api/optimal/nodes/operator/files?"] do
+        conn = get_as(path <> ws(ctx), mint(ctx, %{}))
+
+        assert conn.status == 200
+        refute conn.resp_body =~ "Zephyrcorp", path
+        refute conn.resp_body =~ "Brightwater", path
+      end
+    end
+  end
+
   # A list that said how many rows it left out would tell a key without the
   # label that a restricted row matches its query: a probe for a name, an
   # amount or a project. These routes answer a probe for what the key may not
@@ -665,6 +750,16 @@ defmodule OptimalEngine.API.ReadGatesTest do
       )
 
     id
+  end
+
+  defp edge(ctx, from, to) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO graph_edges (tenant_id, workspace_id, source_id, target_id, relation, weight) VALUES ('default', ?1, ?2, ?3, 'links_to', 1.0)",
+        [ctx.ws, from.id, to.id]
+      )
+
+    {from.id, to.id}
   end
 
   defp cluster(id, theme, chunk_ids) do
