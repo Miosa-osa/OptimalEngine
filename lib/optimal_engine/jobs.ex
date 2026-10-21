@@ -276,6 +276,65 @@ defmodule OptimalEngine.Jobs do
   end
 
   @doc """
+  The job a workspace enqueued with `idempotency_key`, in any state, or
+  `{:error, :not_found}`. A caller checks it before accepting work it would
+  otherwise discard as a duplicate.
+  """
+  @spec find_by_idempotency_key(String.t(), String.t()) :: {:ok, job()} | {:error, term()}
+  def find_by_idempotency_key(workspace_id, key) when is_binary(workspace_id) and is_binary(key) do
+    case Store.raw_query(
+           "SELECT #{@job_columns} FROM jobs WHERE workspace_id = ?1 AND idempotency_key = ?2",
+           [workspace_id, key]
+         ) do
+      {:ok, [row | _]} -> {:ok, job_from_row(row)}
+      {:ok, []} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "How many jobs of a kind a workspace has queued or running."
+  @spec count_active(String.t(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def count_active(workspace_id, kind) when is_binary(workspace_id) and is_binary(kind) do
+    case Store.raw_query(
+           "SELECT COUNT(*) FROM jobs WHERE workspace_id = ?1 AND kind = ?2 AND status IN ('available', 'running')",
+           [workspace_id, kind]
+         ) do
+      {:ok, [[n]]} -> {:ok, n}
+      {:ok, []} -> {:ok, 0}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Jobs of a kind across every workspace, newest first, for maintenance that
+  spans workspaces (an importer sweeping its staging folders). Options:
+  `:statuses` (default all) and `:limit` (default 10,000).
+  """
+  @spec list_kind(String.t(), keyword()) :: {:ok, [job()]} | {:error, term()}
+  def list_kind(kind, opts \\ []) when is_binary(kind) do
+    limit = opts |> Keyword.get(:limit, 10_000) |> max(1)
+    statuses = Keyword.get(opts, :statuses, [])
+
+    {status_sql, params} =
+      case statuses do
+        [] ->
+          {"", [kind, limit]}
+
+        list ->
+          placeholders = Enum.map_join(1..length(list), ", ", &"?#{&1 + 2}")
+          {" AND status IN (#{placeholders})", [kind, limit | Enum.map(list, &to_string/1)]}
+      end
+
+    with {:ok, rows} <-
+           Store.raw_query(
+             "SELECT #{@job_columns} FROM jobs WHERE kind = ?1#{status_sql} ORDER BY inserted_at DESC LIMIT ?2",
+             params
+           ) do
+      {:ok, Enum.map(rows, &job_from_row/1)}
+    end
+  end
+
+  @doc """
   Return the workspace's queued or running job of a kind, if one exists.
 
   Callers use this to coalesce repeated requests onto one job: a save loop that

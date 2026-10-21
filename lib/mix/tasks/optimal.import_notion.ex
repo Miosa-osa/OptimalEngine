@@ -55,15 +55,26 @@ defmodule Mix.Tasks.Optimal.ImportNotion do
 
     staged = Imports.stage()
     File.cp!(zip, staged.source)
+    File.chmod!(staged.source, 0o600)
 
     source = %{"kind" => "upload", "bytes" => bytes}
     enqueue_opts = [actor_id: "local:mix-import", idempotency_key: opts[:key]]
 
     job =
       case Imports.enqueue_notion(workspace, staged, source, enqueue_opts) do
-        {:ok, job, _outcome} -> job
-        {:error, :workspace_not_found} -> Mix.raise("No active workspace #{workspace}")
-        {:error, reason} -> Mix.raise("Could not enqueue the import: #{inspect(reason)}")
+        {:ok, job, _outcome} ->
+          job
+
+        {:error, :workspace_not_found} ->
+          Mix.raise("No active workspace #{workspace}")
+
+        {:error, :too_many_imports} ->
+          Mix.raise(
+            "#{workspace} already has #{Imports.max_outstanding()} imports queued or running"
+          )
+
+        {:error, reason} ->
+          Mix.raise("Could not enqueue the import: #{inspect(reason)}")
       end
 
     Mix.shell().info("import #{job.id} queued for #{workspace}")

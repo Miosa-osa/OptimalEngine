@@ -12,8 +12,9 @@ defmodule OptimalEngine.Imports.Zip do
 
   The whole archive is refused when it has no end of central directory record
   (`:invalid_zip`), uses ZIP64 or spans disks (`:zip64_unsupported`), holds
-  more entries than `:max_entries` (`:too_many_entries`), declares more
-  uncompressed bytes in total than `:max_total_bytes` (`:archive_too_large`),
+  more entries than `:max_entries` (`:too_many_entries`), has a central
+  directory over `:max_directory_bytes` or declares more uncompressed bytes in
+  total than `:max_total_bytes` (`:archive_too_large`),
   or names a path that is absolute, has a drive letter, a `..`, `.` or empty
   segment, a backslash or a NUL (`{:unsafe_path, name}`).
 
@@ -37,6 +38,7 @@ defmodule OptimalEngine.Imports.Zip do
 
   @default_limits %{
     max_entries: 50_000,
+    max_directory_bytes: 64 * 1024 * 1024,
     max_total_bytes: 4 * 1024 * 1024 * 1024
   }
 
@@ -60,7 +62,7 @@ defmodule OptimalEngine.Imports.Zip do
 
   @doc """
   Opens `path` and reads its central directory. `limits` may set
-  `:max_entries` and `:max_total_bytes`.
+  `:max_entries`, `:max_directory_bytes` and `:max_total_bytes`.
   """
   @spec open(Path.t(), map()) :: {:ok, archive()} | {:error, term()}
   def open(path, limits \\ %{}) do
@@ -72,6 +74,8 @@ defmodule OptimalEngine.Imports.Zip do
           with {:ok, size} <- file_size(path),
                {:ok, eocd} <- read_eocd(fd, size),
                :ok <- within(eocd.count, limits.max_entries, :too_many_entries),
+               :ok <- within(eocd.cd_size, limits.max_directory_bytes, :archive_too_large),
+               :ok <- within(eocd.cd_offset + eocd.cd_size, size, :invalid_zip),
                {:ok, cd} <- pread(fd, eocd.cd_offset, eocd.cd_size, size),
                {:ok, entries} <- parse_central(cd, eocd.count, []),
                :ok <- check_entries(entries, size, limits) do
@@ -92,18 +96,31 @@ defmodule OptimalEngine.Imports.Zip do
   """
   @spec read(archive(), entry(), non_neg_integer()) :: {:ok, binary()} | {:error, term()}
   def read(archive, entry, max_bytes) do
-    with {:ok, chunks} <- stream(archive, entry, max_bytes, [], fn chunk, acc -> [acc | chunk] end) do
+    with {:ok, chunks} <- fold(archive, entry, max_bytes, [], fn chunk, acc -> [acc | chunk] end) do
       {:ok, IO.iodata_to_binary(chunks)}
     end
   end
 
   @doc """
-  Inflates one entry into the file `dest`, without holding it in memory.
-  Refuses an entry whose declared size is over `max_bytes`.
+  Inflates one entry piece by piece, folding `fun.(piece, acc)` over the
+  inflated bytes. Inflation stops at the first piece that would take the
+  entry past its declared size, and that piece is not passed on, so `fun`
+  never sees more than the declared size. Refuses an entry whose declared
+  size is over `max_bytes`.
+  """
+  @spec fold(archive(), entry(), non_neg_integer(), acc, (binary(), acc -> acc)) ::
+          {:ok, acc} | {:error, term()}
+        when acc: term()
+  def fold(archive, entry, max_bytes, acc, fun), do: stream(archive, entry, max_bytes, acc, fun)
+
+  @doc """
+  Inflates one entry into the file `dest` (owner-only), without holding it in
+  memory. Refuses an entry whose declared size is over `max_bytes`.
   """
   @spec extract(archive(), entry(), Path.t(), non_neg_integer()) :: :ok | {:error, term()}
   def extract(archive, entry, dest, max_bytes) do
     {:ok, out} = File.open(dest, [:write, :binary, :raw])
+    :ok = File.chmod(dest, 0o600)
 
     result =
       try do
@@ -152,7 +169,7 @@ defmodule OptimalEngine.Imports.Zip do
           zip64_locator? =
             pos >= 20 and binary_part(tail, pos - 20, 4) == @zip64_locator_sig
 
-          if zip64_locator?, do: {:error, :zip64_unsupported}, else: classify_eocd(eocd, size)
+          if zip64_locator?, do: {:error, :zip64_unsupported}, else: classify_eocd(eocd)
       end
     end
   end
@@ -178,15 +195,12 @@ defmodule OptimalEngine.Imports.Zip do
     end
   end
 
-  defp classify_eocd(eocd, size) do
+  defp classify_eocd(eocd) do
     cond do
       eocd.count == 0xFFFF or eocd.cd_size == 0xFFFFFFFF or eocd.cd_offset == 0xFFFFFFFF ->
         {:error, :zip64_unsupported}
 
       eocd.disk != 0 or eocd.cd_disk != 0 or eocd.disk_count != eocd.count ->
-        {:error, :invalid_zip}
-
-      eocd.cd_offset + eocd.cd_size > size ->
         {:error, :invalid_zip}
 
       true ->

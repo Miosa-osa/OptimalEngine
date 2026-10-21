@@ -20,6 +20,17 @@ defmodule OptimalEngine.Imports do
   as the download completes. The job row, the report, the status, errors and
   logs carry only `OptimalEngine.Imports.Fetch.redact/1`, `scheme://host/path`.
 
+  The staging folder is owner-only (0700) and every file in it (the source
+  zip, the URL, unpacked part zips and CSVs) is 0600. At most
+  `max_outstanding/0` imports per workspace are queued or running at once.
+  `sweep/1` (run when `OptimalEngine.Imports.Worker` starts) removes the
+  sources of imports that ended long ago, however they ended, and folders no
+  job refers to.
+
+  An idempotency key names one import per workspace for good: a request that
+  repeats it gets the first job back, whatever state it is in, and its body is
+  not read. A new import needs a new key.
+
   Imports are workspace-scoped: a job writes only into its own workspace.
   """
 
@@ -32,6 +43,8 @@ defmodule OptimalEngine.Imports do
   @max_attempts 3
   @lease_seconds 600
   @default_max_bytes 1024 * 1024 * 1024
+  @default_max_outstanding 2
+  @sweep_age_seconds 86_400
   @import_id ~r/\Aimp_[0-9a-f]{24}\z/
 
   @type staged :: %{id: String.t(), dir: Path.t(), source: Path.t()}
@@ -50,6 +63,45 @@ defmodule OptimalEngine.Imports do
     case Application.get_env(:optimal_engine, :import_max_bytes) do
       n when is_integer(n) and n > 0 -> n
       _ -> @default_max_bytes
+    end
+  end
+
+  @doc """
+  How many imports a workspace may have queued or running at once
+  (`config :optimal_engine, :import_max_outstanding`, default 2).
+  """
+  @spec max_outstanding() :: pos_integer()
+  def max_outstanding do
+    case Application.get_env(:optimal_engine, :import_max_outstanding) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_max_outstanding
+    end
+  end
+
+  @doc """
+  The import a workspace already started with `idempotency_key`, if any, so
+  a repeated request is answered before its body is read.
+  """
+  @spec existing(String.t(), String.t() | nil) :: {:ok, Jobs.job()} | :none
+  def existing(_workspace_id, key) when key in [nil, ""], do: :none
+
+  def existing(workspace_id, key) do
+    case Jobs.find_by_idempotency_key(workspace_id, @notion <> ":" <> key) do
+      {:ok, %{kind: @notion} = job} -> {:ok, job}
+      _ -> :none
+    end
+  end
+
+  @doc """
+  `:ok` when the workspace may start another import, or
+  `{:error, :too_many_imports}` when `max_outstanding/0` are already queued or
+  running.
+  """
+  @spec admit(String.t()) :: :ok | {:error, :too_many_imports}
+  def admit(workspace_id) do
+    case Jobs.count_active(workspace_id, @notion) do
+      {:ok, n} -> if n >= max_outstanding(), do: {:error, :too_many_imports}, else: :ok
+      {:error, _} -> :ok
     end
   end
 
@@ -74,7 +126,57 @@ defmodule OptimalEngine.Imports do
     id = "imp_" <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
     folder = Path.join(dir(), id)
     File.mkdir_p!(folder)
+    File.chmod!(folder, 0o700)
     %{id: id, dir: folder, source: Path.join(folder, "source.zip")}
+  end
+
+  @doc """
+  Removes what old imports leave behind: the sources of imports that are not
+  queued or running and are older than `max_age_seconds` (default one day),
+  however they ended, including jobs dead-lettered when a lease ran out, and
+  staging folders no job refers to. Reports are kept. Returns how many folders
+  were cleaned.
+  """
+  @spec sweep(non_neg_integer()) :: non_neg_integer()
+  def sweep(max_age_seconds \\ @sweep_age_seconds) do
+    with {:ok, jobs} <- Jobs.list_kind(@notion),
+         {:ok, names} <- File.ls(dir()) do
+      active =
+        for %{status: status, payload: %{"import_id" => id}} <- jobs,
+            status in ["available", "running"],
+            into: MapSet.new(),
+            do: id
+
+      known = MapSet.new(jobs, & &1.payload["import_id"])
+      cutoff = System.os_time(:second) - max_age_seconds
+
+      Enum.count(names, fn name ->
+        folder = Path.join(dir(), name)
+
+        cond do
+          not Regex.match?(@import_id, name) or MapSet.member?(active, name) -> false
+          not older_than?(folder, cutoff) -> false
+          MapSet.member?(known, name) -> leftovers?(folder) and clean_source(name) == :ok
+          true -> match?({:ok, _}, File.rm_rf(folder))
+        end
+      end)
+    else
+      _ -> 0
+    end
+  end
+
+  defp leftovers?(folder) do
+    case File.ls(folder) do
+      {:ok, names} -> Enum.any?(names, &(&1 != "report.json"))
+      _ -> false
+    end
+  end
+
+  defp older_than?(folder, cutoff) do
+    case File.stat(folder, time: :posix) do
+      {:ok, %{mtime: mtime}} -> mtime < cutoff
+      _ -> false
+    end
   end
 
   @doc "Removes a staging folder that will not become a job."
@@ -90,7 +192,11 @@ defmodule OptimalEngine.Imports do
 
   Options: `:actor_id`, and `:idempotency_key`: a repeated key returns the
   first job, `:duplicate`, and the new staging folder is discarded.
-  Returns `{:ok, job, :queued | :duplicate}` or `{:error, reason}`.
+  Returns `{:ok, job, :queued | :duplicate}` or `{:error, reason}`, with
+  `{:error, :too_many_imports}` when the workspace already has
+  `max_outstanding/0` imports queued or running. The count and the insert run
+  under one lock per workspace, so two requests at once cannot both take the
+  last place.
   """
   @spec enqueue_notion(String.t(), staged(), map(), keyword()) ::
           {:ok, Jobs.job(), :queued | :duplicate} | {:error, term()}
@@ -115,10 +221,22 @@ defmodule OptimalEngine.Imports do
         _ -> nil
       end
 
-    case Jobs.enqueue(workspace_id, @notion, payload,
-           max_attempts: @max_attempts,
-           idempotency_key: key
-         ) do
+    result =
+      :global.trans(
+        {{__MODULE__, workspace_id}, self()},
+        fn ->
+          with :none <- existing(workspace_id, opts[:idempotency_key]),
+               :ok <- admit(workspace_id) do
+            Jobs.enqueue(workspace_id, @notion, payload,
+              max_attempts: @max_attempts,
+              idempotency_key: key
+            )
+          end
+        end,
+        [node()]
+      )
+
+    case result do
       {:ok, %{payload: %{"import_id" => id}} = job} when id == staged.id ->
         {:ok, job, :queued}
 
@@ -175,28 +293,35 @@ defmodule OptimalEngine.Imports do
     previous = read_report(id)
     write_report(id, %{"started_at" => started})
 
+    # A long download or import keeps its lease, so another worker never
+    # starts it a second time while this one is alive.
+    heartbeat = fn -> _ = Jobs.extend_lease(job.id, owner, @lease_seconds) end
+
     progress = fn report ->
       write_report(id, Map.put(report, "started_at", started))
-      _ = Jobs.extend_lease(job.id, owner, @lease_seconds)
+      heartbeat.()
       :ok
     end
 
+    # A crash is reported by its kind only: an exception message or an exit
+    # term can carry the request, and with it a presigned URL.
     result =
       try do
         with {:ok, folder} <- folder(id),
-             {:ok, source} <- source_file(job, folder) do
+             {:ok, source} <- source_file(job, folder, heartbeat) do
           Notion.import_file(source, job.workspace_id,
             tenant_id: job.tenant_id,
             actor_id: job.payload["actor_id"] || "system:notion-import",
             work_dir: folder,
             limits: Application.get_env(:optimal_engine, :import_limits, %{}),
-            progress: progress
+            progress: progress,
+            heartbeat: heartbeat
           )
         end
       rescue
-        error -> {:error, {:crashed, Exception.message(error)}}
+        error -> {:error, {:crashed, inspect(error.__struct__)}}
       catch
-        kind, reason -> {:error, {:crashed, "#{kind}: #{inspect(reason)}"}}
+        kind, _reason -> {:error, {:crashed, Atom.to_string(kind)}}
       end
 
     finish(job, owner, id, started, previous, result)
@@ -265,13 +390,15 @@ defmodule OptimalEngine.Imports do
 
   # A URL source is downloaded once: the URL file is deleted when the zip is
   # complete, and a later attempt (the import itself failed) reuses the zip.
-  defp source_file(%{payload: %{"source" => %{"kind" => "url"}}}, folder) do
+  defp source_file(%{payload: %{"source" => %{"kind" => "url"}}}, folder, heartbeat) do
     path = Path.join(folder, "source.zip")
     url_file = Path.join(folder, "source.url")
 
     case File.read(url_file) do
       {:ok, url} ->
-        with {:ok, _bytes} <- Fetch.download(String.trim(url), path, max_bytes()) do
+        opts = [progress: fn _bytes -> heartbeat.() end]
+
+        with {:ok, _bytes} <- Fetch.download(String.trim(url), path, max_bytes(), opts) do
           File.rm(url_file)
           {:ok, path}
         end
@@ -281,7 +408,7 @@ defmodule OptimalEngine.Imports do
     end
   end
 
-  defp source_file(_job, folder) do
+  defp source_file(_job, folder, _heartbeat) do
     path = Path.join(folder, "source.zip")
     if File.regular?(path), do: {:ok, path}, else: {:error, :source_missing}
   end
@@ -315,6 +442,7 @@ defmodule OptimalEngine.Imports do
       path = Path.join(folder, "report.json")
       tmp = path <> ".tmp"
       File.write!(tmp, Jason.encode!(report))
+      File.chmod!(tmp, 0o600)
       File.rename!(tmp, path)
     end
 

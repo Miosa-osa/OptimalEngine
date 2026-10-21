@@ -15,7 +15,11 @@ defmodule OptimalEngine.Imports.Notion.Links do
 
   # [text](target) with one level of brackets in the text and of parentheses
   # in the target; an image (`![alt](src)`) is matched so it can be skipped.
-  @link ~r/(!?)\[((?:[^\[\]\n]|\[[^\[\]\n]*\])*)\]\(([^()\s]+(?:\([^()\s]*\)[^()\s]*)*)\)/u
+  # Every repetition is possessive, so the engine never backtracks into what
+  # it has read, and a bracket inside the text or a target is bounded, so a
+  # long line full of unclosed brackets costs time linear in its length, not
+  # its square.
+  @link ~r/(!?)\[((?:[^\[\]\n]++|\[[^\[\]\n]{0,200}+\])*+)\]\(([^()\s]{1,2048}+(?:\([^()\s]{0,256}+\)[^()\s]{0,256}+){0,4}+)\)/u
   @notion_url ~r{\Ahttps?://(?:[a-z0-9-]+\.)*notion\.(?:so|site)/}i
   @scheme ~r/\A[a-z][a-z0-9+.-]*:/i
   @hex_id ~r/([0-9a-f]{32})(?![0-9a-f])/

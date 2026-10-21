@@ -16,14 +16,19 @@ defmodule OptimalEngine.Imports.Notion do
       every exported page or database it links to; links in the stored text
       point at the target's URI (`OptimalEngine.Imports.Notion.Links`)
 
-  A re-import replaces the `child_of` and `links_to` edges of the contexts it
-  writes, so a page that moved has one parent, not two.
+  A re-import replaces the `child_of` and `links_to` edges between imported
+  Notion contexts, the edges this importer writes, so a page that moved has
+  one parent, not two. Any other edge is left alone.
 
   The archive is read by `OptimalEngine.Imports.Zip` under hard limits; a
   Notion export split into part zips at the archive root is read one level
-  deep. Assets (images, files) are counted, not imported. A problem with one
-  page is recorded in the report and the import continues; an archive that is
-  refused, or an entry that inflates past its declared size, stops it.
+  deep, and a root zip that cannot be read is one reported error. Assets
+  (images, files) are counted, not imported. A database CSV is read as a
+  stream, at most `:max_rows_per_csv` rows, and the whole import is held to
+  `:max_contexts` contexts. A problem with one page is recorded in the report
+  and the import continues; an archive that is refused, or an entry that
+  inflates past its declared size, stops it. Contexts written before such a
+  stop stay, without their edges; importing a corrected export completes them.
   """
 
   require Logger
@@ -31,7 +36,7 @@ defmodule OptimalEngine.Imports.Notion do
   alias OptimalEngine.Graph
   alias OptimalEngine.Imports.Notion.{Database, Links, Plan}
   alias OptimalEngine.Imports.Zip
-  alias OptimalEngine.Pipeline.Intake
+  alias OptimalEngine.Pipeline.{Classifier, Intake}
   alias OptimalEngine.Store
 
   @child_of "child_of"
@@ -43,21 +48,33 @@ defmodule OptimalEngine.Imports.Notion do
   @store_backlog 50
   @store_wait_ms 30_000
   @batch 64
+  @prefix_bytes 16
+  @classify_bytes 65_536
 
   @default_limits %{
     max_entries: 50_000,
+    max_directory_bytes: 64 * 1024 * 1024,
     max_total_bytes: 4 * 1024 * 1024 * 1024,
     max_entry_bytes: 64 * 1024 * 1024,
-    max_page_bytes: 2 * 1024 * 1024
+    max_page_bytes: 2 * 1024 * 1024,
+    max_rows_per_csv: 10_000,
+    max_contexts: 100_000
   }
 
   # Failures no other attempt can fix: the archive itself is refused.
   @fatal ~w(invalid_zip zip64_unsupported unsafe_path too_many_entries archive_too_large
-            entry_size_mismatch empty_export source_missing)a
+            entry_size_mismatch empty_export source_missing too_many_contexts)a
+
+  # A root zip that fails to read for one of these is not an export part.
+  @unreadable_part ~w(invalid_zip zip64_unsupported crc_mismatch corrupt_entry encrypted_entry
+                      unsupported_compression)a
 
   @type report :: map()
 
-  @doc "The default limits: entries, total and per-entry bytes, page text bytes."
+  @doc """
+  The default limits: entries, central directory, total and per-entry bytes,
+  page text bytes, rows per CSV, and contexts per import.
+  """
   @spec default_limits() :: map()
   def default_limits, do: @default_limits
 
@@ -89,74 +106,64 @@ defmodule OptimalEngine.Imports.Notion do
     offset = opts |> Keyword.get(:offset, 0) |> max(0)
     prefix = uri(workspace_id, "")
 
-    children = """
-    (SELECT COUNT(*) FROM edges k
-     WHERE k.target_id = c.id AND k.relation = 'child_of' AND k.workspace_id = ?1)
-    """
+    with {:ok, contexts} <- notion_contexts(workspace_id),
+         {:ok, edges} <- Graph.edges_by_relation([@child_of], workspace_id: workspace_id) do
+      edges =
+        Enum.filter(
+          edges,
+          &(Map.has_key?(contexts, &1.source_id) and Map.has_key?(contexts, &1.target_id))
+        )
 
-    query =
-      case parent do
-        nil ->
-          {:ok,
-           Store.raw_query(
-             """
-             SELECT c.uri, c.title, #{children}
-             FROM contexts c
-             WHERE c.workspace_id = ?1 AND substr(c.uri, 1, ?3) = ?2
-               AND NOT EXISTS (SELECT 1 FROM edges e
-                               WHERE e.source_id = c.id AND e.relation = 'child_of'
-                                 AND e.workspace_id = ?1)
-             ORDER BY c.title, c.uri LIMIT ?4 OFFSET ?5
-             """,
-             [workspace_id, prefix, String.length(prefix), limit, offset]
-           )}
+      parents = Map.new(edges, &{&1.source_id, &1.target_id})
+      children = Enum.frequencies_by(edges, & &1.target_id)
 
-        parent_id ->
-          parent_ctx = context_id(workspace_id, parent_id)
+      level =
+        case parent do
+          nil ->
+            {:ok, Enum.reject(contexts, fn {id, _} -> Map.has_key?(parents, id) end)}
 
-          case Store.raw_query("SELECT 1 FROM contexts WHERE id = ?1 AND workspace_id = ?2", [
-                 parent_ctx,
-                 workspace_id
-               ]) do
-            {:ok, [_ | _]} ->
-              {:ok,
-               Store.raw_query(
-                 """
-                 SELECT c.uri, c.title, #{children}
-                 FROM edges e JOIN contexts c ON c.id = e.source_id
-                 WHERE e.target_id = ?2 AND e.relation = 'child_of' AND e.workspace_id = ?1
-                   AND c.workspace_id = ?1
-                 ORDER BY c.title, c.uri LIMIT ?3 OFFSET ?4
-                 """,
-                 [workspace_id, parent_ctx, limit, offset]
-               )}
+          parent_id ->
+            parent_ctx = context_id(workspace_id, parent_id)
 
-            {:ok, []} ->
-              {:error, :not_found}
+            if Map.has_key?(contexts, parent_ctx),
+              do: {:ok, Enum.filter(contexts, fn {id, _} -> parents[id] == parent_ctx end)},
+              else: {:error, :not_found}
+        end
 
-            {:error, reason} ->
-              {:error, reason}
-          end
+      with {:ok, level} <- level do
+        pages =
+          level
+          |> Enum.sort_by(fn {_id, %{title: title, uri: uri}} -> {title || "", uri} end)
+          |> Enum.drop(offset)
+          |> Enum.take(limit)
+          |> Enum.map(fn {id, %{title: title, uri: page_uri}} ->
+            %{
+              page_id: String.replace_prefix(page_uri, prefix, ""),
+              uri: page_uri,
+              title: title,
+              children: Map.get(children, id, 0)
+            }
+          end)
+
+        {:ok,
+         %{workspace_id: workspace_id, parent: parent && uri(workspace_id, parent), pages: pages}}
       end
+    end
+  end
 
-    with {:ok, {:ok, rows}} <- query do
-      {:ok,
-       %{
-         workspace_id: workspace_id,
-         parent: parent && uri(workspace_id, parent),
-         pages:
-           Enum.map(rows, fn [page_uri, title, count] ->
-             %{
-               page_id: String.replace_prefix(page_uri, prefix, ""),
-               uri: page_uri,
-               title: title,
-               children: count
-             }
-           end)
-       }}
-    else
-      {:ok, {:error, reason}} -> {:error, reason}
-      {:error, reason} -> {:error, reason}
+  # Every imported Notion context of a workspace: id => %{uri, title}.
+  defp notion_contexts(workspace_id) do
+    prefix = uri(workspace_id, "")
+
+    case Store.raw_query(
+           "SELECT id, uri, title FROM contexts WHERE workspace_id = ?1 AND substr(uri, 1, ?3) = ?2",
+           [workspace_id, prefix, String.length(prefix)]
+         ) do
+      {:ok, rows} ->
+        {:ok, Map.new(rows, fn [id, uri, title] -> {id, %{uri: uri, title: title}} end)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -168,10 +175,11 @@ defmodule OptimalEngine.Imports.Notion do
   @doc """
   Imports the export at `zip_path` into `workspace_id`.
 
-  Options: `:tenant_id`, `:actor_id`, `:work_dir` (where part zips are
-  unpacked; default the zip's folder), `:limits` (merged over
-  `default_limits/0`), and `:progress`, a function called with the report so
-  far every few pages.
+  Options: `:tenant_id`, `:actor_id`, `:work_dir` (where part zips and CSVs
+  are unpacked; default the zip's folder), `:limits` (merged over
+  `default_limits/0`), `:progress`, a function called with the report so far
+  every few pages, and `:heartbeat`, a function called while the archive is
+  read (a job extends its lease with both).
 
   Returns `{:ok, report}` or `{:error, reason}` when the archive is refused.
   """
@@ -185,28 +193,39 @@ defmodule OptimalEngine.Imports.Notion do
       tenant_id: Keyword.get(opts, :tenant_id, "default"),
       actor_id: Keyword.get(opts, :actor_id, "system:notion-import"),
       limits: limits,
-      progress: Keyword.get(opts, :progress, fn _report -> :ok end)
+      work_dir: work_dir,
+      progress: Keyword.get(opts, :progress, fn _report -> :ok end),
+      heartbeat: Keyword.get(opts, :heartbeat, fn -> :ok end)
     }
 
-    with {:ok, files, read} <- collect(zip_path, work_dir, limits) do
+    with {:ok, files, read} <- collect(zip_path, ctx) do
       plan = Plan.build(files)
 
-      if Enum.any?(plan.items),
-        do: run(plan, read, ctx),
-        else: {:error, :empty_export}
+      cond do
+        plan.items == [] ->
+          {:error, :empty_export}
+
+        length(plan.items) > limits.max_contexts ->
+          {:error, {:too_many_contexts, "#{length(plan.items)} items"}}
+
+        true ->
+          run(plan, read, ctx)
+      end
     end
   end
 
   # ── reading the archive ────────────────────────────────────────────────
 
-  defp collect(zip_path, work_dir, limits) do
-    with {:ok, archive} <- Zip.open(zip_path, Map.take(limits, [:max_entries, :max_total_bytes])) do
+  defp collect(zip_path, ctx) do
+    zip_limits = Map.take(ctx.limits, [:max_entries, :max_directory_bytes, :max_total_bytes])
+
+    with {:ok, archive} <- Zip.open(zip_path, zip_limits) do
       read = %{entries: 0, declared: 0, parts: 0, errors: []}
 
       archive.entries
       |> Enum.reject(& &1.dir?)
       |> Enum.reduce_while({:ok, [], read}, fn entry, {:ok, files, read} ->
-        case outer_entry(entry, archive, work_dir, limits, read) do
+        case outer_entry(entry, archive, ctx, read) do
           {:ok, new_files, read} -> {:cont, {:ok, new_files ++ files, read}}
           {:error, _} = error -> {:halt, error}
         end
@@ -218,47 +237,79 @@ defmodule OptimalEngine.Imports.Notion do
     end
   end
 
-  defp outer_entry(%{name: nil} = entry, _archive, _work_dir, _limits, read) do
+  defp outer_entry(%{name: nil} = entry, _archive, _ctx, read) do
     {:ok, [], invalid_name(entry, read)}
   end
 
-  defp outer_entry(entry, archive, work_dir, limits, read) do
+  defp outer_entry(entry, archive, ctx, read) do
     if part_zip?(entry.name) do
-      read_part(entry, archive, work_dir, limits, read)
+      read_part(entry, archive, ctx, read)
     else
       {:ok, [file(entry, archive)], count(read, entry)}
     end
   end
 
   # Notion splits a large export into part zips at the root of the one it
-  # hands out. They are unpacked one at a time and read like the outer zip,
-  # against the same running limits; a zip anywhere else is an attachment.
-  defp read_part(entry, archive, work_dir, limits, read) do
-    dest = Path.join(work_dir, "part-#{read.parts + 1}.zip")
-    left = %{limits | max_total_bytes: limits.max_total_bytes - read.declared}
+  # hands out. Each is unpacked (its own bytes count against the total) and
+  # read like the outer zip, against the same running limits. A root zip that
+  # is not a readable archive is reported and skipped; a part that breaks a
+  # safety limit refuses the whole import. A zip anywhere else is an
+  # attachment.
+  defp read_part(entry, archive, ctx, read) do
+    limits = ctx.limits
+    dest = Path.join(ctx.work_dir, "part-#{read.parts + 1}.zip")
+    budget = limits.max_total_bytes - read.declared
+    read = %{read | declared: read.declared + entry.size}
+    left = limits.max_total_bytes - read.declared
 
-    with :ok <- Zip.extract(archive, entry, dest, left.max_total_bytes),
-         {:ok, part} <-
-           Zip.open(dest, %{
-             max_entries: limits.max_entries - read.entries,
-             max_total_bytes: left.max_total_bytes
-           }) do
-      read = %{read | parts: read.parts + 1}
+    result =
+      with :ok <- check_total(left),
+           :ok <- Zip.extract(archive, entry, dest, budget) do
+        Zip.open(dest, %{
+          max_entries: limits.max_entries - read.entries,
+          max_directory_bytes: limits.max_directory_bytes,
+          max_total_bytes: left
+        })
+      end
 
-      {files, read} =
-        part.entries
-        |> Enum.reject(& &1.dir?)
-        |> Enum.reduce({[], read}, fn
-          %{name: nil} = inner, {files, read} -> {files, invalid_name(inner, read)}
-          inner, {files, read} -> {[file(inner, part) | files], count(read, inner)}
-        end)
+    ctx.heartbeat.()
 
-      {:ok, files, read}
-    else
-      {:error, {:entry_too_large, _}} -> {:error, :archive_too_large}
-      {:error, _} = error -> error
+    case result do
+      {:ok, part} ->
+        read = %{read | parts: read.parts + 1}
+
+        {files, read} =
+          part.entries
+          |> Enum.reject(& &1.dir?)
+          |> Enum.reduce({[], read}, fn
+            %{name: nil} = inner, {files, read} -> {files, invalid_name(inner, read)}
+            inner, {files, read} -> {[file(inner, part) | files], count(read, inner)}
+          end)
+
+        {:ok, files, read}
+
+      {:error, {:entry_too_large, _}} ->
+        {:error, :archive_too_large}
+
+      {:error, reason} ->
+        if unreadable_part?(reason) do
+          File.rm(dest)
+          error = %{"path" => entry.name, "reason" => "part_unreadable", "detail" => code(reason)}
+          {:ok, [], %{read | errors: [error | read.errors]}}
+        else
+          {:error, reason}
+        end
     end
   end
+
+  defp check_total(left) when left >= 0, do: :ok
+  defp check_total(_left), do: {:error, :archive_too_large}
+
+  defp unreadable_part?({reason, _name}), do: reason in @unreadable_part
+  defp unreadable_part?(reason), do: reason in @unreadable_part
+
+  defp code({reason, _detail}) when is_atom(reason), do: Atom.to_string(reason)
+  defp code(reason) when is_atom(reason), do: Atom.to_string(reason)
 
   defp part_zip?(name),
     do: not String.contains?(name, "/") and String.downcase(Path.extname(name)) == ".zip"
@@ -305,8 +356,12 @@ defmodule OptimalEngine.Imports.Notion do
 
     state = Enum.reduce(Enum.reverse(read.errors) ++ plan.errors, state, &add_error(&2, &1))
 
-    # The gazetteer intake classifies against, read once for the import.
-    ctx = Map.put(ctx, :known_entities, Intake.known_entities())
+    # The gazetteer intake classifies against, read once for the import, and
+    # each database's row pages, found once.
+    ctx =
+      ctx
+      |> Map.put(:known_entities, Intake.known_entities())
+      |> Map.put(:row_pages, pages |> Enum.filter(& &1.parent) |> Enum.group_by(& &1.parent))
 
     try do
       state = Enum.reduce(databases, state, &import_database(&1, plan, &2, ctx))
@@ -328,20 +383,27 @@ defmodule OptimalEngine.Imports.Notion do
     store_all(state, Enum.reject(entries, &is_nil/1), plan, ctx)
   end
 
+  # One page that cannot be read or rewritten is reported and skipped; only a
+  # refused archive (thrown as :fatal) stops the import.
   defp prepare_page(item, plan, state, ctx) do
     case read_text(item, ctx, ctx.limits.max_page_bytes) do
       {:ok, data, warnings} ->
-        title = h1_title(data) || item.title
-        linked = Links.rewrite(data, item.path, plan, &uri(ctx.workspace_id, &1))
-        text = if String.trim(linked.text) == "", do: "# #{title}", else: linked.text
+        try do
+          title = h1_title(data) || item.title
+          linked = Links.rewrite(data, item.path, plan, &uri(ctx.workspace_id, &1))
+          text = if String.trim(linked.text) == "", do: "# #{title}", else: linked.text
 
-        state =
-          state
-          |> add_warnings(item.path, warnings)
-          |> bump("links_unresolved", linked.unresolved)
-          |> put_links(item.id, linked.targets)
+          state =
+            state
+            |> add_warnings(item.path, warnings)
+            |> bump("links_unresolved", linked.unresolved)
+            |> put_links(item.id, linked.targets)
 
-        {entry(item.id, title, text, item.path), state}
+          {entry(item.id, title, text, item.path), state}
+        rescue
+          _error ->
+            {nil, state |> add_error(error(item.path, "page_unreadable", nil)) |> step(ctx, plan)}
+        end
 
       {:error, error} ->
         {nil, state |> add_error(error) |> step(ctx, plan)}
@@ -349,22 +411,27 @@ defmodule OptimalEngine.Imports.Notion do
   end
 
   defp import_database(item, plan, state, ctx) do
-    # A CSV is read whole (up to the entry limit): its rows are the data.
-    with {:ok, data, warnings} <- read_text(item, ctx, :infinity),
-         {:ok, table} <- parse_table(data, item) do
-      rows = match_rows(table.rows, Plan.row_pages(plan, item.id), item.id)
+    with {:ok, table} <- read_table(item, ctx) do
+      rows = match_rows(table.rows, row_index(Map.get(ctx.row_pages, item.id, [])), item.id)
       row_ids = rows |> Enum.map(&elem(&1, 1)) |> List.to_tuple()
+      max_bytes = ctx.limits.max_page_bytes
 
       text =
-        Database.text(item.title, table, fn index ->
-          uri(ctx.workspace_id, elem(row_ids, index))
-        end)
+        Database.text(item.title, table, &uri(ctx.workspace_id, elem(row_ids, &1)), max_bytes)
 
       own_rows = for {:own, id, row} <- rows, do: {id, row}
 
+      if state.total + length(own_rows) > ctx.limits.max_contexts,
+        do: throw({:fatal, {:too_many_contexts, item.path}})
+
       state =
         state
-        |> add_warnings(item.path, warnings)
+        |> then(fn state ->
+          if table.truncated,
+            do:
+              add_error(state, error(item.path, "csv_truncated", "kept #{length(table.rows)} rows")),
+            else: state
+        end)
         |> bump("rows", length(table.rows))
         |> Map.update!(:total, &(&1 + length(own_rows)))
         |> Map.update!(:parents, fn parents ->
@@ -374,7 +441,7 @@ defmodule OptimalEngine.Imports.Notion do
 
       own_rows
       |> Enum.map(fn {id, row} ->
-        text = Database.row_text(table.columns, row, item.title)
+        text = Database.row_text(table.columns, row, item.title, max_bytes)
         entry(id, Database.row_title(row), text, item.path)
       end)
       |> Enum.chunk_every(@batch)
@@ -384,10 +451,25 @@ defmodule OptimalEngine.Imports.Notion do
     end
   end
 
-  defp parse_table(data, item) do
-    case Database.parse(data) do
-      {:ok, table} -> {:ok, table}
-      {:error, :csv_unreadable} -> {:error, error(item.path, "csv_unreadable", nil)}
+  # The CSV is unpacked to an owner-only file and parsed as a stream, so only
+  # the rows kept are ever in memory.
+  defp read_table(item, ctx) do
+    %{entry: entry, archive: archive} = item.file
+    path = Path.join(ctx.work_dir, "csv-#{System.unique_integer([:positive])}.csv")
+
+    try do
+      case Zip.extract(archive, entry, path, ctx.limits.max_entry_bytes) do
+        :ok ->
+          case Database.read(path, ctx.limits.max_rows_per_csv) do
+            {:ok, table} -> {:ok, table}
+            {:error, :csv_unreadable} -> {:error, error(item.path, "csv_unreadable", nil)}
+          end
+
+        {:error, error} ->
+          entry_error(error, item)
+      end
+    after
+      File.rm(path)
     end
   end
 
@@ -395,14 +477,14 @@ defmodule OptimalEngine.Imports.Notion do
   # (exact, or the start of a long title Notion shortened in the file name);
   # otherwise it becomes a context of its own with an id derived from its
   # title and how many rows before it share that title.
-  defp match_rows(rows, row_pages, database_id) do
+  defp match_rows(rows, index, database_id) do
     {matched, _state} =
       Enum.map_reduce(rows, {MapSet.new(), %{}}, fn row, {used, seen} ->
         key = row |> Database.row_title() |> Plan.normalize_title()
         n = Map.get(seen, key, 0)
         seen = Map.put(seen, key, n + 1)
 
-        case row_page(key, row_pages, used) do
+        case row_page(key, index, used) do
           nil ->
             hash = :crypto.hash(:sha256, "#{key}\0#{n}") |> Base.encode16(case: :lower)
             {{:own, "#{database_id}-row-#{binary_part(hash, 0, 16)}", row}, {used, seen}}
@@ -415,14 +497,34 @@ defmodule OptimalEngine.Imports.Notion do
     matched
   end
 
-  defp row_page(key, row_pages, used) do
-    exact = row_pages |> Map.get(key, []) |> Enum.find(&(not MapSet.member?(used, &1.id)))
+  # The row pages of one database by normalized title, and the long titles
+  # (which Notion may have shortened in the file name) by their first bytes,
+  # so a row finds its page without scanning every page.
+  defp row_index(row_pages) do
+    by_title = Enum.group_by(row_pages, &Plan.normalize_title(&1.title))
 
-    exact ||
-      Enum.find_value(row_pages, fn {title_key, pages} ->
-        if byte_size(title_key) >= 16 and String.starts_with?(key, title_key),
-          do: Enum.find(pages, &(not MapSet.member?(used, &1.id)))
-      end)
+    by_prefix =
+      by_title
+      |> Enum.filter(fn {key, _pages} -> byte_size(key) >= @prefix_bytes end)
+      |> Enum.group_by(fn {key, _pages} -> binary_part(key, 0, @prefix_bytes) end)
+
+    %{by_title: by_title, by_prefix: by_prefix}
+  end
+
+  defp row_page(key, index, used) do
+    unused = &Enum.find(&1, fn page -> not MapSet.member?(used, page.id) end)
+
+    case unused.(Map.get(index.by_title, key, [])) do
+      nil when byte_size(key) >= @prefix_bytes ->
+        index.by_prefix
+        |> Map.get(binary_part(key, 0, @prefix_bytes), [])
+        |> Enum.find_value(fn {title_key, pages} ->
+          if String.starts_with?(key, title_key), do: unused.(pages)
+        end)
+
+      found ->
+        found
+    end
   end
 
   # ── reading text ───────────────────────────────────────────────────────
@@ -435,14 +537,17 @@ defmodule OptimalEngine.Imports.Notion do
         {data, warnings} = clean_text(data, max_text_bytes)
         {:ok, data, warnings}
 
-      {:error, {reason, _name}} ->
-        if reason in @fatal, do: throw({:fatal, {reason, item.path}})
-        {:error, error(item.path, Atom.to_string(reason), nil)}
-
-      {:error, reason} ->
-        throw({:fatal, reason})
+      {:error, error} ->
+        entry_error(error, item)
     end
   end
+
+  defp entry_error({reason, _name}, item) do
+    if reason in @fatal, do: throw({:fatal, {reason, item.path}})
+    {:error, error(item.path, Atom.to_string(reason), nil)}
+  end
+
+  defp entry_error(reason, _item), do: throw({:fatal, reason})
 
   defp clean_text(data, max_bytes) do
     data = String.replace_prefix(data, "\uFEFF", "")
@@ -452,18 +557,10 @@ defmodule OptimalEngine.Imports.Notion do
         do: {data, []},
         else: {String.replace_invalid(data, "\uFFFD"), [{"invalid_utf8", "repaired"}]}
 
-    if max_bytes != :infinity and byte_size(data) > max_bytes do
-      {truncate(data, max_bytes), [{"page_truncated", "kept #{max_bytes} bytes"} | warnings]}
+    if byte_size(data) > max_bytes do
+      {Database.clip(data, max_bytes), [{"page_truncated", "kept #{max_bytes} bytes"} | warnings]}
     else
       {data, warnings}
-    end
-  end
-
-  defp truncate(data, max_bytes) do
-    case :unicode.characters_to_binary(binary_part(data, 0, max_bytes)) do
-      text when is_binary(text) -> text
-      {:incomplete, text, _rest} -> text
-      {:error, text, _rest} -> text
     end
   end
 
@@ -473,8 +570,14 @@ defmodule OptimalEngine.Imports.Notion do
     |> Enum.take(11)
     |> Enum.find(&(String.trim(&1) != ""))
     |> case do
-      "# " <> title -> if String.trim(title) == "", do: nil, else: String.trim(title)
-      _ -> nil
+      "# " <> title ->
+        case String.trim(title) do
+          "" -> nil
+          title -> String.slice(title, 0, 500)
+        end
+
+      _ ->
+        nil
     end
   end
 
@@ -485,11 +588,13 @@ defmodule OptimalEngine.Imports.Notion do
   # Stores a batch of contexts in order. Intake runs one call at a time and
   # classification is the costly part of a call, so the batch is classified in
   # parallel, a few texts ahead of the one intake is storing, and intake
-  # stores each classification as it is. An unchanged context is skipped.
+  # stores each classification as it is. An unchanged context is skipped. A
+  # text that cannot be classified is reported, never handed to intake to
+  # classify again inside its single process.
   defp store_all(state, entries, plan, ctx) do
     entries
     |> Task.async_stream(&{&1, classification(&1, ctx)},
-      max_concurrency: System.schedulers_online(),
+      max_concurrency: concurrency(),
       ordered: true,
       timeout: :infinity
     )
@@ -497,9 +602,23 @@ defmodule OptimalEngine.Imports.Notion do
       {:ok, {entry, :unchanged}}, state ->
         state |> bump("unchanged", 1) |> stored(entry.id) |> step(ctx, plan)
 
+      {:ok, {entry, nil}}, state ->
+        state
+        |> add_error(error(entry.path, "page_unreadable", "classification_failed"))
+        |> step(ctx, plan)
+
       {:ok, {entry, classified}}, state ->
         state |> store(entry, classified, ctx) |> step(ctx, plan)
     end)
+  end
+
+  # Half the schedulers by default, so an import leaves room for the Engine's
+  # other work (`config :optimal_engine, :import_classify_concurrency`).
+  defp concurrency do
+    case Application.get_env(:optimal_engine, :import_classify_concurrency) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> max(div(System.schedulers_online(), 2), 1)
+    end
   end
 
   defp classification(entry, ctx) do
@@ -510,8 +629,22 @@ defmodule OptimalEngine.Imports.Notion do
       else: classify(entry, ctx)
   end
 
+  # A long page is classified by its head: genre, mode and summary come from
+  # its first @classify_bytes, and entities from the whole text. Mode
+  # detection is quadratic in the length of a line with no spaces, so a page
+  # built that way would otherwise hold a classifier for hours. The signal
+  # carries the whole text, so intake stores all of it.
   defp classify(entry, ctx) do
-    Intake.classify(entry.text, title: entry.title, known_entities: ctx.known_entities)
+    known = ctx.known_entities
+
+    if byte_size(entry.text) <= @classify_bytes do
+      Intake.classify(entry.text, title: entry.title, known_entities: known)
+    else
+      head = Database.clip(entry.text, @classify_bytes)
+      entities = Classifier.extract_entities(entry.text, known)
+      signal = Intake.classify(head, title: entry.title, known_entities: known, entities: entities)
+      %{signal | content: entry.text}
+    end
   rescue
     _ -> nil
   end
@@ -520,11 +653,8 @@ defmodule OptimalEngine.Imports.Notion do
     yield_to_store(System.monotonic_time(:millisecond) + @store_wait_ms)
 
     case intake(entry, classified, ctx) do
-      {:ok, _result} ->
-        state |> bump("contexts", 1) |> stored(entry.id)
-
-      {:error, reason} ->
-        add_error(state, error(entry.path, "intake_failed", inspect(reason)))
+      {:ok, _result} -> state |> bump("contexts", 1) |> stored(entry.id)
+      {:error, reason} -> add_error(state, error(entry.path, "intake_failed", reason_code(reason)))
     end
   end
 
@@ -536,15 +666,21 @@ defmodule OptimalEngine.Imports.Notion do
       title: entry.title,
       write_files: false,
       source_id: source_id(entry.id),
-      source_uri: uri(ctx.workspace_id, entry.id)
+      source_uri: uri(ctx.workspace_id, entry.id),
+      classified: classified
     ]
 
-    opts = if classified, do: [{:classified, classified} | opts], else: opts
     Intake.process(entry.text, opts)
   catch
-    :exit, reason -> {:error, {:exit, reason}}
+    :exit, _reason -> {:error, :intake_unavailable}
   end
 
+  defp reason_code(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_code({reason, _}) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_code(_reason), do: "failed"
+
+  # A store that does not answer makes the context count as changed: intake
+  # then writes it, which is right either way.
   defp unchanged?(context_id, workspace_id, title, text) do
     case Store.raw_query(
            "SELECT title, content FROM contexts WHERE id = ?1 AND workspace_id = ?2",
@@ -553,6 +689,8 @@ defmodule OptimalEngine.Imports.Notion do
       {:ok, [[^title, ^text]]} -> true
       _ -> false
     end
+  catch
+    :exit, _reason -> false
   end
 
   defp stored(state, id), do: %{state | stored: MapSet.put(state.stored, id)}
@@ -576,9 +714,10 @@ defmodule OptimalEngine.Imports.Notion do
   defp put_links(state, _id, []), do: state
   defp put_links(state, id, targets), do: %{state | links: Map.put(state.links, id, targets)}
 
-  # The edges the import implies, for the contexts it stored; existing
-  # child_of and links_to edges from those contexts that no longer hold are
-  # retracted.
+  # The edges the import implies, for the contexts it stored. An existing
+  # child_of or links_to edge between two imported Notion contexts, starting
+  # at one this import stored, that no longer holds is retracted: those are
+  # the edges this importer writes. Every edge goes through Graph.
   defp write_edges(state, ctx) do
     ws = ctx.workspace_id
     ctx_id = &context_id(ws, &1)
@@ -601,7 +740,7 @@ defmodule OptimalEngine.Imports.Notion do
 
     desired = MapSet.new(child_edges ++ link_edges)
     sources = MapSet.new(state.stored, ctx_id)
-    existing = existing_edges(ws, sources)
+    existing = importer_edges(ws, sources)
 
     desired
     |> MapSet.difference(existing)
@@ -620,19 +759,17 @@ defmodule OptimalEngine.Imports.Notion do
     |> bump("edges_links_to", MapSet.size(MapSet.new(link_edges)))
   end
 
-  defp existing_edges(ws, sources) do
-    case Store.raw_query(
-           "SELECT source_id, target_id, relation FROM edges WHERE workspace_id = ?1 AND relation IN (?2, ?3)",
-           [ws, @child_of, @links_to]
-         ) do
-      {:ok, rows} ->
-        for [source, target, relation] <- rows,
-            MapSet.member?(sources, source),
-            into: MapSet.new(),
-            do: {source, target, relation}
-
+  defp importer_edges(ws, sources) do
+    with {:ok, notion} <- notion_contexts(ws),
+         {:ok, edges} <- Graph.edges_by_relation([@child_of, @links_to], workspace_id: ws) do
+      for %{source_id: source, target_id: target, relation: relation} <- edges,
+          MapSet.member?(sources, source),
+          Map.has_key?(notion, target),
+          into: MapSet.new(),
+          do: {source, target, relation}
+    else
       {:error, reason} ->
-        Logger.warning("[Imports.Notion] could not read existing edges: #{inspect(reason)}")
+        Logger.warning("[Imports.Notion] could not read existing edges: #{reason_code(reason)}")
         MapSet.new()
     end
   end
