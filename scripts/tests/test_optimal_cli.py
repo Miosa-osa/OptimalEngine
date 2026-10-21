@@ -197,6 +197,48 @@ class RouteMappingTests(CliTestCase):
             self.assertEqual(request['body'].get(key), value, (args, key))
         return request
 
+    def test_uris_commands(self):
+        ws = 'default:ops'
+        self.fake.routes[('GET', '/api/maintenance/uris')] = (200, {
+            'dry_run': True, 'groups': 2, 'repaired': 3, 'bytes_to_write': 1234, 'next_after': 'abc_d-e',
+            'groups_detail': []})
+        self.check(['uris', '-w', ws], 'GET', '/api/maintenance/uris', {'workspace': ws})
+        self.check(['uris', 'plan', ws, '--limit', '5', '--after', 'abc'], 'GET', '/api/maintenance/uris',
+                   {'workspace': ws, 'limit': '5', 'after': 'abc'})
+        request = self.check(['uris', 'plan', '*'], 'GET', '/api/maintenance/uris')
+        self.assertNotIn('workspace', request['query'])
+
+        # The repair writes files and rows: it needs --apply, besides the word.
+        self.fake.requests.clear()
+        result = self.run_cli('uris', 'apply', ws)
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn('--apply', result.stderr)
+        self.assertEqual(self.fake.requests, [])
+        self.check(['uris', 'apply', ws, '--apply', '--limit', '50'], 'POST', '/api/maintenance/uris',
+                   body={'apply': True, 'workspace': ws, 'limit': 50})
+        request = self.check(['uris', 'apply', '*', '--apply'], 'POST', '/api/maintenance/uris',
+                             body={'apply': True})
+        self.assertNotIn('workspace', request['body'])
+
+    def test_uris_out_writes_the_answer_to_a_new_file(self):
+        self.fake.routes[('GET', '/api/maintenance/uris')] = (200, {
+            'dry_run': True, 'groups': 2, 'repaired': 3, 'bytes_to_write': 1234, 'next_after': 'abc_d-e',
+            'groups_detail': [{'uri': 'optimal://inbox/x.md'}]})
+        out = self.dir / 'plan.json'
+        result = self.ok('uris', 'plan', 'default:ops', '--out', str(out))
+        self.assertIn(f'wrote {out}', result.stdout)
+        self.assertIn('groups 2', result.stdout)
+        self.assertIn('--after abc_d-e', result.stdout)
+        self.assertEqual(json.loads(out.read_text())['groups_detail'], [{'uri': 'optimal://inbox/x.md'}])
+        self.assertEqual(out.stat().st_mode & 0o777, 0o600)
+
+        # A file that is there is never overwritten, and nothing is asked of the Engine.
+        self.fake.requests.clear()
+        again = self.run_cli('uris', 'plan', 'default:ops', '--out', str(out))
+        self.assertEqual(again.returncode, 64, again.stderr)
+        self.assertEqual(self.fake.requests, [])
+        self.assertEqual(json.loads(out.read_text())['groups'], 2)
+
     def test_session_commands(self):
         ws = 'default:sales'
         self.check(['boot', ws], 'GET', '/api/boot', {'workspace': ws})
