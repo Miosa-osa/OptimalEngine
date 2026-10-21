@@ -46,6 +46,12 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   `connector_runs`, where `GET /api/connectors` and `GET /api/metrics` show
   it as the connector's last error.
 
+  A pulled item that intake refuses (for instance, a row a tenant sharing a
+  bare workspace id holds) does not fail the pull: it is logged, counted in
+  the connector's result as `refused` (and in the summary as
+  `refused_count`), and recorded in the run's `errors_encountered` and
+  `error_detail`.
+
   ## Config (`config :optimal_engine, :pull_scheduler`)
 
     * `:enabled`         - start the loop? (default `true`)
@@ -292,7 +298,8 @@ defmodule OptimalEngine.Connectors.PullScheduler do
           entry,
           status_of(run_result),
           Map.get(run_result, :signals, 0),
-          Map.get(run_result, :reason)
+          Map.get(run_result, :reason),
+          Map.get(run_result, :refused, 0)
         )
 
       {:error, :already_running} ->
@@ -308,13 +315,14 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   defp status_of(%{status: :success}), do: :ok
   defp status_of(_failed_or_disabled), do: :error
 
-  defp result(entry, status, signals, reason) do
+  defp result(entry, status, signals, reason, refused \\ 0) do
     %{
       connector_id: entry.id,
       kind: kind_atom(entry.kind),
       workspace_id: entry.workspace_id,
       status: status,
       signals: signals,
+      refused: refused,
       reason: reason
     }
   end
@@ -326,6 +334,7 @@ defmodule OptimalEngine.Connectors.PullScheduler do
       workspace_id: workspace_id,
       status: :error,
       signals: 0,
+      refused: 0,
       reason: reason
     }
   end
@@ -335,6 +344,7 @@ defmodule OptimalEngine.Connectors.PullScheduler do
       tenant_id: tenant_id,
       connector_results: results,
       ingested_count: results |> Enum.map(& &1.signals) |> Enum.sum(),
+      refused_count: results |> Enum.map(& &1.refused) |> Enum.sum(),
       error_count: Enum.count(results, &(&1.status == :error))
     }
   end
@@ -363,14 +373,13 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   @doc false
   def intake_sink do
     fn signals, scope ->
-      Enum.each(signals, fn signal ->
-        ingest_signal(signal, scope)
-      end)
-
-      :ok
+      refused = Enum.count(signals, &(ingest_signal(&1, scope) == :refused))
+      {:ok, refused}
     end
   end
 
+  # `:ok` when the Signal is stored (or has nothing to store), `:refused` when
+  # intake does not take it. The Runner counts refusals in the run.
   defp ingest_signal(signal, scope) do
     content = signal.content || ""
 
@@ -385,6 +394,7 @@ defmodule OptimalEngine.Connectors.PullScheduler do
 
         {:error, reason} ->
           Logger.warning("[Connectors.PullScheduler] intake failed: #{inspect(reason)}")
+          :refused
       end
     end
   end

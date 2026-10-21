@@ -20,7 +20,7 @@ refused	INSERT OR REPLACE INTO memory_embeddings (memory_id, tenant_id, workspac
 refused	INSERT OR REPLACE INTO model_call_operations ( id, tenant_id, workspace_id, function_name, model_task_type, execution_mode, risk_class, model_id, model_version, prompt_template_id, input_schema, output_contract, execution_policy, storage_target, prompt_policy_id, cost_policy, expected_confidence_behavior, required_privileges, allowed_partitions, lifecycle_state, rollout_state, suspension_reason, retirement_status, valid_time_start, valid_time_end, transaction_time_start, transaction_time_end, stale_after, access_policy_id, security_labels, partition_ids, metadata, updated_at ) VALUES ( ?, datetime('…') )
 refused	INSERT OR REPLACE INTO sessions (id, started_at, committed_at, summary, message_count, metadata) VALUES (?)
 refused	INSERT OR REPLACE INTO sessions (id, summary, message_count, workspace_id) VALUES (?)
-refused	INSERT OR REPLACE INTO vectors (context_id, embedding, dimensions, tenant_id, workspace_id) VALUES (?, COALESCE((SELECT tenant_id FROM contexts WHERE id = ?), (SELECT tenant_id FROM workspaces WHERE id = ?), '…'), COALESCE((SELECT workspace_id FROM contexts WHERE id = ?), ?, '…'))
+refused	INSERT OR REPLACE INTO vectors (context_id, embedding, dimensions, tenant_id, workspace_id) VALUES (?, COALESCE((SELECT tenant_id FROM contexts WHERE id = ?), (SELECT tenant_id FROM workspaces WHERE id = ?), (SELECT t.id FROM tenants t WHERE t.id = substr(?, N, instr(?, '…') - N)), ?, '…'), COALESCE((SELECT workspace_id FROM contexts WHERE id = ?), ?, '…'))
 refused	INSERT OR REPLACE INTO viability_reports (tenant_id, scope, period, report, backfilled) VALUES (?)
 refused	PRAGMA foreign_key_check
 refused	PRAGMA integrity_check
@@ -335,9 +335,9 @@ rejected	EXPLAIN QUERY PLAN SELECT N FROM decomposition_runs WHERE source_packag
 rejected	EXPLAIN QUERY PLAN SELECT N FROM entity_mentions WHERE context_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM entity_mentions WHERE source_package_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM resolution_decisions WHERE mention_id = ?
-rejected	EXPLAIN QUERY PLAN SELECT c.id, c.node, c.entities, c.routed_to, c.supersedes, c.workspace_id FROM contexts c WHERE c.id > ? AND c.workspace_id = ? ORDER BY c.id LIMIT ?
+rejected	EXPLAIN QUERY PLAN SELECT c.id, c.node, c.entities, c.routed_to, c.supersedes, c.workspace_id, c.tenant_id FROM contexts c WHERE c.id > ? AND c.workspace_id = ? ORDER BY c.id LIMIT ?
 rejected	EXPLAIN QUERY PLAN SELECT c.id, c.tenant_id, c.workspace_id, c.signal_id, c.text, c.modality, c.asset_ref FROM chunks c WHERE c.workspace_id = ? AND c.id > ? AND c.id <= ? AND c.text <> '…' AND NOT EXISTS (SELECT N FROM chunk_embeddings e WHERE e.chunk_id = c.id) ORDER BY c.id LIMIT ?
-rejected	EXPLAIN QUERY PLAN SELECT cl.id, c.entities, cl.workspace_id FROM claims cl JOIN contexts c ON c.id = cl.signal_id WHERE cl.signal_id IS NOT NULL AND cl.id > ? AND cl.workspace_id = ? ORDER BY cl.id LIMIT ?
+rejected	EXPLAIN QUERY PLAN SELECT cl.id, c.entities, cl.workspace_id, cl.tenant_id FROM claims cl JOIN contexts c ON c.id = cl.signal_id WHERE cl.signal_id IS NOT NULL AND cl.id > ? AND cl.workspace_id = ? ORDER BY cl.id LIMIT ?
 rejected	INSERT INTO "…" ("…", "…", "…", "…", "…", "…", "…") VALUES (?, N, ?)
 rejected	INSERT INTO "…" ("…", "…", "…", "…", "…", "…", "…", "…") VALUES (?, N, ?)
 rejected	INSERT INTO "…" ("…", "…", "…", "…", "…", "…", "…", "…", "…") VALUES (?, N, ?)

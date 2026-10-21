@@ -67,6 +67,18 @@ defmodule OptimalEngine.Connectors.PullSchedulerTest do
       refute_received {:pulled, ^c, _, _}
     end
 
+    test "a Signal the sink refuses is counted in the connector's result and the summary", ctx do
+      id = register(ctx, "refused", ctx.inbox, %{"marker" => "refused"})
+
+      {:ok, summary} = run_once(ctx, signal_sink: fn _signals, _scope -> {:ok, 1} end)
+
+      assert [%{connector_id: ^id, status: :ok, signals: 1, refused: 1}] =
+               summary.connector_results
+
+      assert summary.refused_count == 1
+      assert summary.error_count == 0
+    end
+
     test "a configured spec only provisions: the operator's workspace, config and enabled state survive",
          ctx do
       id = "pull:#{ctx.tenant}:sources_folder"

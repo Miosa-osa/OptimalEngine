@@ -59,6 +59,7 @@ defmodule OptimalEngine.Store.Postgres do
   use GenServer
 
   alias OptimalEngine.{Context, Graph, Signal, Store}
+  alias OptimalEngine.Store.ContextTenant
   alias OptimalEngine.Store.Postgres.{Connection, Schema}
   alias OptimalEngine.Store.SQLite
 
@@ -76,16 +77,24 @@ defmodule OptimalEngine.Store.Postgres do
 
   @select_context "SELECT #{@context_columns} FROM contexts"
 
+  # The tenant is decided before the insert (`Store.ContextTenant`): the one
+  # the writer names, the owner of the workspace id, or the one of the row it
+  # replaces.
   @insert_context """
   INSERT INTO contexts (#{@context_columns}, tenant_id)
-  VALUES (#{Enum.map_join(1..24, ", ", &"$#{&1}")},
-    COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = $24),
-             (SELECT t.id FROM tenants t
-              WHERE t.id = CASE WHEN strpos($24, ':') > 0
-                                THEN substr($24, 1, strpos($24, ':') - 1)
-                                WHEN strpos($24, ':') = 0 THEN '' END),
-             'default'))
+  VALUES (#{Enum.map_join(1..25, ", ", &"$#{&1}")})
   """
+
+  # The owner of a workspace id: its registered workspace's tenant, else the
+  # tenant its "<tenant>:" prefix names, else none (a bare id).
+  @workspace_owner """
+  SELECT COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = $1),
+                  (SELECT t.id FROM tenants t
+                   WHERE t.id = CASE WHEN strpos($1, ':') > 0
+                                     THEN substr($1, 1, strpos($1, ':') - 1) ELSE '' END))
+  """
+
+  @existing_context "SELECT tenant_id, workspace_id FROM contexts WHERE id = $1"
 
   # SQLite's chunk statement without OR REPLACE: the old chunk is deleted first.
   @insert_chunk """
@@ -97,8 +106,8 @@ defmodule OptimalEngine.Store.Postgres do
   """
 
   @insert_entity """
-  INSERT INTO entities (context_id, name, type, workspace_id)
-  VALUES ($1, $2, 'person', $3)
+  INSERT INTO entities (context_id, name, type, workspace_id, tenant_id)
+  VALUES ($1, $2, 'person', $3, $4)
   ON CONFLICT DO NOTHING
   """
 
@@ -253,8 +262,25 @@ defmodule OptimalEngine.Store.Postgres do
   # entities go with it through their ON DELETE CASCADE key. Entities and
   # edges are best effort on SQLite, so a failed one does not fail the write.
   defp write_context(txn, %Context{} = context) do
+    with {:ok, tenant_id} <- context_tenant(txn, context) do
+      write_context_row(txn, %{context | tenant_id: tenant_id})
+    end
+  end
+
+  defp context_tenant(txn, %Context{} = context) do
+    ContextTenant.for_context(context, fn
+      :owner, params -> first_row(txn, @workspace_owner, params)
+      :existing, params -> first_row(txn, @existing_context, params)
+    end)
+  end
+
+  defp first_row(txn, sql, params) do
+    with {:ok, %{rows: rows}} <- txn_native(txn, sql, params), do: {:ok, List.first(rows)}
+  end
+
+  defp write_context_row(txn, %Context{tenant_id: tenant_id} = context) do
     row = Context.to_row(context)
-    params = Enum.map(@context_fields, &Map.fetch!(row, &1))
+    params = Enum.map(@context_fields, &Map.fetch!(row, &1)) ++ [tenant_id]
 
     with {:ok, _} <- txn_native(txn, "DELETE FROM contexts WHERE id = $1", [row.id]),
          {:ok, _} <- txn_native(txn, @insert_context, params) do
@@ -268,12 +294,12 @@ defmodule OptimalEngine.Store.Postgres do
     end
   end
 
-  defp write_entities(txn, %Context{id: id, entities: entities} = context)
+  defp write_entities(txn, %Context{id: id, entities: entities, tenant_id: tenant_id} = context)
        when is_list(entities) do
     workspace_id = context.workspace_id || "default"
 
     for entity <- entities do
-      txn_native(txn, @insert_entity, [id, entity, workspace_id])
+      txn_native(txn, @insert_entity, [id, entity, workspace_id, tenant_id])
     end
   end
 

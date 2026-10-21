@@ -68,15 +68,20 @@ defmodule OptimalEngine.Batch do
 
   Options:
     - `:workspace_id` — target workspace (default: `"default"`)
+    - `:tenant_id` — the tenant the signals are written for. A bare workspace
+      id can be shared by two tenants, so a caller that acts for a tenant
+      must name it; without it a signal goes to the tenant that owns the
+      registered workspace, else to `default`.
   """
   @spec import_signals(list(map()), keyword()) ::
           {:ok, import_summary()} | {:error, term()}
   def import_signals(items, opts \\ []) when is_list(items) do
     workspace_id = Keyword.get(opts, :workspace_id, "default")
+    tenant_id = Keyword.get(opts, :tenant_id)
 
     summary =
       Enum.reduce(items, %{imported: 0, skipped: 0, errors: 0}, fn item, acc ->
-        case process_signal_item(item, workspace_id) do
+        case process_signal_item(item, workspace_id, tenant_id) do
           :imported -> Map.update!(acc, :imported, &(&1 + 1))
           :skipped -> Map.update!(acc, :skipped, &(&1 + 1))
           :error -> Map.update!(acc, :errors, &(&1 + 1))
@@ -283,7 +288,7 @@ defmodule OptimalEngine.Batch do
   # Private: import helpers
   # ---------------------------------------------------------------------------
 
-  defp process_signal_item(item, workspace_id) when is_map(item) do
+  defp process_signal_item(item, workspace_id, tenant_id) when is_map(item) do
     content = Map.get(item, "content") || Map.get(item, :content)
 
     if not (is_binary(content) and content != "") do
@@ -292,6 +297,7 @@ defmodule OptimalEngine.Batch do
     else
       intake_opts =
         [workspace_id: workspace_id]
+        |> maybe_kw_put(:tenant_id, tenant_id)
         |> maybe_kw_put(:genre, item["genre"] || item[:genre])
         |> maybe_kw_put(:node, item["node"] || item[:node])
         |> maybe_kw_put(:title, item["title"] || item[:title])
@@ -315,7 +321,7 @@ defmodule OptimalEngine.Batch do
       :error
   end
 
-  defp process_signal_item(_item, _workspace_id), do: :error
+  defp process_signal_item(_item, _workspace_id, _tenant_id), do: :error
 
   defp process_memory_item(item, {tenant_id, workspace_id}) when is_map(item) do
     content = Map.get(item, "content") || Map.get(item, :content)

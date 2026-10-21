@@ -732,6 +732,7 @@ defmodule OptimalEngine.Imports.Notion do
   # longer holds is retracted. Every edge goes through Graph.
   defp write_edges(state, ctx) do
     ws = ctx.workspace_id
+    tenant = ctx.tenant_id
     ctx_id = &context_id(ws, &1)
     stored? = &MapSet.member?(state.stored, &1)
 
@@ -752,18 +753,22 @@ defmodule OptimalEngine.Imports.Notion do
 
     desired = MapSet.new(child_edges ++ link_edges)
     sources = MapSet.new(state.stored, ctx_id)
-    existing = importer_edges(ws, sources)
+    existing = importer_edges(ws, tenant, sources)
+
+    # The edges are the importing tenant's, also under a bare workspace id
+    # that another tenant uses too.
+    edge_opts = [workspace_id: ws, tenant_id: tenant, asserted_by: @asserted_by]
 
     desired
     |> MapSet.difference(existing)
     |> Enum.each(fn {source, target, relation} ->
-      Graph.assert_edge(source, target, relation, workspace_id: ws, asserted_by: @asserted_by)
+      Graph.assert_edge(source, target, relation, edge_opts)
     end)
 
     existing
     |> MapSet.difference(desired)
     |> Enum.each(fn {source, target, relation} ->
-      Graph.retract_edge(source, target, relation, workspace_id: ws, asserted_by: @asserted_by)
+      Graph.retract_edge(source, target, relation, edge_opts)
     end)
 
     state
@@ -771,8 +776,8 @@ defmodule OptimalEngine.Imports.Notion do
     |> bump("edges_links_to", MapSet.size(MapSet.new(link_edges)))
   end
 
-  defp importer_edges(ws, sources) do
-    opts = [workspace_id: ws, asserted_by: @asserted_by]
+  defp importer_edges(ws, tenant, sources) do
+    opts = [workspace_id: ws, tenant_id: tenant, asserted_by: @asserted_by]
 
     case Graph.edges_by_relation([@child_of, @links_to], opts) do
       {:ok, edges} ->

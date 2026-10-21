@@ -224,7 +224,7 @@ defmodule OptimalEngine.Graph.Backfill do
 
   defp page_sql(:contexts, where, n) do
     """
-    SELECT c.id, c.node, c.entities, c.routed_to, c.supersedes, c.workspace_id
+    SELECT c.id, c.node, c.entities, c.routed_to, c.supersedes, c.workspace_id, c.tenant_id
     FROM contexts c
     WHERE c.id > ?#{n + 1} AND #{where}
     ORDER BY c.id
@@ -236,7 +236,7 @@ defmodule OptimalEngine.Graph.Backfill do
   # from that context.
   defp page_sql(:claims, where, n) do
     """
-    SELECT cl.id, c.entities, cl.workspace_id
+    SELECT cl.id, c.entities, cl.workspace_id, cl.tenant_id
     FROM claims cl
     JOIN contexts c ON c.id = cl.signal_id
     WHERE cl.signal_id IS NOT NULL AND cl.id > ?#{n + 1} AND #{where}

@@ -268,6 +268,7 @@ defmodule OptimalEngine.ChatSession do
         created_at: now,
         modified_at: now,
         workspace_id: workspace_id,
+        tenant_id: tenant_id,
         metadata: %{
           "kind" => "chat_session",
           "session_id" => session_id,

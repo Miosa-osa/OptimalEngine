@@ -58,6 +58,7 @@ defmodule OptimalEngine.Connectors.Runner do
           status: :success | :error | :disabled,
           signals: non_neg_integer(),
           errors: non_neg_integer(),
+          refused: non_neg_integer(),
           cursor_before: String.t() | nil,
           cursor_after: String.t() | nil,
           reason: term() | nil
@@ -84,6 +85,9 @@ defmodule OptimalEngine.Connectors.Runner do
       `signals` plus a scope map `%{workspace_id, tenant_id, connector_id}`
       so the sink can land connector-ingested signals in the connector's
       workspace (e.g. `Pipeline.Intake.process(text, workspace_id: ...)`).
+      A sink answers `:ok`, or `{:ok, refused}` with the number of signals it
+      could not store; the run counts them in `errors` and `refused`, and its
+      row in `connector_runs` records them.
     * `:adapter` — adapter module override (test seam — production lookup
       goes through the compile-time `Registry`)
   """
@@ -242,8 +246,9 @@ defmodule OptimalEngine.Connectors.Runner do
 
   defp finalize({:ok, signals, next_cursor, payloads}, row, run_id, opts) do
     sink = Keyword.get(opts, :signal_sink, &default_sink/1)
-    :ok = invoke_sink(sink, signals, row)
+    refused = refused_count(invoke_sink(sink, signals, row))
     %{assets: assets, errors: asset_errors} = preserve_payload_assets(row, payloads, opts)
+    errors = length(asset_errors) + refused
 
     # Persist the cursor advance + audit completion in one transaction so
     # they succeed or fail together. Without this, a cursor could advance
@@ -253,9 +258,9 @@ defmodule OptimalEngine.Connectors.Runner do
            row,
            run_id,
            length(signals),
-           length(asset_errors),
+           errors,
            next_cursor,
-           asset_error_detail(asset_errors)
+           run_error_detail(asset_errors, refused)
          ) do
       :ok ->
         %{
@@ -263,7 +268,8 @@ defmodule OptimalEngine.Connectors.Runner do
           workspace_id: row.workspace_id,
           status: :success,
           signals: length(signals),
-          errors: length(asset_errors),
+          errors: errors,
+          refused: refused,
           assets: length(assets),
           asset_errors: length(asset_errors),
           cursor_before: row.cursor,
@@ -547,8 +553,22 @@ defmodule OptimalEngine.Connectors.Runner do
       "payload-#{:erlang.unique_integer([:positive])}"
   end
 
-  defp asset_error_detail([]), do: nil
-  defp asset_error_detail(errors), do: Jason.encode!(%{asset_errors: errors})
+  defp run_error_detail([], 0), do: nil
+
+  defp run_error_detail(asset_errors, refused) do
+    %{}
+    |> then(fn detail ->
+      if asset_errors == [], do: detail, else: Map.put(detail, :asset_errors, asset_errors)
+    end)
+    |> then(fn detail -> if refused == 0, do: detail, else: Map.put(detail, :refused, refused) end)
+    |> Jason.encode!()
+  end
+
+  # A sink answers `:ok`, or `{:ok, refused}` with the number of Signals it
+  # could not store (a Signal intake refused). They are counted as the run's
+  # errors, so a refusal is in the run row and the result, not only in a log.
+  defp refused_count(:ok), do: 0
+  defp refused_count({:ok, refused}) when is_integer(refused) and refused >= 0, do: refused
 
   defp governed_workspace_id(row, opts) do
     Keyword.get(opts, :workspace_id, row.workspace_id || "default") |> to_string()

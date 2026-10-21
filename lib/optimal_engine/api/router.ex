@@ -3459,7 +3459,10 @@ defmodule OptimalEngine.API.Router do
     if not is_list(items) do
       send_resp(conn, 400, Jason.encode!(%{error: "signals must be a list"}))
     else
-      case OptimalEngine.Batch.import_signals(items, workspace_id: workspace_id) do
+      case OptimalEngine.Batch.import_signals(items,
+             workspace_id: workspace_id,
+             tenant_id: conn.assigns[:current_tenant] || "default"
+           ) do
         {:ok, summary} -> json(conn, summary)
       end
     end
