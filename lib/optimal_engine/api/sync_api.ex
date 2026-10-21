@@ -113,7 +113,9 @@ defmodule OptimalEngine.API.SyncAPI do
           {conflicts, note} =
             tenant(conn)
             |> Sync.conflicts(workspace_id, conn.query_params["state"] || "open")
-            |> then(&ReadScope.redact_conflicts(Reader.scope(conn), workspace_id, &1))
+            |> then(
+              &ReadScope.redact_conflicts(Reader.scope(conn, ceiling: true), workspace_id, &1)
+            )
 
           json(conn, 200, %{
             conflicts: conflicts,

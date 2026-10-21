@@ -34,7 +34,7 @@ defmodule OptimalEngine.Sync do
   alias OptimalEngine.Connectors.{Credential, HTTP}
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Store
-  alias OptimalEngine.Sync.{Capture, Gate}
+  alias OptimalEngine.Sync.{Capture, Gate, GateCache, Lineage}
 
   @classes ~w(public internal confidential restricted)
   @page 500
@@ -62,6 +62,7 @@ defmodule OptimalEngine.Sync do
       )
 
     {:ok, triggers} = Capture.install()
+    GateCache.clear()
 
     {:ok,
      %{
@@ -81,6 +82,7 @@ defmodule OptimalEngine.Sync do
         workspace_id
       ])
 
+    GateCache.clear()
     :ok
   end
 
@@ -441,11 +443,16 @@ defmodule OptimalEngine.Sync do
           end) ->
             {:fail, :unknown_columns, mutation}
 
+          # A column holds a number, text or nothing. A list or an object cannot
+          # be bound to a statement, and would end the whole batch with an error.
+          not bindable?(get_in(mutation, ["payload", "row"])) ->
+            {:fail, :unsupported_value, mutation}
+
           # An append-only row is named by its capture sequence on the Engine
           # that wrote it, so a local row with the same name is a different
           # row: it is always added, never a conflict.
           Capture.rowid_key?(columns) ->
-            {:apply, %{mutation: mutation, columns: columns, conflict: nil}}
+            {:apply, %{mutation: mutation, columns: columns, conflict: nil, max_class: gate}}
 
           true ->
             conflict =
@@ -453,10 +460,16 @@ defmodule OptimalEngine.Sync do
               |> local_conflict(workspace_id, table, mutation["entity_id"], local, last_sync)
               |> unless_same_content(mutation)
 
-            {:apply, %{mutation: mutation, columns: columns, conflict: conflict}}
+            {:apply, %{mutation: mutation, columns: columns, conflict: conflict, max_class: gate}}
         end
     end
   end
+
+  defp bindable?(row) when is_map(row) do
+    Enum.all?(row, fn {_name, value} -> is_nil(value) or is_binary(value) or is_number(value) end)
+  end
+
+  defp bindable?(_row), do: true
 
   defp execute(tenant_id, workspace_id, plans) do
     result =
@@ -492,6 +505,10 @@ defmodule OptimalEngine.Sync do
 
     case result do
       {:ok, outcome} ->
+        # What the gate cached stands on the write sequences of the capture and
+        # the ledger, which an apply moves (it writes with capture off, and
+        # records each change in the ledger). Dropping it does not rest on that.
+        if outcome.applied > 0 or outcome.conflicts != [], do: GateCache.clear()
         Enum.each(outcome.fact_conflicts, &raise_fact_claims(tenant_id, workspace_id, &1))
 
         {:ok,
@@ -511,7 +528,7 @@ defmodule OptimalEngine.Sync do
          txn,
          tenant_id,
          workspace_id,
-         %{mutation: mutation, columns: columns, conflict: conflict},
+         %{mutation: mutation, columns: columns, conflict: conflict, max_class: max_class},
          acc
        ) do
     table = mutation["entity_type"]
@@ -531,7 +548,13 @@ defmodule OptimalEngine.Sync do
         savepoint = "sync_" <> Integer.to_string(System.unique_integer([:positive]))
         {:ok, _} = Store.txn_execute(txn, "SAVEPOINT #{savepoint}", [])
 
-        case write(txn, table, columns, mutation, workspace_id, tenant_id) do
+        case write(txn, table, columns, mutation, workspace_id, tenant_id, max_class) do
+          # A delete of a row this Engine holds above the peer's class: the peer
+          # was never sent the row and cannot remove it.
+          :gated ->
+            {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
+            update_in(acc, [:skipped, :gated], &((&1 || 0) + 1))
+
           :ok ->
             {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
             record_ledger(txn, tenant_id, workspace_id, mutation)
@@ -566,7 +589,7 @@ defmodule OptimalEngine.Sync do
     end
   end
 
-  defp write(txn, table, columns, mutation, workspace_id, tenant_id) do
+  defp write(txn, table, columns, mutation, workspace_id, tenant_id, max_class) do
     payload = mutation["payload"] || %{}
     blobs = payload["blobs"] || %{}
 
@@ -584,10 +607,19 @@ defmodule OptimalEngine.Sync do
 
     keys = Capture.key_columns(columns)
     append_only = Capture.rowid_key?(columns)
+
+    case grow_labels(txn, table, keys, row, mutation["operation"], append_only, max_class) do
+      {:ok, row} -> write_row(txn, table, mutation["operation"], keys, append_only, row)
+      :gated -> :gated
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp write_row(txn, table, operation, keys, append_only, row) do
     t = quote_name(table)
 
     {sql, params} =
-      case {mutation["operation"], append_only} do
+      case {operation, append_only} do
         {"delete", _} ->
           where =
             keys
@@ -622,6 +654,140 @@ defmodule OptimalEngine.Sync do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  # Labels only grow when a change is applied: a row this Engine already holds
+  # keeps the labels, the metadata labels and the classification level it has,
+  # whatever the sender wrote and however old its change is. What the change
+  # carries is joined with what is held; a change that carries all of it is
+  # written as sent. Labels that cannot be read count as `restricted`.
+  #
+  # A delete carries only the key, so what it removes is judged by the row held
+  # here: a row above the class the peer is cleared for is not deleted by it
+  # (the peer was never sent it, and a create that followed would otherwise
+  # find no row to keep the labels of).
+  defp grow_labels(_txn, _table, _keys, row, _operation, true, _max_class), do: {:ok, row}
+  defp grow_labels(_txn, _table, [], row, _operation, _append_only, _max_class), do: {:ok, row}
+
+  defp grow_labels(txn, table, keys, row, operation, false, max_class) do
+    spec = Lineage.spec(table)
+
+    columns =
+      cond do
+        spec == nil -> []
+        operation == "delete" -> own_label_columns(spec)
+        true -> label_columns(spec, row)
+      end
+
+    if columns == [] or not Enum.all?(keys, &Map.has_key?(row, &1)) do
+      {:ok, row}
+    else
+      where =
+        keys
+        |> Enum.with_index(1)
+        |> Enum.map_join(" AND ", fn {key, index} -> "#{quote_name(key)} = ?#{index}" end)
+
+      sql =
+        "SELECT #{Enum.map_join(columns, ", ", &quote_name/1)} FROM #{quote_name(table)} WHERE #{where}"
+
+      case {operation, Store.txn_query(txn, sql, Enum.map(keys, &row[&1]))} do
+        {_, {:error, reason}} ->
+          {:error, {:labels_unreadable, reason}}
+
+        {_, {:ok, []}} ->
+          {:ok, row}
+
+        {"delete", {:ok, [held]}} ->
+          rank = Lineage.own_rank(spec, Map.new(Enum.zip(columns, held)))
+
+          if rank != nil and rank > Gate.class_rank(max_class),
+            do: :gated,
+            else: {:ok, row}
+
+        {_, {:ok, [held]}} ->
+          {:ok, keep_held(spec, row, Map.new(Enum.zip(columns, held)))}
+      end
+    end
+  end
+
+  # The columns of a table that say how classified a row is.
+  defp own_label_columns(spec) do
+    Enum.filter(
+      [
+        if(spec.labels, do: "security_labels"),
+        if(spec.partitions, do: "partition_ids"),
+        spec.meta,
+        spec.class
+      ],
+      & &1
+    )
+  end
+
+  # The columns of the change that say how classified the row is.
+  defp label_columns(spec, row) do
+    [
+      if(spec.labels, do: "security_labels"),
+      if(spec.partitions, do: "partition_ids"),
+      spec.meta,
+      spec.class
+    ]
+    |> Enum.filter(&(&1 && Map.has_key?(row, &1)))
+  end
+
+  defp keep_held(spec, row, held) do
+    row
+    |> keep_labels("security_labels", spec.labels, held)
+    |> keep_labels("partition_ids", spec.partitions, held)
+    |> keep_metadata_labels(spec.meta, held)
+    |> keep_class(spec.class, held)
+  end
+
+  defp keep_labels(row, _column, false, _held), do: row
+
+  defp keep_labels(row, column, true, held) do
+    sent = SecurityLabels.labels(plain(row[column]))
+
+    case SecurityLabels.labels(plain(held[column])) -- sent do
+      [] -> row
+      missing -> Map.put(row, column, Jason.encode!(sent ++ missing))
+    end
+  end
+
+  defp keep_metadata_labels(row, nil, _held), do: row
+
+  defp keep_metadata_labels(row, column, held) do
+    sent = row[column] |> plain() |> SecurityLabels.metadata_map()
+    kept = held[column] |> plain() |> SecurityLabels.metadata_map()
+
+    {merged, changed?} =
+      Enum.reduce(["security_labels", "partition_ids"], {sent, false}, fn key, {acc, changed?} ->
+        carried = SecurityLabels.labels(plain(acc[key]))
+
+        case SecurityLabels.labels(plain(kept[key])) -- carried do
+          [] -> {acc, changed?}
+          missing -> {Map.put(acc, key, carried ++ missing), true}
+        end
+      end)
+
+    if changed?, do: Map.put(row, column, Jason.encode!(merged)), else: row
+  end
+
+  # Only a level above `internal` (the column's default, which says nothing)
+  # is kept; a level this Engine does not know is the highest.
+  defp keep_class(row, nil, _held), do: row
+
+  defp keep_class(row, column, held) do
+    kept = plain(held[column])
+
+    if class_level(kept) >= 2 and class_level(kept) > class_level(plain(row[column])),
+      do: Map.put(row, column, kept),
+      else: row
+  end
+
+  defp class_level(value) when value in [nil, ""], do: 0
+  defp class_level(value), do: SecurityLabels.class_rank(value) || 3
+
+  defp plain({:blob, bytes}), do: bytes
+  defp plain(value), do: value
 
   defp record_ledger(txn, tenant_id, workspace_id, mutation) do
     payload = Jason.encode!(mutation["payload"])

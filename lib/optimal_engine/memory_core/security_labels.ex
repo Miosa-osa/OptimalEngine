@@ -285,6 +285,18 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
 
   def metadata_map(_other), do: %{}
 
+  @doc """
+  The labels in a stored value, as strings. A value that cannot be read
+  holds `restricted`, so joining it with another value never drops the class.
+  """
+  @spec labels(term()) :: [String.t()]
+  def labels(value) do
+    case decode(value) do
+      {:ok, _} -> strings(value)
+      :invalid -> ["restricted"]
+    end
+  end
+
   @doc "The labels of two values joined, each once, in order."
   @spec merge(term(), term()) :: [String.t()]
   def merge(left, right) do

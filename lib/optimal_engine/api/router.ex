@@ -2976,7 +2976,7 @@ defmodule OptimalEngine.API.Router do
     guarded_read(conn, fn ->
       case OptimalEngine.Batch.read_signals(
              workspace_id: workspace_id,
-             reader: Reader.scope(conn)
+             reader: Reader.scope(conn, ceiling: true)
            ) do
         {:ok, signals, withheld} ->
           json(conn, withheld_note(%{workspace_id: workspace_id, signals: signals}, withheld))
@@ -2995,7 +2995,7 @@ defmodule OptimalEngine.API.Router do
     guarded_read(conn, fn ->
       case OptimalEngine.Batch.read_memories(
              workspace_id: workspace_id,
-             reader: Reader.scope(conn)
+             reader: Reader.scope(conn, ceiling: true)
            ) do
         {:ok, memories, withheld} ->
           json(conn, withheld_note(%{workspace_id: workspace_id, memories: memories}, withheld))
@@ -3015,7 +3015,7 @@ defmodule OptimalEngine.API.Router do
     guarded_read(conn, fn ->
       case OptimalEngine.Batch.read_workspace(workspace_id,
              tenant_id: tenant_id,
-             reader: Reader.scope(conn)
+             reader: Reader.scope(conn, ceiling: true)
            ) do
         {:ok, snapshot, withheld} -> json(conn, withheld_note(snapshot, withheld))
         {:error, _reason} -> export_failed(conn)

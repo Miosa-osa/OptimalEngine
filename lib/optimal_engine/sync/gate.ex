@@ -35,6 +35,10 @@ defmodule OptimalEngine.Sync.Gate do
     * it is an aggregate (`analysis_reports`) and the workspace holds
       anything above the peer's class.
 
+  A change is held at the higher of the row as the ledger recorded it and the
+  row as it is stored now, so an older version of a row that has labels today
+  stays home with it.
+
   A Store error while classifying is not an answer: it raises, the push
   cycle sends nothing and its cursor stays where it was, so the next cycle
   classifies the same rows again. A workspace whose data class is not one of
@@ -86,7 +90,7 @@ defmodule OptimalEngine.Sync.Gate do
 
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Store
-  alias OptimalEngine.Sync.Lineage
+  alias OptimalEngine.Sync.{GateCache, Lineage}
 
   @internal 1
   @restricted 3
@@ -125,12 +129,13 @@ defmodule OptimalEngine.Sync.Gate do
   Opens a gate for a reader of a workspace. `allowed` is the reader's grants
   (`SecurityLabels.grants/2`).
   """
-  @spec open_reader(String.t(), String.t(), SecurityLabels.grants()) :: t()
-  def open_reader(tenant_id, workspace_id, %{labels: _, partitions: _} = allowed) do
+  @spec open_reader(String.t(), String.t(), SecurityLabels.grants(), SecurityLabels.rank() | nil) ::
+          t()
+  def open_reader(tenant_id, workspace_id, %{labels: _, partitions: _} = allowed, ceiling \\ nil) do
     %__MODULE__{
       tenant_id: tenant_id,
       workspace_id: workspace_id,
-      rank: 0,
+      rank: ceiling || @restricted,
       memo: :ets.new(:sync_gate, [:set, :private]),
       mode: :grants,
       allowed: allowed
@@ -151,11 +156,21 @@ defmodule OptimalEngine.Sync.Gate do
     run(open(tenant_id, workspace_id, max_class), fun)
   end
 
-  @doc "Runs `fun` with a reader's gate, closing it after."
-  @spec with_reader(String.t(), String.t(), SecurityLabels.grants(), (t() -> result)) :: result
+  @doc """
+  Runs `fun` with a reader's gate, closing it after. A `ceiling` (a class rank)
+  is the highest class the reader is shown, unless its grants include every
+  label.
+  """
+  @spec with_reader(
+          String.t(),
+          String.t(),
+          SecurityLabels.grants(),
+          SecurityLabels.rank() | nil,
+          (t() -> result)
+        ) :: result
         when result: var
-  def with_reader(tenant_id, workspace_id, allowed, fun) do
-    run(open_reader(tenant_id, workspace_id, allowed), fun)
+  def with_reader(tenant_id, workspace_id, allowed, ceiling \\ nil, fun) do
+    run(open_reader(tenant_id, workspace_id, allowed, ceiling), fun)
   end
 
   defp run(gate, fun) do
@@ -408,8 +423,11 @@ defmodule OptimalEngine.Sync.Gate do
     end)
   end
 
-  defp readable?(%__MODULE__{allowed: allowed}, tokens),
-    do: SecurityLabels.permits?(allowed, tokens)
+  defp readable?(%__MODULE__{allowed: allowed, rank: ceiling}, tokens) do
+    SecurityLabels.permits?(allowed, tokens) and
+      (allowed.all_labels? or ceiling >= @restricted or
+         SecurityLabels.token_rank(tokens) in [nil | Enum.to_list(0..ceiling)])
+  end
 
   # -- classifying a row --------------------------------------------------------
 
@@ -432,8 +450,42 @@ defmodule OptimalEngine.Sync.Gate do
             unresolved()
 
           true ->
-            top_tokens(gate, table, spec, mutation_row(mutation), true)
+            change_tokens(gate, table, spec, mutation_row(mutation))
         end
+    end
+  end
+
+  # A change in the ledger is a snapshot of the row as it was written, and the
+  # row may carry labels it did not have then (labelled afterwards, or a
+  # version that arrived unlabelled). The change carries the tokens of the
+  # snapshot and of the row as it is stored now. A row that is gone is read as
+  # the ledger last recorded it (every version it has there), so a version
+  # written before the row was labelled and then deleted stays home with the
+  # versions that were labelled.
+  defp change_tokens(gate, table, spec, row) do
+    union(top_tokens(gate, table, spec, row, true), current_tokens(gate, table, spec, row))
+  end
+
+  defp current_tokens(_gate, _table, %{key: nil}, _row), do: nil
+
+  defp current_tokens(gate, table, spec, row) do
+    case row[spec.key] do
+      id when is_binary(id) ->
+        memoized(gate, {:current, table, id}, fn ->
+          case load(gate, table, spec, id) do
+            nil ->
+              case ledger_tokens(gate, table, spec, id) do
+                :none -> nil
+                tokens -> tokens
+              end
+
+            current ->
+              row_tokens(gate, spec, current, MapSet.new([{table, id}]), true)
+          end
+        end)
+
+      _ ->
+        nil
     end
   end
 
@@ -806,21 +858,23 @@ defmodule OptimalEngine.Sync.Gate do
   defp non_empty_json(column), do: "(#{column} NOT IN ('[]', '') OR NOT json_valid(#{column}))"
 
   defp holds_above?(gate) do
-    index = index(gate)
+    shared(gate, :holds_above, fn ->
+      index = index(gate)
 
-    index.contexts != %{} or index.memories != %{} or
-      Enum.any?(Lineage.tables(), fn table ->
-        case exact_predicate(Lineage.spec(table), gate.rank) do
-          nil ->
-            false
+      index.contexts != %{} or index.memories != %{} or
+        Enum.any?(Lineage.tables(), fn table ->
+          case exact_predicate(Lineage.spec(table), gate.rank) do
+            nil ->
+              false
 
-          predicate ->
-            sql =
-              "SELECT 1 FROM #{quote_name(table)} WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate} LIMIT 1"
+            predicate ->
+              sql =
+                "SELECT 1 FROM #{quote_name(table)} WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate} LIMIT 1"
 
-            query!(sql, [gate.tenant_id, gate.workspace_id]) != []
-        end
-      end)
+              query!(sql, [gate.tenant_id, gate.workspace_id]) != []
+          end
+        end)
+    end)
   end
 
   # SQL for "this row names a class above the gate", exactly, by the way its
@@ -910,7 +964,43 @@ defmodule OptimalEngine.Sync.Gate do
   # selected source. A source is selected when a replicating gate would hold
   # it (its class is above the peer's) or, for a reader, when it carries any
   # label or partition. Built once per gate, from the Store.
-  defp index(gate), do: memoized(gate, :index, fn -> build_index(gate) end)
+  defp index(gate),
+    do: memoized(gate, :index, fn -> shared(gate, :index, fn -> build_index(gate) end) end)
+
+  # What a scan of the workspace gave, kept for the next gate while nothing
+  # was written (see `OptimalEngine.Sync.GateCache`). The stamp is read just
+  # before each scan (not once per gate: a long push cycle may need a scan
+  # late, after a write that an earlier scan did not see), so a write that
+  # lands during a scan makes the entry stale, never the reverse. A replicating
+  # gate and a reader's gate select different sources, so the mode is part of
+  # the key.
+  defp shared(gate, what, build) do
+    key = {what, gate.tenant_id, gate.workspace_id, gate.mode, gate.rank}
+
+    GateCache.fetch(key, stamp(gate), fn ->
+      :telemetry.execute([:optimal_engine, :sync, :gate_build], %{count: 1}, %{
+        what: what,
+        workspace_id: gate.workspace_id
+      })
+
+      build.()
+    end)
+  end
+
+  # The write sequence of the change capture and of the ledger: every write to
+  # a replicated table of a workspace that syncs moves one of them, and so
+  # does applying a change from a peer. A workspace that does not sync is not
+  # captured, so nothing tells when it changed: it is not cached.
+  defp stamp(gate) do
+    if query!("SELECT 1 FROM sync_workspaces WHERE workspace_id = ?1", [gate.workspace_id]) == [] do
+      :uncached
+    else
+      query!(
+        "SELECT name, seq FROM sqlite_sequence WHERE name IN ('sync_capture', 'sync_mutations') ORDER BY name",
+        []
+      )
+    end
+  end
 
   defp build_index(gate) do
     scope = [gate.tenant_id, gate.workspace_id]

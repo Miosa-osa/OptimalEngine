@@ -31,6 +31,18 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
     {:ok, workspace} = Workspace.create(%{slug: "reads-#{n}", name: "Reads #{n}"})
     ws = workspace.id
 
+    # The grants are what most of these tests are about, so the ceiling for
+    # what the dump routes hand out is raised to the top; the tests of the
+    # ceiling itself put the default back.
+    previous = Application.get_env(:optimal_engine, :sync_serve_max_class)
+    Application.put_env(:optimal_engine, :sync_serve_max_class, "restricted")
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:optimal_engine, :sync_serve_max_class, previous),
+        else: Application.delete_env(:optimal_engine, :sync_serve_max_class)
+    end)
+
     secret = remember(ws, "Wire 4471 to Harborview, routing 4407", ["restricted"])
     internal = remember(ws, "The Northwind offsite is Thursday", ["internal"])
     team = remember(ws, "Team Atlas roadmap draft", [], ["team-a"])
@@ -424,6 +436,57 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
               do: assert(Gate.readable_id?(gate, "claims", claim_id) == readable?)
         end)
       end
+    end
+  end
+
+  describe "the ceiling for what the dump routes hand out" do
+    setup do
+      Application.delete_env(:optimal_engine, :sync_serve_max_class)
+      :ok
+    end
+
+    test "a key granted restricted is not exported restricted rows", ctx do
+      granted =
+        mint(ctx, %{"allowed_security_labels" => ["restricted", "internal", "confidential"]})
+
+      memories = export(ctx, granted, "memories")
+      refute ctx.secret.id in ids(memories["memories"])
+      assert ctx.internal.id in ids(memories["memories"])
+      assert memories["withheld"] >= 1 and memories["complete"] == false
+
+      refute ctx.secret_doc.id in ids(export(ctx, granted, "signals")["signals"])
+      refute "deal-room-#{ctx.n}" in slugs(export(ctx, granted, "workspace"))
+    end
+
+    test "a key granted * for labels, and the operator, are not held to it", ctx do
+      root = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+      labels_only = mint(ctx, %{"allowed_security_labels" => ["*"]})
+
+      for token <- [root, labels_only, nil] do
+        assert ctx.secret.id in ids(export(ctx, token, "memories")["memories"])
+      end
+    end
+
+    test "the ceiling can be raised", ctx do
+      Application.put_env(:optimal_engine, :sync_serve_max_class, "restricted")
+      granted = mint(ctx, %{"allowed_security_labels" => ["restricted"]})
+
+      assert ctx.secret.id in ids(export(ctx, granted, "memories")["memories"])
+    end
+
+    test "a conflict about a restricted row is redacted for a key held to it", ctx do
+      conflict(ctx, "fact", "facts", %{
+        "id" => "fact-#{ctx.n}",
+        "fact_text" => "Bank detail 4471",
+        "security_labels" => ~s(["restricted"])
+      })
+
+      granted = mint(ctx, %{"allowed_security_labels" => ["restricted"]})
+      assert conflicts(ctx, granted)[cid(ctx, "fact")]["redacted"]
+      refute body_of_conflicts(ctx, granted) =~ "Bank detail"
+
+      root = mint(ctx, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]})
+      refute conflicts(ctx, root)[cid(ctx, "fact")]["redacted"]
     end
   end
 
@@ -852,6 +915,7 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
 
   describe "the storage ledger" do
     test "a keyed reader is shown the changes its grants cover", ctx do
+      Application.delete_env(:optimal_engine, :sync_serve_max_class)
       {:ok, _} = OptimalEngine.Sync.enable("default", ctx.ws, "user:owner")
       path = "/api/storage/workspaces/#{ctx.ws}/mutations?limit=500"
 
