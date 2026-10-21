@@ -12,7 +12,9 @@ defmodule OptimalEngine.Sync.Capture do
 
   `seal/0` moves captured rows into the `sync_mutations` ledger with a
   SHA-256 of the payload, an idempotency key of `<replica>:<capture seq>`,
-  and this Engine's replica id, preserving order.
+  and this Engine's replica id, preserving order. It works through the whole
+  backlog, a batch at a time, so a caller that seals before it reads sees
+  every change captured so far.
 
   Tables whose primary key is a single `INTEGER` row id are append-only
   derivations (their ids differ per Engine); they replicate inserts only, and
@@ -90,6 +92,7 @@ defmodule OptimalEngine.Sync.Capture do
                  surfacing_subscriptions tool_call_runs topology_change_requests training_runs
                  workspace_members workspace_storage_policies)
   @max_columns 60
+  @seal_batch 5_000
 
   @doc """
   The tables that replicate, an explicit list. It is the allow-list for applying
@@ -263,7 +266,18 @@ defmodule OptimalEngine.Sync.Capture do
   were sealed.
   """
   @spec seal() :: {:ok, non_neg_integer()}
-  def seal do
+  def seal, do: seal_backlog(0)
+
+  # A batch is at most @seal_batch rows; sealing goes on until the backlog is
+  # empty, so one call never leaves captured rows behind for the caller to miss.
+  defp seal_backlog(sealed) do
+    case seal_batch() do
+      {:ok, 0, _sealed} -> {:ok, sealed}
+      {:ok, _taken, batch} -> seal_backlog(sealed + batch)
+    end
+  end
+
+  defp seal_batch do
     {:ok, [[replica_id]]} = Store.raw_query("SELECT replica_id FROM sync_identity WHERE id = 1", [])
 
     {:ok, rows} =
@@ -272,63 +286,66 @@ defmodule OptimalEngine.Sync.Capture do
         SELECT c.seq, c.table_name, c.operation, c.workspace_id, c.entity_key, c.row_data, c.blob_data,
                c.occurred_at, w.tenant_id, w.organization_id
         FROM sync_capture c JOIN workspaces w ON w.id = c.workspace_id
-        ORDER BY c.seq LIMIT 5000
+        ORDER BY c.seq LIMIT #{@seal_batch}
         """,
         []
       )
 
     if rows == [] do
-      {:ok, 0}
+      {:ok, 0, 0}
     else
       # Rows captured by a trigger an earlier version installed on a table that
       # is now local-only are dropped, not sealed.
       sealable = Enum.filter(rows, fn [_seq, table | _] -> replicated?(table) end)
 
-      Store.transaction(fn txn ->
-        Enum.each(sealable, fn [
-                                 seq,
-                                 table,
-                                 op,
-                                 workspace_id,
-                                 key,
-                                 row,
-                                 blobs,
-                                 occurred_at,
-                                 tenant_id,
-                                 org_id
-                               ] ->
-          payload = Jason.encode!(%{"row" => Jason.decode!(row), "blobs" => decode_blobs(blobs)})
+      {:ok, sealed} =
+        Store.transaction(fn txn ->
+          Enum.each(sealable, fn [
+                                   seq,
+                                   table,
+                                   op,
+                                   workspace_id,
+                                   key,
+                                   row,
+                                   blobs,
+                                   occurred_at,
+                                   tenant_id,
+                                   org_id
+                                 ] ->
+            payload = Jason.encode!(%{"row" => Jason.decode!(row), "blobs" => decode_blobs(blobs)})
 
-          {:ok, _} =
-            Store.txn_execute(
-              txn,
-              """
-              INSERT OR IGNORE INTO sync_mutations
-                (id, tenant_id, organization_id, workspace_id, device_id, entity_type, entity_id, operation,
-                 payload, payload_hash, idempotency_key, occurred_at)
-              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-              """,
-              [
-                "mut_" <> replica_id <> "_" <> Integer.to_string(seq),
-                tenant_id,
-                org_id,
-                workspace_id,
-                replica_id,
-                table,
-                key || "row:#{seq}",
-                op,
-                payload,
-                :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower),
-                replica_id <> ":" <> Integer.to_string(seq),
-                occurred_at
-              ]
-            )
+            {:ok, _} =
+              Store.txn_execute(
+                txn,
+                """
+                INSERT OR IGNORE INTO sync_mutations
+                  (id, tenant_id, organization_id, workspace_id, device_id, entity_type, entity_id, operation,
+                   payload, payload_hash, idempotency_key, occurred_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                """,
+                [
+                  "mut_" <> replica_id <> "_" <> Integer.to_string(seq),
+                  tenant_id,
+                  org_id,
+                  workspace_id,
+                  replica_id,
+                  table,
+                  key || "row:#{seq}",
+                  op,
+                  payload,
+                  :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower),
+                  replica_id <> ":" <> Integer.to_string(seq),
+                  occurred_at
+                ]
+              )
+          end)
+
+          max_seq = rows |> List.last() |> hd()
+          {:ok, _} = Store.txn_execute(txn, "DELETE FROM sync_capture WHERE seq <= ?1", [max_seq])
+          {:ok, length(sealable)}
         end)
 
-        max_seq = rows |> List.last() |> hd()
-        {:ok, _} = Store.txn_execute(txn, "DELETE FROM sync_capture WHERE seq <= ?1", [max_seq])
-        {:ok, length(sealable)}
-      end)
+      {:ok, length(rows), sealed}
     end
   end
 
@@ -430,10 +447,13 @@ defmodule OptimalEngine.Sync.Capture do
     "json_object(#{pairs})"
   end
 
-  defp key_expr(_keys, _row, true), do: "NULL"
-  defp key_expr([key], row, false), do: "CAST(#{row}.#{quote_name(key)} AS TEXT)"
+  @doc false
+  # The SQL that gives a captured row its `entity_key`. `Sync` computes the same
+  # key from a payload (`Sync.entity_key/2`), and a test compares the two.
+  def key_expr(_keys, _row, true), do: "NULL"
+  def key_expr([key], row, false), do: "CAST(#{row}.#{quote_name(key)} AS TEXT)"
 
-  defp key_expr(keys, row, false) do
+  def key_expr(keys, row, false) do
     "json_array(" <> Enum.map_join(keys, ", ", &"#{row}.#{quote_name(&1)}") <> ")"
   end
 

@@ -139,12 +139,27 @@ defmodule OptimalEngine.Store.Migrations do
       migration_071_workspace_handles(),
       migration_072_workspace_external_id(),
       migration_authority_evidence_kind_index(),
-      migration_entity_mention_tenant()
+      migration_entity_mention_tenant(),
+      migration_sync_pull_floor()
     ]
 
     # A failing-migration test release appends one migration that fails on
     # purpose (OptimalEngine.Store.FailingMigration); every other build adds none.
     migrations ++ OptimalEngine.Store.FailingMigration.migrations(migrations)
+  end
+
+  # The floor a pull judges this Engine's own changes against: its ledger head at
+  # the start of the last cycle with the peer that pulled and pushed everything.
+  # It is a sequence of this Engine's ledger, so the two Engines' clocks do not
+  # decide which changes the peer had seen. Zero (the default) counts none as seen.
+  @sync_pull_floor_version 75
+  defp migration_sync_pull_floor do
+    {@sync_pull_floor_version,
+     "sync peers: the local ledger head at the start of the last complete cycle",
+     [
+       {"sync_peers.pulled_local_seq",
+        "ALTER TABLE sync_peers ADD COLUMN pulled_local_seq INTEGER NOT NULL DEFAULT 0"}
+     ]}
   end
 
   # The id another system knows a workspace by becomes a column, held by one
