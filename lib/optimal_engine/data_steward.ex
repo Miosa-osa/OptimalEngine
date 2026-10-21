@@ -831,9 +831,21 @@ defmodule OptimalEngine.DataSteward do
       })
 
     with :ok <- File.mkdir_p(Path.dirname(marker)),
-         :ok <- File.write(tmp, body),
+         :ok <- write_synced(tmp, body),
          :ok <- File.rename(tmp, marker) do
       :ok
+    end
+  end
+
+  # The note has to be on disk before the directory moves, or a crash that takes the
+  # machine with it leaves the move without its note.
+  defp write_synced(path, body) do
+    with {:ok, file} <- File.open(path, [:write, :binary]) do
+      try do
+        with :ok <- IO.binwrite(file, body), do: :file.sync(file)
+      after
+        File.close(file)
+      end
     end
   end
 
@@ -919,7 +931,7 @@ defmodule OptimalEngine.DataSteward do
   # Workspace ids are unique across tenants, so the id says whether the rename committed;
   # the tenant the note names is for the operator and decides nothing.
   defp recovery_action(target, old, new) do
-    case Store.raw_query("SELECT 1 FROM workspaces WHERE id = ?1", [target]) do
+    case workspace_row(target) do
       {:ok, [_ | _]} ->
         :committed
 
@@ -938,6 +950,13 @@ defmodule OptimalEngine.DataSteward do
       {:error, _} ->
         :needs_attention
     end
+  end
+
+  # A Store that does not answer in time exits the caller; the note waits for the next run.
+  defp workspace_row(id) do
+    Store.raw_query("SELECT 1 FROM workspaces WHERE id = ?1", [id])
+  catch
+    :exit, _timeout -> {:error, :store_unavailable}
   end
 
   defp rename_in(txn, workspace, tables, evidence_key, tenant, source, target, actor_id) do
