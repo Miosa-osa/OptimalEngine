@@ -20,11 +20,16 @@ defmodule OptimalEngine.Signal.GenreDetector do
        "amount due".
     6. Registry keyword scoring, accepted only with corroborating evidence
        (a single common word such as "review" or "plan" is not enough).
+
+  A long text is read by its head (`OptimalEngine.Signal.TextHead`, whole
+  lines up to 64 KiB), so detection takes bounded time whatever a caller
+  sends; a genre is a form, and its form shows at the top.
   """
 
-  alias OptimalEngine.Signal.{GenreRegistry, TimeLimit}
+  alias OptimalEngine.Signal.{GenreRegistry, TextHead, TimeLimit}
 
   @default_genre "note"
+  @sample_bytes 65_536
 
   # Registry keyword scoring must reach this to count. A genre-name hit is
   # worth 3 and a section-word hit 1, so it takes both name words ("privacy
@@ -63,7 +68,7 @@ defmodule OptimalEngine.Signal.GenreDetector do
 
   # Standup labels fold into three slots: done, doing, blocked. They open a
   # line or follow a sentence break ("y: on-call. t: write up. b: none").
-  @standup_label ~r/(?:^|[.;]\s+)\s*(?:[-*]\s+)?(?:#+\s*)?(?:\*\*)?(yesterday|today|tomorrow|blockers?|blocked|did|done yesterday|done|doing|next|issues?|Y|T|B)(?:\*\*)?\s*(?::|$)/im
+  @standup_label ~r/(?:^[^\S\n]*+|[.;]\s++)(?:[-*]\s++)?(?:#+\s*+)?(?:\*\*)?(yesterday|today|tomorrow|blockers?|blocked|did|done yesterday|done|doing|next|issues?|Y|T|B)(?:\*\*)?\s*(?::|$)/im
   @standup_slots %{
     "yesterday" => :done,
     "did" => :done,
@@ -116,17 +121,26 @@ defmodule OptimalEngine.Signal.GenreDetector do
   #
   # `(#+\s*)?` lets plain-text documents use the same headings as markdown;
   # every pattern matches a whole line, so a sentence never qualifies.
+  #
+  # The ADR pair (a Status heading, then a Context heading) is checked once
+  # from the start of the text: the first Status heading is taken (an atomic
+  # group), since a Context heading after any Status heading is after the
+  # first. Retrying from every Status heading was quadratic.
+  #
+  # Space before a label on its line is `[^\S\n]*+`: a `\s*` there would run
+  # on through a block of blank lines from each line start in it, which was
+  # quadratic in the number of blank lines.
 
   @heading_patterns [
     {"adr",
-     ~r/Architecture Decision Record|\bADR[- ]\d+|^(#+\s*)?Status\s*$.*^(#+\s*)?Context\s*$/ims},
+     ~r/\A(?=(?>.*?^(#+\s*)?Status\s*$).*?^(#+\s*)?Context\s*$)|Architecture Decision Record|\bADR[- ]\d+/ims},
     {"changelog", ~r/^#+\s*CHANGELOG\b|^[#]{2,4}\s*(Added|Changed|Fixed|Removed|Deprecated)\s*$/im},
     {"postmortem", ~r/^(#+\s*)?Root Cause( Analysis)?\s*$/im},
     {"runbook", ~r/^(#+\s*)?(Steps|Procedure|Rollback)\s*$/im},
     {"spec",
      ~r/^(#+\s*)?(Requirements|Acceptance Criteria|Constraints)\s*$|^(Acceptance( Criteria)?|Out of scope)\s*:/im},
     {"transcript", ~r/^(#+\s*)?(Participants|Key Points|Transcript)\s*$/im},
-    {"decision-log", ~r/^#+\s*(Key\s+)?Decisions?\b|^\s*(\*\*)?Decision(\*\*)?:\s/im},
+    {"decision-log", ~r/^#+\s*(Key\s+)?Decisions?\b|^[^\S\n]*+(\*\*)?Decision(\*\*)?:\s/im},
     {"plan", ~r/^#+\s*(Non-Negotiables|Time Blocks|Objectives|Milestones)\s*$/im},
     {"brief", ~r/^(#+\s*)?(Objective|Key Messages|Call to Action)\s*$/im},
     {"proposal",
@@ -138,7 +152,12 @@ defmodule OptimalEngine.Signal.GenreDetector do
 
   @message_max_lines 4
   @message_max_chars 600
-  @fenced_block ~r/^\s*(```|~~~).*?^\s*(```|~~~)\s*$/ms
+  # A fence opener up to its closing fence line. With no closing fence left
+  # in the text, no later opener has one either (*COMMIT): retrying from each
+  # opener was quadratic. Blank space before an opener is read once (*SKIP),
+  # and space before a closing fence stays on its line, so a block of blank
+  # lines is not read again from each line start in it.
+  @fenced_block ~r/^\s*+(?:(```|~~~)(?:.*?^[^\S\n]*+(```|~~~)\s*$|(*COMMIT)(*FAIL))|(*SKIP)(*FAIL))/ms
   @addressed ~r/(^|\s)@\w|\b(you|your|you're|youre|y'all|thanks|thank you|thx|ty|lgtm|sgtm|lol|pls|plz|please|btw|fyi|np|imo|anyone|someone|anybody|somebody|im|gonna|omw|brb)\b|^(hey|hi|hello|yo)\b|^\+1\b|:[a-z0-9_+-]+:|[\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}]/iu
 
   # ── Topic keywords ──────────────────────────────────────────────────────
@@ -146,8 +165,9 @@ defmodule OptimalEngine.Signal.GenreDetector do
   @keyword_patterns [
     {"invoice", ~r/\binvoice\s*(#|no\.?\s|number\b)|\bamount due\b|\bpayment due\b|\bbill to\b/i},
     {"profit-loss", ~r/\bP&L\b|\bprofit (and|&) loss\b|\bnet income\b/i},
+    # Space before `budget` on its line as in the headings above.
     {"budget",
-     ~r/^#+\s[^\n]*\bbudget\b|^\s*(total\s+)?budget\s*:|\bquarterly spend\b|\bannual spend\b/im},
+     ~r/^#+\s[^\n]*\bbudget\b|^[^\S\n]*+(total\s+)?budget\s*:|\bquarterly spend\b|\bannual spend\b/im},
     {"decision-log", ~r/\bdecided:|\bwe decided\b|\bkey decisions\b/i},
     {"postmortem", ~r/\bpost-?mortem\b|\bincident report\b|\broot cause analysis\b/i},
     {"runbook", ~r/\brunbook\b|\bstep-by-step\b/i},
@@ -166,6 +186,7 @@ defmodule OptimalEngine.Signal.GenreDetector do
   def detect(_), do: @default_genre
 
   defp detect_text(text) do
+    text = TextHead.take(text, @sample_bytes)
     lines = non_blank_lines(text)
 
     form_genre(text, lines) ||

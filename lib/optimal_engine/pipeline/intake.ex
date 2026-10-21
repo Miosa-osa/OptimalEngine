@@ -104,8 +104,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   alias OptimalEngine.Pipeline.Router, as: Router
   alias OptimalEngine.Pipeline.SemanticProcessor, as: SemanticProcessor
   alias OptimalEngine.Signal
-  alias OptimalEngine.Signal.ModeDetector
-  alias OptimalEngine.Signal.TimeLimit
+  alias OptimalEngine.Signal.{ModeDetector, TextHead, TimeLimit}
   alias OptimalEngine.Store
   alias OptimalEngine.Routing
   alias OptimalEngine.URI
@@ -115,6 +114,9 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   # Policy applied by the quality gate; recorded on reject/quarantine ledger entries.
   @quality_gate_policy "intake_quality_gate_v1"
+
+  # Classification reads at most this much of a text (`classify/2`).
+  @classify_bytes 65_536
 
   # Result type for process/2
   @type result :: %{
@@ -175,9 +177,34 @@ defmodule OptimalEngine.Pipeline.Intake do
   Accepts the classification options of `process/2` (`:genre`, `:title`,
   `:node`, `:entities`, `:type`) plus `:known_entities` (default `[]`).
   The returned signal has no id or timestamps yet.
+
+  A text longer than #{@classify_bytes} bytes is classified by its head
+  (`OptimalEngine.Signal.TextHead`, whole lines up to #{@classify_bytes}
+  bytes): genre, type, title and summaries come from the head; mode and
+  entities from the whole text, since a data document cut short no longer
+  reads as data (the mode detector bounds what it reads itself); and the
+  signal carries the whole text, so nothing is lost when it is stored. The
+  time classification takes is bounded whatever the caller sends.
   """
   @spec classify(String.t(), keyword()) :: Signal.t()
-  def classify(raw_text, opts \\ []) when is_binary(raw_text) do
+  def classify(raw_text, opts \\ [])
+
+  def classify(raw_text, opts)
+      when is_binary(raw_text) and byte_size(raw_text) > @classify_bytes do
+    known = Keyword.get(opts, :known_entities, [])
+    named = Keyword.get(opts, :entities, [])
+    entities = Enum.uniq(named ++ Classifier.extract_entities(raw_text, Enum.uniq(known ++ named)))
+
+    raw_text
+    |> TextHead.take(@classify_bytes)
+    |> classify_text(raw_text, Keyword.put(opts, :entities, entities))
+  end
+
+  def classify(raw_text, opts) when is_binary(raw_text), do: classify_text(raw_text, raw_text, opts)
+
+  # Classifies `raw_text`, the head of `whole` or all of it: Mode reads
+  # `whole`, and the signal carries it.
+  defp classify_text(raw_text, whole, opts) do
     # Merge explicit entities into known entities for extraction
     extra_entities = Keyword.get(opts, :entities, [])
     all_known = Enum.uniq(Keyword.get(opts, :known_entities, []) ++ extra_entities)
@@ -187,7 +214,14 @@ defmodule OptimalEngine.Pipeline.Intake do
     # Without this, content with an empty path is classified as :resource and loses
     # all Mode + Genre + Type + Format + Structure dimensions.
     forced_type = Keyword.get(opts, :type, :signal)
-    classify_opts = [path: "", known_entities: all_known, type: forced_type, genre: genre]
+
+    classify_opts = [
+      path: "",
+      known_entities: all_known,
+      type: forced_type,
+      genre: genre,
+      whole_text: whole
+    ]
 
     ctx = Classifier.classify_context(raw_text, classify_opts)
 
@@ -201,6 +235,7 @@ defmodule OptimalEngine.Pipeline.Intake do
           # context carries no Mode, so read it from the text.
           sig = Context.to_signal(ctx)
           {_frontmatter, body} = Classifier.parse_frontmatter(raw_text)
+          body = Classifier.mode_body(raw_text, body, whole_text: whole)
           %{sig | mode: ModeDetector.resolve(body, genre: genre || sig.genre)}
       end
 
@@ -213,6 +248,7 @@ defmodule OptimalEngine.Pipeline.Intake do
     |> then(fn s -> %{s | content: raw_text, format: :markdown} end)
     |> enhance_with_signal_bridge(raw_text)
     |> regenerate_summaries()
+    |> then(&%{&1 | content: whole})
   end
 
   # ---------------------------------------------------------------------------
