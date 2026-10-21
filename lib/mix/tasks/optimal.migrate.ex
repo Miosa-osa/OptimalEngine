@@ -25,7 +25,13 @@ defmodule Mix.Tasks.Optimal.Migrate do
   @impl Mix.Task
   def run(args) do
     Mix.Task.run("app.start")
+    main(args)
+  end
 
+  # The task without Mix: `bin/optimal maintenance` runs it in a release
+  # (OptimalEngine.Release.Maintenance), with the Engine already started.
+  @doc false
+  def main(args) do
     {opts, _, _} = OptionParser.parse(args, strict: [status: :boolean])
 
     if opts[:status] do
