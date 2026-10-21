@@ -94,14 +94,15 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
 
     * `{:label, name}` a label; the four class names are lowercased, other
       labels are compared exactly;
-    * `{:partition, id}` a partition;
+    * `{:partition_set, ids}` the partitions of one row (sorted); a reader
+      must share at least one of them for each such row (see `permits?/2`);
     * `{:partition_all, id}` a partition the reader must hold in full (see
       `permits?/2`);
     * `:unresolved` something that could not be read or found.
   """
   @type token ::
           {:label, String.t()}
-          | {:partition, String.t()}
+          | {:partition_set, [String.t()]}
           | {:partition_all, String.t()}
           | :unresolved
 
@@ -136,12 +137,25 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
     end
   end
 
-  @doc "The partitions of a stored `partition_ids` value as tokens."
+  @doc """
+  The partitions of a stored `partition_ids` value as tokens: one
+  `{:partition_set, ids}` for the row (none when it has none), and
+  `unresolved` when the value or an element cannot be read.
+  """
   @spec partition_tokens(term()) :: [token()]
   def partition_tokens(value) do
     case decode(value) do
-      {:ok, ids} -> Enum.map(ids, &label_token(&1, :partition))
-      :invalid -> [:unresolved]
+      {:ok, ids} ->
+        tokens = Enum.map(ids, &label_token(&1, :partition))
+        names = for {:partition, id} <- tokens, do: id
+        unreadable = if :unresolved in tokens, do: [:unresolved], else: []
+
+        if names == [],
+          do: unreadable,
+          else: [{:partition_set, names |> Enum.uniq() |> Enum.sort()} | unreadable]
+
+      :invalid ->
+        [:unresolved]
     end
   end
 
@@ -164,6 +178,17 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
 
     labels ++ partitions
   end
+
+  @doc """
+  Whether a list of grants holds `"*"`, which is every label (or every
+  partition) when it is in `allowed_security_labels` (or `allowed_partitions`),
+  as `Auth.KeyIssuance` reads it. A key holds it only when it may mint any
+  grant. The retrieval coordinator, the associative projection and the
+  readers of exports all read it through here.
+  """
+  @spec wildcard?(term()) :: boolean()
+  def wildcard?(grants) when is_list(grants), do: Enum.any?(grants, &(&1 == "*"))
+  def wildcard?(_grants), do: false
 
   @doc """
   The grants of a reader from the labels and partitions its key is allowed.
@@ -191,7 +216,10 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
       a reader with none sees only what has none;
     * partitions: with no partition granted only what has none is seen; with
       some granted, what shares at least one is seen and what has none is
-      not;
+      not. A thing derived from other rows carries the partitions of each of
+      them as a `{:partition_set, ids}` of its own, and the reader must share
+      one of every set: a row that is partitioned to `a` and drawn from a row
+      partitioned to `b` is not seen by a reader that holds only `a`;
     * `{:partition_all, id}` tokens (an aggregate, which is written from
       every partition of its workspace) must all be granted;
     * `unresolved` is never granted, except to a reader that may see all
@@ -202,7 +230,7 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
 
   def permits?(grants, tokens) do
     labels = for {:label, name} <- tokens, do: name
-    partitions = for {:partition, id} <- tokens, do: id
+    sets = for {:partition_set, ids} <- tokens, do: ids
     required = for {:partition_all, id} <- tokens, do: id
 
     labels_ok? =
@@ -210,20 +238,25 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
         (not MapSet.member?(tokens, :unresolved) and subset?(labels, grants.labels))
 
     partitions_ok? =
-      grants.all_partitions? or
-        (shares_partition?(grants.partitions, partitions ++ required) and
-           subset?(required, grants.partitions))
+      grants.all_partitions? or partitions_ok?(grants.partitions, sets, required)
 
     labels_ok? and partitions_ok?
   end
 
-  defp subset?(names, granted), do: Enum.all?(names, &MapSet.member?(granted, &1))
-
-  defp shares_partition?(granted, carried) do
-    if MapSet.size(granted) == 0,
-      do: carried == [],
-      else: Enum.any?(carried, &MapSet.member?(granted, &1))
+  # Nothing granted: only what carries nothing. Something granted: it must be
+  # carried (as retrieval, a row with no partition is not shown), every row's
+  # set must share one, and every partition of an aggregate must be held.
+  defp partitions_ok?(granted, sets, required) do
+    if MapSet.size(granted) == 0 do
+      sets == [] and required == []
+    else
+      (sets != [] or required != []) and
+        Enum.all?(sets, fn ids -> Enum.any?(ids, &MapSet.member?(granted, &1)) end) and
+        subset?(required, granted)
+    end
   end
+
+  defp subset?(names, granted), do: Enum.all?(names, &MapSet.member?(granted, &1))
 
   @doc """
   The class rank of a set of tokens: the highest class named, restricted for

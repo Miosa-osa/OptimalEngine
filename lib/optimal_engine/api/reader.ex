@@ -30,9 +30,11 @@ defmodule OptimalEngine.API.Reader do
     end
   end
 
+  # An element that is not a string grants nothing (a map or a list in the
+  # metadata of a key is not a label), instead of failing the request.
   defp grant(%ApiKey{metadata: %{} = metadata}, name) do
     case Map.get(metadata, name) do
-      grants when is_list(grants) -> Enum.map(grants, &to_string/1)
+      grants when is_list(grants) -> for grant <- grants, is_binary(grant), do: grant
       _ -> []
     end
   end

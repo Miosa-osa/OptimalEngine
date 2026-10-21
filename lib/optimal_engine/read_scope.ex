@@ -11,7 +11,8 @@ defmodule OptimalEngine.ReadScope do
     * the labels and partitions it carries against the key's grants
       (`OptimalEngine.MemoryCore.SecurityLabels.permits?/2`): every label must
       be granted, and with no partition granted only what has none is seen,
-      with some granted only what shares one;
+      with some granted only what shares one (for a row drawn from other
+      rows, one with each of them that has any);
     * the access lists of `OptimalEngine.Identity.ACL`, for the address of the
       resource.
 
@@ -20,8 +21,8 @@ defmodule OptimalEngine.ReadScope do
   (`OptimalEngine.Sync.Gate`), and a row whose source cannot be found is read
   by no one.
 
-  A key granted `"*"` (a key that may mint any grant, such as the bootstrap
-  key) sees every label, every partition, or both. An anonymous local caller
+  A key granted `"*"` (a key that may mint any grant, such as a bootstrap
+  key with `*` or `admin` scope) sees every label, every partition, or both. An anonymous local caller
   is the trusted operator and is not filtered: its scope is `nil`, and every
   function here passes what it is given through.
 
@@ -98,6 +99,7 @@ defmodule OptimalEngine.ReadScope do
         items
       else
         Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), fn gate ->
+          Gate.prefetch_rows(gate, table, Enum.map(items, row_of))
           Enum.filter(items, &Gate.readable_row?(gate, table, row_of.(&1)))
         end)
       end
@@ -161,7 +163,10 @@ defmodule OptimalEngine.ReadScope do
       fun.(fn mutations ->
         readable =
           if gate do
-            Enum.filter(mutations, &Gate.readable_known?(gate, shape(&1)))
+            shaped = Enum.map(mutations, &{&1, shape(&1)})
+            Gate.prefetch_mutations(gate, Enum.map(shaped, &elem(&1, 1)))
+
+            for {mutation, shape} <- shaped, Gate.readable_known?(gate, shape), do: mutation
           else
             mutations
           end
@@ -174,7 +179,7 @@ defmodule OptimalEngine.ReadScope do
             absent: scope.acl_absent
           )
 
-        {kept, length(mutations) - length(kept)}
+        {Enum.map(kept, &served/1), length(mutations) - length(kept)}
       end)
     end
 
@@ -182,6 +187,18 @@ defmodule OptimalEngine.ReadScope do
       do: run.(nil),
       else: Gate.with_reader(scope.tenant_id, workspace_id, grants(scope), run)
   end
+
+  # What a change shows a reader: the row and its blobs, which are what was
+  # classified. Anything else a peer or a caller put in the payload was not
+  # judged, so it is not served (an entry of an unknown entity type has no
+  # row to judge and keeps its payload).
+  defp served(%{entity_type: type, payload: %{} = payload} = mutation) do
+    if Lineage.spec(type),
+      do: %{mutation | payload: Map.take(payload, ["row", "blobs"])},
+      else: mutation
+  end
+
+  defp served(mutation), do: mutation
 
   defp shape(mutation) do
     %{
@@ -224,9 +241,14 @@ defmodule OptimalEngine.ReadScope do
     }
 
     if Gate.readable_mutation?(gate, mutation) and live_row_readable?(gate, conflict),
-      do: {payload, false},
+      do: {served_version(payload), false},
       else: {%{"redacted" => "security_labels"}, true}
   end
+
+  # The row and blobs that were classified; nothing else a peer put in the
+  # payload is served.
+  defp served_version(%{} = payload), do: Map.take(payload, ["row", "blobs"])
+  defp served_version(other), do: other
 
   # The row as it is stored now may carry labels the recorded version did not:
   # it was labelled afterwards. Only rows named by an id can be looked up.
