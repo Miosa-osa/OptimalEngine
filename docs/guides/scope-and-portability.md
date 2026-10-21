@@ -245,6 +245,7 @@ A large workspace therefore never holds the Engine's single writer long enough t
 A failed `create` removes every row it wrote and the workspace record, so it can simply be retried; a failed `merge` can be run again, because it only adds missing rows.
 Registry rows every Engine derives under the same id (principals, model call operations) are kept when the target already has them.
 Tenant and workspace ids are rewritten to the target; integer row ids are reassigned.
+A stored file that the bundle carries is named by its new path: an asset's `storage_path` and its source package's `verbatim_archive_uri`, and the `local_path` and `storage_path` in their metadata, point at the copy under the target workspace's folder instead of the source Engine's disk; an object store URI is kept as it is.
 `create` refuses an existing workspace; `merge` keeps existing rows.
 The source deletes nothing until `finalize-move` receives the same `bundle_sha256` the target reported, then removes the workspace's rows, files and cached embeddings, archives the workspace, and records a redirect so `optimal://` citations keep resolving.
 

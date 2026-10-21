@@ -525,6 +525,53 @@ defmodule OptimalEngine.ScopePortabilityTest do
              )
     end
 
+    test "a local asset is read from the target's copy once the workspace has moved", ctx do
+      source = Path.join(System.tmp_dir!(), "asset-#{ctx.n}.bin")
+      bytes = :crypto.strong_rand_bytes(4_096)
+      File.write!(source, bytes)
+      on_exit(fn -> File.rm(source) end)
+
+      {:ok, %{asset: asset, storage_backend: :filesystem}} =
+        OptimalEngine.MemoryCore.store_asset_file(source,
+          tenant_id: ctx.tenant,
+          workspace_id: ctx.open,
+          actor_id: "test"
+        )
+
+      root = Application.get_env(:optimal_engine, :root_path)
+      assert String.starts_with?(asset.storage_path, Filesystem.path(root, ctx.open) <> "/")
+
+      # The source gives the workspace up, which removes its folder.
+      target = moved_target(ctx, "assets")
+      refute File.exists?(asset.storage_path)
+
+      assert {:ok, %{workspace_id: moved_to}} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true)
+
+      folder = Filesystem.path(root, moved_to)
+      opts = [tenant_id: target, workspace_id: moved_to]
+      {:ok, moved} = OptimalEngine.MemoryCore.AssetStore.get(asset.id, opts)
+
+      assert moved.storage_path ==
+               Path.join(
+                 folder,
+                 Path.relative_to(asset.storage_path, Filesystem.path(root, ctx.open))
+               )
+
+      assert moved.metadata["local_path"] == moved.storage_path
+      assert {:ok, ^bytes} = OptimalEngine.MemoryCore.read_asset(asset.id, opts)
+
+      # Its source package names the same copy.
+      {:ok, [[archive, metadata]]} =
+        Store.raw_query(
+          "SELECT verbatim_archive_uri, metadata FROM source_packages WHERE workspace_id = ?1 AND content_hash = ?2",
+          [moved_to, asset.content_hash]
+        )
+
+      assert archive == moved.storage_path
+      assert Jason.decode!(metadata)["storage_path"] == moved.storage_path
+    end
+
     test "a move takes the workspace's mentions along, including one that records no tenant",
          ctx do
       {:ok, %{id: carried}} =
