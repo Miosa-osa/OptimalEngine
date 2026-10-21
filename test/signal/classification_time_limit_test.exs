@@ -198,7 +198,7 @@ defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
 
       {ms, report} = elapsed_ms(fn -> PreSend.check(draft, %{}) end)
       assert is_map(report)
-      assert ms < 10_000, "pre-send check took #{ms} ms"
+      assert ms < @budget_ms + 2_000, "pre-send check took #{ms} ms"
     end
 
     test "a crafted ingest does not hold up the next ingest, whoever sends it" do
