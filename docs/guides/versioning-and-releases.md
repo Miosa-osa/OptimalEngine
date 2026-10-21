@@ -21,7 +21,7 @@ retrieval and projection component versions
 Read it from `GET /api/version`.
 The lightweight `GET /api/health` and `GET /api/status` responses include the same identity.
 
-The current tracked contract is application `0.3.3`, API `v1`, contract schema `1`, expected migration `73`.
+The current tracked contract is application `0.3.5`, API `v1`, contract schema `1`, expected migration `73`.
 [engine-contract.json](../../engine-contract.json) supplies repository, schema, and capability metadata to [Version.info/0](../../lib/optimal_engine/version.ex) at compilation.
 [test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
 The runner applies every migration whose version is not yet recorded, but `expected_migration` and the replication gate compare the highest number, so two Engines that both report the same number must have applied the same set.

@@ -11,7 +11,7 @@ defmodule OptimalEngine.Conformance.Transport.Stub do
   @version %{
     "application" => "optimal_engine",
     "repository" => "example/repository",
-    "version" => "0.3.3",
+    "version" => "0.3.5",
     "git_sha" => String.duplicate("a", 40),
     "api_version" => "v1",
     "contract_version" => 1,
