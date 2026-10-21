@@ -66,18 +66,36 @@ defmodule Mix.Tasks.Optimal.Conformance do
   @aliases [w: :workspace, h: :help]
 
   @impl Mix.Task
-  def run(args) do
-    {opts, _rest, _invalid} = OptionParser.parse(args, strict: @switches, aliases: @aliases)
+  def run(args), do: main(args)
+
+  # The task without Mix: `bin/optimal maintenance conformance` runs it in a
+  # release (OptimalEngine.Release.Maintenance). It needs no Engine in this VM:
+  # it checks the one at the target URL over HTTP.
+  @doc false
+  def main(args) do
+    {opts, _rest, _invalid} = parse(args)
 
     if opts[:help] do
-      Mix.shell().info(@moduledoc)
+      IO.puts(@moduledoc)
     else
       run_suite(opts)
     end
   end
 
+  @doc false
+  # The Engine a run with these arguments checks.
+  def target_url(args) do
+    {opts, _rest, _invalid} = parse(args)
+    url(opts)
+  end
+
+  defp parse(args), do: OptionParser.parse(args, strict: @switches, aliases: @aliases)
+
+  defp url(opts),
+    do: opts[:url] || System.get_env("OPTIMAL_ENGINE_URL") || "http://127.0.0.1:4200"
+
   defp run_suite(opts) do
-    url = opts[:url] || System.get_env("OPTIMAL_ENGINE_URL") || "http://127.0.0.1:4200"
+    url = url(opts)
 
     case key(opts) do
       {:error, reason} -> Mix.raise(reason)
@@ -87,7 +105,7 @@ defmodule Mix.Tasks.Optimal.Conformance do
 
   defp execute(url, api_key, opts) do
     unless quiet?(opts) do
-      Mix.shell().info("conformance: checking #{url}")
+      IO.puts("conformance: checking #{url}")
     end
 
     report =
@@ -130,7 +148,7 @@ defmodule Mix.Tasks.Optimal.Conformance do
     json = Jason.encode!(report, pretty: true)
 
     case opts[:json] do
-      nil -> Mix.shell().info(json)
+      nil -> IO.puts(json)
       path -> File.write!(path, json <> "\n")
     end
   end
@@ -142,10 +160,10 @@ defmodule Mix.Tasks.Optimal.Conformance do
     brief? = quiet?(opts) or opts[:json] != nil
 
     for check <- report["checks"], not brief? or check["status"] != "pass" do
-      Mix.shell().info("#{String.upcase(check["status"])} #{check["id"]}: #{first_line(check)}")
+      IO.puts("#{String.upcase(check["status"])} #{check["id"]}: #{first_line(check)}")
     end
 
-    Mix.shell().info(
+    IO.puts(
       "conformance: #{summary["passed"]} passed, #{summary["failed"]} failed, #{summary["skipped"]} skipped" <>
         if(opts[:json], do: " (report: #{opts[:json]})", else: "")
     )

@@ -55,11 +55,14 @@ defmodule OptimalEngine.MixProject do
 
   # `MIX_ENV=prod mix release optimal` produces a supervised OTP runtime in
   # _build/prod/rel/optimal/. Use that shape for API/server deployment.
+  # `bin/optimal maintenance <task>` (rel/env.sh.eex) runs the maintenance
+  # tasks in a release. They report failures with Mix.raise, so Mix is loaded,
+  # never started: no Mix project, archive or compiler is involved.
   defp releases do
     [
       optimal: [
         include_executables_for: [:unix],
-        applications: [optimal_engine: :permanent]
+        applications: [optimal_engine: :permanent, mix: :load]
       ]
     ]
   end
