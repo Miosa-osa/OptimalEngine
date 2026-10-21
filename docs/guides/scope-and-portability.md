@@ -100,6 +100,11 @@ The graph analyses (`GET /api/graph/hubs`, `/triangles`, `/clusters` and `/refle
 A rename keeps the id. An operator can also make the id match the slug, or attach rows written to an unregistered id, with `POST /api/data-steward/workspaces/rename {source_workspace_id, target_workspace_id}` and `POST /api/data-steward/workspaces/repair {source_workspace_id, target_workspace_id}` (`topology:write`).
 Both move every row of the caller's tenant that names the workspace to the new id in one transaction, and the answer lists the tables (`tables`, `updated_records` for a repair, `handles_moved` for a rename).
 A rename also moves the slugs the workspace holds, and a repair moves rows only (the target must already be a registered workspace).
+A workspace's directory is keyed by its id, so a rename moves the directory with it: the files, `contexts.path` and `contexts.uri` of the files, and `assets.storage_path` of local assets, in the same transaction (`directory_moved: true`).
+Text that quotes an `optimal://` address of a moved file is not rewritten.
+The directory moves last, so a rename that fails earlier leaves it where it was, and a commit that fails after it moves it back.
+A rename is refused, with nothing changed, when the directory cannot be moved safely: `workspace_directory_shared` when it is the Engine root, a directory the root uses for itself or one that holds more than the workspace (the same test as a move to another Engine), `workspace_directory_exists` when the new id's directory already holds files, `workspace_directory_unusual` when the old one is a link or a file, and `workspace_directory_not_moved` when the filesystem refuses the move.
+A workspace with no directory yet is renamed with nothing to move.
 A rename is refused (`target_workspace_has_rows`, nothing moves) when the new id already holds rows in any workspace table: that is other data written under the id, and a rename is the same workspace under a new id. Merge those rows into the workspace first with `workspaces/repair`, which records the move as a merge, then rename.
 
 Both act inside the caller's tenant.
