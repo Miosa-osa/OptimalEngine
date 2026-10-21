@@ -94,6 +94,10 @@ defmodule OptimalEngine.Release do
   `"backfill_needed": false`. Safe to run again: it adds only missing edges.
   Takes `Graph.backfill/1`'s options (`workspace_id:` limits it to one
   workspace).
+
+  It boots the Engine application, HTTP listener and triple store included,
+  so stop the running Engine service first. Exits non-zero when an edge write
+  failed, and the run is then not recorded.
   """
   @spec graph_backfill(keyword()) :: :ok | no_return()
   def graph_backfill(opts \\ []) do
@@ -101,13 +105,22 @@ defmodule OptimalEngine.Release do
     {:ok, _} = Application.ensure_all_started(@app)
 
     case Graph.backfill(opts) do
-      {:ok, result} ->
+      {:ok, %{failed_edges: 0} = result} ->
         Logger.info(
           "[Release] graph backfill OK: #{result.contexts} contexts, #{result.claims} claims, " <>
-            "edges #{result.edges_before} -> #{result.edges_after}"
+            "edges #{result.edges_before} -> #{result.edges_after}" <>
+            if(result.recorded, do: "", else: " (not recorded: the claim pass was skipped)")
         )
 
         :ok
+
+      {:ok, result} ->
+        Logger.error(
+          "[Release] graph backfill incomplete: #{result.failed_edges} edge writes failed; " <>
+            "run it again"
+        )
+
+        System.halt(1)
 
       {:error, reason} ->
         Logger.error("[Release] graph backfill failed: #{inspect(reason)}")

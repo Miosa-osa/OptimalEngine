@@ -41,6 +41,7 @@ defmodule OptimalEngine.Graph do
 
   alias OptimalEngine.Store
   alias OptimalEngine.Store.Migrations
+  alias OptimalEngine.Workspace
 
   # Name of the default Knowledge.Store that mirrors the SQLite graph_edges table.
   @default_triple_store "default"
@@ -204,52 +205,7 @@ defmodule OptimalEngine.Graph do
   """
   @spec create_edges_for_context(map() | struct()) :: :ok
   def create_edges_for_context(context) do
-    id = struct_or_map_get(context, :id)
-
-    if is_binary(id) do
-      node = struct_or_map_get(context, :node)
-      entities = struct_or_map_get(context, :entities) || []
-      routed_to = struct_or_map_get(context, :routed_to) || []
-      supersedes = struct_or_map_get(context, :supersedes)
-      ws = context_workspace(context)
-
-      now = DateTime.to_iso8601(DateTime.utc_now())
-
-      # entity → context (mentioned_in)
-      Enum.each(entities, fn entity ->
-        insert_edge_via_store(entity, id, "mentioned_in", 1.0, now, ws)
-        maybe_feed_triple_store(entity, "mentioned_in", id, ws)
-      end)
-
-      # entity ↔ entity (co_occurs) — every unordered pair sharing this context
-      Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
-        insert_edge_via_store(a, b, "co_occurs", 0.5, now, ws)
-        insert_edge_via_store(b, a, "co_occurs", 0.5, now, ws)
-        maybe_feed_triple_store(a, "co_occurs", b, ws)
-        maybe_feed_triple_store(b, "co_occurs", a, ws)
-      end)
-
-      # context → node (lives_in)
-      if is_binary(node) and node != "" do
-        insert_edge_via_store(id, node, "lives_in", 1.0, now, ws)
-        maybe_feed_triple_store(id, "lives_in", node, ws)
-      end
-
-      # context → context (cross_ref) — extra destinations beyond the primary node
-      cross_refs = Enum.reject(routed_to, fn dest -> dest == node end)
-
-      Enum.each(cross_refs, fn dest ->
-        insert_edge_via_store(id, dest, "cross_ref", 0.8, now, ws)
-        maybe_feed_triple_store(id, "cross_ref", dest, ws)
-      end)
-
-      # context → context (supersedes)
-      if is_binary(supersedes) and supersedes != "" do
-        insert_edge_via_store(id, supersedes, "supersedes", 1.0, now, ws)
-        maybe_feed_triple_store(id, "supersedes", supersedes, ws)
-      end
-    end
-
+    write_edges(structural_edges(context), context_workspace(context))
     :ok
   end
 
@@ -261,6 +217,21 @@ defmodule OptimalEngine.Graph do
   """
   @spec create_edges_for_context_db(reference(), map() | struct()) :: :ok
   def create_edges_for_context_db(db, context) do
+    ws = context_workspace(context)
+    now = DateTime.to_iso8601(DateTime.utc_now())
+
+    Enum.each(structural_edges(context), fn {source, target, relation, weight} ->
+      insert_edge_direct(db, source, target, relation, weight, now, ws)
+    end)
+
+    :ok
+  end
+
+  # A context's structural edges, `{source, target, relation, weight}`:
+  # entity --mentioned_in--> context, entity <--co_occurs--> entity for every
+  # unordered pair sharing it, context --lives_in--> node, context
+  # --cross_ref--> each extra destination, context --supersedes--> context.
+  defp structural_edges(context) do
     id = struct_or_map_get(context, :id)
 
     if is_binary(id) do
@@ -268,35 +239,24 @@ defmodule OptimalEngine.Graph do
       entities = struct_or_map_get(context, :entities) || []
       routed_to = struct_or_map_get(context, :routed_to) || []
       supersedes = struct_or_map_get(context, :supersedes)
-      ws = context_workspace(context)
 
-      now = DateTime.to_iso8601(DateTime.utc_now())
-
-      Enum.each(entities, fn entity ->
-        insert_edge_direct(db, entity, id, "mentioned_in", 1.0, now, ws)
-      end)
-
-      Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
-        insert_edge_direct(db, a, b, "co_occurs", 0.5, now, ws)
-        insert_edge_direct(db, b, a, "co_occurs", 0.5, now, ws)
-      end)
-
-      if is_binary(node) and node != "" do
-        insert_edge_direct(db, id, node, "lives_in", 1.0, now, ws)
-      end
-
-      cross_refs = Enum.reject(routed_to, fn dest -> dest == node end)
-
-      Enum.each(cross_refs, fn dest ->
-        insert_edge_direct(db, id, dest, "cross_ref", 0.8, now, ws)
-      end)
-
-      if is_binary(supersedes) and supersedes != "" do
-        insert_edge_direct(db, id, supersedes, "supersedes", 1.0, now, ws)
-      end
+      Enum.concat([
+        for(entity <- entities, do: {entity, id, "mentioned_in", 1.0}),
+        for(
+          {a, b} <- co_occurrence_pairs(entities),
+          edge <- [{a, b, "co_occurs", 0.5}, {b, a, "co_occurs", 0.5}],
+          do: edge
+        ),
+        if(is_binary(node) and node != "", do: [{id, node, "lives_in", 1.0}], else: []),
+        for(dest <- routed_to, dest != node, do: {id, dest, "cross_ref", 0.8}),
+        if(is_binary(supersedes) and supersedes != "",
+          do: [{id, supersedes, "supersedes", 1.0}],
+          else: []
+        )
+      ])
+    else
+      []
     end
-
-    :ok
   end
 
   @doc """
@@ -566,7 +526,7 @@ defmodule OptimalEngine.Graph do
   @spec scope(keyword()) :: {String.t(), String.t()}
   def scope(opts) do
     ws = Keyword.get(opts, :workspace_id) || "default"
-    {Keyword.get(opts, :tenant_id) || workspace_tenant(ws), ws}
+    {Keyword.get(opts, :tenant_id) || Workspace.tenant_of(ws), ws}
   end
 
   @doc """
@@ -597,20 +557,6 @@ defmodule OptimalEngine.Graph do
     end
   end
 
-  # The tenant edges are written with (@edge_insert_sql).
-  defp workspace_tenant(ws) do
-    sql = """
-    SELECT COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?1),
-                    (SELECT t.id FROM tenants t WHERE t.id = substr(?1, 1, instr(?1, ':') - 1)),
-                    'default')
-    """
-
-    case Store.raw_query(sql, [ws]) do
-      {:ok, [[tenant_id]]} when is_binary(tenant_id) -> tenant_id
-      _ -> "default"
-    end
-  end
-
   @doc """
   Creates `claim --about--> entity` edges for an extracted claim.
 
@@ -625,17 +571,18 @@ defmodule OptimalEngine.Graph do
   @spec create_claim_edges(String.t(), [String.t()], keyword()) :: :ok
   def create_claim_edges(claim_id, entities, opts \\ [])
       when is_binary(claim_id) and is_list(entities) do
-    ws = Keyword.get(opts, :workspace_id, "default")
-    now = DateTime.to_iso8601(DateTime.utc_now())
+    write_edges(claim_edges(claim_id, entities), Keyword.get(opts, :workspace_id, "default"),
+      feed: false
+    )
 
+    :ok
+  end
+
+  defp claim_edges(claim_id, entities) do
     entities
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> Enum.uniq()
-    |> Enum.each(fn entity ->
-      insert_edge_via_store(claim_id, entity, "about", 1.0, now, ws)
-    end)
-
-    :ok
+    |> Enum.map(&{claim_id, &1, "about", 1.0})
   end
 
   @doc """
@@ -647,23 +594,44 @@ defmodule OptimalEngine.Graph do
   """
   @spec create_semantic_edges_for_context(map() | struct()) :: :ok
   def create_semantic_edges_for_context(context) do
+    write_edges(semantic_edges(context), context_workspace(context))
+    :ok
+  end
+
+  defp semantic_edges(context) do
     id = struct_or_map_get(context, :id)
     entities = struct_or_map_get(context, :entities) || []
-    opts = [workspace_id: context_workspace(context)]
 
     if is_binary(id) do
-      entities
-      |> Enum.filter(&(is_binary(&1) and &1 != ""))
-      |> Enum.uniq()
-      |> Enum.each(&assert_edge(id, &1, "mentions", opts))
+      mentions =
+        entities
+        |> Enum.filter(&(is_binary(&1) and &1 != ""))
+        |> Enum.uniq()
+        |> Enum.map(&{id, &1, "mentions", 1.0})
 
-      Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
-        assert_edge(a, b, "co_occurs_with", opts)
-        assert_edge(b, a, "co_occurs_with", opts)
-      end)
+      pairs =
+        for {a, b} <- co_occurrence_pairs(entities),
+            edge <- [{a, b, "co_occurs_with", 1.0}, {b, a, "co_occurs_with", 1.0}],
+            do: edge
+
+      mentions ++ pairs
+    else
+      []
     end
+  end
 
-    :ok
+  # Writes edges through the Store, and unless `feed: false` into the default
+  # triple store as well; returns how many Store writes failed. An edge that
+  # already exists is not a failure (INSERT OR IGNORE).
+  defp write_edges(edges, ws, opts \\ []) do
+    now = DateTime.to_iso8601(DateTime.utc_now())
+    feed? = Keyword.get(opts, :feed, true)
+
+    Enum.count(edges, fn {source, target, relation, weight} ->
+      result = insert_edge_via_store(source, target, relation, weight, now, ws)
+      if feed?, do: maybe_feed_triple_store(source, relation, target, ws)
+      result != :ok
+    end)
   end
 
   @doc """
@@ -674,8 +642,10 @@ defmodule OptimalEngine.Graph do
   (`create_claim_edges/3`). Every insert is `INSERT OR IGNORE`, so a run adds
   only what is missing and is safe to repeat.
 
-  A completed run is recorded in `graph_backfills` (for its workspace, or for
-  every workspace when none is given), which `backfill_status/1` reads.
+  A run that wrote every edge, the claim edges included, is recorded in
+  `graph_backfills` (for its workspace, or for every workspace when none is
+  given), which `backfill_status/1` reads. A run with `claims: false`, or one
+  where an edge write failed, is not recorded: run it again.
 
   Options:
   - `:workspace_id` - only that workspace's contexts and claims (default: every
@@ -685,37 +655,51 @@ defmodule OptimalEngine.Graph do
   - `:on_progress`  - called with `{:contexts | :claims, rows_so_far}` after
     each batch
 
-  Returns `{:ok, %{contexts:, claims:, edges_before:, edges_after:}}`, the
-  edge counts taken over the run's scope.
+  Returns `{:ok, %{contexts:, claims:, failed_edges:, recorded:, edges_before:,
+  edges_after:}}`, the edge counts taken over the run's scope.
   """
   @spec backfill(keyword()) :: {:ok, map()} | {:error, term()}
   def backfill(opts \\ []) do
     ws = Keyword.get(opts, :workspace_id)
+    claims? = Keyword.get(opts, :claims, true)
     pass = {ws, max(Keyword.get(opts, :batch, 200), 1), Keyword.get(opts, :on_progress)}
     count_opts = if ws, do: [workspace_id: ws], else: []
-    tenant_id = if ws, do: elem(scope(count_opts), 0)
 
     with {:ok, before} <- count(count_opts),
-         {:ok, contexts} <- backfill_pass(:contexts, pass),
-         {:ok, claims} <-
-           if(Keyword.get(opts, :claims, true), do: backfill_pass(:claims, pass), else: {:ok, 0}),
+         {:ok, contexts, context_failures} <- backfill_pass(:contexts, pass),
+         {:ok, claims, claim_failures} <-
+           if(claims?, do: backfill_pass(:claims, pass), else: {:ok, 0, 0}),
          {:ok, after_count} <- count(count_opts),
-         result = %{
-           contexts: contexts,
-           claims: claims,
-           edges_before: before,
-           edges_after: after_count
-         },
-         {:ok, _} <-
-           Store.raw_query(
-             """
-             INSERT INTO graph_backfills
-               (tenant_id, workspace_id, contexts, claims, edges_before, edges_after)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             """,
-             [tenant_id, ws, contexts, claims, before, after_count]
-           ) do
-      {:ok, result}
+         failed = context_failures + claim_failures,
+         recorded = claims? and failed == 0,
+         :ok <- record_backfill(recorded, ws, contexts, claims, before, after_count) do
+      {:ok,
+       %{
+         contexts: contexts,
+         claims: claims,
+         failed_edges: failed,
+         recorded: recorded,
+         edges_before: before,
+         edges_after: after_count
+       }}
+    end
+  end
+
+  defp record_backfill(false, _ws, _contexts, _claims, _before, _after_count), do: :ok
+
+  defp record_backfill(true, ws, contexts, claims, before, after_count) do
+    tenant_id = if ws, do: Workspace.tenant_of(ws)
+
+    case Store.raw_query(
+           """
+           INSERT INTO graph_backfills
+             (tenant_id, workspace_id, contexts, claims, edges_before, edges_after)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+           """,
+           [tenant_id, ws, contexts, claims, before, after_count]
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
     end
   end
 
@@ -748,17 +732,17 @@ defmodule OptimalEngine.Graph do
     {sql, params} = backfill_select(phase, ws)
 
     with {:ok, rows} <- Store.raw_query(sql, params) do
-      total =
+      {total, failed} =
         rows
         |> Enum.chunk_every(batch)
-        |> Enum.reduce(0, fn chunk, done ->
-          Enum.each(chunk, &backfill_row(phase, &1))
+        |> Enum.reduce({0, 0}, fn chunk, {done, failed} ->
+          failed = failed + Enum.sum(Enum.map(chunk, &backfill_row(phase, &1)))
           done = done + length(chunk)
           if on_progress, do: on_progress.({phase, done})
-          done
+          {done, failed}
         end)
 
-      {:ok, total}
+      {:ok, total, failed}
     end
   end
 
@@ -788,15 +772,11 @@ defmodule OptimalEngine.Graph do
       workspace_id: ws || "default"
     }
 
-    create_edges_for_context(context)
-    create_semantic_edges_for_context(context)
+    write_edges(structural_edges(context) ++ semantic_edges(context), context.workspace_id)
   end
 
   defp backfill_row(:claims, [claim_id, entities, ws]) do
-    case decode_json_list(entities) do
-      [] -> :ok
-      list -> create_claim_edges(claim_id, list, workspace_id: ws || "default")
-    end
+    write_edges(claim_edges(claim_id, decode_json_list(entities)), ws || "default", feed: false)
   end
 
   @doc """

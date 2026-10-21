@@ -28,6 +28,7 @@ The baseline `edges` table was keyed by endpoints and relation only, so a pair t
 The migration that created `graph_edges` copied it there with each workspace's tenant and left it in the store, unread and unwritten, for one release, so an older Engine still boots on a migrated store.
 After upgrading, run one graph backfill over every workspace to recreate the edges the old key dropped (see [Graph edges upgrade](versioning-and-releases.md#graph-edges-upgrade)); `GET /api/maintenance/graph` reports `graph_edges.backfill_needed` until it has run.
 The same migration gives the contexts and entities written with tenant `default` under another tenant's workspace (before writes took their workspace's tenant) that workspace's tenant.
+The migration after it gives the vectors, chunks, chunk embeddings and entity mentions of those contexts the same tenant.
 A bundle written before that migration carries its edges as `edges`, and a replicated change sealed before it names `edges`: both are written to `graph_edges`.
 
 ## Share-up policy
@@ -91,7 +92,7 @@ Portable topology documents name workspaces by slug (and by id for a renamed one
 
 Two tenants can share a bare workspace id (one nobody registered), so the graph routes are bound to the caller's tenant.
 `GET /api/graph`, the node routes and the optimal graph routes show the tenant's contexts only.
-The graph analyses (`GET /api/graph/hubs`, `/triangles`, `/clusters` and `/reflect`) read the edge table, which has no tenant of its own, so they answer only for a workspace registered to the caller's tenant: a workspace of another tenant, one that does not exist and an id nobody registered all answer `404 workspace not found`.
+The graph analyses (`GET /api/graph/hubs`, `/triangles`, `/clusters` and `/reflect`) read the caller's tenant's graph edges and contexts in the workspace, so under an id two tenants write to each sees only its own graph; a registered workspace of another tenant answers `404 workspace not found`.
 `/api/graph/triangles` returns at most 100 triangles per request, whatever its `limit`.
 
 ## Repairing a workspace id

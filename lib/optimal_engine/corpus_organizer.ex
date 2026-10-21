@@ -14,6 +14,7 @@ defmodule OptimalEngine.CorpusOrganizer do
 
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
+  alias OptimalEngine.Workspace
 
   @default_intake_slug "knowledge-intake"
   @minimum_score 8
@@ -87,22 +88,10 @@ defmodule OptimalEngine.CorpusOrganizer do
     end
   end
 
-  # The tenant an intake workspace belongs to: the one it is registered to,
-  # else the tenant a context in an unregistered workspace is stored under
-  # (the tenant its "<tenant>:" prefix names, else the default tenant). Reads
-  # the Store, so it is never called inside `Store.transaction/2`.
-  defp intake_tenant(workspace_id) do
-    sql = """
-    SELECT COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?1),
-                    (SELECT t.id FROM tenants t WHERE t.id = substr(?1, 1, instr(?1, ':') - 1)),
-                    'default')
-    """
-
-    case Store.raw_query(sql, [workspace_id]) do
-      {:ok, [[tenant_id]]} -> tenant_id
-      _ -> Tenant.default_id()
-    end
-  end
+  # The tenant an intake workspace belongs to: the one a context written there
+  # is stored under (Workspace.tenant_of/1). Reads the Store, so it is never
+  # called inside `Store.transaction/2`.
+  defp intake_tenant(workspace_id), do: Workspace.tenant_of(workspace_id)
 
   # The tenant and the intake workspace an organizer call acts on: the
   # tenant's own, or with no `:tenant_id` the deployment's.
@@ -980,22 +969,88 @@ defmodule OptimalEngine.CorpusOrganizer do
   end
 
   # An edge joins two records. The context's edges in its source workspace move
-  # with it; one that reaches a record of another tenant is not moved. Edges are
-  # unique per tenant and workspace, so a moved edge replaces the copy the
-  # target workspace already holds.
+  # with it, under its tenant; one that reaches a record of another tenant is
+  # not moved. Edges are unique per tenant and workspace, so the move is three
+  # statements in portable SQL (no UPDATE OR REPLACE, which PostgreSQL lacks):
+  #
+  #   1. A default-tenant copy of an edge the tenant also holds in the source
+  #      workspace would land on the tenant's own: the tenant's copy is kept.
+  #   2. An edge the target workspace already holds for the tenant is replaced
+  #      by the moving one.
+  #   3. The moving edges take the target workspace and the tenant.
+  #
+  # The moving set is the same in every statement: an edge of the context in
+  # the source workspace, of the tenant or the default tenant, that reaches no
+  # record of another tenant. Whether an edge reaches one depends only on its
+  # endpoints, which a duplicate or a replaced copy shares.
   defp update_edges(txn, context_id, source_workspace_id, workspace_id, tenant_id) do
+    default = Tenant.default_id()
+
+    with {:ok, _} <-
+           drop_default_copies(txn, context_id, source_workspace_id, tenant_id, default),
+         {:ok, _} <-
+           Store.txn_execute(
+             txn,
+             """
+             DELETE FROM graph_edges
+             WHERE workspace_id = ?1 AND tenant_id = ?3
+               AND EXISTS (
+                 SELECT 1 FROM graph_edges moving
+                 WHERE moving.id <> graph_edges.id
+                   AND moving.source_id = graph_edges.source_id
+                   AND moving.target_id = graph_edges.target_id
+                   AND moving.relation = graph_edges.relation
+                   AND moving.workspace_id = ?5 AND moving.tenant_id IN (?3, ?4)
+                   AND (moving.source_id = ?2 OR moving.target_id = ?2)
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM contexts other
+                 WHERE other.id IN (graph_edges.source_id, graph_edges.target_id)
+                   AND other.id <> ?2 AND other.tenant_id <> ?3
+               )
+             """,
+             [workspace_id, context_id, tenant_id, default, source_workspace_id]
+           ) do
+      Store.txn_execute(
+        txn,
+        """
+        UPDATE graph_edges SET workspace_id = ?1, tenant_id = ?3
+        WHERE (source_id = ?2 OR target_id = ?2) AND workspace_id = ?5 AND tenant_id IN (?3, ?4)
+          AND NOT EXISTS (
+            SELECT 1 FROM contexts other
+            WHERE other.id IN (graph_edges.source_id, graph_edges.target_id)
+              AND other.id <> ?2 AND other.tenant_id <> ?3
+          )
+        """,
+        [workspace_id, context_id, tenant_id, default, source_workspace_id]
+      )
+    end
+  end
+
+  # A default-tenant context has no second copy to collide with.
+  defp drop_default_copies(_txn, _context_id, _source, tenant_id, tenant_id), do: {:ok, 0}
+
+  defp drop_default_copies(txn, context_id, source_workspace_id, tenant_id, default) do
     Store.txn_execute(
       txn,
       """
-      UPDATE OR REPLACE graph_edges SET workspace_id = ?1, tenant_id = ?3
-      WHERE (source_id = ?2 OR target_id = ?2) AND workspace_id = ?5 AND tenant_id IN (?3, ?4)
+      DELETE FROM graph_edges
+      WHERE workspace_id = ?1 AND tenant_id = ?4
+        AND (source_id = ?2 OR target_id = ?2)
+        AND EXISTS (
+          SELECT 1 FROM graph_edges kept
+          WHERE kept.workspace_id = ?1 AND kept.tenant_id = ?3
+            AND kept.source_id = graph_edges.source_id
+            AND kept.target_id = graph_edges.target_id
+            AND kept.relation = graph_edges.relation
+        )
         AND NOT EXISTS (
           SELECT 1 FROM contexts other
           WHERE other.id IN (graph_edges.source_id, graph_edges.target_id)
             AND other.id <> ?2 AND other.tenant_id <> ?3
         )
       """,
-      [workspace_id, context_id, tenant_id, Tenant.default_id(), source_workspace_id]
+      [source_workspace_id, context_id, tenant_id, default]
     )
   end
 

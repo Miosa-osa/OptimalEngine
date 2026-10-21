@@ -1,10 +1,10 @@
 defmodule OptimalEngine.GraphAnalysisTenantTest do
   @moduledoc """
-  The graph analyses (hubs, triangles, clusters, reflect) answer only for a
-  workspace that is registered to the caller's tenant, and read its graph
-  edges in that tenant. A workspace id that nobody registered can be written
-  by two tenants at once: every member list, hub name and context id would
-  cross if it were read for either.
+  The graph analyses (hubs, triangles, clusters, reflect) read the caller's
+  tenant's graph edges and contexts in the workspace. A workspace id that
+  nobody registered can be written by two tenants at once, so each must see
+  only its own hubs, members and gaps there; a registered workspace of
+  another tenant is not found.
   """
 
   use ExUnit.Case, async: false
@@ -101,13 +101,24 @@ defmodule OptimalEngine.GraphAnalysisTenantTest do
   end
 
   describe "a workspace id nobody registered" do
-    test "answers none of the analyses, whoever asks and whoever wrote under it",
-         %{a: a, b: b, shared: shared} do
-      for tenant <- [a, b], route <- @routes do
-        path = "/api/graph/#{route}?workspace=#{shared}&min=1"
+    test "answers each tenant with its own graph only", %{a: a, b: b, n: n, shared: shared} do
+      for {tenant, tag, other} <- [{a, "a", "b"}, {b, "b", "a"}] do
+        assert {200, hubs} = get("/api/graph/hubs?workspace=#{shared}", key(tenant))
+        assert hubs =~ "hub-#{tag}-s-#{n}"
+        refute hubs =~ "hub-#{other}-"
 
-        assert {404, body} = get(path, key(tenant))
-        assert Jason.decode!(body) == %{"error" => "workspace not found"}, path
+        assert {200, triangles} = get("/api/graph/triangles?workspace=#{shared}", key(tenant))
+        assert triangles =~ "hub-#{tag}-s-#{n}"
+        refute triangles =~ "hub-#{other}-"
+        refute triangles =~ "leaf-#{other}"
+
+        assert {200, clusters} = get("/api/graph/clusters?workspace=#{shared}", key(tenant))
+        assert clusters =~ "leaf-#{tag}1-s-#{n}"
+        refute clusters =~ "leaf-#{other}"
+
+        assert {200, gaps} = get("/api/graph/reflect?workspace=#{shared}&min=2", key(tenant))
+        assert gaps =~ "Acme #{tag}"
+        refute gaps =~ "Acme #{other}"
       end
     end
   end

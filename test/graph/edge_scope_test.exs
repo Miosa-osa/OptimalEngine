@@ -161,6 +161,79 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
 
       assert {:ok, []} = Graph.edges_for("Yara#{ctx.n}", workspace_id: intake.id)
     end
+
+    test "a move keeps the tenant's copy of a doubled edge and replaces the target's copy",
+         ctx do
+      {:ok, intake} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "knowledge-intake",
+          name: "Intake"
+        })
+
+      {:ok, foreign_tenant} = Tenant.create(%{id: "dup-else-#{ctx.n}", name: "Someone else"})
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO contexts (id, tenant_id, workspace_id, type, title, content, created_at, modified_at) VALUES (?1, ?2, 'elsewhere', 'signal', ?1, 'x', '2026-10-21T00:00:00Z', '2026-10-21T00:00:00Z')",
+          ["dup-foreign-#{ctx.n}", foreign_tenant.id]
+        )
+
+      # Ingest writes the tenant's mentioned_in and lives_in edges.
+      id = context!("dup-#{ctx.n}", intake.id, ["Ent#{ctx.n}"])
+      extra = "Extra#{ctx.n}"
+
+      edge = fn tenant, workspace, source, target, relation ->
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO graph_edges (tenant_id, workspace_id, source_id, target_id, relation) VALUES (?1, ?2, ?3, ?4, ?5)",
+            [tenant, workspace, source, target, relation]
+          )
+
+        {:ok, [[edge_id]]} =
+          Store.raw_query(
+            "SELECT id FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND source_id = ?3 AND target_id = ?4 AND relation = ?5",
+            [tenant, workspace, source, target, relation]
+          )
+
+        edge_id
+      end
+
+      # The tenant's own copy, and a default-tenant copy of the same edge.
+      {:ok, [[kept]]} =
+        Store.raw_query(
+          "SELECT id FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND source_id = ?3 AND relation = 'mentioned_in'",
+          [ctx.tenant, intake.id, "Ent#{ctx.n}"]
+        )
+
+      edge.("default", intake.id, "Ent#{ctx.n}", id, "mentioned_in")
+      # Copies the target workspace already holds, which the moving edges replace.
+      edge.(ctx.tenant, ctx.other, "Ent#{ctx.n}", id, "mentioned_in")
+      edge.(ctx.tenant, ctx.other, id, extra, "cross_ref")
+      # An edge only the default tenant holds moves, keeping its id.
+      moved = edge.("default", intake.id, id, extra, "cross_ref")
+      # An edge to another tenant's record stays.
+      stays = edge.(ctx.tenant, intake.id, id, "dup-foreign-#{ctx.n}", "related")
+
+      assert {:ok, _} = CorpusOrganizer.move_context(id, ctx.other, tenant_id: ctx.tenant)
+
+      {:ok, rows} =
+        Store.raw_query(
+          "SELECT id, tenant_id, workspace_id, source_id, target_id, relation FROM graph_edges WHERE source_id = ?1 OR target_id = ?1 ORDER BY relation, id",
+          [id]
+        )
+
+      assert [
+               [^moved, tenant, other, ^id, ^extra, "cross_ref"],
+               [lives_in, tenant, other, ^id, "notes", "lives_in"],
+               [^kept, tenant, other, "Ent" <> _, ^id, "mentioned_in"],
+               [^stays, tenant, intake_id, ^id, "dup-foreign-" <> _, "related"]
+             ] = rows
+
+      assert is_integer(lives_in)
+      assert {tenant, other, intake_id} == {ctx.tenant, ctx.other, intake.id}
+    end
   end
 
   # Points the corpus organizer's intake at `workspace` for one test.
@@ -528,6 +601,19 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
       assert Graph.scope(workspace_id: nobody) == {"default", nobody}
     end
 
+    test "a memory written there without a tenant takes the tenant the id names", ctx do
+      loose = "#{ctx.tenant}:mem-#{ctx.n}"
+
+      assert {:ok, %{tenant_id: tenant}} =
+               OptimalEngine.Memory.create(%{workspace_id: loose, content: "memloose#{ctx.n}"})
+
+      assert tenant == ctx.tenant
+      assert Workspace.tenant_of(loose) == ctx.tenant
+      assert Workspace.tenant_of(ctx.other) == ctx.tenant
+      assert Workspace.tenant_of("nobody-#{ctx.n}:mem") == "default"
+      assert Workspace.tenant_of("bare-#{ctx.n}") == "default"
+    end
+
     test "two tenants keep the same entity edge under one bare id, each reading its own", ctx do
       bare = "shared-bare-#{ctx.n}"
 
@@ -613,8 +699,15 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
       end
 
       assert status.(ctx.own) == %{backfill_needed: true, legacy_edges: 1}
+
+      # A run that skips the claim pass is not the whole backfill.
+      assert {:ok, %{recorded: false, failed_edges: 0}} =
+               Graph.backfill(workspace_id: ctx.own, claims: false)
+
+      assert status.(ctx.own).backfill_needed
+
       # The release entry point a release build runs it with.
-      assert :ok = OptimalEngine.Release.graph_backfill(workspace_id: ctx.own, claims: false)
+      assert :ok = OptimalEngine.Release.graph_backfill(workspace_id: ctx.own)
       assert status.(ctx.own) == %{backfill_needed: false, legacy_edges: 1}
       assert status.(ctx.other).backfill_needed
 
@@ -626,6 +719,113 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
       end)
 
       refute status.(ctx.other).backfill_needed
+    end
+  end
+
+  describe "the derived rows migration" do
+    defp tenant_of_row(table, column, value) do
+      {:ok, [[tenant]]} =
+        Store.raw_query("SELECT tenant_id FROM #{table} WHERE #{column} = ?1", [value])
+
+      tenant
+    end
+
+    test "gives the default-labelled rows derived from a context its tenant", ctx do
+      mine = context!("drv-#{ctx.n}", ctx.other, ["Dee#{ctx.n}"])
+      plain = context!("drv-plain-#{ctx.n}", ctx.own, ["Pia#{ctx.n}"])
+      {:ok, _} = Tenant.create(%{id: "drv-else-#{ctx.n}", name: "Someone else"})
+      blob = {:blob, <<1.0::float-little-32, 0.0::float-little-32>>}
+
+      # Rows derived before their context took its workspace's tenant.
+      for {id, ws} <- [{mine, ctx.other}, {plain, ctx.own}] do
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO vectors (context_id, embedding, dimensions, tenant_id, workspace_id) VALUES (?1, ?2, 2, 'default', ?3)",
+            [id, blob, ws]
+          )
+
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO chunks (id, tenant_id, workspace_id, signal_id, scale, text) VALUES (?1, 'default', ?2, ?3, 'document', 'x')",
+            [id <> "-chunk", ws, id]
+          )
+
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO chunk_embeddings (chunk_id, tenant_id, model, modality, dim, vector, workspace_id) VALUES (?1, 'default', 'm', 'text', 2, ?2, ?3)",
+            [id <> "-chunk", blob, ws]
+          )
+
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO entity_mentions (id, workspace_id, context_id, surface_text, normalized_text, tenant_id) VALUES (?1, ?2, ?3, 'Name', 'name', 'default')",
+            [id <> "-mention", ws, id]
+          )
+      end
+
+      # A row another tenant labelled is not the context's to relabel.
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO chunks (id, tenant_id, workspace_id, signal_id, scale, text) VALUES (?1, ?2, ?3, ?4, 'document', 'x')",
+          [mine <> "-foreign", "drv-else-#{ctx.n}", ctx.other, mine]
+        )
+
+      {_version, _description, statements} =
+        Enum.find(OptimalEngine.Store.Migrations.all(), fn {_version, description, _} ->
+          description == "derived rows take the tenant of their relabelled context"
+        end)
+
+      for _run <- 1..2, {_label, sql} <- statements, do: {:ok, _} = Store.raw_query(sql, [])
+
+      for {id, tenant} <- [{mine, ctx.tenant}, {plain, "default"}] do
+        assert tenant_of_row("vectors", "context_id", id) == tenant
+        assert tenant_of_row("chunks", "id", id <> "-chunk") == tenant
+        assert tenant_of_row("chunk_embeddings", "chunk_id", id <> "-chunk") == tenant
+        assert tenant_of_row("entity_mentions", "id", id <> "-mention") == tenant
+      end
+
+      assert tenant_of_row("chunks", "id", mine <> "-foreign") == "drv-else-#{ctx.n}"
+    end
+  end
+
+  describe "a graph backfill with a failed edge write" do
+    test "is not recorded, and the next complete run is", ctx do
+      context!("boom-#{ctx.n}", ctx.own, ["Boom#{ctx.n}", "Calm#{ctx.n}"])
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO edges (source_id, target_id, relation, workspace_id) VALUES (?1, ?2, 'knows', ?3)",
+          ["Older#{ctx.n}", "Older2#{ctx.n}", ctx.own]
+        )
+
+      # Every write of an edge from this entity fails, as a full disk or a
+      # locked store would make it.
+      trigger = "edge_scope_fail_#{ctx.n}"
+      on_exit(fn -> Store.raw_query("DROP TRIGGER IF EXISTS #{trigger}", []) end)
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          CREATE TRIGGER #{trigger} BEFORE INSERT ON graph_edges
+          WHEN NEW.source_id = 'Boom#{ctx.n}'
+          BEGIN SELECT RAISE(ABORT, 'refused'); END
+          """,
+          []
+        )
+
+      assert {:ok, %{failed_edges: failed, recorded: false}} =
+               Graph.backfill(workspace_id: ctx.own)
+
+      assert failed > 0
+      assert {:ok, %{backfill_needed: true}} = Graph.backfill_status(ctx.own)
+
+      {:ok, _} = Store.raw_query("DROP TRIGGER #{trigger}", [])
+
+      assert {:ok, %{failed_edges: 0, recorded: true}} = Graph.backfill(workspace_id: ctx.own)
+      assert {:ok, %{backfill_needed: false}} = Graph.backfill_status(ctx.own)
+
+      assert {:ok, [_ | _]} =
+               Graph.edges_for("Boom#{ctx.n}", workspace_id: ctx.own, relation: "co_occurs_with")
     end
   end
 

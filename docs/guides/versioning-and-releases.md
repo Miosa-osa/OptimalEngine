@@ -108,7 +108,8 @@ GROUP BY workspace_id, tenant_id;
 
 After upgrading:
 
-1. Run the backfill once, without a workspace, which covers every workspace: `bin/optimal eval 'OptimalEngine.Release.graph_backfill()'` on a release build, or `mix optimal.graph_backfill` from a checkout. It only adds missing edges, so it is safe to run again.
+1. Stop the Engine service, then run the backfill once, without a workspace, which covers every workspace: `bin/optimal eval 'OptimalEngine.Release.graph_backfill()'` on a release build, or `mix optimal.graph_backfill` from a checkout. Both boot the Engine application, its HTTP listener and triple store included, so they cannot run beside the service. It only adds missing edges, so it is safe to run again; start the service when it is done.
+   It exits non-zero when an edge write failed, and only a run where every write succeeded and the claim pass ran counts as done.
 2. Until it has run, search reads fewer graph edges (the graph boost and graph candidates), so results are mildly thinner.
 3. `GET /api/maintenance/graph` reports it per workspace in `graph_edges`: `backfill_needed` is true while the legacy table holds the workspace's rows and no backfill has completed for it or for every workspace, and false afterwards; an Engine that never had legacy edges reads false. `legacy_edges` counts the workspace's legacy rows and `edges` its graph edges.
 
