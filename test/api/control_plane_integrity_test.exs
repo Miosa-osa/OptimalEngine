@@ -224,6 +224,48 @@ defmodule OptimalEngine.API.ControlPlaneIntegrityTest do
            ).status == 403
   end
 
+  test "a foreign tenant on a search is refused, as tenant or tenant_id", %{workspace: workspace} do
+    token = key(workspace, ["read"])
+
+    for field <- ["tenant", "tenant_id"] do
+      response =
+        conn(
+          :get,
+          "/api/search?" <>
+            URI.encode_query(%{
+              "q" => "observation",
+              "workspace" => workspace,
+              field => "foreign-tenant"
+            })
+        )
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> Router.call(Router.init([]))
+
+      assert response.status == 403
+      assert Jason.decode!(response.resp_body)["error"] == "tenant_scope_denied"
+    end
+  end
+
+  test "a write whose body names a foreign tenant_id is refused before it writes", %{
+    workspace: workspace
+  } do
+    token = key(workspace, ["write"])
+    content = "Written into another tenant #{System.unique_integer([:positive])}"
+
+    response =
+      request(
+        "/api/memory",
+        %{content: content, workspace: workspace, tenant_id: "foreign-tenant"},
+        token
+      )
+
+    assert response.status == 403
+    assert Jason.decode!(response.resp_body)["error"] == "tenant_scope_denied"
+
+    assert {:ok, [[0]]} =
+             Store.raw_query("SELECT COUNT(*) FROM memories WHERE content = ?1", [content])
+  end
+
   test "omitted tenant resolves to the authenticated tenant instead of default" do
     tenant = "control-plane-tenant-#{System.unique_integer([:positive])}"
     {:ok, _} = OptimalEngine.Tenancy.Tenant.create(%{id: tenant, name: "Scoped tenant"})
