@@ -49,7 +49,7 @@ defmodule OptimalEngine.Store.SQLite do
       #=> {:ok, result} | {:error, reason}
 
   - The fun receives an opaque transaction handle and must run every statement
-    through `txn_query/3` / `txn_execute/3`. Calling any other
+    through `txn_query/4` / `txn_execute/4`. Calling any other
     `OptimalEngine.Store` function inside the fun deadlocks (the fun runs in
     the Store GenServer process).
   - Fun returns `{:ok, result}` → `COMMIT`, `transaction/2` returns
@@ -361,7 +361,7 @@ defmodule OptimalEngine.Store.SQLite do
   Store operation.
 
   `fun` receives an opaque transaction handle and must run every statement
-  through `txn_query/3` / `txn_execute/3` (calling other `OptimalEngine.Store`
+  through `txn_query/4` / `txn_execute/4` (calling other `OptimalEngine.Store`
   functions inside the fun would deadlock the GenServer). Return
   `{:ok, result}` to commit or `{:error, reason}` to roll back. If the fun
   raises (or throws/exits), the transaction is rolled back and the exception
@@ -379,10 +379,14 @@ defmodule OptimalEngine.Store.SQLite do
     end
   end
 
-  @doc "Executes a SELECT inside a `transaction/2` fun. Returns `{:ok, rows}`."
-  @spec txn_query(term(), String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
+  @doc """
+  Executes a SELECT inside a `transaction/2` fun. Returns `{:ok, rows}`. A
+  failed statement leaves a SQLite transaction open, so `:recoverable` is
+  accepted and changes nothing.
+  """
+  @spec txn_query(term(), String.t(), [term()], keyword()) :: {:ok, [[term()]]} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
-  def txn_query({:txn, db}, sql, params \\ []) do
+  def txn_query({:txn, db}, sql, params \\ [], _opts \\ []) do
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
          :ok <- Exqlite.Sqlite3.bind(stmt, params) do
       result = collect_rows_raw(db, stmt, [])
@@ -396,10 +400,10 @@ defmodule OptimalEngine.Store.SQLite do
   `{:ok, changes}` with the number of rows affected, so callers can detect
   conditional updates that matched zero rows.
   """
-  @spec txn_execute(term(), String.t(), [term()]) ::
+  @spec txn_execute(term(), String.t(), [term()], keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
-  def txn_execute({:txn, db}, sql, params \\ []) do
+  def txn_execute({:txn, db}, sql, params \\ [], _opts \\ []) do
     with :ok <- exec_stmt(db, sql, params) do
       Exqlite.Sqlite3.changes(db)
     end
@@ -1131,7 +1135,7 @@ defmodule OptimalEngine.Store.SQLite do
 
   # Runs a caller fun inside BEGIN IMMEDIATE .. COMMIT/ROLLBACK on the owned
   # connection. Executes in the GenServer process, so the fun must only use
-  # txn_query/3 and txn_execute/3 for database access. Exceptions raised by
+  # txn_query/4 and txn_execute/4 for database access. Exceptions raised by
   # the fun roll the transaction back and are returned as a `:__txn_raise__`
   # sentinel that `transaction/2` re-raises in the calling process — the
   # Store GenServer must survive caller bugs.
@@ -1211,7 +1215,23 @@ defmodule OptimalEngine.Store.SQLite do
       (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, COALESCE(?12, datetime('now')), ?13)
     """
 
-    params = [
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
+         :ok <- Exqlite.Sqlite3.bind(stmt, chunk_params(chunk)),
+         :done <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      other -> {:error, other}
+    end
+  end
+
+  @doc false
+  # The parameters of one chunk row, shared with the PostgreSQL store so both
+  # write the same values.
+  @spec chunk_params(struct() | map()) :: [term()]
+  def chunk_params(chunk) do
+    [
       chunk_field(chunk, :id),
       chunk_field(chunk, :tenant_id) || "default",
       chunk_field(chunk, :signal_id),
@@ -1226,16 +1246,6 @@ defmodule OptimalEngine.Store.SQLite do
       chunk_field(chunk, :created_at),
       chunk_field(chunk, :workspace_id) || "default"
     ]
-
-    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
-         :ok <- Exqlite.Sqlite3.bind(stmt, params),
-         :done <- Exqlite.Sqlite3.step(db, stmt),
-         :ok <- Exqlite.Sqlite3.release(db, stmt) do
-      :ok
-    else
-      {:error, reason} -> {:error, reason}
-      other -> {:error, other}
-    end
   end
 
   defp chunk_field(%{__struct__: _} = chunk, key), do: Map.get(chunk, key)
@@ -1276,6 +1286,16 @@ defmodule OptimalEngine.Store.SQLite do
   end
 
   defp do_insert_classification(db, row) do
+    {sql, params} = statement(:classification, row)
+    exec_stmt(db, sql, params)
+  end
+
+  @doc false
+  # The upsert statement and parameters for one pipeline row. The PostgreSQL
+  # store runs the same statement through the dialect, so both stores write the
+  # same rows.
+  @spec statement(atom(), struct() | map()) :: {String.t(), [term()]}
+  def statement(:classification, row) do
     sql = """
     INSERT INTO classifications
       (tenant_id, chunk_id, mode, genre, signal_type, format, structure,
@@ -1305,7 +1325,109 @@ defmodule OptimalEngine.Store.SQLite do
       chunk_field(row, :workspace_id) || "default"
     ]
 
-    exec_stmt(db, sql, params)
+    {sql, params}
+  end
+
+  def statement(:intent, row) do
+    sql = """
+    INSERT INTO intents (tenant_id, chunk_id, intent, confidence, evidence, workspace_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+    ON CONFLICT(chunk_id) DO UPDATE SET
+      intent     = excluded.intent,
+      confidence = excluded.confidence,
+      evidence   = excluded.evidence,
+      workspace_id = excluded.workspace_id
+    """
+
+    params = [
+      chunk_field(row, :tenant_id) || "default",
+      chunk_field(row, :chunk_id),
+      atom_or_nil(chunk_field(row, :intent)) || "record_fact",
+      chunk_field(row, :confidence),
+      chunk_field(row, :evidence),
+      chunk_field(row, :workspace_id) || "default"
+    ]
+
+    {sql, params}
+  end
+
+  def statement(:embedding, row) do
+    vector = chunk_field(row, :vector) || []
+    blob = encode_vector(vector)
+
+    sql = """
+    INSERT INTO chunk_embeddings
+      (chunk_id, tenant_id, model, modality, dim, vector, workspace_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+    ON CONFLICT(chunk_id) DO UPDATE SET
+      tenant_id    = excluded.tenant_id,
+      model        = excluded.model,
+      modality     = excluded.modality,
+      dim          = excluded.dim,
+      vector       = excluded.vector,
+      workspace_id = excluded.workspace_id
+    """
+
+    params = [
+      chunk_field(row, :chunk_id),
+      chunk_field(row, :tenant_id) || "default",
+      chunk_field(row, :model),
+      atom_or_nil(chunk_field(row, :modality)) || "text",
+      chunk_field(row, :dim) || length(vector),
+      # Force BLOB binding: exqlite otherwise treats a raw binary as TEXT,
+      # and float32 bytes frequently contain 0x00 which SQLite TEXT truncates.
+      {:blob, blob},
+      chunk_field(row, :workspace_id) || "default"
+    ]
+
+    {sql, params}
+  end
+
+  def statement(:cluster, row) do
+    centroid = chunk_field(row, :centroid) || []
+    blob = encode_vector(centroid)
+
+    sql = """
+    INSERT INTO clusters
+      (id, tenant_id, theme, intent_dominant, member_count, centroid, updated_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, datetime('now')))
+    ON CONFLICT(id) DO UPDATE SET
+      theme           = excluded.theme,
+      intent_dominant = excluded.intent_dominant,
+      member_count    = excluded.member_count,
+      centroid        = excluded.centroid,
+      updated_at      = excluded.updated_at
+    """
+
+    params = [
+      chunk_field(row, :id),
+      chunk_field(row, :tenant_id) || "default",
+      chunk_field(row, :theme) || "Unnamed cluster",
+      atom_or_nil(chunk_field(row, :intent_dominant)),
+      chunk_field(row, :member_count) || 0,
+      {:blob, blob},
+      chunk_field(row, :updated_at)
+    ]
+
+    {sql, params}
+  end
+
+  def statement(:cluster_member, row) do
+    sql = """
+    INSERT INTO cluster_members (tenant_id, cluster_id, chunk_id, weight)
+    VALUES (?1, ?2, ?3, ?4)
+    ON CONFLICT(cluster_id, chunk_id) DO UPDATE SET
+      weight = excluded.weight
+    """
+
+    params = [
+      chunk_field(row, :tenant_id) || "default",
+      chunk_field(row, :cluster_id),
+      chunk_field(row, :chunk_id),
+      chunk_field(row, :weight) || 1.0
+    ]
+
+    {sql, params}
   end
 
   # ──────────────────────────────────────────────────────────────────────────
@@ -1341,25 +1463,7 @@ defmodule OptimalEngine.Store.SQLite do
   end
 
   defp do_insert_intent(db, row) do
-    sql = """
-    INSERT INTO intents (tenant_id, chunk_id, intent, confidence, evidence, workspace_id)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-    ON CONFLICT(chunk_id) DO UPDATE SET
-      intent     = excluded.intent,
-      confidence = excluded.confidence,
-      evidence   = excluded.evidence,
-      workspace_id = excluded.workspace_id
-    """
-
-    params = [
-      chunk_field(row, :tenant_id) || "default",
-      chunk_field(row, :chunk_id),
-      atom_or_nil(chunk_field(row, :intent)) || "record_fact",
-      chunk_field(row, :confidence),
-      chunk_field(row, :evidence),
-      chunk_field(row, :workspace_id) || "default"
-    ]
-
+    {sql, params} = statement(:intent, row)
     exec_stmt(db, sql, params)
   end
 
@@ -1401,34 +1505,7 @@ defmodule OptimalEngine.Store.SQLite do
   end
 
   defp do_insert_embedding(db, row) do
-    vector = chunk_field(row, :vector) || []
-    blob = encode_vector(vector)
-
-    sql = """
-    INSERT INTO chunk_embeddings
-      (chunk_id, tenant_id, model, modality, dim, vector, workspace_id)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-    ON CONFLICT(chunk_id) DO UPDATE SET
-      tenant_id    = excluded.tenant_id,
-      model        = excluded.model,
-      modality     = excluded.modality,
-      dim          = excluded.dim,
-      vector       = excluded.vector,
-      workspace_id = excluded.workspace_id
-    """
-
-    params = [
-      chunk_field(row, :chunk_id),
-      chunk_field(row, :tenant_id) || "default",
-      chunk_field(row, :model),
-      atom_or_nil(chunk_field(row, :modality)) || "text",
-      chunk_field(row, :dim) || length(vector),
-      # Force BLOB binding — exqlite otherwise treats a raw binary as TEXT,
-      # and float32 bytes frequently contain 0x00 which SQLite TEXT truncates.
-      {:blob, blob},
-      chunk_field(row, :workspace_id) || "default"
-    ]
-
+    {sql, params} = statement(:embedding, row)
     exec_stmt(db, sql, params)
   end
 
@@ -1469,31 +1546,7 @@ defmodule OptimalEngine.Store.SQLite do
   end
 
   defp do_insert_cluster(db, row) do
-    centroid = chunk_field(row, :centroid) || []
-    blob = encode_vector(centroid)
-
-    sql = """
-    INSERT INTO clusters
-      (id, tenant_id, theme, intent_dominant, member_count, centroid, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, datetime('now')))
-    ON CONFLICT(id) DO UPDATE SET
-      theme           = excluded.theme,
-      intent_dominant = excluded.intent_dominant,
-      member_count    = excluded.member_count,
-      centroid        = excluded.centroid,
-      updated_at      = excluded.updated_at
-    """
-
-    params = [
-      chunk_field(row, :id),
-      chunk_field(row, :tenant_id) || "default",
-      chunk_field(row, :theme) || "Unnamed cluster",
-      atom_or_nil(chunk_field(row, :intent_dominant)),
-      chunk_field(row, :member_count) || 0,
-      {:blob, blob},
-      chunk_field(row, :updated_at)
-    ]
-
+    {sql, params} = statement(:cluster, row)
     exec_stmt(db, sql, params)
   end
 
@@ -1526,20 +1579,7 @@ defmodule OptimalEngine.Store.SQLite do
   end
 
   defp do_insert_cluster_member(db, row) do
-    sql = """
-    INSERT INTO cluster_members (tenant_id, cluster_id, chunk_id, weight)
-    VALUES (?1, ?2, ?3, ?4)
-    ON CONFLICT(cluster_id, chunk_id) DO UPDATE SET
-      weight = excluded.weight
-    """
-
-    params = [
-      chunk_field(row, :tenant_id) || "default",
-      chunk_field(row, :cluster_id),
-      chunk_field(row, :chunk_id),
-      chunk_field(row, :weight) || 1.0
-    ]
-
+    {sql, params} = statement(:cluster_member, row)
     exec_stmt(db, sql, params)
   end
 

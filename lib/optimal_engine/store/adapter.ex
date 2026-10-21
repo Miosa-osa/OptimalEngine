@@ -17,10 +17,17 @@ defmodule OptimalEngine.Store.Adapter do
   ## Transaction semantics
 
   `transaction/2` runs a caller-supplied fun against an opaque handle and
-  commits or rolls back as one unit. The fun must use `txn_query/3` and
-  `txn_execute/3`; calling any other function of the implementation inside the
+  commits or rolls back as one unit. The fun must use `txn_query/4` and
+  `txn_execute/4`; calling any other function of the implementation inside the
   fun is a deadlock for a single-connection implementation. An exception raised
   by the fun rolls back and is re-raised in the caller with its stacktrace.
+
+  On SQLite a failed statement leaves the transaction open. On PostgreSQL it
+  ends the transaction, and the commit rolls back. A statement whose failure
+  the fun handles and goes on from passes `recoverable: true`, so it runs in a
+  savepoint of its own; an implementation where a failed statement never ends
+  the transaction ignores the option. A savepoint the fun opens itself
+  (`SAVEPOINT`, `ROLLBACK TO`, `RELEASE`) works on both.
 
   ## Timestamps
 
@@ -76,11 +83,12 @@ defmodule OptimalEngine.Store.Adapter do
   @callback transaction((term() -> {:ok, term()} | {:error, term()}), timeout()) ::
               {:ok, term()} | {:error, term()}
 
-  @doc "Runs a SELECT inside a transaction handle."
-  @callback txn_query(term(), String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
+  @doc "Runs a SELECT inside a transaction handle. Options: `:recoverable`."
+  @callback txn_query(term(), String.t(), [term()], keyword()) ::
+              {:ok, [[term()]]} | {:error, term()}
 
-  @doc "Runs a non-SELECT statement inside a transaction handle."
-  @callback txn_execute(term(), String.t(), [term()]) ::
+  @doc "Runs a non-SELECT statement inside a transaction handle. Options: `:recoverable`."
+  @callback txn_execute(term(), String.t(), [term()], keyword()) ::
               {:ok, non_neg_integer()} | {:error, term()}
 
   @doc "Inserts chunks in one transaction."

@@ -233,6 +233,20 @@ defmodule OptimalEngine.Graph do
   """
   @spec create_edges_for_context_db(reference(), map() | struct()) :: :ok
   def create_edges_for_context_db(db, context) do
+    Enum.each(context_edges(context), &insert_edge_direct(db, &1))
+  end
+
+  @doc """
+  The edges a context implies, as parameter lists for `edge_insert_sql/0`:
+  `[source, target, relation, weight, valid_from, workspace_id]`.
+
+  Entities are `mentioned_in` the context and `co_occurs` with each other, the
+  context `lives_in` its node, has a `cross_ref` to every other destination,
+  and `supersedes` the context it replaces. Every canonical store writes these
+  edges with the context.
+  """
+  @spec context_edges(map() | struct()) :: [[term()]]
+  def context_edges(context) do
     id = struct_or_map_get(context, :id)
 
     if is_binary(id) do
@@ -244,31 +258,30 @@ defmodule OptimalEngine.Graph do
 
       now = DateTime.to_iso8601(DateTime.utc_now())
 
-      Enum.each(entities, fn entity ->
-        insert_edge_direct(db, entity, id, "mentioned_in", 1.0, now, ws)
-      end)
+      mentions = Enum.map(entities, &[&1, id, "mentioned_in", 1.0, now, ws])
 
-      Enum.each(co_occurrence_pairs(entities), fn {a, b} ->
-        insert_edge_direct(db, a, b, "co_occurs", 0.5, now, ws)
-        insert_edge_direct(db, b, a, "co_occurs", 0.5, now, ws)
-      end)
+      co_occurs =
+        Enum.flat_map(co_occurrence_pairs(entities), fn {a, b} ->
+          [[a, b, "co_occurs", 0.5, now, ws], [b, a, "co_occurs", 0.5, now, ws]]
+        end)
 
-      if is_binary(node) and node != "" do
-        insert_edge_direct(db, id, node, "lives_in", 1.0, now, ws)
-      end
+      lives_in =
+        if is_binary(node) and node != "", do: [[id, node, "lives_in", 1.0, now, ws]], else: []
 
-      cross_refs = Enum.reject(routed_to, fn dest -> dest == node end)
+      cross_refs =
+        routed_to
+        |> Enum.reject(&(&1 == node))
+        |> Enum.map(&[id, &1, "cross_ref", 0.8, now, ws])
 
-      Enum.each(cross_refs, fn dest ->
-        insert_edge_direct(db, id, dest, "cross_ref", 0.8, now, ws)
-      end)
+      supersession =
+        if is_binary(supersedes) and supersedes != "",
+          do: [[id, supersedes, "supersedes", 1.0, now, ws]],
+          else: []
 
-      if is_binary(supersedes) and supersedes != "" do
-        insert_edge_direct(db, id, supersedes, "supersedes", 1.0, now, ws)
-      end
+      mentions ++ co_occurs ++ lives_in ++ cross_refs ++ supersession
+    else
+      []
     end
-
-    :ok
   end
 
   @doc """
@@ -955,6 +968,10 @@ defmodule OptimalEngine.Graph do
                    'default'))
   """
 
+  @doc "The statement that writes one edge and ignores a duplicate."
+  @spec edge_insert_sql() :: String.t()
+  def edge_insert_sql, do: @edge_insert_sql
+
   # Insert via Store GenServer (for use outside of Store callbacks)
   defp insert_edge_via_store(source, target, relation, weight, now, ws) do
     case Store.raw_query(@edge_insert_sql, [source, target, relation, weight, now, ws]) do
@@ -970,10 +987,11 @@ defmodule OptimalEngine.Graph do
     end
   end
 
-  # Insert directly via db reference (for use inside Store callbacks — avoids deadlock)
-  defp insert_edge_direct(db, source, target, relation, weight, now, ws) do
+  # Insert directly via db reference (for use inside Store callbacks, which
+  # avoids a deadlock)
+  defp insert_edge_direct(db, params) do
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, @edge_insert_sql),
-         :ok <- Exqlite.Sqlite3.bind(stmt, [source, target, relation, weight, now, ws]),
+         :ok <- Exqlite.Sqlite3.bind(stmt, params),
          _ <- Exqlite.Sqlite3.step(db, stmt),
          :ok <- Exqlite.Sqlite3.release(db, stmt) do
       :ok
