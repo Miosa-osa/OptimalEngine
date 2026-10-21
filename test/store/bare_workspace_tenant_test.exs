@@ -69,6 +69,34 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
 
   defp tenant_of(id), do: (row(id) || %{}) |> Map.get(:tenant)
 
+  # A chunk and a claim that name the context as their signal.
+  defp children!(signal_id, workspace, tenant \\ "default") do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO chunks (id, tenant_id, signal_id, scale, text, workspace_id) VALUES (?1, ?2, ?3, 'document', 'Body', ?4)",
+        ["chunk-#{signal_id}", tenant, signal_id, workspace]
+      )
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO source_packages (id, tenant_id, workspace_id, content_hash) VALUES (?1, ?2, ?3, ?4)",
+        ["package-#{signal_id}", tenant, workspace, "hash-#{signal_id}"]
+      )
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO claims (id, tenant_id, workspace_id, source_package_id, signal_id, claim_text) VALUES (?1, ?2, ?3, ?4, ?5, 'A claim')",
+        ["claim-#{signal_id}", tenant, workspace, "package-#{signal_id}", signal_id]
+      )
+  end
+
+  defp child_tenants(table, signal_id) do
+    {:ok, rows} =
+      Store.raw_query("SELECT DISTINCT tenant_id FROM #{table} WHERE signal_id = ?1", [signal_id])
+
+    rows |> List.flatten() |> Enum.sort()
+  end
+
   defp entity_tenants(id) do
     {:ok, rows} = Store.raw_query("SELECT tenant_id FROM entities WHERE context_id = ?1", [id])
     rows |> List.flatten() |> Enum.uniq()
@@ -196,6 +224,43 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
       assert tenant_of(id) == a
     end
 
+    test "the takeover relabels the chunks and claims of the context too", %{a: a, ws: ws, n: n} do
+      id = "bare-later-kids-#{n}"
+      other = "bare-later-other-#{n}"
+      assert :ok = Store.insert_context(context(id, ws))
+      assert :ok = Store.insert_context(context(other, ws))
+      for signal <- [id, other], do: children!(signal, ws)
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO workspaces (id, tenant_id, organization_id, slug, name, status, metadata) VALUES (?1, ?2, ?3, ?4, 'Late', 'active', '{}')",
+          [ws, a, Organization.default_for(a), "late-kids-#{n}"]
+        )
+
+      assert :ok = Store.insert_context(context(id, ws))
+
+      assert tenant_of(id) == a
+      assert child_tenants("chunks", id) == [a]
+      assert child_tenants("claims", id) == [a]
+
+      # A context the owner has not rewritten keeps its own.
+      assert tenant_of(other) == "default"
+      assert child_tenants("chunks", other) == ["default"]
+      assert child_tenants("claims", other) == ["default"]
+    end
+
+    test "a rewrite that keeps the tenant leaves the children of the context alone", ctx do
+      %{a: a, ws: ws, n: n} = ctx
+      id = "bare-same-kids-#{n}"
+      assert :ok = Store.insert_context(context(id, ws, tenant_id: a))
+      children!(id, ws, a)
+
+      assert :ok = Store.insert_context(context(id, ws, tenant_id: a, content: "Again."))
+
+      assert child_tenants("chunks", id) == [a]
+      assert child_tenants("claims", id) == [a]
+    end
+
     test "a workspace id that a tenant's prefix names is that tenant's", %{a: a, b: b, n: n} do
       # Nobody registered it, but `<tenant>:` says whose it is.
       workspace = "#{a}:unregistered-#{n}"
@@ -311,6 +376,22 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
     test "backfill writes each context's edges for that context's tenant", ctx do
       assert {:ok, _summary} = Graph.backfill(workspace_id: ctx.ws, claims: false)
       assert_edges_follow_contexts(ctx.ws, ctx.ids, ctx.a, ctx.b)
+    end
+  end
+
+  describe "the edges written with a context" do
+    test "carry the tenant of the context the moment it is inserted", ctx do
+      %{a: a, b: b, ws: ws, n: n} = ctx
+      id_a = "inserted-a-#{n}"
+      id_b = "inserted-b-#{n}"
+      assert :ok = Store.insert_context(context(id_a, ws, tenant_id: a))
+      assert :ok = Store.insert_context(context(id_b, ws, tenant_id: b))
+
+      assert edge_tenants(ws, "source_id = ?2 OR target_id = ?2", [id_a]) == [a]
+      assert edge_tenants(ws, "source_id = ?2 OR target_id = ?2", [id_b]) == [b]
+
+      assert edge_tenants(ws, "relation = 'co_occurs' AND source_id = 'Acme Corp'", []) ==
+               Enum.sort([a, b])
     end
   end
 
