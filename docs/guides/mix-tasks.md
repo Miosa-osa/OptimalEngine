@@ -34,6 +34,7 @@ mix optimal.topology approve <request-id> --workspace default:regulated-workspac
 | `mix optimal.ingest_workspace` | Ingest a workspace directory. |
 | `mix optimal.import_notion` | Import a Notion export zip (Markdown and CSV) into a workspace as a durable job; see [Notion import](notion-import.md). |
 | `mix optimal.index` | Reindex markdown/files under the root. |
+| `mix optimal.repair_uris` | Plan the separation of contexts that share an `optimal://` URI (`--out FILE` writes the plan as JSON); `--apply` carries it out. Only with the Engine stopped: against a running Engine use `optimal uris` (see the CLI guide). |
 | `mix optimal.classify` | Classify content without necessarily writing final state. |
 | `mix optimal.parse` | Parse supported file/content inputs. |
 | `mix optimal.decompose` | Decompose parsed documents into chunks. |

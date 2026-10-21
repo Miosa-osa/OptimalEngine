@@ -98,6 +98,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   alias OptimalEngine.MemoryCore.SourcePackageService
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
   alias OptimalEngine.Pipeline.Indexer, as: Indexer
+  alias OptimalEngine.Pipeline.Intake.Address
   alias OptimalEngine.Pipeline.Intake.Writer, as: Writer
   alias OptimalEngine.Pipeline.Intake.Skeleton, as: Skeleton
   alias OptimalEngine.Pipeline.Router, as: Router
@@ -245,8 +246,9 @@ defmodule OptimalEngine.Pipeline.Intake do
          {:ok, signal} <- quality_gate(signal, source_package, scope),
          {:ok, signal, routed_to} <- route_step(signal, opts),
          {:ok, primary_path} <- write_step(signal, scope, opts),
-         {:ok, cross_paths} <- cross_ref_step(signal, routed_to, scope, opts),
-         {:ok, context} <- index_step(signal, primary_path, scope, source_package, opts),
+         {:ok, cross_paths} <- cross_ref_step(signal, routed_to, primary_path, scope, opts),
+         {:ok, context} <-
+           index_step(signal, primary_path, cross_paths, scope, source_package, opts),
          {:ok, pending_claim} <-
            extract_claims_step(source_package, signal, scope, opts) do
       # Persist detail objects for each extracted entity as a step record
@@ -608,12 +610,15 @@ defmodule OptimalEngine.Pipeline.Intake do
       else: {:ok, nil}
   end
 
-  # Step 4: Write cross-references
-  defp cross_ref_step(%Signal{} = signal, routed_to, %ScopeEnvelope{} = scope, opts) do
-    if write_files?(opts), do: write_cross_refs(signal, routed_to, scope), else: {:ok, []}
+  # Step 4: Write cross-references. Each copy is named after the primary file,
+  # so a signal's copies share its name wherever they land.
+  defp cross_ref_step(%Signal{} = signal, routed_to, primary_path, %ScopeEnvelope{} = scope, opts) do
+    if write_files?(opts),
+      do: write_cross_refs(signal, routed_to, primary_path, scope),
+      else: {:ok, []}
   end
 
-  defp write_cross_refs(%Signal{} = signal, routed_to, %ScopeEnvelope{} = scope) do
+  defp write_cross_refs(%Signal{} = signal, routed_to, primary_path, %ScopeEnvelope{} = scope) do
     folder_scope = ScopeEnvelope.folder_scope(scope)
     primary_folder = Writer.node_to_folder(signal.node, folder_scope)
 
@@ -623,7 +628,11 @@ defmodule OptimalEngine.Pipeline.Intake do
         Writer.node_to_folder(dest, folder_scope) == primary_folder
       end)
 
-    Writer.write_cross_references(signal, cross_nodes, folder_scope)
+    Writer.write_cross_references(
+      signal,
+      cross_nodes,
+      Keyword.put(folder_scope, :primary_path, primary_path)
+    )
   end
 
   # Step 5: Index — write the primary file to SQLite via Indexer. Without a
@@ -631,6 +640,7 @@ defmodule OptimalEngine.Pipeline.Intake do
   defp index_step(
          %Signal{} = signal,
          primary_path,
+         cross_paths,
          %ScopeEnvelope{} = scope,
          %SourcePackage{} = source_package,
          opts
@@ -663,17 +673,18 @@ defmodule OptimalEngine.Pipeline.Intake do
       workspace_id: workspace_id,
       # The document names its source package and carries its labels from the
       # first write: nothing else on the row says what class it is, and
-      # replication reads it before any ledger entry exists.
+      # replication reads it before any ledger entry exists. A repaired
+      # context keeps the record of the repair.
       metadata:
         SecurityLabels.put(
-          %{"source_package_id" => source_package.id},
+          Map.put(preserved_metadata(signal.id), "source_package_id", source_package.id),
           source_package.security_labels
         )
     }
 
     case Store.insert_context(context) do
       :ok ->
-        if primary_path, do: index_cross_refs(signal, scope)
+        if primary_path, do: index_cross_refs(signal, cross_paths, scope, context.metadata)
         {:ok, context}
 
       {:error, _} = err ->
@@ -681,29 +692,36 @@ defmodule OptimalEngine.Pipeline.Intake do
     end
   end
 
-  defp index_cross_refs(%Signal{} = signal, %ScopeEnvelope{} = scope) do
-    folder_scope = ScopeEnvelope.folder_scope(scope)
-    primary_folder = Writer.node_to_folder(signal.node, folder_scope)
-
-    Enum.each(signal.routed_to || [], fn dest ->
-      if Writer.node_to_folder(dest, folder_scope) != primary_folder do
-        cross_path = cross_file_path(signal, dest, folder_scope)
-
-        # Cross-ref Context rows must carry the intake's workspace scope.
-        # Indexing without it stamps the struct default ("default"),
-        # leaking workspace content into default-workspace surfaces.
-        if File.exists?(cross_path) do
-          Indexer.index_file(cross_path, workspace_id: scope.workspace_id)
+  # A context repaired by `OptimalEngine.UriRepair` records where it was in
+  # `metadata.uri_repair`; writing it again must not erase that record.
+  defp preserved_metadata(id) do
+    case Store.raw_query("SELECT metadata FROM contexts WHERE id = ?1", [id]) do
+      {:ok, [[json]]} when is_binary(json) ->
+        case Jason.decode(json) do
+          {:ok, %{"uri_repair" => repair}} -> %{"uri_repair" => repair}
+          _ -> %{}
         end
-      end
-    end)
+
+      _ ->
+        %{}
+    end
   end
 
-  defp cross_file_path(%Signal{} = signal, dest_node, folder_scope) do
-    root = Application.get_env(:optimal_engine, :root_path, "")
-    dest_folder = Writer.node_to_folder(dest_node, folder_scope)
-    filename = Writer.relative_path(%{signal | node: dest_node}, folder_scope) |> Path.basename()
-    Path.join([root, dest_folder, "signals", filename])
+  # The copies are indexed from the paths they were written to. Each row is
+  # marked as a copy of this signal, so writing the signal again recognises its
+  # own copies and updates them in place instead of adding new ones.
+  defp index_cross_refs(%Signal{} = signal, cross_paths, %ScopeEnvelope{} = scope, metadata) do
+    Enum.each(cross_paths, fn cross_path ->
+      # Cross-ref Context rows must carry the intake's workspace scope.
+      # Indexing without it stamps the struct default ("default"),
+      # leaking workspace content into default-workspace surfaces.
+      if File.exists?(cross_path) do
+        Indexer.index_file(cross_path,
+          workspace_id: scope.workspace_id,
+          metadata: Address.copy_metadata(signal.id, metadata)
+        )
+      end
+    end)
   end
 
   # Step 6: Extract a pending Claim from the Source Package.

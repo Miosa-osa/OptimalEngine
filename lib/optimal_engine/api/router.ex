@@ -659,6 +659,97 @@ defmodule OptimalEngine.API.Router do
       end
   end
 
+  # Contexts that share an optimal:// URI (OptimalEngine.UriRepair). GET is the
+  # plan and writes nothing: it lists every context that would get a new
+  # address, what happens to the kept file and why, and the records that name
+  # the shared URI. POST with `apply: true` gives each of them an address of its
+  # own and a file of its own, and answers what it did.
+  #
+  # `workspace` names one workspace of the caller's tenant (and the key must
+  # cover it); without it the run covers the whole tenant and the key must
+  # cover every workspace. `limit` takes that many groups (the plan: all by
+  # default; a run: 50) and `after` starts after the `next_after` of the
+  # previous answer, so a large store is read and repaired in bounded requests.
+  get "/api/maintenance/uris" do
+    with {:ok, scope} <- uri_repair_scope(conn, query_param(conn, "workspace", nil)),
+         {:ok, report} <-
+           OptimalEngine.UriRepair.scan(
+             scope ++
+               [
+                 limit: uri_repair_limit(query_param(conn, "limit", nil), nil),
+                 after: query_param(conn, "after", nil)
+               ]
+           ) do
+      json(conn, report)
+    else
+      {:error, reason} -> uri_repair_error(conn, reason)
+    end
+  end
+
+  post "/api/maintenance/uris" do
+    body = conn.body_params || %{}
+
+    if body["apply"] == true do
+      with {:ok, scope} <- uri_repair_scope(conn, body["workspace"]),
+           {:ok, report} <-
+             OptimalEngine.UriRepair.run(
+               scope ++
+                 [limit: uri_repair_limit(body["limit"], 50), after: body["after"]]
+             ) do
+        json(conn, report)
+      else
+        {:error, reason} -> uri_repair_error(conn, reason)
+      end
+    else
+      conn
+      |> put_status(400)
+      |> json(%{error: "apply=true is required; GET /api/maintenance/uris is the plan"})
+    end
+  end
+
+  defp uri_repair_scope(conn, workspace) when workspace in [nil, ""] do
+    if key_covers_every_workspace?(conn),
+      do: embedding_scope(conn, workspace),
+      else: {:error, :workspace_scope_denied}
+  end
+
+  defp uri_repair_scope(conn, workspace) do
+    with {:ok, scope} <- embedding_scope(conn, workspace) do
+      if key_covers_workspace?(conn.assigns[:current_api_key], scope[:workspace_id]),
+        do: {:ok, scope},
+        else: {:error, :workspace_scope_denied}
+    end
+  end
+
+  # No key at all reaches a handler only when the Engine requires none.
+  defp key_covers_every_workspace?(conn) do
+    case conn.assigns[:current_api_key] do
+      nil -> true
+      api_key -> "*" in (api_key.workspace_scope || [])
+    end
+  end
+
+  defp uri_repair_error(conn, :not_found),
+    do: conn |> put_status(404) |> json(%{error: "workspace not found"})
+
+  defp uri_repair_error(conn, :workspace_scope_denied),
+    do: conn |> put_status(403) |> json(%{error: "workspace_scope_denied"})
+
+  defp uri_repair_error(conn, reason),
+    do: conn |> put_status(500) |> json(%{error: inspect(reason)})
+
+  defp uri_repair_limit(value, _default) when is_integer(value),
+    do: value |> max(1) |> min(100_000)
+
+  defp uri_repair_limit(value, default) when is_binary(value) do
+    case Integer.parse(value) do
+      {number, ""} -> uri_repair_limit(number, default)
+      _ -> default
+    end
+  end
+
+  defp uri_repair_limit(_value, default), do: default
+
   defp embedding_scope(conn, workspace) when workspace in [nil, ""],
     do: {:ok, [tenant_id: conn.assigns[:current_tenant] || "default"]}
 

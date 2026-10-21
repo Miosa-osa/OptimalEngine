@@ -283,14 +283,14 @@ value_opt() {
       tier | kind | owner | counterparty | due | due-before | reason | source-uri | state | cadence | \
       timezone | type | intent | scale | modality | path | action | resource | data-class | subject | \
       ttl | sender | domain | label | channel | text | since | name | workspaces | date | query | \
-      audience | justification | for | slug | days | bandwidth | correlation-id | summary | after | \
-      until | format) return 0 ;;
+      audience | justification | for | slug | days | bandwidth | correlation-id | summary | out | \
+      after | until | format) return 0 ;;
   esac
   return 1
 }
 bool_opt() {
   case $1 in
-    verbose | pretty | raw | literal | disposable | force | help | version | transcript) return 0 ;;
+    verbose | pretty | raw | literal | disposable | force | help | version | transcript | apply) return 0 ;;
   esac
   return 1
 }
@@ -983,6 +983,50 @@ remote_op() {
   esac
 }
 
+# uris_command [plan|apply] [workspace|*]: the contexts that share an optimal://
+# URI. The plan (GET) writes nothing; apply (POST, and only with --apply) gives
+# each of them an address and a file of its own. --out writes the whole answer
+# to a new file, which must not exist.
+uris_command() {
+  _um=plan
+  case ${1:-} in
+    plan | apply)
+      _um=$1
+      shift
+      ;;
+  esac
+  too_many $# 1 "uris $_um"
+  if [ "${1:-}" = '*' ]; then
+    _uw=
+  else
+    use_ws "${1:-}"
+    _uw=$WS
+  fi
+  if [ -n "${O_out:-}" ] && [ -e "$O_out" ]; then
+    die "$EX_USAGE" "--out $O_out exists; it must be a new file"
+  fi
+  if [ "$_um" = apply ]; then
+    [ -n "${O_apply:-}" ] || usage_die "'uris apply' writes files and changes rows; read 'uris plan' first, then pass --apply"
+    maint POST /api/maintenance/uris "$(jobj @apply true workspace "$_uw" @limit "${O_limit:-}" after "${O_after:-}")"
+  else
+    maint GET /api/maintenance/uris "" workspace "$_uw" limit "${O_limit:-}" after "${O_after:-}"
+  fi
+  if [ -z "${O_out:-}" ]; then
+    emit "$R_BODY"
+    return 0
+  fi
+  O_pretty=1
+  (
+    set -C
+    umask 077
+    emit "$R_BODY" >"$O_out"
+  ) 2>/dev/null || die 1 "cannot write $O_out"
+  _un=$(field_text "$R_BODY" next_after) || _un=
+  printf 'wrote %s (groups %s, contexts to repair %s, bytes to write %s)%s\n' "$O_out" \
+    "$(field_text "$R_BODY" groups)" "$(field_text "$R_BODY" repaired)" "$(field_text "$R_BODY" bytes_to_write)" \
+    "${_un:+; next page: --after $_un}"
+}
+
 # --- usage ----------------------------------------------------------------------
 
 usage() {
@@ -1065,6 +1109,12 @@ Operator (a local Engine from an Engine checkout; a remote one through /api/main
   index [args] | graph [hubs|clusters|triangles|backfill] [args] | reality-check --disposable
                                    (remote: index and graph, not backfill or reality-check)
   backup [--name file]             server-side backup (admin scope), local or remote
+  uris [plan] [ws|*] [--limit n] [--after cursor] [--out file]
+                                   contexts that share an optimal:// URI, and what the repair would do
+                                   (admin scope; * = the whole tenant, needs a key for every workspace);
+                                   --out writes the answer to a new JSON file
+  uris apply [ws|*] --apply [--limit n] [--after cursor] [--out file]
+                                   the repair: each gets an address and a file of its own (writes files)
 
 Options
   --api <url>          Engine URL (env OPTIMAL_ENGINE_URL, OE_API; default $DEFAULT_URL)
@@ -1563,6 +1613,9 @@ case $CMD in
     [ "$_am" != GET ] && [ -z "$_ab" ] && _ab='{}'
     call "$_am" "$2" "$_ab"
     emit "$R_BODY"
+    ;;
+  uris)
+    uris_command "$@"
     ;;
   backup)
     too_many $# 0 backup
