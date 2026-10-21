@@ -15,7 +15,16 @@
 #   OPTIMAL_ENGINE_BUILD_TIMESTAMP  default: now, UTC
 #   OPTIMAL_RELEASE_CHANNEL         default: dev; a release passes beta or stable
 # DRY_RUN=1 prints the docker command (and the identity) without building.
+#
+# It never builds the upgrade rollback drill's failing-migration test release:
+# it refuses OPTIMAL_BUILD_FAILING_MIGRATION and passes it to the image as empty.
+# That release is built only by scripts/build-failing-migration-release.sh.
 set -euo pipefail
+
+if [ -n "${OPTIMAL_BUILD_FAILING_MIGRATION:-}" ]; then
+  echo "refusing to build a release with OPTIMAL_BUILD_FAILING_MIGRATION set: it makes the failing-migration test release, which is never released (scripts/build-failing-migration-release.sh builds it)" >&2
+  exit 2
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 out="${1:-$root/out}"
@@ -34,6 +43,7 @@ args=(
   --build-arg "OPTIMAL_ENGINE_GIT_SHA=$git_sha"
   --build-arg "OPTIMAL_ENGINE_BUILD_TIMESTAMP=$build_timestamp"
   --build-arg "OPTIMAL_RELEASE_CHANNEL=$release_channel"
+  --build-arg "OPTIMAL_BUILD_FAILING_MIGRATION="
 )
 [ -n "${BUILDER_IMAGE:-}" ] && args+=(--build-arg "BUILDER_IMAGE=$BUILDER_IMAGE")
 

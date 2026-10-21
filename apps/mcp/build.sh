@@ -16,9 +16,9 @@ out=${1:-$root/dist/cli}
 version=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$root/mix.exs")
 [ -n "$version" ] || { echo "build: cannot read @version from mix.exs" >&2; exit 1; }
 package_version=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' "$here/package.json" | head -1)
-server_version=$(sed -n 's/^ *version: "\(.*\)",$/\1/p' "$here/src/server.ts" | head -1)
+server_version=$(sed -n 's/^export const MCP_VERSION = "\(.*\)";$/\1/p' "$here/src/version.ts" | head -1)
 if [ "$package_version" != "$version" ] || [ "$server_version" != "$version" ]; then
-  echo "build: apps/mcp says $package_version (package.json) and $server_version (src/server.ts) but mix.exs says $version" >&2
+  echo "build: apps/mcp says $package_version (package.json) and $server_version (src/version.ts) but mix.exs says $version" >&2
   exit 1
 fi
 

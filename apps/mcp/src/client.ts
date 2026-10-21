@@ -8,6 +8,7 @@
  */
 
 import { config, maskUrl, redact } from "./config.js";
+import { MCP_VERSION, upgradeHint, versionLower } from "./version.js";
 
 type HttpMethod = "GET" | "POST";
 
@@ -47,6 +48,8 @@ export function describeEngineError(err: EngineError): string {
             ? "; the key lacks the scope for this operation"
             : ""
       }`;
+    case 426:
+      return `${err.message} (HTTP 426${code})`;
     case 400:
       if (err.code === "workspace_required") {
         return "Engine needs a workspace (HTTP 400: workspace_required); pass workspace or set OPTIMAL_WORKSPACE";
@@ -61,6 +64,7 @@ function buildHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json",
+    "User-Agent": `optimal-mcp/${MCP_VERSION}`,
   };
   if (config.apiKey) {
     headers["Authorization"] = `Bearer ${config.apiKey}`;
@@ -81,6 +85,29 @@ function buildUrl(
     }
   }
   return url.toString();
+}
+
+// The Engine releases this process has warned about ("unreadable" for a header without one).
+const warnedFor = new Set<string>();
+
+/**
+ * One stderr line per Engine release when the Engine marks this server as
+ * another minor release (`x-optimal-client-outdated: client=<v> engine=<v>`),
+ * so an Engine upgraded while the server runs is reported again. The request
+ * still succeeds; the warning only says to upgrade.
+ */
+function warnOutdated(header: string): void {
+  const engineVersion = /engine=(\d+\.\d+\.\d+)/.exec(header)?.[1] ?? null;
+  const key = engineVersion ?? "unreadable";
+  if (warnedFor.has(key)) return;
+  warnedFor.add(key);
+  const detail = !engineVersion
+    ? // The header is the Engine's text; an unreadable one is not echoed.
+      `the Engine marks MCP server ${MCP_VERSION} as outdated; ${upgradeHint(null)}`
+    : versionLower(MCP_VERSION, engineVersion)
+      ? `MCP server ${MCP_VERSION} is outdated for Engine ${engineVersion}; ${upgradeHint(engineVersion)}`
+      : `MCP server ${MCP_VERSION} is newer than Engine ${engineVersion}; tools the Engine does not have yet will fail`;
+  console.error(`[optimal-engine-mcp] warning: ${redact(detail)}`);
 }
 
 async function request<T>(
@@ -105,19 +132,30 @@ async function request<T>(
     );
   }
 
+  const outdated = response.headers.get("x-optimal-client-outdated");
+  if (outdated) warnOutdated(outdated);
+
   if (!response.ok) {
     let message: string = response.statusText;
     let code: string | null = null;
+    let engineVersion: string | null = null;
     try {
       const err = (await response.json()) as {
         error?: unknown;
         message?: unknown;
+        engine?: unknown;
       };
       if (typeof err.error === "string") code = err.error;
+      if (typeof err.engine === "string") engineVersion = err.engine;
       const text = err.error ?? err.message;
       if (typeof text === "string") message = text;
     } catch {
       // Non-JSON error body; keep the status text.
+    }
+    if (response.status === 426) {
+      // Another major release: every tool fails the same way until the server
+      // is replaced, so the message says which one to install.
+      message = `the Engine${engineVersion ? ` (${engineVersion})` : ""} refuses MCP server ${MCP_VERSION}; ${upgradeHint(engineVersion)}`;
     }
     throw new EngineError(response.status, message, code);
   }

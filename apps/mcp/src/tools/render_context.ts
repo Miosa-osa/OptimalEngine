@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { engine, EngineError } from "../client.js";
+import { engineFailure } from "./result.js";
 import { config } from "../config.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 
@@ -46,12 +47,8 @@ export function registerRenderContext(server: McpServer): void {
               `Render spec "${spec}" not found. Use render_specs to list available specs.`,
             );
           }
-          throw new McpError(
-            ErrorCode.InternalError,
-            `Engine error ${err.status}: ${err.message}`,
-          );
         }
-        throw err;
+        engineFailure(err);
       }
     },
   );
@@ -76,13 +73,7 @@ export function registerRenderContext(server: McpServer): void {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
       } catch (err) {
-        if (err instanceof EngineError) {
-          throw new McpError(
-            ErrorCode.InternalError,
-            `Engine error ${err.status}: ${err.message}`,
-          );
-        }
-        throw err;
+        engineFailure(err);
       }
     },
   );

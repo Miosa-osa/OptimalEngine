@@ -11,7 +11,7 @@ The image path uses only MIOSA's own infrastructure: no registry, no GitHub, no 
    deploy/miosa-template/build-release.sh out/
    ```
 
-   This runs `docker build --target release` and writes `out/optimal-engine.tgz`: the OTP release (it carries its own ERTS), the four shared libraries a base sandbox lacks (snappy, zstd, lz4, bzip2), and `start-engine`.
+   This runs `docker build --target release` and writes `out/optimal-engine.tgz`: the OTP release (it carries its own ERTS), the four shared libraries a base sandbox lacks (snappy, zstd, lz4, bzip2), and `start-engine` (this directory's `start-engine`, which writes no crash dump into the data volume).
    The rocksdb compile takes 30 to 60 minutes.
 2. **Stage it in a MIOSA bucket** of the organization that builds the template:
 
