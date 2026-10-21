@@ -28,9 +28,15 @@ defmodule OptimalEngine.Signal.PreSend do
   Checks suggest; sending stays with the approval policy. With a workspace,
   each check records a `genre_checked` Signal event (`value` 1 fit, 0
   mismatch) that the genre recognition rate reads.
+
+  A check costs bounded time whatever the draft's size (the API takes up to
+  8 MB). The word count reads the whole draft without building a list; the
+  type, the ask, the declared genre's required parts and the shorter version
+  come from its head (`OptimalEngine.Signal.TextHead`, whole lines up to
+  64 KiB), as mode and genre detection do.
   """
 
-  alias OptimalEngine.Signal.{GenreDetector, GenreRegistry, ModeDetector, TimeLimit}
+  alias OptimalEngine.Signal.{GenreDetector, GenreRegistry, ModeDetector, TextHead, TimeLimit}
   alias OptimalEngine.Viability.SignalEvents
 
   @channels %{
@@ -47,6 +53,16 @@ defmodule OptimalEngine.Signal.PreSend do
 
   # Genres that read as a conversational message in any short channel.
   @conversational ~w(message note email)
+
+  @head_bytes 65_536
+
+  # The characters `\s` matches with Unicode on, asked of the regex engine at
+  # compile time, so the word count is what splitting on ~r/\s+/u gives. Every
+  # other character is in no Unicode whitespace or separator class.
+  @spaces_below_u2000 [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x180E]
+  @spaces_from_u2000 Enum.to_list(0x2000..0x200A) ++ [0x2028, 0x2029, 0x202F, 0x205F, 0x3000]
+  @space_candidates @spaces_below_u2000 ++ @spaces_from_u2000
+  @spaces Enum.filter(@space_candidates, &Regex.match?(~r/\A\s\z/u, <<&1::utf8>>))
 
   @doc "The channel profiles."
   @spec channels() :: map()
@@ -65,15 +81,16 @@ defmodule OptimalEngine.Signal.PreSend do
     receiver = Map.new(receiver || %{}, fn {key, value} -> {to_string(key), value} end)
     profile = profile(receiver)
     words = word_count(draft)
+    head = TextHead.take(draft, @head_bytes)
     genre = GenreDetector.detect(draft)
     {mode, _confidence} = ModeDetector.detect(draft)
-    type = infer_type(draft)
+    type = infer_type(head)
 
     flags =
       [
         routing(profile),
-        bandwidth(profile, words, draft),
-        genre_fit(profile, genre, opts[:genre], draft),
+        bandwidth(profile, words, head),
+        genre_fit(profile, genre, opts[:genre], head),
         type_fit(opts[:type], type)
       ]
       |> Enum.reject(&is_nil/1)
@@ -268,7 +285,20 @@ defmodule OptimalEngine.Signal.PreSend do
   defp on(%{channel: nil}), do: ""
   defp on(%{channel: channel}), do: " on #{channel}"
 
-  defp word_count(text), do: text |> String.split(~r/\s+/u, trim: true) |> length()
+  # Runs of characters between spaces, counted in one pass with no list.
+  defp word_count(text), do: count_words(text, 0, false)
+
+  defp count_words(<<c::utf8, rest::binary>>, n, _in_word) when c in @spaces,
+    do: count_words(rest, n, false)
+
+  defp count_words(<<_c::utf8, rest::binary>>, n, in_word),
+    do: count_words(rest, if(in_word, do: n, else: n + 1), true)
+
+  # A byte that is not UTF-8 counts as part of a word.
+  defp count_words(<<_byte, rest::binary>>, n, in_word),
+    do: count_words(rest, if(in_word, do: n, else: n + 1), true)
+
+  defp count_words(<<>>, n, _in_word), do: n
 
   defp to_s(nil), do: ""
   defp to_s(value), do: to_string(value)
