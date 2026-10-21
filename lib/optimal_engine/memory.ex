@@ -395,6 +395,16 @@ defmodule OptimalEngine.Memory do
 
   ## Options
     - `:tags` - list of string tags for search (default: `[]`)
+
+  ## After a reload
+
+  A live entry keeps `value` exactly as given. An entry read back from the
+  persisted store, or from `import_collection/2`, is decoded from JSON by
+  `OptimalEngine.Memory.Store.decode_entry/1`: the four metadata keys and the
+  top-level keys of a map `value` that the engine's own writers use (`:type`,
+  `:description`, `:context`, `:outcome`, `:tags`, `:created_at`, `:data`,
+  `:session_id`) read as atoms, every other key reads as a string, and an atom
+  or `DateTime` value reads as the string it was written as.
   """
   @spec store(collection(), key(), value(), keyword()) :: :ok | {:error, term()}
   def store(collection, key, value, opts \\ []) do

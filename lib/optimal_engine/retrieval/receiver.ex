@@ -35,6 +35,7 @@ defmodule OptimalEngine.Retrieval.Receiver do
   """
 
   alias OptimalEngine.Identity.Principal
+  alias OptimalEngine.SafeAtom
   alias OptimalEngine.Tenancy.Tenant
 
   @type bandwidth :: :small | :medium | :large
@@ -178,7 +179,10 @@ defmodule OptimalEngine.Retrieval.Receiver do
   # The first candidate (an atom or the text of one) that names an allowed atom.
   defp known(candidates, allowed, default) do
     Enum.find_value(candidates, default, fn candidate ->
-      Enum.find(allowed, &(&1 == candidate or Atom.to_string(&1) == candidate))
+      case SafeAtom.fetch(candidate, allowed) do
+        {:ok, atom} -> atom
+        :error -> nil
+      end
     end)
   end
 end

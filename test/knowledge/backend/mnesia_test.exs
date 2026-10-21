@@ -141,5 +141,33 @@ defmodule OptimalEngine.Knowledge.Backend.MnesiaTest do
       # An id the node already opened can be opened again.
       assert {:ok, _state} = Mnesia.init(state.store_id, [])
     end
+
+    test "concurrent opens cannot pass the cap together" do
+      original = Application.get_env(:optimal_engine, :mnesia_max_stores)
+      opened = MapSet.size(:persistent_term.get({Mnesia, :stores}, MapSet.new()))
+      Application.put_env(:optimal_engine, :mnesia_max_stores, opened + 3)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:optimal_engine, :mnesia_max_stores, original),
+          else: Application.delete_env(:optimal_engine, :mnesia_max_stores)
+      end)
+
+      results =
+        1..12
+        |> Task.async_stream(
+          fn n -> Mnesia.init("zz_race_#{System.unique_integer([:positive])}_#{n}", []) end,
+          max_concurrency: 12,
+          ordered: false,
+          timeout: 30_000
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      admitted = for {:ok, state} <- results, do: state
+      on_exit(fn -> Enum.each(admitted, &Mnesia.terminate/1) end)
+
+      assert length(admitted) == 3
+      assert Enum.count(results, &(&1 == {:error, :too_many_stores})) == 9
+    end
   end
 end

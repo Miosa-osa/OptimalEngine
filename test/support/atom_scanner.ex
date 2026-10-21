@@ -11,13 +11,17 @@ defmodule OptimalEngine.AtomScanner do
   | --- | --- |
   | `:string_to_atom`, `:list_to_atom`, `:binary_to_atom` | `String.to_atom`, `List.to_atom`, `:erlang.binary_to_atom`, `:erlang.list_to_atom`, called or captured. An interpolated atom `:"a_\#{x}"` compiles to `:erlang.binary_to_atom/2`. |
   | `:module_concat` | `Module.concat` |
-  | `:atom_keys` | decoder options `keys: :atoms` and `atoms: true` (`keys: :atoms!` only looks atoms up and is not flagged) |
+  | `:atom_keys` | decoder options `keys: :atoms` and `atoms: true`, as a keyword entry or through `Keyword.put(opts, :keys, :atoms)` and the like (`keys: :atoms!` only looks atoms up and is not flagged) |
   | `:sigil_atoms` | `~w(...)a` with an interpolation |
   | `:binary_to_term` | `:erlang.binary_to_term` without `:safe` |
   | `:code_eval` | `Code.eval_*`, `Code.string_to_quoted*`, `Code.format_string!`, `Code.compile_*`, `Code.require_file`, `Code.load_file`, `EEx.eval_*` and `EEx.compile_*`, `:erl_scan`, `:erl_parse`, `:file.consult` and `:file.script`, `:io.fread` and `:io_lib.fread` with `~a` |
-  | `:apply_atom_module`, `:apply_dynamic` | `apply/3`, `Kernel.apply/3`, `:erlang.apply/3` and `Function.capture/3` whose module is one of the modules above, or is not a literal |
+  | `:apply_atom_module`, `:apply_dynamic` | `apply/3`, `Kernel.apply/3`, `:erlang.apply/3`, `Function.capture/3` and the module, function, arguments forms of `spawn`, `spawn_link`, `spawn_monitor` and `spawn_opt` (also `Kernel.` and `:erlang.`) whose module is one of the modules above, or is not a literal |
   | `:dynamic_call` | `x.to_atom(...)`, `x.binary_to_atom(...)` or `x.list_to_atom(...)` on a receiver that is not a literal module |
   | `:import_atom_module` | `import` of one of the modules above that brings an atom-creating function in |
+
+  `defdelegate to_atom(text), to: String` is read as a call of `String.to_atom/1`,
+  and the same holds for any delegate whose target function, `as:` included, is
+  one of the calls above.
 
   Aliases of those modules (`alias String, as: S`) are followed within a file.
   """
@@ -45,6 +49,24 @@ defmodule OptimalEngine.AtomScanner do
   @eex_eval [:eval_string, :eval_file, :compile_string, :compile_file]
   @file_eval [:consult, :script, :path_consult, :path_script]
   @atom_functions [:to_atom, :binary_to_atom, :list_to_atom]
+
+  # `spawn(module, function, args)` runs `module.function(...)` as `apply/3`
+  # does. Each entry is `{name, arity, index of the module argument}`; the forms
+  # with a node first have the module second.
+  @spawn_forms [
+    {:spawn, 3, 0},
+    {:spawn, 4, 1},
+    {:spawn_link, 3, 0},
+    {:spawn_link, 4, 1},
+    {:spawn_monitor, 3, 0},
+    {:spawn_monitor, 4, 1},
+    {:spawn_opt, 4, 0},
+    {:spawn_opt, 5, 1}
+  ]
+  @spawn_names @spawn_forms |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+
+  # Functions that put an option into a keyword list or a map.
+  @option_puts [:put, :put_new, :replace, :replace!]
 
   @risky_modules [
     {:ex, [:String]},
@@ -78,8 +100,9 @@ defmodule OptimalEngine.AtomScanner do
     {_ast, {_line, found}} =
       Macro.prewalk(ast, {1, []}, fn node, {line, acc} ->
         line = node_line(node) || line
+        delegated = classify_delegate(node, aliases)
         node = skip_declarations(node)
-        new = Enum.map(classify(node, aliases), &{&1, line})
+        new = Enum.map(delegated ++ classify(node, aliases), &{&1, line})
         {node, {line, new ++ acc}}
       end)
 
@@ -154,11 +177,15 @@ defmodule OptimalEngine.AtomScanner do
   # ─── classification ──────────────────────────────────────────────────────
 
   defp classify({{:., _, [receiver, fun]}, _, args} = node, aliases) when is_atom(fun) do
-    receiver |> module_ref(aliases) |> remote(fun, args, node, aliases)
+    ref = module_ref(receiver, aliases)
+    remote(ref, fun, args, node, aliases) ++ option_put(ref, fun, args, node)
   end
 
   defp classify({:apply, _, [_module, _fun, _args] = args} = node, aliases),
     do: apply_call(args, aliases, node)
+
+  defp classify({name, _, args} = node, aliases) when name in @spawn_names and is_list(args),
+    do: spawn_call(name, args, aliases, node)
 
   defp classify({:import, _, [module | opts]} = node, aliases) do
     ref = module_ref(module, aliases)
@@ -212,6 +239,12 @@ defmodule OptimalEngine.AtomScanner do
   defp remote({:ex, [:Kernel]}, :apply, args, node, aliases), do: apply_call(args, aliases, node)
   defp remote({:erl, :erlang}, :apply, args, node, aliases), do: apply_call(args, aliases, node)
 
+  defp remote({:ex, [:Kernel]}, fun, args, node, aliases) when fun in @spawn_names,
+    do: spawn_call(fun, args, aliases, node)
+
+  defp remote({:erl, :erlang}, fun, args, node, aliases) when fun in @spawn_names,
+    do: spawn_call(fun, args, aliases, node)
+
   defp remote({:ex, [:Function]}, :capture, args, node, aliases),
     do: apply_call(args, aliases, node)
 
@@ -228,6 +261,44 @@ defmodule OptimalEngine.AtomScanner do
   end
 
   defp apply_call(_args, _aliases, _node), do: []
+
+  defp spawn_call(name, args, aliases, node) do
+    case Enum.find(@spawn_forms, fn {form, arity, _index} ->
+           form == name and arity == length(args)
+         end) do
+      {_form, _arity, index} -> apply_call([Enum.at(args, index), nil, nil], aliases, node)
+      nil -> []
+    end
+  end
+
+  # `Keyword.put(opts, :keys, :atoms)` sets the decoder option without writing
+  # the keyword entry `keys: :atoms`.
+  defp option_put(ref, fun, [_target, key, value], node)
+       when ref in [{:ex, [:Keyword]}, {:ex, [:Map]}] and fun in @option_puts do
+    if {key, value} in [{:keys, :atoms}, {:atoms, true}],
+      do: [{:atom_keys, call(node)}],
+      else: []
+  end
+
+  defp option_put(_ref, _fun, _args, _node), do: []
+
+  # `defdelegate to_atom(text), to: String` defines a function that calls
+  # `String.to_atom/1`; `as:` names the target function when it differs.
+  defp classify_delegate({:defdelegate, _, [head, opts]} = node, aliases) when is_list(opts) do
+    with {:ok, target} <- Keyword.fetch(opts, :to),
+         fun when is_atom(fun) <- delegate_function(head, Keyword.get(opts, :as)) do
+      target |> module_ref(aliases) |> remote(fun, [], node, aliases)
+    else
+      _ -> []
+    end
+  end
+
+  defp classify_delegate(_node, _aliases), do: []
+
+  defp delegate_function(_head, as) when is_atom(as) and not is_nil(as), do: as
+  defp delegate_function({:when, _, [head | _guards]}, nil), do: delegate_function(head, nil)
+  defp delegate_function({name, _, args}, nil) when is_atom(name) and is_list(args), do: name
+  defp delegate_function(_head, _as), do: nil
 
   defp safe_term_options?([_binary, options]) when is_list(options), do: :safe in options
   defp safe_term_options?(_args), do: false

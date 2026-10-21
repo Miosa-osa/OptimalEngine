@@ -49,7 +49,14 @@ defmodule OptimalEngine.Bridge.Memory do
     _ -> :ok
   end
 
-  @doc "Recalls recent events matching a query."
+  @doc """
+  Recalls recent events matching a query.
+
+  A live event is the map `record_event/3` stored. After the memory store has
+  been reloaded from disk, the event `:type` and `:created_at` read as strings
+  and the keys of `:data` read as strings, because the store decodes JSON
+  without creating atoms (see `OptimalEngine.Memory.store/4`).
+  """
   @spec recall_events(String.t(), keyword()) :: [map()]
   def recall_events(query, opts \\ []) do
     limit = Keyword.get(opts, :limit, 20)
