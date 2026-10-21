@@ -246,7 +246,7 @@ defmodule OptimalEngine.Compliance.Artifacts do
         {:error, reason} -> {:error, object_error(reason)}
       end
     else
-      _ -> {:ok, none()}
+      _ -> {:skip, :not_ours}
     end
   end
 
