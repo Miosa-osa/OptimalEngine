@@ -12,8 +12,8 @@ defmodule OptimalEngine.Authority.Evidence do
   with the tenant's evidence key (separate from the grant key). `verify/1`
   recomputes the chain, so a changed, removed, inserted, or reordered entry
   is detected. `checkpoint/1` signs the current head so it can be anchored
-  outside the Engine; `export/2` returns entries plus the public keys needed
-  to verify them anywhere.
+  outside the Engine; `export/2` returns the chain a page at a time, with its
+  head and the public keys needed to verify it anywhere.
 
   Appends run inside the Store's serialized transaction, so the chain never
   forks under concurrency.
@@ -338,85 +338,121 @@ defmodule OptimalEngine.Authority.Evidence do
   end
 
   @doc """
-  At most `limit` entries after `after_seq` (default and most 10,000), with the
-  public keys and checkpoints needed to verify them, and how complete the export is:
+  A page of the chain for export, with the public keys and checkpoints needed to
+  verify it:
 
-    * `"head"` - the chain's head when the export was read, `{"seq", "hash"}`,
-      signed like a checkpoint (`"kid"`, `"signature"`), so a verifier can tell an
-      export cut short from a whole one; see `head/1`;
-    * `"total"` - how many entries the chain holds after `after_seq`, up to that head;
-    * `"complete"` - true only when the last entry exported is the head (or, with no
-      entry left to export, `after_seq` already is);
-    * `"next_after"` - the `after_seq` of the next page, `nil` when complete.
+    * `"entries"` - at most `:limit` entries (default and most 10,000) after
+      `:after` (default 0), oldest first, none past the head;
+    * `"head"` - `{"seq", "hash"}` of the chain's last entry when the page is read,
+      or of the entry at `:until`, so pages read with the same `:until` share one
+      head however the chain grows; `nil` for an empty chain;
+    * `"head_signature"` - `{"kid", "signature"}`, the evidence key's signature over
+      the statement a checkpoint signs for that head, so a head moved to match a
+      bundle cut short is caught; `nil` with no head;
+    * `"total"` - how many entries the chain holds from seq 1 through the head, the
+      same on every page;
+    * `"complete"` - true only on the page whose last entry is the head (and for an
+      empty chain);
+    * `"next_after"` - the `:after` of the next page, `nil` on the last.
 
-  A longer chain is exported page by page, never cut short in silence; entries
-  appended after the head was read wait for the next export.
+  `{:error, :until_out_of_range}` when `:until` names no entry of the chain, or one
+  below `:after`.
   """
-  @spec export(String.t(), non_neg_integer(), pos_integer()) :: map()
-  def export(tenant_id, after_seq \\ 0, limit \\ 10_000) do
-    limit = limit |> max(1) |> min(10_000)
-    head = head(tenant_id)
+  @spec export(String.t(), keyword()) :: {:ok, map()} | {:error, :until_out_of_range}
+  def export(tenant_id, opts \\ []) do
+    after_seq = Keyword.get(opts, :after, 0)
+    limit = opts |> Keyword.get(:limit, 10_000) |> max(1) |> min(10_000)
 
-    entries =
-      tenant_id
-      |> stream("tenant_seq > ?2 AND tenant_seq <= ?3", [after_seq, head["seq"]])
-      |> Enum.take(limit)
+    with {:ok, head} <- head(tenant_id, after: after_seq, until: Keyword.get(opts, :until)) do
+      through = if head, do: head["seq"], else: 0
 
-    last = if entries == [], do: after_seq, else: List.last(entries)["seq"]
-    complete = last >= head["seq"]
+      entries =
+        tenant_id
+        |> stream("tenant_seq > ?2 AND tenant_seq <= ?3", [after_seq, through])
+        |> Enum.take(limit)
 
-    %{
-      "tenant_id" => tenant_id,
-      "entries" => entries,
-      "complete" => complete,
-      "total" => count_between(tenant_id, after_seq, head["seq"]),
-      "head" => head,
-      "next_after" => if(complete, do: nil, else: last),
-      "keys" => Keys.jwks(tenant_id),
-      "checkpoints" => checkpoints(tenant_id)
-    }
+      last = if entries == [], do: after_seq, else: List.last(entries)["seq"]
+      complete = last >= through
+
+      {:ok,
+       %{
+         "tenant_id" => tenant_id,
+         "entries" => entries,
+         "complete" => complete,
+         "total" => count(tenant_id, "tenant_seq <= ?2", [through]),
+         "head" => head,
+         "head_signature" => head_signature(tenant_id, head),
+         "next_after" => if(complete, do: nil, else: last),
+         "keys" => Keys.jwks(tenant_id),
+         "checkpoints" => checkpoints(tenant_id)
+       }}
+    end
   end
 
   @doc """
-  The chain's head now: `"seq"` and `"hash"` of its last entry (`0` and the genesis
-  hash for an empty chain), signed with the tenant's evidence key over the statement
-  a checkpoint signs (`"kid"`, `"signature"`).
+  An export's head: `{"seq", "hash"}` of the chain's last entry, or with `until:` of
+  the entry at that seq; `nil` for an empty chain. `{:error, :until_out_of_range}`
+  when `until:` names no entry, or one below `after:` (default 0).
   """
-  @spec head(String.t()) :: map()
-  def head(tenant_id) do
-    {seq, hash} =
-      case Store.raw_query(
-             "SELECT tenant_seq, hash FROM authority_evidence WHERE tenant_id = ?1 ORDER BY tenant_seq DESC LIMIT 1",
-             [tenant_id]
-           ) do
-        {:ok, [[seq, hash]]} -> {seq, hash}
-        {:ok, []} -> {0, @genesis}
-      end
+  @spec head(String.t(), keyword()) :: {:ok, map() | nil} | {:error, :until_out_of_range}
+  def head(tenant_id, opts \\ []) do
+    after_seq = Keyword.get(opts, :after, 0)
 
-    head = %{"seq" => seq, "hash" => hash}
+    case Keyword.get(opts, :until) do
+      nil ->
+        {:ok, head_row(tenant_id, "1 = 1", [])}
 
+      until when is_integer(until) and until >= 1 and until >= after_seq ->
+        case head_row(tenant_id, "tenant_seq = ?2", [until]) do
+          nil -> {:error, :until_out_of_range}
+          head -> {:ok, head}
+        end
+
+      _until ->
+        {:error, :until_out_of_range}
+    end
+  end
+
+  defp head_row(tenant_id, condition, params) do
+    case Store.raw_query(
+           "SELECT tenant_seq, hash FROM authority_evidence WHERE tenant_id = ?1 AND (#{condition}) ORDER BY tenant_seq DESC LIMIT 1",
+           [tenant_id | params]
+         ) do
+      {:ok, [[seq, hash]]} -> %{"seq" => seq, "hash" => hash}
+      {:ok, []} -> nil
+    end
+  end
+
+  @doc """
+  The tenant's evidence key's signature over `head`, `{"kid", "signature"}`: the
+  statement a checkpoint signs. `nil` for no head, or a tenant without an evidence key.
+  """
+  @spec head_signature(String.t(), map() | nil) :: map() | nil
+  def head_signature(_tenant_id, nil), do: nil
+
+  def head_signature(tenant_id, head) do
     case Keys.active(tenant_id, "evidence") do
       {:ok, key} ->
-        statement = head_statement(tenant_id, head)
-
-        Map.merge(head, %{
+        %{
           "kid" => key.kid,
-          "signature" => key |> Keys.sign(statement) |> JWS.encode64()
-        })
+          "signature" => key |> Keys.sign(head_statement(tenant_id, head)) |> JWS.encode64()
+        }
 
       {:error, _reason} ->
-        head
+        nil
     end
   end
 
   @doc """
   Verifies an exported bundle without the Engine's database: every entry's link,
-  hash and signature, and how complete the bundle is.
+  hash and signature, and that the bundle is the whole chain through its head.
 
-  `"head"` must be signed by one of the bundle's keys. A bundle that says it is
-  `"complete"` must hold `"total"` entries and end at that head, so a bundle cut
-  short is caught; one that says it is not complete is `{:error, %{reason:
-  :partial}}`, with how far its entries verified, never valid on its own.
+  The head must be signed by one of the bundle's keys (`"head_signature"`). A
+  bundle that is the whole chain starts at seq 1, holds `"total"` entries, ends at
+  the head and says it is `"complete"`; one cut short is caught. A page that is not
+  the whole chain (it says it is not complete, or it starts after seq 1) is
+  `{:error, %{reason: :partial}}`, with how far its entries verified: join the pages
+  into one bundle, with the last page's head, to verify them.
   """
   @spec verify_export(map()) :: {:ok, map()} | {:error, map()}
   def verify_export(%{"entries" => entries, "keys" => %{"keys" => keys}} = bundle) do
@@ -427,7 +463,7 @@ defmodule OptimalEngine.Authority.Evidence do
           do: {kid, key}
 
     with {:ok, last_seq, last_hash} <- verify_run(entries, public_keys),
-         :ok <- verify_completeness(bundle, public_keys, length(entries), last_seq, last_hash) do
+         :ok <- verify_completeness(bundle, public_keys, entries, last_seq, last_hash) do
       {:ok, %{entries: length(entries), head: last_hash}}
     end
   end
@@ -435,7 +471,7 @@ defmodule OptimalEngine.Authority.Evidence do
   defp verify_run(entries, public_keys) do
     Enum.reduce_while(entries, {:ok, nil, nil}, fn entry, {:ok, prev_seq, prev_hash} ->
       expected_seq = if prev_seq, do: prev_seq + 1, else: entry["seq"]
-      expected_prev = prev_hash || entry["prev_hash"]
+      expected_prev = prev_hash || if(entry["seq"] == 1, do: @genesis, else: entry["prev_hash"])
 
       cond do
         entry["seq"] != expected_seq ->
@@ -456,32 +492,45 @@ defmodule OptimalEngine.Authority.Evidence do
     end)
   end
 
-  defp verify_completeness(bundle, public_keys, count, last_seq, last_hash) do
+  defp verify_completeness(bundle, public_keys, entries, last_seq, last_hash) do
     head = bundle["head"]
+    count = length(entries)
+    first_seq = if entries == [], do: nil, else: hd(entries)["seq"]
+
+    # Only an empty chain has no head.
+    head_ok =
+      if is_nil(head),
+        do: count == 0 and bundle["total"] == 0,
+        else: is_map(head) and is_integer(head["seq"]) and is_binary(head["hash"])
 
     cond do
-      not (is_map(head) and is_integer(head["seq"]) and is_binary(head["hash"])) ->
+      not head_ok ->
         {:error, %{reason: :missing_head}}
 
-      not head_signed?(bundle["tenant_id"], head, public_keys) ->
+      head != nil and
+          not head_signed?(bundle["tenant_id"], head, bundle["head_signature"], public_keys) ->
         {:error, %{seq: head["seq"], reason: :bad_head_signature}}
 
-      bundle["complete"] == false ->
+      bundle["complete"] == false or (first_seq != nil and first_seq != 1) ->
         {:error,
          %{
            reason: :partial,
            entries: count,
+           verified_from: first_seq,
            verified_through: last_seq,
            next_after: bundle["next_after"]
          }}
 
-      bundle["complete"] != true ->
+      bundle["complete"] != true or not is_integer(bundle["total"]) ->
         {:error, %{reason: :missing_completeness}}
 
       count != bundle["total"] ->
         {:error, %{reason: :count_mismatch, entries: count, total: bundle["total"]}}
 
-      count > 0 and (last_seq != head["seq"] or last_hash != head["hash"]) ->
+      head == nil ->
+        :ok
+
+      last_seq != head["seq"] or last_hash != head["hash"] ->
         {:error, %{seq: last_seq, reason: :head_mismatch}}
 
       true ->
@@ -489,10 +538,11 @@ defmodule OptimalEngine.Authority.Evidence do
     end
   end
 
-  defp head_signed?(tenant_id, head, public_keys) do
-    with key when not is_nil(key) <- public_keys[head["kid"]],
-         {:ok, signature} <- JWS.decode64(head["signature"] || "") do
-      :crypto.verify(:eddsa, :none, head_statement(tenant_id, head), signature, [key, :ed25519])
+  defp head_signed?(tenant_id, head, signature, public_keys) do
+    with %{"kid" => kid, "signature" => encoded} when is_binary(encoded) <- signature,
+         key when not is_nil(key) <- public_keys[kid],
+         {:ok, raw} <- JWS.decode64(encoded) do
+      :crypto.verify(:eddsa, :none, head_statement(tenant_id, head), raw, [key, :ed25519])
     else
       _ -> false
     end
@@ -501,16 +551,6 @@ defmodule OptimalEngine.Authority.Evidence do
   # What a checkpoint, and an export's head, sign.
   defp head_statement(tenant_id, head) do
     CanonicalJSON.encode(%{"tenant_id" => tenant_id, "seq" => head["seq"], "hash" => head["hash"]})
-  end
-
-  defp count_between(tenant_id, after_seq, through_seq) do
-    {:ok, [[n]]} =
-      Store.raw_query(
-        "SELECT COUNT(*) FROM authority_evidence WHERE tenant_id = ?1 AND tenant_seq > ?2 AND tenant_seq <= ?3",
-        [tenant_id, after_seq, through_seq]
-      )
-
-    n
   end
 
   # ---------------------------------------------------------------------------

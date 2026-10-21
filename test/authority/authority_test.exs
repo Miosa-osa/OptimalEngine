@@ -777,7 +777,8 @@ defmodule OptimalEngine.AuthorityTest do
       assert {:ok, checkpoint} = Evidence.checkpoint(ctx.tenant, "external-anchor-1")
       assert checkpoint["hash"] == head
 
-      bundle = ctx.tenant |> Evidence.export() |> Jason.encode!() |> Jason.decode!()
+      {:ok, exported} = Evidence.export(ctx.tenant)
+      bundle = exported |> Jason.encode!() |> Jason.decode!()
       assert {:ok, %{head: ^head}} = Evidence.verify_export(bundle)
 
       tampered =

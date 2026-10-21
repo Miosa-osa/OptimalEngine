@@ -16,7 +16,7 @@ defmodule Mix.Tasks.Optimal.Authority do
       mix optimal.authority effective <subject> [--workspace ws]
       mix optimal.authority verify
       mix optimal.authority checkpoint [--anchor text]
-      mix optimal.authority export [--out evidence.json]
+      mix optimal.authority export [--until <seq>] [--out evidence.json]
       mix optimal.authority integrity [--record]
       mix optimal.authority keys
 
@@ -50,6 +50,7 @@ defmodule Mix.Tasks.Optimal.Authority do
           reason: :string,
           anchor: :string,
           out: :string,
+          until: :integer,
           record: :boolean
         ],
         aliases: [t: :tenant, w: :workspace]
@@ -148,16 +149,23 @@ defmodule Mix.Tasks.Optimal.Authority do
   end
 
   # The bundle is written as the entries are read, a page at a time, so a chain of any
-  # length is exported whole in bounded memory: the object `Evidence.export/3` returns,
-  # with every entry up to the head read at the start, and so complete.
+  # length is exported whole in bounded memory: one bundle `Evidence.export/2` would
+  # return with every entry through the head (the chain's last entry when the export
+  # starts, or the one at --until), and so complete.
   defp export(tenant, opts) do
-    head = Evidence.head(tenant)
+    head =
+      case Evidence.head(tenant, until: opts[:until]) do
+        {:ok, head} -> head
+        {:error, :until_out_of_range} -> Mix.raise("--until must name an entry of the chain")
+      end
+
+    through = if head, do: head["seq"], else: 0
     device = if opts[:out], do: File.open!(opts[:out], [:write]), else: :stdio
     IO.binwrite(device, [~s({"tenant_id":), Jason.encode!(tenant), ~s(,"entries":[\n)])
 
     {count, last} =
       tenant
-      |> Evidence.stream("tenant_seq <= ?2", [head["seq"]])
+      |> Evidence.stream("tenant_seq <= ?2", [through])
       |> Enum.reduce({0, 0}, fn entry, {written, _last} ->
         IO.binwrite(device, [if(written > 0, do: ",\n", else: ""), Jason.encode!(entry)])
         {written + 1, entry["seq"]}
@@ -165,11 +173,13 @@ defmodule Mix.Tasks.Optimal.Authority do
 
     IO.binwrite(device, [
       ~s(\n],"complete":),
-      Jason.encode!(last == head["seq"]),
+      Jason.encode!(last == through),
       ~s(,"total":),
       Jason.encode!(count),
       ~s(,"head":),
       Jason.encode!(head),
+      ~s(,"head_signature":),
+      Jason.encode!(Evidence.head_signature(tenant, head)),
       ~s(,"next_after":null,"keys":),
       Jason.encode!(Keys.jwks(tenant)),
       ~s(,"checkpoints":),
