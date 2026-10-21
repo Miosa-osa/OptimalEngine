@@ -242,7 +242,7 @@ defmodule OptimalEngine.API.Router do
           :invalid_mode
 
         q == "" ->
-          {[], 0, 0}
+          {[], 0}
 
         true ->
           # Fetch up to max_limit to get the real total, then slice.
@@ -284,7 +284,9 @@ defmodule OptimalEngine.API.Router do
                 |> Ranking.merge(inherited)
                 |> Enum.map(&Map.delete(&1, :rank_score))
 
-              {all, withheld} =
+              # What the key may not see is left out and not counted: a count on a
+              # route that answers a query tells a key which hidden rows match.
+              {all, _withheld} =
                 ReadScope.filter_any(
                   Reader.scope(conn),
                   merged,
@@ -295,7 +297,7 @@ defmodule OptimalEngine.API.Router do
 
               total = length(all)
               page = all |> Enum.drop(offset) |> Enum.take(limit)
-              {page, total, withheld}
+              {page, total}
 
             # The Store did not answer in time: say so, rather than an empty
             # result list that reads as "nothing found".
@@ -312,7 +314,7 @@ defmodule OptimalEngine.API.Router do
               {:search_failed, ref}
 
             _ ->
-              {[], 0, 0}
+              {[], 0}
           end
       end
 
@@ -337,16 +339,10 @@ defmodule OptimalEngine.API.Router do
       {:search_failed, ref} ->
         search_failed_resp(conn, 500, ref)
 
-      {results, total, withheld} ->
+      {results, total} ->
         pagination = Pagination.wrap(results, total, offset, limit)
 
-        json(
-          conn,
-          withheld_note(
-            %{query: q, results: results, pagination: pagination.pagination},
-            withheld
-          )
-        )
+        json(conn, %{query: q, results: results, pagination: pagination.pagination})
     end
   end
 
@@ -396,7 +392,7 @@ defmodule OptimalEngine.API.Router do
 
       case Grep.grep(q, grep_opts) do
         {:ok, found} ->
-          {all_matches, withheld} =
+          {all_matches, _withheld} =
             ReadScope.filter_any(
               Reader.scope(conn),
               found,
@@ -424,18 +420,12 @@ defmodule OptimalEngine.API.Router do
 
           pagination = Pagination.wrap(results, total, offset, limit)
 
-          json(
-            conn,
-            withheld_note(
-              %{
-                query: q,
-                workspace_id: workspace_id,
-                results: results,
-                pagination: pagination.pagination
-              },
-              withheld
-            )
-          )
+          json(conn, %{
+            query: q,
+            workspace_id: workspace_id,
+            results: results,
+            pagination: pagination.pagination
+          })
 
         {:error, {:invalid_as_of, _value}} ->
           send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
@@ -2692,7 +2682,7 @@ defmodule OptimalEngine.API.Router do
       |> Keyword.put(:offset, offset)
       |> api_maybe_put(:q, if(q == "", do: nil, else: q))
 
-    {memories, withheld} =
+    {memories, _withheld} =
       ReadScope.filter(
         Reader.scope(conn),
         workspace_id,
@@ -2705,16 +2695,12 @@ defmodule OptimalEngine.API.Router do
     formatted = Enum.map(memories, &memory_to_map/1)
     pagination = Pagination.wrap(formatted, total, offset, limit)
 
-    response =
-      withheld_note(
-        %{
-          workspace_id: workspace_id,
-          count: length(memories),
-          memories: formatted,
-          pagination: pagination.pagination
-        },
-        withheld
-      )
+    response = %{
+      workspace_id: workspace_id,
+      count: length(memories),
+      memories: formatted,
+      pagination: pagination.pagination
+    }
 
     response = if q != "", do: Map.put(response, :query, q), else: response
     json(conn, response)
@@ -6152,9 +6138,11 @@ defmodule OptimalEngine.API.Router do
 
   defp format_health(_), do: []
 
-  # What a keyed reader was not shown is said, so an answer is never taken for
-  # the whole: `withheld` counts the items left out, `complete` is false when
-  # there were any.
+  # What a keyed reader was not shown is said, so a dump is never taken for the
+  # whole: `withheld` counts the items left out, `complete` is false when there
+  # were any. Only for the routes that dump rows (the exports, the conflict
+  # list, the ledger). A route that answers a query must not say it: the count
+  # tells a key which hidden rows match (search, grep, the memory list).
   defp withheld_note(body, withheld) do
     Map.merge(body, %{withheld: withheld, complete: withheld == 0})
   end

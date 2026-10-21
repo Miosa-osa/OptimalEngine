@@ -249,7 +249,11 @@ An anonymous local caller (no key, authentication not required) is the trusted o
 
 The same two rules apply to `GET /api/memory`, `GET /api/memory/:id`, `GET /api/signals/:id`, `GET /api/wiki/:slug`, `GET /api/search` and `GET /api/grep`.
 A record the key may not see is a `404`, the same answer as a record that is not there.
-A list, a search or a grep leaves out what the key may not see, says how many it left out in `withheld`, and sets `complete` to false when there were any.
+A list, a search or a grep leaves out what the key may not see and says nothing of it: there is no `withheld` and no `complete`, and `pagination` counts only what the key may see.
+This is deliberate.
+A count of what a route left out, on a route that answers a query, tells a key without the label that a row it may not see matches: `withheld` of 1 for `Zephyrcorp` is a probe for the name.
+These routes answer a probe for what the key may not see exactly as they answer one for nothing, as a record by id answers `404` as it does for a record that is not there.
+The exports, the conflict list and the ledger dump rows rather than answer a query, and a partial dump has to say it is partial, so they keep `withheld` and `complete`; the count names a volume, not a match.
 A search or grep decides for each hit from the row it came from (a document, a memory, a chunk), so a chunk of a restricted document is not found by a key without the label.
 `pagination.total` of the memory list counts the memories of the page query before the key's grants are applied; it names no content.
 
