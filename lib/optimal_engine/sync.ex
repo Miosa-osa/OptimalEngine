@@ -775,7 +775,7 @@ defmodule OptimalEngine.Sync do
   # `insert_source_package` keeps the package that is already there when the
   # same conflict text is raised again, with the labels and the metadata it had.
   # Its labels only ever grow, and it names the fact either way. A Store error
-  # leaves the package as it was: the claims are raised with the labels anyway.
+  # raises, so no claims are raised beside a package whose labels were not set.
   defp raise_source_labels(source_id, labels, fact_id) do
     with {:ok, [[stored]]} <-
            Store.raw_query("SELECT security_labels FROM source_packages WHERE id = ?1", [source_id]),
@@ -796,7 +796,8 @@ defmodule OptimalEngine.Sync do
            ) do
       :ok
     else
-      _other -> :ok
+      {:ok, []} -> :ok
+      {:error, reason} -> raise "could not label conflict source #{source_id}: #{inspect(reason)}"
     end
   end
 

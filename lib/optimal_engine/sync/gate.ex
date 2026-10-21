@@ -311,7 +311,10 @@ defmodule OptimalEngine.Sync.Gate do
     known = :ets.lookup(gate.memo, {:chain, strict, id})
 
     cond do
+      # A parent loop: what was read on the way round is short of the versions
+      # still behind it, so none of it may be remembered.
       MapSet.member?(seen, id) ->
+        cut(gate)
         {versions, nil}
 
       match?([_], known) ->
