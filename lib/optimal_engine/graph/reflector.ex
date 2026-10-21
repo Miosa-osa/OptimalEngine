@@ -43,6 +43,7 @@ defmodule OptimalEngine.Graph.Reflector do
   - `:min_cooccurrences` — minimum shared contexts to qualify (default: 2)
   - `:limit` — max suggestions to return (default: 20)
   - `:workspace_id` — workspace to scope to (default: "default")
+  - `:tenant_id`: tenant whose contexts count (default: "default")
 
   Returns `{:ok, [map()]}`. Never raises — logs and returns `{:ok, []}` on failure.
   """
@@ -51,6 +52,7 @@ defmodule OptimalEngine.Graph.Reflector do
     min_cooccurrences = Keyword.get(opts, :min_cooccurrences, 2)
     limit = Keyword.get(opts, :limit, 20)
     ws = Keyword.get(opts, :workspace_id, "default")
+    tenant = Keyword.get(opts, :tenant_id, "default")
     skip_llm = Keyword.get(opts, :skip_llm, false)
 
     # Scope co-occurrence through the contexts table (source of truth for
@@ -60,14 +62,14 @@ defmodule OptimalEngine.Graph.Reflector do
     SELECT e1.name as entity_a, e2.name as entity_b, COUNT(DISTINCT e1.context_id) as cooccurrences
     FROM entities e1
     JOIN entities e2 ON e1.context_id = e2.context_id AND e1.name < e2.name
-    JOIN contexts c ON c.id = e1.context_id AND c.workspace_id = ?3
+    JOIN contexts c ON c.id = e1.context_id AND c.workspace_id = ?3 AND c.tenant_id = ?4
     GROUP BY e1.name, e2.name
     HAVING COUNT(DISTINCT e1.context_id) >= ?1
     ORDER BY cooccurrences DESC
     LIMIT ?2
     """
 
-    with {:ok, rows} <- Store.raw_query(sql, [min_cooccurrences, limit * 3, ws]) do
+    with {:ok, rows} <- Store.raw_query(sql, [min_cooccurrences, limit * 3, ws, tenant]) do
       suggestions =
         rows
         |> Enum.map(fn [a, b, count] -> {a, b, count} end)
@@ -90,20 +92,22 @@ defmodule OptimalEngine.Graph.Reflector do
 
   Options:
   - `:workspace_id` — workspace to scope to (default: "default")
+  - `:tenant_id`: tenant whose contexts count (default: "default")
   """
   @spec shared_contexts(String.t(), String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def shared_contexts(entity_a, entity_b, opts \\ []) do
     ws = Keyword.get(opts, :workspace_id, "default")
+    tenant = Keyword.get(opts, :tenant_id, "default")
 
     sql = """
     SELECT DISTINCT c.id, c.title, c.node
     FROM contexts c
     JOIN entities e1 ON e1.context_id = c.id AND e1.name = ?1
     JOIN entities e2 ON e2.context_id = c.id AND e2.name = ?2
-    WHERE c.workspace_id = ?3
+    WHERE c.workspace_id = ?3 AND c.tenant_id = ?4
     """
 
-    case Store.raw_query(sql, [entity_a, entity_b, ws]) do
+    case Store.raw_query(sql, [entity_a, entity_b, ws, tenant]) do
       {:ok, rows} ->
         contexts = Enum.map(rows, fn [id, title, node] -> %{id: id, title: title, node: node} end)
         {:ok, contexts}

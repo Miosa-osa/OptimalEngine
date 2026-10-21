@@ -92,10 +92,11 @@ defmodule OptimalEngine.API.Router do
   # workspaces' contexts, edges, or entities.
   get "/api/graph" do
     workspace = query_param(conn, "workspace", "default")
-    edges = fetch_visual_edges(workspace)
-    entities = fetch_entity_summary(workspace)
-    nodes = fetch_node_summary(workspace)
-    contexts = fetch_all_contexts(workspace)
+    tenant = conn.assigns[:current_tenant] || "default"
+    edges = fetch_visual_edges(workspace, tenant)
+    entities = fetch_entity_summary(workspace, tenant)
+    nodes = fetch_node_summary(workspace, tenant)
+    contexts = fetch_all_contexts(workspace, tenant)
 
     json(conn, %{
       workspace_id: workspace,
@@ -147,6 +148,7 @@ defmodule OptimalEngine.API.Router do
       Reflector.reflect(
         min_cooccurrences: min,
         workspace_id: workspace,
+        tenant_id: conn.assigns[:current_tenant] || "default",
         skip_llm: skip_llm
       )
 
@@ -155,8 +157,9 @@ defmodule OptimalEngine.API.Router do
 
   get "/api/node/:node_id" do
     workspace = query_param(conn, "workspace", "default")
-    contexts = fetch_node_contexts(node_id, workspace)
-    edges = fetch_node_edges(node_id, workspace)
+    tenant = conn.assigns[:current_tenant] || "default"
+    contexts = fetch_node_contexts(node_id, workspace, tenant)
+    edges = fetch_node_edges(node_id, workspace, tenant)
 
     json(conn, %{
       node: node_id,
@@ -1400,8 +1403,9 @@ defmodule OptimalEngine.API.Router do
   # Workspace-scoped via ?workspace=<id> (default "default").
   get "/api/optimal/graph" do
     workspace = query_param(conn, "workspace", "default")
-    entities = optimal_entity_summary(workspace)
-    edges = optimal_relation_edges(workspace)
+    tenant = conn.assigns[:current_tenant] || "default"
+    entities = optimal_entity_summary(workspace, tenant)
+    edges = optimal_relation_edges(workspace, tenant)
     edge_types = Enum.frequencies_by(edges, & &1.relation)
 
     json(conn, %{
@@ -1419,14 +1423,20 @@ defmodule OptimalEngine.API.Router do
   #   %{nodes: [%{slug, name, type, signal_count}]}
   get "/api/optimal/nodes" do
     workspace = query_param(conn, "workspace", "default")
-    json(conn, %{nodes: optimal_node_summary(workspace)})
+
+    json(conn, %{
+      nodes: optimal_node_summary(workspace, conn.assigns[:current_tenant] || "default")
+    })
   end
 
   # GET /api/optimal/nodes/:slug/files — drill-down file tree. Component
   # expects `{files: [...]}`; each entry `%{name, path, is_dir, size, children?}`.
   get "/api/optimal/nodes/:slug/files" do
     workspace = query_param(conn, "workspace", "default")
-    json(conn, %{files: optimal_node_files(slug, workspace)})
+
+    json(conn, %{
+      files: optimal_node_files(slug, workspace, conn.assigns[:current_tenant] || "default")
+    })
   end
 
   # ── Phase 14: workspace explorer endpoints ──────────────────────────────
@@ -1436,7 +1446,10 @@ defmodule OptimalEngine.API.Router do
   # Accepts optional ?workspace=<id> to scope to a specific workspace (default: "default").
   get "/api/workspace" do
     workspace = query_param(conn, "workspace", "default")
-    json(conn, %{nodes: workspace_nodes(workspace)})
+
+    json(conn, %{
+      nodes: workspace_nodes(workspace, conn.assigns[:current_tenant] || "default")
+    })
   end
 
   # GET /api/signals/classification?workspace=&plan=true: counts of the
@@ -4823,15 +4836,15 @@ defmodule OptimalEngine.API.Router do
 
   # Every context in the requested workspace — each becomes a renderable node
   # in the graph. Always workspace-filtered: no cross-workspace leakage.
-  defp fetch_all_contexts(workspace_id) do
+  defp fetch_all_contexts(workspace_id, tenant_id) do
     case Store.raw_query(
            """
            SELECT id, title, node, type, genre, sn_ratio, modified_at, l0_abstract, uri
            FROM contexts
-           WHERE workspace_id = ?1
+           WHERE workspace_id = ?1 AND tenant_id = ?2
            ORDER BY node, modified_at DESC
            """,
-           [workspace_id]
+           [workspace_id, tenant_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, node, type, genre, sn, mod, abstract, uri] ->
@@ -4863,9 +4876,9 @@ defmodule OptimalEngine.API.Router do
   #
   # All edges are deduplicated: only the (min_id, max_id) pair is kept so
   # A→B and B→A are not both emitted.
-  defp fetch_visual_edges(workspace_id) do
-    entity_edges = fetch_shared_entity_edges(workspace_id)
-    cross_ref_edges = fetch_cross_ref_edges(workspace_id)
+  defp fetch_visual_edges(workspace_id, tenant_id) do
+    entity_edges = fetch_shared_entity_edges(workspace_id, tenant_id)
+    cross_ref_edges = fetch_cross_ref_edges(workspace_id, tenant_id)
 
     (entity_edges ++ cross_ref_edges)
     |> deduplicate_edges()
@@ -4874,17 +4887,17 @@ defmodule OptimalEngine.API.Router do
   # Both endpoints are resolved through the contexts table (the source of
   # truth for workspace membership) so legacy entity rows backfilled to
   # 'default' can never bridge two workspaces.
-  defp fetch_shared_entity_edges(workspace_id) do
+  defp fetch_shared_entity_edges(workspace_id, tenant_id) do
     sql = """
     SELECT e1.context_id AS source, e2.context_id AS target, e1.name AS entity
     FROM entities e1
     JOIN entities e2 ON e1.name = e2.name AND e1.context_id < e2.context_id
-    JOIN contexts c1 ON c1.id = e1.context_id AND c1.workspace_id = ?1
-    JOIN contexts c2 ON c2.id = e2.context_id AND c2.workspace_id = ?1
+    JOIN contexts c1 ON c1.id = e1.context_id AND c1.workspace_id = ?1 AND c1.tenant_id = ?2
+    JOIN contexts c2 ON c2.id = e2.context_id AND c2.workspace_id = ?1 AND c2.tenant_id = ?2
     LIMIT 2000
     """
 
-    case Store.raw_query(sql, [workspace_id]) do
+    case Store.raw_query(sql, [workspace_id, tenant_id]) do
       {:ok, rows} ->
         # Group by (source, target) pair and count shared entities
         rows
@@ -4910,20 +4923,22 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp fetch_cross_ref_edges(workspace_id) do
+  defp fetch_cross_ref_edges(workspace_id, tenant_id) do
     # cross_ref edges: source_id is a context_id, target_id is a node name.
     # Resolve target node name → all context IDs in that node, requiring both
     # endpoints to live in the requested workspace.
     sql = """
     SELECT e.source_id AS source, c.id AS target
     FROM edges e
-    JOIN contexts c ON c.node = e.target_id AND c.workspace_id = ?1
+    JOIN contexts c ON c.node = e.target_id AND c.workspace_id = ?1 AND c.tenant_id = ?2
     WHERE e.relation = 'cross_ref'
-      AND EXISTS (SELECT 1 FROM contexts WHERE id = e.source_id AND workspace_id = ?1)
+      AND EXISTS (
+        SELECT 1 FROM contexts WHERE id = e.source_id AND workspace_id = ?1 AND tenant_id = ?2
+      )
     LIMIT 500
     """
 
-    case Store.raw_query(sql, [workspace_id]) do
+    case Store.raw_query(sql, [workspace_id, tenant_id]) do
       {:ok, rows} ->
         rows
         |> Enum.map(fn [source, target] ->
@@ -4945,33 +4960,33 @@ defmodule OptimalEngine.API.Router do
     end)
   end
 
-  defp fetch_entity_summary(workspace_id) do
+  defp fetch_entity_summary(workspace_id, tenant_id) do
     case Store.raw_query(
            """
            SELECT e.name, e.type, COUNT(*) as count
            FROM entities e
-           JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?1
+           JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?1 AND c.tenant_id = ?2
            GROUP BY e.name, e.type
            ORDER BY count DESC
            LIMIT 200
            """,
-           [workspace_id]
+           [workspace_id, tenant_id]
          ) do
       {:ok, rows} -> rows
       _ -> []
     end
   end
 
-  defp fetch_node_summary(workspace_id) do
+  defp fetch_node_summary(workspace_id, tenant_id) do
     case Store.raw_query(
            """
            SELECT node, COUNT(*) as count, MAX(modified_at) as last_modified
            FROM contexts
-           WHERE workspace_id = ?1
+           WHERE workspace_id = ?1 AND tenant_id = ?2
            GROUP BY node
            ORDER BY node
            """,
-           [workspace_id]
+           [workspace_id, tenant_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [node, count, last_mod] ->
@@ -4986,16 +5001,16 @@ defmodule OptimalEngine.API.Router do
   # Node slugs are reused across workspaces — both queries must filter by
   # workspace_id in addition to the slug (REALITY-AUDIT: natural key is
   # workspace_id + slug).
-  defp fetch_node_contexts(node_id, workspace_id) do
+  defp fetch_node_contexts(node_id, workspace_id, tenant_id) do
     case Store.raw_query(
            """
            SELECT id, title, type, genre, sn_ratio, modified_at
            FROM contexts
-           WHERE node = ?1 AND workspace_id = ?2
+           WHERE node = ?1 AND workspace_id = ?2 AND tenant_id = ?3
            ORDER BY modified_at DESC
            LIMIT 50
            """,
-           [node_id, workspace_id]
+           [node_id, workspace_id, tenant_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, type, genre, sn, mod] ->
@@ -5007,7 +5022,7 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp fetch_node_edges(node_id, workspace_id) do
+  defp fetch_node_edges(node_id, workspace_id, tenant_id) do
     # Return edges where at least one endpoint lives in this node.
     # We join via the contexts table to resolve node membership.
     case Store.raw_query(
@@ -5015,10 +5030,10 @@ defmodule OptimalEngine.API.Router do
            SELECT DISTINCT e.source_id, e.target_id, e.relation, e.weight
            FROM edges e
            JOIN contexts c ON (c.id = e.source_id OR c.id = e.target_id)
-           WHERE c.node = ?1 AND c.workspace_id = ?2
+           WHERE c.node = ?1 AND c.workspace_id = ?2 AND c.tenant_id = ?3
            LIMIT 200
            """,
-           [node_id, workspace_id]
+           [node_id, workspace_id, tenant_id]
          ) do
       {:ok, rows} -> rows
       _ -> []
@@ -5032,18 +5047,18 @@ defmodule OptimalEngine.API.Router do
   # Entities for OptimalGraphView — one row per unique (name, type), with
   # `connections` = how many distinct contexts reference that entity.
   # Workspace membership resolved via the contexts table.
-  defp optimal_entity_summary(workspace_id) do
+  defp optimal_entity_summary(workspace_id, tenant_id) do
     case Store.raw_query(
            """
            SELECT e.name, e.type, COUNT(DISTINCT e.context_id) AS connections
            FROM entities e
-           JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?1
+           JOIN contexts c ON c.id = e.context_id AND c.workspace_id = ?1 AND c.tenant_id = ?2
            WHERE e.name IS NOT NULL AND e.name <> ''
            GROUP BY e.name, e.type
            ORDER BY connections DESC
            LIMIT 300
            """,
-           [workspace_id]
+           [workspace_id, tenant_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [name, type, connections] ->
@@ -5058,14 +5073,14 @@ defmodule OptimalEngine.API.Router do
   # Edges between entities by co-occurrence in the same context. Two entities
   # sharing a context produce one `related_to` edge; weight is the number of
   # shared contexts (capped at 5.0 to keep visuals stable).
-  defp optimal_relation_edges(workspace_id) do
+  defp optimal_relation_edges(workspace_id, tenant_id) do
     sql = """
     SELECT e1.name AS source, e2.name AS target, COUNT(*) AS shared
     FROM entities e1
     JOIN entities e2
       ON e1.context_id = e2.context_id
      AND e1.name < e2.name
-    JOIN contexts c ON c.id = e1.context_id AND c.workspace_id = ?1
+    JOIN contexts c ON c.id = e1.context_id AND c.workspace_id = ?1 AND c.tenant_id = ?2
     WHERE e1.name IS NOT NULL AND e2.name IS NOT NULL
     GROUP BY e1.name, e2.name
     HAVING shared >= 1
@@ -5073,7 +5088,7 @@ defmodule OptimalEngine.API.Router do
     LIMIT 800
     """
 
-    case Store.raw_query(sql, [workspace_id]) do
+    case Store.raw_query(sql, [workspace_id, tenant_id]) do
       {:ok, rows} ->
         Enum.map(rows, fn [s, t, shared] ->
           %{
@@ -5092,16 +5107,16 @@ defmodule OptimalEngine.API.Router do
   # Node list for the drill-down level-0 card grid. Pulls from the workspace
   # `nodes` table (Phase 3.5) joined against context counts, so operators see
   # real signal volumes per node rather than just names.
-  defp optimal_node_summary(workspace_id) do
+  defp optimal_node_summary(workspace_id, tenant_id) do
     sql = """
     SELECT n.slug, n.name, COALESCE(n.kind, 'node') AS type,
-           COALESCE((SELECT COUNT(*) FROM contexts c WHERE c.node = n.slug AND c.workspace_id = ?1), 0) AS signal_count
+           COALESCE((SELECT COUNT(*) FROM contexts c WHERE c.node = n.slug AND c.workspace_id = ?1 AND c.tenant_id = ?2), 0) AS signal_count
     FROM nodes n
-    WHERE n.workspace_id = ?1
+    WHERE n.workspace_id = ?1 AND n.tenant_id = ?2
     ORDER BY n.slug
     """
 
-    case Store.raw_query(sql, [workspace_id]) do
+    case Store.raw_query(sql, [workspace_id, tenant_id]) do
       {:ok, rows} ->
         Enum.map(rows, fn [slug, name, type, count] ->
           %{slug: slug, name: name || slug, type: type, signal_count: count}
@@ -5111,8 +5126,8 @@ defmodule OptimalEngine.API.Router do
         # Fallback for tenants that haven't populated the nodes table yet —
         # derive distinct nodes straight from contexts.
         case Store.raw_query(
-               "SELECT node, COUNT(*) FROM contexts WHERE node IS NOT NULL AND workspace_id = ?1 GROUP BY node",
-               [workspace_id]
+               "SELECT node, COUNT(*) FROM contexts WHERE node IS NOT NULL AND workspace_id = ?1 AND tenant_id = ?2 GROUP BY node",
+               [workspace_id, tenant_id]
              ) do
           {:ok, rows} ->
             Enum.map(rows, fn [slug, count] ->
@@ -5128,16 +5143,16 @@ defmodule OptimalEngine.API.Router do
   # File tree for NodeDrillDown — one entry per signal in a given node,
   # flattened with `is_dir: false`. The component also accepts nested
   # children but the engine stores a flat list per node, so we return that.
-  defp optimal_node_files(slug, workspace_id) do
+  defp optimal_node_files(slug, workspace_id, tenant_id) do
     case Store.raw_query(
            """
            SELECT id, title, uri, genre, modified_at, LENGTH(content) AS size
            FROM contexts
-           WHERE node = ?1 AND workspace_id = ?2
+           WHERE node = ?1 AND workspace_id = ?2 AND tenant_id = ?3
            ORDER BY modified_at DESC
            LIMIT 200
            """,
-           [slug, workspace_id]
+           [slug, workspace_id, tenant_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, uri, genre, modified_at, size] ->
@@ -5162,16 +5177,16 @@ defmodule OptimalEngine.API.Router do
 
   # Flat node list with enough structure for a client-side tree build.
   # Scoped to the given workspace_id (default: "default").
-  defp workspace_nodes(workspace_id) do
+  defp workspace_nodes(workspace_id, tenant_id) do
     sql = """
     SELECT n.id, n.slug, n.name, n.kind, n.parent_id, n.style, n.status,
-           COALESCE((SELECT COUNT(*) FROM contexts c WHERE c.node = n.slug AND c.workspace_id = ?1), 0) AS signal_count
+           COALESCE((SELECT COUNT(*) FROM contexts c WHERE c.node = n.slug AND c.workspace_id = ?1 AND c.tenant_id = ?2), 0) AS signal_count
     FROM nodes n
-    WHERE n.workspace_id = ?1
+    WHERE n.workspace_id = ?1 AND n.tenant_id = ?2
     ORDER BY COALESCE(n.parent_id, ''), n.slug
     """
 
-    case Store.raw_query(sql, [workspace_id]) do
+    case Store.raw_query(sql, [workspace_id, tenant_id]) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, slug, name, kind, parent_id, style, status, count] ->
           %{
