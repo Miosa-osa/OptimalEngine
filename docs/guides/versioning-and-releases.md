@@ -141,6 +141,10 @@ After upgrading:
 
 CI rejects a release tag that does not exactly match the application version.
 
+The release toolchain is one Elixir and OTP pair, named in two places that move together: `BUILDER_IMAGE` in `deploy/Dockerfile.engine` and the `test-current` job in `.github/workflows/ci.yml` (Elixir 1.19.5 / OTP 28.5.0.5 from 0.3.10).
+A build host that sets `BUILDER_IMAGE` to an image it already has must pick one on OTP 28.3 or later.
+OTP 28.0 to 28.2 (erts 16.0 and 16.1) can crash the whole VM when a process is killed during a long regular expression match, which is what a classification time limit does to a slow document; OTP 28.3 fixed it.
+
 ## Migrations at boot
 
 The Store applies pending migrations when it opens, in order, before the API answers.

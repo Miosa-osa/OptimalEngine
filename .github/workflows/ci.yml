@@ -55,7 +55,7 @@ jobs:
         include:
           # The pair the release image ships (deploy/Dockerfile.engine).
           # Formatting is checked here, with the formatter contributors use.
-          - otp: "28.1.1"
+          - otp: "28.5.0.5"
             elixir: "1.19.5"
             name: test-current
             release: true
