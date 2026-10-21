@@ -14,6 +14,7 @@ defmodule OptimalEngine.Imports.NotionTest do
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.TestSupport.NotionExportFixture, as: Fixture
+  alias OptimalEngine.Topology.Node
 
   @moduletag :tmp_dir
 
@@ -554,6 +555,84 @@ defmodule OptimalEngine.Imports.NotionTest do
     stored = contexts(ctx.workspace)
     assert stored[uri(ctx, "cccccccccccccccccccccccccccccccc")].content =~ "bad \uFFFD"
     assert byte_size(stored[uri(ctx, "dddddddddddddddddddddddddddddddd")].content) <= 200
+  end
+
+  test "a long page's entities are read within the classification limit, and the import finishes",
+       ctx do
+    # 676 known names the page never mentions, each starting like "planned",
+    # so no quick check rules one out: reading the whole page for them takes
+    # far longer than a 1 ms limit on any runner.
+    prefix = "notion-absent-#{System.unique_integer([:positive])}-"
+
+    for a <- ?a..?z, b <- ?a..?z do
+      {:ok, _} =
+        Node.upsert(%{slug: prefix <> <<a, b>>, name: "Plannx" <> <<a, b>>, kind: :project})
+    end
+
+    on_exit(fn ->
+      Store.raw_query("DELETE FROM nodes WHERE slug LIKE ?1", [prefix <> "%"])
+    end)
+
+    previous = Application.fetch_env(:optimal_engine, :classification_timeout_ms)
+    Application.put_env(:optimal_engine, :classification_timeout_ms, 1)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:optimal_engine, :classification_timeout_ms, value)
+        :error -> Application.delete_env(:optimal_engine, :classification_timeout_ms)
+      end
+    end)
+
+    page =
+      "# Long\n\n" <> String.duplicate("The rollout continues as planned for the week.\n", 20_000)
+
+    zip =
+      Fixture.zip([
+        {"Long aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md", page},
+        {"Small bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.md", "# Small\n\nFine."}
+      ])
+
+    {{ms, result}, stopped} = timeouts(fn -> elapsed_ms(fn -> import!(ctx, zip) end) end)
+
+    assert {:ok, report} = result
+    assert report["counts"]["contexts"] == 2
+    assert report["errors"] == []
+    assert "entity extraction" in stopped
+    assert ms < 10_000, "the import took #{ms} ms"
+
+    assert byte_size(contexts(ctx.workspace)[uri(ctx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")].content) >
+             900_000
+  end
+
+  defp elapsed_ms(fun) do
+    {microseconds, result} = :timer.tc(fun)
+    {div(microseconds, 1000), result}
+  end
+
+  # The result of `fun` and the labels of the steps the time limit stopped.
+  defp timeouts(fun) do
+    id = {__MODULE__, make_ref()}
+    event = [:optimal_engine, :signal, :classification_timeout]
+    :ok = :telemetry.attach(id, event, &__MODULE__.send_timeout/4, self())
+
+    try do
+      result = fun.()
+      {result, collect_timeouts([])}
+    after
+      :telemetry.detach(id)
+    end
+  end
+
+  @doc false
+  def send_timeout(_event, _measurements, %{label: label}, test),
+    do: send(test, {:stopped, label})
+
+  defp collect_timeouts(labels) do
+    receive do
+      {:stopped, label} -> collect_timeouts([label | labels])
+    after
+      0 -> labels
+    end
   end
 
   test "a refused archive stops the import and writes nothing", ctx do
