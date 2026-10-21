@@ -19,6 +19,7 @@ defmodule OptimalEngine.SyncGateTest do
     AssociativeProjection,
     DerivationLedgerEntry,
     ScopeEnvelope,
+    SecurityLabels,
     SourcePackage
   }
 
@@ -984,6 +985,46 @@ defmodule OptimalEngine.SyncGateTest do
       end
     end
 
+    test "the ledger is read through chunk and cap boundaries: oldest restricted is always seen",
+         ctx do
+      for versions <- [50, 51, 100, 101, 999, 1000, 1001] do
+        id = "fact-edge-#{versions}-#{ctx.n}"
+        fact(ctx, id, "Edge #{versions} secret 5540", ["restricted"])
+        {:ok, _} = Capture.seal()
+
+        {:ok, _} =
+          Store.raw_query("UPDATE facts SET security_labels = '[]' WHERE id = ?1", [id])
+
+        {:ok, _} = Capture.seal()
+        copy_versions(ctx, id, versions - 2)
+        {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+        assert held_delete?(ctx, id), "#{versions} versions, the oldest restricted, were released"
+      end
+    end
+
+    test "a deleted row with every version open is sent below 1,000 versions and held from there",
+         ctx do
+      for {versions, held?} <- [
+            {49, false},
+            {50, false},
+            {51, false},
+            {101, false},
+            {999, false},
+            {1000, true},
+            {1001, true}
+          ] do
+        id = "fact-open-#{versions}-#{ctx.n}"
+        fact(ctx, id, "Open #{versions} 5541", [])
+        {:ok, _} = Capture.seal()
+        copy_versions(ctx, id, versions - 1)
+        {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+        assert held_delete?(ctx, id) == held?,
+               "#{versions} open versions: the delete was #{if held?, do: "released", else: "held"}"
+      end
+    end
+
     test "a version a peer sent without the labels does not release the row's other versions",
          ctx do
       id = "fact-peer-#{ctx.n}"
@@ -1128,7 +1169,7 @@ defmodule OptimalEngine.SyncGateTest do
         end)
 
       # The log names the table, the key and the device, and nothing the row holds.
-      assert log =~ "a delete of facts"
+      assert log =~ "skipped delete of facts"
       assert log =~ id
       assert log =~ "rep_remote"
       refute log =~ "Original 7711"
@@ -1166,7 +1207,7 @@ defmodule OptimalEngine.SyncGateTest do
                    remote_delete(ctx, "facts", long, max_class: "internal")
         end)
 
-      assert log =~ "a delete of facts"
+      assert log =~ "skipped delete of facts"
       assert log =~ String.duplicate("k", 64)
       refute log =~ String.duplicate("k", 65)
 
@@ -1195,8 +1236,34 @@ defmodule OptimalEngine.SyncGateTest do
                    )
         end)
 
-      assert length(Regex.scan(~r/a delete of facts/, log)) == 10
+      assert length(Regex.scan(~r/skipped delete of facts/, log)) == 10
       assert log =~ "4 more changes were skipped the same way"
+    end
+
+    test "the key in the log is cut by bytes, never by graphemes, and stays whole text", ctx do
+      # One grapheme with thousands of combining marks, and characters of three
+      # bytes cut at the 64th.
+      marks = "e" <> String.duplicate("\u0301", 5_000) <> "-#{ctx.n}"
+      euros = String.duplicate("€", 40) <> "-#{ctx.n}"
+
+      for {id, kept} <- [{marks, nil}, {euros, String.duplicate("€", 21)}] do
+        fact(ctx, id, "Cut key 7791", ["restricted"])
+
+        log =
+          capture_log([level: :warning], fn ->
+            assert {:ok, %{skipped: %{gated: 1}}} =
+                     remote_delete(ctx, "facts", id, max_class: "internal")
+          end)
+
+        assert byte_size(log) < 600, "the log line is #{byte_size(log)} bytes"
+        assert String.valid?(log)
+        assert log =~ "skipped delete of facts"
+
+        if kept do
+          assert log =~ kept
+          refute log =~ kept <> "€"
+        end
+      end
     end
 
     test "a delete of a row within the class the peer is cleared for is applied", ctx do
@@ -1473,6 +1540,86 @@ defmodule OptimalEngine.SyncGateTest do
       second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
 
       refute sent?(second["mutations"], "analysis_reports", "rep-late-#{ctx.n}")
+    end
+
+    test "an aggregate is held when a memory's metadata repeats security_labels, whichever is first",
+         ctx do
+      cases = [
+        open_first: {~s({"security_labels":["public"],"security_labels":["restricted"]}), :held},
+        restricted_first:
+          {~s({"security_labels":["restricted"],"security_labels":["public"]}), :held},
+        spelled: {~S({"security_labels":["public"],"security\u005flabels":["restricted"]}), :held},
+        # Controls: one key says what the row is.
+        one_open: {~s({"security_labels":["public"],"note":"a"}), :sent},
+        two_notes: {~s({"note":"a","note":"b","security_labels":["public"]}), :sent}
+      ]
+
+      for {name, {metadata, expected}} <- cases do
+        actual = aggregate_after_memory(ctx, "rk-#{name}", metadata)
+        assert actual == expected, "#{name}: the aggregate was #{actual}, not #{expected}"
+      end
+    end
+
+    test "an aggregate is held around a memory whose labels cannot be read", ctx do
+      cases = [
+        number: {~s({"security_labels":5}), :held},
+        object: {~s({"security_labels":{"a":1}}), :held},
+        boolean: {~s({"security_labels":true}), :held},
+        plain_text: {~s({"security_labels":"internal"}), :held},
+        number_element: {~s({"security_labels":[1]}), :held},
+        null_element: {~s({"security_labels":[null]}), :held},
+        object_element: {~s({"security_labels":[{"a":1}]}), :held},
+        blank_element: {~s({"security_labels":[""]}), :held},
+        space_element: {~s({"security_labels":["   "]}), :held},
+        open_and_number: {~s({"security_labels":["public",5]}), :held},
+        array_as_text: {~s({"security_labels":"[\\"restricted\\"]"}), :held},
+        text_not_json: {~s({"security_labels":"[oops"}), :held},
+        padded_class: {~s({"security_labels":[" Restricted "]}), :held},
+        # Controls: labels that can be read, and say nothing above the gate.
+        absent: {~s({"note":"a"}), :sent},
+        null: {~s({"security_labels":null}), :sent},
+        empty: {~s({"security_labels":[]}), :sent},
+        empty_text: {~s({"security_labels":""}), :sent},
+        empty_array_text: {~s({"security_labels":"[]"}), :sent},
+        open_array_text: {~s({"security_labels":"[\\"public\\"]"}), :sent},
+        other_label: {~s({"security_labels":["team-a","public"]}), :sent}
+      ]
+
+      for {name, {metadata, expected}} <- cases do
+        actual = aggregate_after_memory(ctx, "ul-#{name}", metadata)
+        assert actual == expected, "#{name}: the aggregate was #{actual}, not #{expected}"
+      end
+    end
+
+    test "an aggregate is held around an asset whose labels cannot be read", ctx do
+      cases = [
+        number_element: {"[5]", :held},
+        null_element: {"[null]", :held},
+        blank_element: {~s([""]), :held},
+        padded_class: {~s([" restricted\u00a0"]), :held},
+        not_json: {"oops", :held},
+        text: {~s("restricted"), :held},
+        object: {"{}", :held},
+        # Controls.
+        empty: {"[]", :sent},
+        other_label: {~s(["team-a"]), :sent},
+        internal: {~s(["internal"]), :sent}
+      ]
+
+      for {name, {labels, expected}} <- cases do
+        ws = create_workspace(ctx.tenant, "ua-" <> String.replace("#{name}", "_", "-"), %{})
+        scoped = %{ctx | ws: ws}
+        asset(scoped, "asset-ua-#{name}-#{ctx.n}", labels)
+        report(scoped, "rep-ua-#{name}-#{ctx.n}")
+        pulled = Sync.changes(ctx.tenant, ws, limit: 2_000)
+
+        actual =
+          if sent?(pulled["mutations"], "analysis_reports", "rep-ua-#{name}-#{ctx.n}"),
+            do: :sent,
+            else: :held
+
+        assert actual == expected, "#{name}: the aggregate was #{actual}, not #{expected}"
+      end
     end
 
     test "a change applied from a peer that raises the labels of a source is honoured", ctx do
@@ -2164,7 +2311,145 @@ defmodule OptimalEngine.SyncGateTest do
       {:ok, _} = Store.raw_query("DELETE FROM assets WHERE id = ?1", ["asset-quiet-#{ctx.n}"])
       assert local_stamp() == before
 
+      asset(ctx, ctx.asset, ~s(["restricted"]))
+      assert local_stamp() > before
+    end
+
+    test "a row that names no class moves nothing, written, rewritten or deleted", ctx do
+      before = local_stamp()
+
       asset(ctx, ctx.asset)
+      tool_run(ctx, "run-open-#{ctx.n}")
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE assets SET size_bytes = 9, security_labels = '[]' WHERE id = ?1",
+          [ctx.asset]
+        )
+
+      {:ok, _} = Store.raw_query("DELETE FROM assets WHERE id = ?1", [ctx.asset])
+      {:ok, _} = Store.raw_query("DELETE FROM tool_call_runs WHERE id = ?1", ["run-open-#{ctx.n}"])
+
+      assert local_stamp() == before
+    end
+
+    test "a run table: a labelled run holds an aggregate, open runs leave the scan cached", ctx do
+      report(ctx, ctx.report)
+
+      {_, first} =
+        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+      assert :holds_above in first
+
+      before = local_stamp()
+      for i <- 1..5, do: tool_run(ctx, "run-open-#{i}-#{ctx.n}")
+      assert local_stamp() == before
+
+      {pulled, again} =
+        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+      assert again == []
+      assert sent?(pulled["mutations"], "analysis_reports", ctx.report)
+
+      tool_run(ctx, "run-secret-#{ctx.n}", ~s(["restricted"]))
+      assert local_stamp() > before
+
+      held = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      refute sent?(held["mutations"], "analysis_reports", ctx.report)
+    end
+
+    test "an update that writes the same value moves nothing, even on a labelled row", ctx do
+      asset(ctx, ctx.asset, ~s(["restricted"]))
+      before = local_stamp()
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE assets SET security_labels = security_labels, tenant_id = tenant_id, workspace_id = workspace_id WHERE id = ?1",
+          [ctx.asset]
+        )
+
+      assert local_stamp() == before
+    end
+
+    test "an INSERT OR REPLACE of an asset with a labelled one holds an aggregate", ctx do
+      report(ctx, ctx.report)
+      asset(ctx, ctx.asset)
+
+      first = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      assert sent?(first["mutations"], "analysis_reports", ctx.report)
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT OR REPLACE INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path, security_labels) VALUES (?1, ?2, ?3, 'text/plain', 1, 'x', '[\"restricted\"]')",
+          [ctx.asset, ctx.tenant, ctx.ws]
+        )
+
+      second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      refute sent?(second["mutations"], "analysis_reports", ctx.report)
+    end
+
+    test "moving an asset between workspaces moves the stamp when it names a class", ctx do
+      other = create_workspace(ctx.tenant, "moved-#{ctx.n}", %{})
+
+      {:ok, quiet} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "quiet-moved-#{ctx.n}",
+          name: "Quiet"
+        })
+
+      move = fn id, to ->
+        {:ok, _} = Store.raw_query("UPDATE assets SET workspace_id = ?2 WHERE id = ?1", [id, to])
+      end
+
+      # Open: nothing to find in either workspace.
+      asset(ctx, "asset-open-#{ctx.n}")
+      before = local_stamp()
+      move.("asset-open-#{ctx.n}", other)
+      assert local_stamp() == before
+
+      # Labelled: out of a syncing workspace, between two, and in from one that
+      # does not sync.
+      asset(ctx, ctx.asset, ~s(["restricted"]))
+
+      for {to, label} <- [
+            {other, "to another syncing workspace"},
+            {quiet.id, "to one that does not sync"},
+            {ctx.ws, "back from one that does not sync"}
+          ] do
+        before = local_stamp()
+        move.(ctx.asset, to)
+        assert local_stamp() > before, "moved #{label}"
+      end
+    end
+
+    test "sync enabled later: writes before it move nothing, writes after it do", ctx do
+      {:ok, late} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "late-#{ctx.n}",
+          name: "Late"
+        })
+
+      before = local_stamp()
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path, security_labels) VALUES (?1, ?2, ?3, 'text/plain', 1, 'x', '[\"restricted\"]')",
+          ["asset-late-#{ctx.n}", ctx.tenant, late.id]
+        )
+
+      assert local_stamp() == before
+
+      {:ok, _} = Sync.enable(ctx.tenant, late.id, "user:owner")
+
+      {:ok, _} =
+        Store.raw_query("UPDATE assets SET security_labels = '[]' WHERE id = ?1", [
+          "asset-late-#{ctx.n}"
+        ])
+
       assert local_stamp() > before
     end
   end
@@ -2220,10 +2505,8 @@ defmodule OptimalEngine.SyncGateTest do
       replicated = replicated_tables()
       stamped = Capture.stamped_tables()
 
-      # A scanned table either replicates (the capture triggers watch it, the test
-      # above) or is stamped.
-      assert stamped == Lineage.scanned_tables() -- replicated
       assert stamped != []
+      assert Enum.all?(stamped, &(&1 in Lineage.scanned_tables() and &1 not in replicated))
 
       for table <- ~w(assets active_memory_pools context_packages model_call_runs tool_call_runs
                       skill_packages mcp_tool_definitions),
@@ -2243,6 +2526,18 @@ defmodule OptimalEngine.SyncGateTest do
         assert sql =~ "sync_local_stamp"
       end
 
+      # An update counts when it writes the column the gate reads of the table, and
+      # the scope of the row: the same columns `Gate` builds its scan on.
+      for table <- stamped do
+        {_kind, column} = Lineage.class_column(Lineage.spec(table))
+        assert Capture.stamp_columns(table) == [column, "tenant_id", "workspace_id"]
+
+        assert triggers["sync_stamp_au_#{table}"] =~
+                 ~s(AFTER UPDATE OF "#{column}", "tenant_id", "workspace_id" ON)
+      end
+
+      assert triggers["sync_stamp_au_assets"] =~ ~s(AFTER UPDATE OF "security_labels")
+
       # Nor is one left on a table that is not stamped.
       expected =
         for table <- stamped, operation <- ~w(ai au ad), do: "sync_stamp_#{operation}_#{table}"
@@ -2251,6 +2546,129 @@ defmodule OptimalEngine.SyncGateTest do
 
       # The counter keeps no row, only its sequence.
       assert {:ok, [[0]]} = Store.raw_query("SELECT COUNT(*) FROM sync_local_stamp", [])
+    end
+
+    test "a row that may name a class is told from one that cannot, for each way a table names it" do
+      may? = fn kind, column, value ->
+        sql = Lineage.may_name_class_sql({kind, column}, "r")
+
+        {:ok, [[result]]} =
+          Store.raw_query("SELECT #{sql} FROM (SELECT ?1 AS \"#{column}\") r", [value])
+
+        result == 1
+      end
+
+      # Labels: anything but an empty array, text that is not JSON and NULL included.
+      refute may?.(:labels, "security_labels", "[]")
+
+      for value <- [~s(["restricted"]), ~s(["public"]), "", "not json", "[ ]", nil],
+          do: assert(may?.(:labels, "security_labels", value), inspect(value))
+
+      # Metadata: the key, or a backslash (a key can be spelled with an escape).
+      for value <- [nil, "{}", ~s({"note":"a"})],
+          do: refute(may?.(:meta, "metadata", value), inspect(value))
+
+      for value <- [
+            ~s({"security_labels":[]}),
+            ~S({"security\u005flabels":["x"]}),
+            ~S({"note":"a\nb"})
+          ],
+          do: assert(may?.(:meta, "metadata", value), inspect(value))
+
+      # A class column: not null, empty, internal or public, whatever the case.
+      for value <- [nil, "", "internal", "PUBLIC"],
+          do: refute(may?.(:class, "classification_level", value), inspect(value))
+
+      for value <- ["restricted", "Confidential", "unheard-of"],
+          do: assert(may?.(:class, "classification_level", value), inspect(value))
+    end
+
+    test "the SQL predicates hold what the Elixir tokens rank above the gate, and no less" do
+      values = [
+        [],
+        ["restricted"],
+        ["Restricted"],
+        [" restricted "],
+        ["\trestricted\n"],
+        ["restricted\u00a0"],
+        ["\u2003internal"],
+        ["public"],
+        ["internal"],
+        ["INTERNAL"],
+        ["confidential"],
+        ["team-a"],
+        ["restricted-x"],
+        ["public", "team-a"],
+        ["internal", 5],
+        [1],
+        [nil],
+        [true],
+        [%{"a" => 1}],
+        [["restricted"]],
+        [""],
+        ["  "],
+        "restricted",
+        "internal",
+        "",
+        " ",
+        "[]",
+        "null",
+        ~s(["restricted"]),
+        ~s(["public"]),
+        "[oops",
+        5,
+        nil,
+        true,
+        %{},
+        %{"a" => 1}
+      ]
+
+      held = fn pred, column, text ->
+        {:ok, [[result]]} =
+          Store.raw_query("SELECT #{pred} FROM (SELECT ?1 AS \"#{column}\")", [text])
+
+        result == 1
+      end
+
+      above? = fn tokens, rank ->
+        case SecurityLabels.token_rank(MapSet.new(tokens)) do
+          nil -> false
+          ranked -> ranked > rank
+        end
+      end
+
+      for rank <- 0..2, value <- values do
+        labels = Jason.encode!(value)
+        pred = Gate.exact_predicate({:labels, "security_labels"}, rank)
+
+        assert held.(pred, "security_labels", labels) ==
+                 above?.(SecurityLabels.tokens(labels), rank),
+               "labels #{labels} at rank #{rank}"
+
+        metadata = Jason.encode!(%{"security_labels" => value})
+        pred = Gate.exact_predicate({:meta, "metadata"}, rank)
+
+        assert held.(pred, "metadata", metadata) ==
+                 above?.(SecurityLabels.metadata_tokens(metadata), rank),
+               "metadata #{metadata} at rank #{rank}"
+      end
+
+      # Text that is not JSON, and a repeated key.
+      for rank <- 0..2 do
+        labels = Gate.exact_predicate({:labels, "security_labels"}, rank)
+        meta = Gate.exact_predicate({:meta, "metadata"}, rank)
+
+        assert held.(labels, "security_labels", "not json")
+        assert held.(meta, "metadata", ~s({"security_labels":["public"],"security_labels":[]}))
+        refute held.(meta, "metadata", "not json")
+        refute held.(meta, "metadata", ~s({"note":"a"}))
+        refute held.(meta, "metadata", ~s(["security_labels"]))
+      end
+
+      # A label column that is empty or NULL names nothing for Elixir and is held
+      # here (the column defaults to an empty array, so neither is written).
+      assert held.(Gate.exact_predicate({:labels, "security_labels"}, 1), "security_labels", nil)
+      assert held.(Gate.exact_predicate({:labels, "security_labels"}, 1), "security_labels", "")
     end
 
     test "installing again does no DDL" do
@@ -2812,6 +3230,63 @@ defmodule OptimalEngine.SyncGateTest do
       )
   end
 
+  # A workspace of its own with a memory whose metadata is the text `metadata` and
+  # an aggregate, pulled at the default class: whether the aggregate was sent or
+  # held at home.
+  defp aggregate_after_memory(ctx, name, metadata) do
+    ws = create_workspace(ctx.tenant, String.replace(name, "_", "-"), %{})
+
+    {:ok, memory} =
+      Versioned.create(%{content: "Note #{name}", workspace_id: ws, tenant_id: ctx.tenant})
+
+    {:ok, _} =
+      Store.raw_query("UPDATE memories SET metadata = ?2 WHERE id = ?1", [memory.id, metadata])
+
+    report(%{ctx | ws: ws}, "rep-#{name}-#{ctx.n}")
+    pulled = Sync.changes(ctx.tenant, ws, limit: 2_000)
+
+    if sent?(pulled["mutations"], "analysis_reports", "rep-#{name}-#{ctx.n}"),
+      do: :sent,
+      else: :held
+  end
+
+  # `count` more versions of the fact `id`, copies of its newest in the ledger,
+  # written in one statement.
+  defp copy_versions(ctx, id, count) do
+    {:ok, _} =
+      Store.raw_query(
+        """
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?4),
+          newest AS (
+            SELECT * FROM sync_mutations
+            WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = 'facts' AND entity_id = ?3
+            ORDER BY sequence DESC LIMIT 1
+          )
+        INSERT INTO sync_mutations
+          (id, tenant_id, organization_id, workspace_id, device_id, entity_type, entity_id, operation,
+           payload, payload_hash, idempotency_key, occurred_at)
+        SELECT newest.id || '-' || n.i, newest.tenant_id, newest.organization_id, newest.workspace_id,
+               newest.device_id, newest.entity_type, newest.entity_id, 'update', newest.payload,
+               newest.payload_hash, newest.idempotency_key || '-' || n.i, newest.occurred_at
+        FROM newest, n ORDER BY n.i
+        """,
+        [ctx.tenant, ctx.ws, id, count]
+      )
+  end
+
+  # Whether a replicating gate for a peer cleared for `internal` keeps the delete
+  # of the gone fact `id` at home.
+  defp held_delete?(ctx, id) do
+    delete = %{
+      "entity_type" => "facts",
+      "entity_id" => id,
+      "operation" => "delete",
+      "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
+    }
+
+    Gate.with_gate(ctx.tenant, ctx.ws, "internal", &Gate.hold?(&1, delete))
+  end
+
   defp report(ctx, id) do
     {:ok, _} =
       Store.raw_query(
@@ -2825,6 +3300,14 @@ defmodule OptimalEngine.SyncGateTest do
       Store.raw_query(
         "INSERT INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path, security_labels) VALUES (?1, ?2, ?3, 'text/plain', 1, ?4, ?5)",
         [id, ctx.tenant, ctx.ws, "assets/#{id}", labels]
+      )
+  end
+
+  defp tool_run(ctx, id, labels \\ "[]") do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO tool_call_runs (id, tenant_id, workspace_id, mcp_tool_definition_id, tool_name, decision_state, security_labels) VALUES (?1, ?2, ?3, 'tool-1', 'search', 'allowed', ?4)",
+        [id, ctx.tenant, ctx.ws, labels]
       )
   end
 

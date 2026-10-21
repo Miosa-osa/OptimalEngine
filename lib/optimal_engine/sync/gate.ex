@@ -894,8 +894,7 @@ defmodule OptimalEngine.Sync.Gate do
         [
           spec.labels && non_empty_json("security_labels"),
           spec.partitions && non_empty_json("partition_ids"),
-          spec.meta &&
-            "(#{spec.meta} LIKE '%security_labels%' OR #{spec.meta} LIKE '%partition_ids%')",
+          spec.meta && metadata_candidate(spec.meta),
           spec.class &&
             "(#{spec.class} IS NOT NULL AND lower(#{spec.class}) NOT IN ('', 'internal', 'public'))"
         ],
@@ -923,6 +922,19 @@ defmodule OptimalEngine.Sync.Gate do
 
   defp non_empty_json(column), do: "(#{column} NOT IN ('[]', '') OR NOT json_valid(#{column}))"
 
+  # A metadata that may carry a label or a partition. Text that spells one of the
+  # two keys is a candidate, and so is any text with a backslash in which a
+  # member is named by that key: `"security\u005flabels"` is the key
+  # `security_labels` once decoded, and spelled so it does not contain it.
+  # `metadata_labels_sql/1` then reads the decoded keys.
+  defp metadata_candidate(column) do
+    quoted = quote_name(column)
+
+    "(#{quoted} LIKE '%security_labels%' OR #{quoted} LIKE '%partition_ids%' OR " <>
+      "(instr(#{quoted}, char(92)) > 0 AND json_valid(#{quoted}) AND " <>
+      "EXISTS (SELECT 1 FROM json_each(#{quoted}) WHERE key IN ('security_labels', 'partition_ids'))))"
+  end
+
   # The labels and partitions of a metadata column as a small JSON object, which
   # `SecurityLabels.metadata_tokens/1` reads like the whole column. Metadata that
   # is not JSON names nothing, as there.
@@ -947,46 +959,70 @@ defmodule OptimalEngine.Sync.Gate do
 
       index.contexts != %{} or index.memories != %{} or
         Enum.any?(Lineage.scanned_tables(), fn table ->
-          case exact_predicate(Lineage.spec(table), gate.rank) do
-            nil ->
-              false
+          predicate = exact_predicate(Lineage.class_column(Lineage.spec(table)), gate.rank)
 
-            predicate ->
-              sql =
-                "SELECT 1 FROM #{quote_name(table)} WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate} LIMIT 1"
+          sql =
+            "SELECT 1 FROM #{quote_name(table)} WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate} LIMIT 1"
 
-              query!(sql, [gate.tenant_id, gate.workspace_id]) != []
-          end
+          query!(sql, [gate.tenant_id, gate.workspace_id]) != []
         end)
     end)
   end
 
-  # SQL for "this row names a class above the gate", exactly, by the way its
-  # table names a class; nil for a table that names none.
-  defp exact_predicate(%{labels: true}, rank) do
+  # The characters of Unicode White_Space, which `String.trim/1` removes.
+  @white_space "(' ' || char(#{Enum.join(Enum.to_list(9..13) ++ [133, 160, 5760, 6158] ++ Enum.to_list(8192..8202) ++ [8232, 8233, 8239, 8287, 12288], ", ")}))"
+
+  # SQL for "this row names a class above the gate", by the way its table names a
+  # class (`Lineage.class_column/1`). It holds what `SecurityLabels.tokens/1`
+  # ranks above the gate, and what it cannot read: a label that is not a
+  # non-blank string, or a value that is not an array, is `unresolved` there
+  # (restricted), so it is held here too, and an aggregate never goes out around
+  # a row nobody could classify. Exposed for the test that compares the two.
+  @doc false
+  def exact_predicate({:labels, column}, rank) do
     """
-    (CASE WHEN json_valid(security_labels)
-       THEN EXISTS (SELECT 1 FROM json_each(security_labels) j WHERE lower(j.value) IN (#{classes_above(rank)}))
+    (CASE WHEN json_valid(#{column}) THEN
+       CASE json_type(#{column}) WHEN 'array' THEN #{labels_above(column, rank)} ELSE 1 END
        ELSE 1 END)
     """
   end
 
-  defp exact_predicate(%{meta: meta}, rank) when is_binary(meta) do
+  # A `security_labels` key that appears twice is above every class: SQLite reads
+  # the first of two and `SecurityLabels.metadata_map/1` marks the pair as
+  # unresolved, and the row must not pass as open because the first is.
+  # The value is read as `SecurityLabels.tokens/1` reads it: an array, or text
+  # that holds the JSON of an array (empty text and `null` name nothing);
+  # anything else cannot be read.
+  def exact_predicate({:meta, meta}, rank) do
+    key = "'$.security_labels'"
+    text = "json_extract(#{meta}, #{key})"
+
     """
     (CASE WHEN json_valid(#{meta}) THEN
-       CASE json_type(#{meta}, '$.security_labels')
-         WHEN 'array' THEN EXISTS (SELECT 1 FROM json_each(#{meta}, '$.security_labels') j WHERE lower(j.value) IN (#{classes_above(rank)}))
-         WHEN 'text' THEN lower(json_extract(#{meta}, '$.security_labels')) IN (#{classes_above(rank)})
-         ELSE 0 END
+       CASE WHEN (SELECT count(*) FROM json_each(#{meta}) WHERE key = 'security_labels') > 1 THEN 1
+       WHEN json_type(#{meta}, #{key}) IS NULL OR json_type(#{meta}, #{key}) = 'null' THEN 0
+       WHEN json_type(#{meta}, #{key}) = 'array' THEN #{labels_above("#{meta}, #{key}", rank)}
+       WHEN json_type(#{meta}, #{key}) = 'text' THEN
+         CASE WHEN #{text} = '' THEN 0
+              WHEN json_valid(#{text}) AND json_type(#{text}) = 'array' THEN #{labels_above(text, rank)}
+              ELSE 1 END
+       ELSE 1 END
        ELSE 0 END)
     """
   end
 
   # `internal` is the default of a classification column and says nothing.
-  defp exact_predicate(%{class: class}, rank) when is_binary(class),
+  def exact_predicate({:class, class}, rank),
     do: "lower(#{class}) IN (#{classes_above(max(rank, 1))})"
 
-  defp exact_predicate(_spec, _rank), do: nil
+  # Some element of the array `source` is above the gate, or is not a non-blank
+  # string (trimmed of the white space `String.trim/1` removes).
+  defp labels_above(source, rank) do
+    trimmed = "trim(j.value, #{@white_space})"
+
+    "EXISTS (SELECT 1 FROM json_each(#{source}) j WHERE j.type != 'text' OR #{trimmed} = '' " <>
+      "OR lower(#{trimmed}) IN (#{classes_above(rank)}))"
+  end
 
   defp classes_above(rank) do
     SecurityLabels.classes() |> Enum.drop(rank + 1) |> Enum.map_join(", ", &"'#{&1}'")

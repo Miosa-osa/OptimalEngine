@@ -136,10 +136,12 @@ A dense mesh of links that cycles back on itself (every row naming every other) 
 The push cycle ends in an error with nothing sent and its cursor where it was, so the next cycle classifies the same rows again; a workspace that cannot be read is not assumed to be open.
 - A value SQLite holds as a BLOB travels in `payload.blobs`; a label stored that way is read like any other, on send and on receive.
 - An aggregate (`analysis_reports`, `data_quality_snapshots`, `rhythm_notes`, `sessions`, a wiki page or cluster that names nothing, an edge between entity names) has no row to point at, so it stays home while the workspace holds anything above the peer's class.
+That includes a row whose labels cannot be read, which counts as `restricted` there as it does for the row itself: a label that is a number, an object or a blank string, an array with such an element, text that is not an array, and a metadata that repeats `security_labels`.
+A row nobody could classify never lets an aggregate out.
 - A change is held at the higher of the row as the ledger recorded it and the row as it is stored now.
 An older version of a row that has labels today (it was labelled afterwards, or a version arrived from another Engine without them) stays home with the row.
 When the row is gone, it is read as the ledger last recorded it: every version it has there, newest first, read 50 at a time and stopping as soon as one is above the peer's class.
-A row with more than 1000 versions in the ledger is not read to its oldest: past that it is held, because a version that cannot be read is not assumed to be open.
+A row with 1,000 versions or more in the ledger is not read to its oldest: past that it is held, because a version that cannot be read is not assumed to be open.
 So a version written before the row was labelled and then deleted stays home with the labelled versions, however many versions came after it.
 - A delete carries only the row's key.
 It stays home when the row's earlier changes in the local ledger were held, so a peer that never had the row is not told of it.
@@ -152,7 +154,7 @@ A row this Engine already holds keeps the `security_labels`, the `partition_ids`
 Labels held here that cannot be read count as `restricted`.
 A change that carries everything the row holds is written as sent.
 A delete or an overwrite from a peer is not applied to a row this Engine holds above the class that peer is cleared for (the peer was never sent it): the change is skipped as `gated` and the row stays.
-Each such skip is logged as a warning after the batch commits (the operation, the table, the id cut to 64 characters, and the device that sent it; never the row), at most ten lines for a batch and one more for the rest, so a peer that keeps trying can be found.
+Each such skip is logged as a warning after the batch commits (the operation, the table, and the id and the device that sent it, each of those two cut to 64 bytes; never the row), at most ten lines for a batch and one more for the rest, so a peer that keeps trying can be found.
 The link columns of a row (`source_package_id`, `signal_id`, the `memory_core_source_package_id` in a memory's metadata, and the like) are not kept: a change from a peer may repoint them, as an ordinary edit does.
 A row that carries labels of its own keeps them whatever its links say; a legacy row that is classified only through the rows it links to is classified through the links it has after the change.
 Labels never shrink on a replica through sync, so lowering a label (declassifying) has to be done on each replica.
@@ -174,7 +176,9 @@ That scan is kept between gates (a pull of many pages, the next push cycle) whil
 The stamp is read just before each scan, not once per gate, so a long push cycle that needs a scan late does not use an older stamp.
 A push cycle classifies one page at a time, as it sends it, so a label written while an earlier page is on the wire holds back the pages after it.
 A table the gate scans that stays on its Engine (`assets`, `active_memory_pools`, `context_packages`, the model and tool run tables, `skill_packages`, `mcp_tool_definitions`) is not captured, so triggers on it move a third counter, `sync_local_stamp`, which keeps no row.
-They fire for the rows of a workspace that syncs, for an insert, a delete, and an update that writes a column the gate reads (the labels, the metadata or the class); a status written on every call leaves the scan alone.
+They fire for the rows of a workspace that syncs that may name a class (labels other than an empty array, a class other than `internal` or `public`; a value that cannot be read counts), for an insert or a delete, and for an update that changes the column the gate reads or the scope of the row, to or from such a row.
+A row without labels, a status written on every call, and an update that writes the same value leave the scan alone, so a busy run table does not keep the cache cold.
+An `INSERT OR REPLACE` that swaps a labelled row for an open one is seen at the ttl, which can only hold an aggregate longer.
 An entry also expires after `config :optimal_engine, :sync_gate_cache_ttl_ms` (default `30000`; `0` turns the cache off), which is a backstop for a write that nothing sees; every table the gate scans is captured or stamped, and a test pins that.
 A value that is not a non-negative integer of milliseconds turns the cache off and is warned about once, instead of the gate failing on it at every call.
 The cache is dropped after a change from a peer is applied and when sync is enabled or disabled for a workspace.
