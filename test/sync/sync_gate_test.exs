@@ -26,6 +26,7 @@ defmodule OptimalEngine.SyncGateTest do
   alias OptimalEngine.MemoryCore.Store, as: CoreStore
   alias OptimalEngine.Pipeline.Intake
   alias OptimalEngine.Storage.PolicyStore
+  alias OptimalEngine.Store.Dialect
   alias OptimalEngine.Sync.{Capture, Gate, GateCache, Lineage}
   alias OptimalEngine.Tenancy.Tenant
 
@@ -1660,6 +1661,205 @@ defmodule OptimalEngine.SyncGateTest do
       end
     end
 
+    test "a memory is held as its source is, however the source names its class", ctx do
+      cases = [
+        # The labels column: valid JSON that cannot be read, or a class spelled otherwise.
+        number_element: {{:labels, "[1]"}, :held},
+        blank_element: {{:labels, ~s([""])}, :held},
+        null_element: {{:labels, "[null]"}, :held},
+        object: {{:labels, "{}"}, :held},
+        number: {{:labels, "5"}, :held},
+        escaped_class: {{:labels, ~S(["\u0072estricted"])}, :held},
+        padded_class: {{:labels, ~s([" restricted "])}, :held},
+        restricted: {{:labels, ~s(["restricted"])}, :held},
+        # Partitions that cannot be read.
+        partitions_number: {{:partitions, "5"}, :held},
+        partitions_element: {{:partitions, "[1]"}, :held},
+        # The metadata alone.
+        meta_restricted: {{:meta, "security_labels", ~s(["restricted"])}, :held},
+        meta_number: {{:meta, "security_labels", "5"}, :held},
+        meta_partitions: {{:meta, "partition_ids", "5"}, :held},
+        meta_partition_element: {{:meta, "partition_ids", "[1]"}, :held},
+        # Controls: what can be read, and is not above the gate.
+        open: {{:labels, "[]"}, :open},
+        internal: {{:labels, ~s(["internal"])}, :open},
+        team: {{:labels, ~s(["team-a"])}, :open},
+        partitions_team: {{:partitions, ~s(["team-a"])}, :open},
+        meta_internal: {{:meta, "security_labels", ~s(["internal"])}, :open},
+        meta_team: {{:meta, "partition_ids", ~s(["team-a"])}, :open}
+      ]
+
+      for {name, {change, expected}} <- cases do
+        {memory, source} = bridged_memory(ctx, name)
+
+        {:ok, _} =
+          case change do
+            {:labels, value} ->
+              Store.raw_query("UPDATE source_packages SET security_labels = ?2 WHERE id = ?1", [
+                source.id,
+                value
+              ])
+
+            {:partitions, value} ->
+              Store.raw_query("UPDATE source_packages SET partition_ids = ?2 WHERE id = ?1", [
+                source.id,
+                value
+              ])
+
+            {:meta, key, value} ->
+              Store.raw_query(
+                "UPDATE source_packages SET metadata = json_set(COALESCE(metadata, '{}'), '$.' || ?2, json(?3)) WHERE id = ?1",
+                [source.id, key, value]
+              )
+          end
+
+        held? =
+          Gate.with_gate(
+            ctx.tenant,
+            ctx.ws,
+            "confidential",
+            &Gate.hold?(&1, memory_change(memory.id))
+          )
+
+        actual = if held?, do: :held, else: :open
+        assert actual == expected, "#{name}: the memory was #{actual}, not #{expected}"
+      end
+    end
+
+    test "an aggregate is held around an asset whose partitions cannot be read", ctx do
+      cases = [
+        number: {"5", :held},
+        element: {"[1]", :held},
+        blank: {~s([""]), :held},
+        object: {"{}", :held},
+        text: {"oops", :held},
+        # Controls: partitions that can be read rank nothing.
+        empty: {"[]", :sent},
+        team: {~s(["team-a"]), :sent},
+        two: {~s(["team-a", "team-b"]), :sent}
+      ]
+
+      for {name, {partitions, expected}} <- cases do
+        ws = create_workspace(ctx.tenant, "pa-" <> String.replace("#{name}", "_", "-"), %{})
+        scoped = %{ctx | ws: ws}
+        asset(scoped, "asset-pa-#{name}-#{ctx.n}", "[]", partitions)
+        report(scoped, "rep-pa-#{name}-#{ctx.n}")
+        pulled = Sync.changes(ctx.tenant, ws, limit: 2_000)
+
+        actual =
+          if sent?(pulled["mutations"], "analysis_reports", "rep-pa-#{name}-#{ctx.n}"),
+            do: :sent,
+            else: :held
+
+        assert actual == expected, "#{name}: the aggregate was #{actual}, not #{expected}"
+      end
+    end
+
+    test "an aggregate is held around a memory whose metadata partitions cannot be read", ctx do
+      cases = [
+        number: {~s({"partition_ids":5}), :held},
+        element: {~s({"partition_ids":[1]}), :held},
+        object: {~s({"partition_ids":{"a":1}}), :held},
+        plain_text: {~s({"partition_ids":"team-a"}), :held},
+        repeated: {~s({"partition_ids":["a"],"partition_ids":["b"]}), :held},
+        spelled: {~S({"partition\u005fids":5}), :held},
+        # Controls.
+        team: {~s({"partition_ids":["team-a"]}), :sent},
+        empty: {~s({"partition_ids":[]}), :sent},
+        null: {~s({"partition_ids":null}), :sent},
+        empty_text: {~s({"partition_ids":""}), :sent},
+        array_text: {~s({"partition_ids":"[\\"team-a\\"]"}), :sent}
+      ]
+
+      for {name, {metadata, expected}} <- cases do
+        actual = aggregate_after_memory(ctx, "mp-#{name}", metadata)
+        assert actual == expected, "#{name}: the aggregate was #{actual}, not #{expected}"
+      end
+    end
+
+    test "an aggregate is held around a chunk whose class name this Engine does not know", ctx do
+      cases = [
+        secret: {"secret", :held},
+        two_words: {"top secret", :held},
+        blank: {" ", :held},
+        padded: {"Restricted ", :held},
+        number: {"0", :held},
+        # Controls: a name it knows that is not above the gate, or none.
+        internal: {"internal", :sent},
+        public: {"public", :sent},
+        empty: {"", :sent},
+        confidential: {"Confidential", :sent}
+      ]
+
+      for {name, {level, expected}} <- cases do
+        ws = create_workspace(ctx.tenant, "cl-" <> String.replace("#{name}", "_", "-"), %{})
+        scoped = %{ctx | ws: ws}
+        insert_context(scoped, "doc-cl-#{name}-#{ctx.n}", "Doc #{name}")
+        insert_chunk(scoped, "chk-cl-#{name}-#{ctx.n}", "doc-cl-#{name}-#{ctx.n}", "Text", level)
+        report(scoped, "rep-cl-#{name}-#{ctx.n}")
+        pulled = Sync.changes(ctx.tenant, ws, limit: 2_000)
+
+        actual =
+          if sent?(pulled["mutations"], "analysis_reports", "rep-cl-#{name}-#{ctx.n}"),
+            do: :sent,
+            else: :held
+
+        assert actual == expected, "#{name}: the aggregate was #{actual}, not #{expected}"
+      end
+    end
+
+    test "an aggregate is held around a source or a claim labelled by its metadata alone", ctx do
+      cases = [
+        restricted: {~s(["restricted"]), :held},
+        number: {"5", :held},
+        spelled_element: {~S(["\u0072estricted"]), :held},
+        internal: {~s(["internal"]), :sent},
+        team: {~s(["team-a"]), :sent}
+      ]
+
+      for {name, {labels, expected}} <- cases, table <- [:source, :claim] do
+        label = "#{table}-#{name}"
+        ws = create_workspace(ctx.tenant, "mo-" <> String.replace(label, "_", "-"), %{})
+        scoped = %{ctx | ws: ws}
+        source = plain_source(scoped, "Source #{label}")
+
+        case table do
+          :source ->
+            {:ok, _} =
+              Store.raw_query(
+                "UPDATE source_packages SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json(?2)) WHERE id = ?1",
+                [source.id, labels]
+              )
+
+          :claim ->
+            insert_context(scoped, "doc-mo-#{label}-#{ctx.n}", "Doc #{label}")
+
+            {:ok, _} =
+              Store.raw_query(
+                "INSERT INTO claims (id, tenant_id, workspace_id, source_package_id, signal_id, claim_text, metadata) VALUES (?1, ?2, ?3, ?4, ?5, 'a claim', json_object('security_labels', json(?6)))",
+                [
+                  "clm-mo-#{label}-#{ctx.n}",
+                  ctx.tenant,
+                  ws,
+                  source.id,
+                  "doc-mo-#{label}-#{ctx.n}",
+                  labels
+                ]
+              )
+        end
+
+        report(scoped, "rep-mo-#{label}-#{ctx.n}")
+        pulled = Sync.changes(ctx.tenant, ws, limit: 2_000)
+
+        actual =
+          if sent?(pulled["mutations"], "analysis_reports", "rep-mo-#{label}-#{ctx.n}"),
+            do: :sent,
+            else: :held
+
+        assert actual == expected, "#{label}: the aggregate was #{actual}, not #{expected}"
+      end
+    end
+
     test "a change applied from a peer that raises the labels of a source is honoured", ctx do
       Application.put_env(:optimal_engine, :sync_serve_max_class, "internal")
       source = plain_source(ctx, "Escrow terms 8812")
@@ -2353,6 +2553,23 @@ defmodule OptimalEngine.SyncGateTest do
       assert local_stamp() > before
     end
 
+    test "partitions that cannot be read move the stamp, ones that can be read do not", ctx do
+      before = local_stamp()
+      asset(ctx, "asset-pt-ok-#{ctx.n}", "[]", ~s(["team-a"]))
+      assert local_stamp() == before
+
+      asset(ctx, "asset-pt-bad-#{ctx.n}", "[]", "5")
+      after_insert = local_stamp()
+      assert after_insert > before
+
+      {:ok, _} =
+        Store.raw_query("UPDATE assets SET partition_ids = '[1]' WHERE id = ?1", [
+          "asset-pt-ok-#{ctx.n}"
+        ])
+
+      assert local_stamp() > after_insert
+    end
+
     test "a row that names no class moves nothing, written, rewritten or deleted", ctx do
       before = local_stamp()
 
@@ -2567,14 +2784,17 @@ defmodule OptimalEngine.SyncGateTest do
       # An update counts when it writes the column the gate reads of the table, and
       # the scope of the row: the same columns `Gate` builds its scan on.
       for table <- stamped do
-        {_kind, column} = Lineage.class_column(Lineage.spec(table))
-        assert Capture.stamp_columns(table) == [column, "tenant_id", "workspace_id"]
+        classes = table |> Lineage.spec() |> Lineage.class_columns() |> Enum.map(&elem(&1, 1))
+        assert classes != [], "#{table} is scanned but names no class column"
+        assert Capture.stamp_columns(table) == classes ++ ["tenant_id", "workspace_id"]
 
-        assert triggers["sync_stamp_au_#{table}"] =~
-                 ~s(AFTER UPDATE OF "#{column}", "tenant_id", "workspace_id" ON)
+        listed = Enum.map_join(Capture.stamp_columns(table), ", ", &~s("#{&1}"))
+        assert triggers["sync_stamp_au_#{table}"] =~ "AFTER UPDATE OF #{listed} ON"
       end
 
-      assert triggers["sync_stamp_au_assets"] =~ ~s(AFTER UPDATE OF "security_labels")
+      # Every column that can name a class is watched, not the first of them.
+      assert triggers["sync_stamp_au_assets"] =~
+               ~s(AFTER UPDATE OF "security_labels", "partition_ids", "tenant_id", "workspace_id")
 
       # Nor is one left on a table that is not stamped.
       expected =
@@ -2619,6 +2839,39 @@ defmodule OptimalEngine.SyncGateTest do
 
       for value <- ["restricted", "Confidential", "unheard-of"],
           do: assert(may?.(:class, "classification_level", value), inspect(value))
+
+      # Partitions: only ones that cannot be read; ones that can rank nothing.
+      for value <- ["[]", ~s(["team-a"]), ~s(["a", "b"])],
+          do: refute(may?.(:partitions, "partition_ids", value), inspect(value))
+
+      for value <- [nil, "", "5", "[1]", ~s([""]), "{}", "null", "oops"],
+          do: assert(may?.(:partitions, "partition_ids", value), inspect(value))
+
+      # The partitions in a metadata are named by their key.
+      assert may?.(:meta, "metadata", ~s({"partition_ids":[]}))
+    end
+
+    test "the SQL the scans and the triggers share avoids SQLite-only functions where it can" do
+      # `instr` and `char` are SQLite's, and `LIKE ... ESCAPE` is the same on both
+      # stores. What is left (`json_*`, `trim` with a character set) belongs to
+      # statements the PostgreSQL dialect refuses by name.
+      for column <- [
+            {:labels, "security_labels"},
+            {:meta, "metadata"},
+            {:class, "classification_level"}
+          ] do
+        sql = Lineage.may_name_class_sql(column, "r")
+        refute sql =~ "instr(", sql
+        refute sql =~ "char(", sql
+
+        assert {:ok, _translated, _needs} = Dialect.translate("SELECT 1 FROM t r WHERE " <> sql),
+               sql
+      end
+
+      candidate = Gate.metadata_candidate("metadata")
+      refute candidate =~ "instr("
+      refute candidate =~ "char("
+      assert candidate =~ "ESCAPE"
     end
 
     test "the SQL predicates hold what the Elixir tokens rank above the gate, and no less" do
@@ -2689,6 +2942,52 @@ defmodule OptimalEngine.SyncGateTest do
         assert held.(pred, "metadata", metadata) ==
                  above?.(SecurityLabels.metadata_tokens(metadata), rank),
                "metadata #{metadata} at rank #{rank}"
+
+        # Partitions that cannot be read rank restricted; ones that can rank nothing.
+        partitions = Jason.encode!(value)
+        pred = Gate.exact_predicate({:partitions, "partition_ids"}, rank)
+
+        assert held.(pred, "partition_ids", partitions) ==
+                 above?.(SecurityLabels.partition_tokens(partitions), rank),
+               "partitions #{partitions} at rank #{rank}"
+
+        metadata = Jason.encode!(%{"partition_ids" => value})
+        pred = Gate.exact_predicate({:meta, "metadata"}, rank)
+
+        assert held.(pred, "metadata", metadata) ==
+                 above?.(SecurityLabels.metadata_tokens(metadata), rank),
+               "metadata #{metadata} at rank #{rank}"
+      end
+
+      # A classification column: a name this Engine does not know cannot be read.
+      class_spec = %{labels: false, partitions: false, meta: nil, class: "classification_level"}
+
+      levels = [
+        nil,
+        "",
+        " ",
+        "public",
+        "PUBLIC",
+        "internal",
+        " Internal ",
+        "confidential",
+        "Confidential",
+        "restricted",
+        "RESTRICTED ",
+        "\u00a0restricted",
+        "secret",
+        "top secret",
+        "restricted-x",
+        "0"
+      ]
+
+      for rank <- 0..2, level <- levels do
+        pred = Gate.exact_predicate({:class, "classification_level"}, rank)
+        expected = Lineage.own_rank(class_spec, %{"classification_level" => level})
+
+        assert held.(pred, "classification_level", level) ==
+                 (expected != nil and expected > rank),
+               "class #{inspect(level)} at rank #{rank}"
       end
 
       # Text that is not JSON, and a repeated key.
@@ -3358,12 +3657,32 @@ defmodule OptimalEngine.SyncGateTest do
       )
   end
 
-  defp asset(ctx, id, labels \\ "[]") do
+  defp asset(ctx, id, labels \\ "[]", partitions \\ "[]") do
     {:ok, _} =
       Store.raw_query(
-        "INSERT INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path, security_labels) VALUES (?1, ?2, ?3, 'text/plain', 1, ?4, ?5)",
-        [id, ctx.tenant, ctx.ws, "assets/#{id}", labels]
+        "INSERT INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path, security_labels, partition_ids) VALUES (?1, ?2, ?3, 'text/plain', 1, ?4, ?5, ?6)",
+        [id, ctx.tenant, ctx.ws, "assets/#{id}", labels, partitions]
       )
+  end
+
+  # A versioned memory that points at nothing, and a source package that points at
+  # it (the bridge `Memory` writes, with `source_uri` and `versioned_memory_id`):
+  # only the gate's index joins the two.
+  defp bridged_memory(ctx, name) do
+    {:ok, memory} =
+      Versioned.create(%{content: "Bridged #{name}", workspace_id: ctx.ws, tenant_id: ctx.tenant})
+
+    source =
+      SourcePackage.from_text("Bridged #{name} source",
+        tenant_id: ctx.tenant,
+        workspace_id: ctx.ws,
+        source_type: "versioned_memory",
+        source_uri: "memory://#{memory.id}",
+        metadata: %{"versioned_memory_id" => memory.id}
+      )
+
+    :ok = CoreStore.insert_source_package(source)
+    {memory, source}
   end
 
   defp tool_run(ctx, id, labels \\ "[]") do
