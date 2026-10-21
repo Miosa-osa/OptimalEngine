@@ -214,7 +214,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   the target must report back before `finalize_move/4` deletes anything.
   """
   @spec prepare_move(String.t(), String.t(), String.t()) ::
-          :ok | {:error, :workspace_directory_is_root}
+          :ok | {:error, :workspace_directory_shared}
   def prepare_move(tenant_id, workspace_id, bundle_sha256) do
     with :ok <- movable(workspace_id) do
       {:ok, _} =
@@ -232,17 +232,36 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   @doc """
-  `:ok` when a move may take the workspace off this Engine. The files of the
-  default workspace are the Engine's root directory, which holds every other
-  workspace too, so finishing a move could not remove them without removing
-  everything: such a move is refused with `:workspace_directory_is_root`.
+  `:ok` when a move may take the workspace off this Engine, which removes the
+  workspace's directory. Only a directory that holds that workspace alone may
+  go: a direct child of the Engine root that the root does not use for itself
+  (`Filesystem.reserved_names/0`, any hidden name), or `tenants/<tenant>/<slug>`.
+  Anything else (the root itself, which is the default workspace's directory,
+  a directory the root uses, a hidden one) holds more than the workspace, so the
+  move is refused with `:workspace_directory_shared`.
   """
-  @spec movable(String.t()) :: :ok | {:error, :workspace_directory_is_root}
+  @spec movable(String.t()) :: :ok | {:error, :workspace_directory_shared}
   def movable(workspace_id) do
-    if Path.expand(Filesystem.path(root(), workspace_id)) == Path.expand(root()),
-      do: {:error, :workspace_directory_is_root},
-      else: :ok
+    root = Path.expand(root())
+
+    segments =
+      root
+      |> Filesystem.path(workspace_id)
+      |> Path.expand()
+      |> Path.relative_to(root)
+      |> Path.split()
+
+    if own_directory?(segments), do: :ok, else: {:error, :workspace_directory_shared}
   end
+
+  defp own_directory?([name]),
+    do: own_name?(name) and String.downcase(name) not in Filesystem.reserved_names()
+
+  defp own_directory?(["tenants", tenant, slug]), do: own_name?(tenant) and own_name?(slug)
+  defp own_directory?(_segments), do: false
+
+  # `_` is where a blank or dot segment lands, so several ids can share it.
+  defp own_name?(name), do: name not in ["", "_"] and not String.starts_with?(name, ".")
 
   @doc """
   Resolves an `optimal://<workspace>/...` address: `{:local, uri}` when this

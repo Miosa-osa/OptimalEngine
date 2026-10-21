@@ -734,6 +734,17 @@ defmodule OptimalEngine.ScopePortabilityTest do
       assert {:error, :not_found} = Workspace.get("#{target}:open")
     end
 
+    test "a workspace is moved off only when its directory holds it alone" do
+      for id <- ~w(default default:default default:tenants default:Tenants default:.optimal
+                   default:.wiki default:nodes default:cache default:assets default:. t:..) do
+        assert {:error, :workspace_directory_shared} = WorkspaceBundle.movable(id), id
+      end
+
+      for id <- ~w(default:notes t:notes other:projects) do
+        assert :ok = WorkspaceBundle.movable(id), id
+      end
+    end
+
     test "a workspace whose directory is the Engine root is never moved off, and the root stays" do
       root = Application.get_env(:optimal_engine, :root_path)
       marker = Path.join(root, "move-root-marker-#{System.unique_integer([:positive])}.md")
@@ -741,13 +752,13 @@ defmodule OptimalEngine.ScopePortabilityTest do
       on_exit(fn -> File.rm(marker) end)
 
       assert Filesystem.path(root, "default") == root
-      assert {:error, :workspace_directory_is_root} = WorkspaceBundle.movable("default")
-      assert {:error, :workspace_directory_is_root} = WorkspaceBundle.movable("default:default")
+      assert {:error, :workspace_directory_shared} = WorkspaceBundle.movable("default")
+      assert {:error, :workspace_directory_shared} = WorkspaceBundle.movable("default:default")
 
-      assert {:error, :workspace_directory_is_root} =
+      assert {:error, :workspace_directory_shared} =
                WorkspaceBundle.prepare_move("default", "default", "any-hash")
 
-      assert {:error, :workspace_directory_is_root} =
+      assert {:error, :workspace_directory_shared} =
                WorkspaceBundle.finalize_move("default", "default", "any-hash", %{
                  "target_url" => "https://own-engine.example",
                  "target_workspace_id" => "own:default"

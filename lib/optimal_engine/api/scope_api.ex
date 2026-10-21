@@ -98,8 +98,8 @@ defmodule OptimalEngine.API.ScopeAPI do
         ledger_sequence: manifest["ledger_sequence"]
       })
     else
-      {:error, :workspace_directory_is_root} ->
-        error(conn, 409, :workspace_directory_is_root)
+      {:error, :workspace_directory_shared} ->
+        error(conn, 409, :workspace_directory_shared)
 
       {:error, :not_found} ->
         error(conn, 404, "workspace not found")
@@ -177,7 +177,7 @@ defmodule OptimalEngine.API.ScopeAPI do
            body
          ) do
       {:ok, result} -> json(conn, 200, result)
-      {:error, :workspace_directory_is_root} -> error(conn, 409, :workspace_directory_is_root)
+      {:error, :workspace_directory_shared} -> error(conn, 409, :workspace_directory_shared)
       {:error, reason} -> error(conn, 409, inspect(reason))
     end
   end
