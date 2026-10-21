@@ -14,6 +14,9 @@ defmodule OptimalEngine.VersionTest do
     assert info.repository == contract["repository"]
     assert info.contract_version == contract["contract_version"]
     assert info.capabilities == contract["capabilities"]
+    # The routes `POST /api/maintenance/graph/backfill` and
+    # `POST /api/maintenance/embeddings {"kind": "chunks"}` run durable jobs.
+    assert "maintenance_jobs_v1" in info.capabilities
     assert info.version == contract["version"]
     assert info.expected_migration == contract["expected_migration"]
     assert info.git_sha =~ ~r/^(unknown|[0-9a-f]{40})$/
