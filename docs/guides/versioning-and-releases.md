@@ -145,6 +145,11 @@ The Store logs how long each migration took (`[Migrations] Applied <nnn> in <n> 
 A backfill that may run long on a large store belongs in a resumable job (`OptimalEngine.Jobs`), not in a migration.
 Inside a transaction SQLite refuses `VACUUM`, `ATTACH` and `DETACH` and ignores some pragmas without an error (`PRAGMA foreign_keys = OFF` is a silent no-op), so no migration may use them; a test checks every statement.
 
+The PostgreSQL store derives its schema from the same migrations (`docs/guides/postgres-provider.md`).
+Until a PostgreSQL store is deployed, its baseline is the newest migration and a migration needs nothing for PostgreSQL.
+The release that deploys the first PostgreSQL store sets `@frozen_baseline` in `OptimalEngine.Store.Postgres.Steps` to its newest migration version and is never changed after.
+From then on a migration that moves or changes data needs a declared PostgreSQL step, and CI fails without one (`test/store/postgres/steps_test.exs`).
+
 ## Upgrade rollback drill
 
 An upgrade path has to prove that it rolls back when the new release cannot start.
