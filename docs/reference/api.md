@@ -12,6 +12,8 @@ Grant is the operation grant the key needs (alternatives joined by `or`), read f
 Workspace is `workspace` when the route is authorized for the workspaces it names (the implicit `default` when it names none), and `tenant` when it is tenant-wide; read from `OptimalEngine.API.WorkspaceAuthPlug`.
 A key whose metadata grants app data access (`/api/data/keys`) is confined to `/api/data` whatever its grant.
 `GET /api/sync/tables` returns `replicated`, `local_only` and `migration`; a relay treats every table that is not in `replicated` as local, and `local_only` is not exhaustive (a table another version adds is in neither list).
+`GET /api/authority/evidence/export` takes `after`, `limit` (at most 10,000), `until` and `format` (`json`, or `ndjson`: each entry on a line with `"type": "entry"`, then an `export_end` line with `head`, `head_signature`, `total`, `complete` and `next_after`), and returns `entries`, `head` (`{"seq", "hash"}` of the chain's last entry or the entry at `until`, `null` for an empty chain), `head_signature`, `total` (the chain from seq 1 through the head, the same on every page), `complete` (true only on the page ending at the head) and `next_after`; an `after` or `until` that is not a signed 64-bit integer, or an `until` beyond the head or below `after`, answers 400, and `docs/guides/optimal-authority.md` has the paging rule.
+`GET /api/authority/evidence/keys/:kid` returns one evidence key of the tenant as a public JWK (`kty`, `crv`, `kid`, `x`, `alg` `EdDSA`, `optimal_purpose` `evidence`, and `retired_at` in ISO 8601 UTC when the key is retired); a kid that is unknown, a grant key's or a revoked key's answers 404.
 
 A key's metadata may carry `allowed_security_labels` and `allowed_partitions`, the labels and partitions it may read.
 The routes that return row text in bulk (`/api/batch/export/*`, `/api/sync/conflicts`, `/api/storage/workspaces/:workspace_id/mutations`) show a key only the rows its grants cover, by the rule of governed retrieval, and say what they left out in `withheld` and `complete`.
@@ -21,7 +23,7 @@ A key without a `"*"` label grant is also not shown rows above the Engine's ceil
 The recommended grants for a machine key are `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`.
 `docs/guides/replication.md` has the rule and the routes it does not cover yet.
 
-Routes: 295
+Routes: 296
 
 | Method | Path | Router | Grant | Workspace |
 | --- | --- | --- | --- | --- |
@@ -45,6 +47,7 @@ Routes: 295
 | GET, POST | `/api/authority/evidence` | AuthorityRouter | GET: authority:read; POST: authority:enforce | tenant |
 | POST | `/api/authority/evidence/checkpoint` | AuthorityRouter | authority:admin | tenant |
 | GET | `/api/authority/evidence/export` | AuthorityRouter | authority:read | tenant |
+| GET | `/api/authority/evidence/keys/:kid` | AuthorityRouter | authority:read | tenant |
 | GET | `/api/authority/evidence/verify` | AuthorityRouter | authority:read | tenant |
 | GET, POST | `/api/authority/grants` | AuthorityRouter | GET: authority:read; POST: authority:issue | tenant |
 | GET | `/api/authority/grants/:jti` | AuthorityRouter | authority:read | tenant |

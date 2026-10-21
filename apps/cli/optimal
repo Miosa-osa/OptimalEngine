@@ -283,7 +283,8 @@ value_opt() {
       tier | kind | owner | counterparty | due | due-before | reason | source-uri | state | cadence | \
       timezone | type | intent | scale | modality | path | action | resource | data-class | subject | \
       ttl | sender | domain | label | channel | text | since | name | workspaces | date | query | \
-      audience | justification | for | slug | days | bandwidth | correlation-id | summary) return 0 ;;
+      audience | justification | for | slug | days | bandwidth | correlation-id | summary | after | \
+      until | format) return 0 ;;
   esac
   return 1
 }
@@ -1039,6 +1040,7 @@ Route and authority
   authority effective [ws] [--subject]
   authority decide --action <a> --resource <optimal://...> [--data-class] [--subject] [ws]
   authority request --action <a> --resource <optimal://...> [--data-class] [--ttl] [--justification] [ws]
+  authority export [--after <seq>] [--until <seq>] [--limit <n>] [--format json|ndjson]
 
 Setup and health
   init --for agent|workspace|business|app|tenant-per-customer [--slug] [--name]   (admin scope)
@@ -1399,7 +1401,19 @@ case $CMD in
         post /api/authority/requests "$(jobj workspace_id "$WS" action "$O_action" resource "$O_resource" \
           data_class "${O_data_class:-}" @ttl_seconds "${O_ttl:-}" justification "${O_justification:-}")"
         ;;
-      *) usage_die "authority needs effective, decide or request" ;;
+      export)
+        # A sequence number the Engine can hold: digits only, at most 19 of them.
+        for _ev in "${O_after:-}" "${O_until:-}"; do
+          case $_ev in *[!0-9]*) usage_die "--after and --until take a sequence number" ;; esac
+          [ ${#_ev} -le 19 ] || usage_die "--after and --until take a sequence number of at most 19 digits"
+        done
+        case ${O_format:-json} in json | ndjson) ;; *) usage_die "--format takes json or ndjson" ;; esac
+        call GET /api/authority/evidence/export "" after "${O_after:-}" until "${O_until:-}" \
+          limit "${O_limit:-}" format "${O_format:-}"
+        # Byte for byte, so every entry's hash and signature still verify.
+        printf '%s\n' "$R_BODY"
+        ;;
+      *) usage_die "authority needs effective, decide, request or export" ;;
     esac
     ;;
   init)

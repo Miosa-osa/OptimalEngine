@@ -349,17 +349,27 @@ defmodule OptimalEngine.API.AuthorityRouter do
   get "/evidence" do
     conn = fetch_query_params(conn)
     q = conn.query_params
+    after_seq = int64_param(q["after"]) || 0
 
-    entries =
-      Evidence.list(tenant(conn),
-        after: parse_int(q["after"], 0),
-        limit: parse_int(q["limit"], 500),
-        jti: q["jti"],
-        subject: q["subject"],
-        kind: q["kind"]
-      )
+    cond do
+      after_seq == :invalid ->
+        error(conn, 400, "after_out_of_range")
 
-    json(conn, 200, %{entries: entries})
+      not Enum.all?(~w(jti subject kind), &(is_nil(q[&1]) or is_binary(q[&1]))) ->
+        error(conn, 400, "jti, subject and kind take one value each")
+
+      true ->
+        entries =
+          Evidence.list(tenant(conn),
+            after: after_seq,
+            limit: parse_int(q["limit"], 500),
+            jti: q["jti"],
+            subject: q["subject"],
+            kind: q["kind"]
+          )
+
+        json(conn, 200, %{entries: entries})
+    end
   end
 
   get "/evidence/verify" do
@@ -369,9 +379,44 @@ defmodule OptimalEngine.API.AuthorityRouter do
     end
   end
 
+  # One evidence key by kid, active or retired, for a verifier holding an export.
+  get "/evidence/keys/:kid" do
+    case Keys.evidence_jwk(tenant(conn), kid) do
+      {:ok, jwk} -> json(conn, 200, jwk)
+      {:error, :not_found} -> error(conn, 404, "evidence key not found")
+    end
+  end
+
+  # ?after=&limit=&until=&format=json|ndjson: a page of the chain; pages read with one
+  # until share its head. NDJSON is each entry on a line, then an export_end line.
   get "/evidence/export" do
     conn = fetch_query_params(conn)
-    json(conn, 200, Evidence.export(tenant(conn), parse_int(conn.query_params["after"], 0)))
+    q = conn.query_params
+
+    opts = [
+      after: int64_param(q["after"]) || 0,
+      until: int64_param(q["until"]),
+      limit: parse_int(q["limit"], 10_000)
+    ]
+
+    format = q["format"] || "json"
+
+    if format in ["json", "ndjson"] do
+      case Evidence.export(tenant(conn), opts) do
+        {:ok, page} when format == "ndjson" ->
+          conn
+          |> put_resp_content_type("application/x-ndjson")
+          |> send_resp(200, Evidence.to_ndjson(page))
+
+        {:ok, page} ->
+          json(conn, 200, page)
+
+        {:error, reason} when reason in [:after_out_of_range, :until_out_of_range] ->
+          error(conn, 400, Atom.to_string(reason))
+      end
+    else
+      error(conn, 400, "format must be json or ndjson")
+    end
   end
 
   post "/evidence/checkpoint" do
@@ -465,14 +510,29 @@ defmodule OptimalEngine.API.AuthorityRouter do
     end
   end
 
-  defp parse_int(nil, default), do: default
-
-  defp parse_int(value, default) do
-    case Integer.parse(to_string(value)) do
+  # A query integer, or `default` when it is absent or not one (`?x[]=` gives a list or map).
+  defp parse_int(value, default) when is_binary(value) do
+    case Integer.parse(value) do
       {int, ""} -> int
       _ -> default
     end
   end
+
+  defp parse_int(_value, default), do: default
+
+  # A query integer the Store can bind: nil when absent, :invalid when it is not one signed
+  # 64-bit integer. Exqlite's bind raises above that range, which would take the Store
+  # down with every tenant's call in flight.
+  defp int64_param(value) when value in [nil, ""], do: nil
+
+  defp int64_param(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} when int in -9_223_372_036_854_775_808..9_223_372_036_854_775_807 -> int
+      _ -> :invalid
+    end
+  end
+
+  defp int64_param(_value), do: :invalid
 
   defp inspect_map(map),
     do:

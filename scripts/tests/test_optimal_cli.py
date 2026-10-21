@@ -324,6 +324,20 @@ class RouteMappingTests(CliTestCase):
                              body={'action': 'export', 'ttl_seconds': 600})
         self.assertNotIn('subject', request['body'])
 
+    def test_authority_export_prints_the_page_as_the_engine_wrote_it(self):
+        page = b'{"type":"entry","seq":41,"hash":"ab"}\n{"type":"export_end","complete":true}\n'
+        self.fake.routes[('GET', '/api/authority/evidence/export')] = (200, page)
+        args = ['authority', 'export', '--after', '40', '--until', '41', '-n', '30', '--format', 'ndjson']
+        self.check(args, 'GET', '/api/authority/evidence/export',
+                   {'after': '40', 'until': '41', 'limit': '30', 'format': 'ndjson'})
+        self.assertEqual(self.ok(*args).stdout, page.decode())
+        self.check(['authority', 'export', '--until', '9223372036854775807'], 'GET',
+                   '/api/authority/evidence/export', {'until': '9223372036854775807'})
+        for bad in [['--after', 'x'], ['--until', '4.5'], ['--format', 'xml'], ['--until', '1' * 20],
+                    ['--after', '-1']]:
+            with self.subTest(bad=bad):
+                self.assertEqual(self.run_cli('authority', 'export', *bad).returncode, 64)
+
     def test_engine_commands(self):
         self.check(['status'], 'GET', '/api/status')
         self.check(['health'], 'GET', '/api/health')

@@ -130,6 +130,47 @@ defmodule OptimalEngine.Authority.Keys do
     }
   end
 
+  @doc """
+  One of the tenant's evidence keys as a public JWK, by `kid`: `"kty"`, `"crv"`, `"kid"`,
+  `"x"`, `"alg"` (`"EdDSA"`) and `"optimal_purpose"` (`"evidence"`), with `"retired_at"`
+  (ISO 8601, UTC) when the key is retired. `{:error, :not_found}` for an unknown kid, a
+  key of another purpose or tenant, or a revoked key: what a revoked key signed no
+  longer verifies, so it is never served.
+  """
+  @spec evidence_jwk(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
+  def evidence_jwk(tenant_id, kid) do
+    case Store.raw_query(
+           """
+           SELECT public_key, status, retired_at FROM authority_keys
+           WHERE tenant_id = ?1 AND kid = ?2 AND purpose = 'evidence'
+             AND status IN ('active', 'retired')
+           """,
+           [tenant_id, kid]
+         ) do
+      {:ok, [[public_key, status, retired_at]]} ->
+        jwk =
+          public_key
+          |> decode_public()
+          |> jwk()
+          |> Map.merge(%{"kid" => kid, "alg" => "EdDSA", "optimal_purpose" => "evidence"})
+
+        if status == "retired",
+          do: {:ok, Map.put(jwk, "retired_at", utc_iso8601(retired_at))},
+          else: {:ok, jwk}
+
+      {:ok, _rows} ->
+        {:error, :not_found}
+    end
+  end
+
+  # SQLite's datetime('now') is UTC without a zone ("2026-10-21 07:00:00").
+  defp utc_iso8601(text) do
+    case NaiveDateTime.from_iso8601(text || "") do
+      {:ok, naive} -> naive |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_iso8601()
+      {:error, _reason} -> text
+    end
+  end
+
   @doc "RFC 8037 public JWK for a raw Ed25519 public key."
   @spec jwk(binary()) :: map()
   def jwk(public_key), do: %{"crv" => "Ed25519", "kty" => "OKP", "x" => JWS.encode64(public_key)}

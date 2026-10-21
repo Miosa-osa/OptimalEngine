@@ -149,6 +149,7 @@ Text arguments may be `-` to read standard input.
 | `authority effective [ws] [--subject]` | `GET /api/authority/effective` |
 | `authority decide --action --resource [--data-class --subject] [ws]` | `POST /api/authority/decide` |
 | `authority request --action --resource [--data-class --ttl --justification] [ws]` | `POST /api/authority/requests` |
+| `authority export [--after --until --limit --format json\|ndjson]` | `GET /api/authority/evidence/export`, printed as the Engine wrote it |
 | `init --for agent\|workspace\|business\|app\|tenant-per-customer [--slug --name]` | `POST /api/init` (admin scope) |
 | `size` (alias `usage`) | `GET /api/storage` |
 | `viability [ws] [--workspaces *]`, `viability history [ws] [--days]` | `GET /api/viability`, `GET /api/viability/history` |
