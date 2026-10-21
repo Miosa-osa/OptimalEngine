@@ -645,19 +645,10 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # The Engine operator: an admin key (PermissionPlug) of the default tenant
-  # with every workspace in scope. No key at all reaches a handler only when the
-  # Engine requires none (AuthPlug refuses it otherwise), which is the trusted
-  # local operator.
-  defp engine_operator?(conn) do
-    default = OptimalEngine.Tenancy.Tenant.default_id()
-
-    (conn.assigns[:current_tenant] || default) == default and
-      case conn.assigns[:current_api_key] do
-        nil -> true
-        api_key -> "*" in (api_key.workspace_scope || [])
-      end
-  end
+  # The Engine operator (OptimalEngine.API.Actor.engine_operator?/1): an admin
+  # key (PermissionPlug) of the default tenant with every workspace in scope, or
+  # the trusted local operator on an Engine that requires no key.
+  defp engine_operator?(conn), do: OptimalEngine.API.Actor.engine_operator?(conn)
 
   # Contexts that share an optimal:// URI (OptimalEngine.UriRepair). GET is the
   # plan and writes nothing: it lists every context that would get a new

@@ -274,6 +274,15 @@ if interval = System.get_env("OPTIMAL_SYNC_INTERVAL_MS") do
   config :optimal_engine, :sync_interval_ms, String.to_integer(interval)
 end
 
+# Workspace bundles: the largest raw upload POST /api/bundles/import accepts,
+# in bytes (default 5 GiB); a larger one is refused with 413.
+if max_bytes = System.get_env("OPTIMAL_BUNDLE_MAX_BYTES") do
+  case Integer.parse(String.trim(max_bytes)) do
+    {bytes, ""} when bytes > 0 -> config :optimal_engine, :bundle_max_bytes, bytes
+    _ -> raise ArgumentError, "OPTIMAL_BUNDLE_MAX_BYTES must be a positive number of bytes"
+  end
+end
+
 # Replication: how long one peer's cycle keeps paging before it stops and
 # resumes on the next cycle.
 if budget = System.get_env("OPTIMAL_SYNC_CYCLE_BUDGET_MS") do

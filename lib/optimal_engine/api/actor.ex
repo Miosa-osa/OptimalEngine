@@ -46,6 +46,23 @@ defmodule OptimalEngine.API.Actor do
     end
   end
 
+  @doc """
+  True for the Engine operator: a key of the default tenant whose workspace
+  scope is `*`, or no key at all, which reaches a handler only when the Engine
+  requires none (the trusted local operator). Routes that span tenants (the
+  Engine log, a cross-tenant bundle seed) are the operator's alone.
+  """
+  @spec engine_operator?(Plug.Conn.t()) :: boolean()
+  def engine_operator?(conn) do
+    default = OptimalEngine.Tenancy.Tenant.default_id()
+
+    (conn.assigns[:current_tenant] || default) == default and
+      case conn.assigns[:current_api_key] do
+        nil -> true
+        api_key -> "*" in (api_key.workspace_scope || [])
+      end
+  end
+
   defp body_actor(%{"actor_id" => actor}) when is_binary(actor) and actor != "", do: actor
   defp body_actor(_body), do: nil
 end

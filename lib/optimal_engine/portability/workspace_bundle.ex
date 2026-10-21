@@ -127,9 +127,15 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @doc """
   Imports a bundle into `tenant_id`. Options: `:workspace_id` (target id;
   default the source id with the target tenant), `:organization_id`,
-  `:mode` (`:create` or `:merge`), and `:consume` (delete the bundle file once
+  `:mode` (`:create` or `:merge`), `:consume` (delete the bundle file once
   it is unpacked, for an upload nobody keeps, so a large import holds one copy
-  of the bundle on disk instead of two). Returns a summary with the bundle hash.
+  of the bundle on disk instead of two), and `:cross_tenant`. Returns a summary
+  with the bundle hash.
+
+  A bundle exported by another tenant is refused with
+  `{:error, :bundle_from_another_tenant}` before anything is written, unless
+  `cross_tenant: true` says the move between tenants is intended (the Engine
+  operator seeding a tenant, or one database standing in for two Engines).
   """
   @spec import(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def import(path, tenant_id, opts \\ []) do
@@ -141,6 +147,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
            {:ok, manifest} <- read_manifest(staging),
            :ok <- permitted(manifest),
            :ok <- verify(manifest, staging),
+           :ok <- same_tenant(manifest, tenant_id, opts),
            {:ok, plan} <- plan(manifest, tenant_id, opts),
            :ok <- compatible(manifest, staging),
            {:ok, counts} <- write_rows(manifest, staging, plan, opts),
@@ -160,6 +167,51 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       end
     after
       File.rm_rf(staging)
+    end
+  end
+
+  @doc """
+  The folder a tenant's bundles live in, `<backup dir>/bundles/<tenant>/`
+  (the backup dir is `OPTIMAL_BACKUP_DIR`, or `backups` next to the database).
+  Exports are written there, a download or an import by name reads only from
+  there, and a raw upload is staged there, so one tenant never reaches another
+  tenant's bundles. A tenant id that is not a plain file name gets a folder
+  named after its SHA-256.
+  """
+  @spec bundle_dir(String.t()) :: String.t()
+  def bundle_dir(tenant_id) when is_binary(tenant_id) do
+    dir = Path.join([backup_base(), "bundles", tenant_folder(tenant_id)])
+    File.mkdir_p!(dir)
+    dir
+  end
+
+  @doc """
+  The path of the bundle `name` in the tenant's folder. Only a plain bundle
+  file name is accepted, so a request can never name another path on the host.
+  """
+  @spec bundle_path(String.t(), term()) :: {:ok, String.t()} | {:error, :invalid_bundle_name}
+  def bundle_path(tenant_id, name) when is_binary(name) do
+    if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.tar\.gz\z/, name),
+      do: {:ok, Path.join(bundle_dir(tenant_id), name)},
+      else: {:error, :invalid_bundle_name}
+  end
+
+  def bundle_path(_tenant_id, _name), do: {:error, :invalid_bundle_name}
+
+  @doc """
+  The tenant a bundle was exported from, read from its manifest without
+  unpacking the rest. Bundles are packed with the manifest first, so for them
+  only the first entry is read; an older bundle is searched for its manifest.
+  """
+  @spec source_tenant(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def source_tenant(path) do
+    with {:ok, json} <- manifest_json(path),
+         {:ok, %{"format" => @format, "tenant_id" => tenant_id}} when is_binary(tenant_id) <-
+           Jason.decode(json) do
+      {:ok, tenant_id}
+    else
+      {:error, {:unreadable_bundle, _}} = error -> error
+      _ -> {:error, :not_a_workspace_bundle}
     end
   end
 
@@ -559,6 +611,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       not files_ok -> {:error, :file_checksum_mismatch}
       true -> :ok
     end
+  end
+
+  defp same_tenant(%{"tenant_id" => tenant_id}, tenant_id, _opts), do: :ok
+
+  defp same_tenant(_manifest, _tenant_id, opts) do
+    if opts[:cross_tenant] == true, do: :ok, else: {:error, :bundle_from_another_tenant}
   end
 
   defp plan(manifest, tenant_id, opts) do
@@ -1096,16 +1154,63 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp pack(staging, path) do
     File.mkdir_p!(Path.dirname(path))
 
+    # The manifest goes first, so its tenant and checksums can be read
+    # without decompressing the rest (source_tenant/1).
     entries =
       staging
       |> Path.join("**")
       |> Path.wildcard(match_dot: true)
       |> Enum.filter(&File.regular?/1)
-      |> Enum.map(fn file ->
-        {String.to_charlist(Path.relative_to(file, staging)), String.to_charlist(file)}
+      |> Enum.map(&Path.relative_to(&1, staging))
+      |> Enum.sort_by(&(&1 != "manifest.json"))
+      |> Enum.map(fn relative ->
+        {String.to_charlist(relative), String.to_charlist(Path.join(staging, relative))}
       end)
 
     :erl_tar.create(String.to_charlist(path), entries, [:compressed])
+  end
+
+  # The manifest of a bundle: the first entry when it is named manifest.json
+  # (a ustar header of 512 bytes, then the file), otherwise found by erl_tar.
+  defp manifest_json(path) do
+    first =
+      case File.open(path, [:read, :binary, :compressed]) do
+        {:ok, io} ->
+          try do
+            with <<name::binary-size(100), _::binary-size(24), size::binary-size(12),
+                   _::binary-size(376)>> <- IO.binread(io, 512),
+                 "manifest.json" <- name |> :binary.split(<<0>>) |> hd(),
+                 {bytes, _} <-
+                   size |> :binary.split(<<0>>) |> hd() |> String.trim() |> Integer.parse(8),
+                 json when is_binary(json) and byte_size(json) == bytes <- IO.binread(io, bytes) do
+              {:ok, json}
+            else
+              _ -> :search
+            end
+          after
+            File.close(io)
+          end
+
+        {:error, reason} ->
+          {:error, {:unreadable_bundle, reason}}
+      end
+
+    case first do
+      :search -> search_manifest(path)
+      found -> found
+    end
+  end
+
+  defp search_manifest(path) do
+    case :erl_tar.extract(String.to_charlist(path), [
+           :compressed,
+           :memory,
+           {:files, [~c"manifest.json"]}
+         ]) do
+      {:ok, [{_name, json}]} -> {:ok, json}
+      {:ok, _} -> {:error, :not_a_workspace_bundle}
+      {:error, reason} -> {:error, {:unreadable_bundle, reason}}
+    end
   end
 
   defp unpack(path, staging) do
@@ -1139,6 +1244,25 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   defp root, do: Application.get_env(:optimal_engine, :root_path, File.cwd!())
+
+  defp backup_base do
+    case Application.get_env(:optimal_engine, :backup_dir) do
+      dir when is_binary(dir) and dir != "" ->
+        Path.expand(dir)
+
+      _ ->
+        Application.get_env(:optimal_engine, :db_path, ".optimal/index.db")
+        |> Path.expand()
+        |> Path.dirname()
+        |> Path.join("backups")
+    end
+  end
+
+  defp tenant_folder(tenant_id) do
+    if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/, tenant_id),
+      do: tenant_id,
+      else: "tenant-" <> (:crypto.hash(:sha256, tenant_id) |> Base.encode16(case: :lower))
+  end
 
   # Hashes a file a megabyte at a time; nil when it is missing or unreadable.
   defp file_sha256(path) do
