@@ -105,10 +105,10 @@ Before upgrading:
 2. Find the rows another tenant's key wrote under a workspace id that has no workspace row.
    Before this migration a context took the tenant of its workspace's row only, so a context of an unregistered id reads `default` whoever wrote it; its source package keeps the tenant of the key that wrote it, so the query reads `source_packages`.
    The migration relabels the contexts of an unregistered `<tenant>:<slug>` id with the tenant its prefix names, and leaves a bare id with the default tenant: after the upgrade the tenant's own key reads it as empty (`GET /api/graph` answers `context_count: 0`).
-   From 0.3.10 a write that names its tenant under a bare id lands in that tenant (see "Writes under a bare workspace id" in `scope-and-portability.md`), but a row written before stays with `default`, and the tenant that wrote it cannot rewrite it: the write is refused with `context_id_in_use`.
+   From 0.3.9 a write that names its tenant under a bare id lands in that tenant (see "Writes under a bare workspace id" in `scope-and-portability.md`), but a row written before stays with `default`, and the tenant that wrote it cannot rewrite it: the write is refused with `context_id_in_use`.
    `POST /api/workspaces` gives a workspace the id `<tenant>:<slug>`, so a bare id cannot be registered, and `POST /api/data-steward/workspaces/repair` moves only the rows of the caller's tenant: run as `default`, it moves these rows into a `default` workspace, not into the writing tenant's.
-   No step moves such rows to the tenant that wrote them yet.
-   The query tells you which ids and tenants are affected, and the tenant can send the documents again under a workspace of its own.
+   From 0.3.11 the operator gives those rows back with `DataSteward.relabel_bare_scope/2` (see "Rows written before 0.3.8" in `scope-and-portability.md`), once per id and tenant the query lists, then runs the graph backfill for that id.
+   It moves only the rows the tenant's own source packages vouch for; a row with no source package stays `default`, and the tenant can send that document again under a workspace of its own.
    For an id with a `<tenant>:` prefix, create the workspace, so the maintenance routes answer for it: they answer `404 workspace not found` for an unregistered id.
 
 ```sql
