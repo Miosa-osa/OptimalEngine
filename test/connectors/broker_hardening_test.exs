@@ -50,6 +50,12 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
     :ok
   end
 
+  # What a stored connector's config holds: the reference sealed for its id.
+  defp sealed(config \\ @config) do
+    {:ok, sealed} = CredentialSource.seal_reference(config, %{id: @scope.id})
+    sealed
+  end
+
   defp broker(issue) do
     stub = BrokerStub.install(nil, broker_url: @miosa, issue: issue)
     on_exit(fn -> BrokerStub.uninstall(stub) end)
@@ -120,6 +126,31 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
       assert {:error, :broker_url_not_allowed} = CredentialSource.check_url(@miosa)
     end
 
+    test "an empty, blank or malformed path prefix allows nothing" do
+      for bad <- ["", " ", "/", "/api;v=1/", "api/v1/connect/broker/", "/api/v1/../broker/"] do
+        Application.put_env(:optimal_engine, :credential_broker_paths, [bad])
+        assert {:error, :broker_url_not_allowed} = CredentialSource.check_url(@miosa), inspect(bad)
+      end
+
+      Application.put_env(
+        :optimal_engine,
+        :credential_broker_paths,
+        "  , ;,/api/v1/connect/broker/"
+      )
+
+      assert :ok = CredentialSource.check_url(@miosa)
+
+      Application.put_env(:optimal_engine, :credential_broker_paths, [" ", ""])
+      assert {:error, :broker_url_not_allowed} = CredentialSource.check_url(@miosa)
+    end
+
+    test "a path with a matrix parameter is refused" do
+      assert {:error, :broker_url_not_allowed} =
+               CredentialSource.check_url(
+                 "https://api.miosa.ai/api/v1/connect/broker/credentials;jsessionid=1"
+               )
+    end
+
     test "a refused URL is never called" do
       stub = broker([{"example-issued-token-1", 3_600}])
 
@@ -128,7 +159,7 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
             "https://api.miosa.ai/elsewhere"
           ] do
         assert {:error, :broker_url_not_allowed} =
-                 CredentialSource.hydrate(Map.put(@config, "broker_url", url), @scope)
+                 CredentialSource.hydrate(sealed(Map.put(@config, "broker_url", url)), @scope)
       end
 
       assert BrokerStub.broker_calls(stub) == []
@@ -145,7 +176,7 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
 
       on_exit(fn -> BrokerStub.uninstall(stub) end)
 
-      assert {:ok, hydrated} = CredentialSource.hydrate(@config, @scope)
+      assert {:ok, hydrated} = CredentialSource.hydrate(sealed(), @scope)
       Application.put_env(:optimal_engine, :credential_broker_hosts, [])
 
       result =
@@ -163,7 +194,7 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
   describe "the broker call itself" do
     test "does not retry, verifies TLS, caps the answer and carries no header of the Engine's own" do
       stub = broker([{"example-issued-token-1", 3_600}])
-      assert {:ok, _config} = CredentialSource.hydrate(@config, @scope)
+      assert {:ok, _config} = CredentialSource.hydrate(sealed(), @scope)
 
       assert [call] = BrokerStub.broker_calls(stub)
       assert call.headers == []
@@ -182,7 +213,7 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
             %{"error" => "x", "credentials" => %{"access_token" => "example-token"}}
           ] do
         broker([{:body, body}])
-        assert {:error, :broker_refused} = CredentialSource.hydrate(@config, @scope), inspect(body)
+        assert {:error, :broker_refused} = CredentialSource.hydrate(sealed(), @scope), inspect(body)
       end
     end
 
@@ -192,16 +223,16 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
           {:body, %{"credentials" => %{"access_token" => "example-token", "expires_in" => seconds}}}
         ])
 
-        assert {:ok, config} = CredentialSource.hydrate(@config, @scope), inspect(seconds)
+        assert {:ok, config} = CredentialSource.hydrate(sealed(), @scope), inspect(seconds)
         assert %AccessToken{expires_at: %DateTime{}} = config["credentials"]["access_token"]
       end
     end
   end
 
-  describe "the sealed reference is bound to its connector and workspace" do
-    @binding %{id: "miosa:conn_1:gmail", workspace_id: "default:ops"}
+  describe "the sealed reference is bound to its connector" do
+    @binding %{id: "miosa:conn_1:gmail"}
 
-    test "opens for the connector and workspace it was sealed for" do
+    test "opens for the connector it was sealed for" do
       {:ok, sealed} = CredentialSource.seal_reference(@config, @binding)
       refute Map.has_key?(sealed, "broker_reference")
 
@@ -210,7 +241,7 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
       assert [%{body: %{"reference" => "conn_1.example-signature"}}] = BrokerStub.broker_calls(stub)
     end
 
-    test "does not open when copied to another connector or another workspace" do
+    test "does not open when copied to another connector" do
       {:ok, sealed} = CredentialSource.seal_reference(@config, @binding)
       stub = broker([{"example-issued-token-1", 3_600}])
 
@@ -218,16 +249,27 @@ defmodule OptimalEngine.Connectors.BrokerHardeningTest do
                CredentialSource.hydrate(sealed, %{@scope | id: "miosa:conn_2:gmail"})
 
       assert {:error, :broker_reference_unreadable} =
-               CredentialSource.hydrate(sealed, %{@scope | workspace_id: "default:other"})
+               CredentialSource.hydrate(sealed, Map.delete(@scope, :id))
 
       assert BrokerStub.broker_calls(stub) == []
     end
 
-    test "a reference sealed before it was bound is still read" do
-      {:ok, legacy} = CredentialSource.seal_reference(@config)
-      broker([{"example-issued-token-1", 3_600}])
+    test "opens in whatever workspace the connector is in, so a rename or a move keeps it working" do
+      {:ok, sealed} = CredentialSource.seal_reference(@config, @binding)
+      stub = broker([{"example-issued-token-1", 3_600}])
 
-      assert {:ok, _config} = CredentialSource.hydrate(legacy, @scope)
+      assert {:ok, _config} =
+               CredentialSource.hydrate(sealed, %{@scope | workspace_id: "default:renamed"})
+
+      assert [%{body: %{"workspace_id" => "default:renamed"}}] = BrokerStub.broker_calls(stub)
+    end
+
+    test "a seal made without a connector is refused, and a plaintext reference is not read" do
+      assert_raise FunctionClauseError, fn -> CredentialSource.seal_reference(@config, nil) end
+
+      stub = broker([{"example-issued-token-1", 3_600}])
+      assert {:error, :broker_not_configured} = CredentialSource.hydrate(@config, @scope)
+      assert BrokerStub.broker_calls(stub) == []
     end
 
     test "the envelope takes associated data, and an empty one by default" do

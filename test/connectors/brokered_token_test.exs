@@ -49,6 +49,19 @@ defmodule OptimalEngine.Connectors.BrokeredTokenTest do
 
   @scope %{id: "brokered-test", kind: "test", tenant_id: "default", workspace_id: "default"}
 
+  setup do
+    original_key = System.get_env("CONNECTOR_KEY")
+    System.put_env("CONNECTOR_KEY", Base.encode16(:crypto.strong_rand_bytes(32), case: :lower))
+
+    on_exit(fn ->
+      if original_key,
+        do: System.put_env("CONNECTOR_KEY", original_key),
+        else: System.delete_env("CONNECTOR_KEY")
+    end)
+
+    :ok
+  end
+
   for {kind, {config, answer, refusal}} <- @adapters do
     @kind kind
     @config config
@@ -288,8 +301,9 @@ defmodule OptimalEngine.Connectors.BrokeredTokenTest do
       "broker_reference" => "conn_example_0001"
     }
 
-    with {:ok, hydrated} <-
-           CredentialSource.hydrate(Map.merge(config, broker), Map.put(@scope, :adapter, mod)),
+    with {:ok, sealed} <-
+           CredentialSource.seal_reference(Map.merge(config, broker), %{id: @scope.id}),
+         {:ok, hydrated} <- CredentialSource.hydrate(sealed, Map.put(@scope, :adapter, mod)),
          {:ok, state} <- mod.init(hydrated) do
       mod.sync(state, cursor)
     end

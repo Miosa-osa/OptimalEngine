@@ -210,4 +210,43 @@ defmodule OptimalEngine.RuntimeConfigTest do
       Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
     end
   end
+
+  describe "OPTIMAL_CREDENTIAL_BROKER_PATHS" do
+    setup do
+      original = System.get_env("OPTIMAL_CREDENTIAL_BROKER_PATHS")
+
+      on_exit(fn ->
+        if original,
+          do: System.put_env("OPTIMAL_CREDENTIAL_BROKER_PATHS", original),
+          else: System.delete_env("OPTIMAL_CREDENTIAL_BROKER_PATHS")
+      end)
+    end
+
+    test "lists the path prefixes a broker URL may sit under" do
+      System.put_env("OPTIMAL_CREDENTIAL_BROKER_PATHS", "/api/v1/connect/broker/, /connect/")
+      config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+
+      assert config[:optimal_engine][:credential_broker_paths] ==
+               ["/api/v1/connect/broker/", "/connect/"]
+    end
+
+    test "stops the Engine on an empty, blank, root, matrix or traversing entry" do
+      for bad <- [
+            "",
+            " ",
+            "/api/v1/connect/broker/,",
+            ",/api/",
+            "/",
+            "/api;x/",
+            "/api/../x/",
+            "/a//b/"
+          ] do
+        System.put_env("OPTIMAL_CREDENTIAL_BROKER_PATHS", bad)
+
+        assert_raise ArgumentError, ~r/OPTIMAL_CREDENTIAL_BROKER_PATHS/, fn ->
+          Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+        end
+      end
+    end
+  end
 end

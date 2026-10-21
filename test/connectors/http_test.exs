@@ -20,16 +20,17 @@ defmodule OptimalEngine.Connectors.HTTPTest do
   end
 
   describe "a redirect" do
-    test "is followed by default" do
+    test "is not followed by default, and is followed when asked" do
       origin =
         serve(fn
           "/", port -> redirect(302, "http://127.0.0.1:#{port}/elsewhere")
           _other, _port -> json("{\"ok\":true}")
         end)
 
-      assert {:ok, %{status: 200}} = HTTP.get_json(origin.base <> "/")
+      assert {:ok, %{status: 302}} = HTTP.get_json(origin.base <> "/")
+      refute_received {:requested, _, _, "/elsewhere", _}
 
-      assert_received {:requested, _, "GET", "/", _}
+      assert {:ok, %{status: 200}} = HTTP.get_json(origin.base <> "/", follow_redirects: true)
       assert_received {:requested, _, "GET", "/elsewhere", _}
     end
 
@@ -75,6 +76,25 @@ defmodule OptimalEngine.Connectors.HTTPTest do
                )
 
       refute_received {:requested, _, _, "/landed", _}
+    end
+  end
+
+  describe "a request" do
+    test "tells a mock it follows no redirect unless it was asked to" do
+      parent = self()
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, opts ->
+        send(parent, {:opts, opts})
+        {:ok, {{~c"HTTP/1.1", 200, ~c"OK"}, [], ""}}
+      end)
+
+      HTTP.get_json("https://api.example.com/")
+      assert_received {:opts, opts}
+      assert opts[:follow_redirects] == false
+
+      HTTP.get_json("https://api.example.com/", follow_redirects: true)
+      assert_received {:opts, opts}
+      assert opts[:follow_redirects] == true
     end
   end
 

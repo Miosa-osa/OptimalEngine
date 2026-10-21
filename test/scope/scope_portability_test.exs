@@ -776,6 +776,96 @@ defmodule OptimalEngine.ScopePortabilityTest do
       assert {:error, :not_found} = Workspace.get("#{target}:open")
     end
 
+    test "a workspace with a member and an operating document exports and imports", ctx do
+      principal = "bundle-member-#{ctx.n}"
+
+      {:ok, _} =
+        OptimalEngine.Identity.Principal.upsert(%{
+          id: principal,
+          kind: :user,
+          display_name: "Bundle Member",
+          tenant_id: ctx.tenant
+        })
+
+      {:ok, _} = Workspace.add_member(ctx.open, principal, tenant_id: ctx.tenant)
+
+      {:ok, _} =
+        OptimalEngine.Operating.Protocol.put(
+          ctx.tenant,
+          "workspace",
+          ctx.open,
+          "protocol",
+          "Bundle protocol #{ctx.n}",
+          "u"
+        )
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      names = Enum.map(manifest["tables"], & &1["name"])
+      assert "principals" in names and "operating_documents" in names
+
+      # Everything an export writes, an import accepts.
+      assert Enum.all?(names, &(&1 in WorkspaceBundle.exportable_tables()))
+      assert "memory_reconstruction_steps" in WorkspaceBundle.exportable_tables()
+
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      target = "member-target-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Target"})
+
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, [[1]]} =
+               Store.raw_query(
+                 "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?1 AND principal_id = ?2",
+                 [summary.workspace_id, principal]
+               )
+
+      assert {:ok, [[content]]} =
+               Store.raw_query(
+                 "SELECT content FROM operating_documents WHERE tenant_id = ?1 AND scope_id = ?2 AND kind = 'protocol'",
+                 [target, summary.workspace_id]
+               )
+
+      assert content == "Bundle protocol #{ctx.n}"
+    end
+
+    test "a crafted principals row is written into the importing tenant, whatever tenant it names",
+         ctx do
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      target = "principal-target-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Target"})
+      forged = "crafted-principal-#{ctx.n}"
+
+      craft_bundle(ctx, "principals", [
+        %{
+          "id" => forged,
+          "tenant_id" => "some-other-tenant-#{ctx.n}",
+          "kind" => "user",
+          "display_name" => "Crafted"
+        }
+      ])
+
+      # What a bundle may still do: add principals to the tenant that imports
+      # it, under ids that tenant does not already have. It cannot name another
+      # tenant's, and it cannot replace a principal that exists.
+      assert {:ok, _summary} = WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, [[^target]]} =
+               Store.raw_query("SELECT tenant_id FROM principals WHERE id = ?1", [forged])
+    end
+
     test "a crafted bundle cannot write a table the Engine keeps for itself", ctx do
       {:ok, _manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
 
