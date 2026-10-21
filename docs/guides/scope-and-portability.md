@@ -158,7 +158,9 @@ The answer counts `workspace_owners_updated` and `nodes_retyped`.
 
 Both repairs change the caller's tenant only.
 The target organization and the workspaces a mapping names must be the tenant's (`organization_not_found`, `workspace_not_found`), so the rule that an organization belongs to the tenant of its workspaces holds after a repair as before it.
-They act on the whole tenant, so they need a key that holds the whole tenant (`workspace_scope` `["*"]`); a key restricted to some workspaces answers `403 workspace_scope_denied`.
+They act on the whole tenant and name no workspace, so they need a key that holds the whole tenant (`workspace_scope` `["*"]`); a key restricted to some workspaces answers `403 workspace_scope_denied`.
+An organization id, a workspace id and a match text are at most 256 bytes.
+A repair does not create the tenant's default organization: if a rule leaves out `from_organization_id` and the tenant has none, no workspace is in it and nothing moves.
 
 ## Moving a workspace (split, merge, seed)
 

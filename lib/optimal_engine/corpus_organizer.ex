@@ -755,12 +755,30 @@ defmodule OptimalEngine.CorpusOrganizer do
     |> tap(fn _ -> Store.evict_cached(Enum.map(proposals, & &1.id)) end)
   end
 
+  # The records to archive: all but the newest of those of one workspace that
+  # hold exactly the same content. `?1` is the tenant and `?2` its intake
+  # workspace, or both NULL for every workspace of every tenant.
+  @duplicates_sql """
+  WITH ranked AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+             PARTITION BY tenant_id, workspace_id, content
+             ORDER BY modified_at DESC, created_at DESC, id DESC
+           ) AS duplicate_rank
+    FROM contexts
+    WHERE archived_at IS NULL AND trim(content) <> ''
+      AND (?1 IS NULL OR (tenant_id = ?1 AND workspace_id = ?2))
+  )
+  SELECT id FROM ranked WHERE duplicate_rank > 1
+  """
+
   @doc """
   Archives all but the newest of the records of one workspace that hold
-  exactly the same content. Duplicates are found within a tenant, never
-  across tenants. Options: `:tenant_id` limits the sweep to that tenant;
-  `all_tenants: true` sweeps every tenant, for an operator. One of the two is
-  required.
+  exactly the same content. Options: `:tenant_id` limits the sweep to the
+  intake workspace of that tenant, which is where the organizer works;
+  `all_tenants: true` sweeps every workspace of every tenant, for an operator.
+  One of the two is required. Duplicates are found within a workspace of one
+  tenant, never across them.
   """
   def deduplicate_exact(opts) do
     tenant_id = Keyword.get(opts, :tenant_id)
@@ -768,29 +786,44 @@ defmodule OptimalEngine.CorpusOrganizer do
     if is_nil(tenant_id) and Keyword.get(opts, :all_tenants) != true,
       do: raise(ArgumentError, "deduplicate_exact needs :tenant_id, or all_tenants: true")
 
+    intake = tenant_id && source_workspace(tenant_id)
+
     Store.transaction(fn txn ->
-      Store.txn_execute(
-        txn,
-        """
-        WITH ranked AS (
-          SELECT id,
-                 ROW_NUMBER() OVER (
-                   PARTITION BY tenant_id, workspace_id, content
-                   ORDER BY modified_at DESC, created_at DESC, id DESC
-                 ) AS duplicate_rank
-          FROM contexts
-          WHERE archived_at IS NULL AND trim(content) <> '' AND (?1 IS NULL OR tenant_id = ?1)
-        )
-        UPDATE contexts
-        SET archived_at = datetime('now'),
-            metadata = json_set(COALESCE(metadata, '{}'), '$.cleanup_reason', 'exact_duplicate_context')
-        WHERE id IN (SELECT id FROM ranked WHERE duplicate_rank > 1)
-        """,
-        [tenant_id]
-      )
-      |> case do
-        {:ok, count} -> {:ok, %{archived_exact_duplicates: count}}
-        {:error, _} = error -> error
+      with {:ok, rows} <- Store.txn_query(txn, @duplicates_sql, [tenant_id, intake]),
+           ids = List.flatten(rows),
+           {:ok, count} <- archive(txn, ids) do
+        {:ok, {ids, count}}
+      end
+    end)
+    |> case do
+      {:ok, {ids, count}} ->
+        # The read cache holds the records as they were before they were archived.
+        Store.evict_cached(ids)
+        {:ok, %{archived_exact_duplicates: count}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp archive(txn, ids) do
+    ids
+    |> Enum.chunk_every(500)
+    |> Enum.reduce_while({:ok, 0}, fn chunk, {:ok, total} ->
+      placeholders = Enum.map_join(1..length(chunk), ", ", &"?#{&1}")
+
+      case Store.txn_execute(
+             txn,
+             """
+             UPDATE contexts
+             SET archived_at = datetime('now'),
+                 metadata = json_set(COALESCE(metadata, '{}'), '$.cleanup_reason', 'exact_duplicate_context')
+             WHERE id IN (#{placeholders})
+             """,
+             chunk
+           ) do
+        {:ok, changed} -> {:cont, {:ok, total + changed}}
+        {:error, _} = error -> {:halt, error}
       end
     end)
   end

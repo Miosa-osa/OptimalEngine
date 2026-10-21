@@ -53,9 +53,11 @@ defmodule OptimalEngine.DataSteward.HierarchyRepair do
   @kind ~r/\A[a-z][a-z0-9_-]{0,63}\z/
 
   # A mapping runs in one Store transaction, which holds the Store while it
-  # does; a mapping is a handful of rules, not a table.
+  # does; a mapping is a handful of rules, not a table. An id or a text is a
+  # name, not a document.
   @max_rules 50
   @max_kinds 500
+  @max_bytes 256
 
   @doc "Runs a mapping. Options: `:actor_id`, `:tenant_id`, `:mapping`."
   @spec run(keyword()) :: {:ok, map()} | {:error, term()}
@@ -102,7 +104,7 @@ defmodule OptimalEngine.DataSteward.HierarchyRepair do
   defp parse(_), do: invalid("the mapping is an object")
 
   defp organization_rule(%{"organization_id" => owner} = rule)
-       when is_binary(owner) and owner != "" do
+       when is_binary(owner) and owner != "" and byte_size(owner) <= @max_bytes do
     texts = Enum.map(~w(from_organization_id name_contains description_contains), &rule[&1])
 
     cond do
@@ -126,7 +128,8 @@ defmodule OptimalEngine.DataSteward.HierarchyRepair do
   defp organization_rule(_), do: invalid("an organization rule names an organization_id")
 
   defp node_rule(%{"workspace_id" => workspace_id, "kinds" => kinds} = rule)
-       when is_binary(workspace_id) and is_map(kinds) and map_size(kinds) > 0 do
+       when is_binary(workspace_id) and byte_size(workspace_id) <= @max_bytes and is_map(kinds) and
+              map_size(kinds) > 0 do
     from_kind = Map.get(rule, "from_kind", "workspace")
 
     if kind?(from_kind) and
@@ -146,7 +149,10 @@ defmodule OptimalEngine.DataSteward.HierarchyRepair do
   end
 
   defp kind?(value), do: is_binary(value) and Regex.match?(@kind, value)
-  defp optional_text?(value), do: is_nil(value) or (is_binary(value) and value != "")
+
+  defp optional_text?(value),
+    do: is_nil(value) or (is_binary(value) and value != "" and byte_size(value) <= @max_bytes)
+
   defp invalid(why), do: {:error, {:invalid_mapping, why}}
 
   defp all(items, fun) do
@@ -182,14 +188,24 @@ defmodule OptimalEngine.DataSteward.HierarchyRepair do
     end
   end
 
+  # An organization the rule names must be the tenant's. Without one, the rule
+  # moves workspaces out of the tenant's default organization, which is not
+  # created for it: if there is none, no workspace is in it.
   defp check_organizations(tenant_id, rule) do
-    from = rule.from_organization_id || Organization.default_for(tenant_id)
-
     with :ok <- check_organization(tenant_id, rule.organization_id),
-         :ok <- check_organization(tenant_id, from) do
-      {:ok, %{rule | from_organization_id: from}}
+         :ok <- check_source_organization(tenant_id, rule.from_organization_id) do
+      {:ok,
+       %{
+         rule
+         | from_organization_id: rule.from_organization_id || Organization.default_id_for(tenant_id)
+       }}
     end
   end
+
+  defp check_source_organization(_tenant_id, nil), do: :ok
+
+  defp check_source_organization(tenant_id, organization_id),
+    do: check_organization(tenant_id, organization_id)
 
   defp check_organization(tenant_id, organization_id) do
     case Store.raw_query("SELECT tenant_id, status FROM organizations WHERE id = ?1", [

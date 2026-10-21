@@ -17,7 +17,7 @@ defmodule OptimalEngine.ContextHealth do
       check("routing_concentration", fn -> routing_concentration(tenant_id) end),
       check("pending_claims", fn -> pending_claims(workspace_id) end),
       check("workspace_integrity", fn -> workspace_integrity(workspace_id) end),
-      check("fixture_visibility", &fixture_visibility/0),
+      check("fixture_visibility", fn -> fixture_visibility(tenant_id) end),
       check("freshness", fn -> freshness(workspace_id) end)
     ]
 
@@ -143,11 +143,11 @@ defmodule OptimalEngine.ContextHealth do
     {count == 0, if(count == 0, do: 100, else: 0), %{orphan_workspace_scopes: count}}
   end
 
-  defp fixture_visibility do
+  defp fixture_visibility(tenant_id) do
     {:ok, [[count]]} =
       Store.raw_query(
-        "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND (path LIKE '/var/folders/%/optimal_%test_%' OR path LIKE '/tmp/optimal_%test_%' OR node = 'test' OR node LIKE 'node-a-%' OR node LIKE 'node-b-%' OR title LIKE 'Backfill %' OR title LIKE 'bf task %')",
-        []
+        "SELECT COUNT(*) FROM contexts WHERE archived_at IS NULL AND tenant_id = ?1 AND (path LIKE '/var/folders/%/optimal_%test_%' OR path LIKE '/tmp/optimal_%test_%' OR node = 'test' OR node LIKE 'node-a-%' OR node LIKE 'node-b-%' OR title LIKE 'Backfill %' OR title LIKE 'bf task %')",
+        [tenant_id]
       )
 
     {count == 0, if(count == 0, do: 100, else: 0), %{visible: count}}

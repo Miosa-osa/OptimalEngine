@@ -383,14 +383,19 @@ defmodule OptimalEngine.API.Router do
 
   post "/api/review/routing/:id" do
     body = conn.body_params || %{}
-    decision = if body["decision"] == "accept", do: :accept, else: :reject
 
-    case OptimalEngine.ReviewQueue.decide_route(id, decision, body["workspace"],
-           actor_id: Actor.of(conn, body),
-           tenant_id: conn.assigns[:current_tenant] || "default"
-         ) do
-      {:ok, result} -> json(conn, %{result: result})
-      {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+    case parse_review_decision(body["decision"]) do
+      :invalid ->
+        send_resp(conn, 400, Jason.encode!(%{error: "decision is accept or reject"}))
+
+      decision ->
+        case OptimalEngine.ReviewQueue.decide_route(id, decision, body["workspace"],
+               actor_id: Actor.of(conn, body),
+               tenant_id: conn.assigns[:current_tenant] || "default"
+             ) do
+          {:ok, result} -> json(conn, %{result: result})
+          {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
+        end
     end
   end
 
@@ -3440,7 +3445,16 @@ defmodule OptimalEngine.API.Router do
     workspace = query_param(conn, "workspace", "default")
     tenant = query_param(conn, "tenant", conn.assigns[:current_tenant] || "default")
 
-    case OptimalEngine.DataSteward.dashboard(workspace, tenant_id: tenant) do
+    intake = OptimalEngine.CorpusOrganizer.source_workspace(tenant)
+
+    case OptimalEngine.DataSteward.dashboard(workspace,
+           tenant_id: tenant,
+           intake:
+             OptimalEngine.API.WorkspaceAuthPlug.key_holds?(
+               conn.assigns[:current_api_key],
+               intake
+             )
+         ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
@@ -3480,7 +3494,11 @@ defmodule OptimalEngine.API.Router do
              actor_id: Actor.of(conn, body),
              tenant_id: conn.assigns[:current_tenant] || "default"
            ) do
-        {:ok, result} -> json(conn, result)
+        {:ok, result} ->
+          json(conn, result)
+
+        {:error, {:too_many_items, limit}} ->
+          send_resp(conn, 400, Jason.encode!(%{error: "at most #{limit} items"}))
       end
     else
       send_resp(conn, 400, Jason.encode!(%{error: "decision and non-empty items are required"}))

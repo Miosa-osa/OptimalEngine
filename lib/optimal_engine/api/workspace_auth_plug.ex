@@ -118,21 +118,38 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   defp intake_route?(["api", "data-steward", "routes", "decide"]), do: true
   defp intake_route?(_path_info), do: false
 
+  # The organizer also runs as an analysis: placing the intake's records is
+  # tenant wide however the request reaches it.
+  defp tenant_wide?(%{path_info: ["api", "analyses", "run"], body_params: %{"kind" => kind}}),
+    do: kind == "workspace_population"
+
+  defp tenant_wide?(conn), do: conn.path_info in @tenant_wide
+
   defp outside_key_scope?(conn) do
     case conn.assigns[:current_api_key] do
       nil ->
         false
 
       api_key ->
-        scope = api_key.workspace_scope || []
-
         cond do
-          "*" in scope -> false
-          conn.path_info in @tenant_wide -> true
-          intake_route?(conn.path_info) -> intake(conn) not in scope
+          key_holds?(api_key, "*") -> false
+          tenant_wide?(conn) -> true
+          intake_route?(conn.path_info) -> not key_holds?(api_key, intake(conn))
           true -> false
         end
     end
+  end
+
+  @doc """
+  Whether an API key may use a workspace: its scope lists the workspace or
+  holds `"*"`. An anonymous caller (`nil`) has no key scope to enforce.
+  """
+  @spec key_holds?(map() | nil, String.t()) :: boolean()
+  def key_holds?(nil, _workspace_id), do: true
+
+  def key_holds?(api_key, workspace_id) do
+    scope = api_key.workspace_scope || []
+    "*" in scope or workspace_id in scope
   end
 
   defp intake(conn),
@@ -254,6 +271,10 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # Maintenance is a global family, but these two act on one workspace, so the
   # implicit default is authorized like any other workspace.
   def workspace_scoped?(["api", "maintenance", route]) when route in ~w(index graph), do: true
+  # The steward's node type and hierarchy repairs act on the whole tenant, not
+  # on a workspace (a key needs the whole tenant: `@tenant_wide`).
+  def workspace_scoped?(["api", "data-steward", "nodes", "repair-types"]), do: false
+  def workspace_scoped?(["api", "data-steward", "hierarchy", "repair-deterministic"]), do: false
   def workspace_scoped?(["api", root | _]), do: root not in @global_roots
   def workspace_scoped?(_path_info), do: false
 
@@ -351,16 +372,8 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
     end
   end
 
-  defp check_key_scope(_workspace_id, nil), do: :ok
-
   defp check_key_scope(workspace_id, api_key) do
-    scope = api_key.workspace_scope || []
-
-    if "*" in scope or workspace_id in scope do
-      :ok
-    else
-      {:error, :scope_denied}
-    end
+    if key_holds?(api_key, workspace_id), do: :ok, else: {:error, :scope_denied}
   end
 
   # ---------------------------------------------------------------------------

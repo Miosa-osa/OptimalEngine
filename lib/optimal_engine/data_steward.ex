@@ -25,6 +25,9 @@ defmodule OptimalEngine.DataSteward do
 
   @default_limit 100
 
+  # A batch of route decisions is one request; more than this is several.
+  @max_route_items 500
+
   # Tables a change of workspace id does not re-key. `workspaces` is the
   # record being replaced, and the handles move by their own step.
   # `authority_evidence` is hashed and signed over the workspace id each entry
@@ -76,13 +79,22 @@ defmodule OptimalEngine.DataSteward do
   @spec not_rekeyed_tables() :: [String.t()]
   def not_rekeyed_tables, do: @not_rekeyed
 
+  @doc """
+  The steward's overview of a tenant. Options: `:tenant_id` (default
+  tenant), and `intake: false` for a caller that may not see the tenant's
+  intake workspace, whose `route_clusters` are then empty.
+  """
   def dashboard(workspace_id, opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
     with {:ok, entity_quality} <- EntityQuality.run(workspace_id),
          {:ok, orphan_scopes} <- orphan_scopes(tenant_id),
          {:ok, claims} <- claim_clusters(workspace_id, tenant_id, @default_limit),
-         {:ok, routes} <- route_clusters(tenant_id, @default_limit),
+         {:ok, routes} <-
+           if(Keyword.get(opts, :intake, true),
+             do: route_clusters(tenant_id, @default_limit),
+             else: {:ok, []}
+           ),
          {:ok, entities} <- entity_clusters(workspace_id, tenant_id, @default_limit),
          {:ok, hierarchy} <- HierarchyAudit.run(tenant_id) do
       {:ok,
@@ -234,13 +246,20 @@ defmodule OptimalEngine.DataSteward do
 
   An item is decided on its own: a record that is not the tenant's, or not in
   its intake, or a target that is not an active workspace of the tenant,
-  fails that item and nothing else.
+  fails that item and nothing else. A batch holds at most 500 items
+  (`{:error, {:too_many_items, 500}}`).
   """
   def decide_routes(items, decision, opts)
       when is_list(items) and items != [] and decision in [:accept, :reject] do
     actor_id = Keyword.fetch!(opts, :actor_id)
     tenant_id = Keyword.fetch!(opts, :tenant_id)
 
+    if length(items) > @max_route_items,
+      do: {:error, {:too_many_items, @max_route_items}},
+      else: {:ok, decide_each(items, decision, actor_id, tenant_id)}
+  end
+
+  defp decide_each(items, decision, actor_id, tenant_id) do
     results =
       Enum.map(items, fn item ->
         id = item_id(item)
@@ -264,7 +283,7 @@ defmodule OptimalEngine.DataSteward do
         %{id: id, target_workspace_id: target, result: normalize_result(result)}
       end)
 
-    {:ok, summarize(results)}
+    summarize(results)
   end
 
   @doc """

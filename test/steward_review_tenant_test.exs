@@ -17,7 +17,7 @@ defmodule OptimalEngine.StewardReviewTenantTest do
 
   alias OptimalEngine.API.Router
   alias OptimalEngine.Auth.ApiKey
-  alias OptimalEngine.{CorpusOrganizer, DataSteward, HierarchyAudit, Organization}
+  alias OptimalEngine.{ContextHealth, CorpusOrganizer, DataSteward, HierarchyAudit, Organization}
   alias OptimalEngine.{Store, Workspace}
   alias OptimalEngine.Tenancy.Tenant
 
@@ -113,6 +113,20 @@ defmodule OptimalEngine.StewardReviewTenantTest do
         [id <> "-claim", tenant, workspace, id <> "-pkg", id]
       )
 
+    # The vector is labelled by the store as its record is; the embedding of a
+    # chunk is labelled by whoever wrote it, here with the unscoped default.
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO vectors (context_id, embedding, dimensions, tenant_id, workspace_id) VALUES (?1, ?2, 2, ?3, ?4)",
+        [id, {:blob, <<1.0::float-little-32, 0.0::float-little-32>>}, tenant, workspace]
+      )
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO chunk_embeddings (chunk_id, tenant_id, model, modality, dim, vector, workspace_id) VALUES (?1, 'default', 'm', 'text', 2, ?2, ?3)",
+        [id <> "-chunk", {:blob, <<1.0::float-little-32, 0.0::float-little-32>>}, workspace]
+      )
+
     {:ok, _} =
       Store.raw_query(
         "INSERT INTO entities (context_id, name, type, workspace_id) VALUES (?1, 'Ada', 'person', ?2)",
@@ -131,6 +145,8 @@ defmodule OptimalEngine.StewardReviewTenantTest do
           {"chunks", "id", id <> "-chunk"},
           {"source_packages", "id", id <> "-pkg"},
           {"claims", "id", id <> "-claim"},
+          {"vectors", "context_id", id},
+          {"chunk_embeddings", "chunk_id", id <> "-chunk"},
           {"entities", "context_id", id},
           {"edges", "source_id", id}
         ] do
@@ -243,6 +259,18 @@ defmodule OptimalEngine.StewardReviewTenantTest do
       refute default in listed
     end
 
+    test "the dashboard shows route clusters to a key that holds the intake only", ctx do
+      mine = record(ctx.a, ctx.a_intake, "rv#{ctx.n}-a-scoped-cluster", ctx.a_ws)
+      path = "/api/data-steward/dashboard?workspace=#{ctx.a_ws}"
+
+      assert {200, %{"route_clusters" => []}} = get(path, key(ctx.a, ["read"], [ctx.a_ws]))
+
+      for scope <- [["*"], [ctx.a_ws, ctx.a_intake]] do
+        assert {200, %{"route_clusters" => clusters}} = get(path, key(ctx.a, ["read"], scope))
+        assert mine in for(cluster <- clusters, item <- cluster["items"], do: item["id"])
+      end
+    end
+
     test "the hierarchy audit reports the caller's tenant only", ctx do
       {:ok, _} =
         Store.raw_query("UPDATE workspaces SET organization_id = NULL WHERE id = ?1", [ctx.b_ws])
@@ -266,6 +294,48 @@ defmodule OptimalEngine.StewardReviewTenantTest do
     Enum.any?(checks, fn check ->
       Enum.any?(check.issues, &(workspace_id in [&1[:id], &1[:related_id]]))
     end)
+  end
+
+  describe "context health" do
+    defp check(health, name), do: Enum.find(health.checks, &(&1.name == name))
+
+    test "counts the caller's tenant only", ctx do
+      record(ctx.a, ctx.a_intake, "rv#{ctx.n}-a-count-1")
+      record(ctx.a, ctx.a_ws, "rv#{ctx.n}-a-count-2")
+      for i <- 1..3, do: record(ctx.b, ctx.b_intake, "rv#{ctx.n}-b-count-#{i}")
+      record(ctx.b, ctx.b_ws, "rv#{ctx.n}-b-count-4")
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE contexts SET title = 'Backfill fixture' WHERE id = ?1",
+          ["rv#{ctx.n}-b-count-1"]
+        )
+
+      mine = ContextHealth.run(workspace_id: ctx.a_ws, tenant_id: ctx.a)
+      assert %{detail: %{total: 2, generic: 1}} = check(mine, "routing_concentration")
+      assert %{detail: %{visible: 0}} = check(mine, "fixture_visibility")
+
+      theirs = ContextHealth.run(workspace_id: ctx.b_ws, tenant_id: ctx.b)
+      assert %{detail: %{total: 4, generic: 3}} = check(theirs, "routing_concentration")
+      assert %{detail: %{visible: 1}} = check(theirs, "fixture_visibility")
+    end
+
+    test "over HTTP, from the key's tenant", ctx do
+      record(ctx.a, ctx.a_intake, "rv#{ctx.n}-a-http-count")
+      for i <- 1..3, do: record(ctx.b, ctx.b_intake, "rv#{ctx.n}-b-http-count-#{i}")
+
+      assert {200, %{"checks" => checks}} =
+               get("/api/context-health?workspace=#{ctx.a_ws}", key(ctx.a, ["read"]))
+
+      routing = Enum.find(checks, &(&1["name"] == "routing_concentration"))
+      assert %{"total" => 1, "generic" => 1} = routing["detail"]
+
+      assert {200, %{"context_health" => %{"checks" => checks}}} =
+               get("/api/data-steward/dashboard?workspace=#{ctx.a_ws}", key(ctx.a, ["read"]))
+
+      routing = Enum.find(checks, &(&1["name"] == "routing_concentration"))
+      assert %{"total" => 1, "generic" => 1} = routing["detail"]
+    end
   end
 
   # -- decisions ---------------------------------------------------------------
@@ -305,6 +375,31 @@ defmodule OptimalEngine.StewardReviewTenantTest do
 
       assert {:ok, %{workspace_id: workspace}} = Store.get_context(id)
       assert workspace == ctx.a_ws
+    end
+
+    test "rows of another record stay, whatever they are labelled", ctx do
+      id = record(ctx.a, ctx.a_intake, "rv#{ctx.n}-a-first", ctx.a_ws)
+      other = record(ctx.a, ctx.a_intake, "rv#{ctx.n}-a-other", ctx.a_ws)
+      derived(ctx.a, ctx.a_intake, id)
+      derived(ctx.a, ctx.a_intake, other)
+
+      {:ok, _} =
+        Store.raw_query("UPDATE chunks SET tenant_id = 'default' WHERE signal_id = ?1", [other])
+
+      assert {200, _} =
+               post(
+                 "/api/review/routing/#{id}",
+                 %{decision: "accept", workspace: ctx.a_ws},
+                 key(ctx.a, ["topology:write"])
+               )
+
+      for {table, rows} <- derived_rows(id), do: assert(rows == [[ctx.a, ctx.a_ws]], table)
+
+      {:ok, [[tenant, workspace]]} =
+        Store.raw_query("SELECT tenant_id, workspace_id FROM chunks WHERE signal_id = ?1", [other])
+
+      assert {tenant, workspace} == {"default", ctx.a_intake}
+      assert holder(other) == {ctx.a, ctx.a_intake}
     end
 
     test "an edge to another tenant's record stays where it is", ctx do
@@ -546,6 +641,39 @@ defmodule OptimalEngine.StewardReviewTenantTest do
       assert holder(id) == {ctx.a, ctx.a_ws}
     end
 
+    test "a decision that is neither accept nor reject is a bad request, not a rejection",
+         ctx do
+      id = record(ctx.a, ctx.a_intake, "rv#{ctx.n}-a-typo", ctx.a_ws)
+      reviewer = key(ctx.a, ["topology:write"])
+
+      for body <- [%{decision: "acept", workspace: ctx.a_ws}, %{workspace: ctx.a_ws}] do
+        assert {400, %{"error" => _}} = post("/api/review/routing/#{id}", body, reviewer)
+      end
+
+      assert review_state(id) == "review"
+    end
+
+    test "a batch holds at most 500 items", ctx do
+      reviewer = key(ctx.a, ["topology:write"])
+      items = for i <- 1..501, do: %{id: "rv#{ctx.n}-missing-#{i}"}
+
+      assert {400, %{"error" => error}} =
+               post(
+                 "/api/data-steward/routes/decide",
+                 %{decision: "reject", workspace: ctx.a_ws, items: items},
+                 reviewer
+               )
+
+      assert error =~ "500"
+
+      assert {200, %{"requested" => 500}} =
+               post(
+                 "/api/data-steward/routes/decide",
+                 %{decision: "reject", workspace: ctx.a_ws, items: Enum.take(items, 500)},
+                 reviewer
+               )
+    end
+
     test "the default tenant files its own records inside the default tenant", ctx do
       id = record("default", @default_intake, "rv#{ctx.n}-d-own", ctx.x)
 
@@ -701,6 +829,63 @@ defmodule OptimalEngine.StewardReviewTenantTest do
       assert archived.(b_ids) == 0
     end
 
+    test "the sweep archives duplicates in the intake only, and the cache follows", ctx do
+      intake = for i <- 1..2, do: record(ctx.a, ctx.a_intake, "rv#{ctx.n}-a-sweep#{i}")
+      elsewhere = for i <- 1..2, do: record(ctx.a, ctx.a_ws, "rv#{ctx.n}-a-ws-sweep#{i}")
+      [kept, archived] = Enum.sort(intake, :desc)
+      assert {:ok, %{metadata: before}} = Store.get_context(archived)
+      refute before["cleanup_reason"]
+
+      assert {:ok, %{archived_exact_duplicates: 1}} =
+               CorpusOrganizer.deduplicate_exact(tenant_id: ctx.a)
+
+      assert {:ok, %{metadata: %{"cleanup_reason" => "exact_duplicate_context"}}} =
+               Store.get_context(archived)
+
+      assert {:ok, %{metadata: kept_metadata}} = Store.get_context(kept)
+      refute kept_metadata["cleanup_reason"]
+
+      {:ok, [[count]]} =
+        Store.raw_query(
+          "SELECT COUNT(*) FROM contexts WHERE id IN (?1, ?2) AND archived_at IS NOT NULL",
+          elsewhere
+        )
+
+      assert count == 0
+    end
+
+    test "all_tenants in the request does not widen the sweep", ctx do
+      for i <- 1..2, do: record(ctx.b, ctx.b_intake, "rv#{ctx.n}-b-all#{i}")
+      for i <- 1..2, do: record(ctx.a, ctx.a_intake, "rv#{ctx.n}-a-all#{i}")
+      admin = key(ctx.a, ["*"])
+
+      assert {200, %{"archived_exact_duplicates" => 1}} =
+               post(
+                 "/api/maintenance/corpus-organization",
+                 %{deduplicate_exact: true, all_tenants: true},
+                 admin
+               )
+
+      {:ok, [[count]]} =
+        Store.raw_query(
+          "SELECT COUNT(*) FROM contexts WHERE id LIKE ?1 AND archived_at IS NOT NULL",
+          ["rv#{ctx.n}-b-all%"]
+        )
+
+      assert count == 0
+    end
+
+    test "an analysis run of the organizer needs a key that holds the whole tenant", ctx do
+      id = record(ctx.a, ctx.a_intake, "rv#{ctx.n}-a-analysis")
+      run = %{workspace: ctx.a_intake, kind: "workspace_population"}
+
+      assert {403, %{"error" => "workspace_scope_denied"}} =
+               post("/api/analyses/run", run, key(ctx.a, ["admin"], [ctx.a_intake]))
+
+      assert {200, _} = post("/api/analyses/run", run, key(ctx.a, ["admin"]))
+      assert holder(id) == {ctx.a, ctx.a_intake}
+    end
+
     test "the maintenance organizer needs a key that holds the whole tenant", ctx do
       narrow = key(ctx.a, ["admin"], [ctx.a_ws, ctx.a_intake])
 
@@ -785,11 +970,7 @@ defmodule OptimalEngine.StewardReviewTenantTest do
 
     test "over HTTP, for a key that holds the whole tenant", ctx do
       assert {200, %{"updated_nodes" => updated}} =
-               post(
-                 "/api/data-steward/nodes/repair-types",
-                 %{workspace: ctx.b_ws},
-                 key(ctx.b, ["topology:write"])
-               )
+               post("/api/data-steward/nodes/repair-types", %{}, key(ctx.b, ["topology:write"]))
 
       assert node_row(ctx.b_node) == {"org", "#{ctx.b_ws}:entity"}
       assert node_row(ctx.a_node) == {"org", nil}
@@ -801,7 +982,7 @@ defmodule OptimalEngine.StewardReviewTenantTest do
       narrow = key(ctx.a, ["topology:write"], [ctx.a_ws])
 
       assert {403, %{"error" => "workspace_scope_denied"}} =
-               post("/api/data-steward/nodes/repair-types", %{workspace: ctx.a_ws}, narrow)
+               post("/api/data-steward/nodes/repair-types", %{}, narrow)
 
       assert node_row(ctx.a_node) == {"org", nil}
     end
@@ -898,6 +1079,52 @@ defmodule OptimalEngine.StewardReviewTenantTest do
       assert {:error, :organization_not_found} = repair(ctx, %{"organizations" => [rule]})
       assert organization(ctx.a_suite) == Organization.default_for(ctx.a)
       assert organization(ctx.b_suite) == Organization.default_for(ctx.b)
+    end
+
+    test "a source organization of another tenant is not found", ctx do
+      rule = %{
+        "organization_id" => ctx.ventures,
+        "from_organization_id" => ctx.foreign_org,
+        "name_contains" => "alpha suite"
+      }
+
+      assert {:error, :organization_not_found} = repair(ctx, %{"organizations" => [rule]})
+      assert organization(ctx.a_suite) == Organization.default_for(ctx.a)
+    end
+
+    test "ids and texts are names, not documents", ctx do
+      long = String.duplicate("a", 257)
+
+      rules = [
+        %{"organization_id" => long, "name_contains" => "alpha"},
+        %{"organization_id" => ctx.ventures, "name_contains" => long},
+        %{"organization_id" => ctx.ventures, "description_contains" => long},
+        %{"organization_id" => ctx.ventures, "from_organization_id" => long, "name_contains" => "x"}
+      ]
+
+      for rule <- rules do
+        assert {:error, {:invalid_mapping, _}} = repair(ctx, %{"organizations" => [rule]})
+      end
+
+      kinds = %{"node_kinds" => [%{"workspace_id" => long, "kinds" => %{"tasks" => "operation"}}]}
+      assert {:error, {:invalid_mapping, _}} = repair(ctx, kinds)
+    end
+
+    test "a tenant's default organization is not created by a repair", ctx do
+      tenant = "rev-c-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: tenant, name: tenant})
+      owner = "#{tenant}:ventures"
+      {:ok, _} = Organization.create(%{id: owner, tenant_id: tenant, slug: "ventures", name: "V"})
+      rule = %{"organization_id" => owner, "name_contains" => "alpha"}
+
+      assert {:ok, %{workspace_owners_updated: 0}} =
+               DataSteward.repair_deterministic_hierarchy(
+                 tenant_id: tenant,
+                 actor_id: "user:steward",
+                 mapping: %{"organizations" => [rule]}
+               )
+
+      assert {:error, :not_found} = Organization.get("#{tenant}:default")
     end
 
     test "a rule that matches on nothing is refused rather than matching everything", ctx do
@@ -1010,18 +1237,18 @@ defmodule OptimalEngine.StewardReviewTenantTest do
       path = "/api/data-steward/hierarchy/repair-deterministic"
 
       assert {200, %{"workspace_owners_updated" => 1}} =
-               post(path, %{workspace: ctx.a_ws, mapping: ctx.mapping}, steward)
+               post(path, %{mapping: ctx.mapping}, steward)
 
       assert organization(ctx.a_suite) == ctx.ventures
       assert organization(ctx.b_suite) == Organization.default_for(ctx.b)
 
-      assert {422, %{"error" => error}} = post(path, %{workspace: ctx.a_ws}, steward)
+      assert {422, %{"error" => error}} = post(path, %{}, steward)
       assert error =~ "mapping_required"
 
       narrow = key(ctx.a, ["topology:write"], [ctx.a_ws])
 
       assert {403, %{"error" => "workspace_scope_denied"}} =
-               post(path, %{workspace: ctx.a_ws, mapping: ctx.mapping}, narrow)
+               post(path, %{mapping: ctx.mapping}, narrow)
     end
   end
 end
