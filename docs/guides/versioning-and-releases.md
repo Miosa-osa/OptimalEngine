@@ -21,7 +21,7 @@ retrieval and projection component versions
 Read it from `GET /api/version`.
 The lightweight `GET /api/health` and `GET /api/status` responses include the same identity.
 
-The current tracked contract is application `0.3.5`, API `v1`, contract schema `1`, expected migration `79`.
+The current tracked contract is application `0.3.5`, API `v1`, contract schema `1`, expected migration `80`.
 [engine-contract.json](../../engine-contract.json) supplies repository, schema, and capability metadata to [Version.info/0](../../lib/optimal_engine/version.ex) at compilation.
 [test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
 The runner applies every migration whose version is not yet recorded, but `expected_migration` and the replication gate compare the highest number, so two Engines that both report the same number must have applied the same set.
@@ -108,7 +108,8 @@ GROUP BY workspace_id, tenant_id;
 
 After upgrading:
 
-1. Run the backfill once, without a workspace, which covers every workspace: `bin/optimal eval 'OptimalEngine.Release.graph_backfill()'` on a release build, or `mix optimal.graph_backfill` from a checkout. It only adds missing edges, so it is safe to run again.
+1. Stop the Engine service, then run the backfill once, without a workspace, which covers every workspace: `bin/optimal eval 'OptimalEngine.Release.graph_backfill()'` on a release build, or `mix optimal.graph_backfill` from a checkout. Both boot the Engine application, its HTTP listener and triple store included, so they cannot run beside the service. It only adds missing edges, so it is safe to run again; start the service when it is done.
+   It exits non-zero when an edge write failed, and only a run where every write succeeded and the claim pass ran counts as done.
 2. Until it has run, search reads fewer graph edges (the graph boost and graph candidates), so results are mildly thinner.
 3. `GET /api/maintenance/graph` reports it per workspace in `graph_edges`: `backfill_needed` is true while the legacy table holds the workspace's rows and no backfill has completed for it or for every workspace, and false afterwards; an Engine that never had legacy edges reads false. `legacy_edges` counts the workspace's legacy rows and `edges` its graph edges.
 
@@ -132,7 +133,7 @@ CI rejects a release tag that does not exactly match the application version.
 
 The Store applies pending migrations when it opens, in order, before the API answers.
 Each migration runs in one transaction together with the `schema_migrations` row that records it.
-The failed migration leaves no trace: when a statement fails, everything that migration wrote is rolled back, its version stays unrecorded, and `migration <nnn> failed and was rolled back: <cause>` is raised with the number zero-padded, for example `migration 080` in a release whose last real migration is 079.
+The failed migration leaves no trace: when a statement fails, everything that migration wrote is rolled back, its version stays unrecorded, and `migration <nnn> failed and was rolled back: <cause>` is raised with the number zero-padded, for example `migration 081` in a release whose last real migration is 080.
 The Store then does not open and the release exits without answering.
 Migrations before the failed one in the same boot stay applied.
 A release that adds several migrations can therefore leave a store between releases, and the previous release is not guaranteed to read it.

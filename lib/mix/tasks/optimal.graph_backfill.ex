@@ -43,9 +43,11 @@ defmodule Mix.Tasks.Optimal.GraphBackfill do
     * `--no-claims`   — skip the claim->about->entity pass
 
   One run without `--workspace` covers every workspace, and is the one an
-  upgrade that created `graph_edges` needs: it is recorded, and
-  `GET /api/maintenance/graph` then reads `"backfill_needed": false`. On a
-  release build, run `OptimalEngine.Release.graph_backfill/1` instead.
+  upgrade that created `graph_edges` needs: when every edge write succeeded
+  and the claim pass ran, it is recorded, and `GET /api/maintenance/graph`
+  then reads `"backfill_needed": false`. It starts the Engine application,
+  so stop the running Engine service first. On a release build, run
+  `OptimalEngine.Release.graph_backfill/1` instead.
   """
 
   use Mix.Task
@@ -77,6 +79,9 @@ defmodule Mix.Tasks.Optimal.GraphBackfill do
         shell.info("")
         shell.info("Done. Edges: #{result.edges_before} -> #{result.edges_after}")
         shell.info("Contexts: #{result.contexts}  Claims: #{result.claims}")
+
+        if result.failed_edges > 0,
+          do: Mix.raise("#{result.failed_edges} edge writes failed; run the backfill again")
 
       {:error, reason} ->
         Mix.raise("graph backfill failed: #{inspect(reason)}")

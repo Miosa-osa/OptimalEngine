@@ -59,3 +59,6 @@ A full run records a row with no workspace; a workspace run records that workspa
 `OptimalEngine.Release.graph_backfill/1` is the entry point on a release build, which has no mix.
 An unregistered `<tenant>:<slug>` id now gives its contexts and edges the tenant its prefix names, when that tenant exists, instead of `default`.
 - 2026-10-20: Intake classification costs about 100 ms for a 24 KB page and `Intake.process/2` runs one call at a time, so a bulk importer classifies ahead in parallel with `Intake.classify/2` and `Intake.known_entities/0` and passes `:classified`; the Notion importer measured 104.5 MB of Markdown and CSV (5,400 contexts) searchable in 280 s on an 8-core gate this way, against 695 s classifying inside intake.
+- 2026-10-21: A graph backfill is recorded only when the claim pass ran and every edge write succeeded (`failed_edges` 0); the edge writers now build edge lists and one writer counts failed Store writes, so a partial run can never clear `backfill_needed`.
+`Workspace.tenant_of/1` is the one Elixir-side rule for the tenant of a workspace id (row, then `<tenant>:` prefix, then default); the SQL inserts derive the same COALESCE.
+The release and mix backfill boot the full application (HTTP listener, triple store), so the upgrade note says to stop the service first rather than adding a second maintenance route beside #56's job.

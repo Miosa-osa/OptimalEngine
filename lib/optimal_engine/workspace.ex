@@ -127,6 +127,27 @@ defmodule OptimalEngine.Workspace do
     end
   end
 
+  @doc """
+  The tenant the rows written under a workspace id belong to: the
+  workspace's; for an id no workspace has, the tenant its `"<tenant>:"`
+  prefix names when that tenant exists; else `"default"`. Contexts, graph
+  edges and memories take this tenant (`Store.insert_context` and the graph
+  edge insert derive it in their SQL).
+  """
+  @spec tenant_of(String.t()) :: String.t()
+  def tenant_of(id) when is_binary(id) do
+    sql = """
+    SELECT COALESCE((SELECT w.tenant_id FROM workspaces w WHERE w.id = ?1),
+                    (SELECT t.id FROM tenants t WHERE t.id = substr(?1, 1, instr(?1, ':') - 1)),
+                    'default')
+    """
+
+    case Store.raw_query(sql, [id]) do
+      {:ok, [[tenant_id]]} when is_binary(tenant_id) -> tenant_id
+      _ -> "default"
+    end
+  end
+
   @doc "Returns the workspace identified by `(tenant_id, slug)`."
   @spec get_by_slug(String.t(), String.t()) :: {:ok, t()} | {:error, :not_found}
   def get_by_slug(slug, tenant_id) when is_binary(slug) and is_binary(tenant_id) do

@@ -133,16 +133,13 @@ defmodule OptimalEngine.API.Router do
     })
   end
 
-  # The analyses below answer only for a workspace registered to the caller's
-  # tenant (`404` otherwise, as for a workspace that does not exist), and read
-  # its graph edges in that tenant.
+  # The analyses below read the workspace's graph edges and contexts in the
+  # caller's tenant (request_scope/2), so a workspace id two tenants write
+  # under answers each with its own graph.
   get "/api/graph/hubs" do
     workspace = query_param(conn, "workspace", "default")
-
-    with_registered_workspace(conn, workspace, fn ->
-      {:ok, hubs} = GraphAnalyzer.hubs(request_scope(conn, workspace))
-      json(conn, %{hubs: format_hubs(hubs)})
-    end)
+    {:ok, hubs} = GraphAnalyzer.hubs(request_scope(conn, workspace))
+    json(conn, %{hubs: format_hubs(hubs)})
   end
 
   get "/api/graph/triangles" do
@@ -152,23 +149,16 @@ defmodule OptimalEngine.API.Router do
     # candidate-only triangles. Use `?classify=true` to enable enrichment.
     skip_llm = not (conn |> query_param("classify", "false") |> parse_bool(false))
 
-    with_registered_workspace(conn, workspace, fn ->
-      {:ok, triangles} =
-        GraphAnalyzer.triangles(
-          [limit: limit, skip_llm: skip_llm] ++ request_scope(conn, workspace)
-        )
+    {:ok, triangles} =
+      GraphAnalyzer.triangles([limit: limit, skip_llm: skip_llm] ++ request_scope(conn, workspace))
 
-      json(conn, %{triangles: format_triangles(triangles)})
-    end)
+    json(conn, %{triangles: format_triangles(triangles)})
   end
 
   get "/api/graph/clusters" do
     workspace = query_param(conn, "workspace", "default")
-
-    with_registered_workspace(conn, workspace, fn ->
-      {:ok, clusters} = GraphAnalyzer.clusters(request_scope(conn, workspace))
-      json(conn, %{clusters: format_clusters(clusters)})
-    end)
+    {:ok, clusters} = GraphAnalyzer.clusters(request_scope(conn, workspace))
+    json(conn, %{clusters: format_clusters(clusters)})
   end
 
   get "/api/graph/reflect" do
@@ -178,17 +168,12 @@ defmodule OptimalEngine.API.Router do
     # low-latency candidate gaps only. Use `?classify=true` to enable.
     skip_llm = not (conn |> query_param("classify", "false") |> parse_bool(false))
 
-    with_registered_workspace(conn, workspace, fn ->
-      {:ok, gaps} =
-        Reflector.reflect(
-          min_cooccurrences: min,
-          workspace_id: workspace,
-          tenant_id: conn.assigns[:current_tenant] || "default",
-          skip_llm: skip_llm
-        )
+    {:ok, gaps} =
+      Reflector.reflect(
+        [min_cooccurrences: min, skip_llm: skip_llm] ++ request_scope(conn, workspace)
+      )
 
-      json(conn, %{gaps: format_gaps(gaps)})
-    end)
+    json(conn, %{gaps: format_gaps(gaps)})
   end
 
   get "/api/node/:node_id" do
@@ -5007,23 +4992,6 @@ defmodule OptimalEngine.API.Router do
     end
   rescue
     _ -> default
-  end
-
-  # Runs `fun` when `workspace` is registered to the caller's tenant; a
-  # workspace of another tenant and one that does not exist answer alike.
-  defp with_registered_workspace(conn, workspace, fun) do
-    tenant = conn.assigns[:current_tenant] || "default"
-
-    case OptimalEngine.Workspace.get(workspace) do
-      {:ok, %{tenant_id: ^tenant}} ->
-        fun.()
-
-      {:error, reason} when reason != :not_found ->
-        conn |> put_status(500) |> json(%{error: inspect(reason)})
-
-      _not_in_tenant ->
-        conn |> put_status(404) |> json(%{error: "workspace not found"})
-    end
   end
 
   defp query_param(conn, key, default) do

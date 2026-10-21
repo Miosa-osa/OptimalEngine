@@ -144,7 +144,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_graph_edges(),
       migration_077_context_address_indexes(),
       migration_derived_data_delete_indexes(),
-      migration_asset_foreign_key_indexes()
+      migration_asset_foreign_key_indexes(),
+      migration_derived_rows_tenant()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -298,6 +299,60 @@ defmodule OptimalEngine.Store.Migrations do
         WHERE tenant_id = 'default' AND #{ws_tenant.("entities.workspace_id")} <> 'default'
         """},
        {"graph_edges_done", "UPDATE sync_identity SET applying = 0 WHERE id = 1"}
+     ]}
+  end
+
+  # The number lives here and in the pins listed in
+  # docs/guides/versioning-and-releases.md.
+  @derived_rows_tenant_version 80
+
+  # The graph edges migration gave contexts still labelled "default" in
+  # another tenant's workspace that tenant. The rows derived from a context
+  # took its tenant when they were written or repaired (migration 70 for
+  # vectors, chunks and chunk embeddings, the entity mention backfill for
+  # mentions), so those of a relabelled context still read "default" and its
+  # tenant's filtered reads miss them: they take the context's tenant now. A
+  # row already labelled with a tenant other than the default is left.
+  #
+  # Every statement is safe to run again, and they run with change capture
+  # off (`sync_identity.applying`): every Engine runs them.
+  defp migration_derived_rows_tenant do
+    {@derived_rows_tenant_version, "derived rows take the tenant of their relabelled context",
+     [
+       {"derived_rows_tenant_applying", "UPDATE sync_identity SET applying = 1 WHERE id = 1"},
+       {"repair_vectors_tenant",
+        """
+        UPDATE vectors
+        SET tenant_id = (SELECT c.tenant_id FROM contexts c WHERE c.id = vectors.context_id)
+        WHERE tenant_id = 'default'
+          AND EXISTS (SELECT 1 FROM contexts c
+                      WHERE c.id = vectors.context_id AND c.tenant_id <> 'default')
+        """},
+       {"repair_chunks_tenant",
+        """
+        UPDATE chunks
+        SET tenant_id = (SELECT c.tenant_id FROM contexts c WHERE c.id = chunks.signal_id)
+        WHERE tenant_id = 'default'
+          AND EXISTS (SELECT 1 FROM contexts c
+                      WHERE c.id = chunks.signal_id AND c.tenant_id <> 'default')
+        """},
+       {"repair_chunk_embeddings_tenant",
+        """
+        UPDATE chunk_embeddings
+        SET tenant_id = (SELECT ch.tenant_id FROM chunks ch WHERE ch.id = chunk_embeddings.chunk_id)
+        WHERE tenant_id = 'default'
+          AND EXISTS (SELECT 1 FROM chunks ch
+                      WHERE ch.id = chunk_embeddings.chunk_id AND ch.tenant_id <> 'default')
+        """},
+       {"repair_entity_mentions_tenant",
+        """
+        UPDATE entity_mentions
+        SET tenant_id = (SELECT c.tenant_id FROM contexts c WHERE c.id = entity_mentions.context_id)
+        WHERE tenant_id = 'default'
+          AND EXISTS (SELECT 1 FROM contexts c
+                      WHERE c.id = entity_mentions.context_id AND c.tenant_id <> 'default')
+        """},
+       {"derived_rows_tenant_done", "UPDATE sync_identity SET applying = 0 WHERE id = 1"}
      ]}
   end
 

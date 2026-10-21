@@ -243,8 +243,8 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
   end
 
   describe "GET /api/graph analysis endpoints" do
-    # The analyses read the edge table, which has no tenant, so they answer
-    # only for a workspace registered to the caller's tenant.
+    # The analyses read the caller's tenant's graph in the workspace, whether
+    # or not the workspace is registered.
     defp registered_workspace(slug) do
       {:ok, workspace} =
         Workspace.create(%{
@@ -287,14 +287,17 @@ defmodule OptimalEngine.API.WorkspaceIsolationTest do
       assert request(:get, "/api/graph/clusters?workspace=#{ws_a}").resp_body =~ "isoana1"
     end
 
-    test "a workspace nobody registered answers none of them", ctx do
+    test "a workspace nobody registered answers them, scoped to itself", ctx do
       for path <- [
             "/api/graph/hubs?workspace=#{ctx.ws_a}",
             "/api/graph/triangles?workspace=#{ctx.ws_a}&limit=5",
             "/api/graph/clusters?workspace=#{ctx.ws_a}",
             "/api/graph/reflect?workspace=#{ctx.ws_a}&min=1"
           ] do
-        assert request(:get, path).status == 404, path
+        conn = request(:get, path)
+        assert conn.status == 200, "#{path} returned #{conn.status}"
+        refute conn.resp_body =~ "EntityB#{ctx.suffix}"
+        refute conn.resp_body =~ ctx.b1.id
       end
     end
   end
