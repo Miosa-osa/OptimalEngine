@@ -11,8 +11,10 @@ defmodule OptimalEngine.LogBuffer do
 
   A line is `<UTC ISO 8601 time> [<level>] <message>` on a single line, at most
   4,096 bytes, with control characters other than tab replaced by `?`: C0 and
-  C1 controls, DEL, and the Unicode line and paragraph separators. Before a line
-  is stored, these are replaced with `[redacted]`:
+  C1 controls, DEL, and the Unicode line and paragraph separators. A longer line
+  is redacted first and then cut at a character boundary, ending in `...`, so a
+  cut never leaves part of a secret. Before a line is stored, these are
+  replaced with `[redacted]`:
 
     * Engine API keys, any `oe_` token (generated `oe_<id>_<secret>` keys and
       operator-chosen ones, plain or URL-encoded);
@@ -25,8 +27,9 @@ defmodule OptimalEngine.LogBuffer do
       also at the end of a longer name (`AWS_SECRET_ACCESS_KEY`, `db_password`,
       `notion_token`), in `name=value`, `name: value`, `"name" => value`,
       `{"name", value}` and escaped-JSON forms. A quoted or charlist value is
-      redacted to its closing quote, an unquoted one to the next whitespace,
-      and `authorization` takes an auth scheme word before its credential;
+      redacted to its closing quote (to the end of the line without one), an
+      unquoted one to the next whitespace, and `authorization` takes an auth
+      scheme word before its credential;
     * provider tokens with a known prefix (`sk-`, `sk-ant-`, `rk_`, `whsec_`,
       `msk_`, `mki_`, `xox?-`, `gh?_`, `github_pat_`, `ntn_`, `secret_`,
       `ya29.`), AWS access key ids (`AKIA...`) and JWTs.
@@ -44,14 +47,18 @@ defmodule OptimalEngine.LogBuffer do
   @table __MODULE__
   @default_capacity 1_000
   @max_line 4_096
+  # A line is formatted in a window four times as long, redacted, and only then
+  # cut to @max_line bytes: a cut made before redaction can split a secret so
+  # that no rule recognizes the part that stays.
+  @window 4 * @max_line
 
   @formatter %{
     template: [:time, " [", :level, "] ", :msg],
     single_line: true,
     legacy_header: false,
     time_offset: ~c"Z",
-    chars_limit: @max_line,
-    max_size: @max_line
+    chars_limit: @window,
+    max_size: @window
   }
 
   # Applied in order: the specific shapes first, then the credential-like names,
@@ -61,8 +68,9 @@ defmodule OptimalEngine.LogBuffer do
   # non-alphanumeric, so AWS_SECRET_ACCESS_KEY and db_password do. Its separator
   # is an optional (escaped) quote, then =>, : or =, or the "," of a tuple. A
   # quoted value (a charlist ~c"..." or '...' too) is redacted to its closing
-  # quote, an unquoted one to the next whitespace; `authorization` also takes an
-  # auth scheme word before the credential.
+  # quote, or to the end of the line without one, an unquoted one to the next
+  # whitespace; `authorization` also takes an auth scheme word before the
+  # credential.
   @redactions [
     {~r/oe_[^\s"'&,;)}\]]+/, "oe_[redacted]"},
     {~r/(Bearer\s+)[^\s"',;]+/i, "\\1[redacted]"},
@@ -73,7 +81,7 @@ defmodule OptimalEngine.LogBuffer do
     {~r/([a-z][a-z0-9+.-]*:\/\/)[^\/\s?#]*@/i, "\\1[redacted]@"},
     {~r/(?<![A-Za-z0-9])(authorization)(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?:[A-Za-z][A-Za-z0-9_-]*\s+)?[^\s"']+/i,
      "\\1\\2[redacted]"},
-    {~r/(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|client[_-]?secret|secret[_-]?access[_-]?key|authorization|x-optimal-grant|bot_token)(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?:((?:~c)?\\?")[^"]*?(\\?")|'[^']*'|[^\s"']+)/i,
+    {~r/(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|client[_-]?secret|secret[_-]?access[_-]?key|authorization|x-optimal-grant|bot_token)(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?:((?:~c)?\\?")[^"]*?(\\?"|\z)|'[^']*(?:'|\z)|[^\s"']+)/i,
      :value},
     {~r/(?<![A-Za-z0-9])(github_pat|ntn|ya29|whsec|rk|msk|mki|sk-ant|sk|xox[abpors]|gh[pousr])([_.-])[A-Za-z0-9_.-]{8,}/,
      "\\1\\2[redacted]"},
@@ -114,7 +122,13 @@ defmodule OptimalEngine.LogBuffer do
 
   @doc false
   def log(event, %{config: %{table: table, capacity: capacity}}) do
-    line = event |> :logger_formatter.format(@formatter) |> IO.chardata_to_string() |> redact()
+    line =
+      event
+      |> :logger_formatter.format(@formatter)
+      |> IO.chardata_to_string()
+      |> redact()
+      |> cap()
+
     seq = :ets.update_counter(table, :seq, 1)
     :ets.insert(table, {seq, line})
     :ets.delete(table, seq - capacity)
@@ -132,7 +146,20 @@ defmodule OptimalEngine.LogBuffer do
     end)
   end
 
-  # The name and its separator stay; a double-quoted value keeps its quotes.
+  # At most @max_line bytes, cut at a character boundary and marked with "...".
+  defp cap(line) when byte_size(line) <= @max_line, do: line
+
+  defp cap(line) do
+    head = binary_part(line, 0, @max_line - 3)
+
+    case :unicode.characters_to_binary(head) do
+      {:incomplete, whole, _split_character} -> whole <> "..."
+      _valid_or_not -> head <> "..."
+    end
+  end
+
+  # The name and its separator stay; a double-quoted value keeps its quotes
+  # (its closing one only when the line has it).
   defp redact_value(_whole, name, separator, "", ""), do: name <> separator <> "[redacted]"
 
   defp redact_value(_whole, name, separator, open, close),
