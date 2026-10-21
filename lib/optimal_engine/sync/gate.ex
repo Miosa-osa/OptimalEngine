@@ -946,7 +946,7 @@ defmodule OptimalEngine.Sync.Gate do
       index = index(gate)
 
       index.contexts != %{} or index.memories != %{} or
-        Enum.any?(Lineage.tables(), fn table ->
+        Enum.any?(Lineage.scanned_tables(), fn table ->
           case exact_predicate(Lineage.spec(table), gate.rank) do
             nil ->
               false
@@ -1073,14 +1073,17 @@ defmodule OptimalEngine.Sync.Gate do
 
   # The write sequence of the change capture and of the ledger: every write to
   # a replicated table of a workspace that syncs moves one of them, and so
-  # does applying a change from a peer. A workspace that does not sync is not
-  # captured, so nothing tells when it changed: it is not cached.
+  # does applying a change from a peer. The tables the gate scans that stay on
+  # this Engine are not captured; the triggers `Capture` puts on them move the
+  # third sequence. A workspace that does not sync is not captured, so nothing
+  # tells when it changed: it is not cached. A sequence that is not there yet
+  # (the Engine has not installed its triggers) is simply absent from the stamp.
   defp stamp(gate) do
     if query!("SELECT 1 FROM sync_workspaces WHERE workspace_id = ?1", [gate.workspace_id]) == [] do
       :uncached
     else
       query!(
-        "SELECT name, seq FROM sqlite_sequence WHERE name IN ('sync_capture', 'sync_mutations') ORDER BY name",
+        "SELECT name, seq FROM sqlite_sequence WHERE name IN ('sync_capture', 'sync_local_stamp', 'sync_mutations') ORDER BY name",
         []
       )
     end

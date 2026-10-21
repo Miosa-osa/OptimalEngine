@@ -26,9 +26,19 @@ defmodule OptimalEngine.Sync.Capture do
   a change for it that a peer sends is skipped. A new table is therefore local
   until someone puts it on the list, and a test fails until it is on one list
   or the other. `docs/guides/replication.md` gives the reason for each table.
+
+  The gate (`OptimalEngine.Sync.Gate`) also reads the tables that stay local and
+  carry a label or a class (`stamped_tables/0`: assets, active pools, context
+  packages, model and tool runs, skill packages, tool definitions). Nothing is
+  captured from them, but a write to a row of a workspace that syncs moves
+  `sync_local_stamp`, a table that never holds a row and only keeps a counter in
+  `sqlite_sequence`, which the gate cache reads with the sequences of the
+  capture and the ledger. An update only counts when it writes a column the
+  gate reads.
   """
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Sync.Lineage
 
   # What replicates: workspace knowledge. A peer that holds the `sync` scope may
   # write these tables and no others, so nothing here may grant a capability
@@ -55,8 +65,8 @@ defmodule OptimalEngine.Sync.Capture do
   # twice on a second Engine; `workspaces` and `workspace_handles` name this
   # Engine's workspaces; the rest is sync bookkeeping and run logs.
   @engine_state ~w(sync_capture sync_mutations sync_cursors sync_workspaces sync_peers sync_conflicts
-                   metric_samples uri_redirects federation_peers connectors connector_runs
-                   processor_runs jobs dead_letter_jobs workspaces workspace_handles
+                   sync_local_stamp metric_samples uri_redirects federation_peers connectors
+                   connector_runs processor_runs jobs dead_letter_jobs workspaces workspace_handles
                    graph_backfills)
 
   # Per-Engine as well, but a workspace bundle carries them (a move takes the
@@ -94,6 +104,7 @@ defmodule OptimalEngine.Sync.Capture do
                  workspace_members workspace_storage_policies)
   @max_columns 60
   @seal_batch 5_000
+  @stamp_table "sync_local_stamp"
 
   @doc """
   The tables that replicate, an explicit list. It is the allow-list for applying
@@ -157,6 +168,7 @@ defmodule OptimalEngine.Sync.Capture do
       end)
 
     drop_stale_triggers()
+    install_stamp()
 
     {:ok, %{tables: installed, skipped: Enum.reverse(skipped)}}
   end
@@ -181,23 +193,132 @@ defmodule OptimalEngine.Sync.Capture do
         {:skipped, :too_many_columns}
 
       true ->
-        statements = statements(table, columns)
-        creates = Enum.reject(statements, &String.starts_with?(&1, "DROP"))
-
-        # Triggers already in place are left alone, so a restart does no DDL;
-        # a changed table is re-triggered in one transaction.
-        if installed_triggers(table) == MapSet.new(creates, &String.trim/1) do
-          :ok
-        else
-          {:ok, _} =
-            Store.transaction(fn txn ->
-              Enum.each(statements, fn sql -> {:ok, _} = Store.txn_execute(txn, sql, []) end)
-              {:ok, :installed}
-            end)
-
-          :ok
-        end
+        ensure_triggers(table, "sync_capture_", statements(table, columns))
     end
+  end
+
+  # Triggers already in place are left alone, so a restart does no DDL; a
+  # changed table is re-triggered in one transaction.
+  defp ensure_triggers(table, prefix, statements) do
+    creates = Enum.reject(statements, &String.starts_with?(&1, "DROP"))
+
+    if installed_triggers(table, prefix) == MapSet.new(creates, &String.trim/1) do
+      :ok
+    else
+      {:ok, _} =
+        Store.transaction(fn txn ->
+          Enum.each(statements, fn sql -> {:ok, _} = Store.txn_execute(txn, sql, []) end)
+          {:ok, :installed}
+        end)
+
+      :ok
+    end
+  end
+
+  @doc """
+  The tables the gate scans for a label that stay on this Engine: the tables
+  `Lineage.scanned_tables/0` names that do not replicate. A write to one is not
+  captured; it moves the local stamp instead (see the module doc).
+  """
+  @spec stamped_tables() :: [String.t()]
+  def stamped_tables, do: Enum.reject(Lineage.scanned_tables(), &replicated?/1)
+
+  # The counter table is created here, not by a migration: like the capture
+  # triggers it is installed at boot and when sync is enabled, and a gate that
+  # reads the stamp before it exists just sees no entry for it.
+  defp install_stamp do
+    :ok =
+      Store.raw_execute(
+        "CREATE TABLE IF NOT EXISTS #{@stamp_table} (seq INTEGER PRIMARY KEY AUTOINCREMENT)",
+        []
+      )
+
+    stamped = stamped_tables()
+
+    for table <- stamped do
+      columns = columns(table)
+
+      if Enum.any?(columns, &(&1.name == "workspace_id")),
+        do: ensure_triggers(table, "sync_stamp_", stamp_statements(table, columns))
+    end
+
+    drop_stale_stamp_triggers(stamped)
+  end
+
+  # An insert, a delete, and an update that writes a column the gate reads
+  # (a status written on every call must not drop the scan) bump the counter of
+  # `sync_local_stamp`: insert a row, delete it; the sequence stays.
+  # Only the rows of a workspace that syncs count.
+  defp stamp_statements(table, columns) do
+    t = quote_name(table)
+    names = MapSet.new(columns, & &1.name)
+    spec = Lineage.spec(table)
+
+    read =
+      [
+        spec.labels && "security_labels",
+        spec.partitions && "partition_ids",
+        spec.meta,
+        spec.class,
+        "tenant_id",
+        "workspace_id"
+      ]
+      |> Enum.filter(&(is_binary(&1) and MapSet.member?(names, &1)))
+      |> Enum.uniq()
+      |> Enum.map_join(", ", &quote_name/1)
+
+    syncing = fn row ->
+      "EXISTS (SELECT 1 FROM sync_workspaces WHERE workspace_id = #{row}.\"workspace_id\")"
+    end
+
+    bump = "INSERT INTO #{@stamp_table} (seq) VALUES (NULL); DELETE FROM #{@stamp_table};"
+
+    drops =
+      for suffix <- ~w(ai au ad),
+          do: "DROP TRIGGER IF EXISTS #{quote_name("sync_stamp_#{suffix}_#{table}")}"
+
+    drops ++
+      [
+        """
+        CREATE TRIGGER #{quote_name("sync_stamp_ai_#{table}")} AFTER INSERT ON #{t}
+        WHEN #{syncing.("NEW")}
+        BEGIN
+          #{bump}
+        END
+        """,
+        """
+        CREATE TRIGGER #{quote_name("sync_stamp_au_#{table}")} AFTER UPDATE OF #{read} ON #{t}
+        WHEN #{syncing.("NEW")} OR #{syncing.("OLD")}
+        BEGIN
+          #{bump}
+        END
+        """,
+        """
+        CREATE TRIGGER #{quote_name("sync_stamp_ad_#{table}")} AFTER DELETE ON #{t}
+        WHEN #{syncing.("OLD")}
+        BEGIN
+          #{bump}
+        END
+        """
+      ]
+  end
+
+  # A table that stopped being scanned or started to replicate keeps the
+  # triggers an earlier version put on it.
+  defp drop_stale_stamp_triggers(stamped) do
+    keep = MapSet.new(stamped)
+
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync_stamp_%'",
+        []
+      )
+
+    for [name, table] <- rows, not MapSet.member?(keep, table) do
+      :ok = Store.raw_execute("DROP TRIGGER IF EXISTS #{quote_name(name)}", [])
+    end
+
+    :ok
   end
 
   defp drop_capture_triggers(table) do
@@ -232,11 +353,11 @@ defmodule OptimalEngine.Sync.Capture do
     :ok
   end
 
-  defp installed_triggers(table) do
+  defp installed_triggers(table, prefix) do
     {:ok, rows} =
       Store.raw_query(
-        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 AND name LIKE 'sync_capture_%'",
-        [table]
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 AND name LIKE ?2",
+        [table, prefix <> "%"]
       )
 
     MapSet.new(rows, fn [sql] -> String.trim(sql || "") end)
