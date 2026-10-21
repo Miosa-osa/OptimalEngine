@@ -153,7 +153,9 @@ So label before writing, and write the source before what derives from it.
 A gate reads the workspace once for what it needs to classify many rows: the index of the documents and memories derived from labelled sources, and whether the workspace holds anything above the peer's class.
 That scan is kept between gates (a pull of many pages, the next push cycle) while nothing was written: the key is the scan, the tenant, the workspace, the kind of gate (a peer's or a reader's) and the class, and the stamp is the write sequence of the change capture and the ledger (`sync_capture` and `sync_mutations` in `sqlite_sequence`), which every write to a replicated table of a syncing workspace moves.
 The stamp is read just before each scan, not once per gate, so a long push cycle that needs a scan late does not use an older stamp.
-An entry also expires after `config :optimal_engine, :sync_gate_cache_ttl_ms` (default `30000`; `0` turns the cache off), which is a backstop for a write that capture does not see; every table the gate scans is captured, and a test pins that.
+A table the gate scans that stays on its Engine (`assets`, `active_memory_pools`, `context_packages`, the model and tool run tables, `skill_packages`, `mcp_tool_definitions`) is not captured, so triggers on it move a third counter, `sync_local_stamp`, which keeps no row.
+They fire for the rows of a workspace that syncs, for an insert, a delete, and an update that writes a column the gate reads (the labels, the metadata or the class); a status written on every call leaves the scan alone.
+An entry also expires after `config :optimal_engine, :sync_gate_cache_ttl_ms` (default `30000`; `0` turns the cache off), which is a backstop for a write that nothing sees; every table the gate scans is captured or stamped, and a test pins that.
 The cache is dropped after a change from a peer is applied and when sync is enabled or disabled for a workspace.
 A workspace that does not sync is not captured, so it is never cached.
 The scans emit `[:optimal_engine, :sync, :gate_build]` telemetry with `what: :index | :holds_above` and the `workspace_id`.
