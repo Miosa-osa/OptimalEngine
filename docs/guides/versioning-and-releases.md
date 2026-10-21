@@ -87,6 +87,7 @@ Some migrations need one operator step after the upgraded Engine has booted.
 | Migration | After upgrading |
 | --- | --- |
 | 76, graph edges keyed by tenant and workspace | Run one graph backfill over every workspace, see [Graph edges upgrade](#graph-edges-upgrade). |
+| 78, indexes for the erasure and retention deletes | No step. The first boot builds 16 indexes before `/api/health` answers, so it takes longer on a large store; time a boot on a copy of the store first, and allow for it in the health-check timeout. |
 
 ### Graph edges upgrade
 

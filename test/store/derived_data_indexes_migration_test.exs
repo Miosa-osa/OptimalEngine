@@ -30,11 +30,17 @@ defmodule OptimalEngine.Store.DerivedDataIndexesMigrationTest do
     {"asset_embedding_refs", "asset_id"}
   ]
 
-  test "is the last migration, and only creates indexes" do
-    {version, description, statements} = List.last(Migrations.all())
+  # Found by its description, not its place: later migrations come after it.
+  defp migration do
+    Enum.find(Migrations.all(), fn {_version, description, _statements} ->
+      description == "derived data: indexes the delete paths read by"
+    end)
+  end
 
-    assert description =~ "derived data"
-    assert version == OptimalEngine.Version.info().expected_migration
+  test "is a recorded migration, and only creates indexes" do
+    assert {version, _description, statements} = migration()
+    assert version <= OptimalEngine.Version.info().expected_migration
+    assert length(statements) == length(@read_by)
 
     for {_label, sql} <- statements do
       assert sql =~ ~r/\ACREATE INDEX IF NOT EXISTS /
@@ -42,7 +48,7 @@ defmodule OptimalEngine.Store.DerivedDataIndexesMigrationTest do
   end
 
   test "running its statements again changes nothing" do
-    {_version, _description, statements} = List.last(Migrations.all())
+    {_version, _description, statements} = migration()
 
     for _run <- 1..2, {_label, sql} <- statements do
       assert {:ok, _} = Store.raw_query(sql, [])
@@ -58,7 +64,11 @@ defmodule OptimalEngine.Store.DerivedDataIndexesMigrationTest do
         )
 
       details = plan |> Enum.map(&List.last/1) |> Enum.join(" | ")
-      assert details =~ "USING INDEX" or details =~ "USING COVERING INDEX", details
+      index = "idx_#{unquote(table)}_#{unquote(column)}"
+
+      assert details =~ "USING INDEX #{index}" or details =~ "USING COVERING INDEX #{index}",
+             details
+
       refute details =~ "SCAN #{unquote(table)}", details
     end
   end
