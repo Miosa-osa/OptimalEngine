@@ -18,6 +18,15 @@ defmodule OptimalEngine.Signal.TimeLimit do
   most what is left of the budget (`:classification_budget_ms`, 3,000 by
   default), and once the budget is spent the rest get their fallback without
   running.
+
+  OTP 28.0 to 28.2 (erts 16.0 and 16.1) crash the VM when a process is killed
+  while `re:run` yields inside a large match (OTP-19888, fixed in OTP 28.3).
+  On those versions a worker past the limit is not killed: it is unlinked and
+  left to finish, and its reply is dropped. The caller still gets the
+  fallback at the deadline, and every detection is linear in its text, so the
+  worker ends soon after. A caller that exits while its worker is still
+  inside `re:run` takes the linked worker with it and can still meet the bug
+  there; only OTP 28.3 or later removes that.
   """
 
   require Logger
@@ -80,8 +89,8 @@ defmodule OptimalEngine.Signal.TimeLimit do
   # The worker is a linked task, so it dies with its caller (a request
   # process shut down mid-check takes its detection with it), and it never
   # exits abnormally itself: a failure comes back as a value, which also keeps
-  # the exception text out of the crash log. Task.shutdown/2 drops a reply
-  # that races the deadline.
+  # the exception text out of the crash log. stop/1 drops a reply that races
+  # the deadline.
   defp run_limited(fun, fallback, timeout, label) do
     task =
       Task.async(fn ->
@@ -92,7 +101,7 @@ defmodule OptimalEngine.Signal.TimeLimit do
         end
       end)
 
-    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+    case Task.yield(task, timeout) || stop(task) do
       {:ok, {:ok, result}} ->
         result
 
@@ -109,6 +118,21 @@ defmodule OptimalEngine.Signal.TimeLimit do
 
         Logger.warning("[Signal] #{label} stopped after #{timeout} ms; using the fallback")
         fallback
+    end
+  end
+
+  defp stop(task) do
+    if kill_safe?(), do: Task.shutdown(task, :brutal_kill), else: Task.ignore(task)
+  end
+
+  @doc false
+  # Whether killing a worker that may be inside re:run is safe on an erts
+  # version (this VM's by default): everywhere but erts 16.0 and 16.1, which
+  # OTP 28.0 to 28.2 ship.
+  def kill_safe?(erts_version \\ :erlang.system_info(:version)) do
+    case erts_version |> to_string() |> String.split(".") do
+      ["16", minor | _] -> String.to_integer(minor) >= 2
+      _ -> true
     end
   end
 
