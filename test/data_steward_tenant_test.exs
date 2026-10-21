@@ -19,7 +19,17 @@ defmodule OptimalEngine.DataStewardTenantTest do
   alias OptimalEngine.API.Router
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Authority.Evidence
-  alias OptimalEngine.{DataSteward, EntityResolution, Memory, Organization, Store, Workspace}
+
+  alias OptimalEngine.{
+    CorpusOrganizer,
+    DataSteward,
+    EntityResolution,
+    Memory,
+    Organization,
+    Store,
+    Workspace
+  }
+
   alias OptimalEngine.Tenancy.Tenant
 
   setup do
@@ -196,7 +206,7 @@ defmodule OptimalEngine.DataStewardTenantTest do
 
         "entity_mentions" ->
           {"id",
-           if(String.starts_with?(tag, ["free-", "pkg-", "planted", "foreign-"]),
+           if(String.starts_with?(tag, ["free-", "pkg-", "planted", "foreign-", "mv-"]),
              do: tag,
              else: "mention-#{tag}"
            )}
@@ -472,6 +482,68 @@ defmodule OptimalEngine.DataStewardTenantTest do
       assert {:ok, %{decision: :reject}} = decide.(a)
     end
 
+    test "with an empty context or package id is stored as having none, and can be decided",
+         %{a: a, n: n} do
+      orphan = "mention-empty-#{n}"
+
+      assert {:ok, %{id: mention_id}} =
+               EntityResolution.resolve(
+                 %{
+                   workspace_id: orphan,
+                   surface_text: "Name",
+                   context_id: "",
+                   source_package_id: ""
+                 },
+                 tenant_id: a
+               )
+
+      assert {:ok, [[nil, nil]]} =
+               Store.raw_query(
+                 "SELECT context_id, source_package_id FROM entity_mentions WHERE id = ?1",
+                 [mention_id]
+               )
+
+      assert {:ok, %{decision: :reject}} =
+               EntityResolution.decide(mention_id, :reject,
+                 workspace_id: orphan,
+                 actor_id: "user:steward",
+                 tenant_id: a
+               )
+    end
+
+    test "stored with an empty id by an earlier version reads as having none",
+         %{a: a, n: n} do
+      orphan = "mention-stored-empty-#{n}"
+      mention("stored-empty-#{n}", orphan, "", "")
+
+      assert {:ok, %{decision: :reject}} =
+               EntityResolution.decide("stored-empty-#{n}", :reject,
+                 workspace_id: orphan,
+                 actor_id: "user:steward",
+                 tenant_id: a
+               )
+    end
+
+    test "whose context is gone reads as having none", %{a: a, n: n} do
+      orphan = "mention-gone-#{n}"
+      context(a, orphan, "ctx-gone-#{n}")
+
+      assert {:ok, %{id: mention_id}} =
+               EntityResolution.resolve(
+                 %{workspace_id: orphan, surface_text: "Name", context_id: "ctx-gone-#{n}"},
+                 tenant_id: a
+               )
+
+      raw("DELETE FROM contexts WHERE id = ?1", ["ctx-gone-#{n}"])
+
+      assert {:ok, %{decision: :reject}} =
+               EntityResolution.decide(mention_id, :reject,
+                 workspace_id: orphan,
+                 actor_id: "user:steward",
+                 tenant_id: a
+               )
+    end
+
     test "that makes a new entity makes it the tenant's", %{a: a, n: n} do
       orphan = "mention-entity-#{n}"
       context(a, orphan, "ctx-a-#{n}")
@@ -491,6 +563,51 @@ defmodule OptimalEngine.DataStewardTenantTest do
 
       assert {:ok, [[^a]]} =
                Store.raw_query("SELECT tenant_id FROM canonical_entities WHERE id = ?1", [entity_id])
+    end
+  end
+
+  describe "moving an intake context" do
+    test "moves the mentions and decisions that hang off it and its source packages",
+         %{n: n} do
+      intake = CorpusOrganizer.source_workspace()
+      context("default", intake, "mv-ctx-#{n}")
+      on_exit(fn -> raw("DELETE FROM contexts WHERE id = ?1", ["mv-ctx-#{n}"]) end)
+
+      # A package the context's claims came from, and a mention from each.
+      package_id = package("default", "mv-package-ws-#{n}", "Moves with the context #{n}")
+
+      raw("UPDATE claims SET signal_id = ?1 WHERE source_package_id = ?2", [
+        "mv-ctx-#{n}",
+        package_id
+      ])
+
+      mention("mv-context-#{n}", intake, "mv-ctx-#{n}", nil)
+      mention("mv-package-#{n}", intake, nil, package_id)
+
+      raw(
+        "INSERT INTO resolution_decisions (id, workspace_id, mention_id, decision, actor_id) VALUES (?1, ?2, ?3, 'link', 'user:steward')",
+        ["mv-decision-#{n}", intake, "mv-context-#{n}"]
+      )
+
+      {:ok, target} =
+        Workspace.create(%{
+          tenant_id: "default",
+          organization_id: Organization.default_for("default"),
+          slug: "mv-target-#{n}",
+          name: "Move target"
+        })
+
+      assert {:ok, _} = CorpusOrganizer.move_context("mv-ctx-#{n}", target.id)
+
+      assert unscoped_workspace("entity_mentions", "mv-context-#{n}") == target.id
+      assert unscoped_workspace("entity_mentions", "mv-package-#{n}") == target.id
+
+      assert {:ok, [[workspace]]} =
+               Store.raw_query("SELECT workspace_id FROM resolution_decisions WHERE id = ?1", [
+                 "mv-decision-#{n}"
+               ])
+
+      assert workspace == target.id
     end
   end
 

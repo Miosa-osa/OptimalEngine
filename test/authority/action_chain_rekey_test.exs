@@ -643,6 +643,35 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       assert target == "#{tenant}:ops-quiet"
     end
 
+    test "a repair stops when it cannot tell whether the workspace has action steps",
+         %{tenant: tenant, workspace: old} do
+      {:ok, _} = Workspace.update(old, %{slug: "ops-unknown"})
+      without_authority_key()
+
+      :ok =
+        Store.raw_execute(
+          "ALTER TABLE authority_action_steps RENAME TO authority_action_steps_hidden",
+          []
+        )
+
+      on_exit(fn ->
+        Store.raw_execute(
+          "ALTER TABLE authority_action_steps_hidden RENAME TO authority_action_steps",
+          []
+        )
+      end)
+
+      # Not "no steps, so go ahead": the question could not be answered.
+      assert {:error, reason} =
+               DataSteward.rename_workspace(old, "#{tenant}:ops-unknown",
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
+
+      refute reason == :evidence_key_unavailable
+      assert {:ok, %{id: ^old}} = Workspace.get(old)
+    end
+
     test "a step is not recorded at all, rather than recorded without evidence",
          %{tenant: tenant, workspace: old} do
       correlation = chain(tenant, old)

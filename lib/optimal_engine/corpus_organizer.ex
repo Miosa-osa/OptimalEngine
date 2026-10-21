@@ -708,6 +708,7 @@ defmodule OptimalEngine.CorpusOrganizer do
            {:ok, _} <- update_edges(txn, context_id, target_workspace_id),
            {:ok, _} <- update_claims(txn, context_id, target_workspace_id),
            {:ok, _} <- update_source_packages(txn, context_id, target_workspace_id),
+           {:ok, _} <- update_entity_mentions(txn, context_id, target_workspace_id),
            {:ok, _} <- update_chunk_embeddings(txn, context_id, target_workspace_id) do
         {:ok, %{context_id: context_id, workspace_id: target_workspace_id}}
       else
@@ -781,6 +782,29 @@ defmodule OptimalEngine.CorpusOrganizer do
       "UPDATE source_packages SET workspace_id = ?1 WHERE id IN (SELECT source_package_id FROM claims WHERE signal_id = ?2)",
       [workspace_id, context_id]
     )
+  end
+
+  # The mentions found in the context or in a source package of its claims,
+  # and the decisions made on them, go where they were found.
+  defp update_entity_mentions(txn, context_id, workspace_id) do
+    mentions = """
+    SELECT id FROM entity_mentions
+    WHERE context_id = ?2
+       OR source_package_id IN (SELECT source_package_id FROM claims WHERE signal_id = ?2)
+    """
+
+    with {:ok, _} <-
+           Store.txn_execute(
+             txn,
+             "UPDATE resolution_decisions SET workspace_id = ?1 WHERE mention_id IN (#{mentions})",
+             [workspace_id, context_id]
+           ) do
+      Store.txn_execute(
+        txn,
+        "UPDATE entity_mentions SET workspace_id = ?1 WHERE id IN (#{mentions})",
+        [workspace_id, context_id]
+      )
+    end
   end
 
   defp update_chunk_embeddings(txn, context_id, workspace_id) do

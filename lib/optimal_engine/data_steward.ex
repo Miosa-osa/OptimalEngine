@@ -562,14 +562,19 @@ defmodule OptimalEngine.DataSteward do
   defp recording_key(tenant, source_workspace_id) do
     case Evidence.signing_key(tenant) do
       nil ->
-        if action_steps?(tenant, source_workspace_id) do
-          {:error, :evidence_key_unavailable}
-        else
-          Logger.warning(
-            "[DataSteward] the repair of #{source_workspace_id} will not be recorded as evidence: the Engine cannot sign evidence"
-          )
+        case action_steps?(tenant, source_workspace_id) do
+          {:ok, true} ->
+            {:error, :evidence_key_unavailable}
 
-          {:ok, nil}
+          {:ok, false} ->
+            Logger.warning(
+              "[DataSteward] the repair of #{source_workspace_id} will not be recorded as evidence: the Engine cannot sign evidence"
+            )
+
+            {:ok, nil}
+
+          {:error, _} = error ->
+            error
         end
 
       key ->
@@ -577,14 +582,18 @@ defmodule OptimalEngine.DataSteward do
     end
   end
 
+  # `{:ok, boolean}`, or the error: a question that cannot be answered is not
+  # a "no".
   defp action_steps?(tenant, workspace_id) do
-    match?(
-      {:ok, [[1]]},
-      Store.raw_query(
-        "SELECT EXISTS (SELECT 1 FROM authority_action_steps WHERE tenant_id = ?1 AND workspace_id = ?2)",
-        [tenant, workspace_id]
-      )
-    )
+    Store.transaction(fn txn ->
+      query = "SELECT 1 FROM authority_action_steps WHERE tenant_id = ?2 AND workspace_id = ?3"
+
+      case any_row?(txn, [query], [nil, tenant, workspace_id], :action_steps) do
+        :ok -> {:ok, false}
+        {:error, :action_steps} -> {:ok, true}
+        {:error, _} = error -> error
+      end
+    end)
   end
 
   # The source of a rename is a workspace of the caller's tenant; one of

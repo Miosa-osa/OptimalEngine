@@ -12,9 +12,15 @@ defmodule OptimalEngine.EntityResolution do
   alias OptimalEngine.{DataContract, EntityRegistry, Store}
 
   # A mention is the tenant's (`?3`) when it hangs off a context or source
-  # package of the tenant in the mention's workspace (`?2`), or off none.
+  # package of the tenant in the mention's workspace (`?2`), or off none. It
+  # hangs off none when both ids are null or empty (an earlier version stored
+  # an empty id), or name rows that no longer exist: such a mention could not
+  # be decided by anyone otherwise.
   @owned_mention """
-  ((entity_mentions.context_id IS NULL AND entity_mentions.source_package_id IS NULL)
+  (((NULLIF(entity_mentions.context_id, '') IS NULL
+     OR NOT EXISTS (SELECT 1 FROM contexts c WHERE c.id = entity_mentions.context_id))
+    AND (NULLIF(entity_mentions.source_package_id, '') IS NULL
+     OR NOT EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id)))
    OR EXISTS (SELECT 1 FROM contexts c WHERE c.id = entity_mentions.context_id AND c.tenant_id = ?3 AND c.workspace_id = ?2)
    OR EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id AND s.tenant_id = ?3 AND s.workspace_id = ?2))
   """
@@ -166,8 +172,8 @@ defmodule OptimalEngine.EntityResolution do
            [
              id,
              value(attrs, :workspace_id),
-             value(attrs, :source_package_id),
-             value(attrs, :context_id),
+             present(value(attrs, :source_package_id)),
+             present(value(attrs, :context_id)),
              value(attrs, :surface_text),
              normalized,
              value(attrs, :proposed_kind),
@@ -236,6 +242,10 @@ defmodule OptimalEngine.EntityResolution do
       error -> error
     end
   end
+
+  # An empty id names nothing; it is stored as none.
+  defp present(""), do: nil
+  defp present(value), do: value
 
   defp ensure_unresolved(state) when state in ["unresolved", "ambiguous"], do: :ok
   defp ensure_unresolved(state), do: {:error, {:already_decided, state}}
