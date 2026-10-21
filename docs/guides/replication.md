@@ -13,6 +13,20 @@ Tables keyed by a single integer row id are derivations whose ids differ per Eng
 Tables that hold one Engine's own state are never captured (see What replicates).
 Capture seals the whole backlog before anything reads the ledger, a batch of 5000 rows at a time, so a read never misses a change that was already captured.
 
+### Storage mutation entries share the ledger
+
+The storage mutation route (`POST /api/storage/workspaces/:id/mutations`, scope `write`) appends its entries to the same `sync_mutations` ledger, with a device id, an entity type and an idempotency key the caller chooses.
+Only a row that change capture or a sync apply wrote is a change of a row: capture writes `mut_<replica>_<n>` keyed `<replica>:<n>` under its own replica id, and an apply keys the change it takes `peer:<mutation id>` (the key the sender claims is not stored).
+Only those rows are served (`GET /api/sync/changes`), pushed, counted as pending, or taken for this Engine's own change of a row when a peer's change is judged; a storage entry is none of these, whatever entity type it names, so one written before the checks below is inert.
+So that an entry cannot pass for a change or hold a key a change is sealed under, the route refuses with 422:
+
+| Error | When |
+| --- | --- |
+| `entity_type_names_a_table` | the entity type names a table of this Engine (in any case) or an `authority_*` table |
+| `reserved_idempotency_key` | the idempotency key starts with `<this replica>:`, `mut_<this replica>_` or `peer:` |
+
+Any other entry appends and replays as before: its entity type is free-form (`memory_object`, `app_note`, ...), and the same key with the same change returns the entry already written.
+
 ## What replicates, and what a peer can write
 
 What replicates is an explicit list of workspace knowledge (`Capture.replicated_tables/0`): contexts, chunks and their embeddings, memories and their associations, claims, facts, decisions, episodes, entities and their aliases, mentions and lineage, citations, classifications, intents, clusters, rhythm notes, open loops, observations, source packages, signal events, edges, nodes and node relationships and types, wiki pages, sessions, workflows and their traces, procedural memory, training examples, derivation records and analysis reports.

@@ -2565,13 +2565,15 @@ defmodule OptimalEngine.SyncTest do
             VALUES (?1, ?2, ?3, ?4, ?5, 'e1', 'create', '{"row":{"id":"e1"},"blobs":{}}', 'h', ?6,
                     '2026-10-14T12:00:00.000')
             """,
+            # Captured by an earlier version: a capture id and key, far past any
+            # sequence this test's own changes take.
             [
-              "legacy_#{ctx.n}_#{i}",
+              "mut_#{Sync.replica_id()}_#{900_000_000 + ctx.n * 10 + i}",
               ctx.tenant,
               ctx.ws,
               Sync.replica_id(),
               type,
-              "legacy:#{ctx.n}:#{i}"
+              "#{Sync.replica_id()}:#{900_000_000 + ctx.n * 10 + i}"
             ]
           )
       end

@@ -999,6 +999,10 @@ defmodule OptimalEngine.API.Router do
       {:error, :idempotency_key_conflict} ->
         send_resp(conn, 409, Jason.encode!(%{error: "idempotency_key_conflict"}))
 
+      {:error, reason}
+      when reason in [:entity_type_names_a_table, :reserved_idempotency_key] ->
+        send_resp(conn, 422, Jason.encode!(%{error: Atom.to_string(reason)}))
+
       {:error, reason} ->
         send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end

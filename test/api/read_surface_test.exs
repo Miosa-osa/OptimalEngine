@@ -332,7 +332,7 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
     test "a ledger entry shows a reader the row and blobs, nothing else", ctx do
       {:ok, _} = OptimalEngine.Sync.enable("default", ctx.ws, "user:owner")
 
-      append(ctx, "memories", "mem-extra-#{ctx.n}", %{
+      captured(ctx, "memories", "mem-extra-#{ctx.n}", %{
         "row" => %{"id" => "mem-extra-#{ctx.n}", "content" => "Appended note 7741"},
         "blobs" => %{},
         "note" => "SIDE CHANNEL 6613"
@@ -1283,6 +1283,31 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
         operation: "create",
         payload: payload
       })
+  end
+
+  # A ledger row as change capture writes it (a storage entry may not name a table).
+  defp captured(ctx, entity_type, entity_id, payload) do
+    replica = OptimalEngine.Sync.replica_id()
+    sequence = 900_000_000 + ctx.n
+
+    {:ok, _} =
+      Store.raw_query(
+        """
+        INSERT INTO sync_mutations
+          (id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, payload,
+           payload_hash, idempotency_key, occurred_at)
+        VALUES (?1, 'default', ?2, ?3, ?4, ?5, 'create', ?6, 'h', ?7, '2026-10-14T12:00:00.000')
+        """,
+        [
+          "mut_#{replica}_#{sequence}",
+          ctx.ws,
+          replica,
+          entity_type,
+          entity_id,
+          Jason.encode!(payload),
+          "#{replica}:#{sequence}"
+        ]
+      )
   end
 
   defp ledger(ctx, token) do
