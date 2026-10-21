@@ -9,8 +9,10 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Compliance.{ContextFiles, DerivedData, Erasure, Retention}
+  alias OptimalEngine.Context
   alias OptimalEngine.Identity.Principal
   alias OptimalEngine.Pipeline.Decomposer.Chunk
+  alias OptimalEngine.Pipeline.Intake.Writer
   alias OptimalEngine.Store
 
   setup do
@@ -138,6 +140,57 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
 
       assert File.exists?(target)
       assert File.exists?(outside)
+    end
+
+    test "leaves a file another context that stays holds, though the row names it", ctx do
+      shared = signal!(ctx, "project-platform-launch", "shared.md")
+      # A legacy or forged row: the same workspace and path (the index is not unique).
+      stays = context!(ctx, "stays", shared)
+      gone = context!(ctx, "gone", shared)
+
+      assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [gone])
+
+      assert File.exists?(shared)
+      assert count("contexts", "id", stays) == 1
+    end
+
+    test "leaves a file that is not markdown", ctx do
+      text = signal!(ctx, "project-platform-launch", "notes.txt")
+      id = context!(ctx, "plain-text", text)
+
+      assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [id])
+
+      assert File.exists?(text)
+    end
+
+    test "leaves a file that holds another context's text, or a person's", ctx do
+      theirs = signal!(ctx, "project-platform-launch", "theirs.md")
+      mine = signal!(ctx, "project-platform-launch", "mine.md")
+      other = context!(ctx, "other-text", signal!(ctx, "operation-revenue", "other.md"))
+      forged = context!(ctx, "forged-to-theirs", theirs)
+      edited = context!(ctx, "forged-to-mine", mine)
+
+      # The first file holds the text of a context whose row names another file, the second
+      # a person's own words.
+      write_for!(other, theirs)
+      File.write!(mine, "my own notes, written by hand")
+
+      assert {:ok, %{contexts: 2}} = DerivedData.erase_contexts("default", [forged, edited])
+
+      assert File.exists?(theirs)
+      assert File.exists?(mine)
+    end
+
+    test "removes a file named for the context's id, though its text was edited", ctx do
+      id = "cf-suffixed-#{ctx.n}"
+      [suffix | _] = OptimalEngine.Pipeline.Intake.Address.candidate_suffixes(id)
+      file = signal!(ctx, "project-platform-launch", "2026-03-01-pricing-#{suffix}.md")
+      ^id = context!(ctx, "suffixed", file)
+      File.write!(file, "edited by hand after intake wrote it")
+
+      assert {:ok, %{contexts: 1}} = DerivedData.erase_contexts("default", [id])
+
+      refute File.exists?(file)
     end
 
     test "does not follow a link in a directory above the file", ctx do
@@ -339,7 +392,6 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
 
       [abstract, overview] = sidecars!(file, "Summary of #{ctx.email}")
       clean = signal!(ctx, "project-platform-launch", "clean.md", text: "Nothing personal here.")
-      before = File.stat!(clean, time: :posix).mtime
 
       id =
         context!(ctx, "personal", file,
@@ -350,6 +402,8 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
 
       _clean =
         context!(ctx, "clean", clean, tenant: ctx.tenant, old: true, text: "Nothing personal here.")
+
+      before = File.stat!(clean, time: :posix).mtime
 
       assert {:ok, %{errors: 0}} = Retention.sweep(tenant_id: ctx.tenant)
 
@@ -439,7 +493,17 @@ defmodule OptimalEngine.Compliance.ContextFilesTest do
         ]
       )
 
+    # The file is what intake wrote for this context, unless the test says otherwise.
+    if Keyword.get(opts, :render, true) and match?({:ok, %{type: :regular}}, File.lstat(path)),
+      do: write_for!(id, path)
+
     id
+  end
+
+  # The text intake writes for a context, in the file at `path`.
+  defp write_for!(id, path) do
+    {:ok, context} = Store.get_context(id)
+    File.write!(path, Writer.render(Context.to_signal(context)))
   end
 
   defp sql!(sql, params) do
