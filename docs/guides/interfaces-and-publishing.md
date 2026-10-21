@@ -164,7 +164,15 @@ A data key (minted through `POST /api/data/keys`) holds only `read` and `write`,
 For authenticated calls, omitted `tenant` or `tenant_id` resolves to the key's tenant.
 A different tenant in either body or query is rejected with `403 tenant_scope_denied`.
 A caller with no key is the `default` tenant, and `POST /api/memory-core/active-pools` refuses a body or query that names another tenant in the same way: the pool is opened in the caller's tenant, never in one the request names.
+Opening a pool is stricter for a caller with no key than the routes around it, which still take a tenant from the body: the pool routes treat that caller as the `default` tenant, so a pool opened in another tenant would be out of its reach.
+A blank `workspace` names none and opens the pool in the `default` workspace, as it does for every route.
 Continue supplying the intended workspace explicitly.
+
+An Active Memory Pool id names the pool's tenant and workspace.
+Every `/api/memory-core/active-pools/:id` route answers `404 active pool not found` for a pool of another tenant and for a pool in a workspace the key's `workspace_scope` does not cover, exactly as for an id that is no pool.
+A caller that may use the pool but names a different workspace than the pool's gets `400 workspace_mismatch`.
+A key scoped to the pool's workspace need not name it, and `retrieve` recalls in the pool's own tenant and workspace.
+When a tenant enforces Optimal Authority, these routes are governed against the pool's workspace, not against the `default` workspace.
 
 At the Claim review boundary, the server uses the key's registered principal as the reviewer, or `api_key:<key-id>` when no principal is attached.
 Clients should omit `actor_id` and `verifier_id` on review requests.

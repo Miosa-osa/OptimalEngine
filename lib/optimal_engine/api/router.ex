@@ -86,6 +86,8 @@ defmodule OptimalEngine.API.Router do
   plug(OptimalEngine.API.WorkspaceAuthPlug)
   # A connector id names its workspace: resolve it, 404 outside the key's scope.
   plug(OptimalEngine.API.ConnectorScopePlug)
+  # A pool id names its tenant and workspace: resolve it, 404 outside the caller's.
+  plug(OptimalEngine.API.PoolScopePlug)
   plug(OptimalEngine.API.PermissionPlug)
   plug(OptimalEngine.API.AuthorityPlug)
   plug(:dispatch)
@@ -2572,11 +2574,21 @@ defmodule OptimalEngine.API.Router do
     tenant_id = conn.assigns[:current_tenant] || "default"
 
     if names_other_tenant?(conn, tenant_id) do
-      send_resp(conn, 403, Jason.encode!(%{error: "tenant_scope_denied"}))
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(403, Jason.encode!(%{error: "tenant_scope_denied"}))
     else
+      # A blank workspace names none, as WorkspaceAuthPlug reads it: the default.
+      workspace_id =
+        Enum.find_value(
+          [body["workspace"], body["workspace_id"]],
+          "default",
+          &(is_binary(&1) and &1 != "" and &1)
+        )
+
       opts =
         [
-          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+          workspace_id: workspace_id,
           tenant_id: tenant_id,
           task_type: Map.get(body, "task_type"),
           subject_anchor: Map.get(body, "subject_anchor"),
@@ -2613,6 +2625,9 @@ defmodule OptimalEngine.API.Router do
 
   # POST /api/memory-core/active-pools/:id/retrieve — retrieve governed context
   # for a pool and load the resulting Context Package into that pool.
+  #
+  # Every /active-pools/:id route is confined by PoolScopePlug: a pool of
+  # another tenant or workspace answers 404, as one that does not exist.
   post "/api/memory-core/active-pools/:id/retrieve" do
     body = conn.body_params || %{}
     query = Map.get(body, "query", "")
@@ -2620,10 +2635,14 @@ defmodule OptimalEngine.API.Router do
     if not (is_binary(query) and String.trim(query) != "") do
       send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
     else
+      # Recall happens in the pool's own tenant and workspace (PoolScopePlug has
+      # checked the caller may use both), never in a default the body omits.
+      pool = conn.assigns[:active_pool]
+
       opts =
         [
-          tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
-          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+          tenant_id: pool.tenant_id,
+          workspace_id: pool.workspace_id,
           actor_id: Actor.of(conn, body),
           active_memory_pool_id: id,
           request_intent: Map.get(body, "request_intent", "recall"),
