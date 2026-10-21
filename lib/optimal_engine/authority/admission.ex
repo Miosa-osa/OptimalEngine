@@ -126,7 +126,7 @@ defmodule OptimalEngine.Authority.Admission do
          :ok <- JWS.verify_signature(parsed, public_key) |> tag(jti),
          :ok <- audience(claims, request) |> tag(jti),
          :ok <- times(claims) |> tag(jti),
-         :ok <- binding(claims, request) |> tag(jti),
+         :ok <- binding(claims, request, origin) |> tag(jti),
          :ok <- ceilings(claims, request, opts) |> tag(jti),
          :ok <- local_deny(request) |> tag(jti),
          :ok <- state(origin, request.tenant_id, claims) |> tag(jti),
@@ -181,18 +181,18 @@ defmodule OptimalEngine.Authority.Admission do
 
   defp times(_claims), do: {:error, :invalid_time_claims}
 
-  defp binding(%{"sub" => sub, "optimal" => %{} = optimal} = claims, request) do
+  defp binding(%{"sub" => sub, "optimal" => %{} = optimal} = claims, request, origin) do
     cond do
       sub != request.subject -> {:error, :wrong_subject}
       optimal["tenant"] != request.tenant_id -> {:error, :wrong_tenant}
-      true -> workspace_binding(claims, optimal, request)
+      true -> workspace_binding(claims, optimal, request, origin)
     end
   end
 
-  defp binding(_claims, _request), do: {:error, :malformed}
+  defp binding(_claims, _request, _origin), do: {:error, :malformed}
 
-  defp workspace_binding(claims, optimal, request) do
-    {workspace, resource} = bound_workspace(claims, optimal, request)
+  defp workspace_binding(claims, optimal, request, origin) do
+    {workspace, resource} = bound_workspace(claims, optimal, request, origin)
 
     cond do
       workspace != request.workspace_id -> {:error, :wrong_workspace}
@@ -204,26 +204,32 @@ defmodule OptimalEngine.Authority.Admission do
     end
   end
 
-  # A grant names its workspace by the id it had when it was issued. When
-  # that is not the id asked for, the signed workspace id repairs recorded
-  # after the grant was issued are followed (`WorkspaceRekeys`), so a grant
-  # issued before an operator's repair still admits under the new id, and
-  # only that one. A grant issued after a repair is not changed by it, and a
-  # grant with no local issuance entry (an outside issuer's) is taken as
-  # written.
-  defp bound_workspace(claims, optimal, request) do
+  # A grant names its workspace by the id it had when it was issued. When an
+  # operator has renamed that workspace since (`WorkspaceRekeys`, mode
+  # `rename`), the grant is for the workspace under its new id, and only that:
+  # the old id is no second door into it, and may by now name a different
+  # workspace. Only the renames recorded after the grant was issued count, and
+  # only if they verify. A merge into a workspace that already existed is not
+  # followed: a grant for an unregistered id was never issued for that
+  # workspace's data or policies. A grant that did not come from this Engine
+  # (an outside issuer's, whatever id it carries) is taken as written, and so
+  # is any grant while the tenant has no repair on record.
+  defp bound_workspace(claims, optimal, request, "local") do
     as_written = {optimal["workspace"], optimal["resource"]}
 
-    with true <- optimal["workspace"] != request.workspace_id,
+    with true <- WorkspaceRekeys.any?(request.tenant_id),
          jti when is_binary(jti) <- claims["jti"],
          seq when is_integer(seq) <- issued_seq(request.tenant_id, jti),
          [_ | _] = rekeys <- WorkspaceRekeys.list(request.tenant_id) do
-      {WorkspaceRekeys.current(rekeys, optimal["workspace"], seq),
-       WorkspaceRekeys.current_resource(rekeys, optimal["resource"], seq)}
+      {WorkspaceRekeys.current(rekeys, optimal["workspace"], seq, [:rename]),
+       WorkspaceRekeys.current_resource(rekeys, optimal["resource"], seq, [:rename])}
     else
       _ -> as_written
     end
   end
+
+  defp bound_workspace(_claims, optimal, _request, _origin),
+    do: {optimal["workspace"], optimal["resource"]}
 
   # Where in the evidence chain the Engine recorded issuing the grant.
   defp issued_seq(tenant_id, jti) do

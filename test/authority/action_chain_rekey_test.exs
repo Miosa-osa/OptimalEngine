@@ -17,7 +17,18 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
   alias OptimalEngine.API.{Router, ViabilityAPI}
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Authority
-  alias OptimalEngine.Authority.{ActionChain, CanonicalJSON, Evidence, Integrity, Keys}
+
+  alias OptimalEngine.Authority.{
+    ActionChain,
+    CanonicalJSON,
+    Evidence,
+    Grants,
+    Integrity,
+    JWS,
+    Keys,
+    WorkspaceRekeys
+  }
+
   alias OptimalEngine.{DataSteward, Organization, Store, Workspace}
   alias OptimalEngine.Tenancy.Tenant
 
@@ -140,7 +151,7 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       "action" => "write",
       "resource" => "optimal://#{to}",
       "workspace_id" => to,
-      "detail" => %{"from" => from, "to" => to, "by" => "user:nobody"},
+      "detail" => %{"from" => from, "to" => to, "by" => "user:nobody", "mode" => "rename"},
       "prev_hash" => String.duplicate("0", 64),
       "hash" => String.duplicate("a", 64),
       "kid" => "forged",
@@ -744,8 +755,90 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       {target, _result} = repair_id(tenant, old, "ops-grants")
 
       assert {:error, :wrong_workspace} = admit(grant.token, tenant, "#{tenant}:elsewhere")
+      # The grant is for the workspace as it is now: the id it was issued for
+      # is not a second door into it.
+      assert {:error, :wrong_workspace} = admit(grant.token, tenant, old)
       assert {:ok, _} = admit(grant.token, tenant, target)
       assert %{findings: []} = Integrity.scan(tenant)
+    end
+
+    test "do not admit under an old id that names a different workspace now",
+         %{tenant: tenant, workspace: old} do
+      publish_policy!(tenant, old)
+      grant = grant!(tenant, old)
+      {target, _result} = repair_id(tenant, old, "ops-reused")
+
+      {:ok, _reused} =
+        Workspace.create(%{
+          id: old,
+          tenant_id: tenant,
+          organization_id: Organization.default_for(tenant),
+          slug: "ops-new-workspace",
+          name: "A different workspace with the old id"
+        })
+
+      assert {:error, :wrong_workspace} = admit(grant.token, tenant, old)
+      assert {:ok, _} = admit(grant.token, tenant, target)
+    end
+
+    test "issued for an unregistered id are not carried into the workspace it was merged into",
+         %{tenant: tenant, workspace: registered, n: n} do
+      orphan = "#{tenant}:orphan-#{n}"
+      publish_policy!(tenant, orphan)
+      grant = grant!(tenant, orphan)
+      chain(tenant, orphan)
+
+      assert {:ok, %{rekey_recorded: true}} =
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
+
+      # The target has its own data and its own policy; a grant for the orphan
+      # id never covered either.
+      assert {:error, :wrong_workspace} = admit(grant.token, tenant, registered)
+    end
+
+    test "from an outside issuer are taken as written, whatever id a local grant has",
+         %{tenant: tenant, workspace: old} do
+      publish_policy!(tenant, old)
+      local = grant!(tenant, old)
+
+      {public, private} = :crypto.generate_key(:eddsa, :ed25519)
+      kid = Keys.thumbprint(public)
+      jwks = %{"keys" => [Map.put(Keys.jwk(public), "kid", kid)]}
+
+      {:ok, _} =
+        Authority.register_issuer(tenant, "partner-authority", jwks, "user:owner",
+          max_staleness_seconds: 60
+        )
+
+      now = System.os_time(:second)
+
+      claims = %{
+        "iss" => "partner-authority",
+        "aud" => Grants.audience(),
+        "sub" => "agent:analyst",
+        "iat" => now,
+        "nbf" => now,
+        "exp" => now + 300,
+        # The outside issuer picks the same id as the local grant.
+        "jti" => local.jti,
+        "optimal" => %{
+          "tenant" => tenant,
+          "workspace" => old,
+          "action" => "compute",
+          "resource" => "optimal://#{old}/memory/report-1",
+          "data_class" => "internal",
+          "command_sha256" => CanonicalJSON.hash(%{"sum" => "amount"}),
+          "max_uses" => 1
+        }
+      }
+
+      token = JWS.sign(claims, Grants.typ(), kid, private)
+      {target, _result} = repair_id(tenant, old, "ops-outside")
+
+      assert {:error, :wrong_workspace} = admit(token, tenant, target)
     end
 
     test "do not admit under another id because of a repair that came before them",
@@ -869,6 +962,129 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
                )
 
       assert {:ok, [[76]]} = Store.raw_query("SELECT MAX(version) FROM schema_migrations", [])
+    end
+  end
+
+  describe "which re-keys count" do
+    test "an unsigned re-key behind a forged predecessor whose hash matches is still not trusted",
+         %{tenant: tenant, workspace: old} do
+      correlation = chain(tenant, old)
+      target = "#{tenant}:forged-target"
+
+      # Two hand-written rows: a predecessor, and a re-key whose prev_hash is
+      # that predecessor's hash, so its link to "the entry before it" holds.
+      # Neither is signed, and trust comes from the signature, not the link.
+      predecessor = Map.put(forged_rekey(tenant, "x", "y"), "kind", "settings.changed")
+      insert_entry(predecessor)
+
+      rekey =
+        tenant
+        |> forged_rekey(old, target)
+        |> Map.merge(%{"seq" => predecessor["seq"] + 1, "prev_hash" => predecessor["hash"]})
+
+      insert_entry(rekey)
+      assert Evidence.linked?(tenant, rekey)
+
+      move_steps(tenant, correlation, target)
+      assert verified(trace!(tenant, correlation)) == [false, false, false, false]
+    end
+
+    test "only the re-keys after an entry apply to it, and a merge is not a rename" do
+      rekeys = [
+        %{seq: 10, from: "a", to: "b", mode: :rename},
+        %{seq: 20, from: "b", to: "c", mode: :merge},
+        %{seq: 30, from: "c", to: "d", mode: :rename}
+      ]
+
+      assert WorkspaceRekeys.current(rekeys, "a", 0) == "d"
+      assert WorkspaceRekeys.current(rekeys, "a", 9) == "d"
+      # At or below the re-key's own position it does not apply.
+      assert WorkspaceRekeys.current(rekeys, "a", 10) == "a"
+      assert WorkspaceRekeys.current(rekeys, "a", 11) == "a"
+      assert WorkspaceRekeys.current(rekeys, "b", 20) == "b"
+      assert WorkspaceRekeys.current(rekeys, "c", 29) == "d"
+
+      # Grants follow renames only: the merge into "c" is a different workspace.
+      assert WorkspaceRekeys.current(rekeys, "a", 0, [:rename]) == "b"
+      assert WorkspaceRekeys.current(rekeys, "c", 0, [:rename]) == "d"
+
+      assert WorkspaceRekeys.current_resource(rekeys, "optimal://a/**", 0) ==
+               "optimal://d/**"
+
+      assert WorkspaceRekeys.current_resource(rekeys, "optimal://a", 0, [:rename]) ==
+               "optimal://b"
+
+      assert WorkspaceRekeys.current_resource(rekeys, "other://a/x", 0) == "other://a/x"
+    end
+
+    test "a repair is recorded with its mode: a rename, or a merge into a registered workspace",
+         %{tenant: tenant, workspace: old, n: n} do
+      {_target, _result} = repair_id(tenant, old, "ops-mode")
+      assert [%{mode: :rename}] = WorkspaceRekeys.list(tenant)
+
+      orphan = "#{tenant}:orphan-#{n}"
+      chain(tenant, orphan)
+
+      {:ok, registered} =
+        Workspace.create(%{
+          tenant_id: tenant,
+          organization_id: Organization.default_for(tenant),
+          slug: "merged-into",
+          name: "Merged into"
+        })
+
+      assert {:ok, _} =
+               DataSteward.repair_orphan_scope(orphan, registered.id,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
+
+      assert [%{mode: :rename}, %{mode: :merge}] = WorkspaceRekeys.list(tenant)
+    end
+  end
+
+  describe "a step recorded while a repair runs" do
+    test "ends up under the new id or is refused, never split from its chain",
+         %{tenant: tenant, workspace: old} do
+      correlation = chain(tenant, old)
+      {:ok, _} = Workspace.update(old, %{slug: "ops-race"})
+      target = "#{tenant}:ops-race"
+
+      writers =
+        for _ <- 1..4 do
+          Task.async(fn ->
+            for _ <- 1..15 do
+              ActionChain.record(
+                tenant,
+                %{workspace_id: old, stage: "reply", correlation_id: correlation},
+                "agent:deployer"
+              )
+            end
+          end)
+        end
+
+      repairer =
+        Task.async(fn ->
+          DataSteward.rename_workspace(old, target, tenant_id: tenant, actor_id: "user:steward")
+        end)
+
+      results = writers |> Enum.flat_map(&Task.await(&1, 60_000))
+      assert {:ok, %{rekey_recorded: true}} = Task.await(repairer, 60_000)
+
+      assert Enum.all?(results, fn
+               {:ok, _step} -> true
+               {:error, :workspace_mismatch} -> true
+             end)
+
+      recorded = Enum.count(results, &match?({:ok, _}, &1))
+
+      trace = trace!(tenant, correlation)
+      assert length(trace.steps) == 4 + recorded
+      assert trace.verified
+      assert Enum.uniq(Enum.map(trace.steps, & &1["workspace_id"])) == [target]
+      assert [%{correlation_id: ^correlation}] = ActionChain.list(tenant, [target])
+      assert ActionChain.list(tenant, [old]) == []
+      assert {:ok, _} = Evidence.verify(tenant)
     end
   end
 end

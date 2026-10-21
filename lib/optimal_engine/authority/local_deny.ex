@@ -7,9 +7,17 @@ defmodule OptimalEngine.Authority.LocalDeny do
   grant carries. A fresh, validly signed grant never overrides it; only
   lifting the deny does, and lifting is itself recorded as evidence. This is
   the control a data owner keeps even when authority is delegated elsewhere.
+
+  A deny never stops applying because an operator repaired a workspace id.
+  It matches as it was written, and also as it reads after the id repairs
+  recorded since it was added (`OptimalEngine.Authority.WorkspaceRekeys`): a
+  deny for the old id applies to the new id, and after a merge to the
+  workspace the rows were merged into. Following can only add denials, so it
+  reads the recorded repairs without requiring their signatures; a forged
+  record can widen a deny and never lift one.
   """
 
-  alias OptimalEngine.Authority.Policy
+  alias OptimalEngine.Authority.{Policy, WorkspaceRekeys}
   alias OptimalEngine.Store
 
   @type t :: %{
@@ -86,15 +94,56 @@ defmodule OptimalEngine.Authority.LocalDeny do
     Enum.map(rows, &to_deny/1)
   end
 
-  @doc "The first active local deny matching the request, or nil."
+  @doc """
+  The first active local deny matching the request, or nil. A deny matches
+  as written, or as it reads after the workspace id repairs recorded since it
+  was added, against the request as asked or as it reads after any repair.
+  """
   @spec matching(String.t(), map()) :: t() | nil
   def matching(tenant_id, request) do
-    Enum.find(active(tenant_id), fn deny ->
-      (is_nil(deny.workspace_id) or deny.workspace_id == request[:workspace_id]) and
-        Policy.glob?(deny.subject, request[:subject]) and
-        Policy.glob?(deny.action, request[:action]) and
-        Policy.glob?(deny.resource, request[:resource])
-    end)
+    denies = active(tenant_id)
+
+    # Without a repair on record this is the plain match, and costs one read.
+    rekeys =
+      if denies == [], do: [], else: WorkspaceRekeys.list(tenant_id, trust: :recorded)
+
+    added = if rekeys == [], do: %{}, else: added_seqs(tenant_id)
+
+    Enum.find(denies, &applies?(&1, request, rekeys, Map.get(added, &1.id, 0)))
+  end
+
+  defp applies?(deny, request, rekeys, seq) do
+    workspace_matches?(deny.workspace_id, request[:workspace_id], rekeys, seq) and
+      Policy.glob?(deny.subject, request[:subject]) and
+      Policy.glob?(deny.action, request[:action]) and
+      resource_matches?(deny.resource, request[:resource], rekeys, seq)
+  end
+
+  defp workspace_matches?(nil, _asked, _rekeys, _seq), do: true
+
+  defp workspace_matches?(written, asked, rekeys, seq) do
+    written_as = Enum.uniq([written, WorkspaceRekeys.current(rekeys, written, seq)])
+    asked_as = Enum.uniq([asked, WorkspaceRekeys.current(rekeys, asked, 0)])
+    Enum.any?(asked_as, &(&1 in written_as))
+  end
+
+  defp resource_matches?(pattern, resource, rekeys, seq) do
+    patterns = Enum.uniq([pattern, WorkspaceRekeys.current_resource(rekeys, pattern, seq)])
+    resources = Enum.uniq([resource, WorkspaceRekeys.current_resource(rekeys, resource, 0)])
+    Enum.any?(for(p <- patterns, r <- resources, do: Policy.glob?(p, r)))
+  end
+
+  # Where in the evidence chain each deny was recorded, so a repair made
+  # before the deny was added does not reach it. A deny with no entry (its
+  # entry is written after the row) reads every repair.
+  defp added_seqs(tenant_id) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT json_extract(detail, '$.deny_id'), tenant_seq FROM authority_evidence WHERE tenant_id = ?1 AND kind = 'local_deny.added'",
+        [tenant_id]
+      )
+
+    Map.new(rows, fn [id, seq] -> {id, seq} end)
   end
 
   @doc "One local deny, active or lifted."

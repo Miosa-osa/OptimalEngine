@@ -264,7 +264,8 @@ defmodule OptimalEngine.DataSteward do
                      tenant,
                      source_workspace_id,
                      target_workspace_id,
-                     actor_id
+                     actor_id,
+                     :merge
                    ),
                  else: :ok
                ) do
@@ -349,7 +350,8 @@ defmodule OptimalEngine.DataSteward do
                  tenant,
                  source_workspace_id,
                  target_workspace_id,
-                 actor_id
+                 actor_id,
+                 :rename
                ) do
           {:ok,
            %{

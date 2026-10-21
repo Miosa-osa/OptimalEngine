@@ -31,6 +31,10 @@ defmodule OptimalEngine.Authority.ActionChain do
   alias OptimalEngine.Store
 
   @stages ~w(request approval denial action result reply)
+  @step_select """
+  SELECT id, workspace_id, correlation_id, seq, stage, agent, action, resource, summary,
+         detail, causation_id, context_id, evidence_id, evidence_hash, recorded_by, occurred_at
+  """
   @signal_types %{
     "request" => "direct",
     "approval" => "decide",
@@ -50,7 +54,7 @@ defmodule OptimalEngine.Authority.ActionChain do
   `summary`, `detail` (map; `jti` and `request_id` link native authority
   evidence), `causation_id`, `occurred_at`.
   """
-  @spec record(String.t(), map(), String.t()) :: {:ok, map()} | {:error, atom()}
+  @spec record(String.t(), map(), String.t()) :: {:ok, map()} | {:error, atom() | tuple()}
   def record(tenant_id, attrs, recorded_by) do
     attrs = Map.new(attrs, fn {key, value} -> {to_string(key), value} end)
 
@@ -58,79 +62,98 @@ defmodule OptimalEngine.Authority.ActionChain do
            present(attrs["workspace_id"] || attrs["workspace"], :workspace_required),
          {:ok, stage} <- stage(attrs["stage"]),
          {:ok, correlation_id} <- correlation(stage, attrs["correlation_id"]),
-         previous = steps(tenant_id, correlation_id),
-         :ok <- order(stage, previous, workspace_id),
          {:ok, occurred_at} <- occurred_at(attrs["occurred_at"]),
          {:ok, key} <- evidence_key(tenant_id) do
-      last = List.last(previous)
-      first = List.first(previous)
       detail = if is_map(attrs["detail"]), do: attrs["detail"], else: %{}
 
-      step = %{
-        "id" => "stp_" <> random_id(),
-        "workspace_id" => workspace_id,
-        "correlation_id" => correlation_id,
-        "seq" => length(previous) + 1,
-        "stage" => stage,
-        "agent" => attrs["agent"] || (first && first["agent"]) || recorded_by,
-        "action" => attrs["action"] || (first && first["action"]),
-        "resource" => attrs["resource"] || (first && first["resource"]),
-        "summary" => attrs["summary"] || default_summary(stage, attrs, first),
-        "detail" => detail,
-        "causation_id" => attrs["causation_id"] || (last && last["id"]),
-        "occurred_at" => occurred_at
-      }
-
-      step_hash = CanonicalJSON.hash(step)
-      context_id = "sig_" <> step["id"]
-
-      # The step rows, the Signal, and the signed evidence entry are written
-      # together: a step is never left without its entry, and a workspace id
-      # repair cannot fall between them.
-      {:ok, entry} =
+      # The chain is read, checked and extended in one transaction, so the
+      # step is numbered after the step that really precedes it, and a
+      # workspace id repair is either before it (the chain is then under the
+      # new id) or after it (the repair moves the step with the rest). The
+      # step rows, the Signal, and the signed evidence entry are written
+      # together: a step is never left without its entry.
+      result =
         Store.transaction(fn txn ->
-          {:ok, _} = insert(txn, tenant_id, step, context_id, recorded_by)
+          first = step_at(txn, tenant_id, correlation_id, "ASC")
+          last = step_at(txn, tenant_id, correlation_id, "DESC")
 
-          {:ok, entry} =
-            Evidence.append_in(txn, key, tenant_id, "agent_action.step", %{
-              jti: detail["jti"],
-              subject: step["agent"],
-              action: step["action"],
-              resource: step["resource"],
-              workspace_id: workspace_id,
-              detail: %{
-                "correlation_id" => correlation_id,
-                "causation_id" => step["causation_id"],
-                "stage" => stage,
-                "seq" => step["seq"],
-                "step_id" => step["id"],
-                "context_id" => context_id,
-                "step_sha256" => step_hash,
-                "prev_step_evidence" => last && last["evidence_hash"],
-                "request_id" => detail["request_id"],
-                "recorded_by" => recorded_by
-              }
-            })
+          with :ok <- order(stage, first, workspace_id) do
+            step = %{
+              "id" => "stp_" <> random_id(),
+              "workspace_id" => workspace_id,
+              "correlation_id" => correlation_id,
+              "seq" => ((last && last["seq"]) || 0) + 1,
+              "stage" => stage,
+              "agent" => attrs["agent"] || (first && first["agent"]) || recorded_by,
+              "action" => attrs["action"] || (first && first["action"]),
+              "resource" => attrs["resource"] || (first && first["resource"]),
+              "summary" => attrs["summary"] || default_summary(stage, attrs, first),
+              "detail" => detail,
+              "causation_id" => attrs["causation_id"] || (last && last["id"]),
+              "occurred_at" => occurred_at
+            }
 
-          {:ok, _} =
-            Store.txn_execute(
-              txn,
-              "UPDATE authority_action_steps SET evidence_id = ?2, evidence_hash = ?3 WHERE id = ?1",
-              [step["id"], entry["id"], entry["hash"]]
-            )
+            step_hash = CanonicalJSON.hash(step)
+            context_id = "sig_" <> step["id"]
+            {:ok, _} = insert(txn, tenant_id, step, context_id, recorded_by)
 
-          {:ok, entry}
+            {:ok, entry} =
+              Evidence.append_in(txn, key, tenant_id, "agent_action.step", %{
+                jti: detail["jti"],
+                subject: step["agent"],
+                action: step["action"],
+                resource: step["resource"],
+                workspace_id: workspace_id,
+                detail: %{
+                  "correlation_id" => correlation_id,
+                  "causation_id" => step["causation_id"],
+                  "stage" => stage,
+                  "seq" => step["seq"],
+                  "step_id" => step["id"],
+                  "context_id" => context_id,
+                  "step_sha256" => step_hash,
+                  "prev_step_evidence" => last && last["evidence_hash"],
+                  "request_id" => detail["request_id"],
+                  "recorded_by" => recorded_by
+                }
+              })
+
+            {:ok, _} =
+              Store.txn_execute(
+                txn,
+                "UPDATE authority_action_steps SET evidence_id = ?2, evidence_hash = ?3 WHERE id = ?1",
+                [step["id"], entry["id"], entry["hash"]]
+              )
+
+            {:ok,
+             Map.merge(step, %{
+               "context_id" => context_id,
+               "step_sha256" => step_hash,
+               "evidence_id" => entry["id"],
+               "evidence_hash" => entry["hash"],
+               "recorded_by" => recorded_by
+             })}
+          end
         end)
 
-      {:ok,
-       step
-       |> Map.merge(%{
-         "context_id" => context_id,
-         "step_sha256" => step_hash,
-         "evidence_id" => entry["id"],
-         "evidence_hash" => entry["hash"],
-         "recorded_by" => recorded_by
-       })}
+      result
+    end
+  end
+
+  # The first ("ASC") or last ("DESC") step of a chain: the only two the next
+  # step needs, so recording costs the same however long the chain is.
+  defp step_at(txn, tenant_id, correlation_id, direction) when direction in ["ASC", "DESC"] do
+    {:ok, rows} =
+      Store.txn_query(
+        txn,
+        @step_select <>
+          " FROM authority_action_steps WHERE tenant_id = ?1 AND correlation_id = ?2 ORDER BY seq #{direction} LIMIT 1",
+        [tenant_id, correlation_id]
+      )
+
+    case rows do
+      [row] -> to_step(row)
+      [] -> nil
     end
   end
 
@@ -311,11 +334,11 @@ defmodule OptimalEngine.Authority.ActionChain do
     )
   end
 
-  defp order("request", [], _workspace_id), do: :ok
-  defp order("request", _previous, _workspace_id), do: {:error, :already_requested}
-  defp order(_stage, [], _workspace_id), do: {:error, :request_required}
+  defp order("request", nil, _workspace_id), do: :ok
+  defp order("request", _first, _workspace_id), do: {:error, :already_requested}
+  defp order(_stage, nil, _workspace_id), do: {:error, :request_required}
 
-  defp order(_stage, [first | _], workspace_id) do
+  defp order(_stage, first, workspace_id) do
     if first["workspace_id"] == workspace_id, do: :ok, else: {:error, :workspace_mismatch}
   end
 
@@ -329,51 +352,50 @@ defmodule OptimalEngine.Authority.ActionChain do
   defp steps(tenant_id, correlation_id) do
     {:ok, rows} =
       Store.raw_query(
-        """
-        SELECT id, workspace_id, correlation_id, seq, stage, agent, action, resource, summary,
-               detail, causation_id, context_id, evidence_id, evidence_hash, recorded_by, occurred_at
-        FROM authority_action_steps WHERE tenant_id = ?1 AND correlation_id = ?2 ORDER BY seq
-        """,
+        @step_select <>
+          " FROM authority_action_steps WHERE tenant_id = ?1 AND correlation_id = ?2 ORDER BY seq",
         [tenant_id, correlation_id]
       )
 
-    Enum.map(rows, fn [
-                        id,
-                        ws,
-                        corr,
-                        seq,
-                        stage,
-                        agent,
-                        action,
-                        resource,
-                        summary,
-                        detail,
-                        cause,
-                        ctx,
-                        ev_id,
-                        ev_hash,
-                        by,
-                        at
-                      ] ->
-      %{
-        "id" => id,
-        "workspace_id" => ws,
-        "correlation_id" => corr,
-        "seq" => seq,
-        "stage" => stage,
-        "agent" => agent,
-        "action" => action,
-        "resource" => resource,
-        "summary" => summary,
-        "detail" => Jason.decode!(detail),
-        "causation_id" => cause,
-        "context_id" => ctx,
-        "evidence_id" => ev_id,
-        "evidence_hash" => ev_hash,
-        "recorded_by" => by,
-        "occurred_at" => at
-      }
-    end)
+    Enum.map(rows, &to_step/1)
+  end
+
+  defp to_step([
+         id,
+         ws,
+         corr,
+         seq,
+         stage,
+         agent,
+         action,
+         resource,
+         summary,
+         detail,
+         cause,
+         ctx,
+         ev_id,
+         ev_hash,
+         by,
+         at
+       ]) do
+    %{
+      "id" => id,
+      "workspace_id" => ws,
+      "correlation_id" => corr,
+      "seq" => seq,
+      "stage" => stage,
+      "agent" => agent,
+      "action" => action,
+      "resource" => resource,
+      "summary" => summary,
+      "detail" => Jason.decode!(detail),
+      "causation_id" => cause,
+      "context_id" => ctx,
+      "evidence_id" => ev_id,
+      "evidence_hash" => ev_hash,
+      "recorded_by" => by,
+      "occurred_at" => at
+    }
   end
 
   # The correlation id of reported steps that name a request id or grant id.
