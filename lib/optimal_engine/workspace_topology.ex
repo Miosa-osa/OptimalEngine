@@ -8,6 +8,7 @@ defmodule OptimalEngine.WorkspaceTopology do
   workspace operation instead of exposing raw tables.
   """
 
+  alias OptimalEngine.SafeAtom
   alias OptimalEngine.Store
   alias OptimalEngine.Storage.PolicyStore
   alias OptimalEngine.Tenancy.Tenant
@@ -902,9 +903,9 @@ defmodule OptimalEngine.WorkspaceTopology do
   defp parse_membership(value), do: lookup(value, NodeMember.memberships(), :invalid_membership)
 
   defp lookup(value, allowed, error) do
-    case Enum.find(allowed, &(&1 == value or Atom.to_string(&1) == value)) do
-      nil -> {:error, {error, value}}
-      atom -> {:ok, atom}
+    case SafeAtom.fetch(value, allowed) do
+      {:ok, atom} -> {:ok, atom}
+      :error -> {:error, {error, value}}
     end
   end
 
