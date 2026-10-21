@@ -389,20 +389,21 @@ defmodule OptimalEngine.Graph do
   `:source_id`, `:target_id` and `:relation`. Importers use it to compare the
   edges they mean to hold with the edges already there.
 
-  Options: `:workspace_id` (default: `"default"`).
+  Options: `:workspace_id` (default: `"default"`) and `:tenant_id` (default:
+  the workspace's tenant, as `scope/1` describes).
   """
   @spec edges_by_relation([String.t()], keyword()) :: {:ok, [map()]} | {:error, term()}
   def edges_by_relation(relations, opts \\ []) when is_list(relations) do
-    ws = Keyword.get(opts, :workspace_id, "default")
+    {tenant_id, ws} = scope(opts)
 
     if relations == [] do
       {:ok, []}
     else
-      placeholders = Enum.map_join(1..length(relations), ", ", &"?#{&1 + 1}")
+      placeholders = Enum.map_join(1..length(relations), ", ", &"?#{&1 + 2}")
 
       case Store.raw_query(
-             "SELECT source_id, target_id, relation FROM edges WHERE workspace_id = ?1 AND relation IN (#{placeholders})",
-             [ws | relations]
+             "SELECT source_id, target_id, relation FROM graph_edges WHERE tenant_id = ?1 AND workspace_id = ?2 AND relation IN (#{placeholders})",
+             [tenant_id, ws | relations]
            ) do
         {:ok, rows} ->
           {:ok,
