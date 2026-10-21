@@ -140,6 +140,8 @@ defmodule OptimalEngine.Signal.ClassificationTimeLimitTest do
         TimeLimit.with_budget(fn -> raise "boom" end, budget_ms: 1)
       end
 
+      # Past the 1 ms budget: a leaked deadline would leave nothing to run with.
+      Process.sleep(5)
       assert TimeLimit.run(fn -> :ran end, :fallback) == :ran
     end
 
