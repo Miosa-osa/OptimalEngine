@@ -22,6 +22,18 @@ defmodule OptimalEngine.Store.Adapter do
   fun is a deadlock for a single-connection implementation. An exception raised
   by the fun rolls back and is re-raised in the caller with its stacktrace.
 
+  Transaction control belongs to the implementation. `raw_query/2` and
+  `raw_execute/2` refuse BEGIN, COMMIT, END, ROLLBACK, SAVEPOINT and RELEASE
+  with `ArgumentError`: each call is its own unit, and a transaction one of
+  them opened would stay open across every other caller's statements. Inside
+  `transaction/2`, `txn_query/3` and `txn_execute/3` refuse BEGIN, COMMIT, END
+  and a plain ROLLBACK, and allow savepoints (SAVEPOINT, RELEASE, ROLLBACK TO).
+  The keyword is read as the database reads it, past leading comments, so
+  `/* x */ COMMIT` and `COMMIT--x` are refused too. Every COMMIT the
+  implementation issues is checked, and one that fails is rolled back and
+  returned as `{:error, {:commit_failed, reason}}`, so the connection is never
+  left inside a transaction.
+
   ## Timestamps
 
   Timestamps remain ISO-8601 text in the format the engine already stores.
@@ -66,10 +78,10 @@ defmodule OptimalEngine.Store.Adapter do
   @doc "Drops entries from the hot cache without touching the database."
   @callback evict_cached([String.t()]) :: :ok
 
-  @doc "Runs one SELECT and returns raw rows."
+  @doc "Runs one SELECT and returns raw rows. Refuses transaction control."
   @callback raw_query(String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
 
-  @doc "Runs one non-SELECT statement."
+  @doc "Runs one non-SELECT statement. Refuses transaction control."
   @callback raw_execute(String.t(), [term()]) :: :ok | {:error, term()}
 
   @doc "Runs a fun inside one transaction."

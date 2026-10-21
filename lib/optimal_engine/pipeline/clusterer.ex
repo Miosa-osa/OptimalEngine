@@ -105,12 +105,10 @@ defmodule OptimalEngine.Pipeline.Clusterer do
     with :ok <- clear_clusters(tenant_id),
          {:ok, features} <- load_features(tenant_id),
          {:ok, clusters, memberships} <-
-           assign(features, threshold: threshold, tenant_id: tenant_id, existing: []) do
-      :ok = Store.insert_clusters(clusters)
-
-      :ok =
-        Store.insert_cluster_members(memberships |> Enum.map(&Map.put(&1, :tenant_id, tenant_id)))
-
+           assign(features, threshold: threshold, tenant_id: tenant_id, existing: []),
+         :ok <- Store.insert_clusters(clusters),
+         :ok <-
+           Store.insert_cluster_members(Enum.map(memberships, &Map.put(&1, :tenant_id, tenant_id))) do
       {:ok, %{clusters: length(clusters), members: length(memberships)}}
     end
   end

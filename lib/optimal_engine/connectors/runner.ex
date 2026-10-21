@@ -244,21 +244,16 @@ defmodule OptimalEngine.Connectors.Runner do
 
     # Persist the cursor advance + audit completion in one transaction so
     # they succeed or fail together. Without this, a cursor could advance
-    # while the audit row stayed in `'running'` — a silently-lost run that
+    # while the audit row stayed in `'running'`: a silently-lost run that
     # no operator could diagnose.
-    case transaction(fn ->
-           advance_cursor(row.id, next_cursor)
-
-           complete_run_row(
-             run_id,
-             :success,
-             length(signals),
-             length(asset_errors),
-             row.cursor,
-             next_cursor,
-             asset_error_detail(asset_errors)
-           )
-         end) do
+    case persist_success(
+           row,
+           run_id,
+           length(signals),
+           length(asset_errors),
+           next_cursor,
+           asset_error_detail(asset_errors)
+         ) do
       :ok ->
         %{
           connector_id: row.id,
@@ -601,7 +596,26 @@ defmodule OptimalEngine.Connectors.Runner do
     id
   end
 
+  @complete_run_sql """
+  UPDATE connector_runs
+  SET completed_at = datetime('now'),
+      status       = ?1,
+      signals_ingested = ?2,
+      errors_encountered = ?3,
+      cursor_before = ?4,
+      cursor_after = ?5,
+      error_detail = ?6
+  WHERE id = ?7
+  """
+
   defp complete_run_row(run_id, status, signals, errors, cur_before, cur_after, err_detail) do
+    Store.raw_query(
+      @complete_run_sql,
+      complete_run_params(run_id, status, signals, errors, cur_before, cur_after, err_detail)
+    )
+  end
+
+  defp complete_run_params(run_id, status, signals, errors, cur_before, cur_after, err_detail) do
     status_str =
       case status do
         :success -> "success"
@@ -609,27 +623,48 @@ defmodule OptimalEngine.Connectors.Runner do
         :disabled -> "disabled"
       end
 
-    Store.raw_query(
-      """
-      UPDATE connector_runs
-      SET completed_at = datetime('now'),
-          status       = ?1,
-          signals_ingested = ?2,
-          errors_encountered = ?3,
-          cursor_before = ?4,
-          cursor_after = ?5,
-          error_detail = ?6
-      WHERE id = ?7
-      """,
-      [status_str, signals, errors, cur_before, cur_after, err_detail, run_id]
-    )
+    [status_str, signals, errors, cur_before, cur_after, err_detail, run_id]
   end
 
-  defp advance_cursor(connector_id, new_cursor) do
-    Store.raw_query(
-      "UPDATE connectors SET cursor = ?1 WHERE id = ?2",
-      [new_cursor, connector_id]
-    )
+  # The cursor advance and the run's completion are one Store transaction, run
+  # inside a single Store call, so they commit or roll back together and no
+  # other caller's statement can land between them. A BEGIN sent as its own
+  # Store call would stay open across the calls that follow, and every other
+  # caller's own transaction would fail with "cannot start a transaction
+  # within a transaction" until the COMMIT arrived. A transaction that raises
+  # or exits is a failed persist too, so the run row is never left 'running'.
+  defp persist_success(row, run_id, signals, errors, next_cursor, err_detail) do
+    params =
+      complete_run_params(run_id, :success, signals, errors, row.cursor, next_cursor, err_detail)
+
+    result =
+      Store.transaction(fn txn ->
+        with {:ok, _} <-
+               Store.txn_execute(txn, "UPDATE connectors SET cursor = ?1 WHERE id = ?2", [
+                 next_cursor,
+                 row.id
+               ]),
+             {:ok, _} <- Store.txn_execute(txn, @complete_run_sql, params) do
+          {:ok, :persisted}
+        end
+      end)
+
+    case result do
+      {:ok, :persisted} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("[Runner] transaction aborted: #{inspect(reason)}")
+        :error
+    end
+  rescue
+    error ->
+      Logger.error("[Runner] transaction raised: #{Exception.message(error)}")
+      :error
+  catch
+    :exit, reason ->
+      Logger.error("[Runner] transaction exited: #{inspect(reason)}")
+      :error
   end
 
   defp disable_connector(connector_id) do
@@ -659,22 +694,6 @@ defmodule OptimalEngine.Connectors.Runner do
 
   defp invoke_sink(sink, signals, _row) when is_function(sink, 1) do
     sink.(signals)
-  end
-
-  # Wrap a sequence of raw_query writes in a SQLite BEGIN/COMMIT so a
-  # failure in any statement rolls back the lot. If the transaction
-  # itself errors we log + return :error rather than raising, so the
-  # caller can surface the issue through its normal result channel.
-  defp transaction(fun) when is_function(fun, 0) do
-    Store.raw_query("BEGIN IMMEDIATE", [])
-    fun.()
-    Store.raw_query("COMMIT", [])
-    :ok
-  rescue
-    e ->
-      Store.raw_query("ROLLBACK", [])
-      Logger.error("[Runner] transaction aborted: #{Exception.message(e)}")
-      :error
   end
 
   @doc """
