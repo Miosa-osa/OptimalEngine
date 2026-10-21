@@ -455,7 +455,7 @@ defmodule OptimalEngine.Store.Migrations do
   # The version of the asset foreign key index migration. Provisional like the ones
   # above: the assigned number is the highest on main plus one at merge, changed here
   # and in the pins listed in docs/guides/versioning-and-releases.md.
-  @asset_foreign_key_indexes_version 82
+  @asset_foreign_key_indexes_version 79
 
   # The asset tables point at each other and at source packages with foreign keys that
   # cascade or clear on delete: an extraction deletes its transcripts, OCR spans, visual
