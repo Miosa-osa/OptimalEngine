@@ -301,7 +301,8 @@ The workspace's folder and the files the import copied stay in place; a retry wr
 An import that creates a workspace and keeps no written log of its own (a bundle job keeps its own and takes the job back itself) writes a mark in `<backup dir>/importing/`, with its log beside it, before it makes the workspace record, and puts the mark's token on the record; once everything is written it clears the token and removes both.
 If it fails, raises or is cancelled, it takes back what it wrote at once.
 When the importing process dies without finishing (Cowboy stops a request that runs past its timeout without running its cleanup), a watcher process takes it back at once.
-When the Engine itself stops, the next boot takes it back right after the database opens, before anything else writes.
+When the Engine itself stops, the next boot starts taking it back right after the database opens, in a task of its own, so boot does not wait on a large import; the token keeps other imports out of the workspace until it is done.
+A mark that cannot be read is moved, with its log, to `<backup dir>/importing/unreadable/` for the operator: nothing says whose rows its log names, so none are touched.
 Either way only the rows the log names go, and only while the record still carries the mark's token, so a mark left behind never touches a workspace that a later import finished or made again.
 While a workspace carries an import's token, another import into it, `create` or `merge`, is refused with 409 `import_in_progress` and `retryable: true`, so a retry cannot write into it, or clear the token, while it is still being created or taken back.
 A mark whose import could not be taken back now (the Store did not answer within `config :optimal_engine, :bundle_mark_timeout_ms`, 30 s, or a delete was refused) is kept for the next try, and boot goes on.

@@ -249,9 +249,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   `cross_tenant: true` says the move between tenants is intended (the Engine
   operator seeding a tenant, or one database standing in for two Engines).
 
-  `:written_log` is a file the import appends to, after each batch it commits,
-  naming the rows that batch inserted (by primary key, or by the range the
-  table's key took). `discard_written/4` takes those rows out again and no
+  `:written_log` is a file the import appends a line to with each batch,
+  inside the batch's transaction (a batch that does not commit takes its line
+  back out), naming the rows that batch inserted (by primary key, or by the
+  range the table's key took). `discard_written/4` takes those rows out again and no
   others, so a failed or cancelled import can be undone without touching what
   another writer put in the workspace meanwhile. A caller that passes it (a
   bundle job) keeps the log and undoes the import itself when it does not
@@ -430,10 +431,13 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   workspace made again since carries another, so a mark left behind never
   touches a good workspace. A mark that could not be acted on now (the Store
   did not answer in time, a delete was refused) is kept for the next try;
-  this never raises or exits. The Engine that serves the API lists the marks
-  before it starts and calls this right after the Store starts, before
-  anything else writes; an import's watcher calls it when the importing
-  process dies. Returns how many imports were taken back.
+  this never raises or exits. A mark that cannot be read is set aside, with
+  its log, in `importing/unreadable/`. The Engine that serves the API lists
+  the marks before it starts and runs this in a task of its own right after
+  the Store starts, so boot does not wait on a large import; the token keeps
+  other imports out of each workspace until it is taken back. An import's
+  watcher calls it when the importing process dies. Returns how many imports
+  were taken back.
   """
   @spec discard_unfinished_imports([String.t()]) :: non_neg_integer()
   def discard_unfinished_imports(marks),
@@ -454,9 +458,31 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         :error -> :kept
       end
     else
-      # Unreadable, malformed, or already gone: nothing to take back by it.
-      _ -> drop_mark(path, nil, :stale)
+      # Gone: its import ended, and its log goes too if it is still there.
+      {:error, :enoent} -> drop_mark(path, sibling_log(path), :stale)
+      _unreadable -> set_aside(path)
     end
+  end
+
+  # A mark names its log `<name>.written.jsonl` beside it (mark_importing/3).
+  defp sibling_log(path), do: String.replace_suffix(path, ".json", ".written.jsonl")
+
+  # A mark that cannot be read says nothing about whose rows its log names, so
+  # neither is acted on: both move to `importing/unreadable/` for the operator,
+  # out of the next boot's way.
+  defp set_aside(path) do
+    aside = Path.join(importing_root(), "unreadable")
+    File.mkdir_p(aside)
+
+    for file <- [path, sibling_log(path)], File.exists?(file) do
+      File.rename(file, Path.join(aside, Path.basename(file)))
+    end
+
+    Logger.error(
+      "[WorkspaceBundle] set aside the unreadable import mark #{Path.basename(path)} in #{aside}"
+    )
+
+    :stale
   end
 
   defp take_back(path, log, tenant_id, workspace_id) do
@@ -502,16 +528,12 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     {:ok, rows} =
       Store.transaction(
         fn txn ->
-          Store.txn_query(
-            txn,
-            "SELECT json_extract(metadata, '$.#{@import_token}') FROM workspaces WHERE id = ?1",
-            [workspace_id]
-          )
+          Store.txn_query(txn, "SELECT metadata FROM workspaces WHERE id = ?1", [workspace_id])
         end,
         Application.get_env(:optimal_engine, :bundle_mark_timeout_ms, 30_000)
       )
 
-    {:ok, rows == [[token]]}
+    {:ok, token_of(rows) == token}
   rescue
     error ->
       Logger.error(
@@ -527,6 +549,17 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
       :error
   end
+
+  # The import token in a workspace row's metadata, read in Elixir as
+  # clear_import_token/1 writes it, with the plain SQL every store runs.
+  defp token_of([[json]]) when is_binary(json) do
+    case Jason.decode(json) do
+      {:ok, %{@import_token => token}} -> token
+      _ -> nil
+    end
+  end
+
+  defp token_of(_rows), do: nil
 
   # Each import has a mark of its own, so an import that loses a race to
   # create the same workspace removes only its own; its watcher takes back
@@ -1635,7 +1668,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     # What each table's rows are known by, for the log of what this run wrote.
     trackers = Map.new(names, &{&1, tracker(&1, columns(target_table(&1)))})
-    record = recorder(opts[:written_log])
+    log = written_log_file(opts[:written_log])
 
     # Every table is checked before any is written, so a refused bundle leaves
     # nothing behind.
@@ -1661,7 +1694,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
             end)
             |> self_parents_first(Enum.filter(keys[name], &(&1.table == name)))
 
-          case write_batches(target, rows, verb, batch_rows, opts[:observe], trackers[name], record) do
+          case write_batches(target, rows, verb, batch_rows, opts[:observe], trackers[name], log) do
             {:ok, written} -> {:cont, {:ok, Map.put(counts, name, written)}}
             {:error, :cancelled} -> {:halt, {:error, :cancelled}}
             {:error, reason} -> {:halt, {:error, {:import_failed, name, reason}}}
@@ -1678,11 +1711,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   # Each batch is its own transaction with foreign keys checked at its commit;
   # parents are always written in an earlier batch than their children.
-  defp write_batches(name, rows, verb, batch_rows, observe, tracker, record) do
+  defp write_batches(name, rows, verb, batch_rows, observe, tracker, log) do
     rows
     |> Stream.chunk_every(batch_rows)
     |> Enum.reduce_while({:ok, 0}, fn batch, {:ok, total} ->
-      with {:ok, written} <- write_batch(name, batch, verb, tracker, record),
+      with {:ok, written} <- write_batch(name, batch, verb, tracker, log),
            :ok <- import_batch(name, length(batch)),
            :ok <- batch_written(observe, name, length(batch)) do
         {:cont, {:ok, total + written}}
@@ -1714,38 +1747,49 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # moved. The batch's line is appended to the written log inside the
   # transaction, before it commits: an importing process killed while it
   # waits on the Store (a request Cowboy stops) still leaves a log that names
-  # every committed row, and a line the log cannot take rolls the batch back.
-  # Returns the number written.
-  defp write_batch(name, batch, verb, tracker, record) do
-    result =
-      Store.transaction(fn txn ->
-        {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
-        before = high_water(txn, name, tracker)
+  # every committed row. A batch that does not commit (a line the log cannot
+  # take, a failed statement, a COMMIT refused by a foreign key) takes its
+  # line back out, so the log never names rows that were rolled back: a key
+  # or an AUTOINCREMENT range they held may be another writer's later.
+  # An exit (the Store did not answer in time) leaves the line: the batch may
+  # still commit. Returns the number written.
+  defp write_batch(name, batch, verb, tracker, log) do
+    size = log_size(log)
 
-        {written, keys} =
-          Enum.reduce(batch, {0, []}, fn row, {count, keys} ->
-            names = Map.keys(row)
+    try do
+      result =
+        Store.transaction(fn txn ->
+          {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+          before = high_water(txn, name, tracker)
 
-            placeholders =
-              names |> Enum.with_index(1) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
+          {written, keys} =
+            Enum.reduce(batch, {0, []}, fn row, {count, keys} ->
+              names = Map.keys(row)
 
-            {:ok, changed} =
-              Store.txn_execute(
-                txn,
-                "#{verb} INTO #{quote_name(name)} (#{Enum.map_join(names, ", ", &quote_name/1)}) VALUES (#{placeholders})",
-                Enum.map(names, &decode_value(row[&1]))
-              )
+              placeholders =
+                names |> Enum.with_index(1) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
 
-            {count + changed, if(changed > 0, do: key_of(tracker, row, keys), else: keys)}
-          end)
+              {:ok, changed} =
+                Store.txn_execute(
+                  txn,
+                  "#{verb} INTO #{quote_name(name)} (#{Enum.map_join(names, ", ", &quote_name/1)}) VALUES (#{placeholders})",
+                  Enum.map(names, &decode_value(row[&1]))
+                )
 
-        with :ok <- record.(name, entry(txn, name, tracker, before, Enum.reverse(keys))),
-             do: {:ok, written}
-      end)
+              {count + changed, if(changed > 0, do: key_of(tracker, row, keys), else: keys)}
+            end)
 
-    result
-  rescue
-    error -> {:error, Exception.message(error)}
+          with :ok <- log_batch(log, name, entry(txn, name, tracker, before, Enum.reverse(keys))),
+               do: {:ok, written}
+        end)
+
+      with {:error, _} <- result, do: rewind_log(log, size)
+      result
+    rescue
+      error ->
+        rewind_log(log, size)
+        {:error, Exception.message(error)}
+    end
   end
 
   # A table with a single INTEGER key lets the target assign it, and a table
@@ -1798,29 +1842,63 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       else: nil
   end
 
-  # Appends one line per batch to the log, after the batch is committed: a crash
-  # between the two leaves rows unlogged, never a row logged that was not written.
-  defp recorder(nil), do: fn _name, _entry -> :ok end
+  # The written log: one line per batch, appended inside the batch's
+  # transaction and taken back out when the batch does not commit
+  # (write_batch/5), so it names exactly the rows committed. A log starts empty
+  # (a stale one would name rows this run did not write), and it names rows by
+  # key, so like the job's other private files it is the Engine's alone.
+  defp written_log_file(nil), do: nil
 
-  defp recorder(path) do
-    # A log starts empty (a stale one would name rows this run did not write),
-    # and it names rows by key, so like the job's other private files it is the
-    # Engine's alone.
+  defp written_log_file(path) do
     File.write(path, "")
     File.chmod(path, 0o600)
+    path
+  end
 
-    fn
-      _name, nil ->
-        :ok
+  defp log_batch(nil, _name, _entry), do: :ok
+  defp log_batch(_path, _name, nil), do: :ok
 
-      name, entry ->
-        line = Jason.encode!(Map.put(entry, "table", name)) <> "\n"
+  defp log_batch(path, name, entry) do
+    line = Jason.encode!(Map.put(entry, "table", name)) <> "\n"
 
-        case File.write(path, line, [:append]) do
-          :ok -> :ok
-          {:error, reason} -> {:error, {:written_log, reason}}
-        end
+    case File.write(path, line, [:append]) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:written_log, reason}}
     end
+  end
+
+  defp log_size(nil), do: nil
+
+  defp log_size(path) do
+    case File.stat(path) do
+      {:ok, %{size: size}} -> size
+      _ -> nil
+    end
+  end
+
+  # Cuts the log back to `size`, dropping the line of a batch that did not
+  # commit. A log that cannot be cut keeps the line, and says so: taking the
+  # import back then deletes by keys nothing should hold.
+  defp rewind_log(nil, _size), do: :ok
+  defp rewind_log(_path, nil), do: :ok
+
+  defp rewind_log(path, size) do
+    result =
+      with {:ok, io} <- File.open(path, [:read, :write, :binary, :raw]) do
+        try do
+          with {:ok, _} <- :file.position(io, size), do: :file.truncate(io)
+        after
+          File.close(io)
+        end
+      end
+
+    if result != :ok,
+      do:
+        Logger.error(
+          "[WorkspaceBundle] could not take a rolled-back batch out of #{path}: #{inspect(result)}"
+        )
+
+    result
   end
 
   # A failed create import leaves nothing behind: the rows it wrote, then the

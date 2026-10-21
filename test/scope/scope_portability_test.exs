@@ -1574,7 +1574,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
       refute File.exists?(stale_mark)
     end
 
-    test "a mark whose workspace cannot be removed now is kept, and boot goes on", ctx do
+    test "a mark whose workspace cannot be removed now is kept for the next try", ctx do
       {partial, written} = partial_workspace(ctx, "unremovable", "token-#{ctx.n}")
       mark = write_mark(ctx.tenant, partial.id, "token-#{ctx.n}", [written])
       store = Process.whereis(OptimalEngine.Store.SQLite)
@@ -1584,8 +1584,8 @@ defmodule OptimalEngine.ScopePortabilityTest do
         :sys.suspend(store)
 
         try do
-          task = Task.async(fn -> OptimalEngine.Application.discard_unfinished_imports([mark]) end)
-          assert {:ok, :ignore} = Task.yield(task, 10_000) || Task.shutdown(task, :brutal_kill)
+          task = Task.async(fn -> WorkspaceBundle.discard_unfinished_imports([mark]) end)
+          assert {:ok, 0} = Task.yield(task, 10_000) || Task.shutdown(task, :brutal_kill)
         after
           :sys.resume(store)
         end
@@ -1598,6 +1598,104 @@ defmodule OptimalEngine.ScopePortabilityTest do
       assert WorkspaceBundle.discard_unfinished_imports([mark]) == 1
       assert {:error, :not_found} = Workspace.get(partial.id)
       refute File.exists?(mark)
+    end
+
+    test "at boot the take-back runs beside the Engine, so a slow Store does not hold boot",
+         ctx do
+      {partial, written} = partial_workspace(ctx, "behind-boot", "token-#{ctx.n}")
+      mark = write_mark(ctx.tenant, partial.id, "token-#{ctx.n}", [written])
+      store = Process.whereis(OptimalEngine.Store.SQLite)
+
+      with_env(:bundle_mark_timeout_ms, 5_000, fn ->
+        :sys.suspend(store)
+
+        try do
+          started = System.monotonic_time(:millisecond)
+          task = Task.async(fn -> OptimalEngine.Application.discard_unfinished_imports([mark]) end)
+          assert {:ok, {:ok, pid}} = Task.yield(task, 3_000) || Task.shutdown(task, :brutal_kill)
+          assert is_pid(pid)
+          assert System.monotonic_time(:millisecond) - started < 1_000
+        after
+          :sys.resume(store)
+        end
+      end)
+
+      # The take-back still happens, once the Store answers.
+      assert eventually(fn -> Workspace.get(partial.id) == {:error, :not_found} end, 10_000)
+      refute File.exists?(mark)
+    end
+
+    test "an unreadable mark and its log are set aside, not left in the way", ctx do
+      dir = WorkspaceBundle.bundle_dir("default") |> Path.join("../../importing") |> Path.expand()
+      File.mkdir_p!(dir)
+      name = "torn-#{ctx.n}"
+      mark = Path.join(dir, name <> ".json")
+      log = Path.join(dir, name <> ".written.jsonl")
+      File.write!(mark, ~s({"tenant_id":"#{ctx.tenant}","workspace_id":"#{ctx.open}","to))
+      File.write!(log, ~s({"table":"contexts","columns":["id"],"keys":[["ctx-a-#{ctx.n}"]]}\n))
+      aside = Path.join(dir, "unreadable")
+      on_exit(fn -> Enum.each([mark, log], &File.rm/1) end)
+
+      assert WorkspaceBundle.discard_unfinished_imports([mark]) == 0
+
+      refute File.exists?(mark)
+      refute File.exists?(log)
+      assert File.exists?(Path.join(aside, name <> ".json"))
+      assert File.exists?(Path.join(aside, name <> ".written.jsonl"))
+      Enum.each(["json", "written.jsonl"], &File.rm(Path.join(aside, "#{name}.#{&1}")))
+
+      # Nothing the log names was touched: without a readable mark, nothing
+      # says the rows are the import's.
+      assert {:ok, [_]} =
+               Store.raw_query("SELECT 1 FROM contexts WHERE id = ?1", ["ctx-a-#{ctx.n}"])
+    end
+
+    test "a batch whose commit fails leaves no line in the written log", ctx do
+      target = moved_target(ctx, "phantom")
+
+      # A memory naming a parent the bundle does not carry: its batch fails at
+      # commit, when the foreign keys are checked, after the line was written.
+      resign_bundle(ctx, fn dir, manifest ->
+        file = Path.join(dir, "tables/memories.jsonl")
+        [first | _] = file |> File.read!() |> String.split("\n", trim: true)
+
+        orphan =
+          first
+          |> Jason.decode!()
+          |> Map.put("id", "phantom-#{ctx.n}")
+          |> Map.put("content", "A memory whose parent is not in the bundle #{ctx.n}")
+          |> Map.put("content_hash", "phantom-hash-#{ctx.n}")
+          |> Map.put("parent_memory_id", "no-such-memory-#{ctx.n}")
+          |> Jason.encode!()
+
+        content = File.read!(file) <> orphan <> "\n"
+        File.write!(file, content)
+        sha = :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+
+        Map.update!(manifest, "tables", fn tables ->
+          Enum.map(tables, fn
+            %{"name" => "memories"} = table ->
+              %{table | "rows" => table["rows"] + 1, "sha256" => sha}
+
+            table ->
+              table
+          end)
+        end)
+      end)
+
+      log = Path.join(System.tmp_dir!(), "phantom-#{ctx.n}.jsonl")
+      on_exit(fn -> File.rm(log) end)
+
+      assert {:error, {:import_failed, "memories", _reason}} =
+               WorkspaceBundle.import(ctx.path, target, cross_tenant: true, written_log: log)
+
+      tables =
+        log
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!(&1)["table"])
+
+      refute "memories" in tables
     end
 
     test "a failed import leaves a folder that was there before it as it was", ctx do
