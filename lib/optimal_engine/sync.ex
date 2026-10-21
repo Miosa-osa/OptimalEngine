@@ -18,11 +18,18 @@ defmodule OptimalEngine.Sync do
     (`OptimalEngine.Sync.Gate`): a row stays home when its own labels, or
     those of any row it was copied or derived from, are above the peer's
     class.
-  * Conflicts: when both sides changed the same row since the last sync,
-    the newer change wins and the conflict is recorded; for facts, both
-    versions also become claims in the review queue. Nothing is dropped
-    silently: refused, gated, and failed changes are counted and failures
-    are recorded.
+  * Conflicts: concurrency is ledger order, the winner is the clock. Two
+    changes of a row are concurrent when the sender had not seen the other
+    (judged against the sender's `base_seq` on a push, and on a pull against
+    this Engine's own ledger sequence at the start of the last complete cycle
+    with that peer); the newer change wins, the later device id on a tie, and
+    the conflict is recorded with its kind and why. A change the sender made after
+    seeing the other is applied with no clock check: a sender pushes only what
+    stands after what it took from the peer, or won against it. A change this
+    Engine did not take is not put in its ledger, so nothing forwards it. For
+    facts, both versions also become claims in the review queue. Nothing is
+    dropped silently: refused, gated, and failed changes are counted and
+    failures are recorded.
   * What replicates: only the tables `Capture.replicated_tables/0` lists, an
     explicit list of workspace knowledge. A peer cannot write any other table
     (credentials, roles, API keys, tenants, members, tools, storage, the job
@@ -48,6 +55,10 @@ defmodule OptimalEngine.Sync do
   @page 500
   @cycle_pages 20
   @cycle_budget 60_000
+  # A peer whose cursors were reset is not reset again within this many seconds.
+  @replace_window 600
+  # How many times a day a peer's cursors are reset before the peer is halted.
+  @resets_a_day 2
   @version_refused "the peer refused this Engine's schema version; sync pauses until both run the same Engine version"
   @version_unreported "the relay did not report the other Engine's schema version; sync pauses until it does"
 
@@ -132,7 +143,7 @@ defmodule OptimalEngine.Sync do
     %{
       "replica_id" => replica_id(),
       "version" => Application.spec(:optimal_engine, :vsn) |> to_string(),
-      "migration" => OptimalEngine.Store.Migrations.all() |> List.last() |> elem(0)
+      "migration" => OptimalEngine.Store.Migrations.all() |> Enum.map(&elem(&1, 0)) |> Enum.max()
     }
   end
 
@@ -181,21 +192,52 @@ defmodule OptimalEngine.Sync do
       "mutations" => mutations,
       "cursor" => cursor,
       "more" => length(rows) == limit,
+      "head" => workspace_sequence(tenant_id, workspace_id),
       "engine" => engine_info()
     }
   end
 
   @doc """
   Applies a batch of mutations to `workspace_id`. Options: `:max_class`
-  (data-class gate, default `confidential`), `:since` (ISO time of the last
-  sync with this peer, for conflict detection). Returns counts and conflicts.
+  (data-class gate, default `confidential`), and what the sender had seen of
+  this Engine, for conflict detection:
+
+  * `:base_seq` with `:base_replica_id`: this Engine's ledger sequence the
+    sender had pulled when it pushed, and the replica id it believed it was
+    pulling from. A change here after the sequence is concurrent with the
+    sender's; one at or before it was seen, and the incoming change is applied
+    without a clock check (the sender only pushes the changes that stand after
+    what it saw). A sequence from another ledger (the replica id differs or is
+    missing) or past this workspace's ledger head cannot be trusted and counts
+    as no base.
+  * `:local_floor`: a sequence of this Engine's own ledger, for a batch it
+    pulled: this Engine's ledger head at the start of the last cycle with that
+    peer in which the pull reached the end of the peer's ledger and the push
+    sent everything. Its own changes at or below it are taken as seen by the
+    peer; the ones after it are concurrent. It is a sequence of this ledger,
+    so the two Engines' clocks do not enter into it.
+  * `:sender`: the replica id of the Engine that pushed. Its own earlier
+    changes, and those of the incoming change's origin, are never concurrent
+    with it; changes here from any other device are.
+  * `:direction`: `:pull` when this Engine fetched the batch from the peer
+    (only its own changes are candidates for a conflict), `:push` (default)
+    when the peer sent it.
+  * none of the base options: every change of the row here counts as
+    concurrent, and the conflict is recorded as `unknown_base`.
+
+  The sender is a claim of the replica that holds the key: a `:sender` that
+  names this Engine is ignored, and a `:base_seq` that passes the checks above
+  is believed, so a replica key is trusted to report what it saw.
+
+  Returns counts, the conflicts, and `:base`, the base used (`"seq"`,
+  `"floor"` or `"unknown"`).
   """
   @spec apply_changes(String.t(), String.t(), [map()], keyword()) :: {:ok, map()} | {:error, term()}
   def apply_changes(tenant_id, workspace_id, mutations, opts \\ []) do
     {:ok, _} = Capture.seal()
     local = replica_id()
     max_class = Keyword.get(opts, :max_class, "confidential")
-    last_sync = opts[:since] || "1970-01-01T00:00:00"
+    base = base_for(opts, tenant_id, workspace_id, local)
 
     if Gate.workspace_rank(workspace_id) > Gate.class_rank(max_class) do
       {:error, :workspace_class_above_gate}
@@ -205,12 +247,55 @@ defmodule OptimalEngine.Sync do
       plans =
         Enum.map(
           mutations,
-          &plan(&1, tenant_id, workspace_id, local, max_class, last_sync, columns)
+          &plan(&1, tenant_id, workspace_id, local, max_class, base, columns)
         )
 
-      execute(tenant_id, workspace_id, plans)
+      with {:ok, result} <- execute(tenant_id, workspace_id, plans) do
+        {:ok, result |> Map.put(:base, Atom.to_string(base.kind)) |> put_base_rejected(base)}
+      end
     end
   end
+
+  defp put_base_rejected(result, %{rejected: nil}), do: result
+  defp put_base_rejected(result, %{rejected: why}), do: Map.put(result, :base_rejected, why)
+
+  # What the sender had seen, as far as it can be trusted. A sequence belongs to
+  # one ledger: it means something here only when the sender says it pulled
+  # from this replica, and it cannot be past what this workspace's ledger holds.
+  # Zero claims nothing seen, so it needs no proof.
+  defp base_for(opts, tenant_id, workspace_id, local) do
+    direction = Keyword.get(opts, :direction, :push)
+
+    base = %{
+      kind: :unknown,
+      seen: nil,
+      floor: nil,
+      rejected: nil,
+      direction: direction,
+      sender: sender_other_than(opts[:sender], local)
+    }
+
+    case {opts[:base_seq], opts[:local_floor]} do
+      {seq, _floor} when is_integer(seq) and seq >= 0 ->
+        cond do
+          seq == 0 -> %{base | kind: :seq, seen: 0}
+          opts[:base_replica_id] != local -> %{base | rejected: "replica_mismatch"}
+          seq > workspace_sequence(tenant_id, workspace_id) -> %{base | rejected: "above_head"}
+          true -> %{base | kind: :seq, seen: seq}
+        end
+
+      {_seq, floor} when is_integer(floor) and floor >= 0 ->
+        %{base | kind: :floor, floor: floor}
+
+      _ ->
+        base
+    end
+  end
+
+  # A sender names itself, and the name decides whose changes are left out of the
+  # candidates, so one that names this Engine is ignored.
+  defp sender_other_than(local, local), do: nil
+  defp sender_other_than(sender, _local), do: sender
 
   @doc """
   The tables this Engine replicates and the ones it keeps local, with its schema
@@ -398,7 +483,10 @@ defmodule OptimalEngine.Sync do
   @spec run_all() :: [map()]
   def run_all do
     {:ok, rows} =
-      Store.raw_query(peer_sql() <> "WHERE status != 'disabled' AND policy != 'none'", [])
+      Store.raw_query(
+        peer_sql() <> "WHERE status NOT IN ('disabled', 'halted') AND policy != 'none'",
+        []
+      )
 
     Enum.map(rows, fn row ->
       peer = to_peer(row)
@@ -428,8 +516,28 @@ defmodule OptimalEngine.Sync do
   """
   @spec run_peer(map()) :: map()
   def run_peer(peer) do
+    # One run of a peer at a time: the scheduler's tick and `POST /api/sync/run`
+    # would otherwise pull and push the same pages twice, and race on the cursors.
+    lock = {{:sync_peer, peer.tenant_id, peer.workspace_id, peer.url}, self()}
+
+    case :global.trans(lock, fn -> run_peer_locked(peer) end, [node()], 0) do
+      :aborted ->
+        %{workspace_id: peer.workspace_id, url: peer.url, status: "busy", reason: :already_running}
+
+      result ->
+        result
+    end
+  end
+
+  defp run_peer_locked(peer) do
     budget = Application.get_env(:optimal_engine, :sync_cycle_budget_ms, @cycle_budget)
     deadline = System.monotonic_time(:millisecond) + budget
+    started = utc_now_iso()
+
+    # Sealed first, so the head counts every change captured so far: it is the
+    # floor the next pull judges this Engine's own changes against.
+    {:ok, _} = Capture.seal()
+    head = workspace_sequence(peer.tenant_id, peer.workspace_id)
 
     with {:ok, key} <- peer_key(peer),
          {:ok, peer} <- prepare(peer, key) do
@@ -445,6 +553,8 @@ defmodule OptimalEngine.Sync do
         cond do
           # A peer on another schema version is sent nothing until both match.
           match?({:error, {:version_mismatch, _}}, pulled) -> {:ok, %{skipped: :paused_version}}
+          # Nor is one whose identity is not settled: what it acknowledges may be another Engine's.
+          identity_error?(pulled) -> {:ok, %{skipped: :identity}}
           peer.policy in ["push", "both"] -> push(peer, key, deadline)
           true -> {:ok, %{skipped: :policy}}
         end
@@ -453,12 +563,13 @@ defmodule OptimalEngine.Sync do
         case {pulled, pushed} do
           {{:error, {:version_mismatch, message}}, _} -> {"paused_version", message}
           {_, {:error, {:version_mismatch, message}}} -> {"paused_version", message}
-          {{:error, reason}, _} -> {"error", inspect(reason)}
-          {_, {:error, reason}} -> {"error", inspect(reason)}
-          _ -> {"active", nil}
+          {{:error, :peer_halted}, _} -> {"halted", error_message(:peer_halted)}
+          {{:error, reason}, _} -> {"error", error_message(reason)}
+          {_, {:error, reason}} -> {"error", error_message(reason)}
+          _ -> {"active", base_message(pushed)}
         end
 
-      update_peer_status(peer, status)
+      update_peer_status(peer, status, cycle_synced(peer, pulled, pushed, started, head))
 
       %{
         workspace_id: peer.workspace_id,
@@ -472,23 +583,58 @@ defmodule OptimalEngine.Sync do
         update_peer_status(peer, {"paused_version", message})
         %{workspace_id: peer.workspace_id, url: peer.url, status: "paused_version", reason: message}
 
+      {:error, :peer_halted} ->
+        update_peer_status(peer, {"halted", error_message(:peer_halted)})
+        %{workspace_id: peer.workspace_id, url: peer.url, status: "halted", reason: :peer_halted}
+
       {:error, reason} ->
-        update_peer_status(peer, {"error", inspect(reason)})
+        update_peer_status(peer, {"error", error_message(reason)})
         %{workspace_id: peer.workspace_id, url: peer.url, status: "error", reason: reason}
     end
   end
+
+  defp identity_error?({:error, reason}),
+    do: reason in [:peer_identity_unstable, :peer_replica_unreported, :peer_halted]
+
+  defp identity_error?(_pulled), do: false
+
+  defp error_message(:peer_halted),
+    do:
+      "the peer changed its replica id again within a day, twice already; sync is halted for it until it is added again (POST /api/sync/peers) once the Engine behind the URL is settled"
+
+  defp error_message(:peer_identity_unstable),
+    do:
+      "the peer answers under more than one replica id (two Engines behind one URL, or a relay that does not report this Engine's own id); its cursors were not reset again"
+
+  defp error_message(:peer_replica_unreported),
+    do: "the peer's change page does not say which replica it is; sync pauses until it does"
+
+  defp error_message(reason), do: inspect(reason)
+
+  # A push the peer answered, but whose base it did not accept, still moved
+  # everything; the message says why its conflict checks were conservative.
+  defp base_message({:ok, %{base_rejected: why}}),
+    do:
+      "the peer did not accept the base this Engine sent (#{why}), so it judged concurrent changes conservatively; check that the relay reports this peer's own replica id"
+
+  defp base_message(_pushed), do: nil
 
   @doc "Replication state for a workspace: lag, last sync, pending, conflicts."
   @spec status(String.t(), String.t()) :: map()
   def status(tenant_id, workspace_id) do
     {:ok, _} = Capture.seal()
 
-    {:ok, [[open_conflicts]]} =
+    {:ok, rows} =
       Store.raw_query(
-        "SELECT COUNT(*) FROM sync_conflicts WHERE tenant_id = ?1 AND workspace_id = ?2 AND state = 'open'",
+        """
+        SELECT table_name, COUNT(*) FROM sync_conflicts
+        WHERE tenant_id = ?1 AND workspace_id = ?2 AND state = 'open'
+        GROUP BY table_name
+        """,
         [tenant_id, workspace_id]
       )
 
+    by_table = Map.new(rows, fn [table, count] -> {table, count} end)
     local_seq = workspace_sequence(tenant_id, workspace_id)
     local = replica_id()
 
@@ -497,7 +643,8 @@ defmodule OptimalEngine.Sync do
       enabled: enabled?(workspace_id),
       replica_id: local,
       ledger_sequence: local_seq,
-      open_conflicts: open_conflicts,
+      open_conflicts: by_table |> Map.values() |> Enum.sum(),
+      conflicts_by_table: by_table,
       append_only_tables: Capture.append_only_tables(),
       peers:
         Enum.map(peers(tenant_id, workspace_id), fn peer ->
@@ -545,7 +692,7 @@ defmodule OptimalEngine.Sync do
         remote: decode(remote),
         remote_device: device,
         state: state,
-        detail: detail,
+        detail: decode_detail(detail),
         created_at: at,
         resolved_by: by,
         resolved_at: resolved_at
@@ -581,12 +728,11 @@ defmodule OptimalEngine.Sync do
     end
   end
 
-  defp plan(mutation, _tenant_id, _workspace_id, _local, _gate, _last_sync, _columns)
+  defp plan(mutation, _tenant_id, _workspace_id, _local, _gate, _base, _columns)
        when not is_map(mutation),
        do: {:skip, :invalid, %{}}
 
-  defp plan(mutation, tenant_id, workspace_id, local, gate, last_sync, columns) do
-    table = mutation["entity_type"]
+  defp plan(mutation, tenant_id, workspace_id, local, gate, base, columns) do
     invalid = invalid_reason(mutation)
 
     cond do
@@ -596,9 +742,34 @@ defmodule OptimalEngine.Sync do
       invalid ->
         {:fail, invalid, mutation}
 
-      known?(mutation["id"]) ->
-        {:skip, :duplicate, mutation}
+      # The ids this Engine's own changes get are its own: a peer may not take one.
+      own_id_space?(mutation, local) ->
+        {:fail, :mutation_id_in_use, mutation}
 
+      true ->
+        case id_state(tenant_id, workspace_id, mutation["id"]) do
+          :duplicate -> {:skip, :duplicate, mutation}
+          :elsewhere -> {:fail, :mutation_id_in_use, mutation}
+          :new -> plan_table(mutation, tenant_id, workspace_id, local, gate, base, columns)
+        end
+    end
+  end
+
+  # `mut_<replica>_<capture sequence>` and `<replica>:<capture sequence>` are what
+  # `Capture.seal/0` gives this Engine's changes. One that arrives from another
+  # device would take the id of a change still to come, and the ledger ignores the
+  # second row with an id, so the Engine's own change would never be sealed.
+  defp own_id_space?(mutation, local) do
+    key = mutation["idempotency_key"]
+
+    String.starts_with?(mutation["id"], "mut_" <> local <> "_") or
+      (is_binary(key) and String.starts_with?(key, local <> ":"))
+  end
+
+  defp plan_table(mutation, tenant_id, workspace_id, local, gate, base, columns) do
+    table = mutation["entity_type"]
+
+    cond do
       # A table that stays on its Engine (members, tools, storage, connectors,
       # the job queue, ...) is not applied from a peer, whatever the peer sent.
       Capture.known_local?(table) ->
@@ -619,13 +790,13 @@ defmodule OptimalEngine.Sync do
           workspace_id,
           local,
           gate,
-          last_sync,
+          base,
           Map.get(columns, table, [])
         )
     end
   end
 
-  defp plan_row(mutation, tenant_id, workspace_id, local, gate, last_sync, columns) do
+  defp plan_row(mutation, tenant_id, workspace_id, local, gate, base, columns) do
     table = mutation["entity_type"]
     append_only = Capture.rowid_key?(columns)
     payload = mutation["payload"]
@@ -635,6 +806,8 @@ defmodule OptimalEngine.Sync do
          :ok <- supported_operation(append_only, mutation["operation"]),
          :ok <- known_signal_values(table, mutation),
          {:ok, mutation} <- confine_paths(table, mutation) do
+      mutation = with_row_key(mutation, columns, append_only, tenant_id, workspace_id)
+
       # An append-only row is named by its capture sequence on the Engine that
       # wrote it, so a local row with the same name is a different row: it is
       # always added, never a conflict.
@@ -643,7 +816,7 @@ defmodule OptimalEngine.Sync do
           nil
         else
           tenant_id
-          |> local_conflict(workspace_id, table, mutation["entity_id"], local, last_sync)
+          |> local_conflict(workspace_id, mutation, local, base)
           |> unless_same_content(mutation)
         end
 
@@ -678,6 +851,30 @@ defmodule OptimalEngine.Sync do
     do: value in Enum.map(valid, &Atom.to_string/1)
 
   defp signal_value?(_value, _valid), do: false
+
+  # The sender names the row's `entity_id`, which the conflict check and the
+  # ledger look rows up by. The row says which row it is: its key is the one the
+  # payload's key columns give, written the way capture writes it (with the scope
+  # columns stamped as `write/6` stamps them), so a sender cannot name one row and
+  # change another to escape the check.
+  defp with_row_key(mutation, columns, append_only, tenant_id, workspace_id) do
+    keys = Capture.key_columns(columns)
+    stamped = %{"tenant_id" => tenant_id, "workspace_id" => workspace_id}
+    scope = Map.take(stamped, Enum.map(columns, & &1.name))
+    row = Map.merge(mutation["payload"]["row"], scope)
+
+    if append_only or keys == [] or not Enum.all?(keys, &(row[&1] != nil)),
+      do: mutation,
+      else: Map.put(mutation, "entity_id", entity_key(keys, row))
+  end
+
+  @doc false
+  # The key capture gives a row (`Capture.key_expr/3`), computed from its values.
+  def entity_key([key], row), do: key_text(row[key])
+  def entity_key(keys, row), do: keys |> Enum.map(&row[&1]) |> Jason.encode!()
+
+  defp key_text(value) when is_binary(value), do: value
+  defp key_text(value), do: to_string(value)
 
   # Every name the payload carries, a blob's as well as a row column's, must be
   # a column of the table: a name is quoted into the statement that writes it.
@@ -759,11 +956,7 @@ defmodule OptimalEngine.Sync do
 
   defp windows_path?(path), do: Regex.match?(~r/\A[A-Za-z]:|\A\\\\/, path)
 
-  defp drop_path(mutation, column) do
-    mutation
-    |> put_in(["payload", "row", column], nil)
-    |> Map.delete("payload_hash")
-  end
+  defp drop_path(mutation, column), do: put_in(mutation, ["payload", "row", column], nil)
 
   defp not_replicated_reason(table) do
     if Capture.columns(table) == [], do: :unknown_table, else: :table_not_replicated
@@ -780,6 +973,9 @@ defmodule OptimalEngine.Sync do
         :invalid_mutation
 
       mutation["operation"] not in @operations ->
+        :invalid_mutation
+
+      not (is_nil(mutation["idempotency_key"]) or is_binary(mutation["idempotency_key"])) ->
         :invalid_mutation
 
       not is_binary(mutation["occurred_at"]) ->
@@ -838,7 +1034,7 @@ defmodule OptimalEngine.Sync do
             %{applied: 0, skipped: %{}, failed: [], conflicts: [], fact_conflicts: [], retry: []},
             fn
               {:skip, reason, _mutation}, acc ->
-                update_in(acc, [:skipped, reason], &((&1 || 0) + 1))
+                count_skip(acc, reason)
 
               {:fail, reason, mutation}, acc ->
                 record_failure(txn, tenant_id, workspace_id, mutation, reason)
@@ -848,9 +1044,23 @@ defmodule OptimalEngine.Sync do
               # same change (`POST /api/sync/run` during a scheduler tick) may
               # have committed it since; an append-only row would be added twice.
               {:apply, step}, acc ->
-                if txn_known?(txn, step.mutation["id"]),
-                  do: update_in(acc, [:skipped, :duplicate], &((&1 || 0) + 1)),
-                  else: apply_step(txn, tenant_id, workspace_id, step, acc, foreign_keys)
+                case txn_id_state(txn, tenant_id, workspace_id, step.mutation["id"]) do
+                  :new ->
+                    apply_step(txn, tenant_id, workspace_id, step, acc, foreign_keys)
+
+                  :duplicate ->
+                    count_skip(acc, :duplicate)
+
+                  :elsewhere ->
+                    record_failure(txn, tenant_id, workspace_id, step.mutation, :mutation_id_in_use)
+
+                    %{
+                      acc
+                      | failed: [
+                          %{id: step.mutation["id"], reason: :mutation_id_in_use} | acc.failed
+                        ]
+                    }
+                end
             end
           )
 
@@ -893,6 +1103,8 @@ defmodule OptimalEngine.Sync do
 
   defp foreign_key_failure?(reason), do: String.contains?(inspect(reason), "FOREIGN KEY")
 
+  defp count_skip(acc, reason), do: update_in(acc, [:skipped, reason], &((&1 || 0) + 1))
+
   defp apply_step(
          txn,
          tenant_id,
@@ -902,69 +1114,76 @@ defmodule OptimalEngine.Sync do
          foreign_keys
        ) do
     table = mutation["entity_type"]
-    remote_at = mutation["occurred_at"]
 
-    case conflict do
-      %{occurred_at: local_at} = local when local_at > remote_at ->
-        record_conflict(txn, tenant_id, workspace_id, mutation, local, "kept_local_newer")
-        record_ledger(txn, tenant_id, workspace_id, mutation)
-        acc = %{acc | conflicts: [mutation["id"] | acc.conflicts]}
+    if conflict && local_wins?(conflict, mutation) do
+      # The change here is newer: the incoming one is not applied, and it is
+      # not put in the ledger either, so a hub never forwards a change this
+      # Engine did not take. A repeat is judged the same way and the conflict
+      # is recorded once (its id comes from the mutation).
+      record_conflict(txn, tenant_id, workspace_id, mutation, conflict, "kept_local_newer")
+      acc = %{acc | conflicts: [mutation["id"] | acc.conflicts]}
 
-        if table == "facts",
-          do: %{acc | fact_conflicts: [{local, mutation} | acc.fact_conflicts]},
-          else: acc
+      if table == "facts",
+        do: %{acc | fact_conflicts: [{conflict, mutation} | acc.fact_conflicts]},
+        else: acc
+    else
+      savepoint = "sync_" <> Integer.to_string(System.unique_integer([:positive]))
+      {:ok, _} = Store.txn_execute(txn, "SAVEPOINT #{savepoint}", [])
 
-      _ ->
-        savepoint = "sync_" <> Integer.to_string(System.unique_integer([:positive]))
-        {:ok, _} = Store.txn_execute(txn, "SAVEPOINT #{savepoint}", [])
+      case write(txn, table, columns, mutation, workspace_id, tenant_id, gate) do
+        :ok ->
+          {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
+          record_ledger(txn, tenant_id, workspace_id, mutation)
 
-        case write(txn, table, columns, mutation, workspace_id, tenant_id, gate) do
-          :ok ->
-            {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
-            record_ledger(txn, tenant_id, workspace_id, mutation)
+          acc = %{acc | applied: acc.applied + 1}
 
-            acc = %{acc | applied: acc.applied + 1}
+          if conflict do
+            record_conflict(
+              txn,
+              tenant_id,
+              workspace_id,
+              mutation,
+              conflict,
+              "applied_remote_newer"
+            )
 
-            if conflict do
-              record_conflict(
-                txn,
-                tenant_id,
-                workspace_id,
-                mutation,
-                conflict,
-                "applied_remote_newer"
-              )
+            acc = %{acc | conflicts: [mutation["id"] | acc.conflicts]}
 
-              acc = %{acc | conflicts: [mutation["id"] | acc.conflicts]}
+            if table == "facts",
+              do: %{acc | fact_conflicts: [{conflict, mutation} | acc.fact_conflicts]},
+              else: acc
+          else
+            acc
+          end
 
-              if table == "facts",
-                do: %{acc | fact_conflicts: [{conflict, mutation} | acc.fact_conflicts]},
-                else: acc
-            else
-              acc
-            end
+        {:error, reason} ->
+          {:ok, _} = Store.txn_execute(txn, "ROLLBACK TO #{savepoint}", [])
+          {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
 
-          {:error, reason} ->
-            {:ok, _} = Store.txn_execute(txn, "ROLLBACK TO #{savepoint}", [])
-            {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
+          cond do
+            # The row it would overwrite or delete is above the gate: it stays as it is.
+            reason == :gated ->
+              count_skip(acc, :gated)
 
-            cond do
-              # The row it would overwrite or delete is above the gate: it stays as it is.
-              reason == :gated ->
-                update_in(acc, [:skipped, :gated], &((&1 || 0) + 1))
+            # Its parent may come later in the page: once more after the rest.
+            foreign_keys == :immediate and foreign_key_failure?(reason) ->
+              %{acc | retry: [step | acc.retry]}
 
-              # Its parent may come later in the page: once more after the rest.
-              foreign_keys == :immediate and foreign_key_failure?(reason) ->
-                %{acc | retry: [step | acc.retry]}
-
-              true ->
-                record_failure(txn, tenant_id, workspace_id, mutation, reason)
-                reason = if is_atom(reason), do: reason, else: inspect(reason)
-                %{acc | failed: [%{id: mutation["id"], reason: reason} | acc.failed]}
-            end
-        end
+            true ->
+              record_failure(txn, tenant_id, workspace_id, mutation, reason)
+              reason = if is_atom(reason), do: reason, else: inspect(reason)
+              %{acc | failed: [%{id: mutation["id"], reason: reason} | acc.failed]}
+          end
+      end
     end
   end
+
+  # Of two concurrent changes the newer wins, and when they carry the same time
+  # the greater device id does, so both Engines keep the same version.
+  defp local_wins?(local_change, mutation),
+    do:
+      {local_change.occurred_at, local_change.device} >
+        {mutation["occurred_at"], mutation["device_id"]}
 
   # The row is written into the target tenant and workspace whatever the peer
   # claims: the scope columns are stamped over the payload's, and a row whose
@@ -1273,32 +1492,62 @@ defmodule OptimalEngine.Sync do
           mutation["entity_id"],
           mutation["operation"],
           payload,
-          mutation["payload_hash"] || :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower),
-          mutation["idempotency_key"] || mutation["id"],
+          # The hash and the key are this Engine's: what the sender claims for them is
+          # not stored. The id is unique in the ledger, and so is the key made from it.
+          :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower),
+          mutation["id"],
           mutation["occurred_at"]
         ]
       )
   end
 
+  # Every conflict says why: its kind (`concurrent_edit`, `fact_divergence`,
+  # `unknown_base`) and, in `detail`, the local change's sequence and device, the
+  # base it was judged against, the time of each side's change, and the
+  # resolution. Its id comes from the scope, the incoming mutation and the
+  # resolution, so judging the same change again records nothing new, and a
+  # mutation id another workspace or tenant used does not hide this one.
   defp record_conflict(txn, tenant_id, workspace_id, mutation, local, resolution) do
+    detail = %{
+      "mutation_id" => mutation["id"],
+      "local_seq" => local.sequence,
+      "local_device" => local.device,
+      "base_seq" => local.base_seq,
+      "local_floor" => local.local_floor,
+      "local_occurred_at" => local.occurred_at,
+      "remote_occurred_at" => mutation["occurred_at"],
+      "resolution" => resolution
+    }
+
+    id =
+      "sc_" <>
+        (:crypto.hash(
+           :sha256,
+           Enum.join([tenant_id, workspace_id, mutation["id"], resolution], "|")
+         )
+         |> binary_part(0, 10)
+         |> Base.url_encode64(padding: false))
+
     {:ok, _} =
       Store.txn_execute(
         txn,
         """
-        INSERT INTO sync_conflicts (id, tenant_id, workspace_id, table_name, entity_key, kind, resolution,
-                                    local_payload, remote_payload, remote_device)
-        VALUES (?1, ?2, ?3, ?4, ?5, 'concurrent_change', ?6, ?7, ?8, ?9)
+        INSERT OR IGNORE INTO sync_conflicts (id, tenant_id, workspace_id, table_name, entity_key, kind,
+                                              resolution, local_payload, remote_payload, remote_device, detail)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         """,
         [
-          "sc_" <> random_id(),
+          id,
           tenant_id,
           workspace_id,
           mutation["entity_type"],
           mutation["entity_id"],
+          local.kind,
           resolution,
           local.payload,
           Jason.encode!(mutation["payload"]),
-          mutation["device_id"]
+          mutation["device_id"],
+          Jason.encode!(detail)
         ]
       )
   end
@@ -1466,20 +1715,92 @@ defmodule OptimalEngine.Sync do
     {merged_labels, merged_partitions}
   end
 
-  defp local_conflict(tenant_id, workspace_id, table, entity_id, local, last_sync) do
-    case Store.raw_query(
-           """
-           SELECT occurred_at, payload FROM sync_mutations
-           WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = ?3 AND entity_id = ?4
-             AND device_id = ?5 AND occurred_at > ?6
-           ORDER BY sequence DESC LIMIT 1
-           """,
-           [tenant_id, workspace_id, table, entity_id, local, last_sync]
-         ) do
-      {:ok, [[at, payload]]} -> %{occurred_at: at, payload: payload}
-      _ -> nil
+  # The latest change here to the incoming change's row that it may be
+  # concurrent with, judged against what the sender had seen; nil when there is
+  # none. With a base sequence the order is the ledger's, not the clock's: a
+  # change here after the base is concurrent, whatever its time, and one at or
+  # before it was seen by the sender. Which of two concurrent versions is newer
+  # is their change time (then the device id), the rule both Engines use, so
+  # they keep the same version.
+  #
+  # Which changes here are candidates depends on who sent the batch. A batch
+  # this Engine pulled can only be concurrent with this Engine's own changes.
+  # A batch pushed to it can be concurrent with any change here except the
+  # sender's own and the incoming change's origin's (their order is the
+  # sender's ledger's), including changes a third replica made.
+  defp local_conflict(tenant_id, workspace_id, mutation, local, base) do
+    table = mutation["entity_type"]
+
+    floor =
+      case base do
+        %{kind: :floor, floor: sequence} -> sequence
+        _ -> 0
+      end
+
+    {device_sql, devices} = candidate_devices(base, mutation, local)
+
+    change =
+      case Store.raw_query(
+             """
+             SELECT sequence, occurred_at, payload, device_id, operation FROM sync_mutations
+             WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = ?3 AND entity_id = ?4
+               AND sequence > ?5 AND #{device_sql}
+             ORDER BY sequence DESC LIMIT 1
+             """,
+             [tenant_id, workspace_id, table, mutation["entity_id"], floor | devices]
+           ) do
+        {:ok, [[sequence, at, payload, device, operation]]} ->
+          %{
+            sequence: sequence,
+            occurred_at: at,
+            payload: payload,
+            device: device,
+            operation: operation
+          }
+
+        _ ->
+          nil
+      end
+
+    case {change, base} do
+      {nil, _} ->
+        nil
+
+      {%{sequence: sequence}, %{kind: :seq, seen: seen}} when sequence <= seen ->
+        nil
+
+      {change, base} ->
+        change |> Map.merge(base_detail(base)) |> Map.put(:kind, conflict_kind(table, base))
     end
   end
+
+  defp candidate_devices(%{direction: :pull}, _mutation, local), do: {"device_id = ?6", [local]}
+
+  defp candidate_devices(base, mutation, _local) do
+    excluded =
+      [mutation["device_id"], base.sender] |> Enum.filter(&is_binary/1) |> Enum.uniq()
+
+    placeholders = excluded |> Enum.with_index(6) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
+    {"device_id NOT IN (#{placeholders})", excluded}
+  end
+
+  defp base_detail(%{kind: :seq, seen: seen}), do: %{base_seq: seen, local_floor: nil}
+  defp base_detail(%{kind: :floor, floor: floor}), do: %{base_seq: nil, local_floor: floor}
+  defp base_detail(%{kind: :unknown}), do: %{base_seq: nil, local_floor: nil}
+
+  defp conflict_kind(_table, %{kind: :unknown}), do: "unknown_base"
+  defp conflict_kind("facts", _base), do: "fact_divergence"
+  defp conflict_kind(_table, _base), do: "concurrent_edit"
+
+  # A conflict's detail is a JSON object; a failure's is the reason as text.
+  defp decode_detail(detail) when is_binary(detail) do
+    case Jason.decode(detail) do
+      {:ok, %{} = map} -> map
+      _ -> detail
+    end
+  end
+
+  defp decode_detail(detail), do: detail
 
   # Bookkeeping columns record when this Engine wrote a row, not what the row
   # says. Two Engines that derive the same row (a registry entry both create at
@@ -1488,6 +1809,14 @@ defmodule OptimalEngine.Sync do
                           transaction_time_start transaction_time_end)
 
   defp unless_same_content(nil, _mutation), do: nil
+
+  # A delete carries only the row's key, so it says nothing about the row's
+  # content: it is the same change only as another delete, and a delete here is
+  # the same only as an incoming delete.
+  defp unless_same_content(%{operation: local_op} = conflict, %{"operation" => remote_op})
+       when local_op == "delete" or remote_op == "delete" do
+    if local_op == remote_op, do: nil, else: conflict
+  end
 
   defp unless_same_content(%{payload: payload} = conflict, mutation) do
     local_row =
@@ -1507,16 +1836,25 @@ defmodule OptimalEngine.Sync do
     if same?, do: nil, else: conflict
   end
 
-  defp known?(id) when is_binary(id) do
-    match?({:ok, [_]}, Store.raw_query("SELECT 1 FROM sync_mutations WHERE id = ?1", [id]))
+  # A mutation id is unique in the ledger across tenants and workspaces, and a
+  # sender chooses it. One already used by this workspace's change is a repeat
+  # (skipped); one used by another workspace's or tenant's change is not this
+  # workspace's repeat, and is refused instead of being taken as applied.
+  defp id_state(tenant_id, workspace_id, id) when is_binary(id) do
+    "SELECT tenant_id, workspace_id FROM sync_mutations WHERE id = ?1"
+    |> Store.raw_query([id])
+    |> classify_id(tenant_id, workspace_id)
   end
 
-  defp known?(_id), do: true
-
-  defp txn_known?(txn, id) do
-    sql = "SELECT 1 FROM sync_mutations WHERE id = ?1"
-    match?({:ok, [_ | _]}, Store.txn_query(txn, sql, [id]))
+  defp txn_id_state(txn, tenant_id, workspace_id, id) do
+    txn
+    |> Store.txn_query("SELECT tenant_id, workspace_id FROM sync_mutations WHERE id = ?1", [id])
+    |> classify_id(tenant_id, workspace_id)
   end
+
+  defp classify_id({:ok, [[tenant, workspace] | _]}, tenant, workspace), do: :duplicate
+  defp classify_id({:ok, [_ | _]}, _tenant, _workspace), do: :elsewhere
+  defp classify_id(_result, _tenant, _workspace), do: :new
 
   # ---------------------------------------------------------------------------
   # Peers
@@ -1544,7 +1882,7 @@ defmodule OptimalEngine.Sync do
     with {:ok, status} <- request(:get, relay_url(peer, "status"), nil, key, 15_000),
          :ok <- relay_compatible(status),
          :ok <- relay_enabled(peer, status, key) do
-      {:ok, remember_peer_replica(peer, status["replica_id"])}
+      remember_peer_replica(peer, status["replica_id"])
     end
   end
 
@@ -1564,16 +1902,25 @@ defmodule OptimalEngine.Sync do
   defp relay_enabled(_peer, _status, _key), do: :ok
 
   defp remember_peer_replica(peer, replica) when is_binary(replica) do
+    case same_peer(peer, replica) do
+      {:replaced, replica} -> replace_peer_replica(peer, replica, :replica_changed)
+      :same_peer -> {:ok, store_peer_replica(peer, replica)}
+    end
+  end
+
+  # A status that does not name the replica leaves the known one as it is; the
+  # change pages must name it.
+  defp remember_peer_replica(peer, _replica), do: {:ok, peer}
+
+  defp store_peer_replica(peer, replica) do
     {:ok, _} =
       Store.raw_query(
-        "UPDATE sync_peers SET peer_replica_id = ?4 WHERE tenant_id = ?1 AND workspace_id = ?2 AND url = ?3",
+        "UPDATE sync_peers SET peer_replica_id = COALESCE(?4, peer_replica_id) WHERE tenant_id = ?1 AND workspace_id = ?2 AND url = ?3",
         [peer.tenant_id, peer.workspace_id, peer.url, replica]
       )
 
     %{peer | peer_replica_id: replica}
   end
-
-  defp remember_peer_replica(peer, _replica), do: peer
 
   # Pages are pulled from the cursor while the peer says there is `more`, up to
   # @cycle_pages a cycle and within the cycle's time budget; each page is
@@ -1591,14 +1938,18 @@ defmodule OptimalEngine.Sync do
     with {:ok, %{"mutations" => mutations, "cursor" => cursor, "engine" => engine} = page} <-
            request(:get, url, nil, key, 15_000),
          :ok <- compatible(engine),
+         :ok <- replica_reported(engine),
+         :same_peer <- same_peer(peer, engine["replica_id"]),
+         :ok <- ledger_not_behind(page, since, engine["replica_id"]),
          {:ok, result} <-
            apply_changes(peer.tenant_id, peer.workspace_id, mutations,
              max_class: peer.max_class,
-             since: peer.last_sync_at
+             local_floor: pull_floor(peer),
+             direction: :pull
            ) do
       {:ok, _} =
         Store.raw_query(
-          "UPDATE sync_peers SET last_pulled_seq = ?4, peer_replica_id = ?5 WHERE tenant_id = ?1 AND workspace_id = ?2 AND url = ?3",
+          "UPDATE sync_peers SET last_pulled_seq = ?4, peer_replica_id = COALESCE(?5, peer_replica_id) WHERE tenant_id = ?1 AND workspace_id = ?2 AND url = ?3",
           [peer.tenant_id, peer.workspace_id, peer.url, cursor, engine["replica_id"]]
         )
 
@@ -1617,10 +1968,174 @@ defmodule OptimalEngine.Sync do
         do: pull_pages(peer, key, cursor, totals, pages_left - 1, deadline),
         else: {:ok, Map.merge(totals, %{cursor: cursor, more: more})}
     else
-      {:ok, body} -> {:error, {:not_a_change_page, Map.keys(body)}}
+      # The cursors counted another Engine's ledger: start over with this one,
+      # once. A peer that goes on answering under another id is not followed.
+      {:replaced, replica} ->
+        reset_and_pull(peer, key, replica, :replica_changed, totals, pages_left, deadline)
+
+      # The same Engine, restored from an older copy: its ledger ends before the
+      # cursor, so nothing it holds is past the cursor and the page stays empty.
+      {:behind, replica, head} ->
+        why = {:ledger_behind, head, since}
+        reset_and_pull(peer, key, replica, why, totals, pages_left, deadline)
+
+      {:ok, body} ->
+        {:error, {:not_a_change_page, Map.keys(body)}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # No complete cycle yet (the floor is zero): there is no base to judge against,
+  # and every change of this Engine's own counts as concurrent.
+  defp pull_floor(%{pulled_local_seq: floor}) when is_integer(floor) and floor > 0, do: floor
+  defp pull_floor(_peer), do: nil
+
+  defp same_peer(%{peer_replica_id: known}, replica)
+       when is_binary(known) and is_binary(replica) and known != replica,
+       do: {:replaced, replica}
+
+  defp same_peer(_peer, _replica), do: :same_peer
+
+  # A page that does not say which replica it came from cannot be tied to the
+  # cursors that were kept for one, and would switch the identity check off.
+  defp replica_reported(%{"replica_id" => replica}) when is_binary(replica) and replica != "",
+    do: :ok
+
+  defp replica_reported(_engine), do: {:error, :peer_replica_unreported}
+
+  # The page says how far the peer's ledger reaches (`head`). A ledger that ends
+  # before this Engine's cursor is not the ledger the cursor counted.
+  defp ledger_not_behind(%{"head" => head}, since, replica)
+       when is_integer(head) and is_integer(since) and head < since,
+       do: {:behind, replica, head}
+
+  defp ledger_not_behind(_page, _since, _replica), do: :ok
+
+  defp reset_and_pull(peer, key, replica, why, totals, pages_left, deadline) do
+    case replace_peer_replica(peer, replica, why) do
+      {:ok, peer} -> pull_pages(peer, key, 0, totals, pages_left, deadline)
       {:error, _} = error -> error
     end
   end
+
+  # The peer answers with another replica id than the one its cursors were kept
+  # for: the Engine behind the URL was replaced or restored under a new
+  # identity, so its ledger sequences mean nothing to the cursors. Both cursors
+  # (and the floor of the pull) go back to the start: everything is pulled and
+  # pushed again, which the mutation ids make idempotent. The change is kept as
+  # a resolved conflict.
+  #
+  # This happens at most once in a run, once in `@replace_window` seconds, and
+  # twice in a day; a third change of identity in a day halts the peer
+  # (`:peer_halted`, status `halted`) until an operator adds it again. A
+  # peer that keeps changing its answer (a relay in front of two Engines, a
+  # status that names another replica than the change pages) would otherwise
+  # send every cycle back to the start, pulling and pushing the whole ledger
+  # each time; it is reported as `:peer_identity_unstable` instead, and the
+  # cursors stay where they are.
+  defp replace_peer_replica(peer, replica, why) do
+    cond do
+      Map.get(peer, :replaced, false) ->
+        identity_unstable(peer, replica, "again in the same run")
+
+      resets_within(peer, @replace_window) >= 1 ->
+        identity_unstable(peer, replica, "again within #{@replace_window} seconds")
+
+      resets_within(peer, 86_400) >= @resets_a_day ->
+        Logger.warning(
+          "[Sync] peer #{peer.url} answers as #{replica}, was #{peer.peer_replica_id}, " <>
+            "after #{@resets_a_day} resets in a day; halted until it is added again"
+        )
+
+        {:error, :peer_halted}
+
+      true ->
+        {:ok, reset_peer_cursors(peer, replica, why)}
+    end
+  end
+
+  defp identity_unstable(peer, replica, when_text) do
+    Logger.warning(
+      "[Sync] peer #{peer.url} answers as #{replica}, was #{peer.peer_replica_id}, " <>
+        "#{when_text}; cursors not reset again"
+    )
+
+    {:error, :peer_identity_unstable}
+  end
+
+  # The resets of this peer since it was last added (adding it again marks them
+  # `operator`), within the last `seconds`.
+  defp resets_within(peer, seconds) do
+    case Store.raw_query(
+           """
+           SELECT COUNT(*) FROM sync_conflicts
+           WHERE tenant_id = ?1 AND workspace_id = ?2 AND table_name = 'sync_peers' AND entity_key = ?3
+             AND kind = 'peer_replaced' AND resolved_by = 'sync'
+             AND created_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?4)
+           """,
+           [peer.tenant_id, peer.workspace_id, peer.url, "-#{seconds} seconds"]
+         ) do
+      {:ok, [[n]]} -> n
+      _ -> 0
+    end
+  end
+
+  defp reset_peer_cursors(peer, replica, why) do
+    Logger.warning(
+      "[Sync] peer #{peer.url} answers as #{replica}, was #{peer.peer_replica_id}; cursors reset"
+    )
+
+    detail =
+      Map.merge(
+        %{
+          "previous_replica_id" => peer.peer_replica_id,
+          "replica_id" => replica,
+          "previous_pulled_seq" => peer.last_pulled_seq,
+          "previous_pushed_seq" => peer.last_pushed_seq
+        },
+        reset_reason(why)
+      )
+
+    {:ok, _} =
+      Store.raw_query(
+        """
+        INSERT INTO sync_conflicts (id, tenant_id, workspace_id, table_name, entity_key, kind, resolution,
+                                    remote_device, state, detail, resolved_by, resolved_at)
+        VALUES (?1, ?2, ?3, 'sync_peers', ?4, 'peer_replaced', 'cursors_reset', ?5, 'resolved', ?6, 'sync',
+                strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        """,
+        [
+          "sc_" <> random_id(),
+          peer.tenant_id,
+          peer.workspace_id,
+          peer.url,
+          replica,
+          Jason.encode!(detail)
+        ]
+      )
+
+    {:ok, _} =
+      Store.raw_query(
+        """
+        UPDATE sync_peers
+        SET peer_replica_id = COALESCE(?4, peer_replica_id), last_pulled_seq = 0, last_pushed_seq = 0,
+            pulled_local_seq = 0
+        WHERE tenant_id = ?1 AND workspace_id = ?2 AND url = ?3
+        """,
+        [peer.tenant_id, peer.workspace_id, peer.url, replica]
+      )
+
+    peer
+    |> Map.merge(%{last_pulled_seq: 0, last_pushed_seq: 0, pulled_local_seq: 0, replaced: true})
+    |> Map.update!(:peer_replica_id, &(replica || &1))
+  end
+
+  defp reset_reason(:replica_changed), do: %{"reason" => "replica_changed"}
+
+  defp reset_reason({:ledger_behind, head, cursor}),
+    do: %{"reason" => "ledger_behind", "peer_head" => head, "cursor" => cursor}
 
   # Local changes are pushed a page at a time, up to @cycle_pages a cycle and
   # within the cycle's time budget. The push cursor moves to the last sequence
@@ -1629,7 +2144,7 @@ defmodule OptimalEngine.Sync do
   # peer finds too large (413) is sent again as pages half its size.
   defp push(peer, key, deadline) do
     {:ok, _} = Capture.seal()
-    totals = %{sent: 0, gated: 0, applied: 0, pages: 0}
+    totals = %{sent: 0, gated: 0, superseded: 0, applied: 0, pages: 0, more: false}
 
     Gate.with_gate(peer.tenant_id, peer.workspace_id, peer.max_class, fn gate ->
       push_pages(peer, key, gate, peer.last_pushed_seq, totals, @cycle_pages, @page, deadline)
@@ -1642,12 +2157,15 @@ defmodule OptimalEngine.Sync do
   end
 
   defp push_pages(peer, key, gate, since, totals, pages_left, page, deadline) do
+    replicated = Enum.map_join(Capture.replicated_tables(), ", ", &"'#{&1}'")
+
     {:ok, rows} =
       Store.raw_query(
         """
         SELECT sequence, id, device_id, entity_type, entity_id, operation, payload, payload_hash, idempotency_key, occurred_at
         FROM sync_mutations
         WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3 AND device_id != ?4
+          AND entity_type IN (#{replicated})
         ORDER BY sequence LIMIT ?5
         """,
         [peer.tenant_id, peer.workspace_id, since, peer.peer_replica_id || "", page]
@@ -1656,11 +2174,18 @@ defmodule OptimalEngine.Sync do
     if rows == [] do
       {:ok, totals}
     else
-      mutations =
-        rows
-        |> Enum.map(&to_mutation/1)
-        |> Enum.filter(&Capture.replicated?(&1["entity_type"]))
-        |> releasable(gate)
+      # A change of this Engine's that a change from elsewhere came after (the
+      # peer's, or one it forwarded) was overwritten here by it: the other
+      # Engine already has the winner, so it is not sent. What is sent stands
+      # after everything this Engine took from the peer, or won against it.
+      lost = lost_sequences(peer, rows)
+
+      {superseded, rest} =
+        rows |> Enum.map(&to_mutation/1) |> Enum.split_with(&Map.has_key?(lost, &1["sequence"]))
+
+      Enum.each(superseded, &record_superseded(peer, &1, Map.fetch!(lost, &1["sequence"])))
+
+      mutations = releasable(rest, gate)
 
       case send_page(peer, key, mutations) do
         {:ok, remote} ->
@@ -1675,16 +2200,26 @@ defmodule OptimalEngine.Sync do
           totals = %{
             totals
             | sent: totals.sent + length(mutations),
-              gated: totals.gated + length(rows) - length(mutations),
+              gated: totals.gated + length(rest) - length(mutations),
+              superseded: totals.superseded + length(superseded),
               applied: totals.applied + ((remote || %{})["applied"] || 0),
               pages: totals.pages + 1
           }
 
           totals = if remote, do: Map.put(totals, :remote, remote), else: totals
+          totals = note_base_rejected(totals, remote)
 
-          if length(rows) == page and pages_left > 1 and in_budget?(deadline),
-            do: push_pages(peer, key, gate, cursor, totals, pages_left - 1, page, deadline),
-            else: {:ok, totals}
+          cond do
+            length(rows) < page ->
+              {:ok, totals}
+
+            pages_left > 1 and in_budget?(deadline) ->
+              push_pages(peer, key, gate, cursor, totals, pages_left - 1, page, deadline)
+
+            # A full page and no room for another: rows may be left for the next cycle.
+            true ->
+              {:ok, %{totals | more: true}}
+          end
 
         {:error, {:http_status, 413, _body}} when length(rows) > 1 ->
           half = max(div(length(rows), 2), 1)
@@ -1711,23 +2246,137 @@ defmodule OptimalEngine.Sync do
       else: Enum.reject(mutations, &Gate.hold?(gate, &1))
   end
 
+  # The peer says in its reply when it did not trust the base this Engine sent.
+  defp note_base_rejected(totals, %{"base_rejected" => why}) when is_binary(why),
+    do: Map.put(totals, :base_rejected, why)
+
+  defp note_base_rejected(totals, _remote), do: totals
+
+  # The sequences, among this Engine's own changes in a page, that another
+  # device's change to the same row came after in this ledger, each with the
+  # device and sequence of the latest such change. An incoming change is in the
+  # ledger only if it was applied, and it was applied over what was there, so the
+  # later row is what the row holds.
+  defp lost_sequences(peer, rows) do
+    local = replica_id()
+
+    sequences = for [sequence, _id, ^local | _] <- rows, do: sequence
+
+    if sequences == [] do
+      %{}
+    else
+      {:ok, lost} =
+        Store.raw_query(
+          """
+          SELECT m.sequence, r.device_id, r.sequence
+          FROM sync_mutations m
+          JOIN sync_mutations r
+            ON r.tenant_id = m.tenant_id AND r.workspace_id = m.workspace_id
+           AND r.entity_type = m.entity_type AND r.entity_id = m.entity_id
+           AND r.device_id != m.device_id AND r.sequence > m.sequence
+          WHERE m.tenant_id = ?1 AND m.workspace_id = ?2 AND m.device_id = ?3
+            AND m.sequence BETWEEN ?4 AND ?5
+            AND r.sequence = (
+              SELECT MAX(l.sequence) FROM sync_mutations l
+              WHERE l.tenant_id = m.tenant_id AND l.workspace_id = m.workspace_id
+                AND l.entity_type = m.entity_type AND l.entity_id = m.entity_id
+                AND l.device_id != m.device_id)
+          """,
+          [
+            peer.tenant_id,
+            peer.workspace_id,
+            local,
+            Enum.min(sequences),
+            Enum.max(sequences)
+          ]
+        )
+
+      Map.new(lost, fn [sequence, device, later] ->
+        {sequence, %{device: device, sequence: later}}
+      end)
+    end
+  end
+
+  # A change not sent because the peer's came after it is kept as a resolved
+  # record, so there is a row that says it lost (the ledger only has the two
+  # changes). Its id comes from the scope and the mutation, so a repeat adds
+  # nothing.
+  defp record_superseded(peer, mutation, later) do
+    id =
+      "sc_" <>
+        (:crypto.hash(
+           :sha256,
+           Enum.join([peer.tenant_id, peer.workspace_id, mutation["id"], "superseded"], "|")
+         )
+         |> binary_part(0, 10)
+         |> Base.url_encode64(padding: false))
+
+    detail = %{
+      "mutation_id" => mutation["id"],
+      "local_seq" => mutation["sequence"],
+      "peer" => peer.url,
+      "later_device" => later.device,
+      "later_seq" => later.sequence
+    }
+
+    {:ok, _} =
+      Store.raw_query(
+        """
+        INSERT OR IGNORE INTO sync_conflicts (id, tenant_id, workspace_id, table_name, entity_key, kind,
+                                              resolution, local_payload, remote_device, state, detail,
+                                              resolved_by, resolved_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, 'superseded', 'not_sent_peer_has_newer', ?6, ?7, 'resolved', ?8, 'sync',
+                strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        """,
+        [
+          id,
+          peer.tenant_id,
+          peer.workspace_id,
+          mutation["entity_type"],
+          mutation["entity_id"],
+          Jason.encode!(mutation["payload"]),
+          later.device,
+          Jason.encode!(detail)
+        ]
+      )
+  end
+
   # A page whose rows all stay home (the data-class gate) is not sent: an empty
   # batch is refused by a relay, and it would stop the cursor for good.
   defp send_page(_peer, _key, []), do: {:ok, nil}
 
   defp send_page(peer, key, mutations) do
+    # base_seq: how much of the other Engine's ledger this one had pulled (a
+    # sequence of that Engine's `sync_mutations`), and base_replica_id the
+    # Engine it believed that ledger was, so the other side tells a concurrent
+    # edit from one already seen and ignores a sequence from another ledger.
     body = %{
       "workspace" => peer.workspace_id,
       "replica_id" => replica_id(),
       "engine" => engine_info(),
+      "base_seq" => peer.last_pulled_seq,
+      "base_replica_id" => peer.peer_replica_id,
       "mutations" => mutations
     }
 
     # Only an answer that says what it applied acknowledges the page.
     case request(:post, push_url(peer), body, key, 30_000) do
-      {:ok, %{"applied" => applied} = remote} when is_integer(applied) -> {:ok, remote}
+      {:ok, %{"applied" => applied} = remote} when is_integer(applied) -> same_replied(peer, remote)
       {:ok, remote} -> {:error, {:push_not_acknowledged, Map.keys(remote)}}
       {:error, _} = error -> error
+    end
+  end
+
+  # A reply that names the replica that applied the page must name the one the
+  # cursors were kept for: otherwise the page went to another Engine, and the push
+  # cursor must not move past it.
+  defp same_replied(peer, remote) do
+    case {get_in(remote, ["engine", "replica_id"]), peer.peer_replica_id} do
+      {replied, known} when is_binary(replied) and is_binary(known) and replied != known ->
+        {:error, :peer_identity_unstable}
+
+      _ ->
+        {:ok, remote}
     end
   end
 
@@ -1848,6 +2497,18 @@ defmodule OptimalEngine.Sync do
             ]
           )
 
+        # Adding a peer again is the operator's word that the Engine behind the URL
+        # is settled: the resets before it no longer count against it.
+        {:ok, _} =
+          Store.raw_query(
+            """
+            UPDATE sync_conflicts SET resolved_by = 'operator'
+            WHERE tenant_id = ?1 AND workspace_id = ?2 AND table_name = 'sync_peers' AND entity_key = ?3
+              AND kind = 'peer_replaced' AND resolved_by = 'sync'
+            """,
+            [tenant_id, attrs["workspace_id"], String.trim_trailing(attrs["url"], "/")]
+          )
+
         {:ok, _} = enable(tenant_id, attrs["workspace_id"], by)
 
         {:ok,
@@ -1881,28 +2542,69 @@ defmodule OptimalEngine.Sync do
     end
   end
 
-  defp update_peer_status(peer, {status, message}) do
+  # A cycle is complete when the pull reached the end of the peer's ledger and
+  # the push sent everything there was (or the policy leaves that direction out).
+  # Only then do `last_sync_at` (when the cycle began) and `pulled_local_seq` (the
+  # local ledger head at that moment) move. The head is the floor the next pull
+  # judges this Engine's own changes against: what is at or below it was pushed
+  # in a complete cycle and counts as seen by the peer; what came after it is
+  # concurrent. After a cycle that stopped short, with pages still to come on
+  # either side, the floor stays where it was, so nothing that may not have
+  # reached the peer is taken as seen.
+  defp cycle_synced(peer, pulled, pushed, started, head) do
+    cond do
+      not (pull_complete?(pulled) and push_complete?(pushed)) -> nil
+      # A peer this Engine only pulls from never receives its changes, so none of
+      # them counts as seen: the floor stays at zero and the clock decides each.
+      peer.policy == "pull" -> {started, nil}
+      true -> {started, head}
+    end
+  end
+
+  defp update_peer_status(peer, {status, message}, synced \\ nil) do
+    {at, floor} = synced || {nil, nil}
+
     {:ok, _} =
       Store.raw_query(
         """
         UPDATE sync_peers SET status = ?4, message = ?5,
-          last_sync_at = CASE WHEN ?4 = 'active' THEN strftime('%Y-%m-%dT%H:%M:%f', 'now') ELSE last_sync_at END
+          last_sync_at = CASE WHEN ?4 = 'active' AND ?6 IS NOT NULL THEN ?6 ELSE last_sync_at END,
+          pulled_local_seq = CASE WHEN ?4 = 'active' AND ?7 IS NOT NULL THEN ?7 ELSE pulled_local_seq END
         WHERE tenant_id = ?1 AND workspace_id = ?2 AND url = ?3
         """,
-        [peer.tenant_id, peer.workspace_id, peer.url, status, message]
+        [peer.tenant_id, peer.workspace_id, peer.url, status, message, at, floor]
       )
   end
+
+  # The format SQLite's strftime('%Y-%m-%dT%H:%M:%f', 'now') gives a change's
+  # `occurred_at`, so the two compare as text.
+  defp utc_now_iso do
+    NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:millisecond) |> NaiveDateTime.to_iso8601()
+  end
+
+  defp pull_complete?({:ok, %{more: more}}), do: more != true
+  defp pull_complete?({:ok, %{skipped: :policy}}), do: true
+  defp pull_complete?(_pulled), do: false
+
+  defp push_complete?({:ok, %{more: more}}), do: more != true
+  defp push_complete?({:ok, %{skipped: skipped}}) when skipped in [:policy], do: true
+  defp push_complete?(_pushed), do: false
 
   defp pending_push(tenant_id, workspace_id, peer, _local) do
     replicated = Enum.map_join(Capture.replicated_tables(), ", ", &"'#{&1}'")
 
     case Store.raw_query(
            """
-           SELECT COUNT(*) FROM sync_mutations
-           WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3 AND device_id != ?4
-             AND entity_type IN (#{replicated})
+           SELECT COUNT(*) FROM sync_mutations m
+           WHERE m.tenant_id = ?1 AND m.workspace_id = ?2 AND m.sequence > ?3 AND m.device_id != ?4
+             AND m.entity_type IN (#{replicated})
+             AND NOT (m.device_id = ?5 AND EXISTS (
+               SELECT 1 FROM sync_mutations r
+               WHERE r.tenant_id = m.tenant_id AND r.workspace_id = m.workspace_id
+                 AND r.entity_type = m.entity_type AND r.entity_id = m.entity_id
+                 AND r.device_id != m.device_id AND r.sequence > m.sequence))
            """,
-           [tenant_id, workspace_id, peer.last_pushed_seq, peer.peer_replica_id || ""]
+           [tenant_id, workspace_id, peer.last_pushed_seq, peer.peer_replica_id || "", replica_id()]
          ) do
       {:ok, [[n]]} -> n
       _ -> 0
@@ -1922,7 +2624,7 @@ defmodule OptimalEngine.Sync do
   defp peer_sql do
     """
     SELECT tenant_id, workspace_id, url, credential, policy, max_class, peer_replica_id, last_pulled_seq,
-           last_pushed_seq, last_sync_at, status, message
+           last_pushed_seq, pulled_local_seq, last_sync_at, status, message
     FROM sync_peers
     """
   end
@@ -1937,6 +2639,7 @@ defmodule OptimalEngine.Sync do
          peer_replica,
          pulled,
          pushed,
+         floor,
          at,
          status,
          message
@@ -1951,6 +2654,7 @@ defmodule OptimalEngine.Sync do
       peer_replica_id: peer_replica,
       last_pulled_seq: pulled,
       last_pushed_seq: pushed,
+      pulled_local_seq: floor,
       last_sync_at: at,
       status: status,
       message: message

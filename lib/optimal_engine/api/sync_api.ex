@@ -6,7 +6,7 @@ defmodule OptimalEngine.API.SyncAPI do
   | --- | --- |
   | `GET /api/sync/changes?workspace=&since=` | sync |
   | `GET /api/sync/tables` (the replicated and local tables of this Engine) | sync |
-  | `POST /api/sync/changes` (apply a batch from a peer) | sync |
+  | `POST /api/sync/changes` (apply a batch from a peer, with its `base_seq` and `base_replica_id`) | sync |
   | `POST /api/sync/enable`, `POST /api/sync/peers`, `POST /api/sync/run`, `POST /api/sync/conflicts/:id/resolve` | admin |
   | `GET /api/sync/status?workspace=`, `GET /api/sync/conflicts?workspace=` | read |
   """
@@ -55,7 +55,8 @@ defmodule OptimalEngine.API.SyncAPI do
          true <- Sync.enabled?(workspace_id) || {:error, :sync_not_enabled},
          :ok <- Sync.compatible(body["engine"] || %{}),
          mutations when is_list(mutations) <- body["mutations"] || {:error, :mutations_required},
-         {:ok, result} <- Sync.apply_changes(tenant(conn), workspace_id, mutations) do
+         {:ok, base} <- base_opts(body),
+         {:ok, result} <- Sync.apply_changes(tenant(conn), workspace_id, mutations, base) do
       json(conn, 200, Map.put(result, :engine, Sync.engine_info()))
     else
       {:error, {:version_mismatch, message}} ->
@@ -171,6 +172,29 @@ defmodule OptimalEngine.API.SyncAPI do
       _ -> %{}
     end
   end
+
+  # What the sender had seen of this Engine: `base_seq`, a sequence of this
+  # Engine's ledger (an integer, zero or more; null or absent means none was
+  # sent), `base_replica_id`, the replica it believed that ledger belonged to,
+  # and `replica_id`, the sender itself. A sender that sends no base gets the
+  # conservative check (`unknown_base`), and so does one whose base cannot be
+  # this Engine's ledger; the reply says which base was used (`base`).
+  defp base_opts(body) do
+    with {:ok, seq} <- base_seq(body["base_seq"]),
+         {:ok, replica} <- text_opt(body["base_replica_id"], :base_replica_id),
+         {:ok, sender} <- text_opt(body["replica_id"], :sender) do
+      {:ok, seq ++ replica ++ sender}
+    end
+  end
+
+  defp base_seq(nil), do: {:ok, []}
+  defp base_seq(seq) when is_integer(seq) and seq >= 0, do: {:ok, [base_seq: seq]}
+  defp base_seq(_seq), do: {:error, :invalid_base_seq}
+
+  defp text_opt(nil, _name), do: {:ok, []}
+  defp text_opt(text, name) when is_binary(text), do: {:ok, [{name, text}]}
+  defp text_opt(_text, :base_replica_id), do: {:error, :invalid_base_replica_id}
+  defp text_opt(_text, :sender), do: {:error, :invalid_replica_id}
 
   defp int(nil, default), do: default
 

@@ -8,7 +8,11 @@
 #      laptop, each within 60 s;
 #   2. 100 writes made while the relay is unreachable arrive exactly once after
 #      it returns, and pushing the same changes again applies nothing;
-#   3. a note edited on both sides while apart lands in the conflict queue;
+#   3. a note the cloud wrote and the laptop then edited is no conflict on
+#      either side (with CLOUD_ENGINE_URL), a note passed back and forth three
+#      times each way ends the same on both sides with no conflict, while a
+#      note edited on both sides while apart is one conflict, on the laptop,
+#      and nothing else is;
 #   4. a workspace with sync policy none never leaves the laptop;
 #   5. the relay refuses a push on another migration, and the laptop pauses
 #      while the relay reports another migration and resumes when it matches.
@@ -30,7 +34,8 @@
 # workspace). With them the cloud side writes on the managed Engine itself and
 # checks with its search; without them a second device writes through the
 # relay and the checks read the cloud's ledger through the relay.
-# SYNC_INTERVAL_MS (default 20000) is the laptop's sync interval.
+# SYNC_INTERVAL_MS (default 20000) is the laptop's sync interval, and
+# ANALYSES_INTERVAL_MS (default 5000) when the Engines schedule their analyses.
 #
 # Run it on a disposable machine, never on a machine with a live user store.
 # The managed Engine keeps the proof's writes (marked with the run id).
@@ -114,6 +119,9 @@ engine_env() { # name port; only ever called in the subshell that runs the Engin
   export OPTIMAL_KNOWLEDGE_ROCKSDB_PATH="$dir/rocksdb"
   export OPTIMAL_ENGINE_TOPOLOGY="$dir/topology.yaml" OPTIMAL_ENGINE_TOPOLOGY_FULL="$dir/topology-full.yaml"
   export OPTIMAL_SYNC_INTERVAL_MS="$SYNC_INTERVAL_MS"
+  # Each Engine enqueues its daily analysis jobs 5 s after boot, as a managed
+  # Engine does each day, so every run shows that the job queue stays home.
+  export OPTIMAL_ANALYSES_INTERVAL_MS="${ANALYSES_INTERVAL_MS:-5000}"
   CONNECTOR_KEY="$(cat "$dir/connector_key")"
   OPTIMAL_AUTHORITY_KEY="$(cat "$dir/authority_key")"
   export CONNECTOR_KEY OPTIMAL_AUTHORITY_KEY
