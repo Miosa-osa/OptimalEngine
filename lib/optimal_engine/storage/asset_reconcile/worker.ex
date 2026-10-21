@@ -44,7 +44,11 @@ defmodule OptimalEngine.Storage.AssetReconcile.Worker do
   end
 
   defp pass(interval) do
-    if S3.configured?() and AssetReconcile.pending_count() > 0 do
+    # Counted on every tick, S3 configured or not, so the metrics' cached count
+    # is never older than a tick.
+    counts = AssetReconcile.refresh_counts()
+
+    if S3.configured?() and match?({:ok, %{pending: pending}} when pending > 0, counts) do
       case AssetReconcile.run() do
         {:ok, %{placed: placed, failed: 0, pending: pending}} when placed > 0 and pending > 0 -> 0
         _ -> interval

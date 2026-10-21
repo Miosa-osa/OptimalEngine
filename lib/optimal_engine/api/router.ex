@@ -1166,10 +1166,9 @@ defmodule OptimalEngine.API.Router do
       |> Map.put(:connectors, OptimalEngine.API.ConnectorsAPI.metrics(conn))
       |> Map.put(
         :gauges,
-        Map.put(
+        Map.merge(
           OptimalEngine.Store.FileCache.LegacyPurgeRecord.gauges(),
-          "optimal_engine_storage_assets_pending_placement",
-          OptimalEngine.Storage.AssetReconcile.pending_count()
+          OptimalEngine.Storage.AssetReconcile.gauges()
         )
       )
     )

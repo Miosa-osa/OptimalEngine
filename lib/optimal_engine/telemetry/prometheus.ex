@@ -20,6 +20,7 @@ defmodule OptimalEngine.Telemetry.Prometheus do
 
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FileCache.LegacyPurgeRecord
+  alias OptimalEngine.Storage.AssetReconcile
   alias OptimalEngine.Telemetry
 
   @type render_opts :: []
@@ -156,15 +157,26 @@ defmodule OptimalEngine.Telemetry.Prometheus do
       db_count_metric("memories", "optimal_engine_memories_total", "Total stored memories"),
       db_count_metric("wiki_pages", "optimal_engine_wiki_pages_total", "Total wiki pages"),
       db_active_workspaces_metric(),
-      render_metric(
-        "optimal_engine_storage_assets_pending_placement",
-        :gauge,
-        "Assets kept on the local disk during an object store outage, not yet placed in the bucket",
-        OptimalEngine.Storage.AssetReconcile.pending_count()
-      )
+      render_placement_gauges()
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
+  end
+
+  # The asset placement gauges, from a count the Engine caches rather than
+  # one scan of the assets table per scrape; none when it cannot be counted.
+  defp render_placement_gauges do
+    case AssetReconcile.gauges() do
+      gauges when map_size(gauges) == 0 ->
+        nil
+
+      gauges ->
+        gauges
+        |> Enum.sort()
+        |> Enum.map_join("\n", fn {name, value} ->
+          render_metric(name, :gauge, AssetReconcile.help(name), value)
+        end)
+    end
   end
 
   defp db_count_metric(table, prom_name, help) do

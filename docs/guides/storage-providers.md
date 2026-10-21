@@ -131,9 +131,17 @@ The alert is an error log line (`asset storage alert: ...`) and a counter an ope
 Once the object store answers again, the Engine puts those assets in the bucket (`OptimalEngine.Storage.AssetReconcile`), every ten minutes while any are pending (`OPTIMAL_ASSET_RECONCILE_INTERVAL_MS`, 0 turns it off).
 Each one is uploaded under the key a direct write would have used, read back, and compared with the local copy's SHA-256 before the asset is recorded as placed: its `storage_path` becomes the object URI, its metadata names the object and `storage_placed_at`, and the fallback reason moves to `storage_fallback_resolved`.
 The local copy stays on disk.
-An asset whose local copy no longer matches its hash, or whose object does not read back the same, stays pending; the first transport error ends a pass, so a store still down is not asked once per asset.
+An asset whose object does not read back the same stays pending; the first transport error ends a pass, so a store still down is not asked once per asset.
+A workspace storage policy that cannot be read is not an answer either: the asset stays pending and the next pass asks again.
 An asset whose workspace now keeps assets on the local filesystem is resolved without an upload (`backend_now_filesystem`).
-The assets still waiting are the gauge `optimal_engine_storage_assets_pending_placement`, in `GET /api/metrics` (`gauges`) and in Prometheus.
+A stored path is data, and rows reach the assets table from a workspace bundle import as well as from an upload.
+A pass therefore opens a local copy only if it is a regular file under the Engine root once symlinks are followed; a FIFO, a device, a directory or a path that leads outside the root is never opened.
+A row that can never be placed is quarantined instead of retried by every pass: a path outside the root (`outside_root`), a path that is not a regular file (`not_a_regular_file`), a missing copy (`local_copy_missing`) or a copy that does not match the asset's hash (`local_copy_differs`).
+Its metadata gains `storage_placement_quarantined` and `storage_placement_quarantined_at`, the fallback record stays, and the pass goes on to the next asset.
+Removing the two quarantine keys from the asset's metadata queues it again.
+A row that a bundle import or a re-ingest changes while a pass is working on it is left as that change made it.
+The assets still waiting are the gauge `optimal_engine_storage_assets_pending_placement`, and the quarantined ones the gauge `optimal_engine_storage_assets_placement_quarantined`, in `GET /api/metrics` (`gauges`) and in Prometheus.
+Both are read from a count cached for a minute, so a scrape does not scan the assets table; it is dropped when an asset falls back to disk and refreshed by every pass.
 `GET /api/storage/providers?probe=1` makes an authenticated request to the bucket and reports `s3` as `unreachable` while the object store is down; without `probe` it reports configuration only.
 `scripts/proof-offsite-backup.sh` proves the outage, the recovery and the placement of the outage asset end to end against a real bucket.
 
