@@ -77,15 +77,41 @@ defmodule OptimalEngine.API.ExposureTest do
   end
 
   test "the error repeats on the watcher's interval" do
-    log =
+    # Each report is a log line, so the reports are counted as they arrive
+    # rather than after a fixed sleep: a busy machine only makes this slower.
+    ref = make_ref()
+    test = self()
+
+    :ok =
+      :logger.add_handler(:exposure_repeats, __MODULE__, %{config: %{test: test, ref: ref}})
+
+    try do
       capture_log(fn ->
         {:ok, pid} = ExposureMonitor.start_link(interface: "0.0.0.0", interval_ms: 20, name: nil)
-        Process.sleep(110)
+
+        for _ <- 1..3 do
+          assert_receive {^ref, :reported}, 2_000
+        end
+
         GenServer.stop(pid)
       end)
+    after
+      :logger.remove_handler(:exposure_repeats)
+    end
+  end
 
-    repeats = length(String.split(log, "API is open: auth is off on 0.0.0.0")) - 1
-    assert repeats >= 3
+  @doc false
+  # A :logger handler for the test above: tells the test about each report.
+  def log(%{msg: msg}, %{config: %{test: test, ref: ref}}) do
+    text =
+      case msg do
+        {:string, chardata} -> IO.chardata_to_string(chardata)
+        {:report, report} -> inspect(report)
+        {format, args} -> format |> :io_lib.format(args) |> IO.chardata_to_string()
+      end
+
+    if text =~ "API is open: auth is off on 0.0.0.0", do: send(test, {ref, :reported})
+    :ok
   end
 
   test "/api/health warns auth_open_on_network while the API is open", ctx do
