@@ -2454,35 +2454,45 @@ defmodule OptimalEngine.API.Router do
   end
 
   # POST /api/memory-core/active-pools — open task-scoped working memory.
-  # Body: {workspace?, tenant?, task_type?, subject_anchor?, member_links?,
+  # Body: {workspace?, task_type?, subject_anchor?, member_links?,
   #        agent_links?, tool_links?, security_labels?, partition_ids?, metadata?}
+  #
+  # The pool belongs to the caller's tenant: the key's, or the default tenant
+  # for a caller with no key. A tenant named in the body or the query never
+  # chooses another one; naming a different tenant is refused (403
+  # tenant_scope_denied), as it is for a keyed caller on every route.
   post "/api/memory-core/active-pools" do
     body = conn.body_params || %{}
+    tenant_id = conn.assigns[:current_tenant] || "default"
 
-    opts =
-      [
-        workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
-        tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
-        task_type: Map.get(body, "task_type"),
-        subject_anchor: Map.get(body, "subject_anchor"),
-        time_mode: Map.get(body, "time_mode", "current_valid"),
-        pool_scope: coerce_metadata(Map.get(body, "pool_scope")),
-        member_links: Map.get(body, "member_links", []),
-        agent_links: Map.get(body, "agent_links", []),
-        tool_links: Map.get(body, "tool_links", []),
-        membership_policy: coerce_metadata(Map.get(body, "membership_policy")),
-        delegation_chain_links: Map.get(body, "delegation_chain_links", []),
-        access_policy_id: Map.get(body, "access_policy_id"),
-        security_labels: string_list_param(body, "security_labels"),
-        partition_ids: string_list_param(body, "partition_ids"),
-        policy_version: Map.get(body, "policy_version"),
-        metadata: coerce_metadata(Map.get(body, "metadata"))
-      ]
-      |> reject_nil_keyword()
+    if names_other_tenant?(conn, tenant_id) do
+      send_resp(conn, 403, Jason.encode!(%{error: "tenant_scope_denied"}))
+    else
+      opts =
+        [
+          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
+          tenant_id: tenant_id,
+          task_type: Map.get(body, "task_type"),
+          subject_anchor: Map.get(body, "subject_anchor"),
+          time_mode: Map.get(body, "time_mode", "current_valid"),
+          pool_scope: coerce_metadata(Map.get(body, "pool_scope")),
+          member_links: Map.get(body, "member_links", []),
+          agent_links: Map.get(body, "agent_links", []),
+          tool_links: Map.get(body, "tool_links", []),
+          membership_policy: coerce_metadata(Map.get(body, "membership_policy")),
+          delegation_chain_links: Map.get(body, "delegation_chain_links", []),
+          access_policy_id: Map.get(body, "access_policy_id"),
+          security_labels: string_list_param(body, "security_labels"),
+          partition_ids: string_list_param(body, "partition_ids"),
+          policy_version: Map.get(body, "policy_version"),
+          metadata: coerce_metadata(Map.get(body, "metadata"))
+        ]
+        |> reject_nil_keyword()
 
-    case MemoryCore.open_active_pool(opts) do
-      {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      case MemoryCore.open_active_pool(opts) do
+        {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
+        {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      end
     end
   end
 
@@ -4277,6 +4287,18 @@ defmodule OptimalEngine.API.Router do
       :allowed_security_labels,
       governed_grant(conn, body, "allowed_security_labels") || []
     )
+  end
+
+  # Whether the body or the query names a tenant other than the caller's.
+  defp names_other_tenant?(conn, tenant_id) do
+    body =
+      if is_map(conn.body_params) and not is_struct(conn.body_params),
+        do: conn.body_params,
+        else: %{}
+
+    [body, fetch_query_params(conn).query_params]
+    |> Enum.flat_map(fn params -> [Map.get(params, "tenant"), Map.get(params, "tenant_id")] end)
+    |> Enum.any?(&(&1 != nil and &1 != tenant_id))
   end
 
   defp reject_nil_keyword(keyword) do
