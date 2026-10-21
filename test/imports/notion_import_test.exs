@@ -556,8 +556,10 @@ defmodule OptimalEngine.Imports.NotionTest do
   test "a long page's entities are read within the classification limit, and the import finishes",
        ctx do
     # 676 known names the page never mentions, each starting like "planned",
-    # so no quick check rules one out: reading the whole page for them takes
-    # far longer than a 1 ms limit on any runner.
+    # so no quick check rules one out: reading the whole 1.9 MB page for them
+    # takes seconds, far past a 200 ms limit, while mode and genre, read from
+    # the page's first 64 KiB, take a small part of it. The limit, not the
+    # order in which a page's detections spend its budget, stops the read.
     prefix = "notion-absent-#{System.unique_integer([:positive])}-"
 
     for a <- ?a..?z, b <- ?a..?z do
@@ -570,7 +572,7 @@ defmodule OptimalEngine.Imports.NotionTest do
     end)
 
     previous = Application.fetch_env(:optimal_engine, :classification_timeout_ms)
-    Application.put_env(:optimal_engine, :classification_timeout_ms, 1)
+    Application.put_env(:optimal_engine, :classification_timeout_ms, 200)
 
     on_exit(fn ->
       case previous do
@@ -580,7 +582,7 @@ defmodule OptimalEngine.Imports.NotionTest do
     end)
 
     page =
-      "# Long\n\n" <> String.duplicate("The rollout continues as planned for the week.\n", 20_000)
+      "# Long\n\n" <> String.duplicate("The rollout continues as planned for the week.\n", 40_000)
 
     zip =
       Fixture.zip([
@@ -597,7 +599,7 @@ defmodule OptimalEngine.Imports.NotionTest do
     assert ms < 10_000, "the import took #{ms} ms"
 
     assert byte_size(contexts(ctx.workspace)[uri(ctx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")].content) >
-             900_000
+             1_900_000
   end
 
   defp elapsed_ms(fun) do
