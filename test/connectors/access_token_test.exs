@@ -271,6 +271,190 @@ defmodule OptimalEngine.Connectors.AccessTokenTest do
     end
   end
 
+  describe "the bearer's reach" do
+    @origin "https://api.example.com"
+
+    defp redirecting(location, statuses \\ :always) do
+      fn url, _opts ->
+        count = Process.get(:redirect_count, 0)
+        Process.put(:redirect_count, count + 1)
+
+        cond do
+          String.starts_with?(url, @origin <> "/landed") -> {200, %{"items" => []}}
+          statuses == :always or count < statuses -> {302, %{}, [{"location", location}]}
+          true -> {200, %{"items" => []}}
+        end
+      end
+    end
+
+    test "a call tells HTTP not to follow redirects" do
+      parent = self()
+
+      api = fn _url, opts ->
+        send(parent, {:opts, opts})
+        {200, %{}}
+      end
+
+      stub = BrokerStub.install(nil, api: api)
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      AccessToken.session(%{"access_token" => "direct-token"}, &no_grant/1, &AccessToken.get_json(&1, @api))
+
+      assert_received {:opts, opts}
+      assert opts[:follow_redirects] == false
+    end
+
+    test "a redirect to another origin is handed back, and the token goes nowhere else" do
+      stub = BrokerStub.install(nil, api: redirecting("https://evil.example.net/landed"))
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      result =
+        AccessToken.session(%{"access_token" => "direct-token"}, &no_grant/1, fn token ->
+          AccessToken.get_json(token, @api, follow_same_origin: 3)
+        end)
+
+      assert {:ok, %{status: 302}} = result
+      assert [%{url: @api}] = BrokerStub.api_calls(stub)
+    end
+
+    test "a same-origin redirect is followed with the token only when asked, and only so far" do
+      stub = BrokerStub.install(nil, api: redirecting(@origin <> "/landed"))
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      open = fn opts ->
+        AccessToken.session(%{"access_token" => "direct-token"}, &no_grant/1, fn token ->
+          AccessToken.get_json(token, @api, opts)
+        end)
+      end
+
+      assert {:ok, %{status: 302}} = open.([])
+      assert {:ok, %{status: 200}} = open.(follow_same_origin: 1)
+
+      assert BrokerStub.bearers(stub) == ["direct-token", "direct-token", "direct-token"]
+      assert Enum.map(BrokerStub.api_calls(stub), & &1.url) == [@api, @api, @origin <> "/landed"]
+    end
+
+    test "a redirect chain is bounded by the hops it was given" do
+      stub = BrokerStub.install(nil, api: fn _url, _opts -> {302, %{}, [{"location", @api}]} end)
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      assert {:ok, %{status: 302}} =
+               AccessToken.session(%{"access_token" => "direct-token"}, &no_grant/1, fn token ->
+                 AccessToken.get_json(token, @api, follow_same_origin: 2)
+               end)
+
+      assert length(BrokerStub.api_calls(stub)) == 3
+    end
+
+    test "a relative redirect stays on the origin" do
+      stub = BrokerStub.install(nil, api: redirecting("/landed/here"))
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      assert {:ok, %{status: 200}} =
+               AccessToken.session(%{"access_token" => "direct-token"}, &no_grant/1, fn token ->
+                 AccessToken.get_json(token, @api, follow_same_origin: 1)
+               end)
+
+      assert List.last(BrokerStub.api_calls(stub)).url == @origin <> "/landed/here"
+    end
+
+    test "a URL that is not https never gets the token" do
+      stub = BrokerStub.install(nil, api: &ok_api/2)
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      assert {:error, :insecure_url} =
+               AccessToken.session(%{"access_token" => "direct-token"}, &no_grant/1, fn token ->
+                 AccessToken.get_json(token, "http://api.example.com/v1/items")
+               end)
+
+      assert BrokerStub.api_calls(stub) == []
+    end
+
+    test "a call verifies TLS" do
+      parent = self()
+
+      api = fn _url, opts ->
+        send(parent, {:opts, opts})
+        {200, %{}}
+      end
+
+      stub = BrokerStub.install(nil, api: api)
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      AccessToken.session(%{"access_token" => "direct-token"}, &no_grant/1, &AccessToken.get_json(&1, @api))
+
+      assert_received {:opts, opts}
+      assert opts[:verify_tls] == true
+    end
+  end
+
+  describe "which token a sync starts from" do
+    @grant_keys [:client_id, :client_secret]
+
+    defp granting(parent) do
+      fn _state ->
+        send(parent, :granted)
+        {:ok, "granted-token"}
+      end
+    end
+
+    test "a broker-issued token comes first, before the adapter's own grant", %{renewals: renewals} do
+      stub = BrokerStub.install(nil, api: &ok_api/2)
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      state = %{
+        "access_token" => issued("issued-1", 3_600, [], renewals),
+        "client_id" => "example-client",
+        "client_secret" => "example-secret"
+      }
+
+      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api), grant_keys: @grant_keys)
+
+      refute_received :granted
+      assert BrokerStub.bearers(stub) == ["issued-1"]
+    end
+
+    test "a complete grant comes before a stale direct token" do
+      stub = BrokerStub.install(nil, api: &ok_api/2)
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      state = %{
+        "access_token" => "stale-direct-token",
+        "client_id" => "example-client",
+        "client_secret" => "example-secret"
+      }
+
+      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api), grant_keys: @grant_keys)
+
+      assert_received :granted
+      assert BrokerStub.bearers(stub) == ["granted-token"]
+    end
+
+    test "an incomplete grant leaves the direct token in use" do
+      stub = BrokerStub.install(nil, api: &ok_api/2)
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      state = %{"access_token" => "direct-token", "client_id" => "example-client"}
+
+      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api), grant_keys: @grant_keys)
+
+      refute_received :granted
+      assert BrokerStub.bearers(stub) == ["direct-token"]
+    end
+
+    test "an adapter that names no grant keys keeps its direct token" do
+      stub = BrokerStub.install(nil, api: &ok_api/2)
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      state = %{"access_token" => "direct-token", "client_id" => "example-client", "client_secret" => "s"}
+
+      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api))
+
+      refute_received :granted
+      assert BrokerStub.bearers(stub) == ["direct-token"]
+    end
+  end
+
   describe "secrecy and scope" do
     test "inspect shows the source and the expiry, never the value", %{renewals: renewals} do
       token = issued("issued-secret-value", 3_600, [], renewals)

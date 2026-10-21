@@ -15,6 +15,7 @@ defmodule OptimalEngine.Connectors.BrokeredTokenTest do
 
   use ExUnit.Case, async: false
 
+  alias OptimalEngine.Connectors.Adapters.Gmail
   alias OptimalEngine.Connectors.{CredentialSource, Registry}
   alias OptimalEngine.Test.BrokerStub
 
@@ -110,6 +111,111 @@ defmodule OptimalEngine.Connectors.BrokeredTokenTest do
     end
   end
 
+  # The cursor a second run starts from, and what each API answers it with.
+  defp incremental(:gmail) do
+    {"900001",
+     fn url, _opts ->
+       if String.contains?(url, "/history"), do: {200, %{"historyId" => "900002"}}, else: {200, %{}}
+     end}
+  end
+
+  defp incremental(:drive),
+    do: {"page-token-1", fn _url, _opts -> {200, %{"changes" => [], "newStartPageToken" => "page-token-2"}} end}
+
+  defp incremental(:notion),
+    do: {"2026-10-01T00:00:00.000Z", fn _url, _opts -> {200, %{"results" => [], "has_more" => false}} end}
+
+  defp incremental(:slack) do
+    {Jason.encode!(%{"C0EXAMPLE2" => %{"oldest" => "1790000000.000001"}}),
+     fn _url, _opts -> {200, %{"ok" => true, "messages" => [], "has_more" => false}} end}
+  end
+
+  defp incremental(:dropbox), do: {"dbx-cursor-1", answer(:dropbox)}
+  defp incremental(:salesforce), do: {"2026-10-01T00:00:00.000+0000", answer(:salesforce)}
+  defp incremental(:hubspot), do: {"contacts:after-1", answer(:hubspot)}
+  defp incremental(:onedrive), do: {"https://graph.microsoft.com/v1.0/delta-0", answer(:onedrive)}
+  defp incremental(:teams), do: {"2026-10-01T00:00:00Z", answer(:teams)}
+  defp incremental(:zoom), do: {"2026-10-01", answer(:zoom)}
+
+  for kind <- Map.keys(@adapters) do
+    @kind kind
+
+    describe "#{kind} on a brokered token, from a cursor" do
+      test "calls its API with the token, and a refusal costs one re-fetch" do
+        {config, _answer, refusal} = Map.fetch!(@adapters, @kind)
+        {cursor, answer} = incremental(@kind)
+
+        stub =
+          install_with(answer, refusal,
+            issue: [{"example-issued-1", 3_600}, {"example-issued-2", 3_600}],
+            reject: ["example-issued-1"]
+          )
+
+        assert {:ok, %{signals: _, cursor: _}} = brokered_sync(@kind, config, cursor)
+
+        assert [{"example-issued-1", _refused} | rest] =
+                 Enum.map(BrokerStub.api_calls(stub), &{&1.bearer, &1.status})
+
+        assert Enum.all?(rest, fn {bearer, _status} -> bearer == "example-issued-2" end)
+        assert length(BrokerStub.broker_calls(stub)) == 2
+      end
+
+      test "a second refusal fails the sync with :broker_token_rejected" do
+        {config, _answer, refusal} = Map.fetch!(@adapters, @kind)
+        {cursor, answer} = incremental(@kind)
+
+        stub =
+          install_with(answer, refusal,
+            issue: [{"example-issued-1", 3_600}, {"example-issued-2", 3_600}],
+            reject: ["example-issued-1", "example-issued-2"]
+          )
+
+        assert {:error, :broker_token_rejected} = brokered_sync(@kind, config, cursor)
+        assert BrokerStub.bearers(stub) == ["example-issued-1", "example-issued-2"]
+        assert length(BrokerStub.broker_calls(stub)) == 2
+      end
+    end
+  end
+
+  describe "a stored connector with its own grant" do
+    test "prefers the grant to a stale access token" do
+      stub = BrokerStub.install(:gmail, [])
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      {:ok, state} =
+        Gmail.init(%{
+          "user_email" => "jane@example.com",
+          "labels" => ["INBOX"],
+          "credentials" => %{
+            "oauth_refresh_token" => "example-refresh-token",
+            "client_id" => "example-client",
+            "client_secret" => "example-client-secret",
+            "access_token" => "stale-direct-token"
+          }
+        })
+
+      assert {:ok, %{signals: _, cursor: _}} = Gmail.sync(state, nil)
+
+      bearers = stub |> BrokerStub.bearers() |> Enum.reject(&is_nil/1) |> Enum.uniq()
+      assert bearers == ["example-gmail-access-token"]
+    end
+
+    test "uses its access token when it has no complete grant" do
+      stub = BrokerStub.install(:gmail, [])
+      on_exit(fn -> BrokerStub.uninstall(stub) end)
+
+      {:ok, state} =
+        Gmail.init(%{
+          "user_email" => "jane@example.com",
+          "labels" => ["INBOX"],
+          "credentials" => %{"access_token" => "direct-token", "client_id" => "example-client"}
+        })
+
+      assert {:ok, %{signals: _, cursor: _}} = Gmail.sync(state, nil)
+      assert BrokerStub.bearers(stub) |> Enum.uniq() == ["direct-token"]
+    end
+  end
+
   describe "HubSpot's OAuth app" do
     test "exchanges its refresh token once per sync and calls with the result" do
       parent = self()
@@ -148,6 +254,13 @@ defmodule OptimalEngine.Connectors.BrokeredTokenTest do
 
   # ─── helpers ──────────────────────────────────────────────────────────────
 
+  defp install_with(answer, refusal, opts) do
+    opts = if refusal, do: Keyword.put(opts, :reject_with, refusal), else: opts
+    stub = BrokerStub.install(nil, Keyword.put(opts, :api, answer))
+    on_exit(fn -> BrokerStub.uninstall(stub) end)
+    stub
+  end
+
   defp install(kind, answer, refusal, opts) do
     opts = if refusal, do: Keyword.put(opts, :reject_with, refusal), else: opts
 
@@ -162,7 +275,7 @@ defmodule OptimalEngine.Connectors.BrokeredTokenTest do
   end
 
   # The broker hands the Runner an issued token; the adapter starts from there.
-  defp brokered_sync(kind, config) do
+  defp brokered_sync(kind, config, cursor \\ nil) do
     {:ok, mod} = Registry.fetch(kind)
 
     broker = %{
@@ -174,7 +287,7 @@ defmodule OptimalEngine.Connectors.BrokeredTokenTest do
     with {:ok, hydrated} <-
            CredentialSource.hydrate(Map.merge(config, broker), Map.put(@scope, :adapter, mod)),
          {:ok, state} <- mod.init(hydrated) do
-      mod.sync(state, nil)
+      mod.sync(state, cursor)
     end
   end
 
