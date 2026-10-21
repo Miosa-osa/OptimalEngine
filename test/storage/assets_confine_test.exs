@@ -98,14 +98,37 @@ defmodule OptimalEngine.Storage.AssetsConfineTest do
                Assets.confine_local(Path.join(linked_dir, "asset.bin"))
     end
 
-    test "a directory and a FIFO are not files, and the FIFO is not opened", ctx do
-      fifo = Path.join(ctx.root, "pipe")
-      {_output, 0} = System.cmd("mkfifo", [fifo])
+    test "a directory is not a file", ctx do
       directory = Path.join(ctx.root, "directory")
       File.mkdir_p!(directory)
 
-      assert {:error, {:asset_not_a_file, _}} = Assets.confine_local(fifo)
-      assert {:error, {:asset_not_a_file, _}} = Assets.confine_local(directory)
+      assert {:error, {:asset_not_a_file, :directory}} = Assets.confine_local(directory)
+    end
+
+    # No writer exists and none may be needed: opening a FIFO without one blocks,
+    # and a blocked open holds up the VM's file server for every other test. So
+    # the FIFO is never opened here, the check runs in its own process under a
+    # timeout, and the FIFO is removed at once, with an operation that does not
+    # go through the file server.
+    test "a FIFO is not a file, and checking it never opens it", ctx do
+      fifo = Path.join(ctx.root, "pipe")
+      {_output, 0} = System.cmd("mkfifo", [fifo])
+      parent = self()
+
+      try do
+        checker = spawn(fn -> send(parent, {:checked, Assets.confine_local(fifo)}) end)
+
+        receive do
+          {:checked, result} ->
+            assert {:error, {:asset_not_a_file, :other}} = result
+        after
+          5_000 ->
+            Process.exit(checker, :kill)
+            flunk("confine_local blocked on a FIFO: it must stat the path and never open it")
+        end
+      after
+        :file.delete(String.to_charlist(fifo), [:raw])
+      end
     end
 
     test "a missing file is unreadable, not outside the root", ctx do

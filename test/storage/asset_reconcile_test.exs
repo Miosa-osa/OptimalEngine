@@ -240,22 +240,16 @@ defmodule OptimalEngine.Storage.AssetReconcileTest do
     assert {_path, %{"storage_placement_quarantined" => "outside_root"}} = row(asset.id)
   end
 
-  @tag timeout: 20_000
-  test "a FIFO inside the root is quarantined without being opened", ctx do
+  # A FIFO is covered by the `Assets.confine_local/1` test, which never opens
+  # one. It stays out of this file: a FIFO under the Engine root with a writer
+  # waiting to open it, or any reader that opens it, blocks the VM's file
+  # server, and every later file operation in the suite with it.
+  test "a directory where the copy should be is quarantined, not read", ctx do
     outage(ctx.stub)
-    {asset, _bytes} = kept_on_disk(ctx, "fifo.bin")
-    fifo = Path.join(ctx.tmp, "pipe.bin")
-    {_output, 0} = System.cmd("mkfifo", [fifo])
-    repoint(asset, fifo, sha256("whatever a pipe would yield"))
-
-    # A writer that closes at once, so that code which does open the FIFO reads
-    # end of file instead of waiting for a writer for ever. It stays blocked,
-    # as it should, when nothing opens the FIFO.
-    {:ok, writer} = Task.start(fn -> File.write(fifo, "") end)
-
-    on_exit(fn ->
-      if Process.alive?(writer), do: File.open(fifo, [:read])
-    end)
+    {asset, _bytes} = kept_on_disk(ctx, "directory.bin")
+    directory = Path.join(ctx.tmp, "directory.bin.d")
+    File.mkdir_p!(directory)
+    repoint(asset, directory, sha256("whatever a directory would yield"))
 
     point_at(ctx.stub)
     capture_log(fn -> assert {:ok, %{placed: 0, quarantined: 1}} = run(ctx) end)
