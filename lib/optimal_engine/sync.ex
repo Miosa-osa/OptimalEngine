@@ -746,6 +746,11 @@ defmodule OptimalEngine.Sync do
       own_id_space?(mutation, local) ->
         {:fail, :mutation_id_in_use, mutation}
 
+      # A colon is the shape of a capture key (`<replica>:<capture sequence>`),
+      # which no mutation id has.
+      String.contains?(mutation["id"], ":") ->
+        {:fail, :invalid_mutation_id, mutation}
+
       true ->
         case id_state(tenant_id, workspace_id, mutation["id"]) do
           :duplicate -> {:skip, :duplicate, mutation}
@@ -757,12 +762,14 @@ defmodule OptimalEngine.Sync do
 
   # `mut_<replica>_<capture sequence>` and `<replica>:<capture sequence>` are what
   # `Capture.seal/0` gives this Engine's changes. One that arrives from another
-  # device would take the id of a change still to come, and the ledger ignores the
-  # second row with an id, so the Engine's own change would never be sealed.
+  # device, as an id or as a key, would take the id of a change still to come,
+  # and the ledger ignores the second row with an id or a key, so the Engine's own
+  # change would never be sealed.
   defp own_id_space?(mutation, local) do
+    id = mutation["id"]
     key = mutation["idempotency_key"]
 
-    String.starts_with?(mutation["id"], "mut_" <> local <> "_") or
+    String.starts_with?(id, "mut_" <> local <> "_") or String.starts_with?(id, local <> ":") or
       (is_binary(key) and String.starts_with?(key, local <> ":"))
   end
 
@@ -1493,13 +1500,19 @@ defmodule OptimalEngine.Sync do
           mutation["operation"],
           payload,
           # The hash and the key are this Engine's: what the sender claims for them is
-          # not stored. The id is unique in the ledger, and so is the key made from it.
+          # not stored. The id is unique in the ledger, and so is the key made from it,
+          # which is namespaced apart from the keys `Capture.seal/0` gives
+          # (`<replica>:<capture sequence>`), so no applied change can hold one.
           :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower),
-          mutation["id"],
+          applied_key(mutation["id"]),
           mutation["occurred_at"]
         ]
       )
   end
+
+  @doc false
+  # The ledger key of a change this Engine applied from a peer.
+  def applied_key(id), do: "peer:" <> id
 
   # Every conflict says why: its kind (`concurrent_edit`, `fact_divergence`,
   # `unknown_base`) and, in `detail`, the local change's sequence and device, the
