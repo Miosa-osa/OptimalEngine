@@ -139,7 +139,8 @@ defmodule OptimalEngine.Compliance.DerivedData do
   defp delete_in(txn, ids, files?) do
     ctx = json(ids)
 
-    with {:ok, packages} <- exclusive_packages(txn, ctx),
+    with {:ok, scope} <- erased_scope(txn, ctx),
+         {:ok, packages} <- exclusive_packages(txn, ctx),
          pkgs = json(packages),
          {:ok, claims} <-
            column(
@@ -154,13 +155,15 @@ defmodule OptimalEngine.Compliance.DerivedData do
              [ctx, pkgs]
            ),
          {:ok, assets} <-
-           rows(txn, "SELECT id, storage_path FROM assets WHERE source_package_id IN #{set(1)}", [
-             pkgs
-           ]),
+           rows(
+             txn,
+             "SELECT id, storage_path, workspace_id FROM assets WHERE source_package_id IN #{set(1)}",
+             [pkgs]
+           ),
          {:ok, runs} <-
            rows(
              txn,
-             "SELECT id, checkpoint_uri FROM decomposition_runs " <>
+             "SELECT id, checkpoint_uri, workspace_id FROM decomposition_runs " <>
                "WHERE source_package_id IN #{set(1)} AND checkpoint_uri IS NOT NULL",
              [pkgs]
            ),
@@ -171,10 +174,24 @@ defmodule OptimalEngine.Compliance.DerivedData do
                "WHERE chunk_id IN (SELECT id FROM chunks WHERE signal_id IN #{set(1)})",
              [ctx]
            ),
-         :ok <- remove_files(txn, assets, runs, files?),
+         :ok <- remove_files(txn, assets, runs, scope, files?),
          {:ok, wiki} <- delete_pages(txn, pages),
          {:ok, removed} <- run_steps(txn, steps(ctx, pkgs, claims, mentions, assets), %{}) do
       {:ok, Map.merge(removed, wiki)}
+    end
+  end
+
+  # The workspaces these contexts are in, each with its tenant: the only workspaces whose
+  # files this delete may remove. A row of a bundle can name any workspace, so a file is
+  # removed for a row only when the row's workspace is one of these.
+  defp erased_scope(txn, ctx) do
+    with {:ok, found} <-
+           rows(
+             txn,
+             "SELECT DISTINCT workspace_id, tenant_id FROM contexts WHERE id IN #{set(1)}",
+             [ctx]
+           ) do
+      {:ok, Map.new(found, fn [workspace_id, tenant_id] -> {workspace_id, tenant_id} end)}
     end
   end
 
@@ -329,34 +346,94 @@ defmodule OptimalEngine.Compliance.DerivedData do
   # ── files ──────────────────────────────────────────────────────────────────
 
   # The files of the rows about to go. A file shared with a row that stays (two
-  # assets of one content hash share their bytes) is left alone.
-  defp remove_files(_txn, _assets, _runs, false), do: :ok
+  # assets of one content hash share their bytes) is left alone, whichever way that row
+  # spells the path. A row's file is removed only for a workspace this delete is of,
+  # and only if it is the file this Engine names for the row (`Compliance.Artifacts`).
+  defp remove_files(_txn, _assets, _runs, _scope, false), do: :ok
 
-  defp remove_files(txn, assets, runs, true) do
-    ids = assets |> Enum.map(&hd/1) |> json()
-    paths = assets |> Enum.map(&List.last/1) |> Enum.uniq() |> json()
+  defp remove_files(txn, assets, runs, scope, true) do
+    with {:ok, shared} <- shared_paths(txn, assets, scope) do
+      files =
+        for [_id, path, workspace_id] <- assets,
+            Map.has_key?(scope, workspace_id),
+            not shared?(shared, path),
+            do: asset_artifact(path, scope, workspace_id)
 
-    with {:ok, shared} <-
-           column(
-             txn,
-             "SELECT DISTINCT storage_path FROM assets " <>
-               "WHERE storage_path IN #{set(2)} AND id NOT IN #{set(1)}",
-             [ids, paths]
-           ) do
-      shared = MapSet.new(shared)
+      checkpoints =
+        for [run_id, uri, workspace_id] <- runs,
+            Map.has_key?(scope, workspace_id),
+            do: {:checkpoint, run_id, uri, workspace_id}
 
-      kept = for [_id, path] <- assets, not MapSet.member?(shared, path), do: asset_artifact(path)
-      checkpoints = for [run_id, uri] <- runs, do: {:checkpoint, run_id, uri}
-
-      case Artifacts.remove(kept ++ checkpoints) do
+      case Artifacts.remove(files ++ checkpoints) do
         {:ok, _removed} -> :ok
         {:error, _} = error -> error
       end
     end
   end
 
-  defp asset_artifact(path) do
-    if S3.uri?(path), do: {:asset_copy, path}, else: {:asset_file, path}
+  defp asset_artifact(path, scope, workspace_id) do
+    if S3.uri?(path),
+      do: {:asset_copy, path, Map.fetch!(scope, workspace_id), workspace_id},
+      else: {:asset_file, path, workspace_id}
+  end
+
+  # The paths a row that stays also names: the same string (an index lookup), or the
+  # same file spelled another way (`a/./b`, `a/c/../b`) by a remaining asset of one of
+  # the workspaces, which is looked at only when a local file is about to go.
+  defp shared_paths(txn, assets, scope) do
+    ids = assets |> Enum.map(&hd/1) |> json()
+    paths = assets |> Enum.map(&Enum.at(&1, 1)) |> Enum.uniq() |> json()
+
+    with {:ok, same} <-
+           column(
+             txn,
+             "SELECT DISTINCT storage_path FROM assets " <>
+               "WHERE storage_path IN #{set(2)} AND id NOT IN #{set(1)}",
+             [ids, paths]
+           ),
+         {:ok, spelled} <- spelled_differently(txn, ids, assets, scope) do
+      {:ok, %{same: MapSet.new(same), expanded: spelled}}
+    end
+  end
+
+  defp spelled_differently(txn, ids, assets, scope) do
+    wanted =
+      for [_id, path, workspace_id] <- assets,
+          Map.has_key?(scope, workspace_id),
+          plain_path?(path),
+          not S3.uri?(path),
+          into: MapSet.new(),
+          do: Path.expand(path)
+
+    if MapSet.size(wanted) == 0 do
+      {:ok, MapSet.new()}
+    else
+      with {:ok, remaining} <-
+             column(
+               txn,
+               "SELECT storage_path FROM assets WHERE id NOT IN #{set(1)} " <>
+                 "AND workspace_id IN #{set(2)} AND storage_path NOT LIKE 's3://%'",
+               [ids, json(Map.keys(scope))]
+             ) do
+        {:ok,
+         for(
+           path <- remaining,
+           plain_path?(path),
+           expanded = Path.expand(path),
+           MapSet.member?(wanted, expanded),
+           into: MapSet.new(),
+           do: expanded
+         )}
+      end
+    end
+  end
+
+  defp plain_path?(path), do: is_binary(path) and not String.contains?(path, <<0>>)
+
+  defp shared?(shared, path) do
+    MapSet.member?(shared.same, path) or
+      (plain_path?(path) and not S3.uri?(path) and
+         MapSet.member?(shared.expanded, Path.expand(path)))
   end
 
   # ── helpers ────────────────────────────────────────────────────────────────

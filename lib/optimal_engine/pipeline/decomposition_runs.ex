@@ -211,12 +211,21 @@ defmodule OptimalEngine.Pipeline.DecompositionRuns do
     )
   end
 
+  @doc """
+  Where a checkpoint is written unless the caller names a directory:
+  `<cache_path>/decomposition`. `Compliance.Artifacts` removes a checkpoint only
+  from here.
+  """
+  @spec checkpoint_dir() :: String.t()
+  def checkpoint_dir do
+    :optimal_engine
+    |> Application.get_env(:cache_path, ".optimal/cache")
+    |> Path.join("decomposition")
+    |> Path.expand()
+  end
+
   defp write_checkpoint(context, id, strategy, output) do
-    dir =
-      Keyword.get_lazy(context.opts, :checkpoint_dir, fn ->
-        Application.get_env(:optimal_engine, :cache_path, ".optimal/cache")
-        |> Path.join("decomposition")
-      end)
+    dir = Keyword.get_lazy(context.opts, :checkpoint_dir, &checkpoint_dir/0)
 
     path = Path.join(Path.expand(dir), "#{id}.json")
 

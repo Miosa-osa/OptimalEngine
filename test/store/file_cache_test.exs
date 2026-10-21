@@ -93,6 +93,55 @@ defmodule OptimalEngine.Store.FileCacheTest do
       assert File.regular?(FileCache.key_path())
     end
 
+    test "creating it removes only what has the shape of a cache entry", %{dir: dir} do
+      # `<cache_path>/tenants` can be a directory of something else (a cache path that is
+      # also an Engine root holds its tenants' workspaces there).
+      stale = Path.join([dir, "tenants", String.duplicate("a", 64), String.duplicate("b", 64)])
+      File.mkdir_p!(Path.join(stale, "embeddings/ab"))
+      File.write!(Path.join(stale, "embeddings/ab/#{String.duplicate("c", 64)}.bin"), "old")
+
+      workspace_note = Path.join([dir, "tenants", "acme", "sales", "nodes", "deal.md"])
+      File.mkdir_p!(Path.dirname(workspace_note))
+      File.write!(workspace_note, "a signal of a workspace")
+
+      lookalike = Path.join([stale, "embeddings", "ab", "notes.txt"])
+      File.write!(lookalike, "not a cache entry")
+
+      capture_log(fn -> assert :ok = FileCache.ensure_key() end)
+
+      refute File.exists?(Path.join(stale, "embeddings/ab/#{String.duplicate("c", 64)}.bin"))
+      assert File.read!(workspace_note) == "a signal of a workspace"
+      assert File.read!(lookalike) == "not a cache entry"
+    end
+
+    test "callers that start together end up with one key", %{key: key} do
+      :persistent_term.erase({FileCache, key})
+      parent = self()
+
+      tasks =
+        for _ <- 1..16 do
+          Task.async(fn ->
+            send(parent, {:ready, self()})
+
+            receive do
+              :go -> FileCache.entry_file(@scope, "tests", "same key")
+            end
+          end)
+        end
+
+      for _ <- tasks do
+        receive do
+          {:ready, _pid} -> :ok
+        end
+      end
+
+      Enum.each(tasks, &send(&1.pid, :go))
+      names = tasks |> Task.await_many(30_000) |> Enum.uniq()
+
+      assert [{:ok, _path}] = names
+      assert byte_size(Base.decode16!(String.trim(File.read!(key)), case: :mixed)) == 32
+    end
+
     test "an existing key is kept, and so are the entries made under it", %{key: key} do
       :ok = FileCache.put(@scope, "tests", "durable", [1])
       before = File.read!(key)

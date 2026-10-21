@@ -9,11 +9,11 @@ The embedding cache's own rules are in [`OPTIONS.md`](../../OPTIONS.md), Text Em
 | --- | --- | --- | --- |
 | Archive a workspace (`POST /api/workspaces/:id/archive`) | None: the workspace is marked archived and its rows stay | None | Embedding entries, decomposition checkpoints and local copies of object-store assets |
 | Finalize a move (`POST /api/workspaces/:id/finalize-move`) | Every row of the workspace | The workspace's directory, local assets included | As archive |
-| Erase a principal (`Compliance.Erasure`) | The principal's contexts and everything derived from them, then the principal | Asset files and decomposition checkpoints of the deleted source packages | As archive, for each workspace that held one of the contexts |
-| Retention `delete` | The context and everything derived from it | As erase | As archive, for the workspace |
+| Erase a principal (`Compliance.Erasure`) | The principal's contexts and everything derived from them, then the principal | Asset files and decomposition checkpoints of the deleted source packages | Embedding entries of each workspace that held one of the contexts (also when a batch fails, for the contexts already gone) |
+| Retention `delete` | The context and everything derived from it | As erase | Embedding entries of the workspace |
 | Retention `redact` | The text, abstract and overview are rewritten; everything derived from the original is deleted and built again from the redacted text | As erase, for the deleted derived rows | None |
 | Retention `archive` | None: `archived_at` is set | None | None |
-| A replica applies a peer's delete of a context | The context; the rows derived from it arrive as deletes of their own | None | As archive, for the workspace |
+| A replica applies a peer's delete of a context | The context; the rows derived from it arrive as deletes of their own | None | As archive, for the workspace: the replica cannot tell which files belonged to the deleted rows |
 
 "Everything derived from a context" is, in `Compliance.DerivedData`: the document vector, chunks and chunk vectors (and the intents, classifications, cluster members and citations that cascade from a chunk), entity mentions and their resolution decisions, entities, claims, the facts that accepted a deleted claim, the context's source packages (and `source_packages_fts` where an older database has it), decomposition runs, assets with their extractions, transcripts and OCR spans, wiki pages that cite a deleted chunk, episodes, processor runs, decisions, and graph edges (`graph_edges`) that name the context.
 A source package that a remaining context refers to is kept, and so is an asset file that a remaining asset shares.
@@ -48,6 +48,15 @@ An operator who has to shorten the window removes the manual copies, the bundles
 
 ## Files are removed only when they are the Engine's
 
-A path in a row is data, and a bundle import writes these rows too.
-The Engine removes a decomposition checkpoint only if it is named for its run and is under the cache path or the Engine root, a local asset only if it is `assets/<xx>/<file>` in a workspace directory under the Engine root, and a copy of an object-store asset only under `<cache path>/assets`.
-It never removes a link, a directory other than the object copies of one workspace, the copies' tenant directory, `<cache path>/assets`, or the Engine root.
+A path in a row is data, and a bundle import writes these rows too, so a row is a claim and the Engine checks it against the file it would have written.
+A file is removed for a workspace only when all of these hold:
+
+- A decomposition checkpoint is `<cache path>/decomposition/<run id>.json`, the run id is letters, digits, `_` and `-`, the path is the one built from the run id (the row's has to be the same), and the file says it is that run's and that workspace's (`run_id` and `workspace_id`). A checkpoint written to another directory by a caller that named one, or one that cannot be read back, is left; one over 256 MiB is an error rather than a silent leftover.
+- A local asset is `assets/<xx>/<file>` in the directory of the workspace being erased (`Workspace.Filesystem.path`), never in another workspace's directory or any other file of the root.
+- A copy of an object-store asset is under `<cache path>/assets/<prefix>/<tenant>/<workspace>` of the workspace being erased, never under another workspace's.
+- A row whose workspace is not one of the erased contexts' workspaces has its row deleted and its file left.
+- No directory between the Engine root (or the cache path) and the file is a link, and the file is a regular file: a link is not followed, in the last component or above it. An operator who keeps a workspace directory behind a link keeps those files too.
+- A file that a remaining asset also names, spelled the same way or another (`a/./b`, `a/c/../b`), is kept.
+
+It never removes a directory other than the object copies of one workspace, the copies' tenant directory, `<cache path>/assets`, or the Engine root.
+Archiving, moving, renaming and repairing a workspace remove the checkpoints and copies of the whole workspace by the same rules; an erasure or a retention delete removes those of the rows it deletes and leaves the rest of the workspace's.

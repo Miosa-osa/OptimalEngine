@@ -222,7 +222,7 @@ defmodule OptimalEngine.Compliance.Retention do
   defp purge_deleted_workspaces(%{deleted_in: workspaces} = result) do
     failed =
       workspaces
-      |> Enum.map(&Cache.purge_workspace(&1, :retention))
+      |> Enum.map(&Cache.purge_workspace(&1, :retention, artifacts: false))
       |> Enum.count(&match?({:error, _}, &1))
 
     result |> Map.delete(:deleted_in) |> Map.update!(:errors, &(&1 + failed))

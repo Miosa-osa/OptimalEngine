@@ -83,7 +83,7 @@ defmodule OptimalEngine.Compliance.Erasure do
          :ok <- gate_on_holds(held, force?),
          {:ok, workspaces} <- workspaces_of_contexts(principal_id, tenant_id),
          {:ok, context_ids} <- context_ids(principal_id, tenant_id),
-         {:ok, derived} <- DerivedData.erase_contexts(tenant_id, context_ids) do
+         {:ok, derived} <- erase_derived(tenant_id, context_ids, workspaces) do
       deleted =
         %{contexts: 0, vectors: 0, chunk_embeddings: 0, chunks: 0}
         |> Map.merge(do_cascade(principal_id, tenant_id))
@@ -193,11 +193,27 @@ defmodule OptimalEngine.Compliance.Erasure do
     end
   end
 
+  # The contexts go in batches, so a failure part way leaves the earlier batches gone. What the
+  # cache holds for their workspaces must not outlive them, so it is purged on the error path
+  # too; running the erasure again finishes the rest.
+  defp erase_derived(tenant_id, context_ids, workspaces) do
+    case DerivedData.erase_contexts(tenant_id, context_ids) do
+      {:ok, _derived} = ok ->
+        ok
+
+      {:error, _reason} = error ->
+        purge_cache(workspaces)
+        error
+    end
+  end
+
   # The filesystem cache of each workspace that held an erased context. A failure is
-  # reported (and logged), not raised: the rows are already gone.
+  # reported (and logged), not raised: the rows are already gone. The checkpoints and copies
+  # of the erased contexts went with their rows; those of the contexts that stay are not
+  # touched.
   defp purge_cache(workspaces) do
     workspaces
-    |> Cache.purge_workspaces(:erase)
+    |> Cache.purge_workspaces(:erase, artifacts: false)
     |> Cache.summary()
     |> Map.put(:workspaces, workspaces)
   end

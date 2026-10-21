@@ -165,13 +165,23 @@ defmodule OptimalEngine.Store.FileCache.Maintenance do
   A caller that is about to delete the rows that point at the checkpoints (a
   workspace move) passes `plan: Compliance.Artifacts.plan(workspace_id)` taken
   before.
+
+  A caller that deletes only some of a workspace's contexts (an erasure, a retention
+  delete) passes `artifacts: false`: the files of the rows it deleted went with them
+  (`Compliance.DerivedData`), and the checkpoints and copies of the contexts that stay,
+  or of a decomposition under way, are not its to remove. The embedding entries cannot
+  be told apart per context, so they go for the whole workspace.
   """
   @spec purge_workspace(String.t(), atom(), keyword()) ::
           {:ok, FileCache.removed()} | {:error, term()}
   def purge_workspace(workspace_id, reason, opts \\ [])
       when is_binary(workspace_id) and is_atom(reason) do
     cache = FileCache.purge_workspace(workspace_id)
-    artifacts = Artifacts.purge_workspace(workspace_id, Keyword.get(opts, :plan))
+
+    artifacts =
+      if Keyword.get(opts, :artifacts, true),
+        do: Artifacts.purge_workspace(workspace_id, Keyword.get(opts, :plan)),
+        else: {:ok, %{files: 0, bytes: 0}}
 
     log_purge(combine(cache, artifacts), workspace_id, reason)
   end
@@ -201,12 +211,13 @@ defmodule OptimalEngine.Store.FileCache.Maintenance do
     end
   end
 
-  @doc "`purge_workspace/2` for several workspaces; the first failure is returned after all are tried."
-  @spec purge_workspaces([String.t()], atom()) :: {:ok, FileCache.removed()} | {:error, term()}
-  def purge_workspaces(workspace_ids, reason) when is_list(workspace_ids) do
+  @doc "`purge_workspace/3` for several workspaces; the first failure is returned after all are tried."
+  @spec purge_workspaces([String.t()], atom(), keyword()) ::
+          {:ok, FileCache.removed()} | {:error, term()}
+  def purge_workspaces(workspace_ids, reason, opts \\ []) when is_list(workspace_ids) do
     workspace_ids
     |> Enum.uniq()
-    |> Enum.map(&purge_workspace(&1, reason))
+    |> Enum.map(&purge_workspace(&1, reason, opts))
     |> Enum.reduce({:ok, %{files: 0, bytes: 0}}, fn
       {:ok, removed}, {:ok, total} ->
         {:ok, %{files: total.files + removed.files, bytes: total.bytes + removed.bytes}}
