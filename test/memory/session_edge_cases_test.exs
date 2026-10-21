@@ -184,7 +184,7 @@ defmodule OptimalEngine.Memory.Session.EdgeCasesTest do
   # --- load/1 when session doesn't exist on disk ---
 
   describe "load/1 without prior persist" do
-    test "starts session even when no disk file exists", %{session_id: id} do
+    test "starts session even when no disk file exists" do
       new_id = "load_no_file_#{System.unique_integer([:positive])}"
       {:ok, _} = Session.load(new_id)
       # Should start with empty messages

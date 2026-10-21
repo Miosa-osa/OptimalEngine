@@ -1,8 +1,10 @@
 defmodule OptimalEngine.MemoryCore.ContextRefreshSchedulerTest do
   use ExUnit.Case, async: false
 
+  alias OptimalEngine.MemoryCore.ClaimExtractor
   alias OptimalEngine.MemoryCore.ContextRefreshScheduler
-  alias OptimalEngine.MemoryCore.KnowledgeLifecycle
+  alias OptimalEngine.MemoryCore.FactPromoter
+  alias OptimalEngine.MemoryCore.MemoryObject
   alias OptimalEngine.MemoryCore.RetrievalCoordinator
   alias OptimalEngine.MemoryCore.SourcePackage
   alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
@@ -101,7 +103,7 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshSchedulerTest do
       )
 
     with {:ok, claim} <-
-           KnowledgeLifecycle.extract_claim(source,
+           ClaimExtractor.extract_from_source(source,
              claim_text: "The source states that the project launch was approved.",
              subject_anchor: "project_launch",
              action_class: "approved",
@@ -111,14 +113,14 @@ defmodule OptimalEngine.MemoryCore.ContextRefreshSchedulerTest do
              actor_id: "agent:test"
            ),
          {:ok, fact} <-
-           KnowledgeLifecycle.promote_claim_to_fact(claim,
+           FactPromoter.promote(claim,
              fact_text: "The project launch was approved in the planning meeting.",
              verifier_id: "human:reviewer",
              aggregate_confidence: 0.9,
              aggregate_precision: 0.86
            ),
          {:ok, memory} <-
-           KnowledgeLifecycle.build_memory_object(fact,
+           MemoryObject.build_from_fact(fact,
              summary:
                "The project launch approval is an accepted memory backed by the planning meeting source.",
              memory_type: "decision",

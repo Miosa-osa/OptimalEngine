@@ -8,9 +8,7 @@ defmodule OptimalEngine.MemoryCore.ProvenanceAndEdgeTypesTest do
 
   use ExUnit.Case, async: false
 
-  alias OptimalEngine.MemoryCore.Claim
   alias OptimalEngine.MemoryCore.ClaimExtractor
-  alias OptimalEngine.MemoryCore.Fact
   alias OptimalEngine.MemoryCore.FactPromoter
   alias OptimalEngine.MemoryCore.MemoryObject
   alias OptimalEngine.MemoryCore.SourcePackage

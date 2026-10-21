@@ -790,20 +790,25 @@ defmodule OptimalEngine.MemoryCore.TruthLifecycleTest do
   end
 
   describe "KnowledgeLifecycle deprecated delegation" do
+    # The deprecated entry points are called through apply/3: a direct call
+    # would warn at compile time, and the suite fails on warnings.
     test "legacy entry points still run the full lifecycle" do
       workspace_id = unique_workspace("truth-legacy")
       source = build_source(workspace_id, "Launch approval legacy #{workspace_id}.")
 
       assert {:ok, %Claim{} = claim} =
-               KnowledgeLifecycle.extract_claim(source,
-                 claim_text: "Legacy claim text.",
-                 actor_id: "agent:test"
-               )
+               apply(KnowledgeLifecycle, :extract_claim, [
+                 source,
+                 [claim_text: "Legacy claim text.", actor_id: "agent:test"]
+               ])
 
       assert {:ok, %Fact{} = fact} =
-               KnowledgeLifecycle.promote_claim_to_fact(claim, verifier_id: "human:reviewer")
+               apply(KnowledgeLifecycle, :promote_claim_to_fact, [
+                 claim,
+                 [verifier_id: "human:reviewer"]
+               ])
 
-      assert {:ok, %MemoryObject{}} = KnowledgeLifecycle.build_memory_object(fact)
+      assert {:ok, %MemoryObject{}} = apply(KnowledgeLifecycle, :build_memory_object, [fact])
 
       assert {:ok, [[3]]} =
                Store.raw_query(

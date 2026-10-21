@@ -2003,16 +2003,9 @@ defmodule OptimalEngine.SyncGateTest do
       else: {acc, next_after}
   end
 
-  # Whatever set the Engine replicates: the allow-list when Capture has one,
-  # else every table it captures. The map is checked against that set, never
-  # against a count.
-  defp replicated_tables do
-    Code.ensure_loaded!(Capture)
-
-    if function_exported?(Capture, :replicated_tables, 0),
-      do: apply(Capture, :replicated_tables, []),
-      else: Capture.eligible_tables()
-  end
+  # The tables the Engine replicates (Capture's allow-list). The map is checked
+  # against that set, never against a count.
+  defp replicated_tables, do: Capture.replicated_tables()
 
   defp ref_targets(spec) do
     Enum.flat_map(spec.refs, fn
@@ -2238,7 +2231,7 @@ defmodule OptimalEngine.SyncGateTest do
   end
 
   # A delete from the other Engine: the key only.
-  defp remote_delete(ctx, table, id, opts \\ []) do
+  defp remote_delete(ctx, table, id, opts) do
     mutation = %{
       "id" => "mut_remote_del_#{table}_#{System.unique_integer([:positive])}",
       "device_id" => "rep_remote",

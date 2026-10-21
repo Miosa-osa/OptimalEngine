@@ -9,7 +9,7 @@ defmodule OptimalEngine.Wiki.SchedulerTest do
 
   defp unique, do: System.unique_integer([:positive])
 
-  defp base_page(overrides \\ []) do
+  defp base_page(overrides) do
     suffix = unique()
 
     defaults = [
@@ -27,7 +27,7 @@ defmodule OptimalEngine.Wiki.SchedulerTest do
 
   # Insert a fake context (signal) and a paragraph-scale chunk, then return
   # {signal_id, chunk_id, node_slug}.
-  defp insert_signal(node_slug, workspace_id \\ "default", created_at \\ nil) do
+  defp insert_signal(node_slug, workspace_id, created_at) do
     signal_id = "sig-#{unique()}"
     chunk_id = "chunk-#{unique()}"
     ts = created_at || DateTime.utc_now() |> DateTime.to_iso8601()
