@@ -18,8 +18,8 @@ defmodule OptimalEngine.Memory.WebhookTest do
 
   # Spin up a minimal :gen_tcp HTTP server on a random port.
   # Captures the first POST it receives and sends it to `parent`.
-  # Returns {"http://127.0.0.1:<port>", ref}.
-  defp start_test_server(parent \\ self()) do
+  # Answers with `status`. Returns {"http://127.0.0.1:<port>", ref}.
+  defp start_test_server(parent \\ self(), status \\ 200) do
     port = Enum.random(30_000..39_999)
     ref = make_ref()
 
@@ -39,7 +39,7 @@ defmodule OptimalEngine.Memory.WebhookTest do
           send(parent, {:webhook_received, ref, parsed})
 
           response =
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"ok\":true}"
+            "HTTP/1.1 #{status} Status\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"ok\":true}"
 
           :gen_tcp.send(client, response)
           :gen_tcp.close(client)
@@ -150,6 +150,59 @@ defmodule OptimalEngine.Memory.WebhookTest do
   end
 
   # ── deliver/2 — successful POST ──────────────────────────────────────────────
+
+  # ── log lines ────────────────────────────────────────────────────────────────
+
+  # Slack and Discord webhook URLs carry their secret in the path, others in
+  # the query or the user info. Each secret starts with "Zq".
+  defp url_secret, do: "Zq" <> String.duplicate("7w", 12)
+
+  describe "log lines" do
+    test "name the webhook URL by its scheme, host and port only" do
+      for {url, logged} <- [
+            {"https://hooks.example/services/T0/B0/#{url_secret()}", "https://hooks.example/..."},
+            {"https://user:#{url_secret()}@chat.example/api/webhooks/1/#{url_secret()}",
+             "https://chat.example/..."},
+            {"http://127.0.0.1:4321/hook?token=#{url_secret()}#frag", "http://127.0.0.1:4321/..."}
+          ] do
+        assert Webhook.log_url(url) == logged
+      end
+
+      assert Webhook.log_url("not a url") == "an unparsable URL"
+      assert Webhook.log_url(nil) == "an unparsable URL"
+    end
+
+    test "a failed delivery logs no part of the path" do
+      {:ok, socket} = :gen_tcp.listen(0, [])
+      {:ok, port} = :inet.port(socket)
+      :gen_tcp.close(socket)
+      url = "http://127.0.0.1:#{port}/services/T0/B0/#{url_secret()}"
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, _reason} =
+                   Webhook.deliver(%{event: "test"}, %{"webhook_url" => url}, backoffs: [])
+        end)
+
+      assert log =~ "Delivery failed for http://127.0.0.1:#{port}/..."
+      refute log =~ "Zq"
+      refute log =~ "services"
+    end
+
+    test "a non-2xx answer logs no part of the path" do
+      {base, _ref} = start_test_server(self(), 500)
+      url = base <> "/services/T0/B0/" <> url_secret()
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:http_status, 500}} =
+                   Webhook.deliver(%{event: "test"}, %{"webhook_url" => url}, backoffs: [])
+        end)
+
+      assert log =~ "Non-2xx response 500 from #{base}/..."
+      refute log =~ "Zq"
+    end
+  end
 
   describe "deliver/2 with a live HTTP server" do
     test "sends POST with Content-Type application/json" do

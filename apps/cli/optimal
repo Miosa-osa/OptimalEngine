@@ -236,6 +236,15 @@ jstr() { printf '%s' "$1" | LC_ALL=C awk "$JSTR_AWK"; }
 jfield() { LC_ALL=C awk -v path="$1" "$JFIELD_AWK"; }
 jtext() { LC_ALL=C awk "$JTEXT_AWK"; }
 
+# Decoded text from the Engine, before it reaches a terminal: drops the C0
+# controls but tab and newline, DEL, the C1 controls (U+0080 to U+009F, bytes
+# C2 80 to C2 9F) and the Unicode line and paragraph separators (E2 80 A8 and
+# E2 80 A9).
+strip_controls() {
+  _sc="s/$(printf '\302')[$(printf '\200')-$(printf '\237')]//g;s/$(printf '\342\200')[$(printf '\250\251')]//g"
+  LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "$_sc"
+}
+
 # jobj key value [key value]...: a JSON object of the non-empty values.
 # Values are strings; a key written as @key takes a raw JSON value.
 jobj() {
@@ -706,7 +715,7 @@ emit() {
   _eo=$(redact "$_eo")
   case $_eo in
     '"'*)
-      printf '%s' "$_eo" | jtext
+      printf '%s' "$_eo" | jtext | strip_controls
       printf '\n'
       return 0
       ;;

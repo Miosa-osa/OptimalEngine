@@ -406,6 +406,15 @@ class JsonTests(CliTestCase):
         self.assertEqual(missing.returncode, 1)
         self.assertIn("no field 'nope'", missing.stderr)
 
+    def test_a_field_string_prints_no_terminal_controls(self):
+        # The Engine's JSON escapes them (\u001b, \u009b); decoded, they would
+        # reach the terminal as raw control bytes.
+        self.fake.routes[('GET', '/api/boot')] = (200, {
+            'protocol': {'content': 'a\x1b[2Jb\x07c\u009b31md\u2028e\u2029f\x7fg\u0085h\tkept\nline café'},
+        })
+        content = self.ok('boot', '--field', 'protocol.content').stdout
+        self.assertEqual(content, 'a[2Jbc31mdefgh\tkept\nline café\n')
+
 
 class ConfigTests(CliTestCase):
     def test_url_precedence(self):

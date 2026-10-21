@@ -112,7 +112,7 @@ A patch difference is silent.
 
 Responses are JSON.
 On a terminal they are pretty-printed when `jq` or `python3` is available; `--raw` and `--pretty` force either.
-`--field a.b` prints one field; a string field prints as plain text, for example `optimal protocol --field content`.
+`--field a.b` prints one field; a string field prints as plain text, for example `optimal protocol --field content`, without terminal control characters (C0 controls other than tab and newline, DEL, C1 controls, and the Unicode line and paragraph separators).
 Text arguments may be `-` to read standard input.
 
 | Command | Route |
