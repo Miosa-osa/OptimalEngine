@@ -31,6 +31,15 @@ defmodule OptimalEngine.Store.Postgres do
   `OptimalEngine.Store.Postgres.Connection` for how a transaction that
   PostgreSQL aborts is run again.
 
+  ## Features not on PostgreSQL
+
+  Replication, app data collections, full-text search and the statements that
+  use SQLite's JSON functions, date arithmetic, catalog, `rowid` and other
+  SQLite-only functions are not on PostgreSQL yet
+  (`OptimalEngine.Storage.Postgres.unavailable/0`). Each is refused by name
+  when used. A database that holds replication or app data collection data
+  stops the store from starting, rather than letting it run without them.
+
   ## Differences from the SQLite store
 
   - There is no hot cache: a per-process cache cannot see another engine's
@@ -136,7 +145,36 @@ defmodule OptimalEngine.Store.Postgres do
     end
   end
 
-  defp ready(schema), do: Schema.sync(@pool, schema: schema)
+  defp ready(schema) do
+    with {:ok, report} <- Schema.sync(@pool, schema: schema),
+         :ok <- nothing_unsupported_in_use(),
+         do: {:ok, report}
+  end
+
+  # Data of a feature this store cannot run (`Storage.Postgres.unavailable/0`)
+  # means an engine moved here would silently stop replicating, or stop
+  # serving a collection; such an engine does not start.
+  @in_use [
+    {"replication",
+     "SELECT 1 FROM sync_workspaces UNION ALL SELECT 1 FROM sync_peers WHERE status <> 'disabled'"},
+    {"app_data_collections", "SELECT 1 FROM data_collections"}
+  ]
+
+  defp nothing_unsupported_in_use do
+    @in_use
+    |> Enum.reduce_while([], fn {feature, sql}, in_use ->
+      case native("SELECT EXISTS (#{sql})", []) do
+        {:ok, [[0]]} -> {:cont, in_use}
+        {:ok, [[1]]} -> {:cont, in_use ++ [feature]}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      [] -> :ok
+      {:error, reason} -> {:error, reason}
+      in_use -> {:error, {:unsupported_in_use, in_use}}
+    end
+  end
 
   @impl GenServer
   def handle_call(:schema_report, _from, state), do: {:reply, state.report, state}

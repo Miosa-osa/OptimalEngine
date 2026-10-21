@@ -66,8 +66,12 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   `OptimalEngine.MemoryCore.ContextPackage`; for that, use
   `OptimalEngine.MemoryCore.RetrievalCoordinator.retrieve/2`.
   """
-  @spec assemble(String.t(), keyword()) :: {:ok, assembled()}
+  @spec assemble(String.t(), keyword()) :: {:ok, assembled()} | {:error, term()}
   def assemble(query, opts \\ []) do
+    if SearchEngine.available?(), do: do_assemble(query, opts), else: SearchEngine.unavailable()
+  end
+
+  defp do_assemble(query, opts) do
     budgets = Keyword.get(opts, :tier_budgets, @default_budgets)
 
     # L0 — structural inventory (always loaded, query-independent)
@@ -101,11 +105,15 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   end
 
   @doc "Returns L1 — per-file summaries for a query."
-  @spec l1(String.t(), keyword()) :: {:ok, String.t()}
+  @spec l1(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def l1(query, opts \\ []) do
-    budget = Keyword.get(opts, :budget, @default_budgets.l1)
-    {content, _scores} = build_l1(query, budget, opts)
-    {:ok, content}
+    if SearchEngine.available?() do
+      budget = Keyword.get(opts, :budget, @default_budgets.l1)
+      {content, _scores} = build_l1(query, budget, opts)
+      {:ok, content}
+    else
+      SearchEngine.unavailable()
+    end
   end
 
   @doc """
@@ -124,8 +132,12 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   embeddings) simply contribute nothing, so fusion degrades to FTS-only
   cleanly.
   """
-  @spec fused_search(String.t(), keyword()) :: {:ok, [map()]}
+  @spec fused_search(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def fused_search(query, opts \\ []) do
+    if SearchEngine.available?(), do: do_fused_search(query, opts), else: SearchEngine.unavailable()
+  end
+
+  defp do_fused_search(query, opts) do
     limit = Keyword.get(opts, :limit, 20)
     recall = limit * 3
 

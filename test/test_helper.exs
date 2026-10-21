@@ -22,3 +22,7 @@ if is_nil(System.get_env("OPTIMAL_AUTHORITY_KEY")) do
 end
 
 ExUnit.start()
+
+# OPTIMAL_SQL_CENSUS=<path> records the statements the suite runs on SQLite and
+# reports which of them prepare on PostgreSQL (test/support/sql_census.ex).
+if OptimalEngine.Test.SqlCensus.enabled?(), do: OptimalEngine.Test.SqlCensus.start()

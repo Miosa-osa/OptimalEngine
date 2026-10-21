@@ -32,18 +32,15 @@ defmodule OptimalEngine.Sync.Scheduler do
 
   # The install is retried until it succeeds: a Store busy at startup would
   # otherwise leave a new or changed table uncaptured until the next restart.
-  # The tick chain starts once, after the first attempt.
+  # The tick chain starts once, after the first attempt. Capture is made of
+  # SQLite triggers, so an engine whose canonical store is PostgreSQL says so
+  # once instead of retrying forever.
   @impl true
   def handle_info(:install, state) do
-    case safely(&Capture.install/0) do
-      {:ok, %{tables: n}} ->
-        Logger.debug("[Sync] capture triggers on #{n} tables")
-        purge_ledger()
-
-      other ->
-        retry = Application.get_env(:optimal_engine, :sync_install_retry_ms, @install_retry)
-        Logger.warning("[Sync] capture install failed, retrying in #{retry} ms: #{inspect(other)}")
-        Process.send_after(self(), :install, retry)
+    if OptimalEngine.Store.selected?(OptimalEngine.Store.SQLite) do
+      install_capture()
+    else
+      Logger.info("[Sync] change capture uses SQLite triggers and is off on this store")
     end
 
     unless state[:ticking], do: schedule(state.interval)
@@ -58,6 +55,19 @@ defmodule OptimalEngine.Sync.Scheduler do
 
   @impl true
   def handle_call(:tick, _from, state), do: {:reply, run_cycle(), state}
+
+  defp install_capture do
+    case safely(&Capture.install/0) do
+      {:ok, %{tables: n}} ->
+        Logger.debug("[Sync] capture triggers on #{n} tables")
+        purge_ledger()
+
+      other ->
+        retry = Application.get_env(:optimal_engine, :sync_install_retry_ms, @install_retry)
+        Logger.warning("[Sync] capture install failed, retrying in #{retry} ms: #{inspect(other)}")
+        Process.send_after(self(), :install, retry)
+    end
+  end
 
   # Ledger rows of tables that do not replicate (an earlier version captured and
   # applied every workspace table) are removed once the triggers are in place.

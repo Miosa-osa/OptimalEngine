@@ -61,6 +61,22 @@ config :optimal_engine,
   topology_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY", topology_path),
   topology_full_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY_FULL", topology_full_path)
 
+# The PostgreSQL store of an OPTIMAL_STORE=postgres build keeps its tables in
+# the schema OPTIMAL_POSTGRES_SCHEMA names (default public); the connection is
+# OPTIMAL_POSTGRES_URL, read when the store starts.
+postgres_store_config = Application.get_env(:optimal_engine, :postgres_store, [])
+
+config :optimal_engine,
+       :postgres_store,
+       Keyword.put(
+         postgres_store_config,
+         :schema,
+         System.get_env(
+           "OPTIMAL_POSTGRES_SCHEMA",
+           Keyword.get(postgres_store_config, :schema, "public")
+         )
+       )
+
 knowledge_config = Application.get_env(:optimal_engine, :knowledge, [])
 knowledge_backend = Keyword.get(knowledge_config, :backend, "ets") |> to_string()
 
