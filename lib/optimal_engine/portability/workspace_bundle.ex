@@ -43,6 +43,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   alias OptimalEngine.Authority.CanonicalJSON
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Sync.Capture
   alias OptimalEngine.Workspace
   alias OptimalEngine.Workspace.Filesystem
@@ -157,10 +158,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   @doc """
-  Completes a move on the source Engine: removes the workspace's rows and
-  files, marks it moved, and records where it went. `bundle_sha256` must be
-  the hash the target reported after importing, so nothing is deleted
-  until the target holds a verified copy.
+  Completes a move on the source Engine: removes the workspace's rows, files
+  and filesystem cache, marks it moved, and records where it went.
+  `bundle_sha256` must be the hash the target reported after importing, so
+  nothing is deleted until the target holds a verified copy.
   """
   @spec finalize_move(String.t(), String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def finalize_move(tenant_id, workspace_id, bundle_sha256, %{"target_url" => target_url} = target)
@@ -176,6 +177,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
          true <- expected == bundle_sha256 || {:error, :checksum_mismatch} do
       deleted = delete_rows(tenant_id, workspace_id)
       File.rm_rf(Filesystem.path(root(), workspace_id))
+      cache_purged = Cache.summary(Cache.purge_workspace(workspace_id, :move))
 
       # Only the move keys are written; the archived stub keeps its slugs and
       # its external id value (archiving releases the id itself).
@@ -200,7 +202,13 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           [tenant_id, workspace_id, target_url, target["target_workspace_id"] || workspace_id]
         )
 
-      {:ok, %{workspace_id: workspace_id, deleted_rows: deleted, target_url: target_url}}
+      {:ok,
+       %{
+         workspace_id: workspace_id,
+         deleted_rows: deleted,
+         cache_purged: cache_purged,
+         target_url: target_url
+       }}
     else
       {:ok, []} -> {:error, :no_pending_export}
       error -> error

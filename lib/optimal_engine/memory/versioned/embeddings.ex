@@ -22,7 +22,12 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
   @spec embed_query(String.t(), keyword()) :: {:ok, [float()]} | {:error, term()}
   def embed_query(query, opts \\ []) do
     prefix = Keyword.get(opts, :query_prefix, "")
-    TextEmbedder.embed(prefix <> query, model: Keyword.get(opts, :model, model()))
+
+    TextEmbedder.embed(prefix <> query,
+      model: Keyword.get(opts, :model, model()),
+      tenant_id: Keyword.get(opts, :tenant_id),
+      workspace_id: Keyword.get(opts, :workspace_id)
+    )
   end
 
   @spec index(Versioned.t(), keyword()) :: :ok | {:error, term()}
@@ -33,7 +38,11 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
 
     embedder =
       Keyword.get(opts, :embedder, fn content ->
-        TextEmbedder.embed(content, model: provider_model)
+        TextEmbedder.embed(content,
+          model: provider_model,
+          tenant_id: memory.tenant_id,
+          workspace_id: memory.workspace_id
+        )
       end)
 
     with {:ok, document} <- retrieval_document(memory, opts),
@@ -119,12 +128,17 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
     document_prefix = Keyword.get(opts, :document_prefix, "")
     document_profile = Keyword.get(opts, :document_profile)
 
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+
     embedder =
       Keyword.get(opts, :embedder, fn content ->
-        TextEmbedder.embed(content, model: provider_model)
+        TextEmbedder.embed(content,
+          model: provider_model,
+          tenant_id: tenant_id,
+          workspace_id: workspace_id
+        )
       end)
 
-    tenant_id = Keyword.get(opts, :tenant_id, "default")
     limit = Keyword.get(opts, :limit, 100_000)
     concurrency = opts |> Keyword.get(:concurrency, 4) |> max(1) |> min(32)
 

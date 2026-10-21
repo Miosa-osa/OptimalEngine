@@ -69,6 +69,7 @@ Do not commit them.
 | `OPTIMAL_EMBED_API_KEY` | unset | Key sent to `OPTIMAL_EMBED_URL` as a bearer token. |
 | `OPTIMAL_EMBED_API_KEY_FILE` | unset | File holding that key, used when `OPTIMAL_EMBED_API_KEY` is unset. |
 | `OPTIMAL_EMBED_DIMENSIONS` | 768 for `nomic-embed-text` | Vector width the endpoint must return; other values fail startup configuration unless a positive whole number. |
+| `OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS` | 30 | Days a cached embedding is kept (`config :optimal_engine, :text_embedding, cache_max_age_days:`); `0` keeps entries until their workspace is purged; other values fail startup configuration unless a whole number. |
 
 With `OPTIMAL_EMBED_URL` unset, text embeddings come from Ollama at `OLLAMA_HOST`, exactly as before.
 With it set, the semantic pipeline at intake, chunk embeddings, search queries, durable memory projections, app data, and the embedding backfill all embed through that endpoint.
@@ -85,7 +86,28 @@ Capture and intake still succeed, search serves full-text results, the document 
 Log lines name the endpoint, the status, and the endpoint's error code; they never carry the text sent for embedding or the key.
 `OPTIMAL_EMBED_URL` is where the Engine sends its requests, usually MIOSA's gateway; it is not the gateway's own `OPTIMAL_EMBED_UPSTREAM_URL`, which names the model server behind the gateway.
 Inputs are capped at 6,000 characters after invalid UTF-8 is replaced, and identical inputs are served from the filesystem cache.
-Ollama's cache entries are keyed by the model and the input, as before; an endpoint's are keyed by the endpoint, the model and the input, so vectors from one never answer for the other.
+Ollama's cache entries are keyed by the model and the input; an endpoint's are keyed by the endpoint, the model and the input, so vectors from one never answer for the other.
+The cache is kept per workspace, under `<cache path>/tenants/<tenant>/<workspace>/embeddings/`.
+An entry is named by the SHA-256 digest of its key and holds the vector only, so the cache never holds the text that was embedded.
+Two workspaces that embed the same text each keep their own entry.
+An embedding is cached only when its workspace is known: ingest uses the chunk's or document's workspace, a search uses the workspace being searched, and the memory and app data projections use their own.
+An embedding asked for with no workspace is computed every time.
+Deleting, archiving, moving or erasing a workspace removes everything the cache holds for it.
+Erasing a principal does the same for every workspace that held one of their contexts, and deletes the vectors and chunks derived from those contexts.
+A retention sweep that deletes a context purges its workspace's cache as well.
+Entries also expire by age: a sweep at boot and every six hours removes entries last written more than `cache_max_age_days` (30) ago.
+A cache hit does not extend an entry's life.
+Deleting a single record, such as forgetting one memory, does not purge the cache, so its entry stays until it expires.
+Earlier versions kept the cache unpartitioned, with the embedded text inside each entry.
+The first boot after upgrading removes that cache, because its entries cannot be attributed to a workspace, before the API answers.
+It logs the number of files and bytes (`removed the unpartitioned embedding cache of earlier versions: N files, M bytes`), and records a `cache.legacy_purge` audit event when it removed files.
+Embeddings are recomputed on demand afterwards; later boots find nothing to remove and say nothing.
+The first boot of this release records the result on every Engine, including one with an empty cache (0 files, 0 bytes), in `embed_cache_legacy_purge.json` next to the database.
+The record is Engine-local: it is not a table, so it is not replicated, not in a workspace bundle, and not in a database backup.
+`GET /api/storage` returns it as `embed_cache_legacy_purge`: `{"ran_at": "<ISO 8601 UTC>", "files": N, "bytes": M, "engine_version": "<version that ran it>"}`, or `null` if it has never run.
+`GET /api/metrics` (`gauges`) and `GET /api/metrics/prometheus` carry it as the gauges `optimal_engine_embed_cache_legacy_purge_files` and `optimal_engine_embed_cache_legacy_purge_bytes`.
+The run also emits the telemetry event `[:optimal_engine, :embed_cache, :legacy_purge]` with the measurements `files` and `bytes`.
+Files of the old layout that appear again, for example after a rollback to an earlier version, are removed at the next boot and recorded again.
 An endpoint's vectors must have the model's width; a different width is refused as `embed_dimension_mismatch`, logged with the two widths, never cached, and stops a backfill.
 A cached vector of another width than the model now needs, after the width setting changed, is fetched again.
 Stored vectors of another dimension are never scored, so a model with a different dimension cannot mix with an existing index.

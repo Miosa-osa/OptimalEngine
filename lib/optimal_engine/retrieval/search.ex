@@ -364,17 +364,29 @@ defmodule OptimalEngine.Retrieval.Search do
     end
   end
 
+  # A query's embedding is cached in the workspace being searched, so it is removed
+  # with that workspace.
+  defp searched_scope(opts) do
+    [
+      tenant_id: Keyword.get(opts, :tenant_id, OptimalEngine.Tenancy.Tenant.default_id()),
+      workspace_id: Keyword.get(opts, :workspace_id, "default")
+    ]
+  end
+
   defp query_embedding(query, opts) do
     case Keyword.get(opts, :query_embedding) do
       embedding when is_list(embedding) and embedding != [] ->
         {:ok, embedding}
 
       _ ->
-        MemoryEmbeddings.embed_query(query,
-          model:
-            Keyword.get(opts, :memory_embedding_provider_model) ||
-              Keyword.get(opts, :memory_embedding_model, MemoryEmbeddings.model()),
-          query_prefix: Keyword.get(opts, :memory_query_prefix, "")
+        MemoryEmbeddings.embed_query(
+          query,
+          [
+            model:
+              Keyword.get(opts, :memory_embedding_provider_model) ||
+                Keyword.get(opts, :memory_embedding_model, MemoryEmbeddings.model()),
+            query_prefix: Keyword.get(opts, :memory_query_prefix, "")
+          ] ++ searched_scope(opts)
         )
     end
   end
@@ -603,7 +615,7 @@ defmodule OptimalEngine.Retrieval.Search do
     # tokens, partial model load). Skip the vector hop in that case so
     # we don't chase a zero-vector through VectorStore.
     {vector_results, chunk_results} =
-      case TextEmbedder.embed(query) do
+      case TextEmbedder.embed(query, searched_scope(opts)) do
         {:ok, query_embedding} when is_list(query_embedding) and query_embedding != [] ->
           vector_opts = [
             limit: limit * 3,

@@ -36,6 +36,7 @@ Over the limit the answer is 429 `{"error": "rate_limited", "retry_after_ms": N}
 
 `GET /api/storage` returns the active profile, one gauge per measure, the worst one, the recommendation, and how long the last boot took (`boot_ms`).
 `GET /api/metrics` carries the same under `sizing`.
+`GET /api/storage` also returns `embed_cache_legacy_purge`, the record of the one-time removal of the unpartitioned embedding cache (`OPTIONS.md`, Text Embeddings), or `null` if it has never run.
 
 | Gauge | Measured as | Limit |
 | --- | --- | --- |

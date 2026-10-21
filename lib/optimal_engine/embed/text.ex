@@ -19,9 +19,14 @@ defmodule OptimalEngine.Embed.Text do
   Either way an empty input is refused without a call, invalid UTF-8 is
   replaced, the input is capped at 6,000 characters, and an identical input is
   served from the filesystem cache. Ollama's entries are keyed by the model and
-  the input, as before; an endpoint's are keyed by the endpoint (without user
-  info or query), the model and the input, so vectors from one never answer
-  for the other. An endpoint's vectors must have the model's width (768 for
+  the input; an endpoint's are keyed by the endpoint (without user info or
+  query), the model and the input, so vectors from one never answer for the
+  other. An entry is stored under its tenant and workspace, by the digest of
+  that key, so the cache never holds the text and deleting or erasing a
+  workspace removes everything it cached (`OptimalEngine.Store.FileCache`).
+  An embedding is cached only when the caller names its workspace
+  (`:workspace_id`, with `:tenant_id`); without one it is computed every time.
+  An endpoint's vectors must have the model's width (768 for
   nomic-embed-text, or `OPTIMAL_EMBED_DIMENSIONS`), checked on every answer and
   on every cache hit, and stored vectors of another dimension are never scored
   (`OptimalEngine.Store.Vectors.search/2`).
@@ -38,7 +43,10 @@ defmodule OptimalEngine.Embed.Text do
     * `:probe_timeout_ms` - budget of the health probe on the search path
       (default 2,000 for an endpoint);
     * `:health_ttl_ms` - how long a process keeps an endpoint's health answer
-      (default 60,000).
+      (default 60,000);
+    * `:cache_max_age_days` - how long a cached embedding is kept (default 30;
+      `0` keeps it until its workspace is purged); see
+      `OptimalEngine.Store.FileCache.Maintenance`.
 
   The model is the Engine's embed model (`OPTIMAL_EMBED_MODEL`, default
   `nomic-embed-text`) whichever endpoint serves it.
@@ -80,7 +88,12 @@ defmodule OptimalEngine.Embed.Text do
   ## Options
 
     * `:model` - override the embed model
-    * `:cache` - `false` bypasses the filesystem cache (default `true`)
+    * `:workspace_id` and `:tenant_id` - the workspace the text belongs to (a
+      search query: the workspace being searched) and its tenant (default
+      tenant when omitted). The embedding is cached under them. Without a
+      `:workspace_id` nothing is read from or written to the cache.
+    * `:cache` - `false` bypasses the filesystem cache even with a workspace
+      (default `true`)
   """
   @spec embed(String.t(), keyword()) :: {:ok, [float()]} | {:error, term()}
   def embed(text, opts \\ []) when is_binary(text), do: embed_with(endpoint(), text, opts)
@@ -98,21 +111,36 @@ defmodule OptimalEngine.Embed.Text do
       model = Keyword.get(opts, :model, model())
       capped = cap(text)
 
-      if Keyword.get(opts, :cache, true) do
-        case cached(target, model, capped) do
-          {:ok, vector} ->
-            {:ok, vector}
+      case cache_scope(opts) do
+        nil ->
+          request(target, model, capped)
 
-          {:pending, input} ->
-            result = request(target, model, input)
-            cache(target, model, input, result)
-            result
-        end
-      else
-        request(target, model, capped)
+        scope ->
+          case cached(scope, target, model, capped) do
+            {:ok, vector} ->
+              {:ok, vector}
+
+            {:pending, input} ->
+              result = request(target, model, input)
+              cache(scope, target, model, input, result)
+              result
+          end
       end
     end
   end
+
+  # The tenant and workspace an embedding is cached under, or nil when it is not
+  # cached: the caller turned the cache off, or named no workspace to keep it in.
+  defp cache_scope(opts) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
+    if Keyword.get(opts, :cache, true) && is_binary(workspace_id) && workspace_id != "" do
+      {tenant(Keyword.get(opts, :tenant_id)), workspace_id}
+    end
+  end
+
+  defp tenant(tenant_id) when is_binary(tenant_id) and tenant_id != "", do: tenant_id
+  defp tenant(_none), do: OptimalEngine.Tenancy.Tenant.default_id()
 
   defp request(nil, model, input), do: Ollama.request_embedding(model, input)
 
@@ -182,13 +210,13 @@ defmodule OptimalEngine.Embed.Text do
 
   defp embed_batched(endpoint, texts, opts) do
     model = Keyword.get(opts, :model, model())
-    cache? = Keyword.get(opts, :cache, true)
+    scope = cache_scope(opts)
 
     looked_up =
       Enum.map(texts, fn text ->
         cond do
           String.trim(text) == "" -> {:error, :empty_input}
-          cache? -> cached(endpoint, model, cap(text))
+          scope -> cached(scope, endpoint, model, cap(text))
           true -> {:pending, cap(text)}
         end
       end)
@@ -223,7 +251,7 @@ defmodule OptimalEngine.Embed.Text do
     Enum.map(looked_up, fn
       {:pending, input} ->
         result = Map.fetch!(fetched, input)
-        if cache?, do: cache(endpoint, model, input, result)
+        if scope, do: cache(scope, endpoint, model, input, result)
         result
 
       done ->
@@ -233,8 +261,8 @@ defmodule OptimalEngine.Embed.Text do
 
   # A cached vector of another width than an endpoint's model now needs (the
   # width setting changed since it was stored) is a miss, so it is fetched again.
-  defp cached(target, model, input) do
-    case FileCache.get("embeddings", cache_key(target, model, input)) do
+  defp cached(scope, target, model, input) do
+    case FileCache.get(scope, "embeddings", cache_key(target, model, input)) do
       {:ok, vector} -> if fits?(target, model, vector), do: {:ok, vector}, else: {:pending, input}
       _miss -> {:pending, input}
     end
@@ -249,13 +277,13 @@ defmodule OptimalEngine.Embed.Text do
     end
   end
 
-  defp cache(target, model, input, {:ok, vector}),
-    do: FileCache.put("embeddings", cache_key(target, model, input), vector)
+  defp cache(scope, target, model, input, {:ok, vector}),
+    do: FileCache.put(scope, "embeddings", cache_key(target, model, input), vector)
 
-  defp cache(_endpoint, _model, _input, _error), do: :ok
+  defp cache(_scope, _endpoint, _model, _input, _error), do: :ok
 
   # Ollama at OLLAMA_HOST keeps today's key; an endpoint's entries carry the
-  # endpoint, so neither answers for the other.
+  # endpoint, so neither answers for the other. Only the key's digest is stored.
   defp cache_key(nil, model, input), do: "#{model}\0#{input}"
 
   defp cache_key(endpoint, model, input),

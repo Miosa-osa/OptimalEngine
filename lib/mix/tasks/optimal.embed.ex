@@ -40,7 +40,8 @@ defmodule Mix.Tasks.Optimal.Embed do
     with {:ok, parsed} <- Parser.parse(path),
          {:ok, enriched} <- VlmEnricher.enrich(parsed),
          {:ok, tree} <- Decomposer.decompose(enriched),
-         {:ok, embeddings, %{errors: errors}} <- Embedder.embed_tree(tree) do
+         # A health and dispatch check must reach the embedder, never the cache.
+         {:ok, embeddings, %{errors: errors}} <- Embedder.embed_tree(tree, cache: false) do
       render(tree, embeddings, errors, format)
     else
       {:error, reason} ->

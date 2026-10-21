@@ -17,6 +17,15 @@ defmodule OptimalEngine.Compliance.Erasure do
       rows in the audit trail.
     * Principal must belong to the given `tenant_id`.
 
+  ## What is erased with a principal's contexts
+
+  A context's derived retrieval material goes with it: its document vector
+  (`vectors`), its chunks and the chunk vectors (`chunks`, `chunk_embeddings`).
+  Those rows are not tied to the context by a foreign key, so deleting the
+  context alone left them behind. The filesystem cache of every workspace that
+  held an erased context is purged too (`OptimalEngine.Store.FileCache`); it is
+  recomputable, and its entries cannot be told apart per context.
+
   ## What survives
 
     * Immutable audit events for regulatory purposes are *redacted*
@@ -24,8 +33,9 @@ defmodule OptimalEngine.Compliance.Erasure do
       so the audit trail remains complete but anonymized.
   """
 
-  alias OptimalEngine.Compliance.LegalHold
+  alias OptimalEngine.Compliance.{DerivedData, LegalHold}
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
 
   @type report :: %{
           principal_id: String.t(),
@@ -33,6 +43,7 @@ defmodule OptimalEngine.Compliance.Erasure do
           events_redacted: non_neg_integer(),
           held: non_neg_integer(),
           forced?: boolean(),
+          cache_purged: map(),
           completed_at: String.t()
         }
 
@@ -60,8 +71,11 @@ defmodule OptimalEngine.Compliance.Erasure do
         else: LegalHold.count_holds_for_principal(principal_id, tenant_id)
 
     with {:ok, held} <- held_result,
-         :ok <- gate_on_holds(held, force?) do
-      deleted = do_cascade(principal_id, tenant_id)
+         :ok <- gate_on_holds(held, force?),
+         {:ok, workspaces} <- workspaces_of_contexts(principal_id, tenant_id),
+         {:ok, derived} <- delete_derived(principal_id, tenant_id) do
+      deleted = principal_id |> do_cascade(tenant_id) |> Map.merge(derived)
+      cache_purged = purge_cache(workspaces)
       redacted = redact_audit(principal_id, tenant_id)
 
       Store.raw_query(
@@ -73,7 +87,13 @@ defmodule OptimalEngine.Compliance.Erasure do
           tenant_id,
           actor,
           "principal:#{principal_id}",
-          Jason.encode!(%{deleted: deleted, events_redacted: redacted, held: held, forced?: force?})
+          Jason.encode!(%{
+            deleted: deleted,
+            events_redacted: redacted,
+            held: held,
+            forced?: force?,
+            cache_purged: cache_purged
+          })
         ]
       )
 
@@ -84,6 +104,7 @@ defmodule OptimalEngine.Compliance.Erasure do
          events_redacted: redacted,
          held: held,
          forced?: force?,
+         cache_purged: cache_purged,
          completed_at: DateTime.utc_now() |> DateTime.to_iso8601()
        }}
     end
@@ -105,6 +126,18 @@ defmodule OptimalEngine.Compliance.Erasure do
              tenant_id,
              principal_id
            ]),
+         vectors:
+           count_where(
+             "vectors",
+             "context_id IN (SELECT id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2)",
+             [tenant_id, principal_id]
+           ),
+         chunks:
+           count_where(
+             "chunks",
+             "signal_id IN (SELECT id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2)",
+             [tenant_id, principal_id]
+           ),
          node_members:
            count_where("node_members", "tenant_id = ?1 AND principal_id = ?2", [
              tenant_id,
@@ -132,6 +165,36 @@ defmodule OptimalEngine.Compliance.Erasure do
   defp gate_on_holds(0, _force?), do: :ok
   defp gate_on_holds(_held, true), do: :ok
   defp gate_on_holds(held, false), do: {:error, {:legal_hold_active, held}}
+
+  # The workspaces the erased contexts live in, read before they are deleted. Failing to
+  # read them stops the erasure: the cache purge would not know where to look.
+  defp workspaces_of_contexts(principal_id, tenant_id) do
+    case Store.raw_query(
+           "SELECT DISTINCT workspace_id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2",
+           [tenant_id, principal_id]
+         ) do
+      {:ok, rows} -> {:ok, rows |> List.flatten() |> Enum.filter(&is_binary/1)}
+      {:error, reason} -> {:error, {:erasure_scope_unreadable, reason}}
+    end
+  end
+
+  # The filesystem cache of each workspace that held an erased context. A failure is
+  # reported (and logged), not raised: the rows are already gone.
+  defp purge_cache(workspaces) do
+    workspaces
+    |> Cache.purge_workspaces(:erase)
+    |> Cache.summary()
+    |> Map.put(:workspaces, workspaces)
+  end
+
+  # Retrieval material derived from the principal's contexts, deleted before the contexts
+  # it is selected through. A failure stops the erasure with the contexts still in place.
+  defp delete_derived(principal_id, tenant_id) do
+    DerivedData.delete_for_contexts(
+      "SELECT id FROM contexts WHERE tenant_id = ?1 AND created_by = ?2",
+      [tenant_id, principal_id]
+    )
+  end
 
   defp do_cascade(principal_id, tenant_id) do
     %{

@@ -107,7 +107,7 @@ If the engine API returns the wrong workspace data, that is an engine isolation 
 | FTS rows | Yes for text search | Full-text search projection built from contexts and memory rows. | `mix optimal.search "query"` returns scoped hits. |
 | Vector rows | Optional but expected for semantic retrieval | Embedding-backed retrieval projection. | Reality check retrieval probes pass. Health stays degraded only if configured embedder is broken. |
 | Chunk rows | Yes for document-scale retrieval | Breaks large sources into retrievable pieces. | Reality check store counts include `chunks`; ingesting files should increase chunk rows. |
-| Cache directories | Optional | Rebuildable acceleration for parsing, embeddings, and runtime work. | Can be deleted and rebuilt without losing truth. |
+| Cache directories | Optional | Rebuildable acceleration for parsing, embeddings, and runtime work. Embeddings are cached per workspace, hold vectors only, expire by age, and are removed with their workspace. | Can be deleted and rebuilt without losing truth. See `OPTIONS.md`, Text Embeddings. |
 | RocksDB graph store | Yes for the full local setup | Persistent knowledge graph backend hydrated from SQLite edges. | `lsof` shows `.optimal/knowledge-rocksdb` files open and startup logs show `Knowledge backend: RocksDB`. |
 | ETS graph store | Fallback | In-memory graph backend when RocksDB is unavailable or disabled. | Startup logs show `Knowledge backend: ETS`. |
 | Mnesia graph store | Optional | Distributed BEAM graph backend for specialized deployments. | Backend tests pass and startup logs show `Knowledge backend: Mnesia` when configured. |

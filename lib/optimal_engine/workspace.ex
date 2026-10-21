@@ -34,6 +34,7 @@ defmodule OptimalEngine.Workspace do
 
   alias OptimalEngine.Authority.Evidence
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Organization
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Workspace.Config
@@ -725,6 +726,12 @@ defmodule OptimalEngine.Workspace do
   Soft-deletes a workspace by setting `status = 'archived'`. It keeps its
   handles and its external id value; the external id is released, so another
   workspace of the tenant can be bound to it.
+
+  What the filesystem cache holds for the workspace is removed with it
+  (`OptimalEngine.Store.FileCache`). If that purge fails, the workspace is
+  archived all the same and the answer is `{:error, {:cache_purge_failed,
+  reason}}`: the cache may still hold its text. Archiving again retries the
+  purge, and the age sweep removes what is left in the end.
   """
   @spec archive(String.t()) :: :ok | {:error, term()}
   def archive(id) when is_binary(id) do
@@ -732,8 +739,14 @@ defmodule OptimalEngine.Workspace do
            "UPDATE workspaces SET status = 'archived', archived_at = datetime('now') WHERE id = ?1",
            [id]
          ) do
-      {:ok, _} -> :ok
-      other -> other
+      {:ok, _} ->
+        case Cache.purge_workspace(id, :archive) do
+          {:ok, _purged} -> :ok
+          {:error, cause} -> {:error, {:cache_purge_failed, Cache.reason(cause)}}
+        end
+
+      other ->
+        other
     end
   end
 

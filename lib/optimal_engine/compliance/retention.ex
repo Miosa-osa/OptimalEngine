@@ -21,13 +21,18 @@ defmodule OptimalEngine.Compliance.Retention do
     * `:delete`  — hard-delete the context row.
     * `:redact`  — rewrite content through `Compliance.Redact.redact!/2`.
 
+  A `:delete` also removes the vectors and chunks derived from the context
+  (`Compliance.DerivedData`), which nothing else ties to it, and purges the
+  filesystem cache of its workspace (`OptimalEngine.Store.FileCache`).
+
   ## Trace
 
   Every action emits one audit `events` row with kind = `retention_action`.
   """
 
-  alias OptimalEngine.Compliance.{LegalHold, Redact}
+  alias OptimalEngine.Compliance.{DerivedData, LegalHold, Redact}
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
 
   require Logger
 
@@ -61,7 +66,13 @@ defmodule OptimalEngine.Compliance.Retention do
 
     policies = list_policies(tenant_id)
 
-    acc = %{policies_evaluated: length(policies), actions_taken: 0, skipped_held: 0, errors: 0}
+    acc = %{
+      policies_evaluated: length(policies),
+      actions_taken: 0,
+      skipped_held: 0,
+      errors: 0,
+      deleted_in: MapSet.new()
+    }
 
     result =
       Enum.reduce(policies, acc, fn policy, acc ->
@@ -69,7 +80,7 @@ defmodule OptimalEngine.Compliance.Retention do
         process_targets(targets, policy, tenant_id, dry_run?, acc)
       end)
 
-    {:ok, result}
+    {:ok, purge_deleted_workspaces(result)}
   end
 
   @doc """
@@ -152,9 +163,14 @@ defmodule OptimalEngine.Compliance.Retention do
           {"1 = 0", []}
       end
 
-    case Store.raw_query("SELECT id, content FROM contexts WHERE #{where}", params) do
-      {:ok, rows} -> Enum.map(rows, fn [id, content] -> %{id: id, content: content} end)
-      _ -> []
+    case Store.raw_query("SELECT id, content, workspace_id FROM contexts WHERE #{where}", params) do
+      {:ok, rows} ->
+        Enum.map(rows, fn [id, content, workspace_id] ->
+          %{id: id, content: content, workspace_id: workspace_id}
+        end)
+
+      _ ->
+        []
     end
   rescue
     _ -> []
@@ -177,11 +193,31 @@ defmodule OptimalEngine.Compliance.Retention do
 
         true ->
           case apply_action(target, policy, tenant_id) do
-            :ok -> %{acc | actions_taken: acc.actions_taken + 1}
+            :ok -> acc |> note_deleted(target, policy) |> Map.update!(:actions_taken, &(&1 + 1))
             _ -> %{acc | errors: acc.errors + 1}
           end
       end
     end)
+  end
+
+  # The workspaces a `delete` removed a context from. Their filesystem cache holds
+  # what was embedded from those contexts and cannot be told apart per context, so it
+  # is purged once the sweep is done (see `purge_deleted_workspaces/1`).
+  defp note_deleted(acc, %{workspace_id: workspace_id}, %{action: "delete"})
+       when is_binary(workspace_id),
+       do: %{acc | deleted_in: MapSet.put(acc.deleted_in, workspace_id)}
+
+  defp note_deleted(acc, _target, _policy), do: acc
+
+  # A workspace whose cache could not be purged counts as an error, so the operator
+  # sees it in the report; the purge logs the cause.
+  defp purge_deleted_workspaces(%{deleted_in: workspaces} = result) do
+    failed =
+      workspaces
+      |> Enum.map(&Cache.purge_workspace(&1, :retention))
+      |> Enum.count(&match?({:error, _}, &1))
+
+    result |> Map.delete(:deleted_in) |> Map.update!(:errors, &(&1 + failed))
   end
 
   defp held_error?(target_id, tenant_id) do
@@ -199,16 +235,23 @@ defmodule OptimalEngine.Compliance.Retention do
   # Audit tracing is a best-effort side effect: if it fails it logs (via
   # `trace/3`'s rescue) but does NOT turn a successful action into :error.
   defp apply_action(target, %{action: "delete"}, tenant_id) do
-    case Store.raw_query("DELETE FROM contexts WHERE id = ?1 AND tenant_id = ?2", [
-           target.id,
-           tenant_id
-         ]) do
-      {:ok, _} ->
-        trace(target.id, "delete", tenant_id)
-        :ok
-
-      _ ->
-        :error
+    # Derived vectors and chunks first: nothing ties them to the context, so a context
+    # deleted without them leaves its text behind. If they cannot be deleted the context
+    # stays, and the next sweep tries again.
+    with {:ok, _derived} <-
+           DerivedData.delete_for_contexts(
+             "SELECT id FROM contexts WHERE id = ?1 AND tenant_id = ?2",
+             [target.id, tenant_id]
+           ),
+         {:ok, _} <-
+           Store.raw_query("DELETE FROM contexts WHERE id = ?1 AND tenant_id = ?2", [
+             target.id,
+             tenant_id
+           ]) do
+      trace(target.id, "delete", tenant_id)
+      :ok
+    else
+      _ -> :error
     end
   rescue
     _ -> :error

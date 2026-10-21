@@ -149,6 +149,34 @@ defmodule OptimalEngine.RuntimeConfigTest do
                  fn -> Config.Reader.read!("config/runtime.exs", env: :prod, target: :host) end
   end
 
+  test "embedding cache retention comes from the environment, defaults to 30 days, and rejects typos" do
+    original = System.get_env("OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS")
+
+    on_exit(fn ->
+      if original,
+        do: System.put_env("OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS", original),
+        else: System.delete_env("OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS")
+    end)
+
+    System.delete_env("OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS")
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    assert get_in(config, [:optimal_engine, :text_embedding, :cache_max_age_days]) == 30
+
+    for {value, days} <- [{"7", 7}, {" 90 ", 90}, {"0", 0}] do
+      System.put_env("OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS", value)
+      config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+      assert get_in(config, [:optimal_engine, :text_embedding, :cache_max_age_days]) == days
+    end
+
+    for value <- ["soon", "-1", "1.5", "7d"] do
+      System.put_env("OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS", value)
+
+      assert_raise ArgumentError,
+                   ~r/OPTIMAL_EMBED_CACHE_MAX_AGE_DAYS must be a whole number of days/,
+                   fn -> Config.Reader.read!("config/runtime.exs", env: :prod, target: :host) end
+    end
+  end
+
   test "release channel comes from the environment and rejects unknown channels" do
     original = System.get_env("OPTIMAL_RELEASE_CHANNEL")
 

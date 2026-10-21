@@ -256,15 +256,20 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
     end
 
     test "the filesystem cache persists entries and discards corrupt ones", %{tmp: tmp} do
-      assert :ok = FileCache.put("reality", "key", %{"value" => 1})
-      assert {:ok, %{"value" => 1}} = FileCache.get("reality", "key")
+      scope = {"default", "default:reality"}
+      assert :ok = FileCache.put(scope, "reality", "key", %{"value" => 1})
+      assert {:ok, %{"value" => 1}} = FileCache.get(scope, "reality", "key")
 
       assert {:ok, %{"value" => 1}} =
-               Task.async(fn -> FileCache.get("reality", "key") end) |> Task.await()
+               Task.async(fn -> FileCache.get(scope, "reality", "key") end) |> Task.await()
 
-      assert [entry] = Path.wildcard(Path.join([tmp, "cache", "reality", "*", "*.bin"]))
+      assert [entry] =
+               Path.wildcard(
+                 Path.join([tmp, "cache", "tenants", "*", "*", "reality", "*", "*.bin"])
+               )
+
       File.write!(entry, "corrupt")
-      assert :miss = FileCache.get("reality", "key")
+      assert :miss = FileCache.get(scope, "reality", "key")
       refute File.exists?(entry)
     end
   end
