@@ -8,7 +8,17 @@ defmodule OptimalEngine.Connectors.TokenExchangeTest do
 
   use ExUnit.Case, async: false
 
-  alias OptimalEngine.Connectors.Adapters.{Dropbox, HubSpot, OneDrive, Salesforce, Teams, Zoom}
+  alias OptimalEngine.Connectors.Adapters.{
+    Dropbox,
+    Drive,
+    Gmail,
+    HubSpot,
+    OneDrive,
+    Salesforce,
+    Teams,
+    Zoom
+  }
+
   alias OptimalEngine.Test.BrokerStub
 
   @form "application/x-www-form-urlencoded"
@@ -177,6 +187,100 @@ defmodule OptimalEngine.Connectors.TokenExchangeTest do
           ] do
         install(fn _url, _opts -> {status, %{"error" => "invalid_grant"}} end)
         assert {:error, ^expected} = sync(Zoom, @zoom_config, @zoom_credentials), "status #{status}"
+      end
+    end
+  end
+
+  describe "Gmail's and Drive's refresh" do
+    @google_credentials %{
+      "oauth_refresh_token" => "example-refresh",
+      "client_id" => "example-client",
+      "client_secret" => "example-secret"
+    }
+    @google [
+      {Gmail, %{"user_email" => "jane@example.com", "labels" => ["INBOX"]}},
+      {Drive, %{"scope" => "my_drive"}}
+    ]
+
+    for {mod, config} <- @google do
+      @mod mod
+      @config config
+
+      test "#{inspect(mod)} keeps only the error code of a refused refresh" do
+        install(fn _url, _opts ->
+          {400,
+           %{"error" => "invalid_request", "error_description" => "client_secret=leaked-detail"}}
+        end)
+
+        assert {:error, {:token_error, "invalid_request"}} =
+                 sync(@mod, @config, @google_credentials)
+
+        install(fn _url, _opts -> {400, %{"message" => "no error field"}} end)
+        assert {:error, {:token_error, "unknown"}} = sync(@mod, @config, @google_credentials)
+      end
+
+      test "#{inspect(mod)} reads a revoked grant as expired, however Google says it" do
+        for {status, code} <- [
+              {400, "invalid_grant"},
+              {400, "invalid_client"},
+              {400, "unauthorized_client"},
+              {401, "invalid_client"}
+            ] do
+          install(fn _url, _opts -> {status, %{"error" => code}} end)
+
+          assert {:error, :auth_expired} = sync(@mod, @config, @google_credentials),
+                 "#{status} #{code}"
+        end
+      end
+
+      test "#{inspect(mod)} passes a Retry-After on to the Runner, capped" do
+        install(fn _url, _opts -> {429, %{}, [{"retry-after", "2"}]} end)
+        assert {:error, {:rate_limited, 2_000}} = sync(@mod, @config, @google_credentials)
+
+        install(fn _url, _opts -> {429, %{}, [{"retry-after", "86400"}]} end)
+        assert {:error, {:rate_limited, 30_000}} = sync(@mod, @config, @google_credentials)
+
+        install(fn _url, _opts -> {429, %{}} end)
+        assert {:error, :rate_limited} = sync(@mod, @config, @google_credentials)
+      end
+
+      test "#{inspect(mod)} reads a failing refresh as transient and anything else by its status" do
+        for status <- [500, 503] do
+          install(fn _url, _opts -> {status, %{}} end)
+          assert {:error, :transient} = sync(@mod, @config, @google_credentials), "#{status}"
+        end
+
+        install(fn _url, _opts -> {418, %{"error" => "teapot"}} end)
+        assert {:error, {:http, 418}} = sync(@mod, @config, @google_credentials)
+      end
+    end
+  end
+
+  describe "the error code of a refused exchange" do
+    @dropbox_config %{"namespace" => "personal"}
+    @dropbox_credentials %{
+      "app_key" => "example-client",
+      "app_secret" => "example-secret",
+      "refresh_token" => "example-refresh"
+    }
+
+    test "is kept only if it looks like one" do
+      long = String.duplicate("a", 65)
+
+      for {sent, kept} <- [
+            {"invalid_request", "invalid_request"},
+            {String.duplicate("a", 64), String.duplicate("a", 64)},
+            {long, "unknown"},
+            {"client_secret=leaked-detail", "unknown"},
+            {"Invalid Request", "unknown"},
+            {"invalid_request\nx", "unknown"},
+            {"", "unknown"}
+          ] do
+        install(fn _url, _opts -> {400, %{"error" => sent}} end)
+
+        assert {:error, {:token_error, ^kept}} =
+                 sync(Dropbox, @dropbox_config, @dropbox_credentials),
+               "sent #{inspect(sent)}"
       end
     end
   end
