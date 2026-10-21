@@ -283,7 +283,8 @@ defmodule OptimalEngine.Pipeline.Indexer do
       {:ok, content} ->
         stat = File.stat!(path, time: :posix)
 
-        classified =
+        %Context{} =
+          classified =
           Classifier.classify_context(content,
             path: path,
             known_entities: known_entities
