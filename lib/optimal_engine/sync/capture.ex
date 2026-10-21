@@ -33,8 +33,9 @@ defmodule OptimalEngine.Sync.Capture do
   captured from them, but a write to a row of a workspace that syncs moves
   `sync_local_stamp`, a table that never holds a row and only keeps a counter in
   `sqlite_sequence`, which the gate cache reads with the sequences of the
-  capture and the ledger. An update only counts when it writes a column the
-  gate reads.
+  capture and the ledger. A write counts only when it can change what the gate
+  finds: a row that may name a class is inserted or deleted, or a column the
+  gate reads changes to or from one.
   """
 
   alias OptimalEngine.Store
@@ -237,40 +238,51 @@ defmodule OptimalEngine.Sync.Capture do
 
     for table <- stamped do
       columns = columns(table)
+      read = stamp_columns(table)
 
-      if Enum.any?(columns, &(&1.name == "workspace_id")),
-        do: ensure_triggers(table, "sync_stamp_", stamp_statements(table, columns))
+      if Enum.all?(read, fn column -> Enum.any?(columns, &(&1.name == column)) end),
+        do: ensure_triggers(table, "sync_stamp_", stamp_statements(table, read))
     end
 
     drop_stale_stamp_triggers(stamped)
   end
 
-  # An insert, a delete, and an update that writes a column the gate reads
-  # (a status written on every call must not drop the scan) bump the counter of
-  # `sync_local_stamp`: insert a row, delete it; the sequence stays.
-  # Only the rows of a workspace that syncs count.
-  defp stamp_statements(table, columns) do
-    t = quote_name(table)
-    names = MapSet.new(columns, & &1.name)
-    spec = Lineage.spec(table)
+  @doc """
+  The columns of a stamped table the gate reads: the one it takes the class from
+  (`Lineage.class_column/1`, the column `Gate` builds its scan on) and the scope
+  of the row. An update that writes none of them cannot change what the gate
+  finds.
+  """
+  @spec stamp_columns(String.t()) :: [String.t()]
+  def stamp_columns(table) do
+    {_kind, column} = Lineage.class_column(Lineage.spec(table))
+    [column, "tenant_id", "workspace_id"]
+  end
 
-    read =
-      [
-        spec.labels && "security_labels",
-        spec.partitions && "partition_ids",
-        spec.meta,
-        spec.class,
-        "tenant_id",
-        "workspace_id"
-      ]
-      |> Enum.filter(&(is_binary(&1) and MapSet.member?(names, &1)))
-      |> Enum.uniq()
-      |> Enum.map_join(", ", &quote_name/1)
+  # The counter of `sync_local_stamp` moves (insert a row, delete it; the
+  # sequence stays) when a row of a workspace that syncs is written in a way that
+  # can change what the gate finds:
+  #
+  # * an insert or a delete of a row that may name a class
+  #   (`Lineage.may_name_class_sql/2`), not of one that cannot: a row without
+  #   labels is not above any gate, and a run table gets a row per call;
+  # * an update that changes a column the gate reads, to or from a row that may
+  #   name a class. An update that writes the same value (a re-registration
+  #   rewrites the columns it always writes) moves nothing.
+  #
+  # `NULL` and text that is not JSON are labels the gate cannot read, so they
+  # count as naming a class.
+  defp stamp_statements(table, read) do
+    t = quote_name(table)
+    class = Lineage.class_column(Lineage.spec(table))
+    updated = Enum.map_join(read, ", ", &quote_name/1)
+    changed = Enum.map_join(read, " OR ", &"OLD.#{quote_name(&1)} IS NOT NEW.#{quote_name(&1)}")
 
     syncing = fn row ->
       "EXISTS (SELECT 1 FROM sync_workspaces WHERE workspace_id = #{row}.\"workspace_id\")"
     end
 
+    matters = &Lineage.may_name_class_sql(class, &1)
     bump = "INSERT INTO #{@stamp_table} (seq) VALUES (NULL); DELETE FROM #{@stamp_table};"
 
     drops =
@@ -281,21 +293,22 @@ defmodule OptimalEngine.Sync.Capture do
       [
         """
         CREATE TRIGGER #{quote_name("sync_stamp_ai_#{table}")} AFTER INSERT ON #{t}
-        WHEN #{syncing.("NEW")}
+        WHEN #{syncing.("NEW")} AND #{matters.("NEW")}
         BEGIN
           #{bump}
         END
         """,
         """
-        CREATE TRIGGER #{quote_name("sync_stamp_au_#{table}")} AFTER UPDATE OF #{read} ON #{t}
-        WHEN #{syncing.("NEW")} OR #{syncing.("OLD")}
+        CREATE TRIGGER #{quote_name("sync_stamp_au_#{table}")} AFTER UPDATE OF #{updated} ON #{t}
+        WHEN (#{changed}) AND (#{syncing.("NEW")} OR #{syncing.("OLD")})
+          AND (#{matters.("NEW")} OR #{matters.("OLD")})
         BEGIN
           #{bump}
         END
         """,
         """
         CREATE TRIGGER #{quote_name("sync_stamp_ad_#{table}")} AFTER DELETE ON #{t}
-        WHEN #{syncing.("OLD")}
+        WHEN #{syncing.("OLD")} AND #{matters.("OLD")}
         BEGIN
           #{bump}
         END

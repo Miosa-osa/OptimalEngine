@@ -2263,7 +2263,145 @@ defmodule OptimalEngine.SyncGateTest do
       {:ok, _} = Store.raw_query("DELETE FROM assets WHERE id = ?1", ["asset-quiet-#{ctx.n}"])
       assert local_stamp() == before
 
+      asset(ctx, ctx.asset, ~s(["restricted"]))
+      assert local_stamp() > before
+    end
+
+    test "a row that names no class moves nothing, written, rewritten or deleted", ctx do
+      before = local_stamp()
+
       asset(ctx, ctx.asset)
+      tool_run(ctx, "run-open-#{ctx.n}")
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE assets SET size_bytes = 9, security_labels = '[]' WHERE id = ?1",
+          [ctx.asset]
+        )
+
+      {:ok, _} = Store.raw_query("DELETE FROM assets WHERE id = ?1", [ctx.asset])
+      {:ok, _} = Store.raw_query("DELETE FROM tool_call_runs WHERE id = ?1", ["run-open-#{ctx.n}"])
+
+      assert local_stamp() == before
+    end
+
+    test "a run table: a labelled run holds an aggregate, open runs leave the scan cached", ctx do
+      report(ctx, ctx.report)
+
+      {_, first} =
+        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+      assert :holds_above in first
+
+      before = local_stamp()
+      for i <- 1..5, do: tool_run(ctx, "run-open-#{i}-#{ctx.n}")
+      assert local_stamp() == before
+
+      {pulled, again} =
+        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+      assert again == []
+      assert sent?(pulled["mutations"], "analysis_reports", ctx.report)
+
+      tool_run(ctx, "run-secret-#{ctx.n}", ~s(["restricted"]))
+      assert local_stamp() > before
+
+      held = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      refute sent?(held["mutations"], "analysis_reports", ctx.report)
+    end
+
+    test "an update that writes the same value moves nothing, even on a labelled row", ctx do
+      asset(ctx, ctx.asset, ~s(["restricted"]))
+      before = local_stamp()
+
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE assets SET security_labels = security_labels, tenant_id = tenant_id, workspace_id = workspace_id WHERE id = ?1",
+          [ctx.asset]
+        )
+
+      assert local_stamp() == before
+    end
+
+    test "an INSERT OR REPLACE of an asset with a labelled one holds an aggregate", ctx do
+      report(ctx, ctx.report)
+      asset(ctx, ctx.asset)
+
+      first = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      assert sent?(first["mutations"], "analysis_reports", ctx.report)
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT OR REPLACE INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path, security_labels) VALUES (?1, ?2, ?3, 'text/plain', 1, 'x', '[\"restricted\"]')",
+          [ctx.asset, ctx.tenant, ctx.ws]
+        )
+
+      second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+      refute sent?(second["mutations"], "analysis_reports", ctx.report)
+    end
+
+    test "moving an asset between workspaces moves the stamp when it names a class", ctx do
+      other = create_workspace(ctx.tenant, "moved-#{ctx.n}", %{})
+
+      {:ok, quiet} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "quiet-moved-#{ctx.n}",
+          name: "Quiet"
+        })
+
+      move = fn id, to ->
+        {:ok, _} = Store.raw_query("UPDATE assets SET workspace_id = ?2 WHERE id = ?1", [id, to])
+      end
+
+      # Open: nothing to find in either workspace.
+      asset(ctx, "asset-open-#{ctx.n}")
+      before = local_stamp()
+      move.("asset-open-#{ctx.n}", other)
+      assert local_stamp() == before
+
+      # Labelled: out of a syncing workspace, between two, and in from one that
+      # does not sync.
+      asset(ctx, ctx.asset, ~s(["restricted"]))
+
+      for {to, label} <- [
+            {other, "to another syncing workspace"},
+            {quiet.id, "to one that does not sync"},
+            {ctx.ws, "back from one that does not sync"}
+          ] do
+        before = local_stamp()
+        move.(ctx.asset, to)
+        assert local_stamp() > before, "moved #{label}"
+      end
+    end
+
+    test "sync enabled later: writes before it move nothing, writes after it do", ctx do
+      {:ok, late} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "late-#{ctx.n}",
+          name: "Late"
+        })
+
+      before = local_stamp()
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path, security_labels) VALUES (?1, ?2, ?3, 'text/plain', 1, 'x', '[\"restricted\"]')",
+          ["asset-late-#{ctx.n}", ctx.tenant, late.id]
+        )
+
+      assert local_stamp() == before
+
+      {:ok, _} = Sync.enable(ctx.tenant, late.id, "user:owner")
+
+      {:ok, _} =
+        Store.raw_query("UPDATE assets SET security_labels = '[]' WHERE id = ?1", [
+          "asset-late-#{ctx.n}"
+        ])
+
       assert local_stamp() > before
     end
   end
@@ -2319,10 +2457,8 @@ defmodule OptimalEngine.SyncGateTest do
       replicated = replicated_tables()
       stamped = Capture.stamped_tables()
 
-      # A scanned table either replicates (the capture triggers watch it, the test
-      # above) or is stamped.
-      assert stamped == Lineage.scanned_tables() -- replicated
       assert stamped != []
+      assert Enum.all?(stamped, &(&1 in Lineage.scanned_tables() and &1 not in replicated))
 
       for table <- ~w(assets active_memory_pools context_packages model_call_runs tool_call_runs
                       skill_packages mcp_tool_definitions),
@@ -2342,6 +2478,18 @@ defmodule OptimalEngine.SyncGateTest do
         assert sql =~ "sync_local_stamp"
       end
 
+      # An update counts when it writes the column the gate reads of the table, and
+      # the scope of the row: the same columns `Gate` builds its scan on.
+      for table <- stamped do
+        {_kind, column} = Lineage.class_column(Lineage.spec(table))
+        assert Capture.stamp_columns(table) == [column, "tenant_id", "workspace_id"]
+
+        assert triggers["sync_stamp_au_#{table}"] =~
+                 ~s(AFTER UPDATE OF "#{column}", "tenant_id", "workspace_id" ON)
+      end
+
+      assert triggers["sync_stamp_au_assets"] =~ ~s(AFTER UPDATE OF "security_labels")
+
       # Nor is one left on a table that is not stamped.
       expected =
         for table <- stamped, operation <- ~w(ai au ad), do: "sync_stamp_#{operation}_#{table}"
@@ -2350,6 +2498,41 @@ defmodule OptimalEngine.SyncGateTest do
 
       # The counter keeps no row, only its sequence.
       assert {:ok, [[0]]} = Store.raw_query("SELECT COUNT(*) FROM sync_local_stamp", [])
+    end
+
+    test "a row that may name a class is told from one that cannot, for each way a table names it" do
+      may? = fn kind, column, value ->
+        sql = Lineage.may_name_class_sql({kind, column}, "r")
+
+        {:ok, [[result]]} =
+          Store.raw_query("SELECT #{sql} FROM (SELECT ?1 AS \"#{column}\") r", [value])
+
+        result == 1
+      end
+
+      # Labels: anything but an empty array, text that is not JSON and NULL included.
+      refute may?.(:labels, "security_labels", "[]")
+
+      for value <- [~s(["restricted"]), ~s(["public"]), "", "not json", "[ ]", nil],
+          do: assert(may?.(:labels, "security_labels", value), inspect(value))
+
+      # Metadata: the key, or a backslash (a key can be spelled with an escape).
+      for value <- [nil, "{}", ~s({"note":"a"})],
+          do: refute(may?.(:meta, "metadata", value), inspect(value))
+
+      for value <- [
+            ~s({"security_labels":[]}),
+            ~S({"security\u005flabels":["x"]}),
+            ~S({"note":"a\nb"})
+          ],
+          do: assert(may?.(:meta, "metadata", value), inspect(value))
+
+      # A class column: not null, empty, internal or public, whatever the case.
+      for value <- [nil, "", "internal", "PUBLIC"],
+          do: refute(may?.(:class, "classification_level", value), inspect(value))
+
+      for value <- ["restricted", "Confidential", "unheard-of"],
+          do: assert(may?.(:class, "classification_level", value), inspect(value))
     end
 
     test "installing again does no DDL" do
@@ -2961,6 +3144,14 @@ defmodule OptimalEngine.SyncGateTest do
       Store.raw_query(
         "INSERT INTO assets (id, tenant_id, workspace_id, content_type, size_bytes, storage_path, security_labels) VALUES (?1, ?2, ?3, 'text/plain', 1, ?4, ?5)",
         [id, ctx.tenant, ctx.ws, "assets/#{id}", labels]
+      )
+  end
+
+  defp tool_run(ctx, id, labels \\ "[]") do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO tool_call_runs (id, tenant_id, workspace_id, mcp_tool_definition_id, tool_name, decision_state, security_labels) VALUES (?1, ?2, ?3, 'tool-1', 'search', 'allowed', ?4)",
+        [id, ctx.tenant, ctx.ws, labels]
       )
   end
 

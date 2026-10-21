@@ -959,26 +959,22 @@ defmodule OptimalEngine.Sync.Gate do
 
       index.contexts != %{} or index.memories != %{} or
         Enum.any?(Lineage.scanned_tables(), fn table ->
-          case exact_predicate(Lineage.spec(table), gate.rank) do
-            nil ->
-              false
+          predicate = exact_predicate(Lineage.class_column(Lineage.spec(table)), gate.rank)
 
-            predicate ->
-              sql =
-                "SELECT 1 FROM #{quote_name(table)} WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate} LIMIT 1"
+          sql =
+            "SELECT 1 FROM #{quote_name(table)} WHERE tenant_id = ?1 AND workspace_id = ?2 AND #{predicate} LIMIT 1"
 
-              query!(sql, [gate.tenant_id, gate.workspace_id]) != []
-          end
+          query!(sql, [gate.tenant_id, gate.workspace_id]) != []
         end)
     end)
   end
 
   # SQL for "this row names a class above the gate", exactly, by the way its
-  # table names a class; nil for a table that names none.
-  defp exact_predicate(%{labels: true}, rank) do
+  # table names a class (`Lineage.class_column/1`).
+  defp exact_predicate({:labels, column}, rank) do
     """
-    (CASE WHEN json_valid(security_labels)
-       THEN EXISTS (SELECT 1 FROM json_each(security_labels) j WHERE lower(j.value) IN (#{classes_above(rank)}))
+    (CASE WHEN json_valid(#{column})
+       THEN EXISTS (SELECT 1 FROM json_each(#{column}) j WHERE lower(j.value) IN (#{classes_above(rank)}))
        ELSE 1 END)
     """
   end
@@ -986,7 +982,7 @@ defmodule OptimalEngine.Sync.Gate do
   # A `security_labels` key that appears twice is above every class: SQLite reads
   # the first of two and `SecurityLabels.metadata_map/1` marks the pair as
   # unresolved, and the row must not pass as open because the first is.
-  defp exact_predicate(%{meta: meta}, rank) when is_binary(meta) do
+  defp exact_predicate({:meta, meta}, rank) do
     """
     (CASE WHEN json_valid(#{meta}) THEN
        CASE WHEN (SELECT count(*) FROM json_each(#{meta}) WHERE key = 'security_labels') > 1 THEN 1
@@ -1001,10 +997,8 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   # `internal` is the default of a classification column and says nothing.
-  defp exact_predicate(%{class: class}, rank) when is_binary(class),
+  defp exact_predicate({:class, class}, rank),
     do: "lower(#{class}) IN (#{classes_above(max(rank, 1))})"
-
-  defp exact_predicate(_spec, _rank), do: nil
 
   defp classes_above(rank) do
     SecurityLabels.classes() |> Enum.drop(rank + 1) |> Enum.map_join(", ", &"'#{&1}'")

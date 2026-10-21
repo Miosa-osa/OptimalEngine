@@ -174,7 +174,9 @@ That scan is kept between gates (a pull of many pages, the next push cycle) whil
 The stamp is read just before each scan, not once per gate, so a long push cycle that needs a scan late does not use an older stamp.
 A push cycle classifies one page at a time, as it sends it, so a label written while an earlier page is on the wire holds back the pages after it.
 A table the gate scans that stays on its Engine (`assets`, `active_memory_pools`, `context_packages`, the model and tool run tables, `skill_packages`, `mcp_tool_definitions`) is not captured, so triggers on it move a third counter, `sync_local_stamp`, which keeps no row.
-They fire for the rows of a workspace that syncs, for an insert, a delete, and an update that writes a column the gate reads (the labels, the metadata or the class); a status written on every call leaves the scan alone.
+They fire for the rows of a workspace that syncs that may name a class (labels other than an empty array, a class other than `internal` or `public`; a value that cannot be read counts), for an insert or a delete, and for an update that changes the column the gate reads or the scope of the row, to or from such a row.
+A row without labels, a status written on every call, and an update that writes the same value leave the scan alone, so a busy run table does not keep the cache cold.
+An `INSERT OR REPLACE` that swaps a labelled row for an open one is seen at the ttl, which can only hold an aggregate longer.
 An entry also expires after `config :optimal_engine, :sync_gate_cache_ttl_ms` (default `30000`; `0` turns the cache off), which is a backstop for a write that nothing sees; every table the gate scans is captured or stamped, and a test pins that.
 A value that is not a non-negative integer of milliseconds turns the cache off and is warned about once, instead of the gate failing on it at every call.
 The cache is dropped after a change from a peer is applied and when sync is enabled or disabled for a workspace.
