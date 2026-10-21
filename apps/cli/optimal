@@ -115,6 +115,19 @@ die() {
   exit "$_d_code"
 }
 usage_die() { die "$EX_USAGE" "$* (see '$PROG help')"; }
+
+# int64_ok VALUE: 0 when VALUE is empty (not given) or a whole number that fits in
+# 64 bits, digits only and at most 9223372036854775807. The Engine refuses a
+# larger one with HTTP 400, so the client says so before sending anything.
+int64_ok() {
+  case $1 in '') return 0 ;; *[!0-9]*) return 1 ;; esac
+  _i_n=${1#"${1%%[!0]*}"}
+  case ${#_i_n} in
+    [0-9] | 1[0-8]) return 0 ;;
+    19) awk -v n="$_i_n" 'BEGIN { exit !((n "") <= "9223372036854775807") }' ;;
+    *) return 1 ;;
+  esac
+}
 verbose() { [ -n "${O_verbose:-}" ] && printf '%s\n' "$(redact "$*")" >&2; return 0; }
 
 # Single-quotes a value for eval.
@@ -1138,7 +1151,7 @@ parse_args "$@"
 eval "set -- $POS"
 for _num in limit offset timeout; do
   eval "_nv=\${O_$_num:-}"
-  case $_nv in *[!0-9]*) usage_die "--$_num takes a whole number" ;; esac
+  int64_ok "$_nv" || usage_die "--$_num takes a whole number, at most 9223372036854775807"
 done
 
 if [ -n "${O_version:-}" ]; then
@@ -1447,7 +1460,7 @@ case $CMD in
         ;;
       request)
         [ -n "${O_action:-}" ] && [ -n "${O_resource:-}" ] || usage_die "authority request needs --action and --resource"
-        case ${O_ttl:-} in *[!0-9]*) usage_die "--ttl takes seconds" ;; esac
+        int64_ok "${O_ttl:-}" || usage_die "--ttl takes seconds, a whole number at most 9223372036854775807"
         post /api/authority/requests "$(jobj workspace_id "$WS" action "$O_action" resource "$O_resource" \
           data_class "${O_data_class:-}" @ttl_seconds "${O_ttl:-}" justification "${O_justification:-}")"
         ;;
@@ -1480,7 +1493,7 @@ case $CMD in
       shift
       too_many $# 1 "viability history"
       use_ws "${1:-}"
-      case ${O_days:-} in *[!0-9]*) usage_die "--days takes a whole number" ;; esac
+      int64_ok "${O_days:-}" || usage_die "--days takes a whole number, at most 9223372036854775807"
       if [ -n "${O_workspaces:-}" ]; then
         get /api/viability/history "" workspaces "$O_workspaces" days "${O_days:-}"
       else

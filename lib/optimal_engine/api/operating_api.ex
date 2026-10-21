@@ -12,6 +12,7 @@ defmodule OptimalEngine.API.OperatingAPI do
   import Plug.Conn
 
   alias OptimalEngine.API.Actor
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.Operating.{Boot, Brief, Loops, Protocol, Rhythm}
   alias OptimalEngine.Routing.RuleStore
   alias OptimalEngine.Topology.Portable
@@ -426,14 +427,7 @@ defmodule OptimalEngine.API.OperatingAPI do
     end
   end
 
-  defp int(nil, default), do: default
-
-  defp int(value, default) do
-    case Integer.parse(to_string(value)) do
-      {n, ""} -> n
-      _ -> default
-    end
-  end
+  defp int(value, default), do: IntParam.parse(value, default)
 
   defp error(conn, status, reason) when is_atom(reason),
     do: error(conn, status, Atom.to_string(reason))

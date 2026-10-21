@@ -28,6 +28,7 @@ defmodule OptimalEngine.API.Router do
   @busy_detail "the Engine's store is busy; retry shortly"
 
   alias OptimalEngine.API.Actor
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.API.Pagination
   alias OptimalEngine.API.Reader
   alias OptimalEngine.Graph.Analyzer, as: GraphAnalyzer
@@ -4122,18 +4123,7 @@ defmodule OptimalEngine.API.Router do
     (Map.get(intake, "path") || Map.get(intake, :path)) == "memory_core_pending_claim"
   end
 
-  defp parse_optional_positive_int(nil), do: nil
-  defp parse_optional_positive_int(""), do: nil
-
-  defp parse_optional_positive_int(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {int, ""} when int > 0 -> int
-      _ -> nil
-    end
-  end
-
-  defp parse_optional_positive_int(value) when is_integer(value) and value > 0, do: value
-  defp parse_optional_positive_int(_value), do: nil
+  defp parse_optional_positive_int(value), do: IntParam.parse(value, nil, positive: true)
 
   defp truthy?(true), do: true
   defp truthy?("true"), do: true
@@ -5027,15 +5017,8 @@ defmodule OptimalEngine.API.Router do
     Map.get(conn.query_params, key, default)
   end
 
-  defp parse_int(nil, default), do: default
-  defp parse_int(n, _default) when is_integer(n) and n > 0, do: n
-
-  defp parse_int(str, default) do
-    case Integer.parse(to_string(str)) do
-      {n, _} when n > 0 -> n
-      _ -> default
-    end
-  end
+  defp parse_int(value, default),
+    do: IntParam.parse(value, default, partial: true, positive: true)
 
   # The graph analyzer and batch routes read and write in the requester's
   # tenant as well as the requested workspace (OptimalEngine.Graph.scope/1), so
@@ -5855,6 +5838,12 @@ defmodule OptimalEngine.API.Router do
     |> put_resp_content_type("application/json")
     |> put_resp_header("retry-after", "1")
     |> send_resp(503, Jason.encode!(%{error: "busy", detail: @busy_detail}))
+  end
+
+  def handle_errors(conn, %{reason: %IntParam.OutOfRange{message: message}}) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(400, Jason.encode!(%{error: "invalid_parameter", detail: message}))
   end
 
   def handle_errors(conn, %{reason: reason}) do

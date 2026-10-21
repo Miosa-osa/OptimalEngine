@@ -23,6 +23,7 @@ defmodule OptimalEngine.API.ImportsAPI do
   import Plug.Conn
 
   alias OptimalEngine.API.Actor
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.Imports
   alias OptimalEngine.Imports.{Fetch, Notion}
   alias OptimalEngine.Workspace
@@ -286,14 +287,7 @@ defmodule OptimalEngine.API.ImportsAPI do
     end
   end
 
-  defp int(nil, default), do: default
-
-  defp int(value, default) do
-    case Integer.parse(to_string(value)) do
-      {n, ""} -> n
-      _ -> default
-    end
-  end
+  defp int(value, default), do: IntParam.parse(value, default)
 
   defp error(conn, status, reason), do: json(conn, status, %{error: reason})
 

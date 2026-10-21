@@ -24,6 +24,7 @@ defmodule OptimalEngine.API.ViabilityAPI do
 
   import Plug.Conn
 
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.API.{Actor, OperatingAPI}
   alias OptimalEngine.Authority.ActionChain
   alias OptimalEngine.Signal.{PreSend, Reclassifier}
@@ -347,14 +348,7 @@ defmodule OptimalEngine.API.ViabilityAPI do
     end
   end
 
-  defp int(nil, default), do: default
-
-  defp int(value, default) do
-    case Integer.parse(to_string(value)) do
-      {n, ""} -> n
-      _ -> default
-    end
-  end
+  defp int(value, default), do: IntParam.parse(value, default)
 
   defp error(conn, status, reason) when is_atom(reason),
     do: error(conn, status, Atom.to_string(reason))

@@ -14,6 +14,7 @@ defmodule OptimalEngine.API.ScopeAPI do
   import Plug.Conn
 
   alias OptimalEngine.API.Actor
+  alias OptimalEngine.API.IntParam
   alias OptimalEngine.{Federation, Scope}
   alias OptimalEngine.Portability.WorkspaceBundle
 
@@ -50,11 +51,7 @@ defmodule OptimalEngine.API.ScopeAPI do
           key -> if "*" in key.workspace_scope, do: nil, else: key.workspace_scope
         end
 
-      limit =
-        case Integer.parse(conn.query_params["limit"] || "10") do
-          {n, ""} -> n
-          _ -> 10
-        end
+      limit = IntParam.parse(conn.query_params["limit"], 10)
 
       json(conn, 200, Federation.search(tenant(conn), query, allowed: allowed, limit: limit))
     end
