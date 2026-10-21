@@ -237,8 +237,16 @@ The ledger route skips what the data-class ceiling holds and what the key may no
 An export of a store that cannot be read is a `500`, and a read the gate could not make is a `503`, never a partial answer.
 An anonymous local caller (no key, authentication not required) is the trusted operator and sees everything.
 
-**Not covered yet.** These routes still answer by the access lists (or not at all) and not by the labels and partitions of a keyed caller: `GET /api/memory`, `GET /api/memory/:id`, `GET /api/signals/:id`, `GET /api/wiki/:slug`, and the labels on `GET /api/search` and `GET /api/grep` (which apply the access lists only).
-A key with `read` reaches them whatever its grants. Do not rely on a key's label grants as a boundary until they follow.
+### What a read key sees of single records, lists and searches
+
+The same two rules apply to `GET /api/memory`, `GET /api/memory/:id`, `GET /api/signals/:id`, `GET /api/wiki/:slug`, `GET /api/search` and `GET /api/grep`.
+A record the key may not see is a `404`, the same answer as a record that is not there.
+A list, a search or a grep leaves out what the key may not see, says how many it left out in `withheld`, and sets `complete` to false when there were any.
+A search or grep decides for each hit from the row it came from (a document, a memory, a chunk), so a chunk of a restricted document is not found by a key without the label.
+`pagination.total` of the memory list counts the memories of the page query before the key's grants are applied; it names no content.
+
+**Not covered yet.** These routes also return row text, and a key with `read` still reaches them whatever its grants: the version and relation lists of a memory (`/api/memory/:id/versions`, `/relations`), the Memory Core reads (`/api/memory-core/claims`, `/claims/:id`, `/claim-review`, `/active-pools/:id`), the entity routes (`/api/entities/*`), the graph routes (`/api/graph*`, `/api/optimal/graph`), and the wiki list, contradictions and stale lists (`/api/wiki`, `/api/wiki/contradictions`, `/api/wiki/stale`).
+Do not rely on a key's label grants as a boundary for a workspace until these follow.
 
 Limits worth knowing:
 
