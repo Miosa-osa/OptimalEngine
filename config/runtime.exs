@@ -417,6 +417,22 @@ if interval = System.get_env("OPTIMAL_VIABILITY_INTERVAL_MS") do
   config :optimal_engine, :viability_interval_ms, String.to_integer(interval)
 end
 
+# Maintenance jobs: how often queued chunk-embedding and graph backfill jobs
+# are drained, and how often the sweep queues chunk embedding for workspaces
+# with chunks that have none (0 disables either).
+if interval = System.get_env("OPTIMAL_MAINTENANCE_INTERVAL_MS") do
+  config :optimal_engine, :maintenance_interval_ms, String.to_integer(interval)
+end
+
+if interval = System.get_env("OPTIMAL_EMBEDDING_SWEEP_INTERVAL_MS") do
+  config :optimal_engine, :embedding_sweep_interval_ms, String.to_integer(interval)
+end
+
+# Reindex requests: how often queued reindex jobs are drained (0 disables).
+if interval = System.get_env("OPTIMAL_REINDEX_INTERVAL_MS") do
+  config :optimal_engine, :reindex_interval_ms, String.to_integer(interval)
+end
+
 # Optimal Authority. OPTIMAL_AUTHORITY_KEY (64 hex characters) wraps the
 # signing keys and is read directly by OptimalEngine.Authority.Keys.
 authority_mode = System.get_env("OPTIMAL_AUTHORITY_MODE")

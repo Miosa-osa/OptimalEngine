@@ -156,4 +156,77 @@ defmodule OptimalEngine.JobsTest do
     assert {:error, :kind_required} = Jobs.enqueue(ws, " ", %{})
     assert {:error, :invalid_max_attempts} = Jobs.enqueue(ws, "k", %{}, max_attempts: 0)
   end
+
+  test "enqueue_coalesced keeps one active job of a kind per workspace, even under concurrency",
+       %{workspace_id: ws, kind: kind} do
+    results =
+      1..8
+      |> Enum.map(fn n -> Task.async(fn -> Jobs.enqueue_coalesced(ws, kind, %{"n" => n}) end) end)
+      |> Enum.map(&Task.await/1)
+
+    assert [{:ok, job, :queued}] = Enum.filter(results, &match?({:ok, _, :queued}, &1))
+    assert Enum.all?(results, fn {:ok, other, _} -> other.id == job.id end)
+
+    assert {:ok, %{id: id}} = claim(ws, kind)
+    assert id == job.id
+    assert {:ok, again, :active} = Jobs.enqueue_coalesced(ws, kind)
+    assert again.id == job.id
+
+    {:ok, _} = Jobs.complete(job.id, "worker-a")
+    assert {:ok, next, :queued} = Jobs.enqueue_coalesced(ws, kind, %{}, idempotency_key: "x")
+    refute next.id == job.id
+    assert next.idempotency_key == nil
+    assert {:error, :workspace_not_found} = Jobs.enqueue_coalesced("no-such-workspace", kind)
+  end
+
+  test "complete_and_enqueue completes a job and queues its continuation in one step",
+       %{workspace_id: ws, kind: kind} do
+    {:ok, job} = Jobs.enqueue(ws, kind, %{"step" => 1}, priority: 3, max_attempts: 2)
+    {:ok, _} = claim(ws, kind)
+
+    assert {:ok, %{completed: done, next: next, state: :queued}} =
+             Jobs.complete_and_enqueue(job.id, "worker-a", %{"step" => 2})
+
+    assert done.id == job.id
+    assert done.status == "completed"
+    assert next.payload == %{"step" => 2}
+    assert next.status == "available"
+    assert {next.priority, next.max_attempts} == {3, 2}
+
+    assert {:error, :lease_lost} = Jobs.complete_and_enqueue(next.id, "worker-a", %{})
+    assert {:ok, [_]} = Jobs.list(ws, status: "available")
+  end
+
+  test "a job enqueued while the running one finishes is the continuation it coalesces onto",
+       %{workspace_id: ws, kind: kind} do
+    {:ok, job} = Jobs.enqueue(ws, kind, %{"step" => 1})
+    {:ok, _} = claim(ws, kind)
+    # A request that slipped past coalescing while the job was running.
+    {:ok, other} = Jobs.enqueue(ws, kind, %{"from" => "request"})
+
+    assert {:ok, %{completed: done, next: next, state: :active}} =
+             Jobs.complete_and_enqueue(job.id, "worker-a", %{"step" => 2})
+
+    assert done.status == "completed"
+    assert next.id == other.id
+    assert {:ok, [only]} = Jobs.list(ws, status: "available")
+    assert only.id == other.id
+  end
+
+  test "defer puts a job back later without spending an attempt", %{workspace_id: ws, kind: kind} do
+    {:ok, job} = Jobs.enqueue(ws, kind, %{"n" => 1}, max_attempts: 1)
+    {:ok, claimed} = claim(ws, kind)
+    assert claimed.attempts == 1
+
+    assert {:ok, deferred} =
+             Jobs.defer(job.id, "worker-a", "deferred: waiting", 600, payload: %{"n" => 2})
+
+    assert deferred.status == "available"
+    assert deferred.attempts == 0
+    assert deferred.last_error == "deferred: waiting"
+    assert deferred.payload == %{"n" => 2}
+    assert deferred.lease_owner == nil
+    assert {:ok, nil} = claim(ws, kind)
+    assert {:error, :lease_lost} = Jobs.defer(job.id, "worker-a", "again", 0)
+  end
 end

@@ -292,19 +292,17 @@ defmodule OptimalEngine.Jobs do
     end)
   end
 
+  @complete_sql """
+  UPDATE jobs SET status = 'completed', completed_at = datetime('now'),
+    lease_owner = NULL, lease_expires_at = NULL, updated_at = datetime('now')
+  WHERE id = ?1 AND status = 'running' AND lease_owner = ?2
+  """
+
   @doc "Mark a leased job completed. Fails with `:lease_lost` for a non-owner."
   @spec complete(String.t(), String.t()) :: {:ok, job()} | {:error, term()}
   def complete(job_id, lease_owner) when is_binary(job_id) and is_binary(lease_owner) do
     Store.transaction(fn txn ->
-      case Store.txn_execute(
-             txn,
-             """
-             UPDATE jobs SET status = 'completed', completed_at = datetime('now'),
-               lease_owner = NULL, lease_expires_at = NULL, updated_at = datetime('now')
-             WHERE id = ?1 AND status = 'running' AND lease_owner = ?2
-             """,
-             [job_id, lease_owner]
-           ) do
+      case Store.txn_execute(txn, @complete_sql, [job_id, lease_owner]) do
         {:ok, 1} -> txn_get(txn, job_id)
         {:ok, 0} -> {:error, :lease_lost}
         {:error, reason} -> {:error, reason}
@@ -527,6 +525,101 @@ defmodule OptimalEngine.Jobs do
     end
   end
 
+  @doc """
+  Enqueue a job unless the workspace already has a queued or running job of
+  the same kind, in which case that job is returned with `:active`. The check
+  and the insert run in one Store transaction, so two concurrent requests
+  never both enqueue. Takes the `enqueue/4` options except
+  `:idempotency_key`.
+  """
+  @spec enqueue_coalesced(String.t(), String.t(), map(), keyword()) ::
+          {:ok, job(), :queued | :active} | {:error, term()}
+  def enqueue_coalesced(workspace_id, kind, payload \\ %{}, opts \\ [])
+      when is_binary(workspace_id) and is_binary(kind) and is_map(payload) do
+    opts = Keyword.delete(opts, :idempotency_key)
+
+    with :ok <- validate_kind(kind),
+         :ok <- validate_max_attempts(Keyword.get(opts, :max_attempts, @default_max_attempts)),
+         {:ok, {job, state}} <-
+           Store.transaction(fn txn ->
+             with {:ok, tenant_id} <- txn_workspace_tenant(txn, workspace_id) do
+               txn_coalesce(txn, tenant_id, workspace_id, kind, payload, opts)
+             end
+           end) do
+      {:ok, job, state}
+    end
+  end
+
+  @doc """
+  Complete a leased job and enqueue its continuation in one Store transaction,
+  so no request can land between the two. The continuation coalesces as in
+  `enqueue_coalesced/4`: when the workspace already has another queued or
+  running job of the kind, that job is returned with `:active` and nothing is
+  inserted. Options are those of `enqueue/4`; priority and max_attempts
+  default to the completed job's. Fails with `:lease_lost` for a non-owner,
+  completing and inserting nothing.
+  """
+  @spec complete_and_enqueue(String.t(), String.t(), map(), keyword()) ::
+          {:ok, %{completed: job(), next: job(), state: :queued | :active}} | {:error, term()}
+  def complete_and_enqueue(job_id, lease_owner, payload, opts \\ [])
+      when is_binary(job_id) and is_binary(lease_owner) and is_map(payload) do
+    with :ok <- validate_max_attempts(Keyword.get(opts, :max_attempts, @default_max_attempts)) do
+      Store.transaction(fn txn ->
+        with {:ok, job} <- txn_get(txn, job_id),
+             :ok <- owns_lease(job, lease_owner),
+             :ok <- one_row(Store.txn_execute(txn, @complete_sql, [job_id, lease_owner])),
+             {:ok, completed} <- txn_get(txn, job_id),
+             opts =
+               [priority: job.priority, max_attempts: job.max_attempts]
+               |> Keyword.merge(Keyword.delete(opts, :idempotency_key)),
+             {:ok, {next, state}} <-
+               txn_coalesce(txn, job.tenant_id, job.workspace_id, job.kind, payload, opts) do
+          {:ok, %{completed: completed, next: next, state: state}}
+        end
+      end)
+    end
+  end
+
+  @doc """
+  Put a leased job back without spending an attempt. It becomes `available`
+  again after `retry_in` seconds with `last_error` set to `reason`, and the
+  attempt its claim counted is given back. This is for work that could not
+  start because of something outside the job, such as a dependency that is
+  down, not for a failure. `:payload` replaces the payload (a caller counting
+  deferrals keeps the count there). Fails with `:lease_lost` for a non-owner.
+  """
+  @spec defer(String.t(), String.t(), term(), non_neg_integer(), keyword()) ::
+          {:ok, job()} | {:error, term()}
+  def defer(job_id, lease_owner, reason, retry_in, opts \\ [])
+      when is_binary(job_id) and is_binary(lease_owner) and is_integer(retry_in) do
+    Store.transaction(fn txn ->
+      with {:ok, job} <- txn_get(txn, job_id),
+           :ok <- owns_lease(job, lease_owner),
+           :ok <-
+             one_row(
+               Store.txn_execute(
+                 txn,
+                 """
+                 UPDATE jobs SET status = 'available',
+                   attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+                   last_error = ?2, payload = ?3,
+                   run_at = datetime('now', '+' || ?4 || ' seconds'),
+                   lease_owner = NULL, lease_expires_at = NULL, updated_at = datetime('now')
+                 WHERE id = ?1
+                 """,
+                 [
+                   job_id,
+                   error_message(reason),
+                   Jason.encode!(Keyword.get(opts, :payload, job.payload)),
+                   max(retry_in, 0)
+                 ]
+               )
+             ) do
+        txn_get(txn, job_id)
+      end
+    end)
+  end
+
   @doc "List a workspace's dead letters, newest first."
   @spec dead_letters(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def dead_letters(workspace_id, opts \\ []) when is_binary(workspace_id) do
@@ -734,6 +827,46 @@ defmodule OptimalEngine.Jobs do
 
   defp workspace_tenant(workspace_id) do
     case Store.raw_query(
+           "SELECT tenant_id FROM workspaces WHERE id = ?1 AND status = 'active'",
+           [workspace_id]
+         ) do
+      {:ok, [[tenant_id]]} -> {:ok, tenant_id}
+      {:ok, []} -> {:error, :workspace_not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The workspace's queued or running job of the kind, or a new one inserted.
+  defp txn_coalesce(txn, tenant_id, workspace_id, kind, payload, opts) do
+    with {:ok, active} <-
+           Store.txn_query(
+             txn,
+             """
+             SELECT id FROM jobs
+             WHERE workspace_id = ?1 AND kind = ?2 AND status IN ('available', 'running')
+             ORDER BY inserted_at ASC, id ASC
+             LIMIT 1
+             """,
+             [workspace_id, kind]
+           ) do
+      case active do
+        [[active_id]] ->
+          with {:ok, job} <- txn_get(txn, active_id), do: {:ok, {job, :active}}
+
+        [] ->
+          id = new_id("job_")
+          {sql, params} = insert_statement(id, tenant_id, workspace_id, kind, payload, opts)
+
+          with {:ok, _} <- Store.txn_execute(txn, sql, params),
+               {:ok, job} <- txn_get(txn, id),
+               do: {:ok, {job, :queued}}
+      end
+    end
+  end
+
+  defp txn_workspace_tenant(txn, workspace_id) do
+    case Store.txn_query(
+           txn,
            "SELECT tenant_id FROM workspaces WHERE id = ?1 AND status = 'active'",
            [workspace_id]
          ) do

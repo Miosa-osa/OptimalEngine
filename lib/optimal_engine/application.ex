@@ -153,7 +153,9 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Imports.Worker,
 
       # ── Bundle export and import jobs (/api/bundles/jobs) ───────────────
-      OptimalEngine.Portability.BundleWorker
+      OptimalEngine.Portability.BundleWorker,
+      # ── Maintenance jobs (chunk embeddings, graph edges) and the sweep ───
+      OptimalEngine.Maintenance.Worker
     ]
   end
 
