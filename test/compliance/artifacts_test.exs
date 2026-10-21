@@ -8,6 +8,8 @@ defmodule OptimalEngine.Compliance.ArtifactsTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias OptimalEngine.Compliance.Artifacts
   alias OptimalEngine.Store
 
@@ -225,6 +227,53 @@ defmodule OptimalEngine.Compliance.ArtifactsTest do
 
       assert {:ok, %{files: 0}} = Artifacts.remove([{:checkpoint, "run-13", link, @workspace}])
       assert File.exists?(target)
+    end
+  end
+
+  describe "what it leaves alone" do
+    test "is counted by kind and reason, and logged without a path", ctx do
+      other = checkpoint!(ctx, "run-other", @workspace)
+      note = file!(ctx.root, "tenants/acme/sales/nodes/deal.md")
+      target = file!(ctx.outside, "linked.bin")
+      link = Path.join(ctx.root, "assets/ab/link.bin")
+      File.mkdir_p!(Path.dirname(link))
+      File.ln_s!(target, link)
+      absent = Path.join(ctx.root, "assets/ab/absent.bin")
+
+      log =
+        capture_log(fn ->
+          send(
+            self(),
+            {:result,
+             Artifacts.remove([
+               {:checkpoint, "run-1", other, @workspace},
+               {:asset_file, note, "acme:sales"},
+               {:asset_file, link, "default"},
+               {:asset_file, absent, "default"}
+             ])}
+          )
+        end)
+
+      assert_received {:result, {:ok, result}}
+      assert result.files == 0
+
+      assert result.skipped == %{
+               checkpoint: %{not_ours: 1},
+               asset_file: %{not_ours: 1, link: 1}
+             }
+
+      assert log =~ "left alone"
+      refute log =~ ctx.root
+      refute log =~ ctx.outside
+    end
+
+    test "a file that is already gone is not a skip", ctx do
+      absent = Path.join(ctx.root, "assets/ab/absent.bin")
+
+      assert {:ok, result} = Artifacts.remove([{:asset_file, absent, "default"}])
+
+      assert result.files == 0
+      refute Map.has_key?(result, :skipped)
     end
   end
 
