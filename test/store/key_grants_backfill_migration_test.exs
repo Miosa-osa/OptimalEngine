@@ -2,12 +2,13 @@ defmodule OptimalEngine.Store.KeyGrantsBackfillMigrationTest do
   @moduledoc """
   Migration 85 gives the keys minted before label and partition grants existed
   the grants a machine key should hold: `allowed_security_labels` of public,
-  internal and confidential, and no partition. Such a key read everything until
-  the read routes began to follow grants, and now reads only what carries no
-  label; the backfill narrows it to confidential instead. It touches nothing
-  else: not a key that already has either field, not the operator's bootstrap
-  root key (which holds `"*"` and is given it at boot), not a revoked key, and
-  not a key whose metadata it cannot read.
+  internal and confidential, and no partition. Such a key has none, and reads
+  only rows that carry no label; the backfill lets it read confidential ones
+  too (and, on the routes that read everything before they followed grants,
+  takes restricted ones away). It touches nothing else: not a key that already
+  has either field, not the operator's bootstrap root key (which holds `"*"`
+  and is given it at boot), not a revoked key, and not a key whose metadata it
+  cannot read.
   """
 
   use ExUnit.Case, async: false

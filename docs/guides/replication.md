@@ -231,9 +231,11 @@ A minter can only give grants it holds (a minter that holds `"*"` can give any).
 For any other key, give the labels it should read.
 The recommended default for a machine key is `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`: it reads rows labelled public, internal or confidential and rows with no label, and does not read restricted rows, rows with a label of their own (`private`, a team name) or partitioned rows.
 Migration 85 gives that default, once, to every live key minted before grants existed (a key whose metadata has neither field), and marks it `grants_backfilled`.
-It narrows those keys: until the read routes followed grants they read everything.
+It grants: a key without grants read only unlabelled rows on the routes that already followed grants (the exports, the conflict list, the ledger and governed recall), and now reads confidential rows there as well.
+On the routes that did not (memory by id and list, signal, wiki page, search, grep) such a key read everything, and now reads no restricted row, no row with a label of its own and no partitioned row.
 It leaves alone a key that has either field (an empty list included), a revoked key and the root bootstrap key, which holds `"*"`.
-A key minted after the upgrade is not covered: pass its grants when you mint it.
+To keep a key at unlabelled rows only, give it `allowed_security_labels` and `allowed_partitions` of `[]` before the upgrade: the migration cannot tell it from a key minted before grants existed.
+A key minted through the API writes both fields, empty when the request names none, so the migration never reaches it; pass the grants you mean.
 
 An answer says what was left out.
 Each of these routes returns `withheld` (how many items were not shown) and `complete` (false when any item was left out or, for conflicts, redacted); the export of a workspace counts its signals, memories and wiki pages together.
