@@ -86,19 +86,28 @@ defmodule OptimalEngine.Store.DialectTest do
 
     test "the part of a value before a separator, and instr anywhere else refused" do
       assert {:ok,
-              "SELECT (CASE WHEN strpos($1, ':') > 0 THEN substr($1, 1, strpos($1, ':') - 1) ELSE '' END) FROM t WHERE w.id = $1"} =
+              "SELECT (CASE WHEN strpos($1, ':') > 0 THEN substr($1, 1, strpos($1, ':') - 1) WHEN strpos($1, ':') = 0 THEN '' END) FROM t WHERE w.id = $1"} =
                Dialect.to_postgres(
                  "SELECT substr(?1, 1, instr(?1, ':') - 1) FROM t WHERE w.id = ?1"
                )
 
       assert {:ok,
-              "SELECT (CASE WHEN strpos(w.id, ':') > 0 THEN substr(w.id, 1, strpos(w.id, ':') - 1) ELSE '' END) FROM workspaces w"} =
+              "SELECT (CASE WHEN strpos(w.id, ':') > 0 THEN substr(w.id, 1, strpos(w.id, ':') - 1) WHEN strpos(w.id, ':') = 0 THEN '' END) FROM workspaces w"} =
                Dialect.to_postgres("SELECT substr(w.id, 1, instr(w.id, ':') - 1) FROM workspaces w")
 
       assert {:error, {:unsupported, "instr"}} = Dialect.to_postgres("SELECT instr(a, 'b') FROM t")
 
       assert {:error, {:unsupported, "instr"}} =
                Dialect.to_postgres("SELECT substr(?, 1, instr(?, ':') - 1) FROM t")
+    end
+
+    test "an UPDATE with a conflict clause is refused by name" do
+      for clause <- ~w(REPLACE IGNORE ABORT FAIL ROLLBACK) do
+        assert {:error, {:unsupported, "UPDATE with a conflict clause"}} =
+                 Dialect.to_postgres("UPDATE OR #{clause} t SET a = ?1 WHERE id = ?2")
+      end
+
+      assert {:ok, _} = Dialect.to_postgres("UPDATE t SET last_update = ?1 WHERE a = 1 OR b = 2")
     end
 
     test "IFNULL, json_valid of a column and eight-byte casts" do
@@ -291,6 +300,17 @@ defmodule OptimalEngine.Store.DialectTest do
 
       assert {:error, {:unsupported, "unmapped date/time function"}} =
                Dialect.to_postgres("SELECT datetime(created_at) FROM t")
+
+      # strftime('now') with a modifier, or of a column, is not mapped.
+      for sql <- [
+            "SELECT 1 FROM t WHERE created_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+            "UPDATE t SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour')",
+            "SELECT strftime('%Y-%m-%d', created_at) FROM t"
+          ] do
+        assert {:error, {:unsupported, "unmapped date/time function"}} =
+                 Dialect.to_postgres(sql),
+               sql
+      end
     end
 
     test "mixing numbered and positional placeholders is refused" do
