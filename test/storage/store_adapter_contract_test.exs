@@ -23,13 +23,24 @@ defmodule OptimalEngine.Store.AdapterContractTest do
     assert missing == [], "OptimalEngine.Store is missing callbacks: #{inspect(missing)}"
   end
 
+  test "the PostgreSQL store implements every adapter callback" do
+    Code.ensure_loaded!(OptimalEngine.Store.Postgres)
+
+    missing =
+      Enum.reject(Adapter.behaviour_info(:callbacks), fn {name, arity} ->
+        function_exported?(OptimalEngine.Store.Postgres, name, arity)
+      end)
+
+    assert missing == [], "OptimalEngine.Store.Postgres is missing callbacks: #{inspect(missing)}"
+  end
+
   test "the contract covers transactions, raw statements and the typed operations" do
     callbacks = Adapter.behaviour_info(:callbacks)
 
     for callback <- [
           {:transaction, 2},
-          {:txn_query, 3},
-          {:txn_execute, 3},
+          {:txn_query, 4},
+          {:txn_execute, 4},
           {:raw_query, 2},
           {:raw_execute, 2},
           {:insert_context, 1},

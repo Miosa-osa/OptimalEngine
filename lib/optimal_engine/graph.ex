@@ -217,14 +217,25 @@ defmodule OptimalEngine.Graph do
   """
   @spec create_edges_for_context_db(reference(), map() | struct()) :: :ok
   def create_edges_for_context_db(db, context) do
+    Enum.each(context_edges(context), &insert_edge_direct(db, &1))
+  end
+
+  @doc """
+  The edges a context implies, as parameter lists for `edge_insert_sql/0`:
+  `[source, target, relation, weight, valid_from, workspace_id]`.
+
+  Entities are `mentioned_in` the context and `co_occurs` with each other, the
+  context `lives_in` its node, has a `cross_ref` to every other destination,
+  and `supersedes` the context it replaces. Every canonical store writes these
+  edges with the context.
+  """
+  @spec context_edges(map() | struct()) :: [[term()]]
+  def context_edges(context) do
     ws = context_workspace(context)
     now = DateTime.to_iso8601(DateTime.utc_now())
 
-    Enum.each(structural_edges(context), fn {source, target, relation, weight} ->
-      insert_edge_direct(db, source, target, relation, weight, now, ws)
-    end)
-
-    :ok
+    for {source, target, relation, weight} <- structural_edges(context),
+        do: [source, target, relation, weight, now, ws]
   end
 
   # A context's structural edges, `{source, target, relation, weight}`:
@@ -996,6 +1007,10 @@ defmodule OptimalEngine.Graph do
                    'default'))
   """
 
+  @doc "The statement that writes one edge and ignores a duplicate."
+  @spec edge_insert_sql() :: String.t()
+  def edge_insert_sql, do: @edge_insert_sql
+
   # Insert via Store GenServer (for use outside of Store callbacks)
   defp insert_edge_via_store(source, target, relation, weight, now, ws) do
     case Store.raw_query(@edge_insert_sql, [source, target, relation, weight, now, ws]) do
@@ -1011,10 +1026,11 @@ defmodule OptimalEngine.Graph do
     end
   end
 
-  # Insert directly via db reference (for use inside Store callbacks — avoids deadlock)
-  defp insert_edge_direct(db, source, target, relation, weight, now, ws) do
+  # Insert directly via db reference (for use inside Store callbacks, which
+  # avoids a deadlock)
+  defp insert_edge_direct(db, params) do
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, @edge_insert_sql),
-         :ok <- Exqlite.Sqlite3.bind(stmt, [source, target, relation, weight, now, ws]),
+         :ok <- Exqlite.Sqlite3.bind(stmt, params),
          _ <- Exqlite.Sqlite3.step(db, stmt),
          :ok <- Exqlite.Sqlite3.release(db, stmt) do
       :ok
