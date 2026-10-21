@@ -106,5 +106,48 @@ defmodule OptimalEngine.MemoryCore.WildcardGrantsTest do
       assert expand.([], []) == ["assoc-plain-#{ws}"]
       assert expand.(["*"], []) == ["assoc-plain-#{ws}"]
     end
+
+    test "partitions follow the coordinator: one in common, and none is not enough" do
+      ws = workspace()
+
+      for {id, partitions} <- [
+            {"none", "[]"},
+            {"a", ~s(["team-a"])},
+            {"ab", ~s(["team-a","team-b"])},
+            {"b", ~s(["team-b"])}
+          ] do
+        {:ok, _} =
+          Store.raw_query(
+            """
+            INSERT INTO memory_associations
+              (id, tenant_id, workspace_id, cue, normalized_cue, tag, from_object_type, from_object_id,
+               to_object_type, to_object_id, relationship_type, security_labels, partition_ids)
+            VALUES (?1, 'default', ?2, 'alice', 'alice', 't', 'fact', ?3, 'fact', ?4, 'related', '[]', ?5)
+            """,
+            ["assoc-#{id}-#{ws}", ws, "from-#{id}", "to-#{id}", partitions]
+          )
+      end
+
+      scope = %ScopeEnvelope{tenant_id: "default", workspace_id: ws}
+
+      expand = fn partitions ->
+        {:ok, found} =
+          AssociativeProjection.expand(["alice"], scope,
+            allowed_security_labels: [],
+            allowed_partitions: partitions
+          )
+
+        found |> Enum.map(& &1.id) |> Enum.sort()
+      end
+
+      # Granted team-a: what is in team-a, alone or with others; not what has no
+      # partition, and not what is only in team-b.
+      assert expand.(["team-a"]) == ["assoc-a-#{ws}", "assoc-ab-#{ws}"]
+      assert expand.(["team-b", "team-c"]) == ["assoc-ab-#{ws}", "assoc-b-#{ws}"]
+      assert expand.(["team-c"]) == []
+
+      # Nothing granted: only what has no partition.
+      assert expand.([]) == ["assoc-none-#{ws}"]
+    end
   end
 end

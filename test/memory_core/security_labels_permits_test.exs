@@ -19,13 +19,13 @@ defmodule OptimalEngine.MemoryCore.SecurityLabelsPermitsTest do
       assert SecurityLabels.partition_tokens(~s(["b","a","a"])) == [{:partition_set, ["a", "b"]}]
     end
 
-    test "a value or an element that cannot be read is unresolved" do
-      assert SecurityLabels.partition_tokens("not json") == [:unresolved]
+    test "a value or an element that cannot be read is unresolved on the partition axis" do
+      assert SecurityLabels.partition_tokens("not json") == [:unresolved_partition]
 
       assert SecurityLabels.partition_tokens(~s(["a", 7])) ==
-               [{:partition_set, ["a"]}, :unresolved]
+               [{:partition_set, ["a"]}, :unresolved_partition]
 
-      assert SecurityLabels.partition_tokens("[7]") == [:unresolved]
+      assert SecurityLabels.partition_tokens("[7]") == [:unresolved_partition]
     end
   end
 
@@ -76,6 +76,27 @@ defmodule OptimalEngine.MemoryCore.SecurityLabelsPermitsTest do
     test "an unresolved token is read by no one but a reader of every label" do
       refute permits?(grants(["internal"], ["a"]), [:unresolved, {:partition_set, ["a"]}])
       assert permits?(grants(["*"], ["a"]), [:unresolved, {:partition_set, ["a"]}])
+    end
+
+    test "partitions that cannot be read are read by no one but a reader of every partition" do
+      for tokens <- [[:unresolved_partition], [{:partition_set, ["a"]}, :unresolved_partition]] do
+        refute permits?(grants(["internal"], ["a"]), tokens)
+        refute permits?(grants([], []), tokens)
+        # A reader of every label does not see past a partition it cannot read.
+        refute permits?(grants(["*"], []), tokens)
+        refute permits?(grants(["*"], ["a"]), tokens)
+        assert permits?(grants([], ["*"]), tokens)
+        assert permits?(grants(["*"], ["*"]), tokens)
+      end
+
+      # Labels that cannot be read stay waived by every label, as before.
+      assert permits?(grants(["*"], []), [:unresolved])
+      refute permits?(grants([], ["*"]), [:unresolved])
+    end
+
+    test "both kinds of unresolved rank restricted" do
+      assert SecurityLabels.token_rank(MapSet.new([:unresolved])) == 3
+      assert SecurityLabels.token_rank(MapSet.new([:unresolved_partition])) == 3
     end
   end
 end

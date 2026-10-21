@@ -72,7 +72,8 @@ defmodule OptimalEngine.Auth.BootstrapTest do
   test "a root key registered before the grants existed is given them once, with a warning" do
     token = token()
     id = id_of(token)
-    assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
+    root = env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"})
+    assert :ok = Bootstrap.run(root)
 
     :ok =
       sql!(
@@ -83,7 +84,7 @@ defmodule OptimalEngine.Auth.BootstrapTest do
     assert {:ok, bare} = ApiKey.verify(token)
     assert bare.metadata == %{"source" => "bootstrap"}
 
-    log = capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(env(token)) end)
+    log = capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(root) end)
     assert log =~ "registered before label and partition grants existed"
     assert log =~ id
 
@@ -91,7 +92,7 @@ defmodule OptimalEngine.Auth.BootstrapTest do
     assert key.metadata == @root_grants
 
     # Marked, so the next boot is silent and changes nothing.
-    assert capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(env(token)) end) == ""
+    assert capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(root) end) == ""
     assert {:ok, ^key} = ApiKey.verify(token)
   end
 
@@ -121,6 +122,81 @@ defmodule OptimalEngine.Auth.BootstrapTest do
     assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
     assert {:ok, none} = ApiKey.verify(token)
     assert none.metadata == %{"source" => "bootstrap", "grants_initialized" => true}
+  end
+
+  describe "an existing key is brought to the environment" do
+    test "scopes and workspaces that changed under the same token are applied, with a warning" do
+      token = token()
+      assert :ok = Bootstrap.run(env(token))
+
+      changed =
+        env(token, %{
+          "OPTIMAL_BOOTSTRAP_SCOPES" => "read",
+          "OPTIMAL_BOOTSTRAP_WORKSPACES" => "miosa"
+        })
+
+      log = capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(changed) end)
+
+      assert log =~ "it now holds scopes"
+      assert {:ok, key} = ApiKey.verify(token)
+      assert key.scopes == ["read"]
+      assert key.workspace_scope == ["miosa"]
+
+      assert capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(changed) end) == ""
+    end
+
+    test "a key that stops being root gives up its wildcard grants and keeps the others" do
+      token = token()
+      id = id_of(token)
+      assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
+
+      :ok =
+        sql!(
+          "UPDATE api_keys SET metadata = json_set(metadata, '$.allowed_security_labels', json('[\"*\",\"internal\"]')) WHERE id = ?1",
+          [id]
+        )
+
+      log = capture_log([level: :warning], fn -> assert :ok = Bootstrap.run(env(token)) end)
+
+      assert log =~ "no longer root"
+      assert {:ok, key} = ApiKey.verify(token)
+      assert key.scopes == ["read", "write"]
+      assert key.metadata["allowed_security_labels"] == ["internal"]
+      assert key.metadata["allowed_partitions"] == []
+    end
+
+    test "a key that becomes root is given the grants once, like one that predates them" do
+      token = token()
+      assert :ok = Bootstrap.run(env(token))
+      assert {:ok, plain} = ApiKey.verify(token)
+      assert plain.metadata == %{"source" => "bootstrap"}
+
+      log =
+        capture_log([level: :warning], fn ->
+          assert :ok = Bootstrap.run(env(token, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
+        end)
+
+      assert log =~ "registered before label and partition grants existed"
+      assert {:ok, key} = ApiKey.verify(token)
+      assert key.scopes == ["*"]
+      assert key.metadata == @root_grants
+    end
+
+    test "a rotated token is a new key with the defaults for its scopes" do
+      old = token()
+      new = token()
+      assert :ok = Bootstrap.run(env(old, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
+
+      :ok =
+        sql!(
+          "UPDATE api_keys SET metadata = json_set(metadata, '$.allowed_security_labels', json('[\"internal\"]')) WHERE id = ?1",
+          [id_of(old)]
+        )
+
+      assert :ok = Bootstrap.run(env(new, %{"OPTIMAL_BOOTSTRAP_SCOPES" => "*"}))
+      assert {:ok, key} = ApiKey.verify(new)
+      assert key.metadata == @root_grants
+    end
   end
 
   test "scopes, tenant and workspaces come from the environment" do
