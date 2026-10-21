@@ -37,10 +37,6 @@ defmodule OptimalEngine.Sync.Lineage do
   A link column:
 
     * `{:id, column, table}` the id of a row of `table`;
-    * `{:id_unless, column, table, other}` the same, but only while the row has
-      no value in `other` (a version names its parent and its root: the root
-      alone says what the whole chain is derived from, and following every
-      parent would make a long chain unreadable);
     * `{:typed, type_column, id_column}` an id and the type naming its table;
     * `{:links, column}` a JSON list of ids or `%{"type", "id"}` objects;
     * `{:json_ids, column, table}` a JSON list of ids of `table`;
@@ -51,7 +47,6 @@ defmodule OptimalEngine.Sync.Lineage do
   """
   @type ref_def ::
           {:id, String.t(), String.t()}
-          | {:id_unless, String.t(), String.t(), String.t()}
           | {:typed, String.t(), String.t()}
           | {:links, String.t()}
           | {:json_ids, String.t(), String.t()}
@@ -62,10 +57,12 @@ defmodule OptimalEngine.Sync.Lineage do
   @type t :: %{
           kind: :labelled | :derived | :aggregate | :structural,
           key: String.t() | nil,
+          table: String.t(),
           labels: boolean(),
           meta: String.t() | nil,
           class: String.t() | nil,
           refs: [ref_def()],
+          extra: [String.t()],
           special: [atom()]
         }
 
@@ -226,17 +223,21 @@ defmodule OptimalEngine.Sync.Lineage do
     # Memories. The versioned memory has no label column: a labelled memory
     # carries its labels in `metadata`, and points at the source package and
     # claim it was staged from. A source package of a memory written through
-    # `Memory.create/1` points at the memory instead (`:memory_sources`).
+    # `Memory.create/1` points at the memory instead (`:memory_sources`). A
+    # version is as classified as every version behind it (`:memory_chain`,
+    # which reads `parent_memory_id` and `root_memory_id` itself, one read per
+    # version, and does not recurse).
     "memories" =>
       {:derived,
        [
          {:meta_id, "memory_core_source_package_id", "source_packages"},
          {:meta_id, "memory_core_pending_claim_id", "claims"},
-         {:id_unless, "parent_memory_id", "memories", "root_memory_id"},
-         {:id, "root_memory_id", "memories"},
          {:id, "source_chunk_id", "chunks"},
          {:uris, "citation_uri"}
-       ], meta: "metadata", special: [:memory_sources]},
+       ],
+       meta: "metadata",
+       extra: ["parent_memory_id", "root_memory_id"],
+       special: [:memory_sources, :memory_chain]},
     "memory_embeddings" => {:derived, [{:id, "memory_id", "memories"}], key: nil},
     "memory_relations" =>
       {:derived, [{:id, "source_memory_id", "memories"}, {:id, "target_memory_id", "memories"}]},
@@ -429,11 +430,13 @@ defmodule OptimalEngine.Sync.Lineage do
       {kind, refs, opts} ->
         %{
           kind: kind,
+          table: table,
           key: Keyword.get(opts, :key, if(kind == :structural, do: nil, else: "id")),
           labels: kind == :labelled,
           meta: Keyword.get(opts, :meta),
           class: Keyword.get(opts, :class),
           refs: refs,
+          extra: Keyword.get(opts, :extra, []),
           special: Keyword.get(opts, :special, [])
         }
     end
@@ -463,7 +466,6 @@ defmodule OptimalEngine.Sync.Lineage do
     ref_columns =
       Enum.flat_map(spec.refs, fn
         {:id, column, _table} -> [column]
-        {:id_unless, column, _table, other} -> [column, other]
         {:typed, type_column, id_column} -> [type_column, id_column]
         {:links, column} -> [column]
         {:json_ids, column, _table} -> [column]
@@ -473,7 +475,8 @@ defmodule OptimalEngine.Sync.Lineage do
       end)
 
     ([spec.key] ++
-       [if(spec.labels, do: "security_labels"), spec.meta, spec.class] ++ ref_columns)
+       [if(spec.labels, do: "security_labels"), spec.meta, spec.class] ++
+       spec.extra ++ ref_columns)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
   end
@@ -546,13 +549,6 @@ defmodule OptimalEngine.Sync.Lineage do
   def id_refs(_id), do: []
 
   defp extract({:id, column, table}, row, _spec), do: scalar(row[column], table)
-
-  defp extract({:id_unless, column, table, other}, row, _spec) do
-    case row[other] do
-      id when is_binary(id) and id != "" -> []
-      _ -> scalar(row[column], table)
-    end
-  end
 
   defp extract({:typed, type_column, id_column}, row, _spec) do
     case {table_for_type(row[type_column]), row[id_column]} do

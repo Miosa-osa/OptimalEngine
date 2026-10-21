@@ -913,6 +913,90 @@ defmodule OptimalEngine.SyncGateTest do
       {_result, sent} = push(ctx, max_class: "internal")
       for id <- versions, do: refute(sent?(sent, "memories", id), "version #{id} was sent")
     end
+
+    test "a version is held with a labelled version behind it, whatever its root says", ctx do
+      source = restricted_source(ctx, "Escrow terms 6613")
+      [first, second, third, fourth] = version_chain(ctx, 4)
+
+      # The second version is labelled afterwards, by the source it was staged
+      # from and not by value, so the later versions do not carry it.
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.memory_core_source_package_id', ?2) WHERE id = ?1",
+          [second, source.id]
+        )
+
+      refute sent?(page_from(ctx, fourth), "memories", fourth)
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      # (The second version's own first change predates its label: a stale
+      # snapshot, which a later change deals with.)
+      for id <- [third, fourth], do: refute(sent?(sent, "memories", id), "#{id} was sent")
+      assert sent?(sent, "memories", first)
+    end
+
+    test "a chain written before roots were recorded is read through its parents", ctx do
+      id = fn n -> "legacy-v#{n}-#{ctx.n}" end
+
+      for n <- 1..4 do
+        labels = if n == 2, do: ~s({"security_labels":["restricted"]}), else: "{}"
+        parent = if n == 1, do: nil, else: id.(n - 1)
+
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO memories (id, tenant_id, workspace_id, content, parent_memory_id, version, metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            [id.(n), ctx.tenant, ctx.ws, "Legacy version #{n}", parent, n, labels]
+          )
+      end
+
+      refute sent?(page_from(ctx, id.(4)), "memories", id.(4))
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      for n <- [2, 3, 4], do: refute(sent?(sent, "memories", id.(n)))
+      assert sent?(sent, "memories", id.(1))
+    end
+
+    test "a source package that already holds a conflict is given its labels and the fact", ctx do
+      fact_id = fact_conflict(ctx, ["confidential"], nil)
+
+      # As a package raised before the labels were written.
+      {:ok, _} =
+        Store.raw_query(
+          "UPDATE source_packages SET security_labels = '[]', metadata = '{}' WHERE workspace_id = ?1 AND source_type = 'sync_conflict'",
+          [ctx.ws]
+        )
+
+      older = %{
+        "id" => "mut_remote_conflict_again_#{ctx.n}",
+        "device_id" => "rep_remote",
+        "entity_type" => "facts",
+        "entity_id" => fact_id,
+        "operation" => "update",
+        "occurred_at" => "2000-01-01T00:00:01.000",
+        "payload" => %{
+          "row" => %{
+            "id" => fact_id,
+            "fact_text" => "Wire code 4470",
+            "workspace_id" => ctx.ws,
+            "tenant_id" => ctx.tenant
+          },
+          "blobs" => %{}
+        }
+      }
+
+      assert {:ok, %{conflicts: 1}} = Sync.apply_changes(ctx.tenant, ctx.ws, [older])
+
+      {:ok, [[labels, metadata]]} =
+        Store.raw_query(
+          "SELECT security_labels, metadata FROM source_packages WHERE workspace_id = ?1 AND source_type = 'sync_conflict'",
+          [ctx.ws]
+        )
+
+      assert Jason.decode!(labels) == ["confidential"]
+      assert Jason.decode!(metadata)["fact_id"] == fact_id
+    end
   end
 
   describe "the lineage map" do
@@ -1003,7 +1087,6 @@ defmodule OptimalEngine.SyncGateTest do
   defp ref_targets(spec) do
     Enum.flat_map(spec.refs, fn
       {:id, _column, table} -> [table]
-      {:id_unless, _column, table, _other} -> [table]
       {:json_ids, _column, table} -> [table]
       {:meta_id, _key, table} -> [table]
       {:json_map, _column, mapping} -> Map.values(mapping)

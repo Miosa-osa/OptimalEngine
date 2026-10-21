@@ -46,7 +46,7 @@ Sending is fail-closed:
 - A row stays home when its own labels, or those of any row it derives from, are above the peer's class.
 - A row stays home when a source package, claim or other labelled row it must derive from cannot be found, or its lineage is deeper than 40 hops.
 - A row is as classified as anything reachable through its links, loops included: a context package and its pool that name each other are held together when either is.
-- The versions of a memory are classified through the root of the chain, not by walking every parent, so a memory with many versions is not held for its depth.
+- A version of a memory is as classified as every version behind it, up to the first, each read for its own labels, its source package and claim, and the documents that name it. The chain is walked a version at a time, not recursed into, so a memory with many versions is not held for its depth, and a label that came to an old version by its source (not by value) reaches the later ones.
 - A change to a table the lineage map does not know stays home, and `test/sync/sync_gate_test.exs` fails until the table is classified.
 - A workspace whose `data_class` is not one of the four classes is treated as `restricted`; a workspace with no `data_class` (or not found) is `internal`.
 - A Store error while classifying is not an answer.

@@ -209,12 +209,16 @@ defmodule OptimalEngine.Sync.Gate do
 
   # `strict` is false only while reading the earlier changes of a deleted row:
   # a link to a row that is gone is then not doubt, the row is being removed.
-  defp row_rank(gate, spec, row, visiting, strict) do
+  defp row_rank(gate, spec, row, visiting, strict, skip \\ []) do
     start = Lineage.own_rank(spec, row)
+    self = {:row, spec.table, row[spec.key]}
 
+    # A link to the row itself adds nothing (its own labels are counted) and
+    # is no cut: the row does not depend on the path that led to it.
     ranked =
       spec
       |> Lineage.refs(row)
+      |> Enum.reject(&(&1 == self))
       |> fold_max(start, &ref_rank(gate, &1, visiting, strict))
 
     ranked =
@@ -222,7 +226,7 @@ defmodule OptimalEngine.Sync.Gate do
         do: max_rank(ranked, aggregate_rank(gate)),
         else: ranked
 
-    fold_max(spec.special, ranked, &special_rank(gate, &1, row, visiting, strict))
+    fold_max(spec.special -- skip, ranked, &special_rank(gate, &1, row, visiting, strict))
   end
 
   defp ref_rank(gate, {:row, table, id}, visiting, strict) do
@@ -273,6 +277,66 @@ defmodule OptimalEngine.Sync.Gate do
     end
   end
 
+  # The rank of version `id` and of every version behind it. The chain is
+  # walked up to a version already known (or the first), then ranked from the
+  # oldest down, so each version is read once per gate.
+  defp chain_rank(gate, id, visiting, strict) do
+    spec = Lineage.spec("memories")
+    outer = take_cut(gate)
+    {versions, below} = chain_up(gate, spec, id, strict, [], MapSet.new())
+
+    {rank, ranks} =
+      Enum.reduce(versions, {below, []}, fn {version_id, row}, {below, ranks} ->
+        flat =
+          row_rank(gate, spec, row, MapSet.put(visiting, {"memories", version_id}), strict, [
+            :memory_chain
+          ])
+
+        rank = max_rank(below, flat)
+        {rank, [{version_id, rank} | ranks]}
+      end)
+
+    inner = take_cut(gate)
+
+    unless inner,
+      do: Enum.each(ranks, &:ets.insert(gate.memo, {{:chain, strict, elem(&1, 0)}, elem(&1, 1)}))
+
+    if outer or inner, do: cut(gate)
+    rank
+  end
+
+  # The versions from `id` up that are not known yet, oldest first, and the
+  # rank of what is behind them. A parent that is gone cannot be vouched for.
+  defp chain_up(gate, spec, id, strict, versions, seen) do
+    known = :ets.lookup(gate.memo, {:chain, strict, id})
+
+    cond do
+      MapSet.member?(seen, id) ->
+        {versions, nil}
+
+      match?([_], known) ->
+        {versions, known |> hd() |> elem(1)}
+
+      true ->
+        case load("memories", spec, id) do
+          nil ->
+            {versions, unresolved(strict)}
+
+          row ->
+            versions = [{id, row} | versions]
+            seen = MapSet.put(seen, id)
+
+            case row["parent_memory_id"] do
+              parent when is_binary(parent) and parent != "" ->
+                chain_up(gate, spec, parent, strict, versions, seen)
+
+              _ ->
+                {versions, nil}
+            end
+        end
+    end
+  end
+
   defp unresolved(true), do: @restricted
   defp unresolved(false), do: nil
 
@@ -283,6 +347,19 @@ defmodule OptimalEngine.Sync.Gate do
 
   defp special_rank(gate, :context_sources, row, _visiting, _strict),
     do: Map.get(index(gate).contexts, row["id"])
+
+  # The versions a memory was made from, parent after parent up to the first
+  # (and the root, which a chain imported from a peer may not reach through its
+  # parents). Each is read for what it carries itself and never for its own
+  # ancestors, so a long chain costs one read per version, once, and a label
+  # that came to an old version by its source package or its pointers (not by
+  # value) reaches every later one.
+  defp special_rank(gate, :memory_chain, row, visiting, strict) do
+    [row["parent_memory_id"], row["root_memory_id"]]
+    |> Enum.filter(&(is_binary(&1) and &1 != "" and &1 != row["id"]))
+    |> Enum.uniq()
+    |> fold_max(nil, &chain_rank(gate, &1, visiting, strict))
+  end
 
   # An entity is named in the sources it was resolved from.
   defp special_rank(gate, :entity_sources, row, _visiting, _strict),

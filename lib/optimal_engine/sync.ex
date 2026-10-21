@@ -729,7 +729,7 @@ defmodule OptimalEngine.Sync do
         )
 
       _ = CoreStore.insert_source_package(source)
-      raise_source_labels(source.id, labels)
+      raise_source_labels(source.id, labels, mutation["entity_id"])
 
       Enum.each(texts, fn {side, text} ->
         CoreStore.insert_claim(%{
@@ -773,26 +773,30 @@ defmodule OptimalEngine.Sync do
   end
 
   # `insert_source_package` keeps the package that is already there when the
-  # same conflict text is raised again; its labels only ever grow.
-  defp raise_source_labels(source_id, labels) do
-    case Store.raw_query("SELECT security_labels FROM source_packages WHERE id = ?1", [source_id]) do
-      {:ok, [[stored]]} ->
-        merged =
-          case SecurityLabels.decode(stored) do
-            {:ok, _} -> SecurityLabels.merge(stored, labels)
-            :invalid -> SecurityLabels.merge(["restricted"], labels)
-          end
-
-        {:ok, _} =
-          Store.raw_query("UPDATE source_packages SET security_labels = ?2 WHERE id = ?1", [
-            source_id,
-            Jason.encode!(merged)
-          ])
-
-        :ok
-
-      _other ->
-        :ok
+  # same conflict text is raised again, with the labels and the metadata it had.
+  # Its labels only ever grow, and it names the fact either way. A Store error
+  # leaves the package as it was: the claims are raised with the labels anyway.
+  defp raise_source_labels(source_id, labels, fact_id) do
+    with {:ok, [[stored]]} <-
+           Store.raw_query("SELECT security_labels FROM source_packages WHERE id = ?1", [source_id]),
+         merged =
+           (case SecurityLabels.decode(stored) do
+              {:ok, _} -> SecurityLabels.merge(stored, labels)
+              :invalid -> SecurityLabels.merge(["restricted"], labels)
+            end),
+         {:ok, _} <-
+           Store.raw_query(
+             """
+             UPDATE source_packages
+             SET security_labels = ?2,
+                 metadata = json_set(COALESCE(metadata, '{}'), '$.sync_conflict', json('true'), '$.fact_id', ?3)
+             WHERE id = ?1
+             """,
+             [source_id, Jason.encode!(merged), fact_id]
+           ) do
+      :ok
+    else
+      _other -> :ok
     end
   end
 
