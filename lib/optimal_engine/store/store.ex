@@ -24,6 +24,10 @@ defmodule OptimalEngine.Store do
   @spec adapter() :: module()
   def adapter, do: @adapter
 
+  @doc "True when this build's store is `implementation`."
+  @spec selected?(module()) :: boolean()
+  def selected?(implementation) when is_atom(implementation), do: implementation == @adapter
+
   @doc false
   # The supervisor starts `OptimalEngine.Store`; the child spec stays here so
   # the implementation module can change without touching the supervision tree.

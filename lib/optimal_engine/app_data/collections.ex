@@ -109,10 +109,21 @@ defmodule OptimalEngine.AppData.Collections do
   # Create
   # ---------------------------------------------------------------------------
 
+  # A collection is a table, a full-text index and triggers created at
+  # runtime, which a PostgreSQL store does not have
+  # (`OptimalEngine.Storage.Postgres.unavailable/0`).
+  defp available do
+    if Store.selected?(OptimalEngine.Store.SQLite),
+      do: :ok,
+      else:
+        {:error, {:unsupported, "app data collections are not available on the PostgreSQL store"}}
+  end
+
   @doc "Creates a collection from a definition (see `Schema.normalize_definition/1`)."
   @spec create(Scope.t(), map()) :: {:ok, map()} | {:error, term()}
   def create(%Scope{} = scope, definition) do
-    with :ok <- Scope.allow_admin(scope),
+    with :ok <- available(),
+         :ok <- Scope.allow_admin(scope),
          {:ok, schema} <- Schema.normalize_definition(definition) do
       Store.transaction(fn txn ->
         with {:ok, c} <- create_in(txn, scope, schema),
