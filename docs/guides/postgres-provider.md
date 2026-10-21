@@ -161,7 +161,7 @@ These features are not on the PostgreSQL store yet.
 | The SQLite catalog | `PRAGMA`, `sqlite_master` and the `pragma_*` functions are refused (workspace bundles, the data steward's table list, a workspace slug change, replication). |
 | `rowid` | A statement that orders or filters by `rowid`, or reads `last_insert_rowid()`, is refused (backup schedules, the storage audit, graph edge listings, model call history, a workspace slug change). |
 | Other SQLite functions | `group_concat`, `typeof`, `instr`, `printf` and the rest, `GLOB`, SQLite's collations and a `LIKE` with a computed pattern are refused (action chain lists, clusters, insight health). |
-| Replace writes | `INSERT OR REPLACE`, `REPLACE INTO` and an `INSERT OR IGNORE` with its own `ON CONFLICT` are refused at their call sites; the store's context and chunk writes replace rows as SQLite does. |
+| Replace writes | `INSERT OR REPLACE`, `REPLACE INTO`, an `UPDATE` with a conflict clause (`UPDATE OR REPLACE` and the like) and an `INSERT OR IGNORE` with its own `ON CONFLICT` are refused at their call sites; the store's context and chunk writes replace rows as SQLite does. |
 | Schema and transaction statements | The schema comes from the migrations and transactions from the store, so a schema change, a transaction statement sent as a statement, and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) are refused. |
 
 `OptimalEngine.Store.Dialect.refusals/0` lists every refused construct with its reason, and `test/store/postgres/unavailable_test.exs` checks both ways: every refusal of the dialect is under a feature here, and every name a feature lists is one the dialect or the store refuses with.
@@ -180,6 +180,7 @@ An audit of the 51 `Store.transaction` call sites found eight that check for an 
 A row lock cannot protect a row that does not exist yet, so those eight would each need an advisory lock of their own, and a missed lock point would be a silent lost update.
 At `SERIALIZABLE`, PostgreSQL aborts one side of any interleaving that no serial order could produce, for every call site, including ones written later.
 Every transaction begins with `BEGIN ISOLATION LEVEL SERIALIZABLE`, and each connection is checked on connect for its isolation and `search_path`.
+The database must be UTF8, which the same check enforces: SQLite's text functions (`substr`, `length`, `instr`) count characters, and PostgreSQL's do so in a UTF8 database but count bytes in `SQL_ASCII`.
 The store then rolls the transaction back and runs the fun again, with jittered backoff, at most 25 times and never past the call's timeout, which must be finite.
 The audit also confirmed that no transaction fun has an effect outside the database beyond generating ids and timestamps, so running one again is safe.
 A single statement that meets a serialization failure or a deadlock did not commit and is retried the same way.

@@ -16,8 +16,10 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   ## Sessions
 
   Every connection runs at `SERIALIZABLE` with the store's schema as its
-  `search_path`, and is checked on connect; a pool whose first connection does
-  not have both fails to start. Each session has a statement timeout (60
+  `search_path`, in a UTF8 database, and is checked on connect; a pool whose
+  first connection does not have all three fails to start. SQLite's text
+  functions count characters, and PostgreSQL's do so only in a UTF8 database
+  (in `SQL_ASCII` they count bytes). Each session has a statement timeout (60
   seconds), a lock timeout (15 seconds) and an idle-in-transaction timeout (60
   seconds), so a stuck statement or an abandoned transaction cannot hold rows
   forever. `:statement_timeout`, `:lock_timeout` and
@@ -186,19 +188,34 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   end
 
   defp session(conn, schema) do
-    sql = "SELECT current_setting('transaction_isolation'), current_setting('search_path')"
+    sql =
+      "SELECT current_setting('transaction_isolation'), current_setting('search_path'), " <>
+        "current_setting('server_encoding')"
 
     case Postgrex.query(conn, sql, []) do
-      {:ok, %Postgrex.Result{rows: [["serializable", ^schema]]}} ->
-        :ok
+      {:ok, %Postgrex.Result{rows: [row]}} -> session_problem(row, schema)
+      {:error, error} -> {:error, Errors.message(error)}
+    end
+  end
 
-      {:ok, %Postgrex.Result{rows: [[isolation, search_path]]}} ->
+  @doc false
+  # What is wrong with a session's isolation, search_path and database
+  # encoding, if anything.
+  @spec session_problem([String.t()], String.t()) :: :ok | {:error, String.t()}
+  def session_problem([isolation, search_path, encoding], schema) do
+    cond do
+      isolation != "serializable" or search_path != schema ->
         {:error,
          "store session runs #{isolation} with search_path #{search_path}; " <>
            "expected serializable with #{schema}"}
 
-      {:error, error} ->
-        {:error, Errors.message(error)}
+      encoding != "UTF8" ->
+        {:error,
+         "store database is #{encoding}; the store needs a UTF8 database, " <>
+           "where text functions count characters as SQLite's do"}
+
+      true ->
+        :ok
     end
   end
 
