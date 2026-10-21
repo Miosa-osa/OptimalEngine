@@ -152,9 +152,7 @@ defmodule OptimalEngine.Store.Migrations do
   # the start of the last cycle with the peer that pulled and pushed everything.
   # It is a sequence of this Engine's ledger, so the two Engines' clocks do not
   # decide which changes the peer had seen. Zero (the default) counts none as seen.
-  #
-  # 78: 75 to 77 are held by changes in review.
-  @sync_pull_floor_version 78
+  @sync_pull_floor_version 75
   defp migration_sync_pull_floor do
     {@sync_pull_floor_version,
      "sync peers: the local ledger head at the start of the last complete cycle",
