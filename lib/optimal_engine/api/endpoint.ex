@@ -6,11 +6,14 @@ defmodule OptimalEngine.API.Endpoint do
   `config :optimal_engine, :api,
      enabled: true, port: 4200, interface: "127.0.0.1"`
 
-  Bind to `0.0.0.0` only when a reverse proxy is in front. The engine
-  assumes localhost + same-host clients in dev; cross-host traffic
-  should be authenticated + TLS-terminated by the upstream. An API on a
-  network interface with authentication off is reported loudly, or refused
-  with `OPTIMAL_REFUSE_OPEN_NETWORK=1` (`OptimalEngine.API.Exposure`).
+  Bind beyond loopback (`0.0.0.0`) only with `OPTIMAL_AUTH_REQUIRED=true`;
+  cross-host traffic should also be TLS-terminated by a proxy in front. An API
+  on a network interface with authentication off is reported loudly, or
+  refused with `OPTIMAL_REFUSE_OPEN_NETWORK=1`; an operator whose proxy
+  authenticates every request says so with
+  `OPTIMAL_OPEN_NETWORK_ACKNOWLEDGED=1` (`OptimalEngine.API.Exposure`). A
+  loopback Engine published by a proxy, tunnel or port map is not detected
+  and needs `OPTIMAL_AUTH_REQUIRED=true` too.
 
   See `OptimalEngine.API.Router` for the endpoint list.
   """
@@ -51,15 +54,21 @@ defmodule OptimalEngine.API.Endpoint do
   end
 
   # Authentication off on a network interface (OptimalEngine.API.Exposure): an
-  # error now and every 10 minutes, or no start at all when the refusal is on.
+  # error at start and every 10 minutes, one line when it is acknowledged, or no
+  # start at all when the refusal is on.
   defp exposure_children do
     case OptimalEngine.API.Exposure.boot_check() do
       :ok ->
         []
 
+      # The watcher logs the error when it starts, so the line also reaches the
+      # recent log (GET /api/maintenance/log), which is not running yet here.
       {:warn, interface} ->
-        Logger.error(OptimalEngine.API.Exposure.message(interface))
         [{OptimalEngine.API.ExposureMonitor, interface: interface}]
+
+      {:acknowledged, interface} ->
+        Logger.info(OptimalEngine.API.Exposure.acknowledged_message(interface))
+        []
 
       {:refuse, message} ->
         raise ArgumentError, message

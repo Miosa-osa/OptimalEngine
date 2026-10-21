@@ -447,11 +447,19 @@ end
 # error at boot and every 10 minutes, and warned in /api/health
 # (OptimalEngine.API.Exposure). OPTIMAL_REFUSE_OPEN_NETWORK=1 refuses to start
 # instead; it is off by default in this release and the default in the next.
-case System.get_env("OPTIMAL_REFUSE_OPEN_NETWORK") do
-  nil -> :ok
-  value when value in ["1", "true"] -> config :optimal_engine, :refuse_open_network, true
-  value when value in ["0", "false", ""] -> config :optimal_engine, :refuse_open_network, false
-  _ -> raise ArgumentError, "OPTIMAL_REFUSE_OPEN_NETWORK must be 1 or 0"
+# OPTIMAL_OPEN_NETWORK_ACKNOWLEDGED=1 says the API is open on purpose, with
+# authentication done in front of it: one line at boot, no warning, no refusal.
+# Each accepts 1, true, 0 or false; empty is the same as unset.
+for {name, key} <- [
+      {"OPTIMAL_REFUSE_OPEN_NETWORK", :refuse_open_network},
+      {"OPTIMAL_OPEN_NETWORK_ACKNOWLEDGED", :open_network_acknowledged}
+    ] do
+  case System.get_env(name) do
+    value when value in [nil, ""] -> :ok
+    value when value in ["1", "true"] -> config :optimal_engine, key, true
+    value when value in ["0", "false"] -> config :optimal_engine, key, false
+    _ -> raise ArgumentError, "#{name} must be 1, 0, true or false"
+  end
 end
 
 # Local HTTP API - enabled on demand (the bundled engine turns it on; other

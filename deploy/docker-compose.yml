@@ -17,7 +17,9 @@ services:
       # BuildKit cache mounts are declared inside the Dockerfile via
       # --mount=type=cache; enable DOCKER_BUILDKIT=1 (default in Compose v2).
     ports:
-      - "${OPTIMAL_API_PORT:-4200}:4200"
+      # Published on the host's loopback only. Set OPTIMAL_API_BIND=0.0.0.0 to
+      # reach the Engine from other machines; authentication stays required.
+      - "${OPTIMAL_API_BIND:-127.0.0.1}:${OPTIMAL_API_PORT:-4200}:4200"
     volumes:
       # Persistent data: SQLite DB + cache + any written signal files
       - optimal_data:/data
@@ -30,13 +32,27 @@ services:
       OPTIMAL_API_ENABLED:     "true"
       OPTIMAL_API_PORT:        "4200"
       OPTIMAL_API_INTERFACE:   "0.0.0.0"
-      OPTIMAL_AUTH_REQUIRED:   "${OPTIMAL_AUTH_REQUIRED:-false}"
+      # The container listens on all its interfaces, so the Engine requires
+      # authentication by default (an open API is reported, and refused with
+      # OPTIMAL_REFUSE_OPEN_NETWORK=1). OPTIMAL_BOOTSTRAP_KEY registers the
+      # first key at boot; give the same token as OPTIMAL_ENGINE_API_KEY for
+      # the health check. See env.example.
+      OPTIMAL_AUTH_REQUIRED:   "${OPTIMAL_AUTH_REQUIRED:-true}"
+      OPTIMAL_BOOTSTRAP_KEY:   "${OPTIMAL_BOOTSTRAP_KEY:-}"
+      OPTIMAL_ENGINE_API_KEY:  "${OPTIMAL_ENGINE_API_KEY:-}"
       OLLAMA_HOST:             "${OPTIMAL_OLLAMA_URL:-http://host.docker.internal:11434}"
       # MIX_ENV is already baked into the release; listed here for clarity
       MIX_ENV:                 prod
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:4200/api/health"]
+      # /api/health is authenticated while OPTIMAL_AUTH_REQUIRED is true.
+      test:
+        - CMD-SHELL
+        - >-
+          if [ -n "$$OPTIMAL_ENGINE_API_KEY" ];
+          then wget -qO- --header="Authorization: Bearer $$OPTIMAL_ENGINE_API_KEY" http://localhost:4200/api/health > /dev/null;
+          else wget -qO- http://localhost:4200/api/health > /dev/null;
+          fi
       interval: 30s
       timeout: 5s
       start_period: 20s

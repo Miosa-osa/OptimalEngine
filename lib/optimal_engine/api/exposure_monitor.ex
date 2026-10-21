@@ -1,8 +1,10 @@
 defmodule OptimalEngine.API.ExposureMonitor do
   @moduledoc """
-  Repeats the open-API error line (`OptimalEngine.API.Exposure.message/1`) every
-  10 minutes while the Engine runs with authentication off on a network
-  interface, so the warning is never only at the top of an old log.
+  Logs the open-API error line (`OptimalEngine.API.Exposure.message/1`) when it
+  starts and every 10 minutes after, while the Engine runs with authentication
+  off on a network interface, so the warning is never only at the top of an
+  old log. Logged from here rather than from the Endpoint, the boot line also
+  reaches the recent log (`GET /api/maintenance/log`).
   `OptimalEngine.API.Endpoint` starts it only for such an Engine.
   """
 
@@ -28,6 +30,7 @@ defmodule OptimalEngine.API.ExposureMonitor do
       interval_ms: Keyword.get(opts, :interval_ms, @interval_ms)
     }
 
+    Logger.error(Exposure.message(state.interface))
     schedule(state)
     {:ok, state}
   end
