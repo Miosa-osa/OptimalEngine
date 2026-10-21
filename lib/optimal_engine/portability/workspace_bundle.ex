@@ -717,7 +717,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp rewrite(row, "operating_documents", plan),
     do: row |> Map.put("tenant_id", plan.tenant_id) |> Map.put("scope_id", plan.workspace_id)
 
-  defp rewrite(row, _table, plan) do
+  # A bundle exported before mentions recorded a tenant has no `tenant_id` on
+  # them; the import records the target tenant either way.
+  defp rewrite(row, "entity_mentions", plan),
+    do: row |> Map.put("tenant_id", plan.tenant_id) |> rewrite_scope(plan)
+
+  defp rewrite(row, _table, plan), do: rewrite_scope(row, plan)
+
+  defp rewrite_scope(row, plan) do
     row
     |> then(fn r ->
       if Map.has_key?(r, "tenant_id"), do: Map.put(r, "tenant_id", plan.tenant_id), else: r

@@ -224,10 +224,15 @@ defmodule OptimalEngine.Store.Migrations do
   # an earlier release still reads and writes the store. Every statement is
   # safe to run again: the column add is tolerated as a duplicate, and the
   # backfill only fills rows that have no tenant and name a row that exists.
+  # It runs with change capture off (`sync_identity.applying`, as when a peer's
+  # change is applied), so it does not queue a change for every row it fills.
   defp migration_entity_mention_tenant do
     {@entity_mention_tenant_version, "entity mentions: the tenant that wrote the mention",
      [
        {"entity_mentions_tenant_id", "ALTER TABLE entity_mentions ADD COLUMN tenant_id TEXT"},
+       # The backfill is not a change to replicate: every Engine runs it.
+       {"backfill_entity_mentions_tenant_id_applying",
+        "UPDATE sync_identity SET applying = 1 WHERE id = 1"},
        {"backfill_entity_mentions_tenant_id",
         """
         UPDATE entity_mentions
@@ -237,7 +242,9 @@ defmodule OptimalEngine.Store.Migrations do
         WHERE tenant_id IS NULL
           AND (EXISTS (SELECT 1 FROM contexts c WHERE c.id = entity_mentions.context_id)
                OR EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id))
-        """}
+        """},
+       {"backfill_entity_mentions_tenant_id_done",
+        "UPDATE sync_identity SET applying = 0 WHERE id = 1"}
      ]}
   end
 
