@@ -99,7 +99,8 @@ function warnOutdated(header: string): void {
   outdatedWarned = true;
   const engineVersion = /engine=(\d+\.\d+\.\d+)/.exec(header)?.[1] ?? null;
   const detail = !engineVersion
-    ? `the Engine marks MCP server ${MCP_VERSION} as outdated (${header}); ${upgradeHint(null)}`
+    ? // The header is the Engine's text; an unreadable one is not echoed.
+      `the Engine marks MCP server ${MCP_VERSION} as outdated; ${upgradeHint(null)}`
     : versionLower(MCP_VERSION, engineVersion)
       ? `MCP server ${MCP_VERSION} is outdated for Engine ${engineVersion}; ${upgradeHint(engineVersion)}`
       : `MCP server ${MCP_VERSION} is newer than Engine ${engineVersion}; tools the Engine does not have yet will fail`;
