@@ -150,7 +150,7 @@ A verifier that needs freshness compares the head with something newer: a later 
 `Evidence.verify_export/1` checks the head's signature and that a bundle is the whole chain: it starts at seq 1, holds `total` entries, ends at the head, and says it is complete.
 It verifies entries and the head only with the bundle's evidence keys (`optimal_purpose` `evidence`); a grant key in the bundle verifies neither.
 A page that is not the whole chain is reported `partial`, never valid; join the pages' entries into one bundle with the last page's other fields to verify them.
-`mix optimal.authority export [--until <seq>] [--format json|ndjson]` writes the whole chain through the head page by page, ending complete.
+`mix optimal.authority export [--until <seq>] [--format json|ndjson]` writes the whole chain through the head page by page, ending complete: JSON pretty-printed, NDJSON one record a line.
 Verification and the integrity scan read the chain in pages, so neither is cut short however long the chain grows.
 An agent action trace lists and verifies at most 2,000 native steps; past that it says `truncated: true` with the `total`, reports `verified: false`, and still judges its stages over every linked entry.
 

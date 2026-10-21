@@ -299,6 +299,15 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
              bundle |> Jason.encode!() |> Jason.decode!() |> Evidence.verify_export()
 
     assert {:error, :until_out_of_range} = Evidence.export(empty, until: 1)
+
+    out = Path.join(System.tmp_dir!(), "evidence-empty-#{System.unique_integer([:positive])}.json")
+    on_exit(fn -> File.rm(out) end)
+    Mix.shell(Mix.Shell.Process)
+    on_exit(fn -> Mix.shell(Mix.Shell.IO) end)
+    Mix.Tasks.Optimal.Authority.run(["export", "--tenant", empty, "--out", out])
+
+    assert %{"entries" => [], "head" => nil, "total" => 0, "complete" => true} =
+             out |> File.read!() |> Jason.decode!()
   end
 
   test "a bundle that is cut short, or whose head is tampered with, does not verify", ctx do
@@ -373,7 +382,12 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
 
     Mix.Tasks.Optimal.Authority.run(["export", "--tenant", ctx.tenant, "--out", out])
 
-    bundle = out |> File.read!() |> Jason.decode!()
+    text = File.read!(out)
+    bundle = Jason.decode!(text)
+
+    # Pretty-printed, as the other subcommands print, while it streams.
+    assert String.starts_with?(text, ~s({\n  "tenant_id": ))
+    assert text =~ ~s(\n  "entries": [\n    {\n      "action": )
     assert %{"complete" => true, "total" => ^total, "next_after" => nil} = bundle
     assert length(bundle["entries"]) == total
     {:ok, %{head: head}} = Evidence.verify(ctx.tenant)
