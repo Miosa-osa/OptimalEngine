@@ -23,6 +23,8 @@ defmodule OptimalEngine.API.Router do
   use Plug.Router
   use Plug.ErrorHandler
 
+  require Logger
+
   @busy_detail "the Engine's store is busy; retry shortly"
 
   alias OptimalEngine.API.Actor
@@ -69,6 +71,10 @@ defmodule OptimalEngine.API.Router do
       "application/x-zip-compressed"
     ]
   )
+
+  # A body the parsers passed on unread has no parameters. Handlers read fields
+  # of the body (`body["workspace"]`), which would raise on the unfetched struct.
+  plug(:unparsed_body_has_no_params)
 
   plug(OptimalEngine.API.AuthPlug)
 
@@ -2542,7 +2548,7 @@ defmodule OptimalEngine.API.Router do
         })
 
       {:error, reason} ->
-        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        pool_error(conn, reason)
     end
   end
 
@@ -2566,7 +2572,7 @@ defmodule OptimalEngine.API.Router do
       # A blank workspace names none, as WorkspaceAuthPlug reads it: the default.
       workspace_id =
         Enum.find_value(
-          [body["workspace"], body["workspace_id"]],
+          [Map.get(body, "workspace"), Map.get(body, "workspace_id")],
           "default",
           &(is_binary(&1) and &1 != "" and &1)
         )
@@ -2594,7 +2600,7 @@ defmodule OptimalEngine.API.Router do
 
       case MemoryCore.open_active_pool(opts) do
         {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
-        {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        {:error, reason} -> pool_error(conn, reason)
       end
     end
   end
@@ -2604,7 +2610,7 @@ defmodule OptimalEngine.API.Router do
     case MemoryCore.get_active_pool(id) do
       {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
       {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      {:error, reason} -> pool_error(conn, reason)
     end
   end
 
@@ -2650,7 +2656,7 @@ defmodule OptimalEngine.API.Router do
           send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
 
         {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+          pool_error(conn, reason)
       end
     end
   end
@@ -2686,7 +2692,7 @@ defmodule OptimalEngine.API.Router do
         send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
 
       {:error, reason} ->
-        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        pool_error(conn, reason)
     end
   end
 
@@ -2725,7 +2731,7 @@ defmodule OptimalEngine.API.Router do
           send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
 
         {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+          pool_error(conn, reason)
       end
     end
   end
@@ -2745,7 +2751,7 @@ defmodule OptimalEngine.API.Router do
     case MemoryCore.close_active_pool(id, opts) do
       {:ok, pool} -> json(conn, %{active_memory_pool: active_pool_to_map(pool)})
       {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "active pool not found"}))
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      {:error, reason} -> pool_error(conn, reason)
     end
   end
 
@@ -4414,6 +4420,28 @@ defmodule OptimalEngine.API.Router do
     [body, fetch_query_params(conn).query_params]
     |> Enum.flat_map(fn params -> [Map.get(params, "tenant"), Map.get(params, "tenant_id")] end)
     |> Enum.any?(&(&1 != nil and &1 != tenant_id))
+  end
+
+  defp unparsed_body_has_no_params(%{body_params: %Plug.Conn.Unfetched{}} = conn, _opts),
+    do: %{conn | body_params: %{}}
+
+  defp unparsed_body_has_no_params(conn, _opts), do: conn
+
+  # An error the pool code returns: a pool that is not open is the caller's to
+  # fix (409); anything else is answered with a fixed code, and the reason, which
+  # can name ids and internals, goes to the log and not to the caller.
+  defp pool_error(conn, {:pool_not_open, _state}) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(409, Jason.encode!(%{error: "pool_not_open"}))
+  end
+
+  defp pool_error(conn, reason) do
+    Logger.error("[API] a pool request failed: #{inspect(reason)}")
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(500, Jason.encode!(%{error: "internal_error"}))
   end
 
   defp reject_nil_keyword(keyword) do

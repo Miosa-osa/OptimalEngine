@@ -173,6 +173,8 @@ Every `/api/memory-core/active-pools/:id` route answers `404 active pool not fou
 A caller that may use the pool but names a different workspace than the pool's gets `400 workspace_mismatch`.
 A key scoped to the pool's workspace need not name it, and `retrieve` recalls in the pool's own tenant and workspace.
 When a tenant enforces Optimal Authority, these routes are governed against the pool's workspace, not against the `default` workspace.
+A pool that is not open answers `409 pool_not_open`; any other failure answers `500 internal_error` and the reason goes to the Engine's log, not to the caller.
+A gzip or zip body is passed on unread, so a route that reads fields of the body answers as it does for an empty body.
 
 At the Claim review boundary, the server uses the key's registered principal as the reviewer, or `api_key:<key-id>` when no principal is attached.
 Clients should omit `actor_id` and `verifier_id` on review requests.
