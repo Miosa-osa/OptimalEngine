@@ -137,8 +137,16 @@ With `format=ndjson` a page is one line per entry, the entry object with `"type"
 ```
 
 The stream has no key or checkpoint lines: a verifier reads each evidence key by its `kid` from `GET /api/authority/evidence/keys/:kid`.
+Every character outside ASCII is written as a `\u` escape (U+2028, U+2029 and U+0085 among them), so each line is ASCII and only LF (0x0A) ends a record.
+Split the stream on LF only, never on a reader's wider idea of a line break.
 
 To export a chain of any length, read the first page, then the next ones with `after` set to `next_after` and `until` set to the first page's `head.seq`, until a page is complete.
+`after` and `until` are sequence numbers no larger than 9,223,372,036,854,775,807, the largest the Store holds; anything else answers 400 (`after_out_of_range` or `until_out_of_range`).
+
+A verified export with `complete: true` and a valid `head_signature` proves one thing: the bundle holds every entry from seq 1 through that `head.seq`, ending with that hash.
+It does not prove the head is the chain's current one.
+Any key that can read evidence can have the Engine sign a historical seq through `until`, so an old head comes with a fresh signature.
+A verifier that needs freshness compares the head with something newer: a later signed checkpoint (`POST /api/authority/evidence/checkpoint`, anchored outside the Engine), or the head of a live `GET /api/authority/evidence/export` read without `until`.
 `Evidence.verify_export/1` checks the head's signature and that a bundle is the whole chain: it starts at seq 1, holds `total` entries, ends at the head, and says it is complete.
 A page that is not the whole chain is reported `partial`, never valid; join the pages' entries into one bundle with the last page's other fields to verify them.
 `mix optimal.authority export [--until <seq>] [--format json|ndjson]` writes the whole chain through the head page by page, ending complete.

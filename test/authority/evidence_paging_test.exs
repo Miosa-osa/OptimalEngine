@@ -15,11 +15,13 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
   alias OptimalEngine.API.Router
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Authority
-  alias OptimalEngine.Authority.{ActionChain, Evidence, Integrity, Keys}
+  alias OptimalEngine.Authority.{ActionChain, CanonicalJSON, Evidence, Integrity, Keys}
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
 
   @opts Router.init([])
+
+  @hashed ~w(tenant_id seq id kind jti subject action resource workspace_id detail prev_hash recorded_at)
 
   setup do
     n = System.unique_integer([:positive])
@@ -225,6 +227,61 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     assert get_export(ctx.tenant, "format=xml").status == 400
   end
 
+  test "an after or until beyond a signed 64-bit integer answers 400, and the Store keeps running",
+       ctx do
+    chain_of(ctx.tenant, 5)
+    store = Process.whereis(OptimalEngine.Store.SQLite)
+    max = "9223372036854775807"
+    huge = String.duplicate("9", 40)
+
+    # The largest integer the Store holds is a seq like any other.
+    assert get_export(ctx.tenant, "after=#{max}").status == 200
+    assert get_evidence(ctx.tenant, "after=#{max}").status == 200
+    assert error_of(get_export(ctx.tenant, "until=#{max}")) == {400, "until_out_of_range"}
+
+    for value <- ["9223372036854775808", "-9223372036854775809", huge] do
+      assert error_of(get_export(ctx.tenant, "after=" <> value)) == {400, "after_out_of_range"}
+      assert error_of(get_evidence(ctx.tenant, "after=" <> value)) == {400, "after_out_of_range"}
+      assert error_of(get_export(ctx.tenant, "until=" <> value)) == {400, "until_out_of_range"}
+    end
+
+    assert error_of(get_export(ctx.tenant, "after[a]=1")) == {400, "after_out_of_range"}
+    assert error_of(get_export(ctx.tenant, "until[a]=1")) == {400, "until_out_of_range"}
+    assert error_of(get_evidence(ctx.tenant, "after[a]=1")) == {400, "after_out_of_range"}
+    assert get_evidence(ctx.tenant, "jti[a]=1").status == 400
+
+    too_big = 9_223_372_036_854_775_808
+    assert {:error, :after_out_of_range} = Evidence.export(ctx.tenant, after: too_big)
+    assert {:error, :after_out_of_range} = Evidence.head(ctx.tenant, after: too_big)
+    assert {:error, :until_out_of_range} = Evidence.head(ctx.tenant, until: too_big)
+
+    assert Process.whereis(OptimalEngine.Store.SQLite) == store
+    assert {:ok, %{"total" => 5, "complete" => true}} = Evidence.export(ctx.tenant)
+  end
+
+  test "an NDJSON record holding a newline, U+2028 or U+0085 stays one ASCII line", ctx do
+    text = "line one\nline two\u2028after a line separator\u0085after a next line"
+    attrs = %{subject: "agent:" <> text, detail: %{"note" => text}}
+    {:ok, _} = Evidence.append(ctx.tenant, "decision.allowed", attrs)
+
+    body = get_export(ctx.tenant, "format=ndjson").resp_body
+    lines = String.split(body, "\n", trim: true)
+    assert length(lines) == 2
+    assert Enum.all?(lines, &(&1 =~ ~r/\A[\x20-\x7e]*\z/))
+
+    entry = lines |> hd() |> Jason.decode!()
+    assert entry["detail"]["note"] == text
+    assert entry["subject"] == "agent:" <> text
+    assert CanonicalJSON.hash(Map.take(entry, @hashed)) == entry["hash"]
+
+    keyed =
+      body
+      |> from_ndjson()
+      |> Map.merge(%{"tenant_id" => ctx.tenant, "keys" => Keys.jwks(ctx.tenant)})
+
+    assert {:ok, %{entries: 1}} = Evidence.verify_export(keyed)
+  end
+
   test "an empty chain exports no head, a total of 0, and is complete", ctx do
     empty = "#{ctx.tenant}-empty"
 
@@ -406,10 +463,16 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
   defp ndjson_fields(page),
     do: Map.take(page, ~w(entries head head_signature total complete next_after))
 
+  defp error_of(conn), do: {conn.status, Jason.decode!(conn.resp_body)["error"]}
+
   # Pages joined into one bundle, as a verifier would: every entry, the last page's rest.
   defp join(pages), do: Map.put(List.last(pages), "entries", Enum.flat_map(pages, & &1["entries"]))
 
-  defp get_export(tenant, query) do
+  defp get_export(tenant, query), do: authority_get(tenant, "/evidence/export?" <> query)
+
+  defp get_evidence(tenant, query), do: authority_get(tenant, "/evidence?" <> query)
+
+  defp authority_get(tenant, path) do
     original = Application.get_env(:optimal_engine, :auth, [])
 
     Application.put_env(
@@ -427,7 +490,7 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
           workspace_scope: ["*"]
         })
 
-      conn(:get, "/api/authority/evidence/export?" <> query)
+      conn(:get, "/api/authority" <> path)
       |> put_req_header("authorization", "Bearer " <> key)
       |> Router.call(@opts)
     after

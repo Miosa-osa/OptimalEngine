@@ -1402,7 +1402,11 @@ case $CMD in
           data_class "${O_data_class:-}" @ttl_seconds "${O_ttl:-}" justification "${O_justification:-}")"
         ;;
       export)
-        case ${O_after:-}${O_until:-} in *[!0-9]*) usage_die "--after and --until take a sequence number" ;; esac
+        # A sequence number the Engine can hold: digits only, at most 19 of them.
+        for _ev in "${O_after:-}" "${O_until:-}"; do
+          case $_ev in *[!0-9]*) usage_die "--after and --until take a sequence number" ;; esac
+          [ ${#_ev} -le 19 ] || usage_die "--after and --until take a sequence number of at most 19 digits"
+        done
         case ${O_format:-json} in json | ndjson) ;; *) usage_die "--format takes json or ndjson" ;; esac
         call GET /api/authority/evidence/export "" after "${O_after:-}" until "${O_until:-}" \
           limit "${O_limit:-}" format "${O_format:-}"
