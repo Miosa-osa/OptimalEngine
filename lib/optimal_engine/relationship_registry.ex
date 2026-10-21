@@ -1,13 +1,21 @@
 defmodule OptimalEngine.RelationshipRegistry do
   @moduledoc "Validates and records governed, temporal relationships between canonical entities."
 
-  alias OptimalEngine.{DataContract, EntityRegistry, Store}
+  alias OptimalEngine.{DataContract, Store}
 
-  def relate(attrs) when is_map(attrs) do
+  @doc """
+  Records a relationship between two entities of a workspace. Options:
+  `:tenant_id` (default `"default"`): both entities have to be that tenant's
+  (another tenant's, in a workspace id they share, is `{:error, :not_found}`),
+  and the edge is recorded under it.
+  """
+  def relate(attrs, opts \\ []) when is_map(attrs) do
+    tenant = Keyword.get(opts, :tenant_id, "default")
+
     with {:ok, %{attrs: attrs}} <- DataContract.validate(:relationship, attrs),
          workspace = value(attrs, :workspace_id),
-         {:ok, from} <- EntityRegistry.get(value(attrs, :from_entity_id), workspace),
-         {:ok, to} <- EntityRegistry.get(value(attrs, :to_entity_id), workspace),
+         {:ok, from} <- entity(value(attrs, :from_entity_id), workspace, tenant),
+         {:ok, to} <- entity(value(attrs, :to_entity_id), workspace, tenant),
          {:ok, relation} <- relation_type(value(attrs, :relationship_type)),
          :ok <- allowed_kind(from.entity_kind, relation.subject_kinds, :subject),
          :ok <- allowed_kind(to.entity_kind, relation.object_kinds, :object) do
@@ -20,7 +28,7 @@ defmodule OptimalEngine.RelationshipRegistry do
                 to_object_type, to_object_id, relationship_type, confidence,
                 evidence_links, lifecycle_state, valid_time_start, valid_time_end,
                 transaction_time_start, metadata)
-             VALUES (?1, 'default', ?2, 'canonical_entity', ?3,
+             VALUES (?1, ?11, ?2, 'canonical_entity', ?3,
                      'canonical_entity', ?4, ?5, ?6, ?7, 'current', ?8, ?9,
                      datetime('now'), ?10)
              """,
@@ -37,7 +45,8 @@ defmodule OptimalEngine.RelationshipRegistry do
                Jason.encode!(%{
                  "actor_id" => value(attrs, :actor_id),
                  "relation_schema_version" => relation.schema_version
-               })
+               }),
+               tenant
              ]
            ) do
         :ok ->
@@ -67,6 +76,17 @@ defmodule OptimalEngine.RelationshipRegistry do
              params
            ) do
       {:ok, Enum.map(rows, &row/1)}
+    end
+  end
+
+  defp entity(id, workspace, tenant) do
+    case Store.raw_query(
+           "SELECT id, entity_kind FROM canonical_entities WHERE id=?1 AND workspace_id=?2 AND tenant_id=?3",
+           [id, workspace, tenant]
+         ) do
+      {:ok, [[id, kind]]} -> {:ok, %{id: id, entity_kind: kind}}
+      {:ok, []} -> {:error, :not_found}
+      error -> error
     end
   end
 

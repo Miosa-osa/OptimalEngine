@@ -513,7 +513,9 @@ defmodule OptimalEngine.API.Router do
   post "/api/entity-relationships" do
     body = conn.body_params || %{}
 
-    case OptimalEngine.RelationshipRegistry.relate(body) do
+    case OptimalEngine.RelationshipRegistry.relate(body,
+           tenant_id: conn.assigns[:current_tenant] || "default"
+         ) do
       {:ok, relationship} -> conn |> put_status(201) |> json(relationship)
       {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
     end
