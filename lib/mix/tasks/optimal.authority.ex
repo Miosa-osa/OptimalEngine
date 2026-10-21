@@ -152,8 +152,8 @@ defmodule Mix.Tasks.Optimal.Authority do
   # The bundle is written as the entries are read, a page at a time, so a chain of any
   # length is exported whole in bounded memory: one bundle `Evidence.export/2` would
   # return with every entry through the head (the chain's last entry when the export
-  # starts, or the one at --until), and so complete. --format ndjson writes each entry
-  # on a line, then the export_end line.
+  # starts, or the one at --until), and so complete. --format ndjson writes the lines
+  # `Evidence.to_ndjson/1` writes for a page.
   defp export(tenant, opts) do
     ndjson? =
       case opts[:format] || "json" do
@@ -180,7 +180,7 @@ defmodule Mix.Tasks.Optimal.Authority do
       |> Enum.reduce({0, 0}, fn entry, {written, _last} ->
         line =
           cond do
-            ndjson? -> [Jason.encode!(entry), "\n"]
+            ndjson? -> Evidence.ndjson_entry(entry)
             written > 0 -> [",\n", Jason.encode!(entry)]
             true -> Jason.encode!(entry)
           end
@@ -201,7 +201,7 @@ defmodule Mix.Tasks.Optimal.Authority do
     }
 
     if ndjson? do
-      IO.binwrite(device, [Evidence.export_end(rest), "\n"])
+      IO.binwrite(device, Evidence.ndjson_end(rest))
     else
       "{" <> fields = rest |> Map.delete("tenant_id") |> Jason.encode!()
       IO.binwrite(device, ["\n],", fields, "\n"])
