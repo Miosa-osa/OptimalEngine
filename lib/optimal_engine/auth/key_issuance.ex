@@ -25,8 +25,11 @@ defmodule OptimalEngine.Auth.KeyIssuance do
   leaves them out mints a key with none, which reads only what carries no label
   and no partition, and a request that names them gets them only if the minter
   holds them (a minter that holds `"*"` may give any). Without this a key minted
-  from the bootstrap key would carry its `"*"`. `permissions` is inherited when
-  omitted, as the operation scopes are.
+  from the bootstrap key would carry its `"*"`. A grant the request leaves out is
+  written as an empty list, so a key minted here always carries both fields: the
+  key grant backfill (migration 85) gives grants only to a key that carries
+  neither, and must never reach one that was minted with none. `permissions` is
+  inherited when omitted, as the operation scopes are.
 
   `rate_limit_per_minute` (a positive integer) gives the key its own rate
   limit bucket instead of the size profile's (`OptimalEngine.API.RateLimitPlug`).
@@ -171,16 +174,22 @@ defmodule OptimalEngine.Auth.KeyIssuance do
   defp principal(_tenant_id, _body), do: {:error, "invalid principal_id"}
 
   defp grants(parent, body) do
-    Enum.reduce_while(@grant_fields, {:ok, %{}}, fn field, {:ok, acc} ->
-      case grant(parent, body, field) do
-        {:ok, nil} -> {:cont, {:ok, acc}}
-        {:ok, values} -> {:cont, {:ok, Map.put(acc, field, values)}}
-        {:error, _} = error -> {:halt, error}
-      end
-    end)
+    result =
+      Enum.reduce_while(@grant_fields, {:ok, %{}}, fn field, {:ok, acc} ->
+        case grant(parent, body, field) do
+          {:ok, nil} -> {:cont, {:ok, acc}}
+          {:ok, values} -> {:cont, {:ok, Map.put(acc, field, values)}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+
+    with {:ok, granted} <- result, do: {:ok, Map.merge(@no_grants, granted)}
   end
 
   @inherited_grants ~w(permissions)
+
+  # What a mint that names no label or partition grants writes: none, explicitly.
+  @no_grants %{"allowed_partitions" => [], "allowed_security_labels" => []}
 
   # A root minter issues any operation scope and any `permissions`, but label
   # and partition grants only as far as it holds them: a "*" scope is not a
