@@ -304,7 +304,7 @@ defmodule OptimalEngine.Store.Migrations do
 
   # The number lives here and in the pins listed in
   # docs/guides/versioning-and-releases.md.
-  @derived_rows_tenant_version 79
+  @derived_rows_tenant_version 80
 
   # The graph edges migration gave contexts still labelled "default" in
   # another tenant's workspace that tenant. The rows derived from a context
