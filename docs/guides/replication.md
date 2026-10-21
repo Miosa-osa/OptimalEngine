@@ -258,10 +258,16 @@ The exports, the conflict list and the ledger dump rows rather than answer a que
 An edge follows the contexts at its ends; an end that names no context is an entity, which is no labelled row, so an edge from a context to the entity it names is shown with the context.
 A signal the key may read embeds the clusters it belongs to and the wiki pages that cite it, which are rows of their own: a cluster is judged by its members and a page by what it cites, and one the key may not read is left out of `clusters` and `citations`.
 A search or grep decides for each hit from the row it came from (a document, a memory, a chunk), so a chunk of a restricted document is not found by a key without the label.
-A key whose grants cut a list is shown a full page of what it may see, and `offset` counts those items, not the rows behind them.
+A key whose grants or access lists cut a list is shown a full page of what it may see, and `offset` counts those items, not the rows behind them.
+The access lists cut a list when the tenant has any access list row (or a resource with none is denied), whatever the key's grants.
 The Engine reads on until the page and one more are found: a memory list reads up to 10,000 memories, and a search or a grep up to 1,000 hits (a ranked result is re-asked at twice the size).
-`has_more` is exact within what was read, and `pagination.total` is the number of items the key may see that were found, so it ends one past the page when there is more; it never counts a row the key may not see.
-A key granted `"*"` and the operator are paged by the list as before, and `total` of the memory list is the count of the workspace.
+`has_more` is exact within what was read.
+For a key whose grants cut, `pagination.total` is the number of items the key may see that were found, so it ends one past the page when there is more; it never counts a row the key may not see.
+A key granted `"*"` keeps the count of the workspace as the `total` of the memory list, and the operator is paged by the list as before.
+One gate serves a whole request, so the workspace is read once for all the batches of a page.
+A read that reaches its budget (10,000 memories or 1,000 hits) stops there and answers what it found, with `has_more` false: a key that may see little of a very large list can be told there is no more although more lies beyond what the Engine read.
+The answer does not say that the budget was reached, on purpose: a flag that depends on how many hidden rows came first is a count of them, which these routes do not give.
+Narrow the query, or ask the owner of the workspace for a key that reads more.
 
 **Not covered yet.** Every route not named above as following the grants still answers by the access lists (or not at all), and a key with `read` reaches it whatever its grants. The ones that return row text or name rows:
 

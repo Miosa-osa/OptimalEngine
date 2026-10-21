@@ -201,18 +201,20 @@ defmodule OptimalEngine.API.Router do
     contexts =
       reader
       |> node_page(
+        workspace,
         50,
         &fetch_node_contexts(node_id, workspace, tenant, &1, &2),
-        &readable_node_contexts(reader, workspace, &1)
+        &readable_node_contexts(&1, workspace, &2)
       )
       |> Enum.map(&Map.delete(&1, :uri))
 
     edges =
       node_page(
         reader,
+        workspace,
         200,
         &fetch_node_edges(node_id, workspace, tenant, &1, &2),
-        &readable_node_edges(reader, workspace, tenant, &1)
+        &readable_node_edges(&1, workspace, &2)
       )
 
     json(conn, %{
@@ -301,7 +303,7 @@ defmodule OptimalEngine.API.Router do
           # which hidden rows match.
           reader = Reader.scope(conn)
 
-          visible = fn contexts ->
+          visible = fn scope, contexts ->
             inherited =
               if type in [nil, :memory],
                 do: inherited_policy_results(conn, tenant, workspace, q, as_of),
@@ -316,7 +318,7 @@ defmodule OptimalEngine.API.Router do
 
             {kept, _withheld} =
               ReadScope.filter_any(
-                reader,
+                scope,
                 merged,
                 & &1.id,
                 &(&1.source_workspace_id || workspace),
@@ -326,13 +328,23 @@ defmodule OptimalEngine.API.Router do
             kept
           end
 
-          # A key whose grants cut the hits is shown a full page of what it may
-          # see, so the window grows until the page and one more are found.
+          # A key whose grants or access lists cut the hits is shown a full page
+          # of what it may see, so the window grows until the page and one more
+          # are found. One gate serves the whole request.
           result =
             if ReadScope.filtering?(reader) do
-              ReadScope.widen(offset + limit + 1, fetch_limit, @gated_window, search, visible)
+              ReadScope.shared(reader, workspace, fn shared ->
+                ReadScope.widen(
+                  offset + limit + 1,
+                  fetch_limit,
+                  @gated_window,
+                  search,
+                  &visible.(shared, &1)
+                )
+              end)
             else
-              with {:ok, contexts} <- search.(fetch_limit), do: {:ok, visible.(contexts)}
+              with {:ok, contexts} <- search.(fetch_limit),
+                   do: {:ok, visible.(reader, contexts)}
             end
 
           case result do
@@ -437,10 +449,10 @@ defmodule OptimalEngine.API.Router do
 
       # What the key may see of the matches; the rest is left out and not
       # counted (a count tells a key which hidden chunks match).
-      visible = fn found ->
+      visible = fn scope, found ->
         {kept, _withheld} =
           ReadScope.filter_any(
-            reader,
+            scope,
             found,
             &(&1.chunk_id || &1.context_id),
             fn _match -> workspace_id end,
@@ -450,13 +462,22 @@ defmodule OptimalEngine.API.Router do
         kept
       end
 
-      # A key whose grants cut the matches is shown a full page of what it may
-      # see, so the search reads on until the page and one more are found.
+      # A key whose grants or access lists cut the matches is shown a full page
+      # of what it may see, so the search reads on until the page and one more
+      # are found. One gate serves the whole request.
       result =
         if ReadScope.filtering?(reader) do
-          ReadScope.widen(offset + limit + 1, limit + offset, @gated_window, grep, visible)
+          ReadScope.shared(reader, workspace_id, fn shared ->
+            ReadScope.widen(
+              offset + limit + 1,
+              limit + offset,
+              @gated_window,
+              grep,
+              &visible.(shared, &1)
+            )
+          end)
         else
-          with {:ok, found} <- grep.(limit + offset), do: {:ok, visible.(found)}
+          with {:ok, found} <- grep.(limit + offset), do: {:ok, visible.(reader, found)}
         end
 
       case result do
@@ -1895,9 +1916,10 @@ defmodule OptimalEngine.API.Router do
     files =
       reader
       |> node_page(
+        workspace,
         200,
         &fetch_node_files(slug, workspace, tenant, &1, &2),
-        &readable_node_contexts(reader, workspace, &1)
+        &readable_node_contexts(&1, workspace, &2)
       )
       |> Enum.map(&node_file/1)
 
@@ -2753,10 +2775,10 @@ defmodule OptimalEngine.API.Router do
     # What the key may see of the memories read. What it may not see is left out
     # and not counted: a count on a route that takes a query tells a key which
     # hidden memories match.
-    visible = fn memories ->
+    visible = fn scope, memories ->
       {kept, _withheld} =
         ReadScope.filter(
-          reader,
+          scope,
           workspace_id,
           "memories",
           memories,
@@ -2767,26 +2789,37 @@ defmodule OptimalEngine.API.Router do
       kept
     end
 
-    {memories, total} =
-      if ReadScope.filtering?(reader) do
-        # A key whose grants cut the list is shown a full page of what it may
-        # see, and `offset` counts those: the list is read on until the page
-        # and one more are found, and the total is what was found, which names
-        # no hidden memory.
-        found = ReadScope.scan(offset + limit + 1, read, visible)
-        {found |> Enum.drop(offset) |> Enum.take(limit), length(found)}
-      else
-        total =
-          case OptimalEngine.Memory.count(filter_opts) do
-            {:ok, n} -> n
-            _ -> 0
-          end
+    all_memories = fn ->
+      case OptimalEngine.Memory.count(filter_opts) do
+        {:ok, n} -> n
+        _ -> 0
+      end
+    end
 
-        {visible.(read.(offset, limit)), total}
+    {memories, total, wrap_opts} =
+      if ReadScope.filtering?(reader) do
+        # A key whose grants or access lists cut the list is shown a full page of
+        # what it may see, and `offset` counts those: the list is read on until
+        # the page and one more are found. The total of a key whose grants cut
+        # is what was found, which names no hidden memory; a key granted `*`
+        # keeps the count of the workspace.
+        found =
+          ReadScope.shared(reader, workspace_id, fn shared ->
+            ReadScope.scan(offset + limit + 1, read, &visible.(shared, &1),
+              batch: min(max(offset + limit + 1, 50), 200)
+            )
+          end)
+
+        total = if ReadScope.grants_cut?(reader), do: length(found), else: all_memories.()
+
+        {found |> Enum.drop(offset) |> Enum.take(limit), total,
+         has_more: length(found) > offset + limit}
+      else
+        {visible.(reader, read.(offset, limit)), all_memories.(), []}
       end
 
     formatted = Enum.map(memories, &memory_to_map/1)
-    pagination = Pagination.wrap(formatted, total, offset, limit)
+    pagination = Pagination.wrap(formatted, total, offset, limit, wrap_opts)
 
     response = %{
       workspace_id: workspace_id,
@@ -5629,13 +5662,18 @@ defmodule OptimalEngine.API.Router do
   # workspace_id in addition to the slug (REALITY-AUDIT: natural key is
   # workspace_id + slug).
   # The first `size` rows of a node listing that the key may read, as
-  # `read.(offset, count)` lists them and `keep.(rows)` lets them through. A key
-  # whose grants cut the listing is shown a full page of what it may see
-  # (`ReadScope.scan/4`), not what is left of the rows read first.
-  defp node_page(reader, size, read, keep) do
-    if ReadScope.filtering?(reader),
-      do: size |> ReadScope.scan(read, keep) |> Enum.take(size),
-      else: keep.(read.(0, size))
+  # `read.(offset, count)` lists them and `keep.(reader, rows)` lets them
+  # through. A key whose grants or access lists cut the listing is shown a full
+  # page of what it may see (`ReadScope.scan/4`), not what is left of the rows
+  # read first, and one gate serves the whole request.
+  defp node_page(reader, workspace_id, size, read, keep) do
+    if ReadScope.filtering?(reader) do
+      ReadScope.shared(reader, workspace_id, fn shared ->
+        size |> ReadScope.scan(read, &keep.(shared, &1), batch: size) |> Enum.take(size)
+      end)
+    else
+      keep.(reader, read.(0, size))
+    end
   end
 
   defp readable_node_contexts(reader, workspace_id, contexts) do
@@ -5647,10 +5685,8 @@ defmodule OptimalEngine.API.Router do
 
   # An edge follows the contexts at its ends: it is shown when the key may read
   # each end that is a context. An end that names no context is an entity, which
-  # is no labelled row, and is not judged (the replication gate reads such an end
-  # as a link to nothing and holds the edge, which would leave a gated key none
-  # of its own node's entity edges).
-  defp readable_node_edges(reader, workspace_id, _tenant_id, edges) do
+  # is no labelled row, and is not judged.
+  defp readable_node_edges(reader, workspace_id, edges) do
     contexts =
       edges |> Enum.flat_map(&[&1.source_id, &1.target_id]) |> Enum.uniq() |> context_addresses()
 
@@ -5719,6 +5755,11 @@ defmodule OptimalEngine.API.Router do
   defp fetch_node_edges(node_id, workspace_id, tenant_id, offset, count) do
     # Return edges where at least one endpoint lives in this node.
     # We join via the contexts table to resolve node membership.
+    #
+    # The order is total: (source, target, relation) is the table's unique key
+    # within a tenant and workspace, and DISTINCT collapses an edge both of whose
+    # ends are in the node. A batch boundary of a read around hidden edges cannot
+    # split a tie, so the weight (not a key) needs no tiebreak.
     case Store.raw_query(
            """
            SELECT DISTINCT e.source_id, e.target_id, e.relation, e.weight
@@ -6070,13 +6111,16 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # The pipeline writes one classification and one intent for each chunk; a
+  # signal's are those of its document chunk, found through `chunks.signal_id`.
   defp signal_classification(signal_id) do
     case Store.raw_query(
            """
            SELECT mode, genre, signal_type, format, structure, sn_ratio, confidence
-           FROM classifications WHERE chunk_id = ?1 LIMIT 1
+           FROM classifications
+           WHERE chunk_id = (#{document_chunk_sql()})
            """,
-           ["#{signal_id}:doc"]
+           [signal_id]
          ) do
       {:ok, [[mode, genre, type, format, structure, sn, conf]]} ->
         %{
@@ -6094,25 +6138,32 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  defp document_chunk_sql do
+    "SELECT id FROM chunks WHERE signal_id = ?1 AND scale = 'document' ORDER BY id LIMIT 1"
+  end
+
   defp signal_intent(signal_id) do
     case Store.raw_query(
-           "SELECT intent, confidence FROM intents WHERE chunk_id = ?1 LIMIT 1",
-           ["#{signal_id}:doc"]
+           "SELECT intent, confidence FROM intents WHERE chunk_id = (#{document_chunk_sql()})",
+           [signal_id]
          ) do
       {:ok, [[intent, confidence]]} -> %{intent: intent, confidence: confidence}
       _ -> nil
     end
   end
 
+  # The clusters any chunk of the signal belongs to, once each.
   defp signal_clusters(signal_id) do
     sql = """
-    SELECT c.id, c.theme, c.intent_dominant, cm.weight
+    SELECT c.id, c.theme, c.intent_dominant, MAX(cm.weight)
     FROM cluster_members cm
     JOIN clusters c ON c.id = cm.cluster_id
-    WHERE cm.chunk_id = ?1
+    WHERE cm.chunk_id IN (SELECT id FROM chunks WHERE signal_id = ?1)
+    GROUP BY c.id, c.theme, c.intent_dominant
+    ORDER BY c.id
     """
 
-    case Store.raw_query(sql, ["#{signal_id}:doc"]) do
+    case Store.raw_query(sql, [signal_id]) do
       {:ok, rows} ->
         Enum.map(rows, fn [cid, theme, dom, w] ->
           %{id: cid, theme: theme, intent_dominant: dom, weight: w}
@@ -6127,9 +6178,11 @@ defmodule OptimalEngine.API.Router do
     case Store.raw_query(
            """
            SELECT wiki_slug, wiki_audience, claim_hash, last_verified
-           FROM citations WHERE chunk_id = ?1
+           FROM citations
+           WHERE chunk_id IN (SELECT id FROM chunks WHERE signal_id = ?1)
+           ORDER BY id
            """,
-           ["#{signal_id}:doc"]
+           [signal_id]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [slug, audience, claim, verified] ->
