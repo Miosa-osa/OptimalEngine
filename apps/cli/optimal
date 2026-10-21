@@ -984,7 +984,10 @@ remote_op() {
           too_many $# 1 "graph $1"
           call GET "/api/graph/$1" "" workspace "$WS" limit "${O_limit:-}"
           ;;
-        backfill) remote_refuse "graph backfill" "the Engine API has no maintenance route for it" ;;
+        backfill)
+          too_many $# 1 "graph backfill"
+          maint POST /api/maintenance/graph/backfill "$(jobj workspace "$WS")"
+          ;;
         *) usage_die "unknown graph command '$1'" ;;
       esac
       emit "$R_BODY"
@@ -1121,7 +1124,7 @@ Engine
 Operator (a local Engine from an Engine checkout; a remote one through /api/maintenance, admin scope)
   start | stop [--force] | restart | log [-n lines]   (remote: log only)
   index [args] | graph [hubs|clusters|triangles|backfill] [args] | reality-check --disposable
-                                   (remote: index and graph, not backfill or reality-check)
+                                   (remote: index and graph, backfill as a job; not reality-check)
   backup [--name file]             server-side backup (admin scope), local or remote
   uris [plan] [ws|*] [--limit n] [--after cursor] [--out file]
                                    contexts that share an optimal:// URI, and what the repair would do

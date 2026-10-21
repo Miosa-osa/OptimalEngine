@@ -311,7 +311,8 @@ defmodule OptimalEngine.Pipeline.Intake do
       # Decompose content into chunks and embed them (async, non-blocking).
       # Chunks carry signal_id = context.id to satisfy the join key. If Ollama
       # is unavailable the chunks are still persisted and embeddings are skipped
-      # gracefully — backfill via `mix optimal.embed_backfill` later.
+      # gracefully; the maintenance sweep (OptimalEngine.Maintenance) embeds
+      # them once the embedder answers.
       Task.start(fn -> decompose_and_embed(context, scope) end)
 
       # Additive graph population: link the extracted claim to the signal's

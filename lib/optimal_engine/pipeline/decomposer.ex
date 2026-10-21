@@ -109,8 +109,9 @@ defmodule OptimalEngine.Pipeline.Decomposer do
   # Phase 5 connection: after chunks land in the store, embed them and persist
   # to `chunk_embeddings` so semantic search has vectors. Gated by config flag
   # (`config :optimal_engine, :embed, on_ingest: true`) and the per-call
-  # `:skip_embed` opt. Failures (e.g. Ollama down) are non-fatal — chunks are
-  # still stored; backfill via `mix optimal.embed_backfill` later.
+  # `:skip_embed` opt. Failures (e.g. Ollama down) are non-fatal: chunks are
+  # still stored, and the maintenance sweep (OptimalEngine.Maintenance) embeds
+  # them once the embedder answers.
   defp maybe_embed_chunks(tree, opts) do
     cond do
       Keyword.get(opts, :skip_embed, false) ->
