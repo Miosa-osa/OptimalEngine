@@ -25,6 +25,20 @@ defmodule OptimalEngine.MixProject do
                                  )
                              end)
 
+  # `OptimalEngine.MemoryCore.SecurityLabels` reads metadata with `:json`, which
+  # OTP 27 added. A build without it must not run: every metadata would read as
+  # unlabelled.
+  @otp_release System.otp_release()
+  case Integer.parse(@otp_release) do
+    {release, _rest} when release >= 27 ->
+      :ok
+
+    _other ->
+      Mix.raise(
+        "Optimal Engine needs Erlang/OTP 27 or later (it reads JSON with :json), not OTP #{@otp_release}"
+      )
+  end
+
   def project do
     [
       app: :optimal_engine,

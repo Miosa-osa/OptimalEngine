@@ -894,8 +894,7 @@ defmodule OptimalEngine.Sync.Gate do
         [
           spec.labels && non_empty_json("security_labels"),
           spec.partitions && non_empty_json("partition_ids"),
-          spec.meta &&
-            "(#{spec.meta} LIKE '%security_labels%' OR #{spec.meta} LIKE '%partition_ids%')",
+          spec.meta && metadata_candidate(spec.meta),
           spec.class &&
             "(#{spec.class} IS NOT NULL AND lower(#{spec.class}) NOT IN ('', 'internal', 'public'))"
         ],
@@ -922,6 +921,19 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   defp non_empty_json(column), do: "(#{column} NOT IN ('[]', '') OR NOT json_valid(#{column}))"
+
+  # A metadata that may carry a label or a partition. Text that spells one of the
+  # two keys is a candidate, and so is any text with a backslash in which a
+  # member is named by that key: `"security\u005flabels"` is the key
+  # `security_labels` once decoded, and spelled so it does not contain it.
+  # `metadata_labels_sql/1` then reads the decoded keys.
+  defp metadata_candidate(column) do
+    quoted = quote_name(column)
+
+    "(#{quoted} LIKE '%security_labels%' OR #{quoted} LIKE '%partition_ids%' OR " <>
+      "(instr(#{quoted}, char(92)) > 0 AND json_valid(#{quoted}) AND " <>
+      "EXISTS (SELECT 1 FROM json_each(#{quoted}) WHERE key IN ('security_labels', 'partition_ids'))))"
+  end
 
   # The labels and partitions of a metadata column as a small JSON object, which
   # `SecurityLabels.metadata_tokens/1` reads like the whole column. Metadata that
@@ -971,13 +983,19 @@ defmodule OptimalEngine.Sync.Gate do
     """
   end
 
+  # A `security_labels` key that appears twice is above every class: SQLite reads
+  # the first of two and `SecurityLabels.metadata_map/1` marks the pair as
+  # unresolved, and the row must not pass as open because the first is.
   defp exact_predicate(%{meta: meta}, rank) when is_binary(meta) do
     """
     (CASE WHEN json_valid(#{meta}) THEN
-       CASE json_type(#{meta}, '$.security_labels')
-         WHEN 'array' THEN EXISTS (SELECT 1 FROM json_each(#{meta}, '$.security_labels') j WHERE lower(j.value) IN (#{classes_above(rank)}))
-         WHEN 'text' THEN lower(json_extract(#{meta}, '$.security_labels')) IN (#{classes_above(rank)})
-         ELSE 0 END
+       CASE WHEN (SELECT count(*) FROM json_each(#{meta}) WHERE key = 'security_labels') > 1 THEN 1
+       ELSE
+         CASE json_type(#{meta}, '$.security_labels')
+           WHEN 'array' THEN EXISTS (SELECT 1 FROM json_each(#{meta}, '$.security_labels') j WHERE lower(j.value) IN (#{classes_above(rank)}))
+           WHEN 'text' THEN lower(json_extract(#{meta}, '$.security_labels')) IN (#{classes_above(rank)})
+           ELSE 0 END
+       END
        ELSE 0 END)
     """
   end

@@ -1219,8 +1219,8 @@ defmodule OptimalEngine.Sync do
 
     for mutation <- Enum.take(held, @held_logged) do
       Logger.warning(
-        "[Sync] a #{mutation["operation"]} of #{mutation["entity_type"]} #{cut(mutation["entity_id"])} " <>
-          "from #{cut(mutation["device_id"])} was skipped: this Engine holds the row above the class that peer is cleared for"
+        "[Sync] skipped #{mutation["operation"]} of #{mutation["entity_type"]} #{cut(mutation["entity_id"])} " <>
+          "from #{cut(mutation["device_id"])}: this Engine holds the row above the class that peer is cleared for"
       )
     end
 
@@ -1233,8 +1233,24 @@ defmodule OptimalEngine.Sync do
     :ok
   end
 
-  defp cut(value) when is_binary(value), do: value |> String.slice(0, 64) |> inspect()
-  defp cut(value), do: inspect(value, limit: 3, printable_limit: 64)
+  # By bytes, not by graphemes: a single grapheme can hold any number of
+  # combining marks, and a key is whatever a peer sent.
+  @cut_bytes 64
+
+  defp cut(value) when is_binary(value) do
+    value |> binary_part(0, min(byte_size(value), @cut_bytes)) |> whole_characters(3) |> inspect()
+  end
+
+  defp cut(value), do: inspect(value, limit: 3, printable_limit: @cut_bytes)
+
+  # A cut can leave the first bytes of a multi-byte character at the end.
+  defp whole_characters(binary, drop) when drop > 0 and binary != "" do
+    if String.valid?(binary),
+      do: binary,
+      else: whole_characters(binary_part(binary, 0, byte_size(binary) - 1), drop - 1)
+  end
+
+  defp whole_characters(binary, _drop), do: binary
 
   # A delete of a context that a peer made (an erasure, a retention delete, a move)
   # removed its rows here, and the derived rows that went with it arrive as deletes of

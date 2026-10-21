@@ -984,6 +984,46 @@ defmodule OptimalEngine.SyncGateTest do
       end
     end
 
+    test "the ledger is read through chunk and cap boundaries: oldest restricted is always seen",
+         ctx do
+      for versions <- [50, 51, 100, 101, 999, 1000, 1001] do
+        id = "fact-edge-#{versions}-#{ctx.n}"
+        fact(ctx, id, "Edge #{versions} secret 5540", ["restricted"])
+        {:ok, _} = Capture.seal()
+
+        {:ok, _} =
+          Store.raw_query("UPDATE facts SET security_labels = '[]' WHERE id = ?1", [id])
+
+        {:ok, _} = Capture.seal()
+        copy_versions(ctx, id, versions - 2)
+        {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+        assert held_delete?(ctx, id), "#{versions} versions, the oldest restricted, were released"
+      end
+    end
+
+    test "a deleted row with every version open is sent below 1,000 versions and held from there",
+         ctx do
+      for {versions, held?} <- [
+            {49, false},
+            {50, false},
+            {51, false},
+            {101, false},
+            {999, false},
+            {1000, true},
+            {1001, true}
+          ] do
+        id = "fact-open-#{versions}-#{ctx.n}"
+        fact(ctx, id, "Open #{versions} 5541", [])
+        {:ok, _} = Capture.seal()
+        copy_versions(ctx, id, versions - 1)
+        {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+        assert held_delete?(ctx, id) == held?,
+               "#{versions} open versions: the delete was #{if held?, do: "released", else: "held"}"
+      end
+    end
+
     test "a version a peer sent without the labels does not release the row's other versions",
          ctx do
       id = "fact-peer-#{ctx.n}"
@@ -1128,7 +1168,7 @@ defmodule OptimalEngine.SyncGateTest do
         end)
 
       # The log names the table, the key and the device, and nothing the row holds.
-      assert log =~ "a delete of facts"
+      assert log =~ "skipped delete of facts"
       assert log =~ id
       assert log =~ "rep_remote"
       refute log =~ "Original 7711"
@@ -1166,7 +1206,7 @@ defmodule OptimalEngine.SyncGateTest do
                    remote_delete(ctx, "facts", long, max_class: "internal")
         end)
 
-      assert log =~ "a delete of facts"
+      assert log =~ "skipped delete of facts"
       assert log =~ String.duplicate("k", 64)
       refute log =~ String.duplicate("k", 65)
 
@@ -1195,8 +1235,34 @@ defmodule OptimalEngine.SyncGateTest do
                    )
         end)
 
-      assert length(Regex.scan(~r/a delete of facts/, log)) == 10
+      assert length(Regex.scan(~r/skipped delete of facts/, log)) == 10
       assert log =~ "4 more changes were skipped the same way"
+    end
+
+    test "the key in the log is cut by bytes, never by graphemes, and stays whole text", ctx do
+      # One grapheme with thousands of combining marks, and characters of three
+      # bytes cut at the 64th.
+      marks = "e" <> String.duplicate("\u0301", 5_000) <> "-#{ctx.n}"
+      euros = String.duplicate("€", 40) <> "-#{ctx.n}"
+
+      for {id, kept} <- [{marks, nil}, {euros, String.duplicate("€", 21)}] do
+        fact(ctx, id, "Cut key 7791", ["restricted"])
+
+        log =
+          capture_log([level: :warning], fn ->
+            assert {:ok, %{skipped: %{gated: 1}}} =
+                     remote_delete(ctx, "facts", id, max_class: "internal")
+          end)
+
+        assert byte_size(log) < 600, "the log line is #{byte_size(log)} bytes"
+        assert String.valid?(log)
+        assert log =~ "skipped delete of facts"
+
+        if kept do
+          assert log =~ kept
+          refute log =~ kept <> "€"
+        end
+      end
     end
 
     test "a delete of a row within the class the peer is cleared for is applied", ctx do
@@ -1473,6 +1539,39 @@ defmodule OptimalEngine.SyncGateTest do
       second = Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
 
       refute sent?(second["mutations"], "analysis_reports", "rep-late-#{ctx.n}")
+    end
+
+    test "an aggregate is held when a memory's metadata repeats security_labels, whichever is first",
+         ctx do
+      cases = [
+        open_first: {~s({"security_labels":["public"],"security_labels":["restricted"]}), :held},
+        restricted_first:
+          {~s({"security_labels":["restricted"],"security_labels":["public"]}), :held},
+        spelled: {~S({"security_labels":["public"],"security\u005flabels":["restricted"]}), :held},
+        # Controls: one key says what the row is.
+        one_open: {~s({"security_labels":["public"],"note":"a"}), :sent},
+        two_notes: {~s({"note":"a","note":"b","security_labels":["public"]}), :sent}
+      ]
+
+      for {name, {metadata, expected}} <- cases do
+        ws = create_workspace(ctx.tenant, "rk-" <> String.replace("#{name}", "_", "-"), %{})
+
+        {:ok, memory} =
+          Versioned.create(%{content: "Note #{name}", workspace_id: ws, tenant_id: ctx.tenant})
+
+        {:ok, _} =
+          Store.raw_query("UPDATE memories SET metadata = ?2 WHERE id = ?1", [memory.id, metadata])
+
+        report(%{ctx | ws: ws}, "rep-rk-#{name}-#{ctx.n}")
+        pulled = Sync.changes(ctx.tenant, ws, limit: 2_000)
+
+        actual =
+          if sent?(pulled["mutations"], "analysis_reports", "rep-rk-#{name}-#{ctx.n}"),
+            do: :sent,
+            else: :held
+
+        assert actual == expected, "#{name}: the aggregate was #{actual}, not #{expected}"
+      end
     end
 
     test "a change applied from a peer that raises the labels of a source is honoured", ctx do
@@ -2810,6 +2909,43 @@ defmodule OptimalEngine.SyncGateTest do
         "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, security_labels) VALUES (?1, ?2, ?3, ?4, ?5)",
         [id, ctx.tenant, ctx.ws, text, Jason.encode!(labels)]
       )
+  end
+
+  # `count` more versions of the fact `id`, copies of its newest in the ledger,
+  # written in one statement.
+  defp copy_versions(ctx, id, count) do
+    {:ok, _} =
+      Store.raw_query(
+        """
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?4),
+          newest AS (
+            SELECT * FROM sync_mutations
+            WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = 'facts' AND entity_id = ?3
+            ORDER BY sequence DESC LIMIT 1
+          )
+        INSERT INTO sync_mutations
+          (id, tenant_id, organization_id, workspace_id, device_id, entity_type, entity_id, operation,
+           payload, payload_hash, idempotency_key, occurred_at)
+        SELECT newest.id || '-' || n.i, newest.tenant_id, newest.organization_id, newest.workspace_id,
+               newest.device_id, newest.entity_type, newest.entity_id, 'update', newest.payload,
+               newest.payload_hash, newest.idempotency_key || '-' || n.i, newest.occurred_at
+        FROM newest, n ORDER BY n.i
+        """,
+        [ctx.tenant, ctx.ws, id, count]
+      )
+  end
+
+  # Whether a replicating gate for a peer cleared for `internal` keeps the delete
+  # of the gone fact `id` at home.
+  defp held_delete?(ctx, id) do
+    delete = %{
+      "entity_type" => "facts",
+      "entity_id" => id,
+      "operation" => "delete",
+      "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
+    }
+
+    Gate.with_gate(ctx.tenant, ctx.ws, "internal", &Gate.hold?(&1, delete))
   end
 
   defp report(ctx, id) do

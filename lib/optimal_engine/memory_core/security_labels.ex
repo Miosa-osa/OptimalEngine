@@ -332,8 +332,14 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
       {map, :ok, rest} when is_map(map) -> if String.trim(rest) == "", do: {:ok, map}, else: :error
       _other -> :error
     end
-  rescue
-    _error -> :error
+  catch
+    # What `:json.decode/3` raises for text that is not JSON. Nothing else is
+    # caught: on an OTP without `:json` (below 27, which `mix.exs` refuses) the
+    # call raises `:undef`, and that must stop the caller, not read every
+    # metadata as unlabelled.
+    :error, :unexpected_end -> :error
+    :error, {:invalid_byte, _byte} -> :error
+    :error, {:unexpected_sequence, _bytes} -> :error
   end
 
   @doc """
