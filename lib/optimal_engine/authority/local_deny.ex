@@ -12,9 +12,16 @@ defmodule OptimalEngine.Authority.LocalDeny do
   It matches as it was written, and also as it reads after the id repairs
   recorded since it was added (`OptimalEngine.Authority.WorkspaceRekeys`): a
   deny for the old id applies to the new id, and after a merge to the
-  workspace the rows were merged into. Following can only add denials, so it
-  reads the recorded repairs without requiring their signatures; a forged
-  record can widen a deny and never lift one.
+  workspace the rows were merged into.
+
+  Following can only add denials, so it reads the recorded repairs without
+  requiring their signatures: a forged repair record cannot lift a deny, it
+  can only make one apply to more. (Someone who can write rows into the
+  evidence table can write denies into their table as well, so a signature
+  on a repair would protect nothing here.) Where a deny was added is the
+  first record of it in the chain: a later record of the same deny, forged or
+  not, cannot move that position forward and so cannot cut the deny off from
+  a repair.
   """
 
   alias OptimalEngine.Authority.{Policy, WorkspaceRekeys}
@@ -35,6 +42,16 @@ defmodule OptimalEngine.Authority.LocalDeny do
   @doc "Adds a local deny. Patterns default to `**` (everything)."
   @spec add(String.t(), map(), String.t()) :: {:ok, t()} | {:error, term()}
   def add(tenant_id, attrs, created_by) do
+    Store.transaction(fn txn -> add_in(txn, tenant_id, attrs, created_by) end)
+  end
+
+  @doc """
+  Adds a local deny inside a Store transaction the caller already holds, so
+  the deny commits or rolls back with the caller's own writes (the record of
+  it in the evidence chain).
+  """
+  @spec add_in(term(), String.t(), map(), String.t()) :: {:ok, t()} | {:error, term()}
+  def add_in(txn, tenant_id, attrs, created_by) do
     id = "deny_" <> (:crypto.strong_rand_bytes(9) |> Base.url_encode64(padding: false))
 
     row = [
@@ -48,16 +65,19 @@ defmodule OptimalEngine.Authority.LocalDeny do
       created_by
     ]
 
-    case Store.raw_query(
-           """
-           INSERT INTO authority_local_denies
-             (id, tenant_id, workspace_id, subject, action, resource, reason, created_by)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-           """,
-           row
-         ) do
-      {:ok, _} -> get(tenant_id, id)
-      error -> error
+    with {:ok, _} <-
+           Store.txn_execute(
+             txn,
+             """
+             INSERT INTO authority_local_denies
+               (id, tenant_id, workspace_id, subject, action, resource, reason, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             """,
+             row
+           ),
+         {:ok, [stored]} <-
+           Store.txn_query(txn, select_sql("WHERE tenant_id = ?1 AND id = ?2"), [tenant_id, id]) do
+      {:ok, to_deny(stored)}
     end
   end
 
@@ -133,13 +153,19 @@ defmodule OptimalEngine.Authority.LocalDeny do
     Enum.any?(for(p <- patterns, r <- resources, do: Policy.glob?(p, r)))
   end
 
-  # Where in the evidence chain each deny was recorded, so a repair made
-  # before the deny was added does not reach it. A deny with no entry (its
-  # entry is written after the row) reads every repair.
+  # Where in the evidence chain each deny was first recorded, so a repair made
+  # before the deny was added does not reach it. The first record counts: a
+  # later record of the same deny cannot push the position forward. A deny
+  # with no record (the Engine could not sign evidence when it was added)
+  # reads every repair.
   defp added_seqs(tenant_id) do
     {:ok, rows} =
       Store.raw_query(
-        "SELECT json_extract(detail, '$.deny_id'), tenant_seq FROM authority_evidence WHERE tenant_id = ?1 AND kind = 'local_deny.added'",
+        """
+        SELECT json_extract(detail, '$.deny_id'), MIN(tenant_seq) FROM authority_evidence
+        WHERE tenant_id = ?1 AND kind = 'local_deny.added'
+        GROUP BY json_extract(detail, '$.deny_id')
+        """,
         [tenant_id]
       )
 

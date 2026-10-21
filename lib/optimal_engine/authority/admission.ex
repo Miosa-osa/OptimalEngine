@@ -195,6 +195,7 @@ defmodule OptimalEngine.Authority.Admission do
     {workspace, resource} = bound_workspace(claims, optimal, request, origin)
 
     cond do
+      workspace == :stranded -> {:error, :wrong_workspace}
       workspace != request.workspace_id -> {:error, :wrong_workspace}
       optimal["action"] != request.action -> {:error, :wrong_action}
       not resource_covered?(resource, request.resource) -> {:error, :wrong_resource}
@@ -211,18 +212,37 @@ defmodule OptimalEngine.Authority.Admission do
   # workspace. Only the renames recorded after the grant was issued count, and
   # only if they verify. A merge into a workspace that already existed is not
   # followed: a grant for an unregistered id was never issued for that
-  # workspace's data or policies. A grant that did not come from this Engine
-  # (an outside issuer's, whatever id it carries) is taken as written, and so
-  # is any grant while the tenant has no repair on record.
+  # workspace's data or policies. By the same reasoning the grant does not
+  # keep its old id once a merge has moved the rows away from it: the id
+  # would otherwise admit, as it was written, a workspace that no longer holds
+  # what the grant was issued for (or an unrelated one that took the id), so
+  # the grant admits nowhere (`:stranded`). A grant that did not come from this
+  # Engine (an outside issuer's, whatever id it carries) is taken as written,
+  # and so is any grant while the tenant has no repair on record.
   defp bound_workspace(claims, optimal, request, "local") do
     as_written = {optimal["workspace"], optimal["resource"]}
 
     with true <- WorkspaceRekeys.any?(request.tenant_id),
          jti when is_binary(jti) <- claims["jti"],
          seq when is_integer(seq) <- issued_seq(request.tenant_id, jti),
-         [_ | _] = rekeys <- WorkspaceRekeys.list(request.tenant_id) do
-      {WorkspaceRekeys.current(rekeys, optimal["workspace"], seq, [:rename]),
-       WorkspaceRekeys.current_resource(rekeys, optimal["resource"], seq, [:rename])}
+         ids =
+           Enum.reject(
+             [optimal["workspace"], WorkspaceRekeys.resource_workspace(optimal["resource"])],
+             &is_nil/1
+           ),
+         [_ | _] = rekeys <-
+           WorkspaceRekeys.list(request.tenant_id, near: ids, after: seq) do
+      renamed = {
+        WorkspaceRekeys.current(rekeys, optimal["workspace"], seq, [:rename]),
+        WorkspaceRekeys.current_resource(rekeys, optimal["resource"], seq, [:rename])
+      }
+
+      moved = {
+        WorkspaceRekeys.current(rekeys, optimal["workspace"], seq, :any),
+        WorkspaceRekeys.current_resource(rekeys, optimal["resource"], seq, :any)
+      }
+
+      if moved == renamed, do: renamed, else: {:stranded, nil}
     else
       _ -> as_written
     end

@@ -307,7 +307,8 @@ defmodule OptimalEngine.DataSteward do
 
         # The source gives up its slug and external id before the target takes
         # them, so neither unique index sees both rows at once.
-        with {:ok, _} <-
+        with :ok <- target_free_of_rows(txn, tables, target_workspace_id),
+             {:ok, _} <-
                Store.txn_execute(
                  txn,
                  "UPDATE workspaces SET slug=?1, external_id=NULL WHERE id=?2",
@@ -566,6 +567,26 @@ defmodule OptimalEngine.DataSteward do
   end
 
   defp safe_identifier?(value), do: is_binary(value) and Regex.match?(~r/^[a-zA-Z0-9_]+$/, value)
+
+  # A rename gives the same workspace a new id. An id that already holds rows
+  # is where some other data was written, and moving the workspace onto it
+  # would make that data part of the workspace without saying so; merging it
+  # in first (`repair_orphan_scope/3`) says so, and records it as a merge.
+  defp target_free_of_rows(txn, tables, target) do
+    held =
+      Enum.any?(tables, fn table ->
+        match?(
+          {:ok, [[1]]},
+          Store.txn_query(
+            txn,
+            "SELECT EXISTS (SELECT 1 FROM \"#{table}\" WHERE workspace_id=?1)",
+            [target]
+          )
+        )
+      end)
+
+    if held, do: {:error, :target_workspace_has_rows}, else: :ok
+  end
 
   defp rename_tables(txn, tables, source, target) do
     Enum.reduce_while(tables, {:ok, []}, fn table, {:ok, results} ->

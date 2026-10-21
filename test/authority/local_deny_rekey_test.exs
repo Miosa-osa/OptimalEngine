@@ -136,7 +136,7 @@ defmodule OptimalEngine.Authority.LocalDenyRekeyTest do
       target = "#{tenant}:forged-target"
 
       # Following can only add denials, so it does not need the record to be
-      # signed: a forged row can widen a deny, never lift one.
+      # signed: a forged re-key cannot lift a deny.
       {:ok, [[seq]]} =
         Store.raw_query(
           "SELECT COALESCE(MAX(tenant_seq), 0) + 1 FROM authority_evidence WHERE tenant_id = ?1",
@@ -187,6 +187,63 @@ defmodule OptimalEngine.Authority.LocalDenyRekeyTest do
       # The deny was written after the repair, so it does not reach the
       # workspace the old rows moved to.
       refute denied?(tenant, target)
+    end
+  end
+
+  describe "the record of a deny" do
+    defp refuse_evidence(kind) do
+      :ok =
+        Store.raw_execute(
+          """
+          CREATE TRIGGER deny_test_refuses
+          BEFORE INSERT ON authority_evidence
+          WHEN NEW.kind = '#{kind}'
+          BEGIN SELECT RAISE(ABORT, 'refused by the test'); END
+          """,
+          []
+        )
+
+      on_exit(fn -> Store.raw_execute("DROP TRIGGER IF EXISTS deny_test_refuses", []) end)
+    end
+
+    test "is written with the deny, or neither is", %{tenant: tenant} do
+      refuse_evidence("local_deny.added")
+
+      assert_raise MatchError, fn ->
+        Authority.add_local_deny(tenant, %{"action" => "compute"}, "user:owner")
+      end
+
+      assert LocalDeny.active(tenant) == []
+    end
+
+    test "that a forged duplicate repeats at a later position does not stop repairs reaching the deny",
+         %{tenant: tenant, workspace: old} do
+      deny = deny!(tenant, %{"workspace_id" => old, "resource" => "optimal://#{old}/**"})
+      target = repair_id(tenant, old, "ops-duplicate")
+      assert denied?(tenant, target)
+
+      {:ok, [[seq]]} =
+        Store.raw_query(
+          "SELECT COALESCE(MAX(tenant_seq), 0) + 1 FROM authority_evidence WHERE tenant_id = ?1",
+          [tenant]
+        )
+
+      # A second record of the same deny, after the repair. The deny was added
+      # at its first record, so the repair is still before it in time.
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO authority_evidence
+            (id, tenant_id, tenant_seq, kind, subject, action, resource, workspace_id, detail,
+             prev_hash, hash, kid, signature, recorded_at)
+          VALUES ('ev_dup', ?1, ?2, 'local_deny.added', 'user:nobody', 'write', 'optimal://x', 'x',
+                  ?3, 'p', 'h', 'k', 's', '2026-10-20T00:00:00Z')
+          """,
+          [tenant, seq, Jason.encode!(%{"deny_id" => deny.id, "by" => "user:nobody"})]
+        )
+
+      assert denied?(tenant, target)
+      assert denied?(tenant, old)
     end
   end
 
@@ -271,7 +328,7 @@ defmodule OptimalEngine.Authority.LocalDenyRekeyTest do
       # A merge is not a rename: the grant was issued for the orphan id and is
       # not carried to the workspace that already existed.
       assert {:error, :wrong_workspace} = Authority.admit(grant.token, request(tenant, registered))
-      # The deny is: it widens, it never lifts.
+      # The deny is: a repair only adds to what it covers.
       assert denied?(tenant, registered)
     end
   end

@@ -74,6 +74,7 @@ Portable topology documents name workspaces by slug (and by id for a renamed one
 A rename keeps the id. An operator can also make the id match the slug, or attach rows written to an unregistered id, with `POST /api/data-steward/workspaces/rename {source_workspace_id, target_workspace_id}` and `POST /api/data-steward/workspaces/repair {source_workspace_id, target_workspace_id}` (`topology:write`).
 Both move every row that names the workspace to the new id in one transaction, and the answer lists the tables (`tables`, `updated_records` for a repair, `handles_moved` for a rename).
 A rename also moves the slugs the workspace holds, and a repair moves rows only (the target must already be a registered workspace).
+A rename is refused (`target_workspace_has_rows`, nothing moves) when the new id already holds rows in any workspace table: that is other data written under the id, and a rename is the same workspace under a new id. Merge those rows into the workspace first with `workspaces/repair`, which records the move as a merge, then rename.
 
 Signed evidence is not rewritten, because each entry is hashed and signed over the workspace id it names.
 `authority_evidence` is left alone, and the repair is appended to it as a signed `workspace.rekeyed` entry (from, to, who, mode) in the same transaction, which the answer reports as `rekey_recorded: true`.
@@ -86,9 +87,12 @@ Deleting a re-key does not make anything verify: the steps it explained stop ver
 Grants issued before the repair follow a rename, and only a rename.
 A grant is for the workspace under its new id: it admits there, and no longer under the old id, which may name a different workspace by now.
 A merge is not followed, because a grant for an unregistered id was never issued for the workspace that already existed, with its own data and policies.
+Nor does the grant keep admitting under the unregistered id once a merge moved its rows away: that id may name nothing now, or an unrelated workspace that took it, so a grant for a merged-away id admits nowhere (`wrong_workspace` under either id) and is issued again for the workspace it is meant for.
 A grant from an outside issuer is taken as written, and a grant issued after a repair is not changed by it.
 Local denies follow both modes, as they are written and as they read after the repairs recorded since they were added: a deny for the old id applies to the new id, and after a merge to the workspace the rows were merged into, so a repair never leaves one matching nothing.
-Following can only add denials, so a deny follows a repair on record without checking its signature.
+Following can only add denials, so a deny follows a repair on record without checking its signature: a forged repair record cannot lift a deny, it can only make one apply to more, and whoever can write rows into the evidence table could write denies into theirs directly.
+Where a deny was added is the first `local_deny.added` entry for it; a later record of the same deny cannot move that position forward.
+The deny and its entry are written in one transaction, so a repair cannot fall between them.
 
 An Engine that cannot sign evidence (the key that wraps the evidence key is missing) refuses a repair of a workspace that has agent action steps (`{"error": ":evidence_key_unavailable"}`, 422) and moves nothing, because the steps could never be verified again.
 A workspace with no steps is repaired with a warning in the log, and `rekey_recorded` is `false`.

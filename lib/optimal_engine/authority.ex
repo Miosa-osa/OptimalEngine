@@ -39,6 +39,8 @@ defmodule OptimalEngine.Authority do
     Settings
   }
 
+  alias OptimalEngine.Store
+
   # -- decisions ---------------------------------------------------------------
 
   @doc "Decides a request. With `record: true` a deny or ask is recorded."
@@ -347,8 +349,24 @@ defmodule OptimalEngine.Authority do
   @doc "Adds a local deny and records it."
   @spec add_local_deny(String.t(), map(), String.t()) :: {:ok, map()} | {:error, term()}
   def add_local_deny(tenant_id, attrs, by) do
-    with {:ok, deny} <- LocalDeny.add(tenant_id, attrs, by) do
-      Evidence.append(tenant_id, "local_deny.added", %{
+    # The deny and its record commit together, so a workspace id repair
+    # cannot land between them and be recorded as older than the deny. An
+    # Engine that cannot sign evidence still adds the deny: it is a stop.
+    key = Evidence.signing_key(tenant_id)
+
+    Store.transaction(fn txn ->
+      with {:ok, deny} <- LocalDeny.add_in(txn, tenant_id, attrs, by),
+           :ok <- record_deny(txn, key, tenant_id, deny, by) do
+        {:ok, deny}
+      end
+    end)
+  end
+
+  defp record_deny(_txn, nil, _tenant_id, _deny, _by), do: :ok
+
+  defp record_deny(txn, key, tenant_id, deny, by) do
+    {:ok, _entry} =
+      Evidence.append_in(txn, key, tenant_id, "local_deny.added", %{
         subject: deny.subject,
         action: deny.action,
         resource: deny.resource,
@@ -356,8 +374,7 @@ defmodule OptimalEngine.Authority do
         detail: %{"deny_id" => deny.id, "by" => by, "reason" => deny.reason}
       })
 
-      {:ok, deny}
-    end
+    :ok
   end
 
   @doc "Lifts a local deny and records it."

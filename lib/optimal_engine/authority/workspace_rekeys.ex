@@ -44,15 +44,18 @@ defmodule OptimalEngine.Authority.WorkspaceRekeys do
       what keeps it out is the signature.
 
   Each call checks every re-key of the tenant, which is cheap because repairs
-  are rare. A re-key that was deleted is not noticed here: its steps stop
+  are rare. A caller that follows one or two ids (an admission) passes them as
+  `near:` and only the re-keys reachable from them are checked: a signature
+  is verified for a re-key that can matter, not for every repair the tenant
+  ever made. A re-key that was deleted is not noticed here: its steps stop
   verifying (a deleted record explains nothing, so this fails closed), and the
   gap in the chain is reported by `Evidence.verify/1` and the integrity scan
   (`OptimalEngine.Authority.Integrity.scan/2`).
 
   `list(tenant, trust: :recorded)` returns every structurally valid entry
-  without checking signatures. It is for the one reader that may only ever
-  gain from a forged row: local denies, where following a re-key widens a deny
-  and never lifts one.
+  without checking signatures. It is for the one reader that cannot be hurt
+  by a forged row: local denies, where following a re-key can only make a deny
+  apply to more, so a forged re-key cannot lift one.
   """
 
   alias OptimalEngine.Authority.Evidence
@@ -110,8 +113,13 @@ defmodule OptimalEngine.Authority.WorkspaceRekeys do
   @doc """
   Every re-key of the tenant that verifies and links to the entry before it
   (see the module doc), oldest first. Reads at most 10,000 entries and logs
-  when the tenant has that many. `trust: :recorded` skips the signature and
-  link checks.
+  when the tenant has that many. Options:
+
+    * `trust: :recorded` skips the signature and link checks;
+    * `near: ids` keeps only the re-keys reachable from those workspace ids,
+      by following `from` to `to`, and `after: seq` only those recorded after
+      that position. What `current/4` would apply to `ids` after `seq` is
+      always among them.
   """
   @spec list(String.t(), keyword()) :: [rekey()]
   def list(tenant_id, opts \\ []) do
@@ -124,12 +132,48 @@ defmodule OptimalEngine.Authority.WorkspaceRekeys do
       )
     end
 
-    for entry <- entries,
-        %{} = rekey <- [shape(entry)],
-        reliable?(trust, tenant_id, entry, rekey) do
-      rekey
+    shaped = for entry <- entries, %{} = rekey <- [shape(entry)], do: {entry, rekey}
+
+    shaped =
+      case Keyword.get(opts, :near) do
+        nil -> shaped
+        ids -> reachable(shaped, ids, Keyword.get(opts, :after, 0))
+      end
+
+    for {entry, rekey} <- shaped, reliable?(trust, tenant_id, entry, rekey), do: rekey
+  end
+
+  # The re-keys after `after_seq` that start at one of `ids` or at where an
+  # earlier one of them ended, in the order they were recorded.
+  defp reachable(shaped, ids, after_seq) do
+    candidates = Enum.filter(shaped, fn {_entry, rekey} -> rekey.seq > after_seq end)
+
+    candidates
+    |> reach(MapSet.new(ids), [])
+    |> Enum.sort_by(fn {_entry, rekey} -> rekey.seq end)
+  end
+
+  defp reach(candidates, ids, reached) do
+    case Enum.split_with(candidates, fn {_entry, rekey} -> rekey.from in ids end) do
+      {[], _rest} ->
+        reached
+
+      {hit, rest} ->
+        reach(
+          rest,
+          Enum.reduce(hit, ids, fn {_e, r}, acc -> MapSet.put(acc, r.to) end),
+          hit ++ reached
+        )
     end
   end
+
+  @doc "The workspace id inside an `optimal://<workspace id>/...` resource, or nil."
+  @spec resource_workspace(term()) :: String.t() | nil
+  def resource_workspace("optimal://" <> rest) do
+    rest |> String.split("/", parts: 2) |> hd()
+  end
+
+  def resource_workspace(_resource), do: nil
 
   @doc """
   The id `id` is now: `id` as written at evidence entry `after_seq`, followed

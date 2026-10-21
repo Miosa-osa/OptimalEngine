@@ -22,6 +22,8 @@ defmodule OptimalEngine.Authority.Evidence do
   alias OptimalEngine.Authority.{CanonicalJSON, JWS, Keys}
   alias OptimalEngine.Store
 
+  require Logger
+
   @genesis String.duplicate("0", 64)
   @where_page 1_000
 
@@ -475,13 +477,33 @@ defmodule OptimalEngine.Authority.Evidence do
       "action" => action,
       "resource" => resource,
       "workspace_id" => workspace,
-      "detail" => Jason.decode!(detail || "{}"),
+      "detail" => decode_detail(detail, tenant, seq, id),
       "prev_hash" => prev,
       "hash" => hash,
       "kid" => kid,
       "signature" => sig,
       "recorded_at" => at
     }
+  end
+
+  # A row whose detail is not JSON (written by hand, or damaged) reads as an
+  # empty detail and is logged. Its hash then no longer matches, so it fails
+  # verification like any other changed entry, instead of stopping every
+  # reader of the chain with an exception.
+  defp decode_detail(nil, _tenant, _seq, _id), do: %{}
+
+  defp decode_detail(detail, tenant, seq, id) do
+    case Jason.decode(detail) do
+      {:ok, decoded} ->
+        decoded
+
+      {:error, _reason} ->
+        Logger.warning(
+          "[Evidence] entry #{id} (seq #{seq}) of #{tenant} has a detail that is not JSON; reading it as empty"
+        )
+
+        %{}
+    end
   end
 
   defp random_id, do: :crypto.strong_rand_bytes(12) |> Base.url_encode64(padding: false)

@@ -162,6 +162,18 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
 
   defp rekeys(tenant), do: Evidence.list(tenant, kind: "workspace.rekeyed")
 
+  # Changes the mode recorded in a signed re-key, the way a database writer could.
+  defp edit_mode(tenant, seq, mode) do
+    [entry] = Evidence.list(tenant, kind: "workspace.rekeyed") |> Enum.filter(&(&1["seq"] == seq))
+    detail = Map.put(entry["detail"], "mode", mode)
+
+    {:ok, _} =
+      Store.raw_query(
+        "UPDATE authority_evidence SET detail = ?1 WHERE tenant_id = ?2 AND tenant_seq = ?3",
+        [CanonicalJSON.encode(detail), tenant, seq]
+      )
+  end
+
   defp without_authority_key do
     key = System.get_env("OPTIMAL_AUTHORITY_KEY")
     System.delete_env("OPTIMAL_AUTHORITY_KEY")
@@ -700,6 +712,42 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
     end
   end
 
+  describe "renaming onto an id that already holds rows" do
+    test "is refused, so a rename is the same workspace under a new id, and merging first makes it one",
+         %{tenant: tenant, workspace: old, n: n} do
+      {:ok, _} = Workspace.update(old, %{slug: "ops-held"})
+      target = "#{tenant}:ops-held"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO contexts (id, tenant_id, workspace_id, uri, title, content, created_at, metadata) VALUES (?1, ?2, ?3, ?4, 'Row', 'Row.', '2026-10-20T09:00:00Z', '{}')",
+          ["held-#{n}", tenant, target, "optimal://inbox/held-#{n}.md"]
+        )
+
+      assert {:error, :target_workspace_has_rows} =
+               DataSteward.rename_workspace(old, target, actor_id: "user:steward")
+
+      assert {:ok, %{id: ^old}} = Workspace.get(old)
+      assert {:error, :not_found} = Workspace.get(target)
+      assert rekeys(tenant) == []
+
+      # The rows are the workspace's own: merge them in, then rename.
+      assert {:ok, %{updated_records: updated}} =
+               DataSteward.repair_orphan_scope(target, old,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
+
+      assert updated >= 1
+
+      assert {:ok, %{rekey_recorded: true}} =
+               DataSteward.rename_workspace(old, target, actor_id: "user:steward")
+
+      assert {:ok, [[^target]]} =
+               Store.raw_query("SELECT workspace_id FROM contexts WHERE id = ?1", ["held-#{n}"])
+    end
+  end
+
   describe "grants issued before a repair" do
     defp publish_policy!(tenant, workspace) do
       pack = %{
@@ -796,6 +844,72 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
 
       # The target has its own data and its own policy; a grant for the orphan
       # id never covered either.
+      assert {:error, :wrong_workspace} = admit(grant.token, tenant, registered)
+    end
+
+    test "issued for an unregistered id do not admit under that id once its rows were merged away",
+         %{tenant: tenant, workspace: registered, n: n} do
+      orphan = "#{tenant}:orphan-#{n}"
+      publish_policy!(tenant, orphan)
+      grant = grant!(tenant, orphan)
+      chain(tenant, orphan)
+
+      assert {:ok, %{rekey_recorded: true}} =
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
+
+      # The rows left the id, and the grant is not carried to the workspace
+      # they went to: it admits nowhere.
+      assert {:error, :wrong_workspace} = admit(grant.token, tenant, orphan)
+      assert {:error, :wrong_workspace} = admit(grant.token, tenant, registered)
+    end
+
+    test "issued for an unregistered id do not admit under it when another workspace took it",
+         %{tenant: tenant, workspace: registered, n: n} do
+      orphan = "#{tenant}:orphan-#{n}"
+      publish_policy!(tenant, orphan)
+      grant = grant!(tenant, orphan)
+      chain(tenant, orphan)
+
+      assert {:ok, _} =
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
+
+      {:ok, _reused} =
+        Workspace.create(%{
+          id: orphan,
+          tenant_id: tenant,
+          organization_id: Organization.default_for(tenant),
+          slug: "orphan-id-reused",
+          name: "A different workspace with the orphan id"
+        })
+
+      assert {:error, :wrong_workspace} = admit(grant.token, tenant, orphan)
+      assert {:error, :wrong_workspace} = admit(grant.token, tenant, registered)
+    end
+
+    test "are not made to follow a merge by editing its recorded mode to rename",
+         %{tenant: tenant, workspace: registered, n: n} do
+      orphan = "#{tenant}:orphan-#{n}"
+      publish_policy!(tenant, orphan)
+      grant = grant!(tenant, orphan)
+      chain(tenant, orphan)
+
+      assert {:ok, _} =
+               DataSteward.repair_orphan_scope(orphan, registered,
+                 tenant_id: tenant,
+                 actor_id: "user:steward"
+               )
+
+      [%{seq: seq}] = WorkspaceRekeys.list(tenant)
+      edit_mode(tenant, seq, "rename")
+
+      # The signed hash covers the mode, so the edited entry explains nothing.
+      assert WorkspaceRekeys.list(tenant) == []
       assert {:error, :wrong_workspace} = admit(grant.token, tenant, registered)
     end
 
@@ -965,6 +1079,33 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
     end
   end
 
+  describe "a row that is not what it should be" do
+    test "whose detail is not JSON does not stop the evidence from being read, and fails closed",
+         %{tenant: tenant} do
+      {:ok, _} = Authority.add_local_deny(tenant, %{"action" => "compute"}, "user:owner")
+      seq = next_seq(tenant)
+
+      {:ok, _} =
+        Store.raw_query(
+          """
+          INSERT INTO authority_evidence
+            (id, tenant_id, tenant_seq, kind, detail, prev_hash, hash, kid, signature, recorded_at)
+          VALUES ('ev_junk', ?1, ?2, 'workspace.rekeyed', '{not json', 'p', 'h', 'k', 's',
+                  '2026-10-20T00:00:00.000000Z')
+          """,
+          [tenant, seq]
+        )
+
+      log = capture_log(fn -> assert List.last(Evidence.list(tenant))["seq"] == seq end)
+      assert log =~ "ev_junk"
+
+      assert capture_log(fn ->
+               assert WorkspaceRekeys.list(tenant) == []
+               assert {:error, %{seq: ^seq}} = Evidence.verify(tenant)
+             end) =~ "ev_junk"
+    end
+  end
+
   describe "which re-keys count" do
     test "an unsigned re-key behind a forged predecessor whose hash matches is still not trusted",
          %{tenant: tenant, workspace: old} do
@@ -987,6 +1128,63 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
 
       move_steps(tenant, correlation, target)
       assert verified(trace!(tenant, correlation)) == [false, false, false, false]
+    end
+
+    test "a rename edited to a merge no longer explains the steps it moved",
+         %{tenant: tenant, workspace: old} do
+      correlation = chain(tenant, old)
+      {target, _result} = repair_id(tenant, old, "ops-edited")
+      assert verified(trace!(tenant, correlation)) == [true, true, true, true]
+
+      [%{seq: seq}] = WorkspaceRekeys.list(tenant)
+      edit_mode(tenant, seq, "merge")
+
+      assert WorkspaceRekeys.list(tenant) == []
+      assert verified(trace!(tenant, correlation)) == [false, false, false, false]
+      assert [%{correlation_id: ^correlation}] = ActionChain.list(tenant, [target])
+    end
+
+    test "only the re-keys reachable from the ids asked about are checked",
+         %{tenant: tenant, workspace: first, n: n} do
+      {:ok, second} =
+        Workspace.create(%{
+          tenant_id: tenant,
+          organization_id: Organization.default_for(tenant),
+          slug: "second",
+          name: "Second"
+        })
+
+      {first_target, _} = repair_id(tenant, first, "first-new")
+      {:ok, _} = Workspace.update(second.id, %{slug: "second-new"})
+
+      assert {:ok, _} =
+               DataSteward.rename_workspace(second.id, "#{tenant}:second-new",
+                 actor_id: "user:steward"
+               )
+
+      {:ok, _} = Workspace.update(first_target, %{slug: "first-newer"})
+
+      assert {:ok, _} =
+               DataSteward.rename_workspace(first_target, "#{tenant}:first-newer",
+                 actor_id: "user:steward"
+               )
+
+      all = WorkspaceRekeys.list(tenant)
+      assert length(all) == 3
+
+      # From the first workspace, both hops of its own chain and nothing of the other.
+      assert [%{from: ^first}, %{from: ^first_target}] =
+               WorkspaceRekeys.list(tenant, near: [first])
+
+      assert [%{from: from}] = WorkspaceRekeys.list(tenant, near: [second.id])
+      assert from == second.id
+      assert WorkspaceRekeys.list(tenant, near: ["#{tenant}:unrelated-#{n}"]) == []
+
+      # Only the repairs after a position.
+      [%{seq: first_seq} | _] = all
+
+      assert [%{from: ^first_target}] =
+               WorkspaceRekeys.list(tenant, near: [first, first_target], after: first_seq)
     end
 
     test "only the re-keys after an entry apply to it, and a merge is not a rename" do
@@ -1085,6 +1283,16 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       assert [%{correlation_id: ^correlation}] = ActionChain.list(tenant, [target])
       assert ActionChain.list(tenant, [old]) == []
       assert {:ok, _} = Evidence.verify(tenant)
+
+      # Every entry took its own sequence number: no gap, no repeat.
+      {:ok, rows} =
+        Store.raw_query(
+          "SELECT tenant_seq FROM authority_evidence WHERE tenant_id = ?1 ORDER BY tenant_seq",
+          [tenant]
+        )
+
+      seqs = List.flatten(rows)
+      assert seqs == Enum.to_list(1..length(seqs))
     end
   end
 end
