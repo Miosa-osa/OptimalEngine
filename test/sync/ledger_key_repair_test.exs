@@ -59,6 +59,11 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
       for seq <- (next + 7)..(next + 9),
           do: plant(ctx, "#{ctx.local}:#{seq}", "#{ctx.local}:#{seq}")
 
+    # The storage mutation route stored a caller's key under any device id.
+    stored =
+      for seq <- (next + 10)..(next + 11),
+          do: plant(ctx, "stored-#{ctx.n}-#{seq}", "#{ctx.local}:#{seq}", "stored", ctx.local)
+
     control = plant(ctx, "mut_rep_remote_#{ctx.n}_control", "rep_remote:#{ctx.n}")
 
     repair()
@@ -68,10 +73,10 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
 
     # The next local changes take the sequences the planted rows held, and every
     # one of them is sealed under its own id and key.
-    for i <- 1..14, do: insert_context(ctx, "mine-#{ctx.n}-#{i}")
+    for i <- 1..16, do: insert_context(ctx, "mine-#{ctx.n}-#{i}")
     {:ok, _} = Capture.seal()
 
-    for i <- 1..14 do
+    for i <- 1..16 do
       assert {:ok, [[device, id, key]]} =
                Store.raw_query(
                  "SELECT device_id, id, idempotency_key FROM sync_mutations WHERE entity_type = 'contexts' AND entity_id = ?1",
@@ -87,14 +92,30 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
     # A peer's key in this Engine's capture space is now the applied-change key.
     for id <- keyed, do: assert(key_of(id) == "peer:" <> id)
 
-    # A peer's id in this Engine's own id space is moved out of it.
+    # A peer's id in this Engine's own id space is moved out of it, and the id is
+    # free for the local change it was waiting for.
     for id <- owned do
-      assert key_of(id) == nil
       assert key_of("peer_" <> id) == "peer:peer_" <> id
+
+      case Store.raw_query("SELECT device_id FROM sync_mutations WHERE id = ?1", [id]) do
+        {:ok, []} -> :ok
+        {:ok, [[device]]} -> assert device == ctx.local
+      end
     end
 
-    for id <- coloned, do: assert(key_of(id) == "peer:" <> id)
+    for id <- coloned ++ stored, do: assert(key_of(id) == "peer:" <> id)
     assert key_of(control) == "rep_remote:#{ctx.n}"
+
+    # This Engine's own changes keep their ids and keys.
+    {:ok, own} =
+      Store.raw_query(
+        "SELECT id, idempotency_key FROM sync_mutations WHERE workspace_id = ?1 AND device_id = ?2 AND entity_type = 'contexts'",
+        [ctx.ws, ctx.local]
+      )
+
+    for [id, key] <- own, String.starts_with?(id, "mut_") do
+      assert "mut_" <> String.replace(key, ":", "_") == id
+    end
   end
 
   test "a peer's row with a colon in its id is reported without its payload, and never served or pushed",
@@ -149,7 +170,7 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
     next
   end
 
-  defp plant(ctx, id, key, marker \\ "planted") do
+  defp plant(ctx, id, key, marker \\ "planted", device \\ "rep_remote") do
     payload = Jason.encode!(%{"row" => %{"id" => id, "title" => marker}, "blobs" => %{}})
 
     {:ok, _} =
@@ -158,10 +179,10 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
         INSERT INTO sync_mutations
           (id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, payload,
            payload_hash, idempotency_key, occurred_at)
-        VALUES (?1, ?2, ?3, 'rep_remote', 'contexts', ?1, 'create', ?4, 'h', ?5,
+        VALUES (?1, ?2, ?3, ?6, 'contexts', ?1, 'create', ?4, 'h', ?5,
                 '2026-10-14T12:00:00.000')
         """,
-        [id, ctx.tenant, ctx.ws, payload, key]
+        [id, ctx.tenant, ctx.ws, payload, key, device]
       )
 
     id

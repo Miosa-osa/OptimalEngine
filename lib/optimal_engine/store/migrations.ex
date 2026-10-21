@@ -140,7 +140,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_072_workspace_external_id(),
       migration_authority_evidence_kind_index(),
       migration_entity_mention_tenant(),
-      migration_sync_pull_floor()
+      migration_sync_pull_floor(),
+      migration_planted_ledger_keys()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -161,6 +162,59 @@ defmodule OptimalEngine.Store.Migrations do
      [
        {"sync_peers.pulled_local_seq",
         "ALTER TABLE sync_peers ADD COLUMN pulled_local_seq INTEGER NOT NULL DEFAULT 0"}
+     ]}
+  end
+
+  # An Engine before the ledger key change stored a peer's change under the key
+  # the sender sent (its id when it sent none), and took an id in this Engine's
+  # own id space as it came. Such a row holds the id or the key a local change
+  # is sealed under (`mut_<replica>_<n>`, `<replica>:<n>`), and the ledger keeps
+  # the first row with either, so that local change would not be sealed.
+  #
+  # The storage mutation route (`POST /api/storage/workspaces/:id/mutations`)
+  # stored the caller's key the same way, under any device id.
+  #
+  # Data steps only, no schema change. A peer's row (any device but this one)
+  # with an id in this Engine's own id space is moved out of it (`peer_` and the
+  # id). A row with a key in this Engine's capture key space that is not the
+  # capture row of that key (`<replica>:<n>` belongs to `mut_<replica>_<n>`
+  # alone), and every row just moved, gets the key a change applied from a peer
+  # has (`peer:` and the id). This Engine's own changes are not touched. Each
+  # step is a range on a unique column, so it reads the index, not the ledger,
+  # and each is safe to run again: a repaired row is out of the range. A local
+  # change already lost to such a row is not recovered here, and a row with a
+  # colon in its id is reported at boot instead
+  # (`OptimalEngine.Sync.report_colon_ids/0`).
+  #
+  # 79: 75 to 78 are held by changes in review.
+  @planted_ledger_keys_version 79
+  @this_replica "(SELECT replica_id FROM sync_identity WHERE id = 1)"
+  defp migration_planted_ledger_keys do
+    {@planted_ledger_keys_version,
+     "sync ledger: the ids and keys of this Engine's own changes that planted ledger rows hold",
+     [
+       {"data: a peer's row with an id of this Engine's own space is moved out of it",
+        """
+        UPDATE OR IGNORE sync_mutations SET id = 'peer_' || id
+        WHERE id >= 'mut_' || #{@this_replica} || '_'
+          AND id < 'mut_' || #{@this_replica} || '`'
+          AND device_id != #{@this_replica}
+        """},
+       {"data: a row with a key of this Engine's capture space, not its capture row, gets the applied key",
+        """
+        UPDATE OR IGNORE sync_mutations SET idempotency_key = 'peer:' || id
+        WHERE idempotency_key >= #{@this_replica} || ':'
+          AND idempotency_key < #{@this_replica} || ';'
+          AND id != 'mut_' || #{@this_replica} || '_' ||
+                    substr(idempotency_key, length(#{@this_replica}) + 2)
+        """},
+       {"data: a row moved out of the id space gets the applied key",
+        """
+        UPDATE OR IGNORE sync_mutations SET idempotency_key = 'peer:' || id
+        WHERE id >= 'peer_mut_' || #{@this_replica} || '_'
+          AND id < 'peer_mut_' || #{@this_replica} || '`'
+          AND device_id != #{@this_replica}
+        """}
      ]}
   end
 

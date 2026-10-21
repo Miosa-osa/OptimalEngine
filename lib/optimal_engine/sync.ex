@@ -180,9 +180,10 @@ defmodule OptimalEngine.Sync do
 
     mutations =
       for(
-        [_seq, _id, device, type | _] = row <- rows,
+        [_seq, id, device, type | _] = row <- rows,
         device != requester,
         Capture.replicated?(type),
+        not colon_id?(id),
         do: to_mutation(row)
       )
       |> releasable(tenant_id, workspace_id, max_class)
@@ -408,10 +409,11 @@ defmodule OptimalEngine.Sync do
   end
 
   @doc """
-  `purge_unreplicated/0`, once for each version of the replicated list: the
-  list's version is kept in the database file (`PRAGMA user_version`), so a later
-  boot does not scan the whole ledger again, and a change to the list (a table
-  demoted from it drops its unsent ledger rows) runs the purge once more.
+  `purge_unreplicated/0` and `report_colon_ids/0`, once for each version of the
+  replicated list and of the boot checks of the ledger: the version is kept in the
+  database file (`PRAGMA user_version`), so a later boot does not scan the whole
+  ledger again, and a change to the list (a table demoted from it drops its
+  unsent ledger rows) or a new check runs them once more.
   """
   @spec purge_unreplicated_once() :: {:ok, %{String.t() => non_neg_integer()}}
   def purge_unreplicated_once do
@@ -422,15 +424,65 @@ defmodule OptimalEngine.Sync do
         {:ok, %{}}
 
       _ ->
-        with {:ok, purged} <- purge_unreplicated() do
+        with {:ok, purged} <- purge_unreplicated(),
+             {:ok, _reported} <- report_colon_ids() do
           {:ok, _} = Store.raw_query("PRAGMA user_version = #{version}", [])
           {:ok, purged}
         end
     end
   end
 
-  # A positive 31-bit number that changes with the replicated list.
-  defp list_version, do: :erlang.phash2(Capture.replicated_tables(), 2_000_000_000) + 1
+  # Raised when a boot check of the ledger is added, so it runs once on an
+  # Engine that already ran the others. 1: `report_colon_ids/0`.
+  @ledger_checks 1
+
+  # A positive 31-bit number that changes with the replicated list and the checks.
+  defp list_version,
+    do: :erlang.phash2({Capture.replicated_tables(), @ledger_checks}, 2_000_000_000) + 1
+
+  @doc """
+  Logs every ledger row whose mutation id has a colon, the shape of a capture
+  key (`<replica>:<n>`), which no mutation id has: an Engine before the id check
+  stored such a change from a peer as it came. Each row is logged with its
+  sequence, id, scope, device, table, entity id and time, never its payload. It
+  is not served (`changes/3`) or pushed. Returns how many were found.
+  """
+  @spec report_colon_ids() :: {:ok, non_neg_integer()}
+  def report_colon_ids, do: report_colon_ids(0, 0)
+
+  defp report_colon_ids(after_sequence, found) do
+    {:ok, rows} =
+      Store.raw_query(
+        """
+        SELECT sequence, id, tenant_id, workspace_id, device_id, entity_type, entity_id, occurred_at
+        FROM sync_mutations
+        WHERE sequence > ?1 AND instr(id, ':') > 0
+        ORDER BY sequence LIMIT ?2
+        """,
+        [after_sequence, @purge_batch]
+      )
+
+    Enum.each(rows, fn [sequence, id, tenant, workspace, device, type, entity, at] ->
+      Logger.warning(
+        "[Sync] ledger row #{sequence} has a colon in its mutation id #{id}, so it is not " <>
+          "served or pushed: #{type} #{entity} (tenant #{tenant}, workspace #{workspace}, " <>
+          "device #{device}, at #{at})"
+      )
+    end)
+
+    case rows do
+      [] ->
+        {:ok, found}
+
+      _ ->
+        Process.sleep(@purge_yield_ms)
+        report_colon_ids(rows |> List.last() |> hd(), found + length(rows))
+    end
+  end
+
+  # A mutation id never has a colon; a row an earlier Engine stored with one
+  # stays here (`report_colon_ids/0`).
+  defp colon_id?(id), do: String.contains?(id, ":")
 
   # -- peers -------------------------------------------------------------------
 
@@ -2194,7 +2246,10 @@ defmodule OptimalEngine.Sync do
       lost = lost_sequences(peer, rows)
 
       {superseded, rest} =
-        rows |> Enum.map(&to_mutation/1) |> Enum.split_with(&Map.has_key?(lost, &1["sequence"]))
+        rows
+        |> Enum.map(&to_mutation/1)
+        |> Enum.reject(&colon_id?(&1["id"]))
+        |> Enum.split_with(&Map.has_key?(lost, &1["sequence"]))
 
       Enum.each(superseded, &record_superseded(peer, &1, Map.fetch!(lost, &1["sequence"])))
 
