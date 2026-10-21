@@ -17,12 +17,32 @@ defmodule OptimalEngine.Store.Migrations do
 
   - Pure code change with no schema impact.
   - Data operations that can run on-demand from a Mix task.
+  - A backfill that may run long on a large store. Migrations run before the
+    API answers, and a managed Engine is declared failed when `/api/health`
+    does not answer within 90 seconds of its start, so every migration must
+    finish well inside that window. Put a heavy backfill in a resumable job
+    (`OptimalEngine.Jobs`). `run/2` logs how long each migration took.
 
-  ## Contract with `Store.open_and_migrate/1`
+  ## Transactions
 
-  `Store.open_and_migrate/1` creates its baseline tables (contexts, entities,
-  edges, decisions, sessions, vectors, observations), then calls
-  `Migrations.run/1` which applies anything this module tracks. Baseline
+  Each migration runs in one transaction with the row that records it. A
+  failed migration leaves no trace; migrations before it in the same run stay
+  applied, so a release that adds several migrations can leave a store between
+  releases. A managed upgrade therefore backs the store up before the new
+  release boots and restores that backup when it rolls back
+  (docs/guides/versioning-and-releases.md).
+
+  Inside a transaction SQLite refuses `VACUUM`, `ATTACH` and `DETACH`, and
+  ignores some pragmas without an error: `PRAGMA foreign_keys = OFF` is a silent
+  no-op, so a migration cannot turn foreign keys off for a table rebuild. No
+  migration may use `PRAGMA`, `VACUUM`, `ATTACH` or `DETACH`
+  (test/store/failing_migration_test.exs checks every statement).
+
+  ## Contract with `OptimalEngine.Store.SQLite.open_and_migrate/2`
+
+  `OptimalEngine.Store.SQLite.open_and_migrate/2` creates its baseline tables
+  (contexts, entities, edges, decisions, sessions, vectors, observations), then
+  calls `run/2`, which applies anything this module tracks. Baseline
   DDL stays inline in `Store` for minimal disruption; additive work
   (Phase 1 onward) lives here.
   """
@@ -1216,13 +1236,17 @@ defmodule OptimalEngine.Store.Migrations do
 
   @doc """
   Applies, in order, every migration of `migrations` (default `all/0`) whose
-  version is not yet recorded in the `schema_migrations` table: a set check, so
-  a version added behind a higher applied one still runs.
+  version is not yet recorded in the `schema_migrations` table, and logs how
+  long each one took. It is a set check, so a version added behind a higher
+  applied one still runs.
 
-  Each migration runs in one transaction with the row that records it, so it
-  applies completely or leaves the store as it was: when a statement fails,
-  everything the migration wrote is rolled back, its version stays unrecorded,
-  and the error is raised. Migrations applied earlier in the same run stay.
+  Each migration runs in one transaction with the row that records it, so the
+  failed migration leaves no trace: when a statement fails, everything that
+  migration wrote is rolled back, its version stays unrecorded, and
+  `migration <nnn> failed and was rolled back: <cause>` is raised. Migrations
+  before it in the same run stay applied. A migration that another runner on
+  the same database recorded after this run read `schema_migrations` is
+  skipped.
   """
   @spec run(any(), [migration()]) :: :ok
   def run(db, migrations \\ all()) do
@@ -1235,12 +1259,24 @@ defmodule OptimalEngine.Store.Migrations do
 
     Enum.each(pending, fn {version, description, statements} ->
       Logger.info("[Migrations] Applying #{pad(version)} — #{description}")
+      started = System.monotonic_time(:millisecond)
 
-      in_transaction(db, version, fn ->
-        Enum.each(statements, fn {label, sql} -> safe_execute(db, label, sql) end)
-        after_apply(db, version)
-        record_migration!(db, version, description)
-      end)
+      outcome =
+        in_transaction(db, version, fn ->
+          Enum.each(statements, fn {label, sql} -> safe_execute(db, label, sql) end)
+          after_apply(db, version)
+          record_migration!(db, version, description)
+        end)
+
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      case outcome do
+        :applied ->
+          Logger.info("[Migrations] Applied #{pad(version)} in #{elapsed} ms")
+
+        :already_applied ->
+          Logger.info("[Migrations] #{pad(version)} was applied by another runner; skipped")
+      end
     end)
 
     :ok
@@ -1250,47 +1286,87 @@ defmodule OptimalEngine.Store.Migrations do
   defp after_apply(db, 71), do: report_skipped_handles(db)
   defp after_apply(_db, _version), do: :ok
 
-  defp in_transaction(db, version, fun) do
+  @doc false
+  # Runs `fun` for migration `version` inside BEGIN IMMEDIATE ... COMMIT, unless
+  # the version is already recorded once the write lock is held. Anything that
+  # leaves `fun` (an error, a throw, an exit) rolls the transaction back and is
+  # raised as one RuntimeError naming the migration and what became of the store.
+  @spec in_transaction(any(), pos_integer(), (-> any())) :: :applied | :already_applied
+  def in_transaction(db, version, fun) do
     case Exqlite.Sqlite3.execute(db, "BEGIN IMMEDIATE") do
       :ok -> :ok
       {:error, reason} -> raise "migration #{pad(version)} could not begin: #{inspect(reason)}"
     end
 
     try do
-      fun.()
+      outcome =
+        if recorded?(db, version) do
+          :already_applied
+        else
+          fun.()
+          :applied
+        end
 
       case Exqlite.Sqlite3.execute(db, "COMMIT") do
-        :ok -> :ok
+        :ok -> outcome
         {:error, reason} -> raise "migration #{pad(version)} could not commit: #{inspect(reason)}"
       end
-    rescue
-      error ->
-        _ = Exqlite.Sqlite3.execute(db, "ROLLBACK")
+    catch
+      kind, reason ->
+        stacktrace = __STACKTRACE__
 
-        # The message says what happened to the store, so a crash report or a
+        cause =
+          case kind do
+            :error -> kind |> Exception.normalize(reason, stacktrace) |> Exception.message()
+            other -> "#{other}: #{inspect(reason)}"
+          end
+
+        # The message says what became of the store, so a crash report or a
         # boot log names the migration and the rollback as well as the cause.
-        reraise RuntimeError,
-                [
-                  message:
-                    "migration #{pad(version)} failed and was rolled back: " <>
-                      Exception.message(error)
-                ],
-                __STACKTRACE__
+        message =
+          case Exqlite.Sqlite3.execute(db, "ROLLBACK") do
+            :ok ->
+              "migration #{pad(version)} failed and was rolled back: #{cause}"
+
+            {:error, rollback} ->
+              "migration #{pad(version)} failed and its rollback failed too (#{inspect(rollback)}); " <>
+                "the store may hold part of it: #{cause}"
+          end
+
+        reraise RuntimeError, [message: message], stacktrace
+    end
+  end
+
+  defp recorded?(db, version) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(db, "SELECT 1 FROM schema_migrations WHERE version = ?1")
+
+    try do
+      :ok = Exqlite.Sqlite3.bind(stmt, [version])
+      match?({:row, _}, Exqlite.Sqlite3.step(db, stmt))
+    after
+      Exqlite.Sqlite3.release(db, stmt)
     end
   end
 
   @doc """
   Returns the set of applied migration versions.
+
+  Raises when `schema_migrations` cannot be read: an empty set would make the
+  runner apply every migration again.
   """
   @spec applied_versions(any()) :: MapSet.t(pos_integer())
   def applied_versions(db) do
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(db, "SELECT version FROM schema_migrations")
+    case Exqlite.Sqlite3.prepare(db, "SELECT version FROM schema_migrations") do
+      {:ok, stmt} ->
+        try do
+          db |> collect_versions(stmt, []) |> MapSet.new()
+        after
+          Exqlite.Sqlite3.release(db, stmt)
+        end
 
-    versions = collect_versions(db, stmt, [])
-    Exqlite.Sqlite3.release(db, stmt)
-    MapSet.new(versions)
-  rescue
-    _ -> MapSet.new()
+      {:error, reason} ->
+        raise "cannot read schema_migrations: #{inspect(reason)}"
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -4304,7 +4380,7 @@ defmodule OptimalEngine.Store.Migrations do
     case Exqlite.Sqlite3.step(db, stmt) do
       {:row, [version]} -> collect_versions(db, stmt, [version | acc])
       :done -> acc
-      {:error, _} -> acc
+      {:error, reason} -> raise "cannot read schema_migrations: #{inspect(reason)}"
     end
   end
 

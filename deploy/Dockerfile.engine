@@ -108,6 +108,9 @@ RUN export OPTIMAL_ENGINE_GIT_SHA="${OPTIMAL_ENGINE_GIT_SHA}" \
 # ─────────────────────────────────────────────────────────────────────────────
 FROM builder AS packager
 
+# The start script, kept as one file so every archive runs the same one.
+COPY deploy/miosa-template/start-engine /pkg/optimal-engine/start-engine
+
 RUN set -eux; \
     mkdir -p /pkg/optimal-engine/libextra; \
     cp -a /app/_build/prod/rel/optimal/. /pkg/optimal-engine/; \
@@ -116,19 +119,6 @@ RUN set -eux; \
       test -n "$path"; \
       cp -L "$path" /pkg/optimal-engine/libextra/; \
     done; \
-    printf '%s\n' '#!/bin/sh' \
-      'ROOT="$(cd "$(dirname "$0")" && pwd)"' \
-      'export LD_LIBRARY_PATH="$ROOT/libextra${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
-      'export RELEASE_COOKIE="${RELEASE_COOKIE:-optimal_engine_sandbox}"' \
-      'export OPTIMAL_API_ENABLED="${OPTIMAL_API_ENABLED:-true}"' \
-      'export OPTIMAL_API_INTERFACE="${OPTIMAL_API_INTERFACE:-0.0.0.0}"' \
-      'export OPTIMAL_API_PORT="${OPTIMAL_API_PORT:-4200}"' \
-      'export OPTIMAL_ENGINE_ROOT="${OPTIMAL_ENGINE_ROOT:-/data}"' \
-      'export OPTIMAL_ENGINE_DB="${OPTIMAL_ENGINE_DB:-/data/.optimal/index.db}"' \
-      'export OPTIMAL_ENGINE_CACHE="${OPTIMAL_ENGINE_CACHE:-/data/.optimal/cache}"' \
-      'mkdir -p /data/.optimal' \
-      'exec "$ROOT/bin/optimal" start' \
-      > /pkg/optimal-engine/start-engine; \
     chmod +x /pkg/optimal-engine/start-engine; \
     tar czf /pkg/optimal-engine.tgz -C /pkg optimal-engine
 
@@ -186,6 +176,8 @@ EXPOSE 4200
 # API must be enabled + bound to 0.0.0.0 inside the container so the
 # compose network can reach it; TLS termination is handled by the Caddy
 # reverse proxy in production.
+# ERL_CRASH_DUMP_SECONDS=0 writes no crash dump: one holds ETS tables and
+# process heaps, which is customer data, in the working directory.
 ENV OPTIMAL_ENGINE_ROOT=/data \
     OPTIMAL_ENGINE_DB=/data/.optimal/index.db \
     OPTIMAL_ENGINE_CACHE=/data/.optimal/cache \
@@ -195,7 +187,8 @@ ENV OPTIMAL_ENGINE_ROOT=/data \
     OPTIMAL_API_ENABLED=true \
     OPTIMAL_API_PORT=4200 \
     OPTIMAL_API_INTERFACE=0.0.0.0 \
-    OPTIMAL_RELEASE_CHANNEL=dev
+    OPTIMAL_RELEASE_CHANNEL=dev \
+    ERL_CRASH_DUMP_SECONDS=0
 
 # Secrets are environment-only and carry no value in the image:
 #   OPTIMAL_AUTHORITY_KEY   wraps the authority signing keys

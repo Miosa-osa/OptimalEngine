@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { engine, EngineError } from "../client.js";
+import { engineFailure } from "./result.js";
 import { config } from "../config.js";
 
 export function registerForgetMemory(server: McpServer): void {
@@ -57,12 +58,8 @@ export function registerForgetMemory(server: McpServer): void {
               `Memory not found: ${id}`,
             );
           }
-          throw new McpError(
-            ErrorCode.InternalError,
-            `Engine error ${err.status}: ${err.message}`,
-          );
         }
-        throw err;
+        engineFailure(err);
       }
     },
   );

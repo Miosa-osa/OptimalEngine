@@ -245,7 +245,7 @@ For chats: `session_commit`, `sessions_list`, `session_get`, and `org_policy` (`
 The earlier tools remain: `ask`, `grep`, `profile`, `add_memory`, `forget_memory` (sends the workspace the memory belongs to), `recall`, `wiki_get`, `workspaces`, and `render_context`.
 
 It names itself to the Engine as `User-Agent: optimal-mcp/<version>`.
-When the Engine marks it as another minor release (`x-optimal-client-outdated`), it prints one warning line on stderr per process and carries on.
+When the Engine marks it as another minor release (`x-optimal-client-outdated`), it prints one warning line on stderr per Engine release it sees and carries on, so an Engine upgraded while the server runs is reported again.
 When the Engine refuses it with 426, every tool fails with the upgrade hint, for example `the Engine (1.0.0) refuses MCP server 0.3.3; upgrade the MCP server to 1.0.0 (HTTP 426: client_incompatible)`.
 
 Register it with a harness as a stdio server running `node <path>/apps/mcp/dist/index.js` with those environment variables.

@@ -668,7 +668,13 @@ defmodule OptimalEngine.Store.SQLite do
   # Private: Migration + Setup
   # ---------------------------------------------------------------------------
 
-  defp open_and_migrate(db_path) do
+  @doc false
+  # The Store's open path for a database file: pragmas, baseline tables, then
+  # `migrations` (every one by default). Tests use it to build a store at an
+  # older migration and upgrade it the way a boot does.
+  @spec open_and_migrate(Path.t(), [OptimalEngine.Store.Migrations.migration()]) ::
+          {:ok, term()} | {:error, term()}
+  def open_and_migrate(db_path, migrations \\ OptimalEngine.Store.Migrations.all()) do
     File.mkdir_p!(Path.dirname(db_path))
 
     with {:ok, db} <- Exqlite.Sqlite3.open(db_path),
@@ -695,7 +701,7 @@ defmodule OptimalEngine.Store.SQLite do
          :ok <- Exqlite.Sqlite3.execute(db, @ddl_observations),
          :ok <- run_index_migrations(db),
          :ok <- run_probability_column_migrations(db),
-         :ok <- OptimalEngine.Store.Migrations.run(db) do
+         :ok <- OptimalEngine.Store.Migrations.run(db, migrations) do
       {:ok, db}
     end
   end

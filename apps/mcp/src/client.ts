@@ -87,17 +87,19 @@ function buildUrl(
   return url.toString();
 }
 
-let outdatedWarned = false;
+let warnedFor: string | null = null;
 
 /**
- * One stderr line per process when the Engine marks this server as another
- * minor release (`x-optimal-client-outdated: client=<v> engine=<v>`). The
- * request still succeeds; the warning only says to upgrade.
+ * One stderr line per Engine release when the Engine marks this server as
+ * another minor release (`x-optimal-client-outdated: client=<v> engine=<v>`),
+ * so an Engine upgraded while the server runs is reported again. The request
+ * still succeeds; the warning only says to upgrade.
  */
 function warnOutdated(header: string): void {
-  if (outdatedWarned) return;
-  outdatedWarned = true;
   const engineVersion = /engine=(\d+\.\d+\.\d+)/.exec(header)?.[1] ?? null;
+  const key = engineVersion ?? "unreadable";
+  if (warnedFor === key) return;
+  warnedFor = key;
   const detail = !engineVersion
     ? // The header is the Engine's text; an unreadable one is not echoed.
       `the Engine marks MCP server ${MCP_VERSION} as outdated; ${upgradeHint(null)}`

@@ -1,32 +1,38 @@
 #!/usr/bin/env bash
-# Builds the test release of the upgrade rollback drill (WO-39).
+# Builds a test release of the upgrade rollback drill (WO-39).
 #
-# The release is the Engine at HEAD plus one migration that fails on purpose
-# (OptimalEngine.Store.FailingMigration), and its version ends in
-# -failing-migration. Staged as an upgrade target, it must make an upgrade roll
-# back: the new release never answers because its store cannot open, and the
-# previous release starts again on a store that kept its migration counter and
-# its data. It cannot boot, so it can never pass conformance or be promoted.
+# The release is the Engine at HEAD plus migrations that fail on purpose
+# (OptimalEngine.Store.FailingMigration), and its version says so. Staged as an
+# upgrade target, it must make an upgrade roll back: it never answers, because
+# its store cannot open. It cannot boot, so it can never pass conformance or be
+# promoted, and scripts/check_release_version.exs refuses to release it.
 #
-# Usage: scripts/build-failing-migration-release.sh OUT_DIR [--channel beta] [--mix]
+# Usage: scripts/build-failing-migration-release.sh OUT_DIR [--passing-first] [--channel beta] [--mix]
 #
-#   default   the release pipeline: deploy/Dockerfile.engine --target release
-#   --mix     the local Mix toolchain (MIX_ENV=prod mix release) in a build
-#             directory of its own, for a host without Docker; the archive then
-#             carries no bundled shared libraries
-#   --channel the release channel the manifest will name (default beta)
+#   default          one migration that fails: the store keeps its counter and data
+#                    (version <v>-failing-migration)
+#   --passing-first  a migration that passes, then the failing one: the store is
+#                    left between releases, and only the pre-boot backup restores it
+#                    (version <v>-passing-then-failing-migration)
+#   --mix            build with the local Mix toolchain (MIX_ENV=prod mix release)
+#                    in a build directory of its own, for a host without Docker; the
+#                    archive then carries no bundled shared libraries
+#   --channel        the release channel the manifest will name (default beta)
 #
-# Writes OUT_DIR/optimal-engine-<version>-<sha>.tgz, OUT_DIR/SHA256SUMS and
+# The default build is the release pipeline's: deploy/Dockerfile.engine --target
+# release (BUILDER_IMAGE names a builder image, as for build-release.sh). Writes
+# OUT_DIR/optimal-engine-<version>-<sha>.tgz, OUT_DIR/SHA256SUMS and
 # OUT_DIR/identity.json: the identity the release itself reports, read with
 # `bin/optimal eval` because it cannot start. Then prints the engine-release
 # manifest command for staging (docs/guides/versioning-and-releases.md).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SUFFIX=-failing-migration
 OUT=
 CHANNEL=beta
 MODE=docker
+VARIANT=1
+SUFFIX=-failing-migration
 
 usage() {
   sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2
@@ -44,6 +50,11 @@ while [ $# -gt 0 ]; do
       MODE=mix
       shift
       ;;
+    --passing-first)
+      VARIANT=2
+      SUFFIX=-passing-then-failing-migration
+      shift
+      ;;
     -h | --help) usage ;;
     -*) usage ;;
     *)
@@ -59,6 +70,10 @@ case $CHANNEL in dev | stable | beta | pinned) ;; *) echo "unknown channel $CHAN
 die() {
   echo "build-failing-migration-release: $*" >&2
   exit 1
+}
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
 
 # The artifact names its commit, so it must be exactly that commit.
@@ -85,14 +100,15 @@ echo "== building $VERSION at $SHA ($MODE)"
 
 case $MODE in
   docker)
-    docker build --target release \
-      --build-arg OPTIMAL_ENGINE_GIT_SHA="$SHA" \
-      --build-arg OPTIMAL_ENGINE_BUILD_TIMESTAMP="$TS" \
-      --build-arg OPTIMAL_RELEASE_CHANNEL="$CHANNEL" \
-      --build-arg OPTIMAL_BUILD_FAILING_MIGRATION=1 \
-      -f "$ROOT/deploy/Dockerfile.engine" \
-      -o type=local,dest="$WORK/out" \
-      "$ROOT"
+    args=(
+      --build-arg "OPTIMAL_ENGINE_GIT_SHA=$SHA"
+      --build-arg "OPTIMAL_ENGINE_BUILD_TIMESTAMP=$TS"
+      --build-arg "OPTIMAL_RELEASE_CHANNEL=$CHANNEL"
+      --build-arg "OPTIMAL_BUILD_FAILING_MIGRATION=$VARIANT"
+    )
+    [ -n "${BUILDER_IMAGE:-}" ] && args+=(--build-arg "BUILDER_IMAGE=$BUILDER_IMAGE")
+    docker build --target release "${args[@]}" \
+      -f "$ROOT/deploy/Dockerfile.engine" -o "type=local,dest=$WORK/out" "$ROOT"
     mv "$WORK/out/optimal-engine.tgz" "$ARTIFACT"
     ;;
   mix)
@@ -103,28 +119,14 @@ case $MODE in
     if [ -d "$ROOT/_build/prod" ]; then cp -R -L -p "$ROOT/_build/prod" "$WORK/build"; fi
     (
       cd "$ROOT"
-      export MIX_ENV=prod MIX_BUILD_PATH="$WORK/build" OPTIMAL_BUILD_FAILING_MIGRATION=1 \
+      export MIX_ENV=prod MIX_BUILD_PATH="$WORK/build" OPTIMAL_BUILD_FAILING_MIGRATION="$VARIANT" \
         OPTIMAL_ENGINE_GIT_SHA="$SHA" OPTIMAL_ENGINE_BUILD_TIMESTAMP="$TS" \
         OPTIMAL_RELEASE_CHANNEL="$CHANNEL"
       mix deps.get >/dev/null
       mix compile --force
       mix release optimal --overwrite --path "$WORK/pkg/optimal-engine"
     )
-    # The start script of deploy/Dockerfile.engine's packager stage.
-    printf '%s\n' '#!/bin/sh' \
-      'ROOT="$(cd "$(dirname "$0")" && pwd)"' \
-      'export LD_LIBRARY_PATH="$ROOT/libextra${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
-      'export RELEASE_COOKIE="${RELEASE_COOKIE:-optimal_engine_sandbox}"' \
-      'export OPTIMAL_API_ENABLED="${OPTIMAL_API_ENABLED:-true}"' \
-      'export OPTIMAL_API_INTERFACE="${OPTIMAL_API_INTERFACE:-0.0.0.0}"' \
-      'export OPTIMAL_API_PORT="${OPTIMAL_API_PORT:-4200}"' \
-      'export OPTIMAL_ENGINE_ROOT="${OPTIMAL_ENGINE_ROOT:-/data}"' \
-      'export OPTIMAL_ENGINE_DB="${OPTIMAL_ENGINE_DB:-/data/.optimal/index.db}"' \
-      'export OPTIMAL_ENGINE_CACHE="${OPTIMAL_ENGINE_CACHE:-/data/.optimal/cache}"' \
-      'mkdir -p /data/.optimal' \
-      'exec "$ROOT/bin/optimal" start' \
-      >"$WORK/pkg/optimal-engine/start-engine"
-    chmod +x "$WORK/pkg/optimal-engine/start-engine"
+    install -m 0755 "$ROOT/deploy/miosa-template/start-engine" "$WORK/pkg/optimal-engine/start-engine"
     tar czf "$ARTIFACT" -C "$WORK/pkg" optimal-engine
     ;;
 esac
@@ -133,9 +135,11 @@ esac
 # libraries load: the release must fail on its migration and on nothing else.
 mkdir -p "$WORK/check"
 tar xzf "$ARTIFACT" -C "$WORK/check"
+cmp -s "$WORK/check/optimal-engine/start-engine" "$ROOT/deploy/miosa-template/start-engine" ||
+  die "the archive's start-engine is not deploy/miosa-template/start-engine"
 IDENTITY=$(
   cd "$WORK/check"
-  RELEASE_DISTRIBUTION=none OPTIMAL_RELEASE_CHANNEL="$CHANNEL" \
+  RELEASE_DISTRIBUTION=none OPTIMAL_RELEASE_CHANNEL="$CHANNEL" ERL_CRASH_DUMP_SECONDS=0 \
     LD_LIBRARY_PATH="$WORK/check/optimal-engine/libextra" \
     optimal-engine/bin/optimal eval '
       Application.load(:optimal_engine)
@@ -157,14 +161,7 @@ field() {
 [ "$(field build_timestamp)" = "$TS" ] || die "the release reports build time $(field build_timestamp), not $TS"
 MIGRATION=$(field expected_migration)
 
-(
-  cd "$OUT"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$(basename "$ARTIFACT")"
-  else
-    shasum -a 256 "$(basename "$ARTIFACT")"
-  fi
-) >"$OUT/SHA256SUMS"
+(cd "$OUT" && sha256 "$(basename "$ARTIFACT")") >"$OUT/SHA256SUMS"
 
 cat <<EOF
 built     $ARTIFACT

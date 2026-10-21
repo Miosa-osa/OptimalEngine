@@ -1,11 +1,12 @@
 defmodule OptimalEngine.Store.FailingMigrationTest do
   @moduledoc """
-  A migration applies completely or leaves the store as it was. The failing
-  migration of the upgrade rollback drill proves it: it creates a table, writes
-  a row and changes existing data before it fails, and afterwards the store has
-  the same migration counter, schema and data as before.
+  A failed migration leaves no trace; migrations before it in the same run stay
+  applied. The failing migration of the upgrade rollback drill proves the first
+  half: it creates a table, writes a row and changes an existing row before it
+  fails, and afterwards the store has the same migration counter, schema and
+  data as before. The passing-then-failing variant proves the second half.
 
-  Each test works on a copy of the test store (`VACUUM INTO`), never on the
+  Most tests work on a copy of the test store (`VACUUM INTO`), never on the
   store the application has open.
   """
 
@@ -15,23 +16,19 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
   alias OptimalEngine.Store.{FailingMigration, Migrations}
 
   setup do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "failing-migration-#{System.unique_integer([:positive])}.db"
-      )
-
+    path = tmp_db("failing-migration")
     {:ok, _} = Store.raw_query("VACUUM INTO ?1", [path])
     {:ok, db} = Exqlite.Sqlite3.open(path)
-
-    on_exit(fn ->
-      Exqlite.Sqlite3.close(db)
-      for suffix <- ["", "-wal", "-shm"], do: File.rm(path <> suffix)
-    end)
+    on_exit(fn -> Exqlite.Sqlite3.close(db) end)
 
     execute!(
       db,
       "INSERT INTO contexts (id, tenant_id, workspace_id, type, title, content, created_at) VALUES ('drill-context', 'default', 'default', 'signal', 'Drill', 'Kept through the failed upgrade.', datetime('now'))"
+    )
+
+    execute!(
+      db,
+      "INSERT OR IGNORE INTO tenants (id, name) VALUES ('#{FailingMigration.sentinel_tenant()}', 'Sentinel')"
     )
 
     %{db: db, last: Migrations.all() |> List.last() |> elem(0)}
@@ -52,7 +49,7 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
     {version, _description, statements} = failing
     assert version == ctx.last + 1
 
-    # It changes the store before the statement that fails.
+    # It changes the store, an existing row included, before the statement that fails.
     assert Enum.map(statements, &elem(&1, 0)) == [
              "failing_migration_probe",
              "failing_migration_write",
@@ -65,8 +62,7 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
     error =
       assert_raise RuntimeError, fn -> Migrations.run(ctx.db, Migrations.all() ++ [failing]) end
 
-    padded = ctx.last |> Kernel.+(1) |> Integer.to_string() |> String.pad_leading(3, "0")
-    assert error.message =~ "migration #{padded} failed and was rolled back"
+    assert error.message =~ "migration #{pad(ctx.last + 1)} failed and was rolled back"
     assert error.message =~ "failing_migration_fails"
     assert error.message =~ "NOT NULL constraint failed"
 
@@ -84,6 +80,34 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
     assert snapshot(ctx.db) == before
   end
 
+  test "the update reaches only the sentinel tenant" do
+    {_version, _description, statements} = FailingMigration.migration(Migrations.all())
+    {"failing_migration_update", sql} = List.keyfind(statements, "failing_migration_update", 0)
+    assert sql =~ "WHERE id = '#{FailingMigration.sentinel_tenant()}'"
+  end
+
+  test "in the passing-then-failing variant the migration before the failure stays", ctx do
+    [passing, failing] = FailingMigration.variant(:passing_then_failing, Migrations.all())
+    assert elem(passing, 0) == ctx.last + 1
+    assert elem(failing, 0) == ctx.last + 2
+    tenants = rows(ctx.db, "SELECT id, name FROM tenants ORDER BY id")
+
+    for _attempt <- 1..2 do
+      assert_raise RuntimeError,
+                   ~r/migration #{pad(ctx.last + 2)} failed and was rolled back/,
+                   fn ->
+                     Migrations.run(ctx.db, Migrations.all() ++ [passing, failing])
+                   end
+    end
+
+    # The store is between releases: the passing migration is applied, the
+    # failing one left nothing. Only a backup taken before the boot undoes it.
+    assert rows(ctx.db, "SELECT max(version) FROM schema_migrations") == [[ctx.last + 1]]
+    assert rows(ctx.db, "SELECT count(*) FROM passing_migration_probe") == [[1]]
+    refute table?(ctx.db, "failing_migration_probe")
+    assert rows(ctx.db, "SELECT id, name FROM tenants ORDER BY id") == tenants
+  end
+
   test "a migration that succeeds commits its changes and its version together", ctx do
     probe =
       {ctx.last + 1, "commit probe",
@@ -97,24 +121,54 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
     assert rows(ctx.db, "SELECT count(*) FROM commit_probe") == [[1]]
   end
 
-  test "a failure keeps the migrations before it in the same run", ctx do
-    probe =
-      {ctx.last + 1, "commit probe",
-       [{"commit_probe", "CREATE TABLE commit_probe (id INTEGER PRIMARY KEY)"}]}
+  test "a migration another runner recorded after this run looked is skipped", ctx do
+    # The first migration records the second, as a second runner on the same
+    # database would between this run's read of schema_migrations and its turn.
+    # The second migration's statement would fail if it ran.
+    recorder =
+      {ctx.last + 1, "records the next migration",
+       [
+         {"record_next",
+          "INSERT INTO schema_migrations (version, description) VALUES (#{ctx.last + 2}, 'applied by another runner')"}
+       ]}
 
-    {_version, description, statements} =
-      FailingMigration.migration(Migrations.all() ++ [probe])
+    raced =
+      {ctx.last + 2, "already applied", [{"never_runs", "INSERT INTO no_such_table VALUES (1)"}]}
 
-    failing = {ctx.last + 2, description, statements}
+    assert Migrations.run(ctx.db, Migrations.all() ++ [recorder, raced]) == :ok
 
-    assert_raise RuntimeError, fn ->
-      Migrations.run(ctx.db, Migrations.all() ++ [probe, failing])
+    assert rows(ctx.db, "SELECT description FROM schema_migrations WHERE version = ?1", [
+             ctx.last + 2
+           ]) == [["applied by another runner"]]
+  end
+
+  test "a throw or an exit inside a migration rolls it back too", ctx do
+    before = snapshot(ctx.db)
+    version = ctx.last + 1
+
+    for {kind, leave} <- [
+          {"throw", fn -> throw(:migration_threw) end},
+          {"exit", fn -> exit(:migration_exited) end}
+        ] do
+      error =
+        assert_raise RuntimeError, fn ->
+          Migrations.in_transaction(ctx.db, version, fn ->
+            execute!(ctx.db, "CREATE TABLE throw_probe (id INTEGER)")
+            leave.()
+          end)
+        end
+
+      assert error.message =~ "migration #{pad(version)} failed and was rolled back"
+      assert error.message =~ kind
+      assert snapshot(ctx.db) == before
     end
+  end
 
-    assert rows(ctx.db, "SELECT max(version) FROM schema_migrations") == [[ctx.last + 1]]
-    assert rows(ctx.db, "SELECT count(*) FROM commit_probe") == [[0]]
-    assert table?(ctx.db, "commit_probe")
-    refute table?(ctx.db, "failing_migration_probe")
+  test "no migration uses a statement a transaction ignores or refuses" do
+    for {version, _description, statements} <- Migrations.all(), {label, sql} <- statements do
+      refute Regex.match?(~r/\b(PRAGMA|VACUUM|ATTACH|DETACH)\b/i, sql),
+             "migration #{version} statement #{label} runs #{sql}"
+    end
   end
 
   test "the flag cannot build a release whose version lacks the suffix" do
@@ -141,7 +195,48 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
     assert_raise CompileError, ~r/-failing-migration/, fn -> Code.compile_string(source) end
   end
 
+  describe "an older store" do
+    test "a store at migration 61 with memory embeddings upgrades with its rows and foreign keys intact" do
+      path = tmp_db("store-at-61")
+      at_61 = Enum.take_while(Migrations.all(), fn {version, _, _} -> version <= 61 end)
+      {:ok, db} = Store.SQLite.open_and_migrate(path, at_61)
+      on_exit(fn -> Exqlite.Sqlite3.close(db) end)
+
+      assert rows(db, "SELECT max(version) FROM schema_migrations") == [[61]]
+
+      execute!(
+        db,
+        "INSERT INTO memories (id, tenant_id, workspace_id, content) VALUES ('mem-61', 'default', 'default', 'kept through the upgrade')"
+      )
+
+      execute!(
+        db,
+        "INSERT INTO memory_embeddings (memory_id, tenant_id, workspace_id, model, dimensions, embedding, content_hash) VALUES ('mem-61', 'default', 'default', 'probe-model', 3, x'000102', 'hash-61')"
+      )
+
+      assert rows(db, "PRAGMA foreign_keys") == [[1]]
+      assert Migrations.run(db) == :ok
+
+      assert rows(db, "SELECT max(version) FROM schema_migrations") ==
+               [[Migrations.all() |> List.last() |> elem(0)]]
+
+      assert rows(db, "SELECT memory_id, model, content_hash FROM memory_embeddings") ==
+               [["mem-61", "probe-model", "hash-61"]]
+
+      assert rows(db, "PRAGMA foreign_key_check") == []
+      assert rows(db, "PRAGMA integrity_check") == [["ok"]]
+    end
+  end
+
   # ---------------------------------------------------------------------------
+
+  defp tmp_db(name) do
+    path = Path.join(System.tmp_dir!(), "#{name}-#{System.unique_integer([:positive])}.db")
+    on_exit(fn -> for suffix <- ["", "-wal", "-shm"], do: File.rm(path <> suffix) end)
+    path
+  end
+
+  defp pad(version), do: version |> Integer.to_string() |> String.pad_leading(3, "0")
 
   defp snapshot(db) do
     %{

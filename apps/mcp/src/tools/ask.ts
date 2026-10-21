@@ -1,8 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { engine, EngineError } from "../client.js";
+import { engine } from "../client.js";
+import { engineFailure } from "./result.js";
 import { config } from "../config.js";
-import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 
 export function registerAsk(server: McpServer): void {
   server.tool(
@@ -34,13 +34,7 @@ export function registerAsk(server: McpServer): void {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
       } catch (err) {
-        if (err instanceof EngineError) {
-          throw new McpError(
-            ErrorCode.InternalError,
-            `Engine error ${err.status}: ${err.message}`,
-          );
-        }
-        throw err;
+        engineFailure(err);
       }
     },
   );

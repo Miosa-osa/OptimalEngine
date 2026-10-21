@@ -1,0 +1,19 @@
+#!/bin/sh
+# Starts the Engine release this file sits in. deploy/Dockerfile.engine copies it
+# into the release archive as optimal-engine/start-engine, which is what a MIOSA
+# template and a managed Engine run; scripts/build-failing-migration-release.sh
+# uses the same file.
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+export LD_LIBRARY_PATH="$ROOT/libextra${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export RELEASE_COOKIE="${RELEASE_COOKIE:-optimal_engine_sandbox}"
+export OPTIMAL_API_ENABLED="${OPTIMAL_API_ENABLED:-true}"
+export OPTIMAL_API_INTERFACE="${OPTIMAL_API_INTERFACE:-0.0.0.0}"
+export OPTIMAL_API_PORT="${OPTIMAL_API_PORT:-4200}"
+export OPTIMAL_ENGINE_ROOT="${OPTIMAL_ENGINE_ROOT:-/data}"
+export OPTIMAL_ENGINE_DB="${OPTIMAL_ENGINE_DB:-/data/.optimal/index.db}"
+export OPTIMAL_ENGINE_CACHE="${OPTIMAL_ENGINE_CACHE:-/data/.optimal/cache}"
+# A crash dump holds ETS tables and process heaps, so customer data, and the
+# working directory is the data volume: no dump unless the operator sets a time.
+export ERL_CRASH_DUMP_SECONDS="${ERL_CRASH_DUMP_SECONDS:-0}"
+mkdir -p "$(dirname "$OPTIMAL_ENGINE_DB")"
+exec "$ROOT/bin/optimal" start

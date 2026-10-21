@@ -83,17 +83,26 @@ test("a matching Engine prints nothing", async () => {
   assert.deepEqual(warnings(), []);
 });
 
-test("an Engine of another minor release gets one warning per process", async () => {
+test("an Engine of another minor release gets one warning per Engine release", async () => {
   headers = { "x-optimal-client-outdated": `client=${PACKAGE_VERSION} engine=${NEXT_MINOR}` };
   try {
     for (const [name, args] of [["boot", {}], ["search", { q: "x" }], ["capture", { text: "x" }]]) {
       const result = await call(name, args);
       assert.equal(result.isError, undefined, `${name}: ${JSON.stringify(result.content)}`);
     }
-    const lines = warnings();
+    let lines = warnings();
     assert.equal(lines.length, 1, lines.join("\n"));
     assert.match(lines[0], new RegExp(`MCP server ${PACKAGE_VERSION} is outdated for Engine ${NEXT_MINOR}`));
     assert.match(lines[0], new RegExp(`upgrade the MCP server to ${NEXT_MINOR}`));
+
+    // The Engine is upgraded while the server runs: one more line, for the new release.
+    const later = `${MAJOR}.${MINOR + 2}.0`;
+    headers = { "x-optimal-client-outdated": `client=${PACKAGE_VERSION} engine=${later}` };
+    await call("boot", {});
+    await call("boot", {});
+    lines = warnings();
+    assert.equal(lines.length, 2, lines.join("\n"));
+    assert.match(lines[1], new RegExp(`outdated for Engine ${later}`));
   } finally {
     headers = {};
   }
