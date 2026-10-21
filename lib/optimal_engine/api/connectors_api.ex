@@ -14,7 +14,8 @@ defmodule OptimalEngine.API.ConnectorsAPI do
   Credentials are write-only: they arrive under `credentials` (sealed with
   `CONNECTOR_KEY`) or come from the broker (`config.credential_source:
   "broker"`), and a response only ever says `"stored"`, `"broker"` or
-  `"none"`. Without a named workspace, the list holds the connectors of every
+  `"none"`. A `config.broker_reference` is sealed the same way and answered
+  as `"[redacted]"`. Without a named workspace, the list holds the connectors of every
   workspace the caller's key covers. A connector outside the key's workspaces
   is `404` on every `:id` route (`OptimalEngine.API.ConnectorScopePlug`).
   Registration, changes, deletion and runs asked for here are recorded in the
@@ -49,6 +50,7 @@ defmodule OptimalEngine.API.ConnectorsAPI do
     unknown_kind: 422,
     credentials_outside_envelope: 422,
     broker_credentials_must_not_be_stored: 422,
+    broker_url_not_allowed: 422,
     invalid_credential_source: 422,
     invalid_cadence: 422,
     invalid_outward_topic: 422,

@@ -15,8 +15,15 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
   cut at 20,000 characters), and it is dated when the mail arrived.
 
   ## Credentials
-    * `:oauth_refresh_token` -- long-lived OAuth2 refresh token
+  Either
+    * `:oauth_refresh_token` -- long-lived OAuth2 refresh token, with
     * `:client_id`, `:client_secret` -- Google app credentials
+
+  or an `:access_token`: given directly, or issued by the credential broker
+  for a connector with `credential_source: "broker"` (see
+  `OptimalEngine.Connectors.CredentialSource`). Every Gmail call goes through
+  `OptimalEngine.Connectors.AccessToken`, which renews a brokered token before
+  it expires and once after a `401`.
 
   ## Cursor shape
   Opaque: a Gmail `historyId`. Initial sync: `nil` -> full fetch bounded
@@ -28,9 +35,10 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
     display_name: "Gmail",
     auth_scheme: :oauth2,
     required_keys: [:user_email],
-    credential_keys: [:oauth_refresh_token, :client_id, :client_secret]
+    credential_keys: [:oauth_refresh_token, :client_id, :client_secret],
+    access_token: true
 
-  alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
   @token_url "https://oauth2.googleapis.com/token"
   @base_url "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -42,14 +50,12 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
 
   @impl true
   def sync(state, cursor) do
-    with {:ok, access_token} <- refresh_access_token(state) do
-      headers = [{"authorization", "Bearer #{access_token}"}]
-
+    AccessToken.session(state, &refresh_access_token/1, fn token ->
       case cursor do
-        nil -> full_sync(state, headers)
-        history_id -> incremental_sync(history_id, state, headers)
+        nil -> full_sync(state, token)
+        history_id -> incremental_sync(history_id, state, token)
       end
-    end
+    end)
   end
 
   @impl true
@@ -122,7 +128,7 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
   # the shape the next run's incremental sync needs. Leaving the cursor on a
   # list `pageToken` would make the next run poll `history?startHistoryId=<page
   # token>` and fall back to a full sync on the 404.
-  defp full_sync(state, headers) do
+  defp full_sync(state, token) do
     lookback = pick(state, :initial_lookback_days, 30)
 
     after_ts =
@@ -146,32 +152,32 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
       |> excluded_categories()
       |> Enum.reduce(query, &"#{&2} -category:#{&1}")
 
-    with {:ok, message_stubs} <- fetch_all_messages(query, headers),
-         {:ok, cursor} <- current_history_id(headers) do
-      enrich_and_return(message_stubs, cursor, headers, state)
+    with {:ok, message_stubs} <- fetch_all_messages(query, token),
+         {:ok, cursor} <- current_history_id(token) do
+      enrich_and_return(message_stubs, cursor, token, state)
     end
   end
 
-  defp fetch_all_messages(query, headers) do
-    fetch_all_messages(query, nil, headers, [], 0)
+  defp fetch_all_messages(query, token) do
+    fetch_all_messages(query, nil, token, [], 0)
   end
 
-  defp fetch_all_messages(_query, _page_token, _headers, acc, page) when page >= @max_pages do
+  defp fetch_all_messages(_query, _page_token, _token, acc, page) when page >= @max_pages do
     {:ok, acc}
   end
 
-  defp fetch_all_messages(query, page_token, headers, acc, page) do
+  defp fetch_all_messages(query, page_token, token, acc, page) do
     url =
       "#{@base_url}/messages?maxResults=#{@page_size}&q=#{URI.encode_www_form(query)}" <>
         if(page_token, do: "&pageToken=#{page_token}", else: "")
 
-    case HTTP.get_json(url, headers: headers) do
+    case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: body}} ->
         messages = acc ++ (body["messages"] || [])
 
         case body["nextPageToken"] do
           nil -> {:ok, messages}
-          next -> fetch_all_messages(query, next, headers, messages, page + 1)
+          next -> fetch_all_messages(query, next, token, messages, page + 1)
         end
 
       {:ok, %{status: 401}} ->
@@ -190,8 +196,8 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
 
   # `historyId` is a cursor into the mailbox's change log, not a page token: it
   # is a property of the mailbox, not of the listing we just finished.
-  defp current_history_id(headers) do
-    case HTTP.get_json("#{@base_url}/profile", headers: headers) do
+  defp current_history_id(token) do
+    case AccessToken.get_json(token, "#{@base_url}/profile") do
       {:ok, %{status: 200, body: %{"historyId" => history_id}}} -> {:ok, history_id}
       {:ok, %{status: 401}} -> {:error, :auth_expired}
       {:ok, %{status: 429}} -> {:error, :rate_limited}
@@ -200,10 +206,10 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
     end
   end
 
-  defp incremental_sync(history_id, state, headers) do
+  defp incremental_sync(history_id, state, token) do
     url = "#{@base_url}/history?startHistoryId=#{history_id}&historyTypes=messageAdded"
 
-    case HTTP.get_json(url, headers: headers) do
+    case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: body}} ->
         messages =
           (body["history"] || [])
@@ -211,19 +217,25 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
           |> Enum.map(fn %{"message" => m} -> m end)
 
         next_cursor = body["historyId"] || history_id
-        enrich_and_return(messages, next_cursor, headers, state)
+        enrich_and_return(messages, next_cursor, token, state)
 
       {:ok, %{status: 404}} ->
         # A history id older than the mailbox's retention window. Start over
         # from a full sync, keeping this run's state so the lookback window and
         # the label filter still apply.
-        full_sync(state, headers)
+        full_sync(state, token)
 
       {:ok, %{status: 401}} ->
         {:error, :auth_expired}
 
       {:ok, %{status: 429}} ->
         {:error, :rate_limited}
+
+      {:ok, %{status: status}} when status >= 500 ->
+        {:error, :transient}
+
+      {:ok, %{status: status}} ->
+        {:error, {:http, status}}
 
       {:error, reason} ->
         {:error, reason}
@@ -235,12 +247,12 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
   # advance the cursor past messages that were never read, and the history they
   # are only listed in is gone by the next run. Failing the sync leaves the
   # cursor where it was, so nothing is skipped.
-  defp enrich_and_return(message_stubs, next_cursor, headers, state) do
+  defp enrich_and_return(message_stubs, next_cursor, token, state) do
     skipped = skipped_labels(state)
 
     message_stubs
     |> Enum.reduce_while({:ok, []}, fn %{"id" => id}, {:ok, acc} ->
-      case fetch_message(id, headers) do
+      case fetch_message(id, token) do
         {:ok, msg} ->
           # The history log names every added message, whatever its tab or
           # folder, so the filter the list query applies is applied here too.
@@ -264,12 +276,12 @@ defmodule OptimalEngine.Connectors.Adapters.Gmail do
     end
   end
 
-  defp fetch_message(id, headers) do
+  defp fetch_message(id, token) do
     # The full format carries every header and the body. (A comma-separated
     # `metadataHeaders` value is ignored by Gmail and returns no headers.)
     url = "#{@base_url}/messages/#{id}?format=full"
 
-    case HTTP.get_json(url, headers: headers) do
+    case AccessToken.get_json(token, url) do
       {:ok, %{status: 200, body: msg}} -> {:ok, msg}
       {:ok, %{status: 401}} -> {:error, :auth_expired}
       {:ok, %{status: 429}} -> {:error, :rate_limited}
