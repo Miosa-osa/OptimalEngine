@@ -2,32 +2,39 @@ defmodule OptimalEngine.EntityResolution do
   @moduledoc """
   Creates immutable mentions and records explicit, auditable identity decisions.
 
-  A mention has no tenant of its own: it belongs to the tenant of the context
-  or source package it was found in. So a mention may only point at a context
-  or source package of the writing tenant in its own workspace
-  (`resolve/2`), and a decision is made by the tenant the mention belongs to
-  (`decide/3`); a mention that points at neither belongs to its workspace.
+  A mention records the tenant that wrote it (`tenant_id`), and a decision is
+  made by that tenant (`decide/3`); a mention may only point at a context or
+  source package of the writing tenant in its own workspace (`resolve/2`).
+
+  A mention written before the column has no tenant. It belongs to the tenant
+  of the context or source package it was found in, and one that points at
+  neither belongs to its workspace.
   """
 
   alias OptimalEngine.{DataContract, EntityRegistry, Store}
 
-  # A mention is the tenant's (`?3`) when it hangs off a context or source
+  # A mention is the tenant's (`?3`) when it records that tenant. One that
+  # records none (written before the column, and naming nothing the migration
+  # could fill it from) is the tenant's when it hangs off a context or source
   # package of the tenant in the mention's workspace (`?2`), or off none. It
   # hangs off none when both ids are null or empty (an earlier version stored
   # an empty id), or name rows that no longer exist: such a mention could not
   # be decided by anyone otherwise.
   @owned_mention """
-  (((NULLIF(entity_mentions.context_id, '') IS NULL
-     OR NOT EXISTS (SELECT 1 FROM contexts c WHERE c.id = entity_mentions.context_id))
-    AND (NULLIF(entity_mentions.source_package_id, '') IS NULL
-     OR NOT EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id)))
-   OR EXISTS (SELECT 1 FROM contexts c WHERE c.id = entity_mentions.context_id AND c.tenant_id = ?3 AND c.workspace_id = ?2)
-   OR EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id AND s.tenant_id = ?3 AND s.workspace_id = ?2))
+  (entity_mentions.tenant_id = ?3
+   OR (entity_mentions.tenant_id IS NULL
+    AND (((NULLIF(entity_mentions.context_id, '') IS NULL
+       OR NOT EXISTS (SELECT 1 FROM contexts c WHERE c.id = entity_mentions.context_id))
+      AND (NULLIF(entity_mentions.source_package_id, '') IS NULL
+       OR NOT EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id)))
+     OR EXISTS (SELECT 1 FROM contexts c WHERE c.id = entity_mentions.context_id AND c.tenant_id = ?3 AND c.workspace_id = ?2)
+     OR EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id AND s.tenant_id = ?3 AND s.workspace_id = ?2))))
   """
 
   @doc false
   # The condition that a row of `entity_mentions` (unaliased) is the tenant's
-  # (`?3`) in workspace `?2`, for the queries that list mentions.
+  # (`?3`), for the queries that list mentions in workspace `?2`: they also
+  # bind the row's workspace themselves.
   def owned_mention_sql, do: @owned_mention
 
   @doc """
@@ -57,7 +64,7 @@ defmodule OptimalEngine.EntityResolution do
            ),
          {:ok, candidates} <-
            candidates(tenant, workspace, normalized, value(attrs, :proposed_kind)),
-         {:ok, mention} <- persist_mention(attrs, normalized, candidates) do
+         {:ok, mention} <- persist_mention(attrs, tenant, normalized, candidates) do
       {:ok, Map.put(mention, :candidates, candidates)}
     end
   end
@@ -179,12 +186,12 @@ defmodule OptimalEngine.EntityResolution do
     end
   end
 
-  defp persist_mention(attrs, normalized, candidates) do
+  defp persist_mention(attrs, tenant, normalized, candidates) do
     id = value(attrs, :id) || id("mention")
     state = if length(candidates) > 1, do: "ambiguous", else: "unresolved"
 
     case Store.raw_execute(
-           "INSERT INTO entity_mentions (id, workspace_id, source_package_id, context_id, surface_text, normalized_text, proposed_kind, source_span, extraction_run_id, resolution_state, confidence, metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+           "INSERT INTO entity_mentions (id, workspace_id, source_package_id, context_id, surface_text, normalized_text, proposed_kind, source_span, extraction_run_id, resolution_state, confidence, metadata, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
            [
              id,
              value(attrs, :workspace_id),
@@ -197,7 +204,8 @@ defmodule OptimalEngine.EntityResolution do
              value(attrs, :extraction_run_id),
              state,
              value(attrs, :confidence) || 0.5,
-             Jason.encode!(value(attrs, :metadata) || %{})
+             Jason.encode!(value(attrs, :metadata) || %{}),
+             tenant
            ]
          ) do
       :ok -> {:ok, %{id: id, resolution_state: state, surface_text: value(attrs, :surface_text)}}

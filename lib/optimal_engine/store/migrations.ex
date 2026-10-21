@@ -138,7 +138,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_070_repair_vector_and_chunk_scope(),
       migration_071_workspace_handles(),
       migration_072_workspace_external_id(),
-      migration_authority_evidence_kind_index()
+      migration_authority_evidence_kind_index(),
+      migration_entity_mention_tenant()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -203,6 +204,47 @@ defmodule OptimalEngine.Store.Migrations do
      [
        {"idx_authority_evidence_kind",
         "CREATE INDEX IF NOT EXISTS idx_authority_evidence_kind ON authority_evidence(tenant_id, kind, tenant_seq)"}
+     ]}
+  end
+
+  # The version of the entity mention tenant migration. Provisional like the
+  # one above: the assigned number is the highest on main plus one at merge,
+  # changed here and in the pins listed in
+  # docs/guides/versioning-and-releases.md.
+  @entity_mention_tenant_version 74
+
+  # A mention records the tenant that wrote it, so one that names no context
+  # and no source package is still told apart from another tenant's in a
+  # workspace id both use. It is filled from what the mention names: the
+  # context's tenant, else the source package's. A mention that names nothing
+  # that exists stays without a tenant, and keeps being read as before (the
+  # tenant of what it names, else the workspace).
+  #
+  # Additive only (a nullable column and a backfill): an Engine rolled back to
+  # an earlier release still reads and writes the store. Every statement is
+  # safe to run again: the column add is tolerated as a duplicate, and the
+  # backfill only fills rows that have no tenant and name a row that exists.
+  # It runs with change capture off (`sync_identity.applying`, as when a peer's
+  # change is applied), so it does not queue a change for every row it fills.
+  defp migration_entity_mention_tenant do
+    {@entity_mention_tenant_version, "entity mentions: the tenant that wrote the mention",
+     [
+       {"entity_mentions_tenant_id", "ALTER TABLE entity_mentions ADD COLUMN tenant_id TEXT"},
+       # The backfill is not a change to replicate: every Engine runs it.
+       {"backfill_entity_mentions_tenant_id_applying",
+        "UPDATE sync_identity SET applying = 1 WHERE id = 1"},
+       {"backfill_entity_mentions_tenant_id",
+        """
+        UPDATE entity_mentions
+        SET tenant_id = COALESCE(
+          (SELECT c.tenant_id FROM contexts c WHERE c.id = entity_mentions.context_id),
+          (SELECT s.tenant_id FROM source_packages s WHERE s.id = entity_mentions.source_package_id))
+        WHERE tenant_id IS NULL
+          AND (EXISTS (SELECT 1 FROM contexts c WHERE c.id = entity_mentions.context_id)
+               OR EXISTS (SELECT 1 FROM source_packages s WHERE s.id = entity_mentions.source_package_id))
+        """},
+       {"backfill_entity_mentions_tenant_id_done",
+        "UPDATE sync_identity SET applying = 0 WHERE id = 1"}
      ]}
   end
 

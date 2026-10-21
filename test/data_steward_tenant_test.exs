@@ -73,9 +73,10 @@ defmodule OptimalEngine.DataStewardTenantTest do
     {:ok, _} = Store.raw_query(sql, params)
   end
 
-  # The tables a repair traces to a tenant through a parent row.
+  # The tables with no tenant column, which a repair traces to a tenant
+  # through a parent row.
   defp traced_tables do
-    ~w(entity_aliases entity_identifiers entity_lineage entity_mentions resolution_decisions
+    ~w(entity_aliases entity_identifiers entity_lineage resolution_decisions
        memory_association_paths memory_reconstruction_outcomes memory_consolidation_proposals)
   end
 
@@ -687,7 +688,10 @@ defmodule OptimalEngine.DataStewardTenantTest do
 
       moved = Enum.map(result.tables, & &1.table)
 
-      for table <- traced_tables() do
+      # A mention has a tenant column, but one written before it has no tenant
+      # and is traced to one through its context or source package, as the
+      # tables with no tenant column are.
+      for table <- ["entity_mentions" | traced_tables()] do
         assert table in moved, "#{table} was not moved"
         assert unscoped_workspace(table, "a#{n}") == a_ws, "#{table}: the caller's row"
         assert unscoped_workspace(table, "b#{n}") == orphan, "#{table}: another tenant's row"
@@ -769,6 +773,63 @@ defmodule OptimalEngine.DataStewardTenantTest do
       %{traced: traced, untraced: untraced} = DataSteward.unscoped_tables()
       assert unscoped == Enum.sort(traced ++ untraced)
       assert Enum.sort(traced) == Enum.sort(traced_tables())
+    end
+  end
+
+  describe "a mention that carries its tenant" do
+    defp written(tenant, workspace, surface) do
+      {:ok, %{id: id}} =
+        EntityResolution.resolve(%{workspace_id: workspace, surface_text: surface},
+          tenant_id: tenant
+        )
+
+      id
+    end
+
+    defp mention_workspace(id) do
+      {:ok, [[workspace]]} =
+        Store.raw_query("SELECT workspace_id FROM entity_mentions WHERE id = ?1", [id])
+
+      workspace
+    end
+
+    test "an orphan repair moves the caller's and leaves another tenant's under the shared id",
+         %{a: a, b: b, a_ws: a_ws, n: n} do
+      orphan = "carried-orphan-#{n}"
+      mine = written(a, orphan, "Carried A #{n}")
+      theirs = written(b, orphan, "Carried B #{n}")
+
+      assert {:ok, result} = DataSteward.repair_orphan_scope(orphan, a_ws, steward(a))
+
+      assert %{updated: 1} = Enum.find(result.tables, &(&1.table == "entity_mentions"))
+      assert mention_workspace(mine) == a_ws
+      assert mention_workspace(theirs) == orphan
+    end
+
+    test "a rename is refused while another tenant's is under the source id, and nothing moves",
+         %{a: a, b: b, a_ws: a_ws, n: n} do
+      mine = written(a, a_ws, "Own #{n}")
+      theirs = written(b, a_ws, "Stray #{n}")
+      {:ok, _} = Workspace.update(a_ws, %{slug: "ops-carried"})
+
+      assert {:error, :workspace_id_shared} =
+               DataSteward.rename_workspace(a_ws, "#{a}:ops-carried", steward(a))
+
+      assert mention_workspace(mine) == a_ws
+      assert mention_workspace(theirs) == a_ws
+    end
+
+    test "a rename takes the caller's along, and one written before the column",
+         %{a: a, a_ws: a_ws, n: n} do
+      mine = written(a, a_ws, "Own #{n}")
+      mention("legacy-#{n}", a_ws, nil, nil)
+      {:ok, _} = Workspace.update(a_ws, %{slug: "ops-carried"})
+      target = "#{a}:ops-carried"
+
+      assert {:ok, _} = DataSteward.rename_workspace(a_ws, target, steward(a))
+
+      assert mention_workspace(mine) == target
+      assert mention_workspace("legacy-#{n}") == target
     end
   end
 

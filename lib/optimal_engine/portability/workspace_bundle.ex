@@ -281,7 +281,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     scoped =
       for table <- workspace_tables() do
         columns = columns(table)
-        {where, params} = scope_clause(columns, tenant_id, workspace_id)
+        {where, params} = scope_clause(table, columns, tenant_id, workspace_id)
 
         write_table(
           staging,
@@ -296,7 +296,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       for {table, {fk, parent}} <- @children, table_exists?(table) do
         columns = columns(table)
         parent_columns = columns(parent)
-        {where, params} = scope_clause(parent_columns, tenant_id, workspace_id)
+        {where, params} = scope_clause(parent, parent_columns, tenant_id, workspace_id)
 
         write_table(
           staging,
@@ -717,7 +717,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp rewrite(row, "operating_documents", plan),
     do: row |> Map.put("tenant_id", plan.tenant_id) |> Map.put("scope_id", plan.workspace_id)
 
-  defp rewrite(row, _table, plan) do
+  # A bundle exported before mentions recorded a tenant has no `tenant_id` on
+  # them; the import records the target tenant either way.
+  defp rewrite(row, "entity_mentions", plan),
+    do: row |> Map.put("tenant_id", plan.tenant_id) |> rewrite_scope(plan)
+
+  defp rewrite(row, _table, plan), do: rewrite_scope(row, plan)
+
+  defp rewrite_scope(row, plan) do
     row
     |> then(fn r ->
       if Map.has_key?(r, "tenant_id"), do: Map.put(r, "tenant_id", plan.tenant_id), else: r
@@ -747,7 +754,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     # the Store process the transaction runs in.
     child_statements =
       for {table, {fk, parent}} <- @children, table_exists?(table) do
-        {where, params} = scope_clause(columns(parent), tenant_id, workspace_id)
+        {where, params} = scope_clause(parent, columns(parent), tenant_id, workspace_id)
 
         {"DELETE FROM #{quote_name(table)} WHERE #{quote_name(fk)} IN (SELECT id FROM #{quote_name(parent)} WHERE #{where})",
          params}
@@ -755,7 +762,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     scoped_statements =
       for table <- workspace_tables() do
-        {where, params} = scope_clause(columns(table), tenant_id, workspace_id)
+        {where, params} = scope_clause(table, columns(table), tenant_id, workspace_id)
         {"DELETE FROM #{quote_name(table)} WHERE #{where}", params}
       end
 
@@ -817,10 +824,20 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     end
   end
 
-  defp scope_clause(columns, tenant_id, workspace_id) do
-    if Enum.any?(columns, &(elem(&1, 0) == "tenant_id")),
-      do: {"workspace_id = ?1 AND tenant_id = ?2", [workspace_id, tenant_id]},
-      else: {"workspace_id = ?1", [workspace_id]}
+  # A table with a tenant column is bound to the tenant. A mention written
+  # before it recorded one has none, and belongs to the workspace, which is
+  # the tenant's.
+  defp scope_clause(table, columns, tenant_id, workspace_id) do
+    cond do
+      not Enum.any?(columns, &(elem(&1, 0) == "tenant_id")) ->
+        {"workspace_id = ?1", [workspace_id]}
+
+      table == "entity_mentions" ->
+        {"workspace_id = ?1 AND (tenant_id = ?2 OR tenant_id IS NULL)", [workspace_id, tenant_id]}
+
+      true ->
+        {"workspace_id = ?1 AND tenant_id = ?2", [workspace_id, tenant_id]}
+    end
   end
 
   defp quote_name(name) do

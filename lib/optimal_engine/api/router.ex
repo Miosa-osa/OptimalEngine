@@ -432,7 +432,9 @@ defmodule OptimalEngine.API.Router do
   get "/api/entities/quality" do
     workspace = query_param(conn, "workspace", "default")
 
-    case OptimalEngine.EntityQuality.run(workspace) do
+    case OptimalEngine.EntityQuality.run(workspace,
+           tenant_id: conn.assigns[:current_tenant] || "default"
+         ) do
       {:ok, quality} -> json(conn, quality)
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
     end

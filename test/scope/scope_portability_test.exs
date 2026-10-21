@@ -213,6 +213,55 @@ defmodule OptimalEngine.ScopePortabilityTest do
     end
   end
 
+  # Rewrites the bundle at `path` the way a release before mentions recorded a
+  # tenant wrote it: no `tenant_id` on the mentions, in the rows, the column
+  # list and the checksums.
+  defp without_mention_tenant(path, n) do
+    dir = Path.join(System.tmp_dir!(), "old-shape-#{n}")
+    File.mkdir_p!(dir)
+    :ok = :erl_tar.extract(String.to_charlist(path), [:compressed, {:cwd, String.to_charlist(dir)}])
+
+    table_file = Path.join(dir, "tables/entity_mentions.jsonl")
+
+    content =
+      table_file
+      |> File.stream!()
+      |> Enum.map_join(fn line ->
+        line |> Jason.decode!() |> Map.delete("tenant_id") |> Jason.encode!() |> Kernel.<>("\n")
+      end)
+
+    File.write!(table_file, content)
+    sha = :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+
+    manifest =
+      Path.join(dir, "manifest.json")
+      |> File.read!()
+      |> Jason.decode!()
+      |> Map.delete("bundle_sha256")
+      |> Map.update!("tables", fn tables ->
+        Enum.map(tables, fn
+          %{"name" => "entity_mentions"} = table ->
+            %{table | "sha256" => sha, "columns" => table["columns"] -- ["tenant_id"]}
+
+          table ->
+            table
+        end)
+      end)
+
+    manifest =
+      Map.put(manifest, "bundle_sha256", OptimalEngine.Authority.CanonicalJSON.hash(manifest))
+
+    File.write!(Path.join(dir, "manifest.json"), Jason.encode!(manifest))
+
+    files =
+      for f <- Path.wildcard(Path.join(dir, "**"), match_dot: true),
+          File.regular?(f),
+          do: {String.to_charlist(Path.relative_to(f, dir)), String.to_charlist(f)}
+
+    :ok = :erl_tar.create(String.to_charlist(path), files, [:compressed])
+    File.rm_rf!(dir)
+  end
+
   describe "workspace bundles" do
     setup ctx do
       context(
@@ -311,6 +360,118 @@ defmodule OptimalEngine.ScopePortabilityTest do
                Map.drop(merged.rows, ["decisions", "events", "edges", "observations"]),
                fn {_table, n} -> n == 0 end
              )
+    end
+
+    test "a move takes the workspace's mentions along, including one that records no tenant",
+         ctx do
+      {:ok, %{id: carried}} =
+        OptimalEngine.EntityResolution.resolve(
+          %{workspace_id: ctx.open, surface_text: "Carried #{ctx.n}"},
+          tenant_id: ctx.tenant
+        )
+
+      # Written before mentions recorded a tenant, naming nothing.
+      older = "mention-older-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO entity_mentions (id, workspace_id, surface_text, normalized_text) VALUES (?1, ?2, 'Older', 'older')",
+          [older, ctx.open]
+        )
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM entity_mentions WHERE workspace_id = ?1", [
+                 ctx.open
+               ])
+
+      target = "target-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Target"})
+      {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, rows} =
+               Store.raw_query(
+                 "SELECT id, tenant_id FROM entity_mentions WHERE workspace_id = ?1 ORDER BY id",
+                 [summary.workspace_id]
+               )
+
+      assert Enum.sort(rows) == Enum.sort([[carried, target], [older, target]])
+    end
+
+    test "a move leaves another tenant's mention under the same id where it is", ctx do
+      other = "other-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: other, name: "Other"})
+
+      {:ok, %{id: mine}} =
+        OptimalEngine.EntityResolution.resolve(
+          %{workspace_id: ctx.open, surface_text: "Mine #{ctx.n}"},
+          tenant_id: ctx.tenant
+        )
+
+      # Written under the registered id by another tenant (an earlier version
+      # did not stop it): not this workspace's, so a move does not take it.
+      {:ok, %{id: theirs}} =
+        OptimalEngine.EntityResolution.resolve(
+          %{workspace_id: ctx.open, surface_text: "Theirs #{ctx.n}"},
+          tenant_id: other
+        )
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+
+      assert %{"rows" => 1} =
+               Enum.find(manifest["tables"], &(&1["name"] == "entity_mentions"))
+
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      assert {:ok, [[ctx.open, other]]} ==
+               Store.raw_query(
+                 "SELECT workspace_id, tenant_id FROM entity_mentions WHERE id = ?1",
+                 [theirs]
+               )
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM entity_mentions WHERE id = ?1", [mine])
+    end
+
+    test "a bundle exported before mentions recorded a tenant imports them under the target's",
+         ctx do
+      {:ok, %{id: carried}} =
+        OptimalEngine.EntityResolution.resolve(
+          %{workspace_id: ctx.open, surface_text: "Carried #{ctx.n}"},
+          tenant_id: ctx.tenant
+        )
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      without_mention_tenant(ctx.path, ctx.n)
+
+      target = "target-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Target"})
+      assert {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, [[^target]]} =
+               Store.raw_query(
+                 "SELECT tenant_id FROM entity_mentions WHERE id = ?1 AND workspace_id = ?2",
+                 [carried, summary.workspace_id]
+               )
     end
 
     test "a renamed workspace keeps its id when moved into its own tenant, not its old slugs",
