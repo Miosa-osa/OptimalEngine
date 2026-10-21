@@ -227,7 +227,7 @@ defmodule OptimalEngine.Store.CacheErasureTest do
           do: context!("failing-#{ctx.n}-#{i}", "default", home.id, principal, "text #{i}")
 
       embed!("default", home.id, "#{ctx.doomed} embedded before the erasure")
-      assert marker_in_cache?(ctx.dir, ctx.doomed)
+      assert length(cache_files(ctx.dir)) == 1
 
       {:ok, _} =
         Store.raw_query(
@@ -245,7 +245,7 @@ defmodule OptimalEngine.Store.CacheErasureTest do
 
       # Some contexts went before the batch that failed; what the cache holds for the
       # workspace must not outlive them.
-      refute marker_in_cache?(ctx.dir, ctx.doomed)
+      assert cache_files(ctx.dir) == []
     end
 
     test "the dry run also counts the claims, packages and pages it would delete", ctx do
