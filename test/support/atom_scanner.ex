@@ -15,7 +15,7 @@ defmodule OptimalEngine.AtomScanner do
   | `:sigil_atoms` | `~w(...)a` with an interpolation |
   | `:binary_to_term` | `:erlang.binary_to_term` without `:safe` |
   | `:code_eval` | `Code.eval_*`, `Code.string_to_quoted*`, `Code.format_string!`, `Code.compile_*`, `Code.require_file`, `Code.load_file`, `EEx.eval_*` and `EEx.compile_*`, `:erl_scan`, `:erl_parse`, `:file.consult` and `:file.script`, `:io.fread` and `:io_lib.fread` with `~a` |
-  | `:apply_atom_module`, `:apply_dynamic` | `apply/3`, `Kernel.apply/3`, `:erlang.apply/3`, `Function.capture/3` and the module, function, arguments forms of `spawn*`, `Task`, `Task.Supervisor`, `Node`, `:erpc`, `:rpc`, `:proc_lib` and `:timer` (the table `@mfa_calls`) whose module is one of the modules above, or is not a literal |
+  | `:apply_atom_module`, `:apply_dynamic` | `apply/3`, `Kernel.apply/3`, `:erlang.apply/3`, `Function.capture/3` and the module, function, arguments forms of `spawn*`, `Task`, `Task.Supervisor`, `Node`, `:erpc`, `:rpc`, `:proc_lib`, `:timer` and `:erlang.hibernate/3` (the table `@mfa_calls`) and a child spec's `start: {module, function, args}`, whose module is one of the modules above, or is not a literal |
   | `:dynamic_call` | `x.to_atom(...)`, `x.binary_to_atom(...)` or `x.list_to_atom(...)` on a receiver that is not a literal module |
   | `:import_atom_module` | `import` of one of the modules above that brings an atom-creating function in |
 
@@ -28,7 +28,17 @@ defmodule OptimalEngine.AtomScanner do
   of a delegate are not literals, so a delegate to `apply`, `spawn` or another
   module, function, arguments call is flagged as a dynamic module.
 
-  Aliases of those modules (`alias String, as: S`) are followed within a file.
+  Aliases of those modules are followed within a file: `alias String, as: S`,
+  a plain `alias Task.Supervisor` (which names `Supervisor`) and a grouped
+  `alias Task.{Supervisor, Other}`. An alias never takes over the name of a
+  standard library module the scanner reads (`alias MyApp.String` leaves
+  `String.to_atom` flagged).
+
+  A child spec entry `start: {module, function, args}` is read like
+  `apply(module, function, args)`. `:rpc.multicall/4` and `:timer.tc/3` each
+  have two forms; the shape of the arguments says which one a call is, and when
+  it does not, `:rpc.multicall/4` counts either position and `:timer.tc/3`
+  counts neither.
 
   What it does not see: a macro that expands to one of these calls in another
   file, a function value passed in from another module (`apply(fun, args)`
@@ -68,6 +78,7 @@ defmodule OptimalEngine.AtomScanner do
     {{:ex, [:Kernel]}, [:spawn, :spawn_link, :spawn_monitor], [{3, 0}, {4, 1}]},
     {{:erl, :erlang}, [:spawn, :spawn_link, :spawn_monitor], [{3, 0}, {4, 1}]},
     {{:erl, :erlang}, [:spawn_opt, :spawn_request], [{4, 0}, {5, 1}]},
+    {{:erl, :erlang}, [:hibernate], [{3, 0}]},
     {{:ex, [:Task]}, [:async, :start, :start_link], [{3, 0}]},
     {{:ex, [:Task]}, [:async_stream], [{4, 1}, {5, 1}]},
     {{:ex, [:Task, :Supervisor]}, [:async, :async_nolink, :start_child], [{4, 1}, {5, 1}]},
@@ -75,11 +86,13 @@ defmodule OptimalEngine.AtomScanner do
     {{:ex, [:Node]}, [:spawn, :spawn_link], [{4, 1}, {5, 1}]},
     {{:erl, :erpc}, [:call, :cast, :send_request, :multicall], [{4, 1}, {5, 1}]},
     {{:erl, :rpc}, [:call, :cast, :async_call, :block_call], [{4, 1}, {5, 1}]},
-    {{:erl, :rpc}, [:multicall], [{3, 0}, {4, 1}, {5, 1}]},
+    {{:erl, :rpc}, [:multicall], [{3, 0}, {5, 1}]},
     {{:erl, :proc_lib}, [:spawn, :spawn_link], [{3, 0}, {4, 1}]},
     {{:erl, :proc_lib}, [:spawn_opt], [{4, 0}, {5, 1}]},
     {{:erl, :proc_lib}, [:start, :start_link, :start_monitor], [{3, 0}, {4, 0}, {5, 0}]},
-    {{:erl, :timer}, [:apply_after, :apply_interval, :apply_repeatedly], [{4, 1}]}
+    {{:erl, :proc_lib}, [:hibernate], [{3, 0}]},
+    {{:erl, :timer}, [:apply_after, :apply_interval, :apply_repeatedly], [{4, 1}]},
+    {{:erl, :timer}, [:tc], [{4, 0}]}
   ]
 
   @mfa_index Map.new(
@@ -88,6 +101,25 @@ defmodule OptimalEngine.AtomScanner do
                    {arity, index} <- forms,
                    do: {{ref, name, arity}, index}
              )
+
+  # Standard library modules whose name a plain `alias` must not take over: an
+  # `alias MyApp.String` elsewhere in the file would otherwise hide the real one.
+  @stdlib_roots [
+    :String,
+    :List,
+    :Module,
+    :Code,
+    :EEx,
+    :Kernel,
+    :Task,
+    :Node,
+    :Function,
+    :Keyword,
+    :Map
+  ]
+
+  # Child spec entries that start a process from a `{module, function, args}`.
+  @mfa_start_keys [:start]
 
   # `Kernel` functions that can be called without a module.
   @kernel_mfa [:spawn, :spawn_link, :spawn_monitor]
@@ -180,20 +212,58 @@ defmodule OptimalEngine.AtomScanner do
 
   defp expand_pipe(node), do: {node, []}
 
+  # `alias Task.Supervisor` names `Supervisor`, `alias Task.{Supervisor, Foo}`
+  # names both, and `alias Task.Supervisor, as: TS` names `TS`. A name of the
+  # standard library keeps meaning the standard library.
   defp collect_aliases(ast) do
     {_ast, aliases} =
       Macro.prewalk(ast, %{}, fn
+        {:alias, _, [target]} = node, acc ->
+          {node, put_aliases(acc, alias_pairs(target, nil))}
+
         {:alias, _, [target, opts]} = node, acc when is_list(opts) ->
-          case {module_ref(target, %{}), Keyword.get(opts, :as)} do
-            {{_, _} = ref, {:__aliases__, _, [name]}} -> {node, Map.put(acc, name, ref)}
-            _ -> {node, acc}
-          end
+          {node, put_aliases(acc, alias_pairs(target, Keyword.get(opts, :as)))}
 
         node, acc ->
           {node, acc}
       end)
 
     aliases
+  end
+
+  defp alias_pairs({:__aliases__, _, parts} = target, as) when is_list(parts) do
+    name =
+      case as do
+        {:__aliases__, _, [name]} -> name
+        nil -> List.last(parts)
+        _ -> nil
+      end
+
+    case {name, module_ref(target, %{})} do
+      {name, {_, _} = ref} when is_atom(name) and not is_nil(name) -> [{name, ref}]
+      _ -> []
+    end
+  end
+
+  defp alias_pairs({{:., _, [{:__aliases__, _, base}, :{}]}, _, items}, nil) do
+    Enum.flat_map(items, fn
+      {:__aliases__, _, rest} -> alias_pairs({:__aliases__, [], base ++ rest}, nil)
+      _ -> []
+    end)
+  end
+
+  defp alias_pairs(target, {:__aliases__, _, [name]}) when is_atom(target) and target != nil do
+    [{name, {:erl, target}}]
+  end
+
+  defp alias_pairs(_target, _as), do: []
+
+  defp put_aliases(aliases, pairs) do
+    Enum.reduce(pairs, aliases, fn
+      {name, {:ex, [name]}}, acc -> Map.put(acc, name, {:ex, [name]})
+      {name, _ref}, acc when name in @stdlib_roots -> acc
+      {name, ref}, acc -> Map.put(acc, name, ref)
+    end)
   end
 
   defp module_ref({:__MODULE__, _, context}, _aliases) when is_atom(context),
@@ -238,6 +308,12 @@ defmodule OptimalEngine.AtomScanner do
     if ?a in modifiers and Enum.any?(parts, &(not is_binary(&1))),
       do: [{:sigil_atoms, call(node)}],
       else: []
+  end
+
+  # A child spec starts a process from `start: {module, function, args}`.
+  defp classify({key, {:{}, _, [module, _function, _args]}} = node, aliases)
+       when key in @mfa_start_keys do
+    apply_call([module, nil, nil], aliases, node)
   end
 
   defp classify({:keys, :atoms}, _aliases), do: [{:atom_keys, "keys: :atoms"}]
@@ -294,9 +370,42 @@ defmodule OptimalEngine.AtomScanner do
 
   defp apply_call(_args, _aliases, _node), do: []
 
+  # One finding for a call, from the first candidate module argument that is
+  # risky or dynamic.
   defp mfa_call(ref, name, args, aliases, node) do
+    module_arg_indexes(ref, name, args)
+    |> Enum.flat_map(&apply_call([Enum.at(args, &1), nil, nil], aliases, node))
+    |> Enum.take(1)
+  end
+
+  # `:rpc.multicall/4` is `(Nodes, Module, Function, Args)` and also
+  # `(Module, Function, Args, Timeout)`. The shape of the arguments tells them
+  # apart; when it does not, either position counts.
+  defp module_arg_indexes({:erl, :rpc}, :multicall, [first, _second, third, fourth]) do
+    cond do
+      is_list(fourth) -> [1]
+      is_integer(fourth) or fourth == :infinity -> [0]
+      is_list(third) -> [0]
+      is_list(first) -> [1]
+      true -> [0, 1]
+    end
+  end
+
+  # `:timer.tc/3` is `(Module, Function, Args)` and also
+  # `(Fun, Args, TimeUnit)`; only the first runs a named function.
+  defp module_arg_indexes({:erl, :timer}, :tc, [first, second, third]) do
+    cond do
+      is_list(third) -> [0]
+      match?({:fn, _, _}, first) or match?({:&, _, _}, first) -> []
+      is_atom(third) -> []
+      is_atom(second) and not is_nil(second) -> [0]
+      true -> []
+    end
+  end
+
+  defp module_arg_indexes(ref, name, args) do
     case Map.fetch(@mfa_index, {ref, name, length(args)}) do
-      {:ok, index} -> apply_call([Enum.at(args, index), nil, nil], aliases, node)
+      {:ok, index} -> [index]
       :error -> []
     end
   end
