@@ -71,7 +71,7 @@
 set -eu
 umask 022
 
-DEFAULT_VERSION=0.3.8
+DEFAULT_VERSION=0.3.9
 SYSTEM_PREFIX=${OPTIMAL_CLIENT_SYSTEM_PREFIX:-/opt/optimal}
 # The first release whose CLI and MCP server read key_file= and report the Engine version.
 VERSIONED_SINCE=0.3.3
