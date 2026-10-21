@@ -409,6 +409,91 @@ defmodule OptimalEngine.LogBufferTest do
     end
   end
 
+  describe "the third redaction pass" do
+    test "key names in any case, access key ids and cookies" do
+      for message <- [
+            "backup_key=#{zq(1)} done",
+            "data_key: #{zq(2)} done",
+            "encryption-key=#{zq(3)} done",
+            "access_key=#{zq(4)} done",
+            ~s(accessKeyId: "#{zq(5)}" done),
+            "aws_access_key_id=#{zq(6)} done",
+            "AccessKeyId=#{zq(7)} done",
+            inspect([{"set-cookie", "sid=#{zq(8)}; Path=/"}]) <> " done",
+            "cookies=#{zq(9)} done"
+          ] do
+        line = stored(message)
+        refute line =~ "Zq", line
+        assert line =~ "done", line
+      end
+    end
+
+    test "a cookie header loses its whole value" do
+      line = stored("GET / Cookie: session=#{zq(1)}; theme=#{zq(2)}; lang=en")
+      refute line =~ "Zq", line
+      assert line =~ "Cookie: [redacted]", line
+    end
+
+    test "Erlang binary-keyed forms" do
+      line =
+        stored(
+          "#" <>
+            ~s({<<"password">> => <<"#{zq(1)}">>} {<<"api_key">>,<<"#{zq(2)}">>} ) <>
+            ~s([{<<"token">>, <<"#{zq(3)}">>}] {<<"secret">>, #{zq(4)}} done)
+        )
+
+      refute line =~ "Zq", line
+      assert line =~ "done"
+    end
+
+    test "URL-encoded names and separators" do
+      line =
+        stored(
+          "GET /login?next=%2Fcb%3Ftoken%3D#{zq(1)}%26state%3Dok " <>
+            "body=%7B%22password%22%3A%22#{zq(2)}%22%7D api_key%3d#{zq(3)} done"
+        )
+
+      refute line =~ "Zq", line
+      assert line =~ "done"
+    end
+
+    test "a line break right after the separator" do
+      line =
+        stored(
+          "password:\n#{zq(1)} token =\n  #{zq(2)} " <>
+            inspect(%{"secret" => zq(3)}, pretty: true, width: 10) <> " done"
+        )
+
+      refute line =~ "Zq", line
+      assert line =~ "done"
+    end
+
+    test "crafted lines for the new names and forms finish in bounded time" do
+      for crafted <- [
+            String.duplicate("x_", 7_000) <> "key",
+            String.duplicate("%22token", 2_000),
+            String.duplicate("%3D", 5_000),
+            "cookie=" <> String.duplicate("; ", 7_000),
+            "password:" <> String.duplicate(", ", 7_000),
+            String.duplicate(~s(<<"secret">>), 1_200)
+          ] do
+        {micros, _line} = :timer.tc(fn -> stored(crafted) end)
+        assert micros < 1_000_000, "#{byte_size(crafted)} bytes took #{micros} µs"
+      end
+    end
+
+    test "a token the format window cuts does not show once redaction shortens the line" do
+      tokens = String.duplicate("sk-" <> zq(1) <> " ", 400)
+
+      # Each shift moves the window's cut one character along the tokens.
+      for shift <- 0..21 do
+        line = stored(~s(password=") <> String.duplicate("v", 15_000 + shift) <> ~s(" ) <> tokens)
+        refute line =~ "Zq", line
+        assert String.ends_with?(line, "..."), line
+      end
+    end
+  end
+
   # These go through :logger and the handler the application installed, so
   # each event shape reaches the ring as it would in production.
   describe "secrets logged through the running Engine's logger" do
@@ -482,6 +567,15 @@ defmodule OptimalEngine.LogBufferTest do
 
     test "a Bearer credential" do
       for line <- across_the_cut("Bearer #{secret()} done"), do: refute(line =~ "Zq", line)
+    end
+
+    test "an unclosed quote that starts before the cut and runs past the format window" do
+      # A 20 KB line: the value starts near byte 4,000 and the window ends inside it.
+      value = "Zq" <> String.duplicate("v", 20_000)
+      line = stored(String.duplicate("x", 3_960) <> " password=\"" <> value)
+      assert byte_size(line) <= 4_096
+      refute line =~ "Zq", line
+      assert String.ends_with?(line, "..."), line
     end
 
     test "a cut inside a multibyte character leaves valid UTF-8" do

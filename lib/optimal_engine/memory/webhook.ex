@@ -54,23 +54,12 @@ defmodule OptimalEngine.Memory.Webhook do
   end
 
   @doc """
-  The webhook URL as a log line may name it: scheme, host and port only. The
-  path, query and user info can hold the endpoint's secret.
+  The webhook URL as a log line may name it: scheme, host and port only
+  (`OptimalEngine.LogUrl`). The path, query and user info can hold the
+  endpoint's secret.
   """
   @spec log_url(term()) :: String.t()
-  def log_url(url) when is_binary(url) do
-    case URI.parse(url) do
-      %URI{scheme: scheme, host: host, port: port}
-      when is_binary(scheme) and is_binary(host) and host != "" ->
-        port = if port == URI.default_port(scheme), do: "", else: ":#{port}"
-        "#{scheme}://#{host}#{port}/..."
-
-      _other ->
-        "an unparsable URL"
-    end
-  end
-
-  def log_url(_url), do: "an unparsable URL"
+  defdelegate log_url(url), to: OptimalEngine.LogUrl, as: :render
 
   @doc """
   Compute an HMAC-SHA256 signature over `body` using `secret`.

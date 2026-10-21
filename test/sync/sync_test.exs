@@ -3311,6 +3311,59 @@ defmodule OptimalEngine.SyncTest do
       assert length(Sync.conflicts(ctx.tenant, ctx.ws, "all")) == 3
     end
 
+    test "the log names a peer by scheme and host only when its identity changes", ctx do
+      turn = :ets.new(:turn, [:public])
+      :ets.insert(turn, {:n, 0})
+
+      Application.put_env(:optimal_engine, :http_mock, fn _url, _opts ->
+        n = :ets.update_counter(turn, :n, 1)
+        engine = Sync.engine_info() |> Map.put("replica_id", "rep_new_#{n}")
+        respond(200, %{"mutations" => [], "cursor" => 3, "more" => false, "engine" => engine})
+      end)
+
+      # User info, a path token and a query key: each could be the peer's secret.
+      url = "https://ops:Zq-pass@cloud.example/hooks/Zq-path?key=Zq-query"
+      add_pull_peer(ctx, since: 9, replica: "rep_start", url: url)
+
+      age = fn ->
+        {:ok, _} =
+          Store.raw_query(
+            "UPDATE sync_conflicts SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour') WHERE workspace_id = ?1 AND kind = 'peer_replaced'",
+            [ctx.ws]
+          )
+      end
+
+      # A reset and an identity that changes again in the run, twice, and then
+      # the third change of the day, which halts the peer.
+      log =
+        capture_log(fn ->
+          Sync.run_all()
+          age.()
+          Sync.run_all()
+          age.()
+          Sync.run_all()
+        end)
+
+      assert log =~ "[Sync] peer https://cloud.example/... answers as rep_new_1"
+      assert log =~ "was rep_start; cursors reset"
+      assert log =~ "again in the same run; cursors not reset again"
+      assert log =~ "halted until it is added again"
+      refute log =~ "Zq", log
+    end
+
+    test "the log line for a failed cycle carries no part of the peer's URL", ctx do
+      Application.put_env(:optimal_engine, :http_mock, fn url, _opts ->
+        raise "cannot reach #{url}"
+      end)
+
+      url = "https://ops:Zq-pass@cloud.example/hooks/Zq-path?key=Zq-query"
+      add_pull_peer(ctx, since: 9, url: url)
+      log = capture_log(fn -> Sync.run_all() end)
+
+      assert log =~ "[Sync] cycle for https://cloud.example/... failed"
+      refute log =~ "Zq", log
+    end
+
     test "a peer this Engine only pulls from keeps the pull floor at zero", ctx do
       engine = Sync.engine_info() |> Map.put("replica_id", "rep_cloud")
 
@@ -4047,7 +4100,7 @@ defmodule OptimalEngine.SyncTest do
   defp add_pull_peer(ctx, opts) do
     attrs = %{
       "workspace_id" => ctx.ws,
-      "url" => "https://cloud.example",
+      "url" => Keyword.get(opts, :url, "https://cloud.example"),
       "api_key" => "replica-key",
       "policy" => Keyword.get(opts, :policy, "pull")
     }

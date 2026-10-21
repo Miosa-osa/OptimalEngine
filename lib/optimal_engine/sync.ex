@@ -46,6 +46,7 @@ defmodule OptimalEngine.Sync do
   require Logger
 
   alias OptimalEngine.Connectors.{Credential, HTTP}
+  alias OptimalEngine.LogUrl
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Signal
   alias OptimalEngine.Store
@@ -562,9 +563,15 @@ defmodule OptimalEngine.Sync do
       try do
         run_peer(peer)
       rescue
-        # One peer's failure does not stop the others.
+        # One peer's failure does not stop the others. The message can quote
+        # the peer's URL, so the log names only the exception; the peer's
+        # status keeps the message for the operator.
         error ->
-          Logger.error("[Sync] cycle for #{peer.url} failed: #{Exception.message(error)}")
+          Logger.error(
+            "[Sync] cycle for #{LogUrl.render(peer.url)} failed (#{inspect(error.__struct__)}); " <>
+              "the peer's status has the message"
+          )
+
           update_peer_status(peer, {"error", Exception.message(error)})
 
           %{
@@ -2233,8 +2240,9 @@ defmodule OptimalEngine.Sync do
 
       resets_within(peer, 86_400) >= @resets_a_day ->
         Logger.warning(
-          "[Sync] peer #{peer.url} answers as #{replica}, was #{peer.peer_replica_id}, " <>
-            "after #{@resets_a_day} resets in a day; halted until it is added again"
+          "[Sync] peer #{LogUrl.render(peer.url)} answers as #{replica}, " <>
+            "was #{peer.peer_replica_id}, after #{@resets_a_day} resets in a day; " <>
+            "halted until it is added again"
         )
 
         {:error, :peer_halted}
@@ -2246,8 +2254,8 @@ defmodule OptimalEngine.Sync do
 
   defp identity_unstable(peer, replica, when_text) do
     Logger.warning(
-      "[Sync] peer #{peer.url} answers as #{replica}, was #{peer.peer_replica_id}, " <>
-        "#{when_text}; cursors not reset again"
+      "[Sync] peer #{LogUrl.render(peer.url)} answers as #{replica}, " <>
+        "was #{peer.peer_replica_id}, #{when_text}; cursors not reset again"
     )
 
     {:error, :peer_identity_unstable}
@@ -2272,7 +2280,8 @@ defmodule OptimalEngine.Sync do
 
   defp reset_peer_cursors(peer, replica, why) do
     Logger.warning(
-      "[Sync] peer #{peer.url} answers as #{replica}, was #{peer.peer_replica_id}; cursors reset"
+      "[Sync] peer #{LogUrl.render(peer.url)} answers as #{replica}, " <>
+        "was #{peer.peer_replica_id}; cursors reset"
     )
 
     detail =
@@ -2338,7 +2347,10 @@ defmodule OptimalEngine.Sync do
   rescue
     # A gate that cannot read what it classifies by sends nothing.
     error in [RuntimeError, ArgumentError, Gate.StoreError] ->
-      Logger.error("[Sync] push to #{peer.url} held back: #{Exception.message(error)}")
+      Logger.error(
+        "[Sync] push to #{LogUrl.render(peer.url)} held back: #{Exception.message(error)}"
+      )
+
       {:error, {:gate_unreadable, Exception.message(error)}}
   end
 
