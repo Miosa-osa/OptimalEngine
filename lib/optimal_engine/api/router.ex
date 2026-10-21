@@ -194,8 +194,26 @@ defmodule OptimalEngine.API.Router do
   get "/api/node/:node_id" do
     workspace = query_param(conn, "workspace", "default")
     tenant = conn.assigns[:current_tenant] || "default"
-    contexts = fetch_node_contexts(node_id, workspace, tenant)
-    edges = fetch_node_edges(node_id, workspace, tenant)
+    reader = Reader.scope(conn)
+
+    # A context's title and its edges are read from rows of their own: a key is
+    # shown only those it may read.
+    contexts =
+      reader
+      |> node_page(
+        50,
+        &fetch_node_contexts(node_id, workspace, tenant, &1, &2),
+        &readable_node_contexts(reader, workspace, &1)
+      )
+      |> Enum.map(&Map.delete(&1, :uri))
+
+    edges =
+      node_page(
+        reader,
+        200,
+        &fetch_node_edges(node_id, workspace, tenant, &1, &2),
+        &readable_node_edges(reader, workspace, tenant, &1)
+      )
 
     json(conn, %{
       node: node_id,
@@ -1871,10 +1889,19 @@ defmodule OptimalEngine.API.Router do
   # expects `{files: [...]}`; each entry `%{name, path, is_dir, size, children?}`.
   get "/api/optimal/nodes/:slug/files" do
     workspace = query_param(conn, "workspace", "default")
+    tenant = conn.assigns[:current_tenant] || "default"
+    reader = Reader.scope(conn)
 
-    json(conn, %{
-      files: optimal_node_files(slug, workspace, conn.assigns[:current_tenant] || "default")
-    })
+    files =
+      reader
+      |> node_page(
+        200,
+        &fetch_node_files(slug, workspace, tenant, &1, &2),
+        &readable_node_contexts(reader, workspace, &1)
+      )
+      |> Enum.map(&node_file/1)
+
+    json(conn, %{files: files})
   end
 
   # ── Phase 14: workspace explorer endpoints ──────────────────────────────
@@ -5597,20 +5624,67 @@ defmodule OptimalEngine.API.Router do
   # Node slugs are reused across workspaces — both queries must filter by
   # workspace_id in addition to the slug (REALITY-AUDIT: natural key is
   # workspace_id + slug).
-  defp fetch_node_contexts(node_id, workspace_id, tenant_id) do
+  # The first `size` rows of a node listing that the key may read, as
+  # `read.(offset, count)` lists them and `keep.(rows)` lets them through. A key
+  # whose grants cut the listing is shown a full page of what it may see
+  # (`ReadScope.scan/4`), not what is left of the rows read first.
+  defp node_page(reader, size, read, keep) do
+    if ReadScope.filtering?(reader),
+      do: size |> ReadScope.scan(read, keep) |> Enum.take(size),
+      else: keep.(read.(0, size))
+  end
+
+  defp readable_node_contexts(reader, workspace_id, contexts) do
+    {kept, _withheld} =
+      ReadScope.filter(reader, workspace_id, "contexts", contexts, & &1.id, &(&1.uri || &1.id))
+
+    kept
+  end
+
+  # An edge is judged as the replication gate judges one (`Sync.Lineage`): by the
+  # contexts at its ends.
+  defp readable_node_edges(reader, workspace_id, tenant_id, edges) do
+    {kept, _withheld} =
+      ReadScope.filter_rows(
+        reader,
+        workspace_id,
+        "graph_edges",
+        edges,
+        &%{
+          "tenant_id" => tenant_id,
+          "workspace_id" => workspace_id,
+          "source_id" => &1.source_id,
+          "target_id" => &1.target_id,
+          "relation" => &1.relation
+        },
+        fn _edge -> nil end
+      )
+
+    kept
+  end
+
+  defp fetch_node_contexts(node_id, workspace_id, tenant_id, offset, count) do
     case Store.raw_query(
            """
-           SELECT id, title, type, genre, sn_ratio, modified_at
+           SELECT id, title, type, genre, sn_ratio, modified_at, uri
            FROM contexts
            WHERE node = ?1 AND workspace_id = ?2 AND tenant_id = ?3
            ORDER BY modified_at DESC, uri, id
-           LIMIT 50
+           LIMIT ?4 OFFSET ?5
            """,
-           [node_id, workspace_id, tenant_id]
+           [node_id, workspace_id, tenant_id, count, offset]
          ) do
       {:ok, rows} ->
-        Enum.map(rows, fn [id, title, type, genre, sn, mod] ->
-          %{id: id, title: title, type: type, genre: genre, sn_ratio: sn, modified_at: mod}
+        Enum.map(rows, fn [id, title, type, genre, sn, mod, uri] ->
+          %{
+            id: id,
+            title: title,
+            type: type,
+            genre: genre,
+            sn_ratio: sn,
+            modified_at: mod,
+            uri: uri
+          }
         end)
 
       _ ->
@@ -5618,7 +5692,7 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp fetch_node_edges(node_id, workspace_id, tenant_id) do
+  defp fetch_node_edges(node_id, workspace_id, tenant_id, offset, count) do
     # Return edges where at least one endpoint lives in this node.
     # We join via the contexts table to resolve node membership.
     case Store.raw_query(
@@ -5628,12 +5702,18 @@ defmodule OptimalEngine.API.Router do
            JOIN contexts c ON (c.id = e.source_id OR c.id = e.target_id)
            WHERE c.node = ?1 AND c.workspace_id = ?2 AND c.tenant_id = ?3
              AND e.tenant_id = ?3 AND e.workspace_id = ?2
-           LIMIT 200
+           ORDER BY e.source_id, e.target_id, e.relation
+           LIMIT ?4 OFFSET ?5
            """,
-           [node_id, workspace_id, tenant_id]
+           [node_id, workspace_id, tenant_id, count, offset]
          ) do
-      {:ok, rows} -> rows
-      _ -> []
+      {:ok, rows} ->
+        Enum.map(rows, fn [source, target, relation, weight] ->
+          %{source_id: source, target_id: target, relation: relation, weight: weight}
+        end)
+
+      _ ->
+        []
     end
   end
 
@@ -5740,32 +5820,36 @@ defmodule OptimalEngine.API.Router do
   # File tree for NodeDrillDown — one entry per signal in a given node,
   # flattened with `is_dir: false`. The component also accepts nested
   # children but the engine stores a flat list per node, so we return that.
-  defp optimal_node_files(slug, workspace_id, tenant_id) do
+  defp fetch_node_files(slug, workspace_id, tenant_id, offset, count) do
     case Store.raw_query(
            """
            SELECT id, title, uri, genre, modified_at, LENGTH(content) AS size
            FROM contexts
            WHERE node = ?1 AND workspace_id = ?2 AND tenant_id = ?3
            ORDER BY modified_at DESC, uri, id
-           LIMIT 200
+           LIMIT ?4 OFFSET ?5
            """,
-           [slug, workspace_id, tenant_id]
+           [slug, workspace_id, tenant_id, count, offset]
          ) do
       {:ok, rows} ->
         Enum.map(rows, fn [id, title, uri, genre, modified_at, size] ->
-          %{
-            name: title || id,
-            path: uri || id,
-            is_dir: false,
-            size: size || 0,
-            genre: genre,
-            modified_at: modified_at
-          }
+          %{id: id, title: title, uri: uri, genre: genre, modified_at: modified_at, size: size}
         end)
 
       _ ->
         []
     end
+  end
+
+  defp node_file(context) do
+    %{
+      name: context.title || context.id,
+      path: context.uri || context.id,
+      is_dir: false,
+      size: context.size || 0,
+      genre: context.genre,
+      modified_at: context.modified_at
+    }
   end
 
   # ---------------------------------------------------------------------------
