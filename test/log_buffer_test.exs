@@ -206,6 +206,58 @@ defmodule OptimalEngine.LogBufferTest do
     assert line =~ "?[31mred?[0m bell? tab\there"
   end
 
+  # A stored line is at most 4,096 bytes. Each case slides a secret across
+  # that cut one character at a time; no part of it may stay. Every secret
+  # starts with "Zq", which nothing else in the line contains.
+  defp secret, do: "Zq" <> String.duplicate("9k", 20)
+
+  defp across_the_cut(value) do
+    for shift <- 0..130 do
+      tail = " " <> String.duplicate("y", 200)
+      line = stored(String.duplicate("x", 4_096 - 140 + shift) <> " " <> value <> tail)
+      assert byte_size(line) <= 4_096
+      assert String.ends_with?(line, "...")
+      line
+    end
+  end
+
+  describe "a line cut to its length" do
+    test "a quoted value" do
+      for line <- across_the_cut(~s(password="#{secret()}" done)),
+          do: refute(line =~ "Zq", line)
+    end
+
+    test "the userinfo of a URL" do
+      for line <- across_the_cut("https://Zqdrill:#{secret()}@host.example/path"),
+          do: refute(line =~ "Zq", line)
+    end
+
+    test "an AWS access key id" do
+      key = "AKIA" <> String.duplicate("Q7", 8)
+      for line <- across_the_cut("key #{key} done"), do: refute(line =~ "AKIA", line)
+    end
+
+    test "a Bearer credential" do
+      for line <- across_the_cut("Bearer #{secret()} done"), do: refute(line =~ "Zq", line)
+    end
+
+    test "a cut inside a multibyte character leaves valid UTF-8" do
+      for shift <- 0..3 do
+        line = stored(String.duplicate("x", shift) <> String.duplicate("é", 2_100))
+        assert byte_size(line) <= 4_096
+        assert String.valid?(line)
+      end
+    end
+  end
+
+  test "a quoted value without its closing quote is redacted to the end of the line" do
+    for value <- ["password=\"Zq" <> String.duplicate("u", 12), "secret: 'Zq" <> "uuuu"] do
+      line = stored("login " <> value)
+      refute line =~ "Zq", line
+      assert line =~ "[redacted]"
+    end
+  end
+
   test "C1 controls and the Unicode line and paragraph separators are replaced" do
     line = stored("a\u0085b\u009bc\u2028d\u2029e café")
     for char <- ["\u0085", "\u009b", "\u2028", "\u2029"], do: refute(line =~ char)
