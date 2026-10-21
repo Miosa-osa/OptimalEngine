@@ -13,8 +13,10 @@ defmodule OptimalEngine.API.BundleJobsAPI do
   Every route needs the admin grant (`PermissionPlug`, `/api/bundles`). A job
   belongs to the tenant that started it: another tenant's job is not found.
   The key's workspace scope must cover the job's workspace (the export's
-  source, the import's target): 403 `workspace_scope_denied` otherwise. A
-  start answers 202 with the job and its status URL in `Location`; the same
+  source, the import's target): 403 `workspace_scope_denied` otherwise. An
+  import of a stored `bundle` also needs a scope that covers the workspace the
+  bundle was exported from: 404 `bundle_not_found` otherwise, as for the
+  download. A start answers 202 with the job and its status URL in `Location`; the same
   `Idempotency-Key` with the same request answers 200 with that job and
   `"duplicate": true`.
   """
@@ -22,7 +24,7 @@ defmodule OptimalEngine.API.BundleJobsAPI do
   import Plug.Conn
 
   alias OptimalEngine.API.{Actor, WorkspaceAuthPlug}
-  alias OptimalEngine.Portability.BundleJobs
+  alias OptimalEngine.Portability.{BundleJobs, WorkspaceBundle}
 
   def export(conn) do
     body = body(conn)
@@ -44,7 +46,8 @@ defmodule OptimalEngine.API.BundleJobsAPI do
     body = body(conn)
 
     with {:ok, workspace_id} <- workspace_param(body),
-         :ok <- in_scope(conn, workspace_id) do
+         :ok <- in_scope(conn, workspace_id),
+         :ok <- bundle_in_scope(conn, body) do
       conn
       |> started(
         BundleJobs.submit_import(tenant(conn), body,
@@ -140,6 +143,29 @@ defmodule OptimalEngine.API.BundleJobsAPI do
         {:error, :workspace_scope_denied,
          "the key's workspace scope does not cover #{workspace_id}"}
   end
+
+  # A stored bundle holds the workspace it was exported from, so the key's
+  # scope must cover that one as well as the target, as for the download: a
+  # bundle it may not reach is not found. A name that is no bundle of the
+  # tenant, or a source_url, is the job's to refuse.
+  defp bundle_in_scope(conn, %{"bundle" => name}) when is_binary(name) do
+    with {:ok, path} <- WorkspaceBundle.bundle_path(tenant(conn), name),
+         true <- File.regular?(path) do
+      case WorkspaceBundle.source_workspace(path) do
+        {:ok, source} ->
+          if WorkspaceAuthPlug.key_holds?(conn.assigns[:current_api_key], source),
+            do: :ok,
+            else: {:error, :bundle_not_found, "bundle not found"}
+
+        {:error, _reason} ->
+          {:error, :bundle_not_found, "bundle not found"}
+      end
+    else
+      _ -> :ok
+    end
+  end
+
+  defp bundle_in_scope(_conn, _body), do: :ok
 
   defp idempotency_key(conn, body) do
     case get_req_header(conn, "idempotency-key") do

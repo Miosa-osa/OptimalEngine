@@ -250,28 +250,64 @@ defmodule OptimalEngine.Portability.BundleJobs do
   bundle job still marked running was cut off when the Engine stopped. Its
   partial output is removed and it is made claimable again, recorded as
   `engine_restarted`; the claim counts the attempt and fails it once none are
-  left. Returns how many jobs were released.
+  left. A job whose rows cannot all be taken back ends `failed` with
+  `cleanup_incomplete` and `partial: true` instead, since running it again
+  would meet what is left. It never raises: a job that cannot be cleaned up
+  is released again at every boot, so a raise would crash the worker, and the
+  Engine's supervisor with it, at every boot. Returns how many jobs were
+  released.
   """
   @spec recover() :: non_neg_integer()
   def recover do
     case Jobs.release_running(@kinds, "engine_restarted") do
       {:ok, jobs} ->
-        Enum.each(jobs, fn job ->
-          report = read_report(job.id)
-          clean_up(job, report)
-
-          update_report(job.id, %{
-            "status" => "retrying",
-            "error" => error_map(:engine_restarted, "the Engine stopped while the job ran")
-          })
-        end)
-
+        Enum.each(jobs, &recover_job/1)
         length(jobs)
 
       {:error, reason} ->
         Logger.error("[BundleJobs] could not release interrupted jobs: #{inspect(reason)}")
         0
     end
+  end
+
+  defp recover_job(job) do
+    case clean_up(job, read_report(job.id)) do
+      :ok ->
+        update_report(job.id, %{
+          "status" => "retrying",
+          "error" => error_map(:engine_restarted, "the Engine stopped while the job ran")
+        })
+
+      :incomplete ->
+        give_up(job)
+    end
+  rescue
+    error ->
+      Logger.error("[BundleJobs] could not recover job #{job.id}: #{Exception.message(error)}")
+  catch
+    kind, reason ->
+      Logger.error("[BundleJobs] could not recover job #{job.id}: #{kind} #{inspect(reason)}")
+  end
+
+  # What the job wrote could not all be removed, and another run would meet
+  # what is left: the job ends here, and says so.
+  defp give_up(job) do
+    error =
+      error_map(
+        :cleanup_incomplete,
+        "the Engine stopped while the job ran, and some of the rows it wrote could not be removed",
+        true
+      )
+
+    finish_report(job.id, %{
+      "status" => "failed",
+      "phase" => "done",
+      "error" => error,
+      "partial" => true
+    })
+
+    remove_private(job.id)
+    Jobs.fail(job.id, job.lease_owner, :cleanup_incomplete, permanent: true)
   end
 
   @doc """
@@ -334,6 +370,10 @@ defmodule OptimalEngine.Portability.BundleJobs do
       "phase" => "starting",
       "started_at" => started,
       "error" => nil,
+      # What an earlier attempt learned about its target is not this one's.
+      "target_was_empty" => nil,
+      "record_created" => nil,
+      "unlogged" => nil,
       "progress" => empty_progress()
     })
 
@@ -357,19 +397,21 @@ defmodule OptimalEngine.Portability.BundleJobs do
   defp finish(job, owner, {:ok, result}) do
     finish_report(job.id, %{"status" => "succeeded", "phase" => "done", "result" => result})
     remove_private(job.id)
+    File.rm(written_log(job.id))
     {:ok, _} = Jobs.complete(job.id, owner)
     fetched_view(job.id)
   end
 
   defp finish(job, owner, {:error, :cancelled}) do
     report = read_report(job.id)
-    clean_up(job, report)
+    cleaned = clean_up(job, report)
 
-    # A merge into a workspace that held rows is not rolled back: it says so.
+    # A merge into a workspace that held rows is not rolled back, and rows that
+    # could not be removed stay: it says so.
     finish_report(job.id, %{
       "status" => "cancelled",
       "phase" => "done",
-      "partial" => partial?(job, report)
+      "partial" => partial?(job, report, cleaned)
     })
 
     remove_private(job.id)
@@ -382,9 +424,13 @@ defmodule OptimalEngine.Portability.BundleJobs do
 
   defp finish(job, owner, {:error, code, message}) do
     report = read_report(job.id)
-    clean_up(job, report)
-    error = error_map(code, message, partial?(job, report))
-    retry? = to_string(code) in @retryable and job.attempts < job.max_attempts
+    cleaned = clean_up(job, report)
+    partial = partial?(job, report, cleaned)
+    error = error_map(code, message, partial)
+
+    # Rows left behind by a create would clash with another attempt.
+    retry? =
+      to_string(code) in @retryable and job.attempts < job.max_attempts and cleaned == :ok
 
     if retry? do
       update_report(job.id, %{"status" => "retrying", "phase" => "queued", "error" => error})
@@ -394,7 +440,7 @@ defmodule OptimalEngine.Portability.BundleJobs do
         "status" => "failed",
         "phase" => "done",
         "error" => error,
-        "partial" => partial?(job, report)
+        "partial" => partial
       })
 
       remove_private(job.id)
@@ -478,19 +524,11 @@ defmodule OptimalEngine.Portability.BundleJobs do
     request = job.payload["request"]
     mode = if request["mode"] == "merge", do: :merge, else: :create
 
-    # A target that holds nothing now is emptied again if the import does not
-    # finish, so a failure or a cancel leaves no partial workspace.
-    empty =
-      case mode do
-        :create -> Workspace.get(job.workspace_id) == {:error, :not_found}
-        :merge -> WorkspaceBundle.workspace_empty?(job.tenant_id, job.workspace_id)
-      end
-
-    update_report(job.id, %{
-      "target_was_empty" => empty,
-      "record_existed" => match?({:ok, _}, Workspace.get(job.workspace_id)),
-      "mode" => request["mode"]
-    })
+    # What the target was when the import began is the import's to say (an
+    # event, once it has planned the target), not read here before a download
+    # that may take long: a target that held nothing is emptied again of what
+    # the import wrote if it does not finish.
+    update_report(job.id, %{"mode" => request["mode"]})
 
     with {:ok, path, consume} <- import_source(job, request["source"]) do
       opts =
@@ -508,10 +546,19 @@ defmodule OptimalEngine.Portability.BundleJobs do
       case WorkspaceBundle.import(path, job.tenant_id, opts) do
         {:ok, summary} -> {:ok, import_result(summary)}
         {:error, :cancelled} -> {:error, :cancelled}
-        {:error, reason} -> import_error(reason)
+        {:error, reason} -> import_error(note_unlogged(reason, job))
       end
     end
   end
+
+  # A batch committed whose line the log could not take: the log is short of
+  # what was written, so the cleanup that follows cannot be complete.
+  defp note_unlogged({:import_failed, _table, {:written_log, _}} = reason, job) do
+    update_report(job.id, %{"unlogged" => true})
+    reason
+  end
+
+  defp note_unlogged(reason, _job), do: reason
 
   defp import_source(job, %{"kind" => "bundle", "name" => name}) do
     with {:ok, path} <- WorkspaceBundle.bundle_path(job.tenant_id, name),
@@ -602,33 +649,62 @@ defmodule OptimalEngine.Portability.BundleJobs do
   # ── cleaning up ─────────────────────────────────────────────────────────
 
   # What a job leaves when it does not finish: an export's partial file, an
-  # import's download, and the rows of an import target that held nothing
-  # when the job started (the workspace record too, for a create).
-  defp clean_up(%{kind: @export}, report) do
+  # import's download, and the rows an import wrote into a target that held
+  # nothing when it began (the workspace record too, when the import made it).
+  # `:ok`, or `:incomplete` when some of that could not be removed. It never
+  # raises (see `recover/0`).
+  defp clean_up(job, report) do
+    remove_leftovers(job, report)
+  rescue
+    error ->
+      Logger.error("[BundleJobs] cleaning up job #{job.id} failed: #{Exception.message(error)}")
+      :incomplete
+  catch
+    kind, reason ->
+      Logger.error("[BundleJobs] cleaning up job #{job.id} failed: #{kind} #{inspect(reason)}")
+      :incomplete
+  end
+
+  defp remove_leftovers(%{kind: @export}, report) do
     if is_binary(report["output"]), do: File.rm(report["output"])
     :ok
   end
 
-  defp clean_up(%{kind: @import} = job, report) do
+  defp remove_leftovers(%{kind: @import} = job, report) do
     File.rm(Path.join(job_dir(job.id), "source.tar.gz"))
 
     # Only the rows the job wrote go (the import logged them as it wrote), so a
     # row another writer put in the target meanwhile stays, and so does the
-    # workspace record if that leaves the workspace holding anything.
-    if report["target_was_empty"] == true do
-      WorkspaceBundle.discard_written(written_log(job.id), job.tenant_id, job.workspace_id,
-        record: report["record_existed"] == false
-      )
-    end
+    # workspace record if that leaves the workspace holding anything. What the
+    # target was is what the import reported when it planned it.
+    result =
+      if report["target_was_empty"] == true do
+        WorkspaceBundle.discard_written(written_log(job.id), job.tenant_id, job.workspace_id,
+          record: report["record_created"] == true
+        )
+      else
+        :ok
+      end
 
-    File.rm(written_log(job.id))
-    :ok
+    case result do
+      :ok ->
+        File.rm(written_log(job.id))
+        :ok
+
+      {:incomplete, why} ->
+        # The log stays, to say what is left; the retention sweep removes it.
+        Logger.error("[BundleJobs] job #{job.id} could not take back all it wrote: #{inspect(why)}")
+
+        :incomplete
+    end
   end
 
-  defp partial?(%{kind: @import}, report),
-    do: report["target_was_empty"] == false and report["phase"] in ["writing", "files"]
+  defp partial?(%{kind: @import}, report, cleaned) do
+    cleaned == :incomplete or report["unlogged"] == true or
+      (report["target_was_empty"] == false and report["phase"] in ["writing", "files"])
+  end
 
-  defp partial?(_job, _report), do: false
+  defp partial?(_job, _report, _cleaned), do: false
 
   # ── progress, cancel, heartbeat ─────────────────────────────────────────
 
@@ -657,6 +733,9 @@ defmodule OptimalEngine.Portability.BundleJobs do
       "tables_done" => map_size(tables)
     })
   end
+
+  defp observe(job_id, {:target, %{created: created, empty: empty}}),
+    do: update_report(job_id, %{"record_created" => created, "target_was_empty" => empty})
 
   defp observe(_job_id, _event), do: :ok
 
@@ -884,13 +963,14 @@ defmodule OptimalEngine.Portability.BundleJobs do
       else: {:error, :bundle_too_large, "the bundle is larger than #{max_bytes()} bytes"}
   end
 
-  # The bundle, its unpacked tables and the rows they become: about three
-  # times its size beyond the file itself.
+  # The bundle, its unpacked tables, the rows they become, and the log of the
+  # keys of the rows written (never more than the tables it is drawn from):
+  # about four times its size beyond the file itself.
   defp space_for(size) do
     case WorkspaceBundle.free_bytes(WorkspaceBundle.backup_dir()) do
-      free when is_integer(free) and free < size * 3 ->
+      free when is_integer(free) and free < size * 4 ->
         {:error, :insufficient_storage,
-         "#{free} bytes are free and the import needs about #{size * 3} beyond the bundle"}
+         "#{free} bytes are free and the import needs about #{size * 4} beyond the bundle"}
 
       _ ->
         :ok
@@ -941,7 +1021,6 @@ defmodule OptimalEngine.Portability.BundleJobs do
   end
 
   defp remove_private(job_id) do
-    File.rm(written_log(job_id))
     File.rm(Path.join(job_dir(job_id), "source_url"))
     File.rm(Path.join(job_dir(job_id), "source.tar.gz"))
     :ok

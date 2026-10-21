@@ -235,7 +235,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   `:observe` is told how the import goes, as for `export/4`: `{:phase, phase}`
   (`:verifying`, `:planning`, `:writing`, `:files`), `{:total, rows, files}`
-  from the manifest, and `{:rows, table, n}` after each batch. It may stop
+  from the manifest, `{:target, %{created: created, empty: empty}}` once the
+  target is planned (this run made the workspace record; the workspace held
+  nothing), and `{:rows, table, n}` after each batch. It may stop
   the import with `:cancel` until the target is planned, and between batches
   after that; a stopped create removes what it wrote. The answer is then
   `{:error, :cancelled}`.
@@ -258,6 +260,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
            :ok <- same_tenant(manifest, tenant_id, opts),
            :ok <- observed(observe, {:phase, :planning}),
            {:ok, plan} <- plan(manifest, tenant_id, opts),
+           :ok <- announce_target(observe, plan),
            :ok <- compatible(manifest, staging),
            :ok <- notify(observe, {:phase, :writing}),
            {:ok, counts} <-
@@ -292,6 +295,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     end
   end
 
+  # What the import itself made of the target, told before anything is written
+  # and before the checks that may still refuse the bundle: whether this run
+  # created the workspace record, and whether the workspace held nothing.
+  defp announce_target(observe, plan) do
+    empty = plan.created or workspace_empty?(plan.tenant_id, plan.workspace_id)
+    notify(observe, {:target, %{created: plan.created, empty: empty}})
+  end
+
   defp manifest_rows(manifest),
     do: manifest |> Map.get("tables", []) |> Enum.map(&(&1["rows"] || 0)) |> Enum.sum()
 
@@ -308,19 +319,19 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   With `record: true` the workspace record goes too, when nothing is left in
   the workspace. For an import that did not finish into a target that held
   nothing before it: a create it made, or a merge into an empty workspace.
-  """
-  @spec discard_written(String.t(), String.t(), String.t(), keyword()) :: :ok
-  def discard_written(log_path, tenant_id, workspace_id, opts \\ []) do
-    if File.regular?(log_path) do
-      tables =
-        log_path
-        |> File.stream!()
-        |> Stream.map(&(&1 |> Jason.decode!() |> Map.fetch!("table")))
-        |> Enum.uniq()
 
-      # Children are written after their parents, so they go first.
-      Enum.each(Enum.reverse(tables), &discard_table(&1, log_path, tenant_id, workspace_id))
-    end
+  The batches go last written first, so a row's dependants (a memory that
+  points at it, a table that references it) are gone before it is, with foreign
+  keys checked at each commit. It never raises: it answers `:ok`, or
+  `{:incomplete, why}` when some of what the log names could not be removed (a
+  line of the log was torn by a full disk, or a delete was refused), which the
+  caller reports as a partial import.
+  """
+  @spec discard_written(String.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:incomplete, term()}
+  def discard_written(log_path, tenant_id, workspace_id, opts \\ []) do
+    {batches, damaged} = log_batches(log_path)
+    refused = discard_batches(batches, log_path, tenant_id, workspace_id)
 
     if opts[:record] == true and workspace_empty?(tenant_id, workspace_id),
       do:
@@ -329,32 +340,125 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           tenant_id
         ])
 
-    :ok
+    if damaged + refused == 0,
+      do: :ok,
+      else: {:incomplete, %{unreadable: damaged, refused: refused}}
+  rescue
+    error -> {:incomplete, Exception.message(error)}
+  catch
+    kind, reason -> {:incomplete, "#{kind}: #{inspect(reason)}"}
   end
 
-  defp discard_table(table, log_path, tenant_id, workspace_id) do
-    columns = columns(table)
+  # Where each batch of the log is in the file, newest first, and how many
+  # lines could not be read. An append that fails at a full disk leaves a torn
+  # last line: it is counted, not read.
+  defp log_batches(log_path) do
+    if File.regular?(log_path) do
+      {batches, damaged, _offset} =
+        log_path
+        |> File.stream!()
+        |> Enum.reduce({[], 0, 0}, fn line, {batches, damaged, offset} ->
+          size = byte_size(line)
 
-    # A table with a workspace column is also bound to the workspace, whatever
-    # the log says.
-    scope =
-      if Enum.any?(columns, &(elem(&1, 0) == "workspace_id")),
-        do: scope_clause(table, columns, tenant_id, workspace_id),
-        else: {nil, []}
+          case log_table(line) do
+            {:ok, table} -> {[{table, offset, size} | batches], damaged, offset + size}
+            :error -> {batches, damaged + 1, offset + size}
+          end
+        end)
 
-    log_path
-    |> File.stream!()
-    |> Stream.map(&Jason.decode!/1)
-    |> Stream.filter(&(&1["table"] == table))
-    |> Enum.each(fn entry ->
-      for {sql, params} <- discard_statements(table, entry, scope) do
-        {:ok, _} =
-          Store.transaction(fn txn ->
-            {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
-            Store.txn_execute(txn, sql, params)
+      {batches, damaged}
+    else
+      {[], 0}
+    end
+  end
+
+  defp log_table(line) do
+    case Jason.decode(line) do
+      {:ok, %{"table" => table, "columns" => [_ | _], "keys" => keys}}
+      when is_binary(table) and is_list(keys) ->
+        {:ok, table}
+
+      {:ok, %{"table" => table, "column" => column, "range" => [_, _]}}
+      when is_binary(table) and is_binary(column) ->
+        {:ok, table}
+
+      _ ->
+        :error
+    end
+  end
+
+  # Returns how many batches could not be removed.
+  defp discard_batches([], _log_path, _tenant_id, _workspace_id), do: 0
+
+  defp discard_batches(batches, log_path, tenant_id, workspace_id) do
+    case File.open(log_path, [:read, :binary, :raw]) do
+      {:ok, io} ->
+        try do
+          {refused, _scopes} =
+            Enum.reduce(batches, {0, %{}}, fn {table, offset, size}, {refused, scopes} ->
+              {scope, scopes} = discard_scope(scopes, table, tenant_id, workspace_id)
+
+              if discard_batch(io, table, offset, size, scope),
+                do: {refused, scopes},
+                else: {refused + 1, scopes}
+            end)
+
+          refused
+        after
+          File.close(io)
+        end
+
+      {:error, _reason} ->
+        length(batches)
+    end
+  end
+
+  # A table with a workspace column is also bound to the workspace, whatever
+  # the log says.
+  defp discard_scope(scopes, table, tenant_id, workspace_id) do
+    case scopes do
+      %{^table => scope} ->
+        {scope, scopes}
+
+      _ ->
+        columns = columns(table)
+
+        scope =
+          if Enum.any?(columns, &(elem(&1, 0) == "workspace_id")),
+            do: scope_clause(table, columns, tenant_id, workspace_id),
+            else: {nil, []}
+
+        {scope, Map.put(scopes, table, scope)}
+    end
+  end
+
+  # True when the batch is gone. All of a batch's statements run in one
+  # transaction, with foreign keys checked at its commit: a batch holds a
+  # parent and its children, and the chunks of a large batch must not be
+  # committed one at a time.
+  defp discard_batch(io, table, offset, size, scope) do
+    with {:ok, data} <- :file.pread(io, offset, size),
+         {:ok, entry} <- Jason.decode(data) do
+      statements = discard_statements(table, entry, scope)
+
+      match?(
+        {:ok, _},
+        Store.transaction(fn txn ->
+          {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+
+          Enum.reduce_while(statements, {:ok, :removed}, fn {sql, params}, removed ->
+            case Store.txn_execute(txn, sql, params) do
+              {:ok, _} -> {:cont, removed}
+              {:error, _} = error -> {:halt, error}
+            end
           end)
-      end
-    end)
+        end)
+      )
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
   end
 
   # The DELETE statements for one batch of the log: rows by key, in chunks, or
@@ -1207,6 +1311,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     files =
       {Filesystem.path(root(), plan.workspace_id), MapSet.new(manifest["files"], & &1["path"])}
+
     # What each table's rows are known by, for the log of what this run wrote.
     trackers = Map.new(names, &{&1, tracker(&1, columns(target_table(&1)))})
     record = recorder(opts[:written_log])
@@ -1372,25 +1477,40 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp recorder(nil), do: fn _name, _entry -> :ok end
 
   defp recorder(path) do
+    # A log starts empty (a stale one would name rows this run did not write),
+    # and it names rows by key, so like the job's other private files it is the
+    # Engine's alone.
+    File.write(path, "")
+    File.chmod(path, 0o600)
+
     fn
       _name, nil ->
         :ok
 
       name, entry ->
         line = Jason.encode!(Map.put(entry, "table", name)) <> "\n"
-        File.write(path, line, [:append])
+
+        case File.write(path, line, [:append]) do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:written_log, reason}}
+        end
     end
   end
 
   # A failed create import leaves nothing behind: the rows it wrote, then the
   # workspace record it made, if nothing else is in the workspace.
   defp undo_import(plan, log_path) do
-    discard_written(log_path, plan.tenant_id, plan.workspace_id, record: plan[:created] == true)
-  rescue
-    error ->
-      Logger.error(
-        "[WorkspaceBundle] could not remove the failed import of #{plan.workspace_id}: #{Exception.message(error)}"
-      )
+    case discard_written(log_path, plan.tenant_id, plan.workspace_id,
+           record: plan[:created] == true
+         ) do
+      :ok ->
+        :ok
+
+      {:incomplete, why} ->
+        Logger.error(
+          "[WorkspaceBundle] could not remove all of the failed import of #{plan.workspace_id}: #{inspect(why)}"
+        )
+    end
   end
 
   # Tables a table points at come first; tables outside the bundle and

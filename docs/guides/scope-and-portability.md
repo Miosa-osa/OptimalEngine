@@ -300,6 +300,7 @@ A large workspace takes minutes to export or import, so the same work also runs 
 
 Every route needs the admin grant, and a job belongs to the tenant that started it: another tenant's job is not found.
 The key's workspace scope must cover the job's workspace (the export's source, the import's target), or the answer is 403 `workspace_scope_denied`.
+An import of a stored `bundle` also needs a scope that covers the workspace the bundle was exported from, as the download does: otherwise the answer is 404 `bundle_not_found`, as for a bundle that is not there.
 A start answers 202 with the job and its status URL in `Location`.
 An Engine that serves these routes lists `bundle_jobs_v1` in the `capabilities` of `GET /api/version` (`engine-contract.json`), so a control plane can cut over to them one Engine at a time.
 
@@ -319,10 +320,14 @@ An import's result names the target `workspace_id`, the rows per table, the file
 
 A failure the Engine can retry (`fetch_failed`, `insufficient_storage`, `store_busy`, `engine_restarted`) is tried again after a minute, up to three attempts; any other ends the job `failed` at once, and `retryable: false` means the request must change.
 A failed or cancelled job leaves nothing behind: no partial export file, no download, and none of the rows it wrote into an import target that held nothing when the job started (a `create`, or a `merge` into an empty workspace).
-An import logs each batch as it writes it, and a failed or cancelled one takes back exactly what that log lists, so a row another writer put into the target meanwhile stays, and so does the workspace record when the workspace then holds anything.
+An import logs each batch as it writes it (`bundle-jobs/<id>/written.jsonl` in the backup folder, readable by the Engine's user only, and counted in the free-space check an import makes), and a failed or cancelled one takes back exactly what that log lists, last batch first so that a row's dependants go before it, and no other: a row another writer put into the target meanwhile stays, and so does the workspace record when the workspace then holds anything.
+Whether the target was empty, and whether the import made its workspace record, are what the import itself found when it planned the target, not what the job read before a download.
 A merge into a workspace that already held rows is not rolled back: the job's `partial` is `true` (and a failure's `error` says `"partial": true`) whether it failed or was cancelled, and running it again converges.
+`partial` is also `true` when some of what an import wrote could not be taken back (a line of the log lost to a full disk, or a delete refused), and such a failure is not retried; the log stays in the job's folder until the job record is removed.
 A cancel takes a queued job out at once, and stops a running one at its next page or batch.
 A job running when the Engine stops is not resumed: at the next boot its partial output is removed and it runs again from the start, and after its third attempt it fails with `engine_restarted`.
+A job whose rows cannot all be taken back at that boot ends `failed` with `cleanup_incomplete` and `partial: true` instead, since running it again would meet what is left.
+Recovery never stops the Engine: it skips a torn line of the log, reports the job, and goes on to the next.
 An export reads one snapshot of the database, and a resumed export would join two, so its ledger mark would no longer describe its rows.
 
 An export job's bundle is kept for `OPTIMAL_BUNDLE_RETENTION_HOURS` (168, seven days) after it finishes, then removed; job records are kept 30 days.
