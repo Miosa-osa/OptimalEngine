@@ -100,13 +100,16 @@ defmodule OptimalEngine.Authority.Policy do
   def publish(tenant_id, scope_type, scope_id, document, published_by)
       when scope_type in @scope_types and is_binary(scope_id) do
     with {:ok, normalized} <- validate(document) do
-      previous = active(tenant_id, scope_type, scope_id)
-      version = next_version(tenant_id, scope_type, scope_id)
       id = "pol_" <> random_id()
       hash = hash(normalized)
 
+      # The active pack and the next version are read in the transaction that
+      # replaces them, so two publishes cannot take the same version.
       result =
         Store.transaction(fn txn ->
+          previous = txn_active(txn, tenant_id, scope_type, scope_id)
+          version = txn_next_version(txn, tenant_id, scope_type, scope_id)
+
           with {:ok, _} <-
                  Store.txn_execute(
                    txn,
@@ -136,11 +139,11 @@ defmodule OptimalEngine.Authority.Policy do
                      published_by
                    ]
                  ) do
-            {:ok, id}
+            {:ok, {id, previous}}
           end
         end)
 
-      with {:ok, ^id} <- result, {:ok, policy} <- get(tenant_id, id) do
+      with {:ok, {^id, previous}} <- result, {:ok, policy} <- get(tenant_id, id) do
         {:ok, policy, previous}
       end
     end
@@ -421,8 +424,22 @@ defmodule OptimalEngine.Authority.Policy do
 
   defp stringify_value(value), do: value
 
-  defp next_version(tenant_id, scope_type, scope_id) do
-    case Store.raw_query(
+  defp txn_active(txn, tenant_id, scope_type, scope_id) do
+    case Store.txn_query(
+           txn,
+           select_sql(
+             "WHERE tenant_id = ?1 AND scope_type = ?2 AND scope_id = ?3 AND status = 'active'"
+           ),
+           [tenant_id, scope_type, scope_id]
+         ) do
+      {:ok, [row | _]} -> to_policy(row)
+      _ -> nil
+    end
+  end
+
+  defp txn_next_version(txn, tenant_id, scope_type, scope_id) do
+    case Store.txn_query(
+           txn,
            "SELECT COALESCE(MAX(version), 0) FROM authority_policies WHERE tenant_id = ?1 AND scope_type = ?2 AND scope_id = ?3",
            [tenant_id, scope_type, scope_id]
          ) do
