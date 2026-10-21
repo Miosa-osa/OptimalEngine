@@ -24,6 +24,7 @@ defmodule OptimalEngine.DataSteward do
 
   alias OptimalEngine.Portability.WorkspaceBundle
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
+  alias OptimalEngine.UriRepair.References
   alias OptimalEngine.Workspace.Filesystem
 
   require Logger
@@ -32,6 +33,13 @@ defmodule OptimalEngine.DataSteward do
 
   # A rename that moves a workspace's directory rewrites the path of every file in it.
   @rename_timeout 300_000
+
+  # Where a rename that is about to move a directory notes it (under the Engine root), until
+  # the transaction has committed or the directory is back.
+  @rename_marker_dir ".optimal-rename"
+
+  # How many moved addresses are re-pointed in one statement.
+  @address_chunk 200
 
   # A batch of route decisions is one request; more than this is several.
   @max_route_items 500
@@ -420,16 +428,29 @@ defmodule OptimalEngine.DataSteward do
 
   A workspace's directory is keyed by its id (`Workspace.Filesystem.path/2`), so the
   rename moves it: the files, `contexts.path` and `contexts.uri` of the files, and
-  `assets.storage_path` of local assets all follow the id, in the same transaction.
+  `assets.storage_path` of local assets all follow the id, in the same transaction, and
+  only for rows of this tenant and workspace. A path is matched as the file system sees
+  it (expanded), whether the row stores it absolute or relative to a relative root path,
+  and is written back in the form it had. An address that follows its file takes with it
+  everything that names it: the access rules (`acls`, a deny rule included), the
+  memories' `citation_uri`, the open loops' `source_uri` and `close_source_uri`, and the
+  events' `target_uri`. An address that another context also holds keeps its rules, and
+  the moved context gets a copy (`UriRepair.References`).
   The move is the last step, so a rename that fails earlier leaves the directory where
-  it was, and a commit that fails after it moves the directory back. It is refused,
-  with nothing changed, when the directory cannot be moved safely: the same test as a
-  move to another Engine (`WorkspaceBundle.movable/1`, so never the Engine root, a
-  directory the root uses for itself or one that holds more than the workspace), a
-  target directory that already holds files (`workspace_directory_exists`), or an
-  entry at the source that is not a directory (`workspace_directory_unusual`). A
-  workspace that has no directory yet is renamed with nothing to move. Text that
-  quotes an `optimal://` address of a moved file is not rewritten.
+  it was, and a commit that fails after it moves the directory back. A crash between
+  the move and the commit leaves a marker under `<root>/.optimal-rename`;
+  `recover_interrupted_renames/0` reads the markers and puts the directory back when
+  the rename did not commit (it runs at the start of every rename, and an operator can
+  call it). It is refused, with nothing changed, when the directory cannot be moved
+  safely: the same test as a move to another Engine (`WorkspaceBundle.movable/1`, so
+  never the Engine root, a directory the root uses for itself or one that holds more
+  than the workspace), a target directory that already holds files
+  (`workspace_directory_exists`), or an entry at the source that is not a directory
+  (`workspace_directory_unusual`). A workspace that has no directory yet is renamed with
+  nothing to move. Text that quotes an `optimal://` address of a moved file (wiki
+  bodies) is not rewritten. The answer says whether the directory moved
+  (`directory_moved`) and how many paths and addresses were rewritten
+  (`paths_rewritten`).
   """
   def rename_workspace(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
@@ -438,6 +459,10 @@ defmodule OptimalEngine.DataSteward do
     with :ok <- source_registered(tenant, source_workspace_id),
          {:ok, tables} <- workspace_tables(),
          {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
+      # A crash during an earlier rename may have left a directory under the id its rows
+      # do not have; put it back before looking at the directory again.
+      _ = recover_interrupted_renames()
+
       # What the filesystem says is read now; a refusal is raised below, after the checks
       # of the rows, so a target of the wrong shape is still refused for its shape.
       directory = plan_directory_move(source_workspace_id, target_workspace_id)
@@ -461,22 +486,33 @@ defmodule OptimalEngine.DataSteward do
                    target_workspace_id,
                    actor_id
                  ),
-               :ok <- move_directory(txn, move) do
-            {:ok, Map.put(renamed, :directory_moved, move != nil)}
+               {:ok, rewritten} <-
+                 move_directory(txn, move, %{
+                   tenant: tenant,
+                   source: source_workspace_id,
+                   target: target_workspace_id
+                 }) do
+            {:ok,
+             renamed
+             |> Map.put(:directory_moved, move != nil)
+             |> Map.put(:paths_rewritten, rewritten)}
           end
         end,
         @rename_timeout
       )
-      |> undo_move_if_not_committed(move)
+      |> settle_move(move)
       |> purge_vacated_cache(source_workspace_id, :rename)
     end
   end
 
   # ── the directory goes with the id ─────────────────────────────────────────
 
-  # Decided before the transaction opens, so a refusal changes nothing.
+  # Decided before the transaction opens, so a refusal changes nothing. `stored_new` is
+  # the new directory written the way rows write a path under the configured root, which
+  # may be a relative one.
   defp plan_directory_move(source, target) do
-    root = Path.expand(Application.get_env(:optimal_engine, :root_path, File.cwd!()))
+    configured = Application.get_env(:optimal_engine, :root_path, File.cwd!())
+    root = Path.expand(configured)
     old = Path.expand(Filesystem.path(root, source))
     new = Path.expand(Filesystem.path(root, target))
 
@@ -491,7 +527,8 @@ defmodule OptimalEngine.DataSteward do
           with :ok <- WorkspaceBundle.movable(source),
                :ok <- WorkspaceBundle.movable(target),
                :ok <- target_directory_free(new) do
-            {:ok, %{old: old, new: new}}
+            {:ok,
+             %{old: old, new: new, root: root, stored_new: Filesystem.path(configured, target)}}
           end
 
         _link_file_or_unreadable ->
@@ -525,55 +562,233 @@ defmodule OptimalEngine.DataSteward do
     end
   end
 
-  defp move_directory(_txn, nil), do: :ok
+  defp move_directory(_txn, nil, _rename), do: {:ok, %{contexts: 0, assets: 0, addresses: 0}}
 
-  defp move_directory(txn, %{old: old, new: new}) do
-    with :ok <- rewrite_paths(txn, old, new),
-         :ok <- remove_empty_tree(new),
-         :ok <- File.mkdir_p(Path.dirname(new)),
-         :ok <- File.rename(old, new) do
-      :ok
+  defp move_directory(txn, move, %{tenant: tenant, target: workspace} = rename) do
+    with {:ok, rewritten} <- rewrite_paths(txn, move, tenant, workspace),
+         :ok <- note_intent(move, rename),
+         :ok <- remove_empty_tree(move.new),
+         :ok <- File.mkdir_p(Path.dirname(move.new)),
+         :ok <- File.rename(move.old, move.new) do
+      {:ok, rewritten}
     else
       {:error, reason} when is_atom(reason) -> {:error, {:workspace_directory_not_moved, reason}}
       {:error, _} = error -> error
     end
   end
 
-  # The rows that name a file under the old directory: where it is, and the address
-  # derived from where it is.
-  defp rewrite_paths(txn, old, new) do
-    with {:ok, rows} <-
+  # The rows of this tenant and workspace that name a file under the old directory: where it
+  # is, and the address derived from where it is. A path is read as the file system reads it,
+  # so a relative one is found, and it is written back the way it was written.
+  defp rewrite_paths(txn, move, tenant, workspace) do
+    with {:ok, contexts} <-
            Store.txn_query(
              txn,
-             "SELECT id, path FROM contexts WHERE substr(path, 1, length(?1) + 1) = ?1 || '/'",
-             [old]
+             """
+             SELECT id, path, uri FROM contexts
+              WHERE tenant_id = ?1 AND workspace_id = ?2 AND path IS NOT NULL AND path != ''
+             """,
+             [tenant, workspace]
            ),
-         :ok <- each_ok(rows, fn [id, path] -> move_context(txn, id, path, old, new) end),
-         {:ok, _} <-
+         moved = relocated_contexts(contexts, move),
+         :ok <- each_ok(moved, &move_context(txn, tenant, workspace, &1)),
+         {:ok, assets} <-
+           Store.txn_query(
+             txn,
+             """
+             SELECT id, storage_path FROM assets
+              WHERE tenant_id = ?1 AND workspace_id = ?2 AND storage_path NOT LIKE 's3://%'
+             """,
+             [tenant, workspace]
+           ),
+         relocated = relocated_assets(assets, move),
+         :ok <- each_ok(relocated, &move_asset(txn, tenant, workspace, &1)),
+         addresses = for(%{uri: uri, new_uri: new_uri} = c <- moved, uri != new_uri, do: c),
+         :ok <- move_addresses(txn, tenant, workspace, addresses) do
+      {:ok, %{contexts: length(moved), assets: length(relocated), addresses: length(addresses)}}
+    end
+  end
+
+  defp relocated_contexts(rows, move) do
+    for [id, path, uri] <- rows, {new_path, stored} <- [relocate(path, move)] do
+      # An address that is not the one the old path gives was not made from the path, and
+      # stays what it is.
+      new_uri = if uri == URI.from_path(path), do: URI.from_path(stored), else: uri
+      %{id: id, new_path: new_path, uri: uri, new_uri: new_uri}
+    end
+  end
+
+  defp relocated_assets(rows, move) do
+    for [id, path] <- rows, {new_path, _stored} <- [relocate(path, move)] do
+      %{id: id, new_path: new_path}
+    end
+  end
+
+  # Where a file under the old directory goes: in the form the row has (absolute, or the
+  # configured root's), and in the form addresses are made from. Nil for any other path.
+  defp relocate(path, %{old: old, new: new, stored_new: stored_new}) when is_binary(path) do
+    expanded = if String.contains?(path, <<0>>), do: nil, else: Path.expand(path)
+
+    if expanded && String.starts_with?(expanded, old <> "/") do
+      rest = Path.relative_to(expanded, old)
+      stored = Path.join(stored_new, rest)
+      {if(Path.type(path) == :absolute, do: Path.join(new, rest), else: stored), stored}
+    end
+  end
+
+  defp relocate(_path, _move), do: nil
+
+  defp move_context(txn, tenant, workspace, %{id: id, new_path: path, new_uri: uri}) do
+    case Store.txn_execute(
+           txn,
+           """
+           UPDATE contexts SET path = ?2, uri = ?3
+            WHERE id = ?1 AND tenant_id = ?4 AND workspace_id = ?5
+           """,
+           [id, path, uri, tenant, workspace]
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp move_asset(txn, tenant, workspace, %{id: id, new_path: path}) do
+    case Store.txn_execute(
+           txn,
+           """
+           UPDATE assets SET storage_path = ?2
+            WHERE id = ?1 AND tenant_id = ?3 AND workspace_id = ?4
+           """,
+           [id, path, tenant, workspace]
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  # What names an address that moved follows it: the access rules, the memories' citations,
+  # the open loops' sources and the events' targets. A rule left on the old address would
+  # leave the file with none, and a file with none is open (`acl_absent: :allow`).
+  defp move_addresses(_txn, _tenant, _workspace, []), do: :ok
+
+  defp move_addresses(txn, tenant, workspace, moved) do
+    with {:ok, held} <- held_addresses(txn, tenant, moved) do
+      moved
+      |> Enum.chunk_every(@address_chunk)
+      |> each_ok(&move_address_chunk(txn, tenant, workspace, &1, held))
+    end
+  end
+
+  # By now the contexts hold their new addresses, so an old address that a context still
+  # holds is shared with it. One look at the table per few thousand addresses.
+  defp held_addresses(txn, tenant, moved) do
+    moved
+    |> Enum.map(& &1.uri)
+    |> Enum.uniq()
+    |> Enum.chunk_every(2_000)
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn olds, {:ok, held} ->
+      case Store.txn_query(
+             txn,
+             """
+             SELECT DISTINCT uri FROM contexts
+              WHERE tenant_id = ?1 AND uri IN (SELECT value FROM json_each(?2))
+             """,
+             [tenant, Jason.encode!(olds)]
+           ) do
+        {:ok, rows} -> {:cont, {:ok, rows |> List.flatten() |> MapSet.new() |> MapSet.union(held)}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp move_address_chunk(txn, tenant, workspace, chunk, held) do
+    {shared, own} = Enum.split_with(chunk, &MapSet.member?(held, &1.uri))
+
+    with :ok <- each_ok(shared, &share_address(txn, tenant, workspace, &1)),
+         :ok <- each_ok(own, &move_acls(txn, tenant, &1)) do
+      repoint(txn, tenant, workspace, own)
+    end
+  end
+
+  # The old address is still another context's: it keeps its rules, the moved context gets
+  # a copy, and what names the context by id moves (the rest keeps resolving to the other).
+  defp share_address(txn, tenant, workspace, %{id: id, uri: old, new_uri: new}) do
+    case References.move(txn, tenant, workspace, id, old, new) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp move_acls(txn, tenant, %{uri: old, new_uri: new}) do
+    with {:ok, _} <-
            Store.txn_execute(
              txn,
              """
-             UPDATE assets SET storage_path = ?2 || substr(storage_path, length(?1) + 1)
-              WHERE substr(storage_path, 1, length(?1) + 1) = ?1 || '/'
+             INSERT INTO acls (tenant_id, resource_uri, principal_id, group_id, permission, granted_at)
+             SELECT a.tenant_id, ?1, a.principal_id, a.group_id, a.permission, a.granted_at
+               FROM acls a
+              WHERE a.tenant_id = ?2 AND a.resource_uri = ?3
+                AND NOT EXISTS (
+                  SELECT 1 FROM acls b
+                   WHERE b.tenant_id = a.tenant_id AND b.resource_uri = ?1
+                     AND b.permission = a.permission
+                     AND COALESCE(b.principal_id, '') = COALESCE(a.principal_id, '')
+                     AND COALESCE(b.group_id, '') = COALESCE(a.group_id, ''))
              """,
-             [old, new]
+             [new, tenant, old]
+           ),
+         {:ok, _} <-
+           Store.txn_execute(
+             txn,
+             "DELETE FROM acls WHERE tenant_id = ?1 AND resource_uri = ?2",
+             [tenant, old]
            ) do
       :ok
     end
   end
 
-  defp move_context(txn, id, path, old, new) do
-    moved = new <> String.replace_prefix(path, old, "")
+  # Records that name an address no other context holds. The rows are found with one look at
+  # the table for the whole chunk (these columns have no index, so one scan per address would
+  # be a scan per file moved) and each is then updated by its key.
+  defp repoint(_txn, _tenant, _workspace, []), do: :ok
 
-    case Store.txn_execute(txn, "UPDATE contexts SET path = ?2, uri = ?3 WHERE id = ?1", [
-           id,
-           moved,
-           URI.from_path(moved)
-         ]) do
-      {:ok, _} -> :ok
-      {:error, _} = error -> error
+  defp repoint(txn, tenant, workspace, own) do
+    new_for = Map.new(own, &{&1.uri, &1.new_uri})
+    olds = Jason.encode!(Map.keys(new_for))
+
+    with :ok <- repoint_column(txn, "memories", "citation_uri", {tenant, workspace}, olds, new_for),
+         :ok <- repoint_column(txn, "open_loops", "source_uri", {tenant, workspace}, olds, new_for),
+         :ok <-
+           repoint_column(txn, "open_loops", "close_source_uri", {tenant, workspace}, olds, new_for) do
+      # Events carry no workspace of their own to rely on: the tenant's, as the repair of
+      # shared addresses counts them.
+      repoint_column(txn, "events", "target_uri", {tenant, nil}, olds, new_for)
     end
   end
+
+  defp repoint_column(txn, table, column, {tenant, workspace}, olds, new_for) do
+    {scope, params} =
+      if workspace,
+        do:
+          {"tenant_id = ?1 AND workspace_id = ?2 AND #{column} IN #{set(3)}",
+           [tenant, workspace, olds]},
+        else: {"tenant_id = ?1 AND #{column} IN #{set(2)}", [tenant, olds]}
+
+    with {:ok, rows} <-
+           Store.txn_query(txn, "SELECT id, #{column} FROM #{table} WHERE #{scope}", params) do
+      each_ok(rows, fn [id, old] ->
+        case Store.txn_execute(txn, "UPDATE #{table} SET #{column} = ?2 WHERE id = ?1", [
+               id,
+               Map.fetch!(new_for, old)
+             ]) do
+          {:ok, _} -> :ok
+          {:error, _} = error -> error
+        end
+      end)
+    end
+  end
+
+  defp set(n), do: "(SELECT value FROM json_each(?#{n}))"
 
   defp each_ok(list, fun) do
     Enum.reduce_while(list, :ok, fn item, :ok ->
@@ -597,14 +812,122 @@ defmodule OptimalEngine.DataSteward do
     end
   end
 
-  # A transaction that did not commit after the directory had moved: the rows are as
-  # they were, so the directory goes back to where they say it is.
-  defp undo_move_if_not_committed({:error, _} = error, %{old: old, new: new}) do
+  # ── a crash between the move and the commit ────────────────────────────────
+
+  # Written before the directory moves, removed once the transaction is settled. The
+  # directory and the rows cannot change together, so a crash in between would leave
+  # the directory under an id the rows do not have; the marker says what to put back.
+  defp note_intent(move, %{tenant: tenant, source: source, target: target}) do
+    marker = marker_path(move)
+    tmp = marker <> ".tmp"
+
+    body =
+      Jason.encode!(%{
+        tenant_id: tenant,
+        source: source,
+        target: target,
+        started_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      })
+
+    with :ok <- File.mkdir_p(Path.dirname(marker)),
+         :ok <- File.write(tmp, body),
+         :ok <- File.rename(tmp, marker) do
+      :ok
+    end
+  end
+
+  defp clear_intent(nil), do: :ok
+  defp clear_intent(move), do: File.rm(marker_path(move))
+
+  defp marker_path(%{root: root, old: old, new: new}) do
+    name = Base.url_encode64(:crypto.hash(:sha256, [old, 0, new]), padding: false)
+    Path.join([root, @rename_marker_dir, name <> ".json"])
+  end
+
+  # The transaction is settled. When it did not commit after the directory moved, the rows
+  # are as they were, so the directory goes back to where they say it is.
+  defp settle_move({:error, _} = error, %{old: old, new: new} = move) do
     if File.dir?(new) and not File.exists?(old), do: File.rename(new, old)
+    clear_intent(move)
     error
   end
 
-  defp undo_move_if_not_committed(result, _move), do: result
+  defp settle_move(result, move) do
+    clear_intent(move)
+    result
+  end
+
+  @doc """
+  Puts back the directory of a rename that did not commit. A rename notes what it is
+  about to do under `<root>/.optimal-rename` before it moves a directory and removes the
+  note when the transaction has committed (or the directory is back), so a note that is
+  still there means the process stopped in between. For each note: when the target
+  workspace exists the rename committed and the note goes; when it does not and the
+  directory is under the target's id, it is moved back to the source's; when it is where
+  the rows say, the note goes. Anything else (both directories exist) is left for the
+  operator and reported. Returns what was done for each note.
+  """
+  @spec recover_interrupted_renames() :: {:ok, [map()]} | {:error, term()}
+  def recover_interrupted_renames do
+    root = Path.expand(Application.get_env(:optimal_engine, :root_path, File.cwd!()))
+    dir = Path.join(root, @rename_marker_dir)
+
+    case File.ls(dir) do
+      {:ok, names} ->
+        {:ok,
+         for name <- Enum.sort(names), String.ends_with?(name, ".json") do
+           recover_one(root, Path.join(dir, name))
+         end}
+
+      {:error, :enoent} ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, {:rename_notes_unreadable, reason}}
+    end
+  end
+
+  defp recover_one(root, marker) do
+    with {:ok, body} <- File.read(marker),
+         {:ok, %{"tenant_id" => tenant, "source" => source, "target" => target}}
+         when is_binary(tenant) and is_binary(source) and is_binary(target) <- Jason.decode(body),
+         :ok <- WorkspaceBundle.movable(source),
+         :ok <- WorkspaceBundle.movable(target) do
+      # The directories are the ones the ids name, never paths read from the note.
+      old = Path.expand(Filesystem.path(root, source))
+      new = Path.expand(Filesystem.path(root, target))
+      action = recovery_action(tenant, target, old, new)
+      if action != :needs_attention, do: File.rm(marker)
+      %{source: source, target: target, action: action}
+    else
+      _unreadable -> %{source: nil, target: nil, action: :needs_attention}
+    end
+  end
+
+  defp recovery_action(tenant, target, old, new) do
+    case Store.raw_query("SELECT 1 FROM workspaces WHERE tenant_id = ?1 AND id = ?2", [
+           tenant,
+           target
+         ]) do
+      {:ok, [_ | _]} ->
+        :committed
+
+      {:ok, []} ->
+        cond do
+          File.dir?(new) and not File.exists?(old) ->
+            if File.rename(new, old) == :ok, do: :moved_back, else: :needs_attention
+
+          File.dir?(old) and not File.exists?(new) ->
+            :nothing_moved
+
+          true ->
+            :needs_attention
+        end
+
+      {:error, _} ->
+        :needs_attention
+    end
+  end
 
   defp rename_in(txn, workspace, tables, evidence_key, tenant, source, target, actor_id) do
     temporary_slug =
