@@ -24,14 +24,14 @@ defmodule OptimalEngine.Connectors.Adapters.Dropbox do
     credential_keys: [:refresh_token, :app_key, :app_secret],
     access_token: true
 
-  alias OptimalEngine.Connectors.{AccessToken, HTTP}
+  alias OptimalEngine.Connectors.{AccessToken, TokenExchange}
 
   @token_url "https://api.dropboxapi.com/oauth2/token"
   @content_url "https://api.dropboxapi.com/2"
 
   @impl true
   def sync(state, cursor) do
-    AccessToken.session(state, &refresh_access_token/1, fn token ->
+    session(state, &refresh_access_token/1, fn token ->
       case cursor do
         nil -> full_sync(state, token)
         dbx_cursor -> incremental_sync(dbx_cursor, token)
@@ -57,30 +57,12 @@ defmodule OptimalEngine.Connectors.Adapters.Dropbox do
   # ---- private ----------------------------------------------------------------
 
   defp refresh_access_token(state) do
-    body =
-      "grant_type=refresh_token" <>
-        "&refresh_token=#{pick(state, :refresh_token)}" <>
-        "&client_id=#{pick(state, :app_key)}" <>
-        "&client_secret=#{pick(state, :app_secret)}"
-
-    case HTTP.request(@token_url,
-           method: :post,
-           headers: [{"content-type", "application/x-www-form-urlencoded"}],
-           body: body,
-           parse_json: true
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} ->
-        {:ok, token}
-
-      {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{body: body}} ->
-        {:error, {:token_error, body}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    TokenExchange.exchange(@token_url,
+      grant_type: "refresh_token",
+      refresh_token: pick(state, :refresh_token),
+      client_id: pick(state, :app_key),
+      client_secret: pick(state, :app_secret)
+    )
   end
 
   defp full_sync(state, token) do

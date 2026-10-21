@@ -269,6 +269,7 @@ brokers it may call; with none named, no broker is called:
 
 ```text
 OPTIMAL_CREDENTIAL_BROKER_HOSTS   comma-separated https hosts; api.miosa.ai on MIOSA
+OPTIMAL_CREDENTIAL_BROKER_PATHS   comma-separated path prefixes; default /api/v1/connect/broker/
 CONNECTOR_KEY                     also seals each connector's broker reference
 ```
 

@@ -78,8 +78,24 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
 
         with :ok <- require_keys(flat, unquote(required_keys)),
              :ok <- require_credentials(flat, unquote(credential_keys)) do
-          {:ok, hydrate_state(flat)}
+          {:ok, conceal(hydrate_state(flat))}
         end
+      end
+
+      # An adapter that calls through AccessToken keeps a token given directly
+      # opaque in its state, and opens its token sessions with the keys of its
+      # own grant, so a complete grant is used before a stale access token.
+      if access_token do
+        @doc false
+        def grant_keys, do: unquote(credential_keys)
+
+        defp conceal(state), do: OptimalEngine.Connectors.AccessToken.conceal(state)
+
+        defp session(state, grant, fun) do
+          OptimalEngine.Connectors.AccessToken.session(state, grant, fun, grant_keys: grant_keys())
+        end
+      else
+        defp conceal(state), do: state
       end
 
       # Adapters override to shape the runtime state they want. Default is
@@ -92,7 +108,11 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
       # Adapters with either-or credential schemes (e.g. GitHub pat vs. App,
       # HubSpot token vs. OAuth) declare `credential_keys: []` and override
       # `init/1` to enforce their own credential gate.
-      defoverridable init: 1, hydrate_state: 1
+      if access_token do
+        defoverridable init: 1, hydrate_state: 1, grant_keys: 0
+      else
+        defoverridable init: 1, hydrate_state: 1
+      end
 
       # ── shared helpers ───────────────────────────────────────────────────
 

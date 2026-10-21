@@ -24,17 +24,55 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     credential_keys: [:client_id, :client_secret, :refresh_token],
     access_token: true
 
-  alias OptimalEngine.Connectors.{AccessToken, HTTP}
+  alias OptimalEngine.Connectors.{AccessToken, TokenExchange}
 
   @page_size 200
   @token_url "https://login.salesforce.com/services/oauth2/token"
+  # The token is sent to the connector's instance_url, so it must be Salesforce's.
+  @domains ~w(salesforce.com force.com cloudforce.com salesforce-setup.com)
+
+  @impl true
+  def init(config) do
+    with {:ok, state} <- super(config),
+         :ok <- check_instance_url(pick(state, :instance_url)) do
+      {:ok, state}
+    end
+  end
 
   @impl true
   def sync(state, cursor) do
+    case check_instance_url(pick(state, :instance_url)) do
+      :ok -> pull(state, cursor)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp check_instance_url(url) when is_binary(url) do
+    case {url, URI.parse(url)} do
+      {"https://" <> _rest,
+       %URI{host: host, port: 443, userinfo: nil, query: nil, fragment: nil, path: path}}
+      when is_binary(host) and path in [nil, "", "/"] ->
+        if trusted_host?(host), do: :ok, else: {:error, {:invalid_config, :instance_url}}
+
+      _other ->
+        {:error, {:invalid_config, :instance_url}}
+    end
+  end
+
+  defp check_instance_url(_url), do: {:error, {:invalid_config, :instance_url}}
+
+  defp trusted_host?(host) do
+    host = String.downcase(host, :ascii)
+
+    Regex.match?(~r/\A[a-z0-9.-]+\z/, host) and
+      Enum.any?(@domains, &(host == &1 or String.ends_with?(host, "." <> &1)))
+  end
+
+  defp pull(state, cursor) do
     instance_url = pick(state, :instance_url)
     objects = pick(state, :objects, ["Account"])
 
-    AccessToken.session(state, &get_access_token/1, fn token ->
+    session(state, &get_access_token/1, fn token ->
       since = cursor || default_since()
 
       result =
@@ -92,31 +130,12 @@ defmodule OptimalEngine.Connectors.Adapters.Salesforce do
     client_secret = pick(state, :client_secret)
     refresh_token = pick(state, :refresh_token)
 
-    body =
-      URI.encode_query(%{
-        grant_type: "refresh_token",
-        client_id: client_id,
-        client_secret: client_secret,
-        refresh_token: refresh_token
-      })
-
-    case HTTP.request(@token_url,
-           method: :post,
-           body: body,
-           headers: [{"content-type", "application/x-www-form-urlencoded"}]
-         ) do
-      {:ok, %{status: 200, body: %{"access_token" => token}}} ->
-        {:ok, token}
-
-      {:ok, %{status: 401}} ->
-        {:error, :auth_expired}
-
-      {:ok, %{status: status}} ->
-        {:error, {:http, status}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    TokenExchange.exchange(@token_url,
+      grant_type: "refresh_token",
+      client_id: client_id,
+      client_secret: client_secret,
+      refresh_token: refresh_token
+    )
   end
 
   defp fetch_sobject(instance_url, sobject, since, token) do

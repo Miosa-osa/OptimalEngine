@@ -334,7 +334,9 @@ defmodule OptimalEngine.Connectors.DriveTest do
 
     test "a page with neither token keeps the cursor it was given instead of resetting" do
       stub =
-        ConnectorFixtureStub.install(:drive, body: %{"access_token" => "example-drive-token-x", "changes" => []})
+        ConnectorFixtureStub.install(:drive,
+          body: %{"access_token" => "example-drive-token-x", "changes" => []}
+        )
 
       on_exit(fn -> ConnectorFixtureStub.uninstall(stub) end)
 

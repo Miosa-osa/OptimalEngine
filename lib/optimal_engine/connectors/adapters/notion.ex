@@ -59,7 +59,7 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
 
   @impl true
   def sync(state, cursor) do
-    AccessToken.session(state, &integration_token/1, fn token ->
+    session(state, &integration_token/1, fn token ->
       with {:ok, databases} <- database_ids(state, token),
            {:ok, signals, marks} <- sync_databases(databases, parse_cursor(cursor), token) do
         {:ok, %{signals: signals, cursor: encode_cursor(marks)}}

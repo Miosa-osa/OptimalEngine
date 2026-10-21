@@ -26,6 +26,7 @@ defmodule OptimalEngine.Connectors.Runner do
   """
 
   alias OptimalEngine.Connectors.{
+    AccessToken,
     AssetIngest,
     Cadence,
     Credential,
@@ -196,9 +197,11 @@ defmodule OptimalEngine.Connectors.Runner do
 
   # ─── sync loop with retry ───────────────────────────────────────────────
 
+  # The attempts share one run's broker tokens: a token renewed on the first
+  # attempt, and the re-fetch it cost, are still there for the second.
   defp do_sync_with_retries(row, mod, state, opts) do
     max_retries = Keyword.get(opts, :max_retries, @default_max_retries)
-    do_sync_attempt(row, mod, state, 0, max_retries)
+    AccessToken.run(fn -> do_sync_attempt(row, mod, state, 0, max_retries) end)
   end
 
   defp do_sync_attempt(row, mod, state, attempt, max_retries) do
@@ -702,8 +705,8 @@ defmodule OptimalEngine.Connectors.Runner do
   @spec upsert_row(map()) :: {:ok, String.t()} | {:error, term()}
   def upsert_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
-    with {:ok, sanitized} <- validate_and_seal(config),
-         {:ok, workspace_id} <- row_workspace(id, attrs) do
+    with {:ok, workspace_id} <- row_workspace(id, attrs),
+         {:ok, sanitized} <- validate_and_seal(id, workspace_id, config) do
       write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :update)
     end
   end
@@ -716,17 +719,30 @@ defmodule OptimalEngine.Connectors.Runner do
   @spec provision_row(map()) :: {:ok, :created | :exists} | {:error, term()}
   def provision_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
-    with {:ok, sanitized} <- validate_and_seal(config),
-         {:ok, workspace_id} <- row_workspace(id, attrs) do
+    with {:ok, workspace_id} <- row_workspace(id, attrs),
+         {:ok, sanitized} <- validate_and_seal(id, workspace_id, config) do
       write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :keep)
     end
   end
 
-  defp validate_and_seal(config) do
+  # The broker reference is sealed for the connector and workspace the row ends
+  # up in, so a connector moved to another workspace is sealed again for it.
+  defp validate_and_seal(id, workspace_id, config) do
     with :ok <- Routing.validate_config(config),
          :ok <- Cadence.validate(config),
          {:ok, config} <- encrypt_credentials(config) do
-      CredentialSource.seal_reference(config)
+      CredentialSource.seal_reference(config, %{
+        id: id,
+        workspace_id: workspace_id,
+        previous_workspace_id: stored_workspace(id)
+      })
+    end
+  end
+
+  defp stored_workspace(id) do
+    case Store.raw_query("SELECT workspace_id FROM connectors WHERE id = ?1", [id]) do
+      {:ok, [[workspace_id]]} when is_binary(workspace_id) -> workspace_id
+      _new -> nil
     end
   end
 

@@ -117,6 +117,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     try do
       with :ok <- unpack(path, staging),
            {:ok, manifest} <- read_manifest(staging),
+           :ok <- permitted(manifest),
            :ok <- verify(manifest, staging),
            {:ok, plan} <- plan(manifest, tenant_id, opts),
            :ok <- compatible(manifest, staging),
@@ -395,6 +396,24 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       _ -> {:error, :manifest_unreadable}
     end
   end
+
+  # A bundle carries a workspace's data, and only that. Anyone can write one
+  # and sign its manifest, so the tables it names are checked against the ones
+  # this Engine exports: never a table it keeps for itself (connectors and their
+  # credentials, jobs, sync state) and never one the manifest invents.
+  defp permitted(%{"tables" => tables}) when is_list(tables) do
+    allowed = workspace_tables()
+
+    refused =
+      for table <- tables, name = table_name(table), name not in allowed, do: name
+
+    if refused == [], do: :ok, else: {:error, {:table_not_allowed, Enum.sort(refused)}}
+  end
+
+  defp permitted(_manifest), do: {:error, :manifest_unreadable}
+
+  defp table_name(%{"name" => name}) when is_binary(name), do: name
+  defp table_name(_table), do: "(unnamed)"
 
   defp verify(manifest, staging) do
     claimed = manifest["bundle_sha256"]

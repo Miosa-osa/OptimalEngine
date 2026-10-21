@@ -120,10 +120,14 @@ defmodule OptimalEngine.Connectors.BrokeredTokenTest do
   end
 
   defp incremental(:drive),
-    do: {"page-token-1", fn _url, _opts -> {200, %{"changes" => [], "newStartPageToken" => "page-token-2"}} end}
+    do:
+      {"page-token-1",
+       fn _url, _opts -> {200, %{"changes" => [], "newStartPageToken" => "page-token-2"}} end}
 
   defp incremental(:notion),
-    do: {"2026-10-01T00:00:00.000Z", fn _url, _opts -> {200, %{"results" => [], "has_more" => false}} end}
+    do:
+      {"2026-10-01T00:00:00.000Z",
+       fn _url, _opts -> {200, %{"results" => [], "has_more" => false}} end}
 
   defp incremental(:slack) do
     {Jason.encode!(%{"C0EXAMPLE2" => %{"oldest" => "1790000000.000001"}}),

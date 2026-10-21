@@ -103,7 +103,7 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
 
   @impl true
   def sync(state, cursor) do
-    AccessToken.session(state, &refresh_access_token/1, fn token ->
+    session(state, &refresh_access_token/1, fn token ->
       ctx = %{
         token: token,
         scope: scope(state),
@@ -182,7 +182,7 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
       "client_secret" => pick(state, :client_secret)
     }
 
-    case HTTP.post_json(@token_url, body) do
+    case HTTP.post_json(@token_url, body, follow_redirects: false, verify_tls: true) do
       {:ok, %{status: 200, body: %{"access_token" => token}}} ->
         {:ok, token}
 
@@ -448,7 +448,11 @@ defmodule OptimalEngine.Connectors.Adapters.Drive do
 
   # The body is asked for raw: a JSON file would otherwise be decoded into a map.
   defp fetch_text(url, file, ctx) do
-    case AccessToken.get_json(ctx.token, url, parse_json: false, timeout: @text_timeout_ms) do
+    case AccessToken.get_json(ctx.token, url,
+           parse_json: false,
+           timeout: @text_timeout_ms,
+           follow_same_origin: 2
+         ) do
       {:ok, %{status: 200, body: body}} when is_binary(body) ->
         {:ok, body}
 

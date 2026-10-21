@@ -298,7 +298,11 @@ defmodule OptimalEngine.Connectors.AccessTokenTest do
       stub = BrokerStub.install(nil, api: api)
       on_exit(fn -> BrokerStub.uninstall(stub) end)
 
-      AccessToken.session(%{"access_token" => "direct-token"}, &no_grant/1, &AccessToken.get_json(&1, @api))
+      AccessToken.session(
+        %{"access_token" => "direct-token"},
+        &no_grant/1,
+        &AccessToken.get_json(&1, @api)
+      )
 
       assert_received {:opts, opts}
       assert opts[:follow_redirects] == false
@@ -381,7 +385,11 @@ defmodule OptimalEngine.Connectors.AccessTokenTest do
       stub = BrokerStub.install(nil, api: api)
       on_exit(fn -> BrokerStub.uninstall(stub) end)
 
-      AccessToken.session(%{"access_token" => "direct-token"}, &no_grant/1, &AccessToken.get_json(&1, @api))
+      AccessToken.session(
+        %{"access_token" => "direct-token"},
+        &no_grant/1,
+        &AccessToken.get_json(&1, @api)
+      )
 
       assert_received {:opts, opts}
       assert opts[:verify_tls] == true
@@ -408,7 +416,9 @@ defmodule OptimalEngine.Connectors.AccessTokenTest do
         "client_secret" => "example-secret"
       }
 
-      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api), grant_keys: @grant_keys)
+      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api),
+        grant_keys: @grant_keys
+      )
 
       refute_received :granted
       assert BrokerStub.bearers(stub) == ["issued-1"]
@@ -424,7 +434,9 @@ defmodule OptimalEngine.Connectors.AccessTokenTest do
         "client_secret" => "example-secret"
       }
 
-      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api), grant_keys: @grant_keys)
+      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api),
+        grant_keys: @grant_keys
+      )
 
       assert_received :granted
       assert BrokerStub.bearers(stub) == ["granted-token"]
@@ -436,7 +448,9 @@ defmodule OptimalEngine.Connectors.AccessTokenTest do
 
       state = %{"access_token" => "direct-token", "client_id" => "example-client"}
 
-      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api), grant_keys: @grant_keys)
+      AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api),
+        grant_keys: @grant_keys
+      )
 
       refute_received :granted
       assert BrokerStub.bearers(stub) == ["direct-token"]
@@ -446,7 +460,11 @@ defmodule OptimalEngine.Connectors.AccessTokenTest do
       stub = BrokerStub.install(nil, api: &ok_api/2)
       on_exit(fn -> BrokerStub.uninstall(stub) end)
 
-      state = %{"access_token" => "direct-token", "client_id" => "example-client", "client_secret" => "s"}
+      state = %{
+        "access_token" => "direct-token",
+        "client_id" => "example-client",
+        "client_secret" => "s"
+      }
 
       AccessToken.session(state, granting(self()), &AccessToken.get_json(&1, @api))
 

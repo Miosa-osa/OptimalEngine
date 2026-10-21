@@ -86,7 +86,9 @@ defmodule OptimalEngine.ScopePortabilityTest do
       |> Map.delete("bundle_sha256")
       |> Map.update!("tables", &(&1 ++ [entry]))
 
-    manifest = Map.put(manifest, "bundle_sha256", OptimalEngine.Authority.CanonicalJSON.hash(manifest))
+    manifest =
+      Map.put(manifest, "bundle_sha256", OptimalEngine.Authority.CanonicalJSON.hash(manifest))
+
     File.write!(Path.join(dir, "manifest.json"), Jason.encode!(manifest, pretty: true))
 
     files =
@@ -793,7 +795,8 @@ defmodule OptimalEngine.ScopePortabilityTest do
         }
       ])
 
-      assert {:error, {:table_not_allowed, ["connectors"]}} = WorkspaceBundle.import(ctx.path, target)
+      assert {:error, {:table_not_allowed, ["connectors"]}} =
+               WorkspaceBundle.import(ctx.path, target)
 
       assert {:ok, [[0]]} =
                Store.raw_query("SELECT COUNT(*) FROM connectors WHERE id = ?1", [connector])
