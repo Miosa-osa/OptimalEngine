@@ -402,9 +402,12 @@ defmodule OptimalEngine.Topology.Portable do
   defp entry_slug(%{"slug" => slug}), do: slug
   defp entry_slug(slug), do: slug
 
-  # An id from the document is used only inside the tenant it names.
+  # An id from the document is used only when it is an id the importing tenant
+  # could have (`Workspace.check_id/2`): inside the tenant it names, with a
+  # suffix that is a slug and not a directory of the Engine root. Any other id
+  # is not used, and the workspace takes the id its slug derives.
   defp entry_id(%{"id" => id}, tenant_id) when is_binary(id) do
-    if match?([^tenant_id, _slug], String.split(id, ":", parts: 2)), do: id
+    if Workspace.check_id(id, tenant_id) == :ok, do: id
   end
 
   defp entry_id(_entry, _tenant_id), do: nil

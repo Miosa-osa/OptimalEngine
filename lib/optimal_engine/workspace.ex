@@ -283,8 +283,10 @@ defmodule OptimalEngine.Workspace do
   singleton default-tenant default-workspace case), and becomes the
   workspace's handle.
   A slug is lowercase letters, digits and dashes (`check_slug/1`).
-  Errors: `:invalid_slug`, `:slug_reserved`, `:slug_taken`, `:external_id_taken`,
-  `:invalid_external_id`.
+  An `:id` may be given (a renamed workspace keeps the id it was created
+  with); it must pass `check_id/2` for the tenant, as a derived id does.
+  Errors: `:invalid_slug`, `:slug_reserved`, `:invalid_workspace_id`,
+  `:slug_taken`, `:external_id_taken`, `:invalid_external_id`.
   """
   @spec create(map()) :: {:ok, t()} | {:error, term()}
   def create(%{slug: slug, name: name} = attrs) when is_binary(slug) and is_binary(name) do
@@ -295,6 +297,7 @@ defmodule OptimalEngine.Workspace do
     id = Map.get(attrs, :id) || derive_id(tenant_id, slug)
 
     with :ok <- check_slug(slug),
+         :ok <- check_id(id, tenant_id),
          {:ok, external_id} <- requested_external_id(attrs, metadata),
          {:ok, organization} <- Organization.get(organization_id),
          true <- organization.tenant_id == tenant_id || {:error, :organization_tenant_mismatch},
@@ -432,6 +435,35 @@ defmodule OptimalEngine.Workspace do
       true -> :ok
     end
   end
+
+  @doc """
+  Checks a workspace id for a tenant: `default` for the default tenant, or
+  `<tenant_id>:<suffix>` where the suffix passes `check_slug/1`
+  (`{:error, :invalid_workspace_id}` otherwise).
+
+  The id decides the directory the workspace owns (`Filesystem.path/2`), so an
+  id outside the tenant's namespace (`default:foo` for another tenant, a bare
+  name), one with a suffix that is not a slug (`..`, `a/b`), one that names a
+  directory of the Engine root (`default:tenants`) and the one that maps to the
+  root itself (`default:default`) are all refused: each would write into files
+  that are not the workspace's. A tenant id that holds a colon names no
+  prefix, so it has no valid id.
+  """
+  @spec check_id(term(), String.t()) :: :ok | {:error, :invalid_workspace_id}
+  def check_id(id, tenant_id) when is_binary(id) and is_binary(tenant_id) do
+    default = Tenant.default_id()
+
+    case String.split(id, ":", parts: 2) do
+      [@default_id] when tenant_id == default -> :ok
+      [@default_id, @default_id] when tenant_id == default -> {:error, :invalid_workspace_id}
+      [^tenant_id, suffix] -> if check_slug(suffix) == :ok, do: :ok, else: invalid_id()
+      _other -> invalid_id()
+    end
+  end
+
+  def check_id(_id, _tenant_id), do: invalid_id()
+
+  defp invalid_id, do: {:error, :invalid_workspace_id}
 
   defp next_external_id(current, nil), do: {:ok, current.external_id}
 
