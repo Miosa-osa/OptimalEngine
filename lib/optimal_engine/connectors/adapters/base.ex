@@ -10,7 +10,9 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
   `:credential_keys`, and `access_token: true` for an adapter that calls its
   API through `OptimalEngine.Connectors.AccessToken`: an `access_token`
   credential, given directly or issued by the credential broker, then stands
-  in for its `:credential_keys`.
+  in for its `:credential_keys`. `:token_key` names the key the adapter's
+  single secret lives under (`:api_key`, `:pat`, `:integration_token`), which
+  is where the credential broker puts the secret it issues for the adapter.
 
   An adapter then writes only the parts that distinguish it:
 
@@ -32,6 +34,7 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
     required_keys = Keyword.get(opts, :required_keys, [])
     credential_keys = Keyword.get(opts, :credential_keys, [])
     access_token = Keyword.get(opts, :access_token, false)
+    token_key = Keyword.get(opts, :token_key)
 
     quote bind_quoted: [
             kind: kind,
@@ -39,7 +42,8 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
             auth_scheme: auth_scheme,
             required_keys: required_keys,
             credential_keys: credential_keys,
-            access_token: access_token
+            access_token: access_token,
+            token_key: token_key
           ] do
       @behaviour OptimalEngine.Connectors.Behaviour
 
@@ -57,6 +61,16 @@ defmodule OptimalEngine.Connectors.Adapters.Base do
 
       @impl true
       def required_config_keys, do: unquote(required_keys)
+
+      # What the credential broker needs to know of this adapter: the key its
+      # single secret lives under (`token_key`, nil when it has none), and
+      # whether it calls through `AccessToken`, which takes a brokered access
+      # token under `access_token` and renews it.
+      @doc false
+      def broker_token_key, do: unquote(token_key)
+
+      @doc false
+      def broker_access_token?, do: unquote(access_token)
 
       @impl true
       def init(config) do

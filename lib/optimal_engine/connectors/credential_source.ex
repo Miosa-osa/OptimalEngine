@@ -19,8 +19,8 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   All of them live in the connector's `config` JSON:
 
       "credential_source": "broker"
-      "broker_url":        "https://connect.example.com/api/credentials"
-      "broker_reference":  "conn_0000000000"   (the broker's own reference to the connection)
+      "broker_url":        "https://api.miosa.ai/api/v1/connect/broker/credentials"
+      "broker_reference":  "conn_0000000000.<hmac>"   (the broker's own reference to the connection)
       "broker_scopes":     ["mail.read"]        (optional)
       "broker_timeout_ms": 5000                 (optional, at most 30000)
 
@@ -41,12 +41,17 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   The Engine `POST`s to `broker_url` with a JSON body:
 
       {
-        "reference":    "conn_0000000000",
-        "connector":    {"id": "pull:default:gmail", "kind": "gmail"},
+        "reference":    "conn_0000000000.<hmac>",
+        "connector":    {"id": "miosa:conn_0000000000:gmail", "kind": "gmail"},
         "tenant_id":    "default",
-        "workspace_id": "default",
+        "workspace_id": "default:ops",
         "scopes":       ["mail.read"]
       }
+
+  `connector.id` is the connector's own id and `workspace_id` is the
+  connector's own workspace, whatever workspaces its signals are routed to:
+  a broker that signs the workspace into the reference answers a different
+  one with a `401`.
 
   `reference` is the configured `broker_reference`, sent verbatim and never
   parsed (MIOSA Connect signs it as `<connection_id>.<hmac>`, and that
@@ -66,12 +71,31 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   credential: the adapter calls its API through that module, which asks the
   broker again within 60 s of `expires_at` and once after a `401`.
 
-  Any other connection is answered with its credential map:
+  `expires_at` may also sit beside `credentials`. A stored API key is
+  answered the same way:
 
       {"credentials": {"api_key": "..."}, "expires_at": "2026-10-18T12:05:00Z"}
 
-  which is merged into the config exactly as if it had been decrypted from
-  the Engine's store, so adapters never learn which source they ran under.
+  and the credential map is merged into the config exactly as if it had been
+  decrypted from the Engine's store, so adapters never learn which source
+  they ran under.
+
+  ## Where the broker's secret lands
+
+  Each adapter names the key its single secret lives under (`token_key:` in
+  `OptimalEngine.Connectors.Adapters.Base`, read from the adapter the
+  `:adapter` of the scope names), and the broker's secret is put there:
+
+    * an access token, for an adapter that calls through `AccessToken` (Gmail,
+      Drive, Notion, Slack, Dropbox, HubSpot, OneDrive, Salesforce, Teams,
+      Zoom), stays under `access_token` as an issued token that can be renewed
+    * an access token, for an adapter that does not (Stripe, Fathom, Linear,
+      JotForm, beehiiv: `api_key`; GitHub: `pat`; GoHighLevel, Jira,
+      Confluence: `api_token`), becomes that key, as a plain string
+    * an API key becomes the adapter's key when it is not `api_key` (Notion:
+      `integration_token`, Slack: `bot_token`, GitHub: `pat`, ...)
+
+  A key the broker names itself is passed on as it is, and wins.
 
   ## Errors
 
@@ -119,7 +143,8 @@ defmodule OptimalEngine.Connectors.CredentialSource do
           optional(:id) => String.t(),
           optional(:kind) => String.t(),
           optional(:tenant_id) => String.t(),
-          optional(:workspace_id) => String.t()
+          optional(:workspace_id) => String.t(),
+          optional(:adapter) => module()
         }
 
   @doc "The credential source names."
@@ -268,7 +293,8 @@ defmodule OptimalEngine.Connectors.CredentialSource do
              reference: reference,
              scopes: scope_scopes(config),
              timeout_ms: timeout_ms(config),
-             scope: scope
+             scope: scope,
+             adapter: adapter_traits(scope)
            }}
         end
       end
@@ -318,10 +344,18 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   end
 
   # The broker answers with the credential map itself or nests it under
-  # "credentials". An access token in it becomes an issued `AccessToken` that
-  # can ask the broker again. Anything else, including an empty map, is a
-  # refusal: an adapter initialised with no credentials would report a
-  # confusing `{:missing_credentials, ...}` instead of naming the broker.
+  # "credentials". Anything else, including an empty map, is a refusal: an
+  # adapter initialised with no credentials would report a confusing
+  # `{:missing_credentials, ...}` instead of naming the broker.
+  #
+  # What the adapter gets depends on how it authenticates (`adapter_traits/1`):
+  #
+  #   * an access token, for an adapter that calls through `AccessToken`, is
+  #     issued as an `AccessToken` under `access_token`, which can ask the
+  #     broker again
+  #   * an access token, for any other adapter, goes under the key its single
+  #     secret lives under (`pat`, `api_key`, ...), as a plain string
+  #   * an API key goes under that same key when the adapter's is not `api_key`
   defp credentials(body, broker) when is_map(body) do
     map =
       case value(body, "credentials") || value(body, "data") do
@@ -330,12 +364,11 @@ defmodule OptimalEngine.Connectors.CredentialSource do
       end
 
     expires_at = expires_at(map, body)
-    rest = Map.drop(map, ["access_token" | @token_terms])
+    rest = map |> Map.drop(["access_token" | @token_terms]) |> native_api_key(broker.adapter)
 
     case Map.get(map, "access_token") do
       token when is_binary(token) and token != "" ->
-        issued = AccessToken.issued(token, expires_at, fn -> renew(broker) end)
-        {:ok, Map.put(rest, "access_token", issued)}
+        {:ok, with_access_token(rest, token, expires_at, broker)}
 
       nil when map_size(rest) > 0 ->
         {:ok, rest}
@@ -346,6 +379,45 @@ defmodule OptimalEngine.Connectors.CredentialSource do
   end
 
   defp credentials(_body, _broker), do: {:error, :broker_refused}
+
+  defp with_access_token(rest, token, expires_at, %{adapter: %{access_token?: true}} = broker) do
+    issued = AccessToken.issued(token, expires_at, fn -> renew(broker) end)
+    Map.put(rest, "access_token", issued)
+  end
+
+  defp with_access_token(rest, token, _expires_at, %{adapter: %{token_key: key}})
+       when is_binary(key),
+       do: Map.put_new(rest, key, token)
+
+  defp with_access_token(rest, token, _expires_at, _broker),
+    do: Map.put(rest, "access_token", token)
+
+  defp native_api_key(credentials, %{token_key: key}) when is_binary(key) and key != "api_key" do
+    case Map.pop(credentials, "api_key") do
+      {api_key, rest} when is_binary(api_key) and api_key != "" -> Map.put_new(rest, key, api_key)
+      _none -> credentials
+    end
+  end
+
+  defp native_api_key(credentials, _adapter), do: credentials
+
+  # What the Engine knows of the adapter a connector runs: the key its single
+  # secret lives under, and whether it calls through `AccessToken`. Without an
+  # adapter in the scope, every broker is taken to be answering an OAuth one.
+  defp adapter_traits(scope) do
+    mod = value(scope, :adapter)
+
+    if is_atom(mod) and mod != nil and Code.ensure_loaded?(mod) and
+         function_exported?(mod, :broker_token_key, 0) and
+         function_exported?(mod, :broker_access_token?, 0) do
+      %{token_key: key_name(mod.broker_token_key()), access_token?: mod.broker_access_token?()}
+    else
+      %{token_key: nil, access_token?: true}
+    end
+  end
+
+  defp key_name(nil), do: nil
+  defp key_name(key), do: to_string(key)
 
   # A renewal is an access token or nothing: a broker that answers a renewal
   # with something else has refused it.

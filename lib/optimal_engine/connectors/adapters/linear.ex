@@ -17,7 +17,8 @@ defmodule OptimalEngine.Connectors.Adapters.Linear do
     display_name: "Linear",
     auth_scheme: :token,
     required_keys: [:team_ids],
-    credential_keys: [:api_key]
+    credential_keys: [:api_key],
+    token_key: :api_key
 
   alias OptimalEngine.Connectors.HTTP
 

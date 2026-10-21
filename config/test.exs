@@ -43,7 +43,7 @@ config :optimal_engine, :session, llm_summary: false, llm_extraction: false
 config :optimal_engine, :pull_scheduler, enabled: false
 
 # The credential broker the connector tests stand up behind the HTTP mock.
-config :optimal_engine, :credential_broker_hosts, ["connect.example.com"]
+config :optimal_engine, :credential_broker_hosts, ["connect.example.com", "api.miosa.ai"]
 
 config :optimal_engine, :context_refresh_scheduler,
   enabled: false,

@@ -44,7 +44,8 @@ defmodule OptimalEngine.Connectors.Adapters.Notion do
     auth_scheme: :token,
     required_keys: [:workspace_name, :database_ids],
     credential_keys: [:integration_token],
-    access_token: true
+    access_token: true,
+    token_key: :integration_token
 
   alias OptimalEngine.Connectors.{AccessToken, HTTP}
 

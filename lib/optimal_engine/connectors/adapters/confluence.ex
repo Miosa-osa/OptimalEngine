@@ -17,7 +17,8 @@ defmodule OptimalEngine.Connectors.Adapters.Confluence do
     display_name: "Confluence",
     auth_scheme: :basic,
     required_keys: [:site_url, :spaces],
-    credential_keys: [:email, :api_token]
+    credential_keys: [:email, :api_token],
+    token_key: :api_token
 
   alias OptimalEngine.Connectors.HTTP
 

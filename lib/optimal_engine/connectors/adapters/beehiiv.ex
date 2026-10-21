@@ -30,7 +30,8 @@ defmodule OptimalEngine.Connectors.Adapters.Beehiiv do
     display_name: "beehiiv",
     auth_scheme: :token,
     required_keys: [:publication_id],
-    credential_keys: [:api_key]
+    credential_keys: [:api_key],
+    token_key: :api_key
 
   alias OptimalEngine.Connectors.HTTP
 

@@ -23,7 +23,8 @@ defmodule OptimalEngine.Connectors.Adapters.HubSpot do
     display_name: "HubSpot",
     auth_scheme: :oauth2,
     required_keys: [:portal_id, :objects],
-    credential_keys: []
+    credential_keys: [],
+    access_token: true
 
   alias OptimalEngine.Connectors.{AccessToken, HTTP}
 
