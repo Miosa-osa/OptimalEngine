@@ -221,6 +221,7 @@ defmodule OptimalEngine.API.PermissionPlug do
 
   # Replication: a replica key holds "sync"; configuring sync is admin.
   defp sync_scope(_method, ["changes"]), do: "sync"
+  defp sync_scope("GET", ["tables"]), do: "sync"
   defp sync_scope("GET", _route), do: "read"
   defp sync_scope(_method, _route), do: "admin"
 

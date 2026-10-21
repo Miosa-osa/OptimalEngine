@@ -49,9 +49,10 @@ defmodule OptimalEngine.Sync.CaptureExcludedTest do
     assert triggers_on("workspace_handles") == []
   end
 
-  test "a table that is not workspace-scoped but not excluded keeps whatever it has" do
-    # Only the excluded list is swept: a table that merely has no workspace_id
-    # column is not this module's to clean.
-    assert Capture.install("schema_migrations") == {:skipped, :not_workspace_scoped}
+  test "a table that is not replicated is excluded, whether or not it has a workspace_id" do
+    # Only the replicated list is captured: a table that merely has no
+    # workspace_id column is excluded like any other, not left alone.
+    assert Capture.install("schema_migrations") == {:skipped, :excluded}
+    assert Capture.install("workspace_members") == {:skipped, :excluded}
   end
 end

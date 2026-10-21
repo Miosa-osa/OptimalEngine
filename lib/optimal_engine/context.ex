@@ -271,10 +271,10 @@ defmodule OptimalEngine.Context do
       id: p.id,
       path: p.path,
       title: p.title,
-      mode: parse_atom(mode, :linguistic),
+      mode: Signal.known_atom(mode, Signal.valid_modes(), :linguistic),
       genre: genre || "note",
-      type: parse_atom(signal_type, :inform),
-      format: parse_atom(format, :markdown),
+      type: Signal.known_atom(signal_type, Signal.valid_types(), :inform),
+      format: Signal.known_atom(format, Signal.valid_formats(), :markdown),
       structure: structure || "",
       created_at: p.created_at,
       modified_at: p.modified_at,
@@ -378,15 +378,6 @@ defmodule OptimalEngine.Context do
   defp parse_context_type("skill"), do: :skill
   defp parse_context_type("signal"), do: :signal
   defp parse_context_type(_), do: :resource
-
-  defp parse_atom(nil, default), do: default
-  defp parse_atom("", default), do: default
-
-  defp parse_atom(str, _default) when is_binary(str) do
-    String.to_existing_atom(str)
-  rescue
-    ArgumentError -> String.to_atom(str)
-  end
 
   defp parse_json_list(nil), do: []
   defp parse_json_list(""), do: []

@@ -224,11 +224,25 @@ defmodule OptimalEngine.Storage.Assets do
         {:ok, object.body}
       end
     else
-      case File.read(storage_path) do
-        {:ok, bytes} -> {:ok, bytes}
-        {:error, reason} -> {:error, {:asset_unreadable, storage_path, reason}}
+      with :ok <- confine(storage_path) do
+        case File.read(storage_path) do
+          {:ok, bytes} -> {:ok, bytes}
+          {:error, reason} -> {:error, {:asset_unreadable, storage_path, reason}}
+        end
       end
     end
+  end
+
+  # A stored asset path is data, and rows reach the table from a bundle import
+  # as well as from an upload: a local asset is read only from under this
+  # Engine's root, never from wherever the row says.
+  defp confine(storage_path) do
+    root = Path.expand(Application.get_env(:optimal_engine, :root_path, File.cwd!()))
+    path = Path.expand(storage_path)
+
+    if not String.contains?(storage_path, <<0>>) and String.starts_with?(path, root <> "/"),
+      do: :ok,
+      else: {:error, {:asset_outside_root, storage_path}}
   end
 
   @doc """
@@ -252,9 +266,11 @@ defmodule OptimalEngine.Storage.Assets do
         end
       end
     else
-      if File.regular?(storage_path),
-        do: {:ok, storage_path},
-        else: {:error, {:asset_unreadable, storage_path}}
+      with :ok <- confine(storage_path) do
+        if File.regular?(storage_path),
+          do: {:ok, storage_path},
+          else: {:error, {:asset_unreadable, storage_path}}
+      end
     end
   end
 

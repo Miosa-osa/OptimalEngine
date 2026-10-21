@@ -139,10 +139,10 @@ defmodule OptimalEngine.Signal do
       id: id,
       path: path,
       title: title,
-      mode: parse_atom(mode, :linguistic),
+      mode: known_atom(mode, valid_modes(), :linguistic),
       genre: genre,
-      type: parse_atom(type, :inform),
-      format: parse_atom(format, :markdown),
+      type: known_atom(type, valid_types(), :inform),
+      format: known_atom(format, valid_formats(), :markdown),
       structure: structure || "",
       created_at: parse_dt(created_at),
       modified_at: parse_dt(modified_at),
@@ -175,14 +175,16 @@ defmodule OptimalEngine.Signal do
     end
   end
 
-  defp parse_atom(nil, default), do: default
-  defp parse_atom("", default), do: default
+  @doc """
+  A stored name as one of the atoms in `valid`, or `default` when it is none of
+  them. Stored text never becomes an atom otherwise: rows replicate from other
+  Engines, and `String.to_atom/1` on them would let a row mint atoms without limit.
+  """
+  @spec known_atom(term(), [atom()], atom()) :: atom()
+  def known_atom(name, valid, default) when is_binary(name),
+    do: Enum.find(valid, default, &(Atom.to_string(&1) == name))
 
-  defp parse_atom(str, _default) when is_binary(str) do
-    String.to_existing_atom(str)
-  rescue
-    ArgumentError -> String.to_atom(str)
-  end
+  def known_atom(_name, _valid, default), do: default
 
   defp parse_json_list(nil), do: []
   defp parse_json_list(""), do: []

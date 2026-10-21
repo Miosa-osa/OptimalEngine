@@ -43,18 +43,18 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   alias OptimalEngine.Authority.CanonicalJSON
   alias OptimalEngine.Store
+  alias OptimalEngine.Sync.Capture
   alias OptimalEngine.Workspace
   alias OptimalEngine.Workspace.Filesystem
 
   @format "optimal-workspace-bundle"
   @version 1
-  # Engine bookkeeping that names a workspace but is not its data. Connectors
-  # carry credentials sealed with this Engine's CONNECTOR_KEY and pull on this
-  # Engine's schedule, so they and their run log stay here (the target
-  # registers its own); queued jobs would run twice.
-  @excluded ~w(sync_cursors metric_samples workspaces workspace_handles uri_redirects federation_peers
-               sync_capture sync_workspaces sync_peers sync_conflicts sync_mutations
-               connectors connector_runs jobs processor_runs)
+
+  # Engine bookkeeping that names a workspace but is not its data stays on the
+  # source Engine: `Capture.bundle_excluded?/1` says which tables (connectors carry
+  # credentials sealed with this Engine's CONNECTOR_KEY and pull on its
+  # schedule, so the target registers its own; queued jobs would run twice).
+
   # Registry rows every Engine derives for itself under the same id: a target
   # that already holds one keeps it.
   @keep_existing ~w(principals model_call_operations)
@@ -790,8 +790,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       Store.raw_query("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name", [])
 
     for [name, sql] <- rows,
-        name not in @excluded,
-        not String.starts_with?(name, "authority_"),
+        not Capture.bundle_excluded?(name),
         not String.starts_with?(name, "sqlite_"),
         not (is_binary(sql) and String.contains?(sql, "VIRTUAL")),
         not fts_shadow?(name),
