@@ -204,7 +204,7 @@ Connectors (their credentials are sealed with the source Engine's `CONNECTOR_KEY
 | --- | --- |
 | Export, optionally reserving a move | `POST /api/workspaces/:id/bundle {"for_move": true}` returns the bundle name, `bundle_sha256`, and `ledger_sequence` (the mark a seeded replica pulls from) |
 | Download | `GET /api/bundles/:name` |
-| Import on the target | `POST /api/bundles/import {"bundle": "<name>", "mode": "create|merge", "workspace_id"?, "organization_id"?}`, or the raw file with `content-type: application/gzip` |
+| Import on the target | `POST /api/bundles/import {"bundle": "<name>", "mode": "create|merge", "workspace_id"?, "organization_id"?}`, or the raw file with `content-type: application/gzip` (the same options as query parameters), written to disk as it arrives and deleted once unpacked |
 | Finalize on the source | `POST /api/workspaces/:id/finalize-move {"bundle_sha256", "target_url", "target_workspace_id"}` |
 | Resolve a citation | `GET /api/resolve?uri=optimal://<workspace>/...` returns `local` or `moved` with the new location |
 
@@ -215,6 +215,9 @@ The tenant and workspace columns are set on every row, whether or not the bundle
 A member of the workspace must be a principal of the importing tenant (`foreign_principal`).
 A requested `workspace_id` must name the importing tenant (`<tenant>:<slug>`, or a bare slug that gets the prefix), so one tenant cannot take another's names (`workspace_id_not_in_tenant`).
 What a bundle can still do within those tables is add rows to the workspace it creates or merges into, and add principals to the importing tenant: every principals row is written with that tenant, and an id the Engine already has keeps its existing row.
+
+The export seals every change the replication ledger has captured, reads the ledger's high-water mark, and only then reads the rows.
+Everything at or below `ledger_sequence` is therefore in the bundle, and a replica seeded from it pulls only what comes after.
 Import verifies the manifest, every table file, and every file checksum before writing anything.
 Rows are then written in short transactions of 1,000 rows, tables in foreign-key order and the rows of a self-referencing table (memories, nodes) parents first, with foreign keys checked at each commit.
 A large workspace therefore never holds the Engine's single writer long enough to stall other requests or time out.
