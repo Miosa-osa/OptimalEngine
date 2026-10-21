@@ -210,7 +210,7 @@ Every tick (`tick_ms`, one minute by default) it reads the enabled connector row
 - **Config specs only provision.**
   A spec in `config :optimal_engine, :connectors, enabled: [...]` inserts its row once, when the row does not exist.
   An existing row is never changed by a spec, so an operator's workspace, config and enabled state always win.
-  A spec without a workspace is provisioned into the tenant's intake workspace: the Engine's own workspace when it is workspace-scoped, then the configured intake workspace (`corpus_source_workspace`, `default:knowledge-intake` by default), then the legacy `default` workspace, whichever is first active and owned by the tenant.
+  A spec without a workspace is provisioned into the tenant's intake workspace: the Engine's own workspace when it is workspace-scoped, then the tenant's own intake workspace (`<tenant>:knowledge-intake`, which is `default:knowledge-intake` for the default tenant; `corpus_source_workspace` names the intake of the tenant that owns it), then the legacy `default` workspace, whichever is first active and owned by the tenant.
   An archived workspace is skipped; with no active candidate the spec is reported as a failed pull with `no_intake_workspace` and nothing is inserted.
   Deleting a row a spec provisions brings it back on the next tick, so disable it instead.
 - **Cadence.**
