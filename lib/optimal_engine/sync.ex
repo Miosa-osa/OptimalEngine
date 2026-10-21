@@ -1533,9 +1533,11 @@ defmodule OptimalEngine.Sync do
 
   def change_row?(_id, _device, _key), do: false
 
+  @doc false
   # `change_row?/3` as a condition on `sync_mutations`, or on the alias of it a
-  # join names.
-  defp change_row_sql(table \\ nil) do
+  # join names. Every reader of the ledger that takes a row for a change uses it.
+  @spec change_row_sql(String.t() | nil) :: String.t()
+  def change_row_sql(table \\ nil) do
     [key, id, device] =
       for column <- ["idempotency_key", "id", "device_id"],
           do: if(table, do: "#{table}.#{column}", else: column)

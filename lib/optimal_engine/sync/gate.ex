@@ -923,13 +923,15 @@ defmodule OptimalEngine.Sync.Gate do
 
   # What a row carried, as the local ledger last recorded it, for a row that is
   # gone. Its sources are read as they are now; one that is gone too is ignored.
+  # Only changes of the row count: a storage mutation entry that names the row
+  # is none, and could otherwise stand in for its history.
   defp ledger_tokens(gate, table, spec, id) do
     rows =
       query!(
         """
         SELECT payload FROM sync_mutations
         WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = ?3 AND entity_id = ?4
-          AND operation != 'delete'
+          AND operation != 'delete' AND #{OptimalEngine.Sync.change_row_sql()}
         ORDER BY sequence DESC LIMIT 20
         """,
         [gate.tenant_id, gate.workspace_id, table, id]
