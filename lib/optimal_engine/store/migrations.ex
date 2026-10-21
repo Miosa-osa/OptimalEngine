@@ -708,22 +708,29 @@ defmodule OptimalEngine.Store.Migrations do
   end
 
   # A key minted before label and partition grants existed has none, and the
-  # read routes (retrieval, exports, conflicts, the ledger, memory, signal, wiki,
-  # search, grep) show a key only what its grants cover, so after an upgrade it
+  # read routes show a key only what its grants cover, so after an upgrade it
   # reads only rows that carry no label and no partition. This gives each such
   # key the grants a machine key should hold: `allowed_security_labels` of
   # public, internal and confidential, no partition, and a `grants_backfilled`
-  # marker. It only narrows: those keys read everything until the routes follow
-  # grants, and with these they lose restricted rows, custom labels and
-  # partitions; widen a key by editing its grants, as before.
+  # marker.
+  #
+  # It grants, and it does not only restrict. Where the previous release
+  # already followed grants (the exports, the conflict list, the ledger and
+  # governed recall) a key without grants read only unlabelled rows, and now
+  # reads confidential ones too: it is widened. Where it did not (memory by id
+  # and list, signal, wiki page, search, grep) the key read everything, and now
+  # reads no restricted row, no custom label and no partition: it is narrowed.
+  # A key an operator meant to keep at unlabelled rows must be given explicit
+  # empty grants before the upgrade, because this cannot tell it from a legacy
+  # key.
   #
   # Left as they are: a key that has either grant field (a list, `[]` for none,
   # `"*"`, even null), a key already marked, a revoked key, the operator's root
   # bootstrap key (source bootstrap with a `*` or `admin` scope), which holds
   # `"*"` once the boot has registered it (Auth.Bootstrap), and a key whose
   # metadata is not a JSON object, which no statement can add a field to. A key
-  # minted after this migration still needs its grants in the request that
-  # mints it.
+  # minted after this migration carries explicit grants (KeyIssuance writes
+  # `[]` for what the request leaves out).
   #
   # Safe to run again: a key it has changed carries the fields it looks for. The
   # data step logs how many keys it changed and never which. api_keys is not a
