@@ -265,6 +265,9 @@ The Engine reads on until the page and one more are found: a memory list reads u
 For a key whose grants cut, `pagination.total` is the number of items the key may see that were found, so it ends one past the page when there is more; it never counts a row the key may not see.
 A key granted `"*"` keeps the count of the workspace as the `total` of the memory list, and the operator is paged by the list as before.
 One gate serves a whole request, so the workspace is read once for all the batches of a page.
+A read that reaches its budget (10,000 memories or 1,000 hits) stops there and answers what it found, with `has_more` false: a key that may see little of a very large list can be told there is no more although more lies beyond what the Engine read.
+The answer does not say that the budget was reached, on purpose: a flag that depends on how many hidden rows came first is a count of them, which these routes do not give.
+Narrow the query, or ask the owner of the workspace for a key that reads more.
 
 **Not covered yet.** Every route not named above as following the grants still answers by the access lists (or not at all), and a key with `read` reaches it whatever its grants. The ones that return row text or name rows:
 
