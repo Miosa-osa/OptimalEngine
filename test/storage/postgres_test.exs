@@ -76,12 +76,31 @@ defmodule OptimalEngine.Storage.PostgresTest do
     refute Postgres.healthy?(timeout: 250)
   end
 
-  test "the provider stays adapter_missing even when the probe would pass" do
+  test "the provider names its adapter and whether this build selected it" do
     assert {:ok, provider} = OptimalEngine.Storage.Providers.get("postgres")
-    refute provider.adapter_implemented
-    assert provider.lifecycle_state == "adapter_missing"
-    assert Postgres.describe().adapter_registered == false
-    assert [%{feature: "full_text_search"} | _] = Postgres.describe().unavailable
+    assert provider.adapter_implemented
+    assert provider.adapter_module == "OptimalEngine.Store.Postgres"
+    assert provider.lifecycle_state == "not_configured"
+
+    selected = OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres)
+    assert provider.selected == selected
+
+    description = Postgres.describe()
+    assert description.adapter_registered
+    assert description.stage == 3
+    assert description.selected == selected
+    assert Enum.any?(description.unavailable, &(&1.feature == "full_text_search"))
+  end
+
+  test "a round trip against nothing reports unreachable" do
+    assert {:error, :unreachable} =
+             Postgres.round_trip(url: "postgres://optimal:secret@127.0.0.1:1/optimal", timeout: 250)
+  end
+
+  @tag :postgres
+  test "a round trip writes a row and reads it back, leaving nothing behind" do
+    url = OptimalEngine.Test.PostgresStore.url()
+    assert {:ok, %{wrote: 1, read_back: true}} = Postgres.round_trip(url: url, timeout: 5_000)
   end
 
   if System.get_env("OPTIMAL_POSTGRES_TEST_URL") do

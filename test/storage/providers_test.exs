@@ -33,7 +33,14 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     assert Enum.all?(plan.providers, & &1.adapter_implemented)
   end
 
-  @unimplemented ~w(postgres nats_jetstream valkey qdrant duckdb openbao fractal)
+  test "a canonical store the build does not run on is never ready, however healthy" do
+    refute Planner.ready?(%{id: "postgres", lifecycle_state: "available", selected: false})
+    assert Planner.ready?(%{id: "postgres", lifecycle_state: "available", selected: true})
+    assert Planner.ready?(%{id: "s3", lifecycle_state: "available"})
+    refute Planner.ready?(%{id: "s3", lifecycle_state: "configured_unverified"})
+  end
+
+  @unimplemented ~w(nats_jetstream valkey qdrant duckdb openbao fractal)
 
   test "every provider declares whether an adapter is implemented" do
     for provider <- Providers.list() do
@@ -43,7 +50,19 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     implemented = Providers.list() |> Enum.filter(& &1.adapter_implemented) |> Enum.map(& &1.id)
 
     assert Enum.sort(implemented) ==
-             Enum.sort(~w(sqlite fts5 embedded_vectors rocksdb filesystem ets s3))
+             Enum.sort(~w(sqlite fts5 embedded_vectors rocksdb filesystem ets s3 postgres))
+  end
+
+  test "the canonical store providers say which one this build selected" do
+    {:ok, sqlite} = Providers.get("sqlite")
+    {:ok, postgres} = Providers.get("postgres")
+
+    assert sqlite.selected == OptimalEngine.Store.selected?(OptimalEngine.Store.SQLite)
+    assert postgres.selected == OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres)
+    assert sqlite.selected != postgres.selected
+
+    {:ok, s3} = Providers.get("s3")
+    refute Map.has_key?(s3, :selected)
   end
 
   test "providers without an adapter report adapter_missing even when configured" do
@@ -82,8 +101,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     assert {:ok, plan} = Planner.plan(["cloud_team"])
     refute plan.ready
 
-    assert Enum.sort(plan.adapter_missing) ==
-             Enum.sort(~w(postgres openbao nats_jetstream valkey))
+    assert Enum.sort(plan.adapter_missing) == Enum.sort(~w(openbao nats_jetstream valkey))
 
     # Every provider in this plan either has no adapter or is not configured;
     # none of them is ready to serve.
@@ -91,7 +109,10 @@ defmodule OptimalEngine.Storage.ProvidersTest do
       refute provider.lifecycle_state in ["active", "available"], provider.id
     end
 
-    assert Enum.all?(plan.providers, &(&1.id == "s3" or &1.lifecycle_state == "adapter_missing"))
+    assert Enum.all?(
+             plan.providers,
+             &(&1.id in ["s3", "postgres"] or &1.lifecycle_state == "adapter_missing")
+           )
   end
 
   test "plans combine use cases without duplicate providers" do

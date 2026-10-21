@@ -569,7 +569,7 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
       assert %{provider: "s3", status: "skipped", reason: "not configured"} =
                Enum.find(proofs, &(&1.provider == "s3"))
 
-      for proof <- proofs, proof.provider != "s3" do
+      for proof <- proofs, proof.provider not in ["s3", "postgres"] do
         assert proof.status == "adapter_missing"
       end
     end
@@ -589,7 +589,7 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
       assert s3.evidence.size_bytes > 0
       assert s3.evidence.key =~ "health/"
 
-      for proof <- proofs, proof.provider != "s3" do
+      for proof <- proofs, proof.provider not in ["s3", "postgres"] do
         assert proof.status == "adapter_missing", "#{proof.provider} is #{proof.status}"
         assert proof.reason =~ "no adapter"
       end

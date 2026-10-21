@@ -72,9 +72,20 @@ defmodule OptimalEngine.Sync do
     id
   end
 
+  # Capture is SQLite triggers and applying reads SQLite's catalog, so a
+  # PostgreSQL store refuses to start replicating rather than recording
+  # changes nothing will send (`OptimalEngine.Storage.Postgres.unavailable/0`).
+  @unavailable {:unsupported, "replication is not available on the PostgreSQL store"}
+
   @doc "Enables capture for a workspace (idempotent) and installs triggers."
-  @spec enable(String.t(), String.t(), String.t()) :: {:ok, map()}
+  @spec enable(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def enable(tenant_id, workspace_id, by) do
+    if Store.selected?(OptimalEngine.Store.SQLite),
+      do: do_enable(tenant_id, workspace_id, by),
+      else: {:error, @unavailable}
+  end
+
+  defp do_enable(tenant_id, workspace_id, by) do
     {:ok, _} =
       Store.raw_query(
         "INSERT OR IGNORE INTO sync_workspaces (tenant_id, workspace_id, enabled_by) VALUES (?1, ?2, ?3)",
@@ -500,6 +511,9 @@ defmodule OptimalEngine.Sync do
     max_class = attrs["max_class"] || "confidential"
 
     cond do
+      not Store.selected?(OptimalEngine.Store.SQLite) ->
+        {:error, @unavailable}
+
       not (is_binary(attrs["workspace_id"]) and attrs["workspace_id"] != "") ->
         {:error, :workspace_id_required}
 
