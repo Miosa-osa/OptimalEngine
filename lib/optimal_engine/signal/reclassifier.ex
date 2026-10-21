@@ -22,7 +22,7 @@ defmodule OptimalEngine.Signal.Reclassifier do
   """
 
   alias OptimalEngine.Pipeline.Classifier
-  alias OptimalEngine.Signal.{GenreDetector, ModeDetector}
+  alias OptimalEngine.Signal.{GenreDetector, ModeDetector, TimeLimit}
   alias OptimalEngine.Store
 
   @bridge_default_genre "chat"
@@ -44,7 +44,10 @@ defmodule OptimalEngine.Signal.Reclassifier do
   `%{mode: String.t(), genre: String.t() | nil}`.
   """
   @spec reclassify(map()) :: %{mode: String.t(), genre: String.t() | nil}
-  def reclassify(%{content: content, genre: genre} = row) do
+  def reclassify(%{content: _content, genre: _genre} = row),
+    do: TimeLimit.with_budget(fn -> reclassify_row(row) end)
+
+  defp reclassify_row(%{content: content, genre: genre} = row) do
     {frontmatter, body} = Classifier.parse_frontmatter(content || "")
     trusted = if engine_written?(frontmatter), do: %{}, else: frontmatter
 
