@@ -549,6 +549,18 @@ class JsonTests(CliTestCase):
         self.assertNotIn(b'\xe2\x80\xa8', out.stderr)
         self.assertIn(b'client_incompatible', out.stderr)
 
+    def test_printed_json_escapes_raw_controls(self):
+        # JSON may carry C1 controls and the line separators unescaped; printed as
+        # JSON rather than as one decoded field, they would reach the terminal raw.
+        self.fake.routes[('GET', '/api/boot')] = (
+            200, b'{"protocol": {"content": "a\xc2\x9b31mb\xe2\x80\xa8c"}, "n": 1}')
+        for args in (('boot',), ('boot', '--pretty'), ('boot', '--field', 'protocol')):
+            out = self.run_cli_bytes(*args)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertNotIn(b'\xc2\x9b', out.stdout)
+            self.assertNotIn(b'\xe2\x80\xa8', out.stdout)
+            self.assertIn(b'a\\u009b31mb\\u2028c', out.stdout)
+
 
 class ConfigTests(CliTestCase):
     def test_url_precedence(self):
