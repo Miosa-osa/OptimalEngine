@@ -112,7 +112,7 @@ A patch difference is silent.
 
 Responses are JSON.
 On a terminal they are pretty-printed when `jq` or `python3` is available; `--raw` and `--pretty` force either.
-`--field a.b` prints one field; a string field prints as plain text, for example `optimal protocol --field content`, without terminal control characters (C0 controls other than tab and newline, DEL, C1 controls, and the Unicode line and paragraph separators).
+`--field a.b` prints one field; a string field prints as plain text, for example `optimal protocol --field content`, with terminal control characters (C0 controls other than tab and newline, DEL, C1 controls, and the Unicode line and paragraph separators) replaced by `?`.
 Text arguments may be `-` to read standard input.
 
 | Command | Route |
@@ -218,7 +218,7 @@ Before a line is kept, the Engine replaces these with `[redacted]`:
 - Engine API keys: any `oe_` token, generated or chosen by the operator, plain or URL-encoded;
 - `Bearer` credentials, `Basic` credentials (any case, only followed by a credential, so "basic mode" stays), and the userinfo of a URL, with or without a password, including a password that holds `@`;
 - the value after a credential-like name (`api_key`, `access_token`, `refresh_token`, `token`, `secret`, `password`, `passwd`, `passphrase`, `client_secret`, `secret_access_key`, `secret_key`, `private_key`, `signature`, `authorization`, `x-optimal-grant`, `bot_token`), also at the end of a longer name such as `AWS_SECRET_ACCESS_KEY`, `db_password` or `notion_token`, as the last word of a camelCase name such as `apiKey` or `accessToken`, and after an upper-case environment name ending in `_KEY`, in `name=value`, `name: value`, map, keyword, header-tuple, atom-tuple, Erlang binary and escaped-JSON forms;
-- a quoted value (double-quoted with its escapes, a charlist, an Erlang binary, single-quoted or backtick-quoted) is redacted to its closing quote, or to the end of the line without one, and an unquoted one to whitespace, a quote, or the `&` of the next query parameter, an auth scheme word such as `Token`, `ApiKey`, `Digest` or `AWS4-HMAC-SHA256` included;
+- a quoted value (double-quoted with its escapes, a charlist, an Erlang binary, single-quoted or backtick-quoted) is redacted to its closing quote, or to the end of the line without one, and an unquoted one to whitespace, a quote, or the `&` of the next query parameter, an auth scheme word included: any word after `authorization`, and one such as `Token`, `ApiKey`, `Digest` or `AWS4-HMAC-SHA256` after the other names;
 - a bare name in prose ("the password: was reset") loses the word after it, so the rule fails closed;
 - provider tokens with a known prefix (`sk-`, `sk-ant-`, `rk_`, `whsec_`, `msk_`, `mki_`, `xox?-`, `xapp-`, `gh?_`, `github_pat_`, `glpat-`, `ntn_`, `secret_`, `npm_`, `hf_`, `ya29.`, `AIza`), AWS access key ids (`AKIA` and `ASIA`), and JWTs.
 

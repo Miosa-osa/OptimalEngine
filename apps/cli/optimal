@@ -236,17 +236,11 @@ jstr() { printf '%s' "$1" | LC_ALL=C awk "$JSTR_AWK"; }
 jfield() { LC_ALL=C awk -v path="$1" "$JFIELD_AWK"; }
 jtext() { LC_ALL=C awk "$JTEXT_AWK"; }
 
-# Decoded text from the Engine, before it reaches a terminal: drops the C0
-# controls but tab and newline, DEL, the C1 controls (U+0080 to U+009F, bytes
-# C2 80 to C2 9F) and the Unicode line and paragraph separators (E2 80 A8 and
-# E2 80 A9).
-strip_controls() {
-  _sc="s/$(printf '\302')[$(printf '\200')-$(printf '\237')]//g;s/$(printf '\342\200')[$(printf '\250\251')]//g"
-  LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "$_sc"
-}
-
-# The same characters, each replaced with ? rather than dropped, for lines a
-# reader should see were changed (log lines, error bodies).
+# Text from the Engine, before it reaches a terminal: replaces the C0 controls
+# but tab and newline, DEL, the C1 controls (U+0080 to U+009F, bytes C2 80 to
+# C2 9F) and the Unicode line and paragraph separators (E2 80 A8 and E2 80 A9)
+# with ?. Replacing rather than deleting matters: deleting the inner C2 9B of
+# the invalid bytes C2 C2 9B 9B would leave a C2 9B, a control, behind.
 mark_controls() {
   _mc="s/$(printf '\302')[$(printf '\200')-$(printf '\237')]/?/g;s/$(printf '\342\200')[$(printf '\250\251')]/?/g"
   LC_ALL=C tr '\001-\010\013-\037\177' '?' | LC_ALL=C sed "$_mc"
@@ -657,7 +651,7 @@ call() {
   [ "$R_RC" = 0 ] || die "$EX_UNAVAILABLE" "incomplete response from $_cm $_cp: ${R_ERR:-curl exit $R_RC}"
   case $R_CODE in 2??) return 0 ;; esac
   # The error code is the Engine's text, printed in every message below: no control characters.
-  _ce=$(field_text "$R_BODY" error 2>/dev/null | LC_ALL=C tr -d '\000-\037\177' | strip_controls) || _ce=
+  _ce=$(field_text "$R_BODY" error 2>/dev/null | mark_controls | LC_ALL=C tr '\011\012' '??') || _ce=
   case $R_CODE in
     401)
       if [ -z "$CFG_KEY" ]; then
@@ -722,7 +716,7 @@ emit() {
   _eo=$(redact "$_eo")
   case $_eo in
     '"'*)
-      printf '%s' "$_eo" | jtext | strip_controls
+      printf '%s' "$_eo" | jtext | mark_controls
       printf '\n'
       return 0
       ;;

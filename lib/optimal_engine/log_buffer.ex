@@ -37,8 +37,9 @@ defmodule OptimalEngine.LogBuffer do
       quoted value (`"..."` with its escapes, `~c"..."`, `<<"...">>`, `'...'`,
       `` `...` ``) is redacted to its closing quote, or to the end of the line
       without one; an unquoted one to whitespace, a quote, or the `&` of the
-      next query parameter, an auth scheme word (`Token`, `ApiKey`, `Digest`,
-      `AWS4-HMAC-SHA256` and the like) included. A bare name in prose ("the
+      next query parameter, an auth scheme word included (any word after
+      `authorization`; `Token`, `ApiKey`, `Digest`, `AWS4-HMAC-SHA256` and the
+      like after the other names). A bare name in prose ("the
       password: was reset") loses the word after it: the rule fails closed;
     * provider tokens with a known prefix (`sk-`, `sk-ant-`, `rk_`, `whsec_`,
       `msk_`, `mki_`, `xox?-`, `xapp-`, `gh?_`, `github_pat_`, `glpat-`,
@@ -76,7 +77,8 @@ defmodule OptimalEngine.LogBuffer do
   # credential-like names, then the prefixed tokens (after the names, so
   # secret_access_key is a name). Every pattern is linear on a crafted line: a
   # repeatable start (a URL scheme, a JWT) only counts at the start of a word,
-  # and a repeated part is possessive or bounded.
+  # and a repeated part is possessive or ends where the next start begins (URL
+  # userinfo stops at the "/" of the next "://").
   #
   # A credential-like name counts at the start of a word or after any
   # non-alphanumeric, so AWS_SECRET_ACCESS_KEY and db_password do, and as the
@@ -90,7 +92,9 @@ defmodule OptimalEngine.LogBuffer do
   #     one;
   #   * a '...' or `...` string, the same way;
   #   * otherwise everything up to whitespace, a quote, or the & that starts the
-  #     next query parameter, after an optional auth scheme word.
+  #     next query parameter, after an optional auth scheme word: any word for
+  #     authorization (its own rule), a known one (Bearer, Token, ApiKey,
+  #     Digest, AWS4-HMAC-SHA256 and the like) for the other names.
   #
   # The name list and the atom-named tuple rule repeat the names, because a
   # pattern built by interpolation is compiled at run time.
@@ -103,8 +107,11 @@ defmodule OptimalEngine.LogBuffer do
     # capitalized word.
     {~r/((?i:Basic)\s+)(?![a-z]+(?![A-Za-z0-9+\/=]))(?![A-Z][a-z]+(?![A-Za-z0-9+\/=]))[A-Za-z0-9+\/]++=*/,
      "\\1[redacted]"},
-    {~r/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*+:\/\/)[^\/\s?#]{0,512}@/i, "\\1[redacted]@"},
-    {~r/(?|(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|refresh[_-]?token|token|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|secret|passw(?:or)?d|passphrase|signature|authorization|x-optimal-grant|bot_token)|(?<![A-Za-z0-9_])((?-i:(?:[A-Z][A-Z0-9]*+_)++KEY))|(?<=(?-i:[a-z]))((?-i:Token|Secret|Password|Key)))(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?|((?:~c|<<)?")(?:[^"\\]|\\.)*+\\?("(?:>>)?|\z)|(\\")[^"]*?(\\"|\z)|(')(?:[^'\\]|\\.)*+\\?('|\z)|(`)[^`]*+(`|\z)|()(?:(?:bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|hoba|mutual|oauth|dpop|aws4-hmac-sha256)\s+)?(?:[^\s"'`&]|&(?![\w.-]++=))+())/i,
+    {~r/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*+:\/\/)[^\/\s?#]*@/i, "\\1[redacted]@"},
+    # authorization: any scheme word may come before an unquoted credential.
+    {~r/(?<![A-Za-z0-9])(authorization)(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?|((?:~c|<<)?")(?:[^"\\]|\\.)*+\\?("(?:>>)?|\z)|(\\")[^"]*?(\\"|\z)|(')(?:[^'\\]|\\.)*+\\?('|\z)|(`)[^`]*+(`|\z)|()(?:[A-Za-z][\w-]*+\s+)?(?:[^\s"'`&]|&(?![\w.-]++=))+())/i,
+     :value},
+    {~r/(?|(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|refresh[_-]?token|token|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|secret|passw(?:or)?d|passphrase|signature|x-optimal-grant|bot_token)|(?<![A-Za-z0-9_])((?-i:(?:[A-Z][A-Z0-9]*+_)++KEY))|(?<=(?-i:[a-z]))((?-i:Token|Secret|Password|Key)))(\\?"?\s*(?:=>|[:=]|\\?",)\s*)(?|((?:~c|<<)?")(?:[^"\\]|\\.)*+\\?("(?:>>)?|\z)|(\\")[^"]*?(\\"|\z)|(')(?:[^'\\]|\\.)*+\\?('|\z)|(`)[^`]*+(`|\z)|()(?:(?:bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|hoba|mutual|oauth|dpop|aws4-hmac-sha256)\s+)?(?:[^\s"'`&]|&(?![\w.-]++=))+())/i,
      :value},
     {~r/(\{:?(?:[a-z0-9_]*_)?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|secret|passw(?:or)?d|passphrase|signature|authorization|bot_token),\s*)(?:(?:~c|<<)?"(?:[^"\\]|\\.)*+\\?(?:"(?:>>)?|\z)|'(?:[^'\\]|\\.)*+\\?(?:'|\z)|[^\s,}]+)/i,
      "\\1[redacted]"},
