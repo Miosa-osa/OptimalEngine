@@ -227,7 +227,8 @@ Bundles from before this release sit in `bundles/` itself; move one into its ten
 A raw upload is written to disk a chunk at a time and hashed as it arrives, so a bundle of any size is never held in memory.
 It is refused with 413 past `OPTIMAL_BUNDLE_MAX_BYTES` (5 GiB by default), before reading when `content-length` says so; with 422 `bundle_sha256_mismatch` when `x-bundle-sha256` names another SHA-256 of the file; and with 408 `upload_timeout` when it takes longer than an hour from first byte to last (`config :optimal_engine, :bundle_upload_deadline_ms`).
 The body is read under the HTTP server's own idle limits, so a client that stops sending is closed.
-It is written to `upload-<n>.part` and renamed `upload-<n>.tar.gz` once complete and checked; both are removed when the request ends, also when the connection is cut, and an Engine that stopped mid-upload removes them, and any export or import staging folder, at its next boot.
+It is written to `.upload-<n>.part` and renamed `.upload-<n>.tar.gz` once complete and checked; both are removed when the request ends, also when the connection is cut, and an Engine that stopped mid-upload removes them at its next boot, with the export and import staging folders (`bundle-*`) not changed for two hours.
+The leading dot keeps an upload apart from every bundle name, which must start with a letter or digit, so the boot sweep never takes a retained export for one.
 Exports and imports unpack in `<backup dir>/staging/`, on the data volume.
 Export, import by name, download, and the import that follows a complete upload keep their connection open for as long as they run, so a large workspace is not cut off by the HTTP server's idle limits.
 
@@ -235,6 +236,7 @@ The export seals every change the replication ledger has captured, then reads th
 Everything at or below `ledger_sequence` is therefore in the bundle and nothing above it is, so a replica seeded from it pulls only what comes after.
 A write that lands while the export runs comes after the snapshot: it is not in the bundle, a row re-written meanwhile is in the bundle once, as it was, and the replica pulls the write from above the mark.
 The read runs beside the Engine's single writer, so requests and writes go on while a large workspace is exported.
+While it runs, the database's write-ahead log cannot be checkpointed past the export's snapshot, so the `-wal` file grows by the volume written during the export; the first checkpoint after the export ends moves those pages into the database.
 When the workspace has a captured change not yet sealed as the read begins, the export seals it and starts the read again; if writes keep arriving it answers 503 `writes_in_progress`, and the export can be retried or the writes paused.
 Import verifies the manifest, every table file, and every file checksum before writing anything.
 Rows are then written in short transactions of 1,000 rows, tables in foreign-key order and the rows of a self-referencing table (memories, nodes) parents first, with foreign keys checked at each commit.

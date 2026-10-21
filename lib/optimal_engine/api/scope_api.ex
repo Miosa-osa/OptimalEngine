@@ -165,10 +165,11 @@ defmodule OptimalEngine.API.ScopeAPI do
     end
   end
 
-  # The raw file is streamed to `upload-N.part` in the tenant's folder, a chunk
+  # The raw file is streamed to `.upload-N.part` in the tenant's folder, a chunk
   # at a time, hashed as it arrives, refused past the size limit and the upload
   # deadline, so a bundle of any size is never held in memory. Complete and
-  # checked, it is renamed `upload-N.tar.gz` and imported.
+  # checked, it is renamed `.upload-N.tar.gz` and imported. The leading dot
+  # keeps it apart from every bundle name (WorkspaceBundle.bundle_path/2).
   #
   # The body is read under the HTTP server's own idle limits: a client that
   # goes silent is closed. Only the import that follows is kept open as long as
@@ -180,7 +181,7 @@ defmodule OptimalEngine.API.ScopeAPI do
     upload =
       Path.join(
         WorkspaceBundle.bundle_dir(tenant(conn)),
-        "upload-#{System.unique_integer([:positive])}"
+        ".upload-#{System.unique_integer([:positive])}"
       )
 
     part = upload <> ".part"
