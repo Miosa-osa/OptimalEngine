@@ -37,6 +37,7 @@ defmodule OptimalEngine.Pipeline.Indexer do
   alias OptimalEngine.Pipeline.SemanticProcessor, as: SemanticProcessor
   alias OptimalEngine.Signal
   alias OptimalEngine.Store
+  alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Routing
   alias OptimalEngine.Pipeline.Intake.Address
   alias OptimalEngine.URI
@@ -69,6 +70,11 @@ defmodule OptimalEngine.Pipeline.Indexer do
   @doc """
   Starts a full index run asynchronously.
   Returns `{:ok, :started}` immediately.
+
+  A file is filed under the workspace its path names: `tenants/<tenant>/<slug>/...`
+  is workspace `<tenant>:<slug>` of that tenant (a tenant the Engine does not know
+  is skipped), a top-level folder is `default:<folder>`, and a file in the root is
+  in `default`. The last two name no tenant, so they are the default tenant's.
   """
   @spec full_index() :: {:ok, :started} | {:error, :already_running}
   def full_index do
@@ -209,6 +215,7 @@ defmodule OptimalEngine.Pipeline.Indexer do
     paths = collect_indexable_files(root)
     total = length(paths)
     Logger.info("[Indexer] Found #{total} files to index")
+    tenants = tenant_ids()
 
     results =
       paths
@@ -217,9 +224,12 @@ defmodule OptimalEngine.Pipeline.Indexer do
         contexts =
           batch
           |> Enum.map(fn path ->
-            ws_id = workspace_from_path(path, root)
-            ctx = build_context(path, known_entities, workspace_id: ws_id)
-            if ctx, do: stamp_scope(ctx, workspace_id: ws_id), else: nil
+            with {ws_id, tenant_id} <- scope_from_path(path, root, tenants),
+                 %Context{} = ctx <- build_context(path, known_entities, workspace_id: ws_id) do
+              stamp_scope(ctx, workspace_id: ws_id, tenant_id: tenant_id)
+            else
+              _skipped -> nil
+            end
           end)
           |> Enum.reject(&is_nil/1)
           |> Enum.map(&maybe_semantic_process/1)
@@ -523,6 +533,28 @@ defmodule OptimalEngine.Pipeline.Indexer do
       |> List.first("")
 
     folder_to_node(relative)
+  end
+
+  defp tenant_ids do
+    case Tenant.list() do
+      {:ok, tenants} -> MapSet.new(tenants, & &1.id)
+      _ -> MapSet.new()
+    end
+  end
+
+  # The workspace and the tenant a file's path names. A workspace of another
+  # tenant lives at `tenants/<tenant>/<slug>` (`Workspace.Filesystem.path/2`);
+  # a file in a directory of a tenant the Engine does not know is skipped, as
+  # naming a tenant that is not there would fail the batch it is in. Any other
+  # file is in a workspace of the default tenant, and names no tenant.
+  defp scope_from_path(path, root, tenants) do
+    case path |> Path.relative_to(root) |> Path.split() do
+      ["tenants", tenant, slug, _file | _] ->
+        if MapSet.member?(tenants, tenant), do: {tenant <> ":" <> slug, tenant}, else: :skip
+
+      _ ->
+        {workspace_from_path(path, root), nil}
+    end
   end
 
   defp workspace_from_path(path, root) do

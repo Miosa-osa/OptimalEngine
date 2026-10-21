@@ -1497,14 +1497,28 @@ defmodule OptimalEngine.Store.SQLite do
   # shared by two tenants. `ContextTenant` decides from the named tenant, the
   # workspace's owner and the row being replaced, and may refuse the write.
   defp do_insert(db, %Context{} = ctx) do
-    case context_tenant(db, ctx) do
-      {:ok, tenant_id} -> insert_context_row(db, %{ctx | tenant_id: tenant_id})
-      {:error, _reason} = err -> err
+    with {:ok, tenant_id, previous} <- context_tenant(db, ctx),
+         :ok <- relabel_children(db, ctx.id, tenant_id, previous) do
+      insert_context_row(db, %{ctx | tenant_id: tenant_id})
     end
   end
 
+  # A context another tenant held is taken over by the owner of its workspace:
+  # the chunks and claims written for it go with it.
+  defp relabel_children(_db, _id, _tenant_id, nil), do: :ok
+  defp relabel_children(_db, _id, tenant_id, tenant_id), do: :ok
+
+  defp relabel_children(db, id, tenant_id, _previous) do
+    Enum.reduce_while(ContextTenant.relabel_sql(), :ok, fn sql, :ok ->
+      case exec_stmt(db, sql, [tenant_id, id]) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = err -> {:halt, err}
+      end
+    end)
+  end
+
   defp context_tenant(db, %Context{} = ctx) do
-    ContextTenant.for_context(ctx, fn
+    ContextTenant.decide(ctx, fn
       :owner, params -> first_row(db, ContextTenant.owner_sql(), params)
       :existing, params -> first_row(db, ContextTenant.existing_sql(), params)
     end)
