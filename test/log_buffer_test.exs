@@ -57,8 +57,17 @@ defmodule OptimalEngine.LogBufferTest do
           "key oe_#{@key_id}_abc-DEF_123 and ?h=Bearer%20oe_#{@key_id}_ghi456&k=%3Doe_#{@key_id}_jkl789"
         )
 
-      assert line =~ "oe_#{@key_id}_[redacted]"
+      assert line =~ "oe_[redacted]"
       for secret <- ["abc-DEF_123", "ghi456", "jkl789"], do: refute(line =~ secret)
+    end
+
+    test "Engine API keys an operator chose, base64 secrets included" do
+      line = stored("bootstrap oe_my-own-key_s3cr3t, oe_ops_dGhpcyBpcyBhIHNlY3JldA== (set)")
+
+      for secret <- ["my-own-key_s3cr3t", "s3cr3t", "dGhpcyBpcyBhIHNlY3JldA"],
+          do: refute(line =~ secret)
+
+      assert line =~ "(set)"
     end
 
     test "bearer tokens" do
@@ -68,15 +77,38 @@ defmodule OptimalEngine.LogBufferTest do
     end
 
     test "basic credentials" do
-      line = stored("sent Basic dXNlcjpwYXNzd29yZA==")
+      line = stored("sent Basic dXNlcjpwYXNzd29yZA== and Basic dXNlcjpwYXNz")
       assert line =~ "Basic [redacted]"
       refute line =~ "dXNlcjpwYXNzd29yZA"
+      refute line =~ "dXNlcjpwYXNz"
+    end
+
+    test "basic credentials in any case" do
+      line = stored("sent basic dXNlcjpwYXNzd29yZA== and BASIC dXNlcjpwYXNz")
+      assert line =~ "basic [redacted]"
+      assert line =~ "BASIC [redacted]"
+      refute line =~ "dXNlcjpwYXNzd29yZA"
+      refute line =~ "dXNlcjpwYXNz"
+    end
+
+    test "basic as a word, not an auth scheme, is kept" do
+      line = stored("running in basic mode with Basic Configuration")
+      assert line =~ "basic mode with Basic Configuration"
     end
 
     test "URL userinfo" do
       line = stored("fetching https://deploy:hunter2@objects.example.com/bucket")
       assert line =~ "https://[redacted]@objects.example.com/bucket"
       refute line =~ "hunter2"
+    end
+
+    test "URL userinfo without a password, and a password holding an @" do
+      line =
+        stored("https://tok3n-only@a.example/x and https://user:p@ss-w0rd@b.example/y?q=1")
+
+      assert line =~ "https://[redacted]@a.example/x"
+      assert line =~ "https://[redacted]@b.example/y?q=1"
+      for secret <- ["tok3n-only", "p@ss", "ss-w0rd"], do: refute(line =~ secret)
     end
 
     test "key and value pairs in an inspected map, a keyword list, a header tuple and a query" do
@@ -98,7 +130,41 @@ defmodule OptimalEngine.LogBufferTest do
       end
 
       assert line =~ "eu-west-1"
-      assert line =~ "next=2"
+      assert line =~ ~s(secret_access_key: "[redacted]")
+      # An unquoted value is redacted to the next whitespace, the rest of a query included.
+      assert line =~ "token=[redacted] x-optimal-grant"
+    end
+
+    test "credential names at the end of longer names" do
+      line =
+        stored(
+          "AWS_SECRET_ACCESS_KEY=wJal1 db_password=dbpw1 " <>
+            inspect(%{"notion_token" => "nt-tok1"}) <> " slack_bot_token=sbt-1"
+        )
+
+      for secret <- ~w(wJal1 dbpw1 nt-tok1 sbt-1), do: refute(line =~ secret, "#{secret}: #{line}")
+    end
+
+    test "JSON inside an inspected string" do
+      line = stored(inspect(~s({"password":"jpw-1","api_key":"jak-1"})))
+      for secret <- ~w(jpw-1 jak-1), do: refute(line =~ secret, "#{secret}: #{line}")
+    end
+
+    test "charlist values" do
+      line = stored(inspect(password: ~c"clpw-1") <> " secret: 'sqsec-1'")
+      for secret <- ~w(clpw-1 sqsec-1), do: refute(line =~ secret, "#{secret}: #{line}")
+    end
+
+    test "a value is redacted to its end, not to its first separator" do
+      line =
+        stored(
+          "password=tail1&tail2 authorization: Token tok-tail3 " <>
+            inspect(%{password: "has space&more"})
+        )
+
+      for secret <- ["tail1", "tail2", "tok-tail3", "has space", "more"] do
+        refute line =~ secret, "#{secret}: #{line}"
+      end
     end
 
     test "provider tokens with a known prefix" do
@@ -110,6 +176,19 @@ defmodule OptimalEngine.LogBufferTest do
 
       for secret <- ~w(AbCdEfGh12345678 AbCdEfGh1234 1234567890-abcdefgh) do
         refute line =~ secret, "#{secret} survived: #{line}"
+      end
+    end
+
+    test "more provider prefixes" do
+      line =
+        stored(
+          "github_pat_11ABCDEFG0abcdefghijkl ntn_1234567890abcdefgh secret_AbCdEfGhIjKlMnOp " <>
+            "ya29.a0AfH6SMBxyzxyzxyz rk_live_1234567890abcd whsec_1234567890abcdef"
+        )
+
+      for secret <-
+            ~w(11ABCDEFG0abcdefghijkl 1234567890abcdef AbCdEfGhIjKlMnOp a0AfH6SMBxyzxyzxyz live_1234567890abcd) do
+        refute line =~ secret, "#{secret}: #{line}"
       end
     end
 
@@ -133,6 +212,64 @@ defmodule OptimalEngine.LogBufferTest do
     refute line =~ "\e"
     refute line =~ "\a"
     assert line =~ "?[31mred?[0m bell? tab\there"
+  end
+
+  # A stored line is at most 4,096 bytes. Each case slides a secret across
+  # that cut one character at a time; no part of it may stay. Every secret
+  # starts with "Zq", which nothing else in the line contains.
+  defp secret, do: "Zq" <> String.duplicate("9k", 20)
+
+  defp across_the_cut(value) do
+    for shift <- 0..130 do
+      tail = " " <> String.duplicate("y", 200)
+      line = stored(String.duplicate("x", 4_096 - 140 + shift) <> " " <> value <> tail)
+      assert byte_size(line) <= 4_096
+      assert String.ends_with?(line, "...")
+      line
+    end
+  end
+
+  describe "a line cut to its length" do
+    test "a quoted value" do
+      for line <- across_the_cut(~s(password="#{secret()}" done)),
+          do: refute(line =~ "Zq", line)
+    end
+
+    test "the userinfo of a URL" do
+      for line <- across_the_cut("https://Zqdrill:#{secret()}@host.example/path"),
+          do: refute(line =~ "Zq", line)
+    end
+
+    test "an AWS access key id" do
+      key = "AKIA" <> String.duplicate("Q7", 8)
+      for line <- across_the_cut("key #{key} done"), do: refute(line =~ "AKIA", line)
+    end
+
+    test "a Bearer credential" do
+      for line <- across_the_cut("Bearer #{secret()} done"), do: refute(line =~ "Zq", line)
+    end
+
+    test "a cut inside a multibyte character leaves valid UTF-8" do
+      for shift <- 0..3 do
+        line = stored(String.duplicate("x", shift) <> String.duplicate("é", 2_100))
+        assert byte_size(line) <= 4_096
+        assert String.valid?(line)
+      end
+    end
+  end
+
+  test "a quoted value without its closing quote is redacted to the end of the line" do
+    for value <- ["password=\"Zq" <> String.duplicate("u", 12), "secret: 'Zq" <> "uuuu"] do
+      line = stored("login " <> value)
+      refute line =~ "Zq", line
+      assert line =~ "[redacted]"
+    end
+  end
+
+  test "C1 controls and the Unicode line and paragraph separators are replaced" do
+    line = stored("a\u0085b\u009bc\u2028d\u2029e café")
+    for char <- ["\u0085", "\u009b", "\u2028", "\u2029"], do: refute(line =~ char)
+    assert line =~ "a?b?c?d?e café"
   end
 
   test "a level the logger rejects leaves the Engine running without the handler" do

@@ -640,7 +640,8 @@ call() {
   fi
   [ "$R_RC" = 0 ] || die "$EX_UNAVAILABLE" "incomplete response from $_cm $_cp: ${R_ERR:-curl exit $R_RC}"
   case $R_CODE in 2??) return 0 ;; esac
-  _ce=$(field_text "$R_BODY" error 2>/dev/null) || _ce=
+  # The error code is the Engine's text, printed in every message below: no control characters.
+  _ce=$(field_text "$R_BODY" error 2>/dev/null | LC_ALL=C tr -d '\000-\037\177') || _ce=
   case $R_CODE in
     401)
       if [ -z "$CFG_KEY" ]; then
@@ -672,7 +673,8 @@ call() {
       fi
       ;;
     426)
-      _cev=$(field_text "$R_BODY" engine 2>/dev/null) || _cev=
+      # A version is digits, letters, dots, + and -; anything else in the Engine's answer is dropped.
+      _cev=$(field_text "$R_BODY" engine 2>/dev/null | LC_ALL=C tr -cd '0-9A-Za-z.+-') || _cev=
       die "$EX_CONFIG" "the Engine${_cev:+ ($_cev)} refuses client $OPTIMAL_CLI_VERSION (HTTP 426${_ce:+: $_ce}); $(client_hint "$_cev")"
       ;;
   esac
@@ -685,7 +687,7 @@ print_error_body() {
   [ -n "$R_BODY" ] || return 0
   _pe=$(printf '%s' "$R_BODY" | tr -d ' \n')
   [ "$_pe" = "$(printf '{"error":"%s"}' "$_ce" | tr -d ' \n')" ] && return 0
-  printf '%s\n' "$(redact "$R_BODY")" >&2
+  printf '%s\n' "$(redact "$R_BODY")" | LC_ALL=C tr '\001-\010\013-\037\177' '?' >&2
 }
 
 want_pretty() {

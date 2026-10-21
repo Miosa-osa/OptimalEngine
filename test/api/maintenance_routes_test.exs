@@ -104,6 +104,13 @@ defmodule OptimalEngine.API.MaintenanceRoutesTest do
       assert %{"status" => "already_running", "job_id" => ^job_id} = Jason.decode!(again.resp_body)
     end
 
+    test "an empty workspace is the implicit default, not a workspace named \"\"", ctx do
+      queued = call(:post, "/api/maintenance/index", ctx.operator, %{"workspace" => ""})
+      assert queued.status == 202
+      %{"job_id" => job_id} = Jason.decode!(queued.resp_body)
+      assert {:ok, %{workspace_id: "default"}} = OptimalEngine.Jobs.get(job_id, "default")
+    end
+
     test "with no workspace it is the implicit default, checked like any other", ctx do
       # Another tenant's admin may not enqueue into the default tenant's workspace.
       foreign = call(:post, "/api/maintenance/index", ctx.admin, %{})
@@ -134,7 +141,7 @@ defmodule OptimalEngine.API.MaintenanceRoutesTest do
       assert capacity >= count
       [line] = text |> String.split("\n") |> Enum.filter(&String.contains?(&1, marker))
       assert line =~ "[warning]"
-      assert line =~ "oe_0123456789abcdef01234567_[redacted]"
+      assert line =~ "key=oe_[redacted] header="
       assert line =~ "Bearer [redacted]"
       refute text =~ "s3cret-part-#{ctx.n}"
       refute text =~ "tok-#{ctx.n}"
