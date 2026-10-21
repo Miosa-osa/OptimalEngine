@@ -712,7 +712,7 @@ defmodule OptimalEngine.Retrieval.Search do
       |> Enum.reject(&is_nil/1)
 
     # Apply graph boost (same as FTS-only path)
-    final_results = try_graph_boost(final_results, query)
+    final_results = try_graph_boost(final_results, query, opts)
 
     {:ok, final_results}
   rescue
@@ -803,7 +803,7 @@ defmodule OptimalEngine.Retrieval.Search do
         |> Enum.take(limit)
 
       # Graph boost via OptimalEngine.Knowledge (non-blocking — falls back to unmodified results)
-      results = try_graph_boost(results, query)
+      results = try_graph_boost(results, query, opts)
 
       # Record search event in episodic memory
       observe_search(query, length(results))
@@ -945,9 +945,12 @@ defmodule OptimalEngine.Retrieval.Search do
     end
   end
 
-  # Apply knowledge graph boost to search results (non-blocking)
-  defp try_graph_boost(results, query) do
-    BridgeKnowledge.graph_boost(results, query)
+  # Apply knowledge graph boost to search results (non-blocking), from the
+  # graph of the workspace searched. Its edges are read in the workspace's own
+  # tenant: `:tenant_id` here defaults to "default" for memories, which is not
+  # the tenant of every workspace.
+  defp try_graph_boost(results, query, opts) do
+    BridgeKnowledge.graph_boost(results, query, Keyword.take(opts, [:workspace_id]))
   rescue
     _ -> results
   catch

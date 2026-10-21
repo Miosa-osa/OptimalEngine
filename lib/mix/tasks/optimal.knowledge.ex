@@ -9,6 +9,10 @@ defmodule Mix.Tasks.Optimal.Knowledge do
       mix optimal.knowledge materialize # Run OWL 2 RL reasoning
       mix optimal.knowledge query "Alice"  # Query triples for entity
       mix optimal.knowledge metrics    # Show SICA learning metrics
+
+  `--workspace ID` scopes `sync`, `count`, `materialize` and `query` to one
+  workspace. Without it `query` reads the `default` workspace, and the
+  others cover every workspace (each reasoned over on its own).
   """
 
   use Mix.Task
@@ -20,17 +24,20 @@ defmodule Mix.Tasks.Optimal.Knowledge do
   def run(args) do
     Mix.Task.run("app.start")
 
+    {parsed, args, _invalid} = OptionParser.parse(args, strict: [workspace: :string])
+    scope = if parsed[:workspace], do: [workspace_id: parsed[:workspace]], else: []
+
     case args do
       ["sync" | _] ->
         Mix.shell().info("Syncing SQLite edges → knowledge graph + OWL reasoning...")
 
-        case OptimalEngine.Bridge.Knowledge.sync_and_materialize() do
+        case OptimalEngine.Bridge.Knowledge.sync_and_materialize(scope) do
           {:ok, count} -> Mix.shell().info("Synced and materialized — #{inspect(count)} result.")
           other -> Mix.shell().error("Failed: #{inspect(other)}")
         end
 
       ["count" | _] ->
-        case OptimalEngine.Bridge.Knowledge.count() do
+        case OptimalEngine.Bridge.Knowledge.count(scope) do
           {:ok, count} -> Mix.shell().info("Knowledge store: #{count} triples")
           err -> Mix.shell().error("Failed: #{inspect(err)}")
         end
@@ -38,7 +45,7 @@ defmodule Mix.Tasks.Optimal.Knowledge do
       ["materialize" | _] ->
         Mix.shell().info("Running OWL 2 RL materialization...")
 
-        case OptimalEngine.Bridge.Knowledge.materialize() do
+        case OptimalEngine.Bridge.Knowledge.materialize(scope) do
           {:ok, count} -> Mix.shell().info("Materialized #{count} inferred triples.")
           err -> Mix.shell().error("Failed: #{inspect(err)}")
         end
@@ -46,7 +53,7 @@ defmodule Mix.Tasks.Optimal.Knowledge do
       ["query" | rest] ->
         entity = Enum.join(rest, " ")
 
-        case OptimalEngine.Bridge.Knowledge.context_for(entity) do
+        case OptimalEngine.Bridge.Knowledge.context_for(entity, scope) do
           {:ok, context} -> Mix.shell().info(context)
           {:error, reason} -> Mix.shell().error("Failed: #{inspect(reason)}")
         end

@@ -35,13 +35,13 @@ defmodule OptimalEngine.Knowledge.HydrationTest do
   end
 
   defp edge_total do
-    {:ok, [[n]]} = Store.raw_query("SELECT COUNT(*) FROM edges", [])
+    {:ok, [[n]]} = Store.raw_query("SELECT COUNT(*) FROM graph_edges", [])
     n
   end
 
   test "without a limit every edge after the starting id is loaded", %{ws: ws} do
     add_edges(ws, 5)
-    {:ok, [[max_id]]} = Store.raw_query("SELECT MAX(id) FROM edges", [])
+    {:ok, [[max_id]]} = Store.raw_query("SELECT MAX(id) FROM graph_edges", [])
 
     {:ok, store} = Knowledge.open("hyd-all-#{ws}", backend: Backend.ETS)
     assert {:ok, 5} = Graph.hydrate_triple_store(store, workspace_id: ws, batch_size: 2)

@@ -105,7 +105,7 @@ defmodule OptimalEngine.Graph.SemanticPredicatesTest do
 
     {:ok, rows} =
       Store.raw_query(
-        "SELECT DISTINCT relation FROM edges WHERE workspace_id = ?1",
+        "SELECT DISTINCT relation FROM graph_edges WHERE workspace_id = ?1",
         [ws]
       )
 
@@ -202,7 +202,7 @@ defmodule OptimalEngine.Graph.SemanticPredicatesTest do
     # Verify SQLite persistence.
     {:ok, rows} =
       Store.raw_query(
-        "SELECT source_id, target_id, relation FROM edges WHERE workspace_id = ?1 AND relation = ?2",
+        "SELECT source_id, target_id, relation FROM graph_edges WHERE workspace_id = ?1 AND relation = ?2",
         [ws, predicate]
       )
 

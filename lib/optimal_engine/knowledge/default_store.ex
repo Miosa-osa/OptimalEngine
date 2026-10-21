@@ -4,7 +4,7 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
 
   This GenServer starts a named `Knowledge.Store` (store_id = "default") under
   the Knowledge.Registry, then asynchronously loads all rows from the SQLite
-  `edges` table so the in-memory triple store mirrors durable state after a
+  `graph_edges` table so the in-memory triple store mirrors durable state after a
   restart.
 
   The hydration is fire-and-forget: failures are logged but never crash the

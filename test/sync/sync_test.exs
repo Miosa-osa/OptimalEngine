@@ -346,7 +346,7 @@ defmodule OptimalEngine.SyncTest do
         )
 
       {:ok, [[local_id]]} =
-        Store.raw_query("SELECT MAX(id) FROM edges WHERE workspace_id = ?1", [ctx.ws])
+        Store.raw_query("SELECT MAX(id) FROM graph_edges WHERE workspace_id = ?1", [ctx.ws])
 
       {:ok, _} = Capture.seal()
 
@@ -354,13 +354,13 @@ defmodule OptimalEngine.SyncTest do
       # wrote it, so the other Engine's unrelated edge can carry the same name.
       {:ok, [[local_key]]} =
         Store.raw_query(
-          "SELECT entity_id FROM sync_mutations WHERE workspace_id = ?1 AND entity_type = 'edges' ORDER BY sequence DESC LIMIT 1",
+          "SELECT entity_id FROM sync_mutations WHERE workspace_id = ?1 AND entity_type = 'graph_edges' ORDER BY sequence DESC LIMIT 1",
           [ctx.ws]
         )
 
       remote =
         mutation(ctx, %{
-          "entity_type" => "edges",
+          "entity_type" => "graph_edges",
           "entity_id" => local_key,
           "occurred_at" => "2000-01-01T00:00:00.000",
           "payload" => %{
@@ -379,9 +379,38 @@ defmodule OptimalEngine.SyncTest do
       assert {:ok, %{applied: 1, conflicts: 0}} = Sync.apply_changes(ctx.tenant, ctx.ws, [remote])
 
       assert {:ok, [[2]]} =
-               Store.raw_query("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1", [ctx.ws])
+               Store.raw_query("SELECT COUNT(*) FROM graph_edges WHERE workspace_id = ?1", [ctx.ws])
 
       assert Sync.conflicts(ctx.tenant, ctx.ws) == []
+    end
+
+    test "an edge sealed before the upgrade as an edges row is applied to graph_edges", ctx do
+      remote =
+        mutation(ctx, %{
+          "entity_type" => "edges",
+          "entity_id" => "rep_remote:#{ctx.n}",
+          "payload" => %{
+            "row" => %{
+              "id" => 1,
+              "source_id" => "OldA-#{ctx.n}",
+              "target_id" => "OldB-#{ctx.n}",
+              "relation" => "knows",
+              "workspace_id" => ctx.ws,
+              "tenant_id" => "default"
+            },
+            "blobs" => %{}
+          }
+        })
+
+      assert {:ok, %{applied: 1, failed: []}} = Sync.apply_changes(ctx.tenant, ctx.ws, [remote])
+
+      assert {:ok, [[tenant]]} =
+               Store.raw_query(
+                 "SELECT tenant_id FROM graph_edges WHERE workspace_id = ?1 AND source_id = ?2",
+                 [ctx.ws, "OldA-#{ctx.n}"]
+               )
+
+      assert tenant == ctx.tenant
     end
 
     test "the same row derived on both Engines is not a conflict when only bookkeeping times differ",
@@ -1617,11 +1646,11 @@ defmodule OptimalEngine.SyncTest do
         )
 
       {:ok, [[edge_id]]} =
-        Store.raw_query("SELECT MAX(id) FROM edges WHERE workspace_id = ?1", [ctx.ws])
+        Store.raw_query("SELECT MAX(id) FROM graph_edges WHERE workspace_id = ?1", [ctx.ws])
 
       delete =
         mutation(ctx, %{
-          "entity_type" => "edges",
+          "entity_type" => "graph_edges",
           "operation" => "delete",
           "entity_id" => "row:1",
           "payload" => %{"row" => %{"id" => edge_id}, "blobs" => %{}}
@@ -1630,7 +1659,7 @@ defmodule OptimalEngine.SyncTest do
       assert {:ok, %{applied: 0, failed: [%{reason: :operation_not_supported}]}} =
                Sync.apply_changes(ctx.tenant, ctx.ws, [delete])
 
-      assert probe_count("SELECT COUNT(*) FROM edges WHERE id = ?1", [edge_id]) == 1
+      assert probe_count("SELECT COUNT(*) FROM graph_edges WHERE id = ?1", [edge_id]) == 1
     end
 
     test "a blob named for no column fails that change, not the batch", ctx do

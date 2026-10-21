@@ -1083,32 +1083,16 @@ defmodule OptimalEngine.Pipeline.Intake do
   # ---------------------------------------------------------------------------
 
   # Emits "mentions" (context -> entity) and "co_occurs_with" (entity -> entity)
-  # edges via Graph.assert_edge. These use different predicates than the
-  # structural "mentioned_in" / "co_occurs" edges written by insert_context, so
-  # they complement rather than duplicate the existing graph.
+  # edges (Graph.create_semantic_edges_for_context/1). These use different
+  # predicates than the structural "mentioned_in" / "co_occurs" edges written by
+  # insert_context, so they complement rather than duplicate the existing graph.
   # Never fails the pipeline.
   defp emit_semantic_edges(%Signal{} = signal, %Context{} = context, %ScopeEnvelope{} = scope) do
-    entities =
-      (signal.entities || [])
-      |> Enum.filter(&(is_binary(&1) and &1 != ""))
-      |> Enum.uniq()
-
-    ws_opts = [workspace_id: scope.workspace_id]
-
-    # context --mentions--> entity
-    Enum.each(entities, fn entity ->
-      Graph.assert_edge(context.id, entity, "mentions", ws_opts)
-    end)
-
-    # entity --co_occurs_with--> entity (unordered pairs)
-    entities
-    |> co_occurrence_pairs()
-    |> Enum.each(fn {a, b} ->
-      Graph.assert_edge(a, b, "co_occurs_with", ws_opts)
-      Graph.assert_edge(b, a, "co_occurs_with", ws_opts)
-    end)
-
-    :ok
+    Graph.create_semantic_edges_for_context(%{
+      id: context.id,
+      entities: signal.entities || [],
+      workspace_id: scope.workspace_id
+    })
   rescue
     error ->
       Logger.warning("[Intake] emit_semantic_edges failed (skipping): #{inspect(error)}")
@@ -1116,16 +1100,6 @@ defmodule OptimalEngine.Pipeline.Intake do
   end
 
   defp emit_semantic_edges(_signal, _context, _scope), do: :ok
-
-  defp co_occurrence_pairs([]), do: []
-  defp co_occurrence_pairs([_]), do: []
-
-  defp co_occurrence_pairs(entities) do
-    for {a, i} <- Enum.with_index(entities),
-        {b, j} <- Enum.with_index(entities),
-        i < j,
-        do: {a, b}
-  end
 
   # ---------------------------------------------------------------------------
   # Private: Skeleton detail objects

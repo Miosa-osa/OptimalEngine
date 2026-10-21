@@ -58,7 +58,7 @@ defmodule OptimalEngine.Graph.WorkspaceScopingTest do
   test "edge writes carry the context's workspace_id", ctx do
     {:ok, rows} =
       Store.raw_query(
-        "SELECT DISTINCT workspace_id FROM edges WHERE source_id = ?1 OR target_id = ?1",
+        "SELECT DISTINCT workspace_id FROM graph_edges WHERE source_id = ?1 OR target_id = ?1",
         [ctx.a.id]
       )
 
@@ -97,7 +97,7 @@ defmodule OptimalEngine.Graph.WorkspaceScopingTest do
 
   test "per-workspace rebuild only touches that workspace's edges", ctx do
     {:ok, [[b_before]]} =
-      Store.raw_query("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1", [ctx.ws_b])
+      Store.raw_query("SELECT COUNT(*) FROM graph_edges WHERE workspace_id = ?1", [ctx.ws_b])
 
     assert b_before == 2
 
@@ -106,7 +106,7 @@ defmodule OptimalEngine.Graph.WorkspaceScopingTest do
     # A's edges were recreated with correct attribution
     {:ok, rows} =
       Store.raw_query(
-        "SELECT DISTINCT workspace_id FROM edges WHERE source_id = ?1 OR target_id = ?1",
+        "SELECT DISTINCT workspace_id FROM graph_edges WHERE source_id = ?1 OR target_id = ?1",
         [ctx.a.id]
       )
 
@@ -114,7 +114,7 @@ defmodule OptimalEngine.Graph.WorkspaceScopingTest do
 
     # B's edges were untouched
     {:ok, [[b_after]]} =
-      Store.raw_query("SELECT COUNT(*) FROM edges WHERE workspace_id = ?1", [ctx.ws_b])
+      Store.raw_query("SELECT COUNT(*) FROM graph_edges WHERE workspace_id = ?1", [ctx.ws_b])
 
     assert b_after == b_before
   end

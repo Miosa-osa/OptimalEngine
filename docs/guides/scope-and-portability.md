@@ -10,7 +10,25 @@ An Engine runs in one of two scopes.
 | `workspace` | `OPTIMAL_ENGINE_SCOPE=workspace` and `OPTIMAL_ENGINE_WORKSPACE=<id>` | Serves only that workspace; every other workspace is answered as not found. |
 
 `GET /api/scope` reports the scope.
+
+A workspace id with no workspace row and no `<tenant>:` prefix (an ad hoc id) can be named by every tenant's keys, and the routes read each row in the caller's tenant.
+The contexts and graph edges written under such an id carry tenant `default`, the tenant of a workspace with no row, so another tenant's writes there are not read back as its own: a tenant other than the default writes to registered workspaces (`<tenant>:<slug>` ids).
+An unregistered `<tenant>:<slug>` id is accepted for its own tenant's keys, and the contexts and graph edges written under it take the tenant its prefix names, when that tenant exists.
 On disk, each workspace has its own directory: the default tenant keeps `<root>/<slug>`, and every other tenant gets `<root>/tenants/<tenant>/<slug>`, so two tenants' workspaces with the same slug never share files.
+
+## Graph edges
+
+Graph edges live in `graph_edges`, unique within a tenant and a workspace: the same entity pair in two workspaces is two edges.
+Each edge takes the tenant of its workspace, as a context does: for a workspace that is not registered, the tenant its `<tenant>:` prefix names, else `default`.
+Every graph read (`/api/graph`, `/api/graph/hubs`, `/api/graph/triangles`, `/api/graph/clusters`, `/api/graph/reflect`, `/api/node/:id`, `/api/optimal/graph`, the search graph boost, graph candidates, health and simulation) reads one workspace in one tenant, the requester's tenant for API routes, so a workspace of another tenant reads as empty.
+The contexts and entities those routes show, and `/api/batch/export/signals` and `/api/batch/export/memories`, are filtered by the requester's tenant the same way.
+A search in one tenant ranks the same whether or not another tenant has edges between the same names.
+
+The baseline `edges` table was keyed by endpoints and relation only, so a pair two workspaces shared kept only the first workspace's edge, and its `tenant_id` was never written.
+The migration that created `graph_edges` copied it there with each workspace's tenant and left it in the store, unread and unwritten, for one release, so an older Engine still boots on a migrated store.
+After upgrading, run one graph backfill over every workspace to recreate the edges the old key dropped (see [Graph edges upgrade](versioning-and-releases.md#graph-edges-upgrade)); `GET /api/maintenance/graph` reports `graph_edges.backfill_needed` until it has run.
+The same migration gives the contexts and entities written with tenant `default` under another tenant's workspace (before writes took their workspace's tenant) that workspace's tenant.
+A bundle written before that migration carries its edges as `edges`, and a replicated change sealed before it names `edges`: both are written to `graph_edges`.
 
 ## Share-up policy
 
@@ -178,6 +196,7 @@ A repair does not create the tenant's default organization: if a rule leaves out
 A bundle is a gzip tar file with `manifest.json`, one JSON-lines file per table, and the workspace's files.
 It carries every row of every table with a `workspace_id` column, child rows without one, the principals the workspace's memberships name, and workspace-scoped operating documents.
 Embeddings and other binary columns travel as base64, so vectors are copied, not recomputed; full-text indexes fill through the Engine's triggers as rows are inserted.
+Graph edges travel as `graph_edges`; the legacy `edges` table is not exported (see [Graph edges](#graph-edges)).
 Authority state (keys, packs, grants, evidence), replica cursors, metric samples, redirects, and federation peers stay with the Engine.
 Connectors (their credentials are sealed with the source Engine's `CONNECTOR_KEY`), their run log, queued jobs, and processor runs stay too: register the connectors again on the target.
 
