@@ -1063,6 +1063,9 @@ defmodule OptimalEngine.DataSteward do
   """
   defdelegate repair_deterministic_hierarchy(opts), to: HierarchyRepair, as: :run
 
+  @doc false
+  def relabel_bare_scope(_workspace_id, _opts), do: {:error, :not_implemented}
+
   def recheck(workspace_id, opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
     actor_id = Keyword.get(opts, :actor_id, "system:data-steward")
