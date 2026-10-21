@@ -43,11 +43,12 @@ defmodule OptimalEngine.DataSteward do
   # tables listed here is traced to a tenant through the rows it points at
   # (`trace_sql/2`), and moves only when they are the tenant's and in the
   # workspace being repaired. The list is in the order the tables move: a table
-  # whose parent is another table of the list comes before it (a decision
-  # before its mention, a proposal before its paths), because the trace looks
-  # at where the parent still is.
+  # whose parent is another table of the list comes before it (a proposal
+  # before its paths), or is moved after them (a decision before its mention,
+  # which has a tenant column), because the trace looks at where the parent
+  # still is.
   @traced_tables ~w(resolution_decisions memory_consolidation_proposals entity_aliases
-                    entity_identifiers entity_lineage entity_mentions memory_association_paths
+                    entity_identifiers entity_lineage memory_association_paths
                     memory_reconstruction_outcomes)
 
   # The others have nothing to trace by and are left, and reported.
@@ -87,7 +88,7 @@ defmodule OptimalEngine.DataSteward do
   def dashboard(workspace_id, opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
-    with {:ok, entity_quality} <- EntityQuality.run(workspace_id),
+    with {:ok, entity_quality} <- EntityQuality.run(workspace_id, tenant_id: tenant_id),
          {:ok, orphan_scopes} <- orphan_scopes(tenant_id),
          {:ok, claims} <- claim_clusters(workspace_id, tenant_id, @default_limit),
          {:ok, routes} <-
@@ -325,7 +326,9 @@ defmodule OptimalEngine.DataSteward do
   registered: not in another tenant, in any state, and not an active workspace
   of this one (an archived workspace of the tenant itself can still be repaired
   from). Only the tenant's rows move. A table with a `tenant_id` column is
-  bound to it. A table without one cannot be told apart by tenant for an id
+  bound to it (a mention written before its column, which records no tenant,
+  is traced through its context or source package instead). A table without
+  one cannot be told apart by tenant for an id
   nobody owns, so each of its rows is traced to a tenant through a row it
   points at (see `unscoped_tables/0`) and moves when that row is the
   tenant's. A row that cannot be traced stays, and the answer lists the
@@ -343,6 +346,9 @@ defmodule OptimalEngine.DataSteward do
     with {:ok, tables} <- workspace_tables(),
          {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
       {scoped, unscoped} = Enum.split_with(tables, & &1.tenant_scoped?)
+      # A mention that records no tenant is traced through its context or
+      # source package, so it moves before they do.
+      {mentions, scoped} = Enum.split_with(scoped, &(&1.name == "entity_mentions"))
       untraced = Enum.reject(unscoped, &(&1.name in @traced_tables))
       traced = for name <- @traced_tables, table <- unscoped, table.name == name, do: table
 
@@ -351,11 +357,17 @@ defmodule OptimalEngine.DataSteward do
              :ok <- check_orphan_source(txn, tenant, source_workspace_id),
              {:ok, moved_traced} <-
                move_rows(txn, traced, source_workspace_id, target_workspace_id, tenant),
+             {:ok, moved_mentions} <-
+               move_rows(txn, mentions, source_workspace_id, target_workspace_id, tenant),
              {:ok, moved_scoped} <-
                move_rows(txn, scoped, source_workspace_id, target_workspace_id, tenant),
              # A repair is only a repair if rows of the tenant itself moved; rows
              # that merely hang off them do not make one.
-             :ok <- if(rows_moved(moved_scoped) > 0, do: :ok, else: {:error, :nothing_to_repair}),
+             :ok <-
+               if(rows_moved(moved_mentions) + rows_moved(moved_scoped) > 0,
+                 do: :ok,
+                 else: {:error, :nothing_to_repair}
+               ),
              # Signed rows keep the id they were written with; the move is
              # recorded so they can still be followed to the target.
              :ok <-
@@ -369,7 +381,7 @@ defmodule OptimalEngine.DataSteward do
                  :merge
                ),
              {:ok, left} <- rows_left(txn, untraced, source_workspace_id) do
-          moved = moved_traced ++ moved_scoped
+          moved = moved_traced ++ moved_mentions ++ moved_scoped
 
           {:ok,
            %{
@@ -689,7 +701,7 @@ defmodule OptimalEngine.DataSteward do
   def check_id_not_shared(txn, tables, source, tenant) do
     scoped =
       for %{tenant_scoped?: true, name: name} <- tables,
-          do: "SELECT 1 FROM \"#{name}\" WHERE workspace_id=?2 AND tenant_id<>?3"
+          do: "SELECT 1 FROM \"#{name}\" WHERE workspace_id=?2 AND #{foreign_rows(name)}"
 
     foreign =
       for %{tenant_scoped?: false, name: name} <- tables,
@@ -698,6 +710,11 @@ defmodule OptimalEngine.DataSteward do
 
     any_row?(txn, scoped ++ foreign, [nil, source, tenant], :workspace_id_shared)
   end
+
+  # The condition that a row of a table with a tenant column is another
+  # tenant's.
+  defp foreign_rows("entity_mentions"), do: mention_tenant("entity_mentions", :foreign)
+  defp foreign_rows(_name), do: "tenant_id<>?3"
 
   # `:ok` when none of the queries finds a row, `{:error, reason}` when one
   # does, and the error itself when one fails.
@@ -750,6 +767,14 @@ defmodule OptimalEngine.DataSteward do
     end)
   end
 
+  # A mention records its tenant; one written before the column, and naming
+  # nothing the migration could fill it from, has none and is traced to a
+  # tenant through its context or source package, as it is read
+  # (`OptimalEngine.EntityResolution`).
+  defp move_sql(%{tenant_scoped?: true, name: "entity_mentions"}),
+    do:
+      "UPDATE entity_mentions SET workspace_id=?1 WHERE workspace_id=?2 AND #{mention_tenant("entity_mentions", :own)}"
+
   defp move_sql(%{tenant_scoped?: true, name: name}),
     do: "UPDATE \"#{name}\" SET workspace_id=?1 WHERE workspace_id=?2 AND tenant_id=?3"
 
@@ -776,12 +801,10 @@ defmodule OptimalEngine.DataSteward do
       joiner <> parent("canonical_entities", "s", "entity_lineage.successor_entity_id", side) <> ")"
   end
 
-  defp trace_sql("entity_mentions", side), do: mention_parents("entity_mentions", side)
-
   defp trace_sql("resolution_decisions", side) do
     here = if side == :own, do: "m.workspace_id = ?2 AND ", else: ""
 
-    "EXISTS (SELECT 1 FROM entity_mentions m WHERE m.id = resolution_decisions.mention_id AND #{here}#{mention_parents("m", side)})"
+    "EXISTS (SELECT 1 FROM entity_mentions m WHERE m.id = resolution_decisions.mention_id AND #{here}#{mention_tenant("m", side)})"
   end
 
   defp trace_sql("memory_association_paths", side),
@@ -793,6 +816,17 @@ defmodule OptimalEngine.DataSteward do
   defp trace_sql("memory_consolidation_proposals", side) do
     "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(memory_consolidation_proposals.metadata) THEN memory_consolidation_proposals.metadata ELSE '{}' END, '$.path_ids') j JOIN memory_association_paths a ON a.id = j.value WHERE #{parent("memory_reconstruction_runs", "r", "a.run_id", side)})"
   end
+
+  # The condition that a mention is the tenant's (`:own`, in the workspace
+  # being repaired) or another tenant's (`:foreign`): by the tenant it
+  # records, else by the rows it hangs off.
+  defp mention_tenant(mention, :own),
+    do:
+      "(#{mention}.tenant_id = ?3 OR (#{mention}.tenant_id IS NULL AND #{mention_parents(mention, :own)}))"
+
+  defp mention_tenant(mention, :foreign),
+    do:
+      "(#{mention}.tenant_id <> ?3 OR (#{mention}.tenant_id IS NULL AND #{mention_parents(mention, :foreign)}))"
 
   # A mention hangs off its context or its source package.
   defp mention_parents(mention, side) do
@@ -877,6 +911,12 @@ defmodule OptimalEngine.DataSteward do
     any_row?(txn, queries, [target], :target_workspace_has_rows)
   end
 
+  # The rows of a table with a tenant column that a rename takes: the
+  # tenant's, and, of a mention, one that records none (written before the
+  # column), which in a registered workspace is the workspace's tenant's.
+  defp renamed_rows("entity_mentions"), do: "(tenant_id=?3 OR tenant_id IS NULL)"
+  defp renamed_rows(_name), do: "tenant_id=?3"
+
   # A registered source belongs to one tenant, so a table without a tenant
   # column holds only that workspace's rows; a table with one is bound to the
   # tenant as well, so rows another tenant wrote under the id stay put.
@@ -884,7 +924,7 @@ defmodule OptimalEngine.DataSteward do
     Enum.reduce_while(tables, {:ok, []}, fn table, {:ok, results} ->
       {sql, params} =
         if table.tenant_scoped? do
-          {"UPDATE \"#{table.name}\" SET workspace_id=?1 WHERE workspace_id=?2 AND tenant_id=?3",
+          {"UPDATE \"#{table.name}\" SET workspace_id=?1 WHERE workspace_id=?2 AND #{renamed_rows(table.name)}",
            [target, source, tenant]}
         else
           {"UPDATE \"#{table.name}\" SET workspace_id=?1 WHERE workspace_id=?2", [target, source]}

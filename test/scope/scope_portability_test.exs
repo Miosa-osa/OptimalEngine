@@ -313,6 +313,49 @@ defmodule OptimalEngine.ScopePortabilityTest do
              )
     end
 
+    test "a move takes the workspace's mentions along, including one that records no tenant",
+         ctx do
+      {:ok, %{id: carried}} =
+        OptimalEngine.EntityResolution.resolve(
+          %{workspace_id: ctx.open, surface_text: "Carried #{ctx.n}"},
+          tenant_id: ctx.tenant
+        )
+
+      # Written before mentions recorded a tenant, naming nothing.
+      older = "mention-older-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO entity_mentions (id, workspace_id, surface_text, normalized_text) VALUES (?1, ?2, 'Older', 'older')",
+          [older, ctx.open]
+        )
+
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, ctx.open, ctx.path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, ctx.open, manifest["bundle_sha256"])
+
+      {:ok, _} =
+        WorkspaceBundle.finalize_move(ctx.tenant, ctx.open, manifest["bundle_sha256"], %{
+          "target_url" => "https://other.example"
+        })
+
+      assert {:ok, [[0]]} =
+               Store.raw_query("SELECT COUNT(*) FROM entity_mentions WHERE workspace_id = ?1", [
+                 ctx.open
+               ])
+
+      target = "target-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: target, name: "Target"})
+      {:ok, summary} = WorkspaceBundle.import(ctx.path, target)
+
+      assert {:ok, rows} =
+               Store.raw_query(
+                 "SELECT id, tenant_id FROM entity_mentions WHERE workspace_id = ?1 ORDER BY id",
+                 [summary.workspace_id]
+               )
+
+      assert Enum.sort(rows) == Enum.sort([[carried, target], [older, target]])
+    end
+
     test "a renamed workspace keeps its id when moved into its own tenant, not its old slugs",
          ctx do
       {:ok, _} = Workspace.update(ctx.open, %{slug: "open-renamed"})
