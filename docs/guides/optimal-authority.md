@@ -115,6 +115,16 @@ Every authority event is one entry: tenant sequence number, previous hash, canon
 `GET /api/authority/evidence/verify` recomputes the chain and detects changed, removed, inserted, or reordered entries.
 `POST /api/authority/evidence/checkpoint` signs the head for anchoring outside the Engine.
 `GET /api/authority/evidence/export` returns entries, keys, and checkpoints; `Evidence.verify_export/1` verifies a bundle without the database.
+It returns at most `limit` entries after `after` (default and most 10,000), with what a verifier needs to tell a whole export from one cut short:
+
+```
+{"entries": [...], "complete": true | false, "total": N, "head": {"seq": S, "hash": H, "kid": K, "signature": G}, "next_after": seq | null}
+```
+
+`head` is the chain's last entry when the export was read, signed with the evidence key over the statement a checkpoint signs; `total` counts the entries after `after` up to it; `complete` is true only when the last entry exported is the head, and then `next_after` is `null`.
+`Evidence.verify_export/1` checks the head's signature and, for a complete bundle, that it holds `total` entries ending at the head; a bundle that is not complete is reported `partial`, never valid.
+`mix optimal.authority export` writes the whole chain page by page, ending complete.
+Verification, the integrity scan and agent action chains read the chain in pages, so none is cut short however long the chain grows.
 Outside enforcers report receipts with `POST /api/authority/evidence` (`outcome: could_not_enforce` for constraints they could not apply).
 
 `GET /api/authority/integrity` compares live packs, grants, local denies, and API keys with the evidence and reports changes made outside authority.

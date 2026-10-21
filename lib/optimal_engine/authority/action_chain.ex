@@ -44,6 +44,9 @@ defmodule OptimalEngine.Authority.ActionChain do
     "reply" => "inform"
   }
 
+  # The most native steps a trace verifies and returns.
+  @native_cap 2_000
+
   @doc "The step stages."
   @spec stages() :: [String.t()]
   def stages, do: @stages
@@ -169,9 +172,17 @@ defmodule OptimalEngine.Authority.ActionChain do
   @doc """
   The chain for a correlation id, an Engine approval request id, or a grant
   id: ordered steps, stage coverage, verification, and findings.
+
+  The Engine's own steps (native, read from the evidence chain) are capped at
+  #{@native_cap}, the oldest first, since a grant admitted many times can link
+  far more: `truncated` says whether some were left out, and `total` counts
+  every step, reported and native.
+
+  With `workspace_id:`, a chain of another workspace is `{:error, :not_found}`,
+  known before any step is verified.
   """
-  @spec trace(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
-  def trace(tenant_id, id) do
+  @spec trace(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
+  def trace(tenant_id, id, opts \\ []) do
     steps =
       case steps(tenant_id, id) do
         [] -> tenant_id |> correlation_for(id) |> then(&if(&1, do: steps(tenant_id, &1), else: []))
@@ -179,43 +190,75 @@ defmodule OptimalEngine.Authority.ActionChain do
       end
 
     linked = linked_ids(steps, id)
-    native = native_entries(tenant_id, linked)
+    {native, native_total} = native_entries(tenant_id, linked)
+    rekeys = WorkspaceRekeys.list(tenant_id)
+    workspace_id = chain_workspace(steps, native, rekeys)
 
-    if steps == [] and native == [] do
-      {:error, :not_found}
-    else
-      rekeys = WorkspaceRekeys.list(tenant_id)
-      step_entries = step_evidence(tenant_id, steps)
+    chain = %{
+      steps: steps,
+      native: native,
+      native_total: native_total,
+      rekeys: rekeys,
+      workspace_id: workspace_id
+    }
 
-      reported =
-        Enum.map(steps, fn step ->
-          entry = Map.get(step_entries, step["evidence_id"])
+    cond do
+      steps == [] and native == [] ->
+        {:error, :not_found}
 
-          step
-          |> Map.put("source", "reported")
-          |> Map.put("verified", verified(tenant_id, entry, step, rekeys))
-        end)
+      Keyword.has_key?(opts, :workspace_id) and workspace_id != opts[:workspace_id] ->
+        {:error, :not_found}
 
-      native_steps =
-        native
-        |> Enum.map(&native_step(tenant_id, &1, rekeys))
-        |> Enum.reject(&is_nil/1)
-
-      ordered = Enum.sort_by(reported ++ native_steps, & &1["occurred_at"])
-      stages = MapSet.new(ordered, & &1["stage"])
-
-      {:ok,
-       %{
-         id: id,
-         correlation_id: steps |> List.first() |> then(&(&1 && &1["correlation_id"])),
-         workspace_id: Enum.find_value(ordered, & &1["workspace_id"]),
-         stages: Map.new(@stages, &{&1, MapSet.member?(stages, &1)}),
-         complete: complete?(stages),
-         verified: Enum.all?(ordered, &(&1["verified"] == true)),
-         findings: findings(ordered, stages),
-         steps: ordered
-       }}
+      true ->
+        {:ok, verified_trace(tenant_id, id, chain)}
     end
+  end
+
+  # The workspace a trace reports: that of its earliest step, reported or native,
+  # a native one named as the workspace is now (`native_step/3`).
+  defp chain_workspace(steps, native, rekeys) do
+    (Enum.map(steps, &{&1["occurred_at"], &1["workspace_id"]}) ++
+       Enum.map(native, fn entry ->
+         {entry["recorded_at"],
+          WorkspaceRekeys.current(rekeys, entry["workspace_id"], entry["seq"])}
+       end))
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.find_value(&elem(&1, 1))
+  end
+
+  defp verified_trace(tenant_id, id, chain) do
+    %{steps: steps, native: native, native_total: native_total, rekeys: rekeys} = chain
+    step_entries = step_evidence(tenant_id, steps)
+
+    reported =
+      Enum.map(steps, fn step ->
+        entry = Map.get(step_entries, step["evidence_id"])
+
+        step
+        |> Map.put("source", "reported")
+        |> Map.put("verified", verified(tenant_id, entry, step, rekeys))
+      end)
+
+    native_steps =
+      native
+      |> Enum.map(&native_step(tenant_id, &1, rekeys))
+      |> Enum.reject(&is_nil/1)
+
+    ordered = Enum.sort_by(reported ++ native_steps, & &1["occurred_at"])
+    stages = MapSet.new(ordered, & &1["stage"])
+
+    %{
+      id: id,
+      correlation_id: steps |> List.first() |> then(&(&1 && &1["correlation_id"])),
+      workspace_id: chain.workspace_id,
+      stages: Map.new(@stages, &{&1, MapSet.member?(stages, &1)}),
+      complete: complete?(stages),
+      verified: Enum.all?(ordered, &(&1["verified"] == true)),
+      findings: findings(ordered, stages),
+      steps: ordered,
+      truncated: native_total > length(native),
+      total: length(steps) + native_total
+    }
   end
 
   @doc "Recent chains for workspaces, newest first."
@@ -426,35 +469,39 @@ defmodule OptimalEngine.Authority.ActionChain do
     [id | from_steps] |> Enum.reject(&is_nil/1) |> Enum.uniq()
   end
 
-  defp native_entries(_tenant_id, []), do: []
+  # The native entries a trace links (oldest first, at most @native_cap) and how many
+  # there are: those naming one of `ids` as request, approval or grant, and those of
+  # the grants issued for them. Each id list is one JSON array bound as one parameter
+  # (`json_each`), so a chain of any length is one exact query, never batches.
+  defp native_entries(_tenant_id, []), do: {[], 0}
 
   defp native_entries(tenant_id, ids) do
-    marks = Enum.map_join(0..(length(ids) - 1), ", ", &"?#{&1 + 2}")
-
-    requests =
-      Evidence.where(
-        tenant_id,
-        "kind <> 'agent_action.step' AND (#{detail_field("request_id")} IN (#{marks}) OR #{detail_field("approval")} IN (#{marks}) OR jti IN (#{marks}))",
-        ids
-      )
+    linked =
+      "#{detail_field("request_id")} IN (SELECT value FROM json_each(?2)) OR " <>
+        "#{detail_field("approval")} IN (SELECT value FROM json_each(?2)) OR " <>
+        "jti IN (SELECT value FROM json_each(?2))"
 
     jtis =
-      requests
-      |> Enum.filter(&(&1["kind"] in ["grant.issued", "grant.narrowed"]))
-      |> Enum.map(& &1["jti"])
-      |> Enum.reject(&(&1 in ids or is_nil(&1)))
+      tenant_id
+      |> Evidence.stream("kind IN ('grant.issued', 'grant.narrowed') AND (#{linked})", [
+        Jason.encode!(ids)
+      ])
+      |> Stream.map(& &1["jti"])
+      |> Stream.reject(&(is_nil(&1) or &1 in ids))
+      |> Enum.uniq()
 
-    more =
-      case jtis do
-        [] ->
-          []
+    kinds = Enum.map_join(Map.keys(native_stages()), ", ", &"'#{&1}'")
+    condition = "kind IN (#{kinds}) AND (#{linked} OR jti IN (SELECT value FROM json_each(?3)))"
+    params = [Jason.encode!(ids), Jason.encode!(jtis)]
 
-        _ ->
-          jti_marks = Enum.map_join(0..(length(jtis) - 1), ", ", &"?#{&1 + 2}")
-          Evidence.where(tenant_id, "kind <> 'agent_action.step' AND jti IN (#{jti_marks})", jtis)
-      end
+    entries = tenant_id |> Evidence.stream(condition, params) |> Enum.take(@native_cap)
 
-    Enum.uniq_by(requests ++ more, & &1["id"])
+    total =
+      if length(entries) < @native_cap,
+        do: length(entries),
+        else: Evidence.count(tenant_id, condition, params)
+
+    {entries, total}
   end
 
   @native_stages %{
@@ -468,6 +515,8 @@ defmodule OptimalEngine.Authority.ActionChain do
     "action.completed" => "result",
     "action.withheld" => "result"
   }
+
+  defp native_stages, do: @native_stages
 
   defp native_step(tenant_id, entry, rekeys) do
     case Map.get(@native_stages, entry["kind"]) do
