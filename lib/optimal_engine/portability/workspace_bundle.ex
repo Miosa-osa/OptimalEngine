@@ -74,6 +74,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   @documents "operating_documents"
   @batch_rows 1_000
   @snapshot_attempts 20
+  @stale_staging_seconds 7_200
 
   @doc """
   Writes a bundle for `workspace_id` to `path`. Returns the manifest.
@@ -216,17 +217,31 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   @doc """
   Removes what a run that never finished left behind: raw uploads still being
-  received (`upload-*.part`) or received and not yet imported
-  (`upload-*.tar.gz`) in the tenants' bundle folders, and the staging folders
-  of exports and imports. A run removes its own files whatever happens, so
-  these are only left by an Engine that stopped mid-way. The Engine that
-  serves the API calls this at boot, before it takes requests. Returns how
-  many were removed.
+  received (`.upload-*.part`) or received and not yet imported
+  (`.upload-*.tar.gz`) in the tenants' bundle folders, and the `bundle-*`
+  staging folders of exports and imports last changed more than two hours
+  ago. A run removes its own files whatever happens, so these are only left by
+  an Engine that stopped mid-way. Nothing else is touched: an upload's name
+  starts with a dot, which no bundle name may (`bundle_path/2`), so a retained
+  export is never taken for one. The Engine that serves the API calls this at
+  boot, before it takes requests. Returns how many were removed.
   """
   @spec sweep_leftovers() :: non_neg_integer()
   def sweep_leftovers do
-    uploads = Path.wildcard(Path.join([backup_base(), "bundles", "*", "upload-*.{part,tar.gz}"]))
-    staged = Path.wildcard(Path.join(staging_root(), "*"))
+    uploads =
+      Path.wildcard(Path.join([backup_base(), "bundles", "*", ".upload-*.{part,tar.gz}"]),
+        match_dot: true
+      )
+
+    cutoff = System.os_time(:second) - @stale_staging_seconds
+
+    staged =
+      staging_root()
+      |> Path.join("bundle-*")
+      |> Path.wildcard()
+      |> Enum.filter(fn path ->
+        match?({:ok, %{mtime: mtime}} when mtime < cutoff, File.stat(path, time: :posix))
+      end)
 
     Enum.each(uploads, &File.rm/1)
     Enum.each(staged, &File.rm_rf/1)

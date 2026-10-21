@@ -98,7 +98,7 @@ defmodule OptimalEngine.ScopePortabilityTest do
   end
 
   defp uploads_left(tenant),
-    do: Path.wildcard(Path.join(WorkspaceBundle.bundle_dir(tenant), "upload-*"))
+    do: Path.wildcard(Path.join(WorkspaceBundle.bundle_dir(tenant), ".upload-*"), match_dot: true)
 
   # Upload limits for one test, and the size of every chunk read while it runs.
   defp with_upload_limits(limits, fun) do
@@ -933,21 +933,69 @@ defmodule OptimalEngine.ScopePortabilityTest do
       end)
     end
 
-    test "unfinished uploads and staging folders are swept, and nothing else", ctx do
+    test "unfinished uploads and stale staging folders are swept, and nothing else", ctx do
       dir = WorkspaceBundle.bundle_dir(ctx.tenant)
       kept = Path.join(dir, "kept-#{ctx.n}.tar.gz")
-      left = for suffix <- [".part", ".tar.gz"], do: Path.join(dir, "upload-#{ctx.n}#{suffix}")
+      left = for suffix <- [".part", ".tar.gz"], do: Path.join(dir, ".upload-#{ctx.n}#{suffix}")
       Enum.each([kept | left], &File.write!(&1, "x"))
 
-      staged = Path.join([Path.dirname(dir), "..", "staging", "bundle-#{ctx.n}"]) |> Path.expand()
-      File.mkdir_p!(staged)
-      File.write!(Path.join(staged, "manifest.json"), "{}")
+      staging = Path.join([Path.dirname(dir), "..", "staging"]) |> Path.expand()
+      stale = Path.join(staging, "bundle-#{ctx.n}-stale")
+      fresh = Path.join(staging, "bundle-#{ctx.n}-fresh")
+      other = Path.join(staging, "other-#{ctx.n}")
+      three_hours_ago = System.os_time(:second) - 3 * 3_600
+
+      for folder <- [stale, fresh, other] do
+        File.mkdir_p!(folder)
+        File.write!(Path.join(folder, "manifest.json"), "{}")
+      end
+
+      File.touch!(stale, three_hours_ago)
+      File.touch!(other, three_hours_ago)
 
       assert WorkspaceBundle.sweep_leftovers() >= 3
       refute Enum.any?(left, &File.exists?/1)
-      refute File.exists?(staged)
+      refute File.exists?(stale)
+
+      # An export, a staging folder still in use, and anything not a bundle's
+      # stay where they are.
       assert File.exists?(kept)
+      assert File.exists?(fresh)
+      assert File.exists?(other)
       File.rm(kept)
+      Enum.each([fresh, other], &File.rm_rf/1)
+    end
+
+    test "a retained export of a tenant whose id starts with upload- survives the sweep", ctx do
+      tenant = "upload-x-#{ctx.n}"
+      {:ok, _} = Tenant.create(%{id: tenant, name: "Upload X"})
+
+      {:ok, _} =
+        OptimalEngine.Organization.create(%{
+          id: "#{tenant}:org",
+          tenant_id: tenant,
+          slug: "org",
+          name: "Org"
+        })
+
+      {:ok, workspace} =
+        Workspace.create(%{
+          tenant_id: tenant,
+          organization_id: "#{tenant}:org",
+          slug: "open",
+          name: "Open"
+        })
+
+      context(tenant, workspace.id, "upload-x-#{ctx.n}", "Kept", "a retained export")
+
+      name = "#{tenant}-open-#{System.os_time(:second)}.tar.gz"
+      path = Path.join(WorkspaceBundle.bundle_dir(tenant), name)
+      {:ok, _} = WorkspaceBundle.export(tenant, workspace.id, path)
+      assert {:ok, ^path} = WorkspaceBundle.bundle_path(tenant, name)
+
+      WorkspaceBundle.sweep_leftovers()
+      assert File.exists?(path)
+      File.rm(path)
     end
 
     test "a table larger than one export page travels whole", ctx do
