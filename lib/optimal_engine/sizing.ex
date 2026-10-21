@@ -16,10 +16,20 @@ defmodule OptimalEngine.Sizing do
   and memory map, the hot context cache, and the API rate limit; explicitly
   configured values always win.
 
-  `usage/0` measures vectors, memories, contexts, disk, memory, and the
-  recent write rate against the profile's limits. At 70 percent of any limit
-  the recommendation names the next profile; on `scale` it names the
-  providers to enable instead.
+  `usage/0` measures vectors, memories, pending memory candidates, contexts,
+  disk, memory, and the recent write rate against the profile's limits. At 70
+  percent of any limit the recommendation names the next profile; on `scale`
+  it names the providers to enable instead.
+
+  A memory candidate is a pending claim of type `memory_candidate`: a fact the
+  governed memory intake wrote and nobody has reviewed. `Memory.remember/2`
+  writes the claim and, when asked to project (`POST /api/memory/remember` and
+  `mix optimal.remember` do), a staging row in `memories`; `Memory.create/1`
+  writes a memory and stages its claim. A fact can be in both gauges, and a
+  fact remembered through the library without the projection is only a
+  candidate, so the two are not added. The limit is a tenth of the profile's
+  memories: a candidate is a claim, a source package and ledger entries, and a
+  backlog that deep is more than anyone reviews.
   """
 
   alias OptimalEngine.Store
@@ -35,7 +45,13 @@ defmodule OptimalEngine.Sizing do
       machine: %{vcpu: 1, memory_mib: 1_024, size: "tiny"},
       disk_gib: 2,
       scale_to_zero: true,
-      limits: %{vectors: 50_000, memories: 100_000, contexts: 25_000, writes_per_minute: 600},
+      limits: %{
+        vectors: 50_000,
+        memories: 100_000,
+        memory_candidates: 10_000,
+        contexts: 25_000,
+        writes_per_minute: 600
+      },
       tuning: %{
         sqlite_cache_mib: 16,
         sqlite_mmap_mib: 64,
@@ -50,7 +66,13 @@ defmodule OptimalEngine.Sizing do
       machine: %{vcpu: 1, memory_mib: 2_048, size: "xs"},
       disk_gib: 10,
       scale_to_zero: true,
-      limits: %{vectors: 250_000, memories: 500_000, contexts: 100_000, writes_per_minute: 1_500},
+      limits: %{
+        vectors: 250_000,
+        memories: 500_000,
+        memory_candidates: 50_000,
+        contexts: 100_000,
+        writes_per_minute: 1_500
+      },
       tuning: %{
         sqlite_cache_mib: 64,
         sqlite_mmap_mib: 256,
@@ -68,6 +90,7 @@ defmodule OptimalEngine.Sizing do
       limits: %{
         vectors: 1_000_000,
         memories: 2_000_000,
+        memory_candidates: 200_000,
         contexts: 500_000,
         writes_per_minute: 3_000
       },
@@ -88,6 +111,7 @@ defmodule OptimalEngine.Sizing do
       limits: %{
         vectors: 5_000_000,
         memories: 10_000_000,
+        memory_candidates: 1_000_000,
         contexts: 2_000_000,
         writes_per_minute: 6_000
       },
@@ -108,6 +132,7 @@ defmodule OptimalEngine.Sizing do
       limits: %{
         vectors: 10_000_000,
         memories: 50_000_000,
+        memory_candidates: 5_000_000,
         contexts: 10_000_000,
         writes_per_minute: 12_000
       },
@@ -180,6 +205,7 @@ defmodule OptimalEngine.Sizing do
     evaluate(profile(), %{
       vectors: count_vectors(),
       memories: count("memories"),
+      memory_candidates: memory_candidates(),
       contexts: count("contexts"),
       disk_bytes: disk_bytes(),
       memory_bytes: :erlang.memory(:total),
@@ -195,6 +221,7 @@ defmodule OptimalEngine.Sizing do
     gauges = [
       gauge("vectors", measures.vectors, limits.vectors),
       gauge("memories", measures.memories, limits.memories),
+      gauge("memory_candidates", measures.memory_candidates, limits.memory_candidates),
       gauge("contexts", measures.contexts, limits.contexts),
       gauge("disk_bytes", measures.disk_bytes, profile.disk_bytes),
       gauge("memory_bytes", measures.memory_bytes, profile.machine.memory_mib * @mib),
@@ -316,19 +343,36 @@ defmodule OptimalEngine.Sizing do
     Float.round(written / 60, 1)
   end
 
+  # Pending claims of type `memory_candidate`. No index covers the two columns,
+  # so the count reads the claims table; it is kept for 30 seconds, which
+  # bounds the scan however often the gauges are read.
+  defp memory_candidates do
+    cached(:memory_candidates, 30, fn ->
+      case Store.raw_query(
+             "SELECT COUNT(*) FROM claims WHERE claim_type = ?1 AND lifecycle_state = ?2",
+             ["memory_candidate", "pending"]
+           ) do
+        {:ok, [[n]]} -> n
+        _ -> 0
+      end
+    end)
+  end
+
   # The database files, the graph, the file root, and the cache. Directory
   # sizes are cached for five minutes; a walk stops after 200,000 entries.
-  defp disk_bytes do
+  defp disk_bytes, do: cached(:disk, 300, &measure_disk/0)
+
+  defp cached(key, ttl_seconds, measure) do
     now = System.monotonic_time(:second)
 
-    case :persistent_term.get({__MODULE__, :disk}, nil) do
-      {at, bytes} when now - at < 300 ->
-        bytes
+    case :persistent_term.get({__MODULE__, key}, nil) do
+      {at, value} when now - at < ttl_seconds ->
+        value
 
       _ ->
-        bytes = measure_disk()
-        :persistent_term.put({__MODULE__, :disk}, {now, bytes})
-        bytes
+        value = measure.()
+        :persistent_term.put({__MODULE__, key}, {now, value})
+        value
     end
   end
 
