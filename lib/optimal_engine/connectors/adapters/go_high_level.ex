@@ -72,7 +72,8 @@ defmodule OptimalEngine.Connectors.Adapters.GoHighLevel do
     display_name: "GoHighLevel",
     auth_scheme: :token,
     required_keys: [:location_ids],
-    credential_keys: []
+    credential_keys: [],
+    token_key: :api_token
 
   alias OptimalEngine.Connectors.HTTP
 

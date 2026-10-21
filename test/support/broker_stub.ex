@@ -15,8 +15,11 @@ defmodule OptimalEngine.Test.BrokerStub do
     * `{token, expires_in_seconds}` - a `200` answering
       `{"credentials": {"access_token": token, "expires_at": ...}}`, the
       broker contract, with `expires_at` that far ahead
+    * `{:body, map}` - a `200` answering that body as it is
     * `{:status, code}` - that status with an error body
     * `:unreachable` - a network error
+
+  The broker answers at `broker_url:` (default `broker_url/0`).
 
   A broker call beyond the list raises, so a test that expects a bounded
   number of fetches fails loudly when the Engine asks again.
@@ -59,10 +62,11 @@ defmodule OptimalEngine.Test.BrokerStub do
       end)
 
     api = Keyword.get(opts, :api)
+    broker_url = Keyword.get(opts, :broker_url, @broker_url)
     reject_with = Keyword.get(opts, :reject_with, {401, %{}})
 
     Application.put_env(:optimal_engine, :http_mock, fn url, request_opts ->
-      if String.starts_with?(url, @broker_url),
+      if String.starts_with?(url, broker_url),
         do: broker(agent, url, request_opts),
         else: provider(agent, url, request_opts, api || recording, reject_with)
     end)
@@ -79,7 +83,7 @@ defmodule OptimalEngine.Test.BrokerStub do
     :ok
   end
 
-  @doc "The broker calls, oldest first: `[%{body:, headers:, timeout:, follow_redirects:}]`."
+  @doc "The broker calls, oldest first: `[%{url:, body:, headers:, timeout:, follow_redirects:}]`."
   @spec broker_calls(handle()) :: [map()]
   def broker_calls(%{agent: agent}),
     do: agent |> Agent.get(& &1.broker_calls) |> Enum.reverse()
@@ -94,8 +98,9 @@ defmodule OptimalEngine.Test.BrokerStub do
 
   # ─── broker ──────────────────────────────────────────────────────────────
 
-  defp broker(agent, _url, opts) do
+  defp broker(agent, url, opts) do
     call = %{
+      url: url,
       body: Keyword.get(opts, :body),
       headers: Keyword.get(opts, :headers, []),
       timeout: Keyword.get(opts, :timeout),
@@ -123,6 +128,9 @@ defmodule OptimalEngine.Test.BrokerStub do
             "expires_at" => DateTime.to_iso8601(expires_at)
           }
         })
+
+      {:body, body} when is_map(body) ->
+        httpc(200, body)
 
       {:status, status} ->
         httpc(status, %{"error" => "refused"})

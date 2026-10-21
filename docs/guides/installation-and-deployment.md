@@ -268,7 +268,7 @@ A managed Engine whose connectors take short-lived credentials from a broker
 brokers it may call; with none named, no broker is called:
 
 ```text
-OPTIMAL_CREDENTIAL_BROKER_HOSTS   comma-separated https hosts, e.g. connect.example.com
+OPTIMAL_CREDENTIAL_BROKER_HOSTS   comma-separated https hosts; api.miosa.ai on MIOSA
 CONNECTOR_KEY                     also seals each connector's broker reference
 ```
 

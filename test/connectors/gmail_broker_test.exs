@@ -110,6 +110,56 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
       assert token_endpoint_calls(stub) == []
     end
 
+    test "a connector as the MIOSA platform registers it asks the broker with its own workspace",
+         ctx do
+      miosa_url = "https://api.miosa.ai/api/v1/connect/broker/credentials"
+      reference = "conn_0001.c2lnbmVkLXJlZmVyZW5jZQ"
+      own_workspace = insert_workspace("#{ctx.tenant}:team", ctx.tenant)
+      id = "miosa:conn_#{ctx.id}:gmail"
+
+      {:ok, view} =
+        Rows.register(
+          %{
+            id: id,
+            kind: "gmail",
+            tenant_id: ctx.tenant,
+            workspace_id: own_workspace,
+            config: %{
+              "user_email" => "jane@example.com",
+              "labels" => ["INBOX"],
+              "credential_source" => "broker",
+              "broker_url" => miosa_url,
+              "broker_reference" => reference,
+              "broker_scopes" => ["gmail.readonly"],
+              "interval_ms" => 900_000
+            }
+          },
+          actor: "operator:test"
+        )
+
+      assert view.config["broker_reference"] == "[redacted]"
+
+      stub = install(broker_url: miosa_url, issue: [{"example-broker-token-1", 3_600}])
+
+      assert {:ok, %{status: :success, signals: 3}} = Runner.run(id, governed: false)
+
+      # The workspace is the connector's own: the broker signs it into the
+      # reference, and answers any other with a 401.
+      assert [call] = BrokerStub.broker_calls(stub)
+      assert call.url == miosa_url
+      assert call.headers == []
+
+      assert call.body == %{
+               "reference" => reference,
+               "workspace_id" => own_workspace,
+               "tenant_id" => ctx.tenant,
+               "connector" => %{"id" => id, "kind" => "gmail"},
+               "scopes" => ["gmail.readonly"]
+             }
+
+      assert call.body["workspace_id"] == view.workspace_id
+    end
+
     test "an expiry mid-sync costs one re-fetch, then the sync succeeds", ctx do
       register(ctx)
 

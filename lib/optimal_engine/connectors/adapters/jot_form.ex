@@ -31,7 +31,8 @@ defmodule OptimalEngine.Connectors.Adapters.JotForm do
     display_name: "JotForm",
     auth_scheme: :token,
     required_keys: [:form_ids],
-    credential_keys: [:api_key]
+    credential_keys: [:api_key],
+    token_key: :api_key
 
   alias OptimalEngine.Connectors.HTTP
 

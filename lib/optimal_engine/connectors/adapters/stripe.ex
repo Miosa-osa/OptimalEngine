@@ -72,7 +72,8 @@ defmodule OptimalEngine.Connectors.Adapters.Stripe do
     display_name: "Stripe",
     auth_scheme: :token,
     required_keys: [:resources],
-    credential_keys: [:api_key]
+    credential_keys: [:api_key],
+    token_key: :api_key
 
   alias OptimalEngine.Connectors.HTTP
 

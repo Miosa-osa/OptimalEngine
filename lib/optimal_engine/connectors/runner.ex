@@ -403,7 +403,7 @@ defmodule OptimalEngine.Connectors.Runner do
   defp init_adapter(mod, row) do
     config = maybe_decrypt_credentials(row.config)
 
-    with {:ok, config} <- CredentialSource.hydrate(config, credential_scope(row)) do
+    with {:ok, config} <- CredentialSource.hydrate(config, credential_scope(row, mod)) do
       case mod.init(config) do
         {:ok, state} -> {:ok, state}
         {:error, _} = err -> err
@@ -412,12 +412,13 @@ defmodule OptimalEngine.Connectors.Runner do
     end
   end
 
-  defp credential_scope(row) do
+  defp credential_scope(row, mod) do
     %{
       id: row.id,
       kind: row.kind,
       tenant_id: row.tenant_id,
-      workspace_id: row.workspace_id
+      workspace_id: row.workspace_id,
+      adapter: mod
     }
   end
 

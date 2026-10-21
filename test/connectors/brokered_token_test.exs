@@ -171,7 +171,8 @@ defmodule OptimalEngine.Connectors.BrokeredTokenTest do
       "broker_reference" => "conn_example_0001"
     }
 
-    with {:ok, hydrated} <- CredentialSource.hydrate(Map.merge(config, broker), @scope),
+    with {:ok, hydrated} <-
+           CredentialSource.hydrate(Map.merge(config, broker), Map.put(@scope, :adapter, mod)),
          {:ok, state} <- mod.init(hydrated) do
       mod.sync(state, nil)
     end
