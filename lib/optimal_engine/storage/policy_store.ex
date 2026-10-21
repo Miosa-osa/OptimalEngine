@@ -72,59 +72,95 @@ defmodule OptimalEngine.Storage.PolicyStore do
     end
   end
 
+  @doc """
+  Appends a storage mutation entry, or answers a replay of one with the entry
+  stored. The entry's id is always generated here; a caller's `:id` is ignored.
+
+  A replay (the idempotency key of an entry of the workspace, with the same
+  entity, operation and payload) answers with the stored entry before the
+  entity type is checked, so an entry stored before the check stays the
+  caller's. Only an entry is answered with: a change of a row that holds the
+  key is not one.
+  """
   @spec append_mutation(map()) :: {:ok, map()} | {:error, term()}
   def append_mutation(attrs) when is_map(attrs) do
     required = ~w(workspace_id device_id entity_type entity_id operation)a
 
     with :ok <- require_fields(attrs, required),
          :ok <- validate_operation(attrs.operation),
-         :ok <- validate_entity_type(attrs.entity_type),
+         :ok <- validate_entity_type_text(attrs.entity_type),
          :ok <- validate_idempotency_key(Map.get(attrs, :idempotency_key)),
          {:ok, tenant_id, organization_id} <- workspace_scope(attrs.workspace_id) do
       payload = Map.get(attrs, :payload)
       payload_json = if is_nil(payload), do: nil, else: Jason.encode!(payload)
-      payload_hash = hash(payload_json || "")
-      id = Map.get(attrs, :id, UUID.uuid4())
-      occurred_at = Map.get(attrs, :occurred_at, DateTime.utc_now() |> DateTime.to_iso8601())
-      idempotency_key = Map.get(attrs, :idempotency_key, id)
 
-      case Store.raw_execute(
-             """
-             INSERT OR IGNORE INTO sync_mutations (
-               id, tenant_id, organization_id, workspace_id, device_id, actor_id,
-               entity_type, entity_id, operation, payload, payload_hash,
-               idempotency_key, occurred_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-             """,
-             [
-               id,
-               tenant_id,
-               organization_id,
-               attrs.workspace_id,
-               attrs.device_id,
-               Map.get(attrs, :actor_id),
-               attrs.entity_type,
-               attrs.entity_id,
-               to_string(attrs.operation),
-               payload_json,
-               payload_hash,
-               idempotency_key,
-               occurred_at
-             ]
-           ) do
-        :ok ->
-          fingerprint = %{
-            entity_type: attrs.entity_type,
-            entity_id: attrs.entity_id,
-            operation: to_string(attrs.operation),
-            payload_hash: payload_hash
-          }
+      fingerprint = %{
+        entity_type: attrs.entity_type,
+        entity_id: attrs.entity_id,
+        operation: to_string(attrs.operation),
+        payload_hash: hash(payload_json || "")
+      }
 
-          resolve_appended(tenant_id, attrs.workspace_id, idempotency_key, fingerprint)
+      case replay(tenant_id, attrs.workspace_id, Map.get(attrs, :idempotency_key), fingerprint) do
+        :none ->
+          with :ok <- validate_entity_type(attrs.entity_type) do
+            insert_entry(tenant_id, organization_id, attrs, payload_json, fingerprint)
+          end
 
-        {:error, reason} ->
-          {:error, reason}
+        replayed ->
+          replayed
       end
+    end
+  end
+
+  # An entry written with no key is keyed by its fresh id, which no entry holds.
+  defp replay(_tenant_id, _workspace_id, nil, _fingerprint), do: :none
+
+  defp replay(tenant_id, workspace_id, idempotency_key, fingerprint) do
+    case get_entry_by_idempotency_key(tenant_id, workspace_id, idempotency_key) do
+      {:ok, entry} -> same_change(entry, fingerprint)
+      {:error, :not_found} -> :none
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp same_change(entry, fingerprint) do
+    if Map.take(entry, Map.keys(fingerprint)) == fingerprint,
+      do: {:ok, entry},
+      else: {:error, :idempotency_key_conflict}
+  end
+
+  defp insert_entry(tenant_id, organization_id, attrs, payload_json, fingerprint) do
+    id = UUID.uuid4()
+    occurred_at = Map.get(attrs, :occurred_at, DateTime.utc_now() |> DateTime.to_iso8601())
+    idempotency_key = Map.get(attrs, :idempotency_key, id)
+
+    case Store.raw_execute(
+           """
+           INSERT OR IGNORE INTO sync_mutations (
+             id, tenant_id, organization_id, workspace_id, device_id, actor_id,
+             entity_type, entity_id, operation, payload, payload_hash,
+             idempotency_key, occurred_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+           """,
+           [
+             id,
+             tenant_id,
+             organization_id,
+             attrs.workspace_id,
+             attrs.device_id,
+             Map.get(attrs, :actor_id),
+             attrs.entity_type,
+             attrs.entity_id,
+             fingerprint.operation,
+             payload_json,
+             fingerprint.payload_hash,
+             idempotency_key,
+             occurred_at
+           ]
+         ) do
+      :ok -> resolve_appended(tenant_id, attrs.workspace_id, idempotency_key, fingerprint)
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -134,11 +170,9 @@ defmodule OptimalEngine.Storage.PolicyStore do
   # workspace's mutation or payload, and only treat it as a replay when the
   # stored mutation is the same change (entity, operation, payload).
   defp resolve_appended(tenant_id, workspace_id, idempotency_key, fingerprint) do
-    case get_mutation_by_idempotency_key(tenant_id, workspace_id, idempotency_key) do
-      {:ok, mutation} ->
-        if Map.take(mutation, Map.keys(fingerprint)) == fingerprint,
-          do: {:ok, mutation},
-          else: {:error, :idempotency_key_conflict}
+    case get_entry_by_idempotency_key(tenant_id, workspace_id, idempotency_key) do
+      {:ok, entry} ->
+        same_change(entry, fingerprint)
 
       {:error, :not_found} ->
         classify_ignored_append(idempotency_key)
@@ -288,7 +322,10 @@ defmodule OptimalEngine.Storage.PolicyStore do
     end
   end
 
-  defp get_mutation_by_idempotency_key(tenant_id, workspace_id, key) do
+  # The storage entry of the workspace that holds `key`. A change of a row that
+  # holds it (an earlier version stored a peer's change under the key the peer
+  # sent) is no entry, and is never handed to the storage route.
+  defp get_entry_by_idempotency_key(tenant_id, workspace_id, key) do
     case Store.raw_query(
            """
            SELECT sequence, id, tenant_id, organization_id, workspace_id,
@@ -296,6 +333,7 @@ defmodule OptimalEngine.Storage.PolicyStore do
                   payload, payload_hash, idempotency_key, occurred_at, recorded_at
            FROM sync_mutations
            WHERE tenant_id = ?1 AND workspace_id = ?2 AND idempotency_key = ?3
+             AND NOT #{OptimalEngine.Sync.change_row_sql()}
            """,
            [tenant_id, workspace_id, key]
          ) do
@@ -333,21 +371,28 @@ defmodule OptimalEngine.Storage.PolicyStore do
   defp validate_operation(operation) when operation in ["create", "update", "delete"], do: :ok
   defp validate_operation(_), do: {:error, :invalid_operation}
 
+  defp validate_entity_type_text(type) when is_binary(type), do: :ok
+  defp validate_entity_type_text(_type), do: {:error, :invalid_entity_type}
+
   # A table name is what replication and the gate read rows by; SQLite matches
   # table names without regard to case.
-  defp validate_entity_type(type) when is_binary(type) do
-    {:ok, rows} =
-      Store.raw_query(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
-        [type]
-      )
+  defp validate_entity_type(type) do
+    case Store.raw_query(
+           "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
+           [type]
+         ) do
+      {:ok, []} ->
+        if String.starts_with?(String.downcase(type), "authority_"),
+          do: {:error, :entity_type_names_a_table},
+          else: :ok
 
-    if rows != [] or String.starts_with?(String.downcase(type), "authority_"),
-      do: {:error, :entity_type_names_a_table},
-      else: :ok
+      {:ok, _table} ->
+        {:error, :entity_type_names_a_table}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
-
-  defp validate_entity_type(_type), do: {:error, :invalid_entity_type}
 
   defp validate_idempotency_key(nil), do: :ok
 

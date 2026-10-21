@@ -1700,14 +1700,18 @@ defmodule OptimalEngine.Sync do
 
   def change_row?(_id, _device, _key), do: false
 
+  @doc false
   # `change_row?/3` as a condition on `sync_mutations`, or on the alias of it a
-  # join names.
-  defp change_row_sql(table \\ nil) do
+  # join names. Every reader of the ledger that takes a row for a change uses it.
+  # It is written with LIKE, substr, length and ||, which the PostgreSQL store
+  # translates (`OptimalEngine.Store.Dialect` refuses instr).
+  @spec change_row_sql(String.t() | nil) :: String.t()
+  def change_row_sql(table \\ nil) do
     [key, id, device] =
       for column <- ["idempotency_key", "id", "device_id"],
           do: if(table, do: "#{table}.#{column}", else: column)
 
-    "(instr(#{id}, ':') = 0 AND (#{key} = 'peer:' || #{id} OR " <>
+    "(#{id} NOT LIKE '%:%' AND (#{key} = 'peer:' || #{id} OR " <>
       "(substr(#{key}, 1, length(#{device}) + 1) = #{device} || ':' AND " <>
       "#{id} = 'mut_' || #{device} || '_' || substr(#{key}, length(#{device}) + 2))))"
   end

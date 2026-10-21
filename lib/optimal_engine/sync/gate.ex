@@ -591,7 +591,8 @@ defmodule OptimalEngine.Sync.Gate do
   end
 
   # The tables the ledger recorded `id` in (among those a link of no stated
-  # type can name), read a chunk of ids at a time by `resolve_any/2`.
+  # type can name), read a chunk of ids at a time by `resolve_any/2`. Only
+  # changes of a row count, as in `ledger_tokens/4`.
   defp gone_types(gate, id) do
     memoized(gate, {:gone_types, id}, fn ->
       gone_types_of(gate, [id]) |> Map.get(id, [])
@@ -604,6 +605,7 @@ defmodule OptimalEngine.Sync.Gate do
     sql =
       "SELECT entity_id, entity_type FROM sync_mutations " <>
         "WHERE tenant_id = ?1 AND workspace_id = ?2 AND operation != 'delete' " <>
+        "AND #{OptimalEngine.Sync.change_row_sql()} " <>
         "AND entity_type IN (#{marks(3, length(types))}) " <>
         "AND entity_id IN (#{marks(3 + length(types), length(ids))}) " <>
         "GROUP BY entity_id, entity_type"
@@ -1048,6 +1050,8 @@ defmodule OptimalEngine.Sync.Gate do
   # is gone too is ignored. A replicating gate stops as soon as a version is
   # restricted. A row with more than @ledger_chunk * @ledger_chunks versions is
   # not read to the end and is unresolved. `:none` when the ledger has no version.
+  # Only changes of the row count: a storage mutation entry that names the row
+  # is none, and could otherwise add to its history or push it past what is read.
   @ledger_chunk 50
   @ledger_chunks 20
 
@@ -1060,7 +1064,7 @@ defmodule OptimalEngine.Sync.Gate do
         """
         SELECT sequence, payload FROM sync_mutations
         WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = ?3 AND entity_id = ?4
-          AND operation != 'delete' AND sequence < ?5
+          AND operation != 'delete' AND sequence < ?5 AND #{OptimalEngine.Sync.change_row_sql()}
         ORDER BY sequence DESC LIMIT #{@ledger_chunk}
         """,
         [gate.tenant_id, gate.workspace_id, table, id, before]
