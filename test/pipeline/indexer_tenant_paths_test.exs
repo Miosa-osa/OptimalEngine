@@ -65,6 +65,9 @@ defmodule OptimalEngine.Pipeline.IndexerTenantPathsTest do
     shared = write!(root, "project-a/three.md")
     top = write!(root, "README.md")
     own = write!(root, "nodes/team/four.md")
+    # A file in the directory of a tenant, or in `tenants` itself, is in no workspace.
+    stray = write!(root, "tenants/#{tenant}/stray.md")
+    stray_top = write!(root, "tenants/stray.md")
 
     assert {:ok, :started} = Indexer.full_index()
     await_index(300)
@@ -76,6 +79,8 @@ defmodule OptimalEngine.Pipeline.IndexerTenantPathsTest do
     assert scope_of(top) == [["default", "default"]]
     # The root's own directories are the default workspace's tree.
     assert scope_of(own) == [["default", "default"]]
+    assert scope_of(stray) == []
+    assert scope_of(stray_top) == []
   end
 
   test "reads a path back to the workspace and tenant that Filesystem.path built it for", ctx do

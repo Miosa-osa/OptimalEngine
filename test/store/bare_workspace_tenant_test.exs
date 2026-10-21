@@ -79,6 +79,12 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
 
     {:ok, _} =
       Store.raw_query(
+        "INSERT INTO chunk_embeddings (chunk_id, tenant_id, model, modality, dim, vector, workspace_id) VALUES (?1, ?2, 'm', 'text', 2, ?3, ?4)",
+        ["chunk-#{signal_id}", tenant, {:blob, <<0, 0>>}, workspace]
+      )
+
+    {:ok, _} =
+      Store.raw_query(
         "INSERT INTO source_packages (id, tenant_id, workspace_id, content_hash) VALUES (?1, ?2, ?3, ?4)",
         ["package-#{signal_id}", tenant, workspace, "hash-#{signal_id}"]
       )
@@ -93,6 +99,16 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
   defp vector_tenants(context_id) do
     {:ok, rows} =
       Store.raw_query("SELECT DISTINCT tenant_id FROM vectors WHERE context_id = ?1", [context_id])
+
+    rows |> List.flatten() |> Enum.sort()
+  end
+
+  defp embedding_tenants(signal_id) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT DISTINCT e.tenant_id FROM chunk_embeddings e JOIN chunks c ON c.id = e.chunk_id WHERE c.signal_id = ?1",
+        [signal_id]
+      )
 
     rows |> List.flatten() |> Enum.sort()
   end
@@ -253,12 +269,52 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
       assert child_tenants("chunks", id) == [a]
       assert child_tenants("claims", id) == [a]
       assert vector_tenants(id) == [a]
+      assert embedding_tenants(id) == [a]
 
       # A context the owner has not rewritten keeps its own.
       assert tenant_of(other) == "default"
       assert child_tenants("chunks", other) == ["default"]
       assert child_tenants("claims", other) == ["default"]
       assert vector_tenants(other) == ["default"]
+      assert embedding_tenants(other) == ["default"]
+    end
+
+    test "a row another tenant held is not the default tenant's to give away", ctx do
+      %{a: a, b: b, ws: ws, n: n} = ctx
+      id = "bare-other-kids-#{n}"
+      assert :ok = Store.insert_context(context(id, ws, tenant_id: b))
+      children!(id, ws, b)
+
+      # `a` owns a workspace and writes the same id into it: the row is a's now, and
+      # what was written for b is not a rewrite of the default tenant's rows.
+      assert :ok = Store.insert_context(context(id, register(a, "owned-#{n}")))
+
+      assert tenant_of(id) == a
+      assert child_tenants("chunks", id) == [b]
+      assert child_tenants("claims", id) == [b]
+      assert embedding_tenants(id) == [b]
+    end
+
+    test "a takeover whose row cannot be written leaves the children where they were", ctx do
+      %{a: a, ws: ws, n: n} = ctx
+      id = "bare-atomic-#{n}"
+      assert :ok = Store.insert_context(context(id, ws))
+      children!(id, ws)
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO workspaces (id, tenant_id, organization_id, slug, name, status, metadata) VALUES (?1, ?2, ?3, ?4, 'Late', 'active', '{}')",
+          [ws, a, Organization.default_for(a), "late-atomic-#{n}"]
+        )
+
+      # A title SQLite cannot hold: the row is refused after the owner is decided.
+      assert {:error, :invalid_parameter} =
+               Store.insert_context(context(id, ws, title: %{"not" => "bindable"}))
+
+      assert tenant_of(id) == "default"
+      assert child_tenants("chunks", id) == ["default"]
+      assert child_tenants("claims", id) == ["default"]
+      assert embedding_tenants(id) == ["default"]
     end
 
     test "a rewrite that keeps the tenant leaves the children of the context alone", ctx do
@@ -271,6 +327,7 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
 
       assert child_tenants("chunks", id) == [a]
       assert child_tenants("claims", id) == [a]
+      assert embedding_tenants(id) == [a]
     end
 
     test "a workspace id that a tenant's prefix names is that tenant's", %{a: a, b: b, n: n} do
