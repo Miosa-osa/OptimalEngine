@@ -139,7 +139,75 @@ defmodule OptimalEngine.EntityTenantTest do
     end
   end
 
+  describe "linking a mention to an entity id that is not text" do
+    test "is refused, not skipped", %{a: a, ws: ws, n: n} do
+      mention_id = mention(a, ws, "Hal Hart", n)
+
+      for entity_id <- [12_345, 1.5, true, %{"id" => "x"}, ["x"]] do
+        assert {:error, :entity_not_found} =
+                 decide(mention_id, :link, ws, a, entity_id: entity_id)
+      end
+
+      assert {:error, :entity_id_required} = decide(mention_id, :link, ws, a, entity_id: nil)
+
+      assert {:ok, [["unresolved"]]} =
+               Store.raw_query("SELECT resolution_state FROM entity_mentions WHERE id = ?1", [
+                 mention_id
+               ])
+    end
+
+    test "is refused over HTTP too", %{a: a, ws: ws, n: n} do
+      mention_id = mention(a, ws, "Ida Ives", n)
+
+      assert {422, %{"error" => error}} =
+               call(
+                 :post,
+                 "/api/entity-mentions/#{mention_id}/decision",
+                 %{workspace: ws, decision: "link", entity_id: 12_345},
+                 key(a)
+               )
+
+      assert error =~ "entity_not_found"
+    end
+  end
+
   describe "merging" do
+    test "repoints the tenant's mentions of the loser and not another tenant's",
+         %{a: a, b: b, ws: ws, n: n} do
+      loser = entity(a, ws, "Jo Jay #{n}")
+      winner = entity(a, ws, "Joanne Jay #{n}")
+      mine = mention(a, ws, "Jo Jay", n)
+      theirs = mention(b, ws, "J. Jay", n)
+
+      # Both mentions were resolved to the loser (the other tenant's by an
+      # earlier version, which did not check the entity it was linked to).
+      for id <- [mine, theirs] do
+        {:ok, _} =
+          Store.raw_query(
+            "UPDATE entity_mentions SET resolved_entity_id = ?1, resolution_state = 'linked' WHERE id = ?2",
+            [loser, id]
+          )
+      end
+
+      assert {:ok, _} =
+               EntityRegistry.merge(loser, winner,
+                 workspace_id: ws,
+                 tenant_id: a,
+                 actor_id: "user:reviewer",
+                 reason: "same person"
+               )
+
+      resolved = fn id ->
+        {:ok, [[entity_id]]} =
+          Store.raw_query("SELECT resolved_entity_id FROM entity_mentions WHERE id = ?1", [id])
+
+        entity_id
+      end
+
+      assert resolved.(mine) == winner
+      assert resolved.(theirs) == loser
+    end
+
     test "into or out of an entity of another tenant is refused, and nothing changes",
          %{a: a, b: b, ws: ws, n: n} do
       mine = entity(a, ws, "Eli Ewing #{n}")

@@ -259,7 +259,11 @@ defmodule OptimalEngine.EntityResolution do
     end
   end
 
-  # A mention is linked to an entity of its own tenant and workspace.
+  # A mention is linked to an entity of its own tenant and workspace. No id is
+  # `selected_entity/6`'s to refuse; an id that is not text names no entity,
+  # and must not skip the check (SQLite would compare a number as its text).
+  defp link_target(_tx, :link, nil, _tenant, _workspace), do: :ok
+
   defp link_target(tx, :link, entity_id, tenant, workspace) when is_binary(entity_id) do
     case Store.txn_query(
            tx,
@@ -272,6 +276,7 @@ defmodule OptimalEngine.EntityResolution do
     end
   end
 
+  defp link_target(_tx, :link, _not_text, _tenant, _workspace), do: {:error, :entity_not_found}
   defp link_target(_tx, _decision, _entity_id, _tenant, _workspace), do: :ok
 
   # An empty id names nothing; it is stored as none.

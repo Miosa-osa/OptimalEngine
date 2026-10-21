@@ -121,8 +121,8 @@ defmodule OptimalEngine.EntityRegistry do
            {:ok, _} <-
              Store.txn_execute(
                tx,
-               "UPDATE entity_mentions SET resolved_entity_id=?1, updated_at=?2 WHERE resolved_entity_id=?3 AND workspace_id=?4",
-               [winner_id, now, loser_id, workspace]
+               "UPDATE entity_mentions SET resolved_entity_id=?1, updated_at=?4 WHERE resolved_entity_id=?5 AND workspace_id=?2 AND #{OptimalEngine.EntityResolution.owned_mention_sql()}",
+               [winner_id, workspace, tenant, now, loser_id]
              ),
            {:ok, 1} <-
              Store.txn_execute(
