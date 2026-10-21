@@ -13,8 +13,9 @@ defmodule OptimalEngine.CorpusOrganizer do
   require Logger
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Tenancy.Tenant
 
-  @default_source_workspace "default:knowledge-intake"
+  @default_intake_slug "knowledge-intake"
   @minimum_score 8
   @minimum_margin 5
   @semantic_margin 0.04
@@ -44,12 +45,69 @@ defmodule OptimalEngine.CorpusOrganizer do
     end
   end
 
-  @doc "The intake workspace the organizer routes from (configurable)."
+  @doc """
+  The intake workspace of `tenant_id`, where the organizer routes from and the
+  routing review queue is read.
+
+  Every tenant has its own: `<tenant>:knowledge-intake`. The slug is
+  `config :optimal_engine, :corpus_intake_slug`. An intake named in
+  `config :optimal_engine, :corpus_source_workspace` is the intake of the
+  tenant that owns that workspace and of no other.
+  """
+  @spec source_workspace(String.t()) :: String.t()
+  def source_workspace(tenant_id) when is_binary(tenant_id) do
+    case configured_source() do
+      nil -> tenant_intake(tenant_id)
+      id -> if intake_tenant(id) == tenant_id, do: id, else: tenant_intake(tenant_id)
+    end
+  end
+
+  @doc """
+  The intake workspace of the deployment: the configured one, else that of the
+  default tenant. The organizer routes from it when it is not given a tenant.
+  """
   @spec source_workspace() :: String.t()
   def source_workspace do
+    configured_source() || tenant_intake(Tenant.default_id())
+  end
+
+  defp configured_source do
     case Application.get_env(:optimal_engine, :corpus_source_workspace) do
       id when is_binary(id) and id != "" -> id
-      _ -> @default_source_workspace
+      _ -> nil
+    end
+  end
+
+  defp tenant_intake(tenant_id), do: tenant_id <> ":" <> intake_slug()
+
+  defp intake_slug do
+    case Application.get_env(:optimal_engine, :corpus_intake_slug) do
+      slug when is_binary(slug) and slug != "" -> slug
+      _ -> @default_intake_slug
+    end
+  end
+
+  # The tenant an intake workspace belongs to: the one it is registered to,
+  # else the default tenant, which is the tenant a context in an unregistered
+  # workspace is stored under. Reads the Store, so it is never called inside
+  # `Store.transaction/2`.
+  defp intake_tenant(workspace_id) do
+    case Store.raw_query("SELECT tenant_id FROM workspaces WHERE id = ?1", [workspace_id]) do
+      {:ok, [[tenant_id]]} -> tenant_id
+      _ -> Tenant.default_id()
+    end
+  end
+
+  # The tenant and the intake workspace an organizer call acts on: the
+  # tenant's own, or with no `:tenant_id` the deployment's.
+  defp intake(opts) do
+    case Keyword.get(opts, :tenant_id) do
+      nil ->
+        source = source_workspace()
+        {intake_tenant(source), source}
+
+      tenant_id ->
+        {tenant_id, source_workspace(tenant_id)}
     end
   end
 
@@ -221,14 +279,20 @@ defmodule OptimalEngine.CorpusOrganizer do
   @page_size 50
   @batch_size 200
 
+  @doc """
+  What the organizer would do with the records of an intake workspace.
+  Options: `:tenant_id` (the intake of that tenant; without it, the
+  deployment's), `:limit`, `:page_size`.
+  """
   def preview(opts \\ []) do
     limit = Keyword.get(opts, :limit, 10_000)
     page_size = Keyword.get(opts, :page_size, @page_size)
-    rules = rules()
-    source = source_workspace()
+    {tenant_id, source} = intake(opts)
+    rules = tenant_rules(rules(), tenant_id)
 
-    with {:ok, rows} <- intake_rows(source, "", limit, page_size, []),
-         {:ok, placer} <- semantic_placer(source, semantic_settings(), Enum.map(rows, &hd/1)) do
+    with {:ok, rows} <- intake_rows(tenant_id, source, "", limit, page_size, []),
+         {:ok, placer} <-
+           semantic_placer(tenant_id, source, semantic_settings(), Enum.map(rows, &hd/1)) do
       proposals =
         Enum.map(rows, fn [id, title, l0, content] ->
           title
@@ -241,19 +305,33 @@ defmodule OptimalEngine.CorpusOrganizer do
     end
   end
 
+  # The routing rules belong to the deployment and may name the workspaces of
+  # any tenant. The records of a tenant are placed in its own active workspaces
+  # only: a rule that names another workspace is not applied, and does not
+  # show the tenant a workspace that is not its own.
+  defp tenant_rules(rules, _tenant_id) when map_size(rules) == 0, do: rules
+
+  defp tenant_rules(rules, tenant_id) do
+    case Store.raw_query(
+           "SELECT id FROM workspaces WHERE tenant_id = ?1 AND status = 'active'",
+           [tenant_id]
+         ) do
+      {:ok, rows} ->
+        active = MapSet.new(List.flatten(rows))
+        Map.filter(rules, fn {workspace_id, _markers} -> workspace_id in active end)
+
+      {:error, _} ->
+        %{}
+    end
+  end
+
   # -- placement by meaning ----------------------------------------------------
 
-  defp semantic_placer(_source, nil, _ids), do: {:ok, %{settings: nil}}
+  defp semantic_placer(_tenant_id, _source, nil, _ids), do: {:ok, %{settings: nil}}
 
   # Compares only the records the preview read (`ids`), so a preview with a
   # `:limit` costs that many comparisons on the request path.
-  defp semantic_placer(source, settings, ids) do
-    tenant_id =
-      case Store.raw_query("SELECT tenant_id FROM workspaces WHERE id = ?1", [source]) do
-        {:ok, [[tenant_id]]} -> tenant_id
-        _ -> "default"
-      end
-
+  defp semantic_placer(tenant_id, source, settings, ids) do
     vote? = settings.method in [:knn, :agree]
 
     with {:ok, {sums, documents}} <- filed_vectors(tenant_id, source, vote?, "", {%{}, []}),
@@ -557,31 +635,46 @@ defmodule OptimalEngine.CorpusOrganizer do
     end
   end
 
-  defp intake_rows(_workspace, _after_id, remaining, _page_size, acc) when remaining <= 0,
-    do: {:ok, acc |> Enum.reverse() |> Enum.concat()}
+  defp intake_rows(_tenant_id, _workspace, _after_id, remaining, _page_size, acc)
+       when remaining <= 0,
+       do: {:ok, acc |> Enum.reverse() |> Enum.concat()}
 
-  defp intake_rows(workspace, after_id, remaining, page_size, acc) do
+  defp intake_rows(tenant_id, workspace, after_id, remaining, page_size, acc) do
     case Store.raw_query(
-           "SELECT id, title, l0_abstract, content FROM contexts WHERE workspace_id = ?1 AND archived_at IS NULL AND id > ?2 ORDER BY id LIMIT ?3",
-           [workspace, after_id, min(page_size, remaining)]
+           "SELECT id, title, l0_abstract, content FROM contexts WHERE tenant_id = ?1 AND workspace_id = ?2 AND archived_at IS NULL AND id > ?3 ORDER BY id LIMIT ?4",
+           [tenant_id, workspace, after_id, min(page_size, remaining)]
          ) do
       {:ok, []} ->
         {:ok, acc |> Enum.reverse() |> Enum.concat()}
 
       {:ok, rows} ->
         [last_id | _] = List.last(rows)
-        intake_rows(workspace, last_id, remaining - length(rows), page_size, [rows | acc])
+
+        intake_rows(tenant_id, workspace, last_id, remaining - length(rows), page_size, [
+          rows | acc
+        ])
 
       {:error, _} = error ->
         error
     end
   end
 
+  @doc """
+  Moves every record the preview places with high confidence to its
+  workspace. Options: `:tenant_id` (the intake of that tenant; without it,
+  the deployment's), `:preview`.
+  """
   def apply_high_confidence(opts \\ []) do
     with {:ok, preview} <- given_or_fresh_preview(opts) do
+      {tenant_id, _source} = intake(opts)
+
       results =
         Enum.map(preview.high_confidence, fn proposal ->
-          {proposal, move_context(proposal.id, proposal.workspace_id, evidence(proposal))}
+          {proposal,
+           move_context(proposal.id, proposal.workspace_id,
+             tenant_id: tenant_id,
+             evidence: evidence(proposal)
+           )}
         end)
 
       errors = Enum.filter(results, fn {_proposal, result} -> not match?({:ok, _}, result) end)
@@ -598,17 +691,20 @@ defmodule OptimalEngine.CorpusOrganizer do
   Writes a routing review entry on every intake record that is not placed
   automatically. A record already queued with the same state and proposal
   is left alone, so a daily run rewrites nothing that did not change.
-  Writes run in transactions of `:batch_size` (default 200). Returns the
-  number of entries written.
+  Writes run in transactions of `:batch_size` (default 200). Options:
+  `:tenant_id` (the intake of that tenant; without it, the deployment's),
+  `:preview`, `:batch_size`. Returns the number of entries written.
   """
   def queue_remaining(opts \\ []) do
     batch_size = Keyword.get(opts, :batch_size, @batch_size)
 
     with {:ok, preview} <- given_or_fresh_preview(opts) do
+      {tenant_id, source} = intake(opts)
+
       (preview.review ++ preview.unresolved)
       |> Enum.chunk_every(batch_size)
       |> Enum.reduce_while({:ok, 0}, fn batch, {:ok, count} ->
-        case queue_batch(batch) do
+        case queue_batch(batch, tenant_id, source) do
           {:ok, written} -> {:cont, {:ok, count + written}}
           {:error, reason} -> {:halt, {:error, reason}}
         end
@@ -616,7 +712,7 @@ defmodule OptimalEngine.CorpusOrganizer do
     end
   end
 
-  defp queue_batch(proposals) do
+  defp queue_batch(proposals, tenant_id, source) do
     queued_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
     Store.transaction(fn txn ->
@@ -638,14 +734,15 @@ defmodule OptimalEngine.CorpusOrganizer do
                txn,
                """
                UPDATE contexts SET metadata = json_set(COALESCE(metadata, '{}'), '$.routing_review', json(?1))
-               WHERE id = ?2 AND workspace_id = ?3 AND archived_at IS NULL
-                 AND (json_extract(metadata, '$.routing_review.state') IS NOT ?4
-                      OR json_extract(metadata, '$.routing_review.proposed_workspace_id') IS NOT ?5)
+               WHERE id = ?2 AND tenant_id = ?3 AND workspace_id = ?4 AND archived_at IS NULL
+                 AND (json_extract(metadata, '$.routing_review.state') IS NOT ?5
+                      OR json_extract(metadata, '$.routing_review.proposed_workspace_id') IS NOT ?6)
                """,
                [
                  routing_review,
                  proposal.id,
-                 source_workspace(),
+                 tenant_id,
+                 source,
                  state,
                  proposal.proposed_workspace_id
                ]
@@ -655,9 +752,22 @@ defmodule OptimalEngine.CorpusOrganizer do
         end
       end)
     end)
+    |> tap(fn _ -> Store.evict_cached(Enum.map(proposals, & &1.id)) end)
   end
 
-  def deduplicate_exact do
+  @doc """
+  Archives all but the newest of the records of one workspace that hold
+  exactly the same content. Duplicates are found within a tenant, never
+  across tenants. Options: `:tenant_id` limits the sweep to that tenant;
+  `all_tenants: true` sweeps every tenant, for an operator. One of the two is
+  required.
+  """
+  def deduplicate_exact(opts) do
+    tenant_id = Keyword.get(opts, :tenant_id)
+
+    if is_nil(tenant_id) and Keyword.get(opts, :all_tenants) != true,
+      do: raise(ArgumentError, "deduplicate_exact needs :tenant_id, or all_tenants: true")
+
     Store.transaction(fn txn ->
       Store.txn_execute(
         txn,
@@ -665,18 +775,18 @@ defmodule OptimalEngine.CorpusOrganizer do
         WITH ranked AS (
           SELECT id,
                  ROW_NUMBER() OVER (
-                   PARTITION BY workspace_id, content
+                   PARTITION BY tenant_id, workspace_id, content
                    ORDER BY modified_at DESC, created_at DESC, id DESC
                  ) AS duplicate_rank
           FROM contexts
-          WHERE archived_at IS NULL AND trim(content) <> ''
+          WHERE archived_at IS NULL AND trim(content) <> '' AND (?1 IS NULL OR tenant_id = ?1)
         )
         UPDATE contexts
         SET archived_at = datetime('now'),
             metadata = json_set(COALESCE(metadata, '{}'), '$.cleanup_reason', 'exact_duplicate_context')
         WHERE id IN (SELECT id FROM ranked WHERE duplicate_rank > 1)
         """,
-        []
+        [tenant_id]
       )
       |> case do
         {:ok, count} -> {:ok, %{archived_exact_duplicates: count}}
@@ -686,37 +796,77 @@ defmodule OptimalEngine.CorpusOrganizer do
   end
 
   @doc """
-  Moves an intake context and everything derived from it to
-  `target_workspace_id`. `evidence`, when given, is kept on the context as
-  `metadata.routing_placement` with the time of the move.
+  Moves an intake context of a tenant and everything derived from it to
+  `target_workspace_id`.
+
+  Options: `:tenant_id` (required); `:evidence`, which is kept on the context
+  as `metadata.routing_placement` with the time of the move; `:reviewed_by`,
+  which marks the routing review entry of the context accepted by that actor
+  in the same transaction.
+
+  The context must be in the tenant's intake workspace and belong to the
+  tenant (`{:error, :not_found_or_not_in_intake}` otherwise, whoever else's
+  it is), and the target must be an active workspace of the tenant
+  (`{:error, :target_workspace_not_registered}`). The rows derived from the
+  context move with it and take its tenant, except rows labelled with another
+  tenant, which are not the context's and stay.
   """
-  def move_context(context_id, target_workspace_id, evidence \\ nil) do
-    source = source_workspace()
+  def move_context(context_id, target_workspace_id, opts) when is_list(opts) do
+    tenant_id = Keyword.fetch!(opts, :tenant_id)
+    evidence = Keyword.get(opts, :evidence)
+    reviewed_by = Keyword.get(opts, :reviewed_by)
+    source = source_workspace(tenant_id)
 
     Store.transaction(fn txn ->
       with {:ok, [[^source]]} <-
              Store.txn_query(
                txn,
-               "SELECT workspace_id FROM contexts WHERE id = ?1 AND archived_at IS NULL",
-               [context_id]
+               "SELECT workspace_id FROM contexts WHERE id = ?1 AND tenant_id = ?2 AND archived_at IS NULL",
+               [context_id, tenant_id]
              ),
-           {:ok, _} <- update(txn, "contexts", "id", context_id, target_workspace_id),
-           {:ok, _} <- record_placement(txn, context_id, evidence),
-           {:ok, _} <- update(txn, "chunks", "signal_id", context_id, target_workspace_id),
-           {:ok, _} <- update(txn, "vectors", "context_id", context_id, target_workspace_id),
-           {:ok, _} <- update(txn, "entities", "context_id", context_id, target_workspace_id),
-           {:ok, _} <- update_edges(txn, context_id, target_workspace_id),
-           {:ok, _} <- update_claims(txn, context_id, target_workspace_id),
-           {:ok, _} <- update_source_packages(txn, context_id, target_workspace_id),
-           {:ok, _} <- update_entity_mentions(txn, context_id, target_workspace_id),
-           {:ok, _} <- update_chunk_embeddings(txn, context_id, target_workspace_id) do
+           :ok <- check_target(txn, tenant_id, target_workspace_id),
+           {:ok, _} <- update_context(txn, context_id, target_workspace_id, tenant_id),
+           {:ok, _} <- record_placement(txn, context_id, tenant_id, evidence),
+           {:ok, _} <- record_review(txn, context_id, tenant_id, reviewed_by),
+           {:ok, _} <-
+             update(txn, "chunks", "signal_id", context_id, target_workspace_id, tenant_id),
+           {:ok, _} <-
+             update(txn, "vectors", "context_id", context_id, target_workspace_id, tenant_id),
+           {:ok, _} <-
+             update(txn, "entities", "context_id", context_id, target_workspace_id, tenant_id),
+           {:ok, _} <- update_edges(txn, context_id, target_workspace_id, tenant_id),
+           {:ok, _} <-
+             update(txn, "claims", "signal_id", context_id, target_workspace_id, tenant_id),
+           {:ok, _} <- update_source_packages(txn, context_id, target_workspace_id, tenant_id),
+           {:ok, _} <- update_entity_mentions(txn, context_id, target_workspace_id, tenant_id),
+           {:ok, _} <- update_chunk_embeddings(txn, context_id, target_workspace_id, tenant_id) do
         {:ok, %{context_id: context_id, workspace_id: target_workspace_id}}
       else
-        {:ok, []} -> {:error, :not_found_or_not_in_intake}
+        {:ok, _not_in_intake} -> {:error, :not_found_or_not_in_intake}
         {:error, _} = error -> error
       end
     end)
+    |> tap(fn result ->
+      # The read cache holds the context as it was before the move.
+      if match?({:ok, _}, result), do: Store.evict_cached([context_id])
+    end)
   end
+
+  # The target of a move is an active workspace of the tenant; one of another
+  # tenant is not registered as far as the caller can tell.
+  defp check_target(txn, tenant_id, workspace_id) when is_binary(workspace_id) do
+    case Store.txn_query(
+           txn,
+           "SELECT tenant_id FROM workspaces WHERE id = ?1 AND status = 'active'",
+           [workspace_id]
+         ) do
+      {:ok, [[^tenant_id]]} -> :ok
+      {:ok, _} -> {:error, :target_workspace_not_registered}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp check_target(_txn, _tenant_id, _workspace_id), do: {:error, :target_workspace_required}
 
   # Placement by meaning keeps the method and its numbers: similarity and
   # margin (centroid); similarity, share, votes and neighbours (knn); all of
@@ -742,76 +892,121 @@ defmodule OptimalEngine.CorpusOrganizer do
     }
   end
 
-  defp record_placement(_txn, _context_id, nil), do: {:ok, 0}
+  defp record_placement(_txn, _context_id, _tenant_id, nil), do: {:ok, 0}
 
-  defp record_placement(txn, context_id, evidence) do
+  defp record_placement(txn, context_id, tenant_id, evidence) do
     placed_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
     Store.txn_execute(
       txn,
-      "UPDATE contexts SET metadata = json_set(COALESCE(metadata, '{}'), '$.routing_placement', json(?1)) WHERE id = ?2",
-      [Jason.encode!(Map.put(evidence, "placed_at", placed_at)), context_id]
+      "UPDATE contexts SET metadata = json_set(COALESCE(metadata, '{}'), '$.routing_placement', json(?1)) WHERE id = ?2 AND tenant_id = ?3",
+      [Jason.encode!(Map.put(evidence, "placed_at", placed_at)), context_id, tenant_id]
     )
   end
 
-  defp update(txn, table, key, id, workspace_id) do
-    Store.txn_execute(txn, "UPDATE #{table} SET workspace_id = ?1 WHERE #{key} = ?2", [
-      workspace_id,
-      id
-    ])
-  end
+  defp record_review(_txn, _context_id, _tenant_id, nil), do: {:ok, 0}
 
-  defp update_edges(txn, context_id, workspace_id) do
+  defp record_review(txn, context_id, tenant_id, reviewed_by) do
     Store.txn_execute(
       txn,
-      "UPDATE edges SET workspace_id = ?1 WHERE source_id = ?2 OR target_id = ?2",
-      [workspace_id, context_id]
+      """
+      UPDATE contexts SET metadata = json_set(
+        COALESCE(metadata, '{}'), '$.routing_review.state', 'accepted',
+        '$.routing_review.reviewed_at', datetime('now'),
+        '$.routing_review.reviewed_by', ?3
+      ) WHERE id = ?1 AND tenant_id = ?2
+      """,
+      [context_id, tenant_id, reviewed_by]
     )
   end
 
-  defp update_claims(txn, context_id, workspace_id) do
-    Store.txn_execute(txn, "UPDATE claims SET workspace_id = ?1 WHERE signal_id = ?2", [
-      workspace_id,
-      context_id
-    ])
-  end
-
-  defp update_source_packages(txn, context_id, workspace_id) do
+  defp update_context(txn, context_id, workspace_id, tenant_id) do
     Store.txn_execute(
       txn,
-      "UPDATE source_packages SET workspace_id = ?1 WHERE id IN (SELECT source_package_id FROM claims WHERE signal_id = ?2)",
-      [workspace_id, context_id]
+      "UPDATE contexts SET workspace_id = ?1 WHERE id = ?2 AND tenant_id = ?3",
+      [workspace_id, context_id, tenant_id]
     )
   end
 
-  # The mentions found in the context or in a source package of its claims,
-  # and the decisions made on them, go where they were found.
-  defp update_entity_mentions(txn, context_id, workspace_id) do
+  # A row derived from a context moves with it and takes its tenant. Some
+  # writers do not label a derived row with its tenant (it keeps the unscoped
+  # default), so the context's tenant and the default are both its own; a row
+  # labelled with another tenant is not, and stays.
+  defp update(txn, table, key, id, workspace_id, tenant_id) do
+    Store.txn_execute(
+      txn,
+      "UPDATE #{table} SET workspace_id = ?1, tenant_id = ?3 WHERE #{key} = ?2 AND tenant_id IN (?3, ?4)",
+      [workspace_id, id, tenant_id, Tenant.default_id()]
+    )
+  end
+
+  # An edge joins two records. One that reaches a record of another tenant is
+  # not moved.
+  defp update_edges(txn, context_id, workspace_id, tenant_id) do
+    Store.txn_execute(
+      txn,
+      """
+      UPDATE edges SET workspace_id = ?1, tenant_id = ?3
+      WHERE (source_id = ?2 OR target_id = ?2) AND tenant_id IN (?3, ?4)
+        AND NOT EXISTS (
+          SELECT 1 FROM contexts other
+          WHERE other.id IN (edges.source_id, edges.target_id)
+            AND other.id <> ?2 AND other.tenant_id <> ?3
+        )
+      """,
+      [workspace_id, context_id, tenant_id, Tenant.default_id()]
+    )
+  end
+
+  # The source packages of the claims that moved (they carry the tenant now).
+  defp update_source_packages(txn, context_id, workspace_id, tenant_id) do
+    Store.txn_execute(
+      txn,
+      """
+      UPDATE source_packages SET workspace_id = ?1, tenant_id = ?3
+      WHERE tenant_id IN (?3, ?4)
+        AND id IN (SELECT source_package_id FROM claims WHERE signal_id = ?2 AND tenant_id = ?3)
+      """,
+      [workspace_id, context_id, tenant_id, Tenant.default_id()]
+    )
+  end
+
+  # The mentions found in the context or in a source package of the claims that
+  # moved (they carry the tenant now), and the decisions made on them, go where
+  # they were found.
+  defp update_entity_mentions(txn, context_id, workspace_id, tenant_id) do
     mentions = """
     SELECT id FROM entity_mentions
     WHERE context_id = ?2
-       OR source_package_id IN (SELECT source_package_id FROM claims WHERE signal_id = ?2)
+       OR source_package_id IN (
+         SELECT source_package_id FROM claims WHERE signal_id = ?2 AND tenant_id = ?3
+       )
     """
 
     with {:ok, _} <-
            Store.txn_execute(
              txn,
              "UPDATE resolution_decisions SET workspace_id = ?1 WHERE mention_id IN (#{mentions})",
-             [workspace_id, context_id]
+             [workspace_id, context_id, tenant_id]
            ) do
       Store.txn_execute(
         txn,
         "UPDATE entity_mentions SET workspace_id = ?1 WHERE id IN (#{mentions})",
-        [workspace_id, context_id]
+        [workspace_id, context_id, tenant_id]
       )
     end
   end
 
-  defp update_chunk_embeddings(txn, context_id, workspace_id) do
+  # The embeddings of the chunks that moved (they carry the tenant now).
+  defp update_chunk_embeddings(txn, context_id, workspace_id, tenant_id) do
     Store.txn_execute(
       txn,
-      "UPDATE chunk_embeddings SET workspace_id = ?1 WHERE chunk_id IN (SELECT id FROM chunks WHERE signal_id = ?2)",
-      [workspace_id, context_id]
+      """
+      UPDATE chunk_embeddings SET workspace_id = ?1, tenant_id = ?3
+      WHERE tenant_id IN (?3, ?4)
+        AND chunk_id IN (SELECT id FROM chunks WHERE signal_id = ?2 AND tenant_id = ?3)
+      """,
+      [workspace_id, context_id, tenant_id, Tenant.default_id()]
     )
   end
 

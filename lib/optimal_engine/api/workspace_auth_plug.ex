@@ -12,10 +12,11 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   1. Resolves EVERY workspace id the request names — the `:id` path segment
      on `/api/workspaces/:id*` and `/api/storage/workspaces/:id*`, and the
      `"workspace"`, `"workspace_id"`, `"source_workspace_id"` and
-     `"target_workspace_id"` body fields and query parameters. Authorizing all of them (not just the one
-     a given handler happens to read) means a body/query mismatch can never
-     smuggle a second, unauthorized workspace past the check. Every `/api`
-     route is workspace-scoped except the global families in
+     `"target_workspace_id"` body fields and query parameters, and the
+     `"target_workspace_id"` of each of a body's `"items"`. Authorizing all
+     of them (not just the one a given handler happens to read) means a
+     body/query mismatch can never smuggle a second, unauthorized workspace
+     past the check. Every `/api` route is workspace-scoped except the global families in
      `@global_roots`; when a workspace-scoped route names no workspace, the
      implicit `"default"` workspace is authorized instead — preserving
      single-workspace behavior while keeping it tenant-checked. A key
@@ -32,7 +33,11 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
        scope must contain `"*"`, otherwise **403**
        `{"error":"workspace_scope_denied"}`. Anonymous mode
        (`auth_required: false`, no key) has no key scope to enforce.
-  3. Assigns the primary requested workspace (path > body > query >
+  3. Refuses a key restricted to named workspaces (**403**
+     `{"error":"workspace_scope_denied"}`) on the routes that act on the whole
+     tenant (`@tenant_wide`), and on the routes that work the tenant's intake
+     workspace unless its scope holds that workspace.
+  4. Assigns the primary requested workspace (path > body > query >
      `"default"`) to `conn.assigns[:workspace_id]` — closing the loop with
      `AuthPlug`'s documented workspace-scope contract, which reads that
      assign.
@@ -47,7 +52,7 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
   import Plug.Conn
 
-  alias OptimalEngine.Workspace
+  alias OptimalEngine.{CorpusOrganizer, Workspace}
 
   # Endpoint families that serve no workspace data: engine status, catalogs,
   # tenant-level administration and keys. Connectors list across the key's
@@ -69,6 +74,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
     requested = requested_workspaces(conn)
 
     cond do
+      outside_key_scope?(conn) ->
+        halt_json(conn, 403, "workspace_scope_denied")
+
       requested == [] and not workspace_scoped_path?(conn) ->
         conn
 
@@ -91,6 +99,46 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   end
 
   # ---------------------------------------------------------------------------
+  # Routes that are not about one workspace
+  # ---------------------------------------------------------------------------
+
+  # These act on every workspace of the tenant, so a key restricted to named
+  # workspaces is refused: the corpus organizer and the steward's node type and
+  # hierarchy repairs.
+  @tenant_wide [
+    ["api", "maintenance", "corpus-organization"],
+    ["api", "data-steward", "nodes", "repair-types"],
+    ["api", "data-steward", "hierarchy", "repair-deterministic"]
+  ]
+
+  # These work the tenant's intake workspace (OptimalEngine.CorpusOrganizer),
+  # which is a workspace of the tenant like any other: a key restricted to
+  # named workspaces needs it in its scope.
+  defp intake_route?(["api", "review", "routing" | _]), do: true
+  defp intake_route?(["api", "data-steward", "routes", "decide"]), do: true
+  defp intake_route?(_path_info), do: false
+
+  defp outside_key_scope?(conn) do
+    case conn.assigns[:current_api_key] do
+      nil ->
+        false
+
+      api_key ->
+        scope = api_key.workspace_scope || []
+
+        cond do
+          "*" in scope -> false
+          conn.path_info in @tenant_wide -> true
+          intake_route?(conn.path_info) -> intake(conn) not in scope
+          true -> false
+        end
+    end
+  end
+
+  defp intake(conn),
+    do: CorpusOrganizer.source_workspace(conn.assigns[:current_tenant] || "default")
+
+  # ---------------------------------------------------------------------------
   # Requested-workspace resolution
   # ---------------------------------------------------------------------------
 
@@ -110,6 +158,10 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # of a rename is, by definition, the "<tenant>:<slug>" name of the source's
   # current slug and not yet an id, so it is checked for its tenant and the
   # key's scope but is not refused as a slug named where an id belongs.
+  #
+  # A batch names its targets one by one: `items[].target_workspace_id`
+  # (`/api/data-steward/routes/decide`) is a target like the field of the same
+  # name at the top, authorized the same way.
   @workspace_fields ~w(workspace workspace_id source_workspace_id)
   @target_field "target_workspace_id"
 
@@ -125,8 +177,11 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   defp target_workspaces(conn) do
     named =
       case conn.body_params do
-        params when is_map(params) and not is_struct(params) -> [Map.get(params, @target_field)]
-        _ -> []
+        params when is_map(params) and not is_struct(params) ->
+          [Map.get(params, @target_field) | item_targets(params)]
+
+        _ ->
+          []
       end
 
     (named ++ [Map.get(conn.query_params, @target_field)])
@@ -134,6 +189,11 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
     |> Enum.uniq()
     |> Kernel.--(strict_workspaces(conn))
   end
+
+  defp item_targets(%{"items" => items}) when is_list(items),
+    do: for(%{"target_workspace_id" => target} <- items, do: target)
+
+  defp item_targets(_params), do: []
 
   # /api/workspaces/:id, /api/workspaces/:id/config, /api/workspaces/:id/archive…
   defp path_workspace(%{path_info: ["api", "workspaces", id | _]}), do: URI.decode(id)

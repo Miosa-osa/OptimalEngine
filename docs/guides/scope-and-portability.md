@@ -119,6 +119,47 @@ A repair does not rewrite what names the id inside hashed content.
 Workspace policy packs (`authority_policies.scope_id` and the resource patterns in their signed documents) and API keys (`api_keys.workspace_scope`, fingerprinted when minted) are published and minted again for the new id, which leaves evidence, rather than edited in place, which the integrity scan would report.
 Open loops move, but their de-duplication key is built from the id, so a loop detected again is not matched with the one that moved.
 
+## Repairing node types and the hierarchy
+
+`POST /api/data-steward/nodes/repair-types` gives the active nodes of the caller's tenant the node type their kind names (`org` and `unit` stand for `entity` and `department`), where a node has none or one that is not an active type of its own workspace.
+It answers `{"updated_nodes": n}`.
+
+`POST /api/data-steward/hierarchy/repair-deterministic` moves workspaces to another organization and gives nodes another kind, as a mapping the caller supplies in the request.
+The Engine knows no names, so there is nothing to run without a mapping (`422 mapping_required`):
+
+```json
+{
+  "mapping": {
+    "organizations": [
+      {
+        "organization_id": "acme:ventures",
+        "from_organization_id": "acme:default",
+        "name_contains": "Alpha",
+        "description_contains": "Alpha"
+      }
+    ],
+    "node_kinds": [
+      {
+        "workspace_id": "acme:main",
+        "from_kind": "workspace",
+        "kinds": {"tasks": "operation", "projects": "project"}
+      }
+    ]
+  }
+}
+```
+
+An organization rule moves the tenant's active workspaces that are in `from_organization_id` (the tenant's default organization when it is left out) and whose name or description contains the text, compared without regard to case (ASCII letters) and as text, not as a pattern.
+It needs `name_contains` or `description_contains`, so a rule never matches every workspace.
+A node rule retypes the active nodes of the workspace that have the slug and are of `from_kind` (`workspace` when it is left out): the node takes the kind, and the workspace's active node type of that name.
+A node whose workspace has no such type is left as it was.
+A mapping has at most 50 rules of each kind and retypes at most 500 node slugs.
+The answer counts `workspace_owners_updated` and `nodes_retyped`.
+
+Both repairs change the caller's tenant only.
+The target organization and the workspaces a mapping names must be the tenant's (`organization_not_found`, `workspace_not_found`), so the rule that an organization belongs to the tenant of its workspaces holds after a repair as before it.
+They act on the whole tenant, so they need a key that holds the whole tenant (`workspace_scope` `["*"]`); a key restricted to some workspaces answers `403 workspace_scope_denied`.
+
 ## Moving a workspace (split, merge, seed)
 
 A bundle is a gzip tar file with `manifest.json`, one JSON-lines file per table, and the workspace's files.

@@ -339,7 +339,13 @@ defmodule OptimalEngine.API.Router do
 
   get "/api/context-health" do
     workspace = query_param(conn, "workspace", "default")
-    result = OptimalEngine.ContextHealth.run(workspace_id: workspace)
+
+    result =
+      OptimalEngine.ContextHealth.run(
+        workspace_id: workspace,
+        tenant_id: conn.assigns[:current_tenant] || "default"
+      )
+
     json(conn, result)
   end
 
@@ -365,7 +371,11 @@ defmodule OptimalEngine.API.Router do
     state = query_param(conn, "state", "review")
     limit = query_param(conn, "limit", "25") |> parse_int(25)
 
-    case OptimalEngine.ReviewQueue.routing(state: state, limit: limit) do
+    case OptimalEngine.ReviewQueue.routing(
+           tenant_id: conn.assigns[:current_tenant] || "default",
+           state: state,
+           limit: limit
+         ) do
       {:ok, items} -> json(conn, %{state: state, count: length(items), items: items})
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
     end
@@ -376,7 +386,8 @@ defmodule OptimalEngine.API.Router do
     decision = if body["decision"] == "accept", do: :accept, else: :reject
 
     case OptimalEngine.ReviewQueue.decide_route(id, decision, body["workspace"],
-           actor_id: Actor.of(conn, body)
+           actor_id: Actor.of(conn, body),
+           tenant_id: conn.assigns[:current_tenant] || "default"
          ) do
       {:ok, result} -> json(conn, %{result: result})
       {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
@@ -522,7 +533,9 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/maintenance/corpus-organization" do
-    case OptimalEngine.CorpusOrganizer.preview() do
+    case OptimalEngine.CorpusOrganizer.preview(
+           tenant_id: conn.assigns[:current_tenant] || "default"
+         ) do
       {:ok, preview} -> json(conn, preview)
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
     end
@@ -530,21 +543,22 @@ defmodule OptimalEngine.API.Router do
 
   post "/api/maintenance/corpus-organization" do
     body = conn.body_params || %{}
+    organizer = [tenant_id: conn.assigns[:current_tenant] || "default"]
 
     if body["queue_remaining"] == true do
-      case OptimalEngine.CorpusOrganizer.queue_remaining() do
+      case OptimalEngine.CorpusOrganizer.queue_remaining(organizer) do
         {:ok, result} -> json(conn, result)
         {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
       end
     else
       if body["deduplicate_exact"] == true do
-        case OptimalEngine.CorpusOrganizer.deduplicate_exact() do
+        case OptimalEngine.CorpusOrganizer.deduplicate_exact(organizer) do
           {:ok, result} -> json(conn, result)
           {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
         end
       else
         if body["apply"] == true do
-          case OptimalEngine.CorpusOrganizer.apply_high_confidence() do
+          case OptimalEngine.CorpusOrganizer.apply_high_confidence(organizer) do
             {:ok, result} -> json(conn, result)
             {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
           end
@@ -3463,7 +3477,8 @@ defmodule OptimalEngine.API.Router do
 
     if decision in [:accept, :reject] and is_list(body["items"]) and body["items"] != [] do
       case OptimalEngine.DataSteward.decide_routes(body["items"], decision,
-             actor_id: Actor.of(conn, body)
+             actor_id: Actor.of(conn, body),
+             tenant_id: conn.assigns[:current_tenant] || "default"
            ) do
         {:ok, result} -> json(conn, result)
       end
@@ -3512,11 +3527,16 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # Acts on every workspace of the tenant: WorkspaceAuthPlug refuses a key that
+  # is restricted to some workspaces.
   post "/api/data-steward/nodes/repair-types" do
     body = conn.body_params || %{}
 
-    case OptimalEngine.DataSteward.repair_node_types(actor_id: Actor.of(conn, body)) do
-      {:ok, result} -> json(conn, %{updated_nodes: result})
+    case OptimalEngine.DataSteward.repair_node_types(
+           actor_id: Actor.of(conn, body),
+           tenant_id: conn.assigns[:current_tenant] || "default"
+         ) do
+      {:ok, updated} -> json(conn, %{updated_nodes: updated})
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
@@ -3524,7 +3544,11 @@ defmodule OptimalEngine.API.Router do
   post "/api/data-steward/hierarchy/repair-deterministic" do
     body = conn.body_params || %{}
 
-    case OptimalEngine.DataSteward.repair_deterministic_hierarchy(actor_id: Actor.of(conn, body)) do
+    case OptimalEngine.DataSteward.repair_deterministic_hierarchy(
+           actor_id: Actor.of(conn, body),
+           tenant_id: conn.assigns[:current_tenant] || "default",
+           mapping: body["mapping"]
+         ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
