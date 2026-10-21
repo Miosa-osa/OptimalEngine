@@ -45,7 +45,7 @@ See [installation and deployment](installation-and-deployment.md) for the full p
 ### Option B: from the release image
 
 Docker is optional.
-The image builds a `mix release` on Elixir 1.19.5 and OTP 28, runs as a non-root user, keeps `/data` as the only writable volume, and takes every secret from the environment.
+The image builds a `mix release` on Elixir 1.19.5 and OTP 28.5.0.5, runs as a non-root user, keeps `/data` as the only writable volume, and takes every secret from the environment.
 
 ```bash
 docker build -f deploy/Dockerfile.engine \

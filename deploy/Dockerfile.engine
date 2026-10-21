@@ -2,14 +2,19 @@
 # Stage 1 — builder
 # Compile deps and produce an OTP release via `mix release optimal`.
 #
-# Toolchain: Elixir 1.19.5 / OTP 28, the pair this release is developed and
-# tested on. Elixir needs a newer runtime than the previous 1.17.3 pin.
+# Toolchain: Elixir 1.19.5 / OTP 28.5.0.5, the pair this release is developed
+# and tested on (the test-current job in .github/workflows/ci.yml names the
+# same pair). Elixir needs a newer runtime than the previous 1.17.3 pin.
+# Never OTP 28.0 to 28.2: their runtime (erts 16.0, 16.1) can crash the whole
+# VM when a process is killed during a long regular expression match, which a
+# classification time limit does (fixed in OTP 28.3).
 # RocksDB builds its NIF through CMake, so the builder carries cmake and a
 # C++ toolchain as well as gcc/make and the SQLite headers.
 # ─────────────────────────────────────────────────────────────────────────────
 # BUILDER_IMAGE must be Debian bookworm based. A build host without Docker Hub access can
-# point it at an image it already has, for example elixir:1.19.5-otp-28.
-ARG BUILDER_IMAGE=hexpm/elixir:1.19.5-erlang-28.1.1-debian-bookworm-20260824-slim
+# point it at an image it already has, for example elixir:1.19.5-otp-28, as long
+# as its OTP is 28.3 or later.
+ARG BUILDER_IMAGE=hexpm/elixir:1.19.5-erlang-28.5.0.5-debian-bookworm-20260824-slim
 FROM ${BUILDER_IMAGE} AS builder
 
 # Build-time tools. build-essential + cmake build the RocksDB and SQLite NIFs,
