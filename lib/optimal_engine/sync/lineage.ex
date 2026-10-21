@@ -425,54 +425,113 @@ defmodule OptimalEngine.Sync.Lineage do
   def tables, do: @tables |> Map.keys() |> Enum.sort()
 
   @doc """
-  The tables a gate reads for a class above its own: the ones whose rows carry
-  labels, a class, or labels in their metadata. A gate asks each of them
-  whether the workspace holds anything above a class.
+  The tables a gate reads for a class above its own: the ones with a column that
+  can name a class (`class_columns/1`). A gate asks each of them whether the
+  workspace holds anything above a class.
   """
   @spec scanned_tables() :: [String.t()]
-  def scanned_tables, do: Enum.filter(tables(), &(class_column(spec(&1)) != nil))
+  def scanned_tables, do: Enum.filter(tables(), &(class_columns(spec(&1)) != []))
 
-  @typedoc "What a table's class is read from: a label array, labels in metadata, or a class name."
-  @type class_kind :: :labels | :meta | :class
+  @typedoc """
+  What a column names a class by: a label array, partitions, labels and partitions
+  in metadata, or a class name.
+  """
+  @type class_kind :: :labels | :partitions | :meta | :class
 
   @doc """
-  The one column a gate reads to tell whether a row names a class above its own,
-  with how it is read; nil for a table that names none. A table that has several
-  is read by the first, in this order: its `security_labels`, the labels in its
-  metadata column, its classification column.
+  Every column of a table that can name a class, with how it is read, in the
+  order `own_tokens/2` reads them: the row's `security_labels`, its
+  `partition_ids`, the labels and partitions in its metadata column, its
+  classification column. A row is as classified as the highest of them.
 
-  `OptimalEngine.Sync.Gate` builds its scan from this, and so does the trigger
-  that tells the gate cache a scanned table that stays local was written
+  `OptimalEngine.Sync.Gate` builds its scan from this, and so do the triggers that
+  tell the gate cache a scanned table that stays local was written
   (`OptimalEngine.Sync.Capture`), so the two cannot read different columns.
   """
-  @spec class_column(t()) :: {class_kind(), String.t()} | nil
-  def class_column(%{labels: true}), do: {:labels, "security_labels"}
-  def class_column(%{meta: meta}) when is_binary(meta), do: {:meta, meta}
-  def class_column(%{class: class}) when is_binary(class), do: {:class, class}
-  def class_column(_spec), do: nil
+  @spec class_columns(t()) :: [{class_kind(), String.t()}]
+  def class_columns(spec) do
+    [
+      spec.labels && {:labels, "security_labels"},
+      spec.partitions && {:partitions, "partition_ids"},
+      is_binary(spec.meta) && {:meta, spec.meta},
+      is_binary(spec.class) && {:class, spec.class}
+    ]
+    |> Enum.filter(& &1)
+  end
 
   @doc """
   SQL that is true when the row `row` (`NEW`, `OLD`, or a table alias) may name
-  a class above some gate in its `class_column/1`: a superset of what the gate
-  holds at any rank, cheap enough for a trigger. A row that cannot be above any
-  gate (no labels, no class) cannot change the answer to "does the workspace
-  hold anything above this class".
+  a class above some gate in the column `{kind, column}`: a superset of what the
+  gate holds at any rank, cheap enough for a trigger. A row that cannot be above
+  any gate cannot change the answer to "does the workspace hold anything above
+  this class".
 
   A label array other than `'[]'` counts, `NULL` and text that is not JSON
-  included. Metadata counts when it spells the key or holds a backslash (a key
-  can be spelled with an escape). A class column counts unless it is empty, null,
-  `internal` or `public`.
+  included. Partitions count when they cannot be read (partitions that can be
+  read rank nothing). Metadata counts when it spells `security_labels` or
+  `partition_ids`, or holds a backslash (a key can be spelled with an escape).
+  A class column counts unless it is empty, null, `internal` or `public`.
+  Written to run on PostgreSQL as well where it can (`LIKE ... ESCAPE`, not
+  `instr`); the array tests use SQLite's JSON functions.
   """
   @spec may_name_class_sql({class_kind(), String.t()}, String.t()) :: String.t()
-  def may_name_class_sql({:labels, column}, row), do: "#{row}.\"#{column}\" IS NOT '[]'"
+  def may_name_class_sql({:labels, column}, row), do: "(#{row}.\"#{column}\" IS NOT '[]')"
+
+  def may_name_class_sql({:partitions, column}, row) do
+    value = "#{row}.\"#{column}\""
+    "(#{value} IS NOT '[]' AND #{unreadable_array_sql(value)})"
+  end
 
   def may_name_class_sql({:meta, column}, row) do
-    "(#{row}.\"#{column}\" LIKE '%security_labels%' OR instr(#{row}.\"#{column}\", char(92)) > 0)"
+    value = "#{row}.\"#{column}\""
+
+    "(#{value} LIKE '%security_labels%' OR #{value} LIKE '%partition_ids%' OR " <>
+      "#{backslash_sql(value)})"
   end
 
   def may_name_class_sql({:class, column}, row) do
-    "(#{row}.\"#{column}\" IS NOT NULL AND lower(#{row}.\"#{column}\") NOT IN ('', 'internal', 'public'))"
+    value = "#{row}.\"#{column}\""
+    "(#{value} IS NOT NULL AND lower(#{value}) NOT IN ('', 'internal', 'public'))"
   end
+
+  # The characters of Unicode White_Space, which `String.trim/1` removes
+  # (SQLite's `trim` takes the characters to remove).
+  @white_space "(' ' || char(#{Enum.join(Enum.to_list(9..13) ++ [133, 160, 5760, 6158] ++ Enum.to_list(8192..8202) ++ [8232, 8233, 8239, 8287, 12288], ", ")}))"
+
+  @doc """
+  SQL true when the text `value` holds a backslash. `LIKE` with an explicit
+  escape character is the same on SQLite and PostgreSQL (PostgreSQL's default
+  escape is the backslash, SQLite has none); `instr` and `char` are SQLite's.
+  """
+  @spec backslash_sql(String.t()) :: String.t()
+  def backslash_sql(value), do: "#{value} LIKE '%!\\%' ESCAPE '!'"
+
+  @doc """
+  SQL true when some element of the JSON array `source` (a column, or a column and
+  a path as `json_each` takes them) cannot be read as a label: it is not a
+  string, or it is blank once trimmed of the white space `String.trim/1`
+  removes, or it satisfies `extra`, a condition on `j.value` the caller adds.
+  """
+  @spec unreadable_elements_sql(String.t(), String.t() | nil) :: String.t()
+  def unreadable_elements_sql(source, extra \\ nil) do
+    "EXISTS (SELECT 1 FROM json_each(#{source}) j WHERE j.type != 'text' OR " <>
+      "#{trimmed_sql("j.value")} = ''#{if extra, do: " OR " <> extra, else: ""})"
+  end
+
+  @doc """
+  SQL true when the column `value` cannot be read as an array of labels (or of
+  partitions): not JSON, not an array, or `unreadable_elements_sql/2` of it.
+  `extra` is added to the element test.
+  """
+  @spec unreadable_array_sql(String.t(), String.t() | nil) :: String.t()
+  def unreadable_array_sql(value, extra \\ nil) do
+    "(CASE WHEN json_valid(#{value}) THEN CASE json_type(#{value}) " <>
+      "WHEN 'array' THEN #{unreadable_elements_sql(value, extra)} ELSE 1 END ELSE 1 END)"
+  end
+
+  @doc "SQL that trims `expr` of the white space `String.trim/1` removes."
+  @spec trimmed_sql(String.t()) :: String.t()
+  def trimmed_sql(expr), do: "trim(#{expr}, #{@white_space})"
 
   @doc "How a table's class is made up, or nil for a table the map does not know."
   @spec spec(String.t()) :: t() | nil
