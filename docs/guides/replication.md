@@ -77,7 +77,8 @@ Every applied row is written into the tenant and workspace of the apply, whateve
 A change whose key already exists in another tenant or workspace (a key is often just `id`) is refused with `cross_scope`, so an upsert or a delete cannot reach a row of another workspace.
 A change that lacks its key is refused with `missing_key`, a delete on a table keyed by a row id with `operation_not_supported`, and a payload name (a row column or a blob) that is not a column of the table with `unknown_columns`.
 Columns that name a place on this Engine's disk are confined: `nodes.slug`, `nodes.path`, `node_types.slug` and `wiki_pages.slug` must be relative, without a parent segment or a NUL, or the change is refused with `invalid_path`; `contexts.path` is the absolute path of the file on the Engine that indexed it, so an absolute value is stored as NULL and the rest of the context replicates.
-A change that is malformed (a missing field, an `occurred_at` that is not text, an unknown operation, a payload that is not a row, a value that is not a scalar, a blob that is not hex) fails alone with `invalid_mutation`, `invalid_occurred_at` or `invalid_payload`; the rest of the batch applies.
+A change that is malformed (a missing field, an `occurred_at` that is not text, an unknown operation, a payload that is not a row, a value that is not a scalar, a blob that is not hex) fails alone with `invalid_mutation`, `invalid_occurred_at`, `invalid_payload` or `unsupported_value`; the rest of the batch applies.
+An integer outside the 64-bit range (-2^63 to 2^63-1) cannot be stored, and the driver raises on it instead of binding it, so it is `unsupported_value` too: one such change must not end the batch, and a page that fails whole is never skipped, so the peer would be sent it again and again.
 Foreign keys are checked at commit so that a child may arrive before its parent in one batch; when that commit fails, the batch runs again with every key checked as its row is written, a row refused for its key is tried once more after the rest of the page (so a child that came before its parent still lands), and the rows that name something this Engine lacks fail alone.
 A `contexts` or `classifications` row whose `mode`, `signal_type` or `format` is not one of the values this Engine writes is refused with `invalid_signal_value`; stored values are read back as atoms from those fixed sets only, so a peer cannot grow the atom table.
 A blob named for a confined column (`nodes.path`, `contexts.path`, ...) is refused with `invalid_path`: it would be written over the checked value.
@@ -136,7 +137,9 @@ The push cycle ends in an error with nothing sent and its cursor where it was, s
 - An aggregate (`analysis_reports`, `data_quality_snapshots`, `rhythm_notes`, `sessions`, a wiki page or cluster that names nothing, an edge between entity names) has no row to point at, so it stays home while the workspace holds anything above the peer's class.
 - A change is held at the higher of the row as the ledger recorded it and the row as it is stored now.
 An older version of a row that has labels today (it was labelled afterwards, or a version arrived from another Engine without them) stays home with the row.
-When the row is gone, it is read as the ledger last recorded it (every version it has there, newest 20), so a version written before the row was labelled and then deleted stays home with the labelled versions.
+When the row is gone, it is read as the ledger last recorded it: every version it has there, newest first, read 50 at a time and stopping as soon as one is above the peer's class.
+A row with more than 1000 versions in the ledger is not read to its oldest: past that it is held, because a version that cannot be read is not assumed to be open.
+So a version written before the row was labelled and then deleted stays home with the labelled versions, however many versions came after it.
 - A delete carries only the row's key.
 It stays home when the row's earlier changes in the local ledger were held, so a peer that never had the row is not told of it.
 
@@ -148,6 +151,7 @@ A row this Engine already holds keeps the `security_labels`, the `partition_ids`
 Labels held here that cannot be read count as `restricted`.
 A change that carries everything the row holds is written as sent.
 A delete or an overwrite from a peer is not applied to a row this Engine holds above the class that peer is cleared for (the peer was never sent it): the change is skipped as `gated` and the row stays.
+Each such skip is logged as a warning after the batch commits (the operation, the table, the id cut to 64 characters, and the device that sent it; never the row), at most ten lines for a batch and one more for the rest, so a peer that keeps trying can be found.
 The link columns of a row (`source_package_id`, `signal_id`, the `memory_core_source_package_id` in a memory's metadata, and the like) are not kept: a change from a peer may repoint them, as an ordinary edit does.
 A row that carries labels of its own keeps them whatever its links say; a legacy row that is classified only through the rows it links to is classified through the links it has after the change.
 Labels never shrink on a replica through sync, so lowering a label (declassifying) has to be done on each replica.
@@ -167,9 +171,11 @@ So label before writing, and write the source before what derives from it.
 A gate reads the workspace once for what it needs to classify many rows: the index of the documents and memories derived from labelled sources, and whether the workspace holds anything above the peer's class.
 That scan is kept between gates (a pull of many pages, the next push cycle) while nothing was written: the key is the scan, the tenant, the workspace, the kind of gate (a peer's or a reader's) and the class, and the stamp is the write sequence of the change capture and the ledger (`sync_capture` and `sync_mutations` in `sqlite_sequence`), which every write to a replicated table of a syncing workspace moves.
 The stamp is read just before each scan, not once per gate, so a long push cycle that needs a scan late does not use an older stamp.
+A push cycle classifies one page at a time, as it sends it, so a label written while an earlier page is on the wire holds back the pages after it.
 A table the gate scans that stays on its Engine (`assets`, `active_memory_pools`, `context_packages`, the model and tool run tables, `skill_packages`, `mcp_tool_definitions`) is not captured, so triggers on it move a third counter, `sync_local_stamp`, which keeps no row.
 They fire for the rows of a workspace that syncs, for an insert, a delete, and an update that writes a column the gate reads (the labels, the metadata or the class); a status written on every call leaves the scan alone.
 An entry also expires after `config :optimal_engine, :sync_gate_cache_ttl_ms` (default `30000`; `0` turns the cache off), which is a backstop for a write that nothing sees; every table the gate scans is captured or stamped, and a test pins that.
+A value that is not a non-negative integer of milliseconds turns the cache off and is warned about once, instead of the gate failing on it at every call.
 The cache is dropped after a change from a peer is applied and when sync is enabled or disabled for a workspace.
 A workspace that does not sync is not captured, so it is never cached.
 The scans emit `[:optimal_engine, :sync, :gate_build]` telemetry with `what: :index | :holds_above` and the `workspace_id`.

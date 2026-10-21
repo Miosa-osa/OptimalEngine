@@ -27,9 +27,11 @@ defmodule OptimalEngine.Sync.GateCache do
   when it changed: it is never cached.
 
   Entries also expire after `config :optimal_engine, :sync_gate_cache_ttl_ms`
-  (default 30 seconds; `0` turns the cache off). That bounds how long a write
-  that nothing sees could go unnoticed, such as a write to a scanned table before
-  the Engine installed its triggers. Every table the gate scans is captured or
+  (default 30 seconds; `0` turns the cache off, and so does a value that is not
+  a non-negative integer, with one warning in the log for each such value, so a
+  mistyped setting never leaves it on). That bounds how long a write that
+  nothing sees could go unnoticed, such as a write to a scanned table before the
+  Engine installed its triggers. Every table the gate scans is captured or
   stamped (`test/sync/sync_gate_test.exs` pins that).
   The cache is dropped after a change from a peer is applied and when sync is
   enabled or disabled for a workspace, so it does not rest on the sequences alone
@@ -42,6 +44,8 @@ defmodule OptimalEngine.Sync.GateCache do
   """
 
   use GenServer
+
+  require Logger
 
   @table :optimal_sync_gate_cache
   @default_ttl_ms 30_000
@@ -119,7 +123,23 @@ defmodule OptimalEngine.Sync.GateCache do
   defp ttl_ms do
     case Application.get_env(:optimal_engine, :sync_gate_cache_ttl_ms, @default_ttl_ms) do
       ms when is_integer(ms) and ms >= 0 -> ms
-      _other -> @default_ttl_ms
+      other -> off(other)
     end
+  end
+
+  # `ttl_ms/0` runs on every lookup, so the warning is given once for each value.
+  defp off(value) do
+    key = {__MODULE__, :invalid_ttl, value}
+
+    if :persistent_term.get(key, nil) == nil do
+      :persistent_term.put(key, true)
+
+      Logger.warning(
+        "[Sync] :sync_gate_cache_ttl_ms is #{inspect(value)}, which is not a non-negative integer " <>
+          "of milliseconds; the gate cache is off"
+      )
+    end
+
+    0
   end
 end

@@ -1010,6 +1010,14 @@ defmodule OptimalEngine.Sync do
 
   defp valid_payload?(_payload), do: false
 
+  # An integer that does not fit SQLite's 64 bits cannot be bound to a statement
+  # (the driver raises), which would end the whole batch and, on a pull, the page
+  # that never advances.
+  @int64_min -9_223_372_036_854_775_808
+  @int64_max 9_223_372_036_854_775_807
+
+  defp scalar?(value) when is_integer(value), do: value >= @int64_min and value <= @int64_max
+
   defp scalar?(value),
     do: is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value)
 
@@ -1040,7 +1048,15 @@ defmodule OptimalEngine.Sync do
         outcome =
           Enum.reduce(
             plans,
-            %{applied: 0, skipped: %{}, failed: [], conflicts: [], fact_conflicts: [], retry: []},
+            %{
+              applied: 0,
+              skipped: %{},
+              failed: [],
+              conflicts: [],
+              fact_conflicts: [],
+              retry: [],
+              held: []
+            },
             fn
               {:skip, reason, _mutation}, acc ->
                 count_skip(acc, reason)
@@ -1090,6 +1106,7 @@ defmodule OptimalEngine.Sync do
         # the ledger, which an apply moves (it writes with capture off, and
         # records each change in the ledger). Dropping it does not rest on that.
         if outcome.applied > 0 or outcome.conflicts != [], do: GateCache.clear()
+        log_held(outcome.held)
         Enum.each(outcome.fact_conflicts, &raise_fact_claims(tenant_id, workspace_id, &1))
 
         {:ok,
@@ -1113,6 +1130,36 @@ defmodule OptimalEngine.Sync do
   defp foreign_key_failure?(reason), do: String.contains?(inspect(reason), "FOREIGN KEY")
 
   defp count_skip(acc, reason), do: update_in(acc, [:skipped, reason], &((&1 || 0) + 1))
+
+  # A change a peer sent for a row this Engine holds above the class the peer is
+  # cleared for is skipped (see `check_existing_labels/8`). It is logged once the
+  # batch has committed, not inside the transaction, and only a few lines for a
+  # batch (a peer can send many); the key is cut, never the row.
+  @held_logged 10
+
+  defp log_held([]), do: :ok
+
+  defp log_held(held) do
+    held = Enum.reverse(held)
+
+    for mutation <- Enum.take(held, @held_logged) do
+      Logger.warning(
+        "[Sync] a #{mutation["operation"]} of #{mutation["entity_type"]} #{cut(mutation["entity_id"])} " <>
+          "from #{cut(mutation["device_id"])} was skipped: this Engine holds the row above the class that peer is cleared for"
+      )
+    end
+
+    if length(held) > @held_logged,
+      do:
+        Logger.warning(
+          "[Sync] #{length(held) - @held_logged} more changes were skipped the same way"
+        )
+
+    :ok
+  end
+
+  defp cut(value) when is_binary(value), do: value |> String.slice(0, 64) |> inspect()
+  defp cut(value), do: inspect(value, limit: 3, printable_limit: 64)
 
   defp apply_step(
          txn,
@@ -1172,7 +1219,8 @@ defmodule OptimalEngine.Sync do
           cond do
             # The row it would overwrite or delete is above the gate: it stays as it is.
             reason == :gated ->
-              count_skip(acc, :gated)
+              acc = count_skip(acc, :gated)
+              %{acc | held: [mutation | acc.held]}
 
             # Its parent may come later in the page: once more after the rest.
             foreign_keys == :immediate and foreign_key_failure?(reason) ->
@@ -2195,9 +2243,7 @@ defmodule OptimalEngine.Sync do
     {:ok, _} = Capture.seal()
     totals = %{sent: 0, gated: 0, superseded: 0, applied: 0, pages: 0, more: false}
 
-    Gate.with_gate(peer.tenant_id, peer.workspace_id, peer.max_class, fn gate ->
-      push_pages(peer, key, gate, peer.last_pushed_seq, totals, @cycle_pages, @page, deadline)
-    end)
+    push_pages(peer, key, peer.last_pushed_seq, totals, @cycle_pages, @page, deadline)
   rescue
     # A gate that cannot read what it classifies by sends nothing.
     error in [RuntimeError, ArgumentError, Gate.StoreError] ->
@@ -2205,7 +2251,12 @@ defmodule OptimalEngine.Sync do
       {:error, {:gate_unreadable, Exception.message(error)}}
   end
 
-  defp push_pages(peer, key, gate, since, totals, pages_left, page, deadline) do
+  # A gate is opened for each page, not for the cycle: a cycle can take a minute
+  # and twenty pages, and what a gate learned of the workspace at its first page
+  # (a row it loaded, the sources it indexed) must not outlive a write made
+  # while that page was on its way. The scans of the workspace are shared
+  # between the gates by `Sync.GateCache`, so a page costs a read of the stamp.
+  defp push_pages(peer, key, since, totals, pages_left, page, deadline) do
     replicated = Enum.map_join(Capture.replicated_tables(), ", ", &"'#{&1}'")
 
     {:ok, rows} =
@@ -2240,7 +2291,7 @@ defmodule OptimalEngine.Sync do
 
       Enum.each(superseded, &record_superseded(peer, &1, Map.fetch!(lost, &1["sequence"])))
 
-      mutations = releasable(rest, gate)
+      mutations = releasable(rest, peer.tenant_id, peer.workspace_id, peer.max_class)
 
       case send_page(peer, key, mutations) do
         {:ok, remote} ->
@@ -2269,7 +2320,7 @@ defmodule OptimalEngine.Sync do
               {:ok, totals}
 
             pages_left > 1 and in_budget?(deadline) ->
-              push_pages(peer, key, gate, cursor, totals, pages_left - 1, page, deadline)
+              push_pages(peer, key, cursor, totals, pages_left - 1, page, deadline)
 
             # A full page and no room for another: rows may be left for the next cycle.
             true ->
@@ -2278,7 +2329,7 @@ defmodule OptimalEngine.Sync do
 
         {:error, {:http_status, 413, _body}} when length(rows) > 1 ->
           half = max(div(length(rows), 2), 1)
-          push_pages(peer, key, gate, since, totals, pages_left, half, deadline)
+          push_pages(peer, key, since, totals, pages_left, half, deadline)
 
         {:error, _} = error ->
           error

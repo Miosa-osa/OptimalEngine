@@ -1005,28 +1005,50 @@ defmodule OptimalEngine.Sync.Gate do
     end
   end
 
-  # What a row carried, as the local ledger last recorded it, for a row that is
-  # gone. Its sources are read as they are now; one that is gone too is ignored.
-  defp ledger_tokens(gate, table, spec, id) do
+  # What a row carried, as the local ledger recorded it, for a row that is gone:
+  # every version it has there, newest first, @ledger_chunk at a time (a keyset
+  # on the sequence, so a row with many versions costs a query for each fifty and
+  # never reads the ledger twice). Its sources are read as they are now; one that
+  # is gone too is ignored. A replicating gate stops as soon as a version is
+  # restricted. A row with more than @ledger_chunk * @ledger_chunks versions is
+  # not read to the end and is unresolved. `:none` when the ledger has no version.
+  @ledger_chunk 50
+  @ledger_chunks 20
+
+  defp ledger_tokens(gate, table, spec, id),
+    do: ledger_versions(gate, table, spec, id, 1_000_000_000_000_000_000, 1, :none)
+
+  defp ledger_versions(gate, table, spec, id, before, chunk, seen) do
     rows =
       query!(
         """
-        SELECT payload FROM sync_mutations
+        SELECT sequence, payload FROM sync_mutations
         WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = ?3 AND entity_id = ?4
-          AND operation != 'delete'
-        ORDER BY sequence DESC LIMIT 20
+          AND operation != 'delete' AND sequence < ?5
+        ORDER BY sequence DESC LIMIT #{@ledger_chunk}
         """,
-        [gate.tenant_id, gate.workspace_id, table, id]
+        [gate.tenant_id, gate.workspace_id, table, id, before]
       )
 
-    if rows == [] do
-      :none
-    else
-      for [payload] <- rows, reduce: nil do
-        acc ->
-          row = mutation_row(%{"payload" => decode_payload(payload)})
-          union(acc, classify(gate, table, spec, row, false))
-      end
+    tokens =
+      Enum.reduce(rows, if(seen == :none, do: nil, else: seen), fn [_sequence, payload], acc ->
+        row = mutation_row(%{"payload" => decode_payload(payload)})
+        union(acc, classify(gate, table, spec, row, false))
+      end)
+
+    cond do
+      rows == [] and seen == :none ->
+        :none
+
+      length(rows) < @ledger_chunk or done?(gate, tokens) ->
+        tokens
+
+      chunk >= @ledger_chunks ->
+        union(tokens, unresolved())
+
+      true ->
+        [last_sequence, _payload] = List.last(rows)
+        ledger_versions(gate, table, spec, id, last_sequence, chunk + 1, tokens)
     end
   end
 

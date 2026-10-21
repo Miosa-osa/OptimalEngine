@@ -28,6 +28,8 @@ defmodule OptimalEngine.SyncGateTest do
   alias OptimalEngine.Sync.{Capture, Gate, GateCache, Lineage}
   alias OptimalEngine.Tenancy.Tenant
 
+  import ExUnit.CaptureLog
+
   @relay "relay+https://api.example/api/v1/engines/e1/sync"
 
   setup do
@@ -917,6 +919,65 @@ defmodule OptimalEngine.SyncGateTest do
       refute carries?(sent, "Declassified secret 5510")
     end
 
+    test "a deleted row's ledger is read to the end, not to its newest versions", ctx do
+      # Declassified at the second version, edited many times, deleted. The
+      # oldest version is restricted and the newest hundred are open.
+      id = "fact-many-#{ctx.n}"
+      fact(ctx, id, "Version 1 secret 5530", ["restricted"])
+      {:ok, _} = Capture.seal()
+
+      for n <- 2..130 do
+        {:ok, _} =
+          Store.raw_query(
+            "UPDATE facts SET security_labels = '[]', fact_text = ?2 WHERE id = ?1",
+            [id, "Version #{n} open 5530"]
+          )
+
+        {:ok, _} = Capture.seal()
+      end
+
+      {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      refute sent?(sent, "facts", id)
+      refute carries?(sent, "open 5530")
+      refute carries?(sent, "Version 1 secret 5530")
+    end
+
+    test "a deleted row whose versions were all open is sent whole, however many there were",
+         ctx do
+      few = "fact-few-#{ctx.n}"
+      many = "fact-open-many-#{ctx.n}"
+
+      for {id, versions} <- [{few, 19}, {many, 120}] do
+        fact(ctx, id, "#{id} version 1", [])
+        {:ok, _} = Capture.seal()
+
+        for n <- 2..versions do
+          {:ok, _} =
+            Store.raw_query("UPDATE facts SET fact_text = ?2 WHERE id = ?1", [
+              id,
+              "#{id} version #{n}"
+            ])
+
+          {:ok, _} = Capture.seal()
+        end
+
+        {:ok, _} = Store.raw_query("DELETE FROM facts WHERE id = ?1", [id])
+      end
+
+      {_result, sent} = push(ctx, max_class: "internal")
+
+      for {id, versions} <- [{few, 19}, {many, 120}] do
+        assert carries?(sent, "#{id} version 1")
+        assert carries?(sent, "#{id} version #{versions}")
+
+        assert Enum.any?(sent, &(&1["entity_id"] == id and &1["operation"] == "delete")),
+               "the delete of #{id} was held"
+      end
+    end
+
     test "a version a peer sent without the labels does not release the row's other versions",
          ctx do
       id = "fact-peer-#{ctx.n}"
@@ -1054,8 +1115,18 @@ defmodule OptimalEngine.SyncGateTest do
       id = "fact-del-#{ctx.n}"
       fact(ctx, id, "Original 7711", ["restricted"])
 
-      assert {:ok, %{applied: 0, skipped: %{gated: 1}}} =
-               remote_delete(ctx, "facts", id, max_class: "internal")
+      log =
+        capture_log([level: :warning], fn ->
+          assert {:ok, %{applied: 0, skipped: %{gated: 1}}} =
+                   remote_delete(ctx, "facts", id, max_class: "internal")
+        end)
+
+      # The log names the table, the key and the device, and nothing the row holds.
+      assert log =~ "a delete of facts"
+      assert log =~ id
+      assert log =~ "rep_remote"
+      refute log =~ "Original 7711"
+      refute log =~ "restricted"
 
       assert {:ok, %{applied: 0, skipped: %{gated: 1}}} =
                remote_apply(
@@ -1077,6 +1148,49 @@ defmodule OptimalEngine.SyncGateTest do
 
       assert stored("facts", id, "fact_text") == "Rewritten 7711"
       assert label_list("facts", id) == ["restricted"]
+    end
+
+    test "a skipped change is logged with its key cut, and a batch logs a few lines", ctx do
+      long = String.duplicate("k", 200) <> "-#{ctx.n}"
+      fact(ctx, long, "Long key 7790", ["restricted"])
+
+      log =
+        capture_log([level: :warning], fn ->
+          assert {:ok, %{skipped: %{gated: 1}}} =
+                   remote_delete(ctx, "facts", long, max_class: "internal")
+        end)
+
+      assert log =~ "a delete of facts"
+      assert log =~ String.duplicate("k", 64)
+      refute log =~ String.duplicate("k", 65)
+
+      ids = for i <- 1..14, do: "fact-many-gated-#{ctx.n}-#{i}"
+      for id <- ids, do: fact(ctx, id, "Many #{id}", ["restricted"])
+
+      mutations =
+        for id <- ids do
+          %{
+            "id" => "mut_remote_many_#{id}",
+            "device_id" => "rep_remote",
+            "entity_type" => "facts",
+            "entity_id" => id,
+            "operation" => "delete",
+            "occurred_at" => "2099-01-01T00:00:00.000",
+            "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
+          }
+        end
+
+      log =
+        capture_log([level: :warning], fn ->
+          assert {:ok, %{skipped: %{gated: 14}}} =
+                   Sync.apply_changes(ctx.tenant, ctx.ws, mutations,
+                     since: "2099-12-31T00:00:00",
+                     max_class: "internal"
+                   )
+        end)
+
+      assert length(Regex.scan(~r/a delete of facts/, log)) == 10
+      assert log =~ "4 more changes were skipped the same way"
     end
 
     test "a delete of a row within the class the peer is cleared for is applied", ctx do
@@ -1280,6 +1394,64 @@ defmodule OptimalEngine.SyncGateTest do
       refute carries?(second["mutations"], "Board minutes 8811 summary")
     end
 
+    test "a source labelled while a page is on its way holds what the next page derives from it",
+         ctx do
+      source = plain_source(ctx, "Offer letter 8820")
+
+      {:ok, first} =
+        Versioned.create(%{
+          content: "First page memory 8820",
+          workspace_id: ctx.ws,
+          tenant_id: ctx.tenant
+        })
+
+      {:ok, derived} =
+        Versioned.create(%{
+          content: "Derived memory 8820",
+          workspace_id: ctx.ws,
+          tenant_id: ctx.tenant,
+          metadata: %{"memory_core_source_package_id" => source.id}
+        })
+
+      fired = :ets.new(:relabelled, [:public, :bag])
+
+      relabel = fn mutations ->
+        if Enum.any?(mutations, &(&1["entity_id"] == first.id)) do
+          {:ok, _} =
+            Store.raw_query(
+              "UPDATE source_packages SET security_labels = '[\"restricted\"]' WHERE id = ?1",
+              [source.id]
+            )
+
+          :ets.insert(fired, {:relabelled, source.id})
+        end
+      end
+
+      # One change to a page, so the source is read on an earlier page than the
+      # memory that derives from it, and labelled in between.
+      {_result, sent} = push(ctx, max_class: "internal", max_batch: 1, on_push: relabel)
+
+      # The relabel happened, and the cycle went past the memory that derives from it.
+      assert :ets.lookup(fired, :relabelled) != []
+
+      {:ok, [[derived_last]]} =
+        Store.raw_query("SELECT MAX(sequence) FROM sync_mutations WHERE entity_id = ?1", [
+          derived.id
+        ])
+
+      {:ok, [[cursor]]} =
+        Store.raw_query(
+          "SELECT last_pushed_seq FROM sync_peers WHERE tenant_id = ?1 AND workspace_id = ?2",
+          [ctx.tenant, ctx.ws]
+        )
+
+      assert cursor >= derived_last
+
+      assert sent?(sent, "memories", first.id)
+      refute sent?(sent, "memories", derived.id)
+      refute carries?(sent, "Derived memory 8820")
+    end
+
     test "an aggregate is held after a memory was labelled by its metadata alone", ctx do
       report(ctx, "rep-late-#{ctx.n}")
 
@@ -1406,16 +1578,39 @@ defmodule OptimalEngine.SyncGateTest do
       assert :index in expired
     end
 
-    test "a ttl that is not a number turns nothing off and breaks nothing", ctx do
-      Application.put_env(:optimal_engine, :sync_gate_cache_ttl_ms, "soon")
+    test "a ttl that is not a non-negative integer turns the cache off", ctx do
+      for ttl <- ["soon", -5, 1.5, nil, :forever] do
+        Application.put_env(:optimal_engine, :sync_gate_cache_ttl_ms, ttl)
 
-      {_, builds} =
-        counting_builds(ctx.ws, fn ->
+        {{_, builds}, _log} =
+          with_log([level: :warning], fn ->
+            counting_builds(ctx.ws, fn ->
+              Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+              Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
+            end)
+          end)
+
+        assert Enum.count(builds, &(&1 == :index)) == 2, "ttl #{inspect(ttl)} left the cache on"
+      end
+    end
+
+    test "an invalid ttl is warned about once for each value", ctx do
+      ttl = "soon-#{ctx.n}"
+      Application.put_env(:optimal_engine, :sync_gate_cache_ttl_ms, ttl)
+
+      first =
+        capture_log([level: :warning], fn ->
           Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
           Sync.changes(ctx.tenant, ctx.ws, limit: 2_000)
         end)
 
-      assert Enum.count(builds, &(&1 == :index)) == 1
+      assert length(Regex.scan(~r/gate cache is off/, first)) == 1
+      assert first =~ ttl
+
+      again =
+        capture_log([level: :warning], fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+      refute again =~ "gate cache is off"
     end
 
     test "gates build when the cache table is gone", ctx do
@@ -1991,10 +2186,18 @@ defmodule OptimalEngine.SyncGateTest do
       # (the test below).
       replicated = replicated_tables()
 
-      for table <- Lineage.tables(),
+      # The tables the index is built from (`build_index/1` reads them by SQL) are
+      # pinned by name, whatever the lineage map says of their columns.
+      indexed = ~w(source_packages claims derivation_ledger entity_mentions)
+
+      for table <- indexed,
+          do: assert(table in replicated, "#{table} is read by the index but does not replicate")
+
+      for table <- Enum.uniq(indexed ++ Lineage.tables()),
           table in replicated,
-          spec = Lineage.spec(table),
-          spec.labels or is_binary(spec.meta) or is_binary(spec.class) do
+          table in indexed or
+            ((spec = Lineage.spec(table)) &&
+               (spec.labels or is_binary(spec.meta) or is_binary(spec.class))) do
         columns = Capture.columns(table)
 
         assert Capture.key_columns(columns) != [], "#{table} has no primary key"
@@ -2645,7 +2848,7 @@ defmodule OptimalEngine.SyncGateTest do
   defp cycle(ctx, opts) do
     pushed = :ets.new(:pushed, [:public, :bag])
     cloud = Keyword.get(opts, :cloud, [])
-    relay(ctx, pushed, cloud)
+    relay(ctx, pushed, cloud, opts)
 
     {:ok, _} =
       Sync.add_peer(
@@ -2665,7 +2868,10 @@ defmodule OptimalEngine.SyncGateTest do
     {result, for({:mutations, mutations} <- :ets.tab2list(pushed), m <- mutations, do: m)}
   end
 
-  defp relay(ctx, pushed, cloud) do
+  # `opts`: `:max_batch` refuses a push of more mutations than that with a 413
+  # (the sender then sends smaller pages), `:on_push` is called with the
+  # mutations of every push the relay accepts.
+  defp relay(ctx, pushed, cloud, opts) do
     engine = %{
       "replica_id" => "rep_cloud",
       "migration" => Sync.engine_info()["migration"],
@@ -2702,8 +2908,14 @@ defmodule OptimalEngine.SyncGateTest do
 
         {req[:method], route} == {:post, "push"} ->
           mutations = req[:body]["mutations"]
-          :ets.insert(pushed, {:mutations, mutations})
-          answer(200, %{"data" => %{"applied" => length(mutations), "engine" => engine}})
+
+          if opts[:max_batch] && length(mutations) > opts[:max_batch] do
+            answer(413, %{"error" => %{"code" => "TOO_LARGE"}})
+          else
+            :ets.insert(pushed, {:mutations, mutations})
+            if opts[:on_push], do: opts[:on_push].(mutations)
+            answer(200, %{"data" => %{"applied" => length(mutations), "engine" => engine}})
+          end
 
         true ->
           answer(404, %{"error" => %{"code" => "NOT_FOUND"}})

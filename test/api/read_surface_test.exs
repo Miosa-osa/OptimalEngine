@@ -700,6 +700,56 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
       refute "deal-room-#{ctx.n}" in slugs(export(ctx, mint(ctx, %{}), "workspace"))
     end
 
+    test "metadata that repeats a label key is unresolved for a row, whichever copy is empty",
+         ctx do
+      insert = fn name, metadata ->
+        id = "mem-repeat-#{name}-#{ctx.n}"
+
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO memories (id, tenant_id, workspace_id, content, metadata) VALUES (?1, 'default', ?2, ?3, ?4)",
+            [id, ctx.ws, "Repeated key #{name}", metadata]
+          )
+
+        id
+      end
+
+      seen = fn id, grants -> id in ids(export(ctx, mint(ctx, grants), "memories")["memories"]) end
+
+      # SQLite keeps the first of two keys and Jason the last, so neither may
+      # decide what the row is labelled. The label axis is unresolved: a reader of
+      # some labels is turned away, one of every label is not.
+      for {name, metadata} <- [
+            labels_last_empty: ~s({"security_labels":["restricted"],"security_labels":[]}),
+            labels_first_empty: ~s({"security_labels":[],"security_labels":["restricted"]})
+          ] do
+        id = insert.(name, metadata)
+
+        refute seen.(id, %{"allowed_security_labels" => ["restricted", "internal"]}),
+               "#{name} was shown to a reader of some labels"
+
+        assert seen.(id, %{"allowed_security_labels" => ["*"]}),
+               "#{name} was hidden from a reader of every label"
+      end
+
+      # The partition axis is unresolved on its own: every label does not read past it.
+      for {name, metadata} <- [
+            partitions_last_empty: ~s({"partition_ids":["team-a"],"partition_ids":[]}),
+            partitions_first_empty: ~s({"partition_ids":[],"partition_ids":["team-a"]})
+          ] do
+        id = insert.(name, metadata)
+
+        refute seen.(id, %{"allowed_security_labels" => ["*"]}),
+               "#{name} was shown to a reader of no partition"
+
+        refute seen.(id, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["team-a"]}),
+               "#{name} was shown to a reader of one partition"
+
+        assert seen.(id, %{"allowed_security_labels" => ["*"], "allowed_partitions" => ["*"]}),
+               "#{name} was hidden from a reader of every partition"
+      end
+    end
+
     test "a label that is not a string hides the row", ctx do
       for {name, labels} <- [
             number: "[1]",

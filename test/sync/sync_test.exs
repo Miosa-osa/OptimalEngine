@@ -1095,6 +1095,8 @@ defmodule OptimalEngine.SyncTest do
 
       row = context_row("bad-#{ctx.n}", "Bad", ctx.ws, ctx.tenant)
       nested = %{"row" => %{"id" => %{"nested" => 1}}, "blobs" => %{}}
+      too_big = %{"row" => %{"id" => "x", "mode" => 9_223_372_036_854_775_808}, "blobs" => %{}}
+      too_small = %{"row" => %{"id" => "x", "mode" => -9_223_372_036_854_775_809}, "blobs" => %{}}
       bad_hex = %{"row" => %{"id" => "x"}, "blobs" => %{"embedding" => "zz"}}
 
       # Built by hand: the helper reads the payload, which is what is wrong here.
@@ -1123,6 +1125,10 @@ defmodule OptimalEngine.SyncTest do
         {:invalid_payload, raw.(%{"payload" => nil})},
         {:invalid_payload, raw.(%{"payload" => %{"row" => "nope"}})},
         {:unsupported_value, raw.(%{"payload" => nested})},
+        # An integer that does not fit 64 bits cannot be bound (the driver raises)
+        # and used to end the whole batch, and a pull page that never advanced.
+        {:unsupported_value, raw.(%{"payload" => too_big})},
+        {:unsupported_value, raw.(%{"payload" => too_small})},
         {:invalid_payload, raw.(%{"payload" => bad_hex})}
       ]
 
