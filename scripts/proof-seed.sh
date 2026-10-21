@@ -253,11 +253,12 @@ echo "== step 5: Engine A again; changes just before the export; the export"
 a_pid=$(start_engine a "$A_PORT" "$a_key") || fail "Engine A did not answer /api/health after the seed"
 sample_rss "$a_pid" "$DATA/rss-a.log" &
 python3 - "$DATA" "$A_URL" "$a_key" "$workspace" "$LATE" <<'PY' || fail "exporting the bundle"
-import json, sys, time, urllib.parse
+import json, sys, threading, time, urllib.parse
 sys.path.insert(0, sys.argv[1])
 from proofhttp import call, changes, ok
 
 data, base, key, workspace, late = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+CONCURRENT_MAX = 2000
 
 # Written right before the export: captured, not yet sealed into the ledger.
 late_ids = []
@@ -267,12 +268,34 @@ for i in range(late):
                 "POST /api/memory")
     late_ids.append(memory["id"])
 
+# A writer that keeps adding memories while the export runs. Each one lands
+# either before the export's snapshot (in the bundle, at or below the mark) or
+# after it (above the mark, pulled by the replica), never both.
+exporting = threading.Event()
+exporting.set()
+concurrent_ids = []
+
+def write_while_exporting():
+    i = 0
+    while exporting.is_set() and i < CONCURRENT_MAX:
+        status, body = call(base, key, "POST", "/api/memory",
+                            {"content": "Concurrent change %d during the export" % i, "workspace": workspace})
+        if status in (200, 201):
+            concurrent_ids.append(body["id"])
+        i += 1
+        time.sleep(0.2)
+
+writer = threading.Thread(target=write_while_exporting, daemon=True)
+writer.start()
 started = time.time()
 try:
     bundle = ok(call(base, key, "POST", "/api/workspaces/%s/bundle" % urllib.parse.quote(workspace, safe=""), {}),
                 "POST /api/workspaces/:id/bundle")
 except OSError as error:
     raise SystemExit("the export failed after %.0f s: %r" % (time.time() - started, error))
+finally:
+    exporting.clear()
+    writer.join()
 seconds = time.time() - started
 mark = bundle["ledger_sequence"]
 print("EXPORT_SECONDS=%.1f" % seconds)
@@ -285,7 +308,11 @@ print("BUNDLE_LEDGER_SEQUENCE=%d BUNDLE_TABLES=%d BUNDLE_ROWS=%d BUNDLE_FILES=%d
 after = changes(base, key, workspace, mark)
 late_after = [m for m in after if m["entity_type"] == "memories" and m["entity_id"] in late_ids]
 print("LATE_WRITES=%d LATE_ENTRIES_AFTER_MARK=%d" % (len(late_ids), len(late_after)))
-json.dump({"bundle": bundle, "late_ids": late_ids}, open(data + "/export.json", "w"))
+concurrent_above = sorted({m["entity_id"] for m in after
+                           if m["entity_type"] == "memories" and m["entity_id"] in set(concurrent_ids)})
+print("CONCURRENT_WRITES=%d CONCURRENT_ABOVE_MARK=%d" % (len(concurrent_ids), len(concurrent_above)))
+json.dump({"bundle": bundle, "late_ids": late_ids, "concurrent_ids": concurrent_ids,
+           "concurrent_above": concurrent_above}, open(data + "/export.json", "w"))
 if late_after:
     raise SystemExit("the bundle's mark misses %d ledger entries written before the export" % len(late_after))
 PY
@@ -362,6 +389,18 @@ present = sum(1 for memory_id in exported["late_ids"]
 print("LATE_WRITES_ON_B_AFTER_IMPORT=%d" % present)
 if present != len(exported["late_ids"]):
     problems.append("the late changes are not all in the imported workspace")
+# A memory written during the export is in the bundle exactly when its ledger
+# entry is at or below the mark; the others arrive with the catch-up.
+above = set(exported["concurrent_above"])
+both = [m for m in exported["concurrent_ids"]
+        if m in above and call(base, key, "GET", "/api/memory/" + m)[0] == 200]
+neither = [m for m in exported["concurrent_ids"]
+           if m not in above and call(base, key, "GET", "/api/memory/" + m)[0] != 200]
+print("CONCURRENT_IN_BUNDLE=%d CONCURRENT_IN_BUNDLE_AND_ABOVE_MARK=%d CONCURRENT_IN_NEITHER=%d"
+      % (len(exported["concurrent_ids"]) - len(above) - len(neither), len(both), len(neither)))
+if both or neither:
+    problems.append("%d memories written during the export are both in the bundle and above the mark, "
+                    "%d in neither" % (len(both), len(neither)))
 if problems:
     raise SystemExit("; ".join(problems))
 PY

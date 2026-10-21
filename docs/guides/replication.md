@@ -355,5 +355,5 @@ A peer on a different migration pauses with `status: paused_version` and a messa
 
 Enable sync on the source, export a workspace bundle (`docs/guides/scope-and-portability.md`), import it on the new replica, and register the peer with `since` set to the bundle's `ledger_sequence`.
 The replica then pulls only what happened after the snapshot, so a large workspace never resyncs from zero.
-The export seals every captured change before it reads the mark, so a change written just before the export is in the bundle and is not pulled again.
+The export seals every captured change, then reads the mark and the rows from one snapshot, so a change written just before the export is in the bundle and is not pulled again, and a change written during it is pulled once.
 `scripts/proof-seed.sh` proves it with two Engines: a synthetic workspace (`SEED_MB`, 2048 for 2 GB) seeds the replica, and the replica pulls exactly the source's ledger entries after the mark.
