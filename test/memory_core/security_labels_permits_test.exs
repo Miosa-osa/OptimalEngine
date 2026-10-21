@@ -29,6 +29,44 @@ defmodule OptimalEngine.MemoryCore.SecurityLabelsPermitsTest do
     end
   end
 
+  describe "metadata_map/1" do
+    test "reads an object as Jason does" do
+      assert SecurityLabels.metadata_map(~s({"security_labels":["a"],"n":1,"x":{"y":null}})) ==
+               %{"security_labels" => ["a"], "n" => 1, "x" => %{"y" => nil}}
+
+      assert SecurityLabels.metadata_map(%{security_labels: ["a"]}) == %{"security_labels" => ["a"]}
+    end
+
+    test "is empty for text that is not an object" do
+      for text <- ["not json", "[1,2]", ~s("text"), "7", "", ~s({"a":1} trailing), ~s({"a":)] do
+        assert SecurityLabels.metadata_map(text) == %{}, inspect(text)
+      end
+
+      assert SecurityLabels.metadata_map(nil) == %{}
+    end
+
+    test "reads a repeated security_labels or partition_ids as 0, which is unresolved" do
+      map = SecurityLabels.metadata_map(~s({"security_labels":["a"],"security_labels":[],"n":1}))
+      assert map == %{"security_labels" => 0, "n" => 1}
+      assert SecurityLabels.metadata_tokens(map) == [:unresolved]
+
+      map = SecurityLabels.metadata_map(~s({"partition_ids":["a"],"partition_ids":["b"]}))
+      assert SecurityLabels.metadata_tokens(map) == [:unresolved_partition]
+
+      # Any other repeated key is the last one, as before.
+      assert SecurityLabels.metadata_map(~s({"note":"a","note":"b"})) == %{"note" => "b"}
+    end
+
+    test "a repeated key inside a nested object is marked there, and the top level is not" do
+      map =
+        SecurityLabels.metadata_map(
+          ~s({"security_labels":["a"],"x":{"partition_ids":1,"partition_ids":2}})
+        )
+
+      assert map == %{"security_labels" => ["a"], "x" => %{"partition_ids" => 0}}
+    end
+  end
+
   describe "permits?/2 on partitions" do
     test "with none granted only what carries no partition is seen" do
       assert permits?(grants([], []), [])

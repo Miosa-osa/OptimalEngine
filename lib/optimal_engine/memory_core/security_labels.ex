@@ -286,19 +286,55 @@ defmodule OptimalEngine.MemoryCore.SecurityLabels do
       else: highest_rank(for({:label, name} <- tokens, do: name))
   end
 
-  @doc "A `metadata` value as a map with string keys (empty when unreadable)."
+  @doc """
+  A `metadata` value as a map with string keys (empty when unreadable).
+
+  A `security_labels` or `partition_ids` key that appears twice in the text is
+  read as `0`, which is not a list and so is unresolved: a reader that keeps the
+  first of two and one that keeps the last (SQLite and `Jason`) disagree about
+  what the row is labelled, and the row must not pass as unlabelled because of
+  it. The aggregate rule reads the same text in SQL and treats it the same way.
+  """
   @spec metadata_map(term()) :: map()
   def metadata_map(metadata) when is_map(metadata) and not is_struct(metadata),
     do: Map.new(metadata, fn {key, value} -> {to_string(key), value} end)
 
   def metadata_map(json) when is_binary(json) do
-    case Jason.decode(json) do
-      {:ok, map} when is_map(map) -> map
-      _ -> %{}
+    case decode_object(json) do
+      {:ok, map} -> map
+      :error -> %{}
     end
   end
 
   def metadata_map(_other), do: %{}
+
+  @governed_keys ["security_labels", "partition_ids"]
+
+  # `:json` (OTP 27) hands each member of an object to a callback, which is what
+  # lets a key that appears twice be seen; a decoder that builds a map has
+  # already lost the first.
+  defp decode_object(json) do
+    decoders = %{
+      null: nil,
+      object_start: fn _acc -> {%{}, []} end,
+      object_push: fn key, value, {map, repeated} ->
+        repeated =
+          if key in @governed_keys and Map.has_key?(map, key), do: [key | repeated], else: repeated
+
+        {Map.put(map, key, value), repeated}
+      end,
+      object_finish: fn {map, repeated}, acc ->
+        {Enum.reduce(repeated, map, &Map.put(&2, &1, 0)), acc}
+      end
+    }
+
+    case :json.decode(json, :ok, decoders) do
+      {map, :ok, rest} when is_map(map) -> if String.trim(rest) == "", do: {:ok, map}, else: :error
+      _other -> :error
+    end
+  rescue
+    _error -> :error
+  end
 
   @doc """
   The labels in a stored value, as strings. A value that cannot be read
