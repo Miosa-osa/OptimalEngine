@@ -122,6 +122,17 @@ Each step is a row numbered within its correlation id and pointing at the step b
 Recording `approval` or `denial` needs the `authority:enforce` scope; other stages need `write`.
 The trace also follows the Engine's own flow (approval request, approval, grant, admission, release) by request or grant id, reports whether the chain is complete, verifies every step against the evidence, and names gaps such as an action without an approval.
 
+A step is verified against the workspace id inside its signed evidence entry, not only the workspace column of its row.
+An operator's id repair moves the rows to the new id, so the chain is found under the new id, but it never rewrites signed evidence: an entry keeps the id it was written with.
+The repair appends a signed `workspace.rekeyed` entry (from, to, who) in the transaction that moves the rows, and a step verifies when its row's id is the signed id followed through the re-keys recorded after its entry.
+Only a re-key that is a signed entry of the tenant's chain, from a key that is not revoked, in the position it was signed, counts; a step moved by hand in the database, or "explained" by a row written into the evidence table, does not verify.
+A step is written together with its evidence entry in one transaction, so a step never exists without its entry.
+A step is numbered, checked and written in one transaction, reading only the first and last step of its chain, so recording costs the same for a chain of any length, and a repair cannot fall between reading the chain and writing the step.
+After a repair, record further steps under the new id; the old id is refused for that chain (`workspace_mismatch`).
+An Engine that cannot sign evidence refuses a repair of a workspace that has steps, and refuses to record a step (`evidence_failed`).
+A repair made by an earlier release left no record, so its steps show as unverified.
+See [Repairing a workspace id](scope-and-portability.md#repairing-a-workspace-id).
+
 ## Classification
 
 `GET /api/signals/classification?workspace=<id>` counts the workspace's Signals by genre and mode as stored (`stored`).

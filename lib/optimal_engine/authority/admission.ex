@@ -31,7 +31,7 @@ defmodule OptimalEngine.Authority.Admission do
   Every admission and refusal is recorded in the evidence chain.
   """
 
-  alias OptimalEngine.Authority.{Evidence, Grants, Issuers, JWS, Keys, LocalDeny}
+  alias OptimalEngine.Authority.{Evidence, Grants, Issuers, JWS, Keys, LocalDeny, WorkspaceRekeys}
 
   @skew 5
   @measurable_ceilings ~w(records bytes calls tokens)
@@ -126,7 +126,7 @@ defmodule OptimalEngine.Authority.Admission do
          :ok <- JWS.verify_signature(parsed, public_key) |> tag(jti),
          :ok <- audience(claims, request) |> tag(jti),
          :ok <- times(claims) |> tag(jti),
-         :ok <- binding(claims, request) |> tag(jti),
+         :ok <- binding(claims, request, origin) |> tag(jti),
          :ok <- ceilings(claims, request, opts) |> tag(jti),
          :ok <- local_deny(request) |> tag(jti),
          :ok <- state(origin, request.tenant_id, claims) |> tag(jti),
@@ -181,20 +181,91 @@ defmodule OptimalEngine.Authority.Admission do
 
   defp times(_claims), do: {:error, :invalid_time_claims}
 
-  defp binding(%{"sub" => sub, "optimal" => %{} = optimal}, request) do
+  defp binding(%{"sub" => sub, "optimal" => %{} = optimal} = claims, request, origin) do
     cond do
       sub != request.subject -> {:error, :wrong_subject}
       optimal["tenant"] != request.tenant_id -> {:error, :wrong_tenant}
-      optimal["workspace"] != request.workspace_id -> {:error, :wrong_workspace}
+      true -> workspace_binding(claims, optimal, request, origin)
+    end
+  end
+
+  defp binding(_claims, _request, _origin), do: {:error, :malformed}
+
+  defp workspace_binding(claims, optimal, request, origin) do
+    {workspace, resource} = bound_workspace(claims, optimal, request, origin)
+
+    cond do
+      workspace == :stranded -> {:error, :wrong_workspace}
+      workspace != request.workspace_id -> {:error, :wrong_workspace}
       optimal["action"] != request.action -> {:error, :wrong_action}
-      not resource_covered?(optimal["resource"], request.resource) -> {:error, :wrong_resource}
+      not resource_covered?(resource, request.resource) -> {:error, :wrong_resource}
       (optimal["data_class"] || "internal") != request.data_class -> {:error, :wrong_data_class}
       command_mismatch?(optimal["command_sha256"], request) -> {:error, :command_mismatch}
       true -> :ok
     end
   end
 
-  defp binding(_claims, _request), do: {:error, :malformed}
+  # A grant names its workspace by the id it had when it was issued. When an
+  # operator has renamed that workspace since (`WorkspaceRekeys`, mode
+  # `rename`), the grant is for the workspace under its new id, and only that:
+  # the old id is no second door into it, and may by now name a different
+  # workspace. Only the renames recorded after the grant was issued count, and
+  # only if they verify. A merge into a workspace that already existed is not
+  # followed: a grant for an unregistered id was never issued for that
+  # workspace's data or policies. By the same reasoning the grant does not
+  # keep its old id once a merge has moved the rows away from it: the id
+  # would otherwise admit, as it was written, a workspace that no longer holds
+  # what the grant was issued for (or an unrelated one that took the id), so
+  # the grant admits nowhere (`:stranded`). A grant that did not come from this
+  # Engine (an outside issuer's, whatever id it carries) is taken as written,
+  # and so is any grant while the tenant has no repair on record.
+  defp bound_workspace(claims, optimal, request, "local") do
+    as_written = {optimal["workspace"], optimal["resource"]}
+
+    ids =
+      Enum.reject(
+        [optimal["workspace"], WorkspaceRekeys.resource_workspace(optimal["resource"])],
+        &is_nil/1
+      )
+
+    # The issuance is looked up only when a repair could reach the grant's
+    # workspace at all, which is almost never.
+    with true <- WorkspaceRekeys.any?(request.tenant_id),
+         [_ | _] = rekeys <- WorkspaceRekeys.list(request.tenant_id, near: ids),
+         jti when is_binary(jti) <- claims["jti"],
+         seq when is_integer(seq) <- issued_seq(request.tenant_id, jti) do
+      renamed = {
+        WorkspaceRekeys.current(rekeys, optimal["workspace"], seq, [:rename]),
+        WorkspaceRekeys.current_resource(rekeys, optimal["resource"], seq, [:rename])
+      }
+
+      moved = {
+        WorkspaceRekeys.current(rekeys, optimal["workspace"], seq, :any),
+        WorkspaceRekeys.current_resource(rekeys, optimal["resource"], seq, :any)
+      }
+
+      if moved == renamed, do: renamed, else: {:stranded, nil}
+    else
+      _ -> as_written
+    end
+  end
+
+  defp bound_workspace(_claims, optimal, _request, _origin),
+    do: {optimal["workspace"], optimal["resource"]}
+
+  # Where in the evidence chain the Engine recorded issuing the grant.
+  defp issued_seq(tenant_id, jti) do
+    tenant_id
+    |> Evidence.list(jti: jti)
+    |> Enum.find(fn entry ->
+      entry["kind"] in ["grant.issued", "grant.narrowed"] and
+        Evidence.verify_one(tenant_id, entry) == :ok
+    end)
+    |> case do
+      nil -> nil
+      entry -> entry["seq"]
+    end
+  end
 
   defp resource_covered?(granted, requested) when is_binary(granted) and is_binary(requested) do
     granted == requested or

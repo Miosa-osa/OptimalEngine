@@ -22,6 +22,8 @@ defmodule OptimalEngine.Authority.Evidence do
   alias OptimalEngine.Authority.{CanonicalJSON, JWS, Keys}
   alias OptimalEngine.Store
 
+  require Logger
+
   @genesis String.duplicate("0", 64)
   @where_page 1_000
 
@@ -33,11 +35,47 @@ defmodule OptimalEngine.Authority.Evidence do
             could_not_enforce external.receipt issuer.registered revocations.received
             settings.changed key.rotated key.minted key.revoked integrity.finding
             agent_action.step connector.registered connector.changed connector.deleted
-            connector.run workspace.renamed)
+            connector.run workspace.renamed workspace.rekeyed)
 
   @doc "The evidence kinds the Engine records."
   @spec kinds() :: [String.t()]
   def kinds, do: @kinds
+
+  @doc """
+  The tenant's active evidence key, for a caller that appends inside its own
+  transaction (`append_in/5`) and so fetches the key first: creating one
+  writes to the Store. `nil` when the Engine cannot sign evidence, for
+  example the key that wraps the signing key is missing.
+  """
+  @spec signing_key(String.t()) :: map() | nil
+  def signing_key(tenant_id) do
+    case Keys.active(tenant_id, "evidence") do
+      {:ok, key} -> key
+      {:error, _reason} -> nil
+    end
+  end
+
+  @doc """
+  Whether `entry` sits where it was signed: its `prev_hash` is the hash of the
+  entry before it in the tenant's chain (the genesis hash for the first).
+  Entry hashes cover `prev_hash` and `seq`, so a signed entry copied to
+  another position, or one whose predecessor is gone, is not linked.
+  """
+  @spec linked?(String.t(), map()) :: boolean()
+  def linked?(_tenant_id, %{"seq" => 1, "prev_hash" => prev_hash}), do: prev_hash == @genesis
+
+  def linked?(tenant_id, %{"seq" => seq, "prev_hash" => prev_hash})
+      when is_integer(seq) and seq > 1 do
+    case Store.raw_query(
+           "SELECT hash FROM authority_evidence WHERE tenant_id = ?1 AND tenant_seq = ?2",
+           [tenant_id, seq - 1]
+         ) do
+      {:ok, [[hash]]} -> hash == prev_hash
+      _ -> false
+    end
+  end
+
+  def linked?(_tenant_id, _entry), do: false
 
   @doc """
   Appends one entry. `attrs` may carry `:jti`, `:subject`, `:action`,
@@ -439,13 +477,43 @@ defmodule OptimalEngine.Authority.Evidence do
       "action" => action,
       "resource" => resource,
       "workspace_id" => workspace,
-      "detail" => Jason.decode!(detail || "{}"),
+      "detail" => decode_detail(detail, tenant, seq, id),
       "prev_hash" => prev,
       "hash" => hash,
       "kid" => kid,
       "signature" => sig,
       "recorded_at" => at
     }
+  end
+
+  # A row whose detail is not JSON (written by hand, or damaged) reads as an
+  # empty detail and is logged, once per entry for the life of the node, not on
+  # every read. Its hash then no longer matches, so it fails verification like
+  # any other changed entry, instead of stopping every reader of the chain
+  # with an exception.
+  defp decode_detail(nil, _tenant, _seq, _id), do: %{}
+
+  defp decode_detail(detail, tenant, seq, id) do
+    case Jason.decode(detail) do
+      {:ok, decoded} ->
+        decoded
+
+      {:error, _reason} ->
+        warn_once(tenant, seq, id)
+        %{}
+    end
+  end
+
+  defp warn_once(tenant, seq, id) do
+    key = {__MODULE__, :unreadable_detail, tenant, id}
+
+    if :persistent_term.get(key, nil) == nil do
+      :persistent_term.put(key, true)
+
+      Logger.warning(
+        "[Evidence] entry #{id} (seq #{seq}) of #{tenant} has a detail that is not JSON; reading it as empty"
+      )
+    end
   end
 
   defp random_id, do: :crypto.strong_rand_bytes(12) |> Base.url_encode64(padding: false)

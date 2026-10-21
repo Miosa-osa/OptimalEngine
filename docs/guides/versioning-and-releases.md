@@ -21,9 +21,12 @@ retrieval and projection component versions
 Read it from `GET /api/version`.
 The lightweight `GET /api/health` and `GET /api/status` responses include the same identity.
 
-The current tracked contract is application `0.3.3`, API `v1`, contract schema `1`, expected migration `72`.
+The current tracked contract is application `0.3.3`, API `v1`, contract schema `1`, expected migration `73`.
 [engine-contract.json](../../engine-contract.json) supplies repository, schema, and capability metadata to [Version.info/0](../../lib/optimal_engine/version.ex) at compilation.
 [test/version_test.exs](../../test/version_test.exs) checks that runtime identity matches the contract.
+The runner applies every migration whose version is not yet recorded, but `expected_migration` and the replication gate compare the highest number, so two Engines that both report the same number must have applied the same set.
+A migration number is therefore provisional until its change merges: the change that merges next takes the highest number on main plus one.
+The number lives in one place in `lib/optimal_engine/store/migrations.ex` (the migration's version attribute) and in these pins: `engine-contract.json`, `README.md`, `OPTIONS.md`, this guide, `test/version_test.exs`, `test/api/router_test.exs`, `test/support/conformance_stub_transport.ex`, and `benchmarks/tests/test_truememory_compat.py`.
 Git SHA and timestamp are build-time metadata; changing branches does not prove an already running process changed.
 A missing build SHA may be reported as `unknown` and is not an acceptable exact-commit identity for an integration requiring a pin.
 The commit and build time are compiled into the release, so a build that reuses an earlier compilation of that module reports the values from that earlier compile rather than the ones it was given.

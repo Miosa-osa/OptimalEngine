@@ -6,6 +6,8 @@ defmodule OptimalEngine.DataSteward do
   Mutations require explicit item identifiers and never infer acceptance.
   """
 
+  alias OptimalEngine.Authority.{Evidence, WorkspaceRekeys}
+
   alias OptimalEngine.{
     ContextHealth,
     EntityQuality,
@@ -15,14 +17,34 @@ defmodule OptimalEngine.DataSteward do
     Store
   }
 
+  require Logger
+
   @default_limit 100
 
   # Tables a change of workspace id does not re-key. `workspaces` is the
   # record being replaced, and the handles move by their own step.
   # `authority_evidence` is hashed and signed over the workspace id each entry
   # names, so a rewritten row no longer verifies: an entry keeps the id the
-  # workspace had when it was written.
+  # workspace had when it was written. Rows that point at signed evidence
+  # (`authority_action_steps`) do move, and the move is recorded as signed
+  # evidence too (`OptimalEngine.Authority.WorkspaceRekeys`), which is what
+  # lets a step be verified against the id it was signed with.
   @not_rekeyed ~w(workspaces workspace_handles authority_evidence)
+
+  # What none of the re-keyed tables carry, and so what an operator must redo
+  # after a repair: workspace policy packs (`authority_policies.scope_id`, and
+  # patterns inside their signed documents) and API keys (`api_keys.workspace_scope`,
+  # fingerprinted when minted) name the workspace by id in content that is
+  # hashed and recorded. Rewriting them would be exactly the unrecorded change
+  # the integrity scan reports, so they are published and minted again for the
+  # new id, which leaves evidence. Grants already issued keep working
+  # (`OptimalEngine.Authority.Admission`).
+
+  @doc false
+  # Tables a workspace id repair does not re-key; the schema test ties its
+  # classification of signed tables to this list.
+  @spec not_rekeyed_tables() :: [String.t()]
+  def not_rekeyed_tables, do: @not_rekeyed
 
   def dashboard(workspace_id, opts \\ []) do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
@@ -212,9 +234,10 @@ defmodule OptimalEngine.DataSteward do
   def repair_orphan_scope(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
 
-    with {:ok, [_]} <- registered_workspace(target_workspace_id),
+    with {:ok, [[tenant]]} <- registered_workspace(target_workspace_id),
          {:ok, []} <- registered_workspace(source_workspace_id),
-         {:ok, tables} <- workspace_tables() do
+         {:ok, tables} <- workspace_tables(),
+         {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
       Store.transaction(fn txn ->
         outcome =
           Enum.reduce_while(tables, {:ok, []}, fn table, {:ok, results} ->
@@ -228,19 +251,33 @@ defmodule OptimalEngine.DataSteward do
             end
           end)
 
-        case outcome do
-          {:ok, results} ->
-            {:ok,
-             %{
-               source_workspace_id: source_workspace_id,
-               target_workspace_id: target_workspace_id,
-               actor_id: actor_id,
-               updated_records: Enum.sum(Enum.map(results, & &1.updated)),
-               tables: Enum.filter(results, &(&1.updated > 0))
-             }}
-
-          error ->
-            error
+        with {:ok, results} <- outcome,
+             updated = Enum.sum(Enum.map(results, & &1.updated)),
+             # Signed rows keep the id they were written with; the move is
+             # recorded so they can still be followed to the target.
+             :ok <-
+               if(updated > 0,
+                 do:
+                   WorkspaceRekeys.record(
+                     txn,
+                     evidence_key,
+                     tenant,
+                     source_workspace_id,
+                     target_workspace_id,
+                     actor_id,
+                     :merge
+                   ),
+                 else: :ok
+               ) do
+          {:ok,
+           %{
+             source_workspace_id: source_workspace_id,
+             target_workspace_id: target_workspace_id,
+             actor_id: actor_id,
+             updated_records: updated,
+             tables: Enum.filter(results, &(&1.updated > 0)),
+             rekey_recorded: updated > 0 and not is_nil(evidence_key)
+           }}
         end
       end)
     else
@@ -262,14 +299,16 @@ defmodule OptimalEngine.DataSteward do
          {:ok, []} <-
            Store.raw_query("SELECT id FROM workspaces WHERE id=?1", [target_workspace_id]),
          true <- target_workspace_id == tenant <> ":" <> slug,
-         {:ok, tables} <- workspace_tables() do
+         {:ok, tables} <- workspace_tables(),
+         {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
       Store.transaction(fn txn ->
         temporary_slug =
           "__renaming__" <> slug <> "__" <> Integer.to_string(System.unique_integer([:positive]))
 
         # The source gives up its slug and external id before the target takes
         # them, so neither unique index sees both rows at once.
-        with {:ok, _} <-
+        with :ok <- target_free_of_rows(txn, tables, target_workspace_id),
+             {:ok, _} <-
                Store.txn_execute(
                  txn,
                  "UPDATE workspaces SET slug=?1, external_id=NULL WHERE id=?2",
@@ -302,14 +341,27 @@ defmodule OptimalEngine.DataSteward do
                  [target_workspace_id, source_workspace_id]
                ),
              {:ok, _} <-
-               Store.txn_execute(txn, "DELETE FROM workspaces WHERE id=?1", [source_workspace_id]) do
+               Store.txn_execute(txn, "DELETE FROM workspaces WHERE id=?1", [source_workspace_id]),
+             # Signed rows keep the id they were written with; the move is
+             # recorded so they can still be followed to the target.
+             :ok <-
+               WorkspaceRekeys.record(
+                 txn,
+                 evidence_key,
+                 tenant,
+                 source_workspace_id,
+                 target_workspace_id,
+                 actor_id,
+                 :rename
+               ) do
           {:ok,
            %{
              source_workspace_id: source_workspace_id,
              target_workspace_id: target_workspace_id,
              actor_id: actor_id,
              tables: results,
-             handles_moved: handles_moved
+             handles_moved: handles_moved,
+             rekey_recorded: not is_nil(evidence_key)
            }}
         end
       end)
@@ -450,8 +502,43 @@ defmodule OptimalEngine.DataSteward do
     |> Enum.join(" ")
   end
 
+  # The key that signs the record of the repair, fetched before the
+  # transaction opens (creating a key writes to the Store). Without one the
+  # repair would leave the workspace's action steps unverifiable for good, so
+  # it is refused when there are any; otherwise it goes ahead with a warning
+  # and no record.
+  defp recording_key(tenant, source_workspace_id) do
+    case Evidence.signing_key(tenant) do
+      nil ->
+        if action_steps?(tenant, source_workspace_id) do
+          {:error, :evidence_key_unavailable}
+        else
+          Logger.warning(
+            "[DataSteward] the repair of #{source_workspace_id} will not be recorded as evidence: the Engine cannot sign evidence"
+          )
+
+          {:ok, nil}
+        end
+
+      key ->
+        {:ok, key}
+    end
+  end
+
+  defp action_steps?(tenant, workspace_id) do
+    match?(
+      {:ok, [[1]]},
+      Store.raw_query(
+        "SELECT EXISTS (SELECT 1 FROM authority_action_steps WHERE tenant_id = ?1 AND workspace_id = ?2)",
+        [tenant, workspace_id]
+      )
+    )
+  end
+
   defp registered_workspace(workspace_id) do
-    Store.raw_query("SELECT id FROM workspaces WHERE id=?1 AND status='active'", [workspace_id])
+    Store.raw_query("SELECT tenant_id FROM workspaces WHERE id=?1 AND status='active'", [
+      workspace_id
+    ])
   end
 
   defp workspace_tables do
@@ -480,6 +567,26 @@ defmodule OptimalEngine.DataSteward do
   end
 
   defp safe_identifier?(value), do: is_binary(value) and Regex.match?(~r/^[a-zA-Z0-9_]+$/, value)
+
+  # A rename gives the same workspace a new id. An id that already holds rows
+  # is where some other data was written, and moving the workspace onto it
+  # would make that data part of the workspace without saying so; merging it
+  # in first (`repair_orphan_scope/3`) says so, and records it as a merge.
+  defp target_free_of_rows(txn, tables, target) do
+    held =
+      Enum.any?(tables, fn table ->
+        match?(
+          {:ok, [[1]]},
+          Store.txn_query(
+            txn,
+            "SELECT EXISTS (SELECT 1 FROM \"#{table}\" WHERE workspace_id=?1)",
+            [target]
+          )
+        )
+      end)
+
+    if held, do: {:error, :target_workspace_has_rows}, else: :ok
+  end
 
   defp rename_tables(txn, tables, source, target) do
     Enum.reduce_while(tables, {:ok, []}, fn table, {:ok, results} ->

@@ -117,7 +117,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_069_analysis_reports(),
       migration_070_repair_vector_and_chunk_scope(),
       migration_071_workspace_handles(),
-      migration_072_workspace_external_id()
+      migration_072_workspace_external_id(),
+      migration_authority_evidence_kind_index()
     ]
   end
 
@@ -158,6 +159,26 @@ defmodule OptimalEngine.Store.Migrations do
         """},
        {"idx_workspaces_tenant_external_id",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_tenant_external_id ON workspaces(tenant_id, external_id) WHERE external_id IS NOT NULL AND status = 'active'"}
+     ]}
+  end
+
+  # The version of the evidence index migration. A migration number is
+  # provisional until it merges: the PR that merges next takes the highest
+  # number on main plus one, because the schema gate (`expected_migration`,
+  # and the replication gate) compares the highest number. Change it here and
+  # in the pins listed in docs/guides/versioning-and-releases.md.
+  @authority_evidence_kind_index_version 73
+
+  # Readers that follow one kind of entry (the workspace id repairs an action
+  # chain is verified against, `Evidence.list(kind: ...)`) read it by tenant
+  # and kind in chain order, not by scanning the tenant's whole chain.
+  # Additive and safe to run again.
+  defp migration_authority_evidence_kind_index do
+    {@authority_evidence_kind_index_version,
+     "authority evidence: index by tenant, kind and sequence",
+     [
+       {"idx_authority_evidence_kind",
+        "CREATE INDEX IF NOT EXISTS idx_authority_evidence_kind ON authority_evidence(tenant_id, kind, tenant_seq)"}
      ]}
   end
 
@@ -1190,7 +1211,7 @@ defmodule OptimalEngine.Store.Migrations do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Applies any migrations with `version > max(schema_migrations.version)`.
+  Applies every migration whose version is not yet in `schema_migrations`: a set check, so a version added behind a higher applied one still runs.
   Records each successful migration in the `schema_migrations` table.
   """
   @spec run(any()) :: :ok
