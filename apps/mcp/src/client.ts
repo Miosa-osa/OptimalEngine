@@ -87,7 +87,8 @@ function buildUrl(
   return url.toString();
 }
 
-let warnedFor: string | null = null;
+// The Engine releases this process has warned about ("unreadable" for a header without one).
+const warnedFor = new Set<string>();
 
 /**
  * One stderr line per Engine release when the Engine marks this server as
@@ -98,8 +99,8 @@ let warnedFor: string | null = null;
 function warnOutdated(header: string): void {
   const engineVersion = /engine=(\d+\.\d+\.\d+)/.exec(header)?.[1] ?? null;
   const key = engineVersion ?? "unreadable";
-  if (warnedFor === key) return;
-  warnedFor = key;
+  if (warnedFor.has(key)) return;
+  warnedFor.add(key);
   const detail = !engineVersion
     ? // The header is the Engine's text; an unreadable one is not echoed.
       `the Engine marks MCP server ${MCP_VERSION} as outdated; ${upgradeHint(null)}`

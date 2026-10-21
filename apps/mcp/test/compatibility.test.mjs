@@ -103,6 +103,11 @@ test("an Engine of another minor release gets one warning per Engine release", a
     lines = warnings();
     assert.equal(lines.length, 2, lines.join("\n"));
     assert.match(lines[1], new RegExp(`outdated for Engine ${later}`));
+
+    // An Engine release it already warned about, again (a rolled-back upgrade): no new line.
+    headers = { "x-optimal-client-outdated": `client=${PACKAGE_VERSION} engine=${NEXT_MINOR}` };
+    await call("boot", {});
+    assert.equal(warnings().length, 2, warnings().join("\n"));
   } finally {
     headers = {};
   }

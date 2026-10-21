@@ -7,20 +7,26 @@
 #
 #   Case A: the failing-migration test release starts on that data twice, as a
 #   supervisor restarting it would. Passes when it never answers and the store
-#   keeps its migration counter, schema and data: a logical comparison of
-#   `sqlite3 .dump` before and after.
+#   keeps its migration counter, schema and data: the same `sqlite3 .dump` and
+#   the same schema rows before and after.
 #
 #   Case B: with a backup taken first (VACUUM INTO, as a managed upgrade does),
 #   the passing-then-failing test release starts twice. Passes when it never
-#   answers, its passing migration stays applied while the failing one leaves
-#   nothing, and restoring the backup brings back the same .dump.
-#   VACUUM INTO writes a virtual table's schema row after the ordinary tables,
-#   so the backup's .dump lists the same statements in another order: the
-#   backup is compared with the store before the upgrade statement by statement
-#   regardless of order, and the restored store with the backup exactly.
+#   answers, its passing migration (9000001) stays applied while the failing
+#   one leaves nothing, the previous release opens that unrestored store and
+#   its storage audit reports the migration drift, and restoring the backup
+#   brings back the store: the same schema rows, the same .dump line by line,
+#   and every full-text row joined to its base row.
 #
-# Then the current release starts again and serves the record it had. No crash
-# dump may land in the data directory.
+# Every .dump keeps the hidden rowids (--preserve-rowids): contexts, memories
+# and source_packages have text keys, and their full-text rows hang on the
+# rowid. VACUUM INTO writes a virtual table's schema row after the ordinary
+# tables, so a copy's .dump has the same lines in another order; the schema
+# rows, compared exactly, catch what a line comparison cannot, such as a
+# column moved between tables.
+#
+# Then the current release starts again, serves the record it had and finds
+# the document it had. No crash dump may land in the data directory.
 #
 # Needs a clean commit (the test releases name it), Elixir, sqlite3, curl,
 # python3 and openssl. Builds every release with MIX_ENV=prod and never touches a
@@ -145,17 +151,24 @@ boot_test_release() { # release-dir name failing
   done
 }
 
-# Writes the store's logical content, its `sqlite3 .dump`, to a file.
-dump_to() { # file
-  sql 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null
-  sqlite3 "$DB" .dump >"$1"
+# Writes a store's logical content to a file: its `sqlite3 .dump`, with the
+# hidden rowids.
+dump_to() { # db file
+  sqlite3 "$1" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null
+  sqlite3 "$1" '.dump --preserve-rowids' >"$2"
+}
+
+# Takes a store's .dump and its schema rows as <name>.dump and <name>.schema.
+snapshot() { # db name
+  dump_to "$1" "$DATA/$2.dump"
+  sqlite3 "$1" 'SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name' >"$DATA/$2.schema"
 }
 
 file_sha() { sha256 <"$1" | cut -d' ' -f1; }
 
-# Fails, with the first differences, when two dumps differ; --any-order
-# compares their statements regardless of order.
-same_dump() { # label before after [--any-order]
+# Fails, with the first differences, when two files differ; --any-order
+# compares them line by line regardless of order.
+same_lines() { # label before after [--any-order]
   local before=$2 after=$3
   if [ "${4:-}" = --any-order ]; then
     LC_ALL=C sort "$2" >"$2.sorted"
@@ -163,9 +176,53 @@ same_dump() { # label before after [--any-order]
     before=$2.sorted after=$3.sorted
   fi
   cmp -s "$before" "$after" && return 0
-  echo "--- $1: .dump differences (first 40 lines)" >&2
+  echo "--- $1: differences (first 40 lines)" >&2
   diff "$before" "$after" | head -40 >&2 || true
-  fail "$1: the .dump differs"
+  fail "$1 differ"
+}
+
+# The same schema rows exactly, and the same .dump (line by line with --any-order).
+same_store() { # label before after [--any-order]
+  same_lines "$1: the schema rows" "$DATA/$2.schema" "$DATA/$3.schema"
+  same_lines "$1: the .dump lines" "$DATA/$2.dump" "$DATA/$3.dump" "${4:-}"
+}
+
+# No full-text row without its base row (by rowid, with the same id or
+# content), and no base row without its full-text row.
+fts_joined() { # label
+  local unjoined
+  unjoined=$(sql "SELECT
+    (SELECT count(*) FROM contexts_fts f LEFT JOIN contexts c ON c.rowid = f.rowid
+       WHERE c.rowid IS NULL OR c.id IS NOT f.id),
+    (SELECT count(*) FROM contexts c LEFT JOIN contexts_fts f ON f.rowid = c.rowid WHERE f.rowid IS NULL),
+    (SELECT count(*) FROM memories_fts f LEFT JOIN memories m ON m.rowid = f.rowid
+       WHERE m.rowid IS NULL OR m.content IS NOT f.content),
+    (SELECT count(*) FROM memories m LEFT JOIN memories_fts f ON f.rowid = m.rowid WHERE f.rowid IS NULL)")
+  [ "$unjoined" = "0|0|0|0" ] ||
+    fail "$1: unjoined full-text rows (contexts_fts, contexts, memories_fts, memories): $unjoined"
+}
+
+# The storage audit's migrations check: "ok", or its detail.
+audit_migrations() {
+  curl -s --max-time 120 -H "Authorization: Bearer $KEY" "$URL/api/stores/audit" |
+    json 'next(("ok" if c["ok"] else c["detail"]) for c in d["checks"] if c["name"] == "migrations")'
+}
+
+# True when /api/search finds the seeded document, within 15 s.
+search_finds() { # query document-id
+  for _ in $(seq 1 15); do
+    if api GET "/api/search?q=$1&workspace=default" >"$DATA/search.json" &&
+      python3 -c '
+import json, sys
+results = json.load(open(sys.argv[1])).get("results") or []
+text = lambda r: (r.get("title") or "") + " " + (r.get("content") or "")
+sys.exit(0 if any(r.get("id") == sys.argv[3] or sys.argv[2] in text(r) for r in results) else 1)
+' "$DATA/search.json" "$1" "$2"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 table_count() { sql "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '$1'"; }
@@ -203,9 +260,9 @@ failing_migration=$(json 'd["expected_migration"]' <"$DATA/failing-out/identity.
 passing_version=$(json 'd["version"]' <"$DATA/passing-first-out/identity.json")
 passing_migration=$(json 'd["expected_migration"]' <"$DATA/passing-first-out/identity.json")
 [ "$failing_version" = "$current_version-failing-migration" ] || fail "test release version $failing_version"
-[ "$failing_migration" = "$((current_migration + 1))" ] || fail "test release migration $failing_migration"
+[ "$failing_migration" = 9000001 ] || fail "test release migration $failing_migration, not the reserved 9000001"
 [ "$passing_version" = "$current_version-passing-then-failing-migration" ] || fail "test release version $passing_version"
-[ "$passing_migration" = "$((current_migration + 2))" ] || fail "test release migration $passing_migration"
+[ "$passing_migration" = 9000002 ] || fail "test release migration $passing_migration, not the reserved 9000002"
 
 memory=$(api POST /api/memory/remember \
   "{\"content\": \"Rollback drill record $SHA\", \"workspace\": \"default\", \"force\": true}")
@@ -213,48 +270,67 @@ memory_id=$(printf '%s' "$memory" | json '(d.get("memory") or {}).get("id")')
 [ -n "$memory_id" ] && [ "$memory_id" != None ] || fail "remember returned no id: $memory"
 api GET "/api/memory/$memory_id?workspace=default" | grep -q "Rollback drill record $SHA" ||
   fail "the record is not readable before the upgrade"
+# A document, for the full-text rows of contexts and a search after the rollback.
+marker="drilldoc$(printf '%s' "$SHA" | cut -c1-12)"
+document=$(api POST /api/ingest \
+  "{\"text\": \"Rollback drill document $marker, kept through the failed upgrade.\", \"title\": \"Rollback drill $marker\", \"workspace\": \"default\"}") ||
+  fail "ingest failed"
+document_id=$(printf '%s' "$document" | json 'd.get("signal_id")')
+[ -n "$document_id" ] && [ "$document_id" != None ] || fail "ingest returned no id: $document"
+search_finds "$marker" "$document_id" || fail "search does not find the document before the upgrade: $(cat "$DATA/search.json")"
 stop_current
 
 # The row the failing migration changes before it fails.
 sql "INSERT INTO tenants (id, name) VALUES ('$SENTINEL', 'Sentinel')"
 [ "$(sql 'SELECT max(version) FROM schema_migrations')" = "$current_migration" ] ||
   fail "the store is not at migration $current_migration"
-dump_to "$DATA/dump-before.sql"
-dump_before=$(file_sha "$DATA/dump-before.sql")
+[ "$(sql 'SELECT count(*) FROM contexts')" -ge 1 ] || fail "the store holds no context"
+fts_joined "before the upgrade"
+snapshot "$DB" before
+dump_before=$(file_sha "$DATA/before.dump")
 
 echo "== case A: the failing migration alone"
 boot_test_release "$DATA/failing/optimal-engine" failing "$failing_migration"
 a_counter=$(sql 'SELECT max(version) FROM schema_migrations')
-dump_to "$DATA/dump-a.sql"
-a_dump=$(file_sha "$DATA/dump-a.sql")
+snapshot "$DB" after-a
+a_dump=$(file_sha "$DATA/after-a.dump")
 [ "$a_counter" = "$current_migration" ] || fail "case A: the migration counter moved to $a_counter"
-same_dump "case A, the store after the boots" "$DATA/dump-before.sql" "$DATA/dump-a.sql"
+same_store "case A, the store after the boots" before after-a
 [ "$(table_count failing_migration_probe)" = 0 ] || fail "case A: the failing migration's table survived"
 [ "$(sql "SELECT name FROM tenants WHERE id = '$SENTINEL'")" = Sentinel ] || fail "case A: the sentinel changed"
 [ "$(sql 'PRAGMA integrity_check')" = ok ] || fail "case A: integrity_check"
 
 echo "== case B: a passing migration, then the failing one, with a backup first"
 sql "VACUUM INTO '$DATA/pre-upgrade.db'"
-sqlite3 "$DATA/pre-upgrade.db" .dump >"$DATA/dump-backup.sql"
-same_dump "case B, the backup" "$DATA/dump-before.sql" "$DATA/dump-backup.sql" --any-order
+snapshot "$DATA/pre-upgrade.db" backup
+same_store "case B, the backup" before backup --any-order
 boot_test_release "$DATA/passing-first/optimal-engine" passing-first "$passing_migration"
 b_counter=$(sql 'SELECT max(version) FROM schema_migrations')
-[ "$b_counter" = "$((current_migration + 1))" ] ||
-  fail "case B: the passing migration should stay applied; the counter is $b_counter"
+[ "$b_counter" = 9000001 ] ||
+  fail "case B: the passing migration 9000001 should stay applied; the counter is $b_counter"
 [ "$(sql 'SELECT count(*) FROM passing_migration_probe')" = 1 ] || fail "case B: the passing migration's row"
 [ "$(table_count failing_migration_probe)" = 0 ] || fail "case B: the failing migration's table survived"
 [ "$(sql "SELECT name FROM tenants WHERE id = '$SENTINEL'")" = Sentinel ] || fail "case B: the sentinel changed"
 [ "$(sql 'PRAGMA integrity_check')" = ok ] || fail "case B: integrity_check"
+# Without the restore, the previous release still opens the store, and its
+# storage audit reports the passing migration's reserved number as drift.
+start_current current-unrestored.log
+b_unrestored_audit=$(audit_migrations) || b_unrestored_audit="no readable audit"
+case $b_unrestored_audit in
+  *migration_drift*) ;;
+  *) fail "case B: the audit of the unrestored store reports $b_unrestored_audit, not migration_drift" ;;
+esac
+stop_current
 # The rollback restores the pre-upgrade backup.
 cp "$DATA/pre-upgrade.db" "$DB"
 rm -f "$DB-wal" "$DB-shm"
 b_restored_counter=$(sql 'SELECT max(version) FROM schema_migrations')
-dump_to "$DATA/dump-b-restored.sql"
-b_restored_dump=$(file_sha "$DATA/dump-b-restored.sql")
 [ "$b_restored_counter" = "$current_migration" ] || fail "case B: the restored store is at $b_restored_counter"
-same_dump "case B, the restored store" "$DATA/dump-backup.sql" "$DATA/dump-b-restored.sql"
-same_dump "case B, the restored store against the store before" \
-  "$DATA/dump-before.sql" "$DATA/dump-b-restored.sql" --any-order
+snapshot "$DB" restored
+b_restored_dump=$(file_sha "$DATA/restored.dump")
+same_store "case B, the restored store" before restored --any-order
+fts_joined "case B, the restored store"
+[ "$(table_count passing_migration_probe)" = 0 ] || fail "case B: the restored store has the passing migration's table"
 
 echo "== step 4: the current release starts again and serves the same data"
 start_current current-2.log
@@ -263,6 +339,9 @@ start_current current-2.log
   fail "the current release expects another migration"
 api GET "/api/memory/$memory_id?workspace=default" | grep -q "Rollback drill record $SHA" ||
   fail "the record is not readable after the rollback"
+search_finds "$marker" "$document_id" || fail "search does not find the document after the rollback: $(cat "$DATA/search.json")"
+restored_audit=$(audit_migrations) || restored_audit="no readable audit"
+[ "$restored_audit" = ok ] || fail "the audit of the restored store reports $restored_audit"
 stop_current
 
 dumps=$(find "$DATA/data" -name 'erl_crash.dump*' | wc -l | tr -d ' ')
@@ -272,9 +351,10 @@ echo
 echo "PROOF failing-migration rollback: PASS"
 echo "  current release   $current_version, migration $current_migration, commit $SHA"
 echo "  case A            $failing_version (migration $failing_migration): 2 boots, both exited non-zero, never answered"
-echo "                    migration $current_migration before and $a_counter after; .dump sha256 $dump_before before, $a_dump after"
-echo "  case B            $passing_version (migrations $((current_migration + 1)) and $passing_migration): 2 boots, both exited non-zero, never answered"
-echo "                    migration $b_counter after the boots (the passing one stays); restored backup at $b_restored_counter, .dump $b_restored_dump"
-echo "                    (the backup's own .dump: the statements of $dump_before, in another order)"
+echo "                    migration $current_migration before and $a_counter after; schema rows equal; .dump sha256 $dump_before before, $a_dump after"
+echo "  case B            $passing_version (migrations 9000001 and $passing_migration): 2 boots, both exited non-zero, never answered"
+echo "                    migration $b_counter after the boots (the passing one stays); unrestored, the audit reports $b_unrestored_audit"
+echo "                    restored backup at $b_restored_counter: schema rows equal, .dump lines equal (sha256 $b_restored_dump, the same lines as $dump_before in another order), full-text rows joined"
 echo "  record            $memory_id readable before and after"
+echo "  document          $document_id found by /api/search before and after; the audit of the restored store reports $restored_audit"
 echo "  crash dumps       none in the data directory"

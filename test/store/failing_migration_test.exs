@@ -31,7 +31,11 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
       "INSERT OR IGNORE INTO tenants (id, name) VALUES ('#{FailingMigration.sentinel_tenant()}', 'Sentinel')"
     )
 
-    %{db: db, last: Migrations.all() |> List.last() |> elem(0)}
+    %{
+      db: db,
+      last: Migrations.all() |> List.last() |> elem(0),
+      base: FailingMigration.reserved_base()
+    }
   end
 
   test "a normal build has no failing migration", %{last: last} do
@@ -44,10 +48,25 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
            end)
   end
 
+  test "the test migrations take reserved numbers no real migration reaches", ctx do
+    assert ctx.base == 9_000_000
+    assert ctx.last < ctx.base
+    assert [{9_000_001, _, _}] = FailingMigration.variant(:failing, Migrations.all())
+
+    assert [{9_000_001, _, _}, {9_000_002, _, _}] =
+             FailingMigration.variant(:passing_then_failing, Migrations.all())
+
+    reached = Migrations.all() ++ [{ctx.base, "a real migration at the base", []}]
+
+    assert_raise ArgumentError, ~r/reserved base/, fn ->
+      FailingMigration.variant(:failing, reached)
+    end
+  end
+
   test "the failing migration writes, fails, and leaves the store as it was", ctx do
-    failing = FailingMigration.migration(Migrations.all())
+    [failing] = FailingMigration.variant(:failing, Migrations.all())
     {version, _description, statements} = failing
-    assert version == ctx.last + 1
+    assert version == ctx.base + 1
 
     # It changes the store, an existing row included, before the statement that fails.
     assert Enum.map(statements, &elem(&1, 0)) == [
@@ -62,7 +81,7 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
     error =
       assert_raise RuntimeError, fn -> Migrations.run(ctx.db, Migrations.all() ++ [failing]) end
 
-    assert error.message =~ "migration #{pad(ctx.last + 1)} failed and was rolled back"
+    assert error.message =~ "migration #{ctx.base + 1} failed and was rolled back"
     assert error.message =~ "failing_migration_fails"
     assert error.message =~ "NOT NULL constraint failed"
 
@@ -81,20 +100,18 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
   end
 
   test "the update reaches only the sentinel tenant" do
-    {_version, _description, statements} = FailingMigration.migration(Migrations.all())
+    [{_version, _description, statements}] = FailingMigration.variant(:failing, Migrations.all())
     {"failing_migration_update", sql} = List.keyfind(statements, "failing_migration_update", 0)
     assert sql =~ "WHERE id = '#{FailingMigration.sentinel_tenant()}'"
   end
 
   test "in the passing-then-failing variant the migration before the failure stays", ctx do
     [passing, failing] = FailingMigration.variant(:passing_then_failing, Migrations.all())
-    assert elem(passing, 0) == ctx.last + 1
-    assert elem(failing, 0) == ctx.last + 2
     tenants = rows(ctx.db, "SELECT id, name FROM tenants ORDER BY id")
 
     for _attempt <- 1..2 do
       assert_raise RuntimeError,
-                   ~r/migration #{pad(ctx.last + 2)} failed and was rolled back/,
+                   ~r/migration #{ctx.base + 2} failed and was rolled back/,
                    fn ->
                      Migrations.run(ctx.db, Migrations.all() ++ [passing, failing])
                    end
@@ -102,10 +119,32 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
 
     # The store is between releases: the passing migration is applied, the
     # failing one left nothing. Only a backup taken before the boot undoes it.
-    assert rows(ctx.db, "SELECT max(version) FROM schema_migrations") == [[ctx.last + 1]]
+    assert rows(ctx.db, "SELECT max(version) FROM schema_migrations") == [[ctx.base + 1]]
     assert rows(ctx.db, "SELECT count(*) FROM passing_migration_probe") == [[1]]
     refute table?(ctx.db, "failing_migration_probe")
     assert rows(ctx.db, "SELECT id, name FROM tenants ORDER BY id") == tenants
+  end
+
+  test "an unrestored passing migration stays, and later migrations still apply", ctx do
+    [passing, failing] = FailingMigration.variant(:passing_then_failing, Migrations.all())
+
+    assert_raise RuntimeError, fn ->
+      Migrations.run(ctx.db, Migrations.all() ++ [passing, failing])
+    end
+
+    # The previous release has nothing pending; the passing migration stays
+    # recorded, and its number is the drift the storage audit reports.
+    assert Migrations.run(ctx.db) == :ok
+    assert rows(ctx.db, "SELECT max(version) FROM schema_migrations") == [[ctx.base + 1]]
+
+    # A later real migration is applied by its number, not skipped as below the counter.
+    statements = [{"later_probe", "CREATE TABLE later_probe (id INTEGER)"}]
+    later = {ctx.last + 1, "a later real migration", statements}
+    assert Migrations.run(ctx.db, Migrations.all() ++ [later]) == :ok
+    assert table?(ctx.db, "later_probe")
+
+    sql = "SELECT version FROM schema_migrations WHERE version > ?1 ORDER BY version"
+    assert rows(ctx.db, sql, [ctx.last]) == [[ctx.last + 1], [ctx.base + 1]]
   end
 
   test "a migration that succeeds commits its changes and its version together", ctx do
