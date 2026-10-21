@@ -121,7 +121,11 @@ s3://<bucket>/<prefix>/<tenant>/<workspace>/assets/<shard>/<sha256><extension>
 Readers resolve through the asset store rather than opening `storage_path` directly, so both backends work: `MemoryCore.read_asset/2` returns bytes from either, and `MemoryCore.materialize_asset/2` returns a local path, downloading an object into the engine cache once for tools that take a file argument.
 
 A selected object store that is unconfigured or unreachable never loses the file.
-The bytes are written to the local filesystem, the asset row records `storage_fallback_reason`, and the engine logs an error alert, because an upload that failed to leave the machine must not be reported as a successful remote store.
+The bytes are written to the local filesystem, the asset row records `storage_fallback_reason` (`s3_upload_failed` or `s3_not_configured`), and the engine raises an alert, because an upload that failed to leave the machine must not be reported as a successful remote store.
+The alert is an error log line (`asset storage alert: ...`) and a counter an operator can alert on: `optimal_engine.storage.asset_fallback` in `GET /api/metrics`, `optimal_engine_storage_asset_fallback_total` in `GET /api/metrics/prometheus`.
+`GET /api/storage/providers?probe=1` makes an authenticated request to the bucket and reports `s3` as `unreachable` while the object store is down; without `probe` it reports configuration only.
+Assets written during an outage stay on the local disk after the object store returns; new writes go to the bucket again.
+`scripts/proof-offsite-backup.sh` proves the outage and the recovery end to end against a real bucket.
 
 ## Offsite Backups
 

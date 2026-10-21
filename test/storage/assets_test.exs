@@ -16,7 +16,8 @@ defmodule OptimalEngine.Storage.AssetsTest do
   alias OptimalEngine.TestSupport.S3Stub
 
   @s3_env ~w(OPTIMAL_S3_ENDPOINT OPTIMAL_S3_BUCKET OPTIMAL_S3_REGION OPTIMAL_S3_ACCESS_KEY_ID
-             OPTIMAL_S3_SECRET_ACCESS_KEY OPTIMAL_S3_PREFIX OPTIMAL_ASSET_STORAGE)
+             OPTIMAL_S3_SECRET_ACCESS_KEY OPTIMAL_S3_PREFIX OPTIMAL_S3_MAX_RETRIES
+             OPTIMAL_ASSET_STORAGE)
 
   setup do
     previous_env = Map.new(@s3_env, &{&1, System.get_env(&1)})
@@ -60,6 +61,11 @@ defmodule OptimalEngine.Storage.AssetsTest do
     System.put_env("OPTIMAL_S3_ACCESS_KEY_ID", stub.access_key_id)
     System.put_env("OPTIMAL_S3_SECRET_ACCESS_KEY", stub.secret_access_key)
     System.put_env("OPTIMAL_S3_REGION", stub.region)
+  end
+
+  # The snapshot call is ordered after this process's telemetry events.
+  defp fallback_count do
+    OptimalEngine.Telemetry.snapshot().counters[:"optimal_engine.storage.asset_fallback"] || 0
   end
 
   defp write_source(tmp, name, bytes \\ nil) do
@@ -173,6 +179,7 @@ defmodule OptimalEngine.Storage.AssetsTest do
     System.put_env("OPTIMAL_ASSET_STORAGE", "s3")
 
     {source, bytes} = write_source(tmp, "fallback.bin")
+    fallbacks = fallback_count()
 
     log =
       capture_log(fn ->
@@ -188,6 +195,8 @@ defmodule OptimalEngine.Storage.AssetsTest do
     assert log =~ "asset storage alert"
     assert log =~ "keeping the file on the local filesystem"
     assert S3Stub.object_keys(stub.agent) == []
+    # The alert is also a counter an operator can scrape and alert on.
+    assert fallback_count() == fallbacks + 1
   end
 
   test "an unconfigured object store falls back to the filesystem with an alert", %{
@@ -196,6 +205,7 @@ defmodule OptimalEngine.Storage.AssetsTest do
   } do
     System.put_env("OPTIMAL_ASSET_STORAGE", "s3")
     {source, bytes} = write_source(tmp, "unconfigured.bin")
+    fallbacks = fallback_count()
 
     log =
       capture_log(fn ->
@@ -207,6 +217,7 @@ defmodule OptimalEngine.Storage.AssetsTest do
       end)
 
     assert log =~ "s3 is selected for assets but not configured"
+    assert fallback_count() == fallbacks + 1
   end
 
   test "an explicit option overrides the workspace policy", %{
