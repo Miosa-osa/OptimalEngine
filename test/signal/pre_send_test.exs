@@ -73,6 +73,33 @@ defmodule OptimalEngine.Signal.PreSendTest do
     assert Enum.any?(by_bandwidth.flags, &(&1.code == "bandwidth_overload"))
   end
 
+  # Unicode spaces, and two characters that look like one but are not
+  # whitespace (U+180E, U+200B).
+  @space_like [0x85, 0xA0, 0x1680, 0x180E, 0x2003, 0x200B, 0x2028, 0x2029, 0x202F, 0x3000]
+
+  test "the word count is what splitting on Unicode whitespace gives" do
+    spaces = [" ", "\t", "\n", "\r\n", "\v", "\f"] ++ Enum.map(@space_like, &<<&1::utf8>>)
+
+    draft = Enum.map_join(Enum.with_index(spaces), fn {space, i} -> "w#{i}" <> space <> space end)
+    expected = draft |> String.split(~r/\s+/u, trim: true) |> length()
+
+    assert PreSend.check(draft <> "end", %{}).words == expected + 1
+  end
+
+  test "an 8 MB draft costs bounded time beyond detection" do
+    sentence = "The delivery moves to Friday because the vendor confirmed the parts late. "
+    body = String.duplicate(sentence, div(8 * 1024 * 1024, byte_size(sentence)))
+    draft = "Can you confirm the new address by Thursday? " <> body
+
+    {micros, result} =
+      :timer.tc(fn -> PreSend.check(draft, %{"channel" => "email"}, genre: "proposal") end)
+
+    assert result.words > 1_000_000
+    assert result.detected.type == "direct"
+    assert Enum.any?(result.flags, &(&1.code == "bandwidth_overload"))
+    assert micros < 1_500_000, "an 8 MB draft took #{div(micros, 1000)} ms"
+  end
+
   test "the API checks a draft and records the check for the genre recognition rate" do
     n = System.unique_integer([:positive])
     tenant = "presend-#{n}"
