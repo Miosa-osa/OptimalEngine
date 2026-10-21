@@ -99,10 +99,11 @@ defmodule OptimalEngine.Retrieval.SearchHardeningTest do
 
   describe "a request that raises" do
     test "fails that request and not the process", ctx do
-      assert {:error, {:search_failed, message}} =
+      assert {:error, {:search_failed, ref}} =
                Search.search(ctx.token, workspace_id: ctx.workspace, limit: "many")
 
-      assert is_binary(message)
+      # An opaque id, not the exception text (see search_failure_test.exs).
+      assert ref =~ ~r/\A[0-9a-f]{12}\z/
       assert Process.whereis(Search) == ctx.pid
       assert {:ok, [_ | _]} = Search.search(ctx.token, workspace_id: ctx.workspace)
     end

@@ -40,6 +40,7 @@ defmodule OptimalEngine.TelemetryTest do
 
   test "counter_names/0 + histogram_names/0 declare the known metrics" do
     assert :"optimal_engine.intake.ingested" in Telemetry.counter_names()
+    assert :"optimal_engine.search.failed" in Telemetry.counter_names()
     assert :"optimal_engine.search.latency_ms" in Telemetry.histogram_names()
   end
 

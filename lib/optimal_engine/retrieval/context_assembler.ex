@@ -70,7 +70,9 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
 
   `:as_of` fixes the instant the freshness decay measures age against (see
   `OptimalEngine.Retrieval.AsOf`); one that is not valid answers
-  `{:error, {:invalid_as_of, value}}`.
+  `{:error, {:invalid_as_of, value}}`. A search that raised answers
+  `{:error, {:search_failed, ref}}` (the id is also in the log), not tiers that
+  read as "nothing found".
   """
   @spec assemble(String.t(), keyword()) :: {:ok, assembled()} | {:error, term()}
   def assemble(query, opts \\ []) do
@@ -78,14 +80,12 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   end
 
   defp do_assemble(query, opts) do
-    with {:ok, opts} <- AsOf.put_resolved(opts) do
-      budgets = Keyword.get(opts, :tier_budgets, @default_budgets)
-
+    with {:ok, opts} <- AsOf.put_resolved(opts),
+         budgets = Keyword.get(opts, :tier_budgets, @default_budgets),
+         # L1 — per-file summaries for matching files (query-driven)
+         {:ok, {l1, search_scores}} <- build_l1(query, budgets.l1, opts) do
       # L0 — structural inventory (always loaded, query-independent)
       l0 = build_l0(budgets.l0)
-
-      # L1 — per-file summaries for matching files (query-driven)
-      {l1, search_scores} = build_l1(query, budgets.l1, opts)
 
       # L2 — full content for top results (deep retrieval)
       l2 = build_l2(query, search_scores, budgets.l2, opts)
@@ -116,9 +116,9 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   @spec l1(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def l1(query, opts \\ []) do
     if SearchEngine.available?() do
-      with {:ok, opts} <- AsOf.put_resolved(opts) do
-        budget = Keyword.get(opts, :budget, @default_budgets.l1)
-        {content, _scores} = build_l1(query, budget, opts)
+      with {:ok, opts} <- AsOf.put_resolved(opts),
+           budget = Keyword.get(opts, :budget, @default_budgets.l1),
+           {:ok, {content, _scores}} <- build_l1(query, budget, opts) do
         {:ok, content}
       end
     else
@@ -141,6 +141,9 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   to the top — the canonical RRF property. Lists that are empty (e.g. no
   embeddings) simply contribute nothing, so fusion degrades to FTS-only
   cleanly.
+
+  A search that raised answers `{:error, {:search_failed, ref}}` (the id is also
+  in the log) rather than a list that reads as "nothing found".
   """
   @spec fused_search(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def fused_search(query, opts \\ []) do
@@ -159,41 +162,46 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
       # independent lexical ranking, not the already-fused hybrid output.
       scoped_opts = Keyword.put(opts, :limit, recall)
 
-      fts_results =
-        case SearchEngine.search(
-               query,
-               Keyword.merge(scoped_opts, vector_enabled: false, mode: :lexical)
-             ) do
-          {:ok, results} -> results
-          _ -> []
-        end
-
-      # Semantic list: the hybrid path. When embeddings are absent this
-      # returns the FTS ranking, which is fine — RRF tolerates correlated
-      # lists, and the dedicated FTS list above keeps lexical signal intact.
-      vector_results =
-        case SearchEngine.search(query, scoped_opts) do
-          {:ok, results} -> results
-          _ -> []
-        end
-
-      # Graph 1-hop list: reorder the union by graph adjacency to the query.
-      graph_results = safe_graph_boost(fts_results ++ vector_results, query, opts)
-
-      # Temporal list: freshness-first ordering of everything seen.
-      temporal_results = temporal_ranked(fts_results ++ vector_results ++ graph_results)
-
-      fused =
-        reciprocal_rank_fusion([
-          fts_results,
-          vector_results,
-          graph_results,
-          temporal_results
-        ])
-        |> focus_exact_query(query)
-
-      {:ok, Enum.take(fused, limit)}
+      # A search that raised fails the request with its `{:search_failed, ref}`;
+      # it is not an empty list that reads as "nothing found". Any other miss
+      # (a busy Store) contributes an empty list.
+      with {:ok, fts_results} <-
+             list_or_failure(
+               SearchEngine.search(
+                 query,
+                 Keyword.merge(scoped_opts, vector_enabled: false, mode: :lexical)
+               )
+             ),
+           # Semantic list: the hybrid path. When embeddings are absent this
+           # returns the FTS ranking, which is fine — RRF tolerates correlated
+           # lists, and the dedicated FTS list above keeps lexical signal intact.
+           {:ok, vector_results} <- list_or_failure(SearchEngine.search(query, scoped_opts)) do
+        rank_fused(query, opts, limit, fts_results, vector_results)
+      end
     end
+  end
+
+  defp list_or_failure({:ok, results}), do: {:ok, results}
+  defp list_or_failure({:error, {:search_failed, _ref}} = failed), do: failed
+  defp list_or_failure(_other), do: {:ok, []}
+
+  defp rank_fused(query, opts, limit, fts_results, vector_results) do
+    # Graph 1-hop list: reorder the union by graph adjacency to the query.
+    graph_results = safe_graph_boost(fts_results ++ vector_results, query, opts)
+
+    # Temporal list: freshness-first ordering of everything seen.
+    temporal_results = temporal_ranked(fts_results ++ vector_results ++ graph_results)
+
+    fused =
+      reciprocal_rank_fusion([
+        fts_results,
+        vector_results,
+        graph_results,
+        temporal_results
+      ])
+      |> focus_exact_query(query)
+
+    {:ok, Enum.take(fused, limit)}
   end
 
   # When an exact phrase is present, broad semantic recall should not spend
@@ -274,8 +282,12 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   defp build_l1(query, budget, opts) do
     limit = Keyword.get(opts, :limit, 20)
 
-    {:ok, results} = fused_search(query, Keyword.put(opts, :limit, limit))
+    with {:ok, results} <- fused_search(query, Keyword.put(opts, :limit, limit)) do
+      {:ok, render_l1(results, budget)}
+    end
+  end
 
+  defp render_l1(results, budget) do
     # Build L1 as a list of file summaries — one entry per matching file
     {content, _} =
       Enum.reduce(results, {"", 0}, fn result, {acc, tokens} ->
@@ -500,18 +512,18 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
       ""
     else
       sql = """
-      SELECT topic, decision, rationale, decided_at
+      SELECT title, decision, rationale, decided_at
       FROM decisions
       WHERE context_id IN (#{placeholders})
-      ORDER BY decided_at DESC, context_id, topic
+      ORDER BY decided_at DESC, context_id, id
       LIMIT 5
       """
 
       case Store.raw_query(sql, context_ids) do
         {:ok, rows} when rows != [] ->
           lines =
-            Enum.map(rows, fn [topic, decision, rationale, date] ->
-              "- **#{topic}** (#{date}): #{decision}\n  _Rationale: #{rationale}_"
+            Enum.map(rows, fn [title, decision, rationale, date] ->
+              "- **#{title}** (#{date}): #{decision}" <> rationale_line(rationale)
             end)
 
           "\n## Related Decisions\n\n" <> Enum.join(lines, "\n")
@@ -523,6 +535,11 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   end
 
   defp load_related_decisions(_, _), do: ""
+
+  defp rationale_line(rationale) when is_binary(rationale) and rationale != "",
+    do: "\n  _Rationale: #{rationale}_"
+
+  defp rationale_line(_none), do: ""
 
   defp extract_sources(scores) do
     scores

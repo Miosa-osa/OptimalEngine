@@ -47,7 +47,9 @@ defmodule OptimalEngine.Bridge.Knowledge do
   The boost multiplies the exact score (`rank_score`), not the rounded one, and
   rounds only the displayed `score` (`OptimalEngine.Retrieval.Ranking`). It
   returns the results in the order it was given them and does not sort, so the
-  scores of a boosted list are not necessarily in descending order.
+  scores of a boosted list are not necessarily in descending order. (The default
+  `OptimalEngine.Retrieval.Search` merges the boosted contexts with memories
+  afterwards and orders that list by the boosted scores.)
   """
   @spec graph_boost([map()], String.t(), keyword()) :: [map()]
   def graph_boost(results, query, opts \\ []) when is_list(results) and is_binary(query) do

@@ -298,8 +298,8 @@ defmodule OptimalEngine.API.Router do
             {:error, :hybrid_unavailable} ->
               :hybrid_unavailable
 
-            {:error, {:search_failed, _message}} ->
-              :search_failed
+            {:error, {:search_failed, ref}} ->
+              {:search_failed, ref}
 
             _ ->
               {[], 0}
@@ -324,8 +324,8 @@ defmodule OptimalEngine.API.Router do
         |> put_status(503)
         |> json(%{error: "hybrid_unavailable", detail: "the vector hop is not available"})
 
-      :search_failed ->
-        send_resp(conn, 500, Jason.encode!(%{error: "search failed"}))
+      {:search_failed, ref} ->
+        search_failed_resp(conn, 500, ref)
 
       {results, total} ->
         pagination = Pagination.wrap(results, total, offset, limit)
@@ -413,8 +413,19 @@ defmodule OptimalEngine.API.Router do
         {:error, {:invalid_as_of, _value}} ->
           send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
 
-        {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        {:error, :busy} ->
+          conn
+          |> put_resp_header("retry-after", "1")
+          |> put_status(503)
+          |> json(%{error: "busy", detail: @busy_detail})
+
+        {:error, {:search_failed, ref}} ->
+          search_failed_resp(conn, 500, ref)
+
+        # Any other reason is not echoed: it can carry a process name or a term
+        # from the data.
+        {:error, _reason} ->
+          send_resp(conn, 500, Jason.encode!(%{error: "search failed"}))
       end
     end
   end
@@ -1270,6 +1281,9 @@ defmodule OptimalEngine.API.Router do
           {:error, {:invalid_as_of, _value}} ->
             send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
 
+          {:error, {:search_failed, ref}} ->
+            search_failed_resp(conn, 502, ref)
+
           {:error, reason} ->
             send_resp(conn, 502, Jason.encode!(%{error: inspect(reason)}))
         end
@@ -1365,19 +1379,25 @@ defmodule OptimalEngine.API.Router do
           genre: spec.genre
         })
 
-      {:ok, rag_result} =
-        Retrieval.ask(
-          source,
-          [receiver: receiver, workspace_id: workspace_id] ++
-            Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent])
-        )
+      case Retrieval.ask(
+             source,
+             [receiver: receiver, workspace_id: workspace_id] ++
+               Keyword.take(retrieval_scope(conn), [:tenant_id, :acl_absent])
+           ) do
+        {:ok, rag_result} ->
+          json(conn, %{
+            spec: OptimalEngine.Render.Spec.to_map(spec),
+            context: rag_result.envelope,
+            prompt_guidance: OptimalEngine.Render.Spec.prompt_guidance(spec),
+            trace: rag_result.trace
+          })
 
-      json(conn, %{
-        spec: OptimalEngine.Render.Spec.to_map(spec),
-        context: rag_result.envelope,
-        prompt_guidance: OptimalEngine.Render.Spec.prompt_guidance(spec),
-        trace: rag_result.trace
-      })
+        {:error, {:search_failed, ref}} ->
+          search_failed_resp(conn, 502, ref)
+
+        {:error, _reason} ->
+          send_resp(conn, 502, Jason.encode!(%{error: "retrieval failed"}))
+      end
     else
       nil ->
         send_resp(conn, 400, Jason.encode!(%{error: "source and spec are required"}))
@@ -4961,6 +4981,12 @@ defmodule OptimalEngine.API.Router do
 
   defp body_audience(conn), do: query_param(conn, "audience", "default")
 
+  # A search that raised: the caller gets the opaque id the log has the stack
+  # trace under, never the exception text.
+  defp search_failed_resp(conn, status, ref) do
+    send_resp(conn, status, Jason.encode!(%{error: "search failed", ref: ref}))
+  end
+
   defp do_recall(conn, q, audience, workspace) do
     if String.length(String.trim(q)) < 8 do
       send_resp(
@@ -4983,6 +5009,9 @@ defmodule OptimalEngine.API.Router do
 
         {:error, {:invalid_as_of, _value}} ->
           send_resp(conn, 400, Jason.encode!(%{error: @invalid_as_of}))
+
+        {:error, {:search_failed, ref}} ->
+          search_failed_resp(conn, 502, ref)
 
         {:error, reason} ->
           send_resp(conn, 502, Jason.encode!(%{error: inspect(reason)}))
@@ -5084,6 +5113,9 @@ defmodule OptimalEngine.API.Router do
           elapsed_ms: final.trace.elapsed_ms,
           source: final.source
         })
+
+      {:rag_stream_error, {:search_failed, ref}} ->
+        send_sse(conn, "error", %{error: "search failed", ref: ref})
 
       {:rag_stream_error, reason} ->
         send_sse(conn, "error", %{error: inspect(reason)})
