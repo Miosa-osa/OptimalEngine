@@ -1,6 +1,6 @@
 {
   "name": "@optimal-engine/mcp",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "First-party MCP server for Optimal Engine: boot, brief, loops, protocol, search, assemble, read, capture, record, close, authority, memory, retrieval, and wiki tools for agent clients.",
   "main": "dist/index.js",
   "bin": {
