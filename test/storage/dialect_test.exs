@@ -300,6 +300,17 @@ defmodule OptimalEngine.Store.DialectTest do
 
       assert {:error, {:unsupported, "unmapped date/time function"}} =
                Dialect.to_postgres("SELECT datetime(created_at) FROM t")
+
+      # strftime('now') with a modifier, or of a column, is not mapped.
+      for sql <- [
+            "SELECT 1 FROM t WHERE created_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+            "UPDATE t SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour')",
+            "SELECT strftime('%Y-%m-%d', created_at) FROM t"
+          ] do
+        assert {:error, {:unsupported, "unmapped date/time function"}} =
+                 Dialect.to_postgres(sql),
+               sql
+      end
     end
 
     test "mixing numbered and positional placeholders is refused" do

@@ -133,7 +133,7 @@ defmodule OptimalEngine.Store.Dialect do
                  {"last_insert_rowid", ~r/\blast_insert_rowid\s*\(/i,
                   "needs RETURNING at the call site"},
                  {"WITHOUT ROWID", ~r/\bWITHOUT\s+ROWID\b/i, "DDL, rewritten with the schema"},
-                 {"unmapped date/time function", ~r/\b(str|date)time\s*\(/i,
+                 {"unmapped date/time function", ~r/\b(strf|date)time\s*\(/i,
                   "a format or modifier this module does not map"}
                ] ++
                  Enum.map(@sqlite_json_functions, fn name ->
