@@ -52,9 +52,12 @@ defmodule OptimalEngine.Store.ContextTenant do
 
   @existing_sql "SELECT tenant_id, workspace_id FROM contexts WHERE id = ?1"
 
-  # The rows that name a context as their signal and carry a tenant of their own.
-  @relabel_sql for table <- ~w(chunks claims),
-                   do: "UPDATE #{table} SET tenant_id = ?1 WHERE signal_id = ?2 AND tenant_id != ?1"
+  # The rows that name a context and carry a tenant of their own.
+  @relabel_sql [
+    "UPDATE chunks SET tenant_id = ?1 WHERE signal_id = ?2 AND tenant_id != ?1",
+    "UPDATE claims SET tenant_id = ?1 WHERE signal_id = ?2 AND tenant_id != ?1",
+    "UPDATE vectors SET tenant_id = ?1 WHERE context_id = ?2 AND tenant_id != ?1"
+  ]
 
   @typedoc """
   What a store gives `for_context/2` to read the two facts about the database:
@@ -77,8 +80,8 @@ defmodule OptimalEngine.Store.ContextTenant do
   def existing_sql, do: @existing_sql
 
   @doc """
-  The statements that give a context's chunks and claims the tenant that took
-  the context over (`?1` the tenant, `?2` the context id), in SQLite's dialect.
+  The statements that give a context's chunks, claims and vectors the tenant
+  that took the context over (`?1` the tenant, `?2` the context id), in SQLite's dialect.
   A store runs them when the row it replaces had another tenant: they were
   written under it, and a workspace's owner reads them as its own.
   """

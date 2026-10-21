@@ -41,6 +41,7 @@ defmodule OptimalEngine.Pipeline.Indexer do
   alias OptimalEngine.Routing
   alias OptimalEngine.Pipeline.Intake.Address
   alias OptimalEngine.URI
+  alias OptimalEngine.Workspace.Filesystem
   alias OptimalEngine.Bridge.Knowledge, as: BridgeKnowledge
   alias OptimalEngine.Bridge.Memory, as: BridgeMemory
 
@@ -71,10 +72,12 @@ defmodule OptimalEngine.Pipeline.Indexer do
   Starts a full index run asynchronously.
   Returns `{:ok, :started}` immediately.
 
-  A file is filed under the workspace its path names: `tenants/<tenant>/<slug>/...`
-  is workspace `<tenant>:<slug>` of that tenant (a tenant the Engine does not know
-  is skipped), a top-level folder is `default:<folder>`, and a file in the root is
-  in `default`. The last two name no tenant, so they are the default tenant's.
+  A file is filed under the workspace its path names, the inverse of
+  `Workspace.Filesystem.path/2`: `tenants/<tenant>/<slug>/...` is workspace
+  `<tenant>:<slug>` of that tenant (a tenant the Engine does not know is skipped), a
+  file in the root or in one of its own directories (`nodes`, `assets`...) is in
+  `default`, and any other top-level folder is `default:<folder>`. The last two name no
+  tenant, so they are the default tenant's.
   """
   @spec full_index() :: {:ok, :started} | {:error, :already_running}
   def full_index do
@@ -542,34 +545,29 @@ defmodule OptimalEngine.Pipeline.Indexer do
     end
   end
 
-  # The workspace and the tenant a file's path names. A workspace of another
-  # tenant lives at `tenants/<tenant>/<slug>` (`Workspace.Filesystem.path/2`);
-  # a file in a directory of a tenant the Engine does not know is skipped, as
-  # naming a tenant that is not there would fail the batch it is in. Any other
-  # file is in a workspace of the default tenant, and names no tenant.
+  # The workspace and the tenant a file's path names: what `Workspace.Filesystem.path/2`
+  # builds, read back.
+  #
+  #   * `tenants/<tenant>/<slug>/...` is `<tenant>:<slug>` of that tenant (a tenant the
+  #     Engine does not know is skipped: naming it would fail the batch it is in);
+  #   * the root's own directories (`Filesystem.reserved_names/0`) and the files in the
+  #     root are the default workspace;
+  #   * any other top-level folder is `default:<folder>` (a bare id and `default:<id>` are
+  #     one directory).
+  #
+  # The last two are the default tenant's, and name no tenant.
   defp scope_from_path(path, root, tenants) do
     case path |> Path.relative_to(root) |> Path.split() do
       ["tenants", tenant, slug, _file | _] ->
         if MapSet.member?(tenants, tenant), do: {tenant <> ":" <> slug, tenant}, else: :skip
 
+      [folder, _file | _] ->
+        if folder in Filesystem.reserved_names(),
+          do: {"default", nil},
+          else: {"default:" <> folder, nil}
+
       _ ->
-        {workspace_from_path(path, root), nil}
-    end
-  end
-
-  defp workspace_from_path(path, root) do
-    relative =
-      path
-      |> String.replace_prefix(root <> "/", "")
-      |> String.split("/")
-      |> List.first("")
-
-    if relative != "" and relative != nil do
-      if Path.dirname(Path.relative_to(path, root)) == ".",
-        do: "default",
-        else: "default:" <> relative
-    else
-      "default"
+        {"default", nil}
     end
   end
 
