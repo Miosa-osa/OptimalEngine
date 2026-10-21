@@ -254,7 +254,8 @@ This is deliberate.
 A count of what a route left out, on a route that answers a query, tells a key without the label that a row it may not see matches: `withheld` of 1 for `Zephyrcorp` is a probe for the name.
 These routes answer a probe for what the key may not see exactly as they answer one for nothing, as a record by id answers `404` as it does for a record that is not there.
 The exports, the conflict list and the ledger dump rows rather than answer a query, and a partial dump has to say it is partial, so they keep `withheld` and `complete`; the count names a volume, not a match.
-`GET /api/node/:node_id` and `GET /api/optimal/nodes/:slug/files` list a node's contexts by title and path, and `GET /api/node/:node_id` the edges that touch them: a key is shown the contexts it may read and the edges the gate would let a peer with its grants read (by the contexts at their ends).
+`GET /api/node/:node_id` and `GET /api/optimal/nodes/:slug/files` list a node's contexts by title and path, and `GET /api/node/:node_id` the edges that touch them: a key is shown the contexts it may read and the edges whose contexts it may read.
+An edge follows the contexts at its ends; an end that names no context is an entity, which is no labelled row, so an edge from a context to the entity it names is shown with the context.
 A signal the key may read embeds the clusters it belongs to and the wiki pages that cite it, which are rows of their own: a cluster is judged by its members and a page by what it cites, and one the key may not read is left out of `clusters` and `citations`.
 A search or grep decides for each hit from the row it came from (a document, a memory, a chunk), so a chunk of a restricted document is not found by a key without the label.
 A key whose grants cut a list is shown a full page of what it may see, and `offset` counts those items, not the rows behind them.
