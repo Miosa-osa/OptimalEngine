@@ -373,7 +373,9 @@ defmodule OptimalEngine.SyncErasureTest do
       "operation" => "delete",
       "entity_type" => "source_packages",
       "entity_id" => id,
-      "occurred_at" => "2026-10-14T12:06:00.000",
+      # Newer than any change made here: the package row of these tests is a local insert,
+      # and a delete that is older than a local change to its row is a conflict, not a delete.
+      "occurred_at" => "2099-01-01T00:00:00.000",
       "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
     })
   end
