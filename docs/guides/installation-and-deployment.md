@@ -152,6 +152,38 @@ stale context refresh schedule
 projection rebuild procedure
 ```
 
+## Release Maintenance Tasks
+
+A release has no Mix, so `mix optimal.<task>` is not there.
+`bin/optimal maintenance <task> [args]` runs the same task code in a new VM that never serves the HTTP API, with the same flags and output as the Mix task:
+
+```bash
+bin/optimal maintenance help
+bin/optimal maintenance migrate --status
+bin/optimal maintenance graph_backfill --workspace <id> --no-claims
+bin/optimal maintenance conformance --url http://127.0.0.1:4200 --key-file /path/to/key
+```
+
+| Task | Engine | What it does |
+| --- | --- | --- |
+| `migrate` | stopped | applies pending schema migrations; `--status` lists them |
+| `health` | stopped | store diagnostics; exits 1 on a critical finding |
+| `embed_backfill` | stopped | embeds chunks that have no embedding (`--workspace`, `--limit`, `--batch`, `--dry-run`) |
+| `graph_backfill` | stopped | writes the graph edges of contexts and claims (`--workspace`, `--batch`, `--no-claims`) |
+| `facts` | stopped | lists or shows Memory Core facts |
+| `claims` | stopped | lists, shows, promotes or rejects Memory Core claims |
+| `conformance` | running | checks a running Engine over HTTP (`--url`, `--key` or `OPTIMAL_ENGINE_API_KEY`) |
+
+The Engine is the store's only writer, so a task marked stopped refuses while an Engine is up and changes nothing.
+It counts the Engine as up when something listens on the API port (`OPTIMAL_API_PORT`, default 4200, on 127.0.0.1 or `OPTIMAL_API_INTERFACE`) or the release node (`RELEASE_NODE`, default `optimal`) is registered with epmd.
+Stop the service first, run the task with the service's environment (the same `OPTIMAL_ENGINE_DB`, `OPTIMAL_ENGINE_ROOT` and keys), then start the service again.
+The task then starts the Engine in its own VM with the HTTP API and the background loops off (analyses, connector pulls, sync, offsite backups, the maintenance sweep), logs warnings and errors only, and stops it when the task ends.
+`conformance` is the other way round: it talks to a running Engine and refuses when nothing answers at its target.
+A running Engine also runs the chunk embedding and graph backfills as jobs, with no pause (`POST /api/maintenance/embeddings {"kind": "chunks"}` and `POST /api/maintenance/graph/backfill`, see the [operating layer](operating-layer.md#maintenance-jobs)).
+
+Exit codes: 0 the task succeeded, 1 it failed, 64 no task or an unknown one (the message lists the tasks), 78 refused because the Engine was in the wrong state.
+`rel/env.sh.eex` adds the command to the release script, and puts a packaged release's `libextra/` on the loader path as `start-engine` does.
+
 ## Isolated Fixture Verification
 
 `mix optimal.reality_check` writes diagnostic fixtures and may alter topology, memory, and retrieval records.

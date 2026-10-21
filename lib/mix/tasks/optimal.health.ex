@@ -26,15 +26,21 @@ defmodule Mix.Tasks.Optimal.Health do
   use Mix.Task
 
   @impl Mix.Task
-  def run(_args) do
+  def run(args) do
     Mix.Task.run("app.start")
+    if main(args) != :ok, do: System.halt(1)
+  end
 
+  # The task without Mix: `bin/optimal maintenance` runs it in a release
+  # (OptimalEngine.Release.Maintenance), with the Engine already started.
+  @doc false
+  def main(_args) do
     IO.puts(IO.ANSI.bright() <> "\nOptimal Engine Health Diagnostics\n" <> IO.ANSI.reset())
 
     {:ok, diagnostics} = OptimalEngine.Insight.Health.run()
     Enum.each(diagnostics, &print_check/1)
     print_summary(diagnostics)
-    maybe_exit_nonzero(diagnostics)
+    critical(diagnostics)
   end
 
   # ---------------------------------------------------------------------------
@@ -100,9 +106,11 @@ defmodule Mix.Tasks.Optimal.Health do
     IO.puts("")
   end
 
-  defp maybe_exit_nonzero(diagnostics) do
-    has_critical = Enum.any?(diagnostics, &(&1.severity == :critical))
-    if has_critical, do: System.halt(1)
+  defp critical(diagnostics) do
+    case Enum.count(diagnostics, &(&1.severity == :critical)) do
+      0 -> :ok
+      n -> {:error, "#{n} critical health check(s) failed"}
+    end
   end
 
   # ---------------------------------------------------------------------------

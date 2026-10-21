@@ -70,6 +70,8 @@ RUN --mount=type=cache,target=/root/.hex \
 COPY lib/       ./lib/
 COPY config/    ./config/
 COPY priv/      ./priv/
+# rel/env.sh.eex adds `bin/optimal maintenance <task>` to the release.
+COPY rel/       ./rel/
 COPY README.md  ./README.md
 # Compile-time release identity (OptimalEngine.Version reads it). There is no .git in the
 # build context, so the commit comes in as a build argument.
