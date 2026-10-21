@@ -13,7 +13,7 @@ The embedding cache's own rules are in [`OPTIONS.md`](../../OPTIONS.md), Text Em
 | Retention `delete` | The context and everything derived from it | As erase | Embedding entries of the workspace |
 | Retention `redact` | The text, abstract and overview are rewritten; everything derived from the original is deleted and built again from the redacted text | As erase, for the deleted derived rows | None |
 | Retention `archive` | None: `archived_at` is set | None | None |
-| A replica applies a peer's delete of a context | The context; the rows derived from it arrive as deletes of their own | None | As archive, for the workspace: the replica cannot tell which files belonged to the deleted rows |
+| A replica applies a peer's delete of a context | The context; the rows derived from it arrive as deletes of their own. The decomposition runs and assets this Engine made itself are not replicated and stay (see below) | The checkpoints and local asset files of the source packages only the deleted contexts refer to, read before the batch and removed after it commits, for the contexts that are gone | Embedding entries of the workspace |
 
 "Everything derived from a context" is, in `Compliance.DerivedData`: the document vector, chunks and chunk vectors (and the intents, classifications, cluster members and citations that cascade from a chunk), entity mentions and their resolution decisions, entities, claims, the facts that accepted a deleted claim, the context's source packages (and `source_packages_fts` where an older database has it), decomposition runs, assets with their extractions, transcripts and OCR spans, wiki pages that cite a deleted chunk, episodes, processor runs, decisions, and graph edges (`graph_edges`) that name the context.
 A source package that a remaining context refers to is kept, and so is an asset file that a remaining asset shares.
@@ -46,6 +46,9 @@ Scheduled backups are off unless `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS` is set.
 A restore from a backup brings back what the backup held, so run the erasure again after one.
 An operator who has to shorten the window removes the manual copies, the bundles and the pre-restore copies by hand, and lowers `OPTIMAL_OFFSITE_BACKUP_KEEP` and `OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL`.
 
+On a replica the rows of `decomposition_runs`, `assets` and the asset extractions are this Engine's own and are not replicated, so a peer's delete does not delete them; their files are removed as above and the checkpoint pointers cleared, and the rows stay until an erasure or a retention delete is run on this Engine for the contexts.
+A delete the replica did not apply (held for its label, or kept because a newer local change won) leaves the context and its files; the files of a source package also stay while another context refers to it.
+
 ## Files are removed only when they are the Engine's
 
 A path in a row is data, and a bundle import writes these rows too, so a row is a claim and the Engine checks it against the file it would have written.
@@ -61,4 +64,5 @@ A file is removed for a workspace only when all of these hold:
 - An object of an erased asset is deleted only in the configured bucket, as one key under `<prefix>/<tenant>/<workspace>/assets/` of the workspace being erased with no empty, `.` or `..` segment, and not when another asset still uses it. The objects go before the transaction that deletes their rows, never inside it, so a request to the bucket never holds the store; an object that cannot be deleted leaves the rows in place and the next run finishes.
 
 It never removes a directory other than the object copies of one workspace, the copies' tenant directory, `<cache path>/assets`, or the Engine root.
+A file a row names that is not the Engine's to remove is left alone and counted: `Artifacts.remove/1` answers with `skipped` (by kind and reason, `not_ours` or `link`) and logs a warning with the counts, never a path.
 Archiving, moving, renaming and repairing a workspace remove the checkpoints and copies of the whole workspace by the same rules; an erasure or a retention delete removes those of the rows it deletes and leaves the rest of the workspace's.
