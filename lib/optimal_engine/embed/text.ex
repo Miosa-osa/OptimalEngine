@@ -259,6 +259,37 @@ defmodule OptimalEngine.Embed.Text do
     end)
   end
 
+  @doc """
+  Remove the cache entry `embed/2` keeps for `text`. Takes the options that
+  placed it there (`:workspace_id`, `:tenant_id`, `:model`); without a workspace
+  nothing was cached and there is nothing to remove. The entry of the
+  configured endpoint and the entry of Ollama are both removed, since a text
+  may have been embedded by either.
+
+  This is for a record deleted or forgotten while its text is still at hand. An
+  entry whose text is no longer known (the record is gone, or it was embedded
+  with a prefix or document profile that cannot be rebuilt from the record) is
+  removed by the workspace purge or the age sweep.
+  """
+  @spec forget(String.t(), keyword()) :: :ok | {:error, term()}
+  def forget(text, opts) when is_binary(text) and is_list(opts) do
+    case cache_scope(Keyword.delete(opts, :cache)) do
+      nil ->
+        :ok
+
+      scope ->
+        model = Keyword.get(opts, :model, model())
+        input = cap(text)
+
+        Enum.reduce_while(Enum.uniq([nil, endpoint()]), :ok, fn target, :ok ->
+          case FileCache.delete(scope, "embeddings", cache_key(target, model, input)) do
+            :ok -> {:cont, :ok}
+            {:error, _} = error -> {:halt, error}
+          end
+        end)
+    end
+  end
+
   # A cached vector of another width than an endpoint's model now needs (the
   # width setting changed since it was stored) is a miss, so it is fetched again.
   defp cached(scope, target, model, input) do

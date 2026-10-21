@@ -42,6 +42,7 @@ defmodule OptimalEngine.Memory.Versioned do
   readability in logs.
   """
 
+  alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
   alias OptimalEngine.Memory.Versioned.Store, as: VStore
   alias OptimalEngine.Memory.Surfacer
   alias OptimalEngine.MemoryCore.SecurityLabels
@@ -292,10 +293,15 @@ defmodule OptimalEngine.Memory.Versioned do
   def forget(id, opts \\ []) when is_binary(id) do
     reason = Keyword.get(opts, :reason)
     forget_after = Keyword.get(opts, :forget_after)
+    memory = held(id)
 
     case VStore.mark_forgotten(id, reason, forget_after) do
-      {:ok, _} -> :ok
-      other -> other
+      {:ok, _} ->
+        forget_cached_embedding(memory)
+        :ok
+
+      other ->
+        other
     end
   end
 
@@ -352,11 +358,29 @@ defmodule OptimalEngine.Memory.Versioned do
   @doc "Hard deletes a memory row. Cascades to memory_relations."
   @spec delete(String.t()) :: :ok | {:error, term()}
   def delete(id) when is_binary(id) do
+    memory = held(id)
+
     case VStore.delete(id) do
-      {:ok, _} -> :ok
-      other -> other
+      {:ok, _} ->
+        forget_cached_embedding(memory)
+        :ok
+
+      other ->
+        other
     end
   end
+
+  # The memory as it is before it is forgotten or deleted: after, its text is gone (a delete)
+  # or no longer worth reading (a forget), and the embedding cached from it should go too.
+  defp held(id) do
+    case get(id) do
+      {:ok, memory} -> memory
+      _ -> nil
+    end
+  end
+
+  defp forget_cached_embedding(nil), do: :ok
+  defp forget_cached_embedding(memory), do: MemoryEmbeddings.forget_cache(memory)
 
   # ---------------------------------------------------------------------------
   # Private helpers
