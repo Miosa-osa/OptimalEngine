@@ -90,6 +90,13 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
       )
   end
 
+  defp vector_tenants(context_id) do
+    {:ok, rows} =
+      Store.raw_query("SELECT DISTINCT tenant_id FROM vectors WHERE context_id = ?1", [context_id])
+
+    rows |> List.flatten() |> Enum.sort()
+  end
+
   defp child_tenants(table, signal_id) do
     {:ok, rows} =
       Store.raw_query("SELECT DISTINCT tenant_id FROM #{table} WHERE signal_id = ?1", [signal_id])
@@ -231,6 +238,9 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
       assert :ok = Store.insert_context(context(other, ws))
       for signal <- [id, other], do: children!(signal, ws)
 
+      for signal <- [id, other],
+          do: assert(:ok = Vectors.store(signal, [0.1, 0.2], workspace_id: ws))
+
       {:ok, _} =
         Store.raw_query(
           "INSERT INTO workspaces (id, tenant_id, organization_id, slug, name, status, metadata) VALUES (?1, ?2, ?3, ?4, 'Late', 'active', '{}')",
@@ -242,11 +252,13 @@ defmodule OptimalEngine.Store.BareWorkspaceTenantTest do
       assert tenant_of(id) == a
       assert child_tenants("chunks", id) == [a]
       assert child_tenants("claims", id) == [a]
+      assert vector_tenants(id) == [a]
 
       # A context the owner has not rewritten keeps its own.
       assert tenant_of(other) == "default"
       assert child_tenants("chunks", other) == ["default"]
       assert child_tenants("claims", other) == ["default"]
+      assert vector_tenants(other) == ["default"]
     end
 
     test "a rewrite that keeps the tenant leaves the children of the context alone", ctx do

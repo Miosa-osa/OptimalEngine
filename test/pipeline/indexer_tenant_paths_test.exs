@@ -12,6 +12,7 @@ defmodule OptimalEngine.Pipeline.IndexerTenantPathsTest do
   alias OptimalEngine.Pipeline.Indexer
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
+  alias OptimalEngine.Workspace.Filesystem
 
   setup do
     n = System.unique_integer([:positive])
@@ -63,6 +64,7 @@ defmodule OptimalEngine.Pipeline.IndexerTenantPathsTest do
     nested = write!(root, "tenants/#{tenant}/ops/deep/er/two.md")
     shared = write!(root, "project-a/three.md")
     top = write!(root, "README.md")
+    own = write!(root, "nodes/team/four.md")
 
     assert {:ok, :started} = Indexer.full_index()
     await_index(300)
@@ -72,5 +74,34 @@ defmodule OptimalEngine.Pipeline.IndexerTenantPathsTest do
     # What was a top-level folder stays one.
     assert scope_of(shared) == [["default:project-a", "default"]]
     assert scope_of(top) == [["default", "default"]]
+    # The root's own directories are the default workspace's tree.
+    assert scope_of(own) == [["default", "default"]]
+  end
+
+  test "reads a path back to the workspace and tenant that Filesystem.path built it for", ctx do
+    %{root: root, tenant: tenant, n: n} = ctx
+
+    # {the id a file is written for, the workspace and tenant it is read back as}
+    cases = [
+      {"default", {"default", "default"}},
+      {"default:rt-#{n}", {"default:rt-#{n}", "default"}},
+      # A bare id and `default:<id>` are one directory; the crawl reads both as the latter.
+      {"bare-rt-#{n}", {"default:bare-rt-#{n}", "default"}},
+      {"#{tenant}:rt-#{n}", {"#{tenant}:rt-#{n}", tenant}}
+    ]
+
+    files =
+      for {id, expected} <- cases do
+        dir = Filesystem.path(root, id)
+        subdirectory = if id == "default", do: "nodes/team", else: "nodes"
+        {write!(dir, "#{subdirectory}/round-trip.md"), expected}
+      end
+
+    assert {:ok, :started} = Indexer.full_index()
+    await_index(300)
+
+    for {path, {workspace, expected_tenant}} <- files do
+      assert scope_of(path) == [[workspace, expected_tenant]], path
+    end
   end
 end
