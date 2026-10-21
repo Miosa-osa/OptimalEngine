@@ -197,6 +197,100 @@ defmodule OptimalEngine.API.ConnectorsAPITest do
     end
   end
 
+  describe "a connector on the credential broker" do
+    @reference "conn_0000000009.example-signature"
+
+    defp broker_body(ctx, id) do
+      %{
+        "id" => id,
+        "kind" => "gmail",
+        "workspace" => ctx.ws_a,
+        "config" => %{
+          "user_email" => "ops@example.com",
+          "credential_source" => "broker",
+          "broker_url" => "https://connect.example.com/api/credentials",
+          "broker_reference" => @reference,
+          "broker_scopes" => ["gmail.readonly"]
+        }
+      }
+    end
+
+    test "its reference is sealed on write and redacted on every read, through a move", ctx do
+      id = "broker-#{ctx.suffix}"
+
+      conn = request(ctx.admin, :post, "/api/connectors", broker_body(ctx, id))
+      assert conn.status == 201, conn.resp_body
+      assert json_body(conn)["config"]["broker_reference"] == "[redacted]"
+      assert json_body(conn)["credential_source"] == "broker"
+
+      reads = fn ->
+        [
+          request(ctx.reader, :get, "/api/connectors/#{id}"),
+          request(ctx.reader, :get, "/api/connectors"),
+          request(ctx.reader, :get, "/api/metrics")
+        ]
+      end
+
+      for conn <- reads.() do
+        assert conn.status == 200
+        refute conn.resp_body =~ @reference
+        refute conn.resp_body =~ "broker_reference_ciphertext"
+      end
+
+      conn = request(ctx.admin, :patch, "/api/connectors/#{id}", %{"workspace" => ctx.ws_b})
+      assert conn.status == 200, conn.resp_body
+      assert json_body(conn)["workspace_id"] == ctx.ws_b
+      assert json_body(conn)["config"]["broker_reference"] == "[redacted]"
+      refute conn.resp_body =~ @reference
+
+      for conn <- reads.() do
+        refute conn.resp_body =~ @reference
+        refute conn.resp_body =~ "broker_reference_ciphertext"
+      end
+
+      {:ok, [[stored]]} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [id])
+      refute stored =~ @reference
+      assert stored =~ "broker_reference_ciphertext"
+
+      refute Jason.encode!(Evidence.list("default")) =~ @reference
+    end
+
+    test "the ciphertext is the Engine's alone to write", ctx do
+      id = "broker-forged-#{ctx.suffix}"
+      assert %{status: 201} = request(ctx.admin, :post, "/api/connectors", broker_body(ctx, id))
+
+      conn =
+        request(ctx.admin, :patch, "/api/connectors/#{id}", %{
+          "config" => %{"broker_reference_ciphertext" => "forged"}
+        })
+
+      assert conn.status == 422
+      assert json_body(conn)["error"] == "credentials_outside_envelope"
+    end
+
+    test "a broker URL the Engine may not call is refused on write and on change", ctx do
+      id = "broker-url-#{ctx.suffix}"
+      body = broker_body(ctx, id)
+
+      refused =
+        put_in(body, ["config", "broker_url"], "https://elsewhere.example.net/api/credentials")
+
+      conn = request(ctx.admin, :post, "/api/connectors", refused)
+      assert conn.status == 422
+      assert json_body(conn)["error"] == "broker_url_not_allowed"
+
+      assert %{status: 201} = request(ctx.admin, :post, "/api/connectors", body)
+
+      conn =
+        request(ctx.admin, :patch, "/api/connectors/#{id}", %{
+          "config" => %{"broker_url" => "https://connect.example.com:8443/api/credentials"}
+        })
+
+      assert conn.status == 422
+      assert json_body(conn)["error"] == "broker_url_not_allowed"
+    end
+  end
+
   describe "PATCH, run, and DELETE" do
     setup ctx do
       {:ok, id: register!(ctx, "folder-#{ctx.suffix}", ctx.ws_a)}

@@ -14,12 +14,42 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
   import ExUnit.CaptureLog
 
   alias OptimalEngine.Authority.Evidence
-  alias OptimalEngine.Connectors.{Rows, Runner}
+  alias OptimalEngine.Connectors.{CredentialSource, Rows, Runner}
   alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Test.{BrokerStub, ConnectorFixtureStub}
 
   @reference "conn_example.signed-reference-0001"
+
+  defmodule LeakyKey do
+    @moduledoc "An adapter that reads an API key and crashes with its state as the argument."
+
+    use OptimalEngine.Connectors.Adapters.Base,
+      kind: :leaky_key,
+      display_name: "Leaky",
+      auth_scheme: :token,
+      required_keys: [],
+      credential_keys: [:api_key],
+      token_key: :api_key
+
+    @impl true
+    def sync(state, _cursor), do: String.upcase(state)
+  end
+
+  defmodule LeakyOAuth do
+    @moduledoc "An adapter that calls through AccessToken and crashes with its state as the argument."
+
+    use OptimalEngine.Connectors.Adapters.Base,
+      kind: :leaky_oauth,
+      display_name: "Leaky OAuth",
+      auth_scheme: :oauth2,
+      required_keys: [],
+      credential_keys: [:client_id],
+      access_token: true
+
+    @impl true
+    def sync(state, _cursor), do: String.upcase(state)
+  end
 
   setup do
     original_key = System.get_env("CONNECTOR_KEY")
@@ -310,6 +340,232 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
     end
   end
 
+  describe "the retry budget belongs to the run" do
+    # The first token is refused at once, so the sync spends its one re-fetch on
+    # the second token; the second token is throttled once, which the Runner
+    # answers by running the sync again.
+    defp throttle_first_call_of_token_2 do
+      fn
+        %{bearer: "example-broker-token-2", nth: 1} -> {429, %{}}
+        _call -> nil
+      end
+    end
+
+    test "a retry after a 429 keeps the renewed token and asks the broker for nothing", ctx do
+      register(ctx)
+
+      stub =
+        install(
+          issue: [{"example-broker-token-1", 3_600}, {"example-broker-token-2", 3_600}],
+          reject: ["example-broker-token-1"],
+          override: throttle_first_call_of_token_2()
+        )
+
+      assert {:ok, %{status: :success, signals: 3}} = run(ctx)
+
+      assert length(BrokerStub.broker_calls(stub)) == 2
+      bearers = BrokerStub.bearers(stub)
+      assert hd(bearers) == "example-broker-token-1"
+      assert Enum.all?(tl(bearers), &(&1 == "example-broker-token-2"))
+      assert Enum.count(bearers, &(&1 == "example-broker-token-1")) == 1
+    end
+
+    test "a refusal after a retry fails the run, and the broker is not asked a third time", ctx do
+      register(ctx)
+
+      stub =
+        install(
+          issue: [{"example-broker-token-1", 3_600}, {"example-broker-token-2", 3_600}],
+          reject: ["example-broker-token-1"],
+          expire: %{"example-broker-token-2" => 1},
+          override: throttle_first_call_of_token_2()
+        )
+
+      assert {:ok, %{status: :error, reason: :broker_token_rejected}} = run(ctx)
+      assert length(BrokerStub.broker_calls(stub)) == 2
+    end
+  end
+
+  describe "a connector's own workspace" do
+    test "a move re-seals the reference, and the next run asks with the new workspace", ctx do
+      register(ctx)
+      before = sealed_reference(ctx.id)
+      moved = insert_workspace("#{ctx.tenant}:moved", ctx.tenant)
+
+      assert {:ok, %{workspace_id: ^moved} = view} =
+               Rows.update(ctx.tenant, ctx.id, %{"workspace" => moved})
+
+      assert view.config["broker_reference"] == "[redacted]"
+      refute sealed_reference(ctx.id) == before
+
+      stub = install(issue: [{"example-broker-token-1", 3_600}])
+      assert {:ok, %{status: :success}} = run(ctx)
+
+      assert [call] = BrokerStub.broker_calls(stub)
+      assert call.body["workspace_id"] == moved
+      assert call.body["reference"] == @reference
+    end
+
+    test "a move there and back leaves the reference readable", ctx do
+      register(ctx)
+      moved = insert_workspace("#{ctx.tenant}:moved-twice", ctx.tenant)
+      {:ok, _view} = Rows.update(ctx.tenant, ctx.id, %{"workspace" => moved})
+      {:ok, _view} = Rows.update(ctx.tenant, ctx.id, %{"workspace" => ctx.workspace})
+
+      stub = install(issue: [{"example-broker-token-1", 3_600}])
+      assert {:ok, %{status: :success}} = run(ctx)
+      assert [%{body: %{"workspace_id" => workspace}}] = BrokerStub.broker_calls(stub)
+      assert workspace == ctx.workspace
+    end
+
+    test "routing its signals elsewhere does not change the workspace the broker is asked with",
+         ctx do
+      review = insert_workspace("#{ctx.tenant}:review", ctx.tenant)
+
+      register(ctx, %{"review_workspace_id" => review, "routing_channel" => "#clients"})
+      stub = install(issue: [{"example-broker-token-1", 3_600}])
+
+      assert {:ok, %{status: :success}} = run(ctx)
+
+      assert [call] = BrokerStub.broker_calls(stub)
+      assert call.body["workspace_id"] == ctx.workspace
+      refute call.body["workspace_id"] == review
+    end
+
+    test "a sealed reference copied to another connector is not read", ctx do
+      register(ctx)
+      other_id = "#{ctx.id}-copy"
+      sealed = sealed_reference(ctx.id)
+
+      {:ok, ^other_id} =
+        Runner.upsert_row(%{
+          id: other_id,
+          kind: :gmail,
+          tenant_id: ctx.tenant,
+          workspace_id: ctx.workspace,
+          config: %{
+            "user_email" => "jane@example.com",
+            "credential_source" => "broker",
+            "broker_url" => BrokerStub.broker_url(),
+            "broker_reference_ciphertext" => sealed
+          }
+        })
+
+      stub = install(issue: [{"example-broker-token-1", 3_600}])
+
+      assert {:ok, %{status: :error, reason: :broker_reference_unreadable}} =
+               Runner.run(other_id, governed: false)
+
+      assert BrokerStub.broker_calls(stub) == []
+    end
+  end
+
+  describe "secrecy when an adapter crashes" do
+    @api_key "example-secret-api-key"
+    @access_token "example-secret-access-token"
+
+    defp crash_text(adapter, config) do
+      scope = %{id: "c-1", kind: "x", tenant_id: "default", workspace_id: "default", adapter: adapter}
+
+      with {:ok, hydrated} <- CredentialSource.hydrate(config, scope),
+           {:ok, state} <- adapter.init(hydrated) do
+        result =
+          try do
+            {:returned, adapter.sync(state, nil)}
+          rescue
+            error -> {:crashed, Exception.format(:error, error, __STACKTRACE__)}
+          end
+
+        case result do
+          {:crashed, text} -> text
+          {:returned, other} -> flunk("the adapter was meant to crash, it returned #{inspect(other)}")
+        end
+      end
+    end
+
+    defp broker_config do
+      %{
+        "credential_source" => "broker",
+        "broker_url" => BrokerStub.broker_url(),
+        "broker_reference" => @reference
+      }
+    end
+
+    test "a broker's API key and access token are not in the failure that shows the adapter's state" do
+      for {adapter, body} <- [
+            {LeakyKey, %{"credentials" => %{"api_key" => @api_key}}},
+            {LeakyKey, %{"credentials" => %{"access_token" => @access_token}}},
+            {LeakyOAuth, %{"credentials" => %{"access_token" => @access_token}}}
+          ] do
+        stub = BrokerStub.install(nil, issue: [{:body, body}])
+        text = crash_text(adapter, broker_config())
+        BrokerStub.uninstall(stub)
+
+        assert text =~ "no function clause matching", "the crash did not show the state"
+        refute text =~ @api_key
+        refute text =~ @access_token
+        refute text =~ @reference
+      end
+    end
+
+    test "a token given directly is not in it either" do
+      assert {:ok, state} =
+               LeakyOAuth.init(%{"credentials" => %{"access_token" => "example-direct-secret"}})
+
+      text =
+        try do
+          LeakyOAuth.sync(state, nil)
+        rescue
+          error -> Exception.format(:error, error, __STACKTRACE__)
+        end
+
+      assert text =~ "no function clause matching"
+      refute text =~ "example-direct-secret"
+    end
+
+    test "nothing of it reaches the log of a run that crashes", ctx do
+      previous = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      id = "#{ctx.id}-leaky"
+
+      {:ok, ^id} =
+        Runner.upsert_row(%{
+          id: id,
+          kind: :leaky_key,
+          tenant_id: ctx.tenant,
+          workspace_id: ctx.workspace,
+          config: broker_config()
+        })
+
+      stub = BrokerStub.install(nil, issue: [{:body, %{"credentials" => %{"api_key" => @api_key}}}])
+
+      log =
+        capture_log([level: :debug], fn ->
+          try do
+            Runner.run(id, governed: false, adapter: LeakyKey)
+          rescue
+            error -> send(self(), {:raised, Exception.format(:error, error, __STACKTRACE__)})
+          catch
+            kind, reason -> send(self(), {:raised, Exception.format(kind, reason, __STACKTRACE__)})
+          end
+        end)
+
+      BrokerStub.uninstall(stub)
+
+      raised =
+        receive do
+          {:raised, text} -> text
+        after
+          0 -> ""
+        end
+
+      refute log <> raised =~ @api_key
+      refute log <> raised =~ @reference
+    end
+  end
+
   describe "the refresh-token flow" do
     test "is unchanged: one token refresh, no broker, the refreshed token on every call", ctx do
       {:ok, _view} =
@@ -334,7 +590,7 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
       assert [refresh | calls] = BrokerStub.api_calls(stub)
       assert refresh.url =~ "oauth2.googleapis.com/token"
       assert refresh.bearer == nil
-      assert Enum.uniq(Enum.map(calls, & &1.bearer)) == ["ya29.example-access-token"]
+      assert Enum.uniq(Enum.map(calls, & &1.bearer)) == ["example-gmail-access-token"]
 
       [token_call] =
         ConnectorFixtureStub.calls_matching(stub.fixture, "oauth2.googleapis.com/token")
@@ -359,7 +615,7 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
           }
         })
 
-      stub = install(reject: ["ya29.example-access-token"])
+      stub = install(reject: ["example-gmail-access-token"])
 
       assert {:ok, %{status: :error, reason: :auth_expired}} = run(ctx)
       assert length(token_endpoint_calls(stub)) == 1
@@ -368,6 +624,11 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
   end
 
   # ─── helpers ──────────────────────────────────────────────────────────────
+
+  defp sealed_reference(connector_id) do
+    {:ok, [[config]]} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [connector_id])
+    Jason.decode!(config)["broker_reference_ciphertext"]
+  end
 
   defp run_rows(connector_id) do
     {:ok, rows} =

@@ -21,6 +21,11 @@ defmodule OptimalEngine.Test.BrokerStub do
 
   The broker answers at `broker_url:` (default `broker_url/0`).
 
+  `override:` is a function of `%{url:, bearer:, nth:}` (`nth` counts the calls
+  already made with that bearer, plus one) that answers a provider call itself
+  with `{status, body}` or `{status, body, headers}`, or `nil` to leave it to
+  the rules above. An overridden call does not count against `expire`.
+
   A broker call beyond the list raises, so a test that expects a bounded
   number of fetches fails loudly when the Engine asks again.
 
@@ -62,13 +67,14 @@ defmodule OptimalEngine.Test.BrokerStub do
       end)
 
     api = Keyword.get(opts, :api)
+    override = Keyword.get(opts, :override)
     broker_url = Keyword.get(opts, :broker_url, @broker_url)
     reject_with = Keyword.get(opts, :reject_with, {401, %{}})
 
     Application.put_env(:optimal_engine, :http_mock, fn url, request_opts ->
       if String.starts_with?(url, broker_url),
         do: broker(agent, url, request_opts),
-        else: provider(agent, url, request_opts, api || recording, reject_with)
+        else: provider(agent, url, request_opts, api || recording, reject_with, override)
     end)
 
     %{agent: agent, fixture: fixture}
@@ -83,7 +89,7 @@ defmodule OptimalEngine.Test.BrokerStub do
     :ok
   end
 
-  @doc "The broker calls, oldest first: `[%{url:, body:, headers:, timeout:, follow_redirects:}]`."
+  @doc "The broker calls, oldest first: `[%{url:, opts:, body:, headers:, timeout:, follow_redirects:}]`."
   @spec broker_calls(handle()) :: [map()]
   def broker_calls(%{agent: agent}),
     do: agent |> Agent.get(& &1.broker_calls) |> Enum.reverse()
@@ -101,6 +107,7 @@ defmodule OptimalEngine.Test.BrokerStub do
   defp broker(agent, url, opts) do
     call = %{
       url: url,
+      opts: opts,
       body: Keyword.get(opts, :body),
       headers: Keyword.get(opts, :headers, []),
       timeout: Keyword.get(opts, :timeout),
@@ -145,12 +152,16 @@ defmodule OptimalEngine.Test.BrokerStub do
 
   # ─── provider ────────────────────────────────────────────────────────────
 
-  defp provider(agent, url, opts, answer, reject_with) do
+  defp provider(agent, url, opts, answer, reject_with, override) do
     bearer = bearer(Keyword.get(opts, :headers, []))
-    refused? = refuse?(agent, bearer)
+    overridden = overridden(agent, override, url, bearer)
+    refused? = overridden == nil and refuse?(agent, bearer)
 
     response =
       cond do
+        overridden != nil ->
+          answer_call(fn _url, _opts -> overridden end, url, opts)
+
         refused? ->
           {status, body} = reject_with
           httpc(status, body)
@@ -179,11 +190,19 @@ defmodule OptimalEngine.Test.BrokerStub do
     response
   end
 
+  defp overridden(_agent, nil, _url, _bearer), do: nil
+
+  defp overridden(agent, override, url, bearer) do
+    nth = agent |> Agent.get(& &1.api_calls) |> Enum.count(&(&1.bearer == bearer)) |> Kernel.+(1)
+    override.(%{url: url, bearer: bearer, nth: nth})
+  end
+
   # A recording answers with the raw :httpc shape; an `api:` function with
-  # `{status, body}`.
+  # `{status, body}` or `{status, body, headers}`.
   defp answer_call(answer, url, opts) do
     case answer.(url, opts) do
       {status, body} when is_integer(status) -> httpc(status, body)
+      {status, body, headers} when is_integer(status) -> httpc(status, body, headers)
       raw -> raw
     end
   end
@@ -214,8 +233,13 @@ defmodule OptimalEngine.Test.BrokerStub do
     end)
   end
 
-  defp httpc(status, body) do
-    headers = [{~c"content-type", ~c"application/json"}]
+  defp httpc(status, body, extra \\ []) do
+    headers =
+      [{~c"content-type", ~c"application/json"}] ++
+        Enum.map(extra, fn {name, value} ->
+          {String.to_charlist(name), String.to_charlist(value)}
+        end)
+
     {:ok, {{~c"HTTP/1.1", status, ~c"OK"}, headers, Jason.encode!(body)}}
   end
 end
