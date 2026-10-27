@@ -27,14 +27,10 @@ jobs:
           uv venv --seed --python 3.12 "$RUNNER_TEMP/python"
           echo "$RUNNER_TEMP/python/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/python/bin/python3" --version
-      # RocksDB builds from source with CMake and a C++ compiler; hosted Ubuntu
-      # shipped both, the self-hosted Debian image does not promise them.
+      # RocksDB's build needs the OpenSSL headers (its encrypted env); hosted
+      # Ubuntu shipped libssl-dev, the self-hosted Debian image does not.
       - name: Install native build dependencies
-        run: |
-          packages=(libsnappy-dev)
-          command -v cmake >/dev/null 2>&1 || packages+=(cmake)
-          command -v g++ >/dev/null 2>&1 || packages+=(g++)
-          sudo apt-get update && sudo apt-get install --yes "${packages[@]}"
+        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev libssl-dev
       - run: mix deps.get
       - run: mix compile --warnings-as-errors
       - run: python3 benchmarks/scripts/release_benchmark.py --no-history
