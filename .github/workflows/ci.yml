@@ -28,7 +28,8 @@ jobs:
     # "test (Elixir 1.17.3 / OTP 26.2)" did. The versions are in the matrix
     # below and in the log, not in the check name.
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    # GitHub-hosted runners are billing-blocked org-wide, so the Linux jobs run on MIOSA's ephemeral self-hosted runners (Miosa-osa/miosa tasks/self-hosted-ci-runbook.md).
+    runs-on: [self-hosted, miosa-ci, optimalengine]
     # A cold cache (any mix.lock change) compiles RocksDB from source: about
     # 12 minutes on the 1.19 / OTP 28 job before the tests start.
     timeout-minutes: 25
@@ -76,8 +77,20 @@ jobs:
           otp-version: ${{ matrix.otp }}
           elixir-version: ${{ matrix.elixir }}
 
+      # RocksDB's build needs the OpenSSL headers (its encrypted env) and the
+      # system zstd (the hex package has no bundled copy); hosted Ubuntu
+      # shipped both, the self-hosted Debian image does not. lz4 too, so the
+      # NIF has the codecs the release image (deploy/Dockerfile.engine) builds.
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev
+        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev libssl-dev libzstd-dev liblz4-dev
+
+      # The image is part of the cache key: `runner.os` is "Linux" on hosted
+      # Ubuntu and on the self-hosted Debian image alike, and a _build whose
+      # NIFs (RocksDB, exqlite, bcrypt) were linked against a newer glibc fails
+      # to load rather than recompiling.
+      - name: Identify the runner image
+        id: image
+        run: . /etc/os-release && echo "id=${ID}-${VERSION_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Cache deps and _build
         id: build-cache
@@ -86,9 +99,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-${{ steps.image.outputs.id }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-
+            ${{ runner.os }}-${{ steps.image.outputs.id }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-
 
       - name: Install deps
         run: mix deps.get
@@ -107,7 +120,7 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-${{ steps.image.outputs.id }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
 
       - name: Verify release version
         run: mix run --no-start scripts/check_release_version.exs
@@ -128,7 +141,7 @@ jobs:
 
   mcp:
     name: mcp server (build and test)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, miosa-ci, optimalengine]
     timeout-minutes: 10
     defaults:
       run:
@@ -151,7 +164,7 @@ jobs:
     # server archive with SHA256SUMS. Built and installed on every run. This job
     # runs pull request code and npm, so it holds no write token.
     name: client CLI and MCP release files
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, miosa-ci, optimalengine]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -170,12 +183,22 @@ jobs:
           apps/mcp/build.sh dist/client
           cat dist/client/SHA256SUMS
 
+      # A hosted runner runs every step as the unprivileged user "runner". The
+      # self-hosted runner is root, and the installer deliberately acts
+      # differently for root (it will not write through a user's symlink), so
+      # the tests run as an ordinary account there, as they did before.
       - name: Test the CLI and install the built files
         env:
           OPTIMAL_CLIENT_TEST_RELEASE_DIR: dist/client
         run: |
-          python3 -m unittest discover -s scripts/tests -p 'test_optimal_cli.py'
-          python3 -m unittest discover -s scripts/tests -p 'test_install_client.py'
+          as_user=()
+          if [ "$(id -u)" = 0 ]; then
+            id -u ci-unprivileged >/dev/null 2>&1 || useradd --create-home ci-unprivileged
+            chown -R ci-unprivileged: "$GITHUB_WORKSPACE"
+            as_user=(setpriv --reuid=ci-unprivileged --regid=ci-unprivileged --init-groups -- env HOME=/home/ci-unprivileged)
+          fi
+          "${as_user[@]}" python3 -m unittest discover -s scripts/tests -p 'test_optimal_cli.py'
+          "${as_user[@]}" python3 -m unittest discover -s scripts/tests -p 'test_install_client.py'
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

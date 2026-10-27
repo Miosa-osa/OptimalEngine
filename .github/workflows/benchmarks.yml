@@ -11,18 +11,28 @@ on:
 
 jobs:
   release-benchmarks:
-    runs-on: ubuntu-latest
+    # GitHub-hosted runners are billing-blocked org-wide, so the Linux jobs run on MIOSA's ephemeral self-hosted runners (Miosa-osa/miosa tasks/self-hosted-ci-runbook.md).
+    runs-on: [self-hosted, miosa-ci, optimalengine]
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
         with:
           otp-version: "27"
           elixir-version: "1.17"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # actions/setup-python has no build for Debian 12 (the self-hosted
+      # image), so take the same Python 3.12 from uv and put it first on PATH.
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Set up Python 3.12
+        run: |
+          uv venv --seed --python 3.12 "$RUNNER_TEMP/python"
+          echo "$RUNNER_TEMP/python/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/python/bin/python3" --version
+      # RocksDB's build needs the OpenSSL headers (its encrypted env) and the
+      # system zstd (the hex package has no bundled copy); hosted Ubuntu
+      # shipped both, the self-hosted Debian image does not. lz4 too, so the
+      # NIF has the codecs the release image (deploy/Dockerfile.engine) builds.
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev
+        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev libssl-dev libzstd-dev liblz4-dev
       - run: mix deps.get
       - run: mix compile --warnings-as-errors
       - run: python3 benchmarks/scripts/release_benchmark.py --no-history
