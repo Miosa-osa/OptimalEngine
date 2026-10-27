@@ -28,7 +28,8 @@ jobs:
     # "test (Elixir 1.17.3 / OTP 26.2)" did. The versions are in the matrix
     # below and in the log, not in the check name.
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    # GitHub-hosted runners are billing-blocked org-wide, so the Linux jobs run on MIOSA's ephemeral self-hosted runners (Miosa-osa/miosa tasks/self-hosted-ci-runbook.md).
+    runs-on: [self-hosted, miosa-ci, optimalengine]
     # A cold cache (any mix.lock change) compiles RocksDB from source: about
     # 12 minutes on the 1.19 / OTP 28 job before the tests start.
     timeout-minutes: 25
@@ -76,8 +77,22 @@ jobs:
           otp-version: ${{ matrix.otp }}
           elixir-version: ${{ matrix.elixir }}
 
+      # RocksDB builds from source with CMake and a C++ compiler; hosted Ubuntu
+      # shipped both, the self-hosted Debian image does not promise them.
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev
+        run: |
+          packages=(libsnappy-dev)
+          command -v cmake >/dev/null 2>&1 || packages+=(cmake)
+          command -v g++ >/dev/null 2>&1 || packages+=(g++)
+          sudo apt-get update && sudo apt-get install --yes "${packages[@]}"
+
+      # The image is part of the cache key: `runner.os` is "Linux" on hosted
+      # Ubuntu and on the self-hosted Debian image alike, and a _build whose
+      # NIFs (RocksDB, exqlite, bcrypt) were linked against a newer glibc fails
+      # to load rather than recompiling.
+      - name: Identify the runner image
+        id: image
+        run: . /etc/os-release && echo "id=${ID}-${VERSION_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Cache deps and _build
         id: build-cache
@@ -86,9 +101,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-${{ steps.image.outputs.id }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-
+            ${{ runner.os }}-${{ steps.image.outputs.id }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-
 
       - name: Install deps
         run: mix deps.get
@@ -107,7 +122,7 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-${{ steps.image.outputs.id }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
 
       - name: Verify release version
         run: mix run --no-start scripts/check_release_version.exs
@@ -128,7 +143,7 @@ jobs:
 
   mcp:
     name: mcp server (build and test)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, miosa-ci, optimalengine]
     timeout-minutes: 10
     defaults:
       run:
@@ -151,7 +166,7 @@ jobs:
     # server archive with SHA256SUMS. Built and installed on every run. This job
     # runs pull request code and npm, so it holds no write token.
     name: client CLI and MCP release files
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, miosa-ci, optimalengine]
     timeout-minutes: 15
     permissions:
       contents: read
