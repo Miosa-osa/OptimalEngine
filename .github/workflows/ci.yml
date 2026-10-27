@@ -77,10 +77,12 @@ jobs:
           otp-version: ${{ matrix.otp }}
           elixir-version: ${{ matrix.elixir }}
 
-      # RocksDB's build needs the OpenSSL headers (its encrypted env); hosted
-      # Ubuntu shipped libssl-dev, the self-hosted Debian image does not.
+      # RocksDB's build needs the OpenSSL headers (its encrypted env) and the
+      # system zstd (the hex package has no bundled copy); hosted Ubuntu
+      # shipped both, the self-hosted Debian image does not. lz4 too, so the
+      # NIF has the codecs the release image (deploy/Dockerfile.engine) builds.
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev libssl-dev
+        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev libssl-dev libzstd-dev liblz4-dev
 
       # The image is part of the cache key: `runner.os` is "Linux" on hosted
       # Ubuntu and on the self-hosted Debian image alike, and a _build whose
