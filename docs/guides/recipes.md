@@ -84,6 +84,16 @@ POST /api/assemble {"workspace": "<tenant>:docs", "query": "refunds"}
 GET  /api/read?uri=<optimal:// address>&workspace=<tenant>:docs
 ```
 
+An importer that captures items from another system (chat days, meetings, commits) also sends what intake needs to file them as that system's items:
+
+```
+POST /api/ingest {"workspace": "<tenant>:ops", "title": "WhatsApp 2026-10-28: Jordan", "text": "...",
+                  "occurred_at": "2026-10-28", "source_id": "whatsapp:15125550100:2026-10-28"}
+```
+
+`occurred_at` (an ISO 8601 date or date-time; a bare date means noon UTC) dates the signal when the item happened instead of when it was ingested, `source_id` makes a later ingest of the same item replace its row instead of adding another, and `"write_files": false` stores the signal in the database only, the way connector pulls do.
+An `occurred_at` that is not a date is a 400.
+
 ## App database and connector hub
 
 The app data API (collections, records, queries, change feed) and the connector hub land with their own guides.

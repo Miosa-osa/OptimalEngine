@@ -3812,27 +3812,75 @@ defmodule OptimalEngine.API.Router do
         |> then(fn acc ->
           if(body["extract_claims"] == true, do: Keyword.put(acc, :extract_claims, true), else: acc)
         end)
+        |> then(fn acc ->
+          case body["source_id"] do
+            v when is_binary(v) and v != "" -> Keyword.put(acc, :source_id, v)
+            _ -> acc
+          end
+        end)
+        |> then(fn acc ->
+          if(body["write_files"] == false, do: Keyword.put(acc, :write_files, false), else: acc)
+        end)
 
-      case OptimalEngine.Pipeline.Intake.process(text, intake_opts) do
-        {:ok, result} ->
-          sig = result.signal
-
+      case ingest_occurred_at(body["occurred_at"]) do
+        :error ->
           send_resp(
             conn,
-            200,
-            Jason.encode!(%{
-              ok: true,
-              signal_id: Map.get(result, :context_id) || Map.get(sig, :id),
-              genre: sig.genre,
-              type: sig.type,
-              entities: sig.entities,
-              source_package_id: result[:source_package] && result.source_package.id
-            })
+            400,
+            Jason.encode!(%{error: "occurred_at must be an ISO 8601 date or date-time"})
           )
 
-        {:error, reason} ->
-          send_resp(conn, 422, Jason.encode!(%{ok: false, error: inspect(reason)}))
+        {:ok, occurred_at} ->
+          intake_opts =
+            if occurred_at,
+              do: Keyword.put(intake_opts, :occurred_at, occurred_at),
+              else: intake_opts
+
+          ingest_and_reply(conn, text, intake_opts)
       end
+    end
+  end
+
+  # A capture importer knows when the item happened (a message day, a meeting start);
+  # the signal is dated then instead of at intake. A bare date means noon UTC, so the
+  # day reads the same across US and European time zones.
+  defp ingest_occurred_at(nil), do: {:ok, nil}
+
+  defp ingest_occurred_at(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, at, _offset} ->
+        {:ok, at}
+
+      {:error, _} ->
+        case Date.from_iso8601(value) do
+          {:ok, date} -> {:ok, DateTime.new!(date, ~T[12:00:00], "Etc/UTC")}
+          {:error, _} -> :error
+        end
+    end
+  end
+
+  defp ingest_occurred_at(_other), do: :error
+
+  defp ingest_and_reply(conn, text, intake_opts) do
+    case OptimalEngine.Pipeline.Intake.process(text, intake_opts) do
+      {:ok, result} ->
+        sig = result.signal
+
+        send_resp(
+          conn,
+          200,
+          Jason.encode!(%{
+            ok: true,
+            signal_id: Map.get(result, :context_id) || Map.get(sig, :id),
+            genre: sig.genre,
+            type: sig.type,
+            entities: sig.entities,
+            source_package_id: result[:source_package] && result.source_package.id
+          })
+        )
+
+      {:error, reason} ->
+        send_resp(conn, 422, Jason.encode!(%{ok: false, error: inspect(reason)}))
     end
   end
 
