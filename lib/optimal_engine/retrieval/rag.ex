@@ -177,7 +177,8 @@ defmodule OptimalEngine.Retrieval.RAG do
       else
         WikiFirst.lookup(query, receiver.audience,
           tenant_id: receiver.tenant_id,
-          workspace_id: workspace_id
+          workspace_id: workspace_id,
+          answerable_only: true
         )
       end
 

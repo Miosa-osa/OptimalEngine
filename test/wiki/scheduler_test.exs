@@ -134,6 +134,29 @@ defmodule OptimalEngine.Wiki.SchedulerTest do
       refute page.slug in slugs,
              "expected #{page.slug} NOT to be stale (no new signals)"
     end
+
+    test "page older than the limit with no citations is stale" do
+      old_ts = DateTime.utc_now() |> DateTime.add(-10 * 86_400, :second) |> DateTime.to_iso8601()
+
+      page = base_page(last_curated: old_ts, curated_by: "test")
+      :ok = WikiStore.put(page)
+
+      slugs = Scheduler.stale_pages("default", tenant_id: "default") |> Enum.map(& &1.slug)
+
+      assert page.slug in slugs,
+             "expected uncited #{page.slug} to be stale by age, got: #{inspect(slugs)}"
+    end
+
+    test "page younger than the limit with no citations is not stale" do
+      recent_ts = DateTime.utc_now() |> DateTime.add(-1 * 86_400, :second) |> DateTime.to_iso8601()
+
+      page = base_page(last_curated: recent_ts, curated_by: "test")
+      :ok = WikiStore.put(page)
+
+      slugs = Scheduler.stale_pages("default", tenant_id: "default") |> Enum.map(& &1.slug)
+
+      refute page.slug in slugs
+    end
   end
 
   describe "force_run/1" do

@@ -28,6 +28,52 @@ defmodule OptimalEngine.Retrieval.RAGTest do
       assert result.envelope.body =~ "The answer"
       assert "optimal://a" in result.envelope.sources
     end
+
+    test "skips a wiki page older than the stale limit and falls through to retrieval" do
+      suffix = System.unique_integer([:positive])
+      slug = "rag-wiki-stale-#{suffix}"
+      old_ts = DateTime.utc_now() |> DateTime.add(-30 * 86_400, :second) |> DateTime.to_iso8601()
+
+      :ok =
+        Store.put(%Page{
+          tenant_id: "default",
+          slug: slug,
+          audience: "default",
+          version: 1,
+          frontmatter: %{"slug" => slug},
+          body: "## Summary\n\nThe stale answer {{cite: optimal://a}}.",
+          last_curated: old_ts
+        })
+
+      receiver = Receiver.new(%{format: :markdown, audience: "default"})
+      {:ok, result} = RAG.ask(slug, receiver: receiver, skip_intent: true)
+
+      refute result.source == :wiki
+      refute result.trace.wiki_hit?
+      refute result.envelope.body =~ "The stale answer"
+    end
+
+    test "skips a wiki page that names no source and falls through to retrieval" do
+      suffix = System.unique_integer([:positive])
+      slug = "rag-wiki-unsourced-#{suffix}"
+
+      :ok =
+        Store.put(%Page{
+          tenant_id: "default",
+          slug: slug,
+          audience: "default",
+          version: 1,
+          frontmatter: %{"slug" => slug},
+          body: "## Summary\n\nAn unsourced claim."
+        })
+
+      receiver = Receiver.new(%{format: :markdown, audience: "default"})
+      {:ok, result} = RAG.ask(slug, receiver: receiver, skip_intent: true)
+
+      refute result.source == :wiki
+      refute result.trace.wiki_hit?
+      refute result.envelope.body =~ "An unsourced claim"
+    end
   end
 
   describe "ask/2 — chunks fallback path" do

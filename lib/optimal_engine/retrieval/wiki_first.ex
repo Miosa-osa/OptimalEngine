@@ -28,7 +28,7 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
 
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Wiki
-  alias OptimalEngine.Wiki.Page
+  alias OptimalEngine.Wiki.{Freshness, Page}
 
   @type lookup_result ::
           {:hit, Page.t(), match_reason :: atom()} | :miss
@@ -40,6 +40,9 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
     * `:tenant_id` — defaults to `Tenancy.Tenant.default_id/0`
     * `:workspace_id` — scope to a workspace (default `"default"`)
     * `:fallback_audience` — audience to try on miss (default `"default"`)
+    * `:answerable_only` — when true, ignore pages that are stale or name no
+      source (`OptimalEngine.Wiki.Freshness.answerable?/2`), so the caller
+      falls through to retrieval over contexts. Default false; RAG sets it.
   """
   @spec lookup(String.t(), String.t(), keyword()) :: lookup_result()
   def lookup(query, audience \\ "default", opts \\ []) when is_binary(query) do
@@ -49,6 +52,8 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
     normalized = slugify(query)
 
     with {:ok, pages} <- Wiki.list(tenant_id, workspace_id) do
+      pages = only_answerable(pages, workspace_id, opts)
+
       case match(Enum.filter(pages, &(&1.audience == audience)), query, normalized) do
         :miss when audience != fallback ->
           match(Enum.filter(pages, &(&1.audience == fallback)), query, normalized)
@@ -75,6 +80,7 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
 
     case Wiki.list(tenant_id, workspace_id) do
       {:ok, pages} ->
+        pages = only_answerable(pages, workspace_id, opts)
         primary = score_and_rank(pages, audience, query, normalized)
 
         cond do
@@ -92,6 +98,15 @@ defmodule OptimalEngine.Retrieval.WikiFirst do
 
       _ ->
         []
+    end
+  end
+
+  defp only_answerable(pages, workspace_id, opts) do
+    if Keyword.get(opts, :answerable_only, false) do
+      max_days = Freshness.max_stale_days(workspace_id)
+      Enum.filter(pages, &Freshness.answerable?(&1, max_days))
+    else
+      pages
     end
   end
 

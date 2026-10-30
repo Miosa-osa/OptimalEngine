@@ -4,11 +4,13 @@ defmodule OptimalEngine.Wiki.Scheduler do
 
   A page is "stale" when:
   - `last_curated` is older than the workspace's configured `max_stale_days` (default 7)
-  - AND new signals have been ingested into cited nodes since `last_curated`
+  - AND either it has no citations, or new signals have been ingested into
+    its cited nodes since `last_curated`
 
-  Both conditions must hold. A page that is old but has no new supporting
-  signals is not worth re-curating — the LLM would have nothing new to
-  integrate.
+  Both conditions must hold. A cited page that is old but has no new
+  supporting signals is not worth re-curating — the LLM would have nothing
+  new to integrate. A page without citations has nothing to check against,
+  so age alone makes it stale (see `OptimalEngine.Wiki.Freshness`).
 
   Runs every `interval_minutes` (default 60, configurable per workspace via
   the `:curation` config section). Each tick processes at most
@@ -30,7 +32,7 @@ defmodule OptimalEngine.Wiki.Scheduler do
   require Logger
 
   alias OptimalEngine.Store, as: RawStore
-  alias OptimalEngine.Wiki.{Curator, Page}
+  alias OptimalEngine.Wiki.{Curator, Freshness, Page}
   alias OptimalEngine.Wiki.Store, as: WikiStore
   alias OptimalEngine.Workspace
   alias OptimalEngine.Workspace.Config
@@ -162,7 +164,8 @@ defmodule OptimalEngine.Wiki.Scheduler do
 
   # A page is stale when:
   #   1. last_curated < now - max_stale_days
-  #   2. at least one context in a cited node has been ingested since last_curated
+  #   2. it has no citations, or at least one context in a cited node has
+  #      been ingested since last_curated
   #
   # Cited nodes are derived from the citations table:
   #   citation → chunk → signal (context) → node
@@ -196,46 +199,11 @@ defmodule OptimalEngine.Wiki.Scheduler do
       {:ok, rows} ->
         rows
         |> Enum.map(&row_to_page/1)
-        |> Enum.filter(fn page -> has_new_signals?(page) end)
+        |> Enum.filter(&Freshness.needs_curation?/1)
 
       {:error, reason} ->
         Logger.warning("[Wiki.Scheduler] stale query failed: #{inspect(reason)}")
         []
-    end
-  end
-
-  # Check if any new context in the cited nodes has been ingested since last_curated.
-  defp has_new_signals?(%Page{last_curated: nil}), do: true
-
-  defp has_new_signals?(%Page{} = page) do
-    sql = """
-    SELECT COUNT(*)
-    FROM contexts ctx
-    WHERE ctx.node IN (
-      SELECT DISTINCT ctx2.node
-      FROM contexts ctx2
-      JOIN chunks ch  ON ch.signal_id = ctx2.id
-      JOIN citations  cit ON cit.chunk_id = ch.id
-      WHERE cit.wiki_slug     = ?1
-        AND cit.wiki_audience = ?2
-        AND cit.tenant_id     = ?3
-    )
-    AND datetime(ctx.created_at) > datetime(?4)
-    AND ctx.workspace_id = ?5
-    LIMIT 1
-    """
-
-    params = [
-      page.slug,
-      page.audience,
-      page.tenant_id,
-      page.last_curated,
-      page.workspace_id
-    ]
-
-    case RawStore.raw_query(sql, params) do
-      {:ok, [[count]]} when count > 0 -> true
-      _ -> false
     end
   end
 
