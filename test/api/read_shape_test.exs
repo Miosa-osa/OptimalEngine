@@ -180,6 +180,24 @@ defmodule OptimalEngine.API.ReadShapeTest do
       assert all["pagination"]["has_more"] == false
       assert length(all["edges"]) == all["stats"]["edge_count"]
     end
+
+    test "an offset without a limit windows the edges the way a limit does", ctx do
+      rest = body(get("/api/graph?workspace=#{ctx.ws}&offset=50"))
+
+      assert length(rest["contexts"]) == 5
+      assert rest["pagination"]["limit"] == nil
+      assert rest["pagination"]["offset"] == 50
+      assert rest["pagination"]["has_more"] == false
+      assert rest["stats"]["context_count"] == 55
+
+      ids = MapSet.new(rest["contexts"], & &1["id"])
+      assert rest["edges"] != []
+      assert Enum.all?(rest["edges"], &(&1["source"] in ids and &1["target"] in ids))
+      assert length(rest["edges"]) < rest["stats"]["edge_count"]
+
+      # No limit, so no cap on the entities.
+      assert length(rest["entities"]) == rest["stats"]["entity_count"]
+    end
   end
 
   describe "GET /api/batch/export limit" do
