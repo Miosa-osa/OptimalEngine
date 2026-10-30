@@ -88,6 +88,11 @@ defmodule OptimalEngine.Store.SQLite do
 
   @ets_table :optimal_engine_store_cache
 
+  # ANALYZE reads at most this many rows of each index, so refreshing the
+  # planner statistics takes about a second even on a store of several GB.
+  @analysis_limit 1_000
+  @planner_statistics_interval_ms :timer.hours(1)
+
   # ---------------------------------------------------------------------------
   # Schema DDL
   # ---------------------------------------------------------------------------
@@ -524,6 +529,7 @@ defmodule OptimalEngine.Store.SQLite do
       {:ok, db} ->
         Logger.info("[Store] SQLite opened at #{db_path}")
         :telemetry.execute([:optimal_engine, :store, :init], %{}, %{db_path: db_path})
+        Process.send_after(self(), :refresh_planner_statistics, @planner_statistics_interval_ms)
         {:ok, %{db: db, db_path: db_path}}
 
       {:error, reason} ->
@@ -698,6 +704,18 @@ defmodule OptimalEngine.Store.SQLite do
     {:reply, run_transaction(state.db, fun), state}
   end
 
+  # SQLite's advice for a long-lived connection: PRAGMA optimize at intervals,
+  # which analyzes only the tables this connection used whose statistics have
+  # gone stale, so a store that grows while it runs keeps its plans.
+  @impl true
+  def handle_info(:refresh_planner_statistics, state) do
+    refresh_planner_statistics(state.db, "PRAGMA optimize")
+    Process.send_after(self(), :refresh_planner_statistics, @planner_statistics_interval_ms)
+    {:noreply, state}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
+
   @impl true
   def terminate(_reason, %{db: db}) do
     Exqlite.Sqlite3.close(db)
@@ -718,7 +736,26 @@ defmodule OptimalEngine.Store.SQLite do
 
     with {:ok, db} <- Exqlite.Sqlite3.open(db_path),
          :ok <- migrate(db, migrations) do
+      # 0x10002 checks every table, not only the ones this new connection has
+      # used, so it covers a store that grew, or gained an index in a migration,
+      # since its statistics were taken.
+      refresh_planner_statistics(db, "PRAGMA optimize=0x10002")
       {:ok, db}
+    end
+  end
+
+  # The planner picks join order and indexes from the statistics ANALYZE keeps
+  # in sqlite_stat1; an index without statistics looks like it narrows a lookup
+  # to about ten rows. Statistics only steer the planner, so a refresh that fails
+  # (another process holding the write lock) is logged and the Store goes on.
+  defp refresh_planner_statistics(db, optimize) do
+    with :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA analysis_limit=#{@analysis_limit}"),
+         :ok <- Exqlite.Sqlite3.execute(db, optimize) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.warning("[Store] planner statistics not refreshed: #{inspect(reason)}")
+        :ok
     end
   end
 

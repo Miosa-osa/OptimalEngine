@@ -985,10 +985,18 @@ defmodule OptimalEngine.Retrieval.Search do
     end
   end
 
+  @doc false
   # Build the FTS SQL with dynamic WHERE clauses.
   # We query contexts_fts (which has a `type` column) not `signals_fts`.
   # workspace_id is always applied (defaults to "default").
-  defp build_fts_sql(fts_query, type_filter, node_filter, genre_filter, workspace_id, limit, offset) do
+  #
+  # CROSS JOIN keeps contexts_fts the outer loop: SQLite never reorders a CROSS
+  # JOIN. The match runs once and each hit is one index lookup in contexts. FTS5
+  # cannot look a row up by the UNINDEXED id column, so with contexts outside, as
+  # stale planner statistics chose on a large store, it reran the whole match
+  # for every context in the workspace: minutes per search, with the Store held
+  # the whole time. Tests read the plan of this statement.
+  def build_fts_sql(fts_query, type_filter, node_filter, genre_filter, workspace_id, limit, offset) do
     base_sql = """
     SELECT
       c.id, c.uri, c.type, c.path, c.title,
@@ -999,7 +1007,7 @@ defmodule OptimalEngine.Retrieval.Search do
       c.routed_to, c.metadata, c.workspace_id,
       -bm25(contexts_fts) as bm25_rank
     FROM contexts_fts
-    JOIN contexts c ON c.id = contexts_fts.id
+    CROSS JOIN contexts c ON c.id = contexts_fts.id
     WHERE contexts_fts MATCH ?1
       AND c.archived_at IS NULL
     """
