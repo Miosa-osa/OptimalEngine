@@ -227,12 +227,15 @@ defmodule OptimalEngine.Insight.Health do
   # Check 4 — FTS/index drift (count mismatch)
   # ---------------------------------------------------------------------------
 
+  # CROSS JOIN keeps the FTS scan outside, as in Retrieval.Search: FTS5 cannot
+  # look a row up by its UNINDEXED id, so contexts outside would rescan the whole
+  # FTS table once per context of the workspace.
   @spec check_fts_drift(String.t()) :: map()
   def check_fts_drift(ws \\ "default") do
     sql = """
     SELECT (SELECT COUNT(*) FROM contexts WHERE workspace_id = ?1) as ctx_count,
            (SELECT COUNT(*) FROM contexts_fts f
-              JOIN contexts c ON c.id = f.id
+              CROSS JOIN contexts c ON c.id = f.id
              WHERE c.workspace_id = ?1) as fts_count
     """
 
