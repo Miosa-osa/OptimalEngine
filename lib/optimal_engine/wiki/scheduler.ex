@@ -16,6 +16,16 @@ defmodule OptimalEngine.Wiki.Scheduler do
   the `:curation` config section). Each tick processes at most
   `max_pages_per_cycle` pages per workspace to avoid overwhelming Ollama.
 
+  ## Re-curation needs material
+
+  A stale page is queued only when the curator has something to work with:
+  new chunks in its cited nodes, or, for a page with no citations, the most
+  recent chunks of its own node (frontmatter `node_slug`) or of its
+  workspace. A curation that changes nothing (refused, or failed) is
+  recorded in the page frontmatter and not retried until the next stale
+  window, so one page never costs a model call every tick. `stale_pages/2`
+  and `/api/wiki/stale` still list it.
+
   ## Scheduling
 
   The first tick fires after a 5-minute boot delay so the rest of the
@@ -41,6 +51,7 @@ defmodule OptimalEngine.Wiki.Scheduler do
   @default_interval_minutes 60
   @default_max_stale_days 7
   @default_max_pages_per_cycle 5
+  @material_limit 50
 
   defstruct timer_ref: nil,
             last_run: nil
@@ -72,6 +83,20 @@ defmodule OptimalEngine.Wiki.Scheduler do
     GenServer.cast(__MODULE__, {:force_run, workspace_id})
   end
 
+  @doc """
+  Run one curation scan for a workspace and return the pages it queued.
+
+  A stale page is queued only when the curator has material for it and it was
+  not attempted within the stale window. `slugs: [..]` limits the scan to
+  those pages. With `sync: true` each curation runs
+  before the call returns (otherwise it runs in a detached task).
+  Returns `[%{slug: _, audience: _, citations: [citation]}]`.
+  """
+  @spec run_scan(String.t(), keyword()) :: [map()]
+  def run_scan(workspace_id, opts \\ []) do
+    GenServer.call(__MODULE__, {:run_scan, workspace_id, opts}, :infinity)
+  end
+
   # ── GenServer callbacks ──────────────────────────────────────────────────────
 
   @impl true
@@ -93,6 +118,10 @@ defmodule OptimalEngine.Wiki.Scheduler do
 
     pages = find_stale_pages(tenant_id, workspace_id, max_stale_days)
     {:reply, pages, state}
+  end
+
+  def handle_call({:run_scan, workspace_id, opts}, _from, state) do
+    {:reply, run_workspace_scan(workspace_id, opts), state}
   end
 
   @impl true
@@ -127,38 +156,61 @@ defmodule OptimalEngine.Wiki.Scheduler do
     end
   end
 
-  defp run_workspace_scan(workspace_id) do
+  defp run_workspace_scan(workspace_id, opts \\ []) do
     cur_cfg = curation_config(workspace_id)
 
-    unless Map.get(cur_cfg, :enabled, true) do
-      Logger.debug("[Wiki.Scheduler] curation disabled for workspace=#{workspace_id}, skipping")
-      return_ok()
-    else
+    if Map.get(cur_cfg, :enabled, true) do
       max_stale_days = Map.get(cur_cfg, :max_stale_days, @default_max_stale_days)
       max_pages = Map.get(cur_cfg, :max_pages_per_cycle, @default_max_pages_per_cycle)
+      sync? = Keyword.get(opts, :sync, false)
 
       # We use the workspace id as both workspace_id and tenant_id for now.
       # The default workspace has tenant "default"; multi-tenant support
       # can layer in a workspace→tenant lookup here later.
       tenant_id = "default"
 
-      stale = find_stale_pages(tenant_id, workspace_id, max_stale_days)
-      batch = Enum.take(stale, max_pages)
+      stale =
+        tenant_id
+        |> find_stale_pages(workspace_id, max_stale_days)
+        |> restrict_to(Keyword.get(opts, :slugs))
+
+      # A stale page is queued only when the curator has material for it and
+      # the last attempt is outside the stale window; /api/wiki/stale keeps
+      # listing it either way.
+      batch =
+        stale
+        |> Stream.reject(&attempted_within?(&1, max_stale_days))
+        |> Stream.map(fn page -> {page, curation_material(page)} end)
+        |> Stream.reject(fn {_page, citations} -> citations == [] end)
+        |> Enum.take(max_pages)
 
       if batch == [] do
-        Logger.debug("[Wiki.Scheduler] no stale pages for workspace=#{workspace_id}")
+        Logger.debug(
+          "[Wiki.Scheduler] nothing to re-curate for workspace=#{workspace_id} (#{length(stale)} stale)"
+        )
       else
         Logger.info(
           "[Wiki.Scheduler] workspace=#{workspace_id} — #{length(batch)} stale pages to re-curate (#{length(stale)} total stale)"
         )
 
-        Enum.each(batch, fn page -> queue_curation(page, workspace_id) end)
+        Enum.each(batch, fn {page, citations} ->
+          if sync?,
+            do: curate_page(page, citations, workspace_id),
+            else: Task.start(fn -> curate_page(page, citations, workspace_id) end)
+        end)
       end
+
+      Enum.map(batch, fn {page, citations} ->
+        %{slug: page.slug, audience: page.audience, citations: citations}
+      end)
+    else
+      Logger.debug("[Wiki.Scheduler] curation disabled for workspace=#{workspace_id}, skipping")
+      []
     end
   end
 
-  # Return value placeholder to satisfy cond/unless branches that don't carry state.
-  defp return_ok, do: :ok
+  defp restrict_to(pages, nil), do: pages
+  defp restrict_to(pages, slugs), do: Enum.filter(pages, &(&1.slug in slugs))
 
   # ── Stale page detection ─────────────────────────────────────────────────────
 
@@ -209,35 +261,106 @@ defmodule OptimalEngine.Wiki.Scheduler do
 
   # ── Async curation dispatch ──────────────────────────────────────────────────
 
-  defp queue_curation(%Page{} = page, workspace_id) do
+  defp curate_page(%Page{} = page, citations, workspace_id) do
     Logger.info(
       "[Wiki.Scheduler] curating page=#{page.slug} audience=#{page.audience} workspace=#{workspace_id} last_curated=#{page.last_curated}"
     )
 
-    Task.start(fn ->
-      citations = gather_new_citations(page)
+    outcome = curator().curate(page, citations)
 
-      outcome = Curator.curate(page, citations)
+    if outcome.ok? and outcome.metadata[:reason] != :no_new_citations do
+      committed = %{outcome.page | frontmatter: clear_attempt(outcome.page.frontmatter)}
 
-      if outcome.ok? do
-        case WikiStore.put(outcome.page) do
-          :ok ->
-            Logger.info(
-              "[Wiki.Scheduler] re-curation committed: page=#{page.slug} v#{outcome.page.version}"
-            )
+      case WikiStore.put(committed) do
+        :ok ->
+          Logger.info(
+            "[Wiki.Scheduler] re-curation committed: page=#{page.slug} v#{outcome.page.version}"
+          )
 
-          {:error, reason} ->
-            Logger.warning(
-              "[Wiki.Scheduler] store.put failed after curation of page=#{page.slug}: #{inspect(reason)}"
-            )
-        end
-      else
-        Logger.warning(
-          "[Wiki.Scheduler] curation returned ok?=false for page=#{page.slug}: #{inspect(outcome.metadata)}"
-        )
+        {:error, reason} ->
+          Logger.warning(
+            "[Wiki.Scheduler] store.put failed after curation of page=#{page.slug}: #{inspect(reason)}"
+          )
+
+          WikiStore.record_curation_attempt(page)
       end
-    end)
+    else
+      Logger.warning(
+        "[Wiki.Scheduler] curation produced no change for page=#{page.slug}: #{inspect(outcome.metadata)}"
+      )
+
+      WikiStore.record_curation_attempt(page)
+    end
   end
+
+  # Overridable so tests can stand in a curator that refuses.
+  defp curator, do: Application.get_env(:optimal_engine, :wiki_curator, Curator)
+
+  defp clear_attempt(fm) when is_map(fm), do: Map.delete(fm, WikiStore.attempt_key())
+  defp clear_attempt(fm), do: fm
+
+  # An attempt is recorded in the page frontmatter (not last_curated, which
+  # would make a stale page look fresh). It blocks another attempt until the
+  # next stale window.
+  defp attempted_within?(%Page{frontmatter: fm}, max_stale_days) when is_map(fm) do
+    case Freshness.parse_time(Map.get(fm, WikiStore.attempt_key())) do
+      {:ok, at} -> DateTime.diff(DateTime.utc_now(), at, :second) < max_stale_days * 86_400
+      :error -> false
+    end
+  end
+
+  defp attempted_within?(_, _), do: false
+
+  # What the curator can work with: new chunks in the cited nodes, or, for a
+  # page with no citations, the most recent chunks of its own node (or its
+  # workspace when it has no node). Bounded at @material_limit either way.
+  defp curation_material(%Page{} = page) do
+    if Freshness.cited?(page), do: gather_new_citations(page), else: gather_node_citations(page)
+  end
+
+  defp gather_node_citations(%Page{} = page) do
+    node = page_node(page)
+
+    {sql, params} =
+      if node do
+        {"""
+         SELECT DISTINCT ch.id, ch.text, ctx.node, ctx.created_at
+         FROM contexts ctx
+         JOIN chunks ch ON ch.signal_id = ctx.id
+         WHERE ctx.tenant_id = ?1 AND ctx.workspace_id = ?2 AND ctx.node = ?3
+           AND ch.scale = 'paragraph'
+         ORDER BY ctx.created_at DESC
+         LIMIT #{@material_limit}
+         """, [page.tenant_id, page.workspace_id, node]}
+      else
+        {"""
+         SELECT DISTINCT ch.id, ch.text, ctx.node, ctx.created_at
+         FROM contexts ctx
+         JOIN chunks ch ON ch.signal_id = ctx.id
+         WHERE ctx.tenant_id = ?1 AND ctx.workspace_id = ?2
+           AND ch.scale = 'paragraph'
+         ORDER BY ctx.created_at DESC
+         LIMIT #{@material_limit}
+         """, [page.tenant_id, page.workspace_id]}
+      end
+
+    case RawStore.raw_query(sql, params) do
+      {:ok, rows} -> Enum.map(rows, fn [id, text, n, _at] -> citation(id, text, n) end)
+      _ -> []
+    end
+  end
+
+  defp page_node(%Page{frontmatter: fm}) when is_map(fm) do
+    case Map.get(fm, "node_slug") do
+      node when is_binary(node) and node != "" -> node
+      _ -> nil
+    end
+  end
+
+  defp page_node(_), do: nil
+
+  defp citation(chunk_id, text, node),
+    do: %{chunk_id: chunk_id, text: text || "", uri: "optimal://#{node}##{chunk_id}"}
 
   # Gather chunks from cited nodes that are newer than last_curated.
   # Returns a list of citation maps compatible with Curator.curate/3.
@@ -274,13 +397,7 @@ defmodule OptimalEngine.Wiki.Scheduler do
 
     case RawStore.raw_query(sql, params) do
       {:ok, rows} ->
-        Enum.map(rows, fn [chunk_id, text, node] ->
-          %{
-            chunk_id: chunk_id,
-            text: text || "",
-            uri: "optimal://#{node}##{chunk_id}"
-          }
-        end)
+        Enum.map(rows, fn [chunk_id, text, node] -> citation(chunk_id, text, node) end)
 
       _ ->
         []

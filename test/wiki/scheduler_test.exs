@@ -159,6 +159,66 @@ defmodule OptimalEngine.Wiki.SchedulerTest do
     end
   end
 
+  describe "run_scan/2 — re-curation needs material" do
+    defmodule RefusingCurator do
+      def curate(page, _citations),
+        do: %{ok?: false, page: page, metadata: %{reason: :refused}, warnings: []}
+    end
+
+    defp old_page(extra \\ []) do
+      old_ts = DateTime.utc_now() |> DateTime.add(-10 * 86_400, :second) |> DateTime.to_iso8601()
+      node = "node-uncited-#{unique()}"
+
+      page =
+        base_page(
+          Keyword.merge(
+            [last_curated: old_ts, curated_by: "test", frontmatter: %{"node_slug" => node}],
+            extra
+          )
+        )
+
+      :ok = WikiStore.put(page)
+      {page, node}
+    end
+
+    defp queued_slugs(slug) do
+      Scheduler.run_scan("default", sync: true, slugs: [slug]) |> Enum.map(& &1.slug)
+    end
+
+    test "an uncited stale page with recent node contexts is queued with them as citations" do
+      {page, node} = old_page()
+      {_sig, chunk_id, _} = insert_signal(node, "default", nil)
+
+      queued = Scheduler.run_scan("default", sync: true, slugs: [page.slug])
+      entry = Enum.find(queued, &(&1.slug == page.slug))
+
+      assert entry, "expected #{page.slug} to be queued"
+      assert [%{chunk_id: ^chunk_id, uri: uri}] = entry.citations
+      assert uri == "optimal://#{node}##{chunk_id}"
+    end
+
+    test "an uncited stale page with no contexts in its node is not queued but stays listed" do
+      {page, _node} = old_page()
+
+      refute page.slug in queued_slugs(page.slug)
+      assert page.slug in (Scheduler.stale_pages("default") |> Enum.map(& &1.slug))
+    end
+
+    test "a refused curation is not requeued within the stale window" do
+      {page, node} = old_page()
+      insert_signal(node, "default", nil)
+
+      Application.put_env(:optimal_engine, :wiki_curator, RefusingCurator)
+      on_exit(fn -> Application.delete_env(:optimal_engine, :wiki_curator) end)
+
+      assert page.slug in queued_slugs(page.slug)
+      Application.delete_env(:optimal_engine, :wiki_curator)
+
+      refute page.slug in queued_slugs(page.slug)
+      assert page.slug in (Scheduler.stale_pages("default") |> Enum.map(& &1.slug))
+    end
+  end
+
   describe "force_run/1" do
     test "cast returns :ok and does not crash the GenServer" do
       assert :ok = Scheduler.force_run("default")
