@@ -4,7 +4,11 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-4B275F.svg)](mix.exs)
 
-Optimal Engine is a self-hosted second brain and operating engine for human and AI workspaces.
+**Optimal Engine is a self-hosted second brain and operating engine for human and AI workspaces.**
+
+Put in what your work produces: chats, documents, meetings, email, code, tool results.
+The engine keeps every original as evidence, turns it into claims that a person or a policy reviews, and promotes what holds up into facts with a valid time and a trail back to the source.
+Any agent, app, or person then asks for context and gets one cited, permission-checked package, usually in well under a second.
 
 It gives a person, team, or company a governed place to organize work, preserve source evidence, build institutional memory, retrieve trusted context, operate with agents, and project the same state into markdown, APIs, dashboards, CLI tools, and workflows.
 
@@ -20,18 +24,51 @@ Run work            -> Tools, models, workflows, Skill Packages
 Project the state   -> Markdown, wiki pages, dashboards, exports, APIs
 ```
 
-## At a Glance
+## Measured
 
-| | |
-| --- | --- |
-| Release | Current source contract: application `0.3.10`, API `v1`, contract schema `1`, expected migration `85`. See [engine-contract.json](engine-contract.json), [release identity](docs/guides/versioning-and-releases.md), and [document authority](docs/guides/agent-control-plane.md). |
-| Retrieval quality | The current Candidate Portfolio retrieves at least one gold evidence item for **96.094%** of 1,540 LoCoMo questions and retrieves **87.130%** of all gold evidence addresses at top 100. |
-| Benchmarks | The complete benchmark dashboard, category scores, latency, scale tests, metric definitions, limitations, reproduction commands, and result artifacts are in [Benchmarks](#benchmarks). |
-| Start here | [Quick Start](#quick-start), the [first-workspace story](docs/guides/first-workspace-story.md), and the [starter prompts](templates/starter-prompts/). |
+Every number here comes from a checked-in result or an executable test suite; the full dashboard, with limitations and reproduction commands, is in [Benchmarks](#benchmarks).
 
-A clean pinned checkout does not prove the identity of a separately running HTTP service.
+| What was measured | Result |
+| --- | ---: |
+| LoCoMo questions (1,540) with at least one gold evidence item in the top 100 | **96.1%** |
+| Gold evidence addresses retrieved (2,362) | **87.1%** |
+| Answer accuracy, matched lexical run (1,540 questions) | **87.9%** |
+| Retrieval latency at top 100, P95 | **665.5 ms** |
+| Governed tiered retrieval, P95 | **12.3 ms**, 0 errors |
+| Governed behavioral recall, 50 to 5,000 filler tokens | **21 / 21** |
+| Storage lookup at 100,000 records, P95 | **0.061 ms** |
+| Storage inserts | **25,507** records per second |
 
-## How Input Becomes Memory
+The current Candidate Portfolio retrieves at least one gold evidence item for **96.094%** of 1,540 LoCoMo questions and retrieves **87.130%** of all gold evidence addresses at top 100.
+It is opt-in; the previous routed system covers 94.661% of questions, and the Candidate Portfolio's answer accuracy has not been run yet.
+The complete benchmark dashboard, category scores, latency, scale tests, metric definitions, limitations, reproduction commands, and result artifacts are in [Benchmarks](#benchmarks).
+
+## What Makes It Different
+
+| | Typical vector store | Typical notes app | Optimal Engine |
+| --- | :---: | :---: | :---: |
+| Keeps every original as citable evidence | chunks only | ✓ | ✓ Source Packages |
+| Separates "someone said it" from "it is true" | – | – | ✓ Claims, review, Facts |
+| Knows when a fact stopped being true | – | – | ✓ valid time, supersession |
+| Hands an agent cited, permission-checked context | – | – | ✓ Context Packages |
+| Models people, products, projects and their links | – | by hand | ✓ Nodes and a knowledge graph |
+| Same state as markdown, API, CLI, MCP and wiki | – | partly | ✓ |
+| Runs on your own machine | often | sometimes | ✓ embedded stores, self-hosted |
+
+## How It Works
+
+```mermaid
+flowchart LR
+  IN["Chats, docs, meetings,<br/>email, code, tool results"] --> SIG["Signal<br/>mode, genre, type, format, structure"]
+  SIG --> SRC["Source Package<br/>the original, kept as evidence"]
+  SRC --> CLM["Claims<br/>proposed, then reviewed"]
+  CLM --> FCT["Facts and Memory<br/>valid time, supersession"]
+  SRC --> GR[("Graph<br/>people, products, projects")]
+  FCT --> RET["Retrieval<br/>governed, cheapest first"]
+  GR --> RET
+  RET --> CTX["Context Package<br/>cited, permission-checked"]
+  CTX --> OUT["Agents, apps, CLI,<br/>MCP, wiki"]
+```
 
 Signal classification is the front door for noisy input:
 
@@ -42,10 +79,32 @@ Signal = Mode + Genre + Type + Format + Structure
 The engine keeps those dimensions separate so it can route, parse, review, package, and retrieve the input without pretending every file or message is the same kind of thing.
 See [`docs/concepts/signal-theory.md`](docs/concepts/signal-theory.md) for the breakdown and anti-noise rules.
 
+## Start in Five Minutes
+
+```bash
+brew install snappy
+make install && make bootstrap && make dev        # the engine on http://localhost:4200
+curl http://localhost:4200/api/health
+bin/optimal initiate my-workspace --name "My Workspace" --dump notes.md
+bin/optimal find "what did we decide" --workspace default:my-workspace
+```
+
 Most users should start by dumping messy context into the engine.
 The engine preserves that input, proposes structure, asks follow-up questions, and waits for review before turning suggestions into durable workspace truth.
 
 For the full first-workspace story and copy-paste starter prompts, read [`docs/guides/first-workspace-story.md`](docs/guides/first-workspace-story.md) and [`templates/starter-prompts/`](templates/starter-prompts/).
+The [Quick Start](#quick-start) covers requirements, every CLI surface, and deployment.
+
+## At a Glance
+
+| | |
+| --- | --- |
+| Release | Current source contract: application `0.3.10`, API `v1`, contract schema `1`, expected migration `85`. See [engine-contract.json](engine-contract.json), [release identity](docs/guides/versioning-and-releases.md), and [document authority](docs/guides/agent-control-plane.md). |
+| Built today | [What Is Built](#what-is-built), [Architecture](#architecture), [Product Surfaces](#product-surfaces) |
+| Clients | `apps/cli/optimal` for any running Engine over HTTP, an MCP server in `apps/mcp`, and `bin/optimal` for source checkouts ([client CLI and MCP guide](docs/guides/cli.md)) |
+| License | [Apache 2.0](LICENSE) |
+
+A clean pinned checkout does not prove the identity of a separately running HTTP service.
 
 ## What You Can Build With It
 
