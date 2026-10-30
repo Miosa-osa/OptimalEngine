@@ -1071,7 +1071,7 @@ defmodule OptimalEngine.Embed.TextTest do
       report = OptimalEngine.Health.ready(embedder: :recent)
       assert report.checks.embedder == {:warn, {:embedder_unavailable, 503}}
       assert :embedder in report.degraded
-      assert OptimalEngine.Health.status_of(report) == :degraded
+      assert OptimalEngine.Health.warnings(report) |> Enum.member?("embedder_unavailable")
       refute_received {:embed_request, _, _, _}
     end
 
