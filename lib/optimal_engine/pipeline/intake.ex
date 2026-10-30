@@ -780,7 +780,10 @@ defmodule OptimalEngine.Pipeline.Intake do
         Indexer.index_file(cross_path,
           workspace_id: scope.workspace_id,
           tenant_id: stated_tenant(scope),
-          metadata: Address.copy_metadata(signal.id, metadata)
+          metadata: Address.copy_metadata(signal.id, metadata),
+          # A copy is dated when its signal happened, not when its file was written.
+          created_at: signal.created_at,
+          modified_at: signal.modified_at
         )
       end
     end)
