@@ -4,26 +4,12 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-4B275F.svg)](mix.exs)
 
-Current source contract: application `0.3.10`, API `v1`, contract schema `1`, expected migration `85`.
-See [engine-contract.json](engine-contract.json), [release identity](docs/guides/versioning-and-releases.md), and [document authority](docs/guides/agent-control-plane.md).
-A clean pinned checkout does not prove the identity of a separately running HTTP service.
+Optimal Engine is a self-hosted second brain and operating engine for human and AI workspaces.
 
-## Verified Performance Snapshot
+It gives a person, team, or company a governed place to organize work, preserve source evidence, build institutional memory, retrieve trusted context, operate with agents, and project the same state into markdown, APIs, dashboards, CLI tools, and workflows.
 
-The current Candidate Portfolio retrieves at least one gold evidence item for **96.094%** of 1,540 LoCoMo questions and retrieves **87.130%** of all gold evidence addresses at top 100.
-
-The complete benchmark dashboard, category scores, latency, scale tests, metric definitions, limitations, reproduction commands, and result artifacts are in [Benchmarks](#benchmarks).
-
-Optimal Engine is a self-hosted second brain and operating engine for human and
-AI workspaces.
-
-It gives a person, team, or company a governed place to organize work, preserve
-source evidence, build institutional memory, retrieve trusted context, operate
-with agents, and project the same state into markdown, APIs, dashboards, CLI
-tools, and workflows.
-
-It is not only a notes app, a vector database, or an agent task runner. It is the
-runtime underneath a workspace:
+It is not only a notes app, a vector database, or an agent task runner.
+It is the runtime underneath a workspace:
 
 ```text
 Define the world    -> Organization, Workspaces, Nodes, relationships, policies
@@ -34,26 +20,32 @@ Run work            -> Tools, models, workflows, Skill Packages
 Project the state   -> Markdown, wiki pages, dashboards, exports, APIs
 ```
 
+## At a Glance
+
+| | |
+| --- | --- |
+| Release | Current source contract: application `0.3.10`, API `v1`, contract schema `1`, expected migration `85`. See [engine-contract.json](engine-contract.json), [release identity](docs/guides/versioning-and-releases.md), and [document authority](docs/guides/agent-control-plane.md). |
+| Retrieval quality | The current Candidate Portfolio retrieves at least one gold evidence item for **96.094%** of 1,540 LoCoMo questions and retrieves **87.130%** of all gold evidence addresses at top 100. |
+| Benchmarks | The complete benchmark dashboard, category scores, latency, scale tests, metric definitions, limitations, reproduction commands, and result artifacts are in [Benchmarks](#benchmarks). |
+| Start here | [Quick Start](#quick-start), the [first-workspace story](docs/guides/first-workspace-story.md), and the [starter prompts](templates/starter-prompts/). |
+
+A clean pinned checkout does not prove the identity of a separately running HTTP service.
+
+## How Input Becomes Memory
+
 Signal classification is the front door for noisy input:
 
 ```text
 Signal = Mode + Genre + Type + Format + Structure
 ```
 
-The engine keeps those dimensions separate so it can route, parse, review,
-package, and retrieve the input without pretending every file or message is the
-same kind of thing.
+The engine keeps those dimensions separate so it can route, parse, review, package, and retrieve the input without pretending every file or message is the same kind of thing.
+See [`docs/concepts/signal-theory.md`](docs/concepts/signal-theory.md) for the breakdown and anti-noise rules.
 
-See [`docs/concepts/signal-theory.md`](docs/concepts/signal-theory.md) for the
-breakdown and anti-noise rules.
+Most users should start by dumping messy context into the engine.
+The engine preserves that input, proposes structure, asks follow-up questions, and waits for review before turning suggestions into durable workspace truth.
 
-Most users should start by dumping messy context into the engine. The engine
-preserves that input, proposes structure, asks follow-up questions, and waits for
-review before turning suggestions into durable workspace truth.
-
-For the full first-workspace story and copy-paste starter prompts, read
-[`docs/guides/first-workspace-story.md`](docs/guides/first-workspace-story.md)
-and [`templates/starter-prompts/`](templates/starter-prompts/).
+For the full first-workspace story and copy-paste starter prompts, read [`docs/guides/first-workspace-story.md`](docs/guides/first-workspace-story.md) and [`templates/starter-prompts/`](templates/starter-prompts/).
 
 ## What You Can Build With It
 
