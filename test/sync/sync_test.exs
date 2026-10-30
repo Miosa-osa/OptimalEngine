@@ -2207,6 +2207,17 @@ defmodule OptimalEngine.SyncTest do
     end
 
     test "seal works through a backlog larger than one batch", ctx do
+      # The scheduler seals on its own timer. Were it to take a batch of this
+      # backlog between the insert and the call below, the call would count
+      # only the rest. Suspending it (this waits for a cycle in flight) leaves
+      # the call under test the only sealer.
+      scheduler = Process.whereis(OptimalEngine.Sync.Scheduler)
+      if scheduler, do: :sys.suspend(scheduler, 60_000)
+
+      on_exit(fn ->
+        if scheduler && Process.alive?(scheduler), do: :sys.resume(scheduler)
+      end)
+
       {:ok, _} = Capture.seal()
 
       # More rows than one batch (5000), written by one statement.

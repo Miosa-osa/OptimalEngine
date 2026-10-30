@@ -102,6 +102,8 @@ refused	SELECT N FROM "…" WHERE tenant_id = ? AND workspace_id = ? AND (CASE W
 refused	SELECT N FROM "…" WHERE tenant_id = ? AND workspace_id = ? AND (CASE WHEN json_valid(metadata) THEN CASE json_type(metadata, '…') WHEN '…' THEN EXISTS (SELECT N FROM json_each(metadata, '…') j WHERE lower(j.value) IN ('…')) WHEN '…' THEN lower(json_extract(metadata, '…')) IN ('…') ELSE N END ELSE N END) LIMIT N
 refused	SELECT N FROM "…" WHERE tenant_id = ? AND workspace_id = ? AND (CASE WHEN json_valid(security_labels) THEN CASE json_type(security_labels) WHEN '…' THEN EXISTS (SELECT N FROM json_each(security_labels) j WHERE j.type != '…' OR trim(j.value, ('…' || char(N))) = '…' OR lower(trim(j.value, ('…' || char(N)))) IN ('…')) ELSE N END ELSE N END) LIMIT N
 refused	SELECT N FROM "…" WHERE tenant_id = ? AND workspace_id = ? AND (CASE WHEN json_valid(security_labels) THEN EXISTS (SELECT N FROM json_each(security_labels) j WHERE lower(j.value) IN ('…')) ELSE N END) LIMIT N
+refused	SELECT N FROM (SELECT "…" AS c FROM "…") WHERE instr(CAST(c AS BLOB), CAST(? AS BLOB)) > N LIMIT N
+refused	SELECT N FROM (SELECT "…" AS c FROM "…") WHERE instr(CAST(c AS BLOB), CAST(? AS BLOB)) > N OR instr(CAST(c AS BLOB), CAST(? AS BLOB)) > N OR instr(CAST(c AS BLOB), CAST(? AS BLOB)) > N OR instr(CAST(c AS BLOB), CAST(? AS BLOB)) > N OR instr(CAST(c AS BLOB), CAST(? AS BLOB)) > N LIMIT N
 refused	SELECT N FROM api_keys WHERE id = ? AND json_extract(metadata, '…') = ? AND json_extract(metadata, '…') IS NULL AND json_extract(metadata, '…') IS NULL AND json_extract(metadata, '…') IS NULL AND EXISTS (SELECT N FROM json_each(api_keys.scopes) WHERE value IN ('…'))
 refused	SELECT N FROM sqlite_master WHERE type = '…' AND name = '…'
 refused	SELECT N FROM sqlite_master WHERE type = '…' AND name = ?
@@ -202,6 +204,7 @@ refused	SELECT m.id, m.tenant_id, m.workspace_id, m.content, m.is_static, m.is_f
 refused	SELECT m.id, m.tenant_id, m.workspace_id, m.content, m.is_static, m.is_forgotten, m.forget_after, m.forget_reason, m.version, m.parent_memory_id, m.root_memory_id, m.is_latest, m.citation_uri, m.source_chunk_id, m.audience, m.metadata, m.created_at, m.updated_at FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid WHERE memories_fts MATCH ? AND m.workspace_id = ? AND m.tenant_id = ? AND m.is_forgotten = N AND m.is_latest = N ORDER BY bm25(memories_fts) ASC, m.id LIMIT ? OFFSET ?
 refused	SELECT m.name FROM sqlite_master m WHERE m.type = '…' AND m.sql NOT LIKE '…' AND EXISTS ( SELECT N FROM pragma_index_list(m.name) il JOIN pragma_index_info(il.name) ii WHERE ii.seqno = N AND ii.name = '…' )
 refused	SELECT m.name, c.name FROM sqlite_master m, pragma_table_info(m.name) c WHERE m.type = '…' AND EXISTS (SELECT N FROM pragma_table_info(m.name) w WHERE w.name = '…') ORDER BY m.name, c.name
+refused	SELECT name FROM pragma_table_info(?) ORDER BY cid
 refused	SELECT name FROM sqlite_master WHERE type = '…'
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND name = ?
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND name LIKE '…'
@@ -211,6 +214,7 @@ refused	SELECT name FROM sqlite_master WHERE type = '…' AND tbl_name = '…'
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND tbl_name = '…' AND name LIKE '…'
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND tbl_name = ? AND name LIKE '…'
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND tbl_name = ? AND name LIKE '…' ORDER BY name
+refused	SELECT name FROM sqlite_master WHERE type = '…' ORDER BY name
 refused	SELECT name FROM sqlite_master WHERE type='…' AND name NOT LIKE '…' ORDER BY name
 refused	SELECT name, seq FROM sqlite_sequence WHERE name IN ('…') ORDER BY name
 refused	SELECT name, sql FROM sqlite_master WHERE type = '…' AND name LIKE '…'

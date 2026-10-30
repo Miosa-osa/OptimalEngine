@@ -321,12 +321,20 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
         "example-broker-token-4"
       ]
 
-      stored = every_stored_row()
+      columns = store_columns()
+
+      # The scan has to be able to find something, or an empty answer proves
+      # nothing: the connector's own id is stored in its row.
+      assert "connectors.id" in stored_in([ctx.id], columns)
+      assert length(columns) > 20
+
+      holders = stored_in(secrets, columns)
+      assert holders == [], "a secret is in a stored row of #{inspect(holders)}"
+
       {:ok, view} = Rows.get(ctx.tenant, ctx.id)
       evidence = ctx.tenant |> Evidence.list() |> Jason.encode!()
 
       for secret <- secrets do
-        refute stored =~ secret, "#{secret} is in a stored row"
         refute log =~ secret, "#{secret} is in the log"
         refute Jason.encode!(view) =~ secret, "#{secret} is in the connector view"
         refute evidence =~ secret, "#{secret} is in the evidence chain"
@@ -693,19 +701,39 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
     Enum.map(rows, fn [status, detail] -> {status, detail} end)
   end
 
-  # Every row of every table in the store, as text.
-  defp every_stored_row do
+  # The tables of the store, each with the columns a secret could sit in. A table
+  # the store cannot read (a virtual table's shadow, say) has none.
+  defp store_columns do
     {:ok, tables} =
-      Store.raw_query("SELECT name FROM sqlite_master WHERE type = 'table'", [])
+      Store.raw_query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name", [])
 
-    tables
-    |> Enum.map(fn [table] ->
-      case Store.raw_query(~s(SELECT * FROM "#{table}"), []) do
-        {:ok, rows} -> inspect(rows, limit: :infinity, printable_limit: :infinity)
-        _unreadable -> ""
+    Enum.map(tables, fn [table] ->
+      case Store.raw_query("SELECT name FROM pragma_table_info(?1) ORDER BY cid", [table]) do
+        {:ok, columns} -> {table, Enum.map(columns, fn [column] -> column end)}
+        _unreadable -> {table, []}
       end
     end)
-    |> Enum.join("\n")
+  end
+
+  # The `table.column` places where any of `secrets` is stored, found by the
+  # store itself: one byte-wise `instr` pass per column, so no row is copied out
+  # and rendered. Numbers and blobs compare by their bytes too.
+  defp stored_in(secrets, columns) do
+    matches =
+      secrets
+      |> Enum.with_index(1)
+      |> Enum.map_join(" OR ", fn {_secret, n} ->
+        "instr(CAST(c AS BLOB), CAST(?#{n} AS BLOB)) > 0"
+      end)
+
+    for {table, names} <- columns,
+        column <- names,
+        {:ok, [[1]]} ==
+          Store.raw_query(
+            ~s|SELECT 1 FROM (SELECT "#{column}" AS c FROM "#{table}") WHERE #{matches} LIMIT 1|,
+            secrets
+          ),
+        do: "#{table}.#{column}"
   end
 
   defp insert_workspace(id, tenant, slug) do
