@@ -142,8 +142,12 @@ defmodule OptimalEngine.Portability.BundleJobs do
 
   # ── reading and cancelling ──────────────────────────────────────────────
 
-  @doc "The job's status for its tenant, or `{:error, :not_found}`."
-  @spec status(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
+  @doc """
+  The job's status for its tenant, `{:error, :not_found}` for a job that is not
+  there, or `{:error, :busy}` when the Store did not answer in time (retry).
+  """
+  @spec status(String.t(), String.t()) ::
+          {:ok, map()} | {:error, :not_found | :busy | :store_error}
   def status(tenant_id, job_id) do
     case own_job(tenant_id, job_id) do
       {:ok, job} -> {:ok, view(job)}
@@ -191,7 +195,7 @@ defmodule OptimalEngine.Portability.BundleJobs do
   """
   @spec cancel(String.t(), String.t()) ::
           {:ok, map(), :cancelled | :requested}
-          | {:error, :not_found}
+          | {:error, :not_found | :busy | :store_error}
           | {:error, :job_finished, map()}
   def cancel(tenant_id, job_id) do
     with {:ok, job} <- own_job(tenant_id, job_id) do
@@ -1031,13 +1035,30 @@ defmodule OptimalEngine.Portability.BundleJobs do
   # ── helpers ─────────────────────────────────────────────────────────────
 
   defp own_job(tenant_id, job_id) when is_binary(job_id) do
-    case Jobs.fetch(job_id) do
+    case fetch_job(job_id) do
       {:ok, %{kind: kind, tenant_id: ^tenant_id} = job} when kind in @kinds -> {:ok, job}
-      _ -> {:error, :not_found}
+      {:ok, _other_tenants_or_kind} -> {:error, :not_found}
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, reason} -> {:error, if(busy?(reason), do: :busy, else: :store_error)}
     end
   end
 
   defp own_job(_tenant_id, _job_id), do: {:error, :not_found}
+
+  # A Store that does not answer in time exits the caller; a busy or locked one
+  # answers an error. Neither is a job that is not there.
+  defp fetch_job(job_id) do
+    Jobs.fetch(job_id)
+  catch
+    :exit, {:timeout, _call} -> {:error, :busy}
+  end
+
+  defp busy?(:busy), do: true
+  defp busy?(:timeout), do: true
+  defp busy?({:timeout, _call}), do: true
+  defp busy?(reason) when is_binary(reason), do: reason =~ ~r/busy|locked/i
+  defp busy?(%{message: message}) when is_binary(message), do: message =~ ~r/busy|locked/i
+  defp busy?(_reason), do: false
 
   defp fingerprint(kind, request),
     do: CanonicalJSON.hash(%{"kind" => kind, "request" => request})

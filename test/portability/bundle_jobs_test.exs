@@ -11,7 +11,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
   import Plug.Conn
   import Plug.Test
 
-  alias OptimalEngine.API.Router
+  alias OptimalEngine.API.{BundleJobsAPI, Router}
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.{Jobs, Store, Workspace}
   alias OptimalEngine.Portability.{BundleJobs, WorkspaceBundle}
@@ -454,6 +454,110 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
 
       assert {:ok, [[0]]} =
                Store.raw_query("SELECT COUNT(*) FROM contexts WHERE workspace_id = ?1", [target])
+    end
+  end
+
+  describe "a Store that does not answer in time" do
+    setup do
+      previous = Application.get_env(:optimal_engine, :store_call_timeout_ms)
+      Application.put_env(:optimal_engine, :store_call_timeout_ms, 300)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:optimal_engine, :store_call_timeout_ms, previous),
+          else: Application.delete_env(:optimal_engine, :store_call_timeout_ms)
+      end)
+    end
+
+    # Holds the single-writer Store for `ms` inside one transaction.
+    defp hold_store(ms) do
+      parent = self()
+
+      task =
+        Task.async(fn ->
+          Store.transaction(
+            fn _txn ->
+              send(parent, :holding)
+              Process.sleep(ms)
+              {:ok, :released}
+            end,
+            ms + 5_000
+          )
+        end)
+
+      assert_receive :holding, 2_000
+      task
+    end
+
+    test "status and cancel answer busy, and a job that is not there is still not found", ctx do
+      {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
+
+      task = hold_store(1_500)
+      assert {:error, :busy} = BundleJobs.status(ctx.tenant, view.job_id)
+      assert {:error, :busy} = BundleJobs.cancel(ctx.tenant, view.job_id)
+      assert {:ok, :released} = Task.await(task, 10_000)
+
+      assert {:error, :not_found} = BundleJobs.status(ctx.tenant, "job_missing")
+      assert {:error, :not_found} = BundleJobs.cancel(ctx.tenant, "job_missing")
+      assert {:ok, %{status: "queued"}} = BundleJobs.status(ctx.tenant, view.job_id)
+    end
+
+    test "the status and cancel handlers answer 503 with Retry-After, and 404 for a missing job",
+         ctx do
+      {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
+      base = conn(:get, "/") |> assign(:current_tenant, ctx.tenant)
+
+      task = hold_store(1_500)
+
+      for answer <- [
+            BundleJobsAPI.status(base, view.job_id),
+            BundleJobsAPI.cancel(base, view.job_id)
+          ] do
+        assert answer.status == 503
+        assert get_resp_header(answer, "retry-after") == ["1"]
+        assert decode(answer)["error"] == "busy"
+      end
+
+      assert {:ok, :released} = Task.await(task, 10_000)
+
+      assert BundleJobsAPI.status(base, "job_missing").status == 404
+      assert BundleJobsAPI.cancel(base, "job_missing").status == 404
+      assert BundleJobsAPI.status(base, view.job_id).status == 200
+    end
+
+    test "the routes answer 503 with Retry-After while the Store is busy", ctx do
+      {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
+
+      with_auth(fn ->
+        key = admin_key(ctx.tenant)
+        task = hold_store(1_500)
+
+        # The key is read from the Store before the handler runs, so the request
+        # may fail there; the error handler answers 503 either way and re-raises.
+        for {method, path} <- [
+              {:get, "/api/bundles/jobs/" <> view.job_id},
+              {:post, "/api/bundles/jobs/#{view.job_id}/cancel"}
+            ] do
+          conn =
+            conn(method, path)
+            |> put_req_header("authorization", "Bearer " <> key)
+
+          try do
+            Router.call(conn, Router.init([]))
+          catch
+            _kind, _reason -> :ok
+          end
+
+          {status, headers, body} = sent_resp(conn)
+          assert status == 503
+          assert {"retry-after", "1"} in headers
+          assert %{"error" => "busy"} = Jason.decode!(body)
+        end
+
+        assert {:ok, :released} = Task.await(task, 10_000)
+        assert call(:get, "/api/bundles/jobs/" <> view.job_id, key).status == 200
+        assert call(:get, "/api/bundles/jobs/job_missing", key).status == 404
+      end)
     end
   end
 

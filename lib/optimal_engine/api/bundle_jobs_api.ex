@@ -19,6 +19,8 @@ defmodule OptimalEngine.API.BundleJobsAPI do
   download. A start answers 202 with the job and its status URL in `Location`; the same
   `Idempotency-Key` with the same request answers 200 with that job and
   `"duplicate": true`.
+  A Store that does not answer in time answers a read or a cancel of a job 503 `busy`
+  with `Retry-After: 1`; only a job that is not there is 404.
   """
 
   import Plug.Conn
@@ -79,6 +81,7 @@ defmodule OptimalEngine.API.BundleJobsAPI do
       json(conn, 200, view)
     else
       {:error, :not_found} -> error(conn, 404, :job_not_found, "job not found")
+      {:error, reason} when reason in [:busy, :store_error] -> store_failed(conn, reason)
       {:error, code, message} -> error(conn, status_of(code), code, message)
     end
   end
@@ -91,12 +94,24 @@ defmodule OptimalEngine.API.BundleJobsAPI do
         {:ok, view, :requested} -> json(conn, 202, %{view | cancel_requested: true})
         {:error, :job_finished, view} -> json(conn, 409, %{error: "job_finished", job: view})
         {:error, :not_found} -> error(conn, 404, :job_not_found, "job not found")
+        {:error, reason} when reason in [:busy, :store_error] -> store_failed(conn, reason)
       end
     else
       {:error, :not_found} -> error(conn, 404, :job_not_found, "job not found")
+      {:error, reason} when reason in [:busy, :store_error] -> store_failed(conn, reason)
       {:error, code, message} -> error(conn, status_of(code), code, message)
     end
   end
+
+  # A Store that did not answer is retryable, as on the other routes: 503 with
+  # Retry-After. Any other Store failure is a 500 that does not echo the cause.
+  defp store_failed(conn, :busy) do
+    conn
+    |> put_resp_header("retry-after", "1")
+    |> json(503, %{error: "busy", detail: "the Engine's store is busy; retry shortly"})
+  end
+
+  defp store_failed(conn, :store_error), do: json(conn, 500, %{error: "store_error"})
 
   defp started(conn, {:ok, view, :queued}) do
     conn
