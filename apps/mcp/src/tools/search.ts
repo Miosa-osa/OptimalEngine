@@ -46,6 +46,7 @@ export function registerSearch(server: McpServer): void {
           limit,
           as_of,
           mode,
+          content: "snippet",
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

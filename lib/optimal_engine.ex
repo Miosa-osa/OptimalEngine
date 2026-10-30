@@ -105,6 +105,44 @@ defmodule OptimalEngine do
   @spec stats() :: {:ok, map()} | {:error, term()}
   def stats, do: Store.stats()
 
+  @doc """
+  Row counts of one workspace in one tenant, under the keys of `stats/0`
+  (`cache_size`, a property of the whole process, is not part of it).
+
+  One statement, so the single Store connection is visited once. Entities and
+  decisions belong to the workspace of the context they hang off.
+  """
+  @spec workspace_stats(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def workspace_stats(workspace_id, tenant_id)
+      when is_binary(workspace_id) and is_binary(tenant_id) do
+    sql = """
+    SELECT
+      (SELECT COUNT(*) FROM contexts
+        WHERE tenant_id = ?1 AND workspace_id = ?2 AND archived_at IS NULL),
+      (SELECT COUNT(*) FROM contexts
+        WHERE tenant_id = ?1 AND workspace_id = ?2 AND type = 'signal' AND archived_at IS NULL),
+      (SELECT COUNT(*) FROM contexts
+        WHERE tenant_id = ?1 AND workspace_id = ?2 AND type = 'resource' AND archived_at IS NULL),
+      (SELECT COUNT(*) FROM memories
+        WHERE tenant_id = ?1 AND workspace_id = ?2 AND is_latest = 1 AND is_forgotten = 0),
+      (SELECT COUNT(*) FROM contexts
+        WHERE tenant_id = ?1 AND workspace_id = ?2 AND type = 'skill' AND archived_at IS NULL),
+      (SELECT COUNT(*) FROM entities e
+        JOIN contexts c ON c.id = e.context_id AND c.tenant_id = ?1 AND c.workspace_id = ?2),
+      (SELECT COUNT(*) FROM graph_edges
+        WHERE tenant_id = ?1 AND workspace_id = ?2),
+      (SELECT COUNT(*) FROM decisions d
+        JOIN contexts c ON c.id = d.context_id AND c.tenant_id = ?1 AND c.workspace_id = ?2)
+    """
+
+    keys = ~w(total_contexts total_signals total_resources total_memories total_skills
+              total_entities total_edges total_decisions)
+
+    with {:ok, [row]} <- Store.raw_query(sql, [tenant_id, workspace_id]) do
+      {:ok, keys |> Enum.zip(row) |> Map.new()}
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Ingestion
   # ---------------------------------------------------------------------------

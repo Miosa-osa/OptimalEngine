@@ -90,6 +90,11 @@ test("sends the key as a bearer token and the default workspace", async () => {
   assert.equal(requests[0].query.workspace, "default:sales");
 });
 
+test("asks the Engine for snippets, so an agent gets small results", async () => {
+  await call("search", { q: "renewal" });
+  assert.equal(requests[0].query.content, "snippet");
+});
+
 test("forwards as_of and mode when given and omits them otherwise", async () => {
   await call("search", { q: "renewal" });
   assert.equal("as_of" in requests[0].query, false);
