@@ -1699,7 +1699,7 @@ defmodule OptimalEngine.API.Router do
   end
 
   # GET /api/wiki/stale?workspace=X&tenant=Y
-  # Returns stale pages (last_curated too old AND new signals in cited nodes).
+  # Returns stale pages (last_curated too old AND no citations or new signals in cited nodes).
   # MUST sit before /:slug — "stale" would otherwise match as a slug.
   get "/api/wiki/stale" do
     workspace = query_param(conn, "workspace", "default")
@@ -1712,8 +1712,8 @@ defmodule OptimalEngine.API.Router do
     items =
       Enum.map(pages, fn p ->
         days_stale =
-          case DateTime.from_iso8601(p.last_curated || "") do
-            {:ok, curated_at, _} ->
+          case OptimalEngine.Wiki.Freshness.parse_time(p.last_curated) do
+            {:ok, curated_at} ->
               diff = DateTime.diff(now, curated_at, :second)
               Float.round(diff / 86_400, 1)
 

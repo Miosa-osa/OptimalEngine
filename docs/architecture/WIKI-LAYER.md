@@ -71,6 +71,13 @@ import from existing markdown folders
 safe edit handling
 ```
 
+## Freshness And RAG
+
+A page is stale when it is older than the workspace's `max_stale_days` (default 7, by its last curated time) and either has no citations or has new contexts in its cited nodes.
+`/api/wiki/stale` lists these pages.
+RAG answers from a wiki page only when the page names at least one `{{cite: ...}}` source and is not stale.
+Otherwise it falls through to retrieval over contexts.
+
 ## What Must Not Happen
 
 ```text
