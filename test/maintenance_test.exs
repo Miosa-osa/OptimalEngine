@@ -201,7 +201,13 @@ defmodule OptimalEngine.MaintenanceTest do
       assert {:ok, %{outcome: :continued, next_job_id: next_id}} = drain(ctx.ws, batch: 1)
       assert {:ok, next} = Jobs.get(next_id, ctx.ws)
       [first | _] = ids
-      assert next.payload == %{"after" => %{"phase" => "contexts", "id" => first}}
+
+      assert next.payload == %{
+               "after" => %{"phase" => "contexts", "id" => first},
+               "carried" => %{"contexts" => 1, "claims" => 0, "failed_edges" => 0}
+             }
+
+      assert recorded_backfills(ctx.ws) == []
 
       assert {:ok, %{job: %{id: ^next_id}, outcome: :completed}} = drain(ctx.ws, batch: 5)
 
@@ -210,6 +216,28 @@ defmodule OptimalEngine.MaintenanceTest do
                  "SELECT COUNT(*) FROM graph_edges WHERE relation = 'lives_in' AND workspace_id = ?1",
                  [ctx.ws]
                )
+
+      # The last slice records the whole run, as one run over the workspace would.
+      assert recorded_backfills(ctx.ws) == [[2, 0]]
+    end
+
+    test "a graph continuation an older Engine queued, with no counts, is not recorded", ctx do
+      id = "mnt-gold-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO contexts (id, tenant_id, workspace_id, type, title, content, node, entities, created_at) VALUES (?1, ?2, ?3, 'signal', 'Graph', 'Body', 'inbox', '[]', datetime('now'))",
+          [id, ctx.tenant, ctx.ws]
+        )
+
+      # Nothing tells this slice whether the slices before it wrote every edge.
+      {:ok, _job, :queued} =
+        Maintenance.enqueue(:graph_backfill, ctx.ws, %{
+          "after" => %{"phase" => "contexts", "id" => ""}
+        })
+
+      assert {:ok, %{outcome: :completed}} = drain(ctx.ws, batch: 5)
+      assert recorded_backfills(ctx.ws) == []
     end
   end
 
@@ -483,6 +511,16 @@ defmodule OptimalEngine.MaintenanceTest do
       })
 
     key
+  end
+
+  defp recorded_backfills(workspace) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT contexts, claims FROM graph_backfills WHERE workspace_id = ?1 ORDER BY id",
+        [workspace]
+      )
+
+    rows
   end
 
   defp chunk!(tenant, workspace, id, text) do

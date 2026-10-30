@@ -250,6 +250,7 @@ defmodule OptimalEngine.Maintenance do
       claims: payload["claims"] != false,
       limit: Keyword.get(opts, :batch, @graph_batch),
       after: cursor(payload["after"]),
+      carried: payload["after"] && carried(payload),
       count: false,
       pause_ms: Keyword.get(opts, :pause_ms, @pause_ms)
     ]
@@ -260,7 +261,7 @@ defmodule OptimalEngine.Maintenance do
 
       {:ok, %{next: {phase, id}} = result} ->
         resume = %{"phase" => to_string(phase), "id" => id}
-        {:continue, progress(payload, "after", resume), result}
+        {:continue, payload |> carry(result) |> progress("after", resume), result}
 
       {:error, _} = error ->
         error
@@ -325,6 +326,35 @@ defmodule OptimalEngine.Maintenance do
   defp cursor(%{"phase" => "claims", "id" => id}) when is_binary(id), do: {:claims, id}
   defp cursor(%{"phase" => "contexts", "id" => id}) when is_binary(id), do: {:contexts, id}
   defp cursor(_), do: nil
+
+  # A graph job's slice passes on what it and the slices before it counted, so
+  # the slice that reaches the end records the whole run (Graph.Backfill
+  # `:carried`). Only a chain that began at the start carries counts: a
+  # continuation an older Engine queued has none and is never recorded.
+  defp carry(payload, result) do
+    before =
+      if payload["after"],
+        do: carried(payload),
+        else: %{contexts: 0, claims: 0, failed_edges: 0}
+
+    case before do
+      nil ->
+        payload
+
+      %{contexts: contexts, claims: claims, failed_edges: failed} ->
+        Map.put(payload, "carried", %{
+          "contexts" => contexts + result.contexts,
+          "claims" => claims + result.claims,
+          "failed_edges" => failed + result.failed_edges
+        })
+    end
+  end
+
+  defp carried(%{"carried" => %{"contexts" => c, "claims" => cl, "failed_edges" => f}})
+       when is_integer(c) and is_integer(cl) and is_integer(f),
+       do: %{contexts: c, claims: cl, failed_edges: f}
+
+  defp carried(_payload), do: nil
 
   defp default_owner, do: "maintenance-worker:#{node()}:#{System.pid()}"
 end
