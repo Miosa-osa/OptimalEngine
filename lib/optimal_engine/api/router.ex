@@ -111,7 +111,7 @@ defmodule OptimalEngine.API.Router do
   # table with itself, so its cost grows with the limit.
   @max_triangles 100
 
-  # The text a search hit carries unless the caller asks for `content=full`.
+  # The text a search hit carries when the caller asks for `content=snippet`.
   @snippet_bytes 600
 
   # ---------------------------------------------------------------------------
@@ -131,43 +131,49 @@ defmodule OptimalEngine.API.Router do
   # Workspace-scoped: ?workspace=<id> (default "default") - never leaks other
   # workspaces' contexts, edges, or entities.
   #
-  #   limit=<n>   contexts in the page (default 50, at most 200)
+  #   limit=<n>   contexts in the page (at most 200). Without it the whole
+  #               workspace comes back, as before.
   #   offset=<n>  contexts skipped, in the order of the full list
   #
   # `stats` counts the whole workspace (`context_count`, `edge_count`,
-  # `entity_count`); `pagination` says what this page holds. `edges` are the
-  # links between contexts of the page, and `entities` the most common
-  # entities of the workspace, at most `limit` of them.
+  # `entity_count`); `pagination` says what the response holds. With a `limit`,
+  # `edges` are the links between contexts of the page and `entities` the most
+  # common entities of the workspace, at most `limit` of them.
   get "/api/graph" do
     workspace = query_param(conn, "workspace", "default")
     tenant = conn.assigns[:current_tenant] || "default"
-    {offset, limit} = Pagination.parse(conn)
+    {offset, limit} = optional_page(conn)
     all_edges = fetch_visual_edges(workspace, tenant)
     entities = fetch_entity_summary(workspace, tenant)
     nodes = fetch_node_summary(workspace, tenant)
     all_contexts = fetch_all_contexts(workspace, tenant)
 
-    contexts = all_contexts |> Enum.drop(offset) |> Enum.take(limit)
+    {contexts, pagination} = export_page(all_contexts, offset, limit)
     page_ids = MapSet.new(contexts, & &1.id)
 
     edges =
-      Enum.filter(
-        all_edges,
-        &(MapSet.member?(page_ids, &1.source) and MapSet.member?(page_ids, &1.target))
-      )
+      if limit == nil,
+        do: all_edges,
+        else:
+          Enum.filter(
+            all_edges,
+            &(MapSet.member?(page_ids, &1.source) and MapSet.member?(page_ids, &1.target))
+          )
+
+    entities_shown = if limit == nil, do: entities, else: Enum.take(entities, limit)
 
     json(conn, %{
       workspace_id: workspace,
       contexts: contexts,
       edges: edges,
-      entities: entities |> Enum.take(limit) |> format_entities(),
+      entities: format_entities(entities_shown),
       nodes: nodes,
       stats: %{
         context_count: length(all_contexts),
         edge_count: length(all_edges),
         entity_count: length(entities)
       },
-      pagination: Pagination.wrap(contexts, length(all_contexts), offset, limit).pagination
+      pagination: pagination
     })
   end
 
@@ -266,12 +272,13 @@ defmodule OptimalEngine.API.Router do
   #                     cannot serve it), `auto` (default) takes the vector hop
   #                     when the embedder answers and full text otherwise.
   #
-  #   content=snippet|full
-  #                     how much of a hit's text comes back. `snippet` (default)
-  #                     is the first @snippet_bytes of `content` next to the
-  #                     `l0_abstract`, with `content_truncated` saying whether
-  #                     text was cut; `full` returns the whole text. The whole
-  #                     text of one hit is also at `GET /api/read?tier=full`.
+  #   content=full|snippet
+  #                     how much of a hit's text comes back. `full` (default)
+  #                     returns the whole text. `snippet` returns the first
+  #                     @snippet_bytes of `content` next to the `l0_abstract`.
+  #                     Both shapes carry `content_truncated`, which says
+  #                     whether text was cut. The whole text of one hit is also
+  #                     at `GET /api/read?tier=full`.
   #
   # A document appears once: hits with the same URI, and a signal with its
   # cross-reference copies (`metadata.cross_ref_of`), collapse to the best
@@ -292,7 +299,7 @@ defmodule OptimalEngine.API.Router do
     memory_search_mode = query_param(conn, "memory_search_mode", "hybrid")
     as_of = query_param(conn, "as_of", nil)
     mode = search_mode(query_param(conn, "mode", nil))
-    full_content? = query_param(conn, "content", "snippet") == "full"
+    full_content? = query_param(conn, "content", "full") != "snippet"
     {offset, limit} = Pagination.parse(conn, 10)
 
     found =
@@ -1171,14 +1178,14 @@ defmodule OptimalEngine.API.Router do
 
   # Row counts of one workspace in the caller's tenant: the one named, or the
   # implicit default (WorkspaceAuthPlug authorizes either). `cache_size` is a
-  # property of the whole process and is not reported here.
+  # property of the whole process; it stays in the response as 0.
   get "/api/stats" do
     workspace = query_param(conn, "workspace", "default")
     tenant = conn.assigns[:current_tenant] || "default"
 
     case OptimalEngine.workspace_stats(workspace, tenant) do
       {:ok, stats} ->
-        json(conn, Map.put(stats, "workspace_id", workspace))
+        json(conn, Map.merge(stats, %{"cache_size" => 0, "workspace_id" => workspace}))
 
       {:error, reason} ->
         conn |> put_status(500) |> json(%{error: inspect(reason)})
@@ -3642,17 +3649,19 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  # The exports page what they return: `limit` (default 50, at most 200) and
-  # `offset` take a window of the list the caller may see, in its stable order
-  # (oldest first). `pagination` says where the window stands; `complete` is
-  # false while anything the caller may see is outside the window, as well as
-  # when rows were withheld, so a page is never taken for the whole export.
+  # The exports page what they return only when asked: without `limit` the
+  # whole list comes back, as before. `limit` (at most 200) and `offset` take a
+  # window of the list the caller may see, in its stable order (oldest first).
+  # `pagination` says where the window stands either way (`limit` is null when
+  # none was given); `complete` is false while anything the caller may see is
+  # outside the window, as well as when rows were withheld, so a page is never
+  # taken for the whole export.
 
-  # GET /api/batch/export/signals?workspace=default&limit=50&offset=0
+  # GET /api/batch/export/signals?workspace=default&offset=0
   # Returns: {workspace_id, signals: [...], pagination}
   get "/api/batch/export/signals" do
     workspace_id = query_param(conn, "workspace", "default")
-    {offset, limit} = Pagination.parse(conn)
+    {offset, limit} = optional_page(conn)
 
     guarded_read(conn, fn ->
       case OptimalEngine.Batch.read_signals(
@@ -3676,11 +3685,11 @@ defmodule OptimalEngine.API.Router do
     end)
   end
 
-  # GET /api/batch/export/memories?workspace=default&limit=50&offset=0
+  # GET /api/batch/export/memories?workspace=default&offset=0
   # Returns: {workspace_id, memories: [...], pagination}
   get "/api/batch/export/memories" do
     workspace_id = query_param(conn, "workspace", "default")
-    {offset, limit} = Pagination.parse(conn)
+    {offset, limit} = optional_page(conn)
 
     guarded_read(conn, fn ->
       case OptimalEngine.Batch.read_memories(
@@ -3704,14 +3713,14 @@ defmodule OptimalEngine.API.Router do
     end)
   end
 
-  # GET /api/batch/export/workspace?workspace=default&limit=50&offset=0
+  # GET /api/batch/export/workspace?workspace=default&offset=0
   # Returns the snapshot: {workspace_id, signals, memories, wiki, config,
   # pagination}. The window applies to the signals and to the memories; the
   # wiki pages and the config are whole. `pagination` has a `signals` and a
   # `memories` window.
   get "/api/batch/export/workspace" do
     workspace_id = query_param(conn, "workspace", "default")
-    {offset, limit} = Pagination.parse(conn)
+    {offset, limit} = optional_page(conn)
 
     guarded_read(conn, fn ->
       case OptimalEngine.Batch.read_workspace(
@@ -6537,9 +6546,9 @@ defmodule OptimalEngine.API.Router do
 
   defp format_search_results(_, _workspace, _full_content?), do: []
 
-  # A search hit carries a snippet of its text, not the text: the whole of it is
-  # one `GET /api/read?tier=full` away. `byte_slice` keeps the cut on a
-  # character boundary and costs nothing on a long text.
+  # `content=snippet`: a hit carries the start of its text, not the text; the
+  # whole of it is one `GET /api/read?tier=full` away. `byte_slice` keeps the
+  # cut on a character boundary and costs nothing on a long text.
   defp search_content(content, true), do: {content, false}
 
   defp search_content(content, false) when is_binary(content) do
@@ -6611,9 +6620,16 @@ defmodule OptimalEngine.API.Router do
     Map.merge(body, %{withheld: withheld, complete: withheld == 0})
   end
 
+  # `{offset, limit}` of a route that pages only when asked: `limit` is nil when
+  # the request gave none, and the whole list is wanted.
+  defp optional_page(conn) do
+    {offset, limit} = Pagination.parse(conn)
+    if query_param(conn, "limit", "") == "", do: {offset, nil}, else: {offset, limit}
+  end
+
   # The window of an export list and the envelope that says where it stands.
   defp export_page(items, offset, limit) do
-    page = items |> Enum.drop(offset) |> Enum.take(limit)
+    page = items |> Enum.drop(offset) |> then(&if(limit, do: Enum.take(&1, limit), else: &1))
     {page, Pagination.wrap(page, length(items), offset, limit).pagination}
   end
 

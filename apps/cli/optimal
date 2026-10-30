@@ -1275,7 +1275,7 @@ case $CMD in
     _q=$(need_text "${1:-}" "search query") || exit
     use_ws "${2:-}"
     get /api/search "" q "$_q" workspace "$WS" limit "${O_limit:-}" offset "${O_offset:-}" type "${O_type:-}" \
-      as_of "${O_as_of:-}" mode "${O_mode:-}"
+      as_of "${O_as_of:-}" mode "${O_mode:-}" content snippet
     ;;
   grep)
     too_many $# 2 grep
@@ -1349,7 +1349,7 @@ case $CMD in
     call POST /api/memory/remember "$(jobj content "Aware observation: $_text" workspace "$WS" @force true \
       @metadata "$(jobj kind aware source optimal-cli)")"
     _remembered=$R_BODY
-    call GET /api/search "" q "$_text" workspace "$WS" limit "${O_limit:-5}"
+    call GET /api/search "" q "$_text" workspace "$WS" limit "${O_limit:-5}" content snippet
     emit "{\"captured\":$_captured,\"remembered\":$_remembered,\"related\":$R_BODY}"
     ;;
   note | lesson | decision | task | close)

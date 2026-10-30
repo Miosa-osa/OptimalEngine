@@ -2,10 +2,11 @@ defmodule OptimalEngine.API.ReadShapeTest do
   @moduledoc """
   The size and scope of what the read routes return:
 
-    * `GET /api/search` carries a snippet of each hit's text (`content=full`
-      asks for all of it) and shows a document once, however many
-      cross-reference copies of it match
-    * `GET /api/graph` and `GET /api/batch/export/*` honor `limit` and `offset`
+    * `GET /api/search` carries the whole text of each hit unless
+      `content=snippet` asks for the start of it, and shows a document once,
+      however many cross-reference copies of it match
+    * `GET /api/graph` and `GET /api/batch/export/*` return everything unless
+      `limit` is given, then window by `limit` and `offset`
     * `GET /api/stats` counts the workspace it is asked about
     * a search in a workspace nothing was written to is an empty list
   """
@@ -62,20 +63,24 @@ defmodule OptimalEngine.API.ReadShapeTest do
   end
 
   describe "GET /api/search text" do
-    test "a hit carries a snippet; content=full returns all of it", ctx do
+    test "a hit carries its whole text by default; content=snippet cuts it", ctx do
       token = "snippettoken#{ctx.suffix}"
       long = token <> " " <> String.duplicate("filler words ", 400)
       insert_context("shape-long-#{ctx.suffix}", ctx.ws, %{title: "Long", node: "n", content: long})
 
-      [hit] = body(get("/api/search?q=#{token}&workspace=#{ctx.ws}"))["results"]
+      [full] = body(get("/api/search?q=#{token}&workspace=#{ctx.ws}"))["results"]
+      assert full["content_truncated"] == false
+      assert full["content"] == long
+      assert full["l0_abstract"] =~ "Long"
+
+      [explicit] = body(get("/api/search?q=#{token}&workspace=#{ctx.ws}&content=full"))["results"]
+      assert explicit["content"] == long
+
+      [hit] = body(get("/api/search?q=#{token}&workspace=#{ctx.ws}&content=snippet"))["results"]
       assert hit["content_truncated"] == true
       assert byte_size(hit["content"]) <= 600
       assert String.starts_with?(long, hit["content"])
       assert hit["l0_abstract"] =~ "Long"
-
-      [full] = body(get("/api/search?q=#{token}&workspace=#{ctx.ws}&content=full"))["results"]
-      assert full["content_truncated"] == false
-      assert full["content"] == long
     end
 
     test "a short text is returned whole", ctx do
@@ -87,9 +92,11 @@ defmodule OptimalEngine.API.ReadShapeTest do
         content: token
       })
 
-      [hit] = body(get("/api/search?q=#{token}&workspace=#{ctx.ws}"))["results"]
-      assert hit["content"] == token
-      assert hit["content_truncated"] == false
+      for suffix <- ["", "&content=snippet"] do
+        [hit] = body(get("/api/search?q=#{token}&workspace=#{ctx.ws}#{suffix}"))["results"]
+        assert hit["content"] == token
+        assert hit["content_truncated"] == false
+      end
     end
   end
 
@@ -133,7 +140,7 @@ defmodule OptimalEngine.API.ReadShapeTest do
 
   describe "GET /api/graph limit" do
     setup ctx do
-      for n <- 1..5 do
+      for n <- 1..55 do
         insert_context("shape-g#{n}-#{ctx.suffix}", ctx.ws, %{
           title: "G#{n}",
           node: "gnode",
@@ -148,8 +155,8 @@ defmodule OptimalEngine.API.ReadShapeTest do
       page = body(get("/api/graph?workspace=#{ctx.ws}&limit=2"))
 
       assert length(page["contexts"]) == 2
-      assert page["stats"]["context_count"] == 5
-      assert page["pagination"]["total"] == 5
+      assert page["stats"]["context_count"] == 55
+      assert page["pagination"]["total"] == 55
       assert page["pagination"]["limit"] == 2
       assert page["pagination"]["has_more"] == true
 
@@ -158,7 +165,7 @@ defmodule OptimalEngine.API.ReadShapeTest do
       assert page["stats"]["edge_count"] >= length(page["edges"])
     end
 
-    test "offset moves the window; the default holds all of a small workspace", ctx do
+    test "offset moves the window; without a limit the whole workspace comes back", ctx do
       first = body(get("/api/graph?workspace=#{ctx.ws}&limit=2"))
       second = body(get("/api/graph?workspace=#{ctx.ws}&limit=2&offset=2"))
 
@@ -166,15 +173,18 @@ defmodule OptimalEngine.API.ReadShapeTest do
                Enum.map(second["contexts"], & &1["id"])
 
       all = body(get("/api/graph?workspace=#{ctx.ws}"))
-      assert length(all["contexts"]) == 5
-      assert all["pagination"]["limit"] == 50
+      assert length(all["contexts"]) == 55
+      assert all["stats"]["context_count"] == 55
+      assert all["pagination"]["limit"] == nil
+      assert all["pagination"]["total"] == 55
       assert all["pagination"]["has_more"] == false
+      assert length(all["edges"]) == all["stats"]["edge_count"]
     end
   end
 
   describe "GET /api/batch/export limit" do
     setup ctx do
-      for n <- 1..5 do
+      for n <- 1..55 do
         insert_context("shape-e#{n}-#{ctx.suffix}", ctx.ws, %{title: "E#{n}", node: "enode"})
       end
 
@@ -185,26 +195,31 @@ defmodule OptimalEngine.API.ReadShapeTest do
       page = body(get("/api/batch/export/signals?workspace=#{ctx.ws}&limit=2"))
 
       assert length(page["signals"]) == 2
-      assert page["pagination"]["total"] == 5
+      assert page["pagination"]["total"] == 55
       assert page["pagination"]["has_more"] == true
       assert page["complete"] == false
 
-      rest = body(get("/api/batch/export/signals?workspace=#{ctx.ws}&limit=2&offset=4"))
+      rest = body(get("/api/batch/export/signals?workspace=#{ctx.ws}&limit=2&offset=54"))
       assert length(rest["signals"]) == 1
       assert rest["complete"] == true
     end
 
-    test "without a limit a small workspace comes whole", ctx do
+    test "without a limit the export comes whole, past the largest page", ctx do
       all = body(get("/api/batch/export/signals?workspace=#{ctx.ws}"))
-      assert length(all["signals"]) == 5
+      assert length(all["signals"]) == 55
       assert all["complete"] == true
+      assert all["pagination"]["limit"] == nil
+      assert all["pagination"]["total"] == 55
+      assert all["pagination"]["has_more"] == false
+
+      assert length(body(get("/api/batch/export/workspace?workspace=#{ctx.ws}"))["signals"]) == 55
     end
 
     test "the workspace snapshot windows its signals and memories", ctx do
       snapshot = body(get("/api/batch/export/workspace?workspace=#{ctx.ws}&limit=3"))
 
       assert length(snapshot["signals"]) == 3
-      assert snapshot["pagination"]["signals"]["total"] == 5
+      assert snapshot["pagination"]["signals"]["total"] == 55
       assert snapshot["complete"] == false
     end
   end
@@ -226,6 +241,7 @@ defmodule OptimalEngine.API.ReadShapeTest do
       empty = body(get("/api/stats?workspace=shape-empty-#{ctx.suffix}"))
 
       assert mine["workspace_id"] == ctx.ws
+      assert mine["cache_size"] == 0
       assert mine["total_contexts"] == 3
       assert mine["total_signals"] == 3
       assert mine["total_entities"] == 3

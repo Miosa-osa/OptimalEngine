@@ -269,6 +269,7 @@ export const engine = {
     limit?: number;
     as_of?: string;
     mode?: "lexical" | "hybrid" | "auto";
+    content?: "snippet" | "full";
   }): Promise<SearchResult> {
     return request<SearchResult>("/api/search", { params });
   },
