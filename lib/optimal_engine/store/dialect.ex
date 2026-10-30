@@ -399,9 +399,12 @@ defmodule OptimalEngine.Store.Dialect do
 
   # IFNULL is COALESCE with two arguments, json_valid of a column is
   # PostgreSQL's IS JSON predicate (PostgreSQL 16), and SQLite's INTEGER and
-  # REAL are eight bytes, PostgreSQL's BIGINT and DOUBLE PRECISION.
+  # REAL are eight bytes, PostgreSQL's BIGINT and DOUBLE PRECISION. SQLite's
+  # INDEXED BY and NOT INDEXED pin a plan; PostgreSQL has no index hints and
+  # plans on its own, so the clause is dropped.
   defp rewrite_simple(masked) do
     masked
+    |> then(&Regex.replace(~r/\s+(?:INDEXED\s+BY\s+#{@identifier}|NOT\s+INDEXED)\b/i, &1, ""))
     |> then(&Regex.replace(~r/\bIFNULL\s*\(/i, &1, "COALESCE("))
     |> then(&Regex.replace(~r/\bjson_valid\s*\(\s*(#{@identifier})\s*\)/i, &1, "(\\1 IS JSON)"))
     |> then(&Regex.replace(~r/\bAS\s+INTEGER\s*\)/i, &1, "AS BIGINT)"))

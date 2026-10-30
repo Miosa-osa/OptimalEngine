@@ -306,7 +306,7 @@ rejected	BEGIN/**/IMMEDIATE
 rejected	DELETE FROM "…" WHERE "…" = ?
 rejected	DELETE FROM "…" WHERE "…" IN (?)
 rejected	DELETE FROM data_embeddings WHERE collection_id = ? AND (model != ? OR record_id NOT IN (SELECT "…" FROM "…"))
-rejected	EXPLAIN QUERY PLAN SELECT MAX(w.id) FROM ( SELECT id FROM chunks WHERE workspace_id = ? AND id > ? ORDER BY id LIMIT ? ) AS w
+rejected	EXPLAIN QUERY PLAN SELECT MAX(w.id) FROM ( SELECT id FROM chunks INDEXED BY idx_chunks_workspace_id WHERE workspace_id = ? AND id > ? ORDER BY id LIMIT ? ) AS w
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_adapter_runs WHERE asset_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_embedding_refs WHERE adapter_run_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM asset_embedding_refs WHERE asset_id = ?
@@ -336,9 +336,9 @@ rejected	EXPLAIN QUERY PLAN SELECT N FROM decomposition_runs WHERE source_packag
 rejected	EXPLAIN QUERY PLAN SELECT N FROM entity_mentions WHERE context_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM entity_mentions WHERE source_package_id = ?
 rejected	EXPLAIN QUERY PLAN SELECT N FROM resolution_decisions WHERE mention_id = ?
-rejected	EXPLAIN QUERY PLAN SELECT c.id, c.node, c.entities, c.routed_to, c.supersedes, c.workspace_id, c.tenant_id FROM contexts c WHERE c.id > ? AND c.workspace_id = ? ORDER BY c.id LIMIT ?
-rejected	EXPLAIN QUERY PLAN SELECT c.id, c.tenant_id, c.workspace_id, c.signal_id, c.text, c.modality, c.asset_ref FROM chunks c WHERE c.workspace_id = ? AND c.id > ? AND c.id <= ? AND c.text <> '…' AND NOT EXISTS (SELECT N FROM chunk_embeddings e WHERE e.chunk_id = c.id) ORDER BY c.id LIMIT ?
-rejected	EXPLAIN QUERY PLAN SELECT cl.id, c.entities, cl.workspace_id, cl.tenant_id FROM claims cl JOIN contexts c ON c.id = cl.signal_id WHERE cl.signal_id IS NOT NULL AND cl.id > ? AND cl.workspace_id = ? ORDER BY cl.id LIMIT ?
+rejected	EXPLAIN QUERY PLAN SELECT c.id, c.node, c.entities, c.routed_to, c.supersedes, c.workspace_id, c.tenant_id FROM contexts c INDEXED BY idx_contexts_workspace_id WHERE c.id > ? AND c.workspace_id = ? ORDER BY c.id LIMIT ?
+rejected	EXPLAIN QUERY PLAN SELECT c.id, c.tenant_id, c.workspace_id, c.signal_id, c.text, c.modality, c.asset_ref FROM chunks c INDEXED BY idx_chunks_workspace_id WHERE c.workspace_id = ? AND c.id > ? AND c.id <= ? AND c.text <> '…' AND NOT EXISTS (SELECT N FROM chunk_embeddings e WHERE e.chunk_id = c.id) ORDER BY c.id LIMIT ?
+rejected	EXPLAIN QUERY PLAN SELECT cl.id, c.entities, cl.workspace_id, cl.tenant_id FROM claims cl INDEXED BY idx_claims_workspace_id JOIN contexts c ON c.id = cl.signal_id WHERE cl.signal_id IS NOT NULL AND cl.id > ? AND cl.workspace_id = ? ORDER BY cl.id LIMIT ?
 rejected	INSERT INTO "…" ("…", "…", "…", "…", "…", "…", "…") VALUES (?, N, ?)
 rejected	INSERT INTO "…" ("…", "…", "…", "…", "…", "…", "…", "…") VALUES (?, N, ?)
 rejected	INSERT INTO "…" ("…", "…", "…", "…", "…", "…", "…", "…", "…") VALUES (?, N, ?)

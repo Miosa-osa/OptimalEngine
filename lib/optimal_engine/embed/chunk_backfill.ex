@@ -273,10 +273,15 @@ defmodule OptimalEngine.Embed.ChunkBackfill do
     )
   end
 
+  # A window always reads one workspace through its (workspace_id, id) index.
+  # INDEXED BY keeps that plan whatever the planner statistics say: statistics
+  # that show few chunks per workspace otherwise lead SQLite to range over the
+  # whole table's primary key. PostgreSQL drops the clause (Store.Dialect).
   defp window_end_sql do
     """
     SELECT MAX(w.id) FROM (
-      SELECT id FROM chunks WHERE workspace_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3
+      SELECT id FROM chunks INDEXED BY idx_chunks_workspace_id
+      WHERE workspace_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3
     ) AS w
     """
   end
@@ -284,7 +289,7 @@ defmodule OptimalEngine.Embed.ChunkBackfill do
   defp missing_rows_sql(tenant_sql) do
     """
     SELECT c.id, c.tenant_id, c.workspace_id, c.signal_id, c.text, c.modality, c.asset_ref
-    FROM chunks c
+    FROM chunks c INDEXED BY idx_chunks_workspace_id
     WHERE c.workspace_id = ?1 AND c.id > ?2 AND c.id <= ?3 AND #{missing_sql()}#{tenant_sql}
     ORDER BY c.id
     LIMIT ?4

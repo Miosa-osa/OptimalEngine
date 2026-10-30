@@ -235,13 +235,24 @@ defmodule OptimalEngine.Graph.Backfill do
   defp read_page(opts, phase, after_id, take) do
     {where, params} = scope(opts, phase)
     n = length(params)
-    Store.raw_query(page_sql(phase, where, n), params ++ [after_id, take])
+    Store.raw_query(page_sql(phase, where, n, index_hint(opts, phase)), params ++ [after_id, take])
   end
 
-  defp page_sql(:contexts, where, n) do
+  # A workspace's pages always read through its (workspace_id, id) index.
+  # INDEXED BY keeps that plan whatever the planner statistics say: statistics
+  # that show few rows per workspace otherwise lead SQLite to range over the
+  # whole table's primary key. A tenant or whole-store scan has no such index
+  # and plans freely. PostgreSQL drops the clause (Store.Dialect).
+  defp index_hint(opts, :contexts),
+    do: if(opts[:workspace_id], do: " INDEXED BY idx_contexts_workspace_id", else: "")
+
+  defp index_hint(opts, :claims),
+    do: if(opts[:workspace_id], do: " INDEXED BY idx_claims_workspace_id", else: "")
+
+  defp page_sql(:contexts, where, n, hint) do
     """
     SELECT c.id, c.node, c.entities, c.routed_to, c.supersedes, c.workspace_id, c.tenant_id
-    FROM contexts c
+    FROM contexts c#{hint}
     WHERE c.id > ?#{n + 1} AND #{where}
     ORDER BY c.id
     LIMIT ?#{n + 2}
@@ -250,10 +261,10 @@ defmodule OptimalEngine.Graph.Backfill do
 
   # Claims link to their source context through signal_id; the entities come
   # from that context.
-  defp page_sql(:claims, where, n) do
+  defp page_sql(:claims, where, n, hint) do
     """
     SELECT cl.id, c.entities, cl.workspace_id, cl.tenant_id
-    FROM claims cl
+    FROM claims cl#{hint}
     JOIN contexts c ON c.id = cl.signal_id
     WHERE cl.signal_id IS NOT NULL AND cl.id > ?#{n + 1} AND #{where}
     ORDER BY cl.id
@@ -267,8 +278,11 @@ defmodule OptimalEngine.Graph.Backfill do
   @spec page_statements(String.t()) :: [{atom(), String.t(), [term()]}]
   def page_statements(workspace_id) do
     for phase <- [:contexts, :claims] do
-      {where, params} = scope([workspace_id: workspace_id], phase)
-      {phase, page_sql(phase, where, length(params)), params ++ ["", @page]}
+      opts = [workspace_id: workspace_id]
+      {where, params} = scope(opts, phase)
+
+      {phase, page_sql(phase, where, length(params), index_hint(opts, phase)),
+       params ++ ["", @page]}
     end
   end
 
