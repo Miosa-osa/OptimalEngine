@@ -249,7 +249,7 @@ defmodule OptimalEngine.API.RagStreamTest do
           audience: "default",
           version: 1,
           frontmatter: %{"slug" => slug},
-          body: "# Wiki content"
+          body: "# Wiki content {{cite: optimal://test}}"
         })
 
       path =
