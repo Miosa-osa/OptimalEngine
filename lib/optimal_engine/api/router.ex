@@ -133,12 +133,14 @@ defmodule OptimalEngine.API.Router do
   #
   #   limit=<n>   contexts in the page (at most 200). Without it the whole
   #               workspace comes back, as before.
-  #   offset=<n>  contexts skipped, in the order of the full list
+  #   offset=<n>  contexts skipped, in the order of the full list; alone it
+  #               skips them and returns the rest, with the edges between those
   #
   # `stats` counts the whole workspace (`context_count`, `edge_count`,
-  # `entity_count`); `pagination` says what the response holds. With a `limit`,
-  # `edges` are the links between contexts of the page and `entities` the most
-  # common entities of the workspace, at most `limit` of them.
+  # `entity_count`); `pagination` says what the response holds. With a `limit`
+  # or an `offset`, `edges` are the links between contexts of the page and
+  # `entities` the most common entities of the workspace, at most `limit` of
+  # them (all of them when only an offset was given).
   get "/api/graph" do
     workspace = query_param(conn, "workspace", "default")
     tenant = conn.assigns[:current_tenant] || "default"
@@ -151,8 +153,11 @@ defmodule OptimalEngine.API.Router do
     {contexts, pagination} = export_page(all_contexts, offset, limit)
     page_ids = MapSet.new(contexts, & &1.id)
 
+    # An offset alone windows the contexts, so it windows the edges too.
+    windowed? = limit != nil or offset > 0
+
     edges =
-      if limit == nil,
+      if not windowed?,
         do: all_edges,
         else:
           Enum.filter(
