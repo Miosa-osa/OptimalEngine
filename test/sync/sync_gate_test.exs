@@ -1958,7 +1958,7 @@ defmodule OptimalEngine.SyncGateTest do
       {_, first} = counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
       assert :index in first
 
-      {_, again} = counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+      {_, again} = while_stamp_holds(fn -> rebuilds(ctx) end)
       assert again == []
 
       Process.sleep(450)
@@ -2069,9 +2069,11 @@ defmodule OptimalEngine.SyncGateTest do
     end
 
     test "a second pull with nothing written in between scans nothing", ctx do
-      pull_all(ctx, 2)
-
-      {_pages, builds} = counting_builds(ctx.ws, fn -> pull_all(ctx, 2) end)
+      {_pages, builds} =
+        while_stamp_holds(fn ->
+          pull_all(ctx, 2)
+          counting_builds(ctx.ws, fn -> pull_all(ctx, 2) end)
+        end)
 
       assert builds == []
     end
@@ -2502,14 +2504,18 @@ defmodule OptimalEngine.SyncGateTest do
 
       assert :holds_above in first
 
-      {:ok, _} =
-        Store.raw_query(
-          "UPDATE assets SET size_bytes = 2, metadata = '{\"seen\":true}', trust_label = 'reviewed' WHERE id = ?1",
-          [ctx.asset]
-        )
-
       {_, again} =
-        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+        while_stamp_holds(fn ->
+          rebuilds(ctx)
+
+          {:ok, _} =
+            Store.raw_query(
+              "UPDATE assets SET size_bytes = 2, metadata = '{\"seen\":true}', trust_label = 'reviewed' WHERE id = ?1",
+              [ctx.asset]
+            )
+
+          rebuilds(ctx)
+        end)
 
       assert again == []
 
@@ -2597,11 +2603,15 @@ defmodule OptimalEngine.SyncGateTest do
       assert :holds_above in first
 
       before = local_stamp()
-      for i <- 1..5, do: tool_run(ctx, "run-open-#{i}-#{ctx.n}")
-      assert local_stamp() == before
 
       {pulled, again} =
-        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+        while_stamp_holds(fn ->
+          rebuilds(ctx)
+          for i <- 1..5, do: tool_run(ctx, "run-open-#{i}-#{System.unique_integer([:positive])}")
+          rebuilds(ctx)
+        end)
+
+      assert local_stamp() == before
 
       assert again == []
       assert sent?(pulled["mutations"], "analysis_reports", ctx.report)
@@ -3396,6 +3406,40 @@ defmodule OptimalEngine.SyncGateTest do
     if page["more"],
       do: pull_all(ctx, limit, page["cursor"], pages + 1),
       else: pages
+  end
+
+  # Runs `fun` (a warm read, then the writes and the read under test) again until
+  # none of the write sequences moved while it ran. The cache stamp is the write
+  # sequences of the whole store, so a write by anything else that syncs (a
+  # scheduler, a peer cycle) moves it too and rightly rebuilds; a run in which
+  # they moved says nothing about the writes under test. Only a run in which
+  # they did not move says whether the cache held. `fun` must be repeatable.
+  defp while_stamp_holds(fun, attempts \\ 20) do
+    before = stamp_sequences()
+    result = fun.()
+
+    cond do
+      stamp_sequences() == before -> result
+      attempts > 1 -> while_stamp_holds(fun, attempts - 1)
+      true -> flunk("the write sequences kept moving under the test")
+    end
+  end
+
+  defp rebuilds(ctx) do
+    {pulled, builds} =
+      counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
+
+    {pulled, builds}
+  end
+
+  defp stamp_sequences do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT name, seq FROM sqlite_sequence WHERE name IN ('sync_capture', 'sync_local_stamp', 'sync_mutations') ORDER BY name",
+        []
+      )
+
+    rows
   end
 
   # Runs `fun`, returning its result and what the gate scanned the workspace
