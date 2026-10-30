@@ -2052,7 +2052,15 @@ defmodule OptimalEngine.SyncGateTest do
     end
 
     test "a pull of many pages scans the workspace once", ctx do
-      {pages, builds} = counting_builds(ctx.ws, fn -> pull_all(ctx, 2) end)
+      # A write by anything else that syncs moves the cache stamp mid-pull and
+      # rightly rebuilds the index, so only a pull during which the stamp held
+      # says whether the pages share it. Each attempt starts from an empty
+      # cache, or a retry would be served the entry the last one built.
+      {pages, builds} =
+        while_stamp_holds(fn ->
+          GateCache.clear()
+          counting_builds(ctx.ws, fn -> pull_all(ctx, 2) end)
+        end)
 
       assert pages >= 3
       assert Enum.count(builds, &(&1 == :index)) == 1
