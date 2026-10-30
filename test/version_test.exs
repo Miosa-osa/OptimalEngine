@@ -47,4 +47,13 @@ defmodule OptimalEngine.VersionTest do
     # Compiled from OPTIMAL_RELEASE_CHANNEL at build time ("dev" in a plain test build).
     assert Version.release_channel() in Version.release_channels()
   end
+
+  test "an unpinned build reports the commit of the checkout it was compiled from" do
+    root = Path.expand("..", __DIR__)
+
+    with "" <- System.get_env("OPTIMAL_ENGINE_GIT_SHA", ""),
+         {sha, 0} <- System.cmd("git", ["rev-parse", "HEAD"], cd: root, stderr_to_stdout: true) do
+      assert Version.info().git_sha == String.trim(sha)
+    end
+  end
 end

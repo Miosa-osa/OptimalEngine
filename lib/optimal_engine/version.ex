@@ -20,8 +20,44 @@ defmodule OptimalEngine.Version do
   @contract @external_resource |> File.read!() |> Jason.decode!()
   # Build-time metadata. A release build sets both variables; an unset or empty
   # variable means the checkout's own commit and the compilation time are used.
-  @git_sha (case System.get_env("OPTIMAL_ENGINE_GIT_SHA") do
-              value when is_binary(value) and value != "" ->
+  # The files that move when the checkout's commit moves: HEAD, the branch ref
+  # it names and packed-refs. They are external resources, so Mix recompiles
+  # this module (and re-reads the sha) after a commit, checkout or pull that
+  # changed no source file. A release build with the sha set does not read them.
+  @git_sha_pinned (case System.get_env("OPTIMAL_ENGINE_GIT_SHA") do
+                     value when is_binary(value) and value != "" -> value
+                     _ -> nil
+                   end)
+
+  @git_state_paths (if @git_sha_pinned do
+                      []
+                    else
+                      git_path = fn name ->
+                        case System.cmd("git", ["rev-parse", "--git-path", name],
+                               cd: @source_root,
+                               stderr_to_stdout: true
+                             ) do
+                          {path, 0} -> [Path.expand(String.trim(path), @source_root)]
+                          _ -> []
+                        end
+                      end
+
+                      branch_ref =
+                        case System.cmd("git", ["symbolic-ref", "-q", "HEAD"],
+                               cd: @source_root,
+                               stderr_to_stdout: true
+                             ) do
+                          {ref, 0} -> git_path.(String.trim(ref))
+                          _ -> []
+                        end
+
+                      git_path.("HEAD") ++ branch_ref ++ git_path.("packed-refs")
+                    end)
+
+  for path <- @git_state_paths, do: Module.put_attribute(__MODULE__, :external_resource, path)
+
+  @git_sha (case @git_sha_pinned do
+              value when is_binary(value) ->
                 value
 
               _ ->

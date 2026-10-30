@@ -131,6 +131,19 @@ defmodule OptimalEngine.Retrieval.RAG do
   """
   @spec ask(String.t(), keyword()) :: {:ok, ask_result()} | {:error, term()}
   def ask(query, opts \\ []) when is_binary(query) do
+    started = System.monotonic_time(:millisecond)
+    result = do_ask(query, opts)
+
+    :telemetry.execute(
+      [:optimal_engine, :retrieval, :rag],
+      %{count: 1, duration_ms: System.monotonic_time(:millisecond) - started},
+      %{ok?: match?({:ok, _}, result)}
+    )
+
+    result
+  end
+
+  defp do_ask(query, opts) do
     if Search.available?() do
       with {:ok, opts} <- AsOf.put_if_given(opts) do
         if Keyword.get(opts, :context_package, false),

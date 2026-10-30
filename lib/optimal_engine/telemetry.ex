@@ -21,7 +21,9 @@ defmodule OptimalEngine.Telemetry do
     * `[:optimal_engine, :storage, :asset_fallback]` (an asset that did not
       reach its configured object store and was kept on the local disk)
 
-  Histograms (p50/p95/p99):
+  Histograms (p50/p95/p99). A `search.query`, `retrieval.rag` or `connector.run`
+  event that carries `duration_ms` also records that duration in the matching
+  `latency_ms` histogram; an event named `latency_ms` records its `value`:
     * `[:optimal_engine, :search, :latency_ms]`
     * `[:optimal_engine, :retrieval, :latency_ms]`
     * `[:optimal_engine, :connector, :latency_ms]`
@@ -54,6 +56,14 @@ defmodule OptimalEngine.Telemetry do
     {[:optimal_engine, :retrieval, :latency_ms], :"optimal_engine.retrieval.latency_ms"},
     {[:optimal_engine, :connector, :latency_ms], :"optimal_engine.connector.latency_ms"}
   ]
+
+  # A counter event that carries `duration_ms` also feeds its latency histogram,
+  # so the code that emits the event does not have to emit a second one.
+  @latency_metric_by_event %{
+    [:optimal_engine, :search, :query] => :"optimal_engine.search.latency_ms",
+    [:optimal_engine, :retrieval, :rag] => :"optimal_engine.retrieval.latency_ms",
+    [:optimal_engine, :connector, :run] => :"optimal_engine.connector.latency_ms"
+  }
 
   @counters Enum.map(@counter_events, &elem(&1, 1))
   @histograms Enum.map(@histogram_events, &elem(&1, 1))
@@ -211,6 +221,11 @@ defmodule OptimalEngine.Telemetry do
   def handle_event(event, measurements, _metadata, _config) do
     with {:ok, metric} <- Map.fetch(@metric_by_event, event) do
       send(__MODULE__, {:telemetry_event, metric, measurements})
+    end
+
+    with {:ok, metric} <- Map.fetch(@latency_metric_by_event, event),
+         duration when is_number(duration) <- measurements[:duration_ms] do
+      send(__MODULE__, {:telemetry_event, metric, %{value: duration}})
     end
 
     :ok

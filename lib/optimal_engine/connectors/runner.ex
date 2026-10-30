@@ -93,11 +93,25 @@ defmodule OptimalEngine.Connectors.Runner do
   """
   @spec run(String.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(connector_id, opts \\ []) when is_binary(connector_id) do
-    if governed_run?(opts) do
-      run_governed(connector_id, Keyword.put(opts, :governed, true))
-    else
-      run_raw(connector_id, opts)
+    started = System.monotonic_time(:millisecond)
+
+    result =
+      if governed_run?(opts) do
+        run_governed(connector_id, Keyword.put(opts, :governed, true))
+      else
+        run_raw(connector_id, opts)
+      end
+
+    # A run refused because another is in progress did no work; it is not counted.
+    if result != {:error, :already_running} do
+      :telemetry.execute(
+        [:optimal_engine, :connector, :run],
+        %{count: 1, duration_ms: System.monotonic_time(:millisecond) - started},
+        %{connector_id: connector_id, ok?: match?({:ok, _}, result)}
+      )
     end
+
+    result
   end
 
   @doc "Whether a run of this connector is in progress anywhere in this Engine."

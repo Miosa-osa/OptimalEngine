@@ -53,4 +53,64 @@ defmodule OptimalEngine.TelemetryTest do
     snap = Telemetry.snapshot()
     assert snap.counters[:"optimal_engine.search.query"] >= 1
   end
+
+  test "a counter event with duration_ms also feeds its latency histogram" do
+    :telemetry.execute([:optimal_engine, :search, :query], %{duration_ms: 12}, %{})
+    :telemetry.execute([:optimal_engine, :retrieval, :rag], %{count: 1, duration_ms: 30}, %{})
+    :telemetry.execute([:optimal_engine, :connector, :run], %{count: 1, duration_ms: 50}, %{})
+
+    snap = Telemetry.snapshot()
+
+    for name <- [:search, :retrieval, :connector] do
+      assert snap.histograms[:"optimal_engine.#{name}.latency_ms"].count == 1
+    end
+
+    assert snap.counters[:"optimal_engine.retrieval.rag"] == 1
+    assert snap.counters[:"optimal_engine.connector.run"] == 1
+    assert snap.histograms[:"optimal_engine.retrieval.latency_ms"].p50 == 30
+  end
+
+  describe "emitters" do
+    setup do
+      id = "telemetry-test-#{System.unique_integer([:positive])}"
+      test = self()
+
+      :telemetry.attach_many(
+        id,
+        [
+          [:optimal_engine, :retrieval, :rag],
+          [:optimal_engine, :connector, :run],
+          [:optimal_engine, :intake, :ingested],
+          [:optimal_engine, :intake, :rejected]
+        ],
+        fn event, measurements, _meta, _ -> send(test, {:event, event, measurements}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(id) end)
+    end
+
+    test "RAG.ask emits a rag event with its duration" do
+      OptimalEngine.Retrieval.RAG.ask("telemetry probe", skip_wiki: true)
+
+      assert_receive {:event, [:optimal_engine, :retrieval, :rag], %{duration_ms: ms}}
+      assert is_integer(ms)
+      assert Telemetry.snapshot().counters[:"optimal_engine.retrieval.rag"] >= 1
+    end
+
+    test "a connector run emits a run event, even for one that fails" do
+      assert {:error, _} = OptimalEngine.Connectors.Runner.run("no-such-connector")
+
+      assert_receive {:event, [:optimal_engine, :connector, :run], %{duration_ms: ms}}
+      assert is_integer(ms)
+      assert Telemetry.snapshot().counters[:"optimal_engine.connector.run"] >= 1
+    end
+
+    test "intake emits an ingested or rejected event" do
+      OptimalEngine.Pipeline.Intake.process("telemetry intake probe #{System.unique_integer()}")
+
+      assert_receive {:event, [:optimal_engine, :intake, kind], _}
+      assert kind in [:ingested, :rejected]
+    end
+  end
 end
