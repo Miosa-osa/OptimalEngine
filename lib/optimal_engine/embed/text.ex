@@ -65,6 +65,10 @@ defmodule OptimalEngine.Embed.Text do
   @timeout_ms 5_000
   @probe_timeout_ms 2_000
   @health_ttl_ms 60_000
+  @outcome_key :embed_outcome
+  @outcome_rewrite_ms 5_000
+  @status_ttl_ms 60_000
+  @status_probe_ms 1_500
   @batch_inputs 64
   @batch_bytes 512_000
   # A batch answered 429 is retried once when the endpoint asks for at most this wait.
@@ -142,11 +146,16 @@ defmodule OptimalEngine.Embed.Text do
   defp tenant(tenant_id) when is_binary(tenant_id) and tenant_id != "", do: tenant_id
   defp tenant(_none), do: OptimalEngine.Tenancy.Tenant.default_id()
 
-  defp request(nil, model, input), do: Ollama.request_embedding(model, input)
+  defp request(nil, model, input) do
+    result = Ollama.request_embedding(model, input)
+    note_outcome(result)
+    result
+  end
 
   defp request(endpoint, model, input) do
     result = Endpoint.request(endpoint, model, input)
     note_health(endpoint, result)
+    note_outcome(result)
     result
   end
 
@@ -238,6 +247,7 @@ defmodule OptimalEngine.Embed.Text do
             Endpoint.request_many(endpoint, model, batch, retry_after_max_ms: @retry_after_max_ms)
 
           note_health(endpoint, result)
+          note_outcome(result)
 
           case result do
             {:ok, vectors} ->
@@ -478,6 +488,87 @@ defmodule OptimalEngine.Embed.Text do
       {:ok, result} -> result
       _ -> false
     end
+  end
+
+  @doc """
+  The embedder's state as the Engine last saw it: `:ok`, or `{:error, reason}`
+  when it is down, refuses the key, is out of credit or answers the wrong width.
+
+  This is what the health report shows for the embedder, so a broken embedder
+  is degraded health without probing it on every health call. The state is the
+  outcome of the latest real embedding request in any process (a request the
+  cache answered does not count), kept for `:status_ttl_ms` (default 60
+  seconds). Past that, or before any request, one probe bounded to
+  `:status_probe_ms` (default 1,500) asks again and records its answer. An
+  error that is the input's fault (empty or too long) says nothing about the
+  embedder and is not recorded.
+  """
+  @spec status() :: :ok | {:error, term()}
+  def status do
+    case recent_outcome() do
+      {:ok, outcome} -> outcome
+      :none -> probe_status()
+    end
+  end
+
+  @doc false
+  # The latest recorded outcome, unless it is older than the status TTL.
+  @spec recent_outcome() :: {:ok, :ok | {:error, term()}} | :none
+  def recent_outcome do
+    now = System.monotonic_time(:millisecond)
+
+    case Application.get_env(:optimal_engine, @outcome_key) do
+      {outcome, at} when now - at < status_cfg(:status_ttl_ms, @status_ttl_ms) ->
+        {:ok, outcome}
+
+      _ ->
+        :none
+    end
+  end
+
+  @doc false
+  # Forget the recorded outcome (tests; a changed embedder configuration).
+  @spec reset_outcome() :: :ok
+  def reset_outcome, do: Application.delete_env(:optimal_engine, @outcome_key)
+
+  # The recorded outcome is a node-wide fact, so it lives in the application
+  # environment (an ETS read, no process to call) rather than the process
+  # dictionary the search path's own memo uses. An unchanged outcome is
+  # rewritten at most every few seconds.
+  defp note_outcome({:ok, _vectors}), do: store_outcome(:ok)
+
+  defp note_outcome({:error, reason}) do
+    if unavailable?(reason), do: store_outcome({:error, reason}), else: :ok
+  end
+
+  defp store_outcome(outcome) do
+    now = System.monotonic_time(:millisecond)
+
+    case Application.get_env(:optimal_engine, @outcome_key) do
+      {^outcome, at} when now - at < @outcome_rewrite_ms -> :ok
+      _ -> Application.put_env(:optimal_engine, @outcome_key, {outcome, now})
+    end
+  end
+
+  defp probe_status do
+    budget = status_cfg(:status_probe_ms, @status_probe_ms)
+    task = Task.async(fn -> embed("health", cache: false) end)
+
+    outcome =
+      case Task.yield(task, budget) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {:ok, _vector}} -> :ok
+        {:ok, {:error, reason}} -> {:error, reason}
+        _ -> {:error, :timeout}
+      end
+
+    # A probe that timed out or failed in a way that is no sign of a down
+    # embedder has no recorded answer, and would otherwise be probed again.
+    store_outcome(outcome)
+    outcome
+  end
+
+  defp status_cfg(key, default) do
+    Application.get_env(:optimal_engine, :text_embedding, [])[key] || default
   end
 
   @doc """

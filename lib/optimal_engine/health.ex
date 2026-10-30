@@ -57,16 +57,24 @@ defmodule OptimalEngine.Health do
   Run every readiness check and return a combined report.
 
   Callers that want to skip slow checks (e.g. Ollama) can pass
-  `skip: [:embedder]`.
+  `skip: [:embedder]`. With `embedder: :recent` the embedder check reads the
+  outcome of the latest real embedding request (`OptimalEngine.Embed.Text.status/0`)
+  and probes only when there is none or it is old, so a health endpoint
+  reports a broken embedder as degraded without a probe on every call. The
+  default, `embedder: :probe`, always asks the embedder.
   """
   @spec ready(keyword()) :: readiness()
   def ready(opts \\ []) do
     skip = Keyword.get(opts, :skip, [])
+    embedder = Keyword.get(opts, :embedder, :probe)
 
     checks =
       [:store, :migrations, :credential_key, :network_auth, :embedder]
       |> Enum.reject(&(&1 in skip))
-      |> Enum.map(fn name -> {name, run_check(name)} end)
+      |> Enum.map(fn
+        :embedder -> {:embedder, embedder_check(embedder)}
+        name -> {name, run_check(name)}
+      end)
       |> Enum.into(%{})
 
     errors = Enum.filter(checks, fn {_, v} -> match?({:error, _}, v) end)
@@ -162,11 +170,23 @@ defmodule OptimalEngine.Health do
   # Each failure is named for what the operator has to fix: "unreachable"
   # would send them to the network when the key, the credit or the model is
   # the problem.
-  defp run_check(:embedder) do
-    case safe_embed_ping() do
+  defp run_check(:embedder), do: embedder_check(:probe)
+
+  defp embedder_check(mode) do
+    result = if mode == :recent, do: safe_status(), else: safe_embed_ping()
+
+    case result do
       :ok -> :ok
       {:error, reason} -> {:warn, embedder_problem(reason)}
     end
+  end
+
+  defp safe_status do
+    TextEmbedder.status()
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, reason}
   end
 
   defp embedder_problem({:embed_unauthorized, status}), do: {:embedder_unauthorized, status}

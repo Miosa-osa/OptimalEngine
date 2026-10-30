@@ -1177,8 +1177,10 @@ defmodule OptimalEngine.API.Router do
   end
 
   get "/api/health" do
-    # Lightweight by default: liveness + readiness (store/migrations/creds),
-    # skipping the slow embedder probe so this endpoint never blocks on Ollama.
+    # Lightweight by default: liveness + readiness (store/migrations/creds).
+    # The embedder is read from the latest real embedding outcome, not probed on
+    # each call, so a broken one shows as degraded and this endpoint never
+    # blocks on Ollama.
     # Pass ?full=true for the heavy 10-check knowledge-base diagnostics.
     case query_param(conn, "full", "false") do
       "true" ->
@@ -1194,7 +1196,7 @@ defmodule OptimalEngine.API.Router do
         end
 
       _ ->
-        report = Health.ready(skip: [:embedder])
+        report = Health.ready(embedder: :recent)
         live? = Health.live?()
 
         json(conn, %{
@@ -1218,7 +1220,7 @@ defmodule OptimalEngine.API.Router do
 
   # Engine liveness + readiness (Phase 10 Health module).
   get "/api/status" do
-    report = Health.ready(skip: [:embedder])
+    report = Health.ready(embedder: :recent)
 
     json(conn, %{
       status: Health.status_of(report),

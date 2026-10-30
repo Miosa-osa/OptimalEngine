@@ -1052,6 +1052,68 @@ defmodule OptimalEngine.Embed.TextTest do
     end
   end
 
+  describe "embedder status in health" do
+    setup do
+      Text.reset_outcome()
+      on_exit(&Text.reset_outcome/0)
+    end
+
+    test "a refused embedding degrades health without another call to the endpoint", %{tag: tag} do
+      base = start_stub(fn _path, _body -> {503, %{"error" => "embedding_backend_unavailable"}} end)
+      use_endpoint(base)
+
+      capture_log(fn ->
+        assert {:error, {:embed_unavailable, 503}} = Text.embed("refused #{tag}", cache: false)
+      end)
+
+      assert_received {:embed_request, _, _, _}
+
+      report = OptimalEngine.Health.ready(embedder: :recent)
+      assert report.checks.embedder == {:warn, {:embedder_unavailable, 503}}
+      assert :embedder in report.degraded
+      assert OptimalEngine.Health.status_of(report) == :degraded
+      refute_received {:embed_request, _, _, _}
+    end
+
+    test "a working embedder keeps health up, and the health check does not probe it", %{tag: tag} do
+      use_endpoint(start_stub(&openai_meaning/2))
+
+      assert {:ok, _} = Text.embed("works #{tag}", cache: false)
+      assert_received {:embed_request, _, _, _}
+
+      report = OptimalEngine.Health.ready(embedder: :recent)
+      assert report.checks.embedder == :ok
+      refute :embedder in report.degraded
+      refute_received {:embed_request, _, _, _}
+    end
+
+    test "without a recent outcome one probe answers, and its answer is kept" do
+      use_endpoint(start_stub(fn _path, _body -> {503, %{"error" => "down"}} end))
+
+      capture_log(fn ->
+        assert {:warn, {:embedder_unavailable, 503}} =
+                 OptimalEngine.Health.ready(embedder: :recent).checks.embedder
+
+        assert {:warn, {:embedder_unavailable, 503}} =
+                 OptimalEngine.Health.ready(embedder: :recent).checks.embedder
+      end)
+
+      assert_received {:embed_request, _, _, %{"input" => "health"}}
+      refute_received {:embed_request, _, _, _}
+    end
+
+    test "an outcome older than the status TTL is probed again", %{tag: tag} do
+      use_endpoint(start_stub(&openai_meaning/2), status_ttl_ms: 1)
+
+      assert {:ok, _} = Text.embed("works #{tag}", cache: false)
+      assert_received {:embed_request, _, _, _}
+      Process.sleep(5)
+
+      assert Text.status() == :ok
+      assert_received {:embed_request, _, _, %{"input" => "health"}}
+    end
+  end
+
   defp start_stub(respond) do
     ref = :"#{__MODULE__}.Stub#{System.unique_integer([:positive])}"
     {:ok, _pid} = Plug.Cowboy.http(Stub, [test: self(), respond: respond], port: 0, ref: ref)

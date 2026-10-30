@@ -167,7 +167,12 @@ defmodule OptimalEngine.Pipeline.Intake do
   """
   @spec process(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def process(raw_text, opts \\ []) when is_binary(raw_text) do
-    GenServer.call(__MODULE__, {:process, raw_text, opts}, 30_000)
+    result = GenServer.call(__MODULE__, {:process, raw_text, opts}, 30_000)
+
+    event = if match?({:ok, _}, result), do: :ingested, else: :rejected
+    :telemetry.execute([:optimal_engine, :intake, event], %{count: 1}, %{})
+
+    result
   end
 
   @doc """
