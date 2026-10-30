@@ -100,6 +100,9 @@ defmodule OptimalEngine.Pipeline.Indexer do
       workspace id can be shared by two tenants, so a caller that indexes on
       behalf of a tenant MUST pass this; without it the row stays with the
       owner of the registered workspace, else with `default`.
+    * `:created_at`, `:modified_at`: DateTimes that replace the file's own
+      times. Intake passes its signal's, so a cross-reference copy is dated
+      when the signal happened, not when the copy was written.
   """
   @spec index_file(String.t(), keyword()) :: {:ok, Context.t()} | {:error, term()}
   def index_file(path, opts \\ []) when is_binary(path) and is_list(opts) do
@@ -253,7 +256,7 @@ defmodule OptimalEngine.Pipeline.Indexer do
 
   defp index_single_file(path, known_entities, opts) do
     with ctx when not is_nil(ctx) <- build_context(path, known_entities, opts),
-         ctx = ctx |> stamp_scope(opts) |> stamp_metadata(opts),
+         ctx = ctx |> stamp_scope(opts) |> stamp_metadata(opts) |> stamp_dates(opts),
          :ok <- Store.insert_context(ctx) do
       {:ok, ctx}
     else
@@ -281,6 +284,17 @@ defmodule OptimalEngine.Pipeline.Indexer do
       _ -> ctx
     end
   end
+
+  # A caller that knows when the content happened states it; otherwise the
+  # file's own times stand.
+  defp stamp_dates(%Context{} = ctx, opts) do
+    ctx
+    |> put_date(:created_at, Keyword.get(opts, :created_at))
+    |> put_date(:modified_at, Keyword.get(opts, :modified_at))
+  end
+
+  defp put_date(%Context{} = ctx, key, %DateTime{} = at), do: Map.put(ctx, key, at)
+  defp put_date(%Context{} = ctx, _key, _at), do: ctx
 
   defp stamp_metadata(%Context{} = ctx, opts) do
     case Keyword.get(opts, :metadata) do

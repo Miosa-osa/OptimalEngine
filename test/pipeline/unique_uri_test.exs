@@ -222,6 +222,29 @@ defmodule OptimalEngine.Pipeline.UniqueUriTest do
       assert length(copies) == 2
     end
 
+    test "a cross-reference copy is dated when its signal happened, not when it was written",
+         ctx do
+      {:ok, result} =
+        Intake.process("Invoice 79. Amount: $2,000. Payment due: 2026-04-01.",
+          workspace_id: ctx.ws,
+          node: "team",
+          genre: "invoice",
+          title: "Invoice 79",
+          occurred_at: @occurred
+        )
+
+      assert [copy] =
+               Enum.filter(result.cross_references, &String.contains?(&1, "operation-revenue"))
+
+      {:ok, [[created_at, modified_at]]} =
+        Store.raw_query("SELECT created_at, modified_at FROM contexts WHERE path = ?1", [
+          Path.join(ctx.root, copy)
+        ])
+
+      assert String.starts_with?(created_at, "2026-03-01T10:00:00")
+      assert String.starts_with?(modified_at, "2026-03-01T10:00:00")
+    end
+
     test "a cross-reference copy of a labelled document carries its labels and source package",
          ctx do
       {:ok, labelled} =
