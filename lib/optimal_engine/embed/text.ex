@@ -517,8 +517,10 @@ defmodule OptimalEngine.Embed.Text do
   def recent_outcome do
     now = System.monotonic_time(:millisecond)
 
+    ttl = status_cfg(:status_ttl_ms, @status_ttl_ms)
+
     case Application.get_env(:optimal_engine, @outcome_key) do
-      {outcome, at} when now - at < status_cfg(:status_ttl_ms, @status_ttl_ms) ->
+      {outcome, at} when now - at < ttl ->
         {:ok, outcome}
 
       _ ->
