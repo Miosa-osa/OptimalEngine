@@ -184,6 +184,31 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
     on_exit(fn -> :telemetry.detach(handler) end)
   end
 
+  # A cancel sent from a telemetry handler has to land: the job is read from the
+  # Store, and a read that times out under load answers `:not_found`, which a
+  # handler would drop, and the import would run to its end. It is retried until
+  # the Store answers, and raised if it never does.
+  def cancel_running!(tenant, job_id, attempts \\ 50) do
+    result =
+      try do
+        BundleJobs.cancel(tenant, job_id)
+      catch
+        :exit, reason -> {:error, {:exit, reason}}
+      end
+
+    case result do
+      {:ok, _view, state} when state in [:requested, :cancelled] ->
+        result
+
+      _other when attempts > 1 ->
+        Process.sleep(100)
+        cancel_running!(tenant, job_id, attempts - 1)
+
+      other ->
+        raise "cancel did not land: #{inspect(other)}"
+    end
+  end
+
   @doc false
   def handle_event(_event, _measurements, metadata, fun), do: fun.(metadata)
 
@@ -399,7 +424,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
       {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
 
       on_event([:optimal_engine, :bundle, :export_page], fn %{table: table} ->
-        if table == "contexts", do: BundleJobs.cancel(ctx.tenant, view.job_id)
+        if table == "contexts", do: cancel_running!(ctx.tenant, view.job_id)
       end)
 
       {:ok, done} = BundleJobs.drain()
@@ -420,7 +445,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
         BundleJobs.submit_import(ctx.tenant, %{"workspace_id" => target, "bundle" => name})
 
       on_event([:optimal_engine, :bundle, :import_batch], fn _meta ->
-        BundleJobs.cancel(ctx.tenant, view.job_id)
+        cancel_running!(ctx.tenant, view.job_id)
       end)
 
       {:ok, done} = BundleJobs.drain()
@@ -482,7 +507,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
 
       foreign =
         foreign_write_after_contexts(ctx, target, fn ->
-          BundleJobs.cancel(ctx.tenant, view.job_id)
+          cancel_running!(ctx.tenant, view.job_id)
         end)
 
       {:ok, done} = BundleJobs.drain()
@@ -506,7 +531,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
 
       foreign =
         foreign_write_after_contexts(ctx, target, fn ->
-          BundleJobs.cancel(ctx.tenant, view.job_id)
+          cancel_running!(ctx.tenant, view.job_id)
         end)
 
       {:ok, done} = BundleJobs.drain()
@@ -530,7 +555,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
         })
 
       on_event([:optimal_engine, :bundle, :import_batch], fn
-        %{table: "contexts"} -> BundleJobs.cancel(ctx.tenant, view.job_id)
+        %{table: "contexts"} -> cancel_running!(ctx.tenant, view.job_id)
         _other -> :ok
       end)
 
