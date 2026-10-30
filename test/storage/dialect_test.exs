@@ -118,6 +118,24 @@ defmodule OptimalEngine.Store.DialectTest do
                )
     end
 
+    test "SQLite index hints are dropped, and a column named like them is not" do
+      assert {:ok, "SELECT id FROM chunks WHERE workspace_id = $1 AND id > $2"} =
+               Dialect.to_postgres(
+                 "SELECT id FROM chunks INDEXED BY idx_chunks_workspace_id WHERE workspace_id = ?1 AND id > ?2"
+               )
+
+      assert {:ok, "SELECT c.id FROM contexts c WHERE c.workspace_id = $1"} =
+               Dialect.to_postgres(
+                 "SELECT c.id FROM contexts c INDEXED BY idx_contexts_workspace_id WHERE c.workspace_id = ?1"
+               )
+
+      assert {:ok, "SELECT a FROM t WHERE b = $1"} =
+               Dialect.to_postgres("SELECT a FROM t NOT INDEXED WHERE b = ?1")
+
+      assert {:ok, "SELECT id FROM contexts WHERE NOT indexed_at IS NULL"} =
+               Dialect.to_postgres("SELECT id FROM contexts WHERE NOT indexed_at IS NULL")
+    end
+
     test "a list bound as one JSON array parameter, and json_each anywhere else refused" do
       assert {:ok,
               "SELECT id FROM t WHERE a IN (SELECT value FROM jsonb_array_elements_text(CAST($2 AS text)::jsonb)) AND tenant_id = $1"} =
