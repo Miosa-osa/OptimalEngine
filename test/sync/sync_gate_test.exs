@@ -2502,16 +2502,7 @@ defmodule OptimalEngine.SyncGateTest do
 
       assert :holds_above in first
 
-      {:ok, _} =
-        Store.raw_query(
-          "UPDATE assets SET size_bytes = 2, metadata = '{\"seen\":true}', trust_label = 'reviewed' WHERE id = ?1",
-          [ctx.asset]
-        )
-
-      {_, again} =
-        counting_builds(ctx.ws, fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end)
-
-      assert again == []
+      assert unrelated_write_rebuilds(ctx) == []
 
       {:ok, _} =
         Store.raw_query("UPDATE assets SET security_labels = '[\"internal\"]' WHERE id = ?1", [
@@ -3396,6 +3387,41 @@ defmodule OptimalEngine.SyncGateTest do
     if page["more"],
       do: pull_all(ctx, limit, page["cursor"], pages + 1),
       else: pages
+  end
+
+  # What the gate scanned again after a write to columns it does not read. The
+  # stamp is the write sequences of the whole store, so a write by anything else
+  # that syncs (a scheduler, a peer cycle) moves it too and rightly rebuilds. A
+  # run in which the sequences moved is not about this write: it is repeated.
+  # Only a run in which they did not move says whether the cache held.
+  defp unrelated_write_rebuilds(ctx, attempts \\ 20) do
+    before = stamp_sequences()
+    warm = fn -> Sync.changes(ctx.tenant, ctx.ws, limit: 2_000) end
+    _ = counting_builds(ctx.ws, warm)
+
+    {:ok, _} =
+      Store.raw_query(
+        "UPDATE assets SET size_bytes = 2, metadata = '{\"seen\":true}', trust_label = 'reviewed' WHERE id = ?1",
+        [ctx.asset]
+      )
+
+    {_, rebuilt} = counting_builds(ctx.ws, warm)
+
+    cond do
+      stamp_sequences() == before -> rebuilt
+      attempts > 1 -> unrelated_write_rebuilds(ctx, attempts - 1)
+      true -> flunk("the write sequences kept moving under the test")
+    end
+  end
+
+  defp stamp_sequences do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT name, seq FROM sqlite_sequence WHERE name IN ('sync_capture', 'sync_local_stamp', 'sync_mutations') ORDER BY name",
+        []
+      )
+
+    rows
   end
 
   # Runs `fun`, returning its result and what the gate scanned the workspace
