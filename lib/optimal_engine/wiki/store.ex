@@ -58,6 +58,43 @@ defmodule OptimalEngine.Wiki.Store do
     end
   end
 
+  @attempt_key "curation_attempted_at"
+
+  @doc "Frontmatter key holding the time of the last curation that changed nothing."
+  @spec attempt_key() :: String.t()
+  def attempt_key, do: @attempt_key
+
+  @doc """
+  Record a curation attempt that produced no new version (refused or failed)
+  in the page's frontmatter, leaving `last_curated`, the body and the
+  version alone. The scheduler does not retry the page until the next stale
+  window. Writes the row directly: it is bookkeeping, not a page update, so
+  it does not notify the Surfacer or the memory bridge.
+  """
+  @spec record_curation_attempt(Page.t()) :: :ok | {:error, term()}
+  def record_curation_attempt(%Page{} = page) do
+    frontmatter =
+      (page.frontmatter || %{})
+      |> Map.put(@attempt_key, DateTime.utc_now() |> DateTime.to_iso8601())
+      |> Jason.encode!()
+
+    sql = """
+    UPDATE wiki_pages SET frontmatter = ?1
+    WHERE tenant_id = ?2 AND slug = ?3 AND audience = ?4 AND version = ?5
+    """
+
+    case Store.raw_query(sql, [
+           frontmatter,
+           page.tenant_id,
+           page.slug,
+           page.audience,
+           page.version
+         ]) do
+      {:ok, _} -> :ok
+      other -> other
+    end
+  end
+
   # Phase 15 hook — every successful wiki write fans out to the Surfacer
   # so any matching subscription gets a proactive push. Workspace_id will
   # come off the Page struct once the wiki tier is workspace-aware; for
