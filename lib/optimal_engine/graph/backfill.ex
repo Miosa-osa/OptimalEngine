@@ -27,8 +27,10 @@ defmodule OptimalEngine.Graph.Backfill do
   in `:failed_edges`. A run is recorded in `graph_backfills`, which
   `OptimalEngine.Graph.backfill_status/1` reads, on the terms
   `Graph.backfill/1` records one: it covered a workspace, or every workspace,
-  in one go (no `:after`) to the end, with the claim pass and no failed
-  write. A run over one tenant's workspaces is not recorded there.
+  from the start to the end, with the claim pass and no failed write. A run
+  resumed with `:after` covered it from the start only when `:carried` brings
+  the counts of the runs before it, so a run done in slices is recorded by
+  its last slice. A run over one tenant's workspaces is not recorded there.
 
   Every insert is `INSERT OR IGNORE`, so a run is idempotent. Contexts, then
   claims, are read a page at a time in id order, and every edge is its own
@@ -43,6 +45,9 @@ defmodule OptimalEngine.Graph.Backfill do
     * `:page` is how many rows one Store call reads (default 200);
     * `:after` resumes a run: `{:contexts, id}` or `{:claims, id}` (`run/1`
       returns `:next`); `{:claims, ""}` runs the claim pass alone;
+    * `:carried` is what the earlier slices of a run that began at the start
+      counted, `%{contexts:, claims:, failed_edges:}`; with `:after` it makes
+      the slice that reaches the end record the whole run;
     * `:count` set to false leaves out `:edges_before` and `:edges_after`,
       two counts over the scope's edges (default true);
     * `:pause_ms` sleeps after each page (default 0);
@@ -133,16 +138,27 @@ defmodule OptimalEngine.Graph.Backfill do
              edges_after: edges_after,
              next: next
            }),
-         :ok <- record(recorded, opts, result) do
+         :ok <- record(recorded, opts, whole_run(result, opts[:carried])) do
       {:ok, result}
     end
   end
 
-  # Graph.backfill/1's terms, for a run that read its whole scope itself: a
-  # resumed run cannot see the failures of the runs before it.
+  # Graph.backfill/1's terms, for a run that read its whole scope: by itself,
+  # or in slices whose earlier failures `:carried` brings. A resumed run
+  # without it cannot see the failures of the runs before it.
   defp recorded?(opts, pass, counts, next) do
-    next == nil and opts[:after] == nil and pass.claims? and counts.failed_edges == 0 and
+    carried = opts[:carried]
+    failed = counts.failed_edges + if(carried, do: carried.failed_edges, else: 0)
+
+    next == nil and (opts[:after] == nil or carried != nil) and pass.claims? and failed == 0 and
       not tenant_scope?(opts)
+  end
+
+  # The graph_backfills row of a run done in slices counts all of them.
+  defp whole_run(result, nil), do: result
+
+  defp whole_run(result, carried) do
+    %{result | contexts: result.contexts + carried.contexts, claims: result.claims + carried.claims}
   end
 
   # A run over one tenant's workspaces names neither one workspace nor all.

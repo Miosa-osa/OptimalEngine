@@ -182,6 +182,7 @@ An Engine that has these two job routes (`POST /api/maintenance/graph/backfill` 
 
 One run handles at most 500 chunks, or 1,000 contexts and claims, and never counts the whole scope.
 When more is left, the job completes and queues its continuation in the same transaction; the continuation resumes after the last row it reached.
+A graph continuation also carries what the slices before it counted, so the slice that reaches the end records the backfill in `graph_backfills` when every slice wrote all its edges, and `GET /api/maintenance/graph` then reads `backfill_needed` false for that workspace.
 The work reads one workspace through its `(workspace_id, id)` indexes a page at a time and pauses between pages, so the single-writer Store stays free for requests.
 A failed run retries with backoff and then dead-letters, like the analyses.
 An unavailable embedder is not a failure: the chunk job goes back in the queue after one minute, doubling up to an hour, without spending an attempt (`last_error` "deferred: embedder unavailable"), and marks nothing failed.
