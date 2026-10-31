@@ -7,11 +7,13 @@ defmodule OptimalEngine.Maintenance do
   | --- | --- |
   | `maintenance.chunk_embeddings` | embeds the workspace's chunks that have no embedding (`OptimalEngine.Embed.ChunkBackfill`) |
   | `maintenance.graph_backfill` | writes the relationship edges of the workspace's contexts and claims (`OptimalEngine.Graph.Backfill`) |
+  | `maintenance.association_projection` | rebuilds the workspace's associative projection (`OptimalEngine.MemoryCore.AssociativeProjection`) once a recall finds it older than its sources |
 
   A job belongs to one workspace, and a workspace has at most one queued or
   running job of each kind: a request while one is active gets that job.
   One run does a bounded amount of work (500 chunks, or 1,000 contexts and
-  claims) and never counts the whole scope. When more is left, the job
+  claims; a projection job rebuilds the workspace's projection in one
+  transaction) and never counts the whole scope. When more is left, the job
   completes and queues its continuation in the same Store transaction; the
   continuation resumes after the last row reached, so progress survives a
   restart. A failure retries with backoff and then dead-letters.
@@ -33,10 +35,12 @@ defmodule OptimalEngine.Maintenance do
   alias OptimalEngine.Embed.ChunkBackfill
   alias OptimalEngine.Graph.Backfill, as: GraphBackfill
   alias OptimalEngine.{Jobs, Store}
+  alias OptimalEngine.MemoryCore.{AssociativeProjection, ScopeEnvelope}
 
   @chunk_kind "maintenance.chunk_embeddings"
   @graph_kind "maintenance.graph_backfill"
-  @kinds [@chunk_kind, @graph_kind]
+  @projection_kind "maintenance.association_projection"
+  @kinds [@chunk_kind, @graph_kind, @projection_kind]
 
   @chunk_batch 500
   @graph_batch 1_000
@@ -48,7 +52,7 @@ defmodule OptimalEngine.Maintenance do
   @max_deferral_s 3_600
   @keep_days 7
 
-  @type kind :: :chunk_embeddings | :graph_backfill
+  @type kind :: :chunk_embeddings | :graph_backfill | :association_projection
   @type outcome :: :completed | :continued | :deferred | :retry | :dead
 
   @type sweep :: %{
@@ -62,6 +66,7 @@ defmodule OptimalEngine.Maintenance do
   @spec kind(kind()) :: String.t()
   def kind(:chunk_embeddings), do: @chunk_kind
   def kind(:graph_backfill), do: @graph_kind
+  def kind(:association_projection), do: @projection_kind
 
   @doc "Every maintenance job kind."
   @spec kinds() :: [String.t()]
@@ -78,6 +83,15 @@ defmodule OptimalEngine.Maintenance do
   def enqueue(kind, workspace_id, payload \\ %{}, opts \\ []) do
     Jobs.enqueue_coalesced(workspace_id, kind(kind), payload, opts)
   end
+
+  @doc """
+  Queues a low-priority rebuild of the workspace's associative projection, or
+  returns the one already queued or running there.
+  """
+  @spec queue_projection_rebuild(String.t()) ::
+          {:ok, Jobs.job(), :queued | :active} | {:error, term()}
+  def queue_projection_rebuild(workspace_id),
+    do: enqueue(:association_projection, workspace_id, %{}, priority: @sweep_priority)
 
   @doc "The workspace's queued or running job of a kind, or nil."
   @spec active(kind(), String.t()) :: {:ok, Jobs.job() | nil} | {:error, term()}
@@ -198,11 +212,11 @@ defmodule OptimalEngine.Maintenance do
     # SQLite date arithmetic; a Postgres store uses now() - interval.
     sql = """
     DELETE FROM jobs
-    WHERE kind IN (?1, ?2) AND status = 'completed'
-      AND completed_at < datetime('now', '-' || ?3 || ' days')
+    WHERE kind IN (?1, ?2, ?3) AND status = 'completed'
+      AND completed_at < datetime('now', '-' || ?4 || ' days')
     """
 
-    Store.transaction(fn txn -> Store.txn_execute(txn, sql, [@chunk_kind, @graph_kind, days]) end)
+    Store.transaction(fn txn -> Store.txn_execute(txn, sql, @kinds ++ [days]) end)
   end
 
   # ── the work ────────────────────────────────────────────────────────────
@@ -266,6 +280,12 @@ defmodule OptimalEngine.Maintenance do
       {:error, _} = error ->
         error
     end
+  end
+
+  defp do_perform(%{kind: @projection_kind} = job, _opts) do
+    %{tenant_id: job.tenant_id, workspace_id: job.workspace_id, actor_id: "system:maintenance"}
+    |> ScopeEnvelope.resolve()
+    |> AssociativeProjection.rebuild()
   end
 
   defp do_perform(job, _opts), do: {:error, {:unknown_kind, job.kind}}

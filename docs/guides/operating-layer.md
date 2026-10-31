@@ -159,12 +159,13 @@ POST /api/jobs/dead/<id>/replay {"workspace": "<id>"}     (admin)
 
 ## Maintenance jobs
 
-Two maintenance backfills run as durable jobs, so an Engine without Mix, such as a release, runs them through the API.
+Three kinds of maintenance run as durable jobs, so an Engine without Mix, such as a release, runs them through the API.
 
 | Kind | Work | Mix task (same work) |
 | --- | --- | --- |
 | `maintenance.chunk_embeddings` | embeds the workspace's chunks that have no chunk embedding | `mix optimal.embed_backfill` |
 | `maintenance.graph_backfill` | writes the relationship edges of the workspace's contexts and claims | `mix optimal.graph_backfill` |
+| `maintenance.association_projection` | rebuilds the workspace's associative projection | none; `POST /api/memory/associations/rebuild` does it in the request |
 
 ```
 GET  /api/maintenance/embeddings?kind=chunks&workspace=<id>                     (admin; missing count and the active job)
@@ -181,6 +182,7 @@ The client CLI's `optimal graph backfill [-w ws]` calls the graph route against 
 An Engine that has these two job routes (`POST /api/maintenance/graph/backfill` and `POST /api/maintenance/embeddings` with `kind=chunks`) lists the `maintenance_jobs_v1` capability in `GET /api/version`, so a client can tell it from one that runs the backfills only through Mix.
 
 One run handles at most 500 chunks, or 1,000 contexts and claims, and never counts the whole scope.
+A projection job is queued by recall, not by a route: a reconstructive recall that finds a source of the projection written or ended since it was built answers from the projection as it is and queues one, at low priority ([projection maintenance](reconstructive-memory-and-optimality.md#projection-maintenance)).
 When more is left, the job completes and queues its continuation in the same transaction; the continuation resumes after the last row it reached.
 A graph continuation also carries what the slices before it counted, so the slice that reaches the end records the backfill in `graph_backfills` when every slice wrote all its edges, and `GET /api/maintenance/graph` then reads `backfill_needed` false for that workspace.
 The work reads one workspace through its `(workspace_id, id)` indexes a page at a time and pauses between pages, so the single-writer Store stays free for requests.

@@ -40,7 +40,10 @@ Outcome feedback requires the original actor or an explicit reconstruction revie
 
 ## Projection Maintenance
 
-The Associative Projection is rebuilt from accepted Facts, current Memory Objects, recorded Episodes, and current Relationship Edges.
+The Associative Projection is rebuilt from accepted Facts, current Memory Objects, durable versioned memories, recorded Episodes, and current Relationship Edges.
+A workspace's first reconstructive recall builds it.
+A later recall that finds one of those sources written or ended since the projection was built answers from the projection as it is and queues a `maintenance.association_projection` job, which rebuilds it in the background ([maintenance jobs](operating-layer.md#maintenance-jobs)).
+An Episode's provenance becomes the episode's own link plus one link per source package, signal and claim it names.
 
 ```bash
 .system/oe memory_project miosa
