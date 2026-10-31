@@ -7,6 +7,9 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
   and persists a terminal run atomically with its trace.
   """
 
+  require Logger
+
+  alias OptimalEngine.Maintenance
   alias OptimalEngine.MemoryCore.{AssociativeProjection, ID, RetrievalPackage, ScopeEnvelope, Store}
 
   @policy_version "governed-reconstruction-v2"
@@ -142,9 +145,33 @@ defmodule OptimalEngine.MemoryCore.Reconstruction do
           AssociativeProjection.expand(cues, scope, expansion_opts)
         end
 
-      result ->
+      {:ok, _associations} = result ->
+        refresh_when_stale(scope)
         result
+
+      error ->
+        error
     end
+  end
+
+  # A projection older than its sources answers this recall as it is and is
+  # rebuilt by a maintenance job, so no recall waits on a rebuild. A workspace
+  # that cannot hold a job (not registered) keeps the projection it has.
+  defp refresh_when_stale(scope) do
+    if AssociativeProjection.stale?(scope) do
+      case Maintenance.queue_projection_rebuild(scope.workspace_id) do
+        {:ok, _job, _state} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.debug(
+            "[Reconstruction] projection of #{scope.workspace_id} is stale, " <>
+              "no rebuild queued: #{inspect(reason)}"
+          )
+      end
+    end
+
+    :ok
   end
 
   defp traverse(associations, cues, required_roles, step_budget, token_budget) do

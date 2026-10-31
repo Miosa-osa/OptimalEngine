@@ -47,6 +47,48 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
     end)
   end
 
+  @doc """
+  Whether a source of the workspace's projection (a Fact, Memory Object,
+  durable memory, Episode or Relationship Edge) was written or ended since the
+  projection was built. A workspace with no projection is not stale: its first
+  recall builds one.
+  """
+  @spec stale?(ScopeEnvelope.t()) :: boolean()
+  def stale?(%ScopeEnvelope{} = scope) do
+    params = [scope.tenant_id, scope.workspace_id]
+
+    # One rebuild writes all of a workspace's associations in one transaction;
+    # the earliest of them is when it started, so a source written while it
+    # ran (possible on PostgreSQL) still counts as later.
+    built = """
+    SELECT MIN(updated_at) FROM memory_associations
+    WHERE tenant_id = ?1 AND workspace_id = ?2
+    """
+
+    changed = """
+    SELECT
+      (SELECT MAX(updated_at) FROM facts WHERE tenant_id = ?1 AND workspace_id = ?2),
+      (SELECT MAX(updated_at) FROM memory_objects WHERE tenant_id = ?1 AND workspace_id = ?2),
+      (SELECT MAX(updated_at) FROM memories WHERE tenant_id = ?1 AND workspace_id = ?2),
+      (SELECT MAX(created_at) FROM episodes WHERE tenant_id = ?1 AND workspace_id = ?2),
+      (SELECT MAX(created_at) FROM relationship_edges WHERE tenant_id = ?1 AND workspace_id = ?2),
+      (SELECT MAX(transaction_time_end) FROM relationship_edges
+       WHERE tenant_id = ?1 AND workspace_id = ?2)
+    """
+
+    with {:ok, [[built_at]]} when built_at != nil <- Store.raw_query(built, params),
+         {:ok, [times]} <- Store.raw_query(changed, params) do
+      built_at = to_second(built_at)
+      Enum.any?(times, &(&1 != nil and to_second(&1) >= built_at))
+    else
+      _none_or_error -> false
+    end
+  end
+
+  # Sources write ISO 8601 or SQLite's datetime('now'), both UTC; compared to
+  # the second, a write in the second of a rebuild counts as later.
+  defp to_second(value), do: value |> to_string() |> String.slice(0, 19) |> String.replace("T", " ")
+
   @doc "Expands cues into authorized, current association paths."
   @spec expand([String.t()], ScopeEnvelope.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def expand(cues, %ScopeEnvelope{} = scope, opts \\ []) do

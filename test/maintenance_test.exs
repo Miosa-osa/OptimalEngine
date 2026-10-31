@@ -12,7 +12,8 @@ defmodule OptimalEngine.MaintenanceTest do
   alias OptimalEngine.API.Router
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Embed.ChunkBackfill
-  alias OptimalEngine.{Jobs, Maintenance, Store}
+  alias OptimalEngine.{Jobs, Maintenance, MemoryCore, Store}
+  alias OptimalEngine.MemoryCore.{AssociativeProjection, ScopeEnvelope}
   alias OptimalEngine.Pipeline.Decomposer.ChunkTree
   alias OptimalEngine.Pipeline.Embedder.Embedding
   alias OptimalEngine.Tenancy.Tenant
@@ -20,6 +21,8 @@ defmodule OptimalEngine.MaintenanceTest do
 
   @chunk_kind "maintenance.chunk_embeddings"
   @graph_kind "maintenance.graph_backfill"
+  @projection_kind "maintenance.association_projection"
+  @actor "user:maintenance-test"
 
   setup do
     n = System.unique_integer([:positive])
@@ -241,6 +244,50 @@ defmodule OptimalEngine.MaintenanceTest do
     end
   end
 
+  describe "projection refresh" do
+    test "a recall over a projection older than its sources queues one rebuild, which brings it up to date",
+         ctx do
+      first = "mntfirst#{ctx.n}"
+      later = "mntlater#{ctx.n}"
+
+      scope =
+        ScopeEnvelope.resolve(%{tenant_id: ctx.tenant, workspace_id: ctx.ws, actor_id: @actor})
+
+      # The first memory was written before the projection was built.
+      memory!(ctx, "#{first} kickoff notes", "2026-01-01 00:00:00")
+      assert {:ok, %{associations: built}} = AssociativeProjection.rebuild(scope)
+      assert built > 0
+
+      {:ok, _} =
+        Store.raw_query("UPDATE memory_associations SET updated_at = ?2 WHERE workspace_id = ?1", [
+          ctx.ws,
+          "2026-01-02 00:00:00"
+        ])
+
+      refute AssociativeProjection.stale?(scope)
+      assert {:ok, _package} = recall(ctx, first)
+      assert {:ok, nil} = Maintenance.active(:association_projection, ctx.ws)
+
+      memory!(ctx, "#{later} follow-up notes", "2026-06-01 00:00:00")
+      assert AssociativeProjection.stale?(scope)
+      assert {:ok, []} = AssociativeProjection.expand([later], scope)
+
+      # The recall answers from the projection as it is and queues one rebuild.
+      assert {:ok, _package} = recall(ctx, first)
+
+      assert {:ok, %{id: job_id, kind: @projection_kind}} =
+               Maintenance.active(:association_projection, ctx.ws)
+
+      assert {:ok, _package} = recall(ctx, first)
+      assert {:ok, %{id: ^job_id}} = Maintenance.active(:association_projection, ctx.ws)
+
+      assert {:ok, %{job: %{id: ^job_id}, outcome: :completed}} = drain(ctx.ws)
+      assert {:ok, [_ | _]} = AssociativeProjection.expand([later], scope)
+      refute AssociativeProjection.stale?(scope)
+      assert {:ok, nil} = Maintenance.active(:association_projection, ctx.ws)
+    end
+  end
+
   describe "sweep" do
     test "never runs while the embedder is unhealthy", ctx do
       assert {:ok, %{embedder: :unavailable, queued: [], active: []}} =
@@ -452,6 +499,24 @@ defmodule OptimalEngine.MaintenanceTest do
   # A timestamp in the form SQLite's datetime() writes, `days` ago.
   defp days_ago(days) do
     DateTime.utc_now() |> DateTime.add(-days * 86_400) |> Calendar.strftime("%Y-%m-%d %H:%M:%S")
+  end
+
+  # A durable memory, written and last changed at `at`.
+  defp memory!(ctx, content, at) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO memories (id, tenant_id, workspace_id, content, root_memory_id, audience, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?1, 'default', ?5, ?5)",
+        ["mnt-mem-#{System.unique_integer([:positive])}", ctx.tenant, ctx.ws, content, at]
+      )
+  end
+
+  defp recall(ctx, query) do
+    MemoryCore.retrieve(query,
+      tenant_id: ctx.tenant,
+      workspace_id: ctx.ws,
+      actor_id: @actor,
+      strategy: :reconstructive
+    )
   end
 
   defp drain(workspace_id, opts \\ []) do
