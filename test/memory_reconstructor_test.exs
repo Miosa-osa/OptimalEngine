@@ -2,7 +2,15 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.MemoryCore
-  alias OptimalEngine.MemoryCore.{AssociativeProjection, ReconstructionLearning, ScopeEnvelope}
+
+  alias OptimalEngine.MemoryCore.{
+    AssociativeProjection,
+    Episode,
+    ReconstructionLearning,
+    ScopeEnvelope
+  }
+
+  alias OptimalEngine.MemoryCore.Store, as: MemoryCoreStore
   alias OptimalEngine.Store
 
   setup do
@@ -249,6 +257,62 @@ defmodule OptimalEngine.MemoryCore.ReconstructionTest do
     assert fact_count == 0
 
     Store.raw_execute("DELETE FROM memories WHERE id = ?1", [memory_id])
+  end
+
+  test "reconstructs an episode with the sources its provenance names as evidence links", %{
+    workspace: workspace,
+    actor: actor
+  } do
+    cue = "episodecue#{System.unique_integer([:positive])}"
+
+    {:ok, episode} =
+      Episode.new(%{
+        tenant_id: "default",
+        workspace_id: workspace,
+        kind: "transcript",
+        summary: "The weekly sync #{cue} settled the storage plan",
+        provenance: %{
+          "source_package_id" => "sp_#{cue}",
+          "signal_id" => "sig_#{cue}",
+          "claim_id" => "cl_#{cue}"
+        }
+      })
+
+    assert :ok = MemoryCoreStore.insert_episode(episode)
+    on_exit(fn -> Store.raw_execute("DELETE FROM episodes WHERE id = ?1", [episode.id]) end)
+
+    links = [
+      %{"type" => "episode", "id" => episode.id},
+      %{"type" => "source_package", "id" => "sp_#{cue}"},
+      %{"type" => "signal", "id" => "sig_#{cue}"},
+      %{"type" => "claim", "id" => "cl_#{cue}"}
+    ]
+
+    # The Context Package is stored as /api/assemble stores it, links and all.
+    assert {:ok, package} =
+             MemoryCore.retrieve("#{cue} storage plan",
+               tenant_id: "default",
+               workspace_id: workspace,
+               actor_id: actor,
+               strategy: :hybrid
+             )
+
+    assert Enum.all?(links, &(&1 in package.evidence_links))
+
+    scope = scope(workspace, actor)
+    assert {:ok, [association]} = AssociativeProjection.expand([cue], scope)
+    assert association.evidence_links == links
+
+    # An association projected before episodes carried links holds the
+    # provenance map itself, and reads as the same links.
+    assert :ok =
+             Store.raw_execute(
+               "UPDATE memory_associations SET evidence_links = ?2 WHERE workspace_id = ?1 AND from_object_type = 'episode'",
+               [workspace, Jason.encode!(episode.provenance)]
+             )
+
+    assert {:ok, [projected_before]} = AssociativeProjection.expand([cue], scope)
+    assert projected_before.evidence_links == links
   end
 
   defp reconstruct(workspace, actor) do

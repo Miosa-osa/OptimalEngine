@@ -266,6 +266,8 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
                                  tx_start,
                                  tx_end
                                ] ->
+          evidence = Jason.encode!(evidence_links(type, id, evidence))
+
           content
           |> terms()
           |> Enum.map(fn cue ->
@@ -459,7 +461,7 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
       relationship_type: relation,
       content: content,
       source_package_links: decode(sources),
-      evidence_links: decode(evidence),
+      evidence_links: evidence_links(from_type, from_id, evidence),
       confidence: confidence,
       precision: precision,
       security_labels: decode(labels),
@@ -482,6 +484,34 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
   end
 
   defp normalize(value), do: value |> to_string() |> String.downcase() |> String.trim()
+
+  # An association's evidence is a list of links. An Episode keeps its sources
+  # in a provenance map instead, which becomes the episode's own link and one
+  # link per source package, signal and claim it names. Rows projected before
+  # this held the map itself; they are read the same way until a rebuild.
+  defp evidence_links(type, id, evidence) do
+    case decode(evidence) do
+      links when is_list(links) -> links
+      %{} = provenance -> provenance_links(type, id, provenance)
+      _other -> []
+    end
+  end
+
+  defp provenance_links(type, id, provenance) do
+    sources = [
+      {type, id},
+      {"source_package", provenance["source_package_id"]},
+      {"signal", provenance["signal_id"]}
+    ]
+
+    claims = List.wrap(provenance["claim_id"]) ++ List.wrap(provenance["claim_ids"])
+
+    (sources ++ Enum.map(claims, &{"claim", &1}))
+    |> Enum.filter(fn {_type, value} -> is_binary(value) and value != "" end)
+    |> Enum.uniq()
+    |> Enum.map(fn {link_type, value} -> %{"type" => link_type, "id" => value} end)
+  end
+
   defp decode(nil), do: []
 
   defp decode(value) when is_binary(value) do
