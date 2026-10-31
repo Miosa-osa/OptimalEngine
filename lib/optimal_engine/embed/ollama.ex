@@ -396,7 +396,15 @@ defmodule OptimalEngine.Embed.Ollama do
   end
 
   defp parse_response(status, body) do
-    Logger.warning("Ollama: non-200 status #{status}, body: #{to_string(body)}")
-    {:error, {:http_error, status}}
+    body = to_string(body)
+
+    if status == 400 and String.contains?(body, "exceeds the context length") do
+      # Ollama cuts most input to the model's window but refuses some, CJK text
+      # among it; `OptimalEngine.Embed.Text` sends such input again, shorter.
+      {:error, :input_too_long}
+    else
+      Logger.warning("Ollama: non-200 status #{status}, body: #{body}")
+      {:error, {:http_error, status}}
+    end
   end
 end

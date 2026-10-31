@@ -18,7 +18,9 @@ defmodule OptimalEngine.Embed.Text do
 
   Either way an empty input is refused without a call, invalid UTF-8 is
   replaced, the input is capped at 6,000 characters, and an identical input is
-  served from the filesystem cache. Ollama's entries are keyed by the model and
+  served from the filesystem cache. An input Ollama at `OLLAMA_HOST` refuses as
+  longer than the model's window is sent again at half its length, down to 200
+  characters, and cached under the input it was asked for. Ollama's entries are keyed by the model and
   the input; an endpoint's are keyed by the endpoint (without user info or
   query), the model and the input, so vectors from one never answer for the
   other. An entry is stored under its tenant and workspace, by the digest of
@@ -52,6 +54,8 @@ defmodule OptimalEngine.Embed.Text do
   `nomic-embed-text`) whichever endpoint serves it.
   """
 
+  require Logger
+
   alias OptimalEngine.Embed.{Endpoint, Ollama}
   alias OptimalEngine.Store.FileCache
 
@@ -60,7 +64,11 @@ defmodule OptimalEngine.Embed.Text do
   # Cap input so large chunks embed (truncated) instead of being skipped.
   # nomic-embed-text's effective window is ~2048 tokens; ~4 chars/token, kept
   # conservative so even token-dense text stays under the limit.
+  # Ollama cuts longer text to the window itself, but refuses some (CJK text
+  # over about 2,000 characters): a refused input is sent again at half its
+  # length, down to @min_retry_chars (see ollama_request/2).
   @max_chars 6_000
+  @min_retry_chars 200
   @default_model "nomic-embed-text"
   @timeout_ms 5_000
   @probe_timeout_ms 2_000
@@ -147,9 +155,30 @@ defmodule OptimalEngine.Embed.Text do
   defp tenant(_none), do: OptimalEngine.Tenancy.Tenant.default_id()
 
   defp request(nil, model, input) do
-    result = Ollama.request_embedding(model, input)
+    result = ollama_request(model, input)
     note_outcome(result)
     result
+  end
+
+  defp ollama_request(model, input) do
+    case Ollama.request_embedding(model, input) do
+      {:error, :input_too_long} = refused ->
+        half = div(String.length(input), 2)
+
+        if half >= @min_retry_chars do
+          ollama_request(model, String.slice(input, 0, half))
+        else
+          Logger.warning(
+            "[Embed] Ollama refused an input of #{String.length(input)} characters " <>
+              "as longer than the model's window"
+          )
+
+          refused
+        end
+
+      result ->
+        result
+    end
   end
 
   defp request(endpoint, model, input) do
