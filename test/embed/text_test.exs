@@ -140,6 +140,44 @@ defmodule OptimalEngine.Embed.TextTest do
       assert Text.unavailable?(:ollama_unavailable)
       refute Text.unavailable?({:http_error, 502})
     end
+
+    test "an input Ollama refuses as longer than the model's window is sent again at half its length",
+         %{tag: tag} do
+      ollama = Application.get_env(:optimal_engine, :ollama, [])
+      Application.delete_env(:optimal_engine, :text_embedding)
+      text = tag <> String.duplicate("語", 7_000)
+      short = "short #{tag}"
+
+      # Ollama cuts most long input itself but refuses CJK text over about
+      # 2,000 characters.
+      Application.put_env(:optimal_engine, :ollama, Keyword.put(ollama, :host, refusing(1_500)))
+
+      log =
+        capture_log(fn ->
+          assert [{:ok, [0.5, 0.25]}, {:ok, [0.5, 0.25]}] =
+                   Text.embed_many([text, short], cache: false)
+        end)
+
+      sent = received_inputs(4)
+      assert Enum.map(sent, &String.length/1) == [6_000, 3_000, 1_500, String.length(short)]
+      # Every shorter try is the start of the text.
+      assert Enum.all?(Enum.take(sent, 3), &String.starts_with?(&1, tag))
+      refute log =~ "non-200"
+
+      # An input refused even near 200 characters is given up on, and stops no other.
+      Application.put_env(:optimal_engine, :ollama, Keyword.put(ollama, :host, refusing(100)))
+
+      log =
+        capture_log(fn ->
+          assert [{:error, :input_too_long}, {:ok, [0.5, 0.25]}] =
+                   Text.embed_many([text, short], cache: false)
+        end)
+
+      assert Enum.map(received_inputs(6), &String.length/1) ==
+               [6_000, 3_000, 1_500, 750, 375, String.length(short)]
+
+      assert log =~ "refused an input of 375 characters"
+    end
   end
 
   describe "OPTIMAL_EMBED_URL set" do
@@ -1119,6 +1157,28 @@ defmodule OptimalEngine.Embed.TextTest do
     {:ok, _pid} = Plug.Cowboy.http(Stub, [test: self(), respond: respond], port: 0, ref: ref)
     on_exit(fn -> Plug.Cowboy.shutdown(ref) end)
     "http://127.0.0.1:#{:ranch.get_port(ref)}"
+  end
+
+  # An Ollama that refuses input of more than `limit` characters as it refuses
+  # text longer than the model's window, and embeds the rest.
+  defp refusing(limit) do
+    start_stub(fn _path, %{"input" => input} ->
+      if String.length(input) > limit,
+        do: {400, %{"error" => "the input length exceeds the context length"}},
+        else: {200, %{"embeddings" => [[0.5, 0.25]]}}
+    end)
+  end
+
+  # The inputs of the next `count` requests, then no other request.
+  defp received_inputs(count) do
+    inputs =
+      for _request <- 1..count do
+        assert_received {:embed_request, "/api/embed", [], %{"input" => input}}
+        input
+      end
+
+    refute_received {:embed_request, _, _, _}
+    inputs
   end
 
   # The stubs answer in a four-dimension space, so the width check is told so;
