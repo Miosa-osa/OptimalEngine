@@ -160,6 +160,13 @@ defmodule OptimalEngine.Embed.Text do
     result
   end
 
+  defp request(endpoint, model, input) do
+    result = Endpoint.request(endpoint, model, input)
+    note_health(endpoint, result)
+    note_outcome(result)
+    result
+  end
+
   defp ollama_request(model, input) do
     case Ollama.request_embedding(model, input) do
       {:error, :input_too_long} = refused ->
@@ -179,13 +186,6 @@ defmodule OptimalEngine.Embed.Text do
       result ->
         result
     end
-  end
-
-  defp request(endpoint, model, input) do
-    result = Endpoint.request(endpoint, model, input)
-    note_health(endpoint, result)
-    note_outcome(result)
-    result
   end
 
   # The answer of a real request, never a cache hit, is the endpoint's health
