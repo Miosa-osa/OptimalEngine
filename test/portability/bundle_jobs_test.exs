@@ -154,7 +154,11 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
       })
 
     assert {:ok, %{id: id}} =
-             Jobs.claim(kinds: BundleJobs.kinds(), lease_owner: "gone-#{ctx.n}-#{view.job_id}")
+             Jobs.claim(
+               kinds: BundleJobs.kinds(),
+               workspace_id: target,
+               lease_owner: "gone-#{ctx.n}-#{view.job_id}"
+             )
 
     assert id == view.job_id
 

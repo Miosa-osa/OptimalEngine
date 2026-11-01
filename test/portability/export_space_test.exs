@@ -120,6 +120,9 @@ defmodule OptimalEngine.Portability.ExportSpaceTest do
       assert done.error["retryable"] == true
       assert bundles(ctx) == before
       assert staging() == staged
+
+      # The retry stays queued: cancelled, so no later module's claim takes it.
+      assert {:ok, _view, :cancelled} = BundleJobs.cancel(ctx.tenant, view.job_id)
     end
   end
 
