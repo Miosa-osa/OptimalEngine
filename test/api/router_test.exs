@@ -42,7 +42,7 @@ defmodule OptimalEngine.API.RouterTest do
       assert Map.has_key?(body, "status")
       assert Map.has_key?(body, "ok?")
       assert Map.has_key?(body, "checks")
-      assert body["release"]["version"] == "0.3.11"
+      assert body["release"]["version"] == "0.3.12"
     end
   end
 
@@ -52,7 +52,7 @@ defmodule OptimalEngine.API.RouterTest do
       assert conn.status == 200
       assert {:ok, body} = Jason.decode(conn.resp_body)
       assert body["application"] == "optimal_engine"
-      assert body["version"] == "0.3.11"
+      assert body["version"] == "0.3.12"
       assert body["expected_migration"] == 85
       assert body["components"]["candidate_portfolio"] == "candidate-portfolio-v1"
     end
@@ -63,7 +63,7 @@ defmodule OptimalEngine.API.RouterTest do
       conn = request(:get, "/api/health")
       assert conn.status == 200
       assert {:ok, body} = Jason.decode(conn.resp_body)
-      assert body["release"]["version"] == "0.3.11"
+      assert body["release"]["version"] == "0.3.12"
       assert body["release"]["expected_migration"] == 85
     end
 
