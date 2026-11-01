@@ -123,9 +123,10 @@ routing_rules
 topology_change_requests
 ```
 
-The current implementation uses local SQLite as the default runtime store. The
-target production store is Postgres. The layer model does not change when the
-physical database changes.
+The current implementation uses SQLite as the default runtime store, inside one
+Engine instance that holds every store.
+Postgres is an optional, partial provider for scale.
+The layer model does not change when the physical database changes.
 
 ## Write Rules
 

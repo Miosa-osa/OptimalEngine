@@ -33,7 +33,7 @@ It is not yet complete for:
 
 ```text
 full enterprise deployment
-full Postgres production runtime
+full Postgres runtime (the Postgres build refuses full-text search, replication, and app data collections)
 rich human review UI
 full FTS/vector/graph/temporal retrieval planner
 real provider-specific connector downloads for every adapter
@@ -59,11 +59,11 @@ The backend uses multiple storage roles. They should not be confused.
 | Store role | Current state | Owns |
 | --- | --- | --- |
 | SQLite | Current local canonical runtime store. | Workspaces, Nodes, Sources, Claims, Facts, Memories, Context Packages, pools, workflows, skills, governance rows. |
-| Postgres | Target production canonical runtime store. | Same lifecycle model as SQLite, but for team/enterprise deployment. |
-| Raw artifact storage | Current local file-backed evidence path; target object storage for production. | Files, uploads, attachments, media, source payloads. |
+| Postgres | Optional provider for scale, wired but partial (compile-time `OPTIMAL_STORE=postgres`). | Same lifecycle model as SQLite where the build supports it; no full-text search, replication, or app data collections. |
+| Raw artifact storage | Local file-backed evidence path by default; S3-compatible object storage is wired for assets and offsite backups. | Files, uploads, attachments, media, source payloads. |
 | FTS/vector/chunk indexes | Rebuildable acceleration layer. | Search candidates, embeddings, chunks, summaries, rerank state. |
-| ETS | In-memory graph/knowledge runtime. | Fast process-local graph state. |
-| RocksDB | Default persistent graph backend selected by the standard launcher when its NIF is available. | Graph workload projections, not the canonical SQLite product store. |
+| ETS | In-memory triple-store mirror: the config default, and what the Docker image and MIOSA template run. | Fast process-local graph state, reloaded from the SQLite `graph_edges` table at each start. |
+| RocksDB | Persistent triple-store mirror: the default of the standard launcher (`scripts/run-engine.sh`) when its NIF is available; elsewhere opt in with `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`. | Graph workload projections, not the canonical SQLite product store. |
 | Markdown/wiki/HTML/API | Projection surfaces. | Human-readable or app-readable views, not canonical truth. |
 
 The rule is:
@@ -219,7 +219,8 @@ The next backend work should close gaps in this order:
 8. Workflow mining and executable Skill Package runtime.
 9. Rebuild/recovery services for projections, indexes, context packages, and
    adapter outputs.
-10. Production Postgres deployment path, backups, monitoring, secret management,
+10. Provider paths beyond the embedded default (a complete Postgres build, and
+    adapters for the declared providers), monitoring, secret management,
     and enterprise IAM/SSO integration.
 
 This order keeps the backend aligned with the core product: people and agents

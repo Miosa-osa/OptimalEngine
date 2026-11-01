@@ -1,18 +1,49 @@
 # Installation And Deployment
 
-Optimal Engine is backend-first. It can run as a local CLI-backed workspace for
-one person, or as an organization runtime that multiple people, agents, apps,
-connectors, and scripts use through the same governed engine.
+Optimal Engine is backend-first.
+It can run as a local CLI-backed workspace for one person, or as an organization runtime that multiple people, agents, apps, connectors, and scripts use through the same governed engine.
 
-## Deployment Profiles
+## One Engine, Every Store Inside
 
-| Profile | Use when | Canonical store | Notes |
-| --- | --- | --- | --- |
-| Local CLI | One person, local workspace, development, testing, agent-assisted setup. | SQLite at `.optimal/index.db`. | Fastest path. No Docker required. |
-| Team server | Multiple users or agents using the same API/runtime. | Postgres target for canonical rows. | Add process supervision, backups, auth, audit, and object/file storage. |
-| Enterprise | Multiple organizations, departments, controlled connectors, governed agents, retention and compliance needs. | Postgres or managed relational store target plus object storage and managed secrets. | Requires tenant/workspace isolation, SSO/IAM integration, policy, monitoring, and disaster recovery. |
+The default data layer is one Optimal Engine instance: one process on one durable disk that holds every store inside it.
 
-The data model is the same in every profile:
+| Store | Where it lives inside the instance |
+| --- | --- |
+| Relational | SQLite, `OPTIMAL_ENGINE_DB` |
+| Full text | SQLite FTS5, in the same file |
+| Vectors | Float32 BLOBs in the same file |
+| Knowledge graph | The `graph_edges` table in the same SQLite file is the graph that search and assembly read. The triple store (ETS in memory, or RocksDB on disk) is a mirror rebuilt from it |
+| Assets and objects | Files under `OPTIMAL_ENGINE_ROOT` |
+| Caches | ETS and files under `OPTIMAL_ENGINE_CACHE` |
+| Jobs | The `jobs` and `dead_letter_jobs` tables |
+| Change ledger | The `sync_mutations` table, carried to peers over HTTP or the MIOSA relay |
+| Backups | `OPTIMAL_BACKUP_DIR`, catalogued in `backup_records` |
+| Sealed connector keys | Ciphertext in the database; the keys stay in the environment |
+
+The Engine does not run Postgres, Qdrant, or Redis inside.
+It embeds its own equivalents.
+
+Providers are things a deployment grows onto, not the default shape:
+
+| Provider | Status | Use |
+| --- | --- | --- |
+| S3-compatible storage (Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Assets and offsite backups |
+| PostgreSQL | Wired but partial: a compile-time `OPTIMAL_STORE=postgres` build that refuses full-text search, replication, and app data collections | The canonical relational store for engines that share one database |
+| NATS JetStream, Valkey, Qdrant, DuckDB and Parquet, OpenBao, Fractal | Declared, no adapter yet | Nothing: the Engine cannot use them |
+
+## Choosing A Mode
+
+| Mode | Use when | Data lives in |
+| --- | --- | --- |
+| 1. [Self-hosted, embedded](#mode-1-self-hosted-embedded) | One person, one team, or one organization on a laptop, a server, or Docker. This is the default. | The instance's own disk |
+| 2. [Self-hosted with providers](#mode-2-self-hosted-with-providers) | Assets or backups should leave the machine, or several engines must share one database. | The instance's disk plus S3, or a Postgres build |
+| 3. [Cloud providers](#mode-3-cloud-providers) | The same as mode 2, with managed S3 and managed Postgres. | The instance's disk plus a managed bucket or database |
+| 4. [MIOSA-managed](#mode-4-miosa-managed) | You want the platform to run it: volume, credentials, backups, upgrades. | A MIOSA-managed durable volume |
+
+Every mode starts from mode 1.
+You add a provider only when a limit shows you need it, and `GET /api/storage` tells you when (see [Sizes and presets](sizing-and-presets.md)).
+
+The data model is the same in every mode:
 
 ```text
 Tenant / Organization
@@ -22,20 +53,307 @@ Tenant / Organization
          Active Memory Pools, Workflows, Skills, packages, and exports
 ```
 
-Projects are Nodes inside a Workspace. A Workspace is the bounded operating
-area. A package is a receiver/channel bundle; it is not a note.
+Projects are Nodes inside a Workspace.
+A Workspace is the bounded operating area.
+A package is a receiver/channel bundle; it is not a note.
+
+## Mode 1: Self-Hosted, Embedded
+
+Everything runs in one instance on a laptop, a server, or in Docker.
+No external service is needed.
+
+### Environment
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPTIMAL_API_ENABLED` | off outside the launchers | `true` turns on the HTTP API |
+| `OPTIMAL_API_PORT`, `OPTIMAL_API_INTERFACE` | `4200`, `127.0.0.1` | Where the API listens; the image listens on `0.0.0.0` |
+| `OPTIMAL_AUTH_REQUIRED` | `false` bare, `true` in the image | Require credentials; set `true` beyond loopback |
+| `OPTIMAL_BOOTSTRAP_KEY` | none | Registers the first API key at boot, for an unattended instance |
+| `OPTIMAL_ENGINE_ROOT` | `.optimal/workspaces` | Workspace files and asset bytes |
+| `OPTIMAL_ENGINE_DB` | `.optimal/index.db` | The SQLite store |
+| `OPTIMAL_ENGINE_CACHE` | `.optimal/cache` | Rebuildable cache |
+| `OPTIMAL_BACKUP_DIR` | `backups/` beside the database | Where `POST /api/backup` writes |
+| `OPTIMAL_KNOWLEDGE_BACKEND` | `ets`; `scripts/run-engine.sh` defaults it to `rocksdb` | Triple-store mirror backend |
+| `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` | `.optimal/knowledge-rocksdb` | Where RocksDB keeps the mirror; put it on the data volume |
+| `OPTIMAL_SIZE_PROFILE` | `business` | Tuning for the machine ([Sizes and presets](sizing-and-presets.md)) |
+| `OPTIMAL_RELEASE_CHANNEL` | unset (`dev` in the image) | Reported by `GET /api/version` |
+
+The full table, with every other variable, is in [OPTIONS.md](../../OPTIONS.md#storage-and-providers).
+
+Three keys are generated once and kept outside the container and outside the data volume:
+
+| Key | Seals | If lost |
+| --- | --- | --- |
+| `CONNECTOR_KEY` | Connector and peer credentials in the database | Stored credentials cannot be read; reconnect each connector |
+| `OPTIMAL_AUTHORITY_KEY` | The authority signing keys in the database | The wrapped signing keys cannot be opened |
+| `OPTIMAL_BACKUP_KEY` | Offsite backup copies | Every offsite copy sealed with it is unrecoverable |
+
+Generate each with `openssl rand -hex 32`, keep it in a secret manager or a mode-600 env file, and pass it to every start.
+A replaced container that is started with new random keys cannot read what the old keys sealed.
+Keep a copy of `OPTIMAL_BACKUP_KEY` away from the machine.
+
+### Graph and its mirror
+
+The graph that search, assembly, and materialization read is the SQLite `graph_edges` table.
+The triple store is a mirror rebuilt from that table, and no retrieval path reads it.
+`OPTIMAL_KNOWLEDGE_BACKEND` chooses the mirror's backend.
+The config default is `ets`, which holds the mirror in memory and reloads it from SQLite at each start.
+It is what bare `mix`, tests, the Docker image, the MIOSA template, and managed Engines run, because none of them sets the variable.
+`scripts/run-engine.sh` defaults it to `rocksdb`.
+To keep the mirror on disk anywhere else, set `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` and point `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` at the data volume, for example `/data/.optimal/knowledge-rocksdb` in the image.
+Without the path, RocksDB writes `.optimal/knowledge-rocksdb` under the working directory, which in a container is not the volume.
+If RocksDB is requested and its native library is missing, the Engine logs a warning and falls back to ETS.
+
+### Volume and disk layout
+
+```text
+<data>/
+  .optimal/
+    index.db, index.db-wal, index.db-shm   the SQLite store
+    backups/                               verified backups
+    cache/                                 rebuildable cache
+    embed_cache.key                        secret that names embedding cache entries
+    imports/                               import staging
+    knowledge-rocksdb/                     the triple-store mirror (when RocksDB is selected)
+  <workspace folders>/                     workspace files and asset bytes
+```
+
+In the Docker image `<data>` is `/data`, the only writable volume.
+On a laptop it is the checkout's `.optimal/` directory plus the workspace root.
+Back up the volume only through the Engine (below), never by copying the live database files.
+
+### Laptop
+
+```bash
+make install
+make bootstrap
+make dev
+```
+
+`make dev` runs `scripts/run-engine.sh`, which starts the API, selects RocksDB, and creates `.optimal/connector_key` when `CONNECTOR_KEY` is not set.
+See [Local Install](#local-install) for the requirements.
+
+### Server or Docker
+
+Run the container image, or an OTP release behind a process supervisor and a TLS reverse proxy.
+The container needs one volume at `/data` and the three keys in its environment.
+
+```bash
+docker run -d --name optimal-engine -p 127.0.0.1:4200:4200 \
+  -v optimal-data:/data \
+  --env-file /etc/optimal/engine.env \
+  optimal-engine:<version>
+```
+
+`/etc/optimal/engine.env` holds `CONNECTOR_KEY`, `OPTIMAL_AUTHORITY_KEY`, `OPTIMAL_BACKUP_KEY`, `OPTIMAL_BOOTSTRAP_KEY`, and `OPTIMAL_ENGINE_API_KEY` (the key the health check uses).
+It lives on the host, outside the volume, so a replaced container keeps the keys.
+[`deploy/README.md`](../../deploy/README.md) has the Compose stack, the production overlay with TLS, and the quickstart's mint step.
+
+### Backup and restore
+
+Take a verified online backup while the Engine serves:
+
+```bash
+curl -s -X POST "$URL/api/backup" \
+  -H "Authorization: Bearer $ADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"name": "nightly.db"}'
+```
+
+The file lands in `OPTIMAL_BACKUP_DIR` and is catalogued with its SHA-256 and the result of `PRAGMA integrity_check`.
+The route needs the `admin` scope.
+The backup is the database only: asset bytes on the filesystem and workspace folders are not in it, so snapshot the volume with the Engine stopped, or move assets to S3 (mode 2).
+
+For a copy that survives the machine, set `OPTIMAL_BACKUP_KEY` and an object store (mode 2), then send `{"offsite": true}` or set `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS`.
+Offsite copies are sealed on the Engine's machine before upload.
+
+Restore with the Engine stopped.
+On a checkout:
+
+```bash
+mix optimal.restore /path/to/nightly.db
+```
+
+In a release or container, call the same function in a one-off process with the API disabled:
+
+```bash
+OPTIMAL_API_ENABLED=false bin/optimal eval 'OptimalEngine.Backup.restore("/data/.optimal/backups/nightly.db") |> IO.inspect()'
+```
+
+The restore checks the file against the catalog checksum, runs `integrity_check`, and archives the previous database before replacing it.
+If you keep the mirror on RocksDB, remove its directory before the next start so it is rebuilt from the restored edges.
+Drill the restore against a copy before you rely on it; [Storage providers](storage-providers.md#restore-drill) has a full drill.
+
+### Upgrade
+
+Migrations run when the new version boots, and the previous version is not guaranteed to read a store the new one migrated.
+
+1. Take a backup with `POST /api/backup`.
+2. Stop the Engine, then start the new version with the same data volume and the same keys.
+3. Verify (below), and check the version, channel, and expected migration in `GET /api/version`.
+4. To roll back, stop the new version, start the previous one, and restore the backup from step 1.
+
+On a checkout, `git pull`, `mix deps.get`, and restart `make dev`.
+[Versioning and releases](versioning-and-releases.md) lists the per-migration upgrade notes.
+
+### Verify
+
+```bash
+curl -s "$URL/api/health" -H "Authorization: Bearer $KEY"
+curl -s "$URL/api/stores/audit" -H "Authorization: Bearer $KEY"
+```
+
+`GET /api/health` reports liveness and readiness.
+`GET /api/stores/audit` returns 503 when any check fails: SQLite integrity, foreign keys, migrations, full-text parity, workspace isolation, vector validity, asset files, the latest verified backup, and the offsite schedule.
+A request to a protected route without a key must return 401.
+
+## Mode 2: Self-Hosted With Providers
+
+Start from mode 1 and add providers on your own infrastructure.
+Only two providers are usable today.
+
+| Provider | Status | What it holds |
+| --- | --- | --- |
+| S3-compatible storage (Garage, MinIO, or another) | Wired | Assets and offsite backups |
+| PostgreSQL | Wired but partial | The canonical relational store of a Postgres build |
+| NATS JetStream, Valkey, Qdrant, DuckDB and Parquet, OpenBao, Fractal | Not wired yet | Nothing; declared with no adapter |
+
+### S3 with Garage
+
+Garage is a single-binary S3 server.
+The stack in [`deploy/docker-compose.storage.yml`](../../deploy/docker-compose.storage.yml) runs it next to the Engine.
+
+```bash
+cd deploy
+docker compose -f docker-compose.yml -f docker-compose.storage.yml --profile storage up -d
+```
+
+The Engine side is these variables:
+
+| Variable | Value |
+| --- | --- |
+| `OPTIMAL_S3_ENDPOINT` | `http://garage:3900` |
+| `OPTIMAL_S3_BUCKET` | `optimal-artifacts` |
+| `OPTIMAL_S3_REGION` | Must match Garage's `s3_region` (`garage` in `deploy/storage/garage.toml`) |
+| `OPTIMAL_S3_ACCESS_KEY_ID`, `OPTIMAL_S3_SECRET_ACCESS_KEY` | The Garage key; replace the development defaults |
+| `OPTIMAL_S3_PREFIX` | One prefix per Engine when Engines share a bucket |
+| `OPTIMAL_ASSET_STORAGE` | `s3` to keep asset bytes in the bucket |
+| `OPTIMAL_BACKUP_KEY` | Required for any offsite backup |
+| `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS` | Optional schedule, for example `86400000` |
+
+Check it end to end:
+
+```bash
+curl -s "$URL/api/storage/providers/s3?probe=true" -H "Authorization: Bearer $KEY" | jq
+```
+
+The probe writes, reads back, lists, and deletes a small object, and reports `unreachable` rather than `healthy` for a wrong key, bucket, or region.
+The recipe, the encryption format, and the restore drill are in [Storage providers](storage-providers.md).
+
+With assets and backups in the bucket, the volume holds the database and the cache, plus the mirror if it is on RocksDB.
+Backup, restore, upgrade, and verification are as in mode 1, with the asset bytes now covered.
+
+### The Postgres build
+
+PostgreSQL replaces the canonical relational store of one Engine, and the choice is made when the Engine is compiled, not by configuration:
+
+```bash
+OPTIMAL_STORE=postgres MIX_ENV=prod mix release optimal
+OPTIMAL_POSTGRES_URL='postgres://user:secret@host:5432/db?sslmode=require' \
+OPTIMAL_POSTGRES_SCHEMA=engine_a \
+_build/prod/rel/optimal/bin/optimal start
+```
+
+The stock `deploy/Dockerfile.engine` does not pass `OPTIMAL_STORE` to the build, so a Postgres container image needs `OPTIMAL_STORE=postgres` exported in the build stage; a build argument is not wired yet.
+Setting `OPTIMAL_POSTGRES_URL` on the stock image changes nothing: the provider reports `selected: false` and the data stays in SQLite.
+
+Use one schema per Engine (`OPTIMAL_POSTGRES_SCHEMA`) so that Engines that must not see each other's data do not share tables.
+
+What a Postgres build gives up:
+
+| Feature | On a Postgres build |
+| --- | --- |
+| Full-text search | Refused. Search, context assembly, and asking return an error naming it. |
+| Replication | Refused. Enabling sync and adding a peer return 501. |
+| App data collections | Refused. |
+| SQLite-only statements | Refused by name where used (some JSON functions, date arithmetic, `rowid`, `PRAGMA`). |
+| ETS hot cache | Off. |
+| Engine backup routes | They copy the SQLite file, so they do not back up a Postgres build. Back the database up with Postgres tooling. |
+| Moving an existing Engine's data to Postgres | Not implemented (stage 4 of the provider plan). |
+
+An Engine whose Postgres database holds replication or app data collection data does not start.
+[PostgreSQL Provider](postgres-provider.md) lists every refusal.
+Choose this build only when several Engine processes must write one database and you can live without the features above.
+
+## Mode 3: Cloud Providers
+
+The same two providers, run by a cloud vendor instead of by you.
+The Engine is still one instance on one durable disk.
+
+| Provider | Status | Notes |
+| --- | --- | --- |
+| Managed S3: AWS S3, Cloudflare R2 | Wired | Assets and offsite backups |
+| Managed PostgreSQL | Wired but partial | The Postgres build above, with the same refusals |
+| Managed Qdrant, Valkey, NATS | Not wired yet | Cannot be used |
+
+### Managed S3
+
+| Variable | AWS S3 | Cloudflare R2 |
+| --- | --- | --- |
+| `OPTIMAL_S3_ENDPOINT` | `https://s3.<region>.amazonaws.com` | `https://<account>.r2.cloudflarestorage.com` |
+| `OPTIMAL_S3_REGION` | The bucket's region | `auto` |
+| `OPTIMAL_S3_PATH_STYLE` | `false` for virtual-hosted addressing, which hosted AWS prefers; the default is path style | Default |
+| `OPTIMAL_S3_BUCKET`, `OPTIMAL_S3_PREFIX` | Your bucket, one prefix per Engine | Your bucket, one prefix per Engine |
+| Credentials | `OPTIMAL_S3_ACCESS_KEY_ID` and `OPTIMAL_S3_SECRET_ACCESS_KEY`, or `OPTIMAL_S3_CREDENTIALS_FILE` | The same |
+
+Use a key scoped to the one bucket, with read, write, list, and delete.
+The credentials file is read on every request, so replacing it rotates the key without a restart.
+Give each Engine its own prefix or bucket and write nothing else under it, because erasure deletes the objects of the assets it removes.
+
+### Managed Postgres
+
+Use the Postgres build from mode 2 with the managed database's connection string and `sslmode=require` or stricter.
+Give each Engine its own schema.
+Back the database up with the provider's backups; the Engine's backup routes do not cover it.
+Managed Postgres does not remove any limit above: full-text search, replication, and app data collections stay refused.
+
+### Backup, upgrade, verify
+
+As in mode 2.
+Use `OPTIMAL_BACKUP_KEY` with a managed bucket so the vendor only ever holds ciphertext.
+
+## Mode 4: MIOSA-Managed
+
+The Engine runs as MIOSA's managed `optimal` database engine.
+The platform provides the durable volume, the credentials, and the backups.
+You use the Engine over HTTP.
+
+- **Shape.** One org Engine per organization, with a walled section per workspace.
+  An agent's key opens only its workspace section unless it is scoped to all workspaces.
+  A customer gets an Engine of their own only when a wall requires it: co-owned data, private views, clients, or white-label end users.
+- **Sizes.** Agent memory, Workspace, Business, Platform, and Scale, which map to the Engine's `agent`, `workspace`, `business`, `platform`, and `scale` profiles.
+  Providers are added at Scale.
+- **Operating model.** One-command resize and scale to zero are planned.
+  The Engine reports usage and the resize recommendation today.
+- **Installs.** From built, versioned release archives with channels, backups, and rollback, never from a repository clone on the machine.
+
+[MIOSA-managed Engine](miosa-managed-engine.md) has the full model, the size table, what exists today and what is planned, the environment, and the verification steps.
+[`deploy/miosa-template/`](../../deploy/miosa-template/README.md) holds the build and template scripts.
 
 ## Local Install
 
 Required:
 
 ```text
-Erlang/OTP 27+
+Erlang/OTP 27+, but not 28.0 to 28.2
 Elixir ~> 1.17
 Git
 C toolchain for the SQLite NIF
 Snappy for the RocksDB knowledge graph backend
 ```
+
+OTP 28.0 to 28.2 (erts 16.0 and 16.1) can crash the whole VM when a process is killed during a long regular expression match, which a classification time limit does to a slow document.
+OTP 28.3 fixed it, and the release image uses 28.5.0.5.
 
 Run:
 
@@ -99,9 +417,12 @@ mix optimal.initiate my-workspace --name "My Workspace" --dump setup.md
 The default local paths are:
 
 ```text
-.optimal/index.db        SQLite runtime store
+.optimal/index.db        SQLite runtime store (with -wal and -shm while running)
+.optimal/backups/        verified backups, beside the database
 .optimal/cache/          rebuildable local cache
-.optimal/connector_key   local API/connector secret
+.optimal/embed_cache.key secret that names embedding cache entries, beside the database
+.optimal/knowledge-rocksdb/  the triple-store mirror, when RocksDB is selected
+.optimal/connector_key   local connector secret (written by scripts/run-engine.sh)
 workspace files          markdown/wiki/package/export projection
 ```
 
@@ -129,12 +450,12 @@ markdown/wiki/API      -> projection surfaces
 
 ## Production / Organization Setup
 
-A production deployment should separate five concerns:
+A production deployment starts as one Engine instance (mode 1) and separates five concerns as it grows:
 
 | Concern | Recommended role |
 | --- | --- |
-| Canonical runtime rows | Postgres target or equivalent relational store. |
-| Raw artifacts | File/object storage with retention, backup, and access policy. |
+| Canonical runtime rows | The instance's SQLite file with verified backups. A Postgres build is an optional, partial provider for scale (mode 2). |
+| Raw artifacts | The instance's files, or S3-compatible object storage (wired) with retention, backup, and access policy. |
 | Indexes and caches | Rebuildable FTS/vector/chunk/parse/cache projections. |
 | Worker runtime | Supervised Elixir workers plus adapter/model/tool worker processes. |
 | Access and secrets | SSO/IAM/API keys/secret manager; never store secrets in markdown or context. |
@@ -276,9 +597,16 @@ OPTIMAL_ENGINE_API_KEY       API key used by external clients/agents
 OPTIMAL_AUTH_REQUIRED        true/false override for HTTP authentication
 OPTIMAL_REFUSE_OPEN_NETWORK  1 refuses to start with auth off beyond loopback
 OPTIMAL_OPEN_NETWORK_ACKNOWLEDGED 1: open beyond loopback on purpose, authenticated in front
+OPTIMAL_KNOWLEDGE_BACKEND    ets (default) or rocksdb, for the triple-store mirror
+OPTIMAL_KNOWLEDGE_ROCKSDB_PATH  where RocksDB keeps the mirror
+OPTIMAL_SIZE_PROFILE         agent, workspace, business, platform, or scale
+OPTIMAL_RELEASE_CHANNEL      dev, stable, beta, or pinned
 OLLAMA_HOST                  local model server URL
 OPTIMAL_VLM_MODEL            local visual model name for configured adapters
 ```
+
+The complete list, with defaults and which are compile-time, is in
+[OPTIONS.md](../../OPTIONS.md#storage-and-providers).
 
 An object store is optional and off by default. A deployment that wants assets or
 offsite backups in a bucket sets:
@@ -299,6 +627,7 @@ Offsite backups are encrypted before upload and need a backup key; the engine ca
 
 ```text
 OPTIMAL_BACKUP_KEY                   64 hex characters; offsite copies are refused without it
+OPTIMAL_BACKUP_DIR                   where backups are written; default beside the database
 OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS   scheduled offsite backups; 0 or unset disables
 OPTIMAL_OFFSITE_BACKUP_KEEP          scheduled offsite copies kept; default 14
 OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL    scheduled local files kept; default 3

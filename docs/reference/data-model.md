@@ -135,8 +135,8 @@ audit_event_links
 ## Storage Rule
 
 ```text
-SQLite is the local canonical store today.
-Postgres is the production canonical store target.
+SQLite is the canonical store of the default build, in one Engine instance that holds every store inside it.
+Postgres is an optional provider for scale (a partial, compile-time `OPTIMAL_STORE=postgres` build).
 Raw artifact storage preserves evidence.
 Indexes/caches/projections are rebuildable.
 Markdown/wiki/app/API views are surfaces, not separate truth.

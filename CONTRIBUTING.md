@@ -8,7 +8,7 @@ The Optimal Engine is open-source (Apache 2.0). Contributions are welcome — bu
 
 **Prerequisites**
 
-- Elixir 1.17+ and Erlang/OTP 27+ (CI and the release image use Elixir 1.19.5 / OTP 28.5.0.5)
+- Elixir 1.17+ and Erlang/OTP 27+, but not 28.0 to 28.2 (CI and the release image use Elixir 1.19.5 / OTP 28.5.0.5)
 - SQLite 3.35+ (FTS5 must be compiled in — verify with `sqlite3 :memory: "SELECT fts5()"`)
 - Node.js 20+ (for the TypeScript SDK, MCP server, and site)
 - Git

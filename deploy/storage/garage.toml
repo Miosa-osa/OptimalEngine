@@ -8,6 +8,7 @@ rpc_public_addr = "garage:3901"
 rpc_secret = "0000000000000000000000000000000000000000000000000000000000000000"
 
 [s3_api]
+# OPTIMAL_S3_REGION on the engine must equal this value.
 s3_region = "garage"
 api_bind_addr = "[::]:3900"
 root_domain = ".s3.garage.localhost"

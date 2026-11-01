@@ -78,10 +78,10 @@ being reliable.
 ## Backend Storage Roles
 
 ```text
-SQLite now:
-  local/dev/default runtime store
+SQLite:
+  default runtime store, inside one Engine instance that holds every store
 
-Postgres target:
+Postgres, optional provider for scale (wired but partial):
   multi-user, enterprise, hosted or team deployment
 
 RocksDB/fast indexes:

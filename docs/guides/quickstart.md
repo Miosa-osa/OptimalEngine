@@ -17,7 +17,7 @@ a search result and a cited read of that source
 
 ### Option A: from a checkout
 
-Requirements: Erlang/OTP 27 or newer, Elixir `~> 1.17`, git, a C toolchain for the SQLite NIF, and Snappy when you want the RocksDB knowledge backend.
+Requirements: Erlang/OTP 27 or newer but not 28.0 to 28.2 (their runtime can crash the whole VM; use 28.3 or later), Elixir `~> 1.17`, git, a C toolchain for the SQLite NIF, and Snappy when you want the RocksDB knowledge backend.
 
 ```bash
 git clone https://github.com/Miosa-osa/OptimalEngine.git
@@ -40,7 +40,7 @@ OPTIMAL_API_ENABLED=true OPTIMAL_AUTH_REQUIRED=true mix run --no-halt
 
 Paths default to `.optimal/` beside the checkout: the SQLite store at `.optimal/index.db`, the cache at `.optimal/cache`, and workspace files under `.optimal/workspaces`.
 Set `OPTIMAL_ENGINE_ROOT`, `OPTIMAL_ENGINE_DB`, `OPTIMAL_ENGINE_CACHE`, and `OPTIMAL_API_PORT` to move them, which is what a packaged or container deployment does.
-See [installation and deployment](installation-and-deployment.md) for the full profile table.
+See [installation and deployment](installation-and-deployment.md) for the four deployment modes.
 
 ### Option B: from the release image
 
@@ -61,20 +61,35 @@ docker run --rm -v optimal-data:/data -e OPTIMAL_API_ENABLED=false optimal-engin
   'OptimalEngine.Auth.ApiKey.mint(%{tenant_id: "default", name: "root", scopes: ["*"], workspace_scope: ["*"]}) |> IO.inspect()'
 ```
 
+Generate the Engine's keys once and keep them outside the container.
+`CONNECTOR_KEY` seals connector credentials and `OPTIMAL_AUTHORITY_KEY` wraps the authority signing keys, and both are stored sealed in the database.
+A container started with new random keys cannot read what the old ones sealed, so write them to a file on the host and pass that file every time:
+
+```bash
+mkdir -p ~/.optimal-engine && chmod 700 ~/.optimal-engine
+[ -f ~/.optimal-engine/keys.env ] || (umask 077 && {
+  echo "CONNECTOR_KEY=$(openssl rand -hex 32)"
+  echo "OPTIMAL_AUTHORITY_KEY=$(openssl rand -hex 32)"
+  echo "OPTIMAL_BACKUP_KEY=$(openssl rand -hex 32)"
+} > ~/.optimal-engine/keys.env)
+```
+
+The file is created only if it does not exist, so running the step again keeps the keys you have.
+Keep a copy of it away from this machine: `OPTIMAL_BACKUP_KEY` seals offsite backups, and losing it loses every copy it sealed.
+
 Start the Engine.
 `OPTIMAL_ENGINE_API_KEY` is the key from the step above, and the container health check uses it to probe the authenticated `/api/health` route.
 
 ```bash
-docker run -d --name optimal-engine -p 4200:4200 \
+docker run -d --name optimal-engine -p 127.0.0.1:4200:4200 \
   -v optimal-data:/data \
+  --env-file ~/.optimal-engine/keys.env \
   -e OPTIMAL_AUTH_REQUIRED=true \
-  -e OPTIMAL_AUTHORITY_KEY="$(openssl rand -hex 32)" \
-  -e CONNECTOR_KEY="$(openssl rand -hex 32)" \
   -e OPTIMAL_ENGINE_API_KEY=<the key> \
   optimal-engine:quickstart
 ```
 
-The data volume holds the store, so stopping, removing, or replacing the container keeps your workspace.
+The data volume holds the store, and the keys file holds the keys, so stopping, removing, or replacing the container keeps your workspace and can still read it.
 
 ## 2. Point The Client At The Engine
 

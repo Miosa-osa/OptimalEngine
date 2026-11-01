@@ -21,7 +21,7 @@ services:
       # reach the Engine from other machines; authentication stays required.
       - "${OPTIMAL_API_BIND:-127.0.0.1}:${OPTIMAL_API_PORT:-4200}:4200"
     volumes:
-      # Persistent data: SQLite DB + cache + any written signal files
+      # Persistent data: SQLite DB, backups, cache, graph (when persisted), assets and workspace files
       - optimal_data:/data
       # Read-only sample workspace — useful for first-run exploration
       - ../sample-workspace:/data/sample-workspace:ro
@@ -41,6 +41,20 @@ services:
       OPTIMAL_BOOTSTRAP_KEY:   "${OPTIMAL_BOOTSTRAP_KEY:-}"
       OPTIMAL_ENGINE_API_KEY:  "${OPTIMAL_ENGINE_API_KEY:-}"
       OLLAMA_HOST:             "${OPTIMAL_OLLAMA_URL:-http://host.docker.internal:11434}"
+      # Keys are generated once and kept outside the container and the data
+      # volume (in deploy/.env or a secret manager), so a replaced container
+      # keeps them. A variable with no value is passed through from there when
+      # set, and left unset in the container when not.
+      CONNECTOR_KEY:
+      OPTIMAL_AUTHORITY_KEY:
+      OPTIMAL_BACKUP_KEY:
+      # The graph retrieval reads is the graph_edges table in the database. The
+      # triple store is a mirror of it: ETS (in memory) unless these are set. To
+      # keep the mirror on the volume:
+      #   OPTIMAL_KNOWLEDGE_BACKEND=rocksdb
+      #   OPTIMAL_KNOWLEDGE_ROCKSDB_PATH=/data/.optimal/knowledge-rocksdb
+      OPTIMAL_KNOWLEDGE_BACKEND:
+      OPTIMAL_KNOWLEDGE_ROCKSDB_PATH:
       # MIX_ENV is already baked into the release; listed here for clarity
       MIX_ENV:                 prod
     restart: unless-stopped
@@ -116,6 +130,6 @@ services:
 volumes:
   # Named volume — survives `docker compose down`.
   # Data lives at the Docker-managed path on the host (see `docker volume inspect`).
-  # Back up with: docker run --rm -v optimal-engine_optimal_data:/data -v $(pwd):/backup \
-  #               alpine tar czf /backup/optimal_data_backup.tar.gz /data
+  # Back up with POST /api/backup (a verified online copy of the database into
+  # /data/.optimal/backups), not by archiving the live volume. See deploy/README.md.
   optimal_data:

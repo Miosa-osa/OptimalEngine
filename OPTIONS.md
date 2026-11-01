@@ -56,12 +56,53 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_S3_CREDENTIALS_FILE` | unset | File holding the S3 access key id and secret (two lines or `KEY=VALUE`); environment values win. |
 | `OPTIMAL_ASSET_RECONCILE_INTERVAL_MS` | `600000` (10 minutes) | How often assets kept on the local disk during an object store outage are put in the bucket, while any are pending and S3 is configured; `0` turns it off. |
 | `OPTIMAL_ENGINE_ROOT` | repo root | Engine root for source-checkout usage. |
-| `OPTIMAL_KNOWLEDGE_BACKEND` | `rocksdb` when available | Graph backend selection. |
+| `OPTIMAL_KNOWLEDGE_BACKEND` | `ets` | Backend of the triple-store mirror of `graph_edges`: `ets`, `rocksdb`, or `mnesia`. `scripts/run-engine.sh` defaults it to `rocksdb`; the Docker image and MIOSA template set nothing. |
 | `CONNECTOR_KEY` | generated into `.optimal/connector_key` | Local connector secret. Connector credentials are refused without it; they are never stored in plaintext. |
 | `OPTIMAL_CLAIM_PROMOTION_MODE` | `auto_threshold` | `auto_threshold`: the Engine promotes Claims whose confidence meets the workspace threshold every 30 minutes, as `system:promotion-scheduler`. `manual` or `agent_review`: it promotes nothing, and every Claim waits for a reviewer with `claims:review`. Other values fail startup configuration. |
 
 Keep private values in environment variables, local secret stores, or deployment secret managers.
 Do not commit them.
+
+## Storage And Providers
+
+One Engine instance holds every store inside it, so none of these is needed for the default deployment.
+Names come from `config/runtime.exs`, `config/config.exs`, and the provider adapters.
+"Compile time" means the value is fixed when the Engine is built and changing the environment of a running release does nothing.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPTIMAL_STORE` | `sqlite` | **Compile time.** `sqlite` or `postgres`: which canonical store the build runs. A Postgres build refuses full-text search, replication, and app data collections. Any other value stops the build. |
+| `OPTIMAL_POSTGRES_URL` | none | Connection URL of a Postgres build, read when the store starts. Never logged or returned. |
+| `OPTIMAL_POSTGRES_SCHEMA` | `public` | Schema a Postgres build keeps its tables in; use one per Engine. |
+| `OPTIMAL_S3_ENDPOINT` | none | S3-compatible endpoint base URL. |
+| `OPTIMAL_S3_BUCKET` | none | Bucket name. |
+| `OPTIMAL_S3_REGION` | `us-east-1` | Region of the credential scope; must match the provider (Garage's `s3_region`, the AWS region, `auto` for R2). |
+| `OPTIMAL_S3_ACCESS_KEY_ID`, `OPTIMAL_S3_SECRET_ACCESS_KEY` | none | Credentials. |
+| `OPTIMAL_S3_CREDENTIALS_FILE` | none | File holding the credentials; environment values win. |
+| `OPTIMAL_S3_PREFIX` | none | Key prefix owned by this Engine. |
+| `OPTIMAL_S3_PATH_STYLE` | path style | `false` selects virtual-hosted addressing. |
+| `OPTIMAL_S3_TIMEOUT_MS`, `OPTIMAL_S3_MAX_RETRIES` | `30000`, `2` | Per-request timeout and retries. |
+| `OPTIMAL_S3_TRACE` | off | `1` logs the canonical request when a signature is rejected. |
+| `OPTIMAL_ASSET_STORAGE` | filesystem | `s3` stores asset bytes in the bucket. |
+| `OPTIMAL_SIZE_PROFILE` | `business` | `agent`, `workspace`, `business`, `platform`, or `scale`. Any other value fails startup configuration. |
+| `OPTIMAL_ENGINE_SCOPE` | `org` | `org`, or `workspace` (serves only `OPTIMAL_ENGINE_WORKSPACE`). |
+| `OPTIMAL_ENGINE_WORKSPACE` | none | Workspace id served when the scope is `workspace`; required then. |
+| `OPTIMAL_RELEASE_CHANNEL` | unset | `dev`, `stable`, `beta`, or `pinned`, reported by `GET /api/version`. Any other value fails startup. |
+| `OPTIMAL_BOOTSTRAP_KEY` | none | `oe_<24 hex>_<secret of 32+ chars>`; registers the first API key at boot. |
+| `OPTIMAL_BOOTSTRAP_TENANT`, `OPTIMAL_BOOTSTRAP_SCOPES`, `OPTIMAL_BOOTSTRAP_WORKSPACES` | `default`, `read,write`, `*` | Tenant, operation scopes, and workspace allowlist of the bootstrap key. |
+| `OPTIMAL_KNOWLEDGE_BACKEND` | `ets` | Mirror backend: `ets`, `rocksdb`, or `mnesia` (`ram_copies` only). |
+| `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` | `.optimal/knowledge-rocksdb` | Where RocksDB keeps the mirror, relative to the working directory; set an absolute path on the data volume. |
+| `OPTIMAL_BACKUP_DIR` | `backups/` beside the database | The only directory `POST /api/backup` writes into. |
+| `OPTIMAL_BACKUP_KEY` | none | 64 hex characters; seals offsite backups. |
+| `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS`, `OPTIMAL_OFFSITE_BACKUP_KEEP`, `OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL` | off, `14`, `3` | Scheduled offsite backups and how many copies are kept. |
+| `CONNECTOR_KEY` | none | 64 hex characters; seals connector and peer credentials in the database. |
+| `OPTIMAL_AUTHORITY_KEY` | none | 64 hex characters; wraps the authority signing keys. |
+
+The mirror is not what retrieval reads: the graph that search and assembly read is the `graph_edges` table in SQLite.
+
+Providers the Engine declares and cannot use yet (no adapter): `OPTIMAL_NATS_URL`, `OPTIMAL_VALKEY_URL`, `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`, `OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet), `OPTIMAL_OPENBAO_ADDR` with `OPTIMAL_OPENBAO_TOKEN`, and `OPTIMAL_FRACTAL_ENDPOINT` with `OPTIMAL_FRACTAL_CREDENTIAL_REF`.
+Setting them changes nothing except what `GET /api/storage/providers` reports, which is `adapter_missing`.
+See [Storage providers](docs/guides/storage-providers.md) and [Installation and deployment](docs/guides/installation-and-deployment.md).
 
 ## Text Embeddings
 
@@ -139,10 +180,19 @@ A key sent over plain `http` to another machine is warned about once, without th
 
 ## Knowledge Graph Backend
 
-Use RocksDB for normal local persistence:
+The graph that search, assembly, and materialization read is the SQLite `graph_edges` table.
+The triple store is a mirror rebuilt from it, and no retrieval path reads it.
+`OPTIMAL_KNOWLEDGE_BACKEND` chooses the mirror's backend.
+
+The default is ETS, held in memory and reloaded at each start.
+It is what bare `mix`, tests, the Docker image, and the MIOSA template run, because none of them sets the variable.
+`scripts/run-engine.sh` defaults it to RocksDB.
+
+Use RocksDB to keep the mirror on disk:
 
 ```bash
 OPTIMAL_KNOWLEDGE_BACKEND=rocksdb
+OPTIMAL_KNOWLEDGE_ROCKSDB_PATH=/data/.optimal/knowledge-rocksdb
 ```
 
 Use ETS for fast in-memory testing:
@@ -151,14 +201,15 @@ Use ETS for fast in-memory testing:
 OPTIMAL_KNOWLEDGE_BACKEND=ets
 ```
 
-Use Mnesia only when intentionally testing distributed graph behavior:
+Use Mnesia only when intentionally testing distributed graph behavior.
+Its tables are `ram_copies`, so nothing is persistent:
 
 ```bash
 OPTIMAL_KNOWLEDGE_BACKEND=mnesia
 ```
 
-SQLite remains the durable local source of truth.
-The graph backend supports graph runtime behavior and retrieval.
+A Riak backend exists in the source but is in no build, because its client is not a dependency, and it cannot be selected.
+SQLite remains the durable source of truth.
 
 ## Product Embedding
 
@@ -181,7 +232,7 @@ They should not connect to the owner's private engine unless explicitly configur
 | --- | --- | --- |
 | Local source checkout | Developer or local agent work | `bin/optimal dev` runs the engine on `localhost:4200`. |
 | Bundled desktop engine | BusinessOS desktop user | App launches a local release with fresh local runtime data. |
-| Production service | Hosted org or workspace | Service uses production secrets, scoped keys, and Postgres target when configured. |
+| Production service | Hosted org or workspace | Service uses production secrets and scoped keys. Postgres is an optional, partial provider chosen when the Engine is built (`OPTIMAL_STORE=postgres`, compile time), not switched on by configuring a URL. |
 | Test mode | CI and unit tests | Use isolated temp stores and avoid private `.optimal/` data. |
 
 ## Compatibility And API Grants

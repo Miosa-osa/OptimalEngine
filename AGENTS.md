@@ -47,7 +47,9 @@ make dev
 `make dev` starts the HTTP engine at `http://localhost:4200`.
 It runs `scripts/run-engine.sh`.
 The launcher creates `.optimal/connector_key` if `CONNECTOR_KEY` is not already set.
-It starts the knowledge graph with RocksDB by default when the `rocksdb` NIF is available.
+The launcher defaults `OPTIMAL_KNOWLEDGE_BACKEND` to `rocksdb`, which the Engine itself does not: the config default is `ets`, which bare `mix` and tests use, and the Docker image and the MIOSA template set nothing, so they run ETS.
+RocksDB is used when the `rocksdb` NIF is available, and the Engine falls back to ETS when it is not.
+The triple store (ETS or RocksDB) is a mirror rebuilt from the SQLite `graph_edges` table, and no retrieval path reads it.
 Override with `OPTIMAL_KNOWLEDGE_BACKEND=ets` or `OPTIMAL_KNOWLEDGE_BACKEND=mnesia` when intentionally testing another backend.
 
 Verify:
@@ -92,13 +94,13 @@ Use these terms precisely:
 
 | Store | Role |
 | --- | --- |
-| SQLite | Local canonical runtime store today. |
-| Postgres | Production canonical runtime target. |
+| SQLite | The canonical runtime store of the default build, in the same instance as FTS5 and vectors. |
+| Postgres | Optional provider for scale: a compile-time `OPTIMAL_STORE=postgres` build, partial (no full-text search, replication, or app data collections). |
 | Raw artifact storage | Preserved files, uploads, attachments, and media evidence. |
 | FTS, vector, chunk, cache rows | Rebuildable retrieval and acceleration projections. |
-| RocksDB | Default local persistent knowledge graph backend when installed. |
-| ETS | In-memory fallback knowledge graph backend. |
-| Mnesia | Optional distributed knowledge graph backend. |
+| RocksDB | Persistent triple-store mirror of the graph: the default of `scripts/run-engine.sh`; elsewhere opt in with `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`. |
+| ETS | In-memory triple-store mirror of the graph: the config default (bare `mix`, tests), and what the Docker image and MIOSA template run. |
+| Mnesia | Experimental graph backend with `ram_copies` tables only. |
 | Markdown, wiki, HTML, API, app views | Projection and control surfaces. |
 
 One physical store can hold many layer-owned records.
@@ -112,13 +114,14 @@ Use this flow when explaining or debugging the engine:
 Raw inputs
   -> ingestion
   -> SQLite canonical store
-  -> RocksDB graph runtime plus retrieval projections
+  -> graph backend (ETS or RocksDB) plus retrieval projections
   -> search, graph, and RAG
   -> API, CLI, wiki, and app surfaces
 ```
 
 SQLite is the durable local truth.
-RocksDB is the default persistent local knowledge graph backend when installed.
+The graph that search and assembly read is the SQLite `graph_edges` table.
+The triple store is a mirror of it: RocksDB under `scripts/run-engine.sh`, ETS under bare `mix`, in tests, in the Docker image, and in the MIOSA template.
 Chunks, vectors, FTS rows, and caches are retrieval material or rebuildable projections.
 RAG is an answer path across retrieved context, not a database and not the source of truth.
 BusinessOS is an app surface.

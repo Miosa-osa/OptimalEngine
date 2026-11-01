@@ -329,14 +329,146 @@ An entry's entity type is free-form, but it may not name a table of the engine o
 The Engine gives each entry its id, and the same key with the same change returns the entry already written, an entry written before these checks included.
 Replication never serves or pushes an entry: see "Storage mutation entries share the ledger" in `docs/guides/replication.md`.
 
+## Provider Status
+
+One Engine instance is the default data layer: it holds every store inside it and runs no Postgres, Qdrant, or Redis next to it.
+Providers are what a deployment grows onto, and this table is the status of each in this repository.
+"Wired" means a working adapter exists, "partial" means the adapter works with listed limits, and "declared" means the inventory lists the provider and no adapter exists.
+
+| Provider | Status | What works | What does not |
+| --- | --- | --- | --- |
+| SQLite, FTS5, embedded vectors, filesystem, ETS | Wired, the default | Everything the Engine stores | |
+| RocksDB | Wired, opt in | A persistent triple-store mirror of `graph_edges` (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`) | Falls back to ETS when the native library is missing |
+| `s3` (S3-compatible: Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Asset bytes, offsite backups, the probe and the placement reconciler | |
+| `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Full-text search, replication, app data collections, and the engine's backup routes; moving an existing Engine to it |
+| `nats_jetstream` | Declared, no adapter yet | | Everything |
+| `valkey` | Declared, no adapter yet | | Everything |
+| `qdrant` | Declared, no adapter yet | | Everything; embedded vectors serve every Engine |
+| `duckdb` (DuckDB and Parquet) | Declared, no adapter yet | | Everything |
+| `openbao` | Declared, no adapter yet | | Everything; secrets come from the environment |
+| `fractal` | Declared, no adapter yet | | Everything |
+
+`GET /api/storage/providers` reports `adapter_implemented` for each entry and `adapter_missing` as the lifecycle state of the declared ones, whatever is configured.
+
+## Use Cases And Plans
+
+A use case names the capabilities a workspace needs and the providers that supply them.
+`OptimalEngine.Storage.Planner` turns use cases into a plan.
+A plan is advice: it never enables a provider and never moves data.
+
+`GET /api/storage/use-cases` lists the use cases:
+
+```bash
+curl -s "$URL/api/storage/use-cases" | jq '.use_cases[] | {id, providers}'
+```
+
+```json
+{"use_cases": [{"id": "cloud_team", "label": "Multi-user cloud workspace", "providers": ["postgres", "s3", "openbao", "nats_jetstream", "valkey"], "reason": "Concurrent writes, durable artifacts, managed secrets, and distributed coordination"}], "count": 11}
+```
+
+The entries are sorted by `id`, and each has `id`, `label`, `providers`, and `reason`.
+
+| Use case id | Providers |
+| --- | --- |
+| `desktop_local` | `sqlite`, `fts5`, `embedded_vectors`, `rocksdb`, `filesystem`, `ets` |
+| `cloud_team` | `postgres`, `s3`, `openbao`, `nats_jetstream`, `valkey` |
+| `multi_device` | `postgres`, `s3`, `nats_jetstream`, `openbao` |
+| `high_volume_connectors` | `nats_jetstream`, `s3`, `postgres` |
+| `analytics` | `duckdb` |
+| `high_scale_semantic` | `qdrant` |
+| `media_archive` | `s3` |
+| `regulated` | `postgres`, `s3`, `openbao`, `nats_jetstream` |
+| `enterprise_ai` | `postgres`, `s3`, `openbao`, `nats_jetstream`, `fractal` |
+| `geospatial` | `postgres` |
+| `time_series` | `postgres`, `duckdb` |
+
+`POST /api/storage/plan` plans one or more use cases.
+The body is `{"use_cases": ["media_archive", "analytics"], "probe": false}`, where `use_cases` is a list or a comma-separated string, and `probe: true` makes each provider run its health probe.
+
+```bash
+curl -s -X POST "$URL/api/storage/plan" -H 'content-type: application/json' \
+  -d '{"use_cases": ["media_archive"]}' | jq '{ready, activation_required, adapter_missing}'
+```
+
+The response has this shape:
+
+| Field | Meaning |
+| --- | --- |
+| `use_cases` | The use cases asked for, each with `id`, `label`, `providers`, `reason` |
+| `providers` | The union of their providers, each as in the provider inventory |
+| `ready` | `true` only when every selected provider is `active` or `available`, and a canonical store is the one this build runs |
+| `activation_required` | Ids of the providers that are not ready |
+| `adapter_missing` | Ids of the providers with no adapter |
+| `invariant` | The rule that projections and transports never become truth |
+
+An unknown use case answers 422 with `{"error": "unknown use cases", "unknown": ["..."]}`.
+A plan that selects a provider with no adapter is never `ready`, so `cloud_team` and `regulated` are not ready on any build today, because `openbao` and `nats_jetstream` have no adapter.
+`media_archive` is ready once the `s3` provider is configured and a plan made with `"probe": true` finds it healthy.
+
+The same is available from the shell as `mix optimal.storage use-cases` and `mix optimal.storage plan <ids>`.
+
+## Recipe: Garage
+
+Garage is a small open-source S3 server that fits one machine.
+This recipe runs it next to the Engine and uses it for assets and encrypted offsite backups.
+
+1. Start Garage and the Engine with the storage overlay, then wait for both to be healthy:
+
+   ```bash
+   cd deploy
+   docker compose -f docker-compose.yml -f docker-compose.storage.yml --profile storage up -d
+   ```
+
+   The overlay runs Garage in single-node mode with the bucket `optimal-artifacts` and a development key.
+   Replace the key and secret (`OPTIMAL_S3_ACCESS_KEY_ID`, `OPTIMAL_S3_SECRET_ACCESS_KEY`) in `deploy/.env` before anything but a trial.
+
+2. Set the region to the value in `deploy/storage/garage.toml`.
+   Garage signs for the `s3_region` it is configured with (`garage` in the shipped file), and a request signed for another region is rejected.
+
+   ```dotenv
+   OPTIMAL_S3_ENDPOINT=http://garage:3900
+   OPTIMAL_S3_BUCKET=optimal-artifacts
+   OPTIMAL_S3_REGION=garage
+   OPTIMAL_S3_ACCESS_KEY_ID=<garage key id>
+   OPTIMAL_S3_SECRET_ACCESS_KEY=<garage secret>
+   OPTIMAL_ASSET_STORAGE=s3
+   OPTIMAL_BACKUP_KEY=<64 hex characters>
+   OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS=86400000
+   ```
+
+   Path-style addressing is the default and is what Garage serves, so leave `OPTIMAL_S3_PATH_STYLE` unset.
+
+3. Prove the provider end to end:
+
+   ```bash
+   curl -s "$URL/api/storage/providers/s3?probe=true" -H "Authorization: Bearer $KEY" | jq '{health, lifecycle_state}'
+   ```
+
+   Expect `healthy` and `available`.
+   `unreachable` with a good key means the region does not match `s3_region`.
+
+4. Ingest a file and confirm its `storage_path` starts with `s3://optimal-artifacts/`.
+
+5. Take an offsite backup and list it:
+
+   ```bash
+   curl -s -X POST "$URL/api/backup" -H "Authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"name": "first.db", "offsite": true}' | jq .offsite
+   curl -s "$URL/api/backup/offsite" -H "Authorization: Bearer $KEY" | jq '.backups[0], .schedule.state'
+   ```
+
+6. Run the [restore drill](#restore-drill) into a fresh data directory before you rely on it.
+
+Keep `OPTIMAL_BACKUP_KEY` away from the machine, and give a Garage bucket that holds more than one Engine's data one `OPTIMAL_S3_PREFIX` per Engine.
+
 ## What Is Not Implemented
 
-The engine still has no adapter for NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, or Fractal, and the provider inventory says so.
-PostgreSQL holds the canonical relational store but not full-text search, and moving an existing engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
+The Engine has no adapter for NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, or Fractal, and the provider inventory says so.
+PostgreSQL holds the canonical relational store but not full-text search, replication, or app data collections, and moving an existing Engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.
 
 ## Related
 
-- `docs/guides/installation-and-deployment.md` describes the deployment profiles and the environment variables a runtime reads.
+- `docs/guides/installation-and-deployment.md` describes the four deployment modes and the environment variables a runtime reads.
+- `docs/guides/miosa-managed-engine.md` describes the MIOSA-managed mode.
 - `docs/guides/store-and-layer-reality.md` describes what each logical store is proved to do on a running engine.
-- `docs/guides/replication.md` describes the workspace sync ledger that a distributed runtime would transport.
+- `docs/guides/replication.md` describes the workspace sync ledger and how peers carry it, over HTTP or the MIOSA relay.

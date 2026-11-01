@@ -100,4 +100,5 @@
 - "Context" was used to mean database row, prompt material, search result, and agent working memory. Use **Context Package** for AI-ready task context and **Memory Object** for durable memory.
 - "File" was treated like truth. Files in node folders should be **Workspace Exports** derived from the **Enterprise Memory Core**.
 - "Skill" was used for prompts, tools, procedures, and agent abilities. Use **Skill Package** only for governed procedural knowledge with policy, validation, provenance, and audit.
-- "Postgres" was used as shorthand for the architecture. The canonical term is **Enterprise Memory Core**; Postgres is the likely first implementation substrate.
+- "Postgres" was used as shorthand for the architecture.
+  The canonical term is **Enterprise Memory Core**; the default implementation substrate is the Engine's embedded SQLite, and Postgres is an optional, partial provider for scale.
