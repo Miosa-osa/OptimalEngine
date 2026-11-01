@@ -170,7 +170,7 @@ Use these terms precisely:
 
 | Term | Meaning | Examples |
 | --- | --- | --- |
-| Storage substrate | Where bytes or records physically live. | SQLite, Postgres, raw artifact storage, FTS/vector indexes, cache directories, optional graph backends. |
+| Storage substrate | Where bytes or records physically live. | SQLite, raw artifact storage, FTS/vector indexes, cache directories, graph backends, and optional providers (S3, a partial Postgres build). |
 | Domain layer | The owner of lifecycle and meaning. | Topology, Memory Core, Retrieval, Workflow, Governance. |
 | Projection surface | A way humans, agents, apps, or tools see/control state. | Markdown, wiki, HTML, API, MCP, desktop app, reports, agent context packages. |
 
@@ -179,7 +179,7 @@ canonical lifecycle.
 
 ```mermaid
 flowchart LR
-  Store[(Storage substrate<br/>SQLite / Postgres / artifacts / indexes)]
+  Store[(Storage substrate<br/>SQLite / artifacts / indexes / graph)]
   Layer[Domain layer<br/>owns meaning and lifecycle]
   Surface[Projection surface<br/>markdown / wiki / API / MCP / app]
   Edit[Human or agent edit]
@@ -196,18 +196,22 @@ flowchart LR
 
 | Store | Current role |
 | --- | --- |
-| SQLite | Local canonical runtime store today. |
-| Postgres | Target production canonical runtime store. |
-| Raw artifact storage | Preserved files, uploads, attachments, and media evidence. |
+| SQLite | Canonical runtime store, in the same instance as FTS5 and vectors. |
+| Raw artifact storage | Preserved files, uploads, attachments, and media evidence (the filesystem, or S3 when configured). |
 | FTS/vector/chunk indexes | Rebuildable retrieval projections. |
 | Cache directories | Rebuildable parse, embedding, and runtime acceleration. |
-| ETS/RocksDB/Mnesia/Riak-style backends | Optional graph/knowledge backends; not the main workspace database today. |
+| ETS and RocksDB | Triple-store mirrors of the SQLite `graph_edges` graph, which no retrieval path reads. ETS is the config default and what the Docker image and MIOSA template run; RocksDB is the dev launcher default. Mnesia is experimental (`ram_copies`) and Riak is in no build. |
+| Postgres | Optional provider for scale, wired but partial (compile-time `OPTIMAL_STORE=postgres`, no full-text search, replication, or app data collections). |
+| NATS, Valkey, Qdrant, DuckDB, OpenBao, Fractal | Declared providers with no adapter yet. |
 | Markdown/files | Human-operable projection and editing surface. |
 | HTML/wiki/API/app views | Projection and control surfaces. |
 
-For install profiles, Docker guidance, hosted/local multimodal adapter options,
+One Engine instance is the default data layer: one process on one durable disk that holds every store inside it.
+
+For the four deployment modes (self-hosted embedded, self-hosted with providers, cloud providers, and MIOSA-managed), Docker guidance, hosted/local multimodal adapter options,
 and enterprise readiness checks, read
 [Installation and deployment](guides/installation-and-deployment.md).
+For the MIOSA-managed mode in full, read [MIOSA-managed Engine](guides/miosa-managed-engine.md).
 
 For S3-compatible object storage, workspace assets on a bucket, and offsite
 backups with a restore drill, read

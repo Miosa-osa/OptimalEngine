@@ -10,7 +10,8 @@ BusinessOS and other apps own product state.
 Do not collapse app state into memory.
 Do not rebuild memory inside app code.
 SQLite is the durable local runtime store today.
-RocksDB is the default persistent local graph backend when available.
+RocksDB is the persistent triple-store mirror that the standard launcher selects when its native library is available; ETS is the config default and what the Docker image and MIOSA template run.
+The graph retrieval reads is the SQLite `graph_edges` table; the triple store is a mirror of it.
 FTS, vectors, chunks, caches, graph projections, and RAG outputs are projections or retrieval surfaces.
 They are not the same thing as raw evidence or final truth.
 

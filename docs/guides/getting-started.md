@@ -17,7 +17,7 @@ install
 
 Required:
 
-- Erlang/OTP 27+
+- Erlang/OTP 27+, but not 28.0 to 28.2 (use 28.3 or later)
 - Elixir `~> 1.17`
 - Git
 - C toolchain for the SQLite NIF
@@ -32,7 +32,8 @@ Optional:
   video, vision, or embedding adapters
 
 SQLite is the local canonical runtime store.
-The standard launcher selects RocksDB when its native dependency is available; ETS is the fallback or an explicit testing choice.
+The standard launcher (`scripts/run-engine.sh`) selects RocksDB for the graph mirror and falls back to ETS when the native dependency is missing.
+ETS is the config default, used by bare `mix`, tests, the Docker image, and the MIOSA template.
 
 ## 2. Clone And Compile
 

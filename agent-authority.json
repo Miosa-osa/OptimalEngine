@@ -8,8 +8,8 @@
       "status": "active",
       "owner": "platform",
       "scope": "optimal-engine",
-      "version": 2,
-      "effective": "2026-09-08",
+      "version": 3,
+      "effective": "2026-11-01",
       "owns": [
         "agent-operation"
       ],
@@ -174,8 +174,8 @@
       "status": "active",
       "owner": "platform",
       "scope": "optimal-engine",
-      "version": 2,
-      "effective": "2026-09-08",
+      "version": 3,
+      "effective": "2026-11-01",
       "owns": [
         "layer-ownership",
         "knowledge-flow"
@@ -344,8 +344,8 @@
       "status": "active",
       "owner": "platform",
       "scope": "optimal-engine",
-      "version": 1,
-      "effective": "2026-09-08",
+      "version": 2,
+      "effective": "2026-11-01",
       "owns": [
         "storage-projection"
       ]
@@ -515,6 +515,17 @@
       "scope": "optimal-engine",
       "version": 2,
       "effective": "2026-09-08",
+      "owns": []
+    },
+    {
+      "id": "docs-guides-miosa-managed-engine",
+      "path": "docs/guides/miosa-managed-engine.md",
+      "kind": "reference",
+      "status": "active",
+      "owner": "platform",
+      "scope": "optimal-engine",
+      "version": 1,
+      "effective": "2026-11-01",
       "owns": []
     },
     {

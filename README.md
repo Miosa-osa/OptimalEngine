@@ -393,9 +393,13 @@ assemble by tier, deliver.
 
 The agent-facing storage catalog exposes 12 logical stores through
 `GET /api/stores`: relational, full-text, vector, graph, assets, cache, jobs,
-metrics, backups, decomposition, models, and secrets. These are logical
-capabilities, not a requirement to deploy 12 separate database servers. The
-default local runtime uses SQLite, FTS5, RocksDB, ETS, and filesystem artifacts.
+metrics, backups, decomposition, models, and secrets.
+These are logical capabilities, not a requirement to deploy 12 separate
+database servers.
+One Engine instance holds all of them: SQLite, FTS5, embedded vectors, a graph
+triple-store mirror (ETS by default, RocksDB under the dev launcher), ETS and
+file caches, and filesystem artifacts.
+It does not run Postgres, Qdrant, or Redis inside.
 
 ## Product Surfaces
 
@@ -465,8 +469,9 @@ The engine deliberately separates where data is stored from how it is organized
 and displayed.
 
 ```text
-Storage substrate   -> SQLite, Postgres, raw artifact storage, indexes, caches,
-                       optional graph/knowledge backends.
+Storage substrate   -> SQLite (default), raw artifact storage, indexes, caches,
+                       graph/knowledge backends; S3 and a partial Postgres
+                       build as optional providers.
 Domain ownership    -> topology, intake, signal, memory, retrieval, active work,
                        workflow, skill, governance, evaluation.
 Projection surface  -> markdown, wiki, HTML, app UI, API, MCP/tools, reports,
@@ -690,7 +695,7 @@ flowchart TB
   Workflow[Workflow and Skill Runtime]
   Governance[Tool and Model Governance]
   Eval[Evaluation and Recovery]
-  Store[(SQLite now / Postgres target / optional knowledge backends)]
+  Store[(One Engine: SQLite, files, indexes, graph backend)]
   Export[Wiki / Markdown / HTML / API projections]
 
   Surfaces --> Gateway
@@ -823,7 +828,7 @@ This section is the same ground in more detail.
 Requirements:
 
 - Elixir `~> 1.17`
-- Erlang/OTP 27+
+- Erlang/OTP 27+, but not 28.0 to 28.2 (their runtime can crash the whole VM when a process is killed during a long regular expression match; use 28.3 or later)
 - Node 20+ for app/site surfaces
 - A local C toolchain for optional native dependencies
 - Snappy for the RocksDB knowledge graph backend
@@ -1038,20 +1043,38 @@ Use Docker or a managed runtime when you want a packaged service stack:
 docker compose -f deploy/docker-compose.yml up
 ```
 
-The target production database is Postgres. The architecture is built so the
-physical store can change while layer ownership stays the same.
+One Engine instance is the default data layer: one process on one durable disk
+that holds every store inside it.
+The architecture is built so the physical store can change while layer
+ownership stays the same, and providers are things a deployment grows onto,
+not the default shape.
 
 ```text
-SQLite now: local canonical runtime store
-Postgres target: production canonical runtime store
-FTS/vector/index/cache rows: rebuildable projections
-ETS/RocksDB/Mnesia/Riak knowledge backends: optional graph/triple-store engines
+SQLite: canonical runtime store, with FTS5 and vectors in the same file
+Files: assets and objects, caches, backups
+graph_edges in SQLite: the graph; ETS or RocksDB: a mirror of it
+S3-compatible storage: wired for assets and offsite backups
+Postgres: wired but partial, a compile-time OPTIMAL_STORE=postgres build
+          that refuses full-text search, replication, and app data collections
+NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, Fractal: declared, no adapter yet
 Markdown/files/wiki/HTML/API: export and control surfaces
 ```
 
-RocksDB is not the main workspace database today. It is an optional persistent
-knowledge backend for graph/triple-store workloads when the runtime has the
-required native RocksDB library available.
+The deployment modes (self-hosted embedded, self-hosted with providers, cloud
+providers, and MIOSA-managed) are in
+[Installation and deployment](docs/guides/installation-and-deployment.md).
+
+RocksDB is not the main workspace database.
+It is an optional persistent knowledge backend, and the edges are canonical in
+SQLite.
+The `graph_edges` table is the graph that search and assembly read.
+The triple store is a mirror rebuilt from it that no retrieval path reads.
+The mirror is ETS (held in memory, reloaded at each start) under bare `mix`, in
+tests, in the Docker image, and in the MIOSA template and managed Engines, which
+do not set `OPTIMAL_KNOWLEDGE_BACKEND`.
+`scripts/run-engine.sh` defaults it to RocksDB.
+`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` with `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH`
+selects it anywhere.
 
 ## Verification
 

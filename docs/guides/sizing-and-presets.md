@@ -11,7 +11,23 @@ The profile tunes the Engine to its machine and says when to grow; the preset ap
 | `workspace` | 1 / 2 GiB | 10 GiB | 250k vectors, 500k memories, 50k memory candidates, 100k contexts | yes | one client or team workspace |
 | `business` | 2 / 4 GiB | 25 GiB | 1M vectors, 2M memories, 200k memory candidates, 500k contexts | no | a whole company in one brain |
 | `platform` | 4 / 8 GiB | 100 GiB | 5M vectors, 10M memories, 1M memory candidates, 2M contexts | no | a large customer, a product with many end users |
-| `scale` | 8 / 16 GiB or more | 250 GiB or more | beyond embedded limits | no | vectors move to a vector provider, writers to Postgres |
+| `scale` | 8 / 16 GiB or more | 250 GiB or more | beyond embedded limits | no | beyond one embedded Engine: vectors would move to a vector provider (Qdrant, no adapter yet), writers to Postgres (wired but partial, see below) |
+
+### Sizes on MIOSA
+
+A managed Engine presents the five profiles as five sizes, and each carries the machine size name the profile asks the platform for (`machine.size` in `GET /api/storage/profiles`).
+
+| Size | Profile | Machine size name | Machine (vCPU / RAM) | Disk | Scale to zero |
+| --- | --- | --- | --- | --- | --- |
+| Agent memory | `agent` | `tiny` | 1 / 1 GiB | 2 GiB | flagged |
+| Workspace | `workspace` | `xs` | 1 / 2 GiB | 10 GiB | flagged |
+| Business | `business` | `small` | 2 / 4 GiB | 25 GiB | no |
+| Platform | `platform` | `medium` | 4 / 8 GiB | 100 GiB | no |
+| Scale | `scale` | `large` | 8 / 16 GiB | 250 GiB | no |
+
+Providers are added at Scale.
+One-command resize and scale to zero are planned platform operations: the Engine reports the sizes and a recommendation, and the platform does the move.
+See [MIOSA-managed Engine](miosa-managed-engine.md).
 
 Set the profile with `OPTIMAL_SIZE_PROFILE` (default `business`).
 It sets the SQLite page cache and memory map, the hot context cache, and the API rate limit per key.
@@ -58,8 +74,23 @@ The limit is a tenth of the profile's `memories` limit.
 The count reads the claims table, which no index covers for these two columns, so it is kept for 30 seconds.
 
 A gauge is `ok` under 70 percent, `watch` from 70 percent, and `over` from 100 percent.
-At 70 percent of any limit the recommendation is `resize` to the next profile, with its machine and disk; on `scale` it is `enable_providers` with the providers for the gauge (a vector provider for vectors, object storage for disk, Postgres and a stream for writes).
-A platform reads this to show usage and to resize automatically.
+At 70 percent of any limit the recommendation is `resize` to the next profile, with its machine and disk; on `scale` it is `enable_providers` with the providers for the gauge.
+
+| Gauge | Provider the recommendation names | Status |
+| --- | --- | --- |
+| `vectors` | `qdrant` | No adapter yet. Embedded vectors keep serving. |
+| `disk_bytes` | `s3` | Wired. Moves assets and backups off the disk. |
+| `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` has no adapter yet. |
+| any other gauge | `postgres` | Wired but partial. |
+
+The recommendation names a provider whether or not the Engine can use it, so check `GET /api/storage/providers` (`adapter_implemented`) before acting on it.
+
+A Postgres build gives up full-text search and replication, and app data collections.
+Search, context assembly, and asking are refused by name on it, enabling sync is refused, and the Engine's backup routes (which copy the SQLite file) do not cover it.
+Moving an existing Engine's data to Postgres is not implemented.
+Choose it for write concurrency only when you can live without those features ([PostgreSQL Provider](postgres-provider.md)).
+
+A platform reads the recommendation to show usage and to resize.
 
 `GET /api/storage/profiles` lists every profile.
 

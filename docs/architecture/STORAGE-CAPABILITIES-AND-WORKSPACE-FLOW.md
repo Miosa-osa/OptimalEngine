@@ -79,7 +79,10 @@ This tier has no external service dependency and remains the preferred shape for
 
 ### Tier 1: Self-Hosted Team
 
-PostgreSQL, Garage or another S3-compatible object store, NATS JetStream, Valkey, and OpenBao can be provisioned when a workspace needs concurrent users, durable objects, replayable ingestion, distributed coordination, or centralized secrets.
+A self-hosted team grows onto providers only when one Engine instance is no longer enough.
+Garage or another S3-compatible object store is wired for assets and offsite backups.
+PostgreSQL is wired but partial: a compile-time build that refuses full-text search, replication, and app data collections.
+NATS JetStream, Valkey, and OpenBao can be provisioned next to the Engine, but the Engine has no adapter for them yet, so provisioning them changes nothing.
 
 These services are optional.
 
@@ -89,7 +92,8 @@ Canonical cutover requires an explicit migration, validation, and rollback plan.
 
 ### Tier 2: Cloud Scale
 
-Managed PostgreSQL, S3-compatible object storage, NATS, Valkey, Qdrant, and analytical DuckDB or Parquet projections can replace self-hosted equivalents when availability, throughput, regional access, or operational scale requires them.
+Managed S3-compatible object storage (AWS S3, R2) and managed PostgreSQL (with the limits above) can replace self-hosted equivalents today.
+Managed NATS, Valkey, Qdrant, and analytical DuckDB or Parquet projections are the intended next providers, and none has an adapter yet.
 
 Qdrant is an optional high-scale semantic projection and never becomes accepted truth.
 
@@ -141,7 +145,9 @@ A provider has one of six lifecycle states.
 
 `adapter_missing` means the engine ships no adapter for the provider.
 It outranks configuration and probes: a reachable endpoint the engine cannot talk to is not available storage.
-Every provider reports `adapter_implemented`, and today only the embedded local providers have adapters.
+Every provider reports `adapter_implemented`.
+The embedded local providers, `s3`, and `postgres` have adapters (`postgres` is partial: a compile-time build that refuses full-text search, replication, and app data collections).
+`nats_jetstream`, `valkey`, `qdrant`, `duckdb`, `openbao`, and `fractal` have none yet.
 
 `active` means a default local provider is currently part of the running engine.
 RocksDB is `active` only when the knowledge store runs on it (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`); on an ETS knowledge store it reports `available`.
@@ -172,7 +178,8 @@ The replication ledger is append-only, workspace-scoped, idempotent, and ordered
 Replica cursors can only move forward.
 
 The ledger provides the durable contract needed for multi-device synchronization.
-NATS JetStream is the planned transport for carrying those mutations between processes, but its adapter is not implemented yet.
+Today peers carry it over HTTP, or through the MIOSA relay for an Engine that cannot be dialed (see [Replication](../guides/replication.md)).
+NATS JetStream is a planned transport for the same mutations, and its adapter is not implemented yet.
 
 Transport delivery does not replace the ledger.
 
@@ -234,7 +241,7 @@ Workspace policy and mutation endpoints require workspace authorization when aut
 
 The base Docker Compose file remains the local Engine profile.
 
-The optional storage overlay provisions the open-source team and scale services.
+The optional storage overlay provisions Garage (S3) for the stock image to use, and the services the Engine has no adapter for yet are commented out in it (see [Deployment](../../deploy/README.md)).
 
 ```bash
 docker compose \

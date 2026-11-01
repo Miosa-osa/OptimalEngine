@@ -73,11 +73,11 @@ Use these words precisely:
 
 | Layer | Meaning |
 | --- | --- |
-| SQLite | Durable local canonical runtime store today. |
-| Postgres | Production canonical runtime target. |
-| RocksDB | Default local persistent knowledge graph backend when installed. |
-| ETS | In-memory fallback graph backend. |
-| Mnesia | Optional distributed graph backend. |
+| SQLite | Durable canonical runtime store of the default build; one Engine instance holds every store inside it. |
+| Postgres | Optional provider for scale, partial: a compile-time `OPTIMAL_STORE=postgres` build without full-text search, replication, or app data collections. |
+| RocksDB | Persistent triple-store mirror of the graph: the default of `scripts/run-engine.sh`; elsewhere opt in with `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`. |
+| ETS | In-memory triple-store mirror of the graph: the config default (bare `mix`, tests), and what the Docker image and MIOSA template run. |
+| Mnesia | Experimental graph backend, `ram_copies` only. |
 | Vectors, chunks, FTS, caches | Rebuildable retrieval projections. |
 | RAG | An answer path over retrieved context, not a database. |
 
@@ -87,7 +87,7 @@ The practical flow is:
 raw inputs
   -> ingestion
   -> SQLite canonical store
-  -> RocksDB graph runtime plus retrieval projections
+  -> graph backend (ETS or RocksDB) plus retrieval projections
   -> search, graph, and RAG
   -> API, CLI, wiki, and app surfaces
 ```

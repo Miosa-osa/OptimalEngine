@@ -35,8 +35,10 @@ SQLite owns local truth today.
 Indexes and caches make retrieval faster.
 The graph store makes relationships usable.
 RAG is a query path across those stores.
-RocksDB is the preferred local knowledge graph backend when the native NIF is installed.
-ETS remains the in-memory fallback.
+The graph that search, assembly, and materialization read is the SQLite `graph_edges` table.
+The triple store is a mirror rebuilt from it, and no retrieval path reads it.
+RocksDB is the persistent mirror: `scripts/run-engine.sh` selects it, and `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` with `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` selects it anywhere.
+ETS is the config default, used by bare `mix`, tests, the Docker image, and the MIOSA template, held in memory and reloaded from SQLite at each start.
 ```
 
 ## Runtime Flow
@@ -54,8 +56,9 @@ SQLite canonical store
   -> stores the durable truth for contexts, chunks, entities, edges, vectors, claims, facts, memory objects, packages, and audit
 
 Runtime graph store
-  -> hydrates graph edges from SQLite into RocksDB for the full local setup
-  -> uses ETS only as the fallback when RocksDB is unavailable or intentionally disabled
+  -> hydrates graph edges from SQLite into the configured triple-store mirror after each start
+  -> uses RocksDB under scripts/run-engine.sh, and ETS under bare mix, in tests, the Docker image, and the MIOSA template
+  -> falls back to ETS when RocksDB is requested and its native library is unavailable
 
 Retrieval layer
   -> uses search, chunks, vectors, graph relationships, ranking, and Context Packages
@@ -108,10 +111,10 @@ If the engine API returns the wrong workspace data, that is an engine isolation 
 | Vector rows | Optional but expected for semantic retrieval | Embedding-backed retrieval projection. | Reality check retrieval probes pass. Health stays degraded only if configured embedder is broken. |
 | Chunk rows | Yes for document-scale retrieval | Breaks large sources into retrievable pieces. | Reality check store counts include `chunks`; ingesting files should increase chunk rows. |
 | Cache directories | Optional | Rebuildable acceleration for parsing, embeddings, and runtime work. Embeddings are cached per workspace, hold vectors only, are named under a key that belongs to the install and are readable by the Engine's user only, expire by age, and are removed with their workspace, as are its decomposition checkpoints and local copies of its object-store assets. | Can be deleted and rebuilt without losing truth. See `OPTIONS.md`, Text Embeddings. |
-| RocksDB graph store | Yes for the full local setup | Persistent knowledge graph backend hydrated from SQLite edges. | `lsof` shows `.optimal/knowledge-rocksdb` files open and startup logs show `Knowledge backend: RocksDB`. |
-| ETS graph store | Fallback | In-memory graph backend when RocksDB is unavailable or disabled. | Startup logs show `Knowledge backend: ETS`. |
-| Mnesia graph store | Optional | Distributed BEAM graph backend for specialized deployments. | Backend tests pass and startup logs show `Knowledge backend: Mnesia` when configured. |
-| Postgres | No for local dev | Canonical runtime rows for engines that share one database. `OptimalEngine.Store.Postgres` implements the store contract and a build selects it with `OPTIMAL_STORE=postgres`; full-text search stays on SQLite (see `docs/guides/postgres-provider.md`). | `GET /api/storage/providers` reports `adapter_implemented: true`, and `selected` says which canonical store the build runs. |
+| RocksDB graph store | Optional. It is the default of `scripts/run-engine.sh`; elsewhere opt in with `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` | Persistent knowledge graph backend hydrated from SQLite edges. | `lsof` shows `.optimal/knowledge-rocksdb` files open (or the `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` directory) and startup logs show `Knowledge backend: RocksDB`. |
+| ETS graph store | Default | In-memory mirror of the graph: the config default (bare `mix`, tests, the Docker image, the MIOSA template); also the fallback when RocksDB is requested and unavailable. | Startup logs show `Knowledge backend: ETS`. |
+| Mnesia graph store | Optional | Experimental BEAM graph backend. Its tables are `ram_copies`, so nothing is persistent. | Backend tests pass and startup logs show `Knowledge backend: Mnesia` when configured. |
+| Postgres | No. An optional provider for scale | Canonical runtime rows for engines that share one database. `OptimalEngine.Store.Postgres` implements the store contract and a build selects it with `OPTIMAL_STORE=postgres`; a Postgres build has no full-text search, replication, or app data collections, and refuses them by name (see `docs/guides/postgres-provider.md`). | `GET /api/storage/providers` reports `adapter_implemented: true`, and `selected` says which canonical store the build runs. |
 
 ## Agent-Facing Logical Stores
 
@@ -326,8 +329,8 @@ Say this instead:
 ```text
 The local engine runs SQLite as the canonical store.
 It builds retrieval indexes and hydrates graph views from that store.
-The full local setup uses RocksDB as the persistent knowledge graph backend.
-ETS is the fallback backend when RocksDB is unavailable or intentionally disabled.
+The graph that retrieval reads is SQLite `graph_edges`; its triple-store mirror is RocksDB under `scripts/run-engine.sh` and ETS elsewhere by default.
+ETS is also the fallback backend when RocksDB is requested and unavailable.
 A disposable reality check exercises implemented fixture paths; a live storage audit checks the configured user store.
 ```
 

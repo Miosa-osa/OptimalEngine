@@ -50,7 +50,7 @@ flowchart LR
   API --> Engine
   Intake --> Engine
 
-  Engine --> Store[(SQLite now / Postgres target)]
+  Engine --> Store[(One Engine: SQLite, files, indexes)]
   Engine --> Export[Markdown / wiki / HTML / API projections]
 ```
 
@@ -93,7 +93,7 @@ flowchart TB
   Export[Wiki / Export]
   Eval[Evaluation / Recovery]
 
-  Store[(Canonical runtime store\nSQLite now / Postgres target)]
+  Store[(Canonical runtime store\nSQLite; Postgres optional)]
   Artifacts[(Raw artifact storage)]
   Indexes[(Rebuildable indexes\nFTS / vectors / chunks / caches)]
 
@@ -411,7 +411,7 @@ Done when:
 ```text
 Benchmarks run through the same retrieval path.
 Derived indexes/projections can be rebuilt.
-Postgres deployment is hardened.
+Provider paths (S3 offsite backups, the Postgres build) are hardened.
 Credentials, retention, audit, observability, backups, and migrations are production-ready.
 ```
 

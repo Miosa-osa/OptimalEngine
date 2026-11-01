@@ -34,10 +34,17 @@ Raw inputs
 
 ## Store Model
 
-SQLite is the local durable store today.
-Postgres is the production durable target.
-RocksDB is the default local persistent graph backend when installed.
-ETS and Mnesia are alternate graph backends.
+One Engine instance is the default data layer: one process on one durable disk that holds every store inside it.
+SQLite is the durable store, with FTS5 and vectors in the same file.
+Assets and objects are files, caches are ETS and files, jobs and the change ledger are SQLite tables, and backups and sealed connector keys are part of the same instance.
+The Engine does not run Postgres, Qdrant, or Redis inside; it embeds its own equivalents.
+The graph that search, assembly, and materialization read is the SQLite `graph_edges` table.
+The triple store (ETS or RocksDB) is a mirror rebuilt from it, and no retrieval path reads it.
+The mirror is ETS, in memory, under bare `mix`, in tests, in the Docker image, and in the MIOSA template and managed Engines, because none of them sets `OPTIMAL_KNOWLEDGE_BACKEND`.
+`scripts/run-engine.sh` defaults it to RocksDB, and `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` with `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` selects it anywhere.
+Mnesia is an experiment with `ram_copies` tables, and Riak is in no build.
+Providers are things a deployment grows onto: S3-compatible storage is wired for assets and offsite backups, and Postgres is an optional, partial provider for scale (a compile-time `OPTIMAL_STORE=postgres` build without full-text search, replication, or app data collections).
+NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, and Fractal are declared with no adapter yet.
 Vectors, chunks, FTS rows, and caches are projections.
 The live logical-store catalog is available through `GET /api/stores`.
 Use `GET /api/stores/audit` to verify SQLite integrity, foreign keys, migrations, FTS parity, workspace isolation, vector validity, asset cataloging, verified backups, RLM readiness, and cache readiness.

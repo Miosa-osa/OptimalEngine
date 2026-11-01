@@ -3,43 +3,44 @@
 # Local engine only:
 #   docker compose -f deploy/docker-compose.yml up
 #
-# Team and scale providers:
+# With an S3-compatible object store (Garage):
 #   docker compose -f deploy/docker-compose.yml \
 #     -f deploy/docker-compose.storage.yml --profile storage up -d
 #
+# What the stock engine image can use today:
+#   S3 (Garage here) for assets and offsite backups. It is the only provider in
+#   this file the stock image talks to.
+#
+# What it cannot use:
+#   PostgreSQL is wired only for an engine built with OPTIMAL_STORE=postgres at
+#   compile time, which the stock image is not. Its service is behind the
+#   separate "postgres" profile for that custom build.
+#   NATS JetStream, Valkey, Qdrant and OpenBao have no adapter yet, so they are
+#   commented out below. Starting them changes nothing for the engine.
+#
 # Fractal is an enterprise partner service and is configured through its
 # endpoint and credential reference. It is not started by this compose file.
+#
+# Every credential here is a development default. Replace them before exposing
+# these services.
 
 name: optimal-engine
 
 services:
   engine:
     environment:
-      OPTIMAL_POSTGRES_URL: ${OPTIMAL_POSTGRES_URL:-postgres://optimal:optimal@postgres:5432/optimal}
       OPTIMAL_S3_ENDPOINT: ${OPTIMAL_S3_ENDPOINT:-http://garage:3900}
       OPTIMAL_S3_BUCKET: ${OPTIMAL_S3_BUCKET:-optimal-artifacts}
+      # Must match s3_region in storage/garage.toml, or Garage rejects the
+      # request signature.
+      OPTIMAL_S3_REGION: ${OPTIMAL_S3_REGION:-garage}
       OPTIMAL_S3_ACCESS_KEY_ID: ${OPTIMAL_S3_ACCESS_KEY_ID:-GK00000000000000000000000000000000}
       OPTIMAL_S3_SECRET_ACCESS_KEY: ${OPTIMAL_S3_SECRET_ACCESS_KEY:-local-development-secret}
-      OPTIMAL_NATS_URL: ${OPTIMAL_NATS_URL:-nats://nats:4222}
-      OPTIMAL_VALKEY_URL: ${OPTIMAL_VALKEY_URL:-redis://valkey:6379}
-      OPTIMAL_QDRANT_URL: ${OPTIMAL_QDRANT_URL:-http://qdrant:6333}
-      OPTIMAL_OPENBAO_ADDR: ${OPTIMAL_OPENBAO_ADDR:-http://openbao:8200}
-      OPTIMAL_OPENBAO_TOKEN: ${OPTIMAL_OPENBAO_TOKEN:-local-development-root-token}
-
-  postgres:
-    profiles: ["storage"]
-    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-optimal}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-optimal}
-      POSTGRES_DB: ${POSTGRES_DB:-optimal}
-    volumes:
-      - optimal_postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      # Set to s3 to keep asset bytes in the bucket instead of on /data.
+      # OPTIMAL_ASSET_STORAGE: s3
+      # Only an engine built with OPTIMAL_STORE=postgres reads this. The stock
+      # image reports the provider but keeps its data in SQLite.
+      # OPTIMAL_POSTGRES_URL: ${OPTIMAL_POSTGRES_URL:-postgres://optimal:optimal@postgres:5432/optimal}
 
   garage:
     profiles: ["storage"]
@@ -55,54 +56,59 @@ services:
       - optimal_garage_meta:/var/lib/garage/meta
       - optimal_garage_data:/var/lib/garage/data
 
-  nats:
-    profiles: ["storage"]
-    image: ${NATS_IMAGE:-nats:2.11-alpine}
-    command: ["-js", "-sd", "/data", "-m", "8222"]
-    volumes:
-      - optimal_nats:/data
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  valkey:
-    profiles: ["storage"]
-    image: ${VALKEY_IMAGE:-valkey/valkey:8-alpine}
-    command: ["valkey-server", "--appendonly", "yes"]
-    volumes:
-      - optimal_valkey:/data
-    healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  qdrant:
-    profiles: ["storage"]
-    image: ${QDRANT_IMAGE:-qdrant/qdrant:latest}
-    volumes:
-      - optimal_qdrant:/qdrant/storage
-
-  openbao:
-    profiles: ["storage"]
-    image: ${OPENBAO_IMAGE:-openbao/openbao:2.6}
-    cap_add: ["IPC_LOCK"]
+  # PostgreSQL: for a custom engine build made with OPTIMAL_STORE=postgres.
+  # That build refuses full-text search, replication and app data collections
+  # (docs/guides/postgres-provider.md). Start it with --profile postgres.
+  postgres:
+    profiles: ["postgres"]
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
     environment:
-      BAO_DEV_ROOT_TOKEN_ID: ${OPTIMAL_OPENBAO_TOKEN:-local-development-root-token}
-      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-    command: ["server", "-dev"]
+      POSTGRES_USER: ${POSTGRES_USER:-optimal}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-optimal}
+      POSTGRES_DB: ${POSTGRES_DB:-optimal}
+    volumes:
+      - optimal_postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "bao", "status"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 10
+
+  # NO ADAPTER YET: NATS JetStream, Valkey, Qdrant and OpenBao are declared in
+  # the provider inventory (GET /api/storage/providers reports adapter_missing)
+  # and the engine cannot use them. The services are kept here, commented out,
+  # for the day an adapter ships.
+  #
+  # nats:
+  #   profiles: ["storage"]
+  #   image: ${NATS_IMAGE:-nats:2.11-alpine}
+  #   command: ["-js", "-sd", "/data", "-m", "8222"]
+  #   volumes:
+  #     - optimal_nats:/data
+  #
+  # valkey:
+  #   profiles: ["storage"]
+  #   image: ${VALKEY_IMAGE:-valkey/valkey:8-alpine}
+  #   command: ["valkey-server", "--appendonly", "yes"]
+  #   volumes:
+  #     - optimal_valkey:/data
+  #
+  # qdrant:
+  #   profiles: ["storage"]
+  #   image: ${QDRANT_IMAGE:-qdrant/qdrant:latest}
+  #   volumes:
+  #     - optimal_qdrant:/qdrant/storage
+  #
+  # openbao:
+  #   profiles: ["storage"]
+  #   image: ${OPENBAO_IMAGE:-openbao/openbao:2.6}
+  #   cap_add: ["IPC_LOCK"]
+  #   environment:
+  #     BAO_DEV_ROOT_TOKEN_ID: ${OPTIMAL_OPENBAO_TOKEN:-local-development-root-token}
+  #     BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+  #   command: ["server", "-dev"]
 
 volumes:
   optimal_postgres:
   optimal_garage_meta:
   optimal_garage_data:
-  optimal_nats:
-  optimal_valkey:
-  optimal_qdrant:
