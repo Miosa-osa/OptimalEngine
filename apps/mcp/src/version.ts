@@ -7,7 +7,7 @@
  * package.json and `@version` in the Engine's mix.exs.
  */
 
-export const MCP_VERSION = "0.3.12";
+export const MCP_VERSION = "0.3.13";
 
 /** True when release `a` is lower than release `b` (numeric major.minor.patch). */
 export function versionLower(a: string, b: string): boolean {

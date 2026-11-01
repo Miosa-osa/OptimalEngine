@@ -99,7 +99,7 @@ The [Quick Start](#quick-start) covers requirements, every CLI surface, and depl
 
 | | |
 | --- | --- |
-| Release | Current source contract: application `0.3.12`, API `v1`, contract schema `1`, expected migration `86`. See [engine-contract.json](engine-contract.json), [release identity](docs/guides/versioning-and-releases.md), and [document authority](docs/guides/agent-control-plane.md). |
+| Release | Current source contract: application `0.3.13`, API `v1`, contract schema `1`, expected migration `86`. See [engine-contract.json](engine-contract.json), [release identity](docs/guides/versioning-and-releases.md), and [document authority](docs/guides/agent-control-plane.md). |
 | Built today | [What Is Built](#what-is-built), [Architecture](#architecture), [Product Surfaces](#product-surfaces) |
 | Clients | `apps/cli/optimal` for any running Engine over HTTP, an MCP server in `apps/mcp`, and `bin/optimal` for source checkouts ([client CLI and MCP guide](docs/guides/cli.md)) |
 | License | [Apache 2.0](LICENSE) |
