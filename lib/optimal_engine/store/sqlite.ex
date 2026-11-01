@@ -91,6 +91,11 @@ defmodule OptimalEngine.Store.SQLite do
   # ANALYZE reads at most this many rows of each index, so refreshing the
   # planner statistics takes about a second even on a store of several GB.
   @analysis_limit 1_000
+  # Another process can hold the database's write lock for a moment (a capture
+  # script, the sqlite3 CLI, a backup). A statement waits up to this long for
+  # it, well inside Store.call_timeout/0, then answers {:error, :busy}; without
+  # a timeout SQLite answered busy at once.
+  @busy_timeout_ms 3_000
   @planner_statistics_interval_ms :timer.hours(1)
 
   # ---------------------------------------------------------------------------
@@ -606,6 +611,7 @@ defmodule OptimalEngine.Store.SQLite do
         {:ok, ctx}
       else
         :done -> {:error, :not_found}
+        :busy -> {:error, :busy}
         {:error, reason} -> {:error, reason}
       end
 
@@ -771,6 +777,7 @@ defmodule OptimalEngine.Store.SQLite do
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA foreign_keys=ON"),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA recursive_triggers=ON"),
          :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA synchronous=NORMAL"),
+         :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA busy_timeout=#{@busy_timeout_ms}"),
          :ok <- apply_size_profile(db),
          :ok <- Exqlite.Sqlite3.execute(db, @ddl_contexts),
          :ok <- migrate_from_signals_table(db),
@@ -1682,6 +1689,7 @@ defmodule OptimalEngine.Store.SQLite do
     case Exqlite.Sqlite3.step(db, stmt) do
       {:row, row} -> collect_context_rows(db, stmt, [Context.from_row(row) | acc])
       :done -> {:ok, Enum.reverse(acc)}
+      :busy -> {:error, :busy}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -1690,6 +1698,7 @@ defmodule OptimalEngine.Store.SQLite do
     case Exqlite.Sqlite3.step(db, stmt) do
       {:row, row} -> collect_rows_raw(db, stmt, [row | acc])
       :done -> {:ok, Enum.reverse(acc)}
+      :busy -> {:error, :busy}
       {:error, reason} -> {:error, reason}
     end
   end

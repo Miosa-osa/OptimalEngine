@@ -22,6 +22,7 @@ refused	INSERT OR REPLACE INTO sessions (id, started_at, committed_at, summary, 
 refused	INSERT OR REPLACE INTO sessions (id, summary, message_count, workspace_id) VALUES (?)
 refused	INSERT OR REPLACE INTO vectors (context_id, embedding, dimensions, tenant_id, workspace_id) VALUES (?, COALESCE((SELECT tenant_id FROM contexts WHERE id = ?), (SELECT tenant_id FROM workspaces WHERE id = ?), (SELECT t.id FROM tenants t WHERE t.id = substr(?, N, instr(?, '…') - N)), ?, '…'), COALESCE((SELECT workspace_id FROM contexts WHERE id = ?), ?, '…'))
 refused	INSERT OR REPLACE INTO viability_reports (tenant_id, scope, period, report, backfilled) VALUES (?)
+refused	PRAGMA busy_timeout
 refused	PRAGMA foreign_key_check
 refused	PRAGMA integrity_check
 refused	PRAGMA schema_version
