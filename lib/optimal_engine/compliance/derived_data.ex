@@ -16,7 +16,9 @@ defmodule OptimalEngine.Compliance.DerivedData do
       their `decomposition_runs`, `assets` and the asset extractions, transcripts
       and OCR spans, and the files those rows point at
     * `wiki_pages` that cite one of the context's chunks, and their citations
-    * `episodes`, `processor_runs`, `decisions` and `graph_edges` that name the context
+    * `episodes`, `processor_runs`, `decisions` and `graph_edges` that name the context,
+      and the triples the knowledge store mirrors from those edges
+      (`Knowledge.Mirror`), which leave it before the call returns
     * the context's signal file, its summary sidecars and the cross-reference copies
       intake wrote to the other nodes, with the contexts that index them
       (`Compliance.ContextFiles`)
@@ -48,6 +50,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
   require Logger
 
   alias OptimalEngine.Compliance.{Artifacts, ContextFiles}
+  alias OptimalEngine.Knowledge.DefaultStore
   alias OptimalEngine.Storage.S3
   alias OptimalEngine.Store
 
@@ -73,7 +76,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
            :ok <- remove_objects(tenant_id, batch),
            {:ok, _removed} <-
              ContextFiles.remove(plan.files ++ plan.wiki_files, except: batch, owned: plan.owned) do
-        Store.transaction(&erase_batch(&1, tenant_id, batch, true), @timeout)
+        drop_triples(Store.transaction(&erase_batch(&1, tenant_id, batch, true), @timeout))
       end
     end)
   end
@@ -122,9 +125,28 @@ defmodule OptimalEngine.Compliance.DerivedData do
          :ok <- remove_objects(nil, ids),
          {:ok, _redacted} <- ContextFiles.redact(plan.files, except: ids, owned: plan.owned),
          {:ok, _removed} <- ContextFiles.remove(plan.wiki_files) do
-      Store.transaction(&delete_in(&1, ids, true), @timeout)
+      drop_triples(Store.transaction(&delete_in(&1, ids, true), @timeout))
     end
   end
+
+  # The triggers of Knowledge.Mirror recorded the deleted graph_edges rows in
+  # the same transaction; their triples leave the triple store before this
+  # returns. A store that cannot apply them now applies them on its next drain.
+  defp drop_triples({:ok, _removed} = result) do
+    case DefaultStore.drain() do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[DerivedData] The triple store drops the erased edges on its next drain: #{inspect(reason)}"
+        )
+    end
+
+    result
+  end
+
+  defp drop_triples(other), do: other
 
   @typedoc """
   What goes with one source package on a replica, as rows: the runs `[id, checkpoint,

@@ -209,6 +209,7 @@ refused	SELECT name FROM pragma_table_info(?) ORDER BY cid
 refused	SELECT name FROM sqlite_master WHERE type = '…'
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND name = ?
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND name LIKE '…'
+refused	SELECT name FROM sqlite_master WHERE type = '…' AND name LIKE '…' ORDER BY name
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND name NOT LIKE '…'
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND substr(name, N) = '…' ORDER BY name
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND tbl_name = '…'
@@ -232,6 +233,7 @@ refused	SELECT signal_id, metadata, subject_entity_id, object_entity_id, securit
 refused	SELECT slug FROM workspace_handles WHERE workspace_id = ? AND slug != ? ORDER BY created_at, rowid
 refused	SELECT source_id, target_id, relation, weight FROM edges WHERE workspace_id = ? ORDER BY ROWID DESC LIMIT ?
 refused	SELECT source_id, target_id, relation, weight FROM graph_edges WHERE tenant_id = ? AND workspace_id = ? ORDER BY ROWID DESC LIMIT ?
+refused	SELECT sql FROM sqlite_master WHERE type = '…' AND name LIKE '…' ORDER BY name
 refused	SELECT sql FROM sqlite_master WHERE type = '…' AND tbl_name = ? AND name LIKE '…'
 refused	SELECT sql FROM sqlite_master WHERE type = '…' AND tbl_name = ? AND name LIKE ?
 refused	SELECT storage_uri, checksum_sha256, offsite, metadata FROM backup_records WHERE status = '…' AND integrity_status = '…' ORDER BY verified_at DESC, rowid DESC LIMIT N

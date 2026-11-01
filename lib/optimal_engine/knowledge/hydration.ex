@@ -44,16 +44,36 @@ defmodule OptimalEngine.Knowledge.Hydration do
   @spec marker_path(keyword()) :: String.t()
   def marker_path(backend_opts), do: Path.join(Keyword.fetch!(backend_opts, :path), @marker)
 
+  @doc """
+  Whether the next `run/3` loads the store in full: always for an in-memory
+  backend, and for a persistent one without a marker it can trust. False when
+  the database cannot be read, since then nothing is loaded at all.
+  """
+  @spec full_load?(module(), keyword()) :: boolean()
+  def full_load?(backend, backend_opts) do
+    case newest_edge_id() do
+      {:ok, newest} -> marked(backend, backend_opts, newest) == :none
+      {:error, _} -> false
+    end
+  end
+
   defp persistent?(backend), do: backend == Backend.RocksDB
 
   defp starting_point(backend, backend_opts, newest) do
+    case marked(backend, backend_opts, newest) do
+      {:ok, marked} -> marked
+      :none -> 0
+    end
+  end
+
+  defp marked(backend, backend_opts, newest) do
     with true <- persistent?(backend),
          {:ok, text} <- File.read(marker_path(backend_opts)),
          {marked, ""} <- text |> String.trim() |> Integer.parse(),
          true <- marked >= 0 and marked <= newest do
-      marked
+      {:ok, marked}
     else
-      _full_load -> 0
+      _full_load -> :none
     end
   end
 

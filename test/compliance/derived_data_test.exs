@@ -8,6 +8,8 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
   use ExUnit.Case, async: false
 
   alias OptimalEngine.Compliance.DerivedData
+  alias OptimalEngine.Knowledge.Store, as: KnowledgeStore
+  alias OptimalEngine.TestSupport.TripleStore
   alias OptimalEngine.Pipeline.Decomposer.Chunk
   alias OptimalEngine.Store
 
@@ -105,6 +107,52 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
                decisions: 1,
                graph_edges: 2
              } = removed
+    end
+
+    test "takes the triples the knowledge store mirrors from the erased edges", ctx do
+      TripleStore.wait_until_hydrated()
+      gone = seed!("triples-gone-#{ctx.n}", ctx)
+      kept = seed!("triples-kept-#{ctx.n}", ctx)
+
+      # The seed writes its edges with SQL, so feed them to the store as Graph would.
+      [gone_triples, kept_triples] =
+        for seeded <- [gone, kept] do
+          {:ok, rows} =
+            Store.raw_query(
+              "SELECT workspace_id, source_id, relation, target_id FROM graph_edges WHERE source_id = ?1 OR target_id = ?1 ORDER BY id",
+              [seeded.context]
+            )
+
+          for [graph, subject, predicate, object] <- rows do
+            :ok =
+              KnowledgeStore.assert(TripleStore.default_store(), graph, subject, predicate, object)
+
+            {graph, subject, predicate, object}
+          end
+        end
+
+      assert length(gone_triples) == 2
+      assert {:ok, _removed} = DerivedData.erase_contexts("default", [gone.context])
+
+      for {graph, subject, predicate, object} <- gone_triples do
+        assert {:ok, []} =
+                 KnowledgeStore.query(TripleStore.default_store(),
+                   graph: graph,
+                   subject: subject,
+                   predicate: predicate,
+                   object: object
+                 )
+      end
+
+      for {graph, subject, predicate, object} <- kept_triples do
+        assert {:ok, [_]} =
+                 KnowledgeStore.query(TripleStore.default_store(),
+                   graph: graph,
+                   subject: subject,
+                   predicate: predicate,
+                   object: object
+                 )
+      end
     end
 
     test "removes the files the deleted rows point at and no others", ctx do
